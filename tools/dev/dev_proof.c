@@ -140,31 +140,44 @@ static void proof_action_hash_text(struct sha3_256_ctx *sha,
     sha3_256_write(sha, (const uint8_t *)text, len);
 }
 
-bool zcl_dev_proof_child_action_v1(
+/* Everything the child action requires of its inputs. A selector belongs to
+ * the test dimension and to no other, and every one of the four identity
+ * roots must be present: an all-zero root would let two different builds
+ * seal the same action. */
+static bool dp_child_inputs_ok(
     const struct zcl_dev_proof_child_action_inputs_v1 *inputs,
-    enum zcl_dev_proof_dimension_id dimension,
-    struct vcs_build_action_v1 *action, uint8_t action_root[32])
+    enum zcl_dev_proof_dimension_id dimension, const char *operation,
+    const char *selector, size_t selector_len)
 {
-    const char *operation = proof_dimension_operation(dimension);
-    const char *selector = inputs ? inputs->selector : NULL;
-    size_t selector_len = selector ? strlen(selector) : 0;
-    if (!inputs || !action || !action_root || !operation ||
-        !inputs->source_sha256_hex || !inputs->source_cas_sha3_hex ||
-        !selector || inputs->selected == 0 || selector_len > UINT32_MAX ||
-        (dimension == ZCL_DEV_PROOF_TEST) != (selector_len != 0) ||
-        !proof_root_nonzero(inputs->toolchain_capsule_root) ||
-        !proof_root_nonzero(inputs->flags_root) ||
-        !proof_root_nonzero(inputs->environment_root) ||
-        !proof_root_nonzero(inputs->build_graph_root))
-        return false;
-    memset(action, 0, sizeof(*action));
-    if (!zcl_hex_decode_lower(inputs->source_sha256_hex,
-                              action->source_sha256, 32) ||
-        !zcl_hex_decode_lower(inputs->source_cas_sha3_hex,
-                              action->source_cas_sha3, 32) ||
-        !proof_root_nonzero(action->source_sha256) ||
-        !proof_root_nonzero(action->source_cas_sha3))
-        return false;
+    return inputs && operation && inputs->source_sha256_hex &&
+           inputs->source_cas_sha3_hex && selector &&
+           inputs->selected != 0 && selector_len <= UINT32_MAX &&
+           (dimension == ZCL_DEV_PROOF_TEST) == (selector_len != 0) &&
+           proof_root_nonzero(inputs->toolchain_capsule_root) &&
+           proof_root_nonzero(inputs->flags_root) &&
+           proof_root_nonzero(inputs->environment_root) &&
+           proof_root_nonzero(inputs->build_graph_root);
+}
+
+static bool dp_child_action_sources(
+    const struct zcl_dev_proof_child_action_inputs_v1 *inputs,
+    struct vcs_build_action_v1 *action)
+{
+    return zcl_hex_decode_lower(inputs->source_sha256_hex,
+                                action->source_sha256, 32) &&
+           zcl_hex_decode_lower(inputs->source_cas_sha3_hex,
+                                action->source_cas_sha3, 32) &&
+           proof_root_nonzero(action->source_sha256) &&
+           proof_root_nonzero(action->source_cas_sha3);
+}
+
+/* The action's input root, over the dimension, the build graph, the count
+ * this child was handed, and the operation and selector it will run. */
+static void dp_child_action_seal(
+    const struct zcl_dev_proof_child_action_inputs_v1 *inputs,
+    enum zcl_dev_proof_dimension_id dimension, const char *operation,
+    const char *selector, struct vcs_build_action_v1 *action)
+{
     struct sha3_256_ctx input;
     uint8_t number[4];
     static const uint8_t domain[] =
@@ -183,10 +196,12 @@ bool zcl_dev_proof_child_action_v1(
            inputs->toolchain_capsule_root, 32);
     memcpy(action->flags_sha3, inputs->flags_root, 32);
     memcpy(action->environment_sha3, inputs->environment_root, 32);
-    (void)snprintf(action->target, sizeof(action->target), "%s",
-                   VCS_BUILD_TARGET_V1);
-    (void)snprintf(action->profile, sizeof(action->profile),
-                   "resident-proof-child-v1");
+}
+
+/* The workdir, declared outputs and resource policy this action kind
+ * carries, taken from the one place that defines them. */
+static bool dp_child_action_descriptors(struct vcs_build_action_v1 *action)
+{
     const char *workdir = NULL, *output = NULL, *resource = NULL;
     if (!vcs_build_action_v1_descriptors(
             VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
@@ -198,6 +213,29 @@ bool zcl_dev_proof_child_action_v1(
                    sizeof(action->declared_outputs), "%s", output);
     (void)snprintf(action->resource_policy,
                    sizeof(action->resource_policy), "%s", resource);
+    return true;
+}
+
+bool zcl_dev_proof_child_action_v1(
+    const struct zcl_dev_proof_child_action_inputs_v1 *inputs,
+    enum zcl_dev_proof_dimension_id dimension,
+    struct vcs_build_action_v1 *action, uint8_t action_root[32])
+{
+    const char *operation = proof_dimension_operation(dimension);
+    const char *selector = inputs ? inputs->selector : NULL;
+    size_t selector_len = selector ? strlen(selector) : 0;
+    if (!action || !action_root ||
+        !dp_child_inputs_ok(inputs, dimension, operation, selector,
+                            selector_len))
+        return false;
+    memset(action, 0, sizeof(*action));
+    if (!dp_child_action_sources(inputs, action)) return false;
+    dp_child_action_seal(inputs, dimension, operation, selector, action);
+    (void)snprintf(action->target, sizeof(action->target), "%s",
+                   VCS_BUILD_TARGET_V1);
+    (void)snprintf(action->profile, sizeof(action->profile),
+                   "resident-proof-child-v1");
+    if (!dp_child_action_descriptors(action)) return false;
     action->sequence = (uint64_t)dimension + 1u;
     return vcs_build_action_v1_root_for_kind(
         VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
@@ -304,33 +342,54 @@ static bool cycle_dimension_roots_exact(
     return true;
 }
 
+/* Both digests must decode as lowercase hex before any of the body is
+ * parsed: a digest this reader cannot decode can never be compared. */
+static bool dp_cycle_inputs_ok(
+    const char *body, size_t body_len, const char *source_cas,
+    const char *proof_inputs_sha3,
+    const struct zcl_dev_proof_dimension *dimensions)
+{
+    uint8_t root[32];
+    return body && body_len != 0 && source_cas && proof_inputs_sha3 &&
+           dimensions &&
+           zcl_hex_decode_lower(source_cas, root, sizeof(root)) &&
+           zcl_hex_decode_lower(proof_inputs_sha3, root, sizeof(root));
+}
+
+/* Every field the cycle must carry, each exactly once. */
+static bool dp_cycle_fields_admitted(
+    const struct json_value *cycle, const char *source_cas,
+    const char *proof_inputs_sha3,
+    const struct zcl_dev_proof_dimension
+        dimensions[ZCL_DEV_PROOF_DIMENSIONS])
+{
+    return cycle_field_true_once(cycle, "proof_complete") &&
+           cycle_field_text_once(cycle, "schema", "zcl.dev_cycle.v1") &&
+           cycle_field_text_once(cycle, "status", "passed") &&
+           cycle_field_text_once(cycle, "phase", "verify") &&
+           cycle_field_text_once(cycle, "proof_scope",
+                                 "source_wide_compile_tests_lint_fast") &&
+           cycle_field_text_once(cycle, "source_cas_sha3", source_cas) &&
+           cycle_field_text_once(cycle, "proof_inputs_sha3",
+                                 proof_inputs_sha3) &&
+           cycle_dimension_roots_exact(cycle, dimensions);
+}
+
 bool zcl_dev_proof_cycle_reuse_admissible(
     const char *body, size_t body_len, const char *source_cas,
     const char *proof_inputs_sha3,
     const struct zcl_dev_proof_dimension
         dimensions[ZCL_DEV_PROOF_DIMENSIONS])
 {
-    uint8_t root[32];
     struct json_value cycle = {0};
-    if (!body || body_len == 0 || !source_cas || !proof_inputs_sha3 ||
-        !dimensions ||
-        !zcl_hex_decode_lower(source_cas, root, sizeof(root)) ||
-        !zcl_hex_decode_lower(proof_inputs_sha3, root, sizeof(root)) ||
+    if (!dp_cycle_inputs_ok(body, body_len, source_cas, proof_inputs_sha3,
+                            dimensions) ||
         !json_read(&cycle, body, body_len) || cycle.type != JSON_OBJ) {
         json_free(&cycle);
         return false;
     }
-    bool admitted =
-        cycle_field_true_once(&cycle, "proof_complete") &&
-        cycle_field_text_once(&cycle, "schema", "zcl.dev_cycle.v1") &&
-        cycle_field_text_once(&cycle, "status", "passed") &&
-        cycle_field_text_once(&cycle, "phase", "verify") &&
-        cycle_field_text_once(&cycle, "proof_scope",
-                              "source_wide_compile_tests_lint_fast") &&
-        cycle_field_text_once(&cycle, "source_cas_sha3", source_cas) &&
-        cycle_field_text_once(&cycle, "proof_inputs_sha3",
-                              proof_inputs_sha3) &&
-        cycle_dimension_roots_exact(&cycle, dimensions);
+    bool admitted = dp_cycle_fields_admitted(&cycle, source_cas,
+                                             proof_inputs_sha3, dimensions);
     json_free(&cycle);
     return admitted;
 }
@@ -1266,6 +1325,121 @@ static char *changed_set_read(const char *path, size_t *len_out,
     return bytes;
 }
 
+/* Ask git for the changed list and read it back whole. Returns the buffer
+ * the caller owns, or NULL with `why` already set. */
+static char *dp_changed_set_fetch(const char *repo_root, const char *base,
+                                  const char *local, const char *scratch_path,
+                                  size_t *len_out, char *why, size_t why_len)
+{
+    if (!repo_root || !base || !local || !scratch_path || !scratch_path[0]) {
+        proof_why(why, why_len, "changed_set_request_invalid");
+        return NULL;
+    }
+    const char *ancestor[] = {"git", "merge-base", "--is-ancestor", base,
+                              local, NULL};
+    char ignored[2];
+    if (!git_capture(repo_root, ancestor, ignored, sizeof(ignored))) {
+        proof_why(why, why_len, "remote_base_not_ancestor");
+        return NULL;
+    }
+    /* `--output` sends the list to a file instead of the fixed-size process
+     * capture buffer, so a batch of thousands of paths cannot arrive as a
+     * shorter list that still parses. */
+    char output_arg[PATH_MAX + 16];
+    if (snprintf(output_arg, sizeof(output_arg), "--output=%s", scratch_path) >=
+        (int)sizeof(output_arg)) {
+        proof_why(why, why_len, "changed_set_request_invalid");
+        return NULL;
+    }
+    (void)unlink(scratch_path);
+    const char *argv[] = {"git", "diff", "--name-only", "--diff-filter=ACMRD",
+                          output_arg, base, local, "--", NULL};
+    if (!git_capture(repo_root, argv, ignored, sizeof(ignored))) {
+        (void)unlink(scratch_path);
+        proof_why(why, why_len, "changed_set_unavailable_or_truncated");
+        return NULL;
+    }
+    char *bytes = changed_set_read(scratch_path, len_out, why, why_len);
+    (void)unlink(scratch_path);
+    return bytes;
+}
+
+/* How many rows the buffer holds, counted before anything is stored so an
+ * over-ceiling batch is refused with its real size. */
+static size_t dp_changed_set_count(const char *bytes, size_t len)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (bytes[i] == '\n')
+            continue;
+        count++;
+        while (i < len && bytes[i] != '\n')
+            i++;
+    }
+    return count;
+}
+
+/* Point one reference per row into the buffer. An absolute path, a `..`
+ * escape, a backslash, an over-long path, or more rows than the count
+ * promised refuses the whole set with the row that did it. */
+static bool dp_changed_set_rows(char *bytes, size_t count, const char **refs,
+                                size_t *persist_len, char *why,
+                                size_t why_len)
+{
+    size_t stored = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(bytes, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        size_t path_len = strlen(line);
+        if (path_len == 0)
+            continue;
+        if (stored >= count || path_len >= PROOF_CHANGED_PATH_MAX ||
+            line[0] == '/' || strstr(line, "..") || strchr(line, '\\')) {
+            proof_whyf(why, why_len,
+                       "changed_set_invalid_or_truncated row=%zu", stored + 1);
+            return false;
+        }
+        refs[stored++] = line;
+        *persist_len += path_len + 1;
+    }
+    if (stored != count) {
+        proof_whyf(why, why_len,
+                   "changed_set_invalid_or_truncated rows=%zu of %zu", stored,
+                   count);
+        return false;
+    }
+    return true;
+}
+
+/* Write the accepted list beside the proof state, newline-terminated and
+ * read-only. No persist path asked for means nothing to do. */
+static bool dp_changed_set_persist(const char *persist_path,
+                                   const char **refs, size_t count,
+                                   size_t persist_len, char *why,
+                                   size_t why_len)
+{
+    if (!persist_path || !persist_path[0]) return true;
+    char *persisted = zcl_calloc(persist_len, 1, "proof changed-set record");
+    if (!persisted) {
+        proof_why(why, why_len, "changed_set_allocation_failed");
+        return false;
+    }
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t path_len = strlen(refs[i]);
+        memcpy(persisted + used, refs[i], path_len);
+        used += path_len;
+        persisted[used++] = '\n';
+    }
+    bool written = write_atomic(persist_path, persisted, used, 0400);
+    free(persisted);
+    if (!written) {
+        proof_why(why, why_len, "changed_set_persist_failed");
+        return false;
+    }
+    return true;
+}
+
 bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
                                        const char *local,
                                        const char *scratch_path,
@@ -1276,49 +1450,12 @@ bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
     if (!out)
         return false;
     memset(out, 0, sizeof(*out));
-    if (!repo_root || !base || !local || !scratch_path || !scratch_path[0]) {
-        proof_why(why, why_len, "changed_set_request_invalid");
-        return false;
-    }
-    const char *ancestor[] = {"git", "merge-base", "--is-ancestor", base,
-                              local, NULL};
-    char ignored[2];
-    if (!git_capture(repo_root, ancestor, ignored, sizeof(ignored))) {
-        proof_why(why, why_len, "remote_base_not_ancestor");
-        return false;
-    }
-    /* `--output` sends the list to a file instead of the fixed-size process
-     * capture buffer, so a batch of thousands of paths cannot arrive as a
-     * shorter list that still parses. */
-    char output_arg[PATH_MAX + 16];
-    if (snprintf(output_arg, sizeof(output_arg), "--output=%s", scratch_path) >=
-        (int)sizeof(output_arg)) {
-        proof_why(why, why_len, "changed_set_request_invalid");
-        return false;
-    }
-    (void)unlink(scratch_path);
-    const char *argv[] = {"git", "diff", "--name-only", "--diff-filter=ACMRD",
-                          output_arg, base, local, "--", NULL};
-    if (!git_capture(repo_root, argv, ignored, sizeof(ignored))) {
-        (void)unlink(scratch_path);
-        proof_why(why, why_len, "changed_set_unavailable_or_truncated");
-        return false;
-    }
     size_t len = 0;
-    char *bytes = changed_set_read(scratch_path, &len, why, why_len);
-    (void)unlink(scratch_path);
+    char *bytes = dp_changed_set_fetch(repo_root, base, local, scratch_path,
+                                       &len, why, why_len);
     if (!bytes)
         return false;
-
-    /* Count first, so an over-ceiling batch is refused with its real size. */
-    size_t count = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (bytes[i] == '\n')
-            continue;
-        count++;
-        while (i < len && bytes[i] != '\n')
-            i++;
-    }
+    size_t count = dp_changed_set_count(bytes, len);
     if (count == 0) {
         free(bytes);
         proof_why(why, why_len, "changed_set_empty");
@@ -1338,56 +1475,14 @@ bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
         proof_why(why, why_len, "changed_set_allocation_failed");
         return false;
     }
-    size_t stored = 0, persist_len = 0;
-    char *save = NULL;
-    for (char *line = strtok_r(bytes, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        size_t path_len = strlen(line);
-        if (path_len == 0)
-            continue;
-        if (stored >= count || path_len >= PROOF_CHANGED_PATH_MAX ||
-            line[0] == '/' || strstr(line, "..") || strchr(line, '\\')) {
-            free((void *)refs);
-            free(bytes);
-            proof_whyf(why, why_len,
-                       "changed_set_invalid_or_truncated row=%zu", stored + 1);
-            return false;
-        }
-        refs[stored++] = line;
-        persist_len += path_len + 1;
-    }
-    if (stored != count) {
+    size_t persist_len = 0;
+    if (!dp_changed_set_rows(bytes, count, refs, &persist_len, why,
+                             why_len) ||
+        !dp_changed_set_persist(persist_path, refs, count, persist_len, why,
+                                why_len)) {
         free((void *)refs);
         free(bytes);
-        proof_whyf(why, why_len,
-                   "changed_set_invalid_or_truncated rows=%zu of %zu", stored,
-                   count);
         return false;
-    }
-    if (persist_path && persist_path[0]) {
-        char *persisted = zcl_calloc(persist_len, 1,
-                                     "proof changed-set record");
-        if (!persisted) {
-            free((void *)refs);
-            free(bytes);
-            proof_why(why, why_len, "changed_set_allocation_failed");
-            return false;
-        }
-        size_t used = 0;
-        for (size_t i = 0; i < count; i++) {
-            size_t path_len = strlen(refs[i]);
-            memcpy(persisted + used, refs[i], path_len);
-            used += path_len;
-            persisted[used++] = '\n';
-        }
-        bool written = write_atomic(persist_path, persisted, used, 0400);
-        free(persisted);
-        if (!written) {
-            free((void *)refs);
-            free(bytes);
-            proof_why(why, why_len, "changed_set_persist_failed");
-            return false;
-        }
     }
     out->bytes = bytes;
     out->files = refs;
@@ -2337,6 +2432,82 @@ static bool proof_plan_key_is_flag(const char *key)
  * whole reason two boxes can compare receipts at all. BASE_GENERATION is
  * retained canonically in the graph and returned separately for verification
  * against its own tree: inode/timestamp identity cannot survive a copy. */
+/* `make dev-bin` is the sole writer of the plan file (dev-linker-select.sh
+ * plus the dev build's restart-env generator); a fresh `git worktree
+ * add` checkout never ran it, and ten proof attempts folding this into
+ * "proof_toolchain_or_policy_unavailable" never said so. Name the path
+ * and the exact command the same way the vendor dependency check
+ * further down names its own missing input. */
+static void dp_plan_missing_why(const char *path, int saved, char *why,
+                                size_t why_len)
+{
+    if (saved == ENOENT)
+        proof_whyf(why, why_len, "restart_env_missing:%s (make dev-bin)",
+                   path);
+    else
+        proof_whyf(why, why_len, "restart_env_unreadable:%s (%s)", path,
+                   proof_errno_name(saved));
+}
+
+/* The build plan, whole. An empty read or one that filled the buffer is
+ * refused rather than hashed. */
+static bool dp_plan_body_read(const char *path, char *body, size_t body_size,
+                              char *why, size_t why_len)
+{
+    errno = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        dp_plan_missing_why(path, errno, why, why_len);
+        return false;
+    }
+    size_t n = fread(body, 1, body_size - 1, f);
+    bool ok = !ferror(f) && n > 0 && n < body_size - 1;
+    fclose(f);
+    if (!ok) return false;
+    body[n] = 0;
+    return true;
+}
+
+/* The local mutation token, which must appear exactly once and must be a
+ * 64-character lowercase hex digest. */
+static bool dp_plan_mutation_take(const char *value, bool *mutation_seen,
+                                  char *mutation)
+{
+    uint8_t decoded[32];
+    if (*mutation_seen || strlen(value) != 64 ||
+        !zcl_hex_decode_lower(value, decoded, sizeof(decoded))) {
+        fprintf(stderr, "[devproof] build plan: invalid or duplicate local mutation token\n");
+        return false;
+    }
+    *mutation_seen = true;
+    if (mutation) memcpy(mutation, value, 65);
+    return true;
+}
+
+/* One KEY=VALUE plan line, folded into whichever of the two roots owns it.
+ * The mutation token is folded in by name only; its value is verified
+ * against its own tree, never carried into a portable root. */
+static bool dp_plan_line(char *line, const char *root, size_t root_len,
+                         struct sha3_256_ctx *flags_sha,
+                         struct sha3_256_ctx *graph_sha, char *mutation,
+                         bool *mutation_seen)
+{
+    char *eq = strchr(line, '=');
+    if (!eq) return false; /* a plan line that is not KEY=VALUE */
+    *eq = 0;
+    if (strcmp(line, "COMPILER_ID") == 0) return true;
+    struct sha3_256_ctx *sha =
+        proof_plan_key_is_flag(line) ? flags_sha : graph_sha;
+    sha3_256_write(sha, (const uint8_t *)line, strlen(line) + 1);
+    if (strcmp(line, "BASE_GENERATION") != 0) {
+        proof_hash_plan_value(sha, root, root_len, eq + 1);
+        return true;
+    }
+    if (!dp_plan_mutation_take(eq + 1, mutation_seen, mutation)) return false;
+    proof_hash_plan_value(sha, root, root_len, "<local-mutation>");
+    return true;
+}
+
 static bool proof_plan_roots(const char *root, uint8_t flags[32],
                              uint8_t build_graph[32], char mutation[65], char *why,
                              size_t why_len)
@@ -2350,56 +2521,18 @@ static bool proof_plan_roots(const char *root, uint8_t flags[32],
         snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", root) >=
             (int)sizeof(path))
         return false;
-    errno = 0;
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        /* `make dev-bin` is the sole writer of this file (dev-linker-select.sh
-         * plus the dev build's restart-env generator); a fresh `git worktree
-         * add` checkout never ran it, and ten proof attempts folding this into
-         * "proof_toolchain_or_policy_unavailable" never said so. Name the path
-         * and the exact command the same way the vendor dependency check
-         * below names its own missing input. */
-        if (errno == ENOENT)
-            proof_whyf(why, why_len, "restart_env_missing:%s (make dev-bin)",
-                       path);
-        else
-            proof_whyf(why, why_len, "restart_env_unreadable:%s (%s)", path,
-                       proof_errno_name(errno));
+    if (!dp_plan_body_read(path, body, sizeof(body), why, why_len))
         return false;
-    }
-    size_t n = fread(body, 1, sizeof(body) - 1, f);
-    bool ok = !ferror(f) && n > 0 && n < sizeof(body) - 1;
-    fclose(f);
-    if (!ok) return false;
-    body[n] = 0;
     struct sha3_256_ctx flags_sha, graph_sha;
     hash_begin(&flags_sha, PROOF_FLAGS_DOMAIN);
     hash_begin(&graph_sha, PROOF_BUILD_GRAPH_DOMAIN);
     bool mutation_seen = false;
     char *save = NULL;
     for (char *line = strtok_r(body, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        char *eq = strchr(line, '=');
-        if (!eq) return false; /* a plan line that is not KEY=VALUE */
-        *eq = 0;
-        if (strcmp(line, "COMPILER_ID") == 0) continue;
-        struct sha3_256_ctx *sha =
-            proof_plan_key_is_flag(line) ? &flags_sha : &graph_sha;
-        sha3_256_write(sha, (const uint8_t *)line, strlen(line) + 1);
-        if (strcmp(line, "BASE_GENERATION") == 0) {
-            uint8_t decoded[32];
-            if (mutation_seen || strlen(eq + 1) != 64 ||
-                !zcl_hex_decode_lower(eq + 1, decoded, sizeof(decoded))) {
-                fprintf(stderr, "[devproof] build plan: invalid or duplicate local mutation token\n");
-                return false;
-            }
-            mutation_seen = true;
-            if (mutation) memcpy(mutation, eq + 1, 65);
-            proof_hash_plan_value(sha, root, root_len, "<local-mutation>");
-        } else {
-            proof_hash_plan_value(sha, root, root_len, eq + 1);
-        }
-    }
+         line = strtok_r(NULL, "\n", &save))
+        if (!dp_plan_line(line, root, root_len, &flags_sha, &graph_sha,
+                          mutation, &mutation_seen))
+            return false;
     if (!mutation_seen) {
         fprintf(stderr, "[devproof] build plan: missing local mutation token\n");
         return false;
