@@ -2111,11 +2111,11 @@ Z23_FLAG("ZCL_SOVEREIGN_SOURCE_ROOT", "env_build", "-", "-",
 Z23_FLAG("ZCL_SOVEREIGN_VERIFY_BIN", "env_build", "-", "-",
           "first use tools/dev/sovereign-source-identity.sh:12; documented at docs/P2P_SOURCE_HOSTING.md:298: export ZCL_SOVEREIGN_VERIFY_BIN=/trusted/bootstrap/zclassic23")
 Z23_FLAG("ZCL_SPECIALISTS_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_specialists.c:480")
+          "undocumented; first use tools/lint/lintc/gate_specialists.c:512")
 Z23_FLAG("ZCL_SPECIALISTS_FLOOR", "env_build", "10", "-",
-          "undocumented; first use tools/lint/lintc/gate_specialists.c:481")
+          "undocumented; first use tools/lint/lintc/gate_specialists.c:513")
 Z23_FLAG("ZCL_SPECIALISTS_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_specialists.c:479")
+          "undocumented; first use tools/lint/lintc/gate_specialists.c:511")
 Z23_FLAG("ZCL_SQLITE_CHILD_DB", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_sqlite.c:240")
 Z23_FLAG("ZCL_STAGE_STALL_ESCALATE_WINDOWS", "env_runtime", "-", "-",
