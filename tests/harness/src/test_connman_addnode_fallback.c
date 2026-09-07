@@ -110,10 +110,22 @@ static bool test_addrman_set_fail(struct connman *cm, uint8_t first_octet,
     return false;
 }
 
-int test_connman_addnode_fallback(void)
+
+static bool addnode_dht_hint_wait_and_rate_ok(struct connman *cm)
+{
+    return cm->dht_hint_count == 1 && cm->num_addnodes == 0 &&
+           connman_dht_hint_pending(cm) &&
+           !connman_connect_only_wait_needed_for_test(true, 1, 1, true) &&
+           connman_connect_only_wait_needed_for_test(true, 1, 1, false) &&
+           connman_outbound_rate_allowed_for_test(false, false, true) &&
+           connman_outbound_rate_allowed_for_test(true, false, false) &&
+           connman_outbound_rate_allowed_for_test(false, true, false) &&
+           !connman_outbound_rate_allowed_for_test(false, false, false);
+}
+
+static int check_connman_addnode_dht_hint_priority_dial(void)
 {
     int failures = 0;
-
     printf("connman_addnode_fallback: signed DHT hints get one priority "
            "dial without becoming addnodes... ");
     {
@@ -127,14 +139,7 @@ int test_connman_addnode_fallback(void)
         test_set_ipv4(&hint, 127, 0, 0, 1, 20023);
         ok = ok && connman_queue_dht_hint(&cm, &hint);
         ok = ok && connman_queue_dht_hint(&cm, &hint);
-        ok = ok && cm.dht_hint_count == 1 && cm.num_addnodes == 0 &&
-             connman_dht_hint_pending(&cm) &&
-             !connman_connect_only_wait_needed_for_test(true, 1, 1, true) &&
-             connman_connect_only_wait_needed_for_test(true, 1, 1, false);
-        ok = ok && connman_outbound_rate_allowed_for_test(false, false, true) &&
-             connman_outbound_rate_allowed_for_test(true, false, false) &&
-             connman_outbound_rate_allowed_for_test(false, true, false) &&
-             !connman_outbound_rate_allowed_for_test(false, false, false);
+        ok = ok && addnode_dht_hint_wait_and_rate_ok(&cm);
         struct connman_dial_candidate candidate;
         memset(&candidate, 0, sizeof(candidate));
         size_t n = ok ? connman_gather_dial_candidates(&cm, &candidate, 1) : 0;
@@ -146,7 +151,33 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_loopback_after_connect_pick(struct connman *cm, bool ok)
+{
+    cm->next_addnode_cursor = 0;
+    struct connman_dial_candidate after_connect[2];
+    memset(after_connect, 0, sizeof(after_connect));
+    size_t after_n = ok ? connman_gather_dial_candidates(
+                              cm, after_connect, 2) : 0;
+    ok = ok && after_n == 1 &&
+         after_connect[0].addr.svc.port == 20024;
+    cm->next_addnode_cursor = 0;
+    struct addr_info remaining;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    memset(&remaining, 0, sizeof(remaining));
+    ok = ok && connman_pick_next_outbound_target(
+                   cm, &cm->next_addnode_cursor, &remaining, &source,
+                   NULL) &&
+         source == CONNMAN_TARGET_ADDNODE &&
+         remaining.addr.svc.port == 20024;
+    return ok;
+}
+
+static int check_connman_addnode_loopback_edges_distinct(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: explicit loopback edges remain distinct "
            "in one sparse-fixture batch... ");
     {
@@ -171,27 +202,17 @@ int test_connman_addnode_fallback(void)
         ok = ok && first != NULL;
         if (first)
             first->addr.svc.port = 20023;
-        cm.next_addnode_cursor = 0;
-        struct connman_dial_candidate after_connect[2];
-        memset(after_connect, 0, sizeof(after_connect));
-        size_t after_n = ok ? connman_gather_dial_candidates(
-                                  &cm, after_connect, 2) : 0;
-        ok = ok && after_n == 1 &&
-             after_connect[0].addr.svc.port == 20024;
-        cm.next_addnode_cursor = 0;
-        struct addr_info remaining;
-        enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
-        memset(&remaining, 0, sizeof(remaining));
-        ok = ok && connman_pick_next_outbound_target(
-                       &cm, &cm.next_addnode_cursor, &remaining, &source,
-                       NULL) &&
-             source == CONNMAN_TARGET_ADDNODE &&
-             remaining.addr.svc.port == 20024;
+        ok = addnode_loopback_after_connect_pick(&cm, ok);
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_custom_port_onion_redial(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: explicit custom-port onion remains "
            "eligible for persistent redial... ");
     {
@@ -238,7 +259,91 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_zcl23_first_pick_not_owned(size_t n,
+    const struct connman_dial_candidate *candidate)
+{
+    return n == 1 &&
+           !(candidate->source == CONNMAN_TARGET_ZCL23_DB &&
+             candidate->addr.svc.addr.ip[12] == 140);
+}
+
+static bool addnode_zcl23_fell_through_to_general(struct connman *cm, size_t n,
+    const struct connman_dial_candidate *candidate)
+{
+    return n == 1 &&
+           candidate->source == CONNMAN_TARGET_ADDRMAN &&
+           candidate->addr.svc.addr.ip[12] == 81 &&
+           atomic_load(&cm->zcl23_backoff_skips) >= 1 &&
+           atomic_load(&cm->zcl23_policy_skips) >= 1;
+}
+
+static bool addnode_zcl23_three_day_attempts_bounded(void)
+{
+    int simulated_attempts = 0;
+    int64_t next_attempt = 0;
+    for (int64_t second = 0; second < 3 * 86400; second++) {
+        if (second < next_attempt)
+            continue;
+        simulated_attempts++;
+        next_attempt = second +
+            connman_addrman_retry_cooldown_for_test(simulated_attempts);
+    }
+    return simulated_attempts <= 20;
+}
+
+static bool addnode_zcl23_205_picked(size_t n,
+    const struct connman_dial_candidate *candidate)
+{
+    return n == 1 &&
+           candidate->source == CONNMAN_TARGET_ZCL23_DB &&
+           candidate->addr.svc.addr.ip[12] == 205;
+}
+
+static bool addnode_zcl23_charged_eleven(struct connman *cm,
+    const struct connman_dial_candidate *candidate)
+{
+    struct addr_info charged;
+    memset(&charged, 0, sizeof(charged));
+    return addrman_find_info(&cm->manager.addrman,
+                             &candidate->addr.svc, &charged) &&
+           charged.attempts == 11;
+}
+
+static bool addnode_zcl23_cooldown_then_recharge(struct connman *cm,
+    struct connman_dial_candidate *candidate)
+{
+    /* Whichever other known endpoint was selected now owns an addrman
+     * attempt. Put it into the persisted six-hour tier and prove the
+     * next preferred turn falls through to a healthy general peer. */
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    bool ok = test_addrman_set_fail(cm, 205, 10, now);
+    atomic_store(&cm->zcl23_preference_round, 0);
+    memset(candidate, 0, sizeof(*candidate));
+    size_t n = ok ? connman_gather_dial_candidates(cm, candidate, 1) : 0;
+    ok = ok && addnode_zcl23_fell_through_to_general(cm, n, candidate);
+
+    /* Three days of a peer that accepts TCP and immediately closes must
+     * remain a small bounded number of scheduler assignments, not the
+     * tens-of-thousands/day trajectory observed on node4. */
+    ok = ok && addnode_zcl23_three_day_attempts_bounded();
+
+    /* After the durable cooldown expires, the same endpoint is eligible
+     * through the shared scheduler again and is charged only once. */
+    ok = ok && test_addrman_set_fail(cm, 205, 10, now - 21601);
+    atomic_store(&cm->zcl23_preference_round, 0);
+    memset(candidate, 0, sizeof(*candidate));
+    n = ok ? connman_gather_dial_candidates(cm, candidate, 1) : 0;
+    ok = ok && addnode_zcl23_205_picked(n, candidate);
+    ok = ok && addnode_zcl23_charged_eleven(cm, candidate);
+    return ok;
+}
+
+static int check_connman_addnode_zcl23_backoff_ownership(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: discovered ZCL23 peers share durable "
            "backoff and reciprocal ownership... ");
     {
@@ -285,58 +390,29 @@ int test_connman_addnode_fallback(void)
         struct connman_dial_candidate candidate;
         memset(&candidate, 0, sizeof(candidate));
         size_t n = ok ? connman_gather_dial_candidates(&cm, &candidate, 1) : 0;
-        ok = ok && n == 1;
-        ok = ok && !(candidate.source == CONNMAN_TARGET_ZCL23_DB &&
-                     candidate.addr.svc.addr.ip[12] == 140);
-
-        /* Whichever other known endpoint was selected now owns an addrman
-         * attempt. Put it into the persisted six-hour tier and prove the
-         * next preferred turn falls through to a healthy general peer. */
-        int64_t now = (int64_t)platform_time_wall_time_t();
-        ok = ok && test_addrman_set_fail(&cm, 205, 10, now);
-        atomic_store(&cm.zcl23_preference_round, 0);
-        memset(&candidate, 0, sizeof(candidate));
-        n = ok ? connman_gather_dial_candidates(&cm, &candidate, 1) : 0;
-        ok = ok && n == 1 &&
-             candidate.source == CONNMAN_TARGET_ADDRMAN &&
-             candidate.addr.svc.addr.ip[12] == 81;
-        ok = ok && atomic_load(&cm.zcl23_backoff_skips) >= 1;
-        ok = ok && atomic_load(&cm.zcl23_policy_skips) >= 1;
-
-        /* Three days of a peer that accepts TCP and immediately closes must
-         * remain a small bounded number of scheduler assignments, not the
-         * tens-of-thousands/day trajectory observed on node4. */
-        int simulated_attempts = 0;
-        int64_t next_attempt = 0;
-        for (int64_t second = 0; second < 3 * 86400; second++) {
-            if (second < next_attempt)
-                continue;
-            simulated_attempts++;
-            next_attempt = second +
-                connman_addrman_retry_cooldown_for_test(simulated_attempts);
-        }
-        ok = ok && simulated_attempts <= 20;
-
-        /* After the durable cooldown expires, the same endpoint is eligible
-         * through the shared scheduler again and is charged only once. */
-        ok = ok && test_addrman_set_fail(&cm, 205, 10, now - 21601);
-        atomic_store(&cm.zcl23_preference_round, 0);
-        memset(&candidate, 0, sizeof(candidate));
-        n = ok ? connman_gather_dial_candidates(&cm, &candidate, 1) : 0;
-        ok = ok && n == 1 &&
-             candidate.source == CONNMAN_TARGET_ZCL23_DB &&
-             candidate.addr.svc.addr.ip[12] == 205;
-        struct addr_info charged;
-        memset(&charged, 0, sizeof(charged));
-        ok = ok && addrman_find_info(&cm.manager.addrman,
-                                     &candidate.addr.svc, &charged) &&
-             charged.attempts == 11;
+        ok = ok && addnode_zcl23_first_pick_not_owned(n, &candidate);
+        ok = ok && addnode_zcl23_cooldown_then_recharge(&cm, &candidate);
 
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_drain_pick_fields_ok(const struct addr_info *pick,
+    enum connman_outbound_target_source source, size_t addnode_index, int i,
+    const struct net_address *want)
+{
+    return source == CONNMAN_TARGET_ADDNODE &&
+           addnode_index == (size_t)i &&
+           net_addr_eq(&pick->addr.svc.addr, &want->svc.addr) &&
+           pick->addr.svc.port == want->svc.port;
+}
+
+static int check_connman_addnode_addnodes_drain_before_addrman(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: addnodes drain before addrman... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -363,10 +439,8 @@ int test_connman_addnode_fallback(void)
                                                    &pick,
                                                    &source,
                                                    &addnode_index);
-            ok = ok && source == CONNMAN_TARGET_ADDNODE;
-            ok = ok && addnode_index == (size_t)i;
-            ok = ok && net_addr_eq(&pick.addr.svc.addr, &want.svc.addr);
-            ok = ok && pick.addr.svc.port == want.svc.port;
+            ok = ok && addnode_drain_pick_fields_ok(&pick, source,
+                                                    addnode_index, i, &want);
 
             /* Simulate a failed dial so the next pick advances instead of
              * returning the same addnode again within the cooldown window. */
@@ -401,7 +475,29 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_remove_compacted_ok(struct connman *cm,
+    const struct net_address *a, const struct net_address *c,
+    const struct net_address *missing)
+{
+    return cm->num_addnodes == 2 &&
+           net_addr_eq(&cm->addnodes[0].svc.addr, &a->svc.addr) &&
+           cm->addnodes[0].svc.port == a->svc.port &&
+           net_addr_eq(&cm->addnodes[1].svc.addr, &c->svc.addr) &&
+           cm->addnodes[1].svc.port == c->svc.port &&
+           cm->addnode_last_attempt[1] == 30 &&
+           cm->addnode_backoff_sec[1] == 60 &&
+           cm->addnode_tcp_failures[1] == 3 &&
+           cm->addnode_protocol_failures[1] == 6 &&
+           cm->next_addnode_cursor == 1 &&
+           !connman_remove_addnode(cm, missing);
+}
+
+static int check_connman_addnode_remove_compacts_state(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: addnode remove compacts state... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -438,23 +534,33 @@ int test_connman_addnode_fallback(void)
         cm.next_addnode_cursor = 2;
 
         ok = ok && connman_remove_addnode(&cm, &b);
-        ok = ok && cm.num_addnodes == 2;
-        ok = ok && net_addr_eq(&cm.addnodes[0].svc.addr, &a.svc.addr);
-        ok = ok && cm.addnodes[0].svc.port == a.svc.port;
-        ok = ok && net_addr_eq(&cm.addnodes[1].svc.addr, &c.svc.addr);
-        ok = ok && cm.addnodes[1].svc.port == c.svc.port;
-        ok = ok && cm.addnode_last_attempt[1] == 30;
-        ok = ok && cm.addnode_backoff_sec[1] == 60;
-        ok = ok && cm.addnode_tcp_failures[1] == 3;
-        ok = ok && cm.addnode_protocol_failures[1] == 6;
-        ok = ok && cm.next_addnode_cursor == 1;
-        ok = ok && !connman_remove_addnode(&cm, &missing);
+        ok = ok && addnode_remove_compacted_ok(&cm, &a, &c, &missing);
 
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_outbound_health_expected(struct connman *cm,
+    const struct connman_outbound_health *health)
+{
+    return health->outbound_total == 4 &&
+           health->inbound_total == 1 &&
+           health->healthy == 3 &&
+           health->inbound_healthy == 1 &&
+           health->connecting == 1 &&
+           health->handshake_incomplete == 1 &&
+           health->inbound_handshake_incomplete == 0 &&
+           health->ipv4_group_count == 3 &&
+           health->ipv4_max_group_size == 2 &&
+           connman_outbound_healthy_count(cm) == 3;
+}
+
+static int check_connman_addnode_outbound_health_diversity(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: outbound health tracks diversity... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -486,22 +592,18 @@ int test_connman_addnode_fallback(void)
                                  false, true) != NULL;
 
         connman_get_outbound_health(&cm, &health);
-        ok = ok && health.outbound_total == 4;
-        ok = ok && health.inbound_total == 1;
-        ok = ok && health.healthy == 3;
-        ok = ok && health.inbound_healthy == 1;
-        ok = ok && health.connecting == 1;
-        ok = ok && health.handshake_incomplete == 1;
-        ok = ok && health.inbound_handshake_incomplete == 0;
-        ok = ok && health.ipv4_group_count == 3;
-        ok = ok && health.ipv4_max_group_size == 2;
-        ok = ok && connman_outbound_healthy_count(&cm) == 3;
+        ok = ok && addnode_outbound_health_expected(&cm, &health);
 
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_non_network_not_floor(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: non-network peers do not satisfy "
            "outbound floor... ");
     {
@@ -536,7 +638,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_cold_start_discovery_floor(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: cold-start discovery follows healthy "
            "outbound floor... ");
     {
@@ -554,7 +661,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_max_height_ignores_unusable(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: max peer height ignores unusable slots... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -593,7 +705,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_peer_floor_diverse_subnets(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: peer-floor addnodes prefer diverse "
            "subnets... ");
     {
@@ -644,7 +761,48 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_saturated_attempt_recorded(struct connman *cm)
+{
+    for (int i = 0; i < cm->manager.addrman.id_count; i++) {
+        struct addr_info *info = &cm->manager.addrman.entries[i];
+        if (!info->used)
+            continue;
+        if (info->addr.svc.addr.ip[12] == 47 &&
+            info->addr.svc.addr.ip[13] == 88) {
+            return info->attempts == 1 && info->last_try > 0;
+        }
+    }
+    return false;
+}
+
+static bool addnode_saturated_pick_is_diverse(struct connman *cm)
+{
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    memset(&pick, 0, sizeof(pick));
+    bool ok = connman_pick_next_outbound_target(cm,
+                                               &cm->next_addnode_cursor,
+                                               &pick,
+                                               &source,
+                                               NULL);
+    ok = ok && source == CONNMAN_TARGET_ADDRMAN;
+    ok = ok && net_addr_is_ipv4(&pick.addr.svc.addr);
+    ok = ok && pick.addr.svc.addr.ip[12] == 47;
+    ok = ok && pick.addr.svc.addr.ip[13] == 88;
+    ok = ok && addnode_saturated_attempt_recorded(cm);
+    memset(&pick, 0, sizeof(pick));
+    source = CONNMAN_TARGET_NONE;
+    ok = ok && !connman_pick_next_outbound_target(
+        cm, &cm->next_addnode_cursor, &pick, &source, NULL);
+    return ok;
+}
+
+static int check_connman_addnode_addrman_skips_saturated(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: addrman skips saturated subnets... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -673,45 +831,18 @@ int test_connman_addnode_fallback(void)
             ok = ok && addrman_add(&cm.manager.addrman, &addr, &src, 0);
         }
 
-        if (ok) {
-            struct addr_info pick;
-            enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
-            memset(&pick, 0, sizeof(pick));
-            ok = connman_pick_next_outbound_target(&cm,
-                                                   &cm.next_addnode_cursor,
-                                                   &pick,
-                                                   &source,
-                                                   NULL);
-            ok = ok && source == CONNMAN_TARGET_ADDRMAN;
-            ok = ok && net_addr_is_ipv4(&pick.addr.svc.addr);
-            ok = ok && pick.addr.svc.addr.ip[12] == 47;
-            ok = ok && pick.addr.svc.addr.ip[13] == 88;
-
-            bool attempt_recorded = false;
-            for (int i = 0; i < cm.manager.addrman.id_count; i++) {
-                struct addr_info *info = &cm.manager.addrman.entries[i];
-                if (!info->used)
-                    continue;
-                if (info->addr.svc.addr.ip[12] == 47 &&
-                    info->addr.svc.addr.ip[13] == 88) {
-                    attempt_recorded =
-                        info->attempts == 1 && info->last_try > 0;
-                    break;
-                }
-            }
-            ok = ok && attempt_recorded;
-
-            memset(&pick, 0, sizeof(pick));
-            source = CONNMAN_TARGET_NONE;
-            ok = ok && !connman_pick_next_outbound_target(
-                &cm, &cm.next_addnode_cursor, &pick, &source, NULL);
-        }
+        ok = ok && addnode_saturated_pick_is_diverse(&cm);
 
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_inbound_ephemeral_not_block(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: inbound ephemeral does not block "
            "advertised addrman dial... ");
     {
@@ -756,7 +887,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_prehandshake_protocol_backoff(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: pre-handshake addnode disconnect "
            "backs off as protocol failure... ");
     {
@@ -803,7 +939,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_protocol_backoff_gt_tcp(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: protocol failures back off longer "
            "than TCP failures... ");
     {
@@ -846,7 +987,29 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_cool_down_picks_live_peer(struct connman *cm)
+{
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    memset(&pick, 0, sizeof(pick));
+    bool ok = connman_pick_next_outbound_target(cm,
+                                               &cm->next_addnode_cursor,
+                                               &pick,
+                                               &source,
+                                               NULL);
+    ok = ok && source == CONNMAN_TARGET_ADDRMAN;
+    ok = ok && net_addr_is_ipv4(&pick.addr.svc.addr);
+    ok = ok && pick.addr.svc.addr.ip[12] == 81;
+    ok = ok && pick.addr.svc.addr.ip[13] == 214;
+    return ok;
+}
+
+static int check_connman_addnode_addrman_failures_cool_down(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: addrman repeated failures cool down... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -880,26 +1043,50 @@ int test_connman_addnode_fallback(void)
             }
         }
 
-        if (ok) {
-            struct addr_info pick;
-            enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
-            memset(&pick, 0, sizeof(pick));
-            ok = connman_pick_next_outbound_target(&cm,
-                                                   &cm.next_addnode_cursor,
-                                                   &pick,
-                                                   &source,
-                                                   NULL);
-            ok = ok && source == CONNMAN_TARGET_ADDRMAN;
-            ok = ok && net_addr_is_ipv4(&pick.addr.svc.addr);
-            ok = ok && pick.addr.svc.addr.ip[12] == 81;
-            ok = ok && pick.addr.svc.addr.ip[13] == 214;
-        }
+        ok = ok && addnode_cool_down_picks_live_peer(&cm);
 
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_failure_aware_seed_addrs(struct connman *cm,
+    struct net_addr *src, int64_t now)
+{
+    struct net_address addr;
+    test_set_ipv4(&addr, 45, 33, 1, 1, 8033);   /* dead A */
+    addr.nTime = (uint32_t)now;
+    bool ok = addrman_add(&cm->manager.addrman, &addr, src, 0);
+    test_set_ipv4(&addr, 51, 178, 1, 1, 8033);  /* dead B */
+    addr.nTime = (uint32_t)now;
+    ok = ok && addrman_add(&cm->manager.addrman, &addr, src, 0);
+    test_set_ipv4(&addr, 47, 88, 1, 1, 8033);   /* live C */
+    addr.nTime = (uint32_t)now;
+    ok = ok && addrman_add(&cm->manager.addrman, &addr, src, 0);
+    test_set_ipv4(&addr, 66, 70, 1, 1, 8033);   /* live D */
+    addr.nTime = (uint32_t)now;
+    ok = ok && addrman_add(&cm->manager.addrman, &addr, src, 0);
+    return ok;
+}
+
+static bool addnode_failure_aware_live_pair(
+    const struct connman_dial_candidate *batch, size_t n)
+{
+    bool saw_c = false, saw_d = false, saw_dead = false;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t oct = batch[i].addr.svc.addr.ip[12];
+        if (oct == 47) saw_c = true;
+        else if (oct == 66) saw_d = true;
+        else saw_dead = true;   /* 45 or 51 must never appear */
+    }
+    return saw_c && saw_d && !saw_dead;
+}
+
+static int check_connman_addnode_failure_aware_distinct_batch(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: failure-aware backoff gathers DISTINCT "
            "live candidates and skips recently-dead ones... ");
     {
@@ -918,21 +1105,7 @@ int test_connman_addnode_fallback(void)
          * cap never rejects them: two "dead-on-arrival" (accumulated failures,
          * last try just now → inside their backoff window) and two "live"
          * (never failed, immediately dialable). */
-        if (ok) {
-            struct net_address addr;
-            test_set_ipv4(&addr, 45, 33, 1, 1, 8033);   /* dead A */
-            addr.nTime = (uint32_t)now;
-            ok = ok && addrman_add(&cm.manager.addrman, &addr, &src, 0);
-            test_set_ipv4(&addr, 51, 178, 1, 1, 8033);  /* dead B */
-            addr.nTime = (uint32_t)now;
-            ok = ok && addrman_add(&cm.manager.addrman, &addr, &src, 0);
-            test_set_ipv4(&addr, 47, 88, 1, 1, 8033);   /* live C */
-            addr.nTime = (uint32_t)now;
-            ok = ok && addrman_add(&cm.manager.addrman, &addr, &src, 0);
-            test_set_ipv4(&addr, 66, 70, 1, 1, 8033);   /* live D */
-            addr.nTime = (uint32_t)now;
-            ok = ok && addrman_add(&cm.manager.addrman, &addr, &src, 0);
-        }
+        ok = ok && addnode_failure_aware_seed_addrs(&cm, &src, now);
 
         /* A: 5 consecutive failures → 3600 s cooldown; B: 2 → 300 s. Both
          * tried "just now", so both are firmly inside their backoff windows. */
@@ -948,14 +1121,7 @@ int test_connman_addnode_fallback(void)
             n = connman_gather_dial_candidates(&cm, batch, 4);
             ok = ok && n == 2;
         }
-        bool saw_c = false, saw_d = false, saw_dead = false;
-        for (size_t i = 0; ok && i < n; i++) {
-            uint8_t oct = batch[i].addr.svc.addr.ip[12];
-            if (oct == 47) saw_c = true;
-            else if (oct == 66) saw_d = true;
-            else saw_dead = true;   /* 45 or 51 must never appear */
-        }
-        ok = ok && saw_c && saw_d && !saw_dead;
+        ok = ok && addnode_failure_aware_live_pair(batch, n);
         /* Distinct: two different services, never the same slot twice. */
         if (ok && n == 2)
             ok = ok && !net_service_eq(&batch[0].addr.svc, &batch[1].addr.svc);
@@ -975,7 +1141,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_onion_seed_last_resort(void)
+{
+    int failures = 0;
     /* S6 (design item #S6, `sovereign-service-roadmap.md`, removed from the
      * tree — recover with `git log --follow -- docs/work/archive/sovereign-service-roadmap.md`): bootstrap
      * fallback-of-last-resort. With DNS seeds AND the operator addrman
@@ -1068,7 +1239,86 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_ipv6_onion_fixture_peers(struct connman *cm)
+{
+    bool ok = true;
+    const unsigned char ipv6_prefix[4] = {0x26, 0x00, 0x01, 0x00};
+    for (int i = 0; i < 2 && ok; i++) {
+        struct net_address a;
+        net_address_init(&a);
+        memcpy(a.svc.addr.ip, ipv6_prefix, 4);
+        a.svc.addr.ip[15] = (unsigned char)(i + 1);
+        a.svc.port = 8033;
+        struct p2p_node *n = p2p_node_create(
+            &cm->manager, ZCL_INVALID_SOCKET, &a, "ipv6-peer", false);
+        ok = ok && n != NULL;
+        if (n) cm->manager.nodes[cm->manager.num_nodes++] = n;
+    }
+    for (int i = 0; i < 3 && ok; i++) {
+        struct net_address a;
+        net_address_init(&a);
+        a.svc.addr.has_torv3 = true;
+        memset(a.svc.addr.torv3, (int)(0xA0 + i), TORV3_ADDR_SIZE);
+        a.svc.port = 8033;
+        struct p2p_node *n = p2p_node_create(
+            &cm->manager, ZCL_INVALID_SOCKET, &a, "onion-peer", false);
+        ok = ok && n != NULL;
+        if (n) cm->manager.nodes[cm->manager.num_nodes++] = n;
+    }
+    return ok;
+}
+
+static bool addnode_no_capped_ipv6_group_pick(struct connman *cm)
+{
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    memset(&pick, 0, sizeof(pick));
+    bool got = connman_pick_next_outbound_target(
+        cm, &cm->next_addnode_cursor, &pick, &source, NULL);
+    return !got; /* capped IPv6 group -> no usable candidate */
+}
+
+static bool addnode_uncapped_ipv6_group_pick(struct connman *cm)
+{
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    memset(&pick, 0, sizeof(pick));
+    bool got = connman_pick_next_outbound_target(
+        cm, &cm->next_addnode_cursor, &pick, &source, NULL);
+    return got && source == CONNMAN_TARGET_ADDRMAN &&
+        net_addr_is_ipv6(&pick.addr.svc.addr);
+}
+
+static bool addnode_onion_cand_never_picked(struct connman *cm,
+    struct net_addr *src)
+{
+    struct net_address cand3;
+    net_address_init(&cand3);
+    cand3.svc.addr.has_torv3 = true;
+    memset(cand3.svc.addr.torv3, 0xCC, TORV3_ADDR_SIZE);
+    cand3.svc.port = 8033;
+    bool ok = addrman_add(&cm->manager.addrman, &cand3, src, 0);
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    memset(&pick, 0, sizeof(pick));
+    bool got = connman_pick_next_outbound_target(
+        cm, &cm->next_addnode_cursor, &pick, &source, NULL);
+    /* Only the still-pickable cand2 (a different IPv6 group) or
+     * nothing should ever come back — never the capped onion
+     * candidate. addrman_select() is random, so we can't assert
+     * "nothing" outright if cand2 already got consumed above;
+     * assert the STRONGER invariant instead: whatever (if
+     * anything) comes back is never onion. */
+    ok = ok && (!got || !net_addr_is_tor(&pick.addr.svc.addr));
+    return ok;
+}
+
+static int check_connman_addnode_ipv6_onion_diversity_caps(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: IPv6 /32 and three-slot onion "
            "outbound diversity caps enforced... ");
     {
@@ -1096,31 +1346,7 @@ int test_connman_addnode_fallback(void)
          * reserving five of eight outbound slots. Onion has no sub-grouping;
          * see
          * connman_outbound_diversity_capped()'s doc comment. */
-        if (ok) {
-            const unsigned char ipv6_prefix[4] = {0x26, 0x00, 0x01, 0x00};
-            for (int i = 0; i < 2 && ok; i++) {
-                struct net_address a;
-                net_address_init(&a);
-                memcpy(a.svc.addr.ip, ipv6_prefix, 4);
-                a.svc.addr.ip[15] = (unsigned char)(i + 1);
-                a.svc.port = 8033;
-                struct p2p_node *n = p2p_node_create(
-                    &cm.manager, ZCL_INVALID_SOCKET, &a, "ipv6-peer", false);
-                ok = ok && n != NULL;
-                if (n) cm.manager.nodes[cm.manager.num_nodes++] = n;
-            }
-            for (int i = 0; i < 3 && ok; i++) {
-                struct net_address a;
-                net_address_init(&a);
-                a.svc.addr.has_torv3 = true;
-                memset(a.svc.addr.torv3, (int)(0xA0 + i), TORV3_ADDR_SIZE);
-                a.svc.port = 8033;
-                struct p2p_node *n = p2p_node_create(
-                    &cm.manager, ZCL_INVALID_SOCKET, &a, "onion-peer", false);
-                ok = ok && n != NULL;
-                if (n) cm.manager.nodes[cm.manager.num_nodes++] = n;
-            }
-        }
+        ok = ok && addnode_ipv6_onion_fixture_peers(&cm);
 
         struct net_addr src;
         net_addr_init(&src);
@@ -1136,14 +1362,7 @@ int test_connman_addnode_fallback(void)
             cand.svc.port = 8033;
             ok = ok && addrman_add(&cm.manager.addrman, &cand, &src, 0);
         }
-        if (ok) {
-            struct addr_info pick;
-            enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
-            memset(&pick, 0, sizeof(pick));
-            bool got = connman_pick_next_outbound_target(
-                &cm, &cm.next_addnode_cursor, &pick, &source, NULL);
-            ok = ok && !got; /* capped IPv6 group -> no usable candidate */
-        }
+        ok = ok && addnode_no_capped_ipv6_group_pick(&cm);
 
         /* An addrman candidate in a DIFFERENT (uncapped) IPv6 group IS
          * pickable — proves the rejection above was the cap, not some
@@ -1157,46 +1376,22 @@ int test_connman_addnode_fallback(void)
             cand2.svc.port = 8033;
             ok = ok && addrman_add(&cm.manager.addrman, &cand2, &src, 0);
         }
-        if (ok) {
-            struct addr_info pick;
-            enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
-            memset(&pick, 0, sizeof(pick));
-            bool got = connman_pick_next_outbound_target(
-                &cm, &cm.next_addnode_cursor, &pick, &source, NULL);
-            ok = ok && got && source == CONNMAN_TARGET_ADDRMAN &&
-                net_addr_is_ipv6(&pick.addr.svc.addr);
-        }
+        ok = ok && addnode_uncapped_ipv6_group_pick(&cm);
 
         /* An addrman candidate that is onion (already-capped flat
          * bucket) must never be picked either. */
-        if (ok) {
-            struct net_address cand3;
-            net_address_init(&cand3);
-            cand3.svc.addr.has_torv3 = true;
-            memset(cand3.svc.addr.torv3, 0xCC, TORV3_ADDR_SIZE);
-            cand3.svc.port = 8033;
-            ok = ok && addrman_add(&cm.manager.addrman, &cand3, &src, 0);
-        }
-        if (ok) {
-            struct addr_info pick;
-            enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
-            memset(&pick, 0, sizeof(pick));
-            bool got = connman_pick_next_outbound_target(
-                &cm, &cm.next_addnode_cursor, &pick, &source, NULL);
-            /* Only the still-pickable cand2 (a different IPv6 group) or
-             * nothing should ever come back — never the capped onion
-             * candidate. addrman_select() is random, so we can't assert
-             * "nothing" outright if cand2 already got consumed above;
-             * assert the STRONGER invariant instead: whatever (if
-             * anything) comes back is never onion. */
-            ok = ok && (!got || !net_addr_is_tor(&pick.addr.svc.addr));
-        }
+        ok = ok && addnode_onion_cand_never_picked(&cm, &src);
 
         connman_free(&cm);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_onion_queues_no_blocking(void)
+{
+    int failures = 0;
     /* Onion dial routing, no live Tor: an onion addnode is stored like any
      * other, but the connect attempt routes to the onion stream bridge,
      * which is queued on the addnode list and NOT opened via blocking
@@ -1234,7 +1429,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_reactor_clamps_over_cap(void)
+{
+    int failures = 0;
     /* An over-cap max_connections with room left in the reactor (listen
      * sockets alone don't exhaust it) must be CLAMPED to whatever room
      * remains, not refused — a configured max_connections is a ceiling
@@ -1252,7 +1452,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_reactor_passthrough_in_cap(void)
+{
+    int failures = 0;
     /* A config that fits within REACTOR_MAX_FDS must pass through
      * unchanged (no clamp, not impossible). */
     printf("connman_addnode_fallback: reactor admission passes through "
@@ -1266,7 +1471,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_reactor_refuses_exhausted(void)
+{
+    int failures = 0;
     /* Listen sockets ALONE leaving no room for any peer connection is the
      * one genuinely impossible config: it must still refuse via
      * connman_start(), naming the PERMANENT blocker, never silently
@@ -1311,7 +1521,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_reactor_passes_default(void)
+{
+    int failures = 0;
     /* Sane configuration (default max_connections, no listen sockets) must
      * NOT trip the reactor bound-check — proves the admission math doesn't
      * false-positive on the ordinary boot path. */
@@ -1336,7 +1551,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_retire_both_thresholds(void)
+{
+    int failures = 0;
     /* ── addnode self-healing: RETIRE + HARVEST (net/connman.h) ─────────── */
 
     printf("connman_addnode_fallback: addnode retirement fires past BOTH "
@@ -1391,7 +1611,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_retire_needs_both_gates(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: addnode retirement needs BOTH the "
            "failure-count AND window thresholds, neither alone... ");
     {
@@ -1434,7 +1659,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_retire_suppressed_below_floor(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: addnode retirement is suppressed "
            "below the healthy-outbound floor... ");
     {
@@ -1477,7 +1707,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_retire_revive_on_success(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: retired addnode revives on one "
            "successful dial... ");
     {
@@ -1518,7 +1753,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_retire_revive_on_readd(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: retired addnode revives on operator "
            "addnode re-add... ");
     {
@@ -1561,7 +1801,31 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_census_found_only_good(struct connman *cm)
+{
+    bool found_good1 = false, found_good2 = false, found_bad = false;
+    zcl_mutex_lock(&cm->manager.addrman.cs);
+    for (int i = 0; i < cm->manager.addrman.id_count; i++) {
+        struct addr_info *info = &cm->manager.addrman.entries[i];
+        if (!info->used || !net_addr_is_ipv4(&info->addr.svc.addr))
+            continue;
+        const uint8_t *ip = info->addr.svc.addr.ip;
+        if (ip[12] == 45 && ip[13] == 33 && ip[14] == 10) {
+            if (ip[15] == 1) found_good1 = true;
+            else if (ip[15] == 2) found_good2 = true;
+            else if (ip[15] == 3 || ip[15] == 4) found_bad = true;
+        }
+    }
+    zcl_mutex_unlock(&cm->manager.addrman.cs);
+    return found_good1 && found_good2 && !found_bad;
+}
+
+static int check_connman_addnode_census_harvest_to_addrman(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: census harvest adds proven-reachable "
            "candidates to addrman as discovery entries, not pinned "
            "addnodes... ");
@@ -1631,23 +1895,7 @@ int test_connman_addnode_fallback(void)
          * list — that is the whole point of HARVEST vs a raw addnode add. */
         ok = ok && cm.num_addnodes == 0;
 
-        bool found_good1 = false, found_good2 = false, found_bad = false;
-        if (ok) {
-            zcl_mutex_lock(&cm.manager.addrman.cs);
-            for (int i = 0; i < cm.manager.addrman.id_count; i++) {
-                struct addr_info *info = &cm.manager.addrman.entries[i];
-                if (!info->used || !net_addr_is_ipv4(&info->addr.svc.addr))
-                    continue;
-                const uint8_t *ip = info->addr.svc.addr.ip;
-                if (ip[12] == 45 && ip[13] == 33 && ip[14] == 10) {
-                    if (ip[15] == 1) found_good1 = true;
-                    else if (ip[15] == 2) found_good2 = true;
-                    else if (ip[15] == 3 || ip[15] == 4) found_bad = true;
-                }
-            }
-            zcl_mutex_unlock(&cm.manager.addrman.cs);
-        }
-        ok = ok && found_good1 && found_good2 && !found_bad;
+        ok = ok && addnode_census_found_only_good(&cm);
 
         connman_free(&cm);
         char cmd[256];
@@ -1657,7 +1905,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_fixed_seeds_onion_noop(void)
+{
+    int failures = 0;
     printf("connman seed discovery: hardcoded fixed seeds load into addrman, "
            "onion bootstrap is a safe no-op without Tor... ");
     {
@@ -1701,7 +1954,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_relay_block_handshaked_only(void)
+{
+    int failures = 0;
     /* connman_relay_block announces a new tip to handshaked peers only, and
      * is idempotent per peer. This is the miner/submitblock announce seam:
      * a locally-accepted tip never travels the P2P receive-relay path, so
@@ -1764,7 +2022,23 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool addnode_noise_first_upgrade_ok(struct connman *cm,
+    struct p2p_node *node)
+{
+    return connman_request_noise_upgrade(cm, node) &&
+           node->disconnect &&
+           (node->addr.nServices & NODE_NOISE_TRANSPORT) != 0 &&
+           (cm->addnodes[0].nServices & NODE_NOISE_TRANSPORT) != 0 &&
+           cm->addnode_last_attempt[0] == 0 &&
+           cm->addnode_backoff_sec[0] == 0;
+}
+
+static int check_connman_addnode_noise_capability_upgrade(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: one-shot Noise capability upgrade... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -1786,14 +2060,7 @@ int test_connman_addnode_fallback(void)
         if (node) {
             node->addr.svc.port = pinned.svc.port;
             node->services |= NODE_NOISE_TRANSPORT;
-            ok = ok && connman_request_noise_upgrade(&cm, node);
-            ok = ok && node->disconnect;
-            ok = ok &&
-                (node->addr.nServices & NODE_NOISE_TRANSPORT) != 0;
-            ok = ok &&
-                (cm.addnodes[0].nServices & NODE_NOISE_TRANSPORT) != 0;
-            ok = ok && cm.addnode_last_attempt[0] == 0 &&
-                 cm.addnode_backoff_sec[0] == 0;
+            ok = ok && addnode_noise_first_upgrade_ok(&cm, node);
 
             /* The learned bit makes this the only reconnect request.  The
              * next dial snapshot enters Noise in net.c immediately. */
@@ -1827,7 +2094,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_evict_inbound_when_outbound(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: inbound from a host with a "
            "handshaked outbound is evicted... ");
     {
@@ -1856,7 +2128,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_inbound_only_same_ip_stays(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: inbound-only same-IP stays... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -1877,7 +2154,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_operator_local_sockets_stay(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: operator-local mixed sockets stay... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -1905,7 +2187,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int check_connman_addnode_feeler_does_not_evict(void)
+{
+    int failures = 0;
     printf("connman_addnode_fallback: feeler outbound does not evict "
            "inbound... ");
     {
@@ -1935,8 +2222,12 @@ int test_connman_addnode_fallback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-
+static int check_connman_addnode_unreserved_dial_serial(void)
+{
+    int failures = 0;
     /* free_slots/free_nodes are observations, not locked reservations. A
      * positive scheduler decision therefore admits exactly one attempt. */
     printf("connman_addnode_fallback: unreserved dial admission stays serial... ");
@@ -1968,5 +2259,49 @@ int test_connman_addnode_fallback(void)
             failures++;
         }
     }
+    return failures;
+}
+
+int test_connman_addnode_fallback(void)
+{
+    int failures = 0;
+    failures += check_connman_addnode_dht_hint_priority_dial();
+    failures += check_connman_addnode_loopback_edges_distinct();
+    failures += check_connman_addnode_custom_port_onion_redial();
+    failures += check_connman_addnode_zcl23_backoff_ownership();
+    failures += check_connman_addnode_addnodes_drain_before_addrman();
+    failures += check_connman_addnode_remove_compacts_state();
+    failures += check_connman_addnode_outbound_health_diversity();
+    failures += check_connman_addnode_non_network_not_floor();
+    failures += check_connman_addnode_cold_start_discovery_floor();
+    failures += check_connman_addnode_max_height_ignores_unusable();
+    failures += check_connman_addnode_peer_floor_diverse_subnets();
+    failures += check_connman_addnode_addrman_skips_saturated();
+    failures += check_connman_addnode_inbound_ephemeral_not_block();
+    failures += check_connman_addnode_prehandshake_protocol_backoff();
+    failures += check_connman_addnode_protocol_backoff_gt_tcp();
+    failures += check_connman_addnode_addrman_failures_cool_down();
+    failures += check_connman_addnode_failure_aware_distinct_batch();
+    failures += check_connman_addnode_onion_seed_last_resort();
+    failures += check_connman_addnode_ipv6_onion_diversity_caps();
+    failures += check_connman_addnode_onion_queues_no_blocking();
+    failures += check_connman_addnode_reactor_clamps_over_cap();
+    failures += check_connman_addnode_reactor_passthrough_in_cap();
+    failures += check_connman_addnode_reactor_refuses_exhausted();
+    failures += check_connman_addnode_reactor_passes_default();
+    failures += check_connman_addnode_retire_both_thresholds();
+    failures += check_connman_addnode_retire_needs_both_gates();
+    failures += check_connman_addnode_retire_suppressed_below_floor();
+    failures += check_connman_addnode_retire_revive_on_success();
+    failures += check_connman_addnode_retire_revive_on_readd();
+    failures += check_connman_addnode_census_harvest_to_addrman();
+    failures += check_connman_addnode_fixed_seeds_onion_noop();
+    failures += check_connman_addnode_relay_block_handshaked_only();
+    failures += check_connman_addnode_noise_capability_upgrade();
+    failures += check_connman_addnode_evict_inbound_when_outbound();
+    failures += check_connman_addnode_inbound_only_same_ip_stays();
+    failures += check_connman_addnode_operator_local_sockets_stay();
+    failures += check_connman_addnode_feeler_does_not_evict();
+    failures += check_connman_addnode_unreserved_dial_serial();
     return failures;
 }
