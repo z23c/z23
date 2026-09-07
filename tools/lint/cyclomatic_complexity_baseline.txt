@@ -4302,13 +4302,9 @@ tools/command/native_zcode_work_run_command.c:run_admit:134
 tools/command/native_zcode_work_run_command.c:run_admit_input:29
 tools/command/native_zcode_work_run_command.c:run_async_proof_pending:21
 tools/command/native_zcode_work_run_command.c:run_codex_runner_path:21
-tools/command/native_zcode_work_run_command.c:run_packet:24
 tools/command/native_zcode_work_run_command.c:run_preflight_packet:31
 tools/command/native_zcode_work_run_command.c:run_preflight_runner_path:17
-tools/command/native_zcode_work_run_command.c:run_read_packet:33
 tools/command/native_zcode_work_run_command.c:run_render_async_admission:50
-tools/command/native_zcode_work_run_command.c:run_repair_packet_valid:22
-tools/command/native_zcode_work_run_command.c:run_write_packet:30
 tools/command/native_zcode_work_run_command.c:zcl_native_handle_zcode_work_preflight:46
 tools/command/native_zcode_work_run_command.c:zcl_native_handle_zcode_work_run:134
 tools/command/native_zcode_work_transport_command.c:zcl_native_handle_zcode_work_pull:34
