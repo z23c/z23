@@ -36,7 +36,6 @@ core/modules/net/src/peer_lifecycle.c 1634
 platform/modules/platform/src/os_sandbox_linux.c 1526
 contexts/commons/modules/vcs/src/package_reward.c 1986
 contexts/commons/modules/vcs/src/package_swarm_node.c 2015
-contexts/commons/modules/vcs/src/vcs_devloop.c 2367
 contexts/wallet/modules/wallet/src/wallet.c 1560
 contexts/wallet/modules/wallet/src/wallet_sqlite.c 1603
 engine/entry/main_cli_modes.c 4275

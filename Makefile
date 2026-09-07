@@ -767,7 +767,8 @@ LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
 	platform/modules/platform/src/os_sandbox_package_linux.c \
 	platform/modules/platform/src/os_sandbox_terminal_worker.c \
 	platform/modules/util/src/self_backtrace_stub.c \
-	contexts/commons/modules/vcs/src/vcs_devloop.c,$(LIB_SRCS))
+	contexts/commons/modules/vcs/src/vcs_devloop.c \
+	contexts/commons/modules/vcs/src/vcs_devloop_publication.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
 	platform/modules/platform/src/os_sandbox_package_linux.c \
