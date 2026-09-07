@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 860 |
+| Registry entries (branches + leaves) | 867 |
 | Top-level roots | 14 |
-| Branches | 193 |
-| Leaves (dispatchable command paths) | 667 |
-| … `ready` (live handler in this build) | 596 |
-| … `compat` (metadata only, names a fallback) | 40 |
+| Branches | 195 |
+| Leaves (dispatchable command paths) | 672 |
+| … `ready` (live handler in this build) | 598 |
+| … `compat` (metadata only, names a fallback) | 43 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 39 |
-| Leaves with `effect=mutate` | 237 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 42 |
+| Leaves with `effect=mutate` | 239 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 126 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 57 | 10 | 47 |
-| `engine/composition/commands/dev.def` | 98 | 20 | 78 |
+| `engine/composition/commands/dev.def` | 102 | 21 | 81 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -108,7 +108,7 @@ Per source file:
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
-| `engine/composition/commands/fleet.def` | 17 | 4 | 13 |
+| `engine/composition/commands/fleet.def` | 20 | 5 | 15 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
@@ -806,6 +806,14 @@ represented by its children's sections.
 | `dev train check` | compat 🔧 → `z23-dev dev train check --name <n>` | read / read / operator · foreground/high | `name`, `timeout_ms` | `zcl.train_check.v1` | `z23 dev train check --name q` | Run lint-fast on a stack worktree and report the gates that failed — *stack lint verification requires the dev binary* |
 | `dev train status` | compat 🔧 → `z23-dev dev train status` | read / read / operator · fast/low | `name` | `zcl.train_status.v1` | `z23 dev train status` | List stack worktrees, their base, and last check verdict — *stack status requires the dev binary* |
 | `dev train drop` | compat 🔧 → `z23-dev dev train drop --name <n>` | destructive / dev-mutation / operator · fast/low | `name`, `force` | `zcl.train_drop.v1` | `z23 dev train drop --name q` | Remove a stack worktree — *stack removal requires the dev binary* |
+
+#### `dev.index` — Ingest and search local data sources (board/experiments/landing/logs)
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev index ingest` | compat 🔧 → `z23-dev dev index ingest` | mutate / dev-mutation / operator · maintenance/low | `source`, `index`, `state-root` | `zcl.dev_index_ingest.v1` | `z23 dev index ingest` | Ingest new rows from one or every declared source — *index ingest requires the dev binary* |
+| `dev index status` | compat 🔧 → `z23-dev dev index status` | read / read / operator · fast/low | `source`, `index`, `state-root` | `zcl.dev_index_status.v1` | `z23 dev index status` | Per-source row counts, newest timestamp, and bytes not yet ingested — *index status requires the dev binary* |
+| `dev index search` | compat 🔧 → `z23-dev dev index search` | read / read / operator · fast/low | **`query`**, `source`, `limit`, `index`, `state-root` | `zcl.dev_index_search.v1` | `z23 dev index search 'kind:result'` | Full-text search over every ingested row, newest first — *index search requires the dev binary* |
 
 #### `dev.agent` — Checkout questions without composing shell
 
@@ -1793,6 +1801,13 @@ represented by its children's sections.
 | `fleet experiment result` | ready | mutate / dev-mutation / operator · fast/low | **`task_id`**, `task_class`, `story`, `executor`, `harness`, `model`, `effort`, `in`, `out`, `cache`, `reasoning`, `tool_uses`, `turns`, `wall_s`, `outcome`, `added`, `removed`, `defects`, `note` | `zcl.fleet_experiment_result.v1` | `z23 fleet experiment result --task_id=u1 --task_class=read --model=grok --outcome=LAND --in=800 --out=200 --wall_s=28` | Append one signed result row for a delegated task |
 | `fleet experiment stats` | ready | read / read / operator · instant/low | `task_class`, `model` | `zcl.fleet_experiment_stats.v1` | `z23 fleet experiment stats --task_class=read --model=grok` | Per task_class and model: counts, LAND rate, medians, predicted-vs-actual |
 | `fleet experiment export` | ready | read / read / operator · instant/low | `since`, `box` | `zcl.fleet_experiment_export.v1` | `z23 fleet experiment export --since=24` | Every kept experiment row as exp.sh's 22-column TSV, one line each |
+
+#### `fleet.triggers` — The closed registry of local-event reactions
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet triggers list` | ready | read / read / operator, prose · instant/low | none | `zcl.fleet_triggers_list.v1` | `z23-dev fleet triggers list` | Print the closed trigger registry |
+| `fleet triggers check` | ready | mutate / dev-mutation / operator, prose · foreground/low | `since`, `dry-run` | `zcl.fleet_triggers_check.v1` | `z23-dev fleet triggers check --since=3600` | Run every trigger once against whatever is new in its source |
 
 #### `fleet.roles` — Which key may call which fleet leaf
 
