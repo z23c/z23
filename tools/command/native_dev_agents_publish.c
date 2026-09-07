@@ -23,7 +23,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* tools/command is compiled for ZCL_TARGET=windows-x86_64 like every other
+ * release translation unit, so <sys/utsname.h> cannot be reached
+ * unconditionally. Same split, same reason, as
+ * tools/command/native_fleet_triggers_eval.c. */
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/utsname.h>
+#endif
 
 #define AG_PUB_PARAMS_MAX 24576
 #define AG_PUB_MINUTE 60
@@ -40,16 +51,31 @@ static const char *ag_str(const struct json_value *obj, const char *key)
 
 void zcl_agents_host_name(char *out, size_t cap)
 {
-    struct utsname sys;
     if (!out || cap == 0) return;
     out[0] = '\0';
-    /* uname(), not gethostname(): the same call this tree already uses
-     * elsewhere to name a box (tools/dev/fleet_enrol_facts.c), so this leaf
-     * costs no new external symbol. */
-    if (uname(&sys) == 0 && sys.nodename[0])
-        (void)snprintf(out, cap, "%s", sys.nodename);
-    else
-        (void)snprintf(out, cap, "%s", "unknown-host");
+    /* uname(), not gethostname(), and GetComputerNameA on Windows: the same
+     * two calls this tree already uses to name a box
+     * (tools/dev/fleet_enrol_facts.c), so this leaf costs no new external
+     * symbol on either target. */
+#if defined(_WIN32)
+    {
+        char name[MAX_COMPUTERNAME_LENGTH + 1];
+        DWORD name_len = (DWORD)sizeof(name);
+        if (GetComputerNameA(name, &name_len) && name[0]) {
+            (void)snprintf(out, cap, "%s", name);
+            return;
+        }
+    }
+#else
+    {
+        struct utsname sys;
+        if (uname(&sys) == 0 && sys.nodename[0]) {
+            (void)snprintf(out, cap, "%s", sys.nodename);
+            return;
+        }
+    }
+#endif
+    (void)snprintf(out, cap, "%s", "unknown-host");
 }
 
 /* ── the compact post body ───────────────────────────────────────────── */
