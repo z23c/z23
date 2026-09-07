@@ -4287,11 +4287,8 @@ tools/command/native_zcode_work_command.c:zwork_accept_inner:18
 tools/command/native_zcode_work_command.c:zwork_bind_accepted_publication:17
 tools/command/native_zcode_work_command.c:zwork_compose_selected_lock:17
 tools/command/native_zcode_work_command.c:zwork_coordination_handoff:48
-tools/command/native_zcode_work_command.c:zwork_line_hashes:17
 tools/command/native_zcode_work_command.c:zwork_peer_inventory_apply:34
 tools/command/native_zcode_work_command.c:zwork_plan_input:16
-tools/command/native_zcode_work_command.c:zwork_proof_receipt_roots:17
-tools/command/native_zcode_work_command.c:zwork_proof_snapshot_read:38
 tools/command/native_zcode_work_command.c:zwork_publication_bound:16
 tools/command/native_zcode_work_command.c:zwork_render_selection:21
 tools/command/native_zcode_work_command.c:zwork_reuse_header_symbols:25

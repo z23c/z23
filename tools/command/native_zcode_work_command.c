@@ -9,6 +9,7 @@
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
 #include "command/native_command.h"
 #include "command/native_zcode_discovery.h"
+#include "native_zcode_work_priv.h"
 
 #include "base/cleanse.h"
 #include "base/hex.h"
@@ -63,15 +64,22 @@
 #endif
 #endif
 
-#ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
-#define ZWORK_PATH_MAX 4400
-#define ZWORK_LINE_COUNT_MAX 65536u
-#define ZWORK_REUSE_API_TEXT_MAX 256u
-#define ZWORK_REUSE_HEADER_BYTES_MAX (64u * 1024u)
-#define ZWORK_LOG "zcode.work"
+#ifdef ZCL_HOTFORK_ZWORK_INPUT_CORE
+/* The HOT_FORK capsule compiles this translation unit by itself and never
+ * sees the family's private header, so the shared input core is declared
+ * here for that build alone. */
+const char *zwork_str(const struct json_value *input, const char *key);
+bool zwork_bool(const struct json_value *input, const char *key);
+int64_t zwork_int(const struct json_value *input, const char *key,
+                  int64_t fallback);
+bool zwork_scopes(const struct vcs_package_prepared *prepared,
+                  bool include_package_metadata, char out[1024]);
+uint64_t zwork_source_bytes(const struct vcs_package_prepared *prepared);
+#endif
 
-static bool zwork_task_path(char out[ZWORK_PATH_MAX], const char *task,
-                            const char *suffix)
+#ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
+bool zwork_task_path(char out[ZWORK_PATH_MAX], const char *task,
+                     const char *suffix)
 {
 #if defined(_WIN32)
     char state[ZWORK_PATH_MAX];
@@ -86,65 +94,22 @@ static bool zwork_task_path(char out[ZWORK_PATH_MAX], const char *task,
     return n > 0 && n < ZWORK_PATH_MAX;
 }
 
-struct zwork_patch_summary {
-    struct vcs_zcode_patch_v1 patch;
-    uint64_t added_lines;
-    uint64_t deleted_lines;
-    size_t public_api_changes;
-    bool line_counts_exact;
-};
-
-struct zwork_proof_snapshot {
-    bool available;
-    struct build_fabric_proof_evaluation facts;
-    /* Latest async proof chain event the read ledger holds for the action
-     * ("" when it holds none).  Outstanding means the chain is not
-     * superseded; ledger_supervised means a named or resident node datadir
-     * whose supervisor consumes outstanding chains, as opposed to the closed
-     * scratch ledger.  Together they decide whether CANDIDATE_ADMITTED is a
-     * real wait for independent reproduction or an incomplete execution —
-     * the same fact zcode.work.run classifies. */
-    char async_proof_state[BUILD_PROOF_EVENT_STATE_MAX + 1];
-    bool async_proof_outstanding;
-    bool ledger_supervised;
-    /* Action identity recovered from the durable proof chain when no receipt
-     * can name it yet ("" while nothing is bound). */
-    char action_root[BUILD_PROOF_EVENT_ROOT_HEX + 1];
-};
-
-struct zwork_reuse_candidate {
-    struct vcs_package_reuse_input input;
-    char api_text[VCS_PACKAGE_REUSE_MAX_APIS][ZWORK_REUSE_API_TEXT_MAX];
-    struct vcs_package_build_receipt receipt;
-    bool receipt_verified;
-    bool installed_invalid;
-};
-
-struct zwork_peer_inventory {
-    bool live;
-    bool truncated;
-    bool pointer_board_available;
-    bool pointer_board_truncated;
-    size_t roots_seen;
-    size_t pointer_records_seen;
-    size_t roots_matched;
-};
 #endif
 
-static const char *zwork_str(const struct json_value *input, const char *key)
+const char *zwork_str(const struct json_value *input, const char *key)
 {
     const struct json_value *value = input ? json_get(input, key) : NULL;
     return value && value->type == JSON_STR ? json_get_str(value) : NULL;
 }
 
-static bool zwork_bool(const struct json_value *input, const char *key)
+bool zwork_bool(const struct json_value *input, const char *key)
 {
     const struct json_value *value = input ? json_get(input, key) : NULL;
     return value && value->type == JSON_BOOL && json_get_bool(value);
 }
 
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
-static bool zwork_open_build_ledger(
+bool zwork_open_build_ledger(
     struct node_db *ndb, const char *path, const char *reason,
     bool allow_create)
 {
@@ -158,7 +123,7 @@ static bool zwork_open_build_ledger(
     return allow_create && node_db_open(ndb, path);
 }
 
-static struct node_db *zwork_runtime_ledger(const char *db_path)
+struct node_db *zwork_runtime_ledger(const char *db_path)
 {
     struct node_db *owned = app_runtime_node_db();
     return db_path && app_runtime_node_db_handle_open(owned) &&
@@ -167,7 +132,7 @@ static struct node_db *zwork_runtime_ledger(const char *db_path)
 }
 #endif
 
-static int64_t zwork_int(
+int64_t zwork_int(
     const struct json_value *input, const char *key, int64_t fallback)
 {
     const struct json_value *value = input ? json_get(input, key) : NULL;
@@ -175,9 +140,9 @@ static int64_t zwork_int(
 }
 
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
-static void zwork_fail(struct zcl_command_reply *reply, const char *code,
-                       const char *phase, const char *detail, bool retryable,
-                       bool mutated)
+void zwork_fail(struct zcl_command_reply *reply, const char *code,
+                const char *phase, const char *detail, bool retryable,
+                bool mutated)
 {
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_INVALID, code, phase, retryable,
@@ -190,7 +155,7 @@ static void zwork_fail(struct zcl_command_reply *reply, const char *code,
  * Round-tripping through a fixed buffer both preserves the exact data object
  * and prevents a future inner handler from expanding this exception into an
  * unbounded second response surface. */
-static bool zwork_coordination_handoff(
+bool zwork_coordination_handoff(
     const struct zcl_command_reply *inner, const char *expected_workspace,
     struct zcl_command_reply *reply)
 {
@@ -267,8 +232,8 @@ static bool zwork_coordination_handoff(
         inner->next[0].reason);
 }
 
-static char *zwork_hex_alloc(const uint8_t *bytes, size_t len,
-                             const char *label)
+char *zwork_hex_alloc(const uint8_t *bytes, size_t len,
+                      const char *label)
 {
     if (!bytes || len > (SIZE_MAX - 1u) / 2u) return NULL;
     char *hex = zcl_malloc(len * 2u + 1u, label);
@@ -276,53 +241,7 @@ static char *zwork_hex_alloc(const uint8_t *bytes, size_t len,
     return hex;
 }
 
-/* Project the exact, already-canonical proof-set members. Missing or corrupt
- * CAS bytes stay unavailable; this reader never reconstructs or stores a
- * substitute authority. */
-static bool zwork_proof_receipt_roots(
-    const char *workspace, const char *proof_set_hex,
-    struct json_value *roots_json, bool *available)
-{
-    if (!roots_json || !available) return false;
-    json_init(roots_json);
-    json_set_array(roots_json);
-    *available = false;
-    uint8_t expected[32];
-    if (!workspace || !proof_set_hex ||
-        !zcl_hex_decode_lower(proof_set_hex, expected, 32))
-        return true;
-    uint8_t (*roots)[32] = zcl_malloc(
-        sizeof(*roots) * VCS_ZCODE_PROOF_SET_MAX_RECEIPTS,
-        "zcode.work.proof_receipt_roots");
-    if (!roots) return false;
-    uint8_t *wire = NULL, checked[32];
-    size_t wire_len = 0, count = 0;
-    bool exact = vcs_object_load_raw(
-            workspace, expected, &wire, &wire_len) == 0 &&
-        vcs_zcode_proof_set_parse(
-            wire, wire_len, roots, VCS_ZCODE_PROOF_SET_MAX_RECEIPTS,
-            &count) == VCS_ZCODE_DEV_OK &&
-        vcs_zcode_proof_set_root(
-            (const uint8_t (*)[32])roots, count, checked) ==
-            VCS_ZCODE_DEV_OK &&
-        memcmp(expected, checked, 32) == 0;
-    free(wire);
-    bool ok = true;
-    for (size_t i = 0; exact && ok && i < count; i++) {
-        char hex[65];
-        struct json_value value;
-        zcl_hex_encode(roots[i], 32, hex);
-        json_init(&value);
-        json_set_str(&value, hex);
-        ok = json_push_back(roots_json, &value);
-        json_free(&value);
-    }
-    free(roots);
-    if (exact && ok) *available = true;
-    return ok;
-}
-
-static bool zwork_bind_accepted_publication(
+bool zwork_bind_accepted_publication(
     const char *workspace, const struct vcs_zcode_task_index_entry *entry,
     const struct zcl_command_reply *accepted_reply,
     char candidate_workspace[ZWORK_PATH_MAX],
@@ -403,8 +322,8 @@ static bool zwork_recipe_path(const struct vcs_package_recipe *recipe,
     return false;
 }
 
-static bool zwork_scopes(const struct vcs_package_prepared *prepared,
-                         bool include_package_metadata, char out[1024])
+bool zwork_scopes(const struct vcs_package_prepared *prepared,
+                  bool include_package_metadata, char out[1024])
 {
     out[0] = '\0';
     const struct vcs_package_recipe_strings *lists[] = {
@@ -423,7 +342,7 @@ static bool zwork_scopes(const struct vcs_package_prepared *prepared,
     return out[0] != '\0';
 }
 
-static uint64_t zwork_source_bytes(
+uint64_t zwork_source_bytes(
     const struct vcs_package_prepared *prepared)
 {
     uint64_t total = 0;
@@ -438,7 +357,7 @@ static uint64_t zwork_source_bytes(
 }
 
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
-static bool zwork_regular_package_config(const char *workspace)
+bool zwork_regular_package_config(const char *workspace)
 {
     char path[ZWORK_PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", workspace,
@@ -452,9 +371,9 @@ static bool zwork_regular_package_config(const char *workspace)
     return regular;
 }
 
-static bool zwork_prepare(const char *workspace,
-                          struct vcs_package_prepared *prepared,
-                          char *detail, size_t detail_cap)
+bool zwork_prepare(const char *workspace,
+                   struct vcs_package_prepared *prepared,
+                   char *detail, size_t detail_cap)
 {
     static const uint8_t pubkey[33] = {
         0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb,
@@ -471,8 +390,8 @@ static bool zwork_prepare(const char *workspace,
            VCS_PACKAGE_PREPARE_OK;
 }
 
-static bool zwork_read_bounded_regular(const char *path, size_t maximum,
-                                       uint8_t **out, size_t *out_len)
+bool zwork_read_bounded_regular(const char *path, size_t maximum,
+                                uint8_t **out, size_t *out_len)
 {
     if (!path || !out || !out_len || maximum == 0) {
         LOG_ERROR(ZWORK_LOG, "reuse read received invalid arguments");
@@ -512,7 +431,7 @@ static bool zwork_read_bounded_regular(const char *path, size_t maximum,
     bytes[len] = 0; *out = bytes; *out_len = len; return true;
 }
 
-static bool zwork_reuse_load_facts(
+bool zwork_reuse_load_facts(
     const char *zcode_dir, const struct vcs_package_index_entry *entry,
     struct vcs_package_recipe *recipe)
 {
@@ -577,8 +496,8 @@ static bool zwork_reuse_load_facts(
     return ok;
 }
 
-static bool zwork_reuse_api_add(struct zwork_reuse_candidate *candidate,
-                                const char *api, size_t len)
+bool zwork_reuse_api_add(struct zwork_reuse_candidate *candidate,
+                         const char *api, size_t len)
 {
     if (!candidate || !api || len == 0 ||
         len >= ZWORK_REUSE_API_TEXT_MAX ||
@@ -637,7 +556,7 @@ static bool zwork_reuse_output_is_header(const char *path)
            strcmp(path + len - 2u, ".h") == 0;
 }
 
-static void zwork_reuse_installed(
+void zwork_reuse_installed(
     const char *datadir, const char *zcode_dir,
     const struct vcs_package_index_entry *entry,
     struct zwork_reuse_candidate *candidate)
@@ -693,8 +612,8 @@ static void zwork_reuse_installed(
     }
 }
 
-static bool zwork_lock_has_root(const struct vcs_package_lock *lock,
-                                const char *root_hex)
+bool zwork_lock_has_root(const struct vcs_package_lock *lock,
+                         const char *root_hex)
 {
     char node_hex[65];
     if (!lock || !root_hex) return false;
@@ -706,7 +625,7 @@ static bool zwork_lock_has_root(const struct vcs_package_lock *lock,
     return false;
 }
 
-static const char *zwork_reuse_datadir(
+const char *zwork_reuse_datadir(
     const struct zcl_command_request *request)
 {
     const char *datadir = zwork_str(request->input, "datadir");
@@ -715,7 +634,7 @@ static const char *zwork_reuse_datadir(
     return datadir && datadir[0] ? datadir : NULL;
 }
 
-static bool zwork_use_next_input(
+bool zwork_use_next_input(
     const struct zcl_command_request *request, const char *package_ref,
     struct json_value *next_input)
 {
@@ -773,7 +692,7 @@ static bool zwork_lock_insert(
     return true;
 }
 
-static bool zwork_compose_selected_lock(
+bool zwork_compose_selected_lock(
     struct vcs_package_prepared *prepared,
     const struct vcs_package_index *index,
     const struct zwork_reuse_candidate *candidates,
@@ -866,7 +785,7 @@ static bool zwork_reuse_render_unavailable(const char *license,
  * equal sequences use its deterministic publisher/release ordering.  Reuse
  * may hand that root to zcode.use only when the displayed index row is the
  * exact envelope that the lifecycle will resolve again. */
-static bool zwork_reuse_is_lifecycle_release(
+bool zwork_reuse_is_lifecycle_release(
     const struct vcs_package_index *index,
     const struct vcs_package_index_entry *candidate)
 {
@@ -893,7 +812,7 @@ static bool zwork_reuse_is_lifecycle_release(
  * package facts are already verified by the local index.  An ANNOUNCE is not
  * package metadata and therefore never creates a candidate or changes
  * compatibility; it only orders otherwise-equal verified candidates. */
-static void zwork_peer_inventory_apply(
+void zwork_peer_inventory_apply(
     struct zwork_reuse_candidate *candidates, size_t candidate_count,
     struct zwork_peer_inventory *inventory)
 {
@@ -980,7 +899,7 @@ static void zwork_peer_inventory_apply(
     json_free(&board);
 }
 
-static bool zwork_reuse_render(
+bool zwork_reuse_render(
     const struct zcl_command_request *request, const char *goal,
     const char *license,
     struct vcs_package_prepared *prepared, struct json_value *plan_json,
@@ -1306,10 +1225,10 @@ static bool zwork_render_selection(
                              selection->service_generation)));
 }
 
-static bool zwork_add_next(struct zcl_command_reply *reply,
-                           const char *command,
-                           const struct json_value *input,
-                           const char *reason)
+bool zwork_add_next(struct zcl_command_reply *reply,
+                    const char *command,
+                    const struct json_value *input,
+                    const char *reason)
 {
     char wire[sizeof(reply->next[0].input_json)];
     size_t n = input ? json_write(input, wire, sizeof(wire)) : 0;
@@ -1650,7 +1569,7 @@ void zcl_native_handle_zcode_work_start(
                    false, true);
 }
 
-static const struct vcs_zcode_task_index_entry *zwork_resolve(
+const struct vcs_zcode_task_index_entry *zwork_resolve(
     const struct vcs_zcode_task_index *index, const char *work, bool *ambiguous)
 {
     *ambiguous = false;
@@ -1681,317 +1600,6 @@ static const struct vcs_zcode_task_index_entry *zwork_resolve(
         match = at;
     }
     return match;
-}
-
-static char *zwork_load_goal(const char *workspace, const char *root_hex)
-{
-    uint8_t root[32], check[32], *bytes = NULL;
-    size_t len = 0;
-    if (!zcl_hex_decode_lower(root_hex, root, 32) ||
-        vcs_object_load_raw(workspace, root, &bytes, &len) != 0 ||
-        len == 0 || len > 4096 || memchr(bytes, '\0', len)) {
-        free(bytes); return NULL;
-    }
-    sha3_256(bytes, len, check);
-    if (memcmp(root, check, 32) != 0) { free(bytes); return NULL; }
-    char *goal = zcl_malloc(len + 1u, "zcode.work.goal");
-    if (!goal) { free(bytes); return NULL; }
-    memcpy(goal, bytes, len); goal[len] = '\0'; free(bytes);
-    return goal;
-}
-
-static int zwork_line_hash_compare(const void *left, const void *right)
-{
-    return memcmp(left, right, 32);
-}
-
-static bool zwork_line_hashes(const uint8_t *bytes, size_t len,
-                              uint8_t **out, size_t *count_out,
-                              bool *text_out)
-{
-    *out = NULL; *count_out = 0; *text_out = false;
-    if (len > 0 && (!bytes || memchr(bytes, '\0', len))) return true;
-    size_t count = 0;
-    for (size_t i = 0; i < len; i++)
-        if (bytes[i] == '\n') count++;
-    if (len > 0 && bytes[len - 1u] != '\n') count++;
-    if (count > ZWORK_LINE_COUNT_MAX) return true;
-    uint8_t *hashes = count > 0
-        ? zcl_malloc(count * 32u, "zcode.work.line_hashes") : NULL;
-    if (count > 0 && !hashes) return false;
-    size_t start = 0, at = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (bytes[i] != '\n') continue;
-        sha3_256(bytes + start, i + 1u - start, hashes + at++ * 32u);
-        start = i + 1u;
-    }
-    if (start < len)
-        sha3_256(bytes + start, len - start, hashes + at++ * 32u);
-    if (at != count) { free(hashes); return false; }
-    if (count > 1)
-        qsort(hashes, count, 32u, zwork_line_hash_compare);
-    *out = hashes; *count_out = count; *text_out = true;
-    return true;
-}
-
-static bool zwork_blob(const char *workspace, const uint8_t root[32],
-                       uint8_t **bytes, size_t *len)
-{
-    return vcs_object_get(workspace, root, VCS_TAG_BLOB, bytes, len) == 0;
-}
-
-static bool zwork_line_delta(const char *workspace,
-                             const struct vcs_zcode_patch_change_v1 *change,
-                             uint64_t *added, uint64_t *deleted,
-                             bool *exact)
-{
-    uint8_t *old_bytes = NULL, *new_bytes = NULL;
-    size_t old_len = 0, new_len = 0;
-    bool have_old = change->kind != VCS_DIFF_ADDED;
-    bool have_new = change->kind != VCS_DIFF_REMOVED;
-    if ((have_old && !zwork_blob(workspace, change->old_blob,
-                                 &old_bytes, &old_len)) ||
-        (have_new && !zwork_blob(workspace, change->new_blob,
-                                 &new_bytes, &new_len))) {
-        free(new_bytes); free(old_bytes); return false;
-    }
-    uint8_t *old_hashes = NULL, *new_hashes = NULL;
-    size_t old_count = 0, new_count = 0;
-    bool old_text = true, new_text = true;
-    bool ok = (!have_old || zwork_line_hashes(
-                   old_bytes, old_len, &old_hashes, &old_count, &old_text)) &&
-        (!have_new || zwork_line_hashes(
-                   new_bytes, new_len, &new_hashes, &new_count, &new_text));
-    free(new_bytes); free(old_bytes);
-    if (!ok) { free(new_hashes); free(old_hashes); return false; }
-    if (!old_text || !new_text) {
-        *exact = false; free(new_hashes); free(old_hashes); return true;
-    }
-    size_t oi = 0, ni = 0, common = 0;
-    while (oi < old_count && ni < new_count) {
-        int cmp = memcmp(old_hashes + oi * 32u, new_hashes + ni * 32u, 32u);
-        if (cmp < 0) oi++;
-        else if (cmp > 0) ni++;
-        else { common++; oi++; ni++; }
-    }
-    *deleted += old_count - common;
-    *added += new_count - common;
-    free(new_hashes); free(old_hashes); return true;
-}
-
-static bool zwork_recipe_load(const char *workspace, const char *root_hex,
-                              struct vcs_package_recipe *recipe)
-{
-    uint8_t root[32], checked[32], *wire = NULL;
-    size_t len = 0;
-    bool ok = zcl_hex_decode_lower(root_hex, root, sizeof(root)) &&
-        vcs_object_load_raw_bounded(workspace, root,
-                                    VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES,
-                                    &wire, &len) == 0 &&
-        vcs_package_recipe_parse(wire, len, recipe) == VCS_PACKAGE_RECIPE_OK &&
-        vcs_package_recipe_root(recipe, checked) == VCS_PACKAGE_RECIPE_OK &&
-        memcmp(root, checked, sizeof(root)) == 0;
-    free(wire); return ok;
-}
-
-static bool zwork_is_public_header(const struct vcs_package_recipe *recipe,
-                                   const char *path)
-{
-    for (size_t i = 0; i < recipe->public_headers.count; i++)
-        if (strcmp(recipe->public_headers.items[i], path) == 0) return true;
-    return false;
-}
-
-static bool zwork_patch_summary_load(
-    const char *workspace, const struct vcs_zcode_task_index_entry *entry,
-    struct zwork_patch_summary *out)
-{
-    memset(out, 0, sizeof(*out));
-    vcs_zcode_patch_init(&out->patch);
-    out->line_counts_exact = true;
-    if (!entry->latest_patch_root_hex[0]) return true;
-    uint8_t root[32], checked[32], *wire = NULL;
-    size_t len = 0;
-    bool ok = zcl_hex_decode_lower(entry->latest_patch_root_hex, root,
-                                   sizeof(root)) &&
-        vcs_object_load_raw_bounded(workspace, root,
-                                    VCS_ZCODE_TASK_MAX_PATCH_BYTES,
-                                    &wire, &len) == 0 &&
-        vcs_zcode_patch_parse(wire, len, &out->patch) == VCS_ZCODE_PATCH_OK &&
-        vcs_zcode_patch_root(&out->patch, checked) == VCS_ZCODE_PATCH_OK &&
-        memcmp(root, checked, sizeof(root)) == 0;
-    free(wire);
-    struct vcs_package_recipe recipe;
-    vcs_package_recipe_init(&recipe);
-    ok = ok && zwork_recipe_load(workspace, entry->acceptance_tests_root_hex,
-                                 &recipe);
-    if (!ok) {
-        vcs_package_recipe_free(&recipe);
-        vcs_zcode_patch_free(&out->patch);
-        return false;
-    }
-    for (size_t i = 0; i < out->patch.count && ok; i++) {
-        const struct vcs_zcode_patch_change_v1 *change =
-            &out->patch.changes[i];
-        ok = zwork_line_delta(workspace, change, &out->added_lines,
-                              &out->deleted_lines,
-                              &out->line_counts_exact);
-        if (zwork_is_public_header(&recipe, change->path))
-            out->public_api_changes++;
-    }
-    vcs_package_recipe_free(&recipe);
-    if (!ok) vcs_zcode_patch_free(&out->patch);
-    return ok;
-}
-
-static bool zwork_policy_load(
-    const char *workspace, const char *root_hex,
-    struct vcs_zcode_proof_policy_v1 *policy)
-{
-    uint8_t root[32], checked[32], *wire = NULL;
-    size_t wire_len = 0;
-    bool ok = policy && zcl_hex_decode_lower(root_hex, root, 32) &&
-        vcs_object_load_raw_bounded(
-            workspace, root, VCS_ZCODE_PROOF_POLICY_WIRE_BYTES,
-            &wire, &wire_len) == 0 &&
-        vcs_zcode_proof_policy_parse(wire, wire_len, policy) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_zcode_proof_policy_root(policy, checked) == VCS_ZCODE_DEV_OK &&
-        memcmp(root, checked, sizeof(root)) == 0;
-    free(wire);
-    return ok;
-}
-
-/* Human status is a projection only. Re-evaluate the exact action and receipt
- * bytes without storing a proof set or promoting receipt trust. Before the
- * first receipt exists the task index cannot name the action, so the durable
- * proof chain (keyed by task and candidate roots) supplies both the action
- * identity and the in-flight reading of CANDIDATE_ADMITTED — the same fact
- * zcode.work.run classifies. */
-static void zwork_proof_snapshot_read(
-    const char *workspace, const char *task_root, const char *action_id,
-    const char *candidate_root, const char *proof_datadir, int64_t now,
-    struct zwork_proof_snapshot *out)
-{
-    memset(out, 0, sizeof(*out));
-    bool action_known = action_id && strlen(action_id) == 64u;
-    bool candidate_known = candidate_root && strlen(candidate_root) == 64u;
-    if (!workspace || !task_root || strlen(task_root) != 64u ||
-        (!action_known && !candidate_known))
-        return;
-    char resolved_datadir[ZWORK_PATH_MAX], db_path[ZWORK_PATH_MAX];
-    bool explicit_datadir = proof_datadir && proof_datadir[0];
-    int n = explicit_datadir
-        ? (platform_directory_canonical_real(
-               proof_datadir, resolved_datadir, sizeof(resolved_datadir))
-            ? snprintf(db_path, sizeof(db_path), "%s/node.db",
-                       resolved_datadir) : -1)
-        : (zwork_task_path(resolved_datadir, task_root, "/zbuild")
-            ? snprintf(db_path, sizeof(db_path), "%s/node.db",
-                       resolved_datadir) : -1);
-    struct platform_positioned_file db_file;
-    platform_positioned_file_init(&db_file);
-    bool db_present = n > 0 && (size_t)n < sizeof(db_path) &&
-        platform_positioned_file_open(&db_file, db_path);
-    platform_positioned_file_close(&db_file);
-    if (!db_present)
-        return;
-    struct node_db local_ndb = {0};
-    struct node_db *ndb = zwork_runtime_ledger(db_path);
-    bool owned = ndb != NULL;
-    if (!owned) ndb = &local_ndb;
-    if (!owned && !node_db_open_existing_runtime(
-            ndb, db_path, "zcode.work.status.proof"))
-        return;
-    char action[BUILD_PROOF_EVENT_ROOT_HEX + 1] = {0};
-    if (action_known)
-        (void)snprintf(action, sizeof(action), "%s", action_id);
-    struct db_build_proof_event events[64];
-    int event_count = db_build_proof_events_for_task(
-        ndb, task_root, events, sizeof(events) / sizeof(events[0]));
-    const struct db_build_proof_event *latest = NULL;
-    bool outstanding = false;
-    for (int i = 0; i < event_count; i++) {
-        if (candidate_known &&
-            strcmp(events[i].candidate_root_sha3, candidate_root) != 0)
-            continue;
-        if (!events[i].state[0])
-            continue;
-        latest = &events[i];
-        if (strcmp(events[i].state, "SUPERSEDED") != 0)
-            outstanding = true;
-    }
-    if (latest) {
-        (void)snprintf(out->async_proof_state,
-                       sizeof(out->async_proof_state), "%s", latest->state);
-        out->async_proof_outstanding = outstanding;
-        if (!action[0] && outstanding)
-            (void)snprintf(action, sizeof(action), "%s", latest->action_id);
-    }
-    out->ledger_supervised = explicit_datadir || owned;
-    struct zcl_result result = action[0]
-        ? build_fabric_proof_evaluate_readonly(ndb, workspace, action, now,
-                                               &out->facts)
-        : ZCL_ERR(-1, "no action identity is bound to this task yet");
-    /* A later independently signed display receipt may name an action that
-     * is not in this operator's ledger. It stays visible in the task index,
-     * but cannot redirect the proof snapshot away from the durable proof
-     * event chain. */
-    if (!result.ok || !out->facts.policy_satisfied) {
-        for (int i = event_count - 1; i >= 0; i--) {
-            if (candidate_known && strcmp(
-                    events[i].candidate_root_sha3, candidate_root) != 0)
-                continue;
-            struct build_fabric_proof_evaluation candidate_facts = {0};
-            struct zcl_result candidate_result =
-                build_fabric_proof_evaluate_readonly(
-                    ndb, workspace, events[i].action_id, now,
-                    &candidate_facts);
-            if (!candidate_result.ok || !candidate_facts.policy_satisfied)
-                continue;
-            (void)snprintf(action, sizeof(action), "%s",
-                           events[i].action_id);
-            out->facts = candidate_facts;
-            result = candidate_result;
-            break;
-        }
-    }
-    if (action[0])
-        (void)snprintf(out->action_root, sizeof(out->action_root), "%s",
-                       action);
-    if (!owned) node_db_close(ndb);
-    out->available = result.ok;
-}
-
-static bool zwork_proof_required(
-    const struct vcs_zcode_proof_policy_v1 *policy, uint32_t kind,
-    uint16_t minimum)
-{
-    return (policy->required_proofs & kind) != 0 || minimum > 0;
-}
-
-static bool zwork_confirmation_identity(
-    const struct vcs_zcode_task_index_entry *entry,
-    const struct zwork_proof_snapshot *proof, char identity[65])
-{
-    identity[0] = '\0';
-    if (!entry || !proof || !proof->available ||
-        !proof->facts.policy_satisfied ||
-        !proof->facts.proof_set_root_sha3[0])
-        return false;
-    uint8_t task[32], candidate[32], policy[32], proof_set[32], plan[32];
-    if (!zcl_hex_decode_lower(entry->task_root_hex, task, sizeof(task)) ||
-        !zcl_hex_decode_lower(entry->latest_candidate_root_hex, candidate,
-                              sizeof(candidate)) ||
-        !zcl_hex_decode_lower(entry->proof_policy_root_hex, policy,
-                              sizeof(policy)) ||
-        !zcl_hex_decode_lower(proof->facts.proof_set_root_sha3, proof_set,
-                              sizeof(proof_set)) ||
-        vcs_zcode_acceptance_plan_root(task, candidate, policy, proof_set,
-                                       plan) != VCS_ZCODE_DEV_OK)
-        return false;
-    zcl_hex_encode(plan, sizeof(plan), identity);
-    return true;
 }
 
 void zcl_native_handle_zcode_work_status(
