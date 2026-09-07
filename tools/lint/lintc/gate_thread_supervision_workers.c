@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
 
@@ -110,6 +111,40 @@ static int tsw_cov_case(int want, const char *msg, const char *const *assigns)
     return 0;
 }
 
+/* A present-but-unreadable regular file in the scan set must refuse the
+ * whole gate UNPROVEN exit 2, never silently pass off a hollow per-file
+ * scan — the ruling this fixup enforces in tss_scan_file
+ * (gate_thread_supervision_scan.c), matching the p9 index-extension
+ * precedent for the same failure mode. Cleanup (chmod back, unlink)
+ * always runs, even if an earlier step failed. */
+static int tsw_unreadable_case(void)
+{
+    const char *rel = "core/_thread_supervision_probe_tmp.c";
+    int rc = csr_write(rel,
+        "void thread_supervision_probe(void) {\n"
+        "    thread_registry_spawn(\"tsw_probe_unreadable\", 0, 0);\n"
+        "}\n");
+    if (rc == 0 && chmod(rel, 0) != 0)
+        rc = die("z23-lint: chmod failed: %s\n", rel);
+    static char sink[TSW_SINK];
+    int code = 0;
+    if (rc == 0)
+        rc = cic_invoke(k_tsw_gate, 1, sink, sizeof sink, &code);
+    if (chmod(rel, 0644) != 0 && rc == 0)
+        rc = die("z23-lint: chmod failed: %s\n", rel);
+    if (unlink(rel) != 0 && rc == 0)
+        rc = die("z23-lint: unlink failed: %s\n", rel);
+    if (rc != 0)
+        return rc;
+    if (code != 2 || !strstr(sink, "cannot be")) {
+        fprintf(stderr, "%s: SELFTEST FAILED — an unreadable scanned file "
+                "did not refuse UNPROVEN (wanted exit 2, got %d)\n",
+                k_tsw_name, code);
+        return 2;
+    }
+    return 0;
+}
+
 int check_thread_supervision_selftest(void)
 {
     static const char *const case1[] = {
@@ -139,9 +174,14 @@ int check_thread_supervision_selftest(void)
         rc = tsw_cov_case(1, "an allowance above the true shortfall was "
                              "silently tolerated", case3);
     if (rc == 0)
+        rc = tsw_snap_restore();
+    if (rc == 0)
+        rc = tsw_unreadable_case();
+    if (rc == 0)
         fputs("[check_thread_supervision] SELFTEST PASS (a full scan "
               "passes coverage, a scan short one declared root is UNPROVEN "
-              "exit 2, and an allowance above the true shortfall is a "
-              "stale-ratchet exit 1)\n", stdout);
+              "exit 2, an allowance above the true shortfall is a "
+              "stale-ratchet exit 1, and a present-but-unreadable scanned "
+              "file is UNPROVEN exit 2)\n", stdout);
     return rc;
 }
