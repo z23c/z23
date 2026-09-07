@@ -263,6 +263,8 @@ static const struct lint_gate k_gates[] = {
       check_package_capabilities_selftest },
     { "check-arm-symbol-single", check_arm_symbol_single_run,
       check_arm_symbol_single_selftest },
+    { "check-macos-acceptance", check_macos_acceptance_run,
+      check_macos_acceptance_selftest },
 };
 
 int main(int argc, char **argv)

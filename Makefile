@@ -5442,6 +5442,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_arm_symbol_single.c \
     tools/lint/lintc/gate_arm_symbol_single_analyzer.c \
     tools/lint/lintc/gate_arm_symbol_single_selftest.c \
+    tools/lint/lintc/gate_macos_acceptance.c \
+    tools/lint/lintc/gate_macos_acceptance_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12334,7 +12336,7 @@ check-platform-header-guards:
 # test group. The native leg (`make macos-acceptance`) needs a darwin-arm64
 # host and is reported UNOBSERVED here, never as a pass.
 .PHONY: check-macos-acceptance
-check-macos-acceptance:
+check-macos-acceptance: $(LINTC_TOOL)
 	@./tools/lint/check_macos_acceptance.sh --self-test && ./tools/lint/check_macos_acceptance.sh
 
 
