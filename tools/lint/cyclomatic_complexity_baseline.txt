@@ -255,7 +255,6 @@ cognition/modules/session/src/agent_broker_status.c:agent_broker_write_status:21
 cognition/modules/session/src/agent_broker_vocab.c:mvap_status_from_grant_verdict:20
 cognition/modules/session/src/fleet_board_proto.c:fleet_board_post_decode:19
 cognition/modules/session/src/fleet_board_proto.c:fleet_board_post_validate:26
-cognition/modules/session/src/fleet_board_proto.c:fleet_board_result_string:19
 cognition/modules/session/src/mesh_capability_proto.c:proposal_shape:23
 cognition/modules/session/src/mesh_private_object_proto.c:offer_shape:27
 cognition/modules/session/src/mesh_private_object_stage.c:stage_open_files:16
@@ -1596,7 +1595,6 @@ engine/composition/src/boot_endpoint_records.c:boot_endpoint_records_load:21
 engine/composition/src/boot_error.c:boot_error_report:20
 engine/composition/src/boot_export_consensus_bundle.c:boot_export_consensus_bundle:22
 engine/composition/src/boot_fast_restart.c:boot_bg_quick_check_entry:17
-engine/composition/src/boot_fleet_board.c:boot_fleet_board_frame:16
 engine/composition/src/boot_fleet_board_rpc.c:fb_compose:21
 engine/composition/src/boot_flight_recorder.c:boot_flight_recorder_dump_state_json:17
 engine/composition/src/boot_frontend_services.c:boot_https_explorer_start:27
@@ -2084,7 +2082,7 @@ engine/models/src/database_owner_lease.c:node_db_owner_lease_rebind:16
 engine/models/src/database_schema_preflight.c:inspect_schema:19
 engine/models/src/database_schema_preflight.c:node_db_schema_preflight_existing:24
 engine/models/src/fleet_board_post.c:db_fleet_board_ids_before:18
-engine/models/src/fleet_board_post.c:db_fleet_board_post_ingest:19
+engine/models/src/fleet_board_post.c:db_fleet_board_post_ingest:17
 engine/models/src/mesh_capability_grant.c:capability_immutable_equal:19
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_complete:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_insert:17
@@ -2138,8 +2136,7 @@ engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_append:27
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_experiment_stats:42
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_open:17
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_query:30
-engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_replicate:32
-engine/modules/fleetledger/src/fleet_ledger_catalog.c:zcl_fleet_status_label:19
+engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_replicate:29
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_decode:20
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_validate:36
 engine/modules/framework/src/app_checkpoint.c:validate_and_digest_chunks:17

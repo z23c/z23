@@ -20,30 +20,43 @@
 
 #include <string.h>
 
+/* One stable token per status, as a table rather than a switch: this
+ * vocabulary only ever grows, and a switch grew a branch per value. The
+ * static_assert keeps exactly the safety -Wswitch gave — a value appended
+ * to the enum with no row here leaves the array the size it already was,
+ * and the build stops. */
+static const char *const k_status_labels[] = {
+    [ZCL_FLEET_OK]                 = "ok",
+    [ZCL_FLEET_ARGUMENT]           = "ledger_argument",
+    [ZCL_FLEET_IO]                 = "ledger_io",
+    [ZCL_FLEET_MALFORMED]          = "ledger_row_malformed",
+    [ZCL_FLEET_KIND_UNKNOWN]       = "ledger_kind_unknown",
+    [ZCL_FLEET_KIND_NOT_WRITABLE]  = "ledger_kind_not_writable",
+    [ZCL_FLEET_SUBJECT_UNKNOWN]    = "ledger_subject_unknown",
+    [ZCL_FLEET_VITAL_UNKNOWN]      = "vital_unknown",
+    [ZCL_FLEET_PAIR_UNKNOWN]       = "ledger_pair_unknown",
+    [ZCL_FLEET_CHAIN_BROKEN]       = "ledger_chain_broken",
+    [ZCL_FLEET_SIG_INVALID]        = "ledger_sig_invalid",
+    [ZCL_FLEET_PEER_UNPAIRED]      = "ledger_peer_unpaired",
+    [ZCL_FLEET_NOT_OWNER]          = "ledger_not_owner",
+    [ZCL_FLEET_DELEGATION_EXPIRED] = "ledger_delegation_expired",
+    [ZCL_FLEET_SEQUENCE]           = "ledger_sequence",
+    [ZCL_FLEET_WINDOW]             = "ledger_window_exceeded",
+    [ZCL_FLEET_FULL]               = "ledger_full",
+    [ZCL_FLEET_EXPERIMENT_ENUM]    = "experiment_enum",
+    [ZCL_FLEET_ROLE_REFUSED]       = "ledger_role_refused",
+};
+static_assert(sizeof k_status_labels / sizeof k_status_labels[0] ==
+                  (size_t)ZCL_FLEET_ROLE_REFUSED + 1u,
+              "every zcl_fleet_status value needs its own stable token");
+
 const char *zcl_fleet_status_label(enum zcl_fleet_status s)
 {
-    switch (s) {
-    case ZCL_FLEET_OK:                return "ok";
-    case ZCL_FLEET_ARGUMENT:          return "ledger_argument";
-    case ZCL_FLEET_IO:                return "ledger_io";
-    case ZCL_FLEET_MALFORMED:         return "ledger_row_malformed";
-    case ZCL_FLEET_KIND_UNKNOWN:      return "ledger_kind_unknown";
-    case ZCL_FLEET_KIND_NOT_WRITABLE: return "ledger_kind_not_writable";
-    case ZCL_FLEET_SUBJECT_UNKNOWN:   return "ledger_subject_unknown";
-    case ZCL_FLEET_VITAL_UNKNOWN:     return "vital_unknown";
-    case ZCL_FLEET_PAIR_UNKNOWN:      return "ledger_pair_unknown";
-    case ZCL_FLEET_CHAIN_BROKEN:      return "ledger_chain_broken";
-    case ZCL_FLEET_SIG_INVALID:       return "ledger_sig_invalid";
-    case ZCL_FLEET_PEER_UNPAIRED:     return "ledger_peer_unpaired";
-    case ZCL_FLEET_NOT_OWNER:         return "ledger_not_owner";
-    case ZCL_FLEET_DELEGATION_EXPIRED:
-        return "ledger_delegation_expired";
-    case ZCL_FLEET_SEQUENCE:          return "ledger_sequence";
-    case ZCL_FLEET_WINDOW:            return "ledger_window_exceeded";
-    case ZCL_FLEET_FULL:              return "ledger_full";
-    case ZCL_FLEET_EXPERIMENT_ENUM:   return "experiment_enum";
-    }
-    return "ledger_argument";
+    size_t i = (size_t)s;
+    if (i >= sizeof k_status_labels / sizeof k_status_labels[0] ||
+        !k_status_labels[i])
+        return "ledger_argument";
+    return k_status_labels[i];
 }
 
 /* ── kinds ───────────────────────────────────────────────────────────── */

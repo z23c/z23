@@ -22,6 +22,7 @@
 
 #include "base/hex.h"
 #include "fleet_enrol.h"
+#include "fleet_roles.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/clock.h"
@@ -324,6 +325,30 @@ static void fe_admit_bridge(struct zcl_command_reply *reply,
                                  : "a line for this box was already present");
 }
 
+/* Admitting a machine IS the operator's decision to trust it, so the role
+ * that decision implies is minted here rather than left as a second command
+ * the owner has to remember. Idempotent: re-admitting a box that already
+ * holds `worker` writes no second row.
+ *
+ * A refusal is reported, never fatal. `fleet admit` is deliberately
+ * node-free — the box being admitted has no datadir yet and neither may the
+ * manager — so a manager with no operator identity still enrols the machine
+ * and says plainly that the grant is outstanding. */
+static void fe_admit_role(struct zcl_command_reply *reply,
+                          const uint8_t box_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                          int64_t now)
+{
+    const char *why = NULL;
+    const char *datadir = zcl_native_command_datadir();
+    bool granted = datadir &&
+                   zcl_fleet_roles_grant_worker(datadir, box_pubkey, now, &why);
+    (void)json_push_kv_bool(&reply->data, "worker_role_granted", granted);
+    if (!granted)
+        (void)json_push_kv_str(&reply->data, "worker_role_why",
+                               why ? why : "this box has no datadir to keep a "
+                                           "role store in");
+}
+
 static void fe_admit(const struct zcl_command_request *request,
                      struct zcl_command_reply *reply)
 {
@@ -383,6 +408,7 @@ static void fe_admit(const struct zcl_command_request *request,
     (void)json_push_kv_int(&reply->data, "relay_port", port);
     (void)json_push_kv_int(&reply->data, "enrolled_at", now);
     (void)json_push_kv_bool(&reply->data, "re_enrolled", scan.same_box);
+    fe_admit_role(reply, receipt.box_pubkey, now);
     fe_admit_bridge(reply, &receipt, port,
                     !(bridge && strcmp(bridge, "no") == 0));
     (void)zcl_command_reply_add_next(reply, "fleet.machines", "{}",

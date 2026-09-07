@@ -340,6 +340,10 @@ static void fb_op_status(struct node_db *ndb, struct json_value *result,
     json_push_kv_bool(result, "chain_intact",
                       db_fleet_board_chain_verify(ndb, &checked));
     json_push_kv_int(result, "chain_checked", checked);
+    /* Verified posts this node refused because their author holds no role
+     * here. Invisible in the counts above, because they were never stored. */
+    json_push_kv_int(result, "role_refused",
+                     (int64_t)boot_fleet_board_role_refused_count());
     /* Status is read-only: inspecting the board must never create a signing
      * identity or copy private key material into the RPC path. */
     uint8_t pubkey[32];

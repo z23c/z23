@@ -131,6 +131,12 @@ enum fleet_board_result {
     FLEET_BOARD_ERR_CAPACITY,
     FLEET_BOARD_ERR_ID,
     FLEET_BOARD_ERR_SIGNATURE,
+    /* The signature verifies and the key that made it holds no role on this
+     * node granting `fleet.board.post` for this post's kind. Distinct from
+     * ERR_SIGNATURE on purpose: nothing is wrong with the bytes, and the
+     * peer that relayed them did nothing wrong either — this box has simply
+     * never decided that this host key may write here. */
+    FLEET_BOARD_ERR_ROLE,
 };
 
 const char *fleet_board_result_string(enum fleet_board_result r);

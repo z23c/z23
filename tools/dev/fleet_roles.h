@@ -144,4 +144,43 @@ bool zcl_role_check(const struct zcl_role_store *store,
                     const char *leaf, const char *kind, char *why,
                     size_t why_cap);
 
+/* ── enforcement (tools/dev/fleet_roles_gate.c) ──────────────────────── */
+
+/* Install this box's checker into the engine's role-check seam
+ * (platform/modules/base/include/base/fleet_role_check.h) and run the
+ * one-time enrolment bootstrap below. Call ONCE at node start, with the
+ * node's datadir: until it returns, both ingress points refuse every
+ * foreign-signed byte, which is the correct state for a process that has
+ * not yet been told where its grant store is.
+ *
+ * A box with no filed delegation gets the checker anyway — enforcement is
+ * never conditional — but no bootstrap, because minting a grant needs a
+ * key to sign it with. On such a box every foreign key is refused until an
+ * operator identity exists and `z23 fleet roles grant` can run. */
+void zcl_fleet_roles_enforcement_start(const char *datadir);
+
+/* Mint a signed `worker` grant for `pubkey` unless it already holds one.
+ * True when the key holds `worker` afterwards, whether this call minted it
+ * or found it. Idempotent, so an operator can re-admit a machine without
+ * writing a second row. `why` (optional) names the refusal. */
+bool zcl_fleet_roles_grant_worker(const char *datadir,
+                                  const uint8_t pubkey[32], int64_t now,
+                                  const char **why);
+
+/* Grant `worker` to every key in `keys` that does not already hold it, in
+ * one store open. Returns how many rows were minted (zero when they all
+ * held it already, which is what makes running this at every boot safe).
+ * The explicit key list is what makes this testable without a roster. */
+size_t zcl_fleet_roles_bootstrap_keys(const char *datadir,
+                                      const uint8_t (*keys)[32], size_t count,
+                                      int64_t now, const char **why);
+
+/* The same bootstrap over the keys this box has ENROLLED: every verified
+ * row of the machine roster (tools/dev/fleet_enrol.h). Admitting a machine
+ * already was the operator's decision to trust it, so a fleet that was
+ * working before roles existed keeps working after — without anybody
+ * having to grant a role they already granted by admitting the box. */
+size_t zcl_fleet_roles_bootstrap_enrolled(const char *datadir, int64_t now,
+                                          const char **why);
+
 #endif /* ZCL_FLEET_ROLES_H */

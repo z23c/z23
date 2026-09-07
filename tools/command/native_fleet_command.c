@@ -299,6 +299,10 @@ void zcl_native_handle_fleet_ledger_status(
                            (int64_t)boot_fleet_ledger_delegation_refused_count());
     (void)json_push_kv_int(&reply->data, "inbox_full",
                            (int64_t)boot_fleet_ledger_inbox_full_count());
+    /* Batches whose signer holds no role to write here. The answer to a
+     * number that keeps climbing is a grant, not a reconnection. */
+    (void)json_push_kv_int(&reply->data, "role_refused",
+                           (int64_t)boot_fleet_ledger_role_refused_count());
     (void)json_push_kv(&reply->data, "chains", &rows);
     json_free(&rows);
     reply->status = ZCL_COMMAND_STATUS_PASSED;

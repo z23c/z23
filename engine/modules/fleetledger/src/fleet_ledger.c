@@ -33,6 +33,7 @@
 
 #include "fleetledger/fleet_ledger.h"
 
+#include "base/fleet_role_check.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
@@ -843,6 +844,68 @@ enum zcl_fleet_status zcl_fleet_ledger_read_since(
     return status;
 }
 
+/* Does the key that signed this batch hold a role granting replication of
+ * this row's KIND on this box? Asked through the seam, so this module never
+ * learns where the grant store lives — and refused when nothing answers.
+ *
+ * `kinds_seen` remembers the kinds already allowed inside ONE batch. Every
+ * row in a batch carries the same signer (the caller has just proven that),
+ * so the only thing that varies is the kind, and the closed kind vocabulary
+ * is smaller than the bitmap. That turns a 64-row batch into at most one
+ * store lookup per distinct kind instead of one per row. */
+static bool replicate_role_allows(const uint8_t signer[ZCL_FLEET_ID_BYTES],
+                                  uint8_t kind, uint32_t *kinds_seen)
+{
+    uint32_t bit = kind < 32u ? (uint32_t)1u << kind : 0u;
+    if (bit && (*kinds_seen & bit))
+        return true;
+    char why[ZCL_FLEET_ROLE_WHY_MAX];
+    if (!zcl_fleet_role_allows(signer, ZCL_FLEET_LEAF_LEDGER_REPLICATE,
+                               zcl_fleet_kind_name(kind), why, sizeof why)) {
+        /* The reason names the key by fingerprint prefix and the leaf, and
+         * nothing about the rows: what a peer measured is the owner's
+         * private data and a log is not private. */
+        LOG_WARN("fleet.ledger", "%s", why);
+        return false;
+    }
+    *kinds_seen |= bit;
+    return true;
+}
+
+/* Everything about one decoded row that must hold before ANY byte of the
+ * batch is written, in the order that answers the cheapest question first.
+ * Three different refusals, because they are three different problems: a
+ * row claiming another machine is a peer writing outside its own ownership;
+ * a row signed by a key this peer's delegation does not delegate is a link
+ * carrying somebody else's authority; and a row from a key with no role is
+ * a key this box has simply never decided to accept writes from. */
+static enum zcl_fleet_status replicate_row_admissible(
+    const struct zcl_fleet_row *row,
+    const uint8_t peer_box_id[ZCL_FLEET_ID_BYTES],
+    const uint8_t peer_signer[ZCL_FLEET_ID_BYTES], uint32_t *kinds_seen)
+{
+    if (memcmp(row->box_id, peer_box_id, ZCL_FLEET_ID_BYTES) != 0)
+        return ZCL_FLEET_NOT_OWNER;
+    if (memcmp(row->signer, peer_signer, ZCL_FLEET_ID_BYTES) != 0)
+        return ZCL_FLEET_PEER_UNPAIRED;
+    if (!replicate_role_allows(row->signer, row->kind, kinds_seen))
+        return ZCL_FLEET_ROLE_REFUSED;
+    return ZCL_FLEET_OK;
+}
+
+/* Does this row continue the chain exactly where the last one left off, and
+ * is it signed? */
+static enum zcl_fleet_status replicate_row_links(
+    const struct zcl_fleet_row *row, uint64_t next_seq,
+    const uint8_t expect[ZCL_FLEET_HASH_BYTES])
+{
+    if (row->seq != next_seq)
+        return ZCL_FLEET_SEQUENCE;
+    if (memcmp(row->prev_hash, expect, ZCL_FLEET_HASH_BYTES) != 0)
+        return ZCL_FLEET_CHAIN_BROKEN;
+    return zcl_fleet_row_verify(row);
+}
+
 enum zcl_fleet_status zcl_fleet_ledger_replicate(
     struct zcl_fleet_ledger *ledger,
     const uint8_t peer_box_id[ZCL_FLEET_ID_BYTES],
@@ -870,6 +933,7 @@ enum zcl_fleet_status zcl_fleet_ledger_replicate(
     uint8_t expect[ZCL_FLEET_HASH_BYTES];
     memcpy(expect, box->head_hash, ZCL_FLEET_HASH_BYTES);
     uint64_t next_seq = box->last_seq + 1;
+    uint32_t kinds_seen = 0;
 
     while (offset < len) {
         if (count >= ZCL_FLEET_BATCH_MAX)
@@ -881,21 +945,13 @@ enum zcl_fleet_status zcl_fleet_ledger_replicate(
         if (st != ZCL_FLEET_OK)
             return st;
         offset += used;
-        /* Two different refusals, because they are two different problems.
-         * A row claiming another machine is a peer writing outside its own
-         * ownership; a row signed by a key this peer's delegation does not
-         * delegate is a link carrying somebody else's authority. */
-        if (memcmp(row.box_id, peer_box_id, ZCL_FLEET_ID_BYTES) != 0)
-            return ZCL_FLEET_NOT_OWNER;
-        if (memcmp(row.signer, peer_signer, ZCL_FLEET_ID_BYTES) != 0)
-            return ZCL_FLEET_PEER_UNPAIRED;
+        st = replicate_row_admissible(&row, peer_box_id, peer_signer,
+                                      &kinds_seen);
+        if (st != ZCL_FLEET_OK)
+            return st;
         if (row.seq < next_seq)
             continue; /* already held: a second pull is a no-op */
-        if (row.seq != next_seq)
-            return ZCL_FLEET_SEQUENCE;
-        if (memcmp(row.prev_hash, expect, ZCL_FLEET_HASH_BYTES) != 0)
-            return ZCL_FLEET_CHAIN_BROKEN;
-        st = zcl_fleet_row_verify(&row);
+        st = replicate_row_links(&row, next_seq, expect);
         if (st != ZCL_FLEET_OK)
             return st;
         uint8_t encoded[ZCL_FLEET_ROW_MAX_BYTES];

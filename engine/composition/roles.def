@@ -17,10 +17,19 @@
  *
  * `leaf_pattern_` is an exact `fleet.<a>.<b>` name from
  * engine/composition/commands/fleet.def and fleet_board.def, or such a name
- * with a trailing `*` matching any leaf under that prefix. `kinds_` is the
- * comma-separated closed vocabulary the grant additionally restricts when
- * the leaf is a board post (`fleet.board.post`); `"*"` means every kind the
- * leaf itself accepts. A leaf that is not a board post ignores `kinds_`. */
+ * with a trailing `*` matching any leaf under that prefix. Two leaves here
+ * are named by no command file, because they are not commands: they are the
+ * two places another machine's SIGNED BYTES enter this node.
+ * `fleet.ledger.replicate` is one row a peer replicates into this box's
+ * copy of its chain, and `fleet.board.post` is one gossiped board post.
+ * Both are checked at their ingress, not at a CLI leaf.
+ *
+ * `kinds_` is the comma-separated closed vocabulary the grant additionally
+ * restricts when the leaf carries a kind: the post kind for
+ * `fleet.board.post` (problem, need, offer, claim, result, note, wiki) and
+ * the ledger ROW kind for `fleet.ledger.replicate` (usage, task, attest,
+ * reward, vitals, experiment). `"*"` means every kind the leaf itself
+ * accepts, and a leaf that carries no kind ignores `kinds_`. */
 
 #ifndef Z23_ROLE
 #define Z23_ROLE(role_, why_)
@@ -29,8 +38,8 @@
 Z23_ROLE(operator, "everything on this node; this node's own key, implicit")
 Z23_ROLE(worker,
         "post board rows of kind note, result, claim, problem, need or "
-        "chat in fleet-private scope; write experiment predict/result "
-        "rows; read everything")
+        "chat in fleet-private scope; replicate its own ledger rows into "
+        "this box; write experiment predict/result rows; read everything")
 Z23_ROLE(observer, "read-only leaves")
 Z23_ROLE(landing,
         "the landing machine's key: post board results about trains, "
@@ -53,6 +62,12 @@ Z23_ROLE_GRANT(worker, "fleet.experiment.predict", "*")
 Z23_ROLE_GRANT(worker, "fleet.experiment.result", "*")
 Z23_ROLE_GRANT(worker, "fleet.experiment.stats", "*")
 Z23_ROLE_GRANT(worker, "fleet.ledger.status", "*")
+/* A worker is a machine that does work and reports it, so every ledger row
+ * kind it can write is a kind this box will take from it. `attest` and
+ * `reward` are in the vocabulary and no build writes them yet; naming them
+ * by wildcard rather than by list means the day one is written is not also
+ * the day replication silently stops. */
+Z23_ROLE_GRANT(worker, "fleet.ledger.replicate", "*")
 Z23_ROLE_GRANT(worker, "fleet.usage", "*")
 Z23_ROLE_GRANT(worker, "fleet.vitals.sample", "*")
 Z23_ROLE_GRANT(worker, "fleet.roles.check", "*")

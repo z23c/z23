@@ -15,6 +15,7 @@
 #include "config/boot_fleet_board.h"
 #include "config/boot_internal.h"
 #include "config/runtime.h"
+#include "base/fleet_role_check.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "models/database.h"
@@ -1494,6 +1495,12 @@ static int test_fleet_board_scope_store(void)
 int test_fleet_board(void)
 {
     int failures = 0;
+    /* Every ingest below is a post signed by a key this group invented, and
+     * ingest refuses a key with no role. This group is about the codec, the
+     * store and the gossip path, so the role gate is held open for it; the
+     * gate itself is proven in fleet_roles and fleet_role_enforcement, which
+     * uninstall this first and prove that an empty seam refuses. */
+    zcl_fleet_role_checker_install_permissive_for_testing();
     failures += test_fleet_board_codec();
     failures += test_fleet_board_bounds();
     failures += test_fleet_board_frames();
@@ -1513,5 +1520,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_peer_inventory_cursor();
     failures += test_fleet_board_scope_codec();
     failures += test_fleet_board_scope_store();
+    /* Leave the process as this group found it: the next group in the same
+     * binary must not inherit an open gate. */
+    zcl_fleet_role_checker_install(NULL);
     return failures;
 }

@@ -24,6 +24,8 @@
 
 #include "test/test_core.h"
 
+#include "base/fleet_role_check.h"
+
 #include "controllers/board_site_controller.h"
 
 #include "config/boot_internal.h"
@@ -84,6 +86,11 @@ static bool bs_has(const char *resp, const char *needle)
 int test_board_site(void)
 {
     int failures = 0;
+    /* The fixture store is filled by ingesting posts signed by keys this
+     * group invented, and ingest refuses a key with no role. This group is
+     * about what the /board pages render, so the role gate is held open for
+     * it and closed again below; the gate is proven elsewhere. */
+    zcl_fleet_role_checker_install_permissive_for_testing();
     TEST("board site: room pages render public posts and never fleet rows") {
         /* With no runtime bound, the mount answers a named 503 rather than
          * falling through into another route family. */
@@ -192,5 +199,6 @@ int test_board_site(void)
         node_db_close(&db);
         PASS();
     } _test_next:;
+    zcl_fleet_role_checker_install(NULL);
     return failures;
 }

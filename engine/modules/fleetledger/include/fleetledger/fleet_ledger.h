@@ -241,7 +241,13 @@ enum zcl_fleet_status {
     /* An experiment enum was missing, was `unknown`, or was not in that
      * field's closed vocabulary. Named so a caller can say which field
      * refused rather than collapsing it into a generic malformed row. */
-    ZCL_FLEET_EXPERIMENT_ENUM
+    ZCL_FLEET_EXPERIMENT_ENUM,
+    /* The signing key holds no role granting `fleet.ledger.replicate` for
+     * this row's kind on this box. Distinct from PEER_UNPAIRED: that key
+     * IS the one this link carries, and its signature IS good — this box
+     * has simply never decided that this key may write here. The answer is
+     * `z23 fleet roles grant`, never a reconnection. */
+    ZCL_FLEET_ROLE_REFUSED
 };
 
 /* "ok", "ledger_chain_broken", "ledger_sig_invalid", "ledger_peer_unpaired",
@@ -525,8 +531,16 @@ enum zcl_fleet_status zcl_fleet_ledger_read_since(
  * `ledger_peer_unpaired`: the key that signed it is not the online key this
  * box's delegation delegates, whatever the signature says.
  *
+ * The signer must also hold a ROLE granting `fleet.ledger.replicate` for
+ * each row's kind on this box, asked through base/fleet_role_check.h. A key
+ * with no such grant refuses the WHOLE batch as `ledger_role_refused`, and
+ * so does a process with no role checker installed: this box accepting a
+ * peer's signature is not the same act as this box deciding that peer may
+ * write here, and the second decision has no default-yes.
+ *
  * Rows at or below the replica's head are dropped as already held, which is
- * what makes a second pull a no-op rather than a refusal. */
+ * what makes a second pull a no-op rather than a refusal — but they are
+ * role-checked first, so a re-pull can never be a way past the gate. */
 enum zcl_fleet_status zcl_fleet_ledger_replicate(
     struct zcl_fleet_ledger *ledger,
     const uint8_t peer_box_id[ZCL_FLEET_ID_BYTES],

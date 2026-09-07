@@ -13,11 +13,17 @@
 #include "util/sync.h"
 #include "vcs/zcode_dht_identity.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
 static zcl_mutex_t s_lock;
 static bool s_lock_init;
+/* Posts refused because the host key that signed them holds no role on this
+ * node. Counted since this process started and reported by `fleet board
+ * status`: a number that climbs is the operator's cue to grant a role, and
+ * it is invisible in every other field there. */
+static _Atomic uint64_t s_role_refused;
 static struct boot_svc_ctx *s_svc;      /* borrowed; set by wire() */
 
 /* Per-peer rate-limit slots. A fixed table rather than a growing map: the
@@ -316,7 +322,17 @@ static void fleet_board_offend(struct msg_processor *mp, struct p2p_node *node,
 static bool fleet_board_ingest_refused_locally(enum fleet_board_result result)
 {
     return result == FLEET_BOARD_ERR_CAPACITY ||
-           result == FLEET_BOARD_ERR_ARGS;
+           result == FLEET_BOARD_ERR_ARGS ||
+           /* A role is THIS box's decision about the author's key. The peer
+            * that relayed the post did nothing wrong and often is not even
+            * the author, so scoring it for our own policy would ban the
+            * relays a fleet depends on. */
+           result == FLEET_BOARD_ERR_ROLE;
+}
+
+uint64_t boot_fleet_board_role_refused_count(void)
+{
+    return atomic_load_explicit(&s_role_refused, memory_order_relaxed);
 }
 
 /* Announce this node's newest ids to one peer. The public INV path carries
@@ -426,6 +442,47 @@ static void fleet_board_handle_get(struct msg_processor *mp,
     }
 }
 
+/* One delivered POST frame: decode, ingest, and decide whose problem a
+ * refusal is. Its own function so the multiplexer above stays a dispatch
+ * table rather than a place where one leg's policy accumulates. */
+static void fleet_board_handle_post(struct msg_processor *mp,
+                                    struct p2p_node *node,
+                                    const uint8_t *payload, size_t payload_len,
+                                    struct node_db *ndb, int64_t now)
+{
+    struct fleet_board_post post;
+    enum fleet_board_result r =
+        fleet_board_frame_decode_post(payload, payload_len, &post);
+    if (r != FLEET_BOARD_OK) {
+        fleet_board_offend(mp, node, r);
+        return;
+    }
+    bool stored = false;
+    r = db_fleet_board_post_ingest(ndb, &post, now, &stored);
+    if (r == FLEET_BOARD_ERR_ROLE)
+        atomic_fetch_add_explicit(&s_role_refused, 1, memory_order_relaxed);
+    if (r != FLEET_BOARD_OK) {
+        /* An expired post is stale, not forged: peers legitimately relay
+         * one whose ttl ran out in flight. Capacity, storage and role
+         * refusal are local receiver state. All other errors remain
+         * sender-owned payload failures and keep their scoring
+         * consequence. */
+        if (fleet_board_ingest_refused_locally(r))
+            LOG_WARN("net.fleet_board", "dropped post from peer %lld: %s",
+                     (long long)node->id, fleet_board_result_string(r));
+        else if (r != FLEET_BOARD_ERR_EXPIRED)
+            fleet_board_offend(mp, node, r);
+        return;
+    }
+    if (stored) {
+        char id_hex[65];
+        fleet_board_id_to_hex(post.id, id_hex);
+        LOG_INFO("net.fleet_board", "stored %s post %.16s from peer %lld",
+                 fleet_board_kind_name(post.kind), id_hex,
+                 (long long)node->id);
+    }
+}
+
 bool boot_fleet_board_frame(struct msg_processor *mp, struct p2p_node *node,
                             const uint8_t *payload, size_t payload_len,
                             void *ctx)
@@ -467,34 +524,7 @@ bool boot_fleet_board_frame(struct msg_processor *mp, struct p2p_node *node,
     }
 
     if (type == FLEET_BOARD_FRAME_POST) {
-        struct fleet_board_post post;
-        enum fleet_board_result r =
-            fleet_board_frame_decode_post(payload, payload_len, &post);
-        if (r != FLEET_BOARD_OK) {
-            fleet_board_offend(mp, node, r);
-            return true;
-        }
-        bool stored = false;
-        r = db_fleet_board_post_ingest(ndb, &post, now, &stored);
-        if (r != FLEET_BOARD_OK) {
-            /* An expired post is stale, not forged: peers legitimately relay
-             * one whose ttl ran out in flight. Capacity and storage refusal
-             * are local receiver state. All other errors remain sender-owned
-             * payload failures and keep their scoring consequence. */
-            if (fleet_board_ingest_refused_locally(r))
-                LOG_WARN("net.fleet_board", "dropped post from peer %lld: %s",
-                         (long long)node->id, fleet_board_result_string(r));
-            else if (r != FLEET_BOARD_ERR_EXPIRED)
-                fleet_board_offend(mp, node, r);
-            return true;
-        }
-        if (stored) {
-            char id_hex[65];
-            fleet_board_id_to_hex(post.id, id_hex);
-            LOG_INFO("net.fleet_board", "stored %s post %.16s from peer %lld",
-                     fleet_board_kind_name(post.kind), id_hex,
-                     (long long)node->id);
-        }
+        fleet_board_handle_post(mp, node, payload, payload_len, ndb, now);
         return true;
     }
 

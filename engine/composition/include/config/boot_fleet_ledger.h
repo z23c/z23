@@ -68,9 +68,16 @@ bool boot_fleet_ledger_register_service(void);
  *
  * inbox_full: batches that arrived with no free commit slot. No row is
  * lost — the next pull asks for the same range — but a box that keeps
- * printing this one is not keeping up with what it asks for. */
+ * printing this one is not keeping up with what it asks for.
+ *
+ * role_refused: whole batches refused because the signing key holds no
+ * role granting `fleet.ledger.replicate` on this box (or because no role
+ * checker is installed at all). Unlike the two above, this one has a
+ * direct answer: `z23 fleet roles grant --fp=<fingerprint> --role=worker`,
+ * with the fingerprint prefix the refusal line already printed. */
 uint64_t boot_fleet_ledger_delegation_refused_count(void);
 uint64_t boot_fleet_ledger_inbox_full_count(void);
+uint64_t boot_fleet_ledger_role_refused_count(void);
 
 #ifdef ZCL_TESTING
 struct zcl_fleet_ledger;

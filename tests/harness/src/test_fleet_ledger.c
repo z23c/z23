@@ -23,6 +23,7 @@
 #include "test/mesh_stream_loopback.h"
 #include "test/mesh_term_fixture.h"
 
+#include "base/fleet_role_check.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "chain/chainparams.h"
@@ -309,6 +310,12 @@ int test_fleet_ledger(void)
     int failures = 0;
     char root[256];
     char wire_dir[256];
+    /* Replication now asks whether the signing key holds a role here, and
+     * every key in this group is one the group invented. The gate is held
+     * open for the protocol proofs and closed again below; the gate itself
+     * is proven in fleet_role_enforcement, which starts from an empty seam
+     * and shows that it refuses. */
+    zcl_fleet_role_checker_install_permissive_for_testing();
     test_make_tmpdir(root, sizeof(root), "fleet_ledger", "store");
     test_make_tmpdir(wire_dir, sizeof(wire_dir), "fleet_ledger", "wire");
 
@@ -1440,5 +1447,6 @@ _test_next:
         fl_box_close(&ma);
     test_rm_rf_recursive(wire_dir);
     test_rm_rf_recursive(root);
+    zcl_fleet_role_checker_install(NULL);
     return failures;
 }

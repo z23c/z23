@@ -73,6 +73,14 @@ void boot_fleet_board_wire(struct boot_svc_ctx *svc);
 /* Drop per-peer state. Idempotent. */
 void boot_fleet_board_shutdown(void);
 
+/* Posts that arrived, verified, and were still refused because the host key
+ * that signed them holds no role granting `fleet.board.post` for that kind
+ * on this node — or because no role checker is installed at all. Counted
+ * since this process started and reported by `fleet board status`. The
+ * answer to a climbing number is `z23 fleet roles grant`, with the
+ * fingerprint prefix the refusal line printed. */
+uint64_t boot_fleet_board_role_refused_count(void);
+
 /* Load (creating on first use) this node's board signing identity — the same
  * durable Ed25519 online key the DHT uses, so a node has ONE host identity
  * and a reader can tie a post to the node that made it. Returns false, with

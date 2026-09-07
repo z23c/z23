@@ -72,11 +72,14 @@ static struct fleet_inbox_slot g_inbox[FLEET_LEDGER_INBOX_MAX];
 static struct liveness_contract g_ledger_contract;
 static supervisor_child_id g_ledger_child = SUPERVISOR_INVALID_ID;
 static int64_t g_last_pull;
-/* Counted refusals. Both are facts an operator has to be able to see: one
- * says a paired peer's identity is no longer current, the other says this
- * box could not keep up with what it asked for. Neither names the peer. */
+/* Counted refusals. All three are facts an operator has to be able to see:
+ * the first says a paired peer's identity is no longer current, the second
+ * says this box could not keep up with what it asked for, and the third
+ * says a peer whose signature is good holds no role to write here. None
+ * names the peer. */
 static _Atomic uint64_t g_delegation_refused;
 static _Atomic uint64_t g_inbox_full;
+static _Atomic uint64_t g_role_refused;
 
 #ifdef ZCL_TESTING
 /* See boot_fleet_ledger_test_bind_authority: the DHT composition root this
@@ -446,6 +449,9 @@ static void ledger_drain_inbox(struct zcl_fleet_ledger *ledger)
              * the owner's private data and a log is not private. */
             LOG_WARN("fleet.ledger", "replica batch refused: %s",
                      zcl_fleet_status_label(st));
+            if (st == ZCL_FLEET_ROLE_REFUSED)
+                atomic_fetch_add_explicit(&g_role_refused, 1,
+                                          memory_order_relaxed);
         }
         (void)accepted;
         free(slot.rows);
@@ -582,6 +588,11 @@ uint64_t boot_fleet_ledger_delegation_refused_count(void)
 uint64_t boot_fleet_ledger_inbox_full_count(void)
 {
     return atomic_load_explicit(&g_inbox_full, memory_order_relaxed);
+}
+
+uint64_t boot_fleet_ledger_role_refused_count(void)
+{
+    return atomic_load_explicit(&g_role_refused, memory_order_relaxed);
 }
 
 /* ── lifecycle ───────────────────────────────────────────────────────── */

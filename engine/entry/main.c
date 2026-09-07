@@ -49,6 +49,11 @@
 #include "util/clientversion.h"         /* exact executable source admission */
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
+/* The fleet role checker the two signed-bytes ingress points ask. It lives
+ * in tools/dev with the role catalog and the signed grant store, and it
+ * ships in every profile, not just dev builds: a released node that never
+ * installed a checker would refuse every foreign row and post. */
+#include "dev/fleet_roles.h"
 #ifdef ZCL_DEV_BUILD
 #include "devloop.h"
 #endif
@@ -555,6 +560,16 @@ int main(int argc, char **argv)
     }
 
     printf("z23 starting (datadir=%s)...\n", ctx.datadir);
+    /* Fleet ROLES. The catalog and the signed grant store live in tools/dev
+     * and the two ingress points that consult them live under engine/,
+     * which may not include a tools/ header — so this is the one place that
+     * joins the two, exactly as it already joins every other adapter only
+     * the top of the tree can see. Until this call returns, both ingress
+     * points refuse every foreign-signed row and post, which is the right
+     * state for a process that has not been told where its store is. It
+     * also mints the worker grant every already-enrolled machine implies,
+     * so a fleet that was replicating before roles existed still is. */
+    zcl_fleet_roles_enforcement_start(ctx.datadir);
     rpc_agent_set_boot_context(app_operator_lane_name(ctx.operator_lane),
                                app_runtime_profile_name(ctx.runtime_profile),
                                ctx.datadir, ctx.rpc_port, ctx.p2p_port,

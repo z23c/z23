@@ -11,6 +11,7 @@
 
 #include "models/fleet_board_post.h"
 
+#include "base/fleet_role_check.h"
 #include "config/runtime.h"
 #include "json/json.h"
 /* model_fields.h defines the ZCL_MODEL_* constructors the field list is
@@ -362,6 +363,45 @@ static bool board_append_fits(struct node_db *ndb, int64_t body_bytes)
            bytes <= max_bytes - body_bytes;
 }
 
+/* Does the key that signed this post hold a role granting a post of this
+ * KIND on this node? Asked through base/fleet_role_check.h, so this model
+ * never learns where the grant store lives — and refused outright when
+ * nothing is installed to answer.
+ *
+ * The refusal names the key by the fingerprint prefix the operator would
+ * type into `z23 fleet roles grant`, and nothing else about the post: the
+ * body is somebody's writing and a log is not the board. */
+static bool board_role_allows(const struct fleet_board_post *post)
+{
+    char why[ZCL_FLEET_ROLE_WHY_MAX];
+    if (zcl_fleet_role_allows(post->host_pubkey, ZCL_FLEET_LEAF_BOARD_POST,
+                              fleet_board_kind_name(post->kind), why,
+                              sizeof why))
+        return true;
+    LOG_WARN("fleet.board", "%s", why);
+    return false;
+}
+
+/* Everything that must hold before a post is even considered for storage,
+ * cheapest question first: shape, then time, then signature, then the role
+ * the verified key holds here. The first two reject the bulk of a flood
+ * before any curve arithmetic, and the role check comes last because it is
+ * only meaningful once the key is proven to have signed these bytes. */
+static enum fleet_board_result board_ingest_admissible(
+    const struct fleet_board_post *post, int64_t now)
+{
+    enum fleet_board_result r = fleet_board_post_validate(post);
+    if (r != FLEET_BOARD_OK)
+        return r;
+    r = fleet_board_post_check_time(post, now);
+    if (r != FLEET_BOARD_OK)
+        return r;
+    r = fleet_board_post_verify(post);
+    if (r != FLEET_BOARD_OK)
+        return r;
+    return board_role_allows(post) ? FLEET_BOARD_OK : FLEET_BOARD_ERR_ROLE;
+}
+
 enum fleet_board_result db_fleet_board_post_ingest(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
     bool *stored_out)
@@ -371,15 +411,7 @@ enum fleet_board_result db_fleet_board_post_ingest(
     if (!ndb || !ndb->open || !post)
         return FLEET_BOARD_ERR_ARGS;
 
-    /* Order matters: shape, then time, then signature. The first two are
-     * cheap and reject the bulk of a flood before any curve arithmetic. */
-    enum fleet_board_result r = fleet_board_post_validate(post);
-    if (r != FLEET_BOARD_OK)
-        return r;
-    r = fleet_board_post_check_time(post, now);
-    if (r != FLEET_BOARD_OK)
-        return r;
-    r = fleet_board_post_verify(post);
+    enum fleet_board_result r = board_ingest_admissible(post, now);
     if (r != FLEET_BOARD_OK)
         return r;
 

@@ -87,7 +87,13 @@ bool db_fleet_board_post_validate(const struct db_fleet_board_post *record,
  *   FLEET_BOARD_ERR_*     refused, with the exact reason
  * A post that fails signature, shape, or time checks is never stored, and a
  * refusal never partially mutates the ledger. `stored_out` (optional)
- * distinguishes a fresh append from an idempotent duplicate. */
+ * distinguishes a fresh append from an idempotent duplicate.
+ *
+ * The signing host key must also hold a ROLE granting `fleet.board.post`
+ * for this post's kind on this node, asked through base/fleet_role_check.h.
+ * A key with no such grant refuses as FLEET_BOARD_ERR_ROLE, and so does a
+ * process with no role checker installed: a good signature says who wrote
+ * the post, never that this box agreed to keep it. */
 enum fleet_board_result db_fleet_board_post_ingest(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
     bool *stored_out);

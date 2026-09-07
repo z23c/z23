@@ -27,31 +27,47 @@ static size_t fb_strnlen(const char *s, size_t cap)
     return n;
 }
 
+/* One fixed phrase per refusal, as a table rather than a switch: this
+ * vocabulary only ever grows, and a switch grew a branch per value. The
+ * static_assert keeps exactly the safety -Wswitch gave — a value appended
+ * to the enum with no row here leaves the array the size it already was,
+ * and the build stops. */
+static const char *const k_result_strings[] = {
+    [FLEET_BOARD_OK]            = "ok",
+    [FLEET_BOARD_ERR_ARGS]      = "missing argument",
+    [FLEET_BOARD_ERR_KIND]      = "unknown post kind",
+    [FLEET_BOARD_ERR_SCOPE]     = "unknown post scope",
+    [FLEET_BOARD_ERR_ROOM]      =
+        "room is required for a public post, forbidden otherwise, and "
+        "must be [a-z0-9-] within 32 bytes",
+    [FLEET_BOARD_ERR_AGENT]     = "agent name too long or unprintable",
+    [FLEET_BOARD_ERR_SLUG]      = "slug is not [a-z0-9-] within 64 bytes",
+    [FLEET_BOARD_ERR_TITLE]     = "title too long or unprintable",
+    [FLEET_BOARD_ERR_RECEIPT]   = "receipt too long or unprintable",
+    [FLEET_BOARD_ERR_TEXT]      = "text is empty or over the kind's limit",
+    [FLEET_BOARD_ERR_TTL]       = "ttl is zero or over the ceiling",
+    [FLEET_BOARD_ERR_FUTURE]    = "created_at is in the future",
+    [FLEET_BOARD_ERR_EXPIRED]   = "post has expired",
+    [FLEET_BOARD_ERR_TRUNCATED] = "wire bytes end early",
+    [FLEET_BOARD_ERR_TRAILING]  = "wire bytes carry trailing data",
+    [FLEET_BOARD_ERR_CAPACITY]  = "output buffer too small",
+    [FLEET_BOARD_ERR_ID]        = "id does not match the bytes",
+    [FLEET_BOARD_ERR_SIGNATURE] = "signature does not verify",
+    [FLEET_BOARD_ERR_ROLE]      =
+        "the key that signed it holds no role granting this post kind on "
+        "this node",
+};
+static_assert(sizeof k_result_strings / sizeof k_result_strings[0] ==
+                  (size_t)FLEET_BOARD_ERR_ROLE + 1u,
+              "every fleet_board_result value needs its own fixed phrase");
+
 const char *fleet_board_result_string(enum fleet_board_result r)
 {
-    switch (r) {
-    case FLEET_BOARD_OK:            return "ok";
-    case FLEET_BOARD_ERR_ARGS:      return "missing argument";
-    case FLEET_BOARD_ERR_KIND:      return "unknown post kind";
-    case FLEET_BOARD_ERR_SCOPE:     return "unknown post scope";
-    case FLEET_BOARD_ERR_ROOM:
-        return "room is required for a public post, forbidden otherwise, and "
-               "must be [a-z0-9-] within 32 bytes";
-    case FLEET_BOARD_ERR_AGENT:     return "agent name too long or unprintable";
-    case FLEET_BOARD_ERR_SLUG:      return "slug is not [a-z0-9-] within 64 bytes";
-    case FLEET_BOARD_ERR_TITLE:     return "title too long or unprintable";
-    case FLEET_BOARD_ERR_RECEIPT:   return "receipt too long or unprintable";
-    case FLEET_BOARD_ERR_TEXT:      return "text is empty or over the kind's limit";
-    case FLEET_BOARD_ERR_TTL:       return "ttl is zero or over the ceiling";
-    case FLEET_BOARD_ERR_FUTURE:    return "created_at is in the future";
-    case FLEET_BOARD_ERR_EXPIRED:   return "post has expired";
-    case FLEET_BOARD_ERR_TRUNCATED: return "wire bytes end early";
-    case FLEET_BOARD_ERR_TRAILING:  return "wire bytes carry trailing data";
-    case FLEET_BOARD_ERR_CAPACITY:  return "output buffer too small";
-    case FLEET_BOARD_ERR_ID:        return "id does not match the bytes";
-    case FLEET_BOARD_ERR_SIGNATURE: return "signature does not verify";
-    }
-    return "unknown refusal";
+    size_t i = (size_t)r;
+    if (i >= sizeof k_result_strings / sizeof k_result_strings[0] ||
+        !k_result_strings[i])
+        return "unknown refusal";
+    return k_result_strings[i];
 }
 
 static const char *const k_kind_names[FLEET_BOARD_KIND__COUNT] = {
