@@ -136,19 +136,10 @@ static bool shk_oversized_tor_log(const char *datadir, int64_t bound,
     return shk_write_file(path_out, bound + 4096);
 }
 
-int test_storage_housekeeping(void)
+/* ── 1. start/stop round trip on an empty datadir ── */
+static int shk_case_start_stop_round_trip(void)
 {
-    printf("\n=== storage_housekeeping tests ===\n");
     int failures = 0;
-
-    shk_small_bounds();
-    const struct storage_pacing *pacing = storage_pacing();
-    SHK_CHECK("1 MiB test bounds are published",
-              pacing->log_rotate_bytes == 1LL << 20 &&
-              pacing->wal_truncate_bytes == 1LL << 20 &&
-              pacing->compact_floor_bytes == 1LL << 20);
-
-    /* ── 1. start/stop round trip on an empty datadir ───────────────── */
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "empty");
@@ -174,7 +165,13 @@ int test_storage_housekeeping(void)
         test_cleanup_tmpdir(dir);
     }
 
-    /* ── 2. start refuses NULL/empty/absent datadirs by name ────────── */
+    return failures;
+}
+
+/* ── 2. start refuses NULL/empty/absent datadirs by name ── */
+static int shk_case_start_refuses_bad_datadirs(void)
+{
+    int failures = 0;
     {
         struct zcl_result rnull = storage_housekeeping_start(NULL);
         SHK_CHECK_REFUSED("start refuses a NULL datadir", rnull);
@@ -190,7 +187,13 @@ int test_storage_housekeeping(void)
                           rmiss);
     }
 
-    /* ── 3. service registration: OPTIONAL, wrappers call through ───── */
+    return failures;
+}
+
+/* ── 3. service registration: OPTIONAL, wrappers call through ── */
+static int shk_case_service_registration(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "kernel");
@@ -254,7 +257,13 @@ int test_storage_housekeeping(void)
         test_cleanup_tmpdir(dir);
     }
 
-    /* ── 4. one sweep performs each bound when crossed ──────────────── */
+    return failures;
+}
+
+/* ── 4. one sweep performs each bound when crossed ── */
+static int shk_case_sweep_performs_each_bound(const struct storage_pacing *pacing)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "over");
@@ -370,7 +379,13 @@ int test_storage_housekeeping(void)
         test_cleanup_tmpdir(dir);
     }
 
-    /* ── 5. a sweep with every input under its bound changes nothing ── */
+    return failures;
+}
+
+/* ── 5. a sweep with every input under its bound changes nothing ── */
+static int shk_case_sweep_under_bound_noop(const struct storage_pacing *pacing)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "under");
@@ -433,7 +448,13 @@ int test_storage_housekeeping(void)
         test_cleanup_tmpdir(dir);
     }
 
-    /* ── 6. stop while a tick's work is due does not deadlock ───────── */
+    return failures;
+}
+
+/* ── 6. stop while a tick's work is due does not deadlock ── */
+static int shk_case_stop_with_tick_due(const struct storage_pacing *pacing)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping",
@@ -480,6 +501,27 @@ int test_storage_housekeeping(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
+
+int test_storage_housekeeping(void)
+{
+    printf("\n=== storage_housekeeping tests ===\n");
+    int failures = 0;
+
+    shk_small_bounds();
+    const struct storage_pacing *pacing = storage_pacing();
+    SHK_CHECK("1 MiB test bounds are published",
+              pacing->log_rotate_bytes == 1LL << 20 &&
+              pacing->wal_truncate_bytes == 1LL << 20 &&
+              pacing->compact_floor_bytes == 1LL << 20);
+
+    failures += shk_case_start_stop_round_trip();
+    failures += shk_case_start_refuses_bad_datadirs();
+    failures += shk_case_service_registration();
+    failures += shk_case_sweep_performs_each_bound(pacing);
+    failures += shk_case_sweep_under_bound_noop(pacing);
+    failures += shk_case_stop_with_tick_due(pacing);
 
     shk_restore_pacing();
     if (failures == 0)

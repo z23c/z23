@@ -1106,18 +1106,12 @@ static bool build_fixture(const char *dir)
     return true;
 }
 
-static int case_corpus_honesty(void)
+/* (a) No inventory: proof is NOT MEASURED, and must never read as zero. */
+static int case_corpus_honesty_no_inventory(const char *dir, const char *inv)
 {
     int failures = 0;
-    char dir[512];
-    test_make_tmpdir(dir, sizeof dir, "science", "corpus");
-    SC_CHECK("the fixture tree builds", build_fixture(dir));
-
-    char inv[1024];
-    (void)snprintf(inv, sizeof inv, "%s/docs/CAPABILITY_INVENTORY.jsonl", dir);
-
-    /* (a) No inventory: proof is NOT MEASURED, and must never read as zero. */
     struct science_corpus_report r;
+    char head[1024];
     SC_CHECK("the walk succeeds with no inventory present",
              science_corpus_measure(dir, inv, &r));
     SC_CHECK("only C23 files under maintained roots are counted",
@@ -1131,15 +1125,22 @@ static int case_corpus_honesty(void)
     SC_CHECK("the proven fraction is -1 (not measured), never 0 (nothing "
              "proven)",
              science_corpus_proven_symbols_milli(&r) == -1);
-    char head[1024];
     SC_CHECK("the headline says proof was not measured",
              science_corpus_headline(&r, head, sizeof head) > 0 &&
                  strstr(head, "PROOF NOT MEASURED") != NULL);
     SC_CHECK("and does not claim zero duplicates",
              strstr(head, "0 duplicate") == NULL);
+    return failures;
+}
 
-    /* (b) A fresh inventory that agrees on the file count. Three symbols: one
-     * reached, two not. The honest headline leads with the two. */
+/* (b) A fresh inventory that agrees on the file count. Three symbols: one
+ * reached, two not. The honest headline leads with the two. */
+static int case_corpus_honesty_fresh_inventory(const char *dir,
+                                               const char *inv)
+{
+    int failures = 0;
+    struct science_corpus_report r;
+    char head[1024];
     static const char *const k_inv =
         "{\"record\":\"inventory\",\"source_root_sha3\":"
         "\"000102030405060708090a0b0c0d0e0f"
@@ -1177,10 +1178,18 @@ static int case_corpus_honesty(void)
              science_corpus_goal_milli(&r) == 0);
     SC_CHECK("a fresh inventory produces no staleness warning",
              strstr(head, "STALE") == NULL);
+    return failures;
+}
 
-    /* (c) A stale inventory: the file counts disagree, so the proof figures
-     * describe another tree and the report must say so rather than divide
-     * one walk's numerator by another walk's denominator. */
+/* (c) A stale inventory: the file counts disagree, so the proof figures
+ * describe another tree and the report must say so rather than divide
+ * one walk's numerator by another walk's denominator. */
+static int case_corpus_honesty_stale_inventory(const char *dir,
+                                               const char *inv)
+{
+    int failures = 0;
+    struct science_corpus_report r;
+    char head[1024];
     static const char *const k_stale =
         "{\"record\":\"inventory\",\"source_root_sha3\":\"invalid\","
         "\"files_scanned\":9001,"
@@ -1202,14 +1211,37 @@ static int case_corpus_honesty(void)
     SC_CHECK("a fully-reached symbol set is still only that denominator",
              science_corpus_proven_symbols_milli(&r) == 1000 &&
                  science_corpus_goal_milli(&r) == 0);
+    return failures;
+}
 
-    /* (d) A file with a record shape but no summary is not an inventory we
-     * can scope-check, so it does not count as present. */
+/* (d) A file with a record shape but no summary is not an inventory we
+ * can scope-check, so it does not count as present. */
+static int case_corpus_honesty_headerless(const char *dir, const char *inv)
+{
+    int failures = 0;
+    struct science_corpus_report r;
     SC_CHECK("a headerless inventory writes",
              spill(inv, "{\"record\":\"duplicate\",\"symbol_a\":\"x\"}\n"));
     SC_CHECK("an inventory with no summary record is not present",
              science_corpus_measure(dir, inv, &r) && !r.inventory_present &&
                  science_corpus_proven_symbols_milli(&r) == -1);
+    return failures;
+}
+
+static int case_corpus_honesty(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "science", "corpus");
+    SC_CHECK("the fixture tree builds", build_fixture(dir));
+
+    char inv[1024];
+    (void)snprintf(inv, sizeof inv, "%s/docs/CAPABILITY_INVENTORY.jsonl", dir);
+
+    failures += case_corpus_honesty_no_inventory(dir, inv);
+    failures += case_corpus_honesty_fresh_inventory(dir, inv);
+    failures += case_corpus_honesty_stale_inventory(dir, inv);
+    failures += case_corpus_honesty_headerless(dir, inv);
 
     (void)test_rm_rf_recursive(dir);
     return failures;
