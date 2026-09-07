@@ -144,7 +144,9 @@ static bool balance_observer_fake_call(const char *body_json,
     return *out_resp != NULL;
 }
 
-int test_rpc(void) {
+
+static int check_rpc_legacy_balance_observer_parse(void)
+{
     int failures = 0;
 
     printf("legacy balance observer exact decimals... ");
@@ -203,6 +205,14 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+
+    return failures;
+}
+
+static int check_rpc_legacy_balance_observer_timeout(void)
+{
+    int failures = 0;
+
     printf("legacy balance observer enforces 250 ms transport budget... ");
     {
         struct legacy_balance_observation observed;
@@ -224,6 +234,13 @@ int test_rpc(void) {
         ok = ok && hooked.ok && observed.complete;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_json_null_bool_int_str(void)
+{
+    int failures = 0;
 
     printf("json null/bool/int/str... ");
     {
@@ -247,6 +264,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int check_rpc_json_object_write(void)
+{
+    int failures = 0;
+
     printf("json object write... ");
     {
         struct json_value obj;
@@ -263,6 +287,13 @@ int test_rpc(void) {
         json_free(&obj);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_json_array_write(void)
+{
+    int failures = 0;
 
     printf("json array write... ");
     {
@@ -285,6 +316,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL (got: %s)\n", buf); failures++; }
     }
 
+    return failures;
+}
+
+static int check_rpc_json_read_object(void)
+{
+    int failures = 0;
+
     printf("json read object... ");
     {
         const char *input = "{\"name\":\"zcl\",\"port\":8233,\"active\":true}";
@@ -306,6 +344,14 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+
+    return failures;
+}
+
+static int check_rpc_json_read_array(void)
+{
+    int failures = 0;
+
     printf("json read array... ");
     {
         const char *input = "[1,\"two\",null,false]";
@@ -321,6 +367,13 @@ int test_rpc(void) {
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_json_roundtrip(void)
+{
+    int failures = 0;
 
     printf("json roundtrip... ");
     {
@@ -345,6 +398,13 @@ int test_rpc(void) {
         json_free(&parsed);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_json_rpc_request_and_error(void)
+{
+    int failures = 0;
 
     printf("json_rpc_request... ");
     {
@@ -376,41 +436,17 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    printf("diagnostics registry is the complete catalog manifest... ");
-    {
-        /* diagnostics_dumpers_def_row_count() (diagnostics_internal.h) is a
-         * SECOND array built by re-including diagnostics_dumpers.def with a
-         * dummy element type; g_dumpers[] (behind diagnostics_dumper_count())
-         * is a separately-compiled array over the SAME .def file. Comparing
-         * the two is a real cross-check between independent derivations of
-         * one source of truth, not count==count. The >0 floor guards against
-         * both collapsing to zero together (e.g. a busted include). */
-        const size_t count = diagnostics_dumper_count();
-        const size_t def_count = diagnostics_dumpers_def_row_count();
-        char csv[4096];
-        int csv_len = diagnostics_subsystems_csv(csv, sizeof(csv));
-        size_t csv_pos = 0;
-        bool ok = count > 0 && count == def_count &&
-                  csv_len > 0 && (size_t)csv_len < sizeof(csv);
 
-        struct json_value params, catalog;
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&catalog);
-        ok = ok && diag_rpc_statecatalog(&params, false, &catalog);
-        const struct json_value *subsystems = json_get(&catalog, "subsystems");
-        ok = ok && json_get_int(json_get(&catalog, "count")) ==
-                       (int64_t)count;
-        ok = ok && subsystems && subsystems->type == JSON_ARR &&
-             json_size(subsystems) == count;
+    return failures;
+}
 
-        for (size_t i = 0; i < count; i++) {
-            const struct diagnostics_dump_entry *e = diagnostics_dumper_at(i);
-            const struct json_value *item = json_at(subsystems, i);
-            if (!e || !item) {
-                ok = false;
-                continue;
-            }
+static bool check_rpc_diagnostics_entry_core(
+    const struct diagnostics_dump_entry *e,
+    size_t i, size_t count,
+    const char *csv, int csv_len, size_t *csv_pos_p)
+{
+    bool ok = true;
+    size_t csv_pos = *csv_pos_p;
             const char *required[] = {
                 e->name, e->desc, e->state_class, e->owner_shape,
                 e->owner_file, e->freshness, e->cost, e->primary_test,
@@ -435,7 +471,15 @@ int test_rpc(void) {
                 strncmp(csv + csv_pos, e->name, name_len) != 0)
                 ok = false;
             csv_pos += name_len;
+    *csv_pos_p = csv_pos;
+    return ok;
+}
 
+static bool check_rpc_diagnostics_entry_metadata(
+    const struct diagnostics_dump_entry *e,
+    const struct json_value *item)
+{
+    bool ok = true;
             struct {
                 const char *key;
                 const char *value;
@@ -458,6 +502,14 @@ int test_rpc(void) {
                            accepts_key;
             ok = ok && strcmp(json_get_str(json_get(item, "key_hint")),
                               accepts_key ? e->key_hint : "") == 0;
+    return ok;
+}
+
+static bool check_rpc_diagnostics_entry_keys(
+    const struct diagnostics_dump_entry *e,
+    const struct json_value *item)
+{
+    bool ok = true;
             const struct json_value *examples = json_get(item, "key_examples");
             size_t example_count = (e->key_example_1 ? 1u : 0u) +
                                    (e->key_example_2 ? 1u : 0u);
@@ -474,12 +526,75 @@ int test_rpc(void) {
             const struct json_value *drilldowns = json_get(item, "drilldowns");
             ok = ok && drilldowns && json_size(drilldowns) ==
                            (e->include_supervisor_drilldown ? 2u : 1u);
+    return ok;
+}
+
+static bool check_rpc_diagnostics_catalog_entries(
+    size_t count, const struct json_value *subsystems,
+    const char *csv, int csv_len)
+{
+    bool ok = true;
+    size_t csv_pos = 0;
+        for (size_t i = 0; i < count; i++) {
+            const struct diagnostics_dump_entry *e = diagnostics_dumper_at(i);
+            const struct json_value *item = json_at(subsystems, i);
+            if (!e || !item) {
+                ok = false;
+                continue;
+            }
+            ok = ok && check_rpc_diagnostics_entry_core(
+                e, i, count, csv, csv_len, &csv_pos);
+            ok = ok && check_rpc_diagnostics_entry_metadata(e, item);
+            ok = ok && check_rpc_diagnostics_entry_keys(e, item);
         }
         ok = ok && csv[csv_pos] == '\0' && diagnostics_dumper_at(count) == NULL;
+    return ok;
+}
+
+static int check_rpc_diagnostics_registry_catalog(void)
+{
+    int failures = 0;
+
+    printf("diagnostics registry is the complete catalog manifest... ");
+    {
+        /* diagnostics_dumpers_def_row_count() (diagnostics_internal.h) is a
+         * SECOND array built by re-including diagnostics_dumpers.def with a
+         * dummy element type; g_dumpers[] (behind diagnostics_dumper_count())
+         * is a separately-compiled array over the SAME .def file. Comparing
+         * the two is a real cross-check between independent derivations of
+         * one source of truth, not count==count. The >0 floor guards against
+         * both collapsing to zero together (e.g. a busted include). */
+        const size_t count = diagnostics_dumper_count();
+        const size_t def_count = diagnostics_dumpers_def_row_count();
+        char csv[4096];
+        int csv_len = diagnostics_subsystems_csv(csv, sizeof(csv));
+        bool ok = count > 0 && count == def_count &&
+                  csv_len > 0 && (size_t)csv_len < sizeof(csv);
+
+        struct json_value params, catalog;
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&catalog);
+        ok = ok && diag_rpc_statecatalog(&params, false, &catalog);
+        const struct json_value *subsystems = json_get(&catalog, "subsystems");
+        ok = ok && json_get_int(json_get(&catalog, "count")) ==
+                       (int64_t)count;
+        ok = ok && subsystems && subsystems->type == JSON_ARR &&
+             json_size(subsystems) == count;
+
+        ok = ok && check_rpc_diagnostics_catalog_entries(
+            count, subsystems, csv, csv_len);
         json_free(&catalog);
         json_free(&params);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_dumpstate_unknown_subsystem(void)
+{
+    int failures = 0;
 
     printf("dumpstate unknown subsystem lists registry... ");
     {
@@ -506,6 +621,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int check_rpc_dumpstate_help(void)
+{
+    int failures = 0;
+
     printf("dumpstate help lists registry... ");
     {
         struct json_value params;
@@ -526,6 +648,28 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static bool check_rpc_dumpstate_block_intake_fields(
+    const struct json_value *result)
+{
+        const struct json_value *state = json_get(result, "state");
+        bool ok = state && state->type == JSON_OBJ;
+        ok = ok && json_get(state, "running") != NULL;
+        ok = ok && json_get(state, "current_depth") != NULL;
+        ok = ok && json_get(state, "capacity") != NULL;
+        ok = ok && json_get(state, "saturated") != NULL;
+        ok = ok && json_get(state, "enqueued") != NULL;
+        ok = ok && json_get(state, "processed") != NULL;
+        ok = ok && json_get(state, "dropped") != NULL;
+        return ok;
+}
+
+static int check_rpc_dumpstate_block_intake(void)
+{
+    int failures = 0;
+
     printf("dumpstate block_intake exposes queue telemetry... ");
     {
         struct json_value params;
@@ -541,20 +685,32 @@ int test_rpc(void) {
         struct json_value result;
         json_init(&result);
         ok = ok && diag_rpc_dumpstate(&params, false, &result);
-        const struct json_value *state = json_get(&result, "state");
-        ok = ok && state && state->type == JSON_OBJ;
-        ok = ok && json_get(state, "running") != NULL;
-        ok = ok && json_get(state, "current_depth") != NULL;
-        ok = ok && json_get(state, "capacity") != NULL;
-        ok = ok && json_get(state, "saturated") != NULL;
-        ok = ok && json_get(state, "enqueued") != NULL;
-        ok = ok && json_get(state, "processed") != NULL;
-        ok = ok && json_get(state, "dropped") != NULL;
+        ok = ok && check_rpc_dumpstate_block_intake_fields(&result);
 
         json_free(&params);
         json_free(&result);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static bool check_rpc_dumpstate_block_index_state(bool ok,
+    const struct json_value *result)
+{
+        const struct json_value *state = json_get(result, "state");
+        ok = ok && state && state->type == JSON_OBJ;
+        ok = ok && json_get_bool(json_get(state, "found"));
+        ok = ok && json_get_int(json_get(state, "nHeight")) == 1;
+        ok = ok && strcmp(json_get_str(json_get(state, "lookup_source")),
+                          "best_header_ancestor") == 0;
+        ok = ok && !json_get_bool(json_get(state, "on_active_chain"));
+        return ok;
+}
+
+static int check_rpc_dumpstate_block_index(void)
+{
+    int failures = 0;
 
     printf("dumpstate block_index resolves best-header height... ");
     {
@@ -583,13 +739,7 @@ int test_rpc(void) {
         struct json_value result;
         json_init(&result);
         ok = ok && diag_rpc_dumpstate(&params, false, &result);
-        const struct json_value *state = json_get(&result, "state");
-        ok = ok && state && state->type == JSON_OBJ;
-        ok = ok && json_get_bool(json_get(state, "found"));
-        ok = ok && json_get_int(json_get(state, "nHeight")) == 1;
-        ok = ok && strcmp(json_get_str(json_get(state, "lookup_source")),
-                          "best_header_ancestor") == 0;
-        ok = ok && !json_get_bool(json_get(state, "on_active_chain"));
+        ok = check_rpc_dumpstate_block_index_state(ok, &result);
 
         json_free(&params);
         json_free(&result);
@@ -597,6 +747,13 @@ int test_rpc(void) {
         main_state_free(&ms);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_legacy_rpc_parse_results(void)
+{
+    int failures = 0;
 
     printf("legacy_rpc parse scalar results... ");
     {
@@ -649,6 +806,14 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+
+    return failures;
+}
+
+static int check_rpc_legacy_rpc_timeout_table_warmup(void)
+{
+    int failures = 0;
+
     printf("legacy_rpc bounded timeout rejects unsafe budgets... ");
     {
         char sentinel = '\0';
@@ -690,19 +855,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    printf("getnodelog since_secs timestamp filtering... ");
-    {
-        char dir_template[] = "/tmp/zcl_nodelog_rpc_XXXXXX";
-        char *dir = mkdtemp(dir_template);
-        char log_path[1024] = {0};
-        bool ok = dir != NULL;
-        if (ok) {
-            int n = snprintf(log_path, sizeof(log_path), "%s/node.log", dir);
-            ok = n > 0 && (size_t)n < sizeof(log_path);
-        }
-        if (ok) {
+    return failures;
+}
+
+static bool check_rpc_getnodelog_write_since_log(const char *log_path)
+{
             FILE *fp = fopen(log_path, "w");
-            ok = fp != NULL;
+            bool ok = fp != NULL;
             if (fp) {
                 ok = fputs("{\"ts\":\"2026-06-23T18:30:00.000000Z\","
                            "\"level\":\"info\","
@@ -713,7 +872,63 @@ int test_rpc(void) {
                                  "\"event\":\"node_log_since_recent\"}\n", fp) >= 0;
                 ok = ok && fclose(fp) == 0;
             }
+            return ok;
+}
+
+static bool check_rpc_getnodelog_push_since_params(struct json_value *params)
+{
+    bool ok = true;
+            json_set_array(params);
+            struct json_value v;
+            json_init(&v);
+            json_set_str(&v, "node_log_since");
+            ok = ok && json_push_back(params, &v);
+            json_set_int(&v, 60);
+            ok = ok && json_push_back(params, &v);
+            json_set_int(&v, 10);
+            ok = ok && json_push_back(params, &v);
+            json_set_str(&v, "all");
+            ok = ok && json_push_back(params, &v);
+            json_free(&v);
+    return ok;
+}
+
+static bool check_rpc_getnodelog_since_lines_ok(const struct json_value *result)
+{
+            const struct json_value *lines = json_get(result, "lines");
+            const struct json_value *skipped =
+                json_get(result, "timestamped_lines_skipped");
+            const struct json_value *undated =
+                json_get(result, "undated_lines_included");
+            const struct json_value *complete =
+                json_get(result, "since_filter_complete");
+            bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 2;
+            ok = ok && strstr(json_get_str(json_at(lines, 0)),
+                              "node_log_since_recent") != NULL;
+            ok = ok && strstr(json_get_str(json_at(lines, 1)),
+                              "node_log_since_undated") != NULL;
+            ok = ok && skipped && json_get_int(skipped) == 1;
+            ok = ok && undated && json_get_int(undated) == 1;
+            ok = ok && complete && !json_get_bool(complete);
+    return ok;
+}
+
+static int check_rpc_getnodelog_since_secs(void)
+{
+    int failures = 0;
+
+    printf("getnodelog since_secs timestamp filtering... ");
+    {
+        char dir_template[] = "/tmp/zcl_nodelog_rpc_XXXXXX";
+        char *dir = mkdtemp(dir_template);
+        char log_path[1024] = {0};
+        bool ok = dir != NULL;
+        if (ok) {
+            int n = snprintf(log_path, sizeof(log_path), "%s/node.log", dir);
+            ok = n > 0 && (size_t)n < sizeof(log_path);
         }
+        if (ok)
+            ok = check_rpc_getnodelog_write_since_log(log_path);
 
         struct rpc_fake_clock fake = { .wall_ms = 1782239670000LL };
         const clock_iface_t iface = {
@@ -733,18 +948,7 @@ int test_rpc(void) {
             clock_installed = true;
             diagnostics_controller_set_state(NULL, dir);
 
-            json_set_array(&params);
-            struct json_value v;
-            json_init(&v);
-            json_set_str(&v, "node_log_since");
-            ok = ok && json_push_back(&params, &v);
-            json_set_int(&v, 60);
-            ok = ok && json_push_back(&params, &v);
-            json_set_int(&v, 10);
-            ok = ok && json_push_back(&params, &v);
-            json_set_str(&v, "all");
-            ok = ok && json_push_back(&params, &v);
-            json_free(&v);
+            ok = ok && check_rpc_getnodelog_push_since_params(&params);
         }
 
         if (ok) {
@@ -754,23 +958,8 @@ int test_rpc(void) {
             ok = rpc_table_execute(&tbl, "getnodelog", &params, &result);
         }
 
-        if (ok) {
-            const struct json_value *lines = json_get(&result, "lines");
-            const struct json_value *skipped =
-                json_get(&result, "timestamped_lines_skipped");
-            const struct json_value *undated =
-                json_get(&result, "undated_lines_included");
-            const struct json_value *complete =
-                json_get(&result, "since_filter_complete");
-            ok = lines && lines->type == JSON_ARR && json_size(lines) == 2;
-            ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                              "node_log_since_recent") != NULL;
-            ok = ok && strstr(json_get_str(json_at(lines, 1)),
-                              "node_log_since_undated") != NULL;
-            ok = ok && skipped && json_get_int(skipped) == 1;
-            ok = ok && undated && json_get_int(undated) == 1;
-            ok = ok && complete && !json_get_bool(complete);
-        }
+        if (ok)
+            ok = check_rpc_getnodelog_since_lines_ok(&result);
 
         json_free(&params);
         json_free(&result);
@@ -785,19 +974,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    printf("getnodelog level filter on ISO-timestamped LOG_* lines... ");
-    {
-        char dir_template[] = "/tmp/zcl_nodelog_lvl_XXXXXX";
-        char *dir = mkdtemp(dir_template);
-        char log_path[1024] = {0};
-        bool ok = dir != NULL;
-        if (ok) {
-            int n = snprintf(log_path, sizeof(log_path), "%s/node.log", dir);
-            ok = n > 0 && (size_t)n < sizeof(log_path);
-        }
-        if (ok) {
+    return failures;
+}
+
+static bool check_rpc_getnodelog_write_level_log(const char *log_path)
+{
             FILE *fp = fopen(log_path, "w");
-            ok = fp != NULL;
+            bool ok = fp != NULL;
             if (fp) {
                 /* Current LOG_* format (zcl_log_emit_at): ISO-8601 UTC
                  * timestamp + level token prefix; plus one pre-timestamp
@@ -808,25 +991,26 @@ int test_rpc(void) {
                 ok = ok && fputs("[net] WARN: net.c:4 old(): nlv_legacy_warn\n", fp) >= 0;
                 ok = ok && fclose(fp) == 0;
             }
-        }
+            return ok;
+}
 
-        /* Fake "now" = 2026-06-23T18:34:30Z: every dated line above is
-         * within the 60 s since window. */
-        struct rpc_fake_clock fake = { .wall_ms = 1782239670000LL };
-        const clock_iface_t iface = {
-            .now_monotonic_ns = rpc_fake_now_mono,
-            .now_wall_ms = rpc_fake_now_wall,
-            .self = &fake,
-        };
-        bool clock_installed = false;
-        if (ok) {
-            clock_set_default(&iface);
-            clock_installed = true;
-            diagnostics_controller_set_state(NULL, dir);
-        }
+static bool check_rpc_getnodelog_level_warn_lines(
+    const struct json_value *result)
+{
+                const struct json_value *lines = json_get(result, "lines");
+                bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 3;
+                ok = ok && strstr(json_get_str(json_at(lines, 0)),
+                                  "nlv_legacy_warn") != NULL;
+                ok = ok && strstr(json_get_str(json_at(lines, 1)),
+                                  "nlv_warn") != NULL;
+                ok = ok && strstr(json_get_str(json_at(lines, 2)),
+                                  "nlv_err") != NULL;
+                return ok;
+}
 
-        /* level=warn keeps WARN+ERROR, drops INFO; reverse scan order. */
-        if (ok) {
+static bool check_rpc_getnodelog_level_warn(void)
+{
+    bool ok = true;
             struct json_value params;
             json_init(&params);
             struct json_value result;
@@ -848,22 +1032,27 @@ int test_rpc(void) {
             rpc_table_init(&tbl);
             register_diagnostics_rpc_commands(&tbl);
             ok = rpc_table_execute(&tbl, "getnodelog", &params, &result);
-            if (ok) {
-                const struct json_value *lines = json_get(&result, "lines");
-                ok = lines && lines->type == JSON_ARR && json_size(lines) == 3;
-                ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                                  "nlv_legacy_warn") != NULL;
-                ok = ok && strstr(json_get_str(json_at(lines, 1)),
-                                  "nlv_warn") != NULL;
-                ok = ok && strstr(json_get_str(json_at(lines, 2)),
-                                  "nlv_err") != NULL;
-            }
+            if (ok)
+                ok = check_rpc_getnodelog_level_warn_lines(&result);
             json_free(&params);
             json_free(&result);
-        }
 
-        /* level=error keeps only the ERROR line. */
-        if (ok) {
+    return ok;
+}
+
+static bool check_rpc_getnodelog_level_error_lines(
+    const struct json_value *result)
+{
+                const struct json_value *lines = json_get(result, "lines");
+                bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 1;
+                ok = ok && strstr(json_get_str(json_at(lines, 0)),
+                                  "nlv_err") != NULL;
+                return ok;
+}
+
+static bool check_rpc_getnodelog_level_error(void)
+{
+    bool ok = true;
             struct json_value params;
             json_init(&params);
             struct json_value result;
@@ -885,18 +1074,27 @@ int test_rpc(void) {
             rpc_table_init(&tbl);
             register_diagnostics_rpc_commands(&tbl);
             ok = rpc_table_execute(&tbl, "getnodelog", &params, &result);
-            if (ok) {
-                const struct json_value *lines = json_get(&result, "lines");
-                ok = lines && lines->type == JSON_ARR && json_size(lines) == 1;
-                ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                                  "nlv_err") != NULL;
-            }
+            if (ok)
+                ok = check_rpc_getnodelog_level_error_lines(&result);
             json_free(&params);
             json_free(&result);
-        }
 
-        /* level=ERROR (uppercase) is accepted — case-insensitive parse. */
-        if (ok) {
+    return ok;
+}
+
+static bool check_rpc_getnodelog_level_error_uc_lines(
+    const struct json_value *result)
+{
+                const struct json_value *lines = json_get(result, "lines");
+                bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 1;
+                ok = ok && strstr(json_get_str(json_at(lines, 0)),
+                                  "nlv_err") != NULL;
+                return ok;
+}
+
+static bool check_rpc_getnodelog_level_error_uc(void)
+{
+    bool ok = true;
             struct json_value params;
             json_init(&params);
             struct json_value result;
@@ -918,19 +1116,25 @@ int test_rpc(void) {
             rpc_table_init(&tbl);
             register_diagnostics_rpc_commands(&tbl);
             ok = rpc_table_execute(&tbl, "getnodelog", &params, &result);
-            if (ok) {
-                const struct json_value *lines = json_get(&result, "lines");
-                ok = lines && lines->type == JSON_ARR && json_size(lines) == 1;
-                ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                                  "nlv_err") != NULL;
-            }
+            if (ok)
+                ok = check_rpc_getnodelog_level_error_uc_lines(&result);
             json_free(&params);
             json_free(&result);
-        }
 
-        /* Unknown level is rejected loudly (string error body), never a
-         * silent fall-through to "all". */
-        if (ok) {
+    return ok;
+}
+
+static bool check_rpc_getnodelog_level_unknown_rc(bool ok, bool rc,
+    const struct json_value *result)
+{
+            ok = ok && !rc && result->type == JSON_STR &&
+                 strstr(json_get_str(result), "bad level") != NULL;
+            return ok;
+}
+
+static bool check_rpc_getnodelog_level_unknown(void)
+{
+    bool ok = true;
             struct json_value params;
             json_init(&params);
             struct json_value result;
@@ -952,11 +1156,136 @@ int test_rpc(void) {
             rpc_table_init(&tbl);
             register_diagnostics_rpc_commands(&tbl);
             bool rc = rpc_table_execute(&tbl, "getnodelog", &params, &result);
-            ok = ok && !rc && result.type == JSON_STR &&
-                 strstr(json_get_str(&result), "bad level") != NULL;
+            ok = check_rpc_getnodelog_level_unknown_rc(ok, rc, &result);
             json_free(&params);
             json_free(&result);
+
+    return ok;
+}
+
+static bool check_rpc_getnodelog_write_regex_log(const char *log_path)
+{
+            FILE *fp = fopen(log_path, "w");
+            bool ok = fp != NULL;
+            if (fp) {
+                ok = fputs("[net] nre_alpha connected\n", fp) >= 0;
+                ok = ok && fputs("[sync] nre_beta stalled\n", fp) >= 0;
+                ok = ok && fputs("[rpc] nre_gamma served\n", fp) >= 0;
+                ok = ok && fclose(fp) == 0;
+            }
+            return ok;
+}
+
+static bool check_rpc_getnodelog_regex_alt_lines(
+    const struct json_value *result)
+{
+                const struct json_value *lines = json_get(result, "lines");
+                bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 2;
+                ok = ok && strstr(json_get_str(json_at(lines, 0)),
+                                  "nre_gamma") != NULL;
+                ok = ok && strstr(json_get_str(json_at(lines, 1)),
+                                  "nre_alpha") != NULL;
+                return ok;
+}
+
+static bool check_rpc_getnodelog_regex_alternation(void)
+{
+    bool ok = true;
+            struct json_value params, result, v;
+            json_init(&params);
+            json_init(&result);
+            json_init(&v);
+            json_set_array(&params);
+            json_set_str(&v, "^\\[(net|rpc)\\] nre_");
+            ok = json_push_back(&params, &v);
+            json_set_int(&v, 0);
+            ok = ok && json_push_back(&params, &v);
+            json_set_int(&v, 10);
+            ok = ok && json_push_back(&params, &v);
+            json_free(&v);
+            struct rpc_table tbl;
+            rpc_table_init(&tbl);
+            register_diagnostics_rpc_commands(&tbl);
+            ok = ok && rpc_table_execute(&tbl, "getnodelog", &params, &result);
+            if (ok)
+                ok = check_rpc_getnodelog_regex_alt_lines(&result);
+            json_free(&params);
+            json_free(&result);
+
+    return ok;
+}
+
+static bool check_rpc_getnodelog_regex_refused(void)
+{
+    bool ok = true;
+            struct json_value params, result, v;
+            json_init(&params);
+            json_init(&result);
+            json_init(&v);
+            json_set_array(&params);
+            json_set_str(&v, "nre_\\w+");
+            ok = json_push_back(&params, &v);
+            json_free(&v);
+            struct rpc_table tbl;
+            rpc_table_init(&tbl);
+            register_diagnostics_rpc_commands(&tbl);
+            bool rc = rpc_table_execute(&tbl, "getnodelog", &params, &result);
+            ok = !rc && result.type == JSON_STR &&
+                 strstr(json_get_str(&result), "bad regex") != NULL;
+            json_free(&params);
+            json_free(&result);
+
+    return ok;
+}
+
+static int check_rpc_getnodelog_level_filter(void)
+{
+    int failures = 0;
+
+    printf("getnodelog level filter on ISO-timestamped LOG_* lines... ");
+    {
+        char dir_template[] = "/tmp/zcl_nodelog_lvl_XXXXXX";
+        char *dir = mkdtemp(dir_template);
+        char log_path[1024] = {0};
+        bool ok = dir != NULL;
+        if (ok) {
+            int n = snprintf(log_path, sizeof(log_path), "%s/node.log", dir);
+            ok = n > 0 && (size_t)n < sizeof(log_path);
         }
+        if (ok)
+            ok = check_rpc_getnodelog_write_level_log(log_path);
+
+        /* Fake "now" = 2026-06-23T18:34:30Z: every dated line above is
+         * within the 60 s since window. */
+        struct rpc_fake_clock fake = { .wall_ms = 1782239670000LL };
+        const clock_iface_t iface = {
+            .now_monotonic_ns = rpc_fake_now_mono,
+            .now_wall_ms = rpc_fake_now_wall,
+            .self = &fake,
+        };
+        bool clock_installed = false;
+        if (ok) {
+            clock_set_default(&iface);
+            clock_installed = true;
+            diagnostics_controller_set_state(NULL, dir);
+        }
+
+        /* level=warn keeps WARN+ERROR, drops INFO; reverse scan order. */
+        if (ok)
+            ok = check_rpc_getnodelog_level_warn();
+
+        /* level=error keeps only the ERROR line. */
+        if (ok)
+            ok = check_rpc_getnodelog_level_error();
+
+        /* level=ERROR (uppercase) is accepted — case-insensitive parse. */
+        if (ok)
+            ok = check_rpc_getnodelog_level_error_uc();
+
+        /* Unknown level is rejected loudly (string error body), never a
+         * silent fall-through to "all". */
+        if (ok)
+            ok = check_rpc_getnodelog_level_unknown();
 
         diagnostics_controller_set_state(NULL, "");
         if (clock_installed)
@@ -968,6 +1297,13 @@ int test_rpc(void) {
 
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_ere_matcher(void)
+{
+    int failures = 0;
 
     /* The in-tree ERE matcher behind `getnodelog`. Every expectation below
      * was taken from glibc regcomp/regexec with REG_EXTENDED|REG_NOSUB — the
@@ -1089,6 +1425,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int check_rpc_getnodelog_regex(void)
+{
+    int failures = 0;
+
     printf("getnodelog accepts a regex and refuses a bad one... ");
     {
         char dir_template[] = "/tmp/zcl_nodelog_re_XXXXXX";
@@ -1099,68 +1442,18 @@ int test_rpc(void) {
             int n = snprintf(log_path, sizeof(log_path), "%s/node.log", dir);
             ok = n > 0 && (size_t)n < sizeof(log_path);
         }
-        if (ok) {
-            FILE *fp = fopen(log_path, "w");
-            ok = fp != NULL;
-            if (fp) {
-                ok = fputs("[net] nre_alpha connected\n", fp) >= 0;
-                ok = ok && fputs("[sync] nre_beta stalled\n", fp) >= 0;
-                ok = ok && fputs("[rpc] nre_gamma served\n", fp) >= 0;
-                ok = ok && fclose(fp) == 0;
-            }
-        }
+        if (ok)
+            ok = check_rpc_getnodelog_write_regex_log(log_path);
         if (ok)
             diagnostics_controller_set_state(NULL, dir);
 
         /* Alternation + anchor, the shape an operator actually types. */
-        if (ok) {
-            struct json_value params, result, v;
-            json_init(&params);
-            json_init(&result);
-            json_init(&v);
-            json_set_array(&params);
-            json_set_str(&v, "^\\[(net|rpc)\\] nre_");
-            ok = json_push_back(&params, &v);
-            json_set_int(&v, 0);
-            ok = ok && json_push_back(&params, &v);
-            json_set_int(&v, 10);
-            ok = ok && json_push_back(&params, &v);
-            json_free(&v);
-            struct rpc_table tbl;
-            rpc_table_init(&tbl);
-            register_diagnostics_rpc_commands(&tbl);
-            ok = ok && rpc_table_execute(&tbl, "getnodelog", &params, &result);
-            if (ok) {
-                const struct json_value *lines = json_get(&result, "lines");
-                ok = lines && lines->type == JSON_ARR && json_size(lines) == 2;
-                ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                                  "nre_gamma") != NULL;
-                ok = ok && strstr(json_get_str(json_at(lines, 1)),
-                                  "nre_alpha") != NULL;
-            }
-            json_free(&params);
-            json_free(&result);
-        }
+        if (ok)
+            ok = check_rpc_getnodelog_regex_alternation();
 
         /* An unhonourable pattern is an error, not an empty result set. */
-        if (ok) {
-            struct json_value params, result, v;
-            json_init(&params);
-            json_init(&result);
-            json_init(&v);
-            json_set_array(&params);
-            json_set_str(&v, "nre_\\w+");
-            ok = json_push_back(&params, &v);
-            json_free(&v);
-            struct rpc_table tbl;
-            rpc_table_init(&tbl);
-            register_diagnostics_rpc_commands(&tbl);
-            bool rc = rpc_table_execute(&tbl, "getnodelog", &params, &result);
-            ok = !rc && result.type == JSON_STR &&
-                 strstr(json_get_str(&result), "bad regex") != NULL;
-            json_free(&params);
-            json_free(&result);
-        }
+        if (ok)
+            ok = check_rpc_getnodelog_regex_refused();
 
         diagnostics_controller_set_state(NULL, "");
         if (dir) {
@@ -1169,6 +1462,13 @@ int test_rpc(void) {
         }
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_value_from_amount(void)
+{
+    int failures = 0;
 
     printf("value_from_amount... ");
     {
@@ -1187,6 +1487,13 @@ int test_rpc(void) {
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_dbwrapper_open_write_read(void)
+{
+    int failures = 0;
 
     printf("dbwrapper open/write/read/close... ");
     {
@@ -1217,6 +1524,13 @@ int test_rpc(void) {
         test_rm_rf(dbdir);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_dbwrapper_batch_and_iterator(void)
+{
+    int failures = 0;
 
     printf("dbwrapper batch... ");
     {
@@ -1272,6 +1586,34 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static bool check_rpc_convert_values_agentsession(void)
+{
+    bool ok = true;
+        const char *agent_params[] = {
+            "custody", "{\"wallet_scope\":\"dev\"}"
+        };
+        struct json_value agent_result;
+        ok = ok && rpc_convert_values("agentsession", agent_params, 2,
+                                      &agent_result);
+        ok = ok && agent_result.type == JSON_ARR &&
+            json_size(&agent_result) == 2;
+        ok = ok && strcmp(json_get_str(json_at(&agent_result, 0)),
+                          "custody") == 0;
+        const struct json_value *agent_scope = json_at(&agent_result, 1);
+        ok = ok && agent_scope && agent_scope->type == JSON_OBJ &&
+            strcmp(json_get_str(json_get(agent_scope, "wallet_scope")),
+                   "dev") == 0;
+        json_free(&agent_result);
+    return ok;
+}
+
+static int check_rpc_convert_values(void)
+{
+    int failures = 0;
+
     printf("rpc_convert_values... ");
     {
         const char *params[] = { "1000", "abc123" };
@@ -1289,24 +1631,59 @@ int test_rpc(void) {
         ok = ok && rpc_should_convert_param("agentsession", 1);
         ok = ok && !rpc_should_convert_param("agentsession", 0);
 
-        const char *agent_params[] = {
-            "custody", "{\"wallet_scope\":\"dev\"}"
-        };
-        struct json_value agent_result;
-        ok = ok && rpc_convert_values("agentsession", agent_params, 2,
-                                      &agent_result);
-        ok = ok && agent_result.type == JSON_ARR &&
-            json_size(&agent_result) == 2;
-        ok = ok && strcmp(json_get_str(json_at(&agent_result, 0)),
-                          "custody") == 0;
-        const struct json_value *agent_scope = json_at(&agent_result, 1);
-        ok = ok && agent_scope && agent_scope->type == JSON_OBJ &&
-            strcmp(json_get_str(json_get(agent_scope, "wallet_scope")),
-                   "dev") == 0;
-        json_free(&agent_result);
-
+        ok = ok && check_rpc_convert_values_agentsession();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static bool check_rpc_convert_msg_send_onchain(void)
+{
+    bool ok = true;
+        /* msg_send on the onchain channel: argument 0 is a z-address
+         * string. The static (method, idx) table cannot see argument 2,
+         * so rpc_convert_values() itself must leave argument 0 alone here
+         * or every onchain CLI send would fail to parse. */
+        const char *onchain_params[] = {
+            "zs1exampleaddress", "hello", "onchain", "zs1fromaddress"
+        };
+        struct json_value onchain_result;
+        ok = ok && rpc_convert_values("msg_send", onchain_params, 4,
+                                      &onchain_result);
+        ok = ok && onchain_result.type == JSON_ARR &&
+            json_size(&onchain_result) == 4;
+        ok = ok && json_at(&onchain_result, 0)->type == JSON_STR;
+        ok = ok && strcmp(json_get_str(json_at(&onchain_result, 0)),
+                          "zs1exampleaddress") == 0;
+        json_free(&onchain_result);
+    return ok;
+}
+
+static bool check_rpc_convert_msg_inbox(void)
+{
+    bool ok = true;
+        /* msg_inbox: one audited method besides msg_send whose handler
+         * (msg_inbox_unread_only) reads its only argument with
+         * json_get_int(...) != 0. */
+        ok = ok && rpc_should_convert_param("msg_inbox", 0);
+        ok = ok && rpc_should_convert_param("msg_inbox_index", 0);
+
+        const char *inbox_params[] = { "1" };
+        struct json_value inbox_result;
+        ok = ok && rpc_convert_values("msg_inbox", inbox_params, 1,
+                                      &inbox_result);
+        ok = ok && inbox_result.type == JSON_ARR &&
+            json_size(&inbox_result) == 1;
+        ok = ok && json_at(&inbox_result, 0)->type == JSON_INT;
+        ok = ok && json_get_int(json_at(&inbox_result, 0)) == 1;
+        json_free(&inbox_result);
+    return ok;
+}
+
+static int check_rpc_convert_values_msg_send_inbox(void)
+{
+    int failures = 0;
 
     printf("rpc_convert_values msg_send/msg_inbox peer-id and flag rows... ");
     {
@@ -1326,41 +1703,18 @@ int test_rpc(void) {
         ok = ok && json_get_int(json_at(&p2p_result, 0)) == 60;
         json_free(&p2p_result);
 
-        /* msg_send on the onchain channel: argument 0 is a z-address
-         * string. The static (method, idx) table cannot see argument 2,
-         * so rpc_convert_values() itself must leave argument 0 alone here
-         * or every onchain CLI send would fail to parse. */
-        const char *onchain_params[] = {
-            "zs1exampleaddress", "hello", "onchain", "zs1fromaddress"
-        };
-        struct json_value onchain_result;
-        ok = ok && rpc_convert_values("msg_send", onchain_params, 4,
-                                      &onchain_result);
-        ok = ok && onchain_result.type == JSON_ARR &&
-            json_size(&onchain_result) == 4;
-        ok = ok && json_at(&onchain_result, 0)->type == JSON_STR;
-        ok = ok && strcmp(json_get_str(json_at(&onchain_result, 0)),
-                          "zs1exampleaddress") == 0;
-        json_free(&onchain_result);
 
-        /* msg_inbox: one audited method besides msg_send whose handler
-         * (msg_inbox_unread_only) reads its only argument with
-         * json_get_int(...) != 0. */
-        ok = ok && rpc_should_convert_param("msg_inbox", 0);
-        ok = ok && rpc_should_convert_param("msg_inbox_index", 0);
-
-        const char *inbox_params[] = { "1" };
-        struct json_value inbox_result;
-        ok = ok && rpc_convert_values("msg_inbox", inbox_params, 1,
-                                      &inbox_result);
-        ok = ok && inbox_result.type == JSON_ARR &&
-            json_size(&inbox_result) == 1;
-        ok = ok && json_at(&inbox_result, 0)->type == JSON_INT;
-        ok = ok && json_get_int(json_at(&inbox_result, 0)) == 1;
-        json_free(&inbox_result);
-
+        ok = ok && check_rpc_convert_msg_send_onchain();
+        ok = ok && check_rpc_convert_msg_inbox();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_rpc_convert_msg_send_non_numeric(void)
+{
+    int failures = 0;
 
     printf("rpc_convert_values msg_send rejects a non-numeric peer id... ");
     {
@@ -1383,6 +1737,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int check_rpc_cli_print_json_result(void)
+{
+    int failures = 0;
+
     printf("rpc_cli_print_json_result... ");
     {
         bool ok = rpc_test_cli_print_case(
@@ -1402,6 +1763,13 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int check_rpc_ecc_init_sanity_check(void)
+{
+    int failures = 0;
+
     printf("ecc_init_sanity_check... ");
     {
         if (ecc_init_sanity_check())
@@ -1411,6 +1779,13 @@ int test_rpc(void) {
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int check_rpc_parse_script(void)
+{
+    int failures = 0;
 
     printf("parse_script... ");
     {
@@ -1454,6 +1829,13 @@ int test_rpc(void) {
         }
     }
 
+    return failures;
+}
+
+static int check_rpc_script_to_asm_str(void)
+{
+    int failures = 0;
+
     printf("script_to_asm_str... ");
     {
         struct script s;
@@ -1474,6 +1856,13 @@ int test_rpc(void) {
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int check_rpc_decode_hex_tx_and_parse_hash(void)
+{
+    int failures = 0;
 
     printf("decode_hex_tx roundtrip... ");
     {
@@ -1522,6 +1911,13 @@ int test_rpc(void) {
         }
     }
 
+    return failures;
+}
+
+static int check_rpc_tx_to_json(void)
+{
+    int failures = 0;
+
     printf("tx_to_json... ");
     {
         struct transaction tx;
@@ -1557,6 +1953,13 @@ int test_rpc(void) {
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int check_rpc_async_op_init_state(void)
+{
+    int failures = 0;
+
     printf("async_op init/state... ");
     {
         struct async_rpc_operation op;
@@ -1571,6 +1974,13 @@ int test_rpc(void) {
         }
         async_op_free(&op);
     }
+
+    return failures;
+}
+
+static int check_rpc_async_op_execute_result(void)
+{
+    int failures = 0;
 
     printf("async_op execute/result... ");
     {
@@ -1593,6 +2003,13 @@ int test_rpc(void) {
         }
         async_op_free(&op);
     }
+
+    return failures;
+}
+
+static int check_rpc_async_op_error(void)
+{
+    int failures = 0;
 
     printf("async_op error... ");
     {
@@ -1618,6 +2035,13 @@ int test_rpc(void) {
         async_op_free(&op);
     }
 
+    return failures;
+}
+
+static int check_rpc_async_op_status_json(void)
+{
+    int failures = 0;
+
     printf("async_op status_json... ");
     {
         struct async_rpc_operation op;
@@ -1637,6 +2061,13 @@ int test_rpc(void) {
         json_free(&status);
         async_op_free(&op);
     }
+
+    return failures;
+}
+
+static int check_rpc_async_queue(void)
+{
+    int failures = 0;
 
     printf("async_queue add/execute... ");
     {
@@ -1698,6 +2129,13 @@ int test_rpc(void) {
         async_queue_free(&q);
     }
 
+    return failures;
+}
+
+static int check_rpc_http_tls_inactive(void)
+{
+    int failures = 0;
+
     /* ── Wave 11 #6: RPC TLS tests ─────────────────────────────────── */
 
     printf("rpc_http_tls_active when no TLS configured... ");
@@ -1714,34 +2152,20 @@ int test_rpc(void) {
         }
     }
 
-    printf("rpc TLS start with self-signed cert... ");
-    {
-        /* Generate a self-signed cert+key in temp files */
-        char cert_path[] = "/tmp/zcl_test_cert_XXXXXX";
-        char key_path[] = "/tmp/zcl_test_key_XXXXXX";
-        int cfd = mkstemp(cert_path);
-        int kfd = mkstemp(key_path);
-        bool ok = false;
-        /* Private datadir: rpc_http_start writes <datadir>/.cookie, so a
-         * shared "/tmp" would have two concurrent runs overwriting and then
-         * unlinking each other's credential file. */
-        char rpcdir[512];
-        rpc_test_tmpdir(rpcdir, sizeof(rpcdir), "tls");
-        const uint16_t tls_port = rpc_test_free_port();
-        const uint16_t http_port = rpc_test_free_port();
+    return failures;
+}
 
-        if (cfd >= 0 && kfd >= 0) {
-            /* Generate RSA key + self-signed cert via OpenSSL */
-            EVP_PKEY *pkey = EVP_PKEY_new();
-            EVP_PKEY_CTX *kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
-            if (kctx && EVP_PKEY_keygen_init(kctx) > 0) {
-                EVP_PKEY_CTX_set_rsa_keygen_bits(kctx, 2048);
-                EVP_PKEY_keygen(kctx, &pkey);
-            }
-            if (kctx) EVP_PKEY_CTX_free(kctx);
-
-            X509 *x509 = X509_new();
-            if (x509 && pkey) {
+static bool check_rpc_tls_serve_with_cert(X509 *x509, EVP_PKEY *pkey,
+                                         int *cfd_inout, int *kfd_inout,
+                                         const char *cert_path,
+                                         const char *key_path,
+                                         uint16_t tls_port,
+                                         uint16_t http_port,
+                                         const char *rpcdir)
+{
+    bool ok = false;
+    int cfd = *cfd_inout;
+    int kfd = *kfd_inout;
                 X509_set_version(x509, 2);
                 ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
                 X509_gmtime_adj(X509_getm_notBefore(x509), 0);
@@ -1843,6 +2267,45 @@ int test_rpc(void) {
                 }
 
                 X509_free(x509);
+    *cfd_inout = cfd;
+    *kfd_inout = kfd;
+    return ok;
+}
+
+static int check_rpc_tls_start_self_signed(void)
+{
+    int failures = 0;
+
+    printf("rpc TLS start with self-signed cert... ");
+    {
+        /* Generate a self-signed cert+key in temp files */
+        char cert_path[] = "/tmp/zcl_test_cert_XXXXXX";
+        char key_path[] = "/tmp/zcl_test_key_XXXXXX";
+        int cfd = mkstemp(cert_path);
+        int kfd = mkstemp(key_path);
+        bool ok = false;
+        /* Private datadir: rpc_http_start writes <datadir>/.cookie, so a
+         * shared "/tmp" would have two concurrent runs overwriting and then
+         * unlinking each other's credential file. */
+        char rpcdir[512];
+        rpc_test_tmpdir(rpcdir, sizeof(rpcdir), "tls");
+        const uint16_t tls_port = rpc_test_free_port();
+        const uint16_t http_port = rpc_test_free_port();
+
+        if (cfd >= 0 && kfd >= 0) {
+            /* Generate RSA key + self-signed cert via OpenSSL */
+            EVP_PKEY *pkey = EVP_PKEY_new();
+            EVP_PKEY_CTX *kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+            if (kctx && EVP_PKEY_keygen_init(kctx) > 0) {
+                EVP_PKEY_CTX_set_rsa_keygen_bits(kctx, 2048);
+                EVP_PKEY_keygen(kctx, &pkey);
+            }
+            if (kctx) EVP_PKEY_CTX_free(kctx);
+
+            X509 *x509 = X509_new();
+            if (x509 && pkey) {
+                ok = check_rpc_tls_serve_with_cert(x509, pkey, &cfd, &kfd,
+                    cert_path, key_path, tls_port, http_port, rpcdir);
             }
             if (pkey) EVP_PKEY_free(pkey);
         }
@@ -1863,6 +2326,13 @@ int test_rpc(void) {
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int check_rpc_tls_without_env_and_port_oracle(void)
+{
+    int failures = 0;
 
     printf("rpc TLS not started without env vars... ");
     {
@@ -1924,5 +2394,50 @@ int test_rpc(void) {
         }
     }
 
+    return failures;
+}
+
+int test_rpc(void) {
+    int failures = 0;
+    failures += check_rpc_legacy_balance_observer_parse();
+    failures += check_rpc_legacy_balance_observer_timeout();
+    failures += check_rpc_json_null_bool_int_str();
+    failures += check_rpc_json_object_write();
+    failures += check_rpc_json_array_write();
+    failures += check_rpc_json_read_object();
+    failures += check_rpc_json_read_array();
+    failures += check_rpc_json_roundtrip();
+    failures += check_rpc_json_rpc_request_and_error();
+    failures += check_rpc_diagnostics_registry_catalog();
+    failures += check_rpc_dumpstate_unknown_subsystem();
+    failures += check_rpc_dumpstate_help();
+    failures += check_rpc_dumpstate_block_intake();
+    failures += check_rpc_dumpstate_block_index();
+    failures += check_rpc_legacy_rpc_parse_results();
+    failures += check_rpc_legacy_rpc_timeout_table_warmup();
+    failures += check_rpc_getnodelog_since_secs();
+    failures += check_rpc_getnodelog_level_filter();
+    failures += check_rpc_ere_matcher();
+    failures += check_rpc_getnodelog_regex();
+    failures += check_rpc_value_from_amount();
+    failures += check_rpc_dbwrapper_open_write_read();
+    failures += check_rpc_dbwrapper_batch_and_iterator();
+    failures += check_rpc_convert_values();
+    failures += check_rpc_convert_values_msg_send_inbox();
+    failures += check_rpc_convert_msg_send_non_numeric();
+    failures += check_rpc_cli_print_json_result();
+    failures += check_rpc_ecc_init_sanity_check();
+    failures += check_rpc_parse_script();
+    failures += check_rpc_script_to_asm_str();
+    failures += check_rpc_decode_hex_tx_and_parse_hash();
+    failures += check_rpc_tx_to_json();
+    failures += check_rpc_async_op_init_state();
+    failures += check_rpc_async_op_execute_result();
+    failures += check_rpc_async_op_error();
+    failures += check_rpc_async_op_status_json();
+    failures += check_rpc_async_queue();
+    failures += check_rpc_http_tls_inactive();
+    failures += check_rpc_tls_start_self_signed();
+    failures += check_rpc_tls_without_env_and_port_oracle();
     return failures;
 }
