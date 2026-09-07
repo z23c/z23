@@ -1,7 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — secret-printf static audit of the C23 lint
- * runtime (check-no-secret-printf). Tracked files via lint_git_index_foreach.
+ * runtime (check-no-secret-printf). Production scan walks git-tracked
+ * files via lint_git_index_foreach; full/dev scan walks the filesystem
+ * directly.
  */
 /*
 ALLOWLIST_RE=(
@@ -169,19 +171,22 @@ static int nsp_fill_def(char out[][RS_PATH], int *n)
     return 0;
 }
 
+/* Production scan: git-tracked files only, via the index (fast, no
+ * directory traversal) -- an unread or refused index is UNPROVEN 2, same
+ * as any other production-mode gate. Full/dev scan (the default, and what
+ * every fixture and selftest exercises): walk the filesystem directly,
+ * exactly like the original shell script always did. This gate's fixtures
+ * run inside the make_lint_gates sandbox lane, a hardlink clone with .git
+ * deliberately excluded -- so the full-scan path must never touch the git
+ * index. */
 static int nsp_collect(struct nsp_set *s, char roots[][RS_PATH], int nr,
                        int override)
 {
     struct nsp_collect c = { .roots = roots, .nroots = nr, .set = s };
     int rc, i;
     s->n = 0;
-    if (!override) {
-        rc = lint_git_index_foreach(nsp_on_index, &c);
-        if (rc)
-            return rc;
-        if (lint_prod_scan())
-            return 0;
-    }
+    if (!override && lint_prod_scan())
+        return lint_git_index_foreach(nsp_on_index, &c);
     rc = 0;
     for (i = 0; rc == 0 && i < nr; i++)
         rc = nsp_walk(roots[i], s);

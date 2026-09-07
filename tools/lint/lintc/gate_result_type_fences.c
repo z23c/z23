@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — service result-type ratchet of the C23 lint
- * runtime (check-one-result-type). Tracked files via lint_git_index_foreach.
+ * runtime (check-one-result-type). Production scan walks git-tracked files
+ * via lint_git_index_foreach; full/dev scan walks the filesystem directly.
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -97,13 +98,18 @@ static int ort_walk(const char *dir, struct ort_set *s)
     return rc;
 }
 
+/* Production scan: git-tracked files only, via the index (fast, no
+ * directory traversal) -- an unread or refused index is UNPROVEN 2, same
+ * as any other production-mode gate. Full/dev scan (the default, and what
+ * every fixture and selftest exercises): walk the filesystem directly,
+ * exactly like the original shell script always did. This gate's fixtures
+ * run inside the make_lint_gates sandbox lane, a hardlink clone with .git
+ * deliberately excluded -- so the full-scan path must never touch the git
+ * index. */
 static int ort_collect(struct ort_set *s)
 {
-    int rc = lint_git_index_foreach(ort_on_index, s);
-    if (rc)
-        return rc;
     if (lint_prod_scan())
-        return 0;
+        return lint_git_index_foreach(ort_on_index, s);
     return ort_walk(k_ort_root, s);
 }
 
