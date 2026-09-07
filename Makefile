@@ -5402,6 +5402,9 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_source_identity_authority_selftest.c \
     tools/lint/lintc/gate_hotswap_package_receipt_is_not_authority.c \
     tools/lint/lintc/gate_hotswap_package_receipt_is_not_authority_selftest.c \
+    tools/lint/lintc/gate_byte_order_codec_single.c \
+    tools/lint/lintc/gate_byte_order_codec_single_report.c \
+    tools/lint/lintc/gate_byte_order_codec_single_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11271,7 +11274,7 @@ check-blob-read-bounds: $(LINTC_TOOL)
 # may only shrink). 23 hand-rolled helpers across 11 files existed when this
 # gate was written, despite a canonical set already sitting in
 # crypto/common.h that only seven files used.
-check-byte-order-codec-single:
+check-byte-order-codec-single: $(LINTC_TOOL)
 	@echo "══ LINT: one byte-order codec ══"
 	@./tools/lint/check_byte_order_codec_single.sh --selftest
 	@./tools/lint/check_byte_order_codec_single.sh

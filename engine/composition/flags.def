@@ -248,15 +248,15 @@ Z23_FLAG("ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT", "env_build", "120", "-",
 Z23_FLAG("ZCL_BUILD_EPOCH_SELFTEST_TIMEOUT", "env_build", "600", "-",
           "undocumented; first use tools/dev/build-epoch-selftest.sh:59")
 Z23_FLAG("ZCL_BYTE_ORDER_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_byte_order_codec_single.sh:86")
+          "undocumented; first use tools/lint/lintc/gate_byte_order_codec_single_report.c:333")
 Z23_FLAG("ZCL_BYTE_ORDER_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_byte_order_codec_single.sh:275")
+          "undocumented; first use tools/lint/lintc/gate_byte_order_codec_single_report.c:337")
 Z23_FLAG("ZCL_BYTE_ORDER_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_byte_order_codec_single.sh:274")
+          "undocumented; first use tools/lint/lintc/gate_byte_order_codec_single_report.c:339")
 Z23_FLAG("ZCL_BYTE_ORDER_FILE_FLOOR", "env_build", "800", "-",
-          "undocumented; first use tools/lint/check_byte_order_codec_single.sh:246")
+          "undocumented; first use tools/lint/lintc/gate_byte_order_codec_single_report.c:335")
 Z23_FLAG("ZCL_BYTE_ORDER_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_byte_order_codec_single.sh:90")
+          "undocumented; first use tools/lint/lintc/gate_byte_order_codec_single_report.c:328")
 Z23_FLAG("ZCL_C23_MAX_GLIBC", "env_build", "GLIBC_2.38", "-",
           "undocumented; first use tools/scripts/check_c23_node_binary.sh:139")
 Z23_FLAG("ZCL_C3_ARTIFACT_ROOT", "env_build", "-", "-",
