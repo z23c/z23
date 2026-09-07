@@ -5366,6 +5366,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_service_result_convergence.c \
     tools/lint/lintc/gate_frontier_single_writer.c \
     tools/lint/lintc/gate_no_utxos_mirror_read.c \
+    tools/lint/lintc/gate_narrative_integrity_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12435,7 +12436,8 @@ check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
 # (*.h under any **/include/**, *.def tables) — INCORRECT MODEL CONTEXT once
 # the real body has landed. docs/, vendor/, and test paths narrate history on
 # purpose and are excluded. See tools/scripts/check_no_dev_history_in_contracts.sh.
-check-no-dev-history-in-contracts:
+check-no-dev-history-in-contracts: $(LINTC_TOOL)
+	@echo "══ LINT: no dev-history phrasing in production contracts ══"
 	@./tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh
 
 # Funded transaction receipts and isolated recipient-wallet manifests are
@@ -12718,7 +12720,7 @@ check-no-stale-pinned-facts:
 # gap_vs_oracle, uptime-ledger, a ts= stamp, slo-summary:, WALL_CLOCK_SECONDS)
 # or the explicit historical override <!-- victory-ok: <reason> -->. See
 # tools/scripts/check_no_uncited_victory.sh (has --selftest).
-check-no-uncited-victory:
+check-no-uncited-victory: $(LINTC_TOOL)
 	@echo "══ LINT: no uncited victory claim (docs/HANDOFF.md) ══"
 	@./tools/scripts/check_no_uncited_victory.sh
 

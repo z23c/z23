@@ -380,5 +380,9 @@ int check_frontier_single_writer_run(int argc, char **argv);
 int check_frontier_single_writer_selftest(void);
 int check_no_utxos_mirror_read_run(int argc, char **argv);
 int check_no_utxos_mirror_read_selftest(void);
+int check_no_dev_history_in_contracts_run(int argc, char **argv);
+int check_no_dev_history_in_contracts_selftest(void);
+int check_no_uncited_victory_run(int argc, char **argv);
+int check_no_uncited_victory_selftest(void);
 
 #endif

@@ -193,6 +193,11 @@ static const struct lint_gate k_gates[] = {
       check_frontier_single_writer_selftest },
     { "check-no-utxos-mirror-read", check_no_utxos_mirror_read_run,
       check_no_utxos_mirror_read_selftest },
+    { "check-no-dev-history-in-contracts",
+      check_no_dev_history_in_contracts_run,
+      check_no_dev_history_in_contracts_selftest },
+    { "check-no-uncited-victory", check_no_uncited_victory_run,
+      check_no_uncited_victory_selftest },
 };
 
 int main(int argc, char **argv)
