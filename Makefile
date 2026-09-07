@@ -5364,6 +5364,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_blocker_remedy.c \
     tools/lint/lintc/gate_publish_containment.c \
     tools/lint/lintc/gate_service_result_convergence.c \
+    tools/lint/lintc/gate_frontier_single_writer.c \
+    tools/lint/lintc/gate_no_utxos_mirror_read.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -13010,9 +13012,9 @@ check-stage-advances-or-blocks: $(LINTC_TOOL)
 	@echo "══ LINT: stage advances-or-blocks (E5) ══"
 	@./tools/scripts/check_stage_advances_or_blocks.sh
 
-check-frontier-single-writer:
+check-frontier-single-writer: $(LINTC_TOOL)
 	@echo "══ LINT: one canonical writer per frontier ══"
-	@./tools/scripts/check_frontier_single_writer.sh
+	@./tools/scripts/check_frontier_single_writer.sh --selftest && ./tools/scripts/check_frontier_single_writer.sh
 
 check-dumper-never-blocks: $(LINTC_TOOL)
 	@echo "══ LINT: no dumpstate view blocks behind the reducer ══"
@@ -13029,9 +13031,9 @@ check-no-utxo-projection: $(LINTC_TOOL)
 	@echo "══ LINT: no new event-sourced UTXO-projection consumer (Program H) ══"
 	@./tools/scripts/check_no_utxo_projection.sh
 
-check-no-utxos-mirror-read:
+check-no-utxos-mirror-read: $(LINTC_TOOL)
 	@echo "══ LINT: no new node.db utxos-mirror reader (Program H) ══"
-	@./tools/scripts/check_no_utxos_mirror_read.sh
+	@./tools/scripts/check_no_utxos_mirror_read.sh --selftest && ./tools/scripts/check_no_utxos_mirror_read.sh
 
 check-no-silent-ready: $(LINTC_TOOL)
 	@echo "══ LINT: no-silent-ready (E8) ══"

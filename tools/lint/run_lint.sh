@@ -253,11 +253,11 @@ gate_command() {
         check-shape-includes-header)       echo './tools/scripts/check_shape_includes_header.sh' ;;
         check-projections-pure)            echo './tools/scripts/check_projections_pure.sh' ;;
         check-one-write-path)              echo './tools/scripts/check_one_write_path.sh' ;;
-        check-frontier-single-writer)      echo './tools/scripts/check_frontier_single_writer.sh' ;;
+        check-frontier-single-writer)      echo './tools/scripts/check_frontier_single_writer.sh --selftest && ./tools/scripts/check_frontier_single_writer.sh' ;;
         check-dumper-never-blocks)         echo './tools/scripts/check_dumper_never_blocks.sh' ;;
         check-no-block-index-flat)         echo './tools/scripts/check_no_block_index_flat.sh' ;;
         check-no-utxo-projection)          echo './tools/scripts/check_no_utxo_projection.sh' ;;
-        check-no-utxos-mirror-read)        echo './tools/scripts/check_no_utxos_mirror_read.sh' ;;
+        check-no-utxos-mirror-read)        echo './tools/scripts/check_no_utxos_mirror_read.sh --selftest && ./tools/scripts/check_no_utxos_mirror_read.sh' ;;
         check-no-authoritative-ram-state)  echo './tools/scripts/check_no_authoritative_ram_state.sh' ;;
         check-no-dev-history-in-contracts) echo './tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh' ;;
         check-no-live-lab-history)        echo './tools/scripts/check_no_live_lab_history.sh --selftest && ./tools/scripts/check_no_live_lab_history.sh' ;;

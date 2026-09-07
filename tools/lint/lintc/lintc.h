@@ -376,5 +376,9 @@ int check_stable_publish_containment_run(int argc, char **argv);
 int check_stable_publish_containment_selftest(void);
 int check_service_result_convergence_run(int argc, char **argv);
 int check_service_result_convergence_selftest(void);
+int check_frontier_single_writer_run(int argc, char **argv);
+int check_frontier_single_writer_selftest(void);
+int check_no_utxos_mirror_read_run(int argc, char **argv);
+int check_no_utxos_mirror_read_selftest(void);
 
 #endif

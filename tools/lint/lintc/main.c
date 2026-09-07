@@ -189,6 +189,10 @@ static const struct lint_gate k_gates[] = {
     { "check-service-result-convergence",
       check_service_result_convergence_run,
       check_service_result_convergence_selftest },
+    { "check-frontier-single-writer", check_frontier_single_writer_run,
+      check_frontier_single_writer_selftest },
+    { "check-no-utxos-mirror-read", check_no_utxos_mirror_read_run,
+      check_no_utxos_mirror_read_selftest },
 };
 
 int main(int argc, char **argv)

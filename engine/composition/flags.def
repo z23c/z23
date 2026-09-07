@@ -907,11 +907,11 @@ Z23_FLAG("ZCL_FOLD_INRAM_FLUSH_EVERY", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_FOLD_INRAM_MAX_SLOTS", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/storage/src/coins_ram.c:293")
 Z23_FLAG("ZCL_FRONTIER_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_frontier_single_writer.sh:13")
+          "undocumented; first use tools/lint/lintc/gate_frontier_single_writer.c:473")
 Z23_FLAG("ZCL_FRONTIER_MANIFEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_frontier_single_writer.sh:12")
+          "undocumented; first use tools/lint/lintc/gate_frontier_single_writer.c:472")
 Z23_FLAG("ZCL_FRONTIER_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_frontier_single_writer.sh:14")
+          "undocumented; first use tools/lint/lintc/gate_frontier_single_writer.c:474")
 Z23_FLAG("ZCL_FULL_FOLD_FROM_GENESIS", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_full_fold.c:235")
 Z23_FLAG("ZCL_FUZZ_DETECT_LEAKS", "env_build", "0", "-",
@@ -1476,9 +1476,9 @@ Z23_FLAG("ZCL_NO_UTXO_PROJECTION_BASELINE", "env_build", "-", "-",
 Z23_FLAG("ZCL_NO_UTXO_PROJECTION_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/scripts/check_no_utxo_projection.sh:20")
 Z23_FLAG("ZCL_NO_UTXOS_MIRROR_READ_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_no_utxos_mirror_read.sh:22")
+          "undocumented; first use tools/lint/lintc/gate_no_utxos_mirror_read.c:337")
 Z23_FLAG("ZCL_NO_UTXOS_MIRROR_READ_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_no_utxos_mirror_read.sh:23")
+          "undocumented; first use tools/lint/lintc/gate_no_utxos_mirror_read.c:230")
 Z23_FLAG("ZCL_NULLIFIER_BACKFILL", "env_runtime", "-", "-",
           "undocumented; first use engine/entry/main.c:436")
 Z23_FLAG("ZCL_OBS_SCAN_ALL", "env_runtime", "-", "-",
