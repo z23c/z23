@@ -1094,23 +1094,22 @@ static bool rr_source_is_c(const char *path)
     return rr_safe_relative(path) && n > 2 && strcmp(path + n - 2, ".c") == 0;
 }
 
-static bool rr_compile_one(const struct rr_plan *plan, const char *root,
-                           struct rr_overlay *overlay,
-                           const char *const *extra_flags,
-                           size_t extra_flag_count,
-                           struct zcl_devloop_process_result *process,
-                           int64_t *elapsed_us, int64_t *startup_us,
-                           int64_t *body_us, char *why, size_t why_len)
+static bool rr_compile_one_prepare(const char *root,
+                                   struct rr_overlay *overlay,
+                                   char source_full[PATH_MAX],
+                                   char before_hash[65],
+                                   char overlay_dir[PATH_MAX],
+                                   char temp_o[PATH_MAX],
+                                   char temp_d[PATH_MAX],
+                                   char *why, size_t why_len)
 {
-    char source_full[PATH_MAX], before_hash[65], after_hash[65];
     if (!rr_join_root(root, overlay->source, source_full) ||
         !rr_regular(source_full, NULL) ||
         !rr_sha256_file(source_full, before_hash)) {
         rr_why(why, why_len, "restart source is absent or not a regular file");
         return false;
     }
-    char overlay_dir[PATH_MAX];
-    (void)snprintf(overlay_dir, sizeof(overlay_dir), "%s", overlay->overlay_object);
+    (void)snprintf(overlay_dir, PATH_MAX, "%s", overlay->overlay_object);
     char *slash = strrchr(overlay_dir, '/');
     if (!slash) return false;
     *slash = 0;
@@ -1118,29 +1117,55 @@ static bool rr_compile_one(const struct rr_plan *plan, const char *root,
         rr_why(why, why_len, "could not prepare confined restart object directory");
         return false;
     }
-    char temp_o[PATH_MAX], temp_d[PATH_MAX];
     if (!rr_temp(temp_o, overlay_dir, ".o") ||
         !rr_temp(temp_d, overlay_dir, ".d")) {
         rr_why(why, why_len, "could not allocate restart compile temporaries");
         return false;
     }
-    char cc[sizeof(plan->cc)], flags[sizeof(plan->cflags)];
-    (void)snprintf(cc, sizeof(cc), "%s", plan->cc);
-    (void)snprintf(flags, sizeof(flags), "%s", plan->cflags);
+    return true;
+}
+
+struct rr_compile_argv_buf {
+    char cc[512], flags[RR_TEXT_MAX];
     const char *argv[RR_ARG_MAX], *flagv[RR_ARG_MAX];
-    size_t argc = zcl_argv_split(cc, argv, RR_ARG_MAX);
-    size_t flagc = zcl_argv_split(flags, flagv, RR_ARG_MAX);
-    if (!argc || argc + flagc + extra_flag_count + 9 >= RR_ARG_MAX) {
-        (void)unlink(temp_o); (void)unlink(temp_d);
+    size_t argc;
+};
+
+static bool rr_compile_one_build_argv(const struct rr_plan *plan,
+                                      const char *const *extra_flags,
+                                      size_t extra_flag_count,
+                                      const char *temp_d, const char *temp_o,
+                                      const char *source,
+                                      struct rr_compile_argv_buf *b,
+                                      char *why, size_t why_len)
+{
+    (void)snprintf(b->cc, sizeof(b->cc), "%s", plan->cc);
+    (void)snprintf(b->flags, sizeof(b->flags), "%s", plan->cflags);
+    b->argc = zcl_argv_split(b->cc, b->argv, RR_ARG_MAX);
+    size_t flagc = zcl_argv_split(b->flags, b->flagv, RR_ARG_MAX);
+    if (!b->argc || b->argc + flagc + extra_flag_count + 9 >= RR_ARG_MAX) {
         rr_why(why, why_len, "restart compile action exceeds argv bound");
         return false;
     }
-    for (size_t i = 0; i < flagc; i++) argv[argc++] = flagv[i];
+    for (size_t i = 0; i < flagc; i++) b->argv[b->argc++] = b->flagv[i];
     for (size_t i = 0; i < extra_flag_count; i++)
-        argv[argc++] = extra_flags[i];
-    argv[argc++] = "-MD"; argv[argc++] = "-MF"; argv[argc++] = temp_d;
-    argv[argc++] = "-c"; argv[argc++] = "-o"; argv[argc++] = temp_o;
-    argv[argc++] = overlay->source; argv[argc] = NULL;
+        b->argv[b->argc++] = extra_flags[i];
+    b->argv[b->argc++] = "-MD"; b->argv[b->argc++] = "-MF";
+    b->argv[b->argc++] = temp_d;
+    b->argv[b->argc++] = "-c"; b->argv[b->argc++] = "-o";
+    b->argv[b->argc++] = temp_o;
+    b->argv[b->argc++] = source; b->argv[b->argc] = NULL;
+    return true;
+}
+
+static bool rr_compile_one_run(const char *root, const char **argv,
+                               struct zcl_devloop_process_result *process,
+                               int64_t *elapsed_us, int64_t *startup_us,
+                               int64_t *body_us, const char *source_full,
+                               const char *before_hash, char after_hash[65],
+                               const char *temp_o, const char *temp_d,
+                               char *why, size_t why_len)
+{
     int64_t started = platform_time_monotonic_us();
     bool ran = zcl_devloop_process_run(root, argv, 30000, process);
     *elapsed_us += platform_time_monotonic_us() - started;
@@ -1148,7 +1173,8 @@ static bool rr_compile_one(const struct rr_plan *plan, const char *root,
     *body_us += process->body_us;
     bool ok = ran && !process->timed_out && !process->term_signal &&
               process->exit_code == 0 && rr_regular(temp_o, NULL) &&
-              rr_regular(temp_d, NULL) && rr_sha256_file(source_full, after_hash) &&
+              rr_regular(temp_d, NULL) &&
+              rr_sha256_file(source_full, after_hash) &&
               strcmp(before_hash, after_hash) == 0;
     if (!ok) {
         (void)unlink(temp_o); (void)unlink(temp_d);
@@ -1156,9 +1182,17 @@ static bool rr_compile_one(const struct rr_plan *plan, const char *root,
                                 : "restart compiler could not be executed");
         return false;
     }
-    char marker[PATH_MAX];
-    if (snprintf(marker, sizeof(marker), "%s.source", overlay->overlay_object) >=
-        (int)sizeof(marker)) {
+    return true;
+}
+
+static bool rr_compile_one_publish_object(struct rr_overlay *overlay,
+                                          const char *temp_o,
+                                          const char *temp_d,
+                                          char marker[PATH_MAX],
+                                          char *why, size_t why_len)
+{
+    if (snprintf(marker, PATH_MAX, "%s.source", overlay->overlay_object) >=
+        PATH_MAX) {
         (void)unlink(temp_o); (void)unlink(temp_d);
         rr_why(why, why_len, "restart overlay marker path overflow");
         return false;
@@ -1171,10 +1205,21 @@ static bool rr_compile_one(const struct rr_plan *plan, const char *root,
         return false;
     }
     (void)chmod(overlay->overlay_object, 0444);
-    (void)snprintf(overlay->source_sha256,
-                   sizeof(overlay->source_sha256), "%s", after_hash);
+    return true;
+}
+
+static bool rr_compile_one_publish_marker(const struct rr_plan *plan,
+                                          struct rr_overlay *overlay,
+                                          const char *overlay_dir,
+                                          const char *temp_d,
+                                          const char *marker,
+                                          const char after_hash[65],
+                                          char *why, size_t why_len)
+{
+    (void)snprintf(overlay->source_sha256, sizeof(overlay->source_sha256),
+                   "%s", after_hash);
     char marker_temp[PATH_MAX];
-    if (!rr_temp(marker_temp, overlay_dir, ".source") ) {
+    if (!rr_temp(marker_temp, overlay_dir, ".source")) {
         (void)unlink(overlay->overlay_object); (void)unlink(temp_d);
         rr_why(why, why_len, "could not allocate restart overlay marker");
         return false;
@@ -1194,6 +1239,38 @@ static bool rr_compile_one(const struct rr_plan *plan, const char *root,
     (void)chmod(marker, 0444);
     (void)unlink(temp_d);
     return true;
+}
+
+static bool rr_compile_one(const struct rr_plan *plan, const char *root,
+                           struct rr_overlay *overlay,
+                           const char *const *extra_flags,
+                           size_t extra_flag_count,
+                           struct zcl_devloop_process_result *process,
+                           int64_t *elapsed_us, int64_t *startup_us,
+                           int64_t *body_us, char *why, size_t why_len)
+{
+    char source_full[PATH_MAX], before_hash[65], after_hash[65];
+    char overlay_dir[PATH_MAX], temp_o[PATH_MAX], temp_d[PATH_MAX];
+    if (!rr_compile_one_prepare(root, overlay, source_full, before_hash,
+                                overlay_dir, temp_o, temp_d, why, why_len))
+        return false;
+    struct rr_compile_argv_buf buf;
+    if (!rr_compile_one_build_argv(plan, extra_flags, extra_flag_count,
+                                   temp_d, temp_o, overlay->source, &buf,
+                                   why, why_len)) {
+        (void)unlink(temp_o); (void)unlink(temp_d);
+        return false;
+    }
+    if (!rr_compile_one_run(root, buf.argv, process, elapsed_us, startup_us,
+                            body_us, source_full, before_hash, after_hash,
+                            temp_o, temp_d, why, why_len))
+        return false;
+    char marker[PATH_MAX];
+    if (!rr_compile_one_publish_object(overlay, temp_o, temp_d, marker, why,
+                                       why_len))
+        return false;
+    return rr_compile_one_publish_marker(plan, overlay, overlay_dir, temp_d,
+                                         marker, after_hash, why, why_len);
 }
 
 static bool rr_overlay_for_base_paths(const struct rr_plan *plan,
@@ -1802,6 +1879,66 @@ static bool rr_append_group(char out[4096], const char *group)
     return wrote > 0 && (size_t)wrote < 4096 - used;
 }
 
+static bool rr_collect_groups_expand(const struct zcl_devloop_plan *plan,
+                                     char exact[][ZCL_TEST_GROUP_FULL_MAX],
+                                     size_t *total_out,
+                                     size_t *immediate_total_out)
+{
+    const char *why = NULL;
+    if (!zcl_devloop_plan_proof_admissible(plan, &why))
+        return false;
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+    size_t id_count = 0;
+    for (size_t i = 0; i < plan->path_groups_len; i++)
+        ids[id_count++] = plan->path_groups[i];
+    for (size_t i = 0; i < plan->closure_groups_len; i++)
+        ids[id_count++] = plan->closure_groups[i];
+    bool truncated = false;
+    size_t total = zcl_test_group_expand_plan(ids, id_count, exact,
+                                               RR_EXACT_GROUP_MAX,
+                                               &truncated);
+    if (total == SIZE_MAX || total == 0 || truncated)
+        return false;
+    size_t immediate_total = 0;
+    for (size_t i = 0; i < total; i++)
+        if (!zcl_test_group_is_integration_only(exact[i]))
+            immediate_total++;
+    *total_out = total;
+    *immediate_total_out = immediate_total;
+    return true;
+}
+
+static bool rr_collect_groups_is_path_owned(const struct zcl_devloop_plan *plan,
+                                            const char *group)
+{
+    for (size_t p = 0; p < plan->path_groups_len; p++)
+        if (zcl_test_group_plan_selects(plan->path_groups[p], group))
+            return true;
+    return false;
+}
+
+static bool rr_collect_groups_classify(
+    const struct zcl_devloop_plan *plan, bool immediate_only,
+    bool tier_closure, const char exact[][ZCL_TEST_GROUP_FULL_MAX],
+    size_t total, char out[4096], uint32_t *count, char deferred[4096],
+    uint32_t *deferred_count, bool *bounded_deferred)
+{
+    for (size_t i = 0; i < total; i++) {
+        bool path_owned = rr_collect_groups_is_path_owned(plan, exact[i]);
+        bool integration = zcl_test_group_is_integration_only(exact[i]);
+        if (immediate_only && (integration || (tier_closure && !path_owned))) {
+            if (!rr_append_group(deferred, exact[i])) return false;
+            (*deferred_count)++;
+            if (!integration)
+                *bounded_deferred = true;
+            continue;
+        }
+        if (!rr_append_group(out, exact[i])) return false;
+        (*count)++;
+    }
+    return *count > 0;
+}
+
 static bool rr_collect_groups(const struct zcl_devloop_plan *plan,
                               bool immediate_only,
                               char out[4096], uint32_t *count,
@@ -1816,47 +1953,15 @@ static bool rr_collect_groups(const struct zcl_devloop_plan *plan,
     *count = 0;
     *deferred_count = 0;
     *bounded_deferred = false;
-    const char *why = NULL;
-    if (!zcl_devloop_plan_proof_admissible(plan, &why))
-        return false;
-    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
-    size_t id_count = 0;
-    for (size_t i = 0; i < plan->path_groups_len; i++)
-        ids[id_count++] = plan->path_groups[i];
-    for (size_t i = 0; i < plan->closure_groups_len; i++)
-        ids[id_count++] = plan->closure_groups[i];
     char exact[RR_EXACT_GROUP_MAX][ZCL_TEST_GROUP_FULL_MAX];
-    bool truncated = false;
-    size_t total = zcl_test_group_expand_plan(ids, id_count, exact,
-                                               RR_EXACT_GROUP_MAX,
-                                               &truncated);
-    if (total == SIZE_MAX || total == 0 || truncated)
+    size_t total, immediate_total;
+    if (!rr_collect_groups_expand(plan, exact, &total, &immediate_total))
         return false;
-    size_t immediate_total = 0;
-    for (size_t i = 0; i < total; i++)
-        if (!zcl_test_group_is_integration_only(exact[i]))
-            immediate_total++;
     bool tier_closure = immediate_only &&
         immediate_total > RR_IMMEDIATE_GROUP_MAX;
-    for (size_t i = 0; i < total; i++) {
-        bool path_owned = false;
-        for (size_t p = 0; p < plan->path_groups_len; p++)
-            if (zcl_test_group_plan_selects(plan->path_groups[p], exact[i])) {
-                path_owned = true;
-                break;
-            }
-        bool integration = zcl_test_group_is_integration_only(exact[i]);
-        if (immediate_only && (integration || (tier_closure && !path_owned))) {
-            if (!rr_append_group(deferred, exact[i])) return false;
-            (*deferred_count)++;
-            if (!integration)
-                *bounded_deferred = true;
-            continue;
-        }
-        if (!rr_append_group(out, exact[i])) return false;
-        (*count)++;
-    }
-    return *count > 0;
+    return rr_collect_groups_classify(plan, immediate_only, tier_closure,
+                                      exact, total, out, count, deferred,
+                                      deferred_count, bounded_deferred);
 }
 
 static bool rr_plan_matches_sources(const struct zcl_devloop_plan *plan,
