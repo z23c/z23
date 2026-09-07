@@ -216,7 +216,7 @@ static int gacw_emit_line(FILE *out, const char *line, size_t n)
         "\"aggregate_constant_return\":\"UNPROVEN\"";
     static const char to[] =
         "\"aggregate_constant_return\":\"constant_false\"";
-    char *hit = strstr(line, from);
+    const char *hit = strstr(line, from);
     if (!hit)
         return fwrite(line, 1, n, out) != n
             ? die("z23-lint: write failed\n", "") : 0;
