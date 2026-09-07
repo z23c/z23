@@ -50,10 +50,10 @@ static int fail(const char *message)
 static bool call(const char *text, struct zcl_command_reply *reply)
 {
     struct json_value input;
+    memset(reply, 0, sizeof(*reply));
     json_init(&input);
     if (!json_read(&input, text, strlen(text))) return false;
     struct zcl_command_request request = {.input = &input};
-    memset(reply, 0, sizeof(*reply));
     json_init(&reply->data);
     json_set_object(&reply->data);
     zcl_native_handle_dev_agent_mail(&request, reply);
