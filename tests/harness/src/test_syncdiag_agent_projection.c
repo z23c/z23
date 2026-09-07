@@ -221,11 +221,7 @@ static bool sd_agent_stalled_catchup_part3(const struct json_value *result)
 }
 
 
-/* case: agent flags catch-up as stalled when in-flight blocks age past
- * the request timeout with no tip advance, surfacing the download
- * telemetry and a health warning reason. */
-static bool sd_agent_stalled_catchup_scenario(void)
-{
+struct sd_agent_stalled_catchup_ctx {
     struct connman cm;
     struct node_signals sigs;
     struct main_state ms;
@@ -234,56 +230,72 @@ static bool sd_agent_stalled_catchup_scenario(void)
     struct rpc_table tbl;
     struct json_value params;
     struct json_value result;
+    struct download_manager *dm;
+};
 
+static bool sd_agent_stalled_catchup_setup(
+    struct sd_agent_stalled_catchup_ctx *ctx)
+{
     chain_params_select(CHAIN_MAIN);
-    memset(&cm, 0, sizeof(cm));
-    memset(&sigs, 0, sizeof(sigs));
-    memset(&ms, 0, sizeof(ms));
-    memset(&tip, 0, sizeof(tip));
-    memset(&best_header, 0, sizeof(best_header));
-    memset(&h_tip, 0, sizeof(h_tip));
-    memset(&h_hdr, 0, sizeof(h_hdr));
-    memset(&h_inflight, 0, sizeof(h_inflight));
-    memset(&h_queued, 0, sizeof(h_queued));
+    memset(&ctx->cm, 0, sizeof(ctx->cm));
+    memset(&ctx->sigs, 0, sizeof(ctx->sigs));
+    memset(&ctx->ms, 0, sizeof(ctx->ms));
+    memset(&ctx->tip, 0, sizeof(ctx->tip));
+    memset(&ctx->best_header, 0, sizeof(ctx->best_header));
+    memset(&ctx->h_tip, 0, sizeof(ctx->h_tip));
+    memset(&ctx->h_hdr, 0, sizeof(ctx->h_hdr));
+    memset(&ctx->h_inflight, 0, sizeof(ctx->h_inflight));
+    memset(&ctx->h_queued, 0, sizeof(ctx->h_queued));
 
-    bool ok = connman_init(&cm, chain_params_get(), &sigs);
-    main_state_init(&ms);
-    block_index_init(&tip);
-    block_index_init(&best_header);
-    syncdiag_set_hash(&h_tip, 0x41);
-    syncdiag_set_hash(&h_hdr, 0x42);
-    tip.phashBlock = &h_tip;
-    tip.nHeight = 100;
-    tip.nTime = (uint32_t)platform_time_wall_time_t();
-    tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE;
-    best_header.phashBlock = &h_hdr;
-    best_header.nHeight = 125;
-    best_header.pprev = &tip;
-    best_header.nTime = tip.nTime;
-    best_header.nStatus = BLOCK_VALID_TREE;
-    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
-    ms.pindex_best_header = &best_header;
+    bool ok = connman_init(&ctx->cm, chain_params_get(), &ctx->sigs);
+    main_state_init(&ctx->ms);
+    block_index_init(&ctx->tip);
+    block_index_init(&ctx->best_header);
+    syncdiag_set_hash(&ctx->h_tip, 0x41);
+    syncdiag_set_hash(&ctx->h_hdr, 0x42);
+    ctx->tip.phashBlock = &ctx->h_tip;
+    ctx->tip.nHeight = 100;
+    ctx->tip.nTime = (uint32_t)platform_time_wall_time_t();
+    ctx->tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE;
+    ctx->best_header.phashBlock = &ctx->h_hdr;
+    ctx->best_header.nHeight = 125;
+    ctx->best_header.pprev = &ctx->tip;
+    ctx->best_header.nTime = ctx->tip.nTime;
+    ctx->best_header.nStatus = BLOCK_VALID_TREE;
+    ok = ok && active_chain_move_window_tip(&ctx->ms.chain_active,
+                                            &ctx->tip);
+    ctx->ms.pindex_best_header = &ctx->best_header;
+    return ok;
+}
 
+static bool sd_agent_stalled_catchup_download_fixture(
+    struct sd_agent_stalled_catchup_ctx *ctx, bool ok)
+{
     struct p2p_node *peer =
-        syncdiag_add_peer(&cm, 44, false, PEER_HANDSHAKE_COMPLETE);
+        syncdiag_add_peer(&ctx->cm, 44, false, PEER_HANDSHAKE_COMPLETE);
     ok = ok && peer != NULL;
     if (peer)
         peer->starting_height = 125;
 
-    struct download_manager *dm = msg_get_download_mgr();
-    dl_drain_for_backpressure(dm);
-    syncdiag_set_hash(&h_inflight, 0x51);
-    syncdiag_set_hash(&h_queued, 0x52);
+    ctx->dm = msg_get_download_mgr();
+    dl_drain_for_backpressure(ctx->dm);
+    syncdiag_set_hash(&ctx->h_inflight, 0x51);
+    syncdiag_set_hash(&ctx->h_queued, 0x52);
     int32_t queued_h = 102;
-    ok = ok && dl_mark_requested(dm, &h_inflight, 101, 44);
-    ok = ok && dl_queue_blocks(dm, &h_queued, &queued_h, 1) == 1;
+    ok = ok && dl_mark_requested(ctx->dm, &ctx->h_inflight, 101, 44);
+    ok = ok && dl_queue_blocks(ctx->dm, &ctx->h_queued, &queued_h, 1) == 1;
+    return ok;
+}
 
-    rpc_table_init(&tbl);
-    register_event_rpc_commands(&tbl);
+static bool sd_agent_stalled_catchup_rpc_setup(
+    struct sd_agent_stalled_catchup_ctx *ctx)
+{
+    rpc_table_init(&ctx->tbl);
+    register_event_rpc_commands(&ctx->tbl);
     if (rpc_is_in_warmup(NULL, 0))
         set_rpc_warmup_finished();
-    rpc_net_set_connman(&cm);
-    sync_monitor_set_context(&cm, dm, &ms);
+    rpc_net_set_connman(&ctx->cm);
+    sync_monitor_set_context(&ctx->cm, ctx->dm, &ctx->ms);
     reducer_frontier_provable_tip_set(100);
     sync_monitor_test_set_tip_advance_ts(
         (int64_t)platform_time_wall_time_t() - 180);
@@ -291,25 +303,44 @@ static bool sd_agent_stalled_catchup_scenario(void)
     sync_set_state(SYNC_FINDING_PEERS, "agent stalled");
     sync_set_state(SYNC_HEADERS_DOWNLOAD, "agent stalled");
     sync_set_state(SYNC_BLOCKS_DOWNLOAD, "agent stalled");
+    return true;
+}
 
-    json_init(&params);
-    json_set_array(&params);
-    json_init(&result);
-    ok = ok && rpc_table_execute(&tbl, "agent", &params, &result);
-    ok = sd_agent_stalled_catchup_part1(&result) && ok;
-    ok = sd_agent_stalled_catchup_part2(&result) && ok;
-    ok = sd_agent_stalled_catchup_part3(&result) && ok;
+static bool sd_agent_stalled_catchup_call(
+    struct sd_agent_stalled_catchup_ctx *ctx, bool ok)
+{
+    json_init(&ctx->params);
+    json_set_array(&ctx->params);
+    json_init(&ctx->result);
+    ok = ok && rpc_table_execute(&ctx->tbl, "agent", &ctx->params,
+                                 &ctx->result);
+    ok = sd_agent_stalled_catchup_part1(&ctx->result) && ok;
+    ok = sd_agent_stalled_catchup_part2(&ctx->result) && ok;
+    ok = sd_agent_stalled_catchup_part3(&ctx->result) && ok;
+    return ok;
+}
 
-    json_free(&params);
-    json_free(&result);
-    dl_drain_for_backpressure(dm);
+/* case: agent flags catch-up as stalled when in-flight blocks age past
+ * the request timeout with no tip advance, surfacing the download
+ * telemetry and a health warning reason. */
+static bool sd_agent_stalled_catchup_scenario(void)
+{
+    struct sd_agent_stalled_catchup_ctx ctx;
+    bool ok = sd_agent_stalled_catchup_setup(&ctx);
+    ok = sd_agent_stalled_catchup_download_fixture(&ctx, ok);
+    ok = sd_agent_stalled_catchup_rpc_setup(&ctx) && ok;
+    ok = sd_agent_stalled_catchup_call(&ctx, ok);
+
+    json_free(&ctx.params);
+    json_free(&ctx.result);
+    dl_drain_for_backpressure(ctx.dm);
     sync_monitor_set_context(NULL, NULL, NULL);
     rpc_net_set_connman(NULL);
     reducer_frontier_provable_tip_reset();
     sync_monitor_test_set_tip_advance_ts(0);
     sync_set_state(SYNC_IDLE, "agent stalled cleanup");
-    main_state_free(&ms);
-    connman_free(&cm);
+    main_state_free(&ctx.ms);
+    connman_free(&ctx.cm);
     return ok;
 }
 
@@ -358,11 +389,7 @@ static bool sd_agent_dispatch_idle_part2(const struct json_value *result)
 }
 
 
-/* case: agent flags download dispatch as idle when nothing is in
- * flight and the queue has sat unassigned past the idle threshold with
- * no tip advance. */
-static bool sd_agent_dispatch_idle_scenario(void)
-{
+struct sd_agent_dispatch_idle_ctx {
     struct connman cm;
     struct node_signals sigs;
     struct main_state ms;
@@ -371,53 +398,69 @@ static bool sd_agent_dispatch_idle_scenario(void)
     struct rpc_table tbl;
     struct json_value params;
     struct json_value result;
+    struct download_manager *dm;
+};
 
+static bool sd_agent_dispatch_idle_setup(
+    struct sd_agent_dispatch_idle_ctx *ctx)
+{
     chain_params_select(CHAIN_MAIN);
-    memset(&cm, 0, sizeof(cm));
-    memset(&sigs, 0, sizeof(sigs));
-    memset(&ms, 0, sizeof(ms));
-    memset(&tip, 0, sizeof(tip));
-    memset(&best_header, 0, sizeof(best_header));
-    memset(&h_tip, 0, sizeof(h_tip));
-    memset(&h_hdr, 0, sizeof(h_hdr));
-    memset(&h_queued, 0, sizeof(h_queued));
+    memset(&ctx->cm, 0, sizeof(ctx->cm));
+    memset(&ctx->sigs, 0, sizeof(ctx->sigs));
+    memset(&ctx->ms, 0, sizeof(ctx->ms));
+    memset(&ctx->tip, 0, sizeof(ctx->tip));
+    memset(&ctx->best_header, 0, sizeof(ctx->best_header));
+    memset(&ctx->h_tip, 0, sizeof(ctx->h_tip));
+    memset(&ctx->h_hdr, 0, sizeof(ctx->h_hdr));
+    memset(&ctx->h_queued, 0, sizeof(ctx->h_queued));
 
-    bool ok = connman_init(&cm, chain_params_get(), &sigs);
-    main_state_init(&ms);
-    block_index_init(&tip);
-    block_index_init(&best_header);
-    syncdiag_set_hash(&h_tip, 0x61);
-    syncdiag_set_hash(&h_hdr, 0x62);
-    tip.phashBlock = &h_tip;
-    tip.nHeight = 100;
-    tip.nTime = (uint32_t)platform_time_wall_time_t();
-    tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE;
-    best_header.phashBlock = &h_hdr;
-    best_header.nHeight = 125;
-    best_header.pprev = &tip;
-    best_header.nTime = tip.nTime;
-    best_header.nStatus = BLOCK_VALID_TREE;
-    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
-    ms.pindex_best_header = &best_header;
+    bool ok = connman_init(&ctx->cm, chain_params_get(), &ctx->sigs);
+    main_state_init(&ctx->ms);
+    block_index_init(&ctx->tip);
+    block_index_init(&ctx->best_header);
+    syncdiag_set_hash(&ctx->h_tip, 0x61);
+    syncdiag_set_hash(&ctx->h_hdr, 0x62);
+    ctx->tip.phashBlock = &ctx->h_tip;
+    ctx->tip.nHeight = 100;
+    ctx->tip.nTime = (uint32_t)platform_time_wall_time_t();
+    ctx->tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE;
+    ctx->best_header.phashBlock = &ctx->h_hdr;
+    ctx->best_header.nHeight = 125;
+    ctx->best_header.pprev = &ctx->tip;
+    ctx->best_header.nTime = ctx->tip.nTime;
+    ctx->best_header.nStatus = BLOCK_VALID_TREE;
+    ok = ok && active_chain_move_window_tip(&ctx->ms.chain_active,
+                                            &ctx->tip);
+    ctx->ms.pindex_best_header = &ctx->best_header;
+    return ok;
+}
 
+static bool sd_agent_dispatch_idle_download_fixture(
+    struct sd_agent_dispatch_idle_ctx *ctx, bool ok)
+{
     struct p2p_node *peer =
-        syncdiag_add_peer(&cm, 45, false, PEER_HANDSHAKE_COMPLETE);
+        syncdiag_add_peer(&ctx->cm, 45, false, PEER_HANDSHAKE_COMPLETE);
     ok = ok && peer != NULL;
     if (peer)
         peer->starting_height = 125;
 
-    struct download_manager *dm = msg_get_download_mgr();
-    dl_drain_for_backpressure(dm);
-    syncdiag_set_hash(&h_queued, 0x63);
+    ctx->dm = msg_get_download_mgr();
+    dl_drain_for_backpressure(ctx->dm);
+    syncdiag_set_hash(&ctx->h_queued, 0x63);
     int32_t queued_h = 101;
-    ok = ok && dl_queue_blocks(dm, &h_queued, &queued_h, 1) == 1;
+    ok = ok && dl_queue_blocks(ctx->dm, &ctx->h_queued, &queued_h, 1) == 1;
+    return ok;
+}
 
-    rpc_table_init(&tbl);
-    register_event_rpc_commands(&tbl);
+static bool sd_agent_dispatch_idle_rpc_setup(
+    struct sd_agent_dispatch_idle_ctx *ctx)
+{
+    rpc_table_init(&ctx->tbl);
+    register_event_rpc_commands(&ctx->tbl);
     if (rpc_is_in_warmup(NULL, 0))
         set_rpc_warmup_finished();
-    rpc_net_set_connman(&cm);
-    sync_monitor_set_context(&cm, dm, &ms);
+    rpc_net_set_connman(&ctx->cm);
+    sync_monitor_set_context(&ctx->cm, ctx->dm, &ctx->ms);
     reducer_frontier_provable_tip_set(100);
     sync_monitor_test_set_tip_advance_ts(
         (int64_t)platform_time_wall_time_t() - 45);
@@ -425,24 +468,43 @@ static bool sd_agent_dispatch_idle_scenario(void)
     sync_set_state(SYNC_FINDING_PEERS, "agent dispatch idle");
     sync_set_state(SYNC_HEADERS_DOWNLOAD, "agent dispatch idle");
     sync_set_state(SYNC_BLOCKS_DOWNLOAD, "agent dispatch idle");
+    return true;
+}
 
-    json_init(&params);
-    json_set_array(&params);
-    json_init(&result);
-    ok = ok && rpc_table_execute(&tbl, "agent", &params, &result);
-    ok = sd_agent_dispatch_idle_part1(&result) && ok;
-    ok = sd_agent_dispatch_idle_part2(&result) && ok;
+static bool sd_agent_dispatch_idle_call(
+    struct sd_agent_dispatch_idle_ctx *ctx, bool ok)
+{
+    json_init(&ctx->params);
+    json_set_array(&ctx->params);
+    json_init(&ctx->result);
+    ok = ok && rpc_table_execute(&ctx->tbl, "agent", &ctx->params,
+                                 &ctx->result);
+    ok = sd_agent_dispatch_idle_part1(&ctx->result) && ok;
+    ok = sd_agent_dispatch_idle_part2(&ctx->result) && ok;
+    return ok;
+}
 
-    json_free(&params);
-    json_free(&result);
-    dl_drain_for_backpressure(dm);
+/* case: agent flags download dispatch as idle when nothing is in
+ * flight and the queue has sat unassigned past the idle threshold with
+ * no tip advance. */
+static bool sd_agent_dispatch_idle_scenario(void)
+{
+    struct sd_agent_dispatch_idle_ctx ctx;
+    bool ok = sd_agent_dispatch_idle_setup(&ctx);
+    ok = sd_agent_dispatch_idle_download_fixture(&ctx, ok);
+    ok = sd_agent_dispatch_idle_rpc_setup(&ctx) && ok;
+    ok = sd_agent_dispatch_idle_call(&ctx, ok);
+
+    json_free(&ctx.params);
+    json_free(&ctx.result);
+    dl_drain_for_backpressure(ctx.dm);
     sync_monitor_set_context(NULL, NULL, NULL);
     rpc_net_set_connman(NULL);
     reducer_frontier_provable_tip_reset();
     sync_monitor_test_set_tip_advance_ts(0);
     sync_set_state(SYNC_IDLE, "agent dispatch idle cleanup");
-    main_state_free(&ms);
-    connman_free(&cm);
+    main_state_free(&ctx.ms);
+    connman_free(&ctx.cm);
     return ok;
 }
 
