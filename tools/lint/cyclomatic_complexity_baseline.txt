@@ -3592,7 +3592,6 @@ tests/harness/src/test_sync_watchdog_conditions.c:test_sync_watchdog_conditions:
 tests/harness/src/test_syncdiag_agent_codemap.c:syncdiag_cases_agent_codemap:97
 tests/harness/src/test_syncdiag_agent_contracts.c:syncdiag_cases_agent_contracts:173
 tests/harness/src/test_syncdiag_agent_interface.c:syncdiag_cases_agent_interface:386
-tests/harness/src/test_syncdiag_agent_projection.c:syncdiag_cases_agent_projection:421
 tests/harness/src/test_syncdiag_agent_status.c:syncdiag_cases_agent_status:419
 tests/harness/src/test_syncdiag_anchorstatus.c:syncdiag_cases_anchorstatus:237
 tests/harness/src/test_syncdiag_api_catalog.c:syncdiag_cases_api_catalog:196
