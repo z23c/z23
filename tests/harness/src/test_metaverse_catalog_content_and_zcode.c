@@ -693,7 +693,7 @@ static bool mv_publish(const char *dd, struct mv_pkg *p, char pub_hex[67],
 
     snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
     if (!mv_make_package(p, pkgdir) || !mv_use_recipe(&p->manifest) ||
-        !mv_release(&r, 0x7b, "rhett/property-kit", p->root))
+        !mv_release(&r, 0x7b, "acme/property-kit", p->root))
         return false;
     if (!mv_keypair(0x7b, &sk, &pk))
         return false;

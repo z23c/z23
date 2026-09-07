@@ -335,7 +335,6 @@ B docs/work/HANDOFF_2026-09-04.md 1
 B platform/deploy/install-host-watchdog.sh 1
 B platform/deploy/zclassic23-host-watchdog.sh 1
 B platform/deploy/zclassic23-standby.env.example 1
-B tests/harness/src/test_metaverse_catalog.c 1
 B tests/harness/src/test_tip_agreement_watch.c 1
 B tests/harness/src/test_vcs_accept.c 15
 B tests/harness/src/test_vcs_release.c 11

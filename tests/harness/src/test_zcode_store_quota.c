@@ -825,7 +825,7 @@ int t_store_releases(void)
 
     struct vcs_package_release r;
     ZS_CHECK("releases: fixture signs",
-             zs_release(&r, 0x11, 1u, "rhett/ring-buffer"));
+             zs_release(&r, 0x11, 1u, "acme/ring-buffer"));
     enum vcs_package_accept_result ar = VCS_PACKAGE_ACCEPT_ERR_NULL;
     ZS_CHECK("releases: accepted envelope stored",
              vcs_package_store_put_release(s, &r, &ar) ==
@@ -848,7 +848,7 @@ int t_store_releases(void)
 
     struct vcs_package_release forked;
     ZS_CHECK("releases: equivocation fixture signs",
-             zs_release(&forked, 0x11, 1u, "rhett/ring-buffer-fork"));
+             zs_release(&forked, 0x11, 1u, "acme/ring-buffer-fork"));
     ZS_CHECK("releases: equivocation rejected, nothing stored",
              vcs_package_store_put_release(s, &forked, &ar) ==
                  VCS_PACKAGE_STORE_ERR_ACCEPT &&
