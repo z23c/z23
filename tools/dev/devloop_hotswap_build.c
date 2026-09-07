@@ -4335,16 +4335,68 @@ static bool hs_story_receipt_valid(
         json_get_bool(json_get(resident, "forbidden_effects_absent"));
 }
 
+static bool hs_proof_handoff_args_valid(
+    const char *source, const char *source_epoch, size_t changed_path_count,
+    const struct zcl_devloop_hotswap_build_receipt *build,
+    const struct json_value *resident, const struct json_value *out)
+{
+    return source && source_epoch && strlen(source_epoch) == 64 && build &&
+        build->artifact_sha256[0] && resident &&
+        resident->type == JSON_OBJ && out && changed_path_count != 0 &&
+        changed_path_count <= UINT32_MAX &&
+        hs_story_receipt_valid(source, build, resident);
+}
+
+static bool hs_proof_handoff_emit_identity(
+    struct json_value *out, const struct dev_reflex_proof_handoff_v2 *handoff)
+{
+    return json_push_kv_str(out, "schema", "zcl.dev_proof_handoff.v2") &&
+        json_push_kv_str(out, "candidate_epoch", handoff->candidate_epoch) &&
+        json_push_kv_str(out, "source_epoch", handoff->source_epoch) &&
+        json_push_kv_str(out, "affected_component",
+                         handoff->affected_component) &&
+        json_push_kv_str(out, "action", handoff->action) &&
+        json_push_kv_str(out, "proof_inputs_sha3",
+                         handoff->proof_inputs_sha3) &&
+        json_push_kv_str(out, "focused_evidence_sha3",
+                         handoff->focused_evidence_sha3) &&
+        json_push_kv_str(out, "feedback_class", handoff->feedback_class);
+}
+
+static bool hs_proof_handoff_emit_evidence(
+    struct json_value *out, const struct dev_reflex_proof_handoff_v2 *handoff)
+{
+    return json_push_kv_str(out, "candidate_object_root",
+                            handoff->candidate_object_root) &&
+        json_push_kv_str(out, "candidate_module_root",
+                         handoff->candidate_module_root) &&
+        json_push_kv_str(out, "story_root", handoff->story_root) &&
+        json_push_kv_str(out, "story_fixture_root",
+                         handoff->story_fixture_root) &&
+        json_push_kv_str(out, "observation_root",
+                         handoff->observation_root) &&
+        json_push_kv_int(out, "affected_file_count",
+                         handoff->affected_file_count) &&
+        json_push_kv_bool(out, "compile_green", true) &&
+        json_push_kv_bool(out, "story_obtained", true) &&
+        json_push_kv_bool(out, "reflex_final", true);
+}
+
+static bool hs_proof_handoff_emit(
+    struct json_value *out, const struct dev_reflex_proof_handoff_v2 *handoff)
+{
+    return hs_proof_handoff_emit_identity(out, handoff) &&
+        hs_proof_handoff_emit_evidence(out, handoff);
+}
+
 static bool hs_proof_handoff(
     const char *source, size_t changed_path_count,
     const struct zcl_devloop_hotswap_build_receipt *build,
     const struct json_value *resident, struct json_value *out)
 {
     const char *source_epoch = zcl_devloop_event_edit_epoch();
-    if (!source || !source_epoch || strlen(source_epoch) != 64 || !build ||
-        !build->artifact_sha256[0] || !resident || resident->type != JSON_OBJ ||
-        !out || changed_path_count == 0 || changed_path_count > UINT32_MAX ||
-        !hs_story_receipt_valid(source, build, resident))
+    if (!hs_proof_handoff_args_valid(source, source_epoch, changed_path_count,
+                                     build, resident, out))
         return false;
     const char *feedback_class =
         json_get_str(json_get(resident, "feedback_class"));
@@ -4410,31 +4462,7 @@ static bool hs_proof_handoff(
         dev_reflex_policy_service_builtin();
     if (!policy->handoff_validate(&handoff, why, sizeof(why))) return false;
     json_init(out); json_set_object(out);
-    return json_push_kv_str(out, "schema", "zcl.dev_proof_handoff.v2") &&
-        json_push_kv_str(out, "candidate_epoch", handoff.candidate_epoch) &&
-        json_push_kv_str(out, "source_epoch", handoff.source_epoch) &&
-        json_push_kv_str(out, "affected_component",
-                         handoff.affected_component) &&
-        json_push_kv_str(out, "action", handoff.action) &&
-        json_push_kv_str(out, "proof_inputs_sha3",
-                         handoff.proof_inputs_sha3) &&
-        json_push_kv_str(out, "focused_evidence_sha3",
-                         handoff.focused_evidence_sha3) &&
-        json_push_kv_str(out, "feedback_class", handoff.feedback_class) &&
-        json_push_kv_str(out, "candidate_object_root",
-                         handoff.candidate_object_root) &&
-        json_push_kv_str(out, "candidate_module_root",
-                         handoff.candidate_module_root) &&
-        json_push_kv_str(out, "story_root", handoff.story_root) &&
-        json_push_kv_str(out, "story_fixture_root",
-                         handoff.story_fixture_root) &&
-        json_push_kv_str(out, "observation_root",
-                         handoff.observation_root) &&
-        json_push_kv_int(out, "affected_file_count",
-                         handoff.affected_file_count) &&
-        json_push_kv_bool(out, "compile_green", true) &&
-        json_push_kv_bool(out, "story_obtained", true) &&
-        json_push_kv_bool(out, "reflex_final", true);
+    return hs_proof_handoff_emit(out, &handoff);
 }
 
 static bool hs_emit_event(const char *root, const char *source,
