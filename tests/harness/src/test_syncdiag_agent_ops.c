@@ -542,14 +542,8 @@ static bool sd_timeline_filtered_part1(const struct json_value *timeline_filtere
 static bool sd_timeline_filtered_part2(const struct json_value *timeline_filtered)
 {
     bool ok = true;
-    const struct json_value *timeline_filtered_events =
-        json_get(timeline_filtered, "events");
     const struct json_value *timeline_filtered_filters =
         json_get(timeline_filtered, "filters");
-    const struct json_value *timeline_filtered_first =
-        timeline_filtered_events && timeline_filtered_events->type == JSON_ARR
-            && json_size(timeline_filtered_events) > 0
-                ? json_at(timeline_filtered_events, 0) : NULL;
     ok = ok && timeline_filtered_filters &&
         json_get_int(json_get(timeline_filtered_filters, "height")) == 42;
     ok = ok && timeline_filtered_filters &&
@@ -560,6 +554,20 @@ static bool sd_timeline_filtered_part2(const struct json_value *timeline_filtere
         strcmp(json_get_str(json_get(timeline_filtered_filters,
                                      "condition")),
                "download_queue_starved") == 0;
+    return ok;
+}
+
+static bool sd_timeline_filtered_part2b(const struct json_value *timeline_filtered)
+{
+    bool ok = true;
+    const struct json_value *timeline_filtered_events =
+        json_get(timeline_filtered, "events");
+    const struct json_value *timeline_filtered_filters =
+        json_get(timeline_filtered, "filters");
+    const struct json_value *timeline_filtered_first =
+        timeline_filtered_events && timeline_filtered_events->type == JSON_ARR
+            && json_size(timeline_filtered_events) > 0
+                ? json_at(timeline_filtered_events, 0) : NULL;
     ok = ok && timeline_filtered_filters &&
         strcmp(json_get_str(json_get(timeline_filtered_filters,
                                      "deploy")),
@@ -598,14 +606,6 @@ static bool sd_timeline_filtered_part3(const struct json_value *timeline_filtere
 static bool sd_timeline_cli_part1(const struct json_value *timeline_cli)
 {
     bool ok = true;
-    const struct json_value *timeline_cli_events =
-        json_get(timeline_cli, "events");
-    const struct json_value *timeline_cli_filters =
-        json_get(timeline_cli, "filters");
-    const struct json_value *timeline_cli_first =
-        timeline_cli_events && timeline_cli_events->type == JSON_ARR &&
-        json_size(timeline_cli_events) > 0
-            ? json_at(timeline_cli_events, 0) : NULL;
     ok = ok && timeline_cli->type == JSON_OBJ;
     ok = ok && strcmp(json_get_str(json_get(timeline_cli, "schema")),
                       "zcl.timeline.v2") == 0;
@@ -617,6 +617,20 @@ static bool sd_timeline_cli_part1(const struct json_value *timeline_cli)
         json_get_int(json_get(timeline_cli, "matched_before_limit")) == 1;
     ok = ok &&
         json_get_int(json_get(timeline_cli, "count_returned")) == 1;
+    return ok;
+}
+
+static bool sd_timeline_cli_part1b(const struct json_value *timeline_cli)
+{
+    bool ok = true;
+    const struct json_value *timeline_cli_events =
+        json_get(timeline_cli, "events");
+    const struct json_value *timeline_cli_filters =
+        json_get(timeline_cli, "filters");
+    const struct json_value *timeline_cli_first =
+        timeline_cli_events && timeline_cli_events->type == JSON_ARR &&
+        json_size(timeline_cli_events) > 0
+            ? json_at(timeline_cli_events, 0) : NULL;
     ok = ok && timeline_cli_filters &&
         json_get_bool(json_get(timeline_cli_filters, "active"));
     ok = ok && timeline_cli_first &&
@@ -1710,6 +1724,7 @@ static bool sd_timeline_filtered_scenario(struct sd_agent_ops_ctx *ctx)
                                 &timeline_filtered);
     ok = sd_timeline_filtered_part1(&timeline_filtered) && ok;
     ok = sd_timeline_filtered_part2(&timeline_filtered) && ok;
+    ok = sd_timeline_filtered_part2b(&timeline_filtered) && ok;
     ok = sd_timeline_filtered_part3(&timeline_filtered) && ok;
     json_free(&timeline_filtered);
     json_free(&timeline_filter_params);
@@ -1736,6 +1751,7 @@ static bool sd_timeline_cli_scenario(struct sd_agent_ops_ctx *ctx)
     bool ok = rpc_table_execute(&ctx->tbl, "timeline",
                                 &timeline_cli_params, &timeline_cli);
     ok = sd_timeline_cli_part1(&timeline_cli) && ok;
+    ok = sd_timeline_cli_part1b(&timeline_cli) && ok;
     json_free(&timeline_cli);
     json_free(&timeline_cli_params);
     return ok;
