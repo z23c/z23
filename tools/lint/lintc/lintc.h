@@ -364,5 +364,9 @@ int check_consensus_parity_run(int argc, char **argv);
 int check_consensus_parity_selftest(void);
 int check_systemd_memory_budget_run(int argc, char **argv);
 int check_systemd_memory_budget_selftest(void);
+int check_dumper_never_blocks_run(int argc, char **argv);
+int check_dumper_never_blocks_selftest(void);
+int check_supervisor_registration_run(int argc, char **argv);
+int check_supervisor_registration_selftest(void);
 
 #endif

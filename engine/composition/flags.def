@@ -767,11 +767,11 @@ Z23_FLAG("ZCL_DRIVE_WATCHDOG_SEC", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_DRY_RUN", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:108")
 Z23_FLAG("ZCL_DUMPER_BLOCKING_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_dumper_never_blocks.sh:165")
+          "undocumented; first use tools/lint/lintc/gate_dumper_never_blocks.c:402")
 Z23_FLAG("ZCL_DUMPER_BLOCKING_MANIFEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_dumper_never_blocks.sh:164")
+          "undocumented; first use tools/lint/lintc/gate_dumper_never_blocks.c:401")
 Z23_FLAG("ZCL_DUMPER_BLOCKING_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_dumper_never_blocks.sh:166")
+          "undocumented; first use tools/lint/lintc/gate_dumper_never_blocks.c:133")
 Z23_FLAG("ZCL_ED25519_BATCH_BENCH", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_zid.c:871")
 Z23_FLAG("ZCL_ENABLE_BIP37", "env_runtime", "-", "-",
@@ -1907,7 +1907,7 @@ Z23_FLAG("ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE", "env_build", "-", "-",
 Z23_FLAG("ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR", "env_build", "engine/services/src", "-",
           "undocumented; first use tools/scripts/check_service_result_convergence.sh:60")
 Z23_FLAG("ZCL_SERVICES_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_supervisor_registration.sh:80")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_registration.c:411")
 Z23_FLAG("ZCL_SESSION_ID", "env_runtime", "-", "-",
           "first use tools/dev/devloop_cycle.c:1009; documented at docs/ZVCS.md:258: [64 session_id] from ZCL_SESSION_ID")
 Z23_FLAG("ZCL_SHELL_HOST_BASELINE", "env_build", "-", "-",
@@ -2179,13 +2179,13 @@ Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_SCAN_ROOTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_SUPERVISOR_WORKER_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_supervisor_domain.sh:170")
 Z23_FLAG("ZCL_SUPREG_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_supervisor_registration.sh:124")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_registration.c:416")
 Z23_FLAG("ZCL_SUPREG_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/scripts/check_supervisor_registration.sh:201")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_registration.c:431")
 Z23_FLAG("ZCL_SUPREG_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_supervisor_registration.sh:200")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_registration.c:430")
 Z23_FLAG("ZCL_SUPREG_COVERAGE_ONLY", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_supervisor_registration.sh:227")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_registration.c:432")
 Z23_FLAG("ZCL_SV_PARALLEL_MIN_INPUTS", "env_runtime", "-", "-",
           "undocumented; first use engine/jobs/src/script_validate_verify.c:210")
 Z23_FLAG("ZCL_SYMBOL_FLOOR_BIN", "env_build", "-", "-",

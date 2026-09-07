@@ -177,6 +177,10 @@ static const struct lint_gate k_gates[] = {
       check_consensus_parity_selftest },
     { "check-systemd-memory-budget", check_systemd_memory_budget_run,
       check_systemd_memory_budget_selftest },
+    { "check-dumper-never-blocks", check_dumper_never_blocks_run,
+      check_dumper_never_blocks_selftest },
+    { "check-supervisor-registration", check_supervisor_registration_run,
+      check_supervisor_registration_selftest },
 };
 
 int main(int argc, char **argv)

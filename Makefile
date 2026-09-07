@@ -5358,6 +5358,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_test_registration.c \
     tools/lint/lintc/gate_consensus_parity.c \
     tools/lint/lintc/gate_systemd_memory_budget.c \
+    tools/lint/lintc/gate_dumper_never_blocks.c \
+    tools/lint/lintc/gate_supervisor_registration.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11812,7 +11814,7 @@ check-domain-purity: $(LINTC_TOOL)
 # the supervisor (Round 5) OR appear in supervisor_baseline.txt OR
 # carry a per-file `// supervisor-ok:<tag>` override marker. Drives
 # opt-in adoption of the supervisor primitive over Rounds 6-8.
-check-supervisor-registration:
+check-supervisor-registration: $(LINTC_TOOL)
 	@echo "══ LINT: supervisor registration ══"
 	@./tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh
 
@@ -13008,7 +13010,7 @@ check-frontier-single-writer:
 	@echo "══ LINT: one canonical writer per frontier ══"
 	@./tools/scripts/check_frontier_single_writer.sh
 
-check-dumper-never-blocks:
+check-dumper-never-blocks: $(LINTC_TOOL)
 	@echo "══ LINT: no dumpstate view blocks behind the reducer ══"
 	@./tools/scripts/check_dumper_never_blocks.sh
 
