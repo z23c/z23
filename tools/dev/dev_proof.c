@@ -5402,95 +5402,151 @@ static void warm_sidecar_write(const struct proof_paths *paths,
  * phase clock the outer worker already opened so build/capture and the rest
  * of the proof share one cumulative timer, and the warm-start survey filled
  * by generation_prepare() so the compile dimension can publish it. */
-static bool proof_worker_body(const struct proof_paths *paths,
-                              const char *local, const char *base,
-                              const char *generation, int64_t started_us,
-                              struct proof_phase_clock *phases,
-                              const struct proof_warmstart *warm,
-                              const char *const *files, size_t file_count,
-                              char *why, size_t why_len)
-{
-    struct proof_paths execution = *paths;
-    (void)snprintf(execution.root, sizeof(execution.root), "%s", generation);
+#define PROOF_GROUPS_MAX \
+    (ZCL_DEVLOOP_MAX_PLAN_SELECTIONS * (ZCL_TEST_GROUP_FULL_MAX + 1))
 
-    bool inventory_only = inventory_output_only(files, file_count);
+/* Everything one proof's steps hand each other. `paths` names the
+ * submitting checkout and `execution` the same path set with its root
+ * swapped for the generation, so each step can say which tree it means --
+ * the distinction that decides whether a `make` runs in the isolated
+ * generation or in the developer's own checkout. Nothing here is authority:
+ * the receipt is what this file publishes, and every field below is an
+ * input to it. */
+struct dp_worker {
+    const struct proof_paths *paths;
+    struct proof_paths execution;
+    const char *local;
+    const char *base;
+    const char *generation;
+    struct proof_phase_clock *phases;
+    const struct proof_warmstart *warm;
+    bool inventory_only;
     struct zcl_devloop_plan plan;
-    if (!zcl_devloop_plan_files(files, file_count, &plan)) {
+    char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
+    size_t plan_len;
+    struct dev_source_record source_before;
+    char sealed_source_id[65];
+    char sealed_mutation_id[65];
+    struct zcl_dev_proof_build_identity_v1 identity;
+    struct zcl_dev_acceptance_receipt_v1 receipt;
+    char make_jobs[16];
+    char groups[PROOF_GROUPS_MAX];
+    char only[PROOF_GROUPS_MAX + 8];
+    /* Warm-start sidecar inputs, held here so the bundle step can rewrite
+     * the sidecar with both build phases timed. */
+    const char *warm_compile_mode;
+    uint64_t warm_compile_ms;
+    char binary[PATH_MAX];
+    char generation_binary[PATH_MAX];
+    char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX];
+    uint8_t depfile_root[32];
+    uint8_t helper_root[32];
+    const char *lint_argv[PROOF_LINT_ARGV_CAP];
+    const char *lint_targets;
+    struct zcl_dev_proof_budget lint_budget;
+    bool lint_reads_artifacts;
+};
+
+/* The impact plan, closed and rendered once. */
+static bool dp_worker_plan(struct dp_worker *w, const char *const *files,
+                           size_t file_count, char *why, size_t why_len)
+{
+    if (!zcl_devloop_plan_files(files, file_count, &w->plan)) {
         proof_why(why, why_len, "impact_plan_invalid");
         return false;
     }
     const char *admission_reason = "";
-    if (!zcl_devloop_plan_add_closure(paths->root, files, file_count, &plan) ||
-        !zcl_devloop_plan_proof_admissible(&plan, &admission_reason)) {
+    if (!zcl_devloop_plan_add_closure(w->paths->root, files, file_count,
+                                      &w->plan) ||
+        !zcl_devloop_plan_proof_admissible(&w->plan, &admission_reason)) {
         proof_why(why, why_len,
                   admission_reason && admission_reason[0]
                       ? admission_reason : "impact_plan_incomplete");
         return false;
     }
-    proof_phase_mark(phases, "impact_plan_closure");
-    char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
+    proof_phase_mark(w->phases, "impact_plan_closure");
     /* Render the plan we just closed. The _closure spelling would open the
      * code index and re-walk the whole reverse-caller graph to rebuild the
      * plan sitting in this frame -- the most expensive phase of the proof,
      * paid twice for one answer. */
-    size_t plan_len = zcl_devloop_plan_json_render(
-        &plan, files, file_count, plan_json, sizeof(plan_json));
-    if (!plan_len) {
+    w->plan_len = zcl_devloop_plan_json_render(
+        &w->plan, files, file_count, w->plan_json, sizeof(w->plan_json));
+    if (!w->plan_len) {
         proof_why(why, why_len, "impact_plan_render_failed");
         return false;
     }
-    proof_phase_mark(phases, "impact_plan_render");
-    if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
-    proof_phase_mark(phases, "worktree_exact_recheck");
+    proof_phase_mark(w->phases, "impact_plan_render");
+    return true;
+}
 
-    struct dev_source_record source_before = {0}, source_after = {0};
-    char sealed_source_id[65], sealed_mutation_id[65];
-    if (!zcl_dev_source_identity_capture(generation, &source_before, why,
+/* The source identity this proof is about, sealed so every later step can
+ * be checked against the same answer. */
+static bool dp_worker_seal_source(struct dp_worker *w, char *why,
+                                  size_t why_len)
+{
+    if (!worktree_exact(w->paths->root, w->local, true, why, why_len))
+        return false;
+    proof_phase_mark(w->phases, "worktree_exact_recheck");
+    if (!zcl_dev_source_identity_capture(w->generation, &w->source_before, why,
                                          why_len)) {
         if (!why || !why[0])
             proof_why(why, why_len, "source_identity_capture_failed");
         return false;
     }
-    if (!source_before.cas_present) {
+    if (!w->source_before.cas_present) {
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
     }
-    proof_phase_mark(phases, "source_identity_capture");
-    memcpy(sealed_source_id, source_before.source_id,
-           sizeof(sealed_source_id));
-    memcpy(sealed_mutation_id, source_before.mutation_id,
-           sizeof(sealed_mutation_id));
-    struct zcl_dev_acceptance_receipt_v1 receipt = {0};
-    if (!zcl_dev_proof_oid_decode(local, receipt.local_commit,
-                                  &receipt.local_commit_len) ||
-        !zcl_dev_proof_oid_decode(base, receipt.remote_base,
-                                  &receipt.remote_base_len) ||
-        !zcl_hex_decode_lower(source_before.cas_root_sha3,
-                              receipt.source_cas_root, 32) ||
-        !zcl_hex_decode_lower(source_before.mutation_id,
-                              receipt.mutation_root, 32)) {
+    proof_phase_mark(w->phases, "source_identity_capture");
+    memcpy(w->sealed_source_id, w->source_before.source_id,
+           sizeof(w->sealed_source_id));
+    memcpy(w->sealed_mutation_id, w->source_before.mutation_id,
+           sizeof(w->sealed_mutation_id));
+    return true;
+}
+
+/* The commit pair, the source roots and the changed set, into the receipt. */
+static bool dp_worker_receipt_identity(struct dp_worker *w, char *why,
+                                       size_t why_len)
+{
+    struct zcl_dev_acceptance_receipt_v1 *receipt = &w->receipt;
+    if (!zcl_dev_proof_oid_decode(w->local, receipt->local_commit,
+                                  &receipt->local_commit_len) ||
+        !zcl_dev_proof_oid_decode(w->base, receipt->remote_base,
+                                  &receipt->remote_base_len) ||
+        !zcl_hex_decode_lower(w->source_before.cas_root_sha3,
+                              receipt->source_cas_root, 32) ||
+        !zcl_hex_decode_lower(w->source_before.mutation_id,
+                              receipt->mutation_root, 32)) {
         proof_why(why, why_len, "proof_identity_decode_failed");
         return false;
     }
-    hash_text("zcl.dev_proof_git_source.v1", local, strlen(local),
-              receipt.source_root);
-    if (!hash_file("zcl.dev_proof_changed_set.v1", paths->changed,
-                   receipt.changed_set_root)) {
+    hash_text("zcl.dev_proof_git_source.v1", w->local, strlen(w->local),
+              receipt->source_root);
+    if (!hash_file("zcl.dev_proof_changed_set.v1", w->paths->changed,
+                   receipt->changed_set_root)) {
         proof_why(why, why_len, "changed_set_hash_failed");
         return false;
     }
+    return true;
+}
+
+/* The impact policy, the four build-identity roots, and the impact plan
+ * digest that binds the policy to the plan this proof actually ran. */
+static bool dp_worker_build_identity(struct dp_worker *w, char *why,
+                                     size_t why_len)
+{
     char policy_path[PATH_MAX];
-    struct zcl_dev_proof_build_identity_v1 identity;
     struct dev_source_record original_plan_source = {0};
     if (snprintf(policy_path, sizeof(policy_path),
                  "%s/cognition/controllers/include/controllers/agent_impact_rules.def",
-                 generation) >= (int)sizeof(policy_path) ||
+                 w->generation) >= (int)sizeof(policy_path) ||
         !hash_file("zcl.dev_proof_impact_policy.v1", policy_path,
-                   receipt.impact_policy_root)) {
+                   w->receipt.impact_policy_root)) {
         proof_why(why, why_len, "proof_toolchain_or_policy_unavailable");
         return false;
     }
-    if (!proof_build_identity_capture(paths->root, &identity,
+    if (!proof_build_identity_capture(w->paths->root, &w->identity,
                                        original_plan_source.mutation_id,
                                        why, why_len)) {
         /* Keep the exact restart-plan diagnostic when capture supplied it. */
@@ -5501,7 +5557,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
     /* BASE_GENERATION names this plan's own source metadata, not the
      * independent generation's inode/timestamp token. Check it locally
      * before accepting the portable flags and graph as requested inputs. */
-    if (!zcl_dev_source_mutation_verify(paths->root, &original_plan_source,
+    if (!zcl_dev_source_mutation_verify(w->paths->root, &original_plan_source,
                                         why, why_len)) {
         fprintf(stderr, "[devproof] original build plan: source mutation no longer matches\n");
         proof_why(why, why_len, "proof_original_build_plan_source_changed");
@@ -5510,364 +5566,465 @@ static bool proof_worker_body(const struct proof_paths *paths,
     /* The same four roots the warm-start donor marker seals, from the same
      * call: the receipt and the donor gate cannot disagree about what this
      * build was. */
-    memcpy(receipt.compiler_root, identity.compiler, 32);
-    memcpy(receipt.flags_root, identity.flags, 32);
-    memcpy(receipt.environment_root, identity.environment, 32);
-    memcpy(receipt.build_graph_root, identity.build_graph, 32);
+    memcpy(w->receipt.compiler_root, w->identity.compiler, 32);
+    memcpy(w->receipt.flags_root, w->identity.flags, 32);
+    memcpy(w->receipt.environment_root, w->identity.environment, 32);
+    memcpy(w->receipt.build_graph_root, w->identity.build_graph, 32);
     struct sha3_256_ctx impact;
     hash_begin(&impact, "zcl.dev_proof_impact_plan.v1");
-    sha3_256_write(&impact, receipt.impact_policy_root, 32);
-    sha3_256_write(&impact, (const uint8_t *)plan_json, plan_len);
-    sha3_256_finalize(&impact, receipt.impact_policy_root);
+    sha3_256_write(&impact, w->receipt.impact_policy_root, 32);
+    sha3_256_write(&impact, (const uint8_t *)w->plan_json, w->plan_len);
+    sha3_256_finalize(&impact, w->receipt.impact_policy_root);
+    return true;
+}
 
-    struct zcl_dev_proof_dimension *generated =
-        &receipt.dimensions[ZCL_DEV_PROOF_GENERATED];
-    struct zcl_dev_proof_dimension *compile =
-        &receipt.dimensions[ZCL_DEV_PROOF_COMPILE];
-    struct zcl_dev_proof_dimension *lint =
-        &receipt.dimensions[ZCL_DEV_PROOF_LINT];
-    struct zcl_dev_proof_dimension *test =
-        &receipt.dimensions[ZCL_DEV_PROOF_TEST];
-    /* Warm-start sidecar inputs, hoisted so the bundle block can rewrite
-     * the sidecar with both build phases timed. */
-    const char *warm_compile_mode = "skipped";
-    uint64_t warm_compile_ms = 0;
-
-    char make_jobs[16];
-    if (!proof_make_jobs_arg(make_jobs)) {
+/* Which dimensions this proof runs, and the exact test selector. */
+static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
+{
+    struct zcl_dev_proof_dimension *dims = w->receipt.dimensions;
+    if (!proof_make_jobs_arg(w->make_jobs)) {
         proof_why(why, why_len, "proof_job_count_unavailable");
         return false;
     }
-
-    generated->selected = inventory_only ? 1 : 0;
-    bool compile_selected = !inventory_only && !plan.docs_only;
-    compile->selected = compile_selected ? 1 : 0;
-    lint->selected = inventory_only ? 0 : 1;
-    char groups[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
-                (ZCL_TEST_GROUP_FULL_MAX + 1)] = {0};
-    char only[sizeof(groups) + 8];
+    dims[ZCL_DEV_PROOF_GENERATED].selected = w->inventory_only ? 1 : 0;
+    bool compile_selected = !w->inventory_only && !w->plan.docs_only;
+    dims[ZCL_DEV_PROOF_COMPILE].selected = compile_selected ? 1 : 0;
+    dims[ZCL_DEV_PROOF_LINT].selected = w->inventory_only ? 0 : 1;
     uint32_t test_count = 0;
-    if (!build_test_selector(&plan, inventory_only, groups, sizeof(groups),
-                             &test_count)) {
+    if (!build_test_selector(&w->plan, w->inventory_only, w->groups,
+                             sizeof(w->groups), &test_count)) {
         proof_why(why, why_len, "test_selection_invalid_or_truncated");
         return false;
     }
-    test->selected = test_count;
+    dims[ZCL_DEV_PROOF_TEST].selected = test_count;
     /* Say why the run is this large, in a file a reader finds beside the test
      * log. Without this a universal selection looks like an unexplained
      * whole-catalog run. */
-    if (!proof_note_test_selection(&execution, plan.closure_universal,
+    if (!proof_note_test_selection(&w->execution, w->plan.closure_universal,
                                    test_count)) {
         proof_why(why, why_len, "test_selection_note_unwritable");
         return false;
     }
-    bool cycle_reused = !generated->selected && cycle_proof_reuse(
-        paths, source_before.cas_root_sha3, receipt.dimensions);
-    if (!cycle_reused) {
-        if (generated->selected) {
-            const char *argv[] = {"make", "--no-print-directory", make_jobs,
-                                  "check-capability-inventory-generated", NULL};
-            struct zcl_dev_proof_budget budget = proof_step_budget(
-                paths, "generated", PROOF_GENERATED_DEFAULT_MS);
-            if (!run_dimension(&execution, ZCL_DEV_PROOF_GENERATED, argv,
-                               generated, false, &budget, why, why_len))
-                return false;
-        } else unused_dimension(ZCL_DEV_PROOF_GENERATED, generated);
-        proof_phase_mark(phases, "dimension_generated");
-        if (compile->selected) {
-            char artifact[PATH_MAX];
-            warm_compile_mode = "reused";
-            int artifact_len = snprintf(artifact, sizeof(artifact),
-                                        "%s/build/bin/z23-dev", paths->root);
-            if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
-                !executable_reuse(paths, artifact,
-                                  &source_before, compile, NULL, 0)) {
-                warm_compile_mode = "built";
-                int64_t build_us0 = platform_time_monotonic_us();
-                const char *argv[] = {"make", "--no-print-directory", make_jobs,
-                                      "build-only", NULL};
-                struct zcl_dev_proof_budget budget = proof_step_budget(
-                    paths, "compile", PROOF_COMPILE_DEFAULT_MS);
-                bool built = run_dimension(&execution, ZCL_DEV_PROOF_COMPILE,
-                                           argv, compile, false, &budget, why,
-                                           why_len);
-                warm_compile_ms = (uint64_t)((platform_time_monotonic_us() -
-                                              build_us0) / 1000);
-                if (!built) {
-                    warm_sidecar_write(paths, warm, "failed",
-                                       warm_compile_ms, 0);
-                    return false;
-                }
-                /* The build finished for this commit: publish the donor
-                 * marker for the next generation. Best effort: a missing
-                 * marker only costs the next proof a cold build. */
-                (void)warm_marker_write(generation, paths->root, local,
-                                        base);
-            }
-            warm_sidecar_write(paths, warm, warm_compile_mode,
-                               warm_compile_ms, 0);
-        } else {
-            unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
-            warm_sidecar_write(paths, warm, "skipped", 0, 0);
-        }
-        proof_phase_mark(phases, "dimension_compile");
-        /* Lint proves the source; the test dimension proves the built
-         * runner. Neither feeds the other, so both children are launched
-         * before either is waited on and the proof pays for the longer of the
-         * two rather than their sum.
-         *
-         * EVERYTHING EITHER DIMENSION BUILDS OR IS HANDED HAPPENS BELOW,
-         * BEFORE THE FORK, IN ONE SEQUENCE: the shared admitted executables,
-         * the test runner, the depfile tree, and then a single `make` that
-         * builds the helper executables and -- for a landing, whose lint
-         * dimension runs the whole gate set -- every target that gate set
-         * can build. After the fork the lint dimension's make has nothing
-         * left to link and the test dimension runs no make at all, so
-         * neither can relink a file the other is reading. Two makes in one
-         * generation worktree race each other's build epochs, and a relink
-         * unlinks its output before writing it: that is how a landing
-         * proof's lint-gate shard exec'd a half-written build/bin/z23-lint
-         * and got rc=127 twice. */
-        struct proof_dimension_run runs[2];
-        size_t run_count = 0;
-        char binary[PATH_MAX] = {0}, generation_binary[PATH_MAX] = {0};
-        char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX] = {{0}};
-        uint8_t helper_root[32] = {0}, depfile_root[32] = {0};
-        const char *lint_argv[PROOF_LINT_ARGV_CAP];
-        int64_t lint_fallback_ms = PROOF_LINT_DEFAULT_MS;
-        const char *lint_targets = "lint-fast";
-        if (!proof_lint_prepare(paths->root, make_jobs, lint_argv,
-                                PROOF_LINT_ARGV_CAP, &lint_fallback_ms,
-                                &lint_targets)) {
-            proof_why(why, why_len, "lint_argv_invalid");
+    return true;
+}
+
+static bool dp_dim_generated(struct dp_worker *w,
+                             struct zcl_dev_proof_dimension *generated,
+                             char *why, size_t why_len)
+{
+    if (!generated->selected) {
+        unused_dimension(ZCL_DEV_PROOF_GENERATED, generated);
+        return true;
+    }
+    const char *argv[] = {"make", "--no-print-directory", w->make_jobs,
+                          "check-capability-inventory-generated", NULL};
+    struct zcl_dev_proof_budget budget = proof_step_budget(
+        w->paths, "generated", PROOF_GENERATED_DEFAULT_MS);
+    return run_dimension(&w->execution, ZCL_DEV_PROOF_GENERATED, argv,
+                         generated, false, &budget, why, why_len);
+}
+
+/* Reuse the submitting checkout's executable when its content matches the
+ * sealed source; otherwise build in the generation and publish the donor
+ * marker. Either way the sidecar says which happened. */
+static bool dp_dim_compile(struct dp_worker *w,
+                           struct zcl_dev_proof_dimension *compile,
+                           char *why, size_t why_len)
+{
+    if (!compile->selected) {
+        unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
+        warm_sidecar_write(w->paths, w->warm, "skipped", 0, 0);
+        return true;
+    }
+    char artifact[PATH_MAX];
+    w->warm_compile_mode = "reused";
+    int artifact_len = snprintf(artifact, sizeof(artifact),
+                                "%s/build/bin/z23-dev", w->paths->root);
+    if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
+        !executable_reuse(w->paths, artifact,
+                          &w->source_before, compile, NULL, 0)) {
+        w->warm_compile_mode = "built";
+        int64_t build_us0 = platform_time_monotonic_us();
+        const char *argv[] = {"make", "--no-print-directory", w->make_jobs,
+                              "build-only", NULL};
+        struct zcl_dev_proof_budget budget = proof_step_budget(
+            w->paths, "compile", PROOF_COMPILE_DEFAULT_MS);
+        bool built = run_dimension(&w->execution, ZCL_DEV_PROOF_COMPILE,
+                                   argv, compile, false, &budget, why,
+                                   why_len);
+        w->warm_compile_ms = (uint64_t)((platform_time_monotonic_us() -
+                                         build_us0) / 1000);
+        if (!built) {
+            warm_sidecar_write(w->paths, w->warm, "failed",
+                               w->warm_compile_ms, 0);
             return false;
         }
-        struct zcl_dev_proof_budget lint_budget =
-            proof_step_budget(paths, "lint", lint_fallback_ms);
-        if (lint->selected && paths->phases[0])
-            (void)zcl_dev_proof_phase_note(paths->phases, "lint_targets",
-                                           lint_targets);
-        if (!lint->selected) unused_dimension(ZCL_DEV_PROOF_LINT, lint);
-        if (!test->selected) unused_dimension(ZCL_DEV_PROOF_TEST, test);
-        /* Only the full gate set reads built artifacts (check-capability-
-         * closure walks the undefined symbols of build/bin/z23-dev, and the
-         * `lint:` umbrella names it and the confined package verifier as its
-         * own prerequisites), so only it needs the admitted executables. A
-         * lane proof on lint-fast pays none of this. */
-        bool lint_reads_artifacts =
-            lint->selected && proof_lint_targets_are_full(lint_targets);
-        only[0] = 0;
-        if (test->selected) {
-            if (strcmp(source_before.source_id, sealed_source_id) != 0 ||
-                strcmp(source_before.mutation_id, sealed_mutation_id) != 0) {
-                proof_whyf(
-                    why, why_len,
-                    "proof_saved_source_identity_changed_source_actual_%.16s_sealed_%.16s"
-                    "_mutation_actual_%.16s_sealed_%.16s",
-                    source_before.source_id, sealed_source_id,
-                    source_before.mutation_id, sealed_mutation_id);
-                return false;
-            }
-            struct dev_source_record generation_checkpoint = {0};
-            char checkpoint_why[160] = {0};
-            if (!zcl_dev_source_identity_capture(
-                    generation, &generation_checkpoint, checkpoint_why,
-                    sizeof(checkpoint_why))) {
-                proof_whyf(why, why_len,
-                           "proof_generation_source_checkpoint_%s",
-                           checkpoint_why[0] ? checkpoint_why : "failed");
-                return false;
-            }
-            if (strcmp(generation_checkpoint.source_id, sealed_source_id) != 0 ||
-                strcmp(generation_checkpoint.mutation_id,
-                       sealed_mutation_id) != 0) {
-                proof_whyf(
-                    why, why_len,
-                    "proof_generation_source_identity_changed_source_actual_%.16s_sealed_%.16s"
-                    "_mutation_actual_%.16s_sealed_%.16s",
-                    generation_checkpoint.source_id, sealed_source_id,
-                    generation_checkpoint.mutation_id, sealed_mutation_id);
-                return false;
-            }
-            if (!proof_stress_tests_env_prepare(why, why_len)) return false;
-            if (setenv("ZCL_TESTCACHE_STORE_ROOT", paths->root, 1) != 0) {
-                proof_why(why, why_len, "test_cache_store_root_unavailable");
-                return false;
-            }
-            if (snprintf(only, sizeof(only), "--exact=%s", groups) >=
-                (int)sizeof(only)) {
-                proof_why(why, why_len, "test_selection_invalid_or_truncated");
-                return false;
-            }
+        /* The build finished for this commit: publish the donor
+         * marker for the next generation. Best effort: a missing
+         * marker only costs the next proof a cold build. */
+        (void)warm_marker_write(w->generation, w->paths->root, w->local,
+                                w->base);
+    }
+    warm_sidecar_write(w->paths, w->warm, w->warm_compile_mode,
+                       w->warm_compile_ms, 0);
+    return true;
+}
+
+/* The lint dimension's argv, budget and targets, and the two dimensions
+ * that are not selected marked unused. */
+static bool dp_worker_lint_plan(struct dp_worker *w,
+                                struct zcl_dev_proof_dimension *lint,
+                                struct zcl_dev_proof_dimension *test,
+                                char *why, size_t why_len)
+{
+    int64_t lint_fallback_ms = PROOF_LINT_DEFAULT_MS;
+    w->lint_targets = "lint-fast";
+    if (!proof_lint_prepare(w->paths->root, w->make_jobs, w->lint_argv,
+                            PROOF_LINT_ARGV_CAP, &lint_fallback_ms,
+                            &w->lint_targets)) {
+        proof_why(why, why_len, "lint_argv_invalid");
+        return false;
+    }
+    w->lint_budget = proof_step_budget(w->paths, "lint", lint_fallback_ms);
+    if (lint->selected && w->paths->phases[0])
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "lint_targets",
+                                       w->lint_targets);
+    if (!lint->selected) unused_dimension(ZCL_DEV_PROOF_LINT, lint);
+    if (!test->selected) unused_dimension(ZCL_DEV_PROOF_TEST, test);
+    /* Only the full gate set reads built artifacts (check-capability-
+     * closure walks the undefined symbols of build/bin/z23-dev, and the
+     * `lint:` umbrella names it and the confined package verifier as its
+     * own prerequisites), so only it needs the admitted executables. A
+     * lane proof on lint-fast pays none of this. */
+    w->lint_reads_artifacts =
+        lint->selected && proof_lint_targets_are_full(w->lint_targets);
+    return true;
+}
+
+/* Everything that must still be true of the source before a test runner is
+ * launched, plus the environment and the --exact argument it runs under.
+ * The two identity rechecks are the reason a source edit during a proof
+ * cannot be admitted by it. */
+static bool dp_worker_test_env(struct dp_worker *w, char *why, size_t why_len)
+{
+    if (strcmp(w->source_before.source_id, w->sealed_source_id) != 0 ||
+        strcmp(w->source_before.mutation_id, w->sealed_mutation_id) != 0) {
+        proof_whyf(
+            why, why_len,
+            "proof_saved_source_identity_changed_source_actual_%.16s_sealed_%.16s"
+            "_mutation_actual_%.16s_sealed_%.16s",
+            w->source_before.source_id, w->sealed_source_id,
+            w->source_before.mutation_id, w->sealed_mutation_id);
+        return false;
+    }
+    struct dev_source_record generation_checkpoint = {0};
+    char checkpoint_why[160] = {0};
+    if (!zcl_dev_source_identity_capture(
+            w->generation, &generation_checkpoint, checkpoint_why,
+            sizeof(checkpoint_why))) {
+        proof_whyf(why, why_len,
+                   "proof_generation_source_checkpoint_%s",
+                   checkpoint_why[0] ? checkpoint_why : "failed");
+        return false;
+    }
+    if (strcmp(generation_checkpoint.source_id, w->sealed_source_id) != 0 ||
+        strcmp(generation_checkpoint.mutation_id,
+               w->sealed_mutation_id) != 0) {
+        proof_whyf(
+            why, why_len,
+            "proof_generation_source_identity_changed_source_actual_%.16s_sealed_%.16s"
+            "_mutation_actual_%.16s_sealed_%.16s",
+            generation_checkpoint.source_id, w->sealed_source_id,
+            generation_checkpoint.mutation_id, w->sealed_mutation_id);
+        return false;
+    }
+    if (!proof_stress_tests_env_prepare(why, why_len)) return false;
+    if (setenv("ZCL_TESTCACHE_STORE_ROOT", w->paths->root, 1) != 0) {
+        proof_why(why, why_len, "test_cache_store_root_unavailable");
+        return false;
+    }
+    if (snprintf(w->only, sizeof(w->only), "--exact=%s", w->groups) >=
+        (int)sizeof(w->only)) {
+        proof_why(why, why_len, "test_selection_invalid_or_truncated");
+        return false;
+    }
+    return true;
+}
+
+/* The submitting checkout could not supply an admissible runner
+ * or helper set: build one in the generation and re-admit. */
+static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
+                             char *why, size_t why_len)
+{
+    if (why && why_len > 0) why[0] = 0;
+    const char *bundle_argv[] = {
+        "make", "--no-print-directory", w->make_jobs,
+        "dev-proof-bundle", NULL};
+    struct zcl_dev_proof_budget bundle_budget =
+        proof_step_budget(w->paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
+    int64_t bundle_us0 = platform_time_monotonic_us();
+    int bundle_rc = run_step(w->paths, w->generation, w->paths->bundle_log,
+                             bundle_argv, "bundle", &bundle_budget, NULL);
+    /* First attempt only; a recovery rerun is rare and stays
+     * visible in the retry log. */
+    uint64_t bundle_ms = (uint64_t)((platform_time_monotonic_us() -
+                                     bundle_us0) / 1000);
+    if (bundle_rc != 0 && proof_log_contains(
+            w->paths->bundle_log,
+            "unverified compile epoch appeared after recovery "
+            "admission; rerun make")) {
+        char retry_log[PATH_MAX];
+        if (snprintf(retry_log, sizeof(retry_log), "%s.retry",
+                     w->paths->bundle_log) >= (int)sizeof(retry_log)) {
+            proof_why(why, why_len, "proof_bundle_retry_log_invalid");
+            return false;
         }
-        /* Admit, then build. The admission is content-checked against the
-         * source identity this proof sealed, and marks each entry fresh, so
-         * the build below treats them as up to date instead of relinking the
-         * dev object graph. Doing it first also means the build is the LAST
-         * thing that touches build/ before the fork. */
-        bool inputs_ready = !test->selected || test_binary_path(paths, binary);
-        inputs_ready = inputs_ready &&
-            proof_generation_inputs_prepare(
-                paths, generation, &source_before, test->selected != 0,
-                lint_reads_artifacts, binary, generation_binary, admitted,
-                depfile_root, why, why_len);
-        if (!inputs_ready && !test->selected) {
+        bundle_rc = run_step(w->paths, w->generation, retry_log,
+                             bundle_argv, "bundle", &bundle_budget, NULL);
+    }
+    if (bundle_rc != 0) {
+        proof_why(why, why_len, "proof_bundle_build_failed");
+        return false;
+    }
+#if defined(__APPLE__)
+    /* Compare the executed bundle's plan to the requested
+     * flags and graph, binding its mutation token to this
+     * generation's own source metadata. */
+    if (!zcl_dev_proof_build_plan_verify(
+            w->generation, &w->identity, w->sealed_mutation_id,
+            why, why_len)) {
+        return false;
+    }
+#endif
+    if (!test_binary_path(&w->execution, w->binary) ||
+        !proof_generation_inputs_prepare(
+            &w->execution, w->generation, &w->source_before,
+            test_selected, w->lint_reads_artifacts, w->binary,
+            w->generation_binary, w->admitted, w->depfile_root, why,
+            why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_bundle_admission_failed");
+        return false;
+    }
+    /* Both build phases are timed now: refresh the sidecar so the
+     * receipt directory carries the full compile story. */
+    warm_sidecar_write(w->paths, w->warm, w->warm_compile_mode,
+                       w->warm_compile_ms, bundle_ms);
+    return true;
+}
+
+/* EVERYTHING EITHER DIMENSION BUILDS OR IS HANDED HAPPENS HERE,
+ * BEFORE THE FORK, IN ONE SEQUENCE: the shared admitted executables,
+ * the test runner, the depfile tree, and then a single `make` that
+ * builds the helper executables and -- for a landing, whose lint
+ * dimension runs the whole gate set -- every target that gate set
+ * can build. After the fork the lint dimension's make has nothing
+ * left to link and the test dimension runs no make at all, so
+ * neither can relink a file the other is reading. Two makes in one
+ * generation worktree race each other's build epochs, and a relink
+ * unlinks its output before writing it: that is how a landing
+ * proof's lint-gate shard exec'd a half-written build/bin/z23-lint
+ * and got rc=127 twice.
+ *
+ * Admit, then build. The admission is content-checked against the
+ * source identity this proof sealed, and marks each entry fresh, so
+ * the build below treats them as up to date instead of relinking the
+ * dev object graph. Doing it first also means the build is the LAST
+ * thing that touches build/ before the fork. */
+static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
+                              char *why, size_t why_len)
+{
+    bool inputs_ready = !test_selected || test_binary_path(w->paths, w->binary);
+    inputs_ready = inputs_ready &&
+        proof_generation_inputs_prepare(
+            w->paths, w->generation, &w->source_before, test_selected,
+            w->lint_reads_artifacts, w->binary, w->generation_binary,
+            w->admitted, w->depfile_root, why, why_len);
+    if (!inputs_ready) {
+        if (!test_selected) {
             if (!why || !why[0])
                 proof_why(why, why_len, "proof_lint_admission_failed");
             return false;
         }
-        if (!inputs_ready) {
-            /* The submitting checkout could not supply an admissible runner
-             * or helper set: build one in the generation and re-admit. */
-            if (why && why_len > 0) why[0] = 0;
-            const char *bundle_argv[] = {
-                "make", "--no-print-directory", make_jobs,
-                "dev-proof-bundle", NULL};
-            struct zcl_dev_proof_budget bundle_budget =
-                proof_step_budget(paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
-            int64_t bundle_us0 = platform_time_monotonic_us();
-            int bundle_rc = run_step(paths, generation, paths->bundle_log,
-                                     bundle_argv, "bundle",
-                                     &bundle_budget, NULL);
-            /* First attempt only; a recovery rerun is rare and stays
-             * visible in the retry log. */
-            uint64_t bundle_ms = (uint64_t)((platform_time_monotonic_us() -
-                                             bundle_us0) / 1000);
-            if (bundle_rc != 0 && proof_log_contains(
-                    paths->bundle_log,
-                    "unverified compile epoch appeared after recovery "
-                    "admission; rerun make")) {
-                char retry_log[PATH_MAX];
-                if (snprintf(retry_log, sizeof(retry_log), "%s.retry",
-                             paths->bundle_log) >= (int)sizeof(retry_log)) {
-                    proof_why(why, why_len, "proof_bundle_retry_log_invalid");
-                    return false;
-                }
-                bundle_rc = run_step(paths, generation, retry_log,
-                                     bundle_argv, "bundle",
-                                     &bundle_budget, NULL);
-            }
-            if (bundle_rc != 0) {
-                proof_why(why, why_len, "proof_bundle_build_failed");
-                return false;
-            }
-#if defined(__APPLE__)
-            /* Compare the executed bundle's plan to the requested
-             * flags and graph, binding its mutation token to this
-             * generation's own source metadata. */
-            if (!zcl_dev_proof_build_plan_verify(
-                    generation, &identity, sealed_mutation_id,
-                    why, why_len)) {
-                return false;
-            }
-#endif
-            if (!test_binary_path(&execution, binary) ||
-                !proof_generation_inputs_prepare(
-                    &execution, generation, &source_before,
-                    test->selected != 0, lint_reads_artifacts, binary,
-                    generation_binary, admitted, depfile_root, why, why_len)) {
-                if (!why || !why[0])
-                    proof_why(why, why_len, "proof_bundle_admission_failed");
-                return false;
-            }
-            /* Both build phases are timed now: refresh the sidecar so the
-             * receipt directory carries the full compile story. */
-            warm_sidecar_write(paths, warm, warm_compile_mode,
-                               warm_compile_ms, bundle_ms);
-        }
-        /* The one build both dimensions share. Nothing after this links
-         * anything until both children have exited. */
-        if ((test->selected || lint_reads_artifacts) &&
-            !proof_prefork_build(paths, generation, make_jobs,
-                                 lint_reads_artifacts, why, why_len))
-            return false;
-        if (test->selected &&
-            !test_helpers_hash(generation, generation_binary, admitted,
-                               depfile_root, helper_root, why, why_len))
-            return false;
-        proof_phase_mark(phases, "prefork_inputs_and_build");
-        const char *test_argv[] = {generation_binary, only, "--cache",
-                                   "--activate-proof-contracts", NULL};
-        struct zcl_dev_proof_budget test_budget =
-            zcl_dev_proof_test_budget(paths->state, groups, test->selected);
-        if (lint->selected &&
-            !dimension_start(&execution, execution.root, &runs[run_count],
-                             ZCL_DEV_PROOF_LINT, lint_argv, lint, false,
-                             &lint_budget, why, why_len))
-            return false;
-        if (lint->selected) run_count++;
-        if (test->selected &&
-            !dimension_start(&execution, execution.root, &runs[run_count],
-                             ZCL_DEV_PROOF_TEST, test_argv, test, true,
-                             &test_budget, why, why_len)) {
-            dimension_runs_wait(runs, run_count);
-            for (size_t i = 0; i < run_count; i++)
-                (void)dimension_finish(&execution, &runs[i], NULL, 0);
-            return false;
-        }
-        if (test->selected) run_count++;
-        dimension_runs_wait(runs, run_count);
-        /* Say how long lint actually took, beside the targets it ran. The
-         * full gate set's cold cost inside a fresh generation -- dominated
-         * by check-standalone-tools-link, which is the one gate that runs
-         * `make` and links ~47 one-shot tools no compile dimension ever
-         * built -- is the number the landing budget is set against, so the
-         * next reader measures it instead of guessing. */
-        for (size_t i = 0; i < run_count; i++) {
-            char wall[32];
-            if (runs[i].id != ZCL_DEV_PROOF_LINT || !paths->phases[0])
-                continue;
-            if (snprintf(wall, sizeof(wall), "%lld",
-                         (long long)runs[i].step.report.elapsed_ms) <
-                (int)sizeof(wall))
-                (void)zcl_dev_proof_phase_note(paths->phases, "lint_wall_ms",
-                                               wall);
-        }
-        /* Fail closed on the first dimension that failed, in the order they
-         * would have run sequentially, and always finish every child so each
-         * one's log, receipt root and phases row survive the failure. */
-        bool dimensions_ok = true;
-        for (size_t i = 0; i < run_count; i++) {
-            char step_why[160] = {0};
-            if (dimension_finish(&execution, &runs[i], step_why,
-                                 sizeof(step_why)))
-                continue;
-            if (dimensions_ok) proof_why(why, why_len, step_why);
-            dimensions_ok = false;
-        }
-        if (!dimensions_ok) return false;
-        if (test->selected) test_receipt_bind_helpers(test, helper_root);
-        proof_phase_mark(phases, "dimension_lint_and_test");
+        if (!dp_worker_bundle(w, test_selected, why, why_len)) return false;
     }
-
-    if (!worktree_exact(generation, local, false, why, why_len))
+    /* The one build both dimensions share. Nothing after this links
+     * anything until both children have exited. */
+    if ((test_selected || w->lint_reads_artifacts) &&
+        !proof_prefork_build(w->paths, w->generation, w->make_jobs,
+                             w->lint_reads_artifacts, why, why_len))
         return false;
-    if (!zcl_dev_source_cas_capture(generation, &source_after) ||
+    if (test_selected &&
+        !test_helpers_hash(w->generation, w->generation_binary, w->admitted,
+                           w->depfile_root, w->helper_root, why, why_len))
+        return false;
+    proof_phase_mark(w->phases, "prefork_inputs_and_build");
+    return true;
+}
+
+/* Say how long lint actually took, beside the targets it ran. The
+ * full gate set's cold cost inside a fresh generation -- dominated
+ * by check-standalone-tools-link, which is the one gate that runs
+ * `make` and links ~47 one-shot tools no compile dimension ever
+ * built -- is the number the landing budget is set against, so the
+ * next reader measures it instead of guessing. */
+static void dp_worker_lint_wall_note(const struct dp_worker *w,
+                                     const struct proof_dimension_run *runs,
+                                     size_t run_count)
+{
+    for (size_t i = 0; i < run_count; i++) {
+        char wall[32];
+        if (runs[i].id != ZCL_DEV_PROOF_LINT || !w->paths->phases[0])
+            continue;
+        if (snprintf(wall, sizeof(wall), "%lld",
+                     (long long)runs[i].step.report.elapsed_ms) <
+            (int)sizeof(wall))
+            (void)zcl_dev_proof_phase_note(w->paths->phases, "lint_wall_ms",
+                                           wall);
+    }
+}
+
+/* Lint proves the source; the test dimension proves the built
+ * runner. Neither feeds the other, so both children are launched
+ * before either is waited on and the proof pays for the longer of the
+ * two rather than their sum. */
+static bool dp_worker_dimensions_run(struct dp_worker *w,
+                                     struct zcl_dev_proof_dimension *lint,
+                                     struct zcl_dev_proof_dimension *test,
+                                     char *why, size_t why_len)
+{
+    struct proof_dimension_run runs[2];
+    size_t run_count = 0;
+    const char *test_argv[] = {w->generation_binary, w->only, "--cache",
+                               "--activate-proof-contracts", NULL};
+    struct zcl_dev_proof_budget test_budget =
+        zcl_dev_proof_test_budget(w->paths->state, w->groups, test->selected);
+    if (lint->selected &&
+        !dimension_start(&w->execution, w->execution.root, &runs[run_count],
+                         ZCL_DEV_PROOF_LINT, w->lint_argv, lint, false,
+                         &w->lint_budget, why, why_len))
+        return false;
+    if (lint->selected) run_count++;
+    if (test->selected &&
+        !dimension_start(&w->execution, w->execution.root, &runs[run_count],
+                         ZCL_DEV_PROOF_TEST, test_argv, test, true,
+                         &test_budget, why, why_len)) {
+        dimension_runs_wait(runs, run_count);
+        for (size_t i = 0; i < run_count; i++)
+            (void)dimension_finish(&w->execution, &runs[i], NULL, 0);
+        return false;
+    }
+    if (test->selected) run_count++;
+    dimension_runs_wait(runs, run_count);
+    dp_worker_lint_wall_note(w, runs, run_count);
+    /* Fail closed on the first dimension that failed, in the order they
+     * would have run sequentially, and always finish every child so each
+     * one's log, receipt root and phases row survive the failure. */
+    bool dimensions_ok = true;
+    for (size_t i = 0; i < run_count; i++) {
+        char step_why[160] = {0};
+        if (dimension_finish(&w->execution, &runs[i], step_why,
+                             sizeof(step_why)))
+            continue;
+        if (dimensions_ok) proof_why(why, why_len, step_why);
+        dimensions_ok = false;
+    }
+    if (!dimensions_ok) return false;
+    if (test->selected) test_receipt_bind_helpers(test, w->helper_root);
+    return true;
+}
+
+/* Every dimension this proof actually runs, in order. */
+static bool dp_worker_dimensions(struct dp_worker *w, char *why,
+                                 size_t why_len)
+{
+    struct zcl_dev_proof_dimension *dims = w->receipt.dimensions;
+    struct zcl_dev_proof_dimension *lint = &dims[ZCL_DEV_PROOF_LINT];
+    struct zcl_dev_proof_dimension *test = &dims[ZCL_DEV_PROOF_TEST];
+    if (!dp_dim_generated(w, &dims[ZCL_DEV_PROOF_GENERATED], why, why_len))
+        return false;
+    proof_phase_mark(w->phases, "dimension_generated");
+    if (!dp_dim_compile(w, &dims[ZCL_DEV_PROOF_COMPILE], why, why_len))
+        return false;
+    proof_phase_mark(w->phases, "dimension_compile");
+    if (!dp_worker_lint_plan(w, lint, test, why, why_len)) return false;
+    w->only[0] = 0;
+    if (test->selected && !dp_worker_test_env(w, why, why_len)) return false;
+    if (!dp_worker_prefork(w, test->selected != 0, why, why_len)) return false;
+    if (!dp_worker_dimensions_run(w, lint, test, why, why_len)) return false;
+    proof_phase_mark(w->phases, "dimension_lint_and_test");
+    return true;
+}
+
+/* Prove the source never moved under the run, then publish the receipt.
+ * Nothing after this point may fail: the receipt IS the admission. */
+static bool dp_worker_publish(struct dp_worker *w, int64_t started_us,
+                              char *why, size_t why_len)
+{
+    struct dev_source_record source_after = {0};
+    if (!worktree_exact(w->generation, w->local, false, why, why_len))
+        return false;
+    if (!zcl_dev_source_cas_capture(w->generation, &source_after) ||
         !source_after.cas_present) {
         proof_why(why, why_len, "source_cas_recapture_failed");
         return false;
     }
-    if (strcmp(source_before.cas_root_sha3, source_after.cas_root_sha3) != 0) {
+    if (strcmp(w->source_before.cas_root_sha3,
+               source_after.cas_root_sha3) != 0) {
         proof_why(why, why_len, "source_epoch_superseded");
         return false;
     }
-    if (!zcl_dev_source_mutation_verify(generation, &source_before,
+    if (!zcl_dev_source_mutation_verify(w->generation, &w->source_before,
                                         why, why_len)) {
         fprintf(stderr, "[devproof] generation source mutation changed before receipt publication\n");
         proof_why(why, why_len, "proof_generation_mutation_changed");
         return false;
     }
-    receipt.created_unix = (uint64_t)platform_time_wall_unix();
-    receipt.elapsed_ms = (uint64_t)((platform_time_monotonic_us() - started_us) /
-                                    1000);
-    receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
-    receipt.complete = 1;
-    if (!receipt_store(paths, &receipt)) {
+    w->receipt.created_unix = (uint64_t)platform_time_wall_unix();
+    w->receipt.elapsed_ms =
+        (uint64_t)((platform_time_monotonic_us() - started_us) / 1000);
+    w->receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
+    w->receipt.complete = 1;
+    if (!receipt_store(w->paths, &w->receipt)) {
         proof_why(why, why_len, "receipt_publication_failed");
         return false;
     }
-    proof_unlink_if_current(paths, paths->failure);
+    proof_unlink_if_current(w->paths, w->paths->failure);
     return true;
+}
+
+static bool proof_worker_body(const struct proof_paths *paths,
+                              const char *local, const char *base,
+                              const char *generation, int64_t started_us,
+                              struct proof_phase_clock *phases,
+                              const struct proof_warmstart *warm,
+                              const char *const *files, size_t file_count,
+                              char *why, size_t why_len)
+{
+    struct dp_worker w = {0};
+    w.paths = paths;
+    w.execution = *paths;
+    (void)snprintf(w.execution.root, sizeof(w.execution.root), "%s",
+                   generation);
+    w.local = local;
+    w.base = base;
+    w.generation = generation;
+    w.phases = phases;
+    w.warm = warm;
+    w.inventory_only = inventory_output_only(files, file_count);
+    w.warm_compile_mode = "skipped";
+    if (!dp_worker_plan(&w, files, file_count, why, why_len)) return false;
+    if (!dp_worker_seal_source(&w, why, why_len)) return false;
+    if (!dp_worker_receipt_identity(&w, why, why_len)) return false;
+    if (!dp_worker_build_identity(&w, why, why_len)) return false;
+    if (!dp_worker_select(&w, why, why_len)) return false;
+    bool cycle_reused =
+        !w.receipt.dimensions[ZCL_DEV_PROOF_GENERATED].selected &&
+        cycle_proof_reuse(paths, w.source_before.cas_root_sha3,
+                          w.receipt.dimensions);
+    if (!cycle_reused && !dp_worker_dimensions(&w, why, why_len))
+        return false;
+    return dp_worker_publish(&w, started_us, why, why_len);
 }
 
 static bool proof_worker(const struct proof_paths *paths,
