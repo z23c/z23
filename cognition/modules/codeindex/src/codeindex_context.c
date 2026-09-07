@@ -22,6 +22,7 @@ static const char *const k_contexts[] = {
  * already the build/link units. File-name feature matches may refine a file
  * and expose the module/file disagreement as an overlap. */
 static const struct ci_module_context k_modules[] = {
+    {"appsync", "engine"},
     {"astro", "platform"}, {"base", "platform"}, {"bloom", "core"},
     {"chain", "core"}, {"chainlog", "engine"}, {"codec", "platform"},
     {"codeindex", "cognition"}, {"coins", "core"},

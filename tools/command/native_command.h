@@ -205,6 +205,9 @@ void zcl_native_handle_dev_app_scaffold(
 void zcl_native_handle_dev_app_simulate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_dev_app_sync(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_dev_change_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

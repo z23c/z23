@@ -405,6 +405,29 @@ ZCL_COMMAND_READY_READ(
         ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_app_simulate)
 
+ZCL_COMMAND_READY_COMMAND(
+    "dev.app.sync", "dev.app", "",
+    "Pull one App topic's signed events from a fleet peer",
+    "What this node holds for one (app_id, topic) and the frontier event id "
+    "it would ask a peer with, read live from the datadir's own table. With "
+    "--peer, the bounded pull itself: pulled/verified/refused counts and the "
+    "frontier after it. A checkout process holds no paired session, so a "
+    "call naming a peer is refused as NO_SESSION today and stores nothing; "
+    "the topic's byte budget comes from the App's own app.def and the chain "
+    "id from the selected network, never from anything a row claimed.", 0,
+    "app,events,sync,replicate,anti-entropy,peer",
+    "zcl.dev_app_sync_input.v1", "zcl.dev_app_sync.v1",
+    "app_id,topic,peer", "app_id,topic",
+    "z23 dev app sync social social.events.v1 --peer=node2",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_app_sync)
+
 ZCL_COMMAND_PLANNED_READ(
     "dev.app.inspect", "dev.app", "", "Inspect a resident App generation",
     "Will report one App's resident generation state and active leases "
