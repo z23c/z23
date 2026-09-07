@@ -3460,6 +3460,84 @@ static int test_semantics_contract_negative(void)
     return failures;
 }
 
+/* Builds the two-entry {branch, leaf} fixture registry both trait-bit tests
+ * below share, with `leaf.traits` set to a bit above ZCL_COMMAND_TRAIT_PROSE
+ * (the highest trait command_registry.c currently knows). A caller-set stale
+ * or future trait bit must fail validate() closed, not pass through
+ * silently. */
+static struct zcl_command_registry
+test_unknown_trait_bit_registry(struct zcl_command_spec out_specs[2])
+{
+    struct zcl_command_spec branch = {
+        .path = "x", .parent = "", .aliases = "", .summary = "branch x",
+        .semantics = "", .tags = "", .input_schema = "",
+        .output_schema = "", .input_keys = "", .positional_keys = "",
+        .example = "", .availability_reason = "", .compat_target = "",
+        .budget_bytes = 0, .layer = ZCL_COMMAND_LAYER_OPS,
+        .effect = ZCL_COMMAND_EFFECT_READ, .risk = ZCL_COMMAND_RISK_READ,
+        .scope = ZCL_COMMAND_SCOPE_LOCAL, .authority = ZCL_COMMAND_AUTH_PUBLIC,
+        .availability = ZCL_COMMAND_READY, .mode = ZCL_COMMAND_MODE_BRANCH,
+        .latency = ZCL_COMMAND_LATENCY_INSTANT, .cost = ZCL_COMMAND_COST_TINY,
+        .confirmation = ZCL_COMMAND_CONFIRM_NONE,
+        .allowed_lanes = ZCL_COMMAND_LANE_LOCAL,
+        .transports = ZCL_COMMAND_TRANSPORT_NATIVE, .handler = NULL,
+    };
+    struct zcl_command_spec leaf = {
+        .path = "x.y", .parent = "x", .aliases = "", .summary = "do a thing",
+        .semantics = "the settled result of the thing, read locally",
+        .tags = "t", .input_schema = "zcl.in.v1",
+        .output_schema = "zcl.out.v1", .input_keys = "",
+        .positional_keys = "", .example = "zclassic23 x y",
+        .availability_reason = "", .compat_target = "", .budget_bytes = 0,
+        .layer = ZCL_COMMAND_LAYER_OPS, .effect = ZCL_COMMAND_EFFECT_READ,
+        .risk = ZCL_COMMAND_RISK_READ, .scope = ZCL_COMMAND_SCOPE_LOCAL,
+        .authority = ZCL_COMMAND_AUTH_PUBLIC,
+        .availability = ZCL_COMMAND_READY, .mode = ZCL_COMMAND_MODE_SYNC,
+        .latency = ZCL_COMMAND_LATENCY_INSTANT, .cost = ZCL_COMMAND_COST_TINY,
+        .confirmation = ZCL_COMMAND_CONFIRM_NONE,
+        .allowed_lanes = ZCL_COMMAND_LANE_LOCAL,
+        .transports = ZCL_COMMAND_TRANSPORT_NATIVE,
+        .handler = contract_noop_handler,
+        .traits = 1U << 7,
+    };
+    out_specs[0] = branch;
+    out_specs[1] = leaf;
+    return (struct zcl_command_registry){ .commands = out_specs, .count = 2 };
+}
+
+/* A trait bit above ZCL_COMMAND_TRAIT_PROSE is not one the registry knows
+ * about; validate() must refuse it rather than let an unrecognized bit ride
+ * through into a real catalog undetected. */
+static int test_unknown_trait_bit_rejected(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[2];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char why[128] = { 0 };
+    TEST("validate rejects a trait bit above ZCL_COMMAND_TRAIT_PROSE") {
+        ASSERT(!zcl_command_registry_validate(&reg, why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The rejection above must name the actual defect, not a generic refusal, so
+ * a contributor who trips it does not have to go read command_registry.c to
+ * learn why their new trait bit was refused. */
+static int test_unknown_trait_bit_names_defect(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[2];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char why[128] = { 0 };
+    TEST("the rejection names unknown command trait") {
+        ASSERT(!zcl_command_registry_validate(&reg, why, sizeof(why)));
+        ASSERT(strstr(why, "unknown command trait") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* OS-B1: the real catalog now carries the contract on every leaf. */
 static int test_leaf_semantics_and_budget(void)
 {
@@ -4303,6 +4381,8 @@ int test_command_registry_catalog(void)
     failures += test_wallet_shielded_reads_bound();
     failures += test_ops_dash_dashboards_ported();
     failures += test_semantics_contract_negative();
+    failures += test_unknown_trait_bit_rejected();
+    failures += test_unknown_trait_bit_names_defect();
     failures += test_leaf_semantics_and_budget();
     failures += test_describe_emits_semantics();
     failures += test_every_describe_document_fits();
