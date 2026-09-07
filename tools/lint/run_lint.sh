@@ -187,7 +187,7 @@ gate_command() {
         check-stopwatch-skip-detector)     echo './tools/lint/check_stopwatch_skip_detector.sh' ;;
         check-proof-server-pin)            echo './tools/lint/check_proof_server_pin.sh' ;;
         check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh' ;;
-        check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh' ;;
+        check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh --selftest && ./tools/lint/check_verification_coverage.sh' ;;
         check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
         check-z23-release-install)         echo 'bash platform/packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
         check-published-platforms)         echo './tools/lint/check_published_platforms.sh --selftest && ./tools/lint/check_published_platforms.sh' ;;

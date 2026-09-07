@@ -5381,6 +5381,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_git_hooks_installed.c \
     tools/lint/lintc/gate_fleet_facts.c \
     tools/lint/lintc/gate_fleet_facts_selftest.c \
+    tools/lint/lintc/gate_verification_coverage.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12601,8 +12602,9 @@ check-promotion-receipt-chain:
 # the script directly to see them — run_lint.sh captures passing gate output and
 # may cache-skip the gate; the reader-facing statement is build.yml's own
 # comment, which prong 5 forces to point at the manifest).
-check-verification-coverage:
+check-verification-coverage: $(LINTC_TOOL)
 	@echo "══ LINT: hosted CI verification coverage ══"
+	@./tools/lint/check_verification_coverage.sh --selftest
 	@./tools/lint/check_verification_coverage.sh
 
 # Gate — execute the exact remote activation transaction embedded in ship.sh.

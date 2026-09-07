@@ -219,6 +219,8 @@ static const struct lint_gate k_gates[] = {
     { "check-git-hooks-installed", check_git_hooks_installed_run,
       check_git_hooks_installed_selftest },
     { "check-fleet-facts", check_fleet_facts_run, check_fleet_facts_selftest },
+    { "check-verification-coverage", check_verification_coverage_run,
+      check_verification_coverage_selftest },
 };
 
 int main(int argc, char **argv)

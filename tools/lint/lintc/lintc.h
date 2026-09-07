@@ -409,5 +409,7 @@ int check_git_hooks_installed_run(int argc, char **argv);
 int check_git_hooks_installed_selftest(void);
 int check_fleet_facts_run(int argc, char **argv);
 int check_fleet_facts_selftest(void);
+int check_verification_coverage_run(int argc, char **argv);
+int check_verification_coverage_selftest(void);
 
 #endif
