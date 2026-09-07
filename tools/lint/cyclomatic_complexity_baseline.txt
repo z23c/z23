@@ -4280,7 +4280,6 @@ tools/command/native_zcode_toolchain_command.c:zcl_native_handle_zcode_toolchain
 tools/command/native_zcode_work_command.c:zcl_native_handle_zcode_work_accept:101
 tools/command/native_zcode_work_command.c:zcl_native_handle_zcode_work_publish:76
 tools/command/native_zcode_work_command.c:zcl_native_handle_zcode_work_review:82
-tools/command/native_zcode_work_command.c:zcl_native_handle_zcode_work_status:254
 tools/command/native_zcode_work_command.c:zwork_accept_action_resolve:19
 tools/command/native_zcode_work_command.c:zwork_accept_inner:18
 tools/command/native_zcode_work_command.c:zwork_bind_accepted_publication:17
