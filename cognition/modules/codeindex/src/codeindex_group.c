@@ -161,11 +161,16 @@ static bool group_ends_with(const char *group, const char *component)
            strcmp(group + group_length - component_length, component) == 0;
 }
 
-/* ── canned purposes for the well-known top groups ───────────────────── */
+/* ── canned purposes for the well-known top groups ─────────────────────
+ *
+ * One lookup per band of the taxonomy rather than one function with a
+ * hundred branches. The bands are tried in the order they appear below and
+ * the first non-empty answer wins, which is exactly what the single chain
+ * did — it is only readable now, and each piece sits under the complexity
+ * cap instead of holding the tree's largest baseline pin.  */
 
-const char *ci_group_purpose(const char *group)
+static const char *ci_purpose_roots_a(const char *group)
 {
-    if (!group || !group[0]) return "";
     if (strcmp(group, "contexts") == 0) return "feature-first product rooms";
     if (strcmp(group, "core") == 0) return "sealed consensus core (params, chainparams, math, consensus)";
     if (strcmp(group, "engine") == 0) return "node composition, execution, and the one-writer reducer";
@@ -174,6 +179,11 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "tools") == 0) return "dev/ops tooling and native command surfaces";
     if (strcmp(group, "tests") == 0) return "the canonical test runner, groups, fixtures, and specifications";
     if (strcmp(group, "docs") == 0) return "executable C23 examples embedded in maintained documentation";
+    return "";
+}
+
+static const char *ci_purpose_roots_b(const char *group)
+{
     if (strcmp(group, "app") == 0) return "external C23 package application sources";
     if (strcmp(group, "include") == 0) return "external C23 package public headers";
     if (strcmp(group, "src") == 0) return "external C23 package implementation sources";
@@ -181,6 +191,11 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "packages") == 0) return "reusable and independently buildable C23 packages";
     if (strcmp(group, "examples") == 0) return "small executable C23 usage examples";
     if (strcmp(group, "root") == 0) return "the source architecture";
+    return "";
+}
+
+static const char *ci_purpose_shapes(const char *group)
+{
     if (group_ends_with(group, "conditions")) return "shape: liveness/blocker conditions";
     if (group_ends_with(group, "controllers")) return "shape: REST + native + RPC request handlers";
     if (group_ends_with(group, "jobs")) return "shape: background jobs";
@@ -191,7 +206,11 @@ const char *ci_group_purpose(const char *group)
     if (group_ends_with(group, "reducer")) return "the only authoritative chain-state advancement room";
     if (group_ends_with(group, "ports")) return "interfaces required from the outside world";
     if (group_ends_with(group, "adapters")) return "platform implementations of ports";
+    return "";
+}
 
+static const char *ci_purpose_modules_a(const char *group)
+{
     /* One line per reusable module in k_lib_modules[] above. */
     if (module_group_is(group, "base")) return "dependency sink: LOG_*/GUARD* macros, log-level filter, checked allocators, zcl_result (references nothing in-tree)";
     if (module_group_is(group, "bloom")) return "bloom filters + merkle proofs for lightweight block/tx filtering";
@@ -206,6 +225,11 @@ const char *ci_group_purpose(const char *group)
     if (module_group_is(group, "crypto")) return "hash/cipher/PoW primitives and batched SHA3 acceleration: SHA-2, Blake2, ChaCha20-Poly1305, Ed25519, Equihash";
     if (module_group_is(group, "crypto_registry")) return "singleton catalog of pluggable cryptographic verifier implementations";
     if (module_group_is(group, "encoding")) return "string encoding helpers: money strings, hex/bin string encodings";
+    return "";
+}
+
+static const char *ci_purpose_modules_b(const char *group)
+{
     if (module_group_is(group, "engine")) return "engine-dispatch harness (pure half): vendor registry, request document, hardened response decoder, file envelope, key holder + redactor, and the gate-derived verdict";
     if (module_group_is(group, "event")) return "the in-process publish/subscribe event bus that decouples subsystems";
     if (module_group_is(group, "fingerprint")) return "behavioral fingerprints: fail-closed purity judgement, signature-derived call harnesses, shape-seeded input corpora";
@@ -219,6 +243,11 @@ const char *ci_group_purpose(const char *group)
     if (module_group_is(group, "metrics")) return "Prometheus-style in-process node metrics";
     if (module_group_is(group, "mining")) return "block template generation + the CPU miner loop";
     if (module_group_is(group, "net")) return "P2P networking: connman, peers, addrman, messages, Tor/onion, file market, fast sync";
+    return "";
+}
+
+static const char *ci_purpose_modules_c(const char *group)
+{
     if (module_group_is(group, "noise")) return "secure-session transport: Noise handshake (NK/XX) + post-handshake AEAD record layer";
     if (module_group_is(group, "platform")) return "thin OS-portability wrappers: monotonic clock, RNG, time_t/timespec conversions";
     if (module_group_is(group, "policy")) return "mempool/relay fee policy (min relay fee, fee estimation)";
@@ -231,6 +260,11 @@ const char *ci_group_purpose(const char *group)
     if (module_group_is(group, "storage")) return "persistence layer: event log, coins/anchor/nullifier KV stores, block index, projections";
     if (module_group_is(group, "support")) return "page-locked allocations and the compatibility include for base-owned secure cleanse";
     if (module_group_is(group, "sync")) return "sync + snapshot-sync state machines (single owner of sync_state/sync_planner)";
+    return "";
+}
+
+static const char *ci_purpose_modules_d(const char *group)
+{
     if (module_group_is(group, "util")) return "shared low-level utilities: logging, boot phase/progress, blockers, supervisor, safe_alloc";
     if (module_group_is(group, "validation")) return "consensus block/tx validation: connect_block, mempool accept, checkpoint, tx_verifier";
     if (module_group_is(group, "vcs")) return "in-binary ZVCS: source+binary snapshot/revert, sealed-core commitment guard";
@@ -243,6 +277,11 @@ const char *ci_group_purpose(const char *group)
     if (module_group_is(group, "zanc")) return "ZCL Anchors (ZANC) on-chain SHA2/SHA3 software-package anchoring overlay";
     if (module_group_is(group, "zdir")) return "ZCL Directory (ZDIR) on-chain node directory overlay — .onion peer discovery folded from block history";
     if (module_group_is(group, "zid")) return "sovereign identity Phase 1: signed identity documents + blinded record keys (ed25519/SHA3, pure codec)";
+    return "";
+}
+
+static const char *ci_purpose_modules_e(const char *group)
+{
     if (module_group_is(group, "codeindex")) return "the in-binary source-code navigator index: scan, store, query, the `code` CLI";
     if (module_group_is(group, "ontology")) return "canonical source-universe, contextual predicate-calculus objects, and bounded paraconsistent inference";
     if (module_group_is(group, "fleetfacts")) return "what the fleet has written down about itself — which executor handles which unit kind, what a train and a proof require, which failure signature names which trap — as typed rows over a closed vocabulary, asked by subject";
@@ -255,7 +294,11 @@ const char *ci_group_purpose(const char *group)
     if (module_group_is(group, "territory")) return "generated per-module scorecard: what a module owns, what proves it (routed vs actually reached), what it depends on, where it is weak";
     if (module_group_is(group, "kpi")) return "the durable ledger of the numbers this build already produces: canonical frames appended to a hash-chained log, where a metric nobody could read is UNAVAILABLE and never 0";
     if (module_group_is(group, "metaverse")) return "sovereign digital property: property identity, action vocabulary, read-only per-kind catalog adapters, the pure grant/delegation rule evaluator, signed hash-chained receipts";
+    return "";
+}
 
+static const char *ci_purpose_rooms(const char *group)
+{
     if (strcmp(group, "platform/domain") == 0) return "pure framework-free encoding and platform value objects";
     if (strcmp(group, "contexts/wallet/domain") == 0) return "pure framework-free wallet key derivation and mnemonic math";
 
@@ -268,7 +311,27 @@ const char *ci_group_purpose(const char *group)
     if (starts_seg(group, "engine")) return "execution and composition room";
     if (starts_seg(group, "cognition")) return "software-understanding room";
     if (starts_seg(group, "platform")) return "outside-world boundary room";
+    return "";
+}
 
+const char *ci_group_purpose(const char *group)
+{
+    if (!group || !group[0]) return "";
+    static const char *(*const k_bands[])(const char *) = {
+        ci_purpose_roots_a,
+        ci_purpose_roots_b,
+        ci_purpose_shapes,
+        ci_purpose_modules_a,
+        ci_purpose_modules_b,
+        ci_purpose_modules_c,
+        ci_purpose_modules_d,
+        ci_purpose_modules_e,
+        ci_purpose_rooms,
+    };
+    for (size_t i = 0; i < sizeof k_bands / sizeof k_bands[0]; i++) {
+        const char *purpose = k_bands[i](group);
+        if (purpose[0]) return purpose;
+    }
     return "";
 }
 

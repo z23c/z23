@@ -98,7 +98,6 @@ cognition/modules/codeindex/src/codeindex_focus.c:specialist_focus_rank:57
 cognition/modules/codeindex/src/codeindex_freshness.c:store_is_stale_profile:26
 cognition/modules/codeindex/src/codeindex_group.c:ci_group_emit_all:18
 cognition/modules/codeindex/src/codeindex_group.c:ci_group_for_path:21
-cognition/modules/codeindex/src/codeindex_group.c:ci_group_purpose:97
 cognition/modules/codeindex/src/codeindex_impact.c:codeindex_forward_closure:41
 cognition/modules/codeindex/src/codeindex_impact.c:codeindex_reverse_includes:17
 cognition/modules/codeindex/src/codeindex_impact.c:impact_closure_impl:36
