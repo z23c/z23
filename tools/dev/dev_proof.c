@@ -1554,12 +1554,12 @@ static bool dp_copy_stamp_close(int output, const struct stat *source_st)
     return ok;
 }
 
-/* A fresh copy owns no source metadata: it gets owner-only permissions and
- * the time of the copy. Both steps run whatever the first one does. */
-static bool dp_copy_private_close(int output)
+/* A fresh copy owns no source metadata: it gets the caller's owner-only
+ * mode and the time of the copy. Both steps run whatever the first does. */
+static bool dp_copy_mode_close(int output, mode_t mode)
 {
     bool ok = true;
-    if (fchmod(output, 0600) != 0) ok = false;
+    if (fchmod(output, mode) != 0) ok = false;
     if (close(output) != 0) ok = false;
     return ok;
 }
@@ -1726,7 +1726,7 @@ static bool dependency_copy_fresh(const char *source, const char *target)
         dp_copy_temp_open(target, temporary, &output);
     if (ok) ok = dp_copy_bytes(input, output);
     if (close(input) != 0) ok = false;
-    if (output >= 0 && !dp_copy_private_close(output)) ok = false;
+    if (output >= 0 && !dp_copy_mode_close(output, 0600)) ok = false;
     if (ok && rename(temporary, target) != 0) ok = false;
     if (!ok && output >= 0) (void)unlink(temporary);
     return ok;
@@ -2030,25 +2030,12 @@ static bool warm_copy_file(const char *source, const char *target)
     if (input < 0) return false;
     struct stat st;
     char temporary[PATH_MAX];
-    int temporary_len = snprintf(temporary, sizeof(temporary),
-                                 "%s.tmp.XXXXXX", target);
+    int output = -1;
     bool ok = fstat(input, &st) == 0 && S_ISREG(st.st_mode) &&
-        temporary_len > 0 && temporary_len < (int)sizeof(temporary);
-    int output = ok ? mkstemp(temporary) : -1;
-    if (output < 0) ok = false;
-    unsigned char buffer[65536];
-    while (ok) {
-        ssize_t got = read(input, buffer, sizeof(buffer));
-        if (got < 0 && errno == EINTR) continue;
-        if (got < 0) ok = false;
-        if (got <= 0) break;
-        ok = write_all(output, buffer, (size_t)got);
-    }
+        dp_copy_temp_open(target, temporary, &output);
+    if (ok) ok = dp_copy_bytes(input, output);
     if (close(input) != 0) ok = false;
-    if (output >= 0) {
-        if (fchmod(output, 0700) != 0) ok = false;
-        if (close(output) != 0) ok = false;
-    }
+    if (output >= 0 && !dp_copy_mode_close(output, 0700)) ok = false;
     if (ok && rename(temporary, target) != 0) ok = false;
     if (!ok && output >= 0) (void)unlink(temporary);
     return ok;
@@ -2139,17 +2126,14 @@ static void warm_seed_file(const char *donor_file, const char *gen_file,
     accum->bytes += (uint64_t)donor_st->st_size;
 }
 
-static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
-                           const char *rel_prefix, bool copy_wrapper,
-                           struct warm_seed_accum *accum)
+/* The walk creates its own target directory chain: readdir order is
+ * unspecified, so a file may precede its directory, and the caller
+ * may hand down a root whose own parents do not exist yet (the seam
+ * test seeds into a bare fixture). dependency_parent_ensure builds
+ * the ancestors; the mkdir takes the directory itself. */
+static bool dp_seed_dir_ensure(const char *gen_dir)
 {
-    /* The walk creates its own target directory chain: readdir order is
-     * unspecified, so a file may precede its directory, and the caller
-     * may hand down a root whose own parents do not exist yet (the seam
-     * test seeds into a bare fixture). dependency_parent_ensure builds
-     * the ancestors; the mkdir takes the directory itself. */
     struct stat gen_dir_st;
-    if (!accum || accum->failed) return;
     if (lstat(gen_dir, &gen_dir_st) != 0) {
         char probe[PATH_MAX];
         if (errno != ENOENT ||
@@ -2157,12 +2141,87 @@ static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
                 (int)sizeof(probe) ||
             !dependency_parent_ensure(probe) ||
             (mkdir(gen_dir, 0700) != 0 && errno != EEXIST) ||
-            lstat(gen_dir, &gen_dir_st) != 0) {
-            accum->failed = true;
-            return;
-        }
+            lstat(gen_dir, &gen_dir_st) != 0)
+            return false;
     }
-    if (!S_ISDIR(gen_dir_st.st_mode) || S_ISLNK(gen_dir_st.st_mode)) {
+    return S_ISDIR(gen_dir_st.st_mode) && !S_ISLNK(gen_dir_st.st_mode);
+}
+
+/* The three names one entry needs: its path relative to the seed root, and
+ * the donor and generation sides of it. Truncation fails the whole seed. */
+static bool dp_seed_child_paths(const char *rel_prefix, const char *name,
+                                const char *donor_dir, const char *gen_dir,
+                                char rel[PATH_MAX], char donor_child[PATH_MAX],
+                                char gen_child[PATH_MAX])
+{
+    int rel_len = rel_prefix && rel_prefix[0]
+        ? snprintf(rel, PATH_MAX, "%s/%s", rel_prefix, name)
+        : snprintf(rel, PATH_MAX, "%s", name);
+    return rel_len > 0 && rel_len < PATH_MAX &&
+           snprintf(donor_child, PATH_MAX, "%s/%s", donor_dir,
+                    name) < PATH_MAX &&
+           snprintf(gen_child, PATH_MAX, "%s/%s", gen_dir, name) < PATH_MAX;
+}
+
+/* Whether the generation side of a donor subdirectory is a real directory
+ * this walk may descend into. */
+static bool dp_seed_subdir_ready(const char *gen_child)
+{
+    struct stat gen_st;
+    if (lstat(gen_child, &gen_st) != 0)
+        return errno == ENOENT && mkdir(gen_child, 0700) == 0;
+    return S_ISDIR(gen_st.st_mode) && !S_ISLNK(gen_st.st_mode);
+}
+
+static void dp_seed_regular(const char *donor_child, const char *gen_child,
+                            const char *rel, bool copy_wrapper,
+                            const struct stat *donor_st,
+                            struct warm_seed_accum *accum)
+{
+    enum warm_seed_class class = warm_classify_rel(rel, true);
+    if (class == WARM_SEED_SKIP) return;
+    /* The wrapper copy is caller-gated (bootstrap inputs must be
+     * unchanged); link-class outputs need no gate beyond the epoch. */
+    if (class == WARM_SEED_COPY && !copy_wrapper) return;
+    if (!dependency_parent_ensure(gen_child)) return;
+    warm_seed_file(donor_child, gen_child, rel, class, donor_st, accum);
+}
+
+/* One donor entry. Returns false only when the whole seed must fail;
+ * `*descend` says the caller should recurse into the paths it filled in. */
+static bool dp_seed_entry(const char *donor_dir, const char *gen_dir,
+                          const char *rel_prefix, const char *name,
+                          bool copy_wrapper, struct warm_seed_accum *accum,
+                          char rel[PATH_MAX], char donor_child[PATH_MAX],
+                          char gen_child[PATH_MAX], bool *descend)
+{
+    *descend = false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return true;
+    if (!dp_seed_child_paths(rel_prefix, name, donor_dir, gen_dir, rel,
+                             donor_child, gen_child))
+        return false;
+    struct stat donor_st;
+    if (lstat(donor_child, &donor_st) != 0) return true;
+    if (S_ISLNK(donor_st.st_mode)) return true;
+    if (S_ISDIR(donor_st.st_mode)) {
+        /* Hidden directories (.leases, staging, admission) are live
+         * machinery: do not recreate them, do not descend. */
+        if (warm_path_hidden(rel)) return true;
+        *descend = dp_seed_subdir_ready(gen_child);
+        return true;
+    }
+    if (!S_ISREG(donor_st.st_mode)) return true;
+    dp_seed_regular(donor_child, gen_child, rel, copy_wrapper, &donor_st,
+                    accum);
+    return true;
+}
+
+static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
+                           const char *rel_prefix, bool copy_wrapper,
+                           struct warm_seed_accum *accum)
+{
+    if (!accum || accum->failed) return;
+    if (!dp_seed_dir_ensure(gen_dir)) {
         accum->failed = true;
         return;
     }
@@ -2171,49 +2230,16 @@ static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
     for (struct dirent *entry = readdir(dir); entry;
          entry = readdir(dir)) {
         char rel[PATH_MAX], donor_child[PATH_MAX], gen_child[PATH_MAX];
+        bool descend = false;
         if (accum->failed) break;
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0)
-            continue;
-        int rel_len = rel_prefix && rel_prefix[0]
-            ? snprintf(rel, sizeof(rel), "%s/%s", rel_prefix, entry->d_name)
-            : snprintf(rel, sizeof(rel), "%s", entry->d_name);
-        if (rel_len <= 0 || rel_len >= (int)sizeof(rel) ||
-            snprintf(donor_child, sizeof(donor_child), "%s/%s", donor_dir,
-                     entry->d_name) >= (int)sizeof(donor_child) ||
-            snprintf(gen_child, sizeof(gen_child), "%s/%s", gen_dir,
-                     entry->d_name) >= (int)sizeof(gen_child)) {
+        if (!dp_seed_entry(donor_dir, gen_dir, rel_prefix, entry->d_name,
+                           copy_wrapper, accum, rel, donor_child, gen_child,
+                           &descend)) {
             accum->failed = true;
             break;
         }
-        struct stat donor_st;
-        if (lstat(donor_child, &donor_st) != 0) continue;
-        if (S_ISLNK(donor_st.st_mode)) continue;
-        if (S_ISDIR(donor_st.st_mode)) {
-            /* Hidden directories (.leases, staging, admission) are live
-             * machinery: do not recreate them, do not descend. */
-            if (warm_path_hidden(rel)) continue;
-            struct stat gen_st;
-            if (lstat(gen_child, &gen_st) != 0) {
-                if (errno != ENOENT || mkdir(gen_child, 0700) != 0)
-                    continue;
-            } else if (!S_ISDIR(gen_st.st_mode) ||
-                       S_ISLNK(gen_st.st_mode)) {
-                continue;
-            }
-            warm_seed_walk(donor_child, gen_child, rel, copy_wrapper,
-                           accum);
-            continue;
-        }
-        if (!S_ISREG(donor_st.st_mode)) continue;
-        enum warm_seed_class class = warm_classify_rel(rel, true);
-        if (class == WARM_SEED_SKIP) continue;
-        /* The wrapper copy is caller-gated (bootstrap inputs must be
-         * unchanged); link-class outputs need no gate beyond the epoch. */
-        if (class == WARM_SEED_COPY && !copy_wrapper) continue;
-        if (!dependency_parent_ensure(gen_child)) continue;
-        warm_seed_file(donor_child, gen_child, rel, class, &donor_st,
-                       accum);
+        if (descend)
+            warm_seed_walk(donor_child, gen_child, rel, copy_wrapper, accum);
     }
     (void)closedir(dir);
 }
@@ -2554,71 +2580,120 @@ static bool warm_marker_line(const char *line, const char *key,
            snprintf(out, out_size, "%s", value) > 0;
 }
 
-static bool warm_marker_read(const char *generation, char root[PATH_MAX],
-                             char local[65], char base[65],
-                             int64_t *completed_out,
-                             struct zcl_dev_proof_build_identity_v1 *identity_out)
+/* The eight text fields a donor marker carries, before any of them has been
+ * checked. Nothing here is trusted until dp_marker_identity, dp_marker_root
+ * and dp_marker_completed have each had their say. */
+struct dp_marker_fields {
+    char root[PATH_MAX];
+    char local[65];
+    char base[65];
+    char completed[32];
+    char compiler[65];
+    char flags[65];
+    char environment[65];
+    char build_graph[65];
+};
+
+/* The marker file, whole. A short read, an empty file, or one that filled
+ * the buffer is refused rather than parsed. */
+static bool dp_marker_body_read(const char *generation, char *body,
+                                size_t body_size)
 {
-    char path[PATH_MAX], body[2048];
+    char path[PATH_MAX];
     if (!generation ||
         snprintf(path, sizeof(path), "%s/%s", generation,
                  PROOF_WARM_MARKER_REL) >= (int)sizeof(path))
         return false;
     FILE *f = fopen(path, "r");
     if (!f) return false;
-    size_t n = fread(body, 1, sizeof(body) - 1, f);
+    size_t n = fread(body, 1, body_size - 1, f);
     bool ok = !ferror(f);
     fclose(f);
-    if (!ok || n == 0 || n == sizeof(body) - 1) return false;
+    if (!ok || n == 0 || n == body_size - 1) return false;
     body[n] = 0;
-    char *save = NULL, *line = strtok_r(body, "\n", &save);
-    if (!line || strcmp(line, PROOF_WARM_MARKER_SCHEMA) != 0) return false;
-    char completed_text[32] = {0};
-    char got_root[PATH_MAX] = {0}, got_local[65] = {0}, got_base[65] = {0};
-    char compiler_hex[65] = {0}, flags_hex[65] = {0}, build_graph_hex[65] = {0};
-    char environment_hex[65] = {0};
-    int fields = 0;
-    while ((line = strtok_r(NULL, "\n", &save))) {
-        if (warm_marker_line(line, "root", got_root, sizeof(got_root)) ||
-            warm_marker_line(line, "local", got_local, sizeof(got_local)) ||
-            warm_marker_line(line, "base", got_base, sizeof(got_base)) ||
-            warm_marker_line(line, "completed", completed_text,
-                             sizeof(completed_text)) ||
-            warm_marker_line(line, "compiler", compiler_hex,
-                             sizeof(compiler_hex)) ||
-            warm_marker_line(line, "flags", flags_hex, sizeof(flags_hex)) ||
-            warm_marker_line(line, "environment", environment_hex,
-                             sizeof(environment_hex)) ||
-            warm_marker_line(line, "build_graph", build_graph_hex,
-                             sizeof(build_graph_hex)))
-            fields++;
+    return true;
+}
+
+/* Every remaining line must name exactly one known field. An unrecognised
+ * line refuses the marker; it is never skipped. */
+static bool dp_marker_collect(char **save, struct dp_marker_fields *got,
+                              int *fields)
+{
+    char *line;
+    while ((line = strtok_r(NULL, "\n", save))) {
+        if (warm_marker_line(line, "root", got->root, sizeof(got->root)) ||
+            warm_marker_line(line, "local", got->local, sizeof(got->local)) ||
+            warm_marker_line(line, "base", got->base, sizeof(got->base)) ||
+            warm_marker_line(line, "completed", got->completed,
+                             sizeof(got->completed)) ||
+            warm_marker_line(line, "compiler", got->compiler,
+                             sizeof(got->compiler)) ||
+            warm_marker_line(line, "flags", got->flags, sizeof(got->flags)) ||
+            warm_marker_line(line, "environment", got->environment,
+                             sizeof(got->environment)) ||
+            warm_marker_line(line, "build_graph", got->build_graph,
+                             sizeof(got->build_graph)))
+            (*fields)++;
         else
             return false;
     }
-    /* proof_oid_text rejects anything that is not a lowercase hex object
-     * id; the root check below bars escapes. Any shortfall refuses -- a
-     * marker from before the identity fields existed is exactly the
-     * shortfall this rejects, so an old marker degrades to cold rather
-     * than being adopted unverified. */
-    struct zcl_dev_proof_build_identity_v1 identity;
-    if (fields != 8 || !proof_oid_text(got_local) ||
-        !proof_oid_text(got_base) ||
-        !zcl_hex_decode_lower(compiler_hex, identity.compiler, 32) ||
-        !zcl_hex_decode_lower(flags_hex, identity.flags, 32) ||
-        !zcl_hex_decode_lower(environment_hex, identity.environment, 32) ||
-        !zcl_hex_decode_lower(build_graph_hex, identity.build_graph, 32))
-        return false;
-    if (got_root[0] != '/' || strstr(got_root, "..") ||
-        strchr(got_root, '\\'))
-        return false;
+    return true;
+}
+
+/* proof_oid_text rejects anything that is not a lowercase hex object
+ * id; dp_marker_root_ok bars escapes. Any shortfall refuses -- a
+ * marker from before the identity fields existed is exactly the
+ * shortfall this rejects, so an old marker degrades to cold rather
+ * than being adopted unverified. */
+static bool dp_marker_identity(
+    const struct dp_marker_fields *got, int fields,
+    struct zcl_dev_proof_build_identity_v1 *identity)
+{
+    return fields == 8 && proof_oid_text(got->local) &&
+           proof_oid_text(got->base) &&
+           zcl_hex_decode_lower(got->compiler, identity->compiler, 32) &&
+           zcl_hex_decode_lower(got->flags, identity->flags, 32) &&
+           zcl_hex_decode_lower(got->environment, identity->environment, 32) &&
+           zcl_hex_decode_lower(got->build_graph, identity->build_graph, 32);
+}
+
+static bool dp_marker_root_ok(const char *got_root)
+{
+    return got_root[0] == '/' && !strstr(got_root, "..") &&
+           !strchr(got_root, '\\');
+}
+
+static bool dp_marker_completed(const char *text, int64_t *out)
+{
     char *end = NULL;
     errno = 0;
-    long long completed = strtoll(completed_text, &end, 10);
+    long long completed = strtoll(text, &end, 10);
     if (errno != 0 || !end || *end != 0 || completed <= 0) return false;
-    if (root) (void)snprintf(root, PATH_MAX, "%s", got_root);
-    if (local) (void)snprintf(local, 65, "%s", got_local);
-    if (base) (void)snprintf(base, 65, "%s", got_base);
-    if (completed_out) *completed_out = (int64_t)completed;
+    *out = (int64_t)completed;
+    return true;
+}
+
+static bool warm_marker_read(const char *generation, char root[PATH_MAX],
+                             char local[65], char base[65],
+                             int64_t *completed_out,
+                             struct zcl_dev_proof_build_identity_v1 *identity_out)
+{
+    char body[2048];
+    if (!dp_marker_body_read(generation, body, sizeof(body))) return false;
+    char *save = NULL, *line = strtok_r(body, "\n", &save);
+    if (!line || strcmp(line, PROOF_WARM_MARKER_SCHEMA) != 0) return false;
+    struct dp_marker_fields got = {0};
+    int fields = 0;
+    if (!dp_marker_collect(&save, &got, &fields)) return false;
+    struct zcl_dev_proof_build_identity_v1 identity;
+    if (!dp_marker_identity(&got, fields, &identity)) return false;
+    if (!dp_marker_root_ok(got.root)) return false;
+    int64_t completed = 0;
+    if (!dp_marker_completed(got.completed, &completed)) return false;
+    if (root) (void)snprintf(root, PATH_MAX, "%s", got.root);
+    if (local) (void)snprintf(local, 65, "%s", got.local);
+    if (base) (void)snprintf(base, 65, "%s", got.base);
+    if (completed_out) *completed_out = completed;
     if (identity_out) *identity_out = identity;
     return true;
 }
@@ -2630,6 +2705,66 @@ static bool warm_changed_path_ok(const char *line)
     size_t len = line ? strlen(line) : 0;
     return len > 0 && len < 256 && line[0] != '/' &&
            !strstr(line, "..") && !strchr(line, '\\');
+}
+
+/* One entry of a restamped subtree: a regular file is stamped, a
+ * subdirectory is pushed onto the caller's stack for the walk to reach,
+ * and everything else is left alone. Symlinks are never followed. Returns
+ * false only for a failure that must stop the whole restamp. */
+static bool dp_touch_entry(const char *dir_path, const char *name,
+                           const struct timespec *stamp, char **stack,
+                           size_t stack_cap, size_t *depth)
+{
+    char child[PATH_MAX];
+    struct stat child_st;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
+        snprintf(child, sizeof(child), "%s/%s", dir_path, name) >=
+            (int)sizeof(child) ||
+        lstat(child, &child_st) != 0)
+        return true;
+    if (S_ISLNK(child_st.st_mode)) return true;
+    if (S_ISDIR(child_st.st_mode)) {
+        if (*depth >= stack_cap) return true;
+        char *held = zcl_malloc(strlen(child) + 1, "proof_warm_touch");
+        if (!held) return false;
+        (void)snprintf(held, strlen(child) + 1, "%s", child);
+        stack[(*depth)++] = held;
+        return true;
+    }
+    return !S_ISREG(child_st.st_mode) || warm_touch_one(child, stamp);
+}
+
+/* Restamp every regular file under one directory, iteratively: the stack
+ * holds at most 64 pending directories and deeper ones are left alone,
+ * because an unstamped file only costs a recompile. `top` is the caller's
+ * buffer and is the one entry that must never be freed. */
+static void dp_touch_subtree(const char *path, const struct timespec *stamp,
+                             bool *ok)
+{
+    char *stack[64];
+    size_t depth = 0;
+    char top[PATH_MAX];
+    if (snprintf(top, sizeof(top), "%s", path) >= (int)sizeof(top)) {
+        *ok = false;
+        return;
+    }
+    stack[depth++] = top;
+    while (depth > 0 && *ok) {
+        char *dir_path = stack[--depth];
+        DIR *dir = opendir(dir_path);
+        if (!dir) {
+            *ok = false;
+            break;
+        }
+        for (struct dirent *entry = readdir(dir); entry && *ok;
+             entry = readdir(dir))
+            if (!dp_touch_entry(dir_path, entry->d_name, stamp, stack,
+                                sizeof(stack) / sizeof(stack[0]), &depth))
+                *ok = false;
+        (void)closedir(dir);
+        if (dir_path != top) free(dir_path);
+    }
+    while (depth > 0) free(stack[--depth]);
 }
 
 /* Stamp one changed path: a regular file gets the source stamp, a
@@ -2654,52 +2789,7 @@ static void warm_touch_changed(const char *generation, const char *rel,
     /* Submodule pointer move: conservatively restamp the whole subtree so
      * no translation unit including those headers is missed. Over-broad
      * only costs recompiles, never a stale reuse. */
-    char *stack[64];
-    size_t depth = 0;
-    char top[PATH_MAX];
-    if (snprintf(top, sizeof(top), "%s", path) >= (int)sizeof(top)) {
-        *ok = false;
-        return;
-    }
-    stack[depth++] = top;
-    while (depth > 0 && *ok) {
-        char *dir_path = stack[--depth];
-        DIR *dir = opendir(dir_path);
-        if (!dir) {
-            *ok = false;
-            break;
-        }
-        for (struct dirent *entry = readdir(dir); entry && *ok;
-             entry = readdir(dir)) {
-            char child[PATH_MAX];
-            struct stat child_st;
-            if (strcmp(entry->d_name, ".") == 0 ||
-                strcmp(entry->d_name, "..") == 0 ||
-                snprintf(child, sizeof(child), "%s/%s", dir_path,
-                         entry->d_name) >= (int)sizeof(child) ||
-                lstat(child, &child_st) != 0)
-                continue;
-            if (S_ISLNK(child_st.st_mode)) continue;
-            if (S_ISDIR(child_st.st_mode)) {
-                if (depth < sizeof(stack) / sizeof(stack[0])) {
-                    char *held =
-                        zcl_malloc(strlen(child) + 1, "proof_warm_touch");
-                    if (!held) {
-                        *ok = false;
-                        break;
-                    }
-                    (void)snprintf(held, strlen(child) + 1, "%s", child);
-                    stack[depth++] = held;
-                }
-                continue;
-            }
-            if (S_ISREG(child_st.st_mode) && !warm_touch_one(child, stamp))
-                *ok = false;
-        }
-        (void)closedir(dir);
-        if (dir_path != top) free(dir_path);
-    }
-    while (depth > 0) free(stack[--depth]);
+    dp_touch_subtree(path, stamp, ok);
 }
 
 /* Donor survey record: the public seam type from dev_proof.h, so the
@@ -2833,6 +2923,50 @@ static bool warm_retime_sources(const char *generation,
  * its freshness. The catalog and its reader script are inputs too: a
  * changed catalog could silently narrow the checked set. --quiet turns
  * the diff into a boolean; any failure (including "different") refuses. */
+/* The vocabulary a catalog path may be spelled in. Anything outside it
+ * refuses the catalog rather than being quoted into a git argument. */
+static bool dp_wrapper_word_char(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+           c == '/' || c == '-';
+}
+
+static bool dp_wrapper_input_clean(const char *line, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (!dp_wrapper_word_char(line[i])) return false;
+    return strstr(line, "..") == NULL;
+}
+
+static size_t dp_wrapper_trim(char *line)
+{
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = 0;
+    return len;
+}
+
+/* Read the bootstrap-input catalog into a fixed table. A line that is too
+ * long, spelled outside the path vocabulary, or one too many for the table
+ * refuses the whole catalog: a catalog this reader cannot fully account for
+ * must never silently narrow the checked set. */
+static bool dp_wrapper_catalog_read(FILE *f, char inputs[][128],
+                                    size_t input_cap, size_t *input_count)
+{
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        size_t len = dp_wrapper_trim(line);
+        if (len == 0 || strncmp(line, "license=", 8) == 0) continue;
+        if (len >= sizeof(inputs[0])) return false;
+        if (!dp_wrapper_input_clean(line, len) || *input_count >= input_cap)
+            return false;
+        (void)snprintf(inputs[*input_count], sizeof(inputs[0]), "%s", line);
+        (*input_count)++;
+    }
+    return true;
+}
+
 static bool warm_wrapper_inputs_unchanged(const char *root,
                                           const char *donor_local,
                                           const char *local)
@@ -2844,46 +2978,19 @@ static bool warm_wrapper_inputs_unchanged(const char *root,
         return false;
     FILE *f = fopen(catalog, "r");
     if (!f) return false;
+    char inputs[12][128];
+    size_t input_count = 0;
+    bool ok = dp_wrapper_catalog_read(f, inputs,
+                                      sizeof(inputs) / sizeof(inputs[0]),
+                                      &input_count);
+    bool complete = !ferror(f);
+    fclose(f);
+    if (!ok || !complete || input_count == 0) return false;
     const char *fixed[] = {
         "tools/dev/zcc-bootstrap-inputs.list",
         "tools/dev/zcc_bootstrap.sh",
     };
     size_t fixed_count = sizeof(fixed) / sizeof(fixed[0]);
-    char inputs[12][128];
-    size_t input_count = 0;
-    char line[256];
-    bool ok = true;
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-            line[--len] = 0;
-        if (len == 0 || strncmp(line, "license=", 8) == 0) continue;
-        if (len >= sizeof(inputs[0])) {
-            ok = false;
-            break;
-        }
-        bool clean = true;
-        for (size_t i = 0; i < len; i++) {
-            char c = line[i];
-            bool word = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                        (c >= '0' && c <= '9') || c == '_' || c == '.' ||
-                        c == '/' || c == '-';
-            if (!word) {
-                clean = false;
-                break;
-            }
-        }
-        if (!clean || strstr(line, "..") || input_count >=
-                sizeof(inputs) / sizeof(inputs[0])) {
-            ok = false;
-            break;
-        }
-        (void)snprintf(inputs[input_count], sizeof(inputs[0]), "%s", line);
-        input_count++;
-    }
-    bool complete = !ferror(f);
-    fclose(f);
-    if (!ok || !complete || input_count == 0) return false;
     const char *argv[6 + 12 + 2 + 1];
     size_t argc = 0;
     argv[argc++] = "git";
@@ -2906,6 +3013,96 @@ struct warm_donor {
     char base[65];
 };
 
+/* Survey one generation directory against this proof's build identity, and
+ * fill the pick policy's fields for it. Returns false for a directory that
+ * is not a candidate at all -- a foreign tag, the caller's own generation,
+ * a missing or mismatched marker, or an object tree that cannot be
+ * timestamped. */
+static bool dp_donor_survey(
+    const char *parent, const char *root, const char *in_use,
+    const char *name,
+    const struct zcl_dev_proof_build_identity_v1 *current,
+    struct zcl_dev_proof_warm_candidate *slot)
+{
+    char candidate_path[PATH_MAX];
+    if (!warm_tag_name(name) ||
+        snprintf(candidate_path, sizeof(candidate_path), "%s/%s",
+                 parent, name) >= (int)sizeof(candidate_path) ||
+        strcmp(candidate_path, in_use) == 0)
+        return false;
+    char marker_root[PATH_MAX], marker_local[65], marker_base[65];
+    int64_t completed = 0;
+    struct zcl_dev_proof_build_identity_v1 candidate_identity;
+    if (!warm_marker_read(candidate_path, marker_root, marker_local,
+                          marker_base, &completed, &candidate_identity) ||
+        strcmp(marker_root, root) != 0 ||
+        !proof_build_identity_equal(current, &candidate_identity))
+        return false;
+    char head[65];
+    const char *head_argv[] = {"git", "-C", candidate_path, "rev-parse",
+                              "--verify", "HEAD", NULL};
+    bool head_ok = git_capture(root, head_argv, head, sizeof(head)) &&
+                   strcmp(head, marker_local) == 0;
+    char obj[PATH_MAX];
+    int64_t touched = 0;
+    if (snprintf(obj, sizeof(obj), "%s/build/obj", candidate_path) >=
+            (int)sizeof(obj) ||
+        !warm_generation_touched(obj, NULL) ||
+        !warm_generation_touched(candidate_path, &touched))
+        return false;
+    memset(slot, 0, sizeof(*slot));
+    (void)snprintf(slot->tag, sizeof(slot->tag), "%s", name);
+    (void)snprintf(slot->path, sizeof(slot->path), "%s", candidate_path);
+    (void)snprintf(slot->local, sizeof(slot->local), "%s", marker_local);
+    slot->completed = completed;
+    slot->touched = touched;
+    slot->head_ok = head_ok;
+    /* A generation whose checkout moved since its build finished, or
+     * whose proof is still leased, cannot donate: the first may hold
+     * objects for another commit, the second is still writing. */
+    slot->live = !head_ok ||
+                 warm_donor_live(root, marker_local, marker_base);
+    return true;
+}
+
+/* Room for one more surveyed candidate. */
+static bool dp_donor_reserve(struct zcl_dev_proof_warm_candidate **candidates,
+                             size_t count, size_t *capacity)
+{
+    if (count < *capacity) return true;
+    size_t next = *capacity ? *capacity * 2 : 16;
+    struct zcl_dev_proof_warm_candidate *grown = zcl_realloc(
+        *candidates, next * sizeof(*grown), "proof_warm_donor");
+    if (!grown) return false;
+    *candidates = grown;
+    *capacity = next;
+    return true;
+}
+
+/* Re-read the marker now the survey is done. A sibling lane can
+ * finish a build in this generation while the scan runs; if the
+ * marker or the identity it was sealed under moved, the surveyed
+ * choice is stale and cold is safe. */
+static bool dp_donor_confirm(
+    const struct zcl_dev_proof_warm_candidate *best,
+    const struct zcl_dev_proof_build_identity_v1 *current,
+    struct warm_donor *donor)
+{
+    char marker_root[PATH_MAX], marker_local[65], marker_base[65];
+    int64_t completed = 0;
+    struct zcl_dev_proof_build_identity_v1 recheck_identity;
+    return warm_marker_read(best->path, marker_root, marker_local,
+                            marker_base, &completed, &recheck_identity) &&
+           strcmp(marker_local, best->local) == 0 &&
+           proof_build_identity_equal(current, &recheck_identity) &&
+           snprintf(donor->path, sizeof(donor->path), "%s",
+                    best->path) < (int)sizeof(donor->path) &&
+           snprintf(donor->local, sizeof(donor->local), "%s",
+                    best->local) < (int)sizeof(donor->local) &&
+           snprintf(donor->base, sizeof(donor->base), "%s",
+                    marker_base) < (int)sizeof(donor->base);
+}
+
 /* Newest verifiable idle generation for this root, skipping the caller's
  * own. Fills nothing and reports false when there is no donor: cold is
  * the ordinary path, not an error. */
@@ -2927,86 +3124,22 @@ static bool warm_donor_scan(const char *parent, const char *root,
     size_t count = 0, capacity = 0;
     for (struct dirent *entry = readdir(dir); entry;
          entry = readdir(dir)) {
-        char candidate_path[PATH_MAX];
-        if (!warm_tag_name(entry->d_name) ||
-            snprintf(candidate_path, sizeof(candidate_path), "%s/%s",
-                     parent, entry->d_name) >= (int)sizeof(candidate_path) ||
-            strcmp(candidate_path, in_use) == 0)
+        struct zcl_dev_proof_warm_candidate surveyed;
+        if (!dp_donor_survey(parent, root, in_use, entry->d_name, &current,
+                             &surveyed))
             continue;
-        char marker_root[PATH_MAX], marker_local[65], marker_base[65];
-        int64_t completed = 0;
-        struct zcl_dev_proof_build_identity_v1 candidate_identity;
-        if (!warm_marker_read(candidate_path, marker_root, marker_local,
-                              marker_base, &completed, &candidate_identity) ||
-            strcmp(marker_root, root) != 0 ||
-            !proof_build_identity_equal(&current, &candidate_identity))
-            continue;
-        char head[65];
-        const char *head_argv[] = {"git", "-C", candidate_path, "rev-parse",
-                                  "--verify", "HEAD", NULL};
-        bool head_ok = git_capture(root, head_argv, head, sizeof(head)) &&
-                       strcmp(head, marker_local) == 0;
-        char obj[PATH_MAX];
-        int64_t touched = 0;
-        if (snprintf(obj, sizeof(obj), "%s/build/obj", candidate_path) >=
-                (int)sizeof(obj) ||
-            !warm_generation_touched(obj, NULL) ||
-            !warm_generation_touched(candidate_path, &touched))
-            continue;
-        if (count == capacity) {
-            size_t next = capacity ? capacity * 2 : 16;
-            struct zcl_dev_proof_warm_candidate *grown = zcl_realloc(
-                candidates, next * sizeof(*grown), "proof_warm_donor");
-            if (!grown) {
-                free(candidates);
-                candidates = NULL;
-                count = capacity = 0;
-                break;
-            }
-            candidates = grown;
-            capacity = next;
+        if (!dp_donor_reserve(&candidates, count, &capacity)) {
+            free(candidates);
+            candidates = NULL;
+            count = capacity = 0;
+            break;
         }
-        struct zcl_dev_proof_warm_candidate *slot = &candidates[count];
-        memset(slot, 0, sizeof(*slot));
-        (void)snprintf(slot->tag, sizeof(slot->tag), "%s", entry->d_name);
-        (void)snprintf(slot->path, sizeof(slot->path), "%s",
-                       candidate_path);
-        (void)snprintf(slot->local, sizeof(slot->local), "%s",
-                       marker_local);
-        slot->completed = completed;
-        slot->touched = touched;
-        slot->head_ok = head_ok;
-        /* A generation whose checkout moved since its build finished, or
-         * whose proof is still leased, cannot donate: the first may hold
-         * objects for another commit, the second is still writing. */
-        slot->live = !head_ok ||
-                     warm_donor_live(root, marker_local, marker_base);
-        count++;
+        candidates[count++] = surveyed;
     }
     (void)closedir(dir);
     int best = warm_pick_donor(candidates, count);
     bool found = candidates && best >= 0;
-    if (found) {
-        /* Re-read the marker now the survey is done. A sibling lane can
-         * finish a build in this generation while the scan runs; if the
-         * marker or the identity it was sealed under moved, the surveyed
-         * choice is stale and cold is safe. */
-        char marker_root[PATH_MAX], marker_local[65], marker_base[65];
-        int64_t completed = 0;
-        struct zcl_dev_proof_build_identity_v1 recheck_identity;
-        if (!warm_marker_read(candidates[best].path, marker_root,
-                              marker_local, marker_base, &completed,
-                              &recheck_identity) ||
-            strcmp(marker_local, candidates[best].local) != 0 ||
-            !proof_build_identity_equal(&current, &recheck_identity) ||
-            snprintf(donor->path, sizeof(donor->path), "%s",
-                     candidates[best].path) >= (int)sizeof(donor->path) ||
-            snprintf(donor->local, sizeof(donor->local), "%s",
-                     candidates[best].local) >= (int)sizeof(donor->local) ||
-            snprintf(donor->base, sizeof(donor->base), "%s",
-                     marker_base) >= (int)sizeof(donor->base))
-            found = false;
-    }
+    if (found) found = dp_donor_confirm(&candidates[best], &current, donor);
     free(candidates);
     return found;
 }
