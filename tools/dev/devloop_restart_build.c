@@ -2674,6 +2674,268 @@ static void rr_output_preview(const struct zcl_devloop_process_result *process,
     out[n] = 0;
 }
 
+static void rr_emit_event_source_bytes(struct json_value *doc,
+                                       const char *root,
+                                       const char *const *sources,
+                                       size_t source_count,
+                                       uint64_t source_guard_bytes_read,
+                                       uint64_t source_bytes_total,
+                                       bool source_byte_accounting_complete)
+{
+    uint64_t changed_source_bytes = 0;
+    bool changed_bytes_complete = true;
+    for (size_t i = 0; i < source_count; i++) {
+        char full[PATH_MAX];
+        rr_file_stamp stamp;
+        uint64_t size = 0, next = 0;
+        if (!rr_join_root(root, sources[i], full) ||
+            !rr_regular(full, &stamp) || !rr_stamp_size(&stamp, &size) ||
+            !zcl_u64_add(changed_source_bytes, size, &next)) {
+            changed_bytes_complete = false;
+            break;
+        }
+        changed_source_bytes = next;
+    }
+    source_byte_accounting_complete = source_byte_accounting_complete &&
+        changed_bytes_complete && source_guard_bytes_read <= INT64_MAX &&
+        source_bytes_total <= INT64_MAX && changed_source_bytes <= INT64_MAX;
+    (void)json_push_kv_bool(doc, "source_byte_accounting_complete",
+                            source_byte_accounting_complete);
+    if (source_byte_accounting_complete) {
+        (void)json_push_kv_int(doc, "source_guard_bytes_read",
+                               (int64_t)source_guard_bytes_read);
+        (void)json_push_kv_int(doc, "source_bytes_total",
+                               (int64_t)source_bytes_total);
+        (void)json_push_kv_int(doc, "changed_source_bytes",
+                               (int64_t)changed_source_bytes);
+    }
+}
+
+static void rr_emit_event_files_array(struct json_value *doc,
+                                      const char *const *sources,
+                                      size_t source_count)
+{
+    struct json_value files;
+    json_init(&files); json_set_array(&files);
+    for (size_t i = 0; i < source_count; i++) {
+        struct json_value item;
+        json_init(&item); json_set_str(&item, sources[i]);
+        (void)json_push_back(&files, &item); json_free(&item);
+    }
+    (void)json_push_kv(doc, "files", &files); json_free(&files);
+}
+
+static void rr_emit_event_process_fields(
+    struct json_value *doc, const char *why,
+    const struct zcl_devloop_process_result *process)
+{
+    if (why && why[0])
+        (void)json_push_kv_str(doc, "failure_capsule", why);
+    if (process && process->output_len) {
+        char preview[1025];
+        rr_output_preview(process, preview);
+        (void)json_push_kv_str(doc, "process_output", preview);
+        (void)json_push_kv_bool(doc, "process_output_truncated",
+                                process->output_len > 1024 ||
+                                process->output_truncated);
+    }
+    if (process) {
+        (void)json_push_kv_int(doc, "process_startup_us",
+                               process->startup_us);
+        (void)json_push_kv_int(doc, "process_body_us", process->body_us);
+        (void)json_push_kv_int(doc, "process_first_output_us",
+                               process->first_output_us);
+    }
+}
+
+static void rr_emit_event_build_receipt(
+    struct json_value *receipt,
+    const struct zcl_devloop_restart_build_receipt *build)
+{
+    (void)json_push_kv_str(receipt, "schema",
+                           "zcl.dev_restart_build_receipt.v1");
+    if (build->artifact_path[0])
+        (void)json_push_kv_str(receipt, "artifact_path",
+                               build->artifact_path);
+    if (build->artifact_sha256[0])
+        (void)json_push_kv_str(receipt, "artifact_sha256",
+                               build->artifact_sha256);
+    if (build->artifact_cache_key[0])
+        (void)json_push_kv_str(receipt, "artifact_cache_key",
+                               build->artifact_cache_key);
+    if (build->source_cas_sha3[0])
+        (void)json_push_kv_str(receipt, "source_cas_sha3",
+                               build->source_cas_sha3);
+    (void)json_push_kv_bool(receipt, "source_identity_overlay",
+                            build->source_identity_overlay);
+    (void)json_push_kv_str(receipt, "probe", build->probe);
+    (void)json_push_kv_bool(receipt, "candidate_probe_passed",
+                            build->candidate_probe_passed);
+    (void)json_push_kv_bool(receipt, "plan_cache_hit",
+                            build->plan_cache_hit);
+    (void)json_push_kv_bool(receipt, "artifact_cache_hit",
+                            build->artifact_cache_hit);
+    (void)json_push_kv_int(receipt, "changed_sources",
+                           build->changed_sources);
+    (void)json_push_kv_int(receipt, "compiler_processes",
+                           build->compiler_processes);
+    (void)json_push_kv_int(receipt, "linker_processes",
+                           build->linker_processes);
+    (void)json_push_kv_int(receipt, "complete_graph_linker_processes",
+                           build->complete_graph_linker_processes);
+    (void)json_push_kv_int(receipt, "probe_processes",
+                           build->probe_processes);
+    (void)json_push_kv_int(receipt, "source_guard_captures",
+                           build->source_guard_captures);
+    (void)json_push_kv_int(receipt, "plan_load_us",
+                           build->plan_load_us);
+    (void)json_push_kv_int(receipt, "compile_us", build->compile_us);
+    (void)json_push_kv_int(receipt, "compile_startup_us",
+                           build->compile_startup_us);
+    (void)json_push_kv_int(receipt, "compile_body_us",
+                           build->compile_body_us);
+    (void)json_push_kv_int(receipt, "link_us", build->link_us);
+    (void)json_push_kv_int(receipt, "link_startup_us",
+                           build->link_startup_us);
+    (void)json_push_kv_int(receipt, "link_body_us",
+                           build->link_body_us);
+    (void)json_push_kv_int(receipt, "probe_us", build->probe_us);
+    (void)json_push_kv_int(receipt, "probe_startup_us",
+                           build->probe_startup_us);
+    (void)json_push_kv_int(receipt, "probe_body_us",
+                           build->probe_body_us);
+    (void)json_push_kv_int(receipt, "build_total_us", build->total_us);
+}
+
+static void rr_emit_event_proof_receipt(
+    struct json_value *receipt,
+    const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    (void)json_push_kv_str(receipt, "schema",
+                           "zcl.dev_restart_proof_receipt.v1");
+    if (proof->artifact_path[0])
+        (void)json_push_kv_str(receipt, "artifact_path",
+                               proof->artifact_path);
+    if (proof->artifact_sha256[0])
+        (void)json_push_kv_str(receipt, "artifact_sha256",
+                               proof->artifact_sha256);
+    if (proof->artifact_cache_key[0])
+        (void)json_push_kv_str(receipt, "artifact_cache_key",
+                               proof->artifact_cache_key);
+    if (proof->source_cas_sha3[0])
+        (void)json_push_kv_str(receipt, "source_cas_sha3",
+                               proof->source_cas_sha3);
+    (void)json_push_kv_bool(receipt, "source_identity_overlay",
+                            proof->source_identity_overlay);
+    if (proof->groups_sha256[0])
+        (void)json_push_kv_str(receipt, "exact_groups_sha256",
+                               proof->groups_sha256);
+    if (proof->deferred_groups_sha256[0])
+        (void)json_push_kv_str(receipt,
+                               "deferred_groups_sha256",
+                               proof->deferred_groups_sha256);
+    if (proof->priority_group[0])
+        (void)json_push_kv_str(receipt, "priority_group",
+                               proof->priority_group);
+    if (proof->priority_reason[0])
+        (void)json_push_kv_str(receipt, "priority_reason",
+                               proof->priority_reason);
+    (void)json_push_kv_bool(receipt, "proof_complete",
+                            proof->proof_complete);
+    (void)json_push_kv_bool(receipt, "artifact_cache_hit",
+                            proof->artifact_cache_hit);
+    (void)json_push_kv_bool(receipt, "immediate_proof_complete",
+                            proof->immediate_proof_complete);
+    (void)json_push_kv_bool(receipt, "integration_proof_deferred",
+                            proof->integration_proof_deferred);
+    (void)json_push_kv_bool(receipt, "bounded_proof_deferred",
+                            proof->bounded_proof_deferred);
+    (void)json_push_kv_int(receipt, "group_count", proof->group_count);
+    (void)json_push_kv_int(receipt, "deferred_group_count",
+                           proof->deferred_group_count);
+    (void)json_push_kv_int(receipt, "groups_ran", proof->groups_ran);
+    (void)json_push_kv_int(receipt, "groups_cached",
+                           proof->groups_cached);
+    (void)json_push_kv_int(receipt, "groups_failed",
+                           proof->groups_failed);
+    (void)json_push_kv_int(receipt, "self_skips", proof->self_skips);
+    (void)json_push_kv_int(receipt, "compiler_processes",
+                           proof->compiler_processes);
+    (void)json_push_kv_int(receipt, "linker_processes",
+                           proof->linker_processes);
+    (void)json_push_kv_int(receipt, "complete_graph_linker_processes",
+                           proof->complete_graph_linker_processes);
+    (void)json_push_kv_int(receipt, "test_processes",
+                           proof->test_processes);
+    (void)json_push_kv_int(receipt, "source_guard_captures",
+                           proof->source_guard_captures);
+    (void)json_push_kv_int(receipt, "selection_us",
+                           proof->selection_us);
+    (void)json_push_kv_int(receipt, "compile_us", proof->compile_us);
+    (void)json_push_kv_int(receipt, "compile_startup_us",
+                           proof->compile_startup_us);
+    (void)json_push_kv_int(receipt, "compile_body_us",
+                           proof->compile_body_us);
+    (void)json_push_kv_int(receipt, "link_us", proof->link_us);
+    (void)json_push_kv_int(receipt, "link_startup_us",
+                           proof->link_startup_us);
+    (void)json_push_kv_int(receipt, "link_body_us",
+                           proof->link_body_us);
+    (void)json_push_kv_int(receipt, "test_us", proof->test_us);
+    (void)json_push_kv_int(receipt, "test_startup_us",
+                           proof->test_startup_us);
+    (void)json_push_kv_int(receipt, "test_body_us",
+                           proof->test_body_us);
+    (void)json_push_kv_int(receipt, "priority_test_us",
+                           proof->priority_test_us);
+    (void)json_push_kv_int(receipt, "proof_total_us", proof->total_us);
+}
+
+static void rr_emit_event_next_action(struct json_value *doc,
+                                      const char *status)
+{
+    (void)json_push_kv_str(
+        doc, "agent_next_action",
+        strcmp(status, "feedback_ready") == 0
+            ? "candidate runtime and immediate affected proofs are green; run integration proofs before acceptance"
+            : strcmp(status, "reflex_ready") == 0
+                ? "candidate compile, link, and probe are green; affected proof is running asynchronously"
+            : strcmp(status, "impact_ready") == 0
+                ? "impact is classified; source identity and candidate diagnostics are running"
+            : strcmp(status, "fallback_ready") == 0
+                ? "resident proof was unavailable; conservative integration proof is running"
+            : "repair the named restart refusal; no service or source was replaced");
+}
+
+static bool rr_emit_event_publish(const char *root, char *wire, size_t n)
+{
+    char state_why[160] = {0};
+    int64_t epoch = 0;
+    if (zcl_devloop_cycle_stream_publish(root, wire, n, &epoch,
+                                         state_why, sizeof(state_why))) {
+        (void)fwrite(wire, 1, n, stdout); (void)fflush(stdout);
+        if (!zcl_devloop_cycle_stream_flush_through(
+                root, epoch, state_why, sizeof(state_why))) {
+            fprintf(stderr,
+                    "[devloop] async restart journal flush failed: %s\n",
+                    state_why[0] ? state_why : "unknown");
+            return false;
+        }
+        return true;
+    }
+    /* Standalone unit/API callers do not own a resident ring. Preserve their
+     * durable behavior; the actual watcher always initializes the ring before
+     * reaching this path, so reflex feedback never takes this fallback. */
+    if (!zcl_devloop_cycle_state_write(root, wire, n, state_why,
+                                       sizeof(state_why))) {
+        fprintf(stderr, "[devloop] restart receipt persistence failed: %s\n",
+                state_why[0] ? state_why : "unknown");
+        return false;
+    }
+    (void)fwrite(wire, 1, n, stdout); (void)fflush(stdout);
+    return true;
+}
+
 static bool rr_emit_event(
     const char *root, const char *const *sources, size_t source_count,
     const char *status, const char *phase, int64_t elapsed_us,
@@ -2688,7 +2950,7 @@ static bool rr_emit_event(
     bool feedback_parallel)
 {
     const char *progress_phase = zcl_devloop_progress_phase(status, phase);
-    struct json_value doc, files, receipt;
+    struct json_value doc, receipt;
     json_init(&doc); json_set_object(&doc);
     (void)json_push_kv_str(&doc, "schema", "zcl.dev_cycle.v1");
     (void)json_push_kv_str(&doc, "producer", "resident-restart-authority");
@@ -2720,241 +2982,32 @@ static bool rr_emit_event(
     (void)json_push_kv_int(&doc, "source_guard_captures",
                            source_guard_captures);
     (void)json_push_kv_int(&doc, "impact_us", impact_us);
-    uint64_t changed_source_bytes = 0;
-    bool changed_bytes_complete = true;
-    for (size_t i = 0; i < source_count; i++) {
-        char full[PATH_MAX];
-        rr_file_stamp stamp;
-        uint64_t size = 0, next = 0;
-        if (!rr_join_root(root, sources[i], full) ||
-            !rr_regular(full, &stamp) || !rr_stamp_size(&stamp, &size) ||
-            !zcl_u64_add(changed_source_bytes, size, &next)) {
-            changed_bytes_complete = false;
-            break;
-        }
-        changed_source_bytes = next;
-    }
-    source_byte_accounting_complete = source_byte_accounting_complete &&
-        changed_bytes_complete && source_guard_bytes_read <= INT64_MAX &&
-        source_bytes_total <= INT64_MAX && changed_source_bytes <= INT64_MAX;
-    (void)json_push_kv_bool(&doc, "source_byte_accounting_complete",
-                            source_byte_accounting_complete);
-    if (source_byte_accounting_complete) {
-        (void)json_push_kv_int(&doc, "source_guard_bytes_read",
-                               (int64_t)source_guard_bytes_read);
-        (void)json_push_kv_int(&doc, "source_bytes_total",
-                               (int64_t)source_bytes_total);
-        (void)json_push_kv_int(&doc, "changed_source_bytes",
-                               (int64_t)changed_source_bytes);
-    }
+    rr_emit_event_source_bytes(&doc, root, sources, source_count,
+                               source_guard_bytes_read, source_bytes_total,
+                               source_byte_accounting_complete);
     (void)json_push_kv_int(&doc, "closure_us", closure_us);
     (void)json_push_kv_int(&doc, "file_count", (int64_t)source_count);
-    json_init(&files); json_set_array(&files);
-    for (size_t i = 0; i < source_count; i++) {
-        struct json_value item;
-        json_init(&item); json_set_str(&item, sources[i]);
-        (void)json_push_back(&files, &item); json_free(&item);
-    }
-    (void)json_push_kv(&doc, "files", &files); json_free(&files);
-    if (why && why[0])
-        (void)json_push_kv_str(&doc, "failure_capsule", why);
-    if (process && process->output_len) {
-        char preview[1025];
-        rr_output_preview(process, preview);
-        (void)json_push_kv_str(&doc, "process_output", preview);
-        (void)json_push_kv_bool(&doc, "process_output_truncated",
-                                process->output_len > 1024 ||
-                                process->output_truncated);
-    }
-    if (process) {
-        (void)json_push_kv_int(&doc, "process_startup_us",
-                               process->startup_us);
-        (void)json_push_kv_int(&doc, "process_body_us", process->body_us);
-        (void)json_push_kv_int(&doc, "process_first_output_us",
-                               process->first_output_us);
-    }
+    rr_emit_event_files_array(&doc, sources, source_count);
+    rr_emit_event_process_fields(&doc, why, process);
     if (build) {
         json_init(&receipt); json_set_object(&receipt);
-        (void)json_push_kv_str(&receipt, "schema",
-                               "zcl.dev_restart_build_receipt.v1");
-        if (build->artifact_path[0])
-            (void)json_push_kv_str(&receipt, "artifact_path",
-                                   build->artifact_path);
-        if (build->artifact_sha256[0])
-            (void)json_push_kv_str(&receipt, "artifact_sha256",
-                                   build->artifact_sha256);
-        if (build->artifact_cache_key[0])
-            (void)json_push_kv_str(&receipt, "artifact_cache_key",
-                                   build->artifact_cache_key);
-        if (build->source_cas_sha3[0])
-            (void)json_push_kv_str(&receipt, "source_cas_sha3",
-                                   build->source_cas_sha3);
-        (void)json_push_kv_bool(&receipt, "source_identity_overlay",
-                                build->source_identity_overlay);
-        (void)json_push_kv_str(&receipt, "probe", build->probe);
-        (void)json_push_kv_bool(&receipt, "candidate_probe_passed",
-                                build->candidate_probe_passed);
-        (void)json_push_kv_bool(&receipt, "plan_cache_hit",
-                                build->plan_cache_hit);
-        (void)json_push_kv_bool(&receipt, "artifact_cache_hit",
-                                build->artifact_cache_hit);
-        (void)json_push_kv_int(&receipt, "changed_sources",
-                               build->changed_sources);
-        (void)json_push_kv_int(&receipt, "compiler_processes",
-                               build->compiler_processes);
-        (void)json_push_kv_int(&receipt, "linker_processes",
-                               build->linker_processes);
-        (void)json_push_kv_int(&receipt, "complete_graph_linker_processes",
-                               build->complete_graph_linker_processes);
-        (void)json_push_kv_int(&receipt, "probe_processes",
-                               build->probe_processes);
-        (void)json_push_kv_int(&receipt, "source_guard_captures",
-                               build->source_guard_captures);
-        (void)json_push_kv_int(&receipt, "plan_load_us",
-                               build->plan_load_us);
-        (void)json_push_kv_int(&receipt, "compile_us", build->compile_us);
-        (void)json_push_kv_int(&receipt, "compile_startup_us",
-                               build->compile_startup_us);
-        (void)json_push_kv_int(&receipt, "compile_body_us",
-                               build->compile_body_us);
-        (void)json_push_kv_int(&receipt, "link_us", build->link_us);
-        (void)json_push_kv_int(&receipt, "link_startup_us",
-                               build->link_startup_us);
-        (void)json_push_kv_int(&receipt, "link_body_us",
-                               build->link_body_us);
-        (void)json_push_kv_int(&receipt, "probe_us", build->probe_us);
-        (void)json_push_kv_int(&receipt, "probe_startup_us",
-                               build->probe_startup_us);
-        (void)json_push_kv_int(&receipt, "probe_body_us",
-                               build->probe_body_us);
-        (void)json_push_kv_int(&receipt, "build_total_us", build->total_us);
+        rr_emit_event_build_receipt(&receipt, build);
         (void)json_push_kv(&doc, "build_receipt", &receipt);
         json_free(&receipt);
     }
     if (proof) {
         json_init(&receipt); json_set_object(&receipt);
-        (void)json_push_kv_str(&receipt, "schema",
-                               "zcl.dev_restart_proof_receipt.v1");
-        if (proof->artifact_path[0])
-            (void)json_push_kv_str(&receipt, "artifact_path",
-                                   proof->artifact_path);
-        if (proof->artifact_sha256[0])
-            (void)json_push_kv_str(&receipt, "artifact_sha256",
-                                   proof->artifact_sha256);
-        if (proof->artifact_cache_key[0])
-            (void)json_push_kv_str(&receipt, "artifact_cache_key",
-                                   proof->artifact_cache_key);
-        if (proof->source_cas_sha3[0])
-            (void)json_push_kv_str(&receipt, "source_cas_sha3",
-                                   proof->source_cas_sha3);
-        (void)json_push_kv_bool(&receipt, "source_identity_overlay",
-                                proof->source_identity_overlay);
-        if (proof->groups_sha256[0])
-            (void)json_push_kv_str(&receipt, "exact_groups_sha256",
-                                   proof->groups_sha256);
-        if (proof->deferred_groups_sha256[0])
-            (void)json_push_kv_str(&receipt,
-                                   "deferred_groups_sha256",
-                                   proof->deferred_groups_sha256);
-        if (proof->priority_group[0])
-            (void)json_push_kv_str(&receipt, "priority_group",
-                                   proof->priority_group);
-        if (proof->priority_reason[0])
-            (void)json_push_kv_str(&receipt, "priority_reason",
-                                   proof->priority_reason);
-        (void)json_push_kv_bool(&receipt, "proof_complete",
-                                proof->proof_complete);
-        (void)json_push_kv_bool(&receipt, "artifact_cache_hit",
-                                proof->artifact_cache_hit);
-        (void)json_push_kv_bool(&receipt, "immediate_proof_complete",
-                                proof->immediate_proof_complete);
-        (void)json_push_kv_bool(&receipt, "integration_proof_deferred",
-                                proof->integration_proof_deferred);
-        (void)json_push_kv_bool(&receipt, "bounded_proof_deferred",
-                                proof->bounded_proof_deferred);
-        (void)json_push_kv_int(&receipt, "group_count", proof->group_count);
-        (void)json_push_kv_int(&receipt, "deferred_group_count",
-                               proof->deferred_group_count);
-        (void)json_push_kv_int(&receipt, "groups_ran", proof->groups_ran);
-        (void)json_push_kv_int(&receipt, "groups_cached",
-                               proof->groups_cached);
-        (void)json_push_kv_int(&receipt, "groups_failed",
-                               proof->groups_failed);
-        (void)json_push_kv_int(&receipt, "self_skips", proof->self_skips);
-        (void)json_push_kv_int(&receipt, "compiler_processes",
-                               proof->compiler_processes);
-        (void)json_push_kv_int(&receipt, "linker_processes",
-                               proof->linker_processes);
-        (void)json_push_kv_int(&receipt, "complete_graph_linker_processes",
-                               proof->complete_graph_linker_processes);
-        (void)json_push_kv_int(&receipt, "test_processes",
-                               proof->test_processes);
-        (void)json_push_kv_int(&receipt, "source_guard_captures",
-                               proof->source_guard_captures);
-        (void)json_push_kv_int(&receipt, "selection_us",
-                               proof->selection_us);
-        (void)json_push_kv_int(&receipt, "compile_us", proof->compile_us);
-        (void)json_push_kv_int(&receipt, "compile_startup_us",
-                               proof->compile_startup_us);
-        (void)json_push_kv_int(&receipt, "compile_body_us",
-                               proof->compile_body_us);
-        (void)json_push_kv_int(&receipt, "link_us", proof->link_us);
-        (void)json_push_kv_int(&receipt, "link_startup_us",
-                               proof->link_startup_us);
-        (void)json_push_kv_int(&receipt, "link_body_us",
-                               proof->link_body_us);
-        (void)json_push_kv_int(&receipt, "test_us", proof->test_us);
-        (void)json_push_kv_int(&receipt, "test_startup_us",
-                               proof->test_startup_us);
-        (void)json_push_kv_int(&receipt, "test_body_us",
-                               proof->test_body_us);
-        (void)json_push_kv_int(&receipt, "priority_test_us",
-                               proof->priority_test_us);
-        (void)json_push_kv_int(&receipt, "proof_total_us", proof->total_us);
+        rr_emit_event_proof_receipt(&receipt, proof);
         (void)json_push_kv(&doc, "proof_receipt", &receipt);
         json_free(&receipt);
     }
-    (void)json_push_kv_str(
-        &doc, "agent_next_action",
-        strcmp(status, "feedback_ready") == 0
-            ? "candidate runtime and immediate affected proofs are green; run integration proofs before acceptance"
-            : strcmp(status, "reflex_ready") == 0
-                ? "candidate compile, link, and probe are green; affected proof is running asynchronously"
-            : strcmp(status, "impact_ready") == 0
-                ? "impact is classified; source identity and candidate diagnostics are running"
-            : strcmp(status, "fallback_ready") == 0
-                ? "resident proof was unavailable; conservative integration proof is running"
-            : "repair the named restart refusal; no service or source was replaced");
+    rr_emit_event_next_action(&doc, status);
     char wire[16384];
     size_t n = json_write(&doc, wire, sizeof(wire) - 1);
     json_free(&doc);
     if (!n) return false;
     wire[n++] = '\n'; wire[n] = 0;
-    char state_why[160] = {0};
-    int64_t epoch = 0;
-    if (zcl_devloop_cycle_stream_publish(root, wire, n, &epoch,
-                                         state_why, sizeof(state_why))) {
-        (void)fwrite(wire, 1, n, stdout); (void)fflush(stdout);
-        if (!zcl_devloop_cycle_stream_flush_through(
-                root, epoch, state_why, sizeof(state_why))) {
-            fprintf(stderr,
-                    "[devloop] async restart journal flush failed: %s\n",
-                    state_why[0] ? state_why : "unknown");
-            return false;
-        }
-        return true;
-    }
-    /* Standalone unit/API callers do not own a resident ring. Preserve their
-     * durable behavior; the actual watcher always initializes the ring before
-     * reaching this path, so reflex feedback never takes this fallback. */
-    if (!zcl_devloop_cycle_state_write(root, wire, n, state_why,
-                                       sizeof(state_why))) {
-        fprintf(stderr, "[devloop] restart receipt persistence failed: %s\n",
-                state_why[0] ? state_why : "unknown");
-        return false;
-    }
-    (void)fwrite(wire, 1, n, stdout); (void)fflush(stdout);
-    return true;
+    return rr_emit_event_publish(root, wire, n);
 }
 
 int zcl_devloop_restart_event(const char *repo_root,
