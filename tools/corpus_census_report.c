@@ -443,11 +443,19 @@ static bool census_report_kpis_build(const struct census_ctx *ctx,
     return true;
 }
 
-/* Growth-rate KPI: raw deltas against the previous sequence's report.
- * Per-day rates are floor integers emitted only when at least one full day
- * elapsed between the two cutoffs (never fake precision). */
-static bool census_report_growth_delta(const struct census_ctx *ctx,
-                                       struct json_value *report)
+/* The four previous-report fields the growth delta is computed against. */
+struct census_growth_prev {
+    int64_t total;
+    int64_t pkgs;
+    int64_t mtp;
+    int64_t seq;
+};
+
+/* Read and validate the previous sequence's report file, extracting the
+ * four KPI fields the growth delta needs. Owns and frees the parsed JSON
+ * itself; the caller only ever sees the four extracted fields. */
+static bool census_report_growth_prev_read(const struct census_ctx *ctx,
+                                           struct census_growth_prev *prev)
 {
     uint8_t *prev_wire = NULL;
     size_t prev_len = 0;
@@ -457,54 +465,72 @@ static bool census_report_growth_delta(const struct census_ctx *ctx,
                   ctx->args.previous_report);
         return false;
     }
-    struct json_value prev;
-    json_init(&prev);
-    bool ok = json_read(&prev, (const char *)prev_wire, prev_len);
+    struct json_value j;
+    json_init(&j);
+    bool ok = json_read(&j, (const char *)prev_wire, prev_len);
     free(prev_wire);
-    const struct json_value *pk = ok ? json_get(&prev, "kpis") : NULL;
-    const struct json_value *pc = ok ? json_get(&prev, "cutoff") : NULL;
-    int64_t prev_total =
-        pk ? json_get_int(json_get(pk, "admitted_total_loc")) : -1;
-    int64_t prev_pkgs =
-        pk ? json_get_int(json_get(pk, "packages_admitted")) : -1;
-    int64_t prev_mtp = pc ? json_get_int(json_get(pc, "mtp")) : -1;
-    int64_t prev_seq = ok ? json_get_int(json_get(&prev, "sequence")) : -1;
-    if (!ok || prev_total < 0 || prev_pkgs < 0 || prev_mtp <= 0 ||
-        prev_seq < 0) {
-        json_free(&prev);
+    const struct json_value *pk = ok ? json_get(&j, "kpis") : NULL;
+    const struct json_value *pc = ok ? json_get(&j, "cutoff") : NULL;
+    prev->total = pk ? json_get_int(json_get(pk, "admitted_total_loc")) : -1;
+    prev->pkgs = pk ? json_get_int(json_get(pk, "packages_admitted")) : -1;
+    prev->mtp = pc ? json_get_int(json_get(pc, "mtp")) : -1;
+    prev->seq = ok ? json_get_int(json_get(&j, "sequence")) : -1;
+    json_free(&j);
+    if (!ok || prev->total < 0 || prev->pkgs < 0 || prev->mtp <= 0 ||
+        prev->seq < 0) {
         LOG_ERROR(CENSUS_LOG, "previous report %s lacks the KPI fields",
                   ctx->args.previous_report);
         return false;
     }
+    return true;
+}
+
+/* Compute this sequence's totals against `prev` and fill `delta`.
+ * Per-day rates are floor integers emitted only when at least one full day
+ * elapsed between the two cutoffs (never fake precision). */
+static bool census_report_growth_delta_build(const struct census_ctx *ctx,
+                                             const struct census_growth_prev *prev,
+                                             struct json_value *delta)
+{
     uint64_t this_total_u = 0;
     if (!zcl_u64_add(ctx->assembly.production_loc, ctx->assembly.test_loc,
                      &this_total_u)) {
-        json_free(&prev);
         LOG_ERROR(CENSUS_LOG, "delta total overflow");
         return false;
     }
     int64_t this_total = (int64_t)this_total_u;
     int64_t this_pkgs =
         (int64_t)(ctx->census_count - ctx->assembly.excluded_entries);
-    int64_t days = (ctx->args.cutoff_mtp - prev_mtp) / 86400;
+    int64_t days = (ctx->args.cutoff_mtp - prev->mtp) / 86400;
+    json_set_object(delta);
+    (void)json_push_kv_int(delta, "previous_sequence", prev->seq);
+    (void)json_push_kv_int(delta, "days_elapsed", days);
+    (void)json_push_kv_int(delta, "admitted_loc_added",
+                           this_total - prev->total);
+    (void)json_push_kv_int(delta, "packages_added", this_pkgs - prev->pkgs);
+    if (days > 0) {
+        (void)json_push_kv_int(delta, "admitted_loc_per_day",
+            (this_total - prev->total) / days);
+        (void)json_push_kv_int(delta, "packages_per_day_x100",
+            (this_pkgs - prev->pkgs) * 100 / days);
+    }
+    return true;
+}
+
+/* Growth-rate KPI: raw deltas against the previous sequence's report. */
+static bool census_report_growth_delta(const struct census_ctx *ctx,
+                                       struct json_value *report)
+{
+    struct census_growth_prev prev;
+    if (!census_report_growth_prev_read(ctx, &prev))
+        return false;
     struct json_value delta;
     json_init(&delta);
-    json_set_object(&delta);
-    (void)json_push_kv_int(&delta, "previous_sequence", prev_seq);
-    (void)json_push_kv_int(&delta, "days_elapsed", days);
-    (void)json_push_kv_int(&delta, "admitted_loc_added",
-                           this_total - prev_total);
-    (void)json_push_kv_int(&delta, "packages_added", this_pkgs - prev_pkgs);
-    if (days > 0) {
-        (void)json_push_kv_int(&delta, "admitted_loc_per_day",
-            (this_total - prev_total) / days);
-        (void)json_push_kv_int(&delta, "packages_per_day_x100",
-            (this_pkgs - prev_pkgs) * 100 / days);
-    }
-    (void)json_push_kv(report, "delta_vs_previous", &delta);
+    bool ok = census_report_growth_delta_build(ctx, &prev, &delta);
+    if (ok)
+        (void)json_push_kv(report, "delta_vs_previous", &delta);
     json_free(&delta);
-    json_free(&prev);
-    return true;
+    return ok;
 }
 
 static bool census_report_file_excluded_loc(const struct census_ctx *ctx,
