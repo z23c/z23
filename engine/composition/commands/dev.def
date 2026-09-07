@@ -1233,9 +1233,9 @@ ZCL_COMMAND_DEV_READ(
     "Every z23-stack* worktree beside this checkout (or just --name), each "
     "with its base commit, commit count ahead of that base, the last `dev "
     "train check` verdict recorded on disk (unavailable if check has not "
-    "run), and the landing-queue state read from "
-    "~/.local/state/zclassic23/land/queue.jsonl when that file exists. Reads "
-    "only; nothing here is fetched or mutated.", 65536,
+    "run), whether dev.land's own queue file exists, and the path it was "
+    "read from -- the state root dev.land itself derives, never a second "
+    "hardcoded path. Reads only; nothing here is fetched or mutated.", 65536,
     "train,stack,status,land,queue",
     "zcl.train_status_input.v1", "zcl.train_status.v1", "name", "",
     "z23 dev train status",
