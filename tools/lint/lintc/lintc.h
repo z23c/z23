@@ -384,5 +384,11 @@ int check_no_dev_history_in_contracts_run(int argc, char **argv);
 int check_no_dev_history_in_contracts_selftest(void);
 int check_no_uncited_victory_run(int argc, char **argv);
 int check_no_uncited_victory_selftest(void);
+int check_model_ar_lifecycle_run(int argc, char **argv);
+int check_model_ar_lifecycle_selftest(void);
+int check_raw_malloc_run(int argc, char **argv);
+int check_raw_malloc_selftest(void);
+int check_no_new_repair_rung_run(int argc, char **argv);
+int check_no_new_repair_rung_selftest(void);
 
 #endif

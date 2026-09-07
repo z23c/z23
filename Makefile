@@ -5369,6 +5369,9 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_narrative_integrity_fences.c \
     tools/lint/lintc/gate_no_dev_history_in_contracts.c \
     tools/lint/lintc/gate_no_uncited_victory.c \
+    tools/lint/lintc/gate_model_ar_lifecycle.c \
+    tools/lint/lintc/gate_raw_malloc.c \
+    tools/lint/lintc/gate_no_new_repair_rung.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11187,9 +11190,9 @@ check-stable-publish-contained: $(LINTC_TOOL)
 	@bash tools/scripts/check_stable_publish_containment.sh --self-test
 	@bash tools/scripts/check_stable_publish_containment.sh
 
-check-raw-malloc:
+check-raw-malloc: $(LINTC_TOOL)
 	@echo "══ LINT: raw malloc/calloc/realloc in production code ══"
-	@tools/scripts/check_raw_malloc.sh
+	@tools/scripts/check_raw_malloc.sh --selftest && tools/scripts/check_raw_malloc.sh
 
 check-json-value-init: $(LINTC_TOOL)
 	@echo "══ LINT: struct json_value initialised before first use ══"
@@ -11630,9 +11633,9 @@ check-model-validation: $(LINTC_TOOL)
 	@echo "══ LINT: model validation coverage ══"
 	@./tools/scripts/check_model_validation.sh
 
-check-model-ar-lifecycle:
+check-model-ar-lifecycle: $(LINTC_TOOL)
 	@echo "══ LINT: model ActiveRecord lifecycle saves ══"
-	@./tools/scripts/check_model_ar_lifecycle.sh
+	@./tools/scripts/check_model_ar_lifecycle.sh --selftest && ./tools/scripts/check_model_ar_lifecycle.sh
 
 # A model file must not carry a hand-written SQL statement: reads and writes
 # build one with engine/models/include/models/query_builder.h, whose identifiers
@@ -12371,9 +12374,9 @@ check-telemetry-ontology:
 # write-time-invariant test (`// repair-rung-ok:<test>`) or be grandfathered in
 # tools/scripts/repair_rung_baseline.txt (shrink-only). Fix the WRITER, not
 # downstream with another rung.
-check-no-new-repair-rung:
+check-no-new-repair-rung: $(LINTC_TOOL)
 	@echo "══ LINT: no new repair rung (TENACITY I3) ══"
-	@./tools/scripts/check_no_new_repair_rung.sh
+	@./tools/scripts/check_no_new_repair_rung.sh --selftest && ./tools/scripts/check_no_new_repair_rung.sh
 
 # Sovereign-cure ratchet — no NEW caller of coins_kv_seed_from_node_db (the
 # BORROWED zclassicd-chainstate seed the self-verified-tip cure is deleting,

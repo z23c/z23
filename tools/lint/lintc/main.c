@@ -198,6 +198,11 @@ static const struct lint_gate k_gates[] = {
       check_no_dev_history_in_contracts_selftest },
     { "check-no-uncited-victory", check_no_uncited_victory_run,
       check_no_uncited_victory_selftest },
+    { "check-model-ar-lifecycle", check_model_ar_lifecycle_run,
+      check_model_ar_lifecycle_selftest },
+    { "check-raw-malloc", check_raw_malloc_run, check_raw_malloc_selftest },
+    { "check-no-new-repair-rung", check_no_new_repair_rung_run,
+      check_no_new_repair_rung_selftest },
 };
 
 int main(int argc, char **argv)

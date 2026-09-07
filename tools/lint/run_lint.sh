@@ -125,7 +125,7 @@ gate_command() {
         check-release-no-dev-symbols)      echo 'tools/lint/check_release_no_dev_symbols.sh' ;;
         check-stable-publish-contained)    echo 'bash tools/scripts/check_stable_publish_containment.sh --self-test && bash tools/scripts/check_stable_publish_containment.sh' ;;
         check-raw-sqlite)                  echo 'tools/scripts/check_raw_sqlite.sh' ;;
-        check-raw-malloc)                  echo 'tools/scripts/check_raw_malloc.sh' ;;
+        check-raw-malloc)                  echo 'tools/scripts/check_raw_malloc.sh --selftest && tools/scripts/check_raw_malloc.sh' ;;
         check-json-value-init)             echo 'bash tools/scripts/check_json_value_init.sh --self-test && bash tools/scripts/check_json_value_init.sh' ;;
         check-blob-read-bounds)            echo 'bash tools/lint/check_blob_read_bounds.sh' ;;
         check-outparam-init-before-return) echo 'bash tools/lint/check_outparam_init_before_return.sh --selftest && bash tools/lint/check_outparam_init_before_return.sh' ;;
@@ -161,7 +161,7 @@ gate_command() {
         check-before-save-hooks)           echo './tools/lint/check_before_save_hooks.sh' ;;
         check-pthread-create)              echo './tools/lint/check_pthread_create.sh' ;;
         check-model-validation)            echo './tools/scripts/check_model_validation.sh' ;;
-        check-model-ar-lifecycle)          echo './tools/scripts/check_model_ar_lifecycle.sh' ;;
+        check-model-ar-lifecycle)          echo './tools/scripts/check_model_ar_lifecycle.sh --selftest && ./tools/scripts/check_model_ar_lifecycle.sh' ;;
         check-long-functions)              echo './tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh' ;;
         check-cyclomatic-complexity)       echo './tools/lint/check_cyclomatic_complexity.sh --selftest && ./tools/lint/check_cyclomatic_complexity.sh' ;;
         check-rpc-registrar)               echo './tools/scripts/check_rpc_registrar.sh' ;;
@@ -266,6 +266,8 @@ gate_command() {
         check-honest-witness)              echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_honest_witness.sh' ;;
         check-consensus-parity)            echo './tools/scripts/check_consensus_parity.sh --selftest && ./tools/scripts/check_consensus_parity.sh' ;;
         check-no-new-repair-rung)          echo './tools/scripts/check_no_new_repair_rung.sh' ;;
+        check-consensus-parity)            echo './tools/scripts/check_consensus_parity.sh' ;;
+        check-no-new-repair-rung)          echo './tools/scripts/check_no_new_repair_rung.sh --selftest && ./tools/scripts/check_no_new_repair_rung.sh' ;;
         check-no-new-borrowed-seed)        echo './tools/lint/check_no_new_borrowed_seed.sh .' ;;
         check-no-new-coin-backfill-caller) echo './tools/lint/check_no_new_coin_backfill_caller.sh .' ;;
         check-route-command-parity)        echo './tools/lint/check_route_command_parity.sh .' ;;
