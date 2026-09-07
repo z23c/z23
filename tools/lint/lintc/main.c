@@ -130,6 +130,8 @@ static const struct lint_gate k_gates[] = {
     { "check-generated-artifact-contradictions",
       check_generated_artifact_contradictions_run,
       check_generated_artifact_contradictions_selftest },
+    { "check-model-column-drift", check_model_column_drift_run,
+      check_model_column_drift_selftest },
 };
 
 int main(int argc, char **argv)

@@ -5328,6 +5328,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_generated_artifact_contradictions.c \
     tools/lint/lintc/gate_generated_artifact_contradictions_scan.c \
     tools/lint/lintc/gate_generated_artifact_contradictions_workers.c \
+    tools/lint/lintc/gate_model_column_drift.c \
+    tools/lint/lintc/gate_model_column_drift_workers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12210,7 +12212,7 @@ check-no-raw-sqlite-in-controllers: $(LINTC_TOOL)
 # The fix is a field list in engine/models/include/models/def/ derived through
 # models/model_fields.h. Baseline of pre-existing models lives in
 # tools/lint/model_column_drift_baseline.txt (may only shrink).
-check-model-column-drift:
+check-model-column-drift: $(LINTC_TOOL)
 	@echo "→ model_column_drift"
 	@./tools/lint/check_model_column_drift.sh --selftest
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh
