@@ -298,6 +298,16 @@ static void dtk_state_str(const struct json_value *obj, const char *key,
     (void)snprintf(out, cap, "%s", s ? s : "");
 }
 
+/* A missing state file is a genuinely idle train — the normal case before
+ * any pass has ever run. A PRESENT but unparseable state file is a
+ * different fact entirely: something wrote (or partially wrote, or
+ * corrupted) KEEP.json outside the atomic temp+rename path this leaf always
+ * uses, and this leaf cannot tell what step that file was trying to record.
+ * Treating that ambiguity as "idle" would make a keeper that starts a fresh
+ * assembly over whatever the previous, unreadable pass was doing — exactly
+ * the silent-restart failure mode the state machine exists to rule out. So
+ * "file present but unreadable" resolves to `blocked`, the same as any
+ * other state this leaf does not recognize. */
 static void dtk_state_load(const struct dtk_paths *p, struct dtk_state *st)
 {
     char raw[4096];
@@ -307,11 +317,12 @@ static void dtk_state_load(const struct dtk_paths *p, struct dtk_state *st)
     if (!f)
         return;
     size_t n = fread(raw, 1, sizeof(raw) - 1, f);
+    bool read_err = ferror(f) != 0;
     (void)fclose(f);
     raw[n] = '\0';
     struct json_value v;
     json_init(&v);
-    if (json_read(&v, raw, n) && v.type == JSON_OBJ) {
+    if (!read_err && json_read(&v, raw, n) && v.type == JSON_OBJ) {
         dtk_state_str(&v, "state", st->state, sizeof(st->state));
         dtk_state_str(&v, "base", st->base, sizeof(st->base));
         dtk_state_str(&v, "tip", st->tip, sizeof(st->tip));
@@ -319,6 +330,13 @@ static void dtk_state_load(const struct dtk_paths *p, struct dtk_state *st)
         st->picks = json_get_int(json_get(&v, "picks"));
         if (!st->state[0])
             (void)snprintf(st->state, sizeof(st->state), "idle");
+    } else {
+        (void)snprintf(st->state, sizeof(st->state), "blocked");
+        (void)snprintf(st->reason, sizeof(st->reason),
+                      "%s is present but unreadable or not valid JSON; a "
+                      "previous keeper may have died mid-write outside the "
+                      "atomic path — inspect and repair or remove it",
+                      p->state);
     }
     json_free(&v);
 }
