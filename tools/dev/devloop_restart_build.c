@@ -693,50 +693,67 @@ static bool rr_force_cache_copy_for_test(void)
 /* The operator may place the shared cache on a different filesystem from
  * the worktree. Publish an immutable, rehashed copy when hard links cannot
  * cross that boundary. */
-static bool rr_copy_publish(const char *source, const char *target,
-                            const char expected_sha256[65])
-{
 #if defined(_WIN32)
-    char parent[PATH_MAX], target_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
-    struct platform_positioned_file input;
-    struct platform_positioned_file_snapshot before, after;
-    struct platform_directory_transaction directory;
-    struct platform_directory_child staged;
-    char staged_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u] = {0};
-    platform_positioned_file_init(&input);
-    platform_directory_transaction_init(&directory);
-    platform_directory_child_init(&staged);
-    bool ok = rr_parent_leaf(target, parent, target_leaf) &&
-              platform_positioned_file_open(&input, source) &&
-              platform_positioned_file_snapshot(&input, &before) &&
-              before.size <= SIZE_MAX &&
-              platform_directory_transaction_open(&directory, parent) &&
-              rr_create_temp_child(&directory, ".bin", &staged, staged_leaf);
+static bool rr_copy_publish_win32_open(
+    const char *source, const char *target, char parent[PATH_MAX],
+    char target_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u],
+    struct platform_positioned_file *input,
+    struct platform_positioned_file_snapshot *before,
+    struct platform_directory_transaction *directory,
+    struct platform_directory_child *staged,
+    char staged_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u])
+{
+    return rr_parent_leaf(target, parent, target_leaf) &&
+           platform_positioned_file_open(input, source) &&
+           platform_positioned_file_snapshot(input, before) &&
+           before->size <= SIZE_MAX &&
+           platform_directory_transaction_open(directory, parent) &&
+           rr_create_temp_child(directory, ".bin", staged, staged_leaf);
+}
+
+static bool rr_copy_publish_win32_copy_loop(
+    struct platform_positioned_file *input,
+    struct platform_directory_child *staged, uint64_t total_size)
+{
     unsigned char buffer[32u * 1024u];
     uint64_t offset = 0;
-    while (ok && offset < before.size) {
-        size_t wanted = before.size - offset > sizeof(buffer)
-                            ? sizeof(buffer) : (size_t)(before.size - offset);
-        int64_t got = platform_positioned_file_read(&input, buffer, wanted,
+    bool ok = true;
+    while (ok && offset < total_size) {
+        size_t wanted = total_size - offset > sizeof(buffer)
+                            ? sizeof(buffer) : (size_t)(total_size - offset);
+        int64_t got = platform_positioned_file_read(input, buffer, wanted,
                                                     offset);
         ok = got == (int64_t)wanted &&
-             platform_directory_child_write_exact(&staged, buffer, wanted,
+             platform_directory_child_write_exact(staged, buffer, wanted,
                                                    offset);
         offset += ok ? wanted : 0;
     }
-    ok = ok && platform_positioned_file_snapshot(&input, &after) &&
-         platform_positioned_file_snapshot_equal(&before, &after) &&
-         platform_directory_child_truncate(&staged, before.size) &&
-         platform_directory_child_flush(&staged);
-    platform_positioned_file_close(&input);
+    return ok;
+}
+
+static bool rr_copy_publish_win32_finalize(
+    struct platform_positioned_file *input,
+    struct platform_positioned_file_snapshot *before,
+    struct platform_directory_transaction *directory,
+    struct platform_directory_child *staged,
+    const char target_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u],
+    const char staged_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u],
+    const char *target, const char expected_sha256[65], bool ok)
+{
+    struct platform_positioned_file_snapshot after;
+    ok = ok && platform_positioned_file_snapshot(input, &after) &&
+         platform_positioned_file_snapshot_equal(before, &after) &&
+         platform_directory_child_truncate(staged, before->size) &&
+         platform_directory_child_flush(staged);
+    platform_positioned_file_close(input);
     if (ok)
-        ok = platform_directory_child_replace(&directory, &staged,
+        ok = platform_directory_child_replace(directory, staged,
                                               target_leaf, true);
-    platform_directory_child_close(&staged);
+    platform_directory_child_close(staged);
     if (!ok && staged_leaf[0])
-        (void)platform_directory_child_unlink(&directory, staged_leaf, true);
-    ok = ok && platform_directory_transaction_flush(&directory);
-    platform_directory_transaction_close(&directory);
+        (void)platform_directory_child_unlink(directory, staged_leaf, true);
+    ok = ok && platform_directory_transaction_flush(directory);
+    platform_directory_transaction_close(directory);
     char actual[65];
     if (ok)
         ok = rr_sha256_file(target, actual) &&
@@ -745,10 +762,35 @@ static bool rr_copy_publish(const char *source, const char *target,
         ok = rr_sha256_file(target, actual) &&
              strcmp(actual, expected_sha256) == 0;
     return ok;
+}
+
+static bool rr_copy_publish_win32(const char *source, const char *target,
+                                  const char expected_sha256[65])
+{
+    char parent[PATH_MAX], target_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
+    struct platform_positioned_file input;
+    struct platform_positioned_file_snapshot before;
+    struct platform_directory_transaction directory;
+    struct platform_directory_child staged;
+    char staged_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u] = {0};
+    platform_positioned_file_init(&input);
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&staged);
+    bool ok = rr_copy_publish_win32_open(source, target, parent, target_leaf,
+                                         &input, &before, &directory, &staged,
+                                         staged_leaf);
+    ok = ok && rr_copy_publish_win32_copy_loop(&input, &staged, before.size);
+    return rr_copy_publish_win32_finalize(&input, &before, &directory,
+                                          &staged, target_leaf, staged_leaf,
+                                          target, expected_sha256, ok);
+}
 #else
-    char temp[PATH_MAX];
-    int n = snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", target);
-    if (n <= 0 || n >= (int)sizeof(temp))
+static bool rr_copy_publish_posix_open(const char *source, const char *target,
+                                       char temp[PATH_MAX],
+                                       int *source_fd_out, int *temp_fd_out)
+{
+    int n = snprintf(temp, PATH_MAX, "%s.tmp.XXXXXX", target);
+    if (n <= 0 || n >= PATH_MAX)
         return false;
     int source_fd = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat source_st;
@@ -762,6 +804,13 @@ static bool rr_copy_publish(const char *source, const char *target,
         close(source_fd);
         return false;
     }
+    *source_fd_out = source_fd;
+    *temp_fd_out = temp_fd;
+    return true;
+}
+
+static bool rr_copy_publish_posix_copy(int source_fd, int temp_fd)
+{
     unsigned char buffer[32u * 1024u];
     bool ok = true;
     for (;;) {
@@ -789,6 +838,14 @@ static bool rr_copy_publish(const char *source, const char *target,
     }
     if (close(source_fd) != 0)
         ok = false;
+    return ok;
+}
+
+static bool rr_copy_publish_posix_finalize(const char *temp,
+                                           const char *target, int temp_fd,
+                                           const char expected_sha256[65],
+                                           bool ok)
+{
     if (ok && (fchmod(temp_fd, 0555) != 0 || fsync(temp_fd) != 0))
         ok = false;
     if (close(temp_fd) != 0)
@@ -804,8 +861,32 @@ static bool rr_copy_publish(const char *source, const char *target,
             chmod(target, 0555) != 0)
             ok = false;
     }
+    return ok;
+}
+
+static bool rr_copy_publish_posix(const char *source, const char *target,
+                                  const char expected_sha256[65])
+{
+    char temp[PATH_MAX];
+    int source_fd, temp_fd;
+    if (!rr_copy_publish_posix_open(source, target, temp, &source_fd,
+                                    &temp_fd))
+        return false;
+    bool ok = rr_copy_publish_posix_copy(source_fd, temp_fd);
+    ok = rr_copy_publish_posix_finalize(temp, target, temp_fd,
+                                        expected_sha256, ok);
     (void)unlink(temp);
     return ok;
+}
+#endif
+
+static bool rr_copy_publish(const char *source, const char *target,
+                            const char expected_sha256[65])
+{
+#if defined(_WIN32)
+    return rr_copy_publish_win32(source, target, expected_sha256);
+#else
+    return rr_copy_publish_posix(source, target, expected_sha256);
 #endif
 }
 
