@@ -431,5 +431,9 @@ int check_hotswap_package_receipt_is_not_authority_run(int argc, char **argv);
 int check_hotswap_package_receipt_is_not_authority_selftest(void);
 int check_byte_order_codec_single_run(int argc, char **argv);
 int check_byte_order_codec_single_selftest(void);
+int check_hotswap_swappable_shape_run(int argc, char **argv);
+int check_hotswap_swappable_shape_selftest(void);
+int check_no_snapshot_struct_memcmp_run(int argc, char **argv);
+int check_no_snapshot_struct_memcmp_selftest(void);
 
 #endif

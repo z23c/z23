@@ -5405,6 +5405,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_byte_order_codec_single.c \
     tools/lint/lintc/gate_byte_order_codec_single_report.c \
     tools/lint/lintc/gate_byte_order_codec_single_selftest.c \
+    tools/lint/lintc/gate_hotswap_swappable_shape.c \
+    tools/lint/lintc/gate_no_snapshot_struct_memcmp.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11186,7 +11188,7 @@ check-hotswap-service-islands:
 # (READY + read-only) in the engine/composition/commands catalog and be claimed by exactly
 # one file. Self-tested with seeded-violation fixtures in
 # test_make_lint_gates.c. See docs/work/HOTSWAP.md "Real module ABI".
-check-hotswap-swappable-shape:
+check-hotswap-swappable-shape: $(LINTC_TOOL)
 	@tools/lint/check_hotswap_swappable_shape.sh
 
 # The agent-facing hot-swap ledger (tools/dev/hotswap-candidates.sh) re-parses
@@ -12166,7 +12168,7 @@ check-no-gnu-va-args: $(LINTC_TOOL)
 # (a helper function doing the memcmp elsewhere, a macro-wrapped memcmp, a
 # multi-line call).
 .PHONY: check-no-snapshot-struct-memcmp
-check-no-snapshot-struct-memcmp:
+check-no-snapshot-struct-memcmp: $(LINTC_TOOL)
 	@echo "══ LINT: no raw memcmp/bcmp over struct platform_positioned_file_snapshot ══"
 	@./tools/lint/check_no_snapshot_struct_memcmp.sh --self-test
 	@./tools/lint/check_no_snapshot_struct_memcmp.sh

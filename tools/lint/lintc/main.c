@@ -243,6 +243,10 @@ static const struct lint_gate k_gates[] = {
       check_hotswap_package_receipt_is_not_authority_selftest },
     { "check-byte-order-codec-single", check_byte_order_codec_single_run,
       check_byte_order_codec_single_selftest },
+    { "check-hotswap-swappable-shape", check_hotswap_swappable_shape_run,
+      check_hotswap_swappable_shape_selftest },
+    { "check-no-snapshot-struct-memcmp", check_no_snapshot_struct_memcmp_run,
+      check_no_snapshot_struct_memcmp_selftest },
 };
 
 int main(int argc, char **argv)
