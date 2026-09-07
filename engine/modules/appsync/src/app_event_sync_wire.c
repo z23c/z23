@@ -260,11 +260,59 @@ bool zcl_app_sync_reader_more(const struct zcl_app_sync_reader *r)
     return r && r->in && r->offset < r->len;
 }
 
-/* One canonical signed frame back into its fields. The payload is copied
- * into the caller's buffer and borrowed by `out`, which is the same
- * ownership rule the model's read path uses. Shape only: no signature is
- * checked here, and no identity — that is the verifier's job, and having
- * two opinions about it is how they drift. */
+/* The fields that come before the payload: everything of fixed width, plus
+ * the two length-framed tokens. Split out so neither half of the decode
+ * carries the other's branches. */
+static bool sync_decode_head(struct sync_cursor *c,
+                             struct zcl_app_signed_event_v1 *out)
+{
+    out->version = sync_take_u32_le(c);
+    sync_take_bytes(c, out->chain_id, sizeof(out->chain_id));
+    size_t app_len = sync_take_u16_le(c);
+    if (c->bad || !sync_take_token(c, app_len, out->app_id,
+                                   sizeof(out->app_id)))
+        return false;
+    size_t topic_len = sync_take_u16_le(c);
+    if (c->bad || !sync_take_token(c, topic_len, out->topic,
+                                   sizeof(out->topic)))
+        return false;
+    out->kind = sync_take_u32_le(c);
+    sync_take_bytes(c, out->author_key_id, sizeof(out->author_key_id));
+    sync_take_bytes(c, out->author_pubkey, sizeof(out->author_pubkey));
+    out->sequence = sync_take_u64_le(c);
+    out->created_at = sync_take_u64_le(c);
+    sync_take_bytes(c, out->previous_event_id,
+                    sizeof(out->previous_event_id));
+    return !c->bad;
+}
+
+/* The payload and the signature that follow it. The payload is copied into
+ * the caller's buffer and borrowed by `out`, which is the same ownership
+ * rule the model's read path uses. */
+static bool sync_decode_tail(struct sync_cursor *c,
+                             struct zcl_app_signed_event_v1 *out,
+                             uint8_t *payload, size_t payload_capacity)
+{
+    uint32_t payload_len = sync_take_u32_le(c);
+    if (c->bad || payload_len > ZCL_APP_EVENT_PAYLOAD_MAX ||
+        payload_len > payload_capacity)
+        return false;
+    if (payload_len > 0)
+        sync_take_bytes(c, payload, payload_len);
+    out->payload.data = payload_len > 0 ? payload : NULL;
+    out->payload.len = payload_len;
+    uint16_t sig_len = sync_take_u16_le(c);
+    if (c->bad || sig_len == 0 || sig_len > ZCL_APP_EVENT_SIGNATURE_MAX)
+        return false;
+    sync_take_bytes(c, out->signature, sig_len);
+    out->signature_len = sig_len;
+    return !c->bad;
+}
+
+/* One canonical signed frame back into its fields. Shape only: no signature
+ * is checked here, and no identity — that is the verifier's job, and having
+ * two opinions about it is how they drift. A frame with bytes left over is
+ * refused: this build wrote exactly one encoding of an event. */
 static enum zcl_app_sync_status sync_decode_frame(
     const uint8_t *in, size_t len, struct zcl_app_signed_event_v1 *out,
     uint8_t *payload, size_t payload_capacity)
@@ -272,37 +320,9 @@ static enum zcl_app_sync_status sync_decode_frame(
     struct sync_cursor c = { .in = in, .len = len, .at = 0, .bad = false };
     memset(out, 0, sizeof(*out));
     out->struct_size = sizeof(*out);
-    out->version = sync_take_u32_le(&c);
-    sync_take_bytes(&c, out->chain_id, sizeof(out->chain_id));
-    size_t app_len = sync_take_u16_le(&c);
-    if (c.bad || !sync_take_token(&c, app_len, out->app_id,
-                                  sizeof(out->app_id)))
-        return ZCL_APP_SYNC_MALFORMED;
-    size_t topic_len = sync_take_u16_le(&c);
-    if (c.bad || !sync_take_token(&c, topic_len, out->topic,
-                                  sizeof(out->topic)))
-        return ZCL_APP_SYNC_MALFORMED;
-    out->kind = sync_take_u32_le(&c);
-    sync_take_bytes(&c, out->author_key_id, sizeof(out->author_key_id));
-    sync_take_bytes(&c, out->author_pubkey, sizeof(out->author_pubkey));
-    out->sequence = sync_take_u64_le(&c);
-    out->created_at = sync_take_u64_le(&c);
-    sync_take_bytes(&c, out->previous_event_id,
-                    sizeof(out->previous_event_id));
-    uint32_t payload_len = sync_take_u32_le(&c);
-    if (c.bad || payload_len > ZCL_APP_EVENT_PAYLOAD_MAX ||
-        payload_len > payload_capacity)
-        return ZCL_APP_SYNC_MALFORMED;
-    if (payload_len > 0)
-        sync_take_bytes(&c, payload, payload_len);
-    out->payload.data = payload_len > 0 ? payload : NULL;
-    out->payload.len = payload_len;
-    uint16_t sig_len = sync_take_u16_le(&c);
-    if (c.bad || sig_len == 0 || sig_len > ZCL_APP_EVENT_SIGNATURE_MAX)
-        return ZCL_APP_SYNC_MALFORMED;
-    sync_take_bytes(&c, out->signature, sig_len);
-    out->signature_len = sig_len;
-    if (c.bad || c.at != len)
+    if (!sync_decode_head(&c, out) ||
+        !sync_decode_tail(&c, out, payload, payload_capacity) ||
+        c.at != len)
         return ZCL_APP_SYNC_MALFORMED;
     return ZCL_APP_SYNC_OK;
 }
@@ -318,6 +338,41 @@ static bool sync_row_in_scope(const struct zcl_app_signed_event_v1 *event,
         strncmp(event->topic, scope->topic, ZCL_APP_TOPIC_MAX) == 0;
 }
 
+/* Is there a whole row here, and is it one this answer is allowed to carry?
+ * Every bound the wire declares, asked before a single byte of the row is
+ * looked at. */
+static enum zcl_app_sync_status sync_row_bounds(
+    const struct zcl_app_sync_reader *r, uint32_t *frame_len)
+{
+    if (r->len - r->offset < ZCL_APP_SYNC_ROW_HEAD_BYTES)
+        return ZCL_APP_SYNC_MALFORMED;
+    *frame_len = sync_read_u32_be(r->in + r->offset);
+    if (*frame_len == 0 || *frame_len > ZCL_APP_SYNC_EVENT_MAX_BYTES)
+        return ZCL_APP_SYNC_ROW_TOO_LARGE;
+    if ((size_t)*frame_len > r->len - r->offset - ZCL_APP_SYNC_ROW_HEAD_BYTES)
+        return ZCL_APP_SYNC_MALFORMED;
+    if (r->rows >= ZCL_APP_SYNC_BATCH_MAX)
+        return ZCL_APP_SYNC_BATCH_FULL;
+    return ZCL_APP_SYNC_OK;
+}
+
+/* A decoded row's two admissions: it is in the topic that was asked for,
+ * and the App platform stands behind its identity and its signature. The
+ * event id is recomputed from the row's own bytes rather than trusted, and
+ * the verifier compares the two. */
+static enum zcl_app_sync_status sync_row_admit(
+    struct zcl_app_signed_event_v1 *out,
+    const struct zcl_app_event_scope_v1 *scope)
+{
+    if (!sync_row_in_scope(out, scope))
+        return ZCL_APP_SYNC_SCOPE;
+    char why[256];
+    if (!zcl_app_signed_event_v1_id(out, out->event_id, why, sizeof(why)) ||
+        !zcl_app_signed_event_v1_verify(out, scope, why, sizeof(why)))
+        return ZCL_APP_SYNC_SIG_INVALID;
+    return ZCL_APP_SYNC_OK;
+}
+
 enum zcl_app_sync_status zcl_app_sync_reader_next(
     struct zcl_app_sync_reader *r,
     const struct zcl_app_event_scope_v1 *scope,
@@ -327,33 +382,18 @@ enum zcl_app_sync_status zcl_app_sync_reader_next(
     if (!r || !r->in || !scope || !out || (!payload && payload_capacity > 0))
         return ZCL_APP_SYNC_ARGUMENT;
     memset(out, 0, sizeof(*out));
-    if (r->len - r->offset < ZCL_APP_SYNC_ROW_HEAD_BYTES)
-        return ZCL_APP_SYNC_MALFORMED;
-    uint32_t frame_len = sync_read_u32_be(r->in + r->offset);
-    if (frame_len == 0 || frame_len > ZCL_APP_SYNC_EVENT_MAX_BYTES)
-        return ZCL_APP_SYNC_ROW_TOO_LARGE;
-    if ((size_t)frame_len >
-        r->len - r->offset - ZCL_APP_SYNC_ROW_HEAD_BYTES)
-        return ZCL_APP_SYNC_MALFORMED;
-    if (r->rows >= ZCL_APP_SYNC_BATCH_MAX)
-        return ZCL_APP_SYNC_BATCH_FULL;
+    uint32_t frame_len = 0;
+    enum zcl_app_sync_status st = sync_row_bounds(r, &frame_len);
+    if (st != ZCL_APP_SYNC_OK)
+        return st;
 
     const uint8_t *frame = r->in + r->offset + ZCL_APP_SYNC_ROW_HEAD_BYTES;
-    enum zcl_app_sync_status st =
-        sync_decode_frame(frame, frame_len, out, payload, payload_capacity);
+    st = sync_decode_frame(frame, frame_len, out, payload, payload_capacity);
+    if (st == ZCL_APP_SYNC_OK)
+        st = sync_row_admit(out, scope);
     if (st != ZCL_APP_SYNC_OK) {
         memset(out, 0, sizeof(*out));
         return st;
-    }
-    if (!sync_row_in_scope(out, scope)) {
-        memset(out, 0, sizeof(*out));
-        return ZCL_APP_SYNC_SCOPE;
-    }
-    char why[256];
-    if (!zcl_app_signed_event_v1_id(out, out->event_id, why, sizeof(why)) ||
-        !zcl_app_signed_event_v1_verify(out, scope, why, sizeof(why))) {
-        memset(out, 0, sizeof(*out));
-        return ZCL_APP_SYNC_SIG_INVALID;
     }
     r->offset += ZCL_APP_SYNC_ROW_HEAD_BYTES + frame_len;
     r->rows++;

@@ -121,6 +121,64 @@ static void app_sync_push_frontier(struct json_value *data,
     }
 }
 
+/* Read this node's frontier for the scope's topic, and — when a peer was
+ * named — attempt the pull. `*read` says the table answered at all;
+ * `*pulled` says a pull ran. The database is opened and closed here so no
+ * refusal path can leave it open. */
+static bool app_sync_read_local(const struct zcl_app_event_scope_v1 *scope,
+                                const char *peer, char *path, size_t path_cap,
+                                struct zcl_app_sync_frontier *frontier,
+                                struct zcl_app_sync_report *report,
+                                bool *read, const char **refusal)
+{
+    *read = false;
+    if (!app_sync_db_path(path, path_cap)) {
+        *refusal = "DATADIR_UNAVAILABLE";
+        return false;
+    }
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, path)) {
+        *refusal = "NODE_DB_UNAVAILABLE";
+        return false;
+    }
+    *read = zcl_app_event_sync_frontier(&ndb, scope->app_id, scope->topic,
+                                        frontier);
+    /* A peer named is a pull asked for, and this process holds no paired
+     * session to ask over. `zcl_app_event_replicate` refuses before it
+     * touches the table, so nothing is written on this path. */
+    int64_t arrival = (int64_t)platform_time_wall_time_t();
+    if (*read && peer && peer[0] && arrival > 0) {
+        struct zcl_app_sync_peer target = {
+            .name = peer, .ask = NULL, .ctx = NULL,
+        };
+        (void)zcl_app_event_replicate(&ndb, scope, &target, arrival, report);
+    }
+    node_db_close(&ndb);
+    return true;
+}
+
+static void app_sync_answer(struct zcl_command_reply *reply,
+                            const struct zcl_app_event_scope_v1 *scope,
+                            const struct zcl_app_sync_report *report,
+                            const struct zcl_app_sync_frontier *frontier)
+{
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.dev_app_sync.v1");
+    (void)json_push_kv_str(&reply->data, "app_id", scope->app_id);
+    (void)json_push_kv_str(&reply->data, "topic", scope->topic);
+    (void)json_push_kv_int(&reply->data, "max_event_bytes",
+                           (int64_t)scope->max_event_bytes);
+    (void)json_push_kv_int(&reply->data, "pulled", (int64_t)report->pulled);
+    (void)json_push_kv_int(&reply->data, "verified",
+                           (int64_t)report->verified);
+    (void)json_push_kv_int(&reply->data, "refused", (int64_t)report->refused);
+    app_sync_push_frontier(&reply->data, frontier);
+    (void)json_push_kv_int(&reply->data, "batch_max",
+                           (int64_t)ZCL_APP_SYNC_BATCH_MAX);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
 /* ── dev.app.sync ──────────────────────────────────────────────────────── */
 
 void zcl_native_handle_dev_app_sync(const struct zcl_command_request *request,
@@ -148,48 +206,27 @@ void zcl_native_handle_dev_app_sync(const struct zcl_command_request *request,
     }
 
     char path[512];
-    if (!app_sync_db_path(path, sizeof(path))) {
-        app_sync_refuse(reply, "DATADIR_UNAVAILABLE", "datadir",
-                        "the datadir must be an absolute path",
+    struct zcl_app_sync_frontier frontier;
+    struct zcl_app_sync_report report;
+    memset(&frontier, 0, sizeof(frontier));
+    memset(&report, 0, sizeof(report));
+    bool read = false;
+    const char *refusal = "";
+    if (!app_sync_read_local(&scope, peer, path, sizeof(path), &frontier,
+                             &report, &read, &refusal)) {
+        app_sync_refuse(reply, refusal, "datadir",
+                        "this node's database under the datadir could not be "
+                        "opened at an absolute path",
                         APP_SYNC_LEAF_EVIDENCE);
         return;
     }
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open(&ndb, path)) {
-        app_sync_refuse(reply, "NODE_DB_UNAVAILABLE", "open",
-                        "the node database under this datadir would not open",
-                        path);
-        return;
-    }
-
-    struct zcl_app_sync_frontier frontier;
-    bool read = zcl_app_event_sync_frontier(&ndb, scope.app_id, scope.topic,
-                                            &frontier);
-    /* A peer named is a pull asked for, and this process holds no paired
-     * session to ask over. The refusal names the peer and the rule, and
-     * nothing was written: `zcl_app_event_replicate` refuses before it
-     * touches the table. */
-    struct zcl_app_sync_report report;
-    memset(&report, 0, sizeof(report));
-    bool asked = peer && peer[0];
-    int64_t arrival = (int64_t)platform_time_wall_time_t();
-    if (read && asked && arrival > 0) {
-        struct zcl_app_sync_peer target = {
-            .name = peer, .ask = NULL, .ctx = NULL,
-        };
-        (void)zcl_app_event_replicate(&ndb, &scope, &target,
-                                      arrival, &report);
-    }
-    node_db_close(&ndb);
-
     if (!read) {
         app_sync_refuse(reply, "TOPIC_UNREADABLE", "read",
                         "this node's rows for that topic would not be read",
                         topic);
         return;
     }
-    if (asked) {
+    if (peer && peer[0]) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_TRANSIENT,
             "NO_SESSION", "dispatch", true, false,
@@ -199,18 +236,5 @@ void zcl_native_handle_dev_app_sync(const struct zcl_command_request *request,
             "answered.", peer);
         return;
     }
-
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.dev_app_sync.v1");
-    (void)json_push_kv_str(&reply->data, "app_id", scope.app_id);
-    (void)json_push_kv_str(&reply->data, "topic", scope.topic);
-    (void)json_push_kv_int(&reply->data, "max_event_bytes",
-                           (int64_t)scope.max_event_bytes);
-    (void)json_push_kv_int(&reply->data, "pulled", 0);
-    (void)json_push_kv_int(&reply->data, "verified", 0);
-    (void)json_push_kv_int(&reply->data, "refused", 0);
-    app_sync_push_frontier(&reply->data, &frontier);
-    (void)json_push_kv_int(&reply->data, "batch_max",
-                           (int64_t)ZCL_APP_SYNC_BATCH_MAX);
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+    app_sync_answer(reply, &scope, &report, &frontier);
 }

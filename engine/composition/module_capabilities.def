@@ -323,6 +323,7 @@ ZCL_MODULE_CAPABILITY("contexts/market/models/src/zslp_ledger.c", CAP_FS_WRITE|C
 ZCL_MODULE_CAPABILITY("contexts/market/models/src/zslp_validity.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/market/models/src/zswap_ad.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/address_index_service.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/app_event_sync.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/services/src/agent_broker_catalog_seam.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/services/src/agent_session_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/agents_telemetry_fill.c", CAP_FS_WRITE, "")

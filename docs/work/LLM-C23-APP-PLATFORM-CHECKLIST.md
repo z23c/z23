@@ -159,6 +159,25 @@ manifest compiler, capability broker, telemetry envelope, and HTTPS/onion
 dispatcher. None of the three is complete until it has a clean source epoch
 and durable proof receipt under this document's evidence rule.
 
+**Replication, as it actually stands.** The `signed events replicate via
+bounded P2P/onion anti-entropy` clause below is PART done, and the part is
+worth naming exactly rather than leaving the whole clause unticked:
+
+- DONE — a bounded, signed PULL for one `(app_id, topic)`
+  (`engine/modules/appsync/`, `engine/services/src/app_event_sync.c`,
+  `z23 dev app sync`), with per-row verification under host-owned scope,
+  refuse-and-stop on the first bad row, idempotent save, forks retained,
+  and a two-node test that drives the real wire in wire order
+  (`tests/harness/src/test_app_event_sync.c`).
+- NOT DONE — the transport (no `appsync` mesh stream service; a peer is a
+  seam nothing wires yet, so `--peer` refuses as `NO_SESSION`), the
+  anti-entropy LOOP (pull on command only, no timer), the inventory/get
+  exchange this clause needs for a late joiner (the pull walks the
+  answerer's arrival order, so a node that joins mid-history and advances
+  its frontier can keep a hole), and alternate-relay recovery.
+
+See [`docs/APP_EVENT_SYNC.md`](../APP_EVENT_SYNC.md).
+
 - [ ] **Shared substrate:** immutable `AppEvent` persistence keyed by event
   ID (app/topic/receive-cursor and app/author/sequence/event-ID indexes);
   previous/successor/projection relationships as model APIs (retain all
