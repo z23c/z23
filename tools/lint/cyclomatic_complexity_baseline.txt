@@ -2857,7 +2857,6 @@ tests/harness/src/test_api_rest_index.c:api_rest_index_focused_tests:389
 tests/harness/src/test_api_routes.c:api_route_table_focused_tests:237
 tests/harness/src/test_api_status.c:api_status_focused_tests:205
 tests/harness/src/test_api_supply.c:api_supply_focused_tests:23
-tests/harness/src/test_api_transaction_types.c:api_transaction_type_focused_tests:451
 tests/harness/src/test_api_znam_routes.c:api_znam_routes_focused_tests:336
 tests/harness/src/test_app_context.c:test_app_context:89
 tests/harness/src/test_app_context.c:test_app_context_tor_policy:29
@@ -2995,7 +2994,6 @@ tests/harness/src/test_condition_engine.c:test_condition_engine:120
 tests/harness/src/test_confine.c:c_confine_normal_ops:19
 tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
 tests/harness/src/test_connect_tip_hot_loop_exit.c:test_connect_tip_hot_loop_exit:40
-tests/harness/src/test_connman_addnode_fallback.c:test_connman_addnode_fallback:459
 tests/harness/src/test_consensus.c:test_consensus:73
 tests/harness/src/test_consensus_db_flip.c:flip_build_source:29
 tests/harness/src/test_consensus_db_flip.c:test_consensus_db_flip_platform_arm:26
@@ -3359,7 +3357,6 @@ tests/harness/src/test_psc_real_range.c:prr_setup:27
 tests/harness/src/test_psc_real_range.c:test_psc_real_range:29
 tests/harness/src/test_pv_lookahead.c:la_fold_from:31
 tests/harness/src/test_pv_lookahead.c:test_pv_lookahead:41
-tests/harness/src/test_qr.c:test_qr:482
 tests/harness/src/test_read_leaf_no_datadir_write.c:rlw_dir_set_walk:24
 tests/harness/src/test_read_leaf_no_datadir_write.c:rlw_invoke_refused:34
 tests/harness/src/test_read_leaf_no_datadir_write.c:t_registry_coverage:23
@@ -3425,7 +3422,6 @@ tests/harness/src/test_rom_compile_status.c:build_fixture:29
 tests/harness/src/test_rom_dump.c:test_rom_dump:31
 tests/harness/src/test_rom_fetch.c:rf_lat_conn_thread:19
 tests/harness/src/test_rom_fetch_onion.c:test_rom_fetch_onion:49
-tests/harness/src/test_rpc.c:test_rpc:534
 tests/harness/src/test_rpc_error_envelope.c:test_rpc_error_envelope:121
 tests/harness/src/test_rpc_frontdoor_slots.c:test_rpc_frontdoor_slots:96
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:392
@@ -3692,7 +3688,6 @@ tests/harness/src/test_wallet_projection.c:t_projection_catch_up_replay:20
 tests/harness/src/test_wallet_recovery_safety.c:t_two_concurrent_restores_leave_one_wallet:34
 tests/harness/src/test_wallet_rescan_coverage.c:test_wallet_rescan_coverage:29
 tests/harness/src/test_wallet_restore.c:test_wallet_restore:37
-tests/harness/src/test_wallet_view.c:test_wallet_view:605
 tests/harness/src/test_watcher_lease.c:wl_parent_child_roundtrip:31
 tests/harness/src/test_yardsale_app.c:t_known_sellers:32
 tests/harness/src/test_yardsale_app.c:t_prevout_guard:26
