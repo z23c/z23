@@ -149,7 +149,8 @@ static int nrc_st_hollow(const struct nrc_st_env *e)
 
 int check_no_real_clock_test_deadline_selftest(void)
 {
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-nrc-XXXXXX", td),
             sizeof tmpl))

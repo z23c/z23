@@ -663,7 +663,8 @@ static int spc_selftest_missing_def(const char *stub, int *fails)
 int check_specialists_selftest(void)
 {
     char tmpl[4096];
-    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-spc.XXXXXX", env_or("TMPDIR", "/tmp")),
+    (void)csr_mkdirs("test-tmp");
+    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-spc.XXXXXX", env_or("TMPDIR", "test-tmp")),
             sizeof tmpl))
         return 1;
     char *tmp = mkdtemp(tmpl);

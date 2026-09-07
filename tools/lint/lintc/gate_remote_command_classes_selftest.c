@@ -57,7 +57,8 @@ static int rcc_st_write(const struct rcc_st_ctx *s, const char *rel,
 
 static int rcc_st_setup(struct rcc_st_ctx *s)
 {
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-rcc-XXXXXX", td),
             sizeof tmpl))

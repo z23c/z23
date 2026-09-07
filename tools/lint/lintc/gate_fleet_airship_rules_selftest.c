@@ -93,8 +93,9 @@ static int far_st_missing(struct far_st *st)
 int check_fleet_airship_rules_selftest(void)
 {
     char tmpl[4096];
+    (void)csr_mkdirs("test-tmp");
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-far-XXXXXX",
-                     env_or("TMPDIR", "/tmp")), sizeof tmpl))
+                     env_or("TMPDIR", "test-tmp")), sizeof tmpl))
         return 2;
     if (!mkdtemp(tmpl))
         return die("z23-lint: mkdtemp failed\n", "");

@@ -754,7 +754,8 @@ static int hsw_st_clean(const char *work)
 
 int check_hotswap_swappable_shape_selftest(void)
 {
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/hotswap-swappable-shape-selftest.XXXXXX",
                      td), sizeof tmpl))

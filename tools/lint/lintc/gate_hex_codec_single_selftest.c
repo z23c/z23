@@ -115,7 +115,8 @@ static int hcs_cov_case(int want, const char *msg, const char *const *assigns)
 
 int check_hex_codec_single_selftest(void)
 {
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-hcs-XXXXXX", td), sizeof tmpl))
         return 2;

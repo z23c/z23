@@ -263,7 +263,8 @@ static int shl_selftest_phases(const struct shl_selftest_env *e, const char *sav
 int check_shell_host_assumptions_selftest(void)
 {
     char tmpl[4096];
-    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-shl.XXXXXX", env_or("TMPDIR", "/tmp")),
+    (void)csr_mkdirs("test-tmp");
+    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-shl.XXXXXX", env_or("TMPDIR", "test-tmp")),
             sizeof tmpl))
         return 1;
     char *tmp = mkdtemp(tmpl);

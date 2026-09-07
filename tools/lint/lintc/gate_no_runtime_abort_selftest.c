@@ -41,7 +41,8 @@ static int nra_st_plant(const struct nra_st_ctx *s, const char *body)
 
 static int nra_st_setup(struct nra_st_ctx *s)
 {
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-nra-XXXXXX", td),
             sizeof tmpl))

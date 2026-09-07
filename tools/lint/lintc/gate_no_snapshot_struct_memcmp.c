@@ -591,7 +591,8 @@ int check_no_snapshot_struct_memcmp_selftest(void)
     int rc = hsw2_compile(&re);
     if (rc)
         return rc;
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/no-snapshot-struct-memcmp-selftest.XXXXXX",
                      td), sizeof tmpl)) {

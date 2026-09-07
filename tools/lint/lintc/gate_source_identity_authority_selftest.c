@@ -164,8 +164,9 @@ static int sia_st_violator(struct sia_st *st, const char *name,
 int check_source_identity_authority_selftest(void)
 {
     char tmpl[4096];
+    (void)csr_mkdirs("test-tmp");
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-sia-XXXXXX",
-                     env_or("TMPDIR", "/tmp")), sizeof tmpl))
+                     env_or("TMPDIR", "test-tmp")), sizeof tmpl))
         return 2;
     if (!mkdtemp(tmpl))
         return die("z23-lint: mkdtemp failed\n", "");

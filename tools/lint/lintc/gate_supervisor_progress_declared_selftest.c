@@ -83,7 +83,8 @@ static int spd_st_expect(const char *root, const char *baseline, int decl_ix,
 
 int check_supervisor_progress_declared_selftest(void)
 {
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-spd-XXXXXX", td),
             sizeof tmpl))

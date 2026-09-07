@@ -633,7 +633,8 @@ static int nup_st_native_cases(const char *root, char *p, int *fails)
 
 int check_no_unattended_publish_selftest(void)
 {
-    const char *td = env_or("TMPDIR", "/tmp");
+    const char *td = env_or("TMPDIR", "test-tmp");
+    (void)csr_mkdirs("test-tmp");
     char tmpl[4096], p[4096];
     char *root;
     int fails = 0, rc;
