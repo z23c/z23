@@ -5371,6 +5371,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_model_ar_lifecycle.c \
     tools/lint/lintc/gate_raw_malloc.c \
     tools/lint/lintc/gate_no_new_repair_rung.c \
+    tools/lint/lintc/gate_tor_full_default.c \
+    tools/lint/lintc/gate_installed_acceptance_tools.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -13168,7 +13170,7 @@ check-no-unattended-publish:
 # unset. The DHT harness refuses to start until each binary it names is
 # executable; this proves the installed lane puts every one of those in the
 # prefix outside every conditional, so no undocumented flag is load-bearing.
-check-installed-acceptance-tools:
+check-installed-acceptance-tools: $(LINTC_TOOL)
 	@echo "══ LINT: installed Commons needs no optional flag ══"
 	@./tools/lint/check_installed_acceptance_tools.sh
 
@@ -13243,7 +13245,7 @@ check-mind-owns-rebuild: $(LINTC_TOOL)
 	@./tools/lint/check_mind_owns_rebuild.sh
 
 .PHONY: check-tor-full-default
-check-tor-full-default:
+check-tor-full-default: $(LINTC_TOOL)
 	@echo "══ LINT: real Tor is the default link, a stub cannot be packaged ══"
 	@./tools/lint/check_tor_full_default.sh --selftest
 	@./tools/lint/check_tor_full_default.sh

@@ -203,6 +203,10 @@ static const struct lint_gate k_gates[] = {
     { "check-raw-malloc", check_raw_malloc_run, check_raw_malloc_selftest },
     { "check-no-new-repair-rung", check_no_new_repair_rung_run,
       check_no_new_repair_rung_selftest },
+    { "check-tor-full-default", check_tor_full_default_run,
+      check_tor_full_default_selftest },
+    { "check-installed-acceptance-tools", check_installed_acceptance_tools_run,
+      check_installed_acceptance_tools_selftest },
 };
 
 int main(int argc, char **argv)
