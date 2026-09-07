@@ -8,6 +8,8 @@
 
 #include "appsync/app_event_sync.h"
 
+#include "base/serialize_le.h"
+
 #include <string.h>
 
 /* ── a bounded cursor over the bytes somebody else sent ──────────────── */
@@ -39,7 +41,7 @@ static uint16_t sync_take_u16_le(struct sync_cursor *c)
     const uint8_t *p = sync_take(c, 2);
     if (!p)
         return 0;
-    return (uint16_t)((uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8));
+    return zcl_read_u16_le(p);
 }
 
 static uint32_t sync_take_u32_le(struct sync_cursor *c)
@@ -47,8 +49,7 @@ static uint32_t sync_take_u32_le(struct sync_cursor *c)
     const uint8_t *p = sync_take(c, 4);
     if (!p)
         return 0;
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-        ((uint32_t)p[3] << 24);
+    return zcl_read_u32_le(p);
 }
 
 static uint64_t sync_take_u64_le(struct sync_cursor *c)
@@ -56,10 +57,7 @@ static uint64_t sync_take_u64_le(struct sync_cursor *c)
     const uint8_t *p = sync_take(c, 8);
     if (!p)
         return 0;
-    uint64_t v = 0;
-    for (size_t i = 0; i < 8; i++)
-        v |= (uint64_t)p[i] << (8 * i);
-    return v;
+    return zcl_read_u64_le(p);
 }
 
 static void sync_take_bytes(struct sync_cursor *c, uint8_t *out, size_t n)
@@ -84,22 +82,6 @@ static bool sync_take_token(struct sync_cursor *c, size_t n, char *out,
     out[n] = 0;
     return true;
 }
-
-static uint32_t sync_read_u32_be(const uint8_t *p)
-{
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-        ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-
-static void sync_write_u32_be(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
-
 
 /* ── refusal tokens ──────────────────────────────────────────────────── */
 
@@ -227,7 +209,7 @@ enum zcl_app_sync_status zcl_app_sync_writer_append(
         return ZCL_APP_SYNC_BATCH_FULL;
 
     uint8_t *row = w->out + w->len;
-    sync_write_u32_be(row, (uint32_t)frame_len);
+    zcl_write_u32_be(row, (uint32_t)frame_len);
     uint8_t *body = row + ZCL_APP_SYNC_ROW_HEAD_BYTES;
     size_t written = 0;
     if (!zcl_app_signed_event_v1_canonical_unsigned(
@@ -346,7 +328,7 @@ static enum zcl_app_sync_status sync_row_bounds(
 {
     if (r->len - r->offset < ZCL_APP_SYNC_ROW_HEAD_BYTES)
         return ZCL_APP_SYNC_MALFORMED;
-    *frame_len = sync_read_u32_be(r->in + r->offset);
+    *frame_len = zcl_read_u32_be(r->in + r->offset);
     if (*frame_len == 0 || *frame_len > ZCL_APP_SYNC_EVENT_MAX_BYTES)
         return ZCL_APP_SYNC_ROW_TOO_LARGE;
     if ((size_t)*frame_len > r->len - r->offset - ZCL_APP_SYNC_ROW_HEAD_BYTES)

@@ -539,6 +539,37 @@ static int test_app_sync_out_of_scope_row(void)
                   ZCL_APP_SYNC_MALFORMED);
         ASSERT_EQ(report.stored, 0u);
 
+        /* A row_len claiming more than any answer could ever carry is
+         * refused as too large, never treated as a huge-but-honest count. */
+        uint8_t huge_row_len[1024];
+        memcpy(huge_row_len, answer, writer.len);
+        huge_row_len[0] = 0xff;
+        huge_row_len[1] = 0xff;
+        huge_row_len[2] = 0xff;
+        huge_row_len[3] = 0xff;
+        memset(&report, 0, sizeof(report));
+        ASSERT_EQ(zcl_app_event_sync_apply(&b, &other, huge_row_len,
+                                           writer.len,
+                                           SYNC_TEST_RECEIVED_AT, &report),
+                  ZCL_APP_SYNC_ROW_TOO_LARGE);
+        ASSERT_EQ(report.stored, 0u);
+
+        /* A row_len one byte longer than the bytes actually present is a
+         * malformed answer, never a read past the end of the buffer. */
+        uint8_t row_len_plus_one[1024];
+        memcpy(row_len_plus_one, answer, writer.len);
+        uint32_t declared = (uint32_t)(writer.len - ZCL_APP_SYNC_ROW_HEAD_BYTES) + 1u;
+        row_len_plus_one[0] = (uint8_t)(declared >> 24);
+        row_len_plus_one[1] = (uint8_t)(declared >> 16);
+        row_len_plus_one[2] = (uint8_t)(declared >> 8);
+        row_len_plus_one[3] = (uint8_t)declared;
+        memset(&report, 0, sizeof(report));
+        ASSERT_EQ(zcl_app_event_sync_apply(&b, &other, row_len_plus_one,
+                                           writer.len,
+                                           SYNC_TEST_RECEIVED_AT, &report),
+                  ZCL_APP_SYNC_MALFORMED);
+        ASSERT_EQ(report.stored, 0u);
+
         node_db_close(&b);
         PASS();
     } _test_next:;
