@@ -100,6 +100,19 @@ static bool ic_write(const char *dir, const char *rel, const char *content)
     return true;
 }
 
+#if !defined(_WIN32)
+/* Proof state uses private write_atomic outputs, independent of the caller's
+ * umask. Fixtures must carry that same mode before testing trusted evidence. */
+static bool ic_proof_private_write(const char *dir, const char *rel,
+                                    const char *content)
+{
+    char path[4096];
+    int len = snprintf(path, sizeof(path), "%s/%s", dir, rel);
+    return len > 0 && (size_t)len < sizeof(path) &&
+           ic_write(dir, rel, content) && chmod(path, 0600) == 0;
+}
+#endif
+
 static bool ic_group_in(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
                         size_t len, const char *g)
 {
@@ -1431,14 +1444,14 @@ static int test_ic_proof_wait_reports_settled_failure(void)
         ASSERT(snprintf(root, sizeof(root),
                         IC_FIX_ROOT "/proof_wait_failed_%ld",
                         (long)getpid()) > 0);
-        ASSERT(ic_write(root, "fixture", "proof wait fixture\n"));
+        ASSERT(ic_proof_private_write(root, "fixture", "proof wait fixture\n"));
         char state_dir[4096], failure_rel[4096];
         ASSERT(snprintf(state_dir, sizeof(state_dir),
                         "%s/.cache/zcl-dev-proof", root) > 0);
         ASSERT(snprintf(failure_rel, sizeof(failure_rel),
                         ".cache/zcl-dev-proof/%s-%s.failed", local,
                         base) > 0);
-        ASSERT(ic_write(root, failure_rel, "child_proof_failed_exit_1"));
+        ASSERT(ic_proof_private_write(root, failure_rel, "child_proof_failed_exit_1"));
 
         /* Two throwaway attempt directories for this exact pair, as a real
          * failed proof leaves under attempts/<local>-<base>.XXXXXX/logs/
@@ -1454,8 +1467,8 @@ static int test_ic_proof_wait_reports_settled_failure(void)
         ASSERT(snprintf(newer_marker, sizeof(newer_marker),
                         ".cache/zcl-dev-proof/attempts/%s-%s.newer/logs/x",
                         local, base) > 0);
-        ASSERT(ic_write(root, older_marker, "stale attempt\n"));
-        ASSERT(ic_write(root, newer_marker, "settled attempt\n"));
+        ASSERT(ic_proof_private_write(root, older_marker, "stale attempt\n"));
+        ASSERT(ic_proof_private_write(root, newer_marker, "settled attempt\n"));
         ASSERT(snprintf(older_dir, sizeof(older_dir),
                         "%s/.cache/zcl-dev-proof/attempts/%s-%s.older",
                         root, local, base) > 0);
@@ -1636,22 +1649,28 @@ static int test_ic_proof_retry(void)
         char root[4096], state[4096], key[160], failed[4096];
         char attempt[4096], logs[4096], archived[4096], request[4096];
         test_make_tmpdir(root, sizeof(root), "impact_composition", "retry");
-        ASSERT(ic_write(root, ".cache/fixture", "isolated retry\n"));
+        ASSERT(ic_proof_private_write(root, ".cache/fixture", "isolated retry\n"));
         ASSERT((size_t)snprintf(state, sizeof(state), "%s/.cache/zcl-dev-proof",
                                 root) < sizeof(state));
         ASSERT((size_t)snprintf(key, sizeof(key), "%s-%s", local, base) < sizeof(key));
         ASSERT((size_t)snprintf(failed, sizeof(failed), "%s/%s.failed", state, key) < sizeof(failed));
         char relative[256];
         ASSERT((size_t)snprintf(relative, sizeof(relative), "%s.failed", key) < sizeof(relative));
-        ASSERT(ic_write(state, relative, reason));
+        ASSERT(ic_proof_private_write(state, relative, reason));
         struct zcl_dev_proof_status status = {0};
+        ASSERT((size_t)snprintf(request, sizeof(request), "%s/requests/%s.request", state, key) < sizeof(request));
+        ASSERT(chmod(failed, 0660) == 0);
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(strcmp(status.detail, "proof_retry_failure_evidence_invalid") == 0);
+        ASSERT(ic_bytes_equal(failed, reason, sizeof(reason) - 1));
+        ASSERT(access(request, F_OK) != 0);
+        ASSERT(chmod(failed, 0600) == 0);
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(strcmp(status.detail, "proof_retry_failure_attempt_missing") == 0);
         ASSERT((size_t)snprintf(attempt, sizeof(attempt), "%s/attempts/%s.prior", state, key) < sizeof(attempt));
-        ASSERT(ic_write(attempt, "logs/test.log", "original failed observation\n"));
+        ASSERT(ic_proof_private_write(attempt, "logs/test.log", "original failed observation\n"));
         ASSERT((size_t)snprintf(logs, sizeof(logs), "%s/logs/test.log", attempt) < sizeof(logs));
         ASSERT((size_t)snprintf(archived, sizeof(archived), "%s/logs/failure.txt", attempt) < sizeof(archived));
-        ASSERT((size_t)snprintf(request, sizeof(request), "%s/requests/%s.request", state, key) < sizeof(request));
         struct utimbuf prior_time = { .actime = 1700000000, .modtime = 1700000000 };
         ASSERT(utime(attempt, &prior_time) == 0);
         ASSERT(zcl_dev_proof_ensure(root, local, base, &status));
@@ -1663,27 +1682,27 @@ static int test_ic_proof_retry(void)
         ASSERT((size_t)snprintf(relative, sizeof(relative), "leases/%s.lease", key) < sizeof(relative));
         ASSERT((size_t)snprintf(marker, sizeof(marker), "%s/%s", state, relative) < sizeof(marker));
         ASSERT((size_t)snprintf(marker_body, sizeof(marker_body), "prior %ld 1700000000\n", (long)getpid()) < sizeof(marker_body));
-        ASSERT(ic_write(state, relative, marker_body));
+        ASSERT(ic_proof_private_write(state, relative, marker_body));
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
         ASSERT(unlink(marker) == 0);
         ASSERT((size_t)snprintf(relative, sizeof(relative), "%s.running", key) < sizeof(relative));
         ASSERT((size_t)snprintf(marker, sizeof(marker), "%s/%s", state, relative) < sizeof(marker));
         ASSERT((size_t)snprintf(marker_body, sizeof(marker_body), "%ld 1700000000\n", (long)getpid()) < sizeof(marker_body));
-        ASSERT(ic_write(state, relative, marker_body));
+        ASSERT(ic_proof_private_write(state, relative, marker_body));
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
-        ASSERT(ic_write(state, relative, "unparseable worker marker\n"));
+        ASSERT(ic_proof_private_write(state, relative, "unparseable worker marker\n"));
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(strcmp(status.detail, "proof_retry_worker_not_settled") == 0);
         ASSERT(unlink(marker) == 0);
 
         ASSERT((size_t)snprintf(relative, sizeof(relative), "requests/%s.request", key) < sizeof(relative));
-        ASSERT(ic_write(state, relative, "malformed pending request\n"));
+        ASSERT(ic_proof_private_write(state, relative, "malformed pending request\n"));
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(strcmp(status.detail, "proof_retry_request_present") == 0);
         ASSERT(unlink(request) == 0);
-        ASSERT(ic_write(attempt, "logs/failure.txt", "conflicting evidence\n"));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", "conflicting evidence\n"));
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(strcmp(status.detail, "proof_retry_failure_archive_conflict") == 0);
         ASSERT(ic_bytes_equal(archived, "conflicting evidence\n", strlen("conflicting evidence\n")));
@@ -1731,7 +1750,7 @@ static int test_ic_proof_retry(void)
          * belongs to A, even though B is the newest attempt directory. */
         char crashed[4096], claimed[4096], crash_archive[4096];
         ASSERT((size_t)snprintf(crashed, sizeof(crashed), "%s/attempts/%s.crashed", state, key) < sizeof(crashed));
-        ASSERT(ic_write(crashed, "logs/test.log", "interrupted attempt B\n"));
+        ASSERT(ic_proof_private_write(crashed, "logs/test.log", "interrupted attempt B\n"));
         ASSERT((size_t)snprintf(claimed, sizeof(claimed), "%s/request", crashed) < sizeof(claimed));
         ASSERT((size_t)snprintf(crash_archive, sizeof(crash_archive), "%s/logs/failure.txt", crashed) < sizeof(crash_archive));
         ASSERT(rename(request, claimed) == 0);
@@ -1746,7 +1765,7 @@ static int test_ic_proof_retry(void)
          * before updating the flat marker. A still owns that marker;
          * B's distinct evidence is retained without becoming a conflict. */
         ASSERT(unlink(request) == 0);
-        ASSERT(ic_write(crashed, "logs/failure.txt", "interrupted B failure\n"));
+        ASSERT(ic_proof_private_write(crashed, "logs/failure.txt", "interrupted B failure\n"));
         ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
         ASSERT(strstr(status.log_dir, ".prior/logs") != NULL);
         ASSERT(zcl_dev_proof_retry(root, local, base, &status));
@@ -1779,6 +1798,7 @@ static int test_ic_proof_retry(void)
         ASSERT(file != NULL);
         ASSERT(fwrite(wire, 1, sizeof(wire), file) == sizeof(wire));
         ASSERT(fclose(file) == 0);
+        ASSERT(chmod(status.receipt_path, 0600) == 0);
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_PASSED);
         ASSERT(ic_bytes_equal(status.receipt_path, wire, sizeof(wire)));
