@@ -5367,6 +5367,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_frontier_single_writer.c \
     tools/lint/lintc/gate_no_utxos_mirror_read.c \
     tools/lint/lintc/gate_narrative_integrity_fences.c \
+    tools/lint/lintc/gate_no_dev_history_in_contracts.c \
+    tools/lint/lintc/gate_no_uncited_victory.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
