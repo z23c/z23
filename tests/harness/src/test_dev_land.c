@@ -738,10 +738,20 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
         return false;
     if (dlx_git(NULL, clone) != 0)
         return false;
+    /* The plan-refresh target the regen phase's dlrg_plan_refresh() runs
+     * when it observed any artifact's stat identity change: a trivial
+     * recipe that appends one marker line, so tests can tell how many
+     * times (if any) it ran from the resulting line count, exactly the
+     * observable this rig's fixed make-based mechanics give a test
+     * without a real dev build. */
     if ((size_t)snprintf(makefile_body, sizeof(makefile_body),
                          "docs-capability-inventory:\n\t%s\n"
                          "docs-executor-routing:\n\t%s\n"
-                         "fix-doc-counts:\n\t%s\n",
+                         "fix-doc-counts:\n\t%s\n"
+                         "build/dev-loop/restart.env:\n"
+                         "\t@mkdir -p build/dev-loop\n"
+                         "\t@printf 'plan\\n' >> build/dev-loop/"
+                         "restart.env\n",
                          cap_recipe, routing_recipe, counts_recipe) >=
             sizeof(makefile_body))
         return false;
@@ -874,6 +884,109 @@ static int test_dev_land_regen_failure_fails_row(void)
         ASSERT(strstr(dlx_str(&c, "detail"),
                       "FAIL: synthetic regen failure") != NULL);
         dlx_end(&c);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A generated artifact rewritten with IDENTICAL bytes (git sees no diff, so
+ * no commit is made) still moves that file's mtime/ctime — exactly what the
+ * source-mutation token the proof checks is built from. The regen phase
+ * must re-seal build/dev-loop/restart.env in that case even though nothing
+ * landed in git. */
+static int test_dev_land_regen_refreshes_plan_on_identical_rewrite(void)
+{
+    int failures = 0;
+    TEST("land: the regen phase re-seals the restart plan when a target "
+        "rewrites an artifact with identical bytes") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landwt[1300], head[64], planpath[1400], log[8192];
+        size_t loglen = 0;
+        const char *head_args[] = { "rev-parse", "HEAD", NULL };
+        dlx_isolate("regendocs_d");
+        /* Rewrites the file with the SAME content dlx_rig_make_docregen
+         * seeded it with ("orig\n"): git diff --quiet sees nothing, but
+         * the write still touches the inode's mtime/ctime. */
+        ASSERT(dlx_rig_make_docregen(
+            &rig, "regendocs_d_rig",
+            "@printf 'orig\\n' > docs/CAPABILITY_INVENTORY.jsonl", "@:",
+            "@:"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        (void)snprintf(landwt, sizeof(landwt), "%s",
+                      dlx_str(&c, "log_path"));
+        ASSERT(landwt[0] != '\0');
+        ASSERT(dlx_slurp(landwt, log, sizeof(log), &loglen));
+        log[loglen < sizeof(log) ? loglen : sizeof(log) - 1] = '\0';
+        ASSERT(strstr(log, "regen: restart plan refreshed (1 artifact(s) "
+                          "rewritten, 0 committed)") != NULL);
+        dlx_end(&c);
+        /* No git-visible change: no regen commit, HEAD is still the
+         * submitted tip. */
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
+        ASSERT(strcmp(head, rig.tip) == 0);
+        /* The plan target ran exactly once: one marker line. */
+        (void)snprintf(planpath, sizeof(planpath),
+                      "%s/build/dev-loop/restart.env", landwt);
+        ASSERT(dlx_slurp(planpath, log, sizeof(log), &loglen));
+        log[loglen < sizeof(log) ? loglen : sizeof(log) - 1] = '\0';
+        ASSERT(strcmp(log, "plan\n") == 0);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* When no regen target's output changed a tracked artifact's stat identity
+ * at all, the phase must leave the restart plan alone: refreshing it on
+ * every step, whether or not anything moved, is exactly the redundant
+ * extra `make` invocation the stepper's prebuild phase already avoids when
+ * the plan file exists. */
+static int test_dev_land_regen_leaves_plan_alone_when_untouched(void)
+{
+    int failures = 0;
+    TEST("land: the regen phase leaves the restart plan alone when no "
+        "artifact's stat identity changed") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landwt[1300], planpath[1400], log[8192];
+        size_t loglen = 0;
+        dlx_isolate("regendocs_e");
+        ASSERT(dlx_rig_make_docregen(&rig, "regendocs_e_rig", "@:", "@:",
+                                     "@:"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        (void)snprintf(landwt, sizeof(landwt), "%s",
+                      dlx_str(&c, "log_path"));
+        ASSERT(landwt[0] != '\0');
+        ASSERT(dlx_slurp(landwt, log, sizeof(log), &loglen));
+        log[loglen < sizeof(log) ? loglen : sizeof(log) - 1] = '\0';
+        ASSERT(strstr(log, "regen: restart plan unchanged") != NULL);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        (void)snprintf(planpath, sizeof(planpath),
+                      "%s/build/dev-loop/restart.env", landwt);
+        /* The plan target never ran: the marker file was never created. */
+        ASSERT(!dlx_file_exists(planpath));
         dlx_restore();
         PASS();
     } _test_next:;
@@ -2584,6 +2697,8 @@ int test_dev_land(void)
     failures += test_dev_land_regen_commits_drift();
     failures += test_dev_land_regen_no_commit_when_clean();
     failures += test_dev_land_regen_failure_fails_row();
+    failures += test_dev_land_regen_refreshes_plan_on_identical_rewrite();
+    failures += test_dev_land_regen_leaves_plan_alone_when_untouched();
 
 #endif /* !defined(_WIN32) */
 

@@ -21,6 +21,14 @@
  * submitted commit id, used only to read its subject line for the regen
  * commit's own subject; it is never checked out or moved.
  *
+ * If any regenerated artifact's on-disk identity (inode/size/mtime/ctime)
+ * changed -- whether or not the bytes it wrote differ from what git already
+ * had, and whether or not a commit followed -- this re-seals
+ * build/dev-loop/restart.env (make's DEV_RESTART_PLAN target, which carries
+ * a FORCE prerequisite) before returning, so the plan the proof later reads
+ * describes the tree as this phase left it rather than as it stood before
+ * this phase ran. See native_dev_land_regen.c's dlrg_plan_refresh() for why.
+ *
  * Returns 1 on success (whether or not a commit was made — see below), or
  * -1 on a hard failure with a human-actionable `why` (min 128 bytes
  * recommended; longer is truncated, never overflowed).

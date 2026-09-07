@@ -303,19 +303,85 @@ static bool dlrg_has_makefile(const char *wt)
 }
 
 /* Run every regen target in table order, appending each to `transcript`.
- * Returns false on the first failure, with `why` already set by
- * dlrg_make(). */
+ * `used` carries the caller's running transcript offset forward so later
+ * appends (the plan-refresh note and its own make output) land after this
+ * phase's own output rather than overwriting it. Returns false on the
+ * first failure, with `why` already set by dlrg_make(). */
 static bool dlrg_run_targets(const char *wt, char *transcript,
-                             size_t transcript_cap, char *why,
+                             size_t transcript_cap, size_t *used, char *why,
                              size_t why_cap)
 {
-    size_t used = 0;
     for (size_t i = 0; i < DLRG_N; i++) {
         if (dlrg_make(wt, DLRG_ARTIFACTS[i].target, transcript,
-                     transcript_cap, &used, why, why_cap) != 0)
+                     transcript_cap, used, why, why_cap) != 0)
             return false;
     }
     return true;
+}
+
+/* One artifact path's on-disk identity — the same fields
+ * tools/dev/dev_source_identity.c folds into the build plan's
+ * BASE_GENERATION mutation token (inode, size, mtime, ctime), scoped here
+ * to just the paths this phase can rewrite. */
+struct dlrg_snap {
+    bool exists;
+    ino_t ino;
+    off_t size;
+    struct timespec mtim;
+    struct timespec ctim;
+};
+
+static void dlrg_snap_capture(const char *wt, const char *rel,
+                              struct dlrg_snap *out)
+{
+    char path[4096 + 16];
+    struct stat st;
+    memset(out, 0, sizeof(*out));
+    if (!wt || !rel ||
+        snprintf(path, sizeof(path), "%s/%s", wt, rel) >=
+            (int)sizeof(path) ||
+        stat(path, &st) != 0)
+        return;
+    out->exists = true;
+    out->ino = st.st_ino;
+    out->size = st.st_size;
+    out->mtim = st.st_mtim;
+    out->ctim = st.st_ctim;
+}
+
+static void dlrg_snap_all(const char *wt, struct dlrg_snap *out)
+{
+    for (size_t i = 0; i < DLRG_N; i++)
+        dlrg_snap_capture(wt, DLRG_ARTIFACTS[i].path, &out[i]);
+}
+
+static bool dlrg_snap_eq(const struct dlrg_snap *a, const struct dlrg_snap *b)
+{
+    if (a->exists != b->exists)
+        return false;
+    if (!a->exists)
+        return true;
+    return a->ino == b->ino && a->size == b->size &&
+          a->mtim.tv_sec == b->mtim.tv_sec &&
+          a->mtim.tv_nsec == b->mtim.tv_nsec &&
+          a->ctim.tv_sec == b->ctim.tv_sec &&
+          a->ctim.tv_nsec == b->ctim.tv_nsec;
+}
+
+/* How many of the table's paths changed identity (inode/size/mtime/ctime)
+ * between the two snapshots — set even when the bytes a generator wrote
+ * are identical to what was already there, which is exactly the case
+ * `dlrg_collect_changed`'s git-diff cannot see and the build plan's
+ * mutation token can. */
+static size_t dlrg_snap_diff_count(const struct dlrg_snap *before,
+                                   const struct dlrg_snap *after)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < DLRG_N; i++) {
+        if (!dlrg_snap_eq(&before[i], &after[i]))
+            n++;
+    }
+    return n;
 }
 
 /* Which of the table's paths actually differ from HEAD after the targets
@@ -348,13 +414,50 @@ static int dlrg_finish_unchanged(const char *wt, char *new_head)
     return dlrg_rev_parse(wt, "HEAD", new_head) ? 1 : -1;
 }
 
+/* Re-seal build/dev-loop/restart.env after this phase touched the tree.
+ *
+ * The plan's BASE_GENERATION line is a stat-based mutation token over every
+ * tracked source file (tools/dev/source-identity.sh, dev_source_identity.c)
+ * and the proof checks it against the tree it is about to prove
+ * (dev_proof.c's zcl_dev_source_mutation_verify). A regen target can
+ * rewrite one of DLRG_ARTIFACTS with byte-identical content — git sees no
+ * diff, nothing is committed — and still change that file's mtime/ctime,
+ * which moves the token. If the plan was already sealed before this phase
+ * ran (the common case: the landing worktree's dev-bin build seals it
+ * first), the proof then refuses a tip that never actually diverged from
+ * what the plan describes. Re-running $(DEV_RESTART_PLAN) reseals it from
+ * the tree as it stands now; the target carries a FORCE prerequisite (see
+ * Makefile), so this is always a full reseal, never a stale no-op, and it
+ * is the same target the prebuild phase ensures exists — that later check
+ * just finds it already fresh and does not rebuild it again. */
+static bool dlrg_plan_refresh(const char *wt, size_t touched,
+                              size_t committed, char *transcript,
+                              size_t transcript_cap, size_t *used, char *why,
+                              size_t why_cap)
+{
+    char line[160];
+    if (touched == 0) {
+        dlrg_append(transcript, transcript_cap, used,
+                   "regen: restart plan unchanged\n");
+        return true;
+    }
+    (void)snprintf(line, sizeof(line),
+                  "regen: restart plan refreshed (%zu artifact(s) "
+                  "rewritten, %zu committed)\n",
+                  touched, committed);
+    dlrg_append(transcript, transcript_cap, used, line);
+    return dlrg_make(wt, "build/dev-loop/restart.env", transcript,
+                     transcript_cap, used, why, why_cap) == 0;
+}
+
 int zcl_dev_land_regen_phase(const char *wt, const char *tip_sha,
                              char *new_head, size_t new_head_cap,
                              char *transcript, size_t transcript_cap,
                              char *why, size_t why_cap)
 {
     const char *changed[DLRG_N];
-    size_t changed_n;
+    struct dlrg_snap before[DLRG_N], after[DLRG_N];
+    size_t changed_n, used = 0, touched, committed = 0;
 
     if (!dlrg_args_ok(wt, new_head, new_head_cap, why, why_cap))
         return -1;
@@ -365,14 +468,22 @@ int zcl_dev_land_regen_phase(const char *wt, const char *tip_sha,
     if (!dlrg_has_makefile(wt))
         return dlrg_finish_unchanged(wt, new_head);
 
-    if (!dlrg_run_targets(wt, transcript, transcript_cap, why, why_cap))
+    dlrg_snap_all(wt, before);
+    if (!dlrg_run_targets(wt, transcript, transcript_cap, &used, why,
+                         why_cap))
         return -1;
+    dlrg_snap_all(wt, after);
+    touched = dlrg_snap_diff_count(before, after);
 
     changed_n = dlrg_collect_changed(wt, changed);
-    if (changed_n == 0)
-        return dlrg_finish_unchanged(wt, new_head);
+    if (changed_n > 0) {
+        if (dlrg_commit(wt, tip_sha, changed, changed_n, why, why_cap) < 0)
+            return -1;
+        committed = 1;
+    }
 
-    if (dlrg_commit(wt, tip_sha, changed, changed_n, why, why_cap) < 0)
+    if (!dlrg_plan_refresh(wt, touched, committed, transcript,
+                          transcript_cap, &used, why, why_cap))
         return -1;
 
     return dlrg_finish_unchanged(wt, new_head);
