@@ -141,6 +141,10 @@ static const struct lint_gate k_gates[] = {
     { "check-vcs-no-git", check_vcs_no_git_run, check_vcs_no_git_selftest },
     { "check-no-authoritative-ram-state", check_no_authoritative_ram_state_run,
       check_no_authoritative_ram_state_selftest },
+    { "check-operator-needed-sink", check_operator_needed_sink_run,
+      check_operator_needed_sink_selftest },
+    { "check-shape-includes-header", check_shape_includes_header_run,
+      check_shape_includes_header_selftest },
 };
 
 int main(int argc, char **argv)

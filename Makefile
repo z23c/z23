@@ -5336,6 +5336,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_thread_supervision_workers.c \
     tools/lint/lintc/gate_call_presence_fences.c \
     tools/lint/lintc/gate_authority_fences.c \
+    tools/lint/lintc/gate_wiring_presence_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12414,7 +12415,7 @@ check-no-live-lab-history:
 # Gate E9 — EV_OPERATOR_NEEDED emit must reach a registered sink (HARD).
 # The silent-halt fix: the loud "human needed" signal can never be emitted
 # without a subscriber in engine/modules/event/src/alerts.c.
-check-operator-needed-sink:
+check-operator-needed-sink: $(LINTC_TOOL)
 	@echo "══ LINT: operator-needed sink (E9) ══"
 	@./tools/scripts/check_operator_needed_sink.sh
 
@@ -12940,7 +12941,7 @@ scenario:
 # Gate E3 — shape source files include their shape contract header
 # (conditions -> framework/condition.h, models -> models/ header,
 # supervisors -> supervisor header). HARD: the tree already complies.
-check-shape-includes-header:
+check-shape-includes-header: $(LINTC_TOOL)
 	@echo "══ LINT: shape includes header (E3) ══"
 	@./tools/scripts/check_shape_includes_header.sh
 

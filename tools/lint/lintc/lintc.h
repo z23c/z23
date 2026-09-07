@@ -328,5 +328,9 @@ int check_vcs_no_git_run(int argc, char **argv);
 int check_vcs_no_git_selftest(void);
 int check_no_authoritative_ram_state_run(int argc, char **argv);
 int check_no_authoritative_ram_state_selftest(void);
+int check_operator_needed_sink_run(int argc, char **argv);
+int check_operator_needed_sink_selftest(void);
+int check_shape_includes_header_run(int argc, char **argv);
+int check_shape_includes_header_selftest(void);
 
 #endif
