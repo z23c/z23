@@ -32,6 +32,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "gate_tree_walk_priv.h"
 
 
 enum { SI_MAX = 64, SI_NAME = 96, SI_OUT = 8192 };
@@ -180,24 +181,21 @@ static int si_load(struct si_acc *a)
     return fr;
 }
 
-int check_sysinit_ordering_run(int argc, char **argv)
+static int si_write_golden(const char *der, int nrec)
 {
-    struct si_acc a = { 0 };
-    int rc = si_load(&a);
-    if (rc) return rc;
-    char der[SI_OUT], gold[SI_OUT];
-    int nrec = 0;
-    if (si_finish(&a, der, sizeof der, &nrec)) { fputs(a.err, stderr); return 2; }
-    if (argc >= 1 && strcmp(argv[0], "--update") == 0) {
-        FILE *g = fopen(k_si_gold, "w");
-        if (!g) return die("z23-lint: cannot open %s\n", k_si_gold);
-        size_t dn = strlen(der);
-        rc = fwrite(der, 1, dn, g) != dn;
-        if (fclose(g) != 0 && rc == 0) return die("z23-lint: fclose failed: %s\n", k_si_gold);
-        if (rc) return die("z23-lint: write failed\n", "");
-        printf("[check_sysinit_ordering] golden updated (%d records)\n", nrec);
-        return 0;
-    }
+    FILE *g = fopen(k_si_gold, "w");
+    if (!g) return die("z23-lint: cannot open %s\n", k_si_gold);
+    size_t dn = strlen(der);
+    int rc = fwrite(der, 1, dn, g) != dn;
+    if (fclose(g) != 0 && rc == 0) return die("z23-lint: fclose failed: %s\n", k_si_gold);
+    if (rc) return die("z23-lint: write failed\n", "");
+    printf("[check_sysinit_ordering] golden updated (%d records)\n", nrec);
+    return 0;
+}
+
+static int si_cmp_golden(const char *der)
+{
+    char gold[SI_OUT];
     FILE *g = fopen(k_si_gold, "r");
     if (!g) {
         fputs("check_sysinit_ordering: FATAL — missing golden tools/lint/sysinit_ordering_golden.txt (run --update)\n",
@@ -205,7 +203,7 @@ int check_sysinit_ordering_run(int argc, char **argv)
         return 2;
     }
     size_t used = fread(gold, 1, sizeof gold - 1, g);
-    rc = ferror(g) ? die("z23-lint: read failed: %s\n", k_si_gold) : 0;
+    int rc = ferror(g) ? die("z23-lint: read failed: %s\n", k_si_gold) : 0;
     if (rc == 0 && used == sizeof gold - 1 && !feof(g))
         rc = die("z23-lint: file too large: %s\n", k_si_gold);
     gold[used] = '\0';
@@ -222,6 +220,19 @@ int check_sysinit_ordering_run(int argc, char **argv)
     for (size_t i = 0; i < used; i++) if (gold[i] == '\n') nl++;
     printf("[check_sysinit_ordering] OK — %d boundary records match the golden\n", nl);
     return 0;
+}
+
+int check_sysinit_ordering_run(int argc, char **argv)
+{
+    struct si_acc a = { 0 };
+    int rc = si_load(&a);
+    if (rc) return rc;
+    char der[SI_OUT];
+    int nrec = 0;
+    if (si_finish(&a, der, sizeof der, &nrec)) { fputs(a.err, stderr); return 2; }
+    if (argc >= 1 && strcmp(argv[0], "--update") == 0)
+        return si_write_golden(der, nrec);
+    return si_cmp_golden(der);
 }
 
 static int si_want(const char *src, int want_rc, const char *need)
@@ -809,7 +820,7 @@ struct hs_st {
     int depth, dev_active, lineno;
     int dev_frame[HS_NEST], dev_branch[HS_NEST];
 };
-static int hs_dl_comp(regex_t *re)
+int hs_dl_comp(regex_t *re)
 {
     return compile_pat(re, REG_EXTENDED, "(^|[^[:alnum:]_])dl(open|sym|close)",
                        "[[:space:]]*[(]", "", "");
@@ -837,35 +848,47 @@ static int hs_pp(const char *line)
     if (!strncmp(p, "endif", 5)) return 4;
     return 0;
 }
+static int hs_feed_ifdef(struct hs_st *s, int k)
+{
+    if (s->depth + 1 >= HS_NEST)
+        return die("z23-lint: ifdef nest too deep: %s\n", s->path);
+    s->depth++;
+    s->dev_frame[s->depth] = (k == 1);
+    s->dev_branch[s->depth] = (k == 1);
+    if (k == 1) s->dev_active++;
+    return 0;
+}
+
+static int hs_feed_else(struct hs_st *s)
+{
+    if (s->depth > 0 && s->dev_frame[s->depth] && s->dev_branch[s->depth]) {
+        s->dev_active--;
+        s->dev_branch[s->depth] = 0;
+    }
+    return 0;
+}
+
+static int hs_feed_endif(struct hs_st *s)
+{
+    if (s->depth > 0) {
+        if (s->dev_frame[s->depth] && s->dev_branch[s->depth]) s->dev_active--;
+        s->dev_frame[s->depth] = 0;
+        s->dev_branch[s->depth] = 0;
+        s->depth--;
+    }
+    return 0;
+}
+
 static int hs_feed(struct hs_st *s, const char *line)
 {
     s->lineno++;
     int k = hs_pp(line);
-    if (k == 1 || k == 2) {
-        if (s->depth + 1 >= HS_NEST)
-            return die("z23-lint: ifdef nest too deep: %s\n", s->path);
-        s->depth++;
-        s->dev_frame[s->depth] = (k == 1);
-        s->dev_branch[s->depth] = (k == 1);
-        if (k == 1) s->dev_active++;
-        return 0;
-    }
-    if (k == 3) {
-        if (s->depth > 0 && s->dev_frame[s->depth] && s->dev_branch[s->depth]) {
-            s->dev_active--;
-            s->dev_branch[s->depth] = 0;
-        }
-        return 0;
-    }
-    if (k == 4) {
-        if (s->depth > 0) {
-            if (s->dev_frame[s->depth] && s->dev_branch[s->depth]) s->dev_active--;
-            s->dev_frame[s->depth] = 0;
-            s->dev_branch[s->depth] = 0;
-            s->depth--;
-        }
-        return 0;
-    }
+    if (k == 1 || k == 2)
+        return hs_feed_ifdef(s, k);
+    if (k == 3)
+        return hs_feed_else(s);
+    if (k == 4)
+        return hs_feed_endif(s);
     if (regexec(s->re, line, 0, NULL, 0) != 0 || s->dev_active >= 1) return 0;
     int n = snprintf(s->buf + *s->used, s->cap - *s->used, "%s:%d: %s\n",
                      s->path, s->lineno, line);
@@ -873,7 +896,7 @@ static int hs_feed(struct hs_st *s, const char *line)
     *s->used += (size_t)n;
     return 0;
 }
-static int hs_scan_text(const char *text, const char *path, const regex_t *re,
+int hs_scan_text(const char *text, const char *path, const regex_t *re,
                         char *buf, size_t cap, size_t *used)
 {
     struct hs_st s = {
@@ -956,38 +979,43 @@ static int scan_hs_out(const char *path, void *ctx)
     }
     return fin(f, line, path, rc);
 }
+static int hs_each_file(const char *dir, const char *name, const regex_t *re,
+                        int *saw)
+{
+    char path[4096], bad[CLK_MATCH];
+    struct stat st;
+    size_t nl = strlen(name);
+    int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (k < 0 || (size_t)k >= sizeof path)
+        return die("z23-lint: path too long: %s\n", dir);
+    if (lstat(path, &st) != 0)
+        return die("z23-lint: cannot stat %s\n", path);
+    if (!S_ISREG(st.st_mode) || nl < 2 || name[nl - 2] != '.'
+        || name[nl - 1] != 'c')
+        return 0;
+    size_t used = 0;
+    int rc = hs_scan_path(path, re, bad, sizeof bad, &used);
+    if (rc == 0 && used) {
+        if (fputs(bad, stdout) < 0
+            || printf("FAIL: dl* call outside a #ifdef ZCL_DEV_BUILD region in %s\n",
+                      path) < 0)
+            rc = die("z23-lint: write failed\n", "");
+        else rc = 1;
+    }
+    if (saw) (*saw)++;
+    return rc;
+}
+
 static int hs_each_src(const char *dir, const regex_t *re, int *saw)
 {
     struct dirent **names = NULL;
     int n = scandir(dir, &names, NULL, alphasort);
     if (n < 0) return errno == ENOENT ? 0 : die("z23-lint: cannot scan %s\n", dir);
     int rc = 0;
-    char bad[CLK_MATCH];
     for (int i = 0; i < n; i++) {
         const char *name = names[i]->d_name;
-        if (rc == 0 && strcmp(name, ".") && strcmp(name, "..")) {
-            char path[4096];
-            struct stat st;
-            size_t nl = strlen(name);
-            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
-            if (k < 0 || (size_t)k >= sizeof path)
-                rc = die("z23-lint: path too long: %s\n", dir);
-            else if (lstat(path, &st) != 0)
-                rc = die("z23-lint: cannot stat %s\n", path);
-            else if (S_ISREG(st.st_mode) && nl >= 2 && name[nl - 2] == '.'
-                     && name[nl - 1] == 'c') {
-                size_t used = 0;
-                rc = hs_scan_path(path, re, bad, sizeof bad, &used);
-                if (rc == 0 && used) {
-                    if (fputs(bad, stdout) < 0
-                        || printf("FAIL: dl* call outside a #ifdef ZCL_DEV_BUILD region in %s\n",
-                                  path) < 0)
-                        rc = die("z23-lint: write failed\n", "");
-                    else rc = 1;
-                }
-                if (saw) (*saw)++;
-            }
-        }
+        if (rc == 0 && strcmp(name, ".") && strcmp(name, ".."))
+            rc = hs_each_file(dir, name, re, saw);
         free(names[i]);
     }
     free(names);
@@ -1045,82 +1073,9 @@ int check_hotswap_dev_only_run(int argc, char **argv)
                ? die("z23-lint: write failed\n", "") : 0;
 }
 
-/* Proves scan_hs_out's comment-stripping: a doc comment merely mentioning
- * "dlopen()" must not hit once stripped, though the same raw text does hit
- * the un-stripped regex. Kept out of check_hotswap_dev_only_selftest so
- * that function's own decision count stays under the complexity gate's
- * cap. */
-static int hs_dev_comment_strip_ok(const regex_t *re)
-{
-    struct cstrip cs = { .in_block = 1 };
-    char stripped[128];
-    const char *doc = " * produce a dlopen()-able path that pins the bytes";
-    int strip_ok = cstrip_line(&cs, doc, strlen(doc), stripped, sizeof stripped);
-    return strip_ok && regexec(re, doc, 0, NULL, 0) == 0
-                     && regexec(re, stripped, 0, NULL, 0) != 0;
-}
-
-int check_hotswap_dev_only_selftest(void)
-{
-    regex_t re;
-    int cr = hs_dl_comp(&re);
-    if (cr) return cr;
-    char nested[160], elseb[160], inner[160], pfx[160], d1[64], d2[64], d3[48];
-    char nbuf[256], ebuf[256], ibuf[256];
-    size_t nused = 0, eused = 0, iused = 0;
-    if (snprintf(nested, sizeof nested,
-                 "#ifdef ZCL_DEV_BUILD\n#if defined(__APPLE__)\ndl%s(\"dev\", 0);\n"
-                 "#endif\n#endif\n", "open") >= (int)sizeof nested
-        || snprintf(elseb, sizeof elseb,
-                    "#ifdef ZCL_DEV_BUILD\ndl%s(\"dev\", 0);\n#else\ndl%s(\"release\", 0);\n"
-                    "#endif\n", "open", "open") >= (int)sizeof elseb
-        || snprintf(inner, sizeof inner,
-                    "#ifdef ZCL_DEV_BUILD\n#if 0\ndl%s(\"inner\", 0);\n#endif\n#endif\n",
-                    "open") >= (int)sizeof inner
-        || snprintf(pfx, sizeof pfx, "%s\n%s\n%s\n",
-                    "static void *vfs_dir_xdlopen(void);",
-                    "static void *vfs_dir_xdlsym(void);",
-                    "static void vfs_dir_xdlclose(void);") >= (int)sizeof pfx
-        || snprintf(d1, sizeof d1, "void *p = dl%s(\"fixture\", 0);", "open") >= (int)sizeof d1
-        || snprintf(d2, sizeof d2, "p = dl%s (h, \"fixture\");", "sym") >= (int)sizeof d2
-        || snprintf(d3, sizeof d3, "(void)dl%s(h);", "close") >= (int)sizeof d3) {
-        regfree(&re);
-        return die("z23-lint: selftest buffer overflow\n", "");
-    }
-    int rc = hs_scan_text(nested, "-", &re, nbuf, sizeof nbuf, &nused);
-    if (rc == 0) rc = hs_scan_text(elseb, "-", &re, ebuf, sizeof ebuf, &eused);
-    if (rc == 0) rc = hs_scan_text(inner, "-", &re, ibuf, sizeof ibuf, &iused);
-    int pfx_hit = 0, direct = 0;
-    const char *pl = pfx;
-    while (rc == 0 && *pl) {
-        const char *nl = strchr(pl, '\n');
-        size_t n = nl ? (size_t)(nl - pl) : strlen(pl);
-        char line[160];
-        if (n >= sizeof line) { rc = 2; break; }
-        memcpy(line, pl, n);
-        line[n] = '\0';
-        if (regexec(&re, line, 0, NULL, 0) == 0) pfx_hit++;
-        pl = nl ? nl + 1 : pl + n;
-        if (!nl) break;
-    }
-    if (rc == 0) {
-        if (regexec(&re, d1, 0, NULL, 0) == 0) direct++;
-        if (regexec(&re, d2, 0, NULL, 0) == 0) direct++;
-        if (regexec(&re, d3, 0, NULL, 0) == 0) direct++;
-    }
-    int bad = rc != 0 || nused != 0 || eused == 0 || iused != 0 || pfx_hit != 0
-            || direct != 3;
-    bad |= require_scan_root("check-hotswap-dev-only", "config") == 0;
-    bad |= !hs_dev_comment_strip_ok(&re);
-    if (bad)
-        fputs("FAIL: hot-swap dev-region scanner selftest\n", stderr);
-    regfree(&re);
-    return st_ok(bad, "check_hotswap_dev_only selftest: OK\n");
-}
-
 enum { CBF_MAX = 256, CBF_PATH = 256 };
-static const char k_cbf_def[] = "engine/jobs/src/stage_repair_coin_backfill.c";
-static const char k_cbf_allow[] =
+const char k_cbf_def[] = "engine/jobs/src/stage_repair_coin_backfill.c";
+const char k_cbf_allow[] =
     "engine/reducer/jobs/src/stage_repair_reducer_frontier_coin.c";
 static const char *const k_cbf_roots[] = {
     "core", "engine", "contexts", "cognition", "platform", "tools"
@@ -1128,7 +1083,7 @@ static const char *const k_cbf_roots[] = {
 struct cbf_ent { char path[CBF_PATH]; int count; };
 struct cbf_acc { const char *sym; struct cbf_ent *ent; int n; };
 
-static void cbf_sym(char *buf, size_t cap)
+void cbf_sym(char *buf, size_t cap)
 {
     (void)snprintf(buf, cap, "%s%s", "stage_repair_coin_backfill_try", "(");
 }
@@ -1187,35 +1142,21 @@ static int cbf_has_sym(const char *path, const char *sym)
     return found;
 }
 
-static int cbf_scan(FILE *out)
+static int cbf_fatal_missing(FILE *out, const char *sym)
 {
-    char sym[64];
-    cbf_sym(sym, sizeof sym);
-    if (!cbf_has_sym(k_cbf_def, sym)) {
-        if (fprintf(out, "check_no_new_coin_backfill_caller: FATAL — '%s' no longer found in %s.\n",
-                    sym, k_cbf_def) < 0
-            || fputs("  - If the coin-backfill ladder was deleted, remove this gate and its Makefile wiring.\n",
-                     out) < 0
-            || fputs("  - If it moved or was renamed, update DEF_FILE/SYMBOL so the ratchet keeps firing.\n",
-                     out) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 2;
-    }
-    struct cbf_ent ent[CBF_MAX];
-    struct cbf_acc a = { .sym = sym, .ent = ent, .n = 0 };
-    int rc = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof k_cbf_roots / sizeof k_cbf_roots[0]; i++)
-        rc = walk_src(k_cbf_roots[i], 0, cbf_on_file, &a);
-    if (rc)
-        return rc;
-    qsort(ent, (size_t)a.n, sizeof ent[0], cbf_cmp);
-    int allowed_count = 0, nbad = 0, bad_i[CBF_MAX];
-    for (int i = 0; i < a.n; i++) {
-        if (strcmp(ent[i].path, k_cbf_allow) == 0)
-            allowed_count += ent[i].count;
-        else
-            bad_i[nbad++] = i;
-    }
+    if (fprintf(out, "check_no_new_coin_backfill_caller: FATAL — '%s' no longer found in %s.\n",
+                sym, k_cbf_def) < 0
+        || fputs("  - If the coin-backfill ladder was deleted, remove this gate and its Makefile wiring.\n",
+                 out) < 0
+        || fputs("  - If it moved or was renamed, update DEF_FILE/SYMBOL so the ratchet keeps firing.\n",
+                 out) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 2;
+}
+
+static int cbf_report(FILE *out, const char *sym, const struct cbf_ent *ent,
+                      int allowed_count, const int *bad_i, int nbad)
+{
     if (nbad == 0 && allowed_count == 1)
         return fputs("check_no_new_coin_backfill_caller: clean — one allowed production caller\n",
                      out) < 0 ? die("z23-lint: write failed\n", "") : 0;
@@ -1246,6 +1187,30 @@ static int cbf_scan(FILE *out)
     return 1;
 }
 
+static int cbf_scan(FILE *out)
+{
+    char sym[64];
+    cbf_sym(sym, sizeof sym);
+    if (!cbf_has_sym(k_cbf_def, sym))
+        return cbf_fatal_missing(out, sym);
+    struct cbf_ent ent[CBF_MAX];
+    struct cbf_acc a = { .sym = sym, .ent = ent, .n = 0 };
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof k_cbf_roots / sizeof k_cbf_roots[0]; i++)
+        rc = walk_src(k_cbf_roots[i], 0, cbf_on_file, &a);
+    if (rc)
+        return rc;
+    qsort(ent, (size_t)a.n, sizeof ent[0], cbf_cmp);
+    int allowed_count = 0, nbad = 0, bad_i[CBF_MAX];
+    for (int i = 0; i < a.n; i++) {
+        if (strcmp(ent[i].path, k_cbf_allow) == 0)
+            allowed_count += ent[i].count;
+        else
+            bad_i[nbad++] = i;
+    }
+    return cbf_report(out, sym, ent, allowed_count, bad_i, nbad);
+}
+
 static int cbf_with_root(const char *root, FILE *out)
 {
     char cwd[4096];
@@ -1274,137 +1239,3 @@ int check_no_new_coin_backfill_caller_run(int argc, char **argv)
     return cbf_with_root(cbf_root(argc, argv), stdout);
 }
 
-static int cbf_st_run(FILE *cap, int *rc)
-{
-    if (psp_st_reset(cap))
-        return 1;
-    fflush(stdout);
-    int saved = dup(STDOUT_FILENO);
-    if (saved < 0)
-        return 1;
-    if (dup2(fileno(cap), STDOUT_FILENO) < 0) {
-        close(saved);
-        return 1;
-    }
-    *rc = check_no_new_coin_backfill_caller_run(0, NULL);
-    fflush(stdout);
-    (void)dup2(saved, STDOUT_FILENO);
-    close(saved);
-    return 0;
-}
-
-int check_no_new_coin_backfill_caller_selftest(void)
-{
-    char tmpl[] = "/tmp/z23-lint-cbf-XXXXXX";
-    char *root = mkdtemp(tmpl);
-    if (!root)
-        return die("z23-lint: mkdir failed: %s\n", "/tmp");
-    FILE *cap = tmpfile();
-    if (!cap) {
-        (void)rap_rm_rf(root);
-        return die("z23-lint: tmpfile failed\n", "");
-    }
-    const char *old_root = getenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST");
-    const char *old_prod = getenv("ZCL_LINT_PRODUCTION_SCAN");
-    char oldr[4096], oldp[64];
-    int had_root = 0, had_prod = 0, bad = 0, rc = 0;
-    if (old_root) {
-        if (ovf(snprintf(oldr, sizeof oldr, "%s", old_root), sizeof oldr))
-            bad = 1;
-        else
-            had_root = 1;
-    }
-    if (old_prod) {
-        if (ovf(snprintf(oldp, sizeof oldp, "%s", old_prod), sizeof oldp))
-            bad = 1;
-        else
-            had_prod = 1;
-    }
-    char sym[64], defp[4096], allp[4096], probep[4096], fx[4096], body[256], ob[8192];
-    cbf_sym(sym, sizeof sym);
-    if (ovf(snprintf(defp, sizeof defp, "%s/%s", root, k_cbf_def), sizeof defp)
-        || ovf(snprintf(allp, sizeof allp, "%s/%s", root, k_cbf_allow), sizeof allp)
-        || ovf(snprintf(probep, sizeof probep, "%s/core/probe.c", root), sizeof probep)
-        || ovf(snprintf(fx, sizeof fx, "%s/engine/_xfixture.c", root), sizeof fx)
-        || ovf(snprintf(body, sizeof body, "void %svoid) {}\n", sym), sizeof body)
-        || csr_write(defp, body)
-        || ovf(snprintf(body, sizeof body, "void f(void) { %s); }\n", sym), sizeof body)
-        || csr_write(allp, body)
-        || setenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST", root, 1) != 0)
-        bad = 1;
-
-    if (!bad && cbf_st_run(cap, &rc))
-        bad = 1;
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 0
-        || strstr(ob, "check_no_new_coin_backfill_caller: clean — one allowed production caller") == NULL;
-
-    if (ovf(snprintf(body, sizeof body, "void f(void) { %s); %s); }\n", sym, sym),
-            sizeof body)
-        || csr_write(allp, body))
-        bad = 1;
-    if (!bad && cbf_st_run(cap, &rc))
-        bad = 1;
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "expected exactly 1 call in") == NULL
-        || strstr(ob, "found 2") == NULL;
-
-    if (ovf(snprintf(body, sizeof body, "void f(void) { %s); }\n", sym), sizeof body)
-        || csr_write(allp, body)
-        || ovf(snprintf(body, sizeof body, "void g(void) { %s); }\n", sym), sizeof body)
-        || csr_write(probep, body))
-        bad = 1;
-    if (!bad && cbf_st_run(cap, &rc))
-        bad = 1;
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "NEW production caller(s)") == NULL
-        || strstr(ob, "core/probe.c:1") == NULL;
-    (void)unlink(probep);
-
-    (void)unlink(defp);
-    if (!bad && cbf_st_run(cap, &rc))
-        bad = 1;
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 2 || strstr(ob, "FATAL") == NULL;
-
-    if (ovf(snprintf(body, sizeof body, "void %svoid) {}\n", sym), sizeof body)
-        || csr_write(defp, body)
-        || ovf(snprintf(body, sizeof body, "void x(void) { %s); }\n", sym), sizeof body)
-        || csr_write(fx, body)
-        || setenv("ZCL_LINT_PRODUCTION_SCAN", "1", 1) != 0)
-        bad = 1;
-    if (!bad && cbf_st_run(cap, &rc))
-        bad = 1;
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 0
-        || strstr(ob, "check_no_new_coin_backfill_caller: clean — one allowed production caller") == NULL;
-    (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
-    if (!bad && cbf_st_run(cap, &rc))
-        bad = 1;
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "NEW production caller(s)") == NULL
-        || strstr(ob, "engine/_xfixture.c:1") == NULL;
-
-    fclose(cap);
-    if (had_root)
-        (void)setenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST", oldr, 1);
-    else
-        (void)unsetenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST");
-    if (had_prod)
-        (void)setenv("ZCL_LINT_PRODUCTION_SCAN", oldp, 1);
-    else
-        (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
-    (void)rap_rm_rf(root);
-    if (bad)
-        fputs("FAIL: check_no_new_coin_backfill_caller selftest\n", stderr);
-    return st_ok(bad, "check_no_new_coin_backfill_caller selftest: OK\n");
-}
