@@ -419,6 +419,37 @@ bool db_app_event_topic_frontier(struct node_db *ndb,
     return true;
 }
 
+bool db_app_event_topic_cursor_of(struct node_db *ndb,
+                                  const char *app_id, const char *topic,
+                                  const uint8_t event_id[32],
+                                  int64_t *out_cursor)
+{
+    if (!ndb || !ndb->open || !event_id || !out_cursor ||
+        !bounded_token(app_id, ZCL_APP_ID_MAX) ||
+        !bounded_token(topic, ZCL_APP_TOPIC_MAX))
+        return false; // raw-return-ok:absent-row-is-not-an-error
+    struct qb q;
+    qb_select(&q, QB_T_app_events);
+    static const enum qb_column k_cursor_cols[] = {
+        QB_C_app_events_receive_cursor,
+    };
+    qb_select_columns(&q, k_cursor_cols, QB_NCOLS(k_cursor_cols));
+    qb_where_text(&q, QB_C_app_events_app_id, QB_EQ, app_id);
+    qb_where_text(&q, QB_C_app_events_topic, QB_EQ, topic);
+    qb_where_blob(&q, QB_C_app_events_event_id, QB_EQ, event_id, 32);
+    qb_limit(&q, 1);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("app_event", "topic cursor lookup refused: %s", qb_error(&q));
+    if (!AR_STEP_ROW(s)) {
+        AR_FINALIZE(s);
+        return false; // raw-return-ok:absent-row-is-not-an-error
+    }
+    *out_cursor = AR_COL_INT(s, 0);
+    AR_FINALIZE(s);
+    return true;
+}
+
 bool db_app_event_previous(struct node_db *ndb,
                            const struct db_app_event *record,
                            const struct zcl_app_event_scope_v1 *scope,

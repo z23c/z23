@@ -62,15 +62,42 @@
  * ----------------------------------------------------------------
  * A PULL request — what a puller sends:
  *
- *     0  msg        u8  = ZCL_APP_SYNC_MSG_PULL
- *     1  version    u8  = ZCL_APP_SYNC_WIRE_VERSION
- *     2  since      u64 the puller's local frontier cursor; 0 = from the
- *                       start. It is the ASKER's own cursor and orders
- *                       nothing on the answering side.
- *    10  app_len    u8  1..ZCL_APP_ID_MAX
- *    11  topic_len  u8  1..ZCL_APP_TOPIC_MAX
- *    12  app_id     app_len bytes, no NUL
+ *     0  msg        u8   = ZCL_APP_SYNC_MSG_PULL
+ *     1  version    u8   = ZCL_APP_SYNC_WIRE_VERSION
+ *     2  since      [32] the puller's frontier EVENT ID; 32 zero bytes
+ *                        means "from the start".
+ *    34  app_len    u8   1..ZCL_APP_ID_MAX
+ *    35  topic_len  u8   1..ZCL_APP_TOPIC_MAX
+ *    36  app_id     app_len bytes, no NUL
  *   ...  topic      topic_len bytes, no NUL
+ *
+ * WHY THE CURSOR ON THE WIRE IS AN EVENT ID AND NOT A NUMBER
+ * ---------------------------------------------------------
+ * Each node numbers its own arrivals: `app_events.receive_cursor` is a
+ * per-node AUTOINCREMENT, so cursor 7 on one box and cursor 7 on another
+ * name different rows. Sending a local cursor to page a peer's table would
+ * be reading one box's index into another box's numbering — it agrees by
+ * luck on two boxes that happened to receive the same rows in the same
+ * order, and silently skips rows the moment they did not. The event id is
+ * the one identifier both boxes mean the same thing by, so the asker sends
+ * that and the ANSWERER resolves it against its own arrival order.
+ *
+ * A peer that does not hold the asker's frontier event answers from the
+ * start of the topic. That is not a fallback that loses anything: every
+ * save is idempotent by event id, so re-offering rows the asker already
+ * holds costs bandwidth and stores nothing.
+ *
+ * THIS IS ARRIVAL-ORDER ANTI-ENTROPY, AND THAT IS NOT COMPLETE
+ * -----------------------------------------------------------
+ * Because the answer walks the ANSWERER's arrival order, an event that
+ * reached the peer BEFORE the asker's frontier event did is behind that
+ * frontier and will not be offered again by a later pull. Two nodes that
+ * pull each other from empty converge; a node that joins mid-history and
+ * then advances its frontier can be left with a hole. Closing that needs
+ * the inventory/get exchange the App platform checklist actually asks for
+ * (offer ids, ask for the missing ones), which this build does not have.
+ * Said here rather than in a commit message, because a reader of this wire
+ * has to know what it does not promise.
  *
  * A PULL answer — a run of rows, each:
  *
@@ -95,7 +122,7 @@
 #define ZCL_APP_SYNC_MSG_PULL 1u
 
 /* The fixed head of a PULL request, and the largest one. */
-#define ZCL_APP_SYNC_PULL_HEAD_BYTES 12u
+#define ZCL_APP_SYNC_PULL_HEAD_BYTES 36u
 #define ZCL_APP_SYNC_PULL_MAX_BYTES \
     (ZCL_APP_SYNC_PULL_HEAD_BYTES + ZCL_APP_ID_MAX + ZCL_APP_TOPIC_MAX)
 
@@ -148,7 +175,7 @@ const char *zcl_app_sync_status_label(enum zcl_app_sync_status s);
 /* ── the PULL request ────────────────────────────────────────────────── */
 
 struct zcl_app_sync_pull {
-    uint64_t since_cursor;
+    uint8_t since_event_id[32]; /* 32 zero bytes = from the start */
     char app_id[ZCL_APP_ID_MAX + 1];
     char topic[ZCL_APP_TOPIC_MAX + 1];
 };

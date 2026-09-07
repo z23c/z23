@@ -6,6 +6,7 @@
 
 #include "services/app_event_sync_service.h"
 
+#include "base/bytes.h"
 #include "base/safe_alloc.h"
 #include "models/app_event.h"
 #include "util/log_macros.h"
@@ -69,8 +70,16 @@ enum zcl_app_sync_status zcl_app_event_sync_serve(
         return ZCL_APP_SYNC_ARGUMENT;
     *len = 0;
     *rows = 0;
-    if (pull->since_cursor > (uint64_t)INT64_MAX)
-        return ZCL_APP_SYNC_MALFORMED;
+    /* Resolve the asker's frontier EVENT into this node's own arrival
+     * order. A frontier this node does not hold answers from the start of
+     * the topic: every save is idempotent by event id, so re-offering rows
+     * the asker already holds costs bandwidth and stores nothing, while
+     * guessing a cursor would skip rows silently. */
+    int64_t after_cursor = 0;
+    if (zcl_bytes_any_set(pull->since_event_id, 32) &&
+        !db_app_event_topic_cursor_of(ndb, pull->app_id, pull->topic,
+                                      pull->since_event_id, &after_cursor))
+        after_cursor = 0;
 
     struct db_app_event_ref *refs =
         zcl_calloc(APP_SYNC_PAGE_MAX, sizeof(*refs), "app_sync_serve_refs");
@@ -90,7 +99,7 @@ enum zcl_app_sync_status zcl_app_event_sync_serve(
     zcl_app_sync_writer_init(&writer, out, cap);
     enum zcl_app_sync_status status = ZCL_APP_SYNC_OK;
     int found = db_app_event_topic_after(ndb, pull->app_id, pull->topic,
-                                         (int64_t)pull->since_cursor, refs,
+                                         after_cursor, refs,
                                          APP_SYNC_PAGE_MAX);
     for (int i = 0; i < found && status == ZCL_APP_SYNC_OK; i++)
         status = app_sync_serve_one(ndb, scope, refs[i].event_id, &writer,
@@ -242,7 +251,8 @@ enum zcl_app_sync_status zcl_app_event_replicate(
 
     struct zcl_app_sync_pull pull;
     memset(&pull, 0, sizeof(pull));
-    pull.since_cursor = (uint64_t)report->frontier.cursor;
+    if (report->frontier.have)
+        memcpy(pull.since_event_id, report->frontier.event_id, 32);
     (void)snprintf(pull.app_id, sizeof(pull.app_id), "%s", scope->app_id);
     (void)snprintf(pull.topic, sizeof(pull.topic), "%s", scope->topic);
 

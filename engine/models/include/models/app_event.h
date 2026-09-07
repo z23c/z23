@@ -84,6 +84,19 @@ bool db_app_event_topic_frontier(struct node_db *ndb,
                                  int64_t *out_cursor,
                                  uint8_t out_event_id[32]);
 
+/* Where one event sits in THIS node's arrival order for its topic. An
+ * anti-entropy answer walks receive-cursor order, and the id is the only
+ * name for a row that two nodes agree on, so a serving node resolves the
+ * asker's frontier id against its own cursors here.
+ *
+ * Returns false, quietly and without logging, when this node does not hold
+ * that event under that (app_id, topic): a peer holding a row this node has
+ * never seen is the ordinary case during anti-entropy, not a fault. */
+bool db_app_event_topic_cursor_of(struct node_db *ndb,
+                                  const char *app_id, const char *topic,
+                                  const uint8_t event_id[32],
+                                  int64_t *out_cursor);
+
 /* AppEvent belongs_to :previous_event. Missing predecessors are normal during
  * anti-entropy and return false; an identity/sequence mismatch fails closed. */
 bool db_app_event_previous(struct node_db *ndb,

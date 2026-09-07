@@ -273,6 +273,9 @@ ZCL_TEST_GROUP(hotswap_shelf)
 ZCL_TEST_GROUP(hotswap_rollback)
 ZCL_TEST_GROUP(dev_platform)
 ZCL_TEST_GROUP(dev_app_scaffold)
+/* One dapp's signed App events crossing between two node databases through
+ * the real pull wire, and every way that crossing is refused. */
+ZCL_TEST_GROUP(app_event_sync)
 ZCL_TEST_GROUP(impact_composition)
 /* Signer identity for push-proof receipts: per-box key custody, the
  * signers.allow trust list, and the pre-push admission decision over both. */

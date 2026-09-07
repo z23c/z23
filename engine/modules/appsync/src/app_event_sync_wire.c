@@ -91,13 +91,6 @@ static uint32_t sync_read_u32_be(const uint8_t *p)
         ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
-static uint64_t sync_read_u64_be(const uint8_t *p)
-{
-    uint64_t v = 0;
-    for (size_t i = 0; i < 8; i++)
-        v = (v << 8) | (uint64_t)p[i];
-    return v;
-}
 
 static void sync_write_u32_be(uint8_t *p, uint32_t v)
 {
@@ -107,11 +100,6 @@ static void sync_write_u32_be(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)v;
 }
 
-static void sync_write_u64_be(uint8_t *p, uint64_t v)
-{
-    for (size_t i = 0; i < 8; i++)
-        p[i] = (uint8_t)(v >> (8 * (7 - i)));
-}
 
 /* ── refusal tokens ──────────────────────────────────────────────────── */
 
@@ -162,9 +150,9 @@ enum zcl_app_sync_status zcl_app_sync_pull_encode(
         return ZCL_APP_SYNC_ARGUMENT;
     out[0] = (uint8_t)ZCL_APP_SYNC_MSG_PULL;
     out[1] = (uint8_t)ZCL_APP_SYNC_WIRE_VERSION;
-    sync_write_u64_be(out + 2, pull->since_cursor);
-    out[10] = (uint8_t)app_len;
-    out[11] = (uint8_t)topic_len;
+    memcpy(out + 2, pull->since_event_id, 32);
+    out[34] = (uint8_t)app_len;
+    out[35] = (uint8_t)topic_len;
     memcpy(out + ZCL_APP_SYNC_PULL_HEAD_BYTES, pull->app_id, app_len);
     memcpy(out + ZCL_APP_SYNC_PULL_HEAD_BYTES + app_len, pull->topic,
            topic_len);
@@ -184,9 +172,9 @@ enum zcl_app_sync_status zcl_app_sync_pull_decode(
         return ZCL_APP_SYNC_MALFORMED;
     if (in[1] != (uint8_t)ZCL_APP_SYNC_WIRE_VERSION)
         return ZCL_APP_SYNC_VERSION;
-    out->since_cursor = sync_read_u64_be(in + 2);
-    size_t app_len = in[10];
-    size_t topic_len = in[11];
+    memcpy(out->since_event_id, in + 2, 32);
+    size_t app_len = in[34];
+    size_t topic_len = in[35];
     struct sync_cursor c = {
         .in = in, .len = len, .at = ZCL_APP_SYNC_PULL_HEAD_BYTES,
         .bad = false
