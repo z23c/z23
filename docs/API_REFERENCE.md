@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 868 |
+| Registry entries (branches + leaves) | 872 |
 | Top-level roots | 14 |
-| Branches | 195 |
-| Leaves (dispatchable command paths) | 673 |
-| … `ready` (live handler in this build) | 599 |
-| … `compat` (metadata only, names a fallback) | 44 |
+| Branches | 196 |
+| Leaves (dispatchable command paths) | 676 |
+| … `ready` (live handler in this build) | 601 |
+| … `compat` (metadata only, names a fallback) | 45 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 43 |
-| Leaves with `effect=mutate` | 241 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 44 |
+| Leaves with `effect=mutate` | 244 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 126 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 57 | 10 | 47 |
-| `engine/composition/commands/dev.def` | 102 | 21 | 81 |
+| `engine/composition/commands/dev.def` | 104 | 21 | 83 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -108,7 +108,7 @@ Per source file:
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
-| `engine/composition/commands/fleet.def` | 21 | 5 | 16 |
+| `engine/composition/commands/fleet.def` | 23 | 6 | 17 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
@@ -698,6 +698,7 @@ represented by its children's sections.
 | `dev app plan` | ready | read / read / operator · instant/tiny | **`app_id`**, **`resource`** | `zcl.dev_app_plan.v1` | `z23 dev app plan social posts` | Plan one conventional App resource slice |
 | `dev app scaffold` | compat 🔧 → `z23-dev dev app scaffold <app> <resource>` | mutate / dev-mutation / **owner** · foreground/moderate | **`app_id`**, **`resource`** | `zcl.dev_app_scaffold.v1` | `z23 dev app scaffold social posts` | Materialize a conventional App resource slice — *materializing checkout files requires a dev build* |
 | `dev app simulate` | ready | read / read / operator · fast/moderate | **`app_id`**, `scenario`, `seed` | `zcl.dev_app_sim.v1` | `z23 dev app simulate social --seed=0x534f4349414c0001` | Run deterministic App network scenarios |
+| `dev app sync` | ready | mutate / app-write / operator · fast/low | **`app_id`**, **`topic`**, `peer` | `zcl.dev_app_sync.v1` | `z23 dev app sync social social.events.v1 --peer=node2` | Pull one App topic's signed events from a fleet peer |
 | `dev app inspect` | planned | read / read / operator · fast/low | **`app_id`** | `zcl.dev_app_inspect.v1` | `z23 dev app inspect social` | Inspect a resident App generation — *public App ABI is not connected to resident generations yet* |
 | `dev app publish` | planned | mutate / dev-mutation / **owner**, job, idempotency · foreground/high | **`app_id`**, `idempotency_key` | `zcl.dev_app_publish.v1` | `z23 dev app publish social --idempotency-key=<key>` | Atomically publish a proven App generation — *App ABI generation publication is not wired yet* |
 
@@ -806,6 +807,7 @@ represented by its children's sections.
 | `dev train check` | compat 🔧 → `z23-dev dev train check --name <n>` | read / read / operator · foreground/high | `name`, `timeout_ms` | `zcl.train_check.v1` | `z23 dev train check --name q` | Run lint-fast on a stack worktree and report the gates that failed — *stack lint verification requires the dev binary* |
 | `dev train status` | compat 🔧 → `z23-dev dev train status` | read / read / operator · fast/low | `name` | `zcl.train_status.v1` | `z23 dev train status` | List stack worktrees, their base, and last check verdict — *stack status requires the dev binary* |
 | `dev train drop` | compat 🔧 → `z23-dev dev train drop --name <n>` | destructive / dev-mutation / operator · fast/low | `name`, `force` | `zcl.train_drop.v1` | `z23 dev train drop --name q` | Remove a stack worktree — *stack removal requires the dev binary* |
+| `dev train keep` | compat 🔧 → `z23-dev dev train keep --train=<N>` | mutate / dev-mutation / operator · foreground/high | `train`, `once`, `dry_run` | `zcl.train_keep.v1` | `z23 dev train keep --train=48 --once` | Advance one train's unattended state machine by exactly one step — *the unattended train keeper requires the dev binary* |
 
 #### `dev.index` — Ingest and search local data sources (board/experiments/landing/logs)
 
@@ -1818,6 +1820,12 @@ represented by its children's sections.
 | `fleet roles grant` | ready | mutate / dev-mutation / operator · fast/low | **`fp`**, **`role`** | `zcl.fleet_roles_grant.v1` | `z23 fleet roles grant --fp=<64-hex> --role=worker` | Sign a row granting one role to one key's fingerprint |
 | `fleet roles revoke` | ready | mutate / dev-mutation / operator · fast/low | **`fp`**, **`role`** | `zcl.fleet_roles_revoke.v1` | `z23 fleet roles revoke --fp=<64-hex> --role=worker` | Sign a row revoking one role from one key's fingerprint |
 | `fleet roles check` | ready | read / read / operator · instant/low | **`fp`**, **`leaf`**, `kind` | `zcl.fleet_roles_check.v1` | `z23 fleet roles check --fp=<64-hex> --leaf=fleet.board.post --kind=result` | Would this key's roles allow this leaf (and board kind)? |
+
+#### `fleet.link` — Measure the datagram link to a peer
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet link probe` | ready | mutate / dev-mutation / operator · maintenance/low | `mode`, `peer`, `bind`, `key`, `seconds` | `zcl.fleet_link_probe.v1` | `z23 fleet link probe --seconds=2` | Round-trip time, jitter and loss over the UDP datagram link |
 
 
 ## Aliases
