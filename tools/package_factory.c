@@ -2981,491 +2981,639 @@ static bool hex_take(char *dst, size_t cap, const uint8_t *src, size_t len)
     return true;
 }
 
-static int cmd_run(const struct run_args *args)
-{
+/* Shared mutable state threaded through cmd_run's numbered steps. */
+struct cmd_run_state {
     struct pf_report rep;
-    memset(&rep, 0, sizeof(rep));
-    char error[PF_ERROR_CAP] = {0};
+    char error[PF_ERROR_CAP];
     struct gate_info info;
-    memset(&info, 0, sizeof(info));
     struct vcs_package_prepared prepared;
-    bool prepared_ok = false;
+    bool prepared_ok;
     char release_hex[VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES * 2u + 1u];
-    char release_id_hex[65] = {0};
-    char root_hex_[65] = {0};
-    char recipe_root_hex[65] = {0};
-    uint8_t release_id[32] = {0};
-    uint8_t admission_root[32] = {0};
-    uint8_t *admission_wire = NULL;
-    size_t admission_wire_len = 0;
+    char release_id_hex[65];
+    char root_hex[65];
+    char recipe_root_hex[65];
+    uint8_t release_id[32];
+    char signature_hex[129];
+    uint8_t *release_wire;
+    size_t release_wire_len;
+    uint8_t admission_root[32];
+    uint8_t *admission_wire;
+    size_t admission_wire_len;
     struct store_result sa, sb;
-    memset(&sa, 0, sizeof(sa));
-    memset(&sb, 0, sizeof(sb));
     struct pf_fast_stats fast_stats;
-    memset(&fast_stats, 0, sizeof(fast_stats));
-    bool corpus_registered = false;
-    char corpus_note[320] = {0};
-    uint64_t t_start = now_ms();
+    char dep_plan_sha3[65];
+    bool corpus_registered;
+    char corpus_note[320];
+    uint64_t t_start;
+};
 
-    /* 1. GATE */
-    struct pf_step *s = pf_step_begin(&rep, "gate");
+/* 1. GATE */
+static void cr_step_gate(const struct run_args *args,
+                         struct cmd_run_state *st)
+{
+    struct pf_step *s = pf_step_begin(&st->rep, "gate");
     uint64_t t0 = now_ms();
-    if (gate_check(args->package_dir, &info, error, sizeof(error)))
+    if (gate_check(args->package_dir, &st->info, st->error,
+                   sizeof(st->error)))
         pf_step_ok(s, t0);
     else
-        (void)pf_step_fail(&rep, s, t0, error);
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+}
 
-    /* 2. prepare */
-    s = pf_step_begin(&rep, "prepare");
-    t0 = now_ms();
-    if (!rep.failed) {
-        uint8_t pubkey[33];
-        if (strlen(args->publisher_pubkey) != 66 ||
-            !zcl_hex_decode_lower(args->publisher_pubkey, pubkey, 33)) {
-            (void)snprintf(error, sizeof(error),
-                           "publisher pubkey must be 66 lowercase hex");
-            (void)pf_step_fail(&rep, s, t0, error);
-        } else {
-            struct vcs_package_prepare_options options = {
-                .dir = args->package_dir,
-                .reward_address = NULL,
-                .chain_id = args->chain_id,
-            };
-            memcpy(options.publisher_pubkey, pubkey, 33);
-            options.publisher_sequence = args->publisher_sequence;
-            char detail[256] = {0};
-            enum vcs_package_prepare_error perr = vcs_package_prepare(
-                &options, &prepared, detail, sizeof(detail));
-            if (perr != VCS_PACKAGE_PREPARE_OK) {
-                (void)snprintf(error, sizeof(error), "%s: %s",
-                               vcs_package_prepare_error_string(perr),
-                               detail);
-                (void)pf_step_fail(&rep, s, t0, error);
-            } else if (strcmp(prepared.release.name, info.name) != 0 ||
-                       strcmp(prepared.release.license, info.license) != 0) {
-                (void)snprintf(error, sizeof(error),
-                               "prepare/metadata name or license mismatch");
-                (void)pf_step_fail(&rep, s, t0, error);
-                vcs_package_prepared_free(&prepared);
-            } else {
-                prepared_ok = true;
-                pf_root_hex(prepared.package_root, root_hex_);
-                pf_root_hex(prepared.recipe_root, recipe_root_hex);
-                pf_step_ok(s, t0);
-            }
-        }
+/* 2. prepare */
+static void cr_step_prepare(const struct run_args *args,
+                            struct cmd_run_state *st)
+{
+    struct pf_step *s = pf_step_begin(&st->rep, "prepare");
+    uint64_t t0 = now_ms();
+    if (st->rep.failed)
+        return;
+    uint8_t pubkey[33];
+    if (strlen(args->publisher_pubkey) != 66 ||
+        !zcl_hex_decode_lower(args->publisher_pubkey, pubkey, 33)) {
+        (void)snprintf(st->error, sizeof(st->error),
+                       "publisher pubkey must be 66 lowercase hex");
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+        return;
     }
-
-    /* 3. key cross-check + sign the digest offline */
-    s = pf_step_begin(&rep, "sign");
-    t0 = now_ms();
-    char signature_hex[129] = {0};
-    if (!rep.failed && prepared_ok) {
-        char key_pub[256];
-        if (!pf_signer(args->bin_dir, "--public", NULL, args->key_file,
-                       key_pub, sizeof(key_pub), error, sizeof(error))) {
-            (void)pf_step_fail(&rep, s, t0, error);
-        } else if (strcmp(key_pub, args->publisher_pubkey) != 0) {
-            (void)pf_step_fail(&rep, s, t0,
-                               "publisher-key-file does not match "
-                               "--publisher-pubkey");
-        } else {
-            char digest_hex[65];
-            pf_root_hex(prepared.signing_digest, digest_hex);
-            if (!pf_signer(args->bin_dir, "--sign-digest", digest_hex,
-                           args->key_file, signature_hex,
-                           sizeof(signature_hex), error, sizeof(error))) {
-                (void)pf_step_fail(&rep, s, t0, error);
-            } else if (strlen(signature_hex) != 128) {
-                (void)pf_step_fail(&rep, s, t0, "bad signature hex");
-            } else {
-                pf_step_ok(s, t0);
-            }
-        }
+    struct vcs_package_prepare_options options = {
+        .dir = args->package_dir,
+        .reward_address = NULL,
+        .chain_id = args->chain_id,
+    };
+    memcpy(options.publisher_pubkey, pubkey, 33);
+    options.publisher_sequence = args->publisher_sequence;
+    char detail[256] = {0};
+    enum vcs_package_prepare_error perr = vcs_package_prepare(
+        &options, &st->prepared, detail, sizeof(detail));
+    if (perr != VCS_PACKAGE_PREPARE_OK) {
+        (void)snprintf(st->error, sizeof(st->error), "%s: %s",
+                       vcs_package_prepare_error_string(perr), detail);
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+        return;
     }
-
-    /* 4. seal (in-process verification + canonical re-serialization) */
-    s = pf_step_begin(&rep, "seal");
-    t0 = now_ms();
-    uint8_t *release_wire = NULL;
-    size_t release_wire_len = 0;
-    if (!rep.failed && prepared_ok && signature_hex[0]) {
-        uint8_t signature[64];
-        bool ok = zcl_hex_decode_lower(signature_hex, signature, 64);
-        size_t body_plus = prepared.release_body_len + 64u;
-        release_wire = ok ? zcl_malloc(body_plus, "factory.release") : NULL;
-        if (!release_wire) {
-            (void)pf_step_fail(&rep, s, t0, "release wire alloc/decode");
-        } else {
-            memcpy(release_wire, prepared.release_body,
-                   prepared.release_body_len);
-            memcpy(release_wire + prepared.release_body_len, signature, 64);
-            release_wire_len = body_plus;
-            struct vcs_package_release rel;
-            enum vcs_package_release_error rerr =
-                vcs_package_release_parse(release_wire, release_wire_len,
-                                          &rel);
-            if (rerr == VCS_PACKAGE_RELEASE_OK)
-                rerr = vcs_package_release_verify(&rel);
-            uint8_t *canon = NULL;
-            size_t canon_len = 0;
-            if (rerr == VCS_PACKAGE_RELEASE_OK)
-                rerr = vcs_package_release_id(&rel, release_id);
-            if (rerr == VCS_PACKAGE_RELEASE_OK)
-                rerr = vcs_package_release_serialize(&rel, &canon,
-                                                     &canon_len);
-            if (rerr != VCS_PACKAGE_RELEASE_OK ||
-                canon_len != release_wire_len ||
-                memcmp(canon, release_wire, release_wire_len) != 0) {
-                (void)snprintf(error, sizeof(error),
-                               "release verification: %s",
-                               vcs_package_release_error_string(rerr));
-                free(canon);
-                (void)pf_step_fail(&rep, s, t0, error);
-            } else {
-                free(canon);
-                hex_take(release_hex, sizeof(release_hex), release_wire,
-                         release_wire_len);
-                pf_root_hex(release_id, release_id_hex);
-                pf_step_ok(s, t0);
-            }
-        }
+    if (strcmp(st->prepared.release.name, st->info.name) != 0 ||
+        strcmp(st->prepared.release.license, st->info.license) != 0) {
+        (void)snprintf(st->error, sizeof(st->error),
+                       "prepare/metadata name or license mismatch");
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+        vcs_package_prepared_free(&st->prepared);
+        return;
     }
+    st->prepared_ok = true;
+    pf_root_hex(st->prepared.package_root, st->root_hex);
+    pf_root_hex(st->prepared.recipe_root, st->recipe_root_hex);
+    pf_step_ok(s, t0);
+}
 
-    /* 5./6. store A then store B, identical wires */
-    if (!rep.failed && prepared_ok && release_wire) {
-        char *manifest_hex =
-            zcl_malloc(prepared.manifest_wire_len * 2u + 1u,
-                       "factory.manifest.hex");
-        char *recipe_hex_s =
-            zcl_malloc(prepared.recipe_wire_len * 2u + 1u,
-                       "factory.recipe.hex");
-        if (!manifest_hex || !recipe_hex_s)
-            LOG_ERR(PF_LOG, "hex alloc");
-        hex_take(manifest_hex, prepared.manifest_wire_len * 2u + 1u,
-                 prepared.manifest_wire, prepared.manifest_wire_len);
-        hex_take(recipe_hex_s, prepared.recipe_wire_len * 2u + 1u,
-                 prepared.recipe_wire, prepared.recipe_wire_len);
-        bool ok_a = factory_store_journey(args, args->store_a, release_hex,
-                                          manifest_hex, recipe_hex_s,
-                                          prepared.recipe_wire,
-                                          prepared.recipe_wire_len,
-                                          root_hex_, &rep, "a", &sa,
-                                          &fast_stats);
-        bool ok_b = ok_a &&
-            factory_store_journey(args, args->store_b, release_hex,
-                                  manifest_hex, recipe_hex_s,
-                                  prepared.recipe_wire,
-                                  prepared.recipe_wire_len, root_hex_, &rep,
-                                  "b", &sb, &fast_stats);
-        (void)ok_b;
+/* 3. key cross-check + sign the digest offline */
+static void cr_step_sign(const struct run_args *args,
+                         struct cmd_run_state *st)
+{
+    struct pf_step *s = pf_step_begin(&st->rep, "sign");
+    uint64_t t0 = now_ms();
+    if (st->rep.failed || !st->prepared_ok)
+        return;
+    char key_pub[256];
+    if (!pf_signer(args->bin_dir, "--public", NULL, args->key_file, key_pub,
+                   sizeof(key_pub), st->error, sizeof(st->error))) {
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+        return;
+    }
+    if (strcmp(key_pub, args->publisher_pubkey) != 0) {
+        (void)pf_step_fail(&st->rep, s, t0,
+                           "publisher-key-file does not match "
+                           "--publisher-pubkey");
+        return;
+    }
+    char digest_hex[65];
+    pf_root_hex(st->prepared.signing_digest, digest_hex);
+    if (!pf_signer(args->bin_dir, "--sign-digest", digest_hex,
+                   args->key_file, st->signature_hex,
+                   sizeof(st->signature_hex), st->error, sizeof(st->error))) {
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+        return;
+    }
+    if (strlen(st->signature_hex) != 128) {
+        (void)pf_step_fail(&st->rep, s, t0, "bad signature hex");
+        return;
+    }
+    pf_step_ok(s, t0);
+}
+
+/* In-process verification: parse the release wire, verify it, take its id,
+ * re-serialize it, and require the canonical bytes to match what was just
+ * assembled. */
+static bool cr_seal_verify(const uint8_t *release_wire,
+                           size_t release_wire_len, uint8_t release_id[32],
+                           char *error, size_t error_cap)
+{
+    struct vcs_package_release rel;
+    enum vcs_package_release_error rerr =
+        vcs_package_release_parse(release_wire, release_wire_len, &rel);
+    if (rerr == VCS_PACKAGE_RELEASE_OK)
+        rerr = vcs_package_release_verify(&rel);
+    uint8_t *canon = NULL;
+    size_t canon_len = 0;
+    if (rerr == VCS_PACKAGE_RELEASE_OK)
+        rerr = vcs_package_release_id(&rel, release_id);
+    if (rerr == VCS_PACKAGE_RELEASE_OK)
+        rerr = vcs_package_release_serialize(&rel, &canon, &canon_len);
+    if (rerr != VCS_PACKAGE_RELEASE_OK || canon_len != release_wire_len ||
+        memcmp(canon, release_wire, release_wire_len) != 0) {
+        (void)snprintf(error, error_cap, "release verification: %s",
+                       vcs_package_release_error_string(rerr));
+        free(canon);
+        return false;
+    }
+    free(canon);
+    return true;
+}
+
+/* 4. seal (in-process verification + canonical re-serialization) */
+static void cr_step_seal(const struct run_args *args,
+                         struct cmd_run_state *st)
+{
+    (void)args;
+    struct pf_step *s = pf_step_begin(&st->rep, "seal");
+    uint64_t t0 = now_ms();
+    if (st->rep.failed || !st->prepared_ok || !st->signature_hex[0])
+        return;
+    uint8_t signature[64];
+    bool ok = zcl_hex_decode_lower(st->signature_hex, signature, 64);
+    size_t body_plus = st->prepared.release_body_len + 64u;
+    st->release_wire = ok ? zcl_malloc(body_plus, "factory.release") : NULL;
+    if (!st->release_wire) {
+        (void)pf_step_fail(&st->rep, s, t0, "release wire alloc/decode");
+        return;
+    }
+    memcpy(st->release_wire, st->prepared.release_body,
+           st->prepared.release_body_len);
+    memcpy(st->release_wire + st->prepared.release_body_len, signature, 64);
+    st->release_wire_len = body_plus;
+    if (!cr_seal_verify(st->release_wire, st->release_wire_len,
+                        st->release_id, st->error, sizeof(st->error))) {
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+        return;
+    }
+    hex_take(st->release_hex, sizeof(st->release_hex), st->release_wire,
+             st->release_wire_len);
+    pf_root_hex(st->release_id, st->release_id_hex);
+    pf_step_ok(s, t0);
+}
+
+/* 5./6. store A then store B, identical wires */
+static bool cr_step_stores(const struct run_args *args,
+                           struct cmd_run_state *st)
+{
+    if (st->rep.failed || !st->prepared_ok || !st->release_wire)
+        return true;
+    char *manifest_hex = zcl_malloc(st->prepared.manifest_wire_len * 2u + 1u,
+                                    "factory.manifest.hex");
+    char *recipe_hex_s = zcl_malloc(st->prepared.recipe_wire_len * 2u + 1u,
+                                    "factory.recipe.hex");
+    if (!manifest_hex || !recipe_hex_s) {
+        LOG_ERROR(PF_LOG, "hex alloc");
         free(manifest_hex);
         free(recipe_hex_s);
+        return false;
     }
+    hex_take(manifest_hex, st->prepared.manifest_wire_len * 2u + 1u,
+             st->prepared.manifest_wire, st->prepared.manifest_wire_len);
+    hex_take(recipe_hex_s, st->prepared.recipe_wire_len * 2u + 1u,
+             st->prepared.recipe_wire, st->prepared.recipe_wire_len);
+    bool ok_a = factory_store_journey(
+        args, args->store_a, st->release_hex, manifest_hex, recipe_hex_s,
+        st->prepared.recipe_wire, st->prepared.recipe_wire_len, st->root_hex,
+        &st->rep, "a", &st->sa, &st->fast_stats);
+    bool ok_b = ok_a &&
+        factory_store_journey(args, args->store_b, st->release_hex,
+                              manifest_hex, recipe_hex_s,
+                              st->prepared.recipe_wire,
+                              st->prepared.recipe_wire_len, st->root_hex,
+                              &st->rep, "b", &st->sb, &st->fast_stats);
+    (void)ok_b;
+    free(manifest_hex);
+    free(recipe_hex_s);
+    return true;
+}
 
-    /* 7. exact dependency plan (zcl.dep_plan.v1; local evidence only) */
-    char dep_plan_sha3[65] = {0};
-    if (!rep.failed && prepared_ok && args->dep_plan_path) {
-        s = pf_step_begin(&rep, "dep_plan");
-        t0 = now_ms();
-        if (factory_dep_plan(args, root_hex_, prepared.recipe_wire,
-                             prepared.recipe_wire_len, dep_plan_sha3,
-                             &fast_stats, error, sizeof(error)))
-            pf_step_ok(s, t0);
-        else
-            (void)pf_step_fail(&rep, s, t0, error);
-    }
+/* 7. exact dependency plan (zcl.dep_plan.v1; local evidence only) */
+static void cr_step_dep_plan(const struct run_args *args,
+                             struct cmd_run_state *st)
+{
+    if (st->rep.failed || !st->prepared_ok || !args->dep_plan_path)
+        return;
+    struct pf_step *s = pf_step_begin(&st->rep, "dep_plan");
+    uint64_t t0 = now_ms();
+    if (factory_dep_plan(args, st->root_hex, st->prepared.recipe_wire,
+                         st->prepared.recipe_wire_len, st->dep_plan_sha3,
+                         &st->fast_stats, st->error, sizeof(st->error)))
+        pf_step_ok(s, t0);
+    else
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+}
 
-    /* 8. self-screened admission (census construction) */
-    s = pf_step_begin(&rep, "admission");
-    t0 = now_ms();
-    if (!rep.failed) {
-        char default_seed[PF_PATH_CAP];
-        const char *seed_path = args->signer_seed_file;
-        if (!seed_path) {
-            const char *home = getenv("HOME");
-            if (!home ||
-                snprintf(default_seed, sizeof(default_seed),
-                         "%s/.config/zclassic23/corpus-census-signer.seed",
-                         home) >= (int)sizeof(default_seed)) {
-                (void)pf_step_fail(&rep, s, t0,
-                                   "HOME unset; pass --signer-seed-file");
-                goto admission_done;
-            }
-            seed_path = default_seed;
+/* Resolve the signer seed path (--signer-seed-file, else
+ * $HOME/.config/zclassic23/corpus-census-signer.seed) and load/create it. */
+static bool cr_admission_load_seed(const struct run_args *args,
+                                   uint8_t seed[32], char *error,
+                                   size_t error_cap)
+{
+    char default_seed[PF_PATH_CAP];
+    const char *seed_path = args->signer_seed_file;
+    if (!seed_path) {
+        const char *home = getenv("HOME");
+        if (!home ||
+            snprintf(default_seed, sizeof(default_seed),
+                     "%s/.config/zclassic23/corpus-census-signer.seed",
+                     home) >= (int)sizeof(default_seed)) {
+            (void)snprintf(error, error_cap,
+                           "HOME unset; pass --signer-seed-file");
+            return false;
         }
-        uint8_t seed[32];
-        if (!pf_seed_load_or_create(seed_path, seed)) {
-            (void)pf_step_fail(&rep, s, t0, "signer seed load/create");
-            goto admission_done;
-        }
-        bool ok = factory_admission(args, &info, &prepared, release_id,
-                                    seed, admission_root, &admission_wire,
-                                    &admission_wire_len, error,
-                                    sizeof(error));
-        memory_cleanse(seed, sizeof(seed));
-        if (!ok)
-            (void)pf_step_fail(&rep, s, t0,
-                               error[0] ? error : "admission failed");
-        else
-            pf_step_ok(s, t0);
+        seed_path = default_seed;
     }
-admission_done:
-
-    /* 9. corpus registration */
-    if (!rep.failed && args->register_corpus) {
-        s = pf_step_begin(&rep, "register_corpus");
-        t0 = now_ms();
-        error[0] = '\0';
-        if (factory_register_corpus(args->census_def, info.name, root_hex_,
-                                    args->store_a, args->kind, info.license,
-                                    error, sizeof(error))) {
-            corpus_registered = true;
-            (void)snprintf(corpus_note, sizeof(corpus_note),
-                "rerun: make corpus-census CORPUS_OUT=corpus "
-                "CORPUS_SEQUENCE=<n> CORPUS_PREDECESSOR_ROOT=<root> "
-                "CORPUS_CUTOFF_HEIGHT=<h> CORPUS_CUTOFF_MTP=<m> "
-                "CORPUS_QUALITY_ATTESTED=<0|1>");
-            pf_step_ok(s, t0);
-        } else {
-            (void)pf_step_fail(&rep, s, t0, error);
-        }
+    if (!pf_seed_load_or_create(seed_path, seed)) {
+        (void)snprintf(error, error_cap, "signer seed load/create");
+        return false;
     }
+    return true;
+}
 
-    /* 10. report */
-    uint64_t total_ms = now_ms() - t_start;
+/* 8. self-screened admission (census construction) */
+static void cr_step_admission(const struct run_args *args,
+                              struct cmd_run_state *st)
+{
+    struct pf_step *s = pf_step_begin(&st->rep, "admission");
+    uint64_t t0 = now_ms();
+    if (st->rep.failed)
+        return;
+    uint8_t seed[32];
+    if (!cr_admission_load_seed(args, seed, st->error, sizeof(st->error))) {
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+        return;
+    }
+    bool ok = factory_admission(args, &st->info, &st->prepared,
+                                st->release_id, seed, st->admission_root,
+                                &st->admission_wire, &st->admission_wire_len,
+                                st->error, sizeof(st->error));
+    memory_cleanse(seed, sizeof(seed));
+    if (!ok)
+        (void)pf_step_fail(&st->rep, s, t0,
+                           st->error[0] ? st->error : "admission failed");
+    else
+        pf_step_ok(s, t0);
+}
+
+/* 9. corpus registration */
+static void cr_step_corpus(const struct run_args *args,
+                           struct cmd_run_state *st)
+{
+    if (st->rep.failed || !args->register_corpus)
+        return;
+    struct pf_step *s = pf_step_begin(&st->rep, "register_corpus");
+    uint64_t t0 = now_ms();
+    st->error[0] = '\0';
+    if (factory_register_corpus(args->census_def, st->info.name,
+                                st->root_hex, args->store_a, args->kind,
+                                st->info.license, st->error,
+                                sizeof(st->error))) {
+        st->corpus_registered = true;
+        (void)snprintf(st->corpus_note, sizeof(st->corpus_note),
+            "rerun: make corpus-census CORPUS_OUT=corpus "
+            "CORPUS_SEQUENCE=<n> CORPUS_PREDECESSOR_ROOT=<root> "
+            "CORPUS_CUTOFF_HEIGHT=<h> CORPUS_CUTOFF_MTP=<m> "
+            "CORPUS_QUALITY_ATTESTED=<0|1>");
+        pf_step_ok(s, t0);
+    } else {
+        (void)pf_step_fail(&st->rep, s, t0, st->error);
+    }
+}
+
+/* 10. report — "package" section. */
+static void cr_report_package(struct json_value *report,
+                              const struct run_args *args,
+                              const struct cmd_run_state *st)
+{
+    struct json_value pkg;
+    json_init(&pkg);
+    json_set_object(&pkg);
+    (void)json_push_kv_str(&pkg, "dir", args->package_dir);
+    (void)json_push_kv_str(&pkg, "name", st->info.name);
+    (void)json_push_kv_str(&pkg, "semver", st->info.semver);
+    (void)json_push_kv_str(&pkg, "license", st->info.license);
+    (void)json_push_kv_str(&pkg, "package_root", st->root_hex);
+    (void)json_push_kv_str(&pkg, "recipe_root", st->recipe_root_hex);
+    (void)json_push_kv_str(&pkg, "release_id", st->release_id_hex);
+    (void)json_push_kv_str(&pkg, "publisher_pubkey", args->publisher_pubkey);
+    (void)json_push_kv_int(&pkg, "publisher_sequence",
+                           (int64_t)args->publisher_sequence);
+    (void)json_push_kv_str(&pkg, "kind", args->kind);
+    (void)json_push_kv(report, "package", &pkg);
+    json_free(&pkg);
+}
+
+/* One row ("a" or "b") of the report's "stores" section. */
+static void cr_report_store_row(struct json_value *stores, const char *key,
+                                const char *dir,
+                                const struct store_result *sr)
+{
+    struct json_value so;
+    json_init(&so);
+    json_set_object(&so);
+    /* The store LABEL, not the datadir. This report is a tracked file
+     * under corpus/factory/; an absolute datadir here published the
+     * operator's home directory in every one of them. The label is the
+     * store's identity — where it lives is operator-local and is supplied
+     * at run time by --store-a/--store-b. */
+    {
+        char label[PF_PATH_CAP];
+        char lerr[PF_ERROR_CAP] = {0};
+        (void)json_push_kv_str(&so, "store",
+            pf_store_label(dir, label, sizeof(label), lerr, sizeof(lerr))
+                ? label : "unnamed");
+    }
+    (void)json_push_kv_bool(&so, "published", sr->publish_ok);
+    (void)json_push_kv_bool(&so, "installed", sr->add_ok);
+    (void)json_push_kv_str(&so, "plan_id", sr->plan_id);
+    (void)json_push_kv_str(&so, "receipt_quick", sr->receipt_quick);
+    (void)json_push_kv_str(&so, "receipt_standard", sr->receipt_standard);
+    (void)json_push_kv_bool(&so, "reproduced", sr->reproduced);
+    (void)json_push_kv_str(&so, "storage_ack",
+        sr->storage_ack_status[0] ? sr->storage_ack_status
+                                  : "not_attempted");
+    (void)json_push_kv(stores, key, &so);
+    json_free(&so);
+}
+
+/* 10. report — "stores" section. */
+static void cr_report_stores(struct json_value *report,
+                             const struct run_args *args,
+                             const struct cmd_run_state *st)
+{
+    struct json_value stores;
+    json_init(&stores);
+    json_set_object(&stores);
+    cr_report_store_row(&stores, "a", args->store_a, &st->sa);
+    cr_report_store_row(&stores, "b", args->store_b, &st->sb);
+    (void)json_push_kv(report, "stores", &stores);
+    json_free(&stores);
+}
+
+/* 10. report — "admission" section. */
+static bool cr_report_admission(struct json_value *report,
+                                const struct cmd_run_state *st)
+{
+    char ahex[65];
+    pf_root_hex(st->admission_root, ahex);
+    struct json_value adm;
+    json_init(&adm);
+    json_set_object(&adm);
+    (void)json_push_kv_str(&adm, "admission_root",
+        zcl_bytes_any_set(st->admission_root, 32) ? ahex : "");
+    if (st->admission_wire) {
+        size_t hex_len = st->admission_wire_len * 2u;
+        char *hex = zcl_malloc(hex_len + 1u, "factory.adm.hex");
+        if (!hex) {
+            LOG_ERROR(PF_LOG, "admission hex alloc");
+            json_free(&adm);
+            return false;
+        }
+        zcl_hex_encode(st->admission_wire, st->admission_wire_len, hex);
+        (void)json_push_kv_str(&adm, "admission_wire", hex);
+        free(hex);
+    }
+    (void)json_push_kv_str(&adm, "screen", "self-screened");
+    (void)json_push_kv(report, "admission", &adm);
+    json_free(&adm);
+    return true;
+}
+
+/* 10. report — "dep_plan" section (only when a plan path was requested). */
+static void cr_report_dep_plan(struct json_value *report,
+                               const struct run_args *args,
+                               const struct cmd_run_state *st)
+{
+    if (!args->dep_plan_path)
+        return;
+    struct json_value dp;
+    json_init(&dp);
+    json_set_object(&dp);
+    (void)json_push_kv_str(&dp, "schema", "zcl.dep_plan.v1");
+    (void)json_push_kv_str(&dp, "path", args->dep_plan_path);
+    (void)json_push_kv_str(&dp, "sha3", st->dep_plan_sha3);
+    (void)json_push_kv(report, "dep_plan", &dp);
+    json_free(&dp);
+}
+
+/* 10. report — "fast_cache" section (only when a fast-cache dir was
+ * configured). */
+static void cr_report_fast_cache(struct json_value *report,
+                                 const struct run_args *args,
+                                 const struct cmd_run_state *st)
+{
+    if (!args->fast_cache_dir)
+        return;
+    struct json_value fc;
+    json_init(&fc);
+    json_set_object(&fc);
+    (void)json_push_kv_str(&fc, "schema", "zcl.fastobj.v1");
+    /* Name only — this report is committed and the cache is a local
+     * build-scratch directory whose absolute path identifies the
+     * operator's account, never the evidence. */
+    {
+        char label[PF_PATH_CAP];
+        char lerr[PF_ERROR_CAP] = {0};
+        (void)json_push_kv_str(&fc, "dir",
+            pf_store_label(args->fast_cache_dir, label, sizeof(label), lerr,
+                           sizeof(lerr)) ? label : "unnamed");
+    }
+    (void)json_push_kv_int(&fc, "hits", (int64_t)st->fast_stats.hits);
+    (void)json_push_kv_int(&fc, "misses", (int64_t)st->fast_stats.misses);
+    (void)json_push_kv_int(&fc, "objects_reused_bytes",
+                           (int64_t)st->fast_stats.reused_bytes);
+    (void)json_push_kv_str(&fc, "admission", "local_candidate");
+    (void)json_push_kv_str(&fc, "note",
+        "quarantined local candidate cache; cached objects speed up only "
+        "this node's confined rebuilds and are never attestation or "
+        "admission evidence");
+    (void)json_push_kv_str(&fc, "applies_to",
+        "package-verify --zbuild-package-* rebuilds (second receipt and "
+        "dep plan steps)");
+    (void)json_push_kv(report, "fast_cache", &fc);
+    json_free(&fc);
+}
+
+/* 10. report — "steps" section. */
+static void cr_report_steps(struct json_value *report,
+                            const struct cmd_run_state *st)
+{
+    struct json_value steps;
+    json_init(&steps);
+    json_set_array(&steps);
+    for (size_t i = 0; i < st->rep.step_count; i++) {
+        struct json_value so;
+        json_init(&so);
+        json_set_object(&so);
+        (void)json_push_kv_str(&so, "name", st->rep.steps[i].name);
+        (void)json_push_kv_bool(&so, "ok", st->rep.steps[i].ok);
+        (void)json_push_kv_int(&so, "ms", (int64_t)st->rep.steps[i].ms);
+        if (st->rep.steps[i].error[0])
+            (void)json_push_kv_str(&so, "error", st->rep.steps[i].error);
+        (void)json_push_back(&steps, &so);
+        json_free(&so);
+    }
+    (void)json_push_kv(report, "steps", &steps);
+    json_free(&steps);
+}
+
+/* 10. report — "disclosures" section. */
+static void cr_report_disclosures(struct json_value *report)
+{
+    struct json_value disc;
+    json_init(&disc);
+    json_set_array(&disc);
+    struct json_value v;
+#define PF_DISCLOSE(text)                        \
+    json_init(&v);                               \
+    json_set_str(&v, text);                      \
+    (void)json_push_back(&disc, &v);             \
+    json_free(&v)
+    PF_DISCLOSE("same-host reproduction: both confined builds ran on one "
+                "host with one toolchain (quick + standard flag profiles); "
+                "independent-operator reproduction is future work");
+    PF_DISCLOSE("self-screen admission: the commons_admission.v1 is "
+                "self-signed SELF_SCREENED (tier 0); zero independent "
+                "operator groups participated");
+    PF_DISCLOSE("offline run: no network durability — storage_ack needs "
+                "the live DHT service; durable_hosting is "
+                "unavailable_offline unless a store reports otherwise");
+    PF_DISCLOSE("the approved_verifiers allowlist in each store was "
+                "created by the factory with the publisher key so the "
+                "verify command could run; no verifier quorum was reached "
+                "and none is claimed");
+#undef PF_DISCLOSE
+    (void)json_push_kv(report, "disclosures", &disc);
+    json_free(&disc);
+}
+
+static const char *cr_durable_hosting(const struct cmd_run_state *st)
+{
+    return (st->sa.storage_ack_status[0] &&
+            strcmp(st->sa.storage_ack_status, "unavailable_offline") != 0) ||
+           (st->sb.storage_ack_status[0] &&
+            strcmp(st->sb.storage_ack_status, "unavailable_offline") != 0)
+        ? "attempted"
+        : "unavailable_offline";
+}
+
+static bool cr_write_report_file(const struct run_args *args,
+                                 struct json_value *report)
+{
+    size_t need = json_write(report, NULL, 0);
+    char *text = zcl_malloc(need + 2u, "factory.report.out");
+    if (!text) {
+        LOG_ERROR(PF_LOG, "report buffer alloc");
+        return false;
+    }
+    size_t written = json_write(report, text, need + 1u);
+    if (written > need) {
+        LOG_ERROR(PF_LOG, "report write overflow");
+        free(text);
+        return false;
+    }
+    text[written] = '\n';
+    if (!pf_write_atomic(args->report_path, (const uint8_t *)text,
+                         written + 1u)) {
+        free(text);
+        LOG_ERROR(PF_LOG, "cannot write report %s", args->report_path);
+        return false;
+    }
+    free(text);
+    return true;
+}
+
+/* 10. report */
+static bool cr_step_report(const struct run_args *args,
+                           struct cmd_run_state *st)
+{
+    uint64_t total_ms = now_ms() - st->t_start;
     struct json_value report;
     json_init(&report);
     json_set_object(&report);
     (void)json_push_kv_str(&report, "schema",
                            "zcl.package_factory.report.v1");
-    (void)json_push_kv_bool(&report, "ok", !rep.failed);
+    (void)json_push_kv_bool(&report, "ok", !st->rep.failed);
     (void)json_push_kv_int(&report, "total_ms", (int64_t)total_ms);
-    {
-        struct json_value pkg;
-        json_init(&pkg);
-        json_set_object(&pkg);
-        (void)json_push_kv_str(&pkg, "dir", args->package_dir);
-        (void)json_push_kv_str(&pkg, "name", info.name);
-        (void)json_push_kv_str(&pkg, "semver", info.semver);
-        (void)json_push_kv_str(&pkg, "license", info.license);
-        (void)json_push_kv_str(&pkg, "package_root", root_hex_);
-        (void)json_push_kv_str(&pkg, "recipe_root", recipe_root_hex);
-        (void)json_push_kv_str(&pkg, "release_id", release_id_hex);
-        (void)json_push_kv_str(&pkg, "publisher_pubkey",
-                               args->publisher_pubkey);
-        (void)json_push_kv_int(&pkg, "publisher_sequence",
-                               (int64_t)args->publisher_sequence);
-        (void)json_push_kv_str(&pkg, "kind", args->kind);
-        (void)json_push_kv(&report, "package", &pkg);
-        json_free(&pkg);
-    }
-    {
-        struct json_value stores;
-        json_init(&stores);
-        json_set_object(&stores);
-        const struct {
-            const char *key;
-            const char *dir;
-            const struct store_result *sr;
-        } rows[2] = {
-            {"a", args->store_a, &sa},
-            {"b", args->store_b, &sb},
-        };
-        for (size_t i = 0; i < 2; i++) {
-            struct json_value so;
-            json_init(&so);
-            json_set_object(&so);
-            /* The store LABEL, not the datadir. This report is a tracked
-             * file under corpus/factory/; an absolute datadir here published
-             * the operator's home directory in every one of them. The label
-             * is the store's identity — where it lives is operator-local and
-             * is supplied at run time by --store-a/--store-b. */
-            {
-                char label[PF_PATH_CAP];
-                char lerr[PF_ERROR_CAP] = {0};
-                (void)json_push_kv_str(&so, "store",
-                    pf_store_label(rows[i].dir, label, sizeof(label), lerr,
-                                   sizeof(lerr)) ? label : "unnamed");
-            }
-            (void)json_push_kv_bool(&so, "published", rows[i].sr->publish_ok);
-            (void)json_push_kv_bool(&so, "installed", rows[i].sr->add_ok);
-            (void)json_push_kv_str(&so, "plan_id", rows[i].sr->plan_id);
-            (void)json_push_kv_str(&so, "receipt_quick",
-                                   rows[i].sr->receipt_quick);
-            (void)json_push_kv_str(&so, "receipt_standard",
-                                   rows[i].sr->receipt_standard);
-            (void)json_push_kv_bool(&so, "reproduced",
-                                    rows[i].sr->reproduced);
-            (void)json_push_kv_str(&so, "storage_ack",
-                rows[i].sr->storage_ack_status[0]
-                    ? rows[i].sr->storage_ack_status
-                    : "not_attempted");
-            (void)json_push_kv(&stores, rows[i].key, &so);
-            json_free(&so);
-        }
-        (void)json_push_kv(&report, "stores", &stores);
-        json_free(&stores);
-    }
-    {
-        char ahex[65];
-        pf_root_hex(admission_root, ahex);
-        struct json_value adm;
-        json_init(&adm);
-        json_set_object(&adm);
-        (void)json_push_kv_str(&adm, "admission_root",
-                               zcl_bytes_any_set(admission_root, 32) ? ahex : "");
-        if (admission_wire) {
-            size_t hex_len = admission_wire_len * 2u;
-            char *hex = zcl_malloc(hex_len + 1u, "factory.adm.hex");
-            if (!hex)
-                LOG_ERR(PF_LOG, "admission hex alloc");
-            zcl_hex_encode(admission_wire, admission_wire_len, hex);
-            (void)json_push_kv_str(&adm, "admission_wire", hex);
-            free(hex);
-        }
-        (void)json_push_kv_str(&adm, "screen", "self-screened");
-        (void)json_push_kv(&report, "admission", &adm);
-        json_free(&adm);
-    }
-    if (args->dep_plan_path) {
-        struct json_value dp;
-        json_init(&dp);
-        json_set_object(&dp);
-        (void)json_push_kv_str(&dp, "schema", "zcl.dep_plan.v1");
-        (void)json_push_kv_str(&dp, "path", args->dep_plan_path);
-        (void)json_push_kv_str(&dp, "sha3", dep_plan_sha3);
-        (void)json_push_kv(&report, "dep_plan", &dp);
-        json_free(&dp);
-    }
-    if (args->fast_cache_dir) {
-        struct json_value fc;
-        json_init(&fc);
-        json_set_object(&fc);
-        (void)json_push_kv_str(&fc, "schema", "zcl.fastobj.v1");
-        /* Name only — this report is committed and the cache is a local
-         * build-scratch directory whose absolute path identifies the
-         * operator's account, never the evidence. */
-        {
-            char label[PF_PATH_CAP];
-            char lerr[PF_ERROR_CAP] = {0};
-            (void)json_push_kv_str(&fc, "dir",
-                pf_store_label(args->fast_cache_dir, label, sizeof(label),
-                               lerr, sizeof(lerr)) ? label : "unnamed");
-        }
-        (void)json_push_kv_int(&fc, "hits", (int64_t)fast_stats.hits);
-        (void)json_push_kv_int(&fc, "misses", (int64_t)fast_stats.misses);
-        (void)json_push_kv_int(&fc, "objects_reused_bytes",
-                               (int64_t)fast_stats.reused_bytes);
-        (void)json_push_kv_str(&fc, "admission", "local_candidate");
-        (void)json_push_kv_str(&fc, "note",
-            "quarantined local candidate cache; cached objects speed up "
-            "only this node's confined rebuilds and are never attestation "
-            "or admission evidence");
-        (void)json_push_kv_str(&fc, "applies_to",
-            "package-verify --zbuild-package-* rebuilds (second receipt "
-            "and dep plan steps)");
-        (void)json_push_kv(&report, "fast_cache", &fc);
-        json_free(&fc);
-    }
-    {
-        struct json_value steps;
-        json_init(&steps);
-        json_set_array(&steps);
-        for (size_t i = 0; i < rep.step_count; i++) {
-            struct json_value so;
-            json_init(&so);
-            json_set_object(&so);
-            (void)json_push_kv_str(&so, "name", rep.steps[i].name);
-            (void)json_push_kv_bool(&so, "ok", rep.steps[i].ok);
-            (void)json_push_kv_int(&so, "ms", (int64_t)rep.steps[i].ms);
-            if (rep.steps[i].error[0])
-                (void)json_push_kv_str(&so, "error", rep.steps[i].error);
-            (void)json_push_back(&steps, &so);
-            json_free(&so);
-        }
-        (void)json_push_kv(&report, "steps", &steps);
-        json_free(&steps);
-    }
-    {
-        struct json_value disc;
-        json_init(&disc);
-        json_set_array(&disc);
-        struct json_value v;
-#define PF_DISCLOSE(text)                        \
-        json_init(&v);                           \
-        json_set_str(&v, text);                  \
-        (void)json_push_back(&disc, &v);         \
-        json_free(&v)
-        PF_DISCLOSE("same-host reproduction: both confined builds ran on "
-                    "one host with one toolchain (quick + standard flag "
-                    "profiles); independent-operator reproduction is "
-                    "future work");
-        PF_DISCLOSE("self-screen admission: the commons_admission.v1 is "
-                    "self-signed SELF_SCREENED (tier 0); zero independent "
-                    "operator groups participated");
-        PF_DISCLOSE("offline run: no network durability — storage_ack "
-                    "needs the live DHT service; durable_hosting is "
-                    "unavailable_offline unless a store reports otherwise");
-        PF_DISCLOSE("the approved_verifiers allowlist in each store was "
-                    "created by the factory with the publisher key so the "
-                    "verify command could run; no verifier quorum was "
-                    "reached and none is claimed");
-#undef PF_DISCLOSE
-        (void)json_push_kv(&report, "disclosures", &disc);
-        json_free(&disc);
-    }
+    cr_report_package(&report, args, st);
+    cr_report_stores(&report, args, st);
+    bool ok = cr_report_admission(&report, st);
+    cr_report_dep_plan(&report, args, st);
+    cr_report_fast_cache(&report, args, st);
+    cr_report_steps(&report, st);
+    cr_report_disclosures(&report);
     (void)json_push_kv_str(&report, "durable_hosting",
-        (sa.storage_ack_status[0] &&
-         strcmp(sa.storage_ack_status, "unavailable_offline") != 0) ||
-        (sb.storage_ack_status[0] &&
-         strcmp(sb.storage_ack_status, "unavailable_offline") != 0)
-            ? "attempted"
-            : "unavailable_offline");
+                           cr_durable_hosting(st));
     (void)json_push_kv_bool(&report, "corpus_registered",
-                            corpus_registered);
-    if (corpus_note[0])
-        (void)json_push_kv_str(&report, "corpus_next_step", corpus_note);
-    {
-        size_t need = json_write(&report, NULL, 0);
-        char *text = zcl_malloc(need + 2u, "factory.report.out");
-        if (!text)
-            LOG_ERR(PF_LOG, "report buffer alloc");
-        size_t written = json_write(&report, text, need + 1u);
-        if (written > need)
-            LOG_ERR(PF_LOG, "report write overflow");
-        text[written] = '\n';
-        if (!pf_write_atomic(args->report_path, (const uint8_t *)text,
-                             written + 1u)) {
-            free(text);
-            json_free(&report);
-            LOG_ERR(PF_LOG, "cannot write report %s", args->report_path);
-        }
-        free(text);
-    }
+                            st->corpus_registered);
+    if (st->corpus_note[0])
+        (void)json_push_kv_str(&report, "corpus_next_step", st->corpus_note);
+    if (ok)
+        ok = cr_write_report_file(args, &report);
     json_free(&report);
+    return ok;
+}
 
+static void cr_print_summary(const struct run_args *args,
+                             const struct cmd_run_state *st)
+{
     printf("package-factory: %s package=%s root=%s release=%s\n",
-           rep.failed ? "FAILED" : "ok", info.name, root_hex_,
-           release_id_hex);
+           st->rep.failed ? "FAILED" : "ok", st->info.name, st->root_hex,
+           st->release_id_hex);
     printf("  reproduced: storeA=%d storeB=%d  durable_hosting=%s\n",
-           (int)sa.reproduced, (int)sb.reproduced,
-           (sa.storage_ack_status[0] &&
-            strcmp(sa.storage_ack_status, "unavailable_offline") != 0)
-               ? sa.storage_ack_status
+           (int)st->sa.reproduced, (int)st->sb.reproduced,
+           (st->sa.storage_ack_status[0] &&
+            strcmp(st->sa.storage_ack_status, "unavailable_offline") != 0)
+               ? st->sa.storage_ack_status
                : "unavailable_offline");
-    if (corpus_registered)
+    if (st->corpus_registered)
         printf("  corpus: registered in %s — %s\n", args->census_def,
-               corpus_note);
+               st->corpus_note);
     printf("  report: %s\n", args->report_path);
+}
 
-    for (size_t i = 0; i < rep.step_count; i++)
-        free((void *)rep.steps[i].name);
-    free(release_wire);
-    free(admission_wire);
-    if (prepared_ok) vcs_package_prepared_free(&prepared);
-    gate_info_free(&info);
-    return rep.failed ? 1 : 0;
+static void cr_cleanup(struct cmd_run_state *st)
+{
+    for (size_t i = 0; i < st->rep.step_count; i++)
+        free((void *)st->rep.steps[i].name);
+    free(st->release_wire);
+    free(st->admission_wire);
+    if (st->prepared_ok) vcs_package_prepared_free(&st->prepared);
+    gate_info_free(&st->info);
+}
+
+static int cmd_run(const struct run_args *args)
+{
+    struct cmd_run_state st;
+    memset(&st, 0, sizeof(st));
+    st.t_start = now_ms();
+
+    cr_step_gate(args, &st);
+    cr_step_prepare(args, &st);
+    cr_step_sign(args, &st);
+    cr_step_seal(args, &st);
+    if (!cr_step_stores(args, &st))
+        return -1;
+    cr_step_dep_plan(args, &st);
+    cr_step_admission(args, &st);
+    cr_step_corpus(args, &st);
+    if (!cr_step_report(args, &st))
+        return -1;
+    cr_print_summary(args, &st);
+    int rc = st.rep.failed ? 1 : 0;
+    cr_cleanup(&st);
+    return rc;
 }
 
 /* ── selftest ─────────────────────────────────────────────────────── */
