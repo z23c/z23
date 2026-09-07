@@ -10,11 +10,12 @@
  * result, and free what it owns. `syncdiag_cases_agent_ops` runs every
  * scenario in turn and reports one OK/FAIL line per scenario. A
  * scenario whose assertions would exceed the cyclomatic-complexity cap
- * is further split into `..._partN` helpers that each take the parsed
- * RPC result (and, where the original did, the fixture state) and
- * return whether their slice of the original assertion chain held; no
- * helper below introduces file-scope mutable state — every helper
- * takes its inputs as parameters and derives what it needs locally.
+ * is further split into named helpers, one per section or sub-case of
+ * the RPC result, that each take the parsed RPC result (and, where the
+ * original did, the fixture state) and return whether their slice of
+ * the original assertion chain held; no helper below introduces
+ * file-scope mutable state — every helper takes its inputs as
+ * parameters and derives what it needs locally.
  */
 
 #include "test/syncdiag_rpc_fixture.h"
@@ -119,7 +120,7 @@ static void sd_quality_fixture_teardown(const struct sd_quality_fixture *fx)
     }
 }
 
-static bool sd_ops_fields_part1(const struct json_value *ops)
+static bool sd_ops_fields_contract(const struct json_value *ops)
 {
     bool ok = true;
     ok = ok && ops->type == JSON_OBJ;
@@ -152,7 +153,7 @@ static bool sd_ops_fields_part1(const struct json_value *ops)
     return ok;
 }
 
-static bool sd_ops_fields_part2(const struct json_value *ops)
+static bool sd_ops_fields_direct_commands_core(const struct json_value *ops)
 {
     bool ok = true;
     const struct json_value *ops_direct_commands =
@@ -189,7 +190,7 @@ static bool sd_ops_fields_part2(const struct json_value *ops)
     return ok;
 }
 
-static bool sd_ops_fields_part3(const struct json_value *ops)
+static bool sd_ops_fields_direct_commands_native(const struct json_value *ops)
 {
     bool ok = true;
     const struct json_value *ops_direct_commands =
@@ -235,7 +236,7 @@ static bool sd_ops_fields_part3(const struct json_value *ops)
     return ok;
 }
 
-static bool sd_ops_fields_part4(const struct json_value *ops)
+static bool sd_ops_fields_direct_commands_proof_bundle(const struct json_value *ops)
 {
     bool ok = true;
     const struct json_value *ops_direct_commands =
@@ -271,7 +272,7 @@ static bool sd_ops_fields_part4(const struct json_value *ops)
     return ok;
 }
 
-static bool sd_ops_fields_part5(const struct json_value *ops)
+static bool sd_ops_fields_gaps_and_workflow(const struct json_value *ops)
 {
     bool ok = true;
     const struct json_value *ops_gaps = json_get(ops, "api_gaps");
@@ -298,7 +299,7 @@ static bool sd_ops_fields_part5(const struct json_value *ops)
     return ok;
 }
 
-static bool sd_ops_fields_part6(const struct json_value *ops)
+static bool sd_ops_fields_top_next_work(const struct json_value *ops)
 {
     bool ok = true;
     const struct json_value *ops_work = json_get(ops, "top_next_work");
@@ -327,7 +328,7 @@ static bool sd_ops_fields_part6(const struct json_value *ops)
     return ok;
 }
 
-static bool sd_ops_fields_part7(const struct json_value *ops)
+static bool sd_ops_fields_architecture_review(const struct json_value *ops)
 {
     bool ok = true;
     const struct json_value *ops_work = json_get(ops, "top_next_work");
@@ -364,7 +365,7 @@ static bool sd_ops_fields_part7(const struct json_value *ops)
     return ok;
 }
 
-static bool sd_diagnose_part1(const struct json_value *diagnose)
+static bool sd_diagnose_contract(const struct json_value *diagnose)
 {
     bool ok = true;
     ok = ok && diagnose->type == JSON_OBJ;
@@ -387,7 +388,7 @@ static bool sd_diagnose_part1(const struct json_value *diagnose)
     return ok;
 }
 
-static bool sd_diagnose_part2(const struct json_value *diagnose)
+static bool sd_diagnose_peer_incidents_and_timeline(const struct json_value *diagnose)
 {
     bool ok = true;
     const struct json_value *diagnose_first_call =
@@ -419,7 +420,7 @@ static bool sd_diagnose_part2(const struct json_value *diagnose)
     return ok;
 }
 
-static bool sd_diagnose_part3(const struct json_value *diagnose)
+static bool sd_diagnose_first_call_budget(const struct json_value *diagnose)
 {
     bool ok = true;
     const struct json_value *diagnose_first_call =
@@ -431,7 +432,7 @@ static bool sd_diagnose_part3(const struct json_value *diagnose)
     return ok;
 }
 
-static bool sd_inferred_part1(const struct json_value *inferred_ops)
+static bool sd_inferred_lane_topology(const struct json_value *inferred_ops)
 {
     bool ok = true;
     const struct json_value *inferred_ops_lane =
@@ -457,7 +458,7 @@ static bool sd_inferred_part1(const struct json_value *inferred_ops)
     return ok;
 }
 
-static bool sd_timeline_basic_part1(const struct json_value *timeline)
+static bool sd_timeline_basic_contract(const struct json_value *timeline)
 {
     bool ok = true;
     const struct json_value *timeline_events =
@@ -482,7 +483,7 @@ static bool sd_timeline_basic_part1(const struct json_value *timeline)
     return ok;
 }
 
-static bool sd_timeline_basic_part2(const struct json_value *timeline)
+static bool sd_timeline_basic_summary(const struct json_value *timeline)
 {
     bool ok = true;
     const struct json_value *timeline_summary =
@@ -509,7 +510,7 @@ static bool sd_timeline_basic_part2(const struct json_value *timeline)
     return ok;
 }
 
-static bool sd_timeline_filtered_part1(const struct json_value *timeline_filtered)
+static bool sd_timeline_filtered_contract(const struct json_value *timeline_filtered)
 {
     bool ok = true;
     const struct json_value *timeline_filtered_filters =
@@ -539,7 +540,7 @@ static bool sd_timeline_filtered_part1(const struct json_value *timeline_filtere
     return ok;
 }
 
-static bool sd_timeline_filtered_part2(const struct json_value *timeline_filtered)
+static bool sd_timeline_filtered_filters_reducer(const struct json_value *timeline_filtered)
 {
     bool ok = true;
     const struct json_value *timeline_filtered_filters =
@@ -557,7 +558,7 @@ static bool sd_timeline_filtered_part2(const struct json_value *timeline_filtere
     return ok;
 }
 
-static bool sd_timeline_filtered_part2b(const struct json_value *timeline_filtered)
+static bool sd_timeline_filtered_filters_deploy_lane(const struct json_value *timeline_filtered)
 {
     bool ok = true;
     const struct json_value *timeline_filtered_events =
@@ -581,7 +582,7 @@ static bool sd_timeline_filtered_part2b(const struct json_value *timeline_filter
     return ok;
 }
 
-static bool sd_timeline_filtered_part3(const struct json_value *timeline_filtered)
+static bool sd_timeline_filtered_first_event(const struct json_value *timeline_filtered)
 {
     bool ok = true;
     const struct json_value *timeline_filtered_events =
@@ -603,7 +604,7 @@ static bool sd_timeline_filtered_part3(const struct json_value *timeline_filtere
     return ok;
 }
 
-static bool sd_timeline_cli_part1(const struct json_value *timeline_cli)
+static bool sd_timeline_cli_contract(const struct json_value *timeline_cli)
 {
     bool ok = true;
     ok = ok && timeline_cli->type == JSON_OBJ;
@@ -620,7 +621,7 @@ static bool sd_timeline_cli_part1(const struct json_value *timeline_cli)
     return ok;
 }
 
-static bool sd_timeline_cli_part1b(const struct json_value *timeline_cli)
+static bool sd_timeline_cli_first_event(const struct json_value *timeline_cli)
 {
     bool ok = true;
     const struct json_value *timeline_cli_events =
@@ -642,7 +643,7 @@ static bool sd_timeline_cli_part1b(const struct json_value *timeline_cli)
     return ok;
 }
 
-static bool sd_statecatalog_part1(const struct json_value *catalog)
+static bool sd_statecatalog_contract_block_index(const struct json_value *catalog)
 {
     bool ok = true;
     const struct json_value *catalog_subsystems =
@@ -668,7 +669,7 @@ static bool sd_statecatalog_part1(const struct json_value *catalog)
     return ok;
 }
 
-static bool sd_statecatalog_part2(const struct json_value *catalog)
+static bool sd_statecatalog_block_index_detail(const struct json_value *catalog)
 {
     bool ok = true;
     const struct json_value *catalog_subsystems =
@@ -696,7 +697,7 @@ static bool sd_statecatalog_part2(const struct json_value *catalog)
     return ok;
 }
 
-static bool sd_statecatalog_part3(const struct json_value *catalog)
+static bool sd_statecatalog_reducer_frontier(const struct json_value *catalog)
 {
     bool ok = true;
     const struct json_value *catalog_subsystems =
@@ -725,7 +726,7 @@ static bool sd_statecatalog_part3(const struct json_value *catalog)
     return ok;
 }
 
-static bool sd_lanes_part1(const struct json_value *lanes)
+static bool sd_lanes_contract_status_command(const struct json_value *lanes)
 {
     bool ok = true;
     const struct json_value *lane_commands =
@@ -752,7 +753,7 @@ static bool sd_lanes_part1(const struct json_value *lanes)
     return ok;
 }
 
-static bool sd_lanes_part2(const struct json_value *lanes)
+static bool sd_lanes_commands(const struct json_value *lanes)
 {
     bool ok = true;
     const struct json_value *runtime_services =
@@ -788,7 +789,7 @@ static bool sd_lanes_part2(const struct json_value *lanes)
     return ok;
 }
 
-static bool sd_lanes_part3(const struct json_value *lanes)
+static bool sd_lanes_current_runtime_services(const struct json_value *lanes)
 {
     bool ok = true;
     const struct json_value *runtime_services =
@@ -814,7 +815,7 @@ static bool sd_lanes_part3(const struct json_value *lanes)
     return ok;
 }
 
-static bool sd_lanes_part4(const struct json_value *lanes)
+static bool sd_lanes_fs_and_lane_list(const struct json_value *lanes)
 {
     bool ok = true;
     const struct json_value *lane_arr = json_get(lanes, "lanes");
@@ -836,7 +837,7 @@ static bool sd_lanes_part4(const struct json_value *lanes)
     return ok;
 }
 
-static bool sd_lanes_part5(const struct json_value *lanes)
+static bool sd_lanes_canonical_and_dev(const struct json_value *lanes)
 {
     bool ok = true;
     const struct json_value *lane_arr = json_get(lanes, "lanes");
@@ -860,7 +861,7 @@ static bool sd_lanes_part5(const struct json_value *lanes)
     return ok;
 }
 
-static bool sd_lanes_part6(const struct json_value *lanes)
+static bool sd_lanes_dev_deployment_safety(const struct json_value *lanes)
 {
     bool ok = true;
     const struct json_value *lane_arr = json_get(lanes, "lanes");
@@ -876,7 +877,7 @@ static bool sd_lanes_part6(const struct json_value *lanes)
     return ok;
 }
 
-static bool sd_build_part1(const struct json_value *build)
+static bool sd_build_contract_and_loop_gates(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *loop =
@@ -910,7 +911,7 @@ static bool sd_build_part1(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part2(const struct json_value *build)
+static bool sd_build_loop_compile_rules(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *loop =
@@ -950,7 +951,7 @@ static bool sd_build_part2(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part3(const struct json_value *build)
+static bool sd_build_dev_binary_and_indexing(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *incremental =
@@ -978,7 +979,7 @@ static bool sd_build_part3(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part4(const struct json_value *build)
+static bool sd_build_indexing_freshness(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *indexing = json_get(build, "indexing");
@@ -1004,7 +1005,7 @@ static bool sd_build_part4(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part5(const struct json_value *build)
+static bool sd_build_dev_loop_benchmark(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *dev_loop_benchmark =
@@ -1036,7 +1037,7 @@ static bool sd_build_part5(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part6(const struct json_value *build)
+static bool sd_build_dev_binary_and_cache(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *dev_binary =
@@ -1071,7 +1072,7 @@ static bool sd_build_part6(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part7(const struct json_value *build)
+static bool sd_build_immutable_history_canaries(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *history =
@@ -1108,7 +1109,7 @@ static bool sd_build_part7(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part8(const struct json_value *build)
+static bool sd_build_command_catalog(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *commands = json_get(build, "commands");
@@ -1139,7 +1140,7 @@ static bool sd_build_part8(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part9(const struct json_value *build,
+static bool sd_build_reproducible_and_quality_status(const struct json_value *build,
                            const char *quality_root)
 {
     bool ok = true;
@@ -1174,7 +1175,7 @@ static bool sd_build_part9(const struct json_value *build,
     return ok;
 }
 
-static bool sd_build_part10(const struct json_value *build)
+static bool sd_build_quality_status_lanes_summary(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *quality_status =
@@ -1202,7 +1203,7 @@ static bool sd_build_part10(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part11(const struct json_value *build)
+static bool sd_build_quality_status_fuzz_lane(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *quality_status =
@@ -1231,7 +1232,7 @@ static bool sd_build_part11(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part12(const struct json_value *build)
+static bool sd_build_quality_status_fuzz_stale(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *quality_status =
@@ -1261,7 +1262,7 @@ static bool sd_build_part12(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_part13(const struct json_value *build)
+static bool sd_build_quality_status_coverage_no_verdict(const struct json_value *build)
 {
     bool ok = true;
     const struct json_value *quality_status =
@@ -1276,7 +1277,7 @@ static bool sd_build_part13(const struct json_value *build)
     return ok;
 }
 
-static bool sd_build_deferred_part1(bool moved_outside_repo,
+static bool sd_build_deferred_index_unavailable(bool moved_outside_repo,
                                     bool deferred_read, bool restored_cwd,
                                     const struct json_value *deferred_index)
 {
@@ -1292,7 +1293,7 @@ static bool sd_build_deferred_part1(bool moved_outside_repo,
     return ok;
 }
 
-static bool sd_build_deferred_part2(const struct json_value *deferred_benchmark)
+static bool sd_build_deferred_benchmark_unavailable(const struct json_value *deferred_benchmark)
 {
     bool ok = true;
     ok = ok && deferred_benchmark &&
@@ -1308,7 +1309,7 @@ static bool sd_build_deferred_part2(const struct json_value *deferred_benchmark)
         json_get(deferred_benchmark, "slo") == NULL;
     return ok;
 }
-static bool sd_devstatus_part1(const struct json_value *dev_status)
+static bool sd_devstatus_contract_and_worker_lane(const struct json_value *dev_status)
 {
     bool ok = true;
     const struct json_value *dev_worker =
@@ -1342,7 +1343,7 @@ static bool sd_devstatus_part1(const struct json_value *dev_status)
     return ok;
 }
 
-static bool sd_liveness_brief_part1(const struct json_value *liveness)
+static bool sd_liveness_brief_contract(const struct json_value *liveness)
 {
     bool ok = true;
     const struct json_value *live_first_call =
@@ -1373,7 +1374,7 @@ static bool sd_liveness_brief_part1(const struct json_value *liveness)
     return ok;
 }
 
-static bool sd_liveness_brief_part2(const struct json_value *liveness)
+static bool sd_liveness_brief_first_call(const struct json_value *liveness)
 {
     bool ok = true;
     const struct json_value *live_first_call =
@@ -1404,7 +1405,7 @@ static bool sd_liveness_brief_part2(const struct json_value *liveness)
     return ok;
 }
 
-static bool sd_liveness_brief_part3(const struct json_value *liveness)
+static bool sd_liveness_brief_summary_and_runtime_services(const struct json_value *liveness)
 {
     bool ok = true;
     const struct json_value *live_summary =
@@ -1436,7 +1437,7 @@ static bool sd_liveness_brief_part3(const struct json_value *liveness)
     return ok;
 }
 
-static bool sd_liveness_brief_part4(const struct json_value *liveness)
+static bool sd_liveness_brief_runtime_availability_detail(const struct json_value *liveness)
 {
     bool ok = true;
     const struct json_value *live_summary =
@@ -1465,7 +1466,7 @@ static bool sd_liveness_brief_part4(const struct json_value *liveness)
     return ok;
 }
 
-static bool sd_liveness_brief_part5(const struct json_value *liveness)
+static bool sd_liveness_brief_quality_status(const struct json_value *liveness)
 {
     bool ok = true;
     const struct json_value *live_summary =
@@ -1496,7 +1497,7 @@ static bool sd_liveness_brief_part5(const struct json_value *liveness)
     return ok;
 }
 
-static bool sd_liveness_brief_part6(const struct json_value *liveness)
+static bool sd_liveness_brief_supervisor_state(const struct json_value *liveness)
 {
     bool ok = true;
     const struct json_value *live_supervisor =
@@ -1517,7 +1518,7 @@ static bool sd_liveness_brief_part6(const struct json_value *liveness)
     return ok;
 }
 
-static bool sd_liveness_full_part1(const struct json_value *liveness_full)
+static bool sd_liveness_full_embedded_sections(const struct json_value *liveness_full)
 {
     bool ok = true;
     const struct json_value *full_availability =
@@ -1545,7 +1546,7 @@ static bool sd_liveness_full_part1(const struct json_value *liveness_full)
     return ok;
 }
 
-static bool sd_liveness_probed_part1(const struct json_value *probed_liveness)
+static bool sd_liveness_probed_summary(const struct json_value *probed_liveness)
 {
     bool ok = true;
     const struct json_value *probed_summary =
@@ -1574,7 +1575,7 @@ static bool sd_liveness_probed_part1(const struct json_value *probed_liveness)
     return ok;
 }
 
-static bool sd_liveness_probed_part2(const struct json_value *probed_liveness)
+static bool sd_liveness_probed_availability_and_next_action(const struct json_value *probed_liveness)
 {
     bool ok = true;
     const struct json_value *probed_summary =
@@ -1602,13 +1603,13 @@ static bool sd_ops_fields_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&ops);
     agent_runtime_availability_reset();
     bool ok = rpc_table_execute(&ctx->tbl, "agentops", &ctx->params, &ops);
-    ok = sd_ops_fields_part1(&ops) && ok;
-    ok = sd_ops_fields_part2(&ops) && ok;
-    ok = sd_ops_fields_part3(&ops) && ok;
-    ok = sd_ops_fields_part4(&ops) && ok;
-    ok = sd_ops_fields_part5(&ops) && ok;
-    ok = sd_ops_fields_part6(&ops) && ok;
-    ok = sd_ops_fields_part7(&ops) && ok;
+    ok = sd_ops_fields_contract(&ops) && ok;
+    ok = sd_ops_fields_direct_commands_core(&ops) && ok;
+    ok = sd_ops_fields_direct_commands_native(&ops) && ok;
+    ok = sd_ops_fields_direct_commands_proof_bundle(&ops) && ok;
+    ok = sd_ops_fields_gaps_and_workflow(&ops) && ok;
+    ok = sd_ops_fields_top_next_work(&ops) && ok;
+    ok = sd_ops_fields_architecture_review(&ops) && ok;
     json_free(&ops);
     return ok;
 }
@@ -1631,9 +1632,9 @@ static bool sd_diagnose_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&diagnose);
     bool ok = rpc_table_execute(&ctx->tbl, "agentdiagnose",
                                 &diagnose_full_params, &diagnose);
-    ok = sd_diagnose_part1(&diagnose) && ok;
-    ok = sd_diagnose_part2(&diagnose) && ok;
-    ok = sd_diagnose_part3(&diagnose) && ok;
+    ok = sd_diagnose_contract(&diagnose) && ok;
+    ok = sd_diagnose_peer_incidents_and_timeline(&diagnose) && ok;
+    ok = sd_diagnose_first_call_budget(&diagnose) && ok;
     json_free(&diagnose);
     json_free(&diagnose_full_params);
     return ok;
@@ -1650,7 +1651,7 @@ static bool sd_inferred_lane_scenario(struct sd_agent_ops_ctx *ctx)
                                18232, 8033, 8443, 18034);
     bool ok = rpc_table_execute(&ctx->tbl, "agentops", &ctx->params,
                                 &inferred_ops);
-    ok = sd_inferred_part1(&inferred_ops) && ok;
+    ok = sd_inferred_lane_topology(&inferred_ops) && ok;
     json_free(&inferred_ops);
     rpc_agent_set_boot_context("unknown", "full", "", 0, 0, 0, 0);
     agent_runtime_availability_reset();
@@ -1684,8 +1685,8 @@ static bool sd_timeline_basic_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&timeline);
     bool ok = rpc_table_execute(&ctx->tbl, "timeline", &timeline_params,
                                 &timeline);
-    ok = sd_timeline_basic_part1(&timeline) && ok;
-    ok = sd_timeline_basic_part2(&timeline) && ok;
+    ok = sd_timeline_basic_contract(&timeline) && ok;
+    ok = sd_timeline_basic_summary(&timeline) && ok;
     json_free(&timeline);
     json_free(&timeline_params);
     return ok;
@@ -1722,10 +1723,10 @@ static bool sd_timeline_filtered_scenario(struct sd_agent_ops_ctx *ctx)
     bool ok = rpc_table_execute(&ctx->tbl, "timeline",
                                 &timeline_filter_params,
                                 &timeline_filtered);
-    ok = sd_timeline_filtered_part1(&timeline_filtered) && ok;
-    ok = sd_timeline_filtered_part2(&timeline_filtered) && ok;
-    ok = sd_timeline_filtered_part2b(&timeline_filtered) && ok;
-    ok = sd_timeline_filtered_part3(&timeline_filtered) && ok;
+    ok = sd_timeline_filtered_contract(&timeline_filtered) && ok;
+    ok = sd_timeline_filtered_filters_reducer(&timeline_filtered) && ok;
+    ok = sd_timeline_filtered_filters_deploy_lane(&timeline_filtered) && ok;
+    ok = sd_timeline_filtered_first_event(&timeline_filtered) && ok;
     json_free(&timeline_filtered);
     json_free(&timeline_filter_params);
     return ok;
@@ -1750,8 +1751,8 @@ static bool sd_timeline_cli_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&timeline_cli);
     bool ok = rpc_table_execute(&ctx->tbl, "timeline",
                                 &timeline_cli_params, &timeline_cli);
-    ok = sd_timeline_cli_part1(&timeline_cli) && ok;
-    ok = sd_timeline_cli_part1b(&timeline_cli) && ok;
+    ok = sd_timeline_cli_contract(&timeline_cli) && ok;
+    ok = sd_timeline_cli_first_event(&timeline_cli) && ok;
     json_free(&timeline_cli);
     json_free(&timeline_cli_params);
     return ok;
@@ -1765,9 +1766,9 @@ static bool sd_statecatalog_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&catalog);
     bool ok = rpc_table_execute(&ctx->tbl, "statecatalog", &ctx->params,
                                 &catalog);
-    ok = sd_statecatalog_part1(&catalog) && ok;
-    ok = sd_statecatalog_part2(&catalog) && ok;
-    ok = sd_statecatalog_part3(&catalog) && ok;
+    ok = sd_statecatalog_contract_block_index(&catalog) && ok;
+    ok = sd_statecatalog_block_index_detail(&catalog) && ok;
+    ok = sd_statecatalog_reducer_frontier(&catalog) && ok;
     json_free(&catalog);
     return ok;
 }
@@ -1780,12 +1781,12 @@ static bool sd_lanes_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&lanes);
     bool ok = rpc_table_execute(&ctx->tbl, "agentlanes", &ctx->params,
                                 &lanes);
-    ok = sd_lanes_part1(&lanes) && ok;
-    ok = sd_lanes_part2(&lanes) && ok;
-    ok = sd_lanes_part3(&lanes) && ok;
-    ok = sd_lanes_part4(&lanes) && ok;
-    ok = sd_lanes_part5(&lanes) && ok;
-    ok = sd_lanes_part6(&lanes) && ok;
+    ok = sd_lanes_contract_status_command(&lanes) && ok;
+    ok = sd_lanes_commands(&lanes) && ok;
+    ok = sd_lanes_current_runtime_services(&lanes) && ok;
+    ok = sd_lanes_fs_and_lane_list(&lanes) && ok;
+    ok = sd_lanes_canonical_and_dev(&lanes) && ok;
+    ok = sd_lanes_dev_deployment_safety(&lanes) && ok;
     return ok;
 }
 
@@ -1799,19 +1800,19 @@ static bool sd_build_scenario(struct sd_agent_ops_ctx *ctx,
     json_init(&build);
     bool ok = rpc_table_execute(&ctx->tbl, "agentbuild", &ctx->params,
                                 &build);
-    ok = sd_build_part1(&build) && ok;
-    ok = sd_build_part2(&build) && ok;
-    ok = sd_build_part3(&build) && ok;
-    ok = sd_build_part4(&build) && ok;
-    ok = sd_build_part5(&build) && ok;
-    ok = sd_build_part6(&build) && ok;
-    ok = sd_build_part7(&build) && ok;
-    ok = sd_build_part8(&build) && ok;
-    ok = sd_build_part9(&build, fx->root) && ok;
-    ok = sd_build_part10(&build) && ok;
-    ok = sd_build_part11(&build) && ok;
-    ok = sd_build_part12(&build) && ok;
-    ok = sd_build_part13(&build) && ok;
+    ok = sd_build_contract_and_loop_gates(&build) && ok;
+    ok = sd_build_loop_compile_rules(&build) && ok;
+    ok = sd_build_dev_binary_and_indexing(&build) && ok;
+    ok = sd_build_indexing_freshness(&build) && ok;
+    ok = sd_build_dev_loop_benchmark(&build) && ok;
+    ok = sd_build_dev_binary_and_cache(&build) && ok;
+    ok = sd_build_immutable_history_canaries(&build) && ok;
+    ok = sd_build_command_catalog(&build) && ok;
+    ok = sd_build_reproducible_and_quality_status(&build, fx->root) && ok;
+    ok = sd_build_quality_status_lanes_summary(&build) && ok;
+    ok = sd_build_quality_status_fuzz_lane(&build) && ok;
+    ok = sd_build_quality_status_fuzz_stale(&build) && ok;
+    ok = sd_build_quality_status_coverage_no_verdict(&build) && ok;
     json_free(&build);
     return ok;
 }
@@ -1835,9 +1836,9 @@ static bool sd_build_deferred_scenario(struct sd_agent_ops_ctx *ctx,
         json_get(&deferred_build, "indexing");
     const struct json_value *deferred_benchmark =
         json_get(&deferred_build, "dev_loop_benchmark");
-    bool ok = sd_build_deferred_part1(moved_outside_repo, deferred_read,
+    bool ok = sd_build_deferred_index_unavailable(moved_outside_repo, deferred_read,
                                       restored_cwd, deferred_index);
-    ok = sd_build_deferred_part2(deferred_benchmark) && ok;
+    ok = sd_build_deferred_benchmark_unavailable(deferred_benchmark) && ok;
     json_free(&deferred_build);
     return ok;
 }
@@ -1877,7 +1878,7 @@ static bool sd_devstatus_scenario(struct sd_agent_ops_ctx *ctx)
                old_dev_status_cmd_buf, 1);
     else
         unsetenv("ZCL_AGENT_DEV_STATUS_CMD");
-    ok = sd_devstatus_part1(&dev_status) && ok;
+    ok = sd_devstatus_contract_and_worker_lane(&dev_status) && ok;
     json_free(&dev_status);
     return ok;
 }
@@ -1890,12 +1891,12 @@ static bool sd_liveness_brief_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&liveness);
     bool ok = rpc_table_execute(&ctx->tbl, "agentliveness", &ctx->params,
                                 &liveness);
-    ok = sd_liveness_brief_part1(&liveness) && ok;
-    ok = sd_liveness_brief_part2(&liveness) && ok;
-    ok = sd_liveness_brief_part3(&liveness) && ok;
-    ok = sd_liveness_brief_part4(&liveness) && ok;
-    ok = sd_liveness_brief_part5(&liveness) && ok;
-    ok = sd_liveness_brief_part6(&liveness) && ok;
+    ok = sd_liveness_brief_contract(&liveness) && ok;
+    ok = sd_liveness_brief_first_call(&liveness) && ok;
+    ok = sd_liveness_brief_summary_and_runtime_services(&liveness) && ok;
+    ok = sd_liveness_brief_runtime_availability_detail(&liveness) && ok;
+    ok = sd_liveness_brief_quality_status(&liveness) && ok;
+    ok = sd_liveness_brief_supervisor_state(&liveness) && ok;
     json_free(&liveness);
     return ok;
 }
@@ -1914,7 +1915,7 @@ static bool sd_liveness_full_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&liveness_full);
     bool ok = rpc_table_execute(&ctx->tbl, "agentliveness",
                                 &liveness_full_params, &liveness_full);
-    ok = sd_liveness_full_part1(&liveness_full) && ok;
+    ok = sd_liveness_full_embedded_sections(&liveness_full) && ok;
     json_free(&liveness_full);
     json_free(&liveness_full_params);
     return ok;
@@ -1932,8 +1933,8 @@ static bool sd_liveness_probed_scenario(struct sd_agent_ops_ctx *ctx)
     json_init(&probed_liveness);
     bool ok = rpc_table_execute(&ctx->tbl, "agentliveness", &ctx->params,
                                 &probed_liveness);
-    ok = sd_liveness_probed_part1(&probed_liveness) && ok;
-    ok = sd_liveness_probed_part2(&probed_liveness) && ok;
+    ok = sd_liveness_probed_summary(&probed_liveness) && ok;
+    ok = sd_liveness_probed_availability_and_next_action(&probed_liveness) && ok;
     json_free(&probed_liveness);
     agent_runtime_availability_reset();
     return ok;

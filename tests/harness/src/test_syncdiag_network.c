@@ -8,11 +8,11 @@
  * its fixture, calls the RPC, asserts on the result, and frees what it
  * owns; syncdiag_cases_network() runs all ten and prints one OK/FAIL
  * line per scenario. Scenarios whose assertion chain would exceed the
- * complexity cap are further split into named `_partN` assert helpers
- * that take the parsed RPC result (and, for bootstrapstatus and the
- * reachability scenario, the shared fixture context) as parameters and
- * derive whatever nested fields they need locally — no helper adds
- * file-scope mutable state.
+ * complexity cap are further split into named assert helpers, one per
+ * section of the RPC result, that take the parsed RPC result (and, for
+ * bootstrapstatus and the reachability scenario, the shared fixture
+ * context) as parameters and derive whatever nested fields they need
+ * locally — no helper adds file-scope mutable state.
  */
 
 #include "test/syncdiag_rpc_fixture.h"
@@ -24,7 +24,7 @@
  * stranger's node can name a build it is not itself running. */
 #define SYNCDIAG_PEER_SRC_PREFIX "a1b2c3d4e5f6"
 
-static bool sd_machine_identity_part1(const struct json_value *result)
+static bool sd_machine_identity_contract_and_sections(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *platform = json_get(result, "platform");
@@ -45,7 +45,7 @@ static bool sd_machine_identity_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_machine_identity_part2(const struct json_value *result)
+static bool sd_machine_identity_pairing_posture(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *pairing = json_get(result, "pairing");
@@ -65,7 +65,7 @@ static bool sd_machine_identity_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_machine_identity_part3(const struct json_value *result)
+static bool sd_machine_identity_no_secret_leak(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *blockers = json_get(result, "blockers");
@@ -91,14 +91,14 @@ static bool sd_machine_identity_scenario(void)
 {
     struct json_value result = {0};
     bool ok = machine_identity_dump_state_json(&result, NULL);
-    ok = sd_machine_identity_part1(&result) && ok;
-    ok = sd_machine_identity_part2(&result) && ok;
-    ok = sd_machine_identity_part3(&result) && ok;
+    ok = sd_machine_identity_contract_and_sections(&result) && ok;
+    ok = sd_machine_identity_pairing_posture(&result) && ok;
+    ok = sd_machine_identity_no_secret_leak(&result) && ok;
     json_free(&result);
     return ok;
 }
 
-static bool sd_onionstatus_ready_part1(const struct json_value *result)
+static bool sd_onionstatus_ready_contract(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *state = json_get(result, "bootstrap_state");
@@ -122,7 +122,7 @@ static bool sd_onionstatus_ready_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_onionstatus_ready_part1b(const struct json_value *result)
+static bool sd_onionstatus_ready_port_mapping(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *mapping = json_get(result,
@@ -139,7 +139,7 @@ static bool sd_onionstatus_ready_part1b(const struct json_value *result)
     return ok;
 }
 
-static bool sd_onionstatus_ready_part2(const struct json_value *result)
+static bool sd_onionstatus_ready_outbound_stream_counts(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *streams = json_get(result,
@@ -163,7 +163,7 @@ static bool sd_onionstatus_ready_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_onionstatus_ready_part3(const struct json_value *result)
+static bool sd_onionstatus_ready_handshake_contract(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *handshake = json_get(result,
@@ -183,7 +183,7 @@ static bool sd_onionstatus_ready_part3(const struct json_value *result)
     return ok;
 }
 
-static bool sd_onionstatus_ready_part3b(const struct json_value *result)
+static bool sd_onionstatus_ready_last_outbound_dial(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *last_dial = json_get(result,
@@ -203,7 +203,7 @@ static bool sd_onionstatus_ready_part3b(const struct json_value *result)
     return ok;
 }
 
-static bool sd_onionstatus_ready_part4(const struct json_value *result)
+static bool sd_onionstatus_ready_handshake_counts(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *handshake = json_get(result,
@@ -308,12 +308,12 @@ static bool sd_onionstatus_ready_scenario(void)
     json_set_array(&params);
     json_init(&result);
     bool ok = rpc_table_execute(&tbl, "onionstatus", &params, &result);
-    ok = sd_onionstatus_ready_part1(&result) && ok;
-    ok = sd_onionstatus_ready_part1b(&result) && ok;
-    ok = sd_onionstatus_ready_part2(&result) && ok;
-    ok = sd_onionstatus_ready_part3(&result) && ok;
-    ok = sd_onionstatus_ready_part3b(&result) && ok;
-    ok = sd_onionstatus_ready_part4(&result) && ok;
+    ok = sd_onionstatus_ready_contract(&result) && ok;
+    ok = sd_onionstatus_ready_port_mapping(&result) && ok;
+    ok = sd_onionstatus_ready_outbound_stream_counts(&result) && ok;
+    ok = sd_onionstatus_ready_handshake_contract(&result) && ok;
+    ok = sd_onionstatus_ready_last_outbound_dial(&result) && ok;
+    ok = sd_onionstatus_ready_handshake_counts(&result) && ok;
     ok = sd_onionstatus_ready_incomplete_stage_walk() && ok;
     ok = sd_onionstatus_ready_hostname_check(&result, ok);
 
@@ -356,7 +356,7 @@ static bool sd_onionstatus_unavailable_scenario(void)
     return ok;
 }
 
-static bool sd_getnetworkinfo_startup_part1(const struct json_value *result)
+static bool sd_getnetworkinfo_startup_zero_connections(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *inbound =
@@ -378,7 +378,7 @@ static bool sd_getnetworkinfo_startup_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_getnetworkinfo_startup_part2(const struct json_value *result)
+static bool sd_getnetworkinfo_startup_listen_and_lifecycle(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *listen_count =
@@ -400,7 +400,7 @@ static bool sd_getnetworkinfo_startup_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_getnetworkinfo_startup_part3(const struct json_value *result)
+static bool sd_getnetworkinfo_startup_lifecycle_handshake_counters(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *life =
@@ -414,7 +414,7 @@ static bool sd_getnetworkinfo_startup_part3(const struct json_value *result)
     return ok;
 }
 
-static bool sd_getnetworkinfo_startup_part4(const struct json_value *result)
+static bool sd_getnetworkinfo_startup_lifecycle_outcome_counters(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *life =
@@ -428,7 +428,7 @@ static bool sd_getnetworkinfo_startup_part4(const struct json_value *result)
     return ok;
 }
 
-static bool sd_getnetworkinfo_startup_part5(const struct json_value *result)
+static bool sd_getnetworkinfo_startup_lifecycle_sources(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *life =
@@ -450,7 +450,7 @@ static bool sd_getnetworkinfo_startup_part5(const struct json_value *result)
     return ok;
 }
 
-static bool sd_getnetworkinfo_startup_part6(const struct json_value *result)
+static bool sd_getnetworkinfo_startup_lifecycle_manual_source(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *life =
@@ -479,19 +479,19 @@ static bool sd_getnetworkinfo_startup_scenario(void)
     json_init(&result);
     bool ok = rpc_table_execute(&tbl, "getnetworkinfo",
                                 &params, &result);
-    ok = sd_getnetworkinfo_startup_part1(&result) && ok;
-    ok = sd_getnetworkinfo_startup_part2(&result) && ok;
-    ok = sd_getnetworkinfo_startup_part3(&result) && ok;
-    ok = sd_getnetworkinfo_startup_part4(&result) && ok;
-    ok = sd_getnetworkinfo_startup_part5(&result) && ok;
-    ok = sd_getnetworkinfo_startup_part6(&result) && ok;
+    ok = sd_getnetworkinfo_startup_zero_connections(&result) && ok;
+    ok = sd_getnetworkinfo_startup_listen_and_lifecycle(&result) && ok;
+    ok = sd_getnetworkinfo_startup_lifecycle_handshake_counters(&result) && ok;
+    ok = sd_getnetworkinfo_startup_lifecycle_outcome_counters(&result) && ok;
+    ok = sd_getnetworkinfo_startup_lifecycle_sources(&result) && ok;
+    ok = sd_getnetworkinfo_startup_lifecycle_manual_source(&result) && ok;
 
     json_free(&params);
     json_free(&result);
     return ok;
 }
 
-static bool sd_peerincidents_duplicate_host_part1(const struct json_value *result)
+static bool sd_peerincidents_duplicate_host_contract(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && result->type == JSON_OBJ;
@@ -524,7 +524,7 @@ static bool sd_peerincidents_duplicate_host_part1(const struct json_value *resul
     return ok;
 }
 
-static bool sd_peerincidents_duplicate_host_part2(const struct json_value *result)
+static bool sd_peerincidents_duplicate_host_primary_issue(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *primary =
@@ -557,7 +557,7 @@ static bool sd_peerincidents_duplicate_host_part2(const struct json_value *resul
     return ok;
 }
 
-static bool sd_peerincidents_duplicate_host_part3(const struct json_value *result)
+static bool sd_peerincidents_duplicate_host_groups_and_top_hosts(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *hosts =
@@ -627,9 +627,9 @@ static bool sd_peerincidents_duplicate_host_scenario(void)
     json_init(&result);
     bool ok = rpc_table_execute(&tbl, "peerincidents",
                                 &params, &result);
-    ok = sd_peerincidents_duplicate_host_part1(&result) && ok;
-    ok = sd_peerincidents_duplicate_host_part2(&result) && ok;
-    ok = sd_peerincidents_duplicate_host_part3(&result) && ok;
+    ok = sd_peerincidents_duplicate_host_contract(&result) && ok;
+    ok = sd_peerincidents_duplicate_host_primary_issue(&result) && ok;
+    ok = sd_peerincidents_duplicate_host_groups_and_top_hosts(&result) && ok;
 
     json_free(&params);
     json_free(&result);
@@ -878,7 +878,7 @@ static bool sd_bootstrap_setup_peers(struct sd_bootstrap_ctx *ctx, bool ok)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part1(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_contract(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && result->type == JSON_OBJ;
@@ -907,7 +907,7 @@ static bool sd_bootstrapstatus_ready_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part2(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_p2p_and_peers(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *p2p = json_get(result, "p2p");
@@ -932,7 +932,7 @@ static bool sd_bootstrapstatus_ready_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part3(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_zclassic23_peer_quorum(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *peers = json_get(result, "peers");
@@ -963,7 +963,7 @@ static bool sd_bootstrapstatus_ready_part3(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part4(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_verified_peer_quorum(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *peers = json_get(result, "peers");
@@ -992,7 +992,7 @@ static bool sd_bootstrapstatus_ready_part4(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part5(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_first_verified_peer(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *peers = json_get(result, "peers");
@@ -1013,7 +1013,7 @@ static bool sd_bootstrapstatus_ready_part5(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part5b(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_addrman(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *addrman = json_get(result, "addrman");
@@ -1028,7 +1028,7 @@ static bool sd_bootstrapstatus_ready_part5b(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part6(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_zclassic23_bootstrap(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *zcl23 =
@@ -1058,7 +1058,7 @@ static bool sd_bootstrapstatus_ready_part6(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part7(const struct json_value *result,
+static bool sd_bootstrapstatus_ready_snapshot_loader(const struct json_value *result,
                                            const char *snap_path)
 {
     bool ok = true;
@@ -1086,7 +1086,7 @@ static bool sd_bootstrapstatus_ready_part7(const struct json_value *result,
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part8(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_snapshot_authority_and_legacy(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *loader =
@@ -1116,7 +1116,7 @@ static bool sd_bootstrapstatus_ready_part8(const struct json_value *result)
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_part9(const struct json_value *result)
+static bool sd_bootstrapstatus_ready_beta6_snapshot(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *beta6 =
@@ -1141,7 +1141,7 @@ static bool sd_bootstrapstatus_ready_part9(const struct json_value *result)
 }
 
 
-static bool sd_bootstrapstatus_review_required_part1(const struct json_value *result)
+static bool sd_bootstrapstatus_review_required_contract(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && !json_get_bool(json_get(result, "ok"));
@@ -1164,7 +1164,7 @@ static bool sd_bootstrapstatus_review_required_part1(const struct json_value *re
     return ok;
 }
 
-static bool sd_bootstrapstatus_review_required_part2(const struct json_value *result)
+static bool sd_bootstrapstatus_review_required_bootstrap_sources(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *zcl23 =
@@ -1178,7 +1178,7 @@ static bool sd_bootstrapstatus_review_required_part2(const struct json_value *re
     return ok;
 }
 
-static bool sd_bootstrapstatus_snapshot_missing_index_part1(const struct json_value *result)
+static bool sd_bootstrapstatus_snapshot_missing_index_loader(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *loader = json_get(result, "snapshot_loader");
@@ -1216,16 +1216,16 @@ static bool sd_bootstrapstatus_ready_phase1(struct sd_bootstrap_ctx *ctx)
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
                                  &ctx->params, &ctx->result);
-    ok = sd_bootstrapstatus_ready_part1(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part2(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part3(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part4(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part5(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part5b(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part6(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part7(&ctx->result, ctx->snap_path) && ok;
-    ok = sd_bootstrapstatus_ready_part8(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_part9(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_contract(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_p2p_and_peers(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_zclassic23_peer_quorum(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_verified_peer_quorum(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_first_verified_peer(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_addrman(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_zclassic23_bootstrap(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_snapshot_loader(&ctx->result, ctx->snap_path) && ok;
+    ok = sd_bootstrapstatus_ready_snapshot_authority_and_legacy(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_beta6_snapshot(&ctx->result) && ok;
     return ok;
 }
 
@@ -1239,8 +1239,8 @@ static bool sd_bootstrapstatus_ready_phase2(struct sd_bootstrap_ctx *ctx,
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
                                  &ctx->params, &ctx->result);
-    ok = sd_bootstrapstatus_review_required_part1(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_review_required_part2(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_review_required_contract(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_review_required_bootstrap_sources(&ctx->result) && ok;
     agent_security_posture_test_override_review_required(0);
     return ok;
 }
@@ -1254,7 +1254,7 @@ static bool sd_bootstrapstatus_ready_phase3(struct sd_bootstrap_ctx *ctx,
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
                                  &ctx->params, &ctx->result);
-    ok = sd_bootstrapstatus_snapshot_missing_index_part1(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_snapshot_missing_index_loader(&ctx->result) && ok;
     return ok;
 }
 
@@ -1507,7 +1507,7 @@ static bool sd_reachability_setup(struct sd_reach_ctx *ctx)
 
 /* case: getnetworkinfo separates inbound reachability from outbound
  * handshakes — initial state has one handshaked peer each way. */
-static bool sd_reachability_initial_state_part1(struct sd_reach_ctx *ctx,
+static bool sd_reachability_initial_state_handshake_counts(struct sd_reach_ctx *ctx,
                                                 bool ok)
 {
     ok = ok && rpc_table_execute(&ctx->tbl, "getnetworkinfo",
@@ -1538,7 +1538,7 @@ static bool sd_reachability_initial_state_part1(struct sd_reach_ctx *ctx,
 }
 
 /* case: the one addnode target already carries a TCP failure. */
-static bool sd_reachability_initial_state_part2(struct sd_reach_ctx *ctx,
+static bool sd_reachability_initial_state_addnode_target(struct sd_reach_ctx *ctx,
                                                 bool ok)
 {
     const struct json_value *addnodes =
@@ -1554,7 +1554,7 @@ static bool sd_reachability_initial_state_part2(struct sd_reach_ctx *ctx,
     return ok;
 }
 
-static bool sd_reachability_initial_state_part3(struct sd_reach_ctx *ctx,
+static bool sd_reachability_initial_state_addnode_backoff(struct sd_reach_ctx *ctx,
                                                 bool ok)
 {
     const struct json_value *addnodes =
@@ -1761,9 +1761,9 @@ static bool sd_getnetworkinfo_reachability_scenario(void)
     json_set_array(&ctx.params);
     json_init(&ctx.result);
 
-    ok = ok && sd_reachability_initial_state_part1(&ctx, ok);
-    ok = ok && sd_reachability_initial_state_part2(&ctx, ok);
-    ok = ok && sd_reachability_initial_state_part3(&ctx, ok);
+    ok = ok && sd_reachability_initial_state_handshake_counts(&ctx, ok);
+    ok = ok && sd_reachability_initial_state_addnode_target(&ctx, ok);
+    ok = ok && sd_reachability_initial_state_addnode_backoff(&ctx, ok);
     ok = ok && sd_reachability_addnode_remove(&ctx, ok);
     ok = ok && sd_reachability_addnode_errors(&ctx, ok);
     ok = ok && sd_reachability_peerinfo_call(&ctx, ok);

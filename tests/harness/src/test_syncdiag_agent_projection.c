@@ -8,9 +8,10 @@
  * builds its fixture, calls the RPC, asserts on the result, and frees
  * what it owns; syncdiag_cases_agent_projection() runs all six through
  * a shared sd_report() helper. Scenarios whose assertion chain would
- * exceed the complexity cap are further split into named `_partN`
- * assert helpers that take the parsed RPC result as a parameter and
- * derive whatever nested fields they need locally; the largest
+ * exceed the complexity cap are further split into named assert
+ * helpers, one per section or sub-case of the RPC result, that take
+ * the parsed RPC result as a parameter and derive whatever nested
+ * fields they need locally; the largest
  * scenario (the one-block-lookahead narrative, which runs nine RPC
  * calls against one mutating fixture) is split into named phase
  * functions that thread a running `ok` and a shared context struct —
@@ -19,7 +20,7 @@
 
 #include "test/syncdiag_rpc_fixture.h"
 
-static bool sd_agent_budget_bound_part1(const struct json_value *result,
+static bool sd_agent_budget_bound_partial_result(const struct json_value *result,
                                         bool executed)
 {
     const struct json_value *first_call =
@@ -41,7 +42,7 @@ static bool sd_agent_budget_bound_part1(const struct json_value *result,
     return ok;
 }
 
-static bool sd_agent_budget_bound_part2(const struct json_value *result,
+static bool sd_agent_budget_bound_deferred_and_always_on(const struct json_value *result,
                                         bool ok)
 {
     ok = ok && json_get(result, "resources") == NULL;
@@ -73,8 +74,8 @@ static bool sd_agent_budget_bound_scenario(void)
     json_init(&result);
 
     bool executed = rpc_table_execute(&tbl, "agent", &params, &result);
-    bool ok = sd_agent_budget_bound_part1(&result, executed);
-    ok = sd_agent_budget_bound_part2(&result, ok);
+    bool ok = sd_agent_budget_bound_partial_result(&result, executed);
+    ok = sd_agent_budget_bound_deferred_and_always_on(&result, ok);
 
     unsetenv("ZCL_AGENT_TEST_ELAPSED_OFFSET_MS");
     json_free(&params);
@@ -158,7 +159,7 @@ static bool sd_agent_stale_mirror_latch_scenario(void)
     return ok;
 }
 
-static bool sd_agent_stalled_catchup_part1(const struct json_value *result)
+static bool sd_agent_stalled_catchup_status_and_download(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *download = json_get(result, "download");
@@ -181,7 +182,7 @@ static bool sd_agent_stalled_catchup_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_agent_stalled_catchup_part2(const struct json_value *result)
+static bool sd_agent_stalled_catchup_download_counters(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *download = json_get(result, "download");
@@ -202,7 +203,7 @@ static bool sd_agent_stalled_catchup_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_agent_stalled_catchup_part3(const struct json_value *result)
+static bool sd_agent_stalled_catchup_in_flight_and_health(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *download = json_get(result, "download");
@@ -314,9 +315,9 @@ static bool sd_agent_stalled_catchup_call(
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "agent", &ctx->params,
                                  &ctx->result);
-    ok = sd_agent_stalled_catchup_part1(&ctx->result) && ok;
-    ok = sd_agent_stalled_catchup_part2(&ctx->result) && ok;
-    ok = sd_agent_stalled_catchup_part3(&ctx->result) && ok;
+    ok = sd_agent_stalled_catchup_status_and_download(&ctx->result) && ok;
+    ok = sd_agent_stalled_catchup_download_counters(&ctx->result) && ok;
+    ok = sd_agent_stalled_catchup_in_flight_and_health(&ctx->result) && ok;
     return ok;
 }
 
@@ -344,7 +345,7 @@ static bool sd_agent_stalled_catchup_scenario(void)
     return ok;
 }
 
-static bool sd_agent_dispatch_idle_part1(const struct json_value *result)
+static bool sd_agent_dispatch_idle_status_and_download(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *download = json_get(result, "download");
@@ -366,7 +367,7 @@ static bool sd_agent_dispatch_idle_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_agent_dispatch_idle_part2(const struct json_value *result)
+static bool sd_agent_dispatch_idle_counters_and_health(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *download = json_get(result, "download");
@@ -479,8 +480,8 @@ static bool sd_agent_dispatch_idle_call(
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "agent", &ctx->params,
                                  &ctx->result);
-    ok = sd_agent_dispatch_idle_part1(&ctx->result) && ok;
-    ok = sd_agent_dispatch_idle_part2(&ctx->result) && ok;
+    ok = sd_agent_dispatch_idle_status_and_download(&ctx->result) && ok;
+    ok = sd_agent_dispatch_idle_counters_and_health(&ctx->result) && ok;
     return ok;
 }
 
@@ -508,7 +509,7 @@ static bool sd_agent_dispatch_idle_scenario(void)
     return ok;
 }
 
-static bool sd_agent_cache_miss_phase1_part1(const struct json_value *result,
+static bool sd_agent_cache_miss_phase1_status(const struct json_value *result,
                                              int served_height)
 {
     bool ok = true;
@@ -535,7 +536,7 @@ static bool sd_agent_cache_miss_phase1_part1(const struct json_value *result,
     return ok;
 }
 
-static bool sd_agent_cache_miss_phase1_part2(const struct json_value *result)
+static bool sd_agent_cache_miss_phase1_readiness(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *readiness = json_get(result, "readiness");
@@ -566,7 +567,7 @@ static bool sd_agent_cache_miss_phase1_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_agent_cache_miss_phase1_part3(const struct json_value *result,
+static bool sd_agent_cache_miss_phase1_indexer(const struct json_value *result,
                                              int served_height)
 {
     bool ok = true;
@@ -595,7 +596,7 @@ static bool sd_agent_cache_miss_phase1_part3(const struct json_value *result,
     return ok;
 }
 
-static bool sd_agent_cache_miss_phase1_part4(const struct json_value *result)
+static bool sd_agent_cache_miss_phase1_health(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *indexer = json_get(result, "indexer");
@@ -610,7 +611,7 @@ static bool sd_agent_cache_miss_phase1_part4(const struct json_value *result)
 }
 
 
-static bool sd_agent_cache_miss_phase2_part1(const struct json_value *result,
+static bool sd_agent_cache_miss_phase2_status_and_indexer(const struct json_value *result,
                                              int served_height)
 {
     bool ok = true;
@@ -638,7 +639,7 @@ static bool sd_agent_cache_miss_phase2_part1(const struct json_value *result,
     return ok;
 }
 
-static bool sd_agent_cache_miss_phase2_part2(const struct json_value *result)
+static bool sd_agent_cache_miss_phase2_health(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *health = json_get(result, "health");
@@ -740,12 +741,12 @@ static bool sd_agent_cache_miss_phase1(struct sd_agent_cache_miss_ctx *ctx,
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "agent", &ctx->params,
                                  &ctx->result);
-    ok = sd_agent_cache_miss_phase1_part1(&ctx->result, ctx->served_height)
+    ok = sd_agent_cache_miss_phase1_status(&ctx->result, ctx->served_height)
         && ok;
-    ok = sd_agent_cache_miss_phase1_part2(&ctx->result) && ok;
-    ok = sd_agent_cache_miss_phase1_part3(&ctx->result, ctx->served_height)
+    ok = sd_agent_cache_miss_phase1_readiness(&ctx->result) && ok;
+    ok = sd_agent_cache_miss_phase1_indexer(&ctx->result, ctx->served_height)
         && ok;
-    ok = sd_agent_cache_miss_phase1_part4(&ctx->result) && ok;
+    ok = sd_agent_cache_miss_phase1_health(&ctx->result) && ok;
     return ok;
 }
 
@@ -767,9 +768,9 @@ static bool sd_agent_cache_miss_phase2(struct sd_agent_cache_miss_ctx *ctx,
 
     ok = ok && rpc_table_execute(&ctx->tbl, "agent", &ctx->params,
                                  &ctx->result);
-    ok = sd_agent_cache_miss_phase2_part1(&ctx->result, ctx->served_height)
+    ok = sd_agent_cache_miss_phase2_status_and_indexer(&ctx->result, ctx->served_height)
         && ok;
-    ok = sd_agent_cache_miss_phase2_part2(&ctx->result) && ok;
+    ok = sd_agent_cache_miss_phase2_health(&ctx->result) && ok;
     return ok;
 }
 
@@ -905,7 +906,7 @@ static bool sd_diag_lookahead_setup(struct sd_diag_lookahead_ctx *ctx)
     return ok;
 }
 
-static bool sd_diag_phaseA_part1(const struct json_value *result)
+static bool sd_diag_phaseA_contract(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && result->type == JSON_OBJ;
@@ -936,7 +937,7 @@ static bool sd_diag_phaseA_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseA_part2(const struct json_value *result)
+static bool sd_diag_phaseA_peer_primary_host(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *default_primary_host =
@@ -970,7 +971,7 @@ static bool sd_diag_phaseA_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseA_part3(const struct json_value *result)
+static bool sd_diag_phaseA_peer_readiness_and_mirror(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && strcmp(json_get_str(json_get(result,
@@ -1006,7 +1007,7 @@ static bool sd_diag_phaseA_part3(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseA_part4(const struct json_value *result)
+static bool sd_diag_phaseA_findings_and_brief_omissions(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *findings = json_get(result, "findings");
@@ -1030,7 +1031,7 @@ static bool sd_diag_phaseA_part4(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseA_part5(const struct json_value *result)
+static bool sd_diag_phaseA_first_call_and_omitted_sections(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *default_first_call =
@@ -1056,11 +1057,11 @@ static bool sd_diag_lookahead_phaseA(struct sd_diag_lookahead_ctx *ctx,
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "agentdiagnose", &ctx->params,
                                  &ctx->result);
-    ok = sd_diag_phaseA_part1(&ctx->result) && ok;
-    ok = sd_diag_phaseA_part2(&ctx->result) && ok;
-    ok = sd_diag_phaseA_part3(&ctx->result) && ok;
-    ok = sd_diag_phaseA_part4(&ctx->result) && ok;
-    ok = sd_diag_phaseA_part5(&ctx->result) && ok;
+    ok = sd_diag_phaseA_contract(&ctx->result) && ok;
+    ok = sd_diag_phaseA_peer_primary_host(&ctx->result) && ok;
+    ok = sd_diag_phaseA_peer_readiness_and_mirror(&ctx->result) && ok;
+    ok = sd_diag_phaseA_findings_and_brief_omissions(&ctx->result) && ok;
+    ok = sd_diag_phaseA_first_call_and_omitted_sections(&ctx->result) && ok;
     json_free(&ctx->result);
     return ok;
 }
@@ -1150,7 +1151,7 @@ static bool sd_diag_lookahead_phaseC(struct sd_diag_lookahead_ctx *ctx,
     return ok;
 }
 
-static bool sd_diag_phaseD_part1(const struct json_value *result)
+static bool sd_diag_phaseD_verdict_and_brief_omissions(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && result->type == JSON_OBJ;
@@ -1174,7 +1175,7 @@ static bool sd_diag_phaseD_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseD_part2(const struct json_value *result)
+static bool sd_diag_phaseD_omitted_sections_and_first_call(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *brief_first_call =
@@ -1212,14 +1213,14 @@ static bool sd_diag_lookahead_phaseD(struct sd_diag_lookahead_ctx *ctx,
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "agentdiagnose",
                                  &brief_params, &ctx->result);
-    ok = sd_diag_phaseD_part1(&ctx->result) && ok;
-    ok = sd_diag_phaseD_part2(&ctx->result) && ok;
+    ok = sd_diag_phaseD_verdict_and_brief_omissions(&ctx->result) && ok;
+    ok = sd_diag_phaseD_omitted_sections_and_first_call(&ctx->result) && ok;
     json_free(&ctx->result);
     json_free(&brief_params);
     return ok;
 }
 
-static bool sd_diag_lookahead_phaseE_part1(const struct json_value *result)
+static bool sd_diag_lookahead_phaseE_verdict_and_readiness(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && strcmp(json_get_str(json_get(result, "verdict")),
@@ -1240,7 +1241,7 @@ static bool sd_diag_lookahead_phaseE_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_lookahead_phaseE_part2(const struct json_value *result)
+static bool sd_diag_lookahead_phaseE_peer_finding(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *findings = json_get(result, "findings");
@@ -1285,8 +1286,8 @@ static bool sd_diag_lookahead_phaseE(struct sd_diag_lookahead_ctx *ctx,
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "agentdiagnose", &ctx->params,
                                  &ctx->result);
-    ok = sd_diag_lookahead_phaseE_part1(&ctx->result) && ok;
-    ok = sd_diag_lookahead_phaseE_part2(&ctx->result) && ok;
+    ok = sd_diag_lookahead_phaseE_verdict_and_readiness(&ctx->result) && ok;
+    ok = sd_diag_lookahead_phaseE_peer_finding(&ctx->result) && ok;
     json_free(&ctx->result);
     return ok;
 }
@@ -1389,7 +1390,7 @@ static bool sd_diag_lookahead_phaseG(struct sd_diag_lookahead_ctx *ctx,
     return ok;
 }
 
-static bool sd_diag_phaseH_part1(const struct json_value *result)
+static bool sd_diag_phaseH_verdict_and_primary_host(const struct json_value *result)
 {
     bool ok = true;
     ok = ok && strcmp(json_get_str(json_get(result, "verdict")),
@@ -1424,7 +1425,7 @@ static bool sd_diag_phaseH_part1(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseH_part2(const struct json_value *result)
+static bool sd_diag_phaseH_primary_host_issue_class(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *primary_host_issue =
@@ -1458,7 +1459,7 @@ static bool sd_diag_phaseH_part2(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseH_part3(const struct json_value *result)
+static bool sd_diag_phaseH_primary_host_issue_detail(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *primary_host_issue =
@@ -1484,7 +1485,7 @@ static bool sd_diag_phaseH_part3(const struct json_value *result)
     return ok;
 }
 
-static bool sd_diag_phaseH_part4(const struct json_value *result)
+static bool sd_diag_phaseH_findings_and_direction(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *findings = json_get(result, "findings");
@@ -1569,10 +1570,10 @@ static bool sd_diag_lookahead_phaseH(struct sd_diag_lookahead_ctx *ctx,
     json_init(&ctx->result);
     ok = ok && rpc_table_execute(&ctx->tbl, "agentdiagnose", &ctx->params,
                                  &ctx->result);
-    ok = sd_diag_phaseH_part1(&ctx->result) && ok;
-    ok = sd_diag_phaseH_part2(&ctx->result) && ok;
-    ok = sd_diag_phaseH_part3(&ctx->result) && ok;
-    ok = sd_diag_phaseH_part4(&ctx->result) && ok;
+    ok = sd_diag_phaseH_verdict_and_primary_host(&ctx->result) && ok;
+    ok = sd_diag_phaseH_primary_host_issue_class(&ctx->result) && ok;
+    ok = sd_diag_phaseH_primary_host_issue_detail(&ctx->result) && ok;
+    ok = sd_diag_phaseH_findings_and_direction(&ctx->result) && ok;
     json_free(&ctx->result);
     return ok;
 }
