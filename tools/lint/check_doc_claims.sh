@@ -123,6 +123,46 @@ gate_rc() {
         "$SELF_GATE_NAME") printf 'X'; return 0 ;;   # no self-reference
         check-core-seal)   printf 'X'; return 0 ;;   # driver special-case, not a script
     esac
+
+    # Reuse the DRIVER's own verdict for this gate instead of running a
+    # second, independent copy of it from inside this gate's process.
+    # run_lint.sh's parallel path exports ZCL_LINT_GATES_DIR_X to every gate
+    # it forks (this gate included) and writes <dir>/<gate>.rc the instant
+    # that gate's own worker finishes. Without this, an oracle gate here ran
+    # its named gate's script CONCURRENTLY with the driver's own worker
+    # running the very same script — observed 2026-09-07: two simultaneous
+    # `check_package_anatomy.sh` runs raced check-standalone-tools-link's
+    # nested `make`, which can relink $(BIN_DIR)/z23_bounded_run while a
+    # copy of the anatomy gate is mid-exec against it, so one of the two
+    # copies saw "bounded KAT runner ... is unavailable" (exit 2) though the
+    # gate is clean standalone. Waiting for the recorded verdict instead
+    # removes the second, doc-claims-only invocation entirely, which is the
+    # exposure this gate itself added on top of the driver's single copy.
+    # Fail-closed: no verdict within this gate's own timeout (gate not in
+    # LINT_GATES, standalone `make check-doc-claims`, the out-of-repo
+    # `--scan` invocation, or a driver too old to export the directory)
+    # falls straight through to running the gate directly, exactly as
+    # before this change.
+    local vdir="${ZCL_LINT_GATES_DIR_X:-}" start
+    if [ -n "$vdir" ] && [ -d "$vdir" ]; then
+        start="$SECONDS"
+        while (( SECONDS - start < GATE_TIMEOUT_SEC )); do
+            if [ -f "$vdir/$g.rc" ]; then
+                rc="$(cat "$vdir/$g.rc" 2>/dev/null)"
+                case "$rc" in
+                    ''|*[!0-9]*) ;;   # malformed record — fall through, run it ourselves
+                    *)
+                        GATE_RC[$g]="$rc"
+                        printf '%s' "$rc"
+                        return 0
+                        ;;
+                esac
+                break
+            fi
+            sleep 0.2
+        done
+    fi
+
     cmd="$(gate_cmd_for "$g")"
     if [ -z "$cmd" ]; then printf 'X'; return 0; fi
     timeout "$GATE_TIMEOUT_SEC" bash -c "cd '$ROOT' && ZCL_LINT_PRODUCTION_SCAN=1 $cmd" \
@@ -400,6 +440,62 @@ selfcheck() {
     fi
 
     violations=(); claims_parsed=0; reliance_docs_scanned=0
+
+    # ── Verdict-reuse self-check ──────────────────────────────────────────
+    # Proves the fix for the 2026-09-07 race: gate_rc must use the driver's
+    # OWN recorded verdict for a gate instead of racing a second, independent
+    # copy of that gate's script against the driver's own worker for it
+    # (two concurrent check_package_anatomy.sh runs raced
+    # check-standalone-tools-link's nested `make` relinking
+    # $(BIN_DIR)/z23_bounded_run and one saw it disappear mid-exec).
+    #
+    # (a) REUSE: a recorded verdict must be read, never recomputed. Point
+    #     gate_cmd_for at a scratch table whose entry for a throwaway gate
+    #     name would return an exit code NO seeded verdict shares (99), seed
+    #     a different verdict (7), and confirm gate_rc reports the SEEDED
+    #     value — if it had instead run the scratch command it would report
+    #     99, distinguishably wrong, not a timing guess.
+    local vr_dir vr_table vr_old_table="$GATE_TABLE" vr_old_vdir="${ZCL_LINT_GATES_DIR_X:-}" got
+    vr_dir="$(mktemp -d)" || { echo "FAIL: mktemp failed" >&2; return 2; }
+    vr_table="$vr_dir/fake_run_lint.sh"
+    printf '        zzz_verdict_reuse_gate) echo '"'"'exit 99'"'"' ;;\n' > "$vr_table"
+    printf '%s\n' 7 > "$vr_dir/zzz_verdict_reuse_gate.rc"
+    GATE_TABLE="$vr_table"
+    export ZCL_LINT_GATES_DIR_X="$vr_dir"
+    unset 'GATE_RC[zzz_verdict_reuse_gate]'
+    got="$(gate_rc zzz_verdict_reuse_gate)"
+    if [ "$got" != 7 ]; then
+        echo "FAIL: check_doc_claims verdict-reuse self-check broken — a" >&2
+        echo "      recorded driver verdict (7) was not reused; gate_rc" >&2
+        echo "      returned '$got' instead (99 would mean it re-ran the gate" >&2
+        echo "      command itself, recreating the exact race this fixes)." >&2
+        st_fail=2
+    fi
+
+    # (b) FAIL-CLOSED FALLBACK: no recorded verdict (gate not yet finished,
+    #     or not run by this driver at all) must still run the gate itself,
+    #     unchanged from before this fix. Use a tiny timeout so the fallback
+    #     wait this adds cannot make the gate itself slow.
+    local vr_old_timeout="$GATE_TIMEOUT_SEC"
+    GATE_TIMEOUT_SEC=1
+    printf '        zzz_verdict_fallback_gate) echo '"'"'exit 42'"'"' ;;\n' > "$vr_table"
+    rm -f "$vr_dir/zzz_verdict_fallback_gate.rc"
+    unset 'GATE_RC[zzz_verdict_fallback_gate]'
+    got="$(gate_rc zzz_verdict_fallback_gate)"
+    GATE_TIMEOUT_SEC="$vr_old_timeout"
+    if [ "$got" != 42 ]; then
+        echo "FAIL: check_doc_claims verdict-reuse self-check broken — with no" >&2
+        echo "      recorded verdict, gate_rc must still run the gate itself" >&2
+        echo "      (fail-closed); got '$got', wanted 42." >&2
+        st_fail=2
+    fi
+
+    GATE_TABLE="$vr_old_table"
+    if [ -n "$vr_old_vdir" ]; then export ZCL_LINT_GATES_DIR_X="$vr_old_vdir"
+    else unset ZCL_LINT_GATES_DIR_X; fi
+    unset 'GATE_RC[zzz_verdict_reuse_gate]' 'GATE_RC[zzz_verdict_fallback_gate]'
+    rm -rf "$vr_dir"
+
     rm -rf "$tmp"
     return "$st_fail"
 }
