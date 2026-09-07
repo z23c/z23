@@ -1564,14 +1564,172 @@ static int test_fleet_board_scope_store(void)
     return failures;
 }
 
+/* PUBLIC scope needs no operator grant at all: a never-granted key may post
+ * to a public room, but the SAME key stays refused everywhere else, and a
+ * flood past the per-key quota is refused without ever touching the store.
+ * Every other test in this file runs with the role gate held permissively
+ * open (see the comment on test_fleet_board() below) because it is proving
+ * the codec/store/gossip path in isolation from role wiring. This group is
+ * the opposite: it installs the REAL gate — nothing at all — because a
+ * public exemption that only works while some other check is disabled
+ * would prove nothing. */
+static int test_fleet_board_public_grant_free(void)
+{
+    int failures = 0;
+    TEST("fleet board: a never-granted key posts to a public room and is "
+        "stored, but is refused the moment it tries a fleet room") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(9, seed, pk);
+        const int64_t now = 500000;
+
+        struct fleet_board_post pub;
+        fb_test_compose(&pub, FLEET_BOARD_KIND_NOTE, "stranger",
+                        "hello from a box nobody granted anything to",
+                        (uint64_t)now, 3600);
+        fb_test_scope(&pub, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        ASSERT_EQ(fleet_board_post_sign(&pub, seed, pk), FLEET_BOARD_OK);
+        bool stored = false;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &pub, now, &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored);
+
+        struct fleet_board_post priv;
+        fb_test_compose(&priv, FLEET_BOARD_KIND_NOTE, "stranger",
+                        "the same key tries a fleet room", (uint64_t)now,
+                        3600);
+        fb_test_scope(&priv, FLEET_BOARD_SCOPE_FLEET, "");
+        ASSERT_EQ(fleet_board_post_sign(&priv, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &priv, now, NULL),
+                  FLEET_BOARD_ERR_ROLE);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_public_unknown_scope(void)
+{
+    int failures = 0;
+    TEST("fleet board: an unknown scope value is refused through the real "
+        "ingest path, quota or no quota") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(10, seed, pk);
+        const int64_t now = 500000;
+
+        /* fleet_board_post_sign validates shape before it signs, so an
+         * illegal scope is set AFTER signing — same pattern the codec group
+         * uses for its own scope refusals above. Validation runs before
+         * verification in board_ingest_admissible, so the tampered scope is
+         * refused on its own terms rather than as a signature mismatch. */
+        struct fleet_board_post bad;
+        fb_test_compose(&bad, FLEET_BOARD_KIND_NOTE, "stranger",
+                        "an unknown scope value", (uint64_t)now, 3600);
+        fb_test_scope(&bad, FLEET_BOARD_SCOPE_FLEET, "");
+        ASSERT_EQ(fleet_board_post_sign(&bad, seed, pk), FLEET_BOARD_OK);
+        bad.scope = (uint8_t)FLEET_BOARD_SCOPE__COUNT;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &bad, now, NULL),
+                  FLEET_BOARD_ERR_SCOPE);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_public_quota(void)
+{
+    int failures = 0;
+    TEST("fleet board: the post past the per-key public quota is refused "
+        "and the stored count for that key never moves") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(11, seed, pk);
+        const int64_t now = 500000;
+
+        for (int i = 0; i < FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX; i++) {
+            struct fleet_board_post p;
+            char text[64];
+            (void)snprintf(text, sizeof(text), "post number %d", i);
+            fb_test_compose(&p, FLEET_BOARD_KIND_NOTE, "flooder", text,
+                            (uint64_t)now + (uint64_t)i, 3600);
+            fb_test_scope(&p, FLEET_BOARD_SCOPE_PUBLIC, "general");
+            ASSERT_EQ(fleet_board_post_sign(&p, seed, pk), FLEET_BOARD_OK);
+            bool stored = false;
+            ASSERT_EQ(db_fleet_board_post_ingest(&db, &p, now, &stored),
+                      FLEET_BOARD_OK);
+            ASSERT(stored);
+        }
+
+        struct fleet_board_filter filter;
+        memset(&filter, 0, sizeof(filter));
+        filter.host_set = true;
+        memcpy(filter.host_pubkey, pk, 32);
+        struct db_fleet_board_post rows[FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX +
+                                        4];
+        int before = db_fleet_board_list(&db, &filter, now, rows,
+            sizeof(rows) / sizeof(rows[0]));
+        ASSERT_EQ(before, FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX);
+
+        struct fleet_board_post one_too_many;
+        fb_test_compose(&one_too_many, FLEET_BOARD_KIND_NOTE, "flooder",
+                        "one post past the window quota",
+                        (uint64_t)now +
+                            (uint64_t)FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX,
+                        3600);
+        fb_test_scope(&one_too_many, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        ASSERT_EQ(fleet_board_post_sign(&one_too_many, seed, pk),
+                  FLEET_BOARD_OK);
+        bool stored = true;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &one_too_many, now,
+                                             &stored),
+                  FLEET_BOARD_ERR_QUOTA);
+        ASSERT(!stored);
+
+        int after = db_fleet_board_list(&db, &filter, now, rows,
+            sizeof(rows) / sizeof(rows[0]));
+        ASSERT_EQ(after, before);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Run the three PUBLIC-scope-with-the-real-gate tests together, with the
+ * real gate — nothing installed — bracketing all three, then hand the
+ * permissive stub back so the rest of this file's tests keep the isolation
+ * they were written for. */
+static int test_fleet_board_public_no_grant_needed(void)
+{
+    int failures = 0;
+    zcl_fleet_role_checker_install(NULL);
+    failures += test_fleet_board_public_grant_free();
+    failures += test_fleet_board_public_unknown_scope();
+    failures += test_fleet_board_public_quota();
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
     /* Every ingest below is a post signed by a key this group invented, and
-     * ingest refuses a key with no role. This group is about the codec, the
-     * store and the gossip path, so the role gate is held open for it; the
-     * gate itself is proven in fleet_roles and fleet_role_enforcement, which
-     * uninstall this first and prove that an empty seam refuses. */
+     * ingest refuses a FLEET/LEGACY-scope post from a key with no role. This
+     * group is about the codec, the store and the gossip path, so the role
+     * gate is held open for it; the gate itself — and the PUBLIC-scope
+     * exemption from it — is proven with the REAL gate installed by
+     * test_fleet_board_public_no_grant_needed() below, and by
+     * fleet_roles / fleet_role_enforcement, which uninstall this first and
+     * prove that an empty seam refuses. */
     zcl_fleet_role_checker_install_permissive_for_testing();
     failures += test_fleet_board_codec();
     failures += test_fleet_board_bounds();
@@ -1594,6 +1752,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_peer_inventory_cursor();
     failures += test_fleet_board_scope_codec();
     failures += test_fleet_board_scope_store();
+    failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same
      * binary must not inherit an open gate. */
     zcl_fleet_role_checker_install(NULL);
