@@ -5310,7 +5310,7 @@ EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
 LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -D_POSIX_C_SOURCE=200809L -Iplatform/modules/base/include \
-    $(ZCL_PLATFORM_CPPFLAGS)
+    $(ZCL_PLATFORM_CPPFLAGS) $(REPRO_CFLAGS)
 LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_hotswap_candidates_ledger.c tools/lint/lintc/gate_source_patterns.c \
     tools/lint/lintc/gate_pattern_small.c tools/lint/lintc/gate_wire_dial.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_tree_walk_selftests.c tools/lint/lintc/gate_git_scan_a.c \
