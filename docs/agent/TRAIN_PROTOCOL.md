@@ -171,7 +171,12 @@ the rebased tip is exactly that field's job, so the proof that follows runs
 on the regen'd tip automatically. If a generator or the diff/commit step
 itself fails, the row fails with `dimension=regen` and the first actionable
 line from the failing target's output — never a landing on a tree a
-generator refused to reproduce.
+generator refused to reproduce. A generator can also rewrite one of these
+paths with byte-identical content, moving only its mtime/ctime; the phase
+detects that too and re-seals `build/dev-loop/restart.env` before
+returning, so the proof's stat-based source-mutation token matches the
+tree it is actually proving instead of the tree as it stood before
+regeneration ran.
 
 ### vendor/tor in the landing worktree
 
