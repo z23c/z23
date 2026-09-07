@@ -2183,7 +2183,7 @@ engine/modules/kernel/src/command_registry.c:path_valid:16
 engine/modules/kernel/src/command_registry.c:push_error:20
 engine/modules/kernel/src/command_registry.c:push_next_array:19
 engine/modules/kernel/src/command_registry.c:serialize_reply:37
-engine/modules/kernel/src/command_registry.c:zcl_command_registry_describe_json:51
+engine/modules/kernel/src/command_registry.c:zcl_command_registry_describe_json:49
 engine/modules/kernel/src/command_registry.c:zcl_command_registry_execute_json:48
 engine/modules/kernel/src/command_registry.c:zcl_command_registry_input_validate:303
 engine/modules/kernel/src/command_registry.c:zcl_command_registry_menu_json:32
@@ -3476,7 +3476,6 @@ tests/harness/src/test_rpc_frontdoor_slots.c:test_rpc_frontdoor_slots:96
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:392
 tests/harness/src/test_rpc_service_restart.c:test_rpc_service_restart:34
 tests/harness/src/test_running_image_positioned.c:running_image_positioned_probe:16
-tests/harness/src/test_sapling.c:test_sapling:726
 tests/harness/src/test_sapling_anchor_frontier_condition.c:test_sapling_anchor_frontier_condition:57
 tests/harness/src/test_sapling_ckpt_persist.c:test_sapling_ckpt_persist:99
 tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:257
