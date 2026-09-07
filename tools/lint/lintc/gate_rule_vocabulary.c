@@ -585,7 +585,7 @@ static int rv_st_setup(void)
     char grok[RV_PATH_CAP], rmd[RV_PATH_CAP], pdef[RV_PATH_CAP];
     rv_concat_trunc(grok, sizeof grok, g_rv_dir, '/', "grok");
     if (csr_mkdirs(grok)) return 1;
-    rv_concat_trunc(rmd, sizeof rmd, g_rv_dir, '/', "grok/r.md");
+    rv_concat_trunc(rmd, sizeof rmd, g_rv_dir, '/', "grok/r.md"); // error-doc-ref-ok: a path this selftest creates in its own temp tree
     rv_concat_trunc(pdef, sizeof pdef, g_rv_dir, '/', "personas.def");
     int rc = csr_write(rmd, "# Only Rule\n");
     rc = rc || csr_write(pdef,

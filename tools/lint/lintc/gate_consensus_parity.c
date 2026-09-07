@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "base/hex.h"
+#include "base/serialize_le.h"
 #include "lintc.h"
 
 enum { CP_MAX = 8192, CP_LINE = 8192, CP_FLOOR = 3100000 };
@@ -63,8 +64,7 @@ static void cp_xform(uint32_t h[8], const unsigned char *c)
     uint32_t w[64], a, b, c2, d, e, f, g, hh, t1, t2;
     int i;
     for (i = 0; i < 16; i++)
-        w[i] = ((uint32_t)c[i * 4] << 24) | ((uint32_t)c[i * 4 + 1] << 16)
-             | ((uint32_t)c[i * 4 + 2] << 8) | c[i * 4 + 3];
+        w[i] = zcl_read_u32_be(c + i * 4);
     for (i = 16; i < 64; i++) {
         uint32_t s0 = cp_rotr(w[i - 15], 7) ^ cp_rotr(w[i - 15], 18)
                       ^ (w[i - 15] >> 3);
@@ -106,15 +106,10 @@ static void cp_sha256(const unsigned char *msg, size_t len, char hex[65])
         n = 0;
     }
     memset(block + n, 0, 56 - n);
-    for (i = 0; i < 8; i++)
-        block[63 - i] = (unsigned char)(bits >> (8 * i));
+    zcl_write_u64_be(block + 56, bits);
     cp_xform(h, block);
-    for (i = 0; i < 8; i++) {
-        out[i * 4] = (unsigned char)(h[i] >> 24);
-        out[i * 4 + 1] = (unsigned char)(h[i] >> 16);
-        out[i * 4 + 2] = (unsigned char)(h[i] >> 8);
-        out[i * 4 + 3] = (unsigned char)h[i];
-    }
+    for (i = 0; i < 8; i++)
+        zcl_write_u32_be(out + i * 4, h[i]);
     zcl_hex_encode(out, sizeof out, hex);
 }
 
@@ -626,7 +621,7 @@ int check_consensus_parity_selftest(void)
         || csr_write(cf,
                      "/* selftest fixture — not part of the build */\n"
                      "bool clock_fixture_reject(void)\n{\n"
-                     "    return time(NULL) > 1234567890;\n}\n")
+                     "    return time(NULL) > 1234567890;\n}\n") // platform-ok: fixture text the gate must trip on, never compiled
         || csr_write(rg, "")) {
         rap_rm_rf(tmp);
         return 2;

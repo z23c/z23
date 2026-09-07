@@ -666,6 +666,7 @@ static bool sw_seed_prepare_signed(const char *source_dir, uint8_t seed,
                                    uint64_t sequence,
                                    struct vcs_package_prepared *prepared)
 {
+    vcs_package_prepared_init(prepared);
     struct privkey sk;
     struct pubkey pk;
     if (!sw_keypair(seed, &sk, &pk))
@@ -677,7 +678,6 @@ static bool sw_seed_prepare_signed(const char *source_dir, uint8_t seed,
         .chain_id = "zclassic-main",
     };
     memcpy(options.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
-    vcs_package_prepared_init(prepared);
     char detail[160] = {0};
     if (vcs_package_prepare(&options, prepared, detail, sizeof(detail)) !=
         VCS_PACKAGE_PREPARE_OK) {

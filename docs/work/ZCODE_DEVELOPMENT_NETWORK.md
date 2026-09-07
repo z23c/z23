@@ -381,7 +381,7 @@ ZBuild action. It never accepts a caller-supplied path or command.
 
 <!-- claim: file-present contexts/commons/modules/vcs/include/vcs/zcode_task_index.h # rebuildable dev-task index projection over the workspace CAS -->
 <!-- claim: symbol-present vcs_zcode_task_index_build contexts/commons/modules/vcs/src/zcode_task_index.c # projection rebuilt from CAS wires on every call -->
-<!-- claim: symbol-present zcl_native_handle_zcode_tasks tools/command/native_zcode_dev_command.c # typed task list/search surface -->
+<!-- claim: symbol-present zcl_native_handle_zcode_tasks tools/command/native_zcode_dev_tasks.c # typed task list/search surface -->
 - [x] Publish a bounded code-index context capsule whose members resolve to
   the task's immutable source root. V1 uses an exact symbol/stable ID; semantic
   goal selection remains adapter policy rather than context authority.
@@ -600,7 +600,7 @@ failure-to-task conversion; no current command claims that evidence exists.
 
 <!-- claim: file-present contexts/commons/modules/vcs/include/vcs/zcode_lane.h # canonical signed lane receipt -->
 <!-- claim: symbol-present zcode_lane_advance contexts/commons/services/src/zcode_lane_service.c # sequential proof-gated promotion -->
-<!-- claim: symbol-present zcl_native_handle_zcode_accept tools/command/native_zcode_dev_command.c # explicit operator acceptance -->
+<!-- claim: symbol-present zcl_native_handle_zcode_accept tools/command/native_zcode_dev_tasks.c # explicit operator acceptance -->
 
 ## Acceptance demonstrations
 
