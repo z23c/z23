@@ -125,3 +125,15 @@ FLEET_VITAL("story.passage_wall_s", "s", "sum", 0,
             "what one passage of the walk cost, per passage")
 FLEET_VITAL("story.predict_error", "ratio", "gauge", 86400,
             "how wrong the estimate was, which is whether it may be trusted")
+
+/* ── link: the low-latency datagram channel between two paired peers ──
+ * Appended 2026-09-07 with the gamelink DATAGRAM transport
+ * (engine/modules/gamelink, docs/GAMELINK.md). Appending at the end of the
+ * file adds subject indices without moving any existing one, so no row
+ * already written changes meaning and this is not a wire change. */
+FLEET_VITAL("link.rtt_us", "us", "gauge", 60,
+            "whether two boxes are close enough to play against each other")
+FLEET_VITAL("link.jitter_us", "us", "gauge", 60,
+            "how steady that path is, which decides the interpolation buffer")
+FLEET_VITAL("link.loss_ppm", "ppm", "gauge", 60,
+            "how much of a 60 Hz snapshot stream this path silently eats")

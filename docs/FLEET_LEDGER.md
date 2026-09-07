@@ -243,6 +243,9 @@ something happened, not because a timer fired.
 | `agent.tool_uses` | count | sum | per event | tool calls to finish, the same fact from the other side |
 | `story.passage_wall_s` | s | sum | per event | what one passage of the walk cost, per passage |
 | `story.predict_error` | ratio | gauge | 86400 s | how wrong the estimate was, which is whether it may be trusted |
+| `link.rtt_us` | us | gauge | 60 s | whether two boxes are close enough to play against each other |
+| `link.jitter_us` | us | gauge | 60 s | how steady that path is, which decides the interpolation buffer |
+| `link.loss_ppm` | ppm | gauge | 60 s | how much of a 60 Hz snapshot stream this path silently eats |
 
 This table is rendered from `engine/composition/fleet_vitals.def`, which is
 the one declaration. `make check-fleet-vitals` fails if they disagree.

@@ -161,6 +161,14 @@ LIB_MODULE("crypto")
  * Like chainlog, it holds no key material — signing takes a seed as an
  * argument — so its rank buys it no authority it could later leak. */
 LIB_MODULE("fleetledger")
+/* The unreliable-sequenced UDP datagram channel between two paired fleet
+ * peers (docs/GAMELINK.md). It reaches down to platform/modules/platform
+ * for the socket and the injected clock, core/modules/crypto for the AEAD
+ * and the subkey derivation, and engine/modules/fleetledger for the vitals
+ * rows it writes — so directly above fleetledger is its lowest legal rank.
+ * Nothing depends on it in return: it is a leaf an application dials, never
+ * a service the node calls. */
+LIB_MODULE("gamelink")
 LIB_MODULE("zid")
 LIB_MODULE("noise")
 LIB_MODULE("bloom")
