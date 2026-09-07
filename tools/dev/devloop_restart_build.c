@@ -1241,52 +1241,53 @@ static bool rr_write_response(const struct rr_plan *plan, const char *root,
     return ok;
 }
 
-static bool rr_link(const struct rr_plan *plan, const char *root,
-                    const char *rsp, const char *candidate_dir,
-                    char binary[PATH_MAX],
-                    uint32_t *linker_processes,
-                    struct zcl_devloop_process_result *process,
-                    int64_t *elapsed_us, int64_t *startup_us,
-                    int64_t *body_us, char *why, size_t why_len)
-{
-    char dir[PATH_MAX], temp[PATH_MAX];
-    if (snprintf(dir, sizeof(dir), "%s/build/dev-loop", root) >=
-            (int)sizeof(dir) || !rr_temp(temp, dir, ".bin")) {
-        rr_why(why, why_len, "could not allocate restart binary temporary");
-        return false;
-    }
-    char overlay_rsp[PATH_MAX] = {0};
-    if (!rr_write_overlay_response(root, rsp, overlay_rsp, why, why_len)) {
-        (void)unlink(temp);
-        return false;
-    }
-    char cc[sizeof(plan->cc)], cflags[sizeof(plan->cflags)];
-    char flags[sizeof(plan->ldflags)];
-    char libs[sizeof(plan->libs)], rsp_arg[PATH_MAX + 2];
-    (void)snprintf(cc, sizeof(cc), "%s", plan->cc);
-    (void)snprintf(cflags, sizeof(cflags), "%s", plan->cflags);
-    (void)snprintf(flags, sizeof(flags), "%s", plan->ldflags);
-    (void)snprintf(libs, sizeof(libs), "%s", plan->libs);
-    (void)snprintf(rsp_arg, sizeof(rsp_arg), "@%s", overlay_rsp);
+struct rr_link_argv_buf {
+    char cc[512], cflags[RR_TEXT_MAX], flags[4096], libs[4096];
+    char rsp_arg[PATH_MAX + 2];
     const char *argv[RR_ARG_MAX], *cflagv[RR_ARG_MAX];
     const char *flagv[RR_ARG_MAX], *libv[RR_ARG_MAX];
-    size_t argc = zcl_argv_split(cc, argv, RR_ARG_MAX);
-    size_t cflagc = zcl_argv_split(cflags, cflagv, RR_ARG_MAX);
-    size_t flagc = zcl_argv_split(flags, flagv, RR_ARG_MAX);
-    size_t libc = zcl_argv_split(libs, libv, RR_ARG_MAX);
-    if (!argc || argc + cflagc + flagc + libc + 6 >= RR_ARG_MAX) {
-        (void)unlink(temp);
-        (void)unlink(overlay_rsp);
+    size_t argc;
+};
+
+static bool rr_link_build_argv(const struct rr_plan *plan, const char *temp,
+                               const char *overlay_rsp,
+                               struct rr_link_argv_buf *b,
+                               char *why, size_t why_len)
+{
+    (void)snprintf(b->cc, sizeof(b->cc), "%s", plan->cc);
+    (void)snprintf(b->cflags, sizeof(b->cflags), "%s", plan->cflags);
+    (void)snprintf(b->flags, sizeof(b->flags), "%s", plan->ldflags);
+    (void)snprintf(b->libs, sizeof(b->libs), "%s", plan->libs);
+    (void)snprintf(b->rsp_arg, sizeof(b->rsp_arg), "@%s", overlay_rsp);
+    b->argc = zcl_argv_split(b->cc, b->argv, RR_ARG_MAX);
+    size_t cflagc = zcl_argv_split(b->cflags, b->cflagv, RR_ARG_MAX);
+    size_t flagc = zcl_argv_split(b->flags, b->flagv, RR_ARG_MAX);
+    size_t libc = zcl_argv_split(b->libs, b->libv, RR_ARG_MAX);
+    if (!b->argc || b->argc + cflagc + flagc + libc + 6 >= RR_ARG_MAX) {
         rr_why(why, why_len, "restart link action exceeds argv bound");
         return false;
     }
-    for (size_t i = 0; i < cflagc; i++) argv[argc++] = cflagv[i];
-    for (size_t i = 0; i < flagc; i++) argv[argc++] = flagv[i];
-    argv[argc++] = "-o"; argv[argc++] = temp; argv[argc++] = rsp_arg;
-    argv[argc++] = plan->base_reloc;
-    argv[argc++] = "-Wl,--allow-multiple-definition";
-    for (size_t i = 0; i < libc; i++) argv[argc++] = libv[i];
-    argv[argc] = NULL;
+    for (size_t i = 0; i < cflagc; i++) b->argv[b->argc++] = b->cflagv[i];
+    for (size_t i = 0; i < flagc; i++) b->argv[b->argc++] = b->flagv[i];
+    b->argv[b->argc++] = "-o"; b->argv[b->argc++] = temp;
+    b->argv[b->argc++] = b->rsp_arg;
+    b->argv[b->argc++] = plan->base_reloc;
+    b->argv[b->argc++] = "-Wl,--allow-multiple-definition";
+    for (size_t i = 0; i < libc; i++) b->argv[b->argc++] = b->libv[i];
+    b->argv[b->argc] = NULL;
+    return true;
+}
+
+static bool rr_link_run_and_publish(const char *root, const char *candidate_dir,
+                                    const char *temp, const char *overlay_rsp,
+                                    char binary[PATH_MAX],
+                                    const char **argv,
+                                    uint32_t *linker_processes,
+                                    struct zcl_devloop_process_result *process,
+                                    int64_t *elapsed_us, int64_t *startup_us,
+                                    int64_t *body_us, char *why,
+                                    size_t why_len)
+{
     (*linker_processes)++;
     int64_t started = platform_time_monotonic_us();
     bool ran = zcl_devloop_process_run(root, argv, 30000, process);
@@ -1309,6 +1310,37 @@ static bool rr_link(const struct rr_plan *plan, const char *root,
     }
     (void)unlink(temp);
     return true;
+}
+
+static bool rr_link(const struct rr_plan *plan, const char *root,
+                    const char *rsp, const char *candidate_dir,
+                    char binary[PATH_MAX],
+                    uint32_t *linker_processes,
+                    struct zcl_devloop_process_result *process,
+                    int64_t *elapsed_us, int64_t *startup_us,
+                    int64_t *body_us, char *why, size_t why_len)
+{
+    char dir[PATH_MAX], temp[PATH_MAX];
+    if (snprintf(dir, sizeof(dir), "%s/build/dev-loop", root) >=
+            (int)sizeof(dir) || !rr_temp(temp, dir, ".bin")) {
+        rr_why(why, why_len, "could not allocate restart binary temporary");
+        return false;
+    }
+    char overlay_rsp[PATH_MAX] = {0};
+    if (!rr_write_overlay_response(root, rsp, overlay_rsp, why, why_len)) {
+        (void)unlink(temp);
+        return false;
+    }
+    struct rr_link_argv_buf buf;
+    if (!rr_link_build_argv(plan, temp, overlay_rsp, &buf, why, why_len)) {
+        (void)unlink(temp);
+        (void)unlink(overlay_rsp);
+        return false;
+    }
+    return rr_link_run_and_publish(root, candidate_dir, temp, overlay_rsp,
+                                   binary, buf.argv, linker_processes,
+                                   process, elapsed_us, startup_us, body_us,
+                                   why, why_len);
 }
 
 static bool rr_link_cached(const struct rr_plan *plan, const char *root,
