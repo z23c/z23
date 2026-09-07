@@ -89,7 +89,7 @@ Z23_FLAG("ZCL_AGENT_FAST_PLAN_CMD", "env_build", "-", "-",
 Z23_FLAG("ZCL_AGENT_ID", "env_runtime", "-", "-",
           "first use tools/dev/devloop_cycle.c:1008; documented at docs/ZVCS.md:257: [64 agent_id] from ZCL_AGENT_ID")
 Z23_FLAG("ZCL_AGENT_INDEX_CHECK_FILE", "env_build", "-", "-",
-          "undocumented; first use tools/dev/generate-compdb.sh:364")
+          "undocumented; first use tools/dev/generate-compdb.sh:421")
 Z23_FLAG("ZCL_AGENT_INDEX_CLANGD_CHECK", "env_build", "0", "-",
           "undocumented; first use tools/dev/generate-compdb.sh:20")
 Z23_FLAG("ZCL_AGENT_INDEX_ROOT", "env_build", "-", "-",
@@ -103,13 +103,13 @@ Z23_FLAG("ZCL_AGENT_JSONQ", "env_build", "build/bin/jsonq", "-",
 Z23_FLAG("ZCL_AGENT_LIVE_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:153")
 Z23_FLAG("ZCL_AGENT_LOOP_BIN", "make_var", "0", "-",
-          "first use Makefile:5388; documented at docs/AGENT_API.md:1145: cache-aware make fast-ci checks; set ZCL_AGENT_LOOP_BIN=1 to also link")
+          "first use Makefile:5447; documented at docs/AGENT_API.md:1145: cache-aware make fast-ci checks; set ZCL_AGENT_LOOP_BIN=1 to also link")
 Z23_FLAG("ZCL_AGENT_LOOP_DEPLOY", "make_var", "-", "-",
-          "first use Makefile:5386; documented at docs/AGENT_API.md:1146: build/bin/z23-dev. ZCL_AGENT_LOOP_DEPLOY=stage|dev cannot bypass")
+          "first use Makefile:5445; documented at docs/AGENT_API.md:1146: build/bin/z23-dev. ZCL_AGENT_LOOP_DEPLOY=stage|dev cannot bypass")
 Z23_FLAG("ZCL_AGENT_RELEASE_BIN", "env_build", "build/bin/zclassic23", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:158")
 Z23_FLAG("ZCL_AGENT_SESSION", "env_runtime", "-", "-",
-          "first use tools/command/native_command.c:3661; documented at docs/CUSTODY_MODEL.md:223: as ZCL_AGENT_SESSION=<32 hex chars>")
+          "first use tools/command/native_command.c:3453; documented at docs/CUSTODY_MODEL.md:223: as ZCL_AGENT_SESSION=<32 hex chars>")
 Z23_FLAG("ZCL_AGENT_SHA3", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:28")
 Z23_FLAG("ZCL_AGENT_SRC_BIN", "env_build", "build/bin/zclassic23-dev", "-",
@@ -137,7 +137,7 @@ Z23_FLAG("ZCL_ALERTS_DISABLE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ALERT_WEBHOOK_URL", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/event/src/alerts.c:285")
 Z23_FLAG("ZCL_ALLOW_CORRUPT_INDEX", "env_runtime", "-", "-",
-          "undocumented; first use engine/composition/src/boot.c:2356")
+          "undocumented; first use engine/composition/src/boot.c:2161")
 Z23_FLAG("ZCL_ALLOW_PLAINTEXT_WALLET", "env_runtime", "-", "-",
           "undocumented; first use contexts/wallet/modules/wallet/src/wallet_keystore.c:51")
 Z23_FLAG("ZCL_ANCHOR_MINT_DATADIR", "env_runtime", "-", "-",
@@ -147,9 +147,9 @@ Z23_FLAG("ZCL_ANCHOR_SNAPSHOT_PATH", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ANCHOR_SNAPSHOT_SRC", "env_build", "/tmp/anchor-ram.snapshot", "-",
           "undocumented; first use tools/seed_anchor_snapshot.sh:36")
 Z23_FLAG("ZCL_API_KEY_SCAN_FILES", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_git_scan_a.c:653")
+          "undocumented; first use tools/lint/lintc/gate_git_scan_a.c:669")
 Z23_FLAG("ZCL_APP_AUTHORITY_DIRS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/framework_shape_check.sh:33")
+          "undocumented; first use tools/lint/repo_shape.sh:94")
 Z23_FLAG("ZCL_APP_SHAPES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:330")
 Z23_FLAG("ZCL_ARENA_BIN", "env_build", "-", "-",
@@ -165,9 +165,9 @@ Z23_FLAG("ZCL_ARM_SYMBOL_FILE_FLOOR", "env_build", "2500", "-",
 Z23_FLAG("ZCL_ARM_SYMBOL_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_arm_symbol_single.sh:88")
 Z23_FLAG("ZCL_ARTIFACT_ARM_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_generated_artifact_contradictions.sh:38")
+          "undocumented; first use tools/lint/lintc/gate_generated_artifact_contradictions.c:202")
 Z23_FLAG("ZCL_ARTIFACT_CAPABILITY_INVENTORY", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_generated_artifact_contradictions.sh:15")
+          "undocumented; first use tools/lint/lintc/gate_generated_artifact_contradictions.c:192")
 Z23_FLAG("ZCL_ASAN_ADX_MAKEFILE", "env_build", "Makefile", "-",
           "which Makefile the ASan/ADX build-config gate reads; a test rail so "
           "the selftest can point it at a fixture")
@@ -284,7 +284,7 @@ Z23_FLAG("ZCL_C3_RUN_ID", "env_build", "-", "-",
 Z23_FLAG("ZCL_C3_SNAPSHOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:46")
 Z23_FLAG("ZCL_C3_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8186")
+          "undocumented; first use Makefile:8246")
 Z23_FLAG("ZCL_C3_TIP_DATADIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:63")
 Z23_FLAG("ZCL_CANARY_NO_EXACT", "env_build", "0", "-",
@@ -304,7 +304,7 @@ Z23_FLAG("ZCL_CAP_CLOSURE_ENFORCE_SYMMETRY", "env_build", "-", "-",
 Z23_FLAG("ZCL_CC", "env_build", "clang", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:137")
 Z23_FLAG("ZCL_CC_JOBS", "env_build", "6", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:525")
+          "undocumented; first use tools/lint/check_clang_portability.sh:532")
 Z23_FLAG("ZCL_CHECKOUT_LOCK_HELD", "env_build", "0", "-",
           "undocumented; first use tools/dev/checkout-lock.sh:41")
 Z23_FLAG("ZCL_CLANG_PORTABILITY_COVERAGE", "env_build", "1", "-",
@@ -331,13 +331,13 @@ Z23_FLAG("ZCL_CODEINDEX_COVERAGE_ROOT", "env_build", "-", "-",
           "which source root the codeindex coverage gate measures; a test rail so "
           "the selftest can measure a planted fixture instead of the checkout")
 Z23_FLAG("ZCL_COIN_BACKFILL_ROOT_FOR_TEST", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_tree_walk.c:1190")
+          "undocumented; first use tools/lint/lintc/gate_tree_walk.c:1264")
 Z23_FLAG("ZCL_COIN_MATRIX_RUNS", "env_build", "10", "-",
           "undocumented; first use tools/dev/public_node_coin_generation_matrix_hook.sh:15")
 Z23_FLAG("ZCL_COIN_MATRIX_SEED", "env_build", "-", "-",
           "undocumented; first use tools/dev/public_node_coin_generation_matrix_hook.sh:16")
 Z23_FLAG("ZCL_COINS_LOOKUP_SCAN_DIR", "env_build", "engine/controllers/src", "-",
-          "undocumented; first use tools/scripts/check_coins_lookup_nullcheck.sh:19")
+          "undocumented; first use tools/lint/lintc/gate_pattern_guard.c:356")
 Z23_FLAG("ZCL_COMMAND_AVAILABILITY_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_command_availability_truthful.c:493")
 Z23_FLAG("ZCL_COMMAND_AVAILABILITY_PLANNED_FLOOR", "env_build", "18", "-",
@@ -375,11 +375,11 @@ Z23_FLAG("ZCL_CONSENSUS_RULE_SWEEP_BIN", "env_test", "-", "-",
 Z23_FLAG("ZCL_CONTAINMENT_GREP", "env_build", "-", "-",
           "undocumented; first use tools/scripts/check_stable_publish_containment.sh:38")
 Z23_FLAG("ZCL_CONTROLLER_PRIVATE_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_controller_private_headers.sh:20")
+          "undocumented; first use tools/lint/lintc/gate_controller_private_headers.c:268")
 Z23_FLAG("ZCL_CONTROLLER_PRIVATE_HEADER_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_controller_private_headers.sh:19")
+          "undocumented; first use tools/lint/lintc/gate_controller_private_headers.c:267")
 Z23_FLAG("ZCL_CONTROLLER_PRIVATE_SCAN_ROOT", "env_build", ".", "-",
-          "undocumented; first use tools/lint/check_controller_private_headers.sh:18")
+          "undocumented; first use tools/lint/lintc/gate_controller_private_headers.c:266")
 Z23_FLAG("ZCL_COOKBOOK_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_cookbook.sh:38")
 Z23_FLAG("ZCL_COOKBOOK_DOC", "env_build", "docs/COOKBOOK.md", "-",
@@ -481,7 +481,7 @@ Z23_FLAG("ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEPLOY_EXPECT_SOURCE_ID", "env_build", "-", "-",
           "undocumented; first use tools/deploy_verify.sh:576")
 Z23_FLAG("ZCL_DEPLOY_FROZEN_CANDIDATE", "make_var", "-", "-",
-          "undocumented; first use Makefile:9782")
+          "undocumented; first use Makefile:9842")
 Z23_FLAG("ZCL_DEPLOY_GUARD_NATIVE_JSON", "env_build", "-", "-",
           "undocumented; first use tools/deploy_guard.sh:124")
 Z23_FLAG("ZCL_DEPLOY_GUARD_RPC_TIMEOUT", "env_build", "5", "-",
@@ -543,7 +543,7 @@ Z23_FLAG("ZCL_DEV_ALLOW_REINDEX_DROPIN", "env_build", "0", "-",
 Z23_FLAG("ZCL_DEV_ALLOW_REJECTED_GENERATION", "env_build", "0", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:573")
 Z23_FLAG("ZCL_DEV_ARTIFACT_CACHE", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:2438")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:2439")
 Z23_FLAG("ZCL_DEV_BENCH_ACTIVATE", "env_build", "0", "-",
           "first use tools/dev/dev-loop-bench.sh:20; documented at docs/AGENT_API.md:1224: and separate hot-swap/reload SLO verdicts. With ZCL_DEV_BENCH_ACTIVATE=1")
 Z23_FLAG("ZCL_DEV_BENCH_CMD_CONTROLLER", "env_build", "-", "-",
@@ -587,7 +587,7 @@ Z23_FLAG("ZCL_DEV_DEPLOY_BUILD", "env_build", "fast", "-",
 Z23_FLAG("ZCL_DEV_FAILURE_TEST_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/native-dev-failure-selftest.sh:9")
 Z23_FLAG("ZCL_DEV_GENERATION_ROOT", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:1590")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:1591")
 Z23_FLAG("ZCL_DEV_GIT_EXE", "env_runtime", "-", "-",
           "undocumented; first use cognition/modules/science/src/code_growth.c:164")
 Z23_FLAG("ZCL_DEV_HISTORY_BASE_REF", "env_build", "-", "-",
@@ -605,11 +605,11 @@ Z23_FLAG("ZCL_DEV_LINKER_RUNS", "env_build", "3", "-",
 Z23_FLAG("ZCL_DEV_LOOP_TEST_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/native-dev-loop-wait-selftest.sh:8")
 Z23_FLAG("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:2441")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:2442")
 Z23_FLAG("ZCL_DEVLOOP_TEST_PROCESS", "env_test", "-", "-",
-          "first use tests/harness/src/test_dev_platform.c:2439; documented at docs/work/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
+          "first use tests/harness/src/test_dev_platform.c:2440; documented at docs/work/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
 Z23_FLAG("ZCL_DEV_NATIVE_ACTIVATION", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:1547")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:1548")
 Z23_FLAG("ZCL_DEV_PID_COMMAND", "env_build", "-", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:785")
 Z23_FLAG("ZCL_DEV_PREFLIGHT_COMMAND", "env_build", "-", "-",
@@ -709,7 +709,7 @@ Z23_FLAG("ZCL_DEV_WATCH_DEPLOY_COMMAND", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_WATCH_INITIAL", "env_build", "0", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:21")
 Z23_FLAG("ZCL_DEV_WATCH_MODE", "make_var", "verify", "-",
-          "undocumented; first use Makefile:5406")
+          "undocumented; first use Makefile:5465")
 Z23_FLAG("ZCL_DEV_WATCH_ONCE", "env_build", "0", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:20")
 Z23_FLAG("ZCL_DEV_WATCH_ONCE_FILES", "env_build", "-", "-",
@@ -827,7 +827,7 @@ Z23_FLAG("ZCL_FAST_CACHE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_FAST_CACHE_RESET", "env_build", "0", "-",
           "first use tools/agent_fast_ci.sh:416; documented at docs/AGENT_API.md:1283: ZCL_FAST_CACHE_RESET=1 to clear the green-input cache, or")
 Z23_FLAG("ZCL_FAST_CC", "make_var", "-", "-",
-          "first use Makefile:4384; documented at docs/AGENT_API.md:1275: Override with ZCL_FAST_CC='ccache cc'. Use ZCL_FAST_JOBS=N,")
+          "first use Makefile:4395; documented at docs/AGENT_API.md:1275: Override with ZCL_FAST_CC='ccache cc'. Use ZCL_FAST_JOBS=N,")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES", "env_build", "-", "-",
           "first use tools/agent_fast_ci.sh:192; documented at docs/work/fast-path.md:123: ZCL_FAST_CHANGED_FILES_ONLY=1 when ZCL_FAST_CHANGED_FILES[_FILE] is already")
 Z23_FLAG("ZCL_FAST_CHANGED_FILES_FILE", "env_build", "-", "-",
@@ -855,7 +855,7 @@ Z23_FLAG("ZCL_FAST_TESTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_FEELER_INTERVAL_SECS", "env_runtime", "-", "-",
           "undocumented; first use core/modules/net/src/connman_dialer.c:392")
 Z23_FLAG("ZCL_FILE_PURPOSE_ROOT", "env_build", ".", "-",
-          "undocumented; first use tools/lint/check_file_purpose.sh:37")
+          "undocumented; first use tools/lint/lintc/gate_file_purpose.c:476")
 Z23_FLAG("ZCL_FILE_SIZE_POLICY_BASELINE", "env_runtime", "-", "-",
           "undocumented; first use tools/file_size_policy.c:647")
 Z23_FLAG("ZCL_FILE_SIZE_POLICY_SCAN_ROOTS", "env_runtime", "-", "-",
@@ -913,7 +913,7 @@ Z23_FLAG("ZCL_FRONTIER_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_FRONTIER_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_frontier_single_writer.c:474")
 Z23_FLAG("ZCL_FULL_FOLD_FROM_GENESIS", "env_runtime", "-", "-",
-          "undocumented; first use engine/composition/src/boot_full_fold.c:235")
+          "undocumented; first use engine/composition/src/boot_full_fold.c:267")
 Z23_FLAG("ZCL_FUZZ_DETECT_LEAKS", "env_build", "0", "-",
           "undocumented; first use tools/scripts/background_quality_lane.sh:174")
 Z23_FLAG("ZCL_FUZZ_DURATION", "env_build", "900", "-",
@@ -933,11 +933,11 @@ Z23_FLAG("ZCL_FUZZ_REPLAY_TIMEOUT", "env_build", "5", "-",
 Z23_FLAG("ZCL_FUZZ_TIMEOUT", "env_build", "2", "-",
           "undocumented; first use tools/scripts/background_quality_lane.sh:173")
 Z23_FLAG("ZCL_GATE_CC", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:579")
+          "undocumented; first use tools/lint/check_clang_portability.sh:586")
 Z23_FLAG("ZCL_GATE_FLAGS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:564")
+          "undocumented; first use tools/lint/check_clang_portability.sh:571")
 Z23_FLAG("ZCL_GATE_OUT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:577")
+          "undocumented; first use tools/lint/check_clang_portability.sh:584")
 Z23_FLAG("ZCL_GATE_SCAN_LOG", "env_build", "-", "-",
           "undocumented; first use tools/lint/gate_lib.sh:82")
 Z23_FLAG("ZCL_GATE_TEST_COMPAT_HEADER", "env_build", "-", "-",
@@ -1064,7 +1064,7 @@ Z23_FLAG("ZCL_HOTSWAP_NODE_BINARY", "env_build", "build/bin/zclassic23-dev", "-"
 Z23_FLAG("ZCL_HOTSWAP_PACKAGE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-package.sh:172")
 Z23_FLAG("ZCL_HOTSWAP_PRELOAD", "env_runtime", "-", "-",
-          "first use tools/command/native_command.c:3702; documented at docs/AGENT_API.md:1246: ZCL_HOTSWAP_PRELOAD=<module.so> on a one-shot CLI) runs the freshly")
+          "first use tools/command/native_command.c:3532; documented at docs/AGENT_API.md:1246: ZCL_HOTSWAP_PRELOAD=<module.so> on a one-shot CLI) runs the freshly")
 Z23_FLAG("ZCL_HOTSWAP_PROBE_CASES", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:55")
 Z23_FLAG("ZCL_HOTSWAP_SERVICE_FIXTURE", "env_build", "0", "-",
@@ -1080,9 +1080,9 @@ Z23_FLAG("ZCL_HOTSWAP_SWAPPABLE_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_HOTSWAP_SYMBOLS_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-symbols.sh:58")
 Z23_FLAG("ZCL_HOTSWAP_TEST_AUTH", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1258")
+          "undocumented; first use tests/harness/src/test_parallel.c:1299")
 Z23_FLAG("ZCL_HOTSWAP_TEST_MODULE", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1255")
+          "undocumented; first use tests/harness/src/test_parallel.c:1296")
 Z23_FLAG("ZCL_HOTSWAP_VERIFY_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-verify.sh:43")
 Z23_FLAG("ZCL_HUMAN", "env_test", "-", "-",
@@ -1122,7 +1122,7 @@ Z23_FLAG("ZCL_INTERVENE_UNITS", "env_build", "zclassic23.service", "-",
 Z23_FLAG("ZCL_INTERVENE_WINDOW_SEC", "env_build", "900", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:109")
 Z23_FLAG("ZCL_JOBS_DIR", "env_build", "engine/jobs/src", "-",
-          "undocumented; first use tools/scripts/check_stage_advances_or_blocks.sh:38")
+          "undocumented; first use tools/lint/lintc/gate_progress_honesty_fences.c:44")
 Z23_FLAG("ZCL_JOIN_LAST", "env_build", "0", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:127")
 Z23_FLAG("ZCL_JSONQ", "env_build", "-", "-",
@@ -1138,7 +1138,7 @@ Z23_FLAG("ZCL_K9_SRC", "env_test", "-", "-",
 Z23_FLAG("ZCL_K9_START", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_kill9_recovery.c:1229")
 Z23_FLAG("ZCL_LAND_ALLOW_UNSIGNED", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:1391")
+          "undocumented; first use tools/command/native_dev_land.c:1401")
 Z23_FLAG("ZCL_LAND_BASE", "env_build", "main", "-",
           "undocumented; first use tools/dev/land_lander.sh:104")
 Z23_FLAG("ZCL_LAND_BATCH_MAX", "env_build", "16", "-",
@@ -1146,19 +1146,19 @@ Z23_FLAG("ZCL_LAND_BATCH_MAX", "env_build", "16", "-",
 Z23_FLAG("ZCL_LAND_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:102")
 Z23_FLAG("ZCL_LAND_DEPS_TEST_FORCE", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:3122")
+          "undocumented; first use tools/command/native_dev_land.c:3131")
 Z23_FLAG("ZCL_LAND_GATE_CMD", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:123")
 Z23_FLAG("ZCL_LAND_GATE_TIMEOUT_S", "env_build", "2700", "-",
           "undocumented; first use tools/dev/land_lander.sh:107")
 Z23_FLAG("ZCL_LAND_HOOKS_STUB_DIR", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:1022")
+          "undocumented; first use tools/command/native_dev_land.c:1032")
 Z23_FLAG("ZCL_LAND_INTERVAL_S", "env_build", "30", "-",
           "undocumented; first use tools/dev/land_lander.sh:109")
 Z23_FLAG("ZCL_LAND_MAX_ATTEMPTS", "env_build", "2", "-",
           "undocumented; first use tools/dev/land_lander.sh:108")
 Z23_FLAG("ZCL_LAND_PROOF_STUB", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:1198")
+          "undocumented; first use tools/command/native_dev_land.c:1208")
 Z23_FLAG("ZCL_LAND_QUEUE", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:100")
 Z23_FLAG("ZCL_LAND_RACE_PATH", "env_test", "-", "-",
@@ -1168,15 +1168,15 @@ Z23_FLAG("ZCL_LAND_RACE_PREFIX", "env_test", "-", "-",
 Z23_FLAG("ZCL_LAND_READY_REF", "env_build", "land/ready", "-",
           "undocumented; first use tools/dev/land_lander.sh:105")
 Z23_FLAG("ZCL_LAND_REGEN_GATE_STUB_FAIL", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:2033")
+          "undocumented; first use tools/command/native_dev_land.c:2043")
 Z23_FLAG("ZCL_LAND_REGEN_MAKE_STUB", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:2017")
+          "undocumented; first use tools/command/native_dev_land.c:2027")
 Z23_FLAG("ZCL_LAND_STATE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_bench.sh:68")
 Z23_FLAG("ZCL_LAND_SUBMITTER", "env_build", "-", "-",
           "undocumented; first use tools/dev/land.sh:159")
 Z23_FLAG("ZCL_LAND_TEST_PICK_DELAY_MS", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:3870")
+          "undocumented; first use tools/command/native_dev_land.c:3937")
 Z23_FLAG("ZCL_LAND_TIMING", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:101")
 Z23_FLAG("ZCL_LAND_WORKTREE", "env_build", "-", "-",
@@ -1236,7 +1236,7 @@ Z23_FLAG("ZCL_LEGACY_ORACLE_MODE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/storage/src/dbwrapper.c:97")
 Z23_FLAG("ZCL_LIB_MODULES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_architecture_tree.sh:79")
+          "undocumented; first use tools/lint/check_clang_portability.sh:331")
 Z23_FLAG("ZCL_LINKGRAPH_OBJ_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/module-linkgraph.sh:44")
 Z23_FLAG("ZCL_LINT_BIN_DIR", "env_build", "build/bin", "-",
@@ -1244,17 +1244,17 @@ Z23_FLAG("ZCL_LINT_BIN_DIR", "env_build", "build/bin", "-",
 Z23_FLAG("ZCL_LINT_BUDGET_SEC", "env_build", "75", "-",
           "undocumented; first use tools/lint/run_lint.sh:81")
 Z23_FLAG("ZCL_LINT_CACHE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/run_lint.sh:537")
+          "undocumented; first use tools/lint/run_lint.sh:539")
 Z23_FLAG("ZCL_LINT_CACHE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/lint_cache.sh:344")
 Z23_FLAG("ZCL_LINT_CACHE_DIR_X", "env_build", "-", "-",
-          "undocumented; first use tools/lint/run_lint.sh:343")
+          "undocumented; first use tools/lint/run_lint.sh:345")
 Z23_FLAG("ZCL_LINT_CACHE_DUMP", "env_build", "-", "-",
-          "undocumented; first use tools/lint/run_lint.sh:456")
+          "undocumented; first use tools/lint/run_lint.sh:458")
 Z23_FLAG("ZCL_LINT_CACHE_MODE", "env_build", "off", "-",
-          "undocumented; first use tools/lint/run_lint.sh:341")
+          "undocumented; first use tools/lint/run_lint.sh:343")
 Z23_FLAG("ZCL_LINT_CACHE_TREE_KEY_X", "env_build", "-", "-",
-          "undocumented; first use tools/lint/run_lint.sh:342")
+          "undocumented; first use tools/lint/run_lint.sh:344")
 Z23_FLAG("ZCL_LINT_GATES_DIR_X", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:78")
 Z23_FLAG("ZCL_LINT_GATE_TIMING", "env_test", "-", "-",
@@ -1272,13 +1272,13 @@ Z23_FLAG("ZCL_LINT_REQUIRE_LINKGRAPH", "env_build", "0", "-",
 Z23_FLAG("ZCL_LINT_TIMING_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:69")
 Z23_FLAG("ZCL_LINT_TU_CACHE", "env_build", "1", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:289")
+          "undocumented; first use tools/lint/tu_result_cache.sh:413")
 Z23_FLAG("ZCL_LINT_TU_CACHE_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:321")
+          "undocumented; first use tools/lint/tu_result_cache.sh:445")
 Z23_FLAG("ZCL_LINT_TU_CACHE_GENERATIONS", "env_build", "6", "-",
           "undocumented; first use tools/lint/tu_result_cache.sh:162")
 Z23_FLAG("ZCL_LINT_VERBOSE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/run_lint.sh:619")
+          "undocumented; first use tools/lint/run_lint.sh:621")
 Z23_FLAG("ZCL_LOGROTATE_ROTATE_BYTES", "env_build", "536870912", "-",
           "undocumented; first use tools/scripts/zcl-logrotate.sh:56")
 Z23_FLAG("ZCL_LOGROTATE_TARGETS", "env_build", "-", "-",
@@ -1350,9 +1350,9 @@ Z23_FLAG("ZCL_MOCK_MODE", "env_build", "seam", "-",
 Z23_FLAG("ZCL_MOCK_STATE", "env_build", "/tmp/zcl-mock-state", "-",
           "undocumented; first use tools/scripts/stopwatch_artifact_symmetry_check.sh:257")
 Z23_FLAG("ZCL_MODEL_DRIFT_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_model_column_drift.sh:157")
+          "undocumented; first use tools/lint/lintc/gate_model_column_drift.c:526")
 Z23_FLAG("ZCL_MODEL_DRIFT_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_model_column_drift.sh:174")
+          "undocumented; first use tools/lint/lintc/gate_model_column_drift.c:519")
 Z23_FLAG("ZCL_MODEL_SQL_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:361")
 Z23_FLAG("ZCL_MODEL_SQL_FILE_FLOOR", "env_build", "80", "-",
@@ -1442,7 +1442,7 @@ Z23_FLAG("ZCL_NETCRAWL_ONION_PER_ROUND", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_NETCRAWL_ONION_TIMEOUT_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_crawler.c:198")
 Z23_FLAG("ZCL_NETDISRUPT_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8287")
+          "undocumented; first use Makefile:8347")
 Z23_FLAG("ZCL_NETMON_INTERVAL_SECS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_monitor.c:127")
 Z23_FLAG("ZCL_NETMON_RETAIN_ROWS", "env_runtime", "-", "-",
@@ -1454,9 +1454,9 @@ Z23_FLAG("ZCL_NET_TIP_REGRESSION_SECS", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_NETWORK_CRAWLER", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_crawler.c:161")
 Z23_FLAG("ZCL_NO_BLOCK_INDEX_FLAT_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_no_block_index_flat.sh:21")
+          "undocumented; first use tools/lint/lintc/gate_demoted_store_ratchets.c:367")
 Z23_FLAG("ZCL_NO_BLOCK_INDEX_FLAT_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_no_block_index_flat.sh:22")
+          "undocumented; first use tools/lint/lintc/gate_demoted_store_ratchets.c:369")
 Z23_FLAG("ZCL_NO_BUNDLE_FETCH", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_bundle_fetch.c:156")
 Z23_FLAG("ZCL_NODE_BIN", "env_build", "build/bin/zclassic23", "-",
@@ -1472,15 +1472,15 @@ Z23_FLAG("ZCL_NO_RUNTIME_ABORT_SCAN_ROOTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_SITE_FLOOR", "env_build", "15", "-",
           "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:406")
 Z23_FLAG("ZCL_NO_UTXO_PROJECTION_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_no_utxo_projection.sh:19")
+          "undocumented; first use tools/lint/lintc/gate_demoted_store_ratchets.c:356")
 Z23_FLAG("ZCL_NO_UTXO_PROJECTION_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_no_utxo_projection.sh:20")
+          "undocumented; first use tools/lint/lintc/gate_demoted_store_ratchets.c:358")
 Z23_FLAG("ZCL_NO_UTXOS_MIRROR_READ_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_utxos_mirror_read.c:337")
 Z23_FLAG("ZCL_NO_UTXOS_MIRROR_READ_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_utxos_mirror_read.c:230")
 Z23_FLAG("ZCL_NULLIFIER_BACKFILL", "env_runtime", "-", "-",
-          "undocumented; first use engine/entry/main.c:436")
+          "undocumented; first use engine/entry/main.c:441")
 Z23_FLAG("ZCL_OBS_SCAN_ALL", "env_runtime", "-", "-",
           "undocumented; first use tools/check_observability_pairing.c:198")
 Z23_FLAG("ZCL_OFFLINE_REPAIR", "env_runtime", "-", "-",
@@ -1488,7 +1488,7 @@ Z23_FLAG("ZCL_OFFLINE_REPAIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_OPERATOR_ACK_FILE", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:110")
 Z23_FLAG("ZCL_OPERATOR_LANE", "env_runtime", "-", "-",
-          "first use engine/entry/main.c:414; documented at docs/AGENT_API.md:837: ZCL_OPERATOR_LANE) and reports the lane name, runtime profile, datadir, ports,")
+          "first use engine/entry/main.c:419; documented at docs/AGENT_API.md:837: ZCL_OPERATOR_LANE) and reports the lane name, runtime profile, datadir, ports,")
 Z23_FLAG("ZCL_OPERATOR_PATHS_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_no_operator_paths.sh:208")
 Z23_FLAG("ZCL_OPERATOR_PATHS_TEST_IDENTITIES", "env_build", "-", "-",
@@ -1497,7 +1497,7 @@ Z23_FLAG("ZCL_ORACLE_TIP_MARGIN", "env_runtime", "-", "-",
           "test-only override of the oracle tip safety margin so a tiny synthetic "
           "chain still exercises the periodic-tick path; production never sets it")
 Z23_FLAG("ZCL_ORPHAN_PLACEMENT_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_orphan_placement.sh:36")
+          "undocumented; first use tools/lint/lintc/gate_ratchet_ports.c:1122")
 Z23_FLAG("ZCL_OWP_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_state_hygiene_fences.c:635")
 Z23_FLAG("ZCL_PACKAGE_SIGN_BIN", "env_build", "-", "-",
@@ -1563,9 +1563,9 @@ Z23_FLAG("ZCL_PEER_BAN_HOURS", "env_test", "-", "-",
 Z23_FLAG("ZCL_PEER_BAN_THRESHOLD", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_peer_scoring.c:849")
 Z23_FLAG("ZCL_PEER_FLOOR_SELFTEST", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_landing_proof.c:616")
+          "undocumented; first use tools/lint/lintc/gate_landing_proof.c:653")
 Z23_FLAG("ZCL_PEER_FLOOR_SELFTEST_FILE", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_landing_proof.c:618")
+          "undocumented; first use tools/lint/lintc/gate_landing_proof.c:655")
 Z23_FLAG("ZCL_PEERLESS_OK", "env_runtime", "-", "-",
           "undocumented; first use engine/conditions/src/peer_floor_violated.c:39")
 Z23_FLAG("ZCL_PEER_SCORE_DECAY_PER_MIN", "env_test", "-", "-",
@@ -1573,9 +1573,9 @@ Z23_FLAG("ZCL_PEER_SCORE_DECAY_PER_MIN", "env_test", "-", "-",
 Z23_FLAG("ZCL_PERF_REPORT_UNDER_TEST", "env_build", "-", "-",
           "undocumented; first use tools/dev/zcode_async_proof_perf_report_selftest.sh:6")
 Z23_FLAG("ZCL_PERSONA_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_persona_resolves.sh:37")
+          "undocumented; first use tools/lint/lintc/gate_def_parsers.c:288")
 Z23_FLAG("ZCL_PERSONA_ROW_FLOOR", "env_build", "3", "-",
-          "undocumented; first use tools/lint/check_persona_resolves.sh:38")
+          "undocumented; first use tools/lint/lintc/gate_def_parsers.c:290")
 Z23_FLAG("ZCL_PIPEFAIL_GATE_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_pipefail_status_pipe.sh:573")
 Z23_FLAG("ZCL_PIPEFAIL_GATE_CEILING", "env_build", "-", "-",
@@ -1585,7 +1585,7 @@ Z23_FLAG("ZCL_PIPEFAIL_GATE_FILE_FLOOR", "env_build", "1", "-",
 Z23_FLAG("ZCL_PIPEFAIL_GATE_SCAN_GLOB", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_pipefail_status_pipe.sh:576")
 Z23_FLAG("ZCL_PORTABILITY_SCOPE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:697")
+          "undocumented; first use tools/lint/check_clang_portability.sh:704")
 Z23_FLAG("ZCL_PORTABLE_CC", "env_build", "cc", "-",
           "undocumented; first use tools/scripts/c23_portable_sysroot.sh:15")
 Z23_FLAG("ZCL_PP_CUTTER", "env_build", "-", "-",
@@ -1605,9 +1605,9 @@ Z23_FLAG("ZCL_PPREV_REPAIR_MAX_READS", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_PRI_SEED", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_projection_replay_invariant.c:109")
 Z23_FLAG("ZCL_PRIV_RECEIPT_BASELINE", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_build_config.c:761")
+          "undocumented; first use tools/lint/lintc/gate_build_config.c:747")
 Z23_FLAG("ZCL_PRIV_RECEIPT_DEF_DIR", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_build_config.c:760")
+          "undocumented; first use tools/lint/lintc/gate_build_config.c:746")
 Z23_FLAG("ZCL_PROCESS_GROUP_EXEC", "env_build", "-", "-",
           "undocumented; first use tools/dev/node_lifecycle.sh:30")
 Z23_FLAG("ZCL_PROCESS_START_TOKEN", "env_build", "-", "-",
@@ -1617,11 +1617,11 @@ Z23_FLAG("ZCL_PRODUCER_DD", "env_build", "-", "-",
 Z23_FLAG("ZCL_PRODUCER_RPCPORT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/byte_exact_utxo_check.sh:20")
 Z23_FLAG("ZCL_PRODUCT_CONTEXTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_architecture_tree.sh:66")
+          "undocumented; first use tools/lint/repo_shape.sh:79")
 Z23_FLAG("ZCL_PROFILE", "env_build", "-", "-",
-          "first use tools/ship.sh:644; documented at docs/DEVELOPING.md:305: The compiler-speed loop is make dev or ZCL_PROFILE=dev make. It writes")
+          "first use tools/ship.sh:982; documented at docs/DEVELOPING.md:305: The compiler-speed loop is make dev or ZCL_PROFILE=dev make. It writes")
 Z23_FLAG("ZCL_PROJ_SCAN_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_projections_pure.sh:37")
+          "undocumented; first use tools/lint/lintc/gate_projection_purity_fences.c:223")
 Z23_FLAG("ZCL_PROMOTE_BUILD_TIMEOUT", "env_build", "600", "-",
           "undocumented; first use tools/scripts/promote_fuzz_artifacts.sh:69")
 Z23_FLAG("ZCL_PROMOTE_PATTERNINIT_BUILD_DIR", "env_build", "-", "-",
@@ -1635,11 +1635,11 @@ Z23_FLAG("ZCL_PROMOTE_STOCK_BUILD_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_PROMOTION_DUTY_PCT", "env_runtime", "-", "-",
           "first use engine/services/src/sovereign_promotion_service.c:199; documented at docs/CAPABILITY_INVENTORY.jsonl:1260: {'record':'capability','header':'engine/services/include/services/sovereign_promotion_s...")
 Z23_FLAG("ZCL_PROMPT_SECTIONS_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_prompt_templates.sh:36")
+          "undocumented; first use tools/lint/lintc/gate_def_parsers.c:510")
 Z23_FLAG("ZCL_PROMPT_TEMPLATE_ROW_FLOOR", "env_build", "8", "-",
-          "undocumented; first use tools/lint/check_prompt_templates.sh:37")
+          "undocumented; first use tools/lint/lintc/gate_def_parsers.c:512")
 Z23_FLAG("ZCL_PROMPT_TEMPLATES_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_prompt_templates.sh:35")
+          "undocumented; first use tools/lint/lintc/gate_def_parsers.c:508")
 Z23_FLAG("ZCL_PROOF_RAM_RESERVE_BYTES", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof.c:1799")
 Z23_FLAG("ZCL_PROOF_TIMEOUT_MS", "env_runtime", "-", "-",
@@ -1773,9 +1773,9 @@ Z23_FLAG("ZCL_REMOTE_DRY_RUN", "env_build", "1", "-",
 Z23_FLAG("ZCL_REMOTE_GUARD_ACTION", "env_build", "-", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:125")
 Z23_FLAG("ZCL_REMOTE_HOST", "make_var", "-", "-",
-          "first use Makefile:5446; documented at docs/AGENT_API.md:1338: make remote-node-plan ZCL_REMOTE_HOST=<ssh-host> to compare a remote node's")
+          "first use Makefile:5505; documented at docs/AGENT_API.md:1338: make remote-node-plan ZCL_REMOTE_HOST=<ssh-host> to compare a remote node's")
 Z23_FLAG("ZCL_REMOTE_HOSTS", "make_var", "-", "-",
-          "undocumented; first use Makefile:5449")
+          "undocumented; first use Makefile:5508")
 Z23_FLAG("ZCL_REMOTE_INSTALL_ARTIFACT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:117")
 Z23_FLAG("ZCL_REMOTE_INSTALL_BIN", "env_build", "-", "-",
@@ -1801,11 +1801,11 @@ Z23_FLAG("ZCL_REORG_RATCHET_FILES", "env_build", "-", "-",
 Z23_FLAG("ZCL_REPLAY_COUNT_ONLY", "env_runtime", "-", "-",
           "first use engine/jobs/src/replay_count_only.c:39; documented at docs/work/fail-safe-architecture.md:67: boot force-raise (stage_repair.c:127), ZCL_REPLAY_COUNT_ONLY cursor")
 Z23_FLAG("ZCL_REPO_SHAPE_MAKEFILE", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/lib.c:369")
+          "undocumented; first use tools/lint/lintc/lib.c:763")
 Z23_FLAG("ZCL_REPO_SHAPE_MODULE_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/repo_shape.sh:13")
 Z23_FLAG("ZCL_REPO_SHAPE_ROOT", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/lib.c:237")
+          "undocumented; first use tools/lint/lintc/lib.c:631")
 Z23_FLAG("ZCL_REPRO_BUILD_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/repro_build.sh:69")
 Z23_FLAG("ZCL_REPRO_CAPTURE_NAME", "env_build", "-", "-",
@@ -1827,7 +1827,7 @@ Z23_FLAG("ZCL_REQUIRE_BACKUP_VERIFIED", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_REQUIRE_MINGW", "env_build", "0", "-",
           "first use tools/lint/check_windows_acceptance.sh:367; documented at docs/DEFENSIVE_CODING.md:1018: | **check-windows-platform-seam** | RATCHET | Windows portability of the platform seam:...")
 Z23_FLAG("ZCL_RESULT_DISCARD_SCAN_DIRS_FOR_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_result_discard.sh:56")
+          "undocumented; first use tools/lint/lintc/gate_source_patterns.c:372")
 Z23_FLAG("ZCL_RETIRED_PROTOCOL_ROOT", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:229")
 Z23_FLAG("ZCL_RETRIEVAL_BENCH_KEEP", "env_build", "0", "-",
@@ -1845,7 +1845,7 @@ Z23_FLAG("ZCL_RETRIEVAL_GOLD_CHECK", "env_build", "-", "-",
 Z23_FLAG("ZCL_RETRIEVAL_GOLD_CORPUS", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:22")
 Z23_FLAG("ZCL_ROOT_STRAY_EXTRA_FOR_TEST", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_git_scan_a.c:124")
+          "undocumented; first use tools/lint/lintc/gate_git_scan_a.c:125")
 Z23_FLAG("ZCL_ROUNDTRIP_DATADIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:58")
 Z23_FLAG("ZCL_ROUNDTRIP_LOG", "env_build", "-", "-",
@@ -1929,33 +1929,33 @@ Z23_FLAG("ZCL_SHELL_HOST_SS_CEILING", "env_build", "63", "-",
 Z23_FLAG("ZCL_SHELL_HOST_STAT_CEILING", "env_build", "108", "-",
           "undocumented; first use tools/lint/lintc/gate_shell_host_assumptions.c:549")
 Z23_FLAG("ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA", "env_build", "0", "-",
-          "first use tools/ship.sh:1156; documented at docs/agent/LESSONS.md:150: ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1 is inert unless the")
+          "first use tools/ship.sh:1246; documented at docs/agent/LESSONS.md:150: ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1 is inert unless the")
 Z23_FLAG("ZCL_SHIP_ALLOW_PROOF_SERVER", "env_build", "0", "-",
-          "first use tools/ship.sh:583; documented at docs/BUILD.md:791: promotion additionally requires ZCL_SHIP_ALLOW_PROOF_SERVER=1. Preflight")
+          "first use tools/ship.sh:913; documented at docs/BUILD.md:791: promotion additionally requires ZCL_SHIP_ALLOW_PROOF_SERVER=1. Preflight")
 Z23_FLAG("ZCL_SHIP_CRASH_SAMPLES", "env_build", "3", "-",
-          "undocumented; first use tools/ship.sh:115")
+          "undocumented; first use tools/ship.sh:155")
 Z23_FLAG("ZCL_SHIP_HOSTS", "env_build", "-", "-",
-          "first use tools/ship.sh:66; documented at docs/BUILD.md:786: ZCL_SHIP_HOSTS='user@host-a user@host-b user@host-c' make ship")
+          "first use tools/ship.sh:106; documented at docs/BUILD.md:786: ZCL_SHIP_HOSTS='user@host-a user@host-b user@host-c' make ship")
 Z23_FLAG("ZCL_SHIP_LOCAL_POLL_SECONDS", "env_build", "10", "-",
-          "undocumented; first use tools/ship.sh:1215")
+          "undocumented; first use tools/ship.sh:1584")
 Z23_FLAG("ZCL_SHIP_PROOF_SERVER", "env_build", "-", "-",
-          "first use tools/ship.sh:67; documented at docs/BUILD.md:790: with ZCL_SHIP_PROOF_SERVER. That host is skipped by default; an intentional")
+          "first use tools/ship.sh:107; documented at docs/BUILD.md:790: with ZCL_SHIP_PROOF_SERVER. That host is skipped by default; an intentional")
 Z23_FLAG("ZCL_SHIP_REMOTE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/proof_server_pin.sh:5")
 Z23_FLAG("ZCL_SHIP_REMOTE_EXEC", "env_build", "-", "-",
           "undocumented; first use tools/scripts/ship_progress_lib.sh:772")
 Z23_FLAG("ZCL_SHIP_REMOTE_HEALTH_SECONDS", "env_build", "900", "-",
-          "undocumented; first use tools/ship.sh:111")
+          "undocumented; first use tools/ship.sh:151")
 Z23_FLAG("ZCL_SHIP_REMOTE_SILENCE_SECONDS", "env_build", "300", "-",
-          "undocumented; first use tools/ship.sh:112")
+          "undocumented; first use tools/ship.sh:152")
 Z23_FLAG("ZCL_SHIP_ROLLBACK_HEALTH_SECONDS", "env_build", "600", "-",
-          "undocumented; first use tools/ship.sh:113")
+          "undocumented; first use tools/ship.sh:153")
 Z23_FLAG("ZCL_SHIP_ROLLBACK_SILENCE_SECONDS", "env_build", "180", "-",
-          "undocumented; first use tools/ship.sh:114")
+          "undocumented; first use tools/ship.sh:154")
 Z23_FLAG("ZCL_SHIP_RPC_BUDGETS", "env_build", "-", "-",
-          "undocumented; first use tools/ship.sh:117")
+          "undocumented; first use tools/ship.sh:157")
 Z23_FLAG("ZCL_SHIP_STAGE_JOBS", "env_build", "4", "-",
-          "undocumented; first use tools/ship.sh:164")
+          "undocumented; first use tools/ship.sh:204")
 Z23_FLAG("ZCL_SHIP_TEST_FAIL_ALWAYS", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_ship_remote_transaction.sh:73")
 Z23_FLAG("ZCL_SHIP_TEST_FAIL_MARKER", "env_build", "-", "-",
@@ -1969,7 +1969,7 @@ Z23_FLAG("ZCL_SHIP_TEST_PIDFILE", "env_build", "-", "-",
 Z23_FLAG("ZCL_SHIP_TEST_SOURCE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_ship_remote_transaction.sh:89")
 Z23_FLAG("ZCL_SHIP_UNKNOWN_SAMPLES", "env_build", "5", "-",
-          "undocumented; first use tools/ship.sh:116")
+          "undocumented; first use tools/ship.sh:156")
 Z23_FLAG("ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_ratchet_ports.c:571")
 Z23_FLAG("ZCL_SIMNET_CONTRACT_SEED", "env_test", "-", "-",
@@ -2059,7 +2059,7 @@ Z23_FLAG("ZCL_SLO_WINDOW_HOURS", "env_build", "72", "-",
 Z23_FLAG("ZCL_SOAK_EVIDENCE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:128")
 Z23_FLAG("ZCL_SOAK_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8152")
+          "undocumented; first use Makefile:8212")
 Z23_FLAG("ZCL_SOAK_LAG_WARN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/lane_health.sh:46")
 Z23_FLAG("ZCL_SOAK_NOW", "env_build", "-", "-",
@@ -2113,7 +2113,7 @@ Z23_FLAG("ZCL_SPECIALISTS_FLOOR", "env_build", "10", "-",
 Z23_FLAG("ZCL_SPECIALISTS_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_specialists.c:511")
 Z23_FLAG("ZCL_SQLITE_CHILD_DB", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_sqlite.c:240")
+          "undocumented; first use tests/harness/src/test_sqlite.c:3071")
 Z23_FLAG("ZCL_STAGE_STALL_ESCALATE_WINDOWS", "env_runtime", "-", "-",
           "undocumented; first use engine/supervisors/src/staged_sync_supervisor.c:66")
 Z23_FLAG("ZCL_STALE_FACTS_EMIT_BASELINE", "env_build", "0", "-",
@@ -2133,11 +2133,11 @@ Z23_FLAG("ZCL_STATUS_REASON_GATE_SCAN_GLOB", "env_build", "-", "-",
 Z23_FLAG("ZCL_STICKY_REQUIRE_ALL", "env_build", "0", "-",
           "undocumented; first use tools/scripts/sticky_matrix.sh:36")
 Z23_FLAG("ZCL_STICKY_VERDICT_DIR", "make_var", "-", "-",
-          "undocumented; first use Makefile:7945")
+          "undocumented; first use Makefile:8005")
 Z23_FLAG("ZCL_STOPWATCH_CHECKPOINT_HEIGHT", "env_build", "3056758", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:135")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8187")
+          "undocumented; first use Makefile:8247")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_NOW", "env_build", "-", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:442")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_LAG_BUDGET", "env_build", "2000", "-",
@@ -2153,17 +2153,17 @@ Z23_FLAG("ZCL_STORAGE_CLASS", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_STOREPROOF_KEEP", "env_build", "0", "-",
           "undocumented; first use tools/scripts/store_sell_operator_proof.sh:109")
 Z23_FLAG("ZCL_STRAY_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:1060")
+          "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:1079")
 Z23_FLAG("ZCL_STRESS_TESTS", "env_test", "-", "-",
           "first use tests/harness/src/test_chain_advance_atomicity.c:377; documented at docs/AGENT_TRAPS.md:246: Onion gates self-SKIPing is SKIP-not-FAIL honesty, not a broken suite.** test_onion_boo...")
 Z23_FLAG("ZCL_SUPDOM_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_supervisor_domain.sh:86")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_domain.c:561")
 Z23_FLAG("ZCL_SUPDOM_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_supervisor_domain.sh:85")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_domain.c:519")
 Z23_FLAG("ZCL_SUPDOM_COVERAGE_ONLY", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_supervisor_domain.sh:112")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_domain.c:565")
 Z23_FLAG("ZCL_SUPDOM_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_supervisor_domain.sh:21")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_domain.c:554")
 Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_supervisor_progress_declared.c:621")
 Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_CHILD_FLOOR", "env_build", "30", "-",
@@ -2173,7 +2173,7 @@ Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_FILE_FLOOR", "env_build", "200", "-",
 Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_supervisor_progress_declared.c:618")
 Z23_FLAG("ZCL_SUPERVISOR_WORKER_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_supervisor_domain.sh:170")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_domain_workers.c:149")
 Z23_FLAG("ZCL_SUPREG_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_supervisor_registration.c:416")
 Z23_FLAG("ZCL_SUPREG_COVERAGE", "env_build", "1", "-",
@@ -2223,13 +2223,13 @@ Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:277")
 Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:1599; documented at docs/work/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
+          "first use tests/harness/src/test_parallel.c:1640; documented at docs/work/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:1582; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
+          "first use tests/harness/src/test_parallel.c:1623; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
 Z23_FLAG("ZCL_TESTCACHE_STORE_ROOT", "env_test", "-", "-",
           "first use tests/harness/src/testcache.c:618; documented at docs/zrc/0007-asynchronous-p2p-landing.md:171: 3. **Unpin the verdict store.** dev_proof.c sets ZCL_TESTCACHE_STORE_ROOT")
 Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1443")
+          "undocumented; first use tests/harness/src/test_parallel.c:1484")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_boot_phase.c:410")
 Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",
@@ -2253,15 +2253,15 @@ Z23_FLAG("ZCL_TEST_TIMEOUT_SCALE", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_TIMING_JSON", "env_build", "-", "-",
           "undocumented; first use tools/dev/test-registry-report.sh:44")
 Z23_FLAG("ZCL_THREADSUP_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_thread_supervision.sh:88")
+          "undocumented; first use tools/lint/lintc/gate_thread_supervision_scan.c:471")
 Z23_FLAG("ZCL_THREADSUP_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_thread_supervision.sh:136")
+          "undocumented; first use tools/lint/lintc/gate_thread_supervision.c:609")
 Z23_FLAG("ZCL_THREADSUP_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_thread_supervision.sh:135")
+          "undocumented; first use tools/lint/lintc/gate_thread_supervision.c:557")
 Z23_FLAG("ZCL_THREADSUP_COVERAGE_ONLY", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_thread_supervision.sh:169")
+          "undocumented; first use tools/lint/lintc/gate_thread_supervision.c:613")
 Z23_FLAG("ZCL_THREADSUP_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_thread_supervision.sh:49")
+          "undocumented; first use tools/lint/lintc/gate_thread_supervision.c:598")
 Z23_FLAG("ZCL_TIMINGS_CACHE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/build_bench.sh:65")
 Z23_FLAG("ZCL_TOOLS_LINK_JOBS", "env_build", "1", "-",
@@ -2305,23 +2305,23 @@ Z23_FLAG("ZCL_TRANSACTION_TYPE_CATALOG", "env_build", "-", "-",
 Z23_FLAG("ZCL_TU_CACHE_DIGEST_SELFTEST_VANISH", "env_build", "-", "-",
           "undocumented; first use tools/lint/tu_result_cache.sh:293")
 Z23_FLAG("ZCL_TU_CACHE_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:380")
+          "undocumented; first use tools/lint/tu_result_cache.sh:504")
 Z23_FLAG("ZCL_TU_CACHE_LIB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:563")
+          "undocumented; first use tools/lint/check_clang_portability.sh:570")
 Z23_FLAG("ZCL_TU_CACHE_ON", "env_build", "0", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:352")
+          "undocumented; first use tools/lint/tu_result_cache.sh:476")
 Z23_FLAG("ZCL_TU_CACHE_SCRATCH", "env_build", "-", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:364")
+          "undocumented; first use tools/lint/tu_result_cache.sh:488")
 Z23_FLAG("ZCL_TU_CACHE_SELFTEST_FORCE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:288")
+          "undocumented; first use tools/lint/tu_result_cache.sh:412")
 Z23_FLAG("ZCL_TU_CACHE_STATS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:335")
+          "undocumented; first use tools/lint/tu_result_cache.sh:459")
 Z23_FLAG("ZCL_TU_SELF_CC", "env_build", "-", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:553")
+          "undocumented; first use tools/lint/tu_result_cache.sh:677")
 Z23_FLAG("ZCL_TU_SELF_OUT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:551")
+          "undocumented; first use tools/lint/tu_result_cache.sh:675")
 Z23_FLAG("ZCL_TU_STUB_RUNS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/tu_result_cache.sh:605")
+          "undocumented; first use tools/lint/tu_result_cache.sh:729")
 Z23_FLAG("ZCL_UNATTENDED_PUBLISH_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_unattended_publish.c:446")
 Z23_FLAG("ZCL_UNATTENDED_PUBLISH_TEST_REGEX", "env_build", "-", "-",
