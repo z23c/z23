@@ -1216,8 +1216,14 @@ static int msc_check_mint_anchor_shutdown_ordering(const char *boot_src,
     const char *offline_marker = boot_src
         ? strstr(boot_src, "-mint-anchor: offline reducer stages initialized")
         : NULL;
+    /* Match the call, not its argument list. The boot split (boot.c ->
+     * boot_steps.c) moved app_init's locals into a step-state struct, so the
+     * middle argument is now `s->params` where it was `params`; the call site
+     * itself, and the ordering this checks, did not move. Pinning the whole
+     * argument list made the check silently unfindable — a NULL here fails the
+     * assertion rather than reporting that the contract broke. */
     const char *services_start = boot_src
-        ? strstr(boot_src, "app_init_services(ctx, params, &g_svc)")
+        ? strstr(boot_src, "app_init_services(ctx,")
         : NULL;
     MSC_CHECK("mint-anchor app_init exits before app_init_services",
               offline_marker && services_start && offline_marker < services_start);
