@@ -13,9 +13,12 @@
 
 #include "test/test_core.h"
 
+#include "command/native_command.h"
 #include "command/native_dev_index_catalog.h"
 #include "command/native_dev_index_ingest.h"
 #include "command/native_dev_index_search.h"
+#include "json/json.h"
+#include "kernel/command_registry.h"
 #include "platform/clock.h"
 #include "platform/directory_compat.h"
 
@@ -82,6 +85,41 @@ static int64_t dvi_fake_mono(void *self)
 static int64_t dvi_fake_wall(void *self)
 {
     return atomic_load(&((struct dvi_fake_clock *)self)->wall_ms);
+}
+
+/* Drives one dev.index.* handler with a hand-built request whose input JSON
+ * carries the DOCUMENTED CLI spelling of the two overrides ("index" and
+ * "state-root", hyphenated) — the same keys the CLI flag parser
+ * (nc_split_flag in native_command.c does no hyphen/underscore translation)
+ * hands the handler after splitting "--index=..." / "--state-root=...".
+ * Calling the handler directly (rather than through the catalog dispatcher)
+ * avoids needing a ZCL_DEV_BUILD-wired handler table in the test binary,
+ * while still exercising the exact json_get(request->input, "state-root")
+ * lookup the bug was in. */
+static bool dvi_dispatch(const char *leaf, const char *index_val,
+                         const char *state_root_val,
+                         struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    if (index_val)
+        (void)json_push_kv_str(&input, "index", index_val);
+    if (state_root_val)
+        (void)json_push_kv_str(&input, "state-root", state_root_val);
+    struct zcl_command_request request = {
+        .input = &input,
+        .view = "normal",
+    };
+    zcl_command_reply_init(reply, "");
+    if (strcmp(leaf, "dev.index.ingest") == 0)
+        zcl_native_handle_dev_index_ingest(&request, reply);
+    else if (strcmp(leaf, "dev.index.status") == 0)
+        zcl_native_handle_dev_index_status(&request, reply);
+    else
+        return false;
+    json_free(&input);
+    return true;
 }
 
 int test_dev_index(void);
@@ -369,6 +407,45 @@ int test_dev_index(void)
 
     TEST("index: an unknown source id is refused by dev_index_source_find") {
         ASSERT(dev_index_source_find("not-a-real-source") == NULL);
+        PASS();
+    }
+
+    TEST("index: dispatch accepts the documented --index/--state-root "
+        "spelling (hyphenated), not the underscored form") {
+        char disp_parent[512];
+        test_make_tmpdir(disp_parent, sizeof(disp_parent), "dev_index",
+                         "dispatch");
+        char disp_root[600], disp_board[700], disp_index[700];
+        (void)snprintf(disp_root, sizeof(disp_root), "%s/root", disp_parent);
+        (void)snprintf(disp_board, sizeof(disp_board), "%s/board", disp_root);
+        (void)snprintf(disp_index, sizeof(disp_index), "%s/index.db",
+                      disp_parent);
+        ASSERT(dvi_mkdir(disp_board));
+        char disp_file[800];
+        (void)snprintf(disp_file, sizeof(disp_file), "%s/node1.jsonl",
+                      disp_board);
+        ASSERT(dvi_write(
+            disp_file,
+            "{\"ts\":\"2026-09-01T00:00:00Z\",\"id\":\"d1\",\"host\":"
+            "\"node1\",\"agent\":\"claude\",\"kind\":\"problem\",\"ref\":\"\","
+            "\"text\":\"dispatch\"}\n"));
+
+        struct zcl_command_reply ingest_reply;
+        ASSERT(dvi_dispatch("dev.index.ingest", disp_index, disp_root,
+                            &ingest_reply));
+        ASSERT(ingest_reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_int(json_get(&ingest_reply.data, "rows_added")) == 1);
+        zcl_command_reply_free(&ingest_reply);
+
+        struct zcl_command_reply status_reply;
+        ASSERT(dvi_dispatch("dev.index.status", disp_index, disp_root,
+                            &status_reply));
+        ASSERT(status_reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_int(json_get(&status_reply.data, "index_exists"))
+              != 0);
+        zcl_command_reply_free(&status_reply);
+
+        (void)test_rm_rf_recursive(disp_parent);
         PASS();
     }
 

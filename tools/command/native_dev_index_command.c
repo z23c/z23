@@ -32,7 +32,7 @@ static bool dvi_open(const struct zcl_command_request *request,
     const char *index_override =
         json_get_str(json_get(request->input, "index"));
     const char *state_root_override =
-        json_get_str(json_get(request->input, "state_root"));
+        json_get_str(json_get(request->input, "state-root"));
     char err[DVI_ERR_MAX];
     if (dev_index_db_open(create, index_override, state_root_override, db,
                           out_missing, err, sizeof(err)))
@@ -79,7 +79,7 @@ void zcl_native_handle_dev_index_ingest(
         return;
     }
     const char *state_root_override =
-        json_get_str(json_get(request->input, "state_root"));
+        json_get_str(json_get(request->input, "state-root"));
     sqlite3 *db = NULL;
     if (!dvi_open(request, reply, "dev.index.ingest", true, &db, NULL))
         return;
@@ -136,7 +136,7 @@ void zcl_native_handle_dev_index_status(
         return;
     }
     const char *state_root_override =
-        json_get_str(json_get(request->input, "state_root"));
+        json_get_str(json_get(request->input, "state-root"));
     sqlite3 *db = NULL;
     bool missing = false;
     if (!dvi_open(request, reply, "dev.index.status", false, &db, &missing))
@@ -186,30 +186,76 @@ void zcl_native_handle_dev_index_status(
     json_free(&sources_arr);
 }
 
-void zcl_native_handle_dev_index_search(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+/* Validates query/source/limit, replying and returning false on the first
+ * problem. *limit is always filled in (the declared default when absent).
+ * Split out of zcl_native_handle_dev_index_search to keep that function at
+ * open-db/dispatch/reply, not input validation too. */
+static bool dvi_search_validate_input(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply,
+                                      const char **query, const char **source,
+                                      size_t *limit)
 {
-    const char *query = json_get_str(json_get(request->input, "query"));
-    if (!query || !query[0]) {
+    *query = json_get_str(json_get(request->input, "query"));
+    if (!*query || !(*query)[0]) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "BAD_INPUT",
                                "dev.index.search", false, false,
                                "query must be non-empty", "");
-        return;
+        return false;
     }
-    const char *source = json_get_str(json_get(request->input, "source"));
-    if (source && source[0] && !dev_index_source_find(source)) {
+    *source = json_get_str(json_get(request->input, "source"));
+    if (*source && (*source)[0] && !dev_index_source_find(*source)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "SOURCE_UNKNOWN",
                                "dev.index.search", false, false,
-                               "no such source id", source);
-        return;
+                               "no such source id", *source);
+        return false;
     }
     const struct json_value *limit_v = json_get(request->input, "limit");
-    size_t limit = (limit_v && limit_v->type == JSON_INT &&
-                   json_get_int(limit_v) > 0)
-                      ? (size_t)json_get_int(limit_v)
-                      : DEV_INDEX_SEARCH_DEFAULT_LIMIT;
+    *limit = (limit_v && limit_v->type == JSON_INT && json_get_int(limit_v) > 0)
+                ? (size_t)json_get_int(limit_v)
+                : DEV_INDEX_SEARCH_DEFAULT_LIMIT;
+    return true;
+}
+
+static void dvi_push_empty_hits(struct zcl_command_reply *reply)
+{
+    struct json_value empty;
+    json_init(&empty);
+    json_set_array(&empty);
+    (void)json_push_kv(&reply->data, "hits", &empty);
+    json_free(&empty);
+    (void)json_push_kv_int(&reply->data, "count", 0);
+}
+
+static void dvi_push_hits(struct zcl_command_reply *reply,
+                          const struct dev_index_search_result *result)
+{
+    struct json_value hits;
+    json_init(&hits);
+    json_set_array(&hits);
+    for (size_t i = 0; i < result->count; i++) {
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        (void)json_push_kv_str(&row, "source", result->hits[i].source_id);
+        (void)json_push_kv_str(&row, "ts", result->hits[i].ts);
+        (void)json_push_kv_str(&row, "text", result->hits[i].text);
+        (void)json_push_back(&hits, &row);
+        json_free(&row);
+    }
+    (void)json_push_kv(&reply->data, "hits", &hits);
+    json_free(&hits);
+    (void)json_push_kv_int(&reply->data, "count", (int64_t)result->count);
+}
+
+void zcl_native_handle_dev_index_search(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    const char *query = NULL, *source = NULL;
+    size_t limit = DEV_INDEX_SEARCH_DEFAULT_LIMIT;
+    if (!dvi_search_validate_input(request, reply, &query, &source, &limit))
+        return;
 
     sqlite3 *db = NULL;
     bool missing = false;
@@ -217,12 +263,7 @@ void zcl_native_handle_dev_index_search(
         return;
     (void)json_push_kv_int(&reply->data, "index_exists", !missing);
     if (missing) {
-        struct json_value empty;
-        json_init(&empty);
-        json_set_array(&empty);
-        (void)json_push_kv(&reply->data, "hits", &empty);
-        json_free(&empty);
-        (void)json_push_kv_int(&reply->data, "count", 0);
+        dvi_push_empty_hits(reply);
         return;
     }
 
@@ -237,21 +278,5 @@ void zcl_native_handle_dev_index_search(
         return;
     }
     dev_index_db_close(db);
-
-    struct json_value hits;
-    json_init(&hits);
-    json_set_array(&hits);
-    for (size_t i = 0; i < result.count; i++) {
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "source", result.hits[i].source_id);
-        (void)json_push_kv_str(&row, "ts", result.hits[i].ts);
-        (void)json_push_kv_str(&row, "text", result.hits[i].text);
-        (void)json_push_back(&hits, &row);
-        json_free(&row);
-    }
-    (void)json_push_kv(&reply->data, "hits", &hits);
-    json_free(&hits);
-    (void)json_push_kv_int(&reply->data, "count", (int64_t)result.count);
+    dvi_push_hits(reply, &result);
 }

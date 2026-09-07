@@ -29,36 +29,77 @@ row there — nothing else hand-derives a path a second time.
 ## The three leaves
 
 - `z23-dev dev index ingest [--source=<id>]` — read each declared source (or
-  just one) from its saved byte-offset cursor to the last complete line,
-  insert one row per new line, and advance the cursor.
+  just one) from its saved cursor to the last complete line, insert one row
+  per new line (an already-seen line is silently ignored, never
+  duplicated — see "Identity, not just a cursor" below), and advance the
+  cursor. Reports `rows_added` and `rows_skipped` (lines that failed to
+  parse this run, or a format's own header line) per source. A maintenance
+  leaf: it walks real files, budgeted at 5000ms, not the 250ms a read leaf
+  gets (measured ~3.1s over ~48k real rows).
 - `z23-dev dev index status [--source=<id>]` — per source: row count, newest
-  ts seen, seconds since that ts, and bytes not yet ingested. Read-only.
+  ts seen, seconds since that ts, bytes not yet ingested, and cumulative
+  `rows_skipped`. Read-only, and never creates a missing index — reports
+  `index_exists: false` with no per-source data instead.
 - `z23-dev dev index search <query> [--source=<id>] [--limit=N]` — one FTS5
   `MATCH` query, newest-first. A log line's `key=value` tokens (and every
   structured source's short fields) are flattened into `key:value` search
   terms at ingest time, so `z23-dev dev index search 'kind:result'` matches
-  the flattened term the same way a bare word matches free text.
+  the flattened term the same way a bare word matches free text. Also never
+  creates a missing index.
 
-All three write to and read from one file:
-`~/.local/state/zclassic23/index/index.db` (override the zclassic23 root
-with `ZCL_INDEX_STATE_DIR`, same convention as the sibling evidence-ledger
-paths). It holds a `rows` table (source_id, seq, ts, kind, three generic
-field columns, the raw line), a `cursors` table (one row per file:
-inode/size/byte-offset), and an FTS5 virtual table over the flattened text.
+Every leaf accepts two independent overrides, both explicit CLI flags —
+never an environment variable:
+
+- `--index=<path>` — the sqlite file location, used verbatim.
+- `--state-root=<dir>` — the root every declared source is read from
+  (applies uniformly, whether a source is normally zclassic23-rooted or
+  dev-state-rooted).
+
+Redirecting one never silently redirects the other: an earlier version read
+both from the same `ZCL_INDEX_STATE_DIR` environment variable, so pointing
+the index somewhere else also pointed source discovery there and made the
+real sources disappear. Neither flag is set, the default index path is
+`~/.local/state/zclassic23/index/index.db`. The database holds a `rows`
+table (source_id, seq, ts, kind, three generic field columns, the raw line,
+and `row_key`), a `cursors` table (one row per file: inode/size/byte-offset/
+prefix hash/cumulative rows_skipped), and an FTS5 virtual table over the
+flattened text.
+
+## Identity, not just a cursor
+
+A `rows` row is only ever inserted once for a given (source_id, row_key)
+pair, where `row_key` is a SHA3-256 hash of the row's raw line bytes,
+enforced by a `UNIQUE` index and `INSERT ... ON CONFLICT DO NOTHING`. The
+byte-offset cursor is only an optimisation for where to resume reading —
+correctness never depends on it alone. This matters because board.sh's
+atomic `mv` onto a fresh file changes that file's inode: an earlier version
+treated any inode change as "rotated" and restarted from byte 0, which
+re-inserted every already-seen line as a "new" row (verified 5 rows became
+10 after one `mv`). Now:
+
+- **A rename onto identical bytes** (`mv` with the same content) does not
+  duplicate anything: even restarting from 0 and re-reading every line, the
+  identical (source_id, row_key) pairs are rejected by the `UNIQUE` index.
+- **A rename onto grown content** (the common case — a writer builds a temp
+  file with the old lines plus new ones, then `mv`s it into place) ingests
+  exactly the new lines: the old ones conflict and are ignored.
+- **A same-size in-place rewrite** (content changes, inode and size do not)
+  is not missed. Each cursor also stores a SHA3-256 hash of the file's own
+  first `byte_offset` bytes as of the last successful ingest. The next
+  ingest re-hashes those same bytes off whatever is on disk now and only
+  trusts the saved offset when the two hashes still match — inode and size
+  alone are checked only as a cheap bound (a saved offset larger than the
+  current file size can never be trusted), never as the whole answer.
 
 ## The incremental rule
 
-Ingest never re-reads what it already saw. Per file, `cursors` keeps the
-inode, size, and byte offset consumed so far; the next ingest seeks there
-and reads only new complete lines (a trailing line with no final newline
-yet is left for the next ingest, never partially indexed). If the file's
-inode changed or its size dropped below the saved offset — rotated or
-truncated — ingest restarts that file from byte 0 rather than seeking past
-data that is no longer there. Every file of one source ingests inside a
-single transaction: an earlier version committing one row at a time forced
-one fsync-adjacent WAL commit per row, measured making the real
-`host_gc/tmp_gc.log` file (256 log files' worth in one ingest call) take
-minutes instead of seconds.
+Ingest never re-reads what it already saw when the offset it saved is still
+trustworthy (see above). A trailing line with no final newline yet is left
+for the next ingest, never partially indexed. Every file of one source
+ingests inside a single transaction: an earlier version committing one row
+at a time forced one fsync-adjacent WAL commit per row, measured making the
+real `host_gc/tmp_gc.log` file (256 log files' worth in one ingest call)
+take minutes instead of seconds.
 
 ## What is NOT indexed yet
 

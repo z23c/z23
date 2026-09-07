@@ -77,6 +77,41 @@ static void dev_index_set_err(char *err, size_t cap, const char *fmt,
     (void)snprintf(err, cap, fmt, detail ? detail : "");
 }
 
+/* index.db's default location: <state_root_override, or the zclassic23
+ * root evidence_ledger_home_rel_dir resolves>/index/index.db. Split out of
+ * dev_index_db_path so that function stays override-or-default plus one
+ * ensure-parent-dir step. */
+static bool dev_index_default_db_path(const char *state_root_override,
+                                      char *out, size_t cap)
+{
+    char root[1024];
+    if (state_root_override && state_root_override[0]) {
+        if ((size_t)snprintf(root, sizeof(root), "%s", state_root_override) >=
+            sizeof(root))
+            return false;
+    } else if (!evidence_ledger_home_rel_dir(DEV_INDEX_DB_HOME_REL, root,
+                                             sizeof(root))) {
+        return false;
+    }
+    return (size_t)snprintf(out, cap, "%s/index/index.db", root) < cap;
+}
+
+/* Creates the directory holding `path`, if any, at 0700. A no-op (success)
+ * for a bare filename with no directory component. */
+static bool dev_index_ensure_parent_dir(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+        return true;
+    char dir[1024];
+    size_t dlen = (size_t)(slash - path);
+    if (dlen >= sizeof(dir))
+        return false;
+    memcpy(dir, path, dlen);
+    dir[dlen] = '\0';
+    return !dir[0] || platform_directory_ensure(dir, 0700);
+}
+
 bool dev_index_db_path(const char *index_override,
                        const char *state_root_override, bool create,
                        char *out, size_t cap)
@@ -84,37 +119,15 @@ bool dev_index_db_path(const char *index_override,
     if (!out || cap == 0)
         return false;
     char path[1024];
-    if (index_override && index_override[0]) {
-        if ((size_t)snprintf(path, sizeof(path), "%s", index_override) >=
-            sizeof(path))
-            return false;
-    } else {
-        char root[1024];
-        if (state_root_override && state_root_override[0]) {
-            if ((size_t)snprintf(root, sizeof(root), "%s",
-                                 state_root_override) >= sizeof(root))
-                return false;
-        } else if (!evidence_ledger_home_rel_dir(DEV_INDEX_DB_HOME_REL, root,
-                                                 sizeof(root))) {
-            return false;
-        }
-        if ((size_t)snprintf(path, sizeof(path), "%s/index/index.db", root) >=
-            sizeof(path))
-            return false;
-    }
-    if (create) {
-        char *slash = strrchr(path, '/');
-        if (slash) {
-            char dir[1024];
-            size_t dlen = (size_t)(slash - path);
-            if (dlen >= sizeof(dir))
-                return false;
-            memcpy(dir, path, dlen);
-            dir[dlen] = '\0';
-            if (dir[0] && !platform_directory_ensure(dir, 0700))
-                return false;
-        }
-    }
+    bool resolved = (index_override && index_override[0])
+                       ? (size_t)snprintf(path, sizeof(path), "%s",
+                                         index_override) < sizeof(path)
+                       : dev_index_default_db_path(state_root_override, path,
+                                                   sizeof(path));
+    if (!resolved)
+        return false;
+    if (create && !dev_index_ensure_parent_dir(path))
+        return false;
     return (size_t)snprintf(out, cap, "%s", path) < cap;
 }
 
