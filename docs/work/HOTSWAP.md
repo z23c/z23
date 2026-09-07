@@ -263,7 +263,7 @@ build/bin/z23-dev -datadir="$HOME/.zclassic-c23-dev" -rpcport=18252 \
 
 For a single changed owner or island member, inotify waits for a 1 ms quiet
 window and calls the resident action executor directly. The action plan is
-loaded from `build/hotswap/fast/flags.env` and invalidated by the Makefile,
+loaded from `build/hotswap-fast/flags.env` and invalidated by the Makefile,
 owner manifest, or island manifest. The executor snapshots the existing
 depfile closure, compiles the observed input, rejects dependency mutation or
 expansion, links a content-addressed read-only `.so`, calls the resident
