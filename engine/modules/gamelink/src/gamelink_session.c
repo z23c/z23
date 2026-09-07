@@ -403,7 +403,14 @@ static void gamelink_note_pong(struct gamelink *link, const uint8_t *payload,
     if (link->have_rtt) {
         uint64_t delta = rtt_us > link->rtt_us ? rtt_us - link->rtt_us
                                                : link->rtt_us - rtt_us;
-        link->jitter_us += (delta - link->jitter_us) / 16u;
+        /* J += |D| - J/16, with J held scaled by 16. Signed on purpose:
+         * the unsigned form underflows the moment a round trip comes back
+         * FASTER than the last one, which on a healthy link is half of
+         * them, and the estimate becomes a nineteen-digit number. */
+        link->jitter_scaled_us16 +=
+            (int64_t)delta - link->jitter_scaled_us16 / 16;
+        if (link->jitter_scaled_us16 < 0)
+            link->jitter_scaled_us16 = 0;
     }
     link->rtt_us = rtt_us;
     link->have_rtt = true;
@@ -491,7 +498,7 @@ void gamelink_stats(const struct gamelink *link, struct gamelink_stats *out)
         return;
     *out = link->stats;
     out->rtt_us = link->rtt_us;
-    out->jitter_us = link->jitter_us;
+    out->jitter_us = (uint64_t)(link->jitter_scaled_us16 / 16);
     /* Loss is measured where it can be measured: the receive side knows how
      * many sequence numbers the peer spent and how many of them arrived. */
     if (link->recv_any && link->recv_highest >= link->recv_first) {

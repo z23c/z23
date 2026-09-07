@@ -142,7 +142,12 @@ struct gamelink {
 
     /* Latency. */
     uint64_t rtt_us;
-    uint64_t jitter_us;
+    /* Jitter is held in SIXTEENTHS of a microsecond, which is what RTP's own
+     * implementation of the RFC 3550 estimator does. The divide-by-16 is the
+     * filter; applying it to the stored value instead would quantize every
+     * jitter under 16 us to a flat zero, which on a loopback link is all of
+     * them. gamelink_stats() reports the microseconds. */
+    int64_t jitter_scaled_us16;
     bool have_rtt;
 
     const clock_iface_t *clock;
