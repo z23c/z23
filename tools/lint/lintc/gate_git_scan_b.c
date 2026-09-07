@@ -144,12 +144,10 @@ static int rap_git_cmd(const char *root, const char *rest, char *out, size_t cap
     return capture_cmd(cmd, out, cap, code);
 }
 
-static int rap_scan(const char *root, FILE *out, FILE *err)
+static int rap_require_worktree(const char *root, FILE *err)
 {
-    char tok[4] = { 'm', 'c', 'p', 0 };
     char dump[64];
     int code = 0, rc;
-
     if (strchr(root, '\''))
         return die("z23-lint: path too long: %s\n", root);
     rc = rap_git_cmd(root, "rev-parse --is-inside-work-tree >/dev/null 2>&1",
@@ -163,6 +161,34 @@ static int rap_scan(const char *root, FILE *out, FILE *err)
             return die("z23-lint: write failed\n", "");
         return 2;
     }
+    return 0;
+}
+
+static int rap_require_scan(const struct rap_acc *a, FILE *err)
+{
+    if (a->tracked == 0) {
+        if (fputs("check_no_retired_agent_protocol: FATAL — tracked-file scan is empty\n",
+                  err) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (a->regular == 0) {
+        if (fputs("check_no_retired_agent_protocol: FATAL — no tracked regular files were scanned\n",
+                  err) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    return 0;
+}
+
+static int rap_scan(const char *root, FILE *out, FILE *err)
+{
+    char tok[4] = { 'm', 'c', 'p', 0 };
+    int code = 0, rc;
+
+    rc = rap_require_worktree(root, err);
+    if (rc)
+        return rc;
 
     struct rap_acc a = { .root = root, .tok = tok, .out = out };
     char lscmd[8192];
@@ -172,18 +198,9 @@ static int rap_scan(const char *root, FILE *out, FILE *err)
     rc = each_zpath(lscmd, rap_on_track, &a);
     if (rc)
         return rc;
-    if (a.tracked == 0) {
-        if (fputs("check_no_retired_agent_protocol: FATAL — tracked-file scan is empty\n",
-                  err) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 2;
-    }
-    if (a.regular == 0) {
-        if (fputs("check_no_retired_agent_protocol: FATAL — no tracked regular files were scanned\n",
-                  err) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 2;
-    }
+    rc = rap_require_scan(&a, err);
+    if (rc)
+        return rc;
 
     char greprest[64];
     if (ovf(snprintf(greprest, sizeof greprest, "grep -n -I -i -F '%s' -- .", tok),
@@ -238,6 +255,91 @@ int check_no_retired_agent_protocol_run(int argc, char **argv)
     return rap_scan(root, stdout, stderr);
 }
 
+static int rap_st_clean(const char *root, FILE *out)
+{
+    char path[8192], dump[256];
+    int rc = 0, code = 0, bad = 0;
+    if (ovf(snprintf(path, sizeof path, "%s/clean.c", root), sizeof path))
+        bad = 1;
+    else if (csr_write(path, "memcpy(buffer, source, length);\nnumcpus=4\n"))
+        bad = 1;
+    rc = rap_git_cmd(root, "add -- clean.c", dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc != 0) {
+        fputs("selftest: clean embedded substrings were rejected\n", stderr);
+        bad = 1;
+    }
+    return bad;
+}
+
+static int rap_st_untracked(const char *root, FILE *out, const char *cap)
+{
+    char path[8192], body[128];
+    int rc, bad = 0;
+    if (ovf(snprintf(path, sizeof path, "%s/untracked.txt", root), sizeof path)
+        || ovf(snprintf(body, sizeof body, "Open%sClient\n", cap), sizeof body))
+        bad = 1;
+    else if (csr_write(path, body))
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc != 0) {
+        fputs("selftest: untracked fixture entered the production scan\n", stderr);
+        bad = 1;
+    }
+    return bad;
+}
+
+static int rap_st_content(const char *root, FILE *out)
+{
+    char dump[256], path[8192];
+    int rc = 0, code = 0, bad = 0;
+    rc = rap_git_cmd(root, "add -- untracked.txt", dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc == 0) {
+        fputs("selftest: tracked content violation was not detected\n", stderr);
+        bad = 1;
+    }
+    rc = rap_git_cmd(root, "rm -q --cached untracked.txt", dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (ovf(snprintf(path, sizeof path, "%s/untracked.txt", root), sizeof path) == 0)
+        unlink(path);
+    return bad;
+}
+
+static int rap_st_path(const char *root, FILE *out, const char *tok)
+{
+    char dump[256], path[8192], addrest[256], nam[64];
+    int rc = 0, code = 0, bad = 0;
+    if (ovf(snprintf(nam, sizeof nam, "old_%s_surface.txt", tok), sizeof nam)
+        || ovf(snprintf(path, sizeof path, "%s/%s", root, nam), sizeof path)
+        || ovf(snprintf(addrest, sizeof addrest, "add -- %s", nam), sizeof addrest))
+        bad = 1;
+    else if (csr_write(path, "clean body\n"))
+        bad = 1;
+    rc = rap_git_cmd(root, addrest, dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc == 0) {
+        fputs("selftest: tracked path violation was not detected\n", stderr);
+        bad = 1;
+    }
+    return bad;
+}
+
 int check_no_retired_agent_protocol_selftest(void)
 {
     char tok[4] = { 'm', 'c', 'p', 0 };
@@ -263,74 +365,20 @@ int check_no_retired_agent_protocol_selftest(void)
         had_env = 1;
     }
     int bad = 0, rc = 0, code = 0;
-    char dump[256], path[8192], body[128], addrest[256], nam[64];
+    char dump[256];
     if (setenv("ZCL_RETIRED_PROTOCOL_ROOT", root, 1) != 0)
         bad = 1;
     rc = rap_git_cmd(root, "init -q", dump, sizeof dump, &code);
     if (rc || code != 0)
         bad = 1;
-
-    if (ovf(snprintf(path, sizeof path, "%s/clean.c", root), sizeof path))
+    if (rap_st_clean(root, out))
         bad = 1;
-    else if (csr_write(path, "memcpy(buffer, source, length);\nnumcpus=4\n"))
+    if (rap_st_untracked(root, out, cap))
         bad = 1;
-    rc = rap_git_cmd(root, "add -- clean.c", dump, sizeof dump, &code);
-    if (rc || code != 0)
+    if (rap_st_content(root, out))
         bad = 1;
-    if (psp_st_reset(out))
+    if (rap_st_path(root, out, tok))
         bad = 1;
-    rc = rap_scan(root, out, stderr);
-    if (rc != 0) {
-        fputs("selftest: clean embedded substrings were rejected\n", stderr);
-        bad = 1;
-    }
-
-    if (ovf(snprintf(path, sizeof path, "%s/untracked.txt", root), sizeof path)
-        || ovf(snprintf(body, sizeof body, "Open%sClient\n", cap), sizeof body))
-        bad = 1;
-    else if (csr_write(path, body))
-        bad = 1;
-    if (psp_st_reset(out))
-        bad = 1;
-    rc = rap_scan(root, out, stderr);
-    if (rc != 0) {
-        fputs("selftest: untracked fixture entered the production scan\n", stderr);
-        bad = 1;
-    }
-
-    rc = rap_git_cmd(root, "add -- untracked.txt", dump, sizeof dump, &code);
-    if (rc || code != 0)
-        bad = 1;
-    if (psp_st_reset(out))
-        bad = 1;
-    rc = rap_scan(root, out, stderr);
-    if (rc == 0) {
-        fputs("selftest: tracked content violation was not detected\n", stderr);
-        bad = 1;
-    }
-    rc = rap_git_cmd(root, "rm -q --cached untracked.txt", dump, sizeof dump, &code);
-    if (rc || code != 0)
-        bad = 1;
-    if (ovf(snprintf(path, sizeof path, "%s/untracked.txt", root), sizeof path) == 0)
-        unlink(path);
-
-    if (ovf(snprintf(nam, sizeof nam, "old_%s_surface.txt", tok), sizeof nam)
-        || ovf(snprintf(path, sizeof path, "%s/%s", root, nam), sizeof path)
-        || ovf(snprintf(addrest, sizeof addrest, "add -- %s", nam), sizeof addrest))
-        bad = 1;
-    else if (csr_write(path, "clean body\n"))
-        bad = 1;
-    rc = rap_git_cmd(root, addrest, dump, sizeof dump, &code);
-    if (rc || code != 0)
-        bad = 1;
-    if (psp_st_reset(out))
-        bad = 1;
-    rc = rap_scan(root, out, stderr);
-    if (rc == 0) {
-        fputs("selftest: tracked path violation was not detected\n", stderr);
-        bad = 1;
-    }
-
     fclose(out);
     if (had_env)
         (void)setenv("ZCL_RETIRED_PROTOCOL_ROOT", oldbuf, 1);
@@ -391,6 +439,21 @@ struct nws_acc {
     int scanned, nhits;
 };
 
+static int nws_hit_line(struct nws_acc *a, const char *path, int lineno,
+                        const char *line, const char *prev)
+{
+    if (regexec(a->flag, line, 0, NULL, 0) == 0
+        || regexec(a->pragma, line, 0, NULL, 0) == 0) {
+        if (regexec(a->marker, line, 0, NULL, 0) != 0
+            && regexec(a->marker, prev, 0, NULL, 0) != 0) {
+            if (fprintf(a->hits, "%s:%d:%s\n", path, lineno, line) < 0)
+                return die("z23-lint: write failed\n", "");
+            a->nhits++;
+        }
+    }
+    return 0;
+}
+
 static int nws_on_track(const char *path, void *ctx)
 {
     struct nws_acc *a = ctx;
@@ -416,23 +479,57 @@ static int nws_on_track(const char *path, void *ctx)
         lineno++;
         if (n > 0 && line[n - 1] == '\n')
             line[n - 1] = '\0';
-        if (regexec(a->flag, line, 0, NULL, 0) == 0
-            || regexec(a->pragma, line, 0, NULL, 0) == 0) {
-            if (regexec(a->marker, line, 0, NULL, 0) != 0
-                && regexec(a->marker, prev, 0, NULL, 0) != 0) {
-                if (fprintf(a->hits, "%s:%d:%s\n", path, lineno, line) < 0) {
-                    rc = die("z23-lint: write failed\n", "");
-                    break;
-                }
-                a->nhits++;
-            }
-        }
+        rc = nws_hit_line(a, path, lineno, line, prev);
+        if (rc)
+            break;
         if (ovf(snprintf(prev, sizeof prev, "%s", line), sizeof prev)) {
             rc = 2;
             break;
         }
     }
     return fin(f, line, full, rc);
+}
+
+static int nws_fail_hits(FILE *hits, FILE *err, regex_t *flag, regex_t *pragma,
+                         regex_t *marker, int nhits, int scanned)
+{
+    if (fseek(hits, 0, SEEK_SET) != 0) {
+        fclose(hits);
+        nws_drop(flag, pragma, marker);
+        return die("z23-lint: fseek failed\n", "");
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, hits)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (fprintf(err, "FAIL: unmarked warning suppression — %s\n", line) < 0) {
+            free(line);
+            fclose(hits);
+            nws_drop(flag, pragma, marker);
+            return die("z23-lint: write failed\n", "");
+        }
+    }
+    free(line);
+    fclose(hits);
+    nws_drop(flag, pragma, marker);
+    if (fprintf(err,
+                "check_no_warning_suppression: FAIL — hits=%d scanned=%d\n",
+                nhits, scanned) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (fprintf(err,
+                "  -W" "no-%s also disables [[nodiscard]] reporting; -W"
+                "no-%s hides\n",
+                "unused-result", "stringop-overflow") < 0)
+        return die("z23-lint: write failed\n", "");
+    if (fputs("  a memory-safety diagnostic. Delete the flag, or state the reason on the line above it:\n",
+              err) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (fputs("      # suppression-ok: <why this build surface genuinely needs it>\n",
+              err) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
 }
 
 static int nws_scan(const char *root, FILE *out, FILE *err)
@@ -476,45 +573,9 @@ static int nws_scan(const char *root, FILE *out, FILE *err)
             return die("z23-lint: write failed\n", "");
         return 2;
     }
-    if (a.nhits) {
-        if (fseek(hits, 0, SEEK_SET) != 0) {
-            fclose(hits);
-            nws_drop(&flag, &pragma, &marker);
-            return die("z23-lint: fseek failed\n", "");
-        }
-        char *line = NULL;
-        size_t cap = 0;
-        ssize_t n;
-        while ((n = getline(&line, &cap, hits)) >= 0) {
-            if (n > 0 && line[n - 1] == '\n')
-                line[n - 1] = '\0';
-            if (fprintf(err, "FAIL: unmarked warning suppression — %s\n", line) < 0) {
-                free(line);
-                fclose(hits);
-                nws_drop(&flag, &pragma, &marker);
-                return die("z23-lint: write failed\n", "");
-            }
-        }
-        free(line);
-        fclose(hits);
-        nws_drop(&flag, &pragma, &marker);
-        if (fprintf(err,
-                    "check_no_warning_suppression: FAIL — hits=%d scanned=%d\n",
-                    a.nhits, a.scanned) < 0)
-            return die("z23-lint: write failed\n", "");
-        if (fprintf(err,
-                    "  -W" "no-%s also disables [[nodiscard]] reporting; -W"
-                    "no-%s hides\n",
-                    "unused-result", "stringop-overflow") < 0)
-            return die("z23-lint: write failed\n", "");
-        if (fputs("  a memory-safety diagnostic. Delete the flag, or state the reason on the line above it:\n",
-                  err) < 0)
-            return die("z23-lint: write failed\n", "");
-        if (fputs("      # suppression-ok: <why this build surface genuinely needs it>\n",
-                  err) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 1;
-    }
+    if (a.nhits)
+        return nws_fail_hits(hits, err, &flag, &pragma, &marker, a.nhits,
+                             a.scanned);
     fclose(hits);
     nws_drop(&flag, &pragma, &marker);
     if (fprintf(out, "check_no_warning_suppression: clean — scanned=%d build surfaces\n",
@@ -544,6 +605,173 @@ static int nws_fx_write(const char *path, const char *kind, const char *extra)
     return csr_write(path, extra);
 }
 
+static int nws_fx_abort(FILE *cap, const char *tmp, const char *why)
+{
+    fclose(cap);
+    (void)rap_rm_rf(tmp);
+    return nws_fx_fail(why);
+}
+
+static int nws_fx_run(FILE *cap, const char *root, char *ob, int *scan_rc)
+{
+    int bad = 0;
+    if (psp_st_reset(cap))
+        bad = 1;
+    *scan_rc = nws_scan(root, cap, cap);
+    if (csr_slurp(cap, ob, 4096))
+        bad = 1;
+    return bad;
+}
+
+static int nws_fx_plant_tree(char *repo, char *empty, const char *tmp)
+{
+    char path[8192], dump[64];
+    int code = 0;
+    if (ovf(snprintf(repo, 4096, "%s/repo", tmp), 4096)
+        || ovf(snprintf(empty, 4096, "%s/empty", tmp), 4096))
+        return 1;
+    if (csr_mkdirs(repo) || csr_mkdirs(empty)
+        || ovf(snprintf(path, sizeof path, "%s/tools/lint", repo), sizeof path)
+        || csr_mkdirs(path)
+        || ovf(snprintf(path, sizeof path, "%s/vendor", repo), sizeof path)
+        || csr_mkdirs(path))
+        return 1;
+    if (rap_git_cmd(repo, "init -q", dump, sizeof dump, &code) || code)
+        return 1;
+    if (rap_git_cmd(empty, "init -q", dump, sizeof dump, &code) || code)
+        return 1;
+    return 0;
+}
+
+static int nws_fx_plant_files(const char *repo)
+{
+    char path[8192], dump[64];
+    int code = 0;
+    if (ovf(snprintf(path, sizeof path, "%s/Makefile", repo), sizeof path)
+        || csr_write(path, "CFLAGS = -std=c23 -Wall -Wextra -Werror\n")
+        || ovf(snprintf(path, sizeof path, "%s/a.c", repo), sizeof path)
+        || csr_write(path, "int main(void){return 0;}\n")
+        || ovf(snprintf(path, sizeof path, "%s/vendor/third_party.mk", repo),
+               sizeof path)
+        || nws_fx_write(path, "unused-result", "\n"))
+        return 1;
+    if (rap_git_cmd(repo, "add Makefile a.c vendor/third_party.mk", dump,
+                    sizeof dump, &code)
+        || code)
+        return 1;
+    return 0;
+}
+
+static int nws_fx_plant(char *repo, char *empty, const char *tmp)
+{
+    if (nws_fx_plant_tree(repo, empty, tmp))
+        return 1;
+    return nws_fx_plant_files(repo);
+}
+
+static int nws_fx_clean(FILE *cap, const char *tmp, const char *repo, char *ob)
+{
+    int scan_rc = 0;
+    int bad = nws_fx_run(cap, repo, ob, &scan_rc);
+    if (bad || scan_rc != 0
+        || strstr(ob, "check_no_warning_suppression: clean") == NULL)
+        return nws_fx_abort(cap, tmp, "clean fixture rejected");
+    if (strstr(ob, "vendor/third_party.mk") != NULL)
+        return nws_fx_abort(cap, tmp, "vendor/ must be out of scope");
+    return 0;
+}
+
+static int nws_fx_flag(FILE *cap, const char *tmp, const char *repo,
+                       char *path, char *body, char *ob)
+{
+    if (ovf(snprintf(path, 8192, "%s/Makefile", repo), 8192)
+        || ovf(snprintf(body, 512,
+                        "CFLAGS = -std=c23 -Wall -Wextra -Werror\n"
+                        "CFLAGS += -W" "no-%s\n",
+                        "unused-result"), 512)
+        || csr_write(path, body))
+        return nws_fx_abort(cap, tmp, "could not plant flag-form fixture");
+    int scan_rc = 0;
+    int bad = nws_fx_run(cap, repo, ob, &scan_rc);
+    if (bad || scan_rc != 1 || strstr(ob, "Makefile:2") == NULL)
+        return nws_fx_abort(cap, tmp, "flag form did not trip Makefile:2");
+    return 0;
+}
+
+static int nws_fx_empty_reason(FILE *cap, const char *tmp, const char *repo,
+                               const char *path, char *body, char *ob)
+{
+    if (ovf(snprintf(body, 512,
+                     "# suppression-ok:\nCFLAGS += -W" "no-%s\n",
+                     "unused-result"), 512)
+        || csr_write(path, body))
+        return nws_fx_abort(cap, tmp, "could not plant empty-reason fixture");
+    int scan_rc = 0;
+    int bad = nws_fx_run(cap, repo, ob, &scan_rc);
+    if (bad || scan_rc != 1)
+        return nws_fx_abort(cap, tmp, "empty-reason marker must not exempt");
+    return 0;
+}
+
+static int nws_fx_preceding(FILE *cap, const char *tmp, const char *repo,
+                            const char *path, char *body, char *ob)
+{
+    if (ovf(snprintf(body, 512,
+                     "# suppression-ok: fixture proves the marker is honoured\n"
+                     "CFLAGS += -W" "no-%s\n",
+                     "unused-result"), 512)
+        || csr_write(path, body))
+        return nws_fx_abort(cap, tmp, "could not plant preceding-line fixture");
+    int scan_rc = 0;
+    int bad = nws_fx_run(cap, repo, ob, &scan_rc);
+    if (bad || scan_rc != 0)
+        return nws_fx_abort(cap, tmp, "preceding-line marker not honoured");
+    return 0;
+}
+
+static int nws_fx_same_line(FILE *cap, const char *tmp, const char *repo,
+                            const char *path, char *body, char *ob)
+{
+    if (ovf(snprintf(body, 512,
+                     "CFLAGS += -W" "no-%s  # suppression-ok: fixture\n",
+                     "stringop-overflow"), 512)
+        || csr_write(path, body))
+        return nws_fx_abort(cap, tmp, "could not plant same-line fixture");
+    int scan_rc = 0;
+    int bad = nws_fx_run(cap, repo, ob, &scan_rc);
+    if (bad || scan_rc != 0)
+        return nws_fx_abort(cap, tmp, "same-line marker not honoured");
+    return 0;
+}
+
+static int nws_fx_pragma(FILE *cap, const char *tmp, const char *repo,
+                         char *path, char *body, char *ob)
+{
+    if (csr_write(path, "CFLAGS = -Wall\n")
+        || ovf(snprintf(path, 8192, "%s/a.c", repo), 8192)
+        || ovf(snprintf(body, 512,
+                        "#pragma GCC diagnostic ignored \"-W%s\"\n"
+                        "int main(void){return 0;}\n",
+                        "unused-result"), 512)
+        || csr_write(path, body))
+        return nws_fx_abort(cap, tmp, "could not plant pragma fixture");
+    int scan_rc = 0;
+    int bad = nws_fx_run(cap, repo, ob, &scan_rc);
+    if (bad || scan_rc != 1 || strstr(ob, "a.c:1") == NULL)
+        return nws_fx_abort(cap, tmp, "pragma form did not trip a.c:1");
+    return 0;
+}
+
+static int nws_fx_empty_scan(FILE *cap, const char *tmp, const char *empty,
+                             char *ob)
+{
+    int scan_rc = 0;
+    int bad = nws_fx_run(cap, empty, ob, &scan_rc);
+    if (bad || scan_rc != 2 || strstr(ob, "FATAL") == NULL)
+        return nws_fx_abort(cap, tmp, "empty scan expected FATAL exit 2");
+    return 0;
+}
+
 static int nws_fixtures(void)
 {
     char tmpl[] = "/tmp/z23-lint-nws-XXXXXX";
@@ -555,171 +783,24 @@ static int nws_fixtures(void)
         (void)rap_rm_rf(tmp);
         return die("z23-lint: tmpfile failed\n", "");
     }
-    char repo[4096], empty[4096], path[8192], body[512], ob[4096], dump[64];
-    int code = 0, rc = 0, scan_rc = 0, bad = 0;
-    if (ovf(snprintf(repo, sizeof repo, "%s/repo", tmp), sizeof repo)
-        || ovf(snprintf(empty, sizeof empty, "%s/empty", tmp), sizeof empty))
-        bad = 1;
-    if (!bad
-        && (csr_mkdirs(repo) || csr_mkdirs(empty)
-            || ovf(snprintf(path, sizeof path, "%s/tools/lint", repo), sizeof path)
-            || csr_mkdirs(path)
-            || ovf(snprintf(path, sizeof path, "%s/vendor", repo), sizeof path)
-            || csr_mkdirs(path)))
-        bad = 1;
-    if (!bad && (rap_git_cmd(repo, "init -q", dump, sizeof dump, &code) || code))
-        bad = 1;
-    if (!bad && (rap_git_cmd(empty, "init -q", dump, sizeof dump, &code) || code))
-        bad = 1;
-    if (!bad) {
-        if (ovf(snprintf(path, sizeof path, "%s/Makefile", repo), sizeof path)
-            || csr_write(path, "CFLAGS = -std=c23 -Wall -Wextra -Werror\n")
-            || ovf(snprintf(path, sizeof path, "%s/a.c", repo), sizeof path)
-            || csr_write(path, "int main(void){return 0;}\n")
-            || ovf(snprintf(path, sizeof path, "%s/vendor/third_party.mk", repo),
-                   sizeof path)
-            || nws_fx_write(path, "unused-result", "\n"))
-            bad = 1;
-    }
-    if (!bad
-        && (rap_git_cmd(repo, "add Makefile a.c vendor/third_party.mk", dump,
-                        sizeof dump, &code)
-            || code))
-        bad = 1;
-    if (bad) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("could not plant detector fixture");
-    }
-
-    if (psp_st_reset(cap))
-        bad = 1;
-    scan_rc = nws_scan(repo, cap, cap);
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    if (bad || scan_rc != 0 || strstr(ob, "check_no_warning_suppression: clean") == NULL) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("clean fixture rejected");
-    }
-    if (strstr(ob, "vendor/third_party.mk") != NULL) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("vendor/ must be out of scope");
-    }
-
-    if (ovf(snprintf(path, sizeof path, "%s/Makefile", repo), sizeof path)
-        || ovf(snprintf(body, sizeof body,
-                        "CFLAGS = -std=c23 -Wall -Wextra -Werror\n"
-                        "CFLAGS += -W" "no-%s\n",
-                        "unused-result"), sizeof body)
-        || csr_write(path, body)) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("could not plant flag-form fixture");
-    }
-    if (psp_st_reset(cap))
-        bad = 1;
-    scan_rc = nws_scan(repo, cap, cap);
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    if (bad || scan_rc != 1 || strstr(ob, "Makefile:2") == NULL) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("flag form did not trip Makefile:2");
-    }
-
-    if (ovf(snprintf(body, sizeof body,
-                     "# suppression-ok:\nCFLAGS += -W" "no-%s\n",
-                     "unused-result"), sizeof body)
-        || csr_write(path, body)) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("could not plant empty-reason fixture");
-    }
-    if (psp_st_reset(cap))
-        bad = 1;
-    scan_rc = nws_scan(repo, cap, cap);
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    if (bad || scan_rc != 1) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("empty-reason marker must not exempt");
-    }
-
-    if (ovf(snprintf(body, sizeof body,
-                     "# suppression-ok: fixture proves the marker is honoured\n"
-                     "CFLAGS += -W" "no-%s\n",
-                     "unused-result"), sizeof body)
-        || csr_write(path, body)) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("could not plant preceding-line fixture");
-    }
-    if (psp_st_reset(cap))
-        bad = 1;
-    scan_rc = nws_scan(repo, cap, cap);
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    if (bad || scan_rc != 0) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("preceding-line marker not honoured");
-    }
-
-    if (ovf(snprintf(body, sizeof body,
-                     "CFLAGS += -W" "no-%s  # suppression-ok: fixture\n",
-                     "stringop-overflow"), sizeof body)
-        || csr_write(path, body)) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("could not plant same-line fixture");
-    }
-    if (psp_st_reset(cap))
-        bad = 1;
-    scan_rc = nws_scan(repo, cap, cap);
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    if (bad || scan_rc != 0) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("same-line marker not honoured");
-    }
-
-    if (csr_write(path, "CFLAGS = -Wall\n")
-        || ovf(snprintf(path, sizeof path, "%s/a.c", repo), sizeof path)
-        || ovf(snprintf(body, sizeof body,
-                        "#pragma GCC diagnostic ignored \"-W%s\"\n"
-                        "int main(void){return 0;}\n",
-                        "unused-result"), sizeof body)
-        || csr_write(path, body)) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("could not plant pragma fixture");
-    }
-    if (psp_st_reset(cap))
-        bad = 1;
-    scan_rc = nws_scan(repo, cap, cap);
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    if (bad || scan_rc != 1 || strstr(ob, "a.c:1") == NULL) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("pragma form did not trip a.c:1");
-    }
-
-    if (psp_st_reset(cap))
-        bad = 1;
-    scan_rc = nws_scan(empty, cap, cap);
-    if (csr_slurp(cap, ob, sizeof ob))
-        bad = 1;
-    if (bad || scan_rc != 2 || strstr(ob, "FATAL") == NULL) {
-        fclose(cap);
-        (void)rap_rm_rf(tmp);
-        return nws_fx_fail("empty scan expected FATAL exit 2");
-    }
-
+    char repo[4096], empty[4096], path[8192], body[512], ob[4096];
+    int rc;
+    if (nws_fx_plant(repo, empty, tmp))
+        return nws_fx_abort(cap, tmp, "could not plant detector fixture");
+    if ((rc = nws_fx_clean(cap, tmp, repo, ob)))
+        return rc;
+    if ((rc = nws_fx_flag(cap, tmp, repo, path, body, ob)))
+        return rc;
+    if ((rc = nws_fx_empty_reason(cap, tmp, repo, path, body, ob)))
+        return rc;
+    if ((rc = nws_fx_preceding(cap, tmp, repo, path, body, ob)))
+        return rc;
+    if ((rc = nws_fx_same_line(cap, tmp, repo, path, body, ob)))
+        return rc;
+    if ((rc = nws_fx_pragma(cap, tmp, repo, path, body, ob)))
+        return rc;
+    if ((rc = nws_fx_empty_scan(cap, tmp, empty, ob)))
+        return rc;
     fclose(cap);
     rc = rap_rm_rf(tmp);
     return rc ? rc : 0;
@@ -817,37 +898,38 @@ static int mor_on_file(const char *path, void *ctx)
     return fin(f, line, path, rc);
 }
 
-int check_mind_owns_rebuild_run(int argc, char **argv)
+static int mor_compile(regex_t *call, regex_t *allow)
 {
-    (void)argc;
-    (void)argv;
-    regex_t call, allow;
-    int cr = compile_pat(&call, REG_EXTENDED, "codeindex",
+    int cr = compile_pat(call, REG_EXTENDED, "codeindex",
                          "_rebuild[[:space:]]*\\(", "", "");
     if (cr)
         return cr;
-    cr = compile_pat(&allow, REG_EXTENDED,
+    cr = compile_pat(allow, REG_EXTENDED,
                      "^(cognition/modules/codeindex/(src|include)/",
                      "|tools/mind/|tests/harness/src/test_codeindex)", "", "");
     if (cr) {
-        regfree(&call);
+        regfree(call);
         return cr;
     }
-    FILE *hits = tmpfile(), *viol = tmpfile();
-    if (!hits || !viol) {
-        if (hits) fclose(hits);
-        if (viol) fclose(viol);
-        drop2(&call, &allow);
-        return die("z23-lint: tmpfile failed\n", "");
-    }
-    struct mor_acc a = { .call = &call, .lines = hits, .scanned = 0 };
+    return 0;
+}
+
+static int mor_walk(regex_t *call, FILE *hits, int *scanned)
+{
+    struct mor_acc a = { .call = call, .lines = hits, .scanned = 0 };
     int rc = each_zpath(k_ls_all, mor_on_file, &a);
     if (rc == 0)
         rc = gate_require_scanned(a.scanned, 4, "check-mind-owns-rebuild",
                                   "codeindex_rebuild's own module should always appear; check the pathspec.");
-    int nviol = 0;
-    if (rc == 0 && fseek(hits, 0, SEEK_SET) != 0)
-        rc = die("z23-lint: fseek failed\n", "");
+    *scanned = a.scanned;
+    return rc;
+}
+
+static int mor_classify(FILE *hits, FILE *viol, regex_t *allow, int *nviol)
+{
+    int rc = 0;
+    if (fseek(hits, 0, SEEK_SET) != 0)
+        return die("z23-lint: fseek failed\n", "");
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
@@ -862,18 +944,23 @@ int check_mind_owns_rebuild_run(int argc, char **argv)
             save = *colon;
             *colon = '\0';
         }
-        int ok = colon && regexec(&allow, line, 0, NULL, 0) == 0;
+        int ok = colon && regexec(allow, line, 0, NULL, 0) == 0;
         if (colon)
             *colon = save;
         if (ok)
             continue;
-        nviol++;
+        (*nviol)++;
         if (fprintf(viol, "%s\n", line) < 0)
             rc = die("z23-lint: write failed\n", "");
     }
     free(line);
     if (rc == 0 && ferror(hits))
         rc = die("z23-lint: read failed\n", "");
+    return rc;
+}
+
+static int mor_emit(FILE *viol, int nviol, int scanned, int rc)
+{
     if (rc == 0 && nviol) {
         if (fputs("check-mind-owns-rebuild: FAIL — codeindex_rebuild called outside the mind and the codeindex module\n",
                   stderr) < 0)
@@ -894,9 +981,32 @@ int check_mind_owns_rebuild_run(int argc, char **argv)
             rc = 1;
     } else if (rc == 0) {
         if (printf("check-mind-owns-rebuild: PASS — %d call site(s), all inside the codeindex module, tools/mind/, or that module's own tests\n",
-                   a.scanned) < 0)
+                   scanned) < 0)
             rc = die("z23-lint: write failed\n", "");
     }
+    return rc;
+}
+
+int check_mind_owns_rebuild_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    regex_t call, allow;
+    int cr = mor_compile(&call, &allow);
+    if (cr)
+        return cr;
+    FILE *hits = tmpfile(), *viol = tmpfile();
+    if (!hits || !viol) {
+        if (hits) fclose(hits);
+        if (viol) fclose(viol);
+        drop2(&call, &allow);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    int scanned = 0, nviol = 0;
+    int rc = mor_walk(&call, hits, &scanned);
+    if (rc == 0)
+        rc = mor_classify(hits, viol, &allow, &nviol);
+    rc = mor_emit(viol, nviol, scanned, rc);
     fclose(hits);
     fclose(viol);
     drop2(&call, &allow);
@@ -1070,10 +1180,8 @@ static int sus_floor_check(const char *env, int ne)
                                 "a scanned root dir is missing — layout changed?");
 }
 
-int check_no_stray_untracked_source_run(int argc, char **argv)
+static int sus_collect_dirs(char exist[][RS_PATH], int *ne, const char **envp)
 {
-    (void)argc;
-    (void)argv;
     char scan[SUS_DIRS][RS_PATH];
     int nd = 0, rc = 0;
     const char *env = getenv("ZCL_STRAY_SCAN_DIRS_FOR_TEST");
@@ -1088,51 +1196,41 @@ int check_no_stray_untracked_source_run(int argc, char **argv)
     }
     if (rc)
         return rc;
-    char exist[SUS_DIRS][RS_PATH];
-    int ne = 0;
+    *ne = 0;
     for (int i = 0; i < nd; i++) {
         struct stat st;
         if (stat(scan[i], &st) == 0 && S_ISDIR(st.st_mode)) {
             size_t n = strlen(scan[i]);
-            if (ne >= SUS_DIRS || n >= RS_PATH)
+            if (*ne >= SUS_DIRS || n >= RS_PATH)
                 return die("z23-lint: derived buffer overflow\n", "");
-            memcpy(exist[ne], scan[i], n + 1);
-            ne++;
+            memcpy(exist[*ne], scan[i], n + 1);
+            (*ne)++;
         }
     }
-    rc = sus_floor_check(env, ne);
-    if (rc)
-        return rc;
-    regex_t fixre;
-    rc = sus_fix_comp(&fixre);
-    if (rc)
-        return rc;
+    *envp = env;
+    return 0;
+}
+
+static int sus_walk_dirs(char exist[][RS_PATH], int ne, struct sus_acc *a,
+                         char *track, size_t tcap)
+{
     char lscmd[8192];
     int k = snprintf(lscmd, sizeof lscmd, "git ls-files -z --");
-    if (ovf(k, sizeof lscmd)) {
-        regfree(&fixre);
+    if (ovf(k, sizeof lscmd))
         return 2;
-    }
     size_t used = (size_t)k;
     for (int i = 0; i < ne; i++) {
         k = snprintf(lscmd + used, sizeof lscmd - used, " %s", exist[i]);
-        if (ovf(k, sizeof lscmd - used)) {
-            regfree(&fixre);
+        if (ovf(k, sizeof lscmd - used))
             return 2;
-        }
         used += (size_t)k;
     }
-    static char track[SUS_TRACK];
-    struct sus_track t = { .buf = track, .cap = sizeof track };
-    rc = each_zpath(lscmd, sus_on_track, &t);
-    if (rc) {
-        regfree(&fixre);
+    struct sus_track t = { .buf = track, .cap = tcap };
+    int rc = each_zpath(lscmd, sus_on_track, &t);
+    if (rc)
         return rc;
-    }
-    static char stray[SUS_STRAY_N][SUS_STRAY_L];
-    struct sus_acc a = {
-        .fixre = &fixre, .track = track, .tused = t.used, .stray = stray
-    };
+    a->track = track;
+    a->tused = t.used;
     char walked[SUS_DIRS][RS_PATH];
     int nw = 0;
     for (int i = 0; rc == 0 && i < ne; i++) {
@@ -1144,15 +1242,17 @@ int check_no_stray_untracked_source_run(int argc, char **argv)
         else {
             memcpy(walked[nw], exist[i], n + 1);
             nw++;
-            rc = walk_src(exist[i], 1, sus_scan, &a);
+            rc = walk_src(exist[i], 1, sus_scan, a);
         }
     }
-    regfree(&fixre);
-    if (rc)
-        return rc;
-    if (a.nstray > 0) {
+    return rc;
+}
+
+static int sus_emit_stray(struct sus_acc *a, char exist[][RS_PATH], int ne)
+{
+    if (a->nstray > 0) {
         if (fprintf(stderr, "FAIL: %d untracked stray file(s) under scanned source dirs\n",
-                    a.nstray) < 0
+                    a->nstray) < 0
             || fputs("  These are NOT code violations — they are files git does not track,\n"
                      "  most often leftovers from a crashed agent or an abandoned worktree\n"
                      "  (files matching the lint-gate selftest fixture naming convention,\n"
@@ -1160,9 +1260,9 @@ int check_no_stray_untracked_source_run(int argc, char **argv)
                      "  Delete them (or 'git add' if intentional new source):\n",
                      stderr) < 0)
             return die("z23-lint: write failed\n", "");
-        for (int i = 0; i < a.nstray; i++)
+        for (int i = 0; i < a->nstray; i++)
             if (fprintf(stderr, "    %s [untracked stray file -- not a code violation]\n",
-                        a.stray[i]) < 0)
+                        a->stray[i]) < 0)
                 return die("z23-lint: write failed\n", "");
         return 1;
     }
@@ -1170,14 +1270,42 @@ int check_no_stray_untracked_source_run(int argc, char **argv)
     size_t ju = 0;
     joined[0] = '\0';
     for (int i = 0; i < ne; i++) {
-        k = snprintf(joined + ju, sizeof joined - ju, "%s%s", i ? " " : "", exist[i]);
+        int k = snprintf(joined + ju, sizeof joined - ju, "%s%s",
+                         i ? " " : "", exist[i]);
         if (ovf(k, sizeof joined - ju))
             return 2;
         ju += (size_t)k;
     }
     return printf("[check_no_stray_untracked_source] scanned %d file(s) under %s; "
-                  "0 untracked strays\n", a.ncand, joined) < 0
+                  "0 untracked strays\n", a->ncand, joined) < 0
                ? die("z23-lint: write failed\n", "") : 0;
+}
+
+int check_no_stray_untracked_source_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    char exist[SUS_DIRS][RS_PATH];
+    int ne = 0;
+    const char *env = NULL;
+    int rc = sus_collect_dirs(exist, &ne, &env);
+    if (rc)
+        return rc;
+    rc = sus_floor_check(env, ne);
+    if (rc)
+        return rc;
+    regex_t fixre;
+    rc = sus_fix_comp(&fixre);
+    if (rc)
+        return rc;
+    static char track[SUS_TRACK];
+    static char stray[SUS_STRAY_N][SUS_STRAY_L];
+    struct sus_acc a = { .fixre = &fixre, .stray = stray };
+    rc = sus_walk_dirs(exist, ne, &a, track, sizeof track);
+    regfree(&fixre);
+    if (rc)
+        return rc;
+    return sus_emit_stray(&a, exist, ne);
 }
 
 int check_no_stray_untracked_source_selftest(void)
