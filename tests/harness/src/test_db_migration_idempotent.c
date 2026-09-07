@@ -15,6 +15,7 @@
 #include "session/fleet_board_proto.h"
 #include "crypto/ed25519.h"
 #include "sha3/sha3.h"
+#include "util/fleet_role_check.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -1213,6 +1214,12 @@ static int t_v82_board_kind_ceiling_row_copy_is_lossless(void)
          * it, and fleet_board_post_validate() remains the actual gate. */
         struct node_db ndb2;
         ASSERT(node_db_open(&ndb2, dbpath));
+        /* Ingest refuses a key that carries no role, and this group invents
+         * its own key. The role gate itself is proven in fleet_roles and
+         * fleet_role_enforcement; the question here is only whether the
+         * widened v82 CHECK admits kind 8, so hold the gate open across the
+         * ingest and shut it again once the block is done. */
+        zcl_fleet_role_checker_install_permissive_for_testing();
         uint8_t seed[32], sk[32], pk[32];
         memset(seed, 0, sizeof(seed));
         seed[0] = 0x77;
@@ -1249,6 +1256,9 @@ static int t_v82_board_kind_ceiling_row_copy_is_lossless(void)
         node_db_close(&ndb2);
         PASS();
     } _test_next:;
+    /* Leave the process as this group found it: every other case in this
+     * file proves a refusal against an empty seam. */
+    zcl_fleet_role_checker_install(NULL);
     test_cleanup_tmpdir(dir);
     return failures;
 }
