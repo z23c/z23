@@ -1888,6 +1888,188 @@ static bool rr_prepare_overlays(
     return true;
 }
 
+struct rr_restart_build_ctx {
+    const char *repo_root;
+    const char *const *source_tus;
+    size_t source_count;
+    struct zcl_devloop_restart_build_receipt *receipt;
+    struct zcl_devloop_process_result *process;
+    char *why;
+    size_t why_len;
+    bool guard_source;
+    const struct dev_source_record *epoch_source;
+    int64_t started;
+    char root[PATH_MAX];
+    struct rr_plan plan;
+    struct dev_source_record source_before;
+    const struct dev_source_record *identity;
+};
+
+static bool rr_restart_build_validate_inputs(struct rr_restart_build_ctx *ctx)
+{
+    if (!ctx->repo_root || !ctx->source_tus || !ctx->receipt || !ctx->process ||
+        ctx->source_count == 0 || ctx->source_count > RR_SOURCE_MAX) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart source set is empty or exceeds its bound");
+        return false;
+    }
+    memset(ctx->receipt, 0, sizeof(*ctx->receipt));
+    memset(ctx->process, 0, sizeof(*ctx->process));
+    struct zcl_devloop_plan classification;
+    if (!zcl_devloop_plan_files(ctx->source_tus, ctx->source_count,
+                                &classification)) {
+        rr_why(ctx->why, ctx->why_len, "restart source set is invalid");
+        return false;
+    }
+    if (classification.consensus_risk) {
+        rr_why(ctx->why, ctx->why_len,
+               "consensus-risk input is excluded from fast restart");
+        return false;
+    }
+    for (size_t i = 0; i < ctx->source_count; i++) {
+        if (!rr_source_is_c(ctx->source_tus[i])) {
+            rr_why(ctx->why, ctx->why_len,
+                   "fast restart currently requires changed C translation units");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool rr_restart_build_resolve_root_and_plan(
+    struct rr_restart_build_ctx *ctx)
+{
+    if (!platform_directory_canonical_real(ctx->repo_root, ctx->root,
+                                           sizeof(ctx->root))) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart checkout root could not be resolved");
+        return false;
+    }
+    pthread_mutex_lock(&g_rr_mu);
+    bool plan_ok = rr_plan_load_locked(ctx->root, &ctx->plan,
+                                       &ctx->receipt->plan_cache_hit,
+                                       &ctx->receipt->plan_load_us, ctx->why,
+                                       ctx->why_len);
+    pthread_mutex_unlock(&g_rr_mu);
+    return plan_ok;
+}
+
+static bool rr_restart_build_capture_before(struct rr_restart_build_ctx *ctx)
+{
+    if (ctx->guard_source) ctx->receipt->source_guard_captures++;
+    if (ctx->guard_source &&
+        (!zcl_dev_source_cas_capture(ctx->root, &ctx->source_before) ||
+         !ctx->source_before.cas_present)) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart source snapshot could not be captured before compile");
+        return false;
+    }
+    ctx->identity = ctx->epoch_source ? ctx->epoch_source
+                                      : &ctx->source_before;
+    if (!rr_source_record_valid(ctx->identity)) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart epoch source CAS record is unavailable");
+        return false;
+    }
+    (void)snprintf(ctx->receipt->source_cas_sha3,
+                   sizeof(ctx->receipt->source_cas_sha3), "%s",
+                   ctx->identity->cas_root_sha3);
+    return true;
+}
+
+static bool rr_restart_build_compile_and_link(struct rr_restart_build_ctx *ctx)
+{
+    struct rr_overlay *overlays = zcl_calloc(RR_OVERLAY_MAX, sizeof(*overlays),
+                                             "restart overlays");
+    if (!overlays) {
+        rr_why(ctx->why, ctx->why_len, "restart overlay allocation failed");
+        return false;
+    }
+    const char *runtime_sources[RR_SOURCE_MAX];
+    size_t runtime_source_count = 0;
+    for (size_t i = 0; i < ctx->source_count; i++)
+        if (!rr_source_is_test_only(ctx->source_tus[i]))
+            runtime_sources[runtime_source_count++] = ctx->source_tus[i];
+    if (runtime_source_count == 0) {
+        free(overlays);
+        rr_why(ctx->why, ctx->why_len,
+               "restart source set contains no runtime translation unit");
+        return false;
+    }
+    size_t overlay_count = 0;
+    bool ok = rr_prepare_overlays(
+        &ctx->plan, ctx->root, runtime_sources, runtime_source_count,
+        ctx->identity, "build/dev-loop/restart-objects", overlays,
+        &overlay_count, ctx->process, &ctx->receipt->compiler_processes,
+        &ctx->receipt->compile_us, &ctx->receipt->compile_startup_us,
+        &ctx->receipt->compile_body_us, ctx->why, ctx->why_len);
+    ctx->receipt->source_identity_overlay = ok;
+    char rsp[PATH_MAX] = {0};
+    if (ok && !rr_write_response(&ctx->plan, ctx->root, overlays,
+                                 overlay_count, "build/dev-loop/restart-objects",
+                                 true, rsp, ctx->why, ctx->why_len))
+        ok = false;
+    if (ok) {
+        ok = rr_link_cached(&ctx->plan, ctx->root, rsp,
+                            "build/dev-loop/restart-candidates",
+                            ctx->receipt->artifact_path,
+                            ctx->receipt->artifact_cache_key,
+                            &ctx->receipt->artifact_cache_hit,
+                            &ctx->receipt->linker_processes, ctx->process,
+                            &ctx->receipt->link_us,
+                            &ctx->receipt->link_startup_us,
+                            &ctx->receipt->link_body_us, ctx->why,
+                            ctx->why_len);
+    }
+    if (rsp[0]) (void)unlink(rsp);
+    free(overlays);
+    if (!ok)
+        ctx->receipt->total_us = platform_time_monotonic_us() - ctx->started;
+    return ok;
+}
+
+static bool rr_restart_build_verify_after(struct rr_restart_build_ctx *ctx)
+{
+    if (ctx->guard_source) ctx->receipt->source_guard_captures++;
+    struct dev_source_record source_after = {0};
+    if (ctx->guard_source &&
+        (!zcl_dev_source_cas_capture(ctx->root, &source_after) ||
+         !source_after.cas_present ||
+         strcmp(ctx->source_before.cas_root_sha3,
+                source_after.cas_root_sha3) != 0)) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart source snapshot changed during candidate build");
+        ctx->receipt->total_us = platform_time_monotonic_us() - ctx->started;
+        return false;
+    }
+    if (!rr_sha256_file(ctx->receipt->artifact_path,
+                        ctx->receipt->artifact_sha256)) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart candidate could not be rehashed");
+        return false;
+    }
+    return true;
+}
+
+static void rr_restart_build_probe(struct rr_restart_build_ctx *ctx)
+{
+    const char *probe_argv[] = {
+        ctx->receipt->artifact_path, "discover", "help", NULL
+    };
+    ctx->receipt->probe_processes = 1;
+    int64_t probe_started = platform_time_monotonic_us();
+    bool probed = zcl_devloop_process_run(ctx->root, probe_argv, 5000,
+                                          ctx->process);
+    ctx->receipt->probe_us = platform_time_monotonic_us() - probe_started;
+    ctx->receipt->probe_startup_us = ctx->process->startup_us;
+    ctx->receipt->probe_body_us = ctx->process->body_us;
+    ctx->receipt->candidate_probe_passed = probed &&
+        !ctx->process->timed_out && !ctx->process->term_signal &&
+        ctx->process->exit_code == 0;
+    (void)snprintf(ctx->receipt->probe, sizeof(ctx->receipt->probe), "%s",
+                   "discover.help");
+}
+
 static bool rr_restart_build(
     const char *repo_root, const char *const *source_tus, size_t source_count,
     struct zcl_devloop_restart_build_receipt *receipt,
@@ -1895,140 +2077,27 @@ static bool rr_restart_build(
     char *why, size_t why_len, bool guard_source,
     const struct dev_source_record *epoch_source)
 {
-    int64_t started = platform_time_monotonic_us();
-    if (why && why_len) why[0] = 0;
-    if (!repo_root || !source_tus || !receipt || !process ||
-        source_count == 0 || source_count > RR_SOURCE_MAX) {
-        rr_why(why, why_len, "restart source set is empty or exceeds its bound");
-        return false;
-    }
-    memset(receipt, 0, sizeof(*receipt));
-    memset(process, 0, sizeof(*process));
-    struct zcl_devloop_plan classification;
-    if (!zcl_devloop_plan_files(source_tus, source_count, &classification)) {
-        rr_why(why, why_len, "restart source set is invalid");
-        return false;
-    }
-    if (classification.consensus_risk) {
-        rr_why(why, why_len,
-               "consensus-risk input is excluded from fast restart");
-        return false;
-    }
-    for (size_t i = 0; i < source_count; i++) {
-        if (!rr_source_is_c(source_tus[i])) {
-            rr_why(why, why_len,
-                   "fast restart currently requires changed C translation units");
-            return false;
-        }
-    }
-    char root[PATH_MAX];
-    if (!platform_directory_canonical_real(repo_root, root, sizeof(root))) {
-        rr_why(why, why_len, "restart checkout root could not be resolved");
-        return false;
-    }
-    struct rr_plan plan = {0};
-    pthread_mutex_lock(&g_rr_mu);
-    bool plan_ok = rr_plan_load_locked(root, &plan, &receipt->plan_cache_hit,
-                                       &receipt->plan_load_us, why, why_len);
-    pthread_mutex_unlock(&g_rr_mu);
-    if (!plan_ok) return false;
-
-    struct dev_source_record source_before = {0}, source_after = {0};
-    if (guard_source) receipt->source_guard_captures++;
-    if (guard_source &&
-        (!zcl_dev_source_cas_capture(root, &source_before) ||
-         !source_before.cas_present)) {
-        rr_why(why, why_len,
-               "restart source snapshot could not be captured before compile");
-        return false;
-    }
-
-    const struct dev_source_record *identity =
-        epoch_source ? epoch_source : &source_before;
-    if (!rr_source_record_valid(identity)) {
-        rr_why(why, why_len,
-               "restart epoch source CAS record is unavailable");
-        return false;
-    }
-    (void)snprintf(receipt->source_cas_sha3,
-                   sizeof(receipt->source_cas_sha3), "%s",
-                   identity->cas_root_sha3);
-
-    struct rr_overlay *overlays = zcl_calloc(RR_OVERLAY_MAX, sizeof(*overlays),
-                                              "restart overlays");
-    if (!overlays) {
-        rr_why(why, why_len, "restart overlay allocation failed");
-        return false;
-    }
-    const char *runtime_sources[RR_SOURCE_MAX];
-    size_t runtime_source_count = 0;
-    for (size_t i = 0; i < source_count; i++)
-        if (!rr_source_is_test_only(source_tus[i]))
-            runtime_sources[runtime_source_count++] = source_tus[i];
-    if (runtime_source_count == 0) {
-        free(overlays);
-        rr_why(why, why_len,
-               "restart source set contains no runtime translation unit");
-        return false;
-    }
-    size_t overlay_count = 0;
-    bool ok = rr_prepare_overlays(
-        &plan, root, runtime_sources, runtime_source_count, identity,
-        "build/dev-loop/restart-objects", overlays, &overlay_count, process,
-        &receipt->compiler_processes, &receipt->compile_us,
-        &receipt->compile_startup_us, &receipt->compile_body_us,
-        why, why_len);
-    receipt->source_identity_overlay = ok;
-    char rsp[PATH_MAX] = {0};
-    if (ok && !rr_write_response(&plan, root, overlays, overlay_count,
-                                 "build/dev-loop/restart-objects", true, rsp,
-                                 why, why_len))
-        ok = false;
-    if (ok) {
-        ok = rr_link_cached(&plan, root, rsp,
-                            "build/dev-loop/restart-candidates",
-                            receipt->artifact_path,
-                            receipt->artifact_cache_key,
-                            &receipt->artifact_cache_hit,
-                            &receipt->linker_processes, process,
-                            &receipt->link_us, &receipt->link_startup_us,
-                            &receipt->link_body_us, why, why_len);
-    }
-    if (rsp[0]) (void)unlink(rsp);
-    free(overlays);
-    if (!ok) {
-        receipt->total_us = platform_time_monotonic_us() - started;
-        return false;
-    }
-    if (guard_source) receipt->source_guard_captures++;
-    if (guard_source &&
-        (!zcl_dev_source_cas_capture(root, &source_after) ||
-         !source_after.cas_present ||
-         strcmp(source_before.cas_root_sha3, source_after.cas_root_sha3) != 0)) {
-        rr_why(why, why_len,
-               "restart source snapshot changed during candidate build");
-        receipt->total_us = platform_time_monotonic_us() - started;
-        return false;
-    }
-    if (!rr_sha256_file(receipt->artifact_path, receipt->artifact_sha256)) {
-        rr_why(why, why_len, "restart candidate could not be rehashed");
-        return false;
-    }
-    const char *probe_argv[] = {
-        receipt->artifact_path, "discover", "help", NULL
+    struct rr_restart_build_ctx ctx = {
+        .repo_root = repo_root, .source_tus = source_tus,
+        .source_count = source_count, .receipt = receipt,
+        .process = process, .why = why, .why_len = why_len,
+        .guard_source = guard_source, .epoch_source = epoch_source,
+        .started = platform_time_monotonic_us(),
     };
-    receipt->probe_processes = 1;
-    int64_t probe_started = platform_time_monotonic_us();
-    bool probed = zcl_devloop_process_run(root, probe_argv, 5000, process);
-    receipt->probe_us = platform_time_monotonic_us() - probe_started;
-    receipt->probe_startup_us = process->startup_us;
-    receipt->probe_body_us = process->body_us;
-    receipt->candidate_probe_passed = probed && !process->timed_out &&
-        !process->term_signal && process->exit_code == 0;
-    (void)snprintf(receipt->probe, sizeof(receipt->probe), "%s",
-                   "discover.help");
+    if (why && why_len) why[0] = 0;
+    if (!rr_restart_build_validate_inputs(&ctx))
+        return false;
+    if (!rr_restart_build_resolve_root_and_plan(&ctx))
+        return false;
+    if (!rr_restart_build_capture_before(&ctx))
+        return false;
+    if (!rr_restart_build_compile_and_link(&ctx))
+        return false;
+    if (!rr_restart_build_verify_after(&ctx))
+        return false;
+    rr_restart_build_probe(&ctx);
     receipt->changed_sources = (uint32_t)source_count;
-    receipt->total_us = platform_time_monotonic_us() - started;
+    receipt->total_us = platform_time_monotonic_us() - ctx.started;
     if (!receipt->candidate_probe_passed) {
         rr_why(why, why_len, "restart candidate command-runtime probe failed");
         return false;
