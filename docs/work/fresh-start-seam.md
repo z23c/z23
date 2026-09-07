@@ -99,7 +99,7 @@ concludes "eligible + attempted, nothing landed", finds no
 `<datadir>/bundles/directory.json`, and reports
 `NO_STATE_SOURCE_FETCH_NO_SEED`. The published reason is
 
-> `no fast-start state source selected (fetch=no_seed bundle=none)`
+> `no fast-start state source at boot (fetch=no_seed bundle=none)`
 
 which reads as "no reachable seed served a usable manifest". The truth is "the
 seed set was empty before any peer was contacted". `fetch=no_seed` is

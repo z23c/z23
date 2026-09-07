@@ -65,10 +65,10 @@ static void build_reason(char *out, size_t cap,
                          enum no_state_source_bundle_status bundle)
 {
     snprintf(out, cap,
-             "no fast-start state source selected (fetch=%s bundle=%s) — the "
+             "no fast-start state source at boot (fetch=%s bundle=%s) — the "
              "node is doing full from-genesis IBD; to fast-start, pass "
-             "-fileservice=HOST:PORT or drop a consensus bundle in "
-             "<datadir>/bundles/",
+             "-fileservice=HOST:PORT, drop a consensus bundle in "
+             "<datadir>/bundles/, or let a peer offer one",
              fetch_token(fetch), bundle_token(bundle));
 }
 
