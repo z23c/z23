@@ -5318,6 +5318,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_flag_registry.c \
     tools/lint/lintc/gate_pattern_guard.c \
     tools/lint/lintc/gate_describe_budget.c \
+    tools/lint/lintc/gate_state_hygiene_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11127,10 +11128,10 @@ check-raw-malloc:
 	@echo "══ LINT: raw malloc/calloc/realloc in production code ══"
 	@tools/scripts/check_raw_malloc.sh
 
-check-json-value-init:
+check-json-value-init: $(LINTC_TOOL)
 	@echo "══ LINT: struct json_value initialised before first use ══"
-	@tools/scripts/check_json_value_init.sh --self-test
-	@tools/scripts/check_json_value_init.sh
+	@./tools/scripts/check_json_value_init.sh --selftest
+	@./tools/scripts/check_json_value_init.sh
 
 check-blob-read-bounds: $(LINTC_TOOL)
 	@echo "══ LINT: bounded sqlite blob reads in app models ══"
@@ -12922,7 +12923,7 @@ check-projections-pure:
 # would be grandfathered in tools/scripts/one_write_path_baseline.txt (empty
 # today — the legacy writers are already deleted); any new write surface
 # outside the reducer's single write path fails.
-check-one-write-path:
+check-one-write-path: $(LINTC_TOOL)
 	@echo "══ LINT: one write path (E6) ══"
 	@./tools/scripts/check_one_write_path.sh
 

@@ -42,7 +42,6 @@ tools/scripts/check_no_authoritative_ram_state.sh 1
 tools/scripts/check_no_secret_printf.sh 1
 tools/scripts/check_no_silent_ready.sh 1
 tools/scripts/check_no_uncited_victory.sh 1
-tools/scripts/check_one_write_path.sh 1
 tools/scripts/check_projections_pure.sh 1
 tools/scripts/check_reproducible_build.sh 1
 tools/scripts/check_shape_include_direction.sh 1
