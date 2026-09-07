@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "lintc.h"
 
 static int sql_glob(const char *s, const char *p)

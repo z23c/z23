@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "lintc.h"
 
 enum { CYC_MAX = 15, CYC_NAME = 96, CYC_TOP = 20 };
