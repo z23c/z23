@@ -18,7 +18,7 @@
 #                derivable runtime interface to sealed code.
 #
 #   COMPILE reach  The module TU's preprocessor include closure (cc -MM with the
-#                flags the build itself recorded in build/hotswap/fast/*.cmd),
+#                flags the build itself recorded in build/hotswap-fast/*.cmd),
 #                filtered to sealed files. A hit means sealed TEXT — a struct
 #                layout, an enum, a macro constant, a static inline — was
 #                compiled INTO the module. There is no dynamic symbol for this,
@@ -43,7 +43,7 @@ MANIFEST=core/MANIFEST.sha3
 SWAPPABLE=engine/composition/hotswap_swappable.def
 ISLANDS=engine/composition/hotswap_islands.def
 SO_DIR=build/hotswap
-CMD_DIR=build/hotswap/fast
+CMD_DIR=build/hotswap-fast
 OBJ_ROOT=build/node-obj/epochs
 
 BUILD_ID=""

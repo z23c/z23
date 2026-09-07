@@ -4551,7 +4551,11 @@ verify-change:
 # runs the changed-file dev compile gate, then links the non-LTO dev binary.
 # This deliberately does not replace `z23`, `make deploy`, or release
 # artifacts.
-HOTSWAP_ACTION_PLAN = $(BUILD_DIR)/hotswap/fast/flags.env
+# Sibling of HOTSWAP_SO_DIR, not a child: plain `make` writes this plan as a
+# default-node dep, and a child path would create build/hotswap with no *.so
+# (the hollow-producer shape check-hotswap-module-imports refuses).
+HOTSWAP_FAST_DIR = $(BUILD_DIR)/hotswap-fast
+HOTSWAP_ACTION_PLAN = $(HOTSWAP_FAST_DIR)/flags.env
 DEV_PACKAGE_VERIFIER_TARGET = dev-package-verifier
 ifneq ($(ZCL_HOST_WINDOWS),)
 # The package verifier's safety claim depends on Linux child confinement.
@@ -4954,7 +4958,7 @@ hotswap:
 #   2. tools/scripts/hotswap_module_sections.awk intersects that closure with
 #      the sealed FILE lines of core/MANIFEST.sha3 and emits, per sealed file
 #      reached, the DEEPEST SECTION containing it, into
-#      build/hotswap/fast/<safe>.sections.h;
+#      build/hotswap-fast/<safe>.sections.h;
 #   3. the real compile force-includes that header (-include), so the emitted
 #      `zcl_hotswap_module` carries the section digests this TU actually
 #      compiled against.
@@ -5030,15 +5034,15 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	  [ -n "$$src" ] || { echo "hotswap-module-so: leaf '$(HANDLER)' is not on engine/composition/hotswap_swappable.def (the swappable shape-leaf allowlist)" >&2; exit 2; }; \
 	fi; \
 	[ -f "$$src" ] || { echo "hotswap-module-so: source does not exist: $$src" >&2; exit 2; }; \
-	mkdir -p "$(HOTSWAP_OBJ_DIR)" "$(HOTSWAP_SO_DIR)" "$(HOTSWAP_SO_DIR)/fast"; \
+	mkdir -p "$(HOTSWAP_OBJ_DIR)" "$(HOTSWAP_SO_DIR)" "$(HOTSWAP_FAST_DIR)"; \
 	safe="$$(printf '%s' "$$src" | tr -c 'A-Za-z0-9_.-' '_')"; \
 	compile_src="$$src"; \
 	island_rows="$$(tr '\n' ' ' < engine/composition/hotswap_islands.def \
 	  | grep -oE 'HOTSWAP_ISLAND\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)' || true)"; \
 	members="$$(printf '%s\n' "$$island_rows" | awk -v owner="$$src" -F '"' '$$2 == owner { print $$4; exit }')"; \
 	if [ -n "$$members" ]; then \
-	  unity="$(HOTSWAP_SO_DIR)/fast/$$safe.island.c"; \
-	  tmp_unity="$$(mktemp "$(HOTSWAP_SO_DIR)/fast/.island.XXXXXX.c")"; \
+	  unity="$(HOTSWAP_FAST_DIR)/$$safe.island.c"; \
+	  tmp_unity="$$(mktemp "$(HOTSWAP_FAST_DIR)/.island.XXXXXX.c")"; \
 	  for member in $$members; do \
 	    [ -f "$$member" ] || { echo "hotswap-module-so: missing island member $$member" >&2; exit 2; }; \
 	    printf '#include "%s/%s"\n' '$(CURDIR)' "$$member" >> "$$tmp_unity"; \
@@ -5051,7 +5055,7 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	o="$(HOTSWAP_OBJ_DIR)/mod-$$safe-$(BUILD_SOURCE_ID).o"; \
 	so="$(HOTSWAP_SO_DIR)/$$safe-$(BUILD_SOURCE_ID).so"; \
 	tmp_o="$$(mktemp "$(HOTSWAP_OBJ_DIR)/.module.XXXXXX.o")"; \
-	tmp_d="$$(mktemp "$(HOTSWAP_SO_DIR)/fast/.module.XXXXXX.d")"; \
+	tmp_d="$$(mktemp "$(HOTSWAP_FAST_DIR)/.module.XXXXXX.d")"; \
 	tmp_so="$$(mktemp "$(HOTSWAP_SO_DIR)/.module.XXXXXX.so")"; \
 	trap 'rm -f "$$tmp_o" "$$tmp_d" "$$tmp_so"' EXIT HUP INT TERM; \
 	publish_exact() { \
@@ -5060,9 +5064,9 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	  [ -f "$$pe_dst" ] && [ ! -L "$$pe_dst" ] && cmp -s "$$pe_src" "$$pe_dst" || return 1; \
 	  rm -f "$$pe_src"; \
 	}; \
-	sect_h="$(HOTSWAP_SO_DIR)/fast/$$safe.sections.h"; \
-	tmp_d0="$$(mktemp "$(HOTSWAP_SO_DIR)/fast/.sections.XXXXXX.d")"; \
-	tmp_h="$$(mktemp "$(HOTSWAP_SO_DIR)/fast/.sections.XXXXXX.h")"; \
+	sect_h="$(HOTSWAP_FAST_DIR)/$$safe.sections.h"; \
+	tmp_d0="$$(mktemp "$(HOTSWAP_FAST_DIR)/.sections.XXXXXX.d")"; \
+	tmp_h="$$(mktemp "$(HOTSWAP_FAST_DIR)/.sections.XXXXXX.h")"; \
 	trap 'rm -f "$$tmp_o" "$$tmp_d" "$$tmp_so" "$$tmp_d0" "$$tmp_h"' EXIT HUP INT TERM; \
 	$(CC) $(DEV_LIVE_CFLAGS) -fPIC -DZCL_HOTSWAP_MODULE_GEN \
 	  -DZCL_HOTSWAP_MODULE_SOURCE_TU=\"$$src\" \
@@ -5083,10 +5087,10 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	  echo "hotswap-module-so: REFUSING mismatched existing candidate $$so" >&2; exit 3; }; \
 	chmod a-w "$$o" "$$so"; \
 	$(HOTSWAP_MODULE_CODESIGN) "$$so"; \
-	cache_o="$(HOTSWAP_SO_DIR)/fast/$$safe.o"; \
-	cache_d="$(HOTSWAP_SO_DIR)/fast/$$safe.d"; \
-	cache_cmd="$(HOTSWAP_SO_DIR)/fast/$$safe.cmd"; \
-	cache_ptr="$(HOTSWAP_SO_DIR)/fast/$$safe.so-path"; \
+	cache_o="$(HOTSWAP_FAST_DIR)/$$safe.o"; \
+	cache_d="$(HOTSWAP_FAST_DIR)/$$safe.d"; \
+	cache_cmd="$(HOTSWAP_FAST_DIR)/$$safe.cmd"; \
+	cache_ptr="$(HOTSWAP_FAST_DIR)/$$safe.so-path"; \
 	rm -f "$$cache_o"; \
 	cp -- "$$o" "$$cache_o"; \
 	chmod u+w "$$cache_o"; \

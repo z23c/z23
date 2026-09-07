@@ -2387,7 +2387,7 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
         "HOTSWAP_MODULE_LDFLAGS=-shared -nostartfiles -Wl,-Bsymbolic\n",
         compiler, canonical_root);
     return n > 0 && n < (int)sizeof(flags) &&
-           dp_mk_write(root, "build/hotswap/fast/flags.env", flags);
+           dp_mk_write(root, "build/hotswap-fast/flags.env", flags);
 }
 
 static bool run_hotswap_artifact_cache_fixture(void)
@@ -2413,7 +2413,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
         "if [ \"$compile\" -eq 1 ]; then\n"
         "  extra=\n"
         "  if [ \"${ZCL_DEVLOOP_TEST_MUTATE_DEPS:-0}\" = 1 ]; then\n"
-        "    count_file=build/hotswap/fast/mutation-compile-count\n"
+        "    count_file=build/hotswap-fast/mutation-compile-count\n"
         "    n=$(cat \"$count_file\" 2>/dev/null || echo 0); n=$((n + 1))\n"
         "    printf '%s\\n' \"$n\" >\"$count_file\"\n"
         "    if [ \"$n\" -ge 2 ]; then extra=' engine/controllers/src/status_mutation_fixture.h'; fi\n"
@@ -2561,7 +2561,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
     stage = "cold-dependency-mutation";
     if (!dp_mk_write(root_b, owner,
                      "int zcl_hotswap_fixture_owner(void) { return 13; }\n") ||
-        unlink("test-tmp/dev_hotswap_cache_b/build/hotswap/fast/"
+        unlink("test-tmp/dev_hotswap_cache_b/build/hotswap-fast/"
                "engine_controllers_src_status_native_handlers.c.d") != 0 ||
         platform_environment_set("ZCL_DEVLOOP_TEST_MUTATE_DEPS", "1", 1) != 0 ||
         zcl_devloop_hotswap_build(root_b, owner, &mutated, &process,

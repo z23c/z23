@@ -44,7 +44,7 @@ SCRATCH="${ZCL_HOTSWAP_VERIFY_DIR:-$HOME/.local/state/zclassic23/scratch/hotswap
 mkdir -p "$SCRATCH" || { echo "hotswap-verify: cannot create $SCRATCH" >&2; exit 2; }
 
 MANIFEST="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-engine/composition/hotswap_swappable.def}"
-FLAGS_ENV="build/hotswap/fast/flags.env"
+FLAGS_ENV="build/hotswap-fast/flags.env"
 # The node a module will be dlopen'd into. Step 4 resolves against it.
 SYMBOL_NODE="${ZCL_HOTSWAP_NODE_BINARY:-build/bin/zclassic23-dev}"
 
@@ -146,7 +146,7 @@ for tu in "${TARGETS[@]}"; do
     fi
 
     safe="$(printf '%s' "$tu" | tr -c 'A-Za-z0-9_.-' '_')"
-    obj="build/hotswap/fast/$safe.o"
+    obj="build/hotswap-fast/$safe.o"
     if [ ! -f "$obj" ]; then
         echo "  FAIL: expected cached object $obj not produced"
         fail=$((fail + 1)); failed_rows="${failed_rows}  $tu (no object)"$'\n'

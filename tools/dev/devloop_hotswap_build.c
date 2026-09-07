@@ -348,7 +348,7 @@ static bool hs_plan_load_locked(const char *root, bool *cache_hit,
     char islands[PATH_MAX], services[PATH_MAX], shadow_owners[PATH_MAX];
     char hotfork_capsules[PATH_MAX];
     if (snprintf(flags_path, sizeof(flags_path),
-                 "%s/build/hotswap/fast/flags.env", root) >=
+                 "%s/build/hotswap-fast/flags.env", root) >=
             (int)sizeof(flags_path) ||
         snprintf(makefile, sizeof(makefile), "%s/Makefile", root) >=
             (int)sizeof(makefile) ||
@@ -489,7 +489,7 @@ static bool hs_depfile_resolve_entry(const char *root, const char *arg,
     struct stat st;
     if (pn <= 0 || pn >= (int)sizeof(full))
         return false;
-    if (strstr(full, "/build/hotswap/fast/.resident-") != NULL) {
+    if (strstr(full, "/build/hotswap-fast/.resident-") != NULL) {
         *skip = true; /* generated unity wrapper, never source authority */
         return true;
     }
@@ -941,6 +941,13 @@ static bool hs_publish_artifact_path(const char *root, const char *safe,
                                      const char artifact_sha256[65],
                                      char out[4096])
 {
+    char dir[PATH_MAX];
+    /* The action plan lives in build/hotswap-fast/, a sibling, so publishing
+     * a module is what creates build/hotswap/. */
+    if (snprintf(dir, sizeof(dir), "%s/build/hotswap", root) >=
+            (int)sizeof(dir) ||
+        !platform_directory_ensure(dir, 0700))
+        return false;
     if (snprintf(out, 4096, "%s/build/hotswap/%s-%s.so", root, safe,
                  artifact_sha256) >= 4096)
         return false;
@@ -1007,7 +1014,7 @@ static bool hs_temp(char *out, size_t out_len, const char *root,
                     const char *suffix)
 {
     int n = snprintf(out, out_len,
-                     "%s/build/hotswap/fast/.resident-XXXXXX%s", root,
+                     "%s/build/hotswap-fast/.resident-XXXXXX%s", root,
                      suffix);
     if (n <= 0 || (size_t)n >= out_len)
         return false;
@@ -1377,7 +1384,7 @@ static bool hs_unity_source(const char *root, const char *owner,
         return true;
     char temp[PATH_MAX];
     if (!hs_temp(temp, sizeof(temp), root, ".c") ||
-        snprintf(out, PATH_MAX, "%s/build/hotswap/fast/%s.island.c",
+        snprintf(out, PATH_MAX, "%s/build/hotswap-fast/%s.island.c",
                  root, safe) >= PATH_MAX) {
         hs_why(why, why_len, "could not allocate confined island wrapper");
         return false;
@@ -1490,7 +1497,7 @@ bool zcl_devloop_hotswap_build(
     char cache_hash[PATH_MAX] = {0};
     int cache_fd = -1;
     if (snprintf(cached_dep, sizeof(cached_dep),
-                 "%s/build/hotswap/fast/%s.d", root, safe) >=
+                 "%s/build/hotswap-fast/%s.d", root, safe) >=
             (int)sizeof(cached_dep) ||
         !hs_temp(tmp_o, sizeof(tmp_o), root, ".o") ||
         !hs_temp(tmp_d, sizeof(tmp_d), root, ".d") ||
@@ -3505,7 +3512,7 @@ static bool hs_hotfork_build(
     if (snprintf(key_owner, sizeof(key_owner), "HOT_FORK:%s:%s",
                  def->source_tu, adapter_root) >= (int)sizeof(key_owner) ||
         snprintf(cached_dep, sizeof(cached_dep),
-                 "%s/build/hotswap/fast/%s-%s.hotfork.d", root, safe,
+                 "%s/build/hotswap-fast/%s-%s.hotfork.d", root, safe,
                  adapter_root) >= (int)sizeof(cached_dep)) {
         hs_why(why, why_len, "HOT_FORK adapter identity exceeds bound");
         goto fail;

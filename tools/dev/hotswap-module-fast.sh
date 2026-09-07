@@ -3,7 +3,7 @@
 #
 # Fast MULTI-LEAF module rebuild for the observable hot-swap loop
 # (`make hotswap-try` / `make hotswap-apply`). Bypasses the whole-program make
-# parse by replaying cached compile metadata (build/hotswap/fast/flags.env)
+# parse by replaying cached compile metadata (build/hotswap-fast/flags.env)
 # written by the authoritative `make hotswap-module-so` recipe.
 #
 # FAIL-SAFE CONTRACT: whenever any input is newer than the cached metadata, or
@@ -99,7 +99,7 @@ else
 fi
 [ -f "$src" ] || fallback "source does not exist: $src"
 
-FAST_DIR=build/hotswap/fast
+FAST_DIR=build/hotswap-fast
 FLAGS_ENV="$FAST_DIR/flags.env"
 HOTSWAP_OBJ_DIR=build/hotswap-obj
 HOTSWAP_SO_DIR=build/hotswap

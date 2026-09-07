@@ -48,9 +48,9 @@
 # cached OBJECT file with -Wl,-z,lazy instead of -Wl,-z,now (same object, same
 # -Bsymbolic, only the bind-now flag changes) and dlopening THAT. This script
 # reuses the identical relink recipe — CC and DEV_CFLAGS come from the same
-# build/hotswap/fast/flags.env the module build wrote — but points it at a
+# build/hotswap-fast/flags.env the module build wrote — but points it at a
 # DIFFERENT object than hotswap-verify.sh does: not the mutable
-# build/hotswap/fast/<safe>.o cache (which holds only the MOST RECENTLY built
+# build/hotswap-fast/<safe>.o cache (which holds only the MOST RECENTLY built
 # object for that source file and can silently belong to a different
 # BUILD_SOURCE_ID than the specific .so this script was asked to package), but
 # the immutable, per-artifact object `make hotswap-module-so` also writes and
@@ -139,7 +139,7 @@
 #     .so is missing
 #   - re-linking that object with the frozen shipping flags is not byte-equal
 #     to the .so (artifact bytes and object-derived metadata are never mixed)
-#   - build/hotswap/fast/flags.env (the frozen CC/DEV_CFLAGS the module was
+#   - build/hotswap-fast/flags.env (the frozen CC/DEV_CFLAGS the module was
 #     built with) is missing
 #   - the verifier or the lazy relink fails to build
 #   - hotswap_verify_so does not report ADMITTED for the relinked object
@@ -178,7 +178,7 @@ SCRATCH="$(mktemp -d "$SCRATCH_ROOT/run.XXXXXX")" || {
 cleanup_run() { rm -rf "$SCRATCH"; }
 trap cleanup_run EXIT HUP INT TERM
 
-FLAGS_ENV="build/hotswap/fast/flags.env"
+FLAGS_ENV="build/hotswap-fast/flags.env"
 HOTSWAP_SO_DIR="build/hotswap"
 HOTSWAP_OBJ_DIR="build/hotswap-obj"
 
