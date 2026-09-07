@@ -5320,6 +5320,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_describe_budget.c \
     tools/lint/lintc/gate_state_hygiene_fences.c \
     tools/lint/lintc/gate_supervisor_domain.c \
+    tools/lint/lintc/gate_supervisor_domain_scan.c \
     tools/lint/lintc/gate_supervisor_domain_workers.c \
     tools/lint/lintc/gate_controller_private_headers.c \
     tools/lint/lintc/gate_controller_private_headers_workers.c \

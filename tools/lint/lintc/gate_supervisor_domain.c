@@ -1,10 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Gates: check-supervisor-domain
- * Single-gate family, two files under the 700-line family ceiling:
- * gate_supervisor_domain.c (this file) holds the domain-registration scan
- * — the find mirror, the git-oracle coverage check, the real-grep main scan
- * — and gate_supervisor_domain_workers.c holds the boot-worker lock-in and
+ * Single-gate family, three files under the 700-line family ceiling:
+ * gate_supervisor_domain.c (this file) holds the find mirror, the
+ * git-oracle coverage check, and the gate entry;
+ * gate_supervisor_domain_scan.c holds the native main scan (the ERE over
+ * the scan roots, its traversal, diagnostics, and the four row filters);
+ * and gate_supervisor_domain_workers.c holds the boot-worker lock-in and
  * the gate's --selftest probes. Placement ruling (2026-09-06, Linux side):
  * the small-pattern, ratchet, tree-walk, and git-scan families are claimed
  * or full, so new ports land in their own files; the older in-file routing
@@ -40,20 +42,21 @@
  *   their two FATALs were environment failures, never gate verdicts.
  * - ZCL_SUPDOM_COVERAGE_ONLY=1 prints the coverage-only PASS line with the
  *   RAW find count (${#supdom_files[@]}), not the deduped one.
- * - The main scan runs the REAL system grep through capture_cmd
- *   (sd_main_grep): same operands (-rnE, the same ERE, the roots,
- *   --include='*.c', and the scan_exclusions.sh args when
- *   ZCL_LINT_PRODUCTION_SCAN=1), so GNU grep's \s, its traversal order, its
- *   stderr diagnostics, and its exit status are identical by construction.
- *   Exit >= 2 is the FATAL block (exit 2).
- * - The four `grep -v` filters are BRE regexec per kept line
- *   (sd_filter_hits); 'platform/modules/util/src/supervisor.c' keeps REGEX
- *   semantics (its dots match any character) rather than being repaired
- *   into a fixed string. The original's substring anchoring over the whole
- *   path:line:content row is preserved exactly.
- * - The violation report (hits + the "N violation(s) (mode: M)" line, both
- *   stdout) exits 1 only when ZCL_LINT_MODE is FAIL (default; an empty
- *   value is FAIL, matching ${VAR:-FAIL}).
+ * - The main scan is native (gate_supervisor_domain_scan.c): a
+ *   readdir-order depth-first walk of the roots (fts with no comparison
+ *   function, which is what GNU grep -r uses), per-line regexec of the
+ *   ERE with [[:space:]] standing in for grep's whitespace escape (an
+ *   identical match set: every byte under the scan roots is ASCII), the
+ *   --include='*.c' basename glob, and the scan_exclusions.sh exclude
+ *   globs (basename fnmatch, applied even to explicit root operands,
+ *   exactly like grep 3.11) when ZCL_LINT_PRODUCTION_SCAN=1. grep's own
+ *   open/read diagnostics are reproduced byte-for-byte on stderr and any
+ *   such failure is the exit >= 2 FATAL block (exit 2), the partial rows
+ *   discarded exactly like the shell's captured RAW on that branch.
+ * - The four `grep -v` filters and the violation report (hits + the
+ *   "N violation(s) (mode: M)" line, both stdout) live with the scan;
+ *   the report exits 1 only when ZCL_LINT_MODE is FAIL (default; an
+ *   empty value is FAIL, matching ${VAR:-FAIL}).
  * - The boot-worker lock-in and --selftest: gate_supervisor_domain_workers.c.
  *
  * Preserved latent defects / parity notes:
@@ -67,16 +70,11 @@
  * - The 'platform/modules/util/src/supervisor.c' filter's dots match any
  *   character (regex, not fixed string) — a latent over-exclusion,
  *   reproduced, not repaired.
- * - A grep killed by a signal maps to exit 127 under capture_cmd where the
- *   shell recorded 128+sig; both take the >= 2 FATAL branch, and only the
- *   number in "(exit N)" differs in that pathological case.
  * - File names containing a newline: the shell's mapfile/printf pipeline
  *   counts LINES (such a file reads as several entries and mismatches the
  *   git oracle); the port counts FILES. No such name exists in the tree.
  * - The shell was unbounded; the port's fixed pools (scan set, oracle
- *   capture, grep capture) fail closed with die(). A grep result over 1 MiB
- *   (~8000 violations) dies instead of printing the full list — environment
- *   exhaustion, not a gate verdict.
+ *   capture, and the scan file's RAW/HITS buffers) fail closed with die().
  * - The ZCL_GATE_SCAN_LOG audit hook of gate_lib.sh is not reproduced
  *   (lib.c precedent: "Non-parity: no ZCL_GATE_SCAN_LOG").
  */
@@ -87,7 +85,6 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
-#include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +94,10 @@
 
 /* The boot-worker half of the gate (gate_supervisor_domain_workers.c). */
 int supervisor_domain_workers_run(const char *mode);
+
+/* The native main scan (gate_supervisor_domain_scan.c). */
+int supervisor_domain_scan_run(const char *mode, const char *const *roots,
+                               int nroots);
 
 static const char k_sd_name[] = "check_supervisor_domain";
 static const char k_sd_roots_default[] =
@@ -123,10 +124,6 @@ static int g_sd_nfiles;
 static char g_sd_git[SD_RAW];          /* the oracle capture */
 static const char *g_sd_evec[SD_MAXF]; /* its lines */
 static const char *g_sd_miss[SD_MAXF]; /* the comm -13 result */
-static char g_sd_raw[SD_RAW];          /* the main grep's stdout */
-static char g_sd_hits[SD_RAW];         /* the filtered HITS */
-static size_t g_sd_hits_used;
-static int g_sd_nhits;
 static char g_sd_roots_buf[8192];
 static const char *g_sd_rvec[64];
 static int g_sd_nroots;
@@ -477,121 +474,6 @@ static int sd_coverage(void)
     return 0;
 }
 
-/* ── the main grep (real system grep, real semantics) ──────────────────── */
-
-static int sd_grep_build(char *cmd, size_t cap)
-{
-    size_t n = 0;
-    int rc = sd_cat(cmd, cap, &n, "grep -rnE ");
-    rc |= sd_catq(cmd, cap, &n,
-                  "(^|[^A-Za-z0-9_])supervisor_register\\s*\\(");
-    for (int i = 0; i < g_sd_nroots; i++) {
-        rc |= sd_cat(cmd, cap, &n, " ");
-        rc |= sd_catq(cmd, cap, &n, g_sd_rvec[i]);
-    }
-    rc |= sd_cat(cmd, cap, &n, " --include='*.c'");
-    if (lint_prod_scan()) {
-        static const char *const excl[] = {
-            "--exclude=_*fixture*.c", "--exclude=_*fixture*.h",
-            "--exclude-dir=planted", "--exclude-dir=build",
-            "--exclude-dir=vendor", "--exclude-dir=.claude",
-            "--exclude-dir=test-tmp",
-        };
-        for (size_t i = 0; i < sizeof excl / sizeof excl[0]; i++) {
-            rc |= sd_cat(cmd, cap, &n, " ");
-            rc |= sd_catq(cmd, cap, &n, excl[i]);
-        }
-    }
-    return rc ? 2 : 0;
-}
-
-/* The four grep -v filters, as BRE (regcomp flags 0): the dots in
- * 'platform/modules/util/src/supervisor.c' match any character, exactly
- * like the shell. */
-static int sd_drop_comp(regex_t *re)
-{
-    static const char *const pats[] = {
-        "supervisor_register_in_domain",
-        "platform/modules/util/src/supervisor.c",
-        "tests/harness/include/test/",
-        "// supervisor-root-ok:",
-    };
-    for (int i = 0; i < 4; i++) {
-        int err = regcomp(&re[i], pats[i], 0);
-        if (err) {
-            int rc = reg_fail(&re[i], err);
-            while (i > 0)
-                regfree(&re[--i]);
-            return rc;
-        }
-    }
-    return 0;
-}
-
-static int sd_filter_hits(const regex_t *re)
-{
-    g_sd_hits_used = 0;
-    g_sd_nhits = 0;
-    for (const char *p = g_sd_raw; *p; ) {
-        const char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        char line[4096];
-        if (n >= sizeof line)
-            return die("z23-lint: derived buffer overflow\n", "");
-        memcpy(line, p, n);
-        line[n] = '\0';
-        int drop = 0;
-        for (int i = 0; i < 4 && !drop; i++)
-            drop = regexec(&re[i], line, 0, NULL, 0) == 0;
-        if (!drop) {
-            if (g_sd_hits_used + n + 1 >= sizeof g_sd_hits)
-                return die("z23-lint: derived buffer overflow\n", "");
-            memcpy(g_sd_hits + g_sd_hits_used, p, n);
-            g_sd_hits_used += n;
-            g_sd_hits[g_sd_hits_used++] = '\n';
-            g_sd_nhits++;
-        }
-        if (!nl)
-            break;
-        p = nl + 1;
-    }
-    return 0;
-}
-
-static int sd_main_grep(const char *mode)
-{
-    char cmd[SD_CMD];
-    int rc = sd_grep_build(cmd, sizeof cmd);
-    int code = 0;
-    if (rc == 0)
-        rc = capture_cmd(cmd, g_sd_raw, sizeof g_sd_raw, &code);
-    if (rc)
-        return rc;
-    if (code >= 2) {
-        fprintf(stderr, "%s: FATAL — scan grep failed (exit %d); refusing\n"
-                "  to report PASS off a broken scan.\n", k_sd_name, code);
-        return 2;
-    }
-    regex_t drop[4];
-    rc = sd_drop_comp(drop);
-    if (rc == 0)
-        rc = sd_filter_hits(drop);
-    for (int i = 0; i < 4; i++)
-        regfree(&drop[i]);
-    if (rc)
-        return rc;
-    if (g_sd_nhits > 0) {
-        if (fwrite(g_sd_hits, 1, g_sd_hits_used, stdout) != g_sd_hits_used)
-            return die("z23-lint: write failed\n", "");
-        if (printf("[%s] %d violation(s) (mode: %s)\n", k_sd_name,
-                   g_sd_nhits, mode) < 0)
-            return die("z23-lint: write failed\n", "");
-        if (strcmp(mode, "FAIL") == 0)
-            return 1;
-    }
-    return 0;
-}
-
 /* ── the gate ──────────────────────────────────────────────────────────── */
 
 static int sd_floor(void)
@@ -629,7 +511,7 @@ static int sd_run_body(void)
         return 0;
     }
     const char *mode = env_or("ZCL_LINT_MODE", "FAIL");
-    rc = sd_main_grep(mode);
+    rc = supervisor_domain_scan_run(mode, g_sd_rvec, g_sd_nroots);
     if (rc == 0)
         rc = supervisor_domain_workers_run(mode);
     if (rc == 0)

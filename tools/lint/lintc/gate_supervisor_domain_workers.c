@@ -3,8 +3,9 @@
  * Gates: check-supervisor-domain
  * Second file of the check-supervisor-domain family (the 700-line family
  * ceiling split): the boot background-worker lock-in half of the gate, and
- * the gate's --selftest probes. The domain-registration scan, the coverage
- * check, and the port's parity notes live in gate_supervisor_domain.c.
+ * the gate's --selftest probes. The find mirror, the coverage check, and
+ * the port's parity notes live in gate_supervisor_domain.c; the native
+ * main scan lives in gate_supervisor_domain_scan.c.
  */
 
 /* ── the boot-worker lock-in ─────────────────────────────────────────────
@@ -21,8 +22,9 @@
  *   (glob(3) GLOB_NOCHECK, bash's default no-nullglob/no-failglob; an
  *   expansion error leaves the word literal, as bash does).
  * - `[ -f ]` is stat+S_ISREG. The spawn and registration probes are ERE
- *   matchers with [[:space:]] for grep's \s; a grep open failure reproduces
- *   grep's "grep: <f>: <strerror>" diagnostic, and the shell's funnels are
+ *   matchers with [[:space:]] standing in for grep's whitespace escape; an
+ *   open failure reproduces grep's "grep: <f>: <strerror>" diagnostic, and
+ *   the shell's funnels are
  *   kept exactly: the spawn probe's `! grep -q` skips the file on ANY
  *   nonzero grep exit (no-match and error alike), while the registration
  *   probe and the baseline grandfather fail closed toward "violation".
