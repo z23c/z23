@@ -103,6 +103,31 @@ static int nsp_on_index(const char *path, void *ctx)
     return nsp_add(c->set, path);
 }
 
+static int nsp_walk(const char *dir, struct nsp_set *s);
+
+/* One scandir() entry: skip . / .. / vendor, then stat and recurse into a
+ * directory or add a matching regular file. Split out of nsp_walk to keep
+ * both functions under the cyclomatic cap. */
+static int nsp_walk_entry(const char *dir, const char *nm, struct nsp_set *s)
+{
+    char path[4096];
+    struct stat st;
+    int k;
+    if (strcmp(nm, ".") == 0 || strcmp(nm, "..") == 0
+        || strcmp(nm, "vendor") == 0)
+        return 0;
+    k = snprintf(path, sizeof path, "%s/%s", dir, nm);
+    if (k < 0 || (size_t)k >= sizeof path)
+        return die("z23-lint: path too long: %s\n", dir);
+    if (lstat(path, &st) != 0)
+        return die("z23-lint: cannot stat %s\n", path);
+    if (S_ISDIR(st.st_mode) && !nsp_skip(path))
+        return nsp_walk(path, s);
+    if (S_ISREG(st.st_mode) && nsp_is_src(path) && !nsp_skip(path))
+        return nsp_add(s, path);
+    return 0;
+}
+
 static int nsp_walk(const char *dir, struct nsp_set *s)
 {
     struct dirent **names = NULL;
@@ -111,21 +136,8 @@ static int nsp_walk(const char *dir, struct nsp_set *s)
     if (n < 0)
         return errno == ENOENT ? 0 : die("z23-lint: cannot scan %s\n", dir);
     for (i = 0; i < n; i++) {
-        const char *nm = names[i]->d_name;
-        if (rc == 0 && strcmp(nm, ".") != 0 && strcmp(nm, "..") != 0
-            && strcmp(nm, "vendor") != 0) {
-            char path[4096];
-            struct stat st;
-            int k = snprintf(path, sizeof path, "%s/%s", dir, nm);
-            if (k < 0 || (size_t)k >= sizeof path)
-                rc = die("z23-lint: path too long: %s\n", dir);
-            else if (lstat(path, &st) != 0)
-                rc = die("z23-lint: cannot stat %s\n", path);
-            else if (S_ISDIR(st.st_mode) && !nsp_skip(path))
-                rc = nsp_walk(path, s);
-            else if (S_ISREG(st.st_mode) && nsp_is_src(path) && !nsp_skip(path))
-                rc = nsp_add(s, path);
-        }
+        if (rc == 0)
+            rc = nsp_walk_entry(dir, names[i]->d_name, s);
         free(names[i]);
     }
     free(names);
@@ -288,6 +300,22 @@ static int nsp_line_hit(const char *line)
     return 0;
 }
 
+/* One already-chomped source line: report it as a hit (or return 0 if it
+ * is not a secret-printf line, or the file is allowlisted). Split out of
+ * nsp_scan_file to keep both functions under the cyclomatic cap. */
+static int nsp_scan_line(const char *path, int lineno, const char *buf,
+                         FILE *hits, int *nhit)
+{
+    if (!nsp_line_hit(buf) || nsp_allowed(path))
+        return 0;
+    if (*nhit >= NSP_HIT)
+        return die("z23-lint: secret-printf hit overflow\n", "");
+    if (fprintf(hits, "%s:%d:%s\n", path, lineno, buf) < 0)
+        return die("z23-lint: write failed\n", "");
+    (*nhit)++;
+    return 0;
+}
+
 static int nsp_scan_file(const char *path, FILE *hits, int *nhit)
 {
     FILE *f = fopen(path, "r");
@@ -304,13 +332,7 @@ static int nsp_scan_file(const char *path, FILE *hits, int *nhit)
             buf[--n] = '\0';
         if (n && buf[n - 1] == '\r')
             buf[n] = '\0';
-        if (!nsp_line_hit(buf) || nsp_allowed(path))
-            continue;
-        if (*nhit >= NSP_HIT)
-            return die("z23-lint: secret-printf hit overflow\n", "");
-        if (fprintf(hits, "%s:%d:%s\n", path, lineno, buf) < 0)
-            rc = die("z23-lint: write failed\n", "");
-        (*nhit)++;
+        rc = nsp_scan_line(path, lineno, buf, hits, nhit);
     }
     if (rc == 0 && ferror(f))
         rc = die("z23-lint: read failed: %s\n", path);

@@ -138,6 +138,23 @@ static int ort_scan_file(const char *path, const regex_t *res,
     return rc;
 }
 
+/* Trim a raw baseline line in place (strip trailing CR/LF, skip leading
+ * blanks) and report whether it is a real entry. Split out of
+ * ort_load_base to keep it under the cyclomatic cap. */
+static int ort_trim_baseline_line(char *buf, char **out)
+{
+    size_t n = strlen(buf);
+    char *p = buf;
+    if (n && buf[n - 1] == '\n')
+        buf[--n] = '\0';
+    if (n && buf[n - 1] == '\r')
+        buf[n] = '\0';
+    while (*p == ' ' || *p == '\t')
+        p++;
+    *out = p;
+    return *p != '\0' && *p != '#';
+}
+
 static int ort_load_base(struct bln_set *b)
 {
     FILE *f = fopen(k_ort_base, "r");
@@ -147,17 +164,9 @@ static int ort_load_base(struct bln_set *b)
     if (!f)
         return 0;
     while (rc == 0 && fgets(buf, (int)sizeof buf, f)) {
-        size_t n = strlen(buf);
-        char *p = buf;
-        if (n && buf[n - 1] == '\n')
-            buf[--n] = '\0';
-        if (n && buf[n - 1] == '\r')
-            buf[n] = '\0';
-        while (*p == ' ' || *p == '\t')
-            p++;
-        if (*p == '\0' || *p == '#')
-            continue;
-        rc = bln_add(b, p);
+        char *p;
+        if (ort_trim_baseline_line(buf, &p))
+            rc = bln_add(b, p);
     }
     if (rc == 0 && ferror(f))
         rc = die("z23-lint: read failed: %s\n", k_ort_base);
@@ -188,12 +197,50 @@ static int ort_report(const struct bln_set *neu)
     return 1;
 }
 
+/* One classification pass over every collected file: scan for zcl_result
+ * use and the override marker, then sort into "stale baseline" (grandfathered
+ * but has since migrated) or "new violation" (not baselined and not
+ * migrated). Split out of check_one_result_type_run to keep both functions
+ * under the cyclomatic cap. */
+static int ort_classify_all(const struct ort_set *set, const struct bln_set *base,
+                            const regex_t *res, const regex_t *ok,
+                            struct bln_set *neu, struct bln_set *stale)
+{
+    int rc = 0, i, uses, ovr;
+    for (i = 0; rc == 0 && i < set->n; i++) {
+        rc = ort_scan_file(set->p[i], res, ok, &uses, &ovr);
+        if (rc)
+            break;
+        if (bln_has(base, set->p[i])) {
+            if (uses)
+                rc = bln_add(stale, set->p[i]);
+            continue;
+        }
+        if (!uses && !ovr)
+            rc = bln_add(neu, set->p[i]);
+    }
+    return rc;
+}
+
+static void ort_print_clean(const struct bln_set *base, const struct bln_set *stale)
+{
+    int i;
+    printf("check_one_result_type: clean — %d grandfathered service file(s), "
+           "no new bare-result files\n", base->count);
+    if (stale->count) {
+        printf("  note: %d baselined file(s) now use zcl_result — delete "
+               "their baseline line(s) to ratchet forward:\n", stale->count);
+        for (i = 0; i < stale->count; i++)
+            printf("    %s\n", stale->n[i]);
+    }
+}
+
 int check_one_result_type_run(int argc, char **argv)
 {
     static struct ort_set set;
     struct bln_set base = {0}, neu = {0}, stale = {0};
     regex_t res, ok;
-    int rc, i, uses, ovr;
+    int rc;
     (void)argc;
     (void)argv;
     set.n = 0;
@@ -211,32 +258,13 @@ int check_one_result_type_run(int argc, char **argv)
                    &ok, REG_EXTENDED, k_ort_ok, "", "", "");
     if (rc)
         return rc;
-    for (i = 0; rc == 0 && i < set.n; i++) {
-        rc = ort_scan_file(set.p[i], &res, &ok, &uses, &ovr);
-        if (rc)
-            break;
-        if (bln_has(&base, set.p[i])) {
-            if (uses)
-                rc = bln_add(&stale, set.p[i]);
-            continue;
-        }
-        if (!uses && !ovr)
-            rc = bln_add(&neu, set.p[i]);
-    }
+    rc = ort_classify_all(&set, &base, &res, &ok, &neu, &stale);
     drop2(&res, &ok);
     if (rc)
         return rc;
-    if (neu.count) {
+    if (neu.count)
         return ort_report(&neu);
-    }
-    printf("check_one_result_type: clean — %d grandfathered service file(s), "
-           "no new bare-result files\n", base.count);
-    if (stale.count) {
-        printf("  note: %d baselined file(s) now use zcl_result — delete "
-               "their baseline line(s) to ratchet forward:\n", stale.count);
-        for (i = 0; i < stale.count; i++)
-            printf("    %s\n", stale.n[i]);
-    }
+    ort_print_clean(&base, &stale);
     return 0;
 }
 

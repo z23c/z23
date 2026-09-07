@@ -1287,6 +1287,7 @@ add/remove a gate.
 - `check-no-hardlink-seeding`
 - `check-hex-codec-single`
 - `check-one-result-type`
+- `check-no-secret-printf`
 - `check-one-write-path`
 - `check-frontier-single-writer`
 - `check-dumper-never-blocks`
