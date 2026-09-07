@@ -63,6 +63,17 @@ say()  { printf '\033[1mship:\033[0m %s\n' "$*"; }
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mship: REFUSE:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# One seam every LOCAL mktemp/mktemp -d in this script routes through.
+# Scratch lives under the owner's state root, never /tmp: honour
+# ZCL_SCRATCH_DIR when set, otherwise the standing scratch root. (Remote-side
+# staging under ssh has its own, separate paths — release dirs and systemd
+# drop-in siblings under the target's $HOME — and never touches this seam.)
+ship_scratch_root() {
+    local root="${ZCL_SCRATCH_DIR:-${HOME}/.local/state/zclassic23/scratch}"
+    install -d "$root" >&2
+    printf '%s' "$root"
+}
+
 # Prints (possibly empty) newline-separated persistent-schema files changed
 # between $2 (prior rollback commit) and $3 (candidate) in git repo $1. Same
 # pathspecs the remote leg's forward-only check uses. Kept as its own
@@ -458,7 +469,7 @@ ship_hardlink_tool_path() {
 ship_prepare_hardlink_report() {
     local root="$1" dry="$2" tool n unit rc err_file err
     tool="$(ship_hardlink_tool_path)"
-    err_file="$(mktemp "${TMPDIR:-/tmp}/z23-ship-hardlink-count.XXXXXX")"
+    err_file="$(mktemp "$(ship_scratch_root)/z23-ship-hardlink-count.XXXXXX")"
     n="$("$tool" --count "$root" 2>"$err_file")"
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -604,7 +615,7 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
         refute ship_dev_artifact_reach "$bin/absent" "$g"
     }
     if [ "${1:-}" = "--selftest-dev-guard" ]; then
-        devguard_root="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-selftest.XXXXXX")"
+        devguard_root="$(mktemp -d "$(ship_scratch_root)/z23-ship-selftest.XXXXXX")"
         trap 'rm -rf "$devguard_root"' EXIT HUP INT TERM
         ship_selftest_dev_guard "$devguard_root"
         printf 'ship: dev-artifact guard selftest PASS — refused every reach (symlink to z23.dev, z23-dev alias, zclassic23-dev alias, epoch-dir path relative and absolute, hardlink, copied name, stale epoch copy); accepted genuine release bytes, release symlink, absent name\n'
@@ -648,7 +659,7 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     PROOF_SERVER=node3
     refute ship_is_proof_host node1
     ship_is_proof_host node3
-    test_tmp="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-selftest.XXXXXX")"
+    test_tmp="$(mktemp -d "$(ship_scratch_root)/z23-ship-selftest.XXXXXX")"
     trap 'find "$test_tmp" -depth -delete' EXIT HUP INT TERM
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"real_tor"}}}}'\''\n' > "$test_tmp/real"
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"stub_tor"}}}}'\''\n' > "$test_tmp/stub"
@@ -1156,7 +1167,7 @@ else
     say "gate       make lint"
     make lint >/dev/null || die "make lint failed"
     say "gate       make test-parallel"
-    suite_log="$(mktemp)"
+    suite_log="$(mktemp "$(ship_scratch_root)/zclassic23.ship.suite-log.XXXXXX")"
     make test-parallel >"$suite_log" 2>&1 || true
     # A failing gate costs ~25 minutes to produce. Deleting its log on the way
     # out spends that again on the next run: the five lines a `grep | head -5`
@@ -1220,7 +1231,7 @@ else
         build/bin/zclassic23-package-verify-dev
     make -j"$(nproc)" zclassic23 zclassic23-package-verify dev-package-verifier >/dev/null || \
         die "production build failed"
-    CANDIDATE="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.XXXXXX")"
+    CANDIDATE="$(mktemp "$(ship_scratch_root)/zclassic23.ship.XXXXXX")"
     WORKER_FILES=(); WORKER_SHAS=()
     trap 'rm -f "$CANDIDATE" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
     # The rebuild just relinked both shipping names; prove the bytes now
@@ -1264,7 +1275,7 @@ else
     # so all three spawnables travel as one artifact set.
     for w in zclassic23-package-verify zclassic23-package-verify-dev; do
         [ -x "build/bin/$w" ] || die "gated build did not produce worker $w"
-        f="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.XXXXXX")"
+        f="$(mktemp "$(ship_scratch_root)/zclassic23.ship.XXXXXX")"
         install -m 755 "build/bin/$w" "$f"
         WORKER_FILES+=("$f")
         s="$(sha256sum < "$f" | awk '{print $1}')"
@@ -1286,7 +1297,7 @@ else
         die "could not write the tor stamp sidecar next to the ship candidate"
     say "tor        candidate reports exact real_tor"
 
-    RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.manifest.XXXXXX")"
+    RELEASE_MANIFEST="$(mktemp "$(ship_scratch_root)/zclassic23.ship.manifest.XXXXXX")"
     trap 'rm -f "$CANDIDATE" "$CANDIDATE.tor-stamp" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
     {
         printf '%s  z23\n' "$ARTIFACT_SHA"
@@ -1300,7 +1311,7 @@ else
     # One named archive tree feeds every remote.  It avoids four separate scp
     # handshakes per host and ensures the bytes staged in parallel have the
     # same names covered by the release manifest.
-    STAGE_BUNDLE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zclassic23.ship.bundle.XXXXXX")"
+    STAGE_BUNDLE_DIR="$(mktemp -d "$(ship_scratch_root)/zclassic23.ship.bundle.XXXXXX")"
     install -m 755 "$CANDIDATE" "$STAGE_BUNDLE_DIR/z23"
     install -m 644 "$CANDIDATE.tor-stamp" "$STAGE_BUNDLE_DIR/z23.tor-stamp"
     for i in "${!WORKER_NAMES[@]}"; do
@@ -1422,11 +1433,7 @@ deploy_local() {
             ;;
         *) say "layout     local writable canonical directory $svc_dir" ;;
     esac
-    # Scratch lives under the owner's state root, never /tmp: honour
-    # ZCL_SCRATCH_DIR when set (same override ship_selftest.sh recognises),
-    # otherwise the standing scratch root.
-    install -d "${ZCL_SCRATCH_DIR:-${HOME}/.local/state/zclassic23/scratch}"
-    worker_backup="$(mktemp -d "${ZCL_SCRATCH_DIR:-${HOME}/.local/state/zclassic23/scratch}/z23-ship-local-workers.XXXXXX")"
+    worker_backup="$(mktemp -d "$(ship_scratch_root)/z23-ship-local-workers.XXXXXX")"
     for i in "${!WORKER_NAMES[@]}"; do
         if [ -f "$svc_dir/${WORKER_NAMES[$i]}" ]; then
             install -m 755 "$svc_dir/${WORKER_NAMES[$i]}" "$worker_backup/$i"
