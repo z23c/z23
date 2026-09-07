@@ -249,6 +249,32 @@ static void pc_emit_quoted(const char *s, char out[][PC_ARRLEN], int cap, int *n
         p = q2 + 1;
     }
 }
+/* Handle one non-array-continuation line against `needle`. Sets inarr and
+ * found as appropriate; the only observable effect is via those out-params. */
+static void pc_json_key_line(char *line, const char *needle, char out[][PC_ARRLEN],
+                             int cap, int *n, int *inarr, int *found)
+{
+    char *m = strstr(line, needle);
+    if (!m)
+        return;
+    char *p = m + strlen(needle);
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != ':')
+        return;
+    *found = 1;
+    p++;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    char *b = strchr(p, '[');
+    if (!b) {
+        *inarr = 1;
+        return;
+    }
+    pc_emit_quoted(b + 1, out, cap, n);
+    if (!strchr(b + 1, ']'))
+        *inarr = 1;
+}
 int pc_json_array(const char *manifest, const char *key, char out[][PC_ARRLEN], int cap,
                   int *n)
 {
@@ -273,26 +299,7 @@ int pc_json_array(const char *manifest, const char *key, char out[][PC_ARRLEN], 
                 inarr = 0;
             continue;
         }
-        char *m = strstr(line, needle);
-        if (!m)
-            continue;
-        char *p = m + strlen(needle);
-        while (*p == ' ' || *p == '\t')
-            p++;
-        if (*p != ':')
-            continue;
-        found = 1;
-        p++;
-        while (*p == ' ' || *p == '\t')
-            p++;
-        char *b = strchr(p, '[');
-        if (!b) {
-            inarr = 1;
-            continue;
-        }
-        pc_emit_quoted(b + 1, out, cap, n);
-        if (!strchr(b + 1, ']'))
-            inarr = 1;
+        pc_json_key_line(line, needle, out, cap, n, &inarr, &found);
     }
     int bad = ferror(f);
     free(line);
@@ -341,6 +348,55 @@ static int pc_glob_dir(const char *base, const char *sub, char out[][PC_SRCLEN],
         qsort(out[start], (size_t)(*n - start), PC_SRCLEN, pc_cmp_str);
     return 0;
 }
+static int pc_pkg_sources_files(const char *manifest, const char *dir,
+                                char out[][PC_SRCLEN], int cap, int *n)
+{
+    char arr[PC_MAXARR][PC_ARRLEN];
+    int an = 0;
+    int rc = pc_json_array(manifest, "files", arr, PC_MAXARR, &an);
+    if (rc == 2)
+        return 2;
+    for (int i = 0; i < an; i++) {
+        size_t l = strlen(arr[i]);
+        if (l < 3 || strcmp(arr[i] + l - 2, ".c") != 0)
+            continue;
+        if (*n >= cap)
+            return die("z23-lint: package-capabilities source overflow\n", "");
+        if (ovf(snprintf(out[*n], PC_SRCLEN, "%s/%s", dir, arr[i]), PC_SRCLEN))
+            return 2;
+        (*n)++;
+    }
+    return 0;
+}
+/* Rewrite the base-relative names pc_glob_dir wrote (rooted at `full`)
+ * to repo-root-relative, prefixed with `dir`, over out[from..*n). */
+static int pc_rewrite_prefix(char out[][PC_SRCLEN], int from, int n, const char *full,
+                             const char *dir)
+{
+    for (int i = from; i < n; i++) {
+        char tmp[PC_SRCLEN];
+        memcpy(tmp, out[i], sizeof tmp);
+        const char *rel = tmp + strlen(full) + 1;
+        if (ovf(snprintf(out[i], PC_SRCLEN, "%s/%s", dir, rel), PC_SRCLEN))
+            return 2;
+    }
+    return 0;
+}
+static int pc_pkg_sources_glob(const char *root, const char *dir, char out[][PC_SRCLEN],
+                               int cap, int *n)
+{
+    char full[PC_PATHLEN];
+    if (ovf(snprintf(full, sizeof full, "%s/%s", root, dir), sizeof full))
+        return 2;
+    if (pc_glob_dir(full, "src", out, cap, n))
+        return 2;
+    if (pc_rewrite_prefix(out, 0, *n, full, dir))
+        return 2;
+    int before = *n;
+    if (pc_glob_dir(full, "tests", out, cap, n))
+        return 2;
+    return pc_rewrite_prefix(out, before, *n, full, dir);
+}
 int pc_pkg_sources(const char *root, const char *dir, char out[][PC_SRCLEN], int cap,
                   int *n)
 {
@@ -352,47 +408,7 @@ int pc_pkg_sources(const char *root, const char *dir, char out[][PC_SRCLEN], int
     struct stat st;
     if (stat(manifest, &st) != 0)
         return -1;
-    if (pc_has_key(manifest, "files")) {
-        char arr[PC_MAXARR][PC_ARRLEN];
-        int an = 0;
-        int rc = pc_json_array(manifest, "files", arr, PC_MAXARR, &an);
-        if (rc == 2)
-            return 2;
-        for (int i = 0; i < an; i++) {
-            size_t l = strlen(arr[i]);
-            if (l < 3 || strcmp(arr[i] + l - 2, ".c") != 0)
-                continue;
-            if (*n >= cap)
-                return die("z23-lint: package-capabilities source overflow\n", "");
-            if (ovf(snprintf(out[*n], PC_SRCLEN, "%s/%s", dir, arr[i]), PC_SRCLEN))
-                return 2;
-            (*n)++;
-        }
-        return 0;
-    }
-    char full[PC_PATHLEN];
-    if (ovf(snprintf(full, sizeof full, "%s/%s", root, dir), sizeof full))
-        return 2;
-    if (pc_glob_dir(full, "src", out, cap, n))
-        return 2;
-    /* Rewrite the base-relative names pc_glob_dir wrote (rooted at `full`)
-     * to repo-root-relative, prefixed with `dir`. */
-    for (int i = 0; i < *n; i++) {
-        char tmp[PC_SRCLEN];
-        memcpy(tmp, out[i], sizeof tmp);
-        const char *rel = tmp + strlen(full) + 1;
-        if (ovf(snprintf(out[i], PC_SRCLEN, "%s/%s", dir, rel), PC_SRCLEN))
-            return 2;
-    }
-    int before = *n;
-    if (pc_glob_dir(full, "tests", out, cap, n))
-        return 2;
-    for (int i = before; i < *n; i++) {
-        char tmp[PC_SRCLEN];
-        memcpy(tmp, out[i], sizeof tmp);
-        const char *rel = tmp + strlen(full) + 1;
-        if (ovf(snprintf(out[i], PC_SRCLEN, "%s/%s", dir, rel), PC_SRCLEN))
-            return 2;
-    }
-    return 0;
+    if (pc_has_key(manifest, "files"))
+        return pc_pkg_sources_files(manifest, dir, out, cap, n);
+    return pc_pkg_sources_glob(root, dir, out, cap, n);
 }

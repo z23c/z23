@@ -45,29 +45,28 @@ static int lgws_copy(const char *root, const char *rel, const char *dst_dir)
  * caller wires in are visible — otherwise every real gate would read as an
  * orphan in the fixture. Matches the SAME pattern --list's own self-grep
  * uses: 8-space indent, "check-<name>)", whitespace, "echo". */
+/* True for a line matching --list's own self-grep: 8-space indent,
+ * "check-<name>)", whitespace, "echo". */
+static int lgws_is_table_line(const char *p)
+{
+    if (strncmp(p, "        check-", 14) != 0)
+        return 0;
+    const char *q = p + 14;
+    while (*q && (islower((unsigned char)*q) || isdigit((unsigned char)*q) || *q == '-'))
+        q++;
+    if (q[0] != ')')
+        return 0;
+    while (*q == ' ' || *q == '\t' || *q == ')')
+        q++;
+    return strncmp(q, "echo", 4) == 0;
+}
 static int lgws_strip_table(char *text)
 {
     static char out[LGWS_BUF];
     size_t used = 0;
     char *save = NULL;
     for (char *ln = strtok_r(text, "\n", &save); ln; ln = strtok_r(NULL, "\n", &save)) {
-        const char *p = ln;
-        int skip = 0;
-        if (strncmp(p, "        check-", 14) == 0) {
-            const char *q = p + 14;
-            while (*q && (islower((unsigned char)*q) || isdigit((unsigned char)*q)
-                         || *q == '-'))
-                q++;
-            if (q[0] == ')') {
-                while (*q && *q != 'e' && *q != '\0') {
-                    if (*q != ' ' && *q != '\t' && *q != ')') break;
-                    q++;
-                }
-                if (strncmp(q, "echo", 4) == 0)
-                    skip = 1;
-            }
-        }
-        if (skip)
+        if (lgws_is_table_line(ln))
             continue;
         size_t ll = strlen(ln);
         if (used + ll + 2 >= sizeof out)
@@ -81,18 +80,17 @@ static int lgws_strip_table(char *text)
     return 0;
 }
 
-static int lgws_make_fixture(const char *repo_root, const char *d)
+static int lgws_seed_dirs(const char *d)
 {
     char toollint[4096], toolscripts[4096];
     if (ovf(snprintf(toollint, sizeof toollint, "%s/tools/lint/.keep", d), sizeof toollint)
         || ovf(snprintf(toolscripts, sizeof toolscripts, "%s/tools/scripts/.keep", d),
               sizeof toolscripts))
         return 2;
-    if (csr_write(toollint, "") || csr_write(toolscripts, ""))
-        return 2;
-    if (lgws_copy(repo_root, "tools/lint/run_lint.sh", d)) return 2;
-    if (lgws_copy(repo_root, "tools/lint/lint_cache.sh", d)) return 2;
-
+    return csr_write(toollint, "") || csr_write(toolscripts, "");
+}
+static int lgws_strip_driver(const char *d)
+{
     char driver[4096];
     if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/run_lint.sh", d), sizeof driver))
         return 2;
@@ -106,14 +104,23 @@ static int lgws_make_fixture(const char *repo_root, const char *d)
     text[n] = '\0';
     if (lgws_strip_table(text)) return 2;
     if (csr_write(driver, text)) return 2;
-    if (chmod(driver, 0700) != 0)
-        return die("z23-lint: chmod failed: %s\n", driver);
-
+    return chmod(driver, 0700) != 0 ? die("z23-lint: chmod failed: %s\n", driver) : 0;
+}
+static int lgws_write_sentinels(const char *d)
+{
     char sa[4096], sb[4096];
     if (ovf(snprintf(sa, sizeof sa, "%s/tools/lint/sentinel_a.sh", d), sizeof sa)
         || ovf(snprintf(sb, sizeof sb, "%s/tools/lint/sentinel_b.sh", d), sizeof sb))
         return 2;
     return csr_write(sa, "") || csr_write(sb, "");
+}
+static int lgws_make_fixture(const char *repo_root, const char *d)
+{
+    if (lgws_seed_dirs(d)) return 2;
+    if (lgws_copy(repo_root, "tools/lint/run_lint.sh", d)) return 2;
+    if (lgws_copy(repo_root, "tools/lint/lint_cache.sh", d)) return 2;
+    if (lgws_strip_driver(d)) return 2;
+    return lgws_write_sentinels(d);
 }
 
 static int lgws_write_makefile(const char *d, const char *const *gates, int n)
@@ -356,6 +363,31 @@ static int lgws_case_h(const char *base, int *fails)
     return lgws_expect_accept("H: a fully wired tree passes (positive control)", d, fails);
 }
 
+/* run_lint.sh cd's to its own resolved root before self-grepping $0, so a
+ * relative fixture path stops resolving the moment it does. Always hand it
+ * an absolute one. */
+static const char *lgws_absolutize(char *d0, char *scratch, size_t cap, int *rc)
+{
+    if (d0[0] == '/')
+        return d0;
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd)) {
+        *rc = die("z23-lint: getcwd failed\n", "");
+        return d0;
+    }
+    if (ovf(snprintf(scratch, cap, "%s/%s", cwd, d0), cap)) {
+        *rc = 2;
+        return d0;
+    }
+    return scratch;
+}
+
+typedef int (*lgws_case_fn)(const char *, int *);
+static const lgws_case_fn k_lgws_cases[] = {
+    lgws_case_a, lgws_case_b, lgws_case_c, lgws_case_d,
+    lgws_case_e, lgws_case_f, lgws_case_g, lgws_case_h,
+};
+
 int check_lint_gate_wiring_selftest(void)
 {
     char base[4096];
@@ -367,28 +399,17 @@ int check_lint_gate_wiring_selftest(void)
     char *d0 = mkdtemp(base);
     if (!d0)
         return die("z23-lint: mkdtemp failed: %s\n", base);
-    /* run_lint.sh cd's to its own resolved root before self-grepping $0, so
-     * a relative fixture path stops resolving the moment it does. Always
-     * hand it an absolute one. */
     static char abs0[4096];
-    if (d0[0] != '/') {
-        char cwd[4096];
-        if (!getcwd(cwd, sizeof cwd))
-            return die("z23-lint: getcwd failed\n", "");
-        if (ovf(snprintf(abs0, sizeof abs0, "%s/%s", cwd, d0), sizeof abs0))
-            return 2;
-        d0 = abs0;
-    }
+    int rc = 0;
+    d0 = (char *)lgws_absolutize(d0, abs0, sizeof abs0, &rc);
+    if (rc)
+        return rc;
+
     printf("\xe2\x95\x90\xe2\x95\x90 check-lint-gate-wiring selftest \xe2\x95\x90\xe2\x95\x90\n");
-    int fails = 0, rc = 0;
-    if (rc == 0) rc = lgws_case_a(d0, &fails);
-    if (rc == 0) rc = lgws_case_b(d0, &fails);
-    if (rc == 0) rc = lgws_case_c(d0, &fails);
-    if (rc == 0) rc = lgws_case_d(d0, &fails);
-    if (rc == 0) rc = lgws_case_e(d0, &fails);
-    if (rc == 0) rc = lgws_case_f(d0, &fails);
-    if (rc == 0) rc = lgws_case_g(d0, &fails);
-    if (rc == 0) rc = lgws_case_h(d0, &fails);
+    int fails = 0;
+    size_t ncases = sizeof k_lgws_cases / sizeof k_lgws_cases[0];
+    for (size_t i = 0; rc == 0 && i < ncases; i++)
+        rc = k_lgws_cases[i](d0, &fails);
     rap_rm_rf(d0);
     if (rc) return rc;
     if (fails) {

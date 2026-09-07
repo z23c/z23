@@ -366,6 +366,38 @@ static int lgw_read_ceiling(const char *lintc_h, long *out)
     *out = found;
     return found < 0 ? -2 : 0;
 }
+/* Appends "    <path> has <lines> lines (ceiling <ceiling>)\n" to `over`
+ * for every tools/lint/lintc/gate_*.c file over `ceiling`. */
+static int lgw_scan_family_files(const char *lintc_dir, long ceiling, char *over,
+                                 size_t cap, size_t *used)
+{
+    DIR *d = opendir(lintc_dir);
+    if (!d)
+        return die("z23-lint: cannot open %s\n", lintc_dir);
+    struct dirent *de;
+    int rc = 0;
+    while (rc == 0 && (de = readdir(d)) != NULL) {
+        const char *nm = de->d_name;
+        size_t nl = strlen(nm);
+        if (strncmp(nm, "gate_", 5) != 0 || nl < 3 || strcmp(nm + nl - 2, ".c") != 0)
+            continue;
+        char path[4096];
+        if (ovf(snprintf(path, sizeof path, "%s/%s", lintc_dir, nm), sizeof path)) {
+            rc = 2;
+            break;
+        }
+        long lines = 0;
+        rc = lgw_count_lines(path, &lines);
+        if (rc)
+            break;
+        if (lines > ceiling)
+            rc = lgw_appendf_pub(over, cap, used, "    %s has %ld lines (ceiling %ld)\n",
+                                 path, lines, ceiling);
+    }
+    closedir(d);
+    return rc;
+}
+
 static int lgw_check_e(const char *root, char *out, size_t cap, size_t *used, int *fail)
 {
     char lintc_dir[4096], lintc_h[4160];
@@ -389,36 +421,11 @@ static int lgw_check_e(const char *root, char *out, size_t cap, size_t *used, in
     }
     if (rc)
         return rc;
-    DIR *d = opendir(lintc_dir);
-    if (!d)
-        return die("z23-lint: cannot open %s\n", lintc_dir);
     static char over[LGW_BUF];
     size_t oused = 0;
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        const char *nm = de->d_name;
-        size_t nl = strlen(nm);
-        if (strncmp(nm, "gate_", 5) != 0 || nl < 3 || strcmp(nm + nl - 2, ".c") != 0)
-            continue;
-        char path[4096];
-        if (ovf(snprintf(path, sizeof path, "%s/%s", lintc_dir, nm), sizeof path)) {
-            closedir(d);
-            return 2;
-        }
-        long lines = 0;
-        int lrc = lgw_count_lines(path, &lines);
-        if (lrc) {
-            closedir(d);
-            return lrc;
-        }
-        if (lines > ceiling
-            && lgw_appendf_pub(over, sizeof over, &oused, "    %s has %ld lines (ceiling %ld)\n",
-                          path, lines, ceiling)) {
-            closedir(d);
-            return 2;
-        }
-    }
-    closedir(d);
+    rc = lgw_scan_family_files(lintc_dir, ceiling, over, sizeof over, &oused);
+    if (rc)
+        return rc;
     if (oused == 0)
         return 0;
     *fail = 1;
@@ -434,13 +441,10 @@ static int lgw_check_e(const char *root, char *out, size_t cap, size_t *used, in
 }
 
 /* ── orchestration ───────────────────────────────────────────────────────── */
-int lgw_check_root(const char *root, FILE *out)
+/* Existence of the two source files, plus 1 if either is missing (message
+ * already printed to `out`). */
+static int lgw_paths_exist(const char *makefile, const char *driver, FILE *out)
 {
-    char makefile[4096], driver[4096];
-    if (ovf(snprintf(makefile, sizeof makefile, "%s/Makefile", root), sizeof makefile)
-        || ovf(snprintf(driver, sizeof driver, "%s/tools/lint/run_lint.sh", root),
-              sizeof driver))
-        return 2;
     struct stat st;
     if (stat(makefile, &st) != 0) {
         fprintf(out, "FAIL: no Makefile at %s\n", makefile);
@@ -450,7 +454,14 @@ int lgw_check_root(const char *root, FILE *out)
         fprintf(out, "FAIL: no run_lint.sh at %s\n", driver);
         return 1;
     }
+    return 0;
+}
 
+/* Builds `listed` (LINT_GATES ∪ LINT_FAST_GATES) and `table` (the driver's
+ * --list). Returns 0 ok, 1 rejected (message already printed), 2 die()'d. */
+static int lgw_load_sets(const char *makefile, const char *driver, FILE *out,
+                         struct sr_set *listed, struct sr_set *table)
+{
     struct sr_set umbrella = { .count = 0 }, fastg = { .count = 0 };
     int rc = lgw_extract_var(makefile, "LINT_GATES", &umbrella);
     if (rc == 0)
@@ -464,34 +475,61 @@ int lgw_check_root(const char *root, FILE *out)
              out);
         return 1;
     }
-    struct sr_set listed = { .count = 0 };
+    listed->count = 0;
     for (int i = 0; i < umbrella.count && rc == 0; i++)
-        rc = sr_add(&listed, umbrella.n[i]);
+        rc = sr_add(listed, umbrella.n[i]);
     for (int i = 0; i < fastg.count && rc == 0; i++)
-        rc = sr_add(&listed, fastg.n[i]);
+        rc = sr_add(listed, fastg.n[i]);
     if (rc)
         return rc;
-
-    struct sr_set table = { .count = 0 };
-    rc = lgw_driver_list(driver, &table);
+    table->count = 0;
+    rc = lgw_driver_list(driver, table);
     if (rc)
         return rc;
-    if (table.count == 0) {
+    if (table->count == 0) {
         fprintf(out, "FAIL: '%s --list' produced no gate names.\n", driver);
         fputs("      Either the driver is broken or its --list self-grep no longer\n"
              "      matches its case labels. Both are worse than a missing entry.\n",
              out);
         return 1;
     }
+    return 0;
+}
+
+static int lgw_run_checks(const char *root, const char *makefile, const char *driver,
+                          const struct sr_set *listed, const struct sr_set *table,
+                          char *faults, size_t cap, size_t *used, int *fail)
+{
+    if (lgw_check_a(listed, table, faults, cap, used, fail)) return 2;
+    if (lgw_check_b(listed, table, faults, cap, used, fail)) return 2;
+    if (lgw_check_c(makefile, listed, faults, cap, used, fail)) return 2;
+    if (lgw_check_d(root, driver, table, faults, cap, used, fail)) return 2;
+    return lgw_check_e(root, faults, cap, used, fail);
+}
+
+int lgw_check_root(const char *root, FILE *out)
+{
+    char makefile[4096], driver[4096];
+    if (ovf(snprintf(makefile, sizeof makefile, "%s/Makefile", root), sizeof makefile)
+        || ovf(snprintf(driver, sizeof driver, "%s/tools/lint/run_lint.sh", root),
+              sizeof driver))
+        return 2;
+    int rc = lgw_paths_exist(makefile, driver, out);
+    if (rc)
+        return rc;
+
+    struct sr_set listed, table;
+    rc = lgw_load_sets(makefile, driver, out, &listed, &table);
+    if (rc)
+        return rc;
 
     static char faults[LGW_BUF];
     size_t used = 0;
     int fail = 0;
-    if (lgw_check_a(&listed, &table, faults, sizeof faults, &used, &fail)) return 2;
-    if (lgw_check_b(&listed, &table, faults, sizeof faults, &used, &fail)) return 2;
-    if (lgw_check_c(makefile, &listed, faults, sizeof faults, &used, &fail)) return 2;
-    if (lgw_check_d(root, driver, &table, faults, sizeof faults, &used, &fail)) return 2;
-    if (lgw_check_e(root, faults, sizeof faults, &used, &fail)) return 2;
+    rc = lgw_run_checks(root, makefile, driver, &listed, &table, faults, sizeof faults,
+                        &used, &fail);
+    if (rc)
+        return rc;
 
     if (used > 0)
         fputs(faults, out);

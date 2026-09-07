@@ -190,83 +190,109 @@ static int pc_check_vocab_order(const char *name, char (*decl)[PC_ARRLEN], int d
     return bad;
 }
 
-static int pc_check_symmetry(const char *name, char (*decl)[PC_ARRLEN], int dn,
-                             const struct sr_set *derived, struct pc_modtable *mods,
-                             char (*sources)[PC_SRCLEN], int sn, char *rep, size_t cap,
-                             size_t *used, int *violations)
+/* Sorted derived classes not in decl[], into missing_toks (caller-owned).
+ * Returns the count. */
+static int pc_find_missing(const struct sr_set *derived, char (*decl)[PC_ARRLEN], int dn,
+                           char missing_toks[][SR_NAME])
 {
     static char sorted[SR_ALLOW][SR_NAME];
     int dc = derived->count;
     for (int i = 0; i < dc; i++)
         memcpy(sorted[i], derived->n[i], strlen(derived->n[i]) + 1);
     qsort(sorted, (size_t)dc, SR_NAME, pc_cmp_str);
-
-    int n_missing = 0, n_extra = 0;
-    static char missing_toks[SR_ALLOW][SR_NAME];
+    int n_missing = 0;
     for (int i = 0; i < dc; i++) {
         int declared = 0;
         for (int j = 0; j < dn; j++)
             if (strcmp(decl[j], sorted[i]) == 0) { declared = 1; break; }
-        if (declared)
-            continue;
-        memcpy(missing_toks[n_missing++], sorted[i], strlen(sorted[i]) + 1);
+        if (!declared)
+            memcpy(missing_toks[n_missing++], sorted[i], strlen(sorted[i]) + 1);
     }
-    for (int i = 0; i < dn; i++)
-        if (!sr_has(derived, decl[i]))
-            n_extra++;
-
-    if (n_missing > 0) {
-        (*violations)++;
-        char names[PC_RENDERBUF] = "";
-        size_t nused = 0;
-        for (int i = 0; i < n_missing; i++)
-            if (pc_append(names, sizeof names, &nused, i ? " %s" : "%s", missing_toks[i]))
-                return 2;
-        if (pc_append(rep, cap, used,
-                     "check_package_capabilities: VIOLATION — %s UNDERSTATES its reach.\n"
-                     "  Shipped files declare %s, the manifest does not.\n", name, names))
+    return n_missing;
+}
+static int pc_report_missing(const char *name, char missing_toks[][SR_NAME], int n_missing,
+                             struct pc_modtable *mods, char (*sources)[PC_SRCLEN], int sn,
+                             char *rep, size_t cap, size_t *used)
+{
+    char names[PC_RENDERBUF] = "";
+    size_t nused = 0;
+    for (int i = 0; i < n_missing; i++)
+        if (pc_append(names, sizeof names, &nused, i ? " %s" : "%s", missing_toks[i]))
             return 2;
-        for (int i = 0; i < n_missing; i++)
-            for (int j = 0; j < sn; j++) {
-                struct pc_pathcaps *row = pc_modtable_find(mods, sources[j]);
-                if (row && pc_capset_has(&row->caps, missing_toks[i])
-                    && pc_append(rep, cap, used, "    %s <- %s\n", missing_toks[i],
-                                sources[j]))
-                    return 2;
-            }
-    }
-    if (n_extra > 0) {
-        (*violations)++;
-        char names[PC_RENDERBUF] = "";
-        size_t nused = 0;
-        int seen = 0;
-        for (int i = 0; i < dn; i++) {
-            if (sr_has(derived, decl[i]))
-                continue;
-            if (pc_append(names, sizeof names, &nused, seen ? " %s" : "%s", decl[i]))
+    if (pc_append(rep, cap, used,
+                 "check_package_capabilities: VIOLATION — %s UNDERSTATES its reach.\n"
+                 "  Shipped files declare %s, the manifest does not.\n", name, names))
+        return 2;
+    for (int i = 0; i < n_missing; i++)
+        for (int j = 0; j < sn; j++) {
+            struct pc_pathcaps *row = pc_modtable_find(mods, sources[j]);
+            if (row && pc_capset_has(&row->caps, missing_toks[i])
+                && pc_append(rep, cap, used, "    %s <- %s\n", missing_toks[i], sources[j]))
                 return 2;
-            seen = 1;
         }
-        if (pc_append(rep, cap, used,
+    return 0;
+}
+static int pc_report_extra(const char *name, char (*decl)[PC_ARRLEN], int dn,
+                           const struct sr_set *derived, char *rep, size_t cap,
+                           size_t *used)
+{
+    char names[PC_RENDERBUF] = "";
+    size_t nused = 0;
+    int seen = 0;
+    for (int i = 0; i < dn; i++) {
+        if (sr_has(derived, decl[i]))
+            continue;
+        if (pc_append(names, sizeof names, &nused, seen ? " %s" : "%s", decl[i]))
+            return 2;
+        seen = 1;
+    }
+    return pc_append(rep, cap, used,
                      "check_package_capabilities: VIOLATION — %s OVERSTATES its reach.\n"
                      "  Manifest declares %s, no shipped file reaches it.\n"
                      "  Shrink the declaration; a claim nobody re-derived is not a\n"
-                     "  safety margin, it is rot in the other direction.\n", name, names))
+                     "  safety margin, it is rot in the other direction.\n", name, names);
+}
+static int pc_report_summary(const char *name, const struct sr_set *derived, int clean,
+                             char *rep, size_t cap, size_t *used)
+{
+    char buf[PC_RENDERBUF];
+    if (clean) {
+        pc_render(derived, buf, sizeof buf, 0);
+        return pc_append(rep, cap, used, "  %-28s capabilities: [%s]\n", name, buf);
+    }
+    pc_render(derived, buf, sizeof buf, 1);
+    return pc_append(rep, cap, used, "  Derived value for %s:\n"
+                     "      \"capabilities\": [%s]\n", name, buf);
+}
+static int pc_count_extra(char (*decl)[PC_ARRLEN], int dn, const struct sr_set *derived)
+{
+    int n_extra = 0;
+    for (int i = 0; i < dn; i++)
+        if (!sr_has(derived, decl[i]))
+            n_extra++;
+    return n_extra;
+}
+static int pc_check_symmetry(const char *name, char (*decl)[PC_ARRLEN], int dn,
+                             const struct sr_set *derived, struct pc_modtable *mods,
+                             char (*sources)[PC_SRCLEN], int sn, char *rep, size_t cap,
+                             size_t *used, int *violations)
+{
+    static char missing_toks[SR_ALLOW][SR_NAME];
+    int n_missing = pc_find_missing(derived, decl, dn, missing_toks);
+    int n_extra = pc_count_extra(decl, dn, derived);
+
+    if (n_missing > 0) {
+        (*violations)++;
+        if (pc_report_missing(name, missing_toks, n_missing, mods, sources, sn, rep, cap,
+                              used))
             return 2;
     }
-    if (n_missing == 0 && n_extra == 0) {
-        char plain[PC_RENDERBUF];
-        pc_render(derived, plain, sizeof plain, 0);
-        if (pc_append(rep, cap, used, "  %-28s capabilities: [%s]\n", name, plain))
-            return 2;
-    } else {
-        char js[PC_RENDERBUF];
-        pc_render(derived, js, sizeof js, 1);
-        if (pc_append(rep, cap, used, "  Derived value for %s:\n"
-                     "      \"capabilities\": [%s]\n", name, js))
+    if (n_extra > 0) {
+        (*violations)++;
+        if (pc_report_extra(name, decl, dn, derived, rep, cap, used))
             return 2;
     }
-    return 0;
+    return pc_report_summary(name, derived, n_missing == 0 && n_extra == 0, rep, cap, used);
 }
 
 /* Returns 0 (handled — violations already updated) or 2 (hollow scan /

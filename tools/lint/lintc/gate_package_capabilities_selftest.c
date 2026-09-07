@@ -174,7 +174,7 @@ static int pcs_case_a(const char *base, int *fails)
     const char *rows[] = { "lib/dialer/src/dialer.c CAP_NETWORK", NULL };
     if (pcs_fixture_rows(d, rows))
         return 2;
-    return pcs_expect_rc("A: shipped file uses NETWORK, manifest omits it (understates)",
+    return pcs_expect_rc("A: shipped file uses NETWORK, manifest omits it",
                         1, "UNDERSTATES", d, fails);
 }
 static int pcs_case_b(const char *base, int *fails)
@@ -190,7 +190,7 @@ static int pcs_case_b(const char *base, int *fails)
     const char *rows[] = { "lib/other/src/other.c CAP_FS_READ", NULL };
     if (pcs_fixture_rows(d, rows))
         return 2;
-    return pcs_expect_rc("B: manifest declares a class no shipped file uses (overstates)",
+    return pcs_expect_rc("B: manifest declares a class no shipped file uses",
                         1, "OVERSTATES", d, fails);
 }
 static int pcs_case_c(const char *base, int *fails)
@@ -244,7 +244,7 @@ static int pcs_case_c3(const char *base, int *fails)
     const char *wrows[] = { "lib/cross-target/src/portable.c CAP_NETWORK", NULL };
     if (pcs_fixture_windows_rows(d, wrows))
         return 2;
-    return pcs_expect_rc("C3: package claims union of portable and Windows exact reach",
+    return pcs_expect_rc("C3: package claims union portable and Windows exact reach",
                         0, "OK — every manifest", d, fails);
 }
 static int pcs_case_d(const char *base, int *fails)
@@ -438,6 +438,13 @@ static int pcs_case_j(const char *base, int *fails)
                         "nothing", 0, "OK — every manifest", d, fails);
 }
 
+typedef int (*pcs_case_fn)(const char *, int *);
+static const pcs_case_fn k_pcs_cases[] = {
+    pcs_case_a, pcs_case_b, pcs_case_c, pcs_case_c2, pcs_case_c3, pcs_case_d,
+    pcs_case_e, pcs_case_e2, pcs_case_e3, pcs_case_f1, pcs_case_f2, pcs_case_g1,
+    pcs_case_g2, pcs_case_h, pcs_case_i, pcs_case_j,
+};
+
 int check_package_capabilities_selftest(void)
 {
     char base[4096];
@@ -451,22 +458,9 @@ int check_package_capabilities_selftest(void)
         return die("z23-lint: mkdtemp failed: %s\n", base);
     printf("== check_package_capabilities selftest ==\n");
     int fails = 0, rc = 0;
-    if (rc == 0) rc = pcs_case_a(d0, &fails);
-    if (rc == 0) rc = pcs_case_b(d0, &fails);
-    if (rc == 0) rc = pcs_case_c(d0, &fails);
-    if (rc == 0) rc = pcs_case_c2(d0, &fails);
-    if (rc == 0) rc = pcs_case_c3(d0, &fails);
-    if (rc == 0) rc = pcs_case_d(d0, &fails);
-    if (rc == 0) rc = pcs_case_e(d0, &fails);
-    if (rc == 0) rc = pcs_case_e2(d0, &fails);
-    if (rc == 0) rc = pcs_case_e3(d0, &fails);
-    if (rc == 0) rc = pcs_case_f1(d0, &fails);
-    if (rc == 0) rc = pcs_case_f2(d0, &fails);
-    if (rc == 0) rc = pcs_case_g1(d0, &fails);
-    if (rc == 0) rc = pcs_case_g2(d0, &fails);
-    if (rc == 0) rc = pcs_case_h(d0, &fails);
-    if (rc == 0) rc = pcs_case_i(d0, &fails);
-    if (rc == 0) rc = pcs_case_j(d0, &fails);
+    size_t ncases = sizeof k_pcs_cases / sizeof k_pcs_cases[0];
+    for (size_t i = 0; rc == 0 && i < ncases; i++)
+        rc = k_pcs_cases[i](d0, &fails);
     rap_rm_rf(d0);
     if (rc)
         return rc;
