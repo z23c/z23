@@ -387,16 +387,15 @@ struct sw_pump_stats {
  * honest DATA, immediately replay the same frame a second time. The
  * per-peer in-flight peak is sampled AFTER draining (every issued WANT
  * still outstanding) and BEFORE answering. */
-static void sw_pump(struct sw_node *n, uint64_t peer, const struct sw_pkg *p,
-                    enum sw_serve_mode mode, bool duplicate_last,
-                    uint64_t now, struct sw_pump_stats *st)
+static void sw_pump_drain_outbound(struct sw_node *n, uint64_t peer,
+                                   struct vcs_package_swarm_message
+                                       wants[SWARM_PUMP_MAX_WANTS],
+                                   size_t *want_count,
+                                   struct sw_pump_stats *st)
 {
     uint64_t target = 0;
     uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
     size_t frame_len = 0;
-    memset(&st->last, 0, sizeof(st->last));
-    struct vcs_package_swarm_message wants[SWARM_PUMP_MAX_WANTS];
-    size_t want_count = 0;
     while (vcs_swarm_engine_next_outbound(n->engine, peer, &target, frame,
                                           &frame_len)) {
         struct vcs_package_swarm_message msg;
@@ -412,20 +411,32 @@ static void sw_pump(struct sw_node *n, uint64_t peer, const struct sw_pkg *p,
             st->cancels++;
             continue;
         }
-        if (msg.type != VCS_PACKAGE_SWARM_WANT || want_count >=
+        if (msg.type != VCS_PACKAGE_SWARM_WANT || *want_count >=
                 SWARM_PUMP_MAX_WANTS)
             continue;
-        wants[want_count++] = msg;
+        wants[(*want_count)++] = msg;
         st->wants++;
     }
+}
+
+static void sw_pump_track_inflight(struct sw_node *n, uint64_t peer,
+                                   const struct sw_pkg *p,
+                                   struct sw_pump_stats *st)
+{
     struct vcs_swarm_peer_info infos[VCS_SWARM_MAX_PEERS];
     size_t np = vcs_swarm_engine_peers_for(n->engine, p->root, infos,
                                            VCS_SWARM_MAX_PEERS);
     for (size_t i = 0; i < np; i++)
         if (infos[i].peer == peer && infos[i].inflight > st->max_inflight)
             st->max_inflight = infos[i].inflight;
-    if (mode == SW_SERVE_SILENT)
-        return;
+}
+
+static void sw_pump_serve_wants(
+    struct sw_node *n, uint64_t peer, const struct sw_pkg *p,
+    enum sw_serve_mode mode, bool duplicate_last, uint64_t now,
+    const struct vcs_package_swarm_message *wants, size_t want_count,
+    struct sw_pump_stats *st)
+{
     for (size_t w = 0; w < want_count; w++) {
         struct vcs_package_swarm_message data;
         memset(&data, 0, sizeof(data));
@@ -472,6 +483,21 @@ static void sw_pump(struct sw_node *n, uint64_t peer, const struct sw_pkg *p,
             st->last.rule = dup.rule;
         }
     }
+}
+
+static void sw_pump(struct sw_node *n, uint64_t peer, const struct sw_pkg *p,
+                    enum sw_serve_mode mode, bool duplicate_last,
+                    uint64_t now, struct sw_pump_stats *st)
+{
+    memset(&st->last, 0, sizeof(st->last));
+    struct vcs_package_swarm_message wants[SWARM_PUMP_MAX_WANTS];
+    size_t want_count = 0;
+    sw_pump_drain_outbound(n, peer, wants, &want_count, st);
+    sw_pump_track_inflight(n, peer, p, st);
+    if (mode == SW_SERVE_SILENT)
+        return;
+    sw_pump_serve_wants(n, peer, p, mode, duplicate_last, now, wants,
+                        want_count, st);
 }
 
 /* Fetch + drive to completion between one downloader node and N serving
@@ -552,6 +578,143 @@ static struct vcs_swarm_frame_result sw_answer(
     return res;
 }
 
+static int swarm_case_invalid_wrong_manifest(struct sw_node *n,
+                                              struct sw_pkg *p,
+                                              uint64_t bad,
+                                              const uint8_t *key)
+{
+    int failures = 0;
+    /* Wrong-hash manifest from the malicious peer: named invalid,
+     * INVALID_CHUNK offence, UNVERIFIED no-credit, nothing stored. */
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 2);
+    struct vcs_package_swarm_object wants[8];
+    SW_CHECK("manifest want issued", sw_drain_wants(n, bad, wants, 8) == 1);
+    uint8_t corrupted[4096];
+    memcpy(corrupted, p->wire, p->wire_len);
+    corrupted[p->wire_len - 1] ^= 0xff; /* root no longer reproduces */
+    struct vcs_swarm_frame_result res =
+        sw_answer(n, bad, &wants[0], corrupted, p->wire_len, UINT32_MAX);
+    SW_CHECK("wrong manifest named invalid",
+             res.penalty == VCS_SWARM_PENALTY_INVALID_DATA &&
+             res.rule != NULL && strcmp(res.rule, "invalid-chunk") == 0);
+    struct vcs_service_key_totals totals;
+    SW_CHECK("wrong manifest: invalid offence + unverified no-credit",
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
+             totals.offences[VCS_POLICY_OFFENCE_INVALID_CHUNK] == 1 &&
+             totals.no_credit_events[VCS_POLICY_NO_CREDIT_UNVERIFIED] == 1 &&
+             totals.verified_bytes_downloaded == 0);
+    struct vcs_swarm_download_status dst;
+    SW_CHECK("still want-manifest",
+             vcs_swarm_engine_download_status(n->engine, p->root, &dst) &&
+             dst.state == VCS_SWARM_DL_WANT_MANIFEST);
+    return failures;
+}
+
+static int swarm_case_invalid_honest_takeover(struct sw_node *n,
+                                               struct sw_pkg *p,
+                                               uint64_t bad, uint64_t honest,
+                                               const uint8_t *key2)
+{
+    int failures = 0;
+    /* The malicious peer is manifest-failed; a fresh honest peer serves
+     * the manifest. */
+    SW_CHECK("honest peer add",
+             vcs_swarm_engine_peer_add(n->engine, honest, key2));
+    sw_announce(n->engine, honest, p);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 3);
+    struct vcs_package_swarm_object wants[8];
+    SW_CHECK("honest peer gets no stale frames",
+             sw_drain_wants(n, bad, wants, 8) == 0);
+    SW_CHECK("manifest want to honest peer",
+             sw_drain_wants(n, honest, wants, 8) == 1);
+    struct vcs_swarm_frame_result res =
+        sw_answer(n, honest, &wants[0], p->wire, p->wire_len, UINT32_MAX);
+    SW_CHECK("honest manifest accepted", res.penalty == VCS_SWARM_PENALTY_NONE);
+    struct vcs_swarm_download_status dst;
+    SW_CHECK("now downloading chunks",
+             vcs_swarm_engine_download_status(n->engine, p->root, &dst) &&
+             dst.state == VCS_SWARM_DL_CHUNKS);
+    return failures;
+}
+
+static int swarm_case_invalid_chunk_answers(
+    struct sw_node *n, struct sw_pkg *p, uint64_t bad, uint64_t honest,
+    const uint8_t *key, struct vcs_package_swarm_object *honest_want0)
+{
+    int failures = 0;
+    /* Chunk WANTs spread deterministically: slot 0 (bad) holds chunks 0
+     * and 2, slot 1 (honest) chunk 1. Answer bad's chunk 0 with a wrong
+     * hash and chunk 2 with wrong coordinates; answer NOTHING honest
+     * yet, so the CAS must stay empty and credit at the manifest only. */
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 4);
+    struct vcs_package_swarm_object bad_wants[8], honest_wants[8];
+    size_t nb = sw_drain_wants(n, bad, bad_wants, 8);
+    size_t nh = sw_drain_wants(n, honest, honest_wants, 8);
+    SW_CHECK("bad peer holds two chunk wants", nb == 2);
+    SW_CHECK("honest peer holds one chunk want", nh == 1);
+    *honest_want0 = honest_wants[0];
+    uint8_t wrong[SW_MAX_FILE];
+    size_t len0 = 0;
+    const uint8_t *bytes0 = sw_chunk_bytes(p, bad_wants[0].file_index,
+                                           &len0);
+    memcpy(wrong, bytes0, len0);
+    wrong[0] ^= 0xff;
+    struct vcs_swarm_frame_result res =
+        sw_answer(n, bad, &bad_wants[0], wrong, len0, UINT32_MAX);
+    SW_CHECK("wrong-hash chunk named invalid",
+             res.penalty == VCS_SWARM_PENALTY_INVALID_DATA);
+    uint32_t other = (bad_wants[1].file_index + 1u) % (uint32_t)p->count;
+    size_t len2 = 0;
+    const uint8_t *bytes2 = sw_chunk_bytes(p, other, &len2);
+    res = sw_answer(n, bad, &bad_wants[1], bytes2, len2, other);
+    SW_CHECK("wrong-coords chunk named invalid",
+             res.penalty == VCS_SWARM_PENALTY_INVALID_DATA);
+    struct vcs_service_key_totals totals;
+    SW_CHECK("invalid chunks: offences accumulate, no credit",
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
+             totals.offences[VCS_POLICY_OFFENCE_INVALID_CHUNK] == 3 &&
+             totals.no_credit_events[VCS_POLICY_NO_CREDIT_INVALID_CHUNK] >= 2 &&
+             totals.verified_bytes_downloaded == 0);
+    bool any_present = false;
+    for (uint32_t fi = 0; fi < p->count; fi++)
+        any_present |= vcs_package_store_chunk_present(n->store, p->root, fi,
+                                                       0);
+    SW_CHECK("invalid bytes never stored", !any_present);
+    return failures;
+}
+
+static int swarm_case_invalid_finish_honest(
+    struct sw_node *n, struct sw_pkg *p, uint64_t honest,
+    const struct vcs_package_swarm_object *honest_want0, const uint8_t *key)
+{
+    int failures = 0;
+    /* The honest peer finishes: its held chunk plus the two reassigned
+     * ones (the bad peer is failed for both). */
+    uint32_t max_inflight = 0;
+    const uint64_t peers[1] = { honest };
+    /* Answer the already-held honest want first. */
+    size_t lenh = 0;
+    const uint8_t *bytesh = sw_chunk_bytes(p, honest_want0->file_index,
+                                           &lenh);
+    struct vcs_swarm_frame_result res =
+        sw_answer(n, honest, honest_want0, bytesh, lenh, UINT32_MAX);
+    SW_CHECK("held honest chunk accepted",
+             res.penalty == VCS_SWARM_PENALTY_NONE);
+    SW_CHECK("completes via honest peer",
+             sw_drive_complete(n, peers, 1, p, &max_inflight));
+    SW_CHECK("in-flight bound honored", max_inflight > 0 &&
+             max_inflight <= VCS_SWARM_PEER_INFLIGHT_MAX);
+    struct vcs_package_store_status sst;
+    SW_CHECK("store complete",
+             vcs_package_store_package_status(n->store, p->root, &sst) &&
+             sst.complete);
+    struct vcs_service_key_totals totals;
+    SW_CHECK("malicious peer earned nothing",
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
+             totals.verified_bytes_downloaded == 0);
+    return failures;
+}
+
 static int t_swarm_invalid_data(void)
 {
     int failures = 0;
@@ -569,104 +732,16 @@ static int t_swarm_invalid_data(void)
     SW_CHECK("fetch ok", vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY,
                                                 1) == VCS_SWARM_FETCH_OK);
 
-    /* Wrong-hash manifest from the malicious peer: named invalid,
-     * INVALID_CHUNK offence, UNVERIFIED no-credit, nothing stored. */
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 2);
-    struct vcs_package_swarm_object wants[8];
-    SW_CHECK("manifest want issued", sw_drain_wants(&n, bad, wants, 8) == 1);
-    uint8_t corrupted[4096];
-    memcpy(corrupted, p.wire, p.wire_len);
-    corrupted[p.wire_len - 1] ^= 0xff; /* root no longer reproduces */
-    struct vcs_swarm_frame_result res =
-        sw_answer(&n, bad, &wants[0], corrupted, p.wire_len, UINT32_MAX);
-    SW_CHECK("wrong manifest named invalid",
-             res.penalty == VCS_SWARM_PENALTY_INVALID_DATA &&
-             res.rule != NULL && strcmp(res.rule, "invalid-chunk") == 0);
-    struct vcs_service_key_totals totals;
-    SW_CHECK("wrong manifest: invalid offence + unverified no-credit",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
-             totals.offences[VCS_POLICY_OFFENCE_INVALID_CHUNK] == 1 &&
-             totals.no_credit_events[VCS_POLICY_NO_CREDIT_UNVERIFIED] == 1 &&
-             totals.verified_bytes_downloaded == 0);
-    struct vcs_swarm_download_status dst;
-    SW_CHECK("still want-manifest",
-             vcs_swarm_engine_download_status(n.engine, p.root, &dst) &&
-             dst.state == VCS_SWARM_DL_WANT_MANIFEST);
+    failures += swarm_case_invalid_wrong_manifest(&n, &p, bad, key);
+    failures += swarm_case_invalid_honest_takeover(&n, &p, bad, honest,
+                                                    key2);
 
-    /* The malicious peer is manifest-failed; a fresh honest peer serves
-     * the manifest. */
-    SW_CHECK("honest peer add",
-             vcs_swarm_engine_peer_add(n.engine, honest, key2));
-    sw_announce(n.engine, honest, &p);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 3);
-    SW_CHECK("honest peer gets no stale frames",
-             sw_drain_wants(&n, bad, wants, 8) == 0);
-    SW_CHECK("manifest want to honest peer",
-             sw_drain_wants(&n, honest, wants, 8) == 1);
-    res = sw_answer(&n, honest, &wants[0], p.wire, p.wire_len, UINT32_MAX);
-    SW_CHECK("honest manifest accepted", res.penalty == VCS_SWARM_PENALTY_NONE);
-    SW_CHECK("now downloading chunks",
-             vcs_swarm_engine_download_status(n.engine, p.root, &dst) &&
-             dst.state == VCS_SWARM_DL_CHUNKS);
+    struct vcs_package_swarm_object honest_want0;
+    failures += swarm_case_invalid_chunk_answers(&n, &p, bad, honest, key,
+                                                 &honest_want0);
+    failures += swarm_case_invalid_finish_honest(&n, &p, honest,
+                                                 &honest_want0, key);
 
-    /* Chunk WANTs spread deterministically: slot 0 (bad) holds chunks 0
-     * and 2, slot 1 (honest) chunk 1. Answer bad's chunk 0 with a wrong
-     * hash and chunk 2 with wrong coordinates; answer NOTHING honest
-     * yet, so the CAS must stay empty and credit at the manifest only. */
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 4);
-    struct vcs_package_swarm_object bad_wants[8], honest_wants[8];
-    size_t nb = sw_drain_wants(&n, bad, bad_wants, 8);
-    size_t nh = sw_drain_wants(&n, honest, honest_wants, 8);
-    SW_CHECK("bad peer holds two chunk wants", nb == 2);
-    SW_CHECK("honest peer holds one chunk want", nh == 1);
-    uint8_t wrong[SW_MAX_FILE];
-    size_t len0 = 0;
-    const uint8_t *bytes0 = sw_chunk_bytes(&p, bad_wants[0].file_index,
-                                           &len0);
-    memcpy(wrong, bytes0, len0);
-    wrong[0] ^= 0xff;
-    res = sw_answer(&n, bad, &bad_wants[0], wrong, len0, UINT32_MAX);
-    SW_CHECK("wrong-hash chunk named invalid",
-             res.penalty == VCS_SWARM_PENALTY_INVALID_DATA);
-    uint32_t other = (bad_wants[1].file_index + 1u) % (uint32_t)p.count;
-    size_t len2 = 0;
-    const uint8_t *bytes2 = sw_chunk_bytes(&p, other, &len2);
-    res = sw_answer(&n, bad, &bad_wants[1], bytes2, len2, other);
-    SW_CHECK("wrong-coords chunk named invalid",
-             res.penalty == VCS_SWARM_PENALTY_INVALID_DATA);
-    SW_CHECK("invalid chunks: offences accumulate, no credit",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
-             totals.offences[VCS_POLICY_OFFENCE_INVALID_CHUNK] == 3 &&
-             totals.no_credit_events[VCS_POLICY_NO_CREDIT_INVALID_CHUNK] >= 2 &&
-             totals.verified_bytes_downloaded == 0);
-    bool any_present = false;
-    for (uint32_t fi = 0; fi < p.count; fi++)
-        any_present |= vcs_package_store_chunk_present(n.store, p.root, fi,
-                                                       0);
-    SW_CHECK("invalid bytes never stored", !any_present);
-
-    /* The honest peer finishes: its held chunk plus the two reassigned
-     * ones (the bad peer is failed for both). */
-    uint32_t max_inflight = 0;
-    const uint64_t peers[1] = { honest };
-    /* Answer the already-held honest want first. */
-    size_t lenh = 0;
-    const uint8_t *bytesh = sw_chunk_bytes(&p, honest_wants[0].file_index,
-                                           &lenh);
-    res = sw_answer(&n, honest, &honest_wants[0], bytesh, lenh, UINT32_MAX);
-    SW_CHECK("held honest chunk accepted",
-             res.penalty == VCS_SWARM_PENALTY_NONE);
-    SW_CHECK("completes via honest peer",
-             sw_drive_complete(&n, peers, 1, &p, &max_inflight));
-    SW_CHECK("in-flight bound honored", max_inflight > 0 &&
-             max_inflight <= VCS_SWARM_PEER_INFLIGHT_MAX);
-    struct vcs_package_store_status sst;
-    SW_CHECK("store complete",
-             vcs_package_store_package_status(n.store, p.root, &sst) &&
-             sst.complete);
-    SW_CHECK("malicious peer earned nothing",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
-             totals.verified_bytes_downloaded == 0);
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
@@ -954,31 +1029,23 @@ static int t_swarm_drop_race(void)
 
 /* ── 5: announcements never earn; announce flood named ────────────── */
 
-static int t_swarm_announce_policy(void)
+static int swarm_case_announce_fill_inventory(
+    struct sw_node *n, struct sw_pkg *p, uint64_t peer, const uint8_t *key,
+    const uint8_t *frame, size_t frame_len,
+    struct vcs_swarm_peer_info infos[4])
 {
     int failures = 0;
-    struct sw_node n;
-    struct sw_pkg p;
-    if (!sw_node_open(&n, "announce", NULL /* score 0: NEW_USER */) ||
-        !sw_make_package(&p, 1, 41))
-        return 1;
-    uint8_t key[33];
-    sw_key(12, key);
-    const uint64_t peer = 4001;
-    SW_CHECK("peer add", vcs_swarm_engine_peer_add(n.engine, peer, key));
-    uint8_t frame[128];
-    size_t frame_len = sw_announce_frame(&p, frame);
-    struct vcs_swarm_peer_info infos[4];
+    (void)key;
     /* NEW_USER announce rate is the unique-root serving-set inventory
      * bound (VCS_POLICY_FREE_ANNOUNCE_PER_HOUR/hour). Keep-alive repeats
      * of a root already in peer->ads[] do not consume it. */
     struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
-        n.engine, peer, frame, frame_len, SW_DAY, 1);
+        n->engine, peer, frame, frame_len, SW_DAY, 1);
     SW_CHECK("new-user first unique announce accepted",
              res.penalty == VCS_SWARM_PENALTY_NONE);
     SW_CHECK("new-user announce recorded",
-             vcs_swarm_engine_peers_for(n.engine, p.root, infos, 4) == 1);
-    res = vcs_swarm_engine_handle_frame(n.engine, peer, frame, frame_len,
+             vcs_swarm_engine_peers_for(n->engine, p->root, infos, 4) == 1);
+    res = vcs_swarm_engine_handle_frame(n->engine, peer, frame, frame_len,
                                         SW_DAY, 1);
     SW_CHECK("keep-alive of the same root accepted, no flood",
              res.penalty == VCS_SWARM_PENALTY_NONE);
@@ -994,7 +1061,7 @@ static int t_swarm_announce_policy(void)
         }
         uint8_t extra_frame[128];
         size_t extra_len = sw_announce_frame(&extra, extra_frame);
-        res = vcs_swarm_engine_handle_frame(n.engine, peer, extra_frame,
+        res = vcs_swarm_engine_handle_frame(n->engine, peer, extra_frame,
                                             extra_len, SW_DAY, 1);
         if (res.penalty == VCS_SWARM_PENALTY_NONE)
             extra_accepted++;
@@ -1003,18 +1070,22 @@ static int t_swarm_announce_policy(void)
     SW_CHECK("new-user unique announces fill the inventory bound",
              minted &&
              extra_accepted == VCS_POLICY_FREE_ANNOUNCE_PER_HOUR - 1);
-    struct sw_pkg over;
-    if (!sw_make_package(&over, 2,
-                         (uint8_t)(50u + VCS_POLICY_FREE_ANNOUNCE_PER_HOUR))) {
-        sw_free_package(&p);
-        sw_node_close(&n);
-        test_rm_rf_recursive(n.datadir);
-        return failures + 1;
-    }
+    return failures;
+}
+
+static int swarm_case_announce_over_bound(
+    struct sw_node *n, struct sw_pkg *p, uint64_t peer, const uint8_t *key,
+    struct vcs_swarm_peer_info infos[4], struct sw_pkg *over, bool *built)
+{
+    int failures = 0;
+    *built = sw_make_package(
+        over, 2, (uint8_t)(50u + VCS_POLICY_FREE_ANNOUNCE_PER_HOUR));
+    if (!*built)
+        return failures;
     uint8_t over_frame[128];
-    size_t over_len = sw_announce_frame(&over, over_frame);
-    res = vcs_swarm_engine_handle_frame(n.engine, peer, over_frame, over_len,
-                                        SW_DAY, 1);
+    size_t over_len = sw_announce_frame(over, over_frame);
+    struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
+        n->engine, peer, over_frame, over_len, SW_DAY, 1);
     SW_CHECK("new-user distinct root over inventory bound flood named",
              res.penalty == VCS_SWARM_PENALTY_ANNOUNCE_FLOOD &&
              res.rule != NULL &&
@@ -1022,42 +1093,95 @@ static int t_swarm_announce_policy(void)
     struct vcs_service_key_totals totals;
     /* Unique accepts + one keep-alive + one flood unique; no credit. */
     SW_CHECK("announce: one flood offence, no ratio movement",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
              totals.offences[VCS_POLICY_OFFENCE_ANNOUNCE_FLOOD] == 1 &&
              totals.no_credit_events[VCS_POLICY_NO_CREDIT_ANNOUNCEMENT] ==
                  VCS_POLICY_FREE_ANNOUNCE_PER_HOUR + 2 &&
              totals.verified_bytes_downloaded == 0 &&
              totals.verified_bytes_uploaded == 0);
     SW_CHECK("first unique root still advertised after keep-alive",
-             vcs_swarm_engine_peers_for(n.engine, p.root, infos, 4) == 1);
+             vcs_swarm_engine_peers_for(n->engine, p->root, infos, 4) == 1);
     SW_CHECK("flooded distinct root was not added to the serving set",
-             vcs_swarm_engine_peers_for(n.engine, over.root, infos, 4) == 0);
-    sw_free_package(&over);
+             vcs_swarm_engine_peers_for(n->engine, over->root, infos, 4) ==
+                 0);
+    return failures;
+}
 
+static int swarm_case_announce_contributor(const uint8_t *frame,
+                                            size_t frame_len,
+                                            struct sw_pkg *p,
+                                            struct vcs_swarm_peer_info
+                                                infos[4],
+                                            struct sw_node *n2, bool *opened)
+{
+    int failures = 0;
     /* An earned contributor may announce; it STILL earns nothing. */
-    struct sw_node n2;
     uint8_t key2[33];
     sw_key(13, key2);
-    if (!sw_node_open(&n2, "announce2", sw_score_contributor)) {
+    *opened = sw_node_open(n2, "announce2", sw_score_contributor);
+    if (!*opened)
+        return failures;
+    const uint64_t peer2 = 4002;
+    SW_CHECK("peer2 add", vcs_swarm_engine_peer_add(n2->engine, peer2,
+                                                    key2));
+    struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
+        n2->engine, peer2, frame, frame_len, SW_DAY, 1);
+    SW_CHECK("contributor announce accepted",
+             res.penalty == VCS_SWARM_PENALTY_NONE);
+    SW_CHECK("contributor announce recorded",
+             vcs_swarm_engine_peers_for(n2->engine, p->root, infos, 4) == 1);
+    struct vcs_service_key_totals totals;
+    SW_CHECK("contributor announce earns nothing",
+             vcs_service_key_totals(n2->book, key2, SW_DAY, &totals) &&
+             totals.verified_bytes_downloaded == 0 &&
+             totals.verified_bytes_uploaded == 0 &&
+             totals.no_credit_events[VCS_POLICY_NO_CREDIT_ANNOUNCEMENT] == 1 &&
+             totals.offence_total == 0);
+    return failures;
+}
+
+static int t_swarm_announce_policy(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    if (!sw_node_open(&n, "announce", NULL /* score 0: NEW_USER */) ||
+        !sw_make_package(&p, 1, 41))
+        return 1;
+    uint8_t key[33];
+    sw_key(12, key);
+    const uint64_t peer = 4001;
+    SW_CHECK("peer add", vcs_swarm_engine_peer_add(n.engine, peer, key));
+    uint8_t frame[128];
+    size_t frame_len = sw_announce_frame(&p, frame);
+    struct vcs_swarm_peer_info infos[4];
+
+    failures += swarm_case_announce_fill_inventory(&n, &p, peer, key, frame,
+                                                    frame_len, infos);
+
+    struct sw_pkg over;
+    bool over_built = false;
+    failures += swarm_case_announce_over_bound(&n, &p, peer, key, infos,
+                                               &over, &over_built);
+    if (!over_built) {
         sw_free_package(&p);
         sw_node_close(&n);
         test_rm_rf_recursive(n.datadir);
         return failures + 1;
     }
-    const uint64_t peer2 = 4002;
-    SW_CHECK("peer2 add", vcs_swarm_engine_peer_add(n2.engine, peer2, key2));
-    res = vcs_swarm_engine_handle_frame(n2.engine, peer2, frame, frame_len,
-                                        SW_DAY, 1);
-    SW_CHECK("contributor announce accepted",
-             res.penalty == VCS_SWARM_PENALTY_NONE);
-    SW_CHECK("contributor announce recorded",
-             vcs_swarm_engine_peers_for(n2.engine, p.root, infos, 4) == 1);
-    SW_CHECK("contributor announce earns nothing",
-             vcs_service_key_totals(n2.book, key2, SW_DAY, &totals) &&
-             totals.verified_bytes_downloaded == 0 &&
-             totals.verified_bytes_uploaded == 0 &&
-             totals.no_credit_events[VCS_POLICY_NO_CREDIT_ANNOUNCEMENT] == 1 &&
-             totals.offence_total == 0);
+    sw_free_package(&over);
+
+    struct sw_node n2;
+    bool n2_opened = false;
+    failures += swarm_case_announce_contributor(frame, frame_len, &p, infos,
+                                                &n2, &n2_opened);
+    if (!n2_opened) {
+        sw_free_package(&p);
+        sw_node_close(&n);
+        test_rm_rf_recursive(n.datadir);
+        return failures + 1;
+    }
+
     sw_free_package(&p);
     sw_node_close(&n);
     sw_node_close(&n2);
@@ -1069,14 +1193,13 @@ static int t_swarm_announce_policy(void)
 /* Prepare, sign, store, pin, and import one in-tree package as a public
  * transport carrier. Distinct `seed` values pick distinct publisher keys
  * so each title keeps its own sequence-1 release. */
-static bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
-                                    uint8_t seed, uint64_t sequence,
-                                    uint8_t transport_root[32])
+static bool sw_seed_prepare_signed(const char *source_dir, uint8_t seed,
+                                   uint64_t sequence,
+                                   struct vcs_package_prepared *prepared)
 {
     struct privkey sk;
     struct pubkey pk;
-    if (!n || !source_dir || !transport_root || !n->store || !n->engine ||
-        !sw_keypair(seed, &sk, &pk))
+    if (!sw_keypair(seed, &sk, &pk))
         return false;
     struct vcs_package_prepare_options options = {
         .dir = source_dir,
@@ -1085,39 +1208,46 @@ static bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
         .chain_id = "zclassic-main",
     };
     memcpy(options.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
-    struct vcs_package_prepared prepared;
-    vcs_package_prepared_init(&prepared);
+    vcs_package_prepared_init(prepared);
     char detail[160] = {0};
-    if (vcs_package_prepare(&options, &prepared, detail, sizeof(detail)) !=
+    if (vcs_package_prepare(&options, prepared, detail, sizeof(detail)) !=
         VCS_PACKAGE_PREPARE_OK) {
         fprintf(stderr, "zcode_swarm shelf prepare %s: %s\n", source_dir,
                 detail);
-        vcs_package_prepared_free(&prepared);
+        vcs_package_prepared_free(prepared);
         return false;
     }
     struct uint256 digest;
-    memcpy(digest.data, prepared.signing_digest, 32);
+    memcpy(digest.data, prepared->signing_digest, 32);
     uint8_t compact[COMPACT_SIGNATURE_SIZE];
     if (!privkey_sign_compact(&sk, &digest, compact)) {
-        vcs_package_prepared_free(&prepared);
+        vcs_package_prepared_free(prepared);
         return false;
     }
-    memcpy(prepared.release.signature, compact + 1,
+    memcpy(prepared->release.signature, compact + 1,
            VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+    return true;
+}
+
+static bool sw_seed_store_transport(struct sw_node *n,
+                                    const char *source_dir,
+                                    struct vcs_package_prepared *prepared,
+                                    uint8_t transport_root[32])
+{
     uint8_t *release_wire = NULL;
     size_t release_wire_len = 0;
     struct vcs_package_transport transport;
     vcs_package_transport_init(&transport);
     bool ok =
-        vcs_package_release_verify(&prepared.release) ==
+        vcs_package_release_verify(&prepared->release) ==
             VCS_PACKAGE_RELEASE_OK &&
-        vcs_package_release_serialize(&prepared.release, &release_wire,
+        vcs_package_release_serialize(&prepared->release, &release_wire,
                                       &release_wire_len) ==
             VCS_PACKAGE_RELEASE_OK &&
         vcs_package_transport_build(
-            release_wire, release_wire_len, prepared.recipe_wire,
-            prepared.recipe_wire_len, prepared.manifest_wire,
-            prepared.manifest_wire_len, &transport) ==
+            release_wire, release_wire_len, prepared->recipe_wire,
+            prepared->recipe_wire_len, prepared->manifest_wire,
+            prepared->manifest_wire_len, &transport) ==
             VCS_PACKAGE_TRANSPORT_OK &&
         vcs_package_transport_store(n->store, &transport, source_dir) ==
             VCS_PACKAGE_TRANSPORT_OK &&
@@ -1127,9 +1257,14 @@ static bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
         memcpy(transport_root, transport.transport_root, 32);
     free(release_wire);
     vcs_package_transport_free(&transport);
-    vcs_package_prepared_free(&prepared);
-    if (!ok)
-        return false;
+    vcs_package_prepared_free(prepared);
+    return ok;
+}
+
+static bool sw_seed_import_and_classify(struct sw_node *n,
+                                        const char *source_dir,
+                                        uint8_t transport_root[32])
+{
     struct vcs_package_store_status st;
     if (!vcs_package_store_package_status(n->store, transport_root, &st) ||
         !st.complete || !st.pinned)
@@ -1149,6 +1284,20 @@ static bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
         return false;
     }
     return true;
+}
+
+static bool sw_seed_in_tree_package(struct sw_node *n, const char *source_dir,
+                                    uint8_t seed, uint64_t sequence,
+                                    uint8_t transport_root[32])
+{
+    if (!n || !source_dir || !transport_root || !n->store || !n->engine)
+        return false;
+    struct vcs_package_prepared prepared;
+    if (!sw_seed_prepare_signed(source_dir, seed, sequence, &prepared))
+        return false;
+    if (!sw_seed_store_transport(n, source_dir, &prepared, transport_root))
+        return false;
+    return sw_seed_import_and_classify(n, source_dir, transport_root);
 }
 
 static size_t sw_drain_announces(struct sw_node *n, uint64_t peer,
@@ -1192,64 +1341,60 @@ static const char *const k_c23_shelf[] = {
 };
 enum { SW_SHELF_N = (int)(sizeof(k_c23_shelf) / sizeof(k_c23_shelf[0])) };
 
-static int t_swarm_c23_shelf_announce(void)
+static int shelf_case_seed_titles(struct sw_node *seeder,
+                                   uint8_t roots[SW_SHELF_N][32],
+                                   bool *seeded)
 {
     int failures = 0;
-    struct sw_node seeder, learner;
-    if (!sw_node_open(&seeder, "shelf-seed", sw_score_contributor) ||
-        !sw_node_open(&learner, "shelf-learn", NULL /* NEW_USER */))
-        return 1;
-    uint8_t roots[SW_SHELF_N][32];
-    memset(roots, 0, sizeof(roots));
-    bool seeded = true;
+    *seeded = true;
     for (size_t i = 0; i < SW_SHELF_N; i++) {
-        if (!sw_seed_in_tree_package(&seeder, k_c23_shelf[i],
+        if (!sw_seed_in_tree_package(seeder, k_c23_shelf[i],
                                      (uint8_t)(0x61u + i), i + 1u,
                                      roots[i])) {
             fprintf(stderr, "zcode_swarm shelf: failed %s\n",
                     k_c23_shelf[i]);
-            seeded = false;
+            *seeded = false;
             break;
         }
     }
     SW_CHECK("ordinary C23 shelf has at least eight titles",
              SW_SHELF_N >= 8);
-    SW_CHECK("ordinary C23 shelf prepared and imported", seeded);
-    if (!seeded) {
-        sw_node_close(&seeder);
-        sw_node_close(&learner);
-        test_rm_rf_recursive(seeder.datadir);
-        test_rm_rf_recursive(learner.datadir);
-        return failures + 1;
-    }
+    SW_CHECK("ordinary C23 shelf prepared and imported", *seeded);
+    if (!*seeded)
+        return failures;
     bool unique_roots = true;
     for (size_t i = 0; i < SW_SHELF_N; i++)
         for (size_t j = i + 1u; j < SW_SHELF_N; j++)
             if (memcmp(roots[i], roots[j], 32) == 0)
                 unique_roots = false;
     SW_CHECK("shelf titles derive distinct transport roots", unique_roots);
+    return failures;
+}
 
-    uint8_t seed_key[33], learn_key[33];
-    sw_key(0x71, seed_key);
-    sw_key(0x72, learn_key);
-    const uint64_t seed_peer = 5101, learn_peer = 5102;
+static int shelf_case_seeder_announces(
+    struct sw_node *seeder, uint64_t seed_peer, const uint8_t *seed_key,
+    const uint8_t roots[SW_SHELF_N][32],
+    uint8_t frames[VCS_SWARM_MAX_LOCAL_ANNOUNCES]
+                  [VCS_SWARM_OUTBOUND_FRAME_MAX],
+    size_t lens[VCS_SWARM_MAX_LOCAL_ANNOUNCES], size_t *drained)
+{
+    int failures = 0;
     SW_CHECK("seeder peer add",
-             vcs_swarm_engine_peer_add(seeder.engine, seed_peer, seed_key));
-    size_t queued = vcs_swarm_engine_announce_to(seeder.engine, seed_peer);
+             vcs_swarm_engine_peer_add(seeder->engine, seed_peer, seed_key));
+    size_t queued = vcs_swarm_engine_announce_to(seeder->engine, seed_peer);
     SW_CHECK("announce_to queues the public-serveable shelf",
              queued >= SW_SHELF_N && queued <= VCS_SWARM_MAX_LOCAL_ANNOUNCES);
-    uint8_t frames[VCS_SWARM_MAX_LOCAL_ANNOUNCES][VCS_SWARM_OUTBOUND_FRAME_MAX];
-    size_t lens[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
-    memset(frames, 0, sizeof(frames));
-    memset(lens, 0, sizeof(lens));
-    size_t drained =
-        sw_drain_announces(&seeder, seed_peer, frames, lens,
-                           VCS_SWARM_MAX_LOCAL_ANNOUNCES);
-    SW_CHECK("queued announces drain", drained == queued);
+    memset(frames, 0,
+           sizeof(uint8_t) * VCS_SWARM_MAX_LOCAL_ANNOUNCES *
+               VCS_SWARM_OUTBOUND_FRAME_MAX);
+    memset(lens, 0, sizeof(size_t) * VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    *drained = sw_drain_announces(seeder, seed_peer, frames, lens,
+                                  VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    SW_CHECK("queued announces drain", *drained == queued);
     bool all_seeded = true;
     for (size_t i = 0; i < SW_SHELF_N; i++) {
         bool found = false;
-        for (size_t j = 0; j < drained; j++)
+        for (size_t j = 0; j < *drained; j++)
             if (sw_announce_names_root(frames[j], lens[j], roots[i]))
                 found = true;
         if (!found)
@@ -1257,16 +1402,26 @@ static int t_swarm_c23_shelf_announce(void)
     }
     SW_CHECK("every seeded transport root was announced", all_seeded);
     SW_CHECK("re-announce is already-announced keep-alive, not a flood",
-             vcs_swarm_engine_announce_to(seeder.engine, seed_peer) == 0);
+             vcs_swarm_engine_announce_to(seeder->engine, seed_peer) == 0);
+    return failures;
+}
 
+static int shelf_case_learner_learns(
+    struct sw_node *learner, uint64_t learn_peer, const uint8_t *learn_key,
+    const uint8_t roots[SW_SHELF_N][32],
+    uint8_t frames[VCS_SWARM_MAX_LOCAL_ANNOUNCES]
+                  [VCS_SWARM_OUTBOUND_FRAME_MAX],
+    const size_t lens[VCS_SWARM_MAX_LOCAL_ANNOUNCES], size_t drained)
+{
+    int failures = 0;
     SW_CHECK("learner peer add",
-             vcs_swarm_engine_peer_add(learner.engine, learn_peer,
+             vcs_swarm_engine_peer_add(learner->engine, learn_peer,
                                        learn_key));
     bool learned = true;
     uint32_t unique_accepted = 0;
     for (size_t i = 0; i < drained; i++) {
         struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
-            learner.engine, learn_peer, frames[i], lens[i], SW_DAY, 1);
+            learner->engine, learn_peer, frames[i], lens[i], SW_DAY, 1);
         if (res.penalty != VCS_SWARM_PENALTY_NONE) {
             learned = false;
             break;
@@ -1279,27 +1434,60 @@ static int t_swarm_c23_shelf_announce(void)
     struct vcs_swarm_peer_info infos[4];
     bool advertised = true;
     for (size_t i = 0; i < SW_SHELF_N; i++)
-        if (vcs_swarm_engine_peers_for(learner.engine, roots[i], infos,
+        if (vcs_swarm_engine_peers_for(learner->engine, roots[i], infos,
                                        4) != 1)
             advertised = false;
     SW_CHECK("NEW_USER recorded each shelf transport root", advertised);
     bool keep_alive = true;
     for (size_t i = 0; i < drained; i++) {
         struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
-            learner.engine, learn_peer, frames[i], lens[i], SW_DAY, 2);
+            learner->engine, learn_peer, frames[i], lens[i], SW_DAY, 2);
         if (res.penalty != VCS_SWARM_PENALTY_NONE)
             keep_alive = false;
     }
     struct vcs_service_key_totals totals;
     SW_CHECK("keep-alive repeats of heard roots are not ANNOUNCE_FLOOD",
              keep_alive &&
-             vcs_service_key_totals(learner.book, learn_key, SW_DAY,
+             vcs_service_key_totals(learner->book, learn_key, SW_DAY,
                                     &totals) &&
              totals.offences[VCS_POLICY_OFFENCE_ANNOUNCE_FLOOD] == 0);
     SW_CHECK("unique-flood bound is still the serving-set size",
              VCS_POLICY_FREE_ANNOUNCE_PER_HOUR ==
                  VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
              SW_SHELF_N < VCS_POLICY_FREE_ANNOUNCE_PER_HOUR);
+    return failures;
+}
+
+static int t_swarm_c23_shelf_announce(void)
+{
+    int failures = 0;
+    struct sw_node seeder, learner;
+    if (!sw_node_open(&seeder, "shelf-seed", sw_score_contributor) ||
+        !sw_node_open(&learner, "shelf-learn", NULL /* NEW_USER */))
+        return 1;
+    uint8_t roots[SW_SHELF_N][32];
+    memset(roots, 0, sizeof(roots));
+    bool seeded = false;
+    failures += shelf_case_seed_titles(&seeder, roots, &seeded);
+    if (!seeded) {
+        sw_node_close(&seeder);
+        sw_node_close(&learner);
+        test_rm_rf_recursive(seeder.datadir);
+        test_rm_rf_recursive(learner.datadir);
+        return failures + 1;
+    }
+
+    uint8_t seed_key[33], learn_key[33];
+    sw_key(0x71, seed_key);
+    sw_key(0x72, learn_key);
+    const uint64_t seed_peer = 5101, learn_peer = 5102;
+    uint8_t frames[VCS_SWARM_MAX_LOCAL_ANNOUNCES][VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t lens[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
+    size_t drained = 0;
+    failures += shelf_case_seeder_announces(&seeder, seed_peer, seed_key,
+                                            roots, frames, lens, &drained);
+    failures += shelf_case_learner_learns(&learner, learn_peer, learn_key,
+                                          roots, frames, lens, drained);
 
     sw_node_close(&seeder);
     sw_node_close(&learner);
@@ -1309,6 +1497,102 @@ static int t_swarm_c23_shelf_announce(void)
 }
 
 /* ── 6: scheduler shape + end-to-end ──────────────────────────────── */
+
+static int scheduler_case_rarest_first_order(struct sw_node *n,
+                                              struct sw_pkg *common,
+                                              struct sw_pkg *rare,
+                                              uint64_t d)
+{
+    int failures = 0;
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 2);
+    /* Rarest-first: the RARE package's manifest WANT (to peer d) must be
+     * queued ahead of COMMON's. */
+    uint64_t target = 0;
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0;
+    SW_CHECK("first outbound exists",
+             vcs_swarm_engine_next_outbound(n->engine, 0, &target, frame,
+                                            &frame_len));
+    SW_CHECK("rarest-first: rare package scheduled first", target == d);
+    struct vcs_package_swarm_message msg;
+    SW_CHECK("first frame parses",
+             vcs_package_swarm_parse(frame, frame_len, &msg) &&
+             msg.type == VCS_PACKAGE_SWARM_WANT &&
+             memcmp(msg.body.want.package_root, rare->root, 32) == 0 &&
+             msg.body.want.object_kind ==
+                 VCS_PACKAGE_SWARM_OBJECT_MANIFEST);
+    /* Manifest-first: no chunk WANT may precede a verified manifest. */
+    SW_CHECK("second outbound is common manifest want",
+             vcs_swarm_engine_next_outbound(n->engine, 0, &target, frame,
+                                            &frame_len) &&
+             vcs_package_swarm_parse(frame, frame_len, &msg) &&
+             msg.body.want.object_kind ==
+                 VCS_PACKAGE_SWARM_OBJECT_MANIFEST &&
+             memcmp(msg.body.want.package_root, common->root, 32) == 0);
+    return failures;
+}
+
+static void scheduler_case_drive_to_complete(
+    struct sw_node *n, uint64_t a, uint64_t b, uint64_t c, uint64_t d,
+    struct sw_pkg *common, struct sw_pkg *rare)
+{
+    /* End-to-end: both complete; chunk load spreads across the three
+     * common advertisers. */
+    for (int round = 3; round < 64; round++) {
+        vcs_swarm_engine_tick(n->engine, SW_DAY, (uint64_t)round);
+        struct sw_pump_stats st;
+        memset(&st, 0, sizeof(st));
+        sw_pump(n, a, common, SW_SERVE_HONEST, false, (uint64_t)round, &st);
+        memset(&st, 0, sizeof(st));
+        sw_pump(n, b, common, SW_SERVE_HONEST, false, (uint64_t)round, &st);
+        memset(&st, 0, sizeof(st));
+        sw_pump(n, c, common, SW_SERVE_HONEST, false, (uint64_t)round, &st);
+        memset(&st, 0, sizeof(st));
+        sw_pump(n, d, rare, SW_SERVE_HONEST, false, (uint64_t)round, &st);
+        struct vcs_swarm_download_status s1, s2;
+        vcs_swarm_engine_download_status(n->engine, common->root, &s1);
+        vcs_swarm_engine_download_status(n->engine, rare->root, &s2);
+        if (s1.state == VCS_SWARM_DL_COMPLETE &&
+            s2.state == VCS_SWARM_DL_COMPLETE)
+            break;
+    }
+}
+
+static int scheduler_case_verify_complete(struct sw_node *n,
+                                           struct sw_pkg *common,
+                                           struct sw_pkg *rare,
+                                           const uint8_t *k1,
+                                           const uint8_t *k2,
+                                           const uint8_t *k3)
+{
+    int failures = 0;
+    struct vcs_swarm_download_status s1, s2;
+    SW_CHECK("common complete",
+             vcs_swarm_engine_download_status(n->engine, common->root,
+                                              &s1) &&
+             s1.state == VCS_SWARM_DL_COMPLETE);
+    SW_CHECK("rare complete",
+             vcs_swarm_engine_download_status(n->engine, rare->root, &s2) &&
+             s2.state == VCS_SWARM_DL_COMPLETE);
+    struct vcs_service_key_totals t1, t2, t3;
+    vcs_service_key_totals(n->book, k1, SW_DAY, &t1);
+    vcs_service_key_totals(n->book, k2, SW_DAY, &t2);
+    vcs_service_key_totals(n->book, k3, SW_DAY, &t3);
+    SW_CHECK("multi-peer spread: every advertiser served",
+             t1.verified_bytes_downloaded > 0 ||
+             t2.verified_bytes_downloaded > 0 ||
+             t3.verified_bytes_downloaded > 0);
+    SW_CHECK("no offences in honest run",
+             t1.offence_total == 0 && t2.offence_total == 0 &&
+             t3.offence_total == 0);
+    /* Completion is verified CAS content: every chunk re-reads. */
+    bool all_present = true;
+    for (uint32_t fi = 0; fi < common->count; fi++)
+        all_present &= vcs_package_store_chunk_present(n->store,
+                                                       common->root, fi, 0);
+    SW_CHECK("common chunks verified in CAS", all_present);
+    return failures;
+}
 
 static int t_swarm_scheduler_order(void)
 {
@@ -1339,80 +1623,12 @@ static int t_swarm_scheduler_order(void)
     SW_CHECK("fetch rare",
              vcs_swarm_engine_fetch(n.engine, rare.root, SW_DAY, 1) ==
                  VCS_SWARM_FETCH_OK);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 2);
-    /* Rarest-first: the RARE package's manifest WANT (to peer d) must be
-     * queued ahead of COMMON's. */
-    uint64_t target = 0;
-    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
-    size_t frame_len = 0;
-    SW_CHECK("first outbound exists",
-             vcs_swarm_engine_next_outbound(n.engine, 0, &target, frame,
-                                            &frame_len));
-    SW_CHECK("rarest-first: rare package scheduled first", target == d);
-    struct vcs_package_swarm_message msg;
-    SW_CHECK("first frame parses",
-             vcs_package_swarm_parse(frame, frame_len, &msg) &&
-             msg.type == VCS_PACKAGE_SWARM_WANT &&
-             memcmp(msg.body.want.package_root, rare.root, 32) == 0 &&
-             msg.body.want.object_kind ==
-                 VCS_PACKAGE_SWARM_OBJECT_MANIFEST);
-    /* Manifest-first: no chunk WANT may precede a verified manifest. */
-    SW_CHECK("second outbound is common manifest want",
-             vcs_swarm_engine_next_outbound(n.engine, 0, &target, frame,
-                                            &frame_len) &&
-             vcs_package_swarm_parse(frame, frame_len, &msg) &&
-             msg.body.want.object_kind ==
-                 VCS_PACKAGE_SWARM_OBJECT_MANIFEST &&
-             memcmp(msg.body.want.package_root, common.root, 32) == 0);
 
-    /* End-to-end: both complete; chunk load spreads across the three
-     * common advertisers. */
-    for (int round = 3; round < 64; round++) {
-        vcs_swarm_engine_tick(n.engine, SW_DAY, (uint64_t)round);
-        struct sw_pump_stats st;
-        memset(&st, 0, sizeof(st));
-        sw_pump(&n, a, &common, SW_SERVE_HONEST, false, (uint64_t)round,
-                &st);
-        memset(&st, 0, sizeof(st));
-        sw_pump(&n, b, &common, SW_SERVE_HONEST, false, (uint64_t)round,
-                &st);
-        memset(&st, 0, sizeof(st));
-        sw_pump(&n, c, &common, SW_SERVE_HONEST, false, (uint64_t)round,
-                &st);
-        memset(&st, 0, sizeof(st));
-        sw_pump(&n, d, &rare, SW_SERVE_HONEST, false, (uint64_t)round,
-                &st);
-        struct vcs_swarm_download_status s1, s2;
-        vcs_swarm_engine_download_status(n.engine, common.root, &s1);
-        vcs_swarm_engine_download_status(n.engine, rare.root, &s2);
-        if (s1.state == VCS_SWARM_DL_COMPLETE &&
-            s2.state == VCS_SWARM_DL_COMPLETE)
-            break;
-    }
-    struct vcs_swarm_download_status s1, s2;
-    SW_CHECK("common complete",
-             vcs_swarm_engine_download_status(n.engine, common.root, &s1) &&
-             s1.state == VCS_SWARM_DL_COMPLETE);
-    SW_CHECK("rare complete",
-             vcs_swarm_engine_download_status(n.engine, rare.root, &s2) &&
-             s2.state == VCS_SWARM_DL_COMPLETE);
-    struct vcs_service_key_totals t1, t2, t3;
-    vcs_service_key_totals(n.book, k1, SW_DAY, &t1);
-    vcs_service_key_totals(n.book, k2, SW_DAY, &t2);
-    vcs_service_key_totals(n.book, k3, SW_DAY, &t3);
-    SW_CHECK("multi-peer spread: every advertiser served",
-             t1.verified_bytes_downloaded > 0 ||
-             t2.verified_bytes_downloaded > 0 ||
-             t3.verified_bytes_downloaded > 0);
-    SW_CHECK("no offences in honest run",
-             t1.offence_total == 0 && t2.offence_total == 0 &&
-             t3.offence_total == 0);
-    /* Completion is verified CAS content: every chunk re-reads. */
-    bool all_present = true;
-    for (uint32_t fi = 0; fi < common.count; fi++)
-        all_present &= vcs_package_store_chunk_present(n.store, common.root,
-                                                       fi, 0);
-    SW_CHECK("common chunks verified in CAS", all_present);
+    failures += scheduler_case_rarest_first_order(&n, &common, &rare, d);
+    scheduler_case_drive_to_complete(&n, a, b, c, d, &common, &rare);
+    failures += scheduler_case_verify_complete(&n, &common, &rare, k1, k2,
+                                               k3);
+
     sw_free_package(&common);
     sw_free_package(&rare);
     sw_node_close(&n);
@@ -1521,6 +1737,96 @@ static int t_swarm_disconnect_requeue(void)
 
 /* ── 9: resume after restart ──────────────────────────────────────── */
 
+static int resume_case_answer_one_chunk(struct sw_node *n, uint64_t peer,
+                                         struct sw_pkg *p)
+{
+    int failures = 0;
+    /* Answer exactly ONE chunk WANT, leave the rest outstanding. */
+    uint64_t target = 0;
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0;
+    bool answered = false;
+    while (vcs_swarm_engine_next_outbound(n->engine, peer, &target,
+                                          frame, &frame_len)) {
+        struct vcs_package_swarm_message msg;
+        if (!vcs_package_swarm_parse(frame, frame_len, &msg) ||
+            msg.type != VCS_PACKAGE_SWARM_WANT || answered)
+            continue;
+        answered = true;
+        struct vcs_package_swarm_message data;
+        memset(&data, 0, sizeof(data));
+        data.type = VCS_PACKAGE_SWARM_DATA;
+        data.body.data.object = msg.body.want;
+        size_t len = 0;
+        data.body.data.bytes =
+            sw_chunk_bytes(p, msg.body.want.file_index, &len);
+        data.body.data.bytes_len = (uint32_t)len;
+        uint8_t dframe[8 + 96 + SW_MAX_FILE];
+        size_t dlen = 0;
+        vcs_package_swarm_serialize(&data, dframe, sizeof(dframe), &dlen);
+        struct vcs_swarm_frame_result res =
+            vcs_swarm_engine_handle_frame(n->engine, peer, dframe, dlen,
+                                          SW_DAY, 3);
+        free(res.reply);
+    }
+    SW_CHECK("one chunk answered pre-restart", answered);
+    return failures;
+}
+
+static int resume_case_restart(struct sw_node *n, struct sw_pkg *p)
+{
+    int failures = 0;
+    /* Restart: engine + store + book all reopen on the same datadir. */
+    struct vcs_swarm_download_status dst;
+    SW_CHECK("pre-restart partial",
+             vcs_swarm_engine_download_status(n->engine, p->root, &dst) &&
+             dst.state == VCS_SWARM_DL_CHUNKS && dst.present_chunks == 1);
+    char datadir[1024];
+    char zcode_dir[1100];
+    snprintf(datadir, sizeof(datadir), "%s", n->datadir);
+    snprintf(zcode_dir, sizeof(zcode_dir), "%s", n->zcode_dir);
+    sw_node_close(n);
+    n->store = vcs_package_store_open(datadir,
+                                      VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    n->book = vcs_service_book_load(zcode_dir);
+    n->engine = vcs_swarm_engine_create(n->store, n->book, zcode_dir,
+                                        sw_score_contributor, NULL);
+    snprintf(n->datadir, sizeof(n->datadir), "%s", datadir);
+    snprintf(n->zcode_dir, sizeof(n->zcode_dir), "%s", zcode_dir);
+    SW_CHECK("restart ok", n->store && n->book && n->engine);
+    SW_CHECK("resume rebuilds from CAS",
+             vcs_swarm_engine_download_status(n->engine, p->root, &dst) &&
+             dst.state == VCS_SWARM_DL_CHUNKS && dst.present_chunks == 1);
+    return failures;
+}
+
+static int resume_case_finish(struct sw_node *n, struct sw_pkg *p,
+                               uint64_t peer, const uint8_t *key)
+{
+    int failures = 0;
+    /* Re-add the peer and finish: the download completes from where it
+     * stopped (staging bytes earn nothing — only newly verified bytes
+     * credit). */
+    SW_CHECK("peer re-add", vcs_swarm_engine_peer_add(n->engine, peer, key));
+    sw_announce(n->engine, peer, p);
+    uint32_t max_inflight = 0;
+    const uint64_t peers[1] = { peer };
+    SW_CHECK("resume completes",
+             sw_drive_complete(n, peers, 1, p, &max_inflight));
+    struct vcs_swarm_download_status dst;
+    SW_CHECK("record deleted on completion",
+             vcs_swarm_engine_download_status(n->engine, p->root, &dst) &&
+             dst.state == VCS_SWARM_DL_COMPLETE);
+    struct vcs_service_key_totals totals;
+    uint64_t served = p->wire_len;
+    for (size_t i = 0; i < p->count; i++)
+        served += p->lens[i];
+    SW_CHECK("exactly the verified bytes credited",
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
+             totals.verified_bytes_downloaded == served);
+    return failures;
+}
+
 static int t_swarm_resume(void)
 {
     int failures = 0;
@@ -1541,80 +1847,11 @@ static int t_swarm_resume(void)
     memset(&st, 0, sizeof(st));
     sw_pump(&n, peer, &p, SW_SERVE_HONEST, false, 2, &st); /* manifest */
     vcs_swarm_engine_tick(n.engine, SW_DAY, 3);
-    /* Answer exactly ONE chunk WANT, leave the rest outstanding. */
-    {
-        uint64_t target = 0;
-        uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
-        size_t frame_len = 0;
-        bool answered = false;
-        while (vcs_swarm_engine_next_outbound(n.engine, peer, &target,
-                                              frame, &frame_len)) {
-            struct vcs_package_swarm_message msg;
-            if (!vcs_package_swarm_parse(frame, frame_len, &msg) ||
-                msg.type != VCS_PACKAGE_SWARM_WANT || answered)
-                continue;
-            answered = true;
-            struct vcs_package_swarm_message data;
-            memset(&data, 0, sizeof(data));
-            data.type = VCS_PACKAGE_SWARM_DATA;
-            data.body.data.object = msg.body.want;
-            size_t len = 0;
-            data.body.data.bytes =
-                sw_chunk_bytes(&p, msg.body.want.file_index, &len);
-            data.body.data.bytes_len = (uint32_t)len;
-            uint8_t dframe[8 + 96 + SW_MAX_FILE];
-            size_t dlen = 0;
-            vcs_package_swarm_serialize(&data, dframe, sizeof(dframe),
-                                        &dlen);
-            struct vcs_swarm_frame_result res =
-                vcs_swarm_engine_handle_frame(n.engine, peer, dframe, dlen,
-                                              SW_DAY, 3);
-            free(res.reply);
-        }
-        SW_CHECK("one chunk answered pre-restart", answered);
-    }
-    /* Restart: engine + store + book all reopen on the same datadir. */
-    struct vcs_swarm_download_status dst;
-    SW_CHECK("pre-restart partial",
-             vcs_swarm_engine_download_status(n.engine, p.root, &dst) &&
-             dst.state == VCS_SWARM_DL_CHUNKS && dst.present_chunks == 1);
-    char datadir[1024];
-    char zcode_dir[1100];
-    snprintf(datadir, sizeof(datadir), "%s", n.datadir);
-    snprintf(zcode_dir, sizeof(zcode_dir), "%s", n.zcode_dir);
-    sw_node_close(&n);
-    n.store = vcs_package_store_open(datadir,
-                                     VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    n.book = vcs_service_book_load(zcode_dir);
-    n.engine = vcs_swarm_engine_create(n.store, n.book, zcode_dir,
-                                       sw_score_contributor, NULL);
-    snprintf(n.datadir, sizeof(n.datadir), "%s", datadir);
-    snprintf(n.zcode_dir, sizeof(n.zcode_dir), "%s", zcode_dir);
-    SW_CHECK("restart ok", n.store && n.book && n.engine);
-    SW_CHECK("resume rebuilds from CAS",
-             vcs_swarm_engine_download_status(n.engine, p.root, &dst) &&
-             dst.state == VCS_SWARM_DL_CHUNKS && dst.present_chunks == 1);
-    /* Re-add the peer and finish: the download completes from where it
-     * stopped (staging bytes earn nothing — only newly verified bytes
-     * credit). */
-    SW_CHECK("peer re-add", vcs_swarm_engine_peer_add(n.engine, peer, key));
-    sw_announce(n.engine, peer, &p);
-    uint32_t max_inflight = 0;
-    const uint64_t peers[1] = { peer };
-    SW_CHECK("resume completes",
-             sw_drive_complete(&n, peers, 1, &p, &max_inflight));
-    SW_CHECK("record deleted on completion",
-             vcs_swarm_engine_download_status(n.engine, p.root, &dst) &&
-             dst.state == VCS_SWARM_DL_COMPLETE);
-    char record_path[1200];
-    snprintf(record_path, sizeof(record_path), "%s/downloads", zcode_dir);
-    struct vcs_service_key_totals totals;
-    uint64_t served = p.wire_len;
-    for (size_t i = 0; i < p.count; i++)
-        served += p.lens[i];
-    SW_CHECK("exactly the verified bytes credited",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
-             totals.verified_bytes_downloaded == served);
+
+    failures += resume_case_answer_one_chunk(&n, peer, &p);
+    failures += resume_case_restart(&n, &p);
+    failures += resume_case_finish(&n, &p, peer, key);
+
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
@@ -1623,101 +1860,112 @@ static int t_swarm_resume(void)
 
 /* ── 10: serving, replayed WANTs, burst flood, allowance ──────────── */
 
-static int t_swarm_serving_and_allowance(void)
+static int serve_case_unreleased_not_announced(struct sw_node *n,
+                                                struct sw_pkg *p,
+                                                const uint8_t *key)
 {
     int failures = 0;
-    struct sw_node n;
-    struct sw_pkg p;
-    uint8_t key[33];
-    sw_key(41, key);
-    if (!sw_node_open(&n, "serve", sw_score_contributor) ||
-        !sw_make_package(&p, 3, 91))
-        return 1;
     /* Host the package locally first (publish path). */
     SW_CHECK("manifest admitted",
-             vcs_package_store_put_manifest(n.store, p.wire, p.wire_len,
+             vcs_package_store_put_manifest(n->store, p->wire, p->wire_len,
                                             NULL) == VCS_PACKAGE_STORE_OK);
-    for (size_t i = 0; i < p.count; i++)
+    for (size_t i = 0; i < p->count; i++)
         SW_CHECK("chunk admitted",
                  vcs_package_store_put_chunk(
-                     n.store, p.root, p.manifest.files[i].path, 0,
-                     p.contents[i], p.lens[i]) == VCS_PACKAGE_STORE_OK);
-    const uint64_t peer = 8001;
+                     n->store, p->root, p->manifest.files[i].path, 0,
+                     p->contents[i], p->lens[i]) == VCS_PACKAGE_STORE_OK);
     /* Complete is not hostable. Before the release lands, the engine
      * announces nothing and answers a manifest WANT with the named
      * refusal instead of bytes. */
     SW_CHECK("unreleased package is not announced",
-             vcs_swarm_engine_peer_add(n.engine, 8009, key) &&
-             vcs_swarm_engine_announce_to(n.engine, 8009) == 0);
+             vcs_swarm_engine_peer_add(n->engine, 8009, key) &&
+             vcs_swarm_engine_announce_to(n->engine, 8009) == 0);
     /* ...and a WANT for it is refused BY NAME, with no reply, no penalty
      * and no offence: the requester cannot know what we host. */
-    {
-        struct vcs_package_swarm_message unlicensed;
-        memset(&unlicensed, 0, sizeof(unlicensed));
-        unlicensed.type = VCS_PACKAGE_SWARM_WANT;
-        unlicensed.body.want.request_id = 8801;
-        memcpy(unlicensed.body.want.package_root, p.root, 32);
-        unlicensed.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_MANIFEST;
-        unlicensed.body.want.file_index = UINT32_MAX;
-        unlicensed.body.want.chunk_index = UINT32_MAX;
-        uint8_t refused_frame[8 + 96 + SW_MAX_FILE];
-        size_t refused_len = 0;
-        SW_CHECK("unreleased want serializes",
-                 vcs_package_swarm_serialize(&unlicensed, refused_frame,
-                                             sizeof(refused_frame),
-                                             &refused_len));
-        struct vcs_swarm_frame_result refused =
-            vcs_swarm_engine_handle_frame(n.engine, 8009, refused_frame,
-                                          refused_len, SW_DAY, 1);
-        SW_CHECK("unreleased want refused by name, not by silence",
-                 refused.reply == NULL &&
-                 refused.penalty == VCS_SWARM_PENALTY_NONE &&
-                 !refused.disconnect_peer && refused.rule != NULL &&
-                 strcmp(refused.rule, "no-verified-release") == 0);
-        struct vcs_service_key_totals unlicensed_totals;
-        SW_CHECK("refusal credits nothing and books no offence",
-                 vcs_service_key_totals(n.book, key, SW_DAY,
-                                        &unlicensed_totals) &&
-                 unlicensed_totals.verified_bytes_uploaded == 0);
-    }
+    struct vcs_package_swarm_message unlicensed;
+    memset(&unlicensed, 0, sizeof(unlicensed));
+    unlicensed.type = VCS_PACKAGE_SWARM_WANT;
+    unlicensed.body.want.request_id = 8801;
+    memcpy(unlicensed.body.want.package_root, p->root, 32);
+    unlicensed.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_MANIFEST;
+    unlicensed.body.want.file_index = UINT32_MAX;
+    unlicensed.body.want.chunk_index = UINT32_MAX;
+    uint8_t refused_frame[8 + 96 + SW_MAX_FILE];
+    size_t refused_len = 0;
+    SW_CHECK("unreleased want serializes",
+             vcs_package_swarm_serialize(&unlicensed, refused_frame,
+                                         sizeof(refused_frame),
+                                         &refused_len));
+    struct vcs_swarm_frame_result refused =
+        vcs_swarm_engine_handle_frame(n->engine, 8009, refused_frame,
+                                      refused_len, SW_DAY, 1);
+    SW_CHECK("unreleased want refused by name, not by silence",
+             refused.reply == NULL &&
+             refused.penalty == VCS_SWARM_PENALTY_NONE &&
+             !refused.disconnect_peer && refused.rule != NULL &&
+             strcmp(refused.rule, "no-verified-release") == 0);
+    struct vcs_service_key_totals unlicensed_totals;
+    SW_CHECK("refusal credits nothing and books no offence",
+             vcs_service_key_totals(n->book, key, SW_DAY,
+                                    &unlicensed_totals) &&
+             unlicensed_totals.verified_bytes_uploaded == 0);
+    return failures;
+}
+
+static int serve_case_publish_and_announce(struct sw_node *n,
+                                            struct sw_pkg *p,
+                                            const uint8_t *key,
+                                            uint64_t peer)
+{
+    int failures = 0;
     SW_CHECK("release published",
-             sw_publish_release(n.store, p.root, 0x41, "swarm-serve/fixture"));
-    SW_CHECK("peer add", vcs_swarm_engine_peer_add(n.engine, peer, key));
+             sw_publish_release(n->store, p->root, 0x41,
+                                "swarm-serve/fixture"));
+    SW_CHECK("peer add", vcs_swarm_engine_peer_add(n->engine, peer, key));
 
     /* Announce our complete packages to the peer. */
     SW_CHECK("announce queued",
-             vcs_swarm_engine_announce_to(n.engine, peer) == 1);
+             vcs_swarm_engine_announce_to(n->engine, peer) == 1);
     uint64_t target = 0;
     uint8_t frame[8 + 96 + SW_MAX_FILE];
     size_t frame_len = 0;
     SW_CHECK("announce frame drains",
-             vcs_swarm_engine_next_outbound(n.engine, peer, &target, frame,
+             vcs_swarm_engine_next_outbound(n->engine, peer, &target, frame,
                                             &frame_len));
     /* Dedupe: a repeat announce_to (the per-sync re-announce) queues
      * nothing; a package completed AFTER the peer joined queues exactly
      * one frame on the next call. */
     SW_CHECK("repeat announce queues nothing (deduped)",
-             vcs_swarm_engine_announce_to(n.engine, peer) == 0);
+             vcs_swarm_engine_announce_to(n->engine, peer) == 0);
     struct sw_pkg p2;
     if (!sw_make_package(&p2, 1, 137))
-        return 1;
+        return failures + 1;
     SW_CHECK("late manifest admitted",
-             vcs_package_store_put_manifest(n.store, p2.wire, p2.wire_len,
+             vcs_package_store_put_manifest(n->store, p2.wire, p2.wire_len,
                                             NULL) == VCS_PACKAGE_STORE_OK);
     for (size_t i = 0; i < p2.count; i++)
         SW_CHECK("late chunk admitted",
                  vcs_package_store_put_chunk(
-                     n.store, p2.root, p2.manifest.files[i].path, 0,
+                     n->store, p2.root, p2.manifest.files[i].path, 0,
                      p2.contents[i], p2.lens[i]) == VCS_PACKAGE_STORE_OK);
     SW_CHECK("late release published",
-             sw_publish_release(n.store, p2.root, 0x42, "swarm-late/fixture"));
+             sw_publish_release(n->store, p2.root, 0x42,
+                                "swarm-late/fixture"));
     SW_CHECK("late package announced to the existing peer",
-             vcs_swarm_engine_announce_to(n.engine, peer) == 1);
+             vcs_swarm_engine_announce_to(n->engine, peer) == 1);
     SW_CHECK("late announce frame drains",
-             vcs_swarm_engine_next_outbound(n.engine, peer, &target, frame,
+             vcs_swarm_engine_next_outbound(n->engine, peer, &target, frame,
                                             &frame_len));
     sw_free_package(&p2);
+    return failures;
+}
 
+static int serve_case_manifest_serve_and_replay(struct sw_node *n,
+                                                 struct sw_pkg *p,
+                                                 const uint8_t *key,
+                                                 uint64_t peer)
+{
+    int failures = 0;
     /* Inbound WANT (manifest): served with upload credit. A replay of
      * the same request id: DUPLICATE_REQUEST offence, no second
      * credit. */
@@ -1725,50 +1973,61 @@ static int t_swarm_serving_and_allowance(void)
     memset(&want, 0, sizeof(want));
     want.type = VCS_PACKAGE_SWARM_WANT;
     want.body.want.request_id = 9001;
-    memcpy(want.body.want.package_root, p.root, 32);
+    memcpy(want.body.want.package_root, p->root, 32);
     want.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_MANIFEST;
     want.body.want.file_index = UINT32_MAX;
     want.body.want.chunk_index = UINT32_MAX;
+    uint8_t frame[8 + 96 + SW_MAX_FILE];
     size_t wlen = 0;
     SW_CHECK("want serializes",
              vcs_package_swarm_serialize(&want, frame, sizeof(frame),
                                          &wlen));
     struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
-        n.engine, peer, frame, wlen, SW_DAY, 1);
+        n->engine, peer, frame, wlen, SW_DAY, 1);
     SW_CHECK("manifest served", res.reply != NULL && res.reply_len > 0 &&
              res.penalty == VCS_SWARM_PENALTY_NONE);
     free(res.reply);
     res.reply = NULL;
     struct vcs_service_key_totals totals;
     SW_CHECK("upload credited",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
-             totals.verified_bytes_uploaded == p.wire_len);
-    res = vcs_swarm_engine_handle_frame(n.engine, peer, frame, wlen,
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
+             totals.verified_bytes_uploaded == p->wire_len);
+    res = vcs_swarm_engine_handle_frame(n->engine, peer, frame, wlen,
                                         SW_DAY, 1);
     SW_CHECK("replayed want named duplicate",
              res.penalty == VCS_SWARM_PENALTY_REPLAYED_REQUEST &&
              res.rule != NULL &&
              strcmp(res.rule, "duplicate-request") == 0 && !res.reply);
     SW_CHECK("replay earns no second credit",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
-             totals.verified_bytes_uploaded == p.wire_len &&
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
+             totals.verified_bytes_uploaded == p->wire_len &&
              totals.offences[VCS_POLICY_OFFENCE_DUPLICATE_REQUEST] == 1);
+    return failures;
+}
 
+static int serve_case_bad_coords_and_burst(struct sw_node *n,
+                                            struct sw_pkg *p,
+                                            const uint8_t *key,
+                                            uint64_t peer)
+{
+    int failures = 0;
     /* Chunk WANT with the WRONG expected hash: silent no-serve. */
     struct vcs_package_swarm_message bad_want;
     memset(&bad_want, 0, sizeof(bad_want));
     bad_want.type = VCS_PACKAGE_SWARM_WANT;
     bad_want.body.want.request_id = 9002;
-    memcpy(bad_want.body.want.package_root, p.root, 32);
+    memcpy(bad_want.body.want.package_root, p->root, 32);
     bad_want.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_CHUNK;
     bad_want.body.want.file_index = 0;
     bad_want.body.want.chunk_index = 0;
     memset(bad_want.body.want.expected_hash, 0xee, 32);
+    uint8_t frame[8 + 96 + SW_MAX_FILE];
+    size_t wlen = 0;
     SW_CHECK("bad want serializes",
              vcs_package_swarm_serialize(&bad_want, frame, sizeof(frame),
                                          &wlen));
-    res = vcs_swarm_engine_handle_frame(n.engine, peer, frame, wlen,
-                                        SW_DAY, 1);
+    struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
+        n->engine, peer, frame, wlen, SW_DAY, 1);
     SW_CHECK("wrong-coords want: silent no-serve",
              res.penalty == VCS_SWARM_PENALTY_NONE && !res.reply);
 
@@ -1784,16 +2043,16 @@ static int t_swarm_serving_and_allowance(void)
         memset(&cw, 0, sizeof(cw));
         cw.type = VCS_PACKAGE_SWARM_WANT;
         cw.body.want.request_id = 10000 + i;
-        memcpy(cw.body.want.package_root, p.root, 32);
+        memcpy(cw.body.want.package_root, p->root, 32);
         cw.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_CHUNK;
-        cw.body.want.file_index = i % (uint32_t)p.count;
+        cw.body.want.file_index = i % (uint32_t)p->count;
         cw.body.want.chunk_index = 0;
         memcpy(cw.body.want.expected_hash,
-               p.manifest.files[cw.body.want.file_index].chunk_hashes, 32);
+               p->manifest.files[cw.body.want.file_index].chunk_hashes, 32);
         SW_CHECK("chunk want serializes",
                  vcs_package_swarm_serialize(&cw, frame, sizeof(frame),
                                              &wlen));
-        res = vcs_swarm_engine_handle_frame(n.engine, peer, frame, wlen,
+        res = vcs_swarm_engine_handle_frame(n->engine, peer, frame, wlen,
                                             SW_DAY, 1);
         free(res.reply);
         if (res.penalty == VCS_SWARM_PENALTY_NONE)
@@ -1805,10 +2064,16 @@ static int t_swarm_serving_and_allowance(void)
     }
     SW_CHECK("burst allowance served then stopped",
              served_chunks == burst_limit - 2u && flood_named);
+    struct vcs_service_key_totals totals;
     SW_CHECK("request flood offence recorded",
-             vcs_service_key_totals(n.book, key, SW_DAY, &totals) &&
+             vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
              totals.offences[VCS_POLICY_OFFENCE_REQUEST_FLOOD] >= 1);
+    return failures;
+}
 
+static int serve_case_allowance_exhaustion(struct sw_pkg *p, bool *opened)
+{
+    int failures = 0;
     /* Download allowance: pre-fill the peer's weekly download bucket
      * with its full tier allowance; the scheduler must then refuse to
      * pull from it (named allowance exhausted, NO offence). The peer is
@@ -1817,12 +2082,9 @@ static int t_swarm_serving_and_allowance(void)
     struct sw_node n2;
     uint8_t key2[33];
     sw_key(42, key2);
-    if (!sw_node_open(&n2, "allowance", sw_score_contributor)) {
-        sw_free_package(&p);
-        sw_node_close(&n);
-        test_rm_rf_recursive(n.datadir);
-        return failures + 1;
-    }
+    *opened = sw_node_open(&n2, "allowance", sw_score_contributor);
+    if (!*opened)
+        return failures;
     const uint64_t peer2 = 8002;
     SW_CHECK("peer2 add", vcs_swarm_engine_peer_add(n2.engine, peer2,
                                                     key2));
@@ -1834,8 +2096,8 @@ static int t_swarm_serving_and_allowance(void)
                  vcs_policy_limits_for(VCS_POLICY_TIER_EARNED_CONTRIBUTOR)
                      ->weekly_download_bytes,
                  SW_DAY) == VCS_SERVICE_CREDIT_OK);
-    sw_announce(n2.engine, peer2, &p);
-    SW_CHECK("fetch ok", vcs_swarm_engine_fetch(n2.engine, p.root, SW_DAY,
+    sw_announce(n2.engine, peer2, p);
+    SW_CHECK("fetch ok", vcs_swarm_engine_fetch(n2.engine, p->root, SW_DAY,
                                                 1) == VCS_SWARM_FETCH_OK);
     vcs_swarm_engine_tick(n2.engine, SW_DAY, 2);
     /* The manifest WANT is issued and served first (manifest-first
@@ -1844,28 +2106,58 @@ static int t_swarm_serving_and_allowance(void)
      * the flag, with NO offence. */
     struct sw_pump_stats st;
     memset(&st, 0, sizeof(st));
-    sw_pump(&n2, peer2, &p, SW_SERVE_HONEST, false, 2, &st);
+    sw_pump(&n2, peer2, p, SW_SERVE_HONEST, false, 2, &st);
     SW_CHECK("manifest served pre-exhaustion", st.wants == 1);
     vcs_swarm_engine_tick(n2.engine, SW_DAY, 3);
     memset(&st, 0, sizeof(st));
-    sw_pump(&n2, peer2, &p, SW_SERVE_HONEST, false, 3, &st);
+    sw_pump(&n2, peer2, p, SW_SERVE_HONEST, false, 3, &st);
     SW_CHECK("no chunk wants over allowance", st.wants == 0);
     struct vcs_swarm_peer_info infos[4];
-    size_t np = vcs_swarm_engine_peers_for(n2.engine, p.root, infos, 4);
+    size_t np = vcs_swarm_engine_peers_for(n2.engine, p->root, infos, 4);
     SW_CHECK("allowance exhausted flag",
              np == 1 && infos[0].allowance_exhausted);
+    struct vcs_service_key_totals totals;
     SW_CHECK("exhaustion is not an offence",
              vcs_service_key_totals(n2.book, key2, SW_DAY, &totals) &&
              totals.offence_total == 0);
     struct vcs_swarm_download_status dst;
     SW_CHECK("download stalls honestly at chunks",
-             vcs_swarm_engine_download_status(n2.engine, p.root, &dst) &&
+             vcs_swarm_engine_download_status(n2.engine, p->root, &dst) &&
              dst.state == VCS_SWARM_DL_CHUNKS && dst.inflight == 0);
+    sw_node_close(&n2);
+    test_rm_rf_recursive(n2.datadir);
+    return failures;
+}
+
+static int t_swarm_serving_and_allowance(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    uint8_t key[33];
+    sw_key(41, key);
+    if (!sw_node_open(&n, "serve", sw_score_contributor) ||
+        !sw_make_package(&p, 3, 91))
+        return 1;
+    const uint64_t peer = 8001;
+
+    failures += serve_case_unreleased_not_announced(&n, &p, key);
+    failures += serve_case_publish_and_announce(&n, &p, key, peer);
+    failures += serve_case_manifest_serve_and_replay(&n, &p, key, peer);
+    failures += serve_case_bad_coords_and_burst(&n, &p, key, peer);
+
+    bool n2_opened = false;
+    failures += serve_case_allowance_exhaustion(&p, &n2_opened);
+    if (!n2_opened) {
+        sw_free_package(&p);
+        sw_node_close(&n);
+        test_rm_rf_recursive(n.datadir);
+        return failures + 1;
+    }
+
     sw_free_package(&p);
     sw_node_close(&n);
-    sw_node_close(&n2);
     test_rm_rf_recursive(n.datadir);
-    test_rm_rf_recursive(n2.datadir);
     return failures;
 }
 
@@ -1929,6 +2221,125 @@ static int t_swarm_disconnect_threshold(void)
  * with the existing frame, and the leecher's vcs_blob_fetch_via drives
  * the frozen WANT(manifest) -> WANT(chunk) -> DATA path to a verified
  * copy. Nothing here knows a "blob" message exists, because none does. */
+static int blob_case_seed_and_register(struct sw_node *seed,
+                                        struct sw_node *leech,
+                                        uint64_t peer_leech,
+                                        uint64_t peer_seed,
+                                        const uint8_t *key_leech,
+                                        const uint8_t *key_seed,
+                                        uint8_t blob[300], uint8_t root[32])
+{
+    int failures = 0;
+    for (size_t i = 0; i < 300; i++)
+        blob[i] = (uint8_t)(i * 13u + 5u);
+    SW_CHECK("blob: seeder admits the blob",
+             vcs_blob_put_to(seed->store, blob, 300, root) == VCS_BLOB_OK);
+    struct vcs_package_store_status pst;
+    SW_CHECK("blob: seeded package is complete + single chunk",
+             vcs_package_store_package_status(seed->store, root, &pst) &&
+             pst.complete && pst.total_chunks == 1);
+    SW_CHECK("blob: leecher does not have it yet",
+             !vcs_package_store_package_status(leech->store, root, &pst));
+
+    SW_CHECK("blob: peers register on both engines",
+             vcs_swarm_engine_peer_add(seed->engine, peer_leech,
+                                       key_leech) &&
+             vcs_swarm_engine_peer_add(leech->engine, peer_seed, key_seed));
+    return failures;
+}
+
+static int blob_case_announce_and_drain(struct sw_node *seed,
+                                         struct sw_node *leech,
+                                         uint64_t peer_leech,
+                                         uint64_t peer_seed,
+                                         const uint8_t root[32])
+{
+    int failures = 0;
+    /* ANNOUNCE over the existing frame: no new message type. */
+    size_t announced = vcs_blob_announce_via(seed->engine);
+    SW_CHECK("blob: announce queued on the existing wire", announced >= 1);
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0;
+    uint64_t target = 0;
+    size_t delivered = 0;
+    while (vcs_swarm_engine_next_outbound(seed->engine, peer_leech, &target,
+                                          frame, &frame_len)) {
+        struct vcs_swarm_frame_result r = vcs_swarm_engine_handle_frame(
+            leech->engine, peer_seed, frame, frame_len, SW_DAY, 1);
+        free(r.reply);
+        if (r.penalty == VCS_SWARM_PENALTY_NONE)
+            delivered++;
+    }
+    SW_CHECK("blob: announce accepted unpenalized", delivered >= 1);
+    struct vcs_swarm_peer_info infos[VCS_SWARM_MAX_PEERS];
+    SW_CHECK("blob: leecher sees an advertiser for the root",
+             vcs_swarm_engine_peers_for(leech->engine, root, infos,
+                                        VCS_SWARM_MAX_PEERS) == 1);
+    return failures;
+}
+
+static int blob_case_drive_to_complete(struct sw_node *seed,
+                                        struct sw_node *leech,
+                                        uint64_t peer_leech,
+                                        uint64_t peer_seed,
+                                        const uint8_t root[32])
+{
+    int failures = 0;
+    SW_CHECK("blob: fetch by root accepted",
+             vcs_blob_fetch_via(leech->engine, root, SW_DAY, 2) ==
+                 VCS_BLOB_OK);
+
+    /* Drive: leecher WANT -> seeder engine DATA reply -> leecher. */
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0;
+    uint64_t target = 0;
+    bool complete = false;
+    for (int round = 0; round < 32 && !complete; round++) {
+        vcs_swarm_engine_tick(leech->engine, SW_DAY, (uint64_t)(round + 3));
+        while (vcs_swarm_engine_next_outbound(leech->engine, peer_seed,
+                                              &target, frame, &frame_len)) {
+            struct vcs_swarm_frame_result served =
+                vcs_swarm_engine_handle_frame(seed->engine, peer_leech,
+                                              frame, frame_len, SW_DAY,
+                                              (uint64_t)(round + 3));
+            if (served.reply && served.reply_len > 0) {
+                struct vcs_swarm_frame_result got =
+                    vcs_swarm_engine_handle_frame(
+                        leech->engine, peer_seed, served.reply,
+                        served.reply_len, SW_DAY, (uint64_t)(round + 3));
+                free(got.reply);
+            }
+            free(served.reply);
+        }
+        struct vcs_swarm_download_status ds;
+        if (vcs_swarm_engine_download_status(leech->engine, root, &ds) &&
+            ds.state == VCS_SWARM_DL_COMPLETE)
+            complete = true;
+    }
+    SW_CHECK("blob: download completes over the unchanged wire", complete);
+    return failures;
+}
+
+static int blob_case_verify_bytes(struct sw_node *leech,
+                                   const uint8_t root[32],
+                                   const uint8_t blob[300])
+{
+    int failures = 0;
+    uint8_t out[300];
+    size_t out_len = 0;
+    memset(out, 0, sizeof(out));
+    SW_CHECK("blob: leecher reads back the exact bytes",
+             vcs_blob_get_from(leech->store, root, out, sizeof(out),
+                               &out_len) == VCS_BLOB_OK &&
+             out_len == 300 &&
+             memcmp(out, blob, 300) == 0);
+    uint8_t rederived[32];
+    SW_CHECK("blob: transferred bytes re-derive the same root",
+             vcs_blob_root(out, out_len, rederived) &&
+             memcmp(rederived, root, 32) == 0);
+    return failures;
+}
+
 static int t_swarm_blob_transfer(void)
 {
     int failures = 0;
@@ -1945,86 +2356,15 @@ static int t_swarm_blob_transfer(void)
     }
 
     uint8_t blob[300];
-    for (size_t i = 0; i < sizeof(blob); i++)
-        blob[i] = (uint8_t)(i * 13u + 5u);
     uint8_t root[32];
-    SW_CHECK("blob: seeder admits the blob",
-             vcs_blob_put_to(seed.store, blob, sizeof(blob), root) ==
-                 VCS_BLOB_OK);
-    struct vcs_package_store_status pst;
-    SW_CHECK("blob: seeded package is complete + single chunk",
-             vcs_package_store_package_status(seed.store, root, &pst) &&
-             pst.complete && pst.total_chunks == 1);
-    SW_CHECK("blob: leecher does not have it yet",
-             !vcs_package_store_package_status(leech.store, root, &pst));
-
-    SW_CHECK("blob: peers register on both engines",
-             vcs_swarm_engine_peer_add(seed.engine, peer_leech, key_leech) &&
-             vcs_swarm_engine_peer_add(leech.engine, peer_seed, key_seed));
-
-    /* ANNOUNCE over the existing frame: no new message type. */
-    size_t announced = vcs_blob_announce_via(seed.engine);
-    SW_CHECK("blob: announce queued on the existing wire", announced >= 1);
-    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
-    size_t frame_len = 0;
-    uint64_t target = 0;
-    size_t delivered = 0;
-    while (vcs_swarm_engine_next_outbound(seed.engine, peer_leech, &target,
-                                          frame, &frame_len)) {
-        struct vcs_swarm_frame_result r = vcs_swarm_engine_handle_frame(
-            leech.engine, peer_seed, frame, frame_len, SW_DAY, 1);
-        free(r.reply);
-        if (r.penalty == VCS_SWARM_PENALTY_NONE)
-            delivered++;
-    }
-    SW_CHECK("blob: announce accepted unpenalized", delivered >= 1);
-    struct vcs_swarm_peer_info infos[VCS_SWARM_MAX_PEERS];
-    SW_CHECK("blob: leecher sees an advertiser for the root",
-             vcs_swarm_engine_peers_for(leech.engine, root, infos,
-                                        VCS_SWARM_MAX_PEERS) == 1);
-
-    SW_CHECK("blob: fetch by root accepted",
-             vcs_blob_fetch_via(leech.engine, root, SW_DAY, 2) ==
-                 VCS_BLOB_OK);
-
-    /* Drive: leecher WANT -> seeder engine DATA reply -> leecher. */
-    bool complete = false;
-    for (int round = 0; round < 32 && !complete; round++) {
-        vcs_swarm_engine_tick(leech.engine, SW_DAY, (uint64_t)(round + 3));
-        while (vcs_swarm_engine_next_outbound(leech.engine, peer_seed,
-                                              &target, frame, &frame_len)) {
-            struct vcs_swarm_frame_result served =
-                vcs_swarm_engine_handle_frame(seed.engine, peer_leech, frame,
-                                              frame_len, SW_DAY,
-                                              (uint64_t)(round + 3));
-            if (served.reply && served.reply_len > 0) {
-                struct vcs_swarm_frame_result got =
-                    vcs_swarm_engine_handle_frame(
-                        leech.engine, peer_seed, served.reply,
-                        served.reply_len, SW_DAY, (uint64_t)(round + 3));
-                free(got.reply);
-            }
-            free(served.reply);
-        }
-        struct vcs_swarm_download_status ds;
-        if (vcs_swarm_engine_download_status(leech.engine, root, &ds) &&
-            ds.state == VCS_SWARM_DL_COMPLETE)
-            complete = true;
-    }
-    SW_CHECK("blob: download completes over the unchanged wire", complete);
-
-    uint8_t out[sizeof(blob)];
-    size_t out_len = 0;
-    memset(out, 0, sizeof(out));
-    SW_CHECK("blob: leecher reads back the exact bytes",
-             vcs_blob_get_from(leech.store, root, out, sizeof(out),
-                               &out_len) == VCS_BLOB_OK &&
-             out_len == sizeof(blob) &&
-             memcmp(out, blob, sizeof(blob)) == 0);
-    uint8_t rederived[32];
-    SW_CHECK("blob: transferred bytes re-derive the same root",
-             vcs_blob_root(out, out_len, rederived) &&
-             memcmp(rederived, root, 32) == 0);
+    failures += blob_case_seed_and_register(&seed, &leech, peer_leech,
+                                            peer_seed, key_leech, key_seed,
+                                            blob, root);
+    failures += blob_case_announce_and_drain(&seed, &leech, peer_leech,
+                                             peer_seed, root);
+    failures += blob_case_drive_to_complete(&seed, &leech, peer_leech,
+                                            peer_seed, root);
+    failures += blob_case_verify_bytes(&leech, root, blob);
 
     sw_node_close(&seed);
     sw_node_close(&leech);
@@ -2033,18 +2373,9 @@ static int t_swarm_blob_transfer(void)
     return failures;
 }
 
-static int t_swarm_provider_restricted(void)
+static int provider_case_empty_refusal(struct sw_node *n, struct sw_pkg *p)
 {
     int failures = 0;
-    struct sw_node n;
-    struct sw_pkg p;
-    uint8_t bad_key[33], honest_key[33];
-    sw_key(91, bad_key);
-    sw_key(92, honest_key);
-    const uint64_t bad = 901, honest = 902;
-    if (!sw_node_open(&n, "provider", sw_score_contributor) ||
-        !sw_make_package(&p, 1, 29))
-        return 1;
     struct vcs_zcode_dht_provider_route route = {
         .authenticated_count = 0,
         .reachability_pending = 2,
@@ -2067,68 +2398,92 @@ static int t_swarm_provider_restricted(void)
     json_free(&route_json);
     const uint64_t zero_peers[2] = {0, 0};
     SW_CHECK("provider: empty directed fetch is refused before registration",
-             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 1,
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 1,
                                          NULL, 0) ==
                  VCS_SWARM_FETCH_NO_PROVIDER);
     SW_CHECK("provider: zero-only bounded fetch has the same exact refusal",
              vcs_swarm_engine_fetch_from_bounded(
-                 n.engine, p.root, SW_DAY, 1, zero_peers, 2, 4096) ==
+                 n->engine, p->root, SW_DAY, 1, zero_peers, 2, 4096) ==
                  VCS_SWARM_FETCH_NO_PROVIDER);
     struct vcs_swarm_download_status empty_status;
     SW_CHECK("provider: refusal creates no active or resumable download",
-             vcs_swarm_engine_download_status(n.engine, p.root,
+             vcs_swarm_engine_download_status(n->engine, p->root,
                                               &empty_status) &&
              empty_status.state == VCS_SWARM_DL_INACTIVE);
-    vcs_swarm_engine_free(n.engine);
-    n.engine = vcs_swarm_engine_create(n.store, n.book, n.zcode_dir,
-                                       sw_score_contributor, NULL);
+    vcs_swarm_engine_free(n->engine);
+    n->engine = vcs_swarm_engine_create(n->store, n->book, n->zcode_dir,
+                                        sw_score_contributor, NULL);
     SW_CHECK("provider: refusal leaves no record to reload",
-             n.engine != NULL &&
-             vcs_swarm_engine_download_status(n.engine, p.root,
+             n->engine != NULL &&
+             vcs_swarm_engine_download_status(n->engine, p->root,
                                               &empty_status) &&
              empty_status.state == VCS_SWARM_DL_INACTIVE);
+    return failures;
+}
+
+static int provider_case_exact_bind(struct sw_node *n, struct sw_pkg *p,
+                                     uint64_t bad, uint64_t honest,
+                                     const uint8_t *bad_key,
+                                     const uint8_t *honest_key)
+{
+    int failures = 0;
     SW_CHECK("provider: both advertisers register",
-             vcs_swarm_engine_peer_add(n.engine, bad, bad_key) &&
-             vcs_swarm_engine_peer_add(n.engine, honest, honest_key));
-    sw_announce(n.engine, bad, &p);
+             vcs_swarm_engine_peer_add(n->engine, bad, bad_key) &&
+             vcs_swarm_engine_peer_add(n->engine, honest, honest_key));
+    sw_announce(n->engine, bad, p);
     SW_CHECK("provider: restricted fetch accepts an exact unannounced peer",
-             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 1,
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 1,
                                          &honest, 1) ==
                  VCS_SWARM_FETCH_OK);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 2);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 2);
     struct vcs_package_swarm_object wants[2];
     SW_CHECK("provider: unlisted advertiser receives no WANT",
-             sw_drain_wants(&n, bad, wants, 2) == 0);
+             sw_drain_wants(n, bad, wants, 2) == 0);
     SW_CHECK("provider: exact authenticated provider needs no broadcast ad",
-             sw_drain_wants(&n, honest, wants, 2) == 1);
+             sw_drain_wants(n, honest, wants, 2) == 1);
+    return failures;
+}
 
-    vcs_swarm_engine_free(n.engine);
-    n.engine = vcs_swarm_engine_create(n.store, n.book, n.zcode_dir,
-                                       sw_score_contributor, NULL);
-    SW_CHECK("provider: restricted intent resumes", n.engine != NULL);
+static int provider_case_restart_resume(struct sw_node *n, struct sw_pkg *p,
+                                         uint64_t bad, uint64_t honest,
+                                         const uint8_t *bad_key,
+                                         const uint8_t *honest_key)
+{
+    int failures = 0;
+    vcs_swarm_engine_free(n->engine);
+    n->engine = vcs_swarm_engine_create(n->store, n->book, n->zcode_dir,
+                                        sw_score_contributor, NULL);
+    SW_CHECK("provider: restricted intent resumes", n->engine != NULL);
     SW_CHECK("provider: peers re-register",
-             vcs_swarm_engine_peer_add(n.engine, bad, bad_key) &&
-             vcs_swarm_engine_peer_add(n.engine, honest, honest_key));
-    sw_announce(n.engine, bad, &p);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 3);
+             vcs_swarm_engine_peer_add(n->engine, bad, bad_key) &&
+             vcs_swarm_engine_peer_add(n->engine, honest, honest_key));
+    sw_announce(n->engine, bad, p);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 3);
+    struct vcs_package_swarm_object wants[2];
     SW_CHECK("provider: restart does not widen before fresh binding",
-             sw_drain_wants(&n, bad, wants, 2) == 0 &&
-             sw_drain_wants(&n, honest, wants, 2) == 0);
+             sw_drain_wants(n, bad, wants, 2) == 0 &&
+             sw_drain_wants(n, honest, wants, 2) == 0);
     SW_CHECK("provider: fresh authenticated binding resumes",
-             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 4,
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 4,
                                          &honest, 1) ==
                  VCS_SWARM_FETCH_OK);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 4);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 4);
     SW_CHECK("provider: refreshed allowlist remains exclusive",
-             sw_drain_wants(&n, bad, wants, 2) == 0 &&
-             sw_drain_wants(&n, honest, wants, 2) == 1);
+             sw_drain_wants(n, bad, wants, 2) == 0 &&
+             sw_drain_wants(n, honest, wants, 2) == 1);
+    return failures;
+}
+
+static int provider_case_cancel(struct sw_node *n, struct sw_pkg *p)
+{
+    int failures = 0;
     struct json_value cancel_input;
     json_init(&cancel_input);
     json_set_object(&cancel_input);
     char root_hex[65];
-    zcl_hex_encode(p.root, 32, root_hex);
+    zcl_hex_encode(p->root, 32, root_hex);
     json_push_kv_str(&cancel_input, "blob_root", root_hex);
-    json_push_kv_str(&cancel_input, "datadir", n.datadir);
+    json_push_kv_str(&cancel_input, "datadir", n->datadir);
     json_push_kv_bool(&cancel_input, "cancel", true);
     json_push_kv_int(&cancel_input, "now_unix", 5);
     struct zcl_command_request cancel_request;
@@ -2136,7 +2491,7 @@ static int t_swarm_provider_restricted(void)
     cancel_request.input = &cancel_input;
     struct zcl_command_reply cancel_reply;
     zcl_command_reply_init(&cancel_reply, "zcl.zcode_science_fetch.v1");
-    vcs_swarm_engine_set_global(n.engine);
+    vcs_swarm_engine_set_global(n->engine);
     zcl_native_handle_zcode_science_fetch(&cancel_request, &cancel_reply);
     vcs_swarm_engine_set_global(NULL);
     SW_CHECK("provider: native restricted fetch cancel succeeds",
@@ -2145,35 +2500,188 @@ static int t_swarm_provider_restricted(void)
                                true));
     zcl_command_reply_free(&cancel_reply);
     json_free(&cancel_input);
-    vcs_swarm_engine_free(n.engine);
-    n.engine = vcs_swarm_engine_create(n.store, n.book, n.zcode_dir,
-                                       sw_score_contributor, NULL);
+    return failures;
+}
+
+static int provider_case_post_cancel_restart(struct sw_node *n,
+                                              struct sw_pkg *p, uint64_t bad,
+                                              uint64_t honest,
+                                              const uint8_t *bad_key,
+                                              const uint8_t *honest_key)
+{
+    int failures = 0;
+    vcs_swarm_engine_free(n->engine);
+    n->engine = vcs_swarm_engine_create(n->store, n->book, n->zcode_dir,
+                                        sw_score_contributor, NULL);
     SW_CHECK("provider: engine restarts after cancellation",
-             n.engine != NULL);
+             n->engine != NULL);
     SW_CHECK("provider: canceled peers re-register",
-             vcs_swarm_engine_peer_add(n.engine, bad, bad_key) &&
-             vcs_swarm_engine_peer_add(n.engine, honest, honest_key));
-    sw_announce(n.engine, bad, &p);
-    sw_announce(n.engine, honest, &p);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 6);
+             vcs_swarm_engine_peer_add(n->engine, bad, bad_key) &&
+             vcs_swarm_engine_peer_add(n->engine, honest, honest_key));
+    sw_announce(n->engine, bad, p);
+    sw_announce(n->engine, honest, p);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 6);
+    struct vcs_package_swarm_object wants[2];
     struct vcs_swarm_download_status canceled_status;
     SW_CHECK("provider: canceled resumable state stays deleted on restart",
-             vcs_swarm_engine_download_status(n.engine, p.root,
+             vcs_swarm_engine_download_status(n->engine, p->root,
                                               &canceled_status) &&
              canceled_status.state == VCS_SWARM_DL_INACTIVE &&
-             sw_drain_wants(&n, bad, wants, 2) == 0 &&
-             sw_drain_wants(&n, honest, wants, 2) == 0);
+             sw_drain_wants(n, bad, wants, 2) == 0 &&
+             sw_drain_wants(n, honest, wants, 2) == 0);
     SW_CHECK("provider: explicit rebind after cancel remains restricted",
-             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 7,
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 7,
                                          &honest, 1) ==
                  VCS_SWARM_FETCH_OK);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 7);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 7);
     SW_CHECK("provider: cancel never broadens the restarted fetch",
-             sw_drain_wants(&n, bad, wants, 2) == 0 &&
-             sw_drain_wants(&n, honest, wants, 2) == 1);
+             sw_drain_wants(n, bad, wants, 2) == 0 &&
+             sw_drain_wants(n, honest, wants, 2) == 1);
+    return failures;
+}
+
+static int t_swarm_provider_restricted(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    uint8_t bad_key[33], honest_key[33];
+    sw_key(91, bad_key);
+    sw_key(92, honest_key);
+    const uint64_t bad = 901, honest = 902;
+    if (!sw_node_open(&n, "provider", sw_score_contributor) ||
+        !sw_make_package(&p, 1, 29))
+        return 1;
+
+    failures += provider_case_empty_refusal(&n, &p);
+    failures += provider_case_exact_bind(&n, &p, bad, honest, bad_key,
+                                         honest_key);
+    failures += provider_case_restart_resume(&n, &p, bad, honest, bad_key,
+                                             honest_key);
+    failures += provider_case_cancel(&n, &p);
+    failures += provider_case_post_cancel_restart(&n, &p, bad, honest,
+                                                  bad_key, honest_key);
+
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
+static int bound_case_ordinary_first(struct sw_node *n, struct sw_pkg *p,
+                                      uint64_t peer, uint64_t bound)
+{
+    int failures = 0;
+    SW_CHECK("provider bound: ordinary shared work starts",
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 1,
+                                         &peer, 1) == VCS_SWARM_FETCH_OK);
+    SW_CHECK("provider bound: late scout cannot tighten shared work",
+             vcs_swarm_engine_fetch_from_bounded(
+                 n->engine, p->root, SW_DAY, 1, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_BOUND_NOT_OWNED);
+    struct vcs_swarm_download_status status;
+    SW_CHECK("provider bound: shared work remains unbounded and active",
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.state == VCS_SWARM_DL_WANT_MANIFEST &&
+             status.maximum_package_bytes == 0);
+    SW_CHECK("provider bound: ordinary work cancels cleanly",
+             vcs_swarm_engine_cancel(n->engine, p->root, 1));
+    return failures;
+}
+
+static int bound_case_start_and_restart(struct sw_node *n, struct sw_pkg *p,
+                                         uint64_t peer, uint64_t bound)
+{
+    int failures = 0;
+    struct vcs_swarm_download_status status;
+    SW_CHECK("provider bound: bounded intent starts",
+             vcs_swarm_engine_fetch_from_bounded(
+                 n->engine, p->root, SW_DAY, 2, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_OK);
+    SW_CHECK("provider bound: ceiling is visible before restart",
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == bound);
+    vcs_swarm_engine_free(n->engine);
+    n->engine = vcs_swarm_engine_create(n->store, n->book, n->zcode_dir,
+                                        sw_score_contributor, NULL);
+    SW_CHECK("provider bound: engine restarts", n->engine != NULL);
+    SW_CHECK("provider bound: ceiling survives restart",
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == bound);
+    return failures;
+}
+
+static int bound_case_oversized_manifest_fails(struct sw_node *n,
+                                                struct sw_pkg *p,
+                                                uint64_t peer,
+                                                const uint8_t *key,
+                                                uint64_t bound)
+{
+    int failures = 0;
+    SW_CHECK("provider bound: peer rebinds",
+             vcs_swarm_engine_peer_add(n->engine, peer, key));
+    sw_announce(n->engine, peer, p);
+    SW_CHECK("provider bound: compatible bounded rebind accepted",
+             vcs_swarm_engine_fetch_from_bounded(
+                 n->engine, p->root, SW_DAY, 3, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_OK);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 3);
+    struct sw_pump_stats pump = {0};
+    sw_pump(n, peer, p, SW_SERVE_HONEST, false, 3, &pump);
+    struct vcs_swarm_download_status status;
+    SW_CHECK("provider bound: oversized manifest fails before chunks",
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.state == VCS_SWARM_DL_FAILED && status.rule &&
+             strcmp(status.rule, "maximum-package-bytes-exceeded") == 0 &&
+             status.present_chunks == 0 && status.fetched_bytes == 0);
+    struct vcs_package_store_status stored;
+    SW_CHECK("provider bound: oversized manifest never enters package store",
+             !vcs_package_store_package_status(n->store, p->root, &stored));
+    return failures;
+}
+
+static int bound_case_lift_authority(struct sw_node *n, struct sw_pkg *p,
+                                      uint64_t peer, uint64_t bound)
+{
+    int failures = 0;
+    struct vcs_swarm_download_status status;
+    SW_CHECK("provider bound: failed scout intent retries as ordinary work",
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 4,
+                                         &peer, 1) == VCS_SWARM_FETCH_OK &&
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == 0);
+
+    /* Bound-lift authority: only unrestricted demand may lift a scout
+     * ceiling. fetch_from carries no bound of its own, so before the
+     * !restricted guard a restricted rebind silently un-bound — and
+     * persisted — a live ceiling. */
+    SW_CHECK("provider bound: operator cancel frees the ordinary slot",
+             vcs_swarm_engine_cancel(n->engine, p->root, 1));
+    SW_CHECK("provider bound: bounded scout re-arms on the freed slot",
+             vcs_swarm_engine_fetch_from_bounded(
+                 n->engine, p->root, SW_DAY, 5, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_OK &&
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.state == VCS_SWARM_DL_WANT_MANIFEST &&
+             status.maximum_package_bytes == bound);
+    SW_CHECK("provider bound: restricted rebind cannot lift the ceiling",
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 5,
+                                         &peer, 1) ==
+                 VCS_SWARM_FETCH_OK &&
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == bound);
+    vcs_swarm_engine_free(n->engine);
+    n->engine = vcs_swarm_engine_create(n->store, n->book, n->zcode_dir,
+                                        sw_score_contributor, NULL);
+    SW_CHECK("provider bound: engine restarts", n->engine != NULL);
+    SW_CHECK("provider bound: refused lift left no widening on disk",
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == bound);
+    SW_CHECK("provider bound: ordinary demand lifts the scout ceiling",
+             vcs_swarm_engine_fetch(n->engine, p->root, SW_DAY, 6) ==
+                 VCS_SWARM_FETCH_OK &&
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == 0);
     return failures;
 }
 
@@ -2192,90 +2700,13 @@ static int t_swarm_bounded_provider(void)
     SW_CHECK("provider bound: advertiser registers",
              vcs_swarm_engine_peer_add(n.engine, peer, key));
     sw_announce(n.engine, peer, &p);
-    SW_CHECK("provider bound: ordinary shared work starts",
-             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 1,
-                                         &peer, 1) == VCS_SWARM_FETCH_OK);
-    SW_CHECK("provider bound: late scout cannot tighten shared work",
-             vcs_swarm_engine_fetch_from_bounded(
-                 n.engine, p.root, SW_DAY, 1, &peer, 1, bound) ==
-                 VCS_SWARM_FETCH_BOUND_NOT_OWNED);
-    struct vcs_swarm_download_status status;
-    SW_CHECK("provider bound: shared work remains unbounded and active",
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.state == VCS_SWARM_DL_WANT_MANIFEST &&
-             status.maximum_package_bytes == 0);
-    SW_CHECK("provider bound: ordinary work cancels cleanly",
-             vcs_swarm_engine_cancel(n.engine, p.root, 1));
-    SW_CHECK("provider bound: bounded intent starts",
-             vcs_swarm_engine_fetch_from_bounded(
-                 n.engine, p.root, SW_DAY, 2, &peer, 1, bound) ==
-                 VCS_SWARM_FETCH_OK);
-    SW_CHECK("provider bound: ceiling is visible before restart",
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.maximum_package_bytes == bound);
-    vcs_swarm_engine_free(n.engine);
-    n.engine = vcs_swarm_engine_create(n.store, n.book, n.zcode_dir,
-                                       sw_score_contributor, NULL);
-    SW_CHECK("provider bound: engine restarts", n.engine != NULL);
-    SW_CHECK("provider bound: ceiling survives restart",
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.maximum_package_bytes == bound);
-    SW_CHECK("provider bound: peer rebinds",
-             vcs_swarm_engine_peer_add(n.engine, peer, key));
-    sw_announce(n.engine, peer, &p);
-    SW_CHECK("provider bound: compatible bounded rebind accepted",
-             vcs_swarm_engine_fetch_from_bounded(
-                 n.engine, p.root, SW_DAY, 3, &peer, 1, bound) ==
-                 VCS_SWARM_FETCH_OK);
-    vcs_swarm_engine_tick(n.engine, SW_DAY, 3);
-    struct sw_pump_stats pump = {0};
-    sw_pump(&n, peer, &p, SW_SERVE_HONEST, false, 3, &pump);
-    SW_CHECK("provider bound: oversized manifest fails before chunks",
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.state == VCS_SWARM_DL_FAILED && status.rule &&
-             strcmp(status.rule, "maximum-package-bytes-exceeded") == 0 &&
-             status.present_chunks == 0 && status.fetched_bytes == 0);
-    struct vcs_package_store_status stored;
-    SW_CHECK("provider bound: oversized manifest never enters package store",
-             !vcs_package_store_package_status(n.store, p.root, &stored));
 
-    SW_CHECK("provider bound: failed scout intent retries as ordinary work",
-             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 4,
-                                         &peer, 1) == VCS_SWARM_FETCH_OK &&
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.maximum_package_bytes == 0);
+    failures += bound_case_ordinary_first(&n, &p, peer, bound);
+    failures += bound_case_start_and_restart(&n, &p, peer, bound);
+    failures += bound_case_oversized_manifest_fails(&n, &p, peer, key,
+                                                    bound);
+    failures += bound_case_lift_authority(&n, &p, peer, bound);
 
-    /* Bound-lift authority: only unrestricted demand may lift a scout
-     * ceiling. fetch_from carries no bound of its own, so before the
-     * !restricted guard a restricted rebind silently un-bound — and
-     * persisted — a live ceiling. */
-    SW_CHECK("provider bound: operator cancel frees the ordinary slot",
-             vcs_swarm_engine_cancel(n.engine, p.root, 1));
-    SW_CHECK("provider bound: bounded scout re-arms on the freed slot",
-             vcs_swarm_engine_fetch_from_bounded(
-                 n.engine, p.root, SW_DAY, 5, &peer, 1, bound) ==
-                 VCS_SWARM_FETCH_OK &&
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.state == VCS_SWARM_DL_WANT_MANIFEST &&
-             status.maximum_package_bytes == bound);
-    SW_CHECK("provider bound: restricted rebind cannot lift the ceiling",
-             vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 5,
-                                         &peer, 1) ==
-                 VCS_SWARM_FETCH_OK &&
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.maximum_package_bytes == bound);
-    vcs_swarm_engine_free(n.engine);
-    n.engine = vcs_swarm_engine_create(n.store, n.book, n.zcode_dir,
-                                       sw_score_contributor, NULL);
-    SW_CHECK("provider bound: engine restarts", n.engine != NULL);
-    SW_CHECK("provider bound: refused lift left no widening on disk",
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.maximum_package_bytes == bound);
-    SW_CHECK("provider bound: ordinary demand lifts the scout ceiling",
-             vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY, 6) ==
-                 VCS_SWARM_FETCH_OK &&
-             vcs_swarm_engine_download_status(n.engine, p.root, &status) &&
-             status.maximum_package_bytes == 0);
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
@@ -2378,6 +2809,183 @@ static int t_swarm_event_driven_schedule(void)
     return failures;
 }
 
+struct receipt_exchange_ctx {
+    struct sw_node *n;
+    struct sw_pkg *p;
+    uint64_t peer;
+    secp256k1_context *ctx;
+    uint8_t up_sec[32];
+    uint8_t down_sec[32];
+    uint8_t other_sec[32];
+    uint8_t up_pub[33];
+    uint8_t down_pub[33];
+    uint8_t other_pub[33];
+    struct vcs_swarm_transfer xfer;
+    struct vcs_swarm_transfer leecher_xfer;
+    struct vcs_service_receipt draft;
+    struct vcs_service_receipt leecher_draft;
+    uint8_t wire[VCS_SERVICE_RECEIPT_WIRE_BYTES];
+    struct vcs_service_book *leecher_book;
+};
+
+static int receipt_case_admit_and_serve(struct receipt_exchange_ctx *rc,
+                                         const uint8_t *session_key)
+{
+    int failures = 0;
+    struct sw_node *n = rc->n;
+    struct sw_pkg *p = rc->p;
+    SW_CHECK("receipt: manifest admitted",
+             vcs_package_store_put_manifest(n->store, p->wire, p->wire_len,
+                                            NULL) == VCS_PACKAGE_STORE_OK);
+    for (size_t i = 0; i < p->count; i++)
+        SW_CHECK("receipt: chunk admitted",
+                 vcs_package_store_put_chunk(
+                     n->store, p->root, p->manifest.files[i].path, 0,
+                     p->contents[i], p->lens[i]) == VCS_PACKAGE_STORE_OK);
+    SW_CHECK("receipt: release published",
+             sw_publish_release(n->store, p->root, 0x61,
+                                "swarm-receipt/fx"));
+    rc->peer = 9101;
+    SW_CHECK("receipt: peer add",
+             vcs_swarm_engine_peer_add(n->engine, rc->peer, session_key));
+
+    struct vcs_package_swarm_message want;
+    memset(&want, 0, sizeof(want));
+    want.type = VCS_PACKAGE_SWARM_WANT;
+    want.body.want.request_id = 91001;
+    memcpy(want.body.want.package_root, p->root, 32);
+    want.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_MANIFEST;
+    want.body.want.file_index = UINT32_MAX;
+    want.body.want.chunk_index = UINT32_MAX;
+    uint8_t frame[8 + 96 + SW_MAX_FILE];
+    size_t wlen = 0;
+    SW_CHECK("receipt: want serializes",
+             vcs_package_swarm_serialize(&want, frame, sizeof(frame),
+                                         &wlen));
+    struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
+        n->engine, rc->peer, frame, wlen, SW_DAY, 1);
+    SW_CHECK("receipt: manifest served",
+             res.reply != NULL && res.penalty == VCS_SWARM_PENALTY_NONE);
+    free(res.reply);
+
+    memset(&rc->xfer, 0, sizeof(rc->xfer));
+    SW_CHECK("receipt: snapshot after serve",
+             vcs_swarm_engine_transfer_snapshot(n->engine, rc->peer,
+                                                &rc->xfer) &&
+             memcmp(rc->xfer.package_root, p->root, 32) == 0 &&
+             rc->xfer.served == p->wire_len && rc->xfer.fetched == 0);
+    return failures;
+}
+
+static int receipt_case_keys(struct receipt_exchange_ctx *rc)
+{
+    int failures = 0;
+    rc->ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN |
+                                       SECP256K1_CONTEXT_VERIFY);
+    memset(rc->up_sec, 0, sizeof(rc->up_sec));
+    memset(rc->down_sec, 0, sizeof(rc->down_sec));
+    memset(rc->other_sec, 0, sizeof(rc->other_sec));
+    rc->up_sec[31] = 0x81;
+    rc->down_sec[31] = 0x82;
+    rc->other_sec[31] = 0x83;
+    secp256k1_pubkey parsed;
+    size_t plen = 33;
+    bool keys =
+        secp256k1_ec_pubkey_create(rc->ctx, &parsed, rc->up_sec) == 1 &&
+        secp256k1_ec_pubkey_serialize(rc->ctx, rc->up_pub, &plen, &parsed,
+                                      SECP256K1_EC_COMPRESSED) == 1 &&
+        secp256k1_ec_pubkey_create(rc->ctx, &parsed, rc->down_sec) == 1 &&
+        secp256k1_ec_pubkey_serialize(rc->ctx, rc->down_pub, &plen, &parsed,
+                                      SECP256K1_EC_COMPRESSED) == 1 &&
+        secp256k1_ec_pubkey_create(rc->ctx, &parsed, rc->other_sec) == 1 &&
+        secp256k1_ec_pubkey_serialize(rc->ctx, rc->other_pub, &plen, &parsed,
+                                      SECP256K1_EC_COMPRESSED) == 1;
+    SW_CHECK("receipt: secp keys", keys);
+    return failures;
+}
+
+static int receipt_case_draft(struct receipt_exchange_ctx *rc)
+{
+    int failures = 0;
+    struct sw_pkg *p = rc->p;
+    enum vcs_service_receipt_role role = VCS_SERVICE_RECEIPT_DOWNLOADER;
+    SW_CHECK("receipt: seeder drafts as uploader",
+             vcs_swarm_receipt_draft(&rc->xfer, rc->up_pub, rc->down_pub,
+                                     SW_DAY, SW_DAY, &rc->draft, &role) &&
+             role == VCS_SERVICE_RECEIPT_UPLOADER &&
+             rc->draft.verified_bytes == p->wire_len);
+    rc->leecher_xfer = rc->xfer;
+    rc->leecher_xfer.served = 0;
+    rc->leecher_xfer.fetched = rc->xfer.served;
+    enum vcs_service_receipt_role leecher_role =
+        VCS_SERVICE_RECEIPT_UPLOADER;
+    SW_CHECK("receipt: leecher drafts matching body",
+             vcs_swarm_receipt_draft(&rc->leecher_xfer, rc->down_pub,
+                                     rc->up_pub, SW_DAY, SW_DAY,
+                                     &rc->leecher_draft, &leecher_role) &&
+             leecher_role == VCS_SERVICE_RECEIPT_DOWNLOADER &&
+             memcmp(rc->leecher_draft.session_nonce,
+                    rc->draft.session_nonce, 32) == 0 &&
+             memcmp(rc->leecher_draft.uploader_pubkey,
+                    rc->draft.uploader_pubkey, 33) == 0);
+    return failures;
+}
+
+static int receipt_case_sign_and_accept(struct receipt_exchange_ctx *rc)
+{
+    int failures = 0;
+    struct sw_node *n = rc->n;
+    SW_CHECK("receipt: both ends sign",
+             vcs_service_receipt_sign(&rc->draft,
+                                      VCS_SERVICE_RECEIPT_UPLOADER, rc->ctx,
+                                      rc->up_sec) == VCS_SERVICE_RECEIPT_OK &&
+             vcs_service_receipt_sign(&rc->draft,
+                                      VCS_SERVICE_RECEIPT_DOWNLOADER,
+                                      rc->ctx, rc->down_sec) ==
+                 VCS_SERVICE_RECEIPT_OK &&
+             vcs_service_receipt_serialize(&rc->draft, rc->wire,
+                                           sizeof(rc->wire)) ==
+                 VCS_SERVICE_RECEIPT_OK);
+
+    char leecher_dir[1200];
+    snprintf(leecher_dir, sizeof(leecher_dir), "%s/leecher-zcode",
+             n->datadir);
+    rc->leecher_book = vcs_service_book_load(leecher_dir);
+    SW_CHECK("receipt: leecher book", rc->leecher_book != NULL);
+    SW_CHECK("receipt: seeder accepts matching serve",
+             vcs_swarm_receipt_accept(n->book, &rc->xfer, rc->up_pub,
+                                      SW_DAY, rc->wire,
+                                      sizeof(rc->wire)) ==
+                 VCS_SWARM_RECEIPT_OK);
+    SW_CHECK("receipt: leecher accepts matching fetch",
+             rc->leecher_book &&
+             vcs_swarm_receipt_accept(rc->leecher_book, &rc->leecher_xfer,
+                                      rc->down_pub, SW_DAY, rc->wire,
+                                      sizeof(rc->wire)) ==
+                 VCS_SWARM_RECEIPT_OK);
+    SW_CHECK("receipt: replay is duplicate",
+             vcs_swarm_receipt_accept(n->book, &rc->xfer, rc->up_pub,
+                                      SW_DAY, rc->wire,
+                                      sizeof(rc->wire)) ==
+                 VCS_SWARM_RECEIPT_DUPLICATE);
+    SW_CHECK("receipt: stranger refused",
+             vcs_swarm_receipt_accept(n->book, &rc->xfer, rc->other_pub,
+                                      SW_DAY, rc->wire,
+                                      sizeof(rc->wire)) ==
+                 VCS_SWARM_RECEIPT_NOT_PARTY);
+    struct vcs_swarm_transfer lied = rc->xfer;
+    lied.served = 1;
+    SW_CHECK("receipt: inflated bytes refused",
+             vcs_swarm_receipt_accept(n->book, &lied, rc->up_pub, SW_DAY,
+                                      rc->wire, sizeof(rc->wire)) ==
+                 VCS_SWARM_RECEIPT_BYTES_MISMATCH);
+    SW_CHECK("receipt: named statuses",
+             strcmp(vcs_swarm_receipt_status_string(
+                        VCS_SWARM_RECEIPT_BYTES_MISMATCH),
+                    "bytes-mismatch") == 0);
+    return failures;
+}
+
 static int t_swarm_receipt_exchange(void)
 {
     int failures = 0;
@@ -2388,142 +2996,20 @@ static int t_swarm_receipt_exchange(void)
     if (!sw_node_open(&n, "receipt", sw_score_contributor) ||
         !sw_make_package(&p, 2, 101))
         return 1;
-    SW_CHECK("receipt: manifest admitted",
-             vcs_package_store_put_manifest(n.store, p.wire, p.wire_len,
-                                            NULL) == VCS_PACKAGE_STORE_OK);
-    for (size_t i = 0; i < p.count; i++)
-        SW_CHECK("receipt: chunk admitted",
-                 vcs_package_store_put_chunk(
-                     n.store, p.root, p.manifest.files[i].path, 0,
-                     p.contents[i], p.lens[i]) == VCS_PACKAGE_STORE_OK);
-    SW_CHECK("receipt: release published",
-             sw_publish_release(n.store, p.root, 0x61, "swarm-receipt/fx"));
-    const uint64_t peer = 9101;
-    SW_CHECK("receipt: peer add",
-             vcs_swarm_engine_peer_add(n.engine, peer, session_key));
 
-    struct vcs_package_swarm_message want;
-    memset(&want, 0, sizeof(want));
-    want.type = VCS_PACKAGE_SWARM_WANT;
-    want.body.want.request_id = 91001;
-    memcpy(want.body.want.package_root, p.root, 32);
-    want.body.want.object_kind = VCS_PACKAGE_SWARM_OBJECT_MANIFEST;
-    want.body.want.file_index = UINT32_MAX;
-    want.body.want.chunk_index = UINT32_MAX;
-    uint8_t frame[8 + 96 + SW_MAX_FILE];
-    size_t wlen = 0;
-    SW_CHECK("receipt: want serializes",
-             vcs_package_swarm_serialize(&want, frame, sizeof(frame),
-                                         &wlen));
-    struct vcs_swarm_frame_result res = vcs_swarm_engine_handle_frame(
-        n.engine, peer, frame, wlen, SW_DAY, 1);
-    SW_CHECK("receipt: manifest served",
-             res.reply != NULL && res.penalty == VCS_SWARM_PENALTY_NONE);
-    free(res.reply);
+    struct receipt_exchange_ctx rc;
+    memset(&rc, 0, sizeof(rc));
+    rc.n = &n;
+    rc.p = &p;
 
-    struct vcs_swarm_transfer xfer;
-    memset(&xfer, 0, sizeof(xfer));
-    SW_CHECK("receipt: snapshot after serve",
-             vcs_swarm_engine_transfer_snapshot(n.engine, peer, &xfer) &&
-             memcmp(xfer.package_root, p.root, 32) == 0 &&
-             xfer.served == p.wire_len && xfer.fetched == 0);
+    failures += receipt_case_admit_and_serve(&rc, session_key);
+    failures += receipt_case_keys(&rc);
+    failures += receipt_case_draft(&rc);
+    failures += receipt_case_sign_and_accept(&rc);
 
-    secp256k1_context *ctx = secp256k1_context_create(
-        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
-    uint8_t up_sec[32] = {0};
-    uint8_t down_sec[32] = {0};
-    uint8_t other_sec[32] = {0};
-    up_sec[31] = 0x81;
-    down_sec[31] = 0x82;
-    other_sec[31] = 0x83;
-    uint8_t up_pub[33];
-    uint8_t down_pub[33];
-    uint8_t other_pub[33];
-    secp256k1_pubkey parsed;
-    size_t plen = 33;
-    bool keys = secp256k1_ec_pubkey_create(ctx, &parsed, up_sec) == 1 &&
-                secp256k1_ec_pubkey_serialize(ctx, up_pub, &plen, &parsed,
-                                              SECP256K1_EC_COMPRESSED) == 1 &&
-                secp256k1_ec_pubkey_create(ctx, &parsed, down_sec) == 1 &&
-                secp256k1_ec_pubkey_serialize(ctx, down_pub, &plen, &parsed,
-                                              SECP256K1_EC_COMPRESSED) == 1 &&
-                secp256k1_ec_pubkey_create(ctx, &parsed, other_sec) == 1 &&
-                secp256k1_ec_pubkey_serialize(ctx, other_pub, &plen, &parsed,
-                                              SECP256K1_EC_COMPRESSED) == 1;
-    SW_CHECK("receipt: secp keys", keys);
-
-    struct vcs_service_receipt draft;
-    enum vcs_service_receipt_role role = VCS_SERVICE_RECEIPT_DOWNLOADER;
-    SW_CHECK("receipt: seeder drafts as uploader",
-             vcs_swarm_receipt_draft(&xfer, up_pub, down_pub, SW_DAY,
-                                     SW_DAY, &draft, &role) &&
-             role == VCS_SERVICE_RECEIPT_UPLOADER &&
-             draft.verified_bytes == p.wire_len);
-    struct vcs_swarm_transfer leecher_xfer = xfer;
-    leecher_xfer.served = 0;
-    leecher_xfer.fetched = xfer.served;
-    struct vcs_service_receipt leecher_draft;
-    enum vcs_service_receipt_role leecher_role =
-        VCS_SERVICE_RECEIPT_UPLOADER;
-    SW_CHECK("receipt: leecher drafts matching body",
-             vcs_swarm_receipt_draft(&leecher_xfer, down_pub, up_pub,
-                                     SW_DAY, SW_DAY, &leecher_draft,
-                                     &leecher_role) &&
-             leecher_role == VCS_SERVICE_RECEIPT_DOWNLOADER &&
-             memcmp(leecher_draft.session_nonce, draft.session_nonce,
-                    32) == 0 &&
-             memcmp(leecher_draft.uploader_pubkey, draft.uploader_pubkey,
-                    33) == 0);
-
-    uint8_t wire[VCS_SERVICE_RECEIPT_WIRE_BYTES];
-    SW_CHECK("receipt: both ends sign",
-             vcs_service_receipt_sign(&draft, VCS_SERVICE_RECEIPT_UPLOADER,
-                                      ctx, up_sec) ==
-                 VCS_SERVICE_RECEIPT_OK &&
-             vcs_service_receipt_sign(&draft,
-                                      VCS_SERVICE_RECEIPT_DOWNLOADER, ctx,
-                                      down_sec) ==
-                 VCS_SERVICE_RECEIPT_OK &&
-             vcs_service_receipt_serialize(&draft, wire, sizeof(wire)) ==
-                 VCS_SERVICE_RECEIPT_OK);
-
-    char leecher_dir[1200];
-    snprintf(leecher_dir, sizeof(leecher_dir), "%s/leecher-zcode",
-             n.datadir);
-    struct vcs_service_book *leecher_book =
-        vcs_service_book_load(leecher_dir);
-    SW_CHECK("receipt: leecher book", leecher_book != NULL);
-    SW_CHECK("receipt: seeder accepts matching serve",
-             vcs_swarm_receipt_accept(n.book, &xfer, up_pub, SW_DAY, wire,
-                                      sizeof(wire)) ==
-                 VCS_SWARM_RECEIPT_OK);
-    SW_CHECK("receipt: leecher accepts matching fetch",
-             leecher_book &&
-             vcs_swarm_receipt_accept(leecher_book, &leecher_xfer, down_pub,
-                                      SW_DAY, wire, sizeof(wire)) ==
-                 VCS_SWARM_RECEIPT_OK);
-    SW_CHECK("receipt: replay is duplicate",
-             vcs_swarm_receipt_accept(n.book, &xfer, up_pub, SW_DAY, wire,
-                                      sizeof(wire)) ==
-                 VCS_SWARM_RECEIPT_DUPLICATE);
-    SW_CHECK("receipt: stranger refused",
-             vcs_swarm_receipt_accept(n.book, &xfer, other_pub, SW_DAY,
-                                      wire, sizeof(wire)) ==
-                 VCS_SWARM_RECEIPT_NOT_PARTY);
-    struct vcs_swarm_transfer lied = xfer;
-    lied.served = 1;
-    SW_CHECK("receipt: inflated bytes refused",
-             vcs_swarm_receipt_accept(n.book, &lied, up_pub, SW_DAY, wire,
-                                      sizeof(wire)) ==
-                 VCS_SWARM_RECEIPT_BYTES_MISMATCH);
-    SW_CHECK("receipt: named statuses",
-             strcmp(vcs_swarm_receipt_status_string(
-                        VCS_SWARM_RECEIPT_BYTES_MISMATCH),
-                    "bytes-mismatch") == 0);
-
-    if (leecher_book)
-        vcs_service_book_free(leecher_book);
-    secp256k1_context_destroy(ctx);
+    if (rc.leecher_book)
+        vcs_service_book_free(rc.leecher_book);
+    secp256k1_context_destroy(rc.ctx);
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
@@ -2542,6 +3028,153 @@ static bool sw_secp_pair(secp256k1_context *ctx, uint8_t last,
                                          SECP256K1_EC_COMPRESSED) == 1;
 }
 
+struct receipt_session_ctx {
+    secp256k1_context *ctx;
+    uint8_t up_sec[32], down_sec[32], other_sec[32];
+    uint8_t up_pub[33], down_pub[33], other_pub[33];
+    struct vcs_swarm_receipt_session *up;
+    struct vcs_swarm_receipt_session *down;
+    struct vcs_swarm_receipt_session *stranger;
+    uint64_t peer;
+    struct vcs_swarm_transfer seed_x, leech_x;
+    uint8_t offer[VCS_SERVICE_RECEIPT_WIRE_BYTES];
+    uint8_t *reply;
+    size_t reply_len;
+};
+
+static int session_case_setup_keys_and_identity(struct receipt_session_ctx *rc)
+{
+    int failures = 0;
+    rc->ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN |
+                                       SECP256K1_CONTEXT_VERIFY);
+    SW_CHECK("session: secp keys",
+             rc->ctx && sw_secp_pair(rc->ctx, 0x91, rc->up_sec, rc->up_pub) &&
+             sw_secp_pair(rc->ctx, 0x92, rc->down_sec, rc->down_pub) &&
+             sw_secp_pair(rc->ctx, 0x93, rc->other_sec, rc->other_pub) &&
+             memcmp(rc->up_pub, rc->other_pub, 33) != 0);
+    rc->up = vcs_swarm_receipt_session_open_secret(rc->up_sec);
+    rc->down = vcs_swarm_receipt_session_open_secret(rc->down_sec);
+    rc->stranger = vcs_swarm_receipt_session_open_secret(rc->other_sec);
+    uint8_t got[33];
+    SW_CHECK("session: open secrets",
+             rc->up && rc->down && rc->stranger &&
+             vcs_swarm_receipt_session_local_pub(rc->up, got) &&
+             memcmp(got, rc->up_pub, 33) == 0 &&
+             vcs_swarm_receipt_session_local_pub(rc->down, got) &&
+             memcmp(got, rc->down_pub, 33) == 0);
+
+    uint8_t ident[VCS_SWARM_RECEIPT_IDENTITY_BYTES];
+    size_t ilen = 0;
+    rc->peer = 77;
+    SW_CHECK("session: seeder identity once",
+             vcs_swarm_receipt_identity_take(rc->up, rc->peer, ident,
+                                             sizeof(ident), &ilen) &&
+             ilen == VCS_SWARM_RECEIPT_IDENTITY_BYTES);
+    SW_CHECK("session: seeder identity not resent",
+             !vcs_swarm_receipt_identity_take(rc->up, rc->peer, ident,
+                                              sizeof(ident), &ilen));
+    SW_CHECK("session: leecher notes seeder",
+             vcs_swarm_receipt_identity_note(rc->down, rc->peer, ident,
+                                             ilen));
+    SW_CHECK("session: leecher identity",
+             vcs_swarm_receipt_identity_take(rc->down, rc->peer, ident,
+                                             sizeof(ident), &ilen));
+    SW_CHECK("session: seeder notes leecher",
+             vcs_swarm_receipt_identity_note(rc->up, rc->peer, ident, ilen));
+    return failures;
+}
+
+static int session_case_offer_and_complete(struct receipt_session_ctx *rc,
+                                            struct sw_node *seeder,
+                                            struct sw_node *leecher)
+{
+    int failures = 0;
+    memset(&rc->seed_x, 0, sizeof(rc->seed_x));
+    memset(&rc->leech_x, 0, sizeof(rc->leech_x));
+    memset(rc->seed_x.package_root, 0x44, 32);
+    memcpy(rc->leech_x.package_root, rc->seed_x.package_root, 32);
+    rc->seed_x.served = 4096;
+    rc->leech_x.fetched = 4096;
+
+    SW_CHECK("session: seeder offers",
+             vcs_swarm_receipt_session_offer(rc->up, &rc->seed_x, rc->peer,
+                                             SW_DAY, rc->offer));
+    SW_CHECK("session: second identical offer withheld",
+             !vcs_swarm_receipt_session_offer(rc->up, &rc->seed_x, rc->peer,
+                                              SW_DAY, rc->offer));
+    rc->reply = NULL;
+    rc->reply_len = 0;
+    SW_CHECK("session: leecher completes",
+             vcs_swarm_receipt_session_handle(
+                 rc->down, leecher->book, &rc->leech_x, rc->peer, SW_DAY,
+                 rc->offer, sizeof(rc->offer), &rc->reply, &rc->reply_len) ==
+                 VCS_SWARM_RECEIPT_OK &&
+             rc->reply && rc->reply_len == VCS_SERVICE_RECEIPT_WIRE_BYTES);
+    SW_CHECK("session: seeder accepts completed",
+             vcs_swarm_receipt_session_handle(
+                 rc->up, seeder->book, &rc->seed_x, rc->peer, SW_DAY,
+                 rc->reply, rc->reply_len, NULL, NULL) ==
+                 VCS_SWARM_RECEIPT_OK);
+    SW_CHECK("session: both settled",
+             vcs_swarm_receipt_session_settled(rc->up, rc->peer) &&
+             vcs_swarm_receipt_session_settled(rc->down, rc->peer));
+    return failures;
+}
+
+static int session_case_replay_and_refusals(struct receipt_session_ctx *rc,
+                                             struct sw_node *seeder,
+                                             struct sw_node *leecher)
+{
+    int failures = 0;
+    SW_CHECK("session: replay is duplicate",
+             vcs_swarm_receipt_session_handle(
+                 rc->up, seeder->book, &rc->seed_x, rc->peer, SW_DAY,
+                 rc->reply, rc->reply_len, NULL, NULL) ==
+                 VCS_SWARM_RECEIPT_DUPLICATE);
+    struct vcs_swarm_transfer grown = rc->leech_x;
+    grown.fetched = rc->leech_x.fetched + 1;
+    SW_CHECK("session: superseded offer is stale",
+             vcs_swarm_receipt_session_handle(
+                 rc->down, leecher->book, &grown, rc->peer, SW_DAY,
+                 rc->offer, sizeof(rc->offer), NULL, NULL) ==
+                 VCS_SWARM_RECEIPT_STALE);
+    SW_CHECK("session: stranger refused",
+             vcs_swarm_receipt_session_handle(
+                 rc->stranger, seeder->book, &rc->seed_x, rc->peer, SW_DAY,
+                 rc->reply, rc->reply_len, NULL, NULL) ==
+                 VCS_SWARM_RECEIPT_NOT_PARTY);
+    uint8_t tamper[VCS_SERVICE_RECEIPT_WIRE_BYTES];
+    memcpy(tamper, rc->offer, sizeof(tamper));
+    tamper[40] ^= 0xff;
+    enum vcs_swarm_receipt_status tst = vcs_swarm_receipt_session_handle(
+        rc->down, leecher->book, &rc->leech_x, 78, SW_DAY, tamper,
+        sizeof(tamper), NULL, NULL);
+    SW_CHECK("session: tampered offer refused",
+             tst == VCS_SWARM_RECEIPT_UNVERIFIED ||
+             tst == VCS_SWARM_RECEIPT_NOT_PARTY);
+    free(rc->reply);
+    return failures;
+}
+
+static int session_case_persist(struct sw_node *seeder)
+{
+    int failures = 0;
+    struct vcs_swarm_receipt_session *persisted =
+        vcs_swarm_receipt_session_open(seeder->zcode_dir);
+    uint8_t pub_a[33], pub_b[33];
+    SW_CHECK("session: persist open",
+             persisted &&
+             vcs_swarm_receipt_session_local_pub(persisted, pub_a));
+    vcs_swarm_receipt_session_free(persisted);
+    persisted = vcs_swarm_receipt_session_open(seeder->zcode_dir);
+    SW_CHECK("session: persist reload",
+             persisted &&
+             vcs_swarm_receipt_session_local_pub(persisted, pub_b) &&
+             memcmp(pub_a, pub_b, 33) == 0);
+    vcs_swarm_receipt_session_free(persisted);
+    return failures;
+}
+
 static int t_swarm_receipt_session(void)
 {
     int failures = 0;
@@ -2549,122 +3182,20 @@ static int t_swarm_receipt_session(void)
     if (!sw_node_open(&seeder, "rcpt-s", sw_score_contributor) ||
         !sw_node_open(&leecher, "rcpt-l", sw_score_contributor))
         return 1;
-    secp256k1_context *ctx = secp256k1_context_create(
-        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
-    uint8_t up_sec[32], down_sec[32], other_sec[32];
-    uint8_t up_pub[33], down_pub[33], other_pub[33];
-    SW_CHECK("session: secp keys",
-             ctx && sw_secp_pair(ctx, 0x91, up_sec, up_pub) &&
-             sw_secp_pair(ctx, 0x92, down_sec, down_pub) &&
-             sw_secp_pair(ctx, 0x93, other_sec, other_pub) &&
-             memcmp(up_pub, other_pub, 33) != 0);
-    struct vcs_swarm_receipt_session *up =
-        vcs_swarm_receipt_session_open_secret(up_sec);
-    struct vcs_swarm_receipt_session *down =
-        vcs_swarm_receipt_session_open_secret(down_sec);
-    struct vcs_swarm_receipt_session *stranger =
-        vcs_swarm_receipt_session_open_secret(other_sec);
-    uint8_t got[33];
-    SW_CHECK("session: open secrets",
-             up && down && stranger &&
-             vcs_swarm_receipt_session_local_pub(up, got) &&
-             memcmp(got, up_pub, 33) == 0 &&
-             vcs_swarm_receipt_session_local_pub(down, got) &&
-             memcmp(got, down_pub, 33) == 0);
 
-    uint8_t ident[VCS_SWARM_RECEIPT_IDENTITY_BYTES];
-    size_t ilen = 0;
-    const uint64_t peer = 77;
-    SW_CHECK("session: seeder identity once",
-             vcs_swarm_receipt_identity_take(up, peer, ident, sizeof(ident),
-                                             &ilen) &&
-             ilen == VCS_SWARM_RECEIPT_IDENTITY_BYTES);
-    SW_CHECK("session: seeder identity not resent",
-             !vcs_swarm_receipt_identity_take(up, peer, ident, sizeof(ident),
-                                              &ilen));
-    SW_CHECK("session: leecher notes seeder",
-             vcs_swarm_receipt_identity_note(down, peer, ident, ilen));
-    SW_CHECK("session: leecher identity",
-             vcs_swarm_receipt_identity_take(down, peer, ident, sizeof(ident),
-                                             &ilen));
-    SW_CHECK("session: seeder notes leecher",
-             vcs_swarm_receipt_identity_note(up, peer, ident, ilen));
+    struct receipt_session_ctx rc;
+    memset(&rc, 0, sizeof(rc));
 
-    struct vcs_swarm_transfer seed_x = {0}, leech_x = {0};
-    memset(seed_x.package_root, 0x44, 32);
-    memcpy(leech_x.package_root, seed_x.package_root, 32);
-    seed_x.served = 4096;
-    leech_x.fetched = 4096;
+    failures += session_case_setup_keys_and_identity(&rc);
+    failures += session_case_offer_and_complete(&rc, &seeder, &leecher);
+    failures += session_case_replay_and_refusals(&rc, &seeder, &leecher);
+    failures += session_case_persist(&seeder);
 
-    uint8_t offer[VCS_SERVICE_RECEIPT_WIRE_BYTES];
-    SW_CHECK("session: seeder offers",
-             vcs_swarm_receipt_session_offer(up, &seed_x, peer, SW_DAY,
-                                             offer));
-    SW_CHECK("session: second identical offer withheld",
-             !vcs_swarm_receipt_session_offer(up, &seed_x, peer, SW_DAY,
-                                              offer));
-    uint8_t *reply = NULL;
-    size_t reply_len = 0;
-    SW_CHECK("session: leecher completes",
-             vcs_swarm_receipt_session_handle(down, leecher.book, &leech_x,
-                                              peer, SW_DAY, offer,
-                                              sizeof(offer), &reply,
-                                              &reply_len) ==
-                 VCS_SWARM_RECEIPT_OK &&
-             reply && reply_len == VCS_SERVICE_RECEIPT_WIRE_BYTES);
-    SW_CHECK("session: seeder accepts completed",
-             vcs_swarm_receipt_session_handle(up, seeder.book, &seed_x, peer,
-                                              SW_DAY, reply, reply_len, NULL,
-                                              NULL) == VCS_SWARM_RECEIPT_OK);
-    SW_CHECK("session: both settled",
-             vcs_swarm_receipt_session_settled(up, peer) &&
-             vcs_swarm_receipt_session_settled(down, peer));
-    SW_CHECK("session: replay is duplicate",
-             vcs_swarm_receipt_session_handle(up, seeder.book, &seed_x, peer,
-                                              SW_DAY, reply, reply_len, NULL,
-                                              NULL) ==
-                 VCS_SWARM_RECEIPT_DUPLICATE);
-    struct vcs_swarm_transfer grown = leech_x;
-    grown.fetched = leech_x.fetched + 1;
-    SW_CHECK("session: superseded offer is stale",
-             vcs_swarm_receipt_session_handle(down, leecher.book, &grown,
-                                              peer, SW_DAY, offer,
-                                              sizeof(offer), NULL, NULL) ==
-                 VCS_SWARM_RECEIPT_STALE);
-    SW_CHECK("session: stranger refused",
-             vcs_swarm_receipt_session_handle(stranger, seeder.book, &seed_x,
-                                              peer, SW_DAY, reply, reply_len,
-                                              NULL, NULL) ==
-                 VCS_SWARM_RECEIPT_NOT_PARTY);
-    uint8_t tamper[VCS_SERVICE_RECEIPT_WIRE_BYTES];
-    memcpy(tamper, offer, sizeof(tamper));
-    tamper[40] ^= 0xff;
-    enum vcs_swarm_receipt_status tst = vcs_swarm_receipt_session_handle(
-        down, leecher.book, &leech_x, 78, SW_DAY, tamper, sizeof(tamper),
-        NULL, NULL);
-    SW_CHECK("session: tampered offer refused",
-             tst == VCS_SWARM_RECEIPT_UNVERIFIED ||
-             tst == VCS_SWARM_RECEIPT_NOT_PARTY);
-    free(reply);
-
-    struct vcs_swarm_receipt_session *persisted =
-        vcs_swarm_receipt_session_open(seeder.zcode_dir);
-    uint8_t pub_a[33], pub_b[33];
-    SW_CHECK("session: persist open",
-             persisted &&
-             vcs_swarm_receipt_session_local_pub(persisted, pub_a));
-    vcs_swarm_receipt_session_free(persisted);
-    persisted = vcs_swarm_receipt_session_open(seeder.zcode_dir);
-    SW_CHECK("session: persist reload",
-             persisted &&
-             vcs_swarm_receipt_session_local_pub(persisted, pub_b) &&
-             memcmp(pub_a, pub_b, 33) == 0);
-    vcs_swarm_receipt_session_free(persisted);
-    vcs_swarm_receipt_session_free(up);
-    vcs_swarm_receipt_session_free(down);
-    vcs_swarm_receipt_session_free(stranger);
-    if (ctx)
-        secp256k1_context_destroy(ctx);
+    vcs_swarm_receipt_session_free(rc.up);
+    vcs_swarm_receipt_session_free(rc.down);
+    vcs_swarm_receipt_session_free(rc.stranger);
+    if (rc.ctx)
+        secp256k1_context_destroy(rc.ctx);
     sw_node_close(&seeder);
     sw_node_close(&leecher);
     test_rm_rf_recursive(seeder.datadir);
