@@ -149,6 +149,10 @@ static const struct lint_gate k_gates[] = {
       check_no_utxo_projection_selftest },
     { "check-no-block-index-flat", check_no_block_index_flat_run,
       check_no_block_index_flat_selftest },
+    { "check-projections-pure", check_projections_pure_run,
+      check_projections_pure_selftest },
+    { "check-typed-blocker", check_typed_blocker_run,
+      check_typed_blocker_selftest },
 };
 
 int main(int argc, char **argv)

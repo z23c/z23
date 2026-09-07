@@ -336,5 +336,9 @@ int check_no_utxo_projection_run(int argc, char **argv);
 int check_no_utxo_projection_selftest(void);
 int check_no_block_index_flat_run(int argc, char **argv);
 int check_no_block_index_flat_selftest(void);
+int check_projections_pure_run(int argc, char **argv);
+int check_projections_pure_selftest(void);
+int check_typed_blocker_run(int argc, char **argv);
+int check_typed_blocker_selftest(void);
 
 #endif

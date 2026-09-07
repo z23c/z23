@@ -5341,6 +5341,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_authority_fences.c \
     tools/lint/lintc/gate_wiring_presence_fences.c \
     tools/lint/lintc/gate_demoted_store_ratchets.c \
+    tools/lint/lintc/gate_projection_purity_fences.c \
+    tools/lint/lintc/gate_typed_blocker_ratchets.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11825,7 +11827,7 @@ check-no-runtime-abort:
 # legacy setters / `last_blocker_code` mutations to the typed
 # `blocker_set()` primitive (platform/modules/util/blocker.h). Baseline file
 # enumerates the grandfathered sites; must shrink over Rounds 7-9.
-check-typed-blocker:
+check-typed-blocker: $(LINTC_TOOL)
 	@echo "══ LINT: typed blocker adoption ══"
 	@./tools/scripts/check_typed_blocker.sh
 
@@ -12951,7 +12953,7 @@ check-shape-includes-header: $(LINTC_TOOL)
 
 # Gate E4 — projections are pure folds: no app-layer (services/controllers)
 # includes and no AR model saves. HARD: the projection set already complies.
-check-projections-pure:
+check-projections-pure: $(LINTC_TOOL)
 	@echo "══ LINT: projections pure (E4) ══"
 	@./tools/scripts/check_projections_pure.sh
 
