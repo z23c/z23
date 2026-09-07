@@ -279,6 +279,79 @@ static bool pf_mkdir_p(const char *path)
  * to its stdin, capturing up to cap bytes of stdout into out (NUL-added).
  * The child inherits stderr so its logs stay visible. Returns the exit
  * code, or -1 on spawn/pipe failure (logged). */
+/* One stdin-writable tick of the pf_spawn pump: write what fits, closing
+ * the pipe once the whole input is flushed or on a hard write error. */
+static void pf_spawn_write_in(int fd, const uint8_t *input, size_t input_len,
+                              size_t *written, bool *stdin_open)
+{
+    ssize_t w = write(fd, input + *written, input_len - *written);
+    if (w > 0) {
+        *written += (size_t)w;
+        if (*written == input_len) {
+            close(fd);
+            *stdin_open = false;
+        }
+    } else if (w < 0 && errno != EINTR) {
+        close(fd);
+        *stdin_open = false;
+    }
+}
+
+/* One stdout-readable tick of the pf_spawn pump. Returns false to stop the
+ * pump (EOF or read error), true to keep looping. */
+static bool pf_spawn_read_out(int fd, char *out, size_t cap, size_t *total)
+{
+    if (*total + 1u >= cap) {
+        char drain[4096];
+        ssize_t r = read(fd, drain, sizeof(drain));
+        return r > 0; /* over cap: drain and truncate */
+    }
+    ssize_t r = read(fd, out + *total, cap - 1u - *total);
+    if (r <= 0)
+        return false;
+    *total += (size_t)r;
+    return true;
+}
+
+/* Write stdin, then read stdout to EOF. Inputs are bounded well under the
+ * pipe buffer only for small payloads; the large ones (publish wires) go
+ * through a writer/reader loop that interleaves to avoid a pipe-buffer
+ * deadlock. Closes both fds before returning. */
+static size_t pf_spawn_pump(int stdin_wr, int stdout_rd,
+                            const uint8_t *input, size_t input_len,
+                            char *out, size_t cap)
+{
+    size_t total = 0;
+    size_t written = 0;
+    bool stdin_open = input != NULL;
+    if (!stdin_open) close(stdin_wr);
+    for (;;) {
+        fd_set rfds, wfds;
+        FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
+        FD_SET(stdout_rd, &rfds);
+        int maxfd = stdout_rd;
+        if (stdin_open) {
+            FD_SET(stdin_wr, &wfds);
+            if (stdin_wr > maxfd) maxfd = stdin_wr;
+        }
+        int ready = select(maxfd + 1, &rfds, &wfds, NULL, NULL);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (stdin_open && FD_ISSET(stdin_wr, &wfds))
+            pf_spawn_write_in(stdin_wr, input, input_len, &written,
+                              &stdin_open);
+        if (FD_ISSET(stdout_rd, &rfds) &&
+            !pf_spawn_read_out(stdout_rd, out, cap, &total))
+            break;
+    }
+    if (stdin_open) close(stdin_wr);
+    close(stdout_rd);
+    return total;
+}
+
 static int pf_spawn(char *const argv[], const uint8_t *input,
                     size_t input_len, char *out, size_t cap)
 {
@@ -303,59 +376,9 @@ static int pf_spawn(char *const argv[], const uint8_t *input,
     }
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
-    size_t total = 0;
     int status = 0;
-    /* Write stdin, then read stdout to EOF. Inputs are bounded well under
-     * the pipe buffer only for small payloads; the large ones (publish
-     * wires) go through a writer/reader loop that interleaves to avoid
-     * a pipe-buffer deadlock. */
-    size_t written = 0;
-    bool stdin_open = input != NULL;
-    if (!stdin_open) close(stdin_pipe[1]);
-    for (;;) {
-        fd_set rfds, wfds;
-        FD_ZERO(&rfds);
-        FD_ZERO(&wfds);
-        FD_SET(stdout_pipe[0], &rfds);
-        int maxfd = stdout_pipe[0];
-        if (stdin_open) {
-            FD_SET(stdin_pipe[1], &wfds);
-            if (stdin_pipe[1] > maxfd) maxfd = stdin_pipe[1];
-        }
-        int ready = select(maxfd + 1, &rfds, &wfds, NULL, NULL);
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (stdin_open && FD_ISSET(stdin_pipe[1], &wfds)) {
-            ssize_t w = write(stdin_pipe[1], input + written,
-                              input_len - written);
-            if (w > 0) {
-                written += (size_t)w;
-                if (written == input_len) {
-                    close(stdin_pipe[1]);
-                    stdin_open = false;
-                }
-            } else if (w < 0 && errno != EINTR) {
-                close(stdin_pipe[1]);
-                stdin_open = false;
-            }
-        }
-        if (FD_ISSET(stdout_pipe[0], &rfds)) {
-            if (total + 1u >= cap) {
-                char drain[4096];
-                ssize_t r = read(stdout_pipe[0], drain, sizeof(drain));
-                if (r <= 0) break;
-                continue; /* over cap: drain and truncate */
-            }
-            ssize_t r = read(stdout_pipe[0], out + total,
-                             cap - 1u - total);
-            if (r <= 0) break;
-            total += (size_t)r;
-        }
-    }
-    if (stdin_open) close(stdin_pipe[1]);
-    close(stdout_pipe[0]);
+    size_t total = pf_spawn_pump(stdin_pipe[1], stdout_pipe[0], input,
+                                 input_len, out, cap);
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
         ;
     out[total] = '\0';
@@ -367,6 +390,72 @@ static int pf_spawn(char *const argv[], const uint8_t *input,
  * --input=- with `input` on stdin. Parses the zcl.result.v1 envelope;
  * returns true when the envelope parsed and reported ok:true. The parsed
  * document lives in doc_out (caller json_free()s it). */
+/* Build the argv for pf_spawn: bin path, optional extra flag, the
+ * whitespace-split command words (tokenized in place inside words_copy),
+ * then the trailing --input=- flag and NULL terminator. */
+static void pf_cli_build_argv(char *bin, const char *extra_flag,
+                              char *words_copy, char *argv[16])
+{
+    size_t argc = 0;
+    argv[argc++] = bin;
+    if (extra_flag) argv[argc++] = (char *)extra_flag;
+    for (char *tok = strtok(words_copy, " ");
+         tok && argc + 2u < 16u;
+         tok = strtok(NULL, " "))
+        argv[argc++] = tok;
+    argv[argc++] = (char *)"--input=-";
+    argv[argc] = NULL;
+}
+
+/* rc != 0 path of pf_cli: prefer the structured error body over the raw
+ * (truncated) stdout line. Fills `error` and logs it. */
+static void pf_cli_report_exit_error(const char *out, int rc,
+                                     const char *command_words, char *error,
+                                     size_t error_cap)
+{
+    struct json_value errdoc;
+    json_init(&errdoc);
+    bool parsed = json_read(&errdoc, out, strlen(out));
+    const char *code = parsed
+        ? json_get_str(json_get(json_get(&errdoc, "error"), "code"))
+        : NULL;
+    const char *msg = parsed
+        ? json_get_str(json_get(json_get(&errdoc, "error"), "message"))
+        : NULL;
+    if (code || msg) {
+        (void)snprintf(error, error_cap, "%s exit %d: %s%s%s",
+                       command_words, rc, code ? code : "?",
+                       msg ? ": " : "", msg ? msg : "");
+    } else {
+        char *nl = strchr(out, '\n');
+        if (nl) *nl = '\0';
+        (void)snprintf(error, error_cap, "%s exit %d%s%s", command_words,
+                       rc, out[0] ? ": " : "", out);
+    }
+    json_free(&errdoc);
+    LOG_ERROR(PF_LOG, "%s", error);
+}
+
+/* Reply-parsed-ok path of pf_cli: check the zcl.result.v1 envelope's ok
+ * field. Fills `error` and logs it when refused. */
+static bool pf_cli_check_ok(struct json_value *doc_out,
+                            const char *command_words, char *error,
+                            size_t error_cap)
+{
+    const struct json_value *okv = json_get(doc_out, "ok");
+    if (okv && json_get_bool(okv))
+        return true;
+    const char *code =
+        json_get_str(json_get(json_get(doc_out, "error"), "code"));
+    const char *msg =
+        json_get_str(json_get(json_get(doc_out, "error"), "message"));
+    (void)snprintf(error, error_cap, "%s refused: %s%s%s", command_words,
+                   code ? code : "?", msg ? ": " : "",
+                   msg ? msg : "");
+    LOG_ERROR(PF_LOG, "%s", error);
+    return false;
+}
+
 static bool pf_cli(const char *bin_dir, const char *extra_flag,
                    const char *command_words, const char *input,
                    struct json_value *doc_out, char *error,
@@ -381,15 +470,7 @@ static bool pf_cli(const char *bin_dir, const char *extra_flag,
     if (!words_copy)
         LOG_FAIL(PF_LOG, "command words dup");
     char *argv[16];
-    size_t argc = 0;
-    argv[argc++] = bin;
-    if (extra_flag) argv[argc++] = (char *)extra_flag;
-    for (char *tok = strtok(words_copy, " ");
-         tok && argc + 2u < sizeof(argv) / sizeof(argv[0]);
-         tok = strtok(NULL, " "))
-        argv[argc++] = tok;
-    argv[argc++] = (char *)"--input=-";
-    argv[argc] = NULL;
+    pf_cli_build_argv(bin, extra_flag, words_copy, argv);
     char *out = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.cli.out");
     if (!out) {
         free(words_copy);
@@ -399,28 +480,7 @@ static bool pf_cli(const char *bin_dir, const char *extra_flag,
                       input ? strlen(input) : 0, out, PF_CLI_STDOUT_CAP);
     free(words_copy);
     if (rc != 0) {
-        /* Prefer the structured error body over the raw (truncated) line. */
-        struct json_value errdoc;
-        json_init(&errdoc);
-        bool parsed = json_read(&errdoc, out, strlen(out));
-        const char *code = parsed
-            ? json_get_str(json_get(json_get(&errdoc, "error"), "code"))
-            : NULL;
-        const char *msg = parsed
-            ? json_get_str(json_get(json_get(&errdoc, "error"), "message"))
-            : NULL;
-        if (code || msg) {
-            (void)snprintf(error, error_cap, "%s exit %d: %s%s%s",
-                           command_words, rc, code ? code : "?",
-                           msg ? ": " : "", msg ? msg : "");
-        } else {
-            char *nl = strchr(out, '\n');
-            if (nl) *nl = '\0';
-            (void)snprintf(error, error_cap, "%s exit %d%s%s", command_words,
-                           rc, out[0] ? ": " : "", out);
-        }
-        json_free(&errdoc);
-        LOG_ERROR(PF_LOG, "%s", error);
+        pf_cli_report_exit_error(out, rc, command_words, error, error_cap);
         free(out);
         return false;
     }
@@ -433,19 +493,7 @@ static bool pf_cli(const char *bin_dir, const char *extra_flag,
         return false;
     }
     free(out);
-    const struct json_value *okv = json_get(doc_out, "ok");
-    if (!okv || !json_get_bool(okv)) {
-        const char *code =
-            json_get_str(json_get(json_get(doc_out, "error"), "code"));
-        const char *msg =
-            json_get_str(json_get(json_get(doc_out, "error"), "message"));
-        (void)snprintf(error, error_cap, "%s refused: %s%s%s", command_words,
-                       code ? code : "?", msg ? ": " : "",
-                       msg ? msg : "");
-        LOG_ERROR(PF_LOG, "%s", error);
-        return false;
-    }
-    return true;
+    return pf_cli_check_ok(doc_out, command_words, error, error_cap);
 }
 
 /* Strict structural equality for the small scalar values repeated on every
@@ -464,6 +512,127 @@ static bool pf_json_same_value(const struct json_value *a,
 /* Rows per requested page: one plan/commit step row is a few hundred
  * bytes, so 8 stays far below the 8192-byte reply envelope. */
 #define PF_STEP_PAGE_ITEMS 8
+
+/* Build the paged-request JSON body. Returns false on overflow (also
+ * formats a refusal into `error`). */
+static bool pf_paged_build_input(char *input, size_t input_cap,
+                                 const char *id_key, const char *id_val,
+                                 const char *datadir, size_t cursor,
+                                 const char *command_words, char *error,
+                                 size_t error_cap)
+{
+    int n = snprintf(input, input_cap,
+                     "{\"%s\":\"%s\",\"datadir\":\"%s\",\"max_items\":%u,"
+                     "\"cursor\":%zu}",
+                     id_key, id_val, datadir, (unsigned)PF_STEP_PAGE_ITEMS,
+                     cursor);
+    if (n > 0 && (size_t)n < input_cap)
+        return true;
+    (void)snprintf(error, error_cap, "%s: paged input overflow",
+                   command_words);
+    LOG_ERROR(PF_LOG, "%s", error);
+    return false;
+}
+
+/* Validate page shape: data.steps + data._page presence and type, and that
+ * the requested cursor matches rows collected so far. Returns a refusal
+ * reason, or NULL if the shape is fine. */
+static const char *pf_paged_shape_why(const struct json_value *pdata,
+                                      const struct json_value *psteps,
+                                      const struct json_value *ppage,
+                                      size_t cursor, size_t collected)
+{
+    if (!pdata || !psteps || psteps->type != JSON_ARR || !ppage ||
+        ppage->type != JSON_OBJ)
+        return "paged reply lacks data.steps or data._page";
+    if (cursor != collected)
+        return "paged reply is discontiguous";
+    return NULL;
+}
+
+/* _page.next_cursor when truncated, else -1 (unread). */
+static int64_t pf_paged_next_cursor(const struct json_value *ppage,
+                                    bool truncated)
+{
+    if (!truncated)
+        return -1;
+    const struct json_value *ncv = json_get(ppage, "next_cursor");
+    return ncv ? json_get_int(ncv) : -1;
+}
+
+/* Truncated-page advance check: next_cursor must exist and move forward. */
+static const char *pf_paged_advance_why(bool truncated, size_t page_rows,
+                                        int64_t next, size_t cursor)
+{
+    if (!truncated)
+        return NULL;
+    if (page_rows == 0 || next < 0 || (size_t)next <= cursor)
+        return "_page.next_cursor does not advance";
+    return NULL;
+}
+
+/* Every first-page scalar (other than steps/_page) must repeat identically
+ * on every later page. */
+static const char *pf_paged_scalars_why(const struct json_value *doc_out,
+                                        const struct json_value *pdata)
+{
+    const struct json_value *mdata = json_get(doc_out, "data");
+    for (size_t k = 0; k < mdata->num_children; k++) {
+        const char *key = mdata->keys[k];
+        if (strcmp(key, "steps") == 0 || strcmp(key, "_page") == 0)
+            continue;
+        if (!pf_json_same_value(&mdata->children[k], json_get(pdata, key)))
+            return "a scalar field changed between pages";
+    }
+    return NULL;
+}
+
+/* Append the page's step rows into the merged doc's data.steps array. */
+static void pf_paged_append_rows(struct json_value *doc_out,
+                                 const struct json_value *psteps,
+                                 size_t page_rows)
+{
+    struct json_value *msteps = (struct json_value *)json_get(
+        json_get(doc_out, "data"), "steps");
+    for (size_t i = 0; i < page_rows; i++) {
+        struct json_value row;
+        json_init(&row);
+        json_copy(&row, &psteps->children[i]);
+        (void)json_push_back(msteps, &row);
+        json_free(&row);
+    }
+}
+
+/* Fold one successfully-shaped page into doc_out: the first page moves
+ * page_doc's ownership wholesale; later pages append their step rows and
+ * free page_doc. */
+static void pf_paged_fold_page(struct json_value *doc_out,
+                               struct json_value *page_doc,
+                               const struct json_value *psteps,
+                               size_t page_rows, bool *merged)
+{
+    if (!*merged) {
+        *doc_out = *page_doc;
+        *merged = true;
+        return;
+    }
+    pf_paged_append_rows(doc_out, psteps, page_rows);
+    json_free(page_doc);
+}
+
+/* Final-page totals check: _page.total_items and data.step_count (when
+ * present) must agree with the rows actually collected. */
+static const char *pf_paged_totals_why(const struct json_value *doc_out,
+                                       int64_t total, size_t collected)
+{
+    if (total < 0 || (size_t)total != collected)
+        return "final _page.total_items disagrees with the rows";
+    const struct json_value *scv =
+        json_get(json_get(doc_out, "data"), "step_count");
+    if (scv && json_get_int(scv) != (int64_t)collected)
+        return "step_count disagrees with the paged rows";
+    return NULL;
+}
 
 /* Fetch one zcode CLI reply whose `steps` array may exceed the bounded
  * reply envelope: request small pages and follow _page.next_cursor until
@@ -490,82 +659,36 @@ static bool pf_cli_paged_steps(const char *bin_dir,
     size_t cursor = 0, collected = 0;
     bool merged = false;
     for (;;) {
-        int n = snprintf(input, sizeof(input),
-                         "{\"%s\":\"%s\",\"datadir\":\"%s\",\"max_items\":%u,"
-                         "\"cursor\":%zu}",
-                         id_key, id_val, datadir,
-                         (unsigned)PF_STEP_PAGE_ITEMS, cursor);
-        if (n <= 0 || (size_t)n >= sizeof(input)) {
-            (void)snprintf(error, error_cap, "%s: paged input overflow",
-                           command_words);
-            LOG_ERROR(PF_LOG, "%s", error);
+        if (!pf_paged_build_input(input, sizeof(input), id_key, id_val,
+                                  datadir, cursor, command_words, error,
+                                  error_cap))
             break;
-        }
         struct json_value page_doc;
         if (!pf_cli(bin_dir, NULL, command_words, input, &page_doc, error,
                     error_cap))
             break; /* pf_cli already logged */
-        const char *why = NULL;
         const struct json_value *pdata = json_get(&page_doc, "data");
         const struct json_value *psteps = json_get(pdata, "steps");
         const struct json_value *ppage = json_get(pdata, "_page");
-        if (!pdata || !psteps || psteps->type != JSON_ARR || !ppage ||
-            ppage->type != JSON_OBJ) {
-            why = "paged reply lacks data.steps or data._page";
-        } else if (cursor != collected) {
-            why = "paged reply is discontiguous";
-        }
+        const char *why = pf_paged_shape_why(pdata, psteps, ppage, cursor,
+                                             collected);
         /* Page metadata must be read before page_doc is folded or freed. */
         bool truncated = json_get_bool(json_get(ppage, "truncated"));
         int64_t total = json_get_int(json_get(ppage, "total_items"));
-        int64_t next = -1;
-        if (!why && truncated) {
-            const struct json_value *ncv = json_get(ppage, "next_cursor");
-            next = ncv ? json_get_int(ncv) : -1;
-        }
+        int64_t next = pf_paged_next_cursor(ppage, truncated);
         size_t page_rows = psteps ? psteps->num_children : 0;
-        if (!why && truncated && (page_rows == 0 || next < 0 ||
-                                  (size_t)next <= cursor))
-            why = "_page.next_cursor does not advance";
-        if (!why && merged) {
-            /* Every scalar from the first page must repeat identically. */
-            const struct json_value *mdata = json_get(doc_out, "data");
-            for (size_t k = 0; k < mdata->num_children && !why; k++) {
-                const char *key = mdata->keys[k];
-                if (strcmp(key, "steps") == 0 || strcmp(key, "_page") == 0)
-                    continue;
-                if (!pf_json_same_value(&mdata->children[k],
-                                        json_get(pdata, key)))
-                    why = "a scalar field changed between pages";
-            }
-        }
-        bool moved = false;
-        if (!why && !merged) {
-            *doc_out = page_doc; /* ownership moves to the caller's doc */
-            merged = true;
-            moved = true;
-        } else if (!why) {
-            struct json_value *msteps = (struct json_value *)json_get(
-                json_get(doc_out, "data"), "steps");
-            for (size_t i = 0; i < page_rows; i++) {
-                struct json_value row;
-                json_init(&row);
-                json_copy(&row, &psteps->children[i]);
-                (void)json_push_back(msteps, &row);
-                json_free(&row);
-            }
-        }
-        collected += page_rows;
-        if (!why && !truncated) {
-            if (total < 0 || (size_t)total != collected)
-                why = "final _page.total_items disagrees with the rows";
-            const struct json_value *scv =
-                json_get(json_get(doc_out, "data"), "step_count");
-            if (!why && scv && json_get_int(scv) != (int64_t)collected)
-                why = "step_count disagrees with the paged rows";
-        }
-        if (!moved)
+        if (!why)
+            why = pf_paged_advance_why(truncated, page_rows, next, cursor);
+        if (!why && merged)
+            why = pf_paged_scalars_why(doc_out, pdata);
+        if (!why)
+            pf_paged_fold_page(doc_out, &page_doc, psteps, page_rows,
+                               &merged);
+        else
             json_free(&page_doc);
+        collected += page_rows;
+        if (!why && !truncated)
+            why = pf_paged_totals_why(doc_out, total, collected);
         if (why) {
             (void)snprintf(error, error_cap, "%s: %s", command_words, why);
             LOG_ERROR(PF_LOG, "%s", error);
@@ -680,11 +803,89 @@ static void gate_info_free(struct gate_info *info)
     json_free(&info->meta);
 }
 
+/* Out-parameters threaded through the recursive fixed-layout scan. */
+struct gate_walk_ctx {
+    bool *has_license;
+    bool *has_readme;
+    bool *has_meta;
+    unsigned *inc_h;
+    unsigned *src_c;
+    unsigned *test_c;
+};
+
+static bool gate_walk(const char *dir, size_t root_len,
+                      struct gate_walk_ctx *ctx, char *error,
+                      size_t error_cap);
+
+/* Classify one accepted regular file (relative path) into the layout
+ * counters — split out of gate_walk_entry to keep its own complexity down. */
+static void gate_walk_classify(const char *rel, struct gate_walk_ctx *ctx)
+{
+    size_t rlen = strlen(rel);
+    bool is_c = rlen >= 3 && strcmp(rel + rlen - 2, ".c") == 0;
+    bool is_h = rlen >= 3 && strcmp(rel + rlen - 2, ".h") == 0;
+    if (strcmp(rel, "LICENSE") == 0) *ctx->has_license = true;
+    else if (strcmp(rel, "README") == 0 || strcmp(rel, "README.md") == 0)
+        *ctx->has_readme = true;
+    else if (strcmp(rel, "zcode-package.json") == 0) *ctx->has_meta = true;
+    if (strncmp(rel, "include/", 8) == 0 && is_h) (*ctx->inc_h)++;
+    if (strncmp(rel, "src/", 4) == 0 && is_c) (*ctx->src_c)++;
+    if (strncmp(rel, "tests/", 6) == 0 && is_c) (*ctx->test_c)++;
+}
+
+/* One directory entry of gate_walk: build its path, lstat it, and dispatch
+ * on what it is. Split out to keep gate_walk's own complexity down. */
+static bool gate_walk_entry(const char *dir, size_t root_len,
+                            const char *name, struct gate_walk_ctx *ctx,
+                            char *error, size_t error_cap)
+{
+    size_t plen = strlen(dir) + strlen(name) + 2u;
+    char *path = zcl_malloc(plen, "factory.gate.path");
+    if (!path)
+        LOG_FAIL(PF_LOG, "gate path alloc");
+    (void)snprintf(path, plen, "%s/%s", dir, name);
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        (void)snprintf(error, error_cap, "lstat %s: %s", path,
+                       strerror(errno));
+        LOG_ERROR(PF_LOG, "%s", error);
+        free(path);
+        return false;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        (void)snprintf(error, error_cap, "symlink refused: %s", path);
+        LOG_ERROR(PF_LOG, "%s", error);
+        free(path);
+        return false;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        bool ok = gate_walk(path, root_len, ctx, error, error_cap);
+        free(path);
+        return ok;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        (void)snprintf(error, error_cap, "non-regular file refused: %s",
+                       path);
+        LOG_ERROR(PF_LOG, "%s", error);
+        free(path);
+        return false;
+    }
+    if ((uint64_t)st.st_size > VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES) {
+        (void)snprintf(error, error_cap,
+                       "file over the 64 MiB cap: %s", path);
+        LOG_ERROR(PF_LOG, "%s", error);
+        free(path);
+        return false;
+    }
+    gate_walk_classify(path + root_len, ctx);
+    free(path);
+    return true;
+}
+
 /* Recursive fixed-layout scan: no symlinks or non-regular files, per-file
  * size under the 64 MiB cap, required layout entries present. */
-static bool gate_walk(const char *dir, size_t root_len, bool *has_license,
-                      bool *has_readme, bool *has_meta, unsigned *inc_h,
-                      unsigned *src_c, unsigned *test_c, char *error,
+static bool gate_walk(const char *dir, size_t root_len,
+                      struct gate_walk_ctx *ctx, char *error,
                       size_t error_cap)
 {
     DIR *d = opendir(dir);
@@ -699,68 +900,16 @@ static bool gate_walk(const char *dir, size_t root_len, bool *has_license,
     while (ok && (ent = readdir(d)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
-        size_t plen = strlen(dir) + strlen(ent->d_name) + 2u;
-        char *path = zcl_malloc(plen, "factory.gate.path");
-        if (!path)
-            LOG_FAIL(PF_LOG, "gate path alloc");
-        (void)snprintf(path, plen, "%s/%s", dir, ent->d_name);
-        struct stat st;
-        if (lstat(path, &st) != 0) {
-            (void)snprintf(error, error_cap, "lstat %s: %s", path,
-                           strerror(errno));
-            LOG_ERROR(PF_LOG, "%s", error);
-            free(path);
-            ok = false;
-            break;
-        }
-        if (S_ISLNK(st.st_mode)) {
-            (void)snprintf(error, error_cap, "symlink refused: %s", path);
-            LOG_ERROR(PF_LOG, "%s", error);
-            free(path);
-            ok = false;
-            break;
-        }
-        if (S_ISDIR(st.st_mode)) {
-            ok = gate_walk(path, root_len, has_license, has_readme, has_meta,
-                           inc_h, src_c, test_c, error, error_cap);
-            free(path);
-            continue;
-        }
-        if (!S_ISREG(st.st_mode)) {
-            (void)snprintf(error, error_cap, "non-regular file refused: %s",
-                           path);
-            LOG_ERROR(PF_LOG, "%s", error);
-            free(path);
-            ok = false;
-            break;
-        }
-        if ((uint64_t)st.st_size > VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES) {
-            (void)snprintf(error, error_cap,
-                           "file over the 64 MiB cap: %s", path);
-            LOG_ERROR(PF_LOG, "%s", error);
-            free(path);
-            ok = false;
-            break;
-        }
-        const char *rel = path + root_len;
-        size_t rlen = strlen(rel);
-        bool is_c = rlen >= 3 && strcmp(rel + rlen - 2, ".c") == 0;
-        bool is_h = rlen >= 3 && strcmp(rel + rlen - 2, ".h") == 0;
-        if (strcmp(rel, "LICENSE") == 0) *has_license = true;
-        else if (strcmp(rel, "README") == 0 || strcmp(rel, "README.md") == 0)
-            *has_readme = true;
-        else if (strcmp(rel, "zcode-package.json") == 0) *has_meta = true;
-        if (strncmp(rel, "include/", 8) == 0 && is_h) (*inc_h)++;
-        if (strncmp(rel, "src/", 4) == 0 && is_c) (*src_c)++;
-        if (strncmp(rel, "tests/", 6) == 0 && is_c) (*test_c)++;
-        free(path);
+        ok = gate_walk_entry(dir, root_len, ent->d_name, ctx, error,
+                            error_cap);
     }
     closedir(d);
     return ok;
 }
 
-static bool gate_check(const char *dir, struct gate_info *info, char *error,
-                       size_t error_cap)
+/* Fixed-layout walk plus completeness check: LICENSE, README,
+ * zcode-package.json, at least one include-header, src-c and tests-c. */
+static bool gate_check_layout(const char *dir, char *error, size_t error_cap)
 {
     bool has_license = false, has_readme = false, has_meta = false;
     unsigned inc_h = 0, src_c = 0, test_c = 0;
@@ -771,9 +920,12 @@ static bool gate_check(const char *dir, struct gate_info *info, char *error,
         LOG_FAIL(PF_LOG, "gate root alloc");
     memcpy(root, dir, root_len);
     root[root_len] = '\0';
-    bool ok = gate_walk(root, root_len + 1u, &has_license, &has_readme,
-                        &has_meta, &inc_h, &src_c, &test_c, error,
-                        error_cap);
+    struct gate_walk_ctx ctx = {
+        .has_license = &has_license, .has_readme = &has_readme,
+        .has_meta = &has_meta, .inc_h = &inc_h, .src_c = &src_c,
+        .test_c = &test_c,
+    };
+    bool ok = gate_walk(root, root_len + 1u, &ctx, error, error_cap);
     free(root);
     if (!ok) return false;
     if (!has_license || !has_readme || !has_meta || !inc_h || !src_c ||
@@ -786,7 +938,13 @@ static bool gate_check(const char *dir, struct gate_info *info, char *error,
         LOG_ERROR(PF_LOG, "gate: %s", error);
         return false;
     }
-    /* zcode-package.json: SPDX allowlist and no placeholder dep roots. */
+    return true;
+}
+
+/* Read and JSON-parse zcode-package.json into info->meta. */
+static bool gate_check_load_meta(const char *dir, struct gate_info *info,
+                                 char *error, size_t error_cap)
+{
     size_t plen = strlen(dir) + sizeof("/zcode-package.json");
     char *meta_path = zcl_malloc(plen, "factory.gate.meta");
     if (!meta_path)
@@ -794,7 +952,7 @@ static bool gate_check(const char *dir, struct gate_info *info, char *error,
     (void)snprintf(meta_path, plen, "%s/zcode-package.json", dir);
     uint8_t *bytes = NULL;
     size_t blen = 0;
-    ok = pf_read_file(meta_path, PF_META_MAX_BYTES, &bytes, &blen);
+    bool ok = pf_read_file(meta_path, PF_META_MAX_BYTES, &bytes, &blen);
     free(meta_path);
     if (!ok) {
         (void)snprintf(error, error_cap, "cannot read zcode-package.json");
@@ -808,6 +966,14 @@ static bool gate_check(const char *dir, struct gate_info *info, char *error,
         return false;
     }
     free(bytes);
+    return true;
+}
+
+/* Validate name/semver/license, copy them into info, and check the SPDX
+ * allowlist. */
+static bool gate_check_meta_fields(struct gate_info *info, char *error,
+                                   size_t error_cap)
+{
     const char *name = json_get_str(json_get(&info->meta, "name"));
     const char *semver = json_get_str(json_get(&info->meta, "semver"));
     const char *license = json_get_str(json_get(&info->meta, "license"));
@@ -829,170 +995,220 @@ static bool gate_check(const char *dir, struct gate_info *info, char *error,
         LOG_ERROR(PF_LOG, "gate: %s", error);
         return false;
     }
+    return true;
+}
+
+/* No placeholder dep roots: every dependency's 64-hex root must decode and
+ * be non-zero. */
+static bool gate_check_deps(struct gate_info *info, char *error,
+                            size_t error_cap)
+{
     const struct json_value *deps = json_get(&info->meta, "dependencies");
-    if (deps && deps->type == JSON_ARR) {
-        for (size_t i = 0; i < deps->num_children; i++) {
-            const struct json_value *dep = json_at(deps, i);
-            const char *dname = json_get_str(json_get(dep, "name"));
-            const char *droot = json_get_str(json_get(dep, "root"));
-            uint8_t raw[32];
-            if (!dname || !droot || strlen(droot) != 64 ||
-                !zcl_hex_decode_lower(droot, raw, 32)) {
-                (void)snprintf(error, error_cap,
-                               "malformed dependency %zu in "
-                               "zcode-package.json", i);
-                LOG_ERROR(PF_LOG, "gate: %s", error);
-                return false;
-            }
-            if (root_zero(raw)) {
-                (void)snprintf(error, error_cap,
-                    "dependency-placeholder-root: %s still has the all-zero "
-                    "placeholder root (pin it: package-factory pin-dep "
-                    "--package <dir> --dep-name %s --dep-root <64hex>)",
-                    dname, dname);
-                LOG_ERROR(PF_LOG, "gate: %s", error);
-                return false;
-            }
+    if (!deps || deps->type != JSON_ARR)
+        return true;
+    for (size_t i = 0; i < deps->num_children; i++) {
+        const struct json_value *dep = json_at(deps, i);
+        const char *dname = json_get_str(json_get(dep, "name"));
+        const char *droot = json_get_str(json_get(dep, "root"));
+        uint8_t raw[32];
+        if (!dname || !droot || strlen(droot) != 64 ||
+            !zcl_hex_decode_lower(droot, raw, 32)) {
+            (void)snprintf(error, error_cap,
+                           "malformed dependency %zu in "
+                           "zcode-package.json", i);
+            LOG_ERROR(PF_LOG, "gate: %s", error);
+            return false;
+        }
+        if (root_zero(raw)) {
+            (void)snprintf(error, error_cap,
+                "dependency-placeholder-root: %s still has the all-zero "
+                "placeholder root (pin it: package-factory pin-dep "
+                "--package <dir> --dep-name %s --dep-root <64hex>)",
+                dname, dname);
+            LOG_ERROR(PF_LOG, "gate: %s", error);
+            return false;
         }
     }
     return true;
 }
 
+static bool gate_check(const char *dir, struct gate_info *info, char *error,
+                       size_t error_cap)
+{
+    if (!gate_check_layout(dir, error, error_cap))
+        return false;
+    if (!gate_check_load_meta(dir, info, error, error_cap))
+        return false;
+    if (!gate_check_meta_fields(info, error, error_cap))
+        return false;
+    return gate_check_deps(info, error, error_cap);
+}
+
 /* ── pin-dep ──────────────────────────────────────────────────────── */
 
-/* Byte scanner over JSON text: tracks string state and {} depth. Finds the
- * "dependencies" array, then the object element whose "name" string equals
- * dep_name, then the "root" string INSIDE that same object span. Returns
- * the value span (64 chars) via [val_start, val_end). */
-static bool pin_dep_locate(const char *text, size_t len, const char *dep_name,
-                           size_t *val_start, size_t *val_end,
-                           char *error, size_t error_cap)
+/* Locate the "dependencies" array's open bracket, or SIZE_MAX. */
+static size_t pin_dep_find_array(const char *text, size_t len)
 {
-    /* Locate the "dependencies" array open bracket. */
-    size_t arr = SIZE_MAX;
-    {
-        const char needle[] = "\"dependencies\"";
-        size_t nl = sizeof(needle) - 1u;
-        for (size_t i = 0; i + nl <= len; i++) {
-            if (memcmp(text + i, needle, nl) == 0) {
-                size_t j = i + nl;
-                while (j < len && (text[j] == ' ' || text[j] == '\t' ||
-                                   text[j] == '\n' || text[j] == '\r' ||
-                                   text[j] == ':'))
-                    j++;
-                if (j < len && text[j] == '[') {
-                    arr = j;
-                    break;
-                }
+    const char needle[] = "\"dependencies\"";
+    size_t nl = sizeof(needle) - 1u;
+    for (size_t i = 0; i + nl <= len; i++) {
+        if (memcmp(text + i, needle, nl) == 0) {
+            size_t j = i + nl;
+            while (j < len && (text[j] == ' ' || text[j] == '\t' ||
+                               text[j] == '\n' || text[j] == '\r' ||
+                               text[j] == ':'))
+                j++;
+            if (j < len && text[j] == '[')
+                return j;
+        }
+    }
+    return SIZE_MAX;
+}
+
+/* String-aware matching close brace for the object starting at obj_start,
+ * or SIZE_MAX if unbalanced within [obj_start, len). */
+static size_t pin_dep_find_obj_end(const char *text, size_t obj_start,
+                                   size_t len)
+{
+    int depth = 0;
+    bool in_str = false, esc = false;
+    for (size_t j = obj_start; j < len; j++) {
+        char c = text[j];
+        if (in_str) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') in_str = true;
+        else if (c == '{') depth++;
+        else if (c == '}') {
+            depth--;
+            if (depth == 0)
+                return j;
+        }
+    }
+    return SIZE_MAX;
+}
+
+/* Scan one JSON string starting at text[*pos] == '"'. Advances *pos past
+ * the closing quote and returns the content span [*s0, *s1). */
+static void pin_dep_scan_str(const char *text, size_t bound, size_t *pos,
+                             size_t *s0, size_t *s1)
+{
+    size_t j = ++(*pos);
+    bool e = false;
+    while (j < bound && (text[j] != '"' || e)) {
+        if (e) e = false;
+        else if (text[j] == '\\') e = true;
+        j++;
+    }
+    *s0 = *pos;
+    *s1 = j;
+    *pos = j + 1;
+}
+
+/* Does the string span [s0, s1) equal `key` exactly? */
+static bool pin_dep_key_is(const char *text, size_t s0, size_t s1,
+                           const char *key)
+{
+    size_t klen = strlen(key);
+    return (s1 - s0) == klen && memcmp(text + s0, key, klen) == 0;
+}
+
+/* A JSON key ends at k (index of ':' or the char after the key string,
+ * skipping whitespace). Scan the string value that follows it, if any. */
+static bool pin_dep_scan_value(const char *text, size_t obj_end, size_t k,
+                               size_t *v0, size_t *v1)
+{
+    size_t v = k + 1;
+    while (v < obj_end && isspace((unsigned char)text[v])) v++;
+    if (v >= obj_end || text[v] != '"')
+        return false;
+    pin_dep_scan_str(text, obj_end, &v, v0, v1);
+    return true;
+}
+
+/* Within [obj_start, obj_end): does a "name" string equal dep_name?
+ * Record the "root" value span. */
+static void pin_dep_scan_obj_fields(const char *text, size_t obj_start,
+                                    size_t obj_end, const char *dep_name,
+                                    bool *name_match, size_t *root_vs,
+                                    size_t *root_ve)
+{
+    size_t j = obj_start;
+    while (j < obj_end) {
+        if (text[j] != '"') {
+            j++;
+            continue;
+        }
+        size_t s0, s1;
+        pin_dep_scan_str(text, obj_end, &j, &s0, &s1);
+        size_t k = j;
+        while (k < obj_end && isspace((unsigned char)text[k])) k++;
+        bool is_key = k < obj_end && text[k] == ':';
+        if (is_key && pin_dep_key_is(text, s0, s1, "name")) {
+            size_t v0, v1;
+            if (pin_dep_scan_value(text, obj_end, k, &v0, &v1) &&
+                (size_t)(v1 - v0) == strlen(dep_name) &&
+                memcmp(text + v0, dep_name, strlen(dep_name)) == 0)
+                *name_match = true;
+        } else if (is_key && pin_dep_key_is(text, s0, s1, "root")) {
+            size_t v0, v1;
+            if (pin_dep_scan_value(text, obj_end, k, &v0, &v1)) {
+                *root_vs = v0;
+                *root_ve = v1;
             }
         }
     }
-    if (arr == SIZE_MAX) {
-        (void)snprintf(error, error_cap, "no dependencies array found");
-        LOG_ERROR(PF_LOG, "pin-dep: %s", error);
-        return false;
-    }
-    /* Walk the array elements at depth 1, tracking string state. */
+}
+
+enum pin_dep_next { PIN_DEP_OBJ, PIN_DEP_ARR_END, PIN_DEP_BAD_ELEM };
+
+/* Skip whitespace and element separators to the next array element;
+ * report whether it is an object, the array's close, or malformed. */
+static enum pin_dep_next pin_dep_skip_to_obj(const char *text, size_t len,
+                                             size_t *i)
+{
+    while (*i < len && (isspace((unsigned char)text[*i]) || text[*i] == ','))
+        (*i)++;
+    if (*i >= len || text[*i] == ']')
+        return PIN_DEP_ARR_END;
+    if (text[*i] != '{')
+        return PIN_DEP_BAD_ELEM;
+    return PIN_DEP_OBJ;
+}
+
+/* Walk the "dependencies" array elements at depth 1, tracking string
+ * state, looking for the unique object whose "name" equals dep_name. */
+static bool pin_dep_walk_array(const char *text, size_t len, size_t arr,
+                               const char *dep_name, size_t *val_start,
+                               size_t *val_end, char *error,
+                               size_t error_cap)
+{
     size_t name_hits = 0;
     size_t i = arr + 1u;
     bool ok = false;
     while (i < len && !ok) {
-        /* skip ws and element separators */
-        while (i < len && (isspace((unsigned char)text[i]) || text[i] == ','))
-            i++;
-        if (i >= len) break;
-        if (text[i] == ']') break;
-        if (text[i] != '{') {
+        enum pin_dep_next nx = pin_dep_skip_to_obj(text, len, &i);
+        if (nx == PIN_DEP_ARR_END) break;
+        if (nx == PIN_DEP_BAD_ELEM) {
             (void)snprintf(error, error_cap,
                            "dependencies element is not an object");
             LOG_ERROR(PF_LOG, "pin-dep: %s", error);
             return false;
         }
         size_t obj_start = i;
-        /* find the matching close brace, string-aware */
-        int depth = 0;
-        bool in_str = false, esc = false;
-        size_t obj_end = SIZE_MAX;
-        for (size_t j = obj_start; j < len; j++) {
-            char c = text[j];
-            if (in_str) {
-                if (esc) esc = false;
-                else if (c == '\\') esc = true;
-                else if (c == '"') in_str = false;
-                continue;
-            }
-            if (c == '"') in_str = true;
-            else if (c == '{') depth++;
-            else if (c == '}') {
-                depth--;
-                if (depth == 0) {
-                    obj_end = j;
-                    break;
-                }
-            }
-        }
+        size_t obj_end = pin_dep_find_obj_end(text, obj_start, len);
         if (obj_end == SIZE_MAX) {
             (void)snprintf(error, error_cap, "unbalanced dependency object");
             LOG_ERROR(PF_LOG, "pin-dep: %s", error);
             return false;
         }
-        /* Within [obj_start, obj_end): does a "name" string equal
-         * dep_name? Record the "root" value span. Explicit string spans. */
         bool name_match = false;
         size_t root_vs = SIZE_MAX, root_ve = SIZE_MAX;
-        size_t j = obj_start;
-        while (j < obj_end) {
-            if (text[j] != '"') {
-                j++;
-                continue;
-            }
-            size_t s0 = ++j;
-            bool e = false;
-            while (j < obj_end && (text[j] != '"' || e)) {
-                if (e) e = false;
-                else if (text[j] == '\\') e = true;
-                j++;
-            }
-            size_t s1 = j; /* string content [s0, s1) */
-            j++;
-            /* key? next non-ws char is ':' */
-            size_t k = j;
-            while (k < obj_end && isspace((unsigned char)text[k])) k++;
-            bool is_key = k < obj_end && text[k] == ':';
-            size_t slen = s1 - s0;
-            if (is_key && slen == 4 && memcmp(text + s0, "name", 4) == 0) {
-                /* value string follows */
-                size_t v = k + 1;
-                while (v < obj_end && isspace((unsigned char)text[v])) v++;
-                if (v < obj_end && text[v] == '"') {
-                    size_t v0 = ++v;
-                    bool e2 = false;
-                    while (v < obj_end && (text[v] != '"' || e2)) {
-                        if (e2) e2 = false;
-                        else if (text[v] == '\\') e2 = true;
-                        v++;
-                    }
-                    if ((size_t)(v - v0) == strlen(dep_name) &&
-                        memcmp(text + v0, dep_name, strlen(dep_name)) == 0)
-                        name_match = true;
-                }
-            } else if (is_key && slen == 4 &&
-                       memcmp(text + s0, "root", 4) == 0) {
-                size_t v = k + 1;
-                while (v < obj_end && isspace((unsigned char)text[v])) v++;
-                if (v < obj_end && text[v] == '"') {
-                    size_t v0 = ++v;
-                    bool e2 = false;
-                    while (v < obj_end && (text[v] != '"' || e2)) {
-                        if (e2) e2 = false;
-                        else if (text[v] == '\\') e2 = true;
-                        v++;
-                    }
-                    root_vs = v0;
-                    root_ve = v;
-                }
-            }
-        }
+        pin_dep_scan_obj_fields(text, obj_start, obj_end, dep_name,
+                                &name_match, &root_vs, &root_ve);
         if (name_match) {
             name_hits++;
             if (root_vs == SIZE_MAX || root_ve - root_vs != 64) {
@@ -1019,6 +1235,24 @@ static bool pin_dep_locate(const char *text, size_t len, const char *dep_name,
         return false;
     }
     return true;
+}
+
+/* Byte scanner over JSON text: tracks string state and {} depth. Finds the
+ * "dependencies" array, then the object element whose "name" string equals
+ * dep_name, then the "root" string INSIDE that same object span. Returns
+ * the value span (64 chars) via [val_start, val_end). */
+static bool pin_dep_locate(const char *text, size_t len, const char *dep_name,
+                           size_t *val_start, size_t *val_end,
+                           char *error, size_t error_cap)
+{
+    size_t arr = pin_dep_find_array(text, len);
+    if (arr == SIZE_MAX) {
+        (void)snprintf(error, error_cap, "no dependencies array found");
+        LOG_ERROR(PF_LOG, "pin-dep: %s", error);
+        return false;
+    }
+    return pin_dep_walk_array(text, len, arr, dep_name, val_start, val_end,
+                              error, error_cap);
 }
 
 static int cmd_pin_dep(const char *dir, const char *dep_name,
@@ -1120,48 +1354,52 @@ static int cmd_pin_dep(const char *dir, const char *dep_name,
 
 /* ── admission signing seed (the census signer seed convention) ────── */
 
-static bool pf_seed_load_or_create(const char *path, uint8_t seed[32])
+/* Load an existing 32-raw-byte seed from an already-open fd (closes it). */
+static bool pf_seed_load(int fd, const char *path, uint8_t seed[32])
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        struct stat st;
-        uint8_t raw[32];
-        size_t off = 0;
-        bool ok = fstat(fd, &st) == 0 && st.st_size == 32;
-        while (ok && off < sizeof(raw)) {
-            ssize_t r = read(fd, raw + off, sizeof(raw) - off);
-            if (r <= 0) ok = false;
-            else off += (size_t)r;
-        }
-        close(fd);
-        if (!ok)
-            LOG_FAIL(PF_LOG, "signer seed %s must be exactly 32 raw bytes",
-                     path);
-        memcpy(seed, raw, sizeof(raw));
-        memory_cleanse(raw, sizeof(raw));
-        return true;
+    struct stat st;
+    uint8_t raw[32];
+    size_t off = 0;
+    bool ok = fstat(fd, &st) == 0 && st.st_size == 32;
+    while (ok && off < sizeof(raw)) {
+        ssize_t r = read(fd, raw + off, sizeof(raw) - off);
+        if (r <= 0) ok = false;
+        else off += (size_t)r;
     }
-    if (errno != ENOENT)
-        LOG_FAIL(PF_LOG, "open signer seed %s: %s", path, strerror(errno));
+    close(fd);
+    if (!ok)
+        LOG_FAIL(PF_LOG, "signer seed %s must be exactly 32 raw bytes",
+                 path);
+    memcpy(seed, raw, sizeof(raw));
+    memory_cleanse(raw, sizeof(raw));
+    return true;
+}
+
+/* Ensure the seed file's parent directory exists. */
+static bool pf_seed_mkdir_for(const char *path)
+{
     const char *slash = strrchr(path, '/');
     if (!slash)
         LOG_FAIL(PF_LOG, "signer seed path %s has no directory", path);
-    {
-        size_t dir_len = (size_t)(slash - path);
-        char *dir = zcl_malloc(dir_len + 1u, "factory.seed.dir");
-        if (!dir)
-            LOG_FAIL(PF_LOG, "seed dir alloc");
-        memcpy(dir, path, dir_len);
-        dir[dir_len] = '\0';
-        if (!pf_mkdir_p(dir)) {
-            free(dir);
-            return false;
-        }
-        free(dir);
-    }
+    size_t dir_len = (size_t)(slash - path);
+    char *dir = zcl_malloc(dir_len + 1u, "factory.seed.dir");
+    if (!dir)
+        LOG_FAIL(PF_LOG, "seed dir alloc");
+    memcpy(dir, path, dir_len);
+    dir[dir_len] = '\0';
+    bool ok = pf_mkdir_p(dir);
+    free(dir);
+    return ok;
+}
+
+/* Generate a fresh 32-byte seed and write it to a brand-new file. */
+static bool pf_seed_create(const char *path, uint8_t seed[32])
+{
+    if (!pf_seed_mkdir_for(path))
+        return false;
     if (!rng_fill(seed, 32))
         LOG_FAIL(PF_LOG, "kernel CSPRNG refused 32 bytes");
-    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0)
         LOG_FAIL(PF_LOG, "create signer seed %s: %s", path,
                  strerror(errno));
@@ -1179,6 +1417,16 @@ static bool pf_seed_load_or_create(const char *path, uint8_t seed[32])
     LOG_WARN(PF_LOG, "generated NEW factory signer seed at %s (mode 0600, "
              "raw 32 bytes)", path);
     return true;
+}
+
+static bool pf_seed_load_or_create(const char *path, uint8_t seed[32])
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0)
+        return pf_seed_load(fd, path, seed);
+    if (errno != ENOENT)
+        LOG_FAIL(PF_LOG, "open signer seed %s: %s", path, strerror(errno));
+    return pf_seed_create(path, seed);
 }
 
 /* ── the run pipeline ─────────────────────────────────────────────── */
@@ -2852,6 +3100,46 @@ static bool pf_json_volatile_key(const char *key)
            strcmp(key, "error") == 0;
 }
 
+static bool pf_json_equiv(const struct json_value *a,
+                          const struct json_value *b);
+
+/* JSON_ARR case of pf_json_equiv, split out to keep the dispatcher's own
+ * complexity under the cap. */
+static bool pf_json_equiv_arr(const struct json_value *a,
+                              const struct json_value *b)
+{
+    if (a->num_children != b->num_children)
+        return false;
+    for (size_t i = 0; i < a->num_children; i++)
+        if (!pf_json_equiv(&a->children[i], &b->children[i]))
+            return false;
+    return true;
+}
+
+/* JSON_OBJ case of pf_json_equiv, split out to keep the dispatcher's own
+ * complexity under the cap. */
+static bool pf_json_equiv_obj(const struct json_value *a,
+                              const struct json_value *b)
+{
+    size_t na = 0, nb = 0;
+    for (size_t i = 0; i < a->num_children; i++)
+        if (!pf_json_volatile_key(a->keys[i]))
+            na++;
+    for (size_t i = 0; i < b->num_children; i++)
+        if (!pf_json_volatile_key(b->keys[i]))
+            nb++;
+    if (na != nb)
+        return false;
+    for (size_t i = 0; i < a->num_children; i++) {
+        if (pf_json_volatile_key(a->keys[i]))
+            continue;
+        const struct json_value *bv = json_get(b, a->keys[i]);
+        if (!bv || !pf_json_equiv(&a->children[i], bv))
+            return false;
+    }
+    return true;
+}
+
 /* Recursive structural equality with the volatile keys skipped. */
 static bool pf_json_equiv(const struct json_value *a,
                           const struct json_value *b)
@@ -2870,31 +3158,9 @@ static bool pf_json_equiv(const struct json_value *a,
     case JSON_STR:
         return strcmp(a->val.s, b->val.s) == 0;
     case JSON_ARR:
-        if (a->num_children != b->num_children)
-            return false;
-        for (size_t i = 0; i < a->num_children; i++)
-            if (!pf_json_equiv(&a->children[i], &b->children[i]))
-                return false;
-        return true;
-    case JSON_OBJ: {
-        size_t na = 0, nb = 0;
-        for (size_t i = 0; i < a->num_children; i++)
-            if (!pf_json_volatile_key(a->keys[i]))
-                na++;
-        for (size_t i = 0; i < b->num_children; i++)
-            if (!pf_json_volatile_key(b->keys[i]))
-                nb++;
-        if (na != nb)
-            return false;
-        for (size_t i = 0; i < a->num_children; i++) {
-            if (pf_json_volatile_key(a->keys[i]))
-                continue;
-            const struct json_value *bv = json_get(b, a->keys[i]);
-            if (!bv || !pf_json_equiv(&a->children[i], bv))
-                return false;
-        }
-        return true;
-    }
+        return pf_json_equiv_arr(a, b);
+    case JSON_OBJ:
+        return pf_json_equiv_obj(a, b);
     }
     return false;
 }
