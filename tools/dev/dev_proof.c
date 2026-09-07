@@ -3423,6 +3423,164 @@ static uint64_t directory_bytes_sum(const char *dir)
  * A donor being seeded from while it is reaped degrades gracefully: the
  * seed walk skips files that vanish, and hard links already created keep
  * their inodes after the donor names are unlinked. */
+/* Is this pool entry an idle generation the reaper may consider, and what
+ * does its marker say? Returns false for a foreign tag, the caller's own
+ * generation, an untimestampable tree, or one still in use. */
+static bool dp_reap_survey(const char *parent, const char *in_use,
+                           const char *name, int64_t now,
+                           struct warm_reap_entry *slot)
+{
+    char candidate[PATH_MAX];
+    int64_t touched = 0;
+    if (!warm_tag_name(name) ||
+        snprintf(candidate, sizeof(candidate), "%s/%s", parent,
+                 name) >= (int)sizeof(candidate) ||
+        strcmp(candidate, in_use) == 0 ||
+        !warm_generation_touched(candidate, &touched))
+        return false;
+    char marker_root[PATH_MAX] = {0}, marker_local[65] = {0};
+    char marker_base[65] = {0};
+    int64_t completed = 0;
+    /* Cross-root generations stay in the pool under their own root's
+     * newest-complete rule below; the grouping, not this read,
+     * decides whose donor survives. */
+    bool complete = warm_marker_read(candidate, marker_root,
+                                     marker_local, marker_base,
+                                     &completed, NULL);
+    bool live;
+    if (complete) {
+        /* The lease lives under the marked root, which may be a
+         * sibling checkout sharing this pool; the marker root is
+         * validated absolute and escape-free on read. */
+        live = warm_donor_live(marker_root, marker_local,
+                               marker_base) ||
+               now - touched <= PROOF_WARM_IDLE_ACTIVE_SECONDS;
+    } else {
+        live = now - touched <= PROOF_WARM_IDLE_UNMARKED_SECONDS;
+    }
+    if (live) return false;
+    memset(slot, 0, sizeof(*slot));
+    (void)snprintf(slot->tag, sizeof(slot->tag), "%s", name);
+    (void)snprintf(slot->path, sizeof(slot->path), "%s", candidate);
+    (void)snprintf(slot->root, sizeof(slot->root), "%s",
+                   complete ? marker_root : "");
+    slot->completed = completed;
+    slot->touched = touched;
+    slot->complete = complete;
+    return true;
+}
+
+/* Survey the whole pool. An allocation failure abandons the survey whole:
+ * a partial list could reap a generation whose siblings were never seen. */
+static bool dp_reap_collect(DIR *dir, const char *parent, const char *in_use,
+                            int64_t now, struct warm_reap_entry **entries,
+                            size_t *count)
+{
+    size_t capacity = 0;
+    for (struct dirent *entry = readdir(dir); entry;
+         entry = readdir(dir)) {
+        struct warm_reap_entry surveyed;
+        if (!dp_reap_survey(parent, in_use, entry->d_name, now, &surveyed))
+            continue;
+        if (*count == capacity) {
+            size_t next = capacity ? capacity * 2 : 16;
+            struct warm_reap_entry *grown = zcl_realloc(
+                *entries, next * sizeof(*grown), "proof_warm_reap");
+            if (!grown) {
+                free(*entries);
+                *entries = NULL;
+                *count = 0;
+                return false;
+            }
+            *entries = grown;
+            capacity = next;
+        }
+        (*entries)[(*count)++] = surveyed;
+    }
+    return true;
+}
+
+/* Keep the newest complete generation per root: reap this
+ * one when a same-root sibling wins the donor pick. The pick
+ * is the tested policy; the reaper only groups by root. */
+static bool dp_reap_superseded(const struct warm_reap_entry *entries,
+                               size_t count, size_t i)
+{
+    struct zcl_dev_proof_warm_candidate *group = NULL;
+    size_t group_count = 0, group_cap = 0;
+    size_t self = 0;
+    bool group_ok = true;
+    for (size_t j = 0; j < count; j++) {
+        if (!entries[j].complete ||
+            strcmp(entries[j].root, entries[i].root) != 0)
+            continue;
+        if (group_count == group_cap) {
+            size_t next = group_cap ? group_cap * 2 : 8;
+            struct zcl_dev_proof_warm_candidate *grown =
+                zcl_realloc(group, next * sizeof(*grown),
+                            "proof_warm_reap");
+            if (!grown) {
+                group_ok = false;
+                break;
+            }
+            group = grown;
+            group_cap = next;
+        }
+        struct zcl_dev_proof_warm_candidate *slot =
+            &group[group_count];
+        memset(slot, 0, sizeof(*slot));
+        (void)snprintf(slot->tag, sizeof(slot->tag), "%s",
+                       entries[j].tag);
+        slot->completed = entries[j].completed;
+        slot->touched = entries[j].touched;
+        slot->head_ok = true;
+        slot->live = false;
+        if (j == i) self = group_count;
+        group_count++;
+    }
+    bool reap = false;
+    if (group_ok && group_count > 0) {
+        int best = warm_pick_donor(group, group_count);
+        reap = best >= 0 && (size_t)best != self;
+    }
+    free(group);
+    return reap;
+}
+
+/* Delete one superseded generation, re-proving it is still idle first. */
+static void dp_reap_remove(const struct proof_paths *paths,
+                           const struct warm_reap_entry *entry,
+                           size_t *removed_out, uint64_t *bytes_out)
+{
+    if (!warm_reapable(entry->path)) return;
+    /* Re-read the stamp now the git queries are done. The pool is
+     * shared by every checkout under this parent, so a sibling lane
+     * can claim this generation while it is examined; if it did, it
+     * moved the mtime out of range. */
+    int64_t touched_again = 0;
+    if (!warm_generation_touched(entry->path, &touched_again) ||
+        touched_again != entry->touched)
+        return;
+    /* Measured before the delete: afterward there is nothing left to
+     * walk. Advisory only, so a size that changes mid-measurement
+     * just makes the log line approximate, never wrong enough to act
+     * on -- nothing downstream reads these numbers back. */
+    uint64_t freed = directory_bytes_sum(entry->path);
+    /* --force is safe only because detached and clean were just
+     * proven. What it overrides is git's refusal to delete a tree
+     * that still holds untracked files, and a generation's untracked
+     * files are its build scratch. */
+    const char *argv[] = {"git", "worktree", "remove", "--force",
+                          entry->path, NULL};
+    char output[1024];
+    if (git_capture_within(paths->root, argv,
+                           PROOF_WARM_REMOVE_TIMEOUT_MS, output,
+                           sizeof(output))) {
+        if (removed_out) (*removed_out)++;
+        if (bytes_out) *bytes_out += freed;
+    }
+}
+
 static void generation_pool_reap_ex(const struct proof_paths *paths,
                                     const char *parent, const char *in_use,
                                     size_t max_attempts, size_t *removed_out,
@@ -3435,145 +3593,21 @@ static void generation_pool_reap_ex(const struct proof_paths *paths,
     }
     int64_t now = platform_time_wall_unix();
     struct warm_reap_entry *entries = NULL;
-    size_t count = 0, capacity = 0;
-    bool collect_ok = true;
-    for (struct dirent *entry = readdir(dir); entry;
-         entry = readdir(dir)) {
-        char candidate[PATH_MAX];
-        int64_t touched = 0;
-        if (!warm_tag_name(entry->d_name) ||
-            snprintf(candidate, sizeof(candidate), "%s/%s", parent,
-                     entry->d_name) >= (int)sizeof(candidate) ||
-            strcmp(candidate, in_use) == 0 ||
-            !warm_generation_touched(candidate, &touched))
-            continue;
-        char marker_root[PATH_MAX] = {0}, marker_local[65] = {0};
-        char marker_base[65] = {0};
-        int64_t completed = 0;
-        /* Cross-root generations stay in the pool under their own root's
-         * newest-complete rule below; the grouping, not this read,
-         * decides whose donor survives. */
-        bool complete = warm_marker_read(candidate, marker_root,
-                                         marker_local, marker_base,
-                                         &completed, NULL);
-        bool live;
-        if (complete) {
-            /* The lease lives under the marked root, which may be a
-             * sibling checkout sharing this pool; the marker root is
-             * validated absolute and escape-free on read. */
-            live = warm_donor_live(marker_root, marker_local,
-                                   marker_base) ||
-                   now - touched <= PROOF_WARM_IDLE_ACTIVE_SECONDS;
-        } else {
-            live = now - touched <= PROOF_WARM_IDLE_UNMARKED_SECONDS;
-        }
-        if (live) continue;
-        if (count == capacity) {
-            size_t next = capacity ? capacity * 2 : 16;
-            struct warm_reap_entry *grown = zcl_realloc(
-                entries, next * sizeof(*grown), "proof_warm_reap");
-            if (!grown) {
-                free(entries);
-                entries = NULL;
-                count = capacity = 0;
-                collect_ok = false;
-                break;
-            }
-            entries = grown;
-            capacity = next;
-        }
-        struct warm_reap_entry *slot = &entries[count++];
-        memset(slot, 0, sizeof(*slot));
-        (void)snprintf(slot->tag, sizeof(slot->tag), "%s", entry->d_name);
-        (void)snprintf(slot->path, sizeof(slot->path), "%s", candidate);
-        (void)snprintf(slot->root, sizeof(slot->root), "%s",
-                       complete ? marker_root : "");
-        slot->completed = completed;
-        slot->touched = touched;
-        slot->complete = complete;
-    }
+    size_t count = 0;
+    bool collect_ok = dp_reap_collect(dir, parent, in_use, now, &entries,
+                                      &count);
     (void)closedir(dir);
     size_t attempts = 0;
     for (size_t i = 0; collect_ok && entries && i < count &&
              attempts < max_attempts;
          i++) {
-        bool reap = false;
-        if (!entries[i].complete) {
-            reap = true;
-        } else {
-            /* Keep the newest complete generation per root: reap this
-             * one when a same-root sibling wins the donor pick. The pick
-             * is the tested policy; the reaper only groups by root. */
-            struct zcl_dev_proof_warm_candidate *group = NULL;
-            size_t group_count = 0, group_cap = 0;
-            size_t self = 0;
-            bool group_ok = true;
-            for (size_t j = 0; j < count; j++) {
-                if (!entries[j].complete ||
-                    strcmp(entries[j].root, entries[i].root) != 0)
-                    continue;
-                if (group_count == group_cap) {
-                    size_t next = group_cap ? group_cap * 2 : 8;
-                    struct zcl_dev_proof_warm_candidate *grown =
-                        zcl_realloc(group, next * sizeof(*grown),
-                                    "proof_warm_reap");
-                    if (!grown) {
-                        group_ok = false;
-                        break;
-                    }
-                    group = grown;
-                    group_cap = next;
-                }
-                struct zcl_dev_proof_warm_candidate *slot =
-                    &group[group_count];
-                memset(slot, 0, sizeof(*slot));
-                (void)snprintf(slot->tag, sizeof(slot->tag), "%s",
-                               entries[j].tag);
-                slot->completed = entries[j].completed;
-                slot->touched = entries[j].touched;
-                slot->head_ok = true;
-                slot->live = false;
-                if (j == i) self = group_count;
-                group_count++;
-            }
-            if (group_ok && group_count > 0) {
-                int best = warm_pick_donor(group, group_count);
-                reap = best >= 0 && (size_t)best != self;
-            }
-            free(group);
-        }
-        if (!reap) continue;
+        if (entries[i].complete && !dp_reap_superseded(entries, count, i))
+            continue;
         /* The cap counts candidates that reach git, not directory
          * entries: the queries plus the delete are the only expensive
          * part, and bounding them is what keeps a fast proof fast. */
         attempts++;
-        if (!warm_reapable(entries[i].path)) continue;
-        /* Re-read the stamp now the git queries are done. The pool is
-         * shared by every checkout under this parent, so a sibling lane
-         * can claim this generation while it is examined; if it did, it
-         * moved the mtime out of range. */
-        int64_t touched_again = 0;
-        if (!warm_generation_touched(entries[i].path, &touched_again) ||
-            touched_again != entries[i].touched)
-            continue;
-        /* Measured before the delete: afterward there is nothing left to
-         * walk. Advisory only, so a size that changes mid-measurement
-         * just makes the log line approximate, never wrong enough to act
-         * on -- nothing downstream reads these numbers back. */
-        uint64_t freed = directory_bytes_sum(entries[i].path);
-        /* --force is safe only because detached and clean were just
-         * proven. What it overrides is git's refusal to delete a tree
-         * that still holds untracked files, and a generation's untracked
-         * files are its build scratch. */
-        const char *argv[] = {"git", "worktree", "remove", "--force",
-                              entries[i].path, NULL};
-        char output[1024];
-        if (git_capture_within(paths->root, argv,
-                               PROOF_WARM_REMOVE_TIMEOUT_MS, output,
-                               sizeof(output))) {
-            if (removed_out) (*removed_out)++;
-            if (bytes_out) *bytes_out += freed;
-        }
+        dp_reap_remove(paths, &entries[i], removed_out, bytes_out);
     }
     free(entries);
 }
@@ -3802,17 +3836,13 @@ static bool generation_hooks_configure(const char *generation, char *why,
     return true;
 }
 
-static bool generation_prepare(const struct proof_paths *paths,
-                               const char *local,
-                               struct platform_ram_scratch_lease *ram_lease,
-                               struct proof_warmstart *warm,
-                               char generation[PATH_MAX],
-                               char *why, size_t why_len)
+/* The directory the generation pool sits beside: the checkout's own
+ * parent, with the checkout name trimmed off. */
+static bool dp_generation_parent_dir(const char *root,
+                                     char root_parent[PATH_MAX], char *why,
+                                     size_t why_len)
 {
-    char root_parent[PATH_MAX], parent[PATH_MAX], generation_tag[33];
-    uint8_t generation_hash[ZCL_DEV_PROOF_ROOT_BYTES];
-    if (snprintf(root_parent, sizeof(root_parent), "%s", paths->root) >=
-        (int)sizeof(root_parent)) {
+    if (snprintf(root_parent, PATH_MAX, "%s", root) >= PATH_MAX) {
         proof_why(why, why_len, "proof_generation_path_invalid");
         return false;
     }
@@ -3822,91 +3852,228 @@ static bool generation_prepare(const struct proof_paths *paths,
         return false;
     }
     *slash = 0;
+    return true;
+}
+
+/* One generation per (checkout, local commit) pair, named by a digest over
+ * both so two checkouts never collide in a shared pool. */
+static void dp_generation_tag(const char *root, const char *local,
+                              char generation_tag[33])
+{
+    uint8_t generation_hash[ZCL_DEV_PROOF_ROOT_BYTES];
     struct sha3_256_ctx generation_identity;
     hash_begin(&generation_identity, "zcl.dev_proof_generation_root.v2");
-    sha3_256_write(&generation_identity, (const uint8_t *)paths->root,
-                   strlen(paths->root) + 1);
+    sha3_256_write(&generation_identity, (const uint8_t *)root,
+                   strlen(root) + 1);
     sha3_256_write(&generation_identity, (const uint8_t *)local,
                    strlen(local) + 1);
     sha3_256_finalize(&generation_identity, generation_hash);
     zcl_hex_encode(generation_hash, 16, generation_tag);
-    /* Build and test work here is dominated by fsync, and on a RAM-backed
-     * filesystem fsync costs nothing. When the machine offers one with room to
-     * spare the whole generation — checkout, build tree and test scratch —
-     * lives there; otherwise it stays exactly where it was. The choice is
-     * written to phases.txt so a slow proof can be read against where it ran.
-     * It is deliberately NOT sealed into the receipt: two proofs of the same
-     * source must admit each other whatever storage they happened to use. */
-    char ram_root[PATH_MAX];
-    bool ram_backed = platform_ram_scratch_root(ram_root, sizeof(ram_root), 0);
-    /* Free space seen is not free space kept: N proofs asking at once each
-     * saw the same headroom and together filled the tmpfs. A reservation
-     * held for the life of the generation is what makes this one's yes true
-     * for this one alone. Refusal is not an error — the generation falls
-     * back to disk exactly as if no RAM root had been offered. */
-    bool ram_reserve_refused = false;
-    if (ram_backed &&
+}
+
+/* Build and test work here is dominated by fsync, and on a RAM-backed
+ * filesystem fsync costs nothing. When the machine offers one with room to
+ * spare the whole generation — checkout, build tree and test scratch —
+ * lives there; otherwise it stays exactly where it was. The choice is
+ * written to phases.txt so a slow proof can be read against where it ran.
+ * It is deliberately NOT sealed into the receipt: two proofs of the same
+ * source must admit each other whatever storage they happened to use.
+ *
+ * Free space seen is not free space kept: N proofs asking at once each
+ * saw the same headroom and together filled the tmpfs. A reservation
+ * held for the life of the generation is what makes this one's yes true
+ * for this one alone. Refusal is not an error — the generation falls
+ * back to disk exactly as if no RAM root had been offered. */
+static bool dp_generation_pool(const char *root_parent,
+                               struct platform_ram_scratch_lease *ram_lease,
+                               char parent[PATH_MAX], char ram_root[PATH_MAX],
+                               bool *ram_backed, bool *ram_reserve_refused)
+{
+    *ram_backed = platform_ram_scratch_root(ram_root, PATH_MAX, 0);
+    *ram_reserve_refused = false;
+    if (*ram_backed &&
         !platform_ram_scratch_reserve(ram_root, proof_ram_reserve_bytes(),
                                       ram_lease)) {
-        ram_backed = false;
-        ram_reserve_refused = true;
+        *ram_backed = false;
+        *ram_reserve_refused = true;
     }
-    int parent_len = ram_backed
-        ? snprintf(parent, sizeof(parent), "%s/z23p", ram_root)
-        : snprintf(parent, sizeof(parent), "%s/.z23p", root_parent);
-    if (parent_len <= 0 || (size_t)parent_len >= sizeof(parent) ||
+    int parent_len = *ram_backed
+        ? snprintf(parent, PATH_MAX, "%s/z23p", ram_root)
+        : snprintf(parent, PATH_MAX, "%s/.z23p", root_parent);
+    return parent_len > 0 && (size_t)parent_len < PATH_MAX;
+}
+
+/* Where this proof ran, for a reader comparing a slow proof against its
+ * storage. Display only; nothing downstream reads it back. */
+static void dp_generation_storage_note(const struct proof_paths *paths,
+                                       const char *ram_root, bool ram_backed,
+                                       bool ram_reserve_refused,
+                                       const char *generation)
+{
+    if (!paths->phases[0]) return;
+    char storage_note[192];
+    if (ram_reserve_refused) {
+        uint64_t ram_free_bytes = 0;
+        (void)platform_disk_space_available(ram_root, &ram_free_bytes);
+        char ram_pool[PATH_MAX];
+        size_t ram_pool_count = 0;
+        if (snprintf(ram_pool, sizeof(ram_pool), "%s/z23p", ram_root) <
+            (int)sizeof(ram_pool))
+            ram_pool_count = generation_dir_count(ram_pool);
+        (void)snprintf(storage_note, sizeof(storage_note),
+                       "disk reason=ram_reserve_refused "
+                       "requested_bytes=%llu free_bytes=%llu "
+                       "generations=%zu",
+                       (unsigned long long)proof_ram_reserve_bytes(),
+                       (unsigned long long)ram_free_bytes,
+                       ram_pool_count);
+    } else {
+        (void)snprintf(storage_note, sizeof(storage_note), "%s",
+                       ram_backed ? "ram" : "disk");
+    }
+    (void)zcl_dev_proof_phase_note(paths->phases, "generation_storage",
+                                   storage_note);
+    (void)zcl_dev_proof_phase_note(paths->phases, "generation_root",
+                                   generation);
+}
+
+/* Check the generation out when it is not already there. */
+static bool dp_generation_checkout(const struct proof_paths *paths,
+                                   const char *generation, const char *local,
+                                   char *why, size_t why_len)
+{
+    struct stat st;
+    if (lstat(generation, &st) == 0) return true;
+    if (errno != ENOENT) {
+        proof_why(why, why_len, "proof_generation_inspection_failed");
+        return false;
+    }
+    /* A RAM-backed generation does not survive a reboot, and git still
+     * holds its registration. Drop registrations whose directory is gone
+     * before adding, or the add fails on a name the tmpfs already lost. */
+    const char *prune_argv[] = {"git", "worktree", "prune", NULL};
+    char pruned[ZCL_DEVLOOP_OUTPUT_MAX];
+    (void)git_capture(paths->root, prune_argv, pruned, sizeof(pruned));
+    const char *argv[] = {"git", "worktree", "add", "--detach",
+                          generation, local, NULL};
+    char output[ZCL_DEVLOOP_OUTPUT_MAX];
+    if (!git_capture(paths->root, argv, output, sizeof(output))) {
+        proof_why(why, why_len, "proof_generation_checkout_failed");
+        return false;
+    }
+    return true;
+}
+
+/* The generation's own build tree. Distinct from the dependency copy
+ * below: nothing is missing from the checkout here, the generation's own
+ * build tree could not be created. Conflating the two sent a reader
+ * hunting a vendored archive that was present all along. */
+static bool dp_generation_build_dirs(const char *generation, char *why,
+                                     size_t why_len)
+{
+    char build_dir[PATH_MAX], bin_dir[PATH_MAX];
+    if (snprintf(build_dir, sizeof(build_dir), "%s/build", generation) >=
+            (int)sizeof(build_dir) ||
+        snprintf(bin_dir, sizeof(bin_dir), "%s/build/bin", generation) >=
+            (int)sizeof(bin_dir) ||
+        !platform_private_directory_ensure(build_dir) ||
+        !platform_private_directory_ensure(bin_dir)) {
+        proof_whyf(why, why_len, "proof_generation_build_dir_unwritable:%s",
+                   build_dir);
+        return false;
+    }
+    return true;
+}
+
+/* One generation dependency, copied in with its own inode. */
+static bool dp_generation_dependency(const char *root, const char *generation,
+                                     const char *dependency, char *why,
+                                     size_t why_len)
+{
+    char source[PATH_MAX], target[PATH_MAX];
+    if (snprintf(source, sizeof(source), "%s/%s", root,
+                 dependency) >= (int)sizeof(source) ||
+        snprintf(target, sizeof(target), "%s/%s", generation,
+                 dependency) >= (int)sizeof(target)) {
+        proof_whyf(why, why_len,
+                   "proof_generation_dependency_path_too_long:%s",
+                   dependency);
+        return false;
+    }
+    struct stat source_st;
+    if (lstat(source, &source_st) != 0) {
+        /* vendor/ entries come from the vendored-archive build; the
+         * installed hooks come from arming the clone; the hotswap
+         * fixture images come from any test-binary build. Naming the
+         * target turns a class into one command the reader can run. */
+        const char *fix = strncmp(dependency, "vendor/", 7) == 0
+                              ? "make vendor"
+                              : strncmp(dependency, "build/hotswap/",
+                                        14) == 0
+                                    ? "make test_parallel"
+                                    : "make install-hooks";
+        proof_whyf(why, why_len,
+                   "proof_generation_dependency_unavailable:%s (%s)",
+                   dependency, fix);
+        return false;
+    }
+    /* The source is right there. Telling the reader to rebuild it sent
+     * ten proof attempts hunting a vendored archive that was present all
+     * along; say what actually failed and why. */
+    errno = 0;
+    if (!dependency_parent_ensure(target) ||
+        !dependency_materialize(source, target)) {
+        proof_whyf(why, why_len,
+                   "proof_generation_dependency_copy_failed:%s (%s)",
+                   dependency, proof_errno_name(errno));
+        return false;
+    }
+    return true;
+}
+
+/* Warm start is advisory: it fills `warm` for the receipt sidecar and
+ * never fails the prepare. Any refusal inside degrades to the cold
+ * build the proof has always run. ZCL_DEV_PROOF_WARM=0 forces that
+ * cold path for measurement. */
+static void dp_generation_warm(const struct proof_paths *paths,
+                               const char *parent, const char *generation,
+                               const char *local, struct proof_warmstart *warm)
+{
+    if (!warm) return;
+    if (warm_start_disabled()) {
+        (void)snprintf(warm->cold_reason, sizeof(warm->cold_reason), "%s",
+                       "disabled");
+        return;
+    }
+    memset(warm, 0, sizeof(*warm));
+    (void)warm_start_generation(paths, parent, generation, local, warm);
+}
+
+static bool generation_prepare(const struct proof_paths *paths,
+                               const char *local,
+                               struct platform_ram_scratch_lease *ram_lease,
+                               struct proof_warmstart *warm,
+                               char generation[PATH_MAX],
+                               char *why, size_t why_len)
+{
+    char root_parent[PATH_MAX], parent[PATH_MAX], generation_tag[33];
+    if (!dp_generation_parent_dir(paths->root, root_parent, why, why_len))
+        return false;
+    dp_generation_tag(paths->root, local, generation_tag);
+    char ram_root[PATH_MAX];
+    bool ram_backed = false, ram_reserve_refused = false;
+    if (!dp_generation_pool(root_parent, ram_lease, parent, ram_root,
+                            &ram_backed, &ram_reserve_refused) ||
         snprintf(generation, PATH_MAX, "%s/%s", parent, generation_tag) >=
             PATH_MAX ||
         !platform_private_directory_ensure(parent)) {
         proof_why(why, why_len, "proof_generation_path_invalid");
         return false;
     }
-    if (paths->phases[0]) {
-        char storage_note[192];
-        if (ram_reserve_refused) {
-            uint64_t ram_free_bytes = 0;
-            (void)platform_disk_space_available(ram_root, &ram_free_bytes);
-            char ram_pool[PATH_MAX];
-            size_t ram_pool_count = 0;
-            if (snprintf(ram_pool, sizeof(ram_pool), "%s/z23p", ram_root) <
-                (int)sizeof(ram_pool))
-                ram_pool_count = generation_dir_count(ram_pool);
-            (void)snprintf(storage_note, sizeof(storage_note),
-                           "disk reason=ram_reserve_refused "
-                           "requested_bytes=%llu free_bytes=%llu "
-                           "generations=%zu",
-                           (unsigned long long)proof_ram_reserve_bytes(),
-                           (unsigned long long)ram_free_bytes,
-                           ram_pool_count);
-        } else {
-            (void)snprintf(storage_note, sizeof(storage_note), "%s",
-                           ram_backed ? "ram" : "disk");
-        }
-        (void)zcl_dev_proof_phase_note(paths->phases, "generation_storage",
-                                       storage_note);
-        (void)zcl_dev_proof_phase_note(paths->phases, "generation_root",
-                                       generation);
-    }
-    struct stat st;
-    if (lstat(generation, &st) != 0) {
-        if (errno != ENOENT) {
-            proof_why(why, why_len, "proof_generation_inspection_failed");
-            return false;
-        }
-        /* A RAM-backed generation does not survive a reboot, and git still
-         * holds its registration. Drop registrations whose directory is gone
-         * before adding, or the add fails on a name the tmpfs already lost. */
-        const char *prune_argv[] = {"git", "worktree", "prune", NULL};
-        char pruned[ZCL_DEVLOOP_OUTPUT_MAX];
-        (void)git_capture(paths->root, prune_argv, pruned, sizeof(pruned));
-        const char *argv[] = {"git", "worktree", "add", "--detach",
-                              generation, local, NULL};
-        char output[ZCL_DEVLOOP_OUTPUT_MAX];
-        if (!git_capture(paths->root, argv, output, sizeof(output))) {
-            proof_why(why, why_len, "proof_generation_checkout_failed");
-            return false;
-        }
-    }
+    dp_generation_storage_note(paths, ram_root, ram_backed,
+                               ram_reserve_refused, generation);
+    if (!dp_generation_checkout(paths, generation, local, why, why_len))
+        return false;
     if (!generation_gitlink_prepare(paths, generation, why, why_len))
         return false;
     /* Preserve the complete ignored compiler-input sets that source identity
@@ -3958,61 +4125,12 @@ static bool generation_prepare(const struct proof_paths *paths,
         "build/hotswap/zcl_rollback_fixture_b.so",
 #endif
     };
-    char build_dir[PATH_MAX], bin_dir[PATH_MAX];
-    if (snprintf(build_dir, sizeof(build_dir), "%s/build", generation) >=
-            (int)sizeof(build_dir) ||
-        snprintf(bin_dir, sizeof(bin_dir), "%s/build/bin", generation) >=
-            (int)sizeof(bin_dir) ||
-        !platform_private_directory_ensure(build_dir) ||
-        !platform_private_directory_ensure(bin_dir)) {
-        /* Distinct from the dependency loop below: nothing is missing from
-         * the checkout here, the generation's own build tree could not be
-         * created. Conflating the two sent a reader hunting a vendored
-         * archive that was present all along. */
-        proof_whyf(why, why_len, "proof_generation_build_dir_unwritable:%s",
-                   build_dir);
+    if (!dp_generation_build_dirs(generation, why, why_len))
         return false;
-    }
-    for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++) {
-        char source[PATH_MAX], target[PATH_MAX];
-        if (snprintf(source, sizeof(source), "%s/%s", paths->root,
-                     dependencies[i]) >= (int)sizeof(source) ||
-            snprintf(target, sizeof(target), "%s/%s", generation,
-                     dependencies[i]) >= (int)sizeof(target)) {
-            proof_whyf(why, why_len,
-                       "proof_generation_dependency_path_too_long:%s",
-                       dependencies[i]);
+    for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++)
+        if (!dp_generation_dependency(paths->root, generation,
+                                      dependencies[i], why, why_len))
             return false;
-        }
-        struct stat source_st;
-        if (lstat(source, &source_st) != 0) {
-            /* vendor/ entries come from the vendored-archive build; the
-             * installed hooks come from arming the clone; the hotswap
-             * fixture images come from any test-binary build. Naming the
-             * target turns a class into one command the reader can run. */
-            const char *fix = strncmp(dependencies[i], "vendor/", 7) == 0
-                                  ? "make vendor"
-                                  : strncmp(dependencies[i], "build/hotswap/",
-                                            14) == 0
-                                        ? "make test_parallel"
-                                        : "make install-hooks";
-            proof_whyf(why, why_len,
-                       "proof_generation_dependency_unavailable:%s (%s)",
-                       dependencies[i], fix);
-            return false;
-        }
-        /* The source is right there. Telling the reader to rebuild it sent
-         * ten proof attempts hunting a vendored archive that was present all
-         * along; say what actually failed and why. */
-        errno = 0;
-        if (!dependency_parent_ensure(target) ||
-            !dependency_materialize(source, target)) {
-            proof_whyf(why, why_len,
-                       "proof_generation_dependency_copy_failed:%s (%s)",
-                       dependencies[i], proof_errno_name(errno));
-            return false;
-        }
-    }
     if (!generation_hooks_configure(generation, why, why_len))
         return false;
     if (!worktree_exact(generation, local, false, why, why_len)) {
@@ -4036,20 +4154,7 @@ static bool generation_prepare(const struct proof_paths *paths,
         {.tv_nsec = UTIME_NOW},
     };
     (void)utimensat(AT_FDCWD, generation, taken, AT_SYMLINK_NOFOLLOW);
-    /* Warm start is advisory: it fills `warm` for the receipt sidecar and
-     * never fails the prepare. Any refusal inside degrades to the cold
-     * build the proof has always run. ZCL_DEV_PROOF_WARM=0 forces that
-     * cold path for measurement. */
-    if (warm) {
-        if (warm_start_disabled()) {
-            (void)snprintf(warm->cold_reason, sizeof(warm->cold_reason), "%s",
-                           "disabled");
-        } else {
-            memset(warm, 0, sizeof(*warm));
-            (void)warm_start_generation(paths, parent, generation, local,
-                                        warm);
-        }
-    }
+    dp_generation_warm(paths, parent, generation, local, warm);
     /* Last, so it can only ever run against a generation that is stamped
      * and therefore cannot be the thing reclaimed, and so it sits after
      * every statement that can set `why`. Placed here it has no reachable
