@@ -1148,6 +1148,22 @@ REMOTE_COMMAND_CLASS("fleet.experiment.export", REMOTE_CLASS_NEVER, "")
  * them from its own checkout, so the remote form buys no capability.
  */
 REMOTE_COMMAND_CLASS("fleet.objectives", REMOTE_CLASS_NEVER, "")
+/* ── which key may call which fleet leaf ────────────────────────────────
+ * All four are NEVER. `fleet roles list` and `fleet roles check` are
+ * authority reads, which this table's own rule excludes from READ_ONLY:
+ * they answer "which keys does this node trust, and for what", the exact
+ * map an attacker needs to pick the one key worth stealing, and a peer
+ * learns nothing from them about what this machine is doing. `grant` and
+ * `revoke` are worse than mutating — they append rows signed by THIS
+ * node's key, so a remote form would let a caller decide, in this node's
+ * own name, who this node trusts. Roles are this node's own decision
+ * about a key and never a statement accepted from a peer
+ * (docs/FLEET_ROLES.md); a remote leaf would be exactly that statement.
+ */
+REMOTE_COMMAND_CLASS("fleet.roles.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.roles.grant", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.roles.revoke", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.roles.check", REMOTE_CLASS_NEVER, "")
 /* ── one-paste fleet enrolment ──────────────────────────────────────────
  * All four are NEVER, and `fleet.machines` is the reason the rule exists.
  * The fleet map — which computers this owner has, what they run, how much
