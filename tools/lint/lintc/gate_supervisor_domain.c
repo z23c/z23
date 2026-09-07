@@ -86,6 +86,13 @@
  *   format desyncs its structural checks and fails closed into that same
  *   UNPROVEN. The per-root probes' `|| true` mask (a failed oracle reads
  *   as EMPTY, hitting the per-root UNPROVEN instead) is reproduced.
+ * - A MANDATORY index extension ('link', 'sdir') is refused with a
+ *   dedicated UNPROVEN naming it (sd_oracle_badext) — deliberately NOT
+ *   shell parity: the shell's real git interprets those extensions, but a
+ *   native reader that skipped them could silently read a partial file
+ *   list, the one failure mode a lint gate must not have (verifier
+ *   ruling). Optional extensions (uppercase signatures) are skipped by
+ *   size, exactly like git.
  * - The shell was unbounded; the port's fixed pools (scan set, oracle
  *   capture, and the scan file's RAW/HITS buffers) fail closed with die().
  * - The ZCL_GATE_SCAN_LOG audit hook of gate_lib.sh is not reproduced
@@ -269,6 +276,28 @@ static int sd_walk(const char *root)
  * g_sd_probe_root narrows the match to one root for the per-root probes. */
 static const char *g_sd_probe_root;
 
+/* The mandatory index extension the reader last refused on ("" when the
+ * last read was clean or failed for another reason). */
+static char g_sd_badext[5];
+
+/* A mandatory index extension ('link', 'sdir') the native reader refuses:
+ * named per the verifier ruling, since reading past it could yield a
+ * silently PARTIAL file list. The shell's real git interprets those
+ * extensions, so this block has no shell counterpart — it is the native
+ * reader failing closed where the shell could afford not to. */
+static int sd_oracle_badext(void)
+{
+    fprintf(stderr, "%s: UNPROVEN — the git index carries a mandatory\n"
+            "  extension ('%s') this native reader does not interpret;\n"
+            "  reading past it could silently yield a PARTIAL file list\n"
+            "  (a split index's shared entries, a sparse directory's\n"
+            "  collapsed trees). Refusing to grade. Re-create the index\n"
+            "  without split-index/sparse extensions, or teach\n"
+            "  lint_git_index_foreach the extension first.\n",
+            k_sd_name, g_sd_badext);
+    return 2;
+}
+
 static int sd_oracle_match(const char *path)
 {
     size_t pl = strlen(path);
@@ -307,15 +336,19 @@ static int sd_oracle_add(const char *path, int stage, void *ctx)
 /* The per-declared-root non-emptiness probes: a renamed/emptied root would
  * empty the find and the pathspec together, so refuse to grade. The shell
  * masks git's rc with `|| true` here — a failed oracle reads as EMPTY and
- * hits this same UNPROVEN, so a native reader failure does too. */
+ * hits this same UNPROVEN, so a native reader failure does too — except a
+ * MANDATORY-extension refusal, which is named instead (verifier ruling:
+ * the silent-partial-list failure mode must never pass quietly). */
 static int sd_root_probes(void)
 {
     for (size_t i = 0; i < SD_NROOTS; i++) {
         g_sd_git_used = 0;
         g_sd_git[0] = '\0';
         g_sd_probe_root = k_sd_roots[i];
-        (void)lint_git_index_foreach(sd_oracle_add, NULL);
+        (void)lint_git_index_foreach(sd_oracle_add, NULL, g_sd_badext);
         g_sd_probe_root = NULL;
+        if (g_sd_badext[0])
+            return sd_oracle_badext();
         if (g_sd_git[0] == '\0') {
             fprintf(stderr, "%s: UNPROVEN — declared scan root\n"
                     "  '%s' tracks no *.c at all. A renamed/emptied\n"
@@ -443,7 +476,9 @@ static int sd_cov_oracle(int *out_nexp)
 {
     g_sd_git_used = 0;
     g_sd_git[0] = '\0';
-    int rc = lint_git_index_foreach(sd_oracle_add, NULL);
+    int rc = lint_git_index_foreach(sd_oracle_add, NULL, g_sd_badext);
+    if (rc && g_sd_badext[0])
+        return sd_oracle_badext();
     if (rc) {
         fprintf(stderr, "%s: UNPROVEN — the coverage oracle could not run:\n"
                 "  'git ls-files -- %s' exited %d.\n"

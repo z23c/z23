@@ -213,7 +213,7 @@ int cphs_collect(const char *root)
     g_cphs_nfiles = 0;
     g_cphs_fused = 0;
     if (strcmp(root, ".") == 0) {
-        (void)lint_git_index_foreach(cphs_index_add, NULL);
+        (void)lint_git_index_foreach(cphs_index_add, NULL, NULL);
         return 0;
     }
     struct stat st;

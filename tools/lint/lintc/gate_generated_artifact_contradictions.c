@@ -149,7 +149,7 @@ static int gac_disc_cb(const char *path, int stage, void *ctx)
 static int gac_discover(void)
 {
     int count = 0;
-    (void)lint_git_index_foreach(gac_disc_cb, &count);
+    (void)lint_git_index_foreach(gac_disc_cb, &count, NULL);
     if (count == 1)
         return 0;
     fprintf(stderr, "[%s] UNPROVEN — capability artifact discovery found "

@@ -48,7 +48,11 @@
  * each case, so every inner run sees exactly what `env VAR=VAL... "$self"`
  * would have seen, including operator-set leftovers the case doesn't
  * override. The inner run's merged output is discarded (>/dev/null 2>&1);
- * only its exit code is graded.
+ * only its exit code is graded. A fourth, native-only block then probes the
+ * index reader's extension walk (sdw_ext_probes: a synthetic 'link'
+ * extension is refused and named, a 'TREE' extension changes nothing), so
+ * the SELFTEST PASS line carries one more clause than the shell original's
+ * — a deliberate, verifier-directed divergence.
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -221,6 +225,156 @@ int supervisor_domain_workers_run(const char *mode)
     return 0;
 }
 
+/* ── index-reader probes: mandatory vs optional extensions ──────────────
+ * Library-level, but this gate is the reader's consumer that surfaces a
+ * refusal, so the verifier-ruled probes live in its --selftest: a
+ * synthetic one-entry index carrying a mandatory 'link' extension must be
+ * refused and named; the same index carrying an optional 'TREE' extension
+ * must enumerate byte-identically to no extension at all. The synthetics
+ * are built from scratch — DIRC v2 header, one zeroed-stat entry named
+ * t.c, a 4-byte extension payload, a 20-byte trailer (the reader's
+ * trailer check is structural, not cryptographic). */
+
+enum { SDW_IDXCAP = 128 };
+
+/* DIRC v2, one entry "t.c" (zeroed stat + object id, namelen 3, stage 0,
+ * the 72-byte padded entry), then the optional extension record (4-byte
+ * signature, big-endian size, 4 zero payload bytes), then the zeroed
+ * 20-byte trailer. Returns the byte count. */
+static size_t sdw_idx_build(unsigned char *buf, const char *sig)
+{
+    memset(buf, 0, SDW_IDXCAP);
+    memcpy(buf, "DIRC", 4);
+    buf[7] = 2;                     /* version 2 */
+    buf[11] = 1;                    /* one entry */
+    buf[12 + 61] = 3;               /* entry flags: namelen of "t.c" */
+    memcpy(buf + 12 + 62, "t.c", 3);
+    size_t n = 12 + 72;
+    if (sig) {
+        memcpy(buf + n, sig, 4);
+        buf[n + 7] = 4;             /* payload size */
+        n += 12;
+    }
+    return n + 20;
+}
+
+struct sdw_idxacc { char *list; size_t cap, used; };
+
+static int sdw_idxacc_add(const char *path, int stage, void *ctx)
+{
+    (void)stage;
+    struct sdw_idxacc *a = ctx;
+    int k = snprintf(a->list + a->used, a->cap - a->used, "%s\n", path);
+    if (k < 0 || a->used + (size_t)k + 1 > a->cap)
+        return die("z23-lint: derived buffer overflow\n", "");
+    a->used += (size_t)k;
+    return 0;
+}
+
+/* GIT_INDEX_FILE snapshot around the probes (the operator may have it
+ * set; the four-var selftest snapshot does not cover it). */
+static char g_sdw_gif[4096];
+static int g_sdw_gif_had;
+
+static int sdw_gif_save(void)
+{
+    const char *e = getenv("GIT_INDEX_FILE");
+    g_sdw_gif_had = e != NULL;
+    if (e && ovf(snprintf(g_sdw_gif, sizeof g_sdw_gif, "%s", e),
+                 sizeof g_sdw_gif))
+        return 2;
+    return 0;
+}
+
+static int sdw_gif_restore(void)
+{
+    int rc = g_sdw_gif_had ? setenv("GIT_INDEX_FILE", g_sdw_gif, 1)
+                           : unsetenv("GIT_INDEX_FILE");
+    return rc ? die("z23-lint: setenv failed\n", "") : 0;
+}
+
+/* Build the synthetic index (sig = the extension to append, or NULL),
+ * point GIT_INDEX_FILE at it, and enumerate it into list. Returns the
+ * reader's rc; badext receives a refused mandatory extension's name. */
+static int sdw_ext_probe_one(const char *sig, char *list, size_t cap,
+                             char *badext)
+{
+    unsigned char buf[SDW_IDXCAP];
+    size_t n = sdw_idx_build(buf, sig);
+    char path[64];
+    memcpy(path, "test-tmp/sd_idxext_XXXXXX", 25);
+    int fd = mkstemp(path);
+    if (fd < 0)
+        return die("z23-lint: mktemp failed\n", "");
+    FILE *f = fdopen(fd, "wb");
+    if (!f) {
+        close(fd);
+        unlink(path);
+        return die("z23-lint: write failed\n", "");
+    }
+    int bad = fwrite(buf, 1, n, f) != n;
+    if (fclose(f) != 0)
+        bad = 1;
+    struct sdw_idxacc a = { .list = list, .cap = cap, .used = 0 };
+    int rc = 2;
+    if (!bad && setenv("GIT_INDEX_FILE", path, 1) == 0) {
+        list[0] = '\0';
+        rc = lint_git_index_foreach(sdw_idxacc_add, &a, badext);
+    }
+    if (unlink(path) != 0)
+        return die("z23-lint: unlink failed: %s\n", path);
+    return bad ? die("z23-lint: write failed\n", "") : rc;
+}
+
+/* Baseline: the bare synthetic enumerates exactly its one entry. */
+static int sdw_ext_base(char *list0)
+{
+    char badext[5] = "";
+    int rc = sdw_ext_probe_one(NULL, list0, 256, badext);
+    if (rc == 0 && (badext[0] || strcmp(list0, "t.c\n") != 0))
+        rc = 2;
+    return rc;
+}
+
+/* A mandatory 'link' extension: refused, and the refusal names it. */
+static int sdw_ext_link(void)
+{
+    char list[256], badext[5] = "";
+    int rc = sdw_ext_probe_one("link", list, sizeof list, badext);
+    return rc == 2 && strcmp(badext, "link") == 0 ? 0 : 2;
+}
+
+/* An optional 'TREE' extension: the entry list is byte-identical. */
+static int sdw_ext_tree(const char *list0)
+{
+    char list[256], badext[5] = "";
+    int rc = sdw_ext_probe_one("TREE", list, sizeof list, badext);
+    if (rc == 0 && (badext[0] || strcmp(list, list0) != 0))
+        rc = 2;
+    return rc;
+}
+
+static int sdw_ext_probes(void)
+{
+    int rc = csr_mkdirs("test-tmp");
+    if (rc == 0)
+        rc = sdw_gif_save();
+    char list0[256];
+    if (rc == 0)
+        rc = sdw_ext_base(list0);
+    if (rc == 0)
+        rc = sdw_ext_link();
+    if (rc == 0)
+        rc = sdw_ext_tree(list0);
+    int rr = sdw_gif_restore();
+    if (rc == 0)
+        rc = rr;
+    if (rc)
+        fprintf(stderr, "%s: SELFTEST FAILED — the native index reader's "
+                "extension handling is wrong\n", k_sdw_name);
+    return rc;
+}
+
 /* ── selftest: the three cov_case coverage probes ──────────────────────── */
 
 struct sdw_snap { char val[4096]; int set; };
@@ -321,9 +475,12 @@ int check_supervisor_domain_selftest(void)
         rc = sdw_cov_case(1, "an allowance above the true shortfall was "
                              "silently tolerated", case3);
     if (rc == 0)
+        rc = sdw_ext_probes();
+    if (rc == 0)
         fputs("[check_supervisor_domain] SELFTEST PASS (a full scan passes "
               "coverage, a scan short one declared root is UNPROVEN exit 2, "
-              "and an allowance above the true shortfall is a stale-ratchet "
-              "exit 1)\n", stdout);
+              "an allowance above the true shortfall is a stale-ratchet "
+              "exit 1, and a mandatory index extension is refused while an "
+              "optional one changes nothing)\n", stdout);
     return rc;
 }

@@ -99,12 +99,18 @@ int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ctx)
  * Versions 2, 3 (extended flags), and 4 (prefix-compressed names) are
  * supported. Integrity is structural, not cryptographic: magic, version,
  * entry count, name NULs and v2/v3 eight-byte padding, strict
- * (name, stage) ordering, and the trailing hash all must hold; the SHA-1
- * entry layout (62-byte fixed part) is assumed, so anything else desyncs
- * the checks and fails closed. Failures return 2 SILENTLY — the shell
- * gates this replaces sent git's stderr to /dev/null, so the caller's own
- * UNPROVEN/FATAL block is the only diagnostic byte-parity allows. Buffer
- * exhaustion is the exception: die(), as everywhere in this runtime. */
+ * (name, stage) ordering, the extension walk, and the trailing hash all
+ * must hold; the SHA-1 entry layout (62-byte fixed part, 20-byte trailer)
+ * is assumed, so anything else desyncs the checks and fails closed.
+ * Extensions between the entries and the trailer are walked by signature:
+ * a lowercase-leading signature is MANDATORY by git's own rule ('link',
+ * 'sdir') — the reader refuses it (exit 2) and names it through badext,
+ * because skipping it could yield a silently partial file list; uppercase
+ * signatures are optional and skipped by size. Failures return 2
+ * SILENTLY — the shell gates this replaces sent git's stderr to
+ * /dev/null, so the caller's own UNPROVEN/FATAL block is the only
+ * diagnostic byte-parity allows. Buffer exhaustion is the exception:
+ * die(), as everywhere in this runtime. */
 
 enum { LGI_CAP = 8 << 20, LGI_NAME = 4096 };
 static unsigned char g_lgi_buf[LGI_CAP];
@@ -243,7 +249,8 @@ static int lgi_order(char *prev, int *pstage, int *have, const char *nm,
 }
 
 static int lgi_entries(size_t n, int ver, uint32_t count,
-                       int (*fn)(const char *, int, void *), void *ctx)
+                       int (*fn)(const char *, int, void *), void *ctx,
+                       const unsigned char **rest)
 {
     const unsigned char *p = g_lgi_buf + 12;
     const unsigned char *end = g_lgi_buf + n;
@@ -273,13 +280,46 @@ static int lgi_entries(size_t n, int ver, uint32_t count,
         p = next;
         rc = fn(nm, stage, ctx);
     }
-    if (rc == 0 && (size_t)(end - p) < 20)
-        rc = 2;
+    if (rc == 0)
+        *rest = p;
     return rc;
 }
 
-int lint_git_index_foreach(int (*fn)(const char *, int, void *), void *ctx)
+/* Extension records — 4-byte signature, 4-byte big-endian size, payload —
+ * sit between the entries and the 20-byte trailing hash. Git's own rule:
+ * a signature whose first byte is a lowercase letter is MANDATORY and a
+ * reader that does not interpret it must refuse ('link' split index and
+ * 'sdir' sparse directories are the live ones: ignoring either yields a
+ * silently PARTIAL file list, the one failure mode a lint gate must not
+ * have). Uppercase signatures (TREE, REUC, UNTR, FSMN, EOIE, IEOT) are
+ * optional and skipped by size. A truncated or oversized header refuses
+ * too. A refusal names the extension through badext (NUL-terminated). */
+static int lgi_extensions(const unsigned char *p, const unsigned char *end,
+                          char *badext)
 {
+    while ((size_t)(end - p) > 20) {
+        if ((size_t)(end - p) < 28)
+            return 2;
+        uint32_t sz = lgi_be32(p + 4);
+        if (p[0] >= 'a' && p[0] <= 'z') {
+            if (badext) {
+                memcpy(badext, p, 4);
+                badext[4] = '\0';
+            }
+            return 2;
+        }
+        if ((size_t)sz > (size_t)(end - p) - 28)
+            return 2;
+        p += 8 + sz;
+    }
+    return (size_t)(end - p) == 20 ? 0 : 2;
+}
+
+int lint_git_index_foreach(int (*fn)(const char *, int, void *), void *ctx,
+                           char *badext)
+{
+    if (badext)
+        badext[0] = '\0';
     char ipath[4608];
     if (lgi_locate(ipath, sizeof ipath))
         return 2;
@@ -291,7 +331,12 @@ int lint_git_index_foreach(int (*fn)(const char *, int, void *), void *ctx)
     uint32_t ver = lgi_be32(g_lgi_buf + 4);
     if (ver < 2 || ver > 4)
         return 2;
-    return lgi_entries(n, (int)ver, lgi_be32(g_lgi_buf + 8), fn, ctx);
+    const unsigned char *rest = NULL;
+    int rc = lgi_entries(n, (int)ver, lgi_be32(g_lgi_buf + 8), fn, ctx,
+                         &rest);
+    if (rc == 0)
+        rc = lgi_extensions(rest, g_lgi_buf + n, badext);
+    return rc;
 }
 int replay(FILE *out)
 {
