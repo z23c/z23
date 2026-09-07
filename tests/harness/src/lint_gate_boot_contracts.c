@@ -187,7 +187,22 @@ int t_boot_shutdown_persistence_order_contract(void)
         /* Periodic health callbacks can read node.db. Their sweeper must be
          * joined before the DB checkpoint/close begins. */
         ASSERT(health_stop < wal_checkpoint);
-        ASSERT(count_occurrences(buf, "health_stop();") == 1);
+        /* Two call sites, and exactly two. The online path stops the sweeper
+         * above, before the DB checkpoint. Every offline one-shot
+         * (-mint-anchor, -full-fold, -coldstart-seed-oneshot) starts the
+         * sweeper through boot_phase's lazy health_start() and must stop it in
+         * boot_offline_join_workers_or_exit before the plain registry join:
+         * the sweeper obeys its own lifecycle boundary and not the registry's
+         * global shutdown flag, so an offline exit that skips this loops
+         * forever and never returns. Pin both sites by the text around them,
+         * not by the count alone, so a third unreviewed call still fails. */
+        ASSERT(count_occurrences(buf, "health_stop();") == 2);
+        ASSERT(strstr(buf, "health_stop();\n"
+                           "    /* Stop + join the self-heal condition runner "
+                           "FIRST") != NULL);
+        ASSERT(strstr(buf, "health_stop();\n"
+                           "    int stragglers = thread_registry_join_all(2);")
+               != NULL);
         /* Stage-owned pools must receive their stop signal before the generic
          * registry join, after their supervisor callback users are joined,
          * and while persistence dependencies are still live. */
