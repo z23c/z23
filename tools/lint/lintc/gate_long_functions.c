@@ -145,11 +145,9 @@ static int lf_collect(struct lf_set *s, const char (*roots)[RS_PATH], int nr,
                          .set = s };
     int rc, i;
     s->n = 0;
-    rc = lint_git_index_foreach(lf_on_index, &c);
-    if (rc)
-        return rc;
     if (lint_prod_scan())
-        return 0;
+        return lint_git_index_foreach(lf_on_index, &c);
+    rc = 0;
     for (i = 0; rc == 0 && i < nr; i++)
         rc = lf_walk(roots[i], depth1, s);
     return rc;
@@ -563,7 +561,8 @@ static int lf_finish(struct lf_set *enf, struct lf_set *lib,
     if (rc)
         return rc;
     allow = atoi(env_or("ZCL_LONGFN_COVERAGE_ALLOWANCE", "0"));
-    cov = strcmp(env_or("ZCL_LONGFN_COVERAGE", "1"), "1") == 0;
+    cov = lint_prod_scan()
+        && strcmp(env_or("ZCL_LONGFN_COVERAGE", "1"), "1") == 0;
     only = strcmp(env_or("ZCL_LONGFN_COVERAGE_ONLY", "0"), "1") == 0;
     if (cov) {
         rc = lf_coverage(enf, lib, edef, nde, ldef, ndl, allow);

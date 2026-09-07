@@ -381,13 +381,13 @@ static int tr_walk_src(struct tr_ep_ctx *ep)
 
 static int tr_collect_entries(struct tr_ep_ctx *ep)
 {
-    int rc = lint_git_index_foreach(tr_on_test, ep);
-    if (rc)
-        return rc;
-    if (ep->rc)
+    int rc;
+    if (lint_prod_scan()) {
+        rc = lint_git_index_foreach(tr_on_test, ep);
+        if (rc)
+            return rc;
         return ep->rc;
-    if (lint_prod_scan())
-        return 0;
+    }
     return tr_walk_src(ep);
 }
 

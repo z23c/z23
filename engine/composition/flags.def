@@ -2236,7 +2236,6 @@ Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_parallel.c:1443")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_boot_phase.c:410")
-
 Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",
           "undocumented; first use tools/dev/deploy-dev-lane-selftest.sh:82")
 Z23_FLAG("ZCL_TEST_ONLY", "env_test", "-", "-",
