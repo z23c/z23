@@ -150,6 +150,59 @@ static void hs_why(char *why, size_t why_len, const char *message)
 }
 
 
+static const char *hs_hotswap_guidance_why_not_live(
+    const char *status, const char *phase, const char *why, bool passed,
+    bool compile_green, bool story_green)
+{
+    const char *exact = passed ? "" : why;
+    if (story_green || compile_green)
+        return phase && strcmp(phase, "hotfork_owner_story") == 0
+            ? "HOT_FORK is child-only evidence and never publishes runtime authority"
+            : "reflex candidate evidence never publishes runtime authority";
+    if (!passed && (!exact || !exact[0]))
+        return phase && strcmp(phase, "compile") == 0
+            ? "candidate compilation did not produce a publishable artifact"
+            : "resident dev node did not publish the candidate";
+    (void)status;
+    return exact;
+}
+
+/* A build-config-changing rejection asks for a rebuild before anything else
+ * is worth trying; recognise it by its distinct why-text. */
+static bool hs_hotswap_guidance_needs_rebuild(const char *why)
+{
+    return why && (strstr(why, "DEV_RESTART") ||
+        strstr(why, "service ABI changed") ||
+        strstr(why, "service schema changed") ||
+        strstr(why, "service wire contract changed") ||
+        strstr(why, "frozen KAT identity changed"));
+}
+
+static bool hs_hotswap_guidance_needs_generation(const char *why)
+{
+    return why && (strstr(why, "cannot read RPC auth cookie") ||
+        strstr(why, "returned no activation body"));
+}
+
+static const char *hs_hotswap_guidance_next_command(
+    const char *phase, const char *why, bool passed, bool compile_green,
+    bool story_green)
+{
+    if (story_green)
+        return "keep editing; exact affected proof is running asynchronously";
+    if (compile_green)
+        return "keep editing; the owner-bound shadow story is running";
+    if (passed)
+        return "keep editing; the resident authority owns the next module epoch";
+    if (hs_hotswap_guidance_needs_rebuild(why))
+        return "make -j\"$(getconf _NPROCESSORS_ONLN)\" dev-bin";
+    if (phase && strcmp(phase, "compile") == 0)
+        return "z23-dev dev diagnose latest";
+    if (hs_hotswap_guidance_needs_generation(why))
+        return "z23-dev dev generation current";
+    return "z23-dev dev status --view=full";
+}
+
 void zcl_devloop_hotswap_guidance(
     const char *status, const char *phase, const char *why,
     char *why_not_live, size_t why_not_live_size,
@@ -158,48 +211,20 @@ void zcl_devloop_hotswap_guidance(
     bool passed = status && strcmp(status, "passed") == 0;
     bool compile_green = status && strcmp(status, "reflex_ready") == 0;
     bool story_green = status && strcmp(status, "story_green") == 0;
-    if (why_not_live && why_not_live_size) {
-        const char *exact = passed ? "" : why;
-        if (story_green || compile_green)
-            exact = phase && strcmp(phase, "hotfork_owner_story") == 0
-                ? "HOT_FORK is child-only evidence and never publishes runtime authority"
-                : "reflex candidate evidence never publishes runtime authority";
-        else if (!passed && (!exact || !exact[0])) {
-            exact = phase && strcmp(phase, "compile") == 0
-                ? "candidate compilation did not produce a publishable artifact"
-                : "resident dev node did not publish the candidate";
-        }
-        (void)snprintf(why_not_live, why_not_live_size, "%s", exact);
-    }
+    if (why_not_live && why_not_live_size)
+        (void)snprintf(why_not_live, why_not_live_size, "%s",
+                       hs_hotswap_guidance_why_not_live(
+                           status, phase, why, passed, compile_green,
+                           story_green));
     if (!next_command || next_command_size == 0) return;
-    const char *next =
-        "z23-dev dev status --view=full";
-    if (story_green) {
-        next = "keep editing; exact affected proof is running asynchronously";
-    } else if (compile_green) {
-        next = "keep editing; the owner-bound shadow story is running";
-    } else if (passed) {
-        next = "keep editing; the resident authority owns the next module epoch";
-    } else if ((why && strstr(why, "DEV_RESTART")) ||
-               (why && strstr(why, "service ABI changed")) ||
-               (why && strstr(why, "service schema changed")) ||
-               (why && strstr(why, "service wire contract changed")) ||
-               (why && strstr(why, "frozen KAT identity changed"))) {
-        next = "make -j\"$(getconf _NPROCESSORS_ONLN)\" dev-bin";
-    } else if (phase && strcmp(phase, "compile") == 0) {
-        next = "z23-dev dev diagnose latest";
-    } else if ((why && strstr(why, "cannot read RPC auth cookie")) ||
-               (why && strstr(why, "returned no activation body"))) {
-        next = "z23-dev dev generation current";
-    }
-    (void)snprintf(next_command, next_command_size, "%s", next);
+    (void)snprintf(next_command, next_command_size, "%s",
+                   hs_hotswap_guidance_next_command(
+                       phase, why, passed, compile_green, story_green));
 }
 
-bool zcl_devloop_hotswap_response_error(
-    const struct json_value *response, char *out, size_t out_size)
+static const struct json_value *hs_response_message_field(
+    const struct json_value *response)
 {
-    if (!response || response->type != JSON_OBJ || !out || out_size == 0)
-        return false;
     const struct json_value *message_v = json_get(response, "message");
     const struct json_value *error_v = json_get(response, "error");
     if ((!message_v || message_v->type != JSON_STR) && error_v &&
@@ -208,6 +233,15 @@ bool zcl_devloop_hotswap_response_error(
     if ((!message_v || message_v->type != JSON_STR) && error_v &&
         error_v->type == JSON_STR)
         message_v = error_v;
+    return message_v;
+}
+
+bool zcl_devloop_hotswap_response_error(
+    const struct json_value *response, char *out, size_t out_size)
+{
+    if (!response || response->type != JSON_OBJ || !out || out_size == 0)
+        return false;
+    const struct json_value *message_v = hs_response_message_field(response);
     const char *message = message_v && message_v->type == JSON_STR
         ? json_get_str(message_v) : NULL;
     if (!message || !message[0]) return false;
@@ -439,25 +473,70 @@ static bool hs_sha256_digest_file(const char *path,
     return true;
 }
 
+/* Resolve one depfile argv token to a confined path and, when a snapshot is
+ * requested, record its identity for later mutation detection. Returns
+ * false on a hard error; a generated unity wrapper is skipped (not an
+ * error) by leaving *skip true. */
+static bool hs_depfile_resolve_entry(const char *root, const char *arg,
+                                     bool snapshot, bool *skip,
+                                     struct hs_dep *d)
+{
+    *skip = false;
+    char full[PATH_MAX];
+    int pn = arg[0] == '/'
+        ? snprintf(full, sizeof(full), "%s", arg)
+        : snprintf(full, sizeof(full), "%s/%s", root, arg);
+    struct stat st;
+    if (pn <= 0 || pn >= (int)sizeof(full))
+        return false;
+    if (strstr(full, "/build/hotswap/fast/.resident-") != NULL) {
+        *skip = true; /* generated unity wrapper, never source authority */
+        return true;
+    }
+    if (!hs_regular(full, &st))
+        return false;
+    (void)snprintf(d->path, sizeof(d->path), "%s", full);
+    if (!snapshot)
+        return true;
+    d->dev = st.st_dev;
+    d->ino = st.st_ino;
+    d->size = st.st_size;
+#if defined(_WIN32)
+    d->mtime.tv_sec = st.st_mtime;
+    d->mtime.tv_nsec = 0;
+#else
+    d->mtime = st.st_mtim;
+#endif
+    return hs_sha256_digest_file(full, d->sha256);
+}
+
+/* Read a Makefile-style depfile whole and line-continuation-fold it in
+ * place; returns the colon-delimited prerequisite list, or NULL on any
+ * read, size, or shape failure. */
+static char *hs_depfile_load(const char *path, char *text, size_t text_size)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return NULL;
+    size_t n = fread(text, 1, text_size - 1, f);
+    bool ok = !ferror(f) && !feof(f) ? false : true;
+    fclose(f);
+    if (!ok || n == 0 || n >= text_size)
+        return NULL;
+    text[n] = 0;
+    for (size_t i = 0; i < n; i++)
+        if (text[i] == '\\' && (text[i + 1] == '\n' || text[i + 1] == '\r'))
+            text[i] = text[i + 1] = ' ';
+    return strchr(text, ':');
+}
+
 static bool hs_depfile_read(const char *root, const char *path,
                             struct hs_dep *deps, size_t *count,
                             bool snapshot)
 {
     *count = 0;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return false;
     char text[65536];
-    size_t n = fread(text, 1, sizeof(text) - 1, f);
-    bool ok = !ferror(f) && !feof(f) ? false : true;
-    fclose(f);
-    if (!ok || n == 0 || n >= sizeof(text))
-        return false;
-    text[n] = 0;
-    for (size_t i = 0; i < n; i++)
-        if (text[i] == '\\' && (text[i + 1] == '\n' || text[i + 1] == '\r'))
-            text[i] = text[i + 1] = ' ';
-    char *colon = strchr(text, ':');
+    char *colon = hs_depfile_load(path, text, sizeof(text));
     if (!colon)
         return false;
     const char *argv[HS_DEP_MAX + 1];
@@ -465,32 +544,12 @@ static bool hs_depfile_read(const char *root, const char *path,
     if (argc == 0 || argc >= HS_DEP_MAX)
         return false;
     for (size_t i = 0; i < argc; i++) {
-        char full[PATH_MAX];
-        int pn = argv[i][0] == '/'
-            ? snprintf(full, sizeof(full), "%s", argv[i])
-            : snprintf(full, sizeof(full), "%s/%s", root, argv[i]);
-        struct stat st;
-        if (pn <= 0 || pn >= (int)sizeof(full))
+        bool skip = false;
+        struct hs_dep *d = &deps[*count];
+        if (!hs_depfile_resolve_entry(root, argv[i], snapshot, &skip, d))
             return false;
-        if (strstr(full, "/build/hotswap/fast/.resident-") != NULL)
-            continue; /* generated unity wrapper, never source authority */
-        if (!hs_regular(full, &st))
-            return false;
-        struct hs_dep *d = &deps[(*count)++];
-        (void)snprintf(d->path, sizeof(d->path), "%s", full);
-        if (snapshot) {
-            d->dev = st.st_dev;
-            d->ino = st.st_ino;
-            d->size = st.st_size;
-#if defined(_WIN32)
-            d->mtime.tv_sec = st.st_mtime;
-            d->mtime.tv_nsec = 0;
-#else
-            d->mtime = st.st_mtim;
-#endif
-            if (!hs_sha256_digest_file(full, d->sha256))
-                return false;
-        }
+        if (!skip)
+            (*count)++;
     }
     return true;
 }
@@ -502,6 +561,16 @@ static const struct hs_dep *hs_dep_find(const struct hs_dep *deps,
         if (strcmp(deps[i].path, path) == 0)
             return &deps[i];
     return NULL;
+}
+
+static bool hs_dep_entry_mutated(const struct hs_dep *old,
+                                 const struct hs_dep *cur)
+{
+    return old->dev != cur->dev || old->ino != cur->ino ||
+        old->size != cur->size ||
+        old->mtime.tv_sec != cur->mtime.tv_sec ||
+        old->mtime.tv_nsec != cur->mtime.tv_nsec ||
+        memcmp(old->sha256, cur->sha256, SHA256_OUTPUT_SIZE) != 0;
 }
 
 static bool hs_deps_unchanged(const struct hs_dep *before, size_t before_n,
@@ -524,11 +593,7 @@ static bool hs_deps_unchanged(const struct hs_dep *before, size_t before_n,
                                after[i].path);
             return false;
         }
-        if (old->dev != after[i].dev || old->ino != after[i].ino ||
-            old->size != after[i].size ||
-            old->mtime.tv_sec != after[i].mtime.tv_sec ||
-            old->mtime.tv_nsec != after[i].mtime.tv_nsec ||
-            memcmp(old->sha256, after[i].sha256, SHA256_OUTPUT_SIZE) != 0) {
+        if (hs_dep_entry_mutated(old, &after[i])) {
             if (why && why_len)
                 (void)snprintf(why, why_len,
                                "input mutated during resident build: %.190s",
@@ -548,10 +613,10 @@ static bool hs_sha256_file(const char *path, char out[65])
     return true;
 }
 
-static bool hs_mkdirs(const char *path)
+#if defined(_WIN32)
+static bool hs_mkdirs_win32(const char *path)
 {
     char tmp[PATH_MAX];
-#if defined(_WIN32)
     if (!platform_path_is_absolute(path) || strlen(path) >= sizeof(tmp) ||
         strstr(path, ".."))
         return false;
@@ -569,7 +634,21 @@ static bool hs_mkdirs(const char *path)
         if (!ok) return false;
     }
     return platform_directory_ensure(tmp, 0700);
+}
 #else
+static bool hs_mkdirs_posix_component(char *tmp, char *p, struct stat *st)
+{
+    *p = 0;
+    bool ok = mkdir(tmp, 0700) == 0 ||
+        (errno == EEXIST && lstat(tmp, st) == 0 && S_ISDIR(st->st_mode) &&
+         !S_ISLNK(st->st_mode));
+    *p = '/';
+    return ok;
+}
+
+static bool hs_mkdirs_posix(const char *path)
+{
+    char tmp[PATH_MAX];
     struct stat st;
     if (!path || path[0] != '/' || strlen(path) >= sizeof(tmp))
         return false;
@@ -577,19 +656,23 @@ static bool hs_mkdirs(const char *path)
     for (char *p = tmp + 1; *p; p++) {
         if (*p != '/')
             continue;
-        *p = 0;
-        if (mkdir(tmp, 0700) != 0) {
-            if (errno != EEXIST || lstat(tmp, &st) != 0 ||
-                !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))
-                return false;
-        }
-        *p = '/';
+        if (!hs_mkdirs_posix_component(tmp, p, &st))
+            return false;
     }
     if (mkdir(tmp, 0700) != 0 &&
         (errno != EEXIST || lstat(tmp, &st) != 0 ||
          !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)))
         return false;
     return chmod(tmp, 0700) == 0;
+}
+#endif
+
+static bool hs_mkdirs(const char *path)
+{
+#if defined(_WIN32)
+    return hs_mkdirs_win32(path);
+#else
+    return hs_mkdirs_posix(path);
 #endif
 }
 
@@ -734,6 +817,82 @@ static bool hs_force_cache_copy_for_test(void)
            strcmp(force_copy, "1") == 0;
 }
 
+static bool hs_copy_write_all(int temp_fd, const unsigned char *buffer,
+                              size_t got)
+{
+    size_t written = 0;
+    while (written < got) {
+        ssize_t put = write(temp_fd, buffer + written, got - written);
+        if (put < 0 && errno == EINTR)
+            continue;
+        if (put <= 0)
+            return false;
+        written += (size_t)put;
+    }
+    return true;
+}
+
+static bool hs_copy_stream(int source_fd, int temp_fd)
+{
+    unsigned char buffer[32u * 1024u];
+    for (;;) {
+        ssize_t got = read(source_fd, buffer, sizeof(buffer));
+        if (got == 0)
+            return true;
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (!hs_copy_write_all(temp_fd, buffer, (size_t)got))
+            return false;
+    }
+}
+
+/* Seal the freshly written temp file read-only-and-durable, verify its
+ * digest matches, then publish it under target by hardlink; if target was
+ * concurrently published by another builder, that is success too provided
+ * its content already matches. */
+static bool hs_copy_publish_finish(const char *temp, const char *target,
+                                   const char expected_sha256[65])
+{
+    char actual[65];
+    if (!hs_sha256_file(temp, actual) || strcmp(actual, expected_sha256) != 0)
+        return false;
+    if (hs_link(temp, target) == 0)
+        return true;
+    return errno == EEXIST && hs_regular(target, NULL) &&
+        hs_sha256_file(target, actual) &&
+        strcmp(actual, expected_sha256) == 0 &&
+        chmod(target, 0444) == 0;
+}
+
+/* Open the confined source regular file read-only and allocate the sealed
+ * temp file next to target. On failure both fds are closed/absent and
+ * source_fd and temp_fd are left negative. */
+static bool hs_copy_publish_open(const char *source, char temp[PATH_MAX],
+                                 int *source_fd, int *temp_fd)
+{
+    *source_fd = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_st;
+    if (*source_fd < 0 || fstat(*source_fd, &source_st) != 0 ||
+        !S_ISREG(source_st.st_mode)) {
+        if (*source_fd >= 0) close(*source_fd);
+        *source_fd = -1;
+        return false;
+    }
+#if defined(_WIN32)
+    *temp_fd = mkstemp(temp);
+#else
+    *temp_fd = mkostemp(temp, O_CLOEXEC);
+#endif
+    if (*temp_fd < 0) {
+        close(*source_fd);
+        *source_fd = -1;
+        return false;
+    }
+    return true;
+}
+
 static bool hs_copy_publish(const char *source, const char *target,
                             const char expected_sha256[65])
 {
@@ -741,47 +900,10 @@ static bool hs_copy_publish(const char *source, const char *target,
     int n = snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", target);
     if (n <= 0 || n >= (int)sizeof(temp))
         return false;
-    int source_fd = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat source_st;
-    if (source_fd < 0 || fstat(source_fd, &source_st) != 0 ||
-        !S_ISREG(source_st.st_mode)) {
-        if (source_fd >= 0) close(source_fd);
+    int source_fd, temp_fd;
+    if (!hs_copy_publish_open(source, temp, &source_fd, &temp_fd))
         return false;
-    }
-#if defined(_WIN32)
-    int temp_fd = mkstemp(temp);
-#else
-    int temp_fd = mkostemp(temp, O_CLOEXEC);
-#endif
-    if (temp_fd < 0) {
-        close(source_fd);
-        return false;
-    }
-    unsigned char buffer[32u * 1024u];
-    bool ok = true;
-    for (;;) {
-        ssize_t got = read(source_fd, buffer, sizeof(buffer));
-        if (got == 0)
-            break;
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            ok = false;
-            break;
-        }
-        size_t written = 0;
-        while (written < (size_t)got) {
-            ssize_t put = write(temp_fd, buffer + written,
-                                (size_t)got - written);
-            if (put < 0 && errno == EINTR)
-                continue;
-            if (put <= 0) {
-                ok = false;
-                break;
-            }
-            written += (size_t)put;
-        }
-        if (!ok) break;
-    }
+    bool ok = hs_copy_stream(source_fd, temp_fd);
     if (close(source_fd) != 0)
         ok = false;
 #if defined(_WIN32)
@@ -792,17 +914,7 @@ static bool hs_copy_publish(const char *source, const char *target,
         ok = false;
     if (close(temp_fd) != 0)
         ok = false;
-    char actual[65];
-    if (ok && (!hs_sha256_file(temp, actual) ||
-               strcmp(actual, expected_sha256) != 0))
-        ok = false;
-    if (ok && hs_link(temp, target) != 0) {
-        if (errno != EEXIST || !hs_regular(target, NULL) ||
-            !hs_sha256_file(target, actual) ||
-            strcmp(actual, expected_sha256) != 0 ||
-            chmod(target, 0444) != 0)
-            ok = false;
-    }
+    ok = ok && hs_copy_publish_finish(temp, target, expected_sha256);
     (void)unlink(temp);
     return ok;
 }
@@ -1117,6 +1229,28 @@ static bool hs_run_owner_compile(
 /* Compile-check the static authority shell, but never link or load it. Its
  * mapped pure service is the only dynamic candidate and the only code the
  * forked story invokes. */
+static bool hs_shadow_owner_paths_prepare(
+    const char *root, const char *source_tu, char full[PATH_MAX],
+    char obj[PATH_MAX], char dep[PATH_MAX])
+{
+    return source_tu && source_tu[0] != '/' && !strstr(source_tu, "..") &&
+        snprintf(full, PATH_MAX, "%s/%s", root, source_tu) < PATH_MAX &&
+        hs_regular(full, NULL) &&
+        hs_temp(obj, PATH_MAX, root, ".o") &&
+        hs_temp(dep, PATH_MAX, root, ".d");
+}
+
+static bool hs_shadow_owner_deps_captured(const char *root, const char *dep)
+{
+    struct hs_dep *deps = zcl_malloc(sizeof(*deps) * HS_DEP_MAX,
+                                     "shadow shell dependencies");
+    size_t dep_count = 0;
+    bool ok = deps && hs_depfile_read(root, dep, deps, &dep_count, true) &&
+        dep_count > 0 && !zcl_devloop_process_cancel_requested();
+    free(deps);
+    return ok;
+}
+
 static bool hs_shadow_owner_compile(
     const char *root, const char *source_tu,
     struct zcl_devloop_hotswap_build_receipt *receipt,
@@ -1135,11 +1269,7 @@ static bool hs_shadow_owner_compile(
     (void)plan_us;
     if (!loaded) return false;
     char full[PATH_MAX], obj[PATH_MAX] = {0}, dep[PATH_MAX] = {0};
-    if (!source_tu || source_tu[0] == '/' || strstr(source_tu, "..") ||
-        snprintf(full, sizeof(full), "%s/%s", root, source_tu) >=
-            (int)sizeof(full) || !hs_regular(full, NULL) ||
-        !hs_temp(obj, sizeof(obj), root, ".o") ||
-        !hs_temp(dep, sizeof(dep), root, ".d")) {
+    if (!hs_shadow_owner_paths_prepare(root, source_tu, full, obj, dep)) {
         hs_why(why, why_len, "shadow authority shell is not a confined source");
         if (obj[0]) (void)unlink(obj);
         if (dep[0]) (void)unlink(dep);
@@ -1148,12 +1278,7 @@ static bool hs_shadow_owner_compile(
     bool ok = hs_run_owner_compile(&plan, root, source_tu, obj, dep, result,
                                    elapsed_us, why, why_len);
     if (ok) {
-        struct hs_dep *deps = zcl_malloc(sizeof(*deps) * HS_DEP_MAX,
-                                         "shadow shell dependencies");
-        size_t dep_count = 0;
-        ok = deps && hs_depfile_read(root, dep, deps, &dep_count, true) &&
-             dep_count > 0 && !zcl_devloop_process_cancel_requested();
-        free(deps);
+        ok = hs_shadow_owner_deps_captured(root, dep);
         if (!ok)
             hs_why(why, why_len,
                    "shadow shell dependency capture was incomplete or superseded");
@@ -1202,6 +1327,46 @@ static bool hs_files_equal(const char *a, const char *b)
     return same;
 }
 
+static bool hs_unity_source_write_members(
+    FILE *f, const char *root, const char *members, const char *owner)
+{
+    char member_text[2048];
+    (void)snprintf(member_text, sizeof(member_text), "%s", members);
+    const char *memberv[64];
+    size_t memberc = zcl_argv_split(member_text, memberv, 64);
+    bool ok = memberc > 0;
+    for (size_t i = 0; ok && i < memberc; i++) {
+        char full[PATH_MAX];
+        ok = memberv[i][0] != '/' && !strstr(memberv[i], "..") &&
+             snprintf(full, sizeof(full), "%s/%s", root, memberv[i]) <
+                 (int)sizeof(full) && hs_regular(full, NULL) &&
+             fprintf(f, "#include \"%s\"\n", full) > 0;
+    }
+    char owner_full[PATH_MAX];
+    ok = ok && snprintf(owner_full, sizeof(owner_full), "%s/%s", root,
+                        owner) < (int)sizeof(owner_full) &&
+         hs_regular(owner_full, NULL) &&
+         fprintf(f, "#include \"%s\"\n", owner_full) > 0;
+    return ok && fflush(f) == 0 && fsync(fileno(f)) == 0;
+}
+
+static bool hs_unity_source_publish(const char *temp, char out[PATH_MAX],
+                                    char *why, size_t why_len)
+{
+    if (hs_regular(out, NULL) && hs_files_equal(temp, out)) {
+        (void)unlink(temp);
+        return true;
+    }
+    (void)unlink(out);
+    if (rename(temp, out) != 0) {
+        (void)unlink(temp);
+        out[0] = 0;
+        hs_why(why, why_len, "could not publish stable island wrapper");
+        return false;
+    }
+    return true;
+}
+
 static bool hs_unity_source(const char *root, const char *owner,
                             const char *members, const char *safe,
                             char out[PATH_MAX],
@@ -1224,24 +1389,7 @@ static bool hs_unity_source(const char *root, const char *owner,
         hs_why(why, why_len, "could not open confined island wrapper");
         return false;
     }
-    char member_text[2048];
-    (void)snprintf(member_text, sizeof(member_text), "%s", members);
-    const char *memberv[64];
-    size_t memberc = zcl_argv_split(member_text, memberv, 64);
-    bool ok = memberc > 0;
-    for (size_t i = 0; ok && i < memberc; i++) {
-        char full[PATH_MAX];
-        ok = memberv[i][0] != '/' && !strstr(memberv[i], "..") &&
-             snprintf(full, sizeof(full), "%s/%s", root, memberv[i]) <
-                 (int)sizeof(full) && hs_regular(full, NULL) &&
-             fprintf(f, "#include \"%s\"\n", full) > 0;
-    }
-    char owner_full[PATH_MAX];
-    ok = ok && snprintf(owner_full, sizeof(owner_full), "%s/%s", root,
-                        owner) < (int)sizeof(owner_full) &&
-         hs_regular(owner_full, NULL) &&
-         fprintf(f, "#include \"%s\"\n", owner_full) > 0;
-    ok = ok && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    bool ok = hs_unity_source_write_members(f, root, members, owner);
     fclose(f);
     if (!ok) {
         (void)unlink(temp);
@@ -1249,18 +1397,7 @@ static bool hs_unity_source(const char *root, const char *owner,
         hs_why(why, why_len, "island member list is invalid or unwritable");
         return false;
     }
-    if (hs_regular(out, NULL) && hs_files_equal(temp, out)) {
-        (void)unlink(temp);
-    } else {
-        (void)unlink(out);
-        if (rename(temp, out) != 0) {
-            (void)unlink(temp);
-            out[0] = 0;
-            hs_why(why, why_len, "could not publish stable island wrapper");
-            return false;
-        }
-    }
-    return true;
+    return hs_unity_source_publish(temp, out, why, why_len);
 }
 
 static bool hs_run_link(const struct hs_action_plan *plan,
@@ -1578,16 +1715,21 @@ fail:
     return false;
 }
 
-static bool hs_hotfork_def_valid(const struct hs_hotfork_def *def)
+static bool hs_hotfork_def_fields_present(const struct hs_hotfork_def *def)
 {
-    static const char required_forbidden_effects[] =
-        "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite";
     return def && def->owner_id && def->owner_id[0] &&
         def->feedback_class && def->source_tu && def->source_tu[0] &&
         def->story_id && def->story_id[0] && def->fixture_id &&
         def->fixture_id[0] && def->adapter_id && def->adapter_id[0] &&
         def->forbidden_effect_mask && def->exercised_surface &&
-        def->exercised_surface[0] &&
+        def->exercised_surface[0];
+}
+
+static bool hs_hotfork_def_valid(const struct hs_hotfork_def *def)
+{
+    static const char required_forbidden_effects[] =
+        "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite";
+    return hs_hotfork_def_fields_present(def) &&
         strcmp(def->feedback_class, "HOT_FORK") == 0 &&
         strcmp(def->adapter_id, def->story_id) == 0 &&
         def->max_time_ms > 0 && def->max_time_ms <= 1000 &&
@@ -1623,6 +1765,232 @@ static const struct hs_hotfork_def *hs_hotfork_for_path(const char *path)
     return NULL;
 }
 
+struct hs_hotfork_fixture_template {
+    const char *story_id;
+    const char *fixture_text;
+};
+
+static const struct hs_hotfork_fixture_template k_hotfork_fixture_templates[] = {
+    { "vcs-devloop-publication-envelope.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "root=zero-reject,nonzero-accept\n"
+            "job=canonical-roundtrip,field-preservation,bad-magic-reject,"
+            "zero-required-root-reject,bad-version-reject\n"
+            "receipt=waiting-zero-artifact-roundtrip,field-preservation,"
+            "accepted-zero-artifact-reject,accepted-artifact-roundtrip,"
+            "wrong-length-reject\n%s\n",
+    },
+    { "app-native-read-rpc-composition.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "tokens=array-wrap,legacy-pass-through\n"
+            "names=resolve-params,list-noargs\n"
+            "messaging=inbox-noargs\n"
+            "market=profile-params,list-noargs,status-noargs,content-noargs\n"
+            "swaps=chains-noargs,state-params,list-noargs\n"
+            "transport=frozen-child-stub,no-cookie,no-activation\n%s\n",
+    },
+    { "zcode-moderation-input-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "no-keys=empty-object;reject=null,array,nonempty\n"
+            "backlog=exact-three,positive-cutoffs,explicit-scratch\n"
+            "reject=unknown-key,zero-height,string-height,nonscratch\n"
+            "authority=validation-only,no-projection,no-service-lease\n%s\n",
+    },
+    { "zcode-dev-input-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "json=string-present,string-missing,int-present,int-fallback\n"
+            "roots=lowercase-decode,canonical-render,uppercase-reject\n"
+            "wire=even-decode,odd-reject,bound-reject\n"
+            "paths=equal,parent,child,sibling;candidate=canonical,traversal-reject\n"
+            "authority=validation-only,no-ledger,no-rpc,no-cas-write\n%s\n",
+    },
+    { "zcode-epoch-propose-input-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "json=string-present,string-missing,closed-key-set\n"
+            "roots=lowercase-decode,uppercase-reject,missing-reject\n"
+            "epoch=positive,zero-reject,negative-reject\n"
+            "proposal=exact-valid,unknown-key-reject,nonscratch-reject\n"
+            "authority=validation-only,no-projection,no-cas-write\n%s\n",
+    },
+    { "zcode-passport-input-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "keys=evidence-allowed,signature-commit-only,unknown-reject\n"
+            "roots=exact-plan,optional-job-pair,uppercase-reject\n"
+            "shape=workspace-alone-reject,unknown-key-reject,empty-reject\n"
+            "commit=exact-shape\n"
+            "authority=validation-only,no-signature,no-storage,no-publication\n%s\n",
+    },
+    { "zcode-workspace-input-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "roots=lowercase-decode,uppercase-reject,missing-reject\n"
+            "keys=manifest-allowed,signature-commit-only,unknown-reject,null-reject\n"
+            "zero=all-zero-accept,nonzero-reject\n"
+            "authority=validation-only,no-service,no-storage,no-publication\n%s\n",
+    },
+    { "source-package-transport-shape.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "marker=exact-path,exact-bytes\n"
+            "files=license,manifest,shards,lane,marker,authority,offline-inputs\n"
+            "counts=no-authority,with-authority,null-zero\n"
+            "bounds=file-at-end-reject,offline-at-end-reject\n"
+            "authority=shape-only,no-filesystem,no-cas,no-signing,no-publication\n%s\n",
+    },
+    { "zcode-source-bundle-input-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "json=string-present,string-missing,type-reject\n"
+            "roots=source,named,uppercase-reject\n"
+            "paths=equal,parent,child,sibling\n"
+            "render=roots,metrics,authority-flags\n"
+            "authority=policy-only,no-filesystem,no-cas,no-package-import,no-publication\n%s\n",
+    },
+    { "test-group-catalog-selection-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "catalog=known-present,unknown-absent\n"
+            "exclusive=latency-yes,ordinary-no\n"
+            "semantic-leaf=declared-yes,ordinary-no\n"
+            "resolve=prefixless-and-full-exact,substring-reject\n"
+            "family=declared-oracle,unrelated-reject\n"
+            "integration=declared-yes,ordinary-no,policy-valid\n"
+            "expansion=ordinary-one,immediate-excludes-integration\n"
+            "authority=read-only-catalog,no-process,no-filesystem,no-build\n%s\n",
+    },
+    { "shop-want-view-contract.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "row=bounded-criteria,open,reviewed-ok,no-spec-hash\n"
+            "render=preview,amount,state,next-action\n"
+            "json=preview,truncation,amount,expiry\n"
+            "contract=exact-service-id,frozen-kat\n"
+            "fulfillment=hidden,ready,evidence-blocked,closed\n"
+            "authority=caller-owned-row,pure-service,no-store,no-clock,no-wallet\n%s\n",
+    },
+    { "shop-want-command-input-core.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "hex=lowercase-32,uppercase-reject,length-reject\n"
+            "want=amount,criteria,expiry,nonce,deterministic-signature\n"
+            "reject=expiry-equal-now\n"
+            "authority=caller-owned-json,pure-build-and-sign,no-db,no-filesystem,no-clock,no-publication\n%s\n",
+    },
+    { "command-registry-input-validation-core.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "booleans=wait-for-edit,all,string-reject\n"
+            "maximum-bytes=package-256m,space-8m,path-sensitive\n"
+            "cutoffs=height,mtp,epoch-capacity,positive-only\n"
+            "cpu=one-through-600\n"
+            "shop=issued,expires,amount,integer-or-string-nonce\n"
+            "budget=manifest-derived,default-floor\n"
+            "authority=caller-owned-spec-and-json,pure-validation,no-handler,no-latency-ring,no-publication\n%s\n",
+    },
+    { "zcode-package-view-contract.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "entry=identity,metadata,counts,invalid-incomplete\n"
+            "guide=static-authority-boundaries,next-command\n"
+            "publish=ready,needs-source,blocked,incomplete-reject\n"
+            "contract=exact-service-id,frozen-kat\n"
+            "authority=caller-owned-input,pure-service,no-cas,no-index,no-publication\n%s\n",
+    },
+    { "shop-status-view-contract.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "wallet=absent,plaintext,encrypted,unreadable\n"
+            "closed=stub,no-identity,no-wallet,no-db,no-announcement\n"
+            "live=real-tor,identity,encrypted-wallet,db,schema,announcement\n"
+            "contract=exact-service-id,frozen-kat\n"
+            "authority=copied-snapshot,pure-service,no-files,no-db,no-tor,no-wallet\n%s\n",
+    },
+    { "shop-reputation-view-contract.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "roots=present,absent,pair-exact,pair-mismatch\n"
+            "evidence=releases,packages,observation,reproduction,attestation\n"
+            "unavailable=availability,paid-fulfillment\n"
+            "contract=exact-service-id,frozen-kat\n"
+            "authority=copied-facts,pure-service,no-files,no-signatures,no-clock,no-ledger\n%s\n",
+    },
+    { "zcode-work-input-core.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "json=string-present,type-reject,int-present,fallback\n"
+            "scopes=top-level,dedupe,header-source-test,empty-reject\n"
+            "bytes=selected-manifest-members,missing-ignore,overflow-reject\n"
+            "authority=caller-owned-input,pure-normalization,no-files,no-db,no-cas,no-process\n%s\n",
+    },
+    { "zcode-corpus-command-core.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "root=lowercase-64,uppercase-reject,length-reject\n"
+            "checkpoint=total-loc,overflow-reject,null-reject\n"
+            "shard=counted,durable,excluded,totals,overflow-reject\n"
+            "authority=caller-owned-structs,pure-aggregation,no-storage,no-clock,no-service-publication\n%s\n",
+    },
+    { "devloop-watch-classification-core.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "sources=lowercase-c,header-reject,uppercase-reject,null-reject\n"
+            "epoch=all-c,mixed-reject,empty-reject,null-reject\n"
+            "component=same-owner,mixed-owner,root-path\n"
+            "authority=copied-paths,pure-classification,no-filesystem,no-signals,no-process\n%s\n",
+    },
+    { "devloop-cycle-diagnostic-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "diagnostic=first-actionable,transient-reject,compiler-shape\n"
+            "preview=printable,control-sanitize,truncation,bounds-reject\n"
+            "proof=passed-verify-only\n"
+            "publish=verify,apply,invalid,port\n"
+            "watcher=stopped,starting,runtime-starting,current\n"
+            "authority=copied-text-and-enums,pure-policy,no-filesystem,no-process,no-publication\n%s\n",
+    },
+    { "devloop-plan-classification.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "paths=safe,traversal,absolute,control,docs,sealed,relevant,temp\n"
+            "watch=mutation,attribute,ignored,source-dir\n"
+            "dimensions=names,status-names\n"
+            "authority=copied-paths-and-masks,pure-classification,no-index,no-filesystem,no-process\n%s\n",
+    },
+    { "native-dev-hotswap-receipt-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "hooks=commit,probe,quiesce-off,quiesce-on\n"
+            "module-report=green,refused\n"
+            "service-report=green,restart-refused\n"
+            "commit-boundary=empty-reject,capacity-reject\n"
+            "probe-boundary=missing-leaf-reject\n%s\n",
+    },
+    { "native-dev-input-and-interrupt-policy.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "files=relative-valid,absolute-reject,traversal-reject\n"
+            "cursor=integer,fallback,string-reject\n"
+            "interrupt=STORY_RED,compile_red,proof_pending\n"
+            "group=canonical,dash-reject\n"
+            "generation=gen-lower64,legacy-lower64,uppercase-reject\n"
+            "failure-id=lower64,uppercase-reject,short-reject\n%s\n",
+    },
+    { "curve25519-rfc7748-calculation.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "rfc7748=alice-public,alice-bob-shared-secret\n"
+            "inputs=caller-owned,unchanged\n"
+            "cleanup=module-local-cleanse-observed\n"
+            "authority=pure-calculation,no-wallet,no-keys-from-host,no-rng,no-filesystem,no-network\n%s\n",
+    },
+    { "package-policy-boundary-calculation.v1",
+            "zcl.dev.hotfork.fixture.v1\n"
+            "tiers=names,limits,score-before-ratio\n"
+            "ratio=zero-divisor,ordinary,saturating\n"
+            "week=pre-epoch,epoch,monday\n"
+            "boundaries=publish,download,concurrency,pin,announce,request-burst\n"
+            "verifier=self,score,approval,allow\n"
+            "names=no-credit,offence,unknown\n"
+            "authority=pure-calculation,caller-owned-facts,no-clock,no-filesystem,no-network\n%s\n",
+    },
+};
+
+static const char *hs_hotfork_fixture_template_for(const char *story_id)
+{
+    for (size_t i = 0;
+         i < sizeof(k_hotfork_fixture_templates) /
+             sizeof(k_hotfork_fixture_templates[0]); i++)
+        if (strcmp(k_hotfork_fixture_templates[i].story_id, story_id) == 0)
+            return k_hotfork_fixture_templates[i].fixture_text;
+    return
+        "zcl.dev.hotfork.fixture.v1\n"
+        "result=ok,null-argument,package-incomplete,package-manifest,"
+        "source-carrier-shape,package-chunk,source-verification,destination\n"
+        "shard=0a,ff;reject=0A,100,missing-suffix\n%s\n";
+}
+
 static void hs_hotfork_story_roots(const struct hs_hotfork_def *def,
                                    char story_root[65],
                                    char fixture_root[65])
@@ -1633,268 +2001,8 @@ static void hs_hotfork_story_roots(const struct hs_hotfork_def *def,
         def->owner_id, def->feedback_class, def->source_tu, def->story_id,
         def->fixture_id, def->adapter_id, def->max_time_ms,
         def->forbidden_effect_mask, def->exercised_surface);
-    if (strcmp(def->story_id,
-               "vcs-devloop-publication-envelope.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "root=zero-reject,nonzero-accept\n"
-            "job=canonical-roundtrip,field-preservation,bad-magic-reject,"
-            "zero-required-root-reject,bad-version-reject\n"
-            "receipt=waiting-zero-artifact-roundtrip,field-preservation,"
-            "accepted-zero-artifact-reject,accepted-artifact-roundtrip,"
-            "wrong-length-reject\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "app-native-read-rpc-composition.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "tokens=array-wrap,legacy-pass-through\n"
-            "names=resolve-params,list-noargs\n"
-            "messaging=inbox-noargs\n"
-            "market=profile-params,list-noargs,status-noargs,content-noargs\n"
-            "swaps=chains-noargs,state-params,list-noargs\n"
-            "transport=frozen-child-stub,no-cookie,no-activation\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-moderation-input-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "no-keys=empty-object;reject=null,array,nonempty\n"
-            "backlog=exact-three,positive-cutoffs,explicit-scratch\n"
-            "reject=unknown-key,zero-height,string-height,nonscratch\n"
-            "authority=validation-only,no-projection,no-service-lease\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-dev-input-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "json=string-present,string-missing,int-present,int-fallback\n"
-            "roots=lowercase-decode,canonical-render,uppercase-reject\n"
-            "wire=even-decode,odd-reject,bound-reject\n"
-            "paths=equal,parent,child,sibling;candidate=canonical,traversal-reject\n"
-            "authority=validation-only,no-ledger,no-rpc,no-cas-write\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-epoch-propose-input-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "json=string-present,string-missing,closed-key-set\n"
-            "roots=lowercase-decode,uppercase-reject,missing-reject\n"
-            "epoch=positive,zero-reject,negative-reject\n"
-            "proposal=exact-valid,unknown-key-reject,nonscratch-reject\n"
-            "authority=validation-only,no-projection,no-cas-write\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-passport-input-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "keys=evidence-allowed,signature-commit-only,unknown-reject\n"
-            "roots=exact-plan,optional-job-pair,uppercase-reject\n"
-            "shape=workspace-alone-reject,unknown-key-reject,empty-reject\n"
-            "commit=exact-shape\n"
-            "authority=validation-only,no-signature,no-storage,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-workspace-input-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "roots=lowercase-decode,uppercase-reject,missing-reject\n"
-            "keys=manifest-allowed,signature-commit-only,unknown-reject,null-reject\n"
-            "zero=all-zero-accept,nonzero-reject\n"
-            "authority=validation-only,no-service,no-storage,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "source-package-transport-shape.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "marker=exact-path,exact-bytes\n"
-            "files=license,manifest,shards,lane,marker,authority,offline-inputs\n"
-            "counts=no-authority,with-authority,null-zero\n"
-            "bounds=file-at-end-reject,offline-at-end-reject\n"
-            "authority=shape-only,no-filesystem,no-cas,no-signing,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-source-bundle-input-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "json=string-present,string-missing,type-reject\n"
-            "roots=source,named,uppercase-reject\n"
-            "paths=equal,parent,child,sibling\n"
-            "render=roots,metrics,authority-flags\n"
-            "authority=policy-only,no-filesystem,no-cas,no-package-import,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "test-group-catalog-selection-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "catalog=known-present,unknown-absent\n"
-            "exclusive=latency-yes,ordinary-no\n"
-            "semantic-leaf=declared-yes,ordinary-no\n"
-            "resolve=prefixless-and-full-exact,substring-reject\n"
-            "family=declared-oracle,unrelated-reject\n"
-            "integration=declared-yes,ordinary-no,policy-valid\n"
-            "expansion=ordinary-one,immediate-excludes-integration\n"
-            "authority=read-only-catalog,no-process,no-filesystem,no-build\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "shop-want-view-contract.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "row=bounded-criteria,open,reviewed-ok,no-spec-hash\n"
-            "render=preview,amount,state,next-action\n"
-            "json=preview,truncation,amount,expiry\n"
-            "contract=exact-service-id,frozen-kat\n"
-            "fulfillment=hidden,ready,evidence-blocked,closed\n"
-            "authority=caller-owned-row,pure-service,no-store,no-clock,no-wallet\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "shop-want-command-input-core.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "hex=lowercase-32,uppercase-reject,length-reject\n"
-            "want=amount,criteria,expiry,nonce,deterministic-signature\n"
-            "reject=expiry-equal-now\n"
-            "authority=caller-owned-json,pure-build-and-sign,no-db,no-filesystem,no-clock,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "command-registry-input-validation-core.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "booleans=wait-for-edit,all,string-reject\n"
-            "maximum-bytes=package-256m,space-8m,path-sensitive\n"
-            "cutoffs=height,mtp,epoch-capacity,positive-only\n"
-            "cpu=one-through-600\n"
-            "shop=issued,expires,amount,integer-or-string-nonce\n"
-            "budget=manifest-derived,default-floor\n"
-            "authority=caller-owned-spec-and-json,pure-validation,no-handler,no-latency-ring,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-package-view-contract.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "entry=identity,metadata,counts,invalid-incomplete\n"
-            "guide=static-authority-boundaries,next-command\n"
-            "publish=ready,needs-source,blocked,incomplete-reject\n"
-            "contract=exact-service-id,frozen-kat\n"
-            "authority=caller-owned-input,pure-service,no-cas,no-index,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "shop-status-view-contract.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "wallet=absent,plaintext,encrypted,unreadable\n"
-            "closed=stub,no-identity,no-wallet,no-db,no-announcement\n"
-            "live=real-tor,identity,encrypted-wallet,db,schema,announcement\n"
-            "contract=exact-service-id,frozen-kat\n"
-            "authority=copied-snapshot,pure-service,no-files,no-db,no-tor,no-wallet\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "shop-reputation-view-contract.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "roots=present,absent,pair-exact,pair-mismatch\n"
-            "evidence=releases,packages,observation,reproduction,attestation\n"
-            "unavailable=availability,paid-fulfillment\n"
-            "contract=exact-service-id,frozen-kat\n"
-            "authority=copied-facts,pure-service,no-files,no-signatures,no-clock,no-ledger\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-work-input-core.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "json=string-present,type-reject,int-present,fallback\n"
-            "scopes=top-level,dedupe,header-source-test,empty-reject\n"
-            "bytes=selected-manifest-members,missing-ignore,overflow-reject\n"
-            "authority=caller-owned-input,pure-normalization,no-files,no-db,no-cas,no-process\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "zcode-corpus-command-core.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "root=lowercase-64,uppercase-reject,length-reject\n"
-            "checkpoint=total-loc,overflow-reject,null-reject\n"
-            "shard=counted,durable,excluded,totals,overflow-reject\n"
-            "authority=caller-owned-structs,pure-aggregation,no-storage,no-clock,no-service-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "devloop-watch-classification-core.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "sources=lowercase-c,header-reject,uppercase-reject,null-reject\n"
-            "epoch=all-c,mixed-reject,empty-reject,null-reject\n"
-            "component=same-owner,mixed-owner,root-path\n"
-            "authority=copied-paths,pure-classification,no-filesystem,no-signals,no-process\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "devloop-cycle-diagnostic-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "diagnostic=first-actionable,transient-reject,compiler-shape\n"
-            "preview=printable,control-sanitize,truncation,bounds-reject\n"
-            "proof=passed-verify-only\n"
-            "publish=verify,apply,invalid,port\n"
-            "watcher=stopped,starting,runtime-starting,current\n"
-            "authority=copied-text-and-enums,pure-policy,no-filesystem,no-process,no-publication\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "devloop-plan-classification.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "paths=safe,traversal,absolute,control,docs,sealed,relevant,temp\n"
-            "watch=mutation,attribute,ignored,source-dir\n"
-            "dimensions=names,status-names\n"
-            "authority=copied-paths-and-masks,pure-classification,no-index,no-filesystem,no-process\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "native-dev-hotswap-receipt-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "hooks=commit,probe,quiesce-off,quiesce-on\n"
-            "module-report=green,refused\n"
-            "service-report=green,restart-refused\n"
-            "commit-boundary=empty-reject,capacity-reject\n"
-            "probe-boundary=missing-leaf-reject\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "native-dev-input-and-interrupt-policy.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "files=relative-valid,absolute-reject,traversal-reject\n"
-            "cursor=integer,fallback,string-reject\n"
-            "interrupt=STORY_RED,compile_red,proof_pending\n"
-            "group=canonical,dash-reject\n"
-            "generation=gen-lower64,legacy-lower64,uppercase-reject\n"
-            "failure-id=lower64,uppercase-reject,short-reject\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "curve25519-rfc7748-calculation.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "rfc7748=alice-public,alice-bob-shared-secret\n"
-            "inputs=caller-owned,unchanged\n"
-            "cleanup=module-local-cleanse-observed\n"
-            "authority=pure-calculation,no-wallet,no-keys-from-host,no-rng,no-filesystem,no-network\n%s\n",
-            def->story_id);
-    } else if (strcmp(def->story_id,
-                      "package-policy-boundary-calculation.v1") == 0) {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "tiers=names,limits,score-before-ratio\n"
-            "ratio=zero-divisor,ordinary,saturating\n"
-            "week=pre-epoch,epoch,monday\n"
-            "boundaries=publish,download,concurrency,pin,announce,request-burst\n"
-            "verifier=self,score,approval,allow\n"
-            "names=no-credit,offence,unknown\n"
-            "authority=pure-calculation,caller-owned-facts,no-clock,no-filesystem,no-network\n%s\n",
-            def->story_id);
-    } else {
-        (void)snprintf(fixture, sizeof(fixture),
-            "zcl.dev.hotfork.fixture.v1\n"
-            "result=ok,null-argument,package-incomplete,package-manifest,"
-            "source-carrier-shape,package-chunk,source-verification,destination\n"
-            "shard=0a,ff;reject=0A,100,missing-suffix\n%s\n",
-            def->story_id);
-    }
+    (void)snprintf(fixture, sizeof(fixture),
+        hs_hotfork_fixture_template_for(def->story_id), def->story_id);
     hs_sha3_root(story, story_root);
     hs_sha3_root(fixture, fixture_root);
 }
@@ -3610,6 +3718,50 @@ static void hs_json_text_preview(const char *input, char out[1025])
     out[n] = 0;
 }
 
+static size_t hs_resident_call_params(const char *artifact, bool activate,
+                                      char *out, size_t out_size)
+{
+    struct json_value params, path, flag;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&path);
+    json_set_str(&path, artifact);
+    (void)json_push_back(&params, &path);
+    json_free(&path);
+    json_init(&flag);
+    json_set_bool(&flag, activate);
+    (void)json_push_back(&params, &flag);
+    json_free(&flag);
+    size_t n = json_write(&params, out, out_size);
+    json_free(&params);
+    return n;
+}
+
+/* Validate a parsed resident response: it must report ok, and when the
+ * caller asked to activate the candidate the resident must confirm it did. */
+static bool hs_resident_response_ok(const struct json_value *response,
+                                    bool activate, char *why, size_t why_len)
+{
+    const struct json_value *ok_v = json_get(response, "ok");
+    if (!ok_v || ok_v->type != JSON_BOOL || !json_get_bool(ok_v)) {
+        char response_error[512];
+        if (zcl_devloop_hotswap_response_error(
+                response, response_error, sizeof(response_error)))
+            hs_why(why, why_len, response_error);
+        else
+            hs_why(why, why_len, "resident refused the candidate");
+        return false;
+    }
+    const struct json_value *activated_v = json_get(response, "activated");
+    if (activate && (!activated_v || activated_v->type != JSON_BOOL ||
+                     !json_get_bool(activated_v))) {
+        hs_why(why, why_len,
+               "resident verified but did not activate the candidate");
+        return false;
+    }
+    return true;
+}
+
 static bool hs_resident_call(const char *artifact, bool activate,
                              struct json_value *response, int64_t *elapsed_us,
                              char *why, size_t why_len)
@@ -3623,20 +3775,9 @@ static bool hs_resident_call(const char *artifact, bool activate,
         return false;
     }
     node_rpc_client_init(datadir, 18252);
-    struct json_value params, path, flag;
-    json_init(&params);
-    json_set_array(&params);
-    json_init(&path);
-    json_set_str(&path, artifact);
-    (void)json_push_back(&params, &path);
-    json_free(&path);
-    json_init(&flag);
-    json_set_bool(&flag, activate);
-    (void)json_push_back(&params, &flag);
-    json_free(&flag);
     char params_json[PATH_MAX + 64];
-    size_t params_n = json_write(&params, params_json, sizeof(params_json));
-    json_free(&params);
+    size_t params_n = hs_resident_call_params(artifact, activate, params_json,
+                                              sizeof(params_json));
     if (!params_n) {
         hs_why(why, why_len, "resident activation request exceeded its bound");
         return false;
@@ -3657,24 +3798,7 @@ static bool hs_resident_call(const char *artifact, bool activate,
         hs_why(why, why_len, "resident dev node returned malformed activation JSON");
         return false;
     }
-    const struct json_value *ok_v = json_get(response, "ok");
-    if (!ok_v || ok_v->type != JSON_BOOL || !json_get_bool(ok_v)) {
-        char response_error[512];
-        if (zcl_devloop_hotswap_response_error(
-                response, response_error, sizeof(response_error)))
-            hs_why(why, why_len, response_error);
-        else
-            hs_why(why, why_len, "resident refused the candidate");
-        return false;
-    }
-    const struct json_value *activated_v = json_get(response, "activated");
-    if (activate && (!activated_v || activated_v->type != JSON_BOOL ||
-                     !json_get_bool(activated_v))) {
-        hs_why(why, why_len,
-               "resident verified but did not activate the candidate");
-        return false;
-    }
-    return true;
+    return hs_resident_response_ok(response, activate, why, why_len);
 }
 
 struct hs_shadow_wire {
@@ -3885,25 +4009,40 @@ struct hs_hotfork_wire {
 
 #define HS_HOTFORK_WIRE_MAGIC UINT32_C(0x48465731)
 
-static bool hs_hotfork_descriptor_matches(
+static bool hs_hotfork_descriptor_identity_matches(
     const struct zcl_hotfork_capsule_v1 *capsule,
     const struct hs_hotfork_def *def,
     const struct zcl_devloop_hotswap_build_receipt *build)
 {
-    char story_root[65], fixture_root[65];
-    hs_hotfork_story_roots(def, story_root, fixture_root);
     return capsule && capsule->abi_version == ZCL_HOTFORK_CAPSULE_ABI_V1 &&
         capsule->descriptor_size == sizeof(*capsule) && capsule->owner_id &&
         strcmp(capsule->owner_id, def->owner_id) == 0 && capsule->source_tu &&
         strcmp(capsule->source_tu, def->source_tu) == 0 &&
         capsule->candidate_object_root &&
         strcmp(capsule->candidate_object_root,
-               build->candidate_object_sha256) == 0 && capsule->story_id &&
-        strcmp(capsule->story_id, def->story_id) == 0 &&
+               build->candidate_object_sha256) == 0;
+}
+
+static bool hs_hotfork_descriptor_story_matches(
+    const struct zcl_hotfork_capsule_v1 *capsule,
+    const struct hs_hotfork_def *def)
+{
+    char story_root[65], fixture_root[65];
+    hs_hotfork_story_roots(def, story_root, fixture_root);
+    return capsule->story_id && strcmp(capsule->story_id, def->story_id) == 0 &&
         capsule->story_root && strcmp(capsule->story_root, story_root) == 0 &&
         capsule->story_fixture_root &&
         strcmp(capsule->story_fixture_root, fixture_root) == 0 &&
         capsule->run_story;
+}
+
+static bool hs_hotfork_descriptor_matches(
+    const struct zcl_hotfork_capsule_v1 *capsule,
+    const struct hs_hotfork_def *def,
+    const struct zcl_devloop_hotswap_build_receipt *build)
+{
+    return hs_hotfork_descriptor_identity_matches(capsule, def, build) &&
+        hs_hotfork_descriptor_story_matches(capsule, def);
 }
 
 bool zcl_devloop_hotfork_descriptor_validate(
@@ -4621,6 +4760,32 @@ int zcl_devloop_hotswap_batch_event(
     return ZCL_DEVLOOP_RESTART_EVENT_FINAL;
 }
 
+static int hs_hotfork_owner_story_event(
+    const char *repo_root, const struct hs_hotfork_def *def,
+    struct zcl_devloop_hotswap_build_receipt *build,
+    struct zcl_devloop_process_result *process, int64_t started)
+{
+    struct json_value resident;
+    json_init(&resident);
+    int64_t story_us = 0;
+    char why[512] = {0};
+    bool story_ok = hs_hotfork_probe(def, build, &resident, &story_us,
+                                     why, sizeof(why));
+    if (zcl_devloop_process_cancel_requested()) {
+        json_free(&resident);
+        return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
+    }
+    bool emitted = hs_emit_event(
+        repo_root, def->source_tu, 1,
+        story_ok ? "story_green" : "story_red", "hotfork_owner_story",
+        false, platform_time_monotonic_us() - started, build, story_us,
+        &resident, process, why, true);
+    json_free(&resident);
+    if (!emitted) return -1;
+    return story_ok ? ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING
+                    : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
+}
+
 int zcl_devloop_hotfork_batch_event(
     const char *repo_root, const char *const *paths, size_t path_count,
     enum zcl_devloop_publish_mode publish_mode)
@@ -4652,24 +4817,8 @@ int zcl_devloop_hotfork_batch_event(
                        platform_time_monotonic_us() - started, &build, 0,
                        NULL, &process, "", false))
         return -1;
-    struct json_value resident;
-    json_init(&resident);
-    int64_t story_us = 0;
-    bool story_ok = hs_hotfork_probe(def, &build, &resident, &story_us,
-                                     why, sizeof(why));
-    if (zcl_devloop_process_cancel_requested()) {
-        json_free(&resident);
-        return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
-    }
-    bool emitted = hs_emit_event(
-        repo_root, def->source_tu, 1,
-        story_ok ? "story_green" : "story_red", "hotfork_owner_story",
-        false, platform_time_monotonic_us() - started, &build, story_us,
-        &resident, &process, why, true);
-    json_free(&resident);
-    if (!emitted) return -1;
-    return story_ok ? ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING
-                    : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
+    return hs_hotfork_owner_story_event(repo_root, def, &build, &process,
+                                        started);
 }
 
 int zcl_devloop_hotswap_event(const char *repo_root, const char *source_tu,
