@@ -5441,6 +5441,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_package_capabilities_selftest.c \
     tools/lint/lintc/gate_arm_symbol_single.c \
     tools/lint/lintc/gate_arm_symbol_single_analyzer.c \
+    tools/lint/lintc/gate_arm_symbol_single_coverage.c \
     tools/lint/lintc/gate_arm_symbol_single_selftest.c \
     tools/lint/lintc/gate_macos_acceptance.c \
     tools/lint/lintc/gate_macos_acceptance_selftest.c \
