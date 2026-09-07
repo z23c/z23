@@ -473,19 +473,8 @@ static int spc_slurp_checked(const char *path, char *buf, size_t cap)
     return fin(f, NULL, path, rc);
 }
 
-int check_specialists_run(int argc, char **argv)
+static int spc_require_inputs(const char *def_path, const char *cat_path, const char *mk_path)
 {
-    (void)argc; (void)argv;
-    const char *root = env_or("ZCL_SPECIALISTS_ROOT", ".");
-    const char *def_rel = env_or("ZCL_SPECIALISTS_DEF", "engine/composition/specialists.def");
-    int floor_v = atoi(env_or("ZCL_SPECIALISTS_FLOOR", "10"));
-    char def_path[SPC_PATH], cat_path[SPC_PATH], mk_path[SPC_PATH];
-    if (ovf(snprintf(def_path, sizeof def_path, "%s/%s", root, def_rel), sizeof def_path)
-        || ovf(snprintf(cat_path, sizeof cat_path, "%s/tools/dev/test_group_catalog.def",
-                        root), sizeof cat_path)
-        || ovf(snprintf(mk_path, sizeof mk_path, "%s/Makefile", root), sizeof mk_path))
-        return 2;
-
     if (!spc_is_file(def_path)) {
         fprintf(stderr, "[check_specialists] FATAL — %s is missing; "
                         "refusing to report a clean scan\n", def_path);
@@ -499,6 +488,37 @@ int check_specialists_run(int argc, char **argv)
         fprintf(stderr, "[check_specialists] FATAL — %s is missing\n", mk_path);
         return 2;
     }
+    return 0;
+}
+
+static int spc_report(int nf, int row_count, const char *faults)
+{
+    if (nf > 0) {
+        if (printf("[check_specialists] FAIL — specialist catalog has false rows:\n%s\n",
+                   faults) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    if (printf("[check_specialists] OK — %d specialists; "
+              "every territory, gate and test group resolves\n", row_count) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+int check_specialists_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const char *root = env_or("ZCL_SPECIALISTS_ROOT", ".");
+    const char *def_rel = env_or("ZCL_SPECIALISTS_DEF", "engine/composition/specialists.def");
+    int floor_v = atoi(env_or("ZCL_SPECIALISTS_FLOOR", "10"));
+    char def_path[SPC_PATH], cat_path[SPC_PATH], mk_path[SPC_PATH];
+    if (ovf(snprintf(def_path, sizeof def_path, "%s/%s", root, def_rel), sizeof def_path)
+        || ovf(snprintf(cat_path, sizeof cat_path, "%s/tools/dev/test_group_catalog.def",
+                        root), sizeof cat_path)
+        || ovf(snprintf(mk_path, sizeof mk_path, "%s/Makefile", root), sizeof mk_path))
+        return 2;
+
+    if (spc_require_inputs(def_path, cat_path, mk_path)) return 2;
 
     static char def_text[65536];
     if (spc_slurp_checked(def_path, def_text, sizeof def_text)) return 2;
@@ -526,16 +546,7 @@ int check_specialists_run(int argc, char **argv)
     if (spc_scan(root, has_git, &rows, &gate_set, cat_text, faults, sizeof faults, &nf))
         return 2;
 
-    if (nf > 0) {
-        if (printf("[check_specialists] FAIL — specialist catalog has false rows:\n%s\n",
-                   faults) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 1;
-    }
-    if (printf("[check_specialists] OK — %d specialists; "
-              "every territory, gate and test group resolves\n", rows.n) < 0)
-        return die("z23-lint: write failed\n", "");
-    return 0;
+    return spc_report(nf, rows.n, faults);
 }
 
 /* ── selftest ─────────────────────────────────────────────────────────── */
@@ -590,6 +601,65 @@ static int spc_selftest_case(const char *stub, const char *def_body, int want_ok
     return 0;
 }
 
+static int spc_selftest_fixture(const char *stub)
+{
+    char d1[4096], d2[4096], d3[4096];
+    if (ovf(snprintf(d1, sizeof d1, "%s/core/consensus", stub), sizeof d1)
+        || ovf(snprintf(d2, sizeof d2, "%s/tools/dev", stub), sizeof d2)
+        || ovf(snprintf(d3, sizeof d3, "%s/engine/composition", stub), sizeof d3)
+        || csr_mkdirs(d1) || csr_mkdirs(d2) || csr_mkdirs(d3))
+        return 1;
+
+    char consensus_c[4096], mk[4096], cat[4096];
+    if (ovf(snprintf(consensus_c, sizeof consensus_c, "%s/x.c", d1), sizeof consensus_c)
+        || spc_write(consensus_c, "int x;\n")
+        || ovf(snprintf(mk, sizeof mk, "%s/Makefile", stub), sizeof mk)
+        || spc_write(mk, "LINT_GATES := \\\n    check-consensus-parity\n"
+                        "check-consensus-parity:\n\t@true\n")
+        || ovf(snprintf(cat, sizeof cat, "%s/test_group_catalog.def", d2), sizeof cat)
+        || spc_write(cat, "ZCL_TEST_GROUP(consensus)\n"))
+        return 1;
+    return 0;
+}
+
+static void spc_selftest_bad_rows(const char *stub, int *fails)
+{
+    spc_selftest_case(stub,
+        "SPECIALIST(\"consensus\",\"core/consensus\",\"check-consensus-parity\","
+        "\"consensus\",\"consensus\")\n",
+        1, "a row whose territory, gate and group exist", fails);
+    spc_selftest_case(stub,
+        "SPECIALIST(\"consensus\",\"core/nope\",\"check-consensus-parity\","
+        "\"consensus\",\"consensus\")\n",
+        0, "a territory that matches nothing", fails);
+    spc_selftest_case(stub,
+        "SPECIALIST(\"consensus\",\"core/consensus\",\"check-not-a-gate\","
+        "\"consensus\",\"consensus\")\n",
+        0, "a gate the Makefile does not declare", fails);
+    spc_selftest_case(stub,
+        "SPECIALIST(\"consensus\",\"core/consensus\",\"check-consensus-parity\","
+        "\"no_such_group\",\"consensus\")\n",
+        0, "a test group the catalog does not declare", fails);
+}
+
+static int spc_selftest_missing_def(const char *stub, int *fails)
+{
+    if (setenv("ZCL_SPECIALISTS_ROOT", stub, 1) != 0
+        || setenv("ZCL_SPECIALISTS_DEF", "missing.def", 1) != 0
+        || setenv("ZCL_SPECIALISTS_FLOOR", "1", 1) != 0)
+        return 1;
+    int rc = spc_hush_run();
+    (void)unsetenv("ZCL_SPECIALISTS_ROOT");
+    (void)unsetenv("ZCL_SPECIALISTS_DEF");
+    (void)unsetenv("ZCL_SPECIALISTS_FLOOR");
+    if (rc != 2) {
+        fprintf(stderr, "check_specialists: SELFTEST FAILED — a missing .def did not exit 2 (rc=%d)\n", rc);
+        (*fails)++;
+        return 0;
+    }
+    return printf("  selftest ok: a missing .def exits 2\n") < 0 ? -1 : 0;
+}
+
 int check_specialists_selftest(void)
 {
     char tmpl[4096];
@@ -600,61 +670,13 @@ int check_specialists_selftest(void)
     if (!tmp) return die("z23-lint: mkdir failed\n", "");
     char stub[4096];
     if (ovf(snprintf(stub, sizeof stub, "%s/repo", tmp), sizeof stub)) { rap_rm_rf(tmp); return 1; }
-
-    char d1[4096], d2[4096], d3[4096];
-    int bad = 0;
-    if (ovf(snprintf(d1, sizeof d1, "%s/core/consensus", stub), sizeof d1)
-        || ovf(snprintf(d2, sizeof d2, "%s/tools/dev", stub), sizeof d2)
-        || ovf(snprintf(d3, sizeof d3, "%s/engine/composition", stub), sizeof d3)
-        || csr_mkdirs(d1) || csr_mkdirs(d2) || csr_mkdirs(d3))
-        bad = 1;
-
-    char consensus_c[4096], mk[4096], cat[4096];
-    if (!bad && (ovf(snprintf(consensus_c, sizeof consensus_c, "%s/x.c", d1), sizeof consensus_c)
-        || spc_write(consensus_c, "int x;\n")
-        || ovf(snprintf(mk, sizeof mk, "%s/Makefile", stub), sizeof mk)
-        || spc_write(mk, "LINT_GATES := \\\n    check-consensus-parity\n"
-                        "check-consensus-parity:\n\t@true\n")
-        || ovf(snprintf(cat, sizeof cat, "%s/test_group_catalog.def", d2), sizeof cat)
-        || spc_write(cat, "ZCL_TEST_GROUP(consensus)\n")))
-        bad = 1;
-    if (bad) { rap_rm_rf(tmp); return 1; }
+    if (spc_selftest_fixture(stub)) { rap_rm_rf(tmp); return 1; }
 
     int fails = 0;
-    spc_selftest_case(stub,
-        "SPECIALIST(\"consensus\",\"core/consensus\",\"check-consensus-parity\","
-        "\"consensus\",\"consensus\")\n",
-        1, "a row whose territory, gate and group exist", &fails);
-    spc_selftest_case(stub,
-        "SPECIALIST(\"consensus\",\"core/nope\",\"check-consensus-parity\","
-        "\"consensus\",\"consensus\")\n",
-        0, "a territory that matches nothing", &fails);
-    spc_selftest_case(stub,
-        "SPECIALIST(\"consensus\",\"core/consensus\",\"check-not-a-gate\","
-        "\"consensus\",\"consensus\")\n",
-        0, "a gate the Makefile does not declare", &fails);
-    spc_selftest_case(stub,
-        "SPECIALIST(\"consensus\",\"core/consensus\",\"check-consensus-parity\","
-        "\"no_such_group\",\"consensus\")\n",
-        0, "a test group the catalog does not declare", &fails);
+    spc_selftest_bad_rows(stub, &fails);
 
-    if (setenv("ZCL_SPECIALISTS_ROOT", stub, 1) != 0
-        || setenv("ZCL_SPECIALISTS_DEF", "missing.def", 1) != 0
-        || setenv("ZCL_SPECIALISTS_FLOOR", "1", 1) != 0) {
-        rap_rm_rf(tmp);
-        return 1;
-    }
-    int rc = spc_hush_run();
-    (void)unsetenv("ZCL_SPECIALISTS_ROOT");
-    (void)unsetenv("ZCL_SPECIALISTS_DEF");
-    (void)unsetenv("ZCL_SPECIALISTS_FLOOR");
-    if (rc != 2) {
-        fprintf(stderr, "check_specialists: SELFTEST FAILED — a missing .def did not exit 2 (rc=%d)\n", rc);
-        fails++;
-    } else if (printf("  selftest ok: a missing .def exits 2\n") < 0) {
-        rap_rm_rf(tmp);
-        return die("z23-lint: write failed\n", "");
-    }
+    int mrc = spc_selftest_missing_def(stub, &fails);
+    if (mrc < 0) { rap_rm_rf(tmp); return die("z23-lint: write failed\n", ""); }
 
     rap_rm_rf(tmp);
     if (fails) return 1;

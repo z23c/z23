@@ -773,6 +773,99 @@ static int shl_expect_rc(const struct shl_selftest_env *e, const char *extra_nam
     return 0;
 }
 
+static int shl_selftest_paths(const char *tmp, char *fixture, char *baseline, char *saved,
+                              char *fixture_saved)
+{
+    if (ovf(snprintf(fixture, 4096, "%s/fixture.sh", tmp), 4096)
+        || ovf(snprintf(baseline, 4096, "%s/baseline.txt", tmp), 4096)
+        || ovf(snprintf(saved, 4096, "%s/baseline.saved", tmp), 4096)
+        || ovf(snprintf(fixture_saved, 4096, "%s/fixture.saved", tmp), 4096)
+        || csr_write(fixture, k_fixture))
+        return 1;
+    return 0;
+}
+
+static int shl_copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "r");
+    if (!in) return 1;
+    FILE *out = fopen(to, "w");
+    if (!out) { fclose(in); return 1; }
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+    fclose(in);
+    fclose(out);
+    return 0;
+}
+
+/* growth: append a stray nproc line, confirm it fails and UPDATE refuses
+ * to authorize the growth (baseline unchanged). */
+static int shl_selftest_growth_phase(const struct shl_selftest_env *e, const char *saved,
+                                     const char *fixture_saved, int *fails)
+{
+    if (shl_copy_file(e->baseline, saved)) return 1;
+    if (csr_write(fixture_saved, k_fixture)) return 1;
+    FILE *f = fopen(e->fixture, "a");
+    if (!f || fprintf(f, "\nnproc\n") < 0 || fclose(f) != 0) return 1;
+    if (shl_expect_rc(e, NULL, NULL, 1, "a growth mutation fails", fails)) return 1;
+    if (shl_expect_rc(e, "ZCL_LINT_MODE", "UPDATE", 1,
+                      "UPDATE does not authorize growth", fails))
+        return 1;
+
+    static struct shl_table t1, t2;
+    int p1 = 0, p2 = 0;
+    if (shl_load_baseline(e->baseline, &t1, &p1) || shl_load_baseline(saved, &t2, &p2))
+        return 1;
+    if (t1.n != t2.n) {
+        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
+                        "UPDATE changed the baseline on a failed run\n");
+        (*fails)++;
+    }
+    return 0;
+}
+
+static int shl_selftest_injection_phase(const struct shl_selftest_env *e, int *fails)
+{
+    if (shl_expect_rc(e, "ZCL_SHELL_HOST_INJECT_SCAN_FAILURE", "1", 1,
+                      "an injected scanner failure fails", fails))
+        return 1;
+    return shl_expect_rc(e, "ZCL_SHELL_HOST_INJECT_SCAN_PATH", e->fixture, 1,
+                         "an injected mid-scan failure fails", fails);
+}
+
+static int shl_selftest_deleted_baseline_phase(const struct shl_selftest_env *e, int *fails)
+{
+    if (unlink(e->baseline) != 0 && errno != ENOENT) return 1;
+    if (setenv("ZCL_SHELL_HOST_INJECT_TRACKED_BASELINE", "1", 1) != 0) return 1;
+    if (shl_expect_rc(e, "ZCL_SHELL_HOST_BOOTSTRAP", "1", 1,
+                      "a deleted tracked baseline refuses to regenerate", fails))
+        return 1;
+    unsetenv("ZCL_SHELL_HOST_INJECT_TRACKED_BASELINE");
+    struct stat st;
+    if (stat(e->baseline, &st) == 0) {
+        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
+                        "the deleted-baseline refusal wrote a file\n");
+        (*fails)++;
+    }
+    return 0;
+}
+
+static int shl_selftest_phases(const struct shl_selftest_env *e, const char *saved,
+                               const char *fixture_saved, int *fails)
+{
+    if (shl_bootstrap_baseline(e)) {
+        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — bootstrap\n");
+        (*fails)++;
+    } else if (shl_check_bootstrap_counts(e, fails))
+        return 1;
+
+    if (shl_positive_control(e, fails)) return 1;
+    if (shl_selftest_growth_phase(e, saved, fixture_saved, fails)) return 1;
+    if (shl_selftest_injection_phase(e, fails)) return 1;
+    return shl_selftest_deleted_baseline_phase(e, fails);
+}
+
 int check_shell_host_assumptions_selftest(void)
 {
     char tmpl[4096];
@@ -783,75 +876,16 @@ int check_shell_host_assumptions_selftest(void)
     if (!tmp) return die("z23-lint: mkdir failed\n", "");
 
     char fixture[4096], baseline[4096], saved[4096], fixture_saved[4096];
-    if (ovf(snprintf(fixture, sizeof fixture, "%s/fixture.sh", tmp), sizeof fixture)
-        || ovf(snprintf(baseline, sizeof baseline, "%s/baseline.txt", tmp), sizeof baseline)
-        || ovf(snprintf(saved, sizeof saved, "%s/baseline.saved", tmp), sizeof saved)
-        || ovf(snprintf(fixture_saved, sizeof fixture_saved, "%s/fixture.saved", tmp),
-              sizeof fixture_saved)
-        || csr_write(fixture, k_fixture)) {
+    if (shl_selftest_paths(tmp, fixture, baseline, saved, fixture_saved)) {
         rap_rm_rf(tmp);
         return 1;
     }
     struct shl_selftest_env e = { tmp, fixture, baseline };
     int fails = 0;
-
-    if (shl_bootstrap_baseline(&e)) { fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — bootstrap\n"); fails++; }
-    else if (shl_check_bootstrap_counts(&e, &fails)) { rap_rm_rf(tmp); return 1; }
-
-    if (shl_positive_control(&e, &fails)) { rap_rm_rf(tmp); return 1; }
-
-    /* growth: append a stray nproc line, confirm it fails and UPDATE
-     * refuses to authorize the growth (baseline unchanged). */
-    FILE *cp = fopen(saved, "w");
-    if (!cp) { rap_rm_rf(tmp); return 1; }
-    {
-        FILE *bl = fopen(baseline, "r");
-        if (!bl) { fclose(cp); rap_rm_rf(tmp); return 1; }
-        char buf[4096]; size_t n;
-        while ((n = fread(buf, 1, sizeof buf, bl)) > 0) fwrite(buf, 1, n, cp);
-        fclose(bl);
-    }
-    fclose(cp);
-    if (csr_write(fixture_saved, k_fixture)) { rap_rm_rf(tmp); return 1; }
-    {
-        FILE *f = fopen(fixture, "a");
-        if (!f || fprintf(f, "\nnproc\n") < 0 || fclose(f) != 0) { rap_rm_rf(tmp); return 1; }
-    }
-    if (shl_expect_rc(&e, NULL, NULL, 1, "a growth mutation fails", &fails)) { rap_rm_rf(tmp); return 1; }
-    if (shl_expect_rc(&e, "ZCL_LINT_MODE", "UPDATE", 1,
-                      "UPDATE does not authorize growth", &fails)) { rap_rm_rf(tmp); return 1; }
-
-    static struct shl_table t1, t2;
-    int p1 = 0, p2 = 0;
-    if (shl_load_baseline(baseline, &t1, &p1) || shl_load_baseline(saved, &t2, &p2)) { rap_rm_rf(tmp); return 1; }
-    if (t1.n != t2.n) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
-                        "UPDATE changed the baseline on a failed run\n");
-        fails++;
-    }
-
-    if (shl_expect_rc(&e, "ZCL_SHELL_HOST_INJECT_SCAN_FAILURE", "1", 1,
-                      "an injected scanner failure fails", &fails)) { rap_rm_rf(tmp); return 1; }
-    if (shl_expect_rc(&e, "ZCL_SHELL_HOST_INJECT_SCAN_PATH", fixture, 1,
-                      "an injected mid-scan failure fails", &fails)) { rap_rm_rf(tmp); return 1; }
-
-    if (unlink(baseline) != 0 && errno != ENOENT) { rap_rm_rf(tmp); return 1; }
-    if (setenv("ZCL_SHELL_HOST_INJECT_TRACKED_BASELINE", "1", 1) != 0) { rap_rm_rf(tmp); return 1; }
-    if (shl_expect_rc(&e, "ZCL_SHELL_HOST_BOOTSTRAP", "1", 1,
-                      "a deleted tracked baseline refuses to regenerate", &fails)) {
-        rap_rm_rf(tmp);
-        return 1;
-    }
-    unsetenv("ZCL_SHELL_HOST_INJECT_TRACKED_BASELINE");
-    struct stat st;
-    if (stat(baseline, &st) == 0) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
-                        "the deleted-baseline refusal wrote a file\n");
-        fails++;
-    }
+    int hard_fail = shl_selftest_phases(&e, saved, fixture_saved, &fails);
 
     rap_rm_rf(tmp);
-    if (fails) return 1;
+    if (hard_fail || fails) return 1;
     return printf("[%s] SELFTEST PASS (lexical=true growth=red update=shrink-only "
                  "scanner_failure=red)\n", k_gate) < 0
         ? die("z23-lint: write failed\n", "") : 0;
