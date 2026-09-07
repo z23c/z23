@@ -393,7 +393,7 @@ Z23_FLAG("ZCL_COPY_PROVE_CONTINUITY_RETRIES", "env_build", "15", "-",
 Z23_FLAG("ZCL_COPY_PROVE_STATUS_DIR", "env_runtime", "-", "-",
           "undocumented; first use cognition/controllers/src/agent_copy_prove_controller.c:161")
 Z23_FLAG("ZCL_CORPUS_STORE_ROOT", "env_runtime", "-", "-",
-          "undocumented; first use tools/corpus_census.c:2665")
+          "undocumented; first use tools/corpus_census_args.c:145")
 Z23_FLAG("ZCL_CRASH_DATADIR", "env_runtime", "-", "-",
           "first use tools/crash_recovery_test.c:137; documented at docs/TENACITY.md:205: ZCL_CRASH_DATADIR unset). All valuable as a regression floor; none sample the")
 Z23_FLAG("ZCL_CRASH_REQUIRE_TEETH", "env_runtime", "-", "-",

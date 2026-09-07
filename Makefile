@@ -6367,6 +6367,12 @@ $(BIN_DIR)/gen_sha3_windows: tools/gen_sha3_windows.c \
 .PHONY: tools/corpus-census
 tools/corpus-census: $(BIN_DIR)/corpus-census
 $(BIN_DIR)/corpus-census: tools/corpus_census.c \
+		tools/corpus_census_defs.c \
+		tools/corpus_census_scopes.c \
+		tools/corpus_census_measure.c \
+		tools/corpus_census_package.c \
+		tools/corpus_census_args.c \
+		tools/corpus_census_report.c \
 		contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c \
 		contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c \
 		contexts/commons/modules/vcs/src/zcode_c23_corpus_shard.c \
