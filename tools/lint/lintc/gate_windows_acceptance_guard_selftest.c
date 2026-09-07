@@ -78,42 +78,63 @@ static int wags_mkparents(const char *full)
     return csr_mkdirs(dir);
 }
 
-static int wags_build_good(const char *repo_root, const char *d)
+/* Plain read+write, no process spawn — the fixture harness's only file-copy
+ * need, well under the catalog's real size. */
+static int wags_copy_file(const char *src, const char *dst)
 {
-    char catdir[4096], catfull_src[4096], catfull_dst[4096];
+    FILE *f = fopen(src, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", src);
+    static char buf[131072];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    int bad = ferror(f);
+    int eof = feof(f);
+    fclose(f);
+    if (bad || !eof)
+        return die("z23-lint: cannot read %s\n", src);
+    buf[n] = '\0';
+    return csr_write(dst, buf);
+}
+
+static int wags_copy_catalog(const char *repo_root, const char *d,
+                             char *catfull_src, size_t cap)
+{
+    char catdir[4096], catfull_dst[4096];
     if (ovf(snprintf(catdir, sizeof catdir, "%s/platform/modules/platform/tests",
                      d), sizeof catdir))
         return 2;
     int rc = csr_mkdirs(catdir);
     if (rc) return rc;
-    if (ovf(snprintf(catfull_src, sizeof catfull_src, "%s/%s", repo_root,
-                     k_wag_catalog_rel), sizeof catfull_src)
+    if (ovf(snprintf(catfull_src, cap, "%s/%s", repo_root, k_wag_catalog_rel),
+            cap)
         || ovf(snprintf(catfull_dst, sizeof catfull_dst, "%s/%s", d,
                         k_wag_catalog_rel), sizeof catfull_dst))
         return 2;
-    char cmd[8192], q1[4200], q2[4200];
-    if (sh_single_quote(catfull_src, q1, sizeof q1)
-        || sh_single_quote(catfull_dst, q2, sizeof q2)
-        || ovf(snprintf(cmd, sizeof cmd, "cp %s %s", q1, q2), sizeof cmd))
-        return 2;
-    int code = 0;
-    char dump[256];
-    rc = capture_cmd(cmd, dump, sizeof dump, &code);
+    return wags_copy_file(catfull_src, catfull_dst);
+}
+
+static int wags_write_one_declared(const char *d, const char *rel)
+{
+    char full[4096], stem[512];
+    int rc = wags_full(d, rel, full, sizeof full);
+    if (rc == 0) rc = wags_mkparents(full);
+    if (rc == 0) rc = wags_stem(rel, stem, sizeof stem);
+    if (rc == 0) rc = wags_write_guarded(full, stem);
+    return rc;
+}
+
+static int wags_build_good(const char *repo_root, const char *d)
+{
+    char catfull_src[4096];
+    int rc = wags_copy_catalog(repo_root, d, catfull_src, sizeof catfull_src);
     if (rc) return rc;
-    if (code != 0)
-        return die("z23-lint: cp of the catalog fixture failed\n", "");
 
     static struct wag_paths declared;
     declared.n = 0;
     rc = wag_catalog_sources(catfull_src, &declared);
     if (rc) return rc;
-    for (int i = 0; rc == 0 && i < declared.n; i++) {
-        char full[4096], stem[512];
-        rc = wags_full(d, declared.v[i], full, sizeof full);
-        if (rc == 0) rc = wags_mkparents(full);
-        if (rc == 0) rc = wags_stem(declared.v[i], stem, sizeof stem);
-        if (rc == 0) rc = wags_write_guarded(full, stem);
-    }
+    for (int i = 0; rc == 0 && i < declared.n; i++)
+        rc = wags_write_one_declared(d, declared.v[i]);
     return rc;
 }
 
@@ -305,53 +326,70 @@ static int wags_case_floor(const char *d, int *fails)
                            "floor", d, fails);
 }
 
-int check_windows_acceptance_guard_selftest(void)
+/* Fixtures live under $HOME/.local/state/zclassic23/scratch (never /tmp —
+ * shared with gates that fixture there), matching the shell original's own
+ * scratch contract; ZCL_WINDOWS_ACCEPTANCE_GUARD_SCRATCH overrides it. */
+static int wags_resolve_scratch(char *out, size_t cap)
 {
-    char repo_root[4096];
-    int rc = cic_repo_root(repo_root, sizeof repo_root);
-    if (rc) return rc;
     const char *scratch = env_or("ZCL_WINDOWS_ACCEPTANCE_GUARD_SCRATCH", "");
-    char scratch_buf[4096];
-    if (!scratch[0]) {
-        const char *home = env_or("HOME", "");
-        if (!home[0])
-            return die("z23-lint: HOME is not set\n", "");
-        if (ovf(snprintf(scratch_buf, sizeof scratch_buf,
-                         "%s/.local/state/zclassic23/scratch", home),
-                sizeof scratch_buf))
-            return 2;
-        scratch = scratch_buf;
-    }
+    if (scratch[0])
+        return ovf(snprintf(out, cap, "%s", scratch), cap);
+    const char *home = env_or("HOME", "");
+    if (!home[0])
+        return die("z23-lint: HOME is not set\n", "");
+    return ovf(snprintf(out, cap, "%s/.local/state/zclassic23/scratch",
+                        home), cap);
+}
+
+static int wags_mkdtemp_fixture(char **out)
+{
+    char scratch[4096];
+    int rc = wags_resolve_scratch(scratch, sizeof scratch);
+    if (rc) return rc;
     rc = csr_mkdirs(scratch);
     if (rc) return rc;
-    char tmpl[4096];
+    static char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl,
                      "%s/windows-acceptance-guard-selftest.XXXXXX", scratch),
             sizeof tmpl))
         return 2;
-    char *fixture_root = mkdtemp(tmpl);
-    if (!fixture_root)
-        return die("z23-lint: mkdir failed: %s\n", tmpl);
+    *out = mkdtemp(tmpl);
+    return *out ? 0 : die("z23-lint: mkdir failed: %s\n", tmpl);
+}
 
-    char good[4096];
-    int fails = 0;
-    rc = ovf(snprintf(good, sizeof good, "%s/good", fixture_root),
-            sizeof good);
+static int wags_run_cases(const char *repo_root, const char *fixture_root,
+                          int *fails)
+{
+    char good[4096], floor_dir[4096];
+    int rc = ovf(snprintf(good, sizeof good, "%s/good", fixture_root),
+                sizeof good);
     if (rc == 0) rc = csr_mkdirs(good);
     if (rc == 0) rc = wags_build_good(repo_root, good);
     if (rc == 0)
         rc = wags_expect_green("1. the real catalog with every declared TU "
-                               "correctly guarded passes", good, &fails);
-    if (rc == 0) rc = wags_case_regression(repo_root, good, &fails);
-    if (rc == 0) rc = wags_case_stray(good, &fails);
-
-    char floor_dir[4096];
+                               "correctly guarded passes", good, fails);
+    if (rc == 0) rc = wags_case_regression(repo_root, good, fails);
+    if (rc == 0) rc = wags_case_stray(good, fails);
     if (rc == 0
         && ovf(snprintf(floor_dir, sizeof floor_dir, "%s/floor",
                         fixture_root), sizeof floor_dir))
         rc = 2;
     if (rc == 0) rc = csr_mkdirs(floor_dir);
-    if (rc == 0) rc = wags_case_floor(floor_dir, &fails);
+    if (rc == 0) rc = wags_case_floor(floor_dir, fails);
+    return rc;
+}
+
+int check_windows_acceptance_guard_selftest(void)
+{
+    char repo_root[4096];
+    int rc = cic_repo_root(repo_root, sizeof repo_root);
+    if (rc) return rc;
+    char *fixture_root = NULL;
+    rc = wags_mkdtemp_fixture(&fixture_root);
+    if (rc) return rc;
+
+    int fails = 0;
+    rc = wags_run_cases(repo_root, fixture_root, &fails);
 
     rap_rm_rf(fixture_root);
     if (rc) return rc;

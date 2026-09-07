@@ -146,18 +146,50 @@ int wag_catalog_sources(const char *path, struct wag_paths *out)
  * outline out-params) whether the file defines main() outside the
  * required guard idiom. */
 
+/* Copies one "..." or '...' literal body VERBATIM (escapes included), from
+ * line[*i] (the opening quote) through its close or end of line. */
+static void wag_copy_literal(const char *line, size_t n, char *out,
+                             size_t cap, size_t *i, size_t *o)
+{
+    char q = line[*i];
+    out[(*o)++] = line[(*i)++];
+    while (*i < n && *o + 1 < cap) {
+        if (line[*i] == '\\' && *i + 1 < n && *o + 2 < cap) {
+            out[(*o)++] = line[*i];
+            out[(*o)++] = line[*i + 1];
+            *i += 2;
+            continue;
+        }
+        out[(*o)++] = line[*i];
+        if (line[*i] == q) { (*i)++; break; }
+        (*i)++;
+    }
+}
+
+/* Advances one step of an already-open block comment, blanking it; clears
+ * *in_block on its closing "*" "/" pair. Returns 1 (handled — caller must
+ * `continue`) whenever a block comment was open on entry, 0 otherwise. */
+static int wag_advance_block(const char *line, size_t n, char *out,
+                             size_t cap, size_t *i, size_t *o, int *in_block)
+{
+    if (!*in_block)
+        return 0;
+    if (line[*i] == '*' && *i + 1 < n && line[*i + 1] == '/') {
+        *in_block = 0;
+        *i += 2;
+        if (*o + 1 < cap) out[(*o)++] = ' ';
+    } else {
+        (*i)++;
+    }
+    return 1;
+}
+
 static void wag_strip_line(int *in_block, const char *line, char *out, size_t cap)
 {
     size_t i = 0, o = 0, n = strlen(line);
     while (i < n && o + 1 < cap) {
-        if (*in_block) {
-            if (line[i] == '*' && i + 1 < n && line[i + 1] == '/') {
-                *in_block = 0; i += 2; out[o++] = ' ';
-            } else {
-                i++;
-            }
+        if (wag_advance_block(line, n, out, cap, &i, &o, in_block))
             continue;
-        }
         if (line[i] == '/' && i + 1 < n && line[i + 1] == '*') {
             *in_block = 1; i += 2; out[o++] = ' '; continue;
         }
@@ -165,17 +197,7 @@ static void wag_strip_line(int *in_block, const char *line, char *out, size_t ca
             out[o++] = ' '; break;
         }
         if (line[i] == '"' || line[i] == '\'') {
-            char q = line[i];
-            out[o++] = line[i++];
-            while (i < n && o + 1 < cap) {
-                if (line[i] == '\\' && i + 1 < n && o + 2 < cap) {
-                    out[o++] = line[i]; out[o++] = line[i + 1]; i += 2;
-                    continue;
-                }
-                out[o++] = line[i];
-                if (line[i] == q) { i++; break; }
-                i++;
-            }
+            wag_copy_literal(line, n, out, cap, &i, &o);
             continue;
         }
         out[o++] = line[i++];
@@ -343,8 +365,12 @@ static int wag_report_fail(const struct wag_paths *scan, const regex_t *main_re,
             return 2;
         int vr = wag_inspect(full, main_re, td_re, reason, sizeof reason,
                              &line);
-        if (vr < 0)
+        if (vr < 0) {
+            fprintf(stderr, "%s: UNPROVEN — %s exists but is not readable; "
+                   "refusing to report a clean scan\n", k_wag_gate,
+                   scan->v[i]);
             return 2;
+        }
         if (vr == 0) continue;
         if (vr != 1) return vr;
         any = 1;
