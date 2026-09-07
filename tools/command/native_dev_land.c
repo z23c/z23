@@ -3449,7 +3449,6 @@ scan_failed:
  * proof stub alone: no hermetic test rig here carries one. Any failure
  * refuses with the failing dependency's own typed reason; none of them
  * silently continues past a missing one. */
-#endif /* !_WIN32: dependency priming belongs to the POSIX landing step. */
 
 static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
                                     const struct dl_row *r, bool stubbed,

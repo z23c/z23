@@ -129,8 +129,21 @@ tn_kill_group() {
     fi
 }
 tn_rm_datadir() {
-    local dd="$1" base
+    local dd="$1" base resolved scratch
     [ -n "$dd" ] && [ -d "$dd" ] || return 0
+    scratch="${TN_TMP:-}"
+    [ -n "$scratch" ] || {
+        echo "two-node-peer-tip: WARN: refusing to rm without scratch root '$dd'" >&2
+        return 0
+    }
+    resolved="$(cd "$dd" && pwd)" || return 0
+    case "$resolved" in
+        "$scratch"|"$scratch"/*) ;;
+        *)
+            echo "two-node-peer-tip: WARN: refusing to rm datadir outside scratch root '$dd'" >&2
+            return 0
+            ;;
+    esac
     base="$(basename "$dd")"
     case "$base" in
         zcl23-2node-*) rm -rf "$dd" 2>/dev/null || true ;;
