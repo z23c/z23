@@ -1645,3 +1645,186 @@ int lint_base_write(struct lint_base *b, const char *path, const char *hdr)
         return die("z23-lint: fclose failed: %s\n", path);
     return rc ? die("z23-lint: write failed\n", "") : 0;
 }
+
+static uint32_t gi_be32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static uint16_t gi_be16(const unsigned char *p)
+{
+    return (uint16_t)(((unsigned)p[0] << 8) | (unsigned)p[1]);
+}
+
+static int gi_readn(FILE *f, unsigned char *buf, size_t n, const char *what)
+{
+    if (fread(buf, 1, n, f) == n)
+        return 0;
+    return die("z23-lint: git index read failed (%s)\n", what);
+}
+
+static int gi_skip(FILE *f, size_t n, const char *what)
+{
+    unsigned char buf[4096];
+    while (n) {
+        size_t chunk = n < sizeof buf ? n : sizeof buf;
+        if (gi_readn(f, buf, chunk, what))
+            return 2;
+        n -= chunk;
+    }
+    return 0;
+}
+
+static int gi_gitdir(char *buf, size_t cap)
+{
+    struct stat st;
+    if (stat(".git", &st) != 0)
+        return die("z23-lint: cannot stat .git\n", "");
+    if (S_ISDIR(st.st_mode))
+        return ovf(snprintf(buf, cap, ".git"), cap);
+    if (!S_ISREG(st.st_mode))
+        return die("z23-lint: .git is neither a directory nor a file\n", "");
+    FILE *f = fopen(".git", "r");
+    if (!f)
+        return die("z23-lint: cannot open .git\n", "");
+    char line[4096];
+    if (!fgets(line, (int)sizeof line, f)) {
+        fclose(f);
+        return die("z23-lint: cannot read .git gitdir\n", "");
+    }
+    fclose(f);
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+        line[--n] = '\0';
+    if (strncmp(line, "gitdir: ", 8) != 0)
+        return die("z23-lint: .git file is not a gitdir pointer\n", "");
+    return ovf(snprintf(buf, cap, "%s", line + 8), cap);
+}
+
+static int gi_name(FILE *f, unsigned flagged, char *name, size_t cap,
+                   unsigned *out_n)
+{
+    if (flagged != 0xFFFu) {
+        if (flagged + 1 >= cap)
+            return die("z23-lint: git index path too long\n", "");
+        int rc = gi_readn(f, (unsigned char *)name, flagged + 1, "name");
+        if (rc)
+            return rc;
+        name[flagged] = '\0';
+        *out_n = flagged;
+        return 0;
+    }
+    size_t i = 0;
+    for (;;) {
+        unsigned char c;
+        int rc = gi_readn(f, &c, 1, "long name");
+        if (rc)
+            return rc;
+        if (i + 1 >= cap)
+            return die("z23-lint: git index path too long\n", "");
+        name[i] = (char)c;
+        if (c == 0) {
+            *out_n = (unsigned)i;
+            return 0;
+        }
+        i++;
+    }
+}
+
+static int gi_one_entry(FILE *f, int (*fn)(const char *, void *), void *ctx)
+{
+    unsigned char hdr[62];
+    int rc = gi_readn(f, hdr, sizeof hdr, "entry");
+    if (rc)
+        return rc;
+    uint16_t flags = gi_be16(hdr + 60);
+    int extended = (flags & 0x4000) != 0;
+    unsigned flagged = flags & 0xFFFu;
+    if (extended) {
+        unsigned char extra[2];
+        rc = gi_readn(f, extra, 2, "extended flags");
+        if (rc)
+            return rc;
+    }
+    char name[4096];
+    unsigned namelen = 0;
+    rc = gi_name(f, flagged, name, sizeof name, &namelen);
+    if (rc)
+        return rc;
+    size_t used = 62u + (extended ? 2u : 0u) + namelen + 1u;
+    size_t pad = (8u - (used % 8u)) % 8u;
+    if (pad && gi_skip(f, pad, "pad"))
+        return 2;
+    if (name[0] == '\0')
+        return 0;
+    return fn(name, ctx);
+}
+
+static int gi_exts(FILE *f, off_t sz)
+{
+    for (;;) {
+        long pos = ftell(f);
+        if (pos < 0)
+            return die("z23-lint: git index ftell failed\n", "");
+        if ((off_t)pos + 20 >= sz)
+            break;
+        unsigned char eh[8];
+        int rc = gi_readn(f, eh, 8, "extension");
+        if (rc)
+            return rc;
+        if (eh[0] >= 'a' && eh[0] <= 'z') {
+            char sig[5];
+            memcpy(sig, eh, 4);
+            sig[4] = '\0';
+            fprintf(stderr,
+                    "z23-lint: UNPROVEN — git index mandatory extension '%s'\n",
+                    sig);
+            return 2;
+        }
+        if (gi_skip(f, gi_be32(eh + 4), "extension payload"))
+            return 2;
+    }
+    return 0;
+}
+
+int lint_git_index_foreach(int (*fn)(const char *path, void *ctx), void *ctx)
+{
+    char gd[4096], path[4096];
+    int rc = gi_gitdir(gd, sizeof gd);
+    if (rc)
+        return rc;
+    if (ovf(snprintf(path, sizeof path, "%s/index", gd), sizeof path))
+        return 2;
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return die("z23-lint: cannot stat git index: %s\n", path);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return die("z23-lint: cannot open git index: %s\n", path);
+    unsigned char hdr[12];
+    rc = gi_readn(f, hdr, 12, "header");
+    if (rc) {
+        fclose(f);
+        return rc;
+    }
+    if (memcmp(hdr, "DIRC", 4) != 0) {
+        fclose(f);
+        return die("z23-lint: git index magic is not DIRC\n", "");
+    }
+    uint32_t ver = gi_be32(hdr + 4);
+    uint32_t nent = gi_be32(hdr + 8);
+    if (ver != 2 && ver != 3) {
+        fclose(f);
+        fprintf(stderr, "z23-lint: UNPROVEN — git index version %u\n",
+                (unsigned)ver);
+        return 2;
+    }
+    for (uint32_t i = 0; rc == 0 && i < nent; i++)
+        rc = gi_one_entry(f, fn, ctx);
+    if (rc == 0)
+        rc = gi_exts(f, st.st_size);
+    if (fclose(f) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", path);
+    return rc;
+}

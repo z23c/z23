@@ -102,6 +102,7 @@ int lint_filter_excluded(const char *in, char *out, size_t cap);
 int lint_path_is_excluded(const char *path);
 int excl_ensure(void);
 int lint_prod_scan(void);
+int lint_git_index_foreach(int (*fn)(const char *path, void *ctx), void *ctx);
 int rs_init(void);
 int repo_shape_dirs(const char *family, const char *leaf,
                     char out[][RS_PATH], int max, int *n);
@@ -340,5 +341,9 @@ int check_projections_pure_run(int argc, char **argv);
 int check_projections_pure_selftest(void);
 int check_typed_blocker_run(int argc, char **argv);
 int check_typed_blocker_selftest(void);
+int check_core_include_boundary_run(int argc, char **argv);
+int check_core_include_boundary_selftest(void);
+int check_shape_include_direction_run(int argc, char **argv);
+int check_shape_include_direction_selftest(void);
 
 #endif

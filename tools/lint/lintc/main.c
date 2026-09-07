@@ -153,6 +153,10 @@ static const struct lint_gate k_gates[] = {
       check_projections_pure_selftest },
     { "check-typed-blocker", check_typed_blocker_run,
       check_typed_blocker_selftest },
+    { "check-core-include-boundary", check_core_include_boundary_run,
+      check_core_include_boundary_selftest },
+    { "check-shape-include-direction", check_shape_include_direction_run,
+      check_shape_include_direction_selftest },
 };
 
 int main(int argc, char **argv)

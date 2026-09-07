@@ -5343,6 +5343,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_demoted_store_ratchets.c \
     tools/lint/lintc/gate_projection_purity_fences.c \
     tools/lint/lintc/gate_typed_blocker_ratchets.c \
+    tools/lint/lintc/gate_include_direction_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11493,8 +11494,9 @@ check-core-seal: tools/core_seal
 # Pure-consensus-context include boundary. This governs only CORE_CONTEXTS
 # (core/{consensus,params,math,chainparams}), not core/modules. The byte seal's
 # scope is reported separately by check-core-seal.
-check-core-include-boundary:
+check-core-include-boundary: $(LINTC_TOOL)
 	@echo "══ LINT: pure consensus-context include boundary ══"
+	@./tools/scripts/check_core_include_boundary.sh --selftest
 	@./tools/scripts/check_core_include_boundary.sh
 
 # The hot-swap consensus pin: engine/modules/hotswap/include/hotswap/core_seal_root.h must
@@ -11766,7 +11768,7 @@ lint-armed:
 # including "controllers/...". Baseline
 # tools/scripts/shape_include_direction_baseline.txt grandfathers pre-existing
 # debt; override with `// shape-layer-ok:<tag>`.
-check-shape-include-direction:
+check-shape-include-direction: $(LINTC_TOOL)
 	@echo "══ LINT: inter-shape include direction ══"
 	@./tools/scripts/check_shape_include_direction.sh --selftest
 	@./tools/scripts/check_shape_include_direction.sh

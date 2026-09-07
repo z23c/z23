@@ -1910,12 +1910,6 @@ Z23_FLAG("ZCL_SERVICES_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/check_supervisor_registration.sh:80")
 Z23_FLAG("ZCL_SESSION_ID", "env_runtime", "-", "-",
           "first use tools/dev/devloop_cycle.c:1009; documented at docs/ZVCS.md:258: [64 session_id] from ZCL_SESSION_ID")
-Z23_FLAG("ZCL_SHAPE_DIRECTION_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_shape_include_direction.sh:50")
-Z23_FLAG("ZCL_SHAPE_DIRECTION_MODELS_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_shape_include_direction.sh:51")
-Z23_FLAG("ZCL_SHAPE_DIRECTION_SERVICES_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_shape_include_direction.sh:56")
 Z23_FLAG("ZCL_SHELL_HOST_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_shell_host_assumptions.sh:9")
 Z23_FLAG("ZCL_SHELL_HOST_BOOTSTRAP", "env_build", "0", "-",
