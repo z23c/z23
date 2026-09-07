@@ -153,7 +153,7 @@ static uint16_t cas_reserve_port(void)
  * (see file header) so the CLI's systemctl-based default-service lookup
  * never resolves to this project's real zclassic23.service. Static scratch
  * — not reentrant, fine for this single-threaded test group. */
-static char cas_env_home[600];
+static char cas_env_home[PATH_MAX + 8];
 static char *cas_envp[4];
 
 static char *const *cas_build_envp(const char *home)
@@ -339,9 +339,9 @@ static int cas_test_observed_incident_refuses(void)
     TEST("CLI-client argv: the exact observed incident "
          "`--rpcport=39071 status` (double-dash typo, no -datadir=) is "
          "HARD REFUSED — never falls through to a node boot") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_incident_%d",
-                (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_incident", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
@@ -369,14 +369,14 @@ static int cas_test_double_dash_datadir_refuses(void)
     int failures = 0;
     TEST("CLI-client argv: `--datadir=... status` (double-dash typo) is "
          "refused with the exact -datadir=DIR correction") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_ddatadir_%d",
-                (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_ddatadir", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
             (char *)CAS_BIN,
-            (char *)"--datadir=/tmp/zcl_cas_never_touched",
+            (char *)"--datadir=/zcl_cas_never_touched",
             (char *)"status", NULL,
         };
         char out[8192] = {0};
@@ -388,7 +388,7 @@ static int cas_test_double_dash_datadir_refuses(void)
         ASSERT(!cas_contains(out, "starting (datadir="));
         /* Never actually touched the flag-supplied path. */
         struct stat st;
-        ASSERT(stat("/tmp/zcl_cas_never_touched", &st) != 0);
+        ASSERT(stat("/zcl_cas_never_touched", &st) != 0);
         PASS();
     } _test_next:;
     return failures;
@@ -399,9 +399,9 @@ static int cas_test_missing_value_refuses(void)
     int failures = 0;
     TEST("CLI-client argv: a bare `-rpcport` (missing \"=value\") is "
          "refused, not silently treated as the RPC method name") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_missingval_%d",
-                (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_missingval", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
@@ -424,9 +424,9 @@ static int cas_test_typo_after_command_word_refuses(void)
     TEST("CLI-client argv: `status --rpcport=N` (typo AFTER the command "
          "word) is still refused — proves the classification/validation "
          "scan does not depend on flag position") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_afterword_%d",
-                (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_afterword", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
@@ -449,9 +449,9 @@ static int cas_test_bare_status_still_works(void)
     int failures = 0;
     TEST("CLI-client argv: bare `status` with NO flags at all is NEVER "
          "refused — it intentionally targets the default local node") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_barestatus_%d",
-                (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_barestatus", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = { (char *)CAS_BIN, (char *)"status", NULL };
@@ -474,9 +474,9 @@ static int cas_test_native_param_conventions_unaffected(void)
     TEST("CLI-client argv: legitimate native-command param conventions "
          "(--next) are NOT operator-target flags and are never refused "
          "— the strict validator is deliberately narrow") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_nextparam_%d",
-                (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_nextparam", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
@@ -497,9 +497,9 @@ static int cas_test_extended_transaction_catalog_fits(void)
     int failures = 0;
     TEST("native CLI: the complete 39-type transaction catalog crosses the "
          "8 KiB boundary and still fits its declared 16 KiB budget") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_tx_catalog_%d",
-                 (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_tx_catalog", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
@@ -525,9 +525,9 @@ static int cas_test_extended_transaction_guide_fits(void)
     int failures = 0;
     TEST("native CLI: the largest transaction guide crosses the 8 KiB "
          "boundary and still fits its declared 16 KiB budget") {
-        char home[300];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_tx_guide_%d",
-                 (int)getpid());
+        char home[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_tx_guide", "home");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
         char *argv[] = {
@@ -561,14 +561,13 @@ static int cas_test_daemon_mode_tolerant_and_warns(void)
                    "daemon-tolerant case\n");
             return 0;
         }
-        char home[300], datadir[340];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_daemon_home_%d",
-                (int)getpid());
-        snprintf(datadir, sizeof(datadir), "/tmp/zcl_cas_daemon_dd_%d",
-                 (int)getpid());
+        char home[PATH_MAX], datadir[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_daemon", "home");
+        test_fmt_tmpdir(datadir, sizeof(datadir), "zcl_cas_daemon", "dd");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
-        char datadir_flag[400], rpcport_flag[32], port_flag[32];
+        char datadir_flag[PATH_MAX + 16], rpcport_flag[32], port_flag[32];
         snprintf(datadir_flag, sizeof(datadir_flag), "-datadir=%s", datadir);
         snprintf(rpcport_flag, sizeof(rpcport_flag), "--rpcport=%u", port);
         uint16_t p2p_port = cas_reserve_port();
@@ -631,14 +630,13 @@ static int cas_test_noisetransport_is_recognized(void)
                    "noisetransport case\n");
             return 0;
         }
-        char home[300], datadir[340];
-        snprintf(home, sizeof(home), "/tmp/zcl_cas_v2_home_%d",
-                 (int)getpid());
-        snprintf(datadir, sizeof(datadir), "/tmp/zcl_cas_v2_dd_%d",
-                 (int)getpid());
+        char home[PATH_MAX], datadir[PATH_MAX];
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_v2", "home");
+        test_fmt_tmpdir(datadir, sizeof(datadir), "zcl_cas_v2", "dd");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(home);
 
-        char datadir_flag[400], rpcport_flag[32], port_flag[32];
+        char datadir_flag[PATH_MAX + 16], rpcport_flag[32], port_flag[32];
         snprintf(datadir_flag, sizeof(datadir_flag), "-datadir=%s", datadir);
         snprintf(rpcport_flag, sizeof(rpcport_flag), "-rpcport=%u", rpc_port);
         snprintf(port_flag, sizeof(port_flag), "-port=%u", p2p_port);
@@ -660,11 +658,12 @@ static int cas_test_noisetransport_is_recognized(void)
         uint16_t legacy_rpc_port = cas_reserve_port();
         uint16_t legacy_p2p_port = cas_reserve_port();
         ASSERT(legacy_rpc_port != 0 && legacy_p2p_port != 0);
-        char legacy_home[300], legacy_datadir[340];
-        snprintf(legacy_home, sizeof(legacy_home),
-                 "/tmp/zcl_cas_legacy_noise_home_%d", (int)getpid());
-        snprintf(legacy_datadir, sizeof(legacy_datadir),
-                 "/tmp/zcl_cas_legacy_noise_dd_%d", (int)getpid());
+        char legacy_home[PATH_MAX], legacy_datadir[PATH_MAX];
+        test_fmt_tmpdir(legacy_home, sizeof(legacy_home),
+                        "zcl_cas_legacy_noise", "home");
+        test_fmt_tmpdir(legacy_datadir, sizeof(legacy_datadir),
+                        "zcl_cas_legacy_noise", "dd");
+        (void)test_ensure_tmproot();
         cas_mkdir_p(legacy_home);
         snprintf(datadir_flag, sizeof(datadir_flag), "-datadir=%s",
                  legacy_datadir);

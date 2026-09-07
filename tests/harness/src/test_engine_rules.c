@@ -303,8 +303,8 @@ static bool patch_rewrites_in_place(const char *patch, const char *id)
 static int case_decisions(void)
 {
     int failures = 0;
-    char tmpl[] = "/tmp/zcl_engine_rulesXXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_engine_rules");
     ER_CHECK("a temp state directory", dir != NULL);
     if (!dir) return failures;
 
@@ -538,8 +538,8 @@ static int case_miner(void)
                      strcmp(c.evidence_fail, "u005") == 0 &&
                      strcmp(c.evidence_pass, "u020") == 0);
 
-            char tmpl[] = "/tmp/zcl_engine_mineXXXXXX";
-            char *dir = mkdtemp(tmpl);
+            char tmpl[PATH_MAX];
+            char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_engine_mine");
             if (dir) {
                 char cpath[512];
                 (void)snprintf(cpath, sizeof cpath, "%s/%s", dir,
@@ -602,8 +602,8 @@ static int case_miner(void)
 static int case_rewrite(void)
 {
     int failures = 0;
-    char tmpl[] = "/tmp/zcl_engine_rewriteXXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_engine_rewrite");
     ER_CHECK("a temp directory for the rewrite cases", dir != NULL);
     if (!dir) return failures;
 

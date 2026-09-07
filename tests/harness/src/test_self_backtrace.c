@@ -142,8 +142,8 @@ static char *slurp(const char *path)
 
 static void setup_tmp_datadir(void)
 {
-    char tmpl[] = "/tmp/zcl-selfbt-XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl-selfbt");
     if (dir) SetDataDir(dir);
 }
 

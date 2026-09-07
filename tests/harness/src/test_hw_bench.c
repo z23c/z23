@@ -201,8 +201,8 @@ int test_hw_bench(void)
                   "with no init did NOT run the probe",
                   hw_bench_probe_run_count_for_testing() == probes0);
 
-        char tmpl3[] = "/tmp/zcl_hwb_noprobeXXXXXX";
-        char *root3 = mkdtemp(tmpl3);
+        char tmpl3[PATH_MAX];
+        char *root3 = test_mkdtemp(tmpl3, sizeof(tmpl3), "zcl_hwb_noprobe");
         HWB_CHECK("probe-count fixture mkdtemp succeeds", root3 != NULL);
         if (root3) {
             HWB_CHECK("sample file planted (probe-count fixture)",
@@ -246,8 +246,8 @@ int test_hw_bench(void)
     /* ── end-to-end probe + cache round trip on a /tmp fixture ─────────
      * NEVER a real host datadir — a fresh mkdtemp() fixture every time. */
     {
-        char tmpl[] = "/tmp/zcl_hwb_fixtureXXXXXX";
-        char *root = mkdtemp(tmpl);
+        char tmpl[PATH_MAX];
+        char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwb_fixture");
         HWB_CHECK("fixture mkdtemp succeeds", root != NULL);
         if (root) {
             HWB_CHECK("sample file planted", hwb_plant_sample_file(root));
@@ -358,8 +358,8 @@ int test_hw_bench(void)
         hw_bench_reset_for_testing();
         hw_profile_reset_for_testing();
 
-        char tmpl[] = "/tmp/zcl_hwb_block_fixtureXXXXXX";
-        char *root = mkdtemp(tmpl);
+        char tmpl[PATH_MAX];
+        char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwb_block_fixture");
         HWB_CHECK("hw_profile-poisoning fixture mkdtemp succeeds",
                   root != NULL);
         if (root) {

@@ -856,8 +856,9 @@ static int case_secret(void)
 
     /* A key file must be private: exact 0600 on POSIX, owner+SYSTEM-only on
      * Windows. A shared key is already spent, so this is a refusal. */
-    char path[512];
-    (void)snprintf(path, sizeof(path), "/tmp/zcl_engine_key_%d", (int)getpid());
+    char path[PATH_MAX];
+    test_fmt_tmpdir(path, sizeof(path), "zcl_engine_key", "key");
+    (void)test_ensure_tmproot();
     char key_text[ENGINE_SECRET_MAX];
     (void)snprintf(key_text, sizeof(key_text), "%s\n", k_planted_key);
     EN_CHECK("the private key fixture is created",
@@ -878,9 +879,10 @@ static int case_secret(void)
     /* THE CENTRAL CLAIM: with a key loaded, the harness's own writer cannot
      * put it in an artifact. */
     {
-        char artifact[512];
-        (void)snprintf(artifact, sizeof(artifact),
-                       "/tmp/zcl_engine_artifact_%d", (int)getpid());
+        char artifact[PATH_MAX];
+        test_fmt_tmpdir(artifact, sizeof(artifact), "zcl_engine_artifact",
+                        "log");
+        (void)test_ensure_tmproot();
         char text[1024];
         (void)snprintf(text, sizeof(text),
                        "request failed\nAuthorization: Bearer %s\n"
@@ -1623,7 +1625,7 @@ static int case_cli_argv(void)
              glm_cap && !engine_cli_accepts_turns(glm_cap));
 
     const struct engine_cli_inputs in = {
-        .prompt  = "/tmp/p.txt",
+        .prompt  = "/p.txt",
         .workdir = "/w",
         .turns   = "3",
         .model   = "m-1",
@@ -2921,9 +2923,9 @@ static bool verify_refuses(const char *path)
 static int case_receipt_chain(void)
 {
     int failures = 0;
-    char path[512];
-    (void)snprintf(path, sizeof(path), "/tmp/zcl_engine_receipt_%d.chainlog",
-                   (int)getpid());
+    char path[PATH_MAX];
+    test_fmt_tmpdir(path, sizeof(path), "zcl_engine_receipt", "chainlog");
+    (void)test_ensure_tmproot();
     receipt_unlink(path);
 
     struct engine_receipt_chain_report report;
@@ -3024,9 +3026,13 @@ static int case_receipt_chain(void)
      * filename. This catches accidental regressions to narrow Win32 file
      * APIs without making the ordinary fixture depend on a source-code
      * locale. */
-    char unicode_path[512];
+    char unicode_path[PATH_MAX];
+    char unicode_cwd[PATH_MAX];
+    (void)test_ensure_tmproot();
     (void)snprintf(unicode_path, sizeof(unicode_path),
-                   "/tmp/zcl engine \xC5\xBE receipt %d.chainlog", (int)getpid());
+                   "%s/test-tmp/zcl engine \xC5\xBE receipt %d.chainlog",
+                   getcwd(unicode_cwd, sizeof(unicode_cwd)) ? unicode_cwd : ".",
+                   (int)getpid());
     receipt_unlink(unicode_path);
     EN_CHECK("a receipt appends through a UTF-8 path containing spaces",
              engine_receipt_append(unicode_path, &a, NULL));

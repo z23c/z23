@@ -175,8 +175,8 @@ static int rv_ci_fixture_teeth(void)
     int failures = 0;
 
     /* 1. Contiguous chain: linkage clean, PoW rejected on every block. */
-    char tmpl[] = "/tmp/zcl_rv_fixtureXXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_rv_fixture");
     RV_CHECK("ci: mkdtemp fixture", dir != NULL);
     if (!dir) return failures;
 
@@ -215,8 +215,8 @@ static int rv_ci_fixture_teeth(void)
      * Reopen the same dir, then build a fresh dir whose middle block points
      * at the wrong prev hash. We assert the linkage failure is detected. */
     {
-        char tmpl2[] = "/tmp/zcl_rv_badlinkXXXXXX";
-        char *dir2 = mkdtemp(tmpl2);
+        char tmpl2[PATH_MAX];
+        char *dir2 = test_mkdtemp(tmpl2, sizeof(tmpl2), "zcl_rv_badlink");
         RV_CHECK("ci: mkdtemp bad-linkage", dir2 != NULL);
         if (dir2) {
             struct block_log_file *h2 = NULL;
@@ -265,8 +265,8 @@ static int rv_ci_fixture_teeth(void)
      * sweep must return a non-OK operational result (deser_failed), never
      * silently report success. */
     {
-        char tmpl3[] = "/tmp/zcl_rv_corruptXXXXXX";
-        char *dir3 = mkdtemp(tmpl3);
+        char tmpl3[PATH_MAX];
+        char *dir3 = test_mkdtemp(tmpl3, sizeof(tmpl3), "zcl_rv_corrupt");
         RV_CHECK("ci: mkdtemp corrupt-bytes", dir3 != NULL);
         if (dir3) {
             struct block_log_file *h3 = NULL;
@@ -325,14 +325,14 @@ int test_replay_verify(void)
     {
         struct replay_verify_report rep;
         struct zcl_result r = replay_verify_run(
-                "/tmp/zcl_no_such_legacy_dir_91919191", 0, 1, &rep);
+                "test-tmp/zcl_no_such_legacy_dir_91919191", 0, 1, &rep);
         RV_CHECK("run(missing datadir) → err", !r.ok);
     }
 
     /* ── 3. Datadir with no blocks/ subdir → operational error. */
     {
-        char tmpl[] = "/tmp/zcl_rv_emptyXXXXXX";
-        char *dir = mkdtemp(tmpl);
+        char tmpl[PATH_MAX];
+        char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_rv_empty");
         RV_CHECK("mkdtemp empty", dir != NULL);
         if (dir) {
             struct replay_verify_report rep;

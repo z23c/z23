@@ -424,8 +424,8 @@ int test_hw_profile(void)
 
     /* ── synthetic asymmetric-L3 fixture ─────────────────────────── */
     {
-        char tmpl[] = "/tmp/zcl_hwp_l3_fixtureXXXXXX";
-        char *root = mkdtemp(tmpl);
+        char tmpl[PATH_MAX];
+        char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwp_l3_fixture");
         HWP_CHECK("l3 fixture mkdtemp succeeds", root != NULL);
         if (root) {
             hwp_build_l3_fixture(root);
@@ -467,8 +467,8 @@ int test_hw_profile(void)
 
     /* ── synthetic storage-rotational fixture ────────────────────── */
     {
-        char tmpl[] = "/tmp/zcl_hwp_block_fixtureXXXXXX";
-        char *root = mkdtemp(tmpl);
+        char tmpl[PATH_MAX];
+        char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwp_block_fixture");
         HWP_CHECK("block fixture mkdtemp succeeds", root != NULL);
         if (root) {
             /* The probe never calls stat() on a real block device here —

@@ -14,13 +14,14 @@
  * `cat <path>` command — pure argv, no shell quoting or redirection. */
 bool set_dev_status_cmd_json(const char *json)
 {
-    char path[128];
-    snprintf(path, sizeof(path), "/tmp/zcl_devstatus_%d.json", (int)getpid());
+    char path[PATH_MAX];
+    test_fmt_tmpdir(path, sizeof(path), "zcl_devstatus", "json");
+    (void)test_ensure_tmproot();
     FILE *f = fopen(path, "w");
     if (!f) return false;
     fputs(json, f);
     fclose(f);
-    char cmd[160];
+    char cmd[PATH_MAX + 8];
     snprintf(cmd, sizeof(cmd), "cat %s", path);
     return setenv("ZCL_AGENT_DEV_STATUS_CMD", cmd, 1) == 0;
 }

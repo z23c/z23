@@ -275,8 +275,8 @@ static int check_directory_is_a_door(void)
     static const char *const kSelf =
         "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd.onion";
 
-    char dir[] = "/tmp/zcl_seed_doors_XXXXXX";
-    if (!mkdtemp(dir)) {
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "zcl_seed_doors")) {
         printf("seed_bootstrap_doors: cannot create scratch datadir... FAIL\n");
         return 1;
     }

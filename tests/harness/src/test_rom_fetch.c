@@ -563,8 +563,8 @@ static int test_verify_file(void)
     int failures = 0;
     TEST("rom_fetch: whole-file verify agrees with rom_seed digests, fails closed") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_romfetch_vfy_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_romfetch_vfy");
         ASSERT(dir != NULL);
 
         /* Two chunks: one full 4 MB chunk + a short 4 KB tail. */
@@ -635,11 +635,11 @@ static int test_loopback_e2e(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_srv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_srv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_cli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_cli");
         ASSERT(cdir != NULL);
 
         /* 2 chunks: one full 4 MB chunk + a short 4 KB tail. */
@@ -761,11 +761,11 @@ static int test_rate_cap_retry(void)
         rom_seed_set_peer_bps_cap(ROM_SEED_CHUNK_SIZE);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_rsrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_rsrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_rcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_rcli");
         ASSERT(cdir != NULL);
 
         /* 2 chunks: one full 4 MB chunk + a short 4 KB tail. */
@@ -831,11 +831,11 @@ static int test_parallel_download(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_psrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_psrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_pcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_pcli");
         ASSERT(cdir != NULL);
 
         /* 3 chunks: two full 4 MB chunks + a 4 KB tail. */
@@ -942,11 +942,11 @@ static int test_verified_multi_seeder(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_vmsrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_vmsrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_vmcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_vmcli");
         ASSERT(cdir != NULL);
 
         /* 3 chunks: two full 4 MB chunks + a short 4 KB tail. */
@@ -1103,11 +1103,11 @@ static int test_verified_multi_seeder_hang_failover(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_hgsrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_hgsrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_hgcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_hgcli");
         ASSERT(cdir != NULL);
 
         /* 3 chunks: two full 4 MB chunks + a short 4 KB tail. */
@@ -1252,11 +1252,11 @@ static int test_default_caps_parallel_multichunk(void)
         /* Deliberately DO NOT raise the caps — the shipped defaults must serve
          * 8 parallel workers against one dedicated seeder. */
 
-        char sroot[] = "/tmp/zcl_romfetch_dcsrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_dcsrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_dccli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_dccli");
         ASSERT(cdir != NULL);
 
         /* 9 chunks: eight full 8 MB chunks + a 4 KB tail, sparse-backed. */
@@ -1416,11 +1416,11 @@ static int test_dial_cost_of_a_download(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_latsrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_latsrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_latcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_latcli");
         ASSERT(cdir != NULL);
 
         /* 16 full chunks: 2 chunks per worker, so a per-chunk dial policy
@@ -1532,11 +1532,11 @@ static int test_dead_seed_is_dialled_once_per_job(void)
         rom_seed_set_peer_bps_cap(2ull * (uint64_t)ROM_SEED_CHUNK_SIZE);
         rom_seed_set_global_bps_cap(4ull * (uint64_t)ROM_SEED_CHUNK_SIZE);
 
-        char sroot[] = "/tmp/zcl_romfetch_deadsrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_deadsrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_deadcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_deadcli");
         ASSERT(cdir != NULL);
 
         /* 9 chunks against 8 workers, so at least one worker fetches twice and
@@ -1638,8 +1638,8 @@ static int test_bundle_handler_no_seeder_blocker(void)
     TEST("ops.debug.rom_fetch.bundle: no reachable seeder names a typed "
          "blocker (FAILED status, non-empty error code+message), never "
          "silence and never an unbounded hang") {
-        char croot[] = "/tmp/zcl_romfetch_nsbcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_nsbcli");
         ASSERT(cdir != NULL);
 
         uint8_t root[32], whole[32];
@@ -1698,11 +1698,11 @@ static int test_bundle_handler_corrupted_refused(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_corsrv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_corsrv");
         ASSERT(sdir != NULL);
-        char croot[] = "/tmp/zcl_romfetch_corcli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_corcli");
         ASSERT(cdir != NULL);
 
         size_t size = 8192; /* 1 chunk */
@@ -1801,8 +1801,8 @@ static int test_directory_discovery(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_romfetch_rls_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_rls");
         ASSERT(sdir != NULL);
 
         size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;

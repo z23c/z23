@@ -390,8 +390,8 @@ static int case_e2e(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_bbf_srv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_bbf_srv");
         ASSERT(sdir != NULL);
 
         /* 2 chunks: one full 4 MB chunk + a short 4 KB tail. */
@@ -425,8 +425,8 @@ static int case_e2e(void)
         ASSERT(m.num_chunks == art.num_chunks);
 
         /* (c) Download core lands the content-verified bundle in bundles/. */
-        char croot[] = "/tmp/zcl_bbf_cli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_bbf_cli");
         ASSERT(cdir != NULL);
         struct rom_fetch_peer peers[1];
         memset(peers, 0, sizeof(peers));
@@ -484,8 +484,8 @@ static int case_e2e(void)
 
         /* Byte-mismatch: a wrong committed whole-digest downloads every chunk,
          * fails the whole-file content proof, and lands NOTHING → no install. */
-        char croot2[] = "/tmp/zcl_bbf_bad_XXXXXX";
-        char *cdir2 = mkdtemp(croot2);
+        char croot2[PATH_MAX];
+        char *cdir2 = test_mkdtemp(croot2, sizeof(croot2), "zcl_bbf_bad");
         ASSERT(cdir2 != NULL);
         struct rom_fetch_manifest bad = m;
         bad.whole_sha3[0] ^= 0x01;
@@ -503,8 +503,8 @@ static int case_e2e(void)
 
         /* (d) Production entry: a directory.json hint + -fileservice peer drives
          * the whole gate → pick → seed-assembly → download → land path. */
-        char croot3[] = "/tmp/zcl_bbf_maybe_XXXXXX";
-        char *cdir3 = mkdtemp(croot3);
+        char croot3[PATH_MAX];
+        char *cdir3 = test_mkdtemp(croot3, sizeof(croot3), "zcl_bbf_maybe");
         ASSERT(cdir3 != NULL);
         char b3[400];
         snprintf(b3, sizeof(b3), "%s/bundles", cdir3);
@@ -851,8 +851,8 @@ static int case_discovery(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_bbf_disc_srv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_bbf_disc_srv");
         ASSERT(sdir != NULL);
 
         size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;
@@ -876,8 +876,8 @@ static int case_discovery(void)
         /* Fresh client datadir with NO bundles/directory.json hint. The explicit
          * -fileservice peer + connect_only (no clearnet seeds) makes the lone
          * reachable seed the operator-named one → quorum=1 accepted. */
-        char croot[] = "/tmp/zcl_bbf_disc_cli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_bbf_disc_cli");
         ASSERT(cdir != NULL);
 
         struct app_context ctx;
@@ -928,8 +928,8 @@ static int case_discovery_outcome_persists(void)
     int failures = 0;
     TEST("boot_bundle_fetch: discovery outcome persists + the diagnostics "
          "dumper reads it back labeled") {
-        char proot[] = "/tmp/zcl_bbf_disc_outcome_prog_XXXXXX";
-        char *pdir = mkdtemp(proot);
+        char proot[PATH_MAX];
+        char *pdir = test_mkdtemp(proot, sizeof(proot), "zcl_bbf_disc_outcome_prog");
         ASSERT(pdir != NULL);
         progress_store_close();
         ASSERT(progress_store_open(pdir));
@@ -943,8 +943,8 @@ static int case_discovery_outcome_persists(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_bbf_disc_outcome_srv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_bbf_disc_outcome_srv");
         ASSERT(sdir != NULL);
 
         size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;
@@ -965,8 +965,8 @@ static int case_discovery_outcome_persists(void)
             port = fs_server_get_port();
         ASSERT(port != 0);
 
-        char croot[] = "/tmp/zcl_bbf_disc_outcome_cli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_bbf_disc_outcome_cli");
         ASSERT(cdir != NULL);
 
         struct app_context ctx;
@@ -1004,8 +1004,8 @@ static int case_discovery_outcome_persists(void)
          * peer responds (responded_count>=1) yet advertises nothing usable,
          * so this MUST overwrite the prior recorded outcome with the new
          * label rather than leaving the stale one. ── */
-        char sroot2[] = "/tmp/zcl_bbf_disc_outcome_empty_srv_XXXXXX";
-        char *sdir2 = mkdtemp(sroot2);
+        char sroot2[PATH_MAX];
+        char *sdir2 = test_mkdtemp(sroot2, sizeof(sroot2), "zcl_bbf_disc_outcome_empty_srv");
         ASSERT(sdir2 != NULL);
 
         uint16_t port2 = 0;
@@ -1016,8 +1016,8 @@ static int case_discovery_outcome_persists(void)
             port2 = fs_server_get_port();
         ASSERT(port2 != 0);
 
-        char croot2[] = "/tmp/zcl_bbf_disc_outcome_empty_cli_XXXXXX";
-        char *cdir2 = mkdtemp(croot2);
+        char croot2[PATH_MAX];
+        char *cdir2 = test_mkdtemp(croot2, sizeof(croot2), "zcl_bbf_disc_outcome_empty_cli");
         ASSERT(cdir2 != NULL);
 
         struct app_context ctx2;

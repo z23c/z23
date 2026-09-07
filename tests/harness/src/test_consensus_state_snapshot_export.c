@@ -686,8 +686,8 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
               strstr(frag, "candidate_unbaked") != NULL);
 
     /* (2) derive-from-bundle plumbing. */
-    char bundle_path[] = "/tmp/zcl-rung-bundle-XXXXXX";
-    int bfd = mkstemp(bundle_path);
+    char bundle_path[PATH_MAX];
+    int bfd = test_mkstemp(bundle_path, sizeof(bundle_path), "zcl-rung-bundle");
     CSE_CHECK("rung: bundle temp created", bfd >= 0);
     if (bfd >= 0)
         close(bfd);
@@ -813,8 +813,8 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
     g_rung_hook_rederive_return = false;
 
     /* (8) end-to-end load: candidate artifacts on disk. */
-    char rung_dir[] = "/tmp/zcl-rungdir-XXXXXX";
-    char *rd = mkdtemp(rung_dir);
+    char rung_dir[PATH_MAX];
+    char *rd = test_mkdtemp(rung_dir, sizeof(rung_dir), "zcl-rungdir");
     CSE_CHECK("ladder: rung dir created", rd != NULL);
     if (rd) {
         CSE_CHECK("ladder: write valid candidate", cse_write_rung_file(rd, &a));
@@ -864,8 +864,8 @@ static int test_consensus_state_snapshot_export_platform_arm(void)
     consensus_export_output_close(&output);
     return failures;
 #else
-    char dir_template[] = "/tmp/zcl-cse-XXXXXX";
-    char *dir = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir = test_mkdtemp(dir_template, sizeof(dir_template), "zcl-cse");
     CSE_CHECK("fixture directory", dir != NULL);
     if (!dir)
         return failures;

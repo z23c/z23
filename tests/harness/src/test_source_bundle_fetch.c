@@ -326,8 +326,8 @@ static int test_header_shape_pinned(void)
         ASSERT(ROM_SEED_SOURCE_BUNDLE_MIN_BYTES ==
                VCS_SOURCE_BUNDLE_HEADER_BYTES + 1u);
 
-        char troot[] = "/tmp/zcl_sbfetch_hdr_XXXXXX";
-        char *tdir = mkdtemp(troot);
+        char troot[PATH_MAX];
+        char *tdir = test_mkdtemp(troot, sizeof(troot), "zcl_sbfetch_hdr");
         ASSERT(tdir != NULL);
         ASSERT(sbft_make_tree(tdir, 'A'));
 
@@ -380,11 +380,12 @@ static int test_fetch_by_root(void)
     TEST("source_bundle_fetch: a peer serving a source bundle delivers it by "
          "root, and the bytes rederive to that exact root") {
         sbft_open_caps();
-        char troot[] = "/tmp/zcl_sbfetch_ok_tree_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_ok_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_ok_cli_XXXXXX";
-        char *tdir = mkdtemp(troot), *sdir = mkdtemp(sroot),
-             *cdir = mkdtemp(croot);
+        char troot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *tdir = test_mkdtemp(troot, sizeof(troot), "zcl_sbfetch_ok_tree");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_ok_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_ok_cli");
         ASSERT(tdir && sdir && cdir);
         ASSERT(sbft_make_tree(tdir, 'A'));
 
@@ -448,12 +449,14 @@ static int test_substitution_refused(void)
          "tree, offered under the honest root, is refused as "
          "tree-root-mismatch with nothing materialized") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_sub_honest_XXXXXX";
-        char eroot[] = "/tmp/zcl_sbfetch_sub_evil_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_sub_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_sub_cli_XXXXXX";
-        char *hdir = mkdtemp(hroot), *edir = mkdtemp(eroot),
-             *sdir = mkdtemp(sroot), *cdir = mkdtemp(croot);
+        char hroot[PATH_MAX];
+        char eroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_sub_honest");
+        char *edir = test_mkdtemp(eroot, sizeof(eroot), "zcl_sbfetch_sub_evil");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_sub_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_sub_cli");
         ASSERT(hdir && edir && sdir && cdir);
         ASSERT(sbft_make_tree(hdir, 'A'));
         ASSERT(sbft_make_tree(edir, 'B'));   /* ONE byte apart */
@@ -539,12 +542,14 @@ static int test_substitution_then_recovery(void)
     TEST("source_bundle_fetch: an impostor offered FIRST is refused and the "
          "search continues to the honest bundle behind it") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_rec_honest_XXXXXX";
-        char eroot[] = "/tmp/zcl_sbfetch_rec_evil_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_rec_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_rec_cli_XXXXXX";
-        char *hdir = mkdtemp(hroot), *edir = mkdtemp(eroot),
-             *sdir = mkdtemp(sroot), *cdir = mkdtemp(croot);
+        char hroot[PATH_MAX];
+        char eroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_rec_honest");
+        char *edir = test_mkdtemp(eroot, sizeof(eroot), "zcl_sbfetch_rec_evil");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_rec_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_rec_cli");
         ASSERT(hdir && edir && sdir && cdir);
         ASSERT(sbft_make_tree(hdir, 'A'));
         ASSERT(sbft_make_tree(edir, 'B'));
@@ -605,11 +610,12 @@ static int test_damaged_payload_refused(void)
          "advertising the honest root are both refused, with distinct "
          "reasons and nothing materialized") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_dmg_tree_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_dmg_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_dmg_cli_XXXXXX";
-        char *hdir = mkdtemp(hroot), *sdir = mkdtemp(sroot),
-             *cdir = mkdtemp(croot);
+        char hroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_dmg_tree");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_dmg_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_dmg_cli");
         ASSERT(hdir && sdir && cdir);
         ASSERT(sbft_make_tree(hdir, 'A'));
 
@@ -684,11 +690,12 @@ static int test_stalled_peer_failover(void)
     TEST("source_bundle_fetch: a peer that accepts then goes quiet is "
          "abandoned and the honest peer behind it still delivers") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_stall_tree_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_stall_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_stall_cli_XXXXXX";
-        char *hdir = mkdtemp(hroot), *sdir = mkdtemp(sroot),
-             *cdir = mkdtemp(croot);
+        char hroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_stall_tree");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_stall_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_stall_cli");
         ASSERT(hdir && sdir && cdir);
         ASSERT(sbft_make_tree(hdir, 'A'));
 
@@ -752,11 +759,12 @@ static int test_no_peer_named_refusal(void)
     TEST("source_bundle_fetch: an unknown root, a dead endpoint and an empty "
          "peer list each return a distinct named refusal") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_none_tree_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_none_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_none_cli_XXXXXX";
-        char *hdir = mkdtemp(hroot), *sdir = mkdtemp(sroot),
-             *cdir = mkdtemp(croot);
+        char hroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_none_tree");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_none_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_none_cli");
         ASSERT(hdir && sdir && cdir);
         ASSERT(sbft_make_tree(hdir, 'A'));
 
@@ -872,11 +880,12 @@ static int test_same_chunk_root_divergent_manifest(void)
     TEST("source_bundle_fetch: same chunk root with divergent whole-file "
          "metadata remains a separate candidate") {
         sbft_open_caps();
-        char troot[] = "/tmp/zcl_sbfetch_tuple_tree_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_tuple_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_tuple_cli_XXXXXX";
-        char *tdir = mkdtemp(troot), *sdir = mkdtemp(sroot),
-             *cdir = mkdtemp(croot);
+        char troot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *tdir = test_mkdtemp(troot, sizeof(troot), "zcl_sbfetch_tuple_tree");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_tuple_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_tuple_cli");
         ASSERT(tdir && sdir && cdir);
         ASSERT(sbft_make_tree(tdir, 'A'));
 
@@ -933,11 +942,12 @@ static int test_one_peer_cannot_fill_candidate_set(void)
     TEST("source_bundle_fetch: one peer cannot consume every candidate slot "
          "ahead of an honest peer") {
         sbft_open_caps();
-        char troot[] = "/tmp/zcl_sbfetch_slots_tree_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_slots_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_slots_cli_XXXXXX";
-        char *tdir = mkdtemp(troot), *sdir = mkdtemp(sroot),
-             *cdir = mkdtemp(croot);
+        char troot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *tdir = test_mkdtemp(troot, sizeof(troot), "zcl_sbfetch_slots_tree");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_slots_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_slots_cli");
         ASSERT(tdir && sdir && cdir);
         ASSERT(sbft_make_tree(tdir, 'A'));
 
@@ -1000,12 +1010,14 @@ static int test_leaf_end_to_end(void)
     TEST("zcode.workspace.source.bundle.fetch: writes the verified bundle on "
          "success and creates NO output file on a substitution refusal") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_leaf_honest_XXXXXX";
-        char eroot[] = "/tmp/zcl_sbfetch_leaf_evil_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_leaf_srv_XXXXXX";
-        char oroot[] = "/tmp/zcl_sbfetch_leaf_out_XXXXXX";
-        char *hdir = mkdtemp(hroot), *edir = mkdtemp(eroot),
-             *sdir = mkdtemp(sroot), *odir = mkdtemp(oroot);
+        char hroot[PATH_MAX];
+        char eroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char oroot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_leaf_honest");
+        char *edir = test_mkdtemp(eroot, sizeof(eroot), "zcl_sbfetch_leaf_evil");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_leaf_srv");
+        char *odir = test_mkdtemp(oroot, sizeof(oroot), "zcl_sbfetch_leaf_out");
         ASSERT(hdir && edir && sdir && odir);
         ASSERT(sbft_make_tree(hdir, 'A'));
         ASSERT(sbft_make_tree(edir, 'B'));
@@ -1119,12 +1131,14 @@ static int test_planted_resume_state_refused(void)
          "complete still yields only bytes that rederive to the asked-for "
          "root") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_plant_honest_XXXXXX";
-        char eroot[] = "/tmp/zcl_sbfetch_plant_evil_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_plant_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_plant_cli_XXXXXX";
-        char *hdir = mkdtemp(hroot), *edir = mkdtemp(eroot),
-             *sdir = mkdtemp(sroot), *cdir = mkdtemp(croot);
+        char hroot[PATH_MAX];
+        char eroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_plant_honest");
+        char *edir = test_mkdtemp(eroot, sizeof(eroot), "zcl_sbfetch_plant_evil");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_plant_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_plant_cli");
         ASSERT(hdir && edir && sdir && cdir);
         ASSERT(sbft_make_tree(hdir, 'A'));
         ASSERT(sbft_make_tree(edir, 'B'));
@@ -1283,11 +1297,12 @@ static int test_one_seeder_fills_the_candidate_set(void)
          "refused on every one of them with nothing materialized — and "
          "consumes the entire candidate budget by itself") {
         sbft_open_caps();
-        char hroot[] = "/tmp/zcl_sbfetch_flood_honest_XXXXXX";
-        char sroot[] = "/tmp/zcl_sbfetch_flood_srv_XXXXXX";
-        char croot[] = "/tmp/zcl_sbfetch_flood_cli_XXXXXX";
-        char *hdir = mkdtemp(hroot), *sdir = mkdtemp(sroot),
-             *cdir = mkdtemp(croot);
+        char hroot[PATH_MAX];
+        char sroot[PATH_MAX];
+        char croot[PATH_MAX];
+        char *hdir = test_mkdtemp(hroot, sizeof(hroot), "zcl_sbfetch_flood_honest");
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_sbfetch_flood_srv");
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_sbfetch_flood_cli");
         ASSERT(hdir && sdir && cdir);
 
         /* The tree the caller actually wants. It is never served by anyone in
@@ -1308,8 +1323,8 @@ static int test_one_seeder_fills_the_candidate_set(void)
          * registry holds ROM_SEED_MAX_ARTIFACTS, and both equal the candidate
          * cap today — which is exactly why one seeder is enough. */
         for (unsigned i = 0; i < SOURCE_BUNDLE_FETCH_MAX_CANDIDATES; i++) {
-            char iroot[] = "/tmp/zcl_sbfetch_flood_tree_XXXXXX";
-            char *idir = mkdtemp(iroot);
+            char iroot[PATH_MAX];
+            char *idir = test_mkdtemp(iroot, sizeof(iroot), "zcl_sbfetch_flood_tree");
             ASSERT(idir != NULL);
             ASSERT(sbft_make_tree(idir, (char)('a' + (int)i)));
 

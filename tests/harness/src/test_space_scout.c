@@ -342,8 +342,8 @@ static int test_scout_attestation_and_service(void)
 {
   int failures = 0;
   TEST("space scout: signed local attestation and restart-stable CAS") {
-    char workspace[] = "/tmp/zcl_space_scout_XXXXXX";
-    ASSERT(mkdtemp(workspace) != NULL);
+    char workspace[PATH_MAX];
+    ASSERT(test_mkdtemp(workspace, sizeof(workspace), "zcl_space_scout") != NULL);
     struct vcs_space_scout_mission_v1 mission;
     scout_mission(&mission);
     struct metaverse_space_scout_plan_out plan;
