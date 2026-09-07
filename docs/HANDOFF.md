@@ -45,6 +45,34 @@ Do not reason about live behaviour from this checkout. The node can look
 exactly like a node with a real bug when the fix is already in `main` and
 merely never shipped.
 
+## Train pipeline handoff (2026-09-07)
+
+The landing and train state lives in ledgers, not on this page. Re-check them
+before trusting any sentence below:
+
+```bash
+tail -3 ~/.local/state/z23/dev/land/outcomes.jsonl            # last landings, one row per train
+cat ~/.local/state/zclassic23/scratch/train51/late_picks.txt   # the next train's pick queue
+cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-07.md  # the orchestrator's handoff notes
+```
+
+- Trains are assembled in `~/.z23/trains/train<N>` from verified review refs
+  (`refs/review/<lane>` in the maintainer checkout), landed through `dev land`
+  on the landing box, then rolled out from the ship-source box with the
+  `ship_*.sh --skip-gate` helpers, slowest disk first.
+- Every lane keeps its brief at `~/.local/state/zclassic23/scratch/<lane>/BRIEF.md`
+  and its worktree under `~/.z23/lanes/<lane>`. A lane whose agent dies with
+  its session resumes from that worktree and brief; it is never restarted from
+  scratch.
+- The shell-to-C23 lint gate port ledger is
+  `~/.local/state/zclassic23/scratch/northstar/unported_classified.md`; each
+  port replaces one script with an exec shim and one new family file under
+  `tools/lint/lintc/`.
+- Open items carried into the next train: move the selftest fixture that
+  `tools/ship.sh` keeps under `/tmp` into the state scratch directory, and
+  give the hex-codec and byte-order coverage oracles a filesystem walk for
+  trees that have no `.git`.
+
 ## How to read the ledgers
 
 | Claim | Command or file |
