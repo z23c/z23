@@ -526,7 +526,7 @@ REMOTE_COMMAND_CLASS("vault.session.revoke", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.redeem", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
 
-/* DEV — 68 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
+/* DEV — 71 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
  * owner_capability above; they are the only two).
  *
  * The dev branch drives a checkout. It compiles (ZCL_COMMAND_CAP_COMPILER),
@@ -625,6 +625,9 @@ REMOTE_COMMAND_CLASS("dev.agent.claim", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.ticketkey", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.queue", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.mail", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.index.ingest", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.index.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.index.search", REMOTE_CLASS_NEVER, "")
 
 /* OPS — 36 never_remote leaves.
  *
@@ -1112,6 +1115,21 @@ REMOTE_COMMAND_CLASS("fleet.wiki.history", REMOTE_CLASS_READ_ONLY,
     "every revision of one page, each independently signed")
 REMOTE_COMMAND_CLASS("fleet.board.post", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.wiki.write", REMOTE_CLASS_NEVER, "")
+
+/* ── this node's own triggers — 2 never_remote ─────────────────────────
+ * A trigger is this box reacting to its own local event sources: landing
+ * outcomes, its board file, its experiment ledger. `check` evaluates them
+ * and fires the matching actions, so a peer that could ask for it would be
+ * asking this node to act on its own state on someone else's schedule, and
+ * would move the per-source byte cursor that decides what fires next.
+ *
+ * `list` is refused too, and not from excess caution. The registry it prints
+ * is this box's own reaction map — which of its files are watched, what
+ * pattern each row matches, and what happens when one does. That is the
+ * shape of the target, which this table's enumeration rule keeps off the
+ * wire whether or not reading it changes anything. */
+REMOTE_COMMAND_CLASS("fleet.triggers.check", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.triggers.list", REMOTE_CLASS_NEVER, "")
 
 /* THE OWNER'S PRIVATE FLEET LEDGER — 3 never_remote.
  *

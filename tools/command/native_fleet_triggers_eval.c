@@ -16,7 +16,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+
+/* tools/command is compiled for ZCL_TARGET=windows-x86_64 like every other
+ * release translation unit, so <sys/utsname.h> cannot be reached
+ * unconditionally. Same split, same reason, as tools/dev/fleet_enrol_facts.c. */
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/utsname.h>
+#endif
 
 /* platform_state_root() always returns "<base>/z23/dev" (see
  * platform/modules/platform/src/state_root.c: base is XDG_STATE_HOME or
@@ -74,21 +85,40 @@ bool zcl_trigger_landing_path(char *out, size_t cap)
     return (size_t)snprintf(out, cap, "%s/land/outcomes.jsonl", state) < cap;
 }
 
+/* This box's own short host name, the string board.sh puts in the board
+ * filename. On POSIX that is uname()'s nodename rather than gethostname(2):
+ * the same string from a call this tree already classifies CAP_HARMLESS
+ * (see tools/dev/fleet_enrol_facts.c), so it costs no new external symbol.
+ * The Windows arm reads the same fact through GetComputerNameA, exactly as
+ * fleet_enrol_facts.c does. */
+static bool trg_short_hostname(char *out, size_t cap)
+{
+#if defined(_WIN32)
+    char name[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD name_len = (DWORD)sizeof(name);
+    if (!GetComputerNameA(name, &name_len))
+        return false;
+    if ((size_t)snprintf(out, cap, "%s", name) >= cap)
+        return false;
+#else
+    struct utsname sys;
+    if (uname(&sys) != 0)
+        return false;
+    if ((size_t)snprintf(out, cap, "%s", sys.nodename) >= cap)
+        return false;
+#endif
+    char *dot = strchr(out, '.');
+    if (dot)
+        *dot = 0;
+    return true;
+}
+
 bool zcl_trigger_board_path(char *out, size_t cap)
 {
     char base[PATH_MAX];
-    struct utsname sys;
-    /* uname()'s nodename, not gethostname(2): it is the same string from a
-     * call this tree already classifies CAP_HARMLESS (see
-     * tools/dev/fleet_enrol_facts.c), so reading the board filename this
-     * box's own board.sh writes to costs no new external symbol. */
-    if (!trg_base_dir(base, sizeof base) || uname(&sys) != 0)
+    char host[256];
+    if (!trg_base_dir(base, sizeof base) || !trg_short_hostname(host, sizeof host))
         return false;
-    char host[sizeof sys.nodename];
-    (void)snprintf(host, sizeof host, "%s", sys.nodename);
-    char *dot = strchr(host, '.');
-    if (dot)
-        *dot = 0;
     return (size_t)snprintf(out, cap, "%s/zclassic23/board/%s.jsonl", base,
                             host) < cap;
 }

@@ -18,7 +18,7 @@ declares four sources:
 | id | kind | path | format |
 | --- | --- | --- | --- |
 | `board` | `board_rows` | `board/*.jsonl` under the zclassic23 state root | jsonl |
-| `experiments` | `experiment_rows` | `experiments/rows.tsv` under the zclassic23 state root | tsv |
+| `experiments` | `experiment_rows` | `experiments/rows.tsv` under the zclassic23 state root | tsv | <!-- doc-path-ok: a runtime path under the state root, not a repo path -->
 | `landing` | `landing_outcomes` | `land/outcomes.jsonl` under the native dev-state root | jsonl |
 | `logs` | `log_lines` | every `*.log` under the zclassic23 state root | text_kv (free text + extracted `key=value` tokens) |
 
