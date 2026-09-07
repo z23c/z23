@@ -9737,6 +9737,30 @@ endef
 install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign zclassic23-acme
 	@$(INSTALL_C23_PRODUCTS)
 
+# ── install-train-keeper ──────────────────────────────────────────────────
+# Installs the unattended train keeper's user units and stops. It does NOT
+# enable or start anything: turning a box into one that assembles and lands
+# trains while nobody is watching is an operator decision, and a make target
+# that made it silently would be the wrong place to make it. The target
+# prints the one command that does.
+.PHONY: install-train-keeper
+install-train-keeper:
+	@install -d "$(HOME)/.config/systemd/user"
+	@install -m 644 platform/deploy/z23-train-keeper.service \
+		"$(HOME)/.config/systemd/user/z23-train-keeper.service"
+	@install -m 644 platform/deploy/z23-train-keeper.timer \
+		"$(HOME)/.config/systemd/user/z23-train-keeper.timer"
+	@install -d "$(HOME)/.z23"
+	@if [ ! -f "$(HOME)/.z23/train-keeper.env" ]; then \
+		printf 'Z23_ROOT=%s\n# Z23_TRAIN is the train number the keeper advances. Unset = the unit refuses.\nZ23_TRAIN=\n' \
+			"$(CURDIR)" > "$(HOME)/.z23/train-keeper.env"; \
+		echo "wrote $(HOME)/.z23/train-keeper.env — set Z23_TRAIN before enabling"; \
+	fi
+	@(systemctl --user daemon-reload 2>/dev/null || true)
+	@echo "installed, NOT enabled. To enable:"
+	@echo "  systemctl --user enable --now z23-train-keeper.timer"
+	@echo "To stop it: systemctl --user disable --now z23-train-keeper.timer"
+
 # ── macOS launchd service (the launchd equivalent of systemd linger) ──
 # Installs a LaunchAgent plist that keeps the z23 node running in the
 # background with auto-restart on crash, starts at login, and logs to

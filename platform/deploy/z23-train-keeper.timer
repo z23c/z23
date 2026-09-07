@@ -1,0 +1,16 @@
+# Five minutes is the whole retry policy for the unattended train keeper.
+# The leaf itself is one bounded pass that holds a per-train flock, so a pass
+# still running when the next tick arrives simply refuses and returns; the
+# tick after that finds the lock free. Persistent=true so a box that was
+# asleep at 03:00 catches up once on wake rather than not at all.
+[Unit]
+Description=Run the z23 train keeper every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=z23-train-keeper.service
+
+[Install]
+WantedBy=timers.target

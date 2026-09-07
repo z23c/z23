@@ -1,0 +1,29 @@
+# The unattended train keeper: one bounded pass over one train's state
+# machine, run from z23-train-keeper.timer with no agent session alive.
+#
+# ExecStart goes through a LOGIN shell on purpose. The user manager's own
+# environment is a stripped one, and this unit's child runs `make dev-bin`
+# and `make lint` in a real checkout: the ship recipe already learned that a
+# stripped env breaks those builds in ways that look like source failures.
+# A login shell is how the keeper gets the same environment the operator's
+# own terminal has.
+#
+# Type=oneshot with no Restart=: the timer is the retry policy. A keeper that
+# restarted itself would be a second loop competing with the first, and the
+# leaf's own flock would refuse it anyway.
+#
+# SuccessExitStatus=3 is the leaf's BLOCKED exit. "Nothing to do yet", "the
+# base moved", "another keeper holds the lock" and "this train is blocked"
+# are all correct answers, not unit failures; a genuine internal failure
+# still exits non-zero and non-3, and systemd still marks that failed.
+[Unit]
+Description=Advance one z23 train's unattended state machine
+Documentation=file:%h/github/zclassic23/docs/DEVELOPING.md
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.z23/train-keeper.env
+WorkingDirectory=%h/github/zclassic23
+ExecStart=/bin/bash -lc 'exec "$${Z23_ROOT:-$$HOME/github/zclassic23}/build/bin/z23-dev" dev train keep --train="$${Z23_TRAIN:?set Z23_TRAIN in ~/.z23/train-keeper.env}" --once'
+SuccessExitStatus=3
+TimeoutStartSec=5400
