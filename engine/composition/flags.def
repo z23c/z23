@@ -2308,6 +2308,8 @@ Z23_FLAG("ZCL_TRANSACTION_MICRO_NATIVE_CATALOG", "env_build", "-", "-",
           "undocumented; first use tools/dev/transaction-micro-lab.sh:34")
 Z23_FLAG("ZCL_TRANSACTION_TYPE_CATALOG", "env_build", "-", "-",
           "undocumented; first use tools/dev/transaction-lab.sh:33")
+Z23_FLAG("ZCL_TU_CACHE_DIGEST_SELFTEST_VANISH", "env_build", "-", "-",
+          "undocumented; first use tools/lint/tu_result_cache.sh:293")
 Z23_FLAG("ZCL_TU_CACHE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/tu_result_cache.sh:380")
 Z23_FLAG("ZCL_TU_CACHE_LIB", "env_build", "-", "-",

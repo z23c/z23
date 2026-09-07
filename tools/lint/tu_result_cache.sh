@@ -242,32 +242,134 @@ tu_cache_include_digest() {
         if [ -s "$list.f" ]; then mv -f "$list.f" "$list"; else rm -f "$list.f"; fi
     fi
 
-    # TOCTOU tolerance: $list was built from a `find` snapshot above, but
-    # sha256sum reads every path again here, moments later. Concurrently
-    # under `make lint`, another gate's own selftest plants-then-unlinks a
-    # transient file in a REAL directory (scan_exclusions.sh's fixture regex
-    # above only filters names that FOLLOW the shared `_*fixture*.[ch]`
-    # convention; a differently-named transient write, or a generated header
-    # gen_templates rewrites in place, is not caught by that filter and can
-    # still vanish inside this exact window). Measured 2026-09-07: racing a
-    # 10 ms create/unlink cycle against this call hit sha256sum's "No such
-    # file or directory" on ~13% of calls (40/300), and — because this
-    # pipeline runs under the caller's `set -o pipefail` — that one missing
-    # path failed the WHOLE digest, which check-clang-portability's
-    # --self-test then reported as "could not digest the include set". A
-    # file that disappears between the two reads is, almost by definition,
-    # transient noise no real TU depends on, so drop it from the digest
-    # instead of aborting: run the hashing stage in its own exit-status
-    # sandbox so one vanished path can only shrink the hashed set, never
-    # fail the whole computation. `set -o pipefail` still catches any other
-    # abnormal xargs/sha256sum exit through the check below.
-    local hashed
-    hashed="$(LC_ALL=C sort -u "$list" | tr '\n' '\0' |
-        { xargs -0 -r sha256sum 2>/dev/null || true; } |
-        awk '{ h = $1; $1 = ""; sub(/^ +/, "", $0); printf "%s\t%s\n", $0, h }' |
-        LC_ALL=C sort)"
+    # TOCTOU tolerance, NARROWLY SCOPED: $list was built from a `find`
+    # snapshot above, but sha256sum reads every path again here, moments
+    # later. Concurrently under `make lint`, another gate's own selftest
+    # plants-then-unlinks a transient file in a REAL directory
+    # (scan_exclusions.sh's fixture regex above only filters names that
+    # FOLLOW the shared `_*fixture*.[ch]` convention; a differently-named
+    # transient write, or a generated header gen_templates rewrites in
+    # place, is not caught by that filter and can still vanish inside this
+    # exact window). Measured 2026-09-07: racing a 10 ms create/unlink cycle
+    # against this call hit sha256sum's "No such file or directory" on ~13%
+    # of calls (40/300), and because this used to run as one pipeline under
+    # the caller's `set -o pipefail`, that one missing path failed the WHOLE
+    # digest.
+    #
+    # A first fix swallowed EVERY sha256sum error unconditionally
+    # (`sha256sum ... || true`) — caught in review: `chmod 000` on a file
+    # that stays PRESENT the whole time (genuinely unreadable, not a race)
+    # silently returned rc=0 with the file dropped from the digest, which is
+    # exactly the fail-OPEN this cache's own header forbids ("FAIL-SAFE, NOT
+    # FAIL-OPEN ... none of them can turn a red gate green" — a digest that
+    # quietly omits an unreadable header can salt a cache generation that
+    # never sees that header change).
+    #
+    # So: capture stdout and stderr into this run's OWN scratch dir (never
+    # /tmp) and classify every stderr line by hand. The ONLY tolerated shape
+    # is sha256sum's own per-path report of a path that is simply gone —
+    # "sha256sum: <path>: No such file or directory" — which is what the
+    # race above actually produces, and nothing else: not "Permission
+    # denied" (chmod 000 or a genuinely broken ACL), not "Is a directory",
+    # not I/O errors, and not xargs's OWN diagnostic when sha256sum itself
+    # cannot be found ("xargs: sha256sum: ...", never prefixed "sha256sum:").
+    # Any other stderr line, or sha256sum/xargs missing outright, fails the
+    # digest loudly with the offending line named — same as before this
+    # cache existed. Only a confirmed ENOENT-vanished path is dropped; the
+    # digest then covers exactly the files that were actually hashed.
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "tu_cache_include_digest: sha256sum is not installed" >&2
+        return 1
+    fi
+    if ! command -v xargs >/dev/null 2>&1; then
+        echo "tu_cache_include_digest: xargs is not installed" >&2
+        return 1
+    fi
+
+    # Deterministic hook for tu_cache_include_digest_selftest below: unlike
+    # the live 10ms race this proves, a unit test needs the vanish to land
+    # in the exact same gap every run. No-op unless a selftest sets it, and
+    # only ever a path this very call's own $list already contains.
+    if [ -n "${ZCL_TU_CACHE_DIGEST_SELFTEST_VANISH:-}" ]; then
+        rm -f -- "$ZCL_TU_CACHE_DIGEST_SELFTEST_VANISH"
+    fi
+
+    local sha_out="$scratch/tu-cache-sha-out.txt"
+    local sha_err="$scratch/tu-cache-sha-err.txt"
+    local rc bad hashed
+    LC_ALL=C sort -u "$list" | tr '\n' '\0' |
+        xargs -0 -r sha256sum >"$sha_out" 2>"$sha_err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        bad="$(grep -vE '^sha256sum: .*: No such file or directory$' "$sha_err" 2>/dev/null)"
+        if [ -n "$bad" ]; then
+            echo "tu_cache_include_digest: sha256sum reported an error the vanished-path race does not explain:" >&2
+            printf '  %s\n' "$bad" >&2
+            return 1
+        fi
+        # Every stderr line was a confirmed ENOENT on a path this call's own
+        # `find` listed a moment earlier — drop it, keep whatever hashed.
+    fi
+
+    hashed="$(awk '{ h = $1; $1 = ""; sub(/^ +/, "", $0); printf "%s\t%s\n", $0, h }' \
+        "$sha_out" | LC_ALL=C sort)"
     [ -n "$hashed" ] || return 1
     printf '%s\n' "$hashed" | tu_cache__sha_stdin
+}
+
+# tu_cache_include_digest_selftest — proves the tightened TOCTOU handling
+# above in both directions, entirely inside its own scratch dir/private
+# root (never the real repo tree, never /tmp for anything durable):
+#   (1) a path present when `find` snapshots the tree but gone by the time
+#       sha256sum reads it is DROPPED — the digest still succeeds;
+#   (2) a path that stays present but is genuinely unreadable (chmod 000)
+#       FAILS the digest loudly and NAMES the file — never silently omitted.
+tu_cache_include_digest_selftest() {
+    local base d out rc
+    base="$(mktemp -d)" || { echo "FAIL: mktemp failed" >&2; return 2; }
+    d="$base/root"
+    mkdir -p "$d" "$base/scratch1" "$base/scratch2"
+    printf '#define A 1\n' > "$d/a.h"
+    printf '#define B 1\n' > "$d/b.h"
+    printf '#define C 1\n' > "$d/c.h"
+
+    out="$(ZCL_TU_CACHE_DIGEST_SELFTEST_VANISH="$d/b.h" \
+        tu_cache_include_digest "$base/scratch1" "$d")"
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+        echo "FAIL: tu_cache_include_digest_selftest — a path that vanished" >&2
+        echo "  between find and sha256sum failed the whole digest (rc=$rc)" >&2
+        rm -rf "$base"; return 2
+    fi
+    if [ -e "$d/b.h" ]; then
+        echo "FAIL: tu_cache_include_digest_selftest — the vanish hook did" >&2
+        echo "  not remove its own target; the test proved nothing" >&2
+        rm -rf "$base"; return 2
+    fi
+
+    printf '#define D 1\n' > "$d/d.h"
+    chmod 000 "$d/d.h"
+    out="$(tu_cache_include_digest "$base/scratch2" "$d" 2>"$base/stderr.txt")"
+    rc=$?
+    chmod 644 "$d/d.h"
+    if [ "$rc" -eq 0 ]; then
+        echo "FAIL: tu_cache_include_digest_selftest — an unreadable file" >&2
+        echo "  (chmod 000, never removed) did not fail the digest; a real" >&2
+        echo "  unreadable header would be silently missing from every" >&2
+        echo "  cache key it should have busted" >&2
+        rm -rf "$base"; return 2
+    fi
+    if ! grep -qF "d.h" "$base/stderr.txt" 2>/dev/null; then
+        echo "FAIL: tu_cache_include_digest_selftest — the digest failure" >&2
+        echo "  did not name the unreadable file:" >&2
+        sed 's/^/    /' "$base/stderr.txt" >&2
+        rm -rf "$base"; return 2
+    fi
+
+    rm -rf "$base"
+    echo "  OK: tu_cache_include_digest selftest — a vanished path is dropped" \
+         "(digest still succeeds), an unreadable file fails loudly and is named"
+    return 0
 }
 # Keep the newest N generations under <gate-root>, drop the rest whole. A
 # generation is a directory named by its salt, so this is the only pruning

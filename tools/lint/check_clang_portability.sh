@@ -511,6 +511,13 @@ PROBE
     echo "      a layer emptied from the Makefile parse is UNPROVEN exit 2 (not"
     echo "      clean, and invisible to SRC_FLOOR), a stale allowance is exit 1"
 
+    # The include-set digest's own TOCTOU handling: a path that vanishes
+    # between the `find` snapshot and the sha256sum pass must be dropped
+    # (not fail the whole digest), and a path that is genuinely unreadable
+    # the whole time must still fail loudly and be named — never silently
+    # omitted. See tools/lint/tu_result_cache.sh, tu_cache_include_digest.
+    tu_cache_include_digest_selftest || exit 1
+
     # The per-TU result cache, proven against this gate's real compiler and
     # real flag set. A cache that served a stale verdict would make every
     # sentence above hollow, so it is graded in the same breath.
