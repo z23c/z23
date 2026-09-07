@@ -155,15 +155,15 @@ Z23_FLAG("ZCL_APP_SHAPES", "env_build", "-", "-",
 Z23_FLAG("ZCL_ARENA_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/arena_acceptance.sh:157")
 Z23_FLAG("ZCL_ARM_SYMBOL_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:577")
+          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:377")
 Z23_FLAG("ZCL_ARM_SYMBOL_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:580")
+          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:380")
 Z23_FLAG("ZCL_ARM_SYMBOL_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:581")
+          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:381")
 Z23_FLAG("ZCL_ARM_SYMBOL_FILE_FLOOR", "env_build", "2500", "-",
-          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:579")
+          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:379")
 Z23_FLAG("ZCL_ARM_SYMBOL_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:578")
+          "undocumented; first use tools/lint/lintc/gate_arm_symbol_single.c:378")
 Z23_FLAG("ZCL_ARTIFACT_ARM_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_generated_artifact_contradictions.c:202")
 Z23_FLAG("ZCL_ARTIFACT_CAPABILITY_INVENTORY", "env_build", "-", "-",
