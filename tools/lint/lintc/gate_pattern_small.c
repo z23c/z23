@@ -157,6 +157,46 @@ int check_no_python_selftest(void)
 
 static const char k_mal_baseline[] = "tools/lint/malloc_baseline.txt";
 
+/* The ONE file allowed to call the raw allocator directly: it IS zcl_malloc/
+ * zcl_calloc/zcl_realloc's implementation. Exempted by EXACT path, never by
+ * a content marker — a `// raw-alloc-ok` comment inside this header is a
+ * package-source edit of zclassic23/base, which check-zcode-package-
+ * registry then demands be re-derived through base -> sha3 -> crypto, and
+ * check-core-seal refuses that recipe (round 4 verdict, 2026-09-07).
+ * Fail-closed: mal_seam_verify() FATALs if this path is missing or no
+ * longer names the seam it claims to be, rather than silently keeping the
+ * exemption alive on a stale entry. A second path here is a FIX (the seam
+ * moved to a new file), not a workaround — keep this a single entry. */
+static const char k_mal_seam_path[] = "platform/modules/base/include/base/safe_alloc.h";
+static const char k_mal_seam_name[] = "zcl_malloc_impl";
+
+static int mal_is_exempt_seam(const char *path)
+{
+    return strcmp(path, k_mal_seam_path) == 0;
+}
+
+static int mal_seam_verify(void)
+{
+    FILE *f = fopen(k_mal_seam_path, "r");
+    if (!f)
+        return die("check-malloc: FATAL — the malloc gate's one path "
+                   "exemption does not exist: %s\n", k_mal_seam_path);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int found = 0;
+    while (!found && (n = getline(&line, &cap, f)) >= 0)
+        if (strstr(line, k_mal_seam_name))
+            found = 1;
+    int rc = fin(f, line, k_mal_seam_path, 0);
+    if (rc)
+        return rc;
+    if (!found)
+        return die("check-malloc: FATAL — the malloc gate's one path "
+                   "exemption no longer names its seam: %s\n", k_mal_seam_path);
+    return 0;
+}
+
 struct mal_acc { regex_t *hit; regex_t *excl; int hits; const char *nm; struct bln_set *found; };
 
 static int compile_mal(regex_t *hit, regex_t *excl, const char *nm, const char *xtra)
@@ -165,7 +205,16 @@ static int compile_mal(regex_t *hit, regex_t *excl, const char *nm, const char *
     int n = snprintf(hp, sizeof hp, "[^_]%s[[:space:]]*\\(", nm);
     if (n < 0 || (size_t)n >= sizeof hp)
         return die("z23-lint: pattern buffer overflow\n", "");
-    n = snprintf(ep, sizeof ep, "zcl_%s%s|raw-alloc-ok|safe_alloc|\".*%s|LOG_|fprintf",
+    /* "raw-alloc-ok" stays a legitimate per-line marker for every OTHER
+     * file that owns its own heap escape hatch (core_seal.c, the sim fault
+     * injectors, the lintc gates themselves, ...) — round 4 only replaced
+     * the ONE exemption that lived inside a package-source header
+     * (safe_alloc.h) with the exact-path check above; it did not touch
+     * this marker's use anywhere else. The bare "safe_alloc" substring
+     * this pattern used to also carry is gone: it existed only to match
+     * safe_alloc.h's own unmarked lines, which the path exemption now
+     * covers directly. */
+    n = snprintf(ep, sizeof ep, "zcl_%s%s|raw-alloc-ok|\".*%s|LOG_|fprintf",
                  nm, xtra, nm);
     if (n < 0 || (size_t)n >= sizeof ep)
         return die("z23-lint: pattern buffer overflow\n", "");
@@ -181,6 +230,8 @@ static int compile_mal(regex_t *hit, regex_t *excl, const char *nm, const char *
 static int scan_mal(const char *path, void *ctx)
 {
     struct mal_acc *a = ctx;
+    if (mal_is_exempt_seam(path))
+        return 0;
     FILE *f = fopen(path, "r");
     if (!f)
         return die("z23-lint: cannot open %s\n", path);
@@ -263,6 +314,8 @@ int check_malloc_run(int argc, char **argv)
                                   "under the production roots — extension "
                                   "filter or root list regression?");
     if (rc) return rc;
+    rc = mal_seam_verify();
+    if (rc) return rc;
     struct bln_set base = {0}, found = {0};
     rc = bln_load(&base, k_mal_baseline);
     if (rc) return rc;
@@ -289,6 +342,58 @@ static int mal_want(const regex_t *hit, const regex_t *excl, const char *s, int 
         return 1;
     }
     return 0;
+}
+
+/* Proves the exact-path seam exemption: mal_is_exempt_seam only matches its
+ * one literal path, mal_seam_verify passes against the real (unmarked)
+ * safe_alloc.h, and scanning that real file finds zero hits — the
+ * exemption fires on path alone, before scan_mal ever opens the file. Kept
+ * out of check_malloc_selftest to hold that function's own decision count
+ * at its complexity-gate pin. */
+static int mal_seam_exempt_proof(void)
+{
+    if (mal_is_exempt_seam(k_mal_seam_path) != 1)
+        return 1;
+    if (mal_is_exempt_seam("platform/modules/base/include/base/other_seam.h") != 0)
+        return 1;
+    if (mal_seam_verify() != 0)
+        return 1;
+    regex_t hit, excl;
+    if (compile_mal(&hit, &excl, "malloc", "|zcl_calloc|zcl_realloc"))
+        return 1;
+    struct bln_set found = {0};
+    struct mal_acc seam = { .hit = &hit, .excl = &excl, .hits = 0, .nm = "malloc", .found = &found };
+    int rc = scan_mal(k_mal_seam_path, &seam);
+    drop2(&hit, &excl);
+    return rc != 0 || seam.hits != 0;
+}
+
+/* Proves the exemption is path-only, not content-based: a fresh header at
+ * a DIFFERENT path with the exact same raw malloc( text the seam contains
+ * is still reported. Removed after the check. */
+static int mal_other_header_caught_proof(void)
+{
+    const char *probe_path = "tools/lint/_malloc_seam_selftest_probe.h";
+    FILE *f = fopen(probe_path, "w");
+    if (!f)
+        return 1;
+    int wok = fputs("void *p = malloc(1);\n", f) >= 0;
+    int cerr = fin(f, NULL, probe_path, 0);
+    if (!wok || cerr) {
+        unlink(probe_path);
+        return 1;
+    }
+    regex_t hit, excl;
+    if (compile_mal(&hit, &excl, "malloc", "|zcl_calloc|zcl_realloc")) {
+        unlink(probe_path);
+        return 1;
+    }
+    struct bln_set found = {0};
+    struct mal_acc other = { .hit = &hit, .excl = &excl, .hits = 0, .nm = "malloc", .found = &found };
+    int rc = scan_mal(probe_path, &other);
+    drop2(&hit, &excl);
+    unlink(probe_path);
+    return rc != 0 || other.hits != 1;
 }
 
 int check_malloc_selftest(void)
@@ -326,6 +431,8 @@ int check_malloc_selftest(void)
     drop2(&ch, &ce);
     drop2(&rh, &re);
     bad |= require_scan_root("check-malloc", "app") == 0;
+    bad |= mal_seam_exempt_proof();
+    bad |= mal_other_header_caught_proof();
     return st_ok(bad, "check_malloc selftest: OK\n");
 }
 
