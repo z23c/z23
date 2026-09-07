@@ -1204,3 +1204,16 @@ REMOTE_COMMAND_CLASS("fleet.invite", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.join", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.admit", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.machines", REMOTE_CLASS_NEVER, "")
+
+/* ── the datagram link probe — 1 never_remote ──────────────────────────
+ *
+ * `fleet link probe` opens a UDP socket and sends packets to an address its
+ * caller names. A remote form of that is a reflector: a peer asks this node
+ * to emit traffic at a third party, and every byte of it leaves from THIS
+ * machine's address. The leaf's own answer is a latency number about a path
+ * the caller is already on, so the remote form buys no capability it does not
+ * already have and costs this node its innocence about where its packets go.
+ *
+ * The measurement a peer legitimately wants is the one it takes itself: run
+ * `mode=echo` here and `mode=probe` there. */
+REMOTE_COMMAND_CLASS("fleet.link.probe", REMOTE_CLASS_NEVER, "")

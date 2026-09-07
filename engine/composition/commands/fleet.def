@@ -403,3 +403,42 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_roles_check)
+
+/* ── the low-latency datagram link between two fleet boxes ────────────
+ *
+ * `fleet link probe` is the operator surface over engine/modules/gamelink:
+ * it opens a real UDP session, pings it, and prints round-trip microseconds,
+ * jitter and loss. It is a measurement tool, not a node service — the node
+ * never calls it, it touches no datadir, and it shares no code and no socket
+ * with block relay. See docs/GAMELINK.md. */
+
+ZCL_COMMAND_BRANCH("fleet.link", "fleet", "Measure the datagram link to a peer",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.link.probe", "fleet.link", "",
+    "Round-trip time, jitter and loss over the UDP datagram link",
+    "Opens an authenticated UDP datagram session, pings it for `seconds`, and "
+    "reports round-trip microseconds, jitter, loss in parts per million, and "
+    "every counter that says why a datagram did not arrive. mode is loopback, "
+    "echo or probe. loopback is the default and needs nothing: it runs both "
+    "ends inside this process over 127.0.0.1 with freshly drawn key material, "
+    "which measures this box's own floor — the kernel's UDP path plus the "
+    "per-packet crypto. echo holds a port open and answers pings so another "
+    "box can measure the path; probe measures the path to a box running echo "
+    "and needs its ip:port in peer. Both of those need the shared 32-byte key "
+    "as 64 hex characters in key, because no pairing plumbing hands this leaf "
+    "a live session's material yet. A probe that hears no pong FAILS rather "
+    "than printing zeros, since an unreachable peer must never read as a fast "
+    "one. It writes nothing and contacts no peer but the one named.", 0,
+    "fleet,link,latency,rtt,jitter,loss,udp,game,probe",
+    "zcl.fleet_link_probe.input.v1", "zcl.fleet_link_probe.v1",
+    "mode,peer,bind,key,seconds", "",
+    "z23 fleet link probe --seconds=2",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_link_probe)

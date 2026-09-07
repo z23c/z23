@@ -40,6 +40,9 @@ void zcl_native_handle_fleet_roles_grant(
 void zcl_native_handle_fleet_roles_revoke(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_link_probe(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_fleet_roles_check(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

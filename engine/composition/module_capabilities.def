@@ -698,6 +698,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/fingerprint/src/fp_emit.c", CAP_FS_READ
 ZCL_MODULE_CAPABILITY("cognition/modules/fingerprint/src/fp_index.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/fingerprint/src/fp_select.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/fleetledger/src/fleet_ledger.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/modules/gamelink/src/gamelink_session.c", CAP_NETWORK, "binds one UDP socket and sends and receives datagrams on it: this is the low-latency game/telemetry channel between two paired fleet peers, and it is the only file in the module that touches a socket at all")
 ZCL_MODULE_CAPABILITY("tools/dev/fleet_roles_store.c", CAP_FS_WRITE,
                       "creates <datadir>/fleet_roles and appends to its "
                       "signed chainlog")
