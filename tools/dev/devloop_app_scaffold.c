@@ -212,9 +212,11 @@ static bool scaffold_write_atomic(const char *abs, const char *bytes,
     return true;
 }
 
-/* Make sure the target's directory exists before the temp file is opened. A
- * conventional slice lands in directories the checkout already has; a brand
- * new App context is the exception this covers. */
+/* Make sure the target's directory chain exists before the temp file is
+ * opened. A conventional slice lands in directories the checkout already
+ * has; a brand new App context is the exception this covers. Each component
+ * is created in turn — platform_directory_ensure() is one level deep and
+ * refuses a symlink, so a planted link cannot redirect the write. */
 static bool scaffold_ensure_parent(const char *abs)
 {
     char dir[ZCL_DEVLOOP_PATH_MAX];
@@ -227,6 +229,18 @@ static bool scaffold_ensure_parent(const char *abs)
         return true;
     memcpy(dir, abs, n - 1);
     dir[n - 1] = 0;
+    /* Walk forward from the checkout root, which already exists, creating
+     * each remaining component. Start past the leading '/' so an absolute
+     * path's root is never a create target. */
+    for (size_t i = 1; dir[i]; i++) {
+        if (dir[i] != '/')
+            continue;
+        dir[i] = 0;
+        bool ok = platform_directory_ensure(dir, 0755);
+        dir[i] = '/';
+        if (!ok)
+            return false;
+    }
     return platform_directory_ensure(dir, 0755);
 }
 

@@ -272,6 +272,7 @@ ZCL_TEST_GROUP(hotswap_service_registry)
 ZCL_TEST_GROUP(hotswap_shelf)
 ZCL_TEST_GROUP(hotswap_rollback)
 ZCL_TEST_GROUP(dev_platform)
+ZCL_TEST_GROUP(dev_app_scaffold)
 ZCL_TEST_GROUP(impact_composition)
 /* Signer identity for push-proof receipts: per-box key custody, the
  * signers.allow trust list, and the pre-push admission decision over both. */
