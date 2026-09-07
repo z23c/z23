@@ -1,8 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — include-direction fences of the C23 lint runtime
- * (check-core-include-boundary, check-shape-include-direction). Tracked
- * files via lint_git_index_foreach; unread file or refused index = UNPROVEN 2.
+ * (check-core-include-boundary, check-shape-include-direction). Production
+ * scan walks git-tracked files via lint_git_index_foreach (unread or
+ * refused index = UNPROVEN 2); full/dev scan walks the filesystem directly.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -142,14 +143,20 @@ static int idf_walk(const char *dir, struct idf_collect *c)
     return rc;
 }
 
+/* Production scan: git-tracked files only, via the index (fast, no directory
+ * traversal) — an unread or refused index is UNPROVEN 2, same as any other
+ * production-mode gate. Full/dev scan (the default, and what every fixture
+ * and selftest exercises): walk the filesystem directly, exactly like the
+ * original shell script always did. This gate's fixtures run inside the
+ * make_lint_gates sandbox lane, a hardlink clone with .git deliberately
+ * excluded (see test_make_lint_gates.c) — so the full-scan path must never
+ * touch the git index. */
 static int idf_collect(struct idf_collect *c)
 {
-    int rc = lint_git_index_foreach(idf_on_index, c);
-    int i;
-    if (rc)
-        return rc;
+    int rc, i;
     if (lint_prod_scan())
-        return 0;
+        return lint_git_index_foreach(idf_on_index, c);
+    rc = 0;
     for (i = 0; rc == 0 && i < c->nroots; i++)
         rc = idf_walk(c->roots[i], c);
     return rc;
