@@ -539,7 +539,22 @@ static int hsw2_st_fixture(const char *work, const struct hsw2_re *re)
     int nfiles = 0, ndecl = 0;
     struct hsw2_viol v = {0};
     const char *roots[1] = { dir };
+    /* The fixture leg proves the DETECTOR fires on a planted violation, so it
+     * must scan the fixture even under a production scan
+     * (ZCL_LINT_PRODUCTION_SCAN=1), whose exclusion list drops the scratch root
+     * the fixtures now live under (test-tmp/, since 7a7b8fb8a moved them off a
+     * bare /tmp). Suspend the production-scan exclusion for this controlled
+     * tree only; hsw2_st_real below runs with the environment restored and
+     * still exercises it. */
+    const char *prod = getenv("ZCL_LINT_PRODUCTION_SCAN");
+    char saved[8] = {0};
+    int had = prod != NULL;
+    if (had)
+        snprintf(saved, sizeof saved, "%s", prod);
+    unsetenv("ZCL_LINT_PRODUCTION_SCAN");
     rc = hsw2_scan_roots(re, roots, 1, &nfiles, &ndecl, &v);
+    if (had)
+        setenv("ZCL_LINT_PRODUCTION_SCAN", saved, 1);
     if (rc)
         return rc;
     int bad = strstr(v.buf, "violating.c:9: memcmp()/bcmp() compares") == NULL
