@@ -5382,6 +5382,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_fleet_facts.c \
     tools/lint/lintc/gate_fleet_facts_selftest.c \
     tools/lint/lintc/gate_verification_coverage.c \
+    tools/lint/lintc/gate_no_real_clock_test_deadline.c \
+    tools/lint/lintc/gate_no_real_clock_test_deadline_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12743,7 +12745,7 @@ check-no-wallclock-assertion:
 # were exactly this shape under a contended pool. Per-line marker, not a
 # baseline file: `/* real-clock: <reason> */` on the offending line. See the
 # script header for the full rationale and what it cannot see.
-check-no-real-clock-test-deadline:
+check-no-real-clock-test-deadline: $(LINTC_TOOL)
 	@echo "══ LINT: no unmarked real-clock deadline in the harness's own tests ══"
 	@./tools/lint/check_no_real_clock_test_deadline.sh --selftest
 	@./tools/lint/check_no_real_clock_test_deadline.sh

@@ -221,6 +221,9 @@ static const struct lint_gate k_gates[] = {
     { "check-fleet-facts", check_fleet_facts_run, check_fleet_facts_selftest },
     { "check-verification-coverage", check_verification_coverage_run,
       check_verification_coverage_selftest },
+    { "check-no-real-clock-test-deadline",
+      check_no_real_clock_test_deadline_run,
+      check_no_real_clock_test_deadline_selftest },
 };
 
 int main(int argc, char **argv)

@@ -1691,9 +1691,9 @@ Z23_FLAG("ZCL_READ_LEAF_READ_FLOOR", "env_build", "60", "-",
 Z23_FLAG("ZCL_READ_LEAF_RESOLVED_FLOOR", "env_build", "40", "-",
           "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:107")
 Z23_FLAG("ZCL_REAL_CLOCK_GATE_FILE_FLOOR", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_no_real_clock_test_deadline.sh:275")
+          "undocumented; first use tools/lint/lintc/gate_no_real_clock_test_deadline.c:410")
 Z23_FLAG("ZCL_REAL_CLOCK_GATE_SCAN_GLOB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_real_clock_test_deadline.sh:272")
+          "undocumented; first use tools/lint/lintc/gate_no_real_clock_test_deadline.c:342")
 Z23_FLAG("ZCL_REAL_HOME", "env_build", "-", "-",
           "undocumented; first use tools/scripts/step1_refold_rate_proof.sh:49")
 Z23_FLAG("ZCL_RECEIPT_DIR", "env_build", "-", "-",
