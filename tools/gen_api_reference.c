@@ -422,6 +422,7 @@ static const char *latency_name(int v)
     case ZCL_COMMAND_LATENCY_FOREGROUND: return "foreground";
     case ZCL_COMMAND_LATENCY_BACKGROUND: return "background";
     case ZCL_COMMAND_LATENCY_PERSISTENT: return "persistent";
+    case ZCL_COMMAND_LATENCY_MAINTENANCE: return "maintenance";
     default: return "unknown";
     }
 }

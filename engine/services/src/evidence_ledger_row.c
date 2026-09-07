@@ -585,3 +585,23 @@ bool evidence_ledger_resolve_path(const char *dir_env, const char *home_rel_dir,
     }
     return true;
 }
+
+bool evidence_ledger_home_rel_dir(const char *home_rel_dir, char *out,
+                                 size_t cap)
+{
+    if (!out || cap == 0)
+        LOG_FAIL("evidence_ledger", "path output buffer is NULL/empty");
+    out[0] = '\0';
+    if (!home_rel_dir || !home_rel_dir[0])
+        LOG_FAIL("evidence_ledger", "home-relative dir is NULL/empty");
+    const char *home = getenv("HOME");
+    if (!home || !home[0])
+        LOG_FAIL("evidence_ledger", "no HOME to resolve %s from",
+                 home_rel_dir);
+    if (snprintf(out, cap, "%s/%s", home, home_rel_dir) >= (int)cap) {
+        out[0] = '\0';
+        LOG_FAIL("evidence_ledger", "%s path too long for buffer",
+                 home_rel_dir);
+    }
+    return true;
+}

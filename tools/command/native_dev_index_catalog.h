@@ -43,9 +43,14 @@ size_t dev_index_source_count(void);
 const struct dev_index_source *dev_index_source_at(size_t index);
 const struct dev_index_source *dev_index_source_find(const char *id);
 
-/* Resolve the source's root directory (zclassic23 state root or the native
- * dev-state root); does not create anything, does not append dir_rel. */
+/* Resolve the source's root directory: `state_root_override` when non-empty
+ * (the CLI's --state-root=<dir>, applied to every source regardless of
+ * dev_state_root, for test isolation and deliberate redirection), else the
+ * zclassic23 state root or the native dev-state root per dev_state_root.
+ * Does not create anything, does not append dir_rel. No environment
+ * variable is consulted here — --state-root is the only override. */
 bool dev_index_source_resolve_root(const struct dev_index_source *src,
+                                   const char *state_root_override,
                                    char *out, size_t cap);
 
 /* List every file this source currently names (glob-expanded for a suffix
@@ -53,6 +58,7 @@ bool dev_index_source_resolve_root(const struct dev_index_source *src,
  * to cap bytes, newest-name-last (bytewise directory order). Returns the
  * number written (0 on a source with no files yet, never an error). */
 size_t dev_index_source_list_files(const struct dev_index_source *src,
+                                   const char *state_root_override,
                                    char out[][1024], size_t out_cap,
                                    size_t path_cap);
 

@@ -20,11 +20,22 @@
 
 #define DVI_ERR_MAX 256u
 
-static bool dvi_open(struct zcl_command_reply *reply, const char *leaf,
-                     sqlite3 **db)
+/* Opens the index for `create` (ingest) or read-only (status/search).
+ * `--index=<path>` and `--state-root=<dir>` come from the request, never an
+ * environment variable. When create=false and no index exists yet,
+ * *out_missing is set and this returns true with *db==NULL — the honest
+ * "no index" case, not a failure. */
+static bool dvi_open(const struct zcl_command_request *request,
+                     struct zcl_command_reply *reply, const char *leaf,
+                     bool create, sqlite3 **db, bool *out_missing)
 {
+    const char *index_override =
+        json_get_str(json_get(request->input, "index"));
+    const char *state_root_override =
+        json_get_str(json_get(request->input, "state_root"));
     char err[DVI_ERR_MAX];
-    if (dev_index_db_open(db, err, sizeof(err)))
+    if (dev_index_db_open(create, index_override, state_root_override, db,
+                          out_missing, err, sizeof(err)))
         return true;
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_INTERNAL, "INDEX_DB_ERROR", leaf,
@@ -67,19 +78,21 @@ void zcl_native_handle_dev_index_ingest(
                                "no such source id", only ? only : "");
         return;
     }
+    const char *state_root_override =
+        json_get_str(json_get(request->input, "state_root"));
     sqlite3 *db = NULL;
-    if (!dvi_open(reply, "dev.index.ingest", &db))
+    if (!dvi_open(request, reply, "dev.index.ingest", true, &db, NULL))
         return;
 
     struct json_value sources_arr;
     json_init(&sources_arr);
     json_set_array(&sources_arr);
-    int64_t total_rows = 0, total_files = 0;
+    int64_t total_rows = 0, total_files = 0, total_skipped = 0;
     char err[DVI_ERR_MAX];
     for (int i = 0; i < n; i++) {
         struct dev_index_ingest_result result;
-        if (!dev_index_ingest_source(db, sources[i], &result, err,
-                                     sizeof(err))) {
+        if (!dev_index_ingest_source(db, sources[i], state_root_override,
+                                     &result, err, sizeof(err))) {
             json_free(&sources_arr);
             dev_index_db_close(db);
             zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -94,16 +107,19 @@ void zcl_native_handle_dev_index_ingest(
         (void)json_push_kv_str(&row, "source", result.source_id);
         (void)json_push_kv_int(&row, "files_seen", result.files_seen);
         (void)json_push_kv_int(&row, "rows_added", result.rows_added);
+        (void)json_push_kv_int(&row, "rows_skipped", result.rows_skipped);
         (void)json_push_back(&sources_arr, &row);
         json_free(&row);
         total_rows += result.rows_added;
         total_files += result.files_seen;
+        total_skipped += result.rows_skipped;
     }
     dev_index_db_close(db);
     (void)json_push_kv(&reply->data, "sources", &sources_arr);
     json_free(&sources_arr);
     (void)json_push_kv_int(&reply->data, "files_seen", total_files);
     (void)json_push_kv_int(&reply->data, "rows_added", total_rows);
+    (void)json_push_kv_int(&reply->data, "rows_skipped", total_skipped);
 }
 
 void zcl_native_handle_dev_index_status(
@@ -119,9 +135,21 @@ void zcl_native_handle_dev_index_status(
                                "no such source id", only ? only : "");
         return;
     }
+    const char *state_root_override =
+        json_get_str(json_get(request->input, "state_root"));
     sqlite3 *db = NULL;
-    if (!dvi_open(reply, "dev.index.status", &db))
+    bool missing = false;
+    if (!dvi_open(request, reply, "dev.index.status", false, &db, &missing))
         return;
+    (void)json_push_kv_int(&reply->data, "index_exists", !missing);
+    if (missing) {
+        struct json_value empty;
+        json_init(&empty);
+        json_set_array(&empty);
+        (void)json_push_kv(&reply->data, "sources", &empty);
+        json_free(&empty);
+        return;
+    }
 
     int64_t now_ms = clock_now_wall_ms();
     struct json_value sources_arr;
@@ -130,8 +158,8 @@ void zcl_native_handle_dev_index_status(
     char err[DVI_ERR_MAX];
     for (int i = 0; i < n; i++) {
         struct dev_index_source_status st;
-        if (!dev_index_source_status(db, sources[i], now_ms, &st, err,
-                                     sizeof(err))) {
+        if (!dev_index_source_status(db, sources[i], state_root_override,
+                                     now_ms, &st, err, sizeof(err))) {
             json_free(&sources_arr);
             dev_index_db_close(db);
             zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -149,6 +177,7 @@ void zcl_native_handle_dev_index_status(
         (void)json_push_kv_int(&row, "seconds_since_newest",
                                st.seconds_since_newest);
         (void)json_push_kv_int(&row, "bytes_behind", st.bytes_behind);
+        (void)json_push_kv_int(&row, "rows_skipped", st.rows_skipped);
         (void)json_push_back(&sources_arr, &row);
         json_free(&row);
     }
@@ -183,8 +212,20 @@ void zcl_native_handle_dev_index_search(
                       : DEV_INDEX_SEARCH_DEFAULT_LIMIT;
 
     sqlite3 *db = NULL;
-    if (!dvi_open(reply, "dev.index.search", &db))
+    bool missing = false;
+    if (!dvi_open(request, reply, "dev.index.search", false, &db, &missing))
         return;
+    (void)json_push_kv_int(&reply->data, "index_exists", !missing);
+    if (missing) {
+        struct json_value empty;
+        json_init(&empty);
+        json_set_array(&empty);
+        (void)json_push_kv(&reply->data, "hits", &empty);
+        json_free(&empty);
+        (void)json_push_kv_int(&reply->data, "count", 0);
+        return;
+    }
+
     struct dev_index_search_result result;
     char err[DVI_ERR_MAX];
     if (!dev_index_search(db, query, source, limit, &result, err,

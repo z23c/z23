@@ -444,7 +444,7 @@ static const char *const g_mode_names[] = {
     "branch", "sync", "job", "stream"
 };
 static const char *const g_latency_names[] = {
-    "instant", "fast", "foreground", "background", "persistent"
+    "instant", "fast", "foreground", "background", "persistent", "maintenance"
 };
 static const char *const g_cost_names[] = {
     "tiny", "low", "moderate", "high", "stream"
@@ -485,6 +485,7 @@ static const int64_t g_latency_budget_ms[] = {
     [ZCL_COMMAND_LATENCY_FOREGROUND] = ZCL_COMMAND_LATENCY_BUDGET_FOREGROUND_MS,
     [ZCL_COMMAND_LATENCY_BACKGROUND] = ZCL_COMMAND_LATENCY_BUDGET_BACKGROUND_MS,
     [ZCL_COMMAND_LATENCY_PERSISTENT] = ZCL_COMMAND_LATENCY_BUDGET_PERSISTENT_MS,
+    [ZCL_COMMAND_LATENCY_MAINTENANCE] = ZCL_COMMAND_LATENCY_BUDGET_MAINTENANCE_MS,
 };
 
 int64_t zcl_command_latency_budget_ms(enum zcl_command_latency latency)
@@ -642,7 +643,7 @@ static bool enum_values_valid(const struct zcl_command_spec *spec)
            spec->authority <= ZCL_COMMAND_AUTH_OWNER &&
            spec->availability <= ZCL_COMMAND_PLANNED &&
            spec->mode <= ZCL_COMMAND_MODE_STREAM &&
-           spec->latency <= ZCL_COMMAND_LATENCY_PERSISTENT &&
+           spec->latency <= ZCL_COMMAND_LATENCY_MAINTENANCE &&
            spec->cost <= ZCL_COMMAND_COST_STREAM &&
            spec->confirmation <= ZCL_COMMAND_CONFIRM_PLAN_COMMIT;
 }

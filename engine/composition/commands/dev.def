@@ -1264,11 +1264,19 @@ ZCL_COMMAND_DEV_COMMAND(
  * Local data-source ingest/search over engine/composition/sources.def (the
  * board, the experiment ledger, the landing outcomes ledger, and every
  * *.log under the state root) into one sqlite+FTS5 file,
- * ~/.local/state/zclassic23/index/index.db. `ingest` is incremental per
- * source (a byte-offset cursor per file; a rotated/shrunk file restarts
- * from 0). `status` reports rows/newest-ts/bytes-behind per source,
- * read-only. `search` runs one FTS5 MATCH query, optionally scoped to one
- * source, newest-first. See docs/INDEX.md. */
+ * ~/.local/state/zclassic23/index/index.db by default. `ingest` is
+ * incremental per source, keyed by row identity (a SHA3-256 hash of each
+ * row's raw bytes) so re-reading an already-seen line — a rename, a
+ * restart, a second `ingest` call — never duplicates it; a per-file cursor
+ * is only the optimisation for where to resume reading, verified against a
+ * hash of the file's own already-ingested prefix before it is trusted.
+ * `status` reports rows/newest-ts/bytes-behind/rows_skipped per source,
+ * read-only, and never creates the index if it does not exist yet. `search`
+ * runs one FTS5 MATCH query, optionally scoped to one source, newest-first,
+ * and likewise never creates a missing index. Every leaf accepts
+ * --index=<path> (moves the database) and --state-root=<dir> (moves where
+ * every declared source is read from), independent overrides — neither an
+ * environment variable. See docs/INDEX.md. */
 ZCL_COMMAND_BRANCH("dev.index", "dev",
                    "Ingest and search local data sources (board/experiments/"
                    "landing/logs)",
@@ -1278,15 +1286,24 @@ ZCL_COMMAND_DEV_COMMAND(
     "dev.index.ingest", "dev.index", "",
     "Ingest new rows from one or every declared source",
     "Reads each declared source (or just --source=<id>) from its saved "
-    "byte-offset cursor to the last complete line, inserts one `rows` + "
-    "`rows_fts` row per new line, and advances the cursor. A source naming "
-    "no files yet, or with no new bytes, is success with rows_added=0.",
+    "cursor to the last complete line, inserts one `rows` + `rows_fts` row "
+    "per line whose (source_id, content-hash) is new — an already-seen "
+    "line is silently skipped, never duplicated — and advances the cursor. "
+    "A source naming no files yet, or with no new bytes, is success with "
+    "rows_added=0. rows_skipped counts lines that failed to parse this run "
+    "(malformed, not fatal). A maintenance-tier leaf: it walks real files, "
+    "not already-loaded state, so it is budgeted slower than a read leaf "
+    "(measured ~3.1s over ~48k real rows). --index=<path> and "
+    "--state-root=<dir> override the database location and the sources "
+    "root independently; neither is an environment variable.",
     65536, "index,ingest,sources,board,experiments,landing,logs,fts5",
-    "zcl.dev_index_ingest_input.v1", "zcl.dev_index_ingest.v1", "source", "",
+    "zcl.dev_index_ingest_input.v1", "zcl.dev_index_ingest.v1",
+    "source,index,state_root", "",
     "z23 dev index ingest",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_MAINTENANCE,
+    ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
     zcl_native_handle_dev_index_ingest,
@@ -1296,11 +1313,18 @@ ZCL_COMMAND_DEV_READ(
     "dev.index.status", "dev.index", "",
     "Per-source row counts, newest timestamp, and bytes not yet ingested",
     "Reads the index database only: for one source or every declared "
-    "source, its row count, the newest ts seen, seconds since that ts, and "
+    "source, its row count, the newest ts seen, seconds since that ts, "
     "bytes_behind (current file size minus the saved cursor offset, summed "
-    "over every file the source currently names). Never mutates the index.",
+    "over every file the source currently names), and rows_skipped (lines "
+    "that failed to parse across every ingest so far). Never mutates the "
+    "index, and never creates one — if index.db does not exist yet this "
+    "reports index_exists=false with no per-source data, not an error. "
+    "--index=<path> and --state-root=<dir> override the database location "
+    "and the sources root independently; neither is an environment "
+    "variable.",
     65536, "index,status,sources,cursor",
-    "zcl.dev_index_status_input.v1", "zcl.dev_index_status.v1", "source", "",
+    "zcl.dev_index_status_input.v1", "zcl.dev_index_status.v1",
+    "source,index,state_root", "",
     "z23 dev index status",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
@@ -1316,10 +1340,14 @@ ZCL_COMMAND_DEV_READ(
     "--source=<id>), ordered newest ts first, each hit carrying source, ts, "
     "and the original line. `key:value` matches the flattened key=value "
     "tokens a log line or a structured row's fields were indexed under, "
-    "same as a bare word. --limit defaults to 20, capped at 50.", 65536,
+    "same as a bare word. --limit defaults to 20, capped at 50. Never "
+    "creates a missing index — reports index_exists=false with no hits "
+    "instead. --index=<path> and --state-root=<dir> override the database "
+    "location and the sources root independently; neither is an "
+    "environment variable.", 65536,
     "index,search,fts5,query,logs",
     "zcl.dev_index_search_input.v1", "zcl.dev_index_search.v1",
-    "query,source,limit", "query",
+    "query,source,limit,index,state_root", "query",
     "z23 dev index search 'kind:result'",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,

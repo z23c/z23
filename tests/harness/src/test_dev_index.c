@@ -1,15 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * ACCEPTANCE BAR for dev.index.* (native_dev_index_{catalog,ingest,search,
- * command}.c).
+ * ACCEPTANCE BAR for dev.index.* (native_dev_index_{catalog,ingest,identity,
+ * parse,search,command}.c).
  *
  * Exercises the catalog/ingest/search modules directly against a fixture
- * root, never the real checkout's state: ZCL_INDEX_STATE_DIR redirects the
- * zclassic23-rooted sources (board/experiments/logs) and XDG_STATE_HOME
- * redirects platform_state_root() (the landing source's root) to a
- * per-test temp directory. index.db itself lands under that same
- * ZCL_INDEX_STATE_DIR/index/index.db, so a fixture never touches the
- * operator's real ~/.local/state/zclassic23/index/index.db.
+ * root, never the real checkout's state: every call passes an explicit
+ * state_root_override (and, for dev_index_db_open, an explicit index_override
+ * too) pointing at a per-test temp directory — no environment variable is
+ * read anywhere in this path, so a fixture can never touch the operator's
+ * real ~/.local/state/zclassic23/index/index.db or sources.
  */
 
 #include "test/test_core.h"
@@ -48,8 +47,8 @@ static bool dvi_append(const char *path, const char *text)
 }
 
 /* platform_directory_ensure() creates exactly one level; fixtures here
- * need multi-level paths ("<parent>/xdg/z23/dev/land"), so walk and
- * create each segment, same as platform/state_root.c's ensure_parent(). */
+ * need multi-level paths ("<parent>/root/land"), so walk and create each
+ * segment, same as platform/state_root.c's ensure_parent(). */
 static bool dvi_mkdir(const char *path)
 {
     char copy[768];
@@ -92,25 +91,26 @@ int test_dev_index(void)
     char parent[512];
     test_make_tmpdir(parent, sizeof(parent), "dev_index", "fixture");
 
-    char zclassic23[600], xdg[600], board_dir[700], exp_dir[700];
-    (void)snprintf(zclassic23, sizeof(zclassic23), "%s/zclassic23", parent);
-    (void)snprintf(xdg, sizeof(xdg), "%s/xdg", parent);
-    (void)snprintf(board_dir, sizeof(board_dir), "%s/board", zclassic23);
-    (void)snprintf(exp_dir, sizeof(exp_dir), "%s/experiments", zclassic23);
-    ASSERT(dvi_mkdir(zclassic23));
-    ASSERT(dvi_mkdir(xdg));
+    /* One fixture root serves every source: --state-root=<root> applies to
+     * board/experiments/logs (normally zclassic23-rooted) AND landing
+     * (normally the native dev-state root) alike — see
+     * dev_index_source_resolve_root's doc comment. */
+    char root[600], board_dir[700], exp_dir[700], land_dir[700];
+    (void)snprintf(root, sizeof(root), "%s/root", parent);
+    (void)snprintf(board_dir, sizeof(board_dir), "%s/board", root);
+    (void)snprintf(exp_dir, sizeof(exp_dir), "%s/experiments", root);
+    (void)snprintf(land_dir, sizeof(land_dir), "%s/land", root);
     ASSERT(dvi_mkdir(board_dir));
     ASSERT(dvi_mkdir(exp_dir));
-    (void)setenv("ZCL_INDEX_STATE_DIR", zclassic23, 1);
-    (void)setenv("XDG_STATE_HOME", xdg, 1);
+    ASSERT(dvi_mkdir(land_dir));
 
-    char board_file[800], exp_file[800], land_dir[800], land_file[800];
+    char board_file[800], exp_file[800], land_file[800], board_tmp[800];
     (void)snprintf(board_file, sizeof(board_file), "%s/node1.jsonl", board_dir);
+    (void)snprintf(board_tmp, sizeof(board_tmp), "%s/node1.jsonl.tmp",
+                  board_dir);
     (void)snprintf(exp_file, sizeof(exp_file), "%s/rows.tsv", exp_dir);
-    (void)snprintf(land_dir, sizeof(land_dir), "%s/z23/dev/land", xdg);
     (void)snprintf(land_file, sizeof(land_file), "%s/outcomes.jsonl",
                   land_dir);
-    ASSERT(dvi_mkdir(land_dir));
 
     ASSERT(dvi_write(
         board_file,
@@ -132,14 +132,33 @@ int test_dev_index(void)
         "\"worktree\":\"/w1\",\"note\":\"train1\",\"state\":\"landed\","
         "\"phase\":\"\"}\n"));
 
-    sqlite3 *db = NULL;
     char err[256];
+
+    TEST("index: status on a never-ingested root reports no index, "
+        "and creates nothing") {
+        sqlite3 *db = NULL;
+        bool missing = false;
+        ASSERT(dev_index_db_open(false, NULL, root, &db, &missing, err,
+                                 sizeof(err)));
+        ASSERT(missing);
+        ASSERT(db == NULL);
+        char index_dir[700];
+        (void)snprintf(index_dir, sizeof(index_dir), "%s/index", root);
+        struct platform_directory_list dummy_dirs, dummy_files;
+        memset(&dummy_dirs, 0, sizeof(dummy_dirs));
+        memset(&dummy_files, 0, sizeof(dummy_files));
+        ASSERT(!platform_directory_list_children_sorted(
+            index_dir, &dummy_dirs, &dummy_files));
+        PASS();
+    }
+
+    sqlite3 *db = NULL;
     /* dev_index_db_open's schema includes `CREATE VIRTUAL TABLE rows_fts
      * USING fts5(...)`. If this vendored sqlite build lacked FTS5, that
      * DDL — and therefore this open — would fail with "no such module:
      * fts5", and the assert below names it rather than the test silently
      * skipping the feature. */
-    if (!dev_index_db_open(&db, err, sizeof(err))) {
+    if (!dev_index_db_open(true, NULL, root, &db, NULL, err, sizeof(err))) {
         printf("dev_index_db_open failed (FTS5 missing from this build?): "
               "%s\n", err);
     }
@@ -155,20 +174,26 @@ int test_dev_index(void)
 
     TEST("index: first ingest picks up every fixture row") {
         struct dev_index_ingest_result r;
-        ASSERT(dev_index_ingest_source(db, board_src, &r, err, sizeof(err)));
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
         ASSERT(r.rows_added == 1);
-        ASSERT(dev_index_ingest_source(db, exp_src, &r, err, sizeof(err)));
+        ASSERT(r.rows_skipped == 0);
+        ASSERT(dev_index_ingest_source(db, exp_src, root, &r, err,
+                                       sizeof(err)));
         ASSERT(r.rows_added == 1);
-        ASSERT(dev_index_ingest_source(db, land_src, &r, err, sizeof(err)));
+        ASSERT(dev_index_ingest_source(db, land_src, root, &r, err,
+                                       sizeof(err)));
         ASSERT(r.rows_added == 1);
         PASS();
     }
 
     TEST("index: ingesting again with no new bytes adds zero rows") {
         struct dev_index_ingest_result r;
-        ASSERT(dev_index_ingest_source(db, board_src, &r, err, sizeof(err)));
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
         ASSERT(r.rows_added == 0);
-        ASSERT(dev_index_ingest_source(db, exp_src, &r, err, sizeof(err)));
+        ASSERT(dev_index_ingest_source(db, exp_src, root, &r, err,
+                                       sizeof(err)));
         ASSERT(r.rows_added == 0);
         PASS();
     }
@@ -180,8 +205,20 @@ int test_dev_index(void)
             "\"host\":\"node1\",\"agent\":\"claude\",\"kind\":\"result\","
             "\"ref\":\"a1\",\"text\":\"second\"}\n"));
         struct dev_index_ingest_result r;
-        ASSERT(dev_index_ingest_source(db, board_src, &r, err, sizeof(err)));
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
         ASSERT(r.rows_added == 1);
+        PASS();
+    }
+
+    TEST("index: a malformed line is counted in rows_skipped, not silently "
+        "lost") {
+        ASSERT(dvi_append(board_file, "not valid json at all\n"));
+        struct dev_index_ingest_result r;
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
+        ASSERT(r.rows_added == 0);
+        ASSERT(r.rows_skipped == 1);
         PASS();
     }
 
@@ -190,19 +227,87 @@ int test_dev_index(void)
             board_file,
             "{\"ts\":\"2026-09-01T02:00:00Z\",\"id\":\"a3\","
             "\"host\":\"node1\",\"agent\":\"claude\",\"kind\":\"note\","
-            "\"ref\":\"\",\"text\":\"rewritten\"}\n"));
+            "\"ref\":\"\",\"text\":\"third\"}\n"));
         struct dev_index_ingest_result r;
-        ASSERT(dev_index_ingest_source(db, board_src, &r, err, sizeof(err)));
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
         ASSERT(r.rows_added == 1);
+        PASS();
+    }
+
+    TEST("index: mv onto identical bytes ingests 0 new rows (rename "
+        "changes inode, not content)") {
+        char current[512];
+        FILE *f = fopen(board_file, "rb");
+        ASSERT(f != NULL);
+        size_t n = fread(current, 1, sizeof(current) - 1, f);
+        fclose(f);
+        current[n] = '\0';
+        ASSERT(dvi_write(board_tmp, current));
+        ASSERT(rename(board_tmp, board_file) == 0);
+        struct dev_index_ingest_result r;
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
+        ASSERT(r.rows_added == 0);
+        PASS();
+    }
+
+    TEST("index: append-then-mv ingests exactly the appended row") {
+        char current[512];
+        FILE *f = fopen(board_file, "rb");
+        ASSERT(f != NULL);
+        size_t n = fread(current, 1, sizeof(current) - 1, f);
+        fclose(f);
+        current[n] = '\0';
+        char grown[900];
+        (void)snprintf(grown, sizeof(grown), "%s"
+                      "{\"ts\":\"2026-09-01T01:30:00Z\",\"id\":\"a4\","
+                      "\"host\":\"node1\",\"agent\":\"claude\","
+                      "\"kind\":\"result\",\"ref\":\"a3\","
+                      "\"text\":\"fourth\"}\n",
+                      current);
+        ASSERT(dvi_write(board_tmp, grown));
+        ASSERT(rename(board_tmp, board_file) == 0);
+        struct dev_index_ingest_result r;
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
+        ASSERT(r.rows_added == 1);
+        PASS();
+    }
+
+    TEST("index: a same-size in-place rewrite is re-ingested exactly "
+        "once, not missed and not duplicated") {
+        char current[900];
+        FILE *f = fopen(board_file, "rb");
+        ASSERT(f != NULL);
+        size_t n = fread(current, 1, sizeof(current) - 1, f);
+        fclose(f);
+        current[n] = '\0';
+        /* "fourth" -> "fifth ": same byte length, same file size, same
+         * inode (an ordinary open/write/close, no rename) — the case an
+         * inode-or-size check alone would miss. */
+        char *hit = strstr(current, "fourth");
+        ASSERT(hit != NULL);
+        memcpy(hit, "fifth ", 6);
+        ASSERT(dvi_write(board_file, current));
+
+        struct dev_index_ingest_result r;
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
+        ASSERT(r.rows_added == 1); /* the rewritten line only */
+
+        ASSERT(dev_index_ingest_source(db, board_src, root, &r, err,
+                                       sizeof(err)));
+        ASSERT(r.rows_added == 0); /* re-ingesting adds it exactly once */
         PASS();
     }
 
     TEST("index: search hits a bare word") {
         struct dev_index_search_result res;
-        ASSERT(dev_index_search(db, "rewritten", NULL, 10, &res, err,
+        ASSERT(dev_index_search(db, "fifth", NULL, 10, &res, err,
                                 sizeof(err)));
         ASSERT(res.count >= 1);
-        ASSERT(strstr(res.hits[0].text, "rewritten") != NULL);
+        ASSERT(strstr(res.hits[0].text, "fifth") != NULL);
         PASS();
     }
 
@@ -238,7 +343,7 @@ int test_dev_index(void)
         clock_set_default(&iface);
         struct dev_index_source_status st;
         int64_t now_ms = clock_now_wall_ms();
-        ASSERT(dev_index_source_status(db, exp_src, now_ms, &st, err,
+        ASSERT(dev_index_source_status(db, exp_src, root, now_ms, &st, err,
                                        sizeof(err)));
         clock_reset_default();
         ASSERT(st.rows == 1);
@@ -246,6 +351,19 @@ int test_dev_index(void)
         ASSERT_STR_EQ(st.newest_ts, "2026-09-01T00:00:00Z");
         ASSERT(st.seconds_since_newest > 0);
         ASSERT(st.bytes_behind == 0);
+        /* 1, not 0: the TSV header line is a deliberate never-indexed line
+         * (dev_index_parse_experiment), and rows_skipped counts every line
+         * that produced no row this run — header included, not just
+         * genuinely malformed content. */
+        ASSERT(st.rows_skipped == 1);
+        PASS();
+    }
+
+    TEST("index: status rows_skipped reflects the earlier malformed line") {
+        struct dev_index_source_status st;
+        ASSERT(dev_index_source_status(db, board_src, root, 0, &st, err,
+                                       sizeof(err)));
+        ASSERT(st.rows_skipped == 1);
         PASS();
     }
 
@@ -257,8 +375,6 @@ int test_dev_index(void)
     (void)log_src;
 _test_next:;
     dev_index_db_close(db);
-    (void)unsetenv("ZCL_INDEX_STATE_DIR");
-    (void)unsetenv("XDG_STATE_HOME");
     (void)test_rm_rf_recursive(parent);
     return failures;
 }

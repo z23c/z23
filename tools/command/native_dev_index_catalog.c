@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define DEV_INDEX_ZCLASSIC23_ENV "ZCL_INDEX_STATE_DIR"
 #define DEV_INDEX_ZCLASSIC23_HOME_REL ".local/state/zclassic23"
 
 /* One row per Z23_SOURCE(id_, kind_, root_, path_, format_, why_) in
@@ -140,30 +139,26 @@ const struct dev_index_source *dev_index_source_find(const char *id)
 }
 
 bool dev_index_source_resolve_root(const struct dev_index_source *src,
+                                   const char *state_root_override,
                                    char *out, size_t cap)
 {
     if (!src || !out || cap == 0)
         return false;
+    if (state_root_override && state_root_override[0])
+        return (size_t)snprintf(out, cap, "%s", state_root_override) < cap;
     if (src->dev_state_root)
         return platform_state_root(out, cap);
-    char resolved[1024];
-    if (!evidence_ledger_resolve_path(DEV_INDEX_ZCLASSIC23_ENV,
-                                      DEV_INDEX_ZCLASSIC23_HOME_REL, ".",
-                                      resolved, sizeof(resolved)))
-        return false;
-    size_t n = strlen(resolved);
-    if (n >= 2 && resolved[n - 1] == '.' && resolved[n - 2] == '/')
-        resolved[n - 2] = '\0';
-    if (snprintf(out, cap, "%s", resolved) >= (int)cap)
-        return false;
-    return true;
+    return evidence_ledger_home_rel_dir(DEV_INDEX_ZCLASSIC23_HOME_REL, out,
+                                        cap);
 }
 
-static bool dev_index_dir_path(const struct dev_index_source *src, char *out,
+static bool dev_index_dir_path(const struct dev_index_source *src,
+                               const char *state_root_override, char *out,
                                size_t cap)
 {
     char root[1024];
-    if (!dev_index_source_resolve_root(src, root, sizeof(root)))
+    if (!dev_index_source_resolve_root(src, state_root_override, root,
+                                       sizeof(root)))
         return false;
     if (src->dir_rel[0] == '\0')
         return snprintf(out, cap, "%s", root) < (int)cap;
@@ -217,13 +212,14 @@ static size_t dev_index_walk(const char *dir, const char *suffix,
 }
 
 size_t dev_index_source_list_files(const struct dev_index_source *src,
+                                   const char *state_root_override,
                                    char out[][1024], size_t out_cap,
                                    size_t path_cap)
 {
     if (!src || !out || out_cap == 0)
         return 0;
     char dir[1024];
-    if (!dev_index_dir_path(src, dir, sizeof(dir)))
+    if (!dev_index_dir_path(src, state_root_override, dir, sizeof(dir)))
         return 0;
     if (src->file_name[0] != '\0') {
         if ((size_t)snprintf(out[0], path_cap, "%s/%s", dir,

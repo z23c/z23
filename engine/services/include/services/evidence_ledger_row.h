@@ -146,4 +146,12 @@ bool evidence_ledger_scan_tail(const char *path, size_t tail_bytes,
 bool evidence_ledger_resolve_path(const char *dir_env, const char *home_rel_dir,
                                  const char *file, char *out, size_t cap);
 
+/* Resolve "$HOME/<home_rel_dir>" with NO env-var override at all — for a
+ * caller that deliberately wants no override-by-environment path (an
+ * explicit CLI flag is its only override), unlike evidence_ledger_resolve_path
+ * above. Returns false (and empties `out`) when there is no HOME or the
+ * result would not fit. */
+bool evidence_ledger_home_rel_dir(const char *home_rel_dir, char *out,
+                                 size_t cap);
+
 #endif /* ZCL_SERVICES_EVIDENCE_LEDGER_ROW_H */

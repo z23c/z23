@@ -41,7 +41,12 @@ extern "C" {
  * bytes — legitimate growth with already-minimal per-child summaries, not
  * bloat. 3072 leaves bounded headroom for the larger typed ZCODE development
  * catalog while keeping accidental branch-document growth fail-closed. */
-#define ZCL_COMMAND_BRANCH_BUDGET 3072U
+/* Raised 3072 -> 3584: the `dev` branch gained a fourth `dev.index` child
+ * (ingest/status/search local-source indexing) and measured 3217 bytes,
+ * over the old 3072 ceiling — the same fixed 5-field summary as every
+ * other branch, not a bloated one. 3584 leaves headroom for a couple more
+ * `dev` leaves before this needs raising again. */
+#define ZCL_COMMAND_BRANCH_BUDGET 3584U
 /* Raised from 2400 to absorb the per-leaf `semantics` contract and effective
  * `budget_bytes` the describe document now emits. */
 #define ZCL_COMMAND_SPEC_BUDGET 2816U
@@ -131,15 +136,24 @@ enum zcl_command_latency {
     ZCL_COMMAND_LATENCY_FOREGROUND,
     ZCL_COMMAND_LATENCY_BACKGROUND,
     ZCL_COMMAND_LATENCY_PERSISTENT,
+    /* An operator-invoked maintenance leaf that walks real files (a local
+     * index rebuild, a re-scan) rather than answering from already-loaded
+     * state: bounded, but by design slower than any dispatch-latency tier
+     * above. Added for dev.index.ingest (measured ~3.1s over ~48k real
+     * rows; 5000 leaves honest headroom) rather than mis-declaring it FAST
+     * (250ms) or silently loosening BACKGROUND/PERSISTENT for every other
+     * leaf already at that tier. */
+    ZCL_COMMAND_LATENCY_MAINTENANCE,
 };
 
 /* Per-latency-bucket dispatch budget in milliseconds. This kernel-owned
  * contract gives every native leaf an explicit dispatch ceiling. */
-#define ZCL_COMMAND_LATENCY_BUDGET_INSTANT_MS    50
-#define ZCL_COMMAND_LATENCY_BUDGET_FAST_MS       250
-#define ZCL_COMMAND_LATENCY_BUDGET_FOREGROUND_MS 750
-#define ZCL_COMMAND_LATENCY_BUDGET_BACKGROUND_MS 900
-#define ZCL_COMMAND_LATENCY_BUDGET_PERSISTENT_MS 900
+#define ZCL_COMMAND_LATENCY_BUDGET_INSTANT_MS     50
+#define ZCL_COMMAND_LATENCY_BUDGET_FAST_MS        250
+#define ZCL_COMMAND_LATENCY_BUDGET_FOREGROUND_MS  750
+#define ZCL_COMMAND_LATENCY_BUDGET_BACKGROUND_MS  900
+#define ZCL_COMMAND_LATENCY_BUDGET_PERSISTENT_MS  900
+#define ZCL_COMMAND_LATENCY_BUDGET_MAINTENANCE_MS 5000
 
 /* >= the compiled catalog's leaf count; sized with headroom for the per-leaf
  * latency-sample ring (OS-B2 §2). engine/composition/src/command_catalog.c asserts against
