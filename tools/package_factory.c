@@ -2241,6 +2241,249 @@ static bool factory_store_journey(const struct run_args *args,
  * local evidence filed beside the report — it changes no admission or
  * promotion semantics. On success plan_sha3_out carries the plan file's
  * SHA3-256 hex. */
+
+/* Work dir under the system temp for factory_dep_plan's confined build. */
+static bool fdp_make_work_dir(char work[512])
+{
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir) tmpdir = "/tmp";
+    if (snprintf(work, 512, "%s/package-factory-plan-XXXXXX", tmpdir) >= 512)
+        LOG_FAIL(PF_LOG, "plan work path overflow");
+    if (!mkdtemp(work))
+        LOG_FAIL(PF_LOG, "mkdtemp under %s: %s", tmpdir, strerror(errno));
+    return true;
+}
+
+/* Derive recipe_path/emit_dir under work, write the recipe wire there, and
+ * resolve the package's absolute source path. */
+static bool fdp_prepare_paths(const char *work, char *recipe_path,
+                              size_t recipe_path_cap, char *emit_dir,
+                              size_t emit_dir_cap, const uint8_t *recipe_wire,
+                              size_t recipe_wire_len, const char *package_dir,
+                              char *pkg_abs, char *error, size_t error_cap)
+{
+    if (snprintf(recipe_path, recipe_path_cap, "%s/recipe.wire", work) >=
+            (int)recipe_path_cap ||
+        snprintf(emit_dir, emit_dir_cap, "%s/emit", work) >=
+            (int)emit_dir_cap)
+        LOG_FAIL(PF_LOG, "plan path overflow");
+    if (!pf_write_atomic(recipe_path, recipe_wire, recipe_wire_len))
+        return false;
+    if (!realpath(package_dir, pkg_abs)) {
+        (void)snprintf(error, error_cap, "realpath %s: %s", package_dir,
+                       strerror(errno));
+        LOG_ERROR(PF_LOG, "%s", error);
+        return false;
+    }
+    return true;
+}
+
+/* The locked dependency set comes from store A's add plan — the same
+ * resolution the install build used. A dependency-rich plan overflows the
+ * bounded reply envelope, so page through the steps array and reassemble
+ * it — same contract the store journey uses. */
+static bool fdp_fetch_add_plan(const struct run_args *args,
+                               const char *root_hex,
+                               struct json_value *plan_doc,
+                               const struct json_value **steps_out,
+                               char lock_hex[65], char *error,
+                               size_t error_cap)
+{
+    if (!pf_cli_paged_steps(args->bin_dir, "zcode package add plan",
+                            "name_or_root", root_hex, args->store_a,
+                            plan_doc, error, error_cap))
+        return false;
+    const struct json_value *data = json_get(plan_doc, "data");
+    const char *lk = json_get_str(json_get(data, "lock_root"));
+    const struct json_value *ready = json_get(data, "ready");
+    const struct json_value *steps = json_get(data, "steps");
+    *steps_out = steps;
+    if (!lk || strlen(lk) != 64 || !ready || !json_get_bool(ready) ||
+        !steps || steps->type != JSON_ARR || !steps->num_children) {
+        (void)snprintf(error, error_cap, "add plan not ready");
+        return false;
+    }
+    (void)snprintf(lock_hex, 65, "%s", lk);
+    return true;
+}
+
+/* Fixed (non-dependency) argv strings for the quick-profile plan verifier
+ * spawn. */
+struct fdp_verify_args {
+    char bin[PF_PATH_CAP];
+    char source_arg[PF_PATH_CAP + 32];
+    char recipe_arg[664];
+    char emit_arg[664];
+    char lock_arg[96];
+    char name_arg[VCS_PACKAGE_RELEASE_NAME_MAX + 32];
+    char plan_arg[PF_PATH_CAP + 16];
+    char fast_arg[PF_PATH_CAP + 16];
+    bool use_fast;
+};
+
+static bool fdp_build_fixed_args(struct fdp_verify_args *fa,
+                                 const struct run_args *args,
+                                 const char *pkg_abs, const char *recipe_path,
+                                 const char *emit_dir, const char *lock_hex,
+                                 const char *pkg_name)
+{
+    if (snprintf(fa->bin, sizeof(fa->bin), "%s/zclassic23-package-verify",
+                args->bin_dir) >= (int)sizeof(fa->bin))
+        LOG_FAIL(PF_LOG, "verifier path overflow");
+    if (!pkg_name)
+        LOG_FAIL(PF_LOG, "add plan carried no target package name");
+    if (snprintf(fa->source_arg, sizeof(fa->source_arg),
+                "--zbuild-package-source=%s", pkg_abs) >=
+                (int)sizeof(fa->source_arg) ||
+        snprintf(fa->recipe_arg, sizeof(fa->recipe_arg),
+                "--zbuild-package-recipe=%s", recipe_path) >=
+                (int)sizeof(fa->recipe_arg) ||
+        snprintf(fa->emit_arg, sizeof(fa->emit_arg), "--emit=%s", emit_dir) >=
+                (int)sizeof(fa->emit_arg) ||
+        snprintf(fa->lock_arg, sizeof(fa->lock_arg), "--lock-root=%s",
+                lock_hex) >= (int)sizeof(fa->lock_arg) ||
+        snprintf(fa->name_arg, sizeof(fa->name_arg),
+                "--zbuild-package-name=%s", pkg_name) >=
+                (int)sizeof(fa->name_arg))
+        LOG_FAIL(PF_LOG, "verifier arg overflow");
+    if (snprintf(fa->plan_arg, sizeof(fa->plan_arg), "--plan=%s",
+                args->dep_plan_path) >= (int)sizeof(fa->plan_arg))
+        LOG_FAIL(PF_LOG, "plan arg overflow");
+    fa->use_fast = args->fast_cache_dir != NULL;
+    if (fa->use_fast &&
+        snprintf(fa->fast_arg, sizeof(fa->fast_arg), "--fast-cache=%s",
+                args->fast_cache_dir) >= (int)sizeof(fa->fast_arg))
+        LOG_FAIL(PF_LOG, "fast-cache arg overflow");
+    return true;
+}
+
+/* Dep argv from the add plan's own steps (all but the last, target, step)
+ * — the same resolution the install build used. */
+static bool fdp_build_dep_args(const struct json_value *steps,
+                               size_t step_count, const char *store_a,
+                               size_t dep_stride, char **dep_args_out)
+{
+    size_t dep_count = step_count > 1u ? step_count - 1u : 0;
+    *dep_args_out = NULL;
+    if (dep_count > VCS_PACKAGE_BUILD_MAX_DEPS)
+        LOG_FAIL(PF_LOG, "dep count %zu over the worker bound", dep_count);
+    if (!dep_count)
+        return true;
+    char *dep_args = zcl_malloc(dep_stride * dep_count,
+                               "factory.plan.depargs");
+    if (!dep_args)
+        LOG_FAIL(PF_LOG, "dep args alloc");
+    for (size_t i = 0; i + 1u < step_count; i++) {
+        const struct json_value *step = json_at(steps, i);
+        const char *droot = json_get_str(json_get(step, "root"));
+        if (!droot || strlen(droot) != 64)
+            LOG_FAIL(PF_LOG, "add plan step %zu has no root", i);
+        if (snprintf(dep_args + i * dep_stride, dep_stride,
+                     "--dep=%s,%s/zcode/installed/%s", droot, store_a,
+                     droot) >= (int)dep_stride)
+            LOG_FAIL(PF_LOG, "dep arg overflow");
+    }
+    *dep_args_out = dep_args;
+    return true;
+}
+
+/* The package name comes from the plan's target (last) step. */
+static const char *fdp_resolve_pkg_name(const struct json_value *steps,
+                                        size_t step_count)
+{
+    return json_get_str(json_get(json_at(steps, step_count - 1u), "name"));
+}
+
+/* argv: verifier <root> --zbuild-package-* profile=quick --emit
+ * --lock-root [--dep=...]... --plan=<path> --require-full-isolation */
+static bool fdp_run_verifier(const char *root_hex,
+                             const struct fdp_verify_args *fa,
+                             char *dep_args, size_t dep_count,
+                             size_t dep_stride, struct pf_fast_stats *fast,
+                             int *rc_out, char *error, size_t error_cap)
+{
+    const char *argv[14u + VCS_PACKAGE_BUILD_MAX_DEPS];
+    size_t argc = 0;
+    argv[argc++] = fa->bin;
+    argv[argc++] = root_hex;
+    argv[argc++] = fa->source_arg;
+    argv[argc++] = fa->recipe_arg;
+    argv[argc++] = fa->name_arg;
+    argv[argc++] = "--zbuild-package-profile=quick";
+    argv[argc++] = "--zbuild-package-max-cpu-seconds=120";
+    argv[argc++] = fa->emit_arg;
+    argv[argc++] = fa->lock_arg;
+    for (size_t i = 0; i < dep_count; i++)
+        argv[argc++] = dep_args + i * dep_stride;
+    argv[argc++] = fa->plan_arg;
+    if (fa->use_fast)
+        argv[argc++] = fa->fast_arg;
+    argv[argc++] = "--require-full-isolation";
+    argv[argc] = NULL;
+    char *vout = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.plan.out");
+    if (!vout)
+        LOG_FAIL(PF_LOG, "verifier stdout alloc");
+    *rc_out = pf_spawn((char *const *)argv, NULL, 0, vout, PF_CLI_STDOUT_CAP);
+    if (fast)
+        pf_fast_stats_consume(fast, vout);
+    if (*rc_out != 0) {
+        char *nl = strchr(vout, '\n');
+        if (nl) *nl = '\0';
+        (void)snprintf(error, error_cap,
+                       "quick-profile plan build exit %d%s%s", *rc_out,
+                       vout[0] ? ": " : "", vout);
+        LOG_ERROR(PF_LOG, "%s", error);
+    }
+    free(vout);
+    return true;
+}
+
+/* Build every verifier argv piece and spawn it. */
+static bool fdp_verify_stage(const struct run_args *args,
+                             const char *root_hex, const char *lock_hex,
+                             const struct json_value *steps,
+                             const char *pkg_abs, const char *recipe_path,
+                             const char *emit_dir, int *rc_out,
+                             struct pf_fast_stats *fast, char *error,
+                             size_t error_cap)
+{
+    size_t step_count = steps->num_children;
+    size_t dep_stride = PF_PATH_CAP + 96u;
+    char *dep_args = NULL;
+    if (!fdp_build_dep_args(steps, step_count, args->store_a, dep_stride,
+                            &dep_args))
+        return false;
+    const char *pkg_name = fdp_resolve_pkg_name(steps, step_count);
+    struct fdp_verify_args fa = {0};
+    bool ok = fdp_build_fixed_args(&fa, args, pkg_abs, recipe_path, emit_dir,
+                                   lock_hex, pkg_name);
+    if (ok)
+        ok = fdp_run_verifier(root_hex, &fa, dep_args,
+                              step_count > 1u ? step_count - 1u : 0,
+                              dep_stride, fast, rc_out, error, error_cap);
+    free(dep_args);
+    return ok;
+}
+
+/* Hash the emitted plan into the report. */
+static bool fdp_hash_plan(const char *dep_plan_path, char plan_sha3_out[65],
+                          char *error, size_t error_cap)
+{
+    uint8_t *plan = NULL;
+    size_t plan_len = 0;
+    if (!pf_read_file(dep_plan_path, PF_CLI_STDOUT_CAP, &plan, &plan_len)) {
+        (void)snprintf(error, error_cap, "plan %s unreadable",
+                       dep_plan_path);
+        LOG_ERROR(PF_LOG, "%s", error);
+        return false;
+    }
+    uint8_t digest[32];
+    sha3_256(plan, plan_len, digest);
+    free(plan);
+    zcl_hex_encode(digest, 32, plan_sha3_out);
+    return true;
+}
+
 static bool factory_dep_plan(const struct run_args *args,
                              const char *root_hex,
                              const uint8_t *recipe_wire,
@@ -2251,173 +2494,30 @@ static bool factory_dep_plan(const struct run_args *args,
 {
     plan_sha3_out[0] = '\0';
     char work[512];
-    const char *tmpdir = getenv("TMPDIR");
-    if (!tmpdir) tmpdir = "/tmp";
-    if (snprintf(work, sizeof(work), "%s/package-factory-plan-XXXXXX",
-                 tmpdir) >= (int)sizeof(work))
-        LOG_FAIL(PF_LOG, "plan work path overflow");
-    if (!mkdtemp(work))
-        LOG_FAIL(PF_LOG, "mkdtemp under %s: %s", tmpdir, strerror(errno));
-    char recipe_path[600], emit_dir[600];
-    if (snprintf(recipe_path, sizeof(recipe_path), "%s/recipe.wire",
-                 work) >= (int)sizeof(recipe_path) ||
-        snprintf(emit_dir, sizeof(emit_dir), "%s/emit", work) >=
-            (int)sizeof(emit_dir))
-        LOG_FAIL(PF_LOG, "plan path overflow");
-    bool ok = pf_write_atomic(recipe_path, recipe_wire, recipe_wire_len);
-    char pkg_abs[PF_PATH_CAP];
-    if (ok && !realpath(args->package_dir, pkg_abs)) {
-        (void)snprintf(error, error_cap, "realpath %s: %s",
-                       args->package_dir, strerror(errno));
-        LOG_ERROR(PF_LOG, "%s", error);
-        ok = false;
-    }
-    /* The locked dependency set comes from store A's add plan — the same
-     * resolution the install build used. */
+    if (!fdp_make_work_dir(work))
+        return false;
+    char recipe_path[600], emit_dir[600], pkg_abs[PF_PATH_CAP];
+    bool ok = fdp_prepare_paths(work, recipe_path, sizeof(recipe_path),
+                                emit_dir, sizeof(emit_dir), recipe_wire,
+                                recipe_wire_len, args->package_dir, pkg_abs,
+                                error, error_cap);
     char lock_hex[65] = {0};
     struct json_value plan_doc;
     json_init(&plan_doc);
     const struct json_value *steps = NULL;
-    if (ok) {
-        /* A dependency-rich plan overflows the bounded reply envelope, so
-         * page through the steps array and reassemble it — same contract
-         * the store journey uses. */
-        if (!pf_cli_paged_steps(args->bin_dir, "zcode package add plan",
-                                "name_or_root", root_hex, args->store_a,
-                                &plan_doc, error, error_cap))
-            ok = false;
-    }
-    if (ok) {
-        const struct json_value *data = json_get(&plan_doc, "data");
-        const char *lk = json_get_str(json_get(data, "lock_root"));
-        const struct json_value *ready = json_get(data, "ready");
-        steps = json_get(data, "steps");
-        if (!lk || strlen(lk) != 64 || !ready || !json_get_bool(ready) ||
-            !steps || steps->type != JSON_ARR || !steps->num_children) {
-            (void)snprintf(error, error_cap, "add plan not ready");
-            ok = false;
-        } else {
-            (void)snprintf(lock_hex, sizeof(lock_hex), "%s", lk);
-        }
-    }
+    if (ok)
+        ok = fdp_fetch_add_plan(args, root_hex, &plan_doc, &steps, lock_hex,
+                                error, error_cap);
     int rc = -1;
-    if (ok) {
-        /* argv: verifier <root> --zbuild-package-* profile=quick --emit
-         * --lock-root [--dep=...]... --plan=<path>
-         * --require-full-isolation */
-        char bin[PF_PATH_CAP];
-        if (snprintf(bin, sizeof(bin), "%s/zclassic23-package-verify",
-                     args->bin_dir) >= (int)sizeof(bin))
-            LOG_FAIL(PF_LOG, "verifier path overflow");
-        char source_arg[PF_PATH_CAP + 32], recipe_arg[664],
-             emit_arg[664], lock_arg[96];
-        char name_arg[VCS_PACKAGE_RELEASE_NAME_MAX + 32];
-        size_t step_count = steps->num_children;
-        size_t dep_count = step_count > 1u ? step_count - 1u : 0;
-        if (dep_count > VCS_PACKAGE_BUILD_MAX_DEPS)
-            LOG_FAIL(PF_LOG, "dep count %zu over the worker bound",
-                     dep_count);
-        size_t dep_stride = PF_PATH_CAP + 96u;
-        char *dep_args = NULL;
-        if (dep_count) {
-            dep_args = zcl_malloc(dep_stride * dep_count,
-                                  "factory.plan.depargs");
-            if (!dep_args)
-                LOG_FAIL(PF_LOG, "dep args alloc");
-        }
-        const char *pkg_name = json_get_str(
-            json_get(json_at(steps, step_count - 1u), "name"));
-        if (!pkg_name)
-            LOG_FAIL(PF_LOG, "add plan carried no target package name");
-        if (snprintf(source_arg, sizeof(source_arg),
-                     "--zbuild-package-source=%s", pkg_abs) >=
-                (int)sizeof(source_arg) ||
-            snprintf(recipe_arg, sizeof(recipe_arg),
-                     "--zbuild-package-recipe=%s", recipe_path) >=
-                (int)sizeof(recipe_arg) ||
-            snprintf(emit_arg, sizeof(emit_arg), "--emit=%s", emit_dir) >=
-                (int)sizeof(emit_arg) ||
-            snprintf(lock_arg, sizeof(lock_arg), "--lock-root=%s",
-                     lock_hex) >= (int)sizeof(lock_arg) ||
-            snprintf(name_arg, sizeof(name_arg), "--zbuild-package-name=%s",
-                     pkg_name) >= (int)sizeof(name_arg))
-            LOG_FAIL(PF_LOG, "verifier arg overflow");
-        char plan_arg[PF_PATH_CAP + 16];
-        if (snprintf(plan_arg, sizeof(plan_arg), "--plan=%s",
-                     args->dep_plan_path) >= (int)sizeof(plan_arg))
-            LOG_FAIL(PF_LOG, "plan arg overflow");
-        char fast_arg[PF_PATH_CAP + 16];
-        bool use_fast = args->fast_cache_dir != NULL;
-        if (use_fast &&
-            snprintf(fast_arg, sizeof(fast_arg), "--fast-cache=%s",
-                     args->fast_cache_dir) >= (int)sizeof(fast_arg))
-            LOG_FAIL(PF_LOG, "fast-cache arg overflow");
-        const char *argv[14u + VCS_PACKAGE_BUILD_MAX_DEPS];
-        size_t argc = 0;
-        argv[argc++] = bin;
-        argv[argc++] = root_hex;
-        argv[argc++] = source_arg;
-        argv[argc++] = recipe_arg;
-        argv[argc++] = name_arg;
-        argv[argc++] = "--zbuild-package-profile=quick";
-        argv[argc++] = "--zbuild-package-max-cpu-seconds=120";
-        argv[argc++] = emit_arg;
-        argv[argc++] = lock_arg;
-        size_t di = 0;
-        for (size_t i = 0; i + 1u < step_count; i++) {
-            const struct json_value *step = json_at(steps, i);
-            const char *droot = json_get_str(json_get(step, "root"));
-            if (!droot || strlen(droot) != 64)
-                LOG_FAIL(PF_LOG, "add plan step %zu has no root", i);
-            if (snprintf(dep_args + di * dep_stride, dep_stride,
-                         "--dep=%s,%s/zcode/installed/%s", droot,
-                         args->store_a, droot) >= (int)dep_stride)
-                LOG_FAIL(PF_LOG, "dep arg overflow");
-            argv[argc++] = dep_args + di * dep_stride;
-            di++;
-        }
-        argv[argc++] = plan_arg;
-        if (use_fast)
-            argv[argc++] = fast_arg;
-        argv[argc++] = "--require-full-isolation";
-        argv[argc] = NULL;
-        char *vout = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.plan.out");
-        if (!vout)
-            LOG_FAIL(PF_LOG, "verifier stdout alloc");
-        rc = pf_spawn((char *const *)argv, NULL, 0, vout,
-                      PF_CLI_STDOUT_CAP);
-        if (fast)
-            pf_fast_stats_consume(fast, vout);
-        if (rc != 0) {
-            char *nl = strchr(vout, '\n');
-            if (nl) *nl = '\0';
-            (void)snprintf(error, error_cap,
-                           "quick-profile plan build exit %d%s%s", rc,
-                           vout[0] ? ": " : "", vout);
-            LOG_ERROR(PF_LOG, "%s", error);
-        }
-        free(vout);
-        free(dep_args);
-    }
+    if (ok)
+        ok = fdp_verify_stage(args, root_hex, lock_hex, steps, pkg_abs,
+                              recipe_path, emit_dir, &rc, fast, error,
+                              error_cap);
     json_free(&plan_doc);
     if (ok && rc != 0) ok = false;
-    /* Hash the emitted plan into the report. */
-    if (ok) {
-        uint8_t *plan = NULL;
-        size_t plan_len = 0;
-        if (!pf_read_file(args->dep_plan_path, PF_CLI_STDOUT_CAP, &plan,
-                          &plan_len)) {
-            (void)snprintf(error, error_cap, "plan %s unreadable",
-                           args->dep_plan_path);
-            LOG_ERROR(PF_LOG, "%s", error);
-            ok = false;
-        } else {
-            uint8_t digest[32];
-            sha3_256(plan, plan_len, digest);
-            free(plan);
-            zcl_hex_encode(digest, 32, plan_sha3_out);
-        }
-    }
+    if (ok)
+        ok = fdp_hash_plan(args->dep_plan_path, plan_sha3_out, error,
+                           error_cap);
     /* Best-effort cleanup of the plan work dir. */
     {
         char *rm_argv[] = {(char *)"rm", (char *)"-rf", work, NULL};
