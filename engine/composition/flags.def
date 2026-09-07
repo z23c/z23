@@ -399,7 +399,7 @@ Z23_FLAG("ZCL_CRASH_DATADIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_CRASH_REQUIRE_TEETH", "env_runtime", "-", "-",
           "first use tools/crash_recovery_test.c:712; documented at docs/CHAOS_HARNESS.md:64: > with ZCL_CRASH_REQUIRE_TEETH=1).")
 Z23_FLAG("ZCL_CROSS_TRIPLE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/tor_archives_ready.sh:48")
+          "undocumented; first use tools/scripts/tor_archives_ready.sh:49")
 Z23_FLAG("ZCL_CRYPTO_PERF_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/check_crypto_perf.sh:38")
 Z23_FLAG("ZCL_CRYPTO_PERF_BIN", "env_build", "build/bin/zclassic23", "-",
@@ -2269,7 +2269,7 @@ Z23_FLAG("ZCL_TOOLS_LINK_JOBS", "env_build", "1", "-",
 Z23_FLAG("ZCL_TOR", "env_runtime", "full", "-",
           "first use tools/tor_provenance.c:338; documented at docs/DEVELOPING.md:296: make ZCL_TOR=stub … is the dev-only escape: it links the offline stub,")
 Z23_FLAG("ZCL_TOR_JOBS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/build_tor_full.sh:292")
+          "undocumented; first use tools/scripts/build_tor_full.sh:285")
 Z23_FLAG("ZCL_TOR_STUB_REFUSAL", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tor_stamp_lib.sh:46")
 Z23_FLAG("ZCL_TRACE_VERBOSE", "env_runtime", "-", "-",
