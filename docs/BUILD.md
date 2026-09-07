@@ -823,6 +823,22 @@ qualifies the running `/proc/<pid>/exe` bytes and status before the next host is
 touched. A failure restores that host's prior daemon, identity, and workers and
 stops the rollout.
 
+A candidate that changes persistent-schema code (`engine/models/src/database*`,
+`engine/models/include/models/database*`, `schema_migration.*`) is refused by
+default on every target, remote or local, because reverting to the prior
+binary against an already-migrated datadir is itself unsafe — the old binary
+does not know how to refuse a database newer than it is. Setting
+`ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1` is a deliberate, explicit forward-only
+acceptance: it lets such a candidate ship, and in the same breath disarms
+automatic rollback for the affected host(s), remote or local. A remote target
+carries that acceptance across its own SSH activation; a local target passes
+it into `make deploy` as `ZCL_DEPLOY_ONE_WAY=1`, which is recorded in the
+`90-build-identity.conf` drop-in beside the rollback commit so an operator
+reading the unit later sees why rollback is off. Either way, a failed
+qualification under acceptance stops the node and reports loudly instead of
+silently reverting a binary that can no longer read its own datadir. Without
+the acceptance env, the refusal text is unchanged on both paths.
+
 This page deliberately does not state how many defensive-coding gates exist.
 That number changes whenever a gate lands, and every copy of it in prose has
 gone stale within weeks. The authoritative list is the `LINT_GATES` variable in

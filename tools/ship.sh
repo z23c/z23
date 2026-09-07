@@ -63,6 +63,39 @@ say()  { printf '\033[1mship:\033[0m %s\n' "$*"; }
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31mship: REFUSE:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Prints (possibly empty) newline-separated persistent-schema files changed
+# between $2 (prior rollback commit) and $3 (candidate) in git repo $1. Same
+# pathspecs the remote leg's forward-only check uses. Kept as its own
+# function, defined here (before --selftest) so the local decision below is
+# testable against a small fixture git history instead of the real checkout.
+ship_schema_files_changed() {
+    local repo="$1" prior="$2" head="$3"
+    git -C "$repo" diff --name-only "$prior" "$head" -- \
+        'engine/models/src/database*.c' \
+        'engine/models/include/models/database*.h' \
+        'engine/models/src/schema_migration.c' \
+        'engine/models/include/models/schema_migration.h'
+}
+
+# Pure decision: given $1 = the (possibly empty) output of
+# ship_schema_files_changed and $2 = the raw ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA
+# value, decides what a candidate that may touch persistent-schema code is
+# allowed to do to LOCAL rollback. On acceptance it also fills
+# SHIP_ONE_WAY_PLAN with the changed-file list for the caller to report.
+# Returns:
+#   0  no schema change  -- rollback stays armed, nothing to say
+#   1  schema changed, not accepted -- caller must refuse (message is the
+#      caller's, so refusing text an operator has already seen never moves)
+#   2  schema changed, accepted -- caller must disarm rollback
+ship_one_way_schema_decision() {
+    local changed="$1" accept="$2"
+    SHIP_ONE_WAY_PLAN=""
+    [ -n "$changed" ] || return 0
+    [ "$accept" = "1" ] || return 1
+    SHIP_ONE_WAY_PLAN="$changed"
+    return 2
+}
+
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
 # shellcheck source=tools/scripts/tor_stamp_lib.sh
@@ -771,8 +804,61 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     SHIP_HARDLINK_TOOL=""
     SHIP_MAKE="make -s"
 
+    # ── local forward-only schema acceptance ────────────────────────────
+    # deploy_local() refuses a candidate that touches persistent-schema code
+    # unless the owner explicitly accepted ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1,
+    # in which case it must disarm rollback exactly the way the remote leg
+    # already does. Both halves of that decision — the git diff and the
+    # accept/refuse/disarm choice — are small enough to exercise directly
+    # against a fixture git history, with no live systemd unit involved.
+    schema_repo="$test_tmp/schema-repo"
+    mkdir -p "$schema_repo/engine/models/src"
+    ( cd "$schema_repo" && git init -q &&
+      git config user.email t@t.example && git config user.name selftest &&
+      git config commit.gpgsign false )
+    printf 'v1\n' > "$schema_repo/engine/models/src/database_fixture.c"
+    printf 'unrelated v1\n' > "$schema_repo/README"
+    ( cd "$schema_repo" && git add -A && git commit -q -m base )
+    schema_base="$(git -C "$schema_repo" rev-parse HEAD)"
+    printf 'unrelated v2\n' > "$schema_repo/README"
+    ( cd "$schema_repo" && git add -A && git commit -q -m no-schema-change )
+    schema_unchanged_head="$(git -C "$schema_repo" rev-parse HEAD)"
+    printf 'v2\n' > "$schema_repo/engine/models/src/database_fixture.c"
+    ( cd "$schema_repo" && git add -A && git commit -q -m schema-change )
+    schema_changed_head="$(git -C "$schema_repo" rev-parse HEAD)"
+    [ -z "$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_unchanged_head")" ]
+    schema_diff="$(ship_schema_files_changed "$schema_repo" "$schema_base" "$schema_changed_head")"
+    [ "$schema_diff" = "engine/models/src/database_fixture.c" ]
+    # no schema change -> rollback stays armed, nothing to plan
+    schema_rc=0; ship_one_way_schema_decision "" 0 || schema_rc=$?
+    [ "$schema_rc" -eq 0 ] && [ -z "$SHIP_ONE_WAY_PLAN" ]
+    # schema changed, no acceptance -> caller must refuse
+    schema_rc=0; ship_one_way_schema_decision "$schema_diff" 0 || schema_rc=$?
+    [ "$schema_rc" -eq 1 ]
+    schema_rc=0; ship_one_way_schema_decision "$schema_diff" "" || schema_rc=$?
+    [ "$schema_rc" -eq 1 ]
+    # schema changed, explicit acceptance -> caller must disarm, and is
+    # handed exactly the changed-file list to report
+    schema_rc=0; ship_one_way_schema_decision "$schema_diff" 1 || schema_rc=$?
+    [ "$schema_rc" -eq 2 ] && [ "$SHIP_ONE_WAY_PLAN" = "$schema_diff" ]
+    # The no-acceptance refusal text an operator has already seen in the
+    # field must not move underneath them.
+    grep -qF 'local candidate changes persistent-schema code; local automatic rollback cannot yet be safely disarmed (ship remote targets explicitly after owner acceptance)' "$0"
+    # deploy_local() must actually thread the decision into `make deploy`.
+    grep -qF 'ZCL_DEPLOY_ONE_WAY="$local_one_way"' "$0"
+    # The remote leg's own accept/refuse/disarm text is untouched by this work.
+    grep -qF 'FORWARD-ONLY: schema code changed since' "$0"
+    grep -qF 'ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1, which also disarms rollback' "$0"
+    # The Makefile side: a failed qualification under one-way stops the node
+    # and reports instead of rolling back, and records the acceptance next
+    # to the rollback commit in the same drop-in.
+    grep -qF 'ZCL_DEPLOY_ONE_WAY=1' "$REPO_ROOT/Makefile"
+    grep -qF 'one_way_armed=1' "$REPO_ROOT/Makefile"
+    grep -qF 'stop zclassic23' "$REPO_ROOT/Makefile"
+    grep -qF 'forward-only candidate failed qualification' "$REPO_ROOT/Makefile"
+
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
-    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach; prepare steps built tor-provenance/tor-ready, left a mismatched provenance untouched, reinstalled hooks, and deduped/refused hardlinks correctly)\n'
+    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach; prepare steps built tor-provenance/tor-ready, left a mismatched provenance untouched, reinstalled hooks, and deduped/refused hardlinks correctly; local forward-only schema acceptance mirrors remote accept/refuse/disarm)\n'
     exit 0
 fi
 
@@ -1143,11 +1229,30 @@ install_local_workers() {
     say "workers    installed beside $dir/"
 }
 
+# Prints (possibly empty) newline-separated persistent-schema files changed
+# between $2 (prior rollback commit) and $3 (candidate) in git repo $1. Same
+# pathspecs the remote leg's forward-only check uses. Kept as its own
+# function so the local decision below is testable against a small fixture
+# git history instead of the real checkout.
 deploy_local() {
     step "Deploy → local"
-    if [ "$DRY_RUN" -eq 1 ]; then say "would install the frozen candidate + workers transactionally"; return 0; fi
-    local pid svc_dir worker_backup i rc=0 prior_commit
-    local remapped_rc
+    if [ "$DRY_RUN" -eq 1 ]; then
+        # No live pid to read a rollback commit from here, so preview against
+        # origin/main — the same baseline the preflight above already treats
+        # as the fleet's prior state. Advisory only: the real run still reads
+        # the live node's actual rollback commit.
+        local preview_changed
+        preview_changed="$(ship_schema_files_changed "$REPO_ROOT" origin/main "$HEAD_SHA" 2>/dev/null || true)"
+        if [ -n "$preview_changed" ] && [ "${ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA:-0}" = "1" ]; then
+            say "rollback   local FORWARD-ONLY (ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1): schema file(s) changed: $(printf '%s' "$preview_changed" | tr '\n' ' ')"
+            say "           automatic rollback would be DISARMED; a failed qualification would"
+            say "           STOP the node and report rather than reverting onto a migrated datadir"
+        fi
+        say "would install the frozen candidate + workers transactionally"
+        return 0
+    fi
+    local pid svc_dir worker_backup i rc=0 prior_commit schema_changed local_one_way=0
+    local remapped_rc one_way_rc
     pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
     case "$pid" in
         ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
@@ -1159,13 +1264,20 @@ deploy_local() {
     esac
     git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
         die "local rollback commit $prior_commit is unavailable"
-    if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
-        'engine/models/src/database*.c' \
-        'engine/models/include/models/database*.h' \
-        'engine/models/src/schema_migration.c' \
-        'engine/models/include/models/schema_migration.h'; then
-        die "local candidate changes persistent-schema code; local automatic rollback cannot yet be safely disarmed (ship remote targets explicitly after owner acceptance)"
-    fi
+    schema_changed="$(ship_schema_files_changed "$REPO_ROOT" "$prior_commit" "$HEAD_SHA")"
+    ship_one_way_schema_decision "$schema_changed" "${ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA:-0}"
+    one_way_rc=$?
+    case "$one_way_rc" in
+        0) ;;
+        1) die "local candidate changes persistent-schema code; local automatic rollback cannot yet be safely disarmed (ship remote targets explicitly after owner acceptance)" ;;
+        2)
+            local_one_way=1
+            say "rollback   local FORWARD-ONLY (ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1): schema file(s) changed: $(printf '%s' "$SHIP_ONE_WAY_PLAN" | tr '\n' ' ')"
+            say "           automatic rollback is DISARMED; a failed qualification will STOP"
+            say "           the node and report rather than reverting the binary onto a"
+            say "           migrated datadir"
+            ;;
+    esac
     svc_dir="$(dirname "$(ship_exe_of "$pid")")"
     # Scratch lives under the owner's state root, never /tmp: honour
     # ZCL_SCRATCH_DIR when set (same override ship_selftest.sh recognises),
@@ -1186,6 +1298,7 @@ deploy_local() {
     rm -f build/bin/.deploy-verdict
     ZCL_DEPLOY_ALLOW_CANONICAL=1 \
     ZCL_DEPLOY_FROZEN_CANDIDATE="$CANDIDATE" \
+    ZCL_DEPLOY_ONE_WAY="$local_one_way" \
         make deploy 2>&1 | tail -6 || rc="${PIPESTATUS[0]}"
     # GNU make's own exit status for a failed recipe is a flat 2 regardless of
     # what the recipe itself returned — the recipe's real code (here, the
@@ -1205,8 +1318,12 @@ deploy_local() {
     # installed because it proved no fault requiring rollback. Reverting
     # the workers here would run that new main binary against OLD workers — a
     # version-skew mismatch this rollback exists to prevent, not create. Only
-    # a genuine failure (1, 2, or anything unexpected) restores them.
-    if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+    # a genuine failure (1, 2, or anything unexpected) restores them. A
+    # forward-only deploy (local_one_way=1) disarms rollback altogether: the
+    # old workers, like the old daemon binary, may not be able to speak to a
+    # migrated datadir, so they are left exactly where the failed deploy put
+    # them and reported, never reverted.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ] && [ "$local_one_way" -ne 1 ]; then
         for i in "${!WORKER_NAMES[@]}"; do
             if [ -f "$worker_backup/$i" ]; then
                 install -m 755 "$worker_backup/$i" "$svc_dir/${WORKER_NAMES[$i]}"

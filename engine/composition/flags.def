@@ -498,6 +498,8 @@ Z23_FLAG("ZCL_DEPLOY_GUARD_SYSTEMD_EXECSTART", "env_build", "-", "-",
           "undocumented; first use tools/deploy_guard.sh:46")
 Z23_FLAG("ZCL_DEPLOY_GUARD_UNIT", "env_build", "zclassic23", "-",
           "undocumented; first use tools/deploy_guard.sh:12")
+Z23_FLAG("ZCL_DEPLOY_ONE_WAY", "make_var", "0", "-",
+          "documented at docs/BUILD.md; first use Makefile deploy: recipe; set by tools/ship.sh's deploy_local() when a candidate changes persistent-schema code AND ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1 was accepted, so automatic local rollback disarms instead of reverting onto a migrated datadir")
 Z23_FLAG("ZCL_DEPLOY_RPC_TIMEOUT", "env_build", "20", "-",
           "undocumented; first use tools/deploy_verify.sh:103")
 Z23_FLAG("ZCL_DEPLOY_STAGE", "env_build", "stable", "-",

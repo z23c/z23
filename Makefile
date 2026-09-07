@@ -9854,6 +9854,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	rollback_dropin_present=0; rollback_armed=0; rollback_complete=0; \
 	rollback_source_id=""; rollback_artifact_sha256=""; SERVICE_BIN=""; dropin=""; \
 	restart_timeout=180; \
+	one_way="$${ZCL_DEPLOY_ONE_WAY:-0}"; one_way_armed=0; \
 	cleanup_deploy() { \
 	    deploy_rc=$$?; \
 	    trap - EXIT HUP INT TERM; \
@@ -9887,6 +9888,10 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	        else \
 	            echo "deploy: CRITICAL — rollback verification failed; automation stopped" >&2; \
 	        fi; \
+	    elif [ "$$one_way_armed" -eq 1 ] && [ "$$rollback_complete" -eq 0 ]; then \
+	        rollback_complete=1; \
+	        echo "deploy: REFUSE: forward-only candidate failed qualification; automatic rollback stayed DISARMED because this install accepted a one-way schema change (ZCL_DEPLOY_ONE_WAY=1) and the previous binary cannot read the migrated database. Stopping the node rather than silently reverting it or leaving a failed candidate running." >&2; \
+	        systemctl --user stop zclassic23 2>/dev/null; \
 	    fi; \
 	    rm -f "$$candidate" "$$prior_snapshot" "$$dropin_tmp" "$$service_tmp" \
 	          "$$rollback_bin" "$$rollback_dropin" "$$fleet_manifest_tmp"; \
@@ -9992,13 +9997,21 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    install -m 644 "$$dropin" "$$rollback_dropin"; \
 	    rollback_dropin_present=1; \
 	fi; \
-	rollback_armed=1; \
+	if [ "$$one_way" = "1" ]; then \
+	    one_way_armed=1; \
+	    echo "deploy: FORWARD-ONLY (ZCL_DEPLOY_ONE_WAY=1): automatic rollback is DISARMED for this install — a failed qualification will stop the node and report rather than reverting the binary onto a migrated datadir"; \
+	else \
+	    rollback_armed=1; \
+	fi; \
 	dropin_tmp="$$(mktemp "$$dropin.tmp.XXXXXX")"; \
 	{ \
 	    printf '[Service]\n'; \
 	    printf 'Environment="ZCL_AGENT_EXPECT_SOURCE_ID=%s"\n' "$(BUILD_SOURCE_ID)"; \
 	    printf 'Environment="ZCL_AGENT_EXPECT_BUILD_COMMIT=%s"\n' "$(BUILD_COMMIT)"; \
 	    printf 'Environment="ZCL_AGENT_EXPECT_BUILD_SOURCE=make-deploy"\n'; \
+	    if [ "$$one_way" = "1" ]; then \
+	        printf 'Environment="ZCL_DEPLOY_ONE_WAY=1"\n'; \
+	    fi; \
 	} > "$$dropin_tmp"; \
 	install -m 644 "$$dropin_tmp" "$$dropin"; \
 	rm -f "$$dropin_tmp"; dropin_tmp=""; \
