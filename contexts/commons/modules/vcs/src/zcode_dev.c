@@ -15,7 +15,8 @@ static const uint8_t policy_magic[8] = {'Z','C','P','O','L','Y','\r','\n'};
 static const uint8_t review_magic[8] = {'Z','C','R','E','V','W','\r','\n'};
 static const uint8_t receipt_magic[8] = {'Z','C','W','R','C','P','\r','\n'};
 
-const char *vcs_zcode_dev_error_string(enum vcs_zcode_dev_error error)
+/* First half of the error family: null/wire/schema-shape failures. */
+static const char *dev_error_string_wire(enum vcs_zcode_dev_error error)
 {
     switch (error) {
     case VCS_ZCODE_DEV_OK: return "ok";
@@ -29,6 +30,14 @@ const char *vcs_zcode_dev_error_string(enum vcs_zcode_dev_error error)
     case VCS_ZCODE_DEV_ERR_CAPABILITY: return "capability-invalid";
     case VCS_ZCODE_DEV_ERR_LIMIT: return "limit-invalid";
     case VCS_ZCODE_DEV_ERR_EXPIRY: return "task-expired";
+    default: return NULL;
+    }
+}
+
+/* Second half of the error family: cross-object semantic failures. */
+static const char *dev_error_string_semantic(enum vcs_zcode_dev_error error)
+{
+    switch (error) {
     case VCS_ZCODE_DEV_ERR_POLICY: return "proof-policy-invalid";
     case VCS_ZCODE_DEV_ERR_VERDICT: return "review-verdict-invalid";
     case VCS_ZCODE_DEV_ERR_WORK_KIND: return "work-kind-invalid";
@@ -39,16 +48,21 @@ const char *vcs_zcode_dev_error_string(enum vcs_zcode_dev_error error)
     case VCS_ZCODE_DEV_ERR_POLICY_MISMATCH: return "proof-policy-mismatch";
     case VCS_ZCODE_DEV_ERR_TOOLCHAIN_STALE: return "toolchain-capsule-stale";
     case VCS_ZCODE_DEV_ERR_OUTPUT_MISMATCH: return "output-root-mismatch";
+    default: return NULL;
     }
-    return "unknown";
 }
 
-enum vcs_zcode_dev_error vcs_zcode_task_validate(
+const char *vcs_zcode_dev_error_string(enum vcs_zcode_dev_error error)
+{
+    const char *s = dev_error_string_wire(error);
+    if (s) return s;
+    s = dev_error_string_semantic(error);
+    return s ? s : "unknown";
+}
+
+static enum vcs_zcode_dev_error task_validate_roots(
     const struct vcs_zcode_task_v1 *task)
 {
-    if (!task) return VCS_ZCODE_DEV_ERR_NULL;
-    if (task->schema_version != VCS_ZCODE_DEV_VERSION)
-        return VCS_ZCODE_DEV_ERR_VERSION;
     const uint8_t *roots[] = {
         task->source_root, task->dependency_lock_root,
         task->toolchain_capsule_root, task->write_scope_root,
@@ -57,11 +71,23 @@ enum vcs_zcode_dev_error vcs_zcode_task_validate(
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error task_validate_capabilities(
+    const struct vcs_zcode_task_v1 *task)
+{
     const uint32_t required = VCS_ZCODE_TASK_CAP_SOURCE_READ |
                               VCS_ZCODE_TASK_CAP_CANDIDATE_WRITE;
     if ((task->capabilities & required) != required ||
         (task->capabilities & ~VCS_ZCODE_TASK_CAP_V1_MASK) != 0)
         return VCS_ZCODE_DEV_ERR_CAPABILITY;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error task_validate_limits(
+    const struct vcs_zcode_task_v1 *task)
+{
     if (task->max_changed_files == 0 || task->max_changed_files > 4096 ||
         task->max_patch_bytes == 0 ||
         task->max_patch_bytes > VCS_ZCODE_TASK_MAX_PATCH_BYTES ||
@@ -73,6 +99,21 @@ enum vcs_zcode_dev_error vcs_zcode_task_validate(
         task->max_output_bytes == 0 ||
         task->max_output_bytes > VCS_ZCODE_TASK_MAX_OUTPUT_BYTES)
         return VCS_ZCODE_DEV_ERR_LIMIT;
+    return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_task_validate(
+    const struct vcs_zcode_task_v1 *task)
+{
+    if (!task) return VCS_ZCODE_DEV_ERR_NULL;
+    if (task->schema_version != VCS_ZCODE_DEV_VERSION)
+        return VCS_ZCODE_DEV_ERR_VERSION;
+    enum vcs_zcode_dev_error err = task_validate_roots(task);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    err = task_validate_capabilities(task);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    err = task_validate_limits(task);
+    if (err != VCS_ZCODE_DEV_OK) return err;
     if (task->expires_unix <= 0) return VCS_ZCODE_DEV_ERR_EXPIRY;
     return VCS_ZCODE_DEV_OK;
 }
@@ -92,12 +133,9 @@ static bool required_count(uint32_t proofs, uint32_t bit, uint16_t count)
     return (proofs & bit) ? count > 0 : count == 0;
 }
 
-enum vcs_zcode_dev_error vcs_zcode_proof_policy_validate(
+static enum vcs_zcode_dev_error proof_policy_validate_counts(
     const struct vcs_zcode_proof_policy_v1 *policy)
 {
-    if (!policy) return VCS_ZCODE_DEV_ERR_NULL;
-    if (policy->schema_version != VCS_ZCODE_DEV_VERSION)
-        return VCS_ZCODE_DEV_ERR_VERSION;
     if (policy->required_proofs == 0 ||
         (policy->required_proofs & ~VCS_ZCODE_PROOF_V1_MASK) != 0 ||
         (policy->flags & ~VCS_ZCODE_POLICY_V1_FLAG_MASK) != 0 ||
@@ -108,8 +146,15 @@ enum vcs_zcode_dev_error vcs_zcode_proof_policy_validate(
         !required_count(policy->required_proofs, VCS_ZCODE_PROOF_FUZZ,
                         policy->minimum_fuzz_receipts) ||
         !required_count(policy->required_proofs, VCS_ZCODE_PROOF_REVIEW,
-                        policy->minimum_reviews) ||
-        policy->minimum_matching_receipts == 0 ||
+                        policy->minimum_reviews))
+        return VCS_ZCODE_DEV_ERR_POLICY;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error proof_policy_validate_limits(
+    const struct vcs_zcode_proof_policy_v1 *policy)
+{
+    if (policy->minimum_matching_receipts == 0 ||
         policy->minimum_matching_receipts > 64 ||
         policy->audit_basis_points > 10000 ||
         policy->maximum_proof_age_seconds == 0 ||
@@ -118,6 +163,17 @@ enum vcs_zcode_dev_error vcs_zcode_proof_policy_validate(
             (policy->deterministic_fuzz_seeds > 0))
         return VCS_ZCODE_DEV_ERR_POLICY;
     return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_proof_policy_validate(
+    const struct vcs_zcode_proof_policy_v1 *policy)
+{
+    if (!policy) return VCS_ZCODE_DEV_ERR_NULL;
+    if (policy->schema_version != VCS_ZCODE_DEV_VERSION)
+        return VCS_ZCODE_DEV_ERR_VERSION;
+    enum vcs_zcode_dev_error err = proof_policy_validate_counts(policy);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    return proof_policy_validate_limits(policy);
 }
 
 enum vcs_zcode_dev_error vcs_zcode_candidate_validate(
@@ -163,12 +219,9 @@ enum vcs_zcode_dev_error vcs_zcode_review_validate(
     return VCS_ZCODE_DEV_OK;
 }
 
-static enum vcs_zcode_dev_error receipt_fields(
-    const struct vcs_zcode_work_receipt_v1 *receipt, bool require_signature)
+static enum vcs_zcode_dev_error receipt_check_roots(
+    const struct vcs_zcode_work_receipt_v1 *receipt)
 {
-    if (!receipt) return VCS_ZCODE_DEV_ERR_NULL;
-    if (receipt->schema_version != VCS_ZCODE_DEV_VERSION)
-        return VCS_ZCODE_DEV_ERR_VERSION;
     const uint8_t *roots[] = {
         receipt->task_root, receipt->candidate_root, receipt->action_root,
         receipt->input_root, receipt->output_root,
@@ -179,6 +232,12 @@ static enum vcs_zcode_dev_error receipt_fields(
         if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
     if (!zcl_bytes_any_set(receipt->signer_pubkey, 32))
         return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error receipt_check_status(
+    const struct vcs_zcode_work_receipt_v1 *receipt, bool require_signature)
+{
     if (receipt->work_kind < VCS_ZCODE_WORK_PROPOSE ||
         receipt->work_kind > VCS_ZCODE_WORK_APP_RUN)
         return VCS_ZCODE_DEV_ERR_WORK_KIND;
@@ -195,10 +254,54 @@ static enum vcs_zcode_dev_error receipt_fields(
     return VCS_ZCODE_DEV_OK;
 }
 
+static enum vcs_zcode_dev_error receipt_fields(
+    const struct vcs_zcode_work_receipt_v1 *receipt, bool require_signature)
+{
+    if (!receipt) return VCS_ZCODE_DEV_ERR_NULL;
+    if (receipt->schema_version != VCS_ZCODE_DEV_VERSION)
+        return VCS_ZCODE_DEV_ERR_VERSION;
+    enum vcs_zcode_dev_error err = receipt_check_roots(receipt);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    return receipt_check_status(receipt, require_signature);
+}
+
 enum vcs_zcode_dev_error vcs_zcode_work_receipt_validate(
     const struct vcs_zcode_work_receipt_v1 *receipt)
 {
     return receipt_fields(receipt, true);
+}
+
+static bool task_write_header(struct zcl_codec_writer *w,
+                              const struct vcs_zcode_task_v1 *task)
+{
+    return zcl_codec_write_bytes(w, task_magic, sizeof(task_magic)) &&
+        zcl_codec_write_u16le(w, task->schema_version) &&
+        zcl_codec_write_bytes(w, task->source_root, 32) &&
+        zcl_codec_write_bytes(w, task->dependency_lock_root, 32) &&
+        zcl_codec_write_bytes(w, task->toolchain_capsule_root, 32) &&
+        zcl_codec_write_bytes(w, task->write_scope_root, 32);
+}
+
+static bool task_write_scope_roots(struct zcl_codec_writer *w,
+                                   const struct vcs_zcode_task_v1 *task)
+{
+    return zcl_codec_write_bytes(w, task->acceptance_tests_root, 32) &&
+        zcl_codec_write_bytes(w, task->proof_policy_root, 32) &&
+        zcl_codec_write_bytes(w, task->model_policy_root, 32) &&
+        zcl_codec_write_bytes(w, task->goal_root, 32);
+}
+
+static bool task_write_limits(struct zcl_codec_writer *w,
+                              const struct vcs_zcode_task_v1 *task)
+{
+    return zcl_codec_write_u32le(w, task->capabilities) &&
+        zcl_codec_write_u32le(w, task->max_changed_files) &&
+        zcl_codec_write_u64le(w, task->max_patch_bytes) &&
+        zcl_codec_write_u64le(w, task->max_context_bytes) &&
+        zcl_codec_write_u32le(w, task->max_cpu_seconds) &&
+        zcl_codec_write_u64le(w, task->max_memory_bytes) &&
+        zcl_codec_write_u64le(w, task->max_output_bytes) &&
+        zcl_codec_write_i64le(w, task->expires_unix);
 }
 
 enum vcs_zcode_dev_error vcs_zcode_task_serialize(
@@ -210,28 +313,45 @@ enum vcs_zcode_dev_error vcs_zcode_task_serialize(
         return out ? err : VCS_ZCODE_DEV_ERR_NULL;
     struct zcl_codec_writer w;
     zcl_codec_writer_init(&w, out, VCS_ZCODE_TASK_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&w, task_magic, sizeof(task_magic)) &&
-        zcl_codec_write_u16le(&w, task->schema_version) &&
-        zcl_codec_write_bytes(&w, task->source_root, 32) &&
-        zcl_codec_write_bytes(&w, task->dependency_lock_root, 32) &&
-        zcl_codec_write_bytes(&w, task->toolchain_capsule_root, 32) &&
-        zcl_codec_write_bytes(&w, task->write_scope_root, 32) &&
-        zcl_codec_write_bytes(&w, task->acceptance_tests_root, 32) &&
-        zcl_codec_write_bytes(&w, task->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&w, task->model_policy_root, 32) &&
-        zcl_codec_write_bytes(&w, task->goal_root, 32) &&
-        zcl_codec_write_u32le(&w, task->capabilities) &&
-        zcl_codec_write_u32le(&w, task->max_changed_files) &&
-        zcl_codec_write_u64le(&w, task->max_patch_bytes) &&
-        zcl_codec_write_u64le(&w, task->max_context_bytes) &&
-        zcl_codec_write_u32le(&w, task->max_cpu_seconds) &&
-        zcl_codec_write_u64le(&w, task->max_memory_bytes) &&
-        zcl_codec_write_u64le(&w, task->max_output_bytes) &&
-        zcl_codec_write_i64le(&w, task->expires_unix);
+    bool ok = task_write_header(&w, task) &&
+        task_write_scope_roots(&w, task) &&
+        task_write_limits(&w, task);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&w, &written) &&
            written == VCS_ZCODE_TASK_WIRE_BYTES
         ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+}
+
+static bool task_read_header(struct zcl_codec_reader *r,
+                             struct vcs_zcode_task_v1 *out)
+{
+    return zcl_codec_read_u16le(r, &out->schema_version) &&
+        zcl_codec_read_bytes(r, out->source_root, 32) &&
+        zcl_codec_read_bytes(r, out->dependency_lock_root, 32) &&
+        zcl_codec_read_bytes(r, out->toolchain_capsule_root, 32) &&
+        zcl_codec_read_bytes(r, out->write_scope_root, 32);
+}
+
+static bool task_read_scope_roots(struct zcl_codec_reader *r,
+                                  struct vcs_zcode_task_v1 *out)
+{
+    return zcl_codec_read_bytes(r, out->acceptance_tests_root, 32) &&
+        zcl_codec_read_bytes(r, out->proof_policy_root, 32) &&
+        zcl_codec_read_bytes(r, out->model_policy_root, 32) &&
+        zcl_codec_read_bytes(r, out->goal_root, 32);
+}
+
+static bool task_read_limits(struct zcl_codec_reader *r,
+                             struct vcs_zcode_task_v1 *out)
+{
+    return zcl_codec_read_u32le(r, &out->capabilities) &&
+        zcl_codec_read_u32le(r, &out->max_changed_files) &&
+        zcl_codec_read_u64le(r, &out->max_patch_bytes) &&
+        zcl_codec_read_u64le(r, &out->max_context_bytes) &&
+        zcl_codec_read_u32le(r, &out->max_cpu_seconds) &&
+        zcl_codec_read_u64le(r, &out->max_memory_bytes) &&
+        zcl_codec_read_u64le(r, &out->max_output_bytes) &&
+        zcl_codec_read_i64le(r, &out->expires_unix);
 }
 
 enum vcs_zcode_dev_error vcs_zcode_task_parse(
@@ -245,23 +365,9 @@ enum vcs_zcode_dev_error vcs_zcode_task_parse(
     struct zcl_codec_reader r;
     zcl_codec_reader_init(&r, wire + sizeof(task_magic),
                           len - sizeof(task_magic));
-    bool ok = zcl_codec_read_u16le(&r, &out->schema_version) &&
-        zcl_codec_read_bytes(&r, out->source_root, 32) &&
-        zcl_codec_read_bytes(&r, out->dependency_lock_root, 32) &&
-        zcl_codec_read_bytes(&r, out->toolchain_capsule_root, 32) &&
-        zcl_codec_read_bytes(&r, out->write_scope_root, 32) &&
-        zcl_codec_read_bytes(&r, out->acceptance_tests_root, 32) &&
-        zcl_codec_read_bytes(&r, out->proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&r, out->model_policy_root, 32) &&
-        zcl_codec_read_bytes(&r, out->goal_root, 32) &&
-        zcl_codec_read_u32le(&r, &out->capabilities) &&
-        zcl_codec_read_u32le(&r, &out->max_changed_files) &&
-        zcl_codec_read_u64le(&r, &out->max_patch_bytes) &&
-        zcl_codec_read_u64le(&r, &out->max_context_bytes) &&
-        zcl_codec_read_u32le(&r, &out->max_cpu_seconds) &&
-        zcl_codec_read_u64le(&r, &out->max_memory_bytes) &&
-        zcl_codec_read_u64le(&r, &out->max_output_bytes) &&
-        zcl_codec_read_i64le(&r, &out->expires_unix) &&
+    bool ok = task_read_header(&r, out) &&
+        task_read_scope_roots(&r, out) &&
+        task_read_limits(&r, out) &&
         zcl_codec_reader_finish(&r);
     if (!ok) { memset(out, 0, sizeof(*out)); return VCS_ZCODE_DEV_ERR_WIRE_SIZE; }
     enum vcs_zcode_dev_error err = vcs_zcode_task_validate(out);
@@ -282,6 +388,28 @@ enum vcs_zcode_dev_error vcs_zcode_task_root(
                ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
 }
 
+static bool proof_policy_write_counts(struct zcl_codec_writer *w,
+                                      const struct vcs_zcode_proof_policy_v1 *p)
+{
+    return zcl_codec_write_bytes(w, policy_magic, sizeof(policy_magic)) &&
+        zcl_codec_write_u16le(w, p->schema_version) &&
+        zcl_codec_write_u32le(w, p->required_proofs) &&
+        zcl_codec_write_u16le(w, p->minimum_compile_receipts) &&
+        zcl_codec_write_u16le(w, p->minimum_test_receipts) &&
+        zcl_codec_write_u16le(w, p->minimum_fuzz_receipts);
+}
+
+static bool proof_policy_write_limits(struct zcl_codec_writer *w,
+                                      const struct vcs_zcode_proof_policy_v1 *p)
+{
+    return zcl_codec_write_u16le(w, p->minimum_reviews) &&
+        zcl_codec_write_u16le(w, p->minimum_matching_receipts) &&
+        zcl_codec_write_u16le(w, p->flags) &&
+        zcl_codec_write_u32le(w, p->deterministic_fuzz_seeds) &&
+        zcl_codec_write_u16le(w, p->audit_basis_points) &&
+        zcl_codec_write_u32le(w, p->maximum_proof_age_seconds);
+}
+
 enum vcs_zcode_dev_error vcs_zcode_proof_policy_serialize(
     const struct vcs_zcode_proof_policy_v1 *p,
     uint8_t out[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES])
@@ -291,22 +419,33 @@ enum vcs_zcode_dev_error vcs_zcode_proof_policy_serialize(
         return out ? err : VCS_ZCODE_DEV_ERR_NULL;
     struct zcl_codec_writer w;
     zcl_codec_writer_init(&w, out, VCS_ZCODE_PROOF_POLICY_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&w, policy_magic, sizeof(policy_magic)) &&
-        zcl_codec_write_u16le(&w, p->schema_version) &&
-        zcl_codec_write_u32le(&w, p->required_proofs) &&
-        zcl_codec_write_u16le(&w, p->minimum_compile_receipts) &&
-        zcl_codec_write_u16le(&w, p->minimum_test_receipts) &&
-        zcl_codec_write_u16le(&w, p->minimum_fuzz_receipts) &&
-        zcl_codec_write_u16le(&w, p->minimum_reviews) &&
-        zcl_codec_write_u16le(&w, p->minimum_matching_receipts) &&
-        zcl_codec_write_u16le(&w, p->flags) &&
-        zcl_codec_write_u32le(&w, p->deterministic_fuzz_seeds) &&
-        zcl_codec_write_u16le(&w, p->audit_basis_points) &&
-        zcl_codec_write_u32le(&w, p->maximum_proof_age_seconds);
+    bool ok = proof_policy_write_counts(&w, p) &&
+        proof_policy_write_limits(&w, p);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&w, &written) &&
            written == VCS_ZCODE_PROOF_POLICY_WIRE_BYTES
         ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+}
+
+static bool proof_policy_read_counts(struct zcl_codec_reader *r,
+                                     struct vcs_zcode_proof_policy_v1 *out)
+{
+    return zcl_codec_read_u16le(r, &out->schema_version) &&
+        zcl_codec_read_u32le(r, &out->required_proofs) &&
+        zcl_codec_read_u16le(r, &out->minimum_compile_receipts) &&
+        zcl_codec_read_u16le(r, &out->minimum_test_receipts) &&
+        zcl_codec_read_u16le(r, &out->minimum_fuzz_receipts);
+}
+
+static bool proof_policy_read_limits(struct zcl_codec_reader *r,
+                                     struct vcs_zcode_proof_policy_v1 *out)
+{
+    return zcl_codec_read_u16le(r, &out->minimum_reviews) &&
+        zcl_codec_read_u16le(r, &out->minimum_matching_receipts) &&
+        zcl_codec_read_u16le(r, &out->flags) &&
+        zcl_codec_read_u32le(r, &out->deterministic_fuzz_seeds) &&
+        zcl_codec_read_u16le(r, &out->audit_basis_points) &&
+        zcl_codec_read_u32le(r, &out->maximum_proof_age_seconds);
 }
 
 enum vcs_zcode_dev_error vcs_zcode_proof_policy_parse(
@@ -321,17 +460,8 @@ enum vcs_zcode_dev_error vcs_zcode_proof_policy_parse(
     struct zcl_codec_reader r;
     zcl_codec_reader_init(&r, wire + sizeof(policy_magic),
                           len - sizeof(policy_magic));
-    bool ok = zcl_codec_read_u16le(&r, &out->schema_version) &&
-        zcl_codec_read_u32le(&r, &out->required_proofs) &&
-        zcl_codec_read_u16le(&r, &out->minimum_compile_receipts) &&
-        zcl_codec_read_u16le(&r, &out->minimum_test_receipts) &&
-        zcl_codec_read_u16le(&r, &out->minimum_fuzz_receipts) &&
-        zcl_codec_read_u16le(&r, &out->minimum_reviews) &&
-        zcl_codec_read_u16le(&r, &out->minimum_matching_receipts) &&
-        zcl_codec_read_u16le(&r, &out->flags) &&
-        zcl_codec_read_u32le(&r, &out->deterministic_fuzz_seeds) &&
-        zcl_codec_read_u16le(&r, &out->audit_basis_points) &&
-        zcl_codec_read_u32le(&r, &out->maximum_proof_age_seconds) &&
+    bool ok = proof_policy_read_counts(&r, out) &&
+        proof_policy_read_limits(&r, out) &&
         zcl_codec_reader_finish(&r);
     if (!ok) { memset(out, 0, sizeof(*out)); return VCS_ZCODE_DEV_ERR_WIRE_SIZE; }
     enum vcs_zcode_dev_error err = vcs_zcode_proof_policy_validate(out);
@@ -377,6 +507,27 @@ enum vcs_zcode_dev_error vcs_zcode_acceptance_plan_root(
         ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
 }
 
+static bool candidate_write_identity(struct zcl_codec_writer *w,
+                                     const struct vcs_zcode_candidate_v1 *c)
+{
+    return zcl_codec_write_bytes(w, candidate_magic,
+                                 sizeof(candidate_magic)) &&
+        zcl_codec_write_u16le(w, c->schema_version) &&
+        zcl_codec_write_bytes(w, c->task_root, 32) &&
+        zcl_codec_write_bytes(w, c->base_source_root, 32) &&
+        zcl_codec_write_bytes(w, c->patch_root, 32);
+}
+
+static bool candidate_write_metadata(struct zcl_codec_writer *w,
+                                     const struct vcs_zcode_candidate_v1 *c)
+{
+    return zcl_codec_write_bytes(w, c->candidate_source_root, 32) &&
+        zcl_codec_write_bytes(w, c->adapter_policy_root, 32) &&
+        zcl_codec_write_bytes(w, c->author_pubkey, 32) &&
+        zcl_codec_write_u64le(w, c->sequence) &&
+        zcl_codec_write_i64le(w, c->created_unix);
+}
+
 enum vcs_zcode_dev_error vcs_zcode_candidate_serialize(
     const struct vcs_zcode_candidate_v1 *c,
     uint8_t out[VCS_ZCODE_CANDIDATE_WIRE_BYTES])
@@ -386,21 +537,31 @@ enum vcs_zcode_dev_error vcs_zcode_candidate_serialize(
         return out ? err : VCS_ZCODE_DEV_ERR_NULL;
     struct zcl_codec_writer w;
     zcl_codec_writer_init(&w, out, VCS_ZCODE_CANDIDATE_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&w, candidate_magic,
-                                    sizeof(candidate_magic)) &&
-        zcl_codec_write_u16le(&w, c->schema_version) &&
-        zcl_codec_write_bytes(&w, c->task_root, 32) &&
-        zcl_codec_write_bytes(&w, c->base_source_root, 32) &&
-        zcl_codec_write_bytes(&w, c->patch_root, 32) &&
-        zcl_codec_write_bytes(&w, c->candidate_source_root, 32) &&
-        zcl_codec_write_bytes(&w, c->adapter_policy_root, 32) &&
-        zcl_codec_write_bytes(&w, c->author_pubkey, 32) &&
-        zcl_codec_write_u64le(&w, c->sequence) &&
-        zcl_codec_write_i64le(&w, c->created_unix);
+    bool ok = candidate_write_identity(&w, c) &&
+        candidate_write_metadata(&w, c);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&w, &written) &&
            written == VCS_ZCODE_CANDIDATE_WIRE_BYTES
         ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+}
+
+static bool candidate_read_identity(struct zcl_codec_reader *r,
+                                    struct vcs_zcode_candidate_v1 *out)
+{
+    return zcl_codec_read_u16le(r, &out->schema_version) &&
+        zcl_codec_read_bytes(r, out->task_root, 32) &&
+        zcl_codec_read_bytes(r, out->base_source_root, 32) &&
+        zcl_codec_read_bytes(r, out->patch_root, 32);
+}
+
+static bool candidate_read_metadata(struct zcl_codec_reader *r,
+                                    struct vcs_zcode_candidate_v1 *out)
+{
+    return zcl_codec_read_bytes(r, out->candidate_source_root, 32) &&
+        zcl_codec_read_bytes(r, out->adapter_policy_root, 32) &&
+        zcl_codec_read_bytes(r, out->author_pubkey, 32) &&
+        zcl_codec_read_u64le(r, &out->sequence) &&
+        zcl_codec_read_i64le(r, &out->created_unix);
 }
 
 enum vcs_zcode_dev_error vcs_zcode_candidate_parse(
@@ -415,15 +576,8 @@ enum vcs_zcode_dev_error vcs_zcode_candidate_parse(
     struct zcl_codec_reader r;
     zcl_codec_reader_init(&r, wire + sizeof(candidate_magic),
                           len - sizeof(candidate_magic));
-    bool ok = zcl_codec_read_u16le(&r, &out->schema_version) &&
-        zcl_codec_read_bytes(&r, out->task_root, 32) &&
-        zcl_codec_read_bytes(&r, out->base_source_root, 32) &&
-        zcl_codec_read_bytes(&r, out->patch_root, 32) &&
-        zcl_codec_read_bytes(&r, out->candidate_source_root, 32) &&
-        zcl_codec_read_bytes(&r, out->adapter_policy_root, 32) &&
-        zcl_codec_read_bytes(&r, out->author_pubkey, 32) &&
-        zcl_codec_read_u64le(&r, &out->sequence) &&
-        zcl_codec_read_i64le(&r, &out->created_unix) &&
+    bool ok = candidate_read_identity(&r, out) &&
+        candidate_read_metadata(&r, out) &&
         zcl_codec_reader_finish(&r);
     if (!ok) { memset(out, 0, sizeof(*out)); return VCS_ZCODE_DEV_ERR_WIRE_SIZE; }
     enum vcs_zcode_dev_error err = vcs_zcode_candidate_validate(out);
@@ -444,6 +598,27 @@ enum vcs_zcode_dev_error vcs_zcode_candidate_root(
                ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
 }
 
+static bool review_write_identity(struct zcl_codec_writer *w,
+                                  const struct vcs_zcode_review_v1 *r)
+{
+    return zcl_codec_write_bytes(w, review_magic, sizeof(review_magic)) &&
+        zcl_codec_write_u16le(w, r->schema_version) &&
+        zcl_codec_write_bytes(w, r->task_root, 32) &&
+        zcl_codec_write_bytes(w, r->candidate_root, 32) &&
+        zcl_codec_write_bytes(w, r->proof_policy_root, 32);
+}
+
+static bool review_write_verdict(struct zcl_codec_writer *w,
+                                 const struct vcs_zcode_review_v1 *r)
+{
+    return zcl_codec_write_bytes(w, r->proof_set_root, 32) &&
+        zcl_codec_write_bytes(w, r->findings_root, 32) &&
+        zcl_codec_write_bytes(w, r->reviewer_pubkey, 32) &&
+        zcl_codec_write_u8(w, r->verdict) &&
+        zcl_codec_write_u64le(w, r->sequence) &&
+        zcl_codec_write_i64le(w, r->created_unix);
+}
+
 enum vcs_zcode_dev_error vcs_zcode_review_serialize(
     const struct vcs_zcode_review_v1 *r,
     uint8_t out[VCS_ZCODE_REVIEW_WIRE_BYTES])
@@ -453,21 +628,31 @@ enum vcs_zcode_dev_error vcs_zcode_review_serialize(
         return out ? err : VCS_ZCODE_DEV_ERR_NULL;
     struct zcl_codec_writer w;
     zcl_codec_writer_init(&w, out, VCS_ZCODE_REVIEW_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&w, review_magic, sizeof(review_magic)) &&
-        zcl_codec_write_u16le(&w, r->schema_version) &&
-        zcl_codec_write_bytes(&w, r->task_root, 32) &&
-        zcl_codec_write_bytes(&w, r->candidate_root, 32) &&
-        zcl_codec_write_bytes(&w, r->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&w, r->proof_set_root, 32) &&
-        zcl_codec_write_bytes(&w, r->findings_root, 32) &&
-        zcl_codec_write_bytes(&w, r->reviewer_pubkey, 32) &&
-        zcl_codec_write_u8(&w, r->verdict) &&
-        zcl_codec_write_u64le(&w, r->sequence) &&
-        zcl_codec_write_i64le(&w, r->created_unix);
+    bool ok = review_write_identity(&w, r) && review_write_verdict(&w, r);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&w, &written) &&
            written == VCS_ZCODE_REVIEW_WIRE_BYTES
         ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+}
+
+static bool review_read_identity(struct zcl_codec_reader *reader,
+                                 struct vcs_zcode_review_v1 *out)
+{
+    return zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_bytes(reader, out->task_root, 32) &&
+        zcl_codec_read_bytes(reader, out->candidate_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_policy_root, 32);
+}
+
+static bool review_read_verdict(struct zcl_codec_reader *reader,
+                                struct vcs_zcode_review_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->proof_set_root, 32) &&
+        zcl_codec_read_bytes(reader, out->findings_root, 32) &&
+        zcl_codec_read_bytes(reader, out->reviewer_pubkey, 32) &&
+        zcl_codec_read_u8(reader, &out->verdict) &&
+        zcl_codec_read_u64le(reader, &out->sequence) &&
+        zcl_codec_read_i64le(reader, &out->created_unix);
 }
 
 enum vcs_zcode_dev_error vcs_zcode_review_parse(
@@ -482,16 +667,8 @@ enum vcs_zcode_dev_error vcs_zcode_review_parse(
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire + sizeof(review_magic),
                           len - sizeof(review_magic));
-    bool ok = zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_bytes(&reader, out->task_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->candidate_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_set_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->findings_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->reviewer_pubkey, 32) &&
-        zcl_codec_read_u8(&reader, &out->verdict) &&
-        zcl_codec_read_u64le(&reader, &out->sequence) &&
-        zcl_codec_read_i64le(&reader, &out->created_unix) &&
+    bool ok = review_read_identity(&reader, out) &&
+        review_read_verdict(&reader, out) &&
         zcl_codec_reader_finish(&reader);
     if (!ok) { memset(out, 0, sizeof(*out)); return VCS_ZCODE_DEV_ERR_WIRE_SIZE; }
     enum vcs_zcode_dev_error err = vcs_zcode_review_validate(out);
@@ -512,6 +689,40 @@ enum vcs_zcode_dev_error vcs_zcode_review_root(
                ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
 }
 
+static bool receipt_write_object_roots(struct zcl_codec_writer *w,
+                                       const struct vcs_zcode_work_receipt_v1 *r)
+{
+    return zcl_codec_write_bytes(w, receipt_magic,
+                                 sizeof(receipt_magic)) &&
+        zcl_codec_write_u16le(w, r->schema_version) &&
+        zcl_codec_write_bytes(w, r->task_root, 32) &&
+        zcl_codec_write_bytes(w, r->candidate_root, 32) &&
+        zcl_codec_write_bytes(w, r->action_root, 32) &&
+        zcl_codec_write_bytes(w, r->input_root, 32);
+}
+
+static bool receipt_write_evidence_roots(struct zcl_codec_writer *w,
+                                         const struct vcs_zcode_work_receipt_v1 *r)
+{
+    return zcl_codec_write_bytes(w, r->output_root, 32) &&
+        zcl_codec_write_bytes(w, r->proof_policy_root, 32) &&
+        zcl_codec_write_bytes(w, r->toolchain_capsule_root, 32) &&
+        zcl_codec_write_bytes(w, r->lease_id, 32) &&
+        zcl_codec_write_bytes(w, r->evidence_root, 32) &&
+        zcl_codec_write_bytes(w, r->confinement_root, 32);
+}
+
+static bool receipt_write_outcome(struct zcl_codec_writer *w,
+                                  const struct vcs_zcode_work_receipt_v1 *r)
+{
+    return zcl_codec_write_u8(w, r->work_kind) &&
+        zcl_codec_write_u8(w, r->status) &&
+        zcl_codec_write_i32le(w, r->exit_status) &&
+        zcl_codec_write_i64le(w, r->started_unix) &&
+        zcl_codec_write_i64le(w, r->finished_unix) &&
+        zcl_codec_write_bytes(w, r->signer_pubkey, 32);
+}
+
 static enum vcs_zcode_dev_error receipt_body(
     const struct vcs_zcode_work_receipt_v1 *r,
     uint8_t out[VCS_ZCODE_WORK_RECEIPT_BODY_BYTES])
@@ -521,25 +732,9 @@ static enum vcs_zcode_dev_error receipt_body(
         return out ? err : VCS_ZCODE_DEV_ERR_NULL;
     struct zcl_codec_writer w;
     zcl_codec_writer_init(&w, out, VCS_ZCODE_WORK_RECEIPT_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&w, receipt_magic,
-                                    sizeof(receipt_magic)) &&
-        zcl_codec_write_u16le(&w, r->schema_version) &&
-        zcl_codec_write_bytes(&w, r->task_root, 32) &&
-        zcl_codec_write_bytes(&w, r->candidate_root, 32) &&
-        zcl_codec_write_bytes(&w, r->action_root, 32) &&
-        zcl_codec_write_bytes(&w, r->input_root, 32) &&
-        zcl_codec_write_bytes(&w, r->output_root, 32) &&
-        zcl_codec_write_bytes(&w, r->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&w, r->toolchain_capsule_root, 32) &&
-        zcl_codec_write_bytes(&w, r->lease_id, 32) &&
-        zcl_codec_write_bytes(&w, r->evidence_root, 32) &&
-        zcl_codec_write_bytes(&w, r->confinement_root, 32) &&
-        zcl_codec_write_u8(&w, r->work_kind) &&
-        zcl_codec_write_u8(&w, r->status) &&
-        zcl_codec_write_i32le(&w, r->exit_status) &&
-        zcl_codec_write_i64le(&w, r->started_unix) &&
-        zcl_codec_write_i64le(&w, r->finished_unix) &&
-        zcl_codec_write_bytes(&w, r->signer_pubkey, 32);
+    bool ok = receipt_write_object_roots(&w, r) &&
+        receipt_write_evidence_roots(&w, r) &&
+        receipt_write_outcome(&w, r);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&w, &written) &&
            written == VCS_ZCODE_WORK_RECEIPT_BODY_BYTES
@@ -560,6 +755,39 @@ enum vcs_zcode_dev_error vcs_zcode_work_receipt_serialize(
     return VCS_ZCODE_DEV_OK;
 }
 
+static bool receipt_read_object_roots(struct zcl_codec_reader *reader,
+                                      struct vcs_zcode_work_receipt_v1 *out)
+{
+    return zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_bytes(reader, out->task_root, 32) &&
+        zcl_codec_read_bytes(reader, out->candidate_root, 32) &&
+        zcl_codec_read_bytes(reader, out->action_root, 32) &&
+        zcl_codec_read_bytes(reader, out->input_root, 32);
+}
+
+static bool receipt_read_evidence_roots(struct zcl_codec_reader *reader,
+                                        struct vcs_zcode_work_receipt_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->output_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_policy_root, 32) &&
+        zcl_codec_read_bytes(reader, out->toolchain_capsule_root, 32) &&
+        zcl_codec_read_bytes(reader, out->lease_id, 32) &&
+        zcl_codec_read_bytes(reader, out->evidence_root, 32) &&
+        zcl_codec_read_bytes(reader, out->confinement_root, 32);
+}
+
+static bool receipt_read_outcome(struct zcl_codec_reader *reader,
+                                 struct vcs_zcode_work_receipt_v1 *out)
+{
+    return zcl_codec_read_u8(reader, &out->work_kind) &&
+        zcl_codec_read_u8(reader, &out->status) &&
+        zcl_codec_read_i32le(reader, &out->exit_status) &&
+        zcl_codec_read_i64le(reader, &out->started_unix) &&
+        zcl_codec_read_i64le(reader, &out->finished_unix) &&
+        zcl_codec_read_bytes(reader, out->signer_pubkey, 32) &&
+        zcl_codec_read_bytes(reader, out->signature, 64);
+}
+
 enum vcs_zcode_dev_error vcs_zcode_work_receipt_parse(
     const uint8_t *wire, size_t len, struct vcs_zcode_work_receipt_v1 *out)
 {
@@ -572,24 +800,9 @@ enum vcs_zcode_dev_error vcs_zcode_work_receipt_parse(
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire + sizeof(receipt_magic),
                           len - sizeof(receipt_magic));
-    bool ok = zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_bytes(&reader, out->task_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->candidate_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->action_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->input_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->output_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->toolchain_capsule_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->lease_id, 32) &&
-        zcl_codec_read_bytes(&reader, out->evidence_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->confinement_root, 32) &&
-        zcl_codec_read_u8(&reader, &out->work_kind) &&
-        zcl_codec_read_u8(&reader, &out->status) &&
-        zcl_codec_read_i32le(&reader, &out->exit_status) &&
-        zcl_codec_read_i64le(&reader, &out->started_unix) &&
-        zcl_codec_read_i64le(&reader, &out->finished_unix) &&
-        zcl_codec_read_bytes(&reader, out->signer_pubkey, 32) &&
-        zcl_codec_read_bytes(&reader, out->signature, 64) &&
+    bool ok = receipt_read_object_roots(&reader, out) &&
+        receipt_read_evidence_roots(&reader, out) &&
+        receipt_read_outcome(&reader, out) &&
         zcl_codec_reader_finish(&reader);
     if (!ok) { memset(out, 0, sizeof(*out)); return VCS_ZCODE_DEV_ERR_WIRE_SIZE; }
     enum vcs_zcode_dev_error err = vcs_zcode_work_receipt_validate(out);
@@ -683,23 +896,19 @@ enum vcs_zcode_dev_error vcs_zcode_review_validate_for_candidate(
     return VCS_ZCODE_DEV_OK;
 }
 
-enum vcs_zcode_dev_error vcs_zcode_work_receipt_validate_for_candidate(
+static enum vcs_zcode_dev_error receipt_check_roots_for_candidate(
     const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
-    const struct vcs_zcode_work_receipt_v1 *receipt, int64_t now)
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    uint8_t candidate_root_out[32], int64_t now)
 {
-    enum vcs_zcode_dev_error err =
-        vcs_zcode_candidate_validate_for_task(task, candidate, now);
-    if (err != VCS_ZCODE_DEV_OK) return err;
-    err = vcs_zcode_work_receipt_validate(receipt);
-    if (err != VCS_ZCODE_DEV_OK) return err;
-    uint8_t task_root[32], candidate_root[32];
+    uint8_t task_root[32];
     if (vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
         memcmp(receipt->task_root, task_root, 32) != 0)
         return VCS_ZCODE_DEV_ERR_TASK_MISMATCH;
-    if (vcs_zcode_candidate_root(candidate, candidate_root) !=
+    if (vcs_zcode_candidate_root(candidate, candidate_root_out) !=
             VCS_ZCODE_DEV_OK ||
-        memcmp(receipt->candidate_root, candidate_root, 32) != 0)
+        memcmp(receipt->candidate_root, candidate_root_out, 32) != 0)
         return VCS_ZCODE_DEV_ERR_OUTPUT_MISMATCH;
     if (memcmp(receipt->proof_policy_root, task->proof_policy_root, 32) != 0)
         return VCS_ZCODE_DEV_ERR_POLICY_MISMATCH;
@@ -709,6 +918,14 @@ enum vcs_zcode_dev_error vcs_zcode_work_receipt_validate_for_candidate(
     if (receipt->finished_unix >= task->expires_unix ||
         receipt->finished_unix > now)
         return VCS_ZCODE_DEV_ERR_EXPIRY;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error receipt_check_work_kind_inputs(
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const uint8_t candidate_root[32])
+{
     /* Build/test/fuzz/reproduce inputs are fixed-action artifacts (for V1,
      * the preprocessed TU), so their exact root is action-bound and cannot be
      * inferred from the candidate tree root here. Proposals and reviews have
@@ -723,4 +940,21 @@ enum vcs_zcode_dev_error vcs_zcode_work_receipt_validate_for_candidate(
         memcmp(receipt->output_root, candidate_root, 32) != 0)
         return VCS_ZCODE_DEV_ERR_OUTPUT_MISMATCH;
     return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_work_receipt_validate_for_candidate(
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_work_receipt_v1 *receipt, int64_t now)
+{
+    enum vcs_zcode_dev_error err =
+        vcs_zcode_candidate_validate_for_task(task, candidate, now);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    err = vcs_zcode_work_receipt_validate(receipt);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    uint8_t candidate_root[32];
+    err = receipt_check_roots_for_candidate(task, candidate, receipt,
+                                            candidate_root, now);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    return receipt_check_work_kind_inputs(task, receipt, candidate_root);
 }
