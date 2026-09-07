@@ -5330,6 +5330,9 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_generated_artifact_contradictions_workers.c \
     tools/lint/lintc/gate_model_column_drift.c \
     tools/lint/lintc/gate_model_column_drift_workers.c \
+    tools/lint/lintc/gate_thread_supervision.c \
+    tools/lint/lintc/gate_thread_supervision_scan.c \
+    tools/lint/lintc/gate_thread_supervision_workers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12226,7 +12229,7 @@ check-supervisor-domain: $(LINTC_TOOL)
 # (via util/thread_liveness.h, supervisor_register{,_in_domain}, or a
 # // supervised: marker), explicitly exempted (// thread-supervision-ok:), or
 # baselined in tools/lint/thread_supervision_baseline.txt (shrink-only).
-check-thread-supervision:
+check-thread-supervision: $(LINTC_TOOL)
 	@echo "→ Gate #23: thread_supervision"
 	@./tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh
 

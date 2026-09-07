@@ -318,5 +318,7 @@ int check_generated_artifact_contradictions_run(int argc, char **argv);
 int check_generated_artifact_contradictions_selftest(void);
 int check_model_column_drift_run(int argc, char **argv);
 int check_model_column_drift_selftest(void);
+int check_thread_supervision_run(int argc, char **argv);
+int check_thread_supervision_selftest(void);
 
 #endif

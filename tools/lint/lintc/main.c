@@ -132,6 +132,8 @@ static const struct lint_gate k_gates[] = {
       check_generated_artifact_contradictions_selftest },
     { "check-model-column-drift", check_model_column_drift_run,
       check_model_column_drift_selftest },
+    { "check-thread-supervision", check_thread_supervision_run,
+      check_thread_supervision_selftest },
 };
 
 int main(int argc, char **argv)
