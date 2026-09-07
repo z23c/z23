@@ -1,14 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: private declarations shared between the native `zcode work run`
  * command siblings (native_zcode_work_run_command.c,
- * native_zcode_work_run_deps.c and native_zcode_work_run_packet.c). Nothing
- * here is a public API: every symbol is a static-linkage-turned-internal-
- * linkage helper reused across exactly these sibling translation units,
- * never included elsewhere. */
+ * native_zcode_work_run_deps.c, native_zcode_work_run_packet.c and
+ * native_zcode_work_run_preflight.c). Nothing here is a public API: every
+ * symbol is a static-linkage-turned-internal-linkage helper reused across
+ * exactly these sibling translation units, never included elsewhere. */
 #ifndef ZCL_NATIVE_ZCODE_WORK_RUN_PRIV_H
 #define ZCL_NATIVE_ZCODE_WORK_RUN_PRIV_H
 
 #include "json/json.h"
+#include "vcs/zcode_agent_context.h"
+#include "vcs/zcode_dev.h"
+#include "vcs/zcode_task_index.h"
+#include "vcs/zcode_write_scope.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -74,5 +78,53 @@ bool run_packet(struct json_value *packet, const char *goal,
                 const struct vcs_zcode_agent_context_v1 *context,
                 const struct vcs_zcode_write_scope_v1 *scope,
                 char detail[256]);
+
+/* One reload of the exact verified task a selector names: the task index,
+ * the chosen task and context entries, and the task, goal, agent context and
+ * write scope reloaded from canonical CAS bytes.  Each handler applies its
+ * own admission rules to these facts, and every exit path releases the
+ * selection through run_selection_free().
+ * (native_zcode_work_run_command.c) */
+struct run_selection {
+    struct vcs_zcode_task_index *index;
+    const struct vcs_zcode_task_index_entry *entry;
+    const struct vcs_zcode_task_context_entry *context_entry;
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_agent_context_v1 context;
+    struct vcs_zcode_write_scope_v1 scope;
+    enum vcs_zcode_agent_context_result context_admission;
+    char *goal;
+    bool ambiguous;
+    bool context_ambiguous;
+};
+
+void run_selection_init(struct run_selection *selection);
+void run_selection_free(struct run_selection *selection);
+const struct vcs_zcode_task_index_entry *run_resolve(
+    const struct vcs_zcode_task_index *index, const char *work,
+    bool *ambiguous);
+bool run_load_task(const char *workspace, const char *root_hex,
+                   struct vcs_zcode_task_v1 *task);
+char *run_load_goal(const char *workspace,
+                    const struct vcs_zcode_task_v1 *task);
+bool run_load_context(
+    const char *workspace, const struct vcs_zcode_task_context_entry *entry,
+    const struct vcs_zcode_task_v1 *task, const char *task_root_hex,
+    struct vcs_zcode_agent_context_v1 *context,
+    enum vcs_zcode_agent_context_result *admission);
+bool run_load_scope(const char *workspace,
+                    const struct vcs_zcode_task_v1 *task,
+                    struct vcs_zcode_write_scope_v1 *scope);
+
+/* Typed refusal rendering shared by the run and preflight handlers
+ * (native_zcode_work_run_command.c). */
+struct zcl_command_reply;
+void run_fail(struct zcl_command_reply *reply, const char *code,
+              const char *phase, const char *detail, bool retryable,
+              bool mutated);
+
+/* Fixed confined Codex adapter readiness
+ * (native_zcode_work_run_preflight.c). */
+bool run_codex_runner_path(char out[ZWORK_RUN_PATH_MAX]);
 
 #endif

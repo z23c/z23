@@ -8,9 +8,7 @@
 #include "base/log_macros.h"
 #include "config/runtime.h"
 #include "json/json.h"
-#include "platform/os_proc.h"
 #include "platform/directory_compat.h"
-#include "platform/positioned_file.h"
 #include "platform/time_compat.h"
 #include "models/build_proof_event.h"
 #include "models/database.h"
@@ -21,7 +19,6 @@
 #include "util/file_tree_ops.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
-#include "util/clientversion.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
 #include "vcs/build_action.h"
@@ -122,9 +119,9 @@ static bool run_async_proof_pending(
     return pending;
 }
 
-static void run_fail(struct zcl_command_reply *reply, const char *code,
-                     const char *phase, const char *detail, bool retryable,
-                     bool mutated)
+void run_fail(struct zcl_command_reply *reply, const char *code,
+              const char *phase, const char *detail, bool retryable,
+              bool mutated)
 {
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_INVALID, code, phase, retryable,
@@ -149,52 +146,7 @@ static bool run_add_work_next(struct zcl_command_reply *reply,
         zcl_command_reply_add_next(reply, command, wire, reason);
 }
 
-static bool run_codex_runner_path(char out[ZWORK_RUN_PATH_MAX])
-{
-    char executable[ZWORK_RUN_PATH_MAX];
-    const char *api_key = getenv("CODEX_API_KEY");
-    const char *access_token = getenv("CODEX_ACCESS_TOKEN");
-    if ((!api_key || !api_key[0]) &&
-        (!access_token || !access_token[0]))
-        return false;
-    if ((api_key && api_key[0]) && (access_token && access_token[0]))
-        return false;
-    if (!os_proc_exe_path(executable, sizeof(executable)))
-        return false;
-    char *slash = strrchr(executable, '/');
-#if defined(_WIN32)
-    char *backslash = strrchr(executable, '\\');
-    if (!slash || (backslash && backslash > slash)) slash = backslash;
-#endif
-    if (!slash)
-        return false;
-    *slash = '\0';
-    /* The image suffix is chosen BEFORE the call: _FORTIFY_SOURCE makes
-     * snprintf a macro, and a preprocessor directive between a macro's
-     * parentheses is undefined behaviour. */
-#if defined(_WIN32)
-    const char *const runner_ext = ".exe";
-#else
-    const char *const runner_ext = "";
-#endif
-    int n = snprintf(out, ZWORK_RUN_PATH_MAX,
-                     "%s/zclassic23-zcode-adapter-runner%s", executable,
-                     runner_ext);
-#if defined(_WIN32)
-    struct platform_positioned_file runner;
-    platform_positioned_file_init(&runner);
-    bool ok = n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX &&
-        platform_positioned_file_open(&runner, out) &&
-        platform_positioned_file_is_executable(&runner) &&
-        platform_positioned_file_is_current_user_only(&runner);
-    platform_positioned_file_close(&runner);
-    return ok;
-#else
-    return n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX && access(out, X_OK) == 0;
-#endif
-}
-
-static const struct vcs_zcode_task_index_entry *run_resolve(
+const struct vcs_zcode_task_index_entry *run_resolve(
     const struct vcs_zcode_task_index *index, const char *work, bool *ambiguous)
 {
     *ambiguous = false;
@@ -227,8 +179,8 @@ static const struct vcs_zcode_task_index_entry *run_resolve(
     return match;
 }
 
-static bool run_load_task(const char *workspace, const char *root_hex,
-                          struct vcs_zcode_task_v1 *task)
+bool run_load_task(const char *workspace, const char *root_hex,
+                   struct vcs_zcode_task_v1 *task)
 {
     uint8_t root[32], check[32], *wire = NULL;
     size_t len = 0;
@@ -243,8 +195,8 @@ static bool run_load_task(const char *workspace, const char *root_hex,
     return ok;
 }
 
-static char *run_load_goal(const char *workspace,
-                           const struct vcs_zcode_task_v1 *task)
+char *run_load_goal(const char *workspace,
+                    const struct vcs_zcode_task_v1 *task)
 {
     uint8_t *bytes = NULL, check[32];
     size_t len = 0;
@@ -265,7 +217,7 @@ static char *run_load_goal(const char *workspace,
     return goal;
 }
 
-static bool run_load_context(
+bool run_load_context(
     const char *workspace, const struct vcs_zcode_task_context_entry *entry,
     const struct vcs_zcode_task_v1 *task, const char *task_root_hex,
     struct vcs_zcode_agent_context_v1 *context,
@@ -291,9 +243,9 @@ static bool run_load_context(
                   *admission == VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE);
 }
 
-static bool run_load_scope(const char *workspace,
-                           const struct vcs_zcode_task_v1 *task,
-                           struct vcs_zcode_write_scope_v1 *scope)
+bool run_load_scope(const char *workspace,
+                    const struct vcs_zcode_task_v1 *task,
+                    struct vcs_zcode_write_scope_v1 *scope)
 {
     uint8_t *wire = NULL, check[32];
     size_t len = 0;
@@ -307,6 +259,26 @@ static bool run_load_scope(const char *workspace,
         memcmp(check, task->write_scope_root, 32) == 0;
     free(wire);
     return ok;
+}
+
+/* One selection owns everything a reload allocates — the task index, the goal
+ * bytes and the parsed agent context — so every exit path releases exactly
+ * the same three things. */
+void run_selection_init(struct run_selection *selection)
+{
+    memset(selection, 0, sizeof(*selection));
+    vcs_zcode_agent_context_init(&selection->context);
+    vcs_zcode_write_scope_init(&selection->scope);
+    selection->context_admission = VCS_ZCODE_AGENT_CONTEXT_NULL;
+}
+
+void run_selection_free(struct run_selection *selection)
+{
+    free(selection->goal);
+    selection->goal = NULL;
+    vcs_zcode_agent_context_free(&selection->context);
+    vcs_zcode_task_index_free(selection->index);
+    selection->index = NULL;
 }
 
 struct run_behavior_diff {
@@ -981,320 +953,6 @@ static void run_feedback_timing(
     int64_t elapsed = platform_time_monotonic_us() - started_us;
     (void)json_push_kv_int(&reply->data, "local_first_feedback_us",
                            elapsed < 0 ? 0 : elapsed);
-}
-
-struct run_adapter_preflight {
-    bool runner_structural;
-    bool runner_identity;
-    bool codex_binding;
-    bool credential;
-    bool sandbox;
-    bool packet;
-    int64_t packet_bytes;
-    char codex_artifact_sha3[65];
-    char packet_detail[256];
-};
-
-static bool run_preflight_runner_path(char out[ZWORK_RUN_PATH_MAX])
-{
-    char executable[ZWORK_RUN_PATH_MAX];
-    if (!os_proc_exe_path(executable, sizeof(executable))) return false;
-    char *slash = strrchr(executable, '/');
-#if defined(_WIN32)
-    char *backslash = strrchr(executable, '\\');
-    if (!slash || (backslash && backslash > slash)) slash = backslash;
-#endif
-    if (!slash) return false;
-    *slash = '\0';
-    /* The image suffix is chosen BEFORE the call: _FORTIFY_SOURCE makes
-     * snprintf a macro, and a preprocessor directive between a macro's
-     * parentheses is undefined behaviour. */
-#if defined(_WIN32)
-    const char *const runner_ext = ".exe";
-#else
-    const char *const runner_ext = "";
-#endif
-    int n = snprintf(out, ZWORK_RUN_PATH_MAX,
-                     "%s/zclassic23-zcode-adapter-runner%s", executable,
-                     runner_ext);
-#if defined(_WIN32)
-    struct platform_positioned_file runner;
-    platform_positioned_file_init(&runner);
-    bool ok = n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX &&
-        platform_positioned_file_open(&runner, out) &&
-        platform_positioned_file_is_executable(&runner) &&
-        platform_positioned_file_is_current_user_only(&runner);
-    platform_positioned_file_close(&runner);
-    return ok;
-#else
-    struct stat st;
-    return n > 0 && (size_t)n < ZWORK_RUN_PATH_MAX &&
-        lstat(out, &st) == 0 && S_ISREG(st.st_mode) &&
-        st.st_uid == getuid() && (st.st_mode & 0100u) != 0 &&
-        (st.st_mode & 0022u) == 0;
-#endif
-}
-
-static bool run_preflight_invoke(const char *runner, const char *verb,
-                                 char output[ZWORK_PREFLIGHT_OUTPUT_MAX])
-{
-#if defined(_WIN32)
-    (void)runner; (void)verb;
-    memset(output, 0, ZWORK_PREFLIGHT_OUTPUT_MAX);
-    return false;
-#else
-    const char *const argv[] = { runner, verb, NULL };
-    memset(output, 0, ZWORK_PREFLIGHT_OUTPUT_MAX);
-    return zcl_spawn_capture(argv, output, ZWORK_PREFLIGHT_OUTPUT_MAX,
-                             30000) == 0;
-#endif
-}
-
-static bool run_preflight_runner_identity(const char *runner)
-{
-    char output[ZWORK_PREFLIGHT_OUTPUT_MAX];
-    if (!run_preflight_invoke(runner, "--identity", output)) return false;
-    struct json_value document;
-    json_init(&document);
-    bool ok = json_read(&document, output, strlen(output)) &&
-        document.type == JSON_OBJ;
-    const char *schema = ok ? run_str(&document, "schema") : NULL;
-    const char *source = ok ? run_str(&document, "source_id") : NULL;
-    ok = schema && strcmp(schema,
-             "zcl.zcode_adapter_runner_identity.v1") == 0 && source &&
-         strcmp(source, zcl_build_source_id_sha256()) == 0;
-    json_free(&document);
-    return ok;
-}
-
-static bool run_preflight_codex_binding(
-    const char *runner, char artifact_sha3[65])
-{
-    char output[ZWORK_PREFLIGHT_OUTPUT_MAX];
-    artifact_sha3[0] = '\0';
-    if (!run_preflight_invoke(runner, "--binding", output)) return false;
-    struct json_value document;
-    json_init(&document);
-    bool ok = json_read(&document, output, strlen(output)) &&
-        document.type == JSON_OBJ &&
-        json_get_bool(json_get(&document, "ready"));
-    const char *digest = ok ? run_str(&document, "artifact_sha3") : NULL;
-    ok = digest && strlen(digest) == 64u;
-    if (ok) (void)snprintf(artifact_sha3, 65, "%s", digest);
-    json_free(&document);
-    return ok;
-}
-
-static bool run_preflight_credential(void)
-{
-    const char *api_key = getenv("CODEX_API_KEY");
-    const char *access_token = getenv("CODEX_ACCESS_TOKEN");
-    bool have_api = api_key && api_key[0];
-    bool have_token = access_token && access_token[0];
-    const char *value = have_api ? api_key : access_token;
-    return have_api != have_token && value && strlen(value) <= 16384u;
-}
-
-static bool run_preflight_sandbox(const char *runner)
-{
-#if defined(_WIN32)
-    (void)runner;
-    return false;
-#else
-    char root[] = "/tmp/z23-adapter-preflight.XXXXXX";
-    if (!mkdtemp(root)) return false;
-    struct json_value packet;
-    json_init(&packet); json_set_object(&packet);
-    char packet_path[ZWORK_RUN_PATH_MAX] = {0};
-    bool staged = run_write_packet(root, &packet, packet_path);
-    json_free(&packet);
-    char output[ZWORK_PREFLIGHT_OUTPUT_MAX] = {0};
-    const char *const argv[] = {
-        runner, "--preflight", root, packet_path, NULL,
-    };
-    int rc = staged ? zcl_spawn_capture(
-        argv, output, sizeof(output), 30000) : -1;
-    bool started = false;
-    struct json_value response;
-    json_init(&response);
-    if (rc == 0 && json_read(&response, output, strlen(output)) &&
-        response.type == JSON_OBJ)
-        started = json_get_bool(json_get(&response, "sandbox_started")) &&
-            !json_get_bool(json_get(&response, "model_request_attempted"));
-    json_free(&response);
-    struct zcl_result removed = zcl_tree_remove(root);
-    return started && removed.ok;
-#endif
-}
-
-static bool run_preflight_packet(
-    const struct zcl_command_request *request, int64_t *bytes_out,
-    char detail[256])
-{
-    const char *workspace_arg = run_str(request->input, "workspace");
-    const char *work = run_str(request->input, "work");
-    const char *datadir_arg = run_str(request->input, "datadir");
-    if (!workspace_arg || !workspace_arg[0]) workspace_arg = ".";
-    char workspace[ZWORK_RUN_PATH_MAX], datadir[ZWORK_RUN_PATH_MAX] = {0};
-    if (!platform_directory_canonical_real(workspace_arg, workspace,
-                                           sizeof(workspace))) {
-        (void)snprintf(detail, 256,
-                       "workspace must resolve to an existing directory");
-        return false;
-    }
-    if (datadir_arg && datadir_arg[0] &&
-        !platform_directory_canonical_real(datadir_arg, datadir,
-                                           sizeof(datadir))) {
-        (void)snprintf(detail, 256,
-                       "datadir must resolve to an existing node directory");
-        return false;
-    }
-    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(
-        workspace, platform_time_wall_unix());
-    bool ambiguous = false, context_ambiguous = false;
-    const struct vcs_zcode_task_index_entry *entry = index
-        ? run_resolve(index, work, &ambiguous) : NULL;
-    const struct vcs_zcode_task_context_entry *context_entry = entry
-        ? vcs_zcode_task_index_context_for_task(
-              index, entry->task_root_hex, &context_ambiguous) : NULL;
-    struct vcs_zcode_task_v1 task;
-    struct vcs_zcode_agent_context_v1 context;
-    vcs_zcode_agent_context_init(&context);
-    struct vcs_zcode_write_scope_v1 scope;
-    vcs_zcode_write_scope_init(&scope);
-    enum vcs_zcode_agent_context_result context_admission =
-        VCS_ZCODE_AGENT_CONTEXT_NULL;
-    char *goal = NULL;
-    bool loaded = entry && context_entry && !ambiguous &&
-        !context_ambiguous && !entry->expired &&
-        run_load_task(workspace, entry->task_root_hex, &task) &&
-        (goal = run_load_goal(workspace, &task)) != NULL &&
-        run_load_context(workspace, context_entry, &task,
-                         entry->task_root_hex, &context,
-                         &context_admission) &&
-        context_admission == VCS_ZCODE_AGENT_CONTEXT_OK &&
-        run_load_scope(workspace, &task, &scope);
-    struct json_value packet;
-    json_init(&packet);
-    bool ready = loaded && run_packet(
-        &packet, goal, workspace, datadir, &task, &context, &scope, detail);
-    size_t bytes = ready ? json_write(&packet, NULL, 0) : 0;
-    ready = ready && bytes > 0 && bytes <= ZWORK_ADAPTER_PACKET_MAX;
-    if (ready) *bytes_out = (int64_t)bytes;
-    if (!loaded)
-        (void)snprintf(detail, 256, "%s",
-            entry && entry->expired ? "task expired; start new bounded work" :
-            context_ambiguous ? "task has multiple verified contexts" :
-            ambiguous ? "work selector is ambiguous" :
-            "verified task, goal and unique context are required");
-    json_free(&packet);
-    free(goal); vcs_zcode_agent_context_free(&context);
-    vcs_zcode_task_index_free(index);
-    return ready;
-}
-
-static const char *run_preflight_primary(
-    const struct run_adapter_preflight *state, const char **current,
-    const char **next, bool *human)
-{
-    *human = true;
-    if (!state->runner_structural || !state->runner_identity) {
-        *current = state->runner_structural ? "runner_source_mismatch"
-                                            : "runner_unavailable";
-        *next = "make zclassic23-zcode-adapter-runner";
-        return "ADAPTER_RUNNER_UNBOUND";
-    }
-    if (!state->codex_binding) {
-        *current = "codex_executable_unbound";
-        *next = "install one owner-approved Codex executable binding, then rerun z23 zcode work preflight";
-        return "CODEX_EXECUTABLE_UNBOUND";
-    }
-    if (!state->credential) {
-        *current = "single_run_credential_unavailable";
-        *next = "provide exactly one supported single-run Codex credential, then rerun z23 zcode work preflight";
-        return "CODEX_CREDENTIAL_UNAVAILABLE";
-    }
-    if (!state->sandbox) {
-        *current = "filesystem_sandbox_start_failed";
-        *next = "enable the required unprivileged filesystem sandbox, then rerun z23 zcode work preflight";
-        return "FILESYSTEM_SANDBOX_UNAVAILABLE";
-    }
-    if (!state->packet) {
-        *current = "bounded_packet_unavailable";
-        *next = "run z23 zcode work start for one exact goal, then rerun z23 zcode work preflight with that work id";
-        return "ADAPTER_PACKET_UNAVAILABLE";
-    }
-    *human = false;
-    *current = "ready";
-    *next = "z23 zcode work run --input='{\"workspace\":\".\",\"work\":\"latest\",\"adapter\":\"codex\"}'";
-    return "NONE";
-}
-
-void zcl_native_handle_zcode_work_preflight(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    if (!request || !reply) return;
-    struct run_adapter_preflight state = {0};
-    char runner[ZWORK_RUN_PATH_MAX] = {0};
-    state.runner_structural = run_preflight_runner_path(runner);
-    state.runner_identity = state.runner_structural &&
-        run_preflight_runner_identity(runner);
-    state.codex_binding = state.runner_structural &&
-        run_preflight_codex_binding(runner, state.codex_artifact_sha3);
-    state.credential = run_preflight_credential();
-    state.sandbox = state.runner_structural && run_preflight_sandbox(runner);
-    state.packet = run_preflight_packet(
-        request, &state.packet_bytes, state.packet_detail);
-    const char *current = NULL, *next = NULL;
-    bool human = false;
-    const char *blocker = run_preflight_primary(
-        &state, &current, &next, &human);
-    bool ready = strcmp(blocker, "NONE") == 0;
-    struct json_value checks, executable, credential, sandbox, packet;
-    json_init(&checks); json_set_object(&checks);
-    json_init(&executable); json_set_object(&executable);
-    json_init(&credential); json_set_object(&credential);
-    json_init(&sandbox); json_set_object(&sandbox);
-    json_init(&packet); json_set_object(&packet);
-    bool ok = json_push_kv_bool(&executable, "ready",
-                                state.runner_identity && state.codex_binding) &&
-        json_push_kv_bool(&executable, "runner_bound",
-                          state.runner_identity) &&
-        json_push_kv_bool(&executable, "codex_bound", state.codex_binding) &&
-        (!state.codex_artifact_sha3[0] ||
-         json_push_kv_str(&executable, "artifact_sha3",
-                          state.codex_artifact_sha3)) &&
-        json_push_kv_bool(&credential, "ready", state.credential) &&
-        json_push_kv_bool(&credential, "value_exposed", false) &&
-        json_push_kv_bool(&sandbox, "ready", state.sandbox) &&
-        json_push_kv_bool(&sandbox, "model_request_attempted", false) &&
-        json_push_kv_bool(&packet, "ready", state.packet) &&
-        json_push_kv_int(&packet, "bytes", state.packet_bytes) &&
-        (!state.packet_detail[0] ||
-         json_push_kv_str(&packet, "detail", state.packet_detail)) &&
-        json_push_kv(&checks, "executable_binding", &executable) &&
-        json_push_kv(&checks, "credential_capability", &credential) &&
-        json_push_kv(&checks, "filesystem_sandbox", &sandbox) &&
-        json_push_kv(&checks, "packet", &packet) &&
-        json_push_kv_str(&reply->data, "adapter", "codex") &&
-        json_push_kv_bool(&reply->data, "ready", ready) &&
-        json_push_kv_bool(&reply->data, "model_request_attempted", false) &&
-        json_push_kv(&reply->data, "checks", &checks) &&
-        json_push_kv_str(&reply->data, "blocker", blocker) &&
-        json_push_kv_str(&reply->data, "error_code", blocker) &&
-        json_push_kv_str(&reply->data, "current_state", current) &&
-        json_push_kv_bool(&reply->data, "retryable", !ready) &&
-        json_push_kv_bool(&reply->data, "human_action_required", human) &&
-        json_push_kv_str(&reply->data, "next_action", next);
-    json_free(&packet); json_free(&sandbox); json_free(&credential);
-    json_free(&executable); json_free(&checks);
-    if (!ok) {
-        run_fail(reply, "PREFLIGHT_OUTPUT_FAILED", "render",
-                 "adapter readiness could not be rendered", false, false);
-        return;
-    }
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
 
 void zcl_native_handle_zcode_work_run(
