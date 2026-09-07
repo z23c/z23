@@ -322,13 +322,28 @@ static bool dlrg_run_targets(const char *wt, char *transcript,
 /* One artifact path's on-disk identity — the same fields
  * tools/dev/dev_source_identity.c folds into the build plan's
  * BASE_GENERATION mutation token (inode, size, mtime, ctime), scoped here
- * to just the paths this phase can rewrite. */
+ * to just the paths this phase can rewrite.
+ *
+ * Sub-second time fields are not portable: mingw's `struct stat` carries
+ * only whole-second `st_mtime`/`st_ctime` (no `st_mtim`/`st_ctim`), and
+ * Darwin names the timespec pair `st_mtimespec`/`st_ctimespec`. Mirrors
+ * native_dev_land.c's dl_same_copy_metadata()/dl_same_file_snapshot(),
+ * which already carries this exact three-way split for the same reason:
+ * this file's tools/command home is cross-compiled for Windows by
+ * check-windows-cross-syntax, so it must build there even though the
+ * regen phase itself only ever runs on a real landing worktree (Linux or
+ * Darwin, never Windows). */
 struct dlrg_snap {
     bool exists;
     ino_t ino;
     off_t size;
+#if defined(_WIN32)
+    time_t mtime;
+    time_t ctime;
+#else
     struct timespec mtim;
     struct timespec ctim;
+#endif
 };
 
 static void dlrg_snap_capture(const char *wt, const char *rel,
@@ -345,8 +360,18 @@ static void dlrg_snap_capture(const char *wt, const char *rel,
     out->exists = true;
     out->ino = st.st_ino;
     out->size = st.st_size;
+#if defined(_WIN32)
+    out->mtime = st.st_mtime;
+    out->ctime = st.st_ctime;
+#elif defined(__APPLE__)
+    out->mtim.tv_sec = st.st_mtimespec.tv_sec;
+    out->mtim.tv_nsec = st.st_mtimespec.tv_nsec;
+    out->ctim.tv_sec = st.st_ctimespec.tv_sec;
+    out->ctim.tv_nsec = st.st_ctimespec.tv_nsec;
+#else
     out->mtim = st.st_mtim;
     out->ctim = st.st_ctim;
+#endif
 }
 
 static void dlrg_snap_all(const char *wt, struct dlrg_snap *out)
@@ -361,11 +386,16 @@ static bool dlrg_snap_eq(const struct dlrg_snap *a, const struct dlrg_snap *b)
         return false;
     if (!a->exists)
         return true;
-    return a->ino == b->ino && a->size == b->size &&
-          a->mtim.tv_sec == b->mtim.tv_sec &&
+    if (a->ino != b->ino || a->size != b->size)
+        return false;
+#if defined(_WIN32)
+    return a->mtime == b->mtime && a->ctime == b->ctime;
+#else
+    return a->mtim.tv_sec == b->mtim.tv_sec &&
           a->mtim.tv_nsec == b->mtim.tv_nsec &&
           a->ctim.tv_sec == b->ctim.tv_sec &&
           a->ctim.tv_nsec == b->ctim.tv_nsec;
+#endif
 }
 
 /* How many of the table's paths changed identity (inode/size/mtime/ctime)
