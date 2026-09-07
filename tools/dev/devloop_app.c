@@ -280,7 +280,8 @@ size_t zcl_devloop_app_plan_json(const char *repo_root, const char *app_id,
                     "\"validation_and_relationship_tests\"],"
                     "\"forbidden\":[\"consensus_mutation\",\"wallet_keys\","
                     "\"raw_storage\",\"raw_sockets\",\"boot_ownership\"],"
-                    "\"agent_next_action\":\"z23 dev app scaffold %s %s "
+                    "\"agent_next_action\":\"this command writes and "
+                    "publishes nothing; z23 dev app scaffold %s %s "
                     "writes exactly these files\"}",
                 slice->app_id, slice->app_id, slice->resource);
     zcl_devloop_app_slice_free(slice);

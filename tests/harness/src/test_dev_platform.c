@@ -1061,6 +1061,7 @@ static int test_strict_dev_app_producers(void)
         ASSERT(strstr(body, "engine/models/src/comments.c") != NULL);
         ASSERT(strstr(body, "apps/blog/models/comments.c") == NULL);
         ASSERT(strstr(body, "writes and publishes nothing") != NULL);
+        ASSERT(strstr(body, "dev app scaffold blog comments") != NULL);
         json_free(&doc);
 
         /* The old textual scraper/planner accepted both of these. The strict
