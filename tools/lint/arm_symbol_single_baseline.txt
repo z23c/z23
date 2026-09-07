@@ -67,8 +67,8 @@ core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_manifest
 core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_prepare
 core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_ready
 core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_shutdown
-engine/composition/src/boot_auto_install_bundle.c	boot_autodetect_consensus_bundle
 engine/composition/src/boot_auto_install_bundle.c	boot_auto_install_clear_failed_marker
+engine/composition/src/boot_auto_install_bundle.c	boot_autodetect_consensus_bundle
 engine/composition/src/boot_auto_install_bundle.c	boot_install_bundle_clear
 engine/composition/src/boot_auto_install_bundle.c	boot_install_bundle_consume
 engine/composition/src/boot_auto_install_bundle.c	boot_install_bundle_pending
@@ -236,3 +236,4 @@ tools/dev/devloop_process.c	zcl_devloop_process_run_test
 tools/dev/devloop_watch.c	zcl_devloop_watch
 tools/dev/devloop_watch.c	zcl_devloop_watch_mode
 tools/dev/devloop_watch.c	zcl_devloop_watch_mode_until
+tools/process_group_exec.c	main

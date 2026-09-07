@@ -27,7 +27,6 @@ nproc	tools/scripts/timings.sh	1
 nproc	tools/scripts/zcode_registry_rederive.sh	1
 nproc	tools/ship.sh	1
 sed	tools/dev/commons_journey_acceptance.sh	1
-sed	tools/lint/check_lint_gate_wiring.sh	1
 sed	tools/lint/check_published_platforms.sh	7
 sed	tools/scripts/check_doc_counts.sh	1
 sed	tools/scripts/stopwatch_artifact_symmetry_check.sh	12
