@@ -614,6 +614,12 @@ ZCL_TEST_GROUP(fleet_roles)
  * runs without double-firing, a dry run never advances it, a shrunk source
  * restarts from zero, and a field a row does not carry never matches. */
 ZCL_TEST_GROUP(fleet_triggers)
+/* The two doors another machine's signed bytes come through, and what each
+ * does when the signing key holds no role here. The group exists for the
+ * case a permission gate usually gets wrong: a process with NOTHING
+ * installed to answer must refuse, because a gate that is only closed when
+ * somebody remembered to close it is not a gate. */
+ZCL_TEST_GROUP(fleet_role_enforcement)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)
