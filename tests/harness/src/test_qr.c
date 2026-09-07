@@ -134,13 +134,51 @@ static bool finder_matches(const struct qr_matrix *matrix, uint32_t ox,
     return true;
 }
 
-int test_qr(void)
+static void qr_fill_roots(char root_a[65], char root_b[65], char tree_root[65])
 {
-    printf("\n=== qr ===\n");
-    qr_failures = 0;
-    QR_CHECK("native QR backend is compiled", qr_matrix_backend_available());
-    if (!qr_matrix_backend_available()) return qr_failures;
+    memset(root_a, 'a', 64u); root_a[64] = '\0';
+    memset(root_b, 'b', 64u); root_b[64] = '\0';
+    memset(tree_root, 'c', 64u); tree_root[64] = '\0';
+}
 
+static void qr_fill_long_table(struct zcl_present_model_v1 *long_table)
+{
+    uint32_t i;
+    zcl_present_model_init_v1(long_table, ZCL_PRESENT_MODEL_TABLE);
+    (void)snprintf(long_table->request_id, sizeof(long_table->request_id),
+                   "bounded-table-64");
+    (void)snprintf(long_table->title, sizeof(long_table->title),
+                   "Every bounded row is reachable");
+    long_table->item_count = ZCL_PRESENT_MODEL_ITEMS_MAX;
+    for (i = 0; i < long_table->item_count; i++) {
+        long_table->items[i].kind = ZCL_PRESENT_ITEM_TABLE_ROW;
+        long_table->items[i].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+        (void)snprintf(long_table->items[i].id,
+                       sizeof(long_table->items[i].id), "row-%u", i + 1u);
+        (void)snprintf(long_table->items[i].label,
+                       sizeof(long_table->items[i].label), "Owner %u", i + 1u);
+        (void)snprintf(long_table->items[i].value,
+                       sizeof(long_table->items[i].value), "Exact value %u",
+                       i + 1u);
+    }
+}
+
+static bool qr_clipboard_bmp_header_is_2x2_24bpp(const uint8_t *bmp)
+{
+    return bmp[0] == 'B' && bmp[1] == 'M' &&
+           bmp[18] == 2u && bmp[22] == 2u && bmp[28] == 24u;
+}
+
+static bool qr_clipboard_bmp_bgr_row_order(const uint8_t *bmp)
+{
+    return bmp[54] == 0x00u && bmp[55] == 0x00u && bmp[56] == 0x00u &&
+           bmp[57] == 0xffu && bmp[58] == 0xffu && bmp[59] == 0xffu &&
+           bmp[62] == 0xffu && bmp[63] == 0xffu && bmp[64] == 0xffu &&
+           bmp[65] == 0x00u && bmp[66] == 0x00u && bmp[67] == 0x00u;
+}
+
+static bool qr_case_payment_uri_encode_and_finders(void)
+{
     char why[128];
     struct qr_matrix first;
     struct qr_matrix second;
@@ -148,7 +186,7 @@ int test_qr(void)
         "zclassic:t1QRNativeC23?amount=0.01000000", &first,
         why, sizeof(why));
     QR_CHECK("payment URI encodes", encoded);
-    if (!encoded) return qr_failures;
+    if (!encoded) return false;
     QR_CHECK("matrix has a standards-shaped version width",
              first.width >= 21u && first.width <= 177u &&
              (first.width - 21u) % 4u == 0u);
@@ -191,7 +229,13 @@ int test_qr(void)
              !qr_matrix_encode("", &rejected, why, sizeof(why)));
     QR_CHECK("oversized payload is rejected",
              !qr_matrix_encode(oversized, &rejected, why, sizeof(why)));
+    qr_matrix_free(&second);
+    qr_matrix_free(&first);
+    return true;
+}
 
+static void qr_case_zclassic_window_icon(void)
+{
     uint8_t icon[ZCL_PRESENT_ZCLASSIC_ICON_RGBA_BYTES];
     QR_CHECK("canonical ZClassic window icon expands",
              zcl_present_zclassic_icon_rgba(icon, sizeof(icon)));
@@ -205,7 +249,10 @@ int test_qr(void)
     }
     QR_CHECK("canonical icon preserves brand color and transparency",
              saw_orange && saw_transparent);
+}
 
+static void qr_case_canvas_primitives(void)
+{
     uint8_t canvas_pixels[32u * 32u * 3u];
     struct zcl_present_canvas canvas;
     QR_CHECK("reusable RGB canvas initializes",
@@ -244,12 +291,26 @@ int test_qr(void)
              canvas_pixels[((size_t)19u * 32u + 8u) * 3u] == 0xc8 &&
              canvas_pixels[((size_t)20u * 32u + 20u) * 3u] == 0xc8 &&
              canvas_pixels[((size_t)16u * 32u + 20u) * 3u] == 0);
+}
+
+static void qr_case_chart_scale_maximum(void)
+{
     QR_CHECK("chart scale chooses readable overflow-safe decimal intervals",
              zcl_present_canvas_chart_scale_maximum(0u) == 1u &&
              zcl_present_canvas_chart_scale_maximum(1123394u) == 1200000u &&
              zcl_present_canvas_chart_scale_maximum(100u) == 120u &&
              zcl_present_canvas_chart_scale_maximum(UINT64_MAX) ==
                  UINT64_MAX);
+}
+
+static void qr_case_canvas_text_metrics(void)
+{
+    uint8_t canvas_pixels[32u * 32u * 3u];
+    struct zcl_present_canvas canvas;
+    const struct zcl_present_color canvas_white = {0xff, 0xff, 0xff};
+    const struct zcl_present_color canvas_orange = {0xc8, 0x70, 0x35};
+    (void)zcl_present_canvas_init(&canvas, canvas_pixels,
+                                  sizeof(canvas_pixels), 32u, 32u);
     zcl_present_canvas_clear(&canvas, canvas_white);
     zcl_present_canvas_text(&canvas, 8, 8, "Aa", 2u, 16u, canvas_orange);
     bool saw_antialias = false;
@@ -286,7 +347,11 @@ int test_qr(void)
              strong_canvas_ok &&
              memcmp(canvas_pixels, strong_pixels,
                     sizeof(canvas_pixels)) != 0);
+}
 
+static void qr_case_deposit_card(void)
+{
+    char why[128];
     struct zcl_present_model_v1 deposit_model;
     QR_CHECK("deposit payload becomes one bounded QR visual model",
              zcl_present_model_qr_from_payload_v1(
@@ -318,7 +383,11 @@ int test_qr(void)
     QR_CHECK("deposit card carries ZClassic orange branding in pixels",
              card_has_orange);
     qr_popup_card_free(&deposit_card);
+}
 
+static void qr_case_generic_qr_compositor(void)
+{
+    char why[128];
     struct zcl_present_model_v1 generic_model;
     QR_CHECK("generic payload becomes the same closed QR model shape",
              zcl_present_model_qr_from_payload_v1(
@@ -343,7 +412,13 @@ int test_qr(void)
              strcmp(qr_document.windows[0].copy_text,
                     "generic metadata") == 0);
     ui_present_document_free(&qr_document);
+}
 
+static void qr_case_presentation_clipboard_bmp(void)
+{
+    char why[128];
+    uint8_t icon[ZCL_PRESENT_ZCLASSIC_ICON_RGBA_BYTES];
+    (void)zcl_present_zclassic_icon_rgba(icon, sizeof(icon));
     static const uint8_t tiny_rgb[] = {
         0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
@@ -371,12 +446,8 @@ int test_qr(void)
     QR_CHECK("native clipboard BMP preserves dimensions and BGR row order",
              zcl_present_bitmap_encode_bmp_v1(
                  &present, bmp, sizeof(bmp), &bmp_size) &&
-             bmp[0] == 'B' && bmp[1] == 'M' &&
-             bmp[18] == 2u && bmp[22] == 2u && bmp[28] == 24u &&
-             bmp[54] == 0x00u && bmp[55] == 0x00u && bmp[56] == 0x00u &&
-             bmp[57] == 0xffu && bmp[58] == 0xffu && bmp[59] == 0xffu &&
-             bmp[62] == 0xffu && bmp[63] == 0xffu && bmp[64] == 0xffu &&
-             bmp[65] == 0x00u && bmp[66] == 0x00u && bmp[67] == 0x00u);
+             qr_clipboard_bmp_header_is_2x2_24bpp(bmp) &&
+             qr_clipboard_bmp_bgr_row_order(bmp));
     QR_CHECK("native clipboard BMP refuses a short destination",
              !zcl_present_bitmap_encode_bmp_v1(
                  &present, bmp, sizeof(bmp) - 1u, &bmp_size) &&
@@ -384,7 +455,30 @@ int test_qr(void)
     present.abi_version++;
     QR_CHECK("presentation ABI mismatch fails closed",
              !zcl_present_window_validate_v1(&present, why, sizeof(why)));
-    present.abi_version = ZCL_PRESENT_ABI_V1;
+}
+
+static void qr_case_confirmation_action_clicks(void)
+{
+    char why[128];
+    uint8_t icon[ZCL_PRESENT_ZCLASSIC_ICON_RGBA_BYTES];
+    (void)zcl_present_zclassic_icon_rgba(icon, sizeof(icon));
+    static const uint8_t tiny_rgb[] = {
+        0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+    };
+    struct zcl_present_window_v1 present = {
+        .struct_size = sizeof(present),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Presentation validation fixture",
+        .pixels = tiny_rgb,
+        .width = 2,
+        .height = 2,
+        .pixel_format = ZCL_PRESENT_RGB8,
+        .icon_rgba = icon,
+        .icon_width = ZCL_PRESENT_ZCLASSIC_ICON_WIDTH,
+        .icon_height = ZCL_PRESENT_ZCLASSIC_ICON_HEIGHT,
+        .copy_text = "fixture",
+    };
     struct zcl_present_window_event_v1 bounded_event;
     QR_CHECK("native action keys remain bounded to four",
              !zcl_present_window_run_actions_v1(
@@ -406,6 +500,10 @@ int test_qr(void)
              !zcl_present_window_action_at_v1(
                  720, 720, 1000, 720, 100, 670, 2,
                  &clicked_action));
+}
+
+static void qr_case_chart_hover(void)
+{
     static const struct zcl_present_window_hover_item_v1 hover_items[] = {
         {.x = 100u, .text = "2026-08-30\n100 lines"},
         {.x = 300u, .text = "2026-08-31\n200 lines"},
@@ -437,6 +535,10 @@ int test_qr(void)
              !zcl_present_window_hover_at_v1(
                  &hover, 720, 720, 1000, 720, 100, 300,
                  &hover_index));
+}
+
+static void qr_case_image_copy_control(void)
+{
     const struct zcl_present_window_copy_v1 copy = {
         .struct_size = sizeof(copy),
         .abi_version = ZCL_PRESENT_ABI_V1,
@@ -455,6 +557,11 @@ int test_qr(void)
                  &copy, 720, 720, 720, 720, 700, 650) &&
              !zcl_present_window_copy_at_v1(
                  &copy, 720, 720, 1000, 720, 120, 650));
+}
+
+static void qr_case_chart_keys(void)
+{
+    uint32_t hover_index = UINT32_MAX;
     QR_CHECK("chart keys step and clamp exact day selection",
              zcl_present_window_hover_step_v1(
                  1u, 3u, -7, &hover_index) && hover_index == 0u &&
@@ -472,6 +579,10 @@ int test_qr(void)
                  '-', &render_delta) && render_delta == -1 &&
              !zcl_present_window_hover_render_delta_v1(
                  'x', &render_delta));
+}
+
+static void qr_case_chart_axis_cadence(void)
+{
     QR_CHECK("chart axis cadence prefers weekly labels when they fit",
              zcl_present_canvas_axis_label_stride_v1(
                  85u, 944u, 40u, 12u) == 7u &&
@@ -492,6 +603,45 @@ int test_qr(void)
                  1u, 944u, 40u, 12u) == 7u &&
              zcl_present_canvas_axis_label_stride_v1(
                  512u, 40u, 40u, 12u) == 365u);
+}
+
+static void qr_case_chart_rendering_page_bound(void)
+{
+    char why[128];
+    uint8_t icon[ZCL_PRESENT_ZCLASSIC_ICON_RGBA_BYTES];
+    (void)zcl_present_zclassic_icon_rgba(icon, sizeof(icon));
+    static const uint8_t tiny_rgb[] = {
+        0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+    };
+    struct zcl_present_window_v1 present = {
+        .struct_size = sizeof(present),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Presentation validation fixture",
+        .pixels = tiny_rgb,
+        .width = 2,
+        .height = 2,
+        .pixel_format = ZCL_PRESENT_RGB8,
+        .icon_rgba = icon,
+        .icon_width = ZCL_PRESENT_ZCLASSIC_ICON_WIDTH,
+        .icon_height = ZCL_PRESENT_ZCLASSIC_ICON_HEIGHT,
+        .copy_text = "fixture",
+    };
+    static const struct zcl_present_window_hover_item_v1 hover_items[] = {
+        {.x = 100u, .text = "2026-08-30\n100 lines"},
+        {.x = 300u, .text = "2026-08-31\n200 lines"},
+        {.x = 500u, .text = "2026-09-01\n300 lines"},
+    };
+    const struct zcl_present_window_hover_v1 hover = {
+        .struct_size = sizeof(hover),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .plot_left = 80u,
+        .plot_top = 100u,
+        .plot_right = 520u,
+        .plot_bottom = 600u,
+        .items = hover_items,
+        .item_count = 3u,
+    };
     const struct zcl_present_window_pages_v1 hover_pages = {
         .struct_size = sizeof(hover_pages),
         .abi_version = ZCL_PRESENT_ABI_V1,
@@ -502,6 +652,11 @@ int test_qr(void)
              !zcl_present_window_run_pages_hover_v1(
                  &hover_pages, &hover, 1u, why, sizeof(why)) &&
              strstr(why, "initial page") != NULL);
+}
+
+static void qr_case_shared_qr_model_rejects(void)
+{
+    char why[128];
     struct zcl_present_model_v1 rejected_qr;
     QR_CHECK("shared QR model rejects an empty payload",
              !zcl_present_model_qr_from_payload_v1(
@@ -513,6 +668,12 @@ int test_qr(void)
              !zcl_present_model_qr_from_payload_v1(
                  oversized_qr, "Oversized", &rejected_qr,
                  why, sizeof(why)));
+}
+
+static void qr_case_maximum_qr_chunks(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 rejected_qr;
     char max_qr[ZCL_QR_MAX_PAYLOAD + 1u];
     memset(max_qr, 'q', sizeof(max_qr) - 1u);
     max_qr[sizeof(max_qr) - 1u] = '\0';
@@ -524,6 +685,17 @@ int test_qr(void)
              zcl_present_model_qr_payload_v1(
                  &rejected_qr, recovered_qr, why, sizeof(why)) &&
              strcmp(recovered_qr, max_qr) == 0);
+}
+
+static void qr_case_qr_text_companion_pages(void)
+{
+    char why[128];
+    char max_qr[ZCL_QR_MAX_PAYLOAD + 1u];
+    memset(max_qr, 'q', sizeof(max_qr) - 1u);
+    max_qr[sizeof(max_qr) - 1u] = '\0';
+    struct zcl_present_model_v1 rejected_qr;
+    (void)zcl_present_model_qr_from_payload_v1(
+        max_qr, "Maximum", &rejected_qr, why, sizeof(why));
     char qr_text[ZCL_PRESENT_MODEL_TEXT_MAX];
     size_t qr_text_len = 0;
     uint32_t qr_text_pages = 0;
@@ -545,6 +717,19 @@ int test_qr(void)
                  &rejected_qr, ZCL_PRESENT_MODEL_QR_CHUNKS_MAX,
                  qr_text, sizeof(qr_text), &qr_text_len, &qr_text_pages,
                  why, sizeof(why)));
+}
+
+static void qr_case_qr_text_export_and_backend(void)
+{
+    char why[128];
+    char max_qr[ZCL_QR_MAX_PAYLOAD + 1u];
+    memset(max_qr, 'q', sizeof(max_qr) - 1u);
+    max_qr[sizeof(max_qr) - 1u] = '\0';
+    struct zcl_present_model_v1 rejected_qr;
+    (void)zcl_present_model_qr_from_payload_v1(
+        max_qr, "Maximum", &rejected_qr, why, sizeof(why));
+    char qr_text[ZCL_PRESENT_MODEL_TEXT_MAX];
+    size_t qr_text_len = 0;
     QR_CHECK("complete QR text export joins every exact payload chunk",
              zcl_present_model_text_all_v1(
                  &rejected_qr, qr_text, sizeof(qr_text), &qr_text_len,
@@ -561,7 +746,11 @@ int test_qr(void)
     QR_CHECK("presentation uses stable desktop application identity",
              strcmp(ZCL_PRESENT_APPLICATION_ID,
                     "org.zclassic.ZClassic23") == 0);
+}
 
+static void qr_case_progress_model(void)
+{
+    char why[128];
     struct zcl_present_model_v1 visual;
     zcl_present_model_init_v1(&visual, ZCL_PRESENT_MODEL_PROGRESS);
     (void)snprintf(visual.request_id, sizeof(visual.request_id),
@@ -610,7 +799,11 @@ int test_qr(void)
              strstr(visual_text, "progress: 7/10") != NULL &&
              strstr(visual_text, "action 1: close") != NULL &&
              strstr(visual_text, "authority: display-only") != NULL);
+}
 
+static void qr_case_chart_model(void)
+{
+    char why[128];
     struct zcl_present_model_v1 chart;
     zcl_present_model_init_v1(&chart, ZCL_PRESENT_MODEL_CHART);
     (void)snprintf(chart.request_id, sizeof(chart.request_id),
@@ -659,7 +852,11 @@ int test_qr(void)
     QR_CHECK("zero-scale chart data fails closed",
              !zcl_present_model_validate_v1(&chart, why, sizeof(why)) &&
              strstr(why, "chart-point fraction") != NULL);
+}
 
+static void qr_case_timeline_model(void)
+{
+    char why[128];
     struct zcl_present_model_v1 timeline;
     zcl_present_model_init_v1(&timeline, ZCL_PRESENT_MODEL_TIMELINE);
     (void)snprintf(timeline.request_id, sizeof(timeline.request_id),
@@ -697,7 +894,11 @@ int test_qr(void)
                     ZCL_PRESENT_MODEL_BITMAP_BYTES) != 0);
     zcl_present_model_bitmap_free_v1(&timeline_pixels);
     zcl_present_model_bitmap_free_v1(&row_pixels);
+}
 
+static void qr_case_evidence_graph(void)
+{
+    char why[128];
     struct zcl_present_model_v1 graph;
     zcl_present_model_init_v1(&graph, ZCL_PRESENT_MODEL_EVIDENCE_GRAPH);
     (void)snprintf(graph.request_id, sizeof(graph.request_id),
@@ -750,7 +951,11 @@ int test_qr(void)
     QR_CHECK("forward evidence-graph parent fails closed",
              !zcl_present_model_validate_v1(&graph, why, sizeof(why)) &&
              strstr(why, "earlier graph node") != NULL);
+}
 
+static void qr_case_choice_model(void)
+{
+    char why[128];
     struct zcl_present_model_v1 choice;
     zcl_present_model_init_v1(&choice, ZCL_PRESENT_MODEL_CHOICE);
     (void)snprintf(choice.request_id, sizeof(choice.request_id),
@@ -811,7 +1016,11 @@ int test_qr(void)
     QR_CHECK("choice/action ID drift fails closed",
              !zcl_present_model_validate_v1(&choice, why, sizeof(why)) &&
              strstr(why, "matching select actions") != NULL);
+}
 
+static void qr_case_form_model_render(void)
+{
+    char why[128];
     struct zcl_present_model_v1 form_model;
     zcl_present_model_init_v1(&form_model, ZCL_PRESENT_MODEL_FORM);
     (void)snprintf(form_model.request_id, sizeof(form_model.request_id),
@@ -871,9 +1080,48 @@ int test_qr(void)
                     ZCL_PRESENT_MODEL_BITMAP_BYTES) != 0);
     zcl_present_model_bitmap_free_v1(&form_pixels);
     zcl_present_model_bitmap_free_v1(&form_rows_pixels);
+}
 
+static void qr_case_form_bridge_and_typing(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 form_model;
+    zcl_present_model_init_v1(&form_model, ZCL_PRESENT_MODEL_FORM);
+    (void)snprintf(form_model.request_id, sizeof(form_model.request_id),
+                   "release-form");
+    (void)snprintf(form_model.title, sizeof(form_model.title),
+                   "Describe exact release");
+    memset(form_model.exact_root, 'f', ZCL_PRESENT_MODEL_ROOT_MAX);
+    form_model.exact_root[ZCL_PRESENT_MODEL_ROOT_MAX] = '\0';
+    form_model.item_count = 2;
+    form_model.items[0].kind = ZCL_PRESENT_ITEM_FORM_FIELD;
+    form_model.items[0].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    form_model.items[0].flags = ZCL_PRESENT_ITEM_REQUIRED;
+    (void)snprintf(form_model.items[0].id,
+                   sizeof(form_model.items[0].id), "release-note");
+    (void)snprintf(form_model.items[0].label,
+                   sizeof(form_model.items[0].label), "Release note");
+    form_model.items[1].kind = ZCL_PRESENT_ITEM_FORM_FIELD;
+    form_model.items[1].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    form_model.items[1].flags = ZCL_PRESENT_ITEM_READ_ONLY;
+    (void)snprintf(form_model.items[1].id,
+                   sizeof(form_model.items[1].id), "candidate-root");
+    (void)snprintf(form_model.items[1].label,
+                   sizeof(form_model.items[1].label), "Candidate root");
+    (void)snprintf(form_model.items[1].value,
+                   sizeof(form_model.items[1].value), "immutable-root");
+    form_model.action_count = 2;
+    form_model.actions[0].kind = ZCL_PRESENT_ACTION_CANCEL;
+    (void)snprintf(form_model.actions[0].id,
+                   sizeof(form_model.actions[0].id), "cancel");
+    (void)snprintf(form_model.actions[0].label,
+                   sizeof(form_model.actions[0].label), "Cancel");
+    form_model.actions[1].kind = ZCL_PRESENT_ACTION_SUBMIT;
+    (void)snprintf(form_model.actions[1].id,
+                   sizeof(form_model.actions[1].id), "submit-release-note");
+    (void)snprintf(form_model.actions[1].label,
+                   sizeof(form_model.actions[1].label), "Submit");
     struct zcl_present_window_form_v1 form_state;
-    uint32_t form_focus = UINT32_MAX;
     QR_CHECK("shared form bridge preserves exact values and field policy",
              zcl_present_window_form_from_model_v1(
                  &form_model, &form_state, why, sizeof(why)) &&
@@ -893,6 +1141,51 @@ int test_qr(void)
              form_state.fields[0].value[0] == '\0' &&
              !zcl_present_window_form_edit_v1(
                  &form_state, 1, (uint8_t)'x', false));
+}
+
+static void qr_case_form_focus(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 form_model;
+    zcl_present_model_init_v1(&form_model, ZCL_PRESENT_MODEL_FORM);
+    (void)snprintf(form_model.request_id, sizeof(form_model.request_id),
+                   "release-form");
+    (void)snprintf(form_model.title, sizeof(form_model.title),
+                   "Describe exact release");
+    memset(form_model.exact_root, 'f', ZCL_PRESENT_MODEL_ROOT_MAX);
+    form_model.exact_root[ZCL_PRESENT_MODEL_ROOT_MAX] = '\0';
+    form_model.item_count = 2;
+    form_model.items[0].kind = ZCL_PRESENT_ITEM_FORM_FIELD;
+    form_model.items[0].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    form_model.items[0].flags = ZCL_PRESENT_ITEM_REQUIRED;
+    (void)snprintf(form_model.items[0].id,
+                   sizeof(form_model.items[0].id), "release-note");
+    (void)snprintf(form_model.items[0].label,
+                   sizeof(form_model.items[0].label), "Release note");
+    form_model.items[1].kind = ZCL_PRESENT_ITEM_FORM_FIELD;
+    form_model.items[1].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    form_model.items[1].flags = ZCL_PRESENT_ITEM_READ_ONLY;
+    (void)snprintf(form_model.items[1].id,
+                   sizeof(form_model.items[1].id), "candidate-root");
+    (void)snprintf(form_model.items[1].label,
+                   sizeof(form_model.items[1].label), "Candidate root");
+    (void)snprintf(form_model.items[1].value,
+                   sizeof(form_model.items[1].value), "immutable-root");
+    form_model.action_count = 2;
+    form_model.actions[0].kind = ZCL_PRESENT_ACTION_CANCEL;
+    (void)snprintf(form_model.actions[0].id,
+                   sizeof(form_model.actions[0].id), "cancel");
+    (void)snprintf(form_model.actions[0].label,
+                   sizeof(form_model.actions[0].label), "Cancel");
+    form_model.actions[1].kind = ZCL_PRESENT_ACTION_SUBMIT;
+    (void)snprintf(form_model.actions[1].id,
+                   sizeof(form_model.actions[1].id), "submit-release-note");
+    (void)snprintf(form_model.actions[1].label,
+                   sizeof(form_model.actions[1].label), "Submit");
+    struct zcl_present_window_form_v1 form_state;
+    uint32_t form_focus = UINT32_MAX;
+    (void)zcl_present_window_form_from_model_v1(
+        &form_model, &form_state, why, sizeof(why));
     QR_CHECK("form focus skips read-only bytes then reaches both actions",
              zcl_present_window_form_focus_step_v1(
                  &form_state, 2, 0, 1, &form_focus) &&
@@ -903,7 +1196,47 @@ int test_qr(void)
              zcl_present_window_form_focus_step_v1(
                  &form_state, 2, form_focus, 1, &form_focus) &&
              form_focus == 0);
+}
 
+static void qr_case_form_submission_mutants(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 form_model;
+    zcl_present_model_init_v1(&form_model, ZCL_PRESENT_MODEL_FORM);
+    (void)snprintf(form_model.request_id, sizeof(form_model.request_id),
+                   "release-form");
+    (void)snprintf(form_model.title, sizeof(form_model.title),
+                   "Describe exact release");
+    memset(form_model.exact_root, 'f', ZCL_PRESENT_MODEL_ROOT_MAX);
+    form_model.exact_root[ZCL_PRESENT_MODEL_ROOT_MAX] = '\0';
+    form_model.item_count = 2;
+    form_model.items[0].kind = ZCL_PRESENT_ITEM_FORM_FIELD;
+    form_model.items[0].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    form_model.items[0].flags = ZCL_PRESENT_ITEM_REQUIRED;
+    (void)snprintf(form_model.items[0].id,
+                   sizeof(form_model.items[0].id), "release-note");
+    (void)snprintf(form_model.items[0].label,
+                   sizeof(form_model.items[0].label), "Release note");
+    form_model.items[1].kind = ZCL_PRESENT_ITEM_FORM_FIELD;
+    form_model.items[1].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    form_model.items[1].flags = ZCL_PRESENT_ITEM_READ_ONLY;
+    (void)snprintf(form_model.items[1].id,
+                   sizeof(form_model.items[1].id), "candidate-root");
+    (void)snprintf(form_model.items[1].label,
+                   sizeof(form_model.items[1].label), "Candidate root");
+    (void)snprintf(form_model.items[1].value,
+                   sizeof(form_model.items[1].value), "immutable-root");
+    form_model.action_count = 2;
+    form_model.actions[0].kind = ZCL_PRESENT_ACTION_CANCEL;
+    (void)snprintf(form_model.actions[0].id,
+                   sizeof(form_model.actions[0].id), "cancel");
+    (void)snprintf(form_model.actions[0].label,
+                   sizeof(form_model.actions[0].label), "Cancel");
+    form_model.actions[1].kind = ZCL_PRESENT_ACTION_SUBMIT;
+    (void)snprintf(form_model.actions[1].id,
+                   sizeof(form_model.actions[1].id), "submit-release-note");
+    (void)snprintf(form_model.actions[1].label,
+                   sizeof(form_model.actions[1].label), "Submit");
     struct zcl_present_model_v1 submitted_form = form_model;
     (void)snprintf(submitted_form.items[0].value,
                    sizeof(submitted_form.items[0].value), "exact note");
@@ -925,7 +1258,11 @@ int test_qr(void)
     QR_CHECK("form action-order mutant fails closed",
              !zcl_present_model_validate_v1(
                  &submitted_form, why, sizeof(why)));
+}
 
+static void qr_case_canvas_model_render(void)
+{
+    char why[128];
     struct zcl_present_model_v1 canvas_model;
     zcl_present_model_init_v1(&canvas_model, ZCL_PRESENT_MODEL_CANVAS);
     (void)snprintf(canvas_model.request_id,
@@ -983,7 +1320,50 @@ int test_qr(void)
              strstr(canvas_text, "canvas-point-x-y: 250/300") != NULL &&
              strstr(canvas_text, "flags: selected") != NULL &&
              strstr(canvas_text, "flags: read-only") != NULL);
+}
 
+static void qr_case_canvas_reducer_and_submit(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 canvas_model;
+    zcl_present_model_init_v1(&canvas_model, ZCL_PRESENT_MODEL_CANVAS);
+    (void)snprintf(canvas_model.request_id,
+                   sizeof(canvas_model.request_id), "placement-canvas");
+    (void)snprintf(canvas_model.title, sizeof(canvas_model.title),
+                   "Place the exact label");
+    memset(canvas_model.exact_root, 'e', ZCL_PRESENT_MODEL_ROOT_MAX);
+    canvas_model.exact_root[ZCL_PRESENT_MODEL_ROOT_MAX] = '\0';
+    canvas_model.item_count = 2;
+    canvas_model.items[0].kind = ZCL_PRESENT_ITEM_CANVAS_POINT;
+    canvas_model.items[0].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    canvas_model.items[0].flags = ZCL_PRESENT_ITEM_SELECTED;
+    canvas_model.items[0].numerator = 250;
+    canvas_model.items[0].denominator = 300;
+    (void)snprintf(canvas_model.items[0].id,
+                   sizeof(canvas_model.items[0].id), "label-origin");
+    (void)snprintf(canvas_model.items[0].label,
+                   sizeof(canvas_model.items[0].label), "Label origin");
+    canvas_model.items[1].kind = ZCL_PRESENT_ITEM_CANVAS_POINT;
+    canvas_model.items[1].status = ZCL_PRESENT_STATUS_INFO;
+    canvas_model.items[1].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    canvas_model.items[1].flags = ZCL_PRESENT_ITEM_READ_ONLY;
+    canvas_model.items[1].numerator = 800;
+    canvas_model.items[1].denominator = 700;
+    (void)snprintf(canvas_model.items[1].id,
+                   sizeof(canvas_model.items[1].id), "fixed-anchor");
+    (void)snprintf(canvas_model.items[1].label,
+                   sizeof(canvas_model.items[1].label), "Fixed anchor");
+    canvas_model.action_count = 2;
+    canvas_model.actions[0].kind = ZCL_PRESENT_ACTION_CANCEL;
+    (void)snprintf(canvas_model.actions[0].id,
+                   sizeof(canvas_model.actions[0].id), "cancel");
+    (void)snprintf(canvas_model.actions[0].label,
+                   sizeof(canvas_model.actions[0].label), "Cancel");
+    canvas_model.actions[1].kind = ZCL_PRESENT_ACTION_SUBMIT;
+    (void)snprintf(canvas_model.actions[1].id,
+                   sizeof(canvas_model.actions[1].id), "submit-placement");
+    (void)snprintf(canvas_model.actions[1].label,
+                   sizeof(canvas_model.actions[1].label), "Submit");
     struct zcl_present_window_canvas_v1 canvas_state = {
         .struct_size = sizeof(canvas_state),
         .abi_version = ZCL_PRESENT_ABI_V1,
@@ -1044,6 +1424,10 @@ int test_qr(void)
              !zcl_present_model_validate_v1(
                  &submitted_canvas, why, sizeof(why)));
 
+}
+
+static void qr_case_host_reply(void)
+{
     uint8_t host_nonce[UI_HOST_NONCE_BYTES];
     memset(host_nonce, 0x5a, sizeof(host_nonce));
     uint8_t host_reply[UI_HOST_REPLY_BYTES];
@@ -1066,7 +1450,37 @@ int test_qr(void)
                  host_reply, UI_HOST_PHASE_EVENT, &host_status,
                  &host_value, &host_payload_len, &host_elapsed,
                  host_nonce));
+}
 
+static void qr_case_visual_model_wire(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 visual;
+    zcl_present_model_init_v1(&visual, ZCL_PRESENT_MODEL_PROGRESS);
+    (void)snprintf(visual.request_id, sizeof(visual.request_id),
+                   "reproduce-42");
+    (void)snprintf(visual.title, sizeof(visual.title),
+                   "Independent reproduction");
+    (void)snprintf(visual.summary, sizeof(visual.summary),
+                   "Builder two is reproducing the exact candidate bytes.");
+    visual.item_count = 1;
+    visual.items[0].kind = ZCL_PRESENT_ITEM_PROGRESS;
+    visual.items[0].status = ZCL_PRESENT_STATUS_INFO;
+    visual.items[0].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    visual.items[0].numerator = 7;
+    visual.items[0].denominator = 10;
+    (void)snprintf(visual.items[0].id, sizeof(visual.items[0].id),
+                   "builder-two");
+    (void)snprintf(visual.items[0].label, sizeof(visual.items[0].label),
+                   "Builder two");
+    (void)snprintf(visual.items[0].value, sizeof(visual.items[0].value),
+                   "Compiling");
+    visual.action_count = 1;
+    visual.actions[0].kind = ZCL_PRESENT_ACTION_CLOSE;
+    (void)snprintf(visual.actions[0].id, sizeof(visual.actions[0].id),
+                   "close");
+    (void)snprintf(visual.actions[0].label,
+                   sizeof(visual.actions[0].label), "Close");
     uint8_t model_wire[ZCL_PRESENT_MODEL_WIRE_MAX];
     size_t model_wire_len = 0;
     struct zcl_present_model_v1 decoded;
@@ -1087,7 +1501,11 @@ int test_qr(void)
              !zcl_present_model_decode_v1(
                  model_wire, model_wire_len + 1u, &decoded,
                  why, sizeof(why)));
+}
 
+static void qr_case_confirmation_model(void)
+{
+    char why[128];
     struct zcl_present_model_v1 confirmation;
     zcl_present_model_init_v1(&confirmation,
                               ZCL_PRESENT_MODEL_CONFIRMATION);
@@ -1141,7 +1559,11 @@ int test_qr(void)
              strcmp(action_document.windows[0].copy_text,
                     confirmation.exact_root) == 0);
     ui_present_document_free(&action_document);
+}
 
+static void qr_case_status_facts(void)
+{
+    char why[128];
     struct json_value status_facts, health_facts, health_checks;
     struct json_value backup_facts, work_facts;
     json_init(&status_facts); json_set_object(&status_facts);
@@ -1189,7 +1611,11 @@ int test_qr(void)
     json_free(&backup_facts);
     json_free(&health_facts);
     json_free(&status_facts);
+}
 
+static void qr_case_corpus_instrument(void)
+{
+    char why[128];
     struct json_value corpus_facts;
     json_init(&corpus_facts); json_set_object(&corpus_facts);
     json_push_kv_bool(&corpus_facts, "projection_ready", true);
@@ -1236,6 +1662,28 @@ int test_qr(void)
                     "18 entries; reason LOC unavailable") == 0);
     QR_CHECK("corpus instrument never fabricates used LOC or velocity",
              corpus_used_honest && corpus_velocity_honest);
+}
+
+static void qr_case_corpus_text_export(void)
+{
+    char why[128];
+    struct json_value corpus_facts;
+    json_init(&corpus_facts); json_set_object(&corpus_facts);
+    json_push_kv_bool(&corpus_facts, "projection_ready", true);
+    json_push_kv_str(&corpus_facts, "checkpoint_root",
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+    json_push_kv_int(&corpus_facts, "admitted_production_loc", 201600);
+    json_push_kv_int(&corpus_facts, "admitted_test_loc", 390954);
+    json_push_kv_int(&corpus_facts, "durably_hosted_loc", 0);
+    json_push_kv_int(&corpus_facts, "unique_semantic_units", 434817);
+    json_push_kv_int(&corpus_facts, "packages_admitted", 50);
+    json_push_kv_int(&corpus_facts, "packages_excluded", 18);
+    json_push_kv_str(&corpus_facts, "progress_stage", "below_50m");
+    json_push_kv_str(&corpus_facts, "blocker",
+                     "verified lower bound is 592554 LOC");
+    struct zcl_present_model_v1 corpus_model;
+    (void)zcl_native_presentation_corpus_model_from_facts(
+        &corpus_facts, &corpus_model, why, sizeof(why));
     char corpus_all_text[ZCL_PRESENT_MODEL_TEXT_MAX];
     size_t corpus_all_text_len = 0;
     QR_CHECK("one bounded corpus text export contains every exact fact",
@@ -1249,7 +1697,10 @@ int test_qr(void)
              strstr(corpus_all_text, "CORPUS FACT - Exclusions") &&
              strstr(corpus_all_text, "CORPUS FACT - Velocity"));
     json_free(&corpus_facts);
+}
 
+static void qr_case_corpus_command(void)
+{
     struct json_value corpus_request_input;
     json_init(&corpus_request_input); json_set_object(&corpus_request_input);
     json_push_kv_str(&corpus_request_input, "output", "text");
@@ -1278,7 +1729,11 @@ int test_qr(void)
                     "display-only") == 0);
     zcl_command_reply_free(&corpus_reply);
     json_free(&corpus_request_input);
+}
 
+static void qr_case_code_change_model(void)
+{
+    char why[128];
     static const uint8_t code_before[] =
         "#include \"presentation/model.h\"\n"
         "int exact_value(void) {\n"
@@ -1320,7 +1775,17 @@ int test_qr(void)
              caught_remove && caught_add);
     QR_CHECK("candidate dependency row comes from exact include bytes",
              caught_include);
+}
 
+static void qr_case_development_reflex_red(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    memset(root_a, 'a', 64u); root_a[64] = '\0';
+    memset(root_b, 'b', 64u); root_b[64] = '\0';
+    memset(tree_root, 'c', 64u); tree_root[64] = '\0';
+    (void)tree_root;
+    (void)root_b;
     struct json_value development_facts;
     json_init(&development_facts); json_set_object(&development_facts);
     json_push_kv_str(&development_facts, "schema", "zcl.dev_cycle.v1");
@@ -1366,6 +1831,19 @@ int test_qr(void)
              development_red && development_unknown && development_next);
 
     json_free(&development_facts);
+}
+
+static void qr_case_development_pending_and_compile(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    memset(root_a, 'a', 64u); root_a[64] = '\0';
+    memset(root_b, 'b', 64u); root_b[64] = '\0';
+    memset(tree_root, 'c', 64u); tree_root[64] = '\0';
+    (void)tree_root;
+    struct json_value development_facts;
+    struct zcl_present_model_v1 development_model;
+    bool development_built;
     json_init(&development_facts); json_set_object(&development_facts);
     json_push_kv_str(&development_facts, "schema", "zcl.dev_cycle.v1");
     json_push_kv_str(&development_facts, "status", "proof_pending");
@@ -1413,7 +1891,19 @@ int test_qr(void)
     QR_CHECK("compile-only package receipt never becomes behavioral proof",
              compile_only_receipt);
     json_free(&development_facts);
+}
 
+static void qr_case_unchanged_candidate_bytes(void)
+{
+    char why[128];
+    static const uint8_t code_before[] =
+        "#include \"presentation/model.h\"\n"
+        "int exact_value(void) {\n"
+        "    return 1;\n"
+        "}\n";
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
+    struct zcl_present_model_v1 code_model;
     QR_CHECK("unchanged candidate bytes cannot masquerade as a code change",
              !zcl_native_presentation_code_change_model_from_facts(
                  code_before, sizeof(code_before) - 1u,
@@ -1421,7 +1911,13 @@ int test_qr(void)
                  "tools/command/native_qr_command.c", "return two",
                  "returned one", "returns two", root_a, root_a, tree_root,
                  &code_model, why, sizeof(why)));
+}
 
+static void qr_case_publication_confirm(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
     struct json_value publication_plan, publication_release;
     struct json_value publication_package;
     json_init(&publication_plan); json_set_object(&publication_plan);
@@ -1455,6 +1951,37 @@ int test_qr(void)
                  ZCL_PRESENT_ACTION_CANCEL &&
              publication_model.actions[1].kind ==
                  ZCL_PRESENT_ACTION_CONFIRM);
+    json_free(&publication_plan);
+}
+
+static void qr_case_publication_confirm_chrome(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
+    struct json_value publication_plan, publication_release;
+    struct json_value publication_package;
+    json_init(&publication_plan); json_set_object(&publication_plan);
+    json_push_kv_bool(&publication_plan, "valid", true);
+    json_push_kv_bool(&publication_plan, "ready_to_commit", true);
+    json_push_kv_str(&publication_plan, "plan_token", root_a);
+    json_init(&publication_release); json_set_object(&publication_release);
+    json_push_kv_str(&publication_release, "name", "stranger/hello-c23");
+    json_push_kv_str(&publication_release, "semver", "1.0.0");
+    json_push_kv_str(&publication_release, "license", "Apache-2.0");
+    json_push_kv(&publication_plan, "release", &publication_release);
+    json_free(&publication_release);
+    json_init(&publication_package); json_set_object(&publication_package);
+    json_push_kv_str(&publication_package, "package_root", root_b);
+    json_push_kv_int(&publication_package, "files", 3);
+    json_push_kv_int(&publication_package, "bytes", 4096);
+    json_push_kv_int(&publication_package, "chunks", 3);
+    json_push_kv_bool(&publication_package, "chunks_checked", true);
+    json_push_kv(&publication_plan, "package", &publication_package);
+    json_free(&publication_package);
+    struct zcl_present_model_v1 publication_model;
+    (void)zcl_native_presentation_publication_confirm_model_from_plan(
+        &publication_plan, &publication_model, why, sizeof(why));
     QR_CHECK("canonical confirmation focuses the harmless decision first",
              strcmp(publication_model.actions[0].id, "cancel") == 0 &&
              strcmp(publication_model.actions[1].id, "confirm") == 0);
@@ -1466,6 +1993,37 @@ int test_qr(void)
              strncmp(publication_model.items[0].label,
                      "LOCAL OBSERVATION - ", 20) == 0 &&
              strstr(publication_model.summary, "HUMAN DECISION - ") != NULL);
+    json_free(&publication_plan);
+}
+
+static void qr_case_publication_evidence_boundaries(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
+    struct json_value publication_plan, publication_release;
+    struct json_value publication_package;
+    json_init(&publication_plan); json_set_object(&publication_plan);
+    json_push_kv_bool(&publication_plan, "valid", true);
+    json_push_kv_bool(&publication_plan, "ready_to_commit", true);
+    json_push_kv_str(&publication_plan, "plan_token", root_a);
+    json_init(&publication_release); json_set_object(&publication_release);
+    json_push_kv_str(&publication_release, "name", "stranger/hello-c23");
+    json_push_kv_str(&publication_release, "semver", "1.0.0");
+    json_push_kv_str(&publication_release, "license", "Apache-2.0");
+    json_push_kv(&publication_plan, "release", &publication_release);
+    json_free(&publication_release);
+    json_init(&publication_package); json_set_object(&publication_package);
+    json_push_kv_str(&publication_package, "package_root", root_b);
+    json_push_kv_int(&publication_package, "files", 3);
+    json_push_kv_int(&publication_package, "bytes", 4096);
+    json_push_kv_int(&publication_package, "chunks", 3);
+    json_push_kv_bool(&publication_package, "chunks_checked", true);
+    json_push_kv(&publication_plan, "package", &publication_package);
+    json_free(&publication_package);
+    struct zcl_present_model_v1 publication_model;
+    (void)zcl_native_presentation_publication_confirm_model_from_plan(
+        &publication_plan, &publication_model, why, sizeof(why));
     QR_CHECK("confirmation names every later publication evidence boundary",
              strcmp(publication_model.items[7].value,
                     "Pending this exact decision") == 0 &&
@@ -1482,7 +2040,13 @@ int test_qr(void)
                  &publication_plan, &publication_model,
                  why, sizeof(why)));
     json_free(&publication_plan);
+}
 
+static void qr_case_release_confirm(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
     struct json_value release_status, release_expert, release_evidence;
     json_init(&release_status); json_set_object(&release_status);
     json_push_kv_str(&release_status, "state", "EVIDENCE_READY");
@@ -1537,7 +2101,13 @@ int test_qr(void)
                  release_identity, why, sizeof(why)));
     json_free(&release_evidence);
     json_free(&release_status);
+}
 
+static void qr_case_publication_local_commit(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
     struct json_value publication_facts;
     struct zcl_present_model_v1 publication_status;
     qr_publication_facts(&publication_facts, root_b, tree_root, root_a,
@@ -1554,7 +2124,15 @@ int test_qr(void)
              strcmp(publication_status.request_id,
                     "publish-aaaaaaaaaaaa") == 0);
     json_free(&publication_facts);
+}
 
+static void qr_case_publication_pointer_and_self(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
+    struct json_value publication_facts;
+    struct zcl_present_model_v1 publication_status;
     qr_publication_facts(&publication_facts, root_b, tree_root, root_a,
                          root_a, root_a, true, true, false, false, 0);
     QR_CHECK("signed pointer advances only its exact evidence stage",
@@ -1577,7 +2155,15 @@ int test_qr(void)
              publication_status.items[4].status == ZCL_PRESENT_STATUS_NEUTRAL &&
              publication_status.items[5].status == ZCL_PRESENT_STATUS_NEUTRAL);
     json_free(&publication_facts);
+}
 
+static void qr_case_publication_peer_fetch(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
+    struct json_value publication_facts;
+    struct zcl_present_model_v1 publication_status;
     qr_publication_facts(&publication_facts, root_b, tree_root, root_a,
                          root_a, root_b, true, true, true, false, 0);
     QR_CHECK("matching non-self signed records prove peer discovery only",
@@ -1608,7 +2194,13 @@ int test_qr(void)
              publication_status.items[4].status == ZCL_PRESENT_STATUS_GREEN &&
              publication_status.items[5].status == ZCL_PRESENT_STATUS_NEUTRAL);
     json_free(&publication_facts);
+}
 
+static void qr_case_reproduction_progress(void)
+{
+    char why[128];
+    char root_a[65], root_b[65], tree_root[65];
+    qr_fill_roots(root_a, root_b, tree_root);
     struct json_value reproduction_facts;
     qr_reproduction_facts(&reproduction_facts, root_a, tree_root, root_b,
                           "", "RUNNING");
@@ -1644,7 +2236,10 @@ int test_qr(void)
              reproduction_model.items[3].status == ZCL_PRESENT_STATUS_RED &&
              strstr(reproduction_model.summary, "named refusal") != NULL);
     json_free(&reproduction_facts);
+}
 
+static void qr_case_package_worker_diagnostic(void)
+{
     struct json_value work_dump;
     json_init(&work_dump);
     vcs_zcode_work_node_set_global(NULL);
@@ -1659,7 +2254,37 @@ int test_qr(void)
              strstr(json_get_str(json_get(&work_dump, "next_action")),
                     "-buildworker=1") == NULL);
     json_free(&work_dump);
+}
 
+static void qr_case_progress_native_pixels(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 visual;
+    zcl_present_model_init_v1(&visual, ZCL_PRESENT_MODEL_PROGRESS);
+    (void)snprintf(visual.request_id, sizeof(visual.request_id),
+                   "reproduce-42");
+    (void)snprintf(visual.title, sizeof(visual.title),
+                   "Independent reproduction");
+    (void)snprintf(visual.summary, sizeof(visual.summary),
+                   "Builder two is reproducing the exact candidate bytes.");
+    visual.item_count = 1;
+    visual.items[0].kind = ZCL_PRESENT_ITEM_PROGRESS;
+    visual.items[0].status = ZCL_PRESENT_STATUS_INFO;
+    visual.items[0].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+    visual.items[0].numerator = 7;
+    visual.items[0].denominator = 10;
+    (void)snprintf(visual.items[0].id, sizeof(visual.items[0].id),
+                   "builder-two");
+    (void)snprintf(visual.items[0].label, sizeof(visual.items[0].label),
+                   "Builder two");
+    (void)snprintf(visual.items[0].value, sizeof(visual.items[0].value),
+                   "Compiling");
+    visual.action_count = 1;
+    visual.actions[0].kind = ZCL_PRESENT_ACTION_CLOSE;
+    (void)snprintf(visual.actions[0].id, sizeof(visual.actions[0].id),
+                   "close");
+    (void)snprintf(visual.actions[0].label,
+                   sizeof(visual.actions[0].label), "Close");
     struct zcl_present_model_bitmap_v1 visual_bitmap;
     QR_CHECK("renderer-neutral progress card becomes native RGB pixels",
              zcl_present_model_render_v1(
@@ -1681,7 +2306,11 @@ int test_qr(void)
     QR_CHECK("native model pixels preserve brand and semantic status",
              visual_has_orange && visual_has_info);
     zcl_present_model_bitmap_free_v1(&visual_bitmap);
+}
 
+static void qr_case_bounded_table_pages(void)
+{
+    char why[128];
     struct zcl_present_model_v1 long_table;
     zcl_present_model_init_v1(&long_table, ZCL_PRESENT_MODEL_TABLE);
     (void)snprintf(long_table.request_id, sizeof(long_table.request_id),
@@ -1718,6 +2347,29 @@ int test_qr(void)
                     table_document.windows[table_pages - 1u].pixels,
                     ZCL_PRESENT_MODEL_BITMAP_BYTES) != 0);
     ui_present_document_free(&table_document);
+}
+
+static void qr_case_bounded_table_text(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 long_table;
+    zcl_present_model_init_v1(&long_table, ZCL_PRESENT_MODEL_TABLE);
+    (void)snprintf(long_table.request_id, sizeof(long_table.request_id),
+                   "bounded-table-64");
+    (void)snprintf(long_table.title, sizeof(long_table.title),
+                   "Every bounded row is reachable");
+    long_table.item_count = ZCL_PRESENT_MODEL_ITEMS_MAX;
+    for (uint32_t i = 0; i < long_table.item_count; i++) {
+        long_table.items[i].kind = ZCL_PRESENT_ITEM_TABLE_ROW;
+        long_table.items[i].parent_index = ZCL_PRESENT_MODEL_PARENT_NONE;
+        (void)snprintf(long_table.items[i].id,
+                       sizeof(long_table.items[i].id), "row-%u", i + 1u);
+        (void)snprintf(long_table.items[i].label,
+                       sizeof(long_table.items[i].label), "Owner %u", i + 1u);
+        (void)snprintf(long_table.items[i].value,
+                       sizeof(long_table.items[i].value), "Exact value %u",
+                       i + 1u);
+    }
     char table_text[ZCL_PRESENT_MODEL_TEXT_MAX];
     size_t table_text_len = 0;
     uint32_t table_text_pages = 0;
@@ -1737,10 +2389,23 @@ int test_qr(void)
                  &long_table, table_text, sizeof(table_text),
                  &table_text_len, why, sizeof(why)) &&
              strstr(why, "exceeds its byte bound") != NULL);
+}
+
+static void qr_case_bounded_table_pixels(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 long_table;
+    uint32_t table_pages = 0;
+    struct zcl_present_model_bitmap_v1 visual_bitmap;
     struct zcl_present_model_bitmap_v1 first_page, last_page;
-    bool first_page_ok = zcl_present_model_render_page_v1(
+    bool first_page_ok;
+    bool last_page_ok;
+    qr_fill_long_table(&long_table);
+    (void)zcl_present_model_page_count_v1(
+        &long_table, &table_pages, why, sizeof(why));
+    first_page_ok = zcl_present_model_render_page_v1(
         &long_table, 0, &first_page, why, sizeof(why));
-    bool last_page_ok = zcl_present_model_render_page_v1(
+    last_page_ok = zcl_present_model_render_page_v1(
         &long_table, table_pages - 1u, &last_page, why, sizeof(why));
     QR_CHECK("first and last bounded table pages render distinct pixels",
              first_page_ok && last_page_ok &&
@@ -1752,7 +2417,17 @@ int test_qr(void)
                  why, sizeof(why)));
     zcl_present_model_bitmap_free_v1(&first_page);
     zcl_present_model_bitmap_free_v1(&last_page);
+}
+
+static void qr_case_bounded_table_keys(void)
+{
+    char why[128];
+    struct zcl_present_model_v1 long_table;
+    uint32_t table_pages = 0;
     uint32_t next_page = UINT32_MAX;
+    qr_fill_long_table(&long_table);
+    (void)zcl_present_model_page_count_v1(
+        &long_table, &table_pages, why, sizeof(why));
     QR_CHECK("keyboard page movement advances and clamps deterministically",
              zcl_present_window_page_step_v1(
                  0, table_pages, 1, &next_page) && next_page == 1u &&
@@ -1771,7 +2446,11 @@ int test_qr(void)
                  0, 2, -1, &next_action) && next_action == 1u &&
              !zcl_present_window_action_focus_step_v1(
                  0, 0, 1, &next_action));
+}
 
+static void qr_case_typed_visual_json(void)
+{
+    char why[128];
     static const char model_json[] =
         "{\"kind\":\"code-diff\",\"request_id\":\"diff-1\","
         "\"title\":\"Exact candidate diff\","
@@ -1793,7 +2472,10 @@ int test_qr(void)
              json_model.item_count == 2 &&
              json_model.items[1].kind == ZCL_PRESENT_ITEM_DIFF_ADD);
     json_free(&visual_json);
+}
 
+static void qr_case_typed_chart_command(void)
+{
     static const char chart_json[] =
         "{\"kind\":\"chart\",\"request_id\":\"coverage-chart\","
         "\"title\":\"Exact candidate coverage\",\"output\":\"text\","
@@ -1820,7 +2502,10 @@ int test_qr(void)
                     "display-only") == 0);
     zcl_command_reply_free(&chart_reply);
     json_free(&chart_input);
+}
 
+static void qr_case_typed_timeline_command(void)
+{
     static const char timeline_json[] =
         "{\"kind\":\"timeline\",\"request_id\":\"proof-timeline\","
         "\"title\":\"Exact proof sequence\",\"output\":\"text\","
@@ -1850,7 +2535,10 @@ int test_qr(void)
                     "display-only") == 0);
     zcl_command_reply_free(&timeline_reply);
     json_free(&timeline_input);
+}
 
+static void qr_case_typed_evidence_graph_command(void)
+{
     static const char graph_json[] =
         "{\"kind\":\"evidence-graph\",\"request_id\":\"evidence-graph\","
         "\"title\":\"Candidate evidence\",\"output\":\"text\","
@@ -1881,7 +2569,10 @@ int test_qr(void)
                     "display-only") == 0);
     zcl_command_reply_free(&graph_reply);
     json_free(&graph_input);
+}
 
+static void qr_case_typed_choice_command(void)
+{
     static const char choice_json[] =
         "{\"kind\":\"choice\",\"request_id\":\"proof-choice\","
         "\"title\":\"Choose the next proof\",\"output\":\"text\","
@@ -1916,7 +2607,10 @@ int test_qr(void)
                     "display-only") == 0);
     zcl_command_reply_free(&choice_reply);
     json_free(&choice_input);
+}
 
+static void qr_case_typed_form_command(void)
+{
     static const char form_json[] =
         "{\"kind\":\"form\",\"request_id\":\"release-form\","
         "\"title\":\"Describe exact release\",\"output\":\"text\","
@@ -1954,7 +2648,10 @@ int test_qr(void)
                     "display-only") == 0);
     zcl_command_reply_free(&form_reply);
     json_free(&form_input);
+}
 
+static void qr_case_typed_canvas_command(void)
+{
     static const char canvas_json[] =
         "{\"kind\":\"canvas\",\"request_id\":\"placement-canvas\","
         "\"title\":\"Place exact label\",\"output\":\"text\","
@@ -1995,7 +2692,25 @@ int test_qr(void)
                     "display-only") == 0);
     zcl_command_reply_free(&canvas_reply);
     json_free(&canvas_input);
+}
 
+static void qr_case_shared_presentation_response(void)
+{
+    char why[128];
+    static const char model_json[] =
+        "{\"kind\":\"code-diff\",\"request_id\":\"diff-1\","
+        "\"title\":\"Exact candidate diff\","
+        "\"summary\":\"One candidate-owned line changed.\","
+        "\"items\":[{\"kind\":\"diff-remove\",\"value\":\"return 0;\"},"
+        "{\"kind\":\"diff-add\",\"status\":\"green\","
+        "\"value\":\"return verified;\"}]}";
+    struct json_value visual_json;
+    json_init(&visual_json);
+    (void)json_read(&visual_json, model_json, sizeof(model_json) - 1u);
+    struct zcl_present_model_v1 json_model;
+    (void)ui_present_model_from_json(
+        &visual_json, &json_model, why, sizeof(why));
+    json_free(&visual_json);
     struct json_value text_delivery;
     json_init(&text_delivery);
     json_set_object(&text_delivery);
@@ -2018,7 +2733,18 @@ int test_qr(void)
              !json_get_bool(json_get(&text_reply.data,
                                      "privileged_action_performed")));
     zcl_command_reply_free(&text_reply);
+    json_free(&text_delivery);
+}
 
+static void qr_case_shared_text_paging_fallback(void)
+{
+    struct zcl_present_model_v1 long_table;
+    struct json_value text_delivery;
+    struct zcl_command_reply text_reply;
+    qr_fill_long_table(&long_table);
+    json_init(&text_delivery);
+    json_set_object(&text_delivery);
+    json_push_kv_str(&text_delivery, "output", "text");
     zcl_command_reply_init(&text_reply, "zcl.app_presentation_show.v1");
     zcl_native_present_model(&long_table, "app.presentation.show",
                              &text_delivery, &text_reply);
@@ -2033,7 +2759,13 @@ int test_qr(void)
                     "id: row-2") == NULL);
     zcl_command_reply_free(&text_reply);
     json_free(&text_delivery);
+}
 
+static void qr_case_visual_command_smuggling(void)
+{
+    char why[128];
+    struct json_value visual_json;
+    struct zcl_present_model_v1 json_model;
     static const char smuggled_json[] =
         "{\"kind\":\"status\",\"request_id\":\"bad-1\","
         "\"title\":\"Bad\",\"items\":[{\"kind\":\"text\","
@@ -2046,9 +2778,79 @@ int test_qr(void)
              !ui_present_model_from_json(&visual_json, &json_model,
                                          why, sizeof(why)));
     json_free(&visual_json);
+}
 
-    qr_matrix_free(&second);
-    qr_matrix_free(&first);
+int test_qr(void)
+{
+    printf("\n=== qr ===\n");
+    qr_failures = 0;
+    QR_CHECK("native QR backend is compiled", qr_matrix_backend_available());
+    if (!qr_matrix_backend_available()) return qr_failures;
+
+    if (!qr_case_payment_uri_encode_and_finders()) return qr_failures;
+    qr_case_zclassic_window_icon();
+    qr_case_canvas_primitives();
+    qr_case_chart_scale_maximum();
+    qr_case_canvas_text_metrics();
+    qr_case_deposit_card();
+    qr_case_generic_qr_compositor();
+    qr_case_presentation_clipboard_bmp();
+    qr_case_confirmation_action_clicks();
+    qr_case_chart_hover();
+    qr_case_image_copy_control();
+    qr_case_chart_keys();
+    qr_case_chart_axis_cadence();
+    qr_case_chart_rendering_page_bound();
+    qr_case_shared_qr_model_rejects();
+    qr_case_maximum_qr_chunks();
+    qr_case_qr_text_companion_pages();
+    qr_case_qr_text_export_and_backend();
+    qr_case_progress_model();
+    qr_case_chart_model();
+    qr_case_timeline_model();
+    qr_case_evidence_graph();
+    qr_case_choice_model();
+    qr_case_form_model_render();
+    qr_case_form_bridge_and_typing();
+    qr_case_form_focus();
+    qr_case_form_submission_mutants();
+    qr_case_canvas_model_render();
+    qr_case_canvas_reducer_and_submit();
+    qr_case_host_reply();
+    qr_case_visual_model_wire();
+    qr_case_confirmation_model();
+    qr_case_status_facts();
+    qr_case_corpus_instrument();
+    qr_case_corpus_text_export();
+    qr_case_corpus_command();
+    qr_case_code_change_model();
+    qr_case_development_reflex_red();
+    qr_case_development_pending_and_compile();
+    qr_case_unchanged_candidate_bytes();
+    qr_case_publication_confirm();
+    qr_case_publication_confirm_chrome();
+    qr_case_publication_evidence_boundaries();
+    qr_case_release_confirm();
+    qr_case_publication_local_commit();
+    qr_case_publication_pointer_and_self();
+    qr_case_publication_peer_fetch();
+    qr_case_reproduction_progress();
+    qr_case_package_worker_diagnostic();
+    qr_case_progress_native_pixels();
+    qr_case_bounded_table_pages();
+    qr_case_bounded_table_text();
+    qr_case_bounded_table_pixels();
+    qr_case_bounded_table_keys();
+    qr_case_typed_visual_json();
+    qr_case_typed_chart_command();
+    qr_case_typed_timeline_command();
+    qr_case_typed_evidence_graph_command();
+    qr_case_typed_choice_command();
+    qr_case_typed_form_command();
+    qr_case_typed_canvas_command();
+    qr_case_shared_presentation_response();
+    qr_case_shared_text_paging_fallback();
+    qr_case_visual_command_smuggling();
     printf("=== qr: %d failure(s) ===\n", qr_failures);
     return qr_failures;
 }
