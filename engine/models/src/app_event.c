@@ -382,6 +382,43 @@ int db_app_event_topic_after(struct node_db *ndb,
     QB_QUERY_LIST(ndb, &q, s, out, max, app_event_ref_read(s, &out[count]));
 }
 
+bool db_app_event_topic_frontier(struct node_db *ndb,
+                                 const char *app_id, const char *topic,
+                                 int64_t *out_cursor,
+                                 uint8_t out_event_id[32])
+{
+    if (!ndb || !ndb->open || !out_cursor || !out_event_id ||
+        !bounded_token(app_id, ZCL_APP_ID_MAX) ||
+        !bounded_token(topic, ZCL_APP_TOPIC_MAX))
+        return false; // raw-return-ok:absent-frontier-is-not-an-error
+    struct qb q;
+    qb_select(&q, QB_T_app_events);
+    static const enum qb_column k_frontier_cols[] = {
+        QB_C_app_events_receive_cursor, QB_C_app_events_event_id,
+    };
+    qb_select_columns(&q, k_frontier_cols, QB_NCOLS(k_frontier_cols));
+    qb_where_text(&q, QB_C_app_events_app_id, QB_EQ, app_id);
+    qb_where_text(&q, QB_C_app_events_topic, QB_EQ, topic);
+    qb_order_by(&q, QB_C_app_events_receive_cursor, QB_DESC);
+    qb_limit(&q, 1);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("app_event", "topic frontier refused: %s", qb_error(&q));
+    if (!AR_STEP_ROW(s)) {
+        AR_FINALIZE(s);
+        return false; // raw-return-ok:absent-frontier-is-not-an-error
+    }
+    bool ok = AR_COL_BYTES(s, 1) == 32;
+    if (ok) {
+        *out_cursor = AR_COL_INT(s, 0);
+        AR_READ_BLOB(s, 1, out_event_id, 32);
+    }
+    AR_FINALIZE(s);
+    if (!ok)
+        LOG_FAIL("app_event", "stored frontier event id is not 32 bytes");
+    return true;
+}
+
 bool db_app_event_previous(struct node_db *ndb,
                            const struct db_app_event *record,
                            const struct zcl_app_event_scope_v1 *scope,

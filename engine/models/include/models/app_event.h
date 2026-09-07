@@ -71,6 +71,19 @@ int db_app_event_topic_after(struct node_db *ndb,
                              int64_t after_cursor,
                              struct db_app_event_ref *out, size_t max);
 
+/* The newest row this node holds for one (app_id, topic) by LOCAL arrival:
+ * the highest receive cursor, and the event id at it. One indexed read over
+ * idx_app_events_topic_cursor, so it stays O(1) as a topic grows.
+ *
+ * This is the cursor an anti-entropy pull asks a peer with. It is local
+ * arrival order and nothing else — it is never an App projection order, and
+ * it means nothing on any other node. Returns false, leaving `*out_cursor`
+ * and `*out_event_id` untouched, when the topic holds no row here. */
+bool db_app_event_topic_frontier(struct node_db *ndb,
+                                 const char *app_id, const char *topic,
+                                 int64_t *out_cursor,
+                                 uint8_t out_event_id[32]);
+
 /* AppEvent belongs_to :previous_event. Missing predecessors are normal during
  * anti-entropy and return false; an identity/sequence mismatch fails closed. */
 bool db_app_event_previous(struct node_db *ndb,

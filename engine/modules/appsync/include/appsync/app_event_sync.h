@@ -129,7 +129,16 @@ enum zcl_app_sync_status {
     ZCL_APP_SYNC_ROW_TOO_LARGE,/* one row is over ZCL_APP_SYNC_ROW_MAX_BYTES */
     ZCL_APP_SYNC_BATCH_FULL,   /* the answer is at its row or byte bound */
     ZCL_APP_SYNC_SCOPE,        /* the row is not in the asked-for app/topic */
-    ZCL_APP_SYNC_SIG_INVALID   /* the App platform refused the signature */
+    ZCL_APP_SYNC_SIG_INVALID,  /* the App platform refused the signature */
+    /* No peer was named, or the named peer has no session to ask over.
+     * Distinct from a peer that answered badly: the answer is a pairing or
+     * a connection, never a reason to accept anything. */
+    ZCL_APP_SYNC_NO_PEER,
+    /* The local table refused a row that HAD verified — the event id is
+     * already bound to different bytes, or the database said no. Kept
+     * apart from a signature failure because one accuses the peer and the
+     * other accuses this box's own store. */
+    ZCL_APP_SYNC_STORE
 };
 
 /* "ok", "appsync_malformed", "appsync_sig_invalid", ... — one stable token

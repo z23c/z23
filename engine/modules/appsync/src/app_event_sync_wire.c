@@ -126,6 +126,8 @@ const char *zcl_app_sync_status_label(enum zcl_app_sync_status s)
     case ZCL_APP_SYNC_BATCH_FULL: return "appsync_batch_full";
     case ZCL_APP_SYNC_SCOPE: return "appsync_scope";
     case ZCL_APP_SYNC_SIG_INVALID: return "appsync_sig_invalid";
+    case ZCL_APP_SYNC_NO_PEER: return "appsync_no_peer";
+    case ZCL_APP_SYNC_STORE: return "appsync_store_refused";
     }
     return "appsync_unknown";
 }
