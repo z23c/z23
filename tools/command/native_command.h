@@ -2527,6 +2527,14 @@ void zcl_native_handle_dev_train_drop(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* dev.train.keep — the unattended keeper
+ * (tools/command/native_dev_train_keep.c). Its own file: the four verbs
+ * above are hand-driven, this one runs from a timer with no session alive,
+ * and one file owns one job. Compiled unconditionally like its siblings. */
+void zcl_native_handle_dev_train_keep(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* dev.index.* — local data-source ingest/search
  * (tools/command/native_dev_index_command.c backed by
  * native_dev_index_{catalog,ingest,search}.c). Compiled unconditionally,

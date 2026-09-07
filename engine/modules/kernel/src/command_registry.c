@@ -863,6 +863,18 @@ const struct zcl_command_spec *zcl_command_registry_resolve_words(
 }
 #endif
 
+/* Boolean input keys that carry no per-leaf rule of their own. They live in
+ * one predicate rather than in a longer || chain inside the validator: that
+ * chain is already the widest branch in this file, and every key appended to
+ * it in place made it wider. `release` moved here unchanged; `once` and
+ * `dry_run` are dev.train.keep's, whose CLI passes them as plain bools. */
+static bool cr_input_extra_bool_key(const char *key)
+{
+    return strcmp(key, "release") == 0 || strcmp(key, "once") == 0 ||
+           strcmp(key, "dry_run") == 0 ||
+           command_registry_devagent_input_extra_bool_key(key);
+}
+
 bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                                          const struct json_value *input,
                                          char *why, size_t why_size)
@@ -911,8 +923,7 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                    strcmp(key, "all") == 0 ||
                    strcmp(key, "allow_high_fees") == 0 ||
                    strcmp(key, "exact") == 0 || strcmp(key, "restore") == 0 ||
-                   strcmp(key, "release") == 0 ||
-                   command_registry_devagent_input_extra_bool_key(key)) {
+                   cr_input_extra_bool_key(key)) {
             /* Each is a bool in its own declared schema, and the default
              * STRING branch made it unpassable from a shell while raw RPC
              * accepted it fine — `all`, `include_evidence_wires`, and the

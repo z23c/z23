@@ -1265,6 +1265,36 @@ ZCL_COMMAND_DEV_COMMAND(
     "stack removal requires the dev binary",
     "z23-dev dev train drop --name <n>")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.train.keep", "dev.train", "",
+    "Advance one train's unattended state machine by exactly one step",
+    "One bounded pass over <scratch>/train<N>: read KEEP.json, do the single "
+    "step that state allows, persist the new state, return. There is no loop "
+    "and no wait, because the caller is a five-minute timer and the agent "
+    "that opened the train is usually dead by now. idle takes the LAND "
+    "verdicts out of late_picks.txt, refuses unless origin/main still equals "
+    "the queue's base, cherry-picks each lane's merge-base(base,sha)..sha "
+    "with -x -S, runs dev-bin/complexity/lint-gates/lint, regenerates the "
+    "generated docs as one signed commit, writes READY, then runs "
+    "land_pre.sh and launches land_unit.sh only on PRECHECK: OK. landing "
+    "reads dev.land's outcome ledger and, once the tip landed, retires the "
+    "refs named in picks.txt and opens the next train's queue. A conflict, a "
+    "failed gate or a refused precheck sets blocked and STOPS: blocked never "
+    "retries itself, so a broken train costs one message rather than a box. "
+    "--dry-run prints the plan and touches nothing.", 65536,
+    "train,keep,unattended,timer,land,queue,state-machine",
+    "zcl.train_keep_input.v1", "zcl.train_keep.v1", "train,once,dry_run", "",
+    "z23 dev train keep --train=48 --once",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_train_keep,
+    "the unattended train keeper requires the dev binary",
+    "z23-dev dev train keep --train=<N>")
+
 /* ── dev.index ─────────────────────────────────────────────────────────────
  * Local data-source ingest/search over engine/composition/sources.def (the
  * board, the experiment ledger, the landing outcomes ledger, and every

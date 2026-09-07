@@ -906,6 +906,87 @@ static void dvt_human_summary(const struct json_value *data)
         printf("next:    %s\n", next);
 }
 
+/* Every flag any dev.train verb accepts, in one place. The five verbs share
+ * one CLI entry point because repeated --source is not representable by the
+ * generic --key=value parser; splitting the parse into two small predicates
+ * keeps that entry point readable now that a fifth verb has joined. */
+struct dvt_cli_opts {
+    char name[64];
+    char sources[ZCL_COMMAND_MAX_INPUT];
+    size_t sources_len;
+    int64_t timeout_ms;
+    char train[16];
+    bool force;
+    bool human;
+    bool once;
+    bool dry_run;
+    bool saw_timeout;
+    bool saw_train;
+};
+
+/* build/check/status/drop flags. Returns false for a word it does not own. */
+static bool dvt_cli_build_flag(const char *w, struct dvt_cli_opts *o)
+{
+    const char *value = NULL;
+    if (dvt_cli_flag(w, "name", &value) && value) {
+        (void)snprintf(o->name, sizeof(o->name), "%s", value);
+    } else if (dvt_cli_flag(w, "source", &value) && value) {
+        int n = snprintf(o->sources + o->sources_len,
+                        sizeof(o->sources) - o->sources_len, "%s%s",
+                        o->sources_len ? "\n" : "", value);
+        if (n > 0 && (size_t)n < sizeof(o->sources) - o->sources_len)
+            o->sources_len += (size_t)n;
+    } else if (dvt_cli_flag(w, "timeout", &value) && value) {
+        o->timeout_ms = strtoll(value, NULL, 10);
+        o->saw_timeout = true;
+    } else if (dvt_cli_flag(w, "force", &value)) {
+        o->force = true;
+    } else if (dvt_cli_flag(w, "human", &value)) {
+        o->human = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* keep flags. `--once` is accepted and documented rather than implemented:
+ * one pass is the ONLY mode this leaf has, and a flag that says so out loud
+ * is better than a caller assuming the other mode exists. */
+static bool dvt_cli_keep_flag(const char *w, struct dvt_cli_opts *o)
+{
+    const char *value = NULL;
+    if (dvt_cli_flag(w, "train", &value) && value) {
+        (void)snprintf(o->train, sizeof(o->train), "%s", value);
+        o->saw_train = true;
+    } else if (dvt_cli_flag(w, "once", &value)) {
+        o->once = true;
+    } else if (dvt_cli_flag(w, "dry-run", &value)) {
+        o->dry_run = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static void dvt_cli_input(const struct dvt_cli_opts *o,
+                          struct json_value *input)
+{
+    if (o->name[0])
+        (void)json_push_kv_str(input, "name", o->name);
+    if (o->sources_len)
+        (void)json_push_kv_str(input, "sources", o->sources);
+    if (o->saw_timeout)
+        (void)json_push_kv_int(input, "timeout_ms", o->timeout_ms);
+    if (o->force)
+        (void)json_push_kv_bool(input, "force", true);
+    if (o->saw_train)
+        (void)json_push_kv_str(input, "train", o->train);
+    if (o->once)
+        (void)json_push_kv_bool(input, "once", true);
+    if (o->dry_run)
+        (void)json_push_kv_bool(input, "dry_run", true);
+}
+
 bool zcl_native_dev_train_cli(const struct zcl_command_spec *spec,
                               const char *const *words, size_t word_count,
                               size_t consumed, int *out_rc)
@@ -914,48 +995,23 @@ bool zcl_native_dev_train_cli(const struct zcl_command_spec *spec,
         return false;
     *out_rc = ZCL_COMMAND_EXIT_OK;
 
-    char name[64] = {0};
-    char sources[ZCL_COMMAND_MAX_INPUT] = {0};
-    size_t sources_len = 0;
-    int64_t timeout_ms = 0;
-    bool force = false, human = false, saw_timeout = false;
+    struct dvt_cli_opts opts;
+    memset(&opts, 0, sizeof(opts));
 
     for (size_t i = consumed; i < word_count; i++) {
         const char *w = words[i];
-        const char *value = NULL;
-        if (dvt_cli_flag(w, "name", &value) && value) {
-            (void)snprintf(name, sizeof(name), "%s", value);
-        } else if (dvt_cli_flag(w, "source", &value) && value) {
-            int n = snprintf(sources + sources_len,
-                            sizeof(sources) - sources_len, "%s%s",
-                            sources_len ? "\n" : "", value);
-            if (n > 0 && (size_t)n < sizeof(sources) - sources_len)
-                sources_len += (size_t)n;
-        } else if (dvt_cli_flag(w, "timeout", &value) && value) {
-            timeout_ms = strtoll(value, NULL, 10);
-            saw_timeout = true;
-        } else if (dvt_cli_flag(w, "force", &value)) {
-            force = true;
-        } else if (dvt_cli_flag(w, "human", &value)) {
-            human = true;
-        } else {
-            printf("{\"ok\":false,\"error\":\"unknown flag %s\"}\n", w);
-            *out_rc = ZCL_COMMAND_EXIT_INVALID;
-            return true;
-        }
+        if (dvt_cli_build_flag(w, &opts) || dvt_cli_keep_flag(w, &opts))
+            continue;
+        printf("{\"ok\":false,\"error\":\"unknown flag %s\"}\n", w);
+        *out_rc = ZCL_COMMAND_EXIT_INVALID;
+        return true;
     }
 
     struct json_value input;
     json_init(&input);
     json_set_object(&input);
-    if (name[0])
-        (void)json_push_kv_str(&input, "name", name);
-    if (sources_len)
-        (void)json_push_kv_str(&input, "sources", sources);
-    if (saw_timeout)
-        (void)json_push_kv_int(&input, "timeout_ms", timeout_ms);
-    if (force)
-        (void)json_push_kv_bool(&input, "force", true);
+    dvt_cli_input(&opts, &input);
+    bool human = opts.human;
 
     char why[192];
     if (!zcl_command_registry_input_validate(spec, &input, why, sizeof(why))) {
