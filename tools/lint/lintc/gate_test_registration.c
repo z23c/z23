@@ -249,8 +249,10 @@ static int tr_note_entry(struct tr_ep_ctx *c, const char *name, const char *path
     return 0;
 }
 
-static int tr_on_test(const char *path, void *ctx)
+static int tr_on_test(const char *path, int stage, void *ctx)
 {
+    if (stage != 0)
+        return 0;
     struct tr_ep_ctx *c = ctx;
     const char *base;
     int hit;
@@ -371,7 +373,7 @@ static int tr_walk_src(struct tr_ep_ctx *ep)
                              names[i]->d_name), sizeof path))
                 rc = 2;
             else
-                rc = tr_on_test(path, ep);
+                rc = tr_on_test(path, 0, ep);
         }
         free(names[i]);
     }
@@ -379,11 +381,33 @@ static int tr_walk_src(struct tr_ep_ctx *ep)
     return rc ? rc : ep->rc;
 }
 
+/* The shared native git-index reader refuses a mandatory extension it does
+ * not interpret by naming it in badext: reading past one could silently
+ * yield a PARTIAL file list, so this gate refuses to grade rather than pass
+ * on a short list. Same message shape as the other index gates. */
+static int tr_from_index(struct tr_ep_ctx *ep)
+{
+    char badext[5] = "";
+    int rc = lint_git_index_foreach(tr_on_test, ep, badext);
+    if (badext[0]) {
+        fprintf(stderr,
+                "z23-lint: UNPROVEN — the git index carries a mandatory\n"
+                "  extension ('%s') this native reader does not interpret;\n"
+                "  reading past it could silently yield a PARTIAL file\n"
+                "  list. Refusing to grade. Re-create the index without\n"
+                "  split-index/sparse extensions, or teach\n"
+                "  lint_git_index_foreach the extension first.\n",
+                badext);
+        return 2;
+    }
+    return rc;
+}
+
 static int tr_collect_entries(struct tr_ep_ctx *ep)
 {
     int rc;
     if (lint_prod_scan()) {
-        rc = lint_git_index_foreach(tr_on_test, ep);
+        rc = tr_from_index(ep);
         if (rc)
             return rc;
         return ep->rc;

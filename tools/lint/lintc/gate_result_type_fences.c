@@ -62,8 +62,10 @@ static int ort_add(struct ort_set *s, const char *path)
     return 0;
 }
 
-static int ort_on_index(const char *path, void *ctx)
+static int ort_on_index(const char *path, int stage, void *ctx)
 {
+    if (stage != 0)
+        return 0;
     if (!ort_is_c(path) || !ort_under(path) || lint_path_is_excluded(path))
         return 0;
     return ort_add(ctx, path);
@@ -98,6 +100,28 @@ static int ort_walk(const char *dir, struct ort_set *s)
     return rc;
 }
 
+/* The shared native git-index reader refuses a mandatory extension it does
+ * not interpret by naming it in badext: reading past one could silently
+ * yield a PARTIAL file list, so this gate refuses to grade rather than pass
+ * on a short list. Same message shape as the other index gates. */
+static int ort_from_index(struct ort_set *s)
+{
+    char badext[5] = "";
+    int rc = lint_git_index_foreach(ort_on_index, s, badext);
+    if (badext[0]) {
+        fprintf(stderr,
+                "z23-lint: UNPROVEN — the git index carries a mandatory\n"
+                "  extension ('%s') this native reader does not interpret;\n"
+                "  reading past it could silently yield a PARTIAL file\n"
+                "  list. Refusing to grade. Re-create the index without\n"
+                "  split-index/sparse extensions, or teach\n"
+                "  lint_git_index_foreach the extension first.\n",
+                badext);
+        return 2;
+    }
+    return rc;
+}
+
 /* Production scan: git-tracked files only, via the index (fast, no
  * directory traversal) -- an unread or refused index is UNPROVEN 2, same
  * as any other production-mode gate. Full/dev scan (the default, and what
@@ -109,7 +133,7 @@ static int ort_walk(const char *dir, struct ort_set *s)
 static int ort_collect(struct ort_set *s)
 {
     if (lint_prod_scan())
-        return lint_git_index_foreach(ort_on_index, s);
+        return ort_from_index(s);
     return ort_walk(k_ort_root, s);
 }
 

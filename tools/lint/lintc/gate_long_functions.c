@@ -86,8 +86,10 @@ static int lf_skip_warn(const char *path)
         || lint_path_is_excluded(path);
 }
 
-static int lf_on_index(const char *path, void *ctx)
+static int lf_on_index(const char *path, int stage, void *ctx)
 {
+    if (stage != 0)
+        return 0;
     struct lf_coll *c = ctx;
     int i, ok = 0;
     if (!lf_is_c(path) || lf_skip_warn(path))
@@ -138,6 +140,28 @@ static int lf_walk(const char *dir, int depth1, struct lf_set *s)
     return rc;
 }
 
+/* The shared native git-index reader refuses a mandatory extension it does
+ * not interpret by naming it in badext: reading past one could silently
+ * yield a PARTIAL file list, so this gate refuses to grade rather than pass
+ * on a short list. Same message shape as the other index gates. */
+static int lf_from_index(struct lf_coll *c)
+{
+    char badext[5] = "";
+    int rc = lint_git_index_foreach(lf_on_index, c, badext);
+    if (badext[0]) {
+        fprintf(stderr,
+                "z23-lint: UNPROVEN — the git index carries a mandatory\n"
+                "  extension ('%s') this native reader does not interpret;\n"
+                "  reading past it could silently yield a PARTIAL file\n"
+                "  list. Refusing to grade. Re-create the index without\n"
+                "  split-index/sparse extensions, or teach\n"
+                "  lint_git_index_foreach the extension first.\n",
+                badext);
+        return 2;
+    }
+    return rc;
+}
+
 static int lf_collect(struct lf_set *s, const char (*roots)[RS_PATH], int nr,
                       int depth1)
 {
@@ -146,7 +170,7 @@ static int lf_collect(struct lf_set *s, const char (*roots)[RS_PATH], int nr,
     int rc, i;
     s->n = 0;
     if (lint_prod_scan())
-        return lint_git_index_foreach(lf_on_index, &c);
+        return lf_from_index(&c);
     rc = 0;
     for (i = 0; rc == 0 && i < nr; i++)
         rc = lf_walk(roots[i], depth1, s);
@@ -359,7 +383,7 @@ static int lf_cov_root_ok(const char *root, int depth1)
     c.nroots = 1;
     c.depth1 = depth1;
     c.set = &s;
-    if (lint_git_index_foreach(lf_on_index, &c))
+    if (lf_from_index(&c))
         return 2;
     if (s.n == 0) {
         fprintf(stderr, "check_long_functions: UNPROVEN — declared scan root\n"
@@ -401,10 +425,10 @@ static int lf_coverage(const struct lf_set *enf, const struct lf_set *lib,
         if (rc)
             return rc;
     }
-    rc = lint_git_index_foreach(lf_on_index, &ce);
+    rc = lf_from_index(&ce);
     if (rc)
         return rc;
-    rc = lint_git_index_foreach(lf_on_index, &cl);
+    rc = lf_from_index(&cl);
     if (rc)
         return rc;
     me = lf_missing(&eexp, enf);
