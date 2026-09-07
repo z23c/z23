@@ -116,10 +116,10 @@ void zcl_native_handle_fleet_triggers_check(
     json_init(&fired_ids);
     json_set_array(&fired_ids);
 
-    uint64_t checked = 0, fired = 0;
+    uint64_t checked = 0, fired = 0, failed = 0;
     char why[256] = "";
-    if (!zcl_trigger_check_run(dry_run, since_s, &checked, &fired, &fired_ids,
-                              why, sizeof why)) {
+    if (!zcl_trigger_check_run(dry_run, since_s, &checked, &fired, &failed,
+                              &fired_ids, why, sizeof why)) {
         json_free(&fired_ids);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                               ZCL_COMMAND_EXIT_INTERNAL, "CHECK_FAILED",
@@ -129,19 +129,31 @@ void zcl_native_handle_fleet_triggers_check(
         return;
     }
 
-    char text[128];
-    (void)snprintf(text, sizeof text, "checked %llu rows, fired %llu\n",
-                  (unsigned long long)checked, (unsigned long long)fired);
+    char text[192];
+    (void)snprintf(text, sizeof text,
+                  "checked %llu rows, fired %llu, failed %llu\n",
+                  (unsigned long long)checked, (unsigned long long)fired,
+                  (unsigned long long)failed);
 
     (void)json_push_kv_str(&reply->data, "schema",
                            "zcl.fleet_triggers_check.v1");
     (void)json_push_kv_int(&reply->data, "checked", (int64_t)checked);
     (void)json_push_kv_int(&reply->data, "fired", (int64_t)fired);
+    (void)json_push_kv_int(&reply->data, "failed", (int64_t)failed);
     (void)json_push_kv_int(&reply->data, "since", since_s);
     (void)json_push_kv_bool(&reply->data, "dry_run", dry_run);
     (void)json_push_kv(&reply->data, "fired_ids", &fired_ids);
     (void)json_push_kv_str(&reply->data, "text", text);
     json_free(&fired_ids);
+
+    if (failed > 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                              ZCL_COMMAND_EXIT_FAILED, "ACTION_FAILED",
+                              "execute", true, fired > 0,
+                              why[0] ? why : "a trigger action failed",
+                              "fleet.triggers.check");
+        return;
+    }
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }

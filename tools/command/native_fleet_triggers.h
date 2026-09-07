@@ -77,11 +77,16 @@ int zcl_trigger_ingest_github_comments(const char *jsonl_path, char *out_why,
  * trigger whose source matches, performs the matched action, and (unless
  * dry_run) advances the cursor past the rows it read. since_s is a UTC
  * unix floor: a row whose own timestamp field parses older than it is
- * skipped and not counted as checked. Returns false only on an
- * unrecoverable local error (out_why names it); a source that is simply
- * absent is not an error and contributes zero rows. */
+ * skipped and not counted as checked. Fail-closed: a matched trigger whose
+ * action returns false is NOT fired (nothing goes into out_fired_ids), the
+ * cursor stops BEFORE that row so the next run retries it, and later rows
+ * of the same source wait behind it. out_why then names the trigger and
+ * the action's own reason. Returns false only on an unrecoverable local
+ * error (out_why names it); a source that is simply absent is not an
+ * error and contributes zero rows. */
 bool zcl_trigger_check_run(bool dry_run, int64_t since_s,
                           uint64_t *out_checked, uint64_t *out_fired,
+                          uint64_t *out_failed,
                           struct json_value *out_fired_ids /* array, or NULL */,
                           char *out_why, size_t out_why_cap);
 

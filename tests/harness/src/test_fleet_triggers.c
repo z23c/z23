@@ -696,14 +696,15 @@ static char *ftx_no_node_rpc_hook(const char *method, const char *params_json)
 }
 
 /* No node answering: the action fails closed (fb_no_node's exact refusal;
- * see native_fleet_board_command.c) and `check` itself still succeeds and
- * still counts the row as fired — the same shape `ledger` already has. */
+ * see native_fleet_board_command.c). The row is NOT fired, the cursor holds
+ * before it (so a retry sees it again), and `check` itself fails closed
+ * with a non-zero exit and a typed refusal naming the trigger. */
 static int ftx_case_board_post_no_node(void)
 {
     int failures = 0;
 
-    printf("fleet_triggers: with no node running, board_post refuses "
-          "clearly but check still succeeds... ");
+    printf("fleet_triggers: with no node running, board_post refuses and "
+          "holds the cursor... ");
     ftx_isolate("github_no_node");
     ftx_install_clock();
 
@@ -723,12 +724,153 @@ static int ftx_case_board_post_no_node(void)
     zcl_command_reply_free(&ingest_reply);
 
     node_rpc_client_set_test_hook(ftx_no_node_rpc_hook);
-    struct ftx_call c;
-    ftx_begin(&c, false, 0);
-    ASSERT(ftx_run(&c));
-    ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
-    ASSERT_EQ(ftx_int(&c, "fired"), 1);
-    ftx_end(&c);
+    struct ftx_call c1;
+    ftx_begin(&c1, false, 0);
+    ASSERT(ftx_run(&c1));
+    ASSERT(c1.reply.status != ZCL_COMMAND_STATUS_PASSED);
+    ASSERT(c1.reply.exit_code != ZCL_COMMAND_EXIT_OK);
+    ASSERT_EQ(ftx_int(&c1, "checked"), 1);
+    ASSERT_EQ(ftx_int(&c1, "fired"), 0);
+    ASSERT_EQ(ftx_int(&c1, "failed"), 1);
+    ASSERT(strstr(c1.reply.error.message, "github_comment_to_board") != NULL);
+    ftx_end(&c1);
+
+    /* The cursor held: a second check with the same failing node still
+     * sees the same row and fails the same way, not "checked 0". */
+    struct ftx_call c2;
+    ftx_begin(&c2, false, 0);
+    ASSERT(ftx_run(&c2));
+    ASSERT(c2.reply.status != ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c2, "checked"), 1);
+    ASSERT_EQ(ftx_int(&c2, "fired"), 0);
+    ASSERT_EQ(ftx_int(&c2, "failed"), 1);
+    ftx_end(&c2);
+    node_rpc_client_set_test_hook(NULL);
+    clock_reset_default();
+    PASS();
+_test_next:;
+    return failures;
+}
+
+/* Once the node starts answering, the SAME held row fires exactly once and
+ * the cursor advances — proving a failed action is retried, not lost or
+ * double-fired. */
+static int ftx_case_board_post_retries_then_fires(void)
+{
+    int failures = 0;
+
+    printf("fleet_triggers: a held row retries and fires once the node "
+          "answers... ");
+    ftx_isolate("github_retry_fires");
+    ftx_install_clock();
+
+    char base[PATH_MAX];
+    test_make_tmpdir(base, sizeof base, "fleet_triggers_ingest", "retry");
+    char src_path[PATH_MAX];
+    (void)snprintf(src_path, sizeof src_path, "%s/comments.jsonl", base);
+    ftx_write_file(src_path,
+                  "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
+                  "\"number\":\"47\",\"comment_id\":\"c11\","
+                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "c11\",\"body\":\"retry me\","
+                  "\"ts\":\"2025-09-04T15:00:00Z\"}\n");
+    struct zcl_command_reply ingest_reply;
+    ftx_ingest_call("github", src_path, &ingest_reply);
+    ASSERT(ingest_reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&ingest_reply);
+
+    node_rpc_client_set_test_hook(ftx_no_node_rpc_hook);
+    struct ftx_call c1;
+    ftx_begin(&c1, false, 0);
+    ASSERT(ftx_run(&c1));
+    ASSERT(c1.reply.status != ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c1, "fired"), 0);
+    ASSERT_EQ(ftx_int(&c1, "failed"), 1);
+    ftx_end(&c1);
+
+    g_ftx_board_calls = 0;
+    node_rpc_client_set_test_hook(ftx_board_rpc_hook);
+    struct ftx_call c2;
+    ftx_begin(&c2, false, 0);
+    ASSERT(ftx_run(&c2));
+    ASSERT(c2.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c2, "checked"), 1);
+    ASSERT_EQ(ftx_int(&c2, "fired"), 1);
+    ASSERT_EQ(ftx_int(&c2, "failed"), 0);
+    ftx_end(&c2);
+    ASSERT_EQ(g_ftx_board_calls, 1);
+
+    /* The cursor advanced: a third check sees nothing new. */
+    struct ftx_call c3;
+    ftx_begin(&c3, false, 0);
+    ASSERT(ftx_run(&c3));
+    ASSERT(c3.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c3, "checked"), 0);
+    ASSERT_EQ(ftx_int(&c3, "fired"), 0);
+    ftx_end(&c3);
+    node_rpc_client_set_test_hook(NULL);
+    clock_reset_default();
+    PASS();
+_test_next:;
+    return failures;
+}
+
+/* A later row waits behind a failed one: with two rows queued and the node
+ * down, only the first is counted (checked=1) and the second is untouched
+ * until the first succeeds. */
+static int ftx_case_later_row_waits_behind_failed(void)
+{
+    int failures = 0;
+
+    printf("fleet_triggers: a later row waits behind a failed one... ");
+    ftx_isolate("github_later_waits");
+    ftx_install_clock();
+
+    char base[PATH_MAX];
+    test_make_tmpdir(base, sizeof base, "fleet_triggers_ingest", "waits");
+    char src_path[PATH_MAX];
+    (void)snprintf(src_path, sizeof src_path, "%s/comments.jsonl", base);
+    ftx_write_file(src_path,
+                  "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
+                  "\"number\":\"47\",\"comment_id\":\"c12\","
+                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "c12\",\"body\":\"first, will fail\","
+                  "\"ts\":\"2025-09-04T15:00:00Z\"}\n"
+                  "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
+                  "\"number\":\"47\",\"comment_id\":\"c13\","
+                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "c13\",\"body\":\"second, waits\","
+                  "\"ts\":\"2025-09-04T15:00:01Z\"}\n");
+    struct zcl_command_reply ingest_reply;
+    ftx_ingest_call("github", src_path, &ingest_reply);
+    ASSERT(ingest_reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(json_get_int(json_get(&ingest_reply.data, "appended")), 2);
+    zcl_command_reply_free(&ingest_reply);
+
+    node_rpc_client_set_test_hook(ftx_no_node_rpc_hook);
+    struct ftx_call c1;
+    ftx_begin(&c1, false, 0);
+    ASSERT(ftx_run(&c1));
+    ASSERT(c1.reply.status != ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c1, "checked"), 1);
+    ASSERT_EQ(ftx_int(&c1, "fired"), 0);
+    ASSERT_EQ(ftx_int(&c1, "failed"), 1);
+    ftx_end(&c1);
+
+    /* Now the node answers: the first row fires and, in the SAME run, so
+     * does the second — nothing was lost, and the wait ends as soon as the
+     * blocker clears. */
+    g_ftx_board_calls = 0;
+    node_rpc_client_set_test_hook(ftx_board_rpc_hook);
+    struct ftx_call c2;
+    ftx_begin(&c2, false, 0);
+    ASSERT(ftx_run(&c2));
+    ASSERT(c2.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c2, "checked"), 2);
+    ASSERT_EQ(ftx_int(&c2, "fired"), 2);
+    ASSERT_EQ(ftx_int(&c2, "failed"), 0);
+    ftx_end(&c2);
+    ASSERT_EQ(g_ftx_board_calls, 2);
     node_rpc_client_set_test_hook(NULL);
     clock_reset_default();
     PASS();
@@ -753,6 +895,8 @@ int test_fleet_triggers(void)
     failures += ftx_case_ingest_skips_malformed();
     failures += ftx_case_github_comment_fires_board_post();
     failures += ftx_case_board_post_no_node();
+    failures += ftx_case_board_post_retries_then_fires();
+    failures += ftx_case_later_row_waits_behind_failed();
 
     ftx_restore();
     if (failures == 0)

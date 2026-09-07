@@ -366,15 +366,19 @@ static void trg_board_post_text(const struct zcl_trigger_row *trig,
 static bool trg_action_board_post(const struct zcl_trigger_row *trig,
                                   const struct trg_row *row,
                                   const char *const *header,
-                                  size_t header_count, const char *actual)
+                                  size_t header_count, const char *actual,
+                                  char *out_why, size_t out_why_cap)
 {
     char text[FLEET_BOARD_LINE_MAX];
     trg_board_post_text(trig, row, header, header_count, actual, text,
                         sizeof text);
     char why[192];
     bool ok = zcl_native_fleet_board_post_note(text, why, sizeof why);
-    if (!ok)
+    if (!ok) {
         fprintf(stderr, "TRIGGER %s board_post refused: %s\n", trig->id, why);
+        (void)snprintf(out_why, out_why_cap, "%s board_post refused: %s",
+                      trig->id, why);
+    }
     return ok;
 }
 
@@ -468,28 +472,52 @@ static void trg_read_header(FILE *f, bool has_header, char *header_storage,
     }
 }
 
-/* One matched-or-not verdict for a single trigger against a single row. */
-static bool trg_fire_if_matched(const struct zcl_trigger_row *trig,
-                                const struct trg_row *row,
-                                const char *const *header,
-                                size_t header_count, bool dry_run,
-                                uint64_t seq, struct json_value *fired_ids)
+/* Runs the concrete action for one already-matched trigger. print can never
+ * fail; ledger and board_post can (no disk, no node) — a false return
+ * leaves the row unfired and out_why names which trigger/action refused. */
+static bool trg_run_action(const struct zcl_trigger_row *trig,
+                           const struct trg_row *row,
+                           const char *const *header, size_t header_count,
+                           const char *actual, uint64_t seq, char *out_why,
+                           size_t out_why_cap)
 {
-    (void)dry_run;
-    const char *actual = trg_row_field(row, header, header_count, trig->field);
-    if (!actual || !trg_op_matches(trig->op, actual, trig->value))
-        return false;
     switch (trig->action) {
     case ZCL_TRIGGER_ACTION_PRINT:
         trg_action_print(trig, actual);
-        break;
+        return true;
     case ZCL_TRIGGER_ACTION_LEDGER:
-        (void)trg_action_ledger(trig, actual, seq);
-        break;
+        if (trg_action_ledger(trig, actual, seq))
+            return true;
+        (void)snprintf(out_why, out_why_cap, "%s ledger append failed",
+                      trig->id);
+        return false;
     case ZCL_TRIGGER_ACTION_BOARD_POST:
-        (void)trg_action_board_post(trig, row, header, header_count, actual);
-        break;
+        return trg_action_board_post(trig, row, header, header_count, actual,
+                                     out_why, out_why_cap);
     }
+    return true;
+}
+
+enum trg_match_result {
+    TRG_NO_MATCH = 0,
+    TRG_MATCH_FIRED,
+    TRG_MATCH_FAILED,
+};
+
+/* One matched/fired/failed verdict for a single trigger against a single
+ * row. A matched trigger whose action fails is NOT fired: nothing is
+ * pushed to fired_ids and the caller must not advance past this row. */
+static enum trg_match_result trg_fire_if_matched(
+    const struct zcl_trigger_row *trig, const struct trg_row *row,
+    const char *const *header, size_t header_count, uint64_t seq,
+    struct json_value *fired_ids, char *why, size_t why_cap)
+{
+    const char *actual = trg_row_field(row, header, header_count, trig->field);
+    if (!actual || !trg_op_matches(trig->op, actual, trig->value))
+        return TRG_NO_MATCH;
+    if (!trg_run_action(trig, row, header, header_count, actual, seq, why,
+                       why_cap))
+        return TRG_MATCH_FAILED;
     if (fired_ids) {
         struct json_value idv;
         json_init(&idv);
@@ -497,7 +525,7 @@ static bool trg_fire_if_matched(const struct zcl_trigger_row *trig,
         (void)json_push_back(fired_ids, &idv);
         json_free(&idv);
     }
-    return true;
+    return TRG_MATCH_FIRED;
 }
 
 /* Everything the per-line scan needs held together, so passing it around
@@ -521,29 +549,53 @@ static bool trg_row_too_old(const struct trg_scan_ctx *ctx,
     return trg_parse_iso8601(raw, &ts) && ts < ctx->cutoff;
 }
 
+/* Outcome of scoring one row against every registered trigger for its
+ * source. A row is "failed" the instant one matched trigger's action
+ * fails; evaluation stops there rather than trying the rest, so a retry
+ * of the same row never re-runs an action that already ran. */
+struct trg_row_outcome {
+    uint64_t fired;
+    bool failed;
+    char why[256];
+};
+
 /* Evaluate every registered trigger for this source against one row,
- * performing whichever actions match. Returns how many fired. */
-static uint64_t trg_evaluate_row(const struct trg_scan_ctx *ctx,
-                                 const struct trg_row *row, uint64_t seq)
+ * performing whichever actions match, until one fails or all have run. */
+static void trg_evaluate_row(const struct trg_scan_ctx *ctx,
+                             const struct trg_row *row, uint64_t seq,
+                             struct trg_row_outcome *out)
 {
-    uint64_t fired_count = 0;
+    out->fired = 0;
+    out->failed = false;
+    out->why[0] = 0;
     for (size_t i = 0; i < zcl_trigger_count(); i++) {
         const struct zcl_trigger_row *trig = zcl_trigger_at(i);
-        if (trig && trig->source == ctx->spec->source &&
+        if (!trig || trig->source != ctx->spec->source)
+            continue;
+        enum trg_match_result r =
             trg_fire_if_matched(trig, row, ctx->header, ctx->header_count,
-                               ctx->dry_run, seq, ctx->fired_ids))
-            fired_count++;
+                               seq, ctx->fired_ids, out->why, sizeof out->why);
+        if (r == TRG_MATCH_FIRED)
+            out->fired++;
+        else if (r == TRG_MATCH_FAILED) {
+            out->failed = true;
+            return;
+        }
     }
-    return fired_count;
 }
 
 /* Parse one complete (newline-stripped) line into a row and score it
  * against the registry. *checked counts every row this source's format
- * could parse, whether or not any trigger fired. */
+ * could parse, whether it fired, failed, or matched nothing. A failed row
+ * leaves *row_count untouched (so its cursor position is not consumed) and
+ * sets *row_failed so the caller stops reading further rows this run. */
 static void trg_process_line(const struct trg_scan_ctx *ctx, char *line,
                              size_t len, uint64_t *row_count,
-                             uint64_t *checked, uint64_t *fired)
+                             uint64_t *checked, uint64_t *fired,
+                             uint64_t *failed, char *why, size_t why_cap,
+                             bool *row_failed)
 {
+    *row_failed = false;
     if (len == 0)
         return;
     struct trg_row row;
@@ -556,11 +608,25 @@ static void trg_process_line(const struct trg_scan_ctx *ctx, char *line,
     }
     if (!have_row)
         return;
-    (*row_count)++;
+    uint64_t seq = *row_count + 1;
     (*checked)++;
-    if (!trg_row_too_old(ctx, &row))
-        *fired += trg_evaluate_row(ctx, &row, *row_count);
+    if (trg_row_too_old(ctx, &row)) {
+        trg_row_free(&row);
+        *row_count = seq;
+        return;
+    }
+    struct trg_row_outcome outcome;
+    trg_evaluate_row(ctx, &row, seq, &outcome);
     trg_row_free(&row);
+    if (outcome.failed) {
+        *row_failed = true;
+        (*failed)++;
+        if (why && outcome.why[0])
+            (void)snprintf(why, why_cap, "%s", outcome.why);
+        return;
+    }
+    *row_count = seq;
+    *fired += outcome.fired;
 }
 
 /* Cursor identity/shrink check: a replaced or truncated file restarts at
@@ -578,7 +644,8 @@ static void trg_cursor_rebase(struct trg_cursor *cursor, const struct stat *st)
 static void trg_process_source(const struct trg_source_spec *spec,
                                bool dry_run, int64_t since_s,
                                uint64_t *checked, uint64_t *fired,
-                               struct json_value *fired_ids)
+                               uint64_t *failed, struct json_value *fired_ids,
+                               char *out_why, size_t out_why_cap)
 {
     char path[PATH_MAX];
     struct stat st;
@@ -621,15 +688,26 @@ static void trg_process_source(const struct trg_source_spec *spec,
     uint64_t new_offset = start_offset;
     uint64_t new_row_count = cursor.row_count;
     char line[TRG_LINE_MAX];
+    char fail_why[256] = "";
+    bool any_failed = false;
     while (fgets(line, sizeof line, f)) {
-        size_t len = strlen(line);
-        if (len == 0 || line[len - 1] != '\n')
+        size_t raw_len = strlen(line);
+        if (raw_len == 0 || line[raw_len - 1] != '\n')
             break; /* partial trailing line: leave it for next time */
-        new_offset += (uint64_t)len;
-        line[--len] = 0; /* drop the newline for parsing */
-        trg_process_line(&ctx, line, len, &new_row_count, checked, fired);
+        line[raw_len - 1] = 0; /* drop the newline for parsing */
+        bool row_failed = false;
+        trg_process_line(&ctx, line, raw_len - 1, &new_row_count, checked,
+                         fired, failed, fail_why, sizeof fail_why,
+                         &row_failed);
+        if (row_failed) {
+            any_failed = true;
+            break; /* hold the cursor before this row; later rows wait */
+        }
+        new_offset += (uint64_t)raw_len;
     }
     fclose(f);
+    if (any_failed && out_why && out_why_cap && !out_why[0])
+        (void)snprintf(out_why, out_why_cap, "%s", fail_why);
 
     if (!dry_run) {
         cursor.size = (uint64_t)st.st_size;
@@ -640,20 +718,25 @@ static void trg_process_source(const struct trg_source_spec *spec,
 }
 
 bool zcl_trigger_check_run(bool dry_run, int64_t since_s, uint64_t *out_checked,
-                          uint64_t *out_fired, struct json_value *out_fired_ids,
+                          uint64_t *out_fired, uint64_t *out_failed,
+                          struct json_value *out_fired_ids,
                           char *out_why, size_t out_why_cap)
 {
-    if (!out_checked || !out_fired) {
+    if (!out_checked || !out_fired || !out_failed) {
         if (out_why)
             (void)snprintf(out_why, out_why_cap, "internal: no counters");
         return false;
     }
     *out_checked = 0;
     *out_fired = 0;
+    *out_failed = 0;
+    if (out_why && out_why_cap)
+        out_why[0] = 0;
     for (size_t i = 0; i < sizeof k_source_specs / sizeof k_source_specs[0];
         i++)
         trg_process_source(&k_source_specs[i], dry_run, since_s, out_checked,
-                          out_fired, out_fired_ids);
+                          out_fired, out_failed, out_fired_ids, out_why,
+                          out_why_cap);
     return true;
 }
 

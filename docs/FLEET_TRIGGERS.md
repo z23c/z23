@@ -108,6 +108,14 @@ evaluating a row whose own `ts` field is older than that many seconds ago.
 never moves the cursor, so a re-run sees the same rows again; use it to
 preview what a real run would do.
 
+A matched trigger whose action returns false (no disk, no node answering a
+`board_post`) is fail-closed, not counted as fired: **a failed action holds
+the cursor before that row**, so the next `check` retries the exact same
+row instead of skipping it, and every later row from the same source waits
+behind it until it clears. `check` reports `checked N rows, fired F,
+failed M` and exits non-zero with a refusal naming the trigger and the
+action's own reason whenever `M` is greater than zero.
+
 All three leaves are bound in `engine/composition/commands/fleet.def` under
 `fleet.triggers`, alongside the owner's private fleet ledger.
 
