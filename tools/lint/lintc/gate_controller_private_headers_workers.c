@@ -250,6 +250,121 @@ static int cphw_phase3(void)
     return rc;
 }
 
+/* ── mandatory/optional git-index-extension coverage (root=".") ─────────
+ * A synthetic one-entry DIRC index proves the "." collector (p9's fix to
+ * cphs_collect in gate_controller_private_headers_scan.c) now refuses a
+ * mandatory extension by name instead of silently falling through to the
+ * private-header floor check with a partial file list, while an optional
+ * extension changes nothing — the gate_supervisor_domain_workers.c
+ * sdw_ext_link/sdw_ext_tree precedent, exercised here at the gate-entry
+ * layer (cic_invoke) rather than the walker layer, so it proves the
+ * wiring, not just lib.c's reader (already covered by that other gate's
+ * own selftest). */
+
+enum { CPHW_IDXCAP = 128 };
+
+static size_t cphw_idx_build(unsigned char *buf, const char *sig)
+{
+    memset(buf, 0, CPHW_IDXCAP);
+    memcpy(buf, "DIRC", 4);
+    buf[7] = 2;                     /* version 2 */
+    buf[11] = 1;                    /* one entry */
+    buf[12 + 61] = 3;               /* entry flags: namelen of "t.c" */
+    memcpy(buf + 12 + 62, "t.c", 3);
+    size_t n = 12 + 72;
+    if (sig) {
+        memcpy(buf + n, sig, 4);
+        buf[n + 7] = 4;             /* payload size */
+        n += 12;
+    }
+    return n + 20;
+}
+
+/* Build the synthetic index (sig = the extension to append, or NULL),
+ * point GIT_INDEX_FILE at it, and invoke the real gate once with
+ * ZCL_CONTROLLER_PRIVATE_SCAN_ROOT="." and the header-root/baseline vars
+ * cleared (repo defaults). Returns the invocation's own rc; *code and
+ * sink carry the gate's exit code and merged output. */
+static int cphw_ext_probe(const char *sig, char *sink, size_t cap,
+                          int *code)
+{
+    unsigned char buf[CPHW_IDXCAP];
+    size_t n = cphw_idx_build(buf, sig);
+    char path[64];
+    memcpy(path, "test-tmp/cph_idxext_XXXXXX", 27);
+    int fd = mkstemp(path);
+    if (fd < 0)
+        return die("z23-lint: mktemp failed\n", "");
+    FILE *f = fdopen(fd, "wb");
+    if (!f) {
+        close(fd);
+        unlink(path);
+        return die("z23-lint: write failed\n", "");
+    }
+    int bad = fwrite(buf, 1, n, f) != n;
+    if (fclose(f) != 0)
+        bad = 1;
+    if (bad) {
+        unlink(path);
+        return die("z23-lint: write failed\n", "");
+    }
+    int rc = setenv("GIT_INDEX_FILE", path, 1);
+    if (rc == 0)
+        rc = setenv("ZCL_CONTROLLER_PRIVATE_SCAN_ROOT", ".", 1);
+    if (rc == 0)
+        rc = unsetenv("ZCL_CONTROLLER_PRIVATE_HEADER_ROOT");
+    if (rc == 0)
+        rc = unsetenv("ZCL_CONTROLLER_PRIVATE_BASELINE");
+    if (rc != 0)
+        rc = die("z23-lint: setenv failed\n", "");
+    else
+        rc = cic_invoke(k_cphw_gate, 1, sink, cap, code);
+    (void)unsetenv("GIT_INDEX_FILE");
+    if (unlink(path) != 0)
+        return die("z23-lint: unlink failed: %s\n", path);
+    return rc;
+}
+
+/* A mandatory 'link' extension: the gate refuses (exit 2) and names it,
+ * instead of falling through to the private-header floor with a partial
+ * scan. */
+static int cphw_ext_link(void)
+{
+    static char sink[CPHW_SINK];
+    int code = 0;
+    int rc = cphw_ext_probe("link", sink, sizeof sink, &code);
+    if (rc == 0 && (code != 2 || !strstr(sink, "link"))) {
+        fprintf(stderr, "%s: SELFTEST FAILED — mandatory extension not "
+                "refused/named\n", k_cphw_name);
+        rc = 2;
+    }
+    return rc;
+}
+
+/* An optional 'TREE' extension changes nothing: the gate still falls
+ * through to the ordinary "no controller private headers" floor (only
+ * "t.c" was collected), never the mandatory-extension message. */
+static int cphw_ext_tree(void)
+{
+    static char sink[CPHW_SINK];
+    int code = 0;
+    int rc = cphw_ext_probe("TREE", sink, sizeof sink, &code);
+    if (rc == 0 && (code != 2 || strstr(sink, "mandatory"))) {
+        fprintf(stderr, "%s: SELFTEST FAILED — optional extension changed "
+                "the verdict\n", k_cphw_name);
+        rc = 2;
+    }
+    return rc;
+}
+
+static int cphw_phase4(void)
+{
+    int rc = cphw_ext_link();
+    if (rc == 0)
+        rc = cphw_ext_tree();
+    return rc;
+}
+
 int check_controller_private_headers_selftest(void)
 {
     char root[4096];
@@ -267,9 +382,13 @@ int check_controller_private_headers_selftest(void)
     if (g_cphw_tmp[0])
         (void)rap_rm_rf(g_cphw_tmp);
     if (rc == 0)
+        rc = cphw_phase4();
+    if (rc == 0)
         fputs("[check_controller_private_headers] SELFTEST PASS (owner/"
               "private/test allowed; quoted/angle config, view, and "
               "public-header edges rejected; stale baseline and "
-              "missing/empty roots fail closed)\n", stdout);
+              "missing/empty roots fail closed; a mandatory index "
+              "extension is refused and named while an optional one "
+              "changes nothing)\n", stdout);
     return rc;
 }

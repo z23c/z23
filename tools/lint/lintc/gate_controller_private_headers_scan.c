@@ -208,13 +208,37 @@ static int cphs_walk(const char *root)
     return rc;
 }
 
+/* The mandatory index extension the reader last refused on ("" when the
+ * last read was clean or failed for another reason) — the
+ * gate_supervisor_domain.c precedent. */
+static char g_cphs_badext[5];
+
+/* A mandatory extension ('link', 'sdir'): reading past it could silently
+ * yield a PARTIAL file list, so it is named and refused here rather than
+ * falling through to a downstream floor check with an incomplete
+ * collection — the same failure mode, and the same message shape,
+ * gate_supervisor_domain.c's sd_oracle_badext refuses. */
+static int cphs_badext_report(void)
+{
+    fprintf(stderr, "[%s] UNPROVEN: the git index carries a mandatory\n"
+            "  extension ('%s') this native reader does not interpret;\n"
+            "  reading past it could silently yield a PARTIAL file list\n"
+            "  (a split index's shared entries, a sparse directory's\n"
+            "  collapsed trees). Refusing to grade. Re-create the index\n"
+            "  without split-index/sparse extensions, or teach\n"
+            "  lint_git_index_foreach the extension first.\n",
+            "check_controller_private_headers", g_cphs_badext);
+    return 2;
+}
+
 int cphs_collect(const char *root)
 {
     g_cphs_nfiles = 0;
     g_cphs_fused = 0;
     if (strcmp(root, ".") == 0) {
-        (void)lint_git_index_foreach(cphs_index_add, NULL, NULL);
-        return 0;
+        g_cphs_badext[0] = '\0';
+        (void)lint_git_index_foreach(cphs_index_add, NULL, g_cphs_badext);
+        return g_cphs_badext[0] ? cphs_badext_report() : 0;
     }
     struct stat st;
     if (lstat(root, &st) != 0 || !S_ISDIR(st.st_mode))

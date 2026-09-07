@@ -143,13 +143,35 @@ static int gac_disc_cb(const char *path, int stage, void *ctx)
     return 0;
 }
 
+/* A mandatory index extension ('link', 'sdir'): reading past it could
+ * silently yield a PARTIAL candidate list, so it is named and refused
+ * here rather than falling through to the exactly-one-candidate floor
+ * below with an incomplete scan — the gate_supervisor_domain.c
+ * sd_oracle_badext precedent, same message shape. */
+static int gac_badext_report(const char *badext)
+{
+    fprintf(stderr, "[%s] UNPROVEN — the git index carries a mandatory\n"
+            "  extension ('%s') this native reader does not interpret;\n"
+            "  reading past it could silently yield a PARTIAL file list\n"
+            "  (a split index's shared entries, a sparse directory's\n"
+            "  collapsed trees). Refusing to grade. Re-create the index\n"
+            "  without split-index/sparse extensions, or teach\n"
+            "  lint_git_index_foreach the extension first.\n",
+            k_gac_gate, badext);
+    return 2;
+}
+
 /* git grep -l ... | first-line filter, counted: exactly one candidate or
- * the discovery UNPROVEN. The reader's rc is ignored, as the shell
- * ignored git's. */
+ * the discovery UNPROVEN. A non-badext reader failure is still ignored,
+ * as the shell ignored git's — a genuinely partial-but-nonzero non-badext
+ * scan is still caught by the exactly-one-candidate floor below. */
 static int gac_discover(void)
 {
     int count = 0;
-    (void)lint_git_index_foreach(gac_disc_cb, &count, NULL);
+    char badext[5] = "";
+    (void)lint_git_index_foreach(gac_disc_cb, &count, badext);
+    if (badext[0])
+        return gac_badext_report(badext);
     if (count == 1)
         return 0;
     fprintf(stderr, "[%s] UNPROVEN — capability artifact discovery found "
