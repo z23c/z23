@@ -139,7 +139,7 @@ static bool fb_compose(const struct json_value *in, struct json_value *result,
     if (!fleet_board_kind_from_name(kind_name, &post->kind)) {
         fb_error(result, "BAD_KIND",
                  "kind must be one of problem, need, offer, claim, result, "
-                 "note, wiki");
+                 "note, wiki, agents");
         return false;
     }
     const char *text = fb_str(in, "text", NULL);

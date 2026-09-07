@@ -247,11 +247,31 @@ static void rd_grades(struct rd_buf *b, const struct json_value *grades)
            "prediction to compare against, earns no letter.\n");
 }
 
+/* One `--fleet` row: the host's self-reported (or "self") name, its age,
+ * a STALE mark past the window, and how many rows it is carrying. Falls
+ * back to printing the plain `not_collected` note when `--fleet` was never
+ * asked for, so the two callers of this renderer share one code path. */
+static void rd_other_hosts(struct rd_buf *b, const struct json_value *other)
+{
+    const struct json_value *hosts = json_get(other, "hosts");
+    rd_put(b, "\nOTHER HOSTS\n  %s\n",
+          rd_str(other, "note")[0] ? rd_str(other, "note")
+                                    : ZCL_AGENTS_OTHER_HOSTS_NOTE);
+    for (size_t i = 0; hosts && i < hosts->num_children; i++) {
+        const struct json_value *h = json_at(hosts, i);
+        rd_put(b, "  %-20s age=%lldm%s  running=%lld grades=%lld\n",
+              rd_str(h, "name"), (long long)(rd_int(h, "age_s") / 60),
+              json_get_bool(json_get(h, "stale")) ? " STALE" : "",
+              (long long)rd_int(h, "running_rows"),
+              (long long)rd_int(h, "grade_rows"));
+    }
+}
+
 size_t zcl_agents_render_text(const struct json_value *data, char *out,
                               size_t cap)
 {
     struct rd_buf b;
-    const struct json_value *running, *grades;
+    const struct json_value *running, *grades, *other;
     if (!out || cap == 0) return 0;
     b.at = out;
     b.left = cap;
@@ -260,9 +280,9 @@ size_t zcl_agents_render_text(const struct json_value *data, char *out,
     if (!data || data->type != JSON_OBJ) return 0;
     running = json_get(data, "running");
     grades = json_get(data, "grades");
+    other = json_get(data, "other_hosts");
     if (running) rd_running(&b, running);
     if (grades) rd_grades(&b, grades);
-    rd_put(&b, "\nOTHER HOSTS\n  %s\n",
-           ZCL_AGENTS_OTHER_HOSTS_NOTE);
+    if (other) rd_other_hosts(&b, other);
     return b.written;
 }

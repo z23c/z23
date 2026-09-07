@@ -15,6 +15,96 @@ static bool mesh_capability_v79_present(struct node_db *ndb)
                SQLITE_OK;
 }
 
+/* v82 step 1: rebuild `fleet_board_posts` with `kind` widened to admit 8
+ * (`agents`). SQLite cannot widen an existing CHECK constraint with ALTER
+ * TABLE, so this creates a sibling table with the exact v80/v81 columns and
+ * constraints, copies every row, then swaps it in under the old name. */
+static int db_migrate_v82_rebuild_table(struct node_db *ndb)
+{
+    if (!node_db_exec(ndb,
+            "CREATE TABLE fleet_board_posts_v82("
+            "id BLOB PRIMARY KEY CHECK(length(id)=32),"
+            "seq INTEGER NOT NULL,"
+            "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 8),"
+            "created_at INTEGER NOT NULL CHECK(created_at>0),"
+            "ttl INTEGER NOT NULL CHECK(ttl BETWEEN 1 AND 2592000),"
+            "expires_at INTEGER NOT NULL CHECK(expires_at>created_at),"
+            "ref BLOB NOT NULL CHECK(length(ref)=32),"
+            "host_pubkey BLOB NOT NULL CHECK(length(host_pubkey)=32),"
+            "agent TEXT NOT NULL CHECK(length(agent)<=64),"
+            "slug TEXT NOT NULL CHECK(length(slug)<=64),"
+            "title TEXT NOT NULL CHECK(length(title)<=128),"
+            "supersedes BLOB NOT NULL CHECK(length(supersedes)=32),"
+            "receipt TEXT NOT NULL CHECK(length(receipt)<=256),"
+            "text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 16384),"
+            "body_bytes INTEGER NOT NULL CHECK(body_bytes BETWEEN 1 AND 17408),"
+            "signature BLOB NOT NULL CHECK(length(signature)=64),"
+            "chain_prev BLOB NOT NULL CHECK(length(chain_prev)=32),"
+            "chain_hash BLOB NOT NULL CHECK(length(chain_hash)=32),"
+            "received_at INTEGER NOT NULL CHECK(received_at>=0),"
+            "scope INTEGER NOT NULL DEFAULT 0 CHECK(scope BETWEEN 0 AND 2),"
+            "room TEXT NOT NULL DEFAULT '' CHECK(length(room)<=32))"))
+        LOG_ERR("db", "migrate v82: agents-kind table rebuild failed");
+    if (!node_db_exec(ndb,
+            "INSERT INTO fleet_board_posts_v82 SELECT * FROM "
+            "fleet_board_posts"))
+        LOG_ERR("db", "migrate v82: agents-kind row copy failed");
+    if (!node_db_exec(ndb, "DROP TABLE fleet_board_posts"))
+        LOG_ERR("db", "migrate v82: old board table drop failed");
+    if (!node_db_exec(ndb,
+            "ALTER TABLE fleet_board_posts_v82 RENAME TO fleet_board_posts"))
+        LOG_ERR("db", "migrate v82: board table rename failed");
+    return 0;
+}
+
+/* v82 step 2: every index the rebuilt table (still) needs — the same five
+ * v80/v81 gave it, since `CREATE TABLE` never carries indexes over. */
+static int db_migrate_v82_agents_kind(struct node_db *ndb)
+{
+    if (db_migrate_v82_rebuild_table(ndb) < 0) return -1;
+    if (!node_db_exec(ndb,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_board_seq "
+            "ON fleet_board_posts(seq)"))
+        LOG_ERR("db", "migrate v82: board seq index failed");
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_created "
+            "ON fleet_board_posts(created_at DESC,id)"))
+        LOG_ERR("db", "migrate v82: board created index failed");
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_ref "
+            "ON fleet_board_posts(ref,kind)"))
+        LOG_ERR("db", "migrate v82: board ref index failed");
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_slug "
+            "ON fleet_board_posts(slug,created_at DESC,id)"))
+        LOG_ERR("db", "migrate v82: board slug index failed");
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_room "
+            "ON fleet_board_posts(room,created_at DESC,id)"))
+        LOG_ERR("db", "migrate v82: board room index failed");
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('082')"))
+        LOG_ERR("db", "migrate v82: migration stamp failed");
+    return 0;
+}
+
+/* Wraps its own `current_ver < 82` check and failure handling so the
+ * caller's pinned complexity never has to carry this version gate, or a
+ * check of its result, as branches of its own. A failed step logs loudly
+ * (LOG_ERR above) and simply leaves `current_ver`/`applied` where they
+ * were — the next boot retries v82 from scratch, same as any other
+ * mid-migration crash. */
+static int db_migrate_step_82(struct node_db *ndb, int *current_ver,
+                              int *applied)
+{
+    if (*current_ver >= 82) return 0;
+    if (db_migrate_v82_agents_kind(ndb) < 0) return -1;
+    DB_MIGRATE_PERSIST_VERSION(ndb, 82);
+    *current_ver = 82;
+    (*applied)++;
+    return 0;
+}
+
 int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
 {
     int applied = 0;
@@ -576,6 +666,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         current_ver = 81;
         applied++;
     }
+    (void)db_migrate_step_82(ndb, &current_ver, &applied);
     *version = current_ver;
     return applied;
 }

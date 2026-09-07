@@ -11,15 +11,19 @@
  * `fleet.agents` as its alias so the command a person actually types
  * (`z23-dev fleet agents`) reaches it. It is a dev-lane leaf: everything it
  * reads is a developer's own workspace state, and none of it exists on a
- * node.
+ * node — except `--publish` and `--fleet`, which talk to the local node's
+ * fleet board over the same `fleet_board` RPC method `fleet board post/list`
+ * already use, and fail closed exactly like those leaves when no node
+ * answers.
  *
  * WHAT IT IS NOT. Not an authority. A running process is evidence of
  * ACTIVITY, never of a result, and a letter grade summarizes past rows and
- * permits nothing. No gate may cite it.
+ * permits nothing. No gate may cite it. `--publish` mutates (one board
+ * post); everything else is still a read.
  *
  * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
 
-ZCL_COMMAND_READY_READ(
+ZCL_COMMAND_READY_COMMAND(
     "dev.fleet.agents", "dev.fleet", "fleet.agents",
     "Every AI agent working on this box, and each executor's grade over time",
     "Three sections, always in this order. RUNNING NOW lists one row per agent "
@@ -41,20 +45,25 @@ ZCL_COMMAND_READY_READ(
     "the last row, and a letter: A needs 90% success and a median ratio of "
     "1.50 or better, B 80% and 2.00, C 65%, D 50%, F below, and fewer than "
     "three results earns no letter at all. A malformed row is reported by "
-    "line number and skipped, never guessed at. OTHER HOSTS says, honestly, "
-    "that no other machine is collected yet. since is a window in HOURS "
-    "(0 means the whole ledger), root and ledger point the two readers at a "
-    "fixture, and include_units turns off the systemd read. It never fetches, "
-    "never dials a peer, never opens a datadir, and writes nothing.",
+    "line number and skipped, never guessed at. By default OTHER HOSTS says "
+    "no other machine is collected yet. publish posts this box's rows as one "
+    "fleet-scoped `agents` board post, deduped inside one minute; fleet reads "
+    "the newest such post per host and replaces OTHER HOSTS with a merged, "
+    "aged table and a 'hosts reporting: N of M known' line. since is a "
+    "window in HOURS, root/ledger point at a fixture, include_units skips "
+    "systemd. Outside publish it never fetches, dials a peer, opens a "
+    "datadir, or writes.",
     16384,
-    "fleet,agents,executors,grades,lanes,units,trains,ledger,delegation",
+    "fleet,agents,executors,grades,lanes,units,trains,ledger,delegation,board",
     "zcl.fleet_agents_input.v1", "zcl.fleet_agents.v1",
-    "since,by,root,ledger,include_units", "",
+    "since,by,root,ledger,include_units,publish,fleet", "",
     "z23-dev fleet agents --since=168 --by=executor",
-    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
-    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
-    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
-    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ | ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY |
         ZCL_COMMAND_TRAIT_PROSE,
-    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agents)
+    zcl_native_handle_dev_agents)

@@ -72,6 +72,7 @@ const char *fleet_board_result_string(enum fleet_board_result r)
 
 static const char *const k_kind_names[FLEET_BOARD_KIND__COUNT] = {
     "none", "problem", "need", "offer", "claim", "result", "note", "wiki",
+    "agents",
 };
 
 const char *fleet_board_kind_name(uint8_t kind)

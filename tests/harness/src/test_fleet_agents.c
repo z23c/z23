@@ -21,6 +21,7 @@
 #include "command/native_command.h"
 #include "command/native_dev_agents.h"
 #include "config/command_catalog.h"
+#include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/clock.h"
@@ -246,6 +247,120 @@ static const struct json_value *fax_row(const struct fax_call *c,
     return NULL;
 }
 
+/* ── a fake fleet board, for --publish and --fleet ──────────────────────
+ *
+ * `--publish`/`--fleet` talk to the local node over the `fleet_board` RPC
+ * method exactly like `fleet board post/list` do, so they are proved the
+ * same way test_telemetry_agents.c proves an RPC-reading collector: behind
+ * node_rpc_client_set_test_hook, against canned bodies. No socket, no
+ * node.db, no dependence on a node happening to run. */
+
+#define FAX_SELF_HEX \
+    "1111111111111111111111111111111111111111111111111111111111111111"
+#define FAX_HOST_A \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define FAX_HOST_B \
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+struct fax_board_post { char host[65]; char text[2200]; int64_t created_at; };
+static struct fax_board_post fax_board[16];
+static size_t fax_board_n = 0;
+
+static void fax_board_reset(void) { fax_board_n = 0; }
+
+static void fax_board_append(const char *host, const char *text,
+                             int64_t created_at)
+{
+    if (fax_board_n >= 16) return;
+    (void)snprintf(fax_board[fax_board_n].host, 65, "%s", host);
+    (void)snprintf(fax_board[fax_board_n].text,
+                  sizeof(fax_board[fax_board_n].text), "%s", text);
+    fax_board[fax_board_n].created_at = created_at;
+    fax_board_n++;
+}
+
+static void fax_board_list(const struct json_value *in,
+                           struct json_value *posts)
+{
+    const char *host = json_get_str(json_get(in, "host"));
+    for (size_t i = fax_board_n; i-- > 0;) {
+        if (host && host[0] && strcmp(fax_board[i].host, host) != 0) continue;
+        struct json_value p;
+        json_init(&p); json_set_object(&p);
+        (void)json_push_kv_str(&p, "host", fax_board[i].host);
+        (void)json_push_kv_str(&p, "text", fax_board[i].text);
+        (void)json_push_kv_int(&p, "created_at", fax_board[i].created_at);
+        (void)json_push_back(posts, &p);
+        json_free(&p);
+    }
+}
+
+static void fax_board_op_status(struct json_value *result)
+{
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_str(result, "host", FAX_SELF_HEX);
+}
+
+static void fax_board_op_post(const struct json_value *in,
+                              struct json_value *result)
+{
+    fax_board_append(FAX_SELF_HEX, json_get_str(json_get(in, "text")),
+                     FAX_NOW);
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_str(result, "id", "testpostid");
+}
+
+static void fax_board_op_list(const struct json_value *in,
+                              struct json_value *result)
+{
+    struct json_value posts;
+    json_init(&posts); json_set_array(&posts);
+    fax_board_list(in, &posts);
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv(result, "posts", &posts);
+    json_free(&posts);
+}
+
+static void fax_board_dispatch(const struct json_value *in,
+                               struct json_value *result)
+{
+    const char *op = json_get_str(json_get(in, "op"));
+    json_set_object(result);
+    if (op && strcmp(op, "status") == 0) fax_board_op_status(result);
+    else if (op && strcmp(op, "post") == 0) fax_board_op_post(in, result);
+    else if (op && strcmp(op, "list") == 0) fax_board_op_list(in, result);
+    else (void)json_push_kv_bool(result, "ok", false);
+}
+
+static char *fax_board_hook(const char *method, const char *params_json)
+{
+    struct json_value arr, result;
+    char buf[16384];
+    if (!method || strcmp(method, "fleet_board") != 0 || !params_json)
+        return strdup("{\"ok\":false}");
+    json_init(&arr); json_init(&result);
+    (void)json_read(&arr, params_json, strlen(params_json));
+    fax_board_dispatch(json_at(&arr, 0), &result);
+    size_t n = json_write(&result, buf, sizeof(buf));
+    json_free(&arr); json_free(&result);
+    char *out = malloc(n + 1);
+    if (out) { memcpy(out, buf, n); out[n] = 0; }
+    return out;
+}
+
+/* One `agents` row from another host's own body, by field. */
+static const struct json_value *fax_host_row(const struct json_value *out,
+                                             const char *name)
+{
+    const struct json_value *hosts = json_get(out, "hosts");
+    for (size_t i = 0; hosts && i < hosts->num_children; i++) {
+        const struct json_value *h = json_at(hosts, i);
+        if (strcmp(fax_str(h, "name"), name) == 0) return h;
+    }
+    return NULL;
+}
+
+static int test_fleet_agents_publish(const char *root, const char *ledger);
 int test_fleet_agents(void);
 int test_fleet_agents(void)
 {
@@ -542,7 +657,130 @@ int test_fleet_agents(void)
 
 _test_next:;
     clock_reset_default();
+    failures += test_fleet_agents_publish(root, ledger);
     if (failures == 0) printf("test_fleet_agents: all passed\n");
     else printf("test_fleet_agents: %d FAILED\n", failures);
+    return failures;
+}
+
+/* `--publish` and `--fleet`, against the same ledger/workspace fixture,
+ * split into its own function so the acceptance bar's pinned complexity
+ * does not grow with every new flag this leaf gains. */
+static int test_fleet_agents_publish(const char *root, const char *ledger)
+{
+    int failures = 0;
+    TEST("agents publish: the body is compact, deterministic, and dedupes "
+        "within one minute") {
+        struct json_value running, grades;
+        char text_a[ZCL_AGENTS_PUBLISH_TEXT_MAX + 1];
+        char text_b[ZCL_AGENTS_PUBLISH_TEXT_MAX + 1];
+        struct zcl_agents_options options;
+        memset(&options, 0, sizeof(options));
+        options.root = root; options.ledger = ledger;
+        options.since_hours = 24; options.now_unix = FAX_NOW;
+        json_init(&running); json_init(&grades);
+        zcl_agents_running_json(&options, &running);
+        ASSERT(zcl_agents_grades_json(&options, &grades, NULL, 0));
+
+        size_t na = zcl_agents_publish_text(&running, &grades, "boxname",
+                                            FAX_NOW, text_a, sizeof(text_a));
+        size_t nb = zcl_agents_publish_text(&running, &grades, "boxname",
+                                            FAX_NOW, text_b, sizeof(text_b));
+        ASSERT(na > 0 && na < ZCL_AGENTS_PUBLISH_TEXT_MAX);
+        ASSERT_STR_EQ(text_a, text_b);
+        (void)nb;
+        ASSERT(strstr(text_a, "v1|host=boxname|now=") == text_a);
+        ASSERT(strstr(text_a, "R|dirtylane|lane|") != NULL);
+        ASSERT(strstr(text_a, "G|grok|") != NULL);
+
+        /* The same body inside one minute is a duplicate; a minute later, or
+         * a changed body, is not. */
+        ASSERT(zcl_agents_publish_is_duplicate(text_a, FAX_NOW, text_a,
+                                               FAX_NOW + 30));
+        ASSERT(!zcl_agents_publish_is_duplicate(text_a, FAX_NOW, text_a,
+                                                FAX_NOW + 61));
+        ASSERT(!zcl_agents_publish_is_duplicate(text_a, FAX_NOW, "different",
+                                                FAX_NOW));
+        ASSERT(!zcl_agents_publish_is_duplicate(NULL, FAX_NOW, text_a,
+                                                FAX_NOW));
+        json_free(&running); json_free(&grades);
+        PASS();
+    }
+
+    TEST("agents publish: two runs inside one minute post exactly once") {
+        struct json_value running, grades;
+        struct zcl_agents_options options;
+        struct zcl_command_reply reply;
+        fax_board_reset();
+        node_rpc_client_set_test_hook(fax_board_hook);
+        memset(&options, 0, sizeof(options));
+        options.root = root; options.ledger = ledger;
+        options.since_hours = 24; options.now_unix = FAX_NOW;
+        json_init(&running); json_init(&grades);
+        zcl_agents_running_json(&options, &running);
+        ASSERT(zcl_agents_grades_json(&options, &grades, NULL, 0));
+
+        zcl_command_reply_init(&reply, ZCL_AGENTS_SCHEMA);
+        zcl_agents_do_publish(&options, &running, &grades, &reply);
+        ASSERT(json_get_bool(json_get(&reply.data, "posted")));
+        ASSERT_EQ(fax_board_n, (size_t)1);
+        zcl_command_reply_free(&reply);
+
+        zcl_command_reply_init(&reply, ZCL_AGENTS_SCHEMA);
+        zcl_agents_do_publish(&options, &running, &grades, &reply);
+        ASSERT(!json_get_bool(json_get(&reply.data, "posted")));
+        ASSERT_EQ(fax_board_n, (size_t)1);
+        zcl_command_reply_free(&reply);
+
+        node_rpc_client_set_test_hook(NULL);
+        json_free(&running); json_free(&grades);
+        PASS();
+    }
+
+    TEST("agents fleet: merges this box with two board hosts, one stale") {
+        struct json_value running, grades, out;
+        struct zcl_agents_options options;
+        fax_board_reset();
+        fax_board_append(FAX_HOST_A,
+                         "v1|host=nodeA|now=1000\n"
+                         "R|lane1|lane|abcd123|0|1\n"
+                         "G|codex|5|4|1|8000|B\n",
+                         FAX_NOW - 120);
+        fax_board_append(FAX_HOST_B,
+                         "v1|host=nodeB|now=500\n"
+                         "R|lane2|unit|ef0111|2|0\n",
+                         FAX_NOW - 1200);
+        node_rpc_client_set_test_hook(fax_board_hook);
+        memset(&options, 0, sizeof(options));
+        options.root = root; options.ledger = ledger;
+        options.since_hours = 24; options.now_unix = FAX_NOW;
+        json_init(&running); json_init(&grades); json_init(&out);
+        zcl_agents_running_json(&options, &running);
+        ASSERT(zcl_agents_grades_json(&options, &grades, NULL, 0));
+
+        zcl_agents_do_fleet_merge(&running, &grades, FAX_NOW, &out);
+        ASSERT_EQ(json_get_int(json_get(&out, "hosts_reporting")),
+                  (int64_t)3);
+        ASSERT(json_get_int(json_get(&out, "hosts_known")) >= 3);
+        ASSERT(strstr(json_get_str(json_get(&out, "note")),
+                      "hosts reporting: 3 of") != NULL);
+
+        const struct json_value *a = fax_host_row(&out, "nodeA");
+        ASSERT(a != NULL);
+        ASSERT(!json_get_bool(json_get(a, "stale")));
+        ASSERT_EQ(json_get_int(json_get(a, "running_rows")), (int64_t)1);
+        ASSERT_EQ(json_get_int(json_get(a, "grade_rows")), (int64_t)1);
+
+        const struct json_value *b = fax_host_row(&out, "nodeB");
+        ASSERT(b != NULL);
+        ASSERT(json_get_bool(json_get(b, "stale")));
+        ASSERT_EQ(json_get_int(json_get(b, "running_rows")), (int64_t)1);
+
+        node_rpc_client_set_test_hook(NULL);
+        json_free(&running); json_free(&grades); json_free(&out);
+        PASS();
+    }
+
+_test_next:;
     return failures;
 }

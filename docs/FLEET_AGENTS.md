@@ -13,8 +13,20 @@ working, on what, and how good each of them has been:
 build/bin/z23-dev fleet agents
 ```
 
-It reads only this machine. It never fetches, never dials a peer, never opens
-a datadir, and writes nothing.
+Plain, it reads only this machine and writes nothing. Two flags reach past
+this box, both through the local node's fleet board:
+
+```
+build/bin/z23-dev fleet agents --publish
+build/bin/z23-dev fleet agents --fleet
+```
+
+`--publish` posts this box's RUNNING-NOW and GRADES rows as one fleet-scoped
+`agents` board post; `--fleet` reads the newest such post per host and merges
+it with this box's own live rows. Neither talks to any host directly and
+neither is a second board: both call the same `fleet_board` RPC method
+`fleet board post`/`fleet board list` already use, and both fail closed with
+`NODE_UNAVAILABLE` when no local node answers.
 
 ## What it prints
 
@@ -30,9 +42,45 @@ one. Then this box's loaded `z23-*` systemd user services.
 **GRADES** — one row per executor, or per lane or task class with `--by`,
 read from the delegation ledger described below.
 
-**OTHER HOSTS** — one honest line saying no other machine is collected yet.
-Reading other hosts needs the fleet board transport, which is the next slice
-of this work; nothing here invents a number for a machine it has not read.
+**OTHER HOSTS** — by default, one honest line saying no other machine is
+collected yet. With `--fleet`, it instead reads the local board's `agents`
+posts (see below) and becomes a merged table.
+
+## `--publish`: this box's rows, posted
+
+The post body is a compact, line-based text (not the JSON `--json` prints):
+a header naming this box (`v1|host=<name>|now=<unix>`), one `R|name|kind|
+head|dirty|process_count` line per RUNNING-NOW row, and one
+`G|key|tasks|success|failure|success_rate_bp|grade` line per GRADES row.
+Trimmed to stay under the board's per-post text ceiling. `agent` on the post
+is this box's name; `kind` is `agents`; `scope` is `fleet`.
+
+Publishing the same body twice inside one minute is a no-op: `--publish`
+first reads its own newest `agents` post back (`fleet board list --kind
+agents --scope fleet --host <this box>`) and skips the RPC write when the
+text is unchanged and that post landed in the same 60-second window. The
+reply carries `{posted, id, host}` (`posted:false` on a skip).
+
+There is no node service that calls `--publish` on a timer today: the rows
+it posts (Git worktrees under `~/.z23`, the delegation ledger) are checkout
+state a running node process does not have visibility into, so wiring this
+into a node-side periodic job would mean teaching the node about dev-lane
+layout it otherwise never touches. Publishing stays a command an agent (or
+a cron/systemd timer in the checkout) runs, not a node service.
+
+## `--fleet`: the newest post per host, merged
+
+Reads up to 32 `agents` posts (`fleet board list --kind agents --scope
+fleet`), keeps the newest one per host (the list is already newest-first),
+and merges those with this box's own live RUNNING-NOW/GRADES counts into one
+`hosts` array — self first, then every other host, each row's `name` taken
+from that host's own post header (the only name a host has told the board;
+no seam in this tree maps a board key to an operator-assigned name today),
+its `age_s` since the post's signed `created_at`, `stale:true` past 15
+minutes, and `running_rows`/`grade_rows` counted from its body. The text
+render adds `hosts reporting: N of M known (stale > 15m marked)`; `M` is the
+fleet machine roster's admitted-box count when this box has one to read,
+else the same as `N`.
 
 ## Options
 
@@ -43,6 +91,8 @@ of this work; nothing here invents a number for a machine it has not read.
 | `--root=<dir>` | Scan `<dir>/lanes`, `<dir>/units`, `<dir>/trains`, `<dir>/land` and read markers from `<dir>/scratch` instead of the real locations. This exists for the tests. |
 | `--ledger=<path>` | Read a different ledger file. |
 | `--include_units=false` | Skip the systemd read. |
+| `--publish=true` | Post this box's rows to the local node's fleet board (mutates). |
+| `--fleet=true` | Merge the board's `agents` posts into OTHER HOSTS. |
 | `--json` | Print the machine object instead of the table. |
 
 The plain table and `--json` are rendered from the same data object, so the
@@ -135,6 +185,13 @@ cannot tell the two apart without a prediction.
 - `tools/command/native_dev_agents_scan.c` — the workspace, process and unit
   scan.
 - `tools/command/native_dev_agents_render.c` — the aligned-column rendering.
+- `tools/command/native_dev_agents_publish.c` — `--publish` and `--fleet`:
+  the post body, the dedupe check, and the RPC round trip to the local node.
 - `engine/composition/commands/fleet_agents.def` — the registry row.
+- `cognition/modules/session/include/session/fleet_board_proto.h` — the
+  `agents` post kind.
 - `tests/harness/src/test_fleet_agents.c` — the acceptance bar, proved against
-  its own fixtures with an injected clock.
+  its own fixtures with an injected clock and a faked local node (see
+  `node_rpc_client_set_test_hook`).
+- `tests/harness/src/test_fleet_board.c` — proves the `agents` kind signs,
+  stores, and lists like any other kind.

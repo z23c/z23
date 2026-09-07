@@ -67,7 +67,13 @@ enum fleet_board_kind {
     FLEET_BOARD_KIND_RESULT = 5,
     FLEET_BOARD_KIND_NOTE = 6,
     FLEET_BOARD_KIND_WIKI = 7,
-    FLEET_BOARD_KIND__COUNT = 8,
+    /* One node's fleet-agent-dashboard snapshot: `fleet agents --publish`
+     * posts one of these, fleet-scoped, and `--fleet` merges the newest one
+     * per host with this box's own live scan. Same shape and limits as
+     * `note`; it is its own kind only so a reader can filter for it without
+     * parsing every post's text. */
+    FLEET_BOARD_KIND_AGENTS = 8,
+    FLEET_BOARD_KIND__COUNT = 9,
 };
 
 /* Who may read a post, signed into the post itself. LEGACY_PUBLIC is the

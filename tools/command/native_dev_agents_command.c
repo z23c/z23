@@ -106,6 +106,23 @@ static bool ag_read_flag(const struct zcl_command_request *request,
     return v && v->type == JSON_BOOL ? json_get_bool(v) : fallback;
 }
 
+/* The OTHER HOSTS section: the plain "not collected" stub by default, or
+ * the board merge when the caller asked `--fleet`. Split out of the leaf's
+ * dispatch so that branch does not grow the handler's own complexity. */
+static void ag_other_hosts(bool fleet, const struct json_value *running,
+                           const struct json_value *grades, int64_t now,
+                           struct json_value *others)
+{
+    json_init(others);
+    if (fleet) {
+        zcl_agents_do_fleet_merge(running, grades, now, others);
+        return;
+    }
+    json_set_object(others);
+    (void)json_push_kv_str(others, "state", "not_collected");
+    (void)json_push_kv_str(others, "note", ZCL_AGENTS_OTHER_HOSTS_NOTE);
+}
+
 void zcl_native_handle_dev_agents(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
@@ -140,6 +157,8 @@ void zcl_native_handle_dev_agents(const struct zcl_command_request *request,
     options.collect_units = ag_read_flag(request, "include_units", true);
     options.root = ag_input_str(request, "root");
     options.ledger = ag_input_str(request, "ledger");
+    bool publish = ag_read_flag(request, "publish", false);
+    bool fleet = ag_read_flag(request, "fleet", false);
 
     json_init(&grades);
     if (!zcl_agents_grades_json(&options, &grades, why, sizeof(why))) {
@@ -154,10 +173,14 @@ void zcl_native_handle_dev_agents(const struct zcl_command_request *request,
     json_init(&running);
     zcl_agents_running_json(&options, &running);
 
-    json_init(&others);
-    json_set_object(&others);
-    (void)json_push_kv_str(&others, "state", "not_collected");
-    (void)json_push_kv_str(&others, "note", ZCL_AGENTS_OTHER_HOSTS_NOTE);
+    if (publish) {
+        zcl_agents_do_publish(&options, &running, &grades, reply);
+        json_free(&running);
+        json_free(&grades);
+        return;
+    }
+
+    ag_other_hosts(fleet, &running, &grades, options.now_unix, &others);
 
     json_set_object(&reply->data);
     (void)json_push_kv_str(&reply->data, "schema", ZCL_AGENTS_SCHEMA);

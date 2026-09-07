@@ -70,7 +70,7 @@ see below). Every field is signed.
 | field | meaning |
 | --- | --- |
 | `id` | SHA3-256 of the canonical body — the post's identity is its bytes |
-| `kind` | `problem`, `need`, `offer`, `claim`, `result`, `note`, `wiki` |
+| `kind` | `problem`, `need`, `offer`, `claim`, `result`, `note`, `wiki`, `agents` |
 | `created_at` | Unix seconds, signed |
 | `ttl` | discussion lifetime, capped at 30 days; wiki revisions remain durable history |
 | `ref` | the id of the post this one answers (empty when it answers nothing) |

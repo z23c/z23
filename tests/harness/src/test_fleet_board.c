@@ -375,6 +375,45 @@ static int test_fleet_board_store(void)
     return failures;
 }
 
+static int test_fleet_board_agents_kind(void)
+{
+    int failures = 0;
+    TEST("fleet board: an `agents` post signs, stores, and lists by kind") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(4, seed, pk);
+        const int64_t now = 200000;
+
+        struct fleet_board_post dash;
+        fb_test_compose(&dash, FLEET_BOARD_KIND_AGENTS, "node1",
+                        "v1|host=node1|now=200000\nR|lane-a|lane|abc|0|1\n",
+                        (uint64_t)now, 3600);
+        dash.scope = FLEET_BOARD_SCOPE_FLEET;
+        ASSERT_EQ(fleet_board_post_sign(&dash, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_verify(&dash), FLEET_BOARD_OK);
+        bool stored = false;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &dash, now, &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored);
+
+        struct fleet_board_filter filter;
+        memset(&filter, 0, sizeof(filter));
+        filter.kind = FLEET_BOARD_KIND_AGENTS;
+        filter.scope_set = true;
+        filter.scope = FLEET_BOARD_SCOPE_FLEET;
+        struct db_fleet_board_post rows[4];
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, now, rows, 4), 1);
+        ASSERT(strcmp(rows[0].post.text, dash.text) == 0);
+        ASSERT_STR_EQ(fleet_board_kind_name(rows[0].post.kind), "agents");
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_board_store_boundaries(void)
 {
     int failures = 0;
@@ -1505,6 +1544,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_bounds();
     failures += test_fleet_board_frames();
     failures += test_fleet_board_store();
+    failures += test_fleet_board_agents_kind();
     failures += test_fleet_board_store_boundaries();
     failures += test_fleet_board_byte_boundary();
     failures += test_fleet_board_corrupt_reads();
