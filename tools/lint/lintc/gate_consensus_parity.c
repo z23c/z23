@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "base/hex.h"
 #include "lintc.h"
 
 enum { CP_MAX = 8192, CP_LINE = 8192, CP_FLOOR = 3100000 };
@@ -86,7 +87,6 @@ static void cp_xform(uint32_t h[8], const unsigned char *c)
 
 static void cp_sha256(const unsigned char *msg, size_t len, char hex[65])
 {
-    static const char *hd = "0123456789abcdef";
     uint32_t h[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
                       0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
     unsigned char block[64], out[32];
@@ -115,11 +115,7 @@ static void cp_sha256(const unsigned char *msg, size_t len, char hex[65])
         out[i * 4 + 2] = (unsigned char)(h[i] >> 8);
         out[i * 4 + 3] = (unsigned char)h[i];
     }
-    for (i = 0; i < 32; i++) {
-        hex[i * 2] = hd[out[i] >> 4];
-        hex[i * 2 + 1] = hd[out[i] & 15];
-    }
-    hex[64] = '\0';
+    zcl_hex_encode(out, sizeof out, hex);
 }
 
 static int cp_file_sha(const char *path, char hex[65])
