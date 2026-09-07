@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 867 |
+| Registry entries (branches + leaves) | 868 |
 | Top-level roots | 14 |
 | Branches | 195 |
-| Leaves (dispatchable command paths) | 672 |
-| … `ready` (live handler in this build) | 598 |
+| Leaves (dispatchable command paths) | 673 |
+| … `ready` (live handler in this build) | 599 |
 | … `compat` (metadata only, names a fallback) | 43 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 42 |
@@ -108,7 +108,7 @@ Per source file:
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
-| `engine/composition/commands/fleet.def` | 20 | 5 | 15 |
+| `engine/composition/commands/fleet.def` | 21 | 5 | 16 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
@@ -1808,6 +1808,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `fleet triggers list` | ready | read / read / operator, prose · instant/low | none | `zcl.fleet_triggers_list.v1` | `z23-dev fleet triggers list` | Print the closed trigger registry |
 | `fleet triggers check` | ready | mutate / dev-mutation / operator, prose · foreground/low | `since`, `dry-run` | `zcl.fleet_triggers_check.v1` | `z23-dev fleet triggers check --since=3600` | Run every trigger once against whatever is new in its source |
+| `fleet triggers ingest` | ready | mutate / dev-mutation / operator · fast/low | **`source`**, **`file`** | `zcl.fleet_triggers_ingest.v1` | `z23-dev fleet triggers ingest --source=github --file=/path/comments.jsonl` | Append already-fetched GitHub discussion comment rows to the github_comments trigger source |
 
 #### `fleet.roles` — Which key may call which fleet leaf
 
