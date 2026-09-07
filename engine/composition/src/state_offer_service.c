@@ -278,6 +278,18 @@ static void sosvc_ensure_offering_identity(int32_t tip)
              "find a state source with no operator flag");
 }
 
+bool state_offer_service_advertising(void)
+{
+    int32_t tip = reducer_frontier_external_tip_height();
+    /* Reads the CACHED snapshot only — a status caller must never drive the
+     * disk scan that opens bundle manifests. */
+    pthread_mutex_lock(&g_lock);
+    bool advertising = g_have_identity && tip > 0 && g_snapshot_valid &&
+                       sosvc_has_offerable_artifact_locked(tip);
+    pthread_mutex_unlock(&g_lock);
+    return advertising;
+}
+
 /* The provider net calls at the "zfileaddr" send site. */
 static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
 {

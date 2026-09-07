@@ -60,6 +60,14 @@ void state_offer_service_wire(struct msg_processor *mp);
 void state_offer_service_start(const char *datadir, struct node_db *ndb);
 void state_offer_service_shutdown(void);
 
+/* True iff a peer handshaking with this node right now would hear a state
+ * offer: this node can sign one AND its cached artifact snapshot holds a bundle
+ * that passes the freshness rule at our own tip. The single honest answer to
+ * "can a stranger find a state source through me", and the fact
+ * `bootstrapstatus` reports. Reads cached state only — never drives the disk
+ * scan that opens bundle manifests. */
+bool state_offer_service_advertising(void);
+
 /* Advance the consumer. Called from the peer-link tick, so it must stay cheap:
  * it notes the first peer, asks the store for a decision, and starts at most
  * one download thread. It never blocks on IO. */

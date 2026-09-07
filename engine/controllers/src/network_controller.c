@@ -3,6 +3,8 @@
 
 #include "platform/time_compat.h"
 #include "platform/socket_compat.h"
+#include "config/state_offer_service.h"
+#include "config/state_offer_store.h"
 #include "controllers/agent_controller.h"
 #include "controllers/agent_security_posture.h"
 #include "controllers/network_controller.h"
@@ -341,6 +343,36 @@ static bool rpc_getnetworkinfo(const struct json_value *params, bool help,
     return true;
 }
 
+/* The two facts a cold-start question actually turns on, and neither of them
+ * was reportable before: can a stranger find a state source THROUGH this node
+ * (are we appending a state offer to our handshakes), and has this node been
+ * offered one (how many peers are advertising state to us, and how new).
+ *
+ * Deliberately separate from `beta6_snapshot_bootstrap`: NODE_BOOTSTRAP is
+ * zclassicd beta6's service bit and z23 does not implement that wire, so
+ * `beta6_NODE_BOOTSTRAP_not_advertised` stays true and honest. The z23 state
+ * source is advertised by the zfileaddr message instead, because a service bit
+ * carries no file-service port (net/protocol.h). */
+static void network_push_state_source(struct json_value *result)
+{
+    struct state_offer_store_status st;
+    state_offer_store_status_get(&st);
+
+    struct json_value src = {0};
+    json_set_object(&src);
+    json_push_kv_str(&src, "schema", "zcl.bootstrap.state_source.v1");
+    json_push_kv_str(&src, "advertised_by", "zfileaddr_state_offer");
+    json_push_kv_bool(&src, "advertising_consensus_state_bundle",
+                      state_offer_service_advertising());
+    json_push_kv_int(&src, "candidate_source_peers",
+                     (int64_t)st.peers_offering);
+    json_push_kv_int(&src, "offers_seen", (int64_t)st.offers_seen);
+    json_push_kv_int(&src, "newest_offered_height",
+                     (int64_t)st.newest_height_seen);
+    json_push_kv(result, "state_source", &src);
+    json_free(&src);
+}
+
 static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -490,6 +522,7 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     network_push_zclassic23_bootstrap_contract(result, p2p_serving,
                                                addr_relay_ready, node_zcl23,
                                                ext_ip, ext_port);
+    network_push_state_source(result);
     network_push_snapshot_loader_status(result, ctx ? ctx->datadir : "",
                                         ctx ? ctx->load_snapshot_at_own_height
                                             : "");

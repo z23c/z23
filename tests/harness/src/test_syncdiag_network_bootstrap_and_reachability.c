@@ -421,6 +421,27 @@ static bool sd_bootstrapstatus_ready_beta6_snapshot(const struct json_value *res
 }
 
 
+/* The cold-start question `bootstrapstatus` must be able to answer: is this
+ * node advertising a state source at all, and has anyone advertised one to it.
+ * A node with no bundle registered advertises nothing — the fail-closed half —
+ * and reports zero candidates because nobody has offered. */
+static bool sd_bootstrapstatus_state_source(const struct json_value *result)
+{
+    bool ok = true;
+    const struct json_value *src = json_get(result, "state_source");
+    ok = ok && src && src->type == JSON_OBJ;
+    ok = ok && strcmp(json_get_str(json_get(src, "schema")),
+                      "zcl.bootstrap.state_source.v1") == 0;
+    /* Named, so nobody reads NODE_BOOTSTRAP as the z23 mechanism. */
+    ok = ok && strcmp(json_get_str(json_get(src, "advertised_by")),
+                      "zfileaddr_state_offer") == 0;
+    ok = ok && !json_get_bool(json_get(src,
+                                       "advertising_consensus_state_bundle"));
+    ok = ok && json_get_int(json_get(src, "candidate_source_peers")) == 0;
+    ok = ok && json_get_int(json_get(src, "newest_offered_height")) == 0;
+    return ok;
+}
+
 static bool sd_bootstrapstatus_review_required_contract(const struct json_value *result)
 {
     bool ok = true;
@@ -506,6 +527,7 @@ static bool sd_bootstrapstatus_ready_phase1(struct sd_bootstrap_ctx *ctx)
     ok = sd_bootstrapstatus_ready_snapshot_loader(&ctx->result, ctx->snap_path) && ok;
     ok = sd_bootstrapstatus_ready_snapshot_authority_and_legacy(&ctx->result) && ok;
     ok = sd_bootstrapstatus_ready_beta6_snapshot(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_state_source(&ctx->result) && ok;
     return ok;
 }
 
