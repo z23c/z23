@@ -3597,7 +3597,6 @@ tests/harness/src/test_syncdiag_agent_status.c:syncdiag_cases_agent_status:419
 tests/harness/src/test_syncdiag_anchorstatus.c:syncdiag_cases_anchorstatus:237
 tests/harness/src/test_syncdiag_api_catalog.c:syncdiag_cases_api_catalog:196
 tests/harness/src/test_syncdiag_health.c:syncdiag_cases_health:321
-tests/harness/src/test_syncdiag_network.c:syncdiag_cases_network:569
 tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:393
 tests/harness/src/test_telemetry_agents.c:check_node_down_is_unknown_not_unhealthy:19
 tests/harness/src/test_telemetry_network.c:check_fill_completeness:18
