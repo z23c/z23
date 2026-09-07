@@ -644,30 +644,28 @@ struct dvm_post_input {
 
 static const struct dvm_fail_info {
     const char *code, *message, *evidence;
-} *dvm_post_validate(const struct zcl_command_request *req,
-                     struct dvm_post_input *in)
-{
-    static const struct dvm_fail_info to_empty = {
-        "BAD_INPUT", "post needs a non-empty to", "input.to missing or empty"};
-    static const struct dvm_fail_info to_bad = {
-        "BAD_INPUT", "to names an agent or *", "input.to has an illegal spelling"};
-    static const struct dvm_fail_info kind_bad = {
-        "BAD_INPUT",
-        "kind is one of need|claim|result|problem|note|offer|directive",
-        "input.kind missing or unknown"};
-    static const struct dvm_fail_info body_empty = {
-        "BAD_INPUT", "post needs a non-empty body",
-        "input.body missing or empty"};
-    static const struct dvm_fail_info body_big = {
-        "MAIL_BODY_TOO_LARGE", "body is over the 4096-byte cap",
-        "input.body too large"};
-    static const struct dvm_fail_info from_bad = {
-        "BAD_INPUT", "from names the sending agent",
-        "input.from has an illegal spelling"};
-    static const struct dvm_fail_info ref_big = {
-        "BAD_INPUT", "ref is at most 200 bytes", "input.ref too large"};
-    const struct json_value *bodyv;
+} to_empty_info = {"BAD_INPUT", "post needs a non-empty to",
+                   "input.to missing or empty"},
+  to_bad_info = {"BAD_INPUT", "to names an agent or *",
+                "input.to has an illegal spelling"},
+  kind_bad_info = {"BAD_INPUT",
+                   "kind is one of need|claim|result|problem|note|offer|directive",
+                   "input.kind missing or unknown"},
+  body_empty_info = {"BAD_INPUT", "post needs a non-empty body",
+                     "input.body missing or empty"},
+  body_big_info = {"MAIL_BODY_TOO_LARGE", "body is over the 4096-byte cap",
+                   "input.body too large"},
+  from_bad_info = {"BAD_INPUT", "from names the sending agent",
+                   "input.from has an illegal spelling"},
+  ref_big_info = {"BAD_INPUT", "ref is at most 200 bytes",
+                 "input.ref too large"};
 
+/* Read to/kind/body/from/ref out of req into *in (ref defaults to ""). Pure
+ * extraction, no validation. */
+static void dvm_post_extract(const struct zcl_command_request *req,
+                             struct dvm_post_input *in)
+{
+    const struct json_value *bodyv;
     in->to = dvm_str(req, "to");
     in->kind = dvm_str(req, "kind");
     in->ref = dvm_str(req, "ref");
@@ -676,14 +674,39 @@ static const struct dvm_fail_info {
     in->from = dvm_identity(req, "from");
     if (!in->ref)
         in->ref = "";
-    if (!in->to || !in->to[0]) return &to_empty;
-    if (!dvm_agent_ok(in->to)) return &to_bad;
-    if (!in->kind || !dvm_is_kind(in->kind)) return &kind_bad;
-    if (!in->body || !in->body[0]) return &body_empty;
-    if (strlen(in->body) > DVM_BODY_MAX) return &body_big;
-    if (!in->from || !in->from[0] || !dvm_agent_ok(in->from)) return &from_bad;
-    if (strlen(in->ref) > 200) return &ref_big;
+}
+
+/* Check to/kind, the two fields validated before body is even inspected. */
+static const struct dvm_fail_info *dvm_post_check_to_kind(
+    const struct dvm_post_input *in)
+{
+    if (!in->to || !in->to[0]) return &to_empty_info;
+    if (!dvm_agent_ok(in->to)) return &to_bad_info;
+    if (!in->kind || !dvm_is_kind(in->kind)) return &kind_bad_info;
     return NULL;
+}
+
+/* Check body/from/ref, the fields validated after to/kind pass. */
+static const struct dvm_fail_info *dvm_post_check_body_from_ref(
+    const struct dvm_post_input *in)
+{
+    if (!in->body || !in->body[0]) return &body_empty_info;
+    if (strlen(in->body) > DVM_BODY_MAX) return &body_big_info;
+    if (!in->from || !in->from[0] || !dvm_agent_ok(in->from))
+        return &from_bad_info;
+    if (strlen(in->ref) > 200) return &ref_big_info;
+    return NULL;
+}
+
+static const struct dvm_fail_info *dvm_post_validate(
+    const struct zcl_command_request *req, struct dvm_post_input *in)
+{
+    const struct dvm_fail_info *bad;
+    dvm_post_extract(req, in);
+    bad = dvm_post_check_to_kind(in);
+    if (bad)
+        return bad;
+    return dvm_post_check_body_from_ref(in);
 }
 
 /* Next seq: one plus the largest seq already present. A duplicate seq under
@@ -857,55 +880,122 @@ static void dvm_post(const struct zcl_command_request *req,
 
 /* ── pull ────────────────────────────────────────────────────────────────── */
 
-static void dvm_pull(const struct zcl_command_request *req,
-                     struct zcl_command_reply *reply, const char *maildir)
-{
-    long long since = 0;
-    const char *fromf = NULL;
-    const char *kindf = NULL;
-    const struct json_value *sincev;
-    struct dvm_row *rows = NULL;
-    size_t nrows = 0, caprows = 0;
-    long long cursor = 0;
-    bool have_since = false;
-    DIR *d;
-    struct dirent *ent;
+struct dvm_pull_filter {
+    long long since;
+    const char *from;
+    const char *kind;
+};
 
-    if (req && req->input) {
-        sincev = json_get(req->input, "since");
-        if (sincev) {
-            if (!dvm_int(req, "since", &since)) {
-                dvm_fail(reply, "BAD_INPUT",
-                         "since is a non-negative cursor",
-                         "input.since has the wrong shape");
-                return;
-            }
-            have_since = true;
-        }
-        fromf = dvm_str(req, "from");
-        kindf = dvm_str(req, "kind");
-        if (kindf && !dvm_is_kind(kindf)) {
-            dvm_fail(reply, "BAD_INPUT",
-                     "kind filter is one of need|claim|result|problem|note|"
-                     "offer|directive",
-                     "input.kind unknown");
-            return;
+/* Parse pull's since/from/kind filters from req into *filter (since defaults
+ * to 0 whether req/input is absent or "since" is simply not given). Returns
+ * false, with a fail reply already written, if a filter is malformed. */
+static bool dvm_pull_parse_filter(const struct zcl_command_request *req,
+                                  struct zcl_command_reply *reply,
+                                  struct dvm_pull_filter *filter)
+{
+    filter->since = 0;
+    filter->from = NULL;
+    filter->kind = NULL;
+    if (!req || !req->input)
+        return true;
+    if (json_get(req->input, "since")) {
+        if (!dvm_int(req, "since", &filter->since)) {
+            dvm_fail(reply, "BAD_INPUT", "since is a non-negative cursor",
+                     "input.since has the wrong shape");
+            return false;
         }
     }
-    if (!have_since)
-        since = 0;
-    cursor = since;
+    filter->from = dvm_str(req, "from");
+    filter->kind = dvm_str(req, "kind");
+    if (filter->kind && !dvm_is_kind(filter->kind)) {
+        dvm_fail(reply, "BAD_INPUT",
+                 "kind filter is one of need|claim|result|problem|note|"
+                 "offer|directive",
+                 "input.kind unknown");
+        return false;
+    }
+    return true;
+}
 
-    d = opendir(maildir);
+/* Append r into *rows (growing, capped at DVM_ROWS_MAX); silently drops the
+ * row once the cap or an allocation failure is hit, matching dvm_pull's
+ * original inline growth logic. */
+static void dvm_pull_row_push(struct dvm_row **rows, size_t *nrows,
+                              size_t *caprows, const struct dvm_row *r)
+{
+    if (*nrows == *caprows) {
+        size_t ncap = *caprows ? *caprows * 2 : 32;
+        if (ncap > DVM_ROWS_MAX)
+            ncap = DVM_ROWS_MAX;
+        if (*nrows >= ncap)
+            return;
+        struct dvm_row *nrows_p = (struct dvm_row *)zcl_realloc(
+            *rows, ncap * sizeof(**rows), "devagent_mail.rows");
+        if (!nrows_p)
+            return;
+        *rows = nrows_p;
+        *caprows = ncap;
+    }
+    if (*nrows < *caprows)
+        (*rows)[(*nrows)++] = *r;
+}
+
+/* Read one mail .jsonl file, raising *cursor to the max seq seen (even for
+ * rows at or before the since filter) and appending every row that passes
+ * the since/from/kind filters into *rows. */
+static void dvm_pull_scan_file(const char *path,
+                               const struct dvm_pull_filter *filter,
+                               long long *cursor, struct dvm_row **rows,
+                               size_t *nrows, size_t *caprows)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    for (;;) {
+        static char buf[DVM_LINE_CAP];
+        struct dvm_row r;
+        size_t len;
+        if (!fgets(buf, sizeof(buf), f))
+            break;
+        len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+            buf[--len] = '\0';
+        if (len == 0)
+            continue;
+        if (!dvm_parse_row(buf, &r))
+            continue; /* malformed line: skipped, never fatal */
+        if (r.seq > *cursor)
+            *cursor = r.seq;
+        if (r.seq <= filter->since)
+            continue;
+        if (filter->from && strcmp(r.from, filter->from) != 0)
+            continue;
+        if (filter->kind && strcmp(r.kind, filter->kind) != 0)
+            continue;
+        dvm_pull_row_push(rows, nrows, caprows, &r);
+    }
+    (void)fclose(f);
+}
+
+/* Walk maildir's .jsonl entries, scanning each via dvm_pull_scan_file.
+ * Returns false, with a fail reply already written, on a path-length
+ * overflow or an unreadable directory; true otherwise. */
+static bool dvm_pull_scan_maildir(const char *maildir,
+                                  struct zcl_command_reply *reply,
+                                  const struct dvm_pull_filter *filter,
+                                  long long *cursor, struct dvm_row **rows,
+                                  size_t *nrows, size_t *caprows)
+{
+    DIR *d = opendir(maildir);
     if (!d) {
         dvm_fail(reply, "MAIL_READ_FAILED", "cannot read the mail dir",
                  maildir);
-        return;
+        return false;
     }
+    struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         char path[DVM_PATH_CAP];
         const char *dot;
-        FILE *f;
         size_t namelen = strlen(ent->d_name);
         if (namelen < 7)
             continue;
@@ -916,88 +1006,71 @@ static void dvm_pull(const struct zcl_command_request *req,
             continue;
         if (strcmp(ent->d_name, ".jsonl") == 0)
             continue;
-        int path_length = snprintf(path, sizeof(path), "%s/%s", maildir, ent->d_name);
+        int path_length =
+            snprintf(path, sizeof(path), "%s/%s", maildir, ent->d_name);
         if (path_length <= 0 || (size_t)path_length >= sizeof(path)) {
             (void)closedir(d);
-            free(rows);
-            dvm_fail(reply, "MAIL_READ_FAILED", "mail path exceeds its bound", maildir);
-            return;
+            free(*rows);
+            *rows = NULL;
+            dvm_fail(reply, "MAIL_READ_FAILED", "mail path exceeds its bound",
+                     maildir);
+            return false;
         }
-        f = fopen(path, "r");
-        if (!f)
-            continue;
-        for (;;) {
-            static char buf[DVM_LINE_CAP];
-            struct dvm_row r;
-            size_t len;
-            if (!fgets(buf, sizeof(buf), f))
-                break;
-            len = strlen(buf);
-            while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-                buf[--len] = '\0';
-            if (len == 0)
-                continue;
-            if (!dvm_parse_row(buf, &r))
-                continue; /* malformed line: skipped, never fatal */
-            if (r.seq > cursor)
-                cursor = r.seq;
-            if (r.seq <= since)
-                continue;
-            if (fromf && strcmp(r.from, fromf) != 0)
-                continue;
-            if (kindf && strcmp(r.kind, kindf) != 0)
-                continue;
-            if (nrows == caprows) {
-                size_t ncap = caprows ? caprows * 2 : 32;
-                struct dvm_row *nrows_p;
-                if (ncap > DVM_ROWS_MAX)
-                    ncap = DVM_ROWS_MAX;
-                if (nrows >= ncap)
-                    break;
-                nrows_p = (struct dvm_row *)zcl_realloc(rows,
-                                                    ncap * sizeof(*rows),
-                                                    "devagent_mail.rows");
-                if (!nrows_p)
-                    break;
-                rows = nrows_p;
-                caprows = ncap;
-            }
-            if (nrows < caprows)
-                rows[nrows++] = r;
-        }
-        (void)fclose(f);
+        dvm_pull_scan_file(path, filter, cursor, rows, nrows, caprows);
     }
     (void)closedir(d);
+    return true;
+}
 
-    if (nrows > 1)
-        qsort(rows, nrows, sizeof(*rows), dvm_row_cmp);
-
-    {
-        struct json_value arr, item;
-        json_init(&arr);
-        json_set_array(&arr);
-        for (size_t i = 0; i < nrows; i++) {
-            json_init(&item);
-            json_set_object(&item);
-            (void)json_push_kv_int(&item, "seq", rows[i].seq);
-            (void)json_push_kv_str(&item, "ts", rows[i].ts);
-            (void)json_push_kv_str(&item, "from", rows[i].from);
-            (void)json_push_kv_str(&item, "to", rows[i].to);
-            (void)json_push_kv_str(&item, "kind", rows[i].kind);
-            (void)json_push_kv_str(&item, "body", rows[i].body);
-            (void)json_push_kv_str(&item, "ref", rows[i].ref);
-            (void)json_push_back(&arr, &item);
-            json_free(&item);
-        }
-        (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
-        (void)json_push_kv(&reply->data, "rows", &arr);
-        json_free(&arr);
+static void dvm_pull_build_reply(struct zcl_command_reply *reply,
+                                 struct dvm_row *rows, size_t nrows,
+                                 long long cursor)
+{
+    struct json_value arr, item;
+    json_init(&arr);
+    json_set_array(&arr);
+    for (size_t i = 0; i < nrows; i++) {
+        json_init(&item);
+        json_set_object(&item);
+        (void)json_push_kv_int(&item, "seq", rows[i].seq);
+        (void)json_push_kv_str(&item, "ts", rows[i].ts);
+        (void)json_push_kv_str(&item, "from", rows[i].from);
+        (void)json_push_kv_str(&item, "to", rows[i].to);
+        (void)json_push_kv_str(&item, "kind", rows[i].kind);
+        (void)json_push_kv_str(&item, "body", rows[i].body);
+        (void)json_push_kv_str(&item, "ref", rows[i].ref);
+        (void)json_push_back(&arr, &item);
+        json_free(&item);
     }
+    (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
+    (void)json_push_kv(&reply->data, "rows", &arr);
+    json_free(&arr);
     free(rows);
     (void)json_push_kv_int(&reply->data, "cursor", cursor);
     (void)json_push_kv_int(&reply->data, "count", (long long)nrows);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
+}
+
+static void dvm_pull(const struct zcl_command_request *req,
+                     struct zcl_command_reply *reply, const char *maildir)
+{
+    struct dvm_pull_filter filter;
+    if (!dvm_pull_parse_filter(req, reply, &filter))
+        return;
+
+    long long cursor = filter.since;
+    struct dvm_row *rows = NULL;
+    size_t nrows = 0, caprows = 0;
+
+    if (!dvm_pull_scan_maildir(maildir, reply, &filter, &cursor, &rows,
+                               &nrows, &caprows))
+        return;
+
+    if (nrows > 1)
+        qsort(rows, nrows, sizeof(*rows), dvm_row_cmp);
+
+    dvm_pull_build_reply(reply, rows, nrows, cursor);
 }
 
 /* ── ack ─────────────────────────────────────────────────────────────────── */
