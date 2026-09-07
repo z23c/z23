@@ -16,14 +16,17 @@ that can later run under the resident mind service.
 
 - **Is**: a closed registry (`engine/composition/triggers.def`) plus a
   run-once evaluator (`z23-dev fleet triggers check`) that reads whatever is
-  new in three local sources and performs one of two actions.
+  new in four local sources and performs one of three actions, including
+  posting to the fleet board.
 - **Is not**: a daemon. Nothing here polls, sleeps, or stays resident.
   `check` is one call that reads what changed since its last call and
   returns.
-- **Is not**: networked. Every source is a local file; every action writes
-  to a local file or stdout. No trigger posts to the fleet board, and no
-  trigger reads a GitHub discussion — those are named below as what comes
-  next.
+- **Is not**: itself networked. Every source is a local file; `print` and
+  `ledger` write to a local file or stdout. `board_post` is the one
+  exception, and it reaches only the local running node over the same
+  `fleet_board` RPC method `fleet board post` uses — never a peer, never a
+  shell-out. z23 still has no outbound HTTP seam of its own, which is why
+  the GitHub source below is fed, not fetched.
 
 ## The registry
 
@@ -34,7 +37,7 @@ X-macro style as `engine/composition/fleet_vitals.def`:
 Z23_TRIGGER(id_, source_, field_, op_, value_, action_, why_)
 ```
 
-- `source_` — one of three closed sources:
+- `source_` — one of four closed sources:
   - `landing_outcomes` — `<platform_state_root>/land/outcomes.jsonl`, the
     same file `dev.land` itself appends one row to per terminal outcome
     (`tools/command/native_dev_land.c`).
@@ -45,16 +48,23 @@ Z23_TRIGGER(id_, source_, field_, op_, value_, action_, why_)
   - `experiment_rows` — the interim experiment ledger `exp.sh` appends to
     (`~/.local/lib/z23/tools/exp.sh`), a 22-column TSV at
     `<state>/zclassic23/experiments/rows.tsv`.
+  - `github_comments` — `<state>/zclassic23/triggers/github_comments.jsonl`,
+    fed by `fleet triggers ingest` (see below), never fetched by z23
+    itself.
 - `field_` — a field name looked up in the row: a JSON top-level string key
-  for the two JSONL sources, a named TSV column (read from the file's own
+  for the three JSONL sources, a named TSV column (read from the file's own
   header line) for the experiment source. A row that does not carry the
   field is treated as **absent**, never as an empty string — and an absent
   field never matches, for any `op_`, "ne" included.
 - `op_` — `eq`, `ne`, `prefix`, `contains`.
 - `action_` — `print` (one line on stdout: `TRIGGER <id> <source>
-  <field>=<value>`) or `ledger` (append one JSON row —
+  <field>=<value>`); `ledger` (append one JSON row —
   `{ts,id,source,seq,summary}` — to
-  `<state>/zclassic23/triggers/fired.jsonl`).
+  `<state>/zclassic23/triggers/fired.jsonl`); or `board_post` (post one
+  `note` to the fleet board, over the same `fleet_board` RPC method `fleet
+  board post` uses). `board_post`'s text templates the row's own `body`
+  field when present, else `summary`, else `why_`, followed by `(<id>
+  <field>=<value>)` so a reader always sees which trigger fired.
 - `why_` — one plain sentence: the reason the reaction exists.
 
 An id, source, or field not written down here cannot fire — the same
@@ -98,18 +108,46 @@ evaluating a row whose own `ts` field is older than that many seconds ago.
 never moves the cursor, so a re-run sees the same rows again; use it to
 preview what a real run would do.
 
-Both leaves are bound in `engine/composition/commands/fleet.def` under
+All three leaves are bound in `engine/composition/commands/fleet.def` under
 `fleet.triggers`, alongside the owner's private fleet ledger.
+
+## The GitHub comment source, and why it is fed, not fetched
+
+z23 has no outbound HTTP seam today (checked at
+`grep -a -rln 'https://api.github.com\|gh_api\|http_get' engine tools
+contexts cognition --include='*.c'`, which returns nothing): nothing in the
+tree can reach out to `api.github.com` on its own. Rather than add one,
+`github_comments` is fed by a tiny external adapter — a shell script
+calling `gh api` or curl, outside this tree, holding whatever GitHub token
+it needs in its own secret store — that writes one JSON object per line and
+hands the file to:
+
+```
+z23-dev fleet triggers ingest --source=github --file=/path/to/comments.jsonl
+```
+
+Every line must carry `kind` (`"comment"`), `owner`, `repo`, `number`,
+`comment_id`, `author`, `url`, `body`, and `ts`, all non-empty strings. A
+line missing one is skipped, not fatal — re-feeding an overlapping fetch
+(the adapter's own since-cursor on the GitHub side, not z23's) costs
+nothing. What actually stops a restart from re-firing is the same
+per-source byte cursor `check` already keeps for every other source
+(`<state>/zclassic23/triggers/cursors/github_comments`): once `check` has
+read a row, it stays read across a process restart, same as
+`landing_outcomes` or `board_rows` today.
+
+`github_comment_to_board` (in `engine/composition/triggers.def`) matches
+every ingested comment row (`kind=comment`) and posts it to the fleet board
+with `board_post`, replacing the maintainer's own ad-hoc poll of a GitHub
+discussion.
 
 ## What comes next
 
-- **A board-post action.** The native board leaf itself is changing in
-  train 44 (see `tools/command/native_fleet_board_command.c`); a trigger
-  that posts to the board waits for that leaf to settle rather than
-  binding to an interface about to move.
-- **A GitHub source**, read through whatever relay ends up carrying GitHub
-  discussion comments into z23, so a trigger can react to an owner comment
-  the same way it reacts to a landing outcome today.
+- **The GitHub adapter itself.** This slice defines the ingest leaf and the
+  source it feeds; the shell script that actually calls `gh api` for a
+  specific discussion (owner/repo/number) and a since-cursor on the GitHub
+  side is a separate, small piece of fleet tooling, not part of this tree's
+  gated C.
 - **Running under the resident mind service**, on the same evaluator this
   document describes: `check` is already safe to call from a loop, because
   every source read is bounded by its own cursor and every action is

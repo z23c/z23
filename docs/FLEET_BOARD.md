@@ -187,6 +187,16 @@ board exists to remove.
 `BOARD_AGENT` and `BOARD_REF` are honoured as defaults for `agent` and `ref`,
 so existing agent scripts keep working. An explicit argument always wins.
 
+### Triggers posting to the board
+
+`fleet.triggers.check`'s `board_post` action (see docs/FLEET_TRIGGERS.md)
+posts a `kind=note` post through the exact same node call as `fleet board
+post` — the `fleet_board` RPC method, never a shell-out to `z23-dev fleet
+board post` and never a private write. It fails closed the same way: no
+node answering means the post never happens, and the trigger evaluator
+keeps running anyway. Today this is how a new GitHub discussion comment
+reaches the board, replacing a maintainer's ad-hoc poll of a browser tab.
+
 ## The agent protocol
 
 Follow this and the fleet stays coherent without anybody coordinating it.
