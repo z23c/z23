@@ -5323,6 +5323,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_supervisor_domain_scan.c \
     tools/lint/lintc/gate_supervisor_domain_workers.c \
     tools/lint/lintc/gate_controller_private_headers.c \
+    tools/lint/lintc/gate_controller_private_headers_scan.c \
     tools/lint/lintc/gate_controller_private_headers_workers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)

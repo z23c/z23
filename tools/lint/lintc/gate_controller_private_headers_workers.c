@@ -1,10 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Gates: check-controller-private-headers
- * Second file of the check-controller-private-headers family (the 700-line
- * family ceiling split): the gate's --selftest probes. The gate body — the
- * collect mirror, the include scan, the baseline loader, the verdict — and
- * the port's parity notes live in gate_controller_private_headers.c.
+ * Third file of the check-controller-private-headers family (the 700-line
+ * family ceiling split): the gate's --selftest probes. The gate body —
+ * the baseline loader, the byte-order sort, the shrink-only verdict — and
+ * the family's parity notes live in gate_controller_private_headers.c;
+ * the native collect and include scan live in
+ * gate_controller_private_headers_scan.c.
  */
 
 /* ── --selftest ────────────────────────────────────────────────────────────
