@@ -127,6 +127,9 @@ static const struct lint_gate k_gates[] = {
       check_supervisor_domain_selftest },
     { "check-controller-private-headers", check_controller_private_headers_run,
       check_controller_private_headers_selftest },
+    { "check-generated-artifact-contradictions",
+      check_generated_artifact_contradictions_run,
+      check_generated_artifact_contradictions_selftest },
 };
 
 int main(int argc, char **argv)

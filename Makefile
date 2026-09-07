@@ -5325,6 +5325,9 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_controller_private_headers.c \
     tools/lint/lintc/gate_controller_private_headers_scan.c \
     tools/lint/lintc/gate_controller_private_headers_workers.c \
+    tools/lint/lintc/gate_generated_artifact_contradictions.c \
+    tools/lint/lintc/gate_generated_artifact_contradictions_scan.c \
+    tools/lint/lintc/gate_generated_artifact_contradictions_workers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12807,7 +12810,7 @@ check-capability-inventory-generated:
 	@./tools/lint/check_capability_inventory_generated.sh --selftest
 	@./tools/lint/check_capability_inventory_generated.sh
 
-check-generated-artifact-contradictions:
+check-generated-artifact-contradictions: $(LINTC_TOOL)
 	@echo "══ LINT: generated artifacts cannot contradict each other ══"
 	@./tools/lint/check_generated_artifact_contradictions.sh --selftest
 	@./tools/lint/check_generated_artifact_contradictions.sh
