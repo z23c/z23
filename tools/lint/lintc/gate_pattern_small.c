@@ -155,7 +155,9 @@ int check_no_python_selftest(void)
     return st_ok(bad, "check_no_python selftest: OK\n");
 }
 
-struct mal_acc { regex_t *hit; regex_t *excl; int hits; };
+static const char k_mal_baseline[] = "tools/lint/malloc_baseline.txt";
+
+struct mal_acc { regex_t *hit; regex_t *excl; int hits; const char *nm; struct bln_set *found; };
 
 static int compile_mal(regex_t *hit, regex_t *excl, const char *nm, const char *xtra)
 {
@@ -186,50 +188,95 @@ static int scan_mal(const char *path, void *ctx)
     size_t cap = 0;
     ssize_t n;
     int lineno = 0, rc = 0;
+    struct cstrip cs = {0};
+    char coded[CSTRIP_LINE_MAX];
     while ((n = getline(&line, &cap, f)) >= 0) {
         lineno++;
-        if (regexec(a->hit, line, 0, NULL, 0) != 0
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+        /* Hit-test on the comment/literal-stripped copy (a call name that
+         * only appears in prose or a string never fires); exclusion-test on
+         * the ORIGINAL line, since a `// raw-alloc-ok` marker or a
+         * same-line `zcl_malloc(` lives in exactly the text this strips. */
+        const char *coded_line = cstrip_line(&cs, line, (size_t)n, coded,
+                                             sizeof coded)
+                                      ? coded : line;
+        if (regexec(a->hit, coded_line, 0, NULL, 0) != 0
             || regexec(a->excl, line, 0, NULL, 0) == 0)
             continue;
-        if (n > 0 && line[n - 1] == '\n')
-            line[n - 1] = '\0';
         if (fprintf(stdout, "%s:%d:%s\n", path, lineno, line) < 0) {
             rc = die("z23-lint: write failed\n", "");
             break;
         }
         a->hits++;
+        char key[BLN_ROW];
+        if (ovf(snprintf(key, sizeof key, "%s:%s", path, a->nm), sizeof key)) {
+            rc = 2;
+            break;
+        }
+        rc = bln_add(a->found, key);
     }
     return fin(f, line, path, rc);
 }
 
-static int mal_pass(const char *nm, const char *xtra)
+/* Production C roots (core engine contexts cognition platform tools) — the
+ * app/lib/config/src/domain/adapters tokens this gate used to carry were
+ * dead: those directories were renamed away and walk_src() silently returns
+ * 0 on ENOENT, so the gate scanned only tools/ and reported false-clean over
+ * ~4,000 unscanned production files. walk_src_root() below makes a future
+ * rename loud instead of silent. */
+static const char *const k_mal_roots[] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools"
+};
+
+static int mal_pass(const char *nm, const char *xtra, struct bln_set *found)
 {
     regex_t hit, excl;
     int cr = compile_mal(&hit, &excl, nm, xtra);
     if (cr) return cr;
-    struct mal_acc a = { .hit = &hit, .excl = &excl, .hits = 0 };
-    int rc = walk_src("app", 1, scan_mal, &a);
-    if (rc == 0)
-        rc = walk_src("tools", 1, scan_mal, &a);
-    if (rc == 0 && a.hits) {
-        printf("FAIL: bare %s in app/tools code (use zcl_%s or mark // raw-alloc-ok)\n", nm, nm);
-        rc = 1;
-    }
+    struct mal_acc a = { .hit = &hit, .excl = &excl, .hits = 0, .nm = nm, .found = found };
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof k_mal_roots / sizeof k_mal_roots[0]; i++)
+        rc = walk_src_root("check-malloc", k_mal_roots[i], 1, scan_mal, &a);
     drop2(&hit, &excl);
     return rc;
 }
+
+/* Measured 2026-09-06 under core/engine/contexts/cognition/platform/tools
+ * (.c+.h): 4337 files. Independent of the malloc/calloc/realloc match
+ * logic (git ls-files over the same globs), so a root that exists but is
+ * scanned near-empty by an extension-filter regression trips this even
+ * though require_scan_root() alone would not catch it. */
+enum { MAL_SCAN_FLOOR = 4000 };
 
 int check_malloc_run(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    int rc = mal_pass("malloc", "|zcl_calloc|zcl_realloc");
+    int nfiles = 0;
+    int rc = walk_count_roots("check-malloc", k_mal_roots,
+                              sizeof k_mal_roots / sizeof k_mal_roots[0], 1,
+                              &nfiles);
     if (rc == 0)
-        rc = mal_pass("calloc", "");
+        rc = gate_require_scanned(nfiles, MAL_SCAN_FLOOR, "check-malloc",
+                                  "scanned far fewer .c/.h files than expected "
+                                  "under the production roots — extension "
+                                  "filter or root list regression?");
+    if (rc) return rc;
+    struct bln_set base = {0}, found = {0};
+    rc = bln_load(&base, k_mal_baseline);
+    if (rc) return rc;
+    rc = mal_pass("malloc", "|zcl_calloc|zcl_realloc", &found);
     if (rc == 0)
-        rc = mal_pass("realloc", "");
+        rc = mal_pass("calloc", "", &found);
     if (rc == 0)
-        fputs("  OK: no raw allocations\n", stdout);
+        rc = mal_pass("realloc", "", &found);
+    if (rc == 0)
+        rc = bln_diff_report(stderr, "check-malloc", k_mal_baseline, &base, &found);
+    if (rc == 0)
+        return puts("  OK: every bare malloc/calloc/realloc site is pinned in "
+                    "tools/lint/malloc_baseline.txt (shrink-only)") < 0
+                   ? die("z23-lint: write failed\n", "") : 0;
     return rc;
 }
 
@@ -266,9 +313,19 @@ int check_malloc_selftest(void)
             | mal_want(&ch, &ce, "LOG_INFO(\"calloc(\")", 0)
             | mal_want(&rh, &re, "q = realloc(q, n);", 1)
             | mal_want(&ch, &ce, "r = calloc(1, n);", 1);
+    /* A bare mention of calloc(...) inside a block comment (even one that
+     * opened on an earlier line, hence the pre-seeded in_block state) must
+     * not hit once stripped, though it hits the raw regex directly. */
+    struct cstrip cs = { .in_block = 1 };
+    char stripped[128];
+    const char *raw = " * a zero-count calloc(0, n) call returns a unique ptr */";
+    int strip_ok = cstrip_line(&cs, raw, strlen(raw), stripped, sizeof stripped);
+    bad |= !strip_ok || regexec(&ch, raw, 0, NULL, 0) != 0
+         || regexec(&ch, stripped, 0, NULL, 0) == 0;
     drop2(&mh, &me);
     drop2(&ch, &ce);
     drop2(&rh, &re);
+    bad |= require_scan_root("check-malloc", "app") == 0;
     return st_ok(bad, "check_malloc selftest: OK\n");
 }
 
@@ -457,7 +514,27 @@ struct lg_acc {
     const char *skip_sub;
     const char *skip_eq;
     int hits;
+    /* Optional shrink-only-baseline recording: when sym is set, every hit
+     * also adds "<path>:<sym>" to *found (once per file). NULL for callers
+     * that FAIL on any hit instead of ratcheting a baseline. */
+    const char *sym;
+    struct bln_set *found;
 };
+
+static int lg_got(const regex_t *hit, const regex_t *excl, const regex_t *prev,
+                  const char *p, const char *s);
+
+/* Baseline-record one hit at `path` (a->sym set) into *a->found, as
+ * "<path>:<sym>"; a no-op for callers that FAIL on any hit instead. */
+static int lg_record_hit(struct lg_acc *a, const char *path)
+{
+    if (!a->sym)
+        return 0;
+    char key[BLN_ROW];
+    if (ovf(snprintf(key, sizeof key, "%s:%s", path, a->sym), sizeof key))
+        return 2;
+    return bln_add(a->found, key);
+}
 
 static int scan_lg(const char *path, void *ctx)
 {
@@ -475,10 +552,8 @@ static int scan_lg(const char *path, void *ctx)
     while ((n = getline(&buf[cur], &cap[cur], f)) >= 0) {
         char *line = buf[cur];
         lineno++;
-        if (regexec(a->hit, line, 0, NULL, 0) == 0
-            && regexec(a->excl, line, 0, NULL, 0) != 0
-            && !(lineno > 1
-                 && regexec(a->prev, buf[1 - cur], 0, NULL, 0) == 0)) {
+        const char *prevline = lineno > 1 ? buf[1 - cur] : NULL;
+        if (lg_got(a->hit, a->excl, a->prev, prevline, line)) {
             if (n > 0 && line[n - 1] == '\n')
                 line[n - 1] = '\0';
             if (fprintf(stdout, "%s:%d:%s\n", path, lineno, line) < 0) {
@@ -486,6 +561,9 @@ static int scan_lg(const char *path, void *ctx)
                 break;
             }
             a->hits++;
+            rc = lg_record_hit(a, path);
+            if (rc)
+                break;
         }
         cur = 1 - cur;
     }
@@ -531,31 +609,55 @@ static int pt_comp(regex_t *hit, regex_t *excl, regex_t *prev)
     return cr;
 }
 
+static const char k_pt_baseline[] = "tools/lint/pthread_create_baseline.txt";
+
+/* Production C roots — "lib" and "config" were dead (renamed away); the
+ * gate silently scanned only "app" (also dead) and "tools", i.e. nothing
+ * of substance, and reported clean. See malloc_baseline.txt for the same
+ * root-rename story. */
+static const char *const k_pt_roots[] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools"
+};
+
+/* Measured 2026-09-06: 2644 .c files under the production roots. */
+enum { PT_SCAN_FLOOR = 2400 };
+
 int check_pthread_create_run(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+    int nfiles = 0;
+    int rc = walk_count_roots("check-pthread-create", k_pt_roots,
+                              sizeof k_pt_roots / sizeof k_pt_roots[0], 0,
+                              &nfiles);
+    if (rc == 0)
+        rc = gate_require_scanned(nfiles, PT_SCAN_FLOOR, "check-pthread-create",
+                                  "scanned far fewer .c files than expected "
+                                  "under the production roots");
+    if (rc) return rc;
     regex_t hit, excl, prev;
     int cr = pt_comp(&hit, &excl, &prev);
     if (cr)
         return cr;
+    struct bln_set base = {0}, found = {0};
+    rc = bln_load(&base, k_pt_baseline);
+    if (rc) {
+        drop3(&hit, &excl, &prev);
+        return rc;
+    }
     struct lg_acc a = {
         .hit = &hit, .excl = &excl, .prev = &prev,
         .skip_sub = "tests/harness/include/test/",
         .skip_eq = "platform/modules/util/src/thread_registry.c",
-        .hits = 0
+        .hits = 0, .sym = "pthread_create", .found = &found
     };
-    static const char *const roots[] = { "lib", "app", "tools", "config" };
-    int rc = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
-        rc = walk_src(roots[i], 0, scan_lg, &a);
-    if (rc == 0 && a.hits) {
-        fputs("FAIL: raw pthread_create in production code (use thread_registry_spawn{,_ex} or mark // raw-pthread-ok: <reason>)\n",
-              stdout);
-        rc = 1;
-    } else if (rc == 0) {
-        fputs("  OK: all pthread_create call sites accounted for\n", stdout);
-    }
+    for (size_t i = 0; rc == 0 && i < sizeof k_pt_roots / sizeof k_pt_roots[0]; i++)
+        rc = walk_src_root("check-pthread-create", k_pt_roots[i], 0, scan_lg, &a);
+    if (rc == 0)
+        rc = bln_diff_report(stderr, "check-pthread-create", k_pt_baseline, &base, &found);
+    if (rc == 0)
+        fputs("  OK: every raw pthread_create site is pinned in "
+              "tools/lint/pthread_create_baseline.txt (shrink-only)\n", stdout);
     drop3(&hit, &excl, &prev);
     return rc;
 }
@@ -577,6 +679,7 @@ int check_pthread_create_selftest(void)
                       "pthread_crea" "te(", 0)
             | lg_want(t, &hit, &excl, &prev, NULL,
                       "my_pthread_create_wrapper(", 0);
+    bad |= require_scan_root("check-pthread-create", "lib") == 0;
     drop3(&hit, &excl, &prev);
     return st_ok(bad, "check_pthread_create selftest: OK\n");
 }
@@ -654,29 +757,52 @@ static int va_comp(regex_t *hit, regex_t *excl, regex_t *prev)
     return cr;
 }
 
+static const char k_va_baseline[] = "tools/lint/gnu_va_args_baseline.txt";
+
+/* Production C roots — this gate used to walk two engine/platform
+ * sub-directories plus four dead tokens (app config lib domain src) and
+ * missed engine/{composition,controllers,entry,models,services,supervisors,
+ * conditions,jobs,modules,...} and most of contexts/cognition/platform
+ * entirely. Re-rooted onto the full production tree. */
+static const char *const k_va_roots[] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools"
+};
+
+/* Measured 2026-09-06 under the production roots (.c+.h): 4337 files. */
+enum { VA_SCAN_FLOOR = 4000 };
+
 int check_no_gnu_va_args_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
+    int nfiles = 0;
+    int rc = walk_count_roots("check-no-gnu-va-args", k_va_roots,
+                              sizeof k_va_roots / sizeof k_va_roots[0], 1,
+                              &nfiles);
+    if (rc == 0)
+        rc = gate_require_scanned(nfiles, VA_SCAN_FLOOR, "check-no-gnu-va-args",
+                                  "scanned far fewer .c/.h files than expected "
+                                  "under the production roots");
+    if (rc) return rc;
     regex_t hit, excl, prev;
     int cr = va_comp(&hit, &excl, &prev);
     if (cr) return cr;
-    struct lg_acc a = { .hit = &hit, .excl = &excl, .prev = &prev, .hits = 0 };
-    static const char *const roots[] = {
-        "app", "config", "core", "lib", "domain", "engine/application",
-        "platform/adapters", "platform/ports", "src", "tools"
-    };
-    int rc = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
-        rc = walk_src(roots[i], 1, scan_lg, &a);
-    if (rc == 0 && a.hits) {
-        fputs("FAIL: GNU ', ##" "__VA_ARGS__' extension in C23 source.\n"
-              "      Use '__VA_OPT__(,) __VA_ARGS__' instead, or mark the line\n"
-              "      // gnu-va-args-ok: <reason>\n", stdout);
-        rc = 1;
-    } else if (rc == 0) {
-        fputs("  OK: no GNU comma-swallowing __VA_ARGS__ (C23 __VA_OPT__ everywhere)\n",
-              stdout);
+    struct bln_set base = {0}, found = {0};
+    rc = bln_load(&base, k_va_baseline);
+    if (rc) {
+        drop3(&hit, &excl, &prev);
+        return rc;
     }
+    struct lg_acc a = {
+        .hit = &hit, .excl = &excl, .prev = &prev, .hits = 0,
+        .sym = "gnu-va-args", .found = &found
+    };
+    for (size_t i = 0; rc == 0 && i < sizeof k_va_roots / sizeof k_va_roots[0]; i++)
+        rc = walk_src_root("check-no-gnu-va-args", k_va_roots[i], 1, scan_lg, &a);
+    if (rc == 0)
+        rc = bln_diff_report(stderr, "check-no-gnu-va-args", k_va_baseline, &base, &found);
+    if (rc == 0)
+        fputs("  OK: every GNU comma-swallowing __VA_ARGS__ site is pinned in "
+              "tools/lint/gnu_va_args_baseline.txt (shrink-only)\n", stdout);
     drop3(&hit, &excl, &prev);
     return rc;
 }
@@ -700,6 +826,7 @@ int check_no_gnu_va_args_selftest(void)
             | lg_want(t, &hit, &excl, &prev, NULL, m, 0)
             | lg_want(t, &hit, &excl, &prev, "// gnu-va-args-ok: legacy", h, 0)
             | lg_want(t, &hit, &excl, &prev, NULL, "    x = a ## b;", 0);
+    bad |= require_scan_root("check-no-gnu-va-args", "domain") == 0;
     drop3(&hit, &excl, &prev);
     return st_ok(bad, "check_no_gnu_va_args selftest: OK\n");
 }

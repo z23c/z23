@@ -37,3 +37,12 @@ tests/harness/src/test_canary_sentinel_watch.c
 engine/composition/src/consensus_state_snapshot_install_activate.c
 engine/modules/storage/src/progress_store.c
 engine/modules/storage/src/projection_store.c
+# newly scanned 2026-09-06: root list was dead since the tree rename
+# (check-proc-self-shim walked "app config lib tools" — only "tools" was
+# real — so the gate scanned tools/ alone and reported clean; re-rooted
+# onto core/engine/contexts/cognition/platform/tools). This is CREATING
+# coverage, not raising a baseline: bench_system_uptime_seconds() wants raw
+# system uptime, not os_proc_uptime_seconds()'s process-age-since-boot
+# value, so the two are not a drop-in swap; pinning until a raw-uptime
+# accessor exists on the platform seam.
+engine/entry/main_cli_modes.c

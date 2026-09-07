@@ -1,0 +1,26 @@
+# hotswap_dl_baseline.txt — shrink-only ratchet for check-hotswap-dev-only
+# (z23-lint).
+#
+# newly scanned 2026-09-06: root list was dead since the tree rename
+# (walked "app tools lib config src domain application adapters" — only
+# "tools" ever existed — so the gate scanned tools/ alone and reported
+# clean). Re-rooted onto the real production tree (core engine contexts
+# cognition platform tools) AND onto headers too (the old scan was .c-only,
+# so platform/dlopen_pin.h — which names the exact banned symbols in its own
+# prototypes — was never read regardless of root). This is CREATING
+# coverage, not raising a baseline.
+#
+# Two doc-comment false positives (mentions of "dlopen()" in prose, not
+# code) were reworded rather than pinned — see
+# engine/controllers/include/controllers/policy_native_resident.h and
+# platform/modules/platform/include/platform/dlopen_pin.h in the same
+# commit. This file pins the one REAL dl*() call site the wider scan found:
+# a macOS-only sandbox library load with no ZCL_DEV_BUILD guard. Migrating
+# it under engine/modules/hotswap/ (or adding a documented dev-only guard)
+# needs macOS build coverage this lane does not have; shrink-only until
+# then.
+#
+# Format: "<path>:dlcall", one row per file with an unguarded dl* call
+# outside engine/modules/hotswap/. Shrink-only: a NEW row or a STALE row
+# (baselined but no longer found) both FAIL the gate.
+platform/modules/platform/src/os_sandbox_stub.c:dlcall

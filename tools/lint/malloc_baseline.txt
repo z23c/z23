@@ -1,0 +1,79 @@
+# malloc_baseline.txt — shrink-only ratchet for check-malloc (z23-lint).
+#
+# newly scanned 2026-09-06: root list was dead since the tree rename
+# (check-malloc used to walk "app" and "tools" — "app" no longer exists —
+# so it silently scanned only tools/ and reported OK: no raw allocations
+# while ~4,000 files under core/engine/contexts/cognition/platform went
+# unscanned). Re-rooted onto the real production tree (core engine contexts
+# cognition platform tools); this file pins the debt that visibility
+# uncovered. This is CREATING coverage, not raising a baseline: nothing
+# here passed the gate before — the gate was not looking.
+#
+# Each row is "<path>:<symbol>", one row per file that still calls the
+# named allocator directly instead of zcl_malloc/zcl_calloc/zcl_realloc (or
+# a // raw-alloc-ok marker). Shrink-only: migrate a site onto the checked
+# wrapper (or mark it) and delete its row here; a NEW row (not seen before)
+# or a STALE row (baselined but the site is gone/fixed) both FAIL the gate.
+#
+# tools/dev/, tools/lint/ and other developer-only tooling are out of scope
+# for this ratchet (raw allocation there was already tolerated); everything
+# below is production or package/library C the gate now actually reaches.
+contexts/commons/packages/zbase58/app/main.c:malloc
+contexts/commons/packages/zbase58/app/main.c:realloc
+contexts/commons/packages/zbase64/app/main.c:malloc
+contexts/commons/packages/zbuf/src/zbuf.c:realloc
+contexts/commons/packages/zcsv/app/main.c:realloc
+contexts/commons/packages/zdogview/app/main.c:malloc
+contexts/commons/packages/zescape/app/main.c:malloc
+contexts/commons/packages/zescape/app/main.c:realloc
+contexts/commons/packages/zhex/app/main.c:malloc
+contexts/commons/packages/zhex/app/main.c:realloc
+contexts/commons/packages/zini/src/zini.c:calloc
+contexts/commons/packages/zini/src/zini.c:malloc
+contexts/commons/packages/zini/src/zini.c:realloc
+contexts/commons/packages/zintern/src/zintern.c:malloc
+contexts/commons/packages/zintern/tests/test_zintern.c:malloc
+contexts/commons/packages/zlru/tests/test_zlru.c:calloc
+contexts/commons/packages/zmap/app/main.c:malloc
+contexts/commons/packages/zmap/src/zmap.c:calloc
+contexts/commons/packages/zmap/tests/test_zmap.c:calloc
+contexts/commons/packages/znetstring/app/main.c:malloc
+contexts/commons/packages/znetstring/app/main.c:realloc
+contexts/commons/packages/znetstring/tests/test_znetstring.c:malloc
+contexts/commons/packages/zotpcli/app/main.c:malloc
+contexts/commons/packages/zotpcli/src/zotpcli.c:calloc
+contexts/commons/packages/zpem/app/main.c:malloc
+contexts/commons/packages/zpem/app/main.c:realloc
+contexts/commons/packages/zpem/tests/test_zpem.c:malloc
+contexts/commons/packages/zpq/app/main.c:malloc
+contexts/commons/packages/zpq/src/zpq.c:malloc
+contexts/commons/packages/zpq/tests/test_zpq.c:malloc
+contexts/commons/packages/zpuny/tests/test_zpuny.c:malloc
+contexts/commons/packages/zre/src/zre.c:calloc
+contexts/commons/packages/zre/src/zre.c:malloc
+contexts/commons/packages/zripemd/tests/test_zripemd.c:malloc
+contexts/commons/packages/zscrypt/src/zscrypt.c:malloc
+contexts/commons/packages/zsha256/tests/test_zsha256.c:malloc
+contexts/commons/packages/zstr/app/main.c:malloc
+contexts/commons/packages/ztemplate/src/ztemplate.c:calloc
+contexts/commons/packages/ztemplate/src/ztemplate.c:malloc
+contexts/commons/packages/ztemplate/src/ztemplate.c:realloc
+contexts/commons/packages/ztemplate/tests/test_ztemplate.c:malloc
+contexts/commons/packages/ztrie/src/ztrie.c:malloc
+contexts/commons/packages/ztrie/tests/test_ztrie.c:malloc
+contexts/commons/packages/zvarint/app/main.c:malloc
+contexts/commons/packages/zvec/src/zvec.c:malloc
+contexts/commons/packages/zvec/tests/test_zvec.c:malloc
+contexts/commons/packages/zwalk/src/zwalk.c:malloc
+contexts/commons/packages/zwalk/src/zwalk.c:realloc
+engine/entry/cli.c:malloc
+engine/entry/cli.c:realloc
+engine/entry/main_cli_modes.c:malloc
+engine/entry/main_cli_modes.c:realloc
+platform/adapters/outbound/persistence/src/block_log_file.c:calloc
+platform/adapters/outbound/persistence/src/block_log_file.c:malloc
+platform/adapters/outbound/persistence/src/block_log_file.c:realloc
+platform/adapters/outbound/persistence/src/block_log_legacy.c:calloc
+platform/adapters/outbound/persistence/src/utxo_snapshot_inmem.c:calloc
+platform/adapters/outbound/persistence/src/utxo_snapshot_inmem.c:malloc
+platform/adapters/outbound/persistence/src/utxo_snapshot_inmem.c:realloc

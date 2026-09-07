@@ -731,17 +731,34 @@ static int scan_ps(const char *path, void *ctx)
     return fin(f, line, path, rc);
 }
 
+/* Measured 2026-09-06: 2644 .c files under the production roots. */
+enum { PS_SCAN_FLOOR = 2400 };
+
 int check_proc_self_shim_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
     struct sr_set base = {0};
     int rc = sr_load(&base, "tools/lint/proc_self_shim_baseline.txt");
     if (rc) return rc;
-    char hit[64][192];
-    struct ps_acc a = { .base = &base, .hit = hit, .max = 64 };
-    static const char *const roots[] = { "app", "config", "lib", "tools" };
+    char hit[128][192];
+    struct ps_acc a = { .base = &base, .hit = hit, .max = 128 };
+    /* Production C roots — "app config lib" were dead (renamed away), so
+     * the gate scanned only "tools" and reported false-clean over the rest
+     * of the tree, including the very platform/modules/platform/ home this
+     * gate's own message names as the expected destination. */
+    static const char *const roots[] = {
+        "core", "engine", "contexts", "cognition", "platform", "tools"
+    };
+    int nfiles = 0;
+    rc = walk_count_roots("check-proc-self-shim", roots,
+                          sizeof roots / sizeof roots[0], 0, &nfiles);
+    if (rc == 0)
+        rc = gate_require_scanned(nfiles, PS_SCAN_FLOOR, "check-proc-self-shim",
+                                  "scanned far fewer .c files than expected "
+                                  "under the production roots");
+    if (rc) return rc;
     for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
-        rc = walk_src(roots[i], 0, scan_ps, &a);
+        rc = walk_src_root("check-proc-self-shim", roots[i], 0, scan_ps, &a);
     if (rc) return rc;
     if (!a.n)
         return puts("check_proc_self_shim: clean — no new raw /proc/self or /proc/uptime reads") < 0
@@ -779,6 +796,7 @@ int check_proc_self_shim_selftest(void)
     if (old) (void)setenv("ZCL_LINT_PRODUCTION_SCAN", old, 1);
     else (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
     bad |= lint_path_is_excluded("tools/_xfixture.c") || ps_skip("tools/_xfixture.c", &empty);
+    bad |= require_scan_root("check-proc-self-shim", "app") == 0;
     return st_ok(bad, "check_proc_self_shim selftest: OK\n");
 }
 
@@ -901,7 +919,7 @@ static int hs_scan_path(const char *path, const regex_t *re, char *buf, size_t c
     }
     return fin(f, line, path, rc);
 }
-struct hs_out_acc { const regex_t *re; char *buf; size_t cap, used; };
+struct hs_out_acc { const regex_t *re; char *buf; size_t cap, used; struct bln_set *found; };
 static int scan_hs_out(const char *path, void *ctx)
 {
     struct hs_out_acc *a = ctx;
@@ -912,14 +930,29 @@ static int scan_hs_out(const char *path, void *ctx)
     size_t cap = 0;
     ssize_t n;
     int lineno = 0, rc = 0;
+    struct cstrip cs = {0};
+    char coded[CSTRIP_LINE_MAX];
     while ((n = getline(&line, &cap, f)) >= 0) {
         lineno++;
-        if (regexec(a->re, line, 0, NULL, 0) != 0) continue;
-        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        if (n > 0 && line[n - 1] == '\n') line[--n] = '\0';
+        /* Hit-test the comment/literal-stripped copy: a dl*() mention in
+         * doc prose (e.g. "produce a dlopen()-able path") must not trip a
+         * ban on the real call. */
+        const char *coded_line = cstrip_line(&cs, line, (size_t)n, coded,
+                                             sizeof coded)
+                                      ? coded : line;
+        if (regexec(a->re, coded_line, 0, NULL, 0) != 0) continue;
         int k = snprintf(a->buf + a->used, a->cap - a->used, "%s:%d:%s\n",
                          path, lineno, line);
         if (ovf(k, a->cap - a->used)) { rc = 2; break; }
         a->used += (size_t)k;
+        char key[BLN_ROW];
+        if (ovf(snprintf(key, sizeof key, "%s:dlcall", path), sizeof key)) {
+            rc = 2;
+            break;
+        }
+        rc = bln_add(a->found, key);
+        if (rc) break;
     }
     return fin(f, line, path, rc);
 }
@@ -961,30 +994,54 @@ static int hs_each_src(const char *dir, const regex_t *re, int *saw)
     return rc;
 }
 
+static const char k_hs_baseline[] = "tools/lint/hotswap_dl_baseline.txt";
+
+/* Production C roots — "app lib config src domain application adapters"
+ * were all dead (renamed away); only "tools" was ever real, so the gate
+ * scanned tools/ alone and reported clean over the rest of the tree. */
+static const char *const k_hs_roots[] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools"
+};
+
+/* Measured 2026-09-06 under the production roots (.c+.h): 4337 files. */
+enum { HS_SCAN_FLOOR = 4000 };
+
 int check_hotswap_dev_only_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
+    int nfiles = 0;
+    int rc = walk_count_roots("check-hotswap-dev-only", k_hs_roots,
+                              sizeof k_hs_roots / sizeof k_hs_roots[0], 1,
+                              &nfiles);
+    if (rc == 0)
+        rc = gate_require_scanned(nfiles, HS_SCAN_FLOOR, "check-hotswap-dev-only",
+                                  "scanned far fewer .c/.h files than expected "
+                                  "under the production roots");
+    if (rc) return rc;
     regex_t re;
     int cr = hs_dl_comp(&re);
     if (cr) return cr;
     char hits[CLK_MATCH] = {0};
-    struct hs_out_acc a = { .re = &re, .buf = hits, .cap = sizeof hits };
-    static const char *const roots[] = {
-        "app", "tools", "lib", "config", "src", "domain", "application", "adapters"
-    };
-    int rc = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
-        rc = walk_src(roots[i], 0, scan_hs_out, &a);
-    if (rc == 0 && a.used) {
-        if (fputs(hits, stdout) < 0
-            || puts("FAIL: dlopen/dlsym/dlclose outside engine/modules/hotswap/ (release must be static)") < 0)
-            rc = die("z23-lint: write failed\n", "");
-        else rc = 1;
+    struct bln_set base = {0}, found = {0};
+    rc = bln_load(&base, k_hs_baseline);
+    if (rc) {
+        regfree(&re);
+        return rc;
     }
+    struct hs_out_acc a = { .re = &re, .buf = hits, .cap = sizeof hits, .found = &found };
+    /* hdrs=1: the dead-root audit found this gate's dlopen/dlsym/dlclose
+     * ban skipping .h files too (platform/dlopen_pin.h names the ban's
+     * exact subject in its own prototypes) — a .c-only scan let a header
+     * declare the banned symbol names free of scrutiny. */
+    for (size_t i = 0; rc == 0 && i < sizeof k_hs_roots / sizeof k_hs_roots[0]; i++)
+        rc = walk_src_root("check-hotswap-dev-only", k_hs_roots[i], 1, scan_hs_out, &a);
+    if (rc == 0)
+        rc = bln_diff_report(stderr, "check-hotswap-dev-only", k_hs_baseline, &base, &found);
     if (rc == 0) rc = hs_each_src("engine/modules/hotswap/src", &re, NULL);
     regfree(&re);
     if (rc) return rc;
-    return puts("  OK: hot-swap dynamic loading is dev-only") < 0
+    return puts("  OK: hot-swap dynamic loading is dev-only (unbaselined dl* "
+                "call sites are pinned in tools/lint/hotswap_dl_baseline.txt)") < 0
                ? die("z23-lint: write failed\n", "") : 0;
 }
 
@@ -1038,6 +1095,15 @@ int check_hotswap_dev_only_selftest(void)
     }
     int bad = rc != 0 || nused != 0 || eused == 0 || iused != 0 || pfx_hit != 0
             || direct != 3;
+    bad |= require_scan_root("check-hotswap-dev-only", "config") == 0;
+    /* A doc comment merely mentioning "dlopen()" must not hit once
+     * comment-stripped, though the same text hits the raw regex directly. */
+    struct cstrip cs = { .in_block = 1 };
+    char stripped[128];
+    const char *doc = " * produce a dlopen()-able path that pins the bytes";
+    int strip_ok = cstrip_line(&cs, doc, strlen(doc), stripped, sizeof stripped);
+    bad |= !strip_ok || regexec(&re, doc, 0, NULL, 0) != 0
+         || regexec(&re, stripped, 0, NULL, 0) == 0;
     if (bad)
         fputs("FAIL: hot-swap dev-region scanner selftest\n", stderr);
     regfree(&re);

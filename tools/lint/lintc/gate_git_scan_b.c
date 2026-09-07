@@ -938,8 +938,12 @@ int check_mind_owns_rebuild_selftest(void)
 }
 
 enum { SUS_DIRS = 32, SUS_STRAY_N = 256, SUS_STRAY_L = 512, SUS_TRACK = 2 * 1024 * 1024 };
+/* "adapters" (dead — renamed away) and the duplicate "core" were harmless
+ * (the exist[] filter below already drops the former, and re-scanning core/
+ * twice just wasted time) but both were noise left over from the same
+ * tree-rename that hollowed the other six gates in this family. */
 static const char *const k_sus_dirs[] = {
-    "core", "engine", "contexts", "cognition", "platform", "core", "adapters", "tools"
+    "core", "engine", "contexts", "cognition", "platform", "tools"
 };
 
 static int sus_split_ws(const char *s, char out[][RS_PATH], int max, int *n)
@@ -1081,8 +1085,16 @@ int check_no_stray_untracked_source_run(int argc, char **argv)
             ne++;
         }
     }
-    rc = gate_require_scanned(ne, 1, "check-no-stray-untracked-source",
-                              "none of the scanned root dirs exist — layout changed?");
+    /* Floor is "every configured root exists", not "at least one": with the
+     * default 6-root list a dead root must FATAL even if a future refactor
+     * drops the per-root require_scan_root() call this gate relies on
+     * today. The env-test override (ZCL_STRAY_SCAN_DIRS_FOR_TEST, used by
+     * selftest_scanner_immunity.sh) intentionally passes one directory, so
+     * its floor stays 1. */
+    int sus_floor = (env && env[0]) ? 1
+                    : (int)(sizeof k_sus_dirs / sizeof k_sus_dirs[0]);
+    rc = gate_require_scanned(ne, sus_floor, "check-no-stray-untracked-source",
+                              "a scanned root dir is missing — layout changed?");
     if (rc)
         return rc;
     regex_t fixre;

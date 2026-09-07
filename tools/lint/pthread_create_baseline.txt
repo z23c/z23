@@ -1,0 +1,19 @@
+# pthread_create_baseline.txt — shrink-only ratchet for check-pthread-create
+# (z23-lint).
+#
+# newly scanned 2026-09-06: root list was dead since the tree rename
+# (check-pthread-create walked "lib app tools config" — only "app"/"tools"
+# ever existed and "app" doesn't either, so effectively only tools/ was
+# scanned and the gate reported clean). Re-rooted onto the real production
+# tree (core engine contexts cognition platform tools). This is CREATING
+# coverage, not raising a baseline: nothing here passed the gate before —
+# the gate was not looking. Of ~20 raw pthread_create( sites the wider scan
+# now reaches, all but this one already carry a `// raw-pthread-ok:<reason>`
+# marker on the call line or the line above (short-burst/joined workers);
+# this is the one genuinely unmarked long-running spawn found.
+#
+# Each row is "<path>:pthread_create". Shrink-only: route the site through
+# thread_registry_spawn{,_ex} (or add a // raw-pthread-ok:<reason> marker if
+# it is in fact a bounded/joined worker) and delete its row here; a NEW row
+# or a STALE row (baselined but no longer found) both FAIL the gate.
+engine/composition/src/state_offer_service.c:pthread_create

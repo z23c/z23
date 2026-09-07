@@ -46,7 +46,7 @@ static inline void *zcl_malloc_impl(size_t size, const char *label,
                 size, label, file, line);
         return NULL;
     }
-    void *p = malloc(size);
+    void *p = malloc(size);  // raw-alloc-ok: this IS zcl_malloc's implementation
     if (!p && size > 0) {
         fprintf(stderr, "zcl_malloc FAILED: %zu bytes for '%s' at %s:%d\n",
                 size, label, file, line);
@@ -63,7 +63,7 @@ static inline void *zcl_calloc_impl(size_t count, size_t size,
                 count, size, label, file, line);
         return NULL;
     }
-    void *p = calloc(count, size);
+    void *p = calloc(count, size);  // raw-alloc-ok: this IS zcl_calloc's implementation
     if (!p && count > 0 && size > 0) {
         fprintf(stderr, "zcl_calloc FAILED: %zu x %zu bytes for '%s' at %s:%d\n",
                 count, size, label, file, line);
@@ -82,7 +82,7 @@ static inline void *zcl_realloc_impl(void *ptr, size_t size,
                 size, label, file, line);
         return NULL;
     }
-    void *p = realloc(ptr, size);
+    void *p = realloc(ptr, size);  // raw-alloc-ok: this IS zcl_realloc's implementation
     if (!p && size > 0) {
         fprintf(stderr, "zcl_realloc FAILED: %zu bytes for '%s' at %s:%d\n",
                 size, label, file, line);
@@ -100,7 +100,7 @@ static inline void *zcl_realloc_impl(void *ptr, size_t size,
 static inline void *zcl_malloc_or_die_impl(size_t size, const char *label,
                                             const char *file, int line)
 {
-    void *p = malloc(size);
+    void *p = malloc(size);  // raw-alloc-ok: this IS zcl_malloc_or_die's implementation
     if (!p && size > 0) {
         fprintf(stderr, "FATAL: zcl_malloc_or_die: %zu bytes for '%s' at %s:%d\n",
                 size, label, file, line);

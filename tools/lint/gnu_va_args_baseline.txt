@@ -1,0 +1,13 @@
+# gnu_va_args_baseline.txt — shrink-only ratchet for check-no-gnu-va-args
+# (z23-lint).
+#
+# newly scanned 2026-09-06: root list was dead/partial since the tree
+# rename (walked "app config lib domain src" — none of which exist — plus
+# only engine/application and two platform/ sub-directories, missing the
+# rest of engine, all of contexts/cognition, and most of platform).
+# Re-rooted onto the full production tree (core engine contexts cognition
+# platform tools). This is CREATING coverage, not raising a baseline: the
+# wider scan found ZERO GNU ', ##__VA_ARGS__' sites, so this file starts
+# and stays empty. A NEW row here would mean a fresh violation — never add
+# one; use __VA_OPT__(,) __VA_ARGS__ or a // gnu-va-args-ok:<reason> marker
+# instead.

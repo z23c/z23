@@ -430,8 +430,12 @@ static const char *const k_pf_sites[] = {
     "engine/supervisors/src/net_supervisor.c",
     "engine/conditions/src/peer_floor_violated.c",
 };
+/* Production C roots — "lib app config domain" were dead (renamed away),
+ * so this gate's extra-definition scan only ever reached core/ and tools/,
+ * missing engine/contexts/cognition/platform where a stray redefinition of
+ * ZCL_PEER_FLOOR_HEALTHY would have gone undetected. */
 static const char *const k_pf_walk_roots[] = {
-    "lib", "app", "config", "core", "domain", "tools"
+    "core", "engine", "contexts", "cognition", "platform", "tools"
 };
 
 static int pf_comp_banned(regex_t *re)
@@ -527,6 +531,25 @@ static int pf_walk(const char *dir, struct pf_tree *t)
         free(names[i]);
     }
     free(names);
+    return rc;
+}
+
+/* Measured 2026-09-06 under the production roots (.c+.h): 4337 files.
+ * Independent of pf_walk's own extra-definition regex, so a root that
+ * exists but is scanned near-empty still trips even though
+ * require_scan_root() alone would not catch it. */
+enum { PF_SCAN_FLOOR = 4000 };
+
+static int pf_scan_floor_check(const char *const *roots, size_t nroots)
+{
+    int nfiles = 0;
+    int rc = walk_count_roots("check-peer-floor-single-source", roots, nroots,
+                              1, &nfiles);
+    if (rc == 0)
+        rc = gate_require_scanned(nfiles, PF_SCAN_FLOOR,
+                                  "check-peer-floor-single-source",
+                                  "scanned far fewer .c/.h files than expected "
+                                  "under the production roots");
     return rc;
 }
 
@@ -665,6 +688,11 @@ int check_peer_floor_single_source_run(int argc, char **argv)
     }
 
     struct pf_tree tree = { .re = &def };
+    for (size_t i = 0; rc == 0 && i < sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]; i++)
+        rc = require_scan_root("check-peer-floor-single-source", k_pf_walk_roots[i]);
+    if (rc == 0)
+        rc = pf_scan_floor_check(k_pf_walk_roots,
+                                 sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]);
     for (size_t i = 0; rc == 0 && i < sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]; i++)
         rc = pf_walk(k_pf_walk_roots[i], &tree);
     if (rc) {
@@ -817,6 +845,7 @@ int check_peer_floor_single_source_selftest(void)
     unlink(trip);
     unlink(clean);
     rmdir(root);
+    bad |= require_scan_root("check-peer-floor-single-source", "lib") == 0;
     if (bad)
         fputs("FAIL: check_peer_floor_single_source selftest\n", stderr);
     return st_ok(bad, "check_peer_floor_single_source selftest: OK\n");
