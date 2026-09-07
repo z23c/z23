@@ -1512,46 +1512,87 @@ static const char *proof_errno_name(int value)
  * and never rebuilds it. That is not a hypothetical: a hot-swap fixture image
  * copied this way kept the consensus core seal of an older build and every
  * activation in the generation was rejected on shape. */
+/* `<target>.tmp.XXXXXX`, opened. Every copy in this file lands on a
+ * temporary beside its target and is renamed over it, so a reader never
+ * sees a half-written dependency. */
+static bool dp_copy_temp_open(const char *target, char temporary[PATH_MAX],
+                              int *output)
+{
+    int temporary_len = snprintf(temporary, PATH_MAX, "%s.tmp.XXXXXX",
+                                 target);
+    bool ok = temporary_len > 0 && temporary_len < PATH_MAX;
+    *output = ok ? mkstemp(temporary) : -1;
+    return *output >= 0;
+}
+
+/* Read-to-write until end of file. A short read is not an error and EINTR
+ * is not a short read. */
+static bool dp_copy_bytes(int input, int output)
+{
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t got = read(input, buffer, sizeof(buffer));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) return false;
+        if (got == 0) return true;
+        if (!write_all(output, buffer, (size_t)got)) return false;
+    }
+}
+
+/* Carry the source's mode and timestamps onto the copy, then close it. All
+ * three are attempted whatever the first one does, so the descriptor is
+ * never left open on a partial failure. */
+static bool dp_copy_stamp_close(int output, const struct stat *source_st)
+{
+    bool ok = true;
+    if (fchmod(output, source_st->st_mode & 07777) != 0) ok = false;
+    const struct timespec times[2] = {
+        source_st->st_atim, source_st->st_mtim,
+    };
+    if (futimens(output, times) != 0) ok = false;
+    if (close(output) != 0) ok = false;
+    return ok;
+}
+
+/* A fresh copy owns no source metadata: it gets owner-only permissions and
+ * the time of the copy. Both steps run whatever the first one does. */
+static bool dp_copy_private_close(int output)
+{
+    bool ok = true;
+    if (fchmod(output, 0600) != 0) ok = false;
+    if (close(output) != 0) ok = false;
+    return ok;
+}
+
+/* Drop the temporary and restore the errno that named the real cause: the
+ * cleanup itself must not become the diagnosis. */
+static void dp_copy_temp_discard(int output, const char *temporary, int saved)
+{
+    if (output >= 0) (void)unlink(temporary);
+    if (errno == 0) errno = saved;
+}
+
 static bool dependency_copy_stat(const char *source, const char *target,
                                  const struct stat *source_st)
 {
     int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (input < 0) return false;
     char temporary[PATH_MAX];
-    int temporary_len = snprintf(temporary, sizeof(temporary),
-                                 "%s.tmp.XXXXXX", target);
-    bool ok = temporary_len > 0 && temporary_len < (int)sizeof(temporary);
-    int output = ok ? mkstemp(temporary) : -1;
-    if (output < 0) ok = false;
+    int output = -1;
+    bool ok = dp_copy_temp_open(target, temporary, &output);
     enum platform_file_clone_result cloned = PLATFORM_FILE_CLONE_UNAVAILABLE;
     if (ok) cloned = platform_file_clone_fd(input, output);
     if (cloned == PLATFORM_FILE_CLONE_REFUSED) {
         errno = EIO;
         ok = false;
     }
-    unsigned char buffer[65536];
-    while (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE) {
-        ssize_t got = read(input, buffer, sizeof(buffer));
-        if (got < 0 && errno == EINTR) continue;
-        if (got < 0) ok = false;
-        if (got <= 0) break;
-        ok = write_all(output, buffer, (size_t)got);
-    }
+    if (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE)
+        ok = dp_copy_bytes(input, output);
     int saved = errno;
     if (close(input) != 0) ok = false;
-    if (output >= 0) {
-        if (fchmod(output, source_st->st_mode & 07777) != 0) ok = false;
-        const struct timespec times[2] = {
-            source_st->st_atim, source_st->st_mtim,
-        };
-        if (futimens(output, times) != 0) ok = false;
-        if (close(output) != 0) ok = false;
-    }
+    if (output >= 0 && !dp_copy_stamp_close(output, source_st)) ok = false;
     if (ok && rename(temporary, target) != 0) ok = false;
-    if (!ok) {
-        if (output >= 0) (void)unlink(temporary);
-        if (errno == 0) errno = saved;
-    }
+    if (!ok) dp_copy_temp_discard(output, temporary, saved);
     return ok;
 }
 
@@ -1570,38 +1611,82 @@ static int dependency_seed(const char *source, const char *target,
     return dependency_copy_stat(source, target, source_st) ? 0 : -1;
 }
 
+/* `<dir>/<name>` for both sides of a recursive walk, refusing rather than
+ * truncating either. */
+static bool dp_child_paths(const char *source, const char *target,
+                           const char *name, char child_source[PATH_MAX],
+                           char child_target[PATH_MAX])
+{
+    return snprintf(child_source, PATH_MAX, "%s/%s", source,
+                    name) < PATH_MAX &&
+           snprintf(child_target, PATH_MAX, "%s/%s", target,
+                    name) < PATH_MAX;
+}
+
+/* A symlink standing where a real dependency belongs is removed first: a
+ * copy through it would write outside the generation. */
+static bool dp_materialize_clear_link(const char *target,
+                                      const struct stat *target_st,
+                                      bool *target_exists)
+{
+    if (!*target_exists || !S_ISLNK(target_st->st_mode)) return true;
+    if (unlink(target) != 0) return false;
+    *target_exists = false;
+    return true;
+}
+
+static bool dp_materialize_regular(const char *source, const char *target,
+                                   const struct stat *source_st)
+{
+    /* The temporary copy replaces an old shared inode only
+     * after the source is open and the independent copy is complete. */
+    if (dependency_seed(source, target, source_st) == 0) return true;
+    /* Same filesystem is the fast path; a cross-device generation root is
+     * not a missing dependency, so copy rather than refuse. */
+    if (errno != EXDEV && errno != EPERM && errno != EMLINK) return false;
+    return dependency_copy_stat(source, target, source_st);
+}
+
+/* A dependency symlink is recreated, never followed, and only when it points
+ * inside the tree: an absolute or `..` target would reach out of the
+ * generation. */
+static bool dp_materialize_symlink(const char *source, const char *target,
+                                   bool target_exists)
+{
+    char link_target[PATH_MAX];
+    ssize_t len = readlink(source, link_target, sizeof(link_target) - 1);
+    if (len <= 0 || (size_t)len >= sizeof(link_target) - 1)
+        return false;
+    link_target[len] = 0;
+    if (link_target[0] == '/' || strstr(link_target, ".."))
+        return false;
+    if (target_exists && unlink(target) != 0) return false;
+    return symlink(link_target, target) == 0;
+}
+
+static bool dp_materialize_dir_ensure(const struct stat *source_st,
+                                      const char *target,
+                                      const struct stat *target_st,
+                                      bool target_exists)
+{
+    return S_ISDIR(source_st->st_mode) &&
+           (!target_exists || S_ISDIR(target_st->st_mode)) &&
+           (target_exists || mkdir(target, 0700) == 0);
+}
+
 static bool dependency_materialize(const char *source, const char *target)
 {
     struct stat source_st, target_st;
     if (lstat(source, &source_st) != 0) return false;
     bool target_exists = lstat(target, &target_st) == 0;
-    if (target_exists && S_ISLNK(target_st.st_mode)) {
-        if (unlink(target) != 0) return false;
-        target_exists = false;
-    }
-    if (S_ISREG(source_st.st_mode)) {
-        /* The temporary copy replaces an old shared inode only
-         * after the source is open and the independent copy is complete. */
-        if (dependency_seed(source, target, &source_st) == 0) return true;
-        /* Same filesystem is the fast path; a cross-device generation root is
-         * not a missing dependency, so copy rather than refuse. */
-        if (errno != EXDEV && errno != EPERM && errno != EMLINK) return false;
-        return dependency_copy_stat(source, target, &source_st);
-    }
-    if (S_ISLNK(source_st.st_mode)) {
-        char link_target[PATH_MAX];
-        ssize_t len = readlink(source, link_target, sizeof(link_target) - 1);
-        if (len <= 0 || (size_t)len >= sizeof(link_target) - 1)
-            return false;
-        link_target[len] = 0;
-        if (link_target[0] == '/' || strstr(link_target, ".."))
-            return false;
-        if (target_exists && unlink(target) != 0) return false;
-        return symlink(link_target, target) == 0;
-    }
-    if (!S_ISDIR(source_st.st_mode) ||
-        (target_exists && !S_ISDIR(target_st.st_mode)) ||
-        (!target_exists && mkdir(target, 0700) != 0))
+    if (!dp_materialize_clear_link(target, &target_st, &target_exists))
+        return false;
+    if (S_ISREG(source_st.st_mode))
+        return dp_materialize_regular(source, target, &source_st);
+    if (S_ISLNK(source_st.st_mode))
+        return dp_materialize_symlink(source, target, target_exists);
+    if (!dp_materialize_dir_ensure(&source_st, target, &target_st,
+                                   target_exists))
         return false;
     DIR *dir = opendir(source);
     if (!dir) return false;
@@ -1612,10 +1697,8 @@ static bool dependency_materialize(const char *source, const char *target)
             strcmp(entry->d_name, "..") == 0)
             continue;
         char child_source[PATH_MAX], child_target[PATH_MAX];
-        if (snprintf(child_source, sizeof(child_source), "%s/%s", source,
-                     entry->d_name) >= (int)sizeof(child_source) ||
-            snprintf(child_target, sizeof(child_target), "%s/%s", target,
-                     entry->d_name) >= (int)sizeof(child_target) ||
+        if (!dp_child_paths(source, target, entry->d_name, child_source,
+                            child_target) ||
             !dependency_materialize(child_source, child_target))
             ok = false;
     }
@@ -1638,41 +1721,75 @@ static bool dependency_copy_fresh(const char *source, const char *target)
     if (input < 0) return false;
     struct stat st;
     char temporary[PATH_MAX];
-    int temporary_len = snprintf(temporary, sizeof(temporary),
-                                 "%s.tmp.XXXXXX", target);
+    int output = -1;
     bool ok = fstat(input, &st) == 0 && S_ISREG(st.st_mode) &&
-        temporary_len > 0 && temporary_len < (int)sizeof(temporary);
-    int output = ok ? mkstemp(temporary) : -1;
-    if (output < 0) ok = false;
-    unsigned char buffer[65536];
-    while (ok) {
-        ssize_t got = read(input, buffer, sizeof(buffer));
-        if (got < 0 && errno == EINTR) continue;
-        if (got < 0) ok = false;
-        if (got <= 0) break;
-        ok = write_all(output, buffer, (size_t)got);
-    }
+        dp_copy_temp_open(target, temporary, &output);
+    if (ok) ok = dp_copy_bytes(input, output);
     if (close(input) != 0) ok = false;
-    if (output >= 0) {
-        if (fchmod(output, 0600) != 0) ok = false;
-        if (close(output) != 0) ok = false;
-    }
+    if (output >= 0 && !dp_copy_private_close(output)) ok = false;
     if (ok && rename(temporary, target) != 0) ok = false;
     if (!ok && output >= 0) (void)unlink(temporary);
     return ok;
+}
+
+/* The mirror directory this level of the walk copies into. */
+static bool dp_depfile_dir_ensure(const char *target)
+{
+    if (!dependency_parent_ensure(target)) return false;
+    struct stat target_st;
+    if (lstat(target, &target_st) != 0)
+        return errno == ENOENT && mkdir(target, 0700) == 0;
+    return S_ISDIR(target_st.st_mode) && !S_ISLNK(target_st.st_mode);
+}
+
+static bool dp_depfile_name(const char *name)
+{
+    return strlen(name) > 2 && strcmp(name + strlen(name) - 2, ".d") == 0;
+}
+
+/* Copy one depfile and fold its repo-relative path and content digest into
+ * the running root, in that order. Nothing is folded in unless the copy and
+ * the hash both succeeded. */
+static bool dp_depfile_take(const char *child_source, const char *child_target,
+                            size_t source_root_len, struct sha3_256_ctx *root,
+                            size_t *count)
+{
+    uint8_t digest[32];
+    if (!dependency_copy_fresh(child_source, child_target) ||
+        !hash_file("zcl.dev_proof_depfile.v1", child_source, digest))
+        return false;
+    const char *relative = child_source + source_root_len;
+    if (*relative == '/') relative++;
+    sha3_256_write(root, (const uint8_t *)relative, strlen(relative) + 1);
+    sha3_256_write(root, digest, sizeof(digest));
+    (*count)++;
+    return true;
+}
+
+/* One directory entry: recurse, take a depfile, or ignore it. */
+static bool dp_depfile_entry(const char *child_source,
+                            const char *child_target, const char *name,
+                            size_t source_root_len, struct sha3_256_ctx *root,
+                            size_t *count, bool *recurse)
+{
+    *recurse = false;
+    struct stat st;
+    if (lstat(child_source, &st) != 0) return false;
+    if (S_ISDIR(st.st_mode)) {
+        *recurse = true;
+        return true;
+    }
+    if (S_ISREG(st.st_mode) && dp_depfile_name(name))
+        return dp_depfile_take(child_source, child_target, source_root_len,
+                               root, count);
+    return true;
 }
 
 static bool depfile_tree_copy(const char *source, const char *target,
                               size_t source_root_len,
                               struct sha3_256_ctx *root, size_t *count)
 {
-    if (!dependency_parent_ensure(target)) return false;
-    struct stat target_st;
-    if (lstat(target, &target_st) != 0) {
-        if (errno != ENOENT || mkdir(target, 0700) != 0) return false;
-    } else if (!S_ISDIR(target_st.st_mode) || S_ISLNK(target_st.st_mode)) {
-        return false;
-    }
+    if (!dp_depfile_dir_ensure(target)) return false;
     DIR *dir = opendir(source);
     if (!dir) return false;
     bool ok = true;
@@ -1682,33 +1799,17 @@ static bool depfile_tree_copy(const char *source, const char *target,
             strcmp(entry->d_name, "..") == 0)
             continue;
         char child_source[PATH_MAX], child_target[PATH_MAX];
-        if (snprintf(child_source, sizeof(child_source), "%s/%s", source,
-                     entry->d_name) >= (int)sizeof(child_source) ||
-            snprintf(child_target, sizeof(child_target), "%s/%s", target,
-                     entry->d_name) >= (int)sizeof(child_target)) {
+        if (!dp_child_paths(source, target, entry->d_name, child_source,
+                            child_target)) {
             ok = false;
             break;
         }
-        struct stat st;
-        if (lstat(child_source, &st) != 0) ok = false;
-        else if (S_ISDIR(st.st_mode))
+        bool recurse = false;
+        ok = dp_depfile_entry(child_source, child_target, entry->d_name,
+                              source_root_len, root, count, &recurse);
+        if (ok && recurse)
             ok = depfile_tree_copy(child_source, child_target, source_root_len,
                                    root, count);
-        else if (S_ISREG(st.st_mode) &&
-                 strlen(entry->d_name) > 2 &&
-                 strcmp(entry->d_name + strlen(entry->d_name) - 2, ".d") == 0) {
-            uint8_t digest[32];
-            ok = dependency_copy_fresh(child_source, child_target) &&
-                hash_file("zcl.dev_proof_depfile.v1", child_source, digest);
-            if (ok) {
-                const char *relative = child_source + source_root_len;
-                if (*relative == '/') relative++;
-                sha3_256_write(root, (const uint8_t *)relative,
-                               strlen(relative) + 1);
-                sha3_256_write(root, digest, sizeof(digest));
-                (*count)++;
-            }
-        }
     }
     return closedir(dir) == 0 && ok;
 }
