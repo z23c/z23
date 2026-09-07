@@ -4285,16 +4285,10 @@ tools/command/native_zcode_work_command.c:zcl_native_handle_zcode_work_status:25
 tools/command/native_zcode_work_command.c:zwork_accept_action_resolve:19
 tools/command/native_zcode_work_command.c:zwork_accept_inner:18
 tools/command/native_zcode_work_command.c:zwork_bind_accepted_publication:17
-tools/command/native_zcode_work_command.c:zwork_compose_selected_lock:17
 tools/command/native_zcode_work_command.c:zwork_coordination_handoff:48
-tools/command/native_zcode_work_command.c:zwork_peer_inventory_apply:34
 tools/command/native_zcode_work_command.c:zwork_plan_input:16
 tools/command/native_zcode_work_command.c:zwork_publication_bound:16
 tools/command/native_zcode_work_command.c:zwork_render_selection:21
-tools/command/native_zcode_work_command.c:zwork_reuse_header_symbols:25
-tools/command/native_zcode_work_command.c:zwork_reuse_load_facts:24
-tools/command/native_zcode_work_command.c:zwork_reuse_render:115
-tools/command/native_zcode_work_command.c:zwork_reuse_render_unavailable:20
 tools/command/native_zcode_work_transport_command.c:zcl_native_handle_zcode_work_pull:34
 tools/command/native_zcode_workspace_command.c:workspace_binding_parse:32
 tools/command/native_zcode_workspace_command.c:workspace_manifest_job_preflight:36
