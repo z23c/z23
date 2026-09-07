@@ -232,32 +232,45 @@ static int at_got(int rc, int *out)
     return 0;
 }
 
-static int at_feed(struct at_acc *a, const char *path)
+static int at_feed_obs(struct at_acc *a, const char *path)
 {
-    char s1[AT_NAME], s2[AT_NAME], s3[AT_NAME], s4[AT_NAME], key[AT_NAME];
-    int has, rc, nf;
-    rc = at_got(at_fld(path, 1, s1, sizeof s1), &has);
-    if (rc)
-        return rc;
-    if (has)
-        rc = at_add(&a->roots, s1);
-    for (size_t i = 0; rc == 0 && i < sizeof k_at_obs / sizeof k_at_obs[0]; i++) {
+    for (size_t i = 0; i < sizeof k_at_obs / sizeof k_at_obs[0]; i++) {
         size_t n = strlen(k_at_obs[i]);
         if (!strncmp(path, k_at_obs[i], n) && path[n] == '/')
             a->obs[i] = 1;
     }
+    return 0;
+}
+
+static int at_feed_reg(struct at_acc *a, const char *path)
+{
     const char *base = strrchr(path, '/');
+    int rc = 0;
     base = base ? base + 1 : path;
     for (size_t i = 0; rc == 0 && i < sizeof k_at_reg / sizeof k_at_reg[0]; i++)
         if (!strcmp(base, k_at_reg[i]))
             rc = at_add_path(&a->reg[i], path);
-    nf = at_nf(path);
-    if (rc == 0 && has && !strcmp(s1, "contexts") && nf > 1) {
-        rc = at_got(at_fld(path, 2, s2, sizeof s2), &has);
+    return rc;
+}
+
+static int at_feed_ctx(struct at_acc *a, const char *path, const char *s1,
+                       char *s2, int has, int nf)
+{
+    int rc = 0;
+    if (has && !strcmp(s1, "contexts") && nf > 1) {
+        rc = at_got(at_fld(path, 2, s2, AT_NAME), &has);
         if (rc == 0 && has)
             rc = at_add(&a->ctxs, s2);
     }
-    if (rc == 0 && !strcmp(s1, "contexts") && nf > 3) {
+    return rc;
+}
+
+static int at_feed_ctx_mod(struct at_acc *a, const char *path, const char *s1,
+                           const char *s2, int nf)
+{
+    char s3[AT_NAME], s4[AT_NAME], key[AT_NAME];
+    int rc = 0;
+    if (!strcmp(s1, "contexts") && nf > 3) {
         int h3 = 0, h4 = 0;
         rc = at_got(at_fld(path, 3, s3, sizeof s3), &h3);
         if (rc == 0)
@@ -271,28 +284,37 @@ static int at_feed(struct at_acc *a, const char *path)
                 rc = at_add(&a->pairs, key);
         }
     }
-    if (rc == 0) {
-        int auth = 0;
-        for (size_t i = 0; i < sizeof k_at_auth / sizeof k_at_auth[0]; i++)
-            if (!strcmp(s1, k_at_auth[i]))
-                auth = 1;
-        if (auth && nf > 2) {
-            int h2 = 0, h3 = 0;
-            rc = at_got(at_fld(path, 2, s2, sizeof s2), &h2);
-            if (rc == 0)
-                rc = at_got(at_fld(path, 3, s3, sizeof s3), &h3);
-            if (rc == 0 && h2 && h3 && !strcmp(s2, "modules")) {
-                rc = at_add(&a->mods, s3);
-                if (rc == 0 && ovf(snprintf(key, sizeof key, "%s/%s\t%s",
-                                            s1, s2, s3), sizeof key))
-                    rc = 2;
-                else if (rc == 0)
-                    rc = at_add(&a->pairs, key);
-            }
+    return rc;
+}
+
+static int at_feed_auth_mod(struct at_acc *a, const char *path, const char *s1,
+                            int nf)
+{
+    char s2[AT_NAME], s3[AT_NAME], key[AT_NAME];
+    int rc = 0, auth = 0;
+    for (size_t i = 0; i < sizeof k_at_auth / sizeof k_at_auth[0]; i++)
+        if (!strcmp(s1, k_at_auth[i]))
+            auth = 1;
+    if (auth && nf > 2) {
+        int h2 = 0, h3 = 0;
+        rc = at_got(at_fld(path, 2, s2, sizeof s2), &h2);
+        if (rc == 0)
+            rc = at_got(at_fld(path, 3, s3, sizeof s3), &h3);
+        if (rc == 0 && h2 && h3 && !strcmp(s2, "modules")) {
+            rc = at_add(&a->mods, s3);
+            if (rc == 0 && ovf(snprintf(key, sizeof key, "%s/%s\t%s",
+                                        s1, s2, s3), sizeof key))
+                rc = 2;
+            else if (rc == 0)
+                rc = at_add(&a->pairs, key);
         }
     }
-    if (rc == 0)
-        rc = at_feed_room(a, path, "core");
+    return rc;
+}
+
+static int at_feed_rooms(struct at_acc *a, const char *path)
+{
+    int rc = at_feed_room(a, path, "core");
     if (rc == 0)
         rc = at_feed_room(a, path, "engine");
     if (rc == 0)
@@ -305,13 +327,47 @@ static int at_feed(struct at_acc *a, const char *path)
             return 2;
         rc = at_feed_room(a, path, pfx);
     }
-    if (rc == 0 && a->redre && !strcmp(s1, "engine")) {
+    return rc;
+}
+
+static int at_feed_red(struct at_acc *a, const char *path, const char *s1)
+{
+    char s2[AT_NAME];
+    int rc = 0;
+    if (a->redre && !strcmp(s1, "engine")) {
         int h2 = 0;
         rc = at_got(at_fld(path, 2, s2, sizeof s2), &h2);
         if (rc == 0 && h2 && strcmp(s2, "reducer") != 0
             && regexec(a->redre, path, 0, NULL, 0) == 0)
             rc = at_add_path(&a->red, path);
     }
+    return rc;
+}
+
+static int at_feed(struct at_acc *a, const char *path)
+{
+    char s1[AT_NAME], s2[AT_NAME];
+    int has, rc, nf;
+    rc = at_got(at_fld(path, 1, s1, sizeof s1), &has);
+    if (rc)
+        return rc;
+    if (has)
+        rc = at_add(&a->roots, s1);
+    if (rc == 0)
+        rc = at_feed_obs(a, path);
+    if (rc == 0)
+        rc = at_feed_reg(a, path);
+    nf = at_nf(path);
+    if (rc == 0)
+        rc = at_feed_ctx(a, path, s1, s2, has, nf);
+    if (rc == 0)
+        rc = at_feed_ctx_mod(a, path, s1, s2, nf);
+    if (rc == 0)
+        rc = at_feed_auth_mod(a, path, s1, nf);
+    if (rc == 0)
+        rc = at_feed_rooms(a, path);
+    if (rc == 0)
+        rc = at_feed_red(a, path, s1);
     return rc;
 }
 
@@ -546,6 +602,123 @@ static int at_st_chk(struct at_acc *a, int *fail,
     return rc || (*fail != 0) != (want != 0);
 }
 
+static int at_st_roots(struct at_acc *a, int *fail)
+{
+    int bad = 0, i;
+    size_t nr = sizeof k_at_roots / sizeof k_at_roots[0];
+    memset(a, 0, sizeof *a);
+    for (i = 0; i < (int)nr; i++)
+        if (at_feed(a, k_at_roots[i]))
+            bad = 1;
+    bad |= at_st_chk(a, fail, at_check_roots, 0);
+    if (at_feed(a, "extra"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_roots, 1);
+    return bad;
+}
+
+static int at_st_obs(struct at_acc *a, int *fail)
+{
+    int bad = 0;
+    memset(a, 0, sizeof *a);
+    if (at_feed(a, "app/foo.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_obs, 1);
+    return bad;
+}
+
+static int at_st_reg(struct at_acc *a, int *fail)
+{
+    int bad = 0;
+    memset(a, 0, sizeof *a);
+    if (at_feed(a, "cognition/modules/codeindex/include/codeindex/source_roots.def")
+        || at_feed(a, "cognition/modules/codeindex/include/codeindex/source_prune_dirs.def"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_reg, 0);
+    if (at_feed(a, "tools/source_roots.def"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_reg, 1);
+    return bad;
+}
+
+static int at_st_ctx(struct at_acc *a, int *fail)
+{
+    int bad = 0, i;
+    memset(a, 0, sizeof *a);
+    for (i = 0; i < g_n_ctx; i++) {
+        char p[RS_PATH];
+        if (ovf(snprintf(p, sizeof p, "contexts/%s/x.c", g_ctx[i]), sizeof p)
+            || at_feed(a, p))
+            bad = 1;
+    }
+    bad |= at_st_chk(a, fail, at_check_ctx, 0);
+    memset(a, 0, sizeof *a);
+    if (at_feed(a, "contexts/notacontext/x.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_ctx, 1);
+    return bad;
+}
+
+static int at_st_mods(struct at_acc *a, int *fail)
+{
+    int bad = 0, i;
+    memset(a, 0, sizeof *a);
+    for (i = 0; i < g_n_libs; i++) {
+        char p[RS_PATH];
+        if (ovf(snprintf(p, sizeof p, "core/modules/%s/src/x.c", g_libs[i]),
+                sizeof p) || at_feed(a, p))
+            bad = 1;
+    }
+    bad |= at_st_chk(a, fail, at_check_mods, 0);
+    memset(a, 0, sizeof *a);
+    if (at_feed(a, "core/modules/notamodule/src/x.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_mods, 1);
+    return bad;
+}
+
+static int at_st_dups(struct at_acc *a, int *fail)
+{
+    int bad = 0;
+    memset(a, 0, sizeof *a);
+    if (at_feed(a, "core/modules/dupmod/src/x.c")
+        || at_feed(a, "engine/modules/dupmod/src/y.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_dups, 1);
+    return bad;
+}
+
+static int at_st_rooms(struct at_acc *a, int *fail)
+{
+    int bad = 0;
+    memset(a, 0, sizeof *a);
+    if (at_feed(a, "core/modules/x.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_rooms, 0);
+    memset(a, 0, sizeof *a);
+    if (at_feed(a, "core/notashape/x.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_rooms, 1);
+    return bad;
+}
+
+static int at_st_red(struct at_acc *a, int *fail, regex_t *re)
+{
+    int bad = 0;
+    memset(a, 0, sizeof *a);
+    a->redre = re;
+    if (at_feed(a, "engine/reducer/src/foo.c")
+        || at_feed(a, "engine/services/src/foo.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_red, 0);
+    memset(a, 0, sizeof *a);
+    a->redre = re;
+    if (at_feed(a, "engine/services/src/reducer.c"))
+        bad = 1;
+    bad |= at_st_chk(a, fail, at_check_red, 1);
+    return bad;
+}
+
 int check_architecture_tree_selftest(void)
 {
     int rc = rs_init();
@@ -555,77 +728,16 @@ int check_architecture_tree_selftest(void)
     rc = reg_fail(&re, regcomp(&re, k_at_red, REG_EXTENDED));
     if (rc)
         return rc;
-    int bad = 0, fail = 0, i;
+    int bad = 0, fail = 0;
     struct at_acc a;
-    size_t nr = sizeof k_at_roots / sizeof k_at_roots[0];
-    memset(&a, 0, sizeof a);
-    for (i = 0; i < (int)nr; i++)
-        if (at_feed(&a, k_at_roots[i]))
-            bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_roots, 0);
-    if (at_feed(&a, "extra"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_roots, 1);
-    memset(&a, 0, sizeof a);
-    if (at_feed(&a, "app/foo.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_obs, 1);
-    memset(&a, 0, sizeof a);
-    if (at_feed(&a, "cognition/modules/codeindex/include/codeindex/source_roots.def")
-        || at_feed(&a, "cognition/modules/codeindex/include/codeindex/source_prune_dirs.def"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_reg, 0);
-    if (at_feed(&a, "tools/source_roots.def"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_reg, 1);
-    memset(&a, 0, sizeof a);
-    for (i = 0; i < g_n_ctx; i++) {
-        char p[RS_PATH];
-        if (ovf(snprintf(p, sizeof p, "contexts/%s/x.c", g_ctx[i]), sizeof p)
-            || at_feed(&a, p))
-            bad = 1;
-    }
-    bad |= at_st_chk(&a, &fail, at_check_ctx, 0);
-    memset(&a, 0, sizeof a);
-    if (at_feed(&a, "contexts/notacontext/x.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_ctx, 1);
-    memset(&a, 0, sizeof a);
-    for (i = 0; i < g_n_libs; i++) {
-        char p[RS_PATH];
-        if (ovf(snprintf(p, sizeof p, "core/modules/%s/src/x.c", g_libs[i]),
-                sizeof p) || at_feed(&a, p))
-            bad = 1;
-    }
-    bad |= at_st_chk(&a, &fail, at_check_mods, 0);
-    memset(&a, 0, sizeof a);
-    if (at_feed(&a, "core/modules/notamodule/src/x.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_mods, 1);
-    memset(&a, 0, sizeof a);
-    if (at_feed(&a, "core/modules/dupmod/src/x.c")
-        || at_feed(&a, "engine/modules/dupmod/src/y.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_dups, 1);
-    memset(&a, 0, sizeof a);
-    if (at_feed(&a, "core/modules/x.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_rooms, 0);
-    memset(&a, 0, sizeof a);
-    if (at_feed(&a, "core/notashape/x.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_rooms, 1);
-    memset(&a, 0, sizeof a);
-    a.redre = &re;
-    if (at_feed(&a, "engine/reducer/src/foo.c")
-        || at_feed(&a, "engine/services/src/foo.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_red, 0);
-    memset(&a, 0, sizeof a);
-    a.redre = &re;
-    if (at_feed(&a, "engine/services/src/reducer.c"))
-        bad = 1;
-    bad |= at_st_chk(&a, &fail, at_check_red, 1);
+    bad |= at_st_roots(&a, &fail);
+    bad |= at_st_obs(&a, &fail);
+    bad |= at_st_reg(&a, &fail);
+    bad |= at_st_ctx(&a, &fail);
+    bad |= at_st_mods(&a, &fail);
+    bad |= at_st_dups(&a, &fail);
+    bad |= at_st_rooms(&a, &fail);
+    bad |= at_st_red(&a, &fail, &re);
     regfree(&re);
     return st_ok(bad, "check_architecture_tree selftest: OK\n");
 }
