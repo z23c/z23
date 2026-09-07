@@ -25,6 +25,7 @@
 #include "fleet_roles.h"
 
 #include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 #include "chainlog/chainlog.h"
 #include "crypto/ed25519.h"
 #include "platform/private_directory.h"
@@ -81,10 +82,7 @@ static void row_write_body(const struct role_row *r, uint8_t *out)
     out[3] = 0;
     memcpy(out + 4, r->target_fp, ZCL_ROLE_FP_BYTES);
     memcpy(out + 4 + ZCL_ROLE_FP_BYTES, r->granted_by, 32);
-    uint64_t ts = (uint64_t)r->ts;
-    uint8_t *tsp = out + 4 + ZCL_ROLE_FP_BYTES + 32;
-    for (int i = 7; i >= 0; i--)
-        tsp[7 - i] = (uint8_t)(ts >> (i * 8));
+    zcl_write_u64_be(out + 4 + ZCL_ROLE_FP_BYTES + 32, (uint64_t)r->ts);
 }
 
 static size_t sign_message(const struct role_row *r, uint8_t *out)
@@ -140,11 +138,7 @@ static enum zcl_role_status row_decode(const uint8_t *in, size_t len,
         return ZCL_ROLE_UNKNOWN_ROLE;
     memcpy(out->target_fp, in + 4, ZCL_ROLE_FP_BYTES);
     memcpy(out->granted_by, in + 4 + ZCL_ROLE_FP_BYTES, 32);
-    uint64_t ts = 0;
-    const uint8_t *tsp = in + 4 + ZCL_ROLE_FP_BYTES + 32;
-    for (int i = 0; i < 8; i++)
-        ts = (ts << 8) | tsp[i];
-    out->ts = (int64_t)ts;
+    out->ts = (int64_t)zcl_read_u64_be(in + 4 + ZCL_ROLE_FP_BYTES + 32);
     memcpy(out->sig, in + ZCL_ROLE_ROW_BODY_BYTES, ZCL_ROLE_SIG_BYTES);
     if (!row_verify(out))
         return ZCL_ROLE_SIG_INVALID;
