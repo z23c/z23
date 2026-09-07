@@ -359,7 +359,11 @@ behavior.
 the original monolithic whole-program LTO binary at
 `build/bin/test_parallel_wpo`. Use it to rule out any per-TU-vs-LTO divergence
 if a test ever behaves differently between the two (it should not). `test_zcl`
-(the serial runner) also remains a whole-program build.
+(the serial runner) also remains a whole-program build; its link command
+consumes the full entry-source list through a `@build/bin/test_zcl.link.rsp`
+response file (written by GNU Make's `$(file)`, never by the shell) so the
+`/bin/sh -c` invocation stays far under `MAX_ARG_STRLEN` no matter how many
+`.c` files the build enumerates.
 
 **Fast inner-loop variant.** `make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>` uses the separate
 exact candidate and object tree (`build/bin/test-fast/epochs/<compile-epoch>/`

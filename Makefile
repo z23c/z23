@@ -3261,6 +3261,10 @@ tools/inspect_html: $(BIN_DIR)/inspect_html
 # (Tor, OpenSSL, libevent, GTK, WebKit). Used by 8 binaries to keep the
 # recipe in one place — a new tool becomes one $(eval $(call ...)) line and
 # cannot drift on flags.
+#   Links through a response file (see BUILD_NODE_TOOL body below) so the
+#   `/bin/sh -c` command stays well under MAX_ARG_STRLEN regardless of how
+#   many entry sources a caller passes in $(2) — test_zcl's ~3,500 files
+#   pushed the inline command past that limit.
 #   $(1) = target name (e.g., wallet_dump)
 #   $(2) = entry source(s) — single file or whitespace-separated list
 #   $(3) = extra link libs (e.g., -lm); empty by default
@@ -3268,13 +3272,22 @@ tools/inspect_html: $(BIN_DIR)/inspect_html
 define BUILD_NODE_TOOL
 .PHONY: $(1)
 $(1): $$(BIN_DIR)/$(1)
+# Expanding the complete source list inside the link recipe makes the recipe
+# itself one oversized `/bin/sh -c` argument on Linux once a tool's entry
+# sources plus $(ALL_SRCS) cross ~128 KiB (test_zcl's ~3,500 .c files do).
+# Write the exact prerequisite list to a response file first (make writes it
+# directly — never via the shell, so it cannot hit the same limit) and have
+# the compiler consume it through `@file`, same pattern as
+# TEST_PARALLEL_REL_LINK_RSP above.
+$$(BIN_DIR)/$(1).link.rsp: $(2) $$(ALL_SRCS)
+	@$$(if $$(ZCL_MAKE_NO_EXEC),,$$(file >$$@,$$^)) test -s "$$@"
 $$(BIN_DIR)/$(1): $$(VIEW_GEN_HEADERS) $$(BUILD_IDENTITY_STAMP) \
-		$(2) $$(ALL_SRCS) $$(COMMAND_CATALOG_DEFS) | $$(VENDOR_LIBS)
+		$(2) $$(ALL_SRCS) $$(COMMAND_CATALOG_DEFS) $$(BIN_DIR)/$(1).link.rsp | $$(VENDOR_LIBS)
 	@mkdir -p $$(dir $$@)
 	@set -eu; \
 	tmp="$$$$(mktemp "$$@.link.XXXXXX")"; \
 	trap 'rm -f "$$$$tmp"' EXIT HUP INT TERM; \
-	$$(CC) $$(CFLAGS) $(4) -Wno-deprecated-declarations $$(LDFLAGS) -o "$$$$tmp" $$(filter-out $$(VIEW_GEN_HEADERS) $$(BUILD_IDENTITY_STAMP) $$(COMMAND_CATALOG_DEFS),$$^) $$(TOR_LIBS) $$(LIBS) $$(GTK_LIBS) $$(WEBKIT_LIBS) $(3); \
+	$$(CC) $$(CFLAGS) $(4) -Wno-deprecated-declarations $$(LDFLAGS) -o "$$$$tmp" "@$$(BIN_DIR)/$(1).link.rsp" $$(TOR_LIBS) $$(LIBS) $$(GTK_LIBS) $$(WEBKIT_LIBS) $(3); \
 	tools/dev/source-identity.sh verify-record "$$(BUILD_SOURCE_ID)" "$$(BUILD_CLEAN)" "$$(BUILD_MUTATION)" >/dev/null; \
 	mv -f -- "$$$$tmp" "$$@"; \
 	trap - EXIT HUP INT TERM
