@@ -385,21 +385,42 @@ ship_land_train_active() {
     [ -n "$out" ]
 }
 
-ship_hardlink_count() {
-    local root="$1"
-    find "$root" -xdev -type f -links +1 \
-        -not -path "$root/.git/*" -not -path "$root/build/bin/*" 2>/dev/null | wc -l
+# tools/check_no_hardlink_seeding.c IS the hardlink-seeding gate
+# (check-no-hardlink-seeding): its zcl_dependency_links_scan() walks
+# vendor/, build/hotswap/, build/githooks/ with its own exclusions. A second,
+# independently-scoped `find` here could disagree with the gate this step
+# exists to satisfy — so ship calls that same binary for both the count and
+# the --repair dedupe, never a shell walk of its own. Indirected through
+# SHIP_HARDLINK_TOOL so the selftest can point at the real built binary
+# without a fixture-root Makefile.
+SHIP_HARDLINK_TOOL="${SHIP_HARDLINK_TOOL:-}"
+
+ship_hardlink_tool_path() {
+    if [ -n "$SHIP_HARDLINK_TOOL" ]; then
+        printf '%s' "$SHIP_HARDLINK_TOOL"
+        return 0
+    fi
+    local tool="$REPO_ROOT/build/bin/check_no_hardlink_seeding"
+    [ -x "$tool" ] || $SHIP_MAKE build/bin/check_no_hardlink_seeding ||
+        die "prepare hardlinks FAILED — make build/bin/check_no_hardlink_seeding did not succeed"
+    [ -x "$tool" ] ||
+        die "prepare hardlinks FAILED — $tool still missing after the build"
+    printf '%s' "$tool"
 }
 
 # A hardlink into a lane tree (from a `cp -al` seeding step) shares an inode
 # with its donor: touching it bumps the donor's ctime and can invalidate a
 # proof in flight elsewhere. Dedupe is therefore refused, loudly, naming the
-# unit, whenever a z23-land-train* user unit is running; otherwise the
-# reflink-copy-then-rename swap the maintainers already use replaces each
-# shared inode with an independent one.
+# unit, whenever a z23-land-train* user unit is running (this tool has no
+# process-spawn seam of its own, so ship.sh — not the tool — makes that
+# call); otherwise --repair replaces each shared inode with an independent
+# one via the same reflink-copy-then-rename shape the tool's own FAIL
+# message advises, done natively.
 ship_prepare_hardlink_report() {
-    local root="$1" dry="$2" n unit
-    n="$(ship_hardlink_count "$root")"
+    local root="$1" dry="$2" tool n unit
+    tool="$(ship_hardlink_tool_path)"
+    n="$("$tool" --count "$root")" ||
+        die "prepare hardlinks FAILED — $tool --count $root refused (a transient walk error, not a silent abort)"
     if [ "$dry" -eq 1 ]; then
         say "prepare hardlinks (dry run) $n multiply-linked file(s) reported"
         return 0
@@ -413,11 +434,8 @@ ship_prepare_hardlink_report() {
         die "prepare hardlinks FAILED — $n multiply-linked file(s) found but land-train unit '${unit:-z23-land-train}' is active: deduping now would bump a shared inode's ctime under a live proof"
     fi
     say "prepare hardlinks deduping $n multiply-linked file(s)"
-    find "$root" -xdev -type f -links +1 \
-        -not -path "$root/.git/*" -not -path "$root/build/bin/*" -print0 2>/dev/null |
-    while IFS= read -r -d '' f; do
-        cp -a --reflink=auto -- "$f" "$f.tmp.dd" && mv -f -- "$f.tmp.dd" "$f"
-    done
+    "$tool" --repair "$root" ||
+        die "prepare hardlinks FAILED — $tool --repair $root reported a failure (see above; no silent partial dedupe)"
     say "prepare hardlinks ok (deduped)"
 }
 
@@ -703,20 +721,36 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     ship_prepare_git_hooks "$prep_root"
     [ ! -e "$prep_root/build/bin/z23-git-hook" ]
     grep -qx 'install-hooks' "$prep_calls"
-    # (d) hardlink report: nothing linked -> clean, no refusal
-    printf 'solo\n' > "$prep_root/lonefile"
+    # (d) hardlinks: exercised against the REAL check_no_hardlink_seeding
+    # binary (never a shell find of ship's own — that was finding 2) so the
+    # count/repair ship uses can never disagree with the gate it satisfies.
+    # Files must sit under vendor/, build/hotswap/, or build/githooks/ — the
+    # tool's own scan scope — since a lonefile at the fixture root is outside
+    # it, same as it would be in a real checkout.
+    SHIP_HARDLINK_TOOL="$REPO_ROOT/build/bin/check_no_hardlink_seeding"
+    if [ ! -x "$SHIP_HARDLINK_TOOL" ]; then
+        printf 'ship: selftest CANNOT RUN — required tool is missing:\n' >&2
+        printf '  %s\n' "$SHIP_HARDLINK_TOOL" >&2
+        printf '  Build it first:  make build/bin/check_no_hardlink_seeding\n' >&2
+        exit 1
+    fi
+    # Fixtures live under $prep_root/vendor/hl-* — inside the tool's own
+    # scan scope (vendor/, build/hotswap/, build/githooks/ beneath the given
+    # root), same as $prep_root/vendor/tor already is above.
+    # (d) nothing linked -> clean, no refusal
+    printf 'solo\n' > "$prep_root/vendor/hl-lonefile"
     ship_prepare_hardlink_report "$prep_root" 0
     # (d) links present, no land-train unit active -> deduped in place
-    ln "$prep_root/lonefile" "$prep_root/linked-peer"
-    [ "$(ship_hardlink_count "$prep_root")" -eq 2 ]
+    ln "$prep_root/vendor/hl-lonefile" "$prep_root/vendor/hl-linked-peer"
+    [ "$("$SHIP_HARDLINK_TOOL" --count "$prep_root")" -eq 2 ]
     selftest_no_land_train() { :; }
     SHIP_LAND_TRAIN_QUERY=selftest_no_land_train
     ship_prepare_hardlink_report "$prep_root" 0
-    [ "$(ship_hardlink_count "$prep_root")" -eq 0 ]
+    [ "$("$SHIP_HARDLINK_TOOL" --count "$prep_root")" -eq 0 ]
     # (d) links present, a land-train unit IS active -> refuse and touch
     # NOTHING (the shared inode must stay untouched under a live proof)
-    rm -f "$prep_root/linked-peer"
-    ln "$prep_root/lonefile" "$prep_root/linked-peer"
+    rm -f "$prep_root/vendor/hl-linked-peer"
+    ln "$prep_root/vendor/hl-lonefile" "$prep_root/vendor/hl-linked-peer"
     selftest_land_train_running() {
         printf 'z23-land-train@node1.service loaded active running Land train\n'
     }
@@ -726,14 +760,15 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
         >/dev/null 2>"$prep_root/refuse.err" || prep_refuse_rc=$?
     [ "$prep_refuse_rc" -ne 0 ]
     grep -q 'z23-land-train@node1.service' "$prep_root/refuse.err"
-    [ "$(ship_hardlink_count "$prep_root")" -eq 2 ]
+    [ "$("$SHIP_HARDLINK_TOOL" --count "$prep_root")" -eq 2 ]
     # --dry-run shape: report only, nothing built or repaired
     : > "$prep_calls"
     dry_out="$(ship_prepare_hardlink_report "$prep_root" 1)"
-    [ "$(ship_hardlink_count "$prep_root")" -eq 2 ]
+    [ "$("$SHIP_HARDLINK_TOOL" --count "$prep_root")" -eq 2 ]
     grep -q 'dry run' <<<"$dry_out"
     [ ! -s "$prep_calls" ]
     SHIP_LAND_TRAIN_QUERY=ship_land_train_query_real
+    SHIP_HARDLINK_TOOL=""
     SHIP_MAKE="make -s"
 
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM

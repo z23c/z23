@@ -11193,15 +11193,16 @@ check-observability-pairing: tools/check_observability_pairing
 HARDLINK_SEEDING_SRCS = tools/check_no_hardlink_seeding.c \
     tools/dev/dependency_links.c \
     platform/modules/platform/src/directory_compat.c \
-    platform/modules/platform/src/file_metadata.c platform/modules/base/src/safe_alloc.c
+    platform/modules/platform/src/file_metadata.c platform/modules/base/src/safe_alloc.c \
+    platform/modules/base/src/result.c platform/modules/util/src/file_tree_ops.c
 .PHONY: check-no-hardlink-seeding
 $(BIN_DIR)/check_no_hardlink_seeding: $(HARDLINK_SEEDING_SRCS) \
 	tools/dev/dependency_links.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    $(ZCL_PLATFORM_CPPFLAGS) -DZCL_TESTING \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_TESTING \
 	    -Itools/dev -Iplatform/modules/platform/include \
-	    -Iplatform/modules/base/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -o $@ $(HARDLINK_SEEDING_SRCS)
 
 check-no-hardlink-seeding: $(BIN_DIR)/check_no_hardlink_seeding
