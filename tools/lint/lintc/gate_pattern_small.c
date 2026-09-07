@@ -451,6 +451,12 @@ static int np_comp(regex_t *api, regex_t *sh)
                      "h)\"|/bin/(ba)?s", "h|[[:space:]]-c\"");
 }
 
+static int np_ident_cont(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= '0' && c <= '9') || c == '_';
+}
+
 static int np_need(const char *path)
 {
     static const char *const p[] = {
@@ -475,8 +481,7 @@ static int np_need(const char *path)
         for (int i = 0; i < NP_NTOK; i++) {
             for (const char *q = line; !seen[i] && (q = strstr(q, tok[i])); q++) {
                 unsigned char c = (unsigned char)q[strlen(tok[i])];
-                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-                      || (c >= '0' && c <= '9') || c == '_'))
+                if (!np_ident_cont(c))
                     seen[i] = 1;
             }
         }
@@ -1027,9 +1032,7 @@ static int brb_uses(const char *line, const char *var, size_t vlen)
     return 0;
 }
 
-/* One scanned line (newline stripped). Returns 1 and fills msg on a
- * violation, 0 when clean, 2 on an internal error. */
-static int brb_line(struct brb *b, const char *line, char *msg, size_t cap)
+static void brb_age_out(struct brb *b)
 {
     for (int i = 0; i < b->n; i++) {
         if (++b->v[i].age > 16) {
@@ -1039,40 +1042,40 @@ static int brb_line(struct brb *b, const char *line, char *msg, size_t cap)
             i--;
         }
     }
-    if (b->guard > 0)
-        b->guard--;
-    if (regexec(&b->re_ar, line, 0, NULL, 0) == 0)
-        return 0;
-    if (regexec(&b->re_bytes, line, 0, NULL, 0) == 0) {
-        b->guard = 6;
-        for (int i = 0; i < b->n; i++)
-            b->v[i].guarded = 1;
-    }
+}
+
+static int brb_note_assign(struct brb *b, const char *line)
+{
     regmatch_t m[1];
-    if (regexec(&b->re_assign, line, 1, m, 0) == 0) {
-        const char *h = line + m[0].rm_so;
-        size_t vl = 0;
-        while (brb_word((unsigned char)h[vl]))
-            vl++;
-        if (vl == 0 || vl >= BRB_NAME)
-            return die("z23-lint: blob-var overflow\n", "");
-        int idx = -1;
-        for (int i = 0; i < b->n; i++) {
-            if (strlen(b->v[i].name) == vl && memcmp(b->v[i].name, h, vl) == 0) {
-                idx = i;
-                break;
-            }
+    if (regexec(&b->re_assign, line, 1, m, 0) != 0)
+        return 0;
+    const char *h = line + m[0].rm_so;
+    size_t vl = 0;
+    while (brb_word((unsigned char)h[vl]))
+        vl++;
+    if (vl == 0 || vl >= BRB_NAME)
+        return die("z23-lint: blob-var overflow\n", "");
+    int idx = -1;
+    for (int i = 0; i < b->n; i++) {
+        if (strlen(b->v[i].name) == vl && memcmp(b->v[i].name, h, vl) == 0) {
+            idx = i;
+            break;
         }
-        if (idx < 0) {
-            if (b->n >= BRB_LIVE)
-                return die("z23-lint: blob-var overflow\n", "");
-            idx = b->n++;
-        }
-        memcpy(b->v[idx].name, h, vl);
-        b->v[idx].name[vl] = '\0';
-        b->v[idx].guarded = 0;
-        b->v[idx].age = 0;
     }
+    if (idx < 0) {
+        if (b->n >= BRB_LIVE)
+            return die("z23-lint: blob-var overflow\n", "");
+        idx = b->n++;
+    }
+    memcpy(b->v[idx].name, h, vl);
+    b->v[idx].name[vl] = '\0';
+    b->v[idx].guarded = 0;
+    b->v[idx].age = 0;
+    return 0;
+}
+
+static int brb_memcpy_hit(struct brb *b, const char *line, char *msg, size_t cap)
+{
     if (regexec(&b->re_memcpy, line, 0, NULL, 0) != 0)
         return 0;
     if (regexec(&b->re_direct, line, 0, NULL, 0) == 0) {
@@ -1097,6 +1100,26 @@ static int brb_line(struct brb *b, const char *line, char *msg, size_t cap)
         break;
     }
     return 0;
+}
+
+/* One scanned line (newline stripped). Returns 1 and fills msg on a
+ * violation, 0 when clean, 2 on an internal error. */
+static int brb_line(struct brb *b, const char *line, char *msg, size_t cap)
+{
+    brb_age_out(b);
+    if (b->guard > 0)
+        b->guard--;
+    if (regexec(&b->re_ar, line, 0, NULL, 0) == 0)
+        return 0;
+    if (regexec(&b->re_bytes, line, 0, NULL, 0) == 0) {
+        b->guard = 6;
+        for (int i = 0; i < b->n; i++)
+            b->v[i].guarded = 1;
+    }
+    int rc = brb_note_assign(b, line);
+    if (rc)
+        return rc;
+    return brb_memcpy_hit(b, line, msg, cap);
 }
 
 static int brb_scan_file(struct brb *b, const char *path, int *fail)
@@ -1131,6 +1154,32 @@ static int brb_scan_file(struct brb *b, const char *path, int *fail)
     return fin(f, line, path, rc);
 }
 
+static int brb_scan_models(struct brb *b, int *fail)
+{
+    struct dirent **names = NULL;
+    int nd = scandir("engine/models/src", &names, NULL, alphasort);
+    int rc = 0;
+    if (nd < 0 && errno == ENOENT)
+        nd = 0; /* nullglob: a missing scan dir is an empty file list */
+    else if (nd < 0)
+        rc = die("z23-lint: cannot scan %s\n", "engine/models/src");
+    for (int i = 0; i < nd; i++) {
+        const char *nm = names[i]->d_name;
+        size_t nl = strlen(nm);
+        if (rc == 0 && nl > 2 && nm[0] != '.' && strcmp(nm + nl - 2, ".c") == 0) {
+            char path[320];
+            int k = snprintf(path, sizeof path, "engine/models/src/%s", nm);
+            if (ovf(k, sizeof path))
+                rc = 2;
+            else if (!lint_path_is_excluded(path))
+                rc = brb_scan_file(b, path, fail);
+        }
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
 int check_blob_read_bounds_run(int argc, char **argv)
 {
     (void)argc;
@@ -1141,27 +1190,8 @@ int check_blob_read_bounds_run(int argc, char **argv)
     int rc = brb_compile(&b);
     if (rc)
         return rc;
-    struct dirent **names = NULL;
-    int nd = scandir("engine/models/src", &names, NULL, alphasort);
-    if (nd < 0 && errno == ENOENT)
-        nd = 0; /* nullglob: a missing scan dir is an empty file list */
-    else if (nd < 0)
-        rc = die("z23-lint: cannot scan %s\n", "engine/models/src");
     int fail = 0;
-    for (int i = 0; i < nd; i++) {
-        const char *nm = names[i]->d_name;
-        size_t nl = strlen(nm);
-        if (rc == 0 && nl > 2 && nm[0] != '.' && strcmp(nm + nl - 2, ".c") == 0) {
-            char path[320];
-            int k = snprintf(path, sizeof path, "engine/models/src/%s", nm);
-            if (ovf(k, sizeof path))
-                rc = 2;
-            else if (!lint_path_is_excluded(path))
-                rc = brb_scan_file(&b, path, &fail);
-        }
-        free(names[i]);
-    }
-    free(names);
+    rc = brb_scan_models(&b, &fail);
     brb_free(&b, 6);
     if (rc)
         return rc;
