@@ -232,7 +232,7 @@ gate_command() {
         check-no-orphan-placement)         echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_orphan_placement.sh' ;;
         check-file-size-ceiling)           echo '"$ZCL_LINT_BIN_DIR/file_size_policy"' ;;
         check-operator-needed-sink)        echo './tools/scripts/check_operator_needed_sink.sh' ;;
-        check-systemd-memory-budget)       echo './tools/scripts/check_systemd_memory_budget.sh' ;;
+        check-systemd-memory-budget)       echo './tools/scripts/check_systemd_memory_budget.sh --selftest && ./tools/scripts/check_systemd_memory_budget.sh' ;;
         check-condition-cooldown)          echo './tools/scripts/check_condition_cooldown.sh' ;;
         check-doc-accuracy)                echo './tools/scripts/check_doc_accuracy.sh' ;;
         check-doc-counts)                  echo './tools/scripts/check_doc_counts.sh' ;;
@@ -264,7 +264,7 @@ gate_command() {
         check-stage-advances-or-blocks)    echo './tools/scripts/check_stage_advances_or_blocks.sh' ;;
         check-no-silent-ready)             echo './tools/scripts/check_no_silent_ready.sh' ;;
         check-honest-witness)              echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_honest_witness.sh' ;;
-        check-consensus-parity)            echo './tools/scripts/check_consensus_parity.sh' ;;
+        check-consensus-parity)            echo './tools/scripts/check_consensus_parity.sh --selftest && ./tools/scripts/check_consensus_parity.sh' ;;
         check-no-new-repair-rung)          echo './tools/scripts/check_no_new_repair_rung.sh' ;;
         check-no-new-borrowed-seed)        echo './tools/lint/check_no_new_borrowed_seed.sh .' ;;
         check-no-new-coin-backfill-caller) echo './tools/lint/check_no_new_coin_backfill_caller.sh .' ;;

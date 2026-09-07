@@ -5356,6 +5356,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_secret_printf_fences.c \
     tools/lint/lintc/gate_long_functions.c \
     tools/lint/lintc/gate_test_registration.c \
+    tools/lint/lintc/gate_consensus_parity.c \
+    tools/lint/lintc/gate_systemd_memory_budget.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12297,9 +12299,9 @@ check-no-orphan-placement: $(LINTC_TOOL)
 # bit-for-bit consensus-compatible with zclassicd. Doctrine:
 # docs/CONSENSUS_PARITY_DOCTRINE.md; the golden VALUES are pinned by the
 # test_consensus_parity test group.
-check-consensus-parity:
+check-consensus-parity: $(LINTC_TOOL)
 	@echo "══ LINT: consensus parity with zclassicd (E13) ══"
-	@./tools/scripts/check_consensus_parity.sh
+	@./tools/scripts/check_consensus_parity.sh --selftest && ./tools/scripts/check_consensus_parity.sh
 
 # Gate — command-contract ratchet (lane OS-B1). Every native command leaf in
 # engine/composition/commands/*.def must supply a non-empty `semantics` argument (the
@@ -12445,9 +12447,9 @@ check-operator-needed-sink: $(LINTC_TOOL)
 # Gate P1-3 — systemd finite hard memory caps must fit inside the host budget.
 # Counts MemoryMax plus finite MemorySwapMax across committed node units and
 # fails explicit MemoryMax=infinity. Prevents host OOM from cap drift.
-check-systemd-memory-budget:
+check-systemd-memory-budget: $(LINTC_TOOL)
 	@echo "══ LINT: systemd memory budget (P1-3) ══"
-	@./tools/scripts/check_systemd_memory_budget.sh
+	@./tools/scripts/check_systemd_memory_budget.sh --selftest && ./tools/scripts/check_systemd_memory_budget.sh
 
 # Gate E14 — a COND_CRITICAL condition whose detect() depends on external/
 # network state (peer/connman liveness, the legacy zclassicd RPC oracle)

@@ -2197,17 +2197,17 @@ Z23_FLAG("ZCL_SYM_PEER_PORT", "env_build", "39178", "-",
 Z23_FLAG("ZCL_SYNC_RATE_FLOOR_BPS", "env_runtime", "-", "-",
           "undocumented; first use engine/conditions/src/sync_rate_below_floor.c:142")
 Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_DIRS", "env_build", "deploy", "-",
-          "undocumented; first use tools/scripts/check_systemd_memory_budget.sh:142")
+          "undocumented; first use tools/lint/lintc/gate_systemd_memory_budget.c:396")
 Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_LIMIT_BYTES", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_systemd_memory_budget.sh:69")
+          "undocumented; first use tools/lint/lintc/gate_systemd_memory_budget.c:373")
 Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_LIMIT_PCT", "env_build", "70", "-",
-          "undocumented; first use tools/scripts/check_systemd_memory_budget.sh:73")
+          "undocumented; first use tools/lint/lintc/gate_systemd_memory_budget.c:381")
 Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_MEMTOTAL_BYTES", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_systemd_memory_budget.sh:60")
+          "undocumented; first use tools/lint/lintc/gate_systemd_memory_budget.c:397")
 Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_ROOT", "env_build", ".", "-",
-          "undocumented; first use tools/scripts/check_systemd_memory_budget.sh:151")
+          "undocumented; first use tools/lint/lintc/gate_systemd_memory_budget.c:395")
 Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_SELFTEST", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_systemd_memory_budget.sh:305")
+          "undocumented; first use tools/lint/lintc/gate_systemd_memory_budget.c:557")
 Z23_FLAG("ZCL_TASK_REF", "env_runtime", "-", "-",
           "first use tools/dev/devloop_cycle.c:1010; documented at docs/ZVCS.md:259: [128 task_ref] from ZCL_TASK_REF")
 Z23_FLAG("ZCL_TELEMETRY_DOMAINS_DEF", "env_build", "-", "-",

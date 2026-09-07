@@ -173,6 +173,10 @@ static const struct lint_gate k_gates[] = {
       check_long_functions_selftest },
     { "check-test-registration", check_test_registration_run,
       check_test_registration_selftest },
+    { "check-consensus-parity", check_consensus_parity_run,
+      check_consensus_parity_selftest },
+    { "check-systemd-memory-budget", check_systemd_memory_budget_run,
+      check_systemd_memory_budget_selftest },
 };
 
 int main(int argc, char **argv)
