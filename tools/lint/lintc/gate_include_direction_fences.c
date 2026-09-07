@@ -113,6 +113,31 @@ static int idf_on_index(const char *path, void *ctx)
     return idf_add(c->set, path);
 }
 
+static int idf_walk(const char *dir, struct idf_collect *c);
+
+/* Decide what to do with one scandir() entry: skip "." / ".." / "test",
+ * recurse into a subdirectory, or add a matching regular file. Split out of
+ * idf_walk so the loop that owns it stays under the complexity cap. */
+static int idf_walk_entry(const char *dir, const char *nm, struct idf_collect *c)
+{
+    char path[4096];
+    struct stat st;
+    int k;
+    if (strcmp(nm, ".") == 0 || strcmp(nm, "..") == 0 || strcmp(nm, "test") == 0)
+        return 0;
+    k = snprintf(path, sizeof path, "%s/%s", dir, nm);
+    if (k < 0 || (size_t)k >= sizeof path)
+        return die("z23-lint: path too long: %s\n", dir);
+    if (lstat(path, &st) != 0)
+        return die("z23-lint: cannot stat %s\n", path);
+    if (S_ISDIR(st.st_mode))
+        return idf_walk(path, c);
+    if (S_ISREG(st.st_mode) && idf_src(path, c->inc) && !idf_is_test(path)
+        && !lint_path_is_excluded(path))
+        return idf_add(c->set, path);
+    return 0;
+}
+
 static int idf_walk(const char *dir, struct idf_collect *c)
 {
     struct dirent **names = NULL;
@@ -121,22 +146,8 @@ static int idf_walk(const char *dir, struct idf_collect *c)
     if (n < 0)
         return errno == ENOENT ? 0 : die("z23-lint: cannot scan %s\n", dir);
     for (i = 0; i < n; i++) {
-        const char *nm = names[i]->d_name;
-        if (rc == 0 && strcmp(nm, ".") != 0 && strcmp(nm, "..") != 0
-            && strcmp(nm, "test") != 0) {
-            char path[4096];
-            struct stat st;
-            int k = snprintf(path, sizeof path, "%s/%s", dir, nm);
-            if (k < 0 || (size_t)k >= sizeof path)
-                rc = die("z23-lint: path too long: %s\n", dir);
-            else if (lstat(path, &st) != 0)
-                rc = die("z23-lint: cannot stat %s\n", path);
-            else if (S_ISDIR(st.st_mode))
-                rc = idf_walk(path, c);
-            else if (S_ISREG(st.st_mode) && idf_src(path, c->inc)
-                     && !idf_is_test(path) && !lint_path_is_excluded(path))
-                rc = idf_add(c->set, path);
-        }
+        if (rc == 0)
+            rc = idf_walk_entry(dir, names[i]->d_name, c);
         free(names[i]);
     }
     free(names);
@@ -580,45 +591,55 @@ static int sid_report(const struct bln_set *neu, const struct bln_set *stale,
     return 1;
 }
 
-int check_shape_include_direction_run(int argc, char **argv)
+/* Resolve the models/ and services/ scan roots and collect their tracked
+ * source files into *models / *services. Split out of
+ * check_shape_include_direction_run so the top-level driver stays under the
+ * complexity cap. */
+static int sid_collect_roots(struct idf_set *models, struct idf_set *services)
 {
     char mroots[RS_MAX][RS_PATH], sroots[RS_MAX][RS_PATH];
     int nm = 0, ns = 0, rc;
-    static struct idf_set models, services;
-    struct bln_set base = {0}, seen = {0}, neu = {0}, stale = {0};
     struct idf_collect cm, cs;
-    regex_t minc, sinc, ok;
-    struct sid_acc a;
-    (void)argc;
-    (void)argv;
     rc = repo_shape_room_dirs("models", mroots, RS_MAX, &nm);
     if (rc)
         return rc;
     rc = repo_shape_room_dirs("services", sroots, RS_MAX, &ns);
     if (rc)
         return rc;
-    models.n = 0;
-    services.n = 0;
+    models->n = 0;
+    services->n = 0;
     cm.roots = mroots;
     cm.nroots = nm;
     cm.inc = 0;
-    cm.set = &models;
+    cm.set = models;
     cs.roots = sroots;
     cs.nroots = ns;
     cs.inc = 0;
-    cs.set = &services;
+    cs.set = services;
     rc = idf_collect(&cm);
     if (rc)
         return rc;
     rc = idf_collect(&cs);
     if (rc)
         return rc;
-    rc = gate_require_scanned(models.n, 1, "check-shape-include-direction",
+    rc = gate_require_scanned(models->n, 1, "check-shape-include-direction",
                               "no tracked models/ source");
     if (rc)
         return rc;
-    rc = gate_require_scanned(services.n, 1, "check-shape-include-direction",
-                              "no tracked services/ source");
+    return gate_require_scanned(services->n, 1, "check-shape-include-direction",
+                                "no tracked services/ source");
+}
+
+int check_shape_include_direction_run(int argc, char **argv)
+{
+    int rc;
+    static struct idf_set models, services;
+    struct bln_set base = {0}, seen = {0}, neu = {0}, stale = {0};
+    regex_t minc, sinc, ok;
+    struct sid_acc a;
+    (void)argc;
+    (void)argv;
+    rc = sid_collect_roots(&models, &services);
     if (rc)
         return rc;
     rc = sid_load(&base, k_sid_base);
