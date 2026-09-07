@@ -278,6 +278,24 @@ static bool sd_onionstatus_ready_incomplete_stage_walk(void)
  * fields, port-mapping routes, stream/handshake stage counters, the
  * last-dial record, the first-incomplete-stage narrative walk, and (once
  * the snapshot reads "ready") a well-formed .onion hostname. */
+static bool sd_onionstatus_ready_hostname_check(const struct json_value *result,
+                                                bool ok)
+{
+    const struct json_value *state = json_get(result, "bootstrap_state");
+    const struct json_value *tor_ready = json_get(result, "tor_ready");
+    const struct json_value *service_ready =
+        json_get(result, "onion_service_ready");
+    const struct json_value *address = json_get(result, "onion_address");
+    if (ok && strcmp(json_get_str(state), "ready") == 0) {
+        const char *hostname = json_get_str(address);
+        size_t hostname_len = strlen(hostname);
+        ok = json_get_bool(tor_ready) && json_get_bool(service_ready) &&
+             hostname_len > 6 &&
+             strcmp(hostname + hostname_len - 6, ".onion") == 0;
+    }
+    return ok;
+}
+
 static bool sd_onionstatus_ready_scenario(void)
 {
     struct rpc_table tbl;
@@ -297,19 +315,7 @@ static bool sd_onionstatus_ready_scenario(void)
     ok = sd_onionstatus_ready_part3b(&result) && ok;
     ok = sd_onionstatus_ready_part4(&result) && ok;
     ok = sd_onionstatus_ready_incomplete_stage_walk() && ok;
-
-    const struct json_value *state = json_get(&result, "bootstrap_state");
-    const struct json_value *tor_ready = json_get(&result, "tor_ready");
-    const struct json_value *service_ready =
-        json_get(&result, "onion_service_ready");
-    const struct json_value *address = json_get(&result, "onion_address");
-    if (ok && strcmp(json_get_str(state), "ready") == 0) {
-        const char *hostname = json_get_str(address);
-        size_t hostname_len = strlen(hostname);
-        ok = json_get_bool(tor_ready) && json_get_bool(service_ready) &&
-             hostname_len > 6 &&
-             strcmp(hostname + hostname_len - 6, ".onion") == 0;
-    }
+    ok = sd_onionstatus_ready_hostname_check(&result, ok);
 
     json_free(&params);
     json_free(&result);
@@ -680,6 +686,32 @@ static bool sd_peerincidents_dumpstate_fallback_scenario(void)
 
 /* case: getnetworkinfo exposes the configured -externalip endpoint as a
  * scored local address, alongside the advertised subversion string. */
+static bool sd_getnetworkinfo_external_endpoint_asserts(
+    const struct json_value *result, bool ok)
+{
+    const struct json_value *localaddrs =
+        json_get(result, "localaddresses");
+    const struct json_value *first =
+        localaddrs && localaddrs->type == JSON_ARR
+            ? json_at(localaddrs, 0)
+            : NULL;
+    ok = ok && result->type == JSON_OBJ;
+    ok = ok && json_get_bool(json_get(result,
+                                      "externalip_configured"));
+    ok = ok && localaddrs && localaddrs->type == JSON_ARR;
+    ok = ok && json_size(localaddrs) == 1;
+    ok = ok && first && strcmp(json_get_str(json_get(first, "address")),
+                               "203.0.113.7") == 0;
+    ok = ok && first &&
+         json_get_int(json_get(first, "port")) == 8023;
+    ok = ok && first &&
+         json_get_int(json_get(first, "score")) == 1;
+    ok = ok && strcmp(json_get_str(json_get(result,
+                                            "advertised_subver")),
+                      msg_version_user_agent()) == 0;
+    return ok;
+}
+
 static bool sd_getnetworkinfo_external_endpoint_scenario(void)
 {
     struct rpc_table tbl;
@@ -697,27 +729,7 @@ static bool sd_getnetworkinfo_external_endpoint_scenario(void)
     json_init(&result);
     bool ok = rpc_table_execute(&tbl, "getnetworkinfo",
                                 &params, &result);
-
-    const struct json_value *localaddrs =
-        json_get(&result, "localaddresses");
-    const struct json_value *first =
-        localaddrs && localaddrs->type == JSON_ARR
-            ? json_at(localaddrs, 0)
-            : NULL;
-    ok = ok && result.type == JSON_OBJ;
-    ok = ok && json_get_bool(json_get(&result,
-                                      "externalip_configured"));
-    ok = ok && localaddrs && localaddrs->type == JSON_ARR;
-    ok = ok && json_size(localaddrs) == 1;
-    ok = ok && first && strcmp(json_get_str(json_get(first, "address")),
-                               "203.0.113.7") == 0;
-    ok = ok && first &&
-         json_get_int(json_get(first, "port")) == 8023;
-    ok = ok && first &&
-         json_get_int(json_get(first, "score")) == 1;
-    ok = ok && strcmp(json_get_str(json_get(&result,
-                                            "advertised_subver")),
-                      msg_version_user_agent()) == 0;
+    ok = sd_getnetworkinfo_external_endpoint_asserts(&result, ok);
 
     json_free(&params);
     json_free(&result);
@@ -989,9 +1001,6 @@ static bool sd_bootstrapstatus_ready_part5(const struct json_value *result)
             "verified_zclassic23_bootstrap_peers") : NULL;
     const struct json_value *first_verified =
         verified && json_size(verified) > 0 ? json_at(verified, 0) : NULL;
-    const struct json_value *addrman = json_get(result, "addrman");
-    const struct json_value *zcl23 =
-        json_get(result, "zclassic23_bootstrap");
     ok = ok && first_verified && first_verified->type == JSON_OBJ;
     ok = ok && strcmp(json_get_str(json_get(first_verified,
         "verified_by")), "live_handshake") == 0;
@@ -1001,7 +1010,15 @@ static bool sd_bootstrapstatus_ready_part5(const struct json_value *result)
         "fast_sync_useful"));
     ok = ok && strcmp(json_get_str(json_get(first_verified,
         "bootstrap_readiness")), "useful") == 0;
+    return ok;
+}
 
+static bool sd_bootstrapstatus_ready_part5b(const struct json_value *result)
+{
+    bool ok = true;
+    const struct json_value *addrman = json_get(result, "addrman");
+    const struct json_value *zcl23 =
+        json_get(result, "zclassic23_bootstrap");
     ok = ok && addrman && addrman->type == JSON_OBJ;
     ok = ok && json_get_int(json_get(addrman, "entries")) == 1;
     ok = ok && json_get_bool(json_get(addrman,
@@ -1183,65 +1200,89 @@ static bool sd_bootstrapstatus_snapshot_missing_index_part1(const struct json_va
  * verified zclassic23 peers, then re-reads it once a security-review
  * override blocks every readiness claim, then again once the block
  * index file is missing from the snapshot bundle. */
-static bool sd_bootstrapstatus_ready_scenario(void)
+static bool sd_bootstrapstatus_ready_phase1(struct sd_bootstrap_ctx *ctx)
 {
-    struct sd_bootstrap_ctx ctx;
-    bool ok = sd_bootstrap_setup_connman(&ctx);
-    ok = sd_bootstrap_setup_addrman(&ctx, ok);
-    ok = sd_bootstrap_setup_peers(&ctx, ok);
+    bool ok = sd_bootstrap_setup_connman(ctx);
+    ok = sd_bootstrap_setup_addrman(ctx, ok);
+    ok = sd_bootstrap_setup_peers(ctx, ok);
 
-    rpc_table_init(&ctx.tbl);
-    register_net_rpc_commands(&ctx.tbl);
-    rpc_net_set_connman(&ctx.cm);
-    rpc_net_set_boot_context(ctx.tmp_dir, ctx.snap_path);
+    rpc_table_init(&ctx->tbl);
+    register_net_rpc_commands(&ctx->tbl);
+    rpc_net_set_connman(&ctx->cm);
+    rpc_net_set_boot_context(ctx->tmp_dir, ctx->snap_path);
 
-    json_init(&ctx.params);
-    json_set_array(&ctx.params);
-    json_init(&ctx.result);
-    ok = ok && rpc_table_execute(&ctx.tbl, "bootstrapstatus",
-                                 &ctx.params, &ctx.result);
-    ok = sd_bootstrapstatus_ready_part1(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_ready_part2(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_ready_part3(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_ready_part4(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_ready_part5(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_ready_part6(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_ready_part7(&ctx.result, ctx.snap_path) && ok;
-    ok = sd_bootstrapstatus_ready_part8(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_ready_part9(&ctx.result) && ok;
+    json_init(&ctx->params);
+    json_set_array(&ctx->params);
+    json_init(&ctx->result);
+    ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
+                                 &ctx->params, &ctx->result);
+    ok = sd_bootstrapstatus_ready_part1(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part2(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part3(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part4(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part5(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part5b(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part6(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part7(&ctx->result, ctx->snap_path) && ok;
+    ok = sd_bootstrapstatus_ready_part8(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_ready_part9(&ctx->result) && ok;
+    return ok;
+}
 
+static bool sd_bootstrapstatus_ready_phase2(struct sd_bootstrap_ctx *ctx,
+                                            bool ok)
+{
     /* A transport-ready, tip-published node must still refuse every
      * serving/readiness claim while security posture requires review. */
     agent_security_posture_test_override_review_required(1);
-    json_free(&ctx.result);
-    json_init(&ctx.result);
-    ok = ok && rpc_table_execute(&ctx.tbl, "bootstrapstatus",
-                                 &ctx.params, &ctx.result);
-    ok = sd_bootstrapstatus_review_required_part1(&ctx.result) && ok;
-    ok = sd_bootstrapstatus_review_required_part2(&ctx.result) && ok;
+    json_free(&ctx->result);
+    json_init(&ctx->result);
+    ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
+                                 &ctx->params, &ctx->result);
+    ok = sd_bootstrapstatus_review_required_part1(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_review_required_part2(&ctx->result) && ok;
     agent_security_posture_test_override_review_required(0);
+    return ok;
+}
 
-    ok = ok && unlink(ctx.index_path) == 0;
-    rpc_net_set_boot_context(ctx.tmp_dir, NULL);
-    json_free(&ctx.result);
-    json_init(&ctx.result);
-    ok = ok && rpc_table_execute(&ctx.tbl, "bootstrapstatus",
-                                 &ctx.params, &ctx.result);
-    ok = sd_bootstrapstatus_snapshot_missing_index_part1(&ctx.result) && ok;
+static bool sd_bootstrapstatus_ready_phase3(struct sd_bootstrap_ctx *ctx,
+                                            bool ok)
+{
+    ok = ok && unlink(ctx->index_path) == 0;
+    rpc_net_set_boot_context(ctx->tmp_dir, NULL);
+    json_free(&ctx->result);
+    json_init(&ctx->result);
+    ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
+                                 &ctx->params, &ctx->result);
+    ok = sd_bootstrapstatus_snapshot_missing_index_part1(&ctx->result) && ok;
+    return ok;
+}
 
-    json_free(&ctx.params);
-    json_free(&ctx.result);
+static bool sd_bootstrapstatus_ready_teardown(struct sd_bootstrap_ctx *ctx,
+                                              bool ok)
+{
+    json_free(&ctx->params);
+    json_free(&ctx->result);
     rpc_net_set_connman(NULL);
     rpc_net_set_boot_context(NULL, NULL);
     msg_version_clear_external_ip_for_test();
     reducer_frontier_provable_tip_reset();
-    connman_free(&ctx.cm);
-    if (ctx.tmp_dir) {
-        unlink(ctx.snap_path);
-        unlink(ctx.index_path);
-        rmdir(ctx.tmp_dir);
+    connman_free(&ctx->cm);
+    if (ctx->tmp_dir) {
+        unlink(ctx->snap_path);
+        unlink(ctx->index_path);
+        rmdir(ctx->tmp_dir);
     }
     return ok;
+}
+
+static bool sd_bootstrapstatus_ready_scenario(void)
+{
+    struct sd_bootstrap_ctx ctx;
+    bool ok = sd_bootstrapstatus_ready_phase1(&ctx);
+    ok = sd_bootstrapstatus_ready_phase2(&ctx, ok);
+    ok = sd_bootstrapstatus_ready_phase3(&ctx, ok);
+    return sd_bootstrapstatus_ready_teardown(&ctx, ok);
 }
 
 static bool sd_bootstrapstatus_authority_proven_not_folded(
@@ -1268,6 +1309,18 @@ static bool sd_bootstrapstatus_authority_proven_not_folded(
               REDUCER_FRONTIER_TRUSTED_ANCHOR + 1;
     ok = ok && json_get_bool(json_get(authority,
                                       "coins_kv_proven_authority"));
+    return ok;
+}
+
+static bool sd_bootstrapstatus_authority_proven_not_folded_posture(
+    const struct json_value *result)
+{
+    bool ok = true;
+    const struct json_value *loader =
+        json_get(result, "snapshot_loader");
+    const struct json_value *authority =
+        loader ? json_get(loader, "authority") : NULL;
+    ok = ok && authority && authority->type == JSON_OBJ;
     ok = ok && json_get_bool(json_get(authority,
                                       "coins_cover_hstar"));
     ok = ok && json_get_bool(json_get(authority,
@@ -1307,66 +1360,97 @@ static bool sd_bootstrapstatus_authority_self_folded(
  * "proven but not self-folded" (a coins_kv authority proven from a
  * borrowed seed, no refold marker yet) to "self-folded marker present"
  * once the anchor is marked self-folded. */
-static bool sd_bootstrapstatus_snapshot_authority_scenario(void)
+struct sd_snapshot_authority_ctx {
+    char dir[256];
+    struct rpc_table tbl;
+    struct json_value params;
+    struct json_value result;
+    sqlite3 *pdb;
+};
+
+static bool sd_snapshot_authority_setup(struct sd_snapshot_authority_ctx *ctx)
 {
     test_reset_shared_globals();
     progress_store_close();
     chain_params_select(CHAIN_MAIN);
 
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "syncdiag", "bootstrap_authority");
+    test_make_tmpdir(ctx->dir, sizeof(ctx->dir), "syncdiag",
+                     "bootstrap_authority");
 
-    struct rpc_table tbl;
-    struct json_value params = {0};
-    struct json_value result = {0};
-    sqlite3 *pdb = NULL;
     uint8_t txid[32] = {0};
     const uint8_t one = 0x01;
-    bool ok = progress_store_open(dir);
+    ctx->pdb = NULL;
+    bool ok = progress_store_open(ctx->dir);
     if (ok)
-        pdb = progress_store_db();
+        ctx->pdb = progress_store_db();
     if (ok) {
         memset(txid, 0xB7, sizeof(txid));
-        ok = pdb &&
-             coins_kv_ensure_schema(pdb) &&
+        ok = ctx->pdb &&
+             coins_kv_ensure_schema(ctx->pdb) &&
              syncdiag_seed_reducer_frontier_at_anchor(
-                 pdb, REDUCER_FRONTIER_TRUSTED_ANCHOR) &&
-             coins_kv_add(pdb, txid, 0, 5000000000LL,
+                 ctx->pdb, REDUCER_FRONTIER_TRUSTED_ANCHOR) &&
+             coins_kv_add(ctx->pdb, txid, 0, 5000000000LL,
                           REDUCER_FRONTIER_TRUSTED_ANCHOR, true,
                           NULL, 0) &&
              syncdiag_set_coins_applied(
-                 pdb, REDUCER_FRONTIER_TRUSTED_ANCHOR + 1) &&
-             progress_meta_set(pdb, COINS_KV_MIGRATION_COMPLETE_KEY,
+                 ctx->pdb, REDUCER_FRONTIER_TRUSTED_ANCHOR + 1) &&
+             progress_meta_set(ctx->pdb, COINS_KV_MIGRATION_COMPLETE_KEY,
                                &one, sizeof(one));
     }
+    return ok;
+}
 
-    rpc_table_init(&tbl);
-    register_net_rpc_commands(&tbl);
+static bool sd_snapshot_authority_rpc1(struct sd_snapshot_authority_ctx *ctx,
+                                       bool ok)
+{
+    rpc_table_init(&ctx->tbl);
+    register_net_rpc_commands(&ctx->tbl);
     rpc_net_set_connman(NULL);
-    rpc_net_set_boot_context(dir, NULL);
+    rpc_net_set_boot_context(ctx->dir, NULL);
 
-    json_init(&params);
-    json_set_array(&params);
-    json_init(&result);
-    ok = ok && rpc_table_execute(&tbl, "bootstrapstatus",
-                                 &params, &result);
-    ok = sd_bootstrapstatus_authority_proven_not_folded(&result) && ok;
+    json_init(&ctx->params);
+    json_set_array(&ctx->params);
+    json_init(&ctx->result);
+    ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
+                                 &ctx->params, &ctx->result);
+    ok = sd_bootstrapstatus_authority_proven_not_folded(&ctx->result) && ok;
+    ok = sd_bootstrapstatus_authority_proven_not_folded_posture(
+        &ctx->result) && ok;
+    return ok;
+}
 
-    json_free(&result);
-    json_init(&result);
-    ok = ok && coins_kv_mark_self_folded(pdb);
-    ok = ok && rpc_table_execute(&tbl, "bootstrapstatus",
-                                 &params, &result);
-    ok = sd_bootstrapstatus_authority_self_folded(&result) && ok;
+static bool sd_snapshot_authority_rpc2(struct sd_snapshot_authority_ctx *ctx,
+                                       bool ok)
+{
+    json_free(&ctx->result);
+    json_init(&ctx->result);
+    ok = ok && coins_kv_mark_self_folded(ctx->pdb);
+    ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus",
+                                 &ctx->params, &ctx->result);
+    ok = sd_bootstrapstatus_authority_self_folded(&ctx->result) && ok;
+    return ok;
+}
 
-    json_free(&params);
-    json_free(&result);
+static bool sd_snapshot_authority_teardown(
+    struct sd_snapshot_authority_ctx *ctx, bool ok)
+{
+    json_free(&ctx->params);
+    json_free(&ctx->result);
     rpc_net_set_connman(NULL);
     rpc_net_set_boot_context(NULL, NULL);
     progress_store_close();
-    test_cleanup_tmpdir(dir);
+    test_cleanup_tmpdir(ctx->dir);
     test_reset_shared_globals();
     return ok;
+}
+
+static bool sd_bootstrapstatus_snapshot_authority_scenario(void)
+{
+    struct sd_snapshot_authority_ctx ctx;
+    bool ok = sd_snapshot_authority_setup(&ctx);
+    ok = sd_snapshot_authority_rpc1(&ctx, ok);
+    ok = sd_snapshot_authority_rpc2(&ctx, ok);
+    return sd_snapshot_authority_teardown(&ctx, ok);
 }
 
 /* Fixture + phase helpers for the reachability-vs-handshake scenario:
@@ -1529,7 +1613,8 @@ static bool sd_reachability_addnode_remove(struct sd_reach_ctx *ctx, bool ok)
 
 /* case: removing an already-removed addnode target reports "not found";
  * an unrecognised action reports it "must be" one of the known ones. */
-static bool sd_reachability_addnode_errors(struct sd_reach_ctx *ctx, bool ok)
+static bool sd_reachability_addnode_remove_not_found(
+    struct sd_reach_ctx *ctx, bool ok)
 {
     json_free(&ctx->params);
     json_init(&ctx->params);
@@ -1548,12 +1633,16 @@ static bool sd_reachability_addnode_errors(struct sd_reach_ctx *ctx, bool ok)
     ok = ok && !rpc_table_execute(&ctx->tbl, "addnode", &ctx->params,
                                   &ctx->result);
     ok = ok && strstr(json_get_str(&ctx->result), "not found") != NULL;
-    if (!ok)
-        return ok;
+    return ok;
+}
 
+static bool sd_reachability_addnode_bogus_command(
+    struct sd_reach_ctx *ctx, bool ok)
+{
     json_free(&ctx->params);
     json_init(&ctx->params);
     json_set_array(&ctx->params);
+    struct json_value v;
     json_init(&v);
     json_set_str(&v, "51.178.179.75:8033");
     ok = ok && json_push_back(&ctx->params, &v);
@@ -1568,6 +1657,14 @@ static bool sd_reachability_addnode_errors(struct sd_reach_ctx *ctx, bool ok)
                                   &ctx->result);
     ok = ok && strstr(json_get_str(&ctx->result), "must be") != NULL;
     return ok;
+}
+
+static bool sd_reachability_addnode_errors(struct sd_reach_ctx *ctx, bool ok)
+{
+    ok = sd_reachability_addnode_remove_not_found(ctx, ok);
+    if (!ok)
+        return ok;
+    return sd_reachability_addnode_bogus_command(ctx, ok);
 }
 
 /* case: getpeerinfo reports one peer's build identity honestly (a known
