@@ -8,11 +8,19 @@
  * PRODUCING. A node offers only what it actually holds and can actually serve:
  * an artifact the ROM seed registry has registered under <datadir>/bundles/,
  * whose bundle manifest opens and names a height and a block hash, that is
- * within 576 blocks of this node's own tip. The offer is signed with the same
- * durable Ed25519 online identity the mesh status lane already signs with
- * (vcs_zcode_dht_online_key_load) — no new key, no new key file. A node with no
- * identity material, no eligible bundle, or no running file service simply
- * offers nothing, which is the pre-offer behaviour unchanged.
+ * within 576 blocks of this node's own tip (the compiled checkpoint height is
+ * exempt from that window — see net/state_offer.h). The offer is signed with the
+ * same durable Ed25519 online identity the mesh status lane and the fleet board
+ * already sign with — no new key, no new key file, no second identity.
+ *
+ * That identity is minted ON DEMAND, and only for a node that has something to
+ * advertise: the first peer-link tick at which this node holds a bundle it
+ * would offer calls vcs_zcode_dht_online_key_load_or_create(), the same call the
+ * fleet board makes. Before this, the key existed only if an operator had
+ * happened to use the board, so a hosted node that registered and served a
+ * half-gigabyte consensus bundle appended NO offer to its handshakes and a
+ * stranger could never find it. A node holding no eligible bundle, or with no
+ * running file service, still mints nothing and offers nothing.
  *
  * ACTING. When the store chooses an offer, the bytes are fetched through the
  * UNCHANGED ROM-manifest path: the per-chunk SHA3 manifest is fetched and bound
@@ -60,6 +68,14 @@ void state_offer_service_tick(void);
 #ifdef ZCL_TESTING
 /* Rebuild the cached artifact snapshot on the next provider call. */
 void state_offer_service_test_invalidate(void);
+/* Pretend this node holds one registered bundle at `bundle_height`, so the
+ * "do we hold something worth advertising" rule can be driven without a
+ * datadir full of half-gigabyte artifacts. */
+void state_offer_service_test_hold_artifact(int32_t bundle_height);
+/* Run the mint-if-we-hold-something decision against an injected tip. */
+void state_offer_service_test_ensure_identity(int32_t tip);
+/* True iff this node can sign an offer right now. */
+bool state_offer_service_test_have_identity(void);
 #endif
 
 #endif /* ZCL_CONFIG_STATE_OFFER_SERVICE_H */

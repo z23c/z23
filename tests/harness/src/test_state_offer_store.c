@@ -13,9 +13,14 @@
 
 #include "test/test_core.h"
 
+#include "config/state_offer_service.h"
 #include "config/state_offer_store.h"
+#include "chain/checkpoints.h"
+#include "vcs/zcode_dht_identity.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static void fill_bytes(uint8_t out[32], uint8_t first)
 {
@@ -465,10 +470,93 @@ static int first_boot_peer_offer_is_consumed(void)
     return failures;
 }
 
+/* Path of the one durable online identity file a node signs its offers with. */
+static void identity_path(const char *datadir, char *out, size_t n)
+{
+    int wrote = snprintf(out, n,
+                         "%s/" VCS_ZCODE_DHT_IDENTITY_DIR
+                         "/" VCS_ZCODE_DHT_ONLINE_KEY_FILE, datadir);
+    if (wrote < 0 || (size_t)wrote >= n)
+        abort();
+}
+
+/* THE ADVERTISE RULE. A node mints its offering identity — and therefore can
+ * append a state offer to its zfileaddr handshakes — exactly when it holds a
+ * bundle it would offer, and never otherwise. Before this rule a hosted node
+ * that served a half-gigabyte bundle advertised nothing at all, because the key
+ * file only ever appeared as a side effect of using the fleet board. */
+static int advertise_only_when_we_hold_a_bundle(void)
+{
+    int failures = 0;
+    TEST_CASE("a node with no bundle mints no identity and advertises nothing") {
+        char dir[PATH_MAX], key[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_adv", "nobundle");
+        identity_path(dir, key, sizeof(key));
+
+        state_offer_service_start(dir, NULL);
+        state_offer_service_test_invalidate();
+        /* A live tip and no held artifact: the fail-closed half. */
+        state_offer_service_test_ensure_identity(3200000);
+        ASSERT(!state_offer_service_test_have_identity());
+        ASSERT(access(key, F_OK) != 0);
+        state_offer_service_shutdown();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
+static int advertise_when_we_hold_the_checkpoint_bundle(void)
+{
+    int failures = 0;
+    TEST_CASE("a node holding the checkpoint bundle mints and advertises") {
+        char dir[PATH_MAX], key[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_adv", "checkpoint");
+        identity_path(dir, key, sizeof(key));
+
+        state_offer_service_start(dir, NULL);
+        ASSERT(!state_offer_service_test_have_identity());
+        /* The compiled checkpoint height is exempt from the 576-block
+         * freshness window, so a tip far above it still advertises. */
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        ASSERT(cp != NULL);
+        state_offer_service_test_hold_artifact(cp->height);
+        state_offer_service_test_ensure_identity(cp->height + 100000);
+        ASSERT(state_offer_service_test_have_identity());
+        ASSERT(access(key, F_OK) == 0);
+        state_offer_service_shutdown();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
+static int no_advertisement_for_a_stale_bundle(void)
+{
+    int failures = 0;
+    TEST_CASE("a node holding only a stale bundle still advertises nothing") {
+        char dir[PATH_MAX], key[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_adv", "stale");
+        identity_path(dir, key, sizeof(key));
+
+        state_offer_service_start(dir, NULL);
+        /* Well below the tip and not the checkpoint height: not offerable, so
+         * nothing is minted and nothing is written. */
+        state_offer_service_test_hold_artifact(900000);
+        state_offer_service_test_ensure_identity(3200000);
+        ASSERT(!state_offer_service_test_have_identity());
+        ASSERT(access(key, F_OK) != 0);
+        state_offer_service_shutdown();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
 
+    failures += advertise_only_when_we_hold_a_bundle();
+    failures += advertise_when_we_hold_the_checkpoint_bundle();
+    failures += no_advertisement_for_a_stale_bundle();
     failures += picks_newest_acceptable();
     failures += stale_offer_never_chosen();
     failures += bad_bundle_discards_and_tries_next();

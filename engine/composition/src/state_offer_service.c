@@ -25,6 +25,7 @@
 
 #include "platform/time_compat.h"
 
+#include "base/cleanse.h"
 #include "chain/mmb.h"
 #include "jobs/reducer_frontier.h"
 #include "models/database.h"
@@ -200,11 +201,88 @@ static void sosvc_refresh_snapshot_locked(void)
              g_artifact_count, n);
 }
 
+/* Does this node hold something it would actually offer at `tip`? Caller holds
+ * g_lock. The SAME rule the producer filters with, called from the same header,
+ * so "we may sign" and "we may offer" can never drift apart. */
+static bool sosvc_has_offerable_artifact_locked(int32_t tip)
+{
+    for (uint32_t i = 0; i < g_artifact_count; i++)
+        if (state_offer_height_is_fresh(g_artifacts[i].bundle_height, tip))
+            return true;
+    return false;
+}
+
+/* THE GAP THIS CLOSES. A node that registers and serves a 513 MB consensus
+ * bundle still appended NO offer batch to its "zfileaddr" messages, because
+ * state_offer_service_start() LOADS the durable online identity and nothing in
+ * boot ever CREATES it: the only vcs_zcode_dht_online_key_load_or_create()
+ * caller is the fleet board (engine/composition/src/boot_fleet_board.c), lazily,
+ * on the first board post. On a plain hosted node the key file is absent, so
+ * sosvc_provide returned 0 for the life of the process and a stranger heard
+ * nothing but a port. Every hosted node served the bundle; nobody could find it.
+ *
+ * FAIL CLOSED, AND ONLY FOR SOMETHING WE HOLD. The key is minted only once this
+ * node actually holds a bundle it would offer — a registered ROM artifact whose
+ * manifest opens and whose height passes state_offer_height_is_fresh() against
+ * our own tip (which exempts the compiled checkpoint height by design,
+ * core/modules/net/src/state_offer.c). A node with nothing to offer mints
+ * nothing and writes no file, exactly as before.
+ *
+ * WHAT IS AND IS NOT PROVISIONED. This is the node's OWN durable Ed25519 online
+ * identity — the same key file, created by the same function, that the fleet
+ * board already creates on demand. No new key, no new key file, no second
+ * identity. It authenticates the offer on the wire; it grants nothing. Trust
+ * still binds where it always did: the RMF per-chunk digests, the whole-file
+ * SHA3, and the installer's CHECKPOINT_ROM re-derivation against the compiled
+ * checkpoint.
+ *
+ * WHERE IT RUNS. On the peer-link tick, not the offer send path, and the
+ * snapshot refresh it may drive is the same bounded one sosvc_provide already
+ * drives on that thread, rate-limited by SOSVC_SNAPSHOT_TTL_S. */
+static void sosvc_ensure_offering_identity(int32_t tip)
+{
+    if (g_have_identity || !g_datadir[0] || tip <= 0)
+        return;
+
+    pthread_mutex_lock(&g_lock);
+    if (!g_snapshot_valid ||
+        sosvc_now_unix() - g_snapshot_unix >= SOSVC_SNAPSHOT_TTL_S)
+        sosvc_refresh_snapshot_locked();
+    bool offerable = sosvc_has_offerable_artifact_locked(tip);
+    pthread_mutex_unlock(&g_lock);
+    if (!offerable)
+        return; /* nothing to advertise — mint nothing, write nothing */
+
+    uint8_t seed[32], pubkey[32];
+    char err[160];
+    err[0] = '\0';
+    if (!vcs_zcode_dht_online_key_load_or_create(g_datadir, seed, pubkey, err,
+                                                 sizeof(err))) {
+        LOG_WARN(SOSVC_SUBSYS,
+                 "holding an offerable bundle but this node has no online "
+                 "identity to sign an offer with (%s) — peers will hear our "
+                 "file-service port and no state offer",
+                 err[0] ? err : "unknown reason");
+        memory_cleanse(seed, sizeof(seed));
+        return;
+    }
+
+    pthread_mutex_lock(&g_lock);
+    memcpy(g_online_seed, seed, sizeof(g_online_seed));
+    g_have_identity = true;
+    pthread_mutex_unlock(&g_lock);
+    memory_cleanse(seed, sizeof(seed));
+    LOG_INFO(SOSVC_SUBSYS,
+             "online identity ready — this node now advertises the consensus "
+             "bundle it holds in its zfileaddr handshakes, so a fresh peer can "
+             "find a state source with no operator flag");
+}
+
 /* The provider net calls at the "zfileaddr" send site. */
 static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
 {
     (void)ctx;
-    if (!out || !g_have_identity)
+    if (!out)
         return 0;
 
     int32_t tip = reducer_frontier_external_tip_height();
@@ -215,6 +293,14 @@ static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
         return 0; /* nothing to anchor a work proof to — say nothing */
 
     pthread_mutex_lock(&g_lock);
+    /* Read the identity flag under the same lock the tick sets it under: the
+     * offering identity is minted on the peer-link tick (see
+     * sosvc_ensure_offering_identity), so this net-thread reader must not see
+     * `have identity` before the seed it signs with. */
+    if (!g_have_identity) {
+        pthread_mutex_unlock(&g_lock);
+        return 0;
+    }
     if (!g_snapshot_valid ||
         sosvc_now_unix() - g_snapshot_unix >= SOSVC_SNAPSHOT_TTL_S)
         sosvc_refresh_snapshot_locked();
@@ -449,6 +535,10 @@ void state_offer_service_tick(void)
 {
     int64_t now_ms = sosvc_now_ms();
     state_offer_store_note_first_peer(now_ms);
+    /* Producer side: make sure a node that HOLDS a bundle can actually say so.
+     * One-shot in practice — it returns on the first branch once the identity
+     * is in hand. */
+    sosvc_ensure_offering_identity(reducer_frontier_external_tip_height());
 
     if (g_fetch_running)
         return;
@@ -498,5 +588,33 @@ void state_offer_service_test_invalidate(void)
     pthread_mutex_lock(&g_lock);
     g_snapshot_valid = false;
     pthread_mutex_unlock(&g_lock);
+}
+
+void state_offer_service_test_hold_artifact(int32_t bundle_height)
+{
+    pthread_mutex_lock(&g_lock);
+    g_snapshot_valid = true;
+    g_snapshot_unix = sosvc_now_unix();
+    if (g_artifact_count < STATE_OFFER_MAX_PER_PEER) {
+        struct sosvc_artifact *s = &g_artifacts[g_artifact_count];
+        memset(s, 0, sizeof(*s));
+        s->used = true;
+        s->bundle_height = bundle_height;
+        g_artifact_count++;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+void state_offer_service_test_ensure_identity(int32_t tip)
+{
+    sosvc_ensure_offering_identity(tip);
+}
+
+bool state_offer_service_test_have_identity(void)
+{
+    pthread_mutex_lock(&g_lock);
+    bool have = g_have_identity;
+    pthread_mutex_unlock(&g_lock);
+    return have;
 }
 #endif
