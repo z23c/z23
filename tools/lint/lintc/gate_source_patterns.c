@@ -155,6 +155,35 @@ static int rd_scan_file(const char *path, const struct rd_ctx *ctx)
     return rc;
 }
 
+static int rd_walk(const char *dir, int hdrs, const struct rd_ctx *ctx);
+
+static int rd_is_src(const char *name, size_t nl, int hdrs)
+{
+    return nl >= 2 && name[nl - 2] == '.'
+        && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h'));
+}
+
+static int rd_walk_entry(const char *dir, const char *name, int hdrs,
+                         const struct rd_ctx *ctx)
+{
+    char path[4096];
+    struct stat st;
+    size_t nl = strlen(name);
+    int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+    int rc = 0;
+    if (k < 0 || (size_t)k >= sizeof path)
+        rc = die("z23-lint: path too long: %s\n", dir);
+    else if (lstat(path, &st) != 0)
+        rc = 0; /* vanished mid-scan: grep would just lose the race */
+    else if (S_ISDIR(st.st_mode)) {
+        if (!rd_excl_dir(name))
+            rc = rd_walk(path, hdrs, ctx);
+    } else if (S_ISREG(st.st_mode) && rd_is_src(name, nl, hdrs)
+               && !rd_excl_file(name))
+        rc = rd_scan_file(path, ctx);
+    return rc;
+}
+
 static int rd_walk(const char *dir, int hdrs, const struct rd_ctx *ctx)
 {
     struct dirent **names = NULL;
@@ -164,23 +193,8 @@ static int rd_walk(const char *dir, int hdrs, const struct rd_ctx *ctx)
     int rc = 0;
     for (int i = 0; i < n; i++) {
         const char *name = names[i]->d_name;
-        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-            char path[4096];
-            struct stat st;
-            size_t nl = strlen(name);
-            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
-            if (k < 0 || (size_t)k >= sizeof path)
-                rc = die("z23-lint: path too long: %s\n", dir);
-            else if (lstat(path, &st) != 0)
-                rc = 0; /* vanished mid-scan: grep would just lose the race */
-            else if (S_ISDIR(st.st_mode)) {
-                if (!rd_excl_dir(name))
-                    rc = rd_walk(path, hdrs, ctx);
-            } else if (S_ISREG(st.st_mode) && nl >= 2 && name[nl - 2] == '.'
-                       && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h'))
-                       && !rd_excl_file(name))
-                rc = rd_scan_file(path, ctx);
-        }
+        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
+            rc = rd_walk_entry(dir, name, hdrs, ctx);
         free(names[i]);
     }
     free(names);
@@ -309,6 +323,52 @@ static int rd_update(void)
     return 0;
 }
 
+static void rd_comm_count(char base[][RD_KEY], int nb, int *nnew, int *ngone)
+{
+    int bi = 0;
+    *nnew = 0;
+    *ngone = 0;
+    for (int i = 0; i < g_rd_nkeys; i++) {
+        while (bi < nb && strcoll(base[bi], g_rd_keys[i]) < 0) {
+            if (strstr(base[bi], "::") != NULL)
+                (*ngone)++;
+            bi++;
+        }
+        if (bi < nb && strcoll(base[bi], g_rd_keys[i]) == 0)
+            bi++;
+        else
+            (*nnew)++;
+    }
+    while (bi < nb) {
+        if (strstr(base[bi], "::") != NULL)
+            (*ngone)++;
+        bi++;
+    }
+}
+
+static int rd_print_new_keys(char base[][RD_KEY], int nb)
+{
+    int bi = 0;
+    for (int i = 0; i < g_rd_nkeys; i++) {
+        while (bi < nb && strcoll(base[bi], g_rd_keys[i]) < 0)
+            bi++;
+        if (bi < nb && strcoll(base[bi], g_rd_keys[i]) == 0)
+            bi++;
+        else if (fprintf(stdout, "%s\n", g_rd_keys[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    }
+    return 0;
+}
+
+static int rd_count_base_keys(char base[][RD_KEY], int nb)
+{
+    int nbase = 0;
+    for (int i = 0; i < nb; i++)
+        if (strstr(base[i], "::") != NULL)
+            nbase++;
+    return nbase;
+}
+
 static int rd_fail_mode(void)
 {
     static char base[RD_MAX_KEYS][RD_KEY];
@@ -318,44 +378,20 @@ static int rd_fail_mode(void)
         return rc;
     rd_sort_uniq((char *)base, RD_KEY, &nb);
     /* comm -23 CUR BASE: keys present in the scan but absent from baseline. */
-    int bi = 0, nnew = 0, ngone = 0;
-    for (int i = 0; i < g_rd_nkeys; i++) {
-        while (bi < nb && strcoll(base[bi], g_rd_keys[i]) < 0) {
-            if (strstr(base[bi], "::") != NULL)
-                ngone++;
-            bi++;
-        }
-        if (bi < nb && strcoll(base[bi], g_rd_keys[i]) == 0)
-            bi++;
-        else
-            nnew++;
-    }
-    while (bi < nb) {
-        if (strstr(base[bi], "::") != NULL)
-            ngone++;
-        bi++;
-    }
+    int nnew = 0, ngone = 0;
+    rd_comm_count(base, nb, &nnew, &ngone);
     if (nnew) {
         fputs("FAIL: new (vo" "id)-cast discard of a [[nodiscard]] struct zcl_result.\n"
               "State why the failure is safe to drop:\n"
               "  ZCL_IGNORE_RESULT(<call>, \"<reason>\");   (util/result.h)\n"
               "or mark the line // result-discard-" "ok:<reason> if the macro cannot be used:\n",
               stdout);
-        bi = 0;
-        for (int i = 0; i < g_rd_nkeys; i++) {
-            while (bi < nb && strcoll(base[bi], g_rd_keys[i]) < 0)
-                bi++;
-            if (bi < nb && strcoll(base[bi], g_rd_keys[i]) == 0)
-                bi++;
-            else if (fprintf(stdout, "%s\n", g_rd_keys[i]) < 0)
-                return die("z23-lint: write failed\n", "");
-        }
+        rc = rd_print_new_keys(base, nb);
+        if (rc)
+            return rc;
         return 1;
     }
-    int nbase = 0;
-    for (int i = 0; i < nb; i++)
-        if (strstr(base[i], "::") != NULL)
-            nbase++;
+    int nbase = rd_count_base_keys(base, nb);
     printf("  OK: no new zcl_result cast discard (%d tracked; baseline %d)\n",
            g_rd_nkeys, nbase);
     if (ngone > 0)
@@ -634,6 +670,55 @@ static int wrpl_report(const char *path, const char *func)
     return 0;
 }
 
+static int wrpl_ident_start(unsigned char c)
+{
+    return isalpha(c) || c == '_';
+}
+
+static int wrpl_head_sep(char c)
+{
+    return c == ' ' || c == '\t' || c == '*';
+}
+
+static void wrpl_strip_trailing_blank(char *head, size_t *hl)
+{
+    while (*hl > 0 && (head[*hl - 1] == ' ' || head[*hl - 1] == '\t'))
+        head[--*hl] = '\0';
+}
+
+static int wrpl_head_last_part(const char *head, size_t hl,
+                               const char **last, size_t *last_len)
+{
+    int nparts = 0;
+    *last = NULL;
+    *last_len = 0;
+    for (size_t i = 0; i < hl;) {
+        if (wrpl_head_sep(head[i])) {
+            i++;
+            continue;
+        }
+        size_t start = i;
+        while (i < hl && !wrpl_head_sep(head[i]))
+            i++;
+        nparts++;
+        *last = head + start;
+        *last_len = i - start;
+    }
+    return nparts;
+}
+
+static int wrpl_ident_ok(const char *s, size_t n)
+{
+    if (n == 0 || n >= WRPL_FUNC)
+        return 0;
+    if (!wrpl_ident_start((unsigned char)s[0]))
+        return 0;
+    for (size_t i = 1; i < n; i++)
+        if (!isalnum((unsigned char)s[i]) && s[i] != '_')
+            return 0;
+    return 1;
+}
+
 /* Enclosing-function detection: a column-0 definition header ("<type> name(")
  * that does not end in ';' (which would be a prototype). head = text before
  * the first '(', trailing blanks stripped, split on [ \t*]+ runs; the name is
@@ -642,7 +727,7 @@ static void wrpl_curfunc(struct wrpl_st *st, const struct wrpl_re *r,
                          const char *line)
 {
     unsigned char c0 = (unsigned char)line[0];
-    if (!(isalpha(c0) || c0 == '_'))
+    if (!wrpl_ident_start(c0))
         return;
     const char *paren = strchr(line, '(');
     if (!paren || regexec(&r->semi, line, 0, NULL, 0) == 0)
@@ -653,73 +738,79 @@ static void wrpl_curfunc(struct wrpl_st *st, const struct wrpl_re *r,
         return; /* absurd header: awk would split it, we decline to track */
     memcpy(head, line, hl);
     head[hl] = '\0';
-    while (hl > 0 && (head[hl - 1] == ' ' || head[hl - 1] == '\t'))
-        head[--hl] = '\0';
-    int nparts = 0;
+    wrpl_strip_trailing_blank(head, &hl);
     const char *last = NULL;
     size_t last_len = 0;
-    for (size_t i = 0; i < hl;) {
-        if (head[i] == ' ' || head[i] == '\t' || head[i] == '*') {
-            i++;
-            continue;
-        }
-        size_t start = i;
-        while (i < hl && head[i] != ' ' && head[i] != '\t' && head[i] != '*')
-            i++;
-        nparts++;
-        last = head + start;
-        last_len = i - start;
-    }
-    if (nparts < 2 || last_len == 0 || last_len >= WRPL_FUNC)
+    int nparts = wrpl_head_last_part(head, hl, &last, &last_len);
+    if (nparts < 2 || !wrpl_ident_ok(last, last_len))
         return;
-    if (!(isalpha((unsigned char)last[0]) || last[0] == '_'))
-        return;
-    for (size_t i = 1; i < last_len; i++)
-        if (!isalnum((unsigned char)last[i]) && last[i] != '_')
-            return;
     memcpy(st->curfunc, last, last_len);
     st->curfunc[last_len] = '\0';
 }
 
-/* One newline-stripped line through the awk state machine. */
-static int wrpl_line(struct wrpl_st *st, const struct wrpl_re *r,
-                     const char *path, const char *line)
+static int wrpl_report_if_unlogged(struct wrpl_st *st, const char *path)
 {
-    wrpl_curfunc(st, r, line);
-    if (st->prep) {
-        st->since++;
-        if (st->since > 12) {
+    if (!st->logseen && wrpl_report(path, st->pfunc))
+        return 2;
+    return 0;
+}
+
+static int wrpl_advance_guarded(struct wrpl_st *st, const char *path, int hasret)
+{
+    st->gsince++;
+    if (hasret) {
+        if (wrpl_report_if_unlogged(st, path))
+            return 2;
+        st->prep = 0;
+        st->gp = 0;
+    } else if (st->gsince > 4) {
+        st->prep = 0;
+        st->gp = 0;
+    }
+    return 0;
+}
+
+static int wrpl_advance_unguarded(struct wrpl_st *st, const struct wrpl_re *r,
+                                  const char *path, const char *line, int hasret)
+{
+    if (regexec(&r->guard, line, 0, NULL, 0) == 0) {
+        if (hasret) {
+            if (wrpl_report_if_unlogged(st, path))
+                return 2;
             st->prep = 0;
-            st->gp = 0;
+        } else if (regexec(&r->log, line, 0, NULL, 0) == 0) {
+            st->prep = 0;
         } else {
-            if (regexec(&r->log, line, 0, NULL, 0) == 0)
-                st->logseen = 1;
-            int hasret = regexec(&r->ret, line, 0, NULL, 0) == 0;
-            if (st->gp) {
-                st->gsince++;
-                if (hasret) {
-                    if (!st->logseen && wrpl_report(path, st->pfunc))
-                        return 2;
-                    st->prep = 0;
-                    st->gp = 0;
-                } else if (st->gsince > 4) {
-                    st->prep = 0;
-                    st->gp = 0;
-                }
-            } else if (regexec(&r->guard, line, 0, NULL, 0) == 0) {
-                if (hasret) {
-                    if (!st->logseen && wrpl_report(path, st->pfunc))
-                        return 2;
-                    st->prep = 0;
-                } else if (regexec(&r->log, line, 0, NULL, 0) == 0) {
-                    st->prep = 0;
-                } else {
-                    st->gp = 1;
-                    st->gsince = 0;
-                }
-            }
+            st->gp = 1;
+            st->gsince = 0;
         }
     }
+    return 0;
+}
+
+static int wrpl_advance_window(struct wrpl_st *st, const struct wrpl_re *r,
+                               const char *path, const char *line)
+{
+    st->since++;
+    if (st->since > 12) {
+        st->prep = 0;
+        st->gp = 0;
+    } else {
+        if (regexec(&r->log, line, 0, NULL, 0) == 0)
+            st->logseen = 1;
+        int hasret = regexec(&r->ret, line, 0, NULL, 0) == 0;
+        if (st->gp) {
+            if (wrpl_advance_guarded(st, path, hasret))
+                return 2;
+        } else if (wrpl_advance_unguarded(st, r, path, line, hasret))
+            return 2;
+    }
+    return 0;
+}
+
+static void wrpl_open_bare_prepare(struct wrpl_st *st, const struct wrpl_re *r,
+                                  const char *line)
+{
     /* open a window only for a BARE prepare (not inside an if-condition) */
     if (strstr(line, "sqlite3_prepare_" "v2(") != NULL) {
         st->saw_tok = 1; /* grep -l semantics: the token anywhere counts */
@@ -731,6 +822,18 @@ static int wrpl_line(struct wrpl_st *st, const struct wrpl_re *r,
             memcpy(st->pfunc, st->curfunc, WRPL_FUNC);
         }
     }
+}
+
+/* One newline-stripped line through the awk state machine. */
+static int wrpl_line(struct wrpl_st *st, const struct wrpl_re *r,
+                     const char *path, const char *line)
+{
+    wrpl_curfunc(st, r, line);
+    if (st->prep) {
+        if (wrpl_advance_window(st, r, path, line))
+            return 2;
+    }
+    wrpl_open_bare_prepare(st, r, line);
     return 0;
 }
 
@@ -760,6 +863,34 @@ static int wrpl_scan_file(const char *path, const struct wrpl_re *r)
     return rc;
 }
 
+static int wrpl_walk(const char *dir, const struct wrpl_re *r);
+
+static int wrpl_is_c(const char *name, size_t nl)
+{
+    return nl >= 2 && name[nl - 2] == '.' && name[nl - 1] == 'c';
+}
+
+static int wrpl_walk_entry(const char *dir, const char *name,
+                           const struct wrpl_re *r)
+{
+    char path[4096];
+    struct stat st;
+    size_t nl = strlen(name);
+    int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+    int rc = 0;
+    if (k < 0 || (size_t)k >= sizeof path)
+        rc = die("z23-lint: path too long: %s\n", dir);
+    else if (lstat(path, &st) != 0)
+        rc = 0; /* vanished mid-scan: grep would just lose the race */
+    else if (S_ISDIR(st.st_mode)) {
+        if (!wrpl_excl_dir(name))
+            rc = wrpl_walk(path, r);
+    } else if (S_ISREG(st.st_mode) && wrpl_is_c(name, nl)
+               && !wrpl_excl_file(name))
+        rc = wrpl_scan_file(path, r);
+    return rc;
+}
+
 static int wrpl_walk(const char *dir, const struct wrpl_re *r)
 {
     struct dirent **names = NULL;
@@ -769,22 +900,8 @@ static int wrpl_walk(const char *dir, const struct wrpl_re *r)
     int rc = 0;
     for (int i = 0; i < n; i++) {
         const char *name = names[i]->d_name;
-        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-            char path[4096];
-            struct stat st;
-            size_t nl = strlen(name);
-            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
-            if (k < 0 || (size_t)k >= sizeof path)
-                rc = die("z23-lint: path too long: %s\n", dir);
-            else if (lstat(path, &st) != 0)
-                rc = 0; /* vanished mid-scan: grep would just lose the race */
-            else if (S_ISDIR(st.st_mode)) {
-                if (!wrpl_excl_dir(name))
-                    rc = wrpl_walk(path, r);
-            } else if (S_ISREG(st.st_mode) && nl >= 2 && name[nl - 2] == '.'
-                       && name[nl - 1] == 'c' && !wrpl_excl_file(name))
-                rc = wrpl_scan_file(path, r);
-        }
+        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
+            rc = wrpl_walk_entry(dir, name, r);
         free(names[i]);
     }
     free(names);
@@ -874,6 +991,52 @@ static int wrpl_update(void)
     return 0;
 }
 
+static void wrpl_comm_count(char base[][WRPL_KEY], int nb, int *nnew, int *ngone)
+{
+    int bi = 0;
+    *nnew = 0;
+    *ngone = 0;
+    for (int i = 0; i < g_wrpl_nkeys; i++) {
+        while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0) {
+            if (strstr(base[bi], "::") != NULL)
+                (*ngone)++;
+            bi++;
+        }
+        if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
+            bi++;
+        else
+            (*nnew)++;
+    }
+    while (bi < nb) {
+        if (strstr(base[bi], "::") != NULL)
+            (*ngone)++;
+        bi++;
+    }
+}
+
+static int wrpl_print_new_keys(char base[][WRPL_KEY], int nb)
+{
+    int bi = 0;
+    for (int i = 0; i < g_wrpl_nkeys; i++) {
+        while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0)
+            bi++;
+        if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
+            bi++;
+        else if (fprintf(stdout, "%s\n", g_wrpl_keys[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    }
+    return 0;
+}
+
+static int wrpl_count_base_keys(char base[][WRPL_KEY], int nb)
+{
+    int nbase = 0;
+    for (int i = 0; i < nb; i++)
+        if (strstr(base[i], "::") != NULL)
+            nbase++;
+    return nbase;
+}
+
 static int wrpl_fail_mode(void)
 {
     static char base[WRPL_MAX_KEYS][WRPL_KEY];
@@ -883,44 +1046,20 @@ static int wrpl_fail_mode(void)
         return rc;
     wrpl_sort_uniq((char *)base, WRPL_KEY, &nb);
     /* comm -23 CUR BASE: keys present in the scan but absent from baseline. */
-    int bi = 0, nnew = 0, ngone = 0;
-    for (int i = 0; i < g_wrpl_nkeys; i++) {
-        while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0) {
-            if (strstr(base[bi], "::") != NULL)
-                ngone++;
-            bi++;
-        }
-        if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
-            bi++;
-        else
-            nnew++;
-    }
-    while (bi < nb) {
-        if (strstr(base[bi], "::") != NULL)
-            ngone++;
-        bi++;
-    }
+    int nnew = 0, ngone = 0;
+    wrpl_comm_count(base, nb, &nnew, &ngone);
     if (nnew) {
         fputs("FAIL: new raw sqlite3_prepare_" "v2() with an unlogged NULL-check return.\n"
               "      Log the failure via LOG_FAIL/LOG_RETURN/LOG_ERR/LOG_NULL/LOG_WARN\n"
               "      between the prepare and the 'if (!stmt)' return, or route the\n"
               "      prepare through the AR_* lifecycle macros (activerecord.h):\n",
               stdout);
-        bi = 0;
-        for (int i = 0; i < g_wrpl_nkeys; i++) {
-            while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0)
-                bi++;
-            if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
-                bi++;
-            else if (fprintf(stdout, "%s\n", g_wrpl_keys[i]) < 0)
-                return die("z23-lint: write failed\n", "");
-        }
+        rc = wrpl_print_new_keys(base, nb);
+        if (rc)
+            return rc;
         return 1;
     }
-    int nbase = 0;
-    for (int i = 0; i < nb; i++)
-        if (strstr(base[i], "::") != NULL)
-            nbase++;
+    int nbase = wrpl_count_base_keys(base, nb);
     printf("  OK: no new unlogged raw-prepare NULL-check (%d tracked; baseline %d)\n",
            g_wrpl_nkeys, nbase);
     if (ngone > 0)
