@@ -1316,23 +1316,33 @@ int t_dev_proof_helpers_include_lint_tool(void)
  * and that is how a landing proof's lint-gate shard exec'd a half-written
  * build/bin/z23-lint and got rc=127 twice.
  *
- * proof_worker_body() therefore admits and builds everything shared BEFORE
+ * The proof worker therefore admits and builds everything shared BEFORE
  * it starts either child. Pin that order in the real source, in the sequence
  * it has to hold: the generation's inputs are admitted, then the one
  * pre-fork make runs, then the helper digest is taken, and only then does
  * the first dimension_start() appear. A rewrite that moves the build back
- * below the fork -- the exact regression -- fails here. */
+ * below the fork -- the exact regression -- fails here.
+ *
+ * The worker is now one named step per proof phase, so the order is pinned
+ * twice over: once inside the pre-fork step itself, and once in the step
+ * that calls the pre-fork step before the step that forks. Either half
+ * going missing fails here. */
 static bool dev_proof_prefork_precedes_the_fork(const char *source)
 {
     if (!source) return false;
-    const char *body = strstr(source, "static bool proof_worker_body(");
+    const char *body = strstr(source, "static bool dp_worker_prefork(");
     if (!body) return false;
     const char *inputs = strstr(body, "proof_generation_inputs_prepare(");
     const char *build = strstr(body, "proof_prefork_build(");
     const char *hash = strstr(body, "test_helpers_hash(");
     const char *fork = strstr(body, "dimension_start(");
     if (!inputs || !build || !hash || !fork) return false;
-    return inputs < build && build < hash && hash < fork;
+    if (!(inputs < build && build < hash && hash < fork)) return false;
+    const char *dims = strstr(source, "static bool dp_worker_dimensions(");
+    if (!dims) return false;
+    const char *call_prefork = strstr(dims, "dp_worker_prefork(");
+    const char *call_run = strstr(dims, "dp_worker_dimensions_run(");
+    return call_prefork && call_run && call_prefork < call_run;
 }
 
 int t_dev_proof_prefork_runs_before_the_dimensions(void)

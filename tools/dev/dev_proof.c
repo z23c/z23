@@ -5266,10 +5266,28 @@ static bool test_helpers_hash(
         proof_why(why, why_len, "proof_test_helper_hash_failed");
         return false;
     }
+    /* Named, because the digest's membership is the contract: a reader --
+     * and the lint-gate self-test that pins this block -- must be able to
+     * see each artifact go in by name, not by index. */
+    const uint8_t *runner_root = roots[0], *verifier_root = roots[1];
+    const uint8_t *node_root = roots[2], *dev_node_root = roots[3];
+    const uint8_t *nodectl_root = roots[4], *acme_root = roots[5];
+    const uint8_t *fbsh_root = roots[6], *file_size_policy_root = roots[7];
+    const uint8_t *board_bridge_root = roots[8], *git_hook_root = roots[9];
+    const uint8_t *lint_tool_root = roots[10];
     struct sha3_256_ctx helpers;
     hash_begin(&helpers, "zcl.dev_proof_test_helpers.v1");
-    for (size_t i = 0; i < PROOF_HELPER_INPUT_COUNT; i++)
-        sha3_256_write(&helpers, roots[i], sizeof(roots[i]));
+    sha3_256_write(&helpers, runner_root, 32);
+    sha3_256_write(&helpers, verifier_root, 32);
+    sha3_256_write(&helpers, node_root, 32);
+    sha3_256_write(&helpers, dev_node_root, 32);
+    sha3_256_write(&helpers, nodectl_root, 32);
+    sha3_256_write(&helpers, acme_root, 32);
+    sha3_256_write(&helpers, fbsh_root, 32);
+    sha3_256_write(&helpers, file_size_policy_root, 32);
+    sha3_256_write(&helpers, board_bridge_root, 32);
+    sha3_256_write(&helpers, git_hook_root, 32);
+    sha3_256_write(&helpers, lint_tool_root, 32);
     sha3_256_write(&helpers, depfile_root, 32);
     sha3_256_finalize(&helpers, helper_root);
     return true;
