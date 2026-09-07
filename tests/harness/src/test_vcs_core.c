@@ -93,6 +93,13 @@ static bool vc_write(const char *dir, const char *rel, const char *content)
     size_t n = content ? strlen(content) : 0;
     if (n) fwrite(content, 1, n, f);
     fclose(f);
+    /* fopen()'s default 0666 request passes through the calling process's
+     * umask, so the on-disk mode this fixture ends up with depends on
+     * whatever umask happens to be set when the test runs. Pin it to the
+     * canonical 0644 explicitly so a captured tree's mode bits are
+     * reproducible across hosts; callers that need the executable bit
+     * (run.sh) chmod it up afterward. */
+    chmod(full, 0644);
     return true;
 }
 
