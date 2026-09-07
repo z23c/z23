@@ -261,123 +261,149 @@ static int shk_case_service_registration(void)
 }
 
 /* ── 4. one sweep performs each bound when crossed ── */
-static int shk_case_sweep_performs_each_bound(const struct storage_pacing *pacing)
+struct shk_sweep_bound_ctx {
+    char dir[256];
+    int64_t wal_before;
+    struct projection_store_usage usage;
+    char log_path[512];
+    char log_prev[520];
+    int64_t log_before;
+};
+
+/* topology.db WAL over its bound: feed real edges through the store's own
+ * API until the WAL file crosses the pacing bound. */
+static int shk_drive_wal_over_bound(struct shk_sweep_bound_ctx *ctx,
+                                    const struct storage_pacing *pacing)
 {
     int failures = 0;
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "over");
-
-        /* topology.db WAL over its bound: feed real edges through the
-         * store's own API until the WAL file crosses the pacing bound. */
-        SHK_CHECK("topology_store opens in the fixture datadir",
-                  topology_store_open(dir));
-        int n = 0;
-        while (topology_store_wal_bytes() <= pacing->wal_truncate_bytes &&
-               n < 60000) {
-            struct net_addr advertised =
-                shk_ipv4(66, (unsigned char)((n >> 8) & 0xff),
-                         (unsigned char)(n & 0xff), 7);
-            if (!topology_store_record_self_edge(&advertised, 8233,
-                                                 n + 1, NULL))
-                break;
-            n++;
-        }
-        SHK_CHECK("fixture drove the WAL over its bound",
-                  topology_store_wal_bytes() > pacing->wal_truncate_bytes);
-        int64_t wal_before = topology_store_wal_bytes();
-
-        /* progress.kv over floor AND ratio: 3 MiB of committed junk, all
-         * of it then deleted, so the file keeps the high-water mark while
-         * the live set collapses. */
-        SHK_CHECK("projection_store opens in the fixture datadir",
-                  projection_store_open(dir));
-        sqlite3 *proj = projection_store_db();
-        SHK_CHECK("projection handle is available", proj != NULL);
-        if (proj) {
-            projection_store_tx_lock();
-            int rc = sqlite3_exec(proj,
-                                  "CREATE TABLE IF NOT EXISTS shk_junk("
-                                  "k INTEGER PRIMARY KEY, b BLOB)",
-                                  NULL, NULL, NULL);
-            if (rc == SQLITE_OK)
-                rc = sqlite3_exec(proj, "BEGIN", NULL, NULL, NULL);
-            for (int k = 0; rc == SQLITE_OK && k < 192; k++) {
-                char sql[128];
-                snprintf(sql, sizeof(sql),
-                         "INSERT INTO shk_junk(k, b) "
-                         "VALUES(%d, zeroblob(16384))", k);
-                rc = sqlite3_exec(proj, sql, NULL, NULL, NULL);
-            }
-            if (rc == SQLITE_OK)
-                rc = sqlite3_exec(proj, "COMMIT", NULL, NULL, NULL);
-            /* Land the committed junk in the main file so the bound sees
-             * the file itself, not the WAL. */
-            if (sqlite3_exec(proj, "PRAGMA wal_checkpoint(TRUNCATE)",
-                             NULL, NULL, NULL) != SQLITE_OK)
-                rc = SQLITE_BUSY;
-            if (rc == SQLITE_OK)
-                rc = sqlite3_exec(proj, "DELETE FROM shk_junk", NULL, NULL,
-                                  NULL);
-            projection_store_tx_unlock();
-            SHK_CHECK("projection junk fixture built and deleted",
-                      rc == SQLITE_OK);
-        }
-        char kv_path[512];
-        snprintf(kv_path, sizeof(kv_path), "%s/progress.kv", dir);
-        int64_t kv_before = shk_file_size(kv_path);
-        struct projection_store_usage usage;
-        SHK_CHECK("progress.kv crossed the compaction floor",
-                  kv_before > pacing->compact_floor_bytes);
-        SHK_CHECK("the over-bound predicate fires on the fixture",
-                  projection_store_usage(&usage) &&
-                  projection_store_over_bound(&usage,
-                                              pacing->compact_floor_bytes,
-                                              pacing->compact_ratio_pct));
-
-        /* tor.log over its bound. */
-        char log_path[512], log_prev[520];
-        SHK_CHECK("oversized fake tor.log written",
-                  shk_oversized_tor_log(dir, pacing->log_rotate_bytes,
-                                        log_path, sizeof(log_path)));
-        snprintf(log_prev, sizeof(log_prev), "%s.1", log_path);
-        int64_t log_before = shk_file_size(log_path);
-
-        /* The tick under test. */
-        struct storage_housekeeping_stats before, after;
-        storage_housekeeping_stats(&before);
-        storage_housekeeping_sweep(dir);
-        storage_housekeeping_stats(&after);
-
-        SHK_CHECK("sweep counted exactly one sweep",
-                  after.sweeps == before.sweeps + 1);
-        SHK_CHECK("oversized tor.log rotated",
-                  after.log_rotations == before.log_rotations + 1 &&
-                  shk_file_size(log_path) == 0 &&
-                  shk_file_size(log_prev) == log_before);
-        SHK_CHECK("over-bound topology WAL truncated",
-                  after.topology_checkpoints ==
-                          before.topology_checkpoints + 1 &&
-                  topology_store_wal_bytes() < wal_before &&
-                  topology_store_wal_bytes() <=
-                          pacing->wal_truncate_bytes);
-        /* VACUUM shrinks the store's LOGICAL size (page_count, what the
-         * bound measures and what ls shows once the WAL checkpoints back);
-         * the physical file only catches up at the next checkpoint, so the
-         * postcondition is read through the service's own measure. */
-        struct projection_store_usage compacted_usage;
-        SHK_CHECK("over-bound progress.kv compacted",
-                  after.projection_compactions ==
-                          before.projection_compactions + 1 &&
-                  projection_store_usage(&compacted_usage) &&
-                  compacted_usage.file_bytes < usage.file_bytes &&
-                  compacted_usage.file_bytes <=
-                          pacing->compact_floor_bytes);
-
-        topology_store_close();
-        projection_store_close();
-        test_cleanup_tmpdir(dir);
+    SHK_CHECK("topology_store opens in the fixture datadir",
+              topology_store_open(ctx->dir));
+    int n = 0;
+    while (topology_store_wal_bytes() <= pacing->wal_truncate_bytes &&
+          n < 60000) {
+        struct net_addr advertised =
+            shk_ipv4(66, (unsigned char)((n >> 8) & 0xff),
+                     (unsigned char)(n & 0xff), 7);
+        if (!topology_store_record_self_edge(&advertised, 8233, n + 1, NULL))
+            break;
+        n++;
     }
+    SHK_CHECK("fixture drove the WAL over its bound",
+              topology_store_wal_bytes() > pacing->wal_truncate_bytes);
+    ctx->wal_before = topology_store_wal_bytes();
+    return failures;
+}
+
+/* progress.kv over floor AND ratio: 3 MiB of committed junk, all of it then
+ * deleted, so the file keeps the high-water mark while the live set
+ * collapses. */
+static int shk_drive_progress_kv_over_bound(struct shk_sweep_bound_ctx *ctx,
+                                            const struct storage_pacing *pacing)
+{
+    int failures = 0;
+    SHK_CHECK("projection_store opens in the fixture datadir",
+              projection_store_open(ctx->dir));
+    sqlite3 *proj = projection_store_db();
+    SHK_CHECK("projection handle is available", proj != NULL);
+    if (proj) {
+        projection_store_tx_lock();
+        int rc = sqlite3_exec(proj,
+                              "CREATE TABLE IF NOT EXISTS shk_junk("
+                              "k INTEGER PRIMARY KEY, b BLOB)",
+                              NULL, NULL, NULL);
+        if (rc == SQLITE_OK)
+            rc = sqlite3_exec(proj, "BEGIN", NULL, NULL, NULL);
+        for (int k = 0; rc == SQLITE_OK && k < 192; k++) {
+            char sql[128];
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO shk_junk(k, b) "
+                     "VALUES(%d, zeroblob(16384))", k);
+            rc = sqlite3_exec(proj, sql, NULL, NULL, NULL);
+        }
+        if (rc == SQLITE_OK)
+            rc = sqlite3_exec(proj, "COMMIT", NULL, NULL, NULL);
+        /* Land the committed junk in the main file so the bound sees
+         * the file itself, not the WAL. */
+        if (sqlite3_exec(proj, "PRAGMA wal_checkpoint(TRUNCATE)",
+                         NULL, NULL, NULL) != SQLITE_OK)
+            rc = SQLITE_BUSY;
+        if (rc == SQLITE_OK)
+            rc = sqlite3_exec(proj, "DELETE FROM shk_junk", NULL, NULL, NULL);
+        projection_store_tx_unlock();
+        SHK_CHECK("projection junk fixture built and deleted", rc == SQLITE_OK);
+    }
+    char kv_path[512];
+    snprintf(kv_path, sizeof(kv_path), "%s/progress.kv", ctx->dir);
+    int64_t kv_before = shk_file_size(kv_path);
+    SHK_CHECK("progress.kv crossed the compaction floor",
+              kv_before > pacing->compact_floor_bytes);
+    SHK_CHECK("the over-bound predicate fires on the fixture",
+              projection_store_usage(&ctx->usage) &&
+              projection_store_over_bound(&ctx->usage,
+                                          pacing->compact_floor_bytes,
+                                          pacing->compact_ratio_pct));
+    return failures;
+}
+
+/* tor.log over its bound. */
+static int shk_drive_tor_log_over_bound(struct shk_sweep_bound_ctx *ctx,
+                                        const struct storage_pacing *pacing)
+{
+    int failures = 0;
+    SHK_CHECK("oversized fake tor.log written",
+              shk_oversized_tor_log(ctx->dir, pacing->log_rotate_bytes,
+                                    ctx->log_path, sizeof(ctx->log_path)));
+    snprintf(ctx->log_prev, sizeof(ctx->log_prev), "%s.1", ctx->log_path);
+    ctx->log_before = shk_file_size(ctx->log_path);
+    return failures;
+}
+
+/* The tick under test, plus every postcondition it must satisfy. */
+static int shk_sweep_tick_and_verify(struct shk_sweep_bound_ctx *ctx,
+                                     const struct storage_pacing *pacing)
+{
+    int failures = 0;
+    struct storage_housekeeping_stats before, after;
+    storage_housekeeping_stats(&before);
+    storage_housekeeping_sweep(ctx->dir);
+    storage_housekeeping_stats(&after);
+
+    SHK_CHECK("sweep counted exactly one sweep",
+              after.sweeps == before.sweeps + 1);
+    SHK_CHECK("oversized tor.log rotated",
+              after.log_rotations == before.log_rotations + 1 &&
+              shk_file_size(ctx->log_path) == 0 &&
+              shk_file_size(ctx->log_prev) == ctx->log_before);
+    SHK_CHECK("over-bound topology WAL truncated",
+              after.topology_checkpoints == before.topology_checkpoints + 1 &&
+              topology_store_wal_bytes() < ctx->wal_before &&
+              topology_store_wal_bytes() <= pacing->wal_truncate_bytes);
+    /* VACUUM shrinks the store's LOGICAL size (page_count, what the
+     * bound measures and what ls shows once the WAL checkpoints back);
+     * the physical file only catches up at the next checkpoint, so the
+     * postcondition is read through the service's own measure. */
+    struct projection_store_usage compacted_usage;
+    SHK_CHECK("over-bound progress.kv compacted",
+              after.projection_compactions == before.projection_compactions + 1 &&
+              projection_store_usage(&compacted_usage) &&
+              compacted_usage.file_bytes < ctx->usage.file_bytes &&
+              compacted_usage.file_bytes <= pacing->compact_floor_bytes);
+    return failures;
+}
+
+static int shk_case_sweep_performs_each_bound(const struct storage_pacing *pacing)
+{
+    struct shk_sweep_bound_ctx ctx = {0};
+    test_make_tmpdir(ctx.dir, sizeof(ctx.dir), "storage_housekeeping", "over");
+
+    int failures = shk_drive_wal_over_bound(&ctx, pacing);
+    failures += shk_drive_progress_kv_over_bound(&ctx, pacing);
+    failures += shk_drive_tor_log_over_bound(&ctx, pacing);
+    failures += shk_sweep_tick_and_verify(&ctx, pacing);
+
+    topology_store_close();
+    projection_store_close();
+    test_cleanup_tmpdir(ctx.dir);
 
     return failures;
 }
