@@ -600,7 +600,7 @@ static int ftx_case_ingest_skips_malformed(void)
                   "{\"kind\":\"comment\",\"owner\":\"z23c\"}\n"
                   "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
                   "\"number\":\"47\",\"comment_id\":\"c1\","
-                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "\"author\":\"a-reviewer\",\"url\":\"https://example.invalid/"
                   "c1\",\"body\":\"first watch row\","
                   "\"ts\":\"2026-09-06T10:00:00Z\"}\n");
 
@@ -658,7 +658,7 @@ static int ftx_case_github_comment_fires_board_post(void)
     ftx_write_file(src_path,
                   "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
                   "\"number\":\"47\",\"comment_id\":\"c9\","
-                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "\"author\":\"a-reviewer\",\"url\":\"https://example.invalid/"
                   "c9\",\"body\":\"new comment on discussion 47\","
                   "\"ts\":\"2025-09-04T15:00:00Z\"}\n");
     struct zcl_command_reply ingest_reply;
@@ -715,7 +715,7 @@ static int ftx_case_board_post_no_node(void)
     ftx_write_file(src_path,
                   "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
                   "\"number\":\"47\",\"comment_id\":\"c10\","
-                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "\"author\":\"a-reviewer\",\"url\":\"https://example.invalid/"
                   "c10\",\"body\":\"no node is running\","
                   "\"ts\":\"2025-09-04T15:00:00Z\"}\n");
     struct zcl_command_reply ingest_reply;
@@ -771,7 +771,7 @@ static int ftx_case_board_post_retries_then_fires(void)
     ftx_write_file(src_path,
                   "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
                   "\"number\":\"47\",\"comment_id\":\"c11\","
-                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "\"author\":\"a-reviewer\",\"url\":\"https://example.invalid/"
                   "c11\",\"body\":\"retry me\","
                   "\"ts\":\"2025-09-04T15:00:00Z\"}\n");
     struct zcl_command_reply ingest_reply;
@@ -833,12 +833,12 @@ static int ftx_case_later_row_waits_behind_failed(void)
     ftx_write_file(src_path,
                   "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
                   "\"number\":\"47\",\"comment_id\":\"c12\","
-                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "\"author\":\"a-reviewer\",\"url\":\"https://example.invalid/"
                   "c12\",\"body\":\"first, will fail\","
                   "\"ts\":\"2025-09-04T15:00:00Z\"}\n"
                   "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
                   "\"number\":\"47\",\"comment_id\":\"c13\","
-                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "\"author\":\"a-reviewer\",\"url\":\"https://example.invalid/"
                   "c13\",\"body\":\"second, waits\","
                   "\"ts\":\"2025-09-04T15:00:01Z\"}\n");
     struct zcl_command_reply ingest_reply;
