@@ -27,7 +27,12 @@ static void check(int cond, const char *name)
     }
 }
 
-static const uint8_t RFC_SECRET[20] = "12345678901234567890";
+/* RFC 4226 test key, as raw bytes (not a NUL-terminated C string) so the
+ * array stays exactly 20 bytes -- the key length the test vector expects. */
+static const uint8_t RFC_SECRET[20] = {
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+};
 static const uint8_t TEST_SALT[ZOTPCLI_SALT_LEN] = {
     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
     0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff

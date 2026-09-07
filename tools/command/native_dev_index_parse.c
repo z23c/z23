@@ -141,15 +141,16 @@ static bool dev_index_parse_experiment(const char *line,
  * string. */
 static bool dev_index_looks_like_iso_ts(const char *tok, size_t len)
 {
-    static const char shape[19] = "DDDD-DD-DD?DD:DD:DD";
-    if (len < sizeof(shape))
+    static const char shape[] = "DDDD-DD-DD?DD:DD:DD";
+    enum { DEV_INDEX_TS_SHAPE_LEN = sizeof(shape) - 1 };
+    if (len < DEV_INDEX_TS_SHAPE_LEN)
         return false;
-    char got[sizeof(shape)];
-    for (size_t i = 0; i < sizeof(shape); i++)
+    char got[DEV_INDEX_TS_SHAPE_LEN];
+    for (size_t i = 0; i < DEV_INDEX_TS_SHAPE_LEN; i++)
         got[i] = (tok[i] >= '0' && tok[i] <= '9') ? 'D' : tok[i];
     if (got[10] == 'T' || got[10] == ' ')
         got[10] = '?';
-    return memcmp(got, shape, sizeof(shape)) == 0;
+    return memcmp(got, shape, DEV_INDEX_TS_SHAPE_LEN) == 0;
 }
 
 static bool dev_index_ident_start(char c)
