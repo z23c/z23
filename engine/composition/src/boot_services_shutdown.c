@@ -391,37 +391,31 @@ bool shutdown_clean_marker_permitted(bool durability_ok,
     return durability_ok;
 }
 
-/* Pure gate for app_shutdown_offline's "offline-worker-drain" alarm (pure;
- * unit-tested in test_debug_bundle). A completed one-shot (-mint-anchor /
+/* Pure gate consulted by the offline-worker-drain deadline (pure; unit-
+ * tested in test_debug_bundle). A completed one-shot (-mint-anchor /
  * -full-fold) already fsyncs its bundle and WAL-checkpoints node.db BEFORE
  * app_shutdown_offline is ever called (boot_mint_anchor.c's pre-export
  * durability restore; boot_mint_anchor_bundle_export.c's atomic publish), so
- * the only thing left to join is background workers unrelated to that
- * durability (e.g. the health-sweep sweeper). Returns true when the caller
- * should skip arming that stage's alarm: the join then remains a plain
- * blocking wait (boot_offline_join_workers_or_exit already retains ownership
- * and waits for real, bounded by each worker's own timeout) instead of being
- * cut off by an unrelated deadline that would misreport a durable run as a
- * failure. False (the default, non-one-shot offline path) leaves the alarm
- * armed exactly as before. */
+ * if that stage's deadline still fires (e.g. an unrelated straggler worker),
+ * it must be treated as an already-durable, truthful success rather than a
+ * false failure. False (the default, non-one-shot offline path) leaves the
+ * existing pre-durability handling unchanged. */
 bool boot_offline_shutdown_durable_already(bool one_shot_output_durable)
 {
     return one_shot_output_durable;
 }
 
-/* app_shutdown_offline's call site for the above: logs the fold-complete
- * notice and returns the offline-worker-drain stage's arm_alarm argument
- * (the negation of the durable-already gate). Kept as a thin wrapper so the
- * decision stays independently pure-testable while boot.c stays a one-line
- * call. */
-bool boot_offline_worker_drain_arm_alarm(bool output_already_durable)
+/* app_shutdown_offline's call site: arms the offline-worker-drain deadline
+ * exactly as before (never skipped — a genuinely wedged worker must still be
+ * bounded), and records the durable-already gate so a fired deadline on
+ * THIS stage is decided as an already-durable success (shutdown_stagewatch_
+ * set_stage_durable_override), never a global durability override for any
+ * later stage. */
+void boot_offline_arm_worker_drain_stage(bool output_already_durable)
 {
-    if (!boot_offline_shutdown_durable_already(output_already_durable))
-        return true;
-    fprintf(stderr, "[shutdown] fold complete: bundle exported and durable "
-            "before the offline worker drain; not arming the drain deadline "
-            "so a stalled non-critical worker cannot force a false unclean exit\n");
-    return false;
+    shutdown_stagewatch_enter("offline-worker-drain", 15, false, true);
+    shutdown_stagewatch_set_stage_durable_override(
+        boot_offline_shutdown_durable_already(output_already_durable));
 }
 
 void app_shutdown_svc(struct boot_svc_ctx *svc)
@@ -591,6 +585,13 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
 void boot_offline_join_workers_or_exit(const char *datadir)
 {
     (void)datadir;
+    /* The heartbeat sweeper only obeys its OWN lifecycle boundary
+     * (health_stop), never the registry's global shutdown flag (see
+     * shutdown_stop_runtime_and_drain_workers above) -- every offline one-
+     * shot (-mint-anchor, -full-fold, -coldstart-seed-oneshot) starts it via
+     * boot_phase's lazy health_start(), so it must be stopped here or it
+     * loops forever and the plain pthread_join below never returns. */
+    health_stop();
     int stragglers = thread_registry_join_all(2);
     if (stragglers > 0) {
         fprintf(stderr,

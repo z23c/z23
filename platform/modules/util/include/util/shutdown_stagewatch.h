@@ -143,6 +143,12 @@ void shutdown_stagewatch_reset_for_test(void);
 size_t shutdown_stagewatch_stage_count(void);
 const struct shutdown_stage_record *shutdown_stagewatch_stage(size_t i);
 bool   shutdown_stagewatch_is_durable(void);
+/* Test-only accessor for the per-stage override (see
+ * shutdown_stagewatch_set_stage_durable_override) -- the alarm handler
+ * cannot itself be driven in-process (it _exit()s), so tests verify the
+ * mechanism it consults directly: set after entering a stage, reset by the
+ * next enter(). */
+bool   shutdown_stagewatch_stage_durable_override_for_test(void);
 
 /* Begin a shutdown sequence. `datadir` (may be NULL) is where the receipt is
  * written. Records the start time and computes the receipt path once. */
@@ -159,6 +165,17 @@ void shutdown_stagewatch_enter(const char *stage, int budget_secs,
  * stable storage (coins flushed, WAL checkpointed, clean marker written).
  * Async-signal-safe. */
 void shutdown_stagewatch_mark_durable(void);
+
+/* Scope a durability override to ONLY the current in-flight stage, without
+ * touching the global durability flag (shutdown_stagewatch_mark_durable)
+ * that governs every other stage's own deadline. A fired deadline on THIS
+ * stage is then decided as if durability were already secured (see
+ * shutdown_deadline_decide) -- e.g. a completed one-shot whose real output
+ * already landed durably before this stage even began, so an unrelated
+ * straggler worker here must not manufacture a false failure. Reset to
+ * false by every shutdown_stagewatch_enter() call, so it can never leak
+ * into a later stage the caller did not explicitly opt in again. */
+void shutdown_stagewatch_set_stage_durable_override(bool durable_already);
 
 /* SIGALRM-handler body. Async-signal-safe. Logs which stage overran, applies
  * shutdown_deadline_decide(), and either re-arms alarm() for a GRACE and

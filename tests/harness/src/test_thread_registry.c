@@ -3,6 +3,7 @@
  * thread_registry stress test. */
 
 #include "test/test_core.h"
+#include "health/heartbeat.h"
 #include "util/thread_registry.h"
 
 #include <pthread.h>
@@ -298,6 +299,42 @@ static int t_registry_snapshot(void)
     return failures;
 }
 
+/* ── health-sweep join budget ────────────────────────────────────────
+ *
+ * boot_offline_join_workers_or_exit (engine/composition/src/boot_services_
+ * shutdown.c) must call health_stop() BEFORE thread_registry_join_all(2):
+ * the heartbeat sweeper (zcl_health_sweep) only obeys its own health_stop
+ * lifecycle boundary, never the registry's global shutdown flag, so a join
+ * that does not stop it first waits on a loop that never exits and hangs
+ * the process (never idle silently on an error path). This pins the
+ * invariant that ordering relies on: once health_stop() actually returns
+ * (it joins the sweeper itself), a subsequent thread_registry_join_all
+ * with the SAME 2s production budget reports zero stragglers -- the
+ * sweeper is not still occupying a registry slot. health_set_check_
+ * interval_ms shortens the sweeper's own poll cadence so this stays fast
+ * without an injected clock (the sweeper's nanosleep has no clock seam;
+ * this is the same bounded-real-wait idiom test_heartbeat.c already uses
+ * for the identical health_start/health_stop pair, not a wall-clock-keyed
+ * assertion). */
+static int t_registry_health_sweep_joins_after_stop(void)
+{
+    int failures = 0;
+    thread_registry_reset_for_test();
+    health_reset_for_test();
+
+    TEST("thread_registry: health sweeper is gone before the join once "
+         "health_stop() returns") {
+        health_set_check_interval_ms(5);
+        ASSERT(health_start());
+        health_stop();
+        ASSERT_EQ(thread_registry_join_all(2), 0);
+        PASS();
+    } _test_next:;
+
+    health_reset_for_test();
+    return failures;
+}
+
 int test_thread_registry(void);
 
 int test_thread_registry(void)
@@ -313,5 +350,6 @@ int test_thread_registry(void)
     failures += t_registry_reports_straggler();
     failures += t_registry_owned_join_waits_for_straggler();
     failures += t_registry_exact_exclusion_retains_provider();
+    failures += t_registry_health_sweep_joins_after_stop();
     return failures;
 }

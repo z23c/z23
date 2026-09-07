@@ -3694,7 +3694,7 @@ void app_shutdown_offline(bool output_already_durable)
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_REQUESTED);
     boot_shutdown_deadline_handler_install();
     shutdown_stagewatch_begin(g_datadir);
-    shutdown_stagewatch_enter("offline-worker-drain", 15, false, boot_offline_worker_drain_arm_alarm(output_already_durable));
+    boot_offline_arm_worker_drain_stage(output_already_durable);
     thread_registry_request_shutdown();
     event_async_stop();
     boot_stop_platform_services();

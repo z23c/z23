@@ -220,6 +220,10 @@ static volatile sig_atomic_t g_cur_active;
 static volatile sig_atomic_t g_durable;
 static volatile sig_atomic_t g_graces_used;
 static volatile sig_atomic_t g_active;   /* begin() called */
+/* Set by shutdown_stagewatch_set_stage_durable_override; consulted ONLY by
+ * on_alarm's decision for the CURRENT stage, reset by every enter(). See
+ * util/shutdown_stagewatch.h. */
+static volatile sig_atomic_t g_stage_durable_override;
 
 #ifdef _WIN32
 static _Atomic uint32_t g_timer_generation;
@@ -297,6 +301,11 @@ const struct shutdown_stage_record *shutdown_stagewatch_stage(size_t i)
 
 bool shutdown_stagewatch_is_durable(void) { return g_durable != 0; }
 
+bool shutdown_stagewatch_stage_durable_override_for_test(void)
+{
+    return g_stage_durable_override != 0;
+}
+
 void shutdown_stagewatch_begin(const char *datadir)
 {
     stagewatch_cancel();
@@ -309,6 +318,7 @@ void shutdown_stagewatch_begin(const char *datadir)
     g_cur_active = 0;
     g_durable = 0;
     g_graces_used = 0;
+    g_stage_durable_override = 0;
     memset(g_last_stage, 0, sizeof(g_last_stage));
 
     atomic_store(&g_receipt_ok, false);
@@ -371,6 +381,9 @@ void shutdown_stagewatch_enter(const char *stage, int budget_secs,
     /* Each stage gets its own bounded grace budget: escalation is per-stage,
      * so one slow-but-progressing stage does not starve a later one. */
     g_graces_used = 0;
+    /* A per-stage override applies only to the stage that set it; the next
+     * one starts opted out until its own caller opts it back in. */
+    g_stage_durable_override = 0;
     g_cur_active = 1;
 
     if (arm_alarm && budget_secs > 0)
@@ -380,6 +393,11 @@ void shutdown_stagewatch_enter(const char *stage, int budget_secs,
 void shutdown_stagewatch_mark_durable(void)
 {
     g_durable = 1;   /* AS-safe */
+}
+
+void shutdown_stagewatch_set_stage_durable_override(bool durable_already)
+{
+    g_stage_durable_override = durable_already ? 1 : 0;   /* AS-safe */
 }
 
 /* AS-safe: open the receipt path, write the terminal receipt, fsync, close. */
@@ -437,8 +455,13 @@ void shutdown_stagewatch_on_alarm(void)
     (void)as_write_str(STDERR_FILENO, g_cur_name);
     (void)as_write_str(STDERR_FILENO, "' exceeded its deadline\n");
 
+    /* The per-stage override applies ONLY to the stage that is firing right
+     * now (reset by every enter()); it never substitutes for the global
+     * durability flag any OTHER stage's own deadline consults. */
+    bool durable_for_this_stage = g_durable != 0 || g_stage_durable_override != 0;
     enum shutdown_deadline_action action = shutdown_deadline_decide(
-        g_durable != 0, g_cur_critical, (int)g_graces_used, SHUTDOWN_GRACE_MAX);
+        durable_for_this_stage, g_cur_critical, (int)g_graces_used,
+        SHUTDOWN_GRACE_MAX);
 
     switch (action) {
     case SHUTDOWN_DEADLINE_GRACE:
@@ -453,9 +476,14 @@ void shutdown_stagewatch_on_alarm(void)
         /* Durability secured — the remainder is resumable. Truthful success. */
         write_terminal_receipt_signalsafe(SHUTDOWN_OUTCOME_FORCED_AFTER_DURABLE);
         mark_exit_reason_forced_signalsafe();
-        (void)as_write_str(STDERR_FILENO,
-            "[shutdown] watchdog: durability secured; forcing truthful clean "
-            "exit (0)\n");
+        if (g_stage_durable_override)
+            (void)as_write_str(STDERR_FILENO,
+                "[shutdown] fold complete: bundle exported and durable; a "
+                "worker did not stop in time — exiting 0\n");
+        else
+            (void)as_write_str(STDERR_FILENO,
+                "[shutdown] watchdog: durability secured; forcing truthful clean "
+                "exit (0)\n");
         _exit(0);
 
     case SHUTDOWN_DEADLINE_EXIT_UNCLEAN:

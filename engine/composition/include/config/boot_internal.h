@@ -604,16 +604,17 @@ void app_shutdown_svc(struct boot_svc_ctx *svc);
 bool shutdown_clean_marker_permitted(bool durability_ok,
                                      bool diagnostics_drained);
 
-/* Pure gate for app_shutdown_offline's "offline-worker-drain" alarm (pure;
- * unit-tested in test_debug_bundle). True iff the caller's own durable output
- * (a completed -mint-anchor / -full-fold bundle) already landed before the
- * offline worker join began, so a stalled non-critical worker there must not
- * arm a deadline that could force a false "durability NOT reached" exit. */
+/* Pure gate consulted when the offline-worker-drain deadline fires (pure;
+ * unit-tested in test_debug_bundle). True iff the caller's own durable
+ * output (a completed -mint-anchor / -full-fold bundle) already landed
+ * before the offline worker join began, so a fired deadline there is an
+ * already-durable success, never a false "durability NOT reached" exit. */
 bool boot_offline_shutdown_durable_already(bool one_shot_output_durable);
-/* app_shutdown_offline's call site: logs the fold-complete notice and
- * returns the offline-worker-drain arm_alarm argument (the negation of the
- * gate above). */
-bool boot_offline_worker_drain_arm_alarm(bool output_already_durable);
+/* app_shutdown_offline's call site: arms the offline-worker-drain deadline
+ * (never skipped) and records the gate above so shutdown_stagewatch's alarm
+ * decides a fired deadline on THIS stage using it (shutdown_stagewatch_
+ * set_stage_durable_override), scoped to this stage only. */
+void boot_offline_arm_worker_drain_stage(bool output_already_durable);
 
 /* ── engine/composition/src/boot_services_shutdown.c ──────────────────────────────────── *
  * Drain background workers before app_shutdown_offline's destructive frees;

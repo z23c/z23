@@ -1195,14 +1195,15 @@ static int test_source_epoch_authority_types(void)
  *     driver never starts P2P/frontend services).
  *   - main.c's -mint-anchor branch calls the OFFLINE shutdown (never the
  *     full app_shutdown) before its `minted ? 0 : 1` return.
- *   - app_shutdown_offline arms its offline-worker-drain deadline from
- *     boot_offline_worker_drain_arm_alarm's return (boot_services_
- *     shutdown.c) — the wrapper that logs the fold-complete notice and
- *     negates boot_offline_shutdown_durable_already (pure-tested in
- *     test_debug_bundle.c) — so a completed one-shot's already-durable
- *     bundle export cannot have a stalled unrelated worker force a false
- *     unclean exit, while -coldstart-seed-oneshot still passes `false` and
- *     leaves that deadline armed exactly as before.
+ *   - app_shutdown_offline's offline-worker-drain deadline stays armed
+ *     UNCONDITIONALLY (boot_offline_arm_worker_drain_stage, boot_services_
+ *     shutdown.c) -- a genuinely wedged worker must still be bounded, never
+ *     idle silently -- and records boot_offline_shutdown_durable_already's
+ *     result as a per-stage override (shutdown_stagewatch_set_stage_
+ *     durable_override, pure-tested in test_debug_bundle.c) so a fired
+ *     deadline there is decided as an already-durable success for a
+ *     completed one-shot, while -coldstart-seed-oneshot still passes
+ *     `false` and is decided pre-durability exactly as before.
  *   - the offline shutdown flushes + closes the wallet sqlite handle before
  *     freeing the in-memory wallet. */
 /* main.c's -mint-anchor branch: app_init exits before services start, and
@@ -1266,13 +1267,14 @@ static int msc_check_offline_shutdown_wallet_order(const char *boot_src)
 
 /* A completed -mint-anchor / -full-fold's bundle is already durable before
  * app_shutdown_offline runs (boot_mint_anchor.c's pre-export durability
- * restore + boot_mint_anchor_bundle_export.c's atomic publish), so the
- * offline-worker-drain stage must not arm a deadline that could misreport a
- * durable run as failed. boot.c delegates the decision to boot_offline_
- * worker_drain_arm_alarm (boot_services_shutdown.c, unit-tested with
- * boot_offline_shutdown_durable_already in test_debug_bundle.c); pin the
- * wiring here, and that -coldstart-seed-oneshot still passes `false` and
- * leaves that deadline armed exactly as before. */
+ * restore + boot_mint_anchor_bundle_export.c's atomic publish). The
+ * offline-worker-drain stage's deadline stays armed regardless (a genuinely
+ * wedged worker must still be bounded); boot.c records the durable-already
+ * gate as a per-stage override via boot_offline_arm_worker_drain_stage
+ * (boot_services_shutdown.c), so a fired deadline there is decided
+ * truthfully as an already-durable success -- pin that wiring, and that
+ * -coldstart-seed-oneshot still passes `false` (decided pre-durability
+ * exactly as before). */
 static int msc_check_offline_drain_wiring(const char *boot_src,
                                           const char *main_src)
 {
@@ -1280,42 +1282,70 @@ static int msc_check_offline_drain_wiring(const char *boot_src,
     const char *offline_shutdown_fn = boot_src
         ? strstr(boot_src, "void app_shutdown_offline(bool output_already_durable)")
         : NULL;
-    const char *drain_enter = offline_shutdown_fn
+    const char *drain_arm = offline_shutdown_fn
         ? strstr(offline_shutdown_fn,
-                 "shutdown_stagewatch_enter(\"offline-worker-drain\", 15, "
-                 "false, boot_offline_worker_drain_arm_alarm("
-                 "output_already_durable));")
+                 "boot_offline_arm_worker_drain_stage(output_already_durable);")
         : NULL;
-    MSC_CHECK("offline shutdown arms the drain stage from the durable-already "
+    MSC_CHECK("offline shutdown arms the drain stage via the durable-already "
               "wrapper",
-              drain_enter != NULL);
+              drain_arm != NULL);
 
     char *shutdown_svc_src =
         read_source_file("engine/composition/src/boot_services_shutdown.c");
-    const char *arm_alarm_fn = shutdown_svc_src
+    const char *arm_stage_fn = shutdown_svc_src
         ? strstr(shutdown_svc_src,
-                 "bool boot_offline_worker_drain_arm_alarm(bool "
+                 "void boot_offline_arm_worker_drain_stage(bool "
                  "output_already_durable)")
         : NULL;
-    const char *fold_complete_log = arm_alarm_fn
-        ? strstr(arm_alarm_fn,
-                 "\"[shutdown] fold complete: bundle exported and durable "
-                 "\"")
+    const char *always_armed = arm_stage_fn
+        ? strstr(arm_stage_fn,
+                 "shutdown_stagewatch_enter(\"offline-worker-drain\", 15, "
+                 "false, true);")
         : NULL;
-    const char *returns_false = fold_complete_log
-        ? strstr(fold_complete_log, "return false;")
+    const char *sets_override = always_armed
+        ? strstr(always_armed, "shutdown_stagewatch_set_stage_durable_override(")
         : NULL;
-    MSC_CHECK("drain-alarm wrapper logs fold-complete before skipping the "
-              "alarm",
-              fold_complete_log && returns_false &&
-                  fold_complete_log < returns_false);
+    MSC_CHECK("drain-stage wrapper arms the deadline unconditionally",
+              always_armed != NULL);
+    MSC_CHECK("drain-stage wrapper records the durable-already gate as the "
+              "stage override",
+              sets_override && always_armed < sets_override);
     free(shutdown_svc_src);
 
     const char *cold_start_offline = main_src
         ? strstr(main_src, "app_shutdown_offline(false);")
         : NULL;
-    MSC_CHECK("coldstart-seed-oneshot still leaves the drain deadline armed",
+    MSC_CHECK("coldstart-seed-oneshot still leaves the drain override unset",
               cold_start_offline != NULL);
+    return failures;
+}
+
+/* The heartbeat sweeper (zcl_health_sweep) only obeys its OWN lifecycle
+ * boundary (health_stop), never the registry's global shutdown flag -- and
+ * every offline one-shot starts it via boot_phase's lazy health_start(). If
+ * the offline join never stops it first, its loop runs forever and the
+ * plain pthread_join in thread_registry_join_all_owned hangs the process
+ * silently. Pin that boot_offline_join_workers_or_exit calls health_stop()
+ * before joining. */
+static int msc_check_offline_health_sweep_stop(void)
+{
+    int failures = 0;
+    char *shutdown_svc_src =
+        read_source_file("engine/composition/src/boot_services_shutdown.c");
+    const char *join_fn = shutdown_svc_src
+        ? strstr(shutdown_svc_src,
+                 "void boot_offline_join_workers_or_exit(const char *datadir)")
+        : NULL;
+    const char *health_stop_call = join_fn
+        ? strstr(join_fn, "health_stop();")
+        : NULL;
+    const char *join_all_call = join_fn
+        ? strstr(join_fn, "thread_registry_join_all(2);")
+        : NULL;
+    MSC_CHECK("offline worker join stops the health sweeper before joining",
+              health_stop_call && join_all_call &&
+                  health_stop_call < join_all_call);
+    free(shutdown_svc_src);
     return failures;
 }
 
@@ -1327,6 +1357,7 @@ static int msc_check_offline_shutdown_wiring(void)
     failures += msc_check_mint_anchor_shutdown_ordering(boot_src, main_src);
     failures += msc_check_offline_shutdown_wallet_order(boot_src);
     failures += msc_check_offline_drain_wiring(boot_src, main_src);
+    failures += msc_check_offline_health_sweep_stop();
     free(boot_src);
     free(main_src);
     return failures;
