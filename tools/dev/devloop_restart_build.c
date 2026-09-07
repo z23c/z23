@@ -3010,188 +3010,200 @@ static bool rr_emit_event(
     return rr_emit_event_publish(root, wire, n);
 }
 
-int zcl_devloop_restart_event(const char *repo_root,
+struct rr_event_ctx {
+    const char *repo_root;
+    const char *const *source_tus;
+    size_t source_count;
+    enum zcl_devloop_publish_mode publish_mode;
+    int64_t started;
+    int64_t impact_us;
+    struct zcl_devloop_plan plan;
+    int64_t source_guard_us;
+    uint64_t source_guard_bytes_read;
+    uint64_t source_bytes_total;
+    bool source_byte_accounting_complete;
+    int64_t closure_us;
+    uint32_t source_guard_captures;
+    struct zcl_devloop_restart_build_receipt build;
+    struct zcl_devloop_restart_proof_receipt proof;
+    struct zcl_devloop_process_result build_process;
+    struct zcl_devloop_process_result proof_process;
+    char why[512];
+    struct dev_source_record source_before, source_after;
+};
+
+static bool rr_event_validate(const char *repo_root,
                               const char *const *source_tus,
-                              size_t source_count,
-                              enum zcl_devloop_publish_mode publish_mode)
+                              size_t source_count, struct rr_event_ctx *ctx)
 {
     if (!repo_root || !source_tus || source_count == 0 ||
         source_count > RR_SOURCE_MAX)
-        return 0;
-    int64_t started = platform_time_monotonic_us();
-    int64_t impact_started = started;
-    struct zcl_devloop_plan plan;
-    if (!zcl_devloop_plan_files(source_tus, source_count, &plan) ||
-        plan.docs_only || plan.consensus_risk)
-        return 0;
-    int64_t impact_us = platform_time_monotonic_us() - impact_started;
+        return false;
+    int64_t impact_started = ctx->started;
+    if (!zcl_devloop_plan_files(source_tus, source_count, &ctx->plan) ||
+        ctx->plan.docs_only || ctx->plan.consensus_risk)
+        return false;
+    ctx->impact_us = platform_time_monotonic_us() - impact_started;
     for (size_t i = 0; i < source_count; i++)
         if (!rr_source_is_c(source_tus[i]))
-            return 0;
+            return false;
     bool has_runtime_source = false;
     for (size_t i = 0; i < source_count; i++)
         has_runtime_source = has_runtime_source ||
             !rr_source_is_test_only(source_tus[i]);
-    if (!has_runtime_source)
-        return 0;
-    /* The resident watcher has already published the immutable edit epoch and
-     * IMPACT_READY before entering this compiler lane. Keep the measured path
-     * classification cost in later receipts, but never emit a duplicate
-     * latest-value impact event from the slower proof stage. */
-    int64_t source_guard_us = 0;
-    uint64_t source_guard_bytes_read = 0;
-    uint64_t source_bytes_total = 0;
-    bool source_byte_accounting_complete = false;
-    int64_t closure_us = 0;
-    uint32_t source_guard_captures = 0;
-    struct zcl_devloop_restart_build_receipt build = {0};
-    struct zcl_devloop_restart_proof_receipt proof = {0};
-    struct zcl_devloop_process_result build_process = {0};
-    struct zcl_devloop_process_result proof_process = {0};
-    char why[512] = {0};
-    struct dev_source_record source_before = {0}, source_after = {0};
+    return has_runtime_source;
+}
+
+/* The resident watcher has already published the immutable edit epoch and
+ * IMPACT_READY before entering this compiler lane. Keep the measured path
+ * classification cost in later receipts, but never emit a duplicate
+ * latest-value impact event from the slower proof stage. */
+static bool rr_event_build_phase(struct rr_event_ctx *ctx)
+{
     int64_t guard_started = platform_time_monotonic_us();
-    source_guard_captures++;
-    bool ok = zcl_dev_source_cas_capture(repo_root, &source_before) &&
-              source_before.cas_present;
+    ctx->source_guard_captures++;
+    bool ok = zcl_dev_source_cas_capture(ctx->repo_root, &ctx->source_before) &&
+              ctx->source_before.cas_present;
     if (ok) {
-        source_guard_bytes_read = source_before.cas_bytes_read;
-        source_bytes_total = source_before.cas_bytes_total;
+        ctx->source_guard_bytes_read = ctx->source_before.cas_bytes_read;
+        ctx->source_bytes_total = ctx->source_before.cas_bytes_total;
     }
-    source_guard_us += platform_time_monotonic_us() - guard_started;
+    ctx->source_guard_us += platform_time_monotonic_us() - guard_started;
     if (!ok)
-        rr_why(why, sizeof(why),
+        rr_why(ctx->why, sizeof(ctx->why),
                "restart epoch source snapshot could not be captured");
     int64_t closure_started = platform_time_monotonic_us();
     if (ok) {
         const char *closure_reason = "";
         bool closure_added = zcl_devloop_plan_add_closure_snapshot(
-            repo_root, source_tus, source_count, &plan);
+            ctx->repo_root, ctx->source_tus, ctx->source_count, &ctx->plan);
         bool closure_admissible = closure_added &&
-            zcl_devloop_plan_proof_admissible(&plan, &closure_reason);
+            zcl_devloop_plan_proof_admissible(&ctx->plan, &closure_reason);
         if (!closure_admissible) {
             char detail[256];
             (void)snprintf(
                 detail, sizeof(detail), "affected proof closure refused: %s",
                 closure_added && closure_reason && closure_reason[0]
                     ? closure_reason : "closure_unavailable");
-            rr_why(why, sizeof(why), detail);
+            rr_why(ctx->why, sizeof(ctx->why), detail);
             ok = false;
         }
     }
-    closure_us = platform_time_monotonic_us() - closure_started;
+    ctx->closure_us = platform_time_monotonic_us() - closure_started;
     if (ok)
-        ok = rr_restart_build(repo_root, source_tus, source_count, &build,
-                              &build_process, why, sizeof(why), false,
-                              &source_before);
-    if (ok) {
-        guard_started = platform_time_monotonic_us();
-        source_guard_captures++;
-        ok = zcl_dev_source_cas_capture(repo_root, &source_after) &&
-             source_after.cas_present &&
-             strcmp(source_before.cas_root_sha3,
-                    source_after.cas_root_sha3) == 0;
-        source_guard_us += platform_time_monotonic_us() - guard_started;
-        uint64_t combined_bytes = 0;
-        source_byte_accounting_complete = ok &&
-            source_after.cas_bytes_total == source_bytes_total &&
-            zcl_u64_add(source_guard_bytes_read,
-                        source_after.cas_bytes_read, &combined_bytes);
-        if (source_byte_accounting_complete)
-            source_guard_bytes_read = combined_bytes;
-        if (!ok)
-            rr_why(why, sizeof(why),
-                   "restart epoch source changed during reflex build");
-    }
-    if (build_process.cancelled || zcl_devloop_process_cancel_requested())
-        return 2;
-    bool fallback_pending = !ok &&
-        (strstr(why, "proof closure refused:") ||
-         strstr(why, "proof plan is incomplete") ||
-         strstr(why, "proof set exceeds resident bound") ||
-         strstr(why, "action plan stale"));
-    if (fallback_pending) {
-        proof.integration_proof_deferred = true;
-        proof.bounded_proof_deferred = true;
-    }
-    if (!ok) {
-        bool emitted = rr_emit_event(
-            repo_root, source_tus, source_count,
-            fallback_pending ? "fallback_ready" : "rejected",
-            fallback_pending ? "conservative_proof_selected"
-                             : "compile_link_probe",
-            platform_time_monotonic_us() - started, publish_mode,
-            build.changed_sources ? &build : NULL, &proof, &build_process,
-            why, source_guard_us, source_guard_captures,
-            source_guard_bytes_read, source_bytes_total,
-            source_byte_accounting_complete, impact_us, closure_us,
-            plan.closure_snapshot, false);
-        if (!emitted)
-            return ZCL_DEVLOOP_RESTART_EVENT_ERROR;
-        return fallback_pending ? ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING
-                                : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
-    }
+        ok = rr_restart_build(ctx->repo_root, ctx->source_tus,
+                              ctx->source_count, &ctx->build,
+                              &ctx->build_process, ctx->why, sizeof(ctx->why),
+                              false, &ctx->source_before);
+    return ok;
+}
 
-    /* REFLEX ends at a source-bound candidate probe. Affected tests are a
-     * separate proof stage and may be slow; persist the useful candidate
-     * result first so `dev drive` never waits on them. */
-    if (!rr_emit_event(
-            repo_root, source_tus, source_count, "reflex_ready",
-            "candidate_probe", platform_time_monotonic_us() - started,
-            publish_mode, &build, NULL, &build_process, "",
-            source_guard_us, source_guard_captures,
-            source_guard_bytes_read, source_bytes_total,
-            source_byte_accounting_complete, impact_us, closure_us,
-            plan.closure_snapshot, false))
-        return ZCL_DEVLOOP_RESTART_EVENT_ERROR;
+static bool rr_event_verify_after_build(struct rr_event_ctx *ctx)
+{
+    int64_t guard_started = platform_time_monotonic_us();
+    ctx->source_guard_captures++;
+    bool ok = zcl_dev_source_cas_capture(ctx->repo_root, &ctx->source_after) &&
+              ctx->source_after.cas_present &&
+              strcmp(ctx->source_before.cas_root_sha3,
+                     ctx->source_after.cas_root_sha3) == 0;
+    ctx->source_guard_us += platform_time_monotonic_us() - guard_started;
+    uint64_t combined_bytes = 0;
+    ctx->source_byte_accounting_complete = ok &&
+        ctx->source_after.cas_bytes_total == ctx->source_bytes_total &&
+        zcl_u64_add(ctx->source_guard_bytes_read,
+                    ctx->source_after.cas_bytes_read, &combined_bytes);
+    if (ctx->source_byte_accounting_complete)
+        ctx->source_guard_bytes_read = combined_bytes;
+    if (!ok)
+        rr_why(ctx->why, sizeof(ctx->why),
+               "restart epoch source changed during reflex build");
+    return ok;
+}
 
-    why[0] = 0;
-    ok = rr_restart_prove(repo_root, source_tus, source_count, &plan,
-                          &proof, &proof_process, why, sizeof(why), true,
-                          false, &source_before);
-    if (ok) {
-        guard_started = platform_time_monotonic_us();
-        source_guard_captures++;
-        ok = zcl_dev_source_cas_capture(repo_root, &source_after) &&
-             source_after.cas_present &&
-             strcmp(source_before.cas_root_sha3,
-                    source_after.cas_root_sha3) == 0;
-        source_guard_us += platform_time_monotonic_us() - guard_started;
-        uint64_t combined_bytes = 0;
-        source_byte_accounting_complete = ok &&
-            source_byte_accounting_complete &&
-            source_after.cas_bytes_total == source_bytes_total &&
-            zcl_u64_add(source_guard_bytes_read,
-                        source_after.cas_bytes_read, &combined_bytes);
-        if (source_byte_accounting_complete)
-            source_guard_bytes_read = combined_bytes;
-        if (!ok)
-            rr_why(why, sizeof(why),
-                   "restart epoch source changed during affected proof");
-    }
-    if (proof_process.cancelled || zcl_devloop_process_cancel_requested())
-        return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
-    fallback_pending = !ok &&
-        (strstr(why, "proof plan is incomplete") ||
-         strstr(why, "proof set exceeds resident bound") ||
-         strstr(why, "action plan stale"));
+static int rr_event_handle_build_failure(struct rr_event_ctx *ctx)
+{
+    bool fallback_pending = strstr(ctx->why, "proof closure refused:") ||
+        strstr(ctx->why, "proof plan is incomplete") ||
+        strstr(ctx->why, "proof set exceeds resident bound") ||
+        strstr(ctx->why, "action plan stale");
     if (fallback_pending) {
-        proof.integration_proof_deferred = true;
-        proof.bounded_proof_deferred = true;
+        ctx->proof.integration_proof_deferred = true;
+        ctx->proof.bounded_proof_deferred = true;
     }
     bool emitted = rr_emit_event(
-        repo_root, source_tus, source_count,
+        ctx->repo_root, ctx->source_tus, ctx->source_count,
+        fallback_pending ? "fallback_ready" : "rejected",
+        fallback_pending ? "conservative_proof_selected"
+                         : "compile_link_probe",
+        platform_time_monotonic_us() - ctx->started, ctx->publish_mode,
+        ctx->build.changed_sources ? &ctx->build : NULL, &ctx->proof,
+        &ctx->build_process, ctx->why, ctx->source_guard_us,
+        ctx->source_guard_captures, ctx->source_guard_bytes_read,
+        ctx->source_bytes_total, ctx->source_byte_accounting_complete,
+        ctx->impact_us, ctx->closure_us, ctx->plan.closure_snapshot, false);
+    if (!emitted)
+        return ZCL_DEVLOOP_RESTART_EVENT_ERROR;
+    return fallback_pending ? ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING
+                            : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
+}
+
+static bool rr_event_prove_phase(struct rr_event_ctx *ctx)
+{
+    ctx->why[0] = 0;
+    bool ok = rr_restart_prove(ctx->repo_root, ctx->source_tus,
+                              ctx->source_count, &ctx->plan, &ctx->proof,
+                              &ctx->proof_process, ctx->why, sizeof(ctx->why),
+                              true, false, &ctx->source_before);
+    if (!ok)
+        return false;
+    int64_t guard_started = platform_time_monotonic_us();
+    ctx->source_guard_captures++;
+    ok = zcl_dev_source_cas_capture(ctx->repo_root, &ctx->source_after) &&
+         ctx->source_after.cas_present &&
+         strcmp(ctx->source_before.cas_root_sha3,
+                ctx->source_after.cas_root_sha3) == 0;
+    ctx->source_guard_us += platform_time_monotonic_us() - guard_started;
+    uint64_t combined_bytes = 0;
+    ctx->source_byte_accounting_complete = ok &&
+        ctx->source_byte_accounting_complete &&
+        ctx->source_after.cas_bytes_total == ctx->source_bytes_total &&
+        zcl_u64_add(ctx->source_guard_bytes_read,
+                    ctx->source_after.cas_bytes_read, &combined_bytes);
+    if (ctx->source_byte_accounting_complete)
+        ctx->source_guard_bytes_read = combined_bytes;
+    if (!ok)
+        rr_why(ctx->why, sizeof(ctx->why),
+               "restart epoch source changed during affected proof");
+    return ok;
+}
+
+static int rr_event_finish(struct rr_event_ctx *ctx, bool ok)
+{
+    if (ctx->proof_process.cancelled || zcl_devloop_process_cancel_requested())
+        return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
+    bool fallback_pending = !ok &&
+        (strstr(ctx->why, "proof plan is incomplete") ||
+         strstr(ctx->why, "proof set exceeds resident bound") ||
+         strstr(ctx->why, "action plan stale"));
+    if (fallback_pending) {
+        ctx->proof.integration_proof_deferred = true;
+        ctx->proof.bounded_proof_deferred = true;
+    }
+    bool emitted = rr_emit_event(
+        ctx->repo_root, ctx->source_tus, ctx->source_count,
         ok ? "feedback_ready" :
              fallback_pending ? "fallback_ready" : "rejected",
         ok ? "immediate_affected_proofs" :
              fallback_pending ? "conservative_proof_selected"
                               : "affected_proofs",
-        platform_time_monotonic_us() - started, publish_mode, &build,
-        &proof, proof_process.output_len ? &proof_process : &build_process,
-        why, source_guard_us, source_guard_captures,
-        source_guard_bytes_read, source_bytes_total,
-        source_byte_accounting_complete, impact_us, closure_us,
-        plan.closure_snapshot, false);
+        platform_time_monotonic_us() - ctx->started, ctx->publish_mode,
+        &ctx->build, &ctx->proof,
+        ctx->proof_process.output_len ? &ctx->proof_process
+                                      : &ctx->build_process,
+        ctx->why, ctx->source_guard_us, ctx->source_guard_captures,
+        ctx->source_guard_bytes_read, ctx->source_bytes_total,
+        ctx->source_byte_accounting_complete, ctx->impact_us, ctx->closure_us,
+        ctx->plan.closure_snapshot, false);
     if (!emitted)
         return ZCL_DEVLOOP_RESTART_EVENT_ERROR;
     if (ok)
@@ -3200,6 +3212,42 @@ int zcl_devloop_restart_event(const char *repo_root,
                             : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
 }
 
+int zcl_devloop_restart_event(const char *repo_root,
+                              const char *const *source_tus,
+                              size_t source_count,
+                              enum zcl_devloop_publish_mode publish_mode)
+{
+    struct rr_event_ctx ctx = {
+        .repo_root = repo_root, .source_tus = source_tus,
+        .source_count = source_count, .publish_mode = publish_mode,
+        .started = platform_time_monotonic_us(),
+    };
+    if (!rr_event_validate(repo_root, source_tus, source_count, &ctx))
+        return 0;
+    bool ok = rr_event_build_phase(&ctx);
+    if (ok)
+        ok = rr_event_verify_after_build(&ctx);
+    if (ctx.build_process.cancelled || zcl_devloop_process_cancel_requested())
+        return 2;
+    if (!ok)
+        return rr_event_handle_build_failure(&ctx);
+
+    /* REFLEX ends at a source-bound candidate probe. Affected tests are a
+     * separate proof stage and may be slow; persist the useful candidate
+     * result first so `dev drive` never waits on them. */
+    if (!rr_emit_event(
+            ctx.repo_root, ctx.source_tus, ctx.source_count, "reflex_ready",
+            "candidate_probe", platform_time_monotonic_us() - ctx.started,
+            ctx.publish_mode, &ctx.build, NULL, &ctx.build_process, "",
+            ctx.source_guard_us, ctx.source_guard_captures,
+            ctx.source_guard_bytes_read, ctx.source_bytes_total,
+            ctx.source_byte_accounting_complete, ctx.impact_us,
+            ctx.closure_us, ctx.plan.closure_snapshot, false))
+        return ZCL_DEVLOOP_RESTART_EVENT_ERROR;
+
+    ok = rr_event_prove_phase(&ctx);
+    return rr_event_finish(&ctx, ok);
+}
 int zcl_devloop_restart_story_prove_event(
     const char *repo_root, const char *const *source_tus,
     size_t source_count, enum zcl_devloop_publish_mode publish_mode)
