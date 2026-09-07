@@ -82,7 +82,7 @@ z23 discover schema <path> --side=input|output
 | … `compat` (metadata only, names a fallback) | 43 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 42 |
-| Leaves with `effect=mutate` | 239 |
+| Leaves with `effect=mutate` | 240 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 126 |
 
@@ -786,7 +786,7 @@ represented by its children's sections.
 | `dev fleet truth` | ready | read / read / operator · fast/low | none | `zcl.dev_fleet.v1` | `z23 dev fleet truth` | Show the Git and lint-receipt truth for every origin lane |
 | `dev fleet start` | ready | read / read / operator · foreground/low | `since`, `budget_bytes`, `board_dir`, `include_units`, `cwd` | `zcl.fleet_start.v1` | `z23 dev fleet start` | One opening answer for an orchestrator: the whole fleet in one bounded packet |
 | `dev fleet know` (aliases: `dev.know`) | ready | read / read / operator · instant/tiny | **`subject`**, `relation`, `context`, `budget_bytes` | `zcl.dev_know.v1` | `z23 dev know --subject=sonnet` | Ask what the fleet knows about a subject before acting on it |
-| `dev fleet agents` (aliases: `fleet.agents`) | ready | read / read / operator, prose · foreground/low | `since`, `by`, `root`, `ledger`, `include_units` | `zcl.fleet_agents.v1` | `z23-dev fleet agents --since=168 --by=executor` | Every AI agent working on this box, and each executor's grade over time |
+| `dev fleet agents` (aliases: `fleet.agents`) | ready | mutate / dev-mutation / operator, prose · foreground/low | `since`, `by`, `root`, `ledger`, `include_units`, `publish`, `fleet` | `zcl.fleet_agents.v1` | `z23-dev fleet agents --since=168 --by=executor` | Every AI agent working on this box, and each executor's grade over time |
 
 #### `dev.fleet.tunnel` — Loopback TCP tunnels between paired machines
 
