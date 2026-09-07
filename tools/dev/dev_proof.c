@@ -4359,6 +4359,69 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
     return fclose(f) == 0;
 }
 
+/* Append one resolved group name to the comma-separated selector, refusing
+ * rather than truncating: a selector that lost its tail would run a
+ * narrower suite than the plan asked for. */
+static bool dp_selector_append(char *out, size_t out_size, size_t *pos,
+                               const char *full)
+{
+    int n = snprintf(out + *pos, out_size - *pos, "%s%s",
+                     *pos ? "," : "", full);
+    if (n <= 0 || (size_t)n >= out_size - *pos) return false;
+    *pos += (size_t)n;
+    return true;
+}
+
+/* Is this group already in the selector? Compares whole comma-separated
+ * items, so no name is a prefix match for another. */
+static bool dp_selector_has(const char *out, const char *full)
+{
+    bool duplicate = false;
+    const char *scan = out;
+    size_t full_len = strlen(full);
+    while (*scan) {
+        const char *end = strchr(scan, ',');
+        size_t item_len = end ? (size_t)(end - scan) : strlen(scan);
+        if (item_len == full_len && memcmp(scan, full, full_len) == 0)
+            duplicate = true;
+        if (!end) break;
+        scan = end + 1;
+    }
+    return duplicate;
+}
+
+/* A capacity-bounded plan reaches more groups than it can enumerate. The
+ * plan already turned that into the universal closure, so the proof runs
+ * the whole catalog: a large run is the honest price of a change whose
+ * blast radius does not fit in a list. */
+static bool dp_selector_universal(char *out, size_t out_size, size_t *pos,
+                                  uint32_t *count)
+{
+    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+        if (!dp_selector_append(out, out_size, pos,
+                                zcl_test_group_catalog_at(i)))
+            return false;
+        (*count)++;
+    }
+    return true;
+}
+
+/* One of the plan's two group lists, resolved and appended without
+ * repeating anything the selector already carries. */
+static bool dp_selector_groups(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
+                               size_t len, char *out, size_t out_size,
+                               size_t *pos, uint32_t *count)
+{
+    for (size_t i = 0; i < len; i++) {
+        char full[128];
+        if (!zcl_test_group_resolve_exact(groups[i], full)) return false;
+        if (dp_selector_has(out, full)) continue;
+        if (!dp_selector_append(out, out_size, pos, full)) return false;
+        (*count)++;
+    }
+    return true;
+}
+
 static bool build_test_selector(const struct zcl_devloop_plan *plan,
                                 bool inventory_only, char *out,
                                 size_t out_size, uint32_t *count_out)
@@ -4371,49 +4434,18 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
     }
     size_t pos = 0;
     uint32_t count = 0;
-    /* A capacity-bounded plan reaches more groups than it can enumerate. The
-     * plan already turned that into the universal closure, so the proof runs
-     * the whole catalog: a large run is the honest price of a change whose
-     * blast radius does not fit in a list. */
     if (plan->closure_universal) {
-        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
-            const char *full = zcl_test_group_catalog_at(i);
-            int n = snprintf(out + pos, out_size - pos, "%s%s",
-                             pos ? "," : "", full);
-            if (n <= 0 || (size_t)n >= out_size - pos) return false;
-            pos += (size_t)n;
-            count++;
-        }
-        if (count == 0) return false;
+        if (!dp_selector_universal(out, out_size, &pos, &count) ||
+            count == 0)
+            return false;
         *count_out = count;
         return true;
     }
-    for (int set = 0; set < 2; set++) {
-        size_t len = set == 0 ? plan->path_groups_len : plan->closure_groups_len;
-        for (size_t i = 0; i < len; i++) {
-            const char *group = set == 0 ? plan->path_groups[i]
-                                         : plan->closure_groups[i];
-            char full[128];
-            if (!zcl_test_group_resolve_exact(group, full)) return false;
-            bool duplicate = false;
-            const char *scan = out;
-            size_t full_len = strlen(full);
-            while (*scan) {
-                const char *end = strchr(scan, ',');
-                size_t item_len = end ? (size_t)(end - scan) : strlen(scan);
-                if (item_len == full_len && memcmp(scan, full, full_len) == 0)
-                    duplicate = true;
-                if (!end) break;
-                scan = end + 1;
-            }
-            if (duplicate) continue;
-            int n = snprintf(out + pos, out_size - pos, "%s%s",
-                             pos ? "," : "", full);
-            if (n <= 0 || (size_t)n >= out_size - pos) return false;
-            pos += (size_t)n;
-            count++;
-        }
-    }
+    if (!dp_selector_groups(plan->path_groups, plan->path_groups_len, out,
+                            out_size, &pos, &count) ||
+        !dp_selector_groups(plan->closure_groups, plan->closure_groups_len,
+                            out, out_size, &pos, &count))
+        return false;
     *count_out = count;
     return true;
 }
@@ -4440,12 +4472,26 @@ static bool parse_uint_field(const char *line, const char *key, uint32_t *out)
     return true;
 }
 
-static bool test_log_account(const char *path,
-                             struct zcl_dev_proof_dimension *dim)
+/* Every count the suite verdict line carries. */
+struct dp_test_counts {
+    uint32_t total;
+    uint32_t ran;
+    uint32_t reused;
+    uint32_t gated;
+    uint32_t failed;
+    uint32_t skipped;
+    uint32_t unobserved;
+};
+
+/* The one SUITE VERDICT line the run must have written. Exactly one, whole:
+ * a truncated line or a second one is a log this reader cannot account
+ * from, so it refuses instead of reading the last one it saw. */
+static bool dp_test_verdict_read(const char *path, char *verdict,
+                                 size_t verdict_size)
 {
     FILE *f = fopen(path, "r");
     if (!f) return false;
-    char line[4096], verdict[4096] = {0};
+    char line[4096];
     uint32_t verdict_count = 0;
     bool truncated = false;
     while (fgets(line, sizeof(line), f)) {
@@ -4453,29 +4499,42 @@ static bool test_log_account(const char *path,
             verdict_count++;
             if (!strchr(line, '\n'))
                 truncated = true;
-            (void)snprintf(verdict, sizeof(verdict), "%s", line);
+            (void)snprintf(verdict, verdict_size, "%s", line);
         }
     }
     bool ok = !ferror(f) && !truncated && verdict_count == 1;
     fclose(f);
-    uint32_t total = 0, ran = 0, reused = 0, gated = 0;
-    uint32_t failed = 0, skipped = 0, unobserved = 0;
-    if (!ok || !verdict[0] ||
-        !parse_uint_field(verdict, "groups_total=", &total) ||
-        !parse_uint_field(verdict, "groups_ran=", &ran) ||
-        !parse_uint_field(verdict, "groups_cached=", &reused) ||
-        !parse_uint_field(verdict, "groups_gated=", &gated) ||
-        !parse_uint_field(verdict, "groups_failed=", &failed) ||
-        !parse_uint_field(verdict, "self_skips=", &skipped) ||
-        !parse_uint_field(verdict, "env_unobserved=", &unobserved))
-        return false;
-    dim->ran = ran;
-    dim->reused = reused;
-    dim->failed = failed;
-    dim->skipped = skipped;
-    return (uint64_t)total == (uint64_t)ran + reused + gated &&
-           (uint64_t)ran + reused == dim->selected && failed == 0 &&
-           skipped == 0 && unobserved == 0;
+    return ok && verdict[0];
+}
+
+static bool dp_test_verdict_counts(const char *verdict,
+                                   struct dp_test_counts *counts)
+{
+    return parse_uint_field(verdict, "groups_total=", &counts->total) &&
+           parse_uint_field(verdict, "groups_ran=", &counts->ran) &&
+           parse_uint_field(verdict, "groups_cached=", &counts->reused) &&
+           parse_uint_field(verdict, "groups_gated=", &counts->gated) &&
+           parse_uint_field(verdict, "groups_failed=", &counts->failed) &&
+           parse_uint_field(verdict, "self_skips=", &counts->skipped) &&
+           parse_uint_field(verdict, "env_unobserved=", &counts->unobserved);
+}
+
+static bool test_log_account(const char *path,
+                             struct zcl_dev_proof_dimension *dim)
+{
+    char verdict[4096] = {0};
+    if (!dp_test_verdict_read(path, verdict, sizeof(verdict))) return false;
+    struct dp_test_counts counts = {0};
+    if (!dp_test_verdict_counts(verdict, &counts)) return false;
+    dim->ran = counts.ran;
+    dim->reused = counts.reused;
+    dim->failed = counts.failed;
+    dim->skipped = counts.skipped;
+    return (uint64_t)counts.total ==
+               (uint64_t)counts.ran + counts.reused + counts.gated &&
+           (uint64_t)counts.ran + counts.reused == dim->selected &&
+           counts.failed == 0 && counts.skipped == 0 &&
+           counts.unobserved == 0;
 }
 
 /* One dimension in flight. Dimensions that do not feed each other are started
@@ -4946,36 +5005,59 @@ static bool test_binary_path(const struct proof_paths *paths,
     return n > 0 && n < PATH_MAX && access(out, X_OK) == 0;
 }
 
+/* Copy the checkout's current test-object epoch pointer into the
+ * generation. The epoch name must be one path segment: anything else is a
+ * pointer this proof cannot reason about. */
+static bool dp_epoch_pointer_copy(const struct proof_paths *paths,
+                                  const char *generation, const char *epoch,
+                                  char target[PATH_MAX])
+{
+    char source[PATH_MAX];
+    return epoch && epoch[1] && !strchr(epoch + 1, '/') &&
+           snprintf(source, PATH_MAX, "%s/build/test-obj/.current-epoch",
+                    paths->root) < PATH_MAX &&
+           snprintf(target, PATH_MAX, "%s/build/test-obj/.current-epoch",
+                    generation) < PATH_MAX &&
+           dependency_parent_ensure(target) &&
+           dependency_copy_fresh(source, target);
+}
+
+/* The pointer's value, trimmed of its line ending. A read that filled the
+ * buffer is refused: the epoch would be indistinguishable from a longer
+ * one that happens to share its first bytes. */
+static bool dp_epoch_value_read(const char *target, char *value,
+                                size_t value_size, size_t *len_out)
+{
+    int fd = open(target, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    ssize_t got;
+    do {
+        got = read(fd, value, value_size);
+    } while (got < 0 && errno == EINTR);
+    bool ok = close(fd) == 0 && got > 0 && got < (ssize_t)value_size;
+    size_t len = ok ? (size_t)got : 0;
+    while (len > 0 && (value[len - 1] == '\n' || value[len - 1] == '\r'))
+        len--;
+    *len_out = len;
+    return ok;
+}
+
 static bool test_epoch_pointer_prepare(const struct proof_paths *paths,
                                        const char *generation,
                                        const char *object_dir,
                                        uint8_t pointer_root[32])
 {
     const char *epoch = strrchr(object_dir, '/');
-    char source[PATH_MAX], target[PATH_MAX];
-    if (!epoch || !epoch[1] || strchr(epoch + 1, '/') ||
-        snprintf(source, sizeof(source), "%s/build/test-obj/.current-epoch",
-                 paths->root) >= (int)sizeof(source) ||
-        snprintf(target, sizeof(target), "%s/build/test-obj/.current-epoch",
-                 generation) >= (int)sizeof(target) ||
-        !dependency_parent_ensure(target) ||
-        !dependency_copy_fresh(source, target))
+    char target[PATH_MAX];
+    if (!dp_epoch_pointer_copy(paths, generation, epoch, target))
         return false;
-    int fd = open(target, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
     char value[72];
-    ssize_t got;
-    do {
-        got = read(fd, value, sizeof(value));
-    } while (got < 0 && errno == EINTR);
-    bool ok = close(fd) == 0 && got > 0 && got < (ssize_t)sizeof(value);
-    size_t len = ok ? (size_t)got : 0;
-    while (len > 0 && (value[len - 1] == '\n' || value[len - 1] == '\r'))
-        len--;
-    ok = ok && strlen(epoch + 1) == len &&
+    size_t len = 0;
+    if (!dp_epoch_value_read(target, value, sizeof(value), &len))
+        return false;
+    return strlen(epoch + 1) == len &&
         memcmp(value, epoch + 1, len) == 0 &&
         hash_file("zcl.dev_proof_epoch_pointer.v1", target, pointer_root);
-    return ok;
 }
 
 static bool test_depfiles_prepare(const struct proof_paths *paths,
@@ -5098,87 +5180,96 @@ static bool proof_prefork_build(const struct proof_paths *paths,
  * zcl.dev_proof_test_helpers.v1 digest the test receipt is bound to. Same
  * eleven artifacts, same order, same domains as before the split: the
  * receipt says exactly what it always said. */
+/* The seven helper executables the generation builds for itself, in the
+ * order they fold into the digest. */
+#define PROOF_HELPER_BUILT_COUNT 7
+/* Eleven artifacts fold into the test helper digest: the four the pre-fork
+ * step admitted, plus the seven above. */
+#define PROOF_HELPER_INPUT_COUNT 11
+
+struct dp_helper_input {
+    const char *domain;
+    const char *path;
+};
+
+/* A path is usable only when it was spelled whole into its buffer. */
+static bool dp_path_written(int n)
+{
+    return n > 0 && n < PATH_MAX;
+}
+
+static bool dp_helper_built_paths(
+    const char *generation, char t[PROOF_HELPER_BUILT_COUNT][PATH_MAX])
+{
+    return dp_path_written(snprintf(t[0], PATH_MAX,
+                                    "%s/build/bin/zcl-nodectl", generation)) &&
+           dp_path_written(snprintf(t[1], PATH_MAX,
+                                    "%s/build/bin/zclassic23-acme",
+                                    generation)) &&
+           dp_path_written(snprintf(t[2], PATH_MAX,
+                                    "%s/build/bin/fbsh", generation)) &&
+           dp_path_written(snprintf(t[3], PATH_MAX,
+                                    "%s/build/bin/file_size_policy",
+                                    generation)) &&
+           dp_path_written(snprintf(t[4], PATH_MAX,
+                                    "%s/build/bin/fleet-board-bridge",
+                                    generation)) &&
+           dp_path_written(snprintf(t[5], PATH_MAX,
+                                    "%s/build/bin/z23-git-hook",
+                                    generation)) &&
+           dp_path_written(snprintf(t[6], PATH_MAX,
+                                    "%s/build/bin/z23-lint", generation));
+}
+
+/* Each artifact under its own domain, so the same bytes carried by two
+ * different executables can never hash alike. */
+static bool dp_helper_roots(const struct dp_helper_input *inputs,
+                            size_t count, uint8_t roots[][32])
+{
+    for (size_t i = 0; i < count; i++)
+        if (!hash_file(inputs[i].domain, inputs[i].path, roots[i]))
+            return false;
+    return true;
+}
+
+/* Hash what the pre-fork step admitted and built into the one
+ * zcl.dev_proof_test_helpers.v1 digest the test receipt is bound to. Same
+ * eleven artifacts, same order, same domains as before the split: the
+ * receipt says exactly what it always said. */
 static bool test_helpers_hash(
     const char *generation, const char *runner_target,
     const char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX],
     const uint8_t depfile_root[32], uint8_t helper_root[32],
     char *why, size_t why_len)
 {
-    const char *verifier_target = admitted[PROOF_ADMITTED_PACKAGE_VERIFY];
-    const char *dev_node_target = admitted[PROOF_ADMITTED_DEV_NODE];
-    const char *node_target = admitted[PROOF_ADMITTED_NODE_ALIAS];
-    char nodectl_target[PATH_MAX], acme_target[PATH_MAX], fbsh_target[PATH_MAX];
-    char file_size_policy_target[PATH_MAX], board_bridge_target[PATH_MAX];
-    char git_hook_target[PATH_MAX], lint_tool_target[PATH_MAX];
-    int nodectl_len = snprintf(nodectl_target, sizeof(nodectl_target),
-                               "%s/build/bin/zcl-nodectl", generation);
-    int acme_len = snprintf(acme_target, sizeof(acme_target),
-                            "%s/build/bin/zclassic23-acme", generation);
-    int fbsh_len = snprintf(fbsh_target, sizeof(fbsh_target),
-                            "%s/build/bin/fbsh", generation);
-    int file_size_policy_len = snprintf(
-        file_size_policy_target, sizeof(file_size_policy_target),
-        "%s/build/bin/file_size_policy", generation);
-    int board_bridge_len = snprintf(board_bridge_target, sizeof(board_bridge_target),
-                                    "%s/build/bin/fleet-board-bridge", generation);
-    int git_hook_len = snprintf(git_hook_target, sizeof(git_hook_target),
-                                "%s/build/bin/z23-git-hook", generation);
-    int lint_tool_len = snprintf(lint_tool_target, sizeof(lint_tool_target),
-                                 "%s/build/bin/z23-lint", generation);
-    if (nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
-        acme_len <= 0 || (size_t)acme_len >= sizeof(acme_target) ||
-        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target) ||
-        file_size_policy_len <= 0 ||
-        (size_t)file_size_policy_len >= sizeof(file_size_policy_target) ||
-        board_bridge_len <= 0 ||
-        (size_t)board_bridge_len >= sizeof(board_bridge_target) ||
-        git_hook_len <= 0 ||
-        (size_t)git_hook_len >= sizeof(git_hook_target) ||
-        lint_tool_len <= 0 ||
-        (size_t)lint_tool_len >= sizeof(lint_tool_target)) {
+    char built[PROOF_HELPER_BUILT_COUNT][PATH_MAX];
+    if (!dp_helper_built_paths(generation, built)) {
         proof_why(why, why_len, "proof_test_helper_path_invalid");
         return false;
     }
-    uint8_t runner_root[32], verifier_root[32], node_root[32], nodectl_root[32];
-    uint8_t dev_node_root[32];
-    uint8_t acme_root[32], fbsh_root[32], file_size_policy_root[32];
-    uint8_t board_bridge_root[32], git_hook_root[32], lint_tool_root[32];
-    if (!hash_file("zcl.dev_proof_test_runner.v1", runner_target,
-                   runner_root) ||
-        !hash_file("zcl.dev_proof_package_verifier.v1", verifier_target,
-                   verifier_root) ||
-        !hash_file("zcl.dev_proof_test_node.v1", node_target, node_root) ||
-        !hash_file("zcl.dev_proof_dev_node.v1", dev_node_target,
-                   dev_node_root) ||
-        !hash_file("zcl.dev_proof_nodectl.v1", nodectl_target,
-                   nodectl_root) ||
-        !hash_file("zcl.dev_proof_acme_worker.v1", acme_target, acme_root) ||
-        !hash_file("zcl.dev_proof_fbsh.v1", fbsh_target, fbsh_root) ||
-        !hash_file("zcl.dev_proof_file_size_policy.v1", file_size_policy_target,
-                   file_size_policy_root) ||
-        !hash_file("zcl.dev_proof_board_bridge.v1", board_bridge_target,
-                   board_bridge_root) ||
-        !hash_file("zcl.dev_proof_git_hook.v1", git_hook_target,
-                   git_hook_root) ||
-        !hash_file("zcl.dev_proof_lint_tool.v1", lint_tool_target,
-                   lint_tool_root)) {
+    const struct dp_helper_input inputs[PROOF_HELPER_INPUT_COUNT] = {
+        {"zcl.dev_proof_test_runner.v1", runner_target},
+        {"zcl.dev_proof_package_verifier.v1",
+         admitted[PROOF_ADMITTED_PACKAGE_VERIFY]},
+        {"zcl.dev_proof_test_node.v1", admitted[PROOF_ADMITTED_NODE_ALIAS]},
+        {"zcl.dev_proof_dev_node.v1", admitted[PROOF_ADMITTED_DEV_NODE]},
+        {"zcl.dev_proof_nodectl.v1", built[0]},
+        {"zcl.dev_proof_acme_worker.v1", built[1]},
+        {"zcl.dev_proof_fbsh.v1", built[2]},
+        {"zcl.dev_proof_file_size_policy.v1", built[3]},
+        {"zcl.dev_proof_board_bridge.v1", built[4]},
+        {"zcl.dev_proof_git_hook.v1", built[5]},
+        {"zcl.dev_proof_lint_tool.v1", built[6]},
+    };
+    uint8_t roots[PROOF_HELPER_INPUT_COUNT][32];
+    if (!dp_helper_roots(inputs, PROOF_HELPER_INPUT_COUNT, roots)) {
         proof_why(why, why_len, "proof_test_helper_hash_failed");
         return false;
     }
     struct sha3_256_ctx helpers;
     hash_begin(&helpers, "zcl.dev_proof_test_helpers.v1");
-    sha3_256_write(&helpers, runner_root, sizeof(runner_root));
-    sha3_256_write(&helpers, verifier_root, sizeof(verifier_root));
-    sha3_256_write(&helpers, node_root, sizeof(node_root));
-    sha3_256_write(&helpers, dev_node_root, sizeof(dev_node_root));
-    sha3_256_write(&helpers, nodectl_root, sizeof(nodectl_root));
-    sha3_256_write(&helpers, acme_root, sizeof(acme_root));
-    sha3_256_write(&helpers, fbsh_root, sizeof(fbsh_root));
-    sha3_256_write(&helpers, file_size_policy_root,
-                   sizeof(file_size_policy_root));
-    sha3_256_write(&helpers, board_bridge_root, sizeof(board_bridge_root));
-    sha3_256_write(&helpers, git_hook_root, sizeof(git_hook_root));
-    sha3_256_write(&helpers, lint_tool_root, sizeof(lint_tool_root));
+    for (size_t i = 0; i < PROOF_HELPER_INPUT_COUNT; i++)
+        sha3_256_write(&helpers, roots[i], sizeof(roots[i]));
     sha3_256_write(&helpers, depfile_root, 32);
     sha3_256_finalize(&helpers, helper_root);
     return true;
