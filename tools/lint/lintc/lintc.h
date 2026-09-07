@@ -368,5 +368,9 @@ int check_dumper_never_blocks_run(int argc, char **argv);
 int check_dumper_never_blocks_selftest(void);
 int check_supervisor_registration_run(int argc, char **argv);
 int check_supervisor_registration_selftest(void);
+int check_vcs_no_sha1_run(int argc, char **argv);
+int check_vcs_no_sha1_selftest(void);
+int check_blocker_remedy_run(int argc, char **argv);
+int check_blocker_remedy_selftest(void);
 
 #endif

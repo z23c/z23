@@ -5360,6 +5360,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_systemd_memory_budget.c \
     tools/lint/lintc/gate_dumper_never_blocks.c \
     tools/lint/lintc/gate_supervisor_registration.c \
+    tools/lint/lintc/gate_vcs_sha1_fence.c \
+    tools/lint/lintc/gate_blocker_remedy.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11041,9 +11043,9 @@ check-vcs-no-git: $(LINTC_TOOL)
 	@echo "══ LINT: contexts/commons/modules/vcs is git-free + spawns no processes ══"
 	@tools/scripts/check_vcs_no_git.sh
 
-check-vcs-no-sha1:
+check-vcs-no-sha1: $(LINTC_TOOL)
 	@echo "══ LINT: ZVCS/producer-source authority does not inherit Git SHA-1 ══"
-	@tools/scripts/check_vcs_no_sha1.sh
+	@bash tools/scripts/check_vcs_no_sha1.sh
 	@tools/dev/source-identity-selftest.sh
 	@tools/dev/sovereign-source-identity-selftest.sh
 
@@ -11874,9 +11876,9 @@ check-blocker-escape-registered:
 # engine/conditions/include/conditions/blocker_remedy_bindings.def — a real
 # condition name (checked to exist) or the honest token OWNER — so a new
 # permanent-no-cure blocker cannot be added without declaring that fact.
-check-blocker-remedy:
+check-blocker-remedy: $(LINTC_TOOL)
 	@echo "══ LINT: blocker remedy totality ══"
-	@./tools/scripts/check_blocker_remedy.sh
+	@bash tools/scripts/check_blocker_remedy.sh
 
 # Gate — blocker HAND-OFF declaration (RATCHET, shrink-only baseline
 # tools/lint/blocker_handoff_baseline.txt). check-blocker-remedy above proves

@@ -181,6 +181,9 @@ static const struct lint_gate k_gates[] = {
       check_dumper_never_blocks_selftest },
     { "check-supervisor-registration", check_supervisor_registration_run,
       check_supervisor_registration_selftest },
+    { "check-vcs-no-sha1", check_vcs_no_sha1_run, check_vcs_no_sha1_selftest },
+    { "check-blocker-remedy", check_blocker_remedy_run,
+      check_blocker_remedy_selftest },
 };
 
 int main(int argc, char **argv)

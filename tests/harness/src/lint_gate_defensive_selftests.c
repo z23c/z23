@@ -186,7 +186,10 @@ bool build_commit_macro_file_allowed(const char *path)
 {
     return strstr(path, "/platform/modules/util/src/clientversion.c") ||
            strstr(path, "/platform/modules/util/include/util/clientversion.h") ||
-           strstr(path, "/tests/harness/src/lint_gate_defensive_selftests.c");
+           strstr(path, "/tests/harness/src/lint_gate_defensive_selftests.c") ||
+           /* the VCS SHA-1 lint gate names ZCL_BUILD_COMMIT only as search
+            * text while scanning the Makefile for baked-commit macros */
+           strstr(path, "/tools/lint/lintc/gate_vcs_sha1_fence.c");
 }
 
 int check_build_commit_macro_file(const char *path)
