@@ -439,5 +439,7 @@ int check_remote_command_classes_run(int argc, char **argv);
 int check_remote_command_classes_selftest(void);
 int check_no_runtime_abort_run(int argc, char **argv);
 int check_no_runtime_abort_selftest(void);
+int check_model_sql_literals_run(int argc, char **argv);
+int check_model_sql_literals_selftest(void);
 
 #endif

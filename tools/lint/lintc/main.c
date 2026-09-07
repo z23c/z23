@@ -251,6 +251,8 @@ static const struct lint_gate k_gates[] = {
       check_remote_command_classes_selftest },
     { "check-no-runtime-abort", check_no_runtime_abort_run,
       check_no_runtime_abort_selftest },
+    { "check-model-sql-literals", check_model_sql_literals_run,
+      check_model_sql_literals_selftest },
 };
 
 int main(int argc, char **argv)

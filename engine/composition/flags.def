@@ -1354,11 +1354,11 @@ Z23_FLAG("ZCL_MODEL_DRIFT_BASELINE", "env_build", "-", "-",
 Z23_FLAG("ZCL_MODEL_DRIFT_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_model_column_drift.sh:174")
 Z23_FLAG("ZCL_MODEL_SQL_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_model_sql_literals.sh:83")
+          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:318")
 Z23_FLAG("ZCL_MODEL_SQL_FILE_FLOOR", "env_build", "80", "-",
-          "undocumented; first use tools/lint/check_model_sql_literals.sh:84")
+          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:184")
 Z23_FLAG("ZCL_MODEL_SQL_SCAN_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_model_sql_literals.sh:239")
+          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:172")
 Z23_FLAG("ZCL_MODULE_DIRS", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_accel_oracle_pinned.sh:107")
 Z23_FLAG("ZCL_MSC_PRODUCER", "env_test", "-", "-",
