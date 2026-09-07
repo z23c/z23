@@ -89,6 +89,67 @@ static int nra_st_run(struct nra_st_ctx *s, int site_floor)
     return rc;
 }
 
+/* Runs the gate with stdout captured to a real file (not /dev/null) so a
+ * caller can inspect the printed report text — used to assert the
+ * per-site "path:lineno: text" detail line survives into the violation
+ * report, matching check_no_runtime_abort.sh's DETAIL[] output. */
+static int nra_st_run_capture(struct nra_st_ctx *s, char *outbuf, size_t outbuf_sz)
+{
+    const char *roots[1] = { s->lib_root };
+    struct nra_ctx c = {
+        .baseline = s->baseline,
+        .roots = roots,
+        .nroots = 1,
+        .file_floor = 1,
+        .site_floor = 0,
+        .mode = NRA_MODE_FAIL,
+    };
+    char outpath[4096];
+    if (ovf(snprintf(outpath, sizeof outpath, "%s/out.txt", s->root),
+            sizeof outpath))
+        return -1;
+    FILE *out = fopen(outpath, "w");
+    FILE *err = fopen("/dev/null", "w");
+    if (!out || !err) {
+        if (out) fclose(out);
+        if (err) fclose(err);
+        return -1;
+    }
+    int rc = nra_run_gate(&c, out, err);
+    fclose(out);
+    fclose(err);
+    FILE *rf = fopen(outpath, "r");
+    if (!rf)
+        return -1;
+    size_t n = fread(outbuf, 1, outbuf_sz - 1, rf);
+    outbuf[n] = '\0';
+    fclose(rf);
+    return rc;
+}
+
+static void nra_st_expect_detail(struct nra_st_ctx *s)
+{
+    const char *name = "the violation report dropped the per-site detail line";
+    if (nra_st_plant(s, "    if (x < 0) abort();")) {
+        fprintf(stderr, "%s: SELFTEST FAIL — %s: could not plant fixture\n",
+                k_gate, name);
+        s->fails++;
+        return;
+    }
+    char outbuf[8192];
+    int rc = nra_st_run_capture(s, outbuf, sizeof outbuf);
+    int has_detail = strstr(outbuf, "selftest_probe.c:5:") != NULL &&
+                     strstr(outbuf, "abort();") != NULL;
+    if (rc != 1 || !has_detail) {
+        fprintf(stderr, "%s: SELFTEST FAIL — %s (rc=%d, has_detail=%d)\n",
+                k_gate, name, rc, has_detail);
+        s->fails++;
+    } else {
+        fprintf(stdout, "%s: selftest ok — %s\n", k_gate,
+                "violation report names the file:line:text of the site");
+    }
+}
+
 static void nra_st_expect(struct nra_st_ctx *s, const char *name,
                           const char *body, int want)
 {
@@ -126,6 +187,7 @@ int check_no_runtime_abort_selftest(void)
                  "    static_assert(sizeof(int) == 4, \"m\");", 0);
     nra_st_expect(&s, "a bare abort() did not fail the gate",
                  "    if (x < 0) abort();", 1);
+    nra_st_expect_detail(&s);
     nra_st_expect(&s, "the // abort-ok escape hatch was not honoured",
                  "    if (x < 0) abort(); // abort-ok: entropy failure, keys would be forgeable",
                  0);

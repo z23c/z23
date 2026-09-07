@@ -26,7 +26,7 @@
 #include "lintc.h"
 #include "gate_no_runtime_abort_priv.h"
 
-static const char k_gate[] = "check_no_runtime_abort";
+const char nra_gate_name[] = "check_no_runtime_abort";
 
 /* Network-reachable roots only, not the whole tree — see the shell's own
  * rationale comment (a whole-tree scan drowns the signal in boot-only and
@@ -42,11 +42,11 @@ static const char k_roots_default[] =
     "domain/encoding domain/wallet "
     "core/consensus core/math core/params core/chainparams";
 
-/* ── generic string list (scan_files / violation / stale) ───────────────── */
+/* ── generic string list (scan_files / violation / stale) ─────────────────
+ * struct nra_list is declared in gate_no_runtime_abort_priv.h — shared with
+ * gate_no_runtime_abort_report.c, which builds the violation/stale lists. */
 
-struct nra_list { char **v; size_t n, cap; };
-
-static int nra_push(struct nra_list *l, const char *s, size_t n)
+int nra_push(struct nra_list *l, const char *s, size_t n)
 {
     if (l->n == l->cap) {
         size_t nc = l->cap ? l->cap * 2 : 64;
@@ -65,12 +65,12 @@ static int nra_push(struct nra_list *l, const char *s, size_t n)
     return 0;
 }
 
-static int nra_push_s(struct nra_list *l, const char *s)
+int nra_push_s(struct nra_list *l, const char *s)
 {
     return nra_push(l, s, strlen(s));
 }
 
-static void nra_free(struct nra_list *l)
+void nra_free(struct nra_list *l)
 {
     for (size_t i = 0; i < l->n; i++)
         free(l->v[i]);
@@ -137,12 +137,10 @@ static int nra_collect_files(const struct nra_ctx *c, struct nra_list *files)
     return rc;
 }
 
-/* ── per-site scan (the awk comment/string state machine + hatch check) ── */
-
-enum { NRA_SITE, NRA_HATCH };
-
-struct nra_row { int kind; char path[NRA_PATH]; int lineno; char text[512]; };
-struct nra_rows { struct nra_row *v; size_t n, cap; };
+/* ── per-site scan (the awk comment/string state machine + hatch check) ──
+ * NRA_SITE/NRA_HATCH and struct nra_row/nra_rows are declared in
+ * gate_no_runtime_abort_priv.h — the report side walks the rows to print
+ * the per-site detail lines. */
 
 static int nra_row_push(struct nra_rows *r, const struct nra_row *row)
 {
@@ -291,12 +289,13 @@ static int nra_scan_sites(const struct nra_list *files, const regex_t *re,
 }
 
 /* ── baseline (gate_lib.sh gate_load_kv_file: "<path> <count>", # comment
- * and blank lines skipped, no trimming beyond that) ─────────────────────── */
+ * and blank lines skipped, no trimming beyond that) ─────────────────────
+ * struct nra_base_row/nra_baseline are declared in
+ * gate_no_runtime_abort_priv.h — shared with the report side, which counts
+ * observed sites per file into the same shape and ratchets it against
+ * this loaded baseline. */
 
-struct nra_base_row { char path[NRA_PATH]; int allowed; int used; };
-struct nra_baseline { struct nra_base_row *v; size_t n, cap; };
-
-static int nra_base_push(struct nra_baseline *b, const char *path, int n)
+int nra_base_push(struct nra_baseline *b, const char *path, int n)
 {
     if (b->n == b->cap) {
         size_t nc = b->cap ? b->cap * 2 : 64;
@@ -315,8 +314,8 @@ static int nra_base_push(struct nra_baseline *b, const char *path, int n)
     return 0;
 }
 
-static struct nra_base_row *nra_base_find(struct nra_baseline *b,
-                                          const char *path)
+struct nra_base_row *nra_base_find(struct nra_baseline *b,
+                                   const char *path)
 {
     for (size_t i = 0; i < b->n; i++)
         if (strcmp(b->v[i].path, path) == 0)
@@ -361,7 +360,7 @@ static int nra_base_load(const char *path, struct nra_baseline *b)
     return fin(f, line, path, rc);
 }
 
-static void nra_baseline_free(struct nra_baseline *b)
+void nra_baseline_free(struct nra_baseline *b)
 {
     free(b->v);
     b->v = NULL;
@@ -410,174 +409,9 @@ int check_no_runtime_abort_run(int argc, char **argv)
     return nra_run_gate(&c, stdout, stderr);
 }
 
-/* ── report ───────────────────────────────────────────────────────────── */
-
-static int nra_write_update(const struct nra_ctx *c, const struct nra_rows *rows,
-                            FILE *out)
-{
-    struct nra_baseline live; memset(&live, 0, sizeof live);
-    int rc = 0, total = 0, hatched = 0;
-    for (size_t i = 0; rc == 0 && i < rows->n; i++) {
-        if (rows->v[i].kind == NRA_HATCH) { hatched++; continue; }
-        total++;
-        struct nra_base_row *r = nra_base_find(&live, rows->v[i].path);
-        if (r) r->allowed++;
-        else rc = nra_base_push(&live, rows->v[i].path, 1);
-    }
-    if (rc == 0) {
-        FILE *f = fopen(c->baseline, "w");
-        if (!f) { rc = die("z23-lint: cannot open %s\n", c->baseline); }
-        else {
-            fputs("# check_no_runtime_abort baseline — files in network-reachable code that still\n"
-                  "# hold RUNTIME assert()/abort() sites. assert() is LIVE in this\n"
-                  "# build (-DNDEBUG is set only for vendored LevelDB), so each of\n"
-                  "# these is a process kill on a failed assumption.\n"
-                  "# Format: <path> <site-count>.  COUNTS MAY ONLY SHRINK.\n"
-                  "#\n"
-                  "# Fix a row by returning an error instead: fail the call, log the\n"
-                  "# reason with LOG_FAIL/LOG_ERR, and let the caller reject the\n"
-                  "# input — then lower (or delete) the number here. Adding a row is\n"
-                  "# not a fix. An assertion about a layout or a constant becomes\n"
-                  "# _Static_assert, which this gate deliberately does not count.\n"
-                  "#\n"
-                  "# An abort that is CORRECT (softening it would trade a crash for\n"
-                  "# a key compromise or a plaintext leak) does not belong here at\n"
-                  "# all — annotate it in place with // abort-ok:<reason>.\n"
-                  "#\n"
-                  "# core/ is byte-sealed: its rows are counted and frozen, and are\n"
-                  "# only editable through the owner unseal ritual (make core-unseal).\n"
-                  "# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_no_runtime_abort.sh\n",
-                  f);
-            for (size_t i = 0; i < live.n; i++)
-                fprintf(f, "%s %d\n", live.v[i].path, live.v[i].allowed);
-            rc = fclose(f) != 0 ? die("z23-lint: fclose failed: %s\n", c->baseline) : 0;
-        }
-    }
-    if (rc == 0)
-        fprintf(out, "[%s] baseline UPDATED: %s (%zu files, %d sites, %d annotated)\n",
-                k_gate, c->baseline, live.n, total, hatched);
-    nra_baseline_free(&live);
-    return rc;
-}
-
-/* Per-file site counts (kind==NRA_SITE only); *hatched gets the annotated
- * (kind==NRA_HATCH) count, *total the counted-site total. */
-static int nra_count_rows(const struct nra_rows *rows, struct nra_baseline *counts,
-                          int *total, int *hatched)
-{
-    int rc = 0;
-    *total = 0;
-    *hatched = 0;
-    for (size_t i = 0; rc == 0 && i < rows->n; i++) {
-        if (rows->v[i].kind == NRA_HATCH) { (*hatched)++; continue; }
-        (*total)++;
-        struct nra_base_row *r = nra_base_find(counts, rows->v[i].path);
-        if (r) r->allowed++;
-        else rc = nra_base_push(counts, rows->v[i].path, 1);
-    }
-    return rc;
-}
-
-/* Ratchet each observed per-file count against the baseline: a file not in
- * the baseline, or over its allowed count, is a violation; otherwise
- * tolerated. Marks each matched baseline row used=1 for the stale pass. */
-static int nra_judge_files(const struct nra_baseline *counts,
-                           struct nra_baseline *base,
-                           struct nra_list *violations, int *tolerated)
-{
-    int rc = 0;
-    *tolerated = 0;
-    for (size_t i = 0; rc == 0 && i < counts->n; i++) {
-        struct nra_base_row *b = nra_base_find(base, counts->v[i].path);
-        if (b)
-            b->used = 1;
-        char line[1024];
-        if (!b) {
-            snprintf(line, sizeof line, "  %s — %d runtime abort site(s), not in the baseline",
-                     counts->v[i].path, counts->v[i].allowed);
-            rc = nra_push_s(violations, line);
-        } else if (counts->v[i].allowed > b->allowed) {
-            snprintf(line, sizeof line,
-                     "  %s — %d runtime abort site(s), baseline allows %d",
-                     counts->v[i].path, counts->v[i].allowed, b->allowed);
-            rc = nra_push_s(violations, line);
-        } else {
-            (*tolerated)++;
-        }
-    }
-    return rc;
-}
-
-static int nra_print_violations(const struct nra_ctx *c,
-                                const struct nra_list *violations, FILE *out)
-{
-    fprintf(out, "\n[%s] %zu file(s) gained a runtime abort primitive on a\n"
-            "        network-reachable path. assert() is LIVE in this build, so each\n"
-            "        of these kills the process on a failed assumption:\n",
-            k_gate, violations->n);
-    for (size_t i = 0; i < violations->n; i++)
-        fprintf(out, "%s\n", violations->v[i]);
-    fputs("\n  Reject the input instead of aborting on it:\n"
-          "    return false / -1, log the reason with LOG_FAIL/LOG_ERR/LOG_NULL,\n"
-          "    and let the caller report it. That is how every other rejection\n"
-          "    in this tree behaves, and the node keeps running.\n"
-          "  An assertion about a LAYOUT or a CONSTANT becomes _Static_assert,\n"
-          "  which this gate deliberately does not count.\n"
-          "  An abort that is CORRECT — where continuing would leak plaintext,\n"
-          "  forge a key, or silently mis-verify a signature — is annotated in\n"
-          "  place with:  // abort-ok:<reason>   (reason required, >= 6 chars).\n"
-          "  Worked examples: core/modules/sapling/src/note_encryption.c (esk repeat),\n"
-          "  contexts/wallet/modules/keys/src/pubkey.c (process-wide verify context lifecycle).\n",
-          out);
-    return fprintf(out, "  Raising a number in %s is NOT a fix; counts may only shrink.\n",
-                  c->baseline) < 0;
-}
-
-static int nra_report(const struct nra_ctx *c, const struct nra_rows *rows,
-                      const struct nra_list *files, struct nra_baseline *base,
-                      FILE *out)
-{
-    struct nra_baseline counts; memset(&counts, 0, sizeof counts);
-    int total = 0, hatched = 0;
-    int rc = nra_count_rows(rows, &counts, &total, &hatched);
-
-    struct nra_list violations = { NULL, 0, 0 };
-    int tolerated = 0;
-    if (rc == 0)
-        rc = nra_judge_files(&counts, base, &violations, &tolerated);
-
-    struct nra_list stale = { NULL, 0, 0 };
-    for (size_t i = 0; rc == 0 && i < base->n; i++)
-        if (!base->v[i].used)
-            rc = nra_push_s(&stale, base->v[i].path);
-
-    int fail = 0;
-    if (rc == 0 && violations.n) {
-        fail = 1;
-        rc = nra_print_violations(c, &violations, out);
-    }
-    if (rc == 0 && stale.n) {
-        fail = 1;
-        fprintf(out, "\n[%s] %zu STALE baseline row(s) — the file has no runtime\n"
-                "        abort sites left. Delete them from %s:\n",
-                k_gate, stale.n, c->baseline);
-        for (size_t i = 0; i < stale.n; i++)
-            fprintf(out, "  %s\n", stale.v[i]);
-    }
-    if (rc == 0) {
-        if (fail && c->mode == NRA_MODE_FAIL)
-            rc = 1;
-        else
-            fprintf(out, "[%s] PASS (%zu files scanned, %d runtime site(s) across %zu file(s), "
-                    "%d of %zu baselined row(s) tolerated, %d annotated abort-ok)\n",
-                    k_gate, files->n, total, counts.n, tolerated, base->n, hatched);
-    }
-    nra_free(&violations);
-    nra_free(&stale);
-    nra_baseline_free(&counts);
-    return rc;
-}
-
+/* nra_write_update() and nra_report() (the PASS/FAIL/UPDATE report,
+ * including the per-site detail lines under each violated file) live in
+ * gate_no_runtime_abort_report.c — declared in gate_no_runtime_abort_priv.h. */
 int nra_run_gate(const struct nra_ctx *c, FILE *out, FILE *err)
 {
     (void)err; /* every diagnostic here — gate_require_scanned, die() — is
@@ -593,14 +427,14 @@ int nra_run_gate(const struct nra_ctx *c, FILE *out, FILE *err)
     struct nra_list files = { NULL, 0, 0 };
     rc = nra_collect_files(c, &files);
     if (rc == 0)
-        rc = gate_require_scanned((int)files.n, c->file_floor, k_gate,
+        rc = gate_require_scanned((int)files.n, c->file_floor, nra_gate_name,
             "no production .c/.h under the scan roots");
 
     struct nra_rows rows = { NULL, 0, 0 };
     if (rc == 0)
         rc = nra_scan_sites(&files, &re, &rows);
     if (rc == 0)
-        rc = gate_require_scanned((int)rows.n, c->site_floor, k_gate,
+        rc = gate_require_scanned((int)rows.n, c->site_floor, nra_gate_name,
             "no assert(/abort( sites found at all — the scan or the matcher moved");
 
     if (rc == 0 && c->mode == NRA_MODE_UPDATE) {
