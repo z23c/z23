@@ -241,6 +241,45 @@ static void fb_project_object(struct zcl_command_reply *reply,
     }
 }
 
+/* One `kind=note` post over the same `fleet_board` RPC method the CLI leaf
+ * below uses — a native in-process call, never a shelled-out
+ * `z23-dev fleet board post`. Used by the trigger board_post action
+ * (tools/command/native_fleet_triggers_eval.c) so a fired trigger reaches
+ * the board through the identical fail-closed path a human's own `fleet
+ * board post` command would take. */
+bool zcl_native_fleet_board_post_note(const char *text, char *why,
+                                      size_t why_cap)
+{
+    if (why && why_cap)
+        why[0] = 0;
+    if (!text || !text[0]) {
+        if (why)
+            (void)snprintf(why, why_cap, "empty board post text");
+        return false;
+    }
+    struct json_value out;
+    json_init(&out);
+    json_set_object(&out);
+    (void)json_push_kv_str(&out, "op", "post");
+    (void)json_push_kv_str(&out, "kind", "note");
+    (void)json_push_kv_str(&out, "text", text);
+
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.fleet_triggers_board_post.v1");
+    struct json_value body;
+    json_init(&body);
+    bool ok = fb_call(&reply, &out, &body);
+    json_free(&out);
+    if (ok)
+        json_free(&body);
+    if (!ok && why)
+        (void)snprintf(why, why_cap, "%s",
+                       reply.error.message[0] ? reply.error.message
+                                              : "the board post was refused");
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
 /* ── fleet board post ───────────────────────────────────────────────── */
 void zcl_native_handle_fleet_board_post(
     const struct zcl_command_request *request,

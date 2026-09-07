@@ -145,3 +145,53 @@ void zcl_native_handle_fleet_triggers_check(
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
+
+/* --source: closed to "github", the only adapter this slice feeds.
+ * --file: a local path to a JSONL file of already-fetched rows. Neither is
+ * a secret; the GitHub token, if the adapter needs one, never reaches this
+ * process — it lives in the adapter's own secret store. */
+void zcl_native_handle_fleet_triggers_ingest(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!reply)
+        return;
+    zcl_command_reply_init(reply, "zcl.fleet_triggers_ingest.v1");
+
+    const struct json_value *in = request ? request->input : NULL;
+    const char *source = json_get_str(json_get(in, "source"));
+    const char *file = json_get_str(json_get(in, "file"));
+    if (!source || strcmp(source, "github") != 0) {
+        trg_refuse(reply, "SOURCE_UNKNOWN",
+                  "--source must be \"github\" — the only ingest source "
+                  "this slice accepts", "input.source");
+        return;
+    }
+    if (!file || !file[0]) {
+        trg_refuse(reply, "FILE_REQUIRED",
+                  "--file must name a local JSONL file of already-fetched "
+                  "GitHub comment rows", "input.file");
+        return;
+    }
+
+    char why[256] = "";
+    int appended = zcl_trigger_ingest_github_comments(file, why, sizeof why);
+    if (appended < 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                              ZCL_COMMAND_EXIT_FAILED, "INGEST_FAILED",
+                              "execute", false, false,
+                              why[0] ? why : "ingest did not complete",
+                              "fleet.triggers.ingest");
+        return;
+    }
+
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.fleet_triggers_ingest.v1");
+    (void)json_push_kv_str(&reply->data, "source", source);
+    (void)json_push_kv_int(&reply->data, "appended", appended);
+    char text[128];
+    (void)snprintf(text, sizeof text, "appended %d row(s)\n", appended);
+    (void)json_push_kv_str(&reply->data, "text", text);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}

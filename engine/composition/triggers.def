@@ -19,6 +19,12 @@
  *              board_rows        this box's own board file under
  *                                <state>/zclassic23/board/<host>.jsonl
  *              experiment_rows   <state>/zclassic23/experiments/rows.tsv
+ *              github_comments   <state>/zclassic23/triggers/
+ *                                github_comments.jsonl — GitHub discussion
+ *                                comment rows fed in by
+ *                                `fleet triggers ingest` (z23 has no
+ *                                outbound HTTP seam; see
+ *                                docs/FLEET_TRIGGERS.md).
  *   field_   the row's field name the trigger reads. A field a row does
  *            not carry is ABSENT, not empty-string, and a trigger against
  *            an absent field never fires — for any op, including "ne".
@@ -27,18 +33,20 @@
  *   value_   the literal to compare against.
  *   action_  what happens on a match: "print" writes one line to stdout
  *            (`TRIGGER <id> <source> <field>=<value>`); "ledger" appends
- *            one JSON row to
- *            <state>/zclassic23/triggers/fired.jsonl.
+ *            one JSON row to <state>/zclassic23/triggers/fired.jsonl;
+ *            "board_post" posts one `note` to the fleet board (kind
+ *            fixed), whose text templates the row's own "body" or
+ *            "summary" field (falling back to why_) over "<field>=<value>".
  *   why_     one plain sentence: the reason this reaction exists.
  *
  * ORDER IS NOT IDENTITY here — ids are looked up by name, not position —
  * but append new rows at the end anyway so a diff reads as a diff.
  *
- * This is the FIRST SLICE (see docs/FLEET_TRIGGERS.md): no daemon, no
- * network, no board-post action yet — the native board leaf itself is
- * changing in train 44. `z23-dev fleet triggers check` is run once, by a
- * human or a script, and later by the resident mind service on the same
- * evaluator this file drives.
+ * This is the SECOND SLICE (see docs/FLEET_TRIGGERS.md): still no daemon
+ * and still no outbound network call from z23 itself, but the board-post
+ * action and the GitHub source both exist now. `z23-dev fleet triggers
+ * check` is run once, by a human or a script, and later by the resident
+ * mind service on the same evaluator this file drives.
  */
 
 Z23_TRIGGER("landing_landed_to_ledger", "landing_outcomes", "state", "eq",
@@ -64,3 +72,8 @@ Z23_TRIGGER("experiment_wrong_to_ledger", "experiment_rows", "outcome", "eq",
            "wrong", "ledger",
            "A wrong result is worth keeping in the ledger as a pattern to "
            "learn from later, not just a line in a growing TSV.")
+Z23_TRIGGER("github_comment_to_board", "github_comments", "kind", "eq",
+           "comment", "board_post",
+           "A new GitHub discussion comment needs to reach the fleet board "
+           "immediately, replacing the maintainer's own ad-hoc browser-tab "
+           "poll of the discussion.")

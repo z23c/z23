@@ -219,14 +219,17 @@ ZCL_COMMAND_READY_COMMAND(
     "fleet.triggers.check", "fleet.triggers", "",
     "Run every trigger once against whatever is new in its source",
     "Reads each source (landing outcomes, this box's board file, the "
-    "experiment TSV) from its own saved byte cursor, evaluates every "
-    "registered trigger against every row that is new since last time, "
-    "performs the matched action (print or append to "
-    "triggers/fired.jsonl), and advances the cursor past what it read. "
-    "since, in seconds, skips evaluating a row whose own timestamp is "
-    "older than that; dry-run performs the same actions but never moves "
-    "the cursor, so a re-run sees the same rows again. It contacts no "
-    "peer and starts no daemon: one call reads what is new and returns.",
+    "experiment TSV, ingested GitHub comment rows) from its own saved byte "
+    "cursor, evaluates every registered trigger against every row that is "
+    "new since last time, performs the matched action (print, append to "
+    "triggers/fired.jsonl, or post a fleet board note), and advances the "
+    "cursor past what it read. since, in seconds, skips evaluating a row "
+    "whose own timestamp is older than that; dry-run performs the same "
+    "actions but never moves the cursor, so a re-run sees the same rows "
+    "again. It starts no daemon: one call reads what is new and returns. "
+    "A board_post action reaches the local running node the same way "
+    "`fleet board post` does and fails closed when none answers; every "
+    "other action stays purely local.",
     0,
     "fleet,triggers,check,run,evaluate",
     "zcl.fleet_triggers_check.input.v1", "zcl.fleet_triggers_check.v1",
@@ -240,6 +243,33 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_DEV_STATE_READ | ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_PROSE,
     zcl_native_handle_fleet_triggers_check)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.triggers.ingest", "fleet.triggers", "",
+    "Append already-fetched GitHub discussion comment rows to the "
+    "github_comments trigger source",
+    "z23 has no outbound HTTP seam, so this never reaches GitHub itself: a "
+    "tiny external adapter fetches new comments (e.g. via `gh api`) and "
+    "writes them as one JSON object per line, and this leaf validates and "
+    "appends the ones that carry every field the github_comments source "
+    "needs (kind, owner, repo, number, comment_id, author, url, body, ts) "
+    "to <state>/zclassic23/triggers/github_comments.jsonl. A line missing "
+    "a field is skipped, not fatal, so re-feeding an overlapping fetch "
+    "costs nothing; the per-source byte cursor `fleet triggers check` "
+    "already keeps is what actually prevents re-firing after a restart. "
+    "source is closed to \"github\". It contacts no peer.",
+    0,
+    "fleet,triggers,ingest,github,comments",
+    "zcl.fleet_triggers_ingest.input.v1", "zcl.fleet_triggers_ingest.v1",
+    "source,file", "source,file",
+    "z23-dev fleet triggers ingest --source=github --file=/path/comments.jsonl",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_triggers_ingest)
 
 ZCL_COMMAND_READY_READ(
     "fleet.experiment.stats", "fleet.experiment", "",

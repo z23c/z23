@@ -19,6 +19,7 @@ enum zcl_trigger_source {
     ZCL_TRIGGER_SOURCE_LANDING = 0,
     ZCL_TRIGGER_SOURCE_BOARD,
     ZCL_TRIGGER_SOURCE_EXPERIMENT,
+    ZCL_TRIGGER_SOURCE_GITHUB,
 };
 
 enum zcl_trigger_op {
@@ -31,6 +32,7 @@ enum zcl_trigger_op {
 enum zcl_trigger_action {
     ZCL_TRIGGER_ACTION_PRINT = 0,
     ZCL_TRIGGER_ACTION_LEDGER,
+    ZCL_TRIGGER_ACTION_BOARD_POST,
 };
 
 struct zcl_trigger_row {
@@ -55,8 +57,20 @@ const struct zcl_trigger_row *zcl_trigger_at(size_t index);
 bool zcl_trigger_landing_path(char *out, size_t cap);
 bool zcl_trigger_board_path(char *out, size_t cap);
 bool zcl_trigger_experiment_path(char *out, size_t cap);
+bool zcl_trigger_github_comments_path(char *out, size_t cap);
 bool zcl_trigger_fired_ledger_path(char *out, size_t cap);
 bool zcl_trigger_cursor_path(const char *source_name, char *out, size_t cap);
+
+/* ── github comment ingest (tools/command/native_fleet_triggers_eval.c) ──
+ * Appends one already-fetched GitHub discussion comment row to the
+ * `github_comments` source file. z23 has no outbound HTTP seam today, so
+ * this is fed by a tiny external adapter (a shell script calling `gh api`
+ * or curl) rather than reaching out itself. Every field is required and a
+ * plain string; a line failing that shape is refused and nothing is
+ * appended for it. Returns the number of lines appended; -1 names an
+ * unrecoverable local error in out_why. */
+int zcl_trigger_ingest_github_comments(const char *jsonl_path, char *out_why,
+                                       size_t out_why_cap);
 
 /* ── run-once evaluator ───────────────────────────────────────────────
  * Reads every new row of every source since its cursor, evaluates every
@@ -77,6 +91,9 @@ void zcl_native_handle_fleet_triggers_list(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_fleet_triggers_check(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_triggers_ingest(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 

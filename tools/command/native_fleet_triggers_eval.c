@@ -6,6 +6,7 @@
 
 #include "command/native_fleet_triggers.h"
 
+#include "command/native_command.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/state_root.h"
@@ -129,6 +130,18 @@ bool zcl_trigger_experiment_path(char *out, size_t cap)
     if (!trg_base_dir(base, sizeof base))
         return false;
     return (size_t)snprintf(out, cap, "%s/zclassic23/experiments/rows.tsv",
+                            base) < cap;
+}
+
+/* Fed by `fleet triggers ingest`, never by z23 itself reaching out — see
+ * zcl_trigger_ingest_github_comments below. */
+bool zcl_trigger_github_comments_path(char *out, size_t cap)
+{
+    char base[PATH_MAX];
+    if (!trg_base_dir(base, sizeof base))
+        return false;
+    return (size_t)snprintf(out, cap,
+                            "%s/zclassic23/triggers/github_comments.jsonl",
                             base) < cap;
 }
 
@@ -319,13 +332,50 @@ static bool trg_op_matches(enum zcl_trigger_op op, const char *actual,
 
 /* ── actions ──────────────────────────────────────────────────────────
  * print: one summary line on stdout. ledger: one appended JSON row under
- * <state>/zclassic23/triggers/fired.jsonl. */
+ * <state>/zclassic23/triggers/fired.jsonl. board_post: one `note` post to
+ * the fleet board (see trg_action_board_post below). */
 
 static void trg_action_print(const struct zcl_trigger_row *trig,
                              const char *actual)
 {
     printf("TRIGGER %s %s %s=%s\n", trig->id, trig->source_name, trig->field,
           actual);
+}
+
+/* board_post's template: the row's own "body" field when it carries one
+ * (the GitHub adapter's comment text), else its "summary" field, else the
+ * trigger's own why_ sentence — followed by the matched field=value pair so
+ * a reader always sees which trigger fired. Kept deliberately generic
+ * (named-field lookup, not a per-trigger template string) so no source
+ * needs its own board_post wiring. */
+static void trg_board_post_text(const struct zcl_trigger_row *trig,
+                                const struct trg_row *row,
+                                const char *const *header,
+                                size_t header_count, const char *actual,
+                                char *out, size_t cap)
+{
+    const char *detail = trg_row_field(row, header, header_count, "body");
+    if (!detail)
+        detail = trg_row_field(row, header, header_count, "summary");
+    if (!detail)
+        detail = trig->why;
+    (void)snprintf(out, cap, "%s (%s %s=%s)", detail, trig->id, trig->field,
+                  actual);
+}
+
+static bool trg_action_board_post(const struct zcl_trigger_row *trig,
+                                  const struct trg_row *row,
+                                  const char *const *header,
+                                  size_t header_count, const char *actual)
+{
+    char text[FLEET_BOARD_LINE_MAX];
+    trg_board_post_text(trig, row, header, header_count, actual, text,
+                        sizeof text);
+    char why[192];
+    bool ok = zcl_native_fleet_board_post_note(text, why, sizeof why);
+    if (!ok)
+        fprintf(stderr, "TRIGGER %s board_post refused: %s\n", trig->id, why);
+    return ok;
 }
 
 static bool trg_action_ledger(const struct zcl_trigger_row *trig,
@@ -386,6 +436,8 @@ static const struct trg_source_spec k_source_specs[] = {
     { ZCL_TRIGGER_SOURCE_BOARD, "board_rows", false, zcl_trigger_board_path },
     { ZCL_TRIGGER_SOURCE_EXPERIMENT, "experiment_rows", true,
      zcl_trigger_experiment_path },
+    { ZCL_TRIGGER_SOURCE_GITHUB, "github_comments", false,
+     zcl_trigger_github_comments_path },
 };
 
 /* Read the header line of a TSV source (column names by index); a JSONL
@@ -427,10 +479,16 @@ static bool trg_fire_if_matched(const struct zcl_trigger_row *trig,
     const char *actual = trg_row_field(row, header, header_count, trig->field);
     if (!actual || !trg_op_matches(trig->op, actual, trig->value))
         return false;
-    if (trig->action == ZCL_TRIGGER_ACTION_PRINT) {
+    switch (trig->action) {
+    case ZCL_TRIGGER_ACTION_PRINT:
         trg_action_print(trig, actual);
-    } else {
+        break;
+    case ZCL_TRIGGER_ACTION_LEDGER:
         (void)trg_action_ledger(trig, actual, seq);
+        break;
+    case ZCL_TRIGGER_ACTION_BOARD_POST:
+        (void)trg_action_board_post(trig, row, header, header_count, actual);
+        break;
     }
     if (fired_ids) {
         struct json_value idv;
@@ -597,4 +655,117 @@ bool zcl_trigger_check_run(bool dry_run, int64_t since_s, uint64_t *out_checked,
         trg_process_source(&k_source_specs[i], dry_run, since_s, out_checked,
                           out_fired, out_fired_ids);
     return true;
+}
+
+/* ── github comment ingest ────────────────────────────────────────────
+ * z23 has no outbound HTTP seam (see docs/FLEET_TRIGGERS.md), so this never
+ * reaches GitHub itself: it accepts rows a tiny external adapter already
+ * fetched and appends the ones that carry every field the github_comments
+ * source needs. */
+
+static const char *const k_github_required_fields[] = {
+    "kind", "owner", "repo", "number", "comment_id", "author", "url", "body",
+    "ts",
+};
+
+static bool trg_github_row_valid(const struct json_value *obj)
+{
+    if (!obj || obj->type != JSON_OBJ)
+        return false;
+    for (size_t i = 0;
+        i < sizeof k_github_required_fields / sizeof k_github_required_fields[0];
+        i++) {
+        const struct json_value *v = json_get(obj, k_github_required_fields[i]);
+        if (!v || v->type != JSON_STR || !json_get_str(v)[0])
+            return false;
+    }
+    return strcmp(json_get_str(json_get(obj, "kind")), "comment") == 0;
+}
+
+static bool trg_ingest_dest_open(FILE **out, char *why, size_t why_cap)
+{
+    char dest[PATH_MAX], dir[PATH_MAX], base[PATH_MAX];
+    if (!trg_base_dir(base, sizeof base)) {
+        (void)snprintf(why, why_cap, "no state root");
+        return false;
+    }
+    if ((size_t)snprintf(dir, sizeof dir, "%s/zclassic23/triggers", base) >=
+        sizeof dir) {
+        (void)snprintf(why, why_cap, "triggers dir path too long");
+        return false;
+    }
+    if (!trg_mkdir_p(dir)) {
+        (void)snprintf(why, why_cap, "cannot create %s", dir);
+        return false;
+    }
+    if (!zcl_trigger_github_comments_path(dest, sizeof dest)) {
+        (void)snprintf(why, why_cap, "cannot resolve github_comments path");
+        return false;
+    }
+    *out = fopen(dest, "ab");
+    if (!*out) {
+        (void)snprintf(why, why_cap, "cannot open %s", dest);
+        return false;
+    }
+    return true;
+}
+
+/* One line in, at most one canonical line out. A line that does not parse
+ * or is missing a required field is silently skipped, not fatal: the
+ * adapter feeding this may have already-ingested rows mixed into a fresh
+ * fetch, and re-ingesting them must cost nothing. */
+static int trg_ingest_scan(FILE *in, FILE *out)
+{
+    char line[TRG_LINE_MAX];
+    int appended = 0;
+    while (fgets(line, sizeof line, in)) {
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = 0;
+        if (!len)
+            continue;
+        struct json_value obj;
+        if (!json_read(&obj, line, len))
+            continue;
+        if (!trg_github_row_valid(&obj)) {
+            json_free(&obj);
+            continue;
+        }
+        char canon[TRG_LINE_MAX];
+        size_t n = json_write(&obj, canon, sizeof canon);
+        json_free(&obj);
+        if (n > 0 && n < sizeof canon && fprintf(out, "%s\n", canon) > 0)
+            appended++;
+    }
+    return appended;
+}
+
+int zcl_trigger_ingest_github_comments(const char *jsonl_path, char *out_why,
+                                       size_t out_why_cap)
+{
+    if (out_why && out_why_cap)
+        out_why[0] = 0;
+    if (!jsonl_path || !jsonl_path[0]) {
+        if (out_why)
+            (void)snprintf(out_why, out_why_cap, "a file path is required");
+        return -1;
+    }
+    FILE *in = fopen(jsonl_path, "rb");
+    if (!in) {
+        if (out_why)
+            (void)snprintf(out_why, out_why_cap, "cannot open %s", jsonl_path);
+        return -1;
+    }
+    FILE *out = NULL;
+    char why[128] = "";
+    if (!trg_ingest_dest_open(&out, why, sizeof why)) {
+        fclose(in);
+        if (out_why)
+            (void)snprintf(out_why, out_why_cap, "%s", why);
+        return -1;
+    }
+    int appended = trg_ingest_scan(in, out);
+    fclose(in);
+    fclose(out);
+    return appended;
 }

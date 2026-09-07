@@ -16,6 +16,7 @@ static const struct zcl_trigger_named_source k_sources[] = {
     { "landing_outcomes", ZCL_TRIGGER_SOURCE_LANDING },
     { "board_rows", ZCL_TRIGGER_SOURCE_BOARD },
     { "experiment_rows", ZCL_TRIGGER_SOURCE_EXPERIMENT },
+    { "github_comments", ZCL_TRIGGER_SOURCE_GITHUB },
 };
 
 struct zcl_trigger_named_op {
@@ -38,6 +39,7 @@ struct zcl_trigger_named_action {
 static const struct zcl_trigger_named_action k_actions[] = {
     { "print", ZCL_TRIGGER_ACTION_PRINT },
     { "ledger", ZCL_TRIGGER_ACTION_LEDGER },
+    { "board_post", ZCL_TRIGGER_ACTION_BOARD_POST },
 };
 
 static enum zcl_trigger_source trg_source_value(const char *name)

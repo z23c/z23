@@ -2811,6 +2811,14 @@ enum {
 void zcl_native_handle_fleet_board_post(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* The same node call zcl_native_handle_fleet_board_post makes (the
+ * `fleet_board` RPC method), factored out so another native leaf — a
+ * trigger's board_post action — can post a `note` without shelling out to
+ * `z23-dev fleet board post` or duplicating the RPC envelope handling.
+ * Fails closed with a plain-English `why` when no node answers, exactly
+ * like the CLI leaf. */
+bool zcl_native_fleet_board_post_note(const char *text, char *why,
+                                      size_t why_cap);
 void zcl_native_handle_fleet_board_list(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

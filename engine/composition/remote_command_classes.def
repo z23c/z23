@@ -1116,20 +1116,26 @@ REMOTE_COMMAND_CLASS("fleet.wiki.history", REMOTE_CLASS_READ_ONLY,
 REMOTE_COMMAND_CLASS("fleet.board.post", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.wiki.write", REMOTE_CLASS_NEVER, "")
 
-/* ── this node's own triggers — 2 never_remote ─────────────────────────
+/* ── this node's own triggers — 3 never_remote ─────────────────────────
  * A trigger is this box reacting to its own local event sources: landing
- * outcomes, its board file, its experiment ledger. `check` evaluates them
- * and fires the matching actions, so a peer that could ask for it would be
- * asking this node to act on its own state on someone else's schedule, and
- * would move the per-source byte cursor that decides what fires next.
+ * outcomes, its board file, its experiment ledger, ingested GitHub comment
+ * rows. `check` evaluates them and fires the matching actions, so a peer
+ * that could ask for it would be asking this node to act on its own state
+ * on someone else's schedule, and would move the per-source byte cursor
+ * that decides what fires next.
  *
  * `list` is refused too, and not from excess caution. The registry it prints
  * is this box's own reaction map — which of its files are watched, what
  * pattern each row matches, and what happens when one does. That is the
  * shape of the target, which this table's enumeration rule keeps off the
- * wire whether or not reading it changes anything. */
+ * wire whether or not reading it changes anything.
+ *
+ * `ingest` writes this box's own trigger source file from a local adapter's
+ * output; a peer asking for it would be injecting rows into this node's own
+ * reaction pipeline under someone else's schedule, same as `check`. */
 REMOTE_COMMAND_CLASS("fleet.triggers.check", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.triggers.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.triggers.ingest", REMOTE_CLASS_NEVER, "")
 
 /* THE OWNER'S PRIVATE FLEET LEDGER — 3 never_remote.
  *
