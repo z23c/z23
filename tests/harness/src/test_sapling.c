@@ -24,7 +24,7 @@
 #include "util/safe_alloc.h"
 #include <time.h>
 
-int test_sapling(void)
+static int test_sapling_sapling_check_spend_rejects_null_spend_vk_agent_3(void)
 {
     int failures = 0;
 
@@ -60,6 +60,13 @@ int test_sapling(void)
         else { printf("FAIL (accepted spend with NULL vk)\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_check_output_rejects_null_output_vk_agent_(void)
+{
+    int failures = 0;
+
     printf("sapling_check_output rejects NULL output_vk (AGENT-3)... ");
     {
         /* Same reasoning: output VK still NULL. */
@@ -76,6 +83,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (accepted output with NULL vk)\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_init_params_rejects_tampered_params_agent_(void)
+{
+    int failures = 0;
 
     printf("sapling_init_params rejects tampered params (AGENT-3)... ");
     {
@@ -118,6 +132,13 @@ int test_sapling(void)
         else { printf("FAIL (accepted tampered params)\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_jubjub_to_scalar_zero(void)
+{
+    int failures = 0;
+
     printf("jubjub_to_scalar zero... ");
     {
         unsigned char input[64];
@@ -133,6 +154,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_jubjub_to_scalar_small_value(void)
+{
+    int failures = 0;
 
     printf("jubjub_to_scalar small value... ");
     {
@@ -158,6 +186,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_jubjub_to_scalar_reduction(void)
+{
+    int failures = 0;
+
     printf("jubjub_to_scalar reduction... ");
     {
         /* Input = r itself (256-bit, padded to 512) should give 0 */
@@ -182,6 +217,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_prf_expand_sapling_blake2b(void)
+{
+    int failures = 0;
+
     printf("prf_expand (Sapling blake2b)... ");
     {
         struct uint256 sk;
@@ -199,6 +241,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_prf_ask_prf_nsk_prf_ovk(void)
+{
+    int failures = 0;
 
     printf("prf_ask/prf_nsk/prf_ovk... ");
     {
@@ -219,6 +268,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_prf_addr_a_pk_sprout(void)
+{
+    int failures = 0;
+
     printf("prf_addr_a_pk (Sprout)... ");
     {
         unsigned char a_sk[32];
@@ -236,6 +292,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_sprout_tree_empty_root(void)
+{
+    int failures = 0;
+
     printf("sprout_tree empty root... ");
     {
         struct incremental_merkle_tree t;
@@ -251,6 +314,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sprout_tree_append_and_root_changes(void)
+{
+    int failures = 0;
 
     printf("sprout_tree append and root changes... ");
     {
@@ -274,6 +344,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sprout_tree_append_two_leaves(void)
+{
+    int failures = 0;
 
     printf("sprout_tree append two leaves... ");
     {
@@ -299,6 +376,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sprout_tree_append_three_leaves(void)
+{
+    int failures = 0;
 
     printf("sprout_tree append three leaves... ");
     {
@@ -327,6 +411,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sprout_tree_serialize_deserialize_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- Sprout tree serialization roundtrip --- */
     printf("sprout_tree serialize/deserialize roundtrip... ");
@@ -367,6 +458,13 @@ int test_sapling(void)
         stream_free(&bs2);
     }
 
+    return failures;
+}
+
+static int test_sapling_sprout_tree_deserialize_validation(void)
+{
+    int failures = 0;
+
     /* --- Tree deserialization validation --- */
     printf("sprout_tree deserialize validation... ");
     {
@@ -390,6 +488,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
         stream_free(&bs);
     }
+
+    return failures;
+}
+
+static int test_sapling_sprout_tree_empty_serialize_deserialize(void)
+{
+    int failures = 0;
 
     /* --- Empty tree serialization --- */
     printf("sprout_tree empty serialize/deserialize... ");
@@ -421,6 +526,13 @@ int test_sapling(void)
         stream_free(&bs2);
     }
 
+    return failures;
+}
+
+static int test_sapling_incremental_witness_basic(void)
+{
+    int failures = 0;
+
     /* --- Witness basic test --- */
     printf("incremental_witness basic... ");
     {
@@ -449,6 +561,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_incremental_witness_serialize_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- Witness serialization roundtrip --- */
     printf("incremental_witness serialize roundtrip... ");
@@ -490,6 +609,13 @@ int test_sapling(void)
         stream_free(&bs);
         stream_free(&bs2);
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_v4_tx_roundtrip_spend_output_joinsplit(void)
+{
+    int failures = 0;
 
     /* --- Sapling v4 transaction roundtrip with shielded data --- */
     printf("sapling v4 tx roundtrip (spend+output+joinsplit)... ");
@@ -619,6 +745,13 @@ int test_sapling(void)
         stream_free(&bs3);
     }
 
+    return failures;
+}
+
+static int test_sapling_overwinter_v3_tx_roundtrip(void)
+{
+    int failures = 0;
+
     /* --- Overwinter v3 transaction roundtrip --- */
     printf("overwinter v3 tx roundtrip... ");
     {
@@ -661,6 +794,13 @@ int test_sapling(void)
         stream_free(&bs);
         stream_free(&bs2);
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_v4_tx_shielded_output_only(void)
+{
+    int failures = 0;
 
     /* --- Sapling v4 tx with only shielded outputs (no spends, no joinsplits) --- */
     printf("sapling v4 tx shielded output only... ");
@@ -716,6 +856,13 @@ int test_sapling(void)
         stream_free(&bs3);
     }
 
+    return failures;
+}
+
+static int test_sapling_transaction_get_value_out_with_shielded(void)
+{
+    int failures = 0;
+
     /* --- transaction_get_value_out with shielded --- */
     printf("transaction_get_value_out with shielded... ");
     {
@@ -741,6 +888,13 @@ int test_sapling(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int test_sapling_transaction_get_shielded_value_in(void)
+{
+    int failures = 0;
+
     /* --- transaction_get_shielded_value_in --- */
     printf("transaction_get_shielded_value_in... ");
     {
@@ -759,6 +913,13 @@ int test_sapling(void)
 
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int test_sapling_transaction_copy_with_shielded_data(void)
+{
+    int failures = 0;
 
     /* --- transaction_copy with shielded data --- */
     printf("transaction_copy with shielded data... ");
@@ -800,6 +961,13 @@ int test_sapling(void)
         transaction_free(&dst);
     }
 
+    return failures;
+}
+
+static int test_sapling_sprout_note_cm(void)
+{
+    int failures = 0;
+
     /* --- sprout_note_cm --- */
     printf("sprout_note_cm... ");
     {
@@ -819,6 +987,13 @@ int test_sapling(void)
         if (nonzero) printf("OK\n");
         else { printf("FAIL (zero cm)\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sprout_note_plaintext_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- sprout_note_plaintext roundtrip --- */
     printf("sprout_note_plaintext roundtrip... ");
@@ -850,6 +1025,13 @@ int test_sapling(void)
         stream_free(&bs2);
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_note_plaintext_roundtrip(void)
+{
+    int failures = 0;
+
     /* --- sapling_note_plaintext roundtrip --- */
     printf("sapling_note_plaintext roundtrip... ");
     {
@@ -879,6 +1061,13 @@ int test_sapling(void)
         stream_free(&bs2);
     }
 
+    return failures;
+}
+
+static int test_sapling_sprout_payment_address_roundtrip(void)
+{
+    int failures = 0;
+
     /* --- sprout address serialization roundtrip --- */
     printf("sprout_payment_address roundtrip... ");
     {
@@ -904,6 +1093,13 @@ int test_sapling(void)
         stream_free(&bs);
         stream_free(&bs2);
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_payment_address_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- sapling address serialization roundtrip --- */
     printf("sapling_payment_address roundtrip... ");
@@ -931,6 +1127,13 @@ int test_sapling(void)
         stream_free(&bs2);
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_spending_key_to_expanded(void)
+{
+    int failures = 0;
+
     /* --- sapling_spending_key_to_expanded --- */
     printf("sapling_spending_key_to_expanded... ");
     {
@@ -952,6 +1155,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_chacha20_block_rfc_7539(void)
+{
+    int failures = 0;
 
     /* --- ChaCha20 block (RFC 7539 test vector 2.3.2) --- */
     printf("chacha20_block RFC 7539... ");
@@ -978,6 +1188,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_poly1305_mac_rfc_7539(void)
+{
+    int failures = 0;
+
     /* --- Poly1305 MAC (RFC 7539 test vector 2.5.2) --- */
     printf("poly1305_mac RFC 7539... ");
     {
@@ -999,6 +1216,13 @@ int test_sapling(void)
         if (memcmp(tag, expected, 16) == 0) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_chacha20poly1305_encrypt_decrypt_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- ChaCha20-Poly1305 AEAD roundtrip --- */
     printf("chacha20poly1305 encrypt/decrypt roundtrip... ");
@@ -1028,6 +1252,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_chacha20poly1305_with_aad(void)
+{
+    int failures = 0;
 
     /* --- ChaCha20-Poly1305 with AAD --- */
     printf("chacha20poly1305 with AAD... ");
@@ -1067,6 +1298,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_curve25519_scalarmult_base_rfc_7748(void)
+{
+    int failures = 0;
+
     /* --- Curve25519 scalarmult_base (RFC 7748 Section 6.1) --- */
     printf("curve25519_scalarmult_base RFC 7748... ");
     {
@@ -1095,6 +1333,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_curve25519_scalarmult_dh_key_exchange(void)
+{
+    int failures = 0;
 
     /* --- Curve25519 DH (RFC 7748 Section 6.1) --- */
     printf("curve25519_scalarmult DH key exchange... ");
@@ -1138,6 +1383,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_curve25519_scalarmult_timing_vs_scalar_weight_wave(void)
+{
+    int failures = 0;
 
     /* Wave 2 / Step H regression: Hamming-weight timing test for
      * curve25519_scalarmult. The Montgomery ladder is constant-time by
@@ -1236,6 +1488,13 @@ int test_sapling(void)
         #undef CX25519_TIMING_BATCHES
     }
 
+    return failures;
+}
+
+static int test_sapling_sprout_kdf_blake2b_personalization(void)
+{
+    int failures = 0;
+
     /* --- Sprout KDF --- */
     printf("sprout_kdf BLAKE2b personalization... ");
     {
@@ -1264,6 +1523,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_kdf_blake2b_personalization(void)
+{
+    int failures = 0;
+
     /* --- Sapling KDF --- */
     printf("sapling_kdf BLAKE2b personalization... ");
     {
@@ -1278,6 +1544,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_prf_ock(void)
+{
+    int failures = 0;
 
     /* --- Sapling PRF_ock --- */
     printf("sapling_prf_ock... ");
@@ -1295,6 +1568,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sprout_note_encrypt_decrypt_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- Sprout note encrypt/decrypt roundtrip --- */
     printf("sprout_note_encrypt/decrypt roundtrip... ");
@@ -1357,6 +1637,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sprout_note_encrypt_tamper_detection(void)
+{
+    int failures = 0;
+
     /* --- Sprout note encrypt tamper detection --- */
     printf("sprout_note_encrypt tamper detection... ");
     {
@@ -1394,6 +1681,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_note_encrypt_decrypt_roundtrip(void)
+{
+    int failures = 0;
+
     /* --- Sapling note encrypt/decrypt --- */
     printf("sapling_note_encrypt/decrypt roundtrip... ");
     {
@@ -1423,6 +1717,13 @@ int test_sapling(void)
         if (ok) printf("OK (%zu bytes)\n", (size_t)ZC_SAPLING_ENCCIPHERTEXT_SIZE);
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_out_encrypt_decrypt_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- Sapling outgoing ciphertext encrypt/decrypt --- */
     printf("sapling_out_encrypt/decrypt roundtrip... ");
@@ -1456,6 +1757,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_blake2s_256(void)
+{
+    int failures = 0;
+
     /* --- BLAKE2s basic --- */
     printf("BLAKE2s-256(\"\")... ");
     {
@@ -1478,6 +1786,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_fr_add_sub_mul_identity(void)
+{
+    int failures = 0;
 
     /* --- Fr field basic arithmetic --- */
     printf("fr_add/sub/mul identity... ");
@@ -1511,6 +1826,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_fr_from_bytes_to_bytes_roundtrip(void)
+{
+    int failures = 0;
+
     /* --- Fr from_bytes/to_bytes roundtrip --- */
     printf("fr_from_bytes/to_bytes roundtrip... ");
     {
@@ -1530,6 +1852,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_fr_mul_7_7_49(void)
+{
+    int failures = 0;
+
     /* --- Fr multiplication --- */
     printf("fr_mul 7*7=49... ");
     {
@@ -1546,6 +1875,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_fr_inv_a_a_1_1(void)
+{
+    int failures = 0;
 
     /* --- Fr inversion --- */
     printf("fr_inv (a * a^-1 = 1)... ");
@@ -1564,6 +1900,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_jub_identity_is_identity(void)
+{
+    int failures = 0;
+
     /* --- Jubjub point identity --- */
     printf("jub_identity is identity... ");
     {
@@ -1580,6 +1923,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_jub_double_identity(void)
+{
+    int failures = 0;
+
     /* --- Jubjub point doubling identity --- */
     printf("jub_double identity... ");
     {
@@ -1591,6 +1941,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_jub_from_bytes_to_bytes_roundtrip(void)
+{
+    int failures = 0;
 
     /* --- Jubjub point from_bytes/to_bytes roundtrip --- */
     printf("jub_from_bytes/to_bytes roundtrip... ");
@@ -1637,6 +1994,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_jub_double_known_point(void)
+{
+    int failures = 0;
+
     /* --- Jubjub point doubling --- */
     printf("jub_double known point... ");
     {
@@ -1675,6 +2039,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_pedersen_merkle_hash_depth_25(void)
+{
+    int failures = 0;
 
     /* --- PedersenHash Merkle test vector --- */
     printf("pedersen_merkle_hash depth=25... ");
@@ -1715,6 +2086,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_pedersen_merkle_hash_0_1_1(void)
+{
+    int failures = 0;
+
     /* --- Sapling merkle_hash(0, 1, 1) --- */
     printf("pedersen_merkle_hash(0, 1, 1)... ");
     {
@@ -1738,6 +2116,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_pedersen_chaining_depth_0_1(void)
+{
+    int failures = 0;
+
     /* --- Manual chaining test --- */
     printf("pedersen chaining depth 0→1... ");
     {
@@ -1760,6 +2145,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_tree_empty_root(void)
+{
+    int failures = 0;
 
     /* --- Sapling tree with PedersenHash --- */
     printf("sapling_tree empty root... ");
@@ -1790,6 +2182,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_empty_root_chain_all_33_levels(void)
+{
+    int failures = 0;
 
     /* Verify all 33 Sapling empty root levels against reference data */
     printf("sapling empty root chain (all 33 levels)... ");
@@ -1859,6 +2258,13 @@ int test_sapling(void)
         else failures++;
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_uncommitted(void)
+{
+    int failures = 0;
+
     /* --- Sapling uncommitted value --- */
     printf("sapling_uncommitted... ");
     {
@@ -1869,6 +2275,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_merkle_tree_16_commitments_depth_4(void)
+{
+    int failures = 0;
 
     /* --- Sapling incremental merkle tree: 16 commitments, verify root after each --- */
     /* C++ test uses SaplingTestingMerkleTree (depth=4), NOT production depth=32.
@@ -1944,6 +2357,13 @@ int test_sapling(void)
         else failures++;
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_group_hash_via_ask_to_ak(void)
+{
+    int failures = 0;
+
     /* --- Sapling group_hash (via ask_to_ak which uses SpendingKeyGenerator) --- */
     printf("sapling group_hash via ask_to_ak... ");
     {
@@ -1958,6 +2378,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_check_diversifier(void)
+{
+    int failures = 0;
+
     /* --- Sapling check_diversifier --- */
     printf("sapling check_diversifier... ");
     {
@@ -1966,6 +2393,13 @@ int test_sapling(void)
         if (ok1) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_crh_ivk(void)
+{
+    int failures = 0;
 
     /* --- Sapling CRH^ivk --- */
     printf("sapling crh_ivk... ");
@@ -1978,6 +2412,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_key_components_d_ask(void)
+{
+    int failures = 0;
 
     /* --- Sapling key components (reference test vectors, 10 test cases) --- */
     /* Tests full chain: sk → ask/nsk/ovk → ak/nk → ivk → pk_d, plus cm and nf */
@@ -2194,6 +2635,13 @@ int test_sapling(void)
                num_vecs, num_vecs, vec_fails);
     }
 
+    return failures;
+}
+
+static int test_sapling_redjubjub_sign_verify_roundtrip(void)
+{
+    int failures = 0;
+
     /* --- RedJubjub sign/verify roundtrip --- */
     printf("redjubjub sign/verify roundtrip... ");
     {
@@ -2289,6 +2737,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp_add_sub_identity(void)
+{
+    int failures = 0;
+
     /* --- BLS12-381 Fp field --- */
     printf("bls12_381 fp_add/sub identity... ");
     {
@@ -2302,6 +2757,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp_mul_identity(void)
+{
+    int failures = 0;
 
     printf("bls12_381 fp_mul identity... ");
     {
@@ -2317,6 +2779,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp_from_to_bytes_roundtrip(void)
+{
+    int failures = 0;
+
     printf("bls12_381 fp from/to bytes roundtrip... ");
     {
         uint8_t input[48] = {0};
@@ -2329,6 +2798,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp_mul_7_7_49(void)
+{
+    int failures = 0;
 
     printf("bls12_381 fp_mul 7*7=49... ");
     {
@@ -2345,6 +2821,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp_inv_a_a_1_1(void)
+{
+    int failures = 0;
+
     printf("bls12_381 fp_inv (a * a^-1 = 1)... ");
     {
         uint8_t val[48] = {0};
@@ -2359,6 +2842,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp2_mul_basic(void)
+{
+    int failures = 0;
+
     printf("bls12_381 fp2_mul basic... ");
     {
         struct fp2 a, b, c;
@@ -2369,6 +2859,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp2_inv_roundtrip(void)
+{
+    int failures = 0;
 
     printf("bls12_381 fp2_inv roundtrip... ");
     {
@@ -2386,6 +2883,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp_sqrt(void)
+{
+    int failures = 0;
+
     printf("bls12_381 fp_sqrt... ");
     {
         /* sqrt(4) = 2 or q-2 */
@@ -2401,6 +2905,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_g1_double_generator(void)
+{
+    int failures = 0;
 
     printf("bls12_381 g1_double generator... ");
     {
@@ -2420,6 +2931,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_g1_add_generator_generator(void)
+{
+    int failures = 0;
 
     printf("bls12_381 g1_add generator+generator... ");
     {
@@ -2442,6 +2960,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_g1_from_compressed_generator(void)
+{
+    int failures = 0;
 
     printf("bls12_381 g1_from_compressed generator... ");
     {
@@ -2473,6 +2998,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp6_mul_identity(void)
+{
+    int failures = 0;
+
     printf("bls12_381 fp6_mul identity... ");
     {
         struct fp6 a, one, product;
@@ -2498,6 +3030,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp6_inv_roundtrip(void)
+{
+    int failures = 0;
+
     printf("bls12_381 fp6_inv roundtrip... ");
     {
         struct fp6 a, ainv, product, one;
@@ -2522,6 +3061,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp12_mul_identity(void)
+{
+    int failures = 0;
 
     printf("bls12_381 fp12_mul identity... ");
     {
@@ -2555,6 +3101,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_fp12_inv_roundtrip(void)
+{
+    int failures = 0;
+
     printf("bls12_381 fp12_inv roundtrip... ");
     {
         struct fp12 a, ainv, product;
@@ -2586,6 +3139,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_g1_scalar_mul_3_g(void)
+{
+    int failures = 0;
+
     printf("bls12_381 g1_scalar_mul 3*G... ");
     {
         extern const struct fp G1_GEN_X, G1_GEN_Y;
@@ -2613,6 +3173,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_bls12_381_multipack_nullifier(void)
+{
+    int failures = 0;
+
     printf("bls12_381 multipack nullifier... ");
     {
         /* Pack 32 bytes of zeros */
@@ -2631,6 +3198,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bls12_381_pairing_bilinearity_e_2p_q_e_p_q_2(void)
+{
+    int failures = 0;
 
     printf("bls12_381 pairing bilinearity e(2P,Q)==e(P,Q)^2... ");
     {
@@ -2678,6 +3252,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_aes256_encrypt(void)
+{
+    int failures = 0;
+
     /* AES-256 test (NIST FIPS 197 test vector) */
     printf("aes256 encrypt... ");
     {
@@ -2703,6 +3284,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_zip32_master_key(void)
+{
+    int failures = 0;
 
     /* ZIP 32 master key derivation (test vector from reference test vectors) */
     printf("zip32 master key... ");
@@ -2765,6 +3353,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_zip32_derive_m_1(void)
+{
+    int failures = 0;
+
     /* ZIP 32 child derivation m/1 */
     printf("zip32 derive m/1... ");
     {
@@ -2802,6 +3397,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_zip32_default_diversifier(void)
+{
+    int failures = 0;
+
     /* ZIP 32 default diversifier */
     printf("zip32 default diversifier... ");
     {
@@ -2824,6 +3426,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_zip32_derive_m_1_2h(void)
+{
+    int failures = 0;
 
     /* ZIP 32 hardened child m/1/2h */
     printf("zip32 derive m/1/2h... ");
@@ -2853,6 +3462,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_zip32_xfvk_derive(void)
+{
+    int failures = 0;
+
     /* ZIP 32 XFVK non-hardened derivation */
     printf("zip32 xfvk derive... ");
     {
@@ -2879,6 +3495,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_groth16_vk_read_sapling_spend(void)
+{
+    int failures = 0;
 
     /* Load Sapling spend VK from params file */
     printf("groth16 vk read (sapling-spend)... ");
@@ -2914,6 +3537,13 @@ int test_sapling(void)
         else { printf("FAIL (file not found or parse error)\n"); /* Don't count as failure */ }
     }
 
+    return failures;
+}
+
+static int test_sapling_groth16_vk_read_sapling_output(void)
+{
+    int failures = 0;
+
     printf("groth16 vk read (sapling-output)... ");
     {
         const char *path = getenv("HOME");
@@ -2944,6 +3574,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (file not found or parse error)\n"); }
     }
+
+    return failures;
+}
+
+static int test_sapling_ed25519_verify_rfc_8032_test_1(void)
+{
+    int failures = 0;
 
     /* RFC 8032 Test Vector 1: empty message */
     printf("ed25519 verify (RFC 8032 test 1)... ");
@@ -2980,6 +3617,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_ed25519_verify_rfc_8032_test_2(void)
+{
+    int failures = 0;
+
     printf("ed25519 verify (RFC 8032 test 2)... ");
     {
         const uint8_t pk2[32] = {
@@ -3003,6 +3647,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_groth16_vk_read_sprout_groth16(void)
+{
+    int failures = 0;
 
     printf("groth16 vk read (sprout-groth16)... ");
     {
@@ -3035,6 +3686,13 @@ int test_sapling(void)
         else { printf("FAIL (file not found or parse error)\n"); }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_init_params(void)
+{
+    int failures = 0;
+
     printf("sapling_init_params... ");
     {
         const char *home = getenv("HOME");
@@ -3044,6 +3702,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (params not found)\n"); }
     }
+
+    return failures;
+}
+
+static int test_sapling_redjubjub_sign_verify_round_trip_spend_auth(void)
+{
+    int failures = 0;
 
     /* --- Sapling crypto tests --- */
 
@@ -3070,6 +3735,13 @@ int test_sapling(void)
         if (sign_ok && verify_ok) printf("OK\n");
         else { printf("FAIL (sign=%d verify=%d)\n", sign_ok, verify_ok); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_redjubjub_binding_sig_round_trip(void)
+{
+    int failures = 0;
 
     printf("RedJubjub binding sig round-trip... ");
     {
@@ -3103,6 +3775,13 @@ int test_sapling(void)
         else { printf("FAIL (sign=%d verify=%d)\n", sign_ok, verify_ok); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_value_commitment(void)
+{
+    int failures = 0;
+
     printf("Sapling value commitment... ");
     {
         uint8_t rcv[32];
@@ -3120,6 +3799,13 @@ int test_sapling(void)
         if (ok && nonzero && decomp) printf("OK\n");
         else { printf("FAIL (ok=%d nonzero=%d decomp=%d)\n", ok, nonzero, decomp); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_output_description_build(void)
+{
+    int failures = 0;
 
     printf("Sapling output description build... ");
     {
@@ -3179,6 +3865,13 @@ int test_sapling(void)
             }
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_note_encrypt_decrypt_round_trip(void)
+{
+    int failures = 0;
 
     printf("Sapling note encrypt/decrypt round-trip... ");
     {
@@ -3241,6 +3934,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_value_commitment_deterministic(void)
+{
+    int failures = 0;
+
     printf("Sapling value commitment deterministic... ");
     {
         /* Use test vector: known rcv, known value → recompute cv, verify consistency */
@@ -3266,6 +3966,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_group_hash_generator_derivation_consistenc(void)
+{
+    int failures = 0;
+
     printf("Sapling group_hash generator derivation consistency... ");
     {
         /* Verify that ask→ak matches test vector 1 (already tested above in key
@@ -3287,6 +3994,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_cm_independent_recomputation(void)
+{
+    int failures = 0;
 
     printf("Sapling cm independent recomputation... ");
     {
@@ -3342,6 +4056,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_binding_sig_end_to_end_with_value_balance(void)
+{
+    int failures = 0;
+
     printf("Sapling binding sig end-to-end with value balance... ");
     {
         /* Simulate: 1 output of 10000 zatoshi, value_balance = -10000 (shielding) */
@@ -3388,6 +4109,13 @@ int test_sapling(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_sapling_zip32_m_1_2h_full_fields_chaincode_ask_nsk_ovk_dk(void)
+{
+    int failures = 0;
 
     /* --- ZIP32 m/1/2h full field verification against C++ reference vectors --- */
     printf("zip32 m/1/2h full fields (chaincode,ask,nsk,ovk,dk)... ");
@@ -3438,6 +4166,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_zip32_xfvk_m_1_2h_full_fields_ak_nk_ovk(void)
+{
+    int failures = 0;
+
     /* --- ZIP32 XFVK m/1/2h full verification (ak,nk,ovk from FVK) --- */
     printf("zip32 xfvk m/1/2h full fields (ak,nk,ovk)... ");
     {
@@ -3479,6 +4214,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_zip32_xfvk_derive_m_1_2h_v_3_full_fields(void)
+{
+    int failures = 0;
 
     /* --- ZIP32 XFVK non-hardened derive m/1/2h/v/3 full verification --- */
     printf("zip32 xfvk derive m/1/2h/v/3 full fields... ");
@@ -3548,6 +4290,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_note_encryption_full_e2e_encrypt_kdf_decry(void)
+{
+    int failures = 0;
 
     /* --- Sapling note encryption full end-to-end with ivk decryption --- */
     printf("Sapling note encryption full e2e (encrypt→KDF→decrypt→verify cm)... ");
@@ -3632,6 +4381,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_out_ciphertext_encrypt_decrypt_with_ovk(void)
+{
+    int failures = 0;
+
     /* --- Sapling outgoing ciphertext encrypt/decrypt with ovk --- */
     printf("Sapling out_ciphertext encrypt/decrypt with ovk... ");
     {
@@ -3676,6 +4432,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_note_encryption_wrong_ivk_rejected(void)
+{
+    int failures = 0;
 
     /* --- Sapling note encryption wrong ivk rejection --- */
     printf("Sapling note encryption wrong ivk rejected... ");
@@ -3726,6 +4489,13 @@ int test_sapling(void)
         else { printf("FAIL (wrong ivk decrypted successfully!)\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_value_commitment_additivity(void)
+{
+    int failures = 0;
+
     /* --- Sapling value commitment additivity (cv1 + cv2 = cv_sum) --- */
     printf("Sapling value commitment additivity... ");
     {
@@ -3761,6 +4531,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_ka_agree_commutativity(void)
+{
+    int failures = 0;
 
     /* --- Sapling ka_agree commutativity (esk*pk_d == ivk*epk after cofactor) --- */
     printf("Sapling ka_agree commutativity... ");
@@ -3800,6 +4577,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_redjubjub_sign_verify_10_random_messages(void)
+{
+    int failures = 0;
+
     /* --- RedJubjub sign/verify with multiple messages --- */
     printf("RedJubjub sign/verify 10 random messages... ");
     {
@@ -3822,6 +4606,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_binding_sig_2_spends_3_outputs(void)
+{
+    int failures = 0;
 
     /* --- Sapling binding sig with multiple spend+output --- */
     printf("Sapling binding sig 2 spends + 3 outputs... ");
@@ -3885,6 +4676,13 @@ int test_sapling(void)
         else { printf("FAIL (sig_ok=%d final_ok=%d)\n", sig_ok, final_ok); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_redjubjub_spend_auth_sig_32_byte_sighash(void)
+{
+    int failures = 0;
+
     printf("RedJubjub spend_auth_sig 32-byte sighash... ");
     {
         /* Test that spend_auth_sig works with 32-byte sighash (Zcash spec) */
@@ -3904,6 +4702,13 @@ int test_sapling(void)
         if (sign_ok && verify_ok) printf("OK\n");
         else { printf("FAIL (sign=%d verify=%d)\n", sign_ok, verify_ok); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_full_spend_output_binding_verification(void)
+{
+    int failures = 0;
 
     printf("Sapling full spend+output+binding verification... ");
     {
@@ -3952,6 +4757,13 @@ int test_sapling(void)
         if (sig_ok && final_ok) printf("OK\n");
         else { printf("FAIL (sig_ok=%d final_ok=%d)\n", sig_ok, final_ok); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_note_encryption_known_key_e2e(void)
+{
+    int failures = 0;
 
     /* --- Sapling note encryption with known key material (Zcash C++ SaplingApi test) --- */
     printf("Sapling note encryption known-key e2e... ");
@@ -4056,6 +4868,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_out_ciphertext_with_ovk_ock(void)
+{
+    int failures = 0;
+
     /* --- Sapling outgoing cipher: encrypt with ovk, decrypt with ock --- */
     printf("Sapling out_ciphertext with ovk/ock... ");
     {
@@ -4099,6 +4918,13 @@ int test_sapling(void)
         if (all_ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_build_output_trial_decrypt(void)
+{
+    int failures = 0;
 
     /* --- Sapling full output description: build + trial decrypt --- */
     printf("Sapling build output + trial decrypt... ");
@@ -4179,6 +5005,13 @@ int test_sapling(void)
         }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_note_commitments_all_10_vectors(void)
+{
+    int failures = 0;
+
     /* --- Sapling note commitment: all 10 test vectors --- */
     printf("Sapling note commitments all 10 vectors... ");
     {
@@ -4224,6 +5057,13 @@ int test_sapling(void)
         (void)cm_vecs;
         printf("OK (covered by key components loop)\n");
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_trial_decryption_simulation(void)
+{
+    int failures = 0;
 
     /* --- Trial decryption simulation (wallet-style) --- */
     printf("Sapling trial decryption simulation... ");
@@ -4293,6 +5133,13 @@ int test_sapling(void)
         else { printf("FAIL (build=%d match_idx=%d)\n", build_ok, match_idx); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_memo_types_text_binary_empty(void)
+{
+    int failures = 0;
+
     /* --- Sapling memo field: UTF-8 text, binary data, empty --- */
     printf("Sapling memo types (text/binary/empty)... ");
     {
@@ -4351,6 +5198,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_nullifier_changes_with_position(void)
+{
+    int failures = 0;
+
     /* --- Sapling nullifier computation consistency --- */
     printf("Sapling nullifier changes with position... ");
     {
@@ -4391,6 +5245,13 @@ int test_sapling(void)
         else { printf("FAIL (diff=%d same=%d)\n", all_diff, same); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_zip_32_seed_roundtrip_same_seed_same_address(void)
+{
+    int failures = 0;
+
     /* --- ZIP-32 seed→address roundtrip (deterministic regeneration) --- */
     printf("ZIP-32 seed roundtrip (same seed = same address)... ");
     {
@@ -4417,6 +5278,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_value_commitment_zero_value_is_not_identit(void)
+{
+    int failures = 0;
+
     /* --- Sapling value commitment: zero value --- */
     printf("Sapling value commitment: zero value is not identity... ");
     {
@@ -4436,6 +5304,13 @@ int test_sapling(void)
         if (ok && not_zero && valid) printf("OK\n");
         else { printf("FAIL (ok=%d nonzero=%d valid=%d)\n", ok, not_zero, valid); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_wallet_spent_set_mark_query_no_false_positives(void)
+{
+    int failures = 0;
 
     /* ---- Wallet spent-outpoint index ---- */
     printf("Wallet spent-set: mark, query, no false positives... ");
@@ -4495,6 +5370,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_xsk_encode_decode_roundtrip(void)
+{
+    int failures = 0;
+
     /* Sapling extended spending key encode/decode roundtrip */
     {
         printf("Sapling xsk encode/decode roundtrip... ");
@@ -4534,6 +5416,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_xfvk_encode_decode_roundtrip(void)
+{
+    int failures = 0;
+
     /* Sapling xfvk encode/decode roundtrip */
     {
         printf("Sapling xfvk encode/decode roundtrip... ");
@@ -4569,6 +5458,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_import_xsk_into_keystore(void)
+{
+    int failures = 0;
 
     /* Sapling import xsk into keystore */
     {
@@ -4607,6 +5503,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_sapling_find_key_by_address(void)
+{
+    int failures = 0;
+
     /* Sapling find key by address */
     {
         printf("Sapling find key by address... ");
@@ -4641,6 +5544,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_sapling_full_export_import_bech32_roundtrip(void)
+{
+    int failures = 0;
 
     /* Sapling full export→import→address roundtrip via bech32 */
     {
@@ -4685,6 +5595,13 @@ int test_sapling(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_sapling_amount_formatting_precision(void)
+{
+    int failures = 0;
+
     /* Amount formatting: integer-only, no floating-point rounding */
     {
         printf("Amount formatting precision... ");
@@ -4724,6 +5641,13 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { failures++; }
     }
+
+    return failures;
+}
+
+static int test_sapling_bug_7_nullifier_position_spec_vector_wallet_spend_(void)
+{
+    int failures = 0;
 
     /* --- BUG #7 regression: wallet spend detection needs the REAL absolute
      *     Sapling commitment-tree position in the nullifier.
@@ -4891,6 +5815,147 @@ int test_sapling(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_sapling(void)
+{
+    int failures = 0;
+
+    failures += test_sapling_sapling_check_spend_rejects_null_spend_vk_agent_3();
+    failures += test_sapling_sapling_check_output_rejects_null_output_vk_agent_();
+    failures += test_sapling_sapling_init_params_rejects_tampered_params_agent_();
+    failures += test_sapling_jubjub_to_scalar_zero();
+    failures += test_sapling_jubjub_to_scalar_small_value();
+    failures += test_sapling_jubjub_to_scalar_reduction();
+    failures += test_sapling_prf_expand_sapling_blake2b();
+    failures += test_sapling_prf_ask_prf_nsk_prf_ovk();
+    failures += test_sapling_prf_addr_a_pk_sprout();
+    failures += test_sapling_sprout_tree_empty_root();
+    failures += test_sapling_sprout_tree_append_and_root_changes();
+    failures += test_sapling_sprout_tree_append_two_leaves();
+    failures += test_sapling_sprout_tree_append_three_leaves();
+    failures += test_sapling_sprout_tree_serialize_deserialize_roundtrip();
+    failures += test_sapling_sprout_tree_deserialize_validation();
+    failures += test_sapling_sprout_tree_empty_serialize_deserialize();
+    failures += test_sapling_incremental_witness_basic();
+    failures += test_sapling_incremental_witness_serialize_roundtrip();
+    failures += test_sapling_sapling_v4_tx_roundtrip_spend_output_joinsplit();
+    failures += test_sapling_overwinter_v3_tx_roundtrip();
+    failures += test_sapling_sapling_v4_tx_shielded_output_only();
+    failures += test_sapling_transaction_get_value_out_with_shielded();
+    failures += test_sapling_transaction_get_shielded_value_in();
+    failures += test_sapling_transaction_copy_with_shielded_data();
+    failures += test_sapling_sprout_note_cm();
+    failures += test_sapling_sprout_note_plaintext_roundtrip();
+    failures += test_sapling_sapling_note_plaintext_roundtrip();
+    failures += test_sapling_sprout_payment_address_roundtrip();
+    failures += test_sapling_sapling_payment_address_roundtrip();
+    failures += test_sapling_sapling_spending_key_to_expanded();
+    failures += test_sapling_chacha20_block_rfc_7539();
+    failures += test_sapling_poly1305_mac_rfc_7539();
+    failures += test_sapling_chacha20poly1305_encrypt_decrypt_roundtrip();
+    failures += test_sapling_chacha20poly1305_with_aad();
+    failures += test_sapling_curve25519_scalarmult_base_rfc_7748();
+    failures += test_sapling_curve25519_scalarmult_dh_key_exchange();
+    failures += test_sapling_curve25519_scalarmult_timing_vs_scalar_weight_wave();
+    failures += test_sapling_sprout_kdf_blake2b_personalization();
+    failures += test_sapling_sapling_kdf_blake2b_personalization();
+    failures += test_sapling_sapling_prf_ock();
+    failures += test_sapling_sprout_note_encrypt_decrypt_roundtrip();
+    failures += test_sapling_sprout_note_encrypt_tamper_detection();
+    failures += test_sapling_sapling_note_encrypt_decrypt_roundtrip();
+    failures += test_sapling_sapling_out_encrypt_decrypt_roundtrip();
+    failures += test_sapling_blake2s_256();
+    failures += test_sapling_fr_add_sub_mul_identity();
+    failures += test_sapling_fr_from_bytes_to_bytes_roundtrip();
+    failures += test_sapling_fr_mul_7_7_49();
+    failures += test_sapling_fr_inv_a_a_1_1();
+    failures += test_sapling_jub_identity_is_identity();
+    failures += test_sapling_jub_double_identity();
+    failures += test_sapling_jub_from_bytes_to_bytes_roundtrip();
+    failures += test_sapling_jub_double_known_point();
+    failures += test_sapling_pedersen_merkle_hash_depth_25();
+    failures += test_sapling_pedersen_merkle_hash_0_1_1();
+    failures += test_sapling_pedersen_chaining_depth_0_1();
+    failures += test_sapling_sapling_tree_empty_root();
+    failures += test_sapling_sapling_empty_root_chain_all_33_levels();
+    failures += test_sapling_sapling_uncommitted();
+    failures += test_sapling_sapling_merkle_tree_16_commitments_depth_4();
+    failures += test_sapling_sapling_group_hash_via_ask_to_ak();
+    failures += test_sapling_sapling_check_diversifier();
+    failures += test_sapling_sapling_crh_ivk();
+    failures += test_sapling_sapling_key_components_d_ask();
+    failures += test_sapling_redjubjub_sign_verify_roundtrip();
+    failures += test_sapling_bls12_381_fp_add_sub_identity();
+    failures += test_sapling_bls12_381_fp_mul_identity();
+    failures += test_sapling_bls12_381_fp_from_to_bytes_roundtrip();
+    failures += test_sapling_bls12_381_fp_mul_7_7_49();
+    failures += test_sapling_bls12_381_fp_inv_a_a_1_1();
+    failures += test_sapling_bls12_381_fp2_mul_basic();
+    failures += test_sapling_bls12_381_fp2_inv_roundtrip();
+    failures += test_sapling_bls12_381_fp_sqrt();
+    failures += test_sapling_bls12_381_g1_double_generator();
+    failures += test_sapling_bls12_381_g1_add_generator_generator();
+    failures += test_sapling_bls12_381_g1_from_compressed_generator();
+    failures += test_sapling_bls12_381_fp6_mul_identity();
+    failures += test_sapling_bls12_381_fp6_inv_roundtrip();
+    failures += test_sapling_bls12_381_fp12_mul_identity();
+    failures += test_sapling_bls12_381_fp12_inv_roundtrip();
+    failures += test_sapling_bls12_381_g1_scalar_mul_3_g();
+    failures += test_sapling_bls12_381_multipack_nullifier();
+    failures += test_sapling_bls12_381_pairing_bilinearity_e_2p_q_e_p_q_2();
+    failures += test_sapling_aes256_encrypt();
+    failures += test_sapling_zip32_master_key();
+    failures += test_sapling_zip32_derive_m_1();
+    failures += test_sapling_zip32_default_diversifier();
+    failures += test_sapling_zip32_derive_m_1_2h();
+    failures += test_sapling_zip32_xfvk_derive();
+    failures += test_sapling_groth16_vk_read_sapling_spend();
+    failures += test_sapling_groth16_vk_read_sapling_output();
+    failures += test_sapling_ed25519_verify_rfc_8032_test_1();
+    failures += test_sapling_ed25519_verify_rfc_8032_test_2();
+    failures += test_sapling_groth16_vk_read_sprout_groth16();
+    failures += test_sapling_sapling_init_params();
+    failures += test_sapling_redjubjub_sign_verify_round_trip_spend_auth();
+    failures += test_sapling_redjubjub_binding_sig_round_trip();
+    failures += test_sapling_sapling_value_commitment();
+    failures += test_sapling_sapling_output_description_build();
+    failures += test_sapling_sapling_note_encrypt_decrypt_round_trip();
+    failures += test_sapling_sapling_value_commitment_deterministic();
+    failures += test_sapling_sapling_group_hash_generator_derivation_consistenc();
+    failures += test_sapling_sapling_cm_independent_recomputation();
+    failures += test_sapling_sapling_binding_sig_end_to_end_with_value_balance();
+    failures += test_sapling_zip32_m_1_2h_full_fields_chaincode_ask_nsk_ovk_dk();
+    failures += test_sapling_zip32_xfvk_m_1_2h_full_fields_ak_nk_ovk();
+    failures += test_sapling_zip32_xfvk_derive_m_1_2h_v_3_full_fields();
+    failures += test_sapling_sapling_note_encryption_full_e2e_encrypt_kdf_decry();
+    failures += test_sapling_sapling_out_ciphertext_encrypt_decrypt_with_ovk();
+    failures += test_sapling_sapling_note_encryption_wrong_ivk_rejected();
+    failures += test_sapling_sapling_value_commitment_additivity();
+    failures += test_sapling_sapling_ka_agree_commutativity();
+    failures += test_sapling_redjubjub_sign_verify_10_random_messages();
+    failures += test_sapling_sapling_binding_sig_2_spends_3_outputs();
+    failures += test_sapling_redjubjub_spend_auth_sig_32_byte_sighash();
+    failures += test_sapling_sapling_full_spend_output_binding_verification();
+    failures += test_sapling_sapling_note_encryption_known_key_e2e();
+    failures += test_sapling_sapling_out_ciphertext_with_ovk_ock();
+    failures += test_sapling_sapling_build_output_trial_decrypt();
+    failures += test_sapling_sapling_note_commitments_all_10_vectors();
+    failures += test_sapling_sapling_trial_decryption_simulation();
+    failures += test_sapling_sapling_memo_types_text_binary_empty();
+    failures += test_sapling_sapling_nullifier_changes_with_position();
+    failures += test_sapling_zip_32_seed_roundtrip_same_seed_same_address();
+    failures += test_sapling_sapling_value_commitment_zero_value_is_not_identit();
+    failures += test_sapling_wallet_spent_set_mark_query_no_false_positives();
+    failures += test_sapling_sapling_xsk_encode_decode_roundtrip();
+    failures += test_sapling_sapling_xfvk_encode_decode_roundtrip();
+    failures += test_sapling_sapling_import_xsk_into_keystore();
+    failures += test_sapling_sapling_find_key_by_address();
+    failures += test_sapling_sapling_full_export_import_bech32_roundtrip();
+    failures += test_sapling_amount_formatting_precision();
+    failures += test_sapling_bug_7_nullifier_position_spec_vector_wallet_spend_();
 
     return failures;
 }
