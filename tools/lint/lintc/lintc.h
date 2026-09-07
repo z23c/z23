@@ -425,5 +425,7 @@ int check_shell_host_assumptions_run(int argc, char **argv);
 int check_shell_host_assumptions_selftest(void);
 int check_fleet_airship_rules_run(int argc, char **argv);
 int check_fleet_airship_rules_selftest(void);
+int check_source_identity_authority_run(int argc, char **argv);
+int check_source_identity_authority_selftest(void);
 
 #endif

@@ -5396,6 +5396,10 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_fleet_airship_rules_parse.c \
     tools/lint/lintc/gate_fleet_airship_rules_rules.c \
     tools/lint/lintc/gate_fleet_airship_rules_selftest.c \
+    tools/lint/lintc/gate_source_identity_authority.c \
+    tools/lint/lintc/gate_source_identity_authority_scan.c \
+    tools/lint/lintc/gate_source_identity_authority_ratchet.c \
+    tools/lint/lintc/gate_source_identity_authority_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12680,10 +12684,10 @@ check-identity-parser-single:
 # agentbuild response positionally instead of through the schema-anchored
 # zcl_agentbuild_v2_top_source_id is the same class of bug with a longer
 # fuse. Shrink-only ratchet over tools/lint/source_identity_authority_baseline.txt.
-check-source-identity-authority:
+check-source-identity-authority: $(LINTC_TOOL)
 	@echo "══ LINT: source_id_sha256 producer/reader authority stays Q1/Q2-honest ══"
-	@./tools/lint/check_source_identity_authority.sh --selftest
-	@./tools/lint/check_source_identity_authority.sh
+	@bash tools/lint/check_source_identity_authority.sh --selftest
+	@bash tools/lint/check_source_identity_authority.sh
 
 # Anti-rot ratchet: exactly ONE place decides whether a node status reason
 # means an operator has to intervene. Two operator surfaces (the public REST
