@@ -29,17 +29,24 @@
  *   gate_require_scanned, which already prints the gate_lib.sh text
  *   byte-for-byte.
  * - The coverage block (ZCL_SUPDOM_COVERAGE, default on):
- *   gate_require_git_coverage reimplemented in memory. The per-declared-
- *   root git emptiness probes are sd_root_probes; the git-ls-files oracle
- *   is sd_cov_oracle (rc != 0 -> the "could not run" UNPROVEN, empty ->
- *   the "hollow oracle" UNPROVEN); both sets are LC_ALL=C sorted+deduped
- *   (qsort/strcmp, sd_sort_uniq); comm -13 is the sd_missing merge; and
- *   gate_require_coverage's three-way verdict stands: missing > allowance
- *   is the partial-scan UNPROVEN naming the first 20 (exit 2), missing <
- *   allowance is the stale-ratchet VIOLATION (exit 1), equal passes. The
- *   allowance string is printed verbatim, as the shell's $ expansion did.
- *   gate_lib.sh's mktemp scratch dirs are gone (the compare is in memory);
- *   their two FATALs were environment failures, never gate verdicts.
+ *   gate_require_git_coverage reimplemented in memory, with NO subprocess:
+ *   the ls-files oracle reads .git/index natively via the runtime's DIRC
+ *   reader (lint_git_index_foreach — index order, byte-sorted by name
+ *   then stage, exactly ls-files order; the per-root pathspec glob —
+ *   the literal root, a slash, then '*.c' — has a star that crosses
+ *   '/', so it is exactly prefix plus ".c" suffix, verified
+ *   byte-identical against real git). The
+ *   per-declared-root emptiness probes are sd_root_probes; a reader
+ *   failure maps to the "could not run" UNPROVEN (reporting git's generic
+ *   fatal code 128), an empty oracle to the "hollow oracle" UNPROVEN;
+ *   both sets are LC_ALL=C sorted+deduped (qsort/strcmp, sd_sort_uniq);
+ *   comm -13 is the sd_missing merge; and gate_require_coverage's
+ *   three-way verdict stands: missing > allowance is the partial-scan
+ *   UNPROVEN naming the first 20 (exit 2), missing < allowance is the
+ *   stale-ratchet VIOLATION (exit 1), equal passes. The allowance string
+ *   is printed verbatim, as the shell's $ expansion did. gate_lib.sh's
+ *   mktemp scratch dirs are gone (the compare is in memory); their two
+ *   FATALs were environment failures, never gate verdicts.
  * - ZCL_SUPDOM_COVERAGE_ONLY=1 prints the coverage-only PASS line with the
  *   RAW find count (${#supdom_files[@]}), not the deduped one.
  * - The main scan is native (gate_supervisor_domain_scan.c): a
@@ -73,6 +80,12 @@
  * - File names containing a newline: the shell's mapfile/printf pipeline
  *   counts LINES (such a file reads as several entries and mismatches the
  *   git oracle); the port counts FILES. No such name exists in the tree.
+ * - The oracle's "could not run" UNPROVEN reports 128 (git's generic
+ *   fatal code) where the shell printed git's real exit code, and the
+ *   native index reader assumes the SHA-1 entry layout — any other object
+ *   format desyncs its structural checks and fails closed into that same
+ *   UNPROVEN. The per-root probes' `|| true` mask (a failed oracle reads
+ *   as EMPTY, hitting the per-root UNPROVEN instead) is reproduced.
  * - The shell was unbounded; the port's fixed pools (scan set, oracle
  *   capture, and the scan file's RAW/HITS buffers) fail closed with die().
  * - The ZCL_GATE_SCAN_LOG audit hook of gate_lib.sh is not reproduced
@@ -114,14 +127,14 @@ static const char k_sd_cov_hint[] =
     "— raising ZCL_SUPDOM_COVERAGE_ALLOWANCE is a last resort and needs "
     "the reason written down.";
 
-enum { SD_MAXF = 24576, SD_POOL = 1 << 20, SD_RAW = 1 << 20,
-       SD_CMD = 16384 };
+enum { SD_MAXF = 24576, SD_POOL = 1 << 20, SD_RAW = 1 << 20 };
 
 static char g_sd_pool[SD_POOL];        /* the realized find set */
 static size_t g_sd_used;
 static const char *g_sd_files[SD_MAXF];
 static int g_sd_nfiles;
 static char g_sd_git[SD_RAW];          /* the oracle capture */
+static size_t g_sd_git_used;
 static const char *g_sd_evec[SD_MAXF]; /* its lines */
 static const char *g_sd_miss[SD_MAXF]; /* the comm -13 result */
 static char g_sd_roots_buf[8192];
@@ -139,15 +152,6 @@ static int sd_cat(char *buf, size_t cap, size_t *n, const char *s)
         return die("z23-lint: derived buffer overflow\n", "");
     *n += (size_t)k;
     return 0;
-}
-
-static int sd_catq(char *buf, size_t cap, size_t *n, const char *arg)
-{
-    char q[8192];
-    int rc = sh_single_quote(arg, q, sizeof q);
-    if (rc == 0)
-        rc = sd_cat(buf, cap, n, q);
-    return rc;
 }
 
 static int sd_pool_add(const char *path)
@@ -255,34 +259,63 @@ static int sd_walk(const char *root)
 
 /* ── the coverage check (gate_require_git_coverage, in memory) ─────────── */
 
-/* git ls-files --cached -- <quoted specs> 2>/dev/null, stdout captured. */
-static int sd_git_ls(const char *quoted, char *out, size_t cap, int *code)
+/* git ls-files --cached -- the five per-root '*.c' pathspecs, natively:
+ * lint_git_index_foreach reads .git/index with no subprocess, entries in
+ * index order (byte-sorted by name, then stage) — the order ls-files
+ * prints in. For the fixed literal roots, the default pathspec glob
+ * (root, slash, then '*.c', with a star that crosses '/') is exactly
+ * "starts with <root>/ and ends with .c" — verified byte-identical
+ * against real git for each root and the combined call.
+ * g_sd_probe_root narrows the match to one root for the per-root probes. */
+static const char *g_sd_probe_root;
+
+static int sd_oracle_match(const char *path)
 {
-    char cmd[SD_CMD];
-    size_t n = 0;
-    int rc = sd_cat(cmd, sizeof cmd, &n, "git ls-files --cached -- ");
-    rc |= sd_cat(cmd, sizeof cmd, &n, quoted);
-    rc |= sd_cat(cmd, sizeof cmd, &n, " 2>/dev/null");
-    if (rc)
-        return rc;
-    return capture_cmd(cmd, out, cap, code);
+    size_t pl = strlen(path);
+    for (size_t i = 0; i < SD_NROOTS; i++) {
+        const char *r = g_sd_probe_root ? g_sd_probe_root : k_sd_roots[i];
+        size_t rl = strlen(r);
+        if (pl >= rl + 3 && strncmp(path, r, rl) == 0 && path[rl] == '/'
+            && strcmp(path + pl - 2, ".c") == 0)
+            return 1;
+        if (g_sd_probe_root)
+            break;
+    }
+    return 0;
+}
+
+/* One matching index entry -> one "path\n" row in g_sd_git, the shape
+ * the old pipe capture produced, so sd_oracle_lines is unchanged. In
+ * probe mode the first match ends the walk (the probe only tests
+ * emptiness). */
+static int sd_oracle_add(const char *path, int stage, void *ctx)
+{
+    (void)stage;
+    (void)ctx;
+    if (!sd_oracle_match(path))
+        return 0;
+    size_t n = strlen(path);
+    if (g_sd_git_used + n + 2 > sizeof g_sd_git)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(g_sd_git + g_sd_git_used, path, n);
+    g_sd_git_used += n;
+    g_sd_git[g_sd_git_used++] = '\n';
+    g_sd_git[g_sd_git_used] = '\0';
+    return g_sd_probe_root != NULL;
 }
 
 /* The per-declared-root non-emptiness probes: a renamed/emptied root would
- * empty the find and the pathspec together, so refuse to grade. */
+ * empty the find and the pathspec together, so refuse to grade. The shell
+ * masks git's rc with `|| true` here — a failed oracle reads as EMPTY and
+ * hits this same UNPROVEN, so a native reader failure does too. */
 static int sd_root_probes(void)
 {
     for (size_t i = 0; i < SD_NROOTS; i++) {
-        char spec[640], q[1400];
-        int code = 0;
-        int rc = ovf(snprintf(spec, sizeof spec, "%s/*.c", k_sd_roots[i]),
-                     sizeof spec);
-        if (rc == 0)
-            rc = sh_single_quote(spec, q, sizeof q);
-        if (rc == 0)
-            rc = sd_git_ls(q, g_sd_git, sizeof g_sd_git, &code);
-        if (rc)
-            return rc;
+        g_sd_git_used = 0;
+        g_sd_git[0] = '\0';
+        g_sd_probe_root = k_sd_roots[i];
+        (void)lint_git_index_foreach(sd_oracle_add, NULL);
+        g_sd_probe_root = NULL;
         if (g_sd_git[0] == '\0') {
             fprintf(stderr, "%s: UNPROVEN — declared scan root\n"
                     "  '%s' tracks no *.c at all. A renamed/emptied\n"
@@ -400,35 +433,24 @@ static int sd_cov_stale(int nexp, int nmiss, const char *allow)
     return 1;
 }
 
-/* The git-index oracle: all five per-root *.c pathspecs in one call, its
- * rc and emptiness mapped to the two UNPROVEN blocks. */
+/* The git-index oracle: all five per-root *.c pathspecs in one index pass,
+ * its failure and emptiness mapped to the two UNPROVEN blocks. The shell
+ * printed real git's exit code; the native reader fails silently (the
+ * shell sent git's stderr to /dev/null, so no diagnostic may precede this
+ * block), and the block reports git's generic fatal code 128 — unreachable
+ * on any structurally valid index. */
 static int sd_cov_oracle(int *out_nexp)
 {
-    char quoted[SD_CMD];
-    size_t qn = 0;
-    quoted[0] = '\0';
-    int rc = 0;
-    for (size_t i = 0; rc == 0 && i < SD_NROOTS; i++) {
-        char spec[640];
-        rc = ovf(snprintf(spec, sizeof spec, "%s/*.c", k_sd_roots[i]),
-                 sizeof spec);
-        if (rc == 0 && i > 0)
-            rc = sd_cat(quoted, sizeof quoted, &qn, " ");
-        if (rc == 0)
-            rc = sd_catq(quoted, sizeof quoted, &qn, spec);
-    }
-    int code = 0;
-    if (rc == 0)
-        rc = sd_git_ls(quoted, g_sd_git, sizeof g_sd_git, &code);
-    if (rc)
-        return rc;
-    if (code != 0) {
+    g_sd_git_used = 0;
+    g_sd_git[0] = '\0';
+    int rc = lint_git_index_foreach(sd_oracle_add, NULL);
+    if (rc) {
         fprintf(stderr, "%s: UNPROVEN — the coverage oracle could not run:\n"
                 "  'git ls-files -- %s' exited %d.\n"
                 "  Without an independent expectation this gate cannot tell a\n"
                 "  complete scan from a partial one, so it refuses to grade\n"
                 "  either way. Run it from inside the checkout.\n",
-                k_sd_name, k_sd_specs, code);
+                k_sd_name, k_sd_specs, 128);
         return 2;
     }
     rc = sd_oracle_lines(out_nexp);

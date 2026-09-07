@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <regex.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,215 @@ int each_zpath_st(const char *cmd, int allow_exit1,
 int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ctx)
 {
     return each_zpath_st(cmd, 0, fn, ctx);
+}
+
+/* ── native git index (".git/index", DIRC) enumeration ──────────────────
+ * The no-subprocess successor to each_zpath("git ls-files -z ..."). Reads
+ * the index file directly and invokes fn(path, stage, ctx) per entry in
+ * index order — names byte-sorted, then ascending stage — which is exactly
+ * the order `git ls-files` prints in (it walks the same sorted index and
+ * only filters). A nonzero fn return stops the walk and propagates.
+ *
+ * Index path resolution mirrors git's: $GIT_INDEX_FILE, else .git/index,
+ * else a ".git" gitfile's "gitdir: <path>/index" (linked worktrees keep
+ * their per-worktree index there).
+ *
+ * Versions 2, 3 (extended flags), and 4 (prefix-compressed names) are
+ * supported. Integrity is structural, not cryptographic: magic, version,
+ * entry count, name NULs and v2/v3 eight-byte padding, strict
+ * (name, stage) ordering, and the trailing hash all must hold; the SHA-1
+ * entry layout (62-byte fixed part) is assumed, so anything else desyncs
+ * the checks and fails closed. Failures return 2 SILENTLY — the shell
+ * gates this replaces sent git's stderr to /dev/null, so the caller's own
+ * UNPROVEN/FATAL block is the only diagnostic byte-parity allows. Buffer
+ * exhaustion is the exception: die(), as everywhere in this runtime. */
+
+enum { LGI_CAP = 8 << 20, LGI_NAME = 4096 };
+static unsigned char g_lgi_buf[LGI_CAP];
+
+static uint32_t lgi_be32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+        | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static int lgi_be16(const unsigned char *p)
+{
+    return (p[0] << 8) | p[1];
+}
+
+static int lgi_locate(char *out, size_t cap)
+{
+    const char *env = getenv("GIT_INDEX_FILE");
+    if (env && env[0])
+        return ovf(snprintf(out, cap, "%s", env), cap);
+    struct stat st;
+    if (stat(".git", &st) == 0 && S_ISDIR(st.st_mode))
+        return ovf(snprintf(out, cap, ".git/index"), cap);
+    FILE *f = fopen(".git", "r");
+    if (!f)
+        return 2;
+    char line[4096];
+    char *got = fgets(line, sizeof line, f);
+    fclose(f);
+    if (!got || strncmp(line, "gitdir: ", 8) != 0)
+        return 2;
+    char *nl = strchr(line, '\n');
+    if (nl)
+        *nl = '\0';
+    return ovf(snprintf(out, cap, "%s/index", line + 8), cap);
+}
+
+static int lgi_load(const char *path, size_t *out_n)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 2;
+    size_t n = fread(g_lgi_buf, 1, sizeof g_lgi_buf, f);
+    int bad = ferror(f) || !feof(f);
+    fclose(f);
+    if (bad)
+        return die("z23-lint: git index read failed or oversized\n", "");
+    *out_n = n;
+    return 0;
+}
+
+/* git's varint (MSB continuation, value = ((v + 1) << 7) | next per
+ * continuation byte) — v4 name prefix compression. */
+static int lgi_varint(const unsigned char **pp, const unsigned char *end,
+                      size_t *out)
+{
+    if (*pp >= end)
+        return 2;
+    const unsigned char *p = *pp;
+    unsigned char c = *p++;
+    size_t v = c & 0x7f;
+    while (c & 0x80) {
+        if (p >= end)
+            return 2;
+        c = *p++;
+        v = ((v + 1) << 7) | (size_t)(c & 0x7f);
+    }
+    *pp = p;
+    *out = v;
+    return 0;
+}
+
+/* v2/v3 entry: 62-byte fixed part (plus 2 extended-flag bytes in v3), a
+ * NUL-terminated name, padded so the whole entry is a multiple of 8. */
+static int lgi_name_v23(const unsigned char *ent, const unsigned char *end,
+                        int ext, int flags, const char **name, size_t *esz)
+{
+    size_t nlen = (size_t)(flags & 0xFFF);
+    const unsigned char *nm = ent + 62 + ext;
+    if (nlen == 0xFFF) {
+        const unsigned char *nul = memchr(nm, 0, (size_t)(end - nm));
+        if (!nul)
+            return 2;
+        nlen = (size_t)(nul - nm);
+    }
+    if ((size_t)(end - nm) < nlen + 1 || nm[nlen] != 0)
+        return 2;
+    *esz = ((size_t)(62 + ext) + nlen + 8) & ~(size_t)7;
+    if ((size_t)(end - ent) < *esz)
+        return 2;
+    *name = (const char *)nm;
+    return 0;
+}
+
+/* v4 entry: unpadded fixed part, a strip varint against the previous
+ * name, then the NUL-terminated suffix. prev is read-only input; the
+ * composed name lands in name. */
+static int lgi_name_v4(const unsigned char *ent, const unsigned char *end,
+                       int ext, const char *prev, char *name,
+                       const unsigned char **next)
+{
+    const unsigned char *p = ent + 62 + ext;
+    size_t strip = 0;
+    if (lgi_varint(&p, end, &strip))
+        return 2;
+    size_t plen = strlen(prev);
+    if (strip > plen)
+        return 2;
+    const unsigned char *nul = memchr(p, 0, (size_t)(end - p));
+    if (!nul)
+        return 2;
+    size_t keep = plen - strip, slen = (size_t)(nul - p);
+    if (keep + slen + 1 > LGI_NAME)
+        return 2;
+    memcpy(name, prev, keep);
+    memcpy(name + keep, p, slen + 1);
+    *next = nul + 1;
+    return 0;
+}
+
+/* Index entries sort by (name, stage): a name below the previous, or an
+ * equal name without a strictly greater stage, is structural corruption. */
+static int lgi_order(char *prev, int *pstage, int *have, const char *nm,
+                     int stage)
+{
+    if (*have) {
+        int c = strcmp(nm, prev);
+        if (c < 0 || (c == 0 && stage <= *pstage))
+            return 2;
+    }
+    if (ovf(snprintf(prev, LGI_NAME, "%s", nm), LGI_NAME))
+        return 2;
+    *pstage = stage;
+    *have = 1;
+    return 0;
+}
+
+static int lgi_entries(size_t n, int ver, uint32_t count,
+                       int (*fn)(const char *, int, void *), void *ctx)
+{
+    const unsigned char *p = g_lgi_buf + 12;
+    const unsigned char *end = g_lgi_buf + n;
+    char prev[LGI_NAME] = "";
+    char name[LGI_NAME];
+    int pstage = 0, have = 0, rc = 0;
+    for (uint32_t i = 0; rc == 0 && i < count; i++) {
+        if ((size_t)(end - p) < 62)
+            return 2;
+        int flags = lgi_be16(p + 60);
+        int ext = (ver >= 3 && (flags & 0x4000)) ? 2 : 0;
+        int stage = (flags >> 12) & 3;
+        const char *nm = NULL;
+        const unsigned char *next = NULL;
+        if (ver == 4) {
+            if (lgi_name_v4(p, end, ext, prev, name, &next))
+                return 2;
+            nm = name;
+        } else {
+            size_t esz = 0;
+            if (lgi_name_v23(p, end, ext, flags, &nm, &esz))
+                return 2;
+            next = p + esz;
+        }
+        if (lgi_order(prev, &pstage, &have, nm, stage))
+            return 2;
+        p = next;
+        rc = fn(nm, stage, ctx);
+    }
+    if (rc == 0 && (size_t)(end - p) < 20)
+        rc = 2;
+    return rc;
+}
+
+int lint_git_index_foreach(int (*fn)(const char *, int, void *), void *ctx)
+{
+    char ipath[4608];
+    if (lgi_locate(ipath, sizeof ipath))
+        return 2;
+    size_t n = 0;
+    if (lgi_load(ipath, &n))
+        return 2;
+    if (n < 12 + 20 || memcmp(g_lgi_buf, "DIRC", 4) != 0)
+        return 2;
+    uint32_t ver = lgi_be32(g_lgi_buf + 4);
+    if (ver < 2 || ver > 4)
+        return 2;
+    return lgi_entries(n, (int)ver, lgi_be32(g_lgi_buf + 8), fn, ctx);
 }
 int replay(FILE *out)
 {
