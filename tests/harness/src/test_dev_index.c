@@ -126,6 +126,7 @@ int test_dev_index(void);
 int test_dev_index(void)
 {
     int failures = 0;
+    sqlite3 *db = NULL;
     char parent[512];
     test_make_tmpdir(parent, sizeof(parent), "dev_index", "fixture");
 
@@ -190,7 +191,6 @@ int test_dev_index(void)
         PASS();
     }
 
-    sqlite3 *db = NULL;
     /* dev_index_db_open's schema includes `CREATE VIRTUAL TABLE rows_fts
      * USING fts5(...)`. If this vendored sqlite build lacked FTS5, that
      * DDL — and therefore this open — would fail with "no such module:
