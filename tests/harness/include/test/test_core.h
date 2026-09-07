@@ -25,6 +25,7 @@
 #include <sqlite3.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <errno.h>
 
 /* Only ever used through a pointer here — the definition stays in
  * consensus/params.h for the callers that fill one in. */
@@ -76,6 +77,57 @@ static inline void test_fmt_tmpdir(char *buf, size_t n,
                         "%zu-byte buffer\n", prefix, tag, n);
         abort();
     }
+}
+
+/* Ensure "test-tmp" exists under the process cwd (the repo root every test
+ * group runs from). 0700: a fixture directory it seeds stands in for a
+ * datadir, and platform_private_directory_ensure() refuses any parent that
+ * is not exactly 0700 — see the note on test_make_tmpdir's leaf below.
+ * Returns false only when the directory could not be created AND does not
+ * already exist. */
+static inline bool test_ensure_tmproot(void)
+{
+    if (mkdir("test-tmp", 0700) == 0) return true;
+    return errno == EEXIST;
+}
+
+/* Format "<cwd>/test-tmp/<prefix>_XXXXXX" into buf, create test-tmp if
+ * absent, then mkdtemp() it in place. This is the ONE place a harness
+ * fixture should mint a fresh temp directory: never a bare "/tmp/..."
+ * template, which piles up in the shared system /tmp across aborted runs
+ * instead of living (and getting cleaned) under the repo's own test-tmp/.
+ * Returns the mkdtemp() result: buf on success, NULL on failure. */
+static inline char *test_mkdtemp(char *buf, size_t n, const char *prefix)
+{
+    char cwd[PATH_MAX];
+    int wrote = getcwd(cwd, sizeof(cwd))
+                    ? snprintf(buf, n, "%s/test-tmp/%s_XXXXXX", cwd, prefix)
+                    : -1;
+    if (wrote < 0 || (size_t)wrote >= n) {
+        fprintf(stderr, "test_mkdtemp: no absolute path for %s in a "
+                        "%zu-byte buffer\n", prefix, n);
+        abort();
+    }
+    if (!test_ensure_tmproot()) return NULL;
+    return mkdtemp(buf);
+}
+
+/* Sibling of test_mkdtemp for a plain-file fixture: formats the same
+ * "<cwd>/test-tmp/<prefix>_XXXXXX" template, ensures test-tmp exists, then
+ * mkstemp()s it in place. Returns the open fd, or -1 on failure. */
+static inline int test_mkstemp(char *buf, size_t n, const char *prefix)
+{
+    char cwd[PATH_MAX];
+    int wrote = getcwd(cwd, sizeof(cwd))
+                    ? snprintf(buf, n, "%s/test-tmp/%s_XXXXXX", cwd, prefix)
+                    : -1;
+    if (wrote < 0 || (size_t)wrote >= n) {
+        fprintf(stderr, "test_mkstemp: no absolute path for %s in a "
+                        "%zu-byte buffer\n", prefix, n);
+        abort();
+    }
+    if (!test_ensure_tmproot()) return -1;
+    return mkstemp(buf);
 }
 
 /* Shared helper functions */
