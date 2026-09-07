@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "base/serialize_le.h"
 #include "lintc.h"
 
 const char k_ls_all[] = "git ls-files -z";
@@ -115,15 +116,18 @@ int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ctx)
 enum { LGI_CAP = 8 << 20, LGI_NAME = 4096 };
 static unsigned char g_lgi_buf[LGI_CAP];
 
+/* The git index is big-endian throughout. Both readers go through the one
+ * codec in platform/modules/base rather than laying the shift ladder down
+ * again here; base defines no 16-bit big-endian load, so that width is
+ * composed from two byte loads instead of open-coded as a ladder. */
 static uint32_t lgi_be32(const unsigned char *p)
 {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
-        | ((uint32_t)p[2] << 8) | p[3];
+    return zcl_read_u32_be((const uint8_t *)p);
 }
 
 static int lgi_be16(const unsigned char *p)
 {
-    return (p[0] << 8) | p[1];
+    return (int)p[0] * 256 + (int)p[1];
 }
 
 static int lgi_locate(char *out, size_t cap)

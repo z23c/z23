@@ -59,12 +59,16 @@ static int gacw_path(char *buf, size_t cap, const char *rel)
     return ovf(snprintf(buf, cap, "%s/%s", g_gacw_tmp, rel), cap);
 }
 
-/* Every inner run carries all three ZCL_ARTIFACT_* assignments, then the
- * gate for real with merged output — the call sites' `>log 2>&1`. */
+/* Every inner run carries the two ZCL_ARTIFACT_* assignments this gate
+ * still reads, then the gate for real with merged output — the call
+ * sites' `>log 2>&1`. The shell's third assignment,
+ * ZCL_ARTIFACT_SKIP_FRESHNESS, went with the freshness delegation the
+ * port no longer performs (see the header of
+ * gate_generated_artifact_contradictions.c), so setting it here would
+ * name a flag nothing reads. */
 static int gacw_run(const char *arm, const char *cap, int *code)
 {
-    if (setenv("ZCL_ARTIFACT_SKIP_FRESHNESS", "1", 1) != 0
-        || setenv("ZCL_ARTIFACT_ARM_BASELINE", arm, 1) != 0
+    if (setenv("ZCL_ARTIFACT_ARM_BASELINE", arm, 1) != 0
         || setenv("ZCL_ARTIFACT_CAPABILITY_INVENTORY", cap, 1) != 0)
         return die("z23-lint: setenv failed\n", "");
     return cic_invoke(k_gacw_gate, 1, g_gacw_sink, sizeof g_gacw_sink, code);

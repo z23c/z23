@@ -168,8 +168,6 @@ Z23_FLAG("ZCL_ARTIFACT_ARM_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_generated_artifact_contradictions.sh:38")
 Z23_FLAG("ZCL_ARTIFACT_CAPABILITY_INVENTORY", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_generated_artifact_contradictions.sh:15")
-Z23_FLAG("ZCL_ARTIFACT_SKIP_FRESHNESS", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_generated_artifact_contradictions.sh:98")
 Z23_FLAG("ZCL_ASAN_ADX_MAKEFILE", "env_build", "Makefile", "-",
           "which Makefile the ASan/ADX build-config gate reads; a test rail so "
           "the selftest can point it at a fixture")

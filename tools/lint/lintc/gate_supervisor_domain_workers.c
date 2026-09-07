@@ -302,7 +302,7 @@ static int sdw_ext_probe_one(const char *sig, char *list, size_t cap,
     unsigned char buf[SDW_IDXCAP];
     size_t n = sdw_idx_build(buf, sig);
     char path[64];
-    memcpy(path, "test-tmp/sd_idxext_XXXXXX", 25);
+    memcpy(path, "test-tmp/sd_idxext_XXXXXX", 26);
     int fd = mkstemp(path);
     if (fd < 0)
         return die("z23-lint: mktemp failed\n", "");
