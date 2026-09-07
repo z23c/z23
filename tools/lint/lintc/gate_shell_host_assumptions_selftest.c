@@ -104,13 +104,11 @@ static int shl_check_bootstrap_counts(const struct shl_selftest_env *e, int *fai
         && shl_baseline_has(e->baseline, "stat", e->fixture, 6)
         && shl_baseline_has(e->baseline, "sed", e->fixture, 6);
     if (!ok) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
-                        "the scanner did not conservatively count fixture hits\n");
+        fprintf(stderr, "[%s] FATAL — selftest scanner did not conservatively "
+                        "count fixture hits\n", k_gate);
         (*fails)++;
-        return 0;
     }
-    return printf("  selftest ok: fixture hits counted conservatively\n") < 0
-        ? die("z23-lint: write failed\n", "") : 0;
+    return 0;
 }
 
 static int shl_positive_control(const struct shl_selftest_env *e, int *fails)
@@ -119,11 +117,9 @@ static int shl_positive_control(const struct shl_selftest_env *e, int *fails)
     int rc = shl_hush_run();
     shl_unsetenv_all();
     if (rc != 0) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
-                        "positive control did not pass\n");
+        fprintf(stderr, "[%s] FATAL — selftest positive control failed\n", k_gate);
         (*fails)++;
-    } else if (printf("  selftest ok: positive control passes\n") < 0)
-        return die("z23-lint: write failed\n", "");
+    }
     return 0;
 }
 
@@ -138,10 +134,9 @@ static int shl_expect_rc(const struct shl_selftest_env *e, const char *extra_nam
     shl_unsetenv_all();
     int bad = want_nonzero ? (rc == 0) : (rc != 0);
     if (bad) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — %s\n", label);
+        fprintf(stderr, "[%s] FATAL — selftest %s\n", k_gate, label);
         (*fails)++;
-    } else if (printf("  selftest ok: %s\n", label) < 0)
-        return die("z23-lint: write failed\n", "");
+    }
     return 0;
 }
 
@@ -171,8 +166,42 @@ static int shl_copy_file(const char *from, const char *to)
     return 0;
 }
 
-/* growth: append a stray nproc line, confirm it fails and UPDATE refuses
- * to authorize the growth (baseline unchanged). */
+/* under UPDATE, a hard per-kind ceiling below the actual (post-growth)
+ * total must still refuse the run — a shrink-only baseline permission is
+ * never enough to silently authorize crossing the ceiling. */
+static int shl_expect_ceiling_refusal(const struct shl_selftest_env *e, int *fails)
+{
+    if (shl_setenv_common(e)) return die("z23-lint: setenv failed\n", "");
+    if (setenv("ZCL_LINT_MODE", "UPDATE", 1) != 0
+        || setenv("ZCL_SHELL_HOST_NPROC_CEILING", "5", 1) != 0)
+        return die("z23-lint: setenv failed\n", "");
+    int rc = shl_hush_run();
+    shl_unsetenv_all();
+    if (rc == 0) {
+        fprintf(stderr, "[%s] FATAL — selftest UPDATE exceeded a hard ceiling\n", k_gate);
+        (*fails)++;
+    }
+    return 0;
+}
+
+static int shl_baseline_unchanged(const struct shl_selftest_env *e, const char *saved,
+                                  const char *label, int *fails)
+{
+    static struct shl_table t1, t2;
+    int p1 = 0, p2 = 0;
+    if (shl_load_baseline(e->baseline, &t1, &p1) || shl_load_baseline(saved, &t2, &p2))
+        return 1;
+    if (t1.n != t2.n) {
+        fprintf(stderr, "[%s] FATAL — selftest %s\n", k_gate, label);
+        (*fails)++;
+    }
+    return 0;
+}
+
+/* growth: append a stray nproc line, confirm it fails, that UPDATE does
+ * not authorize the growth, and that a hard per-kind ceiling still
+ * refuses UPDATE even when the baseline itself would otherwise permit
+ * growth — the baseline is left untouched by every failed run. */
 static int shl_selftest_growth_phase(const struct shl_selftest_env *e, const char *saved,
                                      const char *fixture_saved, int *fails)
 {
@@ -180,30 +209,23 @@ static int shl_selftest_growth_phase(const struct shl_selftest_env *e, const cha
     if (csr_write(fixture_saved, k_fixture)) return 1;
     FILE *f = fopen(e->fixture, "a");
     if (!f || fprintf(f, "\nnproc\n") < 0 || fclose(f) != 0) return 1;
-    if (shl_expect_rc(e, NULL, NULL, 1, "a growth mutation fails", fails)) return 1;
+    if (shl_expect_rc(e, NULL, NULL, 1, "growth mutation passed", fails)) return 1;
     if (shl_expect_rc(e, "ZCL_LINT_MODE", "UPDATE", 1,
-                      "UPDATE does not authorize growth", fails))
+                      "UPDATE authorized growth", fails))
         return 1;
-
-    static struct shl_table t1, t2;
-    int p1 = 0, p2 = 0;
-    if (shl_load_baseline(e->baseline, &t1, &p1) || shl_load_baseline(saved, &t2, &p2))
+    if (shl_baseline_unchanged(e, saved, "failed UPDATE changed baseline", fails))
         return 1;
-    if (t1.n != t2.n) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
-                        "UPDATE changed the baseline on a failed run\n");
-        (*fails)++;
-    }
-    return 0;
+    if (shl_expect_ceiling_refusal(e, fails)) return 1;
+    return shl_baseline_unchanged(e, saved, "ceiling failure changed baseline", fails);
 }
 
 static int shl_selftest_injection_phase(const struct shl_selftest_env *e, int *fails)
 {
     if (shl_expect_rc(e, "ZCL_SHELL_HOST_INJECT_SCAN_FAILURE", "1", 1,
-                      "an injected scanner failure fails", fails))
+                      "injected scanner failure passed", fails))
         return 1;
     return shl_expect_rc(e, "ZCL_SHELL_HOST_INJECT_SCAN_PATH", e->fixture, 1,
-                         "an injected mid-scan failure fails", fails);
+                         "intermediate scanner failure passed", fails);
 }
 
 static int shl_selftest_deleted_baseline_phase(const struct shl_selftest_env *e, int *fails)
@@ -211,13 +233,13 @@ static int shl_selftest_deleted_baseline_phase(const struct shl_selftest_env *e,
     if (unlink(e->baseline) != 0 && errno != ENOENT) return 1;
     if (setenv("ZCL_SHELL_HOST_INJECT_TRACKED_BASELINE", "1", 1) != 0) return 1;
     if (shl_expect_rc(e, "ZCL_SHELL_HOST_BOOTSTRAP", "1", 1,
-                      "a deleted tracked baseline refuses to regenerate", fails))
+                      "recreated a deleted tracked baseline", fails))
         return 1;
     unsetenv("ZCL_SHELL_HOST_INJECT_TRACKED_BASELINE");
     struct stat st;
     if (stat(e->baseline, &st) == 0) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — "
-                        "the deleted-baseline refusal wrote a file\n");
+        fprintf(stderr, "[%s] FATAL — selftest deleted-baseline refusal wrote a file\n",
+               k_gate);
         (*fails)++;
     }
     return 0;
@@ -227,7 +249,7 @@ static int shl_selftest_phases(const struct shl_selftest_env *e, const char *sav
                                const char *fixture_saved, int *fails)
 {
     if (shl_bootstrap_baseline(e)) {
-        fprintf(stderr, "check_shell_host_assumptions: SELFTEST FAILED — bootstrap\n");
+        fprintf(stderr, "[%s] FATAL — selftest bootstrap failed\n", k_gate);
         (*fails)++;
     } else if (shl_check_bootstrap_counts(e, fails))
         return 1;
@@ -258,7 +280,7 @@ int check_shell_host_assumptions_selftest(void)
 
     rap_rm_rf(tmp);
     if (hard_fail || fails) return 1;
-    return printf("[%s] SELFTEST PASS (lexical=true growth=red update=shrink-only "
-                 "scanner_failure=red)\n", k_gate) < 0
+    return printf("selftest %s: PASS lexical=true growth=red update=shrink-only "
+                 "scanner_failure=red\n", k_gate) < 0
         ? die("z23-lint: write failed\n", "") : 0;
 }
