@@ -413,5 +413,7 @@ int check_verification_coverage_run(int argc, char **argv);
 int check_verification_coverage_selftest(void);
 int check_no_real_clock_test_deadline_run(int argc, char **argv);
 int check_no_real_clock_test_deadline_selftest(void);
+int check_supervisor_progress_declared_run(int argc, char **argv);
+int check_supervisor_progress_declared_selftest(void);
 
 #endif

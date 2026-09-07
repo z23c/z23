@@ -2169,13 +2169,13 @@ Z23_FLAG("ZCL_SUPDOM_COVERAGE_ONLY", "env_build", "0", "-",
 Z23_FLAG("ZCL_SUPDOM_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_supervisor_domain.sh:21")
 Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_supervisor_progress_declared.sh:79")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_progress_declared.c:613")
 Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_CHILD_FLOOR", "env_build", "30", "-",
-          "undocumented; first use tools/lint/check_supervisor_progress_declared.sh:245")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_progress_declared.c:616")
 Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_FILE_FLOOR", "env_build", "200", "-",
-          "undocumented; first use tools/lint/check_supervisor_progress_declared.sh:172")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_progress_declared.c:615")
 Z23_FLAG("ZCL_SUPERVISOR_PROGRESS_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_supervisor_progress_declared.sh:82")
+          "undocumented; first use tools/lint/lintc/gate_supervisor_progress_declared.c:610")
 Z23_FLAG("ZCL_SUPERVISOR_WORKER_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_supervisor_domain.sh:170")
 Z23_FLAG("ZCL_SUPREG_BASELINE", "env_build", "-", "-",

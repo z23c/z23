@@ -5384,6 +5384,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_verification_coverage.c \
     tools/lint/lintc/gate_no_real_clock_test_deadline.c \
     tools/lint/lintc/gate_no_real_clock_test_deadline_selftest.c \
+    tools/lint/lintc/gate_supervisor_progress_declared.c \
+    tools/lint/lintc/gate_supervisor_progress_declared_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11953,7 +11955,7 @@ check-blocker-handoff-declared:
 # reason. The zero-initialised field made "nobody decided" and "deliberately
 # off" the same value, which is how chain.op_return_backfill reached
 # ticks_run 13083 / blocks_folded 0 / stall_reason "none". Counts shrink only.
-check-supervisor-progress-declared:
+check-supervisor-progress-declared: $(LINTC_TOOL)
 	@echo "══ LINT: supervisor progress-policy declaration ══"
 	@./tools/lint/check_supervisor_progress_declared.sh
 
