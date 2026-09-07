@@ -4172,26 +4172,89 @@ static bool parse_i64(const char *s, int64_t *out)
     return true;
 }
 
-int main(int argc, char **argv)
-{
-    if (argc < 2) {
-        usage(stderr);
-        return 2;
-    }
-    const char *mode = argv[1];
-    /* Generic --key value / --key=value parsing. */
-    const char *package_dir = NULL, *key_file = NULL, *pubkey = NULL,
-               *store_a = NULL, *store_b = NULL, *report = NULL,
-               *bin_dir = "build/bin", *census_def = "contexts/commons/corpus/scopes.def",
-               *seed_file = NULL, *chain_id = "zclassic-main",
-               *kind = "ai", *dep_name = NULL, *dep_root = NULL,
-               *repo = ".", *scratch = "test-tmp/factory-selftest",
-               *dep_plan = NULL, *fast_cache = NULL;
+struct main_opts {
+    const char *package_dir, *key_file, *pubkey, *store_a, *store_b, *report,
+               *bin_dir, *census_def, *seed_file, *chain_id, *kind,
+               *dep_name, *dep_root, *repo, *scratch, *dep_plan, *fast_cache;
     char dep_plan_default[PF_PATH_CAP];
     char fast_cache_default[PF_PATH_CAP];
-    uint64_t sequence = 1, cutoff_height = 1;
-    int64_t cutoff_mtp = 1700000000;
-    bool register_corpus = false;
+    uint64_t sequence;
+    uint64_t cutoff_height;
+    int64_t cutoff_mtp;
+    bool register_corpus;
+};
+
+/* Table-driven dispatch for the plain string-valued --key value flags, so
+ * matching a flag name is a loop over data rather than a long if/else-if
+ * chain. */
+static bool main_apply_string_flag(struct main_opts *opts, const char *keyb,
+                                   const char *value)
+{
+    static const struct {
+        const char *flag;
+        size_t offset;
+    } table[] = {
+        {"--package", offsetof(struct main_opts, package_dir)},
+        {"--publisher-key-file", offsetof(struct main_opts, key_file)},
+        {"--publisher-pubkey", offsetof(struct main_opts, pubkey)},
+        {"--store-a", offsetof(struct main_opts, store_a)},
+        {"--store-b", offsetof(struct main_opts, store_b)},
+        {"--report", offsetof(struct main_opts, report)},
+        {"--dep-plan", offsetof(struct main_opts, dep_plan)},
+        {"--fast-cache", offsetof(struct main_opts, fast_cache)},
+        {"--bin-dir", offsetof(struct main_opts, bin_dir)},
+        {"--census-def", offsetof(struct main_opts, census_def)},
+        {"--signer-seed-file", offsetof(struct main_opts, seed_file)},
+        {"--chain-id", offsetof(struct main_opts, chain_id)},
+        {"--kind", offsetof(struct main_opts, kind)},
+        {"--dep-name", offsetof(struct main_opts, dep_name)},
+        {"--dep-root", offsetof(struct main_opts, dep_root)},
+        {"--repo", offsetof(struct main_opts, repo)},
+        {"--scratch", offsetof(struct main_opts, scratch)},
+    };
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (strcmp(keyb, table[i].flag) == 0) {
+            *(const char **)((char *)opts + table[i].offset) = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The remaining flags need numeric parsing/validation rather than a plain
+ * string assignment. */
+static bool main_apply_numeric_flag(struct main_opts *opts, const char *keyb,
+                                    const char *value, bool *bad)
+{
+    if (strcmp(keyb, "--publisher-sequence") == 0) {
+        *bad = !parse_u64(value, &opts->sequence) || !opts->sequence;
+        return true;
+    }
+    if (strcmp(keyb, "--cutoff-height") == 0) {
+        *bad = !parse_u64(value, &opts->cutoff_height) || !opts->cutoff_height;
+        return true;
+    }
+    if (strcmp(keyb, "--cutoff-mtp") == 0) {
+        *bad = !parse_i64(value, &opts->cutoff_mtp) || opts->cutoff_mtp <= 0;
+        return true;
+    }
+    return false;
+}
+
+/* Generic --key value / --key=value parsing. */
+static int main_parse_args(int argc, char **argv, struct main_opts *opts)
+{
+    *opts = (struct main_opts){
+        .bin_dir = "build/bin",
+        .census_def = "contexts/commons/corpus/scopes.def",
+        .chain_id = "zclassic-main",
+        .kind = "ai",
+        .repo = ".",
+        .scratch = "test-tmp/factory-selftest",
+        .sequence = 1,
+        .cutoff_height = 1,
+        .cutoff_mtp = 1700000000,
+    };
     for (int i = 2; i < argc; i++) {
         char *arg = argv[i];
         if (strncmp(arg, "--", 2) != 0) {
@@ -4211,7 +4274,7 @@ int main(int argc, char **argv)
             if (strlen(arg) >= sizeof(keyb)) return 2;
             strcpy(keyb, arg);
             if (strcmp(keyb, "--register-corpus") == 0) {
-                register_corpus = true;
+                opts->register_corpus = true;
                 continue;
             }
             if (i + 1 >= argc) {
@@ -4220,118 +4283,131 @@ int main(int argc, char **argv)
             }
             value = argv[++i];
         }
-        if (strcmp(keyb, "--package") == 0) package_dir = value;
-        else if (strcmp(keyb, "--publisher-key-file") == 0) key_file = value;
-        else if (strcmp(keyb, "--publisher-pubkey") == 0) pubkey = value;
-        else if (strcmp(keyb, "--store-a") == 0) store_a = value;
-        else if (strcmp(keyb, "--store-b") == 0) store_b = value;
-        else if (strcmp(keyb, "--report") == 0) report = value;
-        else if (strcmp(keyb, "--dep-plan") == 0) dep_plan = value;
-        else if (strcmp(keyb, "--fast-cache") == 0) fast_cache = value;
-        else if (strcmp(keyb, "--bin-dir") == 0) bin_dir = value;
-        else if (strcmp(keyb, "--census-def") == 0) census_def = value;
-        else if (strcmp(keyb, "--signer-seed-file") == 0) seed_file = value;
-        else if (strcmp(keyb, "--chain-id") == 0) chain_id = value;
-        else if (strcmp(keyb, "--kind") == 0) kind = value;
-        else if (strcmp(keyb, "--dep-name") == 0) dep_name = value;
-        else if (strcmp(keyb, "--dep-root") == 0) dep_root = value;
-        else if (strcmp(keyb, "--repo") == 0) repo = value;
-        else if (strcmp(keyb, "--scratch") == 0) scratch = value;
-        else if (strcmp(keyb, "--publisher-sequence") == 0) {
-            if (!parse_u64(value, &sequence) || !sequence) return 2;
-        } else if (strcmp(keyb, "--cutoff-height") == 0) {
-            if (!parse_u64(value, &cutoff_height) || !cutoff_height)
-                return 2;
-        } else if (strcmp(keyb, "--cutoff-mtp") == 0) {
-            if (!parse_i64(value, &cutoff_mtp) || cutoff_mtp <= 0) return 2;
-        } else {
-            usage(stderr);
-            return 2;
+        if (main_apply_string_flag(opts, keyb, value))
+            continue;
+        bool bad = false;
+        if (main_apply_numeric_flag(opts, keyb, value, &bad)) {
+            if (bad) return 2;
+            continue;
         }
+        usage(stderr);
+        return 2;
     }
-    if (strcmp(kind, "human") != 0 && strcmp(kind, "ai") != 0 &&
-        strcmp(kind, "import") != 0) {
+    return 0;
+}
+
+/* Default: the report's sibling, <name>.report.json → <name>.plan.json. */
+static bool main_default_dep_plan(const char *report, char *buf, size_t cap)
+{
+    static const char suffix[] = ".report.json";
+    size_t rl = strlen(report);
+    size_t sl = sizeof(suffix) - 1u;
+    if (rl > sl && strcmp(report + rl - sl, suffix) == 0) {
+        if (rl - sl + sizeof(".plan.json") > cap)
+            return false;
+        memcpy(buf, report, rl - sl);
+        memcpy(buf + rl - sl, ".plan.json", sizeof(".plan.json"));
+        return true;
+    }
+    if (snprintf(buf, cap, "%s.plan.json", report) >= (int)cap)
+        return false;
+    return true;
+}
+
+/* Default per-TU object cache: $XDG_CACHE_HOME/zclassic23/fast-obj, else
+ * $HOME/.cache/zclassic23/fast-obj. An explicit empty --fast-cache=
+ * disables the cache (no default). */
+static const char *main_default_fast_cache(char *buf, size_t cap)
+{
+    const char *base = getenv("XDG_CACHE_HOME");
+    int n;
+    if (base && base[0])
+        n = snprintf(buf, cap, "%s/zclassic23/fast-obj", base);
+    else {
+        const char *home = getenv("HOME");
+        n = home ? snprintf(buf, cap, "%s/.cache/zclassic23/fast-obj", home)
+                 : -1;
+    }
+    if (n > 0 && (size_t)n < cap)
+        return buf;
+    return NULL;
+}
+
+static int main_run_mode(struct main_opts *opts)
+{
+    if (!opts->package_dir || !opts->key_file || !opts->pubkey ||
+        !opts->store_a || !opts->store_b || !opts->report ||
+        (opts->register_corpus && !opts->census_def)) {
+        usage(stderr);
+        return 2;
+    }
+    if (!opts->dep_plan) {
+        if (!main_default_dep_plan(opts->report, opts->dep_plan_default,
+                                   sizeof(opts->dep_plan_default)))
+            return 2;
+        opts->dep_plan = opts->dep_plan_default;
+    }
+    if (!opts->fast_cache) {
+        const char *fc = main_default_fast_cache(
+            opts->fast_cache_default, sizeof(opts->fast_cache_default));
+        if (fc)
+            opts->fast_cache = fc;
+    }
+    if (opts->fast_cache && !opts->fast_cache[0])
+        opts->fast_cache = NULL;
+    struct run_args args = {
+        .package_dir = opts->package_dir,
+        .key_file = opts->key_file,
+        .publisher_pubkey = opts->pubkey,
+        .store_a = opts->store_a,
+        .store_b = opts->store_b,
+        .report_path = opts->report,
+        .dep_plan_path = opts->dep_plan,
+        .fast_cache_dir = opts->fast_cache,
+        .bin_dir = opts->bin_dir,
+        .census_def = opts->census_def,
+        .signer_seed_file = opts->seed_file,
+        .chain_id = opts->chain_id,
+        .kind = opts->kind,
+        .publisher_sequence = opts->sequence,
+        .cutoff_height = opts->cutoff_height,
+        .cutoff_mtp = opts->cutoff_mtp,
+        .register_corpus = opts->register_corpus,
+    };
+    return cmd_run(&args);
+}
+
+static int main_pin_dep_mode(const struct main_opts *opts)
+{
+    if (!opts->package_dir || !opts->dep_name || !opts->dep_root) {
+        usage(stderr);
+        return 2;
+    }
+    return cmd_pin_dep(opts->package_dir, opts->dep_name, opts->dep_root);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) {
+        usage(stderr);
+        return 2;
+    }
+    const char *mode = argv[1];
+    struct main_opts opts;
+    int pe = main_parse_args(argc, argv, &opts);
+    if (pe) return pe;
+    if (strcmp(opts.kind, "human") != 0 && strcmp(opts.kind, "ai") != 0 &&
+        strcmp(opts.kind, "import") != 0) {
         usage(stderr);
         return 2;
     }
 
-    if (strcmp(mode, "run") == 0) {
-        if (!package_dir || !key_file || !pubkey || !store_a || !store_b ||
-            !report || (register_corpus && !census_def)) {
-            usage(stderr);
-            return 2;
-        }
-        if (!dep_plan) {
-            /* Default: the report's sibling, <name>.report.json →
-             * <name>.plan.json. */
-            static const char suffix[] = ".report.json";
-            size_t rl = strlen(report);
-            size_t sl = sizeof(suffix) - 1u;
-            if (rl > sl && strcmp(report + rl - sl, suffix) == 0) {
-                if (rl - sl + sizeof(".plan.json") >
-                    sizeof(dep_plan_default))
-                    return 2;
-                memcpy(dep_plan_default, report, rl - sl);
-                memcpy(dep_plan_default + rl - sl, ".plan.json",
-                       sizeof(".plan.json"));
-            } else if (snprintf(dep_plan_default, sizeof(dep_plan_default),
-                                "%s.plan.json", report) >=
-                           (int)sizeof(dep_plan_default)) {
-                return 2;
-            }
-            dep_plan = dep_plan_default;
-        }
-        if (!fast_cache) {
-            /* Default per-TU object cache: $XDG_CACHE_HOME/zclassic23/
-             * fast-obj, else $HOME/.cache/zclassic23/fast-obj. An explicit
-             * empty --fast-cache= disables the cache (no default). */
-            const char *base = getenv("XDG_CACHE_HOME");
-            int n;
-            if (base && base[0])
-                n = snprintf(fast_cache_default, sizeof(fast_cache_default),
-                             "%s/zclassic23/fast-obj", base);
-            else {
-                const char *home = getenv("HOME");
-                n = home ? snprintf(fast_cache_default,
-                                    sizeof(fast_cache_default),
-                                    "%s/.cache/zclassic23/fast-obj", home)
-                         : -1;
-            }
-            if (n > 0 && (size_t)n < sizeof(fast_cache_default))
-                fast_cache = fast_cache_default;
-        }
-        if (fast_cache && !fast_cache[0])
-            fast_cache = NULL;
-        struct run_args args = {
-            .package_dir = package_dir,
-            .key_file = key_file,
-            .publisher_pubkey = pubkey,
-            .store_a = store_a,
-            .store_b = store_b,
-            .report_path = report,
-            .dep_plan_path = dep_plan,
-            .fast_cache_dir = fast_cache,
-            .bin_dir = bin_dir,
-            .census_def = census_def,
-            .signer_seed_file = seed_file,
-            .chain_id = chain_id,
-            .kind = kind,
-            .publisher_sequence = sequence,
-            .cutoff_height = cutoff_height,
-            .cutoff_mtp = cutoff_mtp,
-            .register_corpus = register_corpus,
-        };
-        return cmd_run(&args);
-    }
-    if (strcmp(mode, "pin-dep") == 0) {
-        if (!package_dir || !dep_name || !dep_root) {
-            usage(stderr);
-            return 2;
-        }
-        return cmd_pin_dep(package_dir, dep_name, dep_root);
-    }
+    if (strcmp(mode, "run") == 0)
+        return main_run_mode(&opts);
+    if (strcmp(mode, "pin-dep") == 0)
+        return main_pin_dep_mode(&opts);
     if (strcmp(mode, "selftest") == 0)
-        return cmd_selftest(repo, scratch, bin_dir);
+        return cmd_selftest(opts.repo, opts.scratch, opts.bin_dir);
     usage(stderr);
     return 2;
 }
