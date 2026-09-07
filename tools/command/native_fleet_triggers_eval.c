@@ -641,6 +641,44 @@ static void trg_cursor_rebase(struct trg_cursor *cursor, const struct stat *st)
     }
 }
 
+/* Reads and scores every complete line from the current file position
+ * onward, stopping early — without consuming that line's bytes or row
+ * number — the instant one row's action fails, so a failed row's cursor
+ * position is never crossed and later rows in the same file wait behind
+ * it. *offset and *row_count start at the scan's origin and are advanced
+ * in place past every row that did not fail. */
+static void trg_scan_lines(FILE *f, const struct trg_scan_ctx *ctx,
+                           uint64_t *offset, uint64_t *row_count,
+                           uint64_t *checked, uint64_t *fired,
+                           uint64_t *failed, char *why, size_t why_cap)
+{
+    char line[TRG_LINE_MAX];
+    while (fgets(line, sizeof line, f)) {
+        size_t raw_len = strlen(line);
+        if (raw_len == 0 || line[raw_len - 1] != '\n')
+            break; /* partial trailing line: leave it for next time */
+        line[raw_len - 1] = 0; /* drop the newline for parsing */
+        bool row_failed = false;
+        trg_process_line(ctx, line, raw_len - 1, row_count, checked, fired,
+                         failed, why, why_cap, &row_failed);
+        if (row_failed)
+            return; /* hold the cursor before this row; later rows wait */
+        *offset += (uint64_t)raw_len;
+    }
+}
+
+/* Locates a source's cursor start: max(saved offset, header length), so a
+ * TSV header line is never re-read as data. Leaves *f positioned there.
+ * Returns false if the seek itself fails (nothing to score this run). */
+static bool trg_seek_to_cursor(FILE *f, uint64_t saved_offset,
+                               long header_bytes, uint64_t *start_offset)
+{
+    *start_offset = saved_offset;
+    if ((long)*start_offset < header_bytes)
+        *start_offset = (uint64_t)header_bytes;
+    return fseek(f, (long)*start_offset, SEEK_SET) == 0;
+}
+
 static void trg_process_source(const struct trg_source_spec *spec,
                                bool dry_run, int64_t since_s,
                                uint64_t *checked, uint64_t *fired,
@@ -668,10 +706,8 @@ static void trg_process_source(const struct trg_source_spec *spec,
                     sizeof header_storage, header, &header_count,
                     &header_bytes);
 
-    uint64_t start_offset = cursor.offset;
-    if ((long)start_offset < header_bytes)
-        start_offset = (uint64_t)header_bytes;
-    if (fseek(f, (long)start_offset, SEEK_SET) != 0) {
+    uint64_t new_offset;
+    if (!trg_seek_to_cursor(f, cursor.offset, header_bytes, &new_offset)) {
         fclose(f);
         return;
     }
@@ -685,28 +721,12 @@ static void trg_process_source(const struct trg_source_spec *spec,
                               : 0,
         .fired_ids = fired_ids,
     };
-    uint64_t new_offset = start_offset;
     uint64_t new_row_count = cursor.row_count;
-    char line[TRG_LINE_MAX];
     char fail_why[256] = "";
-    bool any_failed = false;
-    while (fgets(line, sizeof line, f)) {
-        size_t raw_len = strlen(line);
-        if (raw_len == 0 || line[raw_len - 1] != '\n')
-            break; /* partial trailing line: leave it for next time */
-        line[raw_len - 1] = 0; /* drop the newline for parsing */
-        bool row_failed = false;
-        trg_process_line(&ctx, line, raw_len - 1, &new_row_count, checked,
-                         fired, failed, fail_why, sizeof fail_why,
-                         &row_failed);
-        if (row_failed) {
-            any_failed = true;
-            break; /* hold the cursor before this row; later rows wait */
-        }
-        new_offset += (uint64_t)raw_len;
-    }
+    trg_scan_lines(f, &ctx, &new_offset, &new_row_count, checked, fired,
+                  failed, fail_why, sizeof fail_why);
     fclose(f);
-    if (any_failed && out_why && out_why_cap && !out_why[0])
+    if (fail_why[0] && out_why && out_why_cap && !out_why[0])
         (void)snprintf(out_why, out_why_cap, "%s", fail_why);
 
     if (!dry_run) {
