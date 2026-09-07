@@ -273,7 +273,7 @@ size_t zcl_devloop_app_plan_json(const char *repo_root, const char *app_id,
                     "\"engine/models/src/database_migrate_features.c\","
                     "\"contexts/commons/apps/%s/app.def\","
                     "\"cognition/controllers/include/controllers/"
-                    "agent_impact_rules.def\"],"
+                    "agent_impact_rules.def\",\"docs/CODEBASE_MAP.md\"],"
                     "\"required_proofs\":[\"same_seed_replay\","
                     "\"partition_rejoin_convergence\","
                     "\"invalid_signature_rejection\","

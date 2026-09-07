@@ -326,8 +326,11 @@ make t-fast ONLY=<app>_<resource>_slice
 
 The plan's `wiring` array names the existing files a real resource
 eventually needs edited — the App manifest, the feature migration, the
-agent impact rules. The scaffold never edits them: which registry a resource
-joins is a reviewed decision, not boilerplate.
+agent impact rules, and the `DOC-COUNTS` block in
+[`docs/CODEBASE_MAP.md`](./CODEBASE_MAP.md), whose test-group total the new
+catalog row raises by one (`make check-doc-counts` prints both numbers).
+The scaffold never edits them: which registry a resource joins is a reviewed
+decision, not boilerplate.
 
 **Refusal semantics.** The command is safe to run on a checkout you care
 about, because it decides before it writes:

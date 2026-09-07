@@ -60,7 +60,8 @@ static char *scaffold_read(const char *path, size_t *len_out)
     for (;;) {
         if (len + 4096u + 1u > cap) {
             size_t next = cap ? cap * 2u : 8192u;
-            char *grown = realloc(buf, next);
+            char *grown = zcl_realloc(buf, next,
+                                      "dev.app.scaffold target read");
             if (!grown) {
                 free(buf);
                 (void)fclose(fp);
