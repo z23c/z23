@@ -87,7 +87,12 @@ static inline void test_fmt_tmpdir(char *buf, size_t n,
  * already exist. */
 static inline bool test_ensure_tmproot(void)
 {
+#if defined(_WIN32)
+    /* The MSVCRT mkdir() takes no mode argument. */
+    if (mkdir("test-tmp") == 0) return true;
+#else
     if (mkdir("test-tmp", 0700) == 0) return true;
+#endif
     return errno == EEXIST;
 }
 

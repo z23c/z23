@@ -1266,6 +1266,7 @@ add/remove a gate.
 - `check-no-adx-overclaim`
 - `check-simd-os-support`
 - `check-no-authoritative-ram-state`
+- `check-no-bare-tmp-fixture`
 - `check-no-dev-history-in-contracts`
 - `check-no-live-lab-history`
 - `check-no-new-borrowed-seed`

@@ -268,6 +268,7 @@ gate_command() {
         check-no-new-repair-rung)          echo './tools/scripts/check_no_new_repair_rung.sh' ;;
         check-consensus-parity)            echo './tools/scripts/check_consensus_parity.sh' ;;
         check-no-new-repair-rung)          echo './tools/scripts/check_no_new_repair_rung.sh --selftest && ./tools/scripts/check_no_new_repair_rung.sh' ;;
+        check-no-bare-tmp-fixture)         echo './tools/lint/check_no_bare_tmp_fixture.sh --selftest && ./tools/lint/check_no_bare_tmp_fixture.sh' ;;
         check-no-new-borrowed-seed)        echo './tools/lint/check_no_new_borrowed_seed.sh .' ;;
         check-no-new-coin-backfill-caller) echo './tools/lint/check_no_new_coin_backfill_caller.sh .' ;;
         check-route-command-parity)        echo './tools/lint/check_route_command_parity.sh .' ;;

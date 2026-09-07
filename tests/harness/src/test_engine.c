@@ -2920,6 +2920,18 @@ static bool verify_refuses(const char *path)
         && report.first_bad_line != 0;
 }
 
+/* Formats "<cwd>/test-tmp/zcl engine <byte> receipt <pid>.chainlog" — a
+ * UTF-8, space-containing fixture leaf name, rooted under test-tmp/ rather
+ * than the system temp directory. Split out of case_receipt_chain() to keep
+ * the getcwd() fallback's branch off that function's own complexity count. */
+static void receipt_unicode_path(char *out, size_t n)
+{
+    char cwd[PATH_MAX];
+    const char *base = getcwd(cwd, sizeof(cwd)) ? cwd : ".";
+    (void)snprintf(out, n, "%s/test-tmp/zcl engine \xC5\xBE receipt %d.chainlog",
+                   base, (int)getpid());
+}
+
 static int case_receipt_chain(void)
 {
     int failures = 0;
@@ -3027,12 +3039,8 @@ static int case_receipt_chain(void)
      * APIs without making the ordinary fixture depend on a source-code
      * locale. */
     char unicode_path[PATH_MAX];
-    char unicode_cwd[PATH_MAX];
     (void)test_ensure_tmproot();
-    (void)snprintf(unicode_path, sizeof(unicode_path),
-                   "%s/test-tmp/zcl engine \xC5\xBE receipt %d.chainlog",
-                   getcwd(unicode_cwd, sizeof(unicode_cwd)) ? unicode_cwd : ".",
-                   (int)getpid());
+    receipt_unicode_path(unicode_path, sizeof(unicode_path));
     receipt_unlink(unicode_path);
     EN_CHECK("a receipt appends through a UTF-8 path containing spaces",
              engine_receipt_append(unicode_path, &a, NULL));
