@@ -56,6 +56,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Defined early — before --selftest and --selftest-dev-guard, both of which
+# exit before the rest of this file runs — because the PREPARE functions
+# below (and the selftest cases that exercise them) use say/die too.
+say()  { printf '\033[1mship:\033[0m %s\n' "$*"; }
+step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
+die()  { printf '\033[1;31mship: REFUSE:\033[0m %s\n' "$*" >&2; exit 1; }
+
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
 # shellcheck source=tools/scripts/tor_stamp_lib.sh
@@ -299,6 +306,139 @@ ship_refuse_dev_artifact() {
     die "$probe is the unsippable z23.dev dev artifact — $reach — dev-profile bytes must never ship: remove the dev output and rebuild the release names"
 }
 
+# ── PREPARE: make the tools preflight and the gate need, instead of refusing
+# after them ─────────────────────────────────────────────────────────────────
+# Three of tonight's four ship refusals were not "the tree is unshippable" —
+# they were "a checkout worktree never ran the one-time setup step a
+# from-scratch clone gets for free": z23-tor-provenance unbuilt,
+# vendor/tor/.provenance absent because `git worktree add` does not populate a
+# submodule, and the installed git hook left stale by the gate's own rebuild
+# of z23-git-hook. Each cost a full 25-minute gate before it was even visible.
+# This step runs BEFORE preflight and fixes exactly those three, plus reports
+# (and, off a land-train, repairs) multiply-linked files that trip
+# check-no-hardlink-seeding. It never silently papers over a real defect: a
+# present-but-mismatched vendor/tor/.provenance still falls through to the
+# existing preflight refusal, because rebuilding it there would hide drift
+# instead of surfacing it.
+#
+# $SHIP_MAKE is the make invocation, indirected so the selftest can substitute
+# a recording fake instead of running a real build.
+SHIP_MAKE="${SHIP_MAKE:-make -s}"
+
+ship_prepare_tor_provenance() {
+    local root="${1:-$REPO_ROOT}" bin had=missing
+    bin="$root/build/bin/z23-tor-provenance"
+    [ -x "$bin" ] && had=present
+    $SHIP_MAKE z23-tor-provenance ||
+        die "prepare tor-provenance FAILED — make z23-tor-provenance did not succeed"
+    [ -x "$bin" ] ||
+        die "prepare tor-provenance FAILED — $bin still missing after make z23-tor-provenance"
+    if [ "$had" = missing ]; then
+        say "prepare tor-provenance built (was missing)"
+    else
+        say "prepare tor-provenance ok"
+    fi
+}
+
+# Only the ABSENCE of vendor/tor/.provenance is repaired here. A PRESENT
+# manifest that does not match its archives is drift, and drift is a refusal
+# (the existing ship_checkout_has_real_tor_archives check in preflight), never
+# a silent rebuild.
+ship_prepare_tor_ready() {
+    local root="${1:-$REPO_ROOT}" prov
+    prov="$root/vendor/tor/.provenance"
+    if [ -e "$prov" ]; then
+        say "prepare tor-ready ok (provenance present — a mismatch stays a refusal, not a rebuild)"
+        return 0
+    fi
+    say "prepare tor-ready building (vendor/tor/.provenance missing — git worktree add does not populate vendor/tor)"
+    $SHIP_MAKE tor-ready ||
+        die "prepare tor-ready FAILED — make tor-ready did not succeed"
+    [ -e "$prov" ] ||
+        die "prepare tor-ready FAILED — $prov still missing after make tor-ready"
+    say "prepare tor-ready built"
+}
+
+# The gate's own build (make lint's check-git-hooks-installed dependency
+# chain) can relink build/bin/z23-git-hook at the new tip, leaving the
+# installed copy under build/githooks stale. Rebuilding and reinstalling it
+# HERE, before preflight and the gate, means check-git-hooks-installed can
+# never see that mismatch: nothing later in this run touches the hook again.
+ship_prepare_git_hooks() {
+    local root="${1:-$REPO_ROOT}"
+    rm -f "$root/build/bin/z23-git-hook"
+    $SHIP_MAKE install-hooks ||
+        die "prepare git-hooks FAILED — make install-hooks did not succeed"
+    say "prepare git-hooks reinstalled"
+}
+
+# Indirected so the selftest can substitute a fixture answer instead of
+# querying the real user session.
+ship_land_train_query_real() {
+    systemctl --user list-units --no-legend --state=running 'z23-land-train*' 2>/dev/null
+}
+SHIP_LAND_TRAIN_QUERY="${SHIP_LAND_TRAIN_QUERY:-ship_land_train_query_real}"
+
+ship_land_train_active() {
+    local out
+    out="$("$SHIP_LAND_TRAIN_QUERY" 2>/dev/null)" || true
+    [ -n "$out" ]
+}
+
+ship_hardlink_count() {
+    local root="$1"
+    find "$root" -xdev -type f -links +1 \
+        -not -path "$root/.git/*" -not -path "$root/build/bin/*" 2>/dev/null | wc -l
+}
+
+# A hardlink into a lane tree (from a `cp -al` seeding step) shares an inode
+# with its donor: touching it bumps the donor's ctime and can invalidate a
+# proof in flight elsewhere. Dedupe is therefore refused, loudly, naming the
+# unit, whenever a z23-land-train* user unit is running; otherwise the
+# reflink-copy-then-rename swap the maintainers already use replaces each
+# shared inode with an independent one.
+ship_prepare_hardlink_report() {
+    local root="$1" dry="$2" n unit
+    n="$(ship_hardlink_count "$root")"
+    if [ "$dry" -eq 1 ]; then
+        say "prepare hardlinks (dry run) $n multiply-linked file(s) reported"
+        return 0
+    fi
+    if [ "$n" -eq 0 ]; then
+        say "prepare hardlinks ok (0 multiply-linked files)"
+        return 0
+    fi
+    if ship_land_train_active; then
+        unit="$("$SHIP_LAND_TRAIN_QUERY" 2>/dev/null | awk '{print $1; exit}')"
+        die "prepare hardlinks FAILED — $n multiply-linked file(s) found but land-train unit '${unit:-z23-land-train}' is active: deduping now would bump a shared inode's ctime under a live proof"
+    fi
+    say "prepare hardlinks deduping $n multiply-linked file(s)"
+    find "$root" -xdev -type f -links +1 \
+        -not -path "$root/.git/*" -not -path "$root/build/bin/*" -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+        cp -a --reflink=auto -- "$f" "$f.tmp.dd" && mv -f -- "$f.tmp.dd" "$f"
+    done
+    say "prepare hardlinks ok (deduped)"
+}
+
+# Entry point: (a)-(c) each refuse loudly on failure; (d) reports always and
+# repairs only off a land-train. --dry-run prints the plan (one line per
+# step) and only the REPORT half of (d) — it changes nothing.
+ship_prepare_all() {
+    local root="${1:-$REPO_ROOT}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "prepare tor-provenance (dry run — not built)"
+        say "prepare tor-ready (dry run — not built)"
+        say "prepare git-hooks (dry run — not reinstalled)"
+        ship_prepare_hardlink_report "$root" 1
+        return 0
+    fi
+    ship_prepare_tor_provenance "$root"
+    ship_prepare_tor_ready "$root"
+    ship_prepare_git_hooks "$root"
+    ship_prepare_hardlink_report "$root" 0
+}
+
 if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     # Everything below is a chain of bare boolean assertions under `set -e`,
     # which prints exactly one line — and only on success. Any assertion that
@@ -523,8 +663,81 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
         exit 1
     fi
     ship_selftest_dev_guard "$test_tmp/dev-guard"
+
+    # ── prepare steps: build what preflight/the gate need, never silently
+    # paper over drift ──────────────────────────────────────────────────────
+    prep_root="$test_tmp/prepare"
+    mkdir -p "$prep_root/build/bin" "$prep_root/vendor/tor"
+    prep_calls="$prep_root/make.calls"
+    : > "$prep_calls"
+    selftest_fake_make() {
+        printf '%s\n' "$*" >> "$prep_calls"
+        case "$1" in
+            z23-tor-provenance)
+                printf '#!/bin/sh\n' > "$prep_root/build/bin/z23-tor-provenance"
+                chmod 755 "$prep_root/build/bin/z23-tor-provenance" ;;
+            tor-ready)
+                printf 'fixture provenance\n' > "$prep_root/vendor/tor/.provenance" ;;
+        esac
+    }
+    SHIP_MAKE=selftest_fake_make
+    # (a) missing tool -> built
+    ship_prepare_tor_provenance "$prep_root"
+    [ -x "$prep_root/build/bin/z23-tor-provenance" ]
+    grep -qx 'z23-tor-provenance' "$prep_calls"
+    # (b) missing provenance -> tor-ready called
+    ship_prepare_tor_ready "$prep_root"
+    [ -e "$prep_root/vendor/tor/.provenance" ]
+    grep -qx 'tor-ready' "$prep_calls"
+    # (b) present-but-mismatched stays a REFUSAL later (ship_checkout_has_
+    # real_tor_archives), never a silent rebuild here: a manifest that is
+    # already present must not trigger tor-ready again, even with stale bytes.
+    : > "$prep_calls"
+    printf 'stale provenance\n' > "$prep_root/vendor/tor/.provenance"
+    ship_prepare_tor_ready "$prep_root"
+    refute grep -qx 'tor-ready' "$prep_calls"
+    # (c) hooks always rebuilt + reinstalled, even when nothing looked stale —
+    # the gate's own build can relink the hook after this ran.
+    : > "$prep_calls"
+    printf 'stale hook\n' > "$prep_root/build/bin/z23-git-hook"
+    ship_prepare_git_hooks "$prep_root"
+    [ ! -e "$prep_root/build/bin/z23-git-hook" ]
+    grep -qx 'install-hooks' "$prep_calls"
+    # (d) hardlink report: nothing linked -> clean, no refusal
+    printf 'solo\n' > "$prep_root/lonefile"
+    ship_prepare_hardlink_report "$prep_root" 0
+    # (d) links present, no land-train unit active -> deduped in place
+    ln "$prep_root/lonefile" "$prep_root/linked-peer"
+    [ "$(ship_hardlink_count "$prep_root")" -eq 2 ]
+    selftest_no_land_train() { :; }
+    SHIP_LAND_TRAIN_QUERY=selftest_no_land_train
+    ship_prepare_hardlink_report "$prep_root" 0
+    [ "$(ship_hardlink_count "$prep_root")" -eq 0 ]
+    # (d) links present, a land-train unit IS active -> refuse and touch
+    # NOTHING (the shared inode must stay untouched under a live proof)
+    rm -f "$prep_root/linked-peer"
+    ln "$prep_root/lonefile" "$prep_root/linked-peer"
+    selftest_land_train_running() {
+        printf 'z23-land-train@node1.service loaded active running Land train\n'
+    }
+    SHIP_LAND_TRAIN_QUERY=selftest_land_train_running
+    prep_refuse_rc=0
+    ( ship_prepare_hardlink_report "$prep_root" 0 ) \
+        >/dev/null 2>"$prep_root/refuse.err" || prep_refuse_rc=$?
+    [ "$prep_refuse_rc" -ne 0 ]
+    grep -q 'z23-land-train@node1.service' "$prep_root/refuse.err"
+    [ "$(ship_hardlink_count "$prep_root")" -eq 2 ]
+    # --dry-run shape: report only, nothing built or repaired
+    : > "$prep_calls"
+    dry_out="$(ship_prepare_hardlink_report "$prep_root" 1)"
+    [ "$(ship_hardlink_count "$prep_root")" -eq 2 ]
+    grep -q 'dry run' <<<"$dry_out"
+    [ ! -s "$prep_calls" ]
+    SHIP_LAND_TRAIN_QUERY=ship_land_train_query_real
+    SHIP_MAKE="make -s"
+
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
-    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach)\n'
+    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach; prepare steps built tor-provenance/tor-ready, left a mismatched provenance untouched, reinstalled hooks, and deduped/refused hardlinks correctly)\n'
     exit 0
 fi
 
@@ -537,10 +750,6 @@ for arg in "$@"; do
         *) printf 'ship: unknown argument %s\n' "$arg" >&2; exit 2 ;;
     esac
 done
-
-say()  { printf '\033[1mship:\033[0m %s\n' "$*"; }
-step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
-die()  { printf '\033[1;31mship: REFUSE:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ── 0. The proof server is not a deploy target ──────────────────────────────
 # ZCL_SHIP_PROOF_SERVER may identify one immutable tagged candidate and record
@@ -594,6 +803,14 @@ if [[ " $TARGETS " == *" remote "* ]]; then
         say "ZCL_SHIP_ALLOW_PROOF_SERVER=1 — $PROOF_SERVER may be restarted"
     fi
 fi
+
+# ── 0.5 Prepare ──────────────────────────────────────────────────────────────
+# Build what preflight and the gate need instead of refusing after them: the
+# tor-provenance tool, vendor/tor/.provenance when a worktree never populated
+# it, the installed git hook (always — the gate's own build can relink it),
+# and a hardlink report/repair for check-no-hardlink-seeding.
+step "Prepare"
+ship_prepare_all "$REPO_ROOT"
 
 # ── 1. Preflight ────────────────────────────────────────────────────────────
 # Everything that can refuse cheaply refuses BEFORE the 200-second build, so a

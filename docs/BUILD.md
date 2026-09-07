@@ -786,6 +786,33 @@ canonical `zclassic23` user service:
 ZCL_SHIP_HOSTS='user@host-a user@host-b user@host-c' make ship
 ```
 
+Before preflight, `tools/ship.sh` runs its own **prepare** step so a fresh
+worktree does not refuse after the 25-minute gate for a tool it could have
+built itself in seconds. Each step prints one `ship: prepare <what> <result>`
+line and refuses loudly on failure:
+
+- builds `build/bin/z23-tor-provenance` if it is missing (`make
+  z23-tor-provenance`);
+- runs `make tor-ready` if `vendor/tor/.provenance` is **absent** — the case a
+  bare `git worktree add` leaves, since it never populates the `vendor/tor`
+  submodule. A **present** manifest that does not match its archives is left
+  alone here: that is drift, and stays a refusal from the checkout-archive
+  preflight, never a silent rebuild;
+- rebuilds and reinstalls the native git hooks (`make install-hooks`) every
+  run, because the gate's own build can relink `build/bin/z23-git-hook` at the
+  new tip and leave the installed copy stale — this is why
+  `check-git-hooks-installed` fails only after ship's own 25-minute gate
+  otherwise;
+- reports how many files under the checkout are multiply-linked (the shape a
+  `cp -al` lane-tree seeding step leaves, and what
+  `check-no-hardlink-seeding` refuses on) and, off a live `z23-land-train*`
+  user unit, repairs them with a reflink-copy-then-rename swap; with such a
+  unit active it refuses by name instead, since touching a shared inode bumps
+  its donor's ctime under a live proof.
+
+`--dry-run` prints this plan (and the hardlink count) without building or
+repairing anything.
+
 All remotes are ordinary serving peers unless one exact destination is named
 with `ZCL_SHIP_PROOF_SERVER`. That host is skipped by default; an intentional
 promotion additionally requires `ZCL_SHIP_ALLOW_PROOF_SERVER=1`. Preflight
