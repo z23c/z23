@@ -156,27 +156,9 @@ static int cic_ceiling(const char *path, char *out, size_t cap)
     return fin(f, line, path, rc);
 }
 
-int check_codeindex_coverage_run(int argc, char **argv)
+static int cic_cov_require(const char *bin, const char *baseline,
+                           char *ceiling, size_t ceil_cap)
 {
-    (void)argc;
-    (void)argv;
-    char root[4096], bin_def[4096], base_def[4096], ceiling[64];
-    char qbin[8192], cmd[8192];
-    static char captured[256 * 1024];
-    char verdict[32], missing[32], summary[512];
-    if (cic_repo_root(root, sizeof root))
-        return 2;
-    if (ovf(snprintf(bin_def, sizeof bin_def, "%s/build/bin/z23-dev", root),
-            sizeof bin_def)
-        || ovf(snprintf(base_def, sizeof base_def,
-                        "%s/tools/lint/codeindex_coverage_baseline.txt", root),
-               sizeof base_def))
-        return 2;
-    const char *bin = env_or("ZCL_CODEINDEX_COVERAGE_BIN", bin_def);
-    const char *baseline = env_or("ZCL_CODEINDEX_COVERAGE_BASELINE", base_def);
-    const char *source_root = env_or("ZCL_CODEINDEX_COVERAGE_ROOT", root);
-    if (chdir(root) != 0)
-        return die("z23-lint: cannot scan %s\n", root);
     if (access(bin, X_OK) != 0) {
         if (fprintf(stderr,
                     "check-codeindex-coverage: FATAL — missing executable %s\n",
@@ -192,7 +174,7 @@ int check_codeindex_coverage_run(int argc, char **argv)
             return die("z23-lint: write failed\n", "");
         return 2;
     }
-    if (cic_ceiling(baseline, ceiling, sizeof ceiling))
+    if (cic_ceiling(baseline, ceiling, ceil_cap))
         return 2;
     if (!cic_digits(ceiling)) {
         if (fputs("check-codeindex-coverage: FATAL — baseline must contain one nonnegative integer\n",
@@ -200,14 +182,44 @@ int check_codeindex_coverage_run(int argc, char **argv)
             return die("z23-lint: write failed\n", "");
         return 2;
     }
+    return 0;
+}
+
+static int cic_cov_collect(char *cmd, size_t cmd_cap, char *ceiling,
+                           size_t ceil_cap)
+{
+    char root[4096], bin_def[4096], base_def[4096];
+    char qbin[8192];
+    if (cic_repo_root(root, sizeof root))
+        return 2;
+    if (ovf(snprintf(bin_def, sizeof bin_def, "%s/build/bin/z23-dev", root),
+            sizeof bin_def)
+        || ovf(snprintf(base_def, sizeof base_def,
+                        "%s/tools/lint/codeindex_coverage_baseline.txt", root),
+               sizeof base_def))
+        return 2;
+    const char *bin = env_or("ZCL_CODEINDEX_COVERAGE_BIN", bin_def);
+    const char *baseline = env_or("ZCL_CODEINDEX_COVERAGE_BASELINE", base_def);
+    const char *source_root = env_or("ZCL_CODEINDEX_COVERAGE_ROOT", root);
+    if (chdir(root) != 0)
+        return die("z23-lint: cannot scan %s\n", root);
+    int rc = cic_cov_require(bin, baseline, ceiling, ceil_cap);
+    if (rc)
+        return rc;
     if (setenv("ZCL_DEV_SOURCE_ROOT", source_root, 1) != 0)
         return die("z23-lint: setenv failed\n", "");
     if (sh_single_quote(bin, qbin, sizeof qbin)
-        || ovf(snprintf(cmd, sizeof cmd, "%s code coverage 2>&1", qbin),
-               sizeof cmd))
+        || ovf(snprintf(cmd, cmd_cap, "%s code coverage 2>&1", qbin),
+               cmd_cap))
         return 2;
+    return 0;
+}
+
+static int cic_cov_check(const char *cmd, char *captured, size_t cap,
+                         const char *ceiling, char *summary, size_t summary_cap)
+{
     int code = 0;
-    int rc = capture_cmd(cmd, captured, sizeof captured, &code);
+    int rc = capture_cmd(cmd, captured, cap, &code);
     if (rc)
         return rc;
     if (code != 0) {
@@ -217,9 +229,10 @@ int check_codeindex_coverage_run(int argc, char **argv)
         rc = cic_prefix_sed(captured);
         return rc ? rc : 2;
     }
+    char verdict[32], missing[32];
     cic_take_az(captured, "\"verdict\":\"", verdict, sizeof verdict);
     cic_take_num(captured, "\"missing_files\":", missing, sizeof missing);
-    cic_take_q(captured, "\"summary\":\"", summary, sizeof summary);
+    cic_take_q(captured, "\"summary\":\"", summary, summary_cap);
     if (!cic_digits(missing)) {
         if (fputs("check-codeindex-coverage: FATAL — malformed code coverage reply\n",
                   stderr) < 0)
@@ -242,6 +255,23 @@ int check_codeindex_coverage_run(int argc, char **argv)
             return die("z23-lint: write failed\n", "");
         return 2;
     }
+    return 0;
+}
+
+int check_codeindex_coverage_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    char ceiling[64], cmd[8192];
+    static char captured[256 * 1024];
+    char summary[512];
+    int rc = cic_cov_collect(cmd, sizeof cmd, ceiling, sizeof ceiling);
+    if (rc)
+        return rc;
+    rc = cic_cov_check(cmd, captured, sizeof captured, ceiling, summary,
+                       sizeof summary);
+    if (rc)
+        return rc;
     if (printf("check-codeindex-coverage: PASS — %s; shrink-only ceiling=%s\n",
                summary, ceiling) < 0)
         return die("z23-lint: write failed\n", "");
@@ -257,31 +287,49 @@ static int cic_st_fail(const char *msg, const char *log)
     return rc ? rc : 2;
 }
 
-int check_codeindex_coverage_selftest(void)
+struct cic_st {
+    char tmpl[4096];
+    char fixture[4096];
+    char missp[4096];
+    char basep[4096];
+    char *logb;
+    size_t logcap;
+};
+
+static int cic_st_mk_fixture(struct cic_st *st)
 {
     const char *td = env_or("TMPDIR", "/tmp");
-    char tmpl[4096];
-    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-codeindex-coverage.XXXXXX", td),
-            sizeof tmpl))
+    if (ovf(snprintf(st->tmpl, sizeof st->tmpl,
+                     "%s/z23-codeindex-coverage.XXXXXX", td),
+            sizeof st->tmpl))
         return 2;
-    char *tmp = mkdtemp(tmpl);
+    char *tmp = mkdtemp(st->tmpl);
     if (!tmp)
         return die("z23-lint: mkdir failed: %s\n", td);
-    char fixture[4096], srcdir[4096], ac[4096], missp[4096], basep[4096];
-    static char logb[256 * 1024];
-    int code = 0, rc, bad = 0;
-    if (ovf(snprintf(fixture, sizeof fixture, "%s/repo", tmp), sizeof fixture)
-        || ovf(snprintf(srcdir, sizeof srcdir, "%s/src", fixture), sizeof srcdir)
+    char srcdir[4096], ac[4096];
+    if (ovf(snprintf(st->fixture, sizeof st->fixture, "%s/repo", tmp),
+            sizeof st->fixture)
+        || ovf(snprintf(srcdir, sizeof srcdir, "%s/src", st->fixture),
+               sizeof srcdir)
         || ovf(snprintf(ac, sizeof ac, "%s/a.c", srcdir), sizeof ac)
-        || ovf(snprintf(missp, sizeof missp, "%s/missing.c", srcdir),
-               sizeof missp)
-        || ovf(snprintf(basep, sizeof basep, "%s/baseline", tmp), sizeof basep)
+        || ovf(snprintf(st->missp, sizeof st->missp, "%s/missing.c", srcdir),
+               sizeof st->missp)
+        || ovf(snprintf(st->basep, sizeof st->basep, "%s/baseline", tmp),
+               sizeof st->basep)
         || csr_write(ac, "int coverage_fixture(void) { return 23; }\n")
-        || csr_write(basep, "0\n")) {
+        || csr_write(st->basep, "0\n")) {
         (void)rap_rm_rf(tmp);
         return 2;
     }
+    return 0;
+}
+
+static int cic_st_git_init(struct cic_st *st)
+{
     char dump[256], gitcmd[8192];
+    int code = 0;
+    char *tmp = st->tmpl;
+    const char *fixture = st->fixture;
     if (strchr(fixture, '\'')) {
         (void)rap_rm_rf(tmp);
         return die("z23-lint: path too long: %s\n", fixture);
@@ -296,20 +344,36 @@ int check_codeindex_coverage_selftest(void)
         return die("z23-lint: command failed (%s)\n", "git");
     }
     if (setenv("ZCL_CODEINDEX_COVERAGE_ROOT", fixture, 1) != 0
-        || setenv("ZCL_CODEINDEX_COVERAGE_BASELINE", basep, 1) != 0) {
+        || setenv("ZCL_CODEINDEX_COVERAGE_BASELINE", st->basep, 1) != 0) {
         (void)rap_rm_rf(tmp);
         return die("z23-lint: setenv failed\n", "");
     }
-    rc = cic_invoke("check-codeindex-coverage", 1, logb, sizeof logb, &code);
+    return 0;
+}
+
+static int cic_st_clean_green(struct cic_st *st)
+{
+    int code = 0, rc, bad = 0;
+    rc = cic_invoke("check-codeindex-coverage", 1, st->logb, st->logcap, &code);
     if (rc) {
-        (void)rap_rm_rf(tmp);
+        (void)rap_rm_rf(st->tmpl);
         return rc;
     }
     if (code != 0) {
-        bad = cic_st_fail("clean tracked source was not GREEN", logb);
-        (void)rap_rm_rf(tmp);
+        bad = cic_st_fail("clean tracked source was not GREEN", st->logb);
+        (void)rap_rm_rf(st->tmpl);
         return bad;
     }
+    return 0;
+}
+
+static int cic_st_planted_red(struct cic_st *st)
+{
+    char dump[256], gitcmd[8192];
+    int code = 0, rc, bad = 0;
+    char *tmp = st->tmpl;
+    const char *fixture = st->fixture;
+    const char *missp = st->missp;
     if (csr_write(missp, "int planted_missing(void) { return 1; }\n")
         || ovf(snprintf(gitcmd, sizeof gitcmd, "git -C '%s' add src/missing.c",
                         fixture), sizeof gitcmd)
@@ -321,16 +385,26 @@ int check_codeindex_coverage_selftest(void)
         (void)rap_rm_rf(tmp);
         return die("z23-lint: cannot open %s\n", missp);
     }
-    rc = cic_invoke("check-codeindex-coverage", 1, logb, sizeof logb, &code);
+    rc = cic_invoke("check-codeindex-coverage", 1, st->logb, st->logcap, &code);
     if (rc) {
         (void)rap_rm_rf(tmp);
         return rc;
     }
-    if (code != 1 || strstr(logb, "missing=1") == NULL) {
-        bad = cic_st_fail("planted tracked omission was not named RED", logb);
+    if (code != 1 || strstr(st->logb, "missing=1") == NULL) {
+        bad = cic_st_fail("planted tracked omission was not named RED",
+                          st->logb);
         (void)rap_rm_rf(tmp);
         return bad;
     }
+    return 0;
+}
+
+static int cic_st_restore_green(struct cic_st *st)
+{
+    char dump[256], gitcmd[8192];
+    int code = 0, rc, bad = 0;
+    char *tmp = st->tmpl;
+    const char *fixture = st->fixture;
     if (ovf(snprintf(gitcmd, sizeof gitcmd,
                      "git -C '%s' rm -q --cached --ignore-unmatch src/missing.c",
                      fixture), sizeof gitcmd)
@@ -338,18 +412,43 @@ int check_codeindex_coverage_selftest(void)
         (void)rap_rm_rf(tmp);
         return die("z23-lint: command failed (%s)\n", "git");
     }
-    rc = cic_invoke("check-codeindex-coverage", 1, logb, sizeof logb, &code);
+    rc = cic_invoke("check-codeindex-coverage", 1, st->logb, st->logcap, &code);
     if (rc) {
         (void)rap_rm_rf(tmp);
         return rc;
     }
     if (code != 0) {
         bad = cic_st_fail("removing the planted manifest row did not restore GREEN",
-                          logb);
+                          st->logb);
         (void)rap_rm_rf(tmp);
         return bad;
     }
-    (void)rap_rm_rf(tmp);
+    return 0;
+}
+
+int check_codeindex_coverage_selftest(void)
+{
+    static char logb[256 * 1024];
+    struct cic_st st;
+    memset(&st, 0, sizeof st);
+    st.logb = logb;
+    st.logcap = sizeof logb;
+    int rc = cic_st_mk_fixture(&st);
+    if (rc)
+        return rc;
+    rc = cic_st_git_init(&st);
+    if (rc)
+        return rc;
+    rc = cic_st_clean_green(&st);
+    if (rc)
+        return rc;
+    rc = cic_st_planted_red(&st);
+    if (rc)
+        return rc;
+    rc = cic_st_restore_green(&st);
+    if (rc)
+        return rc;
+    (void)rap_rm_rf(st.tmpl);
     if (fputs("check-codeindex-coverage: SELFTEST PASS — clean and restored manifests are GREEN; one tracked missing file is RED\n",
               stdout) < 0)
         return die("z23-lint: write failed\n", "");
@@ -503,14 +602,13 @@ static int gp_check_named(const char *src, const char *fmt, const char *name,
     return 0;
 }
 
-int check_group_purpose_run(int argc, char **argv)
+static int gp_collect(const char **src_out)
 {
-    (void)argc;
-    (void)argv;
     int rc = rs_init();
     if (rc)
         return rc;
     const char *src = env_or("ZCL_GROUP_PURPOSE_SRC", k_gp_src);
+    *src_out = src;
     struct stat st;
     if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) {
         fprintf(stderr, "check-group-purpose: missing %s\n", src);
@@ -530,28 +628,33 @@ int check_group_purpose_run(int argc, char **argv)
               stderr);
         return 1;
     }
-    int fail = 0, scanned = 0;
+    return 0;
+}
+
+static int gp_check_all(const char *src, int *scanned, int *fail)
+{
+    int rc;
     for (int i = 0; i < g_n_libs; i++) {
         rc = gp_check_named(src, k_gp_mod, g_libs[i], "module",
-                            "has no non-empty purpose", &scanned, &fail);
+                            "has no non-empty purpose", scanned, fail);
         if (rc)
             return rc;
     }
     for (size_t i = 0; i < sizeof k_gp_roots / sizeof k_gp_roots[0]; i++) {
         rc = gp_check_named(src, k_gp_rootp, k_gp_roots[i], "root",
-                            "has no non-empty purpose", &scanned, &fail);
+                            "has no non-empty purpose", scanned, fail);
         if (rc)
             return rc;
     }
     for (int i = 0; i < g_n_shapes; i++) {
         rc = gp_check_named(src, k_gp_shapep, g_shapes[i], "shape",
-                            "has no non-empty purpose", &scanned, &fail);
+                            "has no non-empty purpose", scanned, fail);
         if (rc)
             return rc;
     }
     for (size_t i = 0; i < sizeof k_gp_auth / sizeof k_gp_auth[0]; i++) {
         rc = gp_check_named(src, k_gp_authp, k_gp_auth[i], "authority",
-                            "lacks a room fallback", &scanned, &fail);
+                            "lacks a room fallback", scanned, fail);
         if (rc)
             return rc;
     }
@@ -563,9 +666,24 @@ int check_group_purpose_run(int argc, char **argv)
         if (!has) {
             fputs("check-group-purpose: module-room fallback is missing\n",
                   stderr);
-            fail = 1;
+            *fail = 1;
         }
     }
+    return 0;
+}
+
+int check_group_purpose_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const char *src;
+    int rc = gp_collect(&src);
+    if (rc)
+        return rc;
+    int fail = 0, scanned = 0;
+    rc = gp_check_all(src, &scanned, &fail);
+    if (rc)
+        return rc;
     rc = gate_require_scanned(scanned, g_n_libs + 20, "check-group-purpose",
                               "purpose scan was incomplete");
     if (rc)
