@@ -157,12 +157,12 @@ static int csr_footer(FILE *err)
     return 1;
 }
 
-static int csr_check(FILE *out, FILE *err)
+static int csr_check_files(FILE *err, int *fail)
 {
     static const char *const files[] = {
         k_csr_mirror, k_csr_mod, k_csr_act, k_csr_gen
     };
-    int fail = 0, rc = 0;
+    int rc = 0;
     for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
         if (csr_readable(files[i]))
             continue;
@@ -170,18 +170,21 @@ static int csr_check(FILE *out, FILE *err)
         if (ovf(snprintf(msg, sizeof msg, "%s is missing or unreadable", files[i]),
                 sizeof msg))
             return 2;
-        rc = csr_bad(err, &fail, msg);
-        if (rc)
-            return rc;
+        rc = csr_bad(err, fail, msg);
+        if (rc) return rc;
     }
-    if (fail)
+    if (*fail)
         return 1;
+    return 0;
+}
 
-    char cmd[256], genout[8192], msg[4096], note[8192];
+static int csr_check_gen(FILE *out, FILE *err, int *fail)
+{
+    char cmd[256], genout[8192], note[8192];
     if (ovf(snprintf(cmd, sizeof cmd, "bash %s --check 2>&1", k_csr_gen), sizeof cmd))
         return 2;
     int code = 0;
-    rc = capture_cmd(cmd, genout, sizeof genout, &code);
+    int rc = capture_cmd(cmd, genout, sizeof genout, &code);
     if (rc)
         return rc;
     if (code == 0) {
@@ -191,19 +194,22 @@ static int csr_check(FILE *out, FILE *err)
         if (ovf(snprintf(note, sizeof note, "current  : %s", rest), sizeof note))
             return 2;
         rc = csr_note(out, note);
-        if (rc)
-            return rc;
+        if (rc) return rc;
     } else {
         if (fprintf(err, "%s\n", genout) < 0)
             return die("z23-lint: write failed\n", "");
-        rc = csr_bad(err, &fail,
+        rc = csr_bad(err, fail,
                      "the mirror does not match core/MANIFEST.sha3 (run 'make core-seal')");
-        if (rc)
-            return rc;
+        if (rc) return rc;
     }
+    return 0;
+}
 
+static int csr_check_include(FILE *out, FILE *err, int *fail)
+{
+    char note[8192], msg[4096];
     int found = 0;
-    rc = csr_file_pred(k_csr_mod, csr_has_include, &found);
+    int rc = csr_file_pred(k_csr_mod, csr_has_include, &found);
     if (rc)
         return rc;
     if (found) {
@@ -211,64 +217,73 @@ static int csr_check(FILE *out, FILE *err)
                 sizeof note))
             return 2;
         rc = csr_note(out, note);
-        if (rc)
-            return rc;
+        if (rc) return rc;
     } else {
         if (ovf(snprintf(msg, sizeof msg,
                          "%s does not include \"hotswap/core_seal_root.h\" — "
                          "modules would compile without a pin", k_csr_mod),
                 sizeof msg))
             return 2;
-        rc = csr_bad(err, &fail, msg);
-        if (rc)
-            return rc;
+        rc = csr_bad(err, fail, msg);
+        if (rc) return rc;
     }
+    return 0;
+}
 
-    rc = csr_file_pred(k_csr_mod, csr_has_pin, &found);
+static int csr_check_pin_symbol(FILE *out, FILE *err, int *fail)
+{
+    char msg[4096];
+    int found = 0;
+    int rc = csr_file_pred(k_csr_mod, csr_has_pin, &found);
     if (rc)
         return rc;
     if (found) {
         rc = csr_note(out, "exported : the module emitter stamps the pin symbol");
-        if (rc)
-            return rc;
+        if (rc) return rc;
     } else {
         if (ovf(snprintf(msg, sizeof msg,
                          "%s's ZCL_HOTSWAP_MODULE_LEAVES does not emit "
                          "zcl_hotswap_module_core_seal_root", k_csr_mod),
                 sizeof msg))
             return 2;
-        rc = csr_bad(err, &fail, msg);
-        if (rc)
-            return rc;
+        rc = csr_bad(err, fail, msg);
+        if (rc) return rc;
     }
+    return 0;
+}
 
-    int enforced = 0;
-    rc = csr_count_sub(k_csr_act, "module_consensus_pin_ok(", &enforced);
+static int csr_check_enforced(FILE *out, FILE *err, int *fail, int *enforced)
+{
+    char note[8192], msg[4096];
+    int rc = csr_count_sub(k_csr_act, "module_consensus_pin_ok(", enforced);
     if (rc)
         return rc;
-    if (enforced >= 3) {
+    if (*enforced >= 3) {
         if (ovf(snprintf(note, sizeof note,
                          "enforced : %s checks the pin on %d dlsym path(s)",
-                         k_csr_act, enforced - 1),
+                         k_csr_act, *enforced - 1),
                 sizeof note))
             return 2;
         rc = csr_note(out, note);
-        if (rc)
-            return rc;
+        if (rc) return rc;
     } else {
         if (ovf(snprintf(msg, sizeof msg,
                          "%s has %d module_consensus_pin_ok reference(s); "
                          "expected a definition plus a call on BOTH dlsym paths",
-                         k_csr_act, enforced),
+                         k_csr_act, *enforced),
                 sizeof msg))
             return 2;
-        rc = csr_bad(err, &fail, msg);
-        if (rc)
-            return rc;
+        rc = csr_bad(err, fail, msg);
+        if (rc) return rc;
     }
+    return 0;
+}
 
+static int csr_check_dlsym(FILE *err, int *fail, int enforced)
+{
+    char msg[4096];
     regex_t dlre;
-    rc = csr_comp_dlsym(&dlre);
+    int rc = csr_comp_dlsym(&dlre);
     if (rc)
         return rc;
     int sites = 0;
@@ -283,11 +298,28 @@ static int csr_check(FILE *out, FILE *err)
                          k_csr_act, sites, enforced - 1),
                 sizeof msg))
             return 2;
-        rc = csr_bad(err, &fail, msg);
-        if (rc)
-            return rc;
+        rc = csr_bad(err, fail, msg);
+        if (rc) return rc;
     }
+    return 0;
+}
 
+static int csr_check(FILE *out, FILE *err)
+{
+    int fail = 0, rc = 0;
+    rc = csr_check_files(err, &fail);
+    if (rc) return rc;
+    rc = csr_check_gen(out, err, &fail);
+    if (rc) return rc;
+    rc = csr_check_include(out, err, &fail);
+    if (rc) return rc;
+    rc = csr_check_pin_symbol(out, err, &fail);
+    if (rc) return rc;
+    int enforced = 0;
+    rc = csr_check_enforced(out, err, &fail, &enforced);
+    if (rc) return rc;
+    rc = csr_check_dlsym(err, &fail, enforced);
+    if (rc) return rc;
     if (fail)
         return csr_footer(err);
     return fputs("core_seal_root_mirror: OK — pin current, exported by the module "
@@ -348,6 +380,55 @@ static int csr_plant_base(void)
     return rc;
 }
 
+static int lp_rewind2(FILE *out, FILE *err)
+{
+    rewind(out); rewind(err);
+    return ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0;
+}
+
+static int lp_slurp2(FILE *out, FILE *err, char *ob, size_t oc, char *eb, size_t ec)
+{
+    return csr_slurp(out, ob, oc) || csr_slurp(err, eb, ec);
+}
+
+/* SCENARIO GROUP: empty tree — every pin file is missing or unreadable. */
+static int csr_st_missing(FILE *out, FILE *err, char *ob, size_t oc, char *eb, size_t ec)
+{
+    int rc = csr_check(out, err);
+    int bad = lp_slurp2(out, err, ob, oc, eb, ec);
+    bad |= rc != 1
+        || strstr(eb, "core_seal_root_mirror: FAIL — ") == NULL
+        || strstr(eb, " is missing or unreadable") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: planted tree without the module include. */
+static int csr_st_no_include(FILE *out, FILE *err, char *ob, size_t oc, char *eb, size_t ec)
+{
+    int bad = lp_rewind2(out, err);
+    if (csr_plant_base() || csr_plant_mod(k_csr_mod, 0))
+        bad = 1;
+    int rc = csr_check(out, err);
+    bad |= lp_slurp2(out, err, ob, oc, eb, ec);
+    bad |= rc != 1
+        || strstr(eb, "does not include \"hotswap/core_seal_root.h\"") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: planted tree with include — clean pin. */
+static int csr_st_clean(FILE *out, FILE *err, char *ob, size_t oc, char *eb, size_t ec)
+{
+    int bad = lp_rewind2(out, err);
+    if (csr_plant_mod(k_csr_mod, 1))
+        bad = 1;
+    int rc = csr_check(out, err);
+    bad |= lp_slurp2(out, err, ob, oc, eb, ec);
+    bad |= rc != 0
+        || strstr(ob, "core_seal_root_mirror: OK — pin current, exported by the "
+                      "module emitter, enforced on every dlsym path") == NULL;
+    return bad;
+}
+
 int check_core_seal_root_mirror_selftest(void)
 {
     char cwd[4096];
@@ -365,42 +446,14 @@ int check_core_seal_root_mirror_selftest(void)
         return die("z23-lint: tmpfile failed\n", "");
     }
     char ob[4096], eb[4096];
-    int bad = 0, rc = 0;
     if (chdir(root) != 0) {
         fclose(out); fclose(err); rmdir(root);
         return die("z23-lint: cannot scan %s\n", root);
     }
 
-    rc = csr_check(out, err);
-    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(eb, "core_seal_root_mirror: FAIL — ") == NULL
-        || strstr(eb, " is missing or unreadable") == NULL;
-
-    rewind(out); rewind(err);
-    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
-        bad = 1;
-
-    if (csr_plant_base() || csr_plant_mod(k_csr_mod, 0))
-        bad = 1;
-    rc = csr_check(out, err);
-    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(eb, "does not include \"hotswap/core_seal_root.h\"") == NULL;
-
-    rewind(out); rewind(err);
-    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
-        bad = 1;
-    if (csr_plant_mod(k_csr_mod, 1))
-        bad = 1;
-    rc = csr_check(out, err);
-    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
-        bad = 1;
-    bad |= rc != 0
-        || strstr(ob, "core_seal_root_mirror: OK — pin current, exported by the "
-                      "module emitter, enforced on every dlsym path") == NULL;
+    int bad = csr_st_missing(out, err, ob, sizeof ob, eb, sizeof eb);
+    bad |= csr_st_no_include(out, err, ob, sizeof ob, eb, sizeof eb);
+    bad |= csr_st_clean(out, err, ob, sizeof ob, eb, sizeof eb);
 
     fclose(out);
     fclose(err);
@@ -646,15 +699,9 @@ static int pf_scan_banned_lines(const char *path, const regex_t *re, FILE *err)
     return 0;
 }
 
-int check_peer_floor_single_source_run(int argc, char **argv)
+/* SCAN STAGE: expected header and floor sites exist as regular files. */
+static int pf_require_files(void)
 {
-    (void)argc;
-    (void)argv;
-    const char *st = getenv("ZCL_PEER_FLOOR_SELFTEST");
-    if (st && strcmp(st, "1") == 0)
-        return pf_selftest_mode(getenv("ZCL_PEER_FLOOR_SELFTEST_FILE"),
-                                stdout, stderr);
-
     if (!pf_is_reg(k_pf_hdr)) {
         fprintf(stderr,
                 "check_peer_floor_single_source: FATAL — expected file missing: %s\n",
@@ -669,111 +716,127 @@ int check_peer_floor_single_source_run(int argc, char **argv)
                 k_pf_sites[i]);
         return 2;
     }
+    return 0;
+}
 
-    regex_t def, ref, banned;
-    int cr = pf_comp_def(&def);
+/* SCAN STAGE: compile the definition, reference, and banned-literal regexes. */
+static int pf_compile_all(regex_t *def, regex_t *ref, regex_t *banned)
+{
+    int cr = pf_comp_def(def);
     if (cr)
         return cr;
-    cr = pf_comp_ref(&ref);
+    cr = pf_comp_ref(ref);
     if (cr) {
-        regfree(&def);
+        regfree(def);
         return cr;
     }
-    cr = pf_comp_banned(&banned);
+    cr = pf_comp_banned(banned);
     if (cr) {
-        drop2(&def, &ref);
+        drop2(def, ref);
         return cr;
     }
+    return 0;
+}
 
-    int fail = 0, def_count = 0, rc = pf_count_re(k_pf_hdr, &def, &def_count);
-    if (rc) {
-        drop3(&def, &ref, &banned);
+/* SCAN STAGE: ZCL_PEER_FLOOR_HEALTHY is #define'd exactly once in the header. */
+static int pf_check_single_def(const regex_t *def, int *fail)
+{
+    int def_count = 0;
+    int rc = pf_count_re(k_pf_hdr, def, &def_count);
+    if (rc)
         return rc;
-    }
     if (def_count != 1) {
         if (fprintf(stderr,
                     "check_peer_floor_single_source: FAIL — ZCL_"
                     "PEER_FLOOR_HEALTHY must be #define'd exactly once (as a number) "
-                    "in %s (found %d)\n", k_pf_hdr, def_count) < 0) {
-            drop3(&def, &ref, &banned);
+                    "in %s (found %d)\n", k_pf_hdr, def_count) < 0)
             return die("z23-lint: write failed\n", "");
-        }
-        fail = 1;
+        *fail = 1;
     }
+    return 0;
+}
 
-    struct pf_tree tree = { .re = &def };
-    rc = pf_root_floor_check(k_pf_walk_roots,
-                             sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]);
-    for (size_t i = 0; rc == 0 && i < sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]; i++)
-        rc = pf_walk(k_pf_walk_roots[i], &tree);
-    if (rc) {
-        drop3(&def, &ref, &banned);
-        return rc;
-    }
-    if (tree.n > 1)
-        qsort(tree.p, (size_t)tree.n, sizeof tree.p[0], pf_path_cmp);
+static void pf_uniq_paths(struct pf_tree *tree)
+{
+    if (tree->n > 1)
+        qsort(tree->p, (size_t)tree->n, sizeof tree->p[0], pf_path_cmp);
     int uniq = 0;
-    for (int i = 0; i < tree.n; i++) {
-        if (i && strcmp(tree.p[i], tree.p[i - 1]) == 0)
+    for (int i = 0; i < tree->n; i++) {
+        if (i && strcmp(tree->p[i], tree->p[i - 1]) == 0)
             continue;
         if (uniq != i)
-            memcpy(tree.p[uniq], tree.p[i], PF_NAME);
+            memcpy(tree->p[uniq], tree->p[i], PF_NAME);
         uniq++;
     }
-    tree.n = uniq;
-    if (tree.n != 1) {
-        if (fprintf(stderr,
-                    "check_peer_floor_single_source: FAIL — ZCL_"
-                    "PEER_FLOOR_HEALTHY defined in %d files (expected 1):\n",
-                    tree.n) < 0) {
-            drop3(&def, &ref, &banned);
-            return die("z23-lint: write failed\n", "");
-        }
-        if (tree.n == 0) {
-            if (fputs("    \n", stderr) < 0) {
-                drop3(&def, &ref, &banned);
-                return die("z23-lint: write failed\n", "");
-            }
-        } else {
-            for (int i = 0; i < tree.n; i++) {
-                if (fprintf(stderr, "    %s\n", tree.p[i]) < 0) {
-                    drop3(&def, &ref, &banned);
-                    return die("z23-lint: write failed\n", "");
-                }
-            }
-        }
-        fail = 1;
-    }
+    tree->n = uniq;
+}
 
-    int total_refs = 0;
+static int pf_report_defs(const struct pf_tree *tree, int *fail)
+{
+    if (tree->n == 1)
+        return 0;
+    if (fprintf(stderr,
+                "check_peer_floor_single_source: FAIL — ZCL_"
+                "PEER_FLOOR_HEALTHY defined in %d files (expected 1):\n",
+                tree->n) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (tree->n == 0) {
+        if (fputs("    \n", stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+    } else {
+        for (int i = 0; i < tree->n; i++) {
+            if (fprintf(stderr, "    %s\n", tree->p[i]) < 0)
+                return die("z23-lint: write failed\n", "");
+        }
+    }
+    *fail = 1;
+    return 0;
+}
+
+/* SCAN STAGE: unique extra-definition walk under the production roots. */
+static int pf_scan_extra_defs(const regex_t *def, int *fail)
+{
+    struct pf_tree tree = { .re = def };
+    int rc = pf_root_floor_check(k_pf_walk_roots,
+                                 sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]);
+    for (size_t i = 0; rc == 0 && i < sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]; i++)
+        rc = pf_walk(k_pf_walk_roots[i], &tree);
+    if (rc)
+        return rc;
+    pf_uniq_paths(&tree);
+    return pf_report_defs(&tree, fail);
+}
+
+/* SCAN STAGE: each floor site references the symbol and has no banned literal. */
+static int pf_scan_sites(const regex_t *ref, const regex_t *banned, int *fail,
+                         int *total_refs)
+{
+    int rc = 0;
     for (size_t i = 0; i < sizeof k_pf_sites / sizeof k_pf_sites[0]; i++) {
         int refs = 0;
-        rc = pf_count_re(k_pf_sites[i], &ref, &refs);
-        if (rc) {
-            drop3(&def, &ref, &banned);
-            return rc;
-        }
-        total_refs += refs;
+        rc = pf_count_re(k_pf_sites[i], ref, &refs);
+        if (rc) return rc;
+        *total_refs += refs;
         if (refs < 1) {
             if (fprintf(stderr,
                         "check_peer_floor_single_source: FAIL — %s does not reference "
                         "ZCL_" "PEER_FLOOR_HEALTHY (re-hardcoded floor?)\n",
-                        k_pf_sites[i]) < 0) {
-                drop3(&def, &ref, &banned);
+                        k_pf_sites[i]) < 0)
                 return die("z23-lint: write failed\n", "");
-            }
-            fail = 1;
+            *fail = 1;
         }
-        int br = pf_scan_banned_lines(k_pf_sites[i], &banned, stderr);
-        if (br == 2) {
-            drop3(&def, &ref, &banned);
+        int br = pf_scan_banned_lines(k_pf_sites[i], banned, stderr);
+        if (br == 2)
             return 2;
-        }
         if (br == 1)
-            fail = 1;
+            *fail = 1;
     }
-    drop3(&def, &ref, &banned);
+    return 0;
+}
 
+/* SCAN STAGE: refuse a clean report when wiring drifted. */
+static int pf_finish(int fail, int total_refs)
+{
     if (total_refs < 1) {
         fputs("check_peer_floor_single_source: FATAL — zero ZCL_"
               "PEER_FLOOR_HEALTHY references across all floor sites; the wiring "
@@ -793,13 +856,81 @@ int check_peer_floor_single_source_run(int argc, char **argv)
                ? die("z23-lint: write failed\n", "") : 0;
 }
 
+int check_peer_floor_single_source_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const char *st = getenv("ZCL_PEER_FLOOR_SELFTEST");
+    if (st && strcmp(st, "1") == 0)
+        return pf_selftest_mode(getenv("ZCL_PEER_FLOOR_SELFTEST_FILE"),
+                                stdout, stderr);
+
+    int rc = pf_require_files();
+    if (rc) return rc;
+    regex_t def, ref, banned;
+    rc = pf_compile_all(&def, &ref, &banned);
+    if (rc) return rc;
+    int fail = 0;
+    rc = pf_check_single_def(&def, &fail);
+    if (rc) {
+        drop3(&def, &ref, &banned);
+        return rc;
+    }
+    rc = pf_scan_extra_defs(&def, &fail);
+    if (rc) {
+        drop3(&def, &ref, &banned);
+        return rc;
+    }
+    int total_refs = 0;
+    rc = pf_scan_sites(&ref, &banned, &fail, &total_refs);
+    drop3(&def, &ref, &banned);
+    if (rc) return rc;
+    return pf_finish(fail, total_refs);
+}
+
+/* SCENARIO GROUP: missing selftest file is FATAL. */
+static int pf_st_missing(FILE *out, FILE *err, char *ob, size_t oc, char *eb, size_t ec)
+{
+    char miss[64];
+    miss[0] = '\0';
+    int rc = pf_selftest_mode(miss, out, err);
+    int bad = lp_slurp2(out, err, ob, oc, eb, ec);
+    bad |= rc != 2
+        || strstr(eb, "check_peer_floor_single_source: FATAL — selftest file missing: ''") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: banned floor literal trips. */
+static int pf_st_trip(FILE *out, FILE *err, const char *trip, char *ob, size_t oc,
+                      char *eb, size_t ec)
+{
+    int bad = lp_rewind2(out, err);
+    int rc = pf_selftest_mode(trip, out, err);
+    bad |= lp_slurp2(out, err, ob, oc, eb, ec);
+    bad |= rc != 1 || strstr(ob, "selftest TRIP — banned floor literal in ") == NULL
+        || strstr(ob, trip) == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: healthy-floor reference is clean. */
+static int pf_st_clean(FILE *out, FILE *err, const char *clean, char *ob, size_t oc,
+                       char *eb, size_t ec)
+{
+    int bad = lp_rewind2(out, err);
+    int rc = pf_selftest_mode(clean, out, err);
+    bad |= lp_slurp2(out, err, ob, oc, eb, ec);
+    bad |= rc != 0 || strstr(ob, "selftest CLEAN — no banned floor literal in ") == NULL
+        || strstr(ob, clean) == NULL;
+    return bad;
+}
+
 int check_peer_floor_single_source_selftest(void)
 {
     char tmpl[] = "/tmp/z23-lint-pf-XXXXXX";
     char *root = mkdtemp(tmpl);
     if (!root)
         return die("z23-lint: mkdir failed: %s\n", "/tmp");
-    char miss[64], trip[256], clean[256], ob[512], eb[512];
+    char trip[256], clean[256], ob[512], eb[512];
     int n = snprintf(trip, sizeof trip, "%s/trip.c", root);
     if (ovf(n, sizeof trip))
         return 2;
@@ -825,31 +956,9 @@ int check_peer_floor_single_source_selftest(void)
         unlink(trip); unlink(clean); rmdir(root);
         return die("z23-lint: tmpfile failed\n", "");
     }
-    int bad = 0;
-    miss[0] = '\0';
-    int rc = pf_selftest_mode(miss, out, err);
-    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
-        bad = 1;
-    bad |= rc != 2
-        || strstr(eb, "check_peer_floor_single_source: FATAL — selftest file missing: ''") == NULL;
-
-    rewind(out); rewind(err);
-    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
-        bad = 1;
-    rc = pf_selftest_mode(trip, out, err);
-    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
-        bad = 1;
-    bad |= rc != 1 || strstr(ob, "selftest TRIP — banned floor literal in ") == NULL
-        || strstr(ob, trip) == NULL;
-
-    rewind(out); rewind(err);
-    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
-        bad = 1;
-    rc = pf_selftest_mode(clean, out, err);
-    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
-        bad = 1;
-    bad |= rc != 0 || strstr(ob, "selftest CLEAN — no banned floor literal in ") == NULL
-        || strstr(ob, clean) == NULL;
+    int bad = pf_st_missing(out, err, ob, sizeof ob, eb, sizeof eb);
+    bad |= pf_st_trip(out, err, trip, ob, sizeof ob, eb, sizeof eb);
+    bad |= pf_st_clean(out, err, clean, ob, sizeof ob, eb, sizeof eb);
 
     fclose(out);
     fclose(err);
@@ -913,59 +1022,74 @@ static int psp_file_has_record(const char *path, int *has)
     return rc;
 }
 
-static int psp_check(FILE *out)
+static int psp_check_pin(FILE *out, int *fail)
 {
-    int fail = 0, rc;
     if (!csr_readable(k_psp_pin)) {
         if (fprintf(out,
                     "FAIL: %s is missing — the proof-server promotion has no recorder\n",
                     k_psp_pin) < 0)
             return die("z23-lint: write failed\n", "");
-        fail = 1;
-    } else {
-        char cmd[256], captured[8192];
-        if (ovf(snprintf(cmd, sizeof cmd, "bash %s --self-test 2>&1", k_psp_pin),
-                sizeof cmd))
-            return 2;
-        int code = 0;
-        rc = capture_cmd(cmd, captured, sizeof captured, &code);
-        if (rc)
-            return rc;
-        if (code != 0 || !psp_has_pass_line(captured)) {
-            if (fprintf(out,
-                        "FAIL: %s --self-test (rc=%d; no 'PROOF SERVER PIN SELF-TEST: PASS' line)\n",
-                        k_psp_pin, code) < 0)
-                return die("z23-lint: write failed\n", "");
-            if (fprintf(out, "%s\n", captured) < 0)
-                return die("z23-lint: write failed\n", "");
-            fail = 1;
-        } else if (fprintf(out, "  ok: %s --self-test\n", k_psp_pin) < 0) {
-            return die("z23-lint: write failed\n", "");
-        }
+        *fail = 1;
+        return 0;
     }
+    char cmd[256], captured[8192];
+    if (ovf(snprintf(cmd, sizeof cmd, "bash %s --self-test 2>&1", k_psp_pin),
+            sizeof cmd))
+        return 2;
+    int code = 0;
+    int rc = capture_cmd(cmd, captured, sizeof captured, &code);
+    if (rc)
+        return rc;
+    if (code != 0 || !psp_has_pass_line(captured)) {
+        if (fprintf(out,
+                    "FAIL: %s --self-test (rc=%d; no 'PROOF SERVER PIN SELF-TEST: PASS' line)\n",
+                    k_psp_pin, code) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fprintf(out, "%s\n", captured) < 0)
+            return die("z23-lint: write failed\n", "");
+        *fail = 1;
+        return 0;
+    }
+    if (fprintf(out, "  ok: %s --self-test\n", k_psp_pin) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
 
+static int psp_check_ship(FILE *out, int *fail)
+{
     if (!csr_readable(k_psp_ship)) {
         if (fprintf(out, "FAIL: %s is missing\n", k_psp_ship) < 0)
             return die("z23-lint: write failed\n", "");
-        fail = 1;
-    } else {
-        int has = 0;
-        rc = psp_file_has_record(k_psp_ship, &has);
-        if (rc)
-            return rc;
-        if (!has) {
-            if (fputs("FAIL: tools/ship.sh no longer calls 'proof_server_pin.sh record' — the\n"
-                      "      promotion path would go back to describing a binding it does\n"
-                      "      not record. Wire the call back in after the remote health\n"
-                      "      check confirms the running daemon reports the candidate's\n"
-                      "      source id.\n", out) < 0)
-                return die("z23-lint: write failed\n", "");
-            fail = 1;
-        } else if (fprintf(out, "  ok: %s calls 'proof_server_pin.sh record'\n",
-                           k_psp_ship) < 0) {
-            return die("z23-lint: write failed\n", "");
-        }
+        *fail = 1;
+        return 0;
     }
+    int has = 0;
+    int rc = psp_file_has_record(k_psp_ship, &has);
+    if (rc)
+        return rc;
+    if (!has) {
+        if (fputs("FAIL: tools/ship.sh no longer calls 'proof_server_pin.sh record' — the\n"
+                  "      promotion path would go back to describing a binding it does\n"
+                  "      not record. Wire the call back in after the remote health\n"
+                  "      check confirms the running daemon reports the candidate's\n"
+                  "      source id.\n", out) < 0)
+            return die("z23-lint: write failed\n", "");
+        *fail = 1;
+        return 0;
+    }
+    if (fprintf(out, "  ok: %s calls 'proof_server_pin.sh record'\n",
+               k_psp_ship) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int psp_check(FILE *out)
+{
+    int fail = 0, rc;
+    rc = psp_check_pin(out, &fail);
+    if (rc) return rc;
+    rc = psp_check_ship(out, &fail);
+    if (rc) return rc;
     if (fail)
         return 1;
     return fputs("check_proof_server_pin: clean — recorder self-test passes and "
@@ -978,6 +1102,58 @@ int check_proof_server_pin_run(int argc, char **argv)
     (void)argc;
     (void)argv;
     return psp_check(stdout);
+}
+
+/* SCENARIO GROUP: empty tree — recorder script is missing. */
+static int psp_st_missing(FILE *out, char *ob, size_t oc)
+{
+    int rc = psp_check(out);
+    int bad = 0;
+    if (csr_slurp(out, ob, oc))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/scripts/proof_server_pin.sh is missing — "
+                      "the proof-server promotion has no recorder") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: pin self-test passes but ship.sh does not record. */
+static int psp_st_no_record(FILE *out, char *ob, size_t oc)
+{
+    int bad = 0;
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_psp_pin, "echo PROOF SERVER PIN SELF-TEST: PASS\n")
+        || csr_write(k_psp_ship,
+                     "# mention record elsewhere\n"
+                     "tools/scripts/proof_server_pin.sh check\n"))
+        bad = 1;
+    int rc = psp_check(out);
+    if (csr_slurp(out, ob, oc))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/ship.sh no longer calls "
+                      "'proof_server_pin.sh record' — the") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: recorder and ship.sh record call — clean. */
+static int psp_st_clean(FILE *out, char *ob, size_t oc)
+{
+    int bad = 0;
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_psp_ship,
+                  "tools/scripts/proof_server_pin.sh record \"$HEAD_SHA\"\n"))
+        bad = 1;
+    int rc = psp_check(out);
+    if (csr_slurp(out, ob, oc))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check_proof_server_pin: clean — recorder self-test "
+                      "passes and ship.sh still wires it into the promotion "
+                      "path") == NULL;
+    return bad;
 }
 
 int check_proof_server_pin_selftest(void)
@@ -995,46 +1171,15 @@ int check_proof_server_pin_selftest(void)
         return die("z23-lint: tmpfile failed\n", "");
     }
     char ob[4096];
-    int bad = 0, rc = 0;
     if (chdir(root) != 0) {
         fclose(out);
         rmdir(root);
         return die("z23-lint: cannot scan %s\n", root);
     }
 
-    rc = psp_check(out);
-    if (csr_slurp(out, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "FAIL: tools/scripts/proof_server_pin.sh is missing — "
-                      "the proof-server promotion has no recorder") == NULL;
-
-    if (psp_st_reset(out))
-        bad = 1;
-    if (csr_write(k_psp_pin, "echo PROOF SERVER PIN SELF-TEST: PASS\n")
-        || csr_write(k_psp_ship,
-                     "# mention record elsewhere\n"
-                     "tools/scripts/proof_server_pin.sh check\n"))
-        bad = 1;
-    rc = psp_check(out);
-    if (csr_slurp(out, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "FAIL: tools/ship.sh no longer calls "
-                      "'proof_server_pin.sh record' — the") == NULL;
-
-    if (psp_st_reset(out))
-        bad = 1;
-    if (csr_write(k_psp_ship,
-                  "tools/scripts/proof_server_pin.sh record \"$HEAD_SHA\"\n"))
-        bad = 1;
-    rc = psp_check(out);
-    if (csr_slurp(out, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 0
-        || strstr(ob, "check_proof_server_pin: clean — recorder self-test "
-                      "passes and ship.sh still wires it into the promotion "
-                      "path") == NULL;
+    int bad = psp_st_missing(out, ob, sizeof ob);
+    bad |= psp_st_no_record(out, ob, sizeof ob);
+    bad |= psp_st_clean(out, ob, sizeof ob);
 
     fclose(out);
     unlink(k_psp_pin);
@@ -1218,6 +1363,70 @@ static const char k_ssd_def_five[] =
     "STOPWATCH_SKIP_CLASS(d, 1)\n"
     "STOPWATCH_SKIP_FALLBACK(\"unclassified\", 2)\n";
 
+/* SCENARIO GROUP: empty tree — skip-class script is missing. */
+static int ssd_st_missing(FILE *out, char *ob, size_t oc)
+{
+    int rc = ssd_check(out);
+    int bad = 0;
+    if (csr_slurp(out, ob, oc))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/scripts/stopwatch_skip_class.sh is missing — "
+                      "the skip-streak detector has no shell-side regression guard") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: class script --selftest fails. */
+static int ssd_st_class_fail(FILE *out, char *ob, size_t oc)
+{
+    int bad = 0;
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_ssd_class, k_ssd_class_fail)
+        || csr_write(k_ssd_judge, k_ssd_judge_ok)
+        || csr_write(k_ssd_def, k_ssd_def_five))
+        bad = 1;
+    int rc = ssd_check(out);
+    if (csr_slurp(out, ob, oc))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/scripts/stopwatch_skip_class.sh --selftest (rc=") == NULL
+        || strstr(ob, "no 'selftest: PASS' line)") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: five def rows but the shell parser sees four. */
+static int ssd_st_row_mismatch(FILE *out, char *ob, size_t oc)
+{
+    int bad = 0;
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_ssd_class, k_ssd_class_four))
+        bad = 1;
+    int rc = ssd_check(out);
+    if (csr_slurp(out, ob, oc))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: engine/services/include/services/stopwatch_skip_classes.def has 5 rows but the shell parser sees 4") == NULL;
+    return bad;
+}
+
+/* SCENARIO GROUP: matching class table and def rows — clean. */
+static int ssd_st_clean(FILE *out, char *ob, size_t oc)
+{
+    int bad = 0;
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_ssd_class, k_ssd_class_ok))
+        bad = 1;
+    int rc = ssd_check(out);
+    if (csr_slurp(out, ob, oc))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check_stopwatch_skip_detector: clean — shell skip-streak detector selftests pass") == NULL;
+    return bad;
+}
+
 int check_stopwatch_skip_detector_selftest(void)
 {
     char cwd[4096];
@@ -1233,52 +1442,16 @@ int check_stopwatch_skip_detector_selftest(void)
         return die("z23-lint: tmpfile failed\n", "");
     }
     char ob[4096];
-    int bad = 0, rc = 0;
     if (chdir(root) != 0) {
         fclose(out);
         rmdir(root);
         return die("z23-lint: cannot scan %s\n", root);
     }
 
-    rc = ssd_check(out);
-    if (csr_slurp(out, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "FAIL: tools/scripts/stopwatch_skip_class.sh is missing — "
-                      "the skip-streak detector has no shell-side regression guard") == NULL;
-
-    if (psp_st_reset(out))
-        bad = 1;
-    if (csr_write(k_ssd_class, k_ssd_class_fail)
-        || csr_write(k_ssd_judge, k_ssd_judge_ok)
-        || csr_write(k_ssd_def, k_ssd_def_five))
-        bad = 1;
-    rc = ssd_check(out);
-    if (csr_slurp(out, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "FAIL: tools/scripts/stopwatch_skip_class.sh --selftest (rc=") == NULL
-        || strstr(ob, "no 'selftest: PASS' line)") == NULL;
-
-    if (psp_st_reset(out))
-        bad = 1;
-    if (csr_write(k_ssd_class, k_ssd_class_four))
-        bad = 1;
-    rc = ssd_check(out);
-    if (csr_slurp(out, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 1
-        || strstr(ob, "FAIL: engine/services/include/services/stopwatch_skip_classes.def has 5 rows but the shell parser sees 4") == NULL;
-
-    if (psp_st_reset(out))
-        bad = 1;
-    if (csr_write(k_ssd_class, k_ssd_class_ok))
-        bad = 1;
-    rc = ssd_check(out);
-    if (csr_slurp(out, ob, sizeof ob))
-        bad = 1;
-    bad |= rc != 0
-        || strstr(ob, "check_stopwatch_skip_detector: clean — shell skip-streak detector selftests pass") == NULL;
+    int bad = ssd_st_missing(out, ob, sizeof ob);
+    bad |= ssd_st_class_fail(out, ob, sizeof ob);
+    bad |= ssd_st_row_mismatch(out, ob, sizeof ob);
+    bad |= ssd_st_clean(out, ob, sizeof ob);
 
     fclose(out);
     unlink(k_ssd_class);
