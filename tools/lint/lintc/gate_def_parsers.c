@@ -63,6 +63,46 @@ static int def_take_lit(const char **rest, char *dst, size_t cap)
     return 0;
 }
 
+static const char *def_line_end(const char *p)
+{
+    const char *eol = p;
+    while (*eol && *eol != '\n') eol++;
+    return eol;
+}
+
+static int def_line_closes(const char *p, size_t linelen)
+{
+    size_t trim = linelen;
+    while (trim && isspace((unsigned char)p[trim - 1])) trim--;
+    return trim && p[trim - 1] == ')';
+}
+
+static int def_call_starts(int collecting, const char *p, size_t linelen,
+                           const char *prefix, size_t plen)
+{
+    return !collecting && linelen >= plen && memcmp(p, prefix, plen) == 0;
+}
+
+static int def_finish_call(struct def_calls *out, const char *call, size_t used)
+{
+    if (out->n >= DEF_CALLS)
+        return die("z23-lint: derived buffer overflow\n", "");
+    struct def_call *c = &out->row[out->n];
+    memcpy(c->raw, call, used + 1);
+    const char *r = c->raw;
+    c->n_lit = 0;
+    for (;;) {
+        if (c->n_lit >= DEF_LITS)
+            return die("z23-lint: derived buffer overflow\n", "");
+        int k = def_take_lit(&r, c->lit[c->n_lit], DEF_LIT_W);
+        if (k == 0) break;
+        if (k != 1) return 2;
+        c->n_lit++;
+    }
+    out->n++;
+    return 0;
+}
+
 static int def_parse_calls(const char *text, const char *prefix, struct def_calls *out)
 {
     out->n = 0;
@@ -71,13 +111,10 @@ static int def_parse_calls(const char *text, const char *prefix, struct def_call
     size_t used = 0, plen = strlen(prefix);
     const char *p = text;
     while (*p) {
-        const char *eol = p;
-        while (*eol && *eol != '\n') eol++;
+        const char *eol = def_line_end(p);
         size_t linelen = (size_t)(eol - p);
-        size_t trim = linelen;
-        while (trim && isspace((unsigned char)p[trim - 1])) trim--;
-        int closes = trim && p[trim - 1] == ')';
-        if (!collecting && linelen >= plen && memcmp(p, prefix, plen) == 0) {
+        int closes = def_line_closes(p, linelen);
+        if (def_call_starts(collecting, p, linelen, prefix, plen)) {
             collecting = 1;
             used = 0;
         }
@@ -89,21 +126,7 @@ static int def_parse_calls(const char *text, const char *prefix, struct def_call
             call[used] = '\0';
             if (closes) {
                 collecting = 0;
-                if (out->n >= DEF_CALLS)
-                    return die("z23-lint: derived buffer overflow\n", "");
-                struct def_call *c = &out->row[out->n];
-                memcpy(c->raw, call, used + 1);
-                const char *r = c->raw;
-                c->n_lit = 0;
-                for (;;) {
-                    if (c->n_lit >= DEF_LITS)
-                        return die("z23-lint: derived buffer overflow\n", "");
-                    int k = def_take_lit(&r, c->lit[c->n_lit], DEF_LIT_W);
-                    if (k == 0) break;
-                    if (k != 1) return 2;
-                    c->n_lit++;
-                }
-                out->n++;
+                if (def_finish_call(out, call, used)) return 2;
             }
         }
         p = *eol == '\n' ? eol + 1 : eol;
@@ -179,6 +202,79 @@ static int pr_evidence_tracked(const char *ev)
     return code == 0;
 }
 
+static int pr_join_stance(const struct def_call *c, char *stance, size_t cap)
+{
+    stance[0] = '\0';
+    for (int j = 1; j < c->n_lit - 1; j++) {
+        size_t have = strlen(stance), add = strlen(c->lit[j]);
+        if (have + add >= cap)
+            return die("z23-lint: derived buffer overflow\n", "");
+        memcpy(stance + have, c->lit[j], add + 1);
+    }
+    return 0;
+}
+
+static int pr_fault_dup_territory(struct sr_set *seen, const char *t,
+                                  char *faults, size_t cap, size_t *used, int *nf)
+{
+    char line[512];
+    if (sr_has(seen, t)
+        && (ovf(snprintf(line, sizeof line,
+                         "  %s: a second stance for a territory that already has one", t),
+                sizeof line)
+            || add_fault(faults, cap, used, nf, line)))
+        return 2;
+    if (sr_add(seen, t)) return 2;
+    return 0;
+}
+
+static int pr_fault_not_territory(const char *t, char *faults, size_t cap,
+                                  size_t *used, int *nf)
+{
+    char line[512];
+    int ok = pr_territory_resolves(t);
+    if (ok < 0) return 2;
+    if (!ok && (ovf(snprintf(line, sizeof line,
+                             "  %s: not a territory — no tracked .c or .h under that path", t),
+                    sizeof line)
+                || add_fault(faults, cap, used, nf, line)))
+        return 2;
+    return 0;
+}
+
+static int pr_fault_evidence_untracked(const char *t, const char *ev,
+                                       char *faults, size_t cap, size_t *used, int *nf)
+{
+    char line[512];
+    int ok = pr_evidence_tracked(ev);
+    if (ok < 0) return 2;
+    if (!ok && (ovf(snprintf(line, sizeof line,
+                             "  %s: evidence '%s' is not a tracked file", t, ev),
+                    sizeof line)
+                || add_fault(faults, cap, used, nf, line)))
+        return 2;
+    return 0;
+}
+
+static int pr_fault_stance_bounds(const char *t, int len, char *faults, size_t cap,
+                                  size_t *used, int *nf)
+{
+    char line[512];
+    if (len < PR_STANCE_MIN) {
+        if (ovf(snprintf(line, sizeof line,
+                         "  %s: stance is %d characters; a refusal a reader can act on is longer",
+                         t, len), sizeof line)
+            || add_fault(faults, cap, used, nf, line))
+            return 2;
+    } else if (len > PR_STANCE_MAX
+               && (ovf(snprintf(line, sizeof line,
+                                "  %s: stance is %d characters; that is a summary, not a refusal",
+                                t, len), sizeof line)
+                   || add_fault(faults, cap, used, nf, line)))
+        return 2;
+    return 0;
+}
+
 static int pr_scan(const char *text, char *faults, size_t cap, int *nrows, int *nf)
 {
     static struct def_calls calls;
@@ -191,7 +287,6 @@ static int pr_scan(const char *text, char *faults, size_t cap, int *nrows, int *
     struct sr_set seen = {0};
     for (int i = 0; i < calls.n; i++) {
         struct def_call *c = &calls.row[i];
-        char line[512];
         if (c->n_lit < 3) {
             if (add_fault(faults, cap, &used, nf,
                           "  a PERSONA row does not carry three strings "
@@ -202,46 +297,11 @@ static int pr_scan(const char *text, char *faults, size_t cap, int *nrows, int *
         const char *t = c->lit[0], *ev = c->lit[c->n_lit - 1];
         if (!t[0]) continue;
         char stance[DEF_STANCE];
-        stance[0] = '\0';
-        for (int j = 1; j < c->n_lit - 1; j++) {
-            size_t have = strlen(stance), add = strlen(c->lit[j]);
-            if (have + add >= sizeof stance)
-                return die("z23-lint: derived buffer overflow\n", "");
-            memcpy(stance + have, c->lit[j], add + 1);
-        }
-        if (sr_has(&seen, t)
-            && (ovf(snprintf(line, sizeof line,
-                             "  %s: a second stance for a territory that already has one", t),
-                    sizeof line)
-                || add_fault(faults, cap, &used, nf, line)))
-            return 2;
-        if (sr_add(&seen, t)) return 2;
-        int ok = pr_territory_resolves(t);
-        if (ok < 0) return 2;
-        if (!ok && (ovf(snprintf(line, sizeof line,
-                                 "  %s: not a territory — no tracked .c or .h under that path", t),
-                        sizeof line)
-                    || add_fault(faults, cap, &used, nf, line)))
-            return 2;
-        ok = pr_evidence_tracked(ev);
-        if (ok < 0) return 2;
-        if (!ok && (ovf(snprintf(line, sizeof line,
-                                 "  %s: evidence '%s' is not a tracked file", t, ev),
-                        sizeof line)
-                    || add_fault(faults, cap, &used, nf, line)))
-            return 2;
-        int len = (int)strlen(stance);
-        if (len < PR_STANCE_MIN) {
-            if (ovf(snprintf(line, sizeof line,
-                             "  %s: stance is %d characters; a refusal a reader can act on is longer",
-                             t, len), sizeof line)
-                || add_fault(faults, cap, &used, nf, line))
-                return 2;
-        } else if (len > PR_STANCE_MAX
-                   && (ovf(snprintf(line, sizeof line,
-                                    "  %s: stance is %d characters; that is a summary, not a refusal",
-                                    t, len), sizeof line)
-                       || add_fault(faults, cap, &used, nf, line)))
+        if (pr_join_stance(c, stance, sizeof stance)) return 2;
+        if (pr_fault_dup_territory(&seen, t, faults, cap, &used, nf)) return 2;
+        if (pr_fault_not_territory(t, faults, cap, &used, nf)) return 2;
+        if (pr_fault_evidence_untracked(t, ev, faults, cap, &used, nf)) return 2;
+        if (pr_fault_stance_bounds(t, (int)strlen(stance), faults, cap, &used, nf))
             return 2;
     }
     return 0;
@@ -385,6 +445,86 @@ static int prt_split3(const char *raw, const char *prefix,
     return 0;
 }
 
+static int prt_collect_sections(struct def_calls *scalls, struct sr_set *declared,
+                                char always[][PRT_FIELD], int *n_always, int *nsec)
+{
+    for (int i = 0; i < scalls->n; i++) {
+        char id[PRT_FIELD], need[PRT_FIELD], unused[DEF_RAW];
+        int skip = prt_split3(scalls->row[i].raw, "ENGINE_PROMPT_SECTION(",
+                              id, sizeof id, need, sizeof need, unused, sizeof unused);
+        if (skip < 0) return 2;
+        if (skip || !id[0]) continue;
+        (*nsec)++;
+        if (sr_add(declared, id)) return 2;
+        if (!strcmp(need, "ENGINE_PROMPT_NEED_ALWAYS")) {
+            if (*n_always >= PRT_ALWAYS || strlen(id) >= PRT_FIELD)
+                return die("z23-lint: derived buffer overflow\n", "");
+            memcpy(always[(*n_always)++], id, strlen(id) + 1);
+        }
+    }
+    return 0;
+}
+
+static int prt_collect_templates(struct def_calls *tcalls,
+                                 char kind[][PRT_FIELD], char section[][PRT_FIELD],
+                                 char kinds[][PRT_FIELD], int *nkind, int *nrows)
+{
+    for (int i = 0; i < tcalls->n; i++) {
+        char k[PRT_FIELD], s[PRT_FIELD], body[DEF_RAW];
+        int skip = prt_split3(tcalls->row[i].raw, "ENGINE_PROMPT_TEMPLATE(",
+                              k, sizeof k, s, sizeof s, body, sizeof body);
+        if (skip < 0) return 2;
+        if (skip || !strcmp(body, "\"\")") || !k[0] || !s[0]) continue;
+        if (*nrows >= PRT_ROWS) return die("z23-lint: derived buffer overflow\n", "");
+        memcpy(kind[*nrows], k, strlen(k) + 1);
+        memcpy(section[*nrows], s, strlen(s) + 1);
+        if (kinds_add(kinds, nkind, k)) return 2;
+        (*nrows)++;
+    }
+    return 0;
+}
+
+static int prt_fault_undeclared_section(char kind[][PRT_FIELD],
+                                        char section[][PRT_FIELD], int nrows,
+                                        struct sr_set *declared, char *faults,
+                                        size_t cap, size_t *used, int *nf)
+{
+    for (int i = 0; i < nrows; i++) {
+        if (sr_has(declared, section[i])) continue;
+        char line[256];
+        if (ovf(snprintf(line, sizeof line,
+                         "  %s: names the section '%s', which prompt_sections.def does not declare",
+                         kind[i], section[i]), sizeof line)
+            || add_fault(faults, cap, used, nf, line))
+            return 2;
+    }
+    return 0;
+}
+
+static int prt_fault_missing_always(char kind[][PRT_FIELD], char section[][PRT_FIELD],
+                                    int nrows, char kinds[][PRT_FIELD], int nkind,
+                                    char always[][PRT_FIELD], int n_always,
+                                    char *faults, size_t cap, size_t *used, int *nf)
+{
+    for (int i = 0; i < nkind; i++) {
+        for (int j = 0; j < n_always; j++) {
+            int found = 0;
+            for (int r = 0; r < nrows; r++)
+                if (!strcmp(kind[r], kinds[i]) && !strcmp(section[r], always[j])) {
+                    found = 1; break;
+                }
+            if (found) continue;
+            char line[256];
+            if (ovf(snprintf(line, sizeof line,
+                             "  %s: supplies no body for the always-required '%s' section, so nobody can select this kind",
+                             kinds[i], always[j]), sizeof line)
+                || add_fault(faults, cap, used, nf, line))
+                return 2;
+        }
+    }
+    return 0;
+}
+
 static int prt_scan(const char *tmpl, const char *secs, char *faults, size_t cap,
                     int *nrows, int *nsec, int *nkinds, int *nf)
 {
@@ -397,63 +537,61 @@ static int prt_scan(const char *tmpl, const char *secs, char *faults, size_t cap
     struct sr_set declared = {0};
     char always[PRT_ALWAYS][PRT_FIELD];
     int n_always = 0;
-    for (int i = 0; i < scalls.n; i++) {
-        char id[PRT_FIELD], need[PRT_FIELD], unused[DEF_RAW];
-        int skip = prt_split3(scalls.row[i].raw, "ENGINE_PROMPT_SECTION(",
-                              id, sizeof id, need, sizeof need, unused, sizeof unused);
-        if (skip < 0) return 2;
-        if (skip || !id[0]) continue;
-        (*nsec)++;
-        if (sr_add(&declared, id)) return 2;
-        if (!strcmp(need, "ENGINE_PROMPT_NEED_ALWAYS")) {
-            if (n_always >= PRT_ALWAYS || strlen(id) >= PRT_FIELD)
-                return die("z23-lint: derived buffer overflow\n", "");
-            memcpy(always[n_always++], id, strlen(id) + 1);
-        }
-    }
+    if (prt_collect_sections(&scalls, &declared, always, &n_always, nsec))
+        return 2;
     char kind[PRT_ROWS][PRT_FIELD], section[PRT_ROWS][PRT_FIELD];
     char kinds[PRT_KINDS][PRT_FIELD];
     int nkind = 0;
-    for (int i = 0; i < tcalls.n; i++) {
-        char k[PRT_FIELD], s[PRT_FIELD], body[DEF_RAW];
-        int skip = prt_split3(tcalls.row[i].raw, "ENGINE_PROMPT_TEMPLATE(",
-                              k, sizeof k, s, sizeof s, body, sizeof body);
-        if (skip < 0) return 2;
-        if (skip || !strcmp(body, "\"\")") || !k[0] || !s[0]) continue;
-        if (*nrows >= PRT_ROWS) return die("z23-lint: derived buffer overflow\n", "");
-        memcpy(kind[*nrows], k, strlen(k) + 1);
-        memcpy(section[*nrows], s, strlen(s) + 1);
-        if (kinds_add(kinds, &nkind, k)) return 2;
-        (*nrows)++;
-    }
+    if (prt_collect_templates(&tcalls, kind, section, kinds, &nkind, nrows))
+        return 2;
     *nkinds = nkind;
-    for (int i = 0; i < *nrows; i++) {
-        if (sr_has(&declared, section[i])) continue;
-        char line[256];
-        if (ovf(snprintf(line, sizeof line,
-                         "  %s: names the section '%s', which prompt_sections.def does not declare",
-                         kind[i], section[i]), sizeof line)
-            || add_fault(faults, cap, &used, nf, line))
-            return 2;
-    }
+    if (prt_fault_undeclared_section(kind, section, *nrows, &declared, faults,
+                                     cap, &used, nf))
+        return 2;
     qsort(kinds, (size_t)nkind, sizeof kinds[0], cmpstr);
-    for (int i = 0; i < nkind; i++) {
-        for (int j = 0; j < n_always; j++) {
-            int found = 0;
-            for (int r = 0; r < *nrows; r++)
-                if (!strcmp(kind[r], kinds[i]) && !strcmp(section[r], always[j])) {
-                    found = 1; break;
-                }
-            if (found) continue;
-            char line[256];
-            if (ovf(snprintf(line, sizeof line,
-                             "  %s: supplies no body for the always-required '%s' section, so nobody can select this kind",
-                             kinds[i], always[j]), sizeof line)
-                || add_fault(faults, cap, &used, nf, line))
-                return 2;
-        }
-    }
+    if (prt_fault_missing_always(kind, section, *nrows, kinds, nkind,
+                                 always, n_always, faults, cap, &used, nf))
+        return 2;
     return 0;
+}
+
+static int prt_load_scan(const char *tmpl, const char *secs,
+                         char *ttext, size_t tcap, char *stext, size_t scap,
+                         char *faults, size_t fcap,
+                         int *nrows, int *nsec, int *nkinds, int *nf)
+{
+    if (def_load(tmpl, ttext, tcap) || def_load(secs, stext, scap)
+        || prt_scan(ttext, stext, faults, fcap, nrows, nsec, nkinds, nf))
+        return 2;
+    return 0;
+}
+
+static int prt_require_counts(int nrows, int nsec, int floor)
+{
+    char hint[256];
+    if (ovf(snprintf(hint, sizeof hint,
+                     "prompt_templates.def parsed %d row(s); the ENGINE_PROMPT_TEMPLATE( parser or the file changed shape",
+                     nrows), sizeof hint))
+        return 2;
+    int rc = gate_require_scanned(nrows, floor, "check_prompt_templates", hint);
+    if (rc) return rc;
+    if (ovf(snprintf(hint, sizeof hint,
+                     "prompt_sections.def parsed %d row(s); the ENGINE_PROMPT_SECTION( parser or the file changed shape",
+                     nsec), sizeof hint))
+        return 2;
+    return gate_require_scanned(nsec, PRT_SEC_FLOOR, "check_prompt_templates", hint);
+}
+
+static int prt_print_disagree(const char *faults)
+{
+    if (puts("") == EOF
+        || puts("[check_prompt_templates] a prompt template and the declared prompt shape disagree:") == EOF
+        || puts(faults) == EOF || puts("") == EOF
+        || puts("  A body under a section nobody emits is never delivered, and a") == EOF
+        || puts("  kind missing a required body is an option nobody can choose.") == EOF
+        || puts("  Neither shows up at run time. Fix the row or the section.") == EOF)
+        return die("z23-lint: write failed\n", "");
+    return 1;
 }
 
 static int prt_run_at(const char *tmpl, const char *secs, int floor)
@@ -470,32 +608,12 @@ static int prt_run_at(const char *tmpl, const char *secs, int floor)
     }
     static char ttext[DEF_SLURP], stext[DEF_SLURP], faults[8192];
     int nrows = 0, nsec = 0, nkinds = 0, nf = 0;
-    if (def_load(tmpl, ttext, sizeof ttext) || def_load(secs, stext, sizeof stext)
-        || prt_scan(ttext, stext, faults, sizeof faults, &nrows, &nsec, &nkinds, &nf))
+    if (prt_load_scan(tmpl, secs, ttext, sizeof ttext, stext, sizeof stext,
+                      faults, sizeof faults, &nrows, &nsec, &nkinds, &nf))
         return 2;
-    char hint[256];
-    if (ovf(snprintf(hint, sizeof hint,
-                     "prompt_templates.def parsed %d row(s); the ENGINE_PROMPT_TEMPLATE( parser or the file changed shape",
-                     nrows), sizeof hint))
-        return 2;
-    int rc = gate_require_scanned(nrows, floor, "check_prompt_templates", hint);
+    int rc = prt_require_counts(nrows, nsec, floor);
     if (rc) return rc;
-    if (ovf(snprintf(hint, sizeof hint,
-                     "prompt_sections.def parsed %d row(s); the ENGINE_PROMPT_SECTION( parser or the file changed shape",
-                     nsec), sizeof hint))
-        return 2;
-    rc = gate_require_scanned(nsec, PRT_SEC_FLOOR, "check_prompt_templates", hint);
-    if (rc) return rc;
-    if (nf) {
-        if (puts("") == EOF
-            || puts("[check_prompt_templates] a prompt template and the declared prompt shape disagree:") == EOF
-            || puts(faults) == EOF || puts("") == EOF
-            || puts("  A body under a section nobody emits is never delivered, and a") == EOF
-            || puts("  kind missing a required body is an option nobody can choose.") == EOF
-            || puts("  Neither shows up at run time. Fix the row or the section.") == EOF)
-            return die("z23-lint: write failed\n", "");
-        return 1;
-    }
+    if (nf) return prt_print_disagree(faults);
     if (printf("[check_prompt_templates] PASS (%d row(s), %d kind(s); every section is declared and every kind fills each always-required section)\n",
                nrows, nkinds) < 0)
         return die("z23-lint: write failed\n", "");
