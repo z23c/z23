@@ -4298,10 +4298,6 @@ tools/command/native_zcode_work_command.c:zwork_reuse_header_symbols:25
 tools/command/native_zcode_work_command.c:zwork_reuse_load_facts:24
 tools/command/native_zcode_work_command.c:zwork_reuse_render:115
 tools/command/native_zcode_work_command.c:zwork_reuse_render_unavailable:20
-tools/command/native_zcode_work_run_command.c:run_admit:134
-tools/command/native_zcode_work_run_command.c:run_admit_input:29
-tools/command/native_zcode_work_run_command.c:run_async_proof_pending:21
-tools/command/native_zcode_work_run_command.c:run_render_async_admission:50
 tools/command/native_zcode_work_run_command.c:zcl_native_handle_zcode_work_run:134
 tools/command/native_zcode_work_transport_command.c:zcl_native_handle_zcode_work_pull:34
 tools/command/native_zcode_workspace_command.c:workspace_binding_parse:32

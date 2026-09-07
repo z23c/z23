@@ -1,14 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: private declarations shared between the native `zcode work run`
  * command siblings (native_zcode_work_run_command.c,
- * native_zcode_work_run_deps.c, native_zcode_work_run_packet.c and
- * native_zcode_work_run_preflight.c). Nothing here is a public API: every
- * symbol is a static-linkage-turned-internal-linkage helper reused across
- * exactly these sibling translation units, never included elsewhere. */
+ * native_zcode_work_run_admit.c, native_zcode_work_run_deps.c,
+ * native_zcode_work_run_packet.c and native_zcode_work_run_preflight.c).
+ * Nothing here is a public API: every symbol is a static-linkage-turned-
+ * internal-linkage helper reused across exactly these sibling translation
+ * units, never included elsewhere. */
 #ifndef ZCL_NATIVE_ZCODE_WORK_RUN_PRIV_H
 #define ZCL_NATIVE_ZCODE_WORK_RUN_PRIV_H
 
 #include "json/json.h"
+#include "models/build_proof_event.h"
 #include "vcs/zcode_agent_context.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_task_index.h"
@@ -126,5 +128,43 @@ void run_fail(struct zcl_command_reply *reply, const char *code,
 /* Fixed confined Codex adapter readiness
  * (native_zcode_work_run_preflight.c). */
 bool run_codex_runner_path(char out[ZWORK_RUN_PATH_MAX]);
+
+/* Reply composition and candidate materialization shared with the admission
+ * sibling (native_zcode_work_run_command.c). */
+bool run_add_work_next(struct zcl_command_reply *reply,
+                       const char *command, const char *workspace,
+                       const char *work_id, const char *adapter,
+                       const char *reason);
+bool run_candidate_workspace(const char *store,
+                             const struct vcs_zcode_task_v1 *task,
+                             const char *task_hex, uint32_t attempt,
+                             const uint8_t source_root[32], char out[4400],
+                             bool *created);
+
+/* Admission of one candidate into existing ZCODE candidate authority
+ * (native_zcode_work_run_admit.c).  Everything one admission needs to know
+ * about the attempt it is admitting; the caller owns every pointer for the
+ * whole call. */
+struct run_admit_context {
+    const char *workspace;
+    const char *candidate_workspace;
+    const char *proof_datadir;
+    const char *goal;
+    const struct vcs_zcode_task_index_entry *entry;
+    const struct vcs_zcode_task_context_entry *context_entry;
+    const struct vcs_zcode_task_v1 *task;
+    const struct vcs_zcode_agent_context_v1 *context;
+    const struct vcs_zcode_write_scope_v1 *scope;
+    uint64_t candidate_sequence;
+    const char *adapter_name;
+    bool details;
+};
+
+bool run_admit(const struct run_admit_context *ctx,
+               struct zcl_command_reply *reply);
+bool run_async_proof_pending(
+    const char *proof_datadir, const char *task_root_hex,
+    const char *candidate_root_hex,
+    char state_out[BUILD_PROOF_EVENT_STATE_MAX + 1]);
 
 #endif

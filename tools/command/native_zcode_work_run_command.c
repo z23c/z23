@@ -56,69 +56,6 @@ bool run_bool(const struct json_value *input, const char *key)
     return value && value->type == JSON_BOOL && json_get_bool(value);
 }
 
-static bool run_open_existing_ledger(
-    struct node_db *ndb, const char *path, const char *reason)
-{
-    return ndb && path && path[0] && reason && reason[0] &&
-           node_db_open_existing_runtime(ndb, path, reason);
-}
-
-/* CANDIDATE_ADMITTED has exactly one meaning: the candidate is captured and
- * no signed work receipt exists for it yet.  Whether that is healthy waiting
- * or an incomplete execution is decided by one further fact — does the node
- * datadir this invocation is bound to hold an outstanding (not superseded)
- * async proof chain for the latest candidate?  The chain is keyed by task and
- * candidate roots because the task index cannot name the action before the
- * first receipt arrives.  A named or resident node datadir has a supervisor
- * that consumes that chain, so the wait is real and run must agree with zcode
- * work status instead of failing closed.  The closed scratch ledger has no
- * supervisor: a receipt gap there means the prior foreground execution never
- * finished, which stays CANDIDATE_EXECUTION_INCOMPLETE. */
-static bool run_async_proof_pending(
-    const char *proof_datadir, const char *task_root_hex,
-    const char *candidate_root_hex,
-    char state_out[BUILD_PROOF_EVENT_STATE_MAX + 1])
-{
-    state_out[0] = '\0';
-    if (!proof_datadir || !proof_datadir[0] || !task_root_hex ||
-        strlen(task_root_hex) != BUILD_PROOF_EVENT_ROOT_HEX ||
-        !candidate_root_hex ||
-        strlen(candidate_root_hex) != BUILD_PROOF_EVENT_ROOT_HEX)
-        return false;
-    char db_path[ZWORK_RUN_PATH_MAX];
-    int n = snprintf(db_path, sizeof(db_path), "%s/node.db", proof_datadir);
-    if (n <= 0 || (size_t)n >= sizeof(db_path) ||
-        access(db_path, F_OK) != 0)
-        return false;
-    struct node_db local_ndb = {0};
-    struct node_db *runtime = app_runtime_node_db();
-    bool owned = app_runtime_node_db_handle_open(runtime) &&
-                 strcmp(db_path, runtime->path) == 0;
-    struct node_db *ndb = owned ? runtime : &local_ndb;
-    if (!owned && !run_open_existing_ledger(
-            ndb, db_path, "zcode.work.run.proof_pending"))
-        return false;
-    struct db_build_proof_event events[64];
-    int count = db_build_proof_events_for_task(ndb, task_root_hex, events,
-                                               sizeof(events) /
-                                                   sizeof(events[0]));
-    const struct db_build_proof_event *latest = NULL;
-    bool pending = false;
-    for (int i = 0; i < count; i++) {
-        if (strcmp(events[i].candidate_root_sha3, candidate_root_hex) != 0 ||
-            !events[i].state[0])
-            continue;
-        latest = &events[i];
-        if (strcmp(events[i].state, "SUPERSEDED") != 0)
-            pending = true;
-    }
-    if (pending && latest)
-        (void)snprintf(state_out, BUILD_PROOF_EVENT_STATE_MAX + 1u, "%s",
-                       latest->state);
-    if (!owned) node_db_close(ndb);
-    return pending;
-}
-
 void run_fail(struct zcl_command_reply *reply, const char *code,
               const char *phase, const char *detail, bool retryable,
               bool mutated)
@@ -128,10 +65,10 @@ void run_fail(struct zcl_command_reply *reply, const char *code,
                            mutated, detail, "zcode.work.run");
 }
 
-static bool run_add_work_next(struct zcl_command_reply *reply,
-                              const char *command, const char *workspace,
-                              const char *work_id, const char *adapter,
-                              const char *reason)
+bool run_add_work_next(struct zcl_command_reply *reply,
+                       const char *command, const char *workspace,
+                       const char *work_id, const char *adapter,
+                       const char *reason)
 {
     struct json_value input;
     json_init(&input); json_set_object(&input);
@@ -316,11 +253,11 @@ static bool run_candidate_has_behavior_change(
     return diff.changed;
 }
 
-static bool run_candidate_workspace(const char *store,
-                                    const struct vcs_zcode_task_v1 *task,
-                                    const char *task_hex, uint32_t attempt,
-                                    const uint8_t source_root[32], char out[4400],
-                                    bool *created)
+bool run_candidate_workspace(const char *store,
+                             const struct vcs_zcode_task_v1 *task,
+                             const char *task_hex, uint32_t attempt,
+                             const uint8_t source_root[32], char out[4400],
+                             bool *created)
 {
 #if defined(_WIN32)
     (void)store; (void)task; (void)task_hex; (void)attempt;
@@ -353,597 +290,6 @@ static bool run_candidate_workspace(const char *store,
     *created = false;
     return errno == EEXIST && lstat(out, &st) == 0 && S_ISDIR(st.st_mode);
 #endif
-}
-
-static char *run_wire_hex(const char *workspace, const uint8_t root[32],
-                          size_t maximum_bytes)
-{
-    uint8_t *wire = NULL;
-    size_t len = 0;
-    if (vcs_object_load_raw_bounded(workspace, root, maximum_bytes,
-                                    &wire, &len) != 0 || len == 0 ||
-        len > (SIZE_MAX - 1u) / 2u) {
-        free(wire);
-        return NULL;
-    }
-    char *hex = zcl_malloc(len * 2u + 1u, "zcode.work.run.wire_hex");
-    if (hex) zcl_hex_encode(wire, len, hex);
-    free(wire);
-    return hex;
-}
-
-static bool run_scope_csv(const struct vcs_zcode_write_scope_v1 *scope,
-                          char out[4097])
-{
-    size_t used = 0;
-    out[0] = '\0';
-    for (size_t i = 0; i < scope->count; i++) {
-        size_t len = strlen(scope->paths[i]);
-        size_t extra = len + (i ? 1u : 0u);
-        if (extra > 4096u - used) return false;
-        if (i) out[used++] = ',';
-        memcpy(out + used, scope->paths[i], len);
-        used += len;
-        out[used] = '\0';
-    }
-    return used > 0;
-}
-
-static bool run_admit_input(
-    struct json_value *input, const char *workspace, const char *datadir,
-    const char *candidate_workspace, const char *goal,
-    const struct vcs_zcode_task_index_entry *entry,
-    const struct vcs_zcode_task_context_entry *context_entry,
-    const struct vcs_zcode_task_v1 *task,
-    const struct vcs_zcode_agent_context_v1 *context,
-    const struct vcs_zcode_write_scope_v1 *scope, const char *author_hex,
-    const char *adapter_hex, uint64_t candidate_sequence,
-    const char *execution_profile)
-{
-    char *policy = run_wire_hex(workspace, task->proof_policy_root,
-                                VCS_ZCODE_PROOF_POLICY_WIRE_BYTES);
-    char *lock = run_wire_hex(workspace, task->dependency_lock_root,
-                              VCS_PACKAGE_LOCK_MAX_WIRE_BYTES);
-    char *recipe = run_wire_hex(workspace, task->acceptance_tests_root,
-                                VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES);
-    char scopes[4097], model_hex[65];
-    zcl_hex_encode(task->model_policy_root, 32, model_hex);
-    json_init(input); json_set_object(input);
-    bool ok = policy && lock && recipe && run_scope_csv(scope, scopes) &&
-        json_push_kv_str(input, "mode", "admit") &&
-        json_push_kv_str(input, "workspace", workspace) &&
-        json_push_kv_str(input, "datadir", datadir) &&
-        json_push_kv_str(input, "goal", goal) &&
-        json_push_kv_str(input, "proof_policy_hex", policy) &&
-        json_push_kv_str(input, "dependency_lock_hex", lock) &&
-        json_push_kv_str(input, "acceptance_recipe_hex", recipe) &&
-        json_push_kv_str(input, "write_scope_csv", scopes) &&
-        json_push_kv_str(input, "model_policy_root", model_hex) &&
-        json_push_kv_str(input, "context_symbol", context->query) &&
-        json_push_kv_str(input, "planned_task_root", entry->task_root_hex) &&
-        json_push_kv_str(input, "planned_context_root",
-                         context_entry->context_root_hex) &&
-        json_push_kv_str(input, "candidate_workspace", candidate_workspace) &&
-        json_push_kv_str(input, "adapter_policy_root", adapter_hex) &&
-        json_push_kv_str(input, "author_pubkey", author_hex) &&
-        json_push_kv_int(input, "candidate_sequence",
-                         (int64_t)candidate_sequence) &&
-        json_push_kv_str(input, "action_kind",
-                         VCS_BUILD_ACTION_KIND_PACKAGE_V1) &&
-        json_push_kv_str(input, "profile", execution_profile) &&
-        json_push_kv_int(input, "expires_unix", task->expires_unix) &&
-        json_push_kv_int(input, "max_changed_files",
-                         task->max_changed_files) &&
-        json_push_kv_int(input, "max_patch_bytes",
-                         (int64_t)task->max_patch_bytes) &&
-        json_push_kv_int(input, "max_context_bytes",
-                         (int64_t)task->max_context_bytes) &&
-        json_push_kv_int(input, "max_cpu_seconds", task->max_cpu_seconds) &&
-        json_push_kv_int(input, "max_memory_bytes",
-                         (int64_t)task->max_memory_bytes) &&
-        json_push_kv_int(input, "max_output_bytes",
-                         (int64_t)task->max_output_bytes);
-    free(recipe); free(lock); free(policy);
-    return ok;
-}
-
-static bool run_standard_policy(
-    const char *workspace, const struct vcs_zcode_task_v1 *task,
-    bool *standard)
-{
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    struct vcs_zcode_proof_policy_v1 policy;
-    if (!standard || vcs_object_load_raw_bounded(
-            workspace, task->proof_policy_root,
-            VCS_ZCODE_PROOF_POLICY_WIRE_BYTES, &wire, &wire_len) != 0)
-        return false;
-    bool ok = vcs_zcode_proof_policy_parse(wire, wire_len, &policy) ==
-              VCS_ZCODE_DEV_OK;
-    free(wire);
-    if (!ok) return false;
-    *standard = policy.minimum_compile_receipts >= 2u ||
-                policy.minimum_test_receipts >= 2u;
-    return true;
-}
-
-static struct zcl_result run_plan_standard_peer(
-    const char *datadir, const char *primary_action_id,
-    char peer_action_id[BUILD_FABRIC_ID_HEX + 1])
-{
-    char db_path[ZWORK_RUN_PATH_MAX];
-    int n = snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
-    struct node_db ndb = {0};
-    if (n <= 0 || (size_t)n >= sizeof(db_path) ||
-        !run_open_existing_ledger(
-            &ndb, db_path, "zcode.work.run.standard_peer"))
-        return ZCL_ERR(-1, "scratch ZBuild ledger could not be reopened");
-    int64_t now = platform_time_wall_unix();
-    char peer_job_id[BUILD_FABRIC_ID_HEX + 1];
-    struct zcl_result result = build_fabric_plan_reproduction(
-        &ndb, primary_action_id, VCS_BUILD_PACKAGE_PROFILE_STANDARD_B_V1,
-        now, peer_action_id, peer_job_id);
-    if (result.ok) result = build_fabric_submit(&ndb, peer_job_id, now);
-    node_db_close(&ndb);
-    return result;
-}
-
-static struct zcl_result run_execute_action(
-    const char *workspace, const char *datadir, const char *action_id,
-    struct db_build_worker *worker, const uint8_t secret[32],
-    const uint8_t pubkey[32], struct db_build_receipt *receipt,
-    struct build_fabric_worker_feedback *feedback)
-{
-    char db_path[ZWORK_RUN_PATH_MAX];
-    int n = snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
-    struct node_db ndb = {0};
-    if (n <= 0 || (size_t)n >= sizeof(db_path) ||
-        !run_open_existing_ledger(
-            &ndb, db_path, "zcode.work.run.execute"))
-        return ZCL_ERR(-1, "scratch ZBuild ledger could not be reopened");
-    int64_t now = platform_time_wall_unix();
-    worker->last_seen_at = now;
-    struct zcl_result result = build_fabric_worker_approve(
-        &ndb, worker, now);
-    uint8_t lease_root[32];
-    struct sha3_256_ctx sha;
-    static const char domain[] = "zcl.zcode.work.local_lease.v1";
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    sha3_256_write(&sha, (const uint8_t *)action_id, strlen(action_id));
-    sha3_256_finalize(&sha, lease_root);
-    char lease_id[65];
-    zcl_hex_encode(lease_root, 32, lease_id);
-    struct db_build_action claimed_action;
-    bool claimed = false;
-    if (result.ok)
-        result = build_fabric_claim(
-            &ndb, worker->worker_id, lease_id, now,
-            BUILD_FABRIC_LEASE_SECONDS_MAX, &claimed_action, &claimed);
-    if (result.ok && (!claimed ||
-        strcmp(claimed_action.action_id, action_id) != 0))
-        result = ZCL_ERR(-1, "queued action was not claimable by exact id");
-    if (result.ok)
-        result = build_fabric_worker_execute(
-            &ndb, workspace, datadir, action_id, lease_id,
-            secret, pubkey, receipt, feedback);
-    node_db_close(&ndb);
-    return result;
-}
-
-static bool run_worker_feedback_json(
-    struct json_value *out,
-    const struct build_fabric_worker_feedback *feedback)
-{
-    json_init(out); json_set_object(out);
-    bool present = feedback && feedback->present;
-    return json_push_kv_bool(out, "available", present) &&
-        (!present ||
-         (json_push_kv_str(out, "stage", feedback->stage) &&
-          json_push_kv_str(out, "compiler", feedback->compiler) &&
-          json_push_kv_str(out, "path", feedback->path) &&
-          json_push_kv_int(out, "line", feedback->line) &&
-          json_push_kv_int(out, "column", feedback->column) &&
-          json_push_kv_str(out, "message", feedback->message)));
-}
-
-static bool run_render_async_admission(
-    struct zcl_command_reply *reply,
-    const struct vcs_zcode_task_index_entry *entry,
-    const struct zcl_command_reply *inner, const char *adapter_name,
-    const char *workspace, bool details)
-{
-    const struct json_value *changed = json_get(&inner->data, "changed_files");
-    const struct json_value *candidate = json_get(&inner->data, "candidate_root");
-    const struct json_value *candidate_source =
-        json_get(&inner->data, "candidate_source_root");
-    const struct json_value *patch = json_get(&inner->data, "patch_root");
-    const struct json_value *action = json_get(&inner->data, "action_id");
-    const struct json_value *proof_state =
-        json_get(&inner->data, "async_proof_state");
-    const struct json_value *proof_event =
-        json_get(&inner->data, "async_proof_event_root");
-    const struct json_value *proof_request =
-        json_get(&inner->data, "remote_request_id");
-    const struct json_value *submit_us =
-        json_get(&inner->data, "local_submit_us");
-    if (!changed || !candidate || !candidate_source || !patch || !action ||
-        !proof_state || !proof_event || !proof_request || !submit_us)
-        return false;
-    char work_id[32];
-    (void)snprintf(work_id, sizeof(work_id), "work-%.12s",
-                   entry->task_root_hex);
-    struct json_value expert;
-    json_init(&expert); json_set_object(&expert);
-    bool ok = (!details ||
-        (json_push_kv_str(&expert, "task_root", entry->task_root_hex) &&
-         json_push_kv_str(&expert, "candidate_root",
-                          json_get_str(candidate)) &&
-         json_push_kv_str(&expert, "candidate_source_root",
-                          json_get_str(candidate_source)) &&
-         json_push_kv_str(&expert, "patch_root", json_get_str(patch)) &&
-         json_push_kv_str(&expert, "action_id", json_get_str(action)))) &&
-        json_push_kv_str(&reply->data, "work_id", work_id) &&
-        json_push_kv_str(&reply->data, "state", "CANDIDATE_ADMITTED") &&
-        json_push_kv_str(&reply->data, "stage",
-                         "Waiting for independent reproduction") &&
-        json_push_kv_int(&reply->data, "changed_files",
-                         json_get_int(changed)) &&
-        json_push_kv_str(&reply->data, "async_proof_state",
-                         json_get_str(proof_state)) &&
-        json_push_kv_int(&reply->data, "local_submit_us",
-                         json_get_int(submit_us)) &&
-        json_push_kv_str(&reply->data, "build_result",
-                         "background_pending") &&
-        json_push_kv_int(&reply->data, "compile_receipts", 0) &&
-        json_push_kv_int(&reply->data, "test_receipts", 0) &&
-        json_push_kv_str(&reply->data, "sanitizer_result", "pending") &&
-        json_push_kv_str(&reply->data, "remote_outcome",
-                         "BACKGROUND_PENDING") &&
-        json_push_kv_str(&reply->data, "adapter", adapter_name) &&
-        json_push_kv_str(&reply->data, "next_safe_command",
-                         "zcode work status") &&
-        json_push_kv_bool(&reply->data, "details_available", true) &&
-        (!details ||
-         (json_push_kv_str(&reply->data, "candidate_root",
-                           json_get_str(candidate)) &&
-          json_push_kv_str(&reply->data, "patch_root",
-                           json_get_str(patch)) &&
-          json_push_kv_str(&reply->data, "async_proof_event_root",
-                           json_get_str(proof_event)) &&
-          json_push_kv_int(&reply->data, "remote_request_id",
-                           json_get_int(proof_request)) &&
-          json_push_kv(&reply->data, "expert", &expert))) &&
-        run_add_work_next(
-            reply, "zcode.work.status", workspace, work_id, NULL,
-            "show the admitted candidate while independent proof arrives");
-    static const char *const metric_keys[] = {
-        "foreground_request_creation_us",
-        "durable_action_lookup_dedup_us",
-        "live_rpc_encode_us",
-        "live_rpc_admission_us",
-        "live_rpc_decode_us",
-        "live_rpc_request_bytes",
-        "live_rpc_response_bytes",
-    };
-    for (size_t i = 0; ok && i < sizeof(metric_keys) / sizeof(metric_keys[0]);
-         i++) {
-        const struct json_value *value = json_get(
-            &inner->data, metric_keys[i]);
-        if (value && value->type == JSON_INT)
-            ok = json_push_kv_int(&reply->data, metric_keys[i],
-                                  json_get_int(value));
-    }
-    static const char *const reproduction_string_keys[] = {
-        "reproduction_action_id",
-        "reproduction_job_id",
-        "reproduction_async_proof_event_root",
-    };
-    for (size_t i = 0; details && ok && i < sizeof(reproduction_string_keys) /
-                                      sizeof(reproduction_string_keys[0]);
-         i++) {
-        const struct json_value *value = json_get(
-            &inner->data, reproduction_string_keys[i]);
-        if (value && value->type == JSON_STR)
-            ok = json_push_kv_str(&reply->data, reproduction_string_keys[i],
-                                  json_get_str(value));
-    }
-    const struct json_value *reproduction_request = json_get(
-        &inner->data, "reproduction_remote_request_id");
-    if (details && ok && reproduction_request &&
-        reproduction_request->type == JSON_INT)
-        ok = json_push_kv_int(
-            &reply->data, "reproduction_remote_request_id",
-            json_get_int(reproduction_request));
-    json_free(&expert);
-    return ok;
-}
-
-static bool run_admit(
-    const char *workspace, const char *candidate_workspace,
-    const char *proof_datadir, const char *goal,
-    const struct vcs_zcode_task_index_entry *entry,
-    const struct vcs_zcode_task_context_entry *context_entry,
-    const struct vcs_zcode_task_v1 *task,
-    const struct vcs_zcode_agent_context_v1 *context,
-    const struct vcs_zcode_write_scope_v1 *scope,
-    uint64_t candidate_sequence, const char *adapter_name, bool details,
-    struct zcl_command_reply *reply)
-{
-    char datadir[ZWORK_RUN_PATH_MAX];
-    if (proof_datadir && proof_datadir[0]) {
-        int n = snprintf(datadir, sizeof(datadir), "%s", proof_datadir);
-        if (n <= 0 || (size_t)n >= sizeof(datadir))
-            return false;
-    } else {
-        (void)snprintf(datadir, sizeof(datadir), "%s", candidate_workspace);
-        char *slash = strrchr(datadir, '/');
-        if (!slash) return false;
-        (void)snprintf(slash, (size_t)(datadir + sizeof(datadir) - slash),
-                       "/zbuild");
-    }
-    struct zcl_result made = zcl_mkdir_p(datadir, 0700);
-    struct db_build_worker worker;
-    uint8_t secret[32] = {0}, pubkey[32] = {0};
-    struct zcl_result identity = made.ok
-        ? build_fabric_worker_identity_load(
-              datadir, &worker, secret, pubkey)
-        : made;
-    char author_hex[65], adapter_hex[65];
-    zcl_hex_encode(pubkey, 32, author_hex);
-    uint8_t context_root[32], adapter_root[32];
-    bool rooted = zcl_hex_decode_lower(context_entry->context_root_hex,
-                                       context_root, 32);
-    struct sha3_256_ctx sha;
-    static const char manual_domain[] = "zcl.zcode.adapter.manual.v1";
-    static const char codex_domain[] = "zcl.zcode.adapter.codex.v1";
-    const char *domain = strcmp(adapter_name, "codex") == 0
-        ? codex_domain : manual_domain;
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, (const uint8_t *)domain, strlen(domain) + 1u);
-    if (rooted) sha3_256_write(&sha, context_root, sizeof(context_root));
-    if (rooted && candidate_sequence > 1u) {
-        uint8_t parent_root[32];
-        if (!zcl_hex_decode_lower(entry->latest_candidate_root_hex,
-                                  parent_root, sizeof(parent_root)))
-            rooted = false;
-        else
-            sha3_256_write(&sha, parent_root, sizeof(parent_root));
-    }
-    sha3_256_finalize(&sha, adapter_root);
-    zcl_hex_encode(adapter_root, 32, adapter_hex);
-    if (!identity.ok || !rooted) {
-        memory_cleanse(secret, sizeof(secret));
-        return false;
-    }
-    bool standard = false;
-    if (!run_standard_policy(workspace, task, &standard)) {
-        memory_cleanse(secret, sizeof(secret));
-        return false;
-    }
-    const char *execution_profile = standard
-        ? VCS_BUILD_PACKAGE_PROFILE_STANDARD_A_V1
-        : VCS_BUILD_PACKAGE_PROFILE_QUICK_V1;
-    struct json_value input;
-    if (!run_admit_input(&input, workspace, datadir, candidate_workspace,
-                         goal, entry, context_entry, task, context, scope,
-                         author_hex, adapter_hex, candidate_sequence,
-                         execution_profile)) {
-        memory_cleanse(secret, sizeof(secret));
-        return false;
-    }
-    struct zcl_command_request inner_request = { .input = &input };
-    struct zcl_command_reply inner;
-    zcl_command_reply_init(&inner, "zcl.zcode_improve.v1");
-    zcl_native_handle_zcode_improve(&inner_request, &inner);
-    json_free(&input);
-    if (inner.status != ZCL_COMMAND_STATUS_PASSED) {
-        run_fail(reply, inner.error.code[0] ? inner.error.code :
-                     "CANDIDATE_ADMISSION_FAILED",
-                 inner.error.phase[0] ? inner.error.phase : "admit",
-                 inner.error.message[0] ? inner.error.message :
-                     "existing candidate admission refused",
-                 inner.error.retryable, inner.error.mutated);
-        memory_cleanse(secret, sizeof(secret));
-        zcl_command_reply_free(&inner);
-        return true;
-    }
-    const struct json_value *changed = json_get(&inner.data, "changed_files");
-    const struct json_value *candidate = json_get(&inner.data, "candidate_root");
-    const struct json_value *candidate_source =
-        json_get(&inner.data, "candidate_source_root");
-    const struct json_value *patch = json_get(&inner.data, "patch_root");
-    const struct json_value *action = json_get(&inner.data, "action_id");
-    const struct json_value *proof_state =
-        json_get(&inner.data, "async_proof_state");
-    const struct json_value *proof_event =
-        json_get(&inner.data, "async_proof_event_root");
-    const struct json_value *proof_request =
-        json_get(&inner.data, "remote_request_id");
-    const struct json_value *submit_us =
-        json_get(&inner.data, "local_submit_us");
-    /* An explicit full-node datadir means the daemon now owns this immutable
-     * action.  Foreground work ends at admission: its enabled local worker or
-     * a peer may consume the action later, but the originating CLI must never
-     * race either owner by generically claiming the live queue.  Closed
-     * scratch ledgers (no explicit proof datadir) retain the contained local
-     * execution path used by deterministic unit/development fixtures. */
-    if (proof_datadir && proof_datadir[0]) {
-        memory_cleanse(secret, sizeof(secret));
-        bool rendered = run_render_async_admission(
-            reply, entry, &inner, adapter_name, workspace, details);
-        zcl_command_reply_free(&inner);
-        if (!rendered)
-            run_fail(reply, "ADMISSION_OUTPUT_FAILED", "render",
-                     "live async admission summary could not be rendered",
-                     false, true);
-        return true;
-    }
-    struct db_build_receipt receipt;
-    struct build_fabric_worker_feedback feedback;
-    memset(&feedback, 0, sizeof(feedback));
-    struct zcl_result executed = action && json_get_str(action)
-        ? run_execute_action(workspace, datadir, json_get_str(action), &worker,
-                             secret, pubkey, &receipt, &feedback)
-        : ZCL_ERR(-1, "admission did not return an action id");
-    char peer_action_id[BUILD_FABRIC_ID_HEX + 1] = {0};
-    struct db_build_receipt peer_receipt;
-    memset(&peer_receipt, 0, sizeof(peer_receipt));
-    if (executed.ok && receipt.exit_status == 0 && standard) {
-        executed = run_plan_standard_peer(
-            datadir, json_get_str(action), peer_action_id);
-        if (executed.ok)
-            executed = run_execute_action(
-                workspace, datadir, peer_action_id, &worker, secret, pubkey,
-                &peer_receipt, NULL);
-    }
-    memory_cleanse(secret, sizeof(secret));
-    if (!executed.ok) {
-        run_fail(reply, "PACKAGE_BUILD_FAILED", "build", executed.message,
-                 true, true);
-        struct json_value compiler_feedback;
-        if (run_worker_feedback_json(&compiler_feedback, &feedback))
-            (void)json_push_kv(&reply->data, "compiler_feedback",
-                               &compiler_feedback);
-        json_free(&compiler_feedback);
-        zcl_command_reply_free(&inner);
-        return true;
-    }
-    struct json_value expert;
-    json_init(&expert); json_set_object(&expert);
-    bool expert_ok = !details ||
-        (action && candidate && candidate_source && patch &&
-         json_push_kv_str(&expert, "task_root", entry->task_root_hex) &&
-         json_push_kv_str(&expert, "candidate_root",
-                          json_get_str(candidate)) &&
-         json_push_kv_str(&expert, "candidate_source_root",
-                          json_get_str(candidate_source)) &&
-         json_push_kv_str(&expert, "patch_root", json_get_str(patch)) &&
-         json_push_kv_str(&expert, "action_id", json_get_str(action)) &&
-         json_push_kv_str(&expert, "receipt_id", receipt.receipt_id) &&
-         json_push_kv_str(&expert, "output_root", receipt.output_sha3) &&
-         json_push_kv_str(&expert, "work_receipt_root",
-                          receipt.work_receipt_sha3) &&
-         (!standard ||
-          (json_push_kv_str(&expert, "standard_peer_action_id",
-                            peer_action_id) &&
-           json_push_kv_str(&expert, "standard_peer_work_receipt_root",
-                            peer_receipt.work_receipt_sha3))));
-    char work_id[32];
-    (void)snprintf(work_id, sizeof(work_id), "work-%.12s",
-                   entry->task_root_hex);
-    bool passed = receipt.exit_status == 0 &&
-                  (!standard || peer_receipt.exit_status == 0);
-    char next_workspace[ZWORK_RUN_PATH_MAX] = {0};
-    bool next_created = false;
-    uint8_t next_source_root[32];
-    bool retry_ready = !passed && candidate_sequence < 3u &&
-        candidate_source && json_get_str(candidate_source) &&
-        zcl_hex_decode_lower(json_get_str(candidate_source), next_source_root,
-                             sizeof(next_source_root)) &&
-        run_candidate_workspace(workspace, task, entry->task_root_hex,
-                                (uint32_t)candidate_sequence + 1u,
-                                next_source_root, next_workspace,
-                                &next_created);
-    (void)next_created;
-    struct json_value diagnostic;
-    json_init(&diagnostic); json_set_object(&diagnostic);
-    struct json_value compiler_feedback;
-    bool feedback_ok = run_worker_feedback_json(
-        &compiler_feedback, &feedback);
-    bool diagnostic_ok = json_push_kv_str(&diagnostic, "stage",
-                                           "package_build_and_tests") &&
-        json_push_kv_int(&diagnostic, "attempt",
-                         (int64_t)candidate_sequence) &&
-        json_push_kv_int(&diagnostic, "exit_status", receipt.exit_status) &&
-        json_push_kv_bool(&diagnostic, "retry_safe", retry_ready) &&
-        feedback_ok &&
-        json_push_kv(&diagnostic, "compiler_feedback", &compiler_feedback);
-    struct json_value repair_packet;
-    json_init(&repair_packet); json_set_object(&repair_packet);
-    char repair_detail[256];
-    bool repair_packet_ok = !retry_ready ||
-        (run_packet(
-             &repair_packet, goal, workspace, datadir, task,
-             context, scope, repair_detail) &&
-         json_push_kv(&repair_packet, "diagnostic", &diagnostic));
-    char repair_packet_path[ZWORK_RUN_PATH_MAX] = {0};
-    size_t repair_packet_bytes = retry_ready && repair_packet_ok
-        ? json_write(&repair_packet, NULL, 0) : 0;
-    bool repair_packet_staged = !retry_ready ||
-        (repair_packet_bytes > 0 && run_write_packet(
-            next_workspace, &repair_packet, repair_packet_path));
-    bool ok = changed && candidate && patch && proof_state && proof_event &&
-        proof_request && submit_us && diagnostic_ok && expert_ok &&
-        repair_packet_ok && repair_packet_staged &&
-        receipt.work_receipt_sha3[0] &&
-        json_push_kv_str(&reply->data, "work_id", work_id) &&
-        json_push_kv_str(&reply->data, "state", passed ? "EVIDENCE_READY" :
-                         retry_ready ? "REPAIR_NEEDED" : "BLOCKED") &&
-        json_push_kv_str(&reply->data, "stage",
-                         passed ? "Showing result" :
-                         retry_ready ? "Creating missing code" :
-                                       "Needs attention") &&
-        json_push_kv_int(&reply->data, "changed_files",
-                         json_get_int(changed)) &&
-        json_push_kv_str(&reply->data, "async_proof_state",
-                         json_get_str(proof_state)) &&
-        json_push_kv_int(&reply->data, "local_submit_us",
-                         json_get_int(submit_us)) &&
-        json_push_kv_str(&reply->data, "build_result",
-                         passed ? "passed" : "failed") &&
-        json_push_kv_int(&reply->data, "compile_receipts",
-                         passed ? (standard ? 2 : 1) : 0) &&
-        json_push_kv_int(&reply->data, "test_receipts",
-                         passed ? (standard ? 2 : 1) : 0) &&
-        json_push_kv_str(&reply->data, "sanitizer_result",
-                         passed && standard ? "passed_asan_ubsan" :
-                         standard ? "failed_or_unavailable" :
-                                    "not_required") &&
-        json_push_kv_int(&reply->data, "attempt",
-                         (int64_t)candidate_sequence) &&
-        json_push_kv(&reply->data, "diagnostic", &diagnostic) &&
-        (!retry_ready ||
-         json_push_kv_str(&reply->data, "candidate_workspace",
-                          next_workspace)) &&
-        (!retry_ready ||
-         (json_push_kv_str(&reply->data, "repair_packet_path",
-                           repair_packet_path) &&
-          json_push_kv_int(&reply->data, "model_context_bytes",
-                           (int64_t)repair_packet_bytes))) &&
-        (!retry_ready || !details ||
-         json_push_kv(&reply->data, "repair_packet", &repair_packet)) &&
-        json_push_kv_str(&reply->data, "adapter", adapter_name) &&
-        json_push_kv_str(&reply->data, "next_safe_command",
-                         passed ? "zcode work status" :
-                         retry_ready ? "edit candidate_workspace, then rerun zcode work run" :
-                                       "zcode work status") &&
-        json_push_kv_bool(&reply->data, "details_available", true) &&
-        (!details ||
-         (json_push_kv_str(&reply->data, "candidate_root",
-                           json_get_str(candidate)) &&
-          json_push_kv_str(&reply->data, "patch_root",
-                           json_get_str(patch)) &&
-          json_push_kv_str(&reply->data, "work_receipt_root",
-                           receipt.work_receipt_sha3) &&
-          json_push_kv_str(&reply->data, "async_proof_event_root",
-                           json_get_str(proof_event)) &&
-          json_push_kv_int(&reply->data, "remote_request_id",
-                           json_get_int(proof_request)) &&
-          json_push_kv(&reply->data, "expert", &expert))) &&
-        run_add_work_next(
-            reply, "zcode.work.status", workspace, work_id, NULL,
-            retry_ready
-              ? "show the repair state and its exact resumable action"
-              : "show the exact build and reproduction state");
-    json_free(&compiler_feedback);
-    json_free(&repair_packet); json_free(&diagnostic); json_free(&expert);
-    zcl_command_reply_free(&inner);
-    if (!ok)
-        run_fail(reply, "ADMISSION_OUTPUT_FAILED", "render",
-                 "candidate admission summary could not be rendered",
-                 false, true);
-    return true;
 }
 
 static void run_feedback_timing(
@@ -1201,11 +547,21 @@ void zcl_native_handle_zcode_work_run(
         if (memcmp(candidate_root, materialize_root, 32) != 0 &&
             run_candidate_has_behavior_change(
                 workspace, materialize_root, candidate_root)) {
-            bool handled = run_admit(
-                workspace, candidate_workspace, proof_datadir, goal,
-                entry, context_entry,
-                &task, &context, &scope, candidate_sequence, "manual",
-                details, reply);
+            struct run_admit_context admit = {
+                .workspace = workspace,
+                .candidate_workspace = candidate_workspace,
+                .proof_datadir = proof_datadir,
+                .goal = goal,
+                .entry = entry,
+                .context_entry = context_entry,
+                .task = &task,
+                .context = &context,
+                .scope = &scope,
+                .candidate_sequence = candidate_sequence,
+                .adapter_name = "manual",
+                .details = details,
+            };
+            bool handled = run_admit(&admit, reply);
             if (handled) run_feedback_timing(reply, feedback_started_us);
             if (!handled)
                 run_fail(reply, "CANDIDATE_ADMISSION_FAILED", "admit",
@@ -1294,11 +650,21 @@ void zcl_native_handle_zcode_work_run(
             vcs_zcode_agent_context_free(&context);
             vcs_zcode_task_index_free(index); return;
         }
-        bool handled = run_admit(
-            workspace, candidate_workspace, proof_datadir, goal,
-            entry, context_entry,
-            &task, &context, &scope, candidate_sequence, "codex", details,
-            reply);
+        struct run_admit_context admit = {
+            .workspace = workspace,
+            .candidate_workspace = candidate_workspace,
+            .proof_datadir = proof_datadir,
+            .goal = goal,
+            .entry = entry,
+            .context_entry = context_entry,
+            .task = &task,
+            .context = &context,
+            .scope = &scope,
+            .candidate_sequence = candidate_sequence,
+            .adapter_name = "codex",
+            .details = details,
+        };
+        bool handled = run_admit(&admit, reply);
         if (handled) run_feedback_timing(reply, feedback_started_us);
         if (handled && reply->status == ZCL_COMMAND_STATUS_PASSED)
             (void)json_push_kv_int(&reply->data, "model_context_bytes",

@@ -1190,6 +1190,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_zcode_task_transport_command.c", CAP
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_toolchain_command.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_run_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_run_admit.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_run_deps.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_run_packet.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_run_preflight.c", CAP_FS_READ|CAP_FS_WRITE, "")
