@@ -1464,13 +1464,13 @@ Z23_FLAG("ZCL_NODE_BIN", "env_build", "build/bin/zclassic23", "-",
 Z23_FLAG("ZCL_NODE_UNIT", "env_build", "zclassic23", "-",
           "first use tools/mvp_gate.sh:59; documented at docs/work/mvp-live-gate.md:38: ZCL_NODE_UNIT — systemd --user unit whose ExecStart supplies the")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:389")
+          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:401")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_FILE_FLOOR", "env_build", "400", "-",
-          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:393")
+          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:405")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:382")
-Z23_FLAG("ZCL_NO_RUNTIME_ABORT_SITE_FLOOR", "env_build", "15", "-",
           "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:394")
+Z23_FLAG("ZCL_NO_RUNTIME_ABORT_SITE_FLOOR", "env_build", "15", "-",
+          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:406")
 Z23_FLAG("ZCL_NO_UTXO_PROJECTION_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/check_no_utxo_projection.sh:19")
 Z23_FLAG("ZCL_NO_UTXO_PROJECTION_SCAN_ROOTS", "env_build", "-", "-",
@@ -1763,11 +1763,11 @@ Z23_FLAG("ZCL_REMOTE_BRANCH", "env_build", "main", "-",
 Z23_FLAG("ZCL_REMOTE_BUILD", "env_build", "fast-rebuild", "-",
           "first use tools/scripts/remote_node_update.sh:222; documented at docs/AGENT_API.md:1377: ZCL_REMOTE_BUILD=none. Check it with make remote-status.")
 Z23_FLAG("ZCL_REMOTE_CLASS_AGENT_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:359")
+          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:375")
 Z23_FLAG("ZCL_REMOTE_CLASS_DEF_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:357")
+          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:373")
 Z23_FLAG("ZCL_REMOTE_CLASS_TABLE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:362")
+          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:378")
 Z23_FLAG("ZCL_REMOTE_DRY_RUN", "env_build", "1", "-",
           "first use tools/scripts/remote_node_update.sh:112; documented at docs/AGENT_API.md:1345: ZCL_REMOTE_DRY_RUN=1 prints the host, branch, current HEAD,")
 Z23_FLAG("ZCL_REMOTE_GUARD_ACTION", "env_build", "-", "-",
