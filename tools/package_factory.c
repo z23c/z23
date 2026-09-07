@@ -3695,371 +3695,431 @@ static bool pf_json_equiv(const struct json_value *a,
     return false;
 }
 
-static int cmd_selftest(const char *repo, const char *scratch,
-                        const char *bin_dir)
+/* Scratch-run state threaded through cmd_selftest's numbered checks. */
+struct cst_state {
+    char fixture[PF_PATH_CAP];
+    char pkg[PF_PATH_CAP], key[PF_PATH_CAP], store_a[PF_PATH_CAP],
+         store_b[PF_PATH_CAP], report[PF_PATH_CAP], dplan[PF_PATH_CAP],
+         fastcache[PF_PATH_CAP], report2[PF_PATH_CAP];
+    char pubkey[256];
+    char root_hex[65];
+    char store_a_abs[PF_PATH_CAP];
+    char def_path[PF_PATH_CAP], census_out[PF_PATH_CAP];
+    char store_a_label[PF_PATH_CAP], store_a_root[PF_PATH_CAP];
+    char report_path[PF_PATH_CAP];
+};
+
+/* The scratch root must stay under test-tmp/ (gitignored scratch; never a
+ * real datadir), and the tiny-lines fixture must be readable. */
+static int cst_validate_scratch(const char *repo, const char *scratch,
+                                struct cst_state *st)
 {
-    char error[PF_ERROR_CAP];
-    /* The scratch root must stay under test-tmp/ (gitignored scratch;
-     * never a real datadir). */
     if (strncmp(scratch, "test-tmp/", 9) != 0 &&
         strstr(scratch, "/test-tmp/") == NULL)
         LOG_ERR(PF_LOG, "selftest scratch %s must live under test-tmp/",
                 scratch);
-    char fixture[PF_PATH_CAP];
-    if (snprintf(fixture, sizeof(fixture),
+    if (snprintf(st->fixture, sizeof(st->fixture),
                  "%s/tests/harness/fixtures/zcode/tiny-lines", repo) >=
-        (int)sizeof(fixture))
+        (int)sizeof(st->fixture))
         LOG_ERR(PF_LOG, "fixture path overflow");
-    if (access(fixture, R_OK) != 0)
-        LOG_ERR(PF_LOG, "fixture %s not readable", fixture);
+    if (access(st->fixture, R_OK) != 0)
+        LOG_ERR(PF_LOG, "fixture %s not readable", st->fixture);
+    return 0;
+}
 
-    /* Fresh scratch. */
-    {
-        char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)scratch,
-                           NULL};
-        char devnull[16];
-        if (pf_spawn(rm_argv, NULL, 0, devnull, sizeof(devnull)) != 0)
-            LOG_ERR(PF_LOG, "cannot clear scratch %s", scratch);
-    }
+/* Fresh scratch. */
+static int cst_fresh_scratch(const char *scratch)
+{
+    char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)scratch, NULL};
+    char devnull[16];
+    if (pf_spawn(rm_argv, NULL, 0, devnull, sizeof(devnull)) != 0)
+        LOG_ERR(PF_LOG, "cannot clear scratch %s", scratch);
     if (!pf_mkdir_p(scratch))
         return 1;
-    char pkg[PF_PATH_CAP], key[PF_PATH_CAP], store_a[PF_PATH_CAP],
-         store_b[PF_PATH_CAP], report[PF_PATH_CAP], dplan[PF_PATH_CAP],
-         fastcache[PF_PATH_CAP], report2[PF_PATH_CAP];
-    if (snprintf(pkg, sizeof(pkg), "%s/pkg", scratch) >= (int)sizeof(pkg) ||
-        snprintf(key, sizeof(key), "%s/key", scratch) >= (int)sizeof(key) ||
-        snprintf(store_a, sizeof(store_a), "%s/storeA", scratch) >=
-            (int)sizeof(store_a) ||
-        snprintf(store_b, sizeof(store_b), "%s/storeB", scratch) >=
-            (int)sizeof(store_b) ||
-        snprintf(report, sizeof(report), "%s/report.json", scratch) >=
-            (int)sizeof(report) ||
-        snprintf(dplan, sizeof(dplan), "%s/plan.json", scratch) >=
-            (int)sizeof(dplan) ||
-        snprintf(fastcache, sizeof(fastcache), "%s/fastcache", scratch) >=
-            (int)sizeof(fastcache) ||
-        snprintf(report2, sizeof(report2), "%s/report2.json", scratch) >=
-            (int)sizeof(report2))
+    return 0;
+}
+
+static int cst_build_paths(const char *scratch, struct cst_state *st)
+{
+    if (snprintf(st->pkg, sizeof(st->pkg), "%s/pkg", scratch) >=
+            (int)sizeof(st->pkg) ||
+        snprintf(st->key, sizeof(st->key), "%s/key", scratch) >=
+            (int)sizeof(st->key) ||
+        snprintf(st->store_a, sizeof(st->store_a), "%s/storeA", scratch) >=
+            (int)sizeof(st->store_a) ||
+        snprintf(st->store_b, sizeof(st->store_b), "%s/storeB", scratch) >=
+            (int)sizeof(st->store_b) ||
+        snprintf(st->report, sizeof(st->report), "%s/report.json",
+                scratch) >= (int)sizeof(st->report) ||
+        snprintf(st->dplan, sizeof(st->dplan), "%s/plan.json", scratch) >=
+            (int)sizeof(st->dplan) ||
+        snprintf(st->fastcache, sizeof(st->fastcache), "%s/fastcache",
+                scratch) >= (int)sizeof(st->fastcache) ||
+        snprintf(st->report2, sizeof(st->report2), "%s/report2.json",
+                scratch) >= (int)sizeof(st->report2))
         LOG_ERR(PF_LOG, "selftest path overflow");
-    {
-        char *cp_argv[] = {(char *)"cp", (char *)"-r", fixture,
-                           pkg, NULL};
-        char out[256];
-        if (pf_spawn(cp_argv, NULL, 0, out, sizeof(out)) != 0)
-            LOG_ERR(PF_LOG, "fixture copy failed: %s", out);
-    }
-    /* Throwaway key: the signer's keygen mode. */
-    char pubkey[256];
-    {
-        char bin[PF_PATH_CAP];
-        if (snprintf(bin, sizeof(bin), "%s/zclassic23-package-sign",
-                     bin_dir) >= (int)sizeof(bin))
-            LOG_ERR(PF_LOG, "signer path overflow");
-        char *argv[] = {bin, (char *)"--generate", key, NULL};
-        if (pf_spawn(argv, NULL, 0, pubkey, sizeof(pubkey)) != 0)
-            LOG_ERR(PF_LOG, "keygen failed");
-        size_t len = strlen(pubkey);
-        while (len && isspace((unsigned char)pubkey[len - 1]))
-            pubkey[--len] = '\0';
-        if (strlen(pubkey) != 66)
-            LOG_ERR(PF_LOG, "keygen returned no pubkey");
-        struct run_args args;
-        memset(&args, 0, sizeof(args));
-        args.package_dir = pkg;
-        args.key_file = key;
-        args.publisher_pubkey = pubkey;
-        args.store_a = store_a;
-        args.store_b = store_b;
-        args.report_path = report;
-        args.dep_plan_path = dplan;
-        args.fast_cache_dir = fastcache;
-        args.bin_dir = bin_dir;
-        args.chain_id = "zclassic-main";
-        args.kind = "ai";
-        args.publisher_sequence = 1;
-        args.cutoff_height = 1;
-        args.cutoff_mtp = 1700000000;
-        int rc = cmd_run(&args);
-        if (rc != 0)
-            LOG_ERR(PF_LOG, "selftest: factory run failed (rc=%d)", rc);
-    }
+    return 0;
+}
 
-    /* Assert the report: every step ok, reproduced both sides. */
-    {
-        uint8_t *text = NULL;
-        size_t len = 0;
-        if (!pf_read_file(report, PF_CLI_STDOUT_CAP, &text, &len))
-            LOG_ERR(PF_LOG, "selftest: report %s missing", report);
-        struct json_value doc;
-        json_init(&doc);
-        if (!json_read(&doc, (const char *)text, len)) {
-            free(text);
-            LOG_ERR(PF_LOG, "selftest: report unparsable");
-        }
+static int cst_copy_fixture(const struct cst_state *st)
+{
+    char *cp_argv[] = {(char *)"cp", (char *)"-r", (char *)st->fixture,
+                       (char *)st->pkg, NULL};
+    char out[256];
+    if (pf_spawn(cp_argv, NULL, 0, out, sizeof(out)) != 0)
+        LOG_ERR(PF_LOG, "fixture copy failed: %s", out);
+    return 0;
+}
+
+/* Throwaway key: the signer's keygen mode. */
+static int cst_generate_key(const char *bin_dir, const char *key,
+                            char pubkey[256])
+{
+    char bin[PF_PATH_CAP];
+    if (snprintf(bin, sizeof(bin), "%s/zclassic23-package-sign", bin_dir) >=
+        (int)sizeof(bin))
+        LOG_ERR(PF_LOG, "signer path overflow");
+    char *argv[] = {bin, (char *)"--generate", (char *)key, NULL};
+    if (pf_spawn(argv, NULL, 0, pubkey, 256) != 0)
+        LOG_ERR(PF_LOG, "keygen failed");
+    size_t len = strlen(pubkey);
+    while (len && isspace((unsigned char)pubkey[len - 1]))
+        pubkey[--len] = '\0';
+    if (strlen(pubkey) != 66)
+        LOG_ERR(PF_LOG, "keygen returned no pubkey");
+    return 0;
+}
+
+static void cst_fill_run_args(struct run_args *args, const struct cst_state *st,
+                              const char *bin_dir, const char *report_path)
+{
+    memset(args, 0, sizeof(*args));
+    args->package_dir = st->pkg;
+    args->key_file = st->key;
+    args->publisher_pubkey = st->pubkey;
+    args->store_a = st->store_a;
+    args->store_b = st->store_b;
+    args->report_path = report_path;
+    args->dep_plan_path = st->dplan;
+    args->fast_cache_dir = st->fastcache;
+    args->bin_dir = bin_dir;
+    args->chain_id = "zclassic-main";
+    args->kind = "ai";
+    args->publisher_sequence = 1;
+    args->cutoff_height = 1;
+    args->cutoff_mtp = 1700000000;
+}
+
+static int cst_run_first(const char *bin_dir, const struct cst_state *st)
+{
+    struct run_args args;
+    cst_fill_run_args(&args, st, bin_dir, st->report);
+    int rc = cmd_run(&args);
+    if (rc != 0)
+        LOG_ERR(PF_LOG, "selftest: factory run failed (rc=%d)", rc);
+    return 0;
+}
+
+/* Assert the report: every step ok, reproduced both sides. */
+static int cst_assert_report(const char *report)
+{
+    uint8_t *text = NULL;
+    size_t len = 0;
+    if (!pf_read_file(report, PF_CLI_STDOUT_CAP, &text, &len))
+        LOG_ERR(PF_LOG, "selftest: report %s missing", report);
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, (const char *)text, len)) {
         free(text);
-        const struct json_value *ok = json_get(&doc, "ok");
-        const struct json_value *ra = json_get(
-            json_get(json_get(&doc, "stores"), "a"), "reproduced");
-        const struct json_value *rb = json_get(
-            json_get(json_get(&doc, "stores"), "b"), "reproduced");
-        bool pass = ok && json_get_bool(ok) && ra && json_get_bool(ra) &&
-                    rb && json_get_bool(rb);
-        json_free(&doc);
-        if (!pass)
-            LOG_ERR(PF_LOG, "selftest: report assertions failed");
-        printf("selftest: gate/publish/reproduce/report ok (report=%s)\n",
-               report);
+        LOG_ERR(PF_LOG, "selftest: report unparsable");
     }
+    free(text);
+    const struct json_value *ok = json_get(&doc, "ok");
+    const struct json_value *ra = json_get(
+        json_get(json_get(&doc, "stores"), "a"), "reproduced");
+    const struct json_value *rb = json_get(
+        json_get(json_get(&doc, "stores"), "b"), "reproduced");
+    bool pass = ok && json_get_bool(ok) && ra && json_get_bool(ra) && rb &&
+                json_get_bool(rb);
+    json_free(&doc);
+    if (!pass)
+        LOG_ERR(PF_LOG, "selftest: report assertions failed");
+    printf("selftest: gate/publish/reproduce/report ok (report=%s)\n",
+           report);
+    return 0;
+}
 
-    /* The exact dependency plan exists, parses as zcl.dep_plan.v1, and the
-     * report's plan hash matches the plan file bytes. */
-    {
-        uint8_t *text = NULL;
-        size_t len = 0;
-        if (!pf_read_file(report, PF_CLI_STDOUT_CAP, &text, &len))
-            LOG_ERR(PF_LOG, "selftest: report re-read for plan failed");
-        struct json_value doc;
-        json_init(&doc);
-        if (!json_read(&doc, (const char *)text, len)) {
-            free(text);
-            LOG_ERR(PF_LOG, "selftest: report unparsable (plan)");
-        }
+/* The exact dependency plan exists, parses as zcl.dep_plan.v1, and the
+ * report's plan hash matches the plan file bytes. */
+static int cst_assert_dep_plan(const char *report)
+{
+    uint8_t *text = NULL;
+    size_t len = 0;
+    if (!pf_read_file(report, PF_CLI_STDOUT_CAP, &text, &len))
+        LOG_ERR(PF_LOG, "selftest: report re-read for plan failed");
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, (const char *)text, len)) {
         free(text);
-        const struct json_value *dp = json_get(&doc, "dep_plan");
-        const char *path = json_get_str(json_get(dp, "path"));
-        const char *sha = json_get_str(json_get(dp, "sha3"));
-        /* Copy before json_free: the strings point into the parsed doc. */
-        char path_buf[PF_PATH_CAP], sha_buf[65];
-        (void)snprintf(path_buf, sizeof(path_buf), "%s", path);
-        (void)snprintf(sha_buf, sizeof(sha_buf), "%s", sha);
-        bool pass = path_buf[0] && strlen(sha_buf) == 64;
-        uint8_t *plan = NULL;
-        size_t plan_len = 0;
-        if (pass)
-            pass = pf_read_file(path_buf, PF_CLI_STDOUT_CAP, &plan,
-                                &plan_len);
-        if (pass) {
-            uint8_t digest[32];
-            sha3_256(plan, plan_len, digest);
-            char hex[65];
-            zcl_hex_encode(digest, 32, hex);
-            pass = strcmp(hex, sha_buf) == 0;
-        }
-        if (pass) {
-            struct json_value pdoc;
-            json_init(&pdoc);
-            pass = json_read(&pdoc, (const char *)plan, plan_len);
-            if (pass) {
-                const char *schema = json_get_str(json_get(&pdoc, "schema"));
-                const struct json_value *tus =
-                    json_get(&pdoc, "translation_units");
-                pass = strcmp(schema, "zcl.dep_plan.v1") == 0 && tus &&
-                       tus->type == JSON_ARR && tus->num_children > 0;
-            }
-            json_free(&pdoc);
-            free(plan);
-        }
-        json_free(&doc);
-        if (!pass)
-            LOG_ERR(PF_LOG, "selftest: dependency plan missing, not "
-                    "zcl.dep_plan.v1, or report hash mismatch");
-        printf("selftest: dep_plan ok (path=%s sha3=%.16s...)\n", path_buf,
-               sha_buf);
+        LOG_ERR(PF_LOG, "selftest: report unparsable (plan)");
     }
+    free(text);
+    const struct json_value *dp = json_get(&doc, "dep_plan");
+    const char *path = json_get_str(json_get(dp, "path"));
+    const char *sha = json_get_str(json_get(dp, "sha3"));
+    /* Copy before json_free: the strings point into the parsed doc. */
+    char path_buf[PF_PATH_CAP], sha_buf[65];
+    (void)snprintf(path_buf, sizeof(path_buf), "%s", path);
+    (void)snprintf(sha_buf, sizeof(sha_buf), "%s", sha);
+    bool pass = path_buf[0] && strlen(sha_buf) == 64;
+    uint8_t *plan = NULL;
+    size_t plan_len = 0;
+    if (pass)
+        pass = pf_read_file(path_buf, PF_CLI_STDOUT_CAP, &plan, &plan_len);
+    if (pass) {
+        uint8_t digest[32];
+        sha3_256(plan, plan_len, digest);
+        char hex[65];
+        zcl_hex_encode(digest, 32, hex);
+        pass = strcmp(hex, sha_buf) == 0;
+    }
+    if (pass) {
+        struct json_value pdoc;
+        json_init(&pdoc);
+        pass = json_read(&pdoc, (const char *)plan, plan_len);
+        if (pass) {
+            const char *schema = json_get_str(json_get(&pdoc, "schema"));
+            const struct json_value *tus =
+                json_get(&pdoc, "translation_units");
+            pass = strcmp(schema, "zcl.dep_plan.v1") == 0 && tus &&
+                   tus->type == JSON_ARR && tus->num_children > 0;
+        }
+        json_free(&pdoc);
+        free(plan);
+    }
+    json_free(&doc);
+    if (!pass)
+        LOG_ERR(PF_LOG, "selftest: dependency plan missing, not "
+                "zcl.dep_plan.v1, or report hash mismatch");
+    printf("selftest: dep_plan ok (path=%s sha3=%.16s...)\n", path_buf,
+           sha_buf);
+    return 0;
+}
 
-    /* Second full run against the SAME fast cache with only the stores
-     * wiped: every confined rebuild must now be a cache hit, and the
-     * report must equal run 1's modulo the volatile keys. */
-    {
-        char *rm_argv[] = {(char *)"rm", (char *)"-rf", store_a, store_b,
-                           NULL};
-        char devnull[16];
-        if (pf_spawn(rm_argv, NULL, 0, devnull, sizeof(devnull)) != 0)
-            LOG_ERR(PF_LOG, "selftest: store wipe failed");
-        struct run_args args2;
-        memset(&args2, 0, sizeof(args2));
-        args2.package_dir = pkg;
-        args2.key_file = key;
-        args2.publisher_pubkey = pubkey;
-        args2.store_a = store_a;
-        args2.store_b = store_b;
-        args2.report_path = report2;
-        args2.dep_plan_path = dplan;
-        args2.fast_cache_dir = fastcache;
-        args2.bin_dir = bin_dir;
-        args2.chain_id = "zclassic-main";
-        args2.kind = "ai";
-        args2.publisher_sequence = 1;
-        args2.cutoff_height = 1;
-        args2.cutoff_mtp = 1700000000;
-        int rc = cmd_run(&args2);
-        if (rc != 0)
-            LOG_ERR(PF_LOG, "selftest: factory re-run failed (rc=%d)", rc);
-        uint8_t *t1 = NULL, *t2 = NULL;
-        size_t l1 = 0, l2 = 0;
-        if (!pf_read_file(report, PF_CLI_STDOUT_CAP, &t1, &l1) ||
-            !pf_read_file(report2, PF_CLI_STDOUT_CAP, &t2, &l2))
-            LOG_ERR(PF_LOG, "selftest: cannot re-read both reports");
-        struct json_value d1, d2;
-        json_init(&d1);
-        json_init(&d2);
-        bool pass = json_read(&d1, (const char *)t1, l1) &&
-                    json_read(&d2, (const char *)t2, l2);
-        free(t1);
-        free(t2);
-        if (!pass)
-            LOG_ERR(PF_LOG, "selftest: report pair unparsable");
-        const struct json_value *fc2 = json_get(&d2, "fast_cache");
-        const struct json_value *fc2_hits = json_get(fc2, "hits");
-        const struct json_value *fc2_misses = json_get(fc2, "misses");
-        const struct json_value *fc1 = json_get(&d1, "fast_cache");
-        const struct json_value *fc1_misses = json_get(fc1, "misses");
-        pass = fc2_hits && fc2_misses && fc1_misses &&
+/* The fast-cache re-run must turn every confined rebuild into a cache hit,
+ * checked from the two already-parsed report documents. */
+static int cst_assert_fast_cache_hits(const struct json_value *d1,
+                                      const struct json_value *d2)
+{
+    const struct json_value *fc2 = json_get(d2, "fast_cache");
+    const struct json_value *fc2_hits = json_get(fc2, "hits");
+    const struct json_value *fc2_misses = json_get(fc2, "misses");
+    const struct json_value *fc1 = json_get(d1, "fast_cache");
+    const struct json_value *fc1_misses = json_get(fc1, "misses");
+    bool pass = fc2_hits && fc2_misses && fc1_misses &&
                json_get_int(fc2_hits) >= 3 && json_get_int(fc2_misses) == 0 &&
                json_get_int(fc1_misses) >= 2;
-        if (!pass)
-            LOG_ERR(PF_LOG, "selftest: fast cache did not turn the re-run "
-                    "into all hits");
-        pass = pf_json_equiv(&d1, &d2);
-        json_free(&d1);
-        json_free(&d2);
-        if (!pass)
-            LOG_ERR(PF_LOG, "selftest: cached re-run report diverges from "
-                    "the clean run (beyond volatile keys)");
-        printf("selftest: fast cache ok (re-run all hits, reports equal "
-               "modulo volatile keys)\n");
-    }
+    if (!pass)
+        LOG_ERR(PF_LOG, "selftest: fast cache did not turn the re-run into "
+                "all hits");
+    return 0;
+}
 
-    /* Census intake: a scratch def with ONLY the package line, pointing at
-     * scratch store A; run the census and require the package COUNTED with
-     * test LOC and the reproduced bit. */
+/* Second full run against the SAME fast cache with only the stores wiped:
+ * every confined rebuild must now be a cache hit, and the report must
+ * equal run 1's modulo the volatile keys. */
+static int cst_run_second_and_compare(const char *bin_dir,
+                                      const struct cst_state *st)
+{
+    char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)st->store_a,
+                       (char *)st->store_b, NULL};
+    char devnull[16];
+    if (pf_spawn(rm_argv, NULL, 0, devnull, sizeof(devnull)) != 0)
+        LOG_ERR(PF_LOG, "selftest: store wipe failed");
+    struct run_args args2;
+    cst_fill_run_args(&args2, st, bin_dir, st->report2);
+    int rc = cmd_run(&args2);
+    if (rc != 0)
+        LOG_ERR(PF_LOG, "selftest: factory re-run failed (rc=%d)", rc);
+    uint8_t *t1 = NULL, *t2 = NULL;
+    size_t l1 = 0, l2 = 0;
+    if (!pf_read_file(st->report, PF_CLI_STDOUT_CAP, &t1, &l1) ||
+        !pf_read_file(st->report2, PF_CLI_STDOUT_CAP, &t2, &l2))
+        LOG_ERR(PF_LOG, "selftest: cannot re-read both reports");
+    struct json_value d1, d2;
+    json_init(&d1);
+    json_init(&d2);
+    bool pass = json_read(&d1, (const char *)t1, l1) &&
+                json_read(&d2, (const char *)t2, l2);
+    free(t1);
+    free(t2);
+    if (!pass)
+        LOG_ERR(PF_LOG, "selftest: report pair unparsable");
+    int rc2 = cst_assert_fast_cache_hits(&d1, &d2);
+    if (rc2 == 0)
+        pass = pf_json_equiv(&d1, &d2);
+    json_free(&d1);
+    json_free(&d2);
+    if (rc2 != 0)
+        return rc2;
+    if (!pass)
+        LOG_ERR(PF_LOG, "selftest: cached re-run report diverges from the "
+                "clean run (beyond volatile keys)");
+    printf("selftest: fast cache ok (re-run all hits, reports equal "
+           "modulo volatile keys)\n");
+    return 0;
+}
+
+/* Census intake, step 1: read the package_root out of the first report. */
+static int cst_read_package_root(const char *report, char root_hex[65])
+{
     uint8_t *rtext = NULL;
     size_t rlen = 0;
     if (!pf_read_file(report, PF_CLI_STDOUT_CAP, &rtext, &rlen))
         LOG_ERR(PF_LOG, "selftest: report re-read failed");
-    char root_hex_[65] = {0};
-    {
-        struct json_value doc;
-        json_init(&doc);
-        bool parsed = json_read(&doc, (const char *)rtext, rlen);
-        free(rtext);
-        if (!parsed)
-            LOG_ERR(PF_LOG, "selftest: report unparsable (2)");
-        const char *r = json_get_str(
-            json_get(json_get(&doc, "package"), "package_root"));
-        if (!r || strlen(r) != 64) {
-            json_free(&doc);
-            LOG_ERR(PF_LOG, "selftest: report has no package_root");
-        }
-        (void)snprintf(root_hex_, sizeof(root_hex_), "%s", r);
+    struct json_value doc;
+    json_init(&doc);
+    bool parsed = json_read(&doc, (const char *)rtext, rlen);
+    free(rtext);
+    if (!parsed)
+        LOG_ERR(PF_LOG, "selftest: report unparsable (2)");
+    const char *r = json_get_str(
+        json_get(json_get(&doc, "package"), "package_root"));
+    if (!r || strlen(r) != 64) {
         json_free(&doc);
+        LOG_ERR(PF_LOG, "selftest: report has no package_root");
     }
-    char store_a_abs[PF_PATH_CAP];
-    if (!realpath(store_a, store_a_abs))
-        LOG_ERR(PF_LOG, "selftest: realpath %s: %s", store_a,
+    (void)snprintf(root_hex, 65, "%s", r);
+    json_free(&doc);
+    return 0;
+}
+
+/* Census intake, step 2: a scratch def with ONLY the package line,
+ * pointing at scratch store A by LABEL — the end-to-end proof that the
+ * label form resolves, and that no absolute path is ever written into a
+ * scopes.def, not even a scratch one. */
+static int cst_build_census_def(const char *scratch, struct cst_state *st)
+{
+    if (!realpath(st->store_a, st->store_a_abs))
+        LOG_ERR(PF_LOG, "selftest: realpath %s: %s", st->store_a,
                 strerror(errno));
-    char def_path[PF_PATH_CAP], census_out[PF_PATH_CAP];
-    if (snprintf(def_path, sizeof(def_path), "%s/scopes.def", scratch) >=
-            (int)sizeof(def_path) ||
-        snprintf(census_out, sizeof(census_out), "%s/census", scratch) >=
-            (int)sizeof(census_out))
+    if (snprintf(st->def_path, sizeof(st->def_path), "%s/scopes.def",
+                scratch) >= (int)sizeof(st->def_path) ||
+        snprintf(st->census_out, sizeof(st->census_out), "%s/census",
+                scratch) >= (int)sizeof(st->census_out))
         LOG_ERR(PF_LOG, "selftest path overflow");
-    /* The def carries the store LABEL; the directory it hangs off is passed
-     * to the census as --store-root. This is the end-to-end proof that the
-     * label form resolves — and that no absolute path is ever written into a
-     * scopes.def, not even a scratch one. */
-    char store_a_label[PF_PATH_CAP];
-    char store_a_root[PF_PATH_CAP];
-    {
-        char lerr[PF_ERROR_CAP] = {0};
-        if (!pf_store_label(store_a_abs, store_a_label,
-                            sizeof(store_a_label), lerr, sizeof(lerr)))
-            LOG_ERR(PF_LOG, "selftest: store label: %s", lerr);
-        size_t root_len = strlen(store_a_abs) - strlen(store_a_label);
-        if (root_len < 2u || root_len >= sizeof(store_a_root))
-            LOG_ERR(PF_LOG, "selftest: store '%s' has no parent directory",
-                    store_a_abs);
-        memcpy(store_a_root, store_a_abs, root_len - 1u); /* drop the '/' */
-        store_a_root[root_len - 1u] = '\0';
-    }
-    {
-        size_t line_cap = strlen(store_a_label) + 160u;
-        char *line = zcl_malloc(line_cap, "factory.selftest.def");
-        if (!line)
-            LOG_ERR(PF_LOG, "def line alloc");
-        int n = snprintf(line, line_cap,
-                         "package fixture/tiny-lines | root %s | store %s | "
-                         "kind ai | spdx MIT\n", root_hex_, store_a_label);
-        if (n <= 0 || (size_t)n >= line_cap ||
-            !pf_write_atomic(def_path, (const uint8_t *)line, (size_t)n)) {
-            free(line);
-            LOG_ERR(PF_LOG, "selftest: cannot write scratch def");
-        }
+    char lerr[PF_ERROR_CAP] = {0};
+    if (!pf_store_label(st->store_a_abs, st->store_a_label,
+                        sizeof(st->store_a_label), lerr, sizeof(lerr)))
+        LOG_ERR(PF_LOG, "selftest: store label: %s", lerr);
+    size_t root_len = strlen(st->store_a_abs) - strlen(st->store_a_label);
+    if (root_len < 2u || root_len >= sizeof(st->store_a_root))
+        LOG_ERR(PF_LOG, "selftest: store '%s' has no parent directory",
+                st->store_a_abs);
+    memcpy(st->store_a_root, st->store_a_abs, root_len - 1u); /* drop '/' */
+    st->store_a_root[root_len - 1u] = '\0';
+    size_t line_cap = strlen(st->store_a_label) + 160u;
+    char *line = zcl_malloc(line_cap, "factory.selftest.def");
+    if (!line)
+        LOG_ERR(PF_LOG, "def line alloc");
+    int n = snprintf(line, line_cap,
+                     "package fixture/tiny-lines | root %s | store %s | "
+                     "kind ai | spdx MIT\n", st->root_hex, st->store_a_label);
+    if (n <= 0 || (size_t)n >= line_cap ||
+        !pf_write_atomic(st->def_path, (const uint8_t *)line, (size_t)n)) {
         free(line);
+        LOG_ERR(PF_LOG, "selftest: cannot write scratch def");
     }
-    {
-        char bin[PF_PATH_CAP];
-        if (snprintf(bin, sizeof(bin), "%s/corpus-census", bin_dir) >=
-            (int)sizeof(bin))
-            LOG_ERR(PF_LOG, "census path overflow");
-        char *argv[] = {bin,
-                        (char *)"--repo", (char *)repo,
-                        (char *)"--def", def_path,
-                        (char *)"--out", census_out,
-                        (char *)"--store-root", store_a_root,
-                        (char *)"--cutoff-height", (char *)"1",
-                        (char *)"--cutoff-mtp", (char *)"1700000000",
-                        NULL};
-        char *out = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.census.out");
-        if (!out)
-            LOG_ERR(PF_LOG, "census stdout alloc");
-        int rc = pf_spawn(argv, NULL, 0, out, PF_CLI_STDOUT_CAP);
-        if (rc != 0) {
-            fprintf(stderr, "%s", out);
-            free(out);
-            LOG_ERR(PF_LOG, "selftest: corpus-census exit %d", rc);
-        }
-        printf("selftest: census: %s", strchr(out, 'c') ? out : "");
+    free(line);
+    return 0;
+}
+
+static int cst_run_census(const char *repo, const char *bin_dir,
+                          const struct cst_state *st)
+{
+    char bin[PF_PATH_CAP];
+    if (snprintf(bin, sizeof(bin), "%s/corpus-census", bin_dir) >=
+        (int)sizeof(bin))
+        LOG_ERR(PF_LOG, "census path overflow");
+    char *argv[] = {bin,
+                    (char *)"--repo", (char *)repo,
+                    (char *)"--def", (char *)st->def_path,
+                    (char *)"--out", (char *)st->census_out,
+                    (char *)"--store-root", (char *)st->store_a_root,
+                    (char *)"--cutoff-height", (char *)"1",
+                    (char *)"--cutoff-mtp", (char *)"1700000000",
+                    NULL};
+    char *out = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.census.out");
+    if (!out)
+        LOG_ERR(PF_LOG, "census stdout alloc");
+    int rc = pf_spawn(argv, NULL, 0, out, PF_CLI_STDOUT_CAP);
+    if (rc != 0) {
+        fprintf(stderr, "%s", out);
         free(out);
+        LOG_ERR(PF_LOG, "selftest: corpus-census exit %d", rc);
     }
-    /* Assert the census counted the package. */
-    char report_path[PF_PATH_CAP];
-    if (snprintf(report_path, sizeof(report_path),
-                 "%s/report-000001.json", census_out) >=
-        (int)sizeof(report_path))
+    printf("selftest: census: %s", strchr(out, 'c') ? out : "");
+    free(out);
+    return 0;
+}
+
+/* Assert the census counted the package. */
+static int cst_assert_census(struct cst_state *st)
+{
+    if (snprintf(st->report_path, sizeof(st->report_path),
+                 "%s/report-000001.json", st->census_out) >=
+        (int)sizeof(st->report_path))
         LOG_ERR(PF_LOG, "selftest path overflow");
-    {
-        uint8_t *text = NULL;
-        size_t len = 0;
-        if (!pf_read_file(report_path, PF_CLI_STDOUT_CAP, &text, &len))
-            LOG_ERR(PF_LOG, "selftest: census report missing");
-        struct json_value doc;
-        json_init(&doc);
-        if (!json_read(&doc, (const char *)text, len)) {
-            free(text);
-            LOG_ERR(PF_LOG, "selftest: census report unparsable");
-        }
+    uint8_t *text = NULL;
+    size_t len = 0;
+    if (!pf_read_file(st->report_path, PF_CLI_STDOUT_CAP, &text, &len))
+        LOG_ERR(PF_LOG, "selftest: census report missing");
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, (const char *)text, len)) {
         free(text);
-        const struct json_value *scopes = json_get(&doc, "scopes");
-        bool pass = false;
-        if (scopes && scopes->type == JSON_ARR &&
-            scopes->num_children == 1) {
-            const struct json_value *scope = json_at(scopes, 0);
-            const struct json_value *counted = json_get(scope, "counted");
-            const struct json_value *tloc =
-                json_get(scope, "test_loc_would_be");
-            const struct json_value *repro = json_get(scope, "reproduced");
-            pass = counted && json_get_bool(counted) && tloc &&
-                   json_get_int(tloc) > 0 && repro &&
-                   json_get_bool(repro);
-        }
-        json_free(&doc);
-        if (!pass)
-            LOG_ERR(PF_LOG, "selftest: package NOT counted with test LOC "
-                    "and reproduction in the census");
+        LOG_ERR(PF_LOG, "selftest: census report unparsable");
     }
+    free(text);
+    const struct json_value *scopes = json_get(&doc, "scopes");
+    bool pass = false;
+    if (scopes && scopes->type == JSON_ARR && scopes->num_children == 1) {
+        const struct json_value *scope = json_at(scopes, 0);
+        const struct json_value *counted = json_get(scope, "counted");
+        const struct json_value *tloc = json_get(scope, "test_loc_would_be");
+        const struct json_value *repro = json_get(scope, "reproduced");
+        pass = counted && json_get_bool(counted) && tloc &&
+               json_get_int(tloc) > 0 && repro && json_get_bool(repro);
+    }
+    json_free(&doc);
+    if (!pass)
+        LOG_ERR(PF_LOG, "selftest: package NOT counted with test LOC and "
+                "reproduction in the census");
     printf("selftest: census intake ok (package counted, test_loc>0, "
            "reproduced)\n");
+    return 0;
+}
+
+static int cmd_selftest(const char *repo, const char *scratch,
+                        const char *bin_dir)
+{
+    char error[PF_ERROR_CAP];
+    struct cst_state st;
+    memset(&st, 0, sizeof(st));
+    int rc;
+    if ((rc = cst_validate_scratch(repo, scratch, &st))) return rc;
+    if ((rc = cst_fresh_scratch(scratch))) return rc;
+    if ((rc = cst_build_paths(scratch, &st))) return rc;
+    if ((rc = cst_copy_fixture(&st))) return rc;
+    if ((rc = cst_generate_key(bin_dir, st.key, st.pubkey))) return rc;
+    if ((rc = cst_run_first(bin_dir, &st))) return rc;
+    if ((rc = cst_assert_report(st.report))) return rc;
+    if ((rc = cst_assert_dep_plan(st.report))) return rc;
+    if ((rc = cst_run_second_and_compare(bin_dir, &st))) return rc;
+    if ((rc = cst_read_package_root(st.report, st.root_hex))) return rc;
+    if ((rc = cst_build_census_def(scratch, &st))) return rc;
+    if ((rc = cst_run_census(repo, bin_dir, &st))) return rc;
+    if ((rc = cst_assert_census(&st))) return rc;
     printf("selftest: PASS (scratch left at %s)\n", scratch);
     (void)error;
     return 0;
