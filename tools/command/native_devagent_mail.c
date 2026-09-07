@@ -635,32 +635,134 @@ static void dvm_fail(struct zcl_command_reply *reply, const char *code,
 
 /* ── post ────────────────────────────────────────────────────────────────── */
 
+/* Validated input for one post. Split out of dvm_post() so the guard-clause
+ * chain that rejects malformed input lives apart from sequencing, encoding,
+ * and the platform write. */
+struct dvm_post_input {
+    const char *to, *kind, *body, *from, *ref;
+};
+
+static const struct dvm_fail_info {
+    const char *code, *message, *evidence;
+} *dvm_post_validate(const struct zcl_command_request *req,
+                     struct dvm_post_input *in)
+{
+    static const struct dvm_fail_info to_empty = {
+        "BAD_INPUT", "post needs a non-empty to", "input.to missing or empty"};
+    static const struct dvm_fail_info to_bad = {
+        "BAD_INPUT", "to names an agent or *", "input.to has an illegal spelling"};
+    static const struct dvm_fail_info kind_bad = {
+        "BAD_INPUT",
+        "kind is one of need|claim|result|problem|note|offer|directive",
+        "input.kind missing or unknown"};
+    static const struct dvm_fail_info body_empty = {
+        "BAD_INPUT", "post needs a non-empty body",
+        "input.body missing or empty"};
+    static const struct dvm_fail_info body_big = {
+        "MAIL_BODY_TOO_LARGE", "body is over the 4096-byte cap",
+        "input.body too large"};
+    static const struct dvm_fail_info from_bad = {
+        "BAD_INPUT", "from names the sending agent",
+        "input.from has an illegal spelling"};
+    static const struct dvm_fail_info ref_big = {
+        "BAD_INPUT", "ref is at most 200 bytes", "input.ref too large"};
+    const struct json_value *bodyv;
+
+    in->to = dvm_str(req, "to");
+    in->kind = dvm_str(req, "kind");
+    in->ref = dvm_str(req, "ref");
+    bodyv = json_get(req->input, "body");
+    in->body = bodyv && bodyv->type == JSON_STR ? json_get_str(bodyv) : NULL;
+    in->from = dvm_identity(req, "from");
+    if (!in->ref)
+        in->ref = "";
+    if (!in->to || !in->to[0]) return &to_empty;
+    if (!dvm_agent_ok(in->to)) return &to_bad;
+    if (!in->kind || !dvm_is_kind(in->kind)) return &kind_bad;
+    if (!in->body || !in->body[0]) return &body_empty;
+    if (strlen(in->body) > DVM_BODY_MAX) return &body_big;
+    if (!in->from || !in->from[0] || !dvm_agent_ok(in->from)) return &from_bad;
+    if (strlen(in->ref) > 200) return &ref_big;
+    return NULL;
+}
+
+/* Next seq: one plus the largest seq already present. A duplicate seq under
+ * concurrent posters is acceptable (bytes stay intact); the pull cursor
+ * still advances past both on (ts, from, seq) order. */
+static long long dvm_post_next_seq(const char *outbox)
+{
+    long long seq = 0;
+    FILE *f = fopen(outbox, "r");
+    if (!f)
+        return 1;
+    char buf[DVM_LINE_CAP];
+    while (fgets(buf, sizeof(buf), f)) {
+        long long s;
+        if (dvm_line_int(buf, "seq", &s) && s >= seq)
+            seq = s + 1;
+        else if (!dvm_line_int(buf, "seq", &s) && seq < 1)
+            seq = 1;
+    }
+    (void)fclose(f);
+    return seq < 1 ? 1 : seq;
+}
+
+/* Append line (len bytes) to the private outbox, per platform. Returns
+ * true on success. Split out of dvm_post() so its own complexity does not
+ * fold both platforms' write paths together. */
+#if defined(_WIN32)
+static bool dvm_post_write_line(const char *outbox, const char *line,
+                                size_t len)
+{
+    /* A nonblocking private-file lock serializes the size/write pair. Raw
+     * handle writes preserve LF bytes and do not inherit a CRT descriptor. */
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool written = platform_private_file_open_locked_create(outbox, &file);
+    if (written) {
+        /* Borrow the already-open handle for metadata only; `file` retains
+         * sole ownership of its lock and close. Never re-open the pathname
+         * to decide whether this exact object is private and unaliased. */
+        struct platform_directory_child view = {.native = file.native};
+        struct platform_directory_child_info info;
+        written = platform_directory_child_info(&view, &info) &&
+            info.current_user_only && info.link_count == 1 &&
+            platform_private_file_write_at(&file, line, len, info.size) &&
+            platform_private_file_flush(&file);
+    }
+    platform_private_file_close(&file);
+    return written;
+}
+#else
+static bool dvm_post_write_line(const char *outbox, const char *line,
+                                size_t len)
+{
+    int fd = open(outbox, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    (void)fchmod(fd, 0600);
+    ssize_t w = write(fd, line, len);
+    (void)close(fd);
+    return w == (ssize_t)len;
+}
+#endif
+
 static void dvm_post(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply, const char *maildir)
 {
-    const char *to = dvm_str(req, "to");
-    const char *kind = dvm_str(req, "kind");
-    const char *body = NULL;
-    const char *ref = dvm_str(req, "ref");
-    const struct json_value *bodyv;
+    struct dvm_post_input in;
     char root[DVM_PATH_CAP];
     char outbox[DVM_PATH_CAP];
     char ts[40];
     char esc_from[512], esc_to[512], esc_kind[64], esc_body[DVM_BODY_MAX * 2];
     char esc_ref[512];
     char line[DVM_LINE_CAP];
-    const char *from;
     const char *code;
     char msg[256];
-    long long seq = 0;
+    long long seq;
     time_t now;
     struct tm tm_utc;
-    FILE *f;
     char *nl;
-#if !defined(_WIN32)
-    int fd;
-    ssize_t w;
-#endif
     size_t len;
 
     if (!req || !req->input) {
@@ -668,45 +770,9 @@ static void dvm_post(const struct zcl_command_request *req,
                  "request.input was missing");
         return;
     }
-    bodyv = json_get(req->input, "body");
-    body = bodyv && bodyv->type == JSON_STR ? json_get_str(bodyv) : NULL;
-    from = dvm_identity(req, "from");
-    if (!ref)
-        ref = "";
-    if (!to || !to[0]) {
-        dvm_fail(reply, "BAD_INPUT", "post needs a non-empty to",
-                 "input.to missing or empty");
-        return;
-    }
-    if (!dvm_agent_ok(to)) {
-        dvm_fail(reply, "BAD_INPUT", "to names an agent or *",
-                 "input.to has an illegal spelling");
-        return;
-    }
-    if (!kind || !dvm_is_kind(kind)) {
-        dvm_fail(reply, "BAD_INPUT",
-                 "kind is one of need|claim|result|problem|note|offer|directive",
-                 "input.kind missing or unknown");
-        return;
-    }
-    if (!body || !body[0]) {
-        dvm_fail(reply, "BAD_INPUT", "post needs a non-empty body",
-                 "input.body missing or empty");
-        return;
-    }
-    if (strlen(body) > DVM_BODY_MAX) {
-        dvm_fail(reply, "MAIL_BODY_TOO_LARGE",
-                 "body is over the 4096-byte cap", "input.body too large");
-        return;
-    }
-    if (!from || !from[0] || !dvm_agent_ok(from)) {
-        dvm_fail(reply, "BAD_INPUT", "from names the sending agent",
-                 "input.from has an illegal spelling");
-        return;
-    }
-    if (strlen(ref) > 200) {
-        dvm_fail(reply, "BAD_INPUT", "ref is at most 200 bytes",
-                 "input.ref too large");
+    const struct dvm_fail_info *invalid = dvm_post_validate(req, &in);
+    if (invalid) {
+        dvm_fail(reply, invalid->code, invalid->message, invalid->evidence);
         return;
     }
     /* Checkout root for the inside-the-repo path allowance. Unresolvable
@@ -717,7 +783,7 @@ static void dvm_post(const struct zcl_command_request *req,
         (void)zcl_devagent_checkout_root(cwd && cwd[0] ? cwd : ".", root,
                                          sizeof(root));
     }
-    code = dvm_refuse(body, root[0] ? root : NULL, msg, sizeof(msg));
+    code = dvm_refuse(in.body, root[0] ? root : NULL, msg, sizeof(msg));
     if (code) {
         dvm_fail(reply, code, msg, "input.body hit a refusal rule");
         return;
@@ -728,25 +794,7 @@ static void dvm_post(const struct zcl_command_request *req,
         dvm_fail(reply, "MAIL_WRITE_FAILED", "outbox path exceeds its bound", maildir);
         return;
     }
-    /* Next seq: one plus the largest seq already present. A duplicate seq
-     * under concurrent posters is acceptable (bytes stay intact); the pull
-     * cursor still advances past both on (ts, from, seq) order. */
-    f = fopen(outbox, "r");
-    if (f) {
-        char buf[DVM_LINE_CAP];
-        while (fgets(buf, sizeof(buf), f)) {
-            long long s;
-            if (dvm_line_int(buf, "seq", &s) && s >= seq)
-                seq = s + 1;
-            else if (!dvm_line_int(buf, "seq", &s) && seq < 1)
-                seq = 1;
-        }
-        (void)fclose(f);
-        if (seq < 1)
-            seq = 1;
-    } else {
-        seq = 1;
-    }
+    seq = dvm_post_next_seq(outbox);
 
     now = platform_time_wall_time_t();
     if (!platform_time_utc_tm(now, &tm_utc) ||
@@ -756,11 +804,11 @@ static void dvm_post(const struct zcl_command_request *req,
         return;
     }
 
-    if (!dvm_escape(from, esc_from, sizeof(esc_from)) ||
-        !dvm_escape(to, esc_to, sizeof(esc_to)) ||
-        !dvm_escape(kind, esc_kind, sizeof(esc_kind)) ||
-        !dvm_escape(body, esc_body, sizeof(esc_body)) ||
-        !dvm_escape(ref, esc_ref, sizeof(esc_ref))) {
+    if (!dvm_escape(in.from, esc_from, sizeof(esc_from)) ||
+        !dvm_escape(in.to, esc_to, sizeof(esc_to)) ||
+        !dvm_escape(in.kind, esc_kind, sizeof(esc_kind)) ||
+        !dvm_escape(in.body, esc_body, sizeof(esc_body)) ||
+        !dvm_escape(in.ref, esc_ref, sizeof(esc_ref))) {
         dvm_fail(reply, "BAD_INPUT", "row fields too large to encode",
                  "escape budget exceeded");
         return;
@@ -785,46 +833,14 @@ static void dvm_post(const struct zcl_command_request *req,
         return;
     }
 
-#if defined(_WIN32)
-    /* A nonblocking private-file lock serializes the size/write pair. Raw
-     * handle writes preserve LF bytes and do not inherit a CRT descriptor. */
-    struct platform_private_file file;
-    platform_private_file_init(&file);
-    bool written = platform_private_file_open_locked_create(outbox, &file);
-    if (written) {
-        /* Borrow the already-open handle for metadata only; `file` retains
-         * sole ownership of its lock and close. Never re-open the pathname
-         * to decide whether this exact object is private and unaliased. */
-        struct platform_directory_child view = {.native = file.native};
-        struct platform_directory_child_info info;
-        written = platform_directory_child_info(&view, &info) &&
-            info.current_user_only && info.link_count == 1 &&
-            platform_private_file_write_at(&file, line, len, info.size) &&
-            platform_private_file_flush(&file);
-    }
-    platform_private_file_close(&file);
-    if (!written) {
+    if (!dvm_post_write_line(outbox, line, len)) {
         dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot append the private outbox",
                  outbox);
         return;
     }
-#else
-    fd = open(outbox, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot open the outbox",
-                 outbox);
-        return;
-    }
-    (void)fchmod(fd, 0600);
-    w = write(fd, line, len);
-    (void)close(fd);
-    if (w != (ssize_t)len) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "short write to the outbox",
-                 outbox);
-        return;
-    }
-#endif
 
+    const char *to = in.to, *kind = in.kind, *body = in.body, *from = in.from,
+               *ref = in.ref;
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
     (void)json_push_kv_int(&reply->data, "seq", seq);
     (void)json_push_kv_str(&reply->data, "ts", ts);
@@ -986,6 +1002,62 @@ static void dvm_pull(const struct zcl_command_request *req,
 
 /* ── ack ─────────────────────────────────────────────────────────────────── */
 
+/* Write text (len bytes) to tmp and atomically install it over path, per
+ * platform. Returns NULL on success, or a dvm_fail() message/evidence pair
+ * describing what failed (evidence is always one of tmp or path). Split out
+ * of dvm_ack() so its own complexity does not fold both platforms' write
+ * paths together. */
+struct dvm_ack_write_result {
+    const char *code;
+    const char *message;
+    const char *evidence;
+};
+
+#if defined(_WIN32)
+static struct dvm_ack_write_result dvm_ack_write_cursor(
+    const char *tmp, const char *path, const char *text, size_t len)
+{
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_create(tmp, &file))
+        return (struct dvm_ack_write_result){
+            "MAIL_WRITE_FAILED", "cannot create the private cursor", tmp};
+    bool installed = platform_private_file_write_at(&file, text, len, 0) &&
+        platform_private_file_replace(&file, tmp, path);
+    if (!installed) {
+        (void)platform_private_file_retire(&file, tmp);
+        platform_private_file_close(&file);
+        return (struct dvm_ack_write_result){
+            "MAIL_WRITE_FAILED", "cannot install the private cursor", path};
+    }
+    platform_private_file_close(&file);
+    return (struct dvm_ack_write_result){0};
+}
+#else
+static struct dvm_ack_write_result dvm_ack_write_cursor(
+    const char *tmp, const char *path, const char *text, size_t len)
+{
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return (struct dvm_ack_write_result){
+            "MAIL_WRITE_FAILED", "cannot record the cursor", tmp};
+    (void)fchmod(fd, 0600);
+    ssize_t w = write(fd, text, len);
+    (void)close(fd);
+    if (w != (ssize_t)len) {
+        (void)unlink(tmp);
+        return (struct dvm_ack_write_result){
+            "MAIL_WRITE_FAILED", "short write of the cursor", tmp};
+    }
+    if (rename(tmp, path) != 0) {
+        (void)unlink(tmp);
+        return (struct dvm_ack_write_result){
+            "MAIL_WRITE_FAILED", "cannot install the cursor file", path};
+    }
+    return (struct dvm_ack_write_result){0};
+}
+#endif
+
 static void dvm_ack(const struct zcl_command_request *req,
                     struct zcl_command_reply *reply, const char *maildir)
 {
@@ -994,10 +1066,6 @@ static void dvm_ack(const struct zcl_command_request *req,
     char tmp[DVM_PATH_CAP];
     char text[64];
     const char *agent;
-#if !defined(_WIN32)
-    int fd;
-    ssize_t w;
-#endif
     size_t len;
 
     if (!dvm_int(req, "cursor", &cursor)) {
@@ -1031,43 +1099,12 @@ static void dvm_ack(const struct zcl_command_request *req,
      * cursor: rename(2) is atomic, so a crash mid-write leaves the previous
      * cursor intact instead of an empty file that would silently rewind or
      * lose every reader's position. */
-#if defined(_WIN32)
-    struct platform_private_file file;
-    platform_private_file_init(&file);
-    if (!platform_private_file_create(tmp, &file)) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot create the private cursor", tmp);
+    struct dvm_ack_write_result written = dvm_ack_write_cursor(tmp, path,
+                                                               text, len);
+    if (written.code) {
+        dvm_fail(reply, written.code, written.message, written.evidence);
         return;
     }
-    bool installed = platform_private_file_write_at(&file, text, len, 0) &&
-        platform_private_file_replace(&file, tmp, path);
-    if (!installed) {
-        (void)platform_private_file_retire(&file, tmp);
-        platform_private_file_close(&file);
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot install the private cursor", path);
-        return;
-    }
-    platform_private_file_close(&file);
-#else
-    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot record the cursor", tmp);
-        return;
-    }
-    (void)fchmod(fd, 0600);
-    w = write(fd, text, len);
-    (void)close(fd);
-    if (w != (ssize_t)len) {
-        (void)unlink(tmp);
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "short write of the cursor", tmp);
-        return;
-    }
-    if (rename(tmp, path) != 0) {
-        (void)unlink(tmp);
-        dvm_fail(reply, "MAIL_WRITE_FAILED",
-                 "cannot install the cursor file", path);
-        return;
-    }
-#endif
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
     (void)json_push_kv_str(&reply->data, "agent", agent);
     (void)json_push_kv_int(&reply->data, "cursor", cursor);

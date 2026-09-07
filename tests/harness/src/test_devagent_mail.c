@@ -59,17 +59,13 @@ static void dvx_fixture_fail(const char *context)
     abort();
 }
 
-static void dvx_isolate(const char *tag)
-{
-    char base[512];
-    if (g_dvx_isolated)
-        dvx_fixture_fail("previous state root has not been restored");
-    test_make_tmpdir(base, sizeof(base), "devagent_mail", tag);
-    int n = snprintf(g_dvx_state, sizeof(g_dvx_state), "%s/state", base);
-    if (n <= 0 || (size_t)n >= sizeof(g_dvx_state) ||
-        !platform_private_directory_ensure(g_dvx_state))
-        dvx_fixture_fail("could not create isolated state parent");
+/* Save the ambient state-root environment variable and point it at the
+ * isolated fixture directory, per platform. Split out of dvx_isolate() so
+ * that function's own complexity does not fold both platforms' branches
+ * together. */
 #if defined(_WIN32)
+static void dvx_isolate_env(const char *state)
+{
     wchar_t root[1024];
     g_dvx_saved_root[0] = L'\0';
     SetLastError(ERROR_SUCCESS);
@@ -80,21 +76,38 @@ static void dvx_isolate(const char *tag)
                             error != ERROR_ENVVAR_NOT_FOUND))
         dvx_fixture_fail("could not preserve ZCL_STATE_ROOT");
     g_dvx_had_root = length > 0 || error == ERROR_SUCCESS;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, g_dvx_state, -1,
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, state, -1,
                             root, 1024) <= 0 ||
         !SetEnvironmentVariableW(L"ZCL_STATE_ROOT", root))
         dvx_fixture_fail("could not isolate ZCL_STATE_ROOT");
+}
 #else
+static void dvx_isolate_env(const char *state)
+{
     const char *original = getenv("XDG_STATE_HOME");
     g_dvx_had_root = original != NULL;
     if (original) {
-        n = snprintf(g_dvx_saved_root, sizeof(g_dvx_saved_root), "%s", original);
+        int n = snprintf(g_dvx_saved_root, sizeof(g_dvx_saved_root), "%s",
+                         original);
         if (n < 0 || (size_t)n >= sizeof(g_dvx_saved_root))
             dvx_fixture_fail("could not preserve XDG_STATE_HOME");
     }
-    if (setenv("XDG_STATE_HOME", g_dvx_state, 1) != 0)
+    if (setenv("XDG_STATE_HOME", state, 1) != 0)
         dvx_fixture_fail("could not isolate XDG_STATE_HOME");
+}
 #endif
+
+static void dvx_isolate(const char *tag)
+{
+    char base[512];
+    if (g_dvx_isolated)
+        dvx_fixture_fail("previous state root has not been restored");
+    test_make_tmpdir(base, sizeof(base), "devagent_mail", tag);
+    int n = snprintf(g_dvx_state, sizeof(g_dvx_state), "%s/state", base);
+    if (n <= 0 || (size_t)n >= sizeof(g_dvx_state) ||
+        !platform_private_directory_ensure(g_dvx_state))
+        dvx_fixture_fail("could not create isolated state parent");
+    dvx_isolate_env(g_dvx_state);
     g_dvx_isolated = true;
 }
 
