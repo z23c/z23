@@ -160,10 +160,13 @@ static void gl_relay_close(void)
 }
 
 /* Drain everything waiting, keeping each datagram in arrival order. */
-static size_t gl_relay_capture(void)
+static size_t gl_relay_capture(size_t expected)
 {
     size_t taken = 0;
-    while (g_relay.held < GL_RELAY_HOLD) {
+    while (taken < expected && g_relay.held < GL_RELAY_HOLD) {
+        if (platform_socket_wait_readable(
+                (platform_socket_t)g_relay.socket, 1000) <= 0)
+            break;
         int amount = gl_relay_recv(g_relay.socket,
                                    g_relay.held_bytes[g_relay.held],
                                    GAMELINK_MAX_DATAGRAM);
@@ -234,6 +237,35 @@ static int gl_send_fill(struct gamelink *link, uint8_t value, size_t len)
 
 /* ── the cases ───────────────────────────────────────────────────────── */
 
+/* Send completion is not receive readiness. Wait on the real descriptor;
+ * protocol time remains injected, and every expected packet must be counted. */
+static uint64_t gl_seen(const struct gamelink *link)
+{
+    struct gamelink_stats stats;
+    gamelink_stats(link, &stats);
+    return stats.recv + stats.dropped_old + stats.dropped_auth +
+           stats.dropped_malformed;
+}
+
+static bool gl_drain_until(struct gamelink *link, uint64_t expected)
+{
+    while (gl_seen(link) < expected) {
+        uint64_t before = gl_seen(link);
+        if (platform_socket_wait_readable((platform_socket_t)link->socket,
+                                          1000) <= 0)
+            return false;
+        (void)gamelink_poll(link, gl_on_datagram, &g_sink);
+        if (gl_seen(link) == before)
+            return false;
+    }
+    return gl_seen(link) == expected;
+}
+
+static bool gl_receive(struct gamelink *link, uint64_t count)
+{
+    return gl_drain_until(link, gl_seen(link) + count);
+}
+
 static int gl_case_derivation(void)
 {
     int failures = 0;
@@ -273,7 +305,7 @@ static int gl_case_thousand_in_order(void)
         for (size_t round = 0; round < 10; round++) {
             for (size_t i = 0; i < 100; i++)
                 ASSERT_EQ(gl_send_fill(&a, (uint8_t)i, 64u), (int)GAMELINK_OK);
-            (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+            ASSERT(gl_receive(&b, 100));
         }
         ASSERT_EQ(g_sink.count, (size_t)1000);
         for (size_t i = 0; i < g_sink.count; i++) {
@@ -304,7 +336,7 @@ static int gl_case_reorder_and_replay(void)
         ASSERT(gl_open_pair(&a, &b, g_relay.port));
         for (uint8_t i = 0; i < 5; i++)
             ASSERT_EQ(gl_send_fill(&a, i, 8u), (int)GAMELINK_OK);
-        ASSERT_EQ(gl_relay_capture(), (size_t)5);
+        ASSERT_EQ(gl_relay_capture(5), (size_t)5);
         gl_sink_reset();
         /* 0, 1, 2 in order, then 4 — which leaves 3 late but inside the
          * reorder window, and a late datagram the window still has room for
@@ -312,7 +344,7 @@ static int gl_case_reorder_and_replay(void)
         size_t order[] = {0, 1, 2, 4, 3};
         for (size_t i = 0; i < 5; i++) {
             ASSERT(gl_relay_forward(order[i], b.local_port, SIZE_MAX));
-            (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+            ASSERT(gl_receive(&b, 1));
         }
         ASSERT_EQ(g_sink.count, (size_t)5);
         ASSERT_EQ(g_sink.seq[3], (uint64_t)4);
@@ -324,7 +356,7 @@ static int gl_case_reorder_and_replay(void)
          * holds, and none of them is delivered a second time. */
         for (size_t i = 0; i < 5; i++) {
             ASSERT(gl_relay_forward(i, b.local_port, SIZE_MAX));
-            (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+            ASSERT(gl_receive(&b, 1));
         }
         ASSERT_EQ(g_sink.count, (size_t)5);
         gamelink_stats(&b, &stats);
@@ -336,12 +368,12 @@ static int gl_case_reorder_and_replay(void)
          * and it must never become a delivery either. */
         a.send_seq = 5000;
         ASSERT_EQ(gl_send_fill(&a, 0x5A, 8u), (int)GAMELINK_OK);
-        ASSERT_EQ(gl_relay_capture(), (size_t)1);
+        ASSERT_EQ(gl_relay_capture(1), (size_t)1);
         ASSERT(gl_relay_forward(5, b.local_port, SIZE_MAX));
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 1));
         ASSERT_EQ(g_sink.count, (size_t)6);
         ASSERT(gl_relay_forward(0, b.local_port, SIZE_MAX));
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 1));
         ASSERT_EQ(g_sink.count, (size_t)6);
         gamelink_stats(&b, &stats);
         ASSERT_EQ(stats.dropped_old, (uint64_t)6);
@@ -360,31 +392,31 @@ static int gl_case_tamper(void)
         ASSERT(gl_relay_open());
         ASSERT(gl_open_pair(&a, &b, g_relay.port));
         ASSERT_EQ(gl_send_fill(&a, 0x3C, 16u), (int)GAMELINK_OK);
-        ASSERT_EQ(gl_relay_capture(), (size_t)1);
+        ASSERT_EQ(gl_relay_capture(1), (size_t)1);
         gl_sink_reset();
         struct gamelink_stats stats;
         /* A byte of ciphertext. */
         ASSERT(gl_relay_forward(0, b.local_port, GAMELINK_HEADER_BYTES + 2u));
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 1));
         gamelink_stats(&b, &stats);
         ASSERT_EQ(g_sink.count, (size_t)0);
         ASSERT_EQ(stats.dropped_auth, (uint64_t)1);
         /* A byte of the header, which the AEAD covers as additional data. */
         ASSERT(gl_relay_forward(0, b.local_port, 20u));
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 1));
         gamelink_stats(&b, &stats);
         ASSERT_EQ(g_sink.count, (size_t)0);
         ASSERT_EQ(stats.dropped_auth, (uint64_t)2);
         /* The magic, which never even reaches the cipher. */
         ASSERT(gl_relay_forward(0, b.local_port, 0u));
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 1));
         gamelink_stats(&b, &stats);
         ASSERT_EQ(stats.dropped_malformed, (uint64_t)1);
         /* The untouched original still arrives: the session took three bad
          * datagrams and stayed up, because on an open UDP port a bad
          * datagram is weather, not an incident. */
         ASSERT(gl_relay_forward(0, b.local_port, SIZE_MAX));
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 1));
         ASSERT_EQ(g_sink.count, (size_t)1);
         ASSERT_EQ(g_sink.len[0], (size_t)16);
         ASSERT_EQ(g_sink.first_byte[0], (uint8_t)0x3C);
@@ -427,9 +459,10 @@ static int gl_case_round_trip(void)
         /* Ping at t=0, answered and read at t=5 ms. */
         ASSERT_EQ(gamelink_ping(&a), GAMELINK_OK);
         g_ticks.ns = 5000000;
+        ASSERT_EQ(platform_socket_wait_readable((platform_socket_t)b.socket, 1000), 1);
         ASSERT_EQ(gamelink_probe_serve(&b), (size_t)0);
         gl_sink_reset();
-        ASSERT_EQ(gamelink_poll(&a, gl_on_datagram, &g_sink), (size_t)0);
+        ASSERT(gl_receive(&a, 1));
         struct gamelink_stats stats;
         gamelink_stats(&a, &stats);
         ASSERT_EQ(stats.rtt_us, (uint64_t)5000);
@@ -441,13 +474,22 @@ static int gl_case_round_trip(void)
          * sixteenth of the change: |7000 - 5000| / 16 = 125. */
         ASSERT_EQ(gamelink_ping(&a), GAMELINK_OK);
         g_ticks.ns = 12000000;
+        ASSERT_EQ(platform_socket_wait_readable((platform_socket_t)b.socket, 1000), 1);
         ASSERT_EQ(gamelink_probe_serve(&b), (size_t)0);
-        (void)gamelink_poll(&a, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&a, 1));
         gamelink_stats(&a, &stats);
         ASSERT_EQ(stats.rtt_us, (uint64_t)7000);
         ASSERT_EQ(stats.jitter_us, (uint64_t)125);
         /* And the probe loop reports what it actually saw, not what it sent. */
-        ASSERT_EQ(gamelink_probe_run(&a, &b, 4, 0), (size_t)4);
+        uint64_t a_seen = gl_seen(&a), b_seen = gl_seen(&b);
+        uint64_t pongs_before = stats.pongs_recv;
+        size_t observed = gamelink_probe_run(&a, &b, 4, 0);
+        gamelink_stats(&a, &stats);
+        ASSERT_EQ((uint64_t)observed, stats.pongs_recv - pongs_before);
+        ASSERT(gl_drain_until(&b, b_seen + 4));
+        ASSERT(gl_drain_until(&a, a_seen + 4));
+        gamelink_stats(&a, &stats);
+        ASSERT_EQ(stats.pongs_recv - pongs_before, (uint64_t)4);
         gamelink_stats(&a, &stats);
         ASSERT_EQ(stats.pongs_recv, (uint64_t)6);
     } TEST_END;
@@ -465,13 +507,13 @@ static int gl_case_loss(void)
         ASSERT(gl_open_pair(&a, &b, g_relay.port));
         for (uint8_t i = 0; i < 4; i++)
             ASSERT_EQ(gl_send_fill(&a, i, 8u), (int)GAMELINK_OK);
-        ASSERT_EQ(gl_relay_capture(), (size_t)4);
+        ASSERT_EQ(gl_relay_capture(4), (size_t)4);
         gl_sink_reset();
         /* Everything but sequence 2 reaches the far end. */
         size_t keep[] = {0, 1, 3};
         for (size_t i = 0; i < 3; i++) {
             ASSERT(gl_relay_forward(keep[i], b.local_port, SIZE_MAX));
-            (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+            ASSERT(gl_receive(&b, 1));
         }
         ASSERT_EQ(g_sink.count, (size_t)3);
         struct gamelink_stats stats;
@@ -502,7 +544,7 @@ static int gl_case_wrong_key(void)
         gl_sink_reset();
         for (size_t i = 0; i < 8; i++)
             ASSERT_EQ(gl_send_fill(&wrong, 0x77, 32u), (int)GAMELINK_OK);
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 8));
         struct gamelink_stats stats;
         gamelink_stats(&b, &stats);
         ASSERT_EQ(g_sink.count, (size_t)0);
@@ -535,7 +577,7 @@ static int gl_case_caps(void)
                   GAMELINK_OK);
         ASSERT_EQ(a.send_seq, (uint64_t)1);
         gl_sink_reset();
-        (void)gamelink_poll(&b, gl_on_datagram, &g_sink);
+        ASSERT(gl_receive(&b, 1));
         ASSERT_EQ(g_sink.count, (size_t)1);
         ASSERT_EQ(g_sink.len[0], (size_t)GAMELINK_MAX_PAYLOAD);
         /* And the byte cap is a number, not a convention. */
