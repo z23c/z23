@@ -112,6 +112,27 @@ static bool growth_test_commit(const char *root, const char *message)
     return growth_test_run(add) && growth_test_run(commit);
 }
 
+/* Walk only below the private temp root. Walking from directory+1 of an
+ * absolute TMPDIR path would platform_directory_ensure("/var"), and Darwin
+ * /var is a symlink (lstat refuses it; mkdir EEXIST). */
+static bool growth_ensure_parents_below(const char *root, char *directory)
+{
+    size_t root_len = strlen(root);
+    char *at = directory + root_len;
+    if (*at == '/')
+        at++;
+    for (; *at; at++) {
+        if (*at != '/')
+            continue;
+        *at = '\0';
+        bool component_ok = platform_directory_ensure(directory, 0700);
+        *at = '/';
+        if (!component_ok)
+            return false;
+    }
+    return platform_directory_ensure(directory, 0700);
+}
+
 static int growth_cache_tests(void)
 {
     int failures = 0;
@@ -130,27 +151,8 @@ static int growth_cache_tests(void)
     char directory[512] = "";
     bool directory_path_ok = cache_path_ok && growth_test_path(
         directory, sizeof(directory), root, "lib/demo/src");
-    bool mkdir_ok = directory_path_ok && made;
-    if (mkdir_ok) {
-        /* Walk only below the private temp root. Walking from directory+1 of
-         * an absolute TMPDIR path would platform_directory_ensure("/var"),
-         * and Darwin /var is a symlink (lstat refuses it; mkdir EEXIST). */
-        size_t root_len = strlen(root);
-        char *at = directory + root_len;
-        if (*at == '/') at++;
-        for (; *at; at++) {
-            if (*at != '/') continue;
-            *at = '\0';
-            bool component_ok = platform_directory_ensure(directory, 0700);
-            *at = '/';
-            if (!component_ok) {
-                mkdir_ok = false;
-                break;
-            }
-        }
-        if (mkdir_ok)
-            mkdir_ok = platform_directory_ensure(directory, 0700);
-    }
+    bool mkdir_ok = directory_path_ok && made &&
+        growth_ensure_parents_below(root, directory);
     bool init_ok = mkdir_ok && growth_test_run(init);
     bool write_ok = init_ok && growth_test_write(
         source, "int answer(void) { return 42; }\n");

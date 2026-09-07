@@ -2987,7 +2987,7 @@ tests/harness/src/test_check_block_edge.c:test_check_block_edge:37
 tests/harness/src/test_check_tx_edge.c:test_check_tx_edge:25
 tests/harness/src/test_checkpoint.c:test_checkpoint:37
 tests/harness/src/test_cli_argv_strict.c:cas_run_daemon_wait_for:23
-tests/harness/src/test_code_growth.c:growth_cache_tests:34
+tests/harness/src/test_code_growth.c:growth_cache_tests:31
 tests/harness/src/test_code_growth.c:test_code_growth:20
 tests/harness/src/test_code_have.c:test_code_have:47
 tests/harness/src/test_code_inventory.c:ci_semantic_known_answers:25
