@@ -613,6 +613,148 @@ static int test_sapling_incremental_witness_serialize_roundtrip(void)
     return failures;
 }
 
+static bool v4_tx_build_and_roundtrip(struct transaction *tx, struct transaction *tx2,
+                                       struct byte_stream *bs, struct byte_stream *bs2)
+{
+    transaction_init(tx);
+    tx->overwintered = true;
+    tx->version = SAPLING_TX_VERSION;
+    tx->version_group_id = SAPLING_VERSION_GROUP_ID;
+    tx->lock_time = 500000;
+    tx->expiry_height = 500100;
+    tx->value_balance = 10000;
+
+    transaction_alloc(tx, 1, 1);
+    tx->vin[0].sequence = 0xfffffffe;
+    memset(tx->vin[0].prevout.hash.data, 0xab, 32);
+    tx->vin[0].prevout.n = 0;
+    tx->vin[0].script_sig.data[0] = 0x00;
+    tx->vin[0].script_sig.size = 1;
+    tx->vout[0].value = 50000;
+    tx->vout[0].script_pub_key.data[0] = 0x76;
+    tx->vout[0].script_pub_key.data[1] = 0xa9;
+    tx->vout[0].script_pub_key.size = 2;
+
+    tx->v_shielded_spend = zcl_calloc(1, sizeof(struct spend_description), "test_spend_desc");
+    tx->num_shielded_spend = 1;
+    memset(tx->v_shielded_spend[0].cv.data, 0x11, 32);
+    memset(tx->v_shielded_spend[0].anchor.data, 0x22, 32);
+    memset(tx->v_shielded_spend[0].nullifier.data, 0x33, 32);
+    memset(tx->v_shielded_spend[0].rk.data, 0x44, 32);
+    memset(tx->v_shielded_spend[0].zkproof, 0x55, GROTH_PROOF_SIZE);
+    memset(tx->v_shielded_spend[0].spend_auth_sig, 0x66, 64);
+
+    tx->v_shielded_output = zcl_calloc(1, sizeof(struct output_description), "test_output_desc");
+    tx->num_shielded_output = 1;
+    memset(tx->v_shielded_output[0].cv.data, 0x77, 32);
+    memset(tx->v_shielded_output[0].cm.data, 0x88, 32);
+    memset(tx->v_shielded_output[0].ephemeral_key.data, 0x99, 32);
+    memset(tx->v_shielded_output[0].enc_ciphertext, 0xaa, ZC_SAPLING_ENCCIPHERTEXT_SIZE);
+    memset(tx->v_shielded_output[0].out_ciphertext, 0xbb, ZC_SAPLING_OUTCIPHERTEXT_SIZE);
+    memset(tx->v_shielded_output[0].zkproof, 0xcc, GROTH_PROOF_SIZE);
+
+    tx->v_joinsplit = zcl_calloc(1, sizeof(struct js_description), "test_joinsplit");
+    tx->num_joinsplit = 1;
+    tx->v_joinsplit[0].vpub_old = 1000;
+    tx->v_joinsplit[0].vpub_new = 2000;
+    memset(tx->v_joinsplit[0].anchor.data, 0xdd, 32);
+    tx->v_joinsplit[0].use_groth = true;
+    memset(tx->v_joinsplit[0].proof, 0xee, GROTH_PROOF_SIZE);
+    for (int i = 0; i < ZC_NUM_JS_INPUTS; i++)
+        memset(tx->v_joinsplit[0].nullifiers[i].data, 0x10 + i, 32);
+    for (int i = 0; i < ZC_NUM_JS_OUTPUTS; i++)
+        memset(tx->v_joinsplit[0].commitments[i].data, 0x20 + i, 32);
+    memset(tx->v_joinsplit[0].ephemeral_key.data, 0x30, 32);
+    memset(tx->v_joinsplit[0].random_seed.data, 0x40, 32);
+    for (int i = 0; i < ZC_NUM_JS_INPUTS; i++)
+        memset(tx->v_joinsplit[0].macs[i].data, 0x50 + i, 32);
+    for (int i = 0; i < ZC_NUM_JS_OUTPUTS; i++)
+        memset(tx->v_joinsplit[0].ciphertexts[i], 0x60 + i, ZC_SPROUT_CIPHERTEXT_SIZE);
+
+    memset(tx->joinsplit_pubkey.data, 0xf1, 32);
+    memset(tx->joinsplit_sig, 0xf2, 64);
+    memset(tx->binding_sig, 0xf3, 64);
+
+    stream_init(bs, 8192);
+    bool ok = transaction_serialize(tx, bs);
+
+    stream_init_from_data(bs2, bs->data, bs->size);
+    ok = ok && transaction_deserialize(tx2, bs2);
+    ok = ok && (bs2->read_pos == bs->size);
+    return ok;
+}
+
+static bool v4_tx_check_header_and_io(const struct transaction *tx2)
+{
+    bool ok = true;
+    ok = ok && tx2->overwintered == true;
+    ok = ok && tx2->version == SAPLING_TX_VERSION;
+    ok = ok && tx2->version_group_id == SAPLING_VERSION_GROUP_ID;
+    ok = ok && tx2->lock_time == 500000;
+    ok = ok && tx2->expiry_height == 500100;
+    ok = ok && tx2->value_balance == 10000;
+    ok = ok && tx2->num_vin == 1;
+    ok = ok && tx2->num_vout == 1;
+    return ok;
+}
+
+static bool v4_tx_check_shielded_spend(const struct transaction *tx2)
+{
+    bool ok = true;
+    ok = ok && tx2->num_shielded_spend == 1;
+    ok = ok && tx2->v_shielded_spend[0].cv.data[0] == 0x11;
+    ok = ok && tx2->v_shielded_spend[0].anchor.data[0] == 0x22;
+    ok = ok && tx2->v_shielded_spend[0].nullifier.data[0] == 0x33;
+    ok = ok && tx2->v_shielded_spend[0].rk.data[0] == 0x44;
+    ok = ok && tx2->v_shielded_spend[0].zkproof[0] == 0x55;
+    ok = ok && tx2->v_shielded_spend[0].spend_auth_sig[0] == 0x66;
+    return ok;
+}
+
+static bool v4_tx_check_shielded_output(const struct transaction *tx2)
+{
+    bool ok = true;
+    ok = ok && tx2->num_shielded_output == 1;
+    ok = ok && tx2->v_shielded_output[0].cv.data[0] == 0x77;
+    ok = ok && tx2->v_shielded_output[0].cm.data[0] == 0x88;
+    ok = ok && tx2->v_shielded_output[0].ephemeral_key.data[0] == 0x99;
+    ok = ok && tx2->v_shielded_output[0].enc_ciphertext[0] == 0xaa;
+    ok = ok && tx2->v_shielded_output[0].out_ciphertext[0] == 0xbb;
+    ok = ok && tx2->v_shielded_output[0].zkproof[0] == 0xcc;
+    return ok;
+}
+
+static bool v4_tx_check_joinsplit(const struct transaction *tx2)
+{
+    bool ok = true;
+    ok = ok && tx2->num_joinsplit == 1;
+    ok = ok && tx2->v_joinsplit[0].vpub_old == 1000;
+    ok = ok && tx2->v_joinsplit[0].vpub_new == 2000;
+    ok = ok && tx2->v_joinsplit[0].anchor.data[0] == 0xdd;
+    ok = ok && tx2->v_joinsplit[0].use_groth == true;
+    ok = ok && tx2->v_joinsplit[0].proof[0] == 0xee;
+    ok = ok && tx2->v_joinsplit[0].nullifiers[0].data[0] == 0x10;
+    ok = ok && tx2->v_joinsplit[0].commitments[0].data[0] == 0x20;
+    ok = ok && tx2->v_joinsplit[0].ciphertexts[0][0] == 0x60;
+    return ok;
+}
+
+static bool v4_tx_check_sigs_and_reserialize(const struct transaction *tx2,
+                                              const struct byte_stream *bs,
+                                              struct byte_stream *bs3)
+{
+    bool ok = true;
+    ok = ok && tx2->joinsplit_pubkey.data[0] == 0xf1;
+    ok = ok && tx2->joinsplit_sig[0] == 0xf2;
+    ok = ok && tx2->binding_sig[0] == 0xf3;
+
+    stream_init(bs3, 8192);
+    ok = ok && transaction_serialize(tx2, bs3);
+    ok = ok && (bs3->size == bs->size);
+    ok = ok && (memcmp(bs3->data, bs->data, bs->size) == 0);
+    return ok;
+}
+
 static int test_sapling_sapling_v4_tx_roundtrip_spend_output_joinsplit(void)
 {
     int failures = 0;
@@ -620,120 +762,15 @@ static int test_sapling_sapling_v4_tx_roundtrip_spend_output_joinsplit(void)
     /* --- Sapling v4 transaction roundtrip with shielded data --- */
     printf("sapling v4 tx roundtrip (spend+output+joinsplit)... ");
     {
-        struct transaction tx;
-        transaction_init(&tx);
-        tx.overwintered = true;
-        tx.version = SAPLING_TX_VERSION;
-        tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-        tx.lock_time = 500000;
-        tx.expiry_height = 500100;
-        tx.value_balance = 10000;
+        struct transaction tx, tx2;
+        struct byte_stream bs, bs2, bs3;
 
-        transaction_alloc(&tx, 1, 1);
-        tx.vin[0].sequence = 0xfffffffe;
-        memset(tx.vin[0].prevout.hash.data, 0xab, 32);
-        tx.vin[0].prevout.n = 0;
-        tx.vin[0].script_sig.data[0] = 0x00;
-        tx.vin[0].script_sig.size = 1;
-        tx.vout[0].value = 50000;
-        tx.vout[0].script_pub_key.data[0] = 0x76;
-        tx.vout[0].script_pub_key.data[1] = 0xa9;
-        tx.vout[0].script_pub_key.size = 2;
-
-        tx.v_shielded_spend = zcl_calloc(1, sizeof(struct spend_description), "test_spend_desc");
-        tx.num_shielded_spend = 1;
-        memset(tx.v_shielded_spend[0].cv.data, 0x11, 32);
-        memset(tx.v_shielded_spend[0].anchor.data, 0x22, 32);
-        memset(tx.v_shielded_spend[0].nullifier.data, 0x33, 32);
-        memset(tx.v_shielded_spend[0].rk.data, 0x44, 32);
-        memset(tx.v_shielded_spend[0].zkproof, 0x55, GROTH_PROOF_SIZE);
-        memset(tx.v_shielded_spend[0].spend_auth_sig, 0x66, 64);
-
-        tx.v_shielded_output = zcl_calloc(1, sizeof(struct output_description), "test_output_desc");
-        tx.num_shielded_output = 1;
-        memset(tx.v_shielded_output[0].cv.data, 0x77, 32);
-        memset(tx.v_shielded_output[0].cm.data, 0x88, 32);
-        memset(tx.v_shielded_output[0].ephemeral_key.data, 0x99, 32);
-        memset(tx.v_shielded_output[0].enc_ciphertext, 0xaa, ZC_SAPLING_ENCCIPHERTEXT_SIZE);
-        memset(tx.v_shielded_output[0].out_ciphertext, 0xbb, ZC_SAPLING_OUTCIPHERTEXT_SIZE);
-        memset(tx.v_shielded_output[0].zkproof, 0xcc, GROTH_PROOF_SIZE);
-
-        tx.v_joinsplit = zcl_calloc(1, sizeof(struct js_description), "test_joinsplit");
-        tx.num_joinsplit = 1;
-        tx.v_joinsplit[0].vpub_old = 1000;
-        tx.v_joinsplit[0].vpub_new = 2000;
-        memset(tx.v_joinsplit[0].anchor.data, 0xdd, 32);
-        tx.v_joinsplit[0].use_groth = true;
-        memset(tx.v_joinsplit[0].proof, 0xee, GROTH_PROOF_SIZE);
-        for (int i = 0; i < ZC_NUM_JS_INPUTS; i++)
-            memset(tx.v_joinsplit[0].nullifiers[i].data, 0x10 + i, 32);
-        for (int i = 0; i < ZC_NUM_JS_OUTPUTS; i++)
-            memset(tx.v_joinsplit[0].commitments[i].data, 0x20 + i, 32);
-        memset(tx.v_joinsplit[0].ephemeral_key.data, 0x30, 32);
-        memset(tx.v_joinsplit[0].random_seed.data, 0x40, 32);
-        for (int i = 0; i < ZC_NUM_JS_INPUTS; i++)
-            memset(tx.v_joinsplit[0].macs[i].data, 0x50 + i, 32);
-        for (int i = 0; i < ZC_NUM_JS_OUTPUTS; i++)
-            memset(tx.v_joinsplit[0].ciphertexts[i], 0x60 + i, ZC_SPROUT_CIPHERTEXT_SIZE);
-
-        memset(tx.joinsplit_pubkey.data, 0xf1, 32);
-        memset(tx.joinsplit_sig, 0xf2, 64);
-        memset(tx.binding_sig, 0xf3, 64);
-
-        struct byte_stream bs;
-        stream_init(&bs, 8192);
-        bool ok = transaction_serialize(&tx, &bs);
-
-        struct transaction tx2;
-        struct byte_stream bs2;
-        stream_init_from_data(&bs2, bs.data, bs.size);
-        ok = ok && transaction_deserialize(&tx2, &bs2);
-        ok = ok && (bs2.read_pos == bs.size);
-
-        ok = ok && tx2.overwintered == true;
-        ok = ok && tx2.version == SAPLING_TX_VERSION;
-        ok = ok && tx2.version_group_id == SAPLING_VERSION_GROUP_ID;
-        ok = ok && tx2.lock_time == 500000;
-        ok = ok && tx2.expiry_height == 500100;
-        ok = ok && tx2.value_balance == 10000;
-        ok = ok && tx2.num_vin == 1;
-        ok = ok && tx2.num_vout == 1;
-
-        ok = ok && tx2.num_shielded_spend == 1;
-        ok = ok && tx2.v_shielded_spend[0].cv.data[0] == 0x11;
-        ok = ok && tx2.v_shielded_spend[0].anchor.data[0] == 0x22;
-        ok = ok && tx2.v_shielded_spend[0].nullifier.data[0] == 0x33;
-        ok = ok && tx2.v_shielded_spend[0].rk.data[0] == 0x44;
-        ok = ok && tx2.v_shielded_spend[0].zkproof[0] == 0x55;
-        ok = ok && tx2.v_shielded_spend[0].spend_auth_sig[0] == 0x66;
-
-        ok = ok && tx2.num_shielded_output == 1;
-        ok = ok && tx2.v_shielded_output[0].cv.data[0] == 0x77;
-        ok = ok && tx2.v_shielded_output[0].cm.data[0] == 0x88;
-        ok = ok && tx2.v_shielded_output[0].ephemeral_key.data[0] == 0x99;
-        ok = ok && tx2.v_shielded_output[0].enc_ciphertext[0] == 0xaa;
-        ok = ok && tx2.v_shielded_output[0].out_ciphertext[0] == 0xbb;
-        ok = ok && tx2.v_shielded_output[0].zkproof[0] == 0xcc;
-
-        ok = ok && tx2.num_joinsplit == 1;
-        ok = ok && tx2.v_joinsplit[0].vpub_old == 1000;
-        ok = ok && tx2.v_joinsplit[0].vpub_new == 2000;
-        ok = ok && tx2.v_joinsplit[0].anchor.data[0] == 0xdd;
-        ok = ok && tx2.v_joinsplit[0].use_groth == true;
-        ok = ok && tx2.v_joinsplit[0].proof[0] == 0xee;
-        ok = ok && tx2.v_joinsplit[0].nullifiers[0].data[0] == 0x10;
-        ok = ok && tx2.v_joinsplit[0].commitments[0].data[0] == 0x20;
-        ok = ok && tx2.v_joinsplit[0].ciphertexts[0][0] == 0x60;
-
-        ok = ok && tx2.joinsplit_pubkey.data[0] == 0xf1;
-        ok = ok && tx2.joinsplit_sig[0] == 0xf2;
-        ok = ok && tx2.binding_sig[0] == 0xf3;
-
-        struct byte_stream bs3;
-        stream_init(&bs3, 8192);
-        ok = ok && transaction_serialize(&tx2, &bs3);
-        ok = ok && (bs3.size == bs.size);
-        ok = ok && (memcmp(bs3.data, bs.data, bs.size) == 0);
+        bool ok = v4_tx_build_and_roundtrip(&tx, &tx2, &bs, &bs2);
+        ok = ok && v4_tx_check_header_and_io(&tx2);
+        ok = ok && v4_tx_check_shielded_spend(&tx2);
+        ok = ok && v4_tx_check_shielded_output(&tx2);
+        ok = ok && v4_tx_check_joinsplit(&tx2);
+        ok = ok && v4_tx_check_sigs_and_reserialize(&tx2, &bs, &bs3);
 
         if (ok) printf("OK (size=%zu)\n", bs.size);
         else { printf("FAIL\n"); failures++; }
@@ -2416,6 +2453,105 @@ static int test_sapling_sapling_crh_ivk(void)
     return failures;
 }
 
+static bool ksc_check_simple(const char *label, int v, const uint8_t *got,
+                              const uint8_t *exp, int n, int *vec_fails, int *failures)
+{
+    printf("sapling key components [%d] %s... ", v + 1, label);
+    if (memcmp(got, exp, n) != 0) {
+        printf("FAIL\n");
+        (*vec_fails)++; (*failures)++;
+        return false;
+    }
+    printf("OK\n");
+    return true;
+}
+
+static bool ksc_check_verbose(const char *label, int v, const uint8_t *got,
+                               const uint8_t *exp, int n, bool precond_ok,
+                               int *vec_fails, int *failures)
+{
+    printf("sapling key components [%d] %s... ", v + 1, label);
+    if (!precond_ok || memcmp(got, exp, n) != 0) {
+        printf("FAIL\n");
+        printf("  got: "); for (int i = 0; i < n; i++) printf("%02x", got[i]); printf("\n");
+        printf("  exp: "); for (int i = 0; i < n; i++) printf("%02x", exp[i]); printf("\n");
+        (*vec_fails)++; (*failures)++;
+        return false;
+    }
+    printf("OK\n");
+    return true;
+}
+
+struct ksc_test_vec {
+    const char *sk, *ask, *nsk, *ovk, *ak, *nk, *ivk;
+    const char *diversifier, *pk_d;
+    uint64_t value;
+    const char *rcm, *cm;
+    uint64_t position;
+    const char *nf;
+};
+
+static void ksc_check_one_vector(const struct ksc_test_vec *vec, int v,
+                                  int *vec_fails, int *failures)
+{
+    uint8_t sk_bytes[32], exp_ask[32], exp_nsk[32], exp_ovk[32];
+    uint8_t exp_ak[32], exp_nk[32], exp_ivk[32], exp_div[11], exp_pkd[32];
+    uint8_t exp_rcm[32], exp_cm[32], exp_nf[32];
+
+    /* 32-byte values: BE display hex → LE internal (reversed) */
+    test_hex_to_bytes_rev(vec->sk, sk_bytes, 32);
+    test_hex_to_bytes_rev(vec->ask, exp_ask, 32);
+    test_hex_to_bytes_rev(vec->nsk, exp_nsk, 32);
+    test_hex_to_bytes_rev(vec->ovk, exp_ovk, 32);
+    test_hex_to_bytes_rev(vec->ak, exp_ak, 32);
+    test_hex_to_bytes_rev(vec->nk, exp_nk, 32);
+    test_hex_to_bytes_rev(vec->ivk, exp_ivk, 32);
+    /* Diversifier: forward order (raw bytes, not a scalar) */
+    test_hex_to_bytes(vec->diversifier, exp_div, 11);
+    test_hex_to_bytes_rev(vec->pk_d, exp_pkd, 32);
+    test_hex_to_bytes_rev(vec->rcm, exp_rcm, 32);
+    test_hex_to_bytes_rev(vec->cm, exp_cm, 32);
+    test_hex_to_bytes_rev(vec->nf, exp_nf, 32);
+
+    struct uint256 sk_u;
+    memcpy(sk_u.data, sk_bytes, 32);
+
+    /* PRF derivation */
+    struct uint256 ask_u, nsk_u, ovk_u;
+    prf_ask(&sk_u, &ask_u);
+    prf_nsk(&sk_u, &nsk_u);
+    prf_ovk(&sk_u, &ovk_u);
+
+    ksc_check_verbose("ask", v, ask_u.data, exp_ask, 32, true, vec_fails, failures);
+    ksc_check_simple("nsk", v, nsk_u.data, exp_nsk, 32, vec_fails, failures);
+    ksc_check_simple("ovk", v, ovk_u.data, exp_ovk, 32, vec_fails, failures);
+
+    /* Key derivation */
+    uint8_t ak[32], nk[32], ivk[32], pk_d[32];
+    sapling_ask_to_ak(ask_u.data, ak);
+    sapling_nsk_to_nk(nsk_u.data, nk);
+    sapling_crh_ivk(ak, nk, ivk);
+
+    ksc_check_verbose("ak", v, ak, exp_ak, 32, true, vec_fails, failures);
+    ksc_check_verbose("nk", v, nk, exp_nk, 32, true, vec_fails, failures);
+    ksc_check_verbose("ivk", v, ivk, exp_ivk, 32, true, vec_fails, failures);
+
+    /* pk_d */
+    bool pkd_ok = sapling_ivk_to_pkd(ivk, exp_div, pk_d);
+    ksc_check_verbose("pk_d", v, pk_d, exp_pkd, 32, pkd_ok, vec_fails, failures);
+
+    /* Note commitment */
+    uint8_t cm[32];
+    bool cm_ok = sapling_compute_cm(exp_div, exp_pkd, vec->value, exp_rcm, cm);
+    ksc_check_verbose("cm", v, cm, exp_cm, 32, cm_ok, vec_fails, failures);
+
+    /* Nullifier */
+    uint8_t nf[32];
+    bool nf_ok = sapling_compute_nf(exp_div, exp_pkd, vec->value, exp_rcm,
+                                     ak, nk, vec->position, nf);
+    ksc_check_verbose("nf", v, nf, exp_nf, 32, nf_ok, vec_fails, failures);
+}
+
 static int test_sapling_sapling_key_components_d_ask(void)
 {
     int failures = 0;
@@ -2425,16 +2561,7 @@ static int test_sapling_sapling_key_components_d_ask(void)
     {
         (void)0; /* block scope */
 
-        struct test_vec {
-            const char *sk, *ask, *nsk, *ovk, *ak, *nk, *ivk;
-            const char *diversifier, *pk_d;
-            uint64_t value;
-            const char *rcm, *cm;
-            uint64_t position;
-            const char *nf;
-        };
-
-        struct test_vec vecs[] = {
+        struct ksc_test_vec vecs[] = {
             { /* Test case 1: sk=0x00..00 */
                 "0000000000000000000000000000000000000000000000000000000000000000",
                 "06880e0df04583674f05d25dcf1119cf18f84420407823aa47a53e474aa14885",
@@ -2520,116 +2647,8 @@ static int test_sapling_sapling_key_components_d_ask(void)
         int num_vecs = (int)(sizeof(vecs) / sizeof(vecs[0]));
         int vec_fails = 0;
 
-        for (int v = 0; v < num_vecs; v++) {
-            uint8_t sk_bytes[32], exp_ask[32], exp_nsk[32], exp_ovk[32];
-            uint8_t exp_ak[32], exp_nk[32], exp_ivk[32], exp_div[11], exp_pkd[32];
-            uint8_t exp_rcm[32], exp_cm[32], exp_nf[32];
-
-            /* 32-byte values: BE display hex → LE internal (reversed) */
-            test_hex_to_bytes_rev(vecs[v].sk, sk_bytes, 32);
-            test_hex_to_bytes_rev(vecs[v].ask, exp_ask, 32);
-            test_hex_to_bytes_rev(vecs[v].nsk, exp_nsk, 32);
-            test_hex_to_bytes_rev(vecs[v].ovk, exp_ovk, 32);
-            test_hex_to_bytes_rev(vecs[v].ak, exp_ak, 32);
-            test_hex_to_bytes_rev(vecs[v].nk, exp_nk, 32);
-            test_hex_to_bytes_rev(vecs[v].ivk, exp_ivk, 32);
-            /* Diversifier: forward order (raw bytes, not a scalar) */
-            test_hex_to_bytes(vecs[v].diversifier, exp_div, 11);
-            test_hex_to_bytes_rev(vecs[v].pk_d, exp_pkd, 32);
-            test_hex_to_bytes_rev(vecs[v].rcm, exp_rcm, 32);
-            test_hex_to_bytes_rev(vecs[v].cm, exp_cm, 32);
-            test_hex_to_bytes_rev(vecs[v].nf, exp_nf, 32);
-
-            struct uint256 sk_u;
-            memcpy(sk_u.data, sk_bytes, 32);
-
-            /* PRF derivation */
-            struct uint256 ask_u, nsk_u, ovk_u;
-            prf_ask(&sk_u, &ask_u);
-            prf_nsk(&sk_u, &nsk_u);
-            prf_ovk(&sk_u, &ovk_u);
-
-            printf("sapling key components [%d] ask... ", v+1);
-            if (memcmp(ask_u.data, exp_ask, 32) != 0) {
-                printf("FAIL\n");
-                printf("  got: "); for(int i=0;i<32;i++)printf("%02x",ask_u.data[i]); printf("\n");
-                printf("  exp: "); for(int i=0;i<32;i++)printf("%02x",exp_ask[i]); printf("\n");
-                vec_fails++; failures++;
-            } else printf("OK\n");
-
-            printf("sapling key components [%d] nsk... ", v+1);
-            if (memcmp(nsk_u.data, exp_nsk, 32) != 0) {
-                printf("FAIL\n"); vec_fails++; failures++;
-            } else printf("OK\n");
-
-            printf("sapling key components [%d] ovk... ", v+1);
-            if (memcmp(ovk_u.data, exp_ovk, 32) != 0) {
-                printf("FAIL\n"); vec_fails++; failures++;
-            } else printf("OK\n");
-
-            /* Key derivation */
-            uint8_t ak[32], nk[32], ivk[32], pk_d[32];
-            sapling_ask_to_ak(ask_u.data, ak);
-            sapling_nsk_to_nk(nsk_u.data, nk);
-            sapling_crh_ivk(ak, nk, ivk);
-
-            printf("sapling key components [%d] ak... ", v+1);
-            if (memcmp(ak, exp_ak, 32) != 0) {
-                printf("FAIL\n");
-                printf("  got: "); for(int i=0;i<32;i++)printf("%02x",ak[i]); printf("\n");
-                printf("  exp: "); for(int i=0;i<32;i++)printf("%02x",exp_ak[i]); printf("\n");
-                vec_fails++; failures++;
-            } else printf("OK\n");
-
-            printf("sapling key components [%d] nk... ", v+1);
-            if (memcmp(nk, exp_nk, 32) != 0) {
-                printf("FAIL\n");
-                printf("  got: "); for(int i=0;i<32;i++)printf("%02x",nk[i]); printf("\n");
-                printf("  exp: "); for(int i=0;i<32;i++)printf("%02x",exp_nk[i]); printf("\n");
-                vec_fails++; failures++;
-            } else printf("OK\n");
-
-            printf("sapling key components [%d] ivk... ", v+1);
-            if (memcmp(ivk, exp_ivk, 32) != 0) {
-                printf("FAIL\n");
-                printf("  got: "); for(int i=0;i<32;i++)printf("%02x",ivk[i]); printf("\n");
-                printf("  exp: "); for(int i=0;i<32;i++)printf("%02x",exp_ivk[i]); printf("\n");
-                vec_fails++; failures++;
-            } else printf("OK\n");
-
-            /* pk_d */
-            bool pkd_ok = sapling_ivk_to_pkd(ivk, exp_div, pk_d);
-            printf("sapling key components [%d] pk_d... ", v+1);
-            if (!pkd_ok || memcmp(pk_d, exp_pkd, 32) != 0) {
-                printf("FAIL\n");
-                printf("  got: "); for(int i=0;i<32;i++)printf("%02x",pk_d[i]); printf("\n");
-                printf("  exp: "); for(int i=0;i<32;i++)printf("%02x",exp_pkd[i]); printf("\n");
-                vec_fails++; failures++;
-            } else printf("OK\n");
-
-            /* Note commitment */
-            uint8_t cm[32];
-            bool cm_ok = sapling_compute_cm(exp_div, exp_pkd, vecs[v].value, exp_rcm, cm);
-            printf("sapling key components [%d] cm... ", v+1);
-            if (!cm_ok || memcmp(cm, exp_cm, 32) != 0) {
-                printf("FAIL\n");
-                printf("  got: "); for(int i=0;i<32;i++)printf("%02x",cm[i]); printf("\n");
-                printf("  exp: "); for(int i=0;i<32;i++)printf("%02x",exp_cm[i]); printf("\n");
-                vec_fails++; failures++;
-            } else printf("OK\n");
-
-            /* Nullifier */
-            uint8_t nf[32];
-            bool nf_ok = sapling_compute_nf(exp_div, exp_pkd, vecs[v].value, exp_rcm,
-                                             ak, nk, vecs[v].position, nf);
-            printf("sapling key components [%d] nf... ", v+1);
-            if (!nf_ok || memcmp(nf, exp_nf, 32) != 0) {
-                printf("FAIL\n");
-                printf("  got: "); for(int i=0;i<32;i++)printf("%02x",nf[i]); printf("\n");
-                printf("  exp: "); for(int i=0;i<32;i++)printf("%02x",exp_nf[i]); printf("\n");
-                vec_fails++; failures++;
-            } else printf("OK\n");
-        }
+        for (int v = 0; v < num_vecs; v++)
+            ksc_check_one_vector(&vecs[v], v, &vec_fails, &failures);
 
         printf("sapling key components summary: %d/%d vectors, %d field failures\n",
                num_vecs, num_vecs, vec_fails);
@@ -4610,6 +4629,56 @@ static int test_sapling_redjubjub_sign_verify_10_random_messages(void)
     return failures;
 }
 
+static void bsig_compute_bsk(const uint8_t *rcv_s1, const uint8_t *rcv_s2,
+                              const uint8_t *rcv_o1, const uint8_t *rcv_o2,
+                              const uint8_t *rcv_o3, uint8_t *bsk_out)
+{
+    /* bsk = sum(rcv_spends) - sum(rcv_outputs) */
+    struct fs bsk_fs;
+    struct fs r, neg_r;
+    fs_from_bytes(&bsk_fs, rcv_s1);
+    fs_from_bytes(&r, rcv_s2);
+    fs_add(&bsk_fs, &bsk_fs, &r);
+    fs_from_bytes(&r, rcv_o1);
+    fs_neg(&neg_r, &r);
+    fs_add(&bsk_fs, &bsk_fs, &neg_r);
+    fs_from_bytes(&r, rcv_o2);
+    fs_neg(&neg_r, &r);
+    fs_add(&bsk_fs, &bsk_fs, &neg_r);
+    fs_from_bytes(&r, rcv_o3);
+    fs_neg(&neg_r, &r);
+    fs_add(&bsk_fs, &bsk_fs, &neg_r);
+
+    fs_to_bytes(bsk_out, &bsk_fs);
+}
+
+static void bsig_build_bvk(struct sapling_verification_ctx *ctx,
+                            const uint8_t *cv_s1, const uint8_t *cv_s2,
+                            const uint8_t *cv_o1, const uint8_t *cv_o2,
+                            const uint8_t *cv_o3)
+{
+    sapling_verification_ctx_init(ctx);
+
+    /* Add spends (positive cv) */
+    struct jub_point pt;
+    jub_from_bytes(&pt, cv_s1);
+    jub_add(&ctx->bvk, &ctx->bvk, &pt);
+    jub_from_bytes(&pt, cv_s2);
+    jub_add(&ctx->bvk, &ctx->bvk, &pt);
+
+    /* Subtract outputs (negative cv) */
+    struct jub_point neg;
+    jub_from_bytes(&pt, cv_o1);
+    jub_neg(&neg, &pt);
+    jub_add(&ctx->bvk, &ctx->bvk, &neg);
+    jub_from_bytes(&pt, cv_o2);
+    jub_neg(&neg, &pt);
+    jub_add(&ctx->bvk, &ctx->bvk, &neg);
+    jub_from_bytes(&pt, cv_o3);
+    jub_neg(&neg, &pt);
+    jub_add(&ctx->bvk, &ctx->bvk, &neg);
+}
+
 static int test_sapling_sapling_binding_sig_2_spends_3_outputs(void)
 {
     int failures = 0;
@@ -4632,21 +4701,8 @@ static int test_sapling_sapling_binding_sig_2_spends_3_outputs(void)
         sapling_value_commit(30000, rcv_o2, cv_o2);
         sapling_value_commit(30000, rcv_o3, cv_o3);
 
-        /* bsk = sum(rcv_spends) - sum(rcv_outputs) */
-        struct fs bsk_fs;
-        struct fs r, neg_r;
-        fs_from_bytes(&bsk_fs, rcv_s1);
-        fs_from_bytes(&r, rcv_s2);
-        fs_add(&bsk_fs, &bsk_fs, &r);
-        fs_from_bytes(&r, rcv_o1);
-        fs_neg(&neg_r, &r); fs_add(&bsk_fs, &bsk_fs, &neg_r);
-        fs_from_bytes(&r, rcv_o2);
-        fs_neg(&neg_r, &r); fs_add(&bsk_fs, &bsk_fs, &neg_r);
-        fs_from_bytes(&r, rcv_o3);
-        fs_neg(&neg_r, &r); fs_add(&bsk_fs, &bsk_fs, &neg_r);
-
         uint8_t bsk[32];
-        fs_to_bytes(bsk, &bsk_fs);
+        bsig_compute_bsk(rcv_s1, rcv_s2, rcv_o1, rcv_o2, rcv_o3, bsk);
 
         uint8_t sighash[32];
         GetRandBytes(sighash, 32);
@@ -4656,18 +4712,7 @@ static int test_sapling_sapling_binding_sig_2_spends_3_outputs(void)
 
         /* Build verification context */
         struct sapling_verification_ctx ctx;
-        sapling_verification_ctx_init(&ctx);
-
-        /* Add spends (positive cv) */
-        struct jub_point pt;
-        jub_from_bytes(&pt, cv_s1); jub_add(&ctx.bvk, &ctx.bvk, &pt);
-        jub_from_bytes(&pt, cv_s2); jub_add(&ctx.bvk, &ctx.bvk, &pt);
-
-        /* Subtract outputs (negative cv) */
-        struct jub_point neg;
-        jub_from_bytes(&pt, cv_o1); jub_neg(&neg, &pt); jub_add(&ctx.bvk, &ctx.bvk, &neg);
-        jub_from_bytes(&pt, cv_o2); jub_neg(&neg, &pt); jub_add(&ctx.bvk, &ctx.bvk, &neg);
-        jub_from_bytes(&pt, cv_o3); jub_neg(&neg, &pt); jub_add(&ctx.bvk, &ctx.bvk, &neg);
+        bsig_build_bvk(&ctx, cv_s1, cv_s2, cv_o1, cv_o2, cv_o3);
 
         /* value_balance = 100000 - 90000 = 10000 (fee goes transparent) */
         bool final_ok = sapling_final_check(&ctx, 10000, binding_sig, sighash);
@@ -5308,6 +5353,54 @@ static int test_sapling_sapling_value_commitment_zero_value_is_not_identit(void)
     return failures;
 }
 
+static bool wallet_spent_set_check_marks(struct wallet *w, const struct uint256 *txid1,
+                                          const struct uint256 *txid2)
+{
+    /* Nothing spent yet */
+    bool ok = !wallet_is_outpoint_spent(w, txid1, 0);
+    ok = ok && !wallet_is_outpoint_spent(w, txid1, 1);
+    ok = ok && !wallet_is_outpoint_spent(w, txid2, 0);
+
+    /* Mark txid1:0 as spent */
+    wallet_mark_outpoint_spent(w, txid1, 0);
+    ok = ok && wallet_is_outpoint_spent(w, txid1, 0);
+    ok = ok && !wallet_is_outpoint_spent(w, txid1, 1);
+    ok = ok && !wallet_is_outpoint_spent(w, txid2, 0);
+    ok = ok && (w->num_spent == 1);
+
+    /* Mark txid1:1 and txid2:0 */
+    wallet_mark_outpoint_spent(w, txid1, 1);
+    wallet_mark_outpoint_spent(w, txid2, 0);
+    ok = ok && wallet_is_outpoint_spent(w, txid1, 0);
+    ok = ok && wallet_is_outpoint_spent(w, txid1, 1);
+    ok = ok && wallet_is_outpoint_spent(w, txid2, 0);
+    ok = ok && !wallet_is_outpoint_spent(w, txid2, 1);
+    ok = ok && (w->num_spent == 3);
+
+    /* Double-mark is idempotent */
+    wallet_mark_outpoint_spent(w, txid1, 0);
+    ok = ok && (w->num_spent == 3);
+    return ok;
+}
+
+static bool wallet_spent_set_stress_check(struct wallet *w)
+{
+    /* Stress: mark 1000 outpoints, verify all found */
+    for (uint32_t i = 0; i < 1000; i++) {
+        struct uint256 tid;
+        memset(&tid, 0, sizeof(tid));
+        memcpy(tid.data, &i, sizeof(i));
+        wallet_mark_outpoint_spent(w, &tid, i);
+    }
+    for (uint32_t i = 0; i < 1000; i++) {
+        struct uint256 tid;
+        memset(&tid, 0, sizeof(tid));
+        memcpy(tid.data, &i, sizeof(i));
+        if (!wallet_is_outpoint_spent(w, &tid, i)) return false;
+    }
+    return true;
+}
+
 static int test_sapling_wallet_spent_set_mark_query_no_false_positives(void)
 {
     int failures = 0;
@@ -5325,44 +5418,8 @@ static int test_sapling_wallet_spent_set_mark_query_no_false_positives(void)
         txid1.data[0] = 0xAA;
         txid2.data[0] = 0xBB;
 
-        /* Nothing spent yet */
-        bool ok = !wallet_is_outpoint_spent(w, &txid1, 0);
-        ok = ok && !wallet_is_outpoint_spent(w, &txid1, 1);
-        ok = ok && !wallet_is_outpoint_spent(w, &txid2, 0);
-
-        /* Mark txid1:0 as spent */
-        wallet_mark_outpoint_spent(w, &txid1, 0);
-        ok = ok && wallet_is_outpoint_spent(w, &txid1, 0);
-        ok = ok && !wallet_is_outpoint_spent(w, &txid1, 1);
-        ok = ok && !wallet_is_outpoint_spent(w, &txid2, 0);
-        ok = ok && (w->num_spent == 1);
-
-        /* Mark txid1:1 and txid2:0 */
-        wallet_mark_outpoint_spent(w, &txid1, 1);
-        wallet_mark_outpoint_spent(w, &txid2, 0);
-        ok = ok && wallet_is_outpoint_spent(w, &txid1, 0);
-        ok = ok && wallet_is_outpoint_spent(w, &txid1, 1);
-        ok = ok && wallet_is_outpoint_spent(w, &txid2, 0);
-        ok = ok && !wallet_is_outpoint_spent(w, &txid2, 1);
-        ok = ok && (w->num_spent == 3);
-
-        /* Double-mark is idempotent */
-        wallet_mark_outpoint_spent(w, &txid1, 0);
-        ok = ok && (w->num_spent == 3);
-
-        /* Stress: mark 1000 outpoints, verify all found */
-        for (uint32_t i = 0; i < 1000; i++) {
-            struct uint256 tid;
-            memset(&tid, 0, sizeof(tid));
-            memcpy(tid.data, &i, sizeof(i));
-            wallet_mark_outpoint_spent(w, &tid, i);
-        }
-        for (uint32_t i = 0; i < 1000; i++) {
-            struct uint256 tid;
-            memset(&tid, 0, sizeof(tid));
-            memcpy(tid.data, &i, sizeof(i));
-            if (!wallet_is_outpoint_spent(w, &tid, i)) { ok = false; break; }
-        }
+        bool ok = wallet_spent_set_check_marks(w, &txid1, &txid2);
+        ok = ok && wallet_spent_set_stress_check(w);
 
         wallet_free(w);
         free(wp);
@@ -5645,6 +5702,89 @@ static int test_sapling_amount_formatting_precision(void)
     return failures;
 }
 
+/* Invariant (2a): a wallet note whose nf was computed at the CORRECT
+ * position is detected as spent. */
+static bool bug7_check_correct_position(const uint8_t *d, const uint8_t *pk_d,
+                                         uint64_t value, const uint8_t *rcm,
+                                         const uint8_t *ivk, const uint8_t *cm,
+                                         const uint8_t *nf_real, const uint8_t *exp_nf,
+                                         struct transaction *spend_tx)
+{
+    /* Heap-allocate: struct wallet is ~65 MB (embeds map_wallet[]), which
+     * overflows the default process stack. Match the zcl_calloc pattern
+     * used everywhere else in the test suite. */
+    struct wallet *w = zcl_calloc(1, sizeof(struct wallet), "test_bug7_wallet");
+    wallet_init(w);
+    struct sapling_received_note note;
+    memset(&note, 0, sizeof(note));
+    memcpy(note.diversifier, d, 11);
+    memcpy(note.pk_d, pk_d, 32);
+    note.value = value;
+    memcpy(note.rcm, rcm, 32);
+    memcpy(note.ivk, ivk, 32);
+    memcpy(note.cm, cm, 32);
+    memcpy(note.nf, nf_real, 32);     /* correct position */
+    note.spent = false;
+    note.used = true;
+    /* Insert directly (wallet_add_sapling_note is file-static). */
+    w->sapling_notes = zcl_malloc(sizeof(note), "test_bug7_note");
+    w->sapling_notes[0] = note;
+    w->num_sapling_notes = 1;
+    w->sapling_notes_cap = 1;
+
+    int64_t bal_before = wallet_get_sapling_balance(w);
+    wallet_mark_sapling_nullifiers_spent(w, spend_tx);
+    bool detected = wallet_sapling_nullifier_is_spent(w, exp_nf);
+    int64_t bal_after = wallet_get_sapling_balance(w);
+
+    bool ok = bal_before == (int64_t)value;
+    ok = ok && detected;                 /* MUST match */
+    ok = ok && bal_after == 0;           /* balance no longer counts it */
+    wallet_free(w);
+    free(w);
+    return ok;
+}
+
+/* Invariant (2b): the SAME note with the placeholder nf (position 0) is NOT
+ * detected as spent — the wallet would overstate z-balance. This is the
+ * exact failure the placeholder produced. */
+static bool bug7_check_wrong_position(const uint8_t *d, const uint8_t *pk_d,
+                                       uint64_t value, const uint8_t *rcm,
+                                       const uint8_t *ivk, const uint8_t *cm,
+                                       const uint8_t *nf_zero, const uint8_t *exp_nf,
+                                       struct transaction *spend_tx)
+{
+    /* Heap-allocate (see invariant 2a above): struct wallet is ~65 MB and
+     * must not live on the stack. */
+    struct wallet *w = zcl_calloc(1, sizeof(struct wallet), "test_bug7_wallet0");
+    wallet_init(w);
+    struct sapling_received_note note;
+    memset(&note, 0, sizeof(note));
+    memcpy(note.diversifier, d, 11);
+    memcpy(note.pk_d, pk_d, 32);
+    note.value = value;
+    memcpy(note.rcm, rcm, 32);
+    memcpy(note.ivk, ivk, 32);
+    memcpy(note.cm, cm, 32);
+    memcpy(note.nf, nf_zero, 32);     /* WRONG (placeholder) position */
+    note.spent = false;
+    note.used = true;
+    w->sapling_notes = zcl_malloc(sizeof(note), "test_bug7_note0");
+    w->sapling_notes[0] = note;
+    w->num_sapling_notes = 1;
+    w->sapling_notes_cap = 1;
+
+    wallet_mark_sapling_nullifiers_spent(w, spend_tx);
+    bool detected = wallet_sapling_nullifier_is_spent(w, exp_nf);
+    int64_t bal_after = wallet_get_sapling_balance(w);
+
+    bool ok = !detected;                          /* MUST NOT match */
+    ok = ok && bal_after == (int64_t)value;        /* note wrongly still counted */
+    wallet_free(w);
+    free(w);
+    return ok;
+}
+
 static int test_sapling_bug_7_nullifier_position_spec_vector_wallet_spend_(void)
 {
     int failures = 0;
@@ -5739,78 +5879,10 @@ static int test_sapling_bug_7_nullifier_position_spec_vector_wallet_spend_(void)
         spend_tx.v_shielded_spend = &spend;
         spend_tx.num_shielded_spend = 1;
 
-        /* Invariant (2a): a wallet note whose nf was computed at the CORRECT
-         * position is detected as spent. */
-        {
-            /* Heap-allocate: struct wallet is ~65 MB (embeds map_wallet[]),
-             * which overflows the default process stack. Match the
-             * zcl_calloc pattern used everywhere else in the test suite. */
-            struct wallet *w = zcl_calloc(1, sizeof(struct wallet),
-                                          "test_bug7_wallet");
-            wallet_init(w);
-            struct sapling_received_note note;
-            memset(&note, 0, sizeof(note));
-            memcpy(note.diversifier, d, 11);
-            memcpy(note.pk_d, pk_d, 32);
-            note.value = value;
-            memcpy(note.rcm, rcm, 32);
-            memcpy(note.ivk, ivk, 32);
-            memcpy(note.cm, cm, 32);
-            memcpy(note.nf, nf_real, 32);     /* correct position */
-            note.spent = false;
-            note.used = true;
-            /* Insert directly (wallet_add_sapling_note is file-static). */
-            w->sapling_notes = zcl_malloc(sizeof(note), "test_bug7_note");
-            w->sapling_notes[0] = note;
-            w->num_sapling_notes = 1;
-            w->sapling_notes_cap = 1;
-
-            int64_t bal_before = wallet_get_sapling_balance(w);
-            wallet_mark_sapling_nullifiers_spent(w, &spend_tx);
-            bool detected = wallet_sapling_nullifier_is_spent(w, exp_nf);
-            int64_t bal_after = wallet_get_sapling_balance(w);
-
-            ok = ok && bal_before == (int64_t)value;
-            ok = ok && detected;                 /* MUST match */
-            ok = ok && bal_after == 0;            /* balance no longer counts it */
-            wallet_free(w);
-            free(w);
-        }
-
-        /* Invariant (2b): the SAME note with the placeholder nf (position 0)
-         * is NOT detected as spent — the wallet would overstate z-balance.
-         * This is the exact failure the placeholder produced. */
-        {
-            /* Heap-allocate (see invariant 2a above): struct wallet is
-             * ~65 MB and must not live on the stack. */
-            struct wallet *w = zcl_calloc(1, sizeof(struct wallet),
-                                          "test_bug7_wallet0");
-            wallet_init(w);
-            struct sapling_received_note note;
-            memset(&note, 0, sizeof(note));
-            memcpy(note.diversifier, d, 11);
-            memcpy(note.pk_d, pk_d, 32);
-            note.value = value;
-            memcpy(note.rcm, rcm, 32);
-            memcpy(note.ivk, ivk, 32);
-            memcpy(note.cm, cm, 32);
-            memcpy(note.nf, nf_zero, 32);     /* WRONG (placeholder) position */
-            note.spent = false;
-            note.used = true;
-            w->sapling_notes = zcl_malloc(sizeof(note), "test_bug7_note0");
-            w->sapling_notes[0] = note;
-            w->num_sapling_notes = 1;
-            w->sapling_notes_cap = 1;
-
-            wallet_mark_sapling_nullifiers_spent(w, &spend_tx);
-            bool detected = wallet_sapling_nullifier_is_spent(w, exp_nf);
-            int64_t bal_after = wallet_get_sapling_balance(w);
-
-            ok = ok && !detected;                /* MUST NOT match */
-            ok = ok && bal_after == (int64_t)value; /* note wrongly still counted */
-            wallet_free(w);
-            free(w);
-        }
+        ok = ok && bug7_check_correct_position(d, pk_d, value, rcm, ivk, cm,
+                                                nf_real, exp_nf, &spend_tx);
+        ok = ok && bug7_check_wrong_position(d, pk_d, value, rcm, ivk, cm,
+                                              nf_zero, exp_nf, &spend_tx);
 
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
