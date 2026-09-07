@@ -4,6 +4,15 @@
  * this node's own app_events table.
  */
 
+// one-result-type-ok:closed-wire-refusal-vocabulary — every fallible call
+// here returns `enum zcl_app_sync_status`, which is the WIRE's own closed
+// refusal set (appsync/app_event_sync.h) and is shared with the peer that
+// sent the bytes. Wrapping it in a struct zcl_result at this boundary would
+// give every refusal a second name — a token on the wire and a sentence
+// here — and the two would drift. The one bool left, the frontier read,
+// answers a question with no failure mode worth a sentence: the topic is
+// held or it is not.
+
 #include "services/app_event_sync_service.h"
 
 #include "base/bytes.h"
