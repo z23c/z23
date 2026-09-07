@@ -20,6 +20,11 @@ OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"
 SESSION_TOOL="$SELF_DIR/build-epoch-session.sh"
 IDENTITY_TOOL="$SELF_DIR/build-epoch-open-file-identity.sh"
 CC_COMMAND="${CC:-cc}"
+case "${1:-}" in
+    '') COMPILER_ID_ONLY=0 ;;
+    --compiler-id-only) COMPILER_ID_ONLY=1 ;;
+    *) printf 'build-epoch-selftest: unknown option: %s\n' "$1" >&2; exit 2 ;;
+esac
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch-selftest.XXXXXX")"
 # Darwin exposes /var as a compatibility symlink to /private/var.  Exercise
 # the production no-symlink path contract through the physical temp path.
@@ -200,10 +205,66 @@ fi
 exec 9<&-
 
 phase compiler-id-and-env-sensitivity
+# Every comparison below must execute the real probes, even when the caller
+# uses a memo directory for its own build session.
+unset ZCL_BUILD_EPOCH_KEY_CACHE_DIR
 COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CC_COMMAND")" ||
     fail 'compiler fingerprint failed'
 [[ "$COMPILER_ID" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid compiler fingerprint'
 
+# Compare absolute executable argv from genuinely different directories.
+# A relative wrapper locator is an intentional input, not probe noise; make
+# its locator absolute before this comparison without changing its bytes.
+phase compiler-id-checkout-portability
+read -r -a portable_cc_argv <<< "$CC_COMMAND"
+for ((i = 0; i < ${#portable_cc_argv[@]}; i++)); do
+    case "${portable_cc_argv[i]}" in -*) continue ;; esac
+    resolved="$(command -v -- "${portable_cc_argv[i]}" 2>/dev/null || true)"
+    if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+        portable_cc_argv[i]="$(readlink -f -- "$resolved")"
+    fi
+done
+printf -v PORTABLE_CC_COMMAND '%s ' "${portable_cc_argv[@]}"
+PORTABLE_CC_COMMAND="${PORTABLE_CC_COMMAND% }"
+mkdir -p "$WORK/probe-one" "$WORK/probe with spaces" "$WORK/sdk-one" "$WORK/sdk-two"
+CWD_COMPILER_ID="$(cd "$WORK/probe-one" &&
+    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CC_COMMAND")"
+SPACE_COMPILER_ID="$(cd "$WORK/probe with spaces" &&
+    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CC_COMMAND")"
+[ "$CWD_COMPILER_ID" = "$SPACE_COMPILER_ID" ] ||
+    fail 'incidental C/C++ compilation directories changed compiler identity'
+ARGV_COMPILER_ID="$(cd "$WORK/probe-one" &&
+    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND -DEPOCH_ARGV_PROBE=1" "$PORTABLE_CC_COMMAND")"
+[ "$ARGV_COMPILER_ID" != "$CWD_COMPILER_ID" ] ||
+    fail 'explicit compiler argv disappeared during directory normalization'
+# Clang's explicit constant overrides may equal the first cwd, while the
+# second cwd differs. Those fields must retain their exact value in BOTH
+# probes. Otherwise a normalizer fixes defaults but breaks real overrides.
+case "$("${portable_cc_argv[@]}" --version 2>/dev/null)" in
+    *clang*)
+        for explicit_dirs in \
+            "-fdebug-compilation-dir=$WORK/probe-one -fcoverage-compilation-dir=$WORK/probe-one" \
+            "-Xclang -fdebug-compilation-dir -Xclang $WORK/probe-one -Xclang -fcoverage-compilation-dir=$WORK/probe-one"; do
+            explicit_cc="$PORTABLE_CC_COMMAND $explicit_dirs"
+            EXPLICIT_ONE_ID="$(cd "$WORK/probe-one" &&
+                "$KEY_TOOL" compiler-id "$explicit_cc" "$explicit_cc")"
+            EXPLICIT_TWO_ID="$(cd "$WORK/probe with spaces" &&
+                "$KEY_TOOL" compiler-id "$explicit_cc" "$explicit_cc")"
+            [ "$EXPLICIT_ONE_ID" = "$EXPLICIT_TWO_ID" ] ||
+                fail 'identical explicit Clang directories changed identity across cwd'
+            [ "$EXPLICIT_ONE_ID" != "$CWD_COMPILER_ID" ] ||
+                fail 'explicit Clang directory overrides disappeared from identity'
+        done
+        ;;
+esac
+SDK_ONE_ID="$(SDKROOT="$WORK/sdk-one" \
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+SDK_TWO_ID="$(SDKROOT="$WORK/sdk-two" \
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+[ "$SDK_ONE_ID" != "$SDK_TWO_ID" ] ||
+    fail 'SDK selection disappeared during directory normalization'
+
+phase compiler-id-and-env-sensitivity
 mkdir -p "$WORK/env-include"
 printf '#define EPOCH_ENV_PROBE 1\n' > "$WORK/env-include/probe.h"
 ENV_COMPILER_ID="$(CPATH="$WORK/env-include" \
@@ -248,6 +309,11 @@ CYCLIC_COMPILER_ID="$(CPATH="$WORK/cyclic-include" \
 if "$KEY_TOOL" compiler-id 'cc; printf unsafe' "$CC_COMMAND" \
         >/dev/null 2>&1; then
     fail 'shell-active CC string was accepted'
+fi
+
+if [ "$COMPILER_ID_ONLY" -eq 1 ]; then
+    printf 'build-epoch-selftest: PASS compiler_id_only=true cwd_portable=true explicit_argv_bound=true sdk_bound=true search_roots_bound=true compiler_id=%s\n' "$COMPILER_ID"
+    exit 0
 fi
 
 # From here on CC_COMMAND/CXX_COMMAND and the admitted environment never

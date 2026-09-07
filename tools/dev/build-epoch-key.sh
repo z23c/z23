@@ -84,7 +84,10 @@ compiler-id)
         fail 'could not create compiler fingerprint workspace'
     PREIMAGE="$WORK/compiler.preimage"
     : > "$PREIMAGE"
-    printf 'zcl.build_compiler_identity.v2\0cc_command\0%s\0cxx_command\0%s\0' \
+    # v3 removes only the incidental current directory in Clang's verbose
+    # preprocessing diagnostics. Older identities and memo entries must not
+    # be admitted under that rule, including copied Tor provenance manifests.
+    printf 'zcl.build_compiler_identity.v3\0cc_command\0%s\0cxx_command\0%s\0' \
         "$CC_COMMAND" "$CXX_COMMAND" \
         >> "$PREIMAGE"
 
@@ -125,7 +128,7 @@ compiler-id)
     if [ -n "$CACHE_DIR" ]; then
         mkdir -p "$CACHE_DIR" 2>/dev/null || true
         if [ -d "$CACHE_DIR" ]; then
-            CACHE_FILE="$CACHE_DIR/compiler-id.$(sha256_file "$PREIMAGE")"
+            CACHE_FILE="$CACHE_DIR/compiler-id.v3.$(sha256_file "$PREIMAGE")"
             if [ -s "$CACHE_FILE" ]; then
                 cat -- "$CACHE_FILE"
                 exit 0
@@ -182,6 +185,57 @@ compiler-id)
         fingerprint_tool cxx-argv "$token"
     done
 
+    # Clang -E -v prints its cc1 argv, including default debug/coverage
+    # compilation directories even though this probe produces no object.
+    # Bind real search paths unchanged; normalize only these complete argv
+    # fields when their value is this probe's cwd. A quoted field (spaces in
+    # cwd) and an unquoted field must yield identical canonical bytes.
+    # Explicit directory flags retain their diagnostic values too: the same
+    # override must not normalize differently when it happens to equal one
+    # caller's cwd. The original CC/CXX argv is independently bound above.
+    PROBE_CWD_LOGICAL="$(pwd -L)"
+    PROBE_CWD_PHYSICAL="$(pwd -P)"
+    canonical_probe_directory()
+    {
+        local output_name="$1"
+        local probe_text="${!output_name}"
+        shift
+        local directory field before token explicit forwarded
+        for field in fdebug-compilation-dir fcoverage-compilation-dir; do
+            explicit=0
+            forwarded=0
+            for token in "$@"; do
+                if [ "$forwarded" -eq 1 ]; then
+                    forwarded=0
+                    continue
+                fi
+                case "$token" in
+                    -Xclang) forwarded=1; continue ;;
+                    -Xclang=*) continue ;;
+                    -"$field"|-"$field"=*)
+                        explicit=1; break ;;
+                esac
+            done
+            [ "$explicit" -eq 0 ] || continue
+            # The driver emits its default before forwarded -Xclang fields.
+            # Normalize that first occurrence only; a later explicit cc1
+            # override can equal cwd and must still retain its value.
+            for directory in "$PROBE_CWD_LOGICAL" "$PROBE_CWD_PHYSICAL"; do
+                before=" -$field=$directory "
+                if [[ "$probe_text" == *"$before"* ]]; then
+                    probe_text="${probe_text/"$before"/" -$field=<compiler-probe> "}"
+                    break
+                fi
+                before=" \"-$field=$directory\" "
+                if [[ "$probe_text" == *"$before"* ]]; then
+                    probe_text="${probe_text/"$before"/" -$field=<compiler-probe> "}"
+                    break
+                fi
+            done
+        done
+        printf -v "$output_name" '%s' "$probe_text"
+    }
+
     probe()
     {
         local label="$1" output rc
@@ -190,6 +244,9 @@ compiler-id)
         output="$("${CC_ARGV[@]}" "$@" </dev/null 2>&1)"
         rc=$?
         set -e
+        if [ "$label" = c-include-search ]; then
+            canonical_probe_directory output "${CC_ARGV[@]}"
+        fi
         printf 'probe\0%s\0%d\0%s\0' "$label" "$rc" "$output" \
             >> "$PREIMAGE"
     }
@@ -237,6 +294,9 @@ compiler-id)
         output="$("${CXX_ARGV[@]}" "$@" </dev/null 2>&1)"
         rc=$?
         set -e
+        if [ "$label" = include-search ]; then
+            canonical_probe_directory output "${CXX_ARGV[@]}"
+        fi
         printf 'cxx-probe\0%s\0%d\0%s\0' "$label" "$rc" "$output" \
             >> "$PREIMAGE"
     }
