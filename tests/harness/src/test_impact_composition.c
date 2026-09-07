@@ -2342,6 +2342,111 @@ static bool ic_generation_stat_equal(const struct stat *a,
 #endif
 }
 
+static int test_ic_proof_optional_dependencies(void)
+{
+    int failures = 0;
+    TEST("proof generation: optional cross inputs preserve exact absence and copies") {
+        char fixture[4096], source[4096], generation[4096];
+        ic_budget_fixture("optional-deps", fixture);
+        ASSERT((size_t)snprintf(source, sizeof(source), "%s/source", fixture) <
+               sizeof(source));
+        ASSERT((size_t)snprintf(generation, sizeof(generation),
+                                "%s/generation", fixture) < sizeof(generation));
+        ASSERT(ic_write(source, "vendor/.keep", "fixture\n"));
+        ASSERT(ic_write(generation, "vendor/.keep", "fixture\n"));
+        static const char *const optional[] = {
+            "vendor/.build-x86_64-w64-mingw32", "vendor/.cache", "vendor/cross",
+        };
+        char why[256] = {0};
+        for (size_t i = 0; i < sizeof(optional) / sizeof(optional[0]); i++) {
+            const char *dep = optional[i];
+            ASSERT(zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            char relative[128], src_dir[4096], dst_dir[4096];
+            char src_file[4096], dst_file[4096];
+            ASSERT((size_t)snprintf(relative, sizeof(relative),
+                                    "%s/archive.a", dep) < sizeof(relative));
+            ASSERT(ic_write(source, relative, "cross input\n"));
+            ASSERT((size_t)snprintf(src_dir, sizeof(src_dir), "%s/%s",
+                                    source, dep) < sizeof(src_dir));
+            ASSERT((size_t)snprintf(dst_dir, sizeof(dst_dir), "%s/%s",
+                                    generation, dep) < sizeof(dst_dir));
+            ASSERT((size_t)snprintf(src_file, sizeof(src_file), "%s/%s",
+                                    source, relative) < sizeof(src_file));
+            ASSERT((size_t)snprintf(dst_file, sizeof(dst_file), "%s/%s",
+                                    generation, relative) < sizeof(dst_file));
+            ASSERT(zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            struct stat src_st, dst_st;
+            ASSERT(stat(src_file, &src_st) == 0);
+            ASSERT(stat(dst_file, &dst_st) == 0);
+            ASSERT(src_st.st_dev != dst_st.st_dev ||
+                   src_st.st_ino != dst_st.st_ino);
+            ASSERT(dst_st.st_nlink == 1);
+            ASSERT(dst_st.st_size == src_st.st_size);
+            FILE *copied_file = fopen(dst_file, "rb");
+            ASSERT(copied_file != NULL);
+            char body[32] = {0};
+            size_t got = fread(body, 1, sizeof(body) - 1, copied_file);
+            ASSERT(fclose(copied_file) == 0);
+            ASSERT(got == strlen("cross input\n"));
+            ASSERT(strcmp(body, "cross input\n") == 0);
+            ASSERT(unlink(src_file) == 0);
+            ASSERT(rmdir(src_dir) == 0);
+            ASSERT(!zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            ASSERT(strstr(why, "proof_generation_optional_dependency_stale:") != NULL);
+            ASSERT(strstr(why, dep) != NULL);
+            ASSERT(stat(dst_file, &dst_st) == 0);
+            ASSERT(unlink(dst_file) == 0);
+            ASSERT(rmdir(dst_dir) == 0);
+            ASSERT(zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            ASSERT(symlink("/unavailable-z23-cross-input", dst_dir) == 0);
+            ASSERT(!zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            ASSERT(strstr(why, "proof_generation_optional_dependency_stale:") != NULL);
+            ASSERT(unlink(dst_dir) == 0);
+            /* lstat must see a dangling or escaping symlink as PRESENT,
+             * then the ordinary copy policy must refuse it. */
+            ASSERT(symlink("/unavailable-z23-cross-input", src_dir) == 0);
+            ASSERT(!zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            ASSERT(strstr(why, "proof_generation_dependency_copy_failed:") != NULL);
+            ASSERT(unlink(src_dir) == 0);
+            ASSERT(ic_write(source, relative, "cross input\n"));
+            ASSERT(setenv("ZCL_DEV_PROOF_TEST_LINK_ERRNO", "EACCES", 1) == 0);
+            bool copied = zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why));
+            ASSERT(unsetenv("ZCL_DEV_PROOF_TEST_LINK_ERRNO") == 0);
+            ASSERT(!copied);
+            ASSERT(strstr(why, "proof_generation_dependency_copy_failed:") != NULL);
+            ASSERT(unlink(src_file) == 0);
+            ASSERT(rmdir(src_dir) == 0);
+            ASSERT(rmdir(dst_dir) == 0);
+        }
+        static const char *const required[] = {
+            "vendor/lib", "vendor/include", "vendor/sqlite3.c",
+            "vendor/tor/libtor.a", "build/githooks",
+        };
+        for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++) {
+            ASSERT(!zcl_dev_proof_test_generation_dependency(
+                source, generation, required[i], why, sizeof(why)));
+            ASSERT(strstr(why, "proof_generation_dependency_unavailable:") != NULL);
+            ASSERT(strstr(why, required[i]) != NULL);
+        }
+        /* ENOTDIR must not be mistaken for an optional ENOENT. */
+        ASSERT(ic_write(fixture, "bad-source/vendor", "not a directory\n"));
+        ASSERT((size_t)snprintf(source, sizeof(source), "%s/bad-source", fixture) <
+               sizeof(source));
+        ASSERT(!zcl_dev_proof_test_generation_dependency(
+            source, generation, "vendor/cross", why, sizeof(why)));
+        ASSERT(strstr(why, "proof_generation_dependency_inspection_failed:") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_dependency_crosses_filesystems(void)
 {
     int failures = 0;
@@ -4202,6 +4307,7 @@ int test_impact_composition(void)
     failures += test_ic_platform_file_clone_contract();
 #endif
     failures += test_ic_proof_dependency_crosses_filesystems();
+    failures += test_ic_proof_optional_dependencies();
     failures += test_ic_ram_scratch_reservations_hold_under_concurrency();
 #endif
     failures += test_ic_changed_set_carries_a_landing_batch();

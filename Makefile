@@ -12648,7 +12648,7 @@ check-verification-coverage: $(LINTC_TOOL)
 # and its systemd identity intent; the success case must qualify the /proc
 # executable bytes and status command before considering activation complete.
 # jsonq: ship.sh's release-candidate real-Tor gate reads candidate JSON with it.
-check-ship-remote-transaction: jsonq $(TOR_PROVENANCE_BIN)
+check-ship-remote-transaction: jsonq $(TOR_PROVENANCE_BIN) build/bin/check_no_hardlink_seeding
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/ship.sh --selftest
 	@./tools/ship_selftest.sh

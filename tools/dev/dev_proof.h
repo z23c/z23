@@ -220,6 +220,13 @@ bool zcl_dev_proof_wait(const char *repo_root,
                         struct zcl_dev_proof_status *out);
 
 #if defined(ZCL_TESTING)
+/* The generation's exact required/optional dependency policy and copy path.
+ * Missing optional inputs succeed only if the generation also lacks them;
+ * a stale generation copy, unsafe source, or inspection/copy error refuses. */
+bool zcl_dev_proof_test_generation_dependency(const char *root,
+                                              const char *generation,
+                                              const char *dependency,
+                                              char *why, size_t why_len);
 /* Seam for the selection regression: the same builder the proof worker uses,
  * so a test can prove a universal plan selects the whole catalog without
  * running a proof cycle. */

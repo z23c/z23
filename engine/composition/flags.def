@@ -623,7 +623,7 @@ Z23_FLAG("ZCL_DEV_PROBE_TIMEOUT", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_PROOF_TEST_LINK_ERRNO", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof.c:1699")
 Z23_FLAG("ZCL_DEV_PROOF_WARM", "env_test", "-", "-",
-          "first use tests/harness/src/test_impact_composition.c:3614; documented at docs/experiments/2026-09-03-proof-warm-start.md:32: ZCL_DEV_PROOF_WARM=0 forces the cold path for measurement. It is")
+          "first use tests/harness/src/test_impact_composition.c:3719; documented at docs/experiments/2026-09-03-proof-warm-start.md:32: ZCL_DEV_PROOF_WARM=0 forces the cold path for measurement. It is")
 Z23_FLAG("ZCL_DEV_RECOVERY_ACTIVE_COMMAND", "env_build", "-", "-",
           "undocumented; first use tools/dev/recover-dev-lane.sh:312")
 Z23_FLAG("ZCL_DEV_RECOVERY_BLOCK_INDEX", "env_build", "-", "-",
@@ -1619,7 +1619,7 @@ Z23_FLAG("ZCL_PRODUCER_RPCPORT", "env_build", "-", "-",
 Z23_FLAG("ZCL_PRODUCT_CONTEXTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/repo_shape.sh:79")
 Z23_FLAG("ZCL_PROFILE", "env_build", "-", "-",
-          "first use tools/ship.sh:1083; documented at docs/DEVELOPING.md:305: The compiler-speed loop is make dev or ZCL_PROFILE=dev make. It writes")
+          "first use tools/ship.sh:1101; documented at docs/DEVELOPING.md:305: The compiler-speed loop is make dev or ZCL_PROFILE=dev make. It writes")
 Z23_FLAG("ZCL_PROJ_SCAN_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_projection_purity_fences.c:223")
 Z23_FLAG("ZCL_PROMOTE_BUILD_TIMEOUT", "env_build", "600", "-",
@@ -1883,7 +1883,7 @@ Z23_FLAG("ZCL_RULE_ROW_FLOOR", "env_build", "7", "-",
 Z23_FLAG("ZCL_RULE_VOCAB_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_rule_vocabulary.c:543")
 Z23_FLAG("ZCL_SCRATCH_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/ship.sh:1410")
+          "undocumented; first use tools/ship.sh:1428")
 Z23_FLAG("ZCL_SECP_DUMP_SEEDS", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_secp256k1_differential.c:729")
 Z23_FLAG("ZCL_SECP_GOLDEN_RECORD", "env_test", "-", "-",
@@ -1929,15 +1929,15 @@ Z23_FLAG("ZCL_SHELL_HOST_SS_CEILING", "env_build", "63", "-",
 Z23_FLAG("ZCL_SHELL_HOST_STAT_CEILING", "env_build", "108", "-",
           "undocumented; first use tools/lint/lintc/gate_shell_host_assumptions.c:549")
 Z23_FLAG("ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA", "env_build", "0", "-",
-          "first use tools/ship.sh:1650; documented at docs/agent/LESSONS.md:150: ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1 is inert unless the")
+          "first use tools/ship.sh:1668; documented at docs/agent/LESSONS.md:150: ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1 is inert unless the")
 Z23_FLAG("ZCL_SHIP_ALLOW_PROOF_SERVER", "env_build", "0", "-",
-          "first use tools/ship.sh:1014; documented at docs/BUILD.md:791: promotion additionally requires ZCL_SHIP_ALLOW_PROOF_SERVER=1. Preflight")
+          "first use tools/ship.sh:1032; documented at docs/BUILD.md:791: promotion additionally requires ZCL_SHIP_ALLOW_PROOF_SERVER=1. Preflight")
 Z23_FLAG("ZCL_SHIP_CRASH_SAMPLES", "env_build", "3", "-",
           "undocumented; first use tools/ship.sh:155")
 Z23_FLAG("ZCL_SHIP_HOSTS", "env_build", "-", "-",
           "first use tools/ship.sh:106; documented at docs/BUILD.md:786: ZCL_SHIP_HOSTS='user@host-a user@host-b user@host-c' make ship")
 Z23_FLAG("ZCL_SHIP_LOCAL_POLL_SECONDS", "env_build", "10", "-",
-          "undocumented; first use tools/ship.sh:1709")
+          "undocumented; first use tools/ship.sh:1727")
 Z23_FLAG("ZCL_SHIP_PROOF_SERVER", "env_build", "-", "-",
           "first use tools/ship.sh:107; documented at docs/BUILD.md:790: with ZCL_SHIP_PROOF_SERVER. That host is skipped by default; an intentional")
 Z23_FLAG("ZCL_SHIP_REMOTE", "env_build", "-", "-",

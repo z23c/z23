@@ -3985,6 +3985,37 @@ static bool dp_generation_build_dirs(const char *generation, char *why,
     return true;
 }
 
+/* These cross-target outputs and download caches are not native compiler
+ * inputs. Carry them when present so a Windows acceptance run can reuse
+ * them, but do not require a native checkout to have built a cross target. */
+static bool dp_generation_dependency_optional(const char *dependency)
+{
+    return strcmp(dependency, "vendor/.build-x86_64-w64-mingw32") == 0 ||
+           strcmp(dependency, "vendor/.cache") == 0 ||
+           strcmp(dependency, "vendor/cross") == 0;
+}
+
+/* Absence must agree on both sides. A reused generation with old cross
+ * inputs refuses instead of silently proving against bytes its source no
+ * longer carries. Inspection errors are not evidence of absence. */
+static bool dp_generation_optional_absent(const char *target,
+                                          const char *dependency,
+                                          char *why, size_t why_len)
+{
+    struct stat st;
+    if (lstat(target, &st) == 0) {
+        proof_whyf(why, why_len,
+                   "proof_generation_optional_dependency_stale:%s",
+                   dependency);
+        return false;
+    }
+    if (errno == ENOENT) return true;
+    proof_whyf(why, why_len,
+               "proof_generation_dependency_inspection_failed:%s (%s)",
+               dependency, proof_errno_name(errno));
+    return false;
+}
+
 /* One generation dependency, copied in with its own inode. */
 static bool dp_generation_dependency(const char *root, const char *generation,
                                      const char *dependency, char *why,
@@ -4002,6 +4033,15 @@ static bool dp_generation_dependency(const char *root, const char *generation,
     }
     struct stat source_st;
     if (lstat(source, &source_st) != 0) {
+        if (errno != ENOENT) {
+            proof_whyf(why, why_len,
+                       "proof_generation_dependency_inspection_failed:%s (%s)",
+                       dependency, proof_errno_name(errno));
+            return false;
+        }
+        if (dp_generation_dependency_optional(dependency))
+            return dp_generation_optional_absent(target, dependency, why,
+                                                  why_len);
         /* vendor/ entries come from the vendored-archive build; the
          * installed hooks come from arming the clone; the hotswap
          * fixture images come from any test-binary build. Naming the
@@ -4030,6 +4070,16 @@ static bool dp_generation_dependency(const char *root, const char *generation,
     }
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_generation_dependency(const char *root,
+                                              const char *generation,
+                                              const char *dependency,
+                                              char *why, size_t why_len)
+{
+    return dp_generation_dependency(root, generation, dependency, why, why_len);
+}
+#endif
 
 /* Warm start is advisory: it fills `warm` for the receipt sidecar and
  * never fails the prepare. Any refusal inside degrades to the cold
@@ -4098,19 +4148,14 @@ static bool generation_prepare(const struct proof_paths *paths,
          * Tor from source in RAM, and the next warm restart then re-copies
          * the original libtor.a under a manifest that no longer matches it. */
         "vendor/tor/.provenance",
-        /* The Windows cross build and the tarballs it draws from must never
-         * run inside a generation: `make vendor` re-touches vendor/include
-         * and vendor/lib as a side effect, and the full lint gate's Windows
-         * acceptance check triggers that rebuild. Carrying the finished
-         * cross-build output and cache in means the generation's copy of
-         * vendor/include and vendor/lib stays byte- and mtime-identical
-         * across a lint run instead of being silently rewritten underneath
-         * the proof's mutation check. */
+        /* Preserve optional cross-build outputs and download caches when
+         * present so a generation can reuse the submitting checkout's
+         * prepared target inputs without rebuilding or downloading them. */
         "vendor/.build-x86_64-w64-mingw32",
         "vendor/.cache",
-        /* The cross target's staged lib/include, read by the Windows
-         * acceptance check itself; without it the check has to stage the
-         * cross build from scratch even with the two entries above present. */
+        /* The explicit Windows release target's staged lib/include.
+         * The acceptance catalog builds its SQLite archive separately from
+         * vendor/sqlite3.c; it does not require this optional release tree. */
         "vendor/cross",
         "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",

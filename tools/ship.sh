@@ -926,20 +926,30 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     # original on-disk pathname is now gone. Reproduces the exact failure
     # mode confirmed live on node1 2026-09-07 by copying a real long-running
     # binary, deleting it out from under the running copy, no compiler
-    # required.
+    # required. Darwin only offers the pathname fallback: test that path
+    # while it exists and its loss after unlink, without claiming a procfs
+    # handle survived. Linux must still prove the stronger deleted-inode rail.
     exe_root="$test_tmp/exe"
     mkdir -p "$exe_root"
+    exe_root="$(cd "$exe_root" && pwd -P)"
     sleep_src="$(command -v sleep)"
     cp "$sleep_src" "$exe_root/z23-selftest-exe"
     "$exe_root/z23-selftest-exe" 20 &
     exe_pid=$!
+    trap 'kill "$exe_pid" 2>/dev/null || true; wait "$exe_pid" 2>/dev/null || true; find "$test_tmp" -depth -delete' EXIT HUP INT TERM
     # Wait for the copy to actually be running before deleting it out from
     # under itself — a race here would delete before exec ever opened it.
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [ -e "/proc/$exe_pid/exe" ] && break
+        [ "$(ship_exe_of "$exe_pid")" = "$exe_root/z23-selftest-exe" ] && break
         sleep 0.2
     done
+    [ "$(ship_exe_of "$exe_pid")" = "$exe_root/z23-selftest-exe" ]
+    src_sha="$(ship_sha256_stream < "$sleep_src")"
+    live_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$exe_pid")")"
+    [ "$live_sha" = "$src_sha" ]
     rm -f "$exe_root/z23-selftest-exe"
+    case "$(uname -s)" in
+    Linux)
     case "$(readlink "/proc/$exe_pid/exe" 2>/dev/null || true)" in
         *' (deleted)') ;;
         *) printf 'ship: selftest FAILED — fixture exe was not actually deleted\n' >&2; exit 1 ;;
@@ -953,13 +963,21 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     [ "$resolved" = "$exe_root/z23-selftest-exe" ]
     [ "$(ship_exe_live_of "$exe_pid")" = "/proc/$exe_pid/exe" ]
     live_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$exe_pid")")"
-    src_sha="$(ship_sha256_stream < "$sleep_src")"
     [ "$live_sha" = "$src_sha" ]
+    printf 'ship: deleted executable handle PASS (Linux procfs bytes)\n'
+    ;;
+    *)
+    [ "$(ship_exe_live_of "$exe_pid")" = "$exe_root/z23-selftest-exe" ]
+    refute test -r "$(ship_exe_live_of "$exe_pid")"
+    printf 'ship: pathname fallback PASS; deleted executable handle UNOBSERVED (no Linux procfs)\n'
+    ;;
+    esac
     kill "$exe_pid" 2>/dev/null || true
     wait "$exe_pid" 2>/dev/null || true
+    trap 'find "$test_tmp" -depth -delete' EXIT HUP INT TERM
 
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
-    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach; prepare steps built tor-provenance/tor-ready, left a mismatched provenance untouched, reinstalled hooks, and deduped/refused hardlinks correctly; local forward-only schema acceptance mirrors remote accept/refuse/disarm; local immutable release directory detected and refused before any write; a deleted running executable still resolves and hashes cleanly)\n'
+    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach; prepare steps built tor-provenance/tor-ready, left a mismatched provenance untouched, reinstalled hooks, and deduped/refused hardlinks correctly; local forward-only schema acceptance mirrors remote accept/refuse/disarm; local immutable release directory detected and refused before any write; native executable resolution and byte-read contract)\n'
     exit 0
 fi
 
