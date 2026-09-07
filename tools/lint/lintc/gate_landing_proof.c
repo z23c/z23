@@ -553,6 +553,20 @@ static int pf_scan_floor_check(const char *const *roots, size_t nroots)
     return rc;
 }
 
+/* Combines "does every configured root exist" with "did we actually reach
+ * the expected file count under them" into one call, kept separate from
+ * check_peer_floor_single_source_run so that function's own decision count
+ * stays under the complexity gate's cap. */
+static int pf_root_floor_check(const char *const *roots, size_t nroots)
+{
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < nroots; i++)
+        rc = require_scan_root("check-peer-floor-single-source", roots[i]);
+    if (rc == 0)
+        rc = pf_scan_floor_check(roots, nroots);
+    return rc;
+}
+
 static int pf_is_reg(const char *path)
 {
     struct stat st;
@@ -688,11 +702,8 @@ int check_peer_floor_single_source_run(int argc, char **argv)
     }
 
     struct pf_tree tree = { .re = &def };
-    for (size_t i = 0; rc == 0 && i < sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]; i++)
-        rc = require_scan_root("check-peer-floor-single-source", k_pf_walk_roots[i]);
-    if (rc == 0)
-        rc = pf_scan_floor_check(k_pf_walk_roots,
-                                 sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]);
+    rc = pf_root_floor_check(k_pf_walk_roots,
+                             sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]);
     for (size_t i = 0; rc == 0 && i < sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]; i++)
         rc = pf_walk(k_pf_walk_roots[i], &tree);
     if (rc) {

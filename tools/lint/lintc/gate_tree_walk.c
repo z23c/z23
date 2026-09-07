@@ -1045,6 +1045,21 @@ int check_hotswap_dev_only_run(int argc, char **argv)
                ? die("z23-lint: write failed\n", "") : 0;
 }
 
+/* Proves scan_hs_out's comment-stripping: a doc comment merely mentioning
+ * "dlopen()" must not hit once stripped, though the same raw text does hit
+ * the un-stripped regex. Kept out of check_hotswap_dev_only_selftest so
+ * that function's own decision count stays under the complexity gate's
+ * cap. */
+static int hs_dev_comment_strip_ok(const regex_t *re)
+{
+    struct cstrip cs = { .in_block = 1 };
+    char stripped[128];
+    const char *doc = " * produce a dlopen()-able path that pins the bytes";
+    int strip_ok = cstrip_line(&cs, doc, strlen(doc), stripped, sizeof stripped);
+    return strip_ok && regexec(re, doc, 0, NULL, 0) == 0
+                     && regexec(re, stripped, 0, NULL, 0) != 0;
+}
+
 int check_hotswap_dev_only_selftest(void)
 {
     regex_t re;
@@ -1096,14 +1111,7 @@ int check_hotswap_dev_only_selftest(void)
     int bad = rc != 0 || nused != 0 || eused == 0 || iused != 0 || pfx_hit != 0
             || direct != 3;
     bad |= require_scan_root("check-hotswap-dev-only", "config") == 0;
-    /* A doc comment merely mentioning "dlopen()" must not hit once
-     * comment-stripped, though the same text hits the raw regex directly. */
-    struct cstrip cs = { .in_block = 1 };
-    char stripped[128];
-    const char *doc = " * produce a dlopen()-able path that pins the bytes";
-    int strip_ok = cstrip_line(&cs, doc, strlen(doc), stripped, sizeof stripped);
-    bad |= !strip_ok || regexec(&re, doc, 0, NULL, 0) != 0
-         || regexec(&re, stripped, 0, NULL, 0) == 0;
+    bad |= !hs_dev_comment_strip_ok(&re);
     if (bad)
         fputs("FAIL: hot-swap dev-region scanner selftest\n", stderr);
     regfree(&re);

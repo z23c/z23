@@ -1055,6 +1055,21 @@ static int sus_seen(const char seen[][RS_PATH], int n, const char *d)
     return 0;
 }
 
+/* Floor is "every configured root exists", not "at least one": with the
+ * default 6-root list a dead root must FATAL even if a future refactor
+ * drops the per-root require_scan_root() call this gate relies on today.
+ * The env-test override (ZCL_STRAY_SCAN_DIRS_FOR_TEST, used by
+ * selftest_scanner_immunity.sh) intentionally passes one directory, so its
+ * floor stays 1. Extracted as its own helper so check_no_stray_untracked_
+ * source_run's own decision count stays under the complexity gate's cap. */
+static int sus_floor_check(const char *env, int ne)
+{
+    int sus_floor = (env && env[0]) ? 1
+                    : (int)(sizeof k_sus_dirs / sizeof k_sus_dirs[0]);
+    return gate_require_scanned(ne, sus_floor, "check-no-stray-untracked-source",
+                                "a scanned root dir is missing — layout changed?");
+}
+
 int check_no_stray_untracked_source_run(int argc, char **argv)
 {
     (void)argc;
@@ -1085,16 +1100,7 @@ int check_no_stray_untracked_source_run(int argc, char **argv)
             ne++;
         }
     }
-    /* Floor is "every configured root exists", not "at least one": with the
-     * default 6-root list a dead root must FATAL even if a future refactor
-     * drops the per-root require_scan_root() call this gate relies on
-     * today. The env-test override (ZCL_STRAY_SCAN_DIRS_FOR_TEST, used by
-     * selftest_scanner_immunity.sh) intentionally passes one directory, so
-     * its floor stays 1. */
-    int sus_floor = (env && env[0]) ? 1
-                    : (int)(sizeof k_sus_dirs / sizeof k_sus_dirs[0]);
-    rc = gate_require_scanned(ne, sus_floor, "check-no-stray-untracked-source",
-                              "a scanned root dir is missing — layout changed?");
+    rc = sus_floor_check(env, ne);
     if (rc)
         return rc;
     regex_t fixre;
