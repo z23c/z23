@@ -222,12 +222,64 @@ ship_ps_text() {
 # kernel symlink to the running inode. Darwin: ps comm= (argv[0] of the
 # exec) — a name lookup, not an inode handle, so a caller that needs
 # inode-strength identity must re-verify by other means.
+#
+# Once the on-disk pathname is unlinked while the pid still holds it open
+# (a checkout rebuild relinking the same path underneath a running service is
+# the live case, seen 2026-09-07), the kernel's readlink(2) on /proc/<pid>/exe
+# appends the literal text " (deleted)" to the target. `readlink -f` does not
+# strip that suffix — verified against a throwaway binary — so the naive
+# form used to hand callers a bogus path with garbage glued onto the
+# basename. `make deploy`'s own prior-binary capture already strips this
+# exact suffix before resolving; do the same here so every caller of this
+# shared helper agrees with it.
 ship_exe_of() {
     if [ -e "/proc/$1/exe" ]; then
-        readlink -f "/proc/$1/exe"
+        _ship_exe_raw="$(readlink "/proc/$1/exe" 2>/dev/null || true)"
+        case "$_ship_exe_raw" in
+            *' (deleted)') _ship_exe_raw="${_ship_exe_raw% (deleted)}" ;;
+        esac
+        readlink -f "$_ship_exe_raw" 2>/dev/null || printf '%s\n' "$_ship_exe_raw"
     else
         ship_ps_text "$1" comm
     fi
+}
+
+# A live handle onto the EXACT bytes a pid is running, for a caller that
+# reads or executes those bytes itself (hashing "prior_sha" before a
+# rollback-safety restart, or running the live daemon's own `status`).
+# ship_exe_of() above resolves the pathname on disk, which may no longer
+# hold those bytes at all once the pid's exe is deleted or replaced; the
+# procfs magic symlink /proc/<pid>/exe stays bound to the running inode for
+# as long as the pid lives, deleted or not, and works as both a read target
+# and an exec target. Darwin has no such handle, so it falls back to
+# ship_exe_of()'s best-effort on-disk path.
+ship_exe_live_of() {
+    if [ -e "/proc/$1/exe" ]; then
+        printf '/proc/%s/exe\n' "$1"
+    else
+        ship_exe_of "$1"
+    fi
+}
+
+# Classifies a local service directory for the local-deploy transaction.
+# Prints one token: "release" when the directory is an immutable staged
+# release directory under $2/.local/lib/z23/releases/ (either `make
+# deploy`'s own layout or a manual release swap) that this account cannot
+# write into — the exact directory `make deploy`'s own daemon-install step
+# (Makefile, target `deploy`) already refuses to write into, with the same
+# rationale: a frozen/read-only release directory cannot be deployed over in
+# place — or "writable" for every other layout, including a releases/<id>
+# directory this account happens to still own write access to (an older or
+# manually-repaired layout). Pure text in, one token out, so the selftest
+# pins it against fixture paths without a live systemd service.
+ship_local_release_layout() {
+    local dir="$1" home="$2"
+    case "$dir/" in
+        "$home/.local/lib/z23/releases/"*)
+            if [ -w "$dir" ]; then printf 'writable\n'; else printf 'release\n'; fi
+            ;;
+        *) printf 'writable\n' ;;
+    esac
 }
 
 # The running argv, one line, space-joined on darwin (ps args= loses argv

@@ -30,6 +30,44 @@ historical fixture passes, then deploy/restart intentionally.
 
 ## (0) LIVE OPS TRAPS — public service vs private candidates
 
+- **FIXED 2026-09-07 — `tools/ship.sh --targets=local` used to write the new
+  worker binaries straight into the RUNNING node's executable directory,
+  which broke the moment that directory was an immutable
+  `~/.local/lib/z23/releases/<id>/` staged release (`dr-xr-xr-x`, files
+  `-r-xr-xr-x`) instead of a writable checkout path: the raw
+  `install: cannot remove '…': Permission denied` left the OLD worker file
+  untouched, and ship's own byte-verify then reported the confusing
+  "local worker install bytes differ" — never the real cause. `make deploy`'s
+  own daemon-install step already refuses cleanly for exactly this directory
+  (`$$service_bin_dir is not a writable directory`, Makefile target
+  `deploy`); `deploy_local()`'s worker install did not check first, so it hit
+  the OS error before that clean refusal ever ran.
+  `ship_local_release_layout()` (`tools/scripts/ship_progress_lib.sh`) now
+  classifies the running node's directory — "release" (under
+  `$HOME/.local/lib/z23/releases/` and not writable) versus "writable" —
+  BEFORE anything is written, and `deploy_local()` refuses up front with one
+  actionable message for the release case (worker backup/restore is skipped
+  there: there is nothing to back up) while the writable case is unchanged.
+  Building a fresh immutable release directory for local ship to swap the
+  service onto, the way every remote host already does via
+  `stage_remote()`/`deploy_remote()`, needs `make deploy` to accept an
+  already-staged release directory instead of writing `SERVICE_BIN` in
+  place — tracked as follow-on work; it was not attempted here because it
+  cannot be proven without restarting the canonical service, which no lane
+  may do. Separately, `ship_exe_of()` also used to hand callers a path with
+  the kernel's literal `" (deleted)"` text still glued onto the basename
+  whenever the running executable had been unlinked (a checkout rebuild
+  relinking the same pathname under a still-running process) — harmless for
+  the `dirname` use (no further `/` in the suffix) but broken for hashing or
+  executing those exact bytes. It now strips the suffix before resolving,
+  matching `make deploy`'s own prior-binary capture; a new
+  `ship_exe_live_of()` hands the two callers that read/exec the running
+  bytes directly (`prior_sha`, the local fleet-report `status` line) the
+  `/proc/<pid>/exe` handle, which stays bound to the running inode even
+  after deletion. Pinned by `tools/ship.sh --selftest` (`make
+  check-ship-remote-transaction`): the release/writable classifier against
+  fixture paths, and a live copy-then-delete-the-binary fixture proving
+  `ship_exe_of`/`ship_exe_live_of` still resolve and hash cleanly.
 - **Public connected-node tables can lag or cache old peer identity.** Verify
   the live socket before trusting a crawler row — a node that switched
   services can still show the prior service string in a public peer table

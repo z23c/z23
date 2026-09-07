@@ -887,8 +887,79 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     grep -qF 'stop zclassic23' "$REPO_ROOT/Makefile"
     grep -qF 'forward-only candidate failed qualification' "$REPO_ROOT/Makefile"
 
+    # ── local deploy: immutable release directory is detected and refused
+    # BEFORE anything is written, instead of the OS's raw permission-denied
+    # racing ahead of ship's own byte-verify into a misleading "bytes
+    # differ" refusal (observed live on node1 2026-09-07). Exercised as a
+    # fake "running node's" release directory — no live pid or systemd unit
+    # required, ship_local_release_layout() only reads a path and $HOME.
+    layout_home="$test_tmp/layout-home"
+    release_dir="$layout_home/.local/lib/z23/releases/deadbeefcafefeed"
+    mkdir -p "$release_dir"
+    chmod 555 "$release_dir"
+    [ "$(ship_local_release_layout "$release_dir" "$layout_home")" = release ]
+    # Same releases/<id> prefix, but this account still owns write access
+    # (an older or manually-repaired layout) -> old in-place behaviour.
+    writable_release_dir="$layout_home/.local/lib/z23/releases/0123456789abcdef"
+    mkdir -p "$writable_release_dir"
+    chmod 755 "$writable_release_dir"
+    [ "$(ship_local_release_layout "$writable_release_dir" "$layout_home")" = writable ]
+    # Outside the releases/ prefix entirely (checkout build dir, or any
+    # other canonical path) -> always writable, regardless of its own mode.
+    outside_dir="$layout_home/build/bin"
+    mkdir -p "$outside_dir"
+    [ "$(ship_local_release_layout "$outside_dir" "$layout_home")" = writable ]
+    chmod 755 "$release_dir"
+    # The refusal text and the writable-branch message an operator now
+    # depends on must not move underneath them; the release branch must
+    # explicitly say worker backup/restore is skipped there.
+    grep -qF 'is an immutable staged release directory' "$0"
+    grep -qF 'worker backup/restore is skipped: there is nothing here to back up' "$0"
+    grep -qF 'layout     local writable canonical directory' "$0"
+    grep -qF 'ship_local_release_layout "$svc_dir" "$HOME"' "$0"
+
+    # ── ship_exe_of()/ship_exe_live_of(): a pid whose executable was
+    # unlinked out from under it (a checkout rebuild relinking the same
+    # pathname while the old process still runs it) must still resolve to a
+    # clean path with no " (deleted)" text glued onto it, and its live bytes
+    # must still be readable through /proc/<pid>/exe even though the
+    # original on-disk pathname is now gone. Reproduces the exact failure
+    # mode confirmed live on node1 2026-09-07 by copying a real long-running
+    # binary, deleting it out from under the running copy, no compiler
+    # required.
+    exe_root="$test_tmp/exe"
+    mkdir -p "$exe_root"
+    sleep_src="$(command -v sleep)"
+    cp "$sleep_src" "$exe_root/z23-selftest-exe"
+    "$exe_root/z23-selftest-exe" 20 &
+    exe_pid=$!
+    # Wait for the copy to actually be running before deleting it out from
+    # under itself — a race here would delete before exec ever opened it.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -e "/proc/$exe_pid/exe" ] && break
+        sleep 0.2
+    done
+    rm -f "$exe_root/z23-selftest-exe"
+    case "$(readlink "/proc/$exe_pid/exe" 2>/dev/null || true)" in
+        *' (deleted)') ;;
+        *) printf 'ship: selftest FAILED — fixture exe was not actually deleted\n' >&2; exit 1 ;;
+    esac
+    resolved="$(ship_exe_of "$exe_pid")"
+    case "$resolved" in
+        *' (deleted)')
+            printf 'ship: selftest FAILED — ship_exe_of left the deleted marker in %s\n' "$resolved" >&2
+            exit 1 ;;
+    esac
+    [ "$resolved" = "$exe_root/z23-selftest-exe" ]
+    [ "$(ship_exe_live_of "$exe_pid")" = "/proc/$exe_pid/exe" ]
+    live_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$exe_pid")")"
+    src_sha="$(ship_sha256_stream < "$sleep_src")"
+    [ "$live_sha" = "$src_sha" ]
+    kill "$exe_pid" 2>/dev/null || true
+    wait "$exe_pid" 2>/dev/null || true
+
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
-    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach; prepare steps built tor-provenance/tor-ready, left a mismatched provenance untouched, reinstalled hooks, and deduped/refused hardlinks correctly; local forward-only schema acceptance mirrors remote accept/refuse/disarm)\n'
+    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach; prepare steps built tor-provenance/tor-ready, left a mismatched provenance untouched, reinstalled hooks, and deduped/refused hardlinks correctly; local forward-only schema acceptance mirrors remote accept/refuse/disarm; local immutable release directory detected and refused before any write; a deleted running executable still resolves and hashes cleanly)\n'
     exit 0
 fi
 
@@ -1309,6 +1380,30 @@ deploy_local() {
             ;;
     esac
     svc_dir="$(dirname "$(ship_exe_of "$pid")")"
+    # Local counterpart of the remote release-directory check: an immutable
+    # `releases/<id>` directory refuses a worker install exactly as `make
+    # deploy`'s own daemon-install step already refuses to write the daemon
+    # there (Makefile, target `deploy`, the "$$service_bin_dir is not a
+    # writable directory" REFUSE). Before this check, the worker install
+    # below hit the immutable directory FIRST and left a raw
+    # `install: ... Permission denied`, followed by a misleading "bytes
+    # differ" refusal comparing the byte-verify against the untouched OLD
+    # file — never a clean, actionable message (observed on node1
+    # 2026-09-07: ~/.local/state/zclassic23/scratch/northstar/
+    # ship_node1_local_09070957.log). Checking and refusing here, before
+    # anything is written, replaces that with one honest message and touches
+    # nothing. Building a fresh immutable release directory for LOCAL ship to
+    # swap the service onto — the way every remote already does via
+    # stage_remote()/deploy_remote() — is tracked as follow-on work; it needs
+    # `make deploy` to accept an already-staged release directory in place of
+    # its own SERVICE_BIN write, which this lane does not touch because it
+    # cannot be proven without restarting the live canonical service.
+    case "$(ship_local_release_layout "$svc_dir" "$HOME")" in
+        release)
+            die "local worker/daemon install target $svc_dir is an immutable staged release directory — the same directory \`make deploy\`'s own daemon-install step already refuses to write into. Nothing was mutated (worker backup/restore is skipped: there is nothing here to back up). Point the local canonical zclassic23.service at a writable canonical binary — chmod u+w $svc_dir, or re-home the unit on \$(CURDIR)/build/bin/z23 — then ship locally again."
+            ;;
+        *) say "layout     local writable canonical directory $svc_dir" ;;
+    esac
     # Scratch lives under the owner's state root, never /tmp: honour
     # ZCL_SCRATCH_DIR when set (same override ship_selftest.sh recognises),
     # otherwise the standing scratch root.
@@ -1754,7 +1849,7 @@ chmod 555 "$release_root"
 
 pid="$(systemctl --user show zclassic23 -p MainPID --value)"
 case "$pid" in ""|*[!0-9]*|0) echo "remote: no running MainPID" >&2; exit 1 ;; esac
-prior_sha="$(ship_sha256_stream < "$(ship_exe_of "$pid")")"
+prior_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$pid")")"
 # Linux keeps exact argv boundaries (/proc cmdline is NUL-separated); hosts
 # without procfs fall back to ps args=, which space-joins — the fixture and
 # the canonical node take no argument containing spaces.
@@ -2069,7 +2164,7 @@ for target in $TARGETS; do
     case "$target" in
         local)
             pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
-            s="$(timeout 20 "$(ship_exe_of "$pid")" status 2>/dev/null || true)"
+            s="$(timeout 20 "$(ship_exe_live_of "$pid")" status 2>/dev/null || true)"
             printf '%-22s %-18s %-12s %s\n' "local" "${CAND_SOURCE_ID:0:16}…" \
                 "$(printf '%s' "$s" | grep -oE 'hstar=[0-9]+' | cut -d= -f2)" \
                 "$(printf '%s' "$s" | grep -oE 'sync=[a-z_]+' | cut -d= -f2)" ;;
