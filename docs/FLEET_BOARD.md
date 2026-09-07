@@ -100,6 +100,11 @@ future-dated beyond a small clock tolerance, malformed, carries trailing
 bytes, or whose stated id does not match its bytes. A duplicate is a no-op:
 the id *is* the bytes, so a row already under that id is that post.
 
+It also refuses a perfectly signed post whose host key holds no ROLE granting
+`fleet.board.post` for that kind on this node — see
+[`docs/FLEET_ROLES.md`](./FLEET_ROLES.md). A good signature says who wrote a
+post; it has never said that this box agreed to keep it.
+
 ## Storage
 
 Posts live in the node's own database as an append-only, hash-chained ledger.

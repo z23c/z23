@@ -14,15 +14,18 @@ peer.
 
 ## What is enforced today
 
-The catalog, the store, and `fleet roles check` exist and answer "would
-this key be allowed" correctly — but nothing calls that check yet at
-either of the two places a signed request actually enters a node:
-`zcl_fleet_ledger_replicate()` (engine/modules/fleetledger/src/fleet_ledger.c)
-and `db_fleet_board_post_ingest()` (engine/models/src/fleet_board_post.c)
-both accept a signed row today with no role lookup at all. A key with no
-grant is refused only when something asks `fleet roles check` for it, not
-automatically before a leaf runs. A follow-up lane wires the check into
-those two ingress points.
+Both places a signed request actually enters a node ask this store before
+they keep anything: `zcl_fleet_ledger_replicate()`
+(engine/modules/fleetledger/src/fleet_ledger.c) and
+`db_fleet_board_post_ingest()` (engine/models/src/fleet_board_post.c). A key
+with no active grant is refused there, and so is every key when no role
+checker is installed at all. See **Enforcement** at the end of this page for
+the leaves and kinds each ingress asks, what a refusal costs, and the one
+gap an operator still closes by hand.
+
+Every OTHER fleet leaf still runs without a role lookup: those are local CLI
+calls by this node's own operator, which holds every role implicitly. What
+this page restricts is bytes signed by another machine's key.
 
 ## The roles
 
@@ -31,16 +34,16 @@ Declared once, in `engine/composition/roles.def`, as a closed set:
 | role       | may do |
 |------------|--------|
 | `operator` | everything on this node. This node's own key, **implicit** — it is never stored anywhere, and unsigned local CLI use by this node's operator is unaffected by anything below. |
-| `worker`   | post board rows of kind `note`, `result`, `claim`, `problem`, `need` or `chat`; write experiment `predict`/`result` rows; read everything. |
+| `worker`   | post board rows of kind `note`, `result`, `claim`, `problem`, `need` or `chat`; replicate its own ledger rows into this box; write experiment `predict`/`result` rows; read everything. |
 | `observer` | read-only leaves. |
 | `landing`  | the landing machine's key: post board `result` rows about trains, read the ledger. |
 
 Each role's exact grants — which `fleet.<a>.<b>` leaf (an exact name, or a
 `prefix.*` wildcard) and, for a board post, which kinds — are the
-`Z23_ROLE_GRANT` rows in the same file. `zcl_role_leaf_allowed()` and
-`zcl_role_check()` refuse a key with no active grant naming a leaf by
-design; see "What is enforced today" above for where that check is, and is
-not yet, actually called.
+`Z23_ROLE_GRANT` rows in the same file. A key with no active grant naming a
+leaf is refused before the leaf runs, at both ingress points; there is no
+default-permit path, and no build in which the absence of a policy means
+allow.
 
 ## The store
 
@@ -79,3 +82,62 @@ grant row here changes what THIS box will accept from that key, and
 nothing else. A different box makes its own decision about the same key,
 independently, from its own store. See `docs/FLEET_LEDGER.md` and
 `docs/FLEET_BOARD.md` for the leaves this feature restricts.
+
+## Enforcement
+
+A role is only a role where something asks. Two places on this node take
+bytes signed by ANOTHER machine's key, and both now ask before they keep
+them:
+
+| ingress | leaf asked | kind asked |
+|---------|------------|------------|
+| `zcl_fleet_ledger_replicate()` — one batch a peer replicates into this box's copy of its chain | `fleet.ledger.replicate` | the ROW kind: `usage`, `task`, `attest`, `reward`, `vitals`, `experiment` |
+| `db_fleet_board_post_ingest()` — one gossiped board post | `fleet.board.post` | the POST kind: `problem`, `need`, `offer`, `claim`, `result`, `note`, `wiki` |
+
+`worker` is granted both, with every kind on the ledger side and its
+declared list of post kinds on the board side. `observer` is granted
+neither: reading is not writing. `landing` may post `result` and nothing
+else, exactly as before.
+
+A ledger batch is refused WHOLE — replication was already all-or-nothing,
+and one ungranted row does not get to carry the rest of the batch in with
+it. The refusal is `ledger_role_refused`, counted in `fleet ledger status`
+as `role_refused`. A refused board post is never stored, counted in
+`fleet board status` as `role_refused`, and logged with the fingerprint
+prefix to hand to `z23 fleet roles grant`. Neither log line names anything
+about the row or the post: what the fleet measures is the owner's business.
+
+**There is no default-permit path.** The engine asks through a seam
+(`platform/modules/base/include/base/fleet_role_check.h`) that the top of
+the tree fills in at node start, because the catalog and the store live in
+`tools/dev` and nothing under `engine/` may include a `tools/` header. When
+NOTHING is installed to answer — a process that has not reached that wiring,
+or one that never runs it — both ingress points REFUSE and say so once. A
+gate that is only closed when somebody remembered to close it is not a gate.
+
+### Bootstrap
+
+Enforcement would stop a fleet that was replicating happily the day before,
+so two paths mint the role that admitting a machine already implied:
+
+* `z23 fleet admit` grants `worker` to the key it just enrolled, and says in
+  its reply whether the grant landed. Re-admitting the same box writes no
+  second row.
+* At every node start, every key in the machine roster that holds no grant
+  is granted `worker`, each one logged by fingerprint once. Running it again
+  mints nothing, so this is a migration that is safe to leave in place.
+
+**On a node with no operator identity** — no delegation filed — the
+bootstrap mints nothing, because there is no key to sign a grant with, and
+it says so in the log. Enforcement still stands: every foreign-signed row
+and post is refused until an operator identity exists and
+`z23 fleet roles grant` can run. The node's OWN key is unaffected either
+way; it is recognised by identity, never looked up in the store.
+
+**A roster key is not a host key.** The roster records the box key from
+`fleet join` (`box.ed25519` under the state root); a node signs board posts
+and ledger rows with its DHT ONLINE key, in its datadir. They are two
+different keys on purpose, and the boot migration grants the first. Until a
+join also records the second, the operator grants each peer's host key by
+hand — the fingerprint prefix is printed in every refusal, and
+`fleet ledger status` / `fleet board status` say how many were refused.
