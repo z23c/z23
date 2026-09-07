@@ -178,7 +178,7 @@ gate_command() {
         check-no-adx-overclaim)            echo './tools/lint/check_no_adx_overclaim.sh --selftest && ./tools/lint/check_no_adx_overclaim.sh && ./tools/lint/check_asan_adx_exception.sh --selftest && ./tools/lint/check_asan_adx_exception.sh' ;;
         check-simd-os-support)             echo './tools/lint/check_simd_os_support.sh' ;;
         check-supervisor-registration)     echo './tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh' ;;
-        check-test-registration)           echo './tools/scripts/check_test_registration.sh' ;;
+        check-test-registration)           echo './tools/scripts/check_test_registration.sh --selftest && ./tools/scripts/check_test_registration.sh' ;;
         check-typed-blocker)               echo './tools/scripts/check_typed_blocker.sh' ;;
         check-blocker-escape-registered)   echo './tools/scripts/check_blocker_escape_registered.sh' ;;
         check-blocker-remedy)              echo './tools/scripts/check_blocker_remedy.sh' ;;

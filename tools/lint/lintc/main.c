@@ -169,6 +169,10 @@ static const struct lint_gate k_gates[] = {
       check_one_result_type_selftest },
     { "check-no-secret-printf", check_no_secret_printf_run,
       check_no_secret_printf_selftest },
+    { "check-long-functions", check_long_functions_run,
+      check_long_functions_selftest },
+    { "check-test-registration", check_test_registration_run,
+      check_test_registration_selftest },
 };
 
 int main(int argc, char **argv)

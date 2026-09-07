@@ -5354,6 +5354,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_layering_fences.c \
     tools/lint/lintc/gate_result_type_fences.c \
     tools/lint/lintc/gate_secret_printf_fences.c \
+    tools/lint/lintc/gate_long_functions.c \
+    tools/lint/lintc/gate_test_registration.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11698,7 +11700,7 @@ check-rule-vocabulary:
 # Keep top-level functions in app/controllers + app/services under 500
 # lines. Single state-machines that truly belong as one function can carry
 # a `// long-function-ok:<tag>` override marker explaining WHY.
-check-long-functions:
+check-long-functions: $(LINTC_TOOL)
 	@echo "══ LINT: long function cap (500 lines) ══"
 	@./tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh
 
@@ -11817,8 +11819,9 @@ check-supervisor-registration:
 # NOR dispatched by the serial runner (test.c) is COMPILED
 # but never executed — green forever, proving nothing. Caught the lane-3
 # refold orphans (2026-06-22). Fails CI on any such orphan.
-check-test-registration:
+check-test-registration: $(LINTC_TOOL)
 	@echo "══ LINT: test registration ══"
+	@./tools/scripts/check_test_registration.sh --selftest
 	@./tools/scripts/check_test_registration.sh
 
 # Gate — no NEW runtime abort primitive in network-reachable code (RATCHET,

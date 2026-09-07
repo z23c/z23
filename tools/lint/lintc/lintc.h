@@ -356,5 +356,9 @@ int check_one_result_type_run(int argc, char **argv);
 int check_one_result_type_selftest(void);
 int check_no_secret_printf_run(int argc, char **argv);
 int check_no_secret_printf_selftest(void);
+int check_long_functions_run(int argc, char **argv);
+int check_long_functions_selftest(void);
+int check_test_registration_run(int argc, char **argv);
+int check_test_registration_selftest(void);
 
 #endif

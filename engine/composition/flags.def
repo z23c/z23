@@ -1284,19 +1284,19 @@ Z23_FLAG("ZCL_LOGROTATE_ROTATE_BYTES", "env_build", "536870912", "-",
 Z23_FLAG("ZCL_LOGROTATE_TARGETS", "env_build", "-", "-",
           "undocumented; first use tools/scripts/zcl-logrotate.sh:150")
 Z23_FLAG("ZCL_LONGFN_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_long_functions.sh:179")
+          "undocumented; first use tools/lint/lintc/gate_long_functions.c:578")
 Z23_FLAG("ZCL_LONGFN_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/scripts/check_long_functions.sh:227")
+          "undocumented; first use tools/lint/lintc/gate_long_functions.c:566")
 Z23_FLAG("ZCL_LONGFN_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_long_functions.sh:217")
+          "undocumented; first use tools/lint/lintc/gate_long_functions.c:565")
 Z23_FLAG("ZCL_LONGFN_COVERAGE_ONLY", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_long_functions.sh:262")
+          "undocumented; first use tools/lint/lintc/gate_long_functions.c:567")
 Z23_FLAG("ZCL_LONGFN_ENFORCED_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_long_functions.sh:57")
+          "undocumented; first use tools/lint/lintc/gate_long_functions.c:611")
 Z23_FLAG("ZCL_LONGFN_LIB_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_long_functions.sh:306")
+          "undocumented; first use tools/lint/lintc/gate_long_functions.c:581")
 Z23_FLAG("ZCL_LONGFN_LIB_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_long_functions.sh:58")
+          "undocumented; first use tools/lint/lintc/gate_long_functions.c:616")
 Z23_FLAG("ZCL_MACOS_CAPABILITY_MATRIX", "env_build", "-", "-",
           "undocumented; first use tools/scripts/macos_acceptance.sh:9")
 Z23_FLAG("ZCL_MARKDOWN_LINKS_SELFTEST", "env_build", "0", "-",
@@ -2236,8 +2236,7 @@ Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_parallel.c:1443")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_boot_phase.c:410")
-Z23_FLAG("ZCL_TEST_LEAF_CC", "env_build", "cc", "-",
-          "undocumented; first use tools/scripts/check_test_registration.sh:128")
+
 Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",
           "undocumented; first use tools/dev/deploy-dev-lane-selftest.sh:82")
 Z23_FLAG("ZCL_TEST_ONLY", "env_test", "-", "-",
