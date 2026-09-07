@@ -203,6 +203,22 @@ static const char *dtkt_str(const struct zcl_command_reply *reply,
     return v && v->type == JSON_STR && json_get_str(v) ? json_get_str(v) : "";
 }
 
+/* A JSON array's length, or SIZE_MAX when the value is not an array. One
+ * helper so a case can say "two picks" in one comparison. */
+static size_t dtkt_arr_len(const struct json_value *v)
+{
+    return v && v->type == JSON_ARR ? v->num_children : (size_t)-1;
+}
+
+/* A boolean reply field, compared against what the case expects. A missing
+ * or wrongly typed field never reads as the expected value. */
+static bool dtkt_bool_is(const struct zcl_command_reply *reply,
+                         const char *key, bool want)
+{
+    const struct json_value *v = json_get(&reply->data, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v) == want;
+}
+
 static bool dtkt_plan_has(const struct json_value *arr, const char *sha)
 {
     if (!arr || arr->type != JSON_ARR)
@@ -271,53 +287,100 @@ static bool dtkt_lane(const char *root, const char *name, const char *file,
            dtkt_git(root, publish) && dtkt_git(root, back);
 }
 
+/* Every path and sha the cases below name. Built once by dtkt_setup(), which
+ * is a function rather than a preamble so this group's entry point stays
+ * under the complexity cap without a baseline pin of its own. */
+struct dtkt_fix {
+    char parent[512];
+    char root[600];
+    char bare[600];
+    char scratch[700];
+    char trains[700];
+    char helpers[700];
+    char state[700];
+    char dir7[800];
+    char dir9[800];
+    char land[800];
+    char origin_main[41];
+    char sha_a[41];
+    char sha_b[41];
+    char sha_c[41];
+};
+
+/* The three roots and the clock the keeper reads. A real run sets none of
+ * them; setting all four is what makes this group unable to touch the real
+ * ~/.z23, the real landing queue or a real clock. */
+static void dtkt_env(const struct dtkt_fix *f)
+{
+    (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
+    (void)setenv("ZCL_TRAIN_SCRATCH_ROOT", f->scratch, 1);
+    (void)setenv("ZCL_TRAIN_WORKTREE_ROOT", f->trains, 1);
+    (void)setenv("ZCL_TRAIN_HELPER_DIR", f->helpers, 1);
+    (void)setenv("XDG_STATE_HOME", f->state, 1);
+    (void)setenv("ZCL_TRAIN_KEEP_NOW", "2026-01-02T03:04:05Z", 1);
+}
+
+static void dtkt_env_clear(void)
+{
+    (void)unsetenv("ZCL_TRAIN_SCRATCH_ROOT");
+    (void)unsetenv("ZCL_TRAIN_WORKTREE_ROOT");
+    (void)unsetenv("ZCL_TRAIN_HELPER_DIR");
+    (void)unsetenv("ZCL_TRAIN_KEEP_NOW");
+    (void)unsetenv("XDG_STATE_HOME");
+}
+
+static void dtkt_paths(struct dtkt_fix *f)
+{
+    (void)snprintf(f->root, sizeof(f->root), "%s/root", f->parent);
+    (void)snprintf(f->bare, sizeof(f->bare), "%s/origin.git", f->parent);
+    (void)snprintf(f->scratch, sizeof(f->scratch), "%s/kscratch", f->parent);
+    (void)snprintf(f->trains, sizeof(f->trains), "%s/ktrains", f->parent);
+    (void)snprintf(f->helpers, sizeof(f->helpers), "%s/khelpers", f->parent);
+    (void)snprintf(f->state, sizeof(f->state), "%s/kstate", f->parent);
+    (void)snprintf(f->dir7, sizeof(f->dir7), "%s/train7", f->scratch);
+    (void)snprintf(f->dir9, sizeof(f->dir9), "%s/train9", f->scratch);
+    (void)snprintf(f->land, sizeof(f->land), "%s/z23/dev/land", f->state);
+}
+
+/* Stand-ins for the two northstar helpers the keeper hands the landing to.
+ * land_pre.sh prints the one verdict line the keeper looks for. */
+static bool dtkt_helpers(const struct dtkt_fix *f)
+{
+    return dtkt_write(f->helpers, "land_pre.sh",
+                     "#!/bin/sh\necho \"PRECHECK: OK\"\n") &&
+           dtkt_write(f->helpers, "land_unit.sh",
+                     "#!/bin/sh\necho started $1\n") &&
+           dtkt_chmod_x(f->helpers, "land_pre.sh") &&
+           dtkt_chmod_x(f->helpers, "land_unit.sh");
+}
+
+static bool dtkt_setup(struct dtkt_fix *f)
+{
+    memset(f, 0, sizeof(*f));
+    test_make_tmpdir(f->parent, sizeof(f->parent), "dev_train_keep", "fixture");
+    dtkt_paths(f);
+    dtkt_env(f);
+    return dtkt_fixture_repo(f->root, f->bare, f->parent) &&
+           dtkt_mkdir_p(f->dir7) && dtkt_mkdir_p(f->dir9) &&
+           dtkt_mkdir_p(f->trains) && dtkt_mkdir_p(f->helpers) &&
+           dtkt_mkdir_p(f->land) && dtkt_helpers(f) &&
+           dtkt_rev(f->root, "origin/main", f->origin_main) &&
+           dtkt_lane(f->root, "lanea", "a.txt", "A\n", "lanea: add a",
+                     f->sha_a) &&
+           dtkt_lane(f->root, "laneb", "b.txt", "B\n", "laneb: add b",
+                     f->sha_b) &&
+           dtkt_lane(f->root, "lanec", "a.txt", "C\n", "lanec: also a",
+                     f->sha_c);
+}
+
 /* ── the group ────────────────────────────────────────────────────────── */
 
 int test_dev_train_keep(void);
 int test_dev_train_keep(void)
 {
     int failures = 0;
-    /* The keeper runs make through zcl_devloop_process_run(), which refuses
-     * to exec anything from a test binary unless the fixture opts in. */
-    (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
-    char parent[512];
-    test_make_tmpdir(parent, sizeof(parent), "dev_train_keep", "fixture");
-
-    char root[600], bare[600];
-    char scratch[700], trains[700], helpers[700], state[700];
-    char dir7[800], dir9[800], land[800];
-    (void)snprintf(root, sizeof(root), "%s/root", parent);
-    (void)snprintf(bare, sizeof(bare), "%s/origin.git", parent);
-    (void)snprintf(scratch, sizeof(scratch), "%s/kscratch", parent);
-    (void)snprintf(trains, sizeof(trains), "%s/ktrains", parent);
-    (void)snprintf(helpers, sizeof(helpers), "%s/khelpers", parent);
-    (void)snprintf(state, sizeof(state), "%s/kstate", parent);
-    (void)snprintf(dir7, sizeof(dir7), "%s/train7", scratch);
-    (void)snprintf(dir9, sizeof(dir9), "%s/train9", scratch);
-    (void)snprintf(land, sizeof(land), "%s/z23/dev/land", state);
-
-    ASSERT(dtkt_fixture_repo(root, bare, parent));
-    ASSERT(dtkt_mkdir_p(dir7) && dtkt_mkdir_p(dir9) && dtkt_mkdir_p(trains) &&
-          dtkt_mkdir_p(helpers) && dtkt_mkdir_p(land));
-    (void)setenv("ZCL_TRAIN_SCRATCH_ROOT", scratch, 1);
-    (void)setenv("ZCL_TRAIN_WORKTREE_ROOT", trains, 1);
-    (void)setenv("ZCL_TRAIN_HELPER_DIR", helpers, 1);
-    (void)setenv("XDG_STATE_HOME", state, 1);
-    /* The injected clock: every KEEP.json row this group writes carries this
-     * stamp, so the state file is asserted rather than merely tolerated. */
-    (void)setenv("ZCL_TRAIN_KEEP_NOW", "2026-01-02T03:04:05Z", 1);
-    ASSERT(dtkt_write(helpers, "land_pre.sh",
-                     "#!/bin/sh\necho \"PRECHECK: OK\"\n"));
-    ASSERT(dtkt_write(helpers, "land_unit.sh",
-                     "#!/bin/sh\necho started $1\n"));
-    ASSERT(dtkt_chmod_x(helpers, "land_pre.sh") &&
-          dtkt_chmod_x(helpers, "land_unit.sh"));
-
-    char origin_main[41], sha_a[41], sha_b[41], sha_c[41];
-    ASSERT(dtkt_rev(root, "origin/main", origin_main));
-    ASSERT(dtkt_lane(root, "lanea", "a.txt", "A\n", "lanea: add a", sha_a));
-    ASSERT(dtkt_lane(root, "laneb", "b.txt", "B\n", "laneb: add b", sha_b));
-    ASSERT(dtkt_lane(root, "lanec", "a.txt", "C\n", "lanec: also a", sha_c));
+    struct dtkt_fix f;
+    ASSERT(dtkt_setup(&f));
 
     TEST("train keep: the leaf is registered and declares its own keys") {
         const struct zcl_command_spec *spec = zcl_command_registry_find(
@@ -341,14 +404,14 @@ int test_dev_train_keep(void)
         PASS();
     }
 
-    TEST("train status: the land queue path comes from dev.land's state root") {
+    TEST("train status: the f.land queue path comes from dev.f.land's state f.root") {
         char want[900];
         struct json_value input;
         json_init(&input);
         json_set_object(&input);
         struct zcl_command_context ctx;
         memset(&ctx, 0, sizeof(ctx));
-        ctx.source_root = root;
+        ctx.source_root = f.root;
         struct zcl_command_request request;
         memset(&request, 0, sizeof(request));
         request.context = &ctx;
@@ -357,14 +420,11 @@ int test_dev_train_keep(void)
         zcl_command_reply_init(&reply, "zcl.test.train_keep.v1");
         zcl_native_handle_dev_train_status(&request, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
-        (void)snprintf(want, sizeof(want), "%s/queue.jsonl", land);
+        (void)snprintf(want, sizeof(want), "%s/queue.jsonl", f.land);
         /* The bug this pins: the field used to answer from a hardcoded
-         * ~/.local/state/zclassic23/land path dev.land never wrote to. */
+         * ~/.local/state/zclassic23/f.land path dev.f.land never wrote to. */
         ASSERT_STR_EQ(dtkt_str(&reply, "land_queue_path"), want);
-        const struct json_value *present =
-            json_get(&reply.data, "land_queue_present");
-        ASSERT(present && present->type == JSON_BOOL &&
-              json_get_bool(present) == false);
+        ASSERT(dtkt_bool_is(&reply, "land_queue_present", false));
         zcl_command_reply_free(&reply);
         json_free(&input);
         PASS();
@@ -373,7 +433,7 @@ int test_dev_train_keep(void)
     TEST("train keep: a train number outside 1..9999 is refused, typed") {
         struct json_value input = dtkt_input("0", false);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
         ASSERT_STR_EQ(reply.error.code, "INVALID_TRAIN");
         ASSERT(strncmp(reply.error.message, "keep: refused: ", 15) == 0);
@@ -383,10 +443,10 @@ int test_dev_train_keep(void)
     }
 
     TEST("train keep: an empty queue refuses instead of building nothing") {
-        ASSERT(dtkt_write(dir7, "late_picks.txt", "# header only\n"));
+        ASSERT(dtkt_write(f.dir7, "late_picks.txt", "# header only\n"));
         struct json_value input = dtkt_input("7", true);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
         ASSERT_STR_EQ(reply.error.code, "NO_PICKS");
         zcl_command_reply_free(&reply);
@@ -396,32 +456,31 @@ int test_dev_train_keep(void)
 
     TEST("train keep: only rows whose verdict says LAND at the queued sha are taken") {
         char q[2048], base_line[64], probe[900];
-        ASSERT(dtkt_verdict(dir7, "v_land.txt", "LAND", sha_a));
-        ASSERT(dtkt_verdict(dir7, "v_pending.txt", "LAND", sha_b));
-        ASSERT(dtkt_verdict(dir7, "v_hold.txt", "HOLD", sha_c));
-        ASSERT(dtkt_verdict(dir7, "v_wrong.txt", "LAND", sha_c));
+        ASSERT(dtkt_verdict(f.dir7, "v_land.txt", "LAND", f.sha_a));
+        ASSERT(dtkt_verdict(f.dir7, "v_pending.txt", "LAND", f.sha_b));
+        ASSERT(dtkt_verdict(f.dir7, "v_hold.txt", "HOLD", f.sha_c));
+        ASSERT(dtkt_verdict(f.dir7, "v_wrong.txt", "LAND", f.sha_c));
         (void)snprintf(q, sizeof(q),
                       "lanea %s %s/v_land.txt\n"          /* agrees */
                       "laneb PENDING %s/v_pending.txt\n"  /* verdict decides */
                       "lanec %s %s/v_hold.txt\n"          /* not a LAND */
                       "laned %s %s/v_wrong.txt\n",        /* queue disagrees */
-                      sha_a, dir7, dir7, sha_c, dir7, sha_b, dir7);
-        ASSERT(dtkt_write(dir7, "late_picks.txt", q));
-        (void)snprintf(base_line, sizeof(base_line), "%s\n", origin_main);
-        ASSERT(dtkt_write(dir7, "BASE", base_line));
+                      f.sha_a, f.dir7, f.dir7, f.sha_c, f.dir7, f.sha_b, f.dir7);
+        ASSERT(dtkt_write(f.dir7, "late_picks.txt", q));
+        (void)snprintf(base_line, sizeof(base_line), "%s\n", f.origin_main);
+        ASSERT(dtkt_write(f.dir7, "BASE", base_line));
 
         struct json_value input = dtkt_input("7", true);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         const struct json_value *plan = json_get(&reply.data, "plan");
-        ASSERT(plan && plan->type == JSON_ARR && plan->num_children == 2);
-        ASSERT(dtkt_plan_has(plan, sha_a));
-        ASSERT(dtkt_plan_has(plan, sha_b));
-        const struct json_value *skipped = json_get(&reply.data, "skipped");
-        ASSERT(skipped && skipped->num_children == 2);
+        ASSERT(dtkt_arr_len(plan) == 2);
+        ASSERT(dtkt_plan_has(plan, f.sha_a));
+        ASSERT(dtkt_plan_has(plan, f.sha_b));
+        ASSERT(dtkt_arr_len(json_get(&reply.data, "skipped")) == 2);
         /* --dry-run wrote no state at all. */
-        (void)snprintf(probe, sizeof(probe), "%s/KEEP.json", dir7);
+        (void)snprintf(probe, sizeof(probe), "%s/KEEP.json", f.dir7);
         ASSERT(!dtkt_exists(probe));
         zcl_command_reply_free(&reply);
         json_free(&input);
@@ -430,39 +489,39 @@ int test_dev_train_keep(void)
 
     TEST("train keep: a base that no longer equals origin/main refuses") {
         char base_line[64];
-        ASSERT(dtkt_write(dir7, "BASE",
+        ASSERT(dtkt_write(f.dir7, "BASE",
                          "0000000000000000000000000000000000000000\n"));
         struct json_value input = dtkt_input("7", true);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
         ASSERT_STR_EQ(reply.error.code, "BASE_MOVED");
         zcl_command_reply_free(&reply);
         json_free(&input);
-        (void)snprintf(base_line, sizeof(base_line), "%s\n", origin_main);
-        ASSERT(dtkt_write(dir7, "BASE", base_line));
+        (void)snprintf(base_line, sizeof(base_line), "%s\n", f.origin_main);
+        ASSERT(dtkt_write(f.dir7, "BASE", base_line));
         PASS();
     }
 
     TEST("train keep: a real pass assembles, gates, writes READY and hands off") {
         char q[1200], ready[128], wt[900], picks_line[256], raw[1024];
-        (void)snprintf(q, sizeof(q), "lanea %s %s/v_land.txt\n", sha_a, dir7);
-        ASSERT(dtkt_write(dir7, "late_picks.txt", q));
+        (void)snprintf(q, sizeof(q), "lanea %s %s/v_land.txt\n", f.sha_a, f.dir7);
+        ASSERT(dtkt_write(f.dir7, "late_picks.txt", q));
         struct json_value input = dtkt_input("7", false);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(dtkt_str(&reply, "state"), "landing");
-        (void)snprintf(wt, sizeof(wt), "%s/train7", trains);
+        (void)snprintf(wt, sizeof(wt), "%s/train7", f.trains);
         ASSERT(platform_directory_probe_real(wt) ==
               PLATFORM_DIRECTORY_PROBE_OK);
-        ASSERT(dtkt_first_line(dir7, "READY", ready, sizeof(ready)));
+        ASSERT(dtkt_first_line(f.dir7, "READY", ready, sizeof(ready)));
         ASSERT(strlen(ready) == 40);
         ASSERT_STR_EQ(dtkt_str(&reply, "tip"), ready);
-        ASSERT(dtkt_first_line(dir7, "picks.txt", picks_line,
+        ASSERT(dtkt_first_line(f.dir7, "picks.txt", picks_line,
                               sizeof(picks_line)));
         ASSERT(strncmp(picks_line, "lanea ", 6) == 0);
-        ASSERT(dtkt_slurp(dir7, "KEEP.json", raw, sizeof(raw)));
+        ASSERT(dtkt_slurp(f.dir7, "KEEP.json", raw, sizeof(raw)));
         ASSERT(strstr(raw, "2026-01-02T03:04:05Z") != NULL);
         ASSERT(strstr(raw, "\"state\":\"landing\"") != NULL);
         zcl_command_reply_free(&reply);
@@ -473,19 +532,19 @@ int test_dev_train_keep(void)
     TEST("train keep: a second pass while landing re-assembles nothing") {
         char tip_before[128], tip_after[128], head_before[41], head_after[41];
         char wt[900];
-        (void)snprintf(wt, sizeof(wt), "%s/train7", trains);
-        ASSERT(dtkt_first_line(dir7, "READY", tip_before, sizeof(tip_before)));
+        (void)snprintf(wt, sizeof(wt), "%s/train7", f.trains);
+        ASSERT(dtkt_first_line(f.dir7, "READY", tip_before, sizeof(tip_before)));
         ASSERT(dtkt_rev(wt, "HEAD", head_before));
         struct json_value input = dtkt_input("7", false);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         /* Still landing, same tip, same assembled HEAD: the pass observed
-         * dev.land and touched nothing. Only `reason` moves, and it says
+         * dev.f.land and touched nothing. Only `reason` moves, and it says
          * why the pass had nothing to do. */
         ASSERT_STR_EQ(dtkt_str(&reply, "state"), "landing");
         ASSERT(strstr(dtkt_str(&reply, "reason"), "not finished") != NULL);
-        ASSERT(dtkt_first_line(dir7, "READY", tip_after, sizeof(tip_after)));
+        ASSERT(dtkt_first_line(f.dir7, "READY", tip_after, sizeof(tip_after)));
         ASSERT_STR_EQ(tip_before, tip_after);
         ASSERT(dtkt_rev(wt, "HEAD", head_after));
         ASSERT_STR_EQ(head_before, head_after);
@@ -494,27 +553,27 @@ int test_dev_train_keep(void)
         PASS();
     }
 
-    TEST("train keep: dev.land reporting landed retires the refs and opens the next train") {
+    TEST("train keep: dev.f.land reporting landed retires the refs and opens the next train") {
         char tip[128], row[512], next_queue[900], post[512], ref[64];
-        ASSERT(dtkt_first_line(dir7, "READY", tip, sizeof(tip)));
+        ASSERT(dtkt_first_line(f.dir7, "READY", tip, sizeof(tip)));
         (void)snprintf(row, sizeof(row),
                       "{\"tip\":\"%s\",\"state\":\"landed\"}\n", tip);
-        ASSERT(dtkt_write(land, "outcomes.jsonl", row));
+        ASSERT(dtkt_write(f.land, "outcomes.jsonl", row));
         char before_ref[41];
-        ASSERT(dtkt_rev(root, "refs/review/lanea", before_ref));
+        ASSERT(dtkt_rev(f.root, "refs/review/lanea", before_ref));
         struct json_value input = dtkt_input("7", false);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(dtkt_str(&reply, "state"), "landed");
         /* Only the ref named in picks.txt is retired; laneb's is untouched. */
-        ASSERT(!dtkt_rev(root, "refs/review/lanea", ref));
+        ASSERT(!dtkt_rev(f.root, "refs/review/lanea", ref));
         char survivor[41];
-        ASSERT(dtkt_rev(root, "refs/review/laneb", survivor));
+        ASSERT(dtkt_rev(f.root, "refs/review/laneb", survivor));
         (void)snprintf(next_queue, sizeof(next_queue),
-                      "%s/train8/late_picks.txt", scratch);
+                      "%s/train8/late_picks.txt", f.scratch);
         ASSERT(dtkt_exists(next_queue));
-        ASSERT(dtkt_first_line(dir7, "board_post.txt", post, sizeof(post)));
+        ASSERT(dtkt_first_line(f.dir7, "board_post.txt", post, sizeof(post)));
         ASSERT(strstr(post, "train7 LANDED") != NULL);
         zcl_command_reply_free(&reply);
         json_free(&input);
@@ -523,22 +582,22 @@ int test_dev_train_keep(void)
 
     TEST("train keep: a cherry-pick conflict blocks, and blocked does not retry") {
         char q[1600], base_line[64], state_a[1024], state_b[1024];
-        (void)snprintf(base_line, sizeof(base_line), "%s\n", origin_main);
-        ASSERT(dtkt_write(dir9, "BASE", base_line));
-        ASSERT(dtkt_verdict(dir9, "v_a.txt", "LAND", sha_a));
-        ASSERT(dtkt_verdict(dir9, "v_c.txt", "LAND", sha_c));
+        (void)snprintf(base_line, sizeof(base_line), "%s\n", f.origin_main);
+        ASSERT(dtkt_write(f.dir9, "BASE", base_line));
+        ASSERT(dtkt_verdict(f.dir9, "v_a.txt", "LAND", f.sha_a));
+        ASSERT(dtkt_verdict(f.dir9, "v_c.txt", "LAND", f.sha_c));
         (void)snprintf(q, sizeof(q),
-                      "lanea %s %s/v_a.txt\nlanec %s %s/v_c.txt\n", sha_a,
-                      dir9, sha_c, dir9);
-        ASSERT(dtkt_write(dir9, "late_picks.txt", q));
+                      "lanea %s %s/v_a.txt\nlanec %s %s/v_c.txt\n", f.sha_a,
+                      f.dir9, f.sha_c, f.dir9);
+        ASSERT(dtkt_write(f.dir9, "late_picks.txt", q));
 
         struct json_value input = dtkt_input("9", false);
         struct zcl_command_reply reply;
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
         ASSERT_STR_EQ(reply.error.code, "ASSEMBLY_BLOCKED");
         ASSERT(strstr(reply.error.message, "conflict") != NULL);
-        ASSERT(dtkt_slurp(dir9, "KEEP.json", state_a, sizeof(state_a)));
+        ASSERT(dtkt_slurp(f.dir9, "KEEP.json", state_a, sizeof(state_a)));
         ASSERT(strstr(state_a, "\"state\":\"blocked\"") != NULL);
         zcl_command_reply_free(&reply);
         json_free(&input);
@@ -546,10 +605,10 @@ int test_dev_train_keep(void)
         /* The whole point of blocked: the next tick reports and does not try
          * the same failing assembly again. */
         input = dtkt_input("9", false);
-        dtkt_call(root, &input, &reply);
+        dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(dtkt_str(&reply, "state"), "blocked");
-        ASSERT(dtkt_slurp(dir9, "KEEP.json", state_b, sizeof(state_b)));
+        ASSERT(dtkt_slurp(f.dir9, "KEEP.json", state_b, sizeof(state_b)));
         ASSERT_STR_EQ(state_a, state_b);
         zcl_command_reply_free(&reply);
         json_free(&input);
@@ -557,12 +616,8 @@ int test_dev_train_keep(void)
     }
 
 _test_next:;
-    (void)unsetenv("ZCL_TRAIN_SCRATCH_ROOT");
-    (void)unsetenv("ZCL_TRAIN_WORKTREE_ROOT");
-    (void)unsetenv("ZCL_TRAIN_HELPER_DIR");
-    (void)unsetenv("ZCL_TRAIN_KEEP_NOW");
-    (void)unsetenv("XDG_STATE_HOME");
-    (void)test_rm_rf_recursive(parent);
+    dtkt_env_clear();
+    (void)test_rm_rf_recursive(f.parent);
     if (failures == 0) printf("test_dev_train_keep: all passed\n");
     else printf("test_dev_train_keep: %d FAILED\n", failures);
     return failures;
