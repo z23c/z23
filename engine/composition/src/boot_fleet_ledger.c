@@ -16,6 +16,7 @@
 #include "config/runtime.h"
 #include "boot_mesh_status_internal.h"
 
+#include "base/fleet_role_check.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "fleetledger/fleet_ledger.h"
@@ -595,6 +596,93 @@ uint64_t boot_fleet_ledger_role_refused_count(void)
     return atomic_load_explicit(&g_role_refused, memory_order_relaxed);
 }
 
+/* ── grandfathering ──────────────────────────────────────────────────── */
+
+/* At most one signer per box, plus room for boxes that rotated their online
+ * key while this replica was following them. */
+#define LEDGER_GRANDFATHER_KEYS 64u
+/* Reads per chain. A chain longer than this many batches is scanned from
+ * its start only; the keys signing its newest rows are the ones already
+ * covered by the earlier passes, because a box signs with one key at a
+ * time. Bounded so a long chain cannot turn boot into a walk of history. */
+#define LEDGER_GRANDFATHER_BATCHES 64u
+
+struct ledger_signers {
+    uint8_t keys[LEDGER_GRANDFATHER_KEYS][ZCL_FLEET_ID_BYTES];
+    size_t count;
+};
+
+static void ledger_signer_add(struct ledger_signers *set,
+                              const uint8_t key[ZCL_FLEET_ID_BYTES])
+{
+    for (size_t i = 0; i < set->count; i++) {
+        if (memcmp(set->keys[i], key, ZCL_FLEET_ID_BYTES) == 0)
+            return;
+    }
+    if (set->count < LEDGER_GRANDFATHER_KEYS)
+        memcpy(set->keys[set->count++], key, ZCL_FLEET_ID_BYTES);
+}
+
+/* Every key that signed a row in one peer's chain. The rows were verified
+ * when they were replicated in — this only reads back what was stored. */
+static void ledger_signers_of_box(struct zcl_fleet_ledger *ledger,
+                                  const uint8_t box_id[ZCL_FLEET_ID_BYTES],
+                                  uint8_t *buf, size_t cap,
+                                  struct ledger_signers *set)
+{
+    uint64_t since = 0;
+    for (unsigned pass = 0; pass < LEDGER_GRANDFATHER_BATCHES; pass++) {
+        size_t len = 0;
+        uint64_t last = 0;
+        if (zcl_fleet_ledger_read_since(ledger, box_id, since, buf, cap, &len,
+                                        &last) != ZCL_FLEET_OK ||
+            len == 0)
+            return;
+        size_t offset = 0;
+        while (offset < len) {
+            struct zcl_fleet_row row;
+            size_t used = 0;
+            if (zcl_fleet_row_decode(buf + offset, len - offset, &row,
+                                     &used) != ZCL_FLEET_OK ||
+                used == 0)
+                return;
+            ledger_signer_add(set, row.signer);
+            offset += used;
+        }
+        if (last <= since)
+            return;
+        since = last;
+    }
+}
+
+size_t boot_fleet_ledger_grandfather(struct zcl_fleet_ledger *ledger)
+{
+    struct zcl_fleet_box_status boxes[ZCL_FLEET_BOXES_MAX];
+    struct ledger_signers set;
+    memset(&set, 0, sizeof set);
+    if (!ledger)
+        return 0;
+    size_t nboxes = zcl_fleet_ledger_boxes(ledger, boxes, ZCL_FLEET_BOXES_MAX);
+    uint8_t *buf = zcl_calloc(1, FLEET_LEDGER_ANSWER_MAX,
+                              "fleet_ledger_grandfather");
+    if (!buf)
+        return 0;
+    for (size_t i = 0; i < nboxes; i++) {
+        if (boxes[i].is_self || boxes[i].rows == 0)
+            continue;
+        ledger_signers_of_box(ledger, boxes[i].box_id, buf,
+                              FLEET_LEDGER_ANSWER_MAX, &set);
+    }
+    free(buf);
+    size_t held = 0;
+    for (size_t i = 0; i < set.count; i++) {
+        if (zcl_fleet_role_grandfather(set.keys[i],
+                                       ZCL_FLEET_ROLE_ORIGIN_LEDGER))
+            held++;
+    }
+    return held;
+}
+
 /* ── lifecycle ───────────────────────────────────────────────────────── */
 
 void boot_fleet_ledger_wire(struct boot_svc_ctx *svc)
@@ -651,6 +739,18 @@ void boot_fleet_ledger_wire(struct boot_svc_ctx *svc)
     memset(g_inbox, 0, sizeof g_inbox);
     g_last_pull = 0;
     zcl_mutex_unlock(&g_ledger_lock);
+
+    /* The role bootstrap, on the evidence this box already holds: every
+     * key that signed a row in a chain this replica is carrying was a
+     * key this box accepted rows from before roles existed, so it keeps
+     * that standing rather than being refused at a gate that came
+     * later. Before the service is registered: no peer is served until
+     * the keys this node already trusted are written down. */
+    size_t held = boot_fleet_ledger_grandfather(ledger);
+    if (held)
+        LOG_INFO("fleet.ledger",
+                 "role bootstrap: %zu key(s) whose rows this node already"
+                 " holds carry the worker role", held);
 
     if (!boot_fleet_ledger_register_service()) {
         LOG_ERROR("fleet.ledger", "ledger stream service refused");

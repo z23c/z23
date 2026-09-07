@@ -181,7 +181,7 @@ the end of a batch leaves the replica exactly as it was.
 | `ledger_sig_invalid` | the signature does not verify under its own `signer` |
 | `ledger_peer_unpaired` | a row signed by a key this peer's delegation does not delegate |
 | `ledger_not_owner` | a row claiming a machine that is not the peer on this link |
-| `ledger_role_refused` | the signer's signature is good and this box has never granted that key `fleet.ledger.replicate` for this row's kind — see [`docs/FLEET_ROLES.md`](./FLEET_ROLES.md); the answer is `z23 fleet roles grant`, never a reconnection |
+| `ledger_role_refused` | the signer's signature is good and this box has never granted that key `fleet.ledger.replicate` for this row's kind — see [`docs/FLEET_ROLES.md`](./FLEET_ROLES.md). Every key whose rows this box already holds is granted that role at node start, so an upgrade does not stall replication; a key this box never carried needs `z23 fleet roles grant`, never a reconnection |
 | `ledger_delegation_expired` | the peer's master identity is no longer ACTIVE, or its delegation has run out |
 | `ledger_sequence` | sequence numbers are not dense |
 | `vital_unknown` | a `vitals` subject that is not in the catalog |

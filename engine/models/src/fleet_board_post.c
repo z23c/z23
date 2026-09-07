@@ -758,6 +758,84 @@ int db_fleet_board_recent_ids(struct node_db *ndb, int64_t now,
                                      NULL);
 }
 
+/* ── who this node has been storing posts from ───────────────────────── */
+
+/* One stored post by `key` that still verifies here. The whole list below
+ * is built from a column read, which is fast; this is the signature check
+ * that keeps a corrupted or hand-edited row from putting a key on it. */
+static bool board_host_verifies(struct node_db *ndb, const uint8_t key[32])
+{
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
+    qb_where_blob(&q, QB_C_fleet_board_posts_host_pubkey, QB_EQ, key, 32);
+    qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_DESC);
+    qb_limit(&q, 1);
+    sqlite3_stmt *s = NULL;
+    bool ok = false;
+    if (!QB_PREPARE(ndb, &q, s))
+        return false;
+    if (AR_STEP_ROW(s)) {
+        struct db_fleet_board_post row;
+        memset(&row, 0, sizeof(row));
+        ok = board_row(s, &row);
+    }
+    sqlite3_finalize(s);
+    return ok;
+}
+
+static bool board_host_seen(const uint8_t (*seen)[32], size_t count,
+                            const uint8_t *key)
+{
+    for (size_t i = 0; i < count; i++)
+        if (memcmp(seen[i], key, 32) == 0)
+            return true;
+    return false;
+}
+
+/* Newest first, one column, no signature work. A read that stops early
+ * (end of table, or a read error) yields FEWER keys, never more, so the
+ * caller's decision stays on the refusing side of any failure. */
+static size_t board_collect_hosts(struct node_db *ndb, uint8_t (*out)[32],
+                                  size_t max)
+{
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_column(&q, QB_C_fleet_board_posts_host_pubkey);
+    qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_DESC);
+    sqlite3_stmt *s = NULL;
+    size_t count = 0;
+    if (!QB_PREPARE(ndb, &q, s))
+        return 0;
+    while (count < max && AR_STEP_ROW(s)) {
+        const uint8_t *blob = sqlite3_column_blob(s, 0);
+        if (blob && sqlite3_column_bytes(s, 0) == 32 &&
+            !board_host_seen(out, count, blob))
+            memcpy(out[count++], blob, 32);
+    }
+    sqlite3_finalize(s);
+    return count;
+}
+
+int db_fleet_board_distinct_hosts(struct node_db *ndb, uint8_t (*out)[32],
+                                  size_t max)
+{
+    if (!ndb || !ndb->open || !out || max == 0)
+        return -1;
+    if (max > FLEET_BOARD_HOST_LIST_MAX)
+        max = FLEET_BOARD_HOST_LIST_MAX;
+    size_t count = board_collect_hosts(ndb, out, max);
+    size_t kept = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!board_host_verifies(ndb, out[i]))
+            continue;
+        if (kept != i)
+            memcpy(out[kept], out[i], 32);
+        kept++;
+    }
+    return (int)kept;
+}
+
 static int64_t board_scalar(struct node_db *ndb, struct qb *q)
 {
     sqlite3_stmt *s = NULL;

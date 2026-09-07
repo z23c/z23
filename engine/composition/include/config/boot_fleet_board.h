@@ -70,6 +70,13 @@ void boot_fleet_board_tick(struct msg_processor *mp, struct p2p_node *node,
 /* Record the composition context. Safe before the store opens. */
 void boot_fleet_board_wire(struct boot_svc_ctx *svc);
 
+/* Grant the worker role to every key this node is ALREADY storing posts
+ * from, through the role seam (base/fleet_role_check.h). Called once at
+ * wire, and safe to call again: a key that already holds the role is not
+ * granted twice. Returns how many of those keys hold the role afterwards;
+ * zero on a node with no checker installed, which keeps refusing. */
+size_t boot_fleet_board_grandfather(struct node_db *ndb);
+
 /* Drop per-peer state. Idempotent. */
 void boot_fleet_board_shutdown(void);
 

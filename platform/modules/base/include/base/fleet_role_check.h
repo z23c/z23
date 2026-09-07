@@ -43,8 +43,27 @@ typedef bool (*zcl_fleet_role_check_fn)(const uint8_t key[32],
                                         const char *leaf, const char *kind,
                                         char *why, size_t why_cap, void *ctx);
 
+/* Where a key's standing came from, for the one log line each grandfathered
+ * key gets. Borrowed for the call, never stored. */
+#define ZCL_FLEET_ROLE_ORIGIN_LEDGER "ledger"
+#define ZCL_FLEET_ROLE_ORIGIN_BOARD  "board"
+
+/* GRANDFATHERING. `key` signed a row or a post THIS NODE ALREADY HOLDS,
+ * stored back when nothing asked for a role. Accepting those bytes was this
+ * operator's decision to trust that key, so this writes that decision down
+ * as a signed grant and the peer keeps replicating across the upgrade
+ * instead of stalling at a gate that did not exist when its rows arrived.
+ * It is not a default-permit: the only keys it can ever name are ones
+ * already inside this node's own stores. True when the key holds the role
+ * afterwards, whether this call minted it or found it. */
+typedef bool (*zcl_fleet_role_grandfather_fn)(const uint8_t key[32],
+                                              const char *origin, void *ctx);
+
 struct zcl_fleet_role_checker {
     zcl_fleet_role_check_fn allow;
+    /* Optional. NULL means this process mints nothing, which is a fine
+     * state for a checker that only answers questions. */
+    zcl_fleet_role_grandfather_fn grandfather;
     void *ctx;
     const char *name; /* named in the log line that says who is deciding */
 };
@@ -64,6 +83,13 @@ bool zcl_fleet_role_checker_installed(void);
  * when no checker is installed, and logs that fact once per process. */
 bool zcl_fleet_role_allows(const uint8_t key[32], const char *leaf,
                            const char *kind, char *why, size_t why_cap);
+
+/* Mint (or find) the grant `key` already earned by having a row or post of
+ * its own stored here. False when no checker is installed, when it installed
+ * no grandfather, or when the grant could not be written — a node that cannot
+ * mint grants keeps refusing, which is the same fail-closed answer as
+ * before. */
+bool zcl_fleet_role_grandfather(const uint8_t key[32], const char *origin);
 
 #ifdef ZCL_TESTING
 /* Test fixture: a checker that allows every key. Present ONLY in a

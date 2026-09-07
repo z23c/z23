@@ -148,6 +148,7 @@ enum {
 #define FLEET_ENROL_WHY_ONION_INVALID "join_onion_invalid"
 #define FLEET_ENROL_WHY_RECEIPT_MALFORMED "receipt_malformed"
 #define FLEET_ENROL_WHY_BOX_SIGNATURE "box_signature_invalid"
+#define FLEET_ENROL_WHY_SIGNER_SIGNATURE "signing_key_signature_invalid"
 #define FLEET_ENROL_WHY_ROSTER_UNREADABLE "roster_unreadable"
 #define FLEET_ENROL_WHY_ROSTER_UNWRITABLE "roster_unwritable"
 #define FLEET_ENROL_WHY_ROSTER_FULL "roster_full"
@@ -185,6 +186,16 @@ struct fleet_box_facts {
     uint64_t disk_free_mb;
 };
 
+/* The key a box will SIGN WITH once it runs a node: the DHT online key in
+ * its datadir, which is what signs its board posts and its ledger rows.
+ * It is NOT the box key above — that one lives under the state root and
+ * identifies the machine to the roster. A box that has not started a node
+ * yet has no signing key, and its receipt names none; see the receipt. */
+struct fleet_signing_key {
+    uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES];
+    uint8_t seed[FLEET_ENROL_SEED_BYTES];
+};
+
 struct fleet_receipt {
     struct fleet_invite invite;
     /* The invite exactly as it arrived, so the manager re-verifies the
@@ -199,6 +210,13 @@ struct fleet_receipt {
     struct fleet_box_facts facts;
     char ssh_pubkey[FLEET_ENROL_SSH_MAX + 1]; /* "" when the box has none */
     uint8_t box_pubkey[FLEET_ENROL_PUBKEY_BYTES];
+    /* The signing key above, or all zero when the box named none.
+     * `signer_signature` is that key SIGNING this receipt up to and
+     * including itself, so naming a key here proves possession of it
+     * rather than merely asserting it. Receipts minted before this
+     * field existed carry neither, and still parse. */
+    uint8_t signer_pubkey[FLEET_ENROL_PUBKEY_BYTES];
+    uint8_t signer_signature[FLEET_ENROL_SIG_BYTES];
     uint8_t signature[FLEET_ENROL_SIG_BYTES];
 };
 
@@ -246,17 +264,25 @@ bool fleet_invite_parse(const char *text, struct fleet_invite *out,
 
 /* Sign one enrolment receipt with the box key. `invite_wire` is the token
  * bytes `fleet_invite_parse` returned. `onion` may be NULL or "" and is
- * refused by name when it is neither empty nor a v3 locator. */
+ * refused by name when it is neither empty nor a v3 locator.
+ *
+ * `signer` is the key this box will SIGN board posts and ledger rows with
+ * once it runs a node, or NULL when it has none yet. Naming it here is what
+ * lets `fleet admit` grant a role to the key the enrolled box will actually
+ * use, instead of only to the box key that identifies it. */
 bool fleet_receipt_mint(const uint8_t *invite_wire, size_t invite_wire_len,
                         const char *onion,
                         const struct fleet_box_facts *facts,
                         const char *ssh_pubkey,
                         const uint8_t seed[FLEET_ENROL_SEED_BYTES],
                         const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                        const struct fleet_signing_key *signer,
                         char *text, size_t text_cap, const char **why);
 
 /* Decode and VERIFY one receipt: the box signature over its own bytes AND
- * the operator signature on the invite it carries. Both must hold. */
+ * the operator signature on the invite it carries. Both must hold — and
+ * when the receipt names a signing key, that key's own signature over the
+ * receipt must hold as well, or the whole receipt is refused. */
 bool fleet_receipt_parse(const char *text, struct fleet_receipt *out,
                          uint8_t *wire, size_t wire_cap, size_t *wire_len,
                          const char **why);

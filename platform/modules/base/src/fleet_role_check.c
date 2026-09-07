@@ -68,6 +68,17 @@ bool zcl_fleet_role_allows(const uint8_t key[32], const char *leaf,
     return g_checker.allow(key, leaf, kind, why, why_cap, g_checker.ctx);
 }
 
+bool zcl_fleet_role_grandfather(const uint8_t key[32], const char *origin)
+{
+    if (!key || !origin)
+        return false;
+    if (!atomic_load_explicit(&g_ready, memory_order_acquire))
+        return false;
+    if (!g_checker.grandfather)
+        return false;
+    return g_checker.grandfather(key, origin, g_checker.ctx);
+}
+
 #ifdef ZCL_TESTING
 static bool role_permissive(const uint8_t key[32], const char *leaf,
                             const char *kind, char *why, size_t why_cap,

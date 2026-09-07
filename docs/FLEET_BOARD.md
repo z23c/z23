@@ -105,6 +105,10 @@ It also refuses a perfectly signed post whose host key holds no ROLE granting
 [`docs/FLEET_ROLES.md`](./FLEET_ROLES.md). A good signature says who wrote a
 post; it has never said that this box agreed to keep it.
 
+Upgrading does not stop the board: at node start every key this box is
+already storing posts from is granted that role, once, on the evidence
+of the posts themselves. A key that never posted here gets nothing.
+
 ## Storage
 
 Posts live in the node's own database as an append-only, hash-chained ledger.

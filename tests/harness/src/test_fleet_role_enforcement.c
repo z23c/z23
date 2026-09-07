@@ -20,8 +20,11 @@
 #include "test/test_core.h"
 
 #include "base/fleet_role_check.h"
+#include "config/boot_fleet_board.h"
+#include "config/boot_fleet_ledger.h"
 #include "crypto/ed25519.h"
 #include "dev/fleet_roles.h"
+#include "fleet_enrol.h"
 #include "fleetledger/fleet_ledger.h"
 #include "models/database.h"
 #include "models/fleet_board_post.h"
@@ -77,6 +80,64 @@ static void re_install(struct zcl_role_store *store)
                                         .ctx = store,
                                         .name = "test-role-store" };
     zcl_fleet_role_checker_install(&c);
+}
+
+
+/* ── the production checker's other half ─────────────────────────────── */
+
+/* The grandfathering path mints INTO the store, and a chainlog holds an
+ * exclusive lock, so this mirror of gate_allow opens per check exactly as
+ * tools/dev/fleet_roles_gate.c does rather than holding a handle open. */
+static char g_re_gate_dir[256];
+
+static bool re_gate_allow(const uint8_t key[32], const char *leaf,
+                          const char *kind, char *why, size_t why_cap,
+                          void *ctx)
+{
+    (void)ctx;
+    uint8_t fp[ZCL_ROLE_FP_BYTES];
+    struct zcl_role_report report;
+    zcl_role_fingerprint(key, fp);
+    struct zcl_role_store *s = zcl_role_store_open(g_re_gate_dir, &report);
+    if (!s)
+        return false;
+    bool ok = zcl_role_check(s, fp, false, leaf, kind, why, why_cap);
+    zcl_role_store_close(s);
+    return ok;
+}
+
+/* The clock is the test's constant, never the wall: what is being graded is
+ * which key gets a grant, not what hour it was granted in. */
+static bool re_gate_grandfather(const uint8_t key[32], const char *origin,
+                                void *ctx)
+{
+    (void)origin;
+    (void)ctx;
+    return zcl_fleet_roles_grant_worker(g_re_gate_dir, key, RE_ROW_NOW, NULL);
+}
+
+static void re_gate_install(const char *datadir)
+{
+    (void)snprintf(g_re_gate_dir, sizeof g_re_gate_dir, "%s", datadir);
+    struct zcl_fleet_role_checker c = { .allow = re_gate_allow,
+                                        .grandfather = re_gate_grandfather,
+                                        .ctx = NULL,
+                                        .name = "test-role-gate" };
+    zcl_fleet_role_checker_install(&c);
+}
+
+/* How many rows the signed grant store holds. Idempotence is a claim about
+ * ROWS, not about a return value: a bootstrap that re-granted every key
+ * would still report the same count. */
+static uint64_t re_store_rows(const char *datadir)
+{
+    struct zcl_role_report report;
+    memset(&report, 0, sizeof report);
+    struct zcl_role_store *s = zcl_role_store_open(datadir, &report);
+    if (!s)
+        return 0;
+    zcl_role_store_close(s);
+    return report.rows;
 }
 
 /* ── one ledger box ──────────────────────────────────────────────────── */
@@ -428,6 +489,200 @@ int test_fleet_role_enforcement(void)
         struct zcl_role_entry entries[8];
         ASSERT_EQ((int)zcl_role_store_list(booted, entries, 8), 3);
         zcl_role_store_close(booted);
+        PASS();
+    }
+
+    TEST("fleet roles: the keys whose rows this node already holds keep the "
+         "standing that storing them implied") {
+        char gf_root[256], gf_dir[256];
+        test_make_tmpdir(gf_root, sizeof(gf_root), "fleet_role_enforcement",
+                         "gf_ledger");
+        test_make_tmpdir(gf_dir, sizeof(gf_dir), "fleet_role_enforcement",
+                         "gf_boot");
+        ASSERT(re_file_identity(gf_dir));
+
+        struct re_box g1, g2, recv;
+        ASSERT(re_box_open(&g1, gf_root, "g1", 0x41));
+        ASSERT(re_box_open(&g2, gf_root, "g2", 0x42));
+        ASSERT(re_box_open(&recv, gf_root, "recv", 0x43));
+        ASSERT_EQ(re_add_usage(&g1, 5), ZCL_FLEET_OK);
+        ASSERT_EQ(re_add_usage(&g2, 6), ZCL_FLEET_OK);
+
+        /* Yesterday: nothing asked, so both batches were simply accepted.
+         * This is the fleet the upgrade lands on. */
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        uint8_t buf[8192];
+        size_t n = re_rows_of(&g1, buf, sizeof buf);
+        ASSERT(n > 0);
+        ASSERT_EQ(zcl_fleet_ledger_replicate(recv.ledger, g1.box_id, g1.signer,
+                                             buf, n, NULL),
+                  ZCL_FLEET_OK);
+        n = re_rows_of(&g2, buf, sizeof buf);
+        ASSERT_EQ(zcl_fleet_ledger_replicate(recv.ledger, g2.box_id, g2.signer,
+                                             buf, n, NULL),
+                  ZCL_FLEET_OK);
+
+        /* Today: the gate exists, and nothing in the store names either
+         * key. Without grandfathering this fleet stops here. */
+        re_gate_install(gf_dir);
+        ASSERT_EQ(re_add_usage(&g1, 7), ZCL_FLEET_OK);
+        uint8_t tail[8192];
+        size_t tail_len = 0;
+        uint64_t last = 0;
+        ASSERT_EQ(zcl_fleet_ledger_read_since(g1.ledger, g1.box_id, 1, tail,
+                                              sizeof tail, &tail_len, &last),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(zcl_fleet_ledger_replicate(recv.ledger, g1.box_id, g1.signer,
+                                             tail, tail_len, NULL),
+                  ZCL_FLEET_ROLE_REFUSED);
+
+        /* The boot walk, on the evidence this node already holds. */
+        ASSERT_EQ(boot_fleet_ledger_grandfather(recv.ledger), (size_t)2);
+        uint64_t rows_after_first = re_store_rows(gf_dir);
+        ASSERT_EQ((int)rows_after_first, 2);
+
+        /* The same batch that was refused a moment ago now lands. */
+        ASSERT_EQ(zcl_fleet_ledger_replicate(recv.ledger, g1.box_id, g1.signer,
+                                             tail, tail_len, NULL),
+                  ZCL_FLEET_OK);
+
+        /* A key that never had a row here is still refused: this grants the
+         * decision this node already made, and nothing wider. */
+        char why[ZCL_FLEET_ROLE_WHY_MAX];
+        ASSERT(!zcl_fleet_role_allows(stranger_pub,
+                                      ZCL_FLEET_LEAF_LEDGER_REPLICATE, "usage",
+                                      why, sizeof why));
+
+        /* Every boot runs it, so running it again must write nothing. */
+        ASSERT_EQ(boot_fleet_ledger_grandfather(recv.ledger), (size_t)2);
+        ASSERT_EQ((int)re_store_rows(gf_dir), (int)rows_after_first);
+
+        re_box_close(&recv);
+        re_box_close(&g2);
+        re_box_close(&g1);
+        test_rm_rf_recursive(gf_dir);
+        test_rm_rf_recursive(gf_root);
+        PASS();
+    }
+
+    TEST("fleet roles: the keys this node already stores posts from keep "
+         "posting, and a key that never posted still cannot") {
+        char gb_dir[256];
+        test_make_tmpdir(gb_dir, sizeof(gb_dir), "fleet_role_enforcement",
+                         "gf_board");
+        ASSERT(re_file_identity(gb_dir));
+
+        uint8_t h1_pub[32], h1_seed[32], h1_sk[32];
+        uint8_t h2_pub[32], h2_seed[32], h2_sk[32];
+        uint8_t h3_pub[32], h3_seed[32], h3_sk[32];
+        re_key(0x61, h1_pub, h1_seed, h1_sk);
+        re_key(0x62, h2_pub, h2_seed, h2_sk);
+        re_key(0x63, h3_pub, h3_seed, h3_sk);
+
+        struct node_db db;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        ASSERT_EQ(re_post(&db, h1_sk, h1_pub, FLEET_BOARD_KIND_NOTE,
+                          "stored the day before enforcement"),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(re_post(&db, h2_sk, h2_pub, FLEET_BOARD_KIND_RESULT,
+                          "also stored the day before"),
+                  FLEET_BOARD_OK);
+
+        re_gate_install(gb_dir);
+        ASSERT_EQ(re_post(&db, h1_sk, h1_pub, FLEET_BOARD_KIND_NOTE,
+                          "and the morning after"),
+                  FLEET_BOARD_ERR_ROLE);
+
+        ASSERT_EQ(boot_fleet_board_grandfather(&db), (size_t)2);
+        uint64_t rows_after_first = re_store_rows(gb_dir);
+        ASSERT_EQ((int)rows_after_first, 2);
+        ASSERT_EQ(re_post(&db, h1_sk, h1_pub, FLEET_BOARD_KIND_NOTE,
+                          "and the morning after"),
+                  FLEET_BOARD_OK);
+
+        /* The third key posted nothing here, so nothing was decided about
+         * it and the door stays shut. */
+        ASSERT_EQ(re_post(&db, h3_sk, h3_pub, FLEET_BOARD_KIND_NOTE,
+                          "a machine nobody admitted"),
+                  FLEET_BOARD_ERR_ROLE);
+
+        ASSERT_EQ(boot_fleet_board_grandfather(&db), (size_t)2);
+        ASSERT_EQ((int)re_store_rows(gb_dir), (int)rows_after_first);
+
+        node_db_close(&db);
+        test_rm_rf_recursive(gb_dir);
+        PASS();
+    }
+
+    TEST("fleet roles: an enrolment receipt names the key its box signs "
+         "with, and that key is the one admitting grants") {
+        char en_dir[256];
+        test_make_tmpdir(en_dir, sizeof(en_dir), "fleet_role_enforcement",
+                         "enrol");
+        ASSERT(re_file_identity(en_dir));
+
+        uint8_t mgr_pub[32], mgr_seed[32], mgr_sk[32];
+        uint8_t box_pub[32], box_seed[32], box_sk[32];
+        uint8_t sign_pub[32], sign_seed[32], sign_sk[32];
+        re_key(0x71, mgr_pub, mgr_seed, mgr_sk);
+        re_key(0x72, box_pub, box_seed, box_sk);
+        re_key(0x73, sign_pub, sign_seed, sign_sk);
+
+        uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+        char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct fleet_invite invite;
+        struct fleet_box_facts facts;
+        struct fleet_receipt parsed;
+        struct fleet_signing_key signing;
+        size_t invite_len = 0;
+        const char *why = NULL;
+        memset(&facts, 0, sizeof facts);
+        (void)snprintf(facts.hostname, sizeof facts.hostname, "%s", "g1");
+        memcpy(signing.pubkey, sign_pub, 32);
+        memcpy(signing.seed, sign_seed, 32);
+
+        ASSERT(fleet_invite_mint("studio", 24, "", mgr_seed, mgr_pub,
+                                 RE_ROW_NOW, token, sizeof token, &invite,
+                                 &why));
+        ASSERT(fleet_invite_parse(token, &invite, invite_wire,
+                                  sizeof invite_wire, &invite_len, &why));
+        ASSERT(fleet_receipt_mint(invite_wire, invite_len, "", &facts, "",
+                                  box_seed, box_pub, &signing, receipt,
+                                  sizeof receipt, &why));
+        ASSERT(fleet_receipt_parse(receipt, &parsed, NULL, 0, NULL, &why));
+        /* The signing key travelled, and it is not the box key. */
+        ASSERT(memcmp(parsed.signer_pubkey, sign_pub, 32) == 0);
+        ASSERT(memcmp(parsed.signer_pubkey, parsed.box_pubkey, 32) != 0);
+
+        /* What admit does with it: grant the key that will actually sign. */
+        ASSERT(zcl_fleet_roles_grant_worker(en_dir, parsed.signer_pubkey,
+                                            RE_ROW_NOW, &why));
+        re_gate_install(en_dir);
+        struct node_db db;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+        ASSERT_EQ(re_post(&db, sign_sk, sign_pub, FLEET_BOARD_KIND_NOTE,
+                          "the key the receipt named"),
+                  FLEET_BOARD_OK);
+        node_db_close(&db);
+
+        /* And a receipt that NAMES a key it cannot prove it holds is
+         * refused whole: the operator would have granted a role on it. */
+        memcpy(signing.pubkey, sign_pub, 32);
+        memcpy(signing.seed, box_seed, 32); /* somebody else's key claimed */
+        ASSERT(fleet_receipt_mint(invite_wire, invite_len, "", &facts, "",
+                                  box_seed, box_pub, &signing, receipt,
+                                  sizeof receipt, &why));
+        why = NULL;
+        ASSERT(!fleet_receipt_parse(receipt, &parsed, NULL, 0, NULL, &why));
+        ASSERT_STR_EQ(why, FLEET_ENROL_WHY_SIGNER_SIGNATURE);
+        memset(&signing, 0, sizeof signing);
+
+        test_rm_rf_recursive(en_dir);
         PASS();
     }
 

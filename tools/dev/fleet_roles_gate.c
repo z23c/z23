@@ -14,6 +14,13 @@
  * the filling in, the same way it already wires every other adapter that
  * only the top of the tree can see.
  *
+ * The checker also carries the GRANDFATHER half of the seam: the boot
+ * walks in engine/composition hand it every key whose row or post this
+ * node is already storing, and it writes down the standing that storing
+ * them implied. That is not a new decision — those bytes were accepted
+ * here — and it is what keeps a fleet replicating across the upgrade
+ * without an operator granting anything by hand.
+ *
  * THE STORE IS OPENED PER CHECK, ON PURPOSE. A chainlog takes an exclusive
  * whole-file lock, so a handle kept for the life of the node would hold
  * that lock forever and `z23 fleet roles grant` would block until the node
@@ -107,7 +114,7 @@ static bool gate_allow(const uint8_t key[32], const char *leaf,
 
 /* One grant against an already-open store and an already-loaded identity.
  * Returns true when the key holds `worker` afterwards. */
-static bool gate_grant_one(struct zcl_role_store *store,
+static bool gate_grant_one(struct zcl_role_store *store, const char *origin,
                            const uint8_t pubkey[32],
                            const uint8_t op_pub[32], const uint8_t op_seed[32],
                            int64_t now, bool *minted)
@@ -125,7 +132,7 @@ static bool gate_grant_one(struct zcl_role_store *store,
                  fp8, zcl_role_status_label(st));
         return false;
     }
-    LOG_INFO(ROLE_GATE_DOMAIN, "granted worker to enrolled key %s", fp8);
+    LOG_INFO(ROLE_GATE_DOMAIN, "granted worker to %s key %s", origin, fp8);
     if (minted)
         *minted = true;
     return true;
@@ -151,7 +158,8 @@ size_t zcl_fleet_roles_bootstrap_keys(const char *datadir,
     size_t minted = 0;
     for (size_t i = 0; i < count; i++) {
         bool one = false;
-        (void)gate_grant_one(store, keys[i], op_pub, op_seed, now, &one);
+        (void)gate_grant_one(store, "enrolled", keys[i], op_pub, op_seed, now,
+                             &one);
         if (one)
             minted++;
     }
@@ -160,9 +168,9 @@ size_t zcl_fleet_roles_bootstrap_keys(const char *datadir,
     return minted;
 }
 
-bool zcl_fleet_roles_grant_worker(const char *datadir,
-                                  const uint8_t pubkey[32], int64_t now,
-                                  const char **why)
+static bool gate_grant_named(const char *datadir, const char *origin,
+                             const uint8_t pubkey[32], int64_t now,
+                             const char **why)
 {
     uint8_t op_pub[32], op_seed[32];
     if (!datadir || !pubkey)
@@ -177,7 +185,8 @@ bool zcl_fleet_roles_grant_worker(const char *datadir,
             *why = zcl_role_status_label(report.status);
         return false;
     }
-    bool held = gate_grant_one(store, pubkey, op_pub, op_seed, now, NULL);
+    bool held = gate_grant_one(store, origin, pubkey, op_pub, op_seed, now,
+                               NULL);
     memset(op_seed, 0, sizeof op_seed);
     zcl_role_store_close(store);
     if (!held && why)
@@ -185,19 +194,55 @@ bool zcl_fleet_roles_grant_worker(const char *datadir,
     return held;
 }
 
+bool zcl_fleet_roles_grant_worker(const char *datadir,
+                                  const uint8_t pubkey[32], int64_t now,
+                                  const char **why)
+{
+    return gate_grant_named(datadir, "admitted", pubkey, now, why);
+}
+
+/* The grandfather half of the checker: a key whose row or post this node
+ * already stored gets the standing that storing it implied. Nothing here
+ * widens what a key may do — `worker` is the same role the enrolment
+ * bootstrap mints — and no key that is not already in one of this node's
+ * stores can reach this call. */
+static bool gate_grandfather(const uint8_t key[32], const char *origin,
+                             void *ctx)
+{
+    (void)ctx;
+    if (g_have_self && memcmp(key, g_self_pub, 32) == 0)
+        return true; /* our own key: `operator`, never a stored grant */
+    return gate_grant_named(g_datadir, origin, key,
+                            (int64_t)platform_time_wall_time_t(), NULL);
+}
+
 /* ── the enrolment bootstrap ─────────────────────────────────────────── */
 
+/* All-zero: the receipt named no signing key. Ed25519 refuses the
+ * identity point, so this can never collide with a real key. */
+static const uint8_t k_gate_no_key[32] = {0};
+
+/* Two keys per machine: the box key from its receipt and, when the
+ * receipt named one, the key that box signs its rows and posts with. */
+#define GATE_ROSTER_KEYS (FLEET_ENROL_ROSTER_MAX * 2u)
+
 struct gate_roster {
-    uint8_t keys[FLEET_ENROL_ROSTER_MAX][32];
+    uint8_t keys[GATE_ROSTER_KEYS][32];
     size_t count;
 };
 
 static void gate_roster_row(const struct fleet_machine *machine, void *user)
 {
     struct gate_roster *r = user;
-    if (r->count >= FLEET_ENROL_ROSTER_MAX)
+    if (r->count + 1u >= GATE_ROSTER_KEYS)
         return;
     memcpy(r->keys[r->count++], machine->receipt.box_pubkey, 32);
+    /* And the key the box said it will SIGN with, when its receipt
+     * named one. That is the key its rows and posts carry; the box
+     * key above only identifies the machine. */
+    if (r->count < GATE_ROSTER_KEYS &&
+        memcmp(machine->receipt.signer_pubkey, k_gate_no_key, 32) != 0)
+        memcpy(r->keys[r->count++], machine->receipt.signer_pubkey, 32);
 }
 
 /* Whose roster is this? On a box that joined a fleet, the operator is the
@@ -205,7 +250,7 @@ static void gate_roster_row(const struct fleet_machine *machine, void *user)
  * box that has done neither has no roster, which is a state, not an error —
  * the same answer `fleet machines` gives. */
 static bool gate_roster_authority(uint8_t out[FLEET_ENROL_PUBKEY_BYTES],
-                                  const char **why)
+                             const char **why)
 {
     bool joined = false, own_present = false;
     uint8_t seed[FLEET_ENROL_SEED_BYTES];
@@ -241,7 +286,10 @@ size_t zcl_fleet_roles_bootstrap_enrolled(const char *datadir, int64_t now,
 void zcl_fleet_roles_enforcement_start(const char *datadir)
 {
     static const struct zcl_fleet_role_checker checker = {
-        .allow = gate_allow, .ctx = NULL, .name = "fleet_roles_store"
+        .allow = gate_allow,
+        .grandfather = gate_grandfather,
+        .ctx = NULL,
+        .name = "fleet_roles_store"
     };
     uint8_t seed[32];
     char error[160];

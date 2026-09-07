@@ -4,6 +4,9 @@
 #include "config/boot_fleet_board.h"
 
 #include "config/boot_internal.h"
+#include "config/runtime.h"
+
+#include "base/fleet_role_check.h"
 #include "models/fleet_board_post.h"
 #include "net/fast_sync.h"
 #include "net/net.h"
@@ -68,6 +71,33 @@ void boot_fleet_board_wire(struct boot_svc_ctx *svc)
     s_receive_window_start = 0;
     s_receive_frames = 0;
     zcl_mutex_unlock(&s_lock);
+    /* Outside the lock: this reads the board store and may mint a
+     * grant, and neither belongs under a lock the frame path takes.
+     * Once per wire, at boot, before a single frame is served. */
+    size_t held = boot_fleet_board_grandfather(app_runtime_node_db());
+    if (held)
+        LOG_INFO("fleet.board",
+                 "role bootstrap: %zu key(s) this node already stores"
+                 " posts from hold the worker role", held);
+}
+
+/* Grandfathering. Every key this node is already storing posts from gets
+ * the role that storing them implied, so a fleet that was gossiping happily
+ * yesterday does not stall on a gate that did not exist when those posts
+ * arrived. Nothing here decides anything: the seam's installed checker mints
+ * the grant and logs each fingerprint, and a node with no checker (or no
+ * operator key to sign with) mints nothing and keeps refusing. */
+size_t boot_fleet_board_grandfather(struct node_db *ndb)
+{
+    uint8_t hosts[FLEET_BOARD_HOST_LIST_MAX][32];
+    int found = db_fleet_board_distinct_hosts(ndb, hosts,
+                                              FLEET_BOARD_HOST_LIST_MAX);
+    size_t held = 0;
+    for (int i = 0; i < found; i++) {
+        if (zcl_fleet_role_grandfather(hosts[i], ZCL_FLEET_ROLE_ORIGIN_BOARD))
+            held++;
+    }
+    return held;
 }
 
 void boot_fleet_board_shutdown(void)

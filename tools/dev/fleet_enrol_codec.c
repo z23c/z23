@@ -27,6 +27,12 @@
 #define FE_DOMAIN_INVITE "z23-fleet-invite-v1"
 #define FE_DOMAIN_RECEIPT "z23-fleet-enrol-v1"
 #define FE_DOMAIN_MACHINE "z23-fleet-machine-v1"
+/* A receipt that also names the key the box will SIGN WITH. Version 1
+ * receipts — every one minted before that field existed, including the ones
+ * already sitting in rosters — still parse; only the newer shape carries
+ * the extra key and its possession proof. */
+#define FE_RECEIPT_VERSION_SIGNER 2u
+#define FE_DOMAIN_SIGNER "z23-fleet-signer-v1"
 
 /* One signing buffer: domain string, then body. Sized for the largest body
  * plus the longest domain. */
@@ -380,9 +386,10 @@ static void fe_receipt_body(struct fe_put *p, const uint8_t *invite_wire,
                             size_t invite_wire_len, const char *onion,
                             const struct fleet_box_facts *f,
                             const char *ssh_pubkey,
-                            const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES])
+                            const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                            uint8_t version)
 {
-    fe_put_u8(p, FE_VERSION);
+    fe_put_u8(p, version);
     fe_put_be(p, invite_wire_len, 2);
     fe_put_raw(p, invite_wire, invite_wire_len);
     /* Immediately after the invite, so the locator sits beside the name it
@@ -401,12 +408,37 @@ static void fe_receipt_body(struct fe_put *p, const uint8_t *invite_wire,
     fe_put_raw(p, pubkey, FLEET_ENROL_PUBKEY_BYTES);
 }
 
+
+/* Append the signing key and its possession proof: that key signing this
+ * receipt body up to and including itself. A box can therefore name only a
+ * key it holds, which is what makes granting a role to the named key safe
+ * — the alternative, naming any key at all, would let a joining box hand
+ * the operator somebody else's key to trust. */
+static void fe_receipt_signer_seal(struct fe_put *p,
+                                   const struct fleet_signing_key *signer)
+{
+    uint8_t message[FE_SIGN_MAX];
+    uint8_t sig[FLEET_ENROL_SIG_BYTES];
+    size_t domain_len = strlen(FE_DOMAIN_SIGNER);
+    fe_put_raw(p, signer->pubkey, FLEET_ENROL_PUBKEY_BYTES);
+    if (!p->ok || p->len + domain_len > sizeof(message)) {
+        p->ok = false;
+        return;
+    }
+    memcpy(message, FE_DOMAIN_SIGNER, domain_len);
+    memcpy(message + domain_len, p->buf, p->len);
+    ed25519_sign(sig, message, domain_len + p->len, signer->seed,
+                 signer->pubkey);
+    fe_put_raw(p, sig, sizeof(sig));
+}
+
 bool fleet_receipt_mint(const uint8_t *invite_wire, size_t invite_wire_len,
                         const char *onion,
                         const struct fleet_box_facts *facts,
                         const char *ssh_pubkey,
                         const uint8_t seed[FLEET_ENROL_SEED_BYTES],
                         const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                        const struct fleet_signing_key *signer,
                         char *text, size_t text_cap, const char **why)
 {
     uint8_t body[FLEET_ENROL_RECEIPT_WIRE_MAX];
@@ -424,14 +456,44 @@ bool fleet_receipt_mint(const uint8_t *invite_wire, size_t invite_wire_len,
         fe_why(why, FLEET_ENROL_WHY_ONION_INVALID);
         return false;
     }
-    fe_receipt_body(&p, invite_wire, invite_wire_len, onion, facts, ssh_pubkey,
-                    pubkey);
+    fe_receipt_body(&p, invite_wire, invite_wire_len, onion, facts,
+                    ssh_pubkey, pubkey,
+                    signer ? FE_RECEIPT_VERSION_SIGNER : FE_VERSION);
+    if (signer)
+        fe_receipt_signer_seal(&p, signer);
     if (!p.ok) {
         fe_why(why, FLEET_ENROL_WHY_ARGUMENTS);
         return false;
     }
     return fe_seal(FE_DOMAIN_RECEIPT, body, p.len, seed, pubkey, wire,
                    sizeof(wire), &wire_len, text, text_cap, why);
+}
+
+
+/* Read the signing key and check the possession proof over everything up to
+ * and including that key. A receipt that names a key it cannot prove it
+ * holds is refused whole: half a proof is worse than none, because the
+ * operator would grant a role on it. */
+static bool fe_receipt_signer_open(struct fe_get *g, struct fleet_receipt *out,
+                                   const char **why)
+{
+    uint8_t message[FE_SIGN_MAX];
+    size_t domain_len = strlen(FE_DOMAIN_SIGNER);
+    fe_get_bytes(g, out->signer_pubkey, FLEET_ENROL_PUBKEY_BYTES);
+    size_t prefix = g->pos;
+    fe_get_bytes(g, out->signer_signature, FLEET_ENROL_SIG_BYTES);
+    if (!g->ok || prefix + domain_len > sizeof(message)) {
+        fe_why(why, FLEET_ENROL_WHY_RECEIPT_MALFORMED);
+        return false;
+    }
+    memcpy(message, FE_DOMAIN_SIGNER, domain_len);
+    memcpy(message + domain_len, g->buf, prefix);
+    if (!ed25519_verify(out->signer_signature, message, domain_len + prefix,
+                        out->signer_pubkey)) {
+        fe_why(why, FLEET_ENROL_WHY_SIGNER_SIGNATURE);
+        return false;
+    }
+    return true;
 }
 
 /* Decode a receipt body that has ALREADY had its box signature verified. */
@@ -441,7 +503,8 @@ static bool fe_receipt_fields(struct fe_get *g, size_t body_len,
     char invite_text[(FLEET_ENROL_INVITE_WIRE_MAX * 4) / 3 + 8];
     size_t invite_len = 0;
     const uint8_t *invite_at = NULL;
-    if (fe_get_u8(g) != FE_VERSION) {
+    uint8_t version = fe_get_u8(g);
+    if (version != FE_VERSION && version != FE_RECEIPT_VERSION_SIGNER) {
         fe_why(why, FLEET_ENROL_WHY_RECEIPT_MALFORMED);
         return false;
     }
@@ -472,6 +535,9 @@ static bool fe_receipt_fields(struct fe_get *g, size_t body_len,
     out->facts.disk_free_mb = fe_get_be(g, 8);
     fe_get_text(g, out->ssh_pubkey, sizeof(out->ssh_pubkey), 2);
     fe_get_bytes(g, out->box_pubkey, FLEET_ENROL_PUBKEY_BYTES);
+    if (version == FE_RECEIPT_VERSION_SIGNER &&
+        !fe_receipt_signer_open(g, out, why))
+        return false;
     if (!g->ok || g->pos != body_len) {
         fe_why(why, FLEET_ENROL_WHY_RECEIPT_MALFORMED);
         return false;
@@ -487,6 +553,20 @@ static bool fe_receipt_fields(struct fe_get *g, size_t body_len,
     return fleet_invite_parse(invite_text, &out->invite, NULL, 0, NULL, why);
 }
 
+/* How far from the END of the wire the box key sits. The wire is
+ * body||box_signature, and the body ends with the box key in a v1
+ * receipt or with the signing key and its proof after it in a v2. The
+ * version byte that says which is the body's first byte —
+ * unauthenticated at this point, but a wrong guess only produces a
+ * signature that does not verify, which is a refusal. */
+static size_t fe_receipt_tail(const uint8_t *wire, size_t len)
+{
+    size_t tail = FLEET_ENROL_SIG_BYTES + FLEET_ENROL_PUBKEY_BYTES;
+    if (len && wire[0] == FE_RECEIPT_VERSION_SIGNER)
+        tail += FLEET_ENROL_PUBKEY_BYTES + FLEET_ENROL_SIG_BYTES;
+    return tail;
+}
+
 bool fleet_receipt_parse(const char *text, struct fleet_receipt *out,
                          uint8_t *wire, size_t wire_cap, size_t *wire_len,
                          const char **why)
@@ -495,6 +575,7 @@ bool fleet_receipt_parse(const char *text, struct fleet_receipt *out,
     size_t decoded = 0, body_len = 0;
     struct fe_get g = { local, 0, 0, true };
     uint8_t box_pubkey[FLEET_ENROL_PUBKEY_BYTES];
+    size_t tail = 0;
     fe_why(why, NULL);
     memset(out, 0, sizeof(*out));
     if (!text || !text[0] ||
@@ -503,9 +584,12 @@ bool fleet_receipt_parse(const char *text, struct fleet_receipt *out,
         fe_why(why, FLEET_ENROL_WHY_RECEIPT_MALFORMED);
         return false;
     }
-    memcpy(box_pubkey,
-           local + decoded - FLEET_ENROL_SIG_BYTES - FLEET_ENROL_PUBKEY_BYTES,
-           FLEET_ENROL_PUBKEY_BYTES);
+    tail = fe_receipt_tail(local, decoded);
+    if (decoded < tail + 1u) {
+        fe_why(why, FLEET_ENROL_WHY_RECEIPT_MALFORMED);
+        return false;
+    }
+    memcpy(box_pubkey, local + decoded - tail, FLEET_ENROL_PUBKEY_BYTES);
     if (!fe_open(text, FE_DOMAIN_RECEIPT, box_pubkey, local, sizeof(local),
                  &decoded, &body_len, FLEET_ENROL_WHY_RECEIPT_MALFORMED,
                  FLEET_ENROL_WHY_BOX_SIGNATURE, why))

@@ -153,7 +153,8 @@ static bool fe_row(const char *name, uint8_t op_byte, uint8_t box_byte,
            fleet_invite_parse(token, &invite, invite_wire, sizeof(invite_wire),
                               &invite_len, &why) &&
            fleet_receipt_mint(invite_wire, invite_len, FE_ONION, &facts, ssh,
-                              box_seed, box_pub, receipt, sizeof(receipt),
+                              box_seed, box_pub, NULL, receipt,
+                              sizeof(receipt),
                               &why) &&
            fleet_receipt_parse(receipt, &parsed, receipt_wire,
                                sizeof(receipt_wire), &receipt_len, &why) &&
@@ -302,7 +303,8 @@ static int test_fe_receipt(void)
                                   sizeof(invite_wire), &invite_len, &why));
         ASSERT(fleet_receipt_mint(invite_wire, invite_len, FE_ONION, &facts,
                                   "ssh-ed25519 AAAAkey owner@box", box_seed,
-                                  box_pub, receipt, sizeof(receipt), &why));
+                                  box_pub, NULL, receipt,
+                                  sizeof(receipt), &why));
         ASSERT(fleet_receipt_parse(receipt, &parsed, NULL, 0, NULL, &why));
         /* The invite travels inside the receipt intact, so the manager
          * re-checks its OWN signature rather than trusting a retyped name. */
@@ -566,13 +568,15 @@ static int test_fe_onion_refused_at_mint(void)
                                   sizeof(invite_wire), &invite_len, &why));
         why = NULL;
         ASSERT(!fleet_receipt_mint(invite_wire, invite_len, "node4.local",
-                                   &facts, "", box_seed, box_pub, receipt,
+                                   &facts, "", box_seed, box_pub, NULL,
+                                   receipt,
                                    sizeof(receipt), &why));
         ASSERT_STR_EQ(why, FLEET_ENROL_WHY_ONION_INVALID);
         /* And an absent locator is not an error: the box simply has none. */
         why = NULL;
         ASSERT(fleet_receipt_mint(invite_wire, invite_len, "", &facts, "",
-                                  box_seed, box_pub, receipt, sizeof(receipt),
+                                  box_seed, box_pub, NULL, receipt,
+                                  sizeof(receipt),
                                   &why));
         ASSERT(why == NULL);
         PASS();

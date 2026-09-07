@@ -30,6 +30,9 @@ enum {
     FLEET_BOARD_LIST_MAX = 256,
     /* Distinct public rooms on one index page. */
     FLEET_BOARD_ROOM_LIST_MAX = 64,
+    /* Distinct signing keys one host scan reports. A fleet is the owner's
+     * own machines, so this is generous, not a limit anybody meets. */
+    FLEET_BOARD_HOST_LIST_MAX = 64,
 };
 
 struct db_fleet_board_post {
@@ -147,6 +150,17 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
                               int64_t *last_seq_out);
 
 bool db_fleet_board_have(struct node_db *ndb, const uint8_t id[32]);
+
+/* Every distinct key that signed a post this node is storing, newest post
+ * first, capped at FLEET_BOARD_HOST_LIST_MAX. A key appears only when at
+ * least one of its stored posts still verifies here, so a tampered row
+ * cannot put a key on the list. Returns the count written, or -1 when the
+ * store could not be read. This is what the role bootstrap asks: these are
+ * the keys this node has ALREADY been accepting posts from.
+ * Expiry is not applied — the question is who was trusted, not what is
+ * still worth reading. */
+int db_fleet_board_distinct_hosts(struct node_db *ndb, uint8_t (*out)[32],
+                                  size_t max);
 
 /* The distinct rooms a public reader can reach, for the read-only /board
  * pages: every room named by a non-fleet post, with legacy rows' empty

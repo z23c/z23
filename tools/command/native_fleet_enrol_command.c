@@ -26,6 +26,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/clock.h"
+#include "vcs/zcode_dht_identity.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -130,6 +131,25 @@ static void fe_join_facts(struct json_value *out, const char *onion,
     json_free(&self);
 }
 
+/* The key this box will SIGN board posts and ledger rows with, when it
+ * already has one: the node's DHT online key, in its datadir. LOAD
+ * ONLY. `fleet join` runs on a box that may never have started a node,
+ * and minting a durable node identity as a side effect of joining is a
+ * decision this leaf has no business making. A box with no key yet
+ * names none, and the reply says what to do about that. */
+static const struct fleet_signing_key *fe_signing_key(
+    struct fleet_signing_key *out)
+{
+    const char *datadir = zcl_native_command_datadir();
+    char err[160];
+    memset(out, 0, sizeof(*out));
+    if (!datadir ||
+        !vcs_zcode_dht_online_key_load(datadir, out->seed, out->pubkey, err,
+                                       sizeof(err)))
+        return NULL;
+    return out;
+}
+
 static void fe_join(const struct zcl_command_request *request,
                     struct zcl_command_reply *reply)
 {
@@ -141,6 +161,8 @@ static void fe_join(const struct zcl_command_request *request,
     char ssh[FLEET_ENROL_SSH_MAX + 1];
     struct fleet_invite invite;
     struct fleet_box_facts facts;
+    struct fleet_signing_key signing;
+    const struct fleet_signing_key *signer = NULL;
     size_t invite_len = 0;
     const char *token = json_get_str(json_get(request ? request->input : NULL,
                                               "token"));
@@ -189,13 +211,16 @@ static void fe_join(const struct zcl_command_request *request,
     }
     fleet_enrol_facts_collect(&facts);
     fleet_enrol_ssh_pubkey(ssh, sizeof(ssh));
+    /* Loaded here, at the last moment before it is used, so no refusal
+     * path above leaves a private seed sitting in this frame. */
+    signer = fe_signing_key(&signing);
     if (!fleet_receipt_mint(invite_wire, invite_len, onion, &facts, ssh, seed,
-                            pubkey,
-                            receipt, sizeof(receipt), &why)) {
+                            pubkey, signer, receipt, sizeof(receipt), &why)) {
         fe_fail(reply, "FLEET_RECEIPT_REFUSED", "execute",
                 "this box could not sign its enrolment receipt.", why);
         return;
     }
+    memset(&signing, 0, sizeof(signing)); /* the seed leaves no trace */
     zcl_hex_encode(pubkey, FLEET_ENROL_PUBKEY_BYTES, hex);
     (void)snprintf(line, sizeof(line), "z23 fleet admit %s", receipt);
     (void)json_push_kv_str(&reply->data, "schema", "zcl.fleet.join.v1");
@@ -203,6 +228,17 @@ static void fe_join(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "box_pubkey", hex);
     (void)json_push_kv_str(&reply->data, "relay", invite.relay);
     (void)json_push_kv_bool(&reply->data, "bridge_key_present", ssh[0] != '\0');
+    /* Typed, because the operator needs to know whether admitting this
+     * receipt will cover the key this box signs with. */
+    (void)json_push_kv_bool(&reply->data, "signing_key_named",
+                            signer != NULL);
+    (void)json_push_kv_str(
+        &reply->data, "signing_key",
+        signer ? "named in this receipt, so admitting it grants a role to "
+                 "the key this box will post and replicate with"
+               : "this box has not started a node yet, so this receipt "
+                 "names none; run `z23 fleet join` again after the first "
+                 "node start and admit that receipt too");
     (void)json_push_kv_str(&reply->data, "receipt", receipt);
     (void)json_push_kv_str(&reply->data, "admit_command", line);
     (void)json_push_kv_str(&reply->data, "paste_to",
@@ -325,6 +361,11 @@ static void fe_admit_bridge(struct zcl_command_reply *reply,
                                  : "a line for this box was already present");
 }
 
+/* All-zero: the receipt named no signing key. A key of all zeroes is
+ * not a key — ed25519 refuses the identity point — so this cannot
+ * collide with a real one. */
+static const uint8_t k_fe_no_key[FLEET_ENROL_PUBKEY_BYTES] = {0};
+
 /* Admitting a machine IS the operator's decision to trust it, so the role
  * that decision implies is minted here rather than left as a second command
  * the owner has to remember. Idempotent: re-admitting a box that already
@@ -334,19 +375,43 @@ static void fe_admit_bridge(struct zcl_command_reply *reply,
  * node-free — the box being admitted has no datadir yet and neither may the
  * manager — so a manager with no operator identity still enrols the machine
  * and says plainly that the grant is outstanding. */
+
 static void fe_admit_role(struct zcl_command_reply *reply,
-                          const uint8_t box_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                          const struct fleet_receipt *receipt,
                           int64_t now)
 {
     const char *why = NULL;
     const char *datadir = zcl_native_command_datadir();
     bool granted = datadir &&
-                   zcl_fleet_roles_grant_worker(datadir, box_pubkey, now, &why);
+                   zcl_fleet_roles_grant_worker(datadir,
+                                                receipt->box_pubkey,
+                                                now, &why);
     (void)json_push_kv_bool(&reply->data, "worker_role_granted", granted);
     if (!granted)
         (void)json_push_kv_str(&reply->data, "worker_role_why",
                                why ? why : "this box has no datadir to keep a "
                                            "role store in");
+    /* And the key the box will actually SIGN with, when its receipt
+     * names one. That is the key its board posts and ledger rows
+     * carry, so without this the roster would hold a role for a key
+     * that never signs anything. */
+    bool named = memcmp(receipt->signer_pubkey, k_fe_no_key,
+                        sizeof(k_fe_no_key)) != 0;
+    why = NULL;
+    bool signing_granted =
+        named && datadir &&
+        zcl_fleet_roles_grant_worker(datadir, receipt->signer_pubkey, now,
+                                     &why);
+    (void)json_push_kv_bool(&reply->data, "signing_key_role_granted",
+                            signing_granted);
+    if (!signing_granted)
+        (void)json_push_kv_str(
+            &reply->data, "signing_key_why",
+            named ? (why ? why : "the grant row could not be written")
+                  : "this receipt names no signing key: the box had not "
+                    "started a node when it joined. Run `z23 fleet join` "
+                    "there again after its first node start and admit the "
+                    "new receipt, or the rows it signs are refused.");
 }
 
 static void fe_admit(const struct zcl_command_request *request,
@@ -408,7 +473,7 @@ static void fe_admit(const struct zcl_command_request *request,
     (void)json_push_kv_int(&reply->data, "relay_port", port);
     (void)json_push_kv_int(&reply->data, "enrolled_at", now);
     (void)json_push_kv_bool(&reply->data, "re_enrolled", scan.same_box);
-    fe_admit_role(reply, receipt.box_pubkey, now);
+    fe_admit_role(reply, &receipt, now);
     fe_admit_bridge(reply, &receipt, port,
                     !(bridge && strcmp(bridge, "no") == 0));
     (void)zcl_command_reply_add_next(reply, "fleet.machines", "{}",

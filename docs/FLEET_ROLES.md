@@ -117,27 +117,43 @@ gate that is only closed when somebody remembered to close it is not a gate.
 
 ### Bootstrap
 
-Enforcement would stop a fleet that was replicating happily the day before,
-so two paths mint the role that admitting a machine already implied:
+Enforcement must not stop a fleet that was replicating happily the day
+before, and it must not need the operator to grant anything by hand. Three
+paths mint the role that a decision already made implies. All three are
+idempotent, so every one of them is safe to run at every boot.
 
-* `z23 fleet admit` grants `worker` to the key it just enrolled, and says in
-  its reply whether the grant landed. Re-admitting the same box writes no
-  second row.
-* At every node start, every key in the machine roster that holds no grant
-  is granted `worker`, each one logged by fingerprint once. Running it again
-  mints nothing, so this is a migration that is safe to leave in place.
+* **What this node already accepted.** At node start, every key that signed
+  a row in a ledger chain this box is carrying, and every key that signed a
+  board post this box is storing, is granted `worker` if it holds nothing.
+  Those rows and posts were accepted here, by this node, under the rules of
+  the day: this writes that decision down rather than making a new one. A
+  key that never had a row or a post here is not on the list and is still
+  refused. Each key is logged once by fingerprint, with a count.
+* **What enrolment says.** `z23 fleet join` names, in its receipt, the key
+  the box will actually SIGN with — its node's online key — and signs the
+  receipt with that key too, so naming it proves possession of it. `z23
+  fleet admit` grants `worker` to that key AND to the box key, and says in
+  its reply whether each grant landed.
+* **The roster.** At every node start, every key in the machine roster that
+  holds no grant is granted `worker` — both the box key and, when the
+  receipt named one, the signing key.
 
-**On a node with no operator identity** — no delegation filed — the
-bootstrap mints nothing, because there is no key to sign a grant with, and
-it says so in the log. Enforcement still stands: every foreign-signed row
-and post is refused until an operator identity exists and
-`z23 fleet roles grant` can run. The node's OWN key is unaffected either
-way; it is recognised by identity, never looked up in the store.
+A box that has never started a node has no signing key yet, so its receipt
+names none and `fleet admit` says so. Running `z23 fleet join` again after
+that box's first node start produces a receipt that does name it; admitting
+that receipt grants it. Until then the box's rows are refused, and the count
+in `fleet ledger status` / `fleet board status` says how many.
+
+**On a node with no operator identity** — no delegation filed — every one of
+these mints nothing, because there is no key to sign a grant with, and it
+says so in the log. Enforcement still stands: every foreign-signed row and
+post is refused until an operator identity exists and `z23 fleet roles
+grant` can run. The node's OWN key is unaffected either way; it is
+recognised by identity, never looked up in the store.
 
 **A roster key is not a host key.** The roster records the box key from
 `fleet join` (`box.ed25519` under the state root); a node signs board posts
 and ledger rows with its DHT ONLINE key, in its datadir. They are two
-different keys on purpose, and the boot migration grants the first. Until a
-join also records the second, the operator grants each peer's host key by
-hand — the fingerprint prefix is printed in every refusal, and
-`fleet ledger status` / `fleet board status` say how many were refused.
+different keys on purpose, which is why the receipt now carries both and why
+the first two paths above exist: nothing on an upgraded fleet has to be
+granted by hand.
