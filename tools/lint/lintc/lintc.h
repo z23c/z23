@@ -372,5 +372,9 @@ int check_vcs_no_sha1_run(int argc, char **argv);
 int check_vcs_no_sha1_selftest(void);
 int check_blocker_remedy_run(int argc, char **argv);
 int check_blocker_remedy_selftest(void);
+int check_stable_publish_containment_run(int argc, char **argv);
+int check_stable_publish_containment_selftest(void);
+int check_service_result_convergence_run(int argc, char **argv);
+int check_service_result_convergence_selftest(void);
 
 #endif

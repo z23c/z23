@@ -184,6 +184,11 @@ static const struct lint_gate k_gates[] = {
     { "check-vcs-no-sha1", check_vcs_no_sha1_run, check_vcs_no_sha1_selftest },
     { "check-blocker-remedy", check_blocker_remedy_run,
       check_blocker_remedy_selftest },
+    { "check-stable-publish-contained", check_stable_publish_containment_run,
+      check_stable_publish_containment_selftest },
+    { "check-service-result-convergence",
+      check_service_result_convergence_run,
+      check_service_result_convergence_selftest },
 };
 
 int main(int argc, char **argv)

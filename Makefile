@@ -5362,6 +5362,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_supervisor_registration.c \
     tools/lint/lintc/gate_vcs_sha1_fence.c \
     tools/lint/lintc/gate_blocker_remedy.c \
+    tools/lint/lintc/gate_publish_containment.c \
+    tools/lint/lintc/gate_service_result_convergence.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11175,7 +11177,7 @@ check-release-no-dev-symbols:
 # Phase-0 release containment.  Remove this gate only in the same reviewed
 # change that lands immutable exact-candidate evidence, signed manifests, and
 # the stable publisher; a copy-proof marker alone never authorizes upload.
-check-stable-publish-contained:
+check-stable-publish-contained: $(LINTC_TOOL)
 	@echo "══ LINT: stable network publishing contained ══"
 	@bash tools/scripts/check_stable_publish_containment.sh --self-test
 	@bash tools/scripts/check_stable_publish_containment.sh
@@ -12935,7 +12937,7 @@ check-no-secret-printf: $(LINTC_TOOL)
 # zcl_result somewhere, so a "mixed" file can be E2-clean forever). Baseline
 # at tools/scripts/service_result_convergence_baseline.txt may only shrink;
 # see docs/work/service-result-convergence.md for the inventory + lane plan.
-check-service-result-convergence:
+check-service-result-convergence: $(LINTC_TOOL)
 	@echo "══ LINT: service-result convergence (Phase 3 ratchet) ══"
 	@./tools/scripts/check_service_result_convergence.sh
 
