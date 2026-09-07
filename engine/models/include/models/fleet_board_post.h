@@ -33,6 +33,16 @@ enum {
     /* Distinct signing keys one host scan reports. A fleet is the owner's
      * own machines, so this is generous, not a limit anybody meets. */
     FLEET_BOARD_HOST_LIST_MAX = 64,
+
+    /* PUBLIC-scope quota: a stranger key needs no grant to post to a public
+     * room, so this is the only thing standing between one key and a flood.
+     * Two independent ceilings, both per signing key: a rolling-window rate
+     * (bursts) and a lifetime stored count (a slow trickle that never
+     * bursts but never stops). Either one being spent refuses the post;
+     * neither one touches FLEET-scope rows or the global store cap above. */
+    FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS = 600,   /* 10 minutes */
+    FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX = 60,        /* posts / key / window */
+    FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX = 1000,      /* posts / key, ever */
 };
 
 struct db_fleet_board_post {

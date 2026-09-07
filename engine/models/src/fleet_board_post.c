@@ -382,13 +382,62 @@ static bool board_role_allows(const struct fleet_board_post *post)
     return false;
 }
 
+/* One capped count: how many PUBLIC-scope rows this key already has, with an
+ * optional "and received after `since`" narrowing for the rolling window.
+ * `since < 0` means "no time floor" — the lifetime count. Caller holds board
+ * lock; a query error refuses rather than reporting an empty count, same as
+ * every other aggregate in this file. */
+static bool board_public_count(struct node_db *ndb,
+                               const uint8_t host_pubkey[32], int64_t since,
+                               int64_t *out)
+{
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_count_star(&q);
+    qb_where_blob(&q, QB_C_fleet_board_posts_host_pubkey, QB_EQ, host_pubkey,
+                 32);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_EQ,
+                FLEET_BOARD_SCOPE_PUBLIC);
+    if (since >= 0)
+        qb_where_int(&q, QB_C_fleet_board_posts_received_at, QB_GT, since);
+    return board_aggregate_checked(ndb, &q, out);
+}
+
+/* The only anti-flood check a PUBLIC-scope post gets, since it carries no
+ * role grant at all: two independent per-key ceilings, a rolling-window
+ * rate and a lifetime stored count. `received_at` drives the window, not
+ * the post's own signed `created_at` — the signer chooses the latter, this
+ * node chooses the former, so a flood cannot buy a fresh window by lying
+ * about its clock. */
+static bool board_public_quota_ok(struct node_db *ndb,
+                                  const uint8_t host_pubkey[32], int64_t now)
+{
+    int64_t total = 0;
+    if (!board_public_count(ndb, host_pubkey, -1, &total)) {
+        LOG_WARN("fleet.board", "public quota lifetime aggregate failed");
+        return false;
+    }
+    if (total >= FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX)
+        return false;
+
+    int64_t windowed = 0;
+    int64_t since = now - (int64_t)FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS;
+    if (!board_public_count(ndb, host_pubkey, since, &windowed)) {
+        LOG_WARN("fleet.board", "public quota window aggregate failed");
+        return false;
+    }
+    return windowed < FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX;
+}
+
 /* Everything that must hold before a post is even considered for storage,
- * cheapest question first: shape, then time, then signature, then the role
- * the verified key holds here. The first two reject the bulk of a flood
- * before any curve arithmetic, and the role check comes last because it is
- * only meaningful once the key is proven to have signed these bytes. */
+ * cheapest question first: shape, then time, then signature, then either
+ * the quota (PUBLIC — any key, no grant needed) or the role the verified
+ * key holds here (every other scope, unchanged). The first two reject the
+ * bulk of a flood before any curve arithmetic, and both admission paths
+ * come last because each is only meaningful once the key is proven to have
+ * signed these bytes. */
 static enum fleet_board_result board_ingest_admissible(
-    const struct fleet_board_post *post, int64_t now)
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now)
 {
     enum fleet_board_result r = fleet_board_post_validate(post);
     if (r != FLEET_BOARD_OK)
@@ -399,6 +448,10 @@ static enum fleet_board_result board_ingest_admissible(
     r = fleet_board_post_verify(post);
     if (r != FLEET_BOARD_OK)
         return r;
+    if (post->scope == FLEET_BOARD_SCOPE_PUBLIC) {
+        return board_public_quota_ok(ndb, post->host_pubkey, now)
+                   ? FLEET_BOARD_OK : FLEET_BOARD_ERR_QUOTA;
+    }
     return board_role_allows(post) ? FLEET_BOARD_OK : FLEET_BOARD_ERR_ROLE;
 }
 
@@ -411,7 +464,7 @@ enum fleet_board_result db_fleet_board_post_ingest(
     if (!ndb || !ndb->open || !post)
         return FLEET_BOARD_ERR_ARGS;
 
-    enum fleet_board_result r = board_ingest_admissible(post, now);
+    enum fleet_board_result r = board_ingest_admissible(ndb, post, now);
     if (r != FLEET_BOARD_OK)
         return r;
 
