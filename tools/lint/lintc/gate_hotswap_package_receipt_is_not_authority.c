@@ -49,7 +49,7 @@ static int hpr_ident(unsigned char c)
         || (c >= 'a' && c <= 'z') || c == '_';
 }
 
-/* GNU \b lead-boundary: reject a match whose preceding byte is an
+/* GNU \b lead-boundary: reject a match whose preceding byte is an // posix-ere-ok: prose describing the technique, not a regex
  * identifier byte (so "xfopen(" does not count as a bare "fopen("). */
 static int hpr_lead_ok(const char *line, const regmatch_t *m)
 {

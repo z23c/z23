@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "base/hex.h"
 #include "lintc.h"
 #include "gate_fleet_airship_rules_priv.h"
 
@@ -111,7 +112,7 @@ static int far_check_verifs(const struct far_list *rows,
 }
 
 /* awk -v f="$fact" processes C-style escapes in the assigned value before
- * the comparison runs (gawk: \\ \" \/ \a \b \f \n \r \t \v, \ooo octal,
+ * the comparison runs (gawk: \\ \" \/ \a \b \f \n \r \t \v, \ooo octal, // posix-ere-ok: prose listing escape letters, not a regex
  * \xhh hex; an unknown escape drops the backslash). The rule loop's $fact
  * stays verbatim — only the lookup key is unescaped — so a fact named
  * esc\"aped is reported undeclared even when a FACT row carries it. */
@@ -133,12 +134,11 @@ static char far_esc_octal(const char *s, size_t *pi)
 static char far_esc_hex(const char *s, size_t *pi)
 {
     size_t i = *pi;
-    int v = 0, d = 0;
-    while (d < 2 && isxdigit((unsigned char)s[i + 1])) {
+    int v = 0, d = 0, nib;
+    while (d < 2 && (nib = zcl_hex_nibble(s[i + 1], true)) >= 0) {
         i++;
         d++;
-        v = v * 16 + (isdigit((unsigned char)s[i])
-               ? s[i] - '0' : tolower((unsigned char)s[i]) - 'a' + 10);
+        v = v * 16 + nib;
     }
     *pi = i;
     return d ? (char)v : 'x';
@@ -163,7 +163,7 @@ static int far_awk_unescape(const char *s, char *out, size_t cap)
             out[w++] = far_esc_hex(s, &i);
         else {
             const char *esc = "abfnrtv\\\"/";
-            const char *rep = "\a\b\f\n\r\t\v\\\"/";
+            const char *rep = "\a\b\f\n\r\t\v\\\"/"; // posix-ere-ok: C escape-char string, not a regex
             const char *hit = strchr(esc, c);
             out[w++] = hit ? rep[hit - esc] : c;
         }

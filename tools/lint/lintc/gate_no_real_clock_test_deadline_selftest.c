@@ -89,7 +89,7 @@ static int nrc_st_expect(const struct nrc_st_env *e, int want_fail,
 static const char k_nrc_st_bare_assert[] =
     "int t_probe(void) {\n"
     "    int64_t started = clock_gettime_stub();\n"
-    "    ASSERT(clock_gettime(CLOCK_MONOTONIC, &ts) == 0 && ts.tv_sec - "
+    "    ASSERT(clock_gettime(CLOCK_MONOTONIC, &ts) == 0 && ts.tv_sec - " // platform-ok: fixture text the gate must trip on, never compiled
     "started < 1);\n"
     "    return 0;\n"
     "}\n";
@@ -104,7 +104,7 @@ static const char k_nrc_st_bare_poll[] =
     "}\n";
 static const char k_nrc_st_marked_assert[] =
     "int t_probe(void) {\n"
-    "    ASSERT(clock_gettime(CLOCK_MONOTONIC, &ts) == 0); /* real-clock: "
+    "    ASSERT(clock_gettime(CLOCK_MONOTONIC, &ts) == 0); /* real-clock: " // platform-ok: fixture text the gate must trip on, never compiled
     "selftest fixture */\n"
     "    return 0;\n"
     "}\n";
