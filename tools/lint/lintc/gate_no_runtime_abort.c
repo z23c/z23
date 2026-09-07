@@ -175,26 +175,22 @@ static void nra_trim(char *s)
  * with a reason of >= 6 characters after trimming a trailing block-comment
  * closer and whitespace. Operates on the RAW (unscrubbed) line, matching
  * the awk's has_hatch($0). */
-static int nra_has_hatch(const char *s)
+/* Nearest of a "//" line comment opener and a block-comment opener in s,
+ * or NULL if neither is present. */
+static const char *nra_nearest_comment(const char *s)
 {
-    const char *p = strstr(s, "abort-ok:");
-    if (!p)
-        return 0;
     const char *c1 = strstr(s, "//");
     const char *c2 = strstr(s, "/*");
-    const char *co = NULL;
     if (c1 && c2)
-        co = (c1 < c2) ? c1 : c2;
-    else
-        co = c1 ? c1 : c2;
-    if (!co || co > p)
-        return 0;
-    char reason[512];
-    const char *r = p + 9; /* strlen("abort-ok:") */
-    if (ovf(snprintf(reason, sizeof reason, "%s", r), sizeof reason))
-        return 0;
-    /* Trim leading whitespace, a trailing block-comment closer plus any
-     * whitespace around it, then any remaining trailing whitespace. */
+        return (c1 < c2) ? c1 : c2;
+    return c1 ? c1 : c2;
+}
+
+/* Trim leading whitespace, a trailing block-comment closer plus any
+ * whitespace around it, then any remaining trailing whitespace; return the
+ * trimmed length. */
+static size_t nra_hatch_trim_len(char *reason)
+{
     char *t = reason;
     while (*t == ' ' || *t == '\t')
         t++;
@@ -206,7 +202,22 @@ static int nra_has_hatch(const char *s)
     }
     while (n && (t[n - 1] == ' ' || t[n - 1] == '\t'))
         n--;
-    return (int)n >= 6;
+    return n;
+}
+
+static int nra_has_hatch(const char *s)
+{
+    const char *p = strstr(s, "abort-ok:");
+    if (!p)
+        return 0;
+    const char *co = nra_nearest_comment(s);
+    if (!co || co > p)
+        return 0;
+    char reason[512];
+    const char *r = p + 9; /* strlen("abort-ok:") */
+    if (ovf(snprintf(reason, sizeof reason, "%s", r), sizeof reason))
+        return 0;
+    return (int)nra_hatch_trim_len(reason) >= 6;
 }
 
 /* [^_[:alnum:]](assert|abort)[ \t]*\( with an equivalent start-of-string
@@ -449,66 +460,101 @@ static int nra_write_update(const struct nra_ctx *c, const struct nra_rows *rows
     return rc;
 }
 
-static int nra_report(const struct nra_ctx *c, const struct nra_rows *rows,
-                      const struct nra_list *files, struct nra_baseline *base,
-                      FILE *out)
+/* Per-file site counts (kind==NRA_SITE only); *hatched gets the annotated
+ * (kind==NRA_HATCH) count, *total the counted-site total. */
+static int nra_count_rows(const struct nra_rows *rows, struct nra_baseline *counts,
+                          int *total, int *hatched)
 {
-    struct nra_baseline counts; memset(&counts, 0, sizeof counts);
-    int rc = 0, total = 0, hatched = 0;
+    int rc = 0;
+    *total = 0;
+    *hatched = 0;
     for (size_t i = 0; rc == 0 && i < rows->n; i++) {
-        if (rows->v[i].kind == NRA_HATCH) { hatched++; continue; }
-        total++;
-        struct nra_base_row *r = nra_base_find(&counts, rows->v[i].path);
+        if (rows->v[i].kind == NRA_HATCH) { (*hatched)++; continue; }
+        (*total)++;
+        struct nra_base_row *r = nra_base_find(counts, rows->v[i].path);
         if (r) r->allowed++;
-        else rc = nra_base_push(&counts, rows->v[i].path, 1);
+        else rc = nra_base_push(counts, rows->v[i].path, 1);
     }
-    struct nra_list violations = { NULL, 0, 0 };
-    int tolerated = 0;
-    for (size_t i = 0; rc == 0 && i < counts.n; i++) {
-        struct nra_base_row *b = nra_base_find(base, counts.v[i].path);
+    return rc;
+}
+
+/* Ratchet each observed per-file count against the baseline: a file not in
+ * the baseline, or over its allowed count, is a violation; otherwise
+ * tolerated. Marks each matched baseline row used=1 for the stale pass. */
+static int nra_judge_files(const struct nra_baseline *counts,
+                           struct nra_baseline *base,
+                           struct nra_list *violations, int *tolerated)
+{
+    int rc = 0;
+    *tolerated = 0;
+    for (size_t i = 0; rc == 0 && i < counts->n; i++) {
+        struct nra_base_row *b = nra_base_find(base, counts->v[i].path);
         if (b)
             b->used = 1;
         char line[1024];
         if (!b) {
             snprintf(line, sizeof line, "  %s — %d runtime abort site(s), not in the baseline",
-                     counts.v[i].path, counts.v[i].allowed);
-            rc = nra_push_s(&violations, line);
-        } else if (counts.v[i].allowed > b->allowed) {
+                     counts->v[i].path, counts->v[i].allowed);
+            rc = nra_push_s(violations, line);
+        } else if (counts->v[i].allowed > b->allowed) {
             snprintf(line, sizeof line,
                      "  %s — %d runtime abort site(s), baseline allows %d",
-                     counts.v[i].path, counts.v[i].allowed, b->allowed);
-            rc = nra_push_s(&violations, line);
+                     counts->v[i].path, counts->v[i].allowed, b->allowed);
+            rc = nra_push_s(violations, line);
         } else {
-            tolerated++;
+            (*tolerated)++;
         }
     }
+    return rc;
+}
+
+static int nra_print_violations(const struct nra_ctx *c,
+                                const struct nra_list *violations, FILE *out)
+{
+    fprintf(out, "\n[%s] %zu file(s) gained a runtime abort primitive on a\n"
+            "        network-reachable path. assert() is LIVE in this build, so each\n"
+            "        of these kills the process on a failed assumption:\n",
+            k_gate, violations->n);
+    for (size_t i = 0; i < violations->n; i++)
+        fprintf(out, "%s\n", violations->v[i]);
+    fputs("\n  Reject the input instead of aborting on it:\n"
+          "    return false / -1, log the reason with LOG_FAIL/LOG_ERR/LOG_NULL,\n"
+          "    and let the caller report it. That is how every other rejection\n"
+          "    in this tree behaves, and the node keeps running.\n"
+          "  An assertion about a LAYOUT or a CONSTANT becomes _Static_assert,\n"
+          "  which this gate deliberately does not count.\n"
+          "  An abort that is CORRECT — where continuing would leak plaintext,\n"
+          "  forge a key, or silently mis-verify a signature — is annotated in\n"
+          "  place with:  // abort-ok:<reason>   (reason required, >= 6 chars).\n"
+          "  Worked examples: core/modules/sapling/src/note_encryption.c (esk repeat),\n"
+          "  contexts/wallet/modules/keys/src/pubkey.c (process-wide verify context lifecycle).\n",
+          out);
+    return fprintf(out, "  Raising a number in %s is NOT a fix; counts may only shrink.\n",
+                  c->baseline) < 0;
+}
+
+static int nra_report(const struct nra_ctx *c, const struct nra_rows *rows,
+                      const struct nra_list *files, struct nra_baseline *base,
+                      FILE *out)
+{
+    struct nra_baseline counts; memset(&counts, 0, sizeof counts);
+    int total = 0, hatched = 0;
+    int rc = nra_count_rows(rows, &counts, &total, &hatched);
+
+    struct nra_list violations = { NULL, 0, 0 };
+    int tolerated = 0;
+    if (rc == 0)
+        rc = nra_judge_files(&counts, base, &violations, &tolerated);
+
     struct nra_list stale = { NULL, 0, 0 };
     for (size_t i = 0; rc == 0 && i < base->n; i++)
         if (!base->v[i].used)
             rc = nra_push_s(&stale, base->v[i].path);
+
     int fail = 0;
     if (rc == 0 && violations.n) {
         fail = 1;
-        fprintf(out, "\n[%s] %zu file(s) gained a runtime abort primitive on a\n"
-                "        network-reachable path. assert() is LIVE in this build, so each\n"
-                "        of these kills the process on a failed assumption:\n",
-                k_gate, violations.n);
-        for (size_t i = 0; i < violations.n; i++)
-            fprintf(out, "%s\n", violations.v[i]);
-        fputs("\n  Reject the input instead of aborting on it:\n"
-              "    return false / -1, log the reason with LOG_FAIL/LOG_ERR/LOG_NULL,\n"
-              "    and let the caller report it. That is how every other rejection\n"
-              "    in this tree behaves, and the node keeps running.\n"
-              "  An assertion about a LAYOUT or a CONSTANT becomes _Static_assert,\n"
-              "  which this gate deliberately does not count.\n"
-              "  An abort that is CORRECT — where continuing would leak plaintext,\n"
-              "  forge a key, or silently mis-verify a signature — is annotated in\n"
-              "  place with:  // abort-ok:<reason>   (reason required, >= 6 chars).\n"
-              "  Worked examples: core/modules/sapling/src/note_encryption.c (esk repeat),\n"
-              "  contexts/wallet/modules/keys/src/pubkey.c (process-wide verify context lifecycle).\n",
-              out);
-        fprintf(out, "  Raising a number in %s is NOT a fix; counts may only shrink.\n",
-                c->baseline);
+        rc = nra_print_violations(c, &violations, out);
     }
     if (rc == 0 && stale.n) {
         fail = 1;
