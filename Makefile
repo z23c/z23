@@ -5321,6 +5321,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_state_hygiene_fences.c \
     tools/lint/lintc/gate_supervisor_domain.c \
     tools/lint/lintc/gate_supervisor_domain_workers.c \
+    tools/lint/lintc/gate_controller_private_headers.c \
+    tools/lint/lintc/gate_controller_private_headers_workers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11752,7 +11754,7 @@ check-shape-include-direction:
 # Controller private headers belong to their dynamically-derived source
 # family. Existing external production edges are exact shrink-only debt;
 # tests and private-to-private composition are allowed.
-check-controller-private-headers:
+check-controller-private-headers: $(LINTC_TOOL)
 	@echo "══ LINT: controller private-header ownership ══"
 	@./tools/lint/check_controller_private_headers.sh --selftest
 	@./tools/lint/check_controller_private_headers.sh

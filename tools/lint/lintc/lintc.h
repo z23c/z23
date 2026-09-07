@@ -310,5 +310,7 @@ int check_one_write_path_run(int argc, char **argv);
 int check_one_write_path_selftest(void);
 int check_supervisor_domain_run(int argc, char **argv);
 int check_supervisor_domain_selftest(void);
+int check_controller_private_headers_run(int argc, char **argv);
+int check_controller_private_headers_selftest(void);
 
 #endif

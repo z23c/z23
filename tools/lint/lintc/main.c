@@ -125,6 +125,8 @@ static const struct lint_gate k_gates[] = {
       check_one_write_path_selftest },
     { "check-supervisor-domain", check_supervisor_domain_run,
       check_supervisor_domain_selftest },
+    { "check-controller-private-headers", check_controller_private_headers_run,
+      check_controller_private_headers_selftest },
 };
 
 int main(int argc, char **argv)
