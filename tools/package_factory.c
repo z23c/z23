@@ -2530,63 +2530,72 @@ static bool factory_dep_plan(const struct run_args *args,
 /* Construct and sign the self-screened source_assignment.v1 +
  * commons_admission.v1 for the package — the census driver's
  * construction, with the author binding rooted on the publisher pubkey. */
-static bool factory_admission(const struct run_args *args,
-                              const struct gate_info *info,
-                              const struct vcs_package_prepared *prepared,
-                              const uint8_t release_id[32],
-                              const uint8_t seed[32],
-                              uint8_t admission_root_out[32],
-                              uint8_t **admission_wire_out,
-                              size_t *admission_wire_len_out,
-                              char *error, size_t error_cap)
+
+static uint16_t fa_resolve_kind(const struct run_args *args)
 {
-    uint16_t kind = VCS_ZCODE_SOURCE_AI_AUTHORED;
     if (strcmp(args->kind, "human") == 0)
-        kind = VCS_ZCODE_SOURCE_HUMAN_AUTHORED;
-    else if (strcmp(args->kind, "import") == 0)
-        kind = VCS_ZCODE_SOURCE_CANONICAL_IMPORT;
+        return VCS_ZCODE_SOURCE_HUMAN_AUTHORED;
+    if (strcmp(args->kind, "import") == 0)
+        return VCS_ZCODE_SOURCE_CANONICAL_IMPORT;
+    return VCS_ZCODE_SOURCE_AI_AUTHORED;
+}
 
-    /* author binding: publisher pubkey hex; assignment evidence: the
-     * release id (the factory has no scopes.def line); license: the
-     * census license wire over the package LICENSE. */
-    uint8_t author_root[32], evidence_root_a[32], license_root[32];
-    if (!vcs_signed_evidence_root(k_domain_author, sizeof(k_domain_author),
-                                  (const uint8_t *)args->publisher_pubkey,
-                                  strlen(args->publisher_pubkey),
-                                  author_root) ||
-        !vcs_signed_evidence_root(k_domain_assignment_evidence,
-                                  sizeof(k_domain_assignment_evidence),
-                                  release_id, 32, evidence_root_a))
-        LOG_FAIL(PF_LOG, "admission sub-roots failed");
-    {
-        size_t plen = strlen(args->package_dir) + sizeof("/LICENSE");
-        char *lpath = zcl_malloc(plen, "factory.license");
-        if (!lpath)
-            LOG_FAIL(PF_LOG, "license path alloc");
-        (void)snprintf(lpath, plen, "%s/LICENSE", args->package_dir);
-        uint8_t *lbytes = NULL;
-        size_t llen = 0;
-        bool ok = pf_read_file(lpath, PF_META_MAX_BYTES, &lbytes, &llen);
-        free(lpath);
-        if (!ok) {
-            (void)snprintf(error, error_cap, "LICENSE unreadable");
-            return false;
-        }
-        struct buf wire = {0};
-        uint8_t digest[32];
-        sha3_256(lbytes, llen, digest);
-        ok = buf_put(&wire, "LICENSE", sizeof("LICENSE")) &&
-             buf_put_u64le(&wire, (uint64_t)llen) &&
-             buf_put(&wire, digest, sizeof(digest)) &&
-             vcs_signed_evidence_root(k_domain_license,
-                                      sizeof(k_domain_license), wire.p,
-                                      wire.len, license_root);
-        buf_free(&wire);
-        free(lbytes);
-        if (!ok)
-            LOG_FAIL(PF_LOG, "license root failed");
+/* author binding: publisher pubkey hex; assignment evidence: the release
+ * id (the factory has no scopes.def line). */
+static bool fa_author_evidence_roots(const struct run_args *args,
+                                     const uint8_t release_id[32],
+                                     uint8_t author_root[32],
+                                     uint8_t evidence_root_a[32])
+{
+    return vcs_signed_evidence_root(k_domain_author, sizeof(k_domain_author),
+                                    (const uint8_t *)args->publisher_pubkey,
+                                    strlen(args->publisher_pubkey),
+                                    author_root) &&
+           vcs_signed_evidence_root(k_domain_assignment_evidence,
+                                    sizeof(k_domain_assignment_evidence),
+                                    release_id, 32, evidence_root_a);
+}
+
+/* license: the census license wire over the package LICENSE. */
+static bool fa_license_root(const char *package_dir, uint8_t license_root[32],
+                            char *error, size_t error_cap)
+{
+    size_t plen = strlen(package_dir) + sizeof("/LICENSE");
+    char *lpath = zcl_malloc(plen, "factory.license");
+    if (!lpath)
+        LOG_FAIL(PF_LOG, "license path alloc");
+    (void)snprintf(lpath, plen, "%s/LICENSE", package_dir);
+    uint8_t *lbytes = NULL;
+    size_t llen = 0;
+    bool ok = pf_read_file(lpath, PF_META_MAX_BYTES, &lbytes, &llen);
+    free(lpath);
+    if (!ok) {
+        (void)snprintf(error, error_cap, "LICENSE unreadable");
+        return false;
     }
+    struct buf wire = {0};
+    uint8_t digest[32];
+    sha3_256(lbytes, llen, digest);
+    ok = buf_put(&wire, "LICENSE", sizeof("LICENSE")) &&
+         buf_put_u64le(&wire, (uint64_t)llen) &&
+         buf_put(&wire, digest, sizeof(digest)) &&
+         vcs_signed_evidence_root(k_domain_license, sizeof(k_domain_license),
+                                  wire.p, wire.len, license_root);
+    buf_free(&wire);
+    free(lbytes);
+    if (!ok)
+        LOG_FAIL(PF_LOG, "license root failed");
+    return true;
+}
 
+static bool fa_build_assignment(const struct run_args *args,
+                                const struct vcs_package_prepared *prepared,
+                                uint16_t kind, const uint8_t author_root[32],
+                                const uint8_t license_root[32],
+                                const uint8_t evidence_root_a[32],
+                                const uint8_t seed[32],
+                                uint8_t assignment_root[32])
+{
     struct vcs_zcode_source_assignment_v1 assignment;
     memset(&assignment, 0, sizeof(assignment));
     assignment.schema_version = 1;
@@ -2604,112 +2613,181 @@ static bool factory_admission(const struct run_args *args,
     if (cerr != VCS_ZCODE_C23_OK)
         LOG_FAIL(PF_LOG, "assignment sign: %s",
                  vcs_zcode_c23_error_string(cerr));
-    uint8_t assignment_root[32];
     cerr = vcs_zcode_source_assignment_v1_root(&assignment, assignment_root);
     if (cerr != VCS_ZCODE_C23_OK)
         LOG_FAIL(PF_LOG, "assignment root: %s",
                  vcs_zcode_c23_error_string(cerr));
     memory_cleanse(&assignment, sizeof(assignment));
+    return true;
+}
 
-    /* dependency closure root: name || NUL || root || NUL || semver || NUL
-     * per zcode-package.json dependency (file order), the census recipe. */
-    uint8_t dep_closure_root[32];
-    {
-        struct buf cwire = {0};
-        bool ok = true;
-        const struct json_value *deps =
-            json_get(&((struct gate_info *)info)->meta, "dependencies");
-        if (deps && deps->type == JSON_ARR) {
-            for (size_t i = 0; ok && i < deps->num_children; i++) {
-                const struct json_value *dep = json_at(deps, i);
-                const char *n = json_get_str(json_get(dep, "name"));
-                const char *r = json_get_str(json_get(dep, "root"));
-                const char *v = json_get_str(json_get(dep, "semver"));
-                if (!n || !r || !v) {
-                    ok = false;
-                    break;
-                }
-                ok = buf_put(&cwire, n, strlen(n) + 1u) &&
-                     buf_put(&cwire, r, strlen(r) + 1u) &&
-                     buf_put(&cwire, v, strlen(v) + 1u);
+/* dependency closure root: name || NUL || root || NUL || semver || NUL per
+ * zcode-package.json dependency (file order), the census recipe. */
+static bool fa_dep_closure_root(const struct gate_info *info,
+                                uint8_t dep_closure_root[32])
+{
+    struct buf cwire = {0};
+    bool ok = true;
+    const struct json_value *deps =
+        json_get(&((struct gate_info *)info)->meta, "dependencies");
+    if (deps && deps->type == JSON_ARR) {
+        for (size_t i = 0; ok && i < deps->num_children; i++) {
+            const struct json_value *dep = json_at(deps, i);
+            const char *n = json_get_str(json_get(dep, "name"));
+            const char *r = json_get_str(json_get(dep, "root"));
+            const char *v = json_get_str(json_get(dep, "semver"));
+            if (!n || !r || !v) {
+                ok = false;
+                break;
             }
+            ok = buf_put(&cwire, n, strlen(n) + 1u) &&
+                 buf_put(&cwire, r, strlen(r) + 1u) &&
+                 buf_put(&cwire, v, strlen(v) + 1u);
         }
-        if (ok)
-            ok = vcs_signed_evidence_root(k_domain_dep_closure,
-                                          sizeof(k_domain_dep_closure),
-                                          cwire.p, cwire.len,
-                                          dep_closure_root);
-        buf_free(&cwire);
-        if (!ok)
-            LOG_FAIL(PF_LOG, "dependency closure root failed");
     }
+    if (ok)
+        ok = vcs_signed_evidence_root(k_domain_dep_closure,
+                                      sizeof(k_domain_dep_closure), cwire.p,
+                                      cwire.len, dep_closure_root);
+    buf_free(&cwire);
+    if (!ok)
+        LOG_FAIL(PF_LOG, "dependency closure root failed");
+    return true;
+}
 
+static bool fa_check_family_policy(uint8_t family_policy_root[32])
+{
     struct vcs_zcode_family_policy_v1 policy;
     vcs_zcode_family_policy_v1_default(&policy);
-    uint8_t family_policy_root[32], frozen[32];
+    uint8_t frozen[32];
     if (vcs_zcode_family_policy_v1_root(&policy, family_policy_root) !=
             VCS_ZCODE_COMMONS_OK ||
         !zcl_hex_decode_lower(PF_FAMILY_POLICY_ROOT_HEX, frozen, 32) ||
         memcmp(family_policy_root, frozen, 32) != 0)
         LOG_FAIL(PF_LOG, "family policy root mismatch with the frozen "
                  "constant");
-    uint8_t moderation_root[32], panel_root[32], adm_evidence[32];
-    if (!vcs_signed_evidence_root(k_domain_moderation,
-                                  sizeof(k_domain_moderation), NULL, 0,
-                                  moderation_root) ||
-        !vcs_signed_evidence_root(k_domain_panel, sizeof(k_domain_panel),
-                                  (const uint8_t *)k_panel_literal,
-                                  strlen(k_panel_literal), panel_root) ||
-        !vcs_signed_evidence_root(k_domain_admission_evidence,
-                                  sizeof(k_domain_admission_evidence),
-                                  assignment_root, 32, adm_evidence))
-        LOG_FAIL(PF_LOG, "admission sub-roots failed");
+    return true;
+}
 
-    struct vcs_zcode_commons_admission_v1 admission;
-    memset(&admission, 0, sizeof(admission));
-    admission.schema_version = 1;
-    admission.flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
-    /* Founding self-screen: tier 0 with the SELF_SCREENED state; zero
-     * independent operator groups (disclosed in the report). */
-    admission.state = VCS_ZCODE_ADMISSION_SELF_SCREENED;
-    admission.tier = VCS_ZCODE_MODERATION_TIER_SELF_SCREENED;
-    admission.coverage_complete = 1;
-    admission.closure_complete = 1;
-    admission.sequence = 1;
-    admission.decided_height = args->cutoff_height;
-    admission.decided_mtp = args->cutoff_mtp;
-    admission.expires_height =
+static bool fa_admission_evidence_roots(const uint8_t assignment_root[32],
+                                        uint8_t moderation_root[32],
+                                        uint8_t panel_root[32],
+                                        uint8_t adm_evidence[32])
+{
+    return vcs_signed_evidence_root(k_domain_moderation,
+                                    sizeof(k_domain_moderation), NULL, 0,
+                                    moderation_root) &&
+           vcs_signed_evidence_root(k_domain_panel, sizeof(k_domain_panel),
+                                    (const uint8_t *)k_panel_literal,
+                                    strlen(k_panel_literal), panel_root) &&
+           vcs_signed_evidence_root(k_domain_admission_evidence,
+                                    sizeof(k_domain_admission_evidence),
+                                    assignment_root, 32, adm_evidence);
+}
+
+/* Founding self-screen: tier 0 with the SELF_SCREENED state; zero
+ * independent operator groups (disclosed in the report). */
+static bool fa_build_admission(
+    const struct run_args *args, const struct vcs_package_prepared *prepared,
+    const uint8_t dep_closure_root[32], const uint8_t family_policy_root[32],
+    const uint8_t moderation_root[32], const uint8_t panel_root[32],
+    const uint8_t adm_evidence[32], const uint8_t seed[32],
+    uint8_t admission_root_out[32],
+    struct vcs_zcode_commons_admission_v1 *admission)
+{
+    memset(admission, 0, sizeof(*admission));
+    admission->schema_version = 1;
+    admission->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
+    admission->state = VCS_ZCODE_ADMISSION_SELF_SCREENED;
+    admission->tier = VCS_ZCODE_MODERATION_TIER_SELF_SCREENED;
+    admission->coverage_complete = 1;
+    admission->closure_complete = 1;
+    admission->sequence = 1;
+    admission->decided_height = args->cutoff_height;
+    admission->decided_mtp = args->cutoff_mtp;
+    admission->expires_height =
         args->cutoff_height + PF_ADMISSION_EXPIRY_BLOCKS;
-    admission.expires_mtp = args->cutoff_mtp + PF_ADMISSION_EXPIRY_MTP_SECONDS;
-    memcpy(admission.content_root, prepared->package_root, 32);
-    memcpy(admission.dependency_closure_root, dep_closure_root, 32);
-    memcpy(admission.family_policy_root, family_policy_root, 32);
-    memcpy(admission.moderation_set_root, moderation_root, 32);
-    memcpy(admission.panel_root, panel_root, 32);
-    memcpy(admission.evidence_root, adm_evidence, 32);
+    admission->expires_mtp =
+        args->cutoff_mtp + PF_ADMISSION_EXPIRY_MTP_SECONDS;
+    memcpy(admission->content_root, prepared->package_root, 32);
+    memcpy(admission->dependency_closure_root, dep_closure_root, 32);
+    memcpy(admission->family_policy_root, family_policy_root, 32);
+    memcpy(admission->moderation_set_root, moderation_root, 32);
+    memcpy(admission->panel_root, panel_root, 32);
+    memcpy(admission->evidence_root, adm_evidence, 32);
     enum vcs_zcode_family_admission_error aerr =
-        vcs_zcode_commons_admission_v1_sign(&admission, seed);
+        vcs_zcode_commons_admission_v1_sign(admission, seed);
     if (aerr != VCS_ZCODE_FAMILY_ADMISSION_OK)
         LOG_FAIL(PF_LOG, "admission sign: %s",
                  vcs_zcode_family_admission_error_string(aerr));
-    aerr = vcs_zcode_commons_admission_v1_root(&admission,
-                                               admission_root_out);
+    aerr = vcs_zcode_commons_admission_v1_root(admission, admission_root_out);
     if (aerr != VCS_ZCODE_FAMILY_ADMISSION_OK)
         LOG_FAIL(PF_LOG, "admission root: %s",
                  vcs_zcode_family_admission_error_string(aerr));
+    return true;
+}
+
+static bool fa_encode_admission(
+    struct vcs_zcode_commons_admission_v1 *admission,
+    uint8_t **admission_wire_out, size_t *admission_wire_len_out)
+{
     size_t wire_cap = VCS_ZCODE_COMMONS_ADMISSION_WIRE_BYTES;
     uint8_t *wire = zcl_malloc(wire_cap, "factory.admission");
     if (!wire)
         LOG_FAIL(PF_LOG, "admission wire alloc");
-    aerr = vcs_zcode_commons_admission_v1_encode(&admission, wire, wire_cap,
-                                                 admission_wire_len_out);
-    memory_cleanse(&admission, sizeof(admission));
+    enum vcs_zcode_family_admission_error aerr =
+        vcs_zcode_commons_admission_v1_encode(admission, wire, wire_cap,
+                                              admission_wire_len_out);
+    memory_cleanse(admission, sizeof(*admission));
     if (aerr != VCS_ZCODE_FAMILY_ADMISSION_OK) {
         free(wire);
         LOG_FAIL(PF_LOG, "admission encode: %s",
                  vcs_zcode_family_admission_error_string(aerr));
     }
     *admission_wire_out = wire;
+    return true;
+}
+
+static bool factory_admission(const struct run_args *args,
+                              const struct gate_info *info,
+                              const struct vcs_package_prepared *prepared,
+                              const uint8_t release_id[32],
+                              const uint8_t seed[32],
+                              uint8_t admission_root_out[32],
+                              uint8_t **admission_wire_out,
+                              size_t *admission_wire_len_out,
+                              char *error, size_t error_cap)
+{
+    uint16_t kind = fa_resolve_kind(args);
+    uint8_t author_root[32], evidence_root_a[32], license_root[32];
+    if (!fa_author_evidence_roots(args, release_id, author_root,
+                                  evidence_root_a))
+        LOG_FAIL(PF_LOG, "admission sub-roots failed");
+    if (!fa_license_root(args->package_dir, license_root, error, error_cap))
+        return false;
+    uint8_t assignment_root[32];
+    if (!fa_build_assignment(args, prepared, kind, author_root, license_root,
+                             evidence_root_a, seed, assignment_root))
+        return false;
+    uint8_t dep_closure_root[32];
+    if (!fa_dep_closure_root(info, dep_closure_root))
+        return false;
+    uint8_t family_policy_root[32];
+    if (!fa_check_family_policy(family_policy_root))
+        return false;
+    uint8_t moderation_root[32], panel_root[32], adm_evidence[32];
+    if (!fa_admission_evidence_roots(assignment_root, moderation_root,
+                                     panel_root, adm_evidence))
+        LOG_FAIL(PF_LOG, "admission sub-roots failed");
+    struct vcs_zcode_commons_admission_v1 admission;
+    if (!fa_build_admission(args, prepared, dep_closure_root,
+                            family_policy_root, moderation_root, panel_root,
+                            adm_evidence, seed, admission_root_out,
+                            &admission))
+        return false;
+    if (!fa_encode_admission(&admission, admission_wire_out,
+                             admission_wire_len_out))
+        return false;
     (void)info;
     return true;
 }
