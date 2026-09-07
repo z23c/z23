@@ -380,123 +380,217 @@ static bool rr_flush_stream(FILE *stream)
 #endif
 }
 
+static bool rr_plan_load_locked_paths(const char *root, char path[PATH_MAX],
+                                      char makefile[PATH_MAX], char *why,
+                                      size_t why_len)
+{
+    if (snprintf(path, PATH_MAX, "%s/build/dev-loop/restart.env", root) >=
+            PATH_MAX ||
+        snprintf(makefile, PATH_MAX, "%s/Makefile", root) >= PATH_MAX) {
+        rr_why(why, why_len, "restart action-plan path overflow");
+        return false;
+    }
+    return true;
+}
+
+static bool rr_plan_load_locked_check_stamps(const char *path,
+                                             const char *makefile,
+                                             rr_file_stamp *stamp, char *why,
+                                             size_t why_len)
+{
+    rr_file_stamp make_st;
+    if (!rr_regular(path, stamp) || !rr_regular(makefile, &make_st)) {
+        rr_why(why, why_len,
+               "restart action plan absent; run make dev-bin once");
+        return false;
+    }
+    if (rr_stamp_newer(&make_st, stamp)) {
+        rr_why(why, why_len,
+               "restart action plan stale after build-system change");
+        return false;
+    }
+    return true;
+}
+
+static bool rr_plan_load_locked_from_cache(const char *root,
+                                           const rr_file_stamp *stamp,
+                                           struct rr_plan *out,
+                                           bool *cache_hit,
+                                           int64_t *elapsed_us,
+                                           int64_t started)
+{
+    if (g_rr_plan.loaded && strcmp(g_rr_plan.root, root) == 0 &&
+        rr_stat_equal(&g_rr_plan.stamp, stamp)) {
+        *out = g_rr_plan;
+        *cache_hit = true;
+        *elapsed_us = platform_time_monotonic_us() - started;
+        return true;
+    }
+    return false;
+}
+
+/* Table-driven match for each "KEY=value" line, so the parse loop is a loop
+ * over data rather than a long if/else-if chain. */
+static const struct {
+    size_t offset;
+    size_t cap;
+    const char *prefix;
+} k_rr_plan_fields[] = {
+    {offsetof(struct rr_plan, cc), 512, "CC="},
+    {offsetof(struct rr_plan, compiler_id), 65, "COMPILER_ID="},
+    {offsetof(struct rr_plan, base_generation), 65, "BASE_GENERATION="},
+    {offsetof(struct rr_plan, cflags), RR_TEXT_MAX, "DEV_CFLAGS="},
+    {offsetof(struct rr_plan, ldflags), 4096, "DEV_LDFLAGS="},
+    {offsetof(struct rr_plan, libs), 4096, "DEV_LIBS="},
+    {offsetof(struct rr_plan, obj_dir), PATH_MAX, "DEV_OBJ_DIR="},
+    {offsetof(struct rr_plan, link_rsp), PATH_MAX, "DEV_LINK_RSP="},
+    {offsetof(struct rr_plan, base_reloc), PATH_MAX, "DEV_BASE_RELOC="},
+    {offsetof(struct rr_plan, test_cflags), RR_TEXT_MAX, "TEST_CFLAGS="},
+    {offsetof(struct rr_plan, test_ldflags), 4096, "TEST_LDFLAGS="},
+    {offsetof(struct rr_plan, test_libs), 4096, "TEST_LIBS="},
+    {offsetof(struct rr_plan, test_obj_dir), PATH_MAX, "TEST_OBJ_DIR="},
+    {offsetof(struct rr_plan, test_link_rsp), PATH_MAX, "TEST_LINK_RSP="},
+    {offsetof(struct rr_plan, test_base_reloc), PATH_MAX,
+     "TEST_BASE_RELOC="},
+};
+
+static bool rr_plan_load_locked_apply_field(struct rr_plan *next,
+                                            const char *line)
+{
+    for (size_t i = 0; i < sizeof(k_rr_plan_fields) / sizeof(k_rr_plan_fields[0]);
+         i++) {
+        char *dest = (char *)next + k_rr_plan_fields[i].offset;
+        if (rr_line(dest, k_rr_plan_fields[i].cap, line,
+                    k_rr_plan_fields[i].prefix))
+            return true;
+    }
+    return false;
+}
+
+static bool rr_plan_load_locked_parse(const char *path, struct rr_plan *next,
+                                      bool *read_error, char *why,
+                                      size_t why_len)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        rr_why(why, why_len, "restart action plan could not be opened");
+        return false;
+    }
+    char line[RR_TEXT_MAX + 32];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
+            continue;
+        if (rr_plan_load_locked_apply_field(next, line))
+            continue;
+        fclose(f);
+        rr_why(why, why_len, "restart action plan has an unknown field");
+        return false;
+    }
+    *read_error = ferror(f) != 0;
+    fclose(f);
+    return true;
+}
+
+static bool rr_plan_load_locked_verify_stable(const char *path,
+                                              const rr_file_stamp *stamp,
+                                              char *why, size_t why_len)
+{
+    rr_file_stamp stable_stamp;
+    if (!rr_regular(path, &stable_stamp) ||
+        !rr_stat_equal(stamp, &stable_stamp)) {
+        rr_why(why, why_len,
+               "restart action plan changed while it was being read");
+        return false;
+    }
+    return true;
+}
+
+static bool rr_plan_load_locked_validate_dev(const char *root,
+                                             struct rr_plan *next)
+{
+    char obj_full[PATH_MAX], rsp_full[PATH_MAX], base_reloc_full[PATH_MAX];
+    return next->cc[0] && rr_hex64(next->compiler_id) &&
+           rr_hex64(next->base_generation) && next->cflags[0] &&
+           next->ldflags[0] && next->libs[0] &&
+           rr_join_root(root, next->obj_dir, obj_full) &&
+           rr_join_root(root, next->link_rsp, rsp_full) &&
+           rr_join_root(root, next->base_reloc, base_reloc_full) &&
+           rr_directory(obj_full) && rr_regular(rsp_full, NULL) &&
+           rr_regular(base_reloc_full, NULL) &&
+           strstr(next->cflags, "-DZCL_DEV_BUILD");
+}
+
+static bool rr_plan_load_locked_validate_test(const char *root,
+                                              struct rr_plan *next)
+{
+    char test_obj_full[PATH_MAX], test_rsp_full[PATH_MAX];
+    char test_base_reloc_full[PATH_MAX];
+    return next->test_cflags[0] && next->test_ldflags[0] &&
+           next->test_libs[0] &&
+           rr_join_root(root, next->test_obj_dir, test_obj_full) &&
+           rr_join_root(root, next->test_link_rsp, test_rsp_full) &&
+           rr_join_root(root, next->test_base_reloc, test_base_reloc_full) &&
+           rr_directory(test_obj_full) && rr_regular(test_rsp_full, NULL) &&
+           rr_regular(test_base_reloc_full, NULL) &&
+           strstr(next->test_cflags, "-DZCL_TESTING");
+}
+
+static bool rr_plan_load_locked_validate(const char *root,
+                                         struct rr_plan *next,
+                                         bool read_error, char *why,
+                                         size_t why_len)
+{
+    if (read_error || !rr_plan_load_locked_validate_dev(root, next) ||
+        !rr_plan_load_locked_validate_test(root, next)) {
+        rr_why(why, why_len,
+               "restart action plan incomplete or its object graph is absent");
+        return false;
+    }
+    return true;
+}
+
+static bool rr_plan_load_locked_check_lto(struct rr_plan *next, char *why,
+                                          size_t why_len)
+{
+    if (strstr(next->cflags, "-flto") || strstr(next->ldflags, "-flto") ||
+        strstr(next->cflags, "-fuse-linker-plugin") ||
+        strstr(next->ldflags, "-fuse-linker-plugin") ||
+        strstr(next->test_cflags, "-flto") ||
+        strstr(next->test_ldflags, "-flto") ||
+        strstr(next->test_cflags, "-fuse-linker-plugin") ||
+        strstr(next->test_ldflags, "-fuse-linker-plugin")) {
+        rr_why(why, why_len,
+               "restart action plan contains release-only LTO flags");
+        return false;
+    }
+    return true;
+}
+
 static bool rr_plan_load_locked(const char *root, struct rr_plan *out,
                                 bool *cache_hit, int64_t *elapsed_us,
                                 char *why, size_t why_len)
 {
     int64_t started = platform_time_monotonic_us();
     char path[PATH_MAX], makefile[PATH_MAX];
-    if (snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", root) >=
-            (int)sizeof(path) ||
-        snprintf(makefile, sizeof(makefile), "%s/Makefile", root) >=
-            (int)sizeof(makefile)) {
-        rr_why(why, why_len, "restart action-plan path overflow");
+    if (!rr_plan_load_locked_paths(root, path, makefile, why, why_len))
         return false;
-    }
-    rr_file_stamp stamp, make_st;
-    if (!rr_regular(path, &stamp) || !rr_regular(makefile, &make_st)) {
-        rr_why(why, why_len,
-               "restart action plan absent; run make dev-bin once");
+    rr_file_stamp stamp;
+    if (!rr_plan_load_locked_check_stamps(path, makefile, &stamp, why,
+                                          why_len))
         return false;
-    }
-    if (rr_stamp_newer(&make_st, &stamp)) {
-        rr_why(why, why_len,
-               "restart action plan stale after build-system change");
-        return false;
-    }
-    if (g_rr_plan.loaded && strcmp(g_rr_plan.root, root) == 0 &&
-        rr_stat_equal(&g_rr_plan.stamp, &stamp)) {
-        *out = g_rr_plan;
-        *cache_hit = true;
-        *elapsed_us = platform_time_monotonic_us() - started;
+    if (rr_plan_load_locked_from_cache(root, &stamp, out, cache_hit,
+                                       elapsed_us, started))
         return true;
-    }
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        rr_why(why, why_len, "restart action plan could not be opened");
-        return false;
-    }
     struct rr_plan next = {0};
-    char line[RR_TEXT_MAX + 32];
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
-            continue;
-        if (rr_line(next.cc, sizeof(next.cc), line, "CC=") ||
-            rr_line(next.compiler_id, sizeof(next.compiler_id), line,
-                    "COMPILER_ID=") ||
-            rr_line(next.base_generation, sizeof(next.base_generation), line,
-                    "BASE_GENERATION=") ||
-            rr_line(next.cflags, sizeof(next.cflags), line, "DEV_CFLAGS=") ||
-            rr_line(next.ldflags, sizeof(next.ldflags), line,
-                    "DEV_LDFLAGS=") ||
-            rr_line(next.libs, sizeof(next.libs), line, "DEV_LIBS=") ||
-            rr_line(next.obj_dir, sizeof(next.obj_dir), line,
-                    "DEV_OBJ_DIR=") ||
-            rr_line(next.link_rsp, sizeof(next.link_rsp), line,
-                    "DEV_LINK_RSP=") ||
-            rr_line(next.base_reloc, sizeof(next.base_reloc), line,
-                    "DEV_BASE_RELOC=") ||
-            rr_line(next.test_cflags, sizeof(next.test_cflags), line,
-                    "TEST_CFLAGS=") ||
-            rr_line(next.test_ldflags, sizeof(next.test_ldflags), line,
-                    "TEST_LDFLAGS=") ||
-            rr_line(next.test_libs, sizeof(next.test_libs), line,
-                    "TEST_LIBS=") ||
-            rr_line(next.test_obj_dir, sizeof(next.test_obj_dir), line,
-                    "TEST_OBJ_DIR=") ||
-            rr_line(next.test_link_rsp, sizeof(next.test_link_rsp), line,
-                    "TEST_LINK_RSP=") ||
-            rr_line(next.test_base_reloc, sizeof(next.test_base_reloc), line,
-                    "TEST_BASE_RELOC="))
-            continue;
-        fclose(f);
-        rr_why(why, why_len, "restart action plan has an unknown field");
+    bool read_error = false;
+    if (!rr_plan_load_locked_parse(path, &next, &read_error, why, why_len))
         return false;
-    }
-    bool read_error = ferror(f) != 0;
-    fclose(f);
-    rr_file_stamp stable_stamp;
-    if (!rr_regular(path, &stable_stamp) ||
-        !rr_stat_equal(&stamp, &stable_stamp)) {
-        rr_why(why, why_len,
-               "restart action plan changed while it was being read");
+    if (!rr_plan_load_locked_verify_stable(path, &stamp, why, why_len))
         return false;
-    }
-    char obj_full[PATH_MAX], rsp_full[PATH_MAX], base_reloc_full[PATH_MAX];
-    char test_obj_full[PATH_MAX], test_rsp_full[PATH_MAX];
-    char test_base_reloc_full[PATH_MAX];
-    if (read_error || !next.cc[0] || !rr_hex64(next.compiler_id) ||
-        !rr_hex64(next.base_generation) ||
-        !next.cflags[0] || !next.ldflags[0] || !next.libs[0] ||
-        !rr_join_root(root, next.obj_dir, obj_full) ||
-        !rr_join_root(root, next.link_rsp, rsp_full) ||
-        !rr_join_root(root, next.base_reloc, base_reloc_full) ||
-        !rr_directory(obj_full) || !rr_regular(rsp_full, NULL) ||
-        !rr_regular(base_reloc_full, NULL) ||
-        !strstr(next.cflags, "-DZCL_DEV_BUILD") ||
-        !next.test_cflags[0] || !next.test_ldflags[0] ||
-        !next.test_libs[0] ||
-        !rr_join_root(root, next.test_obj_dir, test_obj_full) ||
-        !rr_join_root(root, next.test_link_rsp, test_rsp_full) ||
-        !rr_join_root(root, next.test_base_reloc, test_base_reloc_full) ||
-        !rr_directory(test_obj_full) || !rr_regular(test_rsp_full, NULL) ||
-        !rr_regular(test_base_reloc_full, NULL) ||
-        !strstr(next.test_cflags, "-DZCL_TESTING")) {
-        rr_why(why, why_len,
-               "restart action plan incomplete or its object graph is absent");
+    if (!rr_plan_load_locked_validate(root, &next, read_error, why, why_len))
         return false;
-    }
-    if (strstr(next.cflags, "-flto") || strstr(next.ldflags, "-flto") ||
-        strstr(next.cflags, "-fuse-linker-plugin") ||
-        strstr(next.ldflags, "-fuse-linker-plugin") ||
-        strstr(next.test_cflags, "-flto") ||
-        strstr(next.test_ldflags, "-flto") ||
-        strstr(next.test_cflags, "-fuse-linker-plugin") ||
-        strstr(next.test_ldflags, "-fuse-linker-plugin")) {
-        rr_why(why, why_len,
-               "restart action plan contains release-only LTO flags");
+    if (!rr_plan_load_locked_check_lto(&next, why, why_len))
         return false;
-    }
     (void)snprintf(next.root, sizeof(next.root), "%s", root);
     next.stamp = stamp;
     next.loaded = true;
