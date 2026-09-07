@@ -270,6 +270,28 @@ static int sw_dumper_files(regex_t *incl, char out[][SW_PATH], int *nout)
     return 0;
 }
 
+static int sw_check_confinement(regex_t *incl, regex_t *conf)
+{
+    static char defs[SW_MAX_DEFS][SW_PATH];
+    int ndef = 0;
+    if (sw_dumper_files(incl, defs, &ndef)) {
+        fputs("check_sandbox_wired: FAIL — could not resolve the dumpstate "
+              "descriptor set\n", stderr);
+        return 1;
+    }
+    int found = 0;
+    for (int i = 0; i < ndef && !found; i++)
+        found = sw_file_has(defs[i], conf);
+    if (!found) {
+        fprintf(stderr, "check_sandbox_wired: FAIL — no \"confine"
+                "ment\" dumpstate row in %s or the %d per-domain files it "
+                "includes (the UNCONFINED verdict would be unreachable via "
+                "ops state)\n", k_sw_agg, ndef - 1);
+        return 1;
+    }
+    return 0;
+}
+
 int check_sandbox_wired_run(int argc, char **argv)
 {
     (void)argc;
@@ -333,24 +355,8 @@ int check_sandbox_wired_run(int argc, char **argv)
                 "process is KILL_PROCESS)\n", k_sw_witness);
         fail = 1;
     }
-    static char defs[SW_MAX_DEFS][SW_PATH];
-    int ndef = 0;
-    if (sw_dumper_files(&r.incl, defs, &ndef)) {
-        fputs("check_sandbox_wired: FAIL — could not resolve the dumpstate "
-              "descriptor set\n", stderr);
+    if (sw_check_confinement(&r.incl, &r.conf))
         fail = 1;
-    } else {
-        int found = 0;
-        for (int i = 0; i < ndef && !found; i++)
-            found = sw_file_has(defs[i], &r.conf);
-        if (!found) {
-            fprintf(stderr, "check_sandbox_wired: FAIL — no \"confine"
-                    "ment\" dumpstate row in %s or the %d per-domain files it "
-                    "includes (the UNCONFINED verdict would be unreachable via "
-                    "ops state)\n", k_sw_agg, ndef - 1);
-            fail = 1;
-        }
-    }
     sw_free(&r, 5);
     if (fail) {
         fputs("check_sandbox_wired: the -sand"
