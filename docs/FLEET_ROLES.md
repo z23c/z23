@@ -12,6 +12,18 @@ central referee**. What this node trusts is this node's own decision,
 recorded in this node's own signed store, never a fact carried in from a
 peer.
 
+## What is enforced today
+
+The catalog, the store, and `fleet roles check` exist and answer "would
+this key be allowed" correctly — but nothing calls that check yet at
+either of the two places a signed request actually enters a node:
+`zcl_fleet_ledger_replicate()` (engine/modules/fleetledger/src/fleet_ledger.c)
+and `db_fleet_board_post_ingest()` (engine/models/src/fleet_board_post.c)
+both accept a signed row today with no role lookup at all. A key with no
+grant is refused only when something asks `fleet roles check` for it, not
+automatically before a leaf runs. A follow-up lane wires the check into
+those two ingress points.
+
 ## The roles
 
 Declared once, in `engine/composition/roles.def`, as a closed set:
@@ -25,8 +37,10 @@ Declared once, in `engine/composition/roles.def`, as a closed set:
 
 Each role's exact grants — which `fleet.<a>.<b>` leaf (an exact name, or a
 `prefix.*` wildcard) and, for a board post, which kinds — are the
-`Z23_ROLE_GRANT` rows in the same file. A key with no active grant naming a
-leaf is refused before the leaf runs; there is no default-permit path.
+`Z23_ROLE_GRANT` rows in the same file. `zcl_role_leaf_allowed()` and
+`zcl_role_check()` refuse a key with no active grant naming a leaf by
+design; see "What is enforced today" above for where that check is, and is
+not yet, actually called.
 
 ## The store
 

@@ -79,10 +79,15 @@ z23 discover schema <path> --side=input|output
 | Branches | 192 |
 | Leaves (dispatchable command paths) | 663 |
 | … `ready` (live handler in this build) | 592 |
+| Registry entries (branches + leaves) | 858 |
+| Top-level roots | 14 |
+| Branches | 193 |
+| Leaves (dispatchable command paths) | 665 |
+| … `ready` (live handler in this build) | 594 |
 | … `compat` (metadata only, names a fallback) | 40 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 39 |
-| Leaves with `effect=mutate` | 235 |
+| Leaves with `effect=mutate` | 237 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 126 |
 
@@ -109,6 +114,7 @@ Per source file:
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
 | `engine/composition/commands/fleet.def` | 12 | 3 | 9 |
+| `engine/composition/commands/fleet.def` | 15 | 4 | 11 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
@@ -1793,6 +1799,15 @@ represented by its children's sections.
 | `fleet experiment result` | ready | mutate / dev-mutation / operator · fast/low | **`task_id`**, `task_class`, `story`, `executor`, `harness`, `model`, `effort`, `in`, `out`, `cache`, `reasoning`, `tool_uses`, `turns`, `wall_s`, `outcome`, `added`, `removed`, `defects`, `note` | `zcl.fleet_experiment_result.v1` | `z23 fleet experiment result --task_id=u1 --task_class=read --model=grok --outcome=LAND --in=800 --out=200 --wall_s=28` | Append one signed result row for a delegated task |
 | `fleet experiment stats` | ready | read / read / operator · instant/low | `task_class`, `model` | `zcl.fleet_experiment_stats.v1` | `z23 fleet experiment stats --task_class=read --model=grok` | Per task_class and model: counts, LAND rate, medians, predicted-vs-actual |
 | `fleet experiment export` | ready | read / read / operator · instant/low | `since`, `box` | `zcl.fleet_experiment_export.v1` | `z23 fleet experiment export --since=24` | Every kept experiment row as exp.sh's 22-column TSV, one line each |
+
+#### `fleet.roles` — Which key may call which fleet leaf
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet roles list` | ready | read / read / operator · instant/low | none | `zcl.fleet_roles_list.v1` | `z23 fleet roles list` | Every fingerprint this node has ever granted or revoked a role |
+| `fleet roles grant` | ready | mutate / dev-mutation / operator · fast/low | **`fp`**, **`role`** | `zcl.fleet_roles_grant.v1` | `z23 fleet roles grant --fp=<64-hex> --role=worker` | Sign a row granting one role to one key's fingerprint |
+| `fleet roles revoke` | ready | mutate / dev-mutation / operator · fast/low | **`fp`**, **`role`** | `zcl.fleet_roles_revoke.v1` | `z23 fleet roles revoke --fp=<64-hex> --role=worker` | Sign a row revoking one role from one key's fingerprint |
+| `fleet roles check` | ready | read / read / operator · instant/low | **`fp`**, **`leaf`**, `kind` | `zcl.fleet_roles_check.v1` | `z23 fleet roles check --fp=<64-hex> --leaf=fleet.board.post --kind=result` | Would this key's roles allow this leaf (and board kind)? |
 
 
 ## Aliases

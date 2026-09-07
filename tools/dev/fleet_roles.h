@@ -99,10 +99,17 @@ struct zcl_role_report {
 struct zcl_role_store;
 
 /* Opens (creating if absent) `<datadir>/fleet_roles/roles.chain` and folds
- * every row in chain order into the in-memory grant table. A row whose own
- * signature fails to verify refuses the whole open — a role store that
- * silently dropped one tampered row could not be trusted for the rows
- * around it either. */
+ * every row in chain order into the in-memory grant table. A corrupted row
+ * BEFORE the tail refuses the whole open — a role store that silently
+ * dropped one tampered row could not be trusted for the rows around it
+ * either. A corruption confined to the TAIL row is a real gap, not covered
+ * by that refusal: the chainlog beneath this store treats a damaged final
+ * frame as an ordinary torn write from a crashed append and silently drops
+ * it (open succeeds, that one row is gone, one WARN is logged) rather than
+ * refusing. The chain's LENGTH is therefore not authenticated: truncating
+ * the file removes the newest grants and revokes without this store
+ * detecting it, until the head is anchored somewhere else (not yet built).
+ * See tools/dev/fleet_roles_store.c's file header for the same note. */
 struct zcl_role_store *zcl_role_store_open(const char *datadir,
                                            struct zcl_role_report *report);
 void zcl_role_store_close(struct zcl_role_store *store);

@@ -6,8 +6,18 @@
  *
  * Every row is self-signed: it names the granting box's own public key and
  * a signature only that key could have produced, so a row cannot be edited
- * on disk without the edit being detected the next time the store opens.
- * Only this node's own operator key is ever asked to sign one — a grant
+ * on disk without the edit being detected the next time the store opens —
+ * with one measured exception. A corrupted row BEFORE the chain's tail is
+ * refused (row_decode's signature check fails, the whole open fails with
+ * ZCL_ROLE_SIG_INVALID). A corrupted TAIL row is not: the chainlog beneath
+ * this store cannot distinguish "the last frame was damaged" from "the
+ * process crashed mid-append", so it treats a broken final frame as an
+ * ordinary torn write, truncates it away, and logs one WARN — the open
+ * succeeds and that one row is simply gone. The practical effect is that
+ * the chain's LENGTH is not authenticated: an attacker (or a bad disk) who
+ * truncates the file removes the newest grants and revokes with nothing
+ * here to detect it, until some later lane anchors the head elsewhere.
+ * Only this node's own operator key is ever asked to sign a row — a grant
  * is always this node's own decision about a key, never a statement
  * carried in from a peer.
  */
