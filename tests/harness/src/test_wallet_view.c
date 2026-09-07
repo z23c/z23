@@ -206,14 +206,30 @@ static double wv_perf_median_ms(const char *path, int warmup, int iters,
     return wv_median_ms(samples, iters);
 }
 
-int test_wallet_view(void)
+static double wv_scan_coins_page_total(void)
+{
+    double coins_bal = -1;
+    const char *scan = (char *)_wv_resp;
+    const char *last_total = NULL;
+    while ((scan = strstr(scan, "Total")) != NULL) {
+        last_total = scan;
+        scan += 5;
+    }
+    if (last_total && last_total > (char *)_wv_resp + 10) {
+        /* Walk backward to find the number */
+        const char *p = last_total - 1;
+        while (p > (char *)_wv_resp && (*p == ' ' || *p == '\n' || *p == '\t' || *p == '>')) p--;
+        /* Now p points to end of the number */
+        const char *numend = p + 1;
+        while (p > (char *)_wv_resp && ((*p >= '0' && *p <= '9') || *p == '.')) p--;
+        if (p < numend) coins_bal = strtod(p + 1, NULL);
+    }
+    return coins_bal;
+}
+
+static int check_wallet_view_get_wallet_returns_dashboard(void)
 {
     int failures = 0;
-
-    /* Initialize with no datadir — tests DB-unavailable paths.
-     * This is intentional: we want to verify graceful degradation. */
-    wallet_view_init(NULL);
-
     /* ═══════════════════════════════════════════════════════════
      * 1. ROUTE RESOLUTION — every URL returns the correct page
      * ═══════════════════════════════════════════════════════════ */
@@ -255,6 +271,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_get_wallet_history_returns_history_or_loading(void)
+{
+    int failures = 0;
 
     printf("wallet_view: GET /wallet/history returns history (or loading)... ");
     {
@@ -294,6 +316,12 @@ int test_wallet_view(void)
         if (n == 0) printf("OK\n");
         else { printf("FAIL (n=%zu, expected 0)\n", n); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_dashboard_has_navigation_with_4_tabs(void)
+{
+    int failures = 0;
 
     /* ═══════════════════════════════════════════════════════════
      * 2. DASHBOARD — visual elements and structure
@@ -346,6 +374,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_dashboard_has_recent_txs_or_loading(void)
+{
+    int failures = 0;
 
     printf("wallet_view: dashboard has recent txs or loading... ");
     {
@@ -379,6 +413,12 @@ int test_wallet_view(void)
         if (ok && !bad) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_dashboard_has_polling_js_or_loading(void)
+{
+    int failures = 0;
 
     printf("wallet_view: dashboard has polling JS or loading... ");
     {
@@ -423,6 +463,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_form_has_error_display_divs(void)
+{
+    int failures = 0;
 
     printf("wallet_view: send form has error display divs... ");
     {
@@ -472,6 +518,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_form_has_blur_validation_on_address_fiel(void)
+{
+    int failures = 0;
 
     printf("wallet_view: send form has blur validation on address field... ");
     {
@@ -535,6 +587,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_review_rejects_negative_amount(void)
+{
+    int failures = 0;
 
     printf("wallet_view: send review rejects negative amount... ");
     {
@@ -578,6 +636,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_review_has_loading_overlay_for_confirm(void)
+{
+    int failures = 0;
 
     printf("wallet_view: send review has loading overlay for confirm... ");
     {
@@ -623,6 +687,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_confirm_with_no_provenance_evidence_refu(void)
+{
+    int failures = 0;
 
     /* The send form carries the sovereignty guard ahead of its
      * transparent/shielded split, because its shielded branch reaches
@@ -672,6 +742,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_receive_has_qr_code_svg(void)
+{
+    int failures = 0;
 
     printf("wallet_view: receive has QR code SVG... ");
     {
@@ -721,6 +797,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_receive_public_pane_hidden_by_default(void)
+{
+    int failures = 0;
 
     printf("wallet_view: receive public pane hidden by default... ");
     {
@@ -792,6 +874,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_coins_page_renders_no_active_nav_tab(void)
+{
+    int failures = 0;
 
     printf("wallet_view: coins page renders (no active nav tab)... ");
     {
@@ -828,6 +916,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_shield_shows_fee_and_total_cost(void)
+{
+    int failures = 0;
 
     printf("wallet_view: shield shows fee and total cost... ");
     {
@@ -868,6 +962,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_shield_with_negative_amount_shows_form_or_not(void)
+{
+    int failures = 0;
 
     printf("wallet_view: shield with negative amount shows form or nothing... ");
     {
@@ -901,6 +1001,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_tx_detail_with_short_txid_shows_error_or_load(void)
+{
+    int failures = 0;
 
     /* ═══════════════════════════════════════════════════════════
      * 8. TRANSACTION DETAIL — /wallet/tx/:txid
@@ -937,6 +1043,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_pulse_returns_valid_json_structure(void)
+{
+    int failures = 0;
 
     /* ═══════════════════════════════════════════════════════════
      * 9. PULSE API — JSON structure and content
@@ -982,6 +1094,12 @@ int test_wallet_view(void)
         if (ok1 && ok2 && ok3) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_design_system_colors_are_consistent(void)
+{
+    int failures = 0;
 
     printf("wallet_view: design system colors are consistent... ");
     {
@@ -1037,6 +1155,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_path_traversal_in_tx_detail_is_sanitized(void)
+{
+    int failures = 0;
 
     printf("wallet_view: path traversal in tx detail is sanitized... ");
     {
@@ -1107,6 +1231,12 @@ int test_wallet_view(void)
         if (n == 0) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_zero_size_response_buffer_doesn_t_crash(void)
+{
+    int failures = 0;
 
     printf("wallet_view: zero-size response buffer doesn't crash... ");
     {
@@ -1128,27 +1258,12 @@ int test_wallet_view(void)
         if (ok) printf("OK (n=%zu)\n", n);
         else { printf("FAIL (overflow! n=%zu)\n", n); failures++; }
     }
+    return failures;
+}
 
-    /* ═══════════════════════════════════════════════════════════
-     * 13. FIXTURE RENDER — hermetic datadir, deterministic seeded data.
-     *     Builds a private node.db (authoritative schema + seeded rows);
-     *     never touches the live node. See wv_build_fixture_datadir().
-     * ═══════════════════════════════════════════════════════════ */
-
-    char fixture_datadir[256] = "";
-    if (!wv_build_fixture_datadir(fixture_datadir, sizeof(fixture_datadir))) {
-        printf("wallet_view: FIXTURE BUILD FAILED — skipping data-driven tests\n");
-        wallet_view_init(NULL);
-        return failures;  /* don't fall back to the live node */
-    }
-
-    /* Switch to the hermetic fixture datadir for data-driven tests. */
-    wallet_view_init(fixture_datadir);
-    printf("\n=== FIXTURE WALLET RENDER TESTS (deterministic seeded data) ===\n\n");
-
-    /* The fixture always seeds funds (transparent + shielded). */
-    bool have_wallet_funds = (WV_FIX_TBAL_SAT + WV_FIX_ZBAL_SAT > 0);
-
+static int check_wallet_view_dashboard_shows_real_balance_not_loading(void)
+{
+    int failures = 0;
     /* ── Dashboard with real data ────────────────────────────── */
 
     printf("LIVE: dashboard shows real balance (not loading)... ");
@@ -1194,6 +1309,13 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_dashboard_recent_txs_link_to_wallet_tx_or_syn(void)
+{
+    int failures = 0;
+    bool have_wallet_funds = (WV_FIX_TBAL_SAT + WV_FIX_ZBAL_SAT > 0);
 
     printf("LIVE: dashboard recent txs link to /wallet/tx/ or syncing... ");
     {
@@ -1228,6 +1350,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_pulse_has_peers_0(void)
+{
+    int failures = 0;
 
     printf("LIVE: pulse has peers > 0... ");
     {
@@ -1277,6 +1405,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_receive_qr_code_is_valid_svg(void)
+{
+    int failures = 0;
 
     printf("LIVE: receive QR code is valid SVG... ");
     {
@@ -1311,6 +1445,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_history_filter_tabs_present_and_styled(void)
+{
+    int failures = 0;
 
     printf("LIVE: history filter tabs present and styled... ");
     {
@@ -1351,6 +1491,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_history_tx_cards_have_direction_badges(void)
+{
+    int failures = 0;
 
     printf("LIVE: history tx cards have direction badges... ");
     {
@@ -1398,6 +1544,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_coins_page_shows_grand_total_stats(void)
+{
+    int failures = 0;
 
     printf("LIVE: coins page shows grand total stats... ");
     {
@@ -1445,6 +1597,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_all_pages_have_consistent_nav_structure(void)
+{
+    int failures = 0;
 
     printf("LIVE: all pages have consistent nav structure... ");
     {
@@ -1471,6 +1629,12 @@ int test_wallet_view(void)
         if (!bad) printf("OK\n");
         else { printf("FAIL (double-encoded entities)\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_wallet_css_loads_without_overflow(void)
+{
+    int failures = 0;
 
     printf("LIVE: wallet CSS loads without overflow... ");
     {
@@ -1499,6 +1663,12 @@ int test_wallet_view(void)
         if (!bad) printf("OK\n");
         else { printf("FAIL (debug text in production HTML)\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_review_with_valid_address_shows_checksum(void)
+{
+    int failures = 0;
 
     printf("LIVE: send review with valid address shows checksum validation... ");
     {
@@ -1546,6 +1716,12 @@ int test_wallet_view(void)
         }
         printf("LIVE: pages dumped to .zcl_test_render/ for inspection\n");
     }
+    return failures;
+}
+
+static int check_wallet_view_balance_consistent_pulse_send_coins(void)
+{
+    int failures = 0;
 
     /* ═══════════════════════════════════════════════════════════
      * 14. BALANCE CONSISTENCY — the same number everywhere
@@ -1571,24 +1747,7 @@ int test_wallet_view(void)
 
         /* Get total balance from coins page (t + z combined) */
         wv_get("/wallet/coins");
-        double coins_bal = -1;
-        {
-            const char *scan = (char *)_wv_resp;
-            const char *last_total = NULL;
-            while ((scan = strstr(scan, "Total")) != NULL) {
-                last_total = scan;
-                scan += 5;
-            }
-            if (last_total && last_total > (char *)_wv_resp + 10) {
-                /* Walk backward to find the number */
-                const char *p = last_total - 1;
-                while (p > (char *)_wv_resp && (*p == ' ' || *p == '\n' || *p == '\t' || *p == '>')) p--;
-                /* Now p points to end of the number */
-                const char *numend = p + 1;
-                while (p > (char *)_wv_resp && ((*p >= '0' && *p <= '9') || *p == '.')) p--;
-                if (p < numend) coins_bal = strtod(p + 1, NULL);
-            }
-        }
+        double coins_bal = wv_scan_coins_page_total();
         int64_t coins_sat = (coins_bal >= 0)
             ? (int64_t)(coins_bal * 1e8 + 0.5) : -1;
 
@@ -1604,6 +1763,13 @@ int test_wallet_view(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int check_wallet_view_balance_must_be_1_zcl_sanity_check(void)
+{
+    int failures = 0;
+    bool have_wallet_funds = (WV_FIX_TBAL_SAT + WV_FIX_ZBAL_SAT > 0);
 
     printf("LIVE: balance must be < 1 ZCL (sanity check)... ");
     {
@@ -1635,6 +1801,12 @@ int test_wallet_view(void)
         if (!bad) printf("OK\n");
         else { printf("FAIL (stale balance visible!)\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_history_shows_0_transactions(void)
+{
+    int failures = 0;
 
     printf("LIVE: history shows > 0 transactions... ");
     {
@@ -1657,6 +1829,13 @@ int test_wallet_view(void)
             printf("OK (%d txs, %d cards)\n", count, cards);
         else { printf("FAIL (0 transactions shown)\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_history_txs_show_non_zero_amounts(void)
+{
+    int failures = 0;
+    bool have_wallet_funds = (WV_FIX_TBAL_SAT + WV_FIX_ZBAL_SAT > 0);
 
     printf("LIVE: history txs show non-zero amounts... ");
     {
@@ -1703,6 +1882,12 @@ int test_wallet_view(void)
             else { printf("FAIL (no z-addresses on receive)\n"); failures++; }
         }
     }
+    return failures;
+}
+
+static int check_wallet_view_shield_review_page_renders_correctly(void)
+{
+    int failures = 0;
 
     printf("LIVE: shield review page renders correctly... ");
     {
@@ -1749,6 +1934,12 @@ int test_wallet_view(void)
         if (!groth16 && !not_impl && has_shielded) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_review_to_zs1_shows_t_z_privacy_warning(void)
+{
+    int failures = 0;
 
     /* ═══════════════════════════════════════════════════════════
      * 14b. PRIVACY & ACCURACY INTEGRATION TESTS
@@ -1809,6 +2000,13 @@ int test_wallet_view(void)
         if (has_lock && is_yellow) printf("OK (yellow for mixed balance)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_dashboard_has_contacts_datalist_on_send_page(void)
+{
+    int failures = 0;
+    bool have_wallet_funds = (WV_FIX_TBAL_SAT + WV_FIX_ZBAL_SAT > 0);
 
     printf("INTEG: dashboard has contacts datalist on send page... ");
     {
@@ -1855,6 +2053,12 @@ int test_wallet_view(void)
         if (good) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_receive_page_shows_z_address_qr_code(void)
+{
+    int failures = 0;
 
     printf("INTEG: receive page shows z-address QR code... ");
     {
@@ -1892,6 +2096,12 @@ int test_wallet_view(void)
         else if (!bad) printf("OK (no unconfirmed txs)\n");
         else { printf("FAIL (shows '0 confs')\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_receive_page_says_click_to_copy_not_tap(void)
+{
+    int failures = 0;
 
     printf("INTEG: receive page says 'Click to copy' not 'Tap'... ");
     {
@@ -1950,6 +2160,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_no_unresolved_vars_in_dashboard(void)
+{
+    int failures = 0;
 
     /* ═══════════════════════════════════════════════════════════
      * 14c. TEMPLATE CORRECTNESS TESTS
@@ -1991,6 +2207,12 @@ int test_wallet_view(void)
         if (!has_unresolved) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_no_unresolved_vars_in_coins(void)
+{
+    int failures = 0;
 
     printf("TMPL: no unresolved {{vars}} in coins... ");
     {
@@ -2028,6 +2250,12 @@ int test_wallet_view(void)
         if (has_review_table && has_privacy_row && has_est_time) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_history_cards_use_template_secured_badge(void)
+{
+    int failures = 0;
 
     printf("TMPL: history cards use template (Secured badge)... ");
     {
@@ -2064,6 +2292,12 @@ int test_wallet_view(void)
         if (has_invalid) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_backup_warning_template_has_address(void)
+{
+    int failures = 0;
 
     printf("TMPL: backup warning template has address... ");
     {
@@ -2074,14 +2308,12 @@ int test_wallet_view(void)
         else if (!has_backup) printf("OK (backed up)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ═══════════════════════════════════════════════════════════
-     * 15. EMPTY STATE TESTS — no DB, simulate fresh install
-     * ═══════════════════════════════════════════════════════════ */
-
-    wallet_view_init(NULL);
-    printf("\n=== EMPTY STATE TESTS ===\n\n");
-
+static int check_wallet_view_dashboard_with_no_db_renders_gracefully(void)
+{
+    int failures = 0;
     printf("EMPTY: dashboard with no DB renders gracefully... ");
     {
         wv_get("/wallet");
@@ -2119,6 +2351,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_send_form_still_renders_with_no_db(void)
+{
+    int failures = 0;
 
     printf("EMPTY: send form still renders with no DB... ");
     {
@@ -2184,6 +2422,12 @@ int test_wallet_view(void)
         if (!bad) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_oversized_post_body_does_not_crash(void)
+{
+    int failures = 0;
 
     printf("EDGE: oversized POST body does not crash... ");
     {
@@ -2264,6 +2508,12 @@ int test_wallet_view(void)
         }
         if (!bad) printf("OK\n");
     }
+    return failures;
+}
+
+static int check_wallet_view_all_titles_contain_z23(void)
+{
+    int failures = 0;
 
     printf("NAV: all titles contain 'Z23'... ");
     {
@@ -2309,6 +2559,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_command_center_has_peer_table(void)
+{
+    int failures = 0;
 
     printf("NODE: command center has peer table... ");
     {
@@ -2363,6 +2619,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_template_render_handles_name_syntax(void)
+{
+    int failures = 0;
 
     printf("PARTIAL: template_render handles {{> name}} syntax... ");
     {
@@ -2403,6 +2665,12 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int check_wallet_view_dashboard_renders_in_50ms(void)
+{
+    int failures = 0;
 
     /* ═══════════════════════════════════════════════════════════
      * 18. PERFORMANCE TESTS — render timing
@@ -2496,10 +2764,96 @@ int test_wallet_view(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_wallet_view(void)
+{
+    int failures = 0;
+
+    /* Initialize with no datadir — tests DB-unavailable paths.
+     * This is intentional: we want to verify graceful degradation. */
+    wallet_view_init(NULL);
+
+    failures += check_wallet_view_get_wallet_returns_dashboard();
+    failures += check_wallet_view_get_wallet_history_returns_history_or_loading();
+    failures += check_wallet_view_dashboard_has_navigation_with_4_tabs();
+    failures += check_wallet_view_dashboard_has_recent_txs_or_loading();
+    failures += check_wallet_view_dashboard_has_polling_js_or_loading();
+    failures += check_wallet_view_send_form_has_error_display_divs();
+    failures += check_wallet_view_send_form_has_blur_validation_on_address_fiel();
+    failures += check_wallet_view_send_review_rejects_negative_amount();
+    failures += check_wallet_view_send_review_has_loading_overlay_for_confirm();
+    failures += check_wallet_view_send_confirm_with_no_provenance_evidence_refu();
+    failures += check_wallet_view_receive_has_qr_code_svg();
+    failures += check_wallet_view_receive_public_pane_hidden_by_default();
+    failures += check_wallet_view_coins_page_renders_no_active_nav_tab();
+    failures += check_wallet_view_shield_shows_fee_and_total_cost();
+    failures += check_wallet_view_shield_with_negative_amount_shows_form_or_not();
+    failures += check_wallet_view_tx_detail_with_short_txid_shows_error_or_load();
+    failures += check_wallet_view_pulse_returns_valid_json_structure();
+    failures += check_wallet_view_design_system_colors_are_consistent();
+    failures += check_wallet_view_path_traversal_in_tx_detail_is_sanitized();
+    failures += check_wallet_view_zero_size_response_buffer_doesn_t_crash();
+
+    /* ═══════════════════════════════════════════════════════════
+     * 13. FIXTURE RENDER — hermetic datadir, deterministic seeded data.
+     *     Builds a private node.db (authoritative schema + seeded rows);
+     *     never touches the live node. See wv_build_fixture_datadir().
+     * ═══════════════════════════════════════════════════════════ */
+
+    char fixture_datadir[256] = "";
+    if (!wv_build_fixture_datadir(fixture_datadir, sizeof(fixture_datadir))) {
+        printf("wallet_view: FIXTURE BUILD FAILED — skipping data-driven tests\n");
+        wallet_view_init(NULL);
+        return failures;  /* don't fall back to the live node */
+    }
+
+    /* Switch to the hermetic fixture datadir for data-driven tests. */
+    wallet_view_init(fixture_datadir);
+    printf("\n=== FIXTURE WALLET RENDER TESTS (deterministic seeded data) ===\n\n");
+
+    failures += check_wallet_view_dashboard_shows_real_balance_not_loading();
+    failures += check_wallet_view_dashboard_recent_txs_link_to_wallet_tx_or_syn();
+    failures += check_wallet_view_pulse_has_peers_0();
+    failures += check_wallet_view_receive_qr_code_is_valid_svg();
+    failures += check_wallet_view_history_filter_tabs_present_and_styled();
+    failures += check_wallet_view_history_tx_cards_have_direction_badges();
+    failures += check_wallet_view_coins_page_shows_grand_total_stats();
+    failures += check_wallet_view_all_pages_have_consistent_nav_structure();
+    failures += check_wallet_view_wallet_css_loads_without_overflow();
+    failures += check_wallet_view_send_review_with_valid_address_shows_checksum();
+    failures += check_wallet_view_balance_consistent_pulse_send_coins();
+    failures += check_wallet_view_balance_must_be_1_zcl_sanity_check();
+    failures += check_wallet_view_history_shows_0_transactions();
+    failures += check_wallet_view_history_txs_show_non_zero_amounts();
+    failures += check_wallet_view_shield_review_page_renders_correctly();
+    failures += check_wallet_view_send_review_to_zs1_shows_t_z_privacy_warning();
+    failures += check_wallet_view_dashboard_has_contacts_datalist_on_send_page();
+    failures += check_wallet_view_receive_page_shows_z_address_qr_code();
+    failures += check_wallet_view_receive_page_says_click_to_copy_not_tap();
+    failures += check_wallet_view_no_unresolved_vars_in_dashboard();
+    failures += check_wallet_view_no_unresolved_vars_in_coins();
+    failures += check_wallet_view_history_cards_use_template_secured_badge();
+    failures += check_wallet_view_backup_warning_template_has_address();
+
+    /* ═══════════════════════════════════════════════════════════
+     * 15. EMPTY STATE TESTS — no DB, simulate fresh install
+     * ═══════════════════════════════════════════════════════════ */
+
+    wallet_view_init(NULL);
+    printf("\n=== EMPTY STATE TESTS ===\n\n");
+
+    failures += check_wallet_view_dashboard_with_no_db_renders_gracefully();
+    failures += check_wallet_view_send_form_still_renders_with_no_db();
+    failures += check_wallet_view_oversized_post_body_does_not_crash();
+    failures += check_wallet_view_all_titles_contain_z23();
+    failures += check_wallet_view_command_center_has_peer_table();
+    failures += check_wallet_view_template_render_handles_name_syntax();
+    failures += check_wallet_view_dashboard_renders_in_50ms();
 
     /* Restore NULL for safety, then tear down the fixture datadir. */
     wallet_view_init(NULL);
     wv_cleanup_fixture_datadir(fixture_datadir);
-
     return failures;
 }
