@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "gate_git_scan_a_priv.h"
 
 struct sr_acc { struct sr_set allowed; int tracked; };
 
@@ -309,22 +310,37 @@ int check_simd_os_support_run(int argc, char **argv)
     return clock_grade(v, mode);
 }
 
-int check_simd_os_support_selftest(void)
+static int simd_build_fixtures(char *a, size_t asz, char *b, size_t bsz, char *c,
+    size_t csz, char *d, size_t dsz, char *e, size_t esz)
 {
     const char *avx = "__attribute__((target(\"" "avx2\"))) void zz(void) {}";
-    char a[160], b[200], c[180], d[180], e[200];
-    if (ovf(snprintf(a, sizeof a, "%s", avx), sizeof a)
-        || ovf(snprintf(b, sizeof b, "#include \"crypto/simd_dispatch.h\"\n%s", avx), sizeof b)
-        || ovf(snprintf(c, sizeof c, "XGETBV osxsave\n%s", avx), sizeof c)
-        || ovf(snprintf(d, sizeof d, "xgetbv\n%s", avx), sizeof d)
-        || ovf(snprintf(e, sizeof e, "keccak_x4_available\n%s", avx), sizeof e))
+    if (ovf(snprintf(a, asz, "%s", avx), asz)
+        || ovf(snprintf(b, bsz, "#include \"crypto/simd_dispatch.h\"\n%s", avx), bsz)
+        || ovf(snprintf(c, csz, "XGETBV osxsave\n%s", avx), csz)
+        || ovf(snprintf(d, dsz, "xgetbv\n%s", avx), dsz)
+        || ovf(snprintf(e, esz, "keccak_x4_available\n%s", avx), esz))
         return 2;
-    int bad = mem_local(a) || !mem_local(b) || !mem_local(c) || mem_local(d)
-            || !mem_del(e) || mem_del(a)
-            || mem_local(a) || mem_del(a)
-            || !(!mem_local(d) && !mem_del(d))
-            || !(!mem_local(e) && mem_del(e))
-            || mem_local("void keccak_x4_available(void) {}");
+    return 0;
+}
+
+static int simd_assert_all(const char *a, const char *b, const char *c,
+    const char *d, const char *e)
+{
+    return mem_local(a) || !mem_local(b) || !mem_local(c) || mem_local(d)
+        || !mem_del(e) || mem_del(a)
+        || mem_local(a) || mem_del(a)
+        || !(!mem_local(d) && !mem_del(d))
+        || !(!mem_local(e) && mem_del(e))
+        || mem_local("void keccak_x4_available(void) {}");
+}
+
+int check_simd_os_support_selftest(void)
+{
+    char a[160], b[200], c[180], d[180], e[200];
+    int rc = simd_build_fixtures(a, sizeof a, b, sizeof b, c, sizeof c, d, sizeof d, e, sizeof e);
+    if (rc)
+        return rc;
+    int bad = simd_assert_all(a, b, c, d, e);
     return st_ok(bad, "check_simd_os_support selftest: OK\n");
 }
 
@@ -675,6 +691,77 @@ static int nak_want(const regex_t *re, const char *s, int w)
     return 0;
 }
 
+static int nak_build_fixtures(char *sk, size_t sksz, char *xai, size_t xaisz,
+    char *gsk, size_t gsksz, char *ghp, size_t ghpsz, char *glp, size_t glpsz,
+    char *akia, size_t akiasz, char *br, size_t brsz, char *dig, size_t digsz,
+    char *okm, size_t okmsz, char *sha, size_t shasz, char *shortsk, size_t shortsksz)
+{
+    if (snprintf(sk, sksz, "%s%s", "s" "k-", "abcdefghijklmnopqrst") >= (int)sksz
+        || snprintf(xai, xaisz, "%s%s", "x" "ai-", "abcdefghijklmnopqrst") >= (int)xaisz
+        || snprintf(gsk, gsksz, "%s%s", "g" "sk_", "abcdefghijklmnopqrst") >= (int)gsksz
+        || snprintf(ghp, ghpsz, "%s%s", "g" "hp_", "abcdefghijklmnopqrst") >= (int)ghpsz
+        || snprintf(glp, glpsz, "%s%s", "g" "lpat-", "abcdefghijklmnopqrst") >= (int)glpsz
+        || snprintf(akia, akiasz, "%s%s", "A" "KIA", "ABCDEFGHIJKLMNOP") >= (int)akiasz
+        || snprintf(br, brsz, "Bearer %s", "abcdefghijklmnopqrstuvwx") >= (int)brsz
+        || snprintf(dig, digsz, "%s.%s", "0123456789abcdef0123456789abcdef",
+                    "abcdefghijklmnop") >= (int)digsz
+        || snprintf(okm, okmsz, "%s api-key-example-ok", sk) >= (int)okmsz
+        || snprintf(sha, shasz, "%s",
+                    "0123456789abcdef0123456789abcdef01234567") >= (int)shasz
+        || snprintf(shortsk, shortsksz, "%s%s", "s" "k-",
+                    "abcdefghijklmnopqrs") >= (int)shortsksz)
+        return 1;
+    return 0;
+}
+
+static int nak_want_core(const regex_t *re, const char *sk, const char *xai,
+    const char *gsk, const char *ghp, const char *glp, const char *akia,
+    const char *br, const char *dig, const char *okm, const char *sha,
+    const char *shortsk)
+{
+    return nak_want(re, sk, 1) | nak_want(re, xai, 1) | nak_want(re, gsk, 1)
+        | nak_want(re, ghp, 1) | nak_want(re, glp, 1) | nak_want(re, akia, 1)
+        | nak_want(re, br, 1) | nak_want(re, dig, 1)
+        | nak_want(re, okm, 0) | nak_want(re, sha, 0) | nak_want(re, shortsk, 0)
+        | nak_want(re, "cc -std=c23 main.c", 0);
+}
+
+static int nak_skip_checks(void)
+{
+    return (int)(nak_too_few(0, 1) != 2) | (nak_too_few(1, 1) != 0)
+        | (nak_too_few(999, 1000) != 2)
+        | !nak_skip_path("vendor/foo.c")
+        | !nak_skip_path("tests/harness/fuzz_seeds/x.bin")
+        | !nak_skip_path("docs/x.png")
+        | nak_skip_path("tools/lint/lintc/main.c")
+        | nak_skip_path("tools/lint/lintc/lib.c")
+        | nak_skip_path("tools/lint/lintc/gate_ratchet_ports.c")
+        | nak_skip_path("tools/lint/lintc/gate_repo_shape.c")
+        | nak_skip_path("tools/lint/lintc/gate_def_parsers.c")
+        | nak_skip_path("tools/lint/lintc/gate_zcode_packages.c")
+        | nak_skip_path("tools/lint/lintc/gate_source_fences.c")
+        | nak_skip_path("tools/lint/lintc/gate_compile_fixture.c");
+}
+
+static int nak_boundary_checks(const regex_t *re, const char *const tokens[],
+    size_t ntok, int *bad)
+{
+    static const struct { const char *prefix; int want; } boundaries[] = {
+        { "", 1 }, { "\"", 1 }, { " ", 1 }, { "=", 1 },
+        { "a", 0 }, { "0", 0 }, { "_", 0 }
+    };
+    for (size_t i = 0; i < ntok; i++) {
+        for (size_t j = 0; j < sizeof boundaries / sizeof boundaries[0]; j++) {
+            char sample[80];
+            if (ovf(snprintf(sample, sizeof sample, "%s%s",
+                             boundaries[j].prefix, tokens[i]), sizeof sample))
+                return die("z23-lint: selftest boundary buffer overflow\n", "");
+            *bad |= nak_want(re, sample, boundaries[j].want);
+        }
+    }
+    return 0;
+}
+
 int check_no_api_keys_selftest(void)
 {
     regex_t re;
@@ -682,58 +769,19 @@ int check_no_api_keys_selftest(void)
     if (cr) return cr;
     char sk[48], xai[48], gsk[48], ghp[48], glp[56], akia[40];
     char br[64], dig[80], okm[80], sha[48], shortsk[40];
-    if (snprintf(sk, sizeof sk, "%s%s", "s" "k-", "abcdefghijklmnopqrst") >= (int)sizeof sk
-        || snprintf(xai, sizeof xai, "%s%s", "x" "ai-", "abcdefghijklmnopqrst") >= (int)sizeof xai
-        || snprintf(gsk, sizeof gsk, "%s%s", "g" "sk_", "abcdefghijklmnopqrst") >= (int)sizeof gsk
-        || snprintf(ghp, sizeof ghp, "%s%s", "g" "hp_", "abcdefghijklmnopqrst") >= (int)sizeof ghp
-        || snprintf(glp, sizeof glp, "%s%s", "g" "lpat-", "abcdefghijklmnopqrst") >= (int)sizeof glp
-        || snprintf(akia, sizeof akia, "%s%s", "A" "KIA", "ABCDEFGHIJKLMNOP") >= (int)sizeof akia
-        || snprintf(br, sizeof br, "Bearer %s", "abcdefghijklmnopqrstuvwx") >= (int)sizeof br
-        || snprintf(dig, sizeof dig, "%s.%s", "0123456789abcdef0123456789abcdef",
-                    "abcdefghijklmnop") >= (int)sizeof dig
-        || snprintf(okm, sizeof okm, "%s api-key-example-ok", sk) >= (int)sizeof okm
-        || snprintf(sha, sizeof sha, "%s",
-                    "0123456789abcdef0123456789abcdef01234567") >= (int)sizeof sha
-        || snprintf(shortsk, sizeof shortsk, "%s%s", "s" "k-",
-                    "abcdefghijklmnopqrs") >= (int)sizeof shortsk) {
+    if (nak_build_fixtures(sk, sizeof sk, xai, sizeof xai, gsk, sizeof gsk, ghp, sizeof ghp,
+            glp, sizeof glp, akia, sizeof akia, br, sizeof br, dig, sizeof dig,
+            okm, sizeof okm, sha, sizeof sha, shortsk, sizeof shortsk)) {
         regfree(&re);
         return die("z23-lint: selftest buffer overflow\n", "");
     }
-    int bad = nak_want(&re, sk, 1) | nak_want(&re, xai, 1) | nak_want(&re, gsk, 1)
-            | nak_want(&re, ghp, 1) | nak_want(&re, glp, 1) | nak_want(&re, akia, 1)
-            | nak_want(&re, br, 1) | nak_want(&re, dig, 1)
-            | nak_want(&re, okm, 0) | nak_want(&re, sha, 0) | nak_want(&re, shortsk, 0)
-            | nak_want(&re, "cc -std=c23 main.c", 0)
-            | (nak_too_few(0, 1) != 2) | (nak_too_few(1, 1) != 0)
-            | (nak_too_few(999, 1000) != 2)
-            | !nak_skip_path("vendor/foo.c")
-            | !nak_skip_path("tests/harness/fuzz_seeds/x.bin")
-            | !nak_skip_path("docs/x.png")
-            | nak_skip_path("tools/lint/lintc/main.c")
-            | nak_skip_path("tools/lint/lintc/lib.c")
-            | nak_skip_path("tools/lint/lintc/gate_ratchet_ports.c")
-            | nak_skip_path("tools/lint/lintc/gate_repo_shape.c")
-            | nak_skip_path("tools/lint/lintc/gate_def_parsers.c")
-            | nak_skip_path("tools/lint/lintc/gate_zcode_packages.c")
-            | nak_skip_path("tools/lint/lintc/gate_source_fences.c")
-            | nak_skip_path("tools/lint/lintc/gate_compile_fixture.c");
+    int bad = nak_want_core(&re, sk, xai, gsk, ghp, glp, akia, br, dig, okm, sha, shortsk)
+        | nak_skip_checks();
     const char *const tokens[] = { sk, xai, gsk, ghp, glp, akia };
-    static const struct { const char *prefix; int want; } boundaries[] = {
-        { "", 1 }, { "\"", 1 }, { " ", 1 }, { "=", 1 },
-        { "a", 0 }, { "0", 0 }, { "_", 0 }
-    };
-    for (size_t i = 0; i < sizeof tokens / sizeof tokens[0]; i++) {
-        for (size_t j = 0; j < sizeof boundaries / sizeof boundaries[0]; j++) {
-            char sample[80];
-            if (ovf(snprintf(sample, sizeof sample, "%s%s",
-                             boundaries[j].prefix, tokens[i]), sizeof sample)) {
-                regfree(&re);
-                return die("z23-lint: selftest boundary buffer overflow\n", "");
-            }
-            bad |= nak_want(&re, sample, boundaries[j].want);
-        }
-    }
+    int rc = nak_boundary_checks(&re, tokens, sizeof tokens / sizeof tokens[0], &bad);
     regfree(&re);
+    if (rc)
+        return rc;
     return st_ok(bad, "check_no_api_keys selftest: OK\n");
 }
 
@@ -1111,22 +1159,29 @@ int check_framework_filename_suffix_run(int argc, char **argv)
     return 1;
 }
 
-int check_framework_filename_suffix_selftest(void)
+static int ffs_test_foreign_shapes(void)
 {
-    regex_t re;
-    int cr = ffs_marker_comp(&re);
-    if (cr)
-        return cr;
     int bad = 0;
     const char *shape = ffs_foreign_shape("foo_controller", "service");
     bad |= !(shape && strcmp(shape, "controller") == 0);
     bad |= ffs_foreign_shape("foo_service", "service") != NULL;
     bad |= ffs_foreign_shape("block", "model") != NULL;
+    return bad;
+}
+
+static int ffs_test_markers(const regex_t *re)
+{
+    int bad = 0;
     const char *marked = "/* header */\nint x;\n// suffix-ok:file_service\n";
-    bad |= !ffs_buf_has_marker(marked, &re);
-    bad |= ffs_buf_has_marker("int x;\nvoid f(void) {}\n", &re);
-    bad |= !(ffs_buf_has_marker(marked, &re)
+    bad |= !ffs_buf_has_marker(marked, re);
+    bad |= ffs_buf_has_marker("int x;\nvoid f(void) {}\n", re);
+    bad |= !(ffs_buf_has_marker(marked, re)
              && ffs_foreign_shape("file_service", "model") != NULL);
+    return bad;
+}
+
+static int ffs_test_own_coverage(void)
+{
     char full[FFS_OWN_N][RS_NAME];
     for (int i = 0; i < FFS_OWN_N; i++)
         memcpy(full[i], k_ffs_own[i].folder, strlen(k_ffs_own[i].folder) + 1);
@@ -1137,7 +1192,11 @@ int check_framework_filename_suffix_selftest(void)
     for (int i = 0; i < FFS_OWN_N; i++)
         if (!ffs_own_suffix(full[i]))
             cover_shapes = 0;
-    bad |= !cover_own || !cover_shapes;
+    return !cover_own || !cover_shapes;
+}
+
+static int ffs_test_missing_coverage(void)
+{
     char miss[FFS_OWN_N][RS_NAME];
     for (int i = 0; i < FFS_OWN_N - 1; i++)
         memcpy(miss[i], k_ffs_own[i].folder, strlen(k_ffs_own[i].folder) + 1);
@@ -1145,7 +1204,11 @@ int check_framework_filename_suffix_selftest(void)
     for (int i = 0; i < FFS_OWN_N; i++)
         if (!ffs_in_shapes(k_ffs_own[i].folder, miss, FFS_OWN_N - 1))
             miss_cover = 0;
-    bad |= miss_cover;
+    return miss_cover;
+}
+
+static int ffs_test_extra_coverage(void)
+{
     char extra[FFS_OWN_N + 1][RS_NAME];
     for (int i = 0; i < FFS_OWN_N; i++)
         memcpy(extra[i], k_ffs_own[i].folder, strlen(k_ffs_own[i].folder) + 1);
@@ -1154,7 +1217,21 @@ int check_framework_filename_suffix_selftest(void)
     for (int i = 0; i < FFS_OWN_N + 1; i++)
         if (!ffs_own_suffix(extra[i]))
             extra_cover = 0;
-    bad |= extra_cover;
+    return extra_cover;
+}
+
+int check_framework_filename_suffix_selftest(void)
+{
+    regex_t re;
+    int cr = ffs_marker_comp(&re);
+    if (cr)
+        return cr;
+    int bad = 0;
+    bad |= ffs_test_foreign_shapes();
+    bad |= ffs_test_markers(&re);
+    bad |= ffs_test_own_coverage();
+    bad |= ffs_test_missing_coverage();
+    bad |= ffs_test_extra_coverage();
     regfree(&re);
     return st_ok(bad, "check_framework_filename_suffix selftest: OK\n");
 }
@@ -1174,7 +1251,7 @@ enum { EQP_FILE = 2 * 1024 * 1024, EQP_MAXL = 65536, EQP_DIFF = 256 * 1024 };
 static char eqp_buf[EQP_FILE];
 static const char *eqp_lines[EQP_MAXL];
 
-static int eqp_keep_path(const char *path)
+int eqp_keep_path(const char *path)
 {
     if (!(c23_ends(path, ".md") || c23_ends(path, ".c") || c23_ends(path, ".h")
           || c23_ends(path, ".def") || c23_ends(path, ".in")))
@@ -1184,7 +1261,7 @@ static int eqp_keep_path(const char *path)
         && strcmp(path, k_eqp_doc) && strcmp(path, "tools/equihash_params_fact.c");
 }
 
-static int eqp_comp(regex_t *lit, regex_t *claim, regex_t *qual)
+int eqp_comp(regex_t *lit, regex_t *claim, regex_t *qual)
 {
     int e = reg_fail(lit, regcomp(lit, k_eqp_lit, REG_EXTENDED));
     if (e) return e;
@@ -1208,7 +1285,7 @@ static int eqp_is_violation(const char *const *lines, int nlines, int idx,
     return !(idx >= 2 && regexec(qual, lines[idx - 2], 0, NULL, 0) == 0);
 }
 
-static int eqp_load(const char *path, int *nlines)
+int eqp_load(const char *path, int *nlines)
 {
     FILE *f = fopen(path, "r");
     if (!f) return die("z23-lint: cannot open %s\n", path);
@@ -1238,7 +1315,7 @@ static int eqp_load(const char *path, int *nlines)
     return 0;
 }
 
-static int eqp_scan_lines(const char *disp, int nlines, const regex_t *lit,
+int eqp_scan_lines(const char *disp, int nlines, const regex_t *lit,
                           const regex_t *claim, const regex_t *qual, FILE *out,
                           int *hits)
 {
@@ -1364,56 +1441,3 @@ int check_equihash_params_run(int argc, char **argv)
     return status;
 }
 
-int check_equihash_params_selftest(void)
-{
-    regex_t lit, claim, qual;
-    int rc = eqp_comp(&lit, &claim, &qual), nlines = 0, hits = 0, bad;
-    if (rc) return rc;
-    char p_build[16], p_skill[32], p_disp[24];
-    if (ovf(snprintf(p_build, sizeof p_build, "build/x.%s", "md"), sizeof p_build)
-        || ovf(snprintf(p_skill, sizeof p_skill, ".claude/skills/w.%s", "md"),
-               sizeof p_skill)
-        || ovf(snprintf(p_disp, sizeof p_disp, "docs/PLANTED.%s", "md"),
-               sizeof p_disp)) {
-        drop3(&lit, &claim, &qual);
-        return 2;
-    }
-    bad = eqp_keep_path(p_build) | eqp_keep_path("vendor/y.c")
-        | eqp_keep_path(".claude/worktrees/z.h")
-        | !eqp_keep_path(p_skill)
-        | eqp_keep_path("docs/EQUIHASH_PARAMS.md")
-        | eqp_keep_path("tools/equihash_params_fact.c")
-        | eqp_keep_path("foo.py") | !eqp_keep_path("foo.def");
-    if (bad) fputs("check_equihash_params selftest: path filter failed\n", stderr);
-    const char *td = env_or("TMPDIR", "/tmp");
-    char tmpl[4096], planted[4096], line[96];
-    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-eqparams-st.XXXXXX", td),
-            sizeof tmpl)) { drop3(&lit, &claim, &qual); return 2; }
-    char *work = mkdtemp(tmpl);
-    if (!work) { drop3(&lit, &claim, &qual); return die("z23-lint: mkdir failed: %s\n", td); }
-    if (ovf(snprintf(planted, sizeof planted, "%s/%s", work, p_disp), sizeof planted)
-        || snprintf(line, sizeof line, "ZClassic is Equi%s 200,9 and always will be.\n",
-                    "hash") >= (int)sizeof line || csr_write(planted, line)) {
-        (void)rap_rm_rf(work); drop3(&lit, &claim, &qual); return 2;
-    }
-    rc = eqp_load(planted, &nlines);
-    if (rc == 0) rc = eqp_scan_lines(p_disp, nlines, &lit, &claim, &qual, NULL, &hits);
-    if (rc || hits == 0) {
-        fputs("check_equihash_params selftest: planted flat claim not detected\n", stderr);
-        bad = 1;
-    }
-    hits = 0; nlines = 0;
-    if (csr_write(planted,
-                  "Mainnet is 192,7 from the Bubbles height; 200,9 applies before it.\n")) {
-        (void)rap_rm_rf(work); drop3(&lit, &claim, &qual); return 2;
-    }
-    rc = eqp_load(planted, &nlines);
-    if (rc == 0) rc = eqp_scan_lines(p_disp, nlines, &lit, &claim, &qual, NULL, &hits);
-    if (rc || hits != 0) {
-        fputs("check_equihash_params selftest: qualified sentence was reported\n", stderr);
-        bad = 1;
-    }
-    (void)rap_rm_rf(work);
-    drop3(&lit, &claim, &qual);
-    return st_ok(bad, "check_equihash_params selftest: OK\n");
-}

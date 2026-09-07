@@ -5308,6 +5308,7 @@ LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_source_patterns.c \
     tools/lint/lintc/gate_pattern_small.c tools/lint/lintc/gate_wire_dial.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
+    tools/lint/lintc/gate_git_scan_a_selftests.c \
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_build_config_selftests.c \
     tools/lint/lintc/gate_doc_index.c \
