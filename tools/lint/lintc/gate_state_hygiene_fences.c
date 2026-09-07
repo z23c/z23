@@ -396,11 +396,15 @@ static int owp_compile(struct owp_re *r)
                          "coins_view_cache_flush[[:space:]]*\\(", "");
     if (rc)
         return rc;
+    /* connect_tip/disconnect_tip/process_new_block were in the shell
+     * pattern this ported (tools/scripts/check_one_write_path.sh) but
+     * are themselves deleted engine entry points (see the stale[] list
+     * in check_deleted_engine_names_file) — a .sh file was never walked
+     * by that gate, but this .c file is, so naming them here trips it.
+     * Dropped: none of the three exist as a live production call, so
+     * this drops no real coverage. */
     rc = compile_pat(&r->b, REG_EXTENDED,
-                     "utxo_projection_set_author[[:space:]]*\\(|",
-                     "process_new_block[[:space:]]*\\(|",
-                     "connect_tip[[:space:]]*\\(|",
-                     "disconnect_tip[[:space:]]*\\(");
+                     "utxo_projection_set_author[[:space:]]*\\(", "", "", "");
     if (rc) {
         regfree(&r->a);
         return rc;
@@ -689,28 +693,28 @@ static int owp_st_feed(struct owp_re *r, const char *line, const char *bkey,
 static int owp_st_a(struct owp_re *r)
 {
     int n = 0;
-    return owp_st_feed(r, "connect_tip();\n", NULL, &n)
-        || sh_want("check_one_write_path", n, 1, "bare connect_tip is new");
+    return owp_st_feed(r, "utxo_projection_set_author();\n", NULL, &n)
+        || sh_want("check_one_write_path", n, 1, "bare utxo_projection_set_author is new");
 }
 
 static int owp_st_b(struct owp_re *r)
 {
     int n = 0;
-    return owp_st_feed(r, "connect_tip(); // one-write-path-ok:test-tag\n", NULL, &n)
+    return owp_st_feed(r, "utxo_projection_set_author(); // one-write-path-ok:test-tag\n", NULL, &n)
         || sh_want("check_one_write_path", n, 0, "inline marker suppresses");
 }
 
 static int owp_st_c(struct owp_re *r)
 {
     int n = 0;
-    return owp_st_feed(r, "    // connect_tip();\n", NULL, &n)
+    return owp_st_feed(r, "    // utxo_projection_set_author();\n", NULL, &n)
         || sh_want("check_one_write_path", n, 0, "comment line is skipped");
 }
 
 static int owp_st_d(struct owp_re *r)
 {
     int n = 0;
-    return owp_st_feed(r, "connect_tip();\n", "t.c:1:connect_tip();", &n)
+    return owp_st_feed(r, "utxo_projection_set_author();\n", "t.c:1:utxo_projection_set_author();", &n)
         || sh_want("check_one_write_path", n, 0, "baseline key is not re-flagged");
 }
 
