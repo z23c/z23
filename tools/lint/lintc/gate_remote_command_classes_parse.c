@@ -395,6 +395,40 @@ static int rcc_emit(const char *buf, struct rcc_rows *rows)
     return rcc_row_push(rows, &row);
 }
 
+static int rcc_paren_delta(const char *s)
+{
+    int d = 0;
+    for (; *s; s++)
+        d += (*s == '(') - (*s == ')');
+    return d;
+}
+
+static void rcc_buf_reset(struct rcc_buf *buf)
+{
+    buf->n = 0;
+    if (buf->s)
+        buf->s[0] = '\0';
+}
+
+/* Append `text` to buf, fold its paren delta into *depth, and emit()/reset
+ * the row when depth drops to zero or below (a REMOTE_COMMAND_CLASS(...)
+ * call closes on this line). Shared by the row-opening line (its text is
+ * the line with the macro name stripped) and every continuation line. */
+static int rcc_row_extend(const char *text, struct rcc_buf *buf, int *depth,
+                          int *collecting, struct rcc_rows *rows)
+{
+    int rc = rcc_buf_cat(buf, text, strlen(text));
+    if (rc)
+        return rc;
+    *depth += rcc_paren_delta(text);
+    if (*depth <= 0) {
+        *collecting = 0;
+        rc = rcc_emit(buf->s, rows);
+        rcc_buf_reset(buf);
+    }
+    return rc;
+}
+
 int rcc_table_rows(const char *table_path, struct rcc_rows *rows)
 {
     FILE *f = fopen(table_path, "r");
@@ -414,38 +448,14 @@ int rcc_table_rows(const char *table_path, struct rcc_rows *rows)
                 break;
             collecting = 1;
             depth = 0;
-            buf.n = 0;
-            if (buf.s)
-                buf.s[0] = '\0';
-            const char *stripped = line + strlen("REMOTE_COMMAND_CLASS");
-            rc = rcc_buf_cat(&buf, stripped, strlen(stripped));
-            if (rc)
-                break;
-            for (const char *q = stripped; *q; q++)
-                depth += (*q == '(') - (*q == ')');
-            if (depth <= 0) {
-                collecting = 0;
-                rc = rcc_emit(buf.s, rows);
-                buf.n = 0;
-                if (buf.s)
-                    buf.s[0] = '\0';
-            }
+            rcc_buf_reset(&buf);
+            rc = rcc_row_extend(line + strlen("REMOTE_COMMAND_CLASS"), &buf,
+                                &depth, &collecting, rows);
             continue;
         }
         if (!collecting)
             continue;
-        rc = rcc_buf_cat(&buf, line, strlen(line));
-        if (rc)
-            break;
-        for (const char *q = line; *q; q++)
-            depth += (*q == '(') - (*q == ')');
-        if (depth <= 0) {
-            collecting = 0;
-            rc = rcc_emit(buf.s, rows);
-            buf.n = 0;
-            if (buf.s)
-                buf.s[0] = '\0';
-        }
+        rc = rcc_row_extend(line, &buf, &depth, &collecting, rows);
     }
     if (rc == 0)
         rc = rcc_emit(buf.s, rows);

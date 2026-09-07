@@ -163,47 +163,63 @@ static int rcc_blank(const char *s)
 
 /* (4) unknown class token, and (5) a permitting class with no stated
  * reason. Both walk the rows in TABLE file order, matching the awk. */
-static int rcc_check_class_rows(const struct rcc_rows *rows, FILE *err,
-                                int *fail)
+static int rcc_permits(const char *cls)
 {
-    int any_bad = 0, any_noreason = 0, rc;
+    return strcmp(cls, "REMOTE_CLASS_OWNER_CAPABILITY") == 0
+        || strcmp(cls, "REMOTE_CLASS_READ_ONLY") == 0;
+}
+
+/* (4) unknown class token. */
+static int rcc_check_bad_class(const struct rcc_rows *rows, FILE *err,
+                               int *fail)
+{
+    int any_bad = 0;
     for (size_t i = 0; i < rows->n; i++)
         if (!rcc_known_class(rows->v[i].cls))
             any_bad = 1;
-    if (any_bad) {
-        *fail = 1;
-        fprintf(err, "%s: FAIL — rows with an unknown class token:\n",
-                k_gate);
-        for (size_t i = 0; i < rows->n; i++)
-            if (!rcc_known_class(rows->v[i].cls)
-                && (rc = fprintf(err, "    %s  (class: %s)\n",
-                                 rows->v[i].leaf, rows->v[i].cls)) < 0)
-                return die("z23-lint: write failed\n", "");
-        fputs("  Use REMOTE_CLASS_NEVER, REMOTE_CLASS_OWNER_CAPABILITY or\n"
-              "  REMOTE_CLASS_READ_ONLY.\n", err);
-    }
-    for (size_t i = 0; i < rows->n; i++) {
-        int permits = strcmp(rows->v[i].cls, "REMOTE_CLASS_OWNER_CAPABILITY") == 0
-            || strcmp(rows->v[i].cls, "REMOTE_CLASS_READ_ONLY") == 0;
-        if (permits && rcc_blank(rows->v[i].reason))
-            any_noreason = 1;
-    }
-    if (any_noreason) {
-        *fail = 1;
-        fprintf(err, "%s: FAIL — remotable leaves with no stated reason:\n",
-                k_gate);
-        for (size_t i = 0; i < rows->n; i++) {
-            int permits = strcmp(rows->v[i].cls, "REMOTE_CLASS_OWNER_CAPABILITY") == 0
-                || strcmp(rows->v[i].cls, "REMOTE_CLASS_READ_ONLY") == 0;
-            if (permits && rcc_blank(rows->v[i].reason)
-                && fprintf(err, "    %s  (%s)\n", rows->v[i].leaf,
-                          rows->v[i].cls) < 0)
-                return die("z23-lint: write failed\n", "");
-        }
-        fputs("  Refusing needs no defence; permitting does. Say why.\n",
-              err);
-    }
+    if (!any_bad)
+        return 0;
+    *fail = 1;
+    fprintf(err, "%s: FAIL — rows with an unknown class token:\n", k_gate);
+    for (size_t i = 0; i < rows->n; i++)
+        if (!rcc_known_class(rows->v[i].cls)
+            && fprintf(err, "    %s  (class: %s)\n", rows->v[i].leaf,
+                      rows->v[i].cls) < 0)
+            return die("z23-lint: write failed\n", "");
+    fputs("  Use REMOTE_CLASS_NEVER, REMOTE_CLASS_OWNER_CAPABILITY or\n"
+          "  REMOTE_CLASS_READ_ONLY.\n", err);
     return 0;
+}
+
+/* (5) a permitting class with no stated reason. */
+static int rcc_check_no_reason(const struct rcc_rows *rows, FILE *err,
+                               int *fail)
+{
+    int any_noreason = 0;
+    for (size_t i = 0; i < rows->n; i++)
+        if (rcc_permits(rows->v[i].cls) && rcc_blank(rows->v[i].reason))
+            any_noreason = 1;
+    if (!any_noreason)
+        return 0;
+    *fail = 1;
+    fprintf(err, "%s: FAIL — remotable leaves with no stated reason:\n",
+            k_gate);
+    for (size_t i = 0; i < rows->n; i++)
+        if (rcc_permits(rows->v[i].cls) && rcc_blank(rows->v[i].reason)
+            && fprintf(err, "    %s  (%s)\n", rows->v[i].leaf,
+                      rows->v[i].cls) < 0)
+            return die("z23-lint: write failed\n", "");
+    fputs("  Refusing needs no defence; permitting does. Say why.\n", err);
+    return 0;
+}
+
+static int rcc_check_class_rows(const struct rcc_rows *rows, FILE *err,
+                                int *fail)
+{
+    int rc = rcc_check_bad_class(rows, err, fail);
+    if (rc == 0)
+        rc = rcc_check_no_reason(rows, err, fail);
+    return rc;
 }
 
 /* (6) a row that would not compile as two C string literals. */
