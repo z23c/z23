@@ -4394,16 +4394,10 @@ tools/command/native_zcode_work_command.c:zwork_reuse_render_unavailable:20
 tools/command/native_zcode_work_run_command.c:run_admit:134
 tools/command/native_zcode_work_run_command.c:run_admit_input:29
 tools/command/native_zcode_work_run_command.c:run_async_proof_pending:21
-tools/command/native_zcode_work_run_command.c:run_candidate_metadata_read:23
-tools/command/native_zcode_work_run_command.c:run_candidate_metadata_write:41
 tools/command/native_zcode_work_run_command.c:run_codex_runner_path:21
-tools/command/native_zcode_work_run_command.c:run_compose_candidate_metadata:21
-tools/command/native_zcode_work_run_command.c:run_dependency_context_json:61
-tools/command/native_zcode_work_run_command.c:run_dependency_header_symbols:24
 tools/command/native_zcode_work_run_command.c:run_packet:24
 tools/command/native_zcode_work_run_command.c:run_preflight_packet:31
 tools/command/native_zcode_work_run_command.c:run_preflight_runner_path:17
-tools/command/native_zcode_work_run_command.c:run_read_dependency_header:25
 tools/command/native_zcode_work_run_command.c:run_read_packet:33
 tools/command/native_zcode_work_run_command.c:run_render_async_admission:50
 tools/command/native_zcode_work_run_command.c:run_repair_packet_valid:22
