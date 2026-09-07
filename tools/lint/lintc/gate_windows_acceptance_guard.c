@@ -336,6 +336,7 @@ static int wag_missing_declared(const char *root, const struct wag_paths *d,
                                 char *out, size_t cap)
 {
     size_t used = 0;
+    out[0] = '\0';
     for (int i = 0; i < d->n; i++) {
         char full[4096];
         if (ovf(snprintf(full, sizeof full, "%s/%s", root, d->v[i]),
