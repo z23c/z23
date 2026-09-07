@@ -3248,36 +3248,49 @@ int zcl_devloop_restart_event(const char *repo_root,
     ok = rr_event_prove_phase(&ctx);
     return rr_event_finish(&ctx, ok);
 }
-int zcl_devloop_restart_story_prove_event(
-    const char *repo_root, const char *const *source_tus,
-    size_t source_count, enum zcl_devloop_publish_mode publish_mode)
+static bool rr_story_applicable(const char *repo_root,
+                                const char *const *source_tus,
+                                size_t source_count,
+                                struct zcl_devloop_plan *plan)
 {
     if (!repo_root || !source_tus || source_count == 0 ||
         source_count > RR_SOURCE_MAX)
-        return ZCL_DEVLOOP_RESTART_EVENT_NOT_APPLICABLE;
-    int64_t started = platform_time_monotonic_us();
-    struct zcl_devloop_plan plan;
-    char why[512] = {0};
-    if (!zcl_devloop_plan_files(source_tus, source_count, &plan) ||
-        plan.docs_only || plan.consensus_risk) {
-        return ZCL_DEVLOOP_RESTART_EVENT_NOT_APPLICABLE;
-    }
+        return false;
+    if (!zcl_devloop_plan_files(source_tus, source_count, plan) ||
+        plan->docs_only || plan->consensus_risk)
+        return false;
+    return true;
+}
+
+static bool rr_story_prepare_closure(const char *repo_root,
+                                     const char *const *source_tus,
+                                     size_t source_count,
+                                     struct zcl_devloop_plan *plan,
+                                     char why[512])
+{
     const char *closure_reason = "";
     bool closure_ok = zcl_devloop_plan_add_closure_snapshot(
-        repo_root, source_tus, source_count, &plan) &&
-        zcl_devloop_plan_proof_admissible(&plan, &closure_reason);
+        repo_root, source_tus, source_count, plan) &&
+        zcl_devloop_plan_proof_admissible(plan, &closure_reason);
     if (!closure_ok) {
-        (void)snprintf(why, sizeof(why),
+        (void)snprintf(why, 512,
                        "affected proof closure refused: %s",
                        closure_reason && closure_reason[0]
                            ? closure_reason : "closure_unavailable");
     }
-    struct zcl_devloop_restart_proof_receipt proof = {0};
-    struct zcl_devloop_process_result process = {0};
-    bool ok = closure_ok && rr_restart_prove(
-        repo_root, source_tus, source_count, &plan, &proof, &process,
-        why, sizeof(why), true, true, NULL);
-    if (process.cancelled || zcl_devloop_process_cancel_requested())
+    return closure_ok;
+}
+
+static int rr_story_finish(const char *repo_root,
+                           const char *const *source_tus,
+                           size_t source_count,
+                           enum zcl_devloop_publish_mode publish_mode,
+                           int64_t started, struct zcl_devloop_plan *plan,
+                           struct zcl_devloop_restart_proof_receipt *proof,
+                           struct zcl_devloop_process_result *process,
+                           char why[512], bool ok)
+{
+    if (process->cancelled || zcl_devloop_process_cancel_requested())
         return ZCL_DEVLOOP_RESTART_EVENT_CANCELLED;
     bool fallback = !ok &&
         (strstr(why, "proof plan is incomplete") ||
@@ -3285,21 +3298,41 @@ int zcl_devloop_restart_story_prove_event(
          strstr(why, "action plan stale") ||
          strstr(why, "proof closure refused:"));
     if (fallback) {
-        proof.integration_proof_deferred = true;
-        proof.bounded_proof_deferred = true;
+        proof->integration_proof_deferred = true;
+        proof->bounded_proof_deferred = true;
     }
     bool emitted = rr_emit_event(
         repo_root, source_tus, source_count,
         ok ? "feedback_ready" : fallback ? "fallback_ready" : "rejected",
         ok ? "immediate_affected_proofs" :
              fallback ? "conservative_proof_selected" : "affected_proofs",
-        platform_time_monotonic_us() - started, publish_mode, NULL, &proof,
-        &process, why, 0, proof.source_guard_captures, 0, 0, false,
-        0, 0, plan.closure_snapshot, false);
+        platform_time_monotonic_us() - started, publish_mode, NULL, proof,
+        process, why, 0, proof->source_guard_captures, 0, 0, false,
+        0, 0, plan->closure_snapshot, false);
     if (!emitted)
         return ZCL_DEVLOOP_RESTART_EVENT_ERROR;
     if (ok)
         return ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING;
     return fallback ? ZCL_DEVLOOP_RESTART_EVENT_FALLBACK_PENDING
                     : ZCL_DEVLOOP_RESTART_EVENT_FINAL;
+}
+
+int zcl_devloop_restart_story_prove_event(
+    const char *repo_root, const char *const *source_tus,
+    size_t source_count, enum zcl_devloop_publish_mode publish_mode)
+{
+    struct zcl_devloop_plan plan;
+    if (!rr_story_applicable(repo_root, source_tus, source_count, &plan))
+        return ZCL_DEVLOOP_RESTART_EVENT_NOT_APPLICABLE;
+    int64_t started = platform_time_monotonic_us();
+    char why[512] = {0};
+    bool closure_ok = rr_story_prepare_closure(repo_root, source_tus,
+                                               source_count, &plan, why);
+    struct zcl_devloop_restart_proof_receipt proof = {0};
+    struct zcl_devloop_process_result process = {0};
+    bool ok = closure_ok && rr_restart_prove(
+        repo_root, source_tus, source_count, &plan, &proof, &process,
+        why, sizeof(why), true, true, NULL);
+    return rr_story_finish(repo_root, source_tus, source_count, publish_mode,
+                           started, &plan, &proof, &process, why, ok);
 }
