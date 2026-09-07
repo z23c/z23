@@ -182,43 +182,21 @@ static int hes_find(char const (*set)[HES_PATH], int n, const char *key)
     return -1;
 }
 
-int check_hotswap_eligible_scope_run(int argc, char **argv)
+/* SCAN STAGE: compile, collect, and require a non-empty pair-complete
+ * manifest. Frees r on every failure path; leaves it compiled on success. */
+static int hes_load_manifest(const char *manifest, struct hes_re *r,
+                             char paths[][HES_PATH], int *np,
+                             struct hes_pair *pairs, int *nq)
 {
-    (void)argc;
-    (void)argv;
-    const char *manifest = getenv("ZCL_HOTSWAP_MANIFEST");
-    if (!manifest || !manifest[0])
-        manifest = "engine/composition/hotswap_eligible.def";
-    const char *casesf = getenv("ZCL_HOTSWAP_PROBE_CASES");
-    if (!casesf || !casesf[0])
-        casesf = "engine/composition/hotswap_probe_cases.def";
-    if (fputs("══ LINT: hot-swap eligibility manifest scope (app-layer only) ══\n",
-              stdout) < 0)
-        return die("z23-lint: write failed\n", "");
-    if (access(manifest, R_OK) != 0) {
-        fprintf(stderr, "check_hotswap_eligible_scope: FATAL — manifest '%s' "
-                "missing/unreadable.\n", manifest);
-        fputs("  Refusing to report 'clean' with no manifest to scan.\n", stderr);
-        return 2;
-    }
-    if (access(casesf, R_OK) != 0) {
-        fprintf(stderr, "check_hotswap_eligible_scope: FATAL — probe cases '%s' "
-                "missing/unreadable.\n", casesf);
-        return 2;
-    }
-    struct hes_re r;
-    int rc = hes_compile(&r);
+    int rc = hes_compile(r);
     if (rc)
         return rc;
     FILE *mf = fopen(manifest, "r");
     if (!mf) {
-        hes_free(&r, 4);
+        hes_free(r, 4);
         return die("z23-lint: cannot open %s\n", manifest);
     }
-    static char paths[HES_MAX][HES_PATH];
-    static struct hes_pair pairs[HES_MAX];
-    int np = 0, nq = 0;
-    rc = hes_collect(mf, &r, paths, &np, pairs, &nq);
+    rc = hes_collect(mf, r, paths, np, pairs, nq);
     if (rc == 0 && ferror(mf))
         rc = die("z23-lint: read failed: %s\n", manifest);
     if (fclose(mf) != 0 && rc == 0)
@@ -231,124 +209,155 @@ int check_hotswap_eligible_scope_run(int argc, char **argv)
         if (ovf(k, sizeof hint))
             rc = 2;
         else
-            rc = gate_require_scanned(np, 1, "check_hotswap_eligible_scope", hint);
+            rc = gate_require_scanned(*np, 1, "check_hotswap_eligible_scope", hint);
     }
     if (rc) {
-        hes_free(&r, 4);
+        hes_free(r, 4);
         return rc;
     }
-    if (nq != np) {
+    if (*nq != *np) {
         fputs("FAIL: every HOTSWAP_" "ELIGIBLE row must carry exactly one "
               "HOTSWAP_" "PROBE on the same line\n", stderr);
-        hes_free(&r, 4);
+        hes_free(r, 4);
         return 1;
     }
-    FILE *viol = tmpfile();
-    if (!viol) {
-        hes_free(&r, 4);
-        return die("z23-lint: tmpfile failed\n", "");
-    }
-    int nv = 0;
-    static char seen_paths[HES_MAX][HES_PATH];
-    static char seen_keys[HES_MAX][HES_KEY];
-    static char seen_owner[HES_MAX][HES_PATH];
-    int nsp = 0, nsk = 0;
-    for (int i = 0; rc == 0 && i < nq; i++) {
-        const char *p = pairs[i].path;
-        const char *probe = pairs[i].probe;
-        if (!hes_probe_valid(probe))
-            rc = hes_note(viol, &nv, "  %s (invalid canonical probe '%s')\n",
-                          p, probe);
-        int cc = -2;
-        if (rc == 0) {
-            FILE *cf = fopen(casesf, "r");
-            if (!cf)
-                rc = die("z23-lint: cannot open %s\n", casesf);
-            else {
-                cc = hes_case_count(cf, probe);
-                if (fclose(cf) != 0 && cc >= 0)
-                    cc = -2;
-                if (cc < 0)
-                    rc = die("z23-lint: read failed: %s\n", casesf);
-            }
-        }
-        if (rc == 0 && cc != 1)
-            rc = hes_note(viol, &nv,
-                          "  %s (probe '%s' resolves to %d resident cases, "
-                          "expected exactly one)\n", p, probe, cc);
-        if (rc)
-            break;
-        char key[HES_KEY];
-        int k = probe[0] ? snprintf(key, sizeof key, "%s", probe)
-                         : snprintf(key, sizeof key, "__empty__:%s", p);
-        if (ovf(k, sizeof key)) {
-            rc = 2;
-            break;
-        }
-        if (hes_find((char const (*)[HES_PATH])seen_paths, nsp, p) >= 0)
-            rc = hes_note(viol, &nv, "  %s (duplicate eligibility row)\n", p);
-        int di = -1;
-        if (rc == 0) {
-            for (int j = 0; j < nsk; j++)
-                if (strcmp(seen_keys[j], key) == 0) {
-                    di = j;
-                    break;
-                }
-            if (di >= 0)
-                rc = hes_note(viol, &nv,
-                              "  %s (probe '%s' is already assigned to %s)\n",
-                              p, probe, seen_owner[di]);
-        }
-        if (rc)
-            break;
-        if (nsp >= HES_MAX || (di < 0 && nsk >= HES_MAX)
-            || strlen(p) >= HES_PATH) {
-            rc = die("z23-lint: hotswap-manifest overflow\n", "");
-            break;
-        }
-        strcpy(seen_paths[nsp++], p);
-        if (di >= 0)
-            /* The original bash assign overwrite makes the LAST writer the
-             * reported owner, not the first. */
-            strcpy(seen_owner[di], p);
+    return 0;
+}
+
+static int hes_pair_probe_cases(const char *p, const char *probe,
+                                const char *casesf, FILE *viol, int *nv)
+{
+    int rc = 0;
+    if (!hes_probe_valid(probe))
+        rc = hes_note(viol, nv, "  %s (invalid canonical probe '%s')\n",
+                      p, probe);
+    int cc = -2;
+    if (rc == 0) {
+        FILE *cf = fopen(casesf, "r");
+        if (!cf)
+            rc = die("z23-lint: cannot open %s\n", casesf);
         else {
-            strcpy(seen_keys[nsk], key);
-            strcpy(seen_owner[nsk], p);
-            nsk++;
+            cc = hes_case_count(cf, probe);
+            if (fclose(cf) != 0 && cc >= 0)
+                cc = -2;
+            if (cc < 0)
+                rc = die("z23-lint: read failed: %s\n", casesf);
         }
     }
-    for (int i = 0; rc == 0 && i < np; i++) {
-        const char *p = paths[i];
-        if (regexec(&r.forbid, p, 0, NULL, 0) == 0) {
-            rc = hes_note(viol, &nv,
-                          "  %s (under a forbidden consensus/state root)\n", p);
-            continue;
-        }
-        size_t pl = strlen(p);
-        if (!(pl > 2 && p[pl - 2] == '.' && p[pl - 1] == 'c')) {
-            rc = hes_note(viol, &nv, "  %s (not a .c translation unit)\n", p);
-            continue;
-        }
-        struct stat st;
-        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) {
-            rc = hes_note(viol, &nv,
-                          "  %s (manifest references a nonexistent file)\n", p);
-            continue;
-        }
-        FILE *tf = fopen(p, "r");
-        int found = 0;
-        if (tf) {
-            found = hes_has_export(tf, &r);
-            if (fclose(tf) != 0)
-                found = 0;
-        }
-        if (!found)
-            rc = hes_note(viol, &nv,
-                          "  %s (eligible TU exports no leaves: neither "
-                          "ZCL_HOTSWAP_EXPORT_" "LEAVES nor ZCL_HOTSWAP_LEAVES_"
-                          "END)\n", p);
+    if (rc == 0 && cc != 1)
+        rc = hes_note(viol, nv,
+                      "  %s (probe '%s' resolves to %d resident cases, "
+                      "expected exactly one)\n", p, probe, cc);
+    return rc;
+}
+
+struct hes_seen {
+    char paths[HES_MAX][HES_PATH];
+    char keys[HES_MAX][HES_KEY];
+    char owner[HES_MAX][HES_PATH];
+    int nsp, nsk;
+};
+
+static int hes_pair_dup(const char *p, const char *probe, FILE *viol, int *nv,
+                        struct hes_seen *seen)
+{
+    int rc = 0;
+    char key[HES_KEY];
+    int k = probe[0] ? snprintf(key, sizeof key, "%s", probe)
+                     : snprintf(key, sizeof key, "__empty__:%s", p);
+    if (ovf(k, sizeof key))
+        return 2;
+    if (hes_find((char const (*)[HES_PATH])seen->paths, seen->nsp, p) >= 0)
+        rc = hes_note(viol, nv, "  %s (duplicate eligibility row)\n", p);
+    int di = -1;
+    if (rc == 0) {
+        for (int j = 0; j < seen->nsk; j++)
+            if (strcmp(seen->keys[j], key) == 0) {
+                di = j;
+                break;
+            }
+        if (di >= 0)
+            rc = hes_note(viol, nv,
+                          "  %s (probe '%s' is already assigned to %s)\n",
+                          p, probe, seen->owner[di]);
     }
-    hes_free(&r, 4);
+    if (rc)
+        return rc;
+    if (seen->nsp >= HES_MAX || (di < 0 && seen->nsk >= HES_MAX)
+        || strlen(p) >= HES_PATH)
+        return die("z23-lint: hotswap-manifest overflow\n", "");
+    strcpy(seen->paths[seen->nsp++], p);
+    if (di >= 0)
+        /* The original bash assign overwrite makes the LAST writer the
+         * reported owner, not the first. */
+        strcpy(seen->owner[di], p);
+    else {
+        strcpy(seen->keys[seen->nsk], key);
+        strcpy(seen->owner[seen->nsk], p);
+        seen->nsk++;
+    }
+    return 0;
+}
+
+static int hes_check_pair(const struct hes_pair *pair, const char *casesf,
+                          FILE *viol, int *nv, struct hes_seen *seen)
+{
+    int rc = hes_pair_probe_cases(pair->path, pair->probe, casesf, viol, nv);
+    if (rc)
+        return rc;
+    return hes_pair_dup(pair->path, pair->probe, viol, nv, seen);
+}
+
+static int hes_check_pairs(const struct hes_pair *pairs, int nq,
+                           const char *casesf, FILE *viol, int *nv)
+{
+    static struct hes_seen seen;
+    seen.nsp = 0;
+    seen.nsk = 0;
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < nq; i++)
+        rc = hes_check_pair(&pairs[i], casesf, viol, nv, &seen);
+    return rc;
+}
+
+static int hes_check_tu(const char *p, const struct hes_re *r,
+                        FILE *viol, int *nv)
+{
+    if (regexec(&r->forbid, p, 0, NULL, 0) == 0)
+        return hes_note(viol, nv,
+                        "  %s (under a forbidden consensus/state root)\n", p);
+    size_t pl = strlen(p);
+    if (!(pl > 2 && p[pl - 2] == '.' && p[pl - 1] == 'c'))
+        return hes_note(viol, nv, "  %s (not a .c translation unit)\n", p);
+    struct stat st;
+    if (stat(p, &st) != 0 || !S_ISREG(st.st_mode))
+        return hes_note(viol, nv,
+                        "  %s (manifest references a nonexistent file)\n", p);
+    FILE *tf = fopen(p, "r");
+    int found = 0;
+    if (tf) {
+        found = hes_has_export(tf, r);
+        if (fclose(tf) != 0)
+            found = 0;
+    }
+    if (!found)
+        return hes_note(viol, nv,
+                        "  %s (eligible TU exports no leaves: neither "
+                        "ZCL_HOTSWAP_EXPORT_" "LEAVES nor ZCL_HOTSWAP_LEAVES_"
+                        "END)\n", p);
+    return 0;
+}
+
+static int hes_check_paths(char const (*paths)[HES_PATH], int np,
+                           const struct hes_re *r, FILE *viol, int *nv, int rc)
+{
+    for (int i = 0; rc == 0 && i < np; i++)
+        rc = hes_check_tu(paths[i], r, viol, nv);
+    return rc;
+}
+
+static int hes_flush_viol(FILE *viol, int nv, int np, int rc)
+{
     if (rc) {
         fclose(viol);
         return rc;
@@ -381,6 +390,100 @@ int check_hotswap_eligible_scope_run(int argc, char **argv)
                ? die("z23-lint: write failed\n", "") : 0;
 }
 
+int check_hotswap_eligible_scope_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const char *manifest = getenv("ZCL_HOTSWAP_MANIFEST");
+    if (!manifest || !manifest[0])
+        manifest = "engine/composition/hotswap_eligible.def";
+    const char *casesf = getenv("ZCL_HOTSWAP_PROBE_CASES");
+    if (!casesf || !casesf[0])
+        casesf = "engine/composition/hotswap_probe_cases.def";
+    if (fputs("══ LINT: hot-swap eligibility manifest scope (app-layer only) ══\n",
+              stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (access(manifest, R_OK) != 0) {
+        fprintf(stderr, "check_hotswap_eligible_scope: FATAL — manifest '%s' "
+                "missing/unreadable.\n", manifest);
+        fputs("  Refusing to report 'clean' with no manifest to scan.\n", stderr);
+        return 2;
+    }
+    if (access(casesf, R_OK) != 0) {
+        fprintf(stderr, "check_hotswap_eligible_scope: FATAL — probe cases '%s' "
+                "missing/unreadable.\n", casesf);
+        return 2;
+    }
+    struct hes_re r;
+    static char paths[HES_MAX][HES_PATH];
+    static struct hes_pair pairs[HES_MAX];
+    int np = 0, nq = 0;
+    int rc = hes_load_manifest(manifest, &r, paths, &np, pairs, &nq);
+    if (rc)
+        return rc;
+    FILE *viol = tmpfile();
+    if (!viol) {
+        hes_free(&r, 4);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    int nv = 0;
+    rc = hes_check_pairs(pairs, nq, casesf, viol, &nv);
+    rc = hes_check_paths(paths, np, &r, viol, &nv, rc);
+    hes_free(&r, 4);
+    return hes_flush_viol(viol, nv, np, rc);
+}
+
+/* SCENARIO GROUP: collection — header-comment rows (no quotes) are ignored,
+ * an eligible-only row is a path but not a pair, leading whitespace and
+ * trailing text on a pair row are accepted. */
+static int hes_st_collect(const struct hes_re *r)
+{
+    static const char mfst[] =
+        "/* HOTSWAP_" "ELIGIBLE(path) HOTSWAP_" "PROBE(tool) header row */\n"
+        "HOTSWAP_" "ELIGIBLE(\"engine/controllers/src/a.c\") HOTSWAP_" "PROBE(\"core.status\")\n"
+        "  HOTSWAP_" "ELIGIBLE(\"engine/controllers/src/b.c\")   HOTSWAP_" "PROBE(\"ops.metrics\")  /* x */\n"
+        "HOTSWAP_" "ELIGIBLE(\"engine/controllers/src/c.c\")\n";
+    static char paths[HES_MAX][HES_PATH];
+    static struct hes_pair pairs[HES_MAX];
+    int np = 0, nq = 0, bad = 0;
+    FILE *mf = fmemopen((void *)mfst, sizeof mfst - 1, "r");
+    if (!mf)
+        bad = 1;
+    else {
+        bad |= hes_collect(mf, r, paths, &np, pairs, &nq) != 0;
+        fclose(mf);
+    }
+    if (np != 3 || nq != 2 || strcmp(paths[0], "engine/controllers/src/a.c")
+        || strcmp(pairs[1].probe, "ops.metrics")) {
+        fputs("check_hotswap_eligible_scope selftest: collect mismatch\n", stderr);
+        bad = 1;
+    }
+    return bad;
+}
+
+/* SCENARIO GROUP: export-macro detection accepts either spelling, rejects a
+ * comment mention without the call paren. */
+static int hes_st_export(const struct hes_re *r)
+{
+    static const char with_exp[] =
+        "ZCL_HOTSWAP_EXPORT_" "LEAVES(status_leaves)\n";
+    static const char with_end[] =
+        "  ZCL_HOTSWAP_LEAVES_" "END (x)\n";
+    static const char without[] =
+        "/* ZCL_HOTSWAP_EXPORT_" "LEAVES without paren */\n";
+    int bad = 0;
+    FILE *ef = fmemopen((void *)with_exp, sizeof with_exp - 1, "r");
+    bad |= !ef || !hes_has_export(ef, r);
+    if (ef) fclose(ef);
+    ef = fmemopen((void *)with_end, sizeof with_end - 1, "r");
+    bad |= !ef || !hes_has_export(ef, r);
+    if (ef) fclose(ef);
+    ef = fmemopen((void *)without, sizeof without - 1, "r");
+    bad |= !ef || hes_has_export(ef, r);
+    if (ef) fclose(ef);
+    return bad;
+}
+
 int check_hotswap_eligible_scope_selftest(void)
 {
     struct hes_re r;
@@ -391,26 +494,7 @@ int check_hotswap_eligible_scope_selftest(void)
     /* Collection: header-comment rows (no quotes) are ignored, an
      * eligible-only row is a path but not a pair, leading whitespace and
      * trailing text on a pair row are accepted. */
-    static const char mfst[] =
-        "/* HOTSWAP_" "ELIGIBLE(path) HOTSWAP_" "PROBE(tool) header row */\n"
-        "HOTSWAP_" "ELIGIBLE(\"engine/controllers/src/a.c\") HOTSWAP_" "PROBE(\"core.status\")\n"
-        "  HOTSWAP_" "ELIGIBLE(\"engine/controllers/src/b.c\")   HOTSWAP_" "PROBE(\"ops.metrics\")  /* x */\n"
-        "HOTSWAP_" "ELIGIBLE(\"engine/controllers/src/c.c\")\n";
-    static char paths[HES_MAX][HES_PATH];
-    static struct hes_pair pairs[HES_MAX];
-    int np = 0, nq = 0;
-    FILE *mf = fmemopen((void *)mfst, sizeof mfst - 1, "r");
-    if (!mf)
-        bad = 1;
-    else {
-        bad |= hes_collect(mf, &r, paths, &np, pairs, &nq) != 0;
-        fclose(mf);
-    }
-    if (np != 3 || nq != 2 || strcmp(paths[0], "engine/controllers/src/a.c")
-        || strcmp(pairs[1].probe, "ops.metrics")) {
-        fputs("check_hotswap_eligible_scope selftest: collect mismatch\n", stderr);
-        bad = 1;
-    }
+    bad |= hes_st_collect(&r);
     /* Probe validity. */
     bad |= !hes_probe_valid("core.status") || !hes_probe_valid("UP_9.x");
     bad |= hes_probe_valid("") || hes_probe_valid("bad probe")
@@ -440,21 +524,7 @@ int check_hotswap_eligible_scope_selftest(void)
     bad |= regexec(&r.forbid, "xcore/x.c", 0, NULL, 0) == 0;
     /* Export-macro detection accepts either spelling, rejects a comment
      * mention without the call paren. */
-    static const char with_exp[] =
-        "ZCL_HOTSWAP_EXPORT_" "LEAVES(status_leaves)\n";
-    static const char with_end[] =
-        "  ZCL_HOTSWAP_LEAVES_" "END (x)\n";
-    static const char without[] =
-        "/* ZCL_HOTSWAP_EXPORT_" "LEAVES without paren */\n";
-    FILE *ef = fmemopen((void *)with_exp, sizeof with_exp - 1, "r");
-    bad |= !ef || !hes_has_export(ef, &r);
-    if (ef) fclose(ef);
-    ef = fmemopen((void *)with_end, sizeof with_end - 1, "r");
-    bad |= !ef || !hes_has_export(ef, &r);
-    if (ef) fclose(ef);
-    ef = fmemopen((void *)without, sizeof without - 1, "r");
-    bad |= !ef || hes_has_export(ef, &r);
-    if (ef) fclose(ef);
+    bad |= hes_st_export(&r);
     hes_free(&r, 4);
     return st_ok(bad, "check_hotswap_eligible_scope selftest: OK\n");
 }
@@ -515,6 +585,72 @@ static int hss_slurp(const char *path, char *buf, size_t cap, size_t *out_n)
     return 0;
 }
 
+static int hss_skip_non_tok(const char *buf, size_t n, const char *tok,
+                            size_t L, size_t i)
+{
+    return i + L > n || memcmp(buf + i, tok, L) != 0
+        || (i > 0 && buf[i - 1] != '\n');
+}
+
+static int hss_walk_spec(const char *buf, size_t n, size_t *j_io,
+                         char *spec, size_t spec_cap)
+{
+    size_t j = *j_io;
+    int depth = 1, in_str = 0, esc = 0;
+    size_t sl = 0;
+    while (j < n && depth > 0) {
+        char c = buf[j];
+        if (in_str) {
+            if (esc)
+                esc = 0;
+            else if (c == '\\')
+                esc = 1;
+            else if (c == '"')
+                in_str = 0;
+        } else {
+            if (c == '"')
+                in_str = 1;
+            else if (c == '(')
+                depth++;
+            else if (c == ')')
+                depth--;
+        }
+        if (depth > 0) {
+            if (sl + 1 >= spec_cap)
+                return die("z23-lint: hotswap manifest arg overflow\n", "");
+            spec[sl++] = c;
+        }
+        j++;
+    }
+    spec[sl] = '\0';
+    *j_io = j;
+    return 0;
+}
+
+static int hss_take_literal(const char *spec, int second,
+                            char out[][HSS_PATH], int *nout)
+{
+    const char *p = spec;
+    for (int k = 0; k < (second ? 2 : 1); k++) {
+        const char *a = strchr(p, '"');
+        if (!a)
+            break;
+        const char *b = strchr(a + 1, '"');
+        if (!b)
+            break;
+        if (k == (second ? 1 : 0)) {
+            size_t len = (size_t)(b - a - 1);
+            if (len >= HSS_PATH || *nout >= HSS_MAX_PATHS)
+                return die("z23-lint: hotswap manifest path overflow\n", "");
+            memcpy(out[*nout], a + 1, len);
+            out[*nout][len] = '\0';
+            (*nout)++;
+        }
+        p = b + 1;
+    }
+    return 0;
+}
+
 /* Column-1 paren-depth walk: every invocation of tok (which includes its
  * open paren) starting at column 1 contributes its first (second=0) or second
  * (second=1) string literal's raw content. Parens inside strings do not
@@ -526,58 +662,18 @@ static int hss_collect(const char *buf, size_t n, const char *tok, int second,
     size_t L = strlen(tok);
     size_t i = 0;
     while (i < n) {
-        if (i + L > n || memcmp(buf + i, tok, L) != 0
-            || (i > 0 && buf[i - 1] != '\n')) {
+        if (hss_skip_non_tok(buf, n, tok, L, i)) {
             i++;
             continue;
         }
         size_t j = i + L;
-        int depth = 1, in_str = 0, esc = 0;
         char spec[HSS_SPEC];
-        size_t sl = 0;
-        while (j < n && depth > 0) {
-            char c = buf[j];
-            if (in_str) {
-                if (esc)
-                    esc = 0;
-                else if (c == '\\')
-                    esc = 1;
-                else if (c == '"')
-                    in_str = 0;
-            } else {
-                if (c == '"')
-                    in_str = 1;
-                else if (c == '(')
-                    depth++;
-                else if (c == ')')
-                    depth--;
-            }
-            if (depth > 0) {
-                if (sl + 1 >= sizeof spec)
-                    return die("z23-lint: hotswap manifest arg overflow\n", "");
-                spec[sl++] = c;
-            }
-            j++;
-        }
-        spec[sl] = '\0';
-        const char *p = spec;
-        for (int k = 0; k < (second ? 2 : 1); k++) {
-            const char *a = strchr(p, '"');
-            if (!a)
-                break;
-            const char *b = strchr(a + 1, '"');
-            if (!b)
-                break;
-            if (k == (second ? 1 : 0)) {
-                size_t len = (size_t)(b - a - 1);
-                if (len >= HSS_PATH || *nout >= HSS_MAX_PATHS)
-                    return die("z23-lint: hotswap manifest path overflow\n", "");
-                memcpy(out[*nout], a + 1, len);
-                out[*nout][len] = '\0';
-                (*nout)++;
-            }
-            p = b + 1;
-        }
+        int rc = hss_walk_spec(buf, n, &j, spec, sizeof spec);
+        if (rc)
+            return rc;
+        rc = hss_take_literal(spec, second, out, nout);
+        if (rc)
+            return rc;
         i = j;
     }
     return 0;
@@ -646,24 +742,23 @@ static int hss_scan_file(const char *path, char *viol, size_t cap, size_t *used)
     return rc;
 }
 
-int check_hotswap_static_state_run(int argc, char **argv)
+static int hss_resolve_manifests(const char **manifest, const char **swappable,
+                                 const char **islands)
 {
-    (void)argc;
-    (void)argv;
-    const char *manifest = getenv("ZCL_HOTSWAP_MANIFEST");
-    if (!manifest)
-        manifest = "engine/composition/hotswap_eligible.def";
-    const char *swappable = getenv("ZCL_HOTSWAP_SWAPPABLE_MANIFEST");
-    if (!swappable)
-        swappable = "engine/composition/hotswap_swappable.def";
-    const char *islands = getenv("ZCL_HOTSWAP_ISLAND_MANIFEST");
-    if (!islands)
-        islands = "engine/composition/hotswap_islands.def";
+    *manifest = getenv("ZCL_HOTSWAP_MANIFEST");
+    if (!*manifest)
+        *manifest = "engine/composition/hotswap_eligible.def";
+    *swappable = getenv("ZCL_HOTSWAP_SWAPPABLE_MANIFEST");
+    if (!*swappable)
+        *swappable = "engine/composition/hotswap_swappable.def";
+    *islands = getenv("ZCL_HOTSWAP_ISLAND_MANIFEST");
+    if (!*islands)
+        *islands = "engine/composition/hotswap_islands.def";
 
     fputs("══ LINT: hot-swap recompiled TUs hold no mutable file-scope statics ══\n",
           stdout);
 
-    const char *const m[3] = { manifest, swappable, islands };
+    const char *const m[3] = { *manifest, *swappable, *islands };
     for (int i = 0; i < 3; i++) {
         if (access(m[i], R_OK) != 0) {
             fprintf(stderr, "check_hotswap_static_state: FATAL — manifest '%s' missing/unreadable.\n",
@@ -673,21 +768,25 @@ int check_hotswap_static_state_run(int argc, char **argv)
             return 2;
         }
     }
+    return 0;
+}
 
-    static char buf[HSS_MANIFEST_CAP];
-    static char eligible[HSS_MAX_PATHS][HSS_PATH];
-    static char swap[HSS_MAX_PATHS][HSS_PATH];
+static int hss_parse_manifests(const char *manifest, const char *swappable,
+                               const char *islands, char *buf, size_t cap,
+                               char eligible[][HSS_PATH], int *ne,
+                               char swap[][HSS_PATH], int *ns,
+                               char isl[][HSS_PATH], int *ni)
+{
     static char isl_lists[HSS_MAX_PATHS][HSS_PATH];
-    static char isl[HSS_MAX_PATHS][HSS_PATH];
-    int ne = 0, ns = 0, nl = 0, ni = 0;
+    int nl = 0;
     size_t n = 0;
-    if (hss_slurp(manifest, buf, sizeof buf, &n)
-        || hss_collect(buf, n, k_hss_eligible_tok, 0, eligible, &ne))
+    if (hss_slurp(manifest, buf, cap, &n)
+        || hss_collect(buf, n, k_hss_eligible_tok, 0, eligible, ne))
         return 2;
-    if (hss_slurp(swappable, buf, sizeof buf, &n)
-        || hss_collect(buf, n, k_hss_swappable_tok, 0, swap, &ns))
+    if (hss_slurp(swappable, buf, cap, &n)
+        || hss_collect(buf, n, k_hss_swappable_tok, 0, swap, ns))
         return 2;
-    if (hss_slurp(islands, buf, sizeof buf, &n)
+    if (hss_slurp(islands, buf, cap, &n)
         || hss_collect(buf, n, k_hss_island_tok, 1, isl_lists, &nl))
         return 2;
     for (int i = 0; i < nl; i++) {
@@ -695,14 +794,19 @@ int check_hotswap_static_state_run(int argc, char **argv)
         memcpy(list, isl_lists[i], strlen(isl_lists[i]) + 1);
         for (char *save = NULL, *p = strtok_r(list, " \t\n", &save);
              p; p = strtok_r(NULL, " \t\n", &save)) {
-            if (ni >= HSS_MAX_PATHS)
+            if (*ni >= HSS_MAX_PATHS)
                 return die("z23-lint: hotswap manifest path overflow\n", "");
             size_t len = strlen(p);
-            memcpy(isl[ni], p, len + 1);
-            ni++;
+            memcpy(isl[*ni], p, len + 1);
+            (*ni)++;
         }
     }
+    return 0;
+}
 
+static int hss_require_floors(const char *manifest, const char *swappable,
+                              const char *islands, int ne, int ns, int ni)
+{
     char hint[4096];
     if (ovf(snprintf(hint, sizeof hint,
                      "no HOTSWAP_" "ELIGIBLE(\"...\") entries parsed from %s",
@@ -722,13 +826,15 @@ int check_hotswap_static_state_run(int argc, char **argv)
                      "no HOTSWAP_" "ISLAND implementation members parsed from %s",
                      islands), sizeof hint))
         return 2;
-    rc = gate_require_scanned(ni, 1, "check_hotswap_static_state", hint);
-    if (rc)
-        return rc;
+    return gate_require_scanned(ni, 1, "check_hotswap_static_state", hint);
+}
 
-    /* Union, de-duplicated, encounter order; empty args drop out. */
-    static char paths[HSS_MAX_PATHS][HSS_PATH];
-    int np = 0;
+static int hss_union_paths(char eligible[][HSS_PATH], int ne,
+                           char swap[][HSS_PATH], int ns,
+                           char isl[][HSS_PATH], int ni,
+                           char paths[][HSS_PATH], int *np)
+{
+    *np = 0;
     for (int src = 0; src < 3; src++) {
         char (*set)[HSS_PATH] = src == 0 ? eligible : src == 1 ? swap : isl;
         int cnt = src == 0 ? ne : src == 1 ? ns : ni;
@@ -736,30 +842,24 @@ int check_hotswap_static_state_run(int argc, char **argv)
             if (!set[i][0])
                 continue;
             int dup = 0;
-            for (int j = 0; j < np; j++)
+            for (int j = 0; j < *np; j++)
                 if (strcmp(paths[j], set[i]) == 0) {
                     dup = 1;
                     break;
                 }
             if (dup)
                 continue;
-            if (np >= HSS_MAX_PATHS)
+            if (*np >= HSS_MAX_PATHS)
                 return die("z23-lint: hotswap manifest path overflow\n", "");
-            strcpy(paths[np++], set[i]);
+            strcpy(paths[(*np)++], set[i]);
         }
     }
-    if (ovf(snprintf(hint, sizeof hint,
-                     "the union of %s and %s parsed to zero TUs",
-                     manifest, swappable), sizeof hint))
-        return 2;
-    rc = gate_require_scanned(np, 1, "check_hotswap_static_state", hint);
-    if (rc)
-        return rc;
+    return 0;
+}
 
-    static char viol[HSS_VIOL_CAP];
-    size_t vused = 0;
-    viol[0] = '\0';
-    int scanned = 0;
+static int hss_scan_union(char paths[][HSS_PATH], int np, char *viol,
+                          size_t vcap, size_t *vused, int *scanned)
+{
     for (int i = 0; i < np; i++) {
         struct stat st;
         if (stat(paths[i], &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -769,17 +869,18 @@ int check_hotswap_static_state_run(int argc, char **argv)
                   stderr);
             return 2;
         }
-        scanned++;
+        (*scanned)++;
         /* hits="$(...)" strips the trailing newline, then the shell appends
          * one: the violations block is exactly the hit lines, no separator. */
-        if (hss_scan_file(paths[i], viol, sizeof viol, &vused))
+        if (hss_scan_file(paths[i], viol, vcap, vused))
             return 2;
     }
-    rc = gate_require_scanned(scanned, 1, "check_hotswap_static_state",
-                              "no hot-swap TU scanned");
-    if (rc)
-        return rc;
+    return 0;
+}
 
+static int hss_report_static(const char *viol, size_t vused, int scanned,
+                             int ne, int ns, int ni)
+{
     if (vused > 0) {
         if (fwrite(viol, 1, vused, stdout) != vused)
             return die("z23-lint: write failed\n", "");
@@ -796,6 +897,56 @@ int check_hotswap_static_state_run(int argc, char **argv)
     printf("      (%d eligible + %d swappable + %d island members, de-duplicated)\n",
            ne, ns, ni);
     return 0;
+}
+
+int check_hotswap_static_state_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const char *manifest, *swappable, *islands;
+    int rc = hss_resolve_manifests(&manifest, &swappable, &islands);
+    if (rc)
+        return rc;
+
+    static char buf[HSS_MANIFEST_CAP];
+    static char eligible[HSS_MAX_PATHS][HSS_PATH];
+    static char swap[HSS_MAX_PATHS][HSS_PATH];
+    static char isl[HSS_MAX_PATHS][HSS_PATH];
+    int ne = 0, ns = 0, ni = 0;
+    if (hss_parse_manifests(manifest, swappable, islands, buf, sizeof buf,
+                            eligible, &ne, swap, &ns, isl, &ni))
+        return 2;
+    rc = hss_require_floors(manifest, swappable, islands, ne, ns, ni);
+    if (rc)
+        return rc;
+
+    /* Union, de-duplicated, encounter order; empty args drop out. */
+    static char paths[HSS_MAX_PATHS][HSS_PATH];
+    int np = 0;
+    rc = hss_union_paths(eligible, ne, swap, ns, isl, ni, paths, &np);
+    if (rc)
+        return rc;
+    char hint[4096];
+    if (ovf(snprintf(hint, sizeof hint,
+                     "the union of %s and %s parsed to zero TUs",
+                     manifest, swappable), sizeof hint))
+        return 2;
+    rc = gate_require_scanned(np, 1, "check_hotswap_static_state", hint);
+    if (rc)
+        return rc;
+
+    static char viol[HSS_VIOL_CAP];
+    size_t vused = 0;
+    viol[0] = '\0';
+    int scanned = 0;
+    rc = hss_scan_union(paths, np, viol, sizeof viol, &vused, &scanned);
+    if (rc)
+        return rc;
+    rc = gate_require_scanned(scanned, 1, "check_hotswap_static_state",
+                              "no hot-swap TU scanned");
+    if (rc)
+        return rc;
+    return hss_report_static(viol, vused, scanned, ne, ns, ni);
 }
 
 static int hss_want(const char *tag, int got, int w, const char *s)
