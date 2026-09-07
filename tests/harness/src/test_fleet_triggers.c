@@ -17,8 +17,10 @@
 
 #include "test/test_core.h"
 
+#include "command/native_command.h"
 #include "command/native_fleet_triggers.h"
 #include "config/command_catalog.h"
+#include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/clock.h"
@@ -521,6 +523,219 @@ _test_next:;
     return failures;
 }
 
+/* ── github_comments ingest + board_post ─────────────────────────────── */
+
+static void ftx_ingest_call(const char *source, const char *file,
+                            struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    if (source)
+        (void)json_push_kv_str(&input, "source", source);
+    if (file)
+        (void)json_push_kv_str(&input, "file", file);
+    struct zcl_command_request req;
+    memset(&req, 0, sizeof req);
+    req.input = &input;
+    req.spec = zcl_command_registry_find(zcl_command_catalog(),
+                                         "fleet.triggers.ingest", NULL);
+    zcl_command_reply_init(reply, "zcl.fleet_triggers_ingest.v1");
+    char why[256];
+    if (!req.spec ||
+        zcl_command_registry_input_validate(req.spec, &input, why,
+                                            sizeof why))
+        zcl_native_handle_fleet_triggers_ingest(&req, reply);
+    else
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                              ZCL_COMMAND_EXIT_INVALID, "INPUT_REJECTED",
+                              "validate", false, false, why, "input");
+    json_free(&input);
+}
+
+/* Refusals: an unknown source, and a missing file. Neither touches the
+ * github_comments file at all. */
+static int ftx_case_ingest_refuses(void)
+{
+    int failures = 0;
+
+    printf("fleet_triggers: ingest refuses an unknown source and a missing "
+          "file... ");
+    ftx_isolate("ingest_refuses");
+
+    struct zcl_command_reply reply;
+    ftx_ingest_call("slack", "/tmp/whatever.jsonl", &reply);
+    ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&reply);
+
+    ftx_ingest_call("github", NULL, &reply);
+    ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&reply);
+
+    char comments_path[PATH_MAX];
+    ASSERT(zcl_trigger_github_comments_path(comments_path,
+                                            sizeof comments_path));
+    struct stat st;
+    ASSERT(stat(comments_path, &st) != 0);
+    PASS();
+_test_next:;
+    return failures;
+}
+
+/* A line missing a required field is skipped, not fatal; a well-formed line
+ * is appended. */
+static int ftx_case_ingest_skips_malformed(void)
+{
+    int failures = 0;
+
+    printf("fleet_triggers: ingest skips a malformed line, keeps a good "
+          "one... ");
+    ftx_isolate("ingest_skips_malformed");
+
+    char base[PATH_MAX];
+    test_make_tmpdir(base, sizeof base, "fleet_triggers_ingest", "src");
+    char src_path[PATH_MAX];
+    (void)snprintf(src_path, sizeof src_path, "%s/comments.jsonl", base);
+    ftx_write_file(src_path,
+                  "{\"kind\":\"comment\",\"owner\":\"z23c\"}\n"
+                  "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
+                  "\"number\":\"47\",\"comment_id\":\"c1\","
+                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "c1\",\"body\":\"first watch row\","
+                  "\"ts\":\"2026-09-06T10:00:00Z\"}\n");
+
+    struct zcl_command_reply reply;
+    ftx_ingest_call("github", src_path, &reply);
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(json_get_int(json_get(&reply.data, "appended")), 1);
+    zcl_command_reply_free(&reply);
+
+    char comments_path[PATH_MAX];
+    ASSERT(zcl_trigger_github_comments_path(comments_path,
+                                            sizeof comments_path));
+    ASSERT_EQ((int64_t)ftx_count_lines(comments_path), 1);
+    ASSERT(ftx_file_contains(comments_path, "first watch row"));
+    PASS();
+_test_next:;
+    return failures;
+}
+
+/* fired.jsonl the RPC hook writes a durable fixture into: proves the
+ * board_post action reaches the SAME native call `fleet board post` uses
+ * (the `fleet_board` RPC method), not a shell-out, and that a fired
+ * trigger's text is templated over the row's own "body" field. */
+static char g_ftx_board_method[64];
+static char g_ftx_board_params[FLEET_BOARD_LINE_MAX + 256];
+static int g_ftx_board_calls;
+
+static char *ftx_board_rpc_hook(const char *method, const char *params_json)
+{
+    g_ftx_board_calls++;
+    (void)snprintf(g_ftx_board_method, sizeof g_ftx_board_method, "%s",
+                  method ? method : "");
+    (void)snprintf(g_ftx_board_params, sizeof g_ftx_board_params, "%s",
+                  params_json ? params_json : "");
+    if (method && strcmp(method, "fleet_board") == 0)
+        return strdup("{\"ok\":true,\"id\":\""
+                     "0000000000000000000000000000000000000000000000000000"
+                     "000000000000\",\"kind\":\"note\"}");
+    return NULL;
+}
+
+static int ftx_case_github_comment_fires_board_post(void)
+{
+    int failures = 0;
+
+    printf("fleet_triggers: an ingested github comment fires a board "
+          "post... ");
+    ftx_isolate("github_board_post");
+    ftx_install_clock();
+
+    char base[PATH_MAX];
+    test_make_tmpdir(base, sizeof base, "fleet_triggers_ingest", "fire");
+    char src_path[PATH_MAX];
+    (void)snprintf(src_path, sizeof src_path, "%s/comments.jsonl", base);
+    ftx_write_file(src_path,
+                  "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
+                  "\"number\":\"47\",\"comment_id\":\"c9\","
+                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "c9\",\"body\":\"new comment on discussion 47\","
+                  "\"ts\":\"2025-09-04T15:00:00Z\"}\n");
+    struct zcl_command_reply ingest_reply;
+    ftx_ingest_call("github", src_path, &ingest_reply);
+    ASSERT(ingest_reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&ingest_reply);
+
+    g_ftx_board_calls = 0;
+    node_rpc_client_set_test_hook(ftx_board_rpc_hook);
+    struct ftx_call c;
+    ftx_begin(&c, false, 0);
+    ASSERT(ftx_run(&c));
+    ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c, "fired"), 1);
+    ftx_end(&c);
+    node_rpc_client_set_test_hook(NULL);
+
+    ASSERT_EQ(g_ftx_board_calls, 1);
+    ASSERT(strcmp(g_ftx_board_method, "fleet_board") == 0);
+    ASSERT(strstr(g_ftx_board_params, "\"kind\":\"note\"") != NULL);
+    ASSERT(strstr(g_ftx_board_params, "new comment on discussion 47") !=
+          NULL);
+    ASSERT(strstr(g_ftx_board_params, "github_comment_to_board") != NULL);
+    clock_reset_default();
+    PASS();
+_test_next:;
+    return failures;
+}
+
+static char *ftx_no_node_rpc_hook(const char *method, const char *params_json)
+{
+    (void)method;
+    (void)params_json;
+    return NULL; /* node_rpc_call's own "nothing answered" convention */
+}
+
+/* No node answering: the action fails closed (fb_no_node's exact refusal;
+ * see native_fleet_board_command.c) and `check` itself still succeeds and
+ * still counts the row as fired — the same shape `ledger` already has. */
+static int ftx_case_board_post_no_node(void)
+{
+    int failures = 0;
+
+    printf("fleet_triggers: with no node running, board_post refuses "
+          "clearly but check still succeeds... ");
+    ftx_isolate("github_no_node");
+    ftx_install_clock();
+
+    char base[PATH_MAX];
+    test_make_tmpdir(base, sizeof base, "fleet_triggers_ingest", "nonode");
+    char src_path[PATH_MAX];
+    (void)snprintf(src_path, sizeof src_path, "%s/comments.jsonl", base);
+    ftx_write_file(src_path,
+                  "{\"kind\":\"comment\",\"owner\":\"z23c\",\"repo\":\"z23\","
+                  "\"number\":\"47\",\"comment_id\":\"c10\","
+                  "\"author\":\"rhett\",\"url\":\"https://example.invalid/"
+                  "c10\",\"body\":\"no node is running\","
+                  "\"ts\":\"2025-09-04T15:00:00Z\"}\n");
+    struct zcl_command_reply ingest_reply;
+    ftx_ingest_call("github", src_path, &ingest_reply);
+    ASSERT(ingest_reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&ingest_reply);
+
+    node_rpc_client_set_test_hook(ftx_no_node_rpc_hook);
+    struct ftx_call c;
+    ftx_begin(&c, false, 0);
+    ASSERT(ftx_run(&c));
+    ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT_EQ(ftx_int(&c, "fired"), 1);
+    ftx_end(&c);
+    node_rpc_client_set_test_hook(NULL);
+    clock_reset_default();
+    PASS();
+_test_next:;
+    return failures;
+}
+
 int test_fleet_triggers(void);
 int test_fleet_triggers(void)
 {
@@ -534,6 +749,10 @@ int test_fleet_triggers(void)
     failures += ftx_case_json_well_formed();
     failures += ftx_case_clock_stamps_ts();
     failures += ftx_case_list_enumerates();
+    failures += ftx_case_ingest_refuses();
+    failures += ftx_case_ingest_skips_malformed();
+    failures += ftx_case_github_comment_fires_board_post();
+    failures += ftx_case_board_post_no_node();
 
     ftx_restore();
     if (failures == 0)
