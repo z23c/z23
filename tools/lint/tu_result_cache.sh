@@ -242,10 +242,32 @@ tu_cache_include_digest() {
         if [ -s "$list.f" ]; then mv -f "$list.f" "$list"; else rm -f "$list.f"; fi
     fi
 
-    LC_ALL=C sort -u "$list" | tr '\n' '\0' |
-        xargs -0 -r sha256sum 2>/dev/null |
+    # TOCTOU tolerance: $list was built from a `find` snapshot above, but
+    # sha256sum reads every path again here, moments later. Concurrently
+    # under `make lint`, another gate's own selftest plants-then-unlinks a
+    # transient file in a REAL directory (scan_exclusions.sh's fixture regex
+    # above only filters names that FOLLOW the shared `_*fixture*.[ch]`
+    # convention; a differently-named transient write, or a generated header
+    # gen_templates rewrites in place, is not caught by that filter and can
+    # still vanish inside this exact window). Measured 2026-09-07: racing a
+    # 10 ms create/unlink cycle against this call hit sha256sum's "No such
+    # file or directory" on ~13% of calls (40/300), and — because this
+    # pipeline runs under the caller's `set -o pipefail` — that one missing
+    # path failed the WHOLE digest, which check-clang-portability's
+    # --self-test then reported as "could not digest the include set". A
+    # file that disappears between the two reads is, almost by definition,
+    # transient noise no real TU depends on, so drop it from the digest
+    # instead of aborting: run the hashing stage in its own exit-status
+    # sandbox so one vanished path can only shrink the hashed set, never
+    # fail the whole computation. `set -o pipefail` still catches any other
+    # abnormal xargs/sha256sum exit through the check below.
+    local hashed
+    hashed="$(LC_ALL=C sort -u "$list" | tr '\n' '\0' |
+        { xargs -0 -r sha256sum 2>/dev/null || true; } |
         awk '{ h = $1; $1 = ""; sub(/^ +/, "", $0); printf "%s\t%s\n", $0, h }' |
-        LC_ALL=C sort | tu_cache__sha_stdin
+        LC_ALL=C sort)"
+    [ -n "$hashed" ] || return 1
+    printf '%s\n' "$hashed" | tu_cache__sha_stdin
 }
 # Keep the newest N generations under <gate-root>, drop the rest whole. A
 # generation is a directory named by its salt, so this is the only pruning
