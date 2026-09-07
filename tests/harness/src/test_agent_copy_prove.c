@@ -359,7 +359,7 @@ static int test_acp_launchd_like_live(void)
     printf("[test_agent_copy_prove] launchd --like-live parity\n");
 
     char work[512], home[560], src[600], fakebin[600], plist[700];
-    char plutil[700], marker[700], stderr_path[700];
+    char plutil[700], marker[700], stderr_path[700], candidate[700];
     test_make_tmpdir(work, sizeof(work), "acp_script", "launchd");
     snprintf(home, sizeof(home), "%s/home", work);
     snprintf(src, sizeof(src), "%s/src", work);
@@ -392,14 +392,25 @@ static int test_acp_launchd_like_live(void)
         "esac\n";
     ACP_CHECK("wrote launchd plutil fixture", acp_write_file(plutil, plutil_body));
     chmod(plutil, 0755);
+    snprintf(candidate, sizeof(candidate), "%s/candidate", fakebin);
+    const char *candidate_body =
+        "#!/bin/sh\n"
+        "[ \"$1\" = agentbuild ] || exit 2\n"
+        "printf '%s\\n' '{\"schema\":\"zcl.agent_build.v2\","
+        "\"api_version\":\"v1\",\"status\":\"ok\","
+        "\"source_id_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\","
+        "\"build_commit\":\"launchd-fixture\"}'\n";
+    ACP_CHECK("wrote launchd candidate identity fixture",
+              acp_write_file(candidate, candidate_body));
+    chmod(candidate, 0755);
     snprintf(stderr_path, sizeof(stderr_path), "%s/launchd.stderr", work);
 
-    char cmd[3000];
+    char cmd[4000];
     snprintf(cmd, sizeof(cmd),
         "env HOME=%s PATH=%s:/usr/bin:/bin ZCL_REPRO_HOST_OS=Darwin "
-        "ZCL_REPRO_LIVE_PLIST=%s tools/repro_on_copy.sh acp-launchd "
+        "ZCL_REPRO_LIVE_PLIST=%s ZCL_NODE_BIN=%s tools/repro_on_copy.sh acp-launchd "
         "--src=%s --like-live --no-run --json 2>%s",
-        home, fakebin, plist, src, stderr_path);
+        home, fakebin, plist, candidate, src, stderr_path);
     FILE *p = popen(cmd, "r");
     ACP_CHECK("popen launchd like-live proof", p != NULL);
     char out[4096];
@@ -421,6 +432,9 @@ static int test_acp_launchd_like_live(void)
                                          sizeof(manifest));
         ACP_CHECK("launchd like-live manifest readable", manifest_ok);
         if (manifest_ok) {
+            ACP_CHECK("launchd manifest binds the candidate source identity",
+                      strstr(manifest, "candidate_source_id_sha256: "
+                             "1111111111111111111111111111111111111111111111111111111111111111\n") != NULL);
             ACP_CHECK("safe launchd behavior flags are preserved",
                       strstr(manifest, "-listen") != NULL &&
                       strstr(manifest, "-txindex") != NULL &&
