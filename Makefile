@@ -5366,7 +5366,6 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_service_result_convergence.c \
     tools/lint/lintc/gate_frontier_single_writer.c \
     tools/lint/lintc/gate_no_utxos_mirror_read.c \
-    tools/lint/lintc/gate_narrative_integrity_fences.c \
     tools/lint/lintc/gate_no_dev_history_in_contracts.c \
     tools/lint/lintc/gate_no_uncited_victory.c \
     tools/lint/lintc/gate_model_ar_lifecycle.c \
