@@ -138,6 +138,92 @@ static int nbs_hollow(FILE *out, const char *sym)
     return 2;
 }
 
+static int nbs_walk_roots(struct nbs_acc *a)
+{
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof k_nbs_roots / sizeof k_nbs_roots[0]; i++)
+        rc = walk_src(k_nbs_roots[i], 0, nbs_on_file, a);
+    return rc;
+}
+
+static int nbs_collect_new(const struct nbs_set *callers, const struct nbs_set *base,
+                           struct nbs_set *newc)
+{
+    for (int i = 0; i < callers->count; i++) {
+        if (!nbs_has(base, callers->n[i])) {
+            int rc = nbs_add(newc, callers->n[i]);
+            if (rc)
+                return rc;
+        }
+    }
+    return 0;
+}
+
+static int nbs_collect_stale(const struct nbs_set *base, const char *sym,
+                             struct nbs_set *stale)
+{
+    for (int i = 0; i < base->count; i++) {
+        if (!nbs_file_has_sym(base->n[i], sym)) {
+            int rc = nbs_add(stale, base->n[i]);
+            if (rc)
+                return rc;
+        }
+    }
+    return 0;
+}
+
+static int nbs_report_clean(FILE *out, int base_count)
+{
+    if (fprintf(out,
+                "check_no_new_borrowed_seed: clean — %d grandfathered caller(s), no new ones\n",
+                base_count) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int nbs_report_new(FILE *out, const struct nbs_set *newc)
+{
+    if (fprintf(out,
+                "check_no_new_borrowed_seed: %d NEW caller(s) of the borrowed seed:\n",
+                newc->count) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < newc->count; i++) {
+        if (fprintf(out, "  %s\n", newc->n[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    }
+    if (fputc('\n', out) == EOF
+        || fputs("Do NOT add a new coins_kv_seed_from_node_db caller — the borrow is being\n",
+                 out) < 0
+        || fputs("DELETED (the self-verified-tip cure). Self-derive the coin set (from the\n",
+                 out) < 0
+        || fputs("minted anchor snapshot / a from-genesis fold) instead. If a caller is\n",
+                 out) < 0
+        || fprintf(out,
+                   "genuinely unavoidable for now, add its path to %s (last resort).\n",
+                   k_nbs_base) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int nbs_report_stale(FILE *out, const struct nbs_set *stale)
+{
+    if (fprintf(out,
+                "check_no_new_borrowed_seed: %d STALE baseline entry(ies) (no longer call it):\n",
+                stale->count) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < stale->count; i++) {
+        if (fprintf(out, "  %s\n", stale->n[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    }
+    if (fputc('\n', out) == EOF
+        || fprintf(out,
+                   "A caller was removed — good. Delete its line from %s so the\n",
+                   k_nbs_base) < 0
+        || fputs("ratchet reflects the smaller set.\n", out) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
 static int nbs_scan(FILE *out)
 {
     char sym[64];
@@ -149,70 +235,29 @@ static int nbs_scan(FILE *out)
     if (rc)
         return rc;
     struct nbs_acc a = { .sym = sym, .def = k_nbs_def, .callers = &callers };
-    for (size_t i = 0; rc == 0 && i < sizeof k_nbs_roots / sizeof k_nbs_roots[0]; i++)
-        rc = walk_src(k_nbs_roots[i], 0, nbs_on_file, &a);
+    rc = nbs_walk_roots(&a);
     if (rc)
         return rc;
     qsort(callers.n, (size_t)callers.count, NBS_PATH, nbs_cmp);
-    for (int i = 0; i < callers.count; i++) {
-        if (!nbs_has(&base, callers.n[i])) {
-            rc = nbs_add(&newc, callers.n[i]);
-            if (rc)
-                return rc;
-        }
-    }
-    for (int i = 0; i < base.count; i++) {
-        if (!nbs_file_has_sym(base.n[i], sym)) {
-            rc = nbs_add(&stale, base.n[i]);
-            if (rc)
-                return rc;
-        }
-    }
-    if (newc.count == 0 && stale.count == 0) {
-        if (fprintf(out,
-                    "check_no_new_borrowed_seed: clean — %d grandfathered caller(s), no new ones\n",
-                    base.count) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 0;
-    }
+    rc = nbs_collect_new(&callers, &base, &newc);
+    if (rc)
+        return rc;
+    rc = nbs_collect_stale(&base, sym, &stale);
+    if (rc)
+        return rc;
+    if (newc.count == 0 && stale.count == 0)
+        return nbs_report_clean(out, base.count);
     if (fputc('\n', out) == EOF)
         return die("z23-lint: write failed\n", "");
     if (newc.count) {
-        if (fprintf(out,
-                    "check_no_new_borrowed_seed: %d NEW caller(s) of the borrowed seed:\n",
-                    newc.count) < 0)
-            return die("z23-lint: write failed\n", "");
-        for (int i = 0; i < newc.count; i++) {
-            if (fprintf(out, "  %s\n", newc.n[i]) < 0)
-                return die("z23-lint: write failed\n", "");
-        }
-        if (fputc('\n', out) == EOF
-            || fputs("Do NOT add a new coins_kv_seed_from_node_db caller — the borrow is being\n",
-                     out) < 0
-            || fputs("DELETED (the self-verified-tip cure). Self-derive the coin set (from the\n",
-                     out) < 0
-            || fputs("minted anchor snapshot / a from-genesis fold) instead. If a caller is\n",
-                     out) < 0
-            || fprintf(out,
-                       "genuinely unavoidable for now, add its path to %s (last resort).\n",
-                       k_nbs_base) < 0)
-            return die("z23-lint: write failed\n", "");
+        rc = nbs_report_new(out, &newc);
+        if (rc)
+            return rc;
     }
     if (stale.count) {
-        if (fprintf(out,
-                    "check_no_new_borrowed_seed: %d STALE baseline entry(ies) (no longer call it):\n",
-                    stale.count) < 0)
-            return die("z23-lint: write failed\n", "");
-        for (int i = 0; i < stale.count; i++) {
-            if (fprintf(out, "  %s\n", stale.n[i]) < 0)
-                return die("z23-lint: write failed\n", "");
-        }
-        if (fputc('\n', out) == EOF
-            || fprintf(out,
-                       "A caller was removed — good. Delete its line from %s so the\n",
-                       k_nbs_base) < 0
-            || fputs("ratchet reflects the smaller set.\n", out) < 0)
-            return die("z23-lint: write failed\n", "");
+        rc = nbs_report_stale(out, &stale);
+        if (rc)
+            return rc;
     }
     return 1;
 }
@@ -515,36 +560,55 @@ static int sbe_update(const struct sbe_set *cur)
     return 0;
 }
 
-static int sbe_report(const struct sbe_set *cur, const struct sbe_set *base)
+static int sbe_count_new(const struct sbe_set *cur, const struct sbe_set *base)
 {
     int n_new = 0;
     for (int i = 0; i < cur->count; i++) {
         if (strstr(cur->n[i], "::") && !sbe_has(base, cur->n[i]))
             n_new++;
     }
-    if (n_new) {
-        if (puts("FAIL: new silent call-guard 'return false' (log the failure via LOG_WARN/LOG_FAIL, or mark // raw-return-ok:<reason>):")
-            == EOF)
+    return n_new;
+}
+
+static int sbe_print_new(const struct sbe_set *cur, const struct sbe_set *base)
+{
+    if (puts("FAIL: new silent call-guard 'return false' (log the failure via LOG_WARN/LOG_FAIL, or mark // raw-return-ok:<reason>):")
+        == EOF)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < cur->count; i++) {
+        if (strstr(cur->n[i], "::") && !sbe_has(base, cur->n[i])
+            && puts(cur->n[i]) == EOF)
             return die("z23-lint: write failed\n", "");
-        for (int i = 0; i < cur->count; i++) {
-            if (strstr(cur->n[i], "::") && !sbe_has(base, cur->n[i])
-                && puts(cur->n[i]) == EOF)
-                return die("z23-lint: write failed\n", "");
-        }
-        return 1;
     }
-    int n_cur = 0, n_base = 0, gone = 0;
+    return 1;
+}
+
+static void sbe_tally_ok(const struct sbe_set *cur, const struct sbe_set *base,
+                         int *n_cur, int *n_base, int *gone)
+{
+    *n_cur = 0;
+    *n_base = 0;
+    *gone = 0;
     for (int i = 0; i < cur->count; i++) {
         if (strstr(cur->n[i], "::"))
-            n_cur++;
+            (*n_cur)++;
     }
     for (int i = 0; i < base->count; i++) {
         if (strstr(base->n[i], "::")) {
-            n_base++;
+            (*n_base)++;
             if (!sbe_has(cur, base->n[i]))
-                gone++;
+                (*gone)++;
         }
     }
+}
+
+static int sbe_report(const struct sbe_set *cur, const struct sbe_set *base)
+{
+    int n_new = sbe_count_new(cur, base);
+    if (n_new)
+        return sbe_print_new(cur, base);
+    int n_cur = 0, n_base = 0, gone = 0;
+    sbe_tally_ok(cur, base, &n_cur, &n_base, &gone);
     if (printf("  OK: no new silent call-guard return-false (%d tracked; baseline %d)\n",
                n_cur, n_base) < 0)
         return die("z23-lint: write failed\n", "");
@@ -862,73 +926,53 @@ static int sql_summary(int v, const char *mode)
     return 0;
 }
 
-int check_no_raw_sqlite_in_controllers_run(int argc, char **argv)
+static int sql_ctrl_scan(char ctrl[][RS_PATH], int nc, struct sql_scan *scan)
 {
-    (void)argc;
-    (void)argv;
-    const char *mode = sql_mode();
-    char ctrl[RS_MAX][RS_PATH], svc[RS_MAX][RS_PATH], ctxr[RS_MAX][RS_PATH];
-    int nc = 0, ns = 0, nctx = 0;
-    int rc = repo_shape_room_dirs("controllers", ctrl, RS_MAX, &nc);
-    if (rc)
-        return rc;
-    regex_t re;
-    rc = compile_pat(&re, REG_EXTENDED, k_sql_re, "", "", "");
-    if (rc)
-        return rc;
-    struct sql_scan scan = { .re = &re };
-    rc = sql_walk_roots(ctrl, nc, 1, sql_on_ctrl, &scan);
-    if (rc || scan.failed) {
-        if (scan.failed) {
-            regfree(&re);
+    int rc = sql_walk_roots(ctrl, nc, 1, sql_on_ctrl, scan);
+    if (rc || scan->failed) {
+        if (scan->failed)
             return 2;
-        }
         fprintf(stderr,
                 "check_no_raw_sqlite_in_controllers: FATAL — source enumeration failed (find=%d)\n",
                 rc);
-        regfree(&re);
         return 2;
     }
-    rc = gate_require_scanned(scan.nfiles, 1, k_sql_name,
-                              "expected controller C/header sources");
-    if (rc) {
-        regfree(&re);
-        return rc;
-    }
-    rc = repo_shape_room_dirs("services", svc, RS_MAX, &ns);
-    if (rc) {
-        regfree(&re);
-        return rc;
-    }
+    return gate_require_scanned(scan->nfiles, 1, k_sql_name,
+                                "expected controller C/header sources");
+}
+
+static int sql_ctx_scan(char ctrl[][RS_PATH], int nc, char svc[][RS_PATH], int ns,
+                        struct sql_ctx *cacc)
+{
+    char ctxr[RS_MAX][RS_PATH];
+    int nctx = 0;
+    int rc = 0;
     for (int i = 0; rc == 0 && i < nc; i++)
         rc = sql_add_root(ctxr, RS_MAX, &nctx, ctrl[i]);
     for (int i = 0; rc == 0 && i < ns; i++)
         rc = sql_add_root(ctxr, RS_MAX, &nctx, svc[i]);
     if (rc == 0 && nctx > 1)
         qsort(ctxr, (size_t)nctx, RS_PATH, nbs_cmp);
-    struct sql_ctx cacc = {0};
     if (rc == 0)
-        rc = sql_walk_roots(ctxr, nctx, 1, sql_on_ctx, &cacc);
-    if (rc || cacc.failed) {
-        if (!cacc.failed)
+        rc = sql_walk_roots(ctxr, nctx, 1, sql_on_ctx, cacc);
+    if (rc || cacc->failed) {
+        if (!cacc->failed)
             fprintf(stderr,
                     "check_no_raw_sqlite_in_controllers: FATAL — context enumeration failed (find=%d)\n",
                     rc);
-        regfree(&re);
         return 2;
     }
-    rc = gate_require_scanned(cacc.nfiles, 2,
-                              "check_no_raw_sqlite_in_controllers.receipt_owner",
-                              "expected controller and service C/header sources");
-    if (rc) {
-        regfree(&re);
-        return rc;
-    }
-    struct sr_set base = {0};
-    rc = sr_load(&base, k_sql_base);
-    int violations = 0;
-    for (int i = 0; rc == 0 && i < scan.nhits; i++) {
-        const char *line = scan.hits[i];
+    return gate_require_scanned(cacc->nfiles, 2,
+                                "check_no_raw_sqlite_in_controllers.receipt_owner",
+                                "expected controller and service C/header sources");
+}
+
+static int sql_emit_hits(const char *mode, const struct sql_scan *scan,
+                         const struct sr_set *base, int *violations)
+{
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < scan->nhits; i++) {
+        const char *line = scan->hits[i];
         char file[RS_PATH];
         const char *colon = strchr(line, ':');
         size_t fl = colon ? (size_t)(colon - line) : strlen(line);
@@ -938,25 +982,77 @@ int check_no_raw_sqlite_in_controllers_run(int argc, char **argv)
         }
         memcpy(file, line, fl);
         file[fl] = '\0';
-        if (!sql_is_violation(mode, file, line, &base))
+        if (!sql_is_violation(mode, file, line, base))
             continue;
-        violations++;
+        (*violations)++;
         if (fprintf(stderr, "%s\n", line) < 0)
             rc = die("z23-lint: write failed\n", "");
     }
-    for (int i = 0; rc == 0 && i < cacc.nrec; i++) {
-        violations++;
-        if (fprintf(stderr, "%s\n", cacc.rec[i]) < 0)
+    return rc;
+}
+
+static int sql_emit_receipts(const struct sql_ctx *cacc, int *violations)
+{
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < cacc->nrec; i++) {
+        (*violations)++;
+        if (fprintf(stderr, "%s\n", cacc->rec[i]) < 0)
             rc = die("z23-lint: write failed\n", "");
     }
-    if (rc == 0)
-        rc = sql_summary(violations, mode);
-    regfree(&re);
+    return rc;
+}
+
+static int sql_grade(int rc, int violations, const char *mode)
+{
     if (rc)
         return rc;
     if (violations > 0 && (strcmp(mode, "FAIL") == 0 || strcmp(mode, "RATCHET") == 0))
         return 1;
     return 0;
+}
+
+int check_no_raw_sqlite_in_controllers_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const char *mode = sql_mode();
+    char ctrl[RS_MAX][RS_PATH], svc[RS_MAX][RS_PATH];
+    int nc = 0, ns = 0;
+    int rc = repo_shape_room_dirs("controllers", ctrl, RS_MAX, &nc);
+    if (rc)
+        return rc;
+    regex_t re;
+    rc = compile_pat(&re, REG_EXTENDED, k_sql_re, "", "", "");
+    if (rc)
+        return rc;
+    struct sql_scan scan = { .re = &re };
+    rc = sql_ctrl_scan(ctrl, nc, &scan);
+    if (rc) {
+        regfree(&re);
+        return rc;
+    }
+    rc = repo_shape_room_dirs("services", svc, RS_MAX, &ns);
+    if (rc) {
+        regfree(&re);
+        return rc;
+    }
+    struct sql_ctx cacc = {0};
+    rc = sql_ctx_scan(ctrl, nc, svc, ns, &cacc);
+    if (rc) {
+        regfree(&re);
+        return rc;
+    }
+    struct sr_set base = {0};
+    rc = sr_load(&base, k_sql_base);
+    int violations = 0;
+    if (rc == 0)
+        rc = sql_emit_hits(mode, &scan, &base, &violations);
+    if (rc == 0)
+        rc = sql_emit_receipts(&cacc, &violations);
+    if (rc == 0)
+        rc = sql_summary(violations, mode);
+    regfree(&re);
+    return sql_grade(rc, violations, mode);
 }
 
 int check_no_raw_sqlite_in_controllers_selftest(void)
