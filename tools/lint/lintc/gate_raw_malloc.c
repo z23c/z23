@@ -168,8 +168,9 @@ static int rma_load_allow(struct rma_set *a, const char *path)
     return 0;
 }
 
-static int rma_skip_line(const char *line)
+static int rma_skip_line(const char *line, size_t call_pos)
 {
+    const char *cslash, *cstar;
     if (strstr(line, "zcl_malloc") || strstr(line, "zcl_calloc")
         || strstr(line, "zcl_realloc"))
         return 1;
@@ -178,7 +179,16 @@ static int rma_skip_line(const char *line)
     if (strchr(line, '"') && (strstr(line, "malloc") || strstr(line, "calloc")
                               || strstr(line, "realloc")))
         return 1;
-    if (strstr(line, "/*") || strstr(line, "* "))
+    /* Original script's comment filter only fires when a comment-open
+     * marker (a slash-star, or a star-space continuation bullet) occurs
+     * BEFORE the malloc/calloc/realloc mention on the line — not anywhere
+     * on the line. An unanchored check wrongly treats
+     * "malloc(count * size)" (the star is a multiplication, not a
+     * comment) as commented-out and silently drops a real violation. */
+    cslash = strstr(line, "/*");
+    cstar = strstr(line, "* ");
+    if ((cslash && (size_t)(cslash - line) < call_pos)
+        || (cstar && (size_t)(cstar - line) < call_pos))
         return 1;
     return 0;
 }
@@ -195,13 +205,14 @@ static int rma_scan_file(const char *path, const regex_t *re,
         return 2;
     }
     while (fgets(buf, (int)sizeof buf, f)) {
+        regmatch_t m;
         size_t n = strlen(buf);
         lineno++;
         if (n && buf[n - 1] == '\n')
             buf[--n] = '\0';
-        if (regexec(re, buf, 0, NULL, 0) != 0)
+        if (regexec(re, buf, 1, &m, 0) != 0)
             continue;
-        if (rma_skip_line(buf))
+        if (rma_skip_line(buf, (size_t)m.rm_so))
             continue;
         if (rma_has(allow, path)) {
             (*nallow)++;
