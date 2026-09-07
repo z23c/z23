@@ -340,7 +340,7 @@ static void tsb_setup(struct tsb_ctx *ctx)
                    ctx->package_destination);
 }
 
-static int tsb_fixture_and_capture(struct tsb_ctx *ctx)
+static int tsb_write_fixture_files(struct tsb_ctx *ctx)
 {
     int failures = 0;
     VC_CHECK("source bundle fixture files",
@@ -369,15 +369,18 @@ static int tsb_fixture_and_capture(struct tsb_ctx *ctx)
     (void)snprintf(executable, sizeof(executable), "%s/run.sh", ctx->source);
     VC_CHECK("source bundle executable mode fixture",
              chmod(executable, 0755) == 0);
+    return failures;
+}
 
-    uint8_t declared_root[32] = {0};
-    bool declared = vc_publish_declared_source_tree(ctx->source, true,
-                                                     declared_root);
-    VC_CHECK("source bundle publishes declared canonical-mode tree", declared);
 #if defined(_WIN32)
-    /* This lane proves transport of the declared canonical 0644/0755 tree.
-     * It does not claim filesystem executable-bit discovery or capture-time
-     * exclusion, both of which remain unavailable without a mode authority. */
+/* This lane proves transport of the declared canonical 0644/0755 tree. It
+ * does not claim filesystem executable-bit discovery or capture-time
+ * exclusion, both of which remain unavailable without a mode authority. */
+static int tsb_capture_check_windows(struct tsb_ctx *ctx,
+                                     const uint8_t declared_root[32],
+                                     bool declared)
+{
+    int failures = 0;
     uint8_t refused_capture[32];
     memset(refused_capture, 0xa5, sizeof(refused_capture));
     bool capture_refused =
@@ -390,12 +393,35 @@ static int tsb_fixture_and_capture(struct tsb_ctx *ctx)
         memcpy(ctx->first_root, declared_root, sizeof(ctx->first_root));
     else
         memset(ctx->first_root, 0, sizeof(ctx->first_root));
+    return failures;
+}
 #else
+static int tsb_capture_check_posix(struct tsb_ctx *ctx,
+                                   const uint8_t declared_root[32],
+                                   bool declared)
+{
+    int failures = 0;
     VC_CHECK("source bundle captures authoritative tree equal to declaration",
              declared &&
              vcs_tree_capture_path(ctx->source, ctx->first_root) == VCS_OK &&
              memcmp(ctx->first_root, declared_root,
                     sizeof(ctx->first_root)) == 0);
+    return failures;
+}
+#endif
+
+static int tsb_fixture_and_capture(struct tsb_ctx *ctx)
+{
+    int failures = tsb_write_fixture_files(ctx);
+
+    uint8_t declared_root[32] = {0};
+    bool declared = vc_publish_declared_source_tree(ctx->source, true,
+                                                     declared_root);
+    VC_CHECK("source bundle publishes declared canonical-mode tree", declared);
+#if defined(_WIN32)
+    failures += tsb_capture_check_windows(ctx, declared_root, declared);
+#else
+    failures += tsb_capture_check_posix(ctx, declared_root, declared);
 #endif
     return failures;
 }
@@ -575,7 +601,7 @@ static int tsb_unlicensed_and_forged_refusals(struct tsb_ctx *ctx)
     return failures;
 }
 
-static int tsb_transport_build_and_manifest(struct tsb_ctx *ctx)
+static int tsb_transport_build(struct tsb_ctx *ctx)
 {
     int failures = 0;
     vcs_source_package_transport_init(&ctx->transport);
@@ -587,7 +613,12 @@ static int tsb_transport_build_and_manifest(struct tsb_ctx *ctx)
              ctx->transport.source.shard_count > 0 &&
              ctx->transport.offline_input_count == 5 &&
              ctx->transport.bundle_metrics.file_count == ctx->created.file_count);
+    return failures;
+}
 
+static int tsb_transport_manifest_check(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     struct vcs_package_manifest carrier;
     char first_shard_path[VCS_SOURCE_BUNDLE_SHARD_PATH_MAX];
     bool have_shard_path =
@@ -612,7 +643,12 @@ static int tsb_transport_build_and_manifest(struct tsb_ctx *ctx)
              vc_package_has_path(&carrier,
                                  "vendor/.cache/openssl-3.0.16.tar.gz"));
     vcs_package_manifest_free(&carrier);
+    return failures;
+}
 
+static int tsb_transport_recipe_check(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     struct vcs_package_recipe carrier_recipe;
     uint8_t carrier_recipe_root[32];
     VC_CHECK("source package recipe builds only inert carrier marker",
@@ -628,6 +664,14 @@ static int tsb_transport_build_and_manifest(struct tsb_ctx *ctx)
              memcmp(carrier_recipe_root, ctx->transport.recipe_root, 32) ==
                  0);
     vcs_package_recipe_free(&carrier_recipe);
+    return failures;
+}
+
+static int tsb_transport_build_and_manifest(struct tsb_ctx *ctx)
+{
+    int failures = tsb_transport_build(ctx);
+    failures += tsb_transport_manifest_check(ctx);
+    failures += tsb_transport_recipe_check(ctx);
     return failures;
 }
 
@@ -1017,6 +1061,12 @@ static bool vc_file_matches(const char *dir, const char *rel, const char *expect
 }
 
 /* Count regular files under a directory tree. */
+enum vc_count_objects_entry_kind {
+    VC_COUNT_OBJECTS_SKIP,
+    VC_COUNT_OBJECTS_INVALID,
+    VC_COUNT_OBJECTS_SHARD,
+};
+
 #if defined(_WIN32)
 /* Count the plain-file entries directly under one shard directory
  * (wide_objects\name), or -1 if anything in it is not an object file. */
@@ -1047,6 +1097,22 @@ static int vc_count_objects_windows_shard(const wchar_t *wide_objects,
     return shard_ok ? count : -1;
 }
 
+/* Classify one FindFirstFileW/FindNextFileW entry directly under objects:
+ * a dotdir/tmp entry is skipped, a two-hex-char directory (not a reparse
+ * point or device) is a shard, anything else is invalid. */
+static enum vc_count_objects_entry_kind vc_count_objects_windows_classify(
+    const wchar_t *name, DWORD attrs)
+{
+    if (!wcscmp(name, L".") || !wcscmp(name, L"..") || !wcscmp(name, L"tmp"))
+        return VC_COUNT_OBJECTS_SKIP;
+    if (wcslen(name) != 2 || wcsspn(name, L"0123456789abcdef") != 2 ||
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        (attrs & FILE_ATTRIBUTE_DEVICE) != 0 ||
+        (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        return VC_COUNT_OBJECTS_INVALID;
+    return VC_COUNT_OBJECTS_SHARD;
+}
+
 static int vc_count_objects_windows(const char *objects)
 {
     WIN32_FIND_DATAW data;
@@ -1060,15 +1126,11 @@ static int vc_count_objects_windows(const char *objects)
     bool ok = true;
     do {
         const wchar_t *name = data.cFileName;
-        if (!wcscmp(name, L".") || !wcscmp(name, L"..") || !wcscmp(name, L"tmp"))
+        enum vc_count_objects_entry_kind kind =
+            vc_count_objects_windows_classify(name, data.dwFileAttributes);
+        if (kind == VC_COUNT_OBJECTS_SKIP)
             continue;
-        if (wcslen(name) != 2 || wcsspn(name, L"0123456789abcdef") != 2 ||
-            (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-            (data.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) != 0 ||
-            (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            ok = false;
-            break;
-        }
+        if (kind == VC_COUNT_OBJECTS_INVALID) { ok = false; break; }
         int shard_count = vc_count_objects_windows_shard(wide_objects, name);
         if (shard_count < 0) { ok = false; break; }
         count += shard_count;
@@ -1107,6 +1169,30 @@ static int vc_count_objects_posix_shard(const char *shard_path)
     return count;
 }
 
+/* Classify one readdir() entry directly under objects: a dotdir/tmp entry
+ * is skipped; a two-hex-char directory whose path fits shard_path is a
+ * shard (shard_path is filled in for that case); anything else is
+ * invalid. */
+static enum vc_count_objects_entry_kind vc_count_objects_posix_classify(
+    DIR *root, const struct dirent *shard, const char *objects,
+    char *shard_path, size_t cap)
+{
+    if (strcmp(shard->d_name, ".") == 0 || strcmp(shard->d_name, "..") == 0 ||
+        strcmp(shard->d_name, "tmp") == 0)
+        return VC_COUNT_OBJECTS_SKIP;
+    if (strlen(shard->d_name) != 2 ||
+        strspn(shard->d_name, "0123456789abcdef") != 2)
+        return VC_COUNT_OBJECTS_INVALID;
+    struct stat shard_st;
+    if (fstatat(dirfd(root), shard->d_name, &shard_st,
+                AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(shard_st.st_mode))
+        return VC_COUNT_OBJECTS_INVALID;
+    int n = snprintf(shard_path, cap, "%s/%s", objects, shard->d_name);
+    if (n < 0 || (size_t)n >= cap)
+        return VC_COUNT_OBJECTS_INVALID;
+    return VC_COUNT_OBJECTS_SHARD;
+}
+
 static int vc_count_objects_posix(const char *objects)
 {
     DIR *root = opendir(objects);
@@ -1121,26 +1207,14 @@ static int vc_count_objects_posix(const char *objects)
             if (errno != 0 || closedir(root) != 0) return -1;
             break;
         }
-        if (strcmp(shard->d_name, ".") == 0 ||
-            strcmp(shard->d_name, "..") == 0 ||
-            strcmp(shard->d_name, "tmp") == 0)
-            continue;
-        if (strlen(shard->d_name) != 2 ||
-            strspn(shard->d_name, "0123456789abcdef") != 2) {
-            (void)closedir(root);
-            return -1;
-        }
-        struct stat shard_st;
-        if (fstatat(dirfd(root), shard->d_name, &shard_st,
-                    AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(shard_st.st_mode)) {
-            (void)closedir(root);
-            return -1;
-        }
         char shard_path[4096];
-        int n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,
-                         shard->d_name);
-        if (n < 0 || (size_t)n >= sizeof(shard_path)) {
-            closedir(root);
+        enum vc_count_objects_entry_kind kind =
+            vc_count_objects_posix_classify(root, shard, objects, shard_path,
+                                            sizeof(shard_path));
+        if (kind == VC_COUNT_OBJECTS_SKIP)
+            continue;
+        if (kind == VC_COUNT_OBJECTS_INVALID) {
+            (void)closedir(root);
             return -1;
         }
         int shard_count = vc_count_objects_posix_shard(shard_path);
