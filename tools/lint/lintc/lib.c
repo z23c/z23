@@ -379,6 +379,34 @@ int want(const char *tag, const regex_t *re, const char *s, int w)
 
 void drop2(regex_t *a, regex_t *b) { regfree(a); regfree(b); }
 
+static int walk_src_match(const char *name, size_t nl, int hdrs)
+{
+    if (nl < 2)
+        return 0;
+    if (hdrs == 2)
+        return nl >= 4 && memcmp(name + nl - 4, ".def", 4) == 0;
+    return name[nl - 2] == '.'
+        && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h'));
+}
+
+static int walk_src_entry(const char *dir, const char *name, int hdrs,
+                          int (*scan)(const char *, void *), void *ctx)
+{
+    char path[4096];
+    struct stat st;
+    size_t nl = strlen(name);
+    int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (k < 0 || (size_t)k >= sizeof path)
+        return die("z23-lint: path too long: %s\n", dir);
+    if (lstat(path, &st) != 0)
+        return die("z23-lint: cannot stat %s\n", path);
+    if (S_ISDIR(st.st_mode))
+        return walk_src(path, hdrs, scan, ctx);
+    if (S_ISREG(st.st_mode) && walk_src_match(name, nl, hdrs))
+        return scan(path, ctx);
+    return 0;
+}
+
 int walk_src(const char *dir, int hdrs,
                     int (*scan)(const char *, void *), void *ctx)
 {
@@ -389,23 +417,8 @@ int walk_src(const char *dir, int hdrs,
     int rc = 0;
     for (int i = 0; i < n; i++) {
         const char *name = names[i]->d_name;
-        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-            char path[4096];
-            struct stat st;
-            size_t nl = strlen(name);
-            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
-            if (k < 0 || (size_t)k >= sizeof path)
-                rc = die("z23-lint: path too long: %s\n", dir);
-            else if (lstat(path, &st) != 0)
-                rc = die("z23-lint: cannot stat %s\n", path);
-            else if (S_ISDIR(st.st_mode))
-                rc = walk_src(path, hdrs, scan, ctx);
-            else if (S_ISREG(st.st_mode) && nl >= 2
-                     && ((hdrs == 2 && nl >= 4 && memcmp(name + nl - 4, ".def", 4) == 0)
-                         || (hdrs != 2 && name[nl - 2] == '.'
-                             && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h')))))
-                rc = scan(path, ctx);
-        }
+        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0)
+            rc = walk_src_entry(dir, name, hdrs, scan, ctx);
         free(names[i]);
     }
     free(names);
@@ -736,6 +749,18 @@ static int rs_continues(const char *s)
     return n && s[n - 1] == '\\';
 }
 
+static char *rs_skip_ws(char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+
+static char *rs_tok_end(char *p)
+{
+    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+    return p;
+}
+
 static int rs_emit(char *line, char dst[][RS_NAME], int max, int *n)
 {
     char *hash = strchr(line, '#');
@@ -743,10 +768,10 @@ static int rs_emit(char *line, char dst[][RS_NAME], int max, int *n)
     for (char *q = line; *q; q++) if (*q == '\\') *q = ' ';
     *n = 0;
     for (char *p = line; *p; ) {
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        p = rs_skip_ws(p);
         if (!*p) break;
         char *s = p;
-        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+        p = rs_tok_end(p);
         char save = *p;
         *p = '\0';
         if (*n >= max || strlen(s) >= RS_NAME) return rs_ovf();
@@ -756,6 +781,17 @@ static int rs_emit(char *line, char dst[][RS_NAME], int max, int *n)
         if (save) p++;
     }
     return 0;
+}
+
+static int rs_is_var_line(const char *line, const char *variable, size_t alen,
+                          const char **rest)
+{
+    if (strncmp(line, variable, alen) != 0) return 0;
+    const char *p = line + alen;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '=') return 0;
+    *rest = p + 1;
+    return 1;
 }
 
 static int rs_make_list(const char *variable, char dst[][RS_NAME], int max, int *n)
@@ -775,12 +811,10 @@ static int rs_make_list(const char *variable, char dst[][RS_NAME], int max, int 
     assembled[0] = '\0';
     while (getline(&line, &cap, f) >= 0) {
         if (!found) {
-            if (strncmp(line, variable, alen) != 0) continue;
-            const char *p = line + alen;
-            while (*p == ' ' || *p == '\t') p++;
-            if (*p != '=') continue;
+            const char *rest;
+            if (!rs_is_var_line(line, variable, alen, &rest)) continue;
             found = 1;
-            if (ovf(snprintf(assembled, sizeof assembled, "%s", p + 1), sizeof assembled)) {
+            if (ovf(snprintf(assembled, sizeof assembled, "%s", rest), sizeof assembled)) {
                 rc = 2; break;
             }
             if (!rs_continues(line)) break;
@@ -820,6 +854,16 @@ static const char *rs_env_or(const char *env, char *buf, size_t cap, const char 
     return ovf(snprintf(buf, cap, fmt, rs_root()), cap) ? NULL : buf;
 }
 
+static int rs_lib_ident(const char *p, const char **end)
+{
+    const char *e = p;
+    while ((*e >= 'A' && *e <= 'Z') || (*e >= 'a' && *e <= 'z')
+           || (*e >= '0' && *e <= '9') || *e == '_')
+        e++;
+    *end = e;
+    return 0;
+}
+
 static int rs_lib_modules(void)
 {
     char path[4096];
@@ -837,10 +881,8 @@ static int rs_lib_modules(void)
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "LIB_MODULE(\"", 12) != 0) continue;
         p += 12;
-        char *e = p;
-        while ((*e >= 'A' && *e <= 'Z') || (*e >= 'a' && *e <= 'z')
-               || (*e >= '0' && *e <= '9') || *e == '_')
-            e++;
+        const char *e;
+        rs_lib_ident(p, &e);
         if (*e != '"' || e[1] != ')' ) continue;
         size_t n = (size_t)(e - p);
         if (g_n_libs >= RS_MAX || n >= RS_NAME) { rc = rs_ovf(); break; }
@@ -862,6 +904,42 @@ static int rs_is_module_dir(const char *rel)
     return strncmp(rel, "modules/", 8) == 0 && strchr(rel + 8, '/') == NULL;
 }
 
+static int rs_mod_walk(const char *dir, int depth);
+
+static int rs_mod_collect(const char *path, int nd)
+{
+    if (nd < 2 || nd > 4)
+        return 0;
+    const char *root = rs_root();
+    size_t rl = strlen(root);
+    const char *rel = (strncmp(path, root, rl) == 0 && path[rl] == '/')
+        ? path + rl + 1 : path;
+    if (!rs_is_module_dir(rel))
+        return 0;
+    if (g_n_mods >= RS_MAX || strlen(rel) >= RS_PATH)
+        return rs_ovf();
+    memcpy(g_mods[g_n_mods], rel, strlen(rel) + 1);
+    g_n_mods++;
+    return 0;
+}
+
+static int rs_mod_entry(const char *dir, const char *name, int depth)
+{
+    char path[4096];
+    struct stat st;
+    int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (ovf(k, sizeof path)) return 2;
+    if (lstat(path, &st) != 0)
+        return (errno == ENOENT || errno == EACCES) ? 0
+            : die("z23-lint: cannot stat %s\n", path);
+    if (!S_ISDIR(st.st_mode))
+        return 0;
+    int nd = depth + 1;
+    int rc = rs_mod_collect(path, nd);
+    if (rc == 0 && nd < 4) rc = rs_mod_walk(path, nd);
+    return rc;
+}
+
 static int rs_mod_walk(const char *dir, int depth)
 {
     struct dirent **names = NULL;
@@ -872,29 +950,8 @@ static int rs_mod_walk(const char *dir, int depth)
     int rc = 0;
     for (int i = 0; i < n; i++) {
         const char *name = names[i]->d_name;
-        if (rc == 0 && strcmp(name, ".") && strcmp(name, "..")) {
-            char path[4096];
-            struct stat st;
-            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
-            if (ovf(k, sizeof path)) rc = 2;
-            else if (lstat(path, &st) != 0)
-                rc = (errno == ENOENT || errno == EACCES) ? 0
-                    : die("z23-lint: cannot stat %s\n", path);
-            else if (S_ISDIR(st.st_mode)) {
-                int nd = depth + 1;
-                if (nd >= 2 && nd <= 4) {
-                    const char *root = rs_root();
-                    size_t rl = strlen(root);
-                    const char *rel = (strncmp(path, root, rl) == 0 && path[rl] == '/')
-                        ? path + rl + 1 : path;
-                    if (rs_is_module_dir(rel)) {
-                        if (g_n_mods >= RS_MAX || strlen(rel) >= RS_PATH) rc = rs_ovf();
-                        else { memcpy(g_mods[g_n_mods], rel, strlen(rel) + 1); g_n_mods++; }
-                    }
-                }
-                if (rc == 0 && nd < 4) rc = rs_mod_walk(path, nd);
-            }
-        }
+        if (rc == 0 && strcmp(name, ".") && strcmp(name, ".."))
+            rc = rs_mod_entry(dir, name, depth);
         free(names[i]);
     }
     free(names);
@@ -924,6 +981,53 @@ static int rs_put(char out[][RS_PATH], int max, int *n, const char *base,
     return 0;
 }
 
+static int rs_init_lists(void)
+{
+    int rc = rs_make_list("PRODUCT_CONTEXTS", g_ctx, RS_MAX, &g_n_ctx);
+    if (rc == 0) rc = rs_make_list("APP_DIRS", g_shapes, RS_SHAPE, &g_n_shapes);
+    if (rc == 0) rc = rs_lib_modules();
+    if (rc == 0)
+        rc = gate_require_scanned(g_n_ctx, 1, "repo-shape",
+                                  "PRODUCT_CONTEXTS parse came back empty");
+    if (rc == 0)
+        rc = gate_require_scanned(g_n_shapes, 1, "repo-shape",
+                                  "APP_DIRS parse came back empty");
+    if (rc == 0)
+        rc = gate_require_scanned(g_n_libs, 1, "repo-shape",
+                                  "module declaration parse came back empty");
+    return rc;
+}
+
+static int rs_init_walk_mods(void)
+{
+    static const char *const auth[] = {
+        "core", "engine", "cognition", "platform", "contexts"
+    };
+    int rc = 0;
+    g_n_mods = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof auth / sizeof auth[0]; i++) {
+        char start[4096];
+        if (ovf(snprintf(start, sizeof start, "%s/%s", rs_root(), auth[i]), sizeof start))
+            return 2;
+        rc = rs_mod_walk(start, 0);
+    }
+    return rc;
+}
+
+static int rs_init_auth_names(void)
+{
+    memcpy(g_auth[0], "engine", 7);
+    memcpy(g_auth[1], "cognition", 10);
+    g_n_auth = 2;
+    for (int i = 0; i < g_n_ctx; i++) {
+        if (g_n_auth >= RS_AUTH) return rs_ovf();
+        if (ovf(snprintf(g_auth[g_n_auth], RS_PATH, "contexts/%s", g_ctx[i]), RS_PATH))
+            return 2;
+        g_n_auth++;
+    }
+    return 0;
+}
+
 int rs_init(void)
 {
     if (g_rs_ready) return 0;
@@ -940,42 +1044,16 @@ int rs_init(void)
         return 2;
     }
     fclose(fm); fclose(fd);
-    int rc = rs_make_list("PRODUCT_CONTEXTS", g_ctx, RS_MAX, &g_n_ctx);
-    if (rc == 0) rc = rs_make_list("APP_DIRS", g_shapes, RS_SHAPE, &g_n_shapes);
-    if (rc == 0) rc = rs_lib_modules();
-    if (rc == 0)
-        rc = gate_require_scanned(g_n_ctx, 1, "repo-shape",
-                                  "PRODUCT_CONTEXTS parse came back empty");
-    if (rc == 0)
-        rc = gate_require_scanned(g_n_shapes, 1, "repo-shape",
-                                  "APP_DIRS parse came back empty");
-    if (rc == 0)
-        rc = gate_require_scanned(g_n_libs, 1, "repo-shape",
-                                  "module declaration parse came back empty");
-    g_n_mods = 0;
-    static const char *const auth[] = {
-        "core", "engine", "cognition", "platform", "contexts"
-    };
-    for (size_t i = 0; rc == 0 && i < sizeof auth / sizeof auth[0]; i++) {
-        char start[4096];
-        if (ovf(snprintf(start, sizeof start, "%s/%s", rs_root(), auth[i]), sizeof start))
-            return 2;
-        rc = rs_mod_walk(start, 0);
-    }
+    int rc = rs_init_lists();
+    if (rc) return rc;
+    rc = rs_init_walk_mods();
     if (rc) return rc;
     g_n_mods = rs_uniq(g_mods, g_n_mods, RS_PATH);
     rc = gate_require_scanned(g_n_mods, g_n_libs, "repo-shape",
                               "physical module directory set is incomplete");
     if (rc) return rc;
-    memcpy(g_auth[0], "engine", 7);
-    memcpy(g_auth[1], "cognition", 10);
-    g_n_auth = 2;
-    for (int i = 0; i < g_n_ctx; i++) {
-        if (g_n_auth >= RS_AUTH) return rs_ovf();
-        if (ovf(snprintf(g_auth[g_n_auth], RS_PATH, "contexts/%s", g_ctx[i]), RS_PATH))
-            return 2;
-        g_n_auth++;
-    }
+    rc = rs_init_auth_names();
+    if (rc) return rc;
     g_rs_ready = 1;
     return 0;
 }
