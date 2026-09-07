@@ -2278,6 +2278,14 @@ Z23_FLAG("ZCL_TOR_STUB_REFUSAL", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tor_stamp_lib.sh:46")
 Z23_FLAG("ZCL_TRACE_VERBOSE", "env_runtime", "-", "-",
           "undocumented; first use platform/modules/util/src/trace.c:64")
+Z23_FLAG("ZCL_TRAIN_HELPER_DIR", "env_test", "-", "-",
+          "undocumented; first use tools/command/native_dev_train_keep.c: the directory holding land_pre.sh and land_unit.sh; the acceptance test points it at a fixture so no run can reach the real helpers")
+Z23_FLAG("ZCL_TRAIN_KEEP_NOW", "env_test", "-", "-",
+          "undocumented; first use tools/command/native_dev_train_keep.c: injects the timestamp dev.train.keep stamps into KEEP.json and keep.log, so the acceptance test asserts the state file instead of tolerating a real clock")
+Z23_FLAG("ZCL_TRAIN_SCRATCH_ROOT", "env_test", "-", "-",
+          "undocumented; first use tools/command/native_dev_train_keep.c: the directory holding train<N>/ queue, state and log files; the acceptance test points it at a fixture")
+Z23_FLAG("ZCL_TRAIN_WORKTREE_ROOT", "env_test", "-", "-",
+          "undocumented; first use tools/command/native_dev_train_keep.c: the directory dev.train.keep opens train worktrees in; the acceptance test points it at a fixture so no run can touch a real train")
 Z23_FLAG("ZCL_TRANSACTION_LAB_CATALOG", "env_build", "-", "-",
           "undocumented; first use tools/dev/transaction-lab.sh:7")
 Z23_FLAG("ZCL_TRANSACTION_LAB_LEDGER", "env_build", "-", "-",

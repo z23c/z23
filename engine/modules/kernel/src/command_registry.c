@@ -862,12 +862,7 @@ const struct zcl_command_spec *zcl_command_registry_resolve_words(
     return best;
 }
 #endif
-
-/* Boolean input keys that carry no per-leaf rule of their own. They live in
- * one predicate rather than in a longer || chain inside the validator: that
- * chain is already the widest branch in this file, and every key appended to
- * it in place made it wider. `release` moved here unchanged; `once` and
- * `dry_run` are dev.train.keep's, whose CLI passes them as plain bools. */
+/* Bool input keys with no per-leaf rule, out of the validator's own chain. */
 static bool cr_input_extra_bool_key(const char *key)
 {
     return strcmp(key, "release") == 0 || strcmp(key, "once") == 0 ||

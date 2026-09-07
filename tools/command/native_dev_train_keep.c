@@ -126,18 +126,20 @@ static bool dtk_is_hex40(const char *s)
 /* Only [A-Za-z0-9_.-], 1..47 bytes, no leading '-': a queue row's name is
  * concatenated into `refs/review/<name>` and printed into a board line, so
  * it must never be able to name a ref outside that namespace. */
+static bool dtk_name_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+}
+
 static bool dtk_valid_name(const char *s)
 {
     size_t len = s ? strlen(s) : 0;
     if (len == 0 || len > 47 || s[0] == '-' || strstr(s, "..") != NULL)
         return false;
-    for (size_t i = 0; i < len; i++) {
-        char c = s[i];
-        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
-        if (!ok)
+    for (size_t i = 0; i < len; i++)
+        if (!dtk_name_char(s[i]))
             return false;
-    }
     return true;
 }
 
@@ -232,19 +234,32 @@ static void dtk_unlock(int fd)
 
 /* ── paths ─────────────────────────────────────────────────────────────── */
 
-/* $var when set, else $HOME + `suffix`. The three env names exist so the
- * acceptance test can point a whole keeper at a scratch tree; a real run
- * never sets them. */
-static bool dtk_root(const char *var, const char *suffix, char *out,
+/* `env` when non-empty, else $HOME + `suffix`. The caller passes the getenv()
+ * itself so the three overrides are readable as literals at their one call
+ * site: they exist only so the acceptance test can point a whole keeper at a
+ * scratch tree, and a real run never sets them. */
+static bool dtk_root(const char *env, const char *suffix, char *out,
                      size_t cap)
 {
-    const char *env = getenv(var);
     if (env && env[0])
         return snprintf(out, cap, "%s", env) < (int)cap;
     const char *home = getenv("HOME");
     if (!home || !home[0])
         return false;
     return snprintf(out, cap, "%s%s", home, suffix) < (int)cap;
+}
+
+/* The seven files the keeper reads and writes inside <scratch>/train<N>. */
+static bool dtk_paths_files(struct dtk_paths *p)
+{
+    return dtk_join(p->dir, "late_picks.txt", p->queue, sizeof(p->queue)) &&
+           dtk_join(p->dir, "picks.txt", p->picks, sizeof(p->picks)) &&
+           dtk_join(p->dir, "READY", p->ready, sizeof(p->ready)) &&
+           dtk_join(p->dir, "BASE", p->base, sizeof(p->base)) &&
+           dtk_join(p->dir, "KEEP.json", p->state, sizeof(p->state)) &&
+           dtk_join(p->dir, "keep.log", p->log, sizeof(p->log)) &&
+           dtk_join(p->dir, "keep.lock", p->lock, sizeof(p->lock)) &&
+           dtk_join(p->dir, "board_post.txt", p->board, sizeof(p->board));
 }
 
 static bool dtk_paths_init(int train, struct dtk_paths *p)
@@ -255,11 +270,12 @@ static bool dtk_paths_init(int train, struct dtk_paths *p)
     if (snprintf(p->name, sizeof(p->name), "train%d", train) >=
         (int)sizeof(p->name))
         return false;
-    if (!dtk_root("ZCL_TRAIN_SCRATCH_ROOT", "/.local/state/zclassic23/scratch",
-                  p->scratch, sizeof(p->scratch)) ||
-        !dtk_root("ZCL_TRAIN_WORKTREE_ROOT", "/.z23/trains", trains,
+    if (!dtk_root(getenv("ZCL_TRAIN_SCRATCH_ROOT"),
+                  "/.local/state/zclassic23/scratch", p->scratch,
+                  sizeof(p->scratch)) ||
+        !dtk_root(getenv("ZCL_TRAIN_WORKTREE_ROOT"), "/.z23/trains", trains,
                   sizeof(trains)) ||
-        !dtk_root("ZCL_TRAIN_HELPER_DIR",
+        !dtk_root(getenv("ZCL_TRAIN_HELPER_DIR"),
                   "/.local/state/zclassic23/scratch/northstar", helpers,
                   sizeof(helpers)) ||
         !zcl_dev_train_land_dir(land, sizeof(land)))
@@ -270,14 +286,7 @@ static bool dtk_paths_init(int train, struct dtk_paths *p)
            dtk_join(helpers, "land_unit.sh", p->land_unit,
                     sizeof(p->land_unit)) &&
            dtk_join(land, "outcomes.jsonl", p->outcomes, sizeof(p->outcomes)) &&
-           dtk_join(p->dir, "late_picks.txt", p->queue, sizeof(p->queue)) &&
-           dtk_join(p->dir, "picks.txt", p->picks, sizeof(p->picks)) &&
-           dtk_join(p->dir, "READY", p->ready, sizeof(p->ready)) &&
-           dtk_join(p->dir, "BASE", p->base, sizeof(p->base)) &&
-           dtk_join(p->dir, "KEEP.json", p->state, sizeof(p->state)) &&
-           dtk_join(p->dir, "keep.log", p->log, sizeof(p->log)) &&
-           dtk_join(p->dir, "keep.lock", p->lock, sizeof(p->lock)) &&
-           dtk_join(p->dir, "board_post.txt", p->board, sizeof(p->board));
+           dtk_paths_files(p);
 }
 
 /* ── persisted state ───────────────────────────────────────────────────── */
@@ -559,14 +568,14 @@ static bool dtk_regen(const struct dtk_paths *p, char *why, size_t cap)
         NULL};
     static const char *const routing[] = {
         "make", "-s", "--no-print-directory", "docs-executor-routing", NULL};
-    static const char *const counts[] = {"tools/lint/check_doc_counts.sh",
-                                         "--fix", NULL};
+    static const char *const counts[] = {"make", "-s", "--no-print-directory",
+                                         "fix-doc-counts", NULL};
     static const char *const api[] = {"make", "-s", "--no-print-directory",
                                       "docs-api-reference", NULL};
     const char *const *steps[] = {inventory, routing, counts, api};
     static const char *const labels[] = {"regen docs-capability-inventory",
                                          "regen docs-executor-routing",
-                                         "regen check_doc_counts --fix",
+                                         "regen fix-doc-counts",
                                          "regen docs-api-reference"};
     for (size_t i = 0; i < 4; i++) {
         if (!dtk_make(p, steps[i], labels[i])) {
@@ -793,6 +802,33 @@ static bool dtk_assemble(const struct dtk_paths *p, const char *root,
     return dtk_rev_parse(p->wt, "HEAD", tip);
 }
 
+/* Re-fetch, then insist origin/main is still exactly the base this queue was
+ * assembled against. A keeper that assembled onto a moved main would produce
+ * a train whose every commit is a surprise to the tree it lands on; the fix
+ * is a human rebase, so this only ever refuses. */
+static bool dtk_agree_on_base(const struct dtk_paths *p, const char *root,
+                              char base[41], char origin[41],
+                              struct zcl_command_reply *reply)
+{
+    static const char *const fetch[] = {"fetch", "-q", "origin", NULL};
+    char why[256];
+    (void)zcl_dev_train_git(root, fetch, NULL, 0, DTK_FETCH_TIMEOUT_MS);
+    if (!dtk_queue_base(p, root, base) ||
+        !dtk_rev_parse(root, "origin/main", origin)) {
+        dtk_refuse(reply, "NO_BASE", "base",
+                   "cannot resolve the queue base or origin/main");
+        return false;
+    }
+    if (strcmp(base, origin) != 0) {
+        (void)snprintf(why, sizeof(why),
+                      "origin/main moved to %s; the queue base is %s", origin,
+                      base);
+        dtk_refuse(reply, "BASE_MOVED", "base", why);
+        return false;
+    }
+    return true;
+}
+
 static void dtk_pass_cycle(const struct dtk_paths *p, const char *root,
                            struct dtk_state *st,
                            struct zcl_command_reply *reply, bool dry_run)
@@ -813,21 +849,8 @@ static void dtk_pass_cycle(const struct dtk_paths *p, const char *root,
                    "no LAND verdicts in the queue");
         return;
     }
-    static const char *const fetch[] = {"fetch", "-q", "origin", NULL};
-    (void)zcl_dev_train_git(root, fetch, NULL, 0, DTK_FETCH_TIMEOUT_MS);
-    if (!dtk_queue_base(p, root, base) ||
-        !dtk_rev_parse(root, "origin/main", origin)) {
-        dtk_refuse(reply, "NO_BASE", "base",
-                   "cannot resolve the queue base or origin/main");
+    if (!dtk_agree_on_base(p, root, base, origin, reply))
         return;
-    }
-    if (strcmp(base, origin) != 0) {
-        (void)snprintf(why, sizeof(why),
-                      "origin/main moved to %s; the queue base is %s", origin,
-                      base);
-        dtk_refuse(reply, "BASE_MOVED", "base", why);
-        return;
-    }
     if (dry_run) {
         dtk_pass_dry(p, picks, n, base, origin, reply);
         return;
@@ -886,6 +909,68 @@ static bool dtk_resume_is_safe(const char *state)
            strcmp(state, "ready") == 0;
 }
 
+/* Resolve the train, its paths and its directory, publishing the typed
+ * refusal for whichever of the three is wrong. Returns -1 when the caller
+ * must stop, otherwise the held lock fd. */
+static int dtk_open(const struct json_value *input,
+                    struct zcl_command_reply *reply, struct dtk_paths *p)
+{
+    /* The train number arrives as the string the shell typed. It is parsed
+     * and range-checked HERE rather than by a new integer rule in the
+     * command registry: that validator is one 300-branch chain already, and
+     * a leaf that owns a bound should state the bound itself. */
+    const char *text = input ? json_get_str(json_get(input, "train")) : NULL;
+    char *end = NULL;
+    long train = text ? strtol(text, &end, 10) : 0;
+    if (!text || !text[0] || !end || *end || train < DTK_TRAIN_MIN ||
+        train > DTK_TRAIN_MAX) {
+        dtk_refuse(reply, "INVALID_TRAIN", "validate",
+                   "--train=<N> must be a whole number 1..9999");
+        return -1;
+    }
+    (void)json_push_kv_int(&reply->data, "train", (int64_t)train);
+    if (!dtk_paths_init((int)train, p)) {
+        dtk_refuse(reply, "NO_STATE_ROOT", "validate",
+                   "cannot resolve the keeper's state paths");
+        return -1;
+    }
+    (void)json_push_kv_str(&reply->data, "train_dir", p->dir);
+    if (!zcl_dev_train_is_dir(p->dir)) {
+        dtk_refuse(reply, "NO_TRAIN_DIR", "validate", "no such train directory");
+        return -1;
+    }
+    int lock = dtk_lock(p->lock);
+    if (lock < 0)
+        dtk_refuse(reply, "KEEPER_BUSY", "lock",
+                   "another keeper holds this train's lock");
+    return lock;
+}
+
+/* One pass, dispatched on the persisted state. Nothing here loops. */
+static void dtk_dispatch(const struct dtk_paths *p, const char *root,
+                         struct zcl_command_reply *reply, bool dry_run)
+{
+    struct dtk_state st;
+    dtk_state_load(p, &st);
+    if (strcmp(st.state, "blocked") == 0 || strcmp(st.state, "landed") == 0) {
+        dtk_publish(reply, p, &st);
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+    } else if (strcmp(st.state, "landing") == 0) {
+        dtk_pass_landing(p, root, &st, reply);
+    } else if (dtk_resume_is_safe(st.state)) {
+        dtk_pass_cycle(p, root, &st, reply, dry_run);
+    } else {
+        char why[256];
+        (void)snprintf(why, sizeof(why),
+                      "a previous keeper died in state %s; inspect %s",
+                      st.state, p->wt);
+        dtk_set(&st, "blocked", why);
+        (void)dtk_state_save(p, &st);
+        dtk_refuse(reply, "KEEPER_CRASHED", "resume", why);
+        dtk_publish(reply, p, &st);
+    }
+}
+
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 void zcl_native_handle_dev_train_keep(const struct zcl_command_request *request,
@@ -902,64 +987,14 @@ void zcl_native_handle_dev_train_keep(const struct zcl_command_request *request,
                            "make dev-bin, or z23-dev dev train keep");
 #else
     const struct json_value *input = request ? request->input : NULL;
-    /* The train number arrives as the string the shell typed. It is parsed
-     * and range-checked HERE rather than by a new integer rule in the
-     * command registry: that validator is one 300-branch chain already, and
-     * a leaf that owns a bound should state the bound itself. */
-    const char *train_text = input ? json_get_str(json_get(input, "train")) : NULL;
-    char *train_end = NULL;
-    long train = train_text ? strtol(train_text, &train_end, 10) : 0;
-    bool train_ok = train_text && train_text[0] && train_end && !*train_end &&
-                    train >= DTK_TRAIN_MIN && train <= DTK_TRAIN_MAX;
     const struct json_value *dry = input ? json_get(input, "dry_run") : NULL;
-    bool dry_run = dry && dry->type == JSON_BOOL && json_get_bool(dry);
     struct dtk_paths p;
-    struct dtk_state st;
-    int lock;
-
     (void)json_push_kv_str(&reply->data, "leaf", DTK_LEAF);
-    if (!train_ok) {
-        dtk_refuse(reply, "INVALID_TRAIN", "validate",
-                   "--train=<N> must be a whole number 1..9999");
+    int lock = dtk_open(input, reply, &p);
+    if (lock < 0)
         return;
-    }
-    (void)json_push_kv_int(&reply->data, "train", (int64_t)train);
-    if (!dtk_paths_init((int)train, &p)) {
-        dtk_refuse(reply, "NO_STATE_ROOT", "validate",
-                   "cannot resolve the keeper's state paths");
-        return;
-    }
-    (void)json_push_kv_str(&reply->data, "train_dir", p.dir);
-    if (!zcl_dev_train_is_dir(p.dir)) {
-        dtk_refuse(reply, "NO_TRAIN_DIR", "validate",
-                   "no such train directory");
-        return;
-    }
-    lock = dtk_lock(p.lock);
-    if (lock < 0) {
-        dtk_refuse(reply, "KEEPER_BUSY", "lock",
-                   "another keeper holds this train's lock");
-        return;
-    }
-    dtk_state_load(&p, &st);
-    const char *root = zcl_dev_train_source_root(request);
-    if (strcmp(st.state, "blocked") == 0 || strcmp(st.state, "landed") == 0) {
-        dtk_publish(reply, &p, &st);
-        reply->status = ZCL_COMMAND_STATUS_PASSED;
-    } else if (strcmp(st.state, "landing") == 0) {
-        dtk_pass_landing(&p, root, &st, reply);
-    } else if (dtk_resume_is_safe(st.state)) {
-        dtk_pass_cycle(&p, root, &st, reply, dry_run);
-    } else {
-        char why[256];
-        (void)snprintf(why, sizeof(why),
-                      "a previous keeper died in state %s; inspect %s", st.state,
-                      p.wt);
-        dtk_set(&st, "blocked", why);
-        (void)dtk_state_save(&p, &st);
-        dtk_refuse(reply, "KEEPER_CRASHED", "resume", why);
-        dtk_publish(reply, &p, &st);
-    }
+    dtk_dispatch(&p, zcl_dev_train_source_root(request), reply,
+                 dry && dry->type == JSON_BOOL && json_get_bool(dry));
     dtk_unlock(lock);
 #endif
 }

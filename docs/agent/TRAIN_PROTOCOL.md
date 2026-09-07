@@ -219,3 +219,99 @@ missing ticket service must never read as a ticket that admits everything.
 The shell loop that drives these transitions today is interim. The C23 leaf `zcode land` (node2's lane) replaces it. `zcode land` posts the claim and result rows itself and drives the same state machine. Until it lands, the loop remains the operator, and every rule in this document binds it unchanged.
 
 Related tooling in the tree: `tools/scripts/worktree_init.sh`, `tools/scripts/worktree_gc.sh`.
+
+## Unattended trains
+
+Everything above assumed a session was alive to drive it. `dev train keep`
+(`tools/command/native_dev_train_keep.c`) is the same protocol with nobody
+watching: one bounded pass over one train, run from a timer.
+
+```
+z23-dev dev train keep --train=<N> --once
+```
+
+There is no loop, no sleep and no wait inside the leaf. It reads
+`<scratch>/train<N>/KEEP.json`, does the single step that state allows,
+persists the new state and returns — which is what makes it safe to kill at
+any moment, and why the timer rather than the leaf is the retry policy.
+
+```text
+idle ──▶ picking ──▶ gating ──▶ ready ──▶ landing ──▶ landed
+      \          \           \         \
+       `──────────`───────────`─────────`──────────▶ blocked
+```
+
+| State | What the next pass does |
+| --- | --- |
+| `idle` | Take the LAND verdicts, assemble, gate, regen, write `READY`, run `land_pre.sh`, launch `land_unit.sh` on `PRECHECK: OK`. |
+| `picking` | Nothing. A crash left a half-assembled worktree, which is a judgement call; it resolves to `blocked`. |
+| `gating` | Run the gates again. The worktree is fully assembled and the gates are pure re-runs. |
+| `ready` | Run the precheck and hand off. |
+| `landing` | Read dev.land's outcome ledger for this tip and advance. |
+| `landed` | Nothing. |
+| `blocked` | Print why and stop. |
+
+### The queue
+
+`<scratch>/train<N>/late_picks.txt`, one row per lane:
+
+```
+<name> <sha|PENDING> <verdict-file>
+```
+
+The verdict file is the authority. Its first line must read `LAND <full-sha>`.
+A row still reading `PENDING` is taken at the verdict's sha — the verdict IS
+the confirmation the column is waiting for — but a row naming a *different*
+sha than its verdict is a queue disagreeing with itself and is skipped, never
+guessed at. `<scratch>/train<N>/BASE` pins the origin/main the queue was built
+against; the keeper re-fetches and refuses if origin/main has moved past it.
+
+Every refusal is one typed literal: `keep: refused: <reason>`, with a code
+(`NO_PICKS`, `BASE_MOVED`, `KEEPER_BUSY`, `ASSEMBLY_BLOCKED`, `GATE_BLOCKED`,
+`PRECHECK_REFUSED`, `KEEPER_CRASHED`). Every step's transcript goes to
+`<scratch>/train<N>/keep.log`.
+
+`--dry-run` prints the plan — the picks it would take, the base, the target
+worktree, the helpers it would call — and touches nothing else.
+
+### Clearing a block
+
+`blocked` never retries itself. A keeper that re-ran the same failing assembly
+every five minutes until morning would burn a box down while telling nobody.
+To clear one:
+
+1. Read `<scratch>/train<N>/keep.log` and `KEEP.json`'s `reason`.
+2. Fix the cause — resolve the conflict in a lane and re-publish its
+   `refs/review/<name>`, drop the offending row from `late_picks.txt`, or
+   rebase and update `BASE`.
+3. Remove the train worktree the failed pass left: `git worktree remove
+   --force ~/.z23/trains/train<N>`.
+4. Delete `<scratch>/train<N>/KEEP.json`. The next tick starts from `idle`.
+
+### The timer
+
+```
+make install-train-keeper
+# set Z23_TRAIN=<N> in ~/.z23/train-keeper.env, then:
+systemctl --user enable --now z23-train-keeper.timer
+```
+
+`make install-train-keeper` installs the units and stops. Turning a box into
+one that assembles and lands trains while nobody is watching is an operator
+decision, so the target prints the enable command rather than running it.
+`systemctl --user disable --now z23-train-keeper.timer` stops it again.
+
+The service runs its command through a login shell on purpose: the user
+manager's own environment is stripped, and the keeper's children run `make
+dev-bin` and `make lint` in a real checkout. `SuccessExitStatus=3` covers the
+leaf's BLOCKED exit, because "nothing to do yet" is a correct answer rather
+than a unit failure.
+
+### What is still manual
+
+The keeper runs `check-cyclomatic-complexity` as the plain check, never with
+`--write-baseline`. Re-pinning a baseline is exactly what an unattended
+process must not do at 03:00 with nobody reading, so a train that needs a
+re-pinned baseline is one a human re-pins. The board row for a landed train is
+written to `<scratch>/train<N>/board_post.txt` for the posting helper rather
+than posted by the leaf.
