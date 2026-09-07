@@ -53,13 +53,19 @@
  *   triple needs its multi-arm aggregate row, strcmp byte order standing
  *   in for LC_ALL=C sort -u); then the untested-invariant constant-stub
  *   checks in file order. Every verdict is the shell's exact text on
- *   stderr and exit 1.
+ *   stderr; CONTRADICTION exits 1 and UNPROVEN exits 2 (see below).
  * - The PASS line's count is the extracted multi_arm_symbol row count
  *   (the shell's wc -l over the sed output — one line per row).
  *
- * Exit codes: every gate verdict is exit 1 (UNPROVEN/CONTRADICTION); the
- * original script has no exit-2 verdict path. die() exit 2 is reserved
- * for environment failures, matching the model ports.
+ * Exit codes: PASS is exit 0 and CONTRADICTION (a real disagreement) is
+ * exit 1, exactly as the original script. Every UNPROVEN verdict is exit
+ * 2 — a verifier-directed divergence (2026-09-07, Linux side) from the
+ * original, whose unproven() exits 1 just like its contradictions. The
+ * fleet convention the sibling ports (controller-private-headers,
+ * supervisor-domain) already follow is that a red gate is 1 and an
+ * unproven scan is 2, and the driver treats them differently. die()
+ * exit 2 remains the environment-failure class, matching the model
+ * ports.
  *
  * THE FRESHNESS DELEGATION — the one structural divergence. When
  * ZCL_ARTIFACT_SKIP_FRESHNESS is not 1, the original spawned two sibling
@@ -148,7 +154,7 @@ static int gac_discover(void)
         return 0;
     fprintf(stderr, "[%s] UNPROVEN — capability artifact discovery found "
             "%d candidates\n", k_gac_gate, count);
-    return 1;
+    return 2;
 }
 
 /* ── resolution (CAP and ARM) ──────────────────────────────────────────── */
@@ -184,7 +190,7 @@ static int gac_resolve(void)
     if (!g_gac_arm[0]) {
         fprintf(stderr, "[%s] UNPROVEN — %s declares no consumable arm "
                 "artifact path\n", k_gac_gate, g_gac_cap);
-        return 1;
+        return 2;
     }
     return 0;
 }
@@ -197,7 +203,7 @@ static int gac_require_line(const char *file, const char *line)
     if (!gac_is_file(file)) {
         fprintf(stderr, "[%s] UNPROVEN — generated artifact absent: %s\n",
                 k_gac_gate, file);
-        return 1;
+        return 2;
     }
     int found = 0;
     int rc = gacs_file_has_line(file, line, &found);
@@ -206,7 +212,7 @@ static int gac_require_line(const char *file, const char *line)
     if (!found) {
         fprintf(stderr, "[%s] UNPROVEN — %s lacks self-describing header: "
                 "%s\n", k_gac_gate, file, line);
-        return 1;
+        return 2;
     }
     return 0;
 }
@@ -244,7 +250,7 @@ static int gac_claims(const char *cap)
     if (rc == 0 && miss) {
         fprintf(stderr, "[%s] UNPROVEN — %s lacks declared "
                 "generated-artifact edge: %s\n", k_gac_gate, cap, miss);
-        rc = 1;
+        rc = 2;
     }
     return rc;
 }
@@ -297,7 +303,7 @@ static int gac_multi_row(const char *cap, const char *arm,
     if (!f[1][0] || !f[2][0]) {
         fprintf(stderr, "[%s] UNPROVEN — %s emitted a multi-arm claim "
                 "without an exact path/symbol\n", k_gac_gate, cap);
-        return 1;
+        return 2;
     }
     char key[8192];
     if (ovf(snprintf(key, sizeof key, "%s\t%s", f[1], f[2]), sizeof key))
@@ -312,7 +318,7 @@ static int gac_multi_row(const char *cap, const char *arm,
         fprintf(stderr, "[%s] UNPROVEN — %s:%s has %d inventory arm(s), "
                 "but the consumed artifact asserts multiple definitions\n",
                 k_gac_gate, f[1], f[2], actual);
-        return 1;
+        return 2;
     }
     char *end = NULL;
     errno = 0;
@@ -401,12 +407,12 @@ static int gac_check(const char *cap, const char *arm)
     if (!gac_is_file(arm)) {
         fprintf(stderr, "[%s] UNPROVEN — generated arm artifact absent: "
                 "%s\n", k_gac_gate, arm);
-        return 1;
+        return 2;
     }
     if (!gac_is_file(cap)) {
         fprintf(stderr, "[%s] UNPROVEN — generated capability artifact "
                 "absent: %s\n", k_gac_gate, cap);
-        return 1;
+        return 2;
     }
     int rc = gac_headers(arm);
     if (rc == 0)
@@ -416,7 +422,7 @@ static int gac_check(const char *cap, const char *arm)
     if (rc == 0 && gacs_baseline_n() == 0) {
         fprintf(stderr, "[%s] UNPROVEN — %s asserts no rows; absence is "
                 "not agreement\n", k_gac_gate, arm);
-        rc = 1;
+        rc = 2;
     }
     if (rc == 0)
         rc = gacs_parse_cap(cap);

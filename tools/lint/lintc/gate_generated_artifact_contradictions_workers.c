@@ -11,8 +11,9 @@
 /* ── --selftest ────────────────────────────────────────────────────────────
  * Byte-parity port of the original script's --selftest block: a mktemp
  * fixture tree with a compatible arm/capability pair, proving the
- * compatible pair passes, that an absent arm artifact is named UNPROVEN,
- * and that an aggregate-constant conflict is named CONTRADICTION.
+ * compatible pair passes (exit 0), that an absent arm artifact is named
+ * UNPROVEN and exits 2 (the unproven-scan convention), and that an
+ * aggregate-constant conflict is named CONTRADICTION and exits 1 (red).
  *
  * Semantic mapping:
  * - mktemp -d "${TMPDIR:-/tmp}/zcl-artifact-contradiction.XXXXXX" is
@@ -172,8 +173,8 @@ static int gacw_pass(void)
     return rc;
 }
 
-/* With the arm baseline renamed away, the gate fails and names it
- * UNPROVEN. */
+/* With the arm baseline renamed away, the gate names it UNPROVEN and
+ * exits 2 — the unproven-scan convention. */
 static int gacw_absent(void)
 {
     char arm[4096], aside[4096], cap[4096];
@@ -187,9 +188,9 @@ static int gacw_absent(void)
     int code = 0;
     if (rc == 0)
         rc = gacw_run(arm, cap, &code);
-    if (rc == 0 && code == 0) {
+    if (rc == 0 && code != 2) {
         fputs("[check-generated-artifact-contradictions] SELFTEST FAIL — "
-              "absent artifact passed\n", stderr);
+              "absent artifact did not exit 2\n", stderr);
         rc = 1;
     }
     if (rc == 0 && !strstr(g_gacw_sink, "UNPROVEN")) {
@@ -248,7 +249,7 @@ static int gacw_conflict_write(const char *src, const char *dst)
     return rc;
 }
 
-/* The conflicted inventory fails and names it CONTRADICTION. */
+/* The conflicted inventory names it CONTRADICTION and exits 1 (red). */
 static int gacw_conflict(void)
 {
     char arm[4096], cap[4096], conflict[4096];
@@ -262,9 +263,9 @@ static int gacw_conflict(void)
     int code = 0;
     if (rc == 0)
         rc = gacw_run(arm, conflict, &code);
-    if (rc == 0 && code == 0) {
+    if (rc == 0 && code != 1) {
         fputs("[check-generated-artifact-contradictions] SELFTEST FAIL — "
-              "contradiction passed\n", stderr);
+              "contradiction did not exit 1\n", stderr);
         rc = 1;
     }
     if (rc == 0 && !strstr(g_gacw_sink, "CONTRADICTION")) {
