@@ -218,6 +218,7 @@ static const struct lint_gate k_gates[] = {
       check_blocker_escape_registered_selftest },
     { "check-git-hooks-installed", check_git_hooks_installed_run,
       check_git_hooks_installed_selftest },
+    { "check-fleet-facts", check_fleet_facts_run, check_fleet_facts_selftest },
 };
 
 int main(int argc, char **argv)

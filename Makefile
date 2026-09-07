@@ -5379,6 +5379,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_rule_vocabulary.c \
     tools/lint/lintc/gate_blocker_escape.c \
     tools/lint/lintc/gate_git_hooks_installed.c \
+    tools/lint/lintc/gate_fleet_facts.c \
+    tools/lint/lintc/gate_fleet_facts_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11721,7 +11723,7 @@ check-fleet-airship-rules:
 	@./tools/lint/check_fleet_airship_rules.sh --selftest
 	@./tools/lint/check_fleet_airship_rules.sh
 
-check-fleet-facts:
+check-fleet-facts: $(LINTC_TOOL)
 	@echo "══ LINT: every fleet fact resolves and the routing doc renders it ══"
 	@./tools/lint/check_fleet_facts.sh --selftest
 	@./tools/lint/check_fleet_facts.sh
