@@ -145,6 +145,10 @@ static const struct lint_gate k_gates[] = {
       check_operator_needed_sink_selftest },
     { "check-shape-includes-header", check_shape_includes_header_run,
       check_shape_includes_header_selftest },
+    { "check-no-utxo-projection", check_no_utxo_projection_run,
+      check_no_utxo_projection_selftest },
+    { "check-no-block-index-flat", check_no_block_index_flat_run,
+      check_no_block_index_flat_selftest },
 };
 
 int main(int argc, char **argv)

@@ -332,5 +332,9 @@ int check_operator_needed_sink_run(int argc, char **argv);
 int check_operator_needed_sink_selftest(void);
 int check_shape_includes_header_run(int argc, char **argv);
 int check_shape_includes_header_selftest(void);
+int check_no_utxo_projection_run(int argc, char **argv);
+int check_no_utxo_projection_selftest(void);
+int check_no_block_index_flat_run(int argc, char **argv);
+int check_no_block_index_flat_selftest(void);
 
 #endif

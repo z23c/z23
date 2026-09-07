@@ -5337,6 +5337,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_call_presence_fences.c \
     tools/lint/lintc/gate_authority_fences.c \
     tools/lint/lintc/gate_wiring_presence_fences.c \
+    tools/lint/lintc/gate_demoted_store_ratchets.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12984,11 +12985,11 @@ check-dumper-never-blocks:
 # Program H enforcement gates (OBSERVE-style ratchets, baselined at today's
 # consumer set). Each lands BEFORE its deletion wave, proving non-growth, and
 # shrinks toward a zero-debt invariant as Program H demotes the copy.
-check-no-block-index-flat:
+check-no-block-index-flat: $(LINTC_TOOL)
 	@echo "══ LINT: no new flat/LevelDB/SQLite header-cache consumer (Program H) ══"
 	@./tools/scripts/check_no_block_index_flat.sh
 
-check-no-utxo-projection:
+check-no-utxo-projection: $(LINTC_TOOL)
 	@echo "══ LINT: no new event-sourced UTXO-projection consumer (Program H) ══"
 	@./tools/scripts/check_no_utxo_projection.sh
 
