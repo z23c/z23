@@ -207,6 +207,8 @@ static const struct lint_gate k_gates[] = {
       check_tor_full_default_selftest },
     { "check-installed-acceptance-tools", check_installed_acceptance_tools_run,
       check_installed_acceptance_tools_selftest },
+    { "check-hotswap-denied-leaves", check_hotswap_denied_leaves_run,
+      check_hotswap_denied_leaves_selftest },
 };
 
 int main(int argc, char **argv)

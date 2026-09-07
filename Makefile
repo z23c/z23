@@ -5373,6 +5373,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_no_new_repair_rung.c \
     tools/lint/lintc/gate_tor_full_default.c \
     tools/lint/lintc/gate_installed_acceptance_tools.c \
+    tools/lint/lintc/gate_hotswap_denied_leaves.c \
+    tools/lint/lintc/gate_hotswap_denied_leaves_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11115,7 +11117,7 @@ check-hotswap-eligible-scope: $(LINTC_TOOL)
 # per-leaf reason are DATA in engine/composition/hotswap_denied_leaves.def, never in the
 # script. Fails closed: a missing or empty denylist is exit 2, not a pass.
 # --selftest runs first and proves the gate fires on a seeded fixture.
-check-hotswap-denied-leaves:
+check-hotswap-denied-leaves: $(LINTC_TOOL)
 	@tools/lint/check_hotswap_denied_leaves.sh --selftest
 	@tools/lint/check_hotswap_denied_leaves.sh
 

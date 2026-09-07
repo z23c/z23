@@ -1038,13 +1038,13 @@ Z23_FLAG("ZCL_HOTSWAP_COMMAND_DEF_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_HOTSWAP_DENIED_LEAVES", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:54")
 Z23_FLAG("ZCL_HOTSWAP_DENY_CATALOG", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_denied_leaves.sh:83")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_denied_leaves.c:46")
 Z23_FLAG("ZCL_HOTSWAP_DENYLIST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_denied_leaves.sh:81")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_denied_leaves.c:42")
 Z23_FLAG("ZCL_HOTSWAP_DENY_SCAN_DIR", "env_build", "engine/composition", "-",
-          "undocumented; first use tools/lint/check_hotswap_denied_leaves.sh:82")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_denied_leaves.c:44")
 Z23_FLAG("ZCL_HOTSWAP_DENY_TU_ROOT", "env_build", ".", "-",
-          "undocumented; first use tools/lint/check_hotswap_denied_leaves.sh:84")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_denied_leaves.c:48")
 Z23_FLAG("ZCL_HOTSWAP_IMPORTS_CAPFILE_OVERRIDE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_hotswap_module_imports.sh:223")
 Z23_FLAG("ZCL_HOTSWAP_IMPORTS_CLASSFILE_OVERRIDE", "env_build", "-", "-",
