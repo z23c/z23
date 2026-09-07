@@ -182,13 +182,4 @@ bool zwork_proof_receipt_roots(const char *workspace,
                                struct json_value *roots_json,
                                bool *available);
 
-/* Acceptance (native_zcode_work_accept.c): the inner lane, evidence and
- * promotion calls plus the accepted-candidate publication binding, reused by
- * the acceptance handler alone. */
-bool zwork_bind_accepted_publication(
-    const char *workspace, const struct vcs_zcode_task_index_entry *entry,
-    const struct zcl_command_reply *accepted_reply,
-    char candidate_workspace[ZWORK_PATH_MAX],
-    struct vcs_devloop_accepted_candidate_result *publication);
-
 #endif /* ZCL_NATIVE_ZCODE_WORK_PRIV_H */
