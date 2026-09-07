@@ -22,6 +22,19 @@ enum { SR_ALLOW = 256, SR_NAME = 96, SR_STRAY = 128 };
 
 struct sr_set { char n[SR_ALLOW][SR_NAME]; int count; };
 
+/* Generic "<path>:<symbol>" shrink-only ratchet baseline, shared by gates
+ * that were re-rooted onto real scan roots and now see debt the dead roots
+ * hid: a row may only be REMOVED (the site fixed or the file deleted), never
+ * added — a NEW row FAILs, and a STALE row (baselined but no longer found)
+ * also FAILs, forcing the list down as sites are cleaned up. */
+enum { BLN_MAX = 512, BLN_ROW = RS_PATH + 64 };
+struct bln_set { char n[BLN_MAX][BLN_ROW]; int count; };
+int bln_has(const struct bln_set *s, const char *name);
+int bln_add(struct bln_set *s, const char *name);
+int bln_load(struct bln_set *s, const char *path);
+int bln_diff_report(FILE *out, const char *gate, const char *baseline_path,
+                    const struct bln_set *base, const struct bln_set *found);
+
 extern const char k_ls_all[];
 extern const char k_planted[];
 extern const char *const k_domain[2];
@@ -49,6 +62,25 @@ int want(const char *tag, const regex_t *re, const char *s, int w);
 int st_ok(int bad, const char *msg);
 int walk_src(const char *dir, int hdrs,
              int (*scan)(const char *, void *), void *ctx);
+int require_scan_root(const char *gate, const char *root);
+int walk_src_root(const char *gate, const char *root, int hdrs,
+                  int (*scan)(const char *, void *), void *ctx);
+
+/* Shared comment/string-literal stripper for gates that regexec() raw
+ * source lines (see cstrip_line in lib.c). in_block persists across the
+ * getline() calls for one file (a block comment can span lines); reset
+ * to {0} per file. */
+struct cstrip { int in_block; };
+int cstrip_line(struct cstrip *st, const char *line, size_t n, char *out,
+               size_t cap);
+/* Shared stack-buffer size for the two callers above: large enough for any
+ * real source line, small enough to keep off the heap (raw malloc/calloc
+ * outside zcl_* wrappers is itself gated in tools/). */
+enum { CSTRIP_LINE_MAX = 8192 };
+
+int fcount_scan(const char *path, void *ctx);
+int walk_count_roots(const char *gate, const char *const *roots, size_t nroots,
+                     int hdrs, int *out);
 int compile_pat(regex_t *re, int flags, const char *a, const char *b,
                 const char *c, const char *d);
 int pair_comp(regex_t *a, int fa, const char *a0, const char *a1,

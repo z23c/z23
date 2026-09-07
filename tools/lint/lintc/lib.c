@@ -153,6 +153,141 @@ int walk_src(const char *dir, int hdrs,
     return rc;
 }
 
+/* A gate that names its scan roots as a literal C array must not go quiet
+ * when the tree is renamed out from under it: walk_src() (below) returns 0
+ * on ENOENT so a recursive sub-directory that vanished mid-walk is not an
+ * error, but the TOP-level root a gate hard-codes is a different thing — its
+ * absence means the gate is scanning nothing and reporting false-clean.
+ * require_scan_root() makes that FATAL; walk_src_root() is the checked
+ * entry point gates should call instead of walk_src() for such a literal
+ * root. Callers that already probe optional/derived paths (stat() the dir
+ * themselves before walking, or accept a runtime-supplied path) keep calling
+ * walk_src() directly — see each such call site's own comment. */
+int require_scan_root(const char *gate, const char *root)
+{
+    struct stat st;
+    if (stat(root, &st) == 0)
+        return 0;
+    if (errno == ENOENT) {
+        fprintf(stderr, "FATAL — scan root '%s' does not exist (gate %s)\n",
+                root, gate);
+        return 2;
+    }
+    return die("z23-lint: cannot stat %s\n", root);
+}
+
+int walk_src_root(const char *gate, const char *root, int hdrs,
+                         int (*scan)(const char *, void *), void *ctx)
+{
+    int rc = require_scan_root(gate, root);
+    return rc ? rc : walk_src(root, hdrs, scan, ctx);
+}
+
+int fcount_scan(const char *path, void *ctx)
+{
+    (void)path;
+    (*(int *)ctx)++;
+    return 0;
+}
+
+/* Count files walk_src_root() would visit across `roots` (matching `hdrs`)
+ * without running any pattern match — an independent number a gate can
+ * check with gate_require_scanned() so a root that EXISTS but yields far
+ * fewer files than expected (an extension-filter bug, not a missing
+ * directory — require_scan_root() already FATALs on that) still trips. */
+int walk_count_roots(const char *gate, const char *const *roots, size_t nroots,
+                     int hdrs, int *out)
+{
+    *out = 0;
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < nroots; i++)
+        rc = walk_src_root(gate, roots[i], hdrs, fcount_scan, out);
+    return rc;
+}
+
+static size_t cstrip_literal(const char *line, size_t n, char *out, size_t i,
+                             char q)
+{
+    out[i] = line[i];
+    i++;
+    while (i < n && line[i] != q) {
+        if (line[i] == '\\' && i + 1 < n) {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            i += 2;
+            continue;
+        }
+        out[i] = ' ';
+        i++;
+    }
+    if (i < n) {
+        out[i] = line[i];
+        i++;
+    }
+    return i;
+}
+
+/* Blank //-line-comments, block comments (state persists across calls via
+ * *st, for one that spans lines), and "..."/'...' literal bodies out of
+ * `line` (n bytes, no trailing NUL needed in the count) into `out`, so a
+ * regex hit-test against `out` skips commented-out code, doc prose, and a
+ * pattern that only appears inside a string/char literal. `out` must hold
+ * at least `cap` bytes; returns 0 (leaves `out` untouched) if n >= cap, so
+ * the caller can fall back to matching the raw line for the rare
+ * pathologically long one instead of truncating it silently. Reset *st to
+ * {0} at the start of each file — block-comment state does not carry
+ * across files. */
+/* Advance past one character of an already-open block comment, blanking
+ * it, and clear *in_block on its closing "*" "/" pair. Returns the new i. */
+static size_t cstrip_in_block(const char *line, size_t n, char *out, size_t i,
+                              int *in_block)
+{
+    if (line[i] == '*' && i + 1 < n && line[i + 1] == '/') {
+        out[i] = ' ';
+        out[i + 1] = ' ';
+        *in_block = 0;
+        return i + 2;
+    }
+    out[i] = ' ';
+    return i + 1;
+}
+
+int cstrip_line(struct cstrip *st, const char *line, size_t n, char *out,
+                size_t cap)
+{
+    if (n >= cap)
+        return 0;
+    size_t i = 0;
+    while (i < n) {
+        if (st->in_block) {
+            i = cstrip_in_block(line, n, out, i, &st->in_block);
+            continue;
+        }
+        if (line[i] == '/' && i + 1 < n && line[i + 1] == '/') {
+            while (i < n) {
+                out[i] = ' ';
+                i++;
+            }
+            break;
+        }
+        if (line[i] == '/' && i + 1 < n && line[i + 1] == '*') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            i += 2;
+            st->in_block = 1;
+            continue;
+        }
+        if (line[i] == '"' || line[i] == '\'') {
+            i = cstrip_literal(line, n, out, i, line[i]);
+            continue;
+        }
+        out[i] = line[i];
+        i++;
+    }
+    out[n] = '\0';
+    return 1;
+}
+
 int compile_pat(regex_t *re, int flags, const char *a, const char *b,
                        const char *c, const char *d)
 {
@@ -664,6 +799,91 @@ int sr_load(struct sr_set *s, const char *path)
         if (n) rc = sr_add(s, p);
     }
     return fin(f, line, path, rc);
+}
+
+int bln_has(const struct bln_set *s, const char *name)
+{
+    for (int i = 0; i < s->count; i++)
+        if (!strcmp(s->n[i], name))
+            return 1;
+    return 0;
+}
+
+int bln_add(struct bln_set *s, const char *name)
+{
+    size_t n = strlen(name);
+    if (bln_has(s, name))
+        return 0;
+    if (s->count >= BLN_MAX || n >= BLN_ROW)
+        return die("z23-lint: baseline-set overflow\n", "");
+    memcpy(s->n[s->count++], name, n + 1);
+    return 0;
+}
+
+int bln_load(struct bln_set *s, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    int rc = 0;
+    while (rc == 0 && getline(&line, &cap, f) >= 0) {
+        char *h = strchr(line, '#'), *p = line;
+        if (h) *h = '\0';
+        while (*p && isspace((unsigned char)*p)) p++;
+        size_t n = strlen(p);
+        while (n && isspace((unsigned char)p[n - 1])) p[--n] = '\0';
+        if (n) rc = bln_add(s, p);
+    }
+    return fin(f, line, path, rc);
+}
+
+static int bln_diff_into(const struct bln_set *have, const struct bln_set *want,
+                         struct bln_set *out)
+{
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < have->count; i++)
+        if (!bln_has(want, have->n[i]))
+            rc = bln_add(out, have->n[i]);
+    return rc;
+}
+
+static int bln_print_rows(FILE *out, const struct bln_set *rows, const char *hdr)
+{
+    if (!rows->count)
+        return 0;
+    if (fputs(hdr, out) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < rows->count; i++)
+        if (fprintf(out, "  %s\n", rows->n[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+int bln_diff_report(FILE *out, const char *gate, const char *baseline_path,
+                    const struct bln_set *base, const struct bln_set *found)
+{
+    struct bln_set newc = {0}, stale = {0};
+    int rc = bln_diff_into(found, base, &newc);
+    if (rc == 0)
+        rc = bln_diff_into(base, found, &stale);
+    if (rc)
+        return rc;
+    if (newc.count == 0 && stale.count == 0)
+        return 0;
+    char nh[128], sh[192];
+    if (ovf(snprintf(nh, sizeof nh, "%s: FATAL — %d NEW site(s) not in %s:\n",
+                     gate, newc.count, baseline_path), sizeof nh)
+        || ovf(snprintf(sh, sizeof sh,
+                        "%s: FATAL — %d STALE baseline row(s) no longer found "
+                        "(delete from %s — this baseline is shrink-only):\n",
+                        gate, stale.count, baseline_path), sizeof sh))
+        return die("z23-lint: message buffer overflow\n", "");
+    rc = bln_print_rows(out, &newc, nh);
+    if (rc == 0)
+        rc = bln_print_rows(out, &stale, sh);
+    return rc ? rc : 2;
 }
 
 int capture_cmd(const char *cmd, char *out, size_t cap, int *code)
