@@ -621,9 +621,9 @@ Z23_FLAG("ZCL_DEV_PROBE_INTERVAL_MS", "env_build", "250", "-",
 Z23_FLAG("ZCL_DEV_PROBE_TIMEOUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:801")
 Z23_FLAG("ZCL_DEV_PROOF_TEST_LINK_ERRNO", "env_runtime", "-", "-",
-          "undocumented; first use tools/dev/dev_proof.c:1699")
+          "undocumented; first use tools/dev/dev_proof.c:1765")
 Z23_FLAG("ZCL_DEV_PROOF_WARM", "env_test", "-", "-",
-          "first use tests/harness/src/test_impact_composition.c:3719; documented at docs/experiments/2026-09-03-proof-warm-start.md:32: ZCL_DEV_PROOF_WARM=0 forces the cold path for measurement. It is")
+          "first use tests/harness/src/test_impact_composition.c:3978; documented at docs/experiments/2026-09-03-proof-warm-start.md:32: ZCL_DEV_PROOF_WARM=0 forces the cold path for measurement. It is")
 Z23_FLAG("ZCL_DEV_RECOVERY_ACTIVE_COMMAND", "env_build", "-", "-",
           "undocumented; first use tools/dev/recover-dev-lane.sh:312")
 Z23_FLAG("ZCL_DEV_RECOVERY_BLOCK_INDEX", "env_build", "-", "-",
@@ -1641,7 +1641,7 @@ Z23_FLAG("ZCL_PROMPT_TEMPLATE_ROW_FLOOR", "env_build", "8", "-",
 Z23_FLAG("ZCL_PROMPT_TEMPLATES_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_def_parsers.c:626")
 Z23_FLAG("ZCL_PROOF_RAM_RESERVE_BYTES", "env_runtime", "-", "-",
-          "undocumented; first use tools/dev/dev_proof.c:2087")
+          "undocumented; first use tools/dev/dev_proof.c:2153")
 Z23_FLAG("ZCL_PROOF_TIMEOUT_MS", "env_runtime", "-", "-",
           "first use tools/dev/dev_proof_budget.c:73; documented at docs/work/AGENT_SYNC_PLAN.md:80: 1. Land the eight leaves (this lane) and ZCL_PROOF_TIMEOUT_MS. Bar: every devagent_* gr...")
 Z23_FLAG("ZCL_PRUNE_KEEP_BLOCKS", "env_runtime", "-", "-",

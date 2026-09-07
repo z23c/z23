@@ -20,5 +20,9 @@ void zcl_native_dev_proof_dispatch(
  * the receipt with no error. */
 void zcl_dev_proof_wait_conclude(struct zcl_command_reply *reply,
                                  const struct zcl_dev_proof_status *status);
+/* Emit resolved status and its exact checkout-bound next action. Pure
+ * presentation shared by the native status command and fixture tests. */
+void zcl_dev_proof_status_conclude(struct zcl_command_reply *reply,
+                                   const struct zcl_dev_proof_status *status);
 
 #endif

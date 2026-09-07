@@ -46,6 +46,32 @@ const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
  * also compile proof_ensure()'s real body and pull in the resident
  * dev-loop watcher from native_dev_command.c, an unrelated dependency this
  * mapping logic does not need. */
+static void proof_emit_next(struct zcl_command_reply *reply,
+                            const struct zcl_dev_proof_status *status)
+{
+    if (status->state == ZCL_DEV_PROOF_STATE_PASSED ||
+        status->state == ZCL_DEV_PROOF_STATE_INVALID ||
+        !status->root[0] || !status->local_commit[0] || !status->remote_base[0])
+        return;
+    struct json_value object = {0};
+    json_set_object(&object);
+    bool ready = json_push_kv_str(&object, "root", status->root) &&
+        json_push_kv_str(&object, "local_commit", status->local_commit) &&
+        json_push_kv_str(&object, "remote_base", status->remote_base);
+    char input[sizeof(reply->next[0].input_json)];
+    size_t n = ready ? json_write(&object, input, sizeof(input)) : 0;
+    json_free(&object);
+    /* An unrepresentable route is omitted, never shortened or redirected
+     * to whichever checkout happens to execute the next command. */
+    if (n == 0 || n >= sizeof(input)) return;
+    bool failed = status->state == ZCL_DEV_PROOF_STATE_FAILED;
+    (void)zcl_command_reply_add_next(
+        reply, failed ? "dev.proof.retry" : "dev.proof.wait", input,
+        failed
+            ? "after repairing the reported prerequisite, explicitly request a new full proof"
+            : "wait for the exact commit/base receipt without running push-time work");
+}
+
 static void proof_emit_status(struct zcl_command_reply *reply,
                               const struct zcl_dev_proof_status *status,
                               bool add_wait_next)
@@ -54,6 +80,8 @@ static void proof_emit_status(struct zcl_command_reply *reply,
                            "zcl.dev_proof_status.v1");
     (void)json_push_kv_str(&reply->data, "status",
                            zcl_dev_proof_state_name(status->state));
+    if (status->root[0])
+        (void)json_push_kv_str(&reply->data, "root", status->root);
     if (status->local_commit[0])
         (void)json_push_kv_str(&reply->data, "local_commit",
                                status->local_commit);
@@ -76,17 +104,13 @@ static void proof_emit_status(struct zcl_command_reply *reply,
         (void)json_push_kv_int(&reply->data, "eta_ms", status->eta_ms);
     (void)json_push_kv_bool(&reply->data, "receipt_reused",
                             status->receipt_reused);
-    char input[192];
-    int n = snprintf(input, sizeof(input),
-                     "{\"local_commit\":\"%s\",\"remote_base\":\"%s\"}",
-                     status->local_commit, status->remote_base);
-    if (add_wait_next && n > 0 && (size_t)n < sizeof(input) &&
-        status->state != ZCL_DEV_PROOF_STATE_PASSED &&
-        status->state != ZCL_DEV_PROOF_STATE_INVALID &&
-        status->local_commit[0] && status->remote_base[0])
-        (void)zcl_command_reply_add_next(
-            reply, "dev.proof.wait", input,
-            "wait for the exact commit/base receipt without running push-time work");
+    if (add_wait_next) proof_emit_next(reply, status);
+}
+
+void zcl_dev_proof_status_conclude(struct zcl_command_reply *reply,
+                                   const struct zcl_dev_proof_status *status)
+{
+    proof_emit_status(reply, status, true);
 }
 
 /* Genuinely still in flight (RUNNING) or not yet requested (MISSING): the
@@ -104,7 +128,7 @@ static void proof_wait_pending(struct zcl_command_reply *reply,
 }
 
 /* The pair's `.failed` marker already settled this exact commit/base
- * identity: proving will not run again for it. This is a terminal outcome,
+ * identity: proving will not run again for it automatically. This is a terminal outcome,
  * not "still proving" — it must never share BLOCKED/exit 3 with the
  * still-in-flight case above, or a caller that treats exit 3 as "keep
  * polling" will spin forever on a proof that already finished failing. */
@@ -197,7 +221,7 @@ static void proof_status(
             status.detail);
         return;
     }
-    proof_emit_status(reply, &status, true);
+    zcl_dev_proof_status_conclude(reply, &status);
 #endif
 }
 
@@ -270,6 +294,56 @@ static void proof_ensure(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
             "PROOF_ENSURE_FAILED", "schedule", false, false,
             "could not schedule exact background verification", status.detail);
+        return;
+    }
+    proof_emit_status(reply, &status, true);
+#endif
+}
+
+static void proof_retry(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+#ifndef ZCL_DEV_BUILD
+    (void)request;
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        "DEV_BUILD_REQUIRED", "dispatch", false, false,
+        "proof retry requires the dev binary", "make dev-bin");
+#else
+    struct zcl_dev_proof_status status = {0};
+    const char *root = proof_source_root(request);
+    if (!zcl_dev_proof_status_read(
+            root, proof_optional_text(request->input, "local_commit"),
+            proof_optional_text(request->input, "remote_base"), &status) ||
+        status.state != ZCL_DEV_PROOF_STATE_FAILED) {
+        proof_emit_status(reply, &status, false);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "PROOF_RETRY_REFUSED", "preflight", false, false,
+            "proof retry requires a settled failed attempt",
+            status.detail[0] ? status.detail : "proof_retry_requires_settled_failure");
+        return;
+    }
+    if (!zcl_native_dev_loop_proof_queue_ready(root)) {
+        proof_emit_status(reply, &status, false);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "PROOF_QUEUE_OWNER_STALE", "schedule", true, false,
+            "proof retry requires a ready resident proof queue",
+            "run dev.proof.ensure to arm the development watcher, then retry explicitly");
+        return;
+    }
+    /* Capture the resolved pair before the library overwrites status. */
+    char local[65], base[65];
+    (void)snprintf(local, sizeof(local), "%s", status.local_commit);
+    (void)snprintf(base, sizeof(base), "%s", status.remote_base);
+    if (!zcl_dev_proof_retry(root, local, base, &status)) {
+        proof_emit_status(reply, &status, false);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "PROOF_RETRY_REFUSED", "schedule", false, false,
+            "could not queue another proof of the settled failed pair",
+            status.detail);
         return;
     }
     proof_emit_status(reply, &status, true);
@@ -400,6 +474,8 @@ void zcl_native_dev_proof_dispatch(
         proof_status(request, reply);
     else if (path && strcmp(path, "dev.proof.wait") == 0)
         proof_wait(request, reply);
+    else if (path && strcmp(path, "dev.proof.retry") == 0)
+        proof_retry(request, reply);
     else if (path && strcmp(path, "dev.proof.signer") == 0)
         proof_signer(request, reply);
     else

@@ -64,6 +64,7 @@ enum zcl_dev_proof_state {
 
 struct zcl_dev_proof_status {
     enum zcl_dev_proof_state state;
+    char root[4096];
     char local_commit[65];
     char remote_base[65];
     char receipt_path[4096];
@@ -207,6 +208,13 @@ bool zcl_dev_proof_ensure(const char *repo_root,
                           const char *local_commit,
                           const char *remote_base,
                           struct zcl_dev_proof_status *out);
+/* Explicitly queue another full proof after a settled failure. Requires no
+ * pending request/live worker, preserves the prior attempt's failure and
+ * logs, and refuses passed pairs. Scheduling grants no receipt authority. */
+bool zcl_dev_proof_retry(const char *repo_root,
+                         const char *local_commit,
+                         const char *remote_base,
+                         struct zcl_dev_proof_status *out);
 /* The singleton development watcher owns this queue. Notifications only
  * publish immutable pair requests; the resident owner claims and executes at
  * most one leased attempt at a time. */

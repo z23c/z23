@@ -1535,6 +1535,261 @@ static int test_ic_proof_wait_reports_settled_failure(void)
     return failures;
 }
 
+static int test_ic_proof_retry_command_contract(void)
+{
+    int failures = 0;
+    TEST("proof retry: native command has local scheduling authority only") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "dev.proof.retry", NULL);
+        ASSERT(spec != NULL);
+        ASSERT(spec->effect == ZCL_COMMAND_EFFECT_MUTATE);
+        ASSERT(spec->scope == ZCL_COMMAND_SCOPE_LOCAL);
+        ASSERT(spec->authority == ZCL_COMMAND_AUTH_OWNER);
+        ASSERT(spec->required_capabilities == ZCL_COMMAND_CAP_DEV_STATE_WRITE);
+        ASSERT(strcmp(spec->input_keys, "root,local_commit,remote_base") == 0);
+#ifndef ZCL_DEV_BUILD
+        struct zcl_command_request request = { .spec = spec };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_native_dev_proof_dispatch(&request, &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(strcmp(reply.error.code, "DEV_BUILD_REQUIRED") == 0);
+        zcl_command_reply_free(&reply);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#if !defined(_WIN32)
+static int test_ic_proof_next_preserves_root(void)
+{
+    int failures = 0;
+    TEST("proof next action: escaped checkout root survives status, retry and wait") {
+        static const char local[] = "1111111111111111111111111111111111111111";
+        static const char base[] = "2222222222222222222222222222222222222222";
+        char fixture[4096], root[4096], relative[256], canonical[4096];
+        test_make_tmpdir(fixture, sizeof(fixture), "impact_composition", "next-root");
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/checkout \"B\"\\leaf", fixture) < sizeof(root));
+        ASSERT((size_t)snprintf(relative, sizeof(relative),
+            ".cache/zcl-dev-proof/%s-%s.failed", local, base) < sizeof(relative));
+        ASSERT(ic_write(root, relative, "prerequisite_missing\n"));
+        ASSERT(realpath(root, canonical) != NULL);
+        struct zcl_dev_proof_status status = {0};
+        /* Query B while the test process still runs in the main checkout.
+         * The status must retain B's canonical root, not the caller's cwd. */
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(strcmp(status.root, canonical) == 0);
+        for (size_t i = 0; i < 2; i++) {
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+            zcl_dev_proof_status_conclude(&reply, &status);
+            ASSERT(reply.next_count == 1);
+            ASSERT(strcmp(reply.next[0].command,
+                           i == 0 ? "dev.proof.retry" : "dev.proof.wait") == 0);
+            struct json_value input = {0};
+            ASSERT(json_read(&input, reply.next[0].input_json,
+                             strlen(reply.next[0].input_json)));
+            const struct json_value *next_root = json_get(&input, "root");
+            ASSERT(next_root != NULL && next_root->type == JSON_STR);
+            ASSERT(strcmp(json_get_str(next_root), canonical) == 0);
+            ASSERT(strcmp(json_get_str(json_get(&input, "local_commit")), local) == 0);
+            ASSERT(strcmp(json_get_str(json_get(&input, "remote_base")), base) == 0);
+            json_free(&input);
+            zcl_command_reply_free(&reply);
+            status.state = ZCL_DEV_PROOF_STATE_RUNNING;
+        }
+        /* The bounded next-action field cannot hold every legal root.
+         * Omit an oversized action instead of truncating or dropping root. */
+        memset(status.root, 'x', sizeof(status.root) - 1);
+        status.root[sizeof(status.root) - 1] = 0;
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_status_conclude(&reply, &status);
+        ASSERT(reply.next_count == 0);
+        zcl_command_reply_free(&reply);
+        ASSERT(test_rm_rf_recursive(fixture) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ic_bytes_equal(const char *path, const void *expected, size_t size)
+{
+    if (size > ZCL_DEV_PROOF_WIRE_BYTES) return false;
+    uint8_t body[ZCL_DEV_PROOF_WIRE_BYTES];
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    size_t got = fread(body, 1, sizeof(body), file);
+    bool ok = !ferror(file) && got == size && memcmp(body, expected, size) == 0;
+    return fclose(file) == 0 && ok;
+}
+
+static int test_ic_proof_retry(void)
+{
+    int failures = 0;
+    TEST("proof retry: explicit settled retry preserves evidence and serializes requests") {
+        static const char local[] = "1111111111111111111111111111111111111111";
+        static const char base[] = "2222222222222222222222222222222222222222";
+        static const char reason[] = "proof_generation_dependency_unavailable:vendor/lib\n";
+        char root[4096], state[4096], key[160], failed[4096];
+        char attempt[4096], logs[4096], archived[4096], request[4096];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "retry");
+        ASSERT(ic_write(root, ".cache/fixture", "isolated retry\n"));
+        ASSERT((size_t)snprintf(state, sizeof(state), "%s/.cache/zcl-dev-proof",
+                                root) < sizeof(state));
+        ASSERT((size_t)snprintf(key, sizeof(key), "%s-%s", local, base) < sizeof(key));
+        ASSERT((size_t)snprintf(failed, sizeof(failed), "%s/%s.failed", state, key) < sizeof(failed));
+        char relative[256];
+        ASSERT((size_t)snprintf(relative, sizeof(relative), "%s.failed", key) < sizeof(relative));
+        ASSERT(ic_write(state, relative, reason));
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(strcmp(status.detail, "proof_retry_failure_attempt_missing") == 0);
+        ASSERT((size_t)snprintf(attempt, sizeof(attempt), "%s/attempts/%s.prior", state, key) < sizeof(attempt));
+        ASSERT(ic_write(attempt, "logs/test.log", "original failed observation\n"));
+        ASSERT((size_t)snprintf(logs, sizeof(logs), "%s/logs/test.log", attempt) < sizeof(logs));
+        ASSERT((size_t)snprintf(archived, sizeof(archived), "%s/logs/failure.txt", attempt) < sizeof(archived));
+        ASSERT((size_t)snprintf(request, sizeof(request), "%s/requests/%s.request", state, key) < sizeof(request));
+        struct utimbuf prior_time = { .actime = 1700000000, .modtime = 1700000000 };
+        ASSERT(utime(attempt, &prior_time) == 0);
+        ASSERT(zcl_dev_proof_ensure(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(access(request, F_OK) != 0);
+
+        /* A live lease or legacy running marker wins over the failure. */
+        char marker[4096], marker_body[256];
+        ASSERT((size_t)snprintf(relative, sizeof(relative), "leases/%s.lease", key) < sizeof(relative));
+        ASSERT((size_t)snprintf(marker, sizeof(marker), "%s/%s", state, relative) < sizeof(marker));
+        ASSERT((size_t)snprintf(marker_body, sizeof(marker_body), "prior %ld 1700000000\n", (long)getpid()) < sizeof(marker_body));
+        ASSERT(ic_write(state, relative, marker_body));
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT(unlink(marker) == 0);
+        ASSERT((size_t)snprintf(relative, sizeof(relative), "%s.running", key) < sizeof(relative));
+        ASSERT((size_t)snprintf(marker, sizeof(marker), "%s/%s", state, relative) < sizeof(marker));
+        ASSERT((size_t)snprintf(marker_body, sizeof(marker_body), "%ld 1700000000\n", (long)getpid()) < sizeof(marker_body));
+        ASSERT(ic_write(state, relative, marker_body));
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT(ic_write(state, relative, "unparseable worker marker\n"));
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(strcmp(status.detail, "proof_retry_worker_not_settled") == 0);
+        ASSERT(unlink(marker) == 0);
+
+        ASSERT((size_t)snprintf(relative, sizeof(relative), "requests/%s.request", key) < sizeof(relative));
+        ASSERT(ic_write(state, relative, "malformed pending request\n"));
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(strcmp(status.detail, "proof_retry_request_present") == 0);
+        ASSERT(unlink(request) == 0);
+        ASSERT(ic_write(attempt, "logs/failure.txt", "conflicting evidence\n"));
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(strcmp(status.detail, "proof_retry_failure_archive_conflict") == 0);
+        ASSERT(ic_bytes_equal(archived, "conflicting evidence\n", strlen("conflicting evidence\n")));
+        ASSERT(access(request, F_OK) != 0);
+        ASSERT(unlink(archived) == 0);
+
+        int start[2];
+        ASSERT(pipe(start) == 0);
+        pid_t children[2];
+        for (size_t i = 0; i < 2; i++) {
+            children[i] = fork();
+            ASSERT(children[i] >= 0);
+            if (children[i] == 0) {
+                (void)close(start[1]);
+                char token;
+                if (read(start[0], &token, 1) != 1) _exit(3);
+                (void)close(start[0]);
+                struct zcl_dev_proof_status child_status = {0};
+                bool queued = zcl_dev_proof_retry(root, local, base, &child_status);
+                _exit(queued ? 0 : child_status.state == ZCL_DEV_PROOF_STATE_RUNNING ? 1 : 2);
+            }
+        }
+        ASSERT(close(start[0]) == 0);
+        ASSERT(write(start[1], "go", 2) == 2);
+        ASSERT(close(start[1]) == 0);
+        int queued_count = 0, refused_count = 0;
+        for (size_t i = 0; i < 2; i++) {
+            int child_status = 0;
+            ASSERT(waitpid(children[i], &child_status, 0) == children[i]);
+            ASSERT(WIFEXITED(child_status));
+            queued_count += WEXITSTATUS(child_status) == 0;
+            refused_count += WEXITSTATUS(child_status) == 1;
+        }
+        ASSERT(queued_count == 1 && refused_count == 1);
+        ASSERT(ic_bytes_equal(failed, reason, sizeof(reason) - 1));
+        ASSERT(ic_bytes_equal(archived, reason, sizeof(reason) - 1));
+        ASSERT(ic_bytes_equal(logs, "original failed observation\n", strlen("original failed observation\n")));
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT(strcmp(status.detail, "resident_proof_request_queued") == 0);
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+
+        /* Crash window 1: B claimed the request and produced logs, but
+         * exited before recording any failure. The pair marker still
+         * belongs to A, even though B is the newest attempt directory. */
+        char crashed[4096], claimed[4096], crash_archive[4096];
+        ASSERT((size_t)snprintf(crashed, sizeof(crashed), "%s/attempts/%s.crashed", state, key) < sizeof(crashed));
+        ASSERT(ic_write(crashed, "logs/test.log", "interrupted attempt B\n"));
+        ASSERT((size_t)snprintf(claimed, sizeof(claimed), "%s/request", crashed) < sizeof(claimed));
+        ASSERT((size_t)snprintf(crash_archive, sizeof(crash_archive), "%s/logs/failure.txt", crashed) < sizeof(crash_archive));
+        ASSERT(rename(request, claimed) == 0);
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(strstr(status.log_dir, ".prior/logs") != NULL);
+        ASSERT(zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(access(crash_archive, F_OK) != 0);
+        ASSERT(ic_bytes_equal(archived, reason, sizeof(reason) - 1));
+
+        /* Crash window 2: B wrote its own failure archive, then exited
+         * before updating the flat marker. A still owns that marker;
+         * B's distinct evidence is retained without becoming a conflict. */
+        ASSERT(unlink(request) == 0);
+        ASSERT(ic_write(crashed, "logs/failure.txt", "interrupted B failure\n"));
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(strstr(status.log_dir, ".prior/logs") != NULL);
+        ASSERT(zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(ic_bytes_equal(crash_archive, "interrupted B failure\n", strlen("interrupted B failure\n")));
+        ASSERT(ic_bytes_equal(failed, reason, sizeof(reason) - 1));
+
+        /* The actual queue claims a new attempt and runs the normal worker.
+         * This isolated non-repository fails exact-tree validation before
+         * any build, preserving the old attempt and creating no receipt. */
+        char why[256] = {0};
+        ASSERT(zcl_dev_proof_queue_run_next(root, why, sizeof(why)) == 1);
+        ASSERT(why[0]);
+        ASSERT(!zcl_dev_proof_queue_has_pending(root));
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(strstr(status.log_dir, ".prior/logs") == NULL);
+        ASSERT((size_t)snprintf(marker, sizeof(marker), "%s/failure.txt", status.log_dir) < sizeof(marker));
+        ASSERT(ic_bytes_equal(marker, why, strlen(why)));
+        ASSERT(ic_bytes_equal(archived, reason, sizeof(reason) - 1));
+        ASSERT(zcl_dev_proof_ensure(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(!zcl_dev_proof_queue_has_pending(root));
+
+        /* An admitted receipt is immutable even when an older failure
+         * marker remains beside it. */
+        struct zcl_dev_acceptance_receipt_v1 receipt = ic_valid_dev_proof_receipt();
+        uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+        ASSERT(zcl_dev_proof_receipt_serialize(&receipt, wire));
+        FILE *file = fopen(status.receipt_path, "wb");
+        ASSERT(file != NULL);
+        ASSERT(fwrite(wire, 1, sizeof(wire), file) == sizeof(wire));
+        ASSERT(fclose(file) == 0);
+        ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_PASSED);
+        ASSERT(ic_bytes_equal(status.receipt_path, wire, sizeof(wire)));
+        ASSERT(!zcl_dev_proof_queue_has_pending(root));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 static int test_ic_resident_proof_queue(void)
 {
     int failures = 0;
@@ -1547,6 +1802,10 @@ static int test_ic_resident_proof_queue(void)
         struct zcl_dev_proof_status status = {0};
         ASSERT(!zcl_dev_proof_queue_has_pending(IC_FIX_ROOT));
         ASSERT(zcl_dev_proof_status_read(IC_FIX_ROOT, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_INVALID);
+        ASSERT(strcmp(status.detail,
+                      "windows_native_proof_worker_unavailable") == 0);
+        ASSERT(!zcl_dev_proof_retry(IC_FIX_ROOT, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_INVALID);
         ASSERT(strcmp(status.detail,
                       "windows_native_proof_worker_unavailable") == 0);
@@ -4270,6 +4529,11 @@ int test_impact_composition(void)
     failures += test_ic_dev_proof_child_action_identity();
     failures += test_ic_resident_proof_queue();
     failures += test_ic_proof_wait_reports_settled_failure();
+    failures += test_ic_proof_retry_command_contract();
+#if !defined(_WIN32)
+    failures += test_ic_proof_retry();
+    failures += test_ic_proof_next_preserves_root();
+#endif
     failures += test_ic_cycle_reuse_requires_exact_proof_inputs();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_pw_tag_names_pool_entries();

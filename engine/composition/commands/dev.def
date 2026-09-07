@@ -705,6 +705,27 @@ ZCL_COMMAND_DEV_COMMAND(
     "background proof scheduling requires the dev binary",
     "z23-dev dev proof status")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.proof.retry", "dev.proof", "",
+    "Retry a settled failed proof after repairing its prerequisites",
+    "Preserves the failed attempt's evidence and queues a new complete proof "
+    "for the exact commit/base pair. Requires a ready resident proof queue; "
+    "refuses passed pairs, pending requests and live workers. Retry changes "
+    "scheduling only and grants no receipt or publication authority.", 0,
+    "dev,proof,retry,receipt,background",
+    "zcl.dev_proof_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base", "",
+    "z23-dev dev proof retry",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_verify_change,
+    "proof retry requires the dev binary",
+    "z23-dev dev proof status")
+
 ZCL_COMMAND_DEV_READ(
     "dev.proof.status", "dev.proof", "",
     "Read exact commit/base proof status",

@@ -458,6 +458,14 @@ static bool proof_queue_has_pending_platform(const char *repo_root)
     return false;
 }
 
+static bool proof_retry_platform(const char *repo_root,
+                                 const char *local_commit,
+                                 const char *remote_base,
+                                 struct zcl_dev_proof_status *out)
+{
+    return proof_ensure_platform(repo_root, local_commit, remote_base, out);
+}
+
 static int proof_queue_run_next_platform(const char *repo_root,
                                          char *why, size_t why_len)
 {
@@ -945,14 +953,50 @@ static bool proof_request_matches_pair(const char *path, const char *local,
  * needs the newest attempt directory for this exact pair. mkdtemp's
  * suffix is random, not time-ordered, so "newest" means highest mtime,
  * not lexicographic order. */
-/* Highest-mtime attempt directory carrying this pair's prefix. The caller
- * owns the directory handle; this only walks it. */
+static bool proof_failure_bytes(const char *path, uint8_t bytes[256],
+                                 size_t *size)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0 || st.st_size <= 0 || st.st_size > 256 ||
+        !read_exact_file(path, bytes, (size_t)st.st_size))
+        return false;
+    *size = (size_t)st.st_size;
+    return true;
+}
+
+/* Any existing archive, including unreadable/unsafe evidence, disallows a
+ * legacy mtime guess. A crash may leave newer attempt logs or an archive
+ * without ever updating the pair marker. Only matching bytes bind them. */
+static bool dp_attempt_failure_matches(const char *attempt,
+                                        const uint8_t *failure, size_t size,
+                                        bool *archives_seen)
+{
+    char logs[PATH_MAX], archive[PATH_MAX];
+    struct stat st;
+    if (snprintf(logs, sizeof(logs), "%s/logs", attempt) >= (int)sizeof(logs) ||
+        lstat(logs, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        snprintf(archive, sizeof(archive), "%s/failure.txt", logs) >=
+            (int)sizeof(archive)) {
+        *archives_seen = true;
+        return false;
+    }
+    if (lstat(archive, &st) != 0 && errno == ENOENT) return false;
+    *archives_seen = true;
+    uint8_t bytes[256];
+    return read_exact_file(archive, bytes, size) &&
+           memcmp(bytes, failure, size) == 0;
+}
+
+/* Highest-mtime matching attempt. With no failure filter, this is the
+ * legacy selection used only when no archived failure records exist. */
 static bool dp_attempt_dir_pick(DIR *dir, const char *attempts,
                                 const char *prefix, size_t prefix_len,
+                                const uint8_t *failure, size_t failure_size,
+                                bool *archives_seen,
                                 char newest[PATH_MAX])
 {
     bool found = false;
-    time_t newest_mtime = 0;
+    struct timespec newest_mtime = {0};
     for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
         if (strncmp(entry->d_name, prefix, prefix_len) != 0)
             continue;
@@ -961,30 +1005,51 @@ static bool dp_attempt_dir_pick(DIR *dir, const char *attempts,
                     entry->d_name) >= (int)sizeof(candidate))
             continue;
         struct stat st;
-        if (stat(candidate, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        if (!found || st.st_mtime > newest_mtime) {
+        if (lstat(candidate, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (failure && !dp_attempt_failure_matches(candidate, failure,
+                                                    failure_size, archives_seen))
+            continue;
+        if (!found || st.st_mtim.tv_sec > newest_mtime.tv_sec ||
+            (st.st_mtim.tv_sec == newest_mtime.tv_sec &&
+             st.st_mtim.tv_nsec > newest_mtime.tv_nsec)) {
             found = true;
-            newest_mtime = st.st_mtime;
+            newest_mtime = st.st_mtim;
             (void)snprintf(newest, PATH_MAX, "%s", candidate);
         }
     }
     return found;
 }
 
-static bool proof_attempt_dir_newest(const struct proof_paths *paths,
-                                     char *out, size_t out_len)
+static bool proof_failure_attempt_logs(const struct proof_paths *paths,
+                                       char *out, size_t out_len,
+                                       bool *archive_conflict)
 {
+    if (archive_conflict) *archive_conflict = false;
     if (!paths || !out || out_len == 0) return false;
+    uint8_t failure[256];
+    size_t size = 0;
+    if (!proof_failure_bytes(paths->failure, failure, &size)) return false;
     char prefix[160];
     int prefix_len = snprintf(prefix, sizeof(prefix), "%s.", paths->key);
     if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix)) return false;
     DIR *dir = opendir(paths->attempts);
     if (!dir) return false;
     char newest[PATH_MAX] = {0};
+    bool archives_seen = false;
     bool found = dp_attempt_dir_pick(dir, paths->attempts, prefix,
-                                     (size_t)prefix_len, newest);
+                                     (size_t)prefix_len, failure, size,
+                                     &archives_seen, newest);
+    if (!found && !archives_seen) {
+        rewinddir(dir);
+        found = dp_attempt_dir_pick(dir, paths->attempts, prefix,
+                                    (size_t)prefix_len, NULL, 0,
+                                    &archives_seen, newest);
+    }
     (void)closedir(dir);
-    if (!found) return false;
+    if (!found) {
+        if (archive_conflict) *archive_conflict = archives_seen;
+        return false;
+    }
     char logs[PATH_MAX];
     if (snprintf(logs, sizeof(logs), "%s/logs", newest) >= (int)sizeof(logs))
         return false;
@@ -1017,6 +1082,7 @@ static bool proof_status_read_platform(const char *repo_root,
     }
     (void)snprintf(out->receipt_path, sizeof(out->receipt_path), "%s",
                    paths.receipt);
+    (void)snprintf(out->root, sizeof(out->root), "%s", paths.root);
     (void)snprintf(out->log_dir, sizeof(out->log_dir), "%s", paths.logs);
     struct zcl_dev_acceptance_receipt_v1 receipt;
     if (receipt_load(&paths, local, base, &receipt, why, sizeof(why))) {
@@ -1060,8 +1126,8 @@ static bool proof_status_read_platform(const char *repo_root,
     }
     if (proof_read_text(paths.failure, out->detail, sizeof(out->detail))) {
         out->state = ZCL_DEV_PROOF_STATE_FAILED;
-        (void)proof_attempt_dir_newest(&paths, out->log_dir,
-                                       sizeof(out->log_dir));
+        (void)proof_failure_attempt_logs(&paths, out->log_dir,
+                                         sizeof(out->log_dir), NULL);
         return true;
     }
     out->state = ZCL_DEV_PROOF_STATE_MISSING;
@@ -6151,6 +6217,11 @@ static bool proof_worker_run(const struct proof_paths *paths,
     if (!ok) {
         const char *message = why && why[0]
             ? why : "background_verification_failed";
+        char failure_log[PATH_MAX];
+        if (snprintf(failure_log, sizeof(failure_log), "%s/failure.txt",
+                     paths->logs) < (int)sizeof(failure_log))
+            (void)proof_write_if_current(paths, failure_log, message,
+                                         strlen(message), 0600);
         (void)proof_write_if_current(paths, paths->failure, message,
                                      strlen(message), 0600);
     }
@@ -6381,11 +6452,12 @@ static bool proof_ensure_platform(const char *repo_root,
         return true;
     }
     if (out->state == ZCL_DEV_PROOF_STATE_RUNNING) return true;
-    /* An exact commit/base pair is immutable: a `.failed` marker already
-     * settles this pair's outcome. Re-enqueueing here would spend a worker
-     * slot re-deriving the identical, deterministic failure and would leave
+    /* A `.failed` marker settles the latest attempt for this exact pair.
+     * Automatic re-enqueueing here would spend a worker slot repeating an
+     * unrepaired failure and would leave
      * a caller that only checks for MISSING/RUNNING believing work is
-     * still in flight. Exit with the settled status instead of lingering. */
+     * still in flight. Only explicit retry after prerequisite repair may
+     * queue another attempt; ordinary ensure preserves the settled status. */
     if (out->state == ZCL_DEV_PROOF_STATE_FAILED) return true;
     struct proof_paths paths;
     if (!proof_paths_fill(repo_root, local, base, &paths) ||
@@ -6405,6 +6477,141 @@ static bool proof_ensure_platform(const char *repo_root,
         return false;
     }
     return zcl_dev_proof_status_read(repo_root, local, base, out);
+}
+
+/* Unknown marker contents are not evidence that a worker has stopped. A
+ * valid stale marker is harmless only when the kernel confirms ESRCH. */
+static bool dp_retry_worker_settled(const char *path, bool lease)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == ENOENT;
+    if (!proof_private_regular(path)) return false;
+    int64_t pid = 0;
+    if (lease) {
+        char token[192];
+        if (!proof_lease_read(path, token, sizeof(token), &pid, NULL))
+            return false;
+    } else {
+        char body[128];
+        long long parsed_pid = 0, started = 0;
+        if (!proof_read_text(path, body, sizeof(body)) ||
+            sscanf(body, "%lld %lld", &parsed_pid, &started) != 2 ||
+            parsed_pid <= 1 || started <= 0)
+            return false;
+        pid = (int64_t)parsed_pid;
+    }
+    if ((int64_t)(pid_t)pid != pid) return false;
+    return kill((pid_t)pid, 0) != 0 && errno == ESRCH;
+}
+
+static bool dp_retry_absent(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+/* Keep exact bytes, including any trailing newline, beside the failed
+ * attempt's logs. Existing archived evidence is checked, never replaced.
+ * Older marker-only failures have no attributable attempt and refuse. */
+static bool dp_retry_archive_failure(const struct proof_paths *paths,
+                                      char *why, size_t why_len)
+{
+    char logs[PATH_MAX], archive[PATH_MAX];
+    struct stat st;
+    uint8_t failure[256], prior[256];
+    size_t size = 0;
+    if (!proof_failure_bytes(paths->failure, failure, &size)) {
+        proof_why(why, why_len, "proof_retry_failure_evidence_invalid");
+        return false;
+    }
+    bool conflict = false;
+    if (!proof_failure_attempt_logs(paths, logs, sizeof(logs), &conflict)) {
+        proof_why(why, why_len, conflict ? "proof_retry_failure_archive_conflict"
+                                         : "proof_retry_failure_attempt_missing");
+        return false;
+    }
+    if (lstat(logs, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        snprintf(archive, sizeof(archive), "%s/failure.txt", logs) >=
+            (int)sizeof(archive)) {
+        proof_why(why, why_len, "proof_retry_failure_attempt_missing");
+        return false;
+    }
+    if (!dp_retry_absent(archive)) {
+        if (read_exact_file(archive, prior, size) &&
+            memcmp(prior, failure, size) == 0)
+            return true;
+        proof_why(why, why_len, "proof_retry_failure_archive_conflict");
+        return false;
+    }
+    if (write_atomic(archive, failure, size, 0600)) return true;
+    proof_why(why, why_len, "proof_retry_failure_archive_failed");
+    return false;
+}
+
+/* Called only while holding the queue's existing claim/publication lock.
+ * The old pair marker remains until the normal worker replaces it; a
+ * queued request already takes precedence in the status projection. */
+static bool dp_retry_locked(const struct proof_paths *paths,
+                             const char *local, const char *base,
+                             struct zcl_dev_proof_status *out)
+{
+    if (!zcl_dev_proof_status_read(paths->root, local, base, out)) return false;
+    const char *refusal = NULL;
+    if (out->state != ZCL_DEV_PROOF_STATE_FAILED)
+        refusal = "proof_retry_requires_settled_failure";
+    else if (!dp_retry_absent(paths->receipt))
+        refusal = "proof_retry_receipt_present";
+    else if (!dp_retry_absent(paths->request))
+        refusal = "proof_retry_request_present";
+    else if (!dp_retry_worker_settled(paths->lease, true) ||
+             !dp_retry_worker_settled(paths->lock, false))
+        refusal = "proof_retry_worker_not_settled";
+    if (refusal) {
+        proof_why(out->detail, sizeof(out->detail), refusal);
+        return false;
+    }
+    if (!dp_retry_archive_failure(paths, out->detail, sizeof(out->detail)))
+        return false;
+    char body[320];
+    size_t body_len = 0;
+    if (!proof_request_body(local, base, body, &body_len) ||
+        !write_atomic(paths->request, body, body_len, 0600)) {
+        proof_why(out->detail, sizeof(out->detail), "resident_proof_enqueue_failed");
+        return false;
+    }
+    return zcl_dev_proof_status_read(paths->root, local, base, out);
+}
+
+static bool proof_retry_platform(const char *repo_root,
+                                 const char *local_commit,
+                                 const char *remote_base,
+                                 struct zcl_dev_proof_status *out)
+{
+    if (!out || !zcl_dev_proof_status_read(repo_root, local_commit,
+                                           remote_base, out))
+        return false;
+    if (out->state != ZCL_DEV_PROOF_STATE_FAILED) {
+        proof_why(out->detail, sizeof(out->detail),
+                   "proof_retry_requires_settled_failure");
+        return false;
+    }
+    char local[65], base[65];
+    (void)snprintf(local, sizeof(local), "%s", out->local_commit);
+    (void)snprintf(base, sizeof(base), "%s", out->remote_base);
+    struct proof_paths paths;
+    if (!proof_paths_fill(repo_root, local, base, &paths) ||
+        !proof_state_prepare(&paths)) {
+        proof_why(out->detail, sizeof(out->detail), "proof_state_unavailable");
+        return false;
+    }
+    int fd = proof_queue_lock_acquire(&paths);
+    if (fd < 0) {
+        proof_why(out->detail, sizeof(out->detail), "proof_queue_lock_failed");
+        return false;
+    }
+    bool queued = dp_retry_locked(&paths, local, base, out);
+    proof_queue_lock_release(fd);
+    return queued;
 }
 
 static bool proof_wait_platform(const char *repo_root,
@@ -6469,6 +6676,14 @@ bool zcl_dev_proof_ensure(const char *repo_root,
 bool zcl_dev_proof_queue_has_pending(const char *repo_root)
 {
     return proof_queue_has_pending_platform(repo_root);
+}
+
+bool zcl_dev_proof_retry(const char *repo_root,
+                         const char *local_commit,
+                         const char *remote_base,
+                         struct zcl_dev_proof_status *out)
+{
+    return proof_retry_platform(repo_root, local_commit, remote_base, out);
 }
 
 int zcl_dev_proof_queue_run_next(const char *repo_root,

@@ -4021,7 +4021,6 @@ tools/command/native_dev_lane.c:dln_clone_file:24
 tools/command/native_dev_lane.c:dln_materialize:19
 tools/command/native_dev_lane.c:dln_materialize_ext_archives:50
 tools/command/native_dev_lane.c:zcl_native_handle_dev_lane_new:36
-tools/command/native_dev_proof_command.c:proof_emit_status:16
 tools/command/native_dev_retrieval_command.c:rb_canonical_repo_path:16
 tools/command/native_dev_retrieval_command.c:rb_compute:28
 tools/command/native_dev_retrieval_command.c:rb_identifier_graph_rank:57

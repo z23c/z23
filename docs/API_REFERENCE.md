@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 872 |
+| Registry entries (branches + leaves) | 873 |
 | Top-level roots | 14 |
 | Branches | 196 |
-| Leaves (dispatchable command paths) | 676 |
+| Leaves (dispatchable command paths) | 677 |
 | … `ready` (live handler in this build) | 601 |
-| … `compat` (metadata only, names a fallback) | 45 |
+| … `compat` (metadata only, names a fallback) | 46 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 44 |
-| Leaves with `effect=mutate` | 244 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 45 |
+| Leaves with `effect=mutate` | 245 |
 | Leaves with `effect=destructive` | 5 |
-| Leaves requiring **owner** authority | 126 |
+| Leaves requiring **owner** authority | 127 |
 
 Per source file:
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 57 | 10 | 47 |
-| `engine/composition/commands/dev.def` | 104 | 21 | 83 |
+| `engine/composition/commands/dev.def` | 105 | 21 | 84 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -724,6 +724,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev proof ensure` | compat 🔧 → `z23-dev dev proof status` | mutate / dev-mutation / **owner** · fast/low | `root`, `local_commit`, `remote_base`, `mode` | `zcl.dev_proof_status.v1` | `z23-dev dev proof ensure` | Ensure background proof for one exact commit and remote base — *background proof scheduling requires the dev binary* |
+| `dev proof retry` | compat 🔧 → `z23-dev dev proof status` | mutate / dev-mutation / **owner** · fast/low | `root`, `local_commit`, `remote_base` | `zcl.dev_proof_status.v1` | `z23-dev dev proof retry` | Retry a settled failed proof after repairing its prerequisites — *proof retry requires the dev binary* |
 | `dev proof status` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `root`, `local_commit`, `remote_base`, `mode` | `zcl.dev_proof_status.v1` | `z23-dev dev proof status` | Read exact commit/base proof status — *proof receipt status requires the dev binary* |
 | `dev proof wait` | compat 🔧 → `z23-dev dev proof status` | mutate / dev-mutation / **owner** · persistent/low | `root`, `local_commit`, `remote_base`, `timeout_ms` | `zcl.dev_proof_status.v1` | `z23-dev dev proof wait` | Wait for one exact commit/base receipt — *proof receipt waiting requires the dev binary* |
 | `dev proof signer` | compat 🔧 → `z23-dev dev proof signer` | read / read / operator · instant/tiny | none | `zcl.dev_proof_signer.v1` | `z23-dev dev proof signer` | Show this box's receipt signing key and who it trusts — *push-proof signer identity requires the dev binary* |
@@ -1916,7 +1917,7 @@ promise the same document shape.
 | `zcl.dev_cycle.v1` | `dev.status`, `dev.change.apply`, `dev.loop.wait` |
 | `zcl.dev_hotswap.v1` | `dev.hotswap.apply`, `dev.hotswap.probe` |
 | `zcl.dev_loop_status.v1` | `dev.loop.ensure`, `dev.loop.status`, `dev.loop.stop` |
-| `zcl.dev_proof_status.v1` | `dev.proof.ensure`, `dev.proof.status`, `dev.proof.wait` |
+| `zcl.dev_proof_status.v1` | `dev.proof.ensure`, `dev.proof.retry`, `dev.proof.status`, `dev.proof.wait` |
 | `zcl.account.v1` | `app.account.show`, `app.account.whoami`, `app.account.add`, `app.account.role`, `app.account.suspend`, `app.account.unsuspend` |
 | `zcl.vault_swap_settle.v1` | `vault.swap.redeem`, `vault.swap.refund` |
 | `zcl.zcode_workspace_verify.v1` | `zcode.workspace.verify`, `zcode.workspace.show` |
