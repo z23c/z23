@@ -81,16 +81,38 @@ static bool materialize_write(const char *path, const uint8_t *bytes,
 }
 #endif
 
-int vcs_tree_materialize(const char *object_store_root,
-                         const uint8_t tree_hash[32],
-                         const char *destination, uint64_t maximum_bytes,
-                         uint32_t file_mode)
-{
-    if (!object_store_root || !tree_hash || !destination ||
-        maximum_bytes == 0 ||
-        (file_mode != 0u && file_mode != 0400u && file_mode != 0600u))
-        return VCS_ERR;
 #if defined(_WIN32)
+/* One entry of the declared tree, or VCS_REFUSED/VCS_ERR without writing
+ * anything if it fails the size/path/type check for this entry alone. */
+static int materialize_entry_windows(struct platform_directory_transaction *root,
+                                     const char *object_store_root,
+                                     const struct vcs_entry *entry,
+                                     uint64_t *total, uint64_t maximum_bytes)
+{
+    if ((entry->mode & VCS_MATERIALIZE_TYPEMASK) != VCS_MATERIALIZE_REGULAR ||
+        !vcs_package_path_valid(entry->path) ||
+        UINT64_MAX - *total < entry->size ||
+        *total + entry->size > maximum_bytes || entry->size > SIZE_MAX)
+        return VCS_REFUSED;
+    uint8_t *bytes = NULL;
+    size_t len = 0;
+    if (vcs_object_get(object_store_root, entry->blob, VCS_TAG_BLOB, &bytes,
+                       &len) != 0 || len != entry->size) {
+        free(bytes);
+        return VCS_ERR;
+    }
+    int result = materialize_write_relative(root, entry->path, bytes, len)
+                     ? VCS_OK : VCS_ERR;
+    free(bytes);
+    if (result == VCS_OK) *total += entry->size;
+    return result;
+}
+
+static int vcs_tree_materialize_windows(const char *object_store_root,
+                                        const uint8_t tree_hash[32],
+                                        const char *destination,
+                                        uint64_t maximum_bytes)
+{
     struct platform_directory_transaction root;
     platform_directory_transaction_init(&root);
     if (!platform_directory_transaction_open(&root, destination))
@@ -103,35 +125,62 @@ int vcs_tree_materialize(const char *object_store_root,
     uint64_t total = 0;
     int result = VCS_OK;
     for (size_t i = 0; i < tree.count; i++) {
-        const struct vcs_entry *entry = &tree.entries[i];
-        if ((entry->mode & VCS_MATERIALIZE_TYPEMASK) !=
-                VCS_MATERIALIZE_REGULAR ||
-            !vcs_package_path_valid(entry->path) ||
-            UINT64_MAX - total < entry->size ||
-            total + entry->size > maximum_bytes || entry->size > SIZE_MAX) {
-            result = VCS_REFUSED;
-            break;
-        }
-        uint8_t *bytes = NULL;
-        size_t len = 0;
-        if (vcs_object_get(object_store_root, entry->blob, VCS_TAG_BLOB,
-                           &bytes, &len) != 0 || len != entry->size) {
-            free(bytes);
-            result = VCS_ERR;
-            break;
-        }
-        if (!materialize_write_relative(&root, entry->path, bytes, len))
-            result = VCS_ERR;
-        free(bytes);
+        result = materialize_entry_windows(&root, object_store_root,
+                                           &tree.entries[i], &total,
+                                           maximum_bytes);
         if (result != VCS_OK) break;
-        total += entry->size;
     }
     if (result == VCS_OK && !platform_directory_transaction_flush(&root))
         result = VCS_ERR;
     platform_directory_transaction_close(&root);
     vcs_manifest_free(&tree);
     return result;
+}
 #else
+/* One entry of the declared tree, or VCS_REFUSED/VCS_ERR without writing
+ * anything if it fails the size/path/type check for this entry alone. */
+static int materialize_entry_posix(const char *object_store_root,
+                                   const char *destination,
+                                   const struct vcs_entry *entry,
+                                   uint64_t *total, uint64_t maximum_bytes,
+                                   uint32_t file_mode)
+{
+    if (!S_ISREG(entry->mode) || !vcs_package_path_valid(entry->path) ||
+        UINT64_MAX - *total < entry->size ||
+        *total + entry->size > maximum_bytes || entry->size > SIZE_MAX)
+        return VCS_REFUSED;
+    uint8_t *bytes = NULL;
+    size_t len = 0;
+    if (vcs_object_get(object_store_root, entry->blob, VCS_TAG_BLOB, &bytes,
+                       &len) != 0 || len != entry->size) {
+        free(bytes);
+        return VCS_ERR;
+    }
+    char path[VCS_MATERIALIZE_PATH_MAX];
+    char parent[VCS_MATERIALIZE_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", destination, entry->path);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        free(bytes);
+        return VCS_REFUSED;
+    }
+    (void)snprintf(parent, sizeof(parent), "%s", path);
+    char *slash = strrchr(parent, '/');
+    if (slash) *slash = '\0';
+    struct zcl_result made = zcl_mkdir_p(parent, 0700);
+    uint32_t mode = file_mode ? file_mode : entry->mode & 0777u;
+    int result = made.ok && materialize_write(path, bytes, len, mode)
+                     ? VCS_OK : VCS_ERR;
+    free(bytes);
+    if (result == VCS_OK) *total += entry->size;
+    return result;
+}
+
+static int vcs_tree_materialize_posix(const char *object_store_root,
+                                      const uint8_t tree_hash[32],
+                                      const char *destination,
+                                      uint64_t maximum_bytes,
+                                      uint32_t file_mode)
+{
     struct stat st;
     if (lstat(destination, &st) != 0 || !S_ISDIR(st.st_mode))
         return VCS_ERR;
@@ -141,42 +190,30 @@ int vcs_tree_materialize(const char *object_store_root,
     uint64_t total = 0;
     int result = VCS_OK;
     for (size_t i = 0; i < tree.count; i++) {
-        const struct vcs_entry *entry = &tree.entries[i];
-        if (!S_ISREG(entry->mode) || !vcs_package_path_valid(entry->path) ||
-            UINT64_MAX - total < entry->size ||
-            total + entry->size > maximum_bytes || entry->size > SIZE_MAX) {
-            result = VCS_REFUSED;
-            break;
-        }
-        uint8_t *bytes = NULL;
-        size_t len = 0;
-        if (vcs_object_get(object_store_root, entry->blob, VCS_TAG_BLOB,
-                           &bytes, &len) != 0 || len != entry->size) {
-            free(bytes);
-            result = VCS_ERR;
-            break;
-        }
-        char path[VCS_MATERIALIZE_PATH_MAX];
-        char parent[VCS_MATERIALIZE_PATH_MAX];
-        int n = snprintf(path, sizeof(path), "%s/%s", destination,
-                         entry->path);
-        if (n <= 0 || (size_t)n >= sizeof(path)) {
-            free(bytes);
-            result = VCS_REFUSED;
-            break;
-        }
-        (void)snprintf(parent, sizeof(parent), "%s", path);
-        char *slash = strrchr(parent, '/');
-        if (slash) *slash = '\0';
-        struct zcl_result made = zcl_mkdir_p(parent, 0700);
-        uint32_t mode = file_mode ? file_mode : entry->mode & 0777u;
-        if (!made.ok || !materialize_write(path, bytes, len, mode))
-            result = VCS_ERR;
-        free(bytes);
+        result = materialize_entry_posix(object_store_root, destination,
+                                         &tree.entries[i], &total,
+                                         maximum_bytes, file_mode);
         if (result != VCS_OK) break;
-        total += entry->size;
     }
     vcs_manifest_free(&tree);
     return result;
+}
+#endif
+
+int vcs_tree_materialize(const char *object_store_root,
+                         const uint8_t tree_hash[32],
+                         const char *destination, uint64_t maximum_bytes,
+                         uint32_t file_mode)
+{
+    if (!object_store_root || !tree_hash || !destination ||
+        maximum_bytes == 0 ||
+        (file_mode != 0u && file_mode != 0400u && file_mode != 0600u))
+        return VCS_ERR;
+#if defined(_WIN32)
+    return vcs_tree_materialize_windows(object_store_root, tree_hash,
+                                        destination, maximum_bytes);
+#else
+    return vcs_tree_materialize_posix(object_store_root, tree_hash,
+                                      destination, maximum_bytes, file_mode);
 #endif
 }
