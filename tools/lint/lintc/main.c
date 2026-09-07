@@ -257,6 +257,8 @@ static const struct lint_gate k_gates[] = {
       check_model_sql_literals_selftest },
     { "check-windows-acceptance-guard", check_windows_acceptance_guard_run,
       check_windows_acceptance_guard_selftest },
+    { "check-lint-gate-wiring", check_lint_gate_wiring_run,
+      check_lint_gate_wiring_selftest },
 };
 
 int main(int argc, char **argv)

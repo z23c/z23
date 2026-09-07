@@ -445,5 +445,7 @@ int check_model_sql_literals_run(int argc, char **argv);
 int check_model_sql_literals_selftest(void);
 int check_windows_acceptance_guard_run(int argc, char **argv);
 int check_windows_acceptance_guard_selftest(void);
+int check_lint_gate_wiring_run(int argc, char **argv);
+int check_lint_gate_wiring_selftest(void);
 
 #endif

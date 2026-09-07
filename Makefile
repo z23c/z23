@@ -5434,6 +5434,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_model_sql_literals_selftest.c \
     tools/lint/lintc/gate_windows_acceptance_guard.c \
     tools/lint/lintc/gate_windows_acceptance_guard_selftest.c \
+    tools/lint/lintc/gate_lint_gate_wiring.c \
+    tools/lint/lintc/gate_lint_gate_wiring_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -13372,7 +13374,7 @@ check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN)
 check-lint-cache:
 	@./tools/lint/lint_cache_selftest.sh
 
-check-lint-gate-wiring:
+check-lint-gate-wiring: $(LINTC_TOOL)
 	@echo "══ LINT: every listed gate is wired in run_lint.sh, and back ══"
 	@./tools/lint/check_lint_gate_wiring.sh --selftest
 	@./tools/lint/check_lint_gate_wiring.sh
