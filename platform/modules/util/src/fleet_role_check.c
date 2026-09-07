@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * The role-check seam. See base/fleet_role_check.h for the contract.
+ * The role-check seam. See util/fleet_role_check.h for the contract.
  *
  * There is exactly one static here that a decision reads, and it starts
  * empty: a fresh process refuses every foreign-signed byte until the layer
@@ -10,9 +10,9 @@
  * fact it needs the operator to read.
  */
 
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 
-#include "base/log_macros.h"
+#include "util/log_macros.h"
 
 #include <stdatomic.h>
 #include <stdio.h>

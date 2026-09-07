@@ -56,13 +56,20 @@ void boot_fleet_ledger_shutdown(void);
 
 struct zcl_fleet_ledger;
 
-/* Grant the worker role, through the role seam (base/fleet_role_check.h),
+/* Grant the worker role, through the role seam (util/fleet_role_check.h),
  * to every key that signed a row in a chain this node is already carrying.
  * Called once at wire, before the ledger service is registered, and safe to
  * call again: a key that already holds the role is not granted twice.
  * Returns how many of those keys hold the role afterwards; zero on a node
  * with no checker installed, which keeps refusing every foreign row. */
 size_t boot_fleet_ledger_grandfather(struct zcl_fleet_ledger *ledger);
+
+/* Grandfather walks that stopped before the end of what they were
+ * reading — the key set filled, the batch bound ran out, or a stored
+ * row would not decode. Above zero means some peer key was never
+ * looked at and its rows are being refused for that reason.
+ * Reported by `fleet ledger status` as `grandfather_truncated`. */
+uint64_t boot_fleet_ledger_grandfather_truncated_count(void);
 
 /* Registered once; serves both halves of every ledger stream. Exposed so a
  * test can register the service without a live composition context. */

@@ -108,7 +108,7 @@ prefix to hand to `z23 fleet roles grant`. Neither log line names anything
 about the row or the post: what the fleet measures is the owner's business.
 
 **There is no default-permit path.** The engine asks through a seam
-(`platform/modules/base/include/base/fleet_role_check.h`) that the top of
+(`platform/modules/util/include/util/fleet_role_check.h`) that the top of
 the tree fills in at node start, because the catalog and the store live in
 `tools/dev` and nothing under `engine/` may include a `tools/` header. When
 NOTHING is installed to answer — a process that has not reached that wiring,
@@ -137,6 +137,15 @@ idempotent, so every one of them is safe to run at every boot.
 * **The roster.** At every node start, every key in the machine roster that
   holds no grant is granted `worker` — both the box key and, when the
   receipt named one, the signing key.
+
+The two boot walks are bounded — 64 signer keys and 64 reads per chain
+on the ledger side, 64 distinct posting keys on the board side. A fleet
+that exceeds a bound does not get a silent prefix: the walk logs one
+WARN naming the count and the bound, and counts it as
+`grandfather_truncated` in `fleet ledger status` and `fleet board
+status`. Above zero there, a refusal may be a key nobody looked at
+rather than a decision anybody made, and `z23 fleet roles grant` names
+the rest.
 
 A box that has never started a node has no signing key yet, so its receipt
 names none and `fleet admit` says so. Running `z23 fleet join` again after

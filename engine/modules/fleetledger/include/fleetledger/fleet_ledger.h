@@ -532,7 +532,7 @@ enum zcl_fleet_status zcl_fleet_ledger_read_since(
  * box's delegation delegates, whatever the signature says.
  *
  * The signer must also hold a ROLE granting `fleet.ledger.replicate` for
- * each row's kind on this box, asked through base/fleet_role_check.h. A key
+ * each row's kind on this box, asked through util/fleet_role_check.h. A key
  * with no such grant refuses the WHOLE batch as `ledger_role_refused`, and
  * so does a process with no role checker installed: this box accepting a
  * peer's signature is not the same act as this box deciding that peer may

@@ -344,6 +344,10 @@ static void fb_op_status(struct node_db *ndb, struct json_value *result,
      * here. Invisible in the counts above, because they were never stored. */
     json_push_kv_int(result, "role_refused",
                      (int64_t)boot_fleet_board_role_refused_count());
+    /* And keys the role bootstrap never reached because the host-scan
+     * bound stopped it: a refusal above may be that, not a decision. */
+    json_push_kv_int(result, "grandfather_truncated",
+                     (int64_t)boot_fleet_board_grandfather_truncated_count());
     /* Status is read-only: inspecting the board must never create a signing
      * identity or copy private key material into the RPC path. */
     uint8_t pubkey[32];

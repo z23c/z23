@@ -15,7 +15,7 @@
 #include "config/boot_fleet_board.h"
 #include "config/boot_internal.h"
 #include "config/runtime.h"
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "models/database.h"

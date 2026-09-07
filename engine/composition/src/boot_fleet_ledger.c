@@ -16,7 +16,7 @@
 #include "config/runtime.h"
 #include "boot_mesh_status_internal.h"
 
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "fleetledger/fleet_ledger.h"
@@ -599,33 +599,52 @@ uint64_t boot_fleet_ledger_role_refused_count(void)
 /* ── grandfathering ──────────────────────────────────────────────────── */
 
 /* At most one signer per box, plus room for boxes that rotated their online
- * key while this replica was following them. */
+ * key while this replica was following them. Reaching this bound is not a
+ * silent prefix: the walk says so, counts it, and the keys it did not reach
+ * keep being refused until an operator grants them by name. */
 #define LEDGER_GRANDFATHER_KEYS 64u
-/* Reads per chain. A chain longer than this many batches is scanned from
- * its start only; the keys signing its newest rows are the ones already
- * covered by the earlier passes, because a box signs with one key at a
- * time. Bounded so a long chain cannot turn boot into a walk of history. */
+/* Reads per chain. Bounded so a long chain cannot turn boot into a walk of
+ * history — and, like the bound above, reported when it stops the walk
+ * early rather than quietly shortening it. */
 #define LEDGER_GRANDFATHER_BATCHES 64u
+
+/* Walks that stopped before the end of what they were reading, since this
+ * process started. Reported by `fleet ledger status` as
+ * `grandfather_truncated`: a number above zero means some peer's key was
+ * never looked at, and its rows are being refused for that reason. */
+static _Atomic uint64_t g_grandfather_truncated;
+
+uint64_t boot_fleet_ledger_grandfather_truncated_count(void)
+{
+    return atomic_load_explicit(&g_grandfather_truncated, memory_order_relaxed);
+}
 
 struct ledger_signers {
     uint8_t keys[LEDGER_GRANDFATHER_KEYS][ZCL_FLEET_ID_BYTES];
     size_t count;
 };
 
-static void ledger_signer_add(struct ledger_signers *set,
+/* False when `key` did not fit, which is the caller's cue to stop and say
+ * so — never to carry on with a set it knows is short. */
+static bool ledger_signer_add(struct ledger_signers *set,
                               const uint8_t key[ZCL_FLEET_ID_BYTES])
 {
     for (size_t i = 0; i < set->count; i++) {
         if (memcmp(set->keys[i], key, ZCL_FLEET_ID_BYTES) == 0)
-            return;
+            return true;
     }
-    if (set->count < LEDGER_GRANDFATHER_KEYS)
-        memcpy(set->keys[set->count++], key, ZCL_FLEET_ID_BYTES);
+    if (set->count >= LEDGER_GRANDFATHER_KEYS)
+        return false;
+    memcpy(set->keys[set->count++], key, ZCL_FLEET_ID_BYTES);
+    return true;
 }
 
 /* Every key that signed a row in one peer's chain. The rows were verified
- * when they were replicated in — this only reads back what was stored. */
-static void ledger_signers_of_box(struct zcl_fleet_ledger *ledger,
+ * when they were replicated in — this only reads back what was stored.
+ * Returns false when the walk stopped early: the key set filled up, the
+ * batch bound ran out, or a stored row would not decode. Each of those
+ * leaves keys unseen, and unseen keys are refused keys. */
+static bool ledger_signers_of_box(struct zcl_fleet_ledger *ledger,
                                   const uint8_t box_id[ZCL_FLEET_ID_BYTES],
                                   uint8_t *buf, size_t cap,
                                   struct ledger_signers *set)
@@ -635,9 +654,10 @@ static void ledger_signers_of_box(struct zcl_fleet_ledger *ledger,
         size_t len = 0;
         uint64_t last = 0;
         if (zcl_fleet_ledger_read_since(ledger, box_id, since, buf, cap, &len,
-                                        &last) != ZCL_FLEET_OK ||
-            len == 0)
-            return;
+                                        &last) != ZCL_FLEET_OK)
+            return false;
+        if (len == 0)
+            return true; /* the end of this chain, not a bound */
         size_t offset = 0;
         while (offset < len) {
             struct zcl_fleet_row row;
@@ -645,20 +665,23 @@ static void ledger_signers_of_box(struct zcl_fleet_ledger *ledger,
             if (zcl_fleet_row_decode(buf + offset, len - offset, &row,
                                      &used) != ZCL_FLEET_OK ||
                 used == 0)
-                return;
-            ledger_signer_add(set, row.signer);
+                return false;
+            if (!ledger_signer_add(set, row.signer))
+                return false;
             offset += used;
         }
         if (last <= since)
-            return;
+            return true;
         since = last;
     }
+    return false; /* the batch bound, not the end of the chain */
 }
 
 size_t boot_fleet_ledger_grandfather(struct zcl_fleet_ledger *ledger)
 {
     struct zcl_fleet_box_status boxes[ZCL_FLEET_BOXES_MAX];
     struct ledger_signers set;
+    bool whole = true;
     memset(&set, 0, sizeof set);
     if (!ledger)
         return 0;
@@ -670,10 +693,22 @@ size_t boot_fleet_ledger_grandfather(struct zcl_fleet_ledger *ledger)
     for (size_t i = 0; i < nboxes; i++) {
         if (boxes[i].is_self || boxes[i].rows == 0)
             continue;
-        ledger_signers_of_box(ledger, boxes[i].box_id, buf,
-                              FLEET_LEDGER_ANSWER_MAX, &set);
+        if (!ledger_signers_of_box(ledger, boxes[i].box_id, buf,
+                                   FLEET_LEDGER_ANSWER_MAX, &set))
+            whole = false;
     }
     free(buf);
+    if (!whole) {
+        (void)atomic_fetch_add_explicit(&g_grandfather_truncated, 1,
+                                        memory_order_relaxed);
+        LOG_WARN("fleet.ledger",
+                 "role bootstrap read only part of the stored chains: %zu "
+                 "signer key(s) collected, bound is %u keys and %u batches "
+                 "per chain. Keys it did not reach hold no role, so their "
+                 "rows are refused until `z23 fleet roles grant` names them",
+                 set.count, (unsigned)LEDGER_GRANDFATHER_KEYS,
+                 (unsigned)LEDGER_GRANDFATHER_BATCHES);
+    }
     size_t held = 0;
     for (size_t i = 0; i < set.count; i++) {
         if (zcl_fleet_role_grandfather(set.keys[i],

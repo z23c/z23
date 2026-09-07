@@ -71,7 +71,7 @@ void boot_fleet_board_tick(struct msg_processor *mp, struct p2p_node *node,
 void boot_fleet_board_wire(struct boot_svc_ctx *svc);
 
 /* Grant the worker role to every key this node is ALREADY storing posts
- * from, through the role seam (base/fleet_role_check.h). Called once at
+ * from, through the role seam (util/fleet_role_check.h). Called once at
  * wire, and safe to call again: a key that already holds the role is not
  * granted twice. Returns how many of those keys hold the role afterwards;
  * zero on a node with no checker installed, which keeps refusing. */
@@ -87,6 +87,12 @@ void boot_fleet_board_shutdown(void);
  * answer to a climbing number is `z23 fleet roles grant`, with the
  * fingerprint prefix the refusal line printed. */
 uint64_t boot_fleet_board_role_refused_count(void);
+
+/* Host scans that stopped at FLEET_BOARD_HOST_LIST_MAX with another
+ * distinct posting key still to come. Above zero means a key that has
+ * posted here was never looked at and its posts are refused for that
+ * reason. Reported as `grandfather_truncated`. */
+uint64_t boot_fleet_board_grandfather_truncated_count(void);
 
 /* Load (creating on first use) this node's board signing identity — the same
  * durable Ed25519 online key the DHT uses, so a node has ONE host identity

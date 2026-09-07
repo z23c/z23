@@ -303,6 +303,11 @@ void zcl_native_handle_fleet_ledger_status(
      * number that keeps climbing is a grant, not a reconnection. */
     (void)json_push_kv_int(&reply->data, "role_refused",
                            (int64_t)boot_fleet_ledger_role_refused_count());
+    /* Keys the role bootstrap never reached because a bound stopped it.
+     * Above zero, a refusal may be this rather than a real decision. */
+    (void)json_push_kv_int(
+        &reply->data, "grandfather_truncated",
+        (int64_t)boot_fleet_ledger_grandfather_truncated_count());
     (void)json_push_kv(&reply->data, "chains", &rows);
     json_free(&rows);
     reply->status = ZCL_COMMAND_STATUS_PASSED;

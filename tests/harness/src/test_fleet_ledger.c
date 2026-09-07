@@ -23,7 +23,7 @@
 #include "test/mesh_stream_loopback.h"
 #include "test/mesh_term_fixture.h"
 
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "chain/chainparams.h"

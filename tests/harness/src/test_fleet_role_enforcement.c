@@ -19,7 +19,7 @@
 
 #include "test/test_core.h"
 
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 #include "config/boot_fleet_board.h"
 #include "config/boot_fleet_ledger.h"
 #include "crypto/ed25519.h"
@@ -162,6 +162,21 @@ static bool re_box_open(struct re_box *b, const char *root, const char *name,
     zcl_ed25519_keypair(b->signer, sk, b->seed);
     memset(b->box_id, (uint8_t)(tag ^ 0x5au), sizeof b->box_id);
     struct zcl_fleet_report report;
+    b->ledger = zcl_fleet_ledger_open(b->dir, b->box_id, b->signer, &report);
+    return b->ledger != NULL && report.status == ZCL_FLEET_OK;
+}
+
+
+/* Reopen one box directory under a DIFFERENT online key, the way a box that
+ * rotated its signing key looks to the replica following it. The machine
+ * (box_id) does not change; only the key its next rows carry. */
+static bool re_box_rotate(struct re_box *b, uint8_t tag)
+{
+    uint8_t sk[32];
+    struct zcl_fleet_report report;
+    zcl_fleet_ledger_close(b->ledger);
+    memset(b->seed, tag, sizeof b->seed);
+    zcl_ed25519_keypair(b->signer, sk, b->seed);
     b->ledger = zcl_fleet_ledger_open(b->dir, b->box_id, b->signer, &report);
     return b->ledger != NULL && report.status == ZCL_FLEET_OK;
 }
@@ -683,6 +698,92 @@ int test_fleet_role_enforcement(void)
         memset(&signing, 0, sizeof signing);
 
         test_rm_rf_recursive(en_dir);
+        PASS();
+    }
+
+    TEST("fleet roles: a ledger with more signers than the walk can carry "
+         "says so instead of grandfathering a prefix in silence") {
+        char tr_root[256], tr_dir[256];
+        test_make_tmpdir(tr_root, sizeof(tr_root), "fleet_role_enforcement",
+                         "trunc_ledger");
+        test_make_tmpdir(tr_dir, sizeof(tr_dir), "fleet_role_enforcement",
+                         "trunc_boot");
+        ASSERT(re_file_identity(tr_dir));
+
+        struct re_box sender, recv;
+        ASSERT(re_box_open(&sender, tr_root, "rotator", 0x81));
+        ASSERT(re_box_open(&recv, tr_root, "recv2", 0x82));
+
+        /* One machine that rotated its online key 65 times, which is one
+         * more distinct signer than the walk's key set holds. Everything
+         * lands the way it did before roles existed. */
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        uint8_t buf[8192];
+        for (unsigned i = 0; i < 65u; i++) {
+            ASSERT(re_box_rotate(&sender, (uint8_t)(0x90u + i)));
+            ASSERT_EQ(re_add_usage(&sender, (int64_t)(i + 1u)), ZCL_FLEET_OK);
+            size_t len = 0;
+            uint64_t last = 0;
+            ASSERT_EQ(zcl_fleet_ledger_read_since(sender.ledger,
+                                                  sender.box_id, i, buf,
+                                                  sizeof buf, &len, &last),
+                      ZCL_FLEET_OK);
+            ASSERT(len > 0);
+            ASSERT_EQ(zcl_fleet_ledger_replicate(recv.ledger, sender.box_id,
+                                                 sender.signer, buf, len,
+                                                 NULL),
+                      ZCL_FLEET_OK);
+        }
+
+        re_gate_install(tr_dir);
+        uint64_t before = boot_fleet_ledger_grandfather_truncated_count();
+        /* 64 of the 65 are granted, and the 65th is not quietly dropped:
+         * the counter is bumped in the same branch as the WARN that names
+         * the count and the bound. */
+        ASSERT_EQ(boot_fleet_ledger_grandfather(recv.ledger), (size_t)64);
+        ASSERT_EQ((int)(boot_fleet_ledger_grandfather_truncated_count() -
+                        before),
+                  1);
+
+        re_box_close(&recv);
+        re_box_close(&sender);
+        test_rm_rf_recursive(tr_dir);
+        test_rm_rf_recursive(tr_root);
+        PASS();
+    }
+
+    TEST("fleet roles: a board with more posting keys than the host scan "
+         "can carry says so instead of granting a prefix in silence") {
+        char tb_dir[256];
+        test_make_tmpdir(tb_dir, sizeof(tb_dir), "fleet_role_enforcement",
+                         "trunc_board");
+        ASSERT(re_file_identity(tb_dir));
+
+        struct node_db db;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+
+        /* 65 distinct machines posted here before roles existed: one more
+         * than FLEET_BOARD_HOST_LIST_MAX. */
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        for (unsigned i = 0; i < 65u; i++) {
+            uint8_t pub[32], seed[32], sk[32];
+            char text[64];
+            re_key((uint8_t)(0x90u + i), pub, seed, sk);
+            (void)snprintf(text, sizeof text, "post from machine %u", i);
+            ASSERT_EQ(re_post(&db, sk, pub, FLEET_BOARD_KIND_NOTE, text),
+                      FLEET_BOARD_OK);
+        }
+
+        re_gate_install(tb_dir);
+        uint64_t before = boot_fleet_board_grandfather_truncated_count();
+        ASSERT_EQ(boot_fleet_board_grandfather(&db), (size_t)64);
+        ASSERT_EQ((int)(boot_fleet_board_grandfather_truncated_count() -
+                        before),
+                  1);
+
+        node_db_close(&db);
+        test_rm_rf_recursive(tb_dir);
         PASS();
     }
 

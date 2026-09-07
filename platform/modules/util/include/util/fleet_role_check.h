@@ -8,9 +8,12 @@
  * header, and the two places foreign-signed bytes enter this node —
  * zcl_fleet_ledger_replicate() and db_fleet_board_post_ingest() — are both
  * under engine/. This file is the seam between them: a function-pointer
- * vtable declared in the lowest layer both ingress points already depend
- * on, filled in by the layer that can see the store. It follows the shape
- * agent_broker_provider_install() already uses in
+ * vtable in a platform module both ingress points may already include,
+ * filled in by the layer that can see the store. It lives HERE rather
+ * than in platform/modules/base on purpose: base sits inside the sealed
+ * core dependency closure, and a seam that grows with the fleet has no
+ * business repinning a sealed package every time it does. It follows the
+ * shape agent_broker_provider_install() already uses in
  * cognition/modules/session/include/session/agent_broker.h:493 — the
  * decision is made by whoever installs, never by the module that asks.
  *
@@ -20,8 +23,8 @@
  * is has not learned that the key is trustworthy.
  */
 
-#ifndef ZCL_BASE_FLEET_ROLE_CHECK_H
-#define ZCL_BASE_FLEET_ROLE_CHECK_H
+#ifndef ZCL_UTIL_FLEET_ROLE_CHECK_H
+#define ZCL_UTIL_FLEET_ROLE_CHECK_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -100,4 +103,4 @@ bool zcl_fleet_role_grandfather(const uint8_t key[32], const char *origin);
 void zcl_fleet_role_checker_install_permissive_for_testing(void);
 #endif
 
-#endif /* ZCL_BASE_FLEET_ROLE_CHECK_H */
+#endif /* ZCL_UTIL_FLEET_ROLE_CHECK_H */

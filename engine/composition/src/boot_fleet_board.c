@@ -6,7 +6,7 @@
 #include "config/boot_internal.h"
 #include "config/runtime.h"
 
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 #include "models/fleet_board_post.h"
 #include "net/fast_sync.h"
 #include "net/net.h"
@@ -27,6 +27,12 @@ static bool s_lock_init;
  * status`: a number that climbs is the operator's cue to grant a role, and
  * it is invisible in every other field there. */
 static _Atomic uint64_t s_role_refused;
+/* Host scans that stopped at the bound with another distinct key still
+ * to come, since this process started. Reported by `fleet board status`
+ * as `grandfather_truncated`: above zero means some key that has posted
+ * here was never looked at, and its posts are refused for that reason. */
+static _Atomic uint64_t s_grandfather_truncated;
+
 static struct boot_svc_ctx *s_svc;      /* borrowed; set by wire() */
 
 /* Per-peer rate-limit slots. A fixed table rather than a growing map: the
@@ -90,8 +96,20 @@ void boot_fleet_board_wire(struct boot_svc_ctx *svc)
 size_t boot_fleet_board_grandfather(struct node_db *ndb)
 {
     uint8_t hosts[FLEET_BOARD_HOST_LIST_MAX][32];
+    bool truncated = false;
     int found = db_fleet_board_distinct_hosts(ndb, hosts,
-                                              FLEET_BOARD_HOST_LIST_MAX);
+                                              FLEET_BOARD_HOST_LIST_MAX,
+                                              &truncated);
+    if (truncated) {
+        (void)atomic_fetch_add_explicit(&s_grandfather_truncated, 1,
+                                        memory_order_relaxed);
+        LOG_WARN("fleet.board",
+                 "role bootstrap saw more distinct posting keys than it"
+                 " can carry: %d granted, bound is %u. The keys past the"
+                 " bound hold no role, so their posts are refused until"
+                 " `z23 fleet roles grant` names them",
+                 found, (unsigned)FLEET_BOARD_HOST_LIST_MAX);
+    }
     size_t held = 0;
     for (int i = 0; i < found; i++) {
         if (zcl_fleet_role_grandfather(hosts[i], ZCL_FLEET_ROLE_ORIGIN_BOARD))
@@ -358,6 +376,12 @@ static bool fleet_board_ingest_refused_locally(enum fleet_board_result result)
             * the author, so scoring it for our own policy would ban the
             * relays a fleet depends on. */
            result == FLEET_BOARD_ERR_ROLE;
+}
+
+uint64_t boot_fleet_board_grandfather_truncated_count(void)
+{
+    return atomic_load_explicit(&s_grandfather_truncated,
+                                memory_order_relaxed);
 }
 
 uint64_t boot_fleet_board_role_refused_count(void)

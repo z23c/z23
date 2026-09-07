@@ -93,7 +93,7 @@ bool db_fleet_board_post_validate(const struct db_fleet_board_post *record,
  * distinguishes a fresh append from an idempotent duplicate.
  *
  * The signing host key must also hold a ROLE granting `fleet.board.post`
- * for this post's kind on this node, asked through base/fleet_role_check.h.
+ * for this post's kind on this node, asked through util/fleet_role_check.h.
  * A key with no such grant refuses as FLEET_BOARD_ERR_ROLE, and so does a
  * process with no role checker installed: a good signature says who wrote
  * the post, never that this box agreed to keep it. */
@@ -157,10 +157,13 @@ bool db_fleet_board_have(struct node_db *ndb, const uint8_t id[32]);
  * cannot put a key on the list. Returns the count written, or -1 when the
  * store could not be read. This is what the role bootstrap asks: these are
  * the keys this node has ALREADY been accepting posts from.
+ * `truncated` (optional) is set when a distinct key past `max` exists:
+ * the list is then a PREFIX, and the caller must say so rather than
+ * act as though it saw every key.
  * Expiry is not applied — the question is who was trusted, not what is
  * still worth reading. */
 int db_fleet_board_distinct_hosts(struct node_db *ndb, uint8_t (*out)[32],
-                                  size_t max);
+                                  size_t max, bool *truncated);
 
 /* The distinct rooms a public reader can reach, for the read-only /board
  * pages: every room named by a non-fleet post, with legacy rows' empty

@@ -11,7 +11,7 @@
 
 #include "models/fleet_board_post.h"
 
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 #include "config/runtime.h"
 #include "json/json.h"
 /* model_fields.h defines the ZCL_MODEL_* constructors the field list is
@@ -364,7 +364,7 @@ static bool board_append_fits(struct node_db *ndb, int64_t body_bytes)
 }
 
 /* Does the key that signed this post hold a role granting a post of this
- * KIND on this node? Asked through base/fleet_role_check.h, so this model
+ * KIND on this node? Asked through util/fleet_role_check.h, so this model
  * never learns where the grant store lives — and refused outright when
  * nothing is installed to answer.
  *
@@ -773,8 +773,12 @@ static bool board_host_verifies(struct node_db *ndb, const uint8_t key[32])
     qb_limit(&q, 1);
     sqlite3_stmt *s = NULL;
     bool ok = false;
-    if (!QB_PREPARE(ndb, &q, s))
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board",
+                 "host verification query could not be prepared: %s",
+                 sqlite3_errmsg(ndb->db));
         return false;
+    }
     if (AR_STEP_ROW(s)) {
         struct db_fleet_board_post row;
         memset(&row, 0, sizeof(row));
@@ -797,7 +801,7 @@ static bool board_host_seen(const uint8_t (*seen)[32], size_t count,
  * (end of table, or a read error) yields FEWER keys, never more, so the
  * caller's decision stays on the refusing side of any failure. */
 static size_t board_collect_hosts(struct node_db *ndb, uint8_t (*out)[32],
-                                  size_t max)
+                                  size_t max, bool *truncated)
 {
     struct qb q;
     qb_select(&q, QB_T_fleet_board_posts);
@@ -805,26 +809,41 @@ static size_t board_collect_hosts(struct node_db *ndb, uint8_t (*out)[32],
     qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_DESC);
     sqlite3_stmt *s = NULL;
     size_t count = 0;
-    if (!QB_PREPARE(ndb, &q, s))
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board", "host scan could not be prepared: %s",
+                 sqlite3_errmsg(ndb->db));
         return 0;
-    while (count < max && AR_STEP_ROW(s)) {
+    }
+    while (AR_STEP_ROW(s)) {
         const uint8_t *blob = sqlite3_column_blob(s, 0);
-        if (blob && sqlite3_column_bytes(s, 0) == 32 &&
-            !board_host_seen(out, count, blob))
-            memcpy(out[count++], blob, 32);
+        if (!blob || sqlite3_column_bytes(s, 0) != 32 ||
+            board_host_seen(out, count, blob))
+            continue;
+        /* One distinct key more than fits is the whole point of the
+         * flag: the caller must be able to say the list is short. */
+        if (count >= max) {
+            *truncated = true;
+            break;
+        }
+        memcpy(out[count++], blob, 32);
     }
     sqlite3_finalize(s);
     return count;
 }
 
 int db_fleet_board_distinct_hosts(struct node_db *ndb, uint8_t (*out)[32],
-                                  size_t max)
+                                  size_t max, bool *truncated)
 {
+    if (truncated)
+        *truncated = false;
     if (!ndb || !ndb->open || !out || max == 0)
         return -1;
     if (max > FLEET_BOARD_HOST_LIST_MAX)
         max = FLEET_BOARD_HOST_LIST_MAX;
-    size_t count = board_collect_hosts(ndb, out, max);
+    bool over = false;
+    size_t count = board_collect_hosts(ndb, out, max, &over);
+    if (truncated)
+        *truncated = over;
     size_t kept = 0;
     for (size_t i = 0; i < count; i++) {
         if (!board_host_verifies(ndb, out[i]))

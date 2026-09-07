@@ -147,7 +147,7 @@ bool zcl_role_check(const struct zcl_role_store *store,
 /* ── enforcement (tools/dev/fleet_roles_gate.c) ──────────────────────── */
 
 /* Install this box's checker into the engine's role-check seam
- * (platform/modules/base/include/base/fleet_role_check.h) and run the
+ * (platform/modules/util/include/util/fleet_role_check.h) and run the
  * one-time enrolment bootstrap below. Call ONCE at node start, with the
  * node's datadir: until it returns, both ingress points refuse every
  * foreign-signed byte, which is the correct state for a process that has

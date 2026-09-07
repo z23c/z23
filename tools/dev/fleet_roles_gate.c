@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * The half of fleet ROLES that the ENGINE reaches: the checker this box
- * installs into base/fleet_role_check.h's seam, and the bootstrap that
+ * installs into util/fleet_role_check.h's seam, and the bootstrap that
  * keeps a fleet which was working before roles existed working after.
  * See tools/dev/fleet_roles.h for the contract.
  *
@@ -34,7 +34,7 @@
 
 #include "fleet_enrol.h"
 
-#include "base/fleet_role_check.h"
+#include "util/fleet_role_check.h"
 #include "base/log_macros.h"
 #include "platform/time_compat.h"
 #include "vcs/zcode_dht_identity.h"
