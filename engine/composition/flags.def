@@ -1464,13 +1464,13 @@ Z23_FLAG("ZCL_NODE_BIN", "env_build", "build/bin/zclassic23", "-",
 Z23_FLAG("ZCL_NODE_UNIT", "env_build", "zclassic23", "-",
           "first use tools/mvp_gate.sh:59; documented at docs/work/mvp-live-gate.md:38: ZCL_NODE_UNIT — systemd --user unit whose ExecStart supplies the")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_runtime_abort.sh:94")
+          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:389")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_FILE_FLOOR", "env_build", "400", "-",
-          "undocumented; first use tools/lint/check_no_runtime_abort.sh:211")
+          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:393")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_runtime_abort.sh:104")
+          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:382")
 Z23_FLAG("ZCL_NO_RUNTIME_ABORT_SITE_FLOOR", "env_build", "15", "-",
-          "undocumented; first use tools/lint/check_no_runtime_abort.sh:281")
+          "undocumented; first use tools/lint/lintc/gate_no_runtime_abort.c:394")
 Z23_FLAG("ZCL_NO_UTXO_PROJECTION_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/check_no_utxo_projection.sh:19")
 Z23_FLAG("ZCL_NO_UTXO_PROJECTION_SCAN_ROOTS", "env_build", "-", "-",

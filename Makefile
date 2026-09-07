@@ -5410,6 +5410,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_remote_command_classes.c \
     tools/lint/lintc/gate_remote_command_classes_parse.c \
     tools/lint/lintc/gate_remote_command_classes_selftest.c \
+    tools/lint/lintc/gate_no_runtime_abort.c \
+    tools/lint/lintc/gate_no_runtime_abort_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11920,7 +11922,7 @@ check-test-registration: $(LINTC_TOOL)
 # compile-time and is NOT counted. An abort that is correct (softening it would
 # leak plaintext or forge a key) is annotated in place with
 # `// abort-ok:<reason>` instead of being buried in the baseline.
-check-no-runtime-abort:
+check-no-runtime-abort: $(LINTC_TOOL)
 	@echo "══ LINT: no runtime abort primitive ══"
 	@./tools/lint/check_no_runtime_abort.sh
 

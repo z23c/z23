@@ -437,5 +437,7 @@ int check_no_snapshot_struct_memcmp_run(int argc, char **argv);
 int check_no_snapshot_struct_memcmp_selftest(void);
 int check_remote_command_classes_run(int argc, char **argv);
 int check_remote_command_classes_selftest(void);
+int check_no_runtime_abort_run(int argc, char **argv);
+int check_no_runtime_abort_selftest(void);
 
 #endif
