@@ -5375,6 +5375,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_installed_acceptance_tools.c \
     tools/lint/lintc/gate_hotswap_denied_leaves.c \
     tools/lint/lintc/gate_hotswap_denied_leaves_selftest.c \
+    tools/lint/lintc/gate_command_availability_truthful.c \
+    tools/lint/lintc/gate_rule_vocabulary.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11741,7 +11743,7 @@ check-prompt-templates: $(LINTC_TOOL)
 # naming nothing is a score attached to no rule, and a heading or persona with
 # no row is guidance nobody is measuring. This gate refuses BOTH directions;
 # checking one way is default-permit, which this tree has already paid for.
-check-rule-vocabulary:
+check-rule-vocabulary: $(LINTC_TOOL)
 	@echo "══ LINT: the executor rule vocabulary is closed ══"
 	@./tools/lint/check_rule_vocabulary.sh --selftest
 	@./tools/lint/check_rule_vocabulary.sh
@@ -12359,13 +12361,13 @@ check-command-contract: $(LINTC_TOOL)
 	@./tools/lint/check_command_contract.sh
 
 # Gate — command-availability truthfulness (HARD). The `availability` a leaf
-# declares in engine/composition/commands/*.def must match what the catalog actually
-# binds: a READY leaf must bind a non-NULL handler (READY with no handler
-# advertises a command the engine cannot dispatch), and a PLANNED/COMPAT leaf
-# must state a non-empty availability_reason (a typed refusal with no stated
-# cause is a silent stall). Parses the macro grammar and aborts LOUD on arity
-# drift rather than reading the wrong argument slot.
-check-command-availability-truthful:
+# declares in engine/composition/commands (one .def file per area) must match
+# what the catalog actually binds: a READY leaf must bind a non-NULL handler
+# (READY with no handler advertises a command the engine cannot dispatch),
+# and a PLANNED/COMPAT leaf must state a non-empty availability_reason (a
+# typed refusal with no stated cause is a silent stall). Parses the macro
+# grammar and aborts LOUD on arity drift rather than reading the wrong slot.
+check-command-availability-truthful: $(LINTC_TOOL)
 	@echo "══ LINT: command-availability truthfulness ══"
 	@./tools/lint/check_command_availability_truthful.sh
 

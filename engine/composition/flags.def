@@ -339,11 +339,11 @@ Z23_FLAG("ZCL_COIN_MATRIX_SEED", "env_build", "-", "-",
 Z23_FLAG("ZCL_COINS_LOOKUP_SCAN_DIR", "env_build", "engine/controllers/src", "-",
           "undocumented; first use tools/scripts/check_coins_lookup_nullcheck.sh:19")
 Z23_FLAG("ZCL_COMMAND_AVAILABILITY_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_command_availability_truthful.sh:49")
+          "undocumented; first use tools/lint/lintc/gate_command_availability_truthful.c:493")
 Z23_FLAG("ZCL_COMMAND_AVAILABILITY_PLANNED_FLOOR", "env_build", "18", "-",
-          "undocumented; first use tools/lint/check_command_availability_truthful.sh:63")
+          "undocumented; first use tools/lint/lintc/gate_command_availability_truthful.c:495")
 Z23_FLAG("ZCL_COMMAND_AVAILABILITY_READY_FLOOR", "env_build", "160", "-",
-          "undocumented; first use tools/lint/check_command_availability_truthful.sh:62")
+          "undocumented; first use tools/lint/lintc/gate_command_availability_truthful.c:494")
 Z23_FLAG("ZCL_COMMAND_CONTRACT_DIR", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_tree_walk.c:533")
 Z23_FLAG("ZCL_COMMAND_INPUT_KEYS_BASELINE", "env_build", "-", "-",
@@ -1879,13 +1879,13 @@ Z23_FLAG("ZCL_RPC_TLS_PORT", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_RPC_TOOL", "env_build", "build/bin/zcl-rpc", "-",
           "undocumented; first use tools/diagnose_gap.sh:32")
 Z23_FLAG("ZCL_RULE_GROK_DIR", "env_build", ".grok/rules", "-",
-          "undocumented; first use tools/lint/check_rule_vocabulary.sh:33")
+          "undocumented; first use tools/lint/lintc/gate_rule_vocabulary.c:545")
 Z23_FLAG("ZCL_RULE_PERSONA_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_rule_vocabulary.sh:32")
+          "undocumented; first use tools/lint/lintc/gate_rule_vocabulary.c:544")
 Z23_FLAG("ZCL_RULE_ROW_FLOOR", "env_build", "7", "-",
-          "undocumented; first use tools/lint/check_rule_vocabulary.sh:34")
+          "undocumented; first use tools/lint/lintc/gate_rule_vocabulary.c:546")
 Z23_FLAG("ZCL_RULE_VOCAB_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_rule_vocabulary.sh:31")
+          "undocumented; first use tools/lint/lintc/gate_rule_vocabulary.c:543")
 Z23_FLAG("ZCL_SCRATCH_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_hotswap_denied_leaves.sh:346")
 Z23_FLAG("ZCL_SECP_DUMP_SEEDS", "env_test", "-", "-",

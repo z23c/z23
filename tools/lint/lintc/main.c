@@ -209,6 +209,9 @@ static const struct lint_gate k_gates[] = {
       check_installed_acceptance_tools_selftest },
     { "check-hotswap-denied-leaves", check_hotswap_denied_leaves_run,
       check_hotswap_denied_leaves_selftest },
+    { "check-command-availability-truthful", check_command_availability_truthful_run,
+      check_command_availability_truthful_selftest },
+    { "check-rule-vocabulary", check_rule_vocabulary_run, check_rule_vocabulary_selftest },
 };
 
 int main(int argc, char **argv)

@@ -397,5 +397,9 @@ int check_installed_acceptance_tools_selftest(void);
 int check_hotswap_denied_leaves_run(int argc, char **argv);
 int check_hotswap_denied_leaves_run_io(FILE *out, FILE *err);
 int check_hotswap_denied_leaves_selftest(void);
+int check_command_availability_truthful_run(int argc, char **argv);
+int check_command_availability_truthful_selftest(void);
+int check_rule_vocabulary_run(int argc, char **argv);
+int check_rule_vocabulary_selftest(void);
 
 #endif
