@@ -303,7 +303,10 @@ expect_red() { # <label> <expected-substring> <dir>
         return 1
     fi
     echo "  self-test ok (RED): $label"
-    printf '%s\n' "$out" | grep -F -- "$needle" | head -1 | sed 's/^/      | /'
+    # Here-string + awk, not `grep | head`: that pipeline is SIGPIPE (141)
+    # under `set -o pipefail` and is what made lint-fast fail this gate
+    # after the first GREEN self-test line.
+    awk -v n="$needle" 'index($0, n) { print; exit }' <<<"$out" | sed 's/^/      | /'
     return 0
 }
 
@@ -333,7 +336,14 @@ run_selftest() {
 
     # 2. THE regression: one declared TU with an unguarded main() goes red
     #    and is named at the offending line.
-    p="$(catalog_tests_sources "$REPO_ROOT/$CATALOG_REL" | head -1)"
+    p=""
+    while IFS= read -r p; do
+        [ -n "$p" ] && break
+    done < <(catalog_tests_sources "$REPO_ROOT/$CATALOG_REL")
+    [ -n "$p" ] || {
+        echo "SELF-TEST FAIL: catalog produced no tests/ source to mutate"
+        return 1
+    }
     cat > "$d/$p" <<'EOF'
 /* Fixture Copyright header. */
 
