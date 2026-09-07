@@ -1893,7 +1893,7 @@ Z23_FLAG("ZCL_SECP_DUMP_SEEDS", "env_test", "-", "-",
 Z23_FLAG("ZCL_SECP_GOLDEN_RECORD", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_secp256k1_differential.c:713")
 Z23_FLAG("ZCL_SECRET_PRINTF_SCAN_DIRS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_no_secret_printf.sh:37")
+          "undocumented; first use tools/lint/lintc/gate_secret_printf_fences.c:337")
 Z23_FLAG("ZCL_SEGMENT_SEALER", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/segment_sealer_service.c:385")
 Z23_FLAG("ZCL_SELF_FOLD_ANCHOR_FIXTURE", "env_test", "-", "-",

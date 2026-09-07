@@ -113,7 +113,7 @@ check-no-orphan-placement check-file-size-ceiling check-operator-needed-sink
 check-condition-cooldown check-doc-accuracy check-doc-counts
 check-no-stale-pinned-facts check-no-uncited-victory check-error-doc-refs
 check-markdown-links check-doc-inline-paths check-hex-codec-single
-check-one-result-type check-service-result-convergence
+check-one-result-type check-no-secret-printf check-service-result-convergence
 check-shape-includes-header check-projections-pure check-one-write-path
 check-frontier-single-writer check-dumper-never-blocks check-no-block-index-flat
 check-no-utxo-projection check-no-utxos-mirror-read

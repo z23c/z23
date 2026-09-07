@@ -5352,6 +5352,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_include_direction_fences.c \
     tools/lint/lintc/gate_progress_honesty_fences.c \
     tools/lint/lintc/gate_layering_fences.c \
+    tools/lint/lintc/gate_result_type_fences.c \
+    tools/lint/lintc/gate_secret_printf_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12908,9 +12910,15 @@ check-hex-codec-single:
 # Gate E2 — new service functions return struct zcl_result, not bare
 # bool/int (RATCHET at file granularity; baseline at
 # tools/scripts/one_result_type_baseline.txt may only shrink).
-check-one-result-type:
+check-one-result-type: $(LINTC_TOOL)
 	@echo "══ LINT: one result type (E2) ══"
+	@./tools/scripts/check_one_result_type.sh --selftest
 	@./tools/scripts/check_one_result_type.sh
+
+check-no-secret-printf: $(LINTC_TOOL)
+	@echo "══ LINT: no secret printf ══"
+	@./tools/scripts/check_no_secret_printf.sh --selftest
+	@./tools/scripts/check_no_secret_printf.sh
 
 # Gate — service-shape convergence SHRINKING-FLOOR ratchet (Phase 3, sibling
 # to E2): counts exported bool-returning function DEFINITIONS per
@@ -13419,6 +13427,7 @@ LINT_GATES := \
     check-doc-inline-paths \
     check-hex-codec-single \
     check-one-result-type \
+    check-no-secret-printf \
     check-service-result-convergence \
     check-shape-includes-header \
     check-projections-pure \

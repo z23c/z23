@@ -352,5 +352,9 @@ int check_lib_layering_run(int argc, char **argv);
 int check_lib_layering_selftest(void);
 int check_domain_purity_run(int argc, char **argv);
 int check_domain_purity_selftest(void);
+int check_one_result_type_run(int argc, char **argv);
+int check_one_result_type_selftest(void);
+int check_no_secret_printf_run(int argc, char **argv);
+int check_no_secret_printf_selftest(void);
 
 #endif

@@ -165,6 +165,10 @@ static const struct lint_gate k_gates[] = {
       check_lib_layering_selftest },
     { "check-domain-purity", check_domain_purity_run,
       check_domain_purity_selftest },
+    { "check-one-result-type", check_one_result_type_run,
+      check_one_result_type_selftest },
+    { "check-no-secret-printf", check_no_secret_printf_run,
+      check_no_secret_printf_selftest },
 };
 
 int main(int argc, char **argv)

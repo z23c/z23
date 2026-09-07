@@ -247,7 +247,8 @@ gate_command() {
         check-markdown-links)              echo './tools/lint/check_markdown_links.sh .' ;;
         check-doc-inline-paths)            echo './tools/lint/check_doc_inline_paths.sh' ;;
         check-hex-codec-single)            echo './tools/lint/check_hex_codec_single.sh --selftest && ./tools/lint/check_hex_codec_single.sh' ;;
-        check-one-result-type)             echo './tools/scripts/check_one_result_type.sh' ;;
+        check-one-result-type)             echo './tools/scripts/check_one_result_type.sh --selftest && ./tools/scripts/check_one_result_type.sh' ;;
+        check-no-secret-printf)            echo './tools/scripts/check_no_secret_printf.sh --selftest && ./tools/scripts/check_no_secret_printf.sh' ;;
         check-service-result-convergence)  echo './tools/scripts/check_service_result_convergence.sh' ;;
         check-shape-includes-header)       echo './tools/scripts/check_shape_includes_header.sh' ;;
         check-projections-pure)            echo './tools/scripts/check_projections_pure.sh' ;;

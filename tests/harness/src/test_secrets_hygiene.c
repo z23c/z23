@@ -251,7 +251,7 @@ static int test_recover_tool_path_documented(void)
     TEST("secrets_hygiene: every key-printing allowlist entry names a real file") {
         /* tools/wallet_dump.c is the only file that legitimately prints
          * raw key material, and only because offline key export is its
-         * whole purpose. The allowlist in check_no_secret_printf.sh names
+         * whole purpose. The allowlist in gate_secret_printf_fences.c names
          * it explicitly.
          *
          * This test used to assert a fixed set of names. That was the weak
@@ -263,7 +263,7 @@ static int test_recover_tool_path_documented(void)
          * standing permission to print secrets from a path nobody reviews
          * any more, and if that path is ever recreated it arrives
          * pre-approved. So the allowlist must not outlive its files. */
-        FILE *f = fopen("tools/scripts/check_no_secret_printf.sh", "r");
+        FILE *f = fopen("tools/lint/lintc/gate_secret_printf_fences.c", "r");
         ASSERT(f != NULL);
         char line[512];
         bool saw_wallet_dump = false;
