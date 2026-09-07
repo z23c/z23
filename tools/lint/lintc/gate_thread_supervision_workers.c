@@ -43,15 +43,17 @@ static const char k_tsw_gate[] = "check-thread-supervision";
 enum { TSW_SINK = 65536 };
 
 struct tsw_snap { char val[4096]; int set; };
-static struct tsw_snap g_tsw_snap[4];
 static const char *const k_tsw_vars[] = {
     "ZCL_LINT_PRODUCTION_SCAN", "ZCL_THREADSUP_COVERAGE_ONLY",
     "ZCL_THREADSUP_SCAN_ROOTS", "ZCL_THREADSUP_COVERAGE_ALLOWANCE",
+    "ZCL_THREADSUP_COVERAGE",
 };
+#define TSW_NVARS ((int)(sizeof k_tsw_vars / sizeof k_tsw_vars[0]))
+static struct tsw_snap g_tsw_snap[TSW_NVARS];
 
 static int tsw_snap_save(void)
 {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < TSW_NVARS; i++) {
         const char *e = getenv(k_tsw_vars[i]);
         g_tsw_snap[i].set = e != NULL;
         if (e && ovf(snprintf(g_tsw_snap[i].val, sizeof g_tsw_snap[i].val,
@@ -63,7 +65,7 @@ static int tsw_snap_save(void)
 
 static int tsw_snap_restore(void)
 {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < TSW_NVARS; i++) {
         int rc = g_tsw_snap[i].set
             ? setenv(k_tsw_vars[i], g_tsw_snap[i].val, 1)
             : unsetenv(k_tsw_vars[i]);
@@ -119,11 +121,29 @@ static int tsw_cov_case(int want, const char *msg, const char *const *assigns)
  * always runs, even if an earlier step failed. */
 static int tsw_unreadable_case(void)
 {
-    const char *rel = "core/_thread_supervision_probe_tmp.c";
-    int rc = csr_write(rel,
-        "void thread_supervision_probe(void) {\n"
-        "    thread_registry_spawn(\"tsw_probe_unreadable\", 0, 0);\n"
-        "}\n");
+    /* The probe lives in a private root under test-tmp, NOT in the real
+     * core/ tree. An unreadable file planted in the shared checkout is
+     * visible to every other gate the lint driver runs at the same time,
+     * and check-file-size-ceiling and check-operator-needed-sink both
+     * (correctly) refuse a scan set they cannot read — so planting it in
+     * core/ turned this selftest into two unrelated red gates. Pointing
+     * the scan at a root of our own proves the same ruling and touches
+     * nothing anyone else is reading. Coverage is off for the inner run:
+     * the oracle names the real tree, and this scan is deliberately not
+     * it. */
+    static const char *const assigns[] = {
+        "ZCL_LINT_PRODUCTION_SCAN=0", "ZCL_THREADSUP_COVERAGE=0",
+        "ZCL_THREADSUP_SCAN_ROOTS=test-tmp/tsw_unreadable", NULL
+    };
+    const char *rel = "test-tmp/tsw_unreadable/probe.c";
+    int rc = tsw_snap_restore();
+    if (rc == 0)
+        rc = tsw_apply(assigns);
+    if (rc == 0)
+        rc = csr_write(rel,
+            "void thread_supervision_probe(void) {\n"
+            "    thread_registry_spawn(\"tsw_probe_unreadable\", 0, 0);\n"
+            "}\n");
     if (rc == 0 && chmod(rel, 0) != 0)
         rc = die("z23-lint: chmod failed: %s\n", rel);
     static char sink[TSW_SINK];
@@ -134,6 +154,8 @@ static int tsw_unreadable_case(void)
         rc = die("z23-lint: chmod failed: %s\n", rel);
     if (unlink(rel) != 0 && rc == 0)
         rc = die("z23-lint: unlink failed: %s\n", rel);
+    if (rc == 0)
+        rc = tsw_snap_restore();
     if (rc != 0)
         return rc;
     if (code != 2 || !strstr(sink, "cannot be")) {
