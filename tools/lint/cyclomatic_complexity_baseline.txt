@@ -508,7 +508,6 @@ contexts/commons/modules/vcs/src/vcs_index.c:vcs_index_meta_get:17
 contexts/commons/modules/vcs/src/vcs_manifest.c:build_cb:16
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_build:19
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_parse:16
-contexts/commons/modules/vcs/src/vcs_materialize.c:vcs_tree_materialize:26
 contexts/commons/modules/vcs/src/vcs_object.c:object_write_mode:25
 contexts/commons/modules/vcs/src/vcs_revert.c:vcs_revert:28
 contexts/commons/modules/vcs/src/vcs_seal.c:vcs_seal_load_globs:21
@@ -3434,7 +3433,6 @@ tests/harness/src/test_sapling_lazy_init.c:test_sapling_lazy_init:17
 tests/harness/src/test_sapling_prover_rng_determinism.c:test_sapling_prover_rng_determinism:28
 tests/harness/src/test_sapling_tree.c:test_sapling_tree:28
 tests/harness/src/test_scan_util.c:test_scan_util:23
-tests/harness/src/test_science.c:case_corpus_honesty:20
 tests/harness/src/test_science.c:case_durability:24
 tests/harness/src/test_science.c:case_hollow_and_ratio:20
 tests/harness/src/test_science.c:case_no_status_setter:26
@@ -3565,7 +3563,6 @@ tests/harness/src/test_stall_totality_matrix.c:test_stall_totality_matrix:96
 tests/harness/src/test_state_auditor.c:test_state_auditor_coins_leg:24
 tests/harness/src/test_sticky_escalator.c:test_sticky_escalator:87
 tests/harness/src/test_stopwatch_skip_watch.c:test_stopwatch_skip_watch:182
-tests/harness/src/test_storage_housekeeping.c:test_storage_housekeeping:39
 tests/harness/src/test_storage_reclaim.c:test_storage_reclaim:16
 tests/harness/src/test_store.c:test_store:328
 tests/harness/src/test_store_buyer.c:test_store_buyer:91
@@ -3664,8 +3661,6 @@ tests/harness/src/test_vault_read.c:test_vault_read:61
 tests/harness/src/test_vcs_core.c:t_manifest_stat_cache_identity:49
 tests/harness/src/test_vcs_core.c:t_package_manifest:25
 tests/harness/src/test_vcs_core.c:t_package_swarm:22
-tests/harness/src/test_vcs_core.c:t_source_bundle:96
-tests/harness/src/test_vcs_core.c:vc_count_objects:26
 tests/harness/src/test_vcs_core.c:vc_store_transport_with_license:16
 tests/harness/src/test_vcs_devloop.c:t_publication_enqueue:34
 tests/harness/src/test_vcs_devloop.c:vd_accepted_fixture_create:24
@@ -3990,7 +3985,6 @@ tools/command/native_dev_command.c:zcl_native_handle_dev_publication_status:118
 tools/command/native_dev_fleet.c:fleet_lane_json:16
 tools/command/native_dev_fleet.c:fleet_load_lanes:19
 tools/command/native_dev_fleet.c:zcl_dev_fleet_collect:26
-tools/command/native_dev_fleet_process.c:fleet_capture_windows:26
 tools/command/native_dev_fleet_process.c:fleet_quote_arg:20
 tools/command/native_dev_fleet_receipts.c:fleet_read_receipt:53
 tools/command/native_dev_fleet_receipts.c:zcl_dev_fleet_receipts_json:74
@@ -4044,8 +4038,7 @@ tools/command/native_devagent_done.c:zcl_native_handle_dev_agent_done:49
 tools/command/native_devagent_hot.c:zcl_native_handle_dev_agent_hot:38
 tools/command/native_devagent_mail.c:dvm_abs_under_root:24
 tools/command/native_devagent_mail.c:dvm_has_ipv4:17
-tools/command/native_devagent_mail.c:dvm_post:41
-tools/command/native_devagent_mail.c:dvm_pull:41
+tools/command/native_devagent_mail.c:dvm_post:22
 tools/command/native_devagent_mail.c:dvm_token_escapes:17
 tools/command/native_devagent_mutate_command.c:zcl_native_handle_dev_agent_mutate:44
 tools/command/native_devagent_outcomes.c:zcl_native_handle_dev_agent_outcomes:70
@@ -4435,7 +4428,6 @@ tools/dev/z23_git_hook.c:read_exact_at:16
 tools/dev/z23_git_hook.c:running_eta:29
 tools/dev/z23_git_hook.c:selftest:62
 tools/engine_unit.c:append_unit_receipt:27
-tools/engine_unit.c:build_task_with_file_contents:32
 tools/engine_unit.c:compose_prompt:23
 tools/engine_unit.c:dispatch_cli:21
 tools/engine_unit.c:gate_feedback_from_log:30
