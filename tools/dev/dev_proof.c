@@ -429,58 +429,82 @@ static bool proof_oid_text(const char *value)
     return zcl_dev_proof_oid_decode(value, decoded, &len);
 }
 
+/* The proof path set is filled in four named steps -- the pair identity and
+ * the canonical checkout root, the state directories under it, the files
+ * named after this exact commit/base pair, and that pair's log files. Every
+ * step refuses on the first truncation, exactly as the single chain it
+ * replaces did, and a step that refuses leaves the later ones unexecuted. */
+static bool dp_paths_root(const char *repo_root, const char *local,
+                          const char *base, struct proof_paths *out)
+{
+    return repo_root && local && base && out && proof_oid_text(local) &&
+           proof_oid_text(base) &&
+           platform_directory_canonical_real(repo_root, out->root,
+                                             sizeof(out->root));
+}
+
+static bool dp_paths_state_dirs(struct proof_paths *out)
+{
+    return snprintf(out->cache, sizeof(out->cache), "%s/.cache",
+                    out->root) < (int)sizeof(out->cache) &&
+           snprintf(out->state, sizeof(out->state), "%s/zcl-dev-proof",
+                    out->cache) < (int)sizeof(out->state) &&
+           snprintf(out->receipts, sizeof(out->receipts), "%s/receipts",
+                    out->state) < (int)sizeof(out->receipts) &&
+           snprintf(out->children, sizeof(out->children), "%s/children",
+                    out->state) < (int)sizeof(out->children) &&
+           snprintf(out->logs, sizeof(out->logs), "%s/logs",
+                    out->state) < (int)sizeof(out->logs) &&
+           snprintf(out->requests, sizeof(out->requests), "%s/requests",
+                    out->state) < (int)sizeof(out->requests) &&
+           snprintf(out->attempts, sizeof(out->attempts), "%s/attempts",
+                    out->state) < (int)sizeof(out->attempts) &&
+           snprintf(out->leases, sizeof(out->leases), "%s/leases",
+                    out->state) < (int)sizeof(out->leases);
+}
+
+static bool dp_paths_pair_files(struct proof_paths *out, const char *local,
+                                const char *base)
+{
+    return snprintf(out->key, sizeof(out->key), "%s-%s", local,
+                    base) < (int)sizeof(out->key) &&
+           snprintf(out->receipt, sizeof(out->receipt), "%s/%s.receipt",
+                    out->receipts, out->key) < (int)sizeof(out->receipt) &&
+           snprintf(out->lock, sizeof(out->lock), "%s/%s.running",
+                    out->state, out->key) < (int)sizeof(out->lock) &&
+           snprintf(out->request, sizeof(out->request), "%s/%s.request",
+                    out->requests, out->key) < (int)sizeof(out->request) &&
+           snprintf(out->lease, sizeof(out->lease), "%s/%s.lease",
+                    out->leases, out->key) < (int)sizeof(out->lease) &&
+           snprintf(out->queue_lock, sizeof(out->queue_lock), "%s/queue.lock",
+                    out->state) < (int)sizeof(out->queue_lock) &&
+           snprintf(out->failure, sizeof(out->failure), "%s/%s.failed",
+                    out->state, out->key) < (int)sizeof(out->failure) &&
+           snprintf(out->changed, sizeof(out->changed), "%s/%s.files",
+                    out->state, out->key) < (int)sizeof(out->changed);
+}
+
+static bool dp_paths_log_files(struct proof_paths *out)
+{
+    return snprintf(out->bundle_log, sizeof(out->bundle_log),
+                    "%s/%s.bundle.log", out->logs,
+                    out->key) < (int)sizeof(out->bundle_log) &&
+           snprintf(out->prefork_log, sizeof(out->prefork_log),
+                    "%s/%s.prefork.log", out->logs,
+                    out->key) < (int)sizeof(out->prefork_log) &&
+           snprintf(out->phases, sizeof(out->phases), "%s/%s.phases.txt",
+                    out->state, out->key) < (int)sizeof(out->phases) &&
+           snprintf(out->warmstart, sizeof(out->warmstart), "%s/%s.warmstart",
+                    out->state, out->key) < (int)sizeof(out->warmstart);
+}
+
 static bool proof_paths_fill(const char *repo_root, const char *local,
                              const char *base, struct proof_paths *out)
 {
-    if (!repo_root || !local || !base || !out || !proof_oid_text(local) ||
-        !proof_oid_text(base) ||
-        !platform_directory_canonical_real(repo_root, out->root,
-                                           sizeof(out->root)))
-        return false;
-    if (snprintf(out->cache, sizeof(out->cache), "%s/.cache", out->root) >=
-            (int)sizeof(out->cache) ||
-        snprintf(out->state, sizeof(out->state), "%s/zcl-dev-proof",
-                 out->cache) >=
-            (int)sizeof(out->state) ||
-        snprintf(out->receipts, sizeof(out->receipts), "%s/receipts",
-                 out->state) >= (int)sizeof(out->receipts) ||
-        snprintf(out->children, sizeof(out->children), "%s/children",
-                 out->state) >= (int)sizeof(out->children) ||
-        snprintf(out->logs, sizeof(out->logs), "%s/logs", out->state) >=
-            (int)sizeof(out->logs) ||
-        snprintf(out->requests, sizeof(out->requests), "%s/requests",
-                 out->state) >= (int)sizeof(out->requests) ||
-        snprintf(out->attempts, sizeof(out->attempts), "%s/attempts",
-                 out->state) >= (int)sizeof(out->attempts) ||
-        snprintf(out->leases, sizeof(out->leases), "%s/leases",
-                 out->state) >= (int)sizeof(out->leases) ||
-        snprintf(out->key, sizeof(out->key), "%s-%s", local, base) >=
-            (int)sizeof(out->key) ||
-        snprintf(out->receipt, sizeof(out->receipt), "%s/%s.receipt",
-                 out->receipts, out->key) >= (int)sizeof(out->receipt) ||
-        snprintf(out->lock, sizeof(out->lock), "%s/%s.running", out->state,
-                 out->key) >= (int)sizeof(out->lock) ||
-        snprintf(out->request, sizeof(out->request), "%s/%s.request",
-                 out->requests, out->key) >= (int)sizeof(out->request) ||
-        snprintf(out->lease, sizeof(out->lease), "%s/%s.lease",
-                 out->leases, out->key) >= (int)sizeof(out->lease) ||
-        snprintf(out->queue_lock, sizeof(out->queue_lock), "%s/queue.lock",
-                 out->state) >= (int)sizeof(out->queue_lock) ||
-        snprintf(out->failure, sizeof(out->failure), "%s/%s.failed",
-                 out->state, out->key) >= (int)sizeof(out->failure) ||
-        snprintf(out->changed, sizeof(out->changed), "%s/%s.files",
-                 out->state, out->key) >= (int)sizeof(out->changed) ||
-        snprintf(out->bundle_log, sizeof(out->bundle_log),
-                 "%s/%s.bundle.log", out->logs, out->key) >=
-            (int)sizeof(out->bundle_log) ||
-        snprintf(out->prefork_log, sizeof(out->prefork_log), "%s/%s.prefork.log",
-                 out->logs, out->key) >= (int)sizeof(out->prefork_log) ||
-        snprintf(out->phases, sizeof(out->phases), "%s/%s.phases.txt",
-                 out->state, out->key) >= (int)sizeof(out->phases) ||
-        snprintf(out->warmstart, sizeof(out->warmstart), "%s/%s.warmstart",
-                 out->state, out->key) >= (int)sizeof(out->warmstart))
-        return false;
-    return true;
+    return dp_paths_root(repo_root, local, base, out) &&
+           dp_paths_state_dirs(out) &&
+           dp_paths_pair_files(out, local, base) &&
+           dp_paths_log_files(out);
 }
 
 static bool proof_state_prepare(const struct proof_paths *paths)
@@ -565,6 +589,30 @@ static void git_capture_why(const char *operation,
     }
 }
 
+/* One side of the pair: a caller-supplied commit is only checked for shape,
+ * an omitted one is read from git. The two refusal strings differ per side
+ * and per cause, so both are named by the caller rather than derived. */
+static bool dp_resolve_commit(const char *repo_root, const char *requested,
+                              const char *const argv[],
+                              const char *invalid_why,
+                              const char *unavailable_why,
+                              char out[65], char *why, size_t why_len)
+{
+    if (requested && requested[0]) {
+        if (!proof_oid_text(requested)) {
+            proof_why(why, why_len, invalid_why);
+            return false;
+        }
+        (void)snprintf(out, 65, "%s", requested);
+        return true;
+    }
+    if (!git_capture(repo_root, argv, out, 65) || !proof_oid_text(out)) {
+        proof_why(why, why_len, unavailable_why);
+        return false;
+    }
+    return true;
+}
+
 static bool proof_resolve_pair_platform(const char *repo_root,
                                         const char *requested_local,
                                         const char *requested_base,
@@ -576,35 +624,17 @@ static bool proof_resolve_pair_platform(const char *repo_root,
         proof_why(why, why_len, "proof_pair_input_invalid");
         return false;
     }
-    if (requested_local && requested_local[0]) {
-        if (!proof_oid_text(requested_local)) {
-            proof_why(why, why_len, "local_commit_invalid");
-            return false;
-        }
-        (void)snprintf(local_commit, 65, "%s", requested_local);
-    } else {
-        const char *argv[] = {"git", "rev-parse", "--verify", "HEAD", NULL};
-        if (!git_capture(repo_root, argv, local_commit, 65) ||
-            !proof_oid_text(local_commit)) {
-            proof_why(why, why_len, "local_commit_unavailable");
-            return false;
-        }
-    }
-    if (requested_base && requested_base[0]) {
-        if (!proof_oid_text(requested_base)) {
-            proof_why(why, why_len, "remote_base_invalid");
-            return false;
-        }
-        (void)snprintf(remote_base, 65, "%s", requested_base);
-    } else {
-        const char *argv[] = {"git", "rev-parse", "--verify",
-                              "refs/remotes/origin/main", NULL};
-        if (!git_capture(repo_root, argv, remote_base, 65) ||
-            !proof_oid_text(remote_base)) {
-            proof_why(why, why_len, "origin_main_unavailable");
-            return false;
-        }
-    }
+    const char *local_argv[] = {"git", "rev-parse", "--verify", "HEAD", NULL};
+    const char *base_argv[] = {"git", "rev-parse", "--verify",
+                               "refs/remotes/origin/main", NULL};
+    if (!dp_resolve_commit(repo_root, requested_local, local_argv,
+                           "local_commit_invalid", "local_commit_unavailable",
+                           local_commit, why, why_len))
+        return false;
+    if (!dp_resolve_commit(repo_root, requested_base, base_argv,
+                           "remote_base_invalid", "origin_main_unavailable",
+                           remote_base, why, why_len))
+        return false;
     if (why && why_len) why[0] = 0;
     return true;
 }
@@ -672,6 +702,19 @@ static bool proof_read_text(const char *path, char *out, size_t out_size)
  * -- older receipt, a cycle-reused receipt with no fresh sidecar, a
  * corrupt file -- leaves `out` untouched so the caller's existing fallback
  * detail stands; this is display-only and can never affect admission. */
+/* One sidecar line, assigned to whichever of the three fields it names.
+ * An unrecognised key is ignored, as it always was. */
+static void dp_warm_sidecar_field(const char *line, char *warm_flag,
+                                  char donor[33], char reason[24])
+{
+    if (strncmp(line, "warm=", 5) == 0)
+        *warm_flag = line[5];
+    else if (strncmp(line, "donor=", 6) == 0)
+        (void)snprintf(donor, 33, "%s", line + 6);
+    else if (strncmp(line, "reason=", 7) == 0)
+        (void)snprintf(reason, 24, "%s", line + 7);
+}
+
 static bool warm_status_line(const char *warmstart_path, char *out,
                              size_t out_len)
 {
@@ -685,14 +728,8 @@ static bool warm_status_line(const char *warmstart_path, char *out,
         return false;
     char warm_flag = 0;
     char donor[33] = {0}, reason[24] = {0};
-    while ((line = strtok_r(NULL, "\n", &save))) {
-        if (strncmp(line, "warm=", 5) == 0)
-            warm_flag = line[5];
-        else if (strncmp(line, "donor=", 6) == 0)
-            (void)snprintf(donor, sizeof(donor), "%s", line + 6);
-        else if (strncmp(line, "reason=", 7) == 0)
-            (void)snprintf(reason, sizeof(reason), "%s", line + 7);
-    }
+    while ((line = strtok_r(NULL, "\n", &save)))
+        dp_warm_sidecar_field(line, &warm_flag, donor, reason);
     if (warm_flag == '1' && donor[0] && strcmp(donor, "-") != 0)
         return snprintf(out, out_len, "warm-start from donor %s", donor) > 0;
     if (warm_flag == '0')
@@ -770,32 +807,58 @@ static bool proof_lease_running(const char *path, int64_t *pid_out,
     return true;
 }
 
-static bool proof_request_read(const char *path, char local[65], char base[65],
-                               int64_t *wall_out, int64_t *monotonic_out)
+/* A request file is exactly five lines: the schema, the two commit ids, and
+ * the two clocks. Splitting, shape-checking and clock-parsing are three
+ * separate refusals, so a caller reading this code can see which of the
+ * three a malformed request tripped. */
+static size_t dp_request_split(char *text, char *lines[5])
 {
-    char text[320], *lines[5], *save = NULL;
-    if (!proof_private_regular(path) ||
-        !proof_read_text(path, text, sizeof(text)))
-        return false;
+    char *save = NULL;
     size_t count = 0;
     for (char *line = strtok_r(text, "\n", &save); line && count < 5;
          line = strtok_r(NULL, "\n", &save))
         lines[count++] = line;
-    if (count != 5 || strcmp(lines[0], "zcl.dev_proof_request.v1") != 0 ||
-        !proof_oid_text(lines[1]) || !proof_oid_text(lines[2]))
-        return false;
+    return count;
+}
+
+static bool dp_request_shape_ok(char *const lines[5], size_t count)
+{
+    return count == 5 &&
+           strcmp(lines[0], "zcl.dev_proof_request.v1") == 0 &&
+           proof_oid_text(lines[1]) && proof_oid_text(lines[2]);
+}
+
+static bool dp_request_stamps(const char *wall_text, const char *mono_text,
+                              int64_t *wall_out, int64_t *monotonic_out)
+{
     char *wall_end = NULL, *mono_end = NULL;
     errno = 0;
-    long long wall = strtoll(lines[3], &wall_end, 10);
+    long long wall = strtoll(wall_text, &wall_end, 10);
     bool wall_ok = errno == 0 && wall_end && *wall_end == 0 && wall > 0;
     errno = 0;
-    long long mono = strtoll(lines[4], &mono_end, 10);
+    long long mono = strtoll(mono_text, &mono_end, 10);
     if (!wall_ok || errno != 0 || !mono_end || *mono_end != 0 || mono <= 0)
         return false;
-    (void)snprintf(local, 65, "%s", lines[1]);
-    (void)snprintf(base, 65, "%s", lines[2]);
     if (wall_out) *wall_out = (int64_t)wall;
     if (monotonic_out) *monotonic_out = (int64_t)mono;
+    return true;
+}
+
+static bool proof_request_read(const char *path, char local[65], char base[65],
+                               int64_t *wall_out, int64_t *monotonic_out)
+{
+    char text[320], *lines[5];
+    if (!proof_private_regular(path) ||
+        !proof_read_text(path, text, sizeof(text)))
+        return false;
+    size_t count = dp_request_split(text, lines);
+    if (!dp_request_shape_ok(lines, count)) return false;
+    int64_t wall = 0, mono = 0;
+    if (!dp_request_stamps(lines[3], lines[4], &wall, &mono)) return false;
+    (void)snprintf(local, 65, "%s", lines[1]);
+    (void)snprintf(base, 65, "%s", lines[2]);
+    if (wall_out) *wall_out = wall;
+    if (monotonic_out) *monotonic_out = mono;
     return true;
 }
 
@@ -823,6 +886,32 @@ static bool proof_request_matches_pair(const char *path, const char *local,
  * needs the newest attempt directory for this exact pair. mkdtemp's
  * suffix is random, not time-ordered, so "newest" means highest mtime,
  * not lexicographic order. */
+/* Highest-mtime attempt directory carrying this pair's prefix. The caller
+ * owns the directory handle; this only walks it. */
+static bool dp_attempt_dir_pick(DIR *dir, const char *attempts,
+                                const char *prefix, size_t prefix_len,
+                                char newest[PATH_MAX])
+{
+    bool found = false;
+    time_t newest_mtime = 0;
+    for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
+        if (strncmp(entry->d_name, prefix, prefix_len) != 0)
+            continue;
+        char candidate[PATH_MAX];
+        if (snprintf(candidate, sizeof(candidate), "%s/%s", attempts,
+                    entry->d_name) >= (int)sizeof(candidate))
+            continue;
+        struct stat st;
+        if (stat(candidate, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (!found || st.st_mtime > newest_mtime) {
+            found = true;
+            newest_mtime = st.st_mtime;
+            (void)snprintf(newest, PATH_MAX, "%s", candidate);
+        }
+    }
+    return found;
+}
+
 static bool proof_attempt_dir_newest(const struct proof_paths *paths,
                                      char *out, size_t out_len)
 {
@@ -832,24 +921,9 @@ static bool proof_attempt_dir_newest(const struct proof_paths *paths,
     if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix)) return false;
     DIR *dir = opendir(paths->attempts);
     if (!dir) return false;
-    bool found = false;
-    time_t newest_mtime = 0;
     char newest[PATH_MAX] = {0};
-    for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
-        if (strncmp(entry->d_name, prefix, (size_t)prefix_len) != 0)
-            continue;
-        char candidate[PATH_MAX];
-        if (snprintf(candidate, sizeof(candidate), "%s/%s", paths->attempts,
-                    entry->d_name) >= (int)sizeof(candidate))
-            continue;
-        struct stat st;
-        if (stat(candidate, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        if (!found || st.st_mtime > newest_mtime) {
-            found = true;
-            newest_mtime = st.st_mtime;
-            (void)snprintf(newest, sizeof(newest), "%s", candidate);
-        }
-    }
+    bool found = dp_attempt_dir_pick(dir, paths->attempts, prefix,
+                                     (size_t)prefix_len, newest);
     (void)closedir(dir);
     if (!found) return false;
     char logs[PATH_MAX];
@@ -1382,28 +1456,46 @@ static bool dependency_parent_ensure(const char *path)
 }
 
 /* A refusal a reader can act on names the failure, not a number. */
-static const char *proof_errno_name(int value)
+/* The names split by what the failure is about: the first group is the
+ * path -- how it is spelled, what it resolves to, what may be done with it
+ * -- and the second is the store behind it. Neither group knows the
+ * fallback text; only proof_errno_name below names it. */
+static const char *dp_errno_name_path(int value)
 {
     switch (value) {
-    case 0: return "no errno";
     case EACCES: return "EACCES";
-    case EDQUOT: return "EDQUOT";
     case EEXIST: return "EEXIST";
     case EINVAL: return "EINVAL";
-    case EIO: return "EIO";
     case EISDIR: return "EISDIR";
     case ELOOP: return "ELOOP";
     case EMLINK: return "EMLINK";
     case ENAMETOOLONG: return "ENAMETOOLONG";
     case ENOENT: return "ENOENT";
-    case ENOMEM: return "ENOMEM";
-    case ENOSPC: return "ENOSPC";
     case ENOTDIR: return "ENOTDIR";
     case EPERM: return "EPERM";
+    default: return NULL;
+    }
+}
+
+static const char *dp_errno_name_store(int value)
+{
+    switch (value) {
+    case EDQUOT: return "EDQUOT";
+    case EIO: return "EIO";
+    case ENOMEM: return "ENOMEM";
+    case ENOSPC: return "ENOSPC";
     case EROFS: return "EROFS";
     case EXDEV: return "EXDEV";
-    default: return "unrecognised errno";
+    default: return NULL;
     }
+}
+
+static const char *proof_errno_name(int value)
+{
+    if (value == 0) return "no errno";
+    const char *name = dp_errno_name_path(value);
+    if (!name) name = dp_errno_name_store(value);
+    return name ? name : "unrecognised errno";
 }
 
 /* Every generation owns independent dependency inodes. Creating another
@@ -5423,6 +5515,34 @@ static void proof_queue_coalesce(const char *root, const char *requests,
     (void)closedir(dir);
 }
 
+/* Everything the queue lock protects, in one step: pick the oldest pending
+ * request, build its paths, publish a lease, move the request into this
+ * attempt, and fold away the requests it supersedes. Returns 0 when the
+ * queue was empty, 1 when this attempt now owns a pair, -1 when the claim
+ * failed. The caller holds and releases the lock. */
+static int dp_queue_claim_locked(const char *repo_root, const char *requests,
+                                 const char *attempts,
+                                 char selected[PATH_MAX], char local[65],
+                                 char base[65], struct proof_paths *pair,
+                                 struct proof_paths *attempt)
+{
+    if (!proof_queue_select(requests, selected, local, base)) return 0;
+    char claimed[PATH_MAX];
+    bool prepared = proof_paths_fill(repo_root, local, base, pair) &&
+        proof_state_prepare(pair) &&
+        proof_attempt_paths_prepare(pair, attempt) &&
+        snprintf(claimed, sizeof(claimed), "%s/request", attempt->attempt) <
+            (int)sizeof(claimed) && proof_lease_publish(attempt);
+    if (prepared && rename(selected, claimed) != 0) {
+        if (proof_lease_current(attempt)) (void)unlink(attempt->lease);
+        prepared = false;
+    }
+    if (!prepared) return -1;
+    proof_queue_coalesce(pair->root, requests, selected, attempts, local,
+                         base);
+    return 1;
+}
+
 static int proof_queue_run_next_platform(const char *repo_root,
                                          char *why, size_t why_len)
 {
@@ -5440,28 +5560,14 @@ static int proof_queue_run_next_platform(const char *repo_root,
         proof_why(why, why_len, "proof_queue_lock_failed");
         return -1;
     }
-    if (!proof_queue_select(requests, selected, local, base)) {
-        (void)flock(fd, LOCK_UN);
-        close(fd);
-        return 0;
-    }
     struct proof_paths pair, attempt;
-    char claimed[PATH_MAX];
-    bool prepared = proof_paths_fill(repo_root, local, base, &pair) &&
-        proof_state_prepare(&pair) &&
-        proof_attempt_paths_prepare(&pair, &attempt) &&
-        snprintf(claimed, sizeof(claimed), "%s/request", attempt.attempt) <
-            (int)sizeof(claimed) && proof_lease_publish(&attempt);
-    if (prepared && rename(selected, claimed) != 0) {
-        if (proof_lease_current(&attempt)) (void)unlink(attempt.lease);
-        prepared = false;
-    }
-    if (prepared)
-        proof_queue_coalesce(pair.root, requests, selected, attempts, local,
-                             base);
+    int claimed = dp_queue_claim_locked(repo_root, requests, attempts,
+                                        selected, local, base, &pair,
+                                        &attempt);
     (void)flock(fd, LOCK_UN);
     close(fd);
-    if (!prepared) {
+    if (claimed == 0) return 0;
+    if (claimed < 0) {
         proof_why(why, why_len, "proof_queue_claim_failed");
         return -1;
     }
