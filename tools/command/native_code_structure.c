@@ -26,133 +26,165 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ── code.group ─────────────────────────────────────────────────────────── */
-void zcl_native_handle_code_group(const struct zcl_command_request *request,
+/* code.group with no arg: the top buckets (direct children of "root", plus
+ * root). */
+static void code_group_render_top(struct codeindex *ci,
+                                  const struct ci_group *groups, int ng,
                                   struct zcl_command_reply *reply)
 {
-    struct codeindex *ci = code_open_source_view(request, reply);
-    if (!ci) return;
-
-    const char *arg = code_str(request, "group");
-
-    static struct ci_group groups[512];
-    int ng = codeindex_groups(ci, groups, (int)(sizeof(groups) / sizeof(groups[0])));
-    if (ng < 0) ng = 0;
-
     struct json_value list, lines;
     json_init(&list);  json_set_array(&list);
     json_init(&lines); json_set_array(&lines);
-
-    if (!arg) {
-        /* No arg: the top buckets (direct children of "root", plus root). */
-        int shown = 0;
-        for (int i = 0; i < ng; i++) {
-            const char *p = groups[i].parent;
-            bool top = (p[0] == '\0') || strcmp(p, "root") == 0;
-            if (!top) continue;
-            if (shown >= CODE_SUBGROUP_CAP) break;
-            char purpose[80];
-            code_trunc(purpose, sizeof(purpose), groups[i].purpose, 64);
-            int fc = codeindex_count_files_in_group(ci, groups[i].path, true);
-            if (fc < 0) fc = 0;
-            struct json_value o;
-            json_init(&o); json_set_object(&o);
-            (void)json_push_kv_str(&o, "path", groups[i].path);
-            (void)json_push_kv_str(&o, "kind", groups[i].kind);
-            (void)json_push_kv_int(&o, "file_count", fc);
-            (void)json_push_kv_str(&o, "purpose", purpose);
-            code_push_obj(&list, &o);
-            char line[176];
-            (void)snprintf(line, sizeof(line), "%s (%d files)%s%s", groups[i].path,
-                           fc, purpose[0] ? " — " : "", purpose);
-            code_push_line(&lines, line);
-            shown++;
-        }
-        (void)json_push_kv_str(&reply->data, "scope", "top");
-        (void)json_push_kv(&reply->data, "groups", &list);
-        (void)json_push_kv(&reply->data, "lines", &lines);
-        (void)json_push_kv_int(&reply->data, "count", shown);
-        char summary[128];
-        (void)snprintf(summary, sizeof(summary),
-                       "%d top source groups; run `code group <path>` to descend",
-                       shown);
-        (void)json_push_kv_str(&reply->data, "summary", summary);
-        json_free(&list); json_free(&lines);
-        codeindex_close(ci);
-        return;
+    int shown = 0;
+    for (int i = 0; i < ng; i++) {
+        const char *p = groups[i].parent;
+        bool top = (p[0] == '\0') || strcmp(p, "root") == 0;
+        if (!top) continue;
+        if (shown >= CODE_SUBGROUP_CAP) break;
+        char purpose[80];
+        code_trunc(purpose, sizeof(purpose), groups[i].purpose, 64);
+        int fc = codeindex_count_files_in_group(ci, groups[i].path, true);
+        if (fc < 0) fc = 0;
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "path", groups[i].path);
+        (void)json_push_kv_str(&o, "kind", groups[i].kind);
+        (void)json_push_kv_int(&o, "file_count", fc);
+        (void)json_push_kv_str(&o, "purpose", purpose);
+        code_push_obj(&list, &o);
+        char line[176];
+        (void)snprintf(line, sizeof(line), "%s (%d files)%s%s", groups[i].path,
+                       fc, purpose[0] ? " — " : "", purpose);
+        code_push_line(&lines, line);
+        shown++;
     }
+    (void)json_push_kv_str(&reply->data, "scope", "top");
+    (void)json_push_kv(&reply->data, "groups", &list);
+    (void)json_push_kv(&reply->data, "lines", &lines);
+    (void)json_push_kv_int(&reply->data, "count", shown);
+    char summary[128];
+    (void)snprintf(summary, sizeof(summary),
+                   "%d top source groups; run `code group <path>` to descend",
+                   shown);
+    (void)json_push_kv_str(&reply->data, "summary", summary);
+    json_free(&list); json_free(&lines);
+}
 
-    /* Arg given: that group's immediate subgroups, then its files. */
+/* code.group with an arg, one assembly pass: `arg`'s immediate subgroups
+ * (purposes included only when `with_purpose`), then its files. Shared by
+ * the full and the purpose-shrunk retry in code_group_render_arg below. */
+static int code_group_fill_one_pass(struct codeindex *ci,
+                                    const struct ci_group *groups, int ng,
+                                    const char *arg, bool with_purpose,
+                                    struct ci_file *files, int nf,
+                                    struct json_value *list,
+                                    struct json_value *farr,
+                                    struct json_value *lines)
+{
+    int nsub = 0;
+    for (int i = 0; i < ng && nsub < CODE_SUBGROUP_CAP; i++) {
+        if (strcmp(groups[i].parent, arg) != 0) continue;
+        int fc = codeindex_count_files_in_group(ci, groups[i].path, true);
+        if (fc < 0) fc = 0;
+        char purpose[80];
+        purpose[0] = '\0';
+        if (with_purpose)
+            code_trunc(purpose, sizeof(purpose), groups[i].purpose, 64);
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "path", groups[i].path);
+        (void)json_push_kv_str(&o, "kind", groups[i].kind);
+        (void)json_push_kv_int(&o, "file_count", fc);
+        if (with_purpose)
+            (void)json_push_kv_str(&o, "purpose", purpose);
+        code_push_obj(list, &o);
+        char sline[176];
+        (void)snprintf(sline, sizeof(sline), "%s (%d files)%s%s",
+                       groups[i].path, fc, purpose[0] ? " — " : "",
+                       purpose);
+        code_push_line(lines, sline);
+        nsub++;
+    }
+    for (int i = 0; i < nf; i++) {
+        char purpose[72];
+        code_trunc(purpose, sizeof(purpose), files[i].purpose, 55);
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "path", files[i].path);
+        (void)json_push_kv_str(&o, "purpose", purpose);
+        code_push_obj(farr, &o);
+        char line[200];
+        (void)snprintf(line, sizeof(line), "%s%s%s", files[i].path,
+                       purpose[0] ? " — " : "", purpose);
+        code_push_line(lines, line);
+    }
+    return nsub;
+}
+
+/* Whether the three assembled JSON parts for code.group's arg branch fit
+ * inside the reply envelope, with ~900 bytes reserved for the scalar fields
+ * pushed after them; json_write overflow counts as the full scratch. */
+static bool code_group_arg_fits_budget(const struct json_value *list,
+                                       const struct json_value *farr,
+                                       const struct json_value *lines)
+{
+    char scratch[ZCL_COMMAND_RESULT_BUDGET + 1];
+    size_t used = 0;
+    const struct json_value *parts[] = { list, farr, lines };
+    for (size_t p = 0; p < sizeof(parts) / sizeof(parts[0]); p++) {
+        size_t n = json_write(parts[p], scratch, sizeof(scratch));
+        used += (n == 0 || n >= sizeof(scratch)) ? sizeof(scratch) : n;
+    }
+    return used <= ZCL_COMMAND_RESULT_BUDGET - 900;
+}
+
+/* code.group with an arg: that group's immediate subgroups, then its files.
+ * Subgroup purposes mirror the top-bucket branch above, but a LARGE group
+ * (lib: 34 modules x ~64-char purposes, emitted twice — JSON field + text
+ * line) cannot fit the kernel's 4096-byte ZCL_COMMAND_RESULT_BUDGET.
+ * Assemble WITH purposes first, measure, and rebuild without them when the
+ * reply would overflow: a purpose-less listing (the pre-purpose output)
+ * beats a RESPONSE_BUDGET_EXCEEDED error. */
+/* Assemble code.group's arg-branch subgroups/files/lines, retrying without
+ * purposes if the with-purpose pass would overflow the reply budget (see
+ * code_group_render_arg's header comment). Returns the subgroup count. */
+static int code_group_assemble_with_retry(
+    struct codeindex *ci, const struct ci_group *groups, int ng,
+    const char *arg, struct ci_file *files, int nf, struct json_value *list,
+    struct json_value *farr, struct json_value *lines)
+{
+    int nsub = 0;
+    for (bool with_purpose = true;; with_purpose = false) {
+        json_free(list);  json_init(list);  json_set_array(list);
+        json_free(lines); json_init(lines); json_set_array(lines);
+        json_free(farr);  json_init(farr);  json_set_array(farr);
+        nsub = code_group_fill_one_pass(ci, groups, ng, arg, with_purpose,
+                                        files, nf, list, farr, lines);
+        if (!with_purpose) break;
+        if (code_group_arg_fits_budget(list, farr, lines))
+            break;
+    }
+    return nsub;
+}
+
+static void code_group_render_arg(struct codeindex *ci,
+                                  const struct ci_group *groups, int ng,
+                                  const char *arg,
+                                  struct zcl_command_reply *reply)
+{
     static struct ci_file files[CODE_FILE_CAP + 1];
     int nf = codeindex_files_in_group(ci, arg, files, CODE_FILE_CAP + 1);
     if (nf < 0) nf = 0;
     bool files_trunc = nf > CODE_FILE_CAP;
     if (files_trunc) nf = CODE_FILE_CAP;
 
-    struct json_value farr;
-    json_init(&farr); json_set_array(&farr);
+    struct json_value list, farr, lines;
+    json_init(&list);  json_set_array(&list);
+    json_init(&farr);  json_set_array(&farr);
+    json_init(&lines); json_set_array(&lines);
 
-    /* Subgroup purposes mirror the top-bucket branch above, but a LARGE group
-     * (lib: 34 modules x ~64-char purposes, emitted twice — JSON field + text
-     * line) cannot fit the kernel's 4096-byte ZCL_COMMAND_RESULT_BUDGET.
-     * Assemble WITH purposes first, measure, and rebuild without them when the
-     * reply would overflow: a purpose-less listing (the pre-purpose output)
-     * beats a RESPONSE_BUDGET_EXCEEDED error. */
-    int nsub = 0;
-    for (bool with_purpose = true;; with_purpose = false) {
-        json_free(&list);  json_init(&list);  json_set_array(&list);
-        json_free(&lines); json_init(&lines); json_set_array(&lines);
-        json_free(&farr);  json_init(&farr);  json_set_array(&farr);
-        nsub = 0;
-        for (int i = 0; i < ng && nsub < CODE_SUBGROUP_CAP; i++) {
-            if (strcmp(groups[i].parent, arg) != 0) continue;
-            int fc = codeindex_count_files_in_group(ci, groups[i].path, true);
-            if (fc < 0) fc = 0;
-            char purpose[80];
-            purpose[0] = '\0';
-            if (with_purpose)
-                code_trunc(purpose, sizeof(purpose), groups[i].purpose, 64);
-            struct json_value o;
-            json_init(&o); json_set_object(&o);
-            (void)json_push_kv_str(&o, "path", groups[i].path);
-            (void)json_push_kv_str(&o, "kind", groups[i].kind);
-            (void)json_push_kv_int(&o, "file_count", fc);
-            if (with_purpose)
-                (void)json_push_kv_str(&o, "purpose", purpose);
-            code_push_obj(&list, &o);
-            char sline[176];
-            (void)snprintf(sline, sizeof(sline), "%s (%d files)%s%s",
-                           groups[i].path, fc, purpose[0] ? " — " : "",
-                           purpose);
-            code_push_line(&lines, sline);
-            nsub++;
-        }
-        for (int i = 0; i < nf; i++) {
-            char purpose[72];
-            code_trunc(purpose, sizeof(purpose), files[i].purpose, 55);
-            struct json_value o;
-            json_init(&o); json_set_object(&o);
-            (void)json_push_kv_str(&o, "path", files[i].path);
-            (void)json_push_kv_str(&o, "purpose", purpose);
-            code_push_obj(&farr, &o);
-            char line[200];
-            (void)snprintf(line, sizeof(line), "%s%s%s", files[i].path,
-                           purpose[0] ? " — " : "", purpose);
-            code_push_line(&lines, line);
-        }
-        if (!with_purpose) break;
-        /* ~900 bytes reserved for the result envelope + the scalar fields
-         * pushed below; json_write overflow counts as the full scratch. */
-        char scratch[ZCL_COMMAND_RESULT_BUDGET + 1];
-        size_t used = 0;
-        const struct json_value *parts[] = { &list, &farr, &lines };
-        for (size_t p = 0; p < sizeof(parts) / sizeof(parts[0]); p++) {
-            size_t n = json_write(parts[p], scratch, sizeof(scratch));
-            used += (n == 0 || n >= sizeof(scratch)) ? sizeof(scratch) : n;
-        }
-        if (used <= ZCL_COMMAND_RESULT_BUDGET - 900)
-            break;
-    }
+    int nsub = code_group_assemble_with_retry(ci, groups, ng, arg, files, nf,
+                                              &list, &farr, &lines);
 
     (void)json_push_kv_str(&reply->data, "scope", "group");
     (void)json_push_kv_str(&reply->data, "group", arg);
@@ -171,10 +203,99 @@ void zcl_native_handle_code_group(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
     json_free(&list); json_free(&farr); json_free(&lines);
+}
+
+/* ── code.group ─────────────────────────────────────────────────────────── */
+void zcl_native_handle_code_group(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply)
+{
+    struct codeindex *ci = code_open_source_view(request, reply);
+    if (!ci) return;
+
+    const char *arg = code_str(request, "group");
+
+    static struct ci_group groups[512];
+    int ng = codeindex_groups(ci, groups, (int)(sizeof(groups) / sizeof(groups[0])));
+    if (ng < 0) ng = 0;
+
+    if (!arg)
+        code_group_render_top(ci, groups, ng, reply);
+    else
+        code_group_render_arg(ci, groups, ng, arg, reply);
+
     codeindex_close(ci);
 }
 
 /* ── code.file ──────────────────────────────────────────────────────────── */
+/* D4: `"includes":[]` had exactly one meaning here — "this file includes
+ * nothing" — and it was WRONG for every header in the tree. The edges come
+ * from compiler depfiles keyed on the translation unit, so a header (or a
+ * .def registry) can never appear on the left of one; a file whose entire
+ * body is `#include "base/safe_alloc.h"` rendered include_count 0 with
+ * includes_truncated false, and any proof graph built on that inherited the
+ * lie. There was an honest flag for "the cap fired" and none for "the graph
+ * cannot answer" — so add one, and use the SAME word the impact closure and
+ * the result cache use for an absent graph. */
+static const char *code_file_includes_status(struct codeindex *ci,
+                                             const char *path, bool inc_trunc)
+{
+    if (inc_trunc) return "closure-truncated";
+    if (!codeindex_path_is_translation_unit(path))
+        return "not-a-translation-unit";
+    int64_t edges = codeindex_include_edge_count(ci);
+    return edges == 0 ? "no-include-graph" : "complete";
+}
+
+/* code.file's `symbols` array: the structured (machine-readable) form. The
+ * redundant per-symbol human `lines` string is dropped so a large file's
+ * reply fits the 4096-byte result budget; `signature` carries the
+ * human-readable content. */
+static void code_file_render_symbols(const struct ci_symbol *syms, int ns,
+                                     const char *path,
+                                     struct json_value *sarr)
+{
+    for (int i = 0; i < ns; i++) {
+        char sig[72];
+        code_trunc(sig, sizeof(sig), syms[i].signature, 60);
+        int line = syms[i].def_path[0] && strcmp(syms[i].def_path, path) == 0
+                       ? syms[i].def_line : syms[i].decl_line;
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "name", syms[i].name);
+        char kind[2] = { syms[i].kind, '\0' };
+        (void)json_push_kv_str(&o, "kind", kind);
+        (void)json_push_kv_int(&o, "line", line);
+        (void)json_push_kv_str(&o, "signature", sig);
+        if (syms[i].partial)
+            (void)json_push_kv_bool(&o, "partial", true);
+        code_push_obj(sarr, &o);
+    }
+}
+
+/* code.file's data collection: the file row (may be not-found), its symbols
+ * (capped/truncation-flagged), and its includes (capped/truncation-flagged).
+ * `syms` and `incs` must each hold at least CODE_SYM_CAP+1 / CODE_INC_CAP+1
+ * entries. */
+static void code_file_collect(struct codeindex *ci, const char *path,
+                              struct ci_file *finfo, bool *ffound,
+                              struct ci_symbol *syms, int *ns,
+                              bool *syms_trunc, char incs[][256], int *ni,
+                              bool *inc_trunc)
+{
+    *ffound = false;
+    (void)codeindex_file(ci, path, finfo, ffound);
+
+    *ns = codeindex_symbols_in_file(ci, path, syms, CODE_SYM_CAP + 1);
+    if (*ns < 0) *ns = 0;
+    *syms_trunc = *ns > CODE_SYM_CAP;
+    if (*syms_trunc) *ns = CODE_SYM_CAP;
+
+    *ni = codeindex_includes_of_file(ci, path, incs, CODE_INC_CAP + 1);
+    if (*ni < 0) *ni = 0;
+    *inc_trunc = *ni > CODE_INC_CAP;
+    if (*inc_trunc) *ni = CODE_INC_CAP;
+}
+
 void zcl_native_handle_code_file(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
@@ -190,40 +311,17 @@ void zcl_native_handle_code_file(const struct zcl_command_request *request,
     if (!ci) return;
 
     struct ci_file finfo;
-    bool ffound = false;
-    (void)codeindex_file(ci, path, &finfo, &ffound);
-
+    bool ffound;
     static struct ci_symbol syms[CODE_SYM_CAP + 1];
-    int ns = codeindex_symbols_in_file(ci, path, syms, CODE_SYM_CAP + 1);
-    if (ns < 0) ns = 0;
-    bool syms_trunc = ns > CODE_SYM_CAP;
-    if (syms_trunc) ns = CODE_SYM_CAP;
-
+    int ns;
+    bool syms_trunc;
     static char incs[CODE_INC_CAP + 1][256];
-    int ni = codeindex_includes_of_file(ci, path, incs, CODE_INC_CAP + 1);
-    if (ni < 0) ni = 0;
-    bool inc_trunc = ni > CODE_INC_CAP;
-    if (inc_trunc) ni = CODE_INC_CAP;
+    int ni;
+    bool inc_trunc;
+    code_file_collect(ci, path, &finfo, &ffound, syms, &ns, &syms_trunc, incs,
+                      &ni, &inc_trunc);
 
-    /* D4: `"includes":[]` had exactly one meaning here — "this file includes
-     * nothing" — and it was WRONG for every header in the tree. The edges come
-     * from compiler depfiles keyed on the translation unit, so a header (or a
-     * .def registry) can never appear on the left of one; a file whose entire
-     * body is `#include "base/safe_alloc.h"` rendered include_count 0 with
-     * includes_truncated false, and any proof graph built on that inherited the
-     * lie. There was an honest flag for "the cap fired" and none for "the graph
-     * cannot answer" — so add one, and use the SAME word the impact closure and
-     * the result cache use for an absent graph. */
-    const char *inc_status = "complete";
-    if (inc_trunc) {
-        inc_status = "closure-truncated";
-    } else if (!codeindex_path_is_translation_unit(path)) {
-        inc_status = "not-a-translation-unit";
-    } else {
-        int64_t edges = codeindex_include_edge_count(ci);
-        if (edges == 0)
-            inc_status = "no-include-graph";
-    }
+    const char *inc_status = code_file_includes_status(ci, path, inc_trunc);
 
     (void)json_push_kv_str(&reply->data, "path", path);
     (void)json_push_kv_str(&reply->data, "group", ffound ? finfo.group : "");
@@ -240,22 +338,7 @@ void zcl_native_handle_code_file(const struct zcl_command_request *request,
     json_init(&sarr);  json_set_array(&sarr);
     json_init(&iarr);  json_set_array(&iarr);
 
-    for (int i = 0; i < ns; i++) {
-        char sig[72];
-        code_trunc(sig, sizeof(sig), syms[i].signature, 60);
-        int line = syms[i].def_path[0] && strcmp(syms[i].def_path, path) == 0
-                       ? syms[i].def_line : syms[i].decl_line;
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "name", syms[i].name);
-        char kind[2] = { syms[i].kind, '\0' };
-        (void)json_push_kv_str(&o, "kind", kind);
-        (void)json_push_kv_int(&o, "line", line);
-        (void)json_push_kv_str(&o, "signature", sig);
-        if (syms[i].partial)
-            (void)json_push_kv_bool(&o, "partial", true);
-        code_push_obj(&sarr, &o);
-    }
+    code_file_render_symbols(syms, ns, path, &sarr);
     for (int i = 0; i < ni; i++)
         code_push_line(&iarr, incs[i]);
 
@@ -286,6 +369,31 @@ void zcl_native_handle_code_file(const struct zcl_command_request *request,
 }
 
 /* ── code.sym ───────────────────────────────────────────────────────────── */
+/* code.sym's other_defs: same-named definitions elsewhere (overloads/statics
+ * in multiple files), excluding the primary. Returns the count rendered. */
+static int code_sym_other_defs(struct codeindex *ci, const char *name,
+                               const struct ci_symbol *s,
+                               struct json_value *others)
+{
+    static struct ci_symbol hits[CODE_OTHER_DEF_CAP + 4];
+    int nh = codeindex_find(ci, name, hits, (int)(sizeof(hits) / sizeof(hits[0])));
+    if (nh < 0) nh = 0;
+    int shown = 0;
+    for (int i = 0; i < nh && shown < CODE_OTHER_DEF_CAP; i++) {
+        if (strcmp(hits[i].name, name) != 0) continue;              /* exact only */
+        if (hits[i].def_path[0] == '\0') continue;                  /* bare decl */
+        if (hits[i].def_line == s->def_line &&
+            strcmp(hits[i].def_path, s->def_path) == 0) continue;   /* the primary */
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "def_path", hits[i].def_path);
+        (void)json_push_kv_int(&o, "def_line", hits[i].def_line);
+        code_push_obj(others, &o);
+        shown++;
+    }
+    return shown;
+}
+
 void zcl_native_handle_code_sym(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
@@ -341,24 +449,9 @@ void zcl_native_handle_code_sym(const struct zcl_command_request *request,
         (void)json_push_kv_str(&reply->data, "card", card);
 
     /* Other same-named definitions (overloads/statics in multiple files). */
-    static struct ci_symbol hits[CODE_OTHER_DEF_CAP + 4];
-    int nh = codeindex_find(ci, name, hits, (int)(sizeof(hits) / sizeof(hits[0])));
-    if (nh < 0) nh = 0;
     struct json_value others;
     json_init(&others); json_set_array(&others);
-    int shown = 0;
-    for (int i = 0; i < nh && shown < CODE_OTHER_DEF_CAP; i++) {
-        if (strcmp(hits[i].name, name) != 0) continue;              /* exact only */
-        if (hits[i].def_path[0] == '\0') continue;                  /* bare decl */
-        if (hits[i].def_line == s.def_line &&
-            strcmp(hits[i].def_path, s.def_path) == 0) continue;    /* the primary */
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "def_path", hits[i].def_path);
-        (void)json_push_kv_int(&o, "def_line", hits[i].def_line);
-        code_push_obj(&others, &o);
-        shown++;
-    }
+    int shown = code_sym_other_defs(ci, name, &s, &others);
     if (shown > 0)
         (void)json_push_kv(&reply->data, "other_defs", &others);
     json_free(&others);
@@ -438,6 +531,32 @@ void zcl_native_handle_code_refs(const struct zcl_command_request *request,
 }
 
 /* ── code.find ──────────────────────────────────────────────────────────── */
+/* code.find's matches[]/lines[] render pass over the `nh` hits already
+ * fetched (and capped) by the caller. */
+static void code_find_render_hits(const struct ci_symbol *hits, int nh,
+                                  struct json_value *arr,
+                                  struct json_value *lines)
+{
+    for (int i = 0; i < nh; i++) {
+        char sig[64];
+        code_trunc(sig, sizeof(sig), hits[i].signature, 52);
+        const char *p = hits[i].def_path[0] ? hits[i].def_path : hits[i].decl_path;
+        int line = hits[i].def_path[0] ? hits[i].def_line : hits[i].decl_line;
+        char kind[2] = { hits[i].kind, '\0' };
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "name", hits[i].name);
+        (void)json_push_kv_str(&o, "kind", kind);
+        (void)json_push_kv_str(&o, "def_path", p);
+        (void)json_push_kv_int(&o, "def_line", line);
+        (void)json_push_kv_str(&o, "signature", sig);
+        code_push_obj(arr, &o);
+        char l[200];
+        (void)snprintf(l, sizeof(l), "%s  %s:%d", hits[i].name, p, line);
+        code_push_line(lines, l);
+    }
+}
+
 void zcl_native_handle_code_find(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
@@ -464,24 +583,7 @@ void zcl_native_handle_code_find(const struct zcl_command_request *request,
     struct json_value arr, lines;
     json_init(&arr);   json_set_array(&arr);
     json_init(&lines); json_set_array(&lines);
-    for (int i = 0; i < nh; i++) {
-        char sig[64];
-        code_trunc(sig, sizeof(sig), hits[i].signature, 52);
-        const char *p = hits[i].def_path[0] ? hits[i].def_path : hits[i].decl_path;
-        int line = hits[i].def_path[0] ? hits[i].def_line : hits[i].decl_line;
-        char kind[2] = { hits[i].kind, '\0' };
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "name", hits[i].name);
-        (void)json_push_kv_str(&o, "kind", kind);
-        (void)json_push_kv_str(&o, "def_path", p);
-        (void)json_push_kv_int(&o, "def_line", line);
-        (void)json_push_kv_str(&o, "signature", sig);
-        code_push_obj(&arr, &o);
-        char l[200];
-        (void)snprintf(l, sizeof(l), "%s  %s:%d", hits[i].name, p, line);
-        code_push_line(&lines, l);
-    }
+    code_find_render_hits(hits, nh, &arr, &lines);
 
     (void)json_push_kv_str(&reply->data, "query", text);
     (void)json_push_kv(&reply->data, "matches", &arr);
@@ -516,6 +618,61 @@ void zcl_native_handle_code_find(const struct zcl_command_request *request,
  * in-tree #include fan-out) and `direct_callers` (call sites directly
  * referencing a symbol this file defines, summed over its symbol table) are
  * cheap depth-1 numbers for a quick glance, distinct from the full closure. */
+/* code.impact's INCLUDE dimension — the half of the blast radius the
+ * call-graph closure structurally cannot see. `impacted_files` is a
+ * CALL-graph answer, so a macro-only header, an enum, a typedef, or an
+ * X-macro registry comes back with a blast radius of exactly itself even
+ * though every translation unit that reads it recompiles. These are the
+ * files the compiler proves read `path`, taken from its own depfiles.
+ * Reported as a separate array on purpose: unioning them into
+ * `impacted_files` would hide which graph answered, and the two have
+ * different completeness conditions. Returns the true count (`*nd_listed`
+ * carries the rendered, capped count). */
+static int code_impact_emit_dependents(struct codeindex *ci, const char *path,
+                                       struct zcl_command_reply *reply,
+                                       int *nd_listed,
+                                       enum codeindex_include_dim *idim)
+{
+    static char dependents[CODE_IMPACT_CAP][256];
+    *idim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+    int nd = codeindex_reverse_includes(ci, path, dependents, CODE_IMPACT_CAP,
+                                        idim);
+    if (nd < 0) nd = 0;
+    *nd_listed = nd < CODE_IMPACT_INCDEP_LIST_CAP
+                     ? nd : CODE_IMPACT_INCDEP_LIST_CAP;
+    struct json_value darr;
+    json_init(&darr); json_set_array(&darr);
+    for (int i = 0; i < *nd_listed; i++) code_push_line(&darr, dependents[i]);
+    (void)json_push_kv(&reply->data, "include_dependents", &darr);
+    (void)json_push_kv_int(&reply->data, "include_dependents_listed",
+                           *nd_listed);
+    (void)json_push_kv_int(&reply->data, "include_dependent_count", nd);
+    (void)json_push_kv_str(&reply->data, "include_dimension",
+                           codeindex_include_dim_label(*idim));
+    json_free(&darr);
+    return nd;
+}
+
+/* code.impact's direct_callers: call sites directly referencing a symbol
+ * DEFINED in this file, summed over its symbol table
+ * (codeindex_symbols_in_file + codeindex_callers per symbol) — the depth-1
+ * fan-out the closure walk would expand from first, reported before that
+ * expansion. */
+static int code_impact_direct_callers(struct codeindex *ci, const char *path)
+{
+    static struct ci_symbol syms[CODE_IMPACT_SYM_CAP];
+    int nsym = codeindex_symbols_in_file(ci, path, syms, CODE_IMPACT_SYM_CAP);
+    if (nsym < 0) nsym = 0;
+    static struct ci_ref callerbuf[CODE_IMPACT_REF_CAP];
+    int direct_callers = 0;
+    for (int i = 0; i < nsym; i++) {
+        int nc = codeindex_callers(ci, syms[i].name, callerbuf,
+                                   CODE_IMPACT_REF_CAP);
+        if (nc > 0) direct_callers += nc;
+    }
+    return direct_callers;
+}
+
 void zcl_native_handle_code_impact(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -556,30 +713,9 @@ void zcl_native_handle_code_impact(const struct zcl_command_request *request,
     (void)json_push_kv_bool(&reply->data, "truncated", truncated);
     json_free(&arr);
 
-    /* The INCLUDE dimension — the half of the blast radius the walk above
-     * structurally cannot see. `impacted_files` is a CALL-graph answer, so a
-     * macro-only header, an enum, a typedef, or an X-macro registry comes back
-     * with a blast radius of exactly itself even though every translation unit
-     * that reads it recompiles. These are the files the compiler proves read
-     * `path`, taken from its own depfiles. Reported as a separate array on
-     * purpose: unioning them into `impacted_files` would hide which graph
-     * answered, and the two have different completeness conditions. */
-    static char dependents[CODE_IMPACT_CAP][256];
-    enum codeindex_include_dim idim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
-    int nd = codeindex_reverse_includes(ci, path, dependents, CODE_IMPACT_CAP,
-                                        &idim);
-    if (nd < 0) nd = 0;
-    int nd_listed = nd < CODE_IMPACT_INCDEP_LIST_CAP
-                        ? nd : CODE_IMPACT_INCDEP_LIST_CAP;
-    struct json_value darr;
-    json_init(&darr); json_set_array(&darr);
-    for (int i = 0; i < nd_listed; i++) code_push_line(&darr, dependents[i]);
-    (void)json_push_kv(&reply->data, "include_dependents", &darr);
-    (void)json_push_kv_int(&reply->data, "include_dependents_listed", nd_listed);
-    (void)json_push_kv_int(&reply->data, "include_dependent_count", nd);
-    (void)json_push_kv_str(&reply->data, "include_dimension",
-                           codeindex_include_dim_label(idim));
-    json_free(&darr);
+    int nd_listed = 0;
+    enum codeindex_include_dim idim;
+    int nd = code_impact_emit_dependents(ci, path, reply, &nd_listed, &idim);
 
     /* direct_includes: this file's own forward in-tree #include fan-out
      * (codeindex_includes_of_file) — a quick depth-1 number, not the closure. */
@@ -588,20 +724,7 @@ void zcl_native_handle_code_impact(const struct zcl_command_request *request,
     if (ninc < 0) ninc = 0;
     (void)json_push_kv_int(&reply->data, "direct_includes", ninc);
 
-    /* direct_callers: call sites directly referencing a symbol DEFINED in this
-     * file, summed over its symbol table (codeindex_symbols_in_file +
-     * codeindex_callers per symbol) — the depth-1 fan-out the closure walk
-     * would expand from first, reported before that expansion. */
-    static struct ci_symbol syms[CODE_IMPACT_SYM_CAP];
-    int nsym = codeindex_symbols_in_file(ci, path, syms, CODE_IMPACT_SYM_CAP);
-    if (nsym < 0) nsym = 0;
-    static struct ci_ref callerbuf[CODE_IMPACT_REF_CAP];
-    int direct_callers = 0;
-    for (int i = 0; i < nsym; i++) {
-        int nc = codeindex_callers(ci, syms[i].name, callerbuf,
-                                   CODE_IMPACT_REF_CAP);
-        if (nc > 0) direct_callers += nc;
-    }
+    int direct_callers = code_impact_direct_callers(ci, path);
     (void)json_push_kv_int(&reply->data, "direct_callers", direct_callers);
 
     /* test_groups + route + consensus_risk + matched — the SAME shared-rule
@@ -637,6 +760,124 @@ void zcl_native_handle_code_impact(const struct zcl_command_request *request,
  *
  * Deliberately does NOT open the symbol index: the Merkle pass is independent of
  * it and must not drag a full index rebuild behind a digest question. */
+/* code.merkle's request resolution: absent/""/"." = the whole tree, else a
+ * directory subtree, else one file's leaf. An unresolvable path reports
+ * found=false rather than failing — the same contract code.impact uses for
+ * a path outside the indexed set. */
+static void code_merkle_resolve(struct ci_merkle *m, const char *want,
+                                bool is_root, struct ci_merkle_node *node,
+                                struct ci_merkle_leaf *leaf, const char **kind,
+                                bool *found, bool *is_file)
+{
+    *kind = "tree";
+    *found = true;
+    *is_file = false;
+    if (is_root) return;
+    bool dir_found = false, file_found = false;
+    (void)ci_merkle_node(m, want, node, &dir_found);
+    if (dir_found) {
+        *kind = "dir";
+    } else if (ci_merkle_leaf(m, want, leaf, &file_found) && file_found) {
+        *kind = "file";
+        *is_file = true;
+    } else {
+        *kind = "absent";
+        *found = false;
+    }
+}
+
+/* code.merkle's children[]: direct subdirectory subtree roots (16-hex
+ * prefixes — enough to compare, cheap enough to list), so an agent descends
+ * to the changed subtree in a few steps instead of rescanning the tree. */
+static void code_merkle_render_children(struct ci_merkle *m, bool is_root,
+                                        const char *want,
+                                        struct zcl_command_reply *reply)
+{
+    static struct ci_merkle_node kids[CODE_MERKLE_CHILD_CAP];
+    int nkids = ci_merkle_child_dirs(m, is_root ? "" : want, kids,
+                                    CODE_MERKLE_CHILD_CAP);
+    if (nkids < 0) nkids = 0;
+    int shown = nkids > CODE_MERKLE_CHILD_CAP ? CODE_MERKLE_CHILD_CAP : nkids;
+    struct json_value arr;
+    json_init(&arr); json_set_array(&arr);
+    for (int i = 0; i < shown; i++) {
+        char kh[65];
+        ci_merkle_hex(&kids[i].digest, kh);
+        kh[16] = '\0';
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "path", kids[i].path);
+        (void)json_push_kv_str(&o, "digest", kh);
+        (void)json_push_kv_int(&o, "file_count",
+                               (int64_t)kids[i].file_count);
+        (void)json_push_kv_int(&o, "total_bytes",
+                               (int64_t)kids[i].total_bytes);
+        code_push_obj(&arr, &o);
+    }
+    (void)json_push_kv(&reply->data, "children", &arr);
+    (void)json_push_kv_int(&reply->data, "children_total", nkids);
+    (void)json_push_kv_bool(&reply->data, "children_truncated",
+                            nkids > shown);
+    json_free(&arr);
+}
+
+/* code.merkle's `build` object: what this call cost — the incrementality
+ * report, not a claim about it. */
+static void code_merkle_emit_build_cost(struct zcl_command_reply *reply,
+                                        const struct ci_merkle_cost *cost)
+{
+    struct json_value build;
+    json_init(&build); json_set_object(&build);
+    (void)json_push_kv_int(&build, "files_total", (int64_t)cost->files_total);
+    (void)json_push_kv_int(&build, "files_read", (int64_t)cost->files_read);
+    (void)json_push_kv_int(&build, "leaves_reused",
+                           (int64_t)cost->leaves_reused);
+    (void)json_push_kv_int(&build, "bytes_read", (int64_t)cost->bytes_read);
+    (void)json_push_kv_int(&build, "nodes_total", (int64_t)cost->nodes_total);
+    (void)json_push_kv_int(&build, "nodes_hashed", (int64_t)cost->nodes_hashed);
+    (void)json_push_kv_int(&build, "nodes_reused", (int64_t)cost->nodes_reused);
+    (void)json_push_kv_bool(&build, "snapshot_used", cost->snapshot_used);
+    (void)json_push_kv_bool(&build, "snapshot_saved", cost->snapshot_saved);
+    (void)json_push_kv_bool(&build, "inventory_changed",
+                            cost->inventory_changed);
+    (void)json_push_kv_bool(&build, "full_rescan", cost->full_rescan);
+    (void)json_push_kv(&reply->data, "build", &build);
+    json_free(&build);
+}
+
+/* code.merkle's summary line: one of three shapes depending on whether the
+ * path resolved at all, and if so whether it is a file or a subtree. */
+static void code_merkle_compose_summary(
+    char summary[288], bool found, bool is_file, bool is_root,
+    const char *want, const char *hex, const char *tree_hex,
+    const struct ci_merkle_node *node, const struct ci_merkle_leaf *leaf,
+    const struct ci_merkle_node *tree, const struct ci_merkle_cost *cost)
+{
+    if (!found) {
+        (void)snprintf(summary, 288,
+                       "'%s' is not an indexed source file or directory; tree "
+                       "root %.16s covers %u file(s)",
+                       want, tree_hex, (unsigned)tree->file_count);
+    } else if (is_file) {
+        (void)snprintf(summary, 288,
+                       "leaf %s = %.16s (%llu bytes); tree root %.16s; re-read "
+                       "%u/%u file(s) this call",
+                       leaf->path, hex, (unsigned long long)leaf->size,
+                       tree_hex, (unsigned)cost->files_read,
+                       (unsigned)cost->files_total);
+    } else {
+        (void)snprintf(summary, 288,
+                       "%s subtree %.16s over %u file(s)/%llu bytes; tree root "
+                       "%.16s; re-read %u/%u file(s), hashed %u/%u node(s)",
+                       is_root ? "whole-tree" : want, hex,
+                       (unsigned)node->file_count,
+                       (unsigned long long)node->total_bytes, tree_hex,
+                       (unsigned)cost->files_read, (unsigned)cost->files_total,
+                       (unsigned)cost->nodes_hashed,
+                       (unsigned)cost->nodes_total);
+    }
+}
+
 void zcl_native_handle_code_merkle(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -676,22 +917,10 @@ void zcl_native_handle_code_merkle(const struct zcl_command_request *request,
     struct ci_merkle_node node = tree;
     struct ci_merkle_leaf leaf;
     memset(&leaf, 0, sizeof(leaf));
-    const char *kind = "tree";
-    bool found = true;
-    bool is_file = false;
-    if (!is_root) {
-        bool dir_found = false, file_found = false;
-        (void)ci_merkle_node(m, want, &node, &dir_found);
-        if (dir_found) {
-            kind = "dir";
-        } else if (ci_merkle_leaf(m, want, &leaf, &file_found) && file_found) {
-            kind = "file";
-            is_file = true;
-        } else {
-            kind = "absent";
-            found = false;
-        }
-    }
+    const char *kind;
+    bool found, is_file;
+    code_merkle_resolve(m, want, is_root, &node, &leaf, &kind, &found,
+                        &is_file);
 
     char hex[65] = "";
     if (found) ci_merkle_hex(is_file ? &leaf.digest : &node.digest, hex);
@@ -718,34 +947,8 @@ void zcl_native_handle_code_merkle(const struct zcl_command_request *request,
     /* Direct subdirectory subtree roots (16-hex prefixes — enough to compare,
      * cheap enough to list), so an agent descends to the changed subtree in a
      * few steps instead of rescanning the tree. */
-    if (found && !is_file) {
-        static struct ci_merkle_node kids[CODE_MERKLE_CHILD_CAP];
-        int nkids = ci_merkle_child_dirs(m, is_root ? "" : want, kids,
-                                        CODE_MERKLE_CHILD_CAP);
-        if (nkids < 0) nkids = 0;
-        int shown = nkids > CODE_MERKLE_CHILD_CAP ? CODE_MERKLE_CHILD_CAP : nkids;
-        struct json_value arr;
-        json_init(&arr); json_set_array(&arr);
-        for (int i = 0; i < shown; i++) {
-            char kh[65];
-            ci_merkle_hex(&kids[i].digest, kh);
-            kh[16] = '\0';
-            struct json_value o;
-            json_init(&o); json_set_object(&o);
-            (void)json_push_kv_str(&o, "path", kids[i].path);
-            (void)json_push_kv_str(&o, "digest", kh);
-            (void)json_push_kv_int(&o, "file_count",
-                                   (int64_t)kids[i].file_count);
-            (void)json_push_kv_int(&o, "total_bytes",
-                                   (int64_t)kids[i].total_bytes);
-            code_push_obj(&arr, &o);
-        }
-        (void)json_push_kv(&reply->data, "children", &arr);
-        (void)json_push_kv_int(&reply->data, "children_total", nkids);
-        (void)json_push_kv_bool(&reply->data, "children_truncated",
-                                nkids > shown);
-        json_free(&arr);
-    }
+    if (found && !is_file)
+        code_merkle_render_children(m, is_root, want, reply);
 
     /* Every answer carries the whole-tree identity, so a subtree digest is
      * always attributable to one tree state. */
@@ -755,47 +958,11 @@ void zcl_native_handle_code_merkle(const struct zcl_command_request *request,
     (void)json_push_kv_int(&reply->data, "tree_bytes",
                            (int64_t)tree.total_bytes);
 
-    /* What this call cost — the incrementality report, not a claim about it. */
-    struct json_value build;
-    json_init(&build); json_set_object(&build);
-    (void)json_push_kv_int(&build, "files_total", (int64_t)cost.files_total);
-    (void)json_push_kv_int(&build, "files_read", (int64_t)cost.files_read);
-    (void)json_push_kv_int(&build, "leaves_reused",
-                           (int64_t)cost.leaves_reused);
-    (void)json_push_kv_int(&build, "bytes_read", (int64_t)cost.bytes_read);
-    (void)json_push_kv_int(&build, "nodes_total", (int64_t)cost.nodes_total);
-    (void)json_push_kv_int(&build, "nodes_hashed", (int64_t)cost.nodes_hashed);
-    (void)json_push_kv_int(&build, "nodes_reused", (int64_t)cost.nodes_reused);
-    (void)json_push_kv_bool(&build, "snapshot_used", cost.snapshot_used);
-    (void)json_push_kv_bool(&build, "snapshot_saved", cost.snapshot_saved);
-    (void)json_push_kv_bool(&build, "inventory_changed",
-                            cost.inventory_changed);
-    (void)json_push_kv_bool(&build, "full_rescan", cost.full_rescan);
-    (void)json_push_kv(&reply->data, "build", &build);
-    json_free(&build);
+    code_merkle_emit_build_cost(reply, &cost);
 
     char summary[288];
-    if (!found) {
-        (void)snprintf(summary, sizeof(summary),
-                       "'%s' is not an indexed source file or directory; tree "
-                       "root %.16s covers %u file(s)",
-                       want, tree_hex, (unsigned)tree.file_count);
-    } else if (is_file) {
-        (void)snprintf(summary, sizeof(summary),
-                       "leaf %s = %.16s (%llu bytes); tree root %.16s; re-read "
-                       "%u/%u file(s) this call",
-                       leaf.path, hex, (unsigned long long)leaf.size, tree_hex,
-                       (unsigned)cost.files_read, (unsigned)cost.files_total);
-    } else {
-        (void)snprintf(summary, sizeof(summary),
-                       "%s subtree %.16s over %u file(s)/%llu bytes; tree root "
-                       "%.16s; re-read %u/%u file(s), hashed %u/%u node(s)",
-                       is_root ? "whole-tree" : want, hex,
-                       (unsigned)node.file_count,
-                       (unsigned long long)node.total_bytes, tree_hex,
-                       (unsigned)cost.files_read, (unsigned)cost.files_total,
-                       (unsigned)cost.nodes_hashed, (unsigned)cost.nodes_total);
-    }
+    code_merkle_compose_summary(summary, found, is_file, is_root, want, hex,
+                                tree_hex, &node, &leaf, &tree, &cost);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
     ci_merkle_free(m);
@@ -907,6 +1074,174 @@ static void code_territory_render_list(struct codeindex *ci,
     json_free(&arr);
 }
 
+/* code.territory's `owns`/`routed_groups`/`reach`/`cost` block: what the
+ * territory has, and how the scorecard's own numbers were obtained. */
+static void code_territory_emit_owns_and_proof(
+    struct zcl_command_reply *reply, const struct territory_report *r,
+    const struct territory_reach_set *rs)
+{
+    struct json_value owns;
+    json_init(&owns); json_set_object(&owns);
+    (void)json_push_kv_int(&owns, "files", r->file_count);
+    (void)json_push_kv_int(&owns, "headers", r->header_count);
+    (void)json_push_kv_int(&owns, "sources", r->source_count);
+    (void)json_push_kv_int(&owns, "bytes", r->bytes);
+    (void)json_push_kv_bool(&owns, "truncated", r->files_truncated);
+    (void)json_push_kv(&reply->data, "owns", &owns);
+    json_free(&owns);
+
+    struct json_value groups;
+    json_init(&groups); json_set_array(&groups);
+    for (int i = 0; i < r->group_count && i < CODE_TERRITORY_GROUP_CAP; i++) {
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "group", r->groups[i].name);
+        (void)json_push_kv_int(&o, "files", r->groups[i].files);
+        code_push_obj(&groups, &o);
+    }
+    (void)json_push_kv(&reply->data, "routed_groups", &groups);
+    json_free(&groups);
+    (void)json_push_kv_int(&reply->data, "routed_group_count", r->group_count);
+    (void)json_push_kv_int(&reply->data, "files_unrouted", r->files_unrouted);
+
+    (void)json_push_kv_int(&reply->data, "public_symbols", r->public_symbols);
+    (void)json_push_kv_int(&reply->data, "reached", r->reached);
+    (void)json_push_kv_int(&reply->data, "unreached", r->unreached);
+    (void)json_push_kv_int(&reply->data, "unknown", r->unknown);
+    (void)json_push_kv_int(&reply->data, "public_types", r->public_types);
+    (void)json_push_kv_int(&reply->data, "public_macros", r->public_macros);
+    (void)json_push_kv_int(&reply->data, "headers_without_functions",
+                           r->headers_without_functions);
+    (void)json_push_kv_int(&reply->data, "headers_extern_c",
+                           r->headers_extern_c);
+    (void)json_push_kv_bool(&reply->data, "symbols_truncated",
+                            r->symbols_truncated);
+
+    struct json_value reach;
+    json_init(&reach); json_set_object(&reach);
+    (void)json_push_kv_str(&reach, "source",
+                           rs ? (r->reach.from_cache ? "memo" : "walk")
+                              : "unavailable");
+    (void)json_push_kv_int(&reach, "entry_points", (int64_t)r->reach.seeds);
+    (void)json_push_kv_int(&reach, "closure_symbols", (int64_t)r->reach.symbols);
+    (void)json_push_kv_int(&reach, "walk_steps", (int64_t)r->reach.steps);
+    (void)json_push_kv_int(&reach, "walk_us", (int64_t)r->reach.build_us);
+    (void)json_push_kv_bool(&reach, "truncated", r->reach.truncated);
+    (void)json_push_kv(&reply->data, "reach", &reach);
+    json_free(&reach);
+
+    struct json_value cost;
+    json_init(&cost); json_set_object(&cost);
+    (void)json_push_kv_int(&cost, "owns_us", (int64_t)r->owns_us);
+    (void)json_push_kv_int(&cost, "routed_us", (int64_t)r->routed_us);
+    (void)json_push_kv_int(&cost, "symbols_us", (int64_t)r->symbols_us);
+    (void)json_push_kv_int(&cost, "deps_us", (int64_t)r->deps_us);
+    (void)json_push_kv_int(&cost, "index_lookups", (int64_t)r->index_lookups);
+    (void)json_push_kv(&reply->data, "cost", &cost);
+    json_free(&cost);
+}
+
+/* code.territory's `depends_on`/`depended_on_by` block. */
+static void code_territory_emit_deps(struct zcl_command_reply *reply,
+                                     const struct territory_report *r)
+{
+    struct json_value dout, din;
+    json_init(&dout); json_set_array(&dout);
+    json_init(&din);  json_set_array(&din);
+    for (int i = 0; i < r->deps_out_count && i < CODE_TERRITORY_DEP_CAP; i++) {
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "name", r->deps_out[i].name);
+        (void)json_push_kv_int(&o, "edges", r->deps_out[i].edges);
+        code_push_obj(&dout, &o);
+    }
+    for (int i = 0; i < r->deps_in_count && i < CODE_TERRITORY_DEP_CAP; i++) {
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "name", r->deps_in[i].name);
+        (void)json_push_kv_int(&o, "edges", r->deps_in[i].edges);
+        code_push_obj(&din, &o);
+    }
+    (void)json_push_kv(&reply->data, "depends_on", &dout);
+    (void)json_push_kv(&reply->data, "depended_on_by", &din);
+    json_free(&dout); json_free(&din);
+    (void)json_push_kv_int(&reply->data, "depends_on_count", r->deps_out_count);
+    (void)json_push_kv_int(&reply->data, "depended_on_by_count",
+                           r->deps_in_count);
+    (void)json_push_kv_str(&reply->data, "deps_dimension",
+                           !r->deps_available ? "no-include-graph"
+                           : r->deps_truncated ? "closure-truncated"
+                                               : "complete");
+}
+
+/* code.territory's `unreached_symbols`/`unknown_symbols`/`unrouted_files`
+ * block: where the territory is weak. */
+static void code_territory_emit_weak_symbols(struct zcl_command_reply *reply,
+                                             const struct territory_report *r)
+{
+    struct json_value weak_syms, weak_unknown;
+    json_init(&weak_syms);    json_set_array(&weak_syms);
+    json_init(&weak_unknown); json_set_array(&weak_unknown);
+    int shown_u = 0, shown_k = 0;
+    for (int i = 0; i < r->public_symbols; i++) {
+        if (r->symbols[i].verdict == TERRITORY_UNREACHED &&
+            shown_u < CODE_TERRITORY_WEAK_CAP) {
+            code_push_line(&weak_syms, r->symbols[i].name);
+            shown_u++;
+        } else if (r->symbols[i].verdict == TERRITORY_UNKNOWN &&
+                   shown_k < CODE_TERRITORY_UNKNOWN_CAP) {
+            char line[192];
+            (void)snprintf(line, sizeof(line), "%s (%s)", r->symbols[i].name,
+                           territory_reach_reason_label(r->symbols[i].reason));
+            code_push_line(&weak_unknown, line);
+            shown_k++;
+        }
+    }
+    (void)json_push_kv(&reply->data, "unreached_symbols", &weak_syms);
+    (void)json_push_kv(&reply->data, "unknown_symbols", &weak_unknown);
+    json_free(&weak_syms); json_free(&weak_unknown);
+}
+
+static void code_territory_emit_weak_files(struct zcl_command_reply *reply,
+                                           const struct territory_report *r)
+{
+    struct json_value weak_files;
+    json_init(&weak_files); json_set_array(&weak_files);
+    int shown_f = 0;
+    for (int i = 0; i < r->file_count && shown_f < CODE_TERRITORY_FILE_CAP; i++)
+        if (!r->files[i].routed) {
+            code_push_line(&weak_files, r->files[i].path);
+            shown_f++;
+        }
+    (void)json_push_kv(&reply->data, "unrouted_files", &weak_files);
+    json_free(&weak_files);
+}
+
+static void code_territory_emit_weak(struct zcl_command_reply *reply,
+                                     const struct territory_report *r)
+{
+    code_territory_emit_weak_symbols(reply, r);
+    code_territory_emit_weak_files(reply, r);
+}
+
+/* code.territory's one-line summary. */
+static void code_territory_compose_summary(char summary[544],
+                                           const struct territory_report *r)
+{
+    (void)snprintf(summary, 544,
+                   "%s: %d files (%d headers, %d sources, %lld bytes); routed "
+                   "to %d group(s), %d file(s) routed to none; %d public "
+                   "functions = %d reached + %d unreached + %d unknown "
+                   "(%d header(s) contributed none, %d of those are extern "
+                   "\"C\" and invisible to the index); depends on %d "
+                   "territor(y/ies), %d depend on it",
+                   r->name, r->file_count, r->header_count, r->source_count,
+                   (long long)r->bytes, r->group_count, r->files_unrouted,
+                   r->public_symbols, r->reached, r->unreached, r->unknown,
+                   r->headers_without_functions, r->headers_extern_c,
+                   r->deps_out_count, r->deps_in_count);
+}
+
 void zcl_native_handle_code_territory(const struct zcl_command_request *request,
                                       struct zcl_command_reply *reply)
 {
@@ -952,150 +1287,12 @@ void zcl_native_handle_code_territory(const struct zcl_command_request *request,
     code_trunc(purpose, sizeof(purpose), r->purpose, 128);
     (void)json_push_kv_str(&reply->data, "purpose", purpose);
 
-    /* what it owns */
-    struct json_value owns;
-    json_init(&owns); json_set_object(&owns);
-    (void)json_push_kv_int(&owns, "files", r->file_count);
-    (void)json_push_kv_int(&owns, "headers", r->header_count);
-    (void)json_push_kv_int(&owns, "sources", r->source_count);
-    (void)json_push_kv_int(&owns, "bytes", r->bytes);
-    (void)json_push_kv_bool(&owns, "truncated", r->files_truncated);
-    (void)json_push_kv(&reply->data, "owns", &owns);
-    json_free(&owns);
-
-    /* what proves it — ROUTED */
-    struct json_value groups;
-    json_init(&groups); json_set_array(&groups);
-    for (int i = 0; i < r->group_count && i < CODE_TERRITORY_GROUP_CAP; i++) {
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "group", r->groups[i].name);
-        (void)json_push_kv_int(&o, "files", r->groups[i].files);
-        code_push_obj(&groups, &o);
-    }
-    (void)json_push_kv(&reply->data, "routed_groups", &groups);
-    json_free(&groups);
-    (void)json_push_kv_int(&reply->data, "routed_group_count", r->group_count);
-    (void)json_push_kv_int(&reply->data, "files_unrouted", r->files_unrouted);
-
-    /* what proves it — REACHED. The three buckets partition public_symbols. */
-    (void)json_push_kv_int(&reply->data, "public_symbols", r->public_symbols);
-    (void)json_push_kv_int(&reply->data, "reached", r->reached);
-    (void)json_push_kv_int(&reply->data, "unreached", r->unreached);
-    (void)json_push_kv_int(&reply->data, "unknown", r->unknown);
-    (void)json_push_kv_int(&reply->data, "public_types", r->public_types);
-    (void)json_push_kv_int(&reply->data, "public_macros", r->public_macros);
-    /* The blind spot in public_symbols, counted rather than hidden: the code
-     * index attributes a function declaration only at file scope, so every
-     * function inside a header's `extern "C" { … }` block is invisible to it.
-     * A low public_symbols next to a high headers_extern_c is a measurement
-     * limit, not a small public surface. */
-    (void)json_push_kv_int(&reply->data, "headers_without_functions",
-                           r->headers_without_functions);
-    (void)json_push_kv_int(&reply->data, "headers_extern_c",
-                           r->headers_extern_c);
-    (void)json_push_kv_bool(&reply->data, "symbols_truncated",
-                            r->symbols_truncated);
-
-    /* how the reached set itself was obtained — the honesty counters */
-    struct json_value reach;
-    json_init(&reach); json_set_object(&reach);
-    (void)json_push_kv_str(&reach, "source",
-                           rs ? (r->reach.from_cache ? "memo" : "walk")
-                              : "unavailable");
-    (void)json_push_kv_int(&reach, "entry_points", (int64_t)r->reach.seeds);
-    (void)json_push_kv_int(&reach, "closure_symbols", (int64_t)r->reach.symbols);
-    (void)json_push_kv_int(&reach, "walk_steps", (int64_t)r->reach.steps);
-    (void)json_push_kv_int(&reach, "walk_us", (int64_t)r->reach.build_us);
-    (void)json_push_kv_bool(&reach, "truncated", r->reach.truncated);
-    (void)json_push_kv(&reply->data, "reach", &reach);
-    json_free(&reach);
-
-    /* What this call cost, per phase. Reported, not claimed: a reader who
-     * doubts a number can see how much work produced it. */
-    struct json_value cost;
-    json_init(&cost); json_set_object(&cost);
-    (void)json_push_kv_int(&cost, "owns_us", (int64_t)r->owns_us);
-    (void)json_push_kv_int(&cost, "routed_us", (int64_t)r->routed_us);
-    (void)json_push_kv_int(&cost, "symbols_us", (int64_t)r->symbols_us);
-    (void)json_push_kv_int(&cost, "deps_us", (int64_t)r->deps_us);
-    (void)json_push_kv_int(&cost, "index_lookups", (int64_t)r->index_lookups);
-    (void)json_push_kv(&reply->data, "cost", &cost);
-    json_free(&cost);
-
-    /* what it depends on, and what depends on it */
-    struct json_value dout, din;
-    json_init(&dout); json_set_array(&dout);
-    json_init(&din);  json_set_array(&din);
-    for (int i = 0; i < r->deps_out_count && i < CODE_TERRITORY_DEP_CAP; i++) {
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "name", r->deps_out[i].name);
-        (void)json_push_kv_int(&o, "edges", r->deps_out[i].edges);
-        code_push_obj(&dout, &o);
-    }
-    for (int i = 0; i < r->deps_in_count && i < CODE_TERRITORY_DEP_CAP; i++) {
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "name", r->deps_in[i].name);
-        (void)json_push_kv_int(&o, "edges", r->deps_in[i].edges);
-        code_push_obj(&din, &o);
-    }
-    (void)json_push_kv(&reply->data, "depends_on", &dout);
-    (void)json_push_kv(&reply->data, "depended_on_by", &din);
-    json_free(&dout); json_free(&din);
-    (void)json_push_kv_int(&reply->data, "depends_on_count", r->deps_out_count);
-    (void)json_push_kv_int(&reply->data, "depended_on_by_count",
-                           r->deps_in_count);
-    (void)json_push_kv_str(&reply->data, "deps_dimension",
-                           !r->deps_available ? "no-include-graph"
-                           : r->deps_truncated ? "closure-truncated"
-                                               : "complete");
-
-    /* where it is weak */
-    struct json_value weak_syms, weak_unknown, weak_files;
-    json_init(&weak_syms);    json_set_array(&weak_syms);
-    json_init(&weak_unknown); json_set_array(&weak_unknown);
-    json_init(&weak_files);   json_set_array(&weak_files);
-    int shown_u = 0, shown_k = 0;
-    for (int i = 0; i < r->public_symbols; i++) {
-        if (r->symbols[i].verdict == TERRITORY_UNREACHED &&
-            shown_u < CODE_TERRITORY_WEAK_CAP) {
-            code_push_line(&weak_syms, r->symbols[i].name);
-            shown_u++;
-        } else if (r->symbols[i].verdict == TERRITORY_UNKNOWN &&
-                   shown_k < CODE_TERRITORY_UNKNOWN_CAP) {
-            char line[192];
-            (void)snprintf(line, sizeof(line), "%s (%s)", r->symbols[i].name,
-                           territory_reach_reason_label(r->symbols[i].reason));
-            code_push_line(&weak_unknown, line);
-            shown_k++;
-        }
-    }
-    int shown_f = 0;
-    for (int i = 0; i < r->file_count && shown_f < CODE_TERRITORY_FILE_CAP; i++)
-        if (!r->files[i].routed) {
-            code_push_line(&weak_files, r->files[i].path);
-            shown_f++;
-        }
-    (void)json_push_kv(&reply->data, "unreached_symbols", &weak_syms);
-    (void)json_push_kv(&reply->data, "unknown_symbols", &weak_unknown);
-    (void)json_push_kv(&reply->data, "unrouted_files", &weak_files);
-    json_free(&weak_syms); json_free(&weak_unknown); json_free(&weak_files);
+    code_territory_emit_owns_and_proof(reply, r, rs);
+    code_territory_emit_deps(reply, r);
+    code_territory_emit_weak(reply, r);
 
     char summary[544];
-    (void)snprintf(summary, sizeof(summary),
-                   "%s: %d files (%d headers, %d sources, %lld bytes); routed "
-                   "to %d group(s), %d file(s) routed to none; %d public "
-                   "functions = %d reached + %d unreached + %d unknown "
-                   "(%d header(s) contributed none, %d of those are extern "
-                   "\"C\" and invisible to the index); depends on %d "
-                   "territor(y/ies), %d depend on it",
-                   r->name, r->file_count, r->header_count, r->source_count,
-                   (long long)r->bytes, r->group_count, r->files_unrouted,
-                   r->public_symbols, r->reached, r->unreached, r->unknown,
-                   r->headers_without_functions, r->headers_extern_c,
-                   r->deps_out_count, r->deps_in_count);
+    code_territory_compose_summary(summary, r);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
     territory_report_free(r);
@@ -1129,6 +1326,71 @@ void zcl_native_handle_code_territory(const struct zcl_command_request *request,
  * IT GRANTS NOTHING. A frame is a measurement, never an approval, never a
  * gate, never permission to land anything.
  */
+
+/* code.kpi's `metrics[]` array: one row per known metric, comparing this
+ * frame against the most recent prior frame (if any). Returns the improved/
+ * regressed/unavailable tallies the summary line needs. */
+static void code_kpi_render_metrics(
+    struct json_value *arr, const struct kpi_metric_def *defs, size_t ndefs,
+    const struct kpi_frame *frame, const struct kpi_ledger_result *led,
+    int *improved, int *regressed, int *unavailable)
+{
+    *improved = 0;
+    *regressed = 0;
+    *unavailable = 0;
+    for (size_t i = 0; i < ndefs; i++) {
+        const struct kpi_entry *cur = kpi_frame_find(frame, defs[i].id);
+        if (!cur) continue;
+        const struct kpi_entry *prev =
+            led->have_previous ? kpi_frame_find(&led->previous, defs[i].id)
+                               : NULL;
+        enum kpi_verdict v = kpi_verdict_of(defs[i].direction, prev, cur);
+        if (v == KPI_VERDICT_IMPROVED) (*improved)++;
+        else if (v == KPI_VERDICT_REGRESSED) (*regressed)++;
+        if (cur->state != KPI_STATE_PRESENT) (*unavailable)++;
+
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "id", defs[i].id);
+        (void)json_push_kv_str(&o, "state", kpi_state_label(cur->state));
+        if (cur->state == KPI_STATE_PRESENT)
+            (void)json_push_kv_int(&o, "value", (int64_t)cur->value);
+        if (prev && prev->state == KPI_STATE_PRESENT) {
+            (void)json_push_kv_int(&o, "previous", (int64_t)prev->value);
+            if (cur->state == KPI_STATE_PRESENT)
+                (void)json_push_kv_int(&o, "delta",
+                                       (int64_t)cur->value -
+                                           (int64_t)prev->value);
+        }
+        (void)json_push_kv_str(&o, "direction",
+                               kpi_direction_label(defs[i].direction));
+        (void)json_push_kv_str(&o, "verdict", kpi_verdict_label(v));
+        (void)json_push_kv_str(&o, "drill", defs[i].drill);
+        code_push_obj(arr, &o);
+    }
+}
+
+/* code.kpi's one-line summary: which frame this is, and against what prior
+ * frame (if any) the improved/regressed/unavailable tallies were computed. */
+static void code_kpi_compose_summary(char summary[320],
+                                     const struct kpi_ledger_result *led,
+                                     size_t ndefs, int improved, int regressed,
+                                     int unavailable)
+{
+    if (!led->have_previous)
+        (void)snprintf(summary, 320,
+                       "frame %llu is the first: %d improved, %d regressed, "
+                       "%d unavailable, %d with no baseline yet",
+                       (unsigned long long)led->seq, improved, regressed,
+                       unavailable, (int)ndefs - unavailable);
+    else
+        (void)snprintf(summary, 320,
+                       "frame %llu vs %llu: %d improved, %d regressed, "
+                       "%d unavailable",
+                       (unsigned long long)led->seq,
+                       (unsigned long long)led->prior_records, improved,
+                       regressed, unavailable);
+}
 
 void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
@@ -1171,38 +1433,9 @@ void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
 
     struct json_value arr;
     json_init(&arr); json_set_array(&arr);
-    int improved = 0, regressed = 0, unavailable = 0;
-
-    for (size_t i = 0; i < ndefs; i++) {
-        const struct kpi_entry *cur = kpi_frame_find(&frame, defs[i].id);
-        if (!cur) continue;
-        const struct kpi_entry *prev =
-            led.have_previous ? kpi_frame_find(&led.previous, defs[i].id)
-                              : NULL;
-        enum kpi_verdict v = kpi_verdict_of(defs[i].direction, prev, cur);
-        if (v == KPI_VERDICT_IMPROVED) improved++;
-        else if (v == KPI_VERDICT_REGRESSED) regressed++;
-        if (cur->state != KPI_STATE_PRESENT) unavailable++;
-
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "id", defs[i].id);
-        (void)json_push_kv_str(&o, "state", kpi_state_label(cur->state));
-        if (cur->state == KPI_STATE_PRESENT)
-            (void)json_push_kv_int(&o, "value", (int64_t)cur->value);
-        if (prev && prev->state == KPI_STATE_PRESENT) {
-            (void)json_push_kv_int(&o, "previous", (int64_t)prev->value);
-            if (cur->state == KPI_STATE_PRESENT)
-                (void)json_push_kv_int(&o, "delta",
-                                       (int64_t)cur->value -
-                                           (int64_t)prev->value);
-        }
-        (void)json_push_kv_str(&o, "direction",
-                               kpi_direction_label(defs[i].direction));
-        (void)json_push_kv_str(&o, "verdict", kpi_verdict_label(v));
-        (void)json_push_kv_str(&o, "drill", defs[i].drill);
-        code_push_obj(&arr, &o);
-    }
+    int improved, regressed, unavailable;
+    code_kpi_render_metrics(&arr, defs, ndefs, &frame, &led, &improved,
+                            &regressed, &unavailable);
 
     char root_hex[65];
     zcl_hex_encode(frame.source_root_sha3, 32, root_hex);
@@ -1218,19 +1451,8 @@ void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
     json_free(&arr);
 
     char summary[320];
-    if (!led.have_previous)
-        (void)snprintf(summary, sizeof summary,
-                       "frame %llu is the first: %d improved, %d regressed, "
-                       "%d unavailable, %d with no baseline yet",
-                       (unsigned long long)led.seq, improved, regressed,
-                       unavailable, (int)ndefs - unavailable);
-    else
-        (void)snprintf(summary, sizeof summary,
-                       "frame %llu vs %llu: %d improved, %d regressed, "
-                       "%d unavailable",
-                       (unsigned long long)led.seq,
-                       (unsigned long long)led.prior_records, improved,
-                       regressed, unavailable);
+    code_kpi_compose_summary(summary, &led, ndefs, improved, regressed,
+                             unavailable);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 }
 
