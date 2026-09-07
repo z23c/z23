@@ -227,6 +227,8 @@ static const struct lint_gate k_gates[] = {
     { "check-supervisor-progress-declared",
       check_supervisor_progress_declared_run,
       check_supervisor_progress_declared_selftest },
+    { "check-no-unattended-publish", check_no_unattended_publish_run,
+      check_no_unattended_publish_selftest },
 };
 
 int main(int argc, char **argv)

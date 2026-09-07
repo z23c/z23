@@ -5386,6 +5386,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_no_real_clock_test_deadline_selftest.c \
     tools/lint/lintc/gate_supervisor_progress_declared.c \
     tools/lint/lintc/gate_supervisor_progress_declared_selftest.c \
+    tools/lint/lintc/gate_no_unattended_publish.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -13176,7 +13177,7 @@ check-no-operator-paths:
 # that fast-forwards from it, with nobody reviewing what went out. Closed
 # allowlist with a mandatory reason per entry; the selftest plants both the
 # push and the commit-tree shape so the gate is never trusted unproven.
-check-no-unattended-publish:
+check-no-unattended-publish: $(LINTC_TOOL)
 	@echo "══ LINT: no script writes to the shared remote ══"
 	@./tools/lint/check_no_unattended_publish.sh --selftest
 	@./tools/lint/check_no_unattended_publish.sh
