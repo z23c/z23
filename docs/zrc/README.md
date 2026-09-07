@@ -130,3 +130,10 @@ means.
   epoch-key encryption for fleet-private rows, a durable e2e direct-message
   store, anchored inter-fleet rooms, and a periodic on-chain checkpoint of
   the board's own hash chain.
+- [`0013-windows-public-peer-networking-security.md`](0013-windows-public-peer-networking-security.md) —
+  closes three gaps surfaced by the first native Windows public peer: fleet
+  board status must open the on-disk identity key instead of refusing on a
+  cache miss, the POSIX fleet-board bridge cannot stand in for a Windows
+  coordination channel, and the install/service/firewall lane needs an
+  explicit hygiene floor so it never collides with an existing datadir tree
+  or leaks endpoints, keys, or cookies onto the public side channel.

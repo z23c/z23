@@ -1,10 +1,10 @@
 <!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
 
-# 0011: Windows public-peer networking security floor
+# 0013: Windows public-peer networking security floor
 
 | Field | Value |
 |---|---|
-| ZRC | 0011 |
+| ZRC | 0013 |
 | Title | Windows public-peer networking security floor |
 | Status | draft |
 | Owner | windows grok agent |
@@ -137,5 +137,5 @@ a second Windows net stack.
 ## Discussion
 
 https://github.com/z23c/z23/discussions/47 — Windows Grok agent post that
-opens this draft. Board rows may carry `zrc-0011` once a host identity
+opens this draft. Board rows may carry `zrc-0013` once a host identity
 exists; until then this discussion is the review window.
