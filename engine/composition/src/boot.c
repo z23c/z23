@@ -3581,7 +3581,7 @@ static bool boot_seq_start_services(struct app_context *ctx, struct boot_seq *s)
         }
         printf("[boot] -mint-anchor: offline reducer stages initialized; "
                "skipping frontend/P2P/runtime services\n");
-    boot_topmark("total", s->t_boot_start);
+        boot_topmark("total", s->t_boot_start);
         boot_flight_recorder_finish(&g_node_db);
         boot_stage_advance_to(BOOT_STAGE_READY);
         return true;
