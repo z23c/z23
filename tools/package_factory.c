@@ -2856,34 +2856,40 @@ static bool pf_store_label(const char *store_dir, char *out, size_t out_cap,
  *
  * `store_a` arrives as the absolute store datadir; only its LABEL is written
  * (pf_store_label), because the def line is committed and hashed. */
-static bool factory_register_corpus(const char *def_path, const char *name,
-                                    const char *root_hex, const char *store_a,
-                                    const char *kind, const char *spdx,
-                                    char *error, size_t error_cap)
+static bool frc_read_existing(const char *def_path, uint8_t **text,
+                              size_t *len, char *error, size_t error_cap)
 {
-    uint8_t *text = NULL;
-    size_t len = 0;
     bool exists = access(def_path, R_OK) == 0;
-    if (exists && !pf_read_file(def_path, 1024u * 1024u, &text, &len)) {
+    if (exists && !pf_read_file(def_path, 1024u * 1024u, text, len)) {
         (void)snprintf(error, error_cap, "cannot read %s", def_path);
         return false;
     }
-    char store_label[PF_PATH_CAP];
-    if (!pf_store_label(store_a, store_label, sizeof(store_label), error,
-                        error_cap)) {
-        free(text);
-        return false;
-    }
+    return true;
+}
+
+static char *frc_build_line(const char *name, const char *root_hex,
+                            const char *store_label, const char *kind,
+                            const char *spdx)
+{
     size_t line_cap = strlen(name) + strlen(root_hex) + strlen(store_label) +
                       strlen(kind) + strlen(spdx) + 64u;
     char *line = zcl_malloc(line_cap, "factory.defline");
     if (!line)
-        LOG_FAIL(PF_LOG, "def line alloc");
+        LOG_NULL(PF_LOG, "def line alloc");
     (void)snprintf(line, line_cap, "package %s | root %s | store %s | "
                    "kind %s | spdx %s", name, root_hex, store_label, kind,
                    spdx);
-    struct buf out = {0};
-    bool replaced = false;
+    return line;
+}
+
+/* Replace the existing "package NAME | ..." line if one exists (fails on a
+ * duplicate); otherwise every input line is copied through unchanged and
+ * the caller appends the new line. */
+static bool frc_rewrite_lines(const uint8_t *text, size_t len,
+                              const char *name, const char *def_path,
+                              const char *line, struct buf *out,
+                              bool *replaced, char *error, size_t error_cap)
+{
     bool ok = true;
     size_t pos = 0;
     while (ok && pos < len) {
@@ -2895,7 +2901,7 @@ static bool factory_register_corpus(const char *def_path, const char *name,
             memcmp(text + pos + tok_len, name, strlen(name)) == 0 &&
             text[pos + tok_len + strlen(name)] == ' ') {
             /* Replace the existing line for this package name. */
-            if (replaced) {
+            if (*replaced) {
                 (void)snprintf(error, error_cap,
                                "duplicate package line for %s in %s", name,
                                def_path);
@@ -2903,20 +2909,53 @@ static bool factory_register_corpus(const char *def_path, const char *name,
                 ok = false;
                 break;
             }
-            ok = buf_put(&out, line, strlen(line));
-            replaced = true;
+            ok = buf_put(out, line, strlen(line));
+            *replaced = true;
         } else {
-            ok = buf_put(&out, text + pos, eol - pos);
+            ok = buf_put(out, text + pos, eol - pos);
         }
-        if (ok && eol < len) ok = buf_put(&out, "\n", 1);
+        if (ok && eol < len) ok = buf_put(out, "\n", 1);
         pos = eol + 1u;
     }
-    if (ok && !replaced) {
-        if (len && text[len - 1] != '\n') ok = buf_put(&out, "\n", 1);
-        if (ok)
-            ok = buf_put(&out, line, strlen(line)) &&
-                 buf_put(&out, "\n", 1);
+    return ok;
+}
+
+static bool frc_append_line(const uint8_t *text, size_t len,
+                            const char *line, struct buf *out)
+{
+    bool ok = true;
+    if (len && text[len - 1] != '\n') ok = buf_put(out, "\n", 1);
+    if (ok)
+        ok = buf_put(out, line, strlen(line)) && buf_put(out, "\n", 1);
+    return ok;
+}
+
+static bool factory_register_corpus(const char *def_path, const char *name,
+                                    const char *root_hex, const char *store_a,
+                                    const char *kind, const char *spdx,
+                                    char *error, size_t error_cap)
+{
+    uint8_t *text = NULL;
+    size_t len = 0;
+    if (!frc_read_existing(def_path, &text, &len, error, error_cap))
+        return false;
+    char store_label[PF_PATH_CAP];
+    if (!pf_store_label(store_a, store_label, sizeof(store_label), error,
+                        error_cap)) {
+        free(text);
+        return false;
     }
+    char *line = frc_build_line(name, root_hex, store_label, kind, spdx);
+    if (!line) {
+        free(text);
+        return false;
+    }
+    struct buf out = {0};
+    bool replaced = false;
+    bool ok = frc_rewrite_lines(text, len, name, def_path, line, &out,
+                                &replaced, error, error_cap);
+    if (ok && !replaced)
+        ok = frc_append_line(text, len, line, &out);
     free(line);
     free(text);
     if (!ok) {
