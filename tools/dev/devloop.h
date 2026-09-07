@@ -813,6 +813,12 @@ int zcl_devloop_app_plan(const char *repo_root, const char *app_id,
                          const char *resource);
 int zcl_devloop_app_simulate(const char *app_id, uint64_t seed);
 
+/* True for a conventional resource name: lowercase snake_case, starting with
+ * a letter, no doubled or trailing underscore, within the App manifest's
+ * resource-name bound. The one admission rule dev.app.plan and
+ * dev.app.scaffold share. */
+bool zcl_devloop_app_resource_valid(const char *name);
+
 /* Release-safe bounded JSON buffer producers backing both the stdout print
  * wrappers above and the Wave 2.2 registry dev handlers. Return bytes written,
  * or 0 on invalid arguments / overflow. */
@@ -822,6 +828,63 @@ size_t zcl_devloop_app_plan_json(const char *repo_root, const char *app_id,
                                  const char *resource, char *out, size_t out_sz);
 size_t zcl_devloop_app_simulate_json(const char *app_id, uint64_t seed,
                                      char *out, size_t out_sz);
+
+/* ── App resource slice (dev.app.plan / dev.app.scaffold) ──────────────
+ *
+ * ONE declaration of what a conventional App resource slice is. dev.app.plan
+ * renders it as a preview; dev.app.scaffold materialises exactly the same
+ * slice on disk. Neither re-derives the other's answer. Two kinds of entry:
+ *
+ *   CREATE — a whole new source file, written atomically (temp + rename).
+ *   ROW    — one exact registry line appended to an existing .def file if,
+ *            and only if, that line is not already present.
+ */
+enum {
+    ZCL_DEVLOOP_APP_SLICE_MAX_FILES = 8,
+    ZCL_DEVLOOP_APP_SLICE_PATH_MAX = 192,
+    ZCL_DEVLOOP_APP_SLICE_NAME_MAX = 96,
+    ZCL_DEVLOOP_APP_SLICE_BODY_MAX = 8192
+};
+
+enum zcl_devloop_app_slice_kind {
+    ZCL_DEVLOOP_APP_SLICE_CREATE = 0,
+    ZCL_DEVLOOP_APP_SLICE_ROW = 1
+};
+
+struct zcl_devloop_app_slice_file {
+    char path[ZCL_DEVLOOP_APP_SLICE_PATH_MAX];
+    enum zcl_devloop_app_slice_kind kind;
+    size_t body_len;
+    char body[ZCL_DEVLOOP_APP_SLICE_BODY_MAX];
+};
+
+struct zcl_devloop_app_slice {
+    char root[ZCL_DEVLOOP_PATH_MAX];
+    char app_id[ZCL_DEVLOOP_APP_SLICE_NAME_MAX];
+    char resource[ZCL_DEVLOOP_APP_SLICE_NAME_MAX];
+    char group[ZCL_DEVLOOP_APP_SLICE_NAME_MAX];
+    size_t file_count;
+    struct zcl_devloop_app_slice_file files[ZCL_DEVLOOP_APP_SLICE_MAX_FILES];
+};
+
+/* Build the slice for one (app_id, resource) pair against the checkout at
+ * repo_root. Returns a heap-owned slice, or NULL when the root, the App
+ * manifest, or the resource name is not admissible. Reads only; writes
+ * nothing. Free with zcl_devloop_app_slice_free(). */
+struct zcl_devloop_app_slice *zcl_devloop_app_slice_build(
+    const char *repo_root, const char *app_id, const char *resource);
+void zcl_devloop_app_slice_free(struct zcl_devloop_app_slice *slice);
+
+/* Materialize the slice. Fail-closed and idempotent: it refuses, having
+ * written nothing, when any CREATE target already exists with different
+ * content or any ROW registry is missing; a target that already matches is
+ * left alone and reported unchanged. Returns bytes written to out, or 0 on
+ * overflow / invalid arguments. */
+size_t zcl_devloop_app_scaffold_json(const char *repo_root, const char *app_id,
+                                     const char *resource, char *out,
+                                     size_t out_sz);
+int zcl_devloop_app_scaffold(const char *repo_root, const char *app_id,
+                             const char *resource);
 
 /* ── Wave 3.2 native activation engine — dev-lane wiring ───────────────
  *

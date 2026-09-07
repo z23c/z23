@@ -367,21 +367,26 @@ ZCL_COMMAND_READY_READ(
         ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_app_plan)
 
-ZCL_COMMAND_PLANNED_COMMAND(
+ZCL_COMMAND_DEV_COMMAND(
     "dev.app.scaffold", "dev.app", "", "Materialize a conventional App resource slice",
-    "Will report the checkout files actually materialized for one App "
-    "resource slice; today the handler is NULL and every call fails "
-    "closed with exit 3.", 0,
+    "The checkout files actually materialized for one App resource slice: "
+    "the model, its service, the slice test, and the test-group row that "
+    "makes the test run. Fail-closed and idempotent — it refuses, having "
+    "written nothing, if any target already exists with different content, "
+    "and reports an already-current slice as unchanged.", 0,
     "app,resource,rails,scaffold", "zcl.dev_app_resource_input.v1",
     "zcl.dev_app_scaffold.v1", "app_id,resource", "app_id,resource",
-    "z23 dev app scaffold social posts", ZCL_COMMAND_LAYER_DEV,
+    "z23 dev app scaffold social posts",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
     ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_NONE,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_CHECKOUT_WRITE,
-    ZCL_COMMAND_TRAIT_DEV_ONLY,
-    "native bounded file materializer is not implemented")
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT |
+        ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_app_scaffold,
+    "materializing checkout files requires a dev build",
+    "z23-dev dev app scaffold <app> <resource>")
 
 ZCL_COMMAND_READY_READ(
     "dev.app.simulate", "dev.app", "", "Run deterministic App network scenarios",

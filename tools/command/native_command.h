@@ -199,6 +199,9 @@ void zcl_native_handle_dev_app_describe(
 void zcl_native_handle_dev_app_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_dev_app_scaffold(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_dev_app_simulate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

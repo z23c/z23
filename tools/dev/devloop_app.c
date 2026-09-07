@@ -68,7 +68,24 @@ static void devbuf_addstr(struct devbuf *b, const char *s)
     devbuf_addf(b, "\"");
 }
 
-static bool resource_name_ok(const char *name)
+
+/* Same as devbuf_addstr, minus one trailing newline: a registry row is stored
+ * with the newline it is written with, but reads better unterminated in JSON. */
+static void devbuf_addstr_trim(struct devbuf *b, const char *s)
+{
+    char trimmed[ZCL_DEVLOOP_APP_SLICE_NAME_MAX * 2];
+    size_t n = strnlen(s, sizeof(trimmed));
+    if (n >= sizeof(trimmed)) {
+        b->ok = false;
+        return;
+    }
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r'))
+        n--;
+    memcpy(trimmed, s, n);
+    trimmed[n] = 0;
+    devbuf_addstr(b, trimmed);
+}
+bool zcl_devloop_app_resource_valid(const char *name)
 {
     if (!name)
         return false;
@@ -188,50 +205,56 @@ int zcl_devloop_app_describe(const char *repo_root, const char *app_id)
 }
 
 /* ── plan ──────────────────────────────────────────────────────────────── */
+/* Render the slice a scaffold would materialise. The file list is not
+ * restated here — it is read out of the one slice builder both commands use,
+ * so a preview can never describe a slice the scaffold does not write. */
 size_t zcl_devloop_app_plan_json(const char *repo_root, const char *app_id,
                                  const char *resource, char *out, size_t out_sz)
 {
-    char root[PATH_MAX];
-    if (!resolve_root(repo_root, root) ||
-        !zcl_app_definition_id_valid_v1(app_id) ||
-        !resource_name_ok(resource))
+    struct zcl_devloop_app_slice *slice =
+        zcl_devloop_app_slice_build(repo_root, app_id, resource);
+    if (!slice)
         return 0;
     struct zcl_app_definition_v1 definition;
-    if (!zcl_app_definition_load_v1(root, app_id, &definition).ok)
+    if (!zcl_app_definition_load_v1(slice->root, slice->app_id,
+                                    &definition).ok) {
+        zcl_devloop_app_slice_free(slice);
         return 0;
-    bool comma = false;
+    }
 
     struct devbuf b;
     devbuf_init(&b, out, out_sz);
     devbuf_addf(&b, "{\"schema\":\"zcl.dev_app_plan.v1\",\"status\":"
                     "\"planned\",\"mode\":\"preview-only\","
                     "\"writes\":false,\"authority\":\"none\",\"app_id\":");
-    devbuf_addstr(&b, definition.app_id);
+    devbuf_addstr(&b, slice->app_id);
     devbuf_addf(&b, ",\"resource\":");
-    devbuf_addstr(&b, resource);
+    devbuf_addstr(&b, slice->resource);
+    devbuf_addf(&b, ",\"test_group\":");
+    devbuf_addstr(&b, slice->group);
     devbuf_addf(&b, ",\"files\":[");
-    static const char *const patterns[] = {
-        "engine/models/include/models/%s.h",
-        "engine/models/src/%s.c",
-        "engine/services/include/services/%s_service.h",
-        "engine/services/src/%s_service.c",
-        "engine/controllers/include/controllers/%s_controller.h",
-        "engine/controllers/src/%s_controller.c",
-        "contexts/explorer/views/include/views/%s_view.h",
-        "contexts/explorer/views/src/%s_view.c",
-    };
-    for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++) {
-        if (i) devbuf_addf(&b, ",");
-        char path[256];
-        int n = snprintf(path, sizeof(path), patterns[i], resource);
-        if (n <= 0 || (size_t)n >= sizeof(path))
-            return 0;
-        devbuf_addstr(&b, path);
+    bool comma = false;
+    for (size_t i = 0; i < slice->file_count; i++) {
+        if (slice->files[i].kind != ZCL_DEVLOOP_APP_SLICE_CREATE)
+            continue;
+        if (comma) devbuf_addf(&b, ",");
+        devbuf_addstr(&b, slice->files[i].path);
+        comma = true;
     }
-    devbuf_addf(&b, ",\"engine/models/src/database_migrate_features.c\","
-                    "\"apps/%s/app.def\",\"tests/harness/src/test_%s.c\","
-                    "\"cognition/controllers/include/controllers/agent_impact_rules.def\"],"
-                    "\"bindings\":[", app_id, app_id);
+    devbuf_addf(&b, "],\"registrations\":[");
+    comma = false;
+    for (size_t i = 0; i < slice->file_count; i++) {
+        if (slice->files[i].kind != ZCL_DEVLOOP_APP_SLICE_ROW)
+            continue;
+        if (comma) devbuf_addf(&b, ",");
+        devbuf_addf(&b, "{\"file\":");
+        devbuf_addstr(&b, slice->files[i].path);
+        devbuf_addf(&b, ",\"row\":");
+        devbuf_addstr_trim(&b, slice->files[i].body);
+        devbuf_addf(&b, "}");
+        comma = true;
+    }
+    devbuf_addf(&b, "],\"bindings\":[");
     comma = false;
     static const struct { uint64_t bit; const char *name; } bindings[] = {
         { ZCL_APP_CAP_WEB_ROUTES, "web" },
@@ -246,15 +269,21 @@ size_t zcl_devloop_app_plan_json(const char *repo_root, const char *app_id,
         devbuf_addstr(&b, bindings[i].name);
         comma = true;
     }
-    devbuf_addf(&b, "],"
+    devbuf_addf(&b, "],\"wiring\":["
+                    "\"engine/models/src/database_migrate_features.c\","
+                    "\"contexts/commons/apps/%s/app.def\","
+                    "\"cognition/controllers/include/controllers/"
+                    "agent_impact_rules.def\"],"
                     "\"required_proofs\":[\"same_seed_replay\","
                     "\"partition_rejoin_convergence\","
                     "\"invalid_signature_rejection\","
                     "\"validation_and_relationship_tests\"],"
                     "\"forbidden\":[\"consensus_mutation\",\"wallet_keys\","
                     "\"raw_storage\",\"raw_sockets\",\"boot_ownership\"],"
-                    "\"agent_next_action\":\"review this conventional "
-                    "slice; this command writes and publishes nothing\"}");
+                    "\"agent_next_action\":\"z23 dev app scaffold %s %s "
+                    "writes exactly these files\"}",
+                slice->app_id, slice->app_id, slice->resource);
+    zcl_devloop_app_slice_free(slice);
     return b.ok ? b.len : 0;
 }
 

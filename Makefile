@@ -908,6 +908,7 @@ MUTATION_LIB_SRCS = tools/dev/mutation_ops.c tools/dev/mutation_run.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
+	tools/dev/devloop_app_scaffold.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/devloop_baseline.c tools/dev/dev_failure_store.c \
@@ -2884,6 +2885,7 @@ HOTSWAP_ROLLBACK_FIXTURE_SOS = \
 TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard tests/harness/src/*.c))
 TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
+	tools/dev/devloop_app_scaffold.c \
 	tools/dev/dev_source_identity.c tools/dev/devloop_process.c \
 	tools/dev/devloop_watch.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \

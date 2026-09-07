@@ -1698,6 +1698,64 @@ void zcl_native_handle_dev_app_plan(const struct zcl_command_request *request,
     dev_reply_from_json(reply, body, n, app_id);
 }
 
+
+/* ── dev.app.scaffold ──────────────────────────────────────────────────── */
+void zcl_native_handle_dev_app_scaffold(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+#ifndef ZCL_DEV_BUILD
+    (void)request;
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        "DEV_BUILD_REQUIRED", "dispatch", false, false,
+        "materializing checkout files requires a dev build",
+        "make dev-bin, or z23-dev dev app scaffold <app> <resource>");
+#else
+    const char *app_id = json_get_str(json_get(request->input, "app_id"));
+    const char *resource = json_get_str(json_get(request->input, "resource"));
+    if (!app_id || !app_id[0] || !resource || !resource[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_ARGS",
+                               "normalize", false, false,
+                               "app_id and resource are required", "");
+        return;
+    }
+    char body[8192];
+    size_t n = zcl_devloop_app_scaffold_json(dev_source_root(request), app_id,
+                                             resource, body, sizeof(body));
+    if (n == 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "INVALID_ARGS",
+                               "resolve", false, false,
+                               "invalid App, resource, or checkout root",
+                               app_id);
+        return;
+    }
+    /* A refusal is a typed failure, not a quiet zero-file success: the slice
+     * conflicts with what is already on disk and the operator must resolve
+     * the named path before the scaffold can be trusted to finish. */
+    if (strstr(body, "\"status\":\"refused\"")) {
+        const char *at = strstr(body, "\"refusal\":\"");
+        char why[ZCL_DEVLOOP_APP_SLICE_PATH_MAX + 96];
+        size_t len = 0;
+        if (at) {
+            at += strlen("\"refusal\":\"");
+            while (len + 1u < sizeof(why) && at[len] && at[len] != '"') {
+                why[len] = at[len];
+                len++;
+            }
+        }
+        why[len] = 0;
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "SCAFFOLD_CONFLICT",
+                               "materialize", false, false,
+                               len ? why : "scaffold refused", resource);
+        return;
+    }
+    dev_reply_from_json(reply, body, n, app_id);
+#endif
+}
+
 /* ── dev.app.simulate ──────────────────────────────────────────────────── */
 void zcl_native_handle_dev_app_simulate(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
