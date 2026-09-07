@@ -282,9 +282,12 @@ static bool vc_publish_declared_source_tree(const char *workspace, bool full,
     return ok;
 }
 
-static int t_source_bundle(void)
-{
-    int failures = 0;
+/* Shared fixture state for t_source_bundle()'s phase functions below. Kept
+ * as one struct (rather than a long parameter list per phase) because most
+ * phases both read and extend what earlier phases built: the declared
+ * source root, the whole-tree bundle wire, the sharded bundle, the signed
+ * lane receipt, and the built content.v2 transport. */
+struct tsb_ctx {
     char source[512], unlicensed_source[512], consumer[512];
     char sharded_consumer[512];
     char package_datadir[512], incomplete_datadir[512];
@@ -292,49 +295,83 @@ static int t_source_bundle(void)
     char package_destination[512], refused_destination[512];
     char incomplete_destination[512];
     char materialized[512], marker[512];
-    test_make_tmpdir(source, sizeof(source), "vcs_core", "bundle-source");
-    test_make_tmpdir(unlicensed_source, sizeof(unlicensed_source),
-                     "vcs_core", "bundle-unlicensed-source");
-    test_make_tmpdir(consumer, sizeof(consumer), "vcs_core", "bundle-consumer");
-    test_make_tmpdir(sharded_consumer, sizeof(sharded_consumer),
-                     "vcs_core", "bundle-sharded-consumer");
-    test_make_tmpdir(package_datadir, sizeof(package_datadir),
-                     "vcs_core", "bundle-package-store");
-    test_make_tmpdir(incomplete_datadir, sizeof(incomplete_datadir),
-                     "vcs_core", "bundle-incomplete-store");
-    test_make_tmpdir(package_workspace, sizeof(package_workspace),
-                     "vcs_core", "bundle-package-workspace");
-    test_make_tmpdir(package_destination, sizeof(package_destination),
-                     "vcs_core", "bundle-package-destination");
-    test_make_tmpdir(refused_destination, sizeof(refused_destination),
-                     "vcs_core", "bundle-refused-destination");
-    test_make_tmpdir(incomplete_destination, sizeof(incomplete_destination),
-                     "vcs_core", "bundle-incomplete-destination");
-    test_make_tmpdir(materialized, sizeof(materialized), "vcs_core",
-                     "bundle-materialized");
-    (void)snprintf(marker, sizeof(marker), "%s/should-not-exist",
-                   package_destination);
 
+    uint8_t first_root[32];
+    uint8_t *first_wire;
+    size_t first_wire_len;
+    struct vcs_source_bundle_metrics created;
+    struct vcs_source_bundle_sharded first_sharded;
+
+    uint8_t lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
+    uint8_t lane_pubkey[32];
+    bool lane_ok;
+    struct vcs_zcode_lane_receipt_v1 lane;
+    struct vcs_source_package_transport transport;
+};
+
+static void tsb_setup(struct tsb_ctx *ctx)
+{
+    test_make_tmpdir(ctx->source, sizeof(ctx->source), "vcs_core",
+                     "bundle-source");
+    test_make_tmpdir(ctx->unlicensed_source, sizeof(ctx->unlicensed_source),
+                     "vcs_core", "bundle-unlicensed-source");
+    test_make_tmpdir(ctx->consumer, sizeof(ctx->consumer), "vcs_core",
+                     "bundle-consumer");
+    test_make_tmpdir(ctx->sharded_consumer, sizeof(ctx->sharded_consumer),
+                     "vcs_core", "bundle-sharded-consumer");
+    test_make_tmpdir(ctx->package_datadir, sizeof(ctx->package_datadir),
+                     "vcs_core", "bundle-package-store");
+    test_make_tmpdir(ctx->incomplete_datadir, sizeof(ctx->incomplete_datadir),
+                     "vcs_core", "bundle-incomplete-store");
+    test_make_tmpdir(ctx->package_workspace, sizeof(ctx->package_workspace),
+                     "vcs_core", "bundle-package-workspace");
+    test_make_tmpdir(ctx->package_destination,
+                     sizeof(ctx->package_destination), "vcs_core",
+                     "bundle-package-destination");
+    test_make_tmpdir(ctx->refused_destination,
+                     sizeof(ctx->refused_destination), "vcs_core",
+                     "bundle-refused-destination");
+    test_make_tmpdir(ctx->incomplete_destination,
+                     sizeof(ctx->incomplete_destination), "vcs_core",
+                     "bundle-incomplete-destination");
+    test_make_tmpdir(ctx->materialized, sizeof(ctx->materialized),
+                     "vcs_core", "bundle-materialized");
+    (void)snprintf(ctx->marker, sizeof(ctx->marker), "%s/should-not-exist",
+                   ctx->package_destination);
+}
+
+static int tsb_fixture_and_capture(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     VC_CHECK("source bundle fixture files",
-             vc_write(source, "LICENSE", TEST_LICENSE_TEXT_MIT) &&
-             vc_write(source, "src/a.c", "int a(void) { return 1; }\n") &&
-             vc_write(source, "include/a.h", "int a(void);\n") &&
-             vc_write(source, "run.sh", "#!/bin/sh\ntouch should-not-exist\n") &&
-             vc_write(source, "vendor/sqlite3.c", "generated amalgamation") &&
-             vc_write(source, "vendor/include/zlib.h", "generated zlib header") &&
-             vc_write(source, "vendor/include/zconf.h", "generated config") &&
-             vc_write(source, "vendor/.cache/leveldb-1.23.tar.gz", "leveldb") &&
-             vc_write(source, "vendor/.cache/libevent-2.1.12.tar.gz", "libevent") &&
-             vc_write(source, "vendor/.cache/openssl-3.0.16.tar.gz", "openssl") &&
-             vc_write(source, "vendor/.cache/sqlite-amalgamation-3490000.zip", "sqlite") &&
-             vc_write(source, "vendor/.cache/zlib-1.3.1.tar.gz", "zlib"));
+             vc_write(ctx->source, "LICENSE", TEST_LICENSE_TEXT_MIT) &&
+             vc_write(ctx->source, "src/a.c", "int a(void) { return 1; }\n") &&
+             vc_write(ctx->source, "include/a.h", "int a(void);\n") &&
+             vc_write(ctx->source, "run.sh",
+                      "#!/bin/sh\ntouch should-not-exist\n") &&
+             vc_write(ctx->source, "vendor/sqlite3.c",
+                      "generated amalgamation") &&
+             vc_write(ctx->source, "vendor/include/zlib.h",
+                      "generated zlib header") &&
+             vc_write(ctx->source, "vendor/include/zconf.h",
+                      "generated config") &&
+             vc_write(ctx->source, "vendor/.cache/leveldb-1.23.tar.gz",
+                      "leveldb") &&
+             vc_write(ctx->source, "vendor/.cache/libevent-2.1.12.tar.gz",
+                      "libevent") &&
+             vc_write(ctx->source, "vendor/.cache/openssl-3.0.16.tar.gz",
+                      "openssl") &&
+             vc_write(ctx->source,
+                      "vendor/.cache/sqlite-amalgamation-3490000.zip",
+                      "sqlite") &&
+             vc_write(ctx->source, "vendor/.cache/zlib-1.3.1.tar.gz", "zlib"));
     char executable[1024];
-    (void)snprintf(executable, sizeof(executable), "%s/run.sh", source);
+    (void)snprintf(executable, sizeof(executable), "%s/run.sh", ctx->source);
     VC_CHECK("source bundle executable mode fixture",
              chmod(executable, 0755) == 0);
 
-    uint8_t first_root[32] = {0}, declared_root[32] = {0};
-    bool declared = vc_publish_declared_source_tree(source, true,
+    uint8_t declared_root[32] = {0};
+    bool declared = vc_publish_declared_source_tree(ctx->source, true,
                                                      declared_root);
     VC_CHECK("source bundle publishes declared canonical-mode tree", declared);
 #if defined(_WIN32)
@@ -343,241 +380,306 @@ static int t_source_bundle(void)
      * exclusion, both of which remain unavailable without a mode authority. */
     uint8_t refused_capture[32];
     memset(refused_capture, 0xa5, sizeof(refused_capture));
-    bool capture_refused = vcs_tree_capture_path(source, refused_capture) ==
-        VCS_REFUSED;
+    bool capture_refused =
+        vcs_tree_capture_path(ctx->source, refused_capture) == VCS_REFUSED;
     uint8_t zero_root[32] = {0};
     VC_CHECK("source bundle Windows local mode capture remains explicit refusal",
              capture_refused &&
              memcmp(refused_capture, zero_root, sizeof(zero_root)) == 0);
-    if (declared) memcpy(first_root, declared_root, sizeof(first_root));
-    else memset(first_root, 0, sizeof(first_root));
+    if (declared)
+        memcpy(ctx->first_root, declared_root, sizeof(ctx->first_root));
+    else
+        memset(ctx->first_root, 0, sizeof(ctx->first_root));
 #else
     VC_CHECK("source bundle captures authoritative tree equal to declaration",
-             declared && vcs_tree_capture_path(source, first_root) == VCS_OK &&
-             memcmp(first_root, declared_root, sizeof(first_root)) == 0);
+             declared &&
+             vcs_tree_capture_path(ctx->source, ctx->first_root) == VCS_OK &&
+             memcmp(ctx->first_root, declared_root,
+                    sizeof(ctx->first_root)) == 0);
 #endif
-    uint8_t *first_wire = NULL;
-    size_t first_wire_len = 0;
-    struct vcs_source_bundle_metrics created;
+    return failures;
+}
+
+static int tsb_bundle_create_and_verify(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     VC_CHECK("source bundle transports only declared tree, excluding generated outputs",
-             vcs_source_bundle_create(source, first_root, &first_wire,
-                                      &first_wire_len, &created) ==
-                 VCS_SOURCE_BUNDLE_OK &&
-             first_wire && first_wire_len > VCS_SOURCE_BUNDLE_HEADER_BYTES &&
-             created.file_count == 4 && created.source_bytes > 0);
+             vcs_source_bundle_create(ctx->source, ctx->first_root,
+                                      &ctx->first_wire, &ctx->first_wire_len,
+                                      &ctx->created) == VCS_SOURCE_BUNDLE_OK &&
+             ctx->first_wire &&
+             ctx->first_wire_len > VCS_SOURCE_BUNDLE_HEADER_BYTES &&
+             ctx->created.file_count == 4 && ctx->created.source_bytes > 0);
     struct vcs_source_bundle_metrics verified;
     VC_CHECK("source bundle verifies without writes",
-             vcs_source_bundle_verify(first_wire, first_wire_len, first_root,
-                                      &verified) == VCS_SOURCE_BUNDLE_OK &&
-             verified.file_count == created.file_count &&
-             !vcs_object_store_initialized(consumer));
+             vcs_source_bundle_verify(ctx->first_wire, ctx->first_wire_len,
+                                      ctx->first_root, &verified) ==
+                 VCS_SOURCE_BUNDLE_OK &&
+             verified.file_count == ctx->created.file_count &&
+             !vcs_object_store_initialized(ctx->consumer));
+    return failures;
+}
 
-    struct vcs_source_bundle_sharded first_sharded;
-    vcs_source_bundle_sharded_init(&first_sharded);
+static int tsb_sharded_create_verify_and_tamper(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    vcs_source_bundle_sharded_init(&ctx->first_sharded);
     VC_CHECK("source bundle v2 creates independently compressed path shards",
              vcs_source_bundle_sharded_create(
-                 source, first_root, &first_sharded) ==
+                 ctx->source, ctx->first_root, &ctx->first_sharded) ==
                  VCS_SOURCE_BUNDLE_OK &&
-             first_sharded.shard_count > 0 &&
-             first_sharded.metrics.file_count == created.file_count);
+             ctx->first_sharded.shard_count > 0 &&
+             ctx->first_sharded.metrics.file_count == ctx->created.file_count);
     struct vcs_source_bundle_metrics sharded_verified;
     VC_CHECK("source bundle v2 rederives complete tree and every blob",
              vcs_source_bundle_sharded_verify(
-                 &first_sharded, first_root, &sharded_verified) ==
+                 &ctx->first_sharded, ctx->first_root, &sharded_verified) ==
                  VCS_SOURCE_BUNDLE_OK &&
-             sharded_verified.source_bytes == created.source_bytes);
-    size_t complete_shards = first_sharded.shard_count;
+             sharded_verified.source_bytes == ctx->created.source_bytes);
+    size_t complete_shards = ctx->first_sharded.shard_count;
     bool shard_fixture_ready = complete_shards > 0 &&
-        first_sharded.shards[0].wire != NULL &&
-        first_sharded.shards[0].wire_len > 0;
-    if (complete_shards > 0) first_sharded.shard_count--;
+        ctx->first_sharded.shards[0].wire != NULL &&
+        ctx->first_sharded.shards[0].wire_len > 0;
+    if (complete_shards > 0) ctx->first_sharded.shard_count--;
     VC_CHECK("source bundle v2 missing shard is refused",
-             complete_shards > 0 && vcs_source_bundle_sharded_verify(
-                 &first_sharded, first_root, NULL) != VCS_SOURCE_BUNDLE_OK);
-    first_sharded.shard_count = complete_shards;
+             complete_shards > 0 &&
+             vcs_source_bundle_sharded_verify(&ctx->first_sharded,
+                                              ctx->first_root, NULL) !=
+                 VCS_SOURCE_BUNDLE_OK);
+    ctx->first_sharded.shard_count = complete_shards;
     if (shard_fixture_ready) {
-        uint8_t saved_shard_tail = first_sharded.shards[0].wire[
-            first_sharded.shards[0].wire_len - 1u];
-        first_sharded.shards[0].wire[
-            first_sharded.shards[0].wire_len - 1u] ^= 0x80u;
+        uint8_t saved_shard_tail =
+            ctx->first_sharded.shards[0]
+                .wire[ctx->first_sharded.shards[0].wire_len - 1u];
+        ctx->first_sharded.shards[0]
+            .wire[ctx->first_sharded.shards[0].wire_len - 1u] ^= 0x80u;
         VC_CHECK("source bundle v2 corrupt shard is refused",
-                 vcs_source_bundle_sharded_verify(
-                     &first_sharded, first_root, NULL) !=
+                 vcs_source_bundle_sharded_verify(&ctx->first_sharded,
+                                                  ctx->first_root, NULL) !=
                      VCS_SOURCE_BUNDLE_OK);
-        first_sharded.shards[0].wire[
-            first_sharded.shards[0].wire_len - 1u] = saved_shard_tail;
-        uint16_t saved_shard_index = first_sharded.shards[0].index;
-        first_sharded.shards[0].index = (uint16_t)(saved_shard_index ^ 1u);
+        ctx->first_sharded.shards[0]
+            .wire[ctx->first_sharded.shards[0].wire_len - 1u] =
+            saved_shard_tail;
+        uint16_t saved_shard_index = ctx->first_sharded.shards[0].index;
+        ctx->first_sharded.shards[0].index =
+            (uint16_t)(saved_shard_index ^ 1u);
         VC_CHECK("source bundle v2 misplaced shard is refused",
-                 vcs_source_bundle_sharded_verify(
-                     &first_sharded, first_root, NULL) !=
+                 vcs_source_bundle_sharded_verify(&ctx->first_sharded,
+                                                  ctx->first_root, NULL) !=
                      VCS_SOURCE_BUNDLE_OK);
-        first_sharded.shards[0].index = saved_shard_index;
+        ctx->first_sharded.shards[0].index = saved_shard_index;
     } else {
         VC_CHECK("source bundle v2 corrupt shard is refused", false);
         VC_CHECK("source bundle v2 misplaced shard is refused", false);
     }
+    return failures;
+}
+
+static int tsb_sharded_import(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     struct vcs_source_bundle_metrics sharded_imported;
     VC_CHECK("source bundle v2 verifies fully before CAS import",
              vcs_source_bundle_sharded_import(
-                 &first_sharded, first_root, sharded_consumer,
+                 &ctx->first_sharded, ctx->first_root, ctx->sharded_consumer,
                  &sharded_imported) == VCS_SOURCE_BUNDLE_OK &&
              sharded_imported.new_blobs == 4 &&
              sharded_imported.reused_blobs == 0);
+    return failures;
+}
 
-    uint8_t lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
-    struct vcs_zcode_lane_receipt_v1 lane = {
+/* Builds ctx->lane_wire/lane_pubkey (a sealed PROVEN lane receipt over
+ * ctx->first_root). No VC_CHECK of its own: later phases prove the receipt
+ * is usable by using it. */
+static void tsb_seal_lane_receipt(struct tsb_ctx *ctx)
+{
+    ctx->lane = (struct vcs_zcode_lane_receipt_v1){
         .schema_version = VCS_ZCODE_DEV_VERSION,
         .lane = VCS_ZCODE_LANE_PROVEN,
         .created_unix = 1,
     };
-    memcpy(lane.source_root, first_root, 32);
-    memset(lane.task_root, 0x11, 32);
-    memset(lane.candidate_root, 0x22, 32);
-    memset(lane.proof_policy_root, 0x33, 32);
-    memset(lane.proof_set_root, 0x44, 32);
-    memset(lane.prior_receipt_root, 0x55, 32);
-    uint8_t lane_seed[32], lane_secret[32], lane_pubkey[32];
+    memcpy(ctx->lane.source_root, ctx->first_root, 32);
+    memset(ctx->lane.task_root, 0x11, 32);
+    memset(ctx->lane.candidate_root, 0x22, 32);
+    memset(ctx->lane.proof_policy_root, 0x33, 32);
+    memset(ctx->lane.proof_set_root, 0x44, 32);
+    memset(ctx->lane.prior_receipt_root, 0x55, 32);
+    uint8_t lane_seed[32], lane_secret[32];
     memset(lane_seed, 0x66, sizeof(lane_seed));
-    ed25519_keypair(lane_pubkey, lane_secret, lane_seed);
-    bool lane_ok = vcs_zcode_lane_receipt_seal(
-            &lane, lane_secret, lane_pubkey) == VCS_ZCODE_DEV_OK &&
-        vcs_zcode_lane_receipt_serialize(&lane, lane_wire) ==
+    ed25519_keypair(ctx->lane_pubkey, lane_secret, lane_seed);
+    ctx->lane_ok =
+        vcs_zcode_lane_receipt_seal(&ctx->lane, lane_secret,
+                                    ctx->lane_pubkey) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_lane_receipt_serialize(&ctx->lane, ctx->lane_wire) ==
             VCS_ZCODE_DEV_OK;
     memset(lane_secret, 0, sizeof(lane_secret));
+}
 
+static int tsb_unlicensed_and_forged_refusals(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     uint8_t unlicensed_root[32] = {0};
     bool unlicensed_files =
-             vc_write(unlicensed_source, "LICENSE",
-                      "Copyright 2026. All rights reserved.\n") &&
-             vc_write(unlicensed_source, "src/a.c",
-                      "int a(void) { return 9; }\n");
+        vc_write(ctx->unlicensed_source, "LICENSE",
+                 "Copyright 2026. All rights reserved.\n") &&
+        vc_write(ctx->unlicensed_source, "src/a.c",
+                 "int a(void) { return 9; }\n");
     VC_CHECK("source package proprietary-license fixture publishes declared tree",
              unlicensed_files && vc_publish_declared_source_tree(
-                 unlicensed_source, false, unlicensed_root));
-    struct vcs_zcode_lane_receipt_v1 unlicensed_lane = lane;
+                 ctx->unlicensed_source, false, unlicensed_root));
+    struct vcs_zcode_lane_receipt_v1 unlicensed_lane = ctx->lane;
     memcpy(unlicensed_lane.source_root, unlicensed_root, 32);
     unlicensed_lane.created_unix = 2;
     uint8_t unlicensed_seed[32], unlicensed_secret[32];
-    uint8_t unlicensed_pubkey[32], unlicensed_lane_wire[
-        VCS_ZCODE_LANE_WIRE_BYTES];
+    uint8_t unlicensed_pubkey[32],
+        unlicensed_lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
     memset(unlicensed_seed, 0x67, sizeof(unlicensed_seed));
     ed25519_keypair(unlicensed_pubkey, unlicensed_secret, unlicensed_seed);
-    bool unlicensed_lane_ok = vcs_zcode_lane_receipt_seal(
-            &unlicensed_lane, unlicensed_secret, unlicensed_pubkey) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_zcode_lane_receipt_serialize(
-            &unlicensed_lane, unlicensed_lane_wire) == VCS_ZCODE_DEV_OK;
+    bool unlicensed_lane_ok =
+        vcs_zcode_lane_receipt_seal(&unlicensed_lane, unlicensed_secret,
+                                    unlicensed_pubkey) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_lane_receipt_serialize(&unlicensed_lane,
+                                         unlicensed_lane_wire) ==
+            VCS_ZCODE_DEV_OK;
     memset(unlicensed_secret, 0, sizeof(unlicensed_secret));
     struct vcs_source_package_transport unlicensed_transport;
     vcs_source_package_transport_init(&unlicensed_transport);
     VC_CHECK("source package creation refuses proprietary LICENSE text",
              unlicensed_lane_ok &&
-                 !vcs_source_package_transport_build(
-                     unlicensed_source, unlicensed_root, unlicensed_pubkey,
-                     unlicensed_lane_wire, sizeof(unlicensed_lane_wire),
-                     &unlicensed_transport));
+             !vcs_source_package_transport_build(
+                 ctx->unlicensed_source, unlicensed_root, unlicensed_pubkey,
+                 unlicensed_lane_wire, sizeof(unlicensed_lane_wire),
+                 &unlicensed_transport));
     vcs_source_package_transport_free(&unlicensed_transport);
+
     uint8_t wrong_signer[32];
     memset(wrong_signer, 0x77, sizeof(wrong_signer));
     struct vcs_source_package_transport unauthorized_transport;
     vcs_source_package_transport_init(&unauthorized_transport);
     VC_CHECK("source package refuses a receipt outside accepted authority",
              !vcs_source_package_transport_build(
-                 source, first_root, wrong_signer, lane_wire,
-                 sizeof(lane_wire), &unauthorized_transport));
+                 ctx->source, ctx->first_root, wrong_signer, ctx->lane_wire,
+                 sizeof(ctx->lane_wire), &unauthorized_transport));
     vcs_source_package_transport_free(&unauthorized_transport);
+
     uint8_t refused_lane[VCS_ZCODE_LANE_WIRE_BYTES];
-    memcpy(refused_lane, lane_wire, sizeof(refused_lane));
+    memcpy(refused_lane, ctx->lane_wire, sizeof(refused_lane));
     refused_lane[sizeof(refused_lane) - 1u] ^= 1u;
     struct vcs_source_package_transport refused_transport;
     vcs_source_package_transport_init(&refused_transport);
     VC_CHECK("source package refuses a forged PROVEN receipt",
              !vcs_source_package_transport_build(
-                 source, first_root, lane_pubkey, refused_lane,
-                 sizeof(refused_lane),
-                 &refused_transport));
+                 ctx->source, ctx->first_root, ctx->lane_pubkey, refused_lane,
+                 sizeof(refused_lane), &refused_transport));
     vcs_source_package_transport_free(&refused_transport);
-    struct vcs_source_package_transport transport;
-    vcs_source_package_transport_init(&transport);
+    return failures;
+}
+
+static int tsb_transport_build_and_manifest(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    vcs_source_package_transport_init(&ctx->transport);
     VC_CHECK("source package carries verified tree through content.v2",
-             lane_ok && vcs_source_package_transport_build(
-                 source, first_root, lane_pubkey, lane_wire, sizeof(lane_wire),
-                 &transport) && transport.source.shard_count > 0 &&
-             transport.offline_input_count == 5 &&
-             transport.bundle_metrics.file_count == created.file_count);
+             ctx->lane_ok &&
+             vcs_source_package_transport_build(
+                 ctx->source, ctx->first_root, ctx->lane_pubkey,
+                 ctx->lane_wire, sizeof(ctx->lane_wire), &ctx->transport) &&
+             ctx->transport.source.shard_count > 0 &&
+             ctx->transport.offline_input_count == 5 &&
+             ctx->transport.bundle_metrics.file_count == ctx->created.file_count);
+
     struct vcs_package_manifest carrier;
     char first_shard_path[VCS_SOURCE_BUNDLE_SHARD_PATH_MAX];
-    bool have_shard_path = transport.source.shard_count > 0 &&
-        vcs_source_bundle_shard_path(
-            transport.source.shards[0].index, first_shard_path,
-            sizeof(first_shard_path));
+    bool have_shard_path =
+        ctx->transport.source.shard_count > 0 &&
+        vcs_source_bundle_shard_path(ctx->transport.source.shards[0].index,
+                                     first_shard_path,
+                                     sizeof(first_shard_path));
     VC_CHECK("source package manifest is canonical sharded carrier",
-             vcs_package_manifest_parse(
-                 transport.manifest_wire, transport.manifest_wire_len,
-                 &carrier) &&
-             carrier.count == vcs_source_package_transport_file_count(
-                                  &transport) &&
-             vc_package_has_path(
-                 &carrier, VCS_SOURCE_PACKAGE_MANIFEST_PATH) &&
-             have_shard_path && vc_package_has_path(
-                 &carrier, first_shard_path) &&
-             vc_package_has_path(
-                 &carrier, VCS_SOURCE_PACKAGE_LANE_PATH) &&
-             vc_package_has_path(
-                 &carrier, VCS_SOURCE_PACKAGE_MARKER_PATH) &&
-             vc_package_has_path(
-                 &carrier, VCS_SOURCE_PACKAGE_LICENSE_PATH) &&
-             vc_package_has_path(
-                 &carrier, "vendor/.cache/openssl-3.0.16.tar.gz"));
+             vcs_package_manifest_parse(ctx->transport.manifest_wire,
+                                        ctx->transport.manifest_wire_len,
+                                        &carrier) &&
+             carrier.count ==
+                 vcs_source_package_transport_file_count(&ctx->transport) &&
+             vc_package_has_path(&carrier,
+                                 VCS_SOURCE_PACKAGE_MANIFEST_PATH) &&
+             have_shard_path &&
+             vc_package_has_path(&carrier, first_shard_path) &&
+             vc_package_has_path(&carrier, VCS_SOURCE_PACKAGE_LANE_PATH) &&
+             vc_package_has_path(&carrier, VCS_SOURCE_PACKAGE_MARKER_PATH) &&
+             vc_package_has_path(&carrier,
+                                 VCS_SOURCE_PACKAGE_LICENSE_PATH) &&
+             vc_package_has_path(&carrier,
+                                 "vendor/.cache/openssl-3.0.16.tar.gz"));
     vcs_package_manifest_free(&carrier);
+
     struct vcs_package_recipe carrier_recipe;
     uint8_t carrier_recipe_root[32];
     VC_CHECK("source package recipe builds only inert carrier marker",
-             vcs_package_recipe_parse(
-                 transport.recipe_wire, transport.recipe_wire_len,
-                 &carrier_recipe) == VCS_PACKAGE_RECIPE_OK &&
+             vcs_package_recipe_parse(ctx->transport.recipe_wire,
+                                      ctx->transport.recipe_wire_len,
+                                      &carrier_recipe) ==
+                 VCS_PACKAGE_RECIPE_OK &&
              carrier_recipe.sources.count == 1 &&
              strcmp(carrier_recipe.sources.items[0],
                     VCS_SOURCE_PACKAGE_MARKER_PATH) == 0 &&
-             vcs_package_recipe_root(
-                 &carrier_recipe, carrier_recipe_root) ==
+             vcs_package_recipe_root(&carrier_recipe, carrier_recipe_root) ==
                  VCS_PACKAGE_RECIPE_OK &&
-             memcmp(carrier_recipe_root, transport.recipe_root, 32) == 0);
+             memcmp(carrier_recipe_root, ctx->transport.recipe_root, 32) ==
+                 0);
     vcs_package_recipe_free(&carrier_recipe);
+    return failures;
+}
 
+static int tsb_carrier_store_admits_and_leaves_incomplete(
+    struct tsb_ctx *ctx, struct vcs_package_store **out_carrier_store)
+{
+    int failures = 0;
     struct vcs_package_store *carrier_store = vcs_package_store_open(
-        package_datadir, UINT64_C(256) * 1024u * 1024u);
+        ctx->package_datadir, UINT64_C(256) * 1024u * 1024u);
     uint8_t admitted_root[32];
     VC_CHECK("source carrier enters the ordinary content.v2 store",
-             carrier_store && vcs_package_store_put_manifest(
-                 carrier_store, transport.manifest_wire,
-                 transport.manifest_wire_len, admitted_root) ==
+             carrier_store &&
+             vcs_package_store_put_manifest(
+                 carrier_store, ctx->transport.manifest_wire,
+                 ctx->transport.manifest_wire_len, admitted_root) ==
                  VCS_PACKAGE_STORE_OK &&
-             memcmp(admitted_root, transport.package_root, 32) == 0);
+             memcmp(admitted_root, ctx->transport.package_root, 32) == 0);
     struct vcs_package_store *incomplete_store = vcs_package_store_open(
-        incomplete_datadir, UINT64_C(256) * 1024u * 1024u);
+        ctx->incomplete_datadir, UINT64_C(256) * 1024u * 1024u);
     uint8_t incomplete_root[32];
     VC_CHECK("source carrier interrupted transfer remains incomplete",
-             incomplete_store && vcs_package_store_put_manifest(
-                 incomplete_store, transport.manifest_wire,
-                 transport.manifest_wire_len, incomplete_root) ==
+             incomplete_store &&
+             vcs_package_store_put_manifest(
+                 incomplete_store, ctx->transport.manifest_wire,
+                 ctx->transport.manifest_wire_len, incomplete_root) ==
                  VCS_PACKAGE_STORE_OK &&
              vcs_source_package_checkout(
-                 incomplete_store, incomplete_root, first_root, lane_pubkey,
-                 package_workspace, incomplete_destination, NULL) ==
+                 incomplete_store, incomplete_root, ctx->first_root,
+                 ctx->lane_pubkey, ctx->package_workspace,
+                 ctx->incomplete_destination, NULL) ==
                  VCS_SOURCE_PACKAGE_CHECKOUT_INCOMPLETE);
     if (incomplete_store) vcs_package_store_close(incomplete_store);
+    *out_carrier_store = carrier_store;
+    return failures;
+}
+
+static int tsb_carrier_chunks_and_hostile_license(
+    struct tsb_ctx *ctx, struct vcs_package_store *carrier_store,
+    uint8_t proprietary_root[32])
+{
+    int failures = 0;
     struct vcs_package_manifest stored_carrier;
     bool stored_parsed = vcs_package_manifest_parse(
-        transport.manifest_wire, transport.manifest_wire_len,
+        ctx->transport.manifest_wire, ctx->transport.manifest_wire_len,
         &stored_carrier);
     bool stored = stored_parsed;
     for (size_t i = 0; stored && i < stored_carrier.count; i++) {
         const struct vcs_package_file *file = &stored_carrier.files[i];
         const uint8_t *bytes = NULL;
         size_t len = 0;
-        stored = vc_transport_file(&transport, file->path, &bytes, &len) &&
+        stored = vc_transport_file(&ctx->transport, file->path, &bytes,
+                                   &len) &&
             len == file->size;
         for (uint32_t j = 0; stored && j < file->chunk_count; j++) {
             size_t off = (size_t)j * VCS_PACKAGE_CHUNK_BYTES;
@@ -585,168 +687,242 @@ static int t_source_bundle(void)
             if (take > VCS_PACKAGE_CHUNK_BYTES)
                 take = VCS_PACKAGE_CHUNK_BYTES;
             stored = vcs_package_store_put_chunk(
-                carrier_store, transport.package_root, file->path, j,
+                carrier_store, ctx->transport.package_root, file->path, j,
                 bytes + off, take) == VCS_PACKAGE_STORE_OK;
         }
     }
     VC_CHECK("source carrier chunks complete through the ordinary store",
              stored);
+    if (stored_parsed) vcs_package_manifest_free(&stored_carrier);
+
     static const uint8_t proprietary_license[] =
         "Copyright 2026. All rights reserved.\n";
-    uint8_t proprietary_root[32];
     VC_CHECK("source carrier hostile license fixture enters inert CAS",
              vc_store_transport_with_license(
-                 carrier_store, &transport, proprietary_license,
+                 carrier_store, &ctx->transport, proprietary_license,
                  sizeof(proprietary_license) - 1u, proprietary_root));
+    return failures;
+}
+
+static int tsb_checkout_success_and_refusals(
+    struct tsb_ctx *ctx, struct vcs_package_store *carrier_store,
+    const uint8_t proprietary_root[32])
+{
+    int failures = 0;
     VC_CHECK("source carrier checkout independently refuses proprietary text",
              vcs_source_package_checkout(
-                 carrier_store, proprietary_root, first_root, lane_pubkey,
-                 package_workspace, refused_destination, NULL) ==
+                 carrier_store, proprietary_root, ctx->first_root,
+                 ctx->lane_pubkey, ctx->package_workspace,
+                 ctx->refused_destination, NULL) ==
                  VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE);
     struct vcs_source_package_checkout_metrics checkout_metrics;
     VC_CHECK("source carrier reconstructs source and offline inputs without Git",
              vcs_source_package_checkout(
-                 carrier_store, transport.package_root, first_root, lane_pubkey,
-                 package_workspace, package_destination,
-                 &checkout_metrics) == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-             checkout_metrics.source.file_count == created.file_count &&
+                 carrier_store, ctx->transport.package_root, ctx->first_root,
+                 ctx->lane_pubkey, ctx->package_workspace,
+                 ctx->package_destination, &checkout_metrics) ==
+                 VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
+             checkout_metrics.source.file_count == ctx->created.file_count &&
              checkout_metrics.offline_input_files == 5 &&
-             vc_file_matches(package_destination, "src/a.c",
+             vc_file_matches(ctx->package_destination, "src/a.c",
                              "int a(void) { return 1; }\n") &&
-             vc_file_matches(package_destination,
+             vc_file_matches(ctx->package_destination,
                              "vendor/.cache/openssl-3.0.16.tar.gz",
                              "openssl") &&
-             access(marker, F_OK) != 0);
+             access(ctx->marker, F_OK) != 0);
     uint8_t refused_root[32];
-    memcpy(refused_root, first_root, sizeof(refused_root));
+    memcpy(refused_root, ctx->first_root, sizeof(refused_root));
     refused_root[0] ^= 1u;
     VC_CHECK("source carrier refuses wrong source authority before checkout",
              vcs_source_package_checkout(
-                 carrier_store, transport.package_root, refused_root,
-                 lane_pubkey,
-                 package_workspace, refused_destination, NULL) ==
+                 carrier_store, ctx->transport.package_root, refused_root,
+                 ctx->lane_pubkey, ctx->package_workspace,
+                 ctx->refused_destination, NULL) ==
                  VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE);
-    if (stored_parsed) vcs_package_manifest_free(&stored_carrier);
-    vcs_package_store_close(carrier_store);
-    vcs_source_package_transport_free(&transport);
+    return failures;
+}
 
+static int tsb_package_store_and_checkout(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    struct vcs_package_store *carrier_store = NULL;
+    failures += tsb_carrier_store_admits_and_leaves_incomplete(
+        ctx, &carrier_store);
+    uint8_t proprietary_root[32] = {0};
+    failures += tsb_carrier_chunks_and_hostile_license(ctx, carrier_store,
+                                                       proprietary_root);
+    failures += tsb_checkout_success_and_refusals(ctx, carrier_store,
+                                                  proprietary_root);
+    vcs_package_store_close(carrier_store);
+    vcs_source_package_transport_free(&ctx->transport);
+    return failures;
+}
+
+static int tsb_standalone_package(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     char offline_cache[4096], held_cache[4096];
-    (void)snprintf(offline_cache, sizeof(offline_cache),
-                   "%s/vendor/.cache", source);
-    (void)snprintf(held_cache, sizeof(held_cache),
-                   "%s/vendor/.cache-held", source);
+    (void)snprintf(offline_cache, sizeof(offline_cache), "%s/vendor/.cache",
+                   ctx->source);
+    (void)snprintf(held_cache, sizeof(held_cache), "%s/vendor/.cache-held",
+                   ctx->source);
     struct vcs_source_package_transport standalone_transport;
     vcs_source_package_transport_init(&standalone_transport);
     bool cache_held = rename(offline_cache, held_cache) == 0;
-    bool standalone_ok = cache_held && vcs_source_package_transport_build(
-        source, first_root, lane_pubkey, lane_wire, sizeof(lane_wire),
-        &standalone_transport) &&
+    bool standalone_ok =
+        cache_held &&
+        vcs_source_package_transport_build(
+            ctx->source, ctx->first_root, ctx->lane_pubkey, ctx->lane_wire,
+            sizeof(ctx->lane_wire), &standalone_transport) &&
         standalone_transport.offline_input_count == 0;
-    bool cache_restored = cache_held && rename(held_cache, offline_cache) == 0;
+    bool cache_restored =
+        cache_held && rename(held_cache, offline_cache) == 0;
     VC_CHECK("standalone source package uses its declared package DAG",
              standalone_ok && cache_restored);
     vcs_source_package_transport_free(&standalone_transport);
+    return failures;
+}
 
+static int tsb_bundle_root_and_truncation_refusals(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     uint8_t wrong_root[32];
-    memcpy(wrong_root, first_root, sizeof(wrong_root));
+    memcpy(wrong_root, ctx->first_root, sizeof(wrong_root));
     wrong_root[0] ^= 1u;
     VC_CHECK("source bundle wrong immutable root refused",
-             vcs_source_bundle_verify(first_wire, first_wire_len, wrong_root,
-                                      NULL) == VCS_SOURCE_BUNDLE_ERR_ROOT);
+             vcs_source_bundle_verify(ctx->first_wire, ctx->first_wire_len,
+                                      wrong_root, NULL) ==
+                 VCS_SOURCE_BUNDLE_ERR_ROOT);
     VC_CHECK("source bundle interrupted wire refused before CAS writes",
-             first_wire && first_wire_len > 0 &&
-             vcs_source_bundle_import(first_wire, first_wire_len - 1u,
-                                      first_root, consumer, NULL) !=
-                 VCS_SOURCE_BUNDLE_OK &&
-             !vcs_object_store_initialized(consumer));
+             ctx->first_wire && ctx->first_wire_len > 0 &&
+             vcs_source_bundle_import(ctx->first_wire,
+                                      ctx->first_wire_len - 1u,
+                                      ctx->first_root, ctx->consumer,
+                                      NULL) != VCS_SOURCE_BUNDLE_OK &&
+             !vcs_object_store_initialized(ctx->consumer));
+    return failures;
+}
 
-    uint8_t *corrupt_wire = first_wire && first_wire_len > 0
-        ? malloc(first_wire_len) : NULL;
+static int tsb_corrupt_bytes_and_retry(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    uint8_t *corrupt_wire = ctx->first_wire && ctx->first_wire_len > 0
+        ? malloc(ctx->first_wire_len) : NULL;
     VC_CHECK("source bundle corruption fixture allocated",
              corrupt_wire != NULL);
     if (corrupt_wire) {
-        memcpy(corrupt_wire, first_wire, first_wire_len);
-        corrupt_wire[first_wire_len - 1u] ^= 0x80u;
+        memcpy(corrupt_wire, ctx->first_wire, ctx->first_wire_len);
+        corrupt_wire[ctx->first_wire_len - 1u] ^= 0x80u;
         VC_CHECK("source bundle corrupt compressed bytes refused",
-                 vcs_source_bundle_verify(corrupt_wire, first_wire_len,
-                                          first_root, NULL) !=
+                 vcs_source_bundle_verify(corrupt_wire, ctx->first_wire_len,
+                                          ctx->first_root, NULL) !=
                      VCS_SOURCE_BUNDLE_OK);
     }
     free(corrupt_wire);
 
     struct vcs_source_bundle_metrics imported;
     VC_CHECK("source bundle complete retry imports verified CAS",
-             vcs_source_bundle_import(first_wire, first_wire_len, first_root,
-                                      consumer, &imported) ==
-                 VCS_SOURCE_BUNDLE_OK &&
+             vcs_source_bundle_import(ctx->first_wire, ctx->first_wire_len,
+                                      ctx->first_root, ctx->consumer,
+                                      &imported) == VCS_SOURCE_BUNDLE_OK &&
              imported.new_blobs == 4 && imported.reused_blobs == 0 &&
-             !imported.repaired && access(marker, F_OK) != 0);
+             !imported.repaired && access(ctx->marker, F_OK) != 0);
+    return failures;
+}
+
+static int tsb_materialize_and_compare(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     VC_CHECK("source bundle materializes without Git",
-             vcs_tree_materialize(consumer, first_root, materialized,
+             vcs_tree_materialize(ctx->consumer, ctx->first_root,
+                                  ctx->materialized,
                                   VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) ==
                  VCS_OK);
     size_t source_len = 0, materialized_len = 0;
-    char *source_a = vc_read(source, "src/a.c", &source_len);
-    char *materialized_a = vc_read(materialized, "src/a.c",
-                                   &materialized_len);
+    char *source_a = vc_read(ctx->source, "src/a.c", &source_len);
+    char *materialized_a =
+        vc_read(ctx->materialized, "src/a.c", &materialized_len);
     VC_CHECK("source bundle reconstructed bytes match",
              source_a && materialized_a && source_len == materialized_len &&
              memcmp(source_a, materialized_a, source_len) == 0);
-    free(materialized_a); free(source_a);
+    free(materialized_a);
+    free(source_a);
+    return failures;
+}
 
+static int tsb_corrupt_object_repair(struct tsb_ctx *ctx)
+{
+    int failures = 0;
     struct vcs_manifest first_manifest;
-    bool loaded = vcs_tree_load(consumer, first_root, &first_manifest);
+    bool loaded = vcs_tree_load(ctx->consumer, ctx->first_root,
+                                &first_manifest);
     VC_CHECK("source bundle imported manifest reloads", loaded);
     if (loaded && first_manifest.count > 0) {
         VC_CHECK("source bundle corrupt cache fixture",
-                 vc_corrupt_object(consumer, first_manifest.entries[0].blob));
+                 vc_corrupt_object(ctx->consumer,
+                                   first_manifest.entries[0].blob));
         struct vcs_source_bundle_metrics repaired;
         VC_CHECK("source bundle verified retry repairs exact corrupt blob",
-                 vcs_source_bundle_import(first_wire, first_wire_len,
-                                          first_root, consumer, &repaired) ==
-                     VCS_SOURCE_BUNDLE_OK && repaired.repaired &&
-                 repaired.new_blobs == 1 && repaired.reused_blobs == 3);
+                 vcs_source_bundle_import(ctx->first_wire,
+                                          ctx->first_wire_len,
+                                          ctx->first_root, ctx->consumer,
+                                          &repaired) ==
+                     VCS_SOURCE_BUNDLE_OK &&
+                 repaired.repaired && repaired.new_blobs == 1 &&
+                 repaired.reused_blobs == 3);
         vcs_manifest_free(&first_manifest);
     }
+    return failures;
+}
 
+static int tsb_successor_fixture_and_capture(struct tsb_ctx *ctx,
+                                             uint8_t second_root[32])
+{
+    int failures = 0;
     VC_CHECK("source bundle successor fixture changed one file",
-             vc_write(source, "src/a.c", "int a(void) { return 2; }\n"));
-    uint8_t second_root[32] = {0}, second_declared_root[32] = {0};
+             vc_write(ctx->source, "src/a.c", "int a(void) { return 2; }\n"));
+    uint8_t second_declared_root[32] = {0};
     bool second_declared = vc_publish_declared_source_tree(
-        source, true, second_declared_root);
+        ctx->source, true, second_declared_root);
 #if defined(_WIN32)
     if (second_declared)
-        memcpy(second_root, second_declared_root, sizeof(second_root));
+        memcpy(second_root, second_declared_root, 32);
     else
-        memset(second_root, 0, sizeof(second_root));
+        memset(second_root, 0, 32);
     VC_CHECK("source bundle successor publishes changed declared tree",
-             second_declared && memcmp(second_root, first_root, 32) != 0);
+             second_declared &&
+             memcmp(second_root, ctx->first_root, 32) != 0);
 #else
     VC_CHECK("source bundle successor capture equals changed declaration",
              second_declared &&
-             vcs_tree_capture_path(source, second_root) == VCS_OK &&
-             memcmp(second_root, second_declared_root,
-                    sizeof(second_root)) == 0 &&
-             memcmp(second_root, first_root, 32) != 0);
+             vcs_tree_capture_path(ctx->source, second_root) == VCS_OK &&
+             memcmp(second_root, second_declared_root, 32) == 0 &&
+             memcmp(second_root, ctx->first_root, 32) != 0);
 #endif
-    uint8_t *second_wire = NULL;
-    size_t second_wire_len = 0;
+    return failures;
+}
+
+static int tsb_successor_bundle_and_shard_diff(
+    struct tsb_ctx *ctx, const uint8_t second_root[32],
+    struct vcs_source_bundle_sharded *second_sharded, uint8_t **second_wire,
+    size_t *second_wire_len)
+{
+    int failures = 0;
     VC_CHECK("source bundle successor creates transport",
-             vcs_source_bundle_create(source, second_root, &second_wire,
-                                      &second_wire_len, NULL) ==
+             vcs_source_bundle_create(ctx->source, second_root, second_wire,
+                                      second_wire_len, NULL) ==
                  VCS_SOURCE_BUNDLE_OK);
-    struct vcs_source_bundle_sharded second_sharded;
-    vcs_source_bundle_sharded_init(&second_sharded);
+    vcs_source_bundle_sharded_init(second_sharded);
     VC_CHECK("source bundle v2 successor creates transport",
              vcs_source_bundle_sharded_create(
-                 source, second_root, &second_sharded) ==
+                 ctx->source, second_root, second_sharded) ==
                  VCS_SOURCE_BUNDLE_OK);
     size_t stable_shards = 0, changed_shards = 0;
-    for (size_t i = 0; i < first_sharded.shard_count; i++) {
+    for (size_t i = 0; i < ctx->first_sharded.shard_count; i++) {
         const struct vcs_source_bundle_shard *first =
-            &first_sharded.shards[i];
+            &ctx->first_sharded.shards[i];
         const struct vcs_source_bundle_shard *second =
-            vc_source_shard(&second_sharded, first->index);
+            vc_source_shard(second_sharded, first->index);
         if (second && second->wire_len == first->wire_len &&
             memcmp(second->wire, first->wire, first->wire_len) == 0)
             stable_shards++;
@@ -755,27 +931,78 @@ static int t_source_bundle(void)
     }
     VC_CHECK("source bundle v2 one-file successor preserves other shards",
              stable_shards > 0 && changed_shards == 1 &&
-             second_sharded.shard_count == first_sharded.shard_count);
+             second_sharded->shard_count == ctx->first_sharded.shard_count);
+    return failures;
+}
+
+static int tsb_successor_import_reuse(struct tsb_ctx *ctx,
+                                      const uint8_t second_root[32],
+                                      const uint8_t *second_wire,
+                                      size_t second_wire_len)
+{
+    int failures = 0;
     struct vcs_source_bundle_metrics successor;
     VC_CHECK("source bundle successor reuses unchanged CAS blobs",
              vcs_source_bundle_import(second_wire, second_wire_len,
-                                      second_root, consumer, &successor) ==
-                 VCS_SOURCE_BUNDLE_OK &&
+                                      second_root, ctx->consumer,
+                                      &successor) == VCS_SOURCE_BUNDLE_OK &&
              successor.new_blobs == 1 && successor.reused_blobs == 3 &&
              successor.new_bytes < successor.reused_bytes);
+    return failures;
+}
 
+static int tsb_successor_bundle(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    uint8_t second_root[32] = {0};
+    failures += tsb_successor_fixture_and_capture(ctx, second_root);
+    uint8_t *second_wire = NULL;
+    size_t second_wire_len = 0;
+    struct vcs_source_bundle_sharded second_sharded;
+    failures += tsb_successor_bundle_and_shard_diff(
+        ctx, second_root, &second_sharded, &second_wire, &second_wire_len);
+    failures += tsb_successor_import_reuse(ctx, second_root, second_wire,
+                                           second_wire_len);
     vcs_source_bundle_sharded_free(&second_sharded);
-    vcs_source_bundle_sharded_free(&first_sharded);
-    free(second_wire); free(first_wire);
-    test_rm_rf_recursive(materialized);
-    test_rm_rf_recursive(sharded_consumer);
-    test_rm_rf_recursive(package_destination);
-    test_rm_rf_recursive(refused_destination);
-    test_rm_rf_recursive(package_workspace);
-    test_rm_rf_recursive(package_datadir);
-    test_rm_rf_recursive(consumer);
-    test_rm_rf_recursive(unlicensed_source);
-    test_rm_rf_recursive(source);
+    free(second_wire);
+    return failures;
+}
+
+static int t_source_bundle(void)
+{
+    int failures = 0;
+    struct tsb_ctx ctx = {0};
+    tsb_setup(&ctx);
+
+    failures += tsb_fixture_and_capture(&ctx);
+    failures += tsb_bundle_create_and_verify(&ctx);
+    failures += tsb_sharded_create_verify_and_tamper(&ctx);
+    failures += tsb_sharded_import(&ctx);
+
+    tsb_seal_lane_receipt(&ctx);
+    failures += tsb_unlicensed_and_forged_refusals(&ctx);
+    failures += tsb_transport_build_and_manifest(&ctx);
+    failures += tsb_package_store_and_checkout(&ctx);
+    failures += tsb_standalone_package(&ctx);
+
+    failures += tsb_bundle_root_and_truncation_refusals(&ctx);
+    failures += tsb_corrupt_bytes_and_retry(&ctx);
+    failures += tsb_materialize_and_compare(&ctx);
+    failures += tsb_corrupt_object_repair(&ctx);
+
+    failures += tsb_successor_bundle(&ctx);
+
+    vcs_source_bundle_sharded_free(&ctx.first_sharded);
+    free(ctx.first_wire);
+    test_rm_rf_recursive(ctx.materialized);
+    test_rm_rf_recursive(ctx.sharded_consumer);
+    test_rm_rf_recursive(ctx.package_destination);
+    test_rm_rf_recursive(ctx.refused_destination);
+    test_rm_rf_recursive(ctx.package_workspace);
+    test_rm_rf_recursive(ctx.package_datadir);
+    test_rm_rf_recursive(ctx.consumer);
+    test_rm_rf_recursive(ctx.unlicensed_source);
+    test_rm_rf_recursive(ctx.source);
     return failures;
 }
 
@@ -790,16 +1017,42 @@ static bool vc_file_matches(const char *dir, const char *rel, const char *expect
 }
 
 /* Count regular files under a directory tree. */
-static int vc_count_objects(const char *repo)
-{
-    char objects[4096];
-    int n = snprintf(objects, sizeof(objects), "%s/.zvcs/objects", repo);
-    if (n < 0 || (size_t)n >= sizeof(objects)) return -1;
 #if defined(_WIN32)
+/* Count the plain-file entries directly under one shard directory
+ * (wide_objects\name), or -1 if anything in it is not an object file. */
+static int vc_count_objects_windows_shard(const wchar_t *wide_objects,
+                                          const wchar_t *name)
+{
+    wchar_t shard_path[32768];
+    int n = _snwprintf(shard_path, 32768, L"%ls\\%ls\\*", wide_objects, name);
+    if (n < 0 || n >= 32768) return -1;
+    WIN32_FIND_DATAW entry_data;
+    HANDLE entries = FindFirstFileW(shard_path, &entry_data);
+    if (entries == INVALID_HANDLE_VALUE) return -1;
+    int count = 0;
+    bool shard_ok = true;
+    do {
+        const wchar_t *entry = entry_data.cFileName;
+        if (!wcscmp(entry, L".") || !wcscmp(entry, L"..")) continue;
+        if ((entry_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            (entry_data.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) != 0 ||
+            (entry_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            shard_ok = false;
+            break;
+        }
+        count++;
+    } while (FindNextFileW(entries, &entry_data));
+    if (GetLastError() != ERROR_NO_MORE_FILES) shard_ok = false;
+    if (!FindClose(entries)) shard_ok = false;
+    return shard_ok ? count : -1;
+}
+
+static int vc_count_objects_windows(const char *objects)
+{
     WIN32_FIND_DATAW data;
     wchar_t wide_objects[32768], pattern[32768];
     if (!platform_windows_wide_path(objects, wide_objects)) return -1;
-    n = _snwprintf(pattern, 32768, L"%ls\\*", wide_objects);
+    int n = _snwprintf(pattern, 32768, L"%ls\\*", wide_objects);
     if (n < 0 || n >= 32768) return -1;
     HANDLE root = FindFirstFileW(pattern, &data);
     if (root == INVALID_HANDLE_VALUE) return -1;
@@ -816,34 +1069,46 @@ static int vc_count_objects(const char *repo)
             ok = false;
             break;
         }
-        wchar_t shard_path[32768];
-        n = _snwprintf(shard_path, 32768, L"%ls\\%ls\\*", wide_objects, name);
-        if (n < 0 || n >= 32768) {
-            ok = false; break;
-        }
-        WIN32_FIND_DATAW entry_data;
-        HANDLE entries = FindFirstFileW(shard_path, &entry_data);
-        if (entries == INVALID_HANDLE_VALUE) { ok = false; break; }
-        bool shard_ok = true;
-        do {
-            const wchar_t *entry = entry_data.cFileName;
-            if (!wcscmp(entry, L".") || !wcscmp(entry, L"..")) continue;
-            if ((entry_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-                (entry_data.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) != 0 ||
-                (entry_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                shard_ok = false;
-                break;
-            }
-            count++;
-        } while (FindNextFileW(entries, &entry_data));
-        if (GetLastError() != ERROR_NO_MORE_FILES) shard_ok = false;
-        if (!FindClose(entries)) shard_ok = false;
-        if (!shard_ok) { ok = false; break; }
+        int shard_count = vc_count_objects_windows_shard(wide_objects, name);
+        if (shard_count < 0) { ok = false; break; }
+        count += shard_count;
     } while (FindNextFileW(root, &data));
     if (GetLastError() != ERROR_NO_MORE_FILES && ok) ok = false;
     if (!FindClose(root)) ok = false;
     return ok ? count : -1;
+}
 #else
+/* Count the plain-file entries directly under one shard directory
+ * (objects/xx), or -1 if anything in it is not an object file. */
+static int vc_count_objects_posix_shard(const char *shard_path)
+{
+    DIR *entries = opendir(shard_path);
+    if (!entries) return -1;
+    int count = 0;
+    struct dirent *entry;
+    for (;;) {
+        errno = 0;
+        entry = readdir(entries);
+        if (!entry) {
+            if (errno != 0 || closedir(entries) != 0) return -1;
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        struct stat st;
+        if (fstatat(dirfd(entries), entry->d_name, &st,
+                    AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(st.st_mode)) {
+            (void)closedir(entries);
+            return -1;
+        }
+        count++;
+    }
+    return count;
+}
+
+static int vc_count_objects_posix(const char *objects)
+{
     DIR *root = opendir(objects);
     if (!root) return -1;
 
@@ -872,42 +1137,32 @@ static int vc_count_objects(const char *repo)
             return -1;
         }
         char shard_path[4096];
-        n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,
-                     shard->d_name);
+        int n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,
+                         shard->d_name);
         if (n < 0 || (size_t)n >= sizeof(shard_path)) {
             closedir(root);
             return -1;
         }
-        DIR *entries = opendir(shard_path);
-        if (!entries) {
+        int shard_count = vc_count_objects_posix_shard(shard_path);
+        if (shard_count < 0) {
             (void)closedir(root);
             return -1;
         }
-        struct dirent *entry;
-        for (;;) {
-            errno = 0;
-            entry = readdir(entries);
-            if (!entry) {
-                if (errno != 0 || closedir(entries) != 0) {
-                    (void)closedir(root);
-                    return -1;
-                }
-                break;
-            }
-            if (strcmp(entry->d_name, ".") == 0 ||
-                strcmp(entry->d_name, "..") == 0)
-                continue;
-            struct stat st;
-            if (fstatat(dirfd(entries), entry->d_name, &st,
-                        AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(st.st_mode)) {
-                (void)closedir(entries);
-                (void)closedir(root);
-                return -1;
-            }
-            count++;
-        }
+        count += shard_count;
     }
     return count;
+}
+#endif
+
+static int vc_count_objects(const char *repo)
+{
+    char objects[4096];
+    int n = snprintf(objects, sizeof(objects), "%s/.zvcs/objects", repo);
+    if (n < 0 || (size_t)n >= sizeof(objects)) return -1;
+#if defined(_WIN32)
+    return vc_count_objects_windows(objects);
+#else
+    return vc_count_objects_posix(objects);
 #endif
 }
 
