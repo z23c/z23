@@ -417,5 +417,7 @@ int check_supervisor_progress_declared_run(int argc, char **argv);
 int check_supervisor_progress_declared_selftest(void);
 int check_no_unattended_publish_run(int argc, char **argv);
 int check_no_unattended_publish_selftest(void);
+int check_hex_codec_single_run(int argc, char **argv);
+int check_hex_codec_single_selftest(void);
 
 #endif

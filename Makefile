@@ -5387,6 +5387,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_supervisor_progress_declared.c \
     tools/lint/lintc/gate_supervisor_progress_declared_selftest.c \
     tools/lint/lintc/gate_no_unattended_publish.c \
+    tools/lint/lintc/gate_hex_codec_single.c \
+    tools/lint/lintc/gate_hex_codec_single_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12969,7 +12971,7 @@ binary-size:
 # platform/modules/base/include/base/hex.h; a private copy anywhere else fails
 # (RATCHET at file granularity; tools/lint/hex_codec_baseline.txt may only
 # shrink). 56 disagreeing copies existed when this gate was written.
-check-hex-codec-single:
+check-hex-codec-single: $(LINTC_TOOL)
 	@echo "══ LINT: one hex codec ══"
 	@./tools/lint/check_hex_codec_single.sh --selftest
 	@./tools/lint/check_hex_codec_single.sh
