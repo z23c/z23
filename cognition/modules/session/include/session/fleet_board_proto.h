@@ -143,6 +143,12 @@ enum fleet_board_result {
      * peer that relayed them did nothing wrong either — this box has simply
      * never decided that this host key may write here. */
     FLEET_BOARD_ERR_ROLE,
+    /* A PUBLIC-scope post's signing key verified fine and needs no grant,
+     * but this key has posted too much: either the rolling-window rate or
+     * the lifetime-stored-per-key ceiling is already spent. Distinct from
+     * ERR_CAPACITY, which is the whole store being full regardless of who
+     * is asking — this refusal is about ONE key, not the ledger. */
+    FLEET_BOARD_ERR_QUOTA,
 };
 
 const char *fleet_board_result_string(enum fleet_board_result r);
