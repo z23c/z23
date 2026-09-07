@@ -204,24 +204,20 @@ static bool rr_directory(const char *path)
 #endif
 }
 
-static bool rr_mkdirs(const char *path)
-{
 #if defined(_WIN32)
-    char copy[PATH_MAX];
-    if (!path || !path[0] || strlen(path) >= sizeof(copy))
-        return false;
-    (void)snprintf(copy, sizeof(copy), "%s", path);
-    for (char *p = copy; *p; p++)
-        if (*p == '\\') *p = '/';
-    char *scan = copy;
+static char *rr_mkdirs_win32_scan_start(char *copy)
+{
     if (((copy[0] >= 'A' && copy[0] <= 'Z') ||
          (copy[0] >= 'a' && copy[0] <= 'z')) && copy[1] == ':' &&
         copy[2] == '/')
-        scan = copy + 3;
-    else if (copy[0] == '/')
-        scan = copy + 1;
-    else
-        return false;
+        return copy + 3;
+    if (copy[0] == '/')
+        return copy + 1;
+    return NULL;
+}
+
+static bool rr_mkdirs_win32_walk(char *copy, char *scan)
+{
     for (char *p = scan; *p; p++) {
         if (*p != '/') continue;
         *p = 0;
@@ -234,12 +230,34 @@ static bool rr_mkdirs(const char *path)
         }
         *p = '/';
     }
+    return true;
+}
+
+static bool rr_mkdirs_win32_finish(const char *copy)
+{
     enum platform_directory_probe_result probe =
         platform_directory_probe_real(copy);
     return probe == PLATFORM_DIRECTORY_PROBE_OK ||
            (probe == PLATFORM_DIRECTORY_PROBE_MISSING &&
             platform_private_directory_ensure(copy));
+}
+
+static bool rr_mkdirs_win32(const char *path)
+{
+    char copy[PATH_MAX];
+    if (!path || !path[0] || strlen(path) >= sizeof(copy))
+        return false;
+    (void)snprintf(copy, sizeof(copy), "%s", path);
+    for (char *p = copy; *p; p++)
+        if (*p == '\\') *p = '/';
+    char *scan = rr_mkdirs_win32_scan_start(copy);
+    if (!scan) return false;
+    if (!rr_mkdirs_win32_walk(copy, scan)) return false;
+    return rr_mkdirs_win32_finish(copy);
+}
 #else
+static bool rr_mkdirs_posix(const char *path)
+{
     char copy[PATH_MAX];
     struct stat st;
     if (!path || path[0] != '/' || strlen(path) >= sizeof(copy))
@@ -257,6 +275,15 @@ static bool rr_mkdirs(const char *path)
     return mkdir(copy, 0700) == 0 ||
            (errno == EEXIST && lstat(copy, &st) == 0 &&
             S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode));
+}
+#endif
+
+static bool rr_mkdirs(const char *path)
+{
+#if defined(_WIN32)
+    return rr_mkdirs_win32(path);
+#else
+    return rr_mkdirs_posix(path);
 #endif
 }
 
