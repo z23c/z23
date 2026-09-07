@@ -240,6 +240,12 @@ enum zcl_command_trait {
     /* May create only a bounded native window/process and return bounded
      * display input. It carries no domain write or software authority. */
     ZCL_COMMAND_TRAIT_DISPLAY_ONLY = 1U << 5,
+    /* Default CLI rendering is a human/AI-readable prose block built from
+     * reply->data, not the JSON envelope; --format=json (or --json) still
+     * pins the structured envelope, rendered from that same data object, so
+     * the two can never disagree. See tools/command/native_command.c's
+     * prose-leaf render path. */
+    ZCL_COMMAND_TRAIT_PROSE = 1U << 6,
 };
 
 enum zcl_command_transport {
@@ -447,6 +453,24 @@ void zcl_command_registry_digest(const struct zcl_command_registry *registry,
 size_t zcl_command_registry_menu_json(const struct zcl_command_registry *registry,
                                       const char *path, char *out,
                                       size_t out_size);
+/* discover.describe's trait booleans, in one JSON "policy" object. A new
+ * trait bit is one conjunct HERE, not one more link in
+ * zcl_command_registry_describe_json's own && chain — that function lives in
+ * a legacy file whose recorded line count may only shrink, and this reads
+ * only the traits bitmask the caller already holds, so it needs no link edge
+ * either (same reason as zcl_command_registry_input_reject_detail above). */
+static inline bool zcl_command_registry_describe_traits(
+    struct json_value *policy, uint32_t traits)
+{
+    return json_push_kv_bool(policy, "deterministic",
+                             (traits & ZCL_COMMAND_TRAIT_DETERMINISTIC) != 0) &&
+           json_push_kv_bool(policy, "idempotent",
+                             (traits & ZCL_COMMAND_TRAIT_IDEMPOTENT) != 0) &&
+           json_push_kv_bool(policy, "display_only",
+                             (traits & ZCL_COMMAND_TRAIT_DISPLAY_ONLY) != 0) &&
+           json_push_kv_bool(policy, "prose",
+                             (traits & ZCL_COMMAND_TRAIT_PROSE) != 0);
+}
 size_t zcl_command_registry_describe_json(
     const struct zcl_command_registry *registry, const char *path,
     char *out, size_t out_size);

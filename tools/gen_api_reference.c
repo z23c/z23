@@ -632,6 +632,8 @@ static void emit_policy(FILE *f, const struct row *r)
     }
     if ((r->traits & ZCL_COMMAND_TRAIT_DISPLAY_ONLY) != 0)
         fputs(", display-only", f);
+    if ((r->traits & ZCL_COMMAND_TRAIT_PROSE) != 0)
+        fputs(", prose", f);
     fputs(" · ", f);
     fputs(latency_name(r->latency), f);
     fputc('/', f);

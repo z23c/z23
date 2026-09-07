@@ -732,7 +732,7 @@ bool zcl_command_registry_validate(const struct zcl_command_registry *registry,
             ZCL_COMMAND_TRAIT_DRY_RUN |
             ZCL_COMMAND_TRAIT_DEV_ONLY |
             ZCL_COMMAND_TRAIT_DISPLAY_ONLY;
-        if ((spec->traits & ~known_traits) != 0) {
+        if ((spec->traits & ~(known_traits | ZCL_COMMAND_TRAIT_PROSE)) != 0) {
             if (why) snprintf(why, why_size,
                               "unknown command trait for %s", spec->path);
             return false;
@@ -1638,13 +1638,7 @@ size_t zcl_command_registry_describe_json(
                           zcl_command_cost_name(spec->cost)) &&
          json_push_kv_str(&policy, "confirmation",
                           zcl_command_confirmation_name(spec->confirmation)) &&
-         json_push_kv_bool(&policy, "deterministic",
-                           (spec->traits & ZCL_COMMAND_TRAIT_DETERMINISTIC) != 0) &&
-         json_push_kv_bool(&policy, "idempotent",
-                           (spec->traits & ZCL_COMMAND_TRAIT_IDEMPOTENT) != 0) &&
-         json_push_kv_bool(&policy, "display_only",
-                           (spec->traits &
-                            ZCL_COMMAND_TRAIT_DISPLAY_ONLY) != 0) &&
+         zcl_command_registry_describe_traits(&policy, spec->traits) &&
          json_push_kv_int(&policy, "allowed_lanes", spec->allowed_lanes) &&
          json_push_kv_int(&policy, "required_capabilities",
                           (int64_t)spec->required_capabilities) &&
