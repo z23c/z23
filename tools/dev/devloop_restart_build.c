@@ -899,12 +899,10 @@ static bool rr_cache_lookup(const char *root, const char *candidate_dir,
            rr_publish_candidate(root, candidate_dir, cache_binary, actual, out);
 }
 
-static bool rr_cache_publish(const char *cache_binary, const char *cache_hash,
-                             const char *built, const char hash[65])
-{
-    if (!rr_link_or_copy_publish(built, cache_binary, hash))
-        return false;
 #if defined(_WIN32)
+static bool rr_cache_publish_win32(const char *cache_hash,
+                                   const char hash[65])
+{
     char parent[PATH_MAX], leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
     struct platform_directory_transaction directory;
     struct platform_directory_child staged;
@@ -928,7 +926,11 @@ static bool rr_cache_publish(const char *cache_binary, const char *cache_hash,
     ok = ok && platform_directory_transaction_flush(&directory);
     platform_directory_transaction_close(&directory);
     return ok;
+}
 #else
+static bool rr_cache_publish_posix(const char *cache_hash,
+                                   const char hash[65])
+{
     char temp[PATH_MAX];
     int n = snprintf(temp, sizeof(temp), "%s.tmp.%ld", cache_hash,
                      (long)getpid());
@@ -949,6 +951,18 @@ static bool rr_cache_publish(const char *cache_binary, const char *cache_hash,
         return false;
     }
     return true;
+}
+#endif
+
+static bool rr_cache_publish(const char *cache_binary, const char *cache_hash,
+                             const char *built, const char hash[65])
+{
+    if (!rr_link_or_copy_publish(built, cache_binary, hash))
+        return false;
+#if defined(_WIN32)
+    return rr_cache_publish_win32(cache_hash, hash);
+#else
+    return rr_cache_publish_posix(cache_hash, hash);
 #endif
 }
 
@@ -1248,12 +1262,10 @@ static bool rr_source_is_test_only(const char *source)
     return source && strncmp(source, prefix, sizeof(prefix) - 1) == 0;
 }
 
-static bool rr_write_response(const struct rr_plan *plan, const char *root,
-                              const struct rr_overlay *overlays,
-                              size_t overlay_count, const char *overlay_prefix,
-                              bool allow_test_only_omission,
-                              char out[PATH_MAX],
-                              char *why, size_t why_len)
+static bool rr_write_response_open(const struct rr_plan *plan,
+                                   const char *root, char out[PATH_MAX],
+                                   FILE **in_out, FILE **dst_out,
+                                   char *why, size_t why_len)
 {
     char rsp_full[PATH_MAX], dir[PATH_MAX];
     if (!rr_join_root(root, plan->link_rsp, rsp_full) ||
@@ -1270,36 +1282,90 @@ static bool rr_write_response(const struct rr_plan *plan, const char *root,
         rr_why(why, why_len, "could not open restart link response");
         return false;
     }
-    bool seen[RR_OVERLAY_MAX] = {0};
+    *in_out = in;
+    *dst_out = dst;
+    return true;
+}
+
+/* Resolve the response line for one linker input token: prefer a live
+ * overlay for this build's plan, else a persistent overlay from a prior
+ * generation, else the original object path. */
+static void rr_write_response_resolve(const struct rr_plan *plan,
+                                      const char *root,
+                                      const struct rr_overlay *overlays,
+                                      size_t overlay_count,
+                                      const char *overlay_prefix,
+                                      const char *token, bool *seen,
+                                      char persistent_overlay[PATH_MAX],
+                                      const char **write_path_out)
+{
+    for (size_t i = 0; i < overlay_count; i++) {
+        if (strcmp(token, overlays[i].base_object) == 0) {
+            const char *write_path = overlays[i].overlay_object;
+            /* Linker cwd is root; retain a worktree-relative response. */
+            size_t root_len = strlen(root);
+            if (strncmp(write_path, root, root_len) == 0 &&
+                write_path[root_len] == '/')
+                write_path += root_len + 1;
+            seen[i] = true;
+            *write_path_out = write_path;
+            return;
+        }
+    }
+    if (rr_overlay_for_base(plan, root, token, overlay_prefix,
+                            persistent_overlay))
+        *write_path_out = persistent_overlay;
+    else
+        *write_path_out = token;
+}
+
+static bool rr_write_response_scan(const struct rr_plan *plan,
+                                   const char *root, FILE *in, FILE *dst,
+                                   const struct rr_overlay *overlays,
+                                   size_t overlay_count,
+                                   const char *overlay_prefix, bool *seen)
+{
     char token[4096];
     bool ok = true;
     while (ok && fscanf(in, "%4095s", token) == 1) {
-        const char *write_path = token;
         char persistent_overlay[PATH_MAX];
-        bool current = false;
-        for (size_t i = 0; i < overlay_count; i++) {
-            if (strcmp(token, overlays[i].base_object) == 0) {
-                write_path = overlays[i].overlay_object;
-                /* Linker cwd is root; retain a worktree-relative response. */
-                size_t root_len = strlen(root);
-                if (strncmp(write_path, root, root_len) == 0 &&
-                    write_path[root_len] == '/')
-                    write_path += root_len + 1;
-                seen[i] = true;
-                current = true;
-                break;
-            }
-        }
-        if (!current && rr_overlay_for_base(plan, root, token, overlay_prefix,
-                                            persistent_overlay))
-            write_path = persistent_overlay;
+        const char *write_path;
+        rr_write_response_resolve(plan, root, overlays, overlay_count,
+                                  overlay_prefix, token, seen,
+                                  persistent_overlay, &write_path);
         ok = fprintf(dst, "%s\n", write_path) > 0;
     }
-    ok = ok && !ferror(in) && rr_flush_stream(dst);
-    fclose(in); fclose(dst);
+    return ok && !ferror(in) && rr_flush_stream(dst);
+}
+
+static bool rr_write_response_check_seen(const struct rr_overlay *overlays,
+                                         size_t overlay_count,
+                                         const bool *seen,
+                                         bool allow_test_only_omission,
+                                         bool ok)
+{
     for (size_t i = 0; i < overlay_count; i++)
         ok = ok && (seen[i] || (allow_test_only_omission &&
                                 rr_source_is_test_only(overlays[i].source)));
+    return ok;
+}
+
+static bool rr_write_response(const struct rr_plan *plan, const char *root,
+                              const struct rr_overlay *overlays,
+                              size_t overlay_count, const char *overlay_prefix,
+                              bool allow_test_only_omission,
+                              char out[PATH_MAX],
+                              char *why, size_t why_len)
+{
+    FILE *in, *dst;
+    if (!rr_write_response_open(plan, root, out, &in, &dst, why, why_len))
+        return false;
+    bool seen[RR_OVERLAY_MAX] = {0};
+    bool ok = rr_write_response_scan(plan, root, in, dst, overlays,
+                                     overlay_count, overlay_prefix, seen);
+    fclose(in); fclose(dst);
+    ok = rr_write_response_check_seen(overlays, overlay_count, seen,
+                                      allow_test_only_omission, ok);
     if (!ok) {
         (void)unlink(out);
         rr_why(why, why_len,
