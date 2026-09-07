@@ -109,6 +109,54 @@ change.
   same OPEN frame with a different service name rather than their own frame
   prefix, unless a later service's framing needs genuinely diverge.
 
+### Credit accounting and bounded buffering
+
+Credit is independent in each direction and counts DATA payload bytes, not
+frame headers. Each direction starts with a sent offset of zero and no
+credit. A WINDOW carries an absolute unsigned 64-bit exclusive send limit;
+it is not a credit increment. The receiver may grant initial credit only
+after OPEN admission and reservation of receive-buffer capacity. Repeated
+or older WINDOW limits do not add credit. A sender emits DATA only when its
+payload fits within `send_limit - sent_offset`, checking the subtraction
+before advancing the offset. DATA carries its starting offset; the receiver
+requires the next exact offset and refuses a gap, overlap, or over-credit
+frame with a named protocol error. Counters never wrap: a stream closes
+before any offset or limit would overflow.
+
+The receiver advances its limit only as the local consumer drains bytes,
+and only after reserving capacity for the additional outstanding grant.
+Both buffered bytes and granted-but-not-yet-received bytes count against
+the same receive budget. Initial proposed limits are 16 streams per peer,
+16 KiB per DATA payload, 64 KiB outstanding per direction per stream, and
+256 KiB aggregate reserved receive capacity per peer. A node also has a
+finite aggregate stream-memory budget across peers; exhaustion refuses new
+OPENs or withholds additional credit. It never allocates from an untrusted
+advertised length before enforcing these limits.
+
+When send credit or outbound queue capacity is exhausted, stop reading the
+local socket and return to the event loop. Do not wait in a peer callback,
+spin, or accumulate an unbounded pending write. A stream id is scoped to
+one established Noise session and is never reused within that session;
+reconnection discards all old streams and grants. Revocation of the pairing
+or service capability closes existing streams as well as refusing new ones.
+
+### Shared-link scheduling
+
+A DATA frame-size cap alone does not prevent a tunnel from filling the
+shared peer queue. Stream traffic is admitted only after the existing
+blockchain-priority scheduler grants spare capacity. Use round-robin service
+among ready streams, at most one 16 KiB DATA frame per stream per turn, and
+at most 64 KiB of queued stream DATA per peer. Stop the turn when either
+the stream budget or the shared queue's available capacity is exhausted.
+No stream callback drains its entire local socket in one turn.
+
+WINDOW and CLOSE have a bounded control allowance independent of DATA
+credit, so a zero-credit stream can resume or close. Coalesce pending WINDOW
+updates to the newest absolute limit and retain at most one pending CLOSE
+per stream. Control frames remain subordinate to blockchain traffic and
+are bounded by the admitted stream count. Neither unlimited control traffic
+nor unbounded bulk frames may bypass the shared-link resource policy.
+
 ### First service: the TCP tunnel
 
 One side of the tunnel dials a local target (for example a local SSH
@@ -132,6 +180,20 @@ non-loopback target refused unless an explicit policy row names that host.
 - A sender cannot push data past the receive credit its peer has granted; a
   test demonstrates credit exhaustion blocking the sender until a WINDOW
   frame arrives, and the sender resuming once it does.
+- Duplicate and reordered WINDOW updates do not increase the absolute grant;
+  zero-credit, over-credit, wrong-offset, and near-`UINT64_MAX` cases exercise
+  the real codec and accounting. Every invalid DATA case closes by name
+  without delivery, allocation beyond the budget, or counter wrap.
+- With a stalled local consumer and all stream slots occupied, measured
+  buffered plus reserved receive bytes stay within both the per-peer and
+  node-wide limits. A further OPEN is refused or gets no grant; a compliant
+  sender stops socket reads. WINDOW and CLOSE still make progress when DATA
+  credit is zero, and reconnect or capability revocation invalidates grants.
+- Under continuously ready bulk streams, a scheduler fixture proves the
+  per-turn and queue byte caps, round-robin service, and selection of pending
+  blockchain work before stream DATA or control traffic. The existing
+  blockchain-priority acceptance must also pass with these streams saturated;
+  a loopback throughput result alone does not qualify shared-link priority.
 - A TCP tunnel opened between two paired nodes carries bytes unchanged in
   both directions, proven by a loopback test that pumps a nontrivial amount
   of data through it and compares what went in against what came out.
