@@ -522,9 +522,9 @@ static int hl_run_impl(FILE *out, FILE *err)
 {
     /* Resolved per invocation, like the shell's run_check locals: the
      * selftest re-runs this with the env knobs pointed at seeded fixtures. */
-    const char *tool = env_or("ZCL_HOTSWAP_CANDIDATES_" "TOOL",
+    const char *tool = env_or("ZCL_HOTSWAP_CANDIDATES_TOOL",
                               "tools/dev/hotswap-candidates.sh");
-    const char *makefile = env_or("ZCL_HOTSWAP_CANDIDATES_" "MAKEFILE",
+    const char *makefile = env_or("ZCL_HOTSWAP_CANDIDATES_MAKEFILE",
                                   "Makefile");
     const char *const inputs[4] = { tool, k_hl_shape_gate, k_hl_denied_def,
                                     makefile };
@@ -675,14 +675,14 @@ int check_hotswap_candidates_ledger_selftest(void)
             "──\n",
             "  SELFTEST FAIL: the gate passed a tool whose counts disagree "
             "with the manifests.\n",
-            "ZCL_HOTSWAP_CANDIDATES_" "TOOL", stub);
+            "ZCL_HOTSWAP_CANDIDATES_TOOL", stub);
     if (!bad)
         bad |= hl_st_run(
             "── selftest 2/2: a hotswap: recipe with the refusal removed "
             "must FAIL ──\n",
             "  SELFTEST FAIL: the gate passed a recipe that no longer "
             "refuses FILES=/PROBE=.\n",
-            "ZCL_HOTSWAP_CANDIDATES_" "MAKEFILE", mk);
+            "ZCL_HOTSWAP_CANDIDATES_MAKEFILE", mk);
     (void)rap_rm_rf(tmp);
     if (bad) {
         fputs("SELFTEST FAILED — this gate cannot be trusted.\n", stderr);
