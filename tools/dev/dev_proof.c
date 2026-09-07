@@ -2,6 +2,9 @@
  * purpose: Admit exact commit/base pairs from the resident development proof. */
 
 #define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 
 #include "dev_proof.h"
 #include "dev_proof_budget.h"
