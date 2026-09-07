@@ -74,16 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 855 |
-| Top-level roots | 14 |
-| Branches | 192 |
-| Leaves (dispatchable command paths) | 663 |
-| … `ready` (live handler in this build) | 592 |
-| Registry entries (branches + leaves) | 858 |
+| Registry entries (branches + leaves) | 860 |
 | Top-level roots | 14 |
 | Branches | 193 |
-| Leaves (dispatchable command paths) | 665 |
-| … `ready` (live handler in this build) | 594 |
+| Leaves (dispatchable command paths) | 667 |
+| … `ready` (live handler in this build) | 596 |
 | … `compat` (metadata only, names a fallback) | 40 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 39 |
@@ -113,8 +108,7 @@ Per source file:
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
-| `engine/composition/commands/fleet.def` | 12 | 3 | 9 |
-| `engine/composition/commands/fleet.def` | 15 | 4 | 11 |
+| `engine/composition/commands/fleet.def` | 17 | 4 | 13 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
