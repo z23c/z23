@@ -447,5 +447,7 @@ int check_windows_acceptance_guard_run(int argc, char **argv);
 int check_windows_acceptance_guard_selftest(void);
 int check_lint_gate_wiring_run(int argc, char **argv);
 int check_lint_gate_wiring_selftest(void);
+int check_package_capabilities_run(int argc, char **argv);
+int check_package_capabilities_selftest(void);
 
 #endif
