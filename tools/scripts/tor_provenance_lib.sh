@@ -14,6 +14,18 @@ zcl_tor_provenance_bin() {
     printf '%s/build/bin/z23-tor-provenance\n' "$1"
 }
 
+# The compiler probe must observe the same deployment target as the build.
+# Apple Clang changes its effective target when this variable is set.
+zcl_tor_prepare_environment() {
+    [ "$(uname -s 2>/dev/null || echo unknown)" = Darwin ] || return 0
+    MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+    if [ "$MACOSX_DEPLOYMENT_TARGET" != 14.0 ]; then
+        echo "$1: Darwin requires MACOSX_DEPLOYMENT_TARGET=14.0" >&2
+        return 2
+    fi
+    export MACOSX_DEPLOYMENT_TARGET
+}
+
 # The compiler that actually built (or would build) libtor.a under
 # <build-dir> -- shared between build_tor_full.sh, which records this in the
 # provenance manifest it writes, and tor_archives_ready.sh's have_all(),

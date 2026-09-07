@@ -53,14 +53,7 @@ if [ -n "$VENDOR_TARGET" ]; then
     TOR_SRC_DIR="$ROOT/vendor/cross/$VENDOR_TARGET/tor-src"
     VENDOR_ROOT_DIR="$ROOT/vendor/cross/$VENDOR_TARGET"
 fi
-if [ "$HOST_OS" = "Darwin" ]; then
-    MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
-    [ "$MACOSX_DEPLOYMENT_TARGET" = "14.0" ] || {
-        echo "tor-full: Darwin requires MACOSX_DEPLOYMENT_TARGET=14.0" >&2
-        exit 2
-    }
-    export MACOSX_DEPLOYMENT_TARGET
-fi
+zcl_tor_prepare_environment tor-full || exit $?
 
 cd "$ROOT"
 if [ ! -e "$TOR_DIR/.git" ]; then

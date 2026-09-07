@@ -43,6 +43,7 @@ cd "$ROOT"
 
 # shellcheck source=tools/scripts/tor_provenance_lib.sh
 . "$SCRIPT_ROOT/tools/scripts/tor_provenance_lib.sh"
+zcl_tor_prepare_environment tor-ready || exit $?
 
 # The Makefile's ZCL_TOR_TREE: one host tree, or one tree per cross triple.
 TRIPLE="${ZCL_CROSS_TRIPLE:-}"
@@ -84,7 +85,9 @@ have_all() {
     local cc cid
     cc="$(tor_ambient_compiler)"
     command -v "${cc%% *}" >/dev/null 2>&1 || return 1
-    cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cc" "$cc" 2>/dev/null)" || return 1
+    # Match build_tor_full.sh's probe directory too: Apple Clang's verbose
+    # preprocessing output includes its compilation directory.
+    cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cc" "$cc" 2>/dev/null)" || return 1
     "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 || \
         tor_alias_check "$cc"
 }
@@ -113,7 +116,7 @@ tor_alias_check() {
         cand_path="$(command -v "$cand" 2>/dev/null)" || continue
         cand_path="$(realpath -- "$cand_path" 2>/dev/null)" || continue
         [ "$cand_path" = "$primary_path" ] || continue
-        cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cand" "$cand" 2>/dev/null)" || continue
+        cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cand" "$cand" 2>/dev/null)" || continue
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 && return 0
     done
     return 1
@@ -320,7 +323,7 @@ case "${1:-ready}" in
             exit 1
         }
         selftest_cc="$(zcl_tor_effective_cc "$fake_primary/$TOR_TREE" "$TRIPLE")"
-        selftest_cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$selftest_cc" "$selftest_cc" 2>/dev/null)" || {
+        selftest_cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$selftest_cc" "$selftest_cc" 2>/dev/null)" || {
             echo "tor_archives_ready: selftest FAILED — could not derive a fixture compiler id" >&2
             exit 1
         }
@@ -414,7 +417,7 @@ case "${1:-ready}" in
                 mkdir -p "$fake_wt3/${a%/*}"
                 printf 'fixture tor archive bytes\n' >"$fake_wt3/$a"
             done
-            alias_cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id gcc gcc 2>/dev/null)" || {
+            alias_cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id gcc gcc 2>/dev/null)" || {
                 echo "tor_archives_ready: selftest FAILED — could not derive the gcc alias compiler id" >&2
                 exit 1
             }
