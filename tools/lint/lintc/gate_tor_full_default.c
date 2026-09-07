@@ -201,55 +201,45 @@ static void tfd_re_drop(struct tfd_re *r)
     regfree(&r->error_clause); regfree(&r->tor_full_filter);
 }
 
+/* One check-and-note site, so the eight Makefile assertions below cost the
+ * caller a single branch each instead of an "if (!ok) { note; if (rc) }"
+ * triplet apiece (keeps tfd_check_makefile under the complexity cap). */
+static int tfd_require(struct tfd_state *st, int ok, const char *msg)
+{ return ok ? 0 : tfd_note(st, msg); }
+
 static int tfd_check_makefile(struct tfd_state *st, const struct tfd_re *r)
 {
-    int rc;
-    if (!tfd_line_lit(g_tfd_raw, "-include $(TOR_BOOTSTRAP_MK)")) {
-        rc = tfd_note(st,
-            "the Makefile never includes $(TOR_BOOTSTRAP_MK), so a plain "
-            "`make` does not establish the Tor archives and links the stub");
-        if (rc) return rc;
-    }
-    if (!tfd_line_re(g_tfd_raw, &r->tor_ready)) {
-        rc = tfd_note(st,
-            "$(TOR_BOOTSTRAP_MK) has no 'tor-ready' prerequisite, so the "
-            "include cannot build anything");
-        if (rc) return rc;
-    }
-    if (!tfd_line_re(g_tfd_joined, &r->link_req)) {
-        rc = tfd_note(st,
-            "ZCL_TOR_LINK_REQUESTED is not computed as filter-out of a "
-            "skip list; an allow list would let any unlisted goal link "
-            "the stub");
-        if (rc) return rc;
-    }
-    if (!tfd_line_re(g_tfd_raw, &r->tor_default)) {
-        rc = tfd_note(st, "ZCL_TOR does not default to 'full'");
-        if (rc) return rc;
-    }
-    if (!tfd_line_re(g_tfd_raw, &r->error_clause)) {
-        rc = tfd_note(st,
-            "an unrecognised ZCL_TOR value is not refused; the Makefile "
-            "would guess");
-        if (rc) return rc;
-    }
-    if (!tfd_line_re(g_tfd_raw, &r->tor_full_filter)) {
-        rc = tfd_note(st,
-            "TOR_FULL is not emptied by ZCL_TOR=stub, so the stub is not "
-            "selected by the knob");
-        if (rc) return rc;
-    }
-    if (!tfd_line_lit(g_tfd_raw, "ZCL_TOR=stub - LINKING THE OFFLINE TOR STUB")) {
-        rc = tfd_note(st, "selecting the stub prints no loud line");
-        if (rc) return rc;
-    }
-    if (!tfd_line_lit(g_tfd_raw, "zcl_tor_require_full")) {
-        rc = tfd_note(st,
-            "the Makefile's install recipe never reads the tor stamp, so "
-            "`make install` would place a stub node");
-        if (rc) return rc;
-    }
-    return 0;
+    int rc = tfd_require(st, tfd_line_lit(g_tfd_raw, "-include $(TOR_BOOTSTRAP_MK)"),
+        "the Makefile never includes $(TOR_BOOTSTRAP_MK), so a plain "
+        "`make` does not establish the Tor archives and links the stub");
+    if (rc) return rc;
+    rc = tfd_require(st, tfd_line_re(g_tfd_raw, &r->tor_ready),
+        "$(TOR_BOOTSTRAP_MK) has no 'tor-ready' prerequisite, so the "
+        "include cannot build anything");
+    if (rc) return rc;
+    rc = tfd_require(st, tfd_line_re(g_tfd_joined, &r->link_req),
+        "ZCL_TOR_LINK_REQUESTED is not computed as filter-out of a "
+        "skip list; an allow list would let any unlisted goal link "
+        "the stub");
+    if (rc) return rc;
+    rc = tfd_require(st, tfd_line_re(g_tfd_raw, &r->tor_default),
+        "ZCL_TOR does not default to 'full'");
+    if (rc) return rc;
+    rc = tfd_require(st, tfd_line_re(g_tfd_raw, &r->error_clause),
+        "an unrecognised ZCL_TOR value is not refused; the Makefile "
+        "would guess");
+    if (rc) return rc;
+    rc = tfd_require(st, tfd_line_re(g_tfd_raw, &r->tor_full_filter),
+        "TOR_FULL is not emptied by ZCL_TOR=stub, so the stub is not "
+        "selected by the knob");
+    if (rc) return rc;
+    rc = tfd_require(st,
+        tfd_line_lit(g_tfd_raw, "ZCL_TOR=stub - LINKING THE OFFLINE TOR STUB"),
+        "selecting the stub prints no loud line");
+    if (rc) return rc;
+    return tfd_require(st, tfd_line_lit(g_tfd_raw, "zcl_tor_require_full"),
+        "the Makefile's install recipe never reads the tor stamp, so "
+        "`make install` would place a stub node");
 }
 
 static int tfd_check_carriers(struct tfd_state *st)
@@ -505,6 +495,43 @@ static int tfd_seed(const char *dir)
     return 0;
 }
 
+/* First occurrence of `from` (len flen) within the line [p, p+len). Linear
+ * scan, not a library call, so a `from` containing an embedded NUL (never
+ * true for this gate's fixtures, but kept honest) still works on the raw
+ * bytes rather than stopping at the first NUL the way strstr would. */
+static const char *tfd_edit_find(const char *p, size_t len, const char *from,
+                                 size_t flen)
+{
+    if (flen == 0 || flen > len) return NULL;
+    for (size_t i = 0; i + flen <= len; i++)
+        if (memcmp(p + i, from, flen) == 0) return p + i;
+    return NULL;
+}
+
+/* Apply one line's substitution (or copy it unchanged) into out/oi,
+ * pulled out of tfd_edit's loop to keep that function under the
+ * complexity cap. Returns 2 (fatal) on overflow, else 0. */
+static int tfd_edit_line(const char *p, size_t len, const char *from,
+                         size_t flen, const char *to, size_t tlen, char *out,
+                         size_t *oi, size_t outcap, int *any)
+{
+    const char *hit = tfd_edit_find(p, len, from, flen);
+    size_t seg_extra = hit ? (len - flen + tlen) : len;
+    if (*oi + seg_extra + 2 >= outcap)
+        return die("z23-lint: derived buffer overflow\n", "");
+    if (!hit) {
+        memcpy(out + *oi, p, len);
+        *oi += len;
+        return 0;
+    }
+    *any = 1;
+    size_t pre = (size_t)(hit - p);
+    memcpy(out + *oi, p, pre); *oi += pre;
+    memcpy(out + *oi, to, tlen); *oi += tlen;
+    memcpy(out + *oi, hit + flen, len - pre - flen); *oi += len - pre - flen;
+    return 0;
+}
+
 /* First-occurrence-PER-LINE substring replace, like the original's one-shot
  * `sed -e "s/from/to/"` (no `g`): every line that contains `from` gets one
  * substitution, so a phrase repeated in both a comment and a code line (as
@@ -521,28 +548,12 @@ static int tfd_edit(const char *root, const char *rel, const char *from,
     size_t oi = 0;
     size_t flen = strlen(from), tlen = strlen(to);
     const char *p = g_tfd_raw;
-    int any = 0;
+    int any = 0, rc = 0;
     while (*p != '\0') {
         const char *nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        const char *hit = NULL;
-        if (flen > 0 && flen <= len) {
-            for (size_t i = 0; i + flen <= len; i++) {
-                if (memcmp(p + i, from, flen) == 0) { hit = p + i; break; }
-            }
-        }
-        size_t seg_extra = hit ? (len - flen + tlen) : len;
-        if (oi + seg_extra + 2 >= sizeof out)
-            return die("z23-lint: derived buffer overflow\n", "");
-        if (hit) {
-            any = 1;
-            size_t pre = (size_t)(hit - p);
-            memcpy(out + oi, p, pre); oi += pre;
-            memcpy(out + oi, to, tlen); oi += tlen;
-            memcpy(out + oi, hit + flen, len - pre - flen); oi += len - pre - flen;
-        } else {
-            memcpy(out + oi, p, len); oi += len;
-        }
+        rc = tfd_edit_line(p, len, from, flen, to, tlen, out, &oi, sizeof out, &any);
+        if (rc) return rc;
         if (nl) out[oi++] = '\n';
         if (!nl) break;
         p = nl + 1;

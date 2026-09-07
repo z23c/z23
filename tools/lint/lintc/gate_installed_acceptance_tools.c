@@ -235,6 +235,44 @@ static int atl_continues(const char *line, size_t *cut)
     return 1;
 }
 
+/* Merge a physical line with any pending continuation. On return, *line
+ * is set to the complete logical line and 0 is returned; 1 means the
+ * (possibly joined) text itself ends in "\" and was stashed into pending
+ * for the next physical line; 2 is a fatal buffer overflow. Split out of
+ * atl_parse_installer to keep that function under the complexity cap. */
+static int atl_join_line(char *pending, char *joined, size_t cap,
+                         const char *raw, const char **line)
+{
+    const char *cand;
+    if (pending[0] != '\0') {
+        if (ovf(snprintf(joined, cap, "%s %s", pending, raw), cap)) return 2;
+        pending[0] = '\0';
+        cand = joined;
+    } else {
+        cand = raw;
+    }
+    size_t cut;
+    if (!atl_continues(cand, &cut)) { *line = cand; return 0; }
+    if (cut >= cap) return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(pending, cand, cut);
+    pending[cut] = '\0';
+    return 1;
+}
+
+/* Depth bookkeeping (closer decrements before recording, opener increments
+ * after) plus the depth-0/non-comment record capture. Split out of
+ * atl_parse_installer for the same reason as atl_join_line above. */
+static int atl_classify_and_record(const char *line, int *depth,
+                                   struct atl_recs *out)
+{
+    const char *stripped = atl_lstrip(line);
+    if (atl_stripped_is_closer(stripped) && *depth > 0) (*depth)--;
+    int rc = (*depth == 0 && stripped[0] != '#') ? atl_rec_add(out, line) : 0;
+    if (rc) return rc;
+    if (atl_stripped_is_opener(stripped)) (*depth)++;
+    return 0;
+}
+
 static int atl_parse_installer(const char *path, struct atl_recs *out)
 {
     FILE *f = fopen(path, "r");
@@ -245,29 +283,12 @@ static int atl_parse_installer(const char *path, struct atl_recs *out)
     int depth = 0, rc = 0;
     while ((n = getline(&raw, &cap, f)) >= 0) {
         if (n > 0 && raw[n - 1] == '\n') raw[--n] = '\0';
-        const char *line;
-        if (pending[0] != '\0') {
-            if (ovf(snprintf(joined, sizeof joined, "%s %s", pending, raw),
-                    sizeof joined)) { rc = 2; break; }
-            pending[0] = '\0';
-            line = joined;
-        } else {
-            line = raw;
-        }
-        size_t cut;
-        if (atl_continues(line, &cut)) {
-            if (cut >= sizeof pending) { rc = die("z23-lint: derived buffer overflow\n", ""); break; }
-            memcpy(pending, line, cut);
-            pending[cut] = '\0';
-            continue;
-        }
-        const char *stripped = atl_lstrip(line);
-        if (atl_stripped_is_closer(stripped) && depth > 0) depth--;
-        if (depth == 0 && stripped[0] != '#') {
-            rc = atl_rec_add(out, line);
-            if (rc) break;
-        }
-        if (atl_stripped_is_opener(stripped)) depth++;
+        const char *line = NULL;
+        int jr = atl_join_line(pending, joined, sizeof joined, raw, &line);
+        if (jr == 2) { rc = 2; break; }
+        if (jr == 1) continue;
+        rc = atl_classify_and_record(line, &depth, out);
+        if (rc) break;
     }
     return fin(f, raw, path, rc);
 }
