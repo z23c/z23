@@ -1500,6 +1500,84 @@ static bool byte_is_space(char c)
  * `text` unchanged (still heap-owned) if nothing matched or allocation
  * failed partway, so a scan that finds nothing never costs the caller its
  * task text. */
+/* Pull the next whitespace-delimited token from [*pp, end), strip trailing
+ * prose punctuation a real path never ends in, and leave tok empty if what
+ * remains is too long or does not look like a path. Always advances *pp
+ * past the token (or to end), so the caller's loop makes progress whether
+ * or not the token turns out usable. */
+static void build_task_next_token(const char **pp, const char *end,
+                                  char tok[ENGINE_PATCH_MAX_PATH])
+{
+    const char *p = *pp;
+    while (p < end && byte_is_space(*p)) p++;
+    const char *tok_start = p;
+    while (p < end && !byte_is_space(*p)) p++;
+    size_t tok_len = (size_t)(p - tok_start);
+    *pp = p;
+    tok[0] = '\0';
+    if (tok_len == 0 || tok_len >= ENGINE_PATCH_MAX_PATH)
+        return;
+    memcpy(tok, tok_start, tok_len);
+    tok[tok_len] = '\0';
+    while (tok_len > 0 && strchr(",.;:)]\"'!?", tok[tok_len - 1])) {
+        tok_len--;
+        tok[tok_len] = '\0';
+    }
+    if (tok_len == 0 || !engine_patch_looks_like_a_path(tok))
+        tok[0] = '\0';
+}
+
+static bool build_task_seen_contains(
+    char seen[][ENGINE_PATCH_MAX_PATH], size_t seen_n, const char *tok)
+{
+    for (size_t i = 0; i < seen_n; i++)
+        if (strcmp(seen[i], tok) == 0) return true;
+    return false;
+}
+
+/* Append one file's section header and (possibly truncated) content to
+ * out[*used..], writing the shared section header first if this is the
+ * first file. Returns the byte count actually taken from content, for the
+ * caller's running total-bytes budget. */
+static size_t build_task_append_file(char *out, size_t cap, size_t *used,
+                                     bool *header_written, const char *tok,
+                                     const char *content, size_t clen,
+                                     size_t bytes_included)
+{
+    size_t take = clen;
+    bool truncated = false;
+    if (take > TASK_FILE_CONTEXT_PER_FILE_BYTES) {
+        take = TASK_FILE_CONTEXT_PER_FILE_BYTES;
+        truncated = true;
+    }
+    if (bytes_included + take > TASK_FILE_CONTEXT_MAX_TOTAL_BYTES) {
+        take = TASK_FILE_CONTEXT_MAX_TOTAL_BYTES - bytes_included;
+        truncated = true;
+    }
+    if (!*header_written) {
+        const int hn = snprintf(out + *used, cap - *used,
+            "\n\n# Current contents of files this task names\n\n"
+            "Every file below exists in your worktree right now, "
+            "exactly as shown. Do not guess, reconstruct from memory, "
+            "or ask for it again.\n");
+        if (hn > 0)
+            *used += (size_t)hn < cap - *used ? (size_t)hn : cap - *used;
+        *header_written = true;
+    }
+    const int hn = snprintf(out + *used, cap - *used,
+                            "\n## %s (%zu byte(s)%s)\n", tok, clen,
+                            truncated ? "; truncated below" : "");
+    if (hn > 0)
+        *used += (size_t)hn < cap - *used ? (size_t)hn : cap - *used;
+    if (take > 0 && *used < cap) {
+        const size_t room = cap - *used;
+        const size_t copy_n = take < room ? take : room;
+        memcpy(out + *used, content, copy_n);
+        *used += copy_n;
+    }
+    return take;
+}
+
 static char *build_task_with_file_contents(const char *text, size_t text_len,
                                            const char *workdir)
 {
@@ -1522,32 +1600,11 @@ static char *build_task_with_file_contents(const char *text, size_t text_len,
     const char *end = text + text_len;
     while (p < end && files_included < TASK_FILE_CONTEXT_MAX_FILES
           && bytes_included < TASK_FILE_CONTEXT_MAX_TOTAL_BYTES) {
-        while (p < end && byte_is_space(*p))
-            p++;
-        const char *tok_start = p;
-        while (p < end && !byte_is_space(*p))
-            p++;
-        size_t tok_len = (size_t)(p - tok_start);
-        if (tok_len == 0 || tok_len >= ENGINE_PATCH_MAX_PATH)
-            continue;
         char tok[ENGINE_PATCH_MAX_PATH];
-        memcpy(tok, tok_start, tok_len);
-        tok[tok_len] = '\0';
-        /* Trailing prose punctuation a real path never ends in. */
-        while (tok_len > 0 && strchr(",.;:)]\"'!?", tok[tok_len - 1])) {
-            tok_len--;
-            tok[tok_len] = '\0';
-        }
-        if (tok_len == 0 || !engine_patch_looks_like_a_path(tok))
+        build_task_next_token(&p, end, tok);
+        if (!tok[0])
             continue;
-        bool dup = false;
-        for (size_t i = 0; i < seen_n; i++) {
-            if (strcmp(seen[i], tok) == 0) {
-                dup = true;
-                break;
-            }
-        }
-        if (dup)
+        if (build_task_seen_contains(seen, seen_n, tok))
             continue;
         char path[1024];
         if ((size_t)snprintf(path, sizeof(path), "%s/%s", workdir, tok)
@@ -1558,40 +1615,12 @@ static char *build_task_with_file_contents(const char *text, size_t text_len,
         if (!content)
             continue;                      /* not a file that exists here */
         if (seen_n < TASK_FILE_CONTEXT_MAX_FILES) {
-            memcpy(seen[seen_n], tok, tok_len + 1);
+            memcpy(seen[seen_n], tok, strlen(tok) + 1);
             seen_n++;
         }
-        size_t take = clen;
-        bool truncated = false;
-        if (take > TASK_FILE_CONTEXT_PER_FILE_BYTES) {
-            take = TASK_FILE_CONTEXT_PER_FILE_BYTES;
-            truncated = true;
-        }
-        if (bytes_included + take > TASK_FILE_CONTEXT_MAX_TOTAL_BYTES) {
-            take = TASK_FILE_CONTEXT_MAX_TOTAL_BYTES - bytes_included;
-            truncated = true;
-        }
-        if (!header_written) {
-            const int hn = snprintf(out + used, cap - used,
-                "\n\n# Current contents of files this task names\n\n"
-                "Every file below exists in your worktree right now, "
-                "exactly as shown. Do not guess, reconstruct from memory, "
-                "or ask for it again.\n");
-            if (hn > 0)
-                used += (size_t)hn < cap - used ? (size_t)hn : cap - used;
-            header_written = true;
-        }
-        const int hn = snprintf(out + used, cap - used,
-                                "\n## %s (%zu byte(s)%s)\n", tok, clen,
-                                truncated ? "; truncated below" : "");
-        if (hn > 0)
-            used += (size_t)hn < cap - used ? (size_t)hn : cap - used;
-        if (take > 0 && used < cap) {
-            const size_t room = cap - used;
-            const size_t copy_n = take < room ? take : room;
-            memcpy(out + used, content, copy_n);
-            used += copy_n;
-        }
+        size_t take = build_task_append_file(out, cap, &used,
+                                             &header_written, tok, content,
+                                             clen, bytes_included);
         free(content);
         files_included++;
         bytes_included += take;
