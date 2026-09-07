@@ -1843,6 +1843,332 @@ static bool factory_second_receipt(const struct run_args *args,
 }
 
 /* plan|commit publish + add + second receipt + verify against one store. */
+
+/* Fields shared by every stage of one store's journey. */
+struct fsj_ctx {
+    const struct run_args *args;
+    const char *store;
+    struct pf_report *rep;
+    const char *tag;
+    struct store_result *sr;
+};
+
+/* Format the "publish plan not valid" refusal, leading with the first
+ * failed rule (the reply carries the exact failed rules; "blocked" alone
+ * is undiagnosable from the report). */
+static void fsj_format_publish_plan_error(const struct json_value *doc,
+                                          char *error, size_t error_cap)
+{
+    const struct json_value *data = json_get(doc, "data");
+    const char *readiness = json_get_str(json_get(data, "readiness"));
+    const char *next_action = json_get_str(json_get(data, "next_action"));
+    const struct json_value *failures = json_get(data, "failures");
+    const char *frule = NULL, *fdetail = NULL;
+    if (failures && failures->type == JSON_ARR && failures->num_children) {
+        const struct json_value *f0 = &failures->children[0];
+        frule = json_get_str(json_get(f0, "rule"));
+        fdetail = json_get_str(json_get(f0, "detail"));
+    }
+    (void)snprintf(error, error_cap,
+                   "publish plan not valid (readiness=%s next=%s%s%s%s%s)",
+                   readiness ? readiness : "?",
+                   next_action ? next_action : "?",
+                   frule ? " first=" : "", frule ? frule : "",
+                   fdetail ? ": " : "", fdetail ? fdetail : "");
+}
+
+static bool fsj_publish_plan(const struct fsj_ctx *ctx,
+                             const char *release_hex,
+                             const char *manifest_hex,
+                             const char *recipe_hex, char *input,
+                             char *error, size_t error_cap)
+{
+    char name[48];
+    (void)snprintf(name, sizeof(name), "publish_plan_%s", ctx->tag);
+    struct pf_step *s = pf_step_begin(ctx->rep, name);
+    uint64_t t0 = now_ms();
+    int n = snprintf(input, PF_CLI_STDOUT_CAP,
+        "{\"release_hex\":\"%s\",\"manifest_hex\":\"%s\","
+        "\"recipe_hex\":\"%s\",\"dir\":\"%s\",\"datadir\":\"%s\"}",
+        release_hex, manifest_hex, recipe_hex, ctx->args->package_dir,
+        ctx->store);
+    if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP)
+        return pf_step_fail(ctx->rep, s, t0, "publish input overflow");
+    struct json_value doc;
+    if (!pf_cli(ctx->args->bin_dir, NULL, "zcode package publish plan",
+                input, &doc, error, error_cap))
+        return pf_step_fail(ctx->rep, s, t0, error);
+    const struct json_value *valid =
+        json_get(json_get(&doc, "data"), "valid");
+    bool v = valid && json_get_bool(valid);
+    if (!v)
+        fsj_format_publish_plan_error(&doc, error, error_cap);
+    json_free(&doc);
+    if (!v)
+        return pf_step_fail(ctx->rep, s, t0, error);
+    pf_step_ok(s, t0);
+    return true;
+}
+
+static bool fsj_publish_commit(const struct fsj_ctx *ctx,
+                               const char *release_hex,
+                               const char *manifest_hex,
+                               const char *recipe_hex, char *input,
+                               char *error, size_t error_cap)
+{
+    char name[48];
+    (void)snprintf(name, sizeof(name), "publish_commit_%s", ctx->tag);
+    struct pf_step *s = pf_step_begin(ctx->rep, name);
+    uint64_t t0 = now_ms();
+    int n = snprintf(input, PF_CLI_STDOUT_CAP,
+        "{\"release_hex\":\"%s\",\"manifest_hex\":\"%s\","
+        "\"recipe_hex\":\"%s\",\"dir\":\"%s\",\"datadir\":\"%s\"}",
+        release_hex, manifest_hex, recipe_hex, ctx->args->package_dir,
+        ctx->store);
+    if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP)
+        return pf_step_fail(ctx->rep, s, t0, "publish input overflow");
+    struct json_value doc;
+    if (!pf_cli(ctx->args->bin_dir, NULL, "zcode package publish commit",
+                input, &doc, error, error_cap))
+        return pf_step_fail(ctx->rep, s, t0, error);
+    const char *result =
+        json_get_str(json_get(json_get(&doc, "data"), "result"));
+    bool okr = result && (strcmp(result, "committed") == 0 ||
+                          strcmp(result, "published") == 0 ||
+                          strcmp(result, "duplicate") == 0);
+    json_free(&doc);
+    if (!okr)
+        return pf_step_fail(ctx->rep, s, t0, "publish commit result bad");
+    ctx->sr->publish_ok = true;
+    pf_step_ok(s, t0);
+    return true;
+}
+
+/* A dependency-rich plan overflows the bounded reply envelope, so the
+ * fetch pages through the steps array and reassembles it. */
+static bool fsj_add_plan(const struct fsj_ctx *ctx, const char *root_hex,
+                         struct json_value *plan_doc,
+                         const struct json_value **steps_out,
+                         char lock_hex[65], char *error, size_t error_cap)
+{
+    char name[48];
+    (void)snprintf(name, sizeof(name), "add_plan_%s", ctx->tag);
+    struct pf_step *s = pf_step_begin(ctx->rep, name);
+    uint64_t t0 = now_ms();
+    if (!pf_cli_paged_steps(ctx->args->bin_dir, "zcode package add plan",
+                            "name_or_root", root_hex, ctx->store, plan_doc,
+                            error, error_cap)) {
+        json_free(plan_doc);
+        return pf_step_fail(ctx->rep, s, t0, error);
+    }
+    const struct json_value *data = json_get(plan_doc, "data");
+    const char *plan_id = json_get_str(json_get(data, "plan_id"));
+    const char *lk = json_get_str(json_get(data, "lock_root"));
+    const struct json_value *ready = json_get(data, "ready");
+    const struct json_value *steps = json_get(data, "steps");
+    *steps_out = steps;
+    if (!plan_id || strlen(plan_id) != 64 || !lk || strlen(lk) != 64 ||
+        !ready || !json_get_bool(ready) || !steps ||
+        steps->type != JSON_ARR || !steps->num_children) {
+        json_free(plan_doc);
+        return pf_step_fail(ctx->rep, s, t0, "add plan not ready");
+    }
+    (void)snprintf(ctx->sr->plan_id, sizeof(ctx->sr->plan_id), "%s",
+                   plan_id);
+    (void)snprintf(lock_hex, 65, "%s", lk);
+    pf_step_ok(s, t0);
+    return true;
+}
+
+/* The commit step list mirrors the plan's, so it can overflow the bounded
+ * reply envelope for a dependency-rich plan; page it the same way. */
+static bool fsj_add_commit(const struct fsj_ctx *ctx,
+                           struct json_value *plan_doc, char *error,
+                           size_t error_cap)
+{
+    char name[48];
+    (void)snprintf(name, sizeof(name), "add_commit_%s", ctx->tag);
+    struct pf_step *s = pf_step_begin(ctx->rep, name);
+    uint64_t t0 = now_ms();
+    struct json_value doc;
+    if (!pf_cli_paged_steps(ctx->args->bin_dir, "zcode package add commit",
+                            "plan_id", ctx->sr->plan_id, ctx->store, &doc,
+                            error, error_cap)) {
+        json_free(plan_doc);
+        return pf_step_fail(ctx->rep, s, t0, error);
+    }
+    const struct json_value *data = json_get(&doc, "data");
+    const struct json_value *inst = json_get(data, "installed");
+    const struct json_value *csteps = json_get(data, "steps");
+    const char *receipt = NULL;
+    if (csteps && csteps->type == JSON_ARR && csteps->num_children) {
+        const struct json_value *last =
+            json_at(csteps, csteps->num_children - 1u);
+        receipt = json_get_str(json_get(last, "build_receipt_id"));
+    }
+    bool oki = inst && json_get_bool(inst) && receipt &&
+              strlen(receipt) == 64;
+    if (oki)
+        (void)snprintf(ctx->sr->receipt_quick, sizeof(ctx->sr->receipt_quick),
+                      "%s", receipt);
+    json_free(&doc);
+    if (!oki) {
+        json_free(plan_doc);
+        return pf_step_fail(ctx->rep, s, t0,
+                            "add commit did not install with a receipt");
+    }
+    ctx->sr->add_ok = true;
+    pf_step_ok(s, t0);
+    return true;
+}
+
+/* Second, distinct confined build receipt (factory_second_receipt). */
+static bool fsj_second_receipt_step(const struct fsj_ctx *ctx,
+                                    const char *root_hex,
+                                    const char *lock_hex,
+                                    const struct json_value *steps,
+                                    const uint8_t *recipe_wire,
+                                    size_t recipe_wire_len,
+                                    struct json_value *plan_doc,
+                                    struct pf_fast_stats *fast, char *error,
+                                    size_t error_cap)
+{
+    char name[48];
+    (void)snprintf(name, sizeof(name), "reproduce_build_%s", ctx->tag);
+    struct pf_step *s = pf_step_begin(ctx->rep, name);
+    uint64_t t0 = now_ms();
+    bool ok2 = factory_second_receipt(
+        ctx->args, ctx->store, root_hex, lock_hex, steps, recipe_wire,
+        recipe_wire_len, ctx->sr->receipt_quick, ctx->sr, fast, error,
+        error_cap);
+    json_free(plan_doc);
+    if (!ok2)
+        return pf_step_fail(ctx->rep, s, t0, error);
+    pf_step_ok(s, t0);
+    return true;
+}
+
+/* Approved-verifier allowlist (local config; the publisher key) so `zcode
+ * package verify` can run; the quorum is NOT reached without attestations
+ * — only the reproduction verdict matters here. */
+static bool fsj_write_approved_verifiers(const char *store,
+                                         const char *publisher_pubkey)
+{
+    char av_path[PF_PATH_CAP];
+    if (snprintf(av_path, sizeof(av_path), "%s/zcode/approved_verifiers",
+                store) >= (int)sizeof(av_path)) {
+        LOG_ERROR(PF_LOG, "approved_verifiers path overflow");
+        return false;
+    }
+    if (access(av_path, R_OK) == 0)
+        return true;
+    char line[70];
+    int n = snprintf(line, sizeof(line), "%s\n", publisher_pubkey);
+    if (n <= 0 ||
+        !pf_write_atomic(av_path, (const uint8_t *)line, (size_t)n)) {
+        LOG_ERROR(PF_LOG, "cannot write %s", av_path);
+        return false;
+    }
+    return true;
+}
+
+/* verify: require reproduced=true */
+static bool fsj_verify_step(const struct fsj_ctx *ctx, const char *root_hex,
+                            char *input, char *error, size_t error_cap)
+{
+    char name[48];
+    (void)snprintf(name, sizeof(name), "verify_%s", ctx->tag);
+    struct pf_step *s = pf_step_begin(ctx->rep, name);
+    uint64_t t0 = now_ms();
+    int n = snprintf(input, PF_CLI_STDOUT_CAP,
+                     "{\"root\":\"%s\",\"datadir\":\"%s\"}", root_hex,
+                     ctx->store);
+    if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP)
+        return pf_step_fail(ctx->rep, s, t0, "verify input overflow");
+    struct json_value doc;
+    if (!pf_cli(ctx->args->bin_dir, NULL, "zcode package verify", input,
+                &doc, error, error_cap))
+        return pf_step_fail(ctx->rep, s, t0, error);
+    const struct json_value *repro = json_get(
+        json_get(json_get(&doc, "data"), "reproduction"), "reproduced");
+    ctx->sr->reproduced = repro && json_get_bool(repro);
+    json_free(&doc);
+    if (!ctx->sr->reproduced)
+        return pf_step_fail(ctx->rep, s, t0,
+                            "reproduction verdict is not reproduced");
+    ctx->sr->verify_ok = true;
+    pf_step_ok(s, t0);
+    return true;
+}
+
+/* Second half of storage_ack: attempt the commit leg once a plan_token
+ * came back. */
+static bool fsj_storage_ack_commit(const struct fsj_ctx *ctx,
+                                   const char *root_hex, const char *flag,
+                                   const char *token, char *input,
+                                   char *error, size_t error_cap)
+{
+    int n = snprintf(input, PF_CLI_STDOUT_CAP,
+        "{\"mode\":\"commit\",\"namespace\":\"commons\","
+        "\"transport_root\":\"%s\",\"sequence\":1,"
+        "\"not_before\":1,\"expiry\":2,\"plan_token\":\"%s\"}",
+        root_hex, token);
+    if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP)
+        return false;
+    struct json_value doc;
+    if (!pf_cli(ctx->args->bin_dir, flag, "zcode network storage_ack",
+                input, &doc, error, error_cap))
+        return false;
+    json_free(&doc);
+    return true;
+}
+
+/* storage_ack: attempt plan/commit offline; refusal is expected without
+ * the live DHT service and is recorded, never fatal. */
+static bool fsj_storage_ack_step(const struct fsj_ctx *ctx,
+                                 const char *root_hex, char *input,
+                                 char *error, size_t error_cap)
+{
+    char name[48];
+    (void)snprintf(name, sizeof(name), "storage_ack_%s", ctx->tag);
+    struct pf_step *s = pf_step_begin(ctx->rep, name);
+    uint64_t t0 = now_ms();
+    char flag[PF_PATH_CAP + 16];
+    if (snprintf(flag, sizeof(flag), "-datadir=%s", ctx->store) >=
+        (int)sizeof(flag)) {
+        LOG_ERROR(PF_LOG, "datadir flag overflow");
+        return false;
+    }
+    int n = snprintf(input, PF_CLI_STDOUT_CAP,
+        "{\"mode\":\"plan\",\"namespace\":\"commons\","
+        "\"transport_root\":\"%s\",\"sequence\":1,\"not_before\":1,"
+        "\"expiry\":2}", root_hex);
+    if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP)
+        return pf_step_fail(ctx->rep, s, t0, "storage_ack input overflow");
+    struct json_value doc;
+    if (!pf_cli(ctx->args->bin_dir, flag, "zcode network storage_ack",
+                input, &doc, error, error_cap)) {
+        (void)snprintf(ctx->sr->storage_ack_status,
+                       sizeof(ctx->sr->storage_ack_status),
+                       "unavailable_offline");
+        s->ok = true; /* recorded, not fatal */
+        s->ms = now_ms() - t0;
+        (void)snprintf(s->error, sizeof(s->error), "%s", error);
+        return true;
+    }
+    const char *token = json_get_str(
+        json_get(json_get(&doc, "data"), "plan_token"));
+    json_free(&doc);
+    bool committed = token && strlen(token) == 64 &&
+                     fsj_storage_ack_commit(ctx, root_hex, flag, token,
+                                            input, error, error_cap);
+    (void)snprintf(ctx->sr->storage_ack_status,
+                   sizeof(ctx->sr->storage_ack_status), "%s",
+                   committed ? "committed" : "planned_only");
+    pf_step_ok(s, t0);
+    return true;
+}
+
 static bool factory_store_journey(const struct run_args *args,
                                   const char *store, const char *release_hex,
                                   const char *manifest_hex,
@@ -1860,313 +2186,49 @@ static bool factory_store_journey(const struct run_args *args,
     if (!input)
         LOG_FAIL(PF_LOG, "store journey input alloc");
     char error[PF_ERROR_CAP];
-    struct json_value doc;
-    uint64_t t0;
-
-    /* publish plan */
-    struct pf_step *s;
-    {
-        char name[48];
-        (void)snprintf(name, sizeof(name), "publish_plan_%s", tag);
-        s = pf_step_begin(rep, name);
-        t0 = now_ms();
-        int n = snprintf(input, PF_CLI_STDOUT_CAP,
-            "{\"release_hex\":\"%s\",\"manifest_hex\":\"%s\","
-            "\"recipe_hex\":\"%s\",\"dir\":\"%s\",\"datadir\":\"%s\"}",
-            release_hex, manifest_hex, recipe_hex, args->package_dir,
-            store);
-        if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP) {
-            (void)pf_step_fail(rep, s, t0, "publish input overflow");
-            free(input);
-            return false;
-        }
-        if (!pf_cli(args->bin_dir, NULL, "zcode package publish plan",
-                    input, &doc, error, sizeof(error))) {
-            (void)pf_step_fail(rep, s, t0, error);
-            free(input);
-            return false;
-        }
-        const struct json_value *valid =
-            json_get(json_get(&doc, "data"), "valid");
-        bool v = valid && json_get_bool(valid);
-        if (!v) {
-            const struct json_value *data = json_get(&doc, "data");
-            const char *readiness =
-                json_get_str(json_get(data, "readiness"));
-            const char *next_action =
-                json_get_str(json_get(data, "next_action"));
-            /* The reply carries the exact failed rules; "blocked" alone is
-             * undiagnosable from the report, so lead with the first. */
-            const struct json_value *failures =
-                json_get(data, "failures");
-            const char *frule = NULL, *fdetail = NULL;
-            if (failures && failures->type == JSON_ARR &&
-                failures->num_children) {
-                const struct json_value *f0 = &failures->children[0];
-                frule = json_get_str(json_get(f0, "rule"));
-                fdetail = json_get_str(json_get(f0, "detail"));
-            }
-            (void)snprintf(error, sizeof(error),
-                           "publish plan not valid (readiness=%s next=%s%s%s%s%s)",
-                           readiness ? readiness : "?",
-                           next_action ? next_action : "?",
-                           frule ? " first=" : "", frule ? frule : "",
-                           fdetail ? ": " : "", fdetail ? fdetail : "");
-        }
-        json_free(&doc);
-        if (!v) {
-            (void)pf_step_fail(rep, s, t0, error);
-            free(input);
-            return false;
-        }
-        pf_step_ok(s, t0);
+    struct fsj_ctx ctx = {
+        .args = args, .store = store, .rep = rep, .tag = tag, .sr = sr,
+    };
+    if (!fsj_publish_plan(&ctx, release_hex, manifest_hex, recipe_hex,
+                          input, error, sizeof(error))) {
+        free(input);
+        return false;
     }
-    /* publish commit */
-    {
-        char name[48];
-        (void)snprintf(name, sizeof(name), "publish_commit_%s", tag);
-        s = pf_step_begin(rep, name);
-        t0 = now_ms();
-        int n = snprintf(input, PF_CLI_STDOUT_CAP,
-            "{\"release_hex\":\"%s\",\"manifest_hex\":\"%s\","
-            "\"recipe_hex\":\"%s\",\"dir\":\"%s\",\"datadir\":\"%s\"}",
-            release_hex, manifest_hex, recipe_hex, args->package_dir,
-            store);
-        if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP) {
-            (void)pf_step_fail(rep, s, t0, "publish input overflow");
-            free(input);
-            return false;
-        }
-        if (!pf_cli(args->bin_dir, NULL, "zcode package publish commit",
-                    input, &doc, error, sizeof(error))) {
-            (void)pf_step_fail(rep, s, t0, error);
-            free(input);
-            return false;
-        }
-        const char *result =
-            json_get_str(json_get(json_get(&doc, "data"), "result"));
-        bool okr = result && (strcmp(result, "committed") == 0 ||
-                              strcmp(result, "published") == 0 ||
-                              strcmp(result, "duplicate") == 0);
-        json_free(&doc);
-        if (!okr) {
-            (void)pf_step_fail(rep, s, t0, "publish commit result bad");
-            free(input);
-            return false;
-        }
-        sr->publish_ok = true;
-        pf_step_ok(s, t0);
+    if (!fsj_publish_commit(&ctx, release_hex, manifest_hex, recipe_hex,
+                            input, error, sizeof(error))) {
+        free(input);
+        return false;
     }
-    /* add plan */
-    const struct json_value *steps = NULL;
     struct json_value plan_doc;
     json_init(&plan_doc);
+    const struct json_value *steps = NULL;
     char lock_hex[65] = {0};
-    {
-        char name[48];
-        (void)snprintf(name, sizeof(name), "add_plan_%s", tag);
-        s = pf_step_begin(rep, name);
-        t0 = now_ms();
-        /* A dependency-rich plan overflows the bounded reply envelope, so
-         * the fetch pages through the steps array and reassembles it. */
-        if (!pf_cli_paged_steps(args->bin_dir, "zcode package add plan",
-                                "name_or_root", root_hex, store, &plan_doc,
-                                error, sizeof(error))) {
-            json_free(&plan_doc);
-            (void)pf_step_fail(rep, s, t0, error);
-            free(input);
-            return false;
-        }
-        const struct json_value *data = json_get(&plan_doc, "data");
-        const char *plan_id = json_get_str(json_get(data, "plan_id"));
-        const char *lk = json_get_str(json_get(data, "lock_root"));
-        const struct json_value *ready = json_get(data, "ready");
-        steps = json_get(data, "steps");
-        if (!plan_id || strlen(plan_id) != 64 || !lk || strlen(lk) != 64 ||
-            !ready || !json_get_bool(ready) || !steps ||
-            steps->type != JSON_ARR || !steps->num_children) {
-            json_free(&plan_doc);
-            (void)pf_step_fail(rep, s, t0, "add plan not ready");
-            free(input);
-            return false;
-        }
-        (void)snprintf(sr->plan_id, sizeof(sr->plan_id), "%s", plan_id);
-        (void)snprintf(lock_hex, sizeof(lock_hex), "%s", lk);
-        pf_step_ok(s, t0);
+    if (!fsj_add_plan(&ctx, root_hex, &plan_doc, &steps, lock_hex, error,
+                      sizeof(error))) {
+        free(input);
+        return false;
     }
-    /* add commit */
-    {
-        char name[48];
-        (void)snprintf(name, sizeof(name), "add_commit_%s", tag);
-        s = pf_step_begin(rep, name);
-        t0 = now_ms();
-        /* The commit step list mirrors the plan's, so it can overflow the
-         * bounded reply envelope for a dependency-rich plan; page it the
-         * same way. */
-        if (!pf_cli_paged_steps(args->bin_dir, "zcode package add commit",
-                                "plan_id", sr->plan_id, store, &doc, error,
-                                sizeof(error))) {
-            json_free(&plan_doc);
-            (void)pf_step_fail(rep, s, t0, error);
-            free(input);
-            return false;
-        }
-        const struct json_value *data = json_get(&doc, "data");
-        const struct json_value *inst = json_get(data, "installed");
-        const struct json_value *csteps = json_get(data, "steps");
-        const char *receipt = NULL;
-        if (csteps && csteps->type == JSON_ARR && csteps->num_children) {
-            const struct json_value *last =
-                json_at(csteps, csteps->num_children - 1u);
-            receipt = json_get_str(json_get(last, "build_receipt_id"));
-        }
-        bool oki = inst && json_get_bool(inst) && receipt &&
-                   strlen(receipt) == 64;
-        if (oki)
-            (void)snprintf(sr->receipt_quick, sizeof(sr->receipt_quick),
-                           "%s", receipt);
-        json_free(&doc);
-        if (!oki) {
-            json_free(&plan_doc);
-            (void)pf_step_fail(rep, s, t0,
-                               "add commit did not install with a "
-                               "receipt");
-            free(input);
-            return false;
-        }
-        sr->add_ok = true;
-        pf_step_ok(s, t0);
+    if (!fsj_add_commit(&ctx, &plan_doc, error, sizeof(error))) {
+        free(input);
+        return false;
     }
-    /* second, distinct confined build receipt */
-    {
-        char name[48];
-        (void)snprintf(name, sizeof(name), "reproduce_build_%s", tag);
-        s = pf_step_begin(rep, name);
-        t0 = now_ms();
-        bool ok2 = factory_second_receipt(
-            args, store, root_hex, lock_hex, steps, recipe_wire,
-            recipe_wire_len, sr->receipt_quick, sr, fast, error,
-            sizeof(error));
-        json_free(&plan_doc);
-        if (!ok2) {
-            (void)pf_step_fail(rep, s, t0, error);
-            free(input);
-            return false;
-        }
-        pf_step_ok(s, t0);
+    if (!fsj_second_receipt_step(&ctx, root_hex, lock_hex, steps,
+                                 recipe_wire, recipe_wire_len, &plan_doc,
+                                 fast, error, sizeof(error))) {
+        free(input);
+        return false;
     }
-    /* approved-verifier allowlist (local config; the publisher key) so
-     * zcode package verify can run; the quorum is NOT reached without
-     * attestations — only the reproduction verdict matters here. */
-    {
-        char av_path[PF_PATH_CAP];
-        if (snprintf(av_path, sizeof(av_path),
-                     "%s/zcode/approved_verifiers", store) >=
-            (int)sizeof(av_path)) {
-            LOG_ERROR(PF_LOG, "approved_verifiers path overflow");
-            free(input);
-            return false;
-        }
-        if (access(av_path, R_OK) != 0) {
-            char line[70];
-            int n = snprintf(line, sizeof(line), "%s\n",
-                             args->publisher_pubkey);
-            if (n <= 0 ||
-                !pf_write_atomic(av_path, (const uint8_t *)line,
-                                 (size_t)n)) {
-                LOG_ERROR(PF_LOG, "cannot write %s", av_path);
-                free(input);
-                return false;
-            }
-        }
+    if (!fsj_write_approved_verifiers(store, args->publisher_pubkey)) {
+        free(input);
+        return false;
     }
-    /* verify: require reproduced=true */
-    {
-        char name[48];
-        (void)snprintf(name, sizeof(name), "verify_%s", tag);
-        s = pf_step_begin(rep, name);
-        t0 = now_ms();
-        int n = snprintf(input, PF_CLI_STDOUT_CAP,
-                         "{\"root\":\"%s\",\"datadir\":\"%s\"}", root_hex,
-                         store);
-        if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP) {
-            (void)pf_step_fail(rep, s, t0, "verify input overflow");
-            free(input);
-            return false;
-        }
-        if (!pf_cli(args->bin_dir, NULL, "zcode package verify", input,
-                    &doc, error, sizeof(error))) {
-            (void)pf_step_fail(rep, s, t0, error);
-            free(input);
-            return false;
-        }
-        const struct json_value *repro = json_get(
-            json_get(json_get(&doc, "data"), "reproduction"), "reproduced");
-        sr->reproduced = repro && json_get_bool(repro);
-        json_free(&doc);
-        if (!sr->reproduced) {
-            (void)pf_step_fail(rep, s, t0,
-                               "reproduction verdict is not reproduced");
-            free(input);
-            return false;
-        }
-        sr->verify_ok = true;
-        pf_step_ok(s, t0);
+    if (!fsj_verify_step(&ctx, root_hex, input, error, sizeof(error))) {
+        free(input);
+        return false;
     }
-    /* storage_ack: attempt plan/commit offline; refusal is expected
-     * without the live DHT service and is recorded, never fatal. */
-    {
-        char name[48];
-        (void)snprintf(name, sizeof(name), "storage_ack_%s", tag);
-        s = pf_step_begin(rep, name);
-        t0 = now_ms();
-        char flag[PF_PATH_CAP + 16];
-        if (snprintf(flag, sizeof(flag), "-datadir=%s", store) >=
-            (int)sizeof(flag)) {
-            LOG_ERROR(PF_LOG, "datadir flag overflow");
-            free(input);
-            return false;
-        }
-        int n = snprintf(input, PF_CLI_STDOUT_CAP,
-            "{\"mode\":\"plan\",\"namespace\":\"commons\","
-            "\"transport_root\":\"%s\",\"sequence\":1,\"not_before\":1,"
-            "\"expiry\":2}", root_hex);
-        if (n <= 0 || (size_t)n >= PF_CLI_STDOUT_CAP) {
-            (void)pf_step_fail(rep, s, t0, "storage_ack input overflow");
-            free(input);
-            return false;
-        }
-        if (!pf_cli(args->bin_dir, flag, "zcode network storage_ack",
-                    input, &doc, error, sizeof(error))) {
-            (void)snprintf(sr->storage_ack_status,
-                           sizeof(sr->storage_ack_status),
-                           "unavailable_offline");
-            s->ok = true; /* recorded, not fatal */
-            s->ms = now_ms() - t0;
-            (void)snprintf(s->error, sizeof(s->error), "%s", error);
-        } else {
-            const char *token = json_get_str(
-                json_get(json_get(&doc, "data"), "plan_token"));
-            json_free(&doc);
-            bool committed = false;
-            if (token && strlen(token) == 64) {
-                n = snprintf(input, PF_CLI_STDOUT_CAP,
-                    "{\"mode\":\"commit\",\"namespace\":\"commons\","
-                    "\"transport_root\":\"%s\",\"sequence\":1,"
-                    "\"not_before\":1,\"expiry\":2,\"plan_token\":\"%s\"}",
-                    root_hex, token);
-                if (n > 0 && (size_t)n < PF_CLI_STDOUT_CAP &&
-                    pf_cli(args->bin_dir, flag, "zcode network storage_ack",
-                           input, &doc, error, sizeof(error))) {
-                    committed = true;
-                    json_free(&doc);
-                }
-            }
-            (void)snprintf(sr->storage_ack_status,
-                           sizeof(sr->storage_ack_status), "%s",
-                           committed ? "committed" : "planned_only");
-            pf_step_ok(s, t0);
-        }
+    if (!fsj_storage_ack_step(&ctx, root_hex, input, error, sizeof(error))) {
+        free(input);
+        return false;
     }
     free(input);
     return true;
