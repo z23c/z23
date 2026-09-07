@@ -1560,7 +1560,6 @@ docs/examples/09_seed_replay.c:main:27
 docs/examples/10_wire_adversaries.c:main:26
 docs/examples/11_collectible_market.c:main:36
 engine/composition/src/args.c:args_parse_node_options:125
-engine/composition/src/boot.c:app_init:486
 engine/composition/src/boot.c:boot_step_init_crypto_and_state:17
 engine/composition/src/boot.c:sandbox_build_fs_rules:18
 engine/composition/src/boot_anchor_snapshot_reachability.c:anchor_snapshot_verified_reachable_ex:19
@@ -3290,7 +3289,6 @@ tests/harness/src/test_mint_skip_crypto.c:msc_make_killed_wal:39
 tests/harness/src/test_mint_skip_crypto.c:msc_wal_writer_child:20
 tests/harness/src/test_mint_skip_crypto.c:stage_rows_match:25
 tests/harness/src/test_mint_skip_crypto.c:test_mint_anchor_lane_containment:27
-tests/harness/src/test_mint_skip_crypto.c:test_mint_skip_crypto:34
 tests/harness/src/test_mint_skip_crypto.c:test_normal_boot_preflight_killed_wal:28
 tests/harness/src/test_mint_skip_crypto.c:test_source_epoch_authority_types:16
 tests/harness/src/test_mirror_divergence_locator.c:test_mirror_divergence_locator:23
