@@ -586,16 +586,56 @@ static bool rr_cache_root(char out[PATH_MAX])
     return n > 0 && n < PATH_MAX && rr_mkdirs(out);
 }
 
+static bool rr_cache_key_normalize(const struct rr_plan *plan,
+                                   const char *root,
+                                   char cc[], size_t cc_cap,
+                                   char cflags[], size_t cflags_cap,
+                                   char ldflags[], size_t ldflags_cap,
+                                   char libs[], size_t libs_cap)
+{
+    return rr_normalize_root(plan->cc, root, cc, cc_cap) &&
+           rr_normalize_root(plan->cflags, root, cflags, cflags_cap) &&
+           rr_normalize_root(plan->ldflags, root, ldflags, ldflags_cap) &&
+           rr_normalize_root(plan->libs, root, libs, libs_cap);
+}
+
+static bool rr_cache_key_base_reloc(const struct rr_plan *plan,
+                                    const char *root, char hash_out[65])
+{
+    char full[PATH_MAX];
+    return rr_join_root(root, plan->base_reloc, full) &&
+           rr_regular(full, NULL) &&
+           rr_sha256_file(full, hash_out);
+}
+
+static bool rr_cache_key_scan_inputs(FILE *f, const char *root,
+                                     struct sha256_ctx *ctx)
+{
+    char token[4096];
+    bool ok = true;
+    while (ok && fscanf(f, "%4095s", token) == 1) {
+        rr_key_field(ctx, "link_input", token, strlen(token));
+        if (strncmp(token, "build/dev-loop/restart-objects/", 31) == 0 ||
+            strncmp(token, "build/dev-loop/restart-test-objects/", 36) == 0) {
+            char full[PATH_MAX], hash[65];
+            ok = rr_join_root(root, token, full) && rr_regular(full, NULL) &&
+                 rr_sha256_file(full, hash);
+            if (ok)
+                rr_key_field(ctx, "overlay_sha256", hash, strlen(hash));
+        }
+    }
+    return ok && !ferror(f);
+}
+
 static bool rr_cache_key(const struct rr_plan *plan, const char *root,
                          const char *rsp, char out[65])
 {
     static const char domain[] = "zcl.dev_artifact_cache.restart.v2";
     char cc[sizeof(plan->cc)], cflags[sizeof(plan->cflags)];
     char ldflags[sizeof(plan->ldflags)], libs[sizeof(plan->libs)];
-    if (!rr_normalize_root(plan->cc, root, cc, sizeof(cc)) ||
-        !rr_normalize_root(plan->cflags, root, cflags, sizeof(cflags)) ||
-        !rr_normalize_root(plan->ldflags, root, ldflags, sizeof(ldflags)) ||
-        !rr_normalize_root(plan->libs, root, libs, sizeof(libs)))
+    if (!rr_cache_key_normalize(plan, root, cc, sizeof(cc), cflags,
+                                sizeof(cflags), ldflags, sizeof(ldflags),
+                                libs, sizeof(libs)))
         return false;
     FILE *f = fopen(rsp, "r");
     if (!f)
@@ -612,30 +652,15 @@ static bool rr_cache_key(const struct rr_plan *plan, const char *root,
     rr_key_field(&ctx, "cflags", cflags, strlen(cflags));
     rr_key_field(&ctx, "ldflags", ldflags, strlen(ldflags));
     rr_key_field(&ctx, "libs", libs, strlen(libs));
-    char base_reloc_full[PATH_MAX], base_reloc_hash[65];
-    if (!rr_join_root(root, plan->base_reloc, base_reloc_full) ||
-        !rr_regular(base_reloc_full, NULL) ||
-        !rr_sha256_file(base_reloc_full, base_reloc_hash)) {
+    char base_reloc_hash[65];
+    if (!rr_cache_key_base_reloc(plan, root, base_reloc_hash)) {
         fclose(f);
         return false;
     }
     rr_key_field(&ctx, "link_mode", "overlay_base_v1", 15);
     rr_key_field(&ctx, "base_reloc_sha256", base_reloc_hash,
                  strlen(base_reloc_hash));
-    char token[4096];
-    bool ok = true;
-    while (ok && fscanf(f, "%4095s", token) == 1) {
-        rr_key_field(&ctx, "link_input", token, strlen(token));
-        if (strncmp(token, "build/dev-loop/restart-objects/", 31) == 0 ||
-            strncmp(token, "build/dev-loop/restart-test-objects/", 36) == 0) {
-            char full[PATH_MAX], hash[65];
-            ok = rr_join_root(root, token, full) && rr_regular(full, NULL) &&
-                 rr_sha256_file(full, hash);
-            if (ok)
-                rr_key_field(&ctx, "overlay_sha256", hash, strlen(hash));
-        }
-    }
-    ok = ok && !ferror(f);
+    bool ok = rr_cache_key_scan_inputs(f, root, &ctx);
     fclose(f);
     if (!ok)
         return false;
@@ -985,9 +1010,10 @@ static bool rr_overlay_object_safe(const char *path)
     return safe;
 }
 
-static bool rr_write_overlay_response(const char *root, const char *rsp,
-                                      char out[PATH_MAX], char *why,
-                                      size_t why_len)
+static bool rr_write_overlay_response_open(const char *root, const char *rsp,
+                                           char out[PATH_MAX], FILE **in_out,
+                                           FILE **dst_out, char *why,
+                                           size_t why_len)
 {
     char dir[PATH_MAX];
     if (snprintf(dir, sizeof(dir), "%s/build/dev-loop", root) >=
@@ -1003,9 +1029,17 @@ static bool rr_write_overlay_response(const char *root, const char *rsp,
         rr_why(why, why_len, "could not open overlay-only link response");
         return false;
     }
+    *in_out = in;
+    *dst_out = dst;
+    return true;
+}
+
+static bool rr_write_overlay_response_scan(FILE *in, FILE *dst,
+                                           const char *root, size_t *count)
+{
     char token[4096], full[PATH_MAX];
-    size_t count = 0;
     bool ok = true;
+    *count = 0;
     while (ok && fscanf(in, "%4095s", token) == 1) {
         bool overlay =
             strncmp(token, "build/dev-loop/restart-objects/", 31) == 0 ||
@@ -1015,9 +1049,21 @@ static bool rr_write_overlay_response(const char *root, const char *rsp,
         ok = rr_join_root(root, token, full) && rr_regular(full, NULL) &&
              rr_overlay_object_safe(full) && fprintf(dst, "%s\n", token) > 0;
         if (ok)
-            count++;
+            (*count)++;
     }
-    ok = ok && count > 0 && !ferror(in) && rr_flush_stream(dst);
+    return ok && *count > 0 && !ferror(in) && rr_flush_stream(dst);
+}
+
+static bool rr_write_overlay_response(const char *root, const char *rsp,
+                                      char out[PATH_MAX], char *why,
+                                      size_t why_len)
+{
+    FILE *in, *dst;
+    if (!rr_write_overlay_response_open(root, rsp, out, &in, &dst, why,
+                                        why_len))
+        return false;
+    size_t count;
+    bool ok = rr_write_overlay_response_scan(in, dst, root, &count);
     fclose(in);
     fclose(dst);
     if (!ok) {
@@ -1136,10 +1182,13 @@ static bool rr_compile_one(const struct rr_plan *plan, const char *root,
     return true;
 }
 
-static bool rr_overlay_for_base(const struct rr_plan *plan, const char *root,
-                                const char *base_object,
-                                const char *overlay_prefix,
-                                char overlay_relative[PATH_MAX])
+static bool rr_overlay_for_base_paths(const struct rr_plan *plan,
+                                      const char *root,
+                                      const char *base_object,
+                                      const char *overlay_prefix,
+                                      char overlay_relative[PATH_MAX],
+                                      char source[PATH_MAX],
+                                      char marker[PATH_MAX])
 {
     size_t prefix_len = strlen(plan->obj_dir);
     size_t token_len = strlen(base_object);
@@ -1148,8 +1197,8 @@ static bool rr_overlay_for_base(const struct rr_plan *plan, const char *root,
         strcmp(base_object + token_len - 2, ".o") != 0)
         return false;
     const char *stem = base_object + prefix_len + 1;
-    char source[PATH_MAX], overlay[PATH_MAX], marker[PATH_MAX];
-    if (snprintf(source, sizeof(source), "%s", stem) >= (int)sizeof(source))
+    char overlay[PATH_MAX];
+    if (snprintf(source, PATH_MAX, "%s", stem) >= PATH_MAX)
         return false;
     size_t source_len = strlen(source);
     source[source_len - 1] = 'c';
@@ -1157,10 +1206,16 @@ static bool rr_overlay_for_base(const struct rr_plan *plan, const char *root,
                  overlay_prefix, stem) >= PATH_MAX ||
         snprintf(overlay, sizeof(overlay), "%s/%s", root,
                  overlay_relative) >= (int)sizeof(overlay) ||
-        snprintf(marker, sizeof(marker), "%s.source", overlay) >=
-            (int)sizeof(marker) || !rr_regular(overlay, NULL) ||
-        !rr_regular(marker, NULL))
+        snprintf(marker, PATH_MAX, "%s.source", overlay) >= PATH_MAX ||
+        !rr_regular(overlay, NULL) || !rr_regular(marker, NULL))
         return false;
+    return true;
+}
+
+static bool rr_overlay_for_base_verify(const struct rr_plan *plan,
+                                       const char *root, const char *source,
+                                       const char *marker)
+{
     FILE *f = fopen(marker, "r");
     if (!f) return false;
     char generation[65] = {0}, expected[65] = {0}, extra = 0;
@@ -1173,6 +1228,18 @@ static bool rr_overlay_for_base(const struct rr_plan *plan, const char *root,
            rr_join_root(root, source, source_full) &&
            rr_regular(source_full, NULL) &&
            rr_sha256_file(source_full, actual) && strcmp(actual, expected) == 0;
+}
+
+static bool rr_overlay_for_base(const struct rr_plan *plan, const char *root,
+                                const char *base_object,
+                                const char *overlay_prefix,
+                                char overlay_relative[PATH_MAX])
+{
+    char source[PATH_MAX], marker[PATH_MAX];
+    if (!rr_overlay_for_base_paths(plan, root, base_object, overlay_prefix,
+                                   overlay_relative, source, marker))
+        return false;
+    return rr_overlay_for_base_verify(plan, root, source, marker);
 }
 
 static bool rr_source_is_test_only(const char *source)
