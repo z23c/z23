@@ -5439,6 +5439,9 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_package_capabilities.c \
     tools/lint/lintc/gate_package_capabilities_parse.c \
     tools/lint/lintc/gate_package_capabilities_selftest.c \
+    tools/lint/lintc/gate_arm_symbol_single.c \
+    tools/lint/lintc/gate_arm_symbol_single_analyzer.c \
+    tools/lint/lintc/gate_arm_symbol_single_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11321,7 +11324,7 @@ check-byte-order-codec-single: $(LINTC_TOOL)
 # core/modules/net/src/file_service.c's `#if defined(_WIN32)` split (RATCHET at
 # <path>\t<function> granularity; tools/lint/arm_symbol_single_baseline.txt
 # may only shrink).
-check-arm-symbol-single:
+check-arm-symbol-single: $(LINTC_TOOL)
 	@echo "══ LINT: one definition per non-static function per TU ══"
 	@./tools/lint/check_arm_symbol_single.sh --selftest
 	@./tools/lint/check_arm_symbol_single.sh

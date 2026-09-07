@@ -449,5 +449,7 @@ int check_lint_gate_wiring_run(int argc, char **argv);
 int check_lint_gate_wiring_selftest(void);
 int check_package_capabilities_run(int argc, char **argv);
 int check_package_capabilities_selftest(void);
+int check_arm_symbol_single_run(int argc, char **argv);
+int check_arm_symbol_single_selftest(void);
 
 #endif
