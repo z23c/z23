@@ -62,7 +62,13 @@ you know why the flag exists.
 `make check-flag-registry` (part of the full `make lint` umbrella, not
 `lint-fast`) parses the catalog and scans every git-tracked `*.c`, `*.h`,
 `*.sh`, and `Makefile` for reads. It fails closed on a hollow scan (zero
-files, or zero reads) rather than reporting a false "clean". See
-`tools/lint/lintc/gate_flag_registry.c` for the implementation and
-`tools/lint/check_lint_gate_wiring.sh` for how every lint gate, including
-this one, stays wired into both `Makefile` and `tools/lint/run_lint.sh`.
+files, or zero reads) rather than reporting a false "clean". For every row
+whose `why_` names a `first use <path>:<line>` site, the gate also opens
+that file and checks the flag's exact name appears on that line, so a
+stale or wrong pointer (a moved read, an error-message string, a different
+flag's line) fails the gate instead of going unnoticed. See
+`tools/lint/lintc/gate_flag_registry.c` and
+`tools/lint/lintc/gate_flag_registry_first_use.c` for the implementation
+and `tools/lint/check_lint_gate_wiring.sh` for how every lint gate,
+including this one, stays wired into both `Makefile` and
+`tools/lint/run_lint.sh`.

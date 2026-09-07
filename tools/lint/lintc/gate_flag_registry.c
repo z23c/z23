@@ -28,24 +28,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#include "gate_flag_registry_priv.h"
 #include "lintc.h"
 
 enum {
     FR_MAX = 4096,   /* headroom over the ~1154 rows the first sweep found */
-    FR_NAME = 96,
-    FR_KIND = 24,
-    FR_VAL = 64,
     FR_WHY = 512,
     FR_DEF_BUF = 512 * 1024,
-};
-
-struct fr_row {
-    char name[FR_NAME];
-    char kind[FR_KIND];
-    char def[FR_VAL];
-    char exp[FR_VAL];
-    int used;
 };
 
 struct fr_ctx {
@@ -109,7 +100,8 @@ static int fr_parse_one(const char **cur, struct fr_row *row)
         return 0;
     if (!fr_next_quoted(cur, why, sizeof why))
         return 0;
-    (void)why;
+    row->fu_present = fru_parse_pointer(why, row->fu_path, sizeof row->fu_path,
+                                        &row->fu_line);
     return fr_skip_close(cur);
 }
 
@@ -433,6 +425,32 @@ static int fr_check_expired(const struct fr_row *rows, int n, const char *head_d
 
 /* ── entry points ────────────────────────────────────────────────────── */
 
+/* Runs the three post-scan reconciliation checks (stale rows, expired
+ * rows, and every row's first-use pointer) and either prints the single
+ * OK line or leaves the FAIL lines those checks already wrote to out. */
+static int fr_reconcile(const struct fr_row *rows, int n, const char *head_date,
+                        int reads, FILE *out)
+{
+    int fail = fr_check_stale(rows, n, out);
+    if (fail < 0)
+        return die("z23-lint: write failed\n", "");
+    int fail2 = fr_check_expired(rows, n, head_date, out);
+    if (fail2 < 0)
+        return die("z23-lint: write failed\n", "");
+
+    int fu_verified = 0;
+    int fail3 = fru_check_rows(rows, n, out, &fu_verified);
+    if (fail3 == 2)
+        return 2;
+    if (fail || fail2 || fail3)
+        return 1;
+
+    return fprintf(out, "check_flag_registry: OK — %d flags registered, "
+                   "%d read sites, 0 unregistered, 0 expired, %d first-use "
+                   "pointers verified\n", n, reads, fu_verified) < 0
+        ? die("z23-lint: write failed\n", "") : 0;
+}
+
 static int fr_run_impl(const char *def_path, const char *ls_cmd,
                        const char *head_date, FILE *out)
 {
@@ -466,18 +484,7 @@ static int fr_run_impl(const char *def_path, const char *ls_cmd,
     if (rc)
         return rc;
 
-    int fail = fr_check_stale(rows, n, out);
-    if (fail < 0)
-        return die("z23-lint: write failed\n", "");
-    int fail2 = fr_check_expired(rows, n, head_date, out);
-    if (fail2 < 0)
-        return die("z23-lint: write failed\n", "");
-    if (fail || fail2)
-        return 1;
-
-    return fprintf(out, "check_flag_registry: OK — %d flags registered, "
-                   "%d read sites, 0 unregistered, 0 expired\n", n, ctx.reads) < 0
-        ? die("z23-lint: write failed\n", "") : 0;
+    return fr_reconcile(rows, n, head_date, ctx.reads, out);
 }
 
 int check_flag_registry_run(int argc, char **argv)
@@ -511,6 +518,188 @@ static int fr_st_case(const char *def_text, const char *src_name,
     return psp_st_reset(out);
 }
 
+/* The eight core parsing/registration/reconciliation cases: unregistered
+ * reads (direct and through the env_or/env_int_or wrappers), a clean
+ * registration, a comment that must not be mistaken for a live row, a
+ * stale row, an expired row, and a hollow scan. None of these rows carry
+ * a first-use pointer. */
+static int fr_st_core_cases(FILE *out, char *ob, size_t obcap)
+{
+    int rc = 0, bad = 0;
+
+    bad |= fr_st_case("\n", "./a.c",
+            "int f(void){ return getenv(\"ZCL_UNKNOWN_X\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' a.c", out, ob, obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "a.c:1: ZCL_UNKNOWN_X is not in engine/composition/flags.def") == NULL;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
+            "./b.c", "int f(void){ return getenv(\"ZCL_KNOWN_X\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' b.c", out, ob, obcap, &rc);
+    bad |= rc != 0
+        || strstr(ob, "check_flag_registry: OK — 1 flags registered, 1 read "
+                      "sites, 0 unregistered, 0 expired, 0 first-use "
+                      "pointers verified") == NULL;
+
+    /* A read through the lint runtime's env_or / env_int_or wrappers is a
+     * read. Without this the gate calls a flag only a C gate consumes dead
+     * and demands its row be deleted — the shape that first caught it. */
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n"
+            "Z23_FLAG(\"ZCL_KNOWN_Y\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
+            "./w.c",
+            "int f(void){ return *env_or(\"ZCL_KNOWN_X\", \"d\")\n"
+            "                  + env_int_or(\"ZCL_KNOWN_Y\", 1); }\n",
+            "2026-01-01", "printf '%s\\0' w.c", out, ob, obcap, &rc);
+    bad |= rc != 0
+        || strstr(ob, "check_flag_registry: OK — 2 flags registered, 2 read "
+                      "sites, 0 unregistered, 0 expired, 0 first-use "
+                      "pointers verified") == NULL;
+
+    /* ... and an UNregistered name reached through a wrapper still fails. */
+    bad |= fr_st_case("\n", "./x.c",
+            "int f(void){ return *env_or(\"ZCL_UNKNOWN_W\", \"d\"); }\n",
+            "2026-01-01", "printf '%s\\0' x.c", out, ob, obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "x.c:1: ZCL_UNKNOWN_W is not in engine/composition/flags.def") == NULL;
+
+    bad |= fr_st_case(
+            "/* example: Z23_FLAG(\"ZCL_NOT_A_FLAG\", \"env_runtime\", \"-\",\n"
+            " * \"-\", \"x\") lives only in this comment. */\n"
+            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
+            "./e.c", "int f(void){ return getenv(\"ZCL_KNOWN_X\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' e.c", out, ob, obcap, &rc);
+    bad |= rc != 0
+        || strstr(ob, "check_flag_registry: OK — 1 flags registered, 1 read "
+                      "sites, 0 unregistered, 0 expired, 0 first-use "
+                      "pointers verified") == NULL;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n"
+            "Z23_FLAG(\"ZCL_STALE_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
+            "./c.c", "int f(void){ return getenv(\"ZCL_KNOWN_X\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' c.c", out, ob, obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "flags.def: ZCL_STALE_X is registered but no longer "
+                      "read — remove the row") == NULL;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_EXP_X\", \"env_runtime\", \"-\", \"2020-01-01\",\n"
+            " \"why\")\n",
+            "./d.c", "int f(void){ return getenv(\"ZCL_EXP_X\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' d.c", out, ob, obcap, &rc);
+    bad |= rc != 1 || strstr(ob, "flags.def: ZCL_EXP_X expired on 2020-01-01") == NULL;
+
+    bad |= fr_st_case("\n", NULL, NULL, "2026-01-01", "true", out, ob, obcap, &rc);
+    bad |= rc != 2;
+
+    return bad;
+}
+
+/* first-use pointer checks: every row below carries a real getenv() so
+ * fr_check_stale never fires — the only thing under test is whether the
+ * row's own "first use <path>:<line>" clause points where it claims to. */
+static int fr_st_first_use_cases(FILE *out, char *ob, size_t obcap)
+{
+    int rc = 0, bad = 0;
+
+    if (csr_write("./fu_filler.c",
+                "int z(void){ return getenv(\"ZCL_FU_FILLER\") != 0; }\n"))
+        return 1;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+            "Z23_FLAG(\"ZCL_FU_OK\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fu_ok.c:1\")\n",
+            "./fu_ok.c", "int f(void){ return getenv(\"ZCL_FU_OK\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' fu_filler.c fu_ok.c", out, ob,
+            obcap, &rc);
+    bad |= rc != 0
+        || strstr(ob, "check_flag_registry: OK — 2 flags registered, 2 read "
+                      "sites, 0 unregistered, 0 expired, 1 first-use "
+                      "pointers verified") == NULL;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+            "Z23_FLAG(\"ZCL_FU_BAD_LINE\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fu_bad.c:2\")\n",
+            "./fu_bad.c",
+            "int f(void){ return getenv(\"ZCL_FU_BAD_LINE\") != 0; }\n"
+            "int g(void){ return 0; }\n",
+            "2026-01-01", "printf '%s\\0' fu_filler.c fu_bad.c", out, ob,
+            obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "flag_registry: ZCL_FU_BAD_LINE first use "
+                      "./fu_bad.c:2 does not read it (name absent)") == NULL;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+            "Z23_FLAG(\"ZCL_FOO\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fu_bound.c:1\")\n",
+            "./fu_bound.c",
+            "int x = ZCL_FOO_BAR;\n"
+            "int f(void){ return getenv(\"ZCL_FOO\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' fu_filler.c fu_bound.c", out, ob,
+            obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "flag_registry: ZCL_FOO first use ./fu_bound.c:1 does"
+                      " not read it (name absent)") == NULL;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+            "Z23_FLAG(\"ZCL_FU_MISSING\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fu_missing_nope.c:1\")\n",
+            NULL, NULL, "2026-01-01", "printf '%s\\0' fu_filler.c", out, ob,
+            obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "flag_registry: ZCL_FU_MISSING first use "
+                      "./fu_missing_nope.c:1 does not read it "
+                      "(file missing)") == NULL;
+
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+            "Z23_FLAG(\"ZCL_FU_PAST\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fu_short.c:5\")\n",
+            "./fu_short.c",
+            "int f(void){ return getenv(\"ZCL_FU_PAST\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' fu_filler.c fu_short.c", out, ob,
+            obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "flag_registry: ZCL_FU_PAST first use ./fu_short.c:5"
+                      " does not read it (line past end (1 lines))") == NULL;
+
+    if (csr_write("./fu_secret.c",
+                "int f(void){ return getenv(\"ZCL_FU_UNREADABLE\") != 0; }\n"))
+        return 1;
+    bad |= chmod("./fu_secret.c", 0) != 0;
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
+            "Z23_FLAG(\"ZCL_FU_UNREADABLE\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fu_secret.c:1\")\n",
+            NULL, NULL, "2026-01-01", "printf '%s\\0' fu_filler.c", out, ob,
+            obcap, &rc);
+    bad |= rc != 2;
+    chmod("./fu_secret.c", 0644);
+    return bad;
+}
+
+static void fr_st_cleanup(void)
+{
+    unlink("./f.def");
+    unlink("./a.c");
+    unlink("./b.c");
+    unlink("./c.c");
+    unlink("./d.c");
+    unlink("./e.c");
+    unlink("./fu_filler.c");
+    unlink("./fu_ok.c");
+    unlink("./fu_bad.c");
+    unlink("./fu_bound.c");
+    unlink("./fu_short.c");
+    unlink("./fu_secret.c");
+}
+
 int check_flag_registry_selftest(void)
 {
     char cwd[4096];
@@ -532,79 +721,13 @@ int check_flag_registry_selftest(void)
     }
 
     char ob[4096];
-    int rc = 0, bad = 0;
-
-    bad |= fr_st_case("\n", "./a.c",
-            "int f(void){ return getenv(\"ZCL_UNKNOWN_X\") != 0; }\n",
-            "2026-01-01", "printf '%s\\0' a.c", out, ob, sizeof ob, &rc);
-    bad |= rc != 1
-        || strstr(ob, "a.c:1: ZCL_UNKNOWN_X is not in engine/composition/flags.def") == NULL;
-
-    bad |= fr_st_case(
-            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
-            "./b.c", "int f(void){ return getenv(\"ZCL_KNOWN_X\") != 0; }\n",
-            "2026-01-01", "printf '%s\\0' b.c", out, ob, sizeof ob, &rc);
-    bad |= rc != 0
-        || strstr(ob, "check_flag_registry: OK — 1 flags registered, 1 read "
-                      "sites, 0 unregistered, 0 expired") == NULL;
-
-    /* A read through the lint runtime's env_or / env_int_or wrappers is a
-     * read. Without this the gate calls a flag only a C gate consumes dead
-     * and demands its row be deleted — the shape that first caught it. */
-    bad |= fr_st_case(
-            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n"
-            "Z23_FLAG(\"ZCL_KNOWN_Y\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
-            "./w.c",
-            "int f(void){ return *env_or(\"ZCL_KNOWN_X\", \"d\")\n"
-            "                  + env_int_or(\"ZCL_KNOWN_Y\", 1); }\n",
-            "2026-01-01", "printf '%s\\0' w.c", out, ob, sizeof ob, &rc);
-    bad |= rc != 0
-        || strstr(ob, "check_flag_registry: OK — 2 flags registered, 2 read "
-                      "sites, 0 unregistered, 0 expired") == NULL;
-
-    /* ... and an UNregistered name reached through a wrapper still fails. */
-    bad |= fr_st_case("\n", "./x.c",
-            "int f(void){ return *env_or(\"ZCL_UNKNOWN_W\", \"d\"); }\n",
-            "2026-01-01", "printf '%s\\0' x.c", out, ob, sizeof ob, &rc);
-    bad |= rc != 1
-        || strstr(ob, "x.c:1: ZCL_UNKNOWN_W is not in engine/composition/flags.def") == NULL;
-
-    bad |= fr_st_case(
-            "/* example: Z23_FLAG(\"ZCL_NOT_A_FLAG\", \"env_runtime\", \"-\",\n"
-            " * \"-\", \"x\") lives only in this comment. */\n"
-            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
-            "./e.c", "int f(void){ return getenv(\"ZCL_KNOWN_X\") != 0; }\n",
-            "2026-01-01", "printf '%s\\0' e.c", out, ob, sizeof ob, &rc);
-    bad |= rc != 0
-        || strstr(ob, "check_flag_registry: OK — 1 flags registered, 1 read "
-                      "sites, 0 unregistered, 0 expired") == NULL;
-
-    bad |= fr_st_case(
-            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n"
-            "Z23_FLAG(\"ZCL_STALE_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
-            "./c.c", "int f(void){ return getenv(\"ZCL_KNOWN_X\") != 0; }\n",
-            "2026-01-01", "printf '%s\\0' c.c", out, ob, sizeof ob, &rc);
-    bad |= rc != 1
-        || strstr(ob, "flags.def: ZCL_STALE_X is registered but no longer "
-                      "read — remove the row") == NULL;
-
-    bad |= fr_st_case(
-            "Z23_FLAG(\"ZCL_EXP_X\", \"env_runtime\", \"-\", \"2020-01-01\",\n"
-            " \"why\")\n",
-            "./d.c", "int f(void){ return getenv(\"ZCL_EXP_X\") != 0; }\n",
-            "2026-01-01", "printf '%s\\0' d.c", out, ob, sizeof ob, &rc);
-    bad |= rc != 1 || strstr(ob, "flags.def: ZCL_EXP_X expired on 2020-01-01") == NULL;
-
-    bad |= fr_st_case("\n", NULL, NULL, "2026-01-01", "true", out, ob, sizeof ob, &rc);
-    bad |= rc != 2;
+    int bad = fr_st_core_cases(out, ob, sizeof ob);
+    bad |= fr_st_first_use_cases(out, ob, sizeof ob);
+    fflush(stdout);
+    fflush(stderr);
 
     fclose(out);
-    unlink("./f.def");
-    unlink("./a.c");
-    unlink("./b.c");
-    unlink("./c.c");
-    unlink("./d.c");
-    unlink("./e.c");
+    fr_st_cleanup();
     if (chdir(cwd) != 0)
         return die("z23-lint: cannot scan %s\n", cwd);
     rmdir(root);
