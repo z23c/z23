@@ -1255,12 +1255,80 @@ static bool pin_dep_locate(const char *text, size_t len, const char *dep_name,
                               error, error_cap);
 }
 
+static bool pin_dep_valid_root(const char *dep_name, const char *dep_root,
+                               uint8_t raw[32])
+{
+    return dep_name && *dep_name && dep_root && strlen(dep_root) == 64 &&
+           zcl_hex_decode_lower(dep_root, raw, 32) && !root_zero(raw);
+}
+
+/* Locate the dependency's root value, refuse unless it is still the
+ * all-zero placeholder, and rewrite the file in place (same length, only
+ * the 64 root chars change). */
+static bool pin_dep_rewrite_file(const char *path, uint8_t *text, size_t len,
+                                 const char *dep_name, const char *dep_root,
+                                 char *error, size_t error_cap)
+{
+    size_t vs = 0, ve = 0;
+    if (!pin_dep_locate((const char *)text, len, dep_name, &vs, &ve, error,
+                        error_cap))
+        return false;
+    char cur_hex[65];
+    memcpy(cur_hex, text + vs, 64);
+    cur_hex[64] = '\0';
+    uint8_t cur[32];
+    if (!zcl_hex_decode_lower(cur_hex, cur, 32) || !root_zero(cur)) {
+        LOG_ERROR(PF_LOG,
+                  "dependency %s is already pinned (no placeholder); "
+                  "refusing to replace a real root", dep_name);
+        return false;
+    }
+    struct buf out = {0};
+    bool ok = buf_put(&out, text, vs) && buf_put(&out, dep_root, 64) &&
+             buf_put(&out, text + ve, len - ve);
+    if (ok) ok = pf_write_atomic(path, out.p, out.len);
+    buf_free(&out);
+    return ok;
+}
+
+/* Re-parse the rewritten file and confirm the pin landed exactly. */
+static bool pin_dep_verify(const char *path, const char *dep_name,
+                           const char *dep_root)
+{
+    uint8_t *check = NULL;
+    size_t clen = 0;
+    if (!pf_read_file(path, PF_META_MAX_BYTES, &check, &clen))
+        return false;
+    struct json_value doc;
+    json_init(&doc);
+    bool parsed = json_read(&doc, (const char *)check, clen);
+    free(check);
+    if (!parsed) {
+        json_free(&doc);
+        LOG_ERROR(PF_LOG, "rewritten %s no longer parses", path);
+        return false;
+    }
+    const struct json_value *deps = json_get(&doc, "dependencies");
+    bool confirmed = false;
+    if (deps && deps->type == JSON_ARR) {
+        for (size_t i = 0; i < deps->num_children; i++) {
+            const struct json_value *dep = json_at(deps, i);
+            const char *n = json_get_str(json_get(dep, "name"));
+            const char *r = json_get_str(json_get(dep, "root"));
+            if (n && r && strcmp(n, dep_name) == 0 &&
+                strcmp(r, dep_root) == 0)
+                confirmed = true;
+        }
+    }
+    json_free(&doc);
+    return confirmed;
+}
+
 static int cmd_pin_dep(const char *dir, const char *dep_name,
                        const char *dep_root)
 {
     uint8_t raw[32];
-    if (!dep_name || !*dep_name || !dep_root || strlen(dep_root) != 64 ||
-        !zcl_hex_decode_lower(dep_root, raw, 32) || root_zero(raw))
+    if (!pin_dep_valid_root(dep_name, dep_root, raw))
         LOG_ERR(PF_LOG,
                 "pin-dep needs --dep-name <name> and --dep-root <64 "
                 "lowercase hex, nonzero>");
@@ -1276,73 +1344,14 @@ static int cmd_pin_dep(const char *dir, const char *dep_name,
         return 1;
     }
     char error[PF_ERROR_CAP];
-    size_t vs = 0, ve = 0;
-    if (!pin_dep_locate((const char *)text, len, dep_name, &vs, &ve,
-                        error, sizeof(error))) {
-        free(text);
-        free(path);
-        return 1;
-    }
-    /* Refuse unless the current value is the all-zero placeholder. */
-    char cur_hex[65];
-    memcpy(cur_hex, text + vs, 64);
-    cur_hex[64] = '\0';
-    uint8_t cur[32];
-    if (!zcl_hex_decode_lower(cur_hex, cur, 32) || !root_zero(cur)) {
-        LOG_ERROR(PF_LOG,
-                  "dependency %s is already pinned (no placeholder); "
-                  "refusing to replace a real root", dep_name);
-        free(text);
-        free(path);
-        return 1;
-    }
-    /* Strict rewrite: same length, only the 64 root chars change. */
-    struct buf out = {0};
-    if (!buf_put(&out, text, vs) || !buf_put(&out, dep_root, 64) ||
-        !buf_put(&out, text + ve, len - ve)) {
-        free(text);
-        free(path);
-        buf_free(&out);
-        return 1;
-    }
-    bool ok = pf_write_atomic(path, out.p, out.len);
-    buf_free(&out);
+    bool ok = pin_dep_rewrite_file(path, text, len, dep_name, dep_root,
+                                   error, sizeof(error));
     free(text);
     if (!ok) {
         free(path);
         return 1;
     }
-    /* Re-parse the rewritten file and confirm the pin landed exactly. */
-    uint8_t *check = NULL;
-    size_t clen = 0;
-    if (!pf_read_file(path, PF_META_MAX_BYTES, &check, &clen)) {
-        free(path);
-        return 1;
-    }
-    struct json_value doc;
-    json_init(&doc);
-    bool parsed = json_read(&doc, (const char *)check, clen);
-    free(check);
-    if (!parsed) {
-        json_free(&doc);
-        LOG_ERROR(PF_LOG, "rewritten %s no longer parses", path);
-        free(path);
-        return 1;
-    }
-    const struct json_value *deps = json_get(&doc, "dependencies");
-    bool confirmed = false;
-    if (deps && deps->type == JSON_ARR) {
-        for (size_t i = 0; i < deps->num_children; i++) {
-            const struct json_value *dep = json_at(deps, i);
-            const char *n = json_get_str(json_get(dep, "name"));
-            const char *r = json_get_str(json_get(dep, "root"));
-            if (n && r && strcmp(n, dep_name) == 0 &&
-                strcmp(r, dep_root) == 0)
-                confirmed = true;
-        }
-    }
-    json_free(&doc);
-    if (!confirmed) {
+    if (!pin_dep_verify(path, dep_name, dep_root)) {
         free(path);
         LOG_ERR(PF_LOG, "pin verification failed for %s", dep_name);
     }
@@ -1495,6 +1504,296 @@ static void pf_fast_stats_consume(struct pf_fast_stats *st,
 /* One confined standard-profile rebuild producing the second, distinct
  * receipt for `store`, compared against the quick-profile install receipt
  * and filed into the store's receipts dir. */
+
+/* Work dir under the system temp for factory_second_receipt's confined
+ * rebuild, removed at the end by the caller. */
+static bool fsr_make_work_dir(char work[512])
+{
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir) tmpdir = "/tmp";
+    if (snprintf(work, 512, "%s/package-factory-emit-XXXXXX", tmpdir) >= 512)
+        LOG_FAIL(PF_LOG, "emit work path overflow");
+    if (!mkdtemp(work))
+        LOG_FAIL(PF_LOG, "mkdtemp under %s: %s", tmpdir, strerror(errno));
+    return true;
+}
+
+/* Derive recipe_path/emit_dir under work, write the recipe wire there, and
+ * resolve the package's absolute source path. */
+static bool fsr_prepare_paths(const char *work, char *recipe_path,
+                              size_t recipe_path_cap, char *emit_dir,
+                              size_t emit_dir_cap, const uint8_t *recipe_wire,
+                              size_t recipe_wire_len, const char *package_dir,
+                              char *pkg_abs, char *error, size_t error_cap)
+{
+    if (snprintf(recipe_path, recipe_path_cap, "%s/recipe.wire", work) >=
+            (int)recipe_path_cap ||
+        snprintf(emit_dir, emit_dir_cap, "%s/emit", work) >=
+            (int)emit_dir_cap)
+        LOG_FAIL(PF_LOG, "emit path overflow");
+    if (!pf_write_atomic(recipe_path, recipe_wire, recipe_wire_len))
+        return false;
+    if (!realpath(package_dir, pkg_abs)) {
+        (void)snprintf(error, error_cap, "realpath %s: %s", package_dir,
+                       strerror(errno));
+        LOG_ERROR(PF_LOG, "%s", error);
+        return false;
+    }
+    return true;
+}
+
+/* The install receipt is read FIRST: its committed dependency set is the
+ * exact, install-time-validated input list the standard-profile rebuild
+ * must be fed. The quick path commits the declared DIRECT deps
+ * (pkgl_receipt_inputs_match enforces this at install time); the plan's
+ * transitive closure is a superset and must NOT be used — the worker
+ * records every --dep it is handed, so feeding the closure would
+ * mis-record transitive roots and fail reproduction. */
+static bool fsr_read_reference(const char *store,
+                               const char *reference_receipt_hex,
+                               uint8_t **ref_wire, size_t *ref_len,
+                               struct vcs_package_build_receipt *reference,
+                               char *error, size_t error_cap)
+{
+    char ref_path[PF_PATH_CAP];
+    if (snprintf(ref_path, sizeof(ref_path), "%s/zcode/receipts/%s", store,
+                reference_receipt_hex) >= (int)sizeof(ref_path))
+        LOG_FAIL(PF_LOG, "reference receipt path overflow");
+    if (!pf_read_file(ref_path, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES, ref_wire,
+                      ref_len)) {
+        (void)snprintf(error, error_cap, "install receipt %s unreadable",
+                       reference_receipt_hex);
+        return false;
+    }
+    if (vcs_package_build_parse(*ref_wire, *ref_len, reference) !=
+            VCS_PACKAGE_BUILD_OK) {
+        (void)snprintf(error, error_cap, "install receipt does not parse");
+        return false;
+    }
+    return true;
+}
+
+/* The package name comes from the plan's target (last) step. */
+static const char *fsr_resolve_pkg_name(const struct json_value *plan_steps)
+{
+    size_t step_count = 0;
+    if (plan_steps && plan_steps->type == JSON_ARR)
+        step_count = plan_steps->num_children;
+    if (!step_count)
+        return NULL;
+    const struct json_value *target = json_at(plan_steps, step_count - 1u);
+    return json_get_str(json_get(target, "name"));
+}
+
+/* Fixed (non-dependency) argv strings for the standard-profile verifier
+ * spawn. */
+struct fsr_verify_args {
+    char bin[PF_PATH_CAP];
+    char source_arg[PF_PATH_CAP + 32];
+    char recipe_arg[664];
+    char emit_arg[664];
+    char lock_arg[96];
+    char name_arg[VCS_PACKAGE_RELEASE_NAME_MAX + 32];
+    char fast_arg[PF_PATH_CAP + 16];
+    bool use_fast;
+};
+
+static bool fsr_build_fixed_args(struct fsr_verify_args *fa,
+                                 const struct run_args *args,
+                                 const char *pkg_abs, const char *recipe_path,
+                                 const char *emit_dir, const char *lock_hex,
+                                 const char *pkg_name)
+{
+    if (snprintf(fa->bin, sizeof(fa->bin), "%s/zclassic23-package-verify",
+                args->bin_dir) >= (int)sizeof(fa->bin))
+        LOG_FAIL(PF_LOG, "verifier path overflow");
+    if (snprintf(fa->source_arg, sizeof(fa->source_arg),
+                "--zbuild-package-source=%s", pkg_abs) >=
+                (int)sizeof(fa->source_arg) ||
+        snprintf(fa->recipe_arg, sizeof(fa->recipe_arg),
+                "--zbuild-package-recipe=%s", recipe_path) >=
+                (int)sizeof(fa->recipe_arg) ||
+        snprintf(fa->emit_arg, sizeof(fa->emit_arg), "--emit=%s", emit_dir) >=
+                (int)sizeof(fa->emit_arg) ||
+        snprintf(fa->lock_arg, sizeof(fa->lock_arg), "--lock-root=%s",
+                lock_hex) >= (int)sizeof(fa->lock_arg))
+        LOG_FAIL(PF_LOG, "verifier arg overflow");
+    if (!pkg_name)
+        LOG_FAIL(PF_LOG, "add plan carried no target package name");
+    if (snprintf(fa->name_arg, sizeof(fa->name_arg),
+                "--zbuild-package-name=%s", pkg_name) >=
+            (int)sizeof(fa->name_arg))
+        LOG_FAIL(PF_LOG, "name arg overflow");
+    fa->use_fast = args->fast_cache_dir != NULL;
+    if (fa->use_fast &&
+        snprintf(fa->fast_arg, sizeof(fa->fast_arg), "--fast-cache=%s",
+                args->fast_cache_dir) >= (int)sizeof(fa->fast_arg))
+        LOG_FAIL(PF_LOG, "fast-cache arg overflow");
+    return true;
+}
+
+/* Dep argv comes from the reference (install) receipt's committed set —
+ * never from the plan's transitive closure (see fsr_read_reference). */
+static bool fsr_build_dep_args(const struct vcs_package_build_receipt *reference,
+                               const char *store, size_t dep_stride,
+                               char **dep_args_out)
+{
+    size_t dep_count = reference->dep_count;
+    *dep_args_out = NULL;
+    if (!dep_count)
+        return true;
+    char *dep_args = zcl_malloc(dep_stride * dep_count, "factory.depargs");
+    if (!dep_args)
+        LOG_FAIL(PF_LOG, "dep args alloc");
+    for (size_t i = 0; i < dep_count; i++) {
+        char droot[65];
+        pf_root_hex(reference->dep_roots[i], droot);
+        if (snprintf(dep_args + i * dep_stride, dep_stride,
+                     "--dep=%s,%s/zcode/installed/%s", droot, store,
+                     droot) >= (int)dep_stride)
+            LOG_FAIL(PF_LOG, "dep arg overflow");
+    }
+    *dep_args_out = dep_args;
+    return true;
+}
+
+/* argv: verifier <root> --zbuild-package-source=<abs pkg>
+ * --zbuild-package-recipe=<file> --zbuild-package-name=<name>
+ * --zbuild-package-profile=standard --zbuild-package-max-cpu-..
+ * --emit=<dir> --lock-root=<hex> [--dep=<root>,<dir>]...
+ * --require-full-isolation */
+static bool fsr_run_verifier(const char *root_hex,
+                             const struct fsr_verify_args *fa,
+                             char *dep_args, size_t dep_count,
+                             size_t dep_stride, struct pf_fast_stats *fast,
+                             int *rc_out, char *error, size_t error_cap)
+{
+    const char *argv[13u + VCS_PACKAGE_BUILD_MAX_DEPS];
+    size_t argc = 0;
+    argv[argc++] = fa->bin;
+    argv[argc++] = root_hex;
+    argv[argc++] = fa->source_arg;
+    argv[argc++] = fa->recipe_arg;
+    argv[argc++] = fa->name_arg;
+    argv[argc++] = "--zbuild-package-profile=standard";
+    argv[argc++] = "--zbuild-package-max-cpu-seconds=120";
+    argv[argc++] = fa->emit_arg;
+    argv[argc++] = fa->lock_arg;
+    for (size_t i = 0; i < dep_count; i++)
+        argv[argc++] = dep_args + i * dep_stride;
+    if (fa->use_fast)
+        argv[argc++] = fa->fast_arg;
+    argv[argc++] = "--require-full-isolation";
+    argv[argc] = NULL;
+    char *vout = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.verify.out");
+    if (!vout)
+        LOG_FAIL(PF_LOG, "verifier stdout alloc");
+    *rc_out = pf_spawn((char *const *)argv, NULL, 0, vout, PF_CLI_STDOUT_CAP);
+    if (fast)
+        pf_fast_stats_consume(fast, vout);
+    if (*rc_out != 0) {
+        char *nl = strchr(vout, '\n');
+        if (nl) *nl = '\0';
+        (void)snprintf(error, error_cap,
+                       "standard-profile rebuild exit %d%s%s", *rc_out,
+                       vout[0] ? ": " : "", vout);
+        LOG_ERROR(PF_LOG, "%s", error);
+    }
+    free(vout);
+    return true;
+}
+
+/* Build every verifier argv piece and spawn it. */
+static bool fsr_verify_stage(const struct run_args *args, const char *store,
+                             const char *root_hex, const char *lock_hex,
+                             const struct json_value *plan_steps,
+                             const char *pkg_abs, const char *recipe_path,
+                             const char *emit_dir,
+                             const struct vcs_package_build_receipt *reference,
+                             struct pf_fast_stats *fast, int *rc_out,
+                             char *error, size_t error_cap)
+{
+    struct fsr_verify_args fa = {0};
+    const char *pkg_name = fsr_resolve_pkg_name(plan_steps);
+    if (!fsr_build_fixed_args(&fa, args, pkg_abs, recipe_path, emit_dir,
+                              lock_hex, pkg_name))
+        return false;
+    size_t dep_stride = PF_PATH_CAP + 96u;
+    char *dep_args = NULL;
+    bool ok = fsr_build_dep_args(reference, store, dep_stride, &dep_args);
+    if (ok)
+        ok = fsr_run_verifier(root_hex, &fa, dep_args, reference->dep_count,
+                              dep_stride, fast, rc_out, error, error_cap);
+    free(dep_args);
+    return ok;
+}
+
+/* Read + compare + file the second receipt. */
+static bool fsr_check_reproduction(const char *store,
+                                   const struct vcs_package_build_receipt *reference,
+                                   const char *reference_receipt_hex,
+                                   const char *emit_dir,
+                                   struct store_result *sr, char *error,
+                                   size_t error_cap)
+{
+    char report_path[664];
+    if (snprintf(report_path, sizeof(report_path), "%s/build-report",
+                emit_dir) >= (int)sizeof(report_path))
+        LOG_FAIL(PF_LOG, "report path overflow");
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (!pf_read_file(report_path, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES, &wire,
+                      &wire_len)) {
+        (void)snprintf(error, error_cap, "no build-report emitted");
+        return false;
+    }
+    struct vcs_package_build_receipt rebuild;
+    if (vcs_package_build_parse(wire, wire_len, &rebuild) !=
+            VCS_PACKAGE_BUILD_OK) {
+        (void)snprintf(error, error_cap, "emitted receipt invalid");
+        free(wire);
+        return false;
+    }
+    uint8_t rebuild_id[32];
+    if (vcs_package_build_id(&rebuild, rebuild_id) != VCS_PACKAGE_BUILD_OK) {
+        (void)snprintf(error, error_cap, "receipt id failed");
+        free(wire);
+        return false;
+    }
+    /* The reference receipt was read + parsed before the spawn; compare
+     * against that pre-validated copy directly. */
+    struct vcs_reproduce_verdict verdict;
+    vcs_package_reproduce_compare(reference, &rebuild, &verdict);
+    if (!verdict.reproduced) {
+        (void)snprintf(error, error_cap,
+            "standard-profile rebuild does NOT reproduce the "
+            "install build: %s %s",
+            vcs_reproduce_rule_string((enum vcs_reproduce_rule)verdict.rule),
+            verdict.detail);
+        LOG_ERROR(PF_LOG, "%s", error);
+        free(wire);
+        return false;
+    }
+    pf_root_hex(rebuild_id, sr->receipt_standard);
+    if (strcmp(sr->receipt_standard, reference_receipt_hex) == 0) {
+        (void)snprintf(error, error_cap,
+            "receipt-not-distinct: the second build filed "
+            "the same receipt id");
+        LOG_ERROR(PF_LOG, "%s", error);
+        free(wire);
+        return false;
+    }
+    char dest[PF_PATH_CAP];
+    if (snprintf(dest, sizeof(dest), "%s/zcode/receipts/%s", store,
+                sr->receipt_standard) >= (int)sizeof(dest))
+        LOG_FAIL(PF_LOG, "receipt dest overflow");
+    bool ok = pf_write_atomic(dest, wire, wire_len);
+    if (!ok)
+        (void)snprintf(error, error_cap, "cannot file the second receipt");
+    free(wire);
+    return ok;
+}
+
 static bool factory_second_receipt(const struct run_args *args,
                                    const char *store,
                                    const char *root_hex,
@@ -1509,224 +1808,28 @@ static bool factory_second_receipt(const struct run_args *args,
 {
     /* Work dir under the system temp, removed at the end. */
     char work[512];
-    const char *tmpdir = getenv("TMPDIR");
-    if (!tmpdir) tmpdir = "/tmp";
-    if (snprintf(work, sizeof(work), "%s/package-factory-emit-XXXXXX",
-                 tmpdir) >= (int)sizeof(work))
-        LOG_FAIL(PF_LOG, "emit work path overflow");
-    if (!mkdtemp(work))
-        LOG_FAIL(PF_LOG, "mkdtemp under %s: %s", tmpdir, strerror(errno));
-    char recipe_path[600], emit_dir[600];
-    if (snprintf(recipe_path, sizeof(recipe_path), "%s/recipe.wire", work) >=
-            (int)sizeof(recipe_path) ||
-        snprintf(emit_dir, sizeof(emit_dir), "%s/emit", work) >=
-            (int)sizeof(emit_dir)) {
-        LOG_FAIL(PF_LOG, "emit path overflow");
-    }
-    bool ok = pf_write_atomic(recipe_path, recipe_wire, recipe_wire_len);
-    char pkg_abs[PF_PATH_CAP];
-    if (ok && !realpath(args->package_dir, pkg_abs)) {
-        (void)snprintf(error, error_cap, "realpath %s: %s",
-                       args->package_dir, strerror(errno));
-        LOG_ERROR(PF_LOG, "%s", error);
-        ok = false;
-    }
-    /* The install receipt is read FIRST: its committed dependency set is
-     * the exact, install-time-validated input list the standard-profile
-     * rebuild must be fed. The quick path commits the declared DIRECT
-     * deps (pkgl_receipt_inputs_match enforces this at install time);
-     * the plan's transitive closure is a superset and must NOT be used —
-     * the worker records every --dep it is handed, so feeding the closure
-     * would mis-record transitive roots and fail reproduction. */
+    if (!fsr_make_work_dir(work))
+        return false;
+    char recipe_path[600], emit_dir[600], pkg_abs[PF_PATH_CAP];
+    bool ok = fsr_prepare_paths(work, recipe_path, sizeof(recipe_path),
+                                emit_dir, sizeof(emit_dir), recipe_wire,
+                                recipe_wire_len, args->package_dir, pkg_abs,
+                                error, error_cap);
     uint8_t *ref_wire = NULL;
     size_t ref_len = 0;
     struct vcs_package_build_receipt reference;
-    if (ok) {
-        char ref_path[PF_PATH_CAP];
-        if (snprintf(ref_path, sizeof(ref_path), "%s/zcode/receipts/%s",
-                     store, reference_receipt_hex) >= (int)sizeof(ref_path))
-            LOG_FAIL(PF_LOG, "reference receipt path overflow");
-        if (!pf_read_file(ref_path, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
-                          &ref_wire, &ref_len)) {
-            (void)snprintf(error, error_cap,
-                           "install receipt %s unreadable",
-                           reference_receipt_hex);
-            ok = false;
-        } else if (vcs_package_build_parse(ref_wire, ref_len, &reference) !=
-                       VCS_PACKAGE_BUILD_OK) {
-            (void)snprintf(error, error_cap,
-                           "install receipt does not parse");
-            ok = false;
-        }
-    }
+    if (ok)
+        ok = fsr_read_reference(store, reference_receipt_hex, &ref_wire,
+                                &ref_len, &reference, error, error_cap);
     int rc = -1;
-    if (ok) {
-        /* argv: verifier <root> --zbuild-package-source=<abs pkg>
-         * --zbuild-package-recipe=<file> --zbuild-package-name=<name>
-         * --zbuild-package-profile=standard --zbuild-package-max-cpu-..
-         * --emit=<dir> --lock-root=<hex> [--dep=<root>,<dir>]...
-         * --require-full-isolation */
-        char bin[PF_PATH_CAP];
-        if (snprintf(bin, sizeof(bin), "%s/zclassic23-package-verify",
-                     args->bin_dir) >= (int)sizeof(bin))
-            LOG_FAIL(PF_LOG, "verifier path overflow");
-        char source_arg[PF_PATH_CAP + 32], recipe_arg[664],
-             emit_arg[664], lock_arg[96];
-        static char name_arg[VCS_PACKAGE_RELEASE_NAME_MAX + 32];
-        size_t step_count = 0;
-        if (plan_steps && plan_steps->type == JSON_ARR)
-            step_count = plan_steps->num_children;
-        /* Dep argv comes from the reference (install) receipt's committed
-         * set — never from the plan's transitive closure (see above). */
-        size_t dep_count = reference.dep_count;
-        size_t dep_stride = PF_PATH_CAP + 96u;
-        char *dep_args = NULL;
-        if (dep_count) {
-            dep_args = zcl_malloc(dep_stride * dep_count, "factory.depargs");
-            if (!dep_args)
-                LOG_FAIL(PF_LOG, "dep args alloc");
-        }
-        if (snprintf(source_arg, sizeof(source_arg),
-                     "--zbuild-package-source=%s", pkg_abs) >=
-                (int)sizeof(source_arg) ||
-            snprintf(recipe_arg, sizeof(recipe_arg),
-                     "--zbuild-package-recipe=%s", recipe_path) >=
-                (int)sizeof(recipe_arg) ||
-            snprintf(emit_arg, sizeof(emit_arg), "--emit=%s", emit_dir) >=
-                (int)sizeof(emit_arg) ||
-            snprintf(lock_arg, sizeof(lock_arg), "--lock-root=%s",
-                     lock_hex) >= (int)sizeof(lock_arg))
-            LOG_FAIL(PF_LOG, "verifier arg overflow");
-        /* The package name comes from the plan's target step. */
-        const char *pkg_name = NULL;
-        if (step_count) {
-            const struct json_value *target =
-                json_at(plan_steps, step_count - 1u);
-            pkg_name = json_get_str(json_get(target, "name"));
-        }
-        if (!pkg_name)
-            LOG_FAIL(PF_LOG, "add plan carried no target package name");
-        if (snprintf(name_arg, sizeof(name_arg), "--zbuild-package-name=%s",
-                     pkg_name) >= (int)sizeof(name_arg))
-            LOG_FAIL(PF_LOG, "name arg overflow");
-        char fast_arg[PF_PATH_CAP + 16];
-        bool use_fast = args->fast_cache_dir != NULL;
-        if (use_fast &&
-            snprintf(fast_arg, sizeof(fast_arg), "--fast-cache=%s",
-                     args->fast_cache_dir) >= (int)sizeof(fast_arg))
-            LOG_FAIL(PF_LOG, "fast-cache arg overflow");
-        const char *argv[13u + VCS_PACKAGE_BUILD_MAX_DEPS];
-        size_t argc = 0;
-        argv[argc++] = bin;
-        argv[argc++] = root_hex;
-        argv[argc++] = source_arg;
-        argv[argc++] = recipe_arg;
-        argv[argc++] = name_arg;
-        argv[argc++] = "--zbuild-package-profile=standard";
-        argv[argc++] = "--zbuild-package-max-cpu-seconds=120";
-        argv[argc++] = emit_arg;
-        argv[argc++] = lock_arg;
-        size_t di = 0;
-        for (size_t i = 0; i < dep_count; i++) {
-            char droot[65];
-            pf_root_hex(reference.dep_roots[i], droot);
-            size_t need = dep_stride;
-            if (snprintf(dep_args + di * dep_stride, need,
-                         "--dep=%s,%s/zcode/installed/%s", droot, store,
-                         droot) >= (int)need)
-                LOG_FAIL(PF_LOG, "dep arg overflow");
-            argv[argc++] = dep_args + di * dep_stride;
-            di++;
-        }
-        if (use_fast)
-            argv[argc++] = fast_arg;
-        argv[argc++] = "--require-full-isolation";
-        argv[argc] = NULL;
-        char *vout = zcl_malloc(PF_CLI_STDOUT_CAP, "factory.verify.out");
-        if (!vout)
-            LOG_FAIL(PF_LOG, "verifier stdout alloc");
-        rc = pf_spawn((char *const *)argv, NULL, 0, vout, PF_CLI_STDOUT_CAP);
-        if (fast)
-            pf_fast_stats_consume(fast, vout);
-        if (rc != 0) {
-            char *nl = strchr(vout, '\n');
-            if (nl) *nl = '\0';
-            (void)snprintf(error, error_cap,
-                           "standard-profile rebuild exit %d%s%s", rc,
-                           vout[0] ? ": " : "", vout);
-            LOG_ERROR(PF_LOG, "%s", error);
-        }
-        free(vout);
-        free(dep_args);
-    }
+    if (ok)
+        ok = fsr_verify_stage(args, store, root_hex, lock_hex, plan_steps,
+                              pkg_abs, recipe_path, emit_dir, &reference,
+                              fast, &rc, error, error_cap);
     if (ok && rc != 0) ok = false;
-    /* Read + compare + file the second receipt. */
-    if (ok) {
-        char report_path[664];
-        if (snprintf(report_path, sizeof(report_path), "%s/build-report",
-                     emit_dir) >= (int)sizeof(report_path))
-            LOG_FAIL(PF_LOG, "report path overflow");
-        uint8_t *wire = NULL;
-        size_t wire_len = 0;
-        if (!pf_read_file(report_path, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
-                          &wire, &wire_len)) {
-            (void)snprintf(error, error_cap, "no build-report emitted");
-            ok = false;
-        }
-        struct vcs_package_build_receipt rebuild;
-        if (ok && vcs_package_build_parse(wire, wire_len, &rebuild) !=
-                      VCS_PACKAGE_BUILD_OK) {
-            (void)snprintf(error, error_cap, "emitted receipt invalid");
-            ok = false;
-        }
-        uint8_t rebuild_id[32];
-        if (ok && vcs_package_build_id(&rebuild, rebuild_id) !=
-                      VCS_PACKAGE_BUILD_OK) {
-            (void)snprintf(error, error_cap, "receipt id failed");
-            ok = false;
-        }
-        /* The reference receipt was read + parsed before the spawn;
-         * compare against that pre-validated copy directly. Cleanup is
-         * single-point: wire below, ref_wire after this block. */
-        if (ok) {
-            struct vcs_reproduce_verdict verdict;
-            vcs_package_reproduce_compare(&reference, &rebuild,
-                                          &verdict);
-            if (!verdict.reproduced) {
-                (void)snprintf(error, error_cap,
-                    "standard-profile rebuild does NOT reproduce the "
-                    "install build: %s %s",
-                    vcs_reproduce_rule_string(
-                        (enum vcs_reproduce_rule)verdict.rule),
-                    verdict.detail);
-                LOG_ERROR(PF_LOG, "%s", error);
-                ok = false;
-            } else {
-                pf_root_hex(rebuild_id, sr->receipt_standard);
-                if (strcmp(sr->receipt_standard,
-                           reference_receipt_hex) == 0) {
-                    (void)snprintf(error, error_cap,
-                        "receipt-not-distinct: the second build filed "
-                        "the same receipt id");
-                    LOG_ERROR(PF_LOG, "%s", error);
-                    ok = false;
-                }
-            }
-        }
-        if (ok) {
-            char dest[PF_PATH_CAP];
-            if (snprintf(dest, sizeof(dest), "%s/zcode/receipts/%s",
-                         store, sr->receipt_standard) >=
-                (int)sizeof(dest))
-                LOG_FAIL(PF_LOG, "receipt dest overflow");
-            if (!pf_write_atomic(dest, wire, wire_len)) {
-                (void)snprintf(error, error_cap,
-                               "cannot file the second receipt");
-                ok = false;
-            }
-        }
-        free(wire);
-    }
+    if (ok)
+        ok = fsr_check_reproduction(store, &reference, reference_receipt_hex,
+                                    emit_dir, sr, error, error_cap);
     free(ref_wire);
     /* Best-effort cleanup of the emit work dir. */
     {
