@@ -394,13 +394,15 @@ bool zcl_dev_proof_warm_marker_read(
     char base[65], int64_t *completed,
     struct zcl_dev_proof_build_identity_v1 *identity);
 /* Seed donor_build into gen_build (object and depfile outputs linked,
- * wrapper copied, everything else skipped) and repair the timestamp graph
- * so exactly `changed` (relative to gen_src) reads newer than the seeds.
- * The wrapper copy is unconditional here; production gates it on the
- * bootstrap-inputs diff. */
+ * dependency room files and the wrapper copied, everything else skipped)
+ * and repair the timestamp graph so exactly `changed` (relative to gen_src)
+ * reads newer than the seeds. `copy_wrapper` is the caller gate production
+ * computes from the bootstrap-inputs diff: false leaves bin/zcc behind and
+ * must leave every other seedable file, room copies included, untouched. */
 bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
                                         const char *gen_build,
                                         const char *gen_src,
+                                        bool copy_wrapper,
                                         const char *const *changed,
                                         size_t nchanged,
                                         struct zcl_dev_proof_warm_stats *stats);

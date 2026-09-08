@@ -31,6 +31,14 @@ bool zcl_dependency_links_scan(
     void *context, struct zcl_dependency_link_stats *stats,
     char *why, size_t why_cap);
 
+/* Whether `relative_to_build` — a path relative to a checkout's build/
+ * directory — falls inside one of the dependency rooms the scan above walks.
+ * Every regular file in one of those rooms must own its inode, so no seeding
+ * path may reach it by hardlink. The room names live in one table with the
+ * scan itself, because a seeder and this gate that disagreed about them would
+ * produce exactly the failure the gate exists to report. */
+bool zcl_dependency_build_room_path(const char *relative_to_build);
+
 #if defined(ZCL_TESTING)
 bool zcl_dependency_links_scan_directory_for_testing(
     const char *directory, size_t initial_entries,

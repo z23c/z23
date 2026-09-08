@@ -4271,7 +4271,7 @@ tools/determinism_scan.c:run_classify:72
 tools/determinism_scan.c:run_collect:19
 tools/determinism_scan.c:run_receipt_golden:19
 tools/dev/dependency_links.c:scan_directory:17
-tools/dev/dependency_links.c:zcl_dependency_links_scan:17
+tools/dev/dependency_links.c:zcl_dependency_links_scan:16
 tools/dev/dev_activation.c:dev_activation_canon:27
 tools/dev/dev_activation.c:dev_activation_link_generation:22
 tools/dev/dev_activation.c:dev_activation_read_gen_link:20

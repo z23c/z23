@@ -54,6 +54,7 @@
 #include "command/native_dev_proof_command.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
+#include "dependency_links.h"
 #include "dev_proof.h"
 #include "dev_proof_budget.h"
 #include "dev_proof_receipt.h"
@@ -3695,6 +3696,30 @@ static int test_pw_classify_link_copy_skip(void)
                ZCL_DEV_PROOF_WARM_LINK);
         ASSERT(zcl_dev_proof_warm_classify("bin/zcc", true) ==
                ZCL_DEV_PROOF_WARM_COPY);
+        /* A dependency room is graded by the hardlink-isolation gate, which
+         * requires an independent inode for every regular file in it. The
+         * two rollback fixture dependency files are exactly what a warm
+         * proof used to link there, and exactly what that gate refused. */
+        ASSERT(zcl_dev_proof_warm_classify("hotswap/zcl_rollback_fixture_a.d",
+                                           true) == ZCL_DEV_PROOF_WARM_COPY);
+        ASSERT(zcl_dev_proof_warm_classify("hotswap/zcl_rollback_fixture_b.d",
+                                           true) == ZCL_DEV_PROOF_WARM_COPY);
+        ASSERT(zcl_dev_proof_warm_classify("hotswap/x.o", true) ==
+               ZCL_DEV_PROOF_WARM_COPY);
+        ASSERT(zcl_dev_proof_warm_classify("githooks/hook.o", true) ==
+               ZCL_DEV_PROOF_WARM_COPY);
+        /* A room admits nothing the suffix rule would not have seeded, and
+         * a name that merely starts with a room's is a different directory. */
+        ASSERT(zcl_dev_proof_warm_classify("hotswap/fixture.so", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify("hotswaps/x.o", true) ==
+               ZCL_DEV_PROOF_WARM_LINK);
+        ASSERT(!zcl_dependency_build_room_path("hotswap"));
+        ASSERT(!zcl_dependency_build_room_path("hotswap/"));
+        ASSERT(!zcl_dependency_build_room_path(""));
+        ASSERT(!zcl_dependency_build_room_path(NULL));
+        ASSERT(zcl_dependency_build_room_path("hotswap/a.d"));
+        ASSERT(zcl_dependency_build_room_path("githooks/pre-push"));
         /* Rewritten in place or live: never shared across generations. */
         ASSERT(zcl_dev_proof_warm_classify("bin/z23-dev", true) ==
                ZCL_DEV_PROOF_WARM_SKIP);
@@ -4589,17 +4614,22 @@ static int test_pw_seed_links_replaces_and_copies(void)
                         "ARCHIVE"));
         ASSERT(ic_write(root, "donor/build/obj/.hidden/x.o", "HIDDEN"));
         ASSERT(ic_write(root, "donor/build/bin/z23-dev", "PRODUCT"));
+        /* A dependency room: its dependency files must arrive on their own
+         * inodes, and its loadable module is not seeded at all. */
+        ASSERT(ic_write(root, "donor/build/hotswap/zcl_rollback_fixture_a.d",
+                        "ROOM-DEP-A"));
+        ASSERT(ic_write(root, "donor/build/hotswap/fixture.so", "MODULE"));
         ASSERT(ic_write(root, "gen/src/changed.c",
                         "int changed(void){return 1;}\n"));
         ASSERT(ic_write(root, "gen/src/same.c", "int same(void){return 0;}\n"));
         static const char *const changed[] = {"src/changed.c"};
         struct zcl_dev_proof_warm_stats stats = {0};
-        ASSERT(zcl_dev_proof_warm_seed_and_retime(donor, gen, gen_src,
+        ASSERT(zcl_dev_proof_warm_seed_and_retime(donor, gen, gen_src, true,
                                                   changed, 1, &stats));
-        ASSERT(stats.files_linked == 4);
+        ASSERT(stats.files_linked == 5);
         ASSERT(stats.bytes_linked == strlen("OBJECT-A-V1") +
                strlen("DEP-A") + strlen("OBJECT-B-V1!") +
-               strlen("WRAPPER-V1"));
+               strlen("WRAPPER-V1") + strlen("ROOM-DEP-A"));
         char gen_a_o[4096], donor_a_o[4096], gen_zcc[4096], donor_zcc[4096];
         ASSERT(snprintf(gen_a_o, sizeof(gen_a_o),
                         "%s/obj/epochs/E/mod/a.o", gen) > 0);
@@ -4623,6 +4653,21 @@ static int test_pw_seed_links_replaces_and_copies(void)
         char buf[64];
         ASSERT(pw_read_all(gen_zcc, buf, sizeof(buf), NULL));
         ASSERT(strcmp(buf, "WRAPPER-V1") == 0);
+        /* Hardlink isolation for the dependency room: same bytes, own inode.
+         * A shared inode here is what the landing proof's
+         * check-no-hardlink-seeding gate refused after every test group had
+         * already passed. */
+        char gen_room[4096], donor_room[4096];
+        unsigned long long gen_room_ino = 0, donor_room_ino = 0;
+        ASSERT(snprintf(gen_room, sizeof(gen_room),
+                        "%s/hotswap/zcl_rollback_fixture_a.d", gen) > 0);
+        ASSERT(snprintf(donor_room, sizeof(donor_room),
+                        "%s/hotswap/zcl_rollback_fixture_a.d", donor) > 0);
+        ASSERT(pw_stat_ino(gen_room, &gen_room_ino));
+        ASSERT(pw_stat_ino(donor_room, &donor_room_ino));
+        ASSERT(gen_room_ino != donor_room_ino);
+        ASSERT(pw_read_all(gen_room, buf, sizeof(buf), NULL));
+        ASSERT(strcmp(buf, "ROOM-DEP-A") == 0);
         /* Decoys never arrive. */
         char probe[4096];
         static const char *const absent[] = {
@@ -4633,6 +4678,7 @@ static int test_pw_seed_links_replaces_and_copies(void)
             "obj/epochs/E/mod/lib.a",
             "obj/.hidden/x.o",
             "bin/z23-dev",
+            "hotswap/fixture.so",
         };
         for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
             ASSERT(snprintf(probe, sizeof(probe), "%s/%s", gen,
@@ -4696,6 +4742,59 @@ static int test_pw_seed_links_replaces_and_copies(void)
     return failures;
 }
 
+/* The bootstrap wrapper and a dependency room file are both copy class, for
+ * two unrelated reasons: bin/zcc may only be inherited while the inputs that
+ * built it are unchanged, while a room file must be copied because the
+ * landing proof's hardlink-isolation gate requires it to own its inode. The
+ * caller's wrapper gate must therefore reach bin/zcc and nothing else: a
+ * stale wrapper is an ordinary state, and letting it also drop the room
+ * copies leaves the generation missing dependency files it never rebuilds. */
+static int test_pw_seed_room_copy_survives_a_stale_wrapper(void)
+{
+    int failures = 0;
+    TEST("proof warm start: a stale wrapper does not skip the room copies") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096], donor[4096], gen[4096], gen_src[4096];
+        test_make_tmpdir(root, sizeof(root), "proof_warm", "stale_wrapper");
+        ASSERT(snprintf(donor, sizeof(donor), "%s/donor/build", root) > 0);
+        ASSERT(snprintf(gen, sizeof(gen), "%s/gen/build", root) > 0);
+        ASSERT(snprintf(gen_src, sizeof(gen_src), "%s/gen", root) > 0);
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/mod/a.o",
+                        "OBJECT-A-V1"));
+        ASSERT(ic_write(root, "donor/build/bin/zcc", "WRAPPER-V1"));
+        ASSERT(ic_write(root, "donor/build/hotswap/zcl_rollback_fixture_a.d",
+                        "ROOM-DEP-A"));
+        ASSERT(ic_write(root, "gen/src/same.c", "int same(void){return 0;}\n"));
+        struct zcl_dev_proof_warm_stats stats = {0};
+        ASSERT(zcl_dev_proof_warm_seed_and_retime(donor, gen, gen_src, false,
+                                                  NULL, 0, &stats));
+        /* The object and the room file, and only those two. */
+        ASSERT(stats.files_linked == 2);
+        ASSERT(stats.bytes_linked ==
+               strlen("OBJECT-A-V1") + strlen("ROOM-DEP-A"));
+        char gen_zcc[4096], gen_room[4096], donor_room[4096];
+        ASSERT(snprintf(gen_zcc, sizeof(gen_zcc), "%s/bin/zcc", gen) > 0);
+        ASSERT(access(gen_zcc, F_OK) != 0);
+        ASSERT(snprintf(gen_room, sizeof(gen_room),
+                        "%s/hotswap/zcl_rollback_fixture_a.d", gen) > 0);
+        ASSERT(snprintf(donor_room, sizeof(donor_room),
+                        "%s/hotswap/zcl_rollback_fixture_a.d", donor) > 0);
+        char buf[64];
+        ASSERT(pw_read_all(gen_room, buf, sizeof(buf), NULL));
+        ASSERT(strcmp(buf, "ROOM-DEP-A") == 0);
+        unsigned long long gen_room_ino = 0, donor_room_ino = 0;
+        ASSERT(pw_stat_ino(gen_room, &gen_room_ino));
+        ASSERT(pw_stat_ino(donor_room, &donor_room_ino));
+        ASSERT(gen_room_ino != donor_room_ino);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pw_seed_cold_without_seedables(void)
 {
     int failures = 0;
@@ -4711,15 +4810,15 @@ static int test_pw_seed_cold_without_seedables(void)
         ASSERT(ic_write(root, "donor/build/obj/epochs/E/tool", "BINARY"));
         ASSERT(ic_write(root, "gen/src/same.c", "int same(void){return 0;}\n"));
         struct zcl_dev_proof_warm_stats stats = {0};
-        ASSERT(!zcl_dev_proof_warm_seed_and_retime(donor, gen, gen_src,
+        ASSERT(!zcl_dev_proof_warm_seed_and_retime(donor, gen, gen_src, true,
                                                    NULL, 0, &stats));
         ASSERT(stats.files_linked == 0);
         char probe[4096];
         ASSERT(snprintf(probe, sizeof(probe), "%s/obj/epochs/E/tool",
                         gen) > 0);
         ASSERT(access(probe, F_OK) != 0);
-        ASSERT(!zcl_dev_proof_warm_seed_and_retime(NULL, gen, gen_src, NULL,
-                                                   0, &stats));
+        ASSERT(!zcl_dev_proof_warm_seed_and_retime(NULL, gen, gen_src, true,
+                                                   NULL, 0, &stats));
         ASSERT(test_rm_rf_recursive(root) == 0);
 #endif
         PASS();
@@ -6038,6 +6137,7 @@ int test_impact_composition(void)
     failures += test_pw_receipt_refuses_an_older_root_policy();
     failures += test_pw_status_line_reports_warm_or_typed_cold();
     failures += test_pw_seed_links_replaces_and_copies();
+    failures += test_pw_seed_room_copy_survives_a_stale_wrapper();
     failures += test_pw_seed_cold_without_seedables();
     failures += test_pw_disable_switch_forces_cold();
     failures += test_ic_fast_sync_splits_keep_proof_lane();

@@ -7,6 +7,7 @@
 #endif
 
 #include "dev_proof.h"
+#include "dependency_links.h"
 #include "dev_proof_budget.h"
 #include "devloop.h"
 #include "test_group_catalog.h"
@@ -2213,21 +2214,39 @@ static bool warm_has_suffix(const char *rel, const char *suffix)
            strcmp(rel + rel_len - suffix_len, suffix) == 0;
 }
 
+/* The bootstrap compiler wrapper. Named once because two decisions ask about
+ * it: what class it seeds as, and whether the caller's wrapper gate applies. */
+static bool warm_seed_is_wrapper(const char *rel)
+{
+    return rel && strcmp(rel, "bin/zcc") == 0;
+}
+
 /* LINK: immutable compiler outputs, replaced rather than rewritten by the
  * epoch publishers, so sharing an inode with the donor is safe. COPY: the
  * small executed wrapper binary, which must not share an inode across
- * generations. SKIP: everything else, including anything rewritten in
- * place (archives, linked binaries, session stamps, locks). `rel` is
- * relative to the generation's build/ directory. */
+ * generations, and every file inside a dependency room. SKIP: everything
+ * else, including anything rewritten in place (archives, linked binaries,
+ * session stamps, locks). `rel` is relative to the generation's build/
+ * directory.
+ *
+ * The dependency rooms (build/hotswap, build/githooks — the table lives in
+ * tools/dev/dependency_links.c) are graded by the hardlink-isolation gate,
+ * which requires every regular file in them to own its inode: a shared inode
+ * there carries one generation's ctime into another's sealed dependency set.
+ * The suffix rule alone admitted the rollback fixtures' own .d files, so a
+ * warm proof seeded exactly the two paths that gate then refused. Nothing
+ * else about a room changes here: a file the suffix rule would not have
+ * seeded at all is still skipped. */
 static enum warm_seed_class warm_classify_rel(const char *rel, bool is_reg)
 {
     if (!rel || !rel[0] || !is_reg || warm_path_hidden(rel))
         return WARM_SEED_SKIP;
-    if (strcmp(rel, "bin/zcc") == 0)
+    if (warm_seed_is_wrapper(rel))
         return WARM_SEED_COPY;
-    if (warm_has_suffix(rel, ".o") || warm_has_suffix(rel, ".d"))
-        return WARM_SEED_LINK;
-    return WARM_SEED_SKIP;
+    if (!warm_has_suffix(rel, ".o") && !warm_has_suffix(rel, ".d"))
+        return WARM_SEED_SKIP;
+    return zcl_dependency_build_room_path(rel) ? WARM_SEED_COPY
+                                               : WARM_SEED_LINK;
 }
 
 static bool generation_gitlink_prepare(const struct proof_paths *paths,
@@ -2458,9 +2477,14 @@ static void dp_seed_regular(const char *donor_child, const char *gen_child,
 {
     enum warm_seed_class class = warm_classify_rel(rel, true);
     if (class == WARM_SEED_SKIP) return;
-    /* The wrapper copy is caller-gated (bootstrap inputs must be
-     * unchanged); link-class outputs need no gate beyond the epoch. */
-    if (class == WARM_SEED_COPY && !copy_wrapper) return;
+    /* The wrapper copy is caller-gated: bin/zcc is a bootstrap input this
+     * generation may inherit only while the inputs that built it are
+     * unchanged. A dependency room file is also COPY class, but for an
+     * unrelated reason — the isolation gate requires it to own its inode —
+     * so it must not inherit that gate and go silently unseeded whenever the
+     * wrapper happens to be stale. Link-class outputs need no gate beyond
+     * the epoch. */
+    if (!copy_wrapper && warm_seed_is_wrapper(rel)) return;
     if (!dependency_parent_ensure(gen_child)) return;
     warm_seed_file(donor_child, gen_child, rel, class, donor_st, accum);
 }
@@ -3919,6 +3943,7 @@ bool zcl_dev_proof_warm_marker_read(
 bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
                                         const char *gen_build,
                                         const char *gen_src,
+                                        bool copy_wrapper,
                                         const char *const *changed,
                                         size_t nchanged,
                                         struct zcl_dev_proof_warm_stats *stats)
@@ -3926,9 +3951,7 @@ bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
     if (!donor_build || !gen_build || !gen_src || !stats) return false;
     memset(stats, 0, sizeof(*stats));
     struct warm_seed_accum accum = {0};
-    /* Unconditional wrapper copy at seam level; production gates it on
-     * the bootstrap-inputs diff. */
-    warm_seed_walk(donor_build, gen_build, "", true, &accum);
+    warm_seed_walk(donor_build, gen_build, "", copy_wrapper, &accum);
     struct timespec seed_stamp = {0}, source_stamp = {0};
     bool ok = !accum.failed && accum.files > 0 &&
               warm_retime_outputs(gen_build, &accum, &seed_stamp) &&

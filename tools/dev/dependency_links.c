@@ -11,6 +11,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/* The build/ subdirectories this scan treats as dependency rooms. One table,
+ * read by the walk below and by zcl_dependency_build_room_path(), so a warm
+ * seeder cannot come to a different conclusion about which files must own
+ * their inodes than the gate that grades it. */
+static const char *const DEPENDENCY_BUILD_ROOMS[] = {"hotswap", "githooks"};
+#define DEPENDENCY_BUILD_ROOM_COUNT \
+    (sizeof(DEPENDENCY_BUILD_ROOMS) / sizeof(DEPENDENCY_BUILD_ROOMS[0]))
+
 struct dependency_scan {
     const char *root;
     size_t root_len;
@@ -128,6 +136,14 @@ static bool scan_optional(struct dependency_scan *scan, const char *parent,
     return scan_directory(scan, path, 0);
 }
 
+static bool scan_build_rooms(struct dependency_scan *scan, const char *build)
+{
+    for (size_t i = 0; i < DEPENDENCY_BUILD_ROOM_COUNT; i++)
+        if (!scan_optional(scan, build, DEPENDENCY_BUILD_ROOMS[i]))
+            return false;
+    return true;
+}
+
 bool zcl_dependency_links_scan(
     const char *root, zcl_dependency_linked_file_fn callback, void *context,
     struct zcl_dependency_link_stats *stats, char *why, size_t why_cap)
@@ -159,8 +175,22 @@ bool zcl_dependency_links_scan(
         return false;
     if (build_probe == PLATFORM_DIRECTORY_PROBE_MISSING)
         return true;
-    return scan_optional(&scan, build, "hotswap") &&
-           scan_optional(&scan, build, "githooks");
+    return scan_build_rooms(&scan, build);
+}
+
+bool zcl_dependency_build_room_path(const char *relative_to_build)
+{
+    if (!relative_to_build || !relative_to_build[0])
+        return false;
+    for (size_t i = 0; i < DEPENDENCY_BUILD_ROOM_COUNT; i++) {
+        const size_t n = strlen(DEPENDENCY_BUILD_ROOMS[i]);
+        /* A room name matches only as a whole leading component: "hotswaps/x"
+         * is a different directory and is not one of these rooms. */
+        if (strncmp(relative_to_build, DEPENDENCY_BUILD_ROOMS[i], n) == 0 &&
+            relative_to_build[n] == '/' && relative_to_build[n + 1])
+            return true;
+    }
+    return false;
 }
 
 #if defined(ZCL_TESTING)
