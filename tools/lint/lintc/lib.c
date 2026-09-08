@@ -1421,7 +1421,7 @@ int cic_invoke(const char *gate, int merge_err, char *out, size_t cap,
  * ledger doubles as the refusal the wiring gate enforces. Line counts are
  * newline counts, matching wc -l exactly. */
 
-#define FL_MAX 64
+#define FL_MAX 512
 #define FL_NAME 256
 
 static int fl_count(const char *path, long *out)
@@ -1466,7 +1466,17 @@ int lint_families_ledger(void)
             continue;
         if (nf >= FL_MAX || nl >= FL_NAME) {
             closedir(d);
-            return die("z23-lint: too many family files under %s\n", k_dir);
+            char detail[FL_NAME + 96];
+            if (nf >= FL_MAX)
+                snprintf(detail, sizeof detail,
+                        "%s (FL_MAX=%d exceeded; saw at least %d family "
+                        "files — raise FL_MAX)", k_dir, FL_MAX, nf);
+            else
+                snprintf(detail, sizeof detail,
+                        "%s (FL_NAME=%d exceeded by filename %s, %zu bytes "
+                        "— raise FL_NAME)", k_dir, FL_NAME, nm, nl);
+            return die("z23-lint: too many family files under %s\n",
+                      detail);
         }
         memcpy(names[nf], nm, nl + 1);
         nf++;
