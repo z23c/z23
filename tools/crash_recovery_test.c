@@ -85,6 +85,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/time_compat.h"
+#include "json/json.h"
+#include "storage/consensus_db.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -213,7 +215,7 @@ static int parse_args(int argc, char **argv, struct cr_config *cfg)
                    "[--connect=HOST:PORT] [--seed-blocks=N] "
                    "[--iterations=N] [--min-delay-ms=N] "
                    "[--max-delay-ms=N] [--rpc-port=N] [--seed=N] "
-                   "[--verbose]\n");
+                   "[--verbose] | --selftest\n");
             return 1;
         } else {
             fprintf(stderr, "crash_recovery_test: unknown arg %s\n", argv[i]);
@@ -279,28 +281,46 @@ static int cr_rpc(const struct cr_config *cfg, const char *method,
     if (!p) return -1;
     size_t total = fread(out, 1, out_cap - 1, p);
     out[total] = '\0';
+    bool complete = !ferror(p) && total < out_cap - 1;
     int rc = pclose(p);
-    if (rc != 0) return -1;
+    if (rc != 0 || !complete) return -1;
     return (int)total;
 }
 
-/* Parse a JSON-RPC response looking for a numeric "result" field.
- * Returns true if the field was found and parsed. This is not a
- * general JSON parser — we only need to scrape one int per call. */
+/* A successful transport alone is not a successful RPC observation. */
+static const struct json_value *cr_result(const char *response,
+                                          struct json_value *envelope)
+{
+    if (!json_read(envelope, response, strlen(response)) ||
+        envelope->type != JSON_OBJ)
+        return NULL;
+    const struct json_value *error = json_get(envelope, "error");
+    if (!error || error->type != JSON_NULL) return NULL;
+    return json_get(envelope, "result");
+}
+
+static bool cr_nonnegative(const struct json_value *value, int64_t *out)
+{
+    *out = 0;
+    if (!value || value->type != JSON_INT || value->val.i < 0)
+        return false;
+    *out = value->val.i;
+    return true;
+}
+
+static bool cr_hash(const struct json_value *value)
+{
+    if (!value || value->type != JSON_STR || strlen(value->val.s) != 64)
+        return false;
+    return strspn(value->val.s, "0123456789abcdef") == 64;
+}
+
 static bool parse_result_i64(const char *response, int64_t *out)
 {
-    const char *key = "\"result\"";
-    const char *p = strstr(response, key);
-    if (!p) return false;
-    p += strlen(key);
-    while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    /* Skip a leading quote for string-encoded numbers, just in case. */
-    if (*p == '"') p++;
-    char *end = NULL;
-    long long v = strtoll(p, &end, 10);
-    if (end == p) return false;
-    *out = (int64_t)v;
-    return true;
+    struct json_value envelope = {0};
+    bool ok = cr_nonnegative(cr_result(response, &envelope), out);
+    json_free(&envelope);
+    return ok;
 }
 
 /* ── Integrity snapshot ─────────────────────────────────────── */
@@ -308,48 +328,49 @@ static bool parse_result_i64(const char *response, int64_t *out)
 struct cr_snapshot {
     int64_t block_count;
     int64_t utxo_count;
-    /* A 64-hex commitment is plenty of signal without dragging in
-     * full SHA3 parsing. We keep the raw string and compare. */
-    char    commitment[96];
+    char    commitment[65];
 };
+
+static bool cr_parse_snapshot(const char *response, struct cr_snapshot *out)
+{
+    memset(out, 0, sizeof(*out));
+    struct cr_snapshot parsed = {0};
+    struct json_value envelope = {0};
+    const struct json_value *result = cr_result(response, &envelope);
+    const struct json_value *hash = json_get(result, "sha3_hash");
+    bool ok = result && result->type == JSON_OBJ &&
+        cr_nonnegative(json_get(result, "height"), &parsed.block_count) &&
+        cr_nonnegative(json_get(result, "utxo_count"), &parsed.utxo_count) &&
+        cr_hash(hash);
+    if (ok) {
+        memcpy(parsed.commitment, hash->val.s, sizeof(parsed.commitment));
+        *out = parsed;
+    }
+    json_free(&envelope);
+    return ok;
+}
 
 static bool cr_read_snapshot(const struct cr_config *cfg,
                               struct cr_snapshot *out)
 {
     char buf[16384];
     memset(out, 0, sizeof(*out));
-
-    /* getblockcount → integer result */
-    if (cr_rpc(cfg, "getblockcount", buf, sizeof(buf)) < 0) return false;
-    if (!parse_result_i64(buf, &out->block_count)) return false;
-
-    /* node-specific RPC: utxo count. The C23 node exposes it via
-     * `getutxocount`; fall back to `-1` on older builds. */
-    if (cr_rpc(cfg, "getutxocount", buf, sizeof(buf)) >= 0)
-        (void)parse_result_i64(buf, &out->utxo_count);
-    else
-        out->utxo_count = -1;
-
-    /* utxo_commitment — string result. We stash the first 64 hex
-     * chars from the response; a real SHA3 commitment is 64 chars. */
-    if (cr_rpc(cfg, "getutxocommitment", buf, sizeof(buf)) >= 0) {
-        const char *r = strstr(buf, "\"result\"");
-        if (r) {
-            r = strchr(r, '"');
-            if (r) r = strchr(r + 1, '"');  /* "result" */
-            if (r) r = strchr(r + 1, '"');  /* value open */
-            if (r) {
-                r++;
-                const char *end = strchr(r, '"');
-                if (end && (size_t)(end - r) < sizeof(out->commitment)) {
-                    size_t n = (size_t)(end - r);
-                    memcpy(out->commitment, r, n);
-                    out->commitment[n] = '\0';
-                }
-            }
-        }
+    if (cr_rpc(cfg, "getutxocommitment", buf, sizeof(buf)) < 0 ||
+        !cr_parse_snapshot(buf, out)) {
+        fprintf(stderr, "crash_recovery_test: complete typed UTXO commitment unavailable\n");
+        return false;
     }
     return true;
+}
+
+static int64_t cr_seeded_height(const struct cr_config *cfg)
+{
+    struct cr_snapshot snapshot;
+    if (!cr_read_snapshot(cfg, &snapshot) || snapshot.utxo_count <= 0) {
+        fprintf(stderr, "crash_recovery_test: seed has no positive UTXO evidence\n");
+        return 0;
+    }
+    return snapshot.block_count;
 }
 
 /* ── Invariant check ────────────────────────────────────────── */
@@ -374,79 +395,41 @@ static const char *cr_verdict_name(enum cr_verdict v)
     }
 }
 
-/* ── On-disk recovery invariant: no UTXO row above the tip ──────
- *
- * Reads $datadir/node.db DIRECTLY (read-only) and counts UTXO rows
- * whose height exceeds the coins_best_block tip height. This is the
- * EXACT invariant the in-process kill9 unit test asserts
- * (tests/harness/src/test_kill9_recovery.c:p11_7_count_utxos_above_tip):
- *
- *   tip  = SELECT b.height FROM blocks b, node_state n
- *          WHERE n.key='coins_best_block' AND b.hash=n.value
- *   over = SELECT COUNT(*) FROM utxos WHERE height > tip
- *
- * `over` MUST be 0 after recovery — the coins-view boot check
- * auto-rewinds a single-block overshoot (≤32 rows) on open; anything
- * left above the tip is a recovery regression.
- *
- * IMPORTANT: the canonical UTXO set lives in node.db, NOT a "coins.db"
- * (there is no such file — see engine/modules/storage/src/coins_view_sqlite.c).
- *
- * The two row-step calls below carry a
- * `// raw-sql-ok:crash-harness-readonly-foreign-db` marker: this is a
- * standalone test harness reading ANOTHER process's node.db READ-ONLY.
- * The AR_* lifecycle is for the live node's own model writes; routing a
- * foreign read-only integrity probe through it would be a category
- * error (there is no model, no save, no DB connection we own).
- *
- * Returns:  >=0  the overshoot count (0 == invariant holds)
- *            -1  could not read the tip / tables not present yet
- *                (a fresh node before its first block — treated as
- *                "not applicable", NOT a failure, by the caller)
- *            -2  could not open node.db at all (hard harness error) */
-static int cr_count_utxos_above_tip(const struct cr_config *cfg)
+/* One read-only statement observes the canonical coins, not node.db's
+ * projection. Require its count to agree with the typed RPC snapshot before
+ * interpreting the above-tip count. Missing or moving evidence is an error.
+ * The raw step is a foreign-store observation, not a model write. */
+static int cr_count_above_db(sqlite3 *db, const struct cr_snapshot *snapshot)
 {
-    char dbpath[600];
-    snprintf(dbpath, sizeof(dbpath), "%s/node.db", cfg->datadir);
-
-    sqlite3 *db = NULL;
-    /* Open read-only; if node.db isn't there yet, that's -2. We pass
-     * the immutable+nolock query string so we never take a write lock
-     * on a file the live boot path may still be checkpointing. */
-    if (sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        if (db) sqlite3_close(db);
-        return -2;
-    }
-    sqlite3_busy_timeout(db, 2000);
-
-    int tip = -1;
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT b.height FROM blocks b, node_state n "
-            "WHERE n.key='coins_best_block' AND b.hash=n.value",
-            -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW)  // raw-sql-ok:crash-harness-readonly-foreign-db
-            tip = sqlite3_column_int(s, 0);
-    }
-    sqlite3_finalize(s);
-    s = NULL;
-
-    if (tip < 0) {           /* no tip pointer yet → not applicable */
-        sqlite3_close(db);
-        return -1;
-    }
-
     int over = -1;
     if (sqlite3_prepare_v2(db,
-            "SELECT COUNT(*) FROM utxos WHERE height > ?",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_int(s, 1, tip);
-        if (sqlite3_step(s) == SQLITE_ROW)  // raw-sql-ok:crash-harness-readonly-foreign-db
-            over = sqlite3_column_int(s, 0);
+            "SELECT COUNT(*),COALESCE(SUM(height > ?),0) FROM coins",
+            -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_int64(s, 1, snapshot->block_count) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW) { // raw-sql-ok:crash-harness-readonly-foreign-db
+        int64_t count = sqlite3_column_int64(s, 0);
+        int64_t above = sqlite3_column_int64(s, 1);
+        if (count == snapshot->utxo_count && above >= 0 && above <= INT_MAX)
+            over = (int)above;
     }
-    sqlite3_finalize(s);
+    if (sqlite3_finalize(s) != SQLITE_OK) over = -1;
+    return over;
+}
+
+static int cr_count_utxos_above_tip(const struct cr_config *cfg,
+                                   const struct cr_snapshot *snapshot)
+{
+    char dbpath[600];
+    snprintf(dbpath, sizeof(dbpath), "%s/%s", cfg->datadir, CONSENSUS_DB_FILENAME);
+    sqlite3 *db = NULL;
+    int over = -1;
+    if (sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+        sqlite3_busy_timeout(db, 2000);
+        over = cr_count_above_db(db, snapshot);
+    }
     sqlite3_close(db);
-    return over;   /* may be -1 if the utxos table is absent */
+    return over;
 }
 
 static enum cr_verdict cr_compare(const struct cr_snapshot *before,
@@ -574,10 +557,19 @@ static bool cr_wait_for_rpc_ready(const struct cr_config *cfg, int timeout_ms)
     return false;
 }
 
-/* Mine `count` regtest blocks via the `generate` RPC against the
- * isolated node. Best-effort: a failure to mine is logged by the
- * caller via the return, but is not itself a recovery violation.
- * Returns true if the RPC produced a result. */
+static bool cr_generated(const char *response, int count)
+{
+    struct json_value envelope = {0};
+    const struct json_value *result = cr_result(response, &envelope);
+    bool ok = result && result->type == JSON_ARR &&
+        json_size(result) == (size_t)count;
+    for (size_t i = 0; ok && i < json_size(result); i++)
+        ok = cr_hash(json_at(result, i));
+    json_free(&envelope);
+    return ok;
+}
+
+/* Require the exact number of returned mined block hashes. */
 static bool cr_generate(const struct cr_config *cfg, int count)
 {
     if (count <= 0) return true;
@@ -585,7 +577,121 @@ static bool cr_generate(const struct cr_config *cfg, int count)
     snprintf(method, sizeof(method), "generate %d", count);
     char buf[16384];
     return cr_rpc(cfg, method, buf, sizeof(buf)) >= 0 &&
-           strstr(buf, "\"result\"") != NULL;
+           cr_generated(buf, count);
+}
+
+#define CR_TEST_HASH "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define CR_TEST_SNAPSHOT "{\"error\":null,\"result\":{\"height\":30,\"utxo_count\":30," \
+                         "\"sha3_hash\":\"" CR_TEST_HASH "\"}}"
+
+static int cr_scalar_selftest(void)
+{
+    static const char *bad[] = {
+        "{\"result\":\"30\",\"error\":null}",
+        "{\"result\":30,\"error\":{\"code\":-28}}",
+        "{\"result\":30}", "{\"result\":-1,\"error\":null}",
+        "{\"result\":1.5,\"error\":null}",
+        "{\"result\":true,\"error\":null}",
+        "{\"result\":30,\"error\":null} trailing", ""
+    };
+    int64_t value = -1;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (parse_result_i64(bad[i], &value)) {
+            fprintf(stderr, "crash RPC selftest: invalid scalar %zu accepted\n", i);
+            return 1;
+        }
+    }
+    if (!parse_result_i64("{\"result\":0,\"error\":null}", &value) || value != 0) {
+        fprintf(stderr, "crash RPC selftest: valid zero refused\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cr_snapshot_selftest(void)
+{
+    static const char *bad[] = {
+        "{\"result\":null,\"error\":{\"code\":-32601}}",
+        "{\"result\":{\"height\":30,\"utxo_count\":30},\"error\":null}",
+        "{\"result\":{\"height\":30,\"sha3_hash\":\"" CR_TEST_HASH "\"},\"error\":null}",
+        "{\"result\":{\"height\":\"30\",\"utxo_count\":30,\"sha3_hash\":\"" CR_TEST_HASH "\"},\"error\":null}",
+        "{\"result\":{\"height\":30,\"utxo_count\":-1,\"sha3_hash\":\"" CR_TEST_HASH "\"},\"error\":null}",
+        "{\"result\":{\"height\":30,\"utxo_count\":30,\"sha3_hash\":\"sha3_hash\"},\"error\":null}",
+        CR_TEST_SNAPSHOT " trailing"
+    };
+    struct cr_snapshot snapshot;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        memset(&snapshot, 1, sizeof(snapshot));
+        if (cr_parse_snapshot(bad[i], &snapshot) || snapshot.block_count != 0 ||
+            snapshot.utxo_count != 0 || snapshot.commitment[0] != '\0') {
+            fprintf(stderr, "crash RPC selftest: invalid snapshot %zu admitted\n", i);
+            return 1;
+        }
+    }
+    if (!cr_parse_snapshot(CR_TEST_SNAPSHOT, &snapshot) ||
+        snapshot.block_count != 30 || snapshot.utxo_count != 30 ||
+        strcmp(snapshot.commitment, CR_TEST_HASH) != 0) {
+        fprintf(stderr, "crash RPC selftest: complete snapshot was not preserved\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cr_store_selftest(void)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
+        sqlite3_close(db);
+        fprintf(stderr, "crash RPC selftest: memory store unavailable\n");
+        return 1;
+    }
+    struct cr_snapshot snapshot = { .block_count = 30, .utxo_count = 2 };
+    bool ok = sqlite3_exec(db, "CREATE TABLE utxos(height INTEGER)",
+                           NULL, NULL, NULL) == SQLITE_OK &&
+        cr_count_above_db(db, &snapshot) < 0;
+    ok = ok && sqlite3_exec(db,
+        "CREATE TABLE coins(height INTEGER NOT NULL);"
+        "INSERT INTO coins VALUES(29),(30)", NULL, NULL, NULL) == SQLITE_OK &&
+        cr_count_above_db(db, &snapshot) == 0;
+    ok = ok && sqlite3_exec(db, "UPDATE coins SET height=31 WHERE height=30",
+                            NULL, NULL, NULL) == SQLITE_OK &&
+        cr_count_above_db(db, &snapshot) == 1;
+    snapshot.utxo_count = 3;
+    ok = ok && cr_count_above_db(db, &snapshot) < 0;
+    sqlite3_close(db);
+    if (!ok) {
+        fprintf(stderr, "crash RPC selftest: canonical-store observation failed\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cr_rpc_selftest(void)
+{
+    if (cr_scalar_selftest() || cr_snapshot_selftest() || cr_store_selftest()) return 1;
+    if (!cr_generated("{\"result\":[\"" CR_TEST_HASH "\"],\"error\":null}", 1) ||
+        cr_generated("{\"result\":[],\"error\":null}", 1) ||
+        cr_generated("{\"result\":[\"bad\"],\"error\":null}", 1) ||
+        cr_generated("{\"result\":null,\"error\":{\"code\":-28}}", 1)) {
+        fprintf(stderr, "crash RPC selftest: generate result contract failed\n");
+        return 1;
+    }
+    printf("crash RPC selftest: PASS (typed envelopes, complete snapshots, exact generated hashes, canonical-store overshoot)\n");
+    return 0;
+}
+
+static bool cr_selftest_requested(int argc, char **argv)
+{
+    return argc == 2 && strcmp(argv[1], "--selftest") == 0;
+}
+
+static bool cr_binaries_ready(void)
+{
+    if (access(CR_NODE_BIN, X_OK) != 0 || access(CR_RPC_BIN, X_OK) != 0) {
+        fprintf(stderr, "crash_recovery_test: node or RPC binary missing; run make zclassic23 zcl-rpc\n");
+        return false;
+    }
+    return true;
 }
 
 static void cr_kill_node(pid_t pid)
@@ -611,6 +717,7 @@ static bool datadir_exists(const char *path)
 
 int main(int argc, char **argv)
 {
+    if (cr_selftest_requested(argc, argv)) return cr_rpc_selftest();
     struct cr_config cfg;
     cr_defaults(&cfg);
     int parse_rc = parse_args(argc, argv, &cfg);
@@ -625,16 +732,7 @@ int main(int argc, char **argv)
     printf("  rpc port:     %d\n", cfg.rpc_port);
     printf("  seed:         %" PRIu64 "\n", cfg.seed);
 
-    if (access(CR_NODE_BIN, X_OK) != 0) {
-        fprintf(stderr, "crash_recovery_test: " CR_NODE_BIN " not found or "
-                        "not executable\n");
-        return 2;
-    }
-    if (access(CR_RPC_BIN, X_OK) != 0) {
-        fprintf(stderr, "crash_recovery_test: " CR_RPC_BIN " not found — run "
-                        "`make zcl-rpc` first\n");
-        return 2;
-    }
+    if (!cr_binaries_ready()) return 2;
 
     if (cfg.bootstrap) {
         /* The make target (via isolated_node_env.sh) has already minted
@@ -673,10 +771,7 @@ int main(int argc, char **argv)
          * and the loop would be vacuous. We do NOT run a toothless loop in that
          * case — see the teeth block immediately below. */
         {
-            struct cr_snapshot seed_snap;
-            int64_t seeded_h = 0;
-            if (cr_read_snapshot(&cfg, &seed_snap))
-                seeded_h = seed_snap.block_count;
+            int64_t seeded_h = cr_seeded_height(&cfg);
             cr_kill_node(seed_pid);  /* clean handoff to the loop */
             /* WS-C teeth (the load-bearing one). The OLD code only WARNED on a
              * genesis seed and then ran the loop anyway. That loop is VACUOUS:
@@ -798,10 +893,9 @@ int main(int argc, char **argv)
             return 0;       /* shared push/PR mvp-spawn job: loud witness, non-disruptive */
         }
 
-        /* In regtest mode, kick off a block mine just before the kill so
-         * the SIGKILL has a chance to land during a real connect_block /
-         * coins.db write — the exact window the overshoot invariant
-         * guards. Best-effort; ignored on non-regtest datadirs. */
+        /* Mine before the kill to exercise recovery of an advanced durable
+         * tip. This synchronous RPC completes before the delay; it does not
+         * establish that SIGKILL interrupted a block transaction. */
         if (cfg.regtest)
             (void)cr_generate(&cfg, 1);
 
@@ -833,12 +927,13 @@ int main(int argc, char **argv)
 
         enum cr_verdict v = cr_compare(&before, &after, cfg.seeded_height);
 
-        /* On-disk recovery invariant (the kill9-unit shape, now against
-         * the real binary): zero UTXO rows above the tip after restart.
-         * Read node.db directly read-only. -1 (not-applicable: no tip /
-         * no utxos table yet) and -2 (can't open) are NOT failures — a
-         * cold node before its first block legitimately has neither. */
-        int over = cr_count_utxos_above_tip(&cfg);
+        int over = cr_count_utxos_above_tip(&cfg, &after);
+        if (over < 0) {
+            fprintf(stderr, "iter %d: canonical coins observation unavailable or inconsistent\n", it);
+            cr_kill_node(pid);
+            harness_errors++;
+            continue;
+        }
         if (over > 0 && v == CR_OK)
             v = CR_UTXO_ABOVE_TIP;
 

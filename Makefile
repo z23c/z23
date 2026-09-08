@@ -7806,11 +7806,13 @@ $(NATIVE_UI_DRIVER_BIN): tools/native_ui_driver.c
 # depends on the node binary and the CLI RPC helper.
 .PHONY: crash_recovery_test
 crash_recovery_test: $(CRASH_RECOVERY_TEST_BIN)
-$(CRASH_RECOVERY_TEST_BIN): tools/crash_recovery_test.c platform/modules/platform/src/clock.c
+CRASH_RECOVERY_TEST_SRCS = tools/crash_recovery_test.c platform/modules/platform/src/clock.c \
+    platform/modules/json/src/json.c platform/modules/base/src/safe_alloc.c
+$(CRASH_RECOVERY_TEST_BIN): $(CRASH_RECOVERY_TEST_SRCS) platform/modules/json/include/json/json.h engine/modules/storage/include/storage/consensus_db.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread \
-	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -Ivendor/include -o $@ \
-	    tools/crash_recovery_test.c platform/modules/platform/src/clock.c \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/json/include -Iengine/modules/storage/include -Ivendor/include -o $@ \
+	    $(CRASH_RECOVERY_TEST_SRCS) \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 .PHONY: test-crash
@@ -7852,9 +7854,10 @@ test-crash: crash_recovery_test zclassic23 zcl-rpc
 # The recipe runs under bash (NOT the default /bin/sh=dash) because
 # isolated_node_env.sh relies on `set -o pipefail`. The whole body is one
 # bash invocation so the sourced trap stays armed for the harness run.
-test-crash-bootstrap: crash_recovery_test zclassic23 zcl-rpc
+test-crash-bootstrap: crash_recovery_test zclassic23 zcl-rpc jsonq process-group-exec
+	@$(CRASH_RECOVERY_TEST_BIN) --selftest
 	@bash -c 'set -euo pipefail; \
-	 export ISO_KIND=crash ISO_PORT_BASE=39030; \
+	 export ISO_KIND=crash ISO_PORT_BASE=39030 ZCL_CRASH_REQUIRE_TEETH=1; \
 	 . tools/scripts/isolated_node_env.sh; \
 	 iso_init; \
 	 echo "test-crash-bootstrap: kill-9 cycles on $$ISO_DD (rpc=$$ISO_RPCPORT)"; \

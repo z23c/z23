@@ -282,7 +282,7 @@ Z23_FLAG("ZCL_C3_RUN_ID", "env_build", "-", "-",
 Z23_FLAG("ZCL_C3_SNAPSHOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:46")
 Z23_FLAG("ZCL_C3_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8373")
+          "undocumented; first use Makefile:8376")
 Z23_FLAG("ZCL_C3_TIP_DATADIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:63")
 Z23_FLAG("ZCL_CANARY_NO_EXACT", "env_build", "0", "-",
@@ -393,9 +393,9 @@ Z23_FLAG("ZCL_COPY_PROVE_STATUS_DIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_CORPUS_STORE_ROOT", "env_runtime", "-", "-",
           "undocumented; first use tools/corpus_census_args.c:145")
 Z23_FLAG("ZCL_CRASH_DATADIR", "env_runtime", "-", "-",
-          "first use tools/crash_recovery_test.c:137; documented at docs/TENACITY.md:205: ZCL_CRASH_DATADIR unset). All valuable as a regression floor; none sample the")
+          "first use tools/crash_recovery_test.c:139; documented at docs/TENACITY.md:205: ZCL_CRASH_DATADIR unset). All valuable as a regression floor; none sample the")
 Z23_FLAG("ZCL_CRASH_REQUIRE_TEETH", "env_runtime", "-", "-",
-          "first use tools/crash_recovery_test.c:712; documented at docs/CHAOS_HARNESS.md:64: > with ZCL_CRASH_REQUIRE_TEETH=1).")
+          "first use tools/crash_recovery_test.c:807; documented at docs/CHAOS_HARNESS.md:64: > with ZCL_CRASH_REQUIRE_TEETH=1).")
 Z23_FLAG("ZCL_CROSS_TRIPLE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tor_archives_ready.sh:49")
 Z23_FLAG("ZCL_CRYPTO_PERF_BASELINE", "env_build", "-", "-",
@@ -479,7 +479,7 @@ Z23_FLAG("ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEPLOY_EXPECT_SOURCE_ID", "env_build", "-", "-",
           "undocumented; first use tools/deploy_verify.sh:576")
 Z23_FLAG("ZCL_DEPLOY_FROZEN_CANDIDATE", "make_var", "-", "-",
-          "undocumented; first use Makefile:9993")
+          "undocumented; first use Makefile:9996")
 Z23_FLAG("ZCL_DEPLOY_GUARD_NATIVE_JSON", "env_build", "-", "-",
           "undocumented; first use tools/deploy_guard.sh:124")
 Z23_FLAG("ZCL_DEPLOY_GUARD_RPC_TIMEOUT", "env_build", "5", "-",
@@ -1440,7 +1440,7 @@ Z23_FLAG("ZCL_NETCRAWL_ONION_PER_ROUND", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_NETCRAWL_ONION_TIMEOUT_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_crawler.c:198")
 Z23_FLAG("ZCL_NETDISRUPT_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8474")
+          "undocumented; first use Makefile:8477")
 Z23_FLAG("ZCL_NETMON_INTERVAL_SECS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_monitor.c:127")
 Z23_FLAG("ZCL_NETMON_RETAIN_ROWS", "env_runtime", "-", "-",
@@ -2059,7 +2059,7 @@ Z23_FLAG("ZCL_SLO_WINDOW_HOURS", "env_build", "72", "-",
 Z23_FLAG("ZCL_SOAK_EVIDENCE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:128")
 Z23_FLAG("ZCL_SOAK_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8339")
+          "undocumented; first use Makefile:8342")
 Z23_FLAG("ZCL_SOAK_LAG_WARN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/lane_health.sh:46")
 Z23_FLAG("ZCL_SOAK_NOW", "env_build", "-", "-",
@@ -2133,11 +2133,11 @@ Z23_FLAG("ZCL_STATUS_REASON_GATE_SCAN_GLOB", "env_build", "-", "-",
 Z23_FLAG("ZCL_STICKY_REQUIRE_ALL", "env_build", "0", "-",
           "undocumented; first use tools/scripts/sticky_matrix.sh:36")
 Z23_FLAG("ZCL_STICKY_VERDICT_DIR", "make_var", "-", "-",
-          "undocumented; first use Makefile:8132")
+          "undocumented; first use Makefile:8135")
 Z23_FLAG("ZCL_STOPWATCH_CHECKPOINT_HEIGHT", "env_build", "3056758", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:135")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8374")
+          "undocumented; first use Makefile:8377")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_NOW", "env_build", "-", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:442")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_LAG_BUDGET", "env_build", "2000", "-",
