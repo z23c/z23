@@ -1773,6 +1773,15 @@ void zcl_native_handle_ops_selftest(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ops.host.gc — host garbage collection over the dev-proof worktree
+ * pools. Dry run by default: classifies every registered worktree under
+ * each pool, measures what is reclaimable, and names every refusal. With
+ * apply, removes exactly the reapable ones through git worktree removal —
+ * the engine has no other deletion path (command/host_gc_sweep.h). */
+void zcl_native_handle_ops_host_gc(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* ops.debug.meaning — node-free field ontology + question index. Answers
  * "what does this telemetry field mean, is this value bad, and which report
  * answers my question" straight out of the binary's static tables, with no

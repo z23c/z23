@@ -863,3 +863,34 @@ ZCL_COMMAND_PLANNED_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
     "recovery rebuild plan/commit handshake is a Wave 2.2 deliverable")
+
+/* ── ops.host ──────────────────────────────────────────────────────────────
+ * Machine-local hygiene for the box this node runs on. Not chain state and
+ * not a dev-only convenience: the hourly janitor unit calls this on fleet
+ * machines that carry the release binary and no checkout, which is why the
+ * tree is `ops` and not `dev` (engine/composition/commands/README.md). */
+ZCL_COMMAND_BRANCH("ops.host", "ops", "Host maintenance",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.host.gc", "ops.host", "",
+    "Classify and reclaim dead dev-proof worktree generations",
+    "One report per sweep class over the dev-proof worktree pools (the disk "
+    "pool and its tmpfs twin by default, or --roots): registered, and the "
+    "partition of it into reapable / too_young / in_use / locked / "
+    "need_review, plus bytes_reclaimable and bytes_reclaimed. Counts are "
+    "measured at call time from git's own worktree listing and a single "
+    "/proc pass, never cached. Dry run unless apply=true, and even then the "
+    "only deletion path is git's worktree removal; every protected path is "
+    "named in refusals[] rather than silently skipped.", 65536,
+    "host,gc,garbage,worktree,generation,disk,reclaim,janitor",
+    "zcl.host_gc.input.v1", "zcl.host_gc.v1",
+    "apply,floor_hours,roots", "",
+    "z23 ops host gc --apply=false",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_DESTRUCTIVE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_ops_host_gc)

@@ -169,6 +169,9 @@ static bool devagent_scoped_bool(const char *path, const char *key,
         /* fleet.triggers.check's `--dry-run`: performs the same actions as
          * a real run but never advances a source's cursor. */
         { "fleet.triggers.check", "dry-run" },
+        /* ops.host.gc's `--apply`: the one switch that turns the host
+         * sweep from a classification report into a removal. */
+        { "ops.host.gc", "apply" },
     };
     if (!path)
         return false;
@@ -177,6 +180,30 @@ static bool devagent_scoped_bool(const char *path, const char *key,
             *type_ok = value->type == JSON_BOOL;
             return true;
         }
+    }
+    return false;
+}
+
+/* ops.host.gc's two non-boolean inputs. `floor_hours` is the age floor in
+ * hours (0 disables it, a year is the ceiling) and would otherwise fall to
+ * the shared string branch, making `--floor_hours=12` unpassable from a
+ * shell; `roots` is the bounded array of pool directories that replaces the
+ * default pair, and an array key with no rule is refused outright. */
+static bool devagent_host_gc_input(const char *path, const char *key,
+                                   const struct json_value *value,
+                                   bool *type_ok)
+{
+    if (!path || strcmp(path, "ops.host.gc") != 0)
+        return false;
+    if (strcmp(key, "floor_hours") == 0) {
+        *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
+                   json_get_int(value) <= 8760;
+        return true;
+    }
+    if (strcmp(key, "roots") == 0) {
+        *type_ok = value->type == JSON_ARR && json_size(value) >= 1u &&
+                   json_size(value) <= 8u;
+        return true;
     }
     return false;
 }
@@ -198,6 +225,8 @@ bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
     if (devagent_experiment_quantity(key, value, type_ok))
         return true;
     if (devagent_scoped_bool(path, key, value, type_ok))
+        return true;
+    if (devagent_host_gc_input(path, key, value, type_ok))
         return true;
     return false;
 }
