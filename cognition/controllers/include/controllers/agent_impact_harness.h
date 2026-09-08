@@ -59,6 +59,19 @@ bool agent_impact_windows_acceptance_table_lists(const char *table_text,
 bool agent_impact_string_literal_contains(const char *text,
                                           const char *needle);
 
+/* Same signal as agent_impact_string_literal_contains(), but the match must
+ * also be bounded on both sides by a non-identifier, non-path character
+ * (the start/end of the literal, a quote, a space, a slash, or similar
+ * punctuation) — not merely an alphanumeric-or-underscore continuation, and
+ * not the wrong file extension. "main.c" matches inside the literal
+ * "tools/soak/main.c" but not inside "domain_main_thing" (no "main.c"
+ * substring at all) or "main.cpp" (the character right after the match is
+ * an identifier character, 'p'). Used for a single-word basename, where an
+ * unbounded substring scan is unsafe: a short common word like "main" is a
+ * substring of many unrelated identifiers. */
+bool agent_impact_string_literal_contains_whole_token(const char *text,
+                                                      const char *needle);
+
 /* Applies rules 1 and 2 above to `path`, adding the resolved group(s) to
  * `acc` and bumping its match counter. Returns true when at least one group
  * was added. A no-op (returns false) for any path outside

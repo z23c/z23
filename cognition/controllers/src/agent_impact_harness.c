@@ -14,6 +14,7 @@
 #include "test_group_catalog.h"
 #include "util/file_io.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +63,7 @@ bool agent_impact_harness_test_group_name(
     if (strncmp(stem, "test_", 5) != 0 && strncmp(stem, "spec_", 5) != 0)
         return false;
     if (!zcl_test_group_catalog_contains(stem))
-        return false;
+        return false; // raw-return-ok:not-in-catalog-means-not-a-group
 
     (void)snprintf(out, ZCL_AGENT_IMPACT_GROUP_MAX, "%s", stem + 5);
     return true;
@@ -188,7 +189,42 @@ static bool aih_span_has_needle(const char *s, size_t slen, const char *needle,
     return false;
 }
 
-bool agent_impact_string_literal_contains(const char *text, const char *needle)
+/* True when `c` cannot extend an identifier or a filename/extension token —
+ * i.e. it is safe to treat as the edge of a WHOLE-TOKEN match (a quote,
+ * space, slash, punctuation, or the start/end of the literal all count). */
+static bool aih_is_token_boundary(char c)
+{
+    return !(isalnum((unsigned char)c) || c == '_' || c == '.' || c == '-');
+}
+
+/* Same scan as aih_span_has_needle, but a hit only counts when it is
+ * bounded on both sides by aih_is_token_boundary() (or the start/end of
+ * the literal): "main.c" matches inside "tools/soak/main.c" (left = '/',
+ * right = end) but not inside "main.cpp" (right = 'p', an identifier char)
+ * or "domain_main.c" (left = '_'). This is what keeps a common short
+ * basename from fanning out into every unrelated identifier that happens
+ * to contain it as a substring. */
+static bool aih_span_has_bounded_needle(const char *s, size_t slen,
+                                        const char *needle, size_t needle_len)
+{
+    if (needle_len == 0 || needle_len > slen)
+        return false;
+    for (size_t i = 0; i + needle_len <= slen; i++) {
+        if (memcmp(s + i, needle, needle_len) != 0)
+            continue;
+        bool left_ok = i == 0 || aih_is_token_boundary(s[i - 1]);
+        bool right_ok = i + needle_len == slen ||
+                        aih_is_token_boundary(s[i + needle_len]);
+        if (left_ok && right_ok)
+            return true;
+    }
+    return false;
+}
+
+/* Walks every string literal in `text` (honoring backslash escapes) and
+ * reports whether any one of them contains `needle` — bounded to a whole
+ * token when `bounded` is set, an unbounded substring scan otherwise. */
+static bool aih_scan_literals(const char *text, const char *needle, bool bounded)
 {
     if (!text || !needle || !needle[0])
         return false;
@@ -198,9 +234,12 @@ bool agent_impact_string_literal_contains(const char *text, const char *needle)
     for (const char *p = text;; p++) {
         char c = *p;
         if (c == '\0') {
-            if (in_str && aih_span_has_needle(lit_start, (size_t)(p - lit_start),
-                                              needle, needle_len))
-                return true;
+            if (in_str) {
+                size_t slen = (size_t)(p - lit_start);
+                return bounded
+                    ? aih_span_has_bounded_needle(lit_start, slen, needle, needle_len)
+                    : aih_span_has_needle(lit_start, slen, needle, needle_len);
+            }
             return false;
         }
         if (!in_str) {
@@ -209,12 +248,30 @@ bool agent_impact_string_literal_contains(const char *text, const char *needle)
         }
         if (c == '\\' && p[1]) { p++; continue; }
         if (c == '"') {
-            if (aih_span_has_needle(lit_start, (size_t)(p - lit_start),
-                                    needle, needle_len))
+            size_t slen = (size_t)(p - lit_start);
+            bool hit = bounded
+                ? aih_span_has_bounded_needle(lit_start, slen, needle, needle_len)
+                : aih_span_has_needle(lit_start, slen, needle, needle_len);
+            if (hit)
                 return true;
             in_str = false;
         }
     }
+}
+
+bool agent_impact_string_literal_contains(const char *text, const char *needle)
+{
+    return aih_scan_literals(text, needle, false);
+}
+
+/* Same as agent_impact_string_literal_contains(), but the match must land
+ * on a whole token (see aih_is_token_boundary) — used for the single-word
+ * basename form of a name reference, where an unbounded substring scan is
+ * unsafe (a common short word like "main" is a substring of many unrelated
+ * identifiers). */
+bool agent_impact_string_literal_contains_whole_token(const char *text, const char *needle)
+{
+    return aih_scan_literals(text, needle, true);
 }
 
 /* `path`'s basename with the .c extension stripped; false when it does not
@@ -250,6 +307,20 @@ static bool aih_underscore_variant(const char *stem, char out[static ZCL_AGENT_I
     return changed;
 }
 
+/* A compound stem (has an internal '-' or '_', e.g. "zcl-rpc", "engine_unit")
+ * is a distinctive project token: it is vanishingly unlikely to occur as an
+ * accidental substring of an unrelated identifier or English word, so it can
+ * still be matched with a plain unbounded substring scan (this is the
+ * matching this file has always done, unchanged). A single-word stem
+ * (e.g. "main", "test", "download") carries no such guarantee — "main" is a
+ * substring of "domain", the C keyword appears bare in unrelated test
+ * fixtures, and so on — so it is only matched in its extension-qualified,
+ * whole-token form (see aih_scan_dir_for_reference). */
+static bool aih_stem_is_compound(const char *stem)
+{
+    return strchr(stem, '-') != NULL || strchr(stem, '_') != NULL;
+}
+
 /* The referencing file's own group(s): rules 1/2 above, plus the shared rule
  * table it would earn on its own merits. Never rule 3 — a referencer never
  * chains into a second referencer's referencers. */
@@ -272,9 +343,35 @@ static void aih_merge_referrer_hit(const char *referrer_path,
     }
 }
 
+static bool aih_referrer_hits(const char *text, const char *path,
+                              const char *stem, const char *alt,
+                              bool has_alt, bool compound)
+{
+    if (compound) {
+        /* Distinctive compound token (has '-' or '_'): the plain unbounded
+         * substring scan this file has always used — a hit anywhere inside
+         * a longer identifier (e.g. "zcl_rpc" inside "binary_missing_zcl_rpc")
+         * still counts as a deliberate name reference. */
+        return agent_impact_string_literal_contains(text, stem) ||
+               (has_alt && agent_impact_string_literal_contains(text, alt));
+    }
+    (void)alt;
+    (void)has_alt;
+    /* Single-word stem (e.g. "main"): a bare or even extension-qualified
+     * basename ("main.c") is still ambiguous — this repo has several
+     * unrelated main.c files (tools/soak/main.c, tools/lint/lintc/main.c,
+     * a fixture's app/main.c), and a literal that names one of them says
+     * nothing about the others. Require the query's full repo-relative
+     * path as a whole-token match instead: this is what "tools/soak/main.c"
+     * satisfies (bounded by the start/end of the literal or a non-identifier
+     * char) while "domain_main_thing" and an unrelated "app/main.c" do not. */
+    return agent_impact_string_literal_contains_whole_token(text, path);
+}
+
 static void aih_scan_dir_for_reference(const char *dir, const char *path,
                                        const char *stem, const char *alt,
-                                       bool has_alt, struct agent_impact_acc *acc,
+                                       bool has_alt, bool compound,
+                                       struct agent_impact_acc *acc,
                                        bool *matched)
 {
     DIR *dh = opendir(dir);
@@ -295,8 +392,7 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
         if (!zcl_read_whole_file_text(relp, AIH_REFERRER_MAX, &text, &len,
                                       "agent_impact_name_reference"))
             continue;
-        bool hit = agent_impact_string_literal_contains(text, stem) ||
-                   (has_alt && agent_impact_string_literal_contains(text, alt));
+        bool hit = aih_referrer_hits(text, path, stem, alt, has_alt, compound);
         free(text);
         (void)len;
         if (hit)
@@ -328,13 +424,14 @@ bool agent_impact_apply_name_reference_routes(const char *path,
         return false;
     char stem[ZCL_AGENT_IMPACT_GROUP_MAX];
     if (!aih_basename_stem(path, stem))
-        return false;
+        return false; // raw-return-ok:not-eligible-for-name-reference
     char alt[ZCL_AGENT_IMPACT_GROUP_MAX];
     bool has_alt = aih_underscore_variant(stem, alt);
+    bool compound = aih_stem_is_compound(stem);
 
     bool matched = false;
     for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS) / sizeof(AIH_REFERRER_DIRS[0]); d++)
         aih_scan_dir_for_reference(AIH_REFERRER_DIRS[d], path, stem, alt, has_alt,
-                                   acc, &matched);
+                                   compound, acc, &matched);
     return matched;
 }

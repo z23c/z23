@@ -6312,6 +6312,68 @@ static int test_ic_harness_name_reference_secondary_candidate(void)
     return failures;
 }
 
+static int test_ic_name_reference_single_word_stem_is_bounded(void)
+{
+    int failures = 0;
+    TEST("harness routing: a single-word basename (no '-' or '_') only "
+         "counts a whole-token, full-path match — never an unbounded "
+         "substring of an unrelated identifier or the wrong extension") {
+        /* Synthetic needle/text pairs below (never a real repo path) so this
+         * test's own source cannot become a live self-match for a real
+         * query — see the split-literal note on the E2E path below. "gad"
+         * stands in for a query stem like "main": a substring of the
+         * unrelated word "domain" the same way "main" is a substring of
+         * "domain". An unbounded scan would wrongly treat the identifier
+         * "domain_gad" as a reference to some file named gad.c; the bounded
+         * form requires the query's own repo-relative path as a whole
+         * token, so this never matches at all. */
+        ASSERT(!agent_impact_string_literal_contains_whole_token(
+            "\"domain_gad_thing\"\n", "tools/soak/gad.c"));
+        /* the query's own full path, present verbatim and bounded by '/'
+         * on the left and the end of the literal on the right, matches. */
+        ASSERT(agent_impact_string_literal_contains_whole_token(
+            "\"a fixture lives at tools/soak/gad.c today\"\n",
+            "tools/soak/gad.c"));
+        /* a different extension must not count as the same file: the
+         * character right after the ".c" match is an identifier char. */
+        ASSERT(!agent_impact_string_literal_contains_whole_token(
+            "\"see tools/soak/gad.cpp for the C++ port\"\n",
+            "tools/soak/gad.c"));
+
+        /* End to end, on the real file the verifier's fan-out finding named:
+         * tools/soak/main.c shares its single-word basename "main" with
+         * tools/lint/lintc/main.c and a wordcount fixture's app/main.c, and
+         * that basename is also a substring of unrelated identifiers
+         * ("domain_...") sprinkled across tests/harness/src/ — none of
+         * which reference this exact path, so it must stay matched:true
+         * (the harness/lint-gate structural route) with zero name-reference
+         * secondary candidates: exactly what main's own build/bin/z23-dev
+         * (which has no name-reference feature at all) reports for this
+         * file. The path is split across two adjacent literals below (still
+         * one C string once the compiler concatenates them) so this test's
+         * own source is not itself a self-match — the scanner treats each
+         * "..." span independently. */
+        struct zcl_command_reply reply;
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path", "tools/soak/" "main.c"));
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal", .invoked_name = "code.tests",
+        };
+        zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+        zcl_native_handle_code_tests(&request, &reply);
+        const struct json_value *groups = json_get(&reply.data, "test_groups");
+        ASSERT(groups && groups->type == JSON_ARR && groups->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(&groups->children[0]), "make_lint_gates");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "route")),
+                     "make_lint_gates");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_harness_no_owner_stays_unmatched(void)
 {
     int failures = 0;
@@ -6445,6 +6507,7 @@ int test_impact_composition(void)
     failures += test_ic_harness_test_group_naming();
     failures += test_ic_harness_windows_acceptance_table();
     failures += test_ic_harness_name_reference_secondary_candidate();
+    failures += test_ic_name_reference_single_word_stem_is_bounded();
     failures += test_ic_harness_no_owner_stays_unmatched();
     return failures;
 }
