@@ -31,11 +31,19 @@ repeat them.
 | `make t ONLY=<group>` | strict cached per-TU non-LTO harness | `Makefile:2554`; use before push / when chasing optimizer behavior |
 | `make test-parallel TEST_PARALLEL_ARGS=--no-cache` | full uncached suite | `Makefile:2107` |
 | `make pre-push-ci` | mapped focused proof for pushed files | unmapped code fails closed |
-| `make macos-acceptance` | closed 42-group native aggregate with zero eligible skips, followed by an audited temporary `darwin-arm64` runtime cut and node-free execution of its stripped node | the capability matrix supplies 34 unique evidence groups; its eight `ZCL_MACOS_REQUIRED_TEST(...)` rows add the documented baseline groups not already selected there: `crypto`, `sqlite`, `rng`, `os_proc`, `self_backtrace`, `binary_staleness`, `dev_platform`, and `cold_join_sovereign`. The package leg proves local packaging/acceptance only; installed, synced, notarized, and published remain unobserved |
+| `make macos-acceptance` | closed 43-group native aggregate with zero eligible skips, followed by an audited temporary `darwin-arm64` runtime cut and node-free execution of its stripped node | the capability matrix supplies 35 unique evidence groups; its eight `ZCL_MACOS_REQUIRED_TEST(...)` rows add the documented baseline groups not already selected there: `crypto`, `sqlite`, `rng`, `os_proc`, `self_backtrace`, `binary_staleness`, `dev_platform`, and `cold_join_sovereign`. The package leg proves local packaging/acceptance only; installed, synced, notarized, and published remain unobserved |
 
 This exact aggregate, not a green `make lint`, is the macOS evidence base.
 `AGENTS.md`'s baseline is startup and platform-contract evidence only; it is
 not chain-sync acceptance.
+
+The node evidence includes `test_utxo_apply_crash_replay`: isolated children
+run the production UTXO apply stage against canonical `consensus.db`, receive
+SIGKILL during repeated apply cycles, then reopen and replay. Every cycle checks
+the exact committed prefix, coins, inverse deltas, and cursor relationships;
+the final uninterrupted cycle must reach all 240 fixture blocks. This is
+transaction recovery evidence with synthetic blocks, separate from the packaged
+node's real process restart and peer-tip recovery below.
 
 The packaged node also runs through a unique isolated LaunchAgent in
 `macos_launchd_acceptance.sh`: successful typed RPC and native boot completion,
