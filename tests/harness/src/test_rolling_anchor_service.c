@@ -57,6 +57,38 @@ static void ra_divergence_observer(enum event_type type, uint32_t peer_id,
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
+/* A listing with nothing in it still has to come back as an empty listing,
+ * not as undefined behaviour: append_entry() allocates nothing until the
+ * first entry, so sorting an empty list hands qsort() a null pointer it is
+ * declared never to receive. UBSan reports that ("null pointer passed as
+ * argument 1"), and a dependency room holding no regular file is an ordinary
+ * listing rather than an error. Both the regular-only and the children arms
+ * are covered because they sort different lists. Its own function so the
+ * caller's complexity pin does not move. */
+static int ra_empty_listing_checks(void)
+{
+    int failures = 0;
+    char empty_dir[256];
+    test_make_tmpdir(empty_dir, sizeof(empty_dir), "rolling_anchor",
+                     "empty_listing");
+    struct platform_directory_list empty_files = {0};
+    bool empty_listed =
+        platform_directory_list_regular_sorted(empty_dir, &empty_files);
+    RA_CHECK("persistence: an empty directory lists as an empty listing",
+             empty_listed && empty_files.count == 0);
+    platform_directory_list_free(&empty_files);
+    struct platform_directory_list empty_dirs = {0};
+    struct platform_directory_list empty_children = {0};
+    bool children_listed = platform_directory_list_children_sorted(
+        empty_dir, &empty_dirs, &empty_children);
+    RA_CHECK("persistence: an empty directory has no children either",
+             children_listed && empty_dirs.count == 0 &&
+                 empty_children.count == 0);
+    platform_directory_list_free(&empty_dirs);
+    platform_directory_list_free(&empty_children);
+    return failures;
+}
+
 static int64_t ra_dump_int(const char *field)
 {
     struct json_value v;
@@ -172,6 +204,8 @@ int test_rolling_anchor_service(void)
         RA_CHECK("persistence: successful commit leaves no staging file",
                  listed && !staging_found);
         platform_directory_list_free(&files);
+
+        failures += ra_empty_listing_checks();
 
         rolling_anchor_reset_for_test();
         struct zcl_result reloaded = rolling_anchor_init(persist_dir, NULL);

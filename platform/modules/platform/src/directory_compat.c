@@ -25,6 +25,21 @@ static int entry_compare(const void *a, const void *b)
     return strcmp(ea->name, eb->name);
 }
 
+/* An empty listing has no array to sort: append_entry() only allocates on the
+ * first entry, so `entries` is still NULL when `count` is 0, and qsort()
+ * declares its first argument never-null however small the count. Passing the
+ * pair through is undefined behaviour that UBSan reports as
+ * "null pointer passed as argument 1, which is declared to never be null" —
+ * observed under `make t-asan ONLY=dev_land`, where a dependency room that
+ * holds no regular file is an ordinary, expected listing rather than an error.
+ * One entry is already sorted, so the same guard covers it. */
+static void sort_entries(struct platform_directory_list *list)
+{
+    if (list->count > 1)
+        qsort(list->entries, list->count, sizeof(*list->entries),
+              entry_compare);
+}
+
 static bool append_entry(struct platform_directory_list *list,
                          const char *name,
                          const struct platform_directory_entry *snapshot)
@@ -346,7 +361,7 @@ bool platform_directory_list_real_sorted(const char *path,
     CloseHandle(root_handle);
     if (error != ERROR_NO_MORE_FILES) ok = false;
     if (!ok) { platform_directory_list_free(out); return false; }
-    qsort(out->entries, out->count, sizeof(*out->entries), entry_compare);
+    sort_entries(out);
     return true;
 }
 
@@ -484,11 +499,9 @@ static bool platform_directory_list_children_sorted_impl(
         return false;
     }
     if (directories)
-        qsort(directories->entries, directories->count,
-              sizeof(*directories->entries), entry_compare);
+        sort_entries(directories);
     if (files)
-        qsort(files->entries, files->count, sizeof(*files->entries),
-              entry_compare);
+        sort_entries(files);
     return true;
 }
 
@@ -594,7 +607,7 @@ bool platform_directory_list_real_sorted(const char *path,
     }
     if (closedir(dir) != 0) ok = false;
     if (!ok) { platform_directory_list_free(out); return false; }
-    qsort(out->entries, out->count, sizeof(*out->entries), entry_compare);
+    sort_entries(out);
     return true;
 }
 
@@ -631,7 +644,7 @@ bool platform_directory_list_regular_sorted(
     }
     if (closedir(dir) != 0) ok = false;
     if (!ok) { platform_directory_list_free(out); return false; }
-    qsort(out->entries, out->count, sizeof(*out->entries), entry_compare);
+    sort_entries(out);
     return true;
 }
 
@@ -674,10 +687,8 @@ static bool platform_directory_list_children_sorted_impl(
         platform_directory_list_free(files);
         return false;
     }
-    qsort(directories->entries, directories->count,
-          sizeof(*directories->entries), entry_compare);
-    qsort(files->entries, files->count, sizeof(*files->entries),
-          entry_compare);
+    sort_entries(directories);
+    sort_entries(files);
     return true;
 }
 #endif
