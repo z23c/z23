@@ -158,6 +158,127 @@ static int test_service_kernel_failure_unwinds(void)
     return failures;
 }
 
+/* THE 2026-09-08 node1 outage, reproduced.
+ *
+ * The frontend kernel registers file_service, rom_seed, rpc_http, api_cache,
+ * https_explorer, miner, onion_tor, zcode_store in that order. rpc_http was
+ * the only REQUIRED entry. Its bind failed once — the outgoing process still
+ * held the RPC port — and start_all() unwound file_service and rom_seed and
+ * returned WITHOUT ever calling https_explorer's start hook. The public site
+ * stayed down for 27 minutes for a failure that had nothing to do with it.
+ *
+ * The shape below is the real one: a required-but-INDEPENDENT service in the
+ * middle, ordinary optional services after it. */
+static int test_service_kernel_independent_failure_spares_siblings(void)
+{
+    int failures = 0;
+    TEST("service kernel: an independent failure does not cancel later services") {
+        struct zcl_service_kernel kernel;
+        int events[16] = {0};
+        int event_count = 0;
+        struct service_kernel_test_ctx before = {
+            .id = 1, .events = events, .event_count = &event_count
+        };
+        struct service_kernel_test_ctx front_door = {
+            .id = 2, .fail_start = true,
+            .events = events, .event_count = &event_count
+        };
+        struct service_kernel_test_ctx site = {
+            .id = 3, .events = events, .event_count = &event_count
+        };
+
+        zcl_service_kernel_init(&kernel);
+        struct zcl_service_spec spec_before = test_spec("rom_seed", &before);
+        spec_before.flags = ZCL_SERVICE_OPTIONAL;
+        struct zcl_service_spec spec_front = test_spec("rpc_http",
+                                                       &front_door);
+        spec_front.flags = ZCL_SERVICE_INDEPENDENT;
+        struct zcl_service_spec spec_site = test_spec("https_explorer", &site);
+        spec_site.flags = ZCL_SERVICE_OPTIONAL;
+
+        ASSERT(zcl_service_kernel_register(&kernel, &spec_before));
+        ASSERT(zcl_service_kernel_register(&kernel, &spec_front));
+        ASSERT(zcl_service_kernel_register(&kernel, &spec_site));
+
+        /* Still a failure — the caller must still degrade and say so. */
+        ASSERT(!zcl_service_kernel_start_all(&kernel));
+        /* ...but the site came up, and nothing was rolled back. */
+        ASSERT_EQ(site.start_count, 1);
+        ASSERT_EQ(before.stop_count, 0);
+        ASSERT(kernel.started);
+
+        const struct zcl_service_entry *explorer =
+            zcl_service_kernel_find(&kernel, "https_explorer");
+        ASSERT(explorer != NULL);
+        ASSERT_EQ((int)explorer->state, (int)ZCL_SERVICE_STARTED);
+
+        /* The failure is still named, with its reason, on the right entry. */
+        const struct zcl_service_entry *door =
+            zcl_service_kernel_find(&kernel, "rpc_http");
+        ASSERT(door != NULL);
+        ASSERT_EQ((int)door->state, (int)ZCL_SERVICE_FAILED);
+        ASSERT(door->failure_reason != NULL);
+
+        /* And a genuinely required service still unwinds: INDEPENDENT is a
+         * per-service decision, not a weakening of the kernel. */
+        zcl_service_kernel_stop_all(&kernel);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Per-service timing, and the in-flight description a watchdog reads. */
+static int test_service_kernel_start_timing(void)
+{
+    int failures = 0;
+    TEST("service kernel: names the service a slow start is waiting on") {
+        struct zcl_service_kernel kernel;
+        int events[8] = {0};
+        int event_count = 0;
+        struct service_kernel_test_ctx a = {
+            .id = 1, .events = events, .event_count = &event_count
+        };
+        char desc[80];
+
+        zcl_service_kernel_init(&kernel);
+        struct zcl_service_spec spec_a = test_spec("https_explorer", &a);
+        ASSERT(zcl_service_kernel_register(&kernel, &spec_a));
+
+        /* Nothing in flight before the start, and nothing after it. */
+        ASSERT(!zcl_service_kernel_describe_starting(
+            &kernel, "frontend", 0, ZCL_SERVICE_SLOW_START_US,
+            desc, sizeof(desc)));
+        ASSERT_EQ(desc[0], '\0');
+
+        ASSERT(zcl_service_kernel_start_all(&kernel));
+        const struct zcl_service_entry *e =
+            zcl_service_kernel_find(&kernel, "https_explorer");
+        ASSERT(e != NULL);
+        ASSERT(e->start_us >= 0);
+        ASSERT(!zcl_service_kernel_describe_starting(
+            &kernel, "frontend", 0, ZCL_SERVICE_SLOW_START_US,
+            desc, sizeof(desc)));
+
+        /* A start in flight: below the slow threshold it is not news, at or
+         * above it the watchdog gets the service's NAME, which is the fact
+         * `[boot] svc.frontend_tor_start 2462ms` never carried. */
+        atomic_store(&kernel.starting_name, "rpc_http");
+        atomic_store(&kernel.starting_since_us, 1000000);
+        ASSERT(!zcl_service_kernel_describe_starting(
+            &kernel, "frontend", 6000000, ZCL_SERVICE_SLOW_START_US,
+            desc, sizeof(desc)));
+        ASSERT(zcl_service_kernel_describe_starting(
+            &kernel, "frontend", 42000000, ZCL_SERVICE_SLOW_START_US,
+            desc, sizeof(desc)));
+        ASSERT_STR_EQ(desc, "frontend=rpc_http 41s");
+
+        atomic_store(&kernel.starting_name, NULL);
+        zcl_service_kernel_stop_all(&kernel);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_service_kernel_init_failure(void)
 {
     int failures = 0;
@@ -315,6 +436,8 @@ int test_service_kernel(void)
     int failures = 0;
     failures += test_service_kernel_lifecycle();
     failures += test_service_kernel_failure_unwinds();
+    failures += test_service_kernel_independent_failure_spares_siblings();
+    failures += test_service_kernel_start_timing();
     failures += test_service_kernel_init_failure();
     failures += test_service_kernel_optional_failures();
     failures += test_runtime_profile_parse();

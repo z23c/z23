@@ -167,7 +167,15 @@ static void boot_rpc_http_stop(void *ctx)
 /* The rpc_http frontend service spec. boot_register_frontend_services()
  * installs exactly this value, so the restart regression test can drive a
  * stop_all -> start_all cycle over the REAL hooks without also booting Tor,
- * the explorer and the miner — and can never drift from what boots. */
+ * the explorer and the miner — and can never drift from what boots.
+ *
+ * INDEPENDENT, not OPTIONAL. A front door that will not bind is still a
+ * failure and still degrades the node — but on 2026-09-08 it was the ONLY
+ * required service in this kernel, so one transient bind conflict on the
+ * RPC port unwound file_service and rom_seed and returned before
+ * https_explorer's start was ever called. The public site was down for 27
+ * minutes for a reason that had nothing to do with the public site. The
+ * explorer does not need the front door to bind in order to listen. */
 struct zcl_service_spec boot_frontend_rpc_http_spec(struct boot_svc_ctx *svc)
 {
     return (struct zcl_service_spec){
@@ -175,6 +183,7 @@ struct zcl_service_spec boot_frontend_rpc_http_spec(struct boot_svc_ctx *svc)
         .start = boot_rpc_http_start,
         .stop = boot_rpc_http_stop,
         .ctx = svc,
+        .flags = ZCL_SERVICE_INDEPENDENT,
     };
 }
 

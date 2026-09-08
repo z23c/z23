@@ -139,6 +139,38 @@ static platform_socket_t rsr_hold_loopback_port(uint16_t *port_out)
     return fd;
 }
 
+/* The stand-in public site: it only counts, so "did it get to run at all"
+ * is the whole assertion. */
+static int g_site_starts;
+
+static bool rsr_site_start(void *ctx)
+{
+    (*(int *)ctx)++;
+    return true;
+}
+
+static void rsr_site_stop(void *ctx)
+{
+    (void)ctx;
+}
+
+/* THE 27-minute node1 outage of 2026-09-08, on the real hook: the RPC port
+ * was still held by the departing process, boot_rpc_http_start() returned
+ * false, and because rpc_http was the kernel's one REQUIRED service,
+ * start_all() returned before https_explorer's start was ever called. The
+ * site was down for a reason that had nothing to do with the site. */
+static int rsr_site_survived_refused_front_door(void)
+{
+    printf("rpc_service_restart: a refused front door does not cancel the "
+           "public site... ");
+    if (g_site_starts == 1) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (site starts=%d)\n", g_site_starts);
+    return 1;
+}
+
 int test_rpc_service_restart(void)
 {
     int failures = 0;
@@ -190,7 +222,18 @@ int test_rpc_service_restart(void)
     struct zcl_service_kernel kernel;
     zcl_service_kernel_init(&kernel);
     struct zcl_service_spec spec = boot_frontend_rpc_http_spec(&g_svc);
-    if (!zcl_service_kernel_register(&kernel, &spec)) {
+    /* Stands in for https_explorer: registered AFTER rpc_http, exactly as
+     * boot_register_frontend_services() registers it, so a front door that
+     * cannot bind is proved not to cancel the public site. */
+    struct zcl_service_spec site = {
+        .name = "https_explorer",
+        .start = rsr_site_start,
+        .stop = rsr_site_stop,
+        .ctx = &g_site_starts,
+        .flags = ZCL_SERVICE_OPTIONAL,
+    };
+    if (!zcl_service_kernel_register(&kernel, &spec) ||
+        !zcl_service_kernel_register(&kernel, &site)) {
         printf("rpc_service_restart: FAIL (service registration)\n");
         platform_socket_close(held_fd);
         unsetenv("ZCL_RPC_COOKIE_ROTATE_SEC");
@@ -234,8 +277,12 @@ int test_rpc_service_restart(void)
         printf("FAIL\n");
         failures++;
     }
-    if (occupied_started)
-        zcl_service_kernel_stop_all(&kernel);
+    failures += rsr_site_survived_refused_front_door();
+
+    /* Close the cycle unconditionally. A failed INDEPENDENT service leaves
+     * its siblings RUNNING (that is the point), so the kernel is started
+     * either way and the next start_all is a restart, not a first start. */
+    zcl_service_kernel_stop_all(&kernel);
     platform_socket_close(held_fd);
 
     printf("rpc_service_restart: a fresh process starts in warmup... ");

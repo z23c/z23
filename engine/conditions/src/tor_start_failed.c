@@ -83,7 +83,7 @@ static bool witness_tor_start_failed(int64_t target_at_detect)
     // moved — not the inverse of detect and not a flag the remedy wrote.
     (void)target_at_detect;
     if (!tor_integration_is_enabled())
-        return false;
+        return false; // raw-return-ok:witness-observation-not-an-error
 
     boot_tor_watch_note_up(boot_tor_watch_current());
     blocker_clear(BOOT_TOR_START_FAILED_BLOCKER);

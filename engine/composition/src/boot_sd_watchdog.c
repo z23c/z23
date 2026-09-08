@@ -154,13 +154,15 @@ void boot_ready_legs_describe(const struct boot_ready_legs *l,
         return;
     }
     snprintf(out, cap,
-             "descriptor=%s listener=%s pump=%s sweep=%s rendezvous=%s%s%s",
+             "descriptor=%s listener=%s pump=%s sweep=%s rendezvous=%s"
+             "%s%s%s%s",
              l->descriptor ? "yes" : "no",
              l->listener   ? "yes" : "no",
              l->pump       ? "yes" : "no",
              l->sweep      ? "yes" : "no",
              "unconfirmed",
-             l->tor[0] ? " " : "", l->tor);
+             l->tor[0] ? " " : "", l->tor,
+             l->frontend[0] ? " " : "", l->frontend);
 }
 
 static void boot_sd_watchdog_collect_ready_legs(struct boot_ready_legs *out)
@@ -178,6 +180,14 @@ static void boot_sd_watchdog_collect_ready_legs(struct boot_ready_legs *out)
      * atomic loads, safe on the pet thread. */
     boot_tor_watch_status(svc ? &svc->tor_watch : NULL,
                           out->tor, sizeof(out->tor));
+
+    /* Which frontend service is holding a slow start, if any. Also
+     * lock-free: the whole point is to describe a start that is still
+     * blocked, so this must never wait on it. */
+    (void)zcl_service_kernel_describe_starting(
+        svc ? &svc->frontend_kernel : NULL, "frontend",
+        platform_time_monotonic_us(), ZCL_SERVICE_SLOW_START_US,
+        out->frontend, sizeof(out->frontend));
 
     /* Sweep: the root supervisor is sweeping (or has not swept yet this
      * boot, which is not a wedge). */

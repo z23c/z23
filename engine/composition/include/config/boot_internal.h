@@ -484,17 +484,23 @@ struct boot_ready_legs {
     bool listener;
     bool pump;
     bool sweep;
-    /* A NON-LEG annotation. It never gates READY — it answers the question
-     * `descriptor=no` on its own cannot: is this node still bootstrapping,
-     * or did Tor fail and stay failed?
+    /* Two NON-LEG annotations. Neither gates READY; both answer questions
+     * the four legs cannot, and both were missing on 2026-09-08.
      *
-     *   "tor=ok" / "tor=starting" / "tor=failed(<token>)" / "tor=off"
-     *   (config/boot_tor_watch.h). On 2026-09-08 an operator read
-     *   `descriptor=no` for 27 minutes with no way to tell that the Tor
-     *   thread had already exited on a port conflict.
+     *   tor — "tor=ok" / "tor=starting" / "tor=failed(<token>)" /
+     *     "tor=off" (config/boot_tor_watch.h). An operator read
+     *     `descriptor=no` for 27 minutes with no way to tell that the Tor
+     *     thread had already exited on a port conflict.
+     *
+     *   frontend — "frontend=<service> <n>s" while a frontend service's
+     *     start() hook has been running longer than
+     *     ZCL_SERVICE_SLOW_START_US. A wedged start is otherwise
+     *     indistinguishable from a slow one, and the kernel is the only
+     *     place that knows WHICH service is holding it.
      *
      * Empty string = omit from the status line. */
     char tor[48];
+    char frontend[80];
 };
 
 /* Pure: true only when every leg is confirmed. NULL is not confirmed. */
