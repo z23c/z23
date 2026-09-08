@@ -15,6 +15,23 @@ static bool mesh_capability_v79_present(struct node_db *ndb)
                SQLITE_OK;
 }
 
+/* True once fleet_board_posts already carries the v81 `scope` column.
+ * ALTER TABLE ... ADD COLUMN has no IF NOT EXISTS form, so without this
+ * guard a database that reaches v82+ (a fresh open runs every block up to
+ * NODE_DB_SCHEMA_LATEST in one pass) and is later re-migrated from a
+ * schema_version stamped back below 81 — exactly what an older-binary
+ * rollback / re-upgrade cycle, or this file's own idempotency tests, do —
+ * would re-run this ADD COLUMN against a table that already has it and
+ * fail with "duplicate column name". */
+static bool fleet_board_posts_v81_scope_present(struct node_db *ndb)
+{
+    const char *type = NULL;
+    return ndb && ndb->open &&
+           sqlite3_table_column_metadata(
+               ndb->db, NULL, "fleet_board_posts",
+               "scope", &type, NULL, NULL, NULL, NULL) == SQLITE_OK;
+}
+
 /* v82 step 1: rebuild `fleet_board_posts` with `kind` widened to admit 1..64,
  * far past today's 8 known kinds (through `agents`), so a future kind never
  * forces another one-way table rebuild. The C layer stays the real gate: rows
@@ -105,6 +122,244 @@ static int db_migrate_step_82(struct node_db *ndb, int *current_ver,
     if (db_migrate_v82_agents_kind(ndb) < 0) return -1;
     DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 82, floor_ver);
     *current_ver = 82;
+    (*applied)++;
+    return 0;
+}
+
+/* v69: new async events bind the candidate source root directly. Existing
+ * v68 rows retain their v1 event roots and an empty source; the next
+ * append upgrades that chain to the v2 root domain.
+ *
+ * Wraps its own `current_ver < 69` check and backup-guard failure handling
+ * (same pattern as db_migrate_step_82 below) so the caller's own pinned
+ * cyclomatic complexity never has to carry this version gate, or the
+ * backup guard's branch, as its own. Returns 0 on skip/success, or
+ * DB_MIGRATE_BACKUP_FAILED_PROPAGATE (see database_internal.h) if the
+ * pre-migration backup refused. */
+static int db_migrate_step_69(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 69) return 0;
+    if (!node_db_backup_before_breaking_migration(ndb, *current_ver))
+        return DB_MIGRATE_BACKUP_FAILED_PROPAGATE;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE build_proof_events_v69("
+            "event_root TEXT NOT NULL UNIQUE CHECK(length(event_root)=64),"
+            "prior_event_root TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(prior_event_root) IN (0,64)),"
+            "action_id TEXT NOT NULL REFERENCES build_actions(action_id) "
+            "ON DELETE CASCADE CHECK(length(action_id)=64),"
+            "source_root_sha3 TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(source_root_sha3) IN (0,64)),"
+            "task_root_sha3 TEXT NOT NULL CHECK(length(task_root_sha3)=64),"
+            "candidate_root_sha3 TEXT NOT NULL CHECK(length(candidate_root_sha3)=64),"
+            "proof_policy_root_sha3 TEXT NOT NULL CHECK(length(proof_policy_root_sha3)=64),"
+            "context_root_sha3 TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(context_root_sha3) IN (0,64)),"
+            "receipt_root_sha3 TEXT NOT NULL DEFAULT '' "
+            "CHECK(length(receipt_root_sha3) IN (0,64)),"
+            "workspace TEXT NOT NULL CHECK(length(workspace) BETWEEN 1 AND 4095),"
+            "state TEXT NOT NULL CHECK(state IN ('REQUESTED','PEER_DISCOVERED',"
+            "'CONTEXT_READY','RUNNING','REMOTE_GREEN','REMOTE_RED',"
+            "'RECEIPT_VERIFIED','REPRODUCED','SUPERSEDED',"
+            "'READY_FOR_ACCEPTANCE')),"
+            "peer_id INTEGER NOT NULL CHECK(peer_id>=0),"
+            "request_id BLOB NOT NULL CHECK(length(request_id)=8),"
+            "deadline_at INTEGER NOT NULL CHECK(deadline_at>=0),"
+            "elapsed_us INTEGER NOT NULL CHECK(elapsed_us>=0),"
+            "created_at INTEGER NOT NULL CHECK(created_at>0))"))
+        LOG_ERR("db", "migrate v69: replacement table failed");
+    if (!node_db_exec(ndb,
+            "INSERT INTO build_proof_events_v69 "
+            "(event_root,prior_event_root,action_id,source_root_sha3,"
+            "task_root_sha3,candidate_root_sha3,proof_policy_root_sha3,"
+            "context_root_sha3,receipt_root_sha3,workspace,state,peer_id,"
+            "request_id,deadline_at,elapsed_us,created_at) SELECT "
+            "event_root,prior_event_root,action_id,'',task_root_sha3,"
+            "candidate_root_sha3,proof_policy_root_sha3,context_root_sha3,"
+            "receipt_root_sha3,workspace,state,peer_id,request_id,"
+            "deadline_at,elapsed_us,created_at FROM build_proof_events"))
+        LOG_ERR("db", "migrate v69: event copy failed");
+    if (!node_db_exec(ndb, "DROP TABLE build_proof_events"))
+        LOG_ERR("db", "migrate v69: prior table drop failed");
+    if (!node_db_exec(ndb,
+            "ALTER TABLE build_proof_events_v69 RENAME TO build_proof_events"))
+        LOG_ERR("db", "migrate v69: table rename failed");
+    if (!node_db_exec(ndb,
+            "CREATE INDEX idx_build_proof_events_action ON "
+            "build_proof_events(action_id,created_at,event_root)"))
+        LOG_ERR("db", "migrate v69: action index failed");
+    if (!node_db_exec(ndb,
+            "CREATE INDEX idx_build_proof_events_task ON "
+            "build_proof_events(task_root_sha3,created_at)"))
+        LOG_ERR("db", "migrate v69: task index failed");
+    if (!node_db_exec(ndb,
+            "CREATE UNIQUE INDEX idx_build_proof_events_one_successor "
+            "ON build_proof_events(prior_event_root) "
+            "WHERE prior_event_root<>''"))
+        LOG_ERR("db", "migrate v69: chain index failed");
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('069')"))
+        LOG_ERR("db", "migrate v69: migration stamp failed");
+    *floor_ver = 69; /* BREAKING: build_proof_events source-root rebuild */
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 69, *floor_ver);
+    *current_ver = 69;
+    (*applied)++;
+    return 0;
+}
+
+/* v75: an in-flight Yardsale confirmation is durable before its outbound
+ * accept can leave the node. ARMING is intentionally sticky across an
+ * uncertain process exit, preventing automatic replay.
+ *
+ * Wraps its own `current_ver < 75` check, same reasoning as
+ * db_migrate_step_69 above. */
+static int db_migrate_step_75(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 75) return 0;
+    if (!node_db_backup_before_breaking_migration(ndb, *current_ver))
+        return DB_MIGRATE_BACKUP_FAILED_PROPAGATE;
+    if (!node_db_exec(ndb,
+            "CREATE TABLE yardsale_plans_v75("
+            "plan_root TEXT PRIMARY KEY CHECK(length(plan_root)=64),"
+            "kind TEXT NOT NULL CHECK(kind IN ('arm','buy')),"
+            "request_hash TEXT NOT NULL UNIQUE CHECK(length(request_hash)=64),"
+            "payload_hex TEXT NOT NULL,result TEXT NOT NULL,"
+            "state TEXT NOT NULL CHECK(state IN "
+            "('PLANNED','ARMING','COMMITTED','EXPIRED')),"
+            "expires_unix INTEGER NOT NULL CHECK(expires_unix>0),"
+            "created_at INTEGER NOT NULL)"))
+        LOG_ERR("db", "migrate v75: replacement table failed");
+    if (!node_db_exec(ndb,
+            "INSERT INTO yardsale_plans_v75 SELECT * FROM yardsale_plans"))
+        LOG_ERR("db", "migrate v75: plan copy failed");
+    if (!node_db_exec(ndb, "DROP TABLE yardsale_plans"))
+        LOG_ERR("db", "migrate v75: prior table drop failed");
+    if (!node_db_exec(ndb,
+            "ALTER TABLE yardsale_plans_v75 RENAME TO yardsale_plans"))
+        LOG_ERR("db", "migrate v75: replacement rename failed");
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('075')"))
+        LOG_ERR("db", "migrate v75: migration stamp failed");
+    *floor_ver = 75; /* BREAKING: yardsale_plans state-CHECK rebuild */
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 75, *floor_ver);
+    *current_ver = 75;
+    (*applied)++;
+    return 0;
+}
+
+/* v79: v78 grants never named the receiving machine and consumed at offer
+ * time, so they cannot safely cross the transport boundary. Preserve them
+ * in a retired audit table and create fail-closed v2 authority with
+ * canonical sealed geometry and resumable claims. A fresh baseline already
+ * has the v79 shape and skips replacement.
+ *
+ * Wraps its own `current_ver < 79` check, same reasoning as
+ * db_migrate_step_69 above. */
+static int db_migrate_step_79(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 79) return 0;
+    if (!mesh_capability_v79_present(ndb)) {
+        if (!node_db_backup_before_breaking_migration(ndb, *current_ver))
+            return DB_MIGRATE_BACKUP_FAILED_PROPAGATE;
+        if (!node_db_exec(ndb,
+                "DROP INDEX IF EXISTS "
+                "idx_mesh_capability_grants_pairing_state"))
+            LOG_ERR("db", "migrate v79: prior grant index drop failed");
+        if (!node_db_exec(ndb,
+                "ALTER TABLE mesh_capability_grants RENAME TO "
+                "mesh_capability_grants_v78_retired"))
+            LOG_ERR("db", "migrate v79: prior grant retirement failed");
+        if (!node_db_exec(ndb,
+                "CREATE TABLE mesh_capability_grants("
+                "grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=64),"
+                "pairing_id TEXT NOT NULL REFERENCES mesh_pairings(pairing_id) "
+                "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
+                "target_master_pubkey BLOB NOT NULL CHECK(length(target_master_pubkey)=32),"
+                "target_noise_static BLOB NOT NULL CHECK(length(target_noise_static)=32),"
+                "operation INTEGER NOT NULL CHECK(operation=1),"
+                "plaintext_root BLOB NOT NULL CHECK(length(plaintext_root)=32),"
+                "ciphertext_root BLOB NOT NULL CHECK(length(ciphertext_root)=32),"
+                "object_size_bytes INTEGER NOT NULL CHECK(object_size_bytes BETWEEN 1 AND 1073741824),"
+                "ciphertext_size_bytes INTEGER NOT NULL CHECK(ciphertext_size_bytes<=2147483648),"
+                "storage_limit_bytes INTEGER NOT NULL CHECK(storage_limit_bytes>=ciphertext_size_bytes+object_size_bytes AND storage_limit_bytes<=3221225472),"
+                "transfer_limit_bytes INTEGER NOT NULL CHECK(transfer_limit_bytes>=ciphertext_size_bytes AND transfer_limit_bytes<=2147483648),"
+                "max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes=65536),"
+                "chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 16389),"
+                "wall_limit_seconds INTEGER NOT NULL CHECK(wall_limit_seconds BETWEEN 1 AND 600),"
+                "nonce BLOB NOT NULL CHECK(length(nonce)=32),"
+                "deny_mask INTEGER NOT NULL CHECK(deny_mask=255),"
+                "issued_at INTEGER NOT NULL CHECK(issued_at>0),"
+                "not_before INTEGER NOT NULL CHECK(not_before>=issued_at),"
+                "expires_at INTEGER NOT NULL CHECK(expires_at>not_before AND expires_at-issued_at<=2592000),"
+                "transfer_id BLOB NOT NULL DEFAULT X'' CHECK(length(transfer_id) IN (0,32)),"
+                "claimed_at INTEGER NOT NULL DEFAULT 0 CHECK(claimed_at>=0),"
+                "consumed_at INTEGER NOT NULL DEFAULT 0 CHECK(consumed_at>=0),"
+                "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at=0 OR revoked_at>=issued_at),"
+                "revocation_generation INTEGER NOT NULL DEFAULT 0 CHECK((revoked_at=0 AND revocation_generation=0) OR (revoked_at>0 AND revocation_generation>0)),"
+                "CHECK(chunk_count=(object_size_bytes+65519)/65520),"
+                "CHECK(ciphertext_size_bytes=object_size_bytes+16*chunk_count),"
+                "CHECK((claimed_at=0 AND length(transfer_id)=0 AND consumed_at=0) OR (claimed_at>=not_before AND claimed_at<expires_at AND length(transfer_id)=32 AND (consumed_at=0 OR (consumed_at>=claimed_at AND consumed_at<expires_at)))))"))
+            LOG_ERR("db", "migrate v79: corrected grants table failed");
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS "
+            "idx_mesh_capability_grants_pairing_state ON "
+            "mesh_capability_grants(pairing_id,revoked_at,consumed_at,expires_at)"))
+        LOG_ERR("db", "migrate v79: grant state index failed");
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('079')"))
+        LOG_ERR("db", "migrate v79: migration stamp failed");
+    *floor_ver = 79; /* BREAKING: mesh_capability_grants v2 rebuild */
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 79, *floor_ver);
+    *current_ver = 79;
+    (*applied)++;
+    return 0;
+}
+
+/* v81: every board row carries the scope its post was signed with — a
+ * public room any node key may post to, or fleet-private — and the public
+ * room's name. Rows written before scopes existed were gossiped to the
+ * whole network, so they migrate to scope 0 (legacy-public) with an empty
+ * room, which is exactly what their v1 signatures still commit to. The
+ * bounds mirror the signed wire bounds, so a row that could not have been
+ * a valid scoped post cannot exist here either. A fresh baseline already
+ * has the v81 shape and skips the ADD COLUMNs (see
+ * fleet_board_posts_v81_scope_present() above).
+ *
+ * Wraps its own `current_ver < 81` check, same reasoning as
+ * db_migrate_step_69 above. */
+static int db_migrate_step_81(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 81) return 0;
+    if (!fleet_board_posts_v81_scope_present(ndb)) {
+        if (!node_db_exec(ndb,
+                "ALTER TABLE fleet_board_posts ADD COLUMN "
+                "scope INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(scope BETWEEN 0 AND 2)"))
+            LOG_ERR("db", "migrate v81: board scope column failed");
+        if (!node_db_exec(ndb,
+                "ALTER TABLE fleet_board_posts ADD COLUMN "
+                "room TEXT NOT NULL DEFAULT '' "
+                "CHECK(length(room)<=32)"))
+            LOG_ERR("db", "migrate v81: board room column failed");
+    }
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_room "
+            "ON fleet_board_posts(room,created_at DESC,id)"))
+        LOG_ERR("db", "migrate v81: board room index failed");
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('081')"))
+        LOG_ERR("db", "migrate v81: migration stamp failed");
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 81, *floor_ver);
+    *current_ver = 81;
     (*applied)++;
     return 0;
 }
@@ -219,79 +474,13 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
         current_ver = 68;
         applied++;
     }
-    if (current_ver < 69) {
-        /* v69: new async events bind the candidate source root directly.
-         * Existing v68 rows retain their v1 event roots and an empty source;
-         * the next append upgrades that chain to the v2 root domain. */
-        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+    {
+        int r = db_migrate_step_69(ndb, &current_ver, &floor_ver, &applied);
+        if (r < 0) {
             *version = current_ver;
             *floor = floor_ver;
-            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+            return r;
         }
-        if (!node_db_exec(ndb,
-                "CREATE TABLE build_proof_events_v69("
-                "event_root TEXT NOT NULL UNIQUE CHECK(length(event_root)=64),"
-                "prior_event_root TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(prior_event_root) IN (0,64)),"
-                "action_id TEXT NOT NULL REFERENCES build_actions(action_id) "
-                "ON DELETE CASCADE CHECK(length(action_id)=64),"
-                "source_root_sha3 TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(source_root_sha3) IN (0,64)),"
-                "task_root_sha3 TEXT NOT NULL CHECK(length(task_root_sha3)=64),"
-                "candidate_root_sha3 TEXT NOT NULL CHECK(length(candidate_root_sha3)=64),"
-                "proof_policy_root_sha3 TEXT NOT NULL CHECK(length(proof_policy_root_sha3)=64),"
-                "context_root_sha3 TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(context_root_sha3) IN (0,64)),"
-                "receipt_root_sha3 TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(receipt_root_sha3) IN (0,64)),"
-                "workspace TEXT NOT NULL CHECK(length(workspace) BETWEEN 1 AND 4095),"
-                "state TEXT NOT NULL CHECK(state IN ('REQUESTED','PEER_DISCOVERED',"
-                "'CONTEXT_READY','RUNNING','REMOTE_GREEN','REMOTE_RED',"
-                "'RECEIPT_VERIFIED','REPRODUCED','SUPERSEDED',"
-                "'READY_FOR_ACCEPTANCE')),"
-                "peer_id INTEGER NOT NULL CHECK(peer_id>=0),"
-                "request_id BLOB NOT NULL CHECK(length(request_id)=8),"
-                "deadline_at INTEGER NOT NULL CHECK(deadline_at>=0),"
-                "elapsed_us INTEGER NOT NULL CHECK(elapsed_us>=0),"
-                "created_at INTEGER NOT NULL CHECK(created_at>0))"))
-            LOG_ERR("db", "migrate v69: replacement table failed");
-        if (!node_db_exec(ndb,
-                "INSERT INTO build_proof_events_v69 "
-                "(event_root,prior_event_root,action_id,source_root_sha3,"
-                "task_root_sha3,candidate_root_sha3,proof_policy_root_sha3,"
-                "context_root_sha3,receipt_root_sha3,workspace,state,peer_id,"
-                "request_id,deadline_at,elapsed_us,created_at) SELECT "
-                "event_root,prior_event_root,action_id,'',task_root_sha3,"
-                "candidate_root_sha3,proof_policy_root_sha3,context_root_sha3,"
-                "receipt_root_sha3,workspace,state,peer_id,request_id,"
-                "deadline_at,elapsed_us,created_at FROM build_proof_events"))
-            LOG_ERR("db", "migrate v69: event copy failed");
-        if (!node_db_exec(ndb, "DROP TABLE build_proof_events"))
-            LOG_ERR("db", "migrate v69: prior table drop failed");
-        if (!node_db_exec(ndb,
-                "ALTER TABLE build_proof_events_v69 RENAME TO build_proof_events"))
-            LOG_ERR("db", "migrate v69: table rename failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX idx_build_proof_events_action ON "
-                "build_proof_events(action_id,created_at,event_root)"))
-            LOG_ERR("db", "migrate v69: action index failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX idx_build_proof_events_task ON "
-                "build_proof_events(task_root_sha3,created_at)"))
-            LOG_ERR("db", "migrate v69: task index failed");
-        if (!node_db_exec(ndb,
-                "CREATE UNIQUE INDEX idx_build_proof_events_one_successor "
-                "ON build_proof_events(prior_event_root) "
-                "WHERE prior_event_root<>''"))
-            LOG_ERR("db", "migrate v69: chain index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('069')"))
-            LOG_ERR("db", "migrate v69: migration stamp failed");
-        floor_ver = 69; /* BREAKING: build_proof_events source-root rebuild */
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 69, floor_ver);
-        current_ver = 69;
-        applied++;
     }
     if (current_ver < 70) {
         /* v70: a worker result is quarantined together with the canonical
@@ -399,42 +588,13 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
         current_ver = 74;
         applied++;
     }
-    if (current_ver < 75) {
-        /* v75: an in-flight Yardsale confirmation is durable before its
-         * outbound accept can leave the node. ARMING is intentionally sticky
-         * across an uncertain process exit, preventing automatic replay. */
-        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+    {
+        int r = db_migrate_step_75(ndb, &current_ver, &floor_ver, &applied);
+        if (r < 0) {
             *version = current_ver;
             *floor = floor_ver;
-            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+            return r;
         }
-        if (!node_db_exec(ndb,
-                "CREATE TABLE yardsale_plans_v75("
-                "plan_root TEXT PRIMARY KEY CHECK(length(plan_root)=64),"
-                "kind TEXT NOT NULL CHECK(kind IN ('arm','buy')),"
-                "request_hash TEXT NOT NULL UNIQUE CHECK(length(request_hash)=64),"
-                "payload_hex TEXT NOT NULL,result TEXT NOT NULL,"
-                "state TEXT NOT NULL CHECK(state IN "
-                "('PLANNED','ARMING','COMMITTED','EXPIRED')),"
-                "expires_unix INTEGER NOT NULL CHECK(expires_unix>0),"
-                "created_at INTEGER NOT NULL)"))
-            LOG_ERR("db", "migrate v75: replacement table failed");
-        if (!node_db_exec(ndb,
-                "INSERT INTO yardsale_plans_v75 SELECT * FROM yardsale_plans"))
-            LOG_ERR("db", "migrate v75: plan copy failed");
-        if (!node_db_exec(ndb, "DROP TABLE yardsale_plans"))
-            LOG_ERR("db", "migrate v75: prior table drop failed");
-        if (!node_db_exec(ndb,
-                "ALTER TABLE yardsale_plans_v75 RENAME TO yardsale_plans"))
-            LOG_ERR("db", "migrate v75: replacement rename failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('075')"))
-            LOG_ERR("db", "migrate v75: migration stamp failed");
-        floor_ver = 75; /* BREAKING: yardsale_plans state-CHECK rebuild */
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 75, floor_ver);
-        current_ver = 75;
-        applied++;
     }
     if (current_ver < 76) {
         /* v76: private local machine-pairing authority. The record binds one
@@ -536,71 +696,13 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
         current_ver = 78;
         applied++;
     }
-    if (current_ver < 79) {
-        /* v79: v78 grants never named the receiving machine and consumed at
-         * offer time, so they cannot safely cross the transport boundary.
-         * Preserve them in a retired audit table and create fail-closed v2
-         * authority with canonical sealed geometry and resumable claims. A
-         * fresh baseline already has the v79 shape and skips replacement. */
-        if (!mesh_capability_v79_present(ndb)) {
-            if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
-                *version = current_ver;
-                *floor = floor_ver;
-                return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
-            }
-            if (!node_db_exec(ndb,
-                    "DROP INDEX IF EXISTS "
-                    "idx_mesh_capability_grants_pairing_state"))
-                LOG_ERR("db", "migrate v79: prior grant index drop failed");
-            if (!node_db_exec(ndb,
-                    "ALTER TABLE mesh_capability_grants RENAME TO "
-                    "mesh_capability_grants_v78_retired"))
-                LOG_ERR("db", "migrate v79: prior grant retirement failed");
-            if (!node_db_exec(ndb,
-                    "CREATE TABLE mesh_capability_grants("
-                    "grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=64),"
-                    "pairing_id TEXT NOT NULL REFERENCES mesh_pairings(pairing_id) "
-                    "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
-                    "target_master_pubkey BLOB NOT NULL CHECK(length(target_master_pubkey)=32),"
-                    "target_noise_static BLOB NOT NULL CHECK(length(target_noise_static)=32),"
-                    "operation INTEGER NOT NULL CHECK(operation=1),"
-                    "plaintext_root BLOB NOT NULL CHECK(length(plaintext_root)=32),"
-                    "ciphertext_root BLOB NOT NULL CHECK(length(ciphertext_root)=32),"
-                    "object_size_bytes INTEGER NOT NULL CHECK(object_size_bytes BETWEEN 1 AND 1073741824),"
-                    "ciphertext_size_bytes INTEGER NOT NULL CHECK(ciphertext_size_bytes<=2147483648),"
-                    "storage_limit_bytes INTEGER NOT NULL CHECK(storage_limit_bytes>=ciphertext_size_bytes+object_size_bytes AND storage_limit_bytes<=3221225472),"
-                    "transfer_limit_bytes INTEGER NOT NULL CHECK(transfer_limit_bytes>=ciphertext_size_bytes AND transfer_limit_bytes<=2147483648),"
-                    "max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes=65536),"
-                    "chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 16389),"
-                    "wall_limit_seconds INTEGER NOT NULL CHECK(wall_limit_seconds BETWEEN 1 AND 600),"
-                    "nonce BLOB NOT NULL CHECK(length(nonce)=32),"
-                    "deny_mask INTEGER NOT NULL CHECK(deny_mask=255),"
-                    "issued_at INTEGER NOT NULL CHECK(issued_at>0),"
-                    "not_before INTEGER NOT NULL CHECK(not_before>=issued_at),"
-                    "expires_at INTEGER NOT NULL CHECK(expires_at>not_before AND expires_at-issued_at<=2592000),"
-                    "transfer_id BLOB NOT NULL DEFAULT X'' CHECK(length(transfer_id) IN (0,32)),"
-                    "claimed_at INTEGER NOT NULL DEFAULT 0 CHECK(claimed_at>=0),"
-                    "consumed_at INTEGER NOT NULL DEFAULT 0 CHECK(consumed_at>=0),"
-                    "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at=0 OR revoked_at>=issued_at),"
-                    "revocation_generation INTEGER NOT NULL DEFAULT 0 CHECK((revoked_at=0 AND revocation_generation=0) OR (revoked_at>0 AND revocation_generation>0)),"
-                    "CHECK(chunk_count=(object_size_bytes+65519)/65520),"
-                    "CHECK(ciphertext_size_bytes=object_size_bytes+16*chunk_count),"
-                    "CHECK((claimed_at=0 AND length(transfer_id)=0 AND consumed_at=0) OR (claimed_at>=not_before AND claimed_at<expires_at AND length(transfer_id)=32 AND (consumed_at=0 OR (consumed_at>=claimed_at AND consumed_at<expires_at)))))"))
-                LOG_ERR("db", "migrate v79: corrected grants table failed");
+    {
+        int r = db_migrate_step_79(ndb, &current_ver, &floor_ver, &applied);
+        if (r < 0) {
+            *version = current_ver;
+            *floor = floor_ver;
+            return r;
         }
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS "
-                "idx_mesh_capability_grants_pairing_state ON "
-                "mesh_capability_grants(pairing_id,revoked_at,consumed_at,expires_at)"))
-            LOG_ERR("db", "migrate v79: grant state index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('079')"))
-            LOG_ERR("db", "migrate v79: migration stamp failed");
-        floor_ver = 79; /* BREAKING: mesh_capability_grants v2 rebuild */
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 79, floor_ver);
-        current_ver = 79;
-        applied++;
     }
     if (current_ver < 80) {
         /* v80: the fleet AI message board and wiki — one append-only, signed,
@@ -660,36 +762,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
         current_ver = 80;
         applied++;
     }
-    if (current_ver < 81) {
-        /* v81: every board row carries the scope its post was signed with —
-         * a public room any node key may post to, or fleet-private — and the
-         * public room's name. Rows written before scopes existed were gossiped
-         * to the whole network, so they migrate to scope 0 (legacy-public)
-         * with an empty room, which is exactly what their v1 signatures still
-         * commit to. The bounds mirror the signed wire bounds, so a row that
-         * could not have been a valid scoped post cannot exist here either. */
-        if (!node_db_exec(ndb,
-                "ALTER TABLE fleet_board_posts ADD COLUMN "
-                "scope INTEGER NOT NULL DEFAULT 0 "
-                "CHECK(scope BETWEEN 0 AND 2)"))
-            LOG_ERR("db", "migrate v81: board scope column failed");
-        if (!node_db_exec(ndb,
-                "ALTER TABLE fleet_board_posts ADD COLUMN "
-                "room TEXT NOT NULL DEFAULT '' "
-                "CHECK(length(room)<=32)"))
-            LOG_ERR("db", "migrate v81: board room column failed");
-        if (!node_db_exec(ndb,
-                "CREATE INDEX IF NOT EXISTS idx_fleet_board_room "
-                "ON fleet_board_posts(room,created_at DESC,id)"))
-            LOG_ERR("db", "migrate v81: board room index failed");
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('081')"))
-            LOG_ERR("db", "migrate v81: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 81, floor_ver);
-        current_ver = 81;
-        applied++;
-    }
+    (void)db_migrate_step_81(ndb, &current_ver, &floor_ver, &applied);
     (void)db_migrate_step_82(ndb, &current_ver, &applied, floor_ver);
     *version = current_ver;
     *floor = floor_ver;

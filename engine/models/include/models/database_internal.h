@@ -106,6 +106,22 @@ void node_db_log_unknown_schema_refusal(const char *detail);
  * migration stopped instead of only that it did. */
 #define NODE_DB_MIGRATE_ERR_BACKUP_FAILED (-3)
 
+/* Internal-only propagation sentinel between the versioned-migration hop
+ * functions (node_db_migrate_features() -> ..._v30_up() -> ..._v49_up() ->
+ * ..._v67_up()), NOT the public error code a caller of node_db_migrate()
+ * sees. Each hop's own tail line forwards its downstream call's result with
+ * a plain, branch-free `applied + <downstream call>` (matching every other
+ * migration hop here and keeping each hop function's own pinned cyclomatic
+ * complexity unchanged) — so the one function that actually detects a
+ * backup refusal (node_db_migrate_features_v67_up(), or a lower-numbered
+ * hop with its own BREAKING step) must return a magnitude so far below any
+ * possible sum of `applied` counts (each hop applies at most a few dozen
+ * versioned steps) that no amount of unconditional addition on the way up
+ * can bring it back to a non-negative value. node_db_migrate() itself is
+ * the ONLY place that reads the sign and translates it to
+ * NODE_DB_MIGRATE_ERR_BACKUP_FAILED for its own caller. */
+#define DB_MIGRATE_BACKUP_FAILED_PROPAGATE (-1000000)
+
 /* Opt-in pre-migration safety net for -db-backup-before-migrate
  * (ZCL_DB_BACKUP_BEFORE_MIGRATE; see engine/composition/src/args.c). When the
  * flag is unset this is a no-op that returns true immediately — it never

@@ -275,40 +275,62 @@ int node_db_schema_compat_floor(struct node_db *ndb)
     return floor;
 }
 
+/* Campaign C3 schema-downgrade / compat-floor recheck, split out of
+ * node_db_migrate() to keep that already-pinned function's own cyclomatic
+ * complexity from growing. Mirrors (and is independently re-derived from
+ * the same node_state keys as) the open-time preflight in database.c, which
+ * already decided whether to let this open proceed at all — a runtime
+ * reopen does not go through that preflight a second time, so this recheck
+ * is the only gate it sees.
+ *
+ * If schema_version exceeds what this binary knows about AND the
+ * database's own schema_compat_floor is also above it, refuse: the newer
+ * binary applied at least one BREAKING change (a rename, drop, or a change
+ * to what an existing column/row means) that this binary cannot safely
+ * read or write through. If the floor is at or below what this binary
+ * knows, every change beyond it was ADDITIVE (new tables/columns/indexes
+ * this binary simply does not touch) — open and run normally, but skip
+ * every migration block: this binary must never attempt a schema write for
+ * a version it does not understand.
+ *
+ * Returns the exact value node_db_migrate() itself should return: -2
+ * (refuse, already logged), 0 (read-compatible open, already logged), or
+ * DB_MIGRATE_PRECHECK_PROCEED (current_ver is within this binary's known
+ * range — the caller's single `if` below lets it fall through to run the
+ * migration blocks as normal). DB_MIGRATE_PRECHECK_PROCEED is a sentinel
+ * distinct from every value node_db_migrate() ever legitimately returns
+ * from THIS check (which is only -2 or 0), so the caller can tell "run the
+ * migrations" apart from "already decided, pass this straight through"
+ * with the one comparison instead of a comparison per verdict. */
+#define DB_MIGRATE_PRECHECK_PROCEED 1
+
+static int db_migrate_precheck_newer_schema(struct node_db *ndb,
+                                            int current_ver)
+{
+    if (current_ver <= NODE_DB_MAX_SCHEMA)
+        return DB_MIGRATE_PRECHECK_PROCEED;
+
+    int floor = node_db_schema_compat_floor(ndb);
+    if (floor > NODE_DB_MAX_SCHEMA) {
+        node_db_log_newer_schema_refusal(current_ver, floor);
+        return -2;
+    }
+    if (!ndb->suppress_migrate_banner)
+        node_db_log_read_compatible_open(current_ver, floor);
+    return 0;
+}
+
 int node_db_migrate(struct node_db *ndb, const char *datadir)
 {
     (void)datadir;
     if (!ndb->open) return -1;
 
-    /* Campaign C3: schema-downgrade / compat-floor recheck. This mirrors
-     * (and is independently re-derived from the same node_state keys as)
-     * the open-time preflight in database.c, which already decided whether
-     * to let this open proceed at all — a runtime reopen does not go
-     * through that preflight a second time, so this recheck is the only
-     * gate it sees. Checked FIRST, before the schema_migrations bootstrap
-     * below: a read-compatible open must never attempt any schema write,
-     * not even an idempotent one.
-     *
-     * If schema_version exceeds what this binary knows about AND the
-     * database's own schema_compat_floor is also above it, refuse: the
-     * newer binary applied at least one BREAKING change (a rename, drop, or
-     * a change to what an existing column/row means) that this binary
-     * cannot safely read or write through. If the floor is at or below what
-     * this binary knows, every change beyond it was ADDITIVE (new
-     * tables/columns/indexes this binary simply does not touch) — open and
-     * run normally, but skip every migration block below: this binary must
-     * never attempt a schema write for a version it does not understand. */
+    /* Checked FIRST, before the schema_migrations bootstrap below: a
+     * read-compatible open must never attempt any schema write, not even
+     * an idempotent one. See db_migrate_precheck_newer_schema() above. */
     int current_ver = node_db_schema_version(ndb);
-    if (current_ver > NODE_DB_MAX_SCHEMA) {
-        int floor = node_db_schema_compat_floor(ndb);
-        if (floor > NODE_DB_MAX_SCHEMA) {
-            node_db_log_newer_schema_refusal(current_ver, floor);
-            return -2;
-        }
-        if (!ndb->suppress_migrate_banner)
-            node_db_log_read_compatible_open(current_ver, floor);
-        return 0;
-    }
+    int precheck = db_migrate_precheck_newer_schema(ndb, current_ver);
+    if (precheck != DB_MIGRATE_PRECHECK_PROCEED) return precheck;
 
     /* Ensure schema_migrations table exists.  If this fails,
      * node_db_schema_version() will return 0 and every migration will
@@ -765,8 +787,14 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
      * database_migrate_features.c — same versioned-block pattern, same
      * schema_migrations + schema_version stamping. */
     int feature_applied = node_db_migrate_features(ndb, &current_ver, &floor);
+    /* A negative return here is DB_MIGRATE_BACKUP_FAILED_PROPAGATE, already
+     * combined by unconditional addition through every migration hop below
+     * this one (see that macro's comment in database_internal.h) — this is
+     * the ONE place that reads the sign and translates it to the public
+     * error code; current_ver/floor were already left exactly where the
+     * refusing step's own guard set them. */
     if (feature_applied < 0)
-        return feature_applied; /* e.g. NODE_DB_MIGRATE_ERR_BACKUP_FAILED */
+        return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
     applied += feature_applied;
 
     if (applied > 0)

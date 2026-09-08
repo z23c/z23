@@ -120,6 +120,50 @@ static bool migration_app_events_schema_valid(struct node_db *ndb)
                k_app_events_previous_index_stored);
 }
 
+/* v29: shared immutable signed AppEvent substrate. Blog, Social, Chat,
+ * games, and future manifest-declared topics converge on this one
+ * signature-verified store. receive_cursor is local anti-entropy position
+ * only; projections must resolve forks from signed identity and sequence,
+ * never arrival order. This application overlay is not consulted by
+ * consensus.
+ *
+ * v29 is ADDITIVE (a new shared table + indexes): floor_ver carries over
+ * unchanged, but is still persisted in the same transaction as
+ * schema_version so a reader never observes one bumped without the other.
+ * Split out of node_db_migrate_features() to keep that already-pinned
+ * function's own cyclomatic complexity from growing; always returns having
+ * either committed (with schema_version=29) or logged and rolled back —
+ * the caller advances current_ver unconditionally either way, same as
+ * every other migration block here. Returns 0 always (int, not void, only
+ * because LOG_ERR below expands to an int-returning `return -1;` on its
+ * own failure path; the caller does not read this value). */
+static int db_migrate_v29_app_events(struct node_db *ndb, int floor_ver)
+{
+    if (!node_db_begin(ndb))
+        LOG_ERR("db", "migrate v29: cannot begin atomic migration");
+    bool ok = node_db_exec(ndb, k_app_events_table_create) &&
+              node_db_exec(ndb, k_app_events_topic_index_create) &&
+              node_db_exec(ndb, k_app_events_author_index_create) &&
+              node_db_exec(ndb, k_app_events_previous_index_create) &&
+              migration_app_events_schema_valid(ndb) &&
+              node_db_exec(ndb,
+                  "INSERT OR IGNORE INTO schema_migrations(version) "
+                  "VALUES('029')");
+    int32_t version_29 = 29;
+    int32_t floor_29 = (int32_t)floor_ver;
+    ok = ok && node_db_state_set(ndb, "schema_version", &version_29,
+                                 sizeof(version_29));
+    ok = ok && node_db_state_set(ndb, "schema_compat_floor", &floor_29,
+                                 sizeof(floor_29));
+    ok = ok && node_db_commit(ndb);
+    if (!ok) {
+        if (!node_db_rollback(ndb))
+            LOG_ERR("db", "migrate v29: migration and rollback failed");
+        LOG_ERR("db", "migrate v29: atomic schema verification failed");
+    }
+    return 0;
+}
+
 int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
 {
     int applied = 0;
@@ -636,55 +680,17 @@ int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
     }
 
     if (current_ver < 29) {
-        /* v29: shared immutable signed AppEvent substrate. Blog, Social, Chat,
-         * games, and future manifest-declared topics converge on this one
-         * signature-verified store. receive_cursor is local anti-entropy
-         * position only; projections must resolve forks from signed identity
-         * and sequence, never arrival order. This application overlay is not
-         * consulted by consensus. */
-        if (!node_db_begin(ndb))
-            LOG_ERR("db", "migrate v29: cannot begin atomic migration");
-        bool ok = node_db_exec(ndb, k_app_events_table_create) &&
-                  node_db_exec(ndb, k_app_events_topic_index_create) &&
-                  node_db_exec(ndb, k_app_events_author_index_create) &&
-                  node_db_exec(ndb, k_app_events_previous_index_create) &&
-                  migration_app_events_schema_valid(ndb) &&
-                  node_db_exec(ndb,
-                      "INSERT OR IGNORE INTO schema_migrations(version) "
-                      "VALUES('029')");
-        int32_t version_29 = 29;
-        /* v29 is ADDITIVE (a new shared table + indexes): floor_ver carries
-         * over unchanged, but is still persisted in the same transaction as
-         * schema_version so a reader never observes one bumped without the
-         * other. */
-        int32_t floor_29 = (int32_t)floor_ver;
-        if (ok)
-            ok = node_db_state_set(ndb, "schema_version", &version_29,
-                                   sizeof(version_29));
-        if (ok)
-            ok = node_db_state_set(ndb, "schema_compat_floor", &floor_29,
-                                   sizeof(floor_29));
-        if (ok)
-            ok = node_db_commit(ndb);
-        if (!ok) {
-            if (!node_db_rollback(ndb))
-                LOG_ERR("db", "migrate v29: migration and rollback failed");
-            LOG_ERR("db", "migrate v29: atomic schema verification failed");
-        }
+        (void)db_migrate_v29_app_events(ndb, floor_ver);
         current_ver = 29;
         applied++;
     }
 
-    int applied2 = node_db_migrate_features_v30_up(ndb, &current_ver, &floor_ver);
-    if (applied2 < 0) {
-        /* A breaking step downstream refused for want of a pre-migration
-         * backup: current_ver/floor_ver were left exactly where that step's
-         * own guard set them, before it touched anything. */
-        *version = current_ver;
-        *floor = floor_ver;
-        return applied2;
-    }
-    applied += applied2;
+    /* Unconditional, branch-free forward — see DB_MIGRATE_BACKUP_FAILED_
+     * PROPAGATE's comment in database_internal.h for why this stays safe
+     * even when a downstream hop's own backup guard refused (current_ver/
+     * floor_ver, threaded by pointer all the way down, are already left
+     * exactly where that step's own guard set them). */
+    applied += node_db_migrate_features_v30_up(ndb, &current_ver, &floor_ver);
 
     *version = current_ver;
     *floor = floor_ver;

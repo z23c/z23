@@ -295,6 +295,40 @@ const char *cli_flag_client_whitelist_csv(void)
     return buf;
 }
 
+/* Bare boolean flags whose entire effect is "set this one env var to '1'".
+ * Routed through one table lookup (one branch in the args_parse_node_options
+ * ladder) instead of a dedicated strcmp/setenv else-if per flag, so a new
+ * bare-boolean flag never grows that already-pinned function's cyclomatic
+ * complexity. A flag whose handling does more than setenv (validates a
+ * value, mutates ctx directly, etc.) does NOT belong in this table — keep
+ * those as their own else-if arm. */
+struct cli_bare_bool_flag {
+    const char *flag;
+    const char *env_var;
+};
+
+static const struct cli_bare_bool_flag k_cli_bare_bool_flags[] = {
+    { "-wallet-no-phrase-backup", "ZCL_WALLET_NO_PHRASE_BACKUP" },
+    { "-db-backup-before-migrate", "ZCL_DB_BACKUP_BEFORE_MIGRATE" },
+};
+#define CLI_BARE_BOOL_FLAG_COUNT \
+    (sizeof(k_cli_bare_bool_flags) / sizeof(k_cli_bare_bool_flags[0]))
+
+/* Returns true and setenv()s the matching row's env var (never overwriting
+ * a running boot's own re-exec) when arg names one of k_cli_bare_bool_flags;
+ * returns false, touching nothing, otherwise. */
+static bool args_try_bare_bool_flag(const char *arg)
+{
+    for (size_t i = 0; i < CLI_BARE_BOOL_FLAG_COUNT; i++) {
+        if (strcmp(arg, k_cli_bare_bool_flags[i].flag) == 0) {
+            platform_environment_set(k_cli_bare_bool_flags[i].env_var, "1",
+                                     1);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool args_should_auto_add_local_peer(bool connect_only, int own_p2p_port,
                                      int legacy_p2p_port,
                                      bool already_listed)
@@ -718,33 +752,32 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
             platform_environment_set("ZCL_ALLOW_PLAINTEXT_WALLET", "1",
                                      1);
         }
-        else if (strcmp(argv[i], "-wallet-no-phrase-backup") == 0) {
-            /* "I accept a wallet with no written backup." A new wallet's
-             * twelve recovery words are shown once, on stdout, and under a
-             * systemd unit stdout is node.log — so when stdout is not a
-             * terminal the node refuses to create a spendable wallet at
-             * all. This flag is the operator saying that is fine here: the
-             * wallet is created, NO phrase is drawn, and every boot that
-             * creates one says so loudly. Read by
-             * boot_wallet_phrase_backup_waived() (config/boot_wallet_phrase.h). */
-            platform_environment_set("ZCL_WALLET_NO_PHRASE_BACKUP", "1",
-                                     1);
-        }
-        else if (strcmp(argv[i], "-db-backup-before-migrate") == 0) {
-            /* Opt-in pre-migration safety net. node.db is routinely too
-             * large to casually copy before every upgrade "just in case" —
-             * that size is exactly why a newer binary opening an older
-             * database now has a read-compatible path instead of a hard
-             * refusal (see database_migrate.c). This flag is the opposite
-             * choice for the one upgrade an operator judges worth the wait
-             * and the disk: before this boot applies any BREAKING schema
-             * step, it copies node.db to node.db.schema<N>.bak beside it via
-             * SQLite's online backup API, and refuses to proceed with that
-             * step at all if free space is short. Read by
-             * node_db_backup_before_breaking_migration()
-             * (engine/models/src/database_backup.c). Default OFF. */
-            platform_environment_set("ZCL_DB_BACKUP_BEFORE_MIGRATE", "1",
-                                     1);
+        /* "-wallet-no-phrase-backup": "I accept a wallet with no written
+         * backup." A new wallet's twelve recovery words are shown once, on
+         * stdout, and under a systemd unit stdout is node.log — so when
+         * stdout is not a terminal the node refuses to create a spendable
+         * wallet at all. This flag is the operator saying that is fine
+         * here: the wallet is created, NO phrase is drawn, and every boot
+         * that creates one says so loudly. Read by
+         * boot_wallet_phrase_backup_waived() (config/boot_wallet_phrase.h).
+         *
+         * "-db-backup-before-migrate": opt-in pre-migration safety net.
+         * node.db is routinely too large to casually copy before every
+         * upgrade "just in case" — that size is exactly why a newer binary
+         * opening an older database now has a read-compatible path instead
+         * of a hard refusal (see database_migrate.c). This flag is the
+         * opposite choice for the one upgrade an operator judges worth the
+         * wait and the disk: before this boot applies any BREAKING schema
+         * step, it copies node.db to node.db.schema<N>.bak beside it via
+         * SQLite's online backup API, and refuses to proceed with that step
+         * at all if free space is short. Read by
+         * node_db_backup_before_breaking_migration()
+         * (engine/models/src/database_backup.c). Default OFF.
+         *
+         * Both are bare booleans whose entire effect is one setenv, so both
+         * route through k_cli_bare_bool_flags/args_try_bare_bool_flag above
+         * instead of their own else-if arm. */
+        else if (args_try_bare_bool_flag(argv[i])) {
         }
         else if (strcmp(argv[i], "-rebuildfromlog") == 0) ctx->boot_from_log = true;
         else if (strcmp(argv[i], "-leveldb-no-verify-checksums") == 0) {

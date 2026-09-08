@@ -356,6 +356,40 @@ static bool migration_ledger_consistent(sqlite3 *db, int32_t marker,
     return ok;
 }
 
+/* version is newer than this binary knows. Whether that is refused
+ * outright or opened READ-COMPATIBLE depends entirely on the database's
+ * own compat floor — never on this binary guessing. Split out of
+ * inspect_schema() to keep that already-pinned function's own cyclomatic
+ * complexity from growing. */
+static struct node_db_schema_preflight inspect_schema_newer_than_binary(
+    sqlite3 *db, int32_t version)
+{
+    int32_t floor = version;
+    const char *floor_detail = NULL;
+    if (!read_compat_floor(db, version, &floor, &floor_detail))
+        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
+                                floor_detail);
+    if (floor > NODE_DB_MAX_SCHEMA) {
+        struct node_db_schema_preflight out = preflight_result(
+            NODE_DB_SCHEMA_PREFLIGHT_NEWER, version,
+            "newer schema marker above this binary's compat floor");
+        out.floor = floor;
+        return out;
+    }
+    const char *ledger_detail = NULL;
+    if (!migration_ledger_consistent(db, version, &ledger_detail)) {
+        struct node_db_schema_preflight out = preflight_result(
+            NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version, ledger_detail);
+        out.floor = floor;
+        return out;
+    }
+    struct node_db_schema_preflight out = preflight_result(
+        NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE, version,
+        "newer schema marker within this binary's compat floor");
+    out.floor = floor;
+    return out;
+}
+
 static struct node_db_schema_preflight inspect_schema(sqlite3 *db)
 {
     int tables = 0;
@@ -413,35 +447,8 @@ static struct node_db_schema_preflight inspect_schema(sqlite3 *db)
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
             "SCHEMA_VERSION_UNKNOWN: schema marker is unsupported");
 
-    if (version > NODE_DB_MAX_SCHEMA) {
-        /* Newer than this binary knows. Whether that is refused outright or
-         * opened READ-COMPATIBLE depends entirely on the database's own
-         * compat floor — never on this binary guessing. */
-        int32_t floor = version;
-        const char *floor_detail = NULL;
-        if (!read_compat_floor(db, version, &floor, &floor_detail))
-            return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
-                                    floor_detail);
-        if (floor > NODE_DB_MAX_SCHEMA) {
-            struct node_db_schema_preflight out = preflight_result(
-                NODE_DB_SCHEMA_PREFLIGHT_NEWER, version,
-                "newer schema marker above this binary's compat floor");
-            out.floor = floor;
-            return out;
-        }
-        const char *ledger_detail = NULL;
-        if (!migration_ledger_consistent(db, version, &ledger_detail)) {
-            struct node_db_schema_preflight out = preflight_result(
-                NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version, ledger_detail);
-            out.floor = floor;
-            return out;
-        }
-        struct node_db_schema_preflight out = preflight_result(
-            NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE, version,
-            "newer schema marker within this binary's compat floor");
-        out.floor = floor;
-        return out;
-    }
+    if (version > NODE_DB_MAX_SCHEMA)
+        return inspect_schema_newer_than_binary(db, version);
 
     const char *detail = NULL;
     if (!migration_ledger_consistent(db, version, &detail))

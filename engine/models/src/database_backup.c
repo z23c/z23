@@ -50,20 +50,14 @@ static bool backup_has_room(uint64_t available_bytes, uint64_t db_size_bytes)
     return available_bytes >= db_size_bytes + margin;
 }
 
-bool node_db_backup_before_breaking_migration(struct node_db *ndb,
-                                              int old_schema_version)
+/* Refuses (LOG_FAIL -> false) unless at least a database-size-plus-margin
+ * of free space sits beside ndb->path. Split out of
+ * node_db_backup_before_breaking_migration() to keep that caller's own
+ * cyclomatic complexity low: every branch here is the space-refusal path,
+ * none of it is the actual copy. */
+static bool backup_check_space(struct node_db *ndb, int old_schema_version,
+                                uint64_t *out_db_size)
 {
-    /* LOG_FAIL (not LOG_ERR) below: LOG_ERR's own `return -1;` is meant for
-     * int-returning callers and would come back through this bool-returning
-     * function as a truthy `true`, silently inverting every refusal into a
-     * permit. LOG_FAIL logs the same way and returns `false`. */
-    if (!ndb || !ndb->open)
-        LOG_FAIL("db", "migrate: backup requested against a closed handle");
-
-    const char *flag = getenv("ZCL_DB_BACKUP_BEFORE_MIGRATE");
-    if (!flag || strcmp(flag, "1") != 0)
-        return true; /* opt-in feature, not requested: no-op success */
-
     struct stat st;
     if (stat(ndb->path, &st) != 0)
         LOG_FAIL("db", "migrate: backup: cannot stat %s before schema v%d",
@@ -78,7 +72,7 @@ bool node_db_backup_before_breaking_migration(struct node_db *ndb,
                  ndb->path);
     }
 
-    if (!backup_has_room(available, db_size)) {
+    if (!backup_has_room(available, db_size))
         LOG_FAIL("db",
             "migrate: refusing to apply the breaking schema step above "
             "v%d — pre-migration backup needs %llu bytes free beside %s "
@@ -88,21 +82,27 @@ bool node_db_backup_before_breaking_migration(struct node_db *ndb,
             (unsigned long long)(db_size +
                 NODE_DB_BACKUP_FREE_SPACE_MARGIN_BYTES),
             ndb->path, (unsigned long long)available);
-    }
 
-    char bak_path[1200];
-    int n = snprintf(bak_path, sizeof(bak_path), "%s.schema%d.bak",
-                     ndb->path, old_schema_version);
-    if (n <= 0 || (size_t)n >= sizeof(bak_path))
-        LOG_FAIL("db", "migrate: backup: path too long for %s", ndb->path);
+    *out_db_size = db_size;
+    return true;
+}
 
+/* Copies ndb's live database onto a TEMPORARY sibling file via SQLite's
+ * online backup API, then renames it into place only once the copy is
+ * verified complete — so a reader never observes a partially written
+ * "<path>.schema<N>.bak" left by a crash or a failed copy mid-step. */
+static bool backup_copy_to_tmp_and_rename(struct node_db *ndb,
+                                          const char *bak_path,
+                                          const char *tmp_path)
+{
     sqlite3 *dest = NULL;
-    if (sqlite3_open(bak_path, &dest) != SQLITE_OK) {
+    if (sqlite3_open(tmp_path, &dest) != SQLITE_OK) {
         const char *errmsg = dest ? sqlite3_errmsg(dest) : "sqlite3_open failed";
-        LOG_WARN("db", "migrate: backup: could not create %s: %s", bak_path,
+        LOG_WARN("db", "migrate: backup: could not create %s: %s", tmp_path,
                  errmsg);
         if (dest)
             sqlite3_close(dest);
+        (void)remove(tmp_path);
         return false;
     }
 
@@ -110,9 +110,9 @@ bool node_db_backup_before_breaking_migration(struct node_db *ndb,
         sqlite3_backup_init(dest, "main", ndb->db, "main");
     if (!backup) {
         LOG_WARN("db", "migrate: backup: sqlite3_backup_init failed for "
-                 "%s: %s", bak_path, sqlite3_errmsg(dest));
+                 "%s: %s", tmp_path, sqlite3_errmsg(dest));
         sqlite3_close(dest);
-        (void)remove(bak_path);
+        (void)remove(tmp_path);
         return false;
     }
 
@@ -120,21 +120,63 @@ bool node_db_backup_before_breaking_migration(struct node_db *ndb,
     do {
         step_rc = sqlite3_backup_step(backup, 256);
     } while (step_rc == SQLITE_OK);
-
     int finish_rc = sqlite3_backup_finish(backup);
     sqlite3_close(dest);
 
     if (step_rc != SQLITE_DONE) {
         LOG_WARN("db", "migrate: backup: copy of %s to %s failed (rc=%d)",
-                 ndb->path, bak_path, step_rc);
-        (void)remove(bak_path);
+                 ndb->path, tmp_path, step_rc);
+        (void)remove(tmp_path);
         return false;
     }
     if (finish_rc != SQLITE_OK) {
         LOG_WARN("db", "migrate: backup: finish failed for %s (rc=%d)",
-                 bak_path, finish_rc);
+                 tmp_path, finish_rc);
+        (void)remove(tmp_path);
         return false;
     }
+    if (rename(tmp_path, bak_path) != 0) {
+        LOG_WARN("db", "migrate: backup: rename %s -> %s failed",
+                 tmp_path, bak_path);
+        (void)remove(tmp_path);
+        return false;
+    }
+    return true;
+}
+
+bool node_db_backup_before_breaking_migration(struct node_db *ndb,
+                                              int old_schema_version)
+{
+    /* LOG_FAIL (not LOG_ERR) below: LOG_ERR's own `return -1;` is meant for
+     * int-returning callers and would come back through this bool-returning
+     * function as a truthy `true`, silently inverting every refusal into a
+     * permit. LOG_FAIL logs the same way and returns `false`. */
+    if (!ndb || !ndb->open)
+        LOG_FAIL("db", "migrate: backup requested against a closed handle");
+
+    const char *flag = getenv("ZCL_DB_BACKUP_BEFORE_MIGRATE");
+    if (!flag || strcmp(flag, "1") != 0)
+        return true; /* opt-in feature, not requested: no-op success */
+
+    uint64_t db_size = 0;
+    if (!backup_check_space(ndb, old_schema_version, &db_size))
+        return false;
+
+    char bak_path[1200];
+    int n = snprintf(bak_path, sizeof(bak_path), "%s.schema%d.bak",
+                     ndb->path, old_schema_version);
+    if (n <= 0 || (size_t)n >= sizeof(bak_path))
+        LOG_FAIL("db", "migrate: backup: path too long for %s", ndb->path);
+
+    char tmp_path[1216];
+    n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", bak_path);
+    if (n <= 0 || (size_t)n >= sizeof(tmp_path))
+        LOG_FAIL("db", "migrate: backup: temp path too long for %s",
+                 ndb->path);
+    (void)remove(tmp_path); /* clear any stale temp from a prior crash */
+
+    if (!backup_copy_to_tmp_and_rename(ndb, bak_path, tmp_path))
+        return false;
 
     LOG_WARN("db", "migrate: wrote pre-migration backup %s (schema v%d, "
              "%llu bytes) before applying a breaking schema step",

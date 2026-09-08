@@ -2036,10 +2036,10 @@ engine/models/src/database.c:node_db_open_impl:29
 engine/models/src/database_migrate.c:node_db_migrate:19
 engine/models/src/database_migrate.c:node_db_state_set_detached:18
 engine/models/src/database_migrate_features.c:migration_schema_object_matches:20
-engine/models/src/database_migrate_features.c:node_db_migrate_features:47
+engine/models/src/database_migrate_features.c:node_db_migrate_features:37
 engine/models/src/database_migrate_features_v30_up.c:node_db_migrate_features_v30_up:20
-engine/models/src/database_migrate_features_v49_up.c:node_db_migrate_features_v49_up:31
-engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:75
+engine/models/src/database_migrate_features_v49_up.c:node_db_migrate_features_v49_up:25
+engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:51
 engine/models/src/database_modes.c:node_db_wal_checkpoint_result:21
 engine/models/src/database_owner_lease.c:node_db_owner_lease_acquire:19
 engine/models/src/database_owner_lease.c:node_db_owner_lease_probe:23

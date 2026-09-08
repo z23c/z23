@@ -16,6 +16,286 @@
 #include "models/database.h"
 #include "models/database_internal.h"
 
+/* v51: ZCODE science findings admission (G4) — extend the plan ledger's
+ * kind CHECK with 'findings' for zcode.science.findings.plan|commit. SQLite
+ * cannot ALTER a CHECK constraint, so the table is rebuilt and rows carry
+ * over.
+ *
+ * Wraps its own `current_ver < 51` check and backup-guard failure handling
+ * (same pattern as db_migrate_step_82 in database_migrate_features_v67_up.c)
+ * so the caller's own pinned cyclomatic complexity never has to carry this
+ * version gate, or the backup guard's branch, as its own. Returns 0 on
+ * skip/success, or DB_MIGRATE_BACKUP_FAILED_PROPAGATE (with *current_ver/
+ * *floor_ver left exactly where the guard found them) if the pre-migration
+ * backup refused — see that macro's own comment in database_internal.h for
+ * why this is the internal propagation sentinel and not the public
+ * NODE_DB_MIGRATE_ERR_BACKUP_FAILED. */
+static int db_migrate_step_51(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 51) return 0;
+    if (!node_db_backup_before_breaking_migration(ndb, *current_ver))
+        return DB_MIGRATE_BACKUP_FAILED_PROPAGATE;
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS zcode_science_plans_v51 ("
+        "plan_root TEXT PRIMARY KEY CHECK(length(plan_root)=64),"
+        "kind TEXT NOT NULL CHECK(kind IN ('study','work','findings','review','vote')),"
+        "request_hash TEXT NOT NULL UNIQUE CHECK(length(request_hash)=64),"
+        "wire_hex TEXT NOT NULL,"
+        "result_root TEXT NOT NULL CHECK(length(result_root) IN (0,64)),"
+        "state TEXT NOT NULL CHECK(state IN ('PLANNED','COMMITTED')),"
+        "expires_unix INTEGER NOT NULL CHECK(expires_unix>0),"
+        "created_at INTEGER NOT NULL)");
+    node_db_exec(ndb,
+        "INSERT INTO zcode_science_plans_v51 "
+        "SELECT * FROM zcode_science_plans");
+    node_db_exec(ndb, "DROP TABLE zcode_science_plans");
+    node_db_exec(ndb,
+        "ALTER TABLE zcode_science_plans_v51 "
+        "RENAME TO zcode_science_plans");
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('051')");
+    *floor_ver = 51; /* BREAKING: kind CHECK rebuild */
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 51, *floor_ver);
+    *current_ver = 51;
+    (*applied)++;
+    return 0;
+}
+
+/* v61: isolated wallet-local transaction intents. The broker and
+ * agent-session authorities remain dev/prod-only; this widens only the
+ * durable vault-intent scope so a pre-funded operator-lane=test wallet can
+ * reserve and recover its own exact transaction plans. SQLite cannot ALTER
+ * a CHECK constraint, so rebuild the parent table atomically and preserve
+ * every existing intent and index.
+ *
+ * Wraps its own `current_ver < 61` check, same reasoning as
+ * db_migrate_step_51 above. */
+static int db_migrate_step_61(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 61) return 0;
+    if (!node_db_backup_before_breaking_migration(ndb, *current_ver))
+        return DB_MIGRATE_BACKUP_FAILED_PROPAGATE;
+    if (!node_db_exec(ndb,
+        "PRAGMA foreign_keys=OFF;"
+        "BEGIN IMMEDIATE;"
+        "CREATE TABLE vault_intents_v61 ("
+        "plan_id BLOB PRIMARY KEY CHECK(length(plan_id)=32),"
+        "digest BLOB NOT NULL CHECK(length(digest)=32),"
+        "state INTEGER NOT NULL DEFAULT 0,"
+        "route INTEGER NOT NULL,"
+        "created_at INTEGER NOT NULL,"
+        "expires_at INTEGER NOT NULL,"
+        "anchor_height INTEGER NOT NULL,"
+        "anchor_hash BLOB NOT NULL CHECK(length(anchor_hash)=32),"
+        "encrypted_payload BLOB NOT NULL,"
+        "txid BLOB CHECK(txid IS NULL OR length(txid)=32),"
+        "confirm_height INTEGER NOT NULL DEFAULT -1,"
+        "confirm_hash BLOB CHECK(confirm_hash IS NULL OR length(confirm_hash)=32),"
+        "error_code TEXT NOT NULL DEFAULT '',"
+        "updated_at INTEGER NOT NULL,"
+        "wallet_scope TEXT NOT NULL DEFAULT '' "
+        "CHECK(wallet_scope IN ('','dev','prod','test')),"
+        "wallet_instance_id TEXT NOT NULL DEFAULT '' "
+        "CHECK(length(wallet_instance_id) IN (0,32)),"
+        "wallet_genesis TEXT NOT NULL DEFAULT '' "
+        "CHECK(length(wallet_genesis) IN (0,64)),"
+        "snapshot_root BLOB "
+        "CHECK(snapshot_root IS NULL OR length(snapshot_root)=32),"
+        "recipient_value_zat INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(recipient_value_zat>=0),"
+        "max_fee_zat INTEGER NOT NULL DEFAULT 0 CHECK(max_fee_zat>=0),"
+        "reserved_zat INTEGER NOT NULL DEFAULT 0 CHECK(reserved_zat>=0),"
+        "application_kind TEXT NOT NULL DEFAULT '' "
+        "CHECK(length(application_kind)<=32),"
+        "idempotency_key TEXT NOT NULL DEFAULT '' "
+        "CHECK(length(idempotency_key)<=64),"
+        "request_digest BLOB "
+        "CHECK(request_digest IS NULL OR length(request_digest)=32)"
+        ") WITHOUT ROWID;"
+        "INSERT INTO vault_intents_v61 SELECT * FROM vault_intents;"
+        "DROP TABLE vault_intents;"
+        "ALTER TABLE vault_intents_v61 RENAME TO vault_intents;"
+        "CREATE INDEX idx_vault_intents_state_time "
+        "ON vault_intents(state,created_at DESC);"
+        "CREATE INDEX idx_vault_intents_wallet_reserve "
+        "ON vault_intents(wallet_scope,wallet_instance_id,state);"
+        "CREATE UNIQUE INDEX idx_vault_intents_application_idempotency "
+        "ON vault_intents(wallet_scope,application_kind,idempotency_key) "
+        "WHERE application_kind<>'' AND idempotency_key<>'';"
+        "COMMIT;"
+        "PRAGMA foreign_keys=ON;")) {
+        (void)node_db_exec(ndb, "ROLLBACK;PRAGMA foreign_keys=ON;");
+        LOG_ERR("db", "migrate v61: atomic vault-intent rebuild failed");
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('061')"))
+        LOG_ERR("db", "migrate v61: migration stamp failed");
+    *floor_ver = 61; /* BREAKING: vault_intents CHECK rebuild */
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 61, *floor_ver);
+    *current_ver = 61;
+    (*applied)++;
+    return 0;
+}
+
+/* v63: file-offer wire v2 (onion-routed delivery endpoint). The signed
+ * offer gains endpoint_type (0=clearnet, 1=onion) and the seller's Tor v3
+ * onion_pubkey; auth_version 2 marks v2 wires. SQLite cannot ALTER the v55
+ * CHECK(auth_version IN (0,1)), so rebuild the table atomically and
+ * preserve every offer and index (the unique indexes widen to IN (1,2)).
+ *
+ * Wraps its own `current_ver < 63` check, same reasoning as
+ * db_migrate_step_51 above. */
+static int db_migrate_step_63(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 63) return 0;
+    if (!node_db_backup_before_breaking_migration(ndb, *current_ver))
+        return DB_MIGRATE_BACKUP_FAILED_PROPAGATE;
+    if (!node_db_exec(ndb,
+        "PRAGMA foreign_keys=OFF;"
+        "BEGIN IMMEDIATE;"
+        "CREATE TABLE file_offers_v63 ("
+        "root_hash BLOB NOT NULL PRIMARY KEY,"
+        "filename TEXT NOT NULL,"
+        "size_bytes INTEGER NOT NULL,"
+        "num_chunks INTEGER NOT NULL,"
+        "price_per_mb INTEGER NOT NULL,"
+        "z_addr BLOB,peer_ip BLOB,peer_port INTEGER,"
+        "last_seen INTEGER,ttl INTEGER DEFAULT 4,"
+        "auth_version INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(auth_version IN (0,1,2)),"
+        "network_genesis BLOB NOT NULL "
+        "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(network_genesis)=32),"
+        "seller_pubkey BLOB NOT NULL "
+        "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(seller_pubkey)=32),"
+        "nonce INTEGER NOT NULL DEFAULT 0 CHECK(nonce>=0),"
+        "issued_unix INTEGER NOT NULL DEFAULT 0 CHECK(issued_unix>=0),"
+        "expires_unix INTEGER NOT NULL DEFAULT 0 CHECK(expires_unix>=0),"
+        "seller_signature BLOB NOT NULL "
+        "DEFAULT X'00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(seller_signature)=64),"
+        "offer_id BLOB NOT NULL "
+        "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(offer_id)=32),"
+        "endpoint_type INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(endpoint_type IN (0,1)),"
+        "onion_pubkey BLOB NOT NULL "
+        "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(onion_pubkey)=32));"
+        "INSERT INTO file_offers_v63 "
+        "SELECT root_hash,filename,size_bytes,num_chunks,price_per_mb,"
+        "z_addr,peer_ip,peer_port,last_seen,ttl,auth_version,"
+        "network_genesis,seller_pubkey,nonce,issued_unix,expires_unix,"
+        "seller_signature,offer_id,0,"
+        "X'0000000000000000000000000000000000000000000000000000000000000000' "
+        "FROM file_offers;"
+        "DROP TABLE file_offers;"
+        "ALTER TABLE file_offers_v63 RENAME TO file_offers;"
+        "CREATE INDEX idx_file_offers_last_seen "
+        "ON file_offers(last_seen DESC);"
+        "CREATE UNIQUE INDEX idx_file_offers_offer_id "
+        "ON file_offers(offer_id) WHERE auth_version IN (1,2);"
+        "CREATE UNIQUE INDEX idx_file_offers_seller_nonce "
+        "ON file_offers(seller_pubkey,nonce) WHERE auth_version IN (1,2);"
+        "CREATE INDEX idx_file_offers_expires "
+        "ON file_offers(expires_unix) WHERE auth_version IN (1,2);"
+        "COMMIT;"
+        "PRAGMA foreign_keys=ON;")) {
+        (void)node_db_exec(ndb, "ROLLBACK;PRAGMA foreign_keys=ON;");
+        LOG_ERR("db", "migrate v63: atomic file-offer rebuild failed");
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('063')"))
+        LOG_ERR("db", "migrate v63: migration stamp failed");
+    *floor_ver = 63; /* BREAKING: file_offers CHECK rebuild */
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 63, *floor_ver);
+    *current_ver = 63;
+    (*applied)++;
+    return 0;
+}
+
+/* v64: widen the market_payment_claims offer_wire CHECK for v2
+ * (onion-endpoint) offers. v56 pinned length(offer_wire)=535 — the v1
+ * wire — before v2 wires existed; v63 introduced the 568-byte v2 offer
+ * wire (FILE_MARKET_OFFER_WIRE_BYTES_V2) but only rebuilt file_offers, so
+ * every claim INSERT for an onion offer failed the CHECK and the seller
+ * silently never persisted the claim (delivery authorization then sat at
+ * PENDING forever: no claim candidates). SQLite cannot ALTER a CHECK, so
+ * rebuild atomically, preserving every row and index (no stored row can
+ * violate the new CHECK: the old one was strictly tighter).
+ *
+ * Wraps its own `current_ver < 64` check, same reasoning as
+ * db_migrate_step_51 above. */
+static int db_migrate_step_64(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 64) return 0;
+    if (!node_db_backup_before_breaking_migration(ndb, *current_ver))
+        return DB_MIGRATE_BACKUP_FAILED_PROPAGATE;
+    if (!node_db_exec(ndb,
+        "PRAGMA foreign_keys=OFF;"
+        "BEGIN IMMEDIATE;"
+        "CREATE TABLE market_payment_claims_v64 ("
+        "claim_id BLOB NOT NULL PRIMARY KEY CHECK(length(claim_id)=32),"
+        "offer_id BLOB NOT NULL CHECK(length(offer_id)=32),"
+        "txid BLOB NOT NULL CHECK(length(txid)=32),"
+        "buyer_pubkey BLOB NOT NULL CHECK(length(buyer_pubkey)=32),"
+        "chunk_start INTEGER NOT NULL CHECK(chunk_start>=0),"
+        "chunks_paid INTEGER NOT NULL CHECK(chunks_paid>0),"
+        "amount_zat INTEGER NOT NULL CHECK(amount_zat>0 AND "
+        "amount_zat<=2100000000000000),"
+        "claim_wire BLOB NOT NULL CHECK(length(claim_wire)=218),"
+        "offer_wire BLOB NOT NULL "
+        "CHECK(length(offer_wire) IN (535,568)),"
+        "status TEXT NOT NULL CHECK(status IN "
+        "('PENDING','CONFIRMED','UNKNOWN','CONFLICTED','REJECTED')),"
+        "status_reason TEXT NOT NULL,"
+        "output_index INTEGER NOT NULL DEFAULT -1 "
+        "CHECK(output_index>=-1),"
+        "block_height INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(block_height>=0),"
+        "confirmations INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(confirmations>=0),"
+        "observed_at INTEGER NOT NULL CHECK(observed_at>0),"
+        "reconciled_at INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(reconciled_at>=0));"
+        "INSERT INTO market_payment_claims_v64 "
+        "SELECT claim_id,offer_id,txid,buyer_pubkey,chunk_start,"
+        "chunks_paid,amount_zat,claim_wire,offer_wire,status,"
+        "status_reason,output_index,block_height,confirmations,"
+        "observed_at,reconciled_at FROM market_payment_claims;"
+        "DROP TABLE market_payment_claims;"
+        "ALTER TABLE market_payment_claims_v64 "
+        "RENAME TO market_payment_claims;"
+        "CREATE UNIQUE INDEX idx_market_payment_claim_contract "
+        "ON market_payment_claims(offer_id,txid,chunk_start,chunks_paid,"
+        "buyer_pubkey);"
+        "CREATE INDEX idx_market_payment_claim_buyer "
+        "ON market_payment_claims(offer_id,buyer_pubkey,status);"
+        "CREATE INDEX idx_market_payment_claim_txid "
+        "ON market_payment_claims(txid);"
+        "COMMIT;"
+        "PRAGMA foreign_keys=ON;")) {
+        (void)node_db_exec(ndb, "ROLLBACK;PRAGMA foreign_keys=ON;");
+        LOG_ERR("db", "migrate v64: atomic payment-claim rebuild failed");
+    }
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) "
+            "VALUES('064')"))
+        LOG_ERR("db", "migrate v64: migration stamp failed");
+    *floor_ver = 64; /* BREAKING: market_payment_claims CHECK rebuild */
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 64, *floor_ver);
+    *current_ver = 64;
+    (*applied)++;
+    return 0;
+}
+
 int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
                                     int *floor)
 {
@@ -156,39 +436,13 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
         applied++;
     }
 
-    if (current_ver < 51) {
-        /* v51: ZCODE science findings admission (G4) — extend the plan
-         * ledger's kind CHECK with 'findings' for
-         * zcode.science.findings.plan|commit. SQLite cannot ALTER a CHECK
-         * constraint, so the table is rebuilt and rows carry over. */
-        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+    {
+        int r = db_migrate_step_51(ndb, &current_ver, &floor_ver, &applied);
+        if (r < 0) {
             *version = current_ver;
             *floor = floor_ver;
-            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+            return r;
         }
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS zcode_science_plans_v51 ("
-            "plan_root TEXT PRIMARY KEY CHECK(length(plan_root)=64),"
-            "kind TEXT NOT NULL CHECK(kind IN ('study','work','findings','review','vote')),"
-            "request_hash TEXT NOT NULL UNIQUE CHECK(length(request_hash)=64),"
-            "wire_hex TEXT NOT NULL,"
-            "result_root TEXT NOT NULL CHECK(length(result_root) IN (0,64)),"
-            "state TEXT NOT NULL CHECK(state IN ('PLANNED','COMMITTED')),"
-            "expires_unix INTEGER NOT NULL CHECK(expires_unix>0),"
-            "created_at INTEGER NOT NULL)");
-        node_db_exec(ndb,
-            "INSERT INTO zcode_science_plans_v51 "
-            "SELECT * FROM zcode_science_plans");
-        node_db_exec(ndb, "DROP TABLE zcode_science_plans");
-        node_db_exec(ndb,
-            "ALTER TABLE zcode_science_plans_v51 "
-            "RENAME TO zcode_science_plans");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('051')");
-        floor_ver = 51; /* BREAKING: kind CHECK rebuild */
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 51, floor_ver);
-        current_ver = 51;
-        applied++;
     }
 
     if (current_ver < 52) {
@@ -521,78 +775,13 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
         applied++;
     }
 
-    if (current_ver < 61) {
-        /* v61: isolated wallet-local transaction intents. The broker and
-         * agent-session authorities remain dev/prod-only; this widens only
-         * the durable vault-intent scope so a pre-funded operator-lane=test
-         * wallet can reserve and recover its own exact transaction plans.
-         * SQLite cannot ALTER a CHECK constraint, so rebuild the parent
-         * table atomically and preserve every existing intent and index. */
-        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+    {
+        int r = db_migrate_step_61(ndb, &current_ver, &floor_ver, &applied);
+        if (r < 0) {
             *version = current_ver;
             *floor = floor_ver;
-            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+            return r;
         }
-        if (!node_db_exec(ndb,
-            "PRAGMA foreign_keys=OFF;"
-            "BEGIN IMMEDIATE;"
-            "CREATE TABLE vault_intents_v61 ("
-            "plan_id BLOB PRIMARY KEY CHECK(length(plan_id)=32),"
-            "digest BLOB NOT NULL CHECK(length(digest)=32),"
-            "state INTEGER NOT NULL DEFAULT 0,"
-            "route INTEGER NOT NULL,"
-            "created_at INTEGER NOT NULL,"
-            "expires_at INTEGER NOT NULL,"
-            "anchor_height INTEGER NOT NULL,"
-            "anchor_hash BLOB NOT NULL CHECK(length(anchor_hash)=32),"
-            "encrypted_payload BLOB NOT NULL,"
-            "txid BLOB CHECK(txid IS NULL OR length(txid)=32),"
-            "confirm_height INTEGER NOT NULL DEFAULT -1,"
-            "confirm_hash BLOB CHECK(confirm_hash IS NULL OR length(confirm_hash)=32),"
-            "error_code TEXT NOT NULL DEFAULT '',"
-            "updated_at INTEGER NOT NULL,"
-            "wallet_scope TEXT NOT NULL DEFAULT '' "
-            "CHECK(wallet_scope IN ('','dev','prod','test')),"
-            "wallet_instance_id TEXT NOT NULL DEFAULT '' "
-            "CHECK(length(wallet_instance_id) IN (0,32)),"
-            "wallet_genesis TEXT NOT NULL DEFAULT '' "
-            "CHECK(length(wallet_genesis) IN (0,64)),"
-            "snapshot_root BLOB "
-            "CHECK(snapshot_root IS NULL OR length(snapshot_root)=32),"
-            "recipient_value_zat INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(recipient_value_zat>=0),"
-            "max_fee_zat INTEGER NOT NULL DEFAULT 0 CHECK(max_fee_zat>=0),"
-            "reserved_zat INTEGER NOT NULL DEFAULT 0 CHECK(reserved_zat>=0),"
-            "application_kind TEXT NOT NULL DEFAULT '' "
-            "CHECK(length(application_kind)<=32),"
-            "idempotency_key TEXT NOT NULL DEFAULT '' "
-            "CHECK(length(idempotency_key)<=64),"
-            "request_digest BLOB "
-            "CHECK(request_digest IS NULL OR length(request_digest)=32)"
-            ") WITHOUT ROWID;"
-            "INSERT INTO vault_intents_v61 SELECT * FROM vault_intents;"
-            "DROP TABLE vault_intents;"
-            "ALTER TABLE vault_intents_v61 RENAME TO vault_intents;"
-            "CREATE INDEX idx_vault_intents_state_time "
-            "ON vault_intents(state,created_at DESC);"
-            "CREATE INDEX idx_vault_intents_wallet_reserve "
-            "ON vault_intents(wallet_scope,wallet_instance_id,state);"
-            "CREATE UNIQUE INDEX idx_vault_intents_application_idempotency "
-            "ON vault_intents(wallet_scope,application_kind,idempotency_key) "
-            "WHERE application_kind<>'' AND idempotency_key<>'';"
-            "COMMIT;"
-            "PRAGMA foreign_keys=ON;")) {
-            (void)node_db_exec(ndb, "ROLLBACK;PRAGMA foreign_keys=ON;");
-            LOG_ERR("db", "migrate v61: atomic vault-intent rebuild failed");
-        }
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('061')"))
-            LOG_ERR("db", "migrate v61: migration stamp failed");
-        floor_ver = 61; /* BREAKING: vault_intents CHECK rebuild */
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 61, floor_ver);
-        current_ver = 61;
-        applied++;
     }
 
     if (current_ver < 62) {
@@ -613,154 +802,22 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
         applied++;
     }
 
-    if (current_ver < 63) {
-        /* v63: file-offer wire v2 (onion-routed delivery endpoint). The
-         * signed offer gains endpoint_type (0=clearnet, 1=onion) and the
-         * seller's Tor v3 onion_pubkey; auth_version 2 marks v2 wires.
-         * SQLite cannot ALTER the v55 CHECK(auth_version IN (0,1)), so
-         * rebuild the table atomically and preserve every offer and index
-         * (the unique indexes widen to IN (1,2)). */
-        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+    {
+        int r = db_migrate_step_63(ndb, &current_ver, &floor_ver, &applied);
+        if (r < 0) {
             *version = current_ver;
             *floor = floor_ver;
-            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+            return r;
         }
-        if (!node_db_exec(ndb,
-            "PRAGMA foreign_keys=OFF;"
-            "BEGIN IMMEDIATE;"
-            "CREATE TABLE file_offers_v63 ("
-            "root_hash BLOB NOT NULL PRIMARY KEY,"
-            "filename TEXT NOT NULL,"
-            "size_bytes INTEGER NOT NULL,"
-            "num_chunks INTEGER NOT NULL,"
-            "price_per_mb INTEGER NOT NULL,"
-            "z_addr BLOB,peer_ip BLOB,peer_port INTEGER,"
-            "last_seen INTEGER,ttl INTEGER DEFAULT 4,"
-            "auth_version INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(auth_version IN (0,1,2)),"
-            "network_genesis BLOB NOT NULL "
-            "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
-            "CHECK(length(network_genesis)=32),"
-            "seller_pubkey BLOB NOT NULL "
-            "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
-            "CHECK(length(seller_pubkey)=32),"
-            "nonce INTEGER NOT NULL DEFAULT 0 CHECK(nonce>=0),"
-            "issued_unix INTEGER NOT NULL DEFAULT 0 CHECK(issued_unix>=0),"
-            "expires_unix INTEGER NOT NULL DEFAULT 0 CHECK(expires_unix>=0),"
-            "seller_signature BLOB NOT NULL "
-            "DEFAULT X'00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000' "
-            "CHECK(length(seller_signature)=64),"
-            "offer_id BLOB NOT NULL "
-            "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
-            "CHECK(length(offer_id)=32),"
-            "endpoint_type INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(endpoint_type IN (0,1)),"
-            "onion_pubkey BLOB NOT NULL "
-            "DEFAULT X'0000000000000000000000000000000000000000000000000000000000000000' "
-            "CHECK(length(onion_pubkey)=32));"
-            "INSERT INTO file_offers_v63 "
-            "SELECT root_hash,filename,size_bytes,num_chunks,price_per_mb,"
-            "z_addr,peer_ip,peer_port,last_seen,ttl,auth_version,"
-            "network_genesis,seller_pubkey,nonce,issued_unix,expires_unix,"
-            "seller_signature,offer_id,0,"
-            "X'0000000000000000000000000000000000000000000000000000000000000000' "
-            "FROM file_offers;"
-            "DROP TABLE file_offers;"
-            "ALTER TABLE file_offers_v63 RENAME TO file_offers;"
-            "CREATE INDEX idx_file_offers_last_seen "
-            "ON file_offers(last_seen DESC);"
-            "CREATE UNIQUE INDEX idx_file_offers_offer_id "
-            "ON file_offers(offer_id) WHERE auth_version IN (1,2);"
-            "CREATE UNIQUE INDEX idx_file_offers_seller_nonce "
-            "ON file_offers(seller_pubkey,nonce) WHERE auth_version IN (1,2);"
-            "CREATE INDEX idx_file_offers_expires "
-            "ON file_offers(expires_unix) WHERE auth_version IN (1,2);"
-            "COMMIT;"
-            "PRAGMA foreign_keys=ON;")) {
-            (void)node_db_exec(ndb, "ROLLBACK;PRAGMA foreign_keys=ON;");
-            LOG_ERR("db", "migrate v63: atomic file-offer rebuild failed");
-        }
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('063')"))
-            LOG_ERR("db", "migrate v63: migration stamp failed");
-        floor_ver = 63; /* BREAKING: file_offers CHECK rebuild */
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 63, floor_ver);
-        current_ver = 63;
-        applied++;
     }
 
-    if (current_ver < 64) {
-        /* v64: widen the market_payment_claims offer_wire CHECK for v2
-         * (onion-endpoint) offers. v56 pinned length(offer_wire)=535 —
-         * the v1 wire — before v2 wires existed; v63 introduced the 568-byte
-         * v2 offer wire (FILE_MARKET_OFFER_WIRE_BYTES_V2) but only rebuilt
-         * file_offers, so every claim INSERT for an onion offer failed the
-         * CHECK and the seller silently never persisted the claim (delivery
-         * authorization then sat at PENDING forever: no claim candidates).
-         * SQLite cannot ALTER a CHECK, so rebuild atomically, preserving
-         * every row and index (no stored row can violate the new CHECK:
-         * the old one was strictly tighter). */
-        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+    {
+        int r = db_migrate_step_64(ndb, &current_ver, &floor_ver, &applied);
+        if (r < 0) {
             *version = current_ver;
             *floor = floor_ver;
-            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+            return r;
         }
-        if (!node_db_exec(ndb,
-            "PRAGMA foreign_keys=OFF;"
-            "BEGIN IMMEDIATE;"
-            "CREATE TABLE market_payment_claims_v64 ("
-            "claim_id BLOB NOT NULL PRIMARY KEY CHECK(length(claim_id)=32),"
-            "offer_id BLOB NOT NULL CHECK(length(offer_id)=32),"
-            "txid BLOB NOT NULL CHECK(length(txid)=32),"
-            "buyer_pubkey BLOB NOT NULL CHECK(length(buyer_pubkey)=32),"
-            "chunk_start INTEGER NOT NULL CHECK(chunk_start>=0),"
-            "chunks_paid INTEGER NOT NULL CHECK(chunks_paid>0),"
-            "amount_zat INTEGER NOT NULL CHECK(amount_zat>0 AND "
-            "amount_zat<=2100000000000000),"
-            "claim_wire BLOB NOT NULL CHECK(length(claim_wire)=218),"
-            "offer_wire BLOB NOT NULL "
-            "CHECK(length(offer_wire) IN (535,568)),"
-            "status TEXT NOT NULL CHECK(status IN "
-            "('PENDING','CONFIRMED','UNKNOWN','CONFLICTED','REJECTED')),"
-            "status_reason TEXT NOT NULL,"
-            "output_index INTEGER NOT NULL DEFAULT -1 "
-            "CHECK(output_index>=-1),"
-            "block_height INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(block_height>=0),"
-            "confirmations INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(confirmations>=0),"
-            "observed_at INTEGER NOT NULL CHECK(observed_at>0),"
-            "reconciled_at INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(reconciled_at>=0));"
-            "INSERT INTO market_payment_claims_v64 "
-            "SELECT claim_id,offer_id,txid,buyer_pubkey,chunk_start,"
-            "chunks_paid,amount_zat,claim_wire,offer_wire,status,"
-            "status_reason,output_index,block_height,confirmations,"
-            "observed_at,reconciled_at FROM market_payment_claims;"
-            "DROP TABLE market_payment_claims;"
-            "ALTER TABLE market_payment_claims_v64 "
-            "RENAME TO market_payment_claims;"
-            "CREATE UNIQUE INDEX idx_market_payment_claim_contract "
-            "ON market_payment_claims(offer_id,txid,chunk_start,chunks_paid,"
-            "buyer_pubkey);"
-            "CREATE INDEX idx_market_payment_claim_buyer "
-            "ON market_payment_claims(offer_id,buyer_pubkey,status);"
-            "CREATE INDEX idx_market_payment_claim_txid "
-            "ON market_payment_claims(txid);"
-            "COMMIT;"
-            "PRAGMA foreign_keys=ON;")) {
-            (void)node_db_exec(ndb, "ROLLBACK;PRAGMA foreign_keys=ON;");
-            LOG_ERR("db", "migrate v64: atomic payment-claim rebuild failed");
-        }
-        if (!node_db_exec(ndb,
-                "INSERT OR IGNORE INTO schema_migrations(version) "
-                "VALUES('064')"))
-            LOG_ERR("db", "migrate v64: migration stamp failed");
-        floor_ver = 64; /* BREAKING: market_payment_claims CHECK rebuild */
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 64, floor_ver);
-        current_ver = 64;
-        applied++;
     }
 
     if (current_ver < 65) {
@@ -835,8 +892,8 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
 
     *version = current_ver;
     *floor = floor_ver;
-    int applied2 = node_db_migrate_features_v67_up(ndb, version, floor);
-    if (applied2 < 0)
-        return applied2; /* v67_up already set version and floor before it */
-    return applied + applied2;
+    /* Unconditional, branch-free forward — see DB_MIGRATE_BACKUP_FAILED_
+     * PROPAGATE's comment in database_internal.h for why this stays safe
+     * even when v67_up's own backup guard refused. */
+    return applied + node_db_migrate_features_v67_up(ndb, version, floor);
 }
