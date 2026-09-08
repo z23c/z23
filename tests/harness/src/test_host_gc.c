@@ -18,9 +18,11 @@
  * totals.
  *
  * Then: a dry run changes nothing on disk, an apply reclaims ONLY the
- * orphan, and a canonical datadir is refused BY NAME — once by its name
- * alone (~/.zclassic-c23-devfleet, never created and never touched by this
- * test) and once by its contents (a directory holding blk*.dat).
+ * orphan, every leaf in the engine's own protected-tree table is refused
+ * BY NAME under a throwaway fixture home (never created and never touched
+ * by this test — including the two live datadir names, which this test
+ * reaches only through the table, never as a literal), and a directory is
+ * separately refused by its contents (holding blk*.dat).
  */
 
 #include "test/test_core.h"
@@ -291,29 +293,36 @@ int test_host_gc(void)
         PASS();
     }
 
-    TEST("host gc: a canonical datadir is refused by name, never swept") {
+    TEST("host gc: every protected leaf is refused by name, never swept") {
         struct host_gc_request req;
         char reason[HOST_GC_REASON_CAP];
+        char expect[HOST_GC_REASON_CAP];
         char datadir[HGT_PATH];
-        const char *home = getenv("HOME");
-        /* The canonical name and its sibling suffix are composed from two
-         * runtime parts rather than spelled as one literal, so this test
-         * proves the same refusal-by-name without handing the live-datadir
-         * isolation gate a fresh textual match to baseline. */
-        const char *canonical_leaf = ".zclassic";
-        const char *sibling_suffix = "-c23-devfleet";
+        char fixture_home[HGT_PATH];
+        size_t nleaves = host_gc_protected_leaf_count();
+        /* This walks tools/command/host_gc_paths.c's own protected-leaf
+         * table (host_gc_protected_leaf), so it proves the sweep refuses
+         * EVERY tree it protects — the two live datadir names included —
+         * by name and without stat()ing it, without this test ever
+         * spelling one of those names as a literal of its own. The home
+         * a path is built under is this test's own throwaway fixture
+         * directory, never the real $HOME. */
+        (void)snprintf(fixture_home, sizeof(fixture_home),
+                       "%s/fixture-home", tmp);
         hgt_seed_request(&req, pool);
-        ASSERT(home != NULL);
-        (void)snprintf(datadir, sizeof(datadir), "%s/%s%s", home,
-                       canonical_leaf, sibling_suffix);
-        ASSERT(host_gc_path_protected(&req, "", datadir, reason,
-                                      sizeof(reason)));
-        ASSERT_STR_EQ(reason, "protected_tree:.zclassic");
-        (void)snprintf(datadir, sizeof(datadir), "%s/%s", home,
-                       canonical_leaf);
-        ASSERT(host_gc_path_protected(&req, "", datadir, reason,
-                                      sizeof(reason)));
-        ASSERT_STR_EQ(reason, "protected_tree:.zclassic");
+        (void)snprintf(req.home, sizeof(req.home), "%s", fixture_home);
+        ASSERT(nleaves > 0);
+        for (size_t i = 0; i < nleaves; i++) {
+            const char *leaf = host_gc_protected_leaf(i);
+            ASSERT(leaf != NULL);
+            (void)snprintf(datadir, sizeof(datadir), "%s/%s", fixture_home,
+                           leaf);
+            ASSERT(host_gc_path_protected(&req, "", datadir, reason,
+                                          sizeof(reason)));
+            (void)snprintf(expect, sizeof(expect), "protected_tree:%s",
+                           leaf);
+            ASSERT_STR_EQ(reason, expect);
+        }
         PASS();
     }
 

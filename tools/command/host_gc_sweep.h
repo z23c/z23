@@ -118,4 +118,12 @@ bool host_gc_path_protected(const struct host_gc_request *req,
                             const char *repo, const char *path,
                             char *reason, size_t reason_cap);
 
+/* The protected-leaf table itself, read-only, so a caller (a test, chiefly)
+ * can assert "every protected leaf is refused by name" by walking the same
+ * table the sweep enforces against, rather than re-typing the live datadir
+ * names as a literal of its own. `host_gc_protected_leaf(i)` returns NULL
+ * once `i >= host_gc_protected_leaf_count()`. */
+size_t host_gc_protected_leaf_count(void);
+const char *host_gc_protected_leaf(size_t i);
+
 #endif /* ZCL_TOOLS_HOST_GC_SWEEP_H */

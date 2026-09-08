@@ -125,6 +125,20 @@ static const struct hg_protected_row k_hg_protected[] = {
     { ".local/state/zclassic23-quality", false },
 };
 
+/* Read-only view of k_hg_protected for callers (tests, chiefly) that must
+ * exercise "every protected leaf is refused by name" without hand-copying
+ * this table's entries — including the two live datadir names — into their
+ * own source. */
+size_t host_gc_protected_leaf_count(void)
+{
+    return sizeof(k_hg_protected) / sizeof(k_hg_protected[0]);
+}
+
+const char *host_gc_protected_leaf(size_t i)
+{
+    return i < host_gc_protected_leaf_count() ? k_hg_protected[i].rel : NULL;
+}
+
 static bool hg_protected_named(const char *home, const char *p,
                                char *reason, size_t cap)
 {
