@@ -4,6 +4,14 @@
  *          resolution. No process is spawned and no file is written here, so
  *          a registered test group can prove every rule in microseconds. */
 
+/* realpath() is declared by glibc only through the fortify inline unless a
+ * feature-test macro asks for it; without this the file compiles today by
+ * accident of -O2 and is a hard C23 error at -O0 or on another libc. Must
+ * precede the first #include, which is where <features.h> is read. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
@@ -337,7 +345,15 @@ bool zcl_devagent_checkout_root(const char *start, char *out, size_t out_cap)
         if (dva_marker_present(dir, "Makefile") &&
             dva_marker_present(dir, "engine/composition/commands/root.def") &&
             dva_marker_present(dir, "tools/dev/test_group_catalog.def")) {
-            int n = snprintf(out, out_cap, "%s", dir);
+            /* Canonicalize before answering. A caller that passes "." or a
+             * relative start walks relative to its cwd and would otherwise
+             * get "." back — a string downstream validators reject and
+             * queue rows silently drop. realpath also resolves symlinked
+             * checkouts to the one true path. */
+            char resolved[PATH_MAX];
+            if (!realpath(dir, resolved))
+                return false;
+            int n = snprintf(out, out_cap, "%s", resolved);
             return n > 0 && (size_t)n < out_cap;
         }
         char *slash = strrchr(dir, '/');

@@ -20,13 +20,24 @@
  * filesystem probe in the checkout-root leg, which uses only paths the suite
  * creates under its own temp directory. */
 
+/* realpath() is declared by glibc only through the fortify inline unless a
+ * feature-test macro asks for it; without this the file compiles today by
+ * accident of -O2 and is a hard C23 error at -O0 or on another libc. Must
+ * precede the first #include, which is where <features.h> is read. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 
 #include "command/native_devagent.h"
 #include "platform/directory_compat.h"
 
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Write an empty file at <dir>/<rel>, creating parent directories. */
 static bool tds_touch(const char *dir, const char *rel)
@@ -308,14 +319,17 @@ int test_devagent_surface(void)
     /* ──────────────────────── checkout-root walk ───────────────────────── */
 
     TEST("checkout root: found by walking up from a nested directory") {
-        char dir[1024], nested[1200], found[1024];
+        char dir[1024], nested[1200], found[1024], here[PATH_MAX];
         test_make_tmpdir(dir, sizeof(dir), "devagent", "root");
         ASSERT(tds_touch(dir, "Makefile"));
         ASSERT(tds_touch(dir, "engine/composition/commands/root.def"));
         ASSERT(tds_touch(dir, "tools/dev/test_group_catalog.def"));
         (void)snprintf(nested, sizeof(nested), "%s/engine/composition/commands", dir);
         ASSERT(zcl_devagent_checkout_root(nested, found, sizeof(found)));
-        ASSERT_STR_EQ(found, dir);
+        /* The answer is canonical, so compare against the canonical
+         * fixture path — a symlinked TMPDIR must not flake the walk. */
+        ASSERT(realpath(dir, here) != NULL);
+        ASSERT_STR_EQ(found, here);
         test_cleanup_tmpdir(dir);
         PASS();
     }
@@ -327,7 +341,7 @@ int test_devagent_surface(void)
      * live inside the fixture, so the assertion does not depend on where the
      * suite happens to be running. */
     TEST("checkout root: a partial marker set is walked past, not accepted") {
-        char outer[1024], inner[1200], deep[1400], found[1024];
+        char outer[1024], inner[1200], deep[1400], found[1024], here[PATH_MAX];
         test_make_tmpdir(outer, sizeof(outer), "devagent", "partial");
         ASSERT(tds_touch(outer, "Makefile"));
         ASSERT(tds_touch(outer, "engine/composition/commands/root.def"));
@@ -337,7 +351,8 @@ int test_devagent_surface(void)
         ASSERT(tds_touch(inner, "engine/composition/commands/root.def"));
         (void)snprintf(deep, sizeof(deep), "%s/inner/engine/composition/commands", outer);
         ASSERT(zcl_devagent_checkout_root(deep, found, sizeof(found)));
-        ASSERT_STR_EQ(found, outer);
+        ASSERT(realpath(outer, here) != NULL);
+        ASSERT_STR_EQ(found, here);
         test_cleanup_tmpdir(outer);
         PASS();
     }
@@ -345,6 +360,27 @@ int test_devagent_surface(void)
     TEST("checkout root: the filesystem root terminates the walk") {
         char found[1024];
         ASSERT(!zcl_devagent_checkout_root("/", found, sizeof(found)));
+        PASS();
+    }
+
+    /* A symlinked route to a checkout must answer the canonical path, not
+     * the alias: dev.land carries the string verbatim in a queue row, and
+     * an uncanonicalized answer is a row the queue can never read back.
+     * Proven through a symlink instead of a chdir — the parallel runner
+     * shares one cwd, so no test may move it. */
+    TEST("checkout root: a symlinked start answers the canonical path") {
+        char dir[1024], alias[1100], found[1024], here[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "devagent", "canon");
+        ASSERT(tds_touch(dir, "Makefile"));
+        ASSERT(tds_touch(dir, "engine/composition/commands/root.def"));
+        ASSERT(tds_touch(dir, "tools/dev/test_group_catalog.def"));
+        (void)snprintf(alias, sizeof(alias), "%s/alias", dir);
+        ASSERT(symlink(dir, alias) == 0);
+        ASSERT(realpath(dir, here) != NULL);
+        ASSERT(zcl_devagent_checkout_root(alias, found, sizeof(found)));
+        ASSERT_STR_EQ(found, here);
+        remove(alias);
+        test_cleanup_tmpdir(dir);
         PASS();
     }
 
