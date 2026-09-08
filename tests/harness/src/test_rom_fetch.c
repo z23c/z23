@@ -1084,6 +1084,226 @@ static int test_verified_multi_seeder(void)
     return failures;
 }
 
+/* ── (g) Interrupt and resume across a REAL severed connection ──────────
+ *
+ * test_verified_multi_seeder above proves resume from a HAND-BUILT durable
+ * .part + journal. This proves the same property end to end against a real
+ * interruption: a download running on its own thread, the seeder stopped out
+ * from under it mid-transfer, and then the SAME call re-issued.
+ *
+ * The cut lands deterministically with no clock and no sleep. A download's
+ * progress callback runs under rom_fetch's own callback mutex AFTER the
+ * chunk is durably journaled, so the first worker to land a chunk parks
+ * there and every other worker queues behind it — no further chunk index can
+ * be claimed until this test releases them. The test wakes on that first
+ * landed chunk, stops the server, and only then lets the download go. With 9
+ * chunks and 8 workers it can therefore never complete, and at least one
+ * chunk is always durably on disk before the link dies. */
+
+struct rf_cut_ctx {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    bool reached;         /* a first chunk landed and parked in the callback */
+    bool server_stopped;  /* the test has severed the link — release them    */
+    bool finished;        /* the download call returned                      */
+    bool ok;              /* ...with this                                    */
+
+    /* Immutable download inputs, read by the download thread. */
+    struct rom_fetch_peer peer;
+    struct rom_fetch_manifest m;
+    const uint8_t (*chunk_sha3)[32];
+    uint32_t num_chunks;
+    char out_dir[PATH_MAX];
+};
+
+/* Runs on a fetch worker, under rom_fetch's callback mutex. */
+static bool rf_cut_progress(uint32_t done, uint32_t total, uint64_t bytes,
+                            void *vctx)
+{
+    (void)done; (void)total; (void)bytes;
+    struct rf_cut_ctx *c = (struct rf_cut_ctx *)vctx;
+    pthread_mutex_lock(&c->mu);
+    c->reached = true;
+    pthread_cond_broadcast(&c->cv);
+    while (!c->server_stopped)
+        pthread_cond_wait(&c->cv, &c->mu);
+    pthread_mutex_unlock(&c->mu);
+    /* Never abort from here: the interruption under test is the server going
+     * away, not a caller changing its mind. */
+    return true;
+}
+
+static void *rf_cut_thread(void *vctx)
+{
+    struct rf_cut_ctx *c = (struct rf_cut_ctx *)vctx;
+    bool ok = rom_fetch_download_verified_parallel(&c->peer, 1, &c->m,
+                                                   c->chunk_sha3,
+                                                   c->num_chunks, c->out_dir,
+                                                   rf_cut_progress, c);
+    pthread_mutex_lock(&c->mu);
+    c->ok = ok;
+    c->finished = true;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+    return NULL;
+}
+
+static int test_verified_real_interrupt_resume(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: a download the seeder is stopped underneath leaves a "
+         "resumable .part + journal, and re-issuing the SAME call pulls "
+         "ONLY the chunks the journal was still missing") {
+        fs_server_stop(); /* never inherit a leaked server */
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        rom_seed_set_peer_bps_cap(1ull << 30);
+        rom_seed_set_global_bps_cap(1ull << 30);
+
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_cutsrv");
+        ASSERT(sdir != NULL);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_cutcli");
+        ASSERT(cdir != NULL);
+
+        /* 9 chunks against 8 workers: the cut below parks every worker after
+         * its first chunk, so at least one chunk is always still missing. */
+        uint64_t size = 8ull * (uint64_t)ROM_SEED_CHUNK_SIZE + 4096;
+        ASSERT(write_sparse_bundle(sdir, "consensus-state-bundle-cut.sqlite",
+                                   size));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-cut.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        ASSERT(art.num_chunks == 9);
+        ASSERT(art.num_chunks > ROM_FETCH_MAX_WORKERS);
+        struct rom_fetch_manifest m;
+        manifest_from_artifact(&art, &m);
+
+        uint16_t port = 0;
+        fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout collisions */
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+            platform_sleep_ms(50);
+        if (fs_server_is_running())
+            port = fs_server_get_port();
+        ASSERT(port != 0);
+
+        uint8_t (*chunk_sha3)[32] = malloc((size_t)ROM_SEED_MAX_CHUNKS * 32);
+        ASSERT(chunk_sha3 != NULL);
+        uint32_t manifest_chunks = 0;
+        ASSERT(rom_fetch_get_manifest("127.0.0.1", port, m.chunk_root,
+                                      chunk_sha3, ROM_SEED_MAX_CHUNKS,
+                                      &manifest_chunks));
+        ASSERT(manifest_chunks == art.num_chunks);
+
+        char part_path[1200];
+        snprintf(part_path, sizeof(part_path), "%s/%s%s", cdir, m.filename,
+                 ROM_FETCH_PART_SUFFIX);
+        char jrnl_path[1264];
+        snprintf(jrnl_path, sizeof(jrnl_path), "%s.journal", part_path);
+        char final_path[1200];
+        snprintf(final_path, sizeof(final_path), "%s/%s", cdir, m.filename);
+
+        /* (1) THE CUT. Start the download on its own thread, wait for its
+         * first chunk to land, then stop the seeder while it is mid-flight. */
+        struct rf_cut_ctx *c = calloc(1, sizeof(*c));
+        ASSERT(c != NULL);
+        pthread_mutex_init(&c->mu, NULL);
+        pthread_cond_init(&c->cv, NULL);
+        snprintf(c->peer.addr, sizeof(c->peer.addr), "%s", "127.0.0.1");
+        c->peer.port = port;
+        c->m = m;
+        c->chunk_sha3 = chunk_sha3;
+        c->num_chunks = manifest_chunks;
+        snprintf(c->out_dir, sizeof(c->out_dir), "%s", cdir);
+
+        pthread_t tid;
+        int spawn_rc = pthread_create(&tid, NULL, rf_cut_thread, c);
+        bool reached = false;
+        if (spawn_rc == 0) {
+            pthread_mutex_lock(&c->mu);
+            while (!c->reached && !c->finished)
+                pthread_cond_wait(&c->cv, &c->mu);
+            reached = c->reached;
+            pthread_mutex_unlock(&c->mu);
+
+            if (reached)
+                fs_server_stop(); /* the real cut: every live fd severed */
+
+            pthread_mutex_lock(&c->mu);
+            c->server_stopped = true;
+            pthread_cond_broadcast(&c->cv);
+            pthread_mutex_unlock(&c->mu);
+            pthread_join(tid, NULL);
+        }
+        /* Nothing above may ASSERT: the download thread reads this frame. */
+        ASSERT(spawn_rc == 0);
+        ASSERT(reached);
+        ASSERT(!c->ok);              /* the interrupted call fails closed   */
+
+        struct stat st;
+        ASSERT(access(final_path, F_OK) != 0); /* never installed           */
+        ASSERT(stat(part_path, &st) == 0);     /* .part left for resume     */
+        ASSERT(stat(jrnl_path, &st) == 0);     /* journal left for resume   */
+
+        /* How much survived the cut, read from the durable journal itself. */
+        struct rom_journal *j = rom_journal_open(jrnl_path, m.chunk_root,
+                                                 m.whole_sha3, m.chunk_size,
+                                                 m.num_chunks);
+        ASSERT(j != NULL);
+        uint32_t done_at_cut = rom_journal_count_done(j);
+        rom_journal_close(j);
+        ASSERT(done_at_cut >= 1);                 /* progress WAS kept      */
+        ASSERT(done_at_cut < m.num_chunks);       /* and it was not all     */
+        printf("\n  interrupted with %u/%u chunks durable; ",
+               (unsigned)done_at_cut, (unsigned)m.num_chunks);
+
+        /* (2) THE RESUME. Same seeder, same port, same call. */
+        fs_server_start(sdir, port);
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+            platform_sleep_ms(50);
+        ASSERT(fs_server_is_running());
+        ASSERT(fs_server_get_port() == port);
+
+        struct rom_fetch_peer peers[1];
+        memset(peers, 0, sizeof(peers));
+        snprintf(peers[0].addr, sizeof(peers[0].addr), "%s", "127.0.0.1");
+        peers[0].port = port;
+
+        int64_t served_before = seed_chunks_served();
+        ASSERT(rom_fetch_download_verified_parallel(peers, 1, &m, chunk_sha3,
+                                                    manifest_chunks, cdir,
+                                                    NULL, NULL));
+        int64_t served_after = seed_chunks_served();
+        printf("resume pulled %lld chunk(s) over the wire\n",
+               (long long)(served_after - served_before));
+        /* THE assertion: only the chunks the journal was missing crossed the
+         * wire — a resume, not a fresh download. */
+        ASSERT(served_after - served_before ==
+               (int64_t)(m.num_chunks - done_at_cut));
+        /* ...and the file that landed is byte-identical to the seeder's. */
+        ASSERT(rom_fetch_verify_file(final_path, &m));
+        ASSERT(stat(jrnl_path, &st) != 0); /* journal cleaned on install    */
+        ASSERT(stat(part_path, &st) != 0); /* staging file renamed into place */
+
+        pthread_cond_destroy(&c->cv);
+        pthread_mutex_destroy(&c->mu);
+        free(c);
+        free(chunk_sha3);
+        fs_server_stop();
+        unlink(final_path);
+        char p[1200];
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-cut.sqlite", sdir);
+        unlink(p);
+        rmdir(sdir);
+        rmdir(cdir);
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── (h) Multi-seeder failover past a HUNG (not just dead) seeder ──────
  *
  * test_verified_multi_seeder above already proves failover past a peer
@@ -1873,6 +2093,7 @@ static int test_rom_fetch_platform_arm(void)
     failures += test_rate_cap_retry();
     failures += test_parallel_download();
     failures += test_verified_multi_seeder();
+    failures += test_verified_real_interrupt_resume();
     failures += test_verified_multi_seeder_hang_failover();
     failures += test_refusal_frame_decode();
     failures += test_default_caps_parallel_multichunk();
