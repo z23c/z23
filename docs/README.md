@@ -101,6 +101,8 @@ from a hash, signature, test, or reproduction receipt.
   initial commands, and continuation behavior.
 - [`DEVELOPING.md`](DEVELOPING.md) — navigation, reflex feedback, focused tests,
   integration, push, and asynchronous deep proof.
+- [`work/HANDOFF_2026-09-08.md`](work/HANDOFF_2026-09-08.md) — development
+  checkpoint, publication evidence, measured costs, and remaining program work.
 - [`CODEBASE_MAP.md`](CODEBASE_MAP.md) — source ownership and extension recipes.
 - [`INDEX.md`](INDEX.md) — local data-source ingest/search (`z23-dev dev
   index`): the board, experiment ledger, landing outcomes, and logs, into
