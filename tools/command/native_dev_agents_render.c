@@ -155,6 +155,8 @@ static void rd_running(struct rd_buf *b, const struct json_value *running)
                        rd_int(running, "with_process")),
            (long long)rd_int(running, "window_hours"),
            (long long)rd_int(running, "idle"));
+    rd_put(b, "  process observation: %s (counts cover observed processes only).\n",
+           rd_str(running, "process_observation"));
     if (json_get_bool(json_get(running, "truncated")))
         rd_put(b, "  showing %lld of %lld active workspaces.\n",
                (long long)rd_int(running, "count"),

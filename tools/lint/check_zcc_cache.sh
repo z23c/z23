@@ -11,8 +11,8 @@
 # source. A compile cache that can do that is worse than no cache, because
 # every downstream proof in this project is a statement about bytes.
 #
-# This gate builds a fixture five ways and requires the cache to be both fast
-# and RIGHT: identical bytes when nothing changed, different bytes when a
+# This gate exercises unchanged, edited, and concurrent builds. It requires
+# identical bytes when nothing changed, different bytes when a
 # header changed, warnings replayed on a hit, and a real hit actually taken
 # (a cache that misses every time would pass a correctness-only test while
 # quietly costing every developer the speed this exists for).
@@ -222,6 +222,199 @@ fi
 unkey="$("$ZCC" --zcc-stats | awk '/unkeyable/ {print $2}')"
 [ "${unkey:-0}" = 0 ] || fail "$unkey compile(s) could not be keyed at all"
 
+# Same-content requests share one compile; independent keys and audit requests
+# retain their own compiler execution. Barriers follow real compilation so a
+# header edit while a follower waits cannot change the owner's fixture bytes.
+SF_ROOT="$WORK/singleflight"
+mkdir -p "$SF_ROOT"
+export SF_CC="$(command -v cc)"
+cat > "$SF_ROOT/compiler" <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+    case "$argument" in -E|--version|-dump*) exec "$SF_CC" "$@" ;; esac
+done
+: > "$SF_STATE/compile.$$"
+owner=0
+if [ "${SF_HOLD:-0}" = 1 ] && mkdir "$SF_STATE/owner" 2>/dev/null; then
+    owner=1
+fi
+result=0
+if [ "$owner" = 1 ] && [ "${SF_FAIL:-0}" = 1 ]; then
+    result=75
+else
+    "$SF_CC" "$@" || result=$?
+fi
+: > "$SF_STATE/finished.$$"
+if [ "$owner" = 1 ]; then
+    printf '%s\n' "$PPID" > "$SF_STATE/owner.zccpid"
+    : > "$SF_STATE/held"
+    for ((attempt = 0; attempt < 400; attempt++)); do
+        if [ -e "$SF_STATE/release" ]; then
+            : > "$SF_STATE/released"
+            exit "$result"
+        fi
+        sleep 0.025
+    done
+    echo 'singleflight fixture release timed out' >&2
+    exit 76
+fi
+exit "$result"
+WRAPPER
+chmod +x "$SF_ROOT/compiler"
+
+sf_ready()
+{
+    local path="$1" attempt
+    for ((attempt = 0; attempt < 400; attempt++)); do
+        [ -e "$path" ] && return 0
+        sleep 0.025
+    done
+    fail "singleflight barrier timed out: $path"
+    return 1
+}
+
+sf_count()
+{
+    local kind="$1" paths
+    shopt -s nullglob
+    paths=("$SF_STATE/$kind."*)
+    shopt -u nullglob
+    printf '%s\n' "${#paths[@]}"
+}
+
+sf_waiting()
+{
+    local output="$1" attempt
+    for ((attempt = 0; attempt < 400; attempt++)); do
+        if grep -q '^WAIT ' "$SF_STATE/log.$output" 2>/dev/null; then return 0; fi
+        sleep 0.025
+    done
+    fail "singleflight $output did not observe contention"
+    return 1
+}
+
+sf_case()
+{
+    export SF_STATE="$SF_ROOT/$1"
+    mkdir -p "$SF_STATE"
+    printf '#define VALUE 42\n' > "$SF_STATE/value.h"
+    printf '#include "value.h"\nstatic int sf_unused(void) { return 0; }\nint value(void) { return VALUE; }\n' > "$SF_STATE/value.c"
+}
+
+sf_compile()
+(
+    local output="$1" definition="${2:-1}" audit="${3:-0}" hold="${4:-0}" reject="${5:-0}"
+    unset ZCC_AUDIT
+    if [ "$audit" = 1 ]; then export ZCC_AUDIT=1; fi
+    ZCC_DIR="$SF_STATE/cache" ZCC_LOG="$SF_STATE/log.$output" \
+        SF_HOLD="$hold" SF_FAIL="$reject" \
+        "$ZCC" "$SF_ROOT/compiler" -std=c23 -O1 -Wall -DSF_KEY="$definition" \
+        -MD -MF "$SF_STATE/$output.d" -MT "$SF_STATE/$output.o" \
+        -c "$SF_STATE/value.c" -o "$SF_STATE/$output.o" \
+        > "$SF_STATE/stdout.$output" 2> "$SF_STATE/stderr.$output"
+)
+
+sf_join()
+{
+    local process="$1" label="$2"
+    wait "$process" || fail "singleflight $label compile failed"
+}
+
+sf_case shared
+sf_compile owner 1 0 1 & sf_owner=$!
+sf_ready "$SF_STATE/held" || exit 1
+sf_compile follower & sf_follower=$!
+sf_waiting follower || exit 1
+# Independent-key completion proves there is no fleet-wide compile lock.
+sf_compile independent 2 & sf_independent=$!
+sf_join "$sf_independent" independent
+[ "$(sf_count compile)" = 2 ] || fail 'same-key follower compiled while its owner was active'
+: > "$SF_STATE/release"
+sf_join "$sf_owner" owner
+sf_join "$sf_follower" follower
+[ "$(sf_count compile)" = 2 ] || fail 'identical cold requests did not share one compile'
+cmp -s "$SF_STATE/owner.o" "$SF_STATE/follower.o" || fail 'shared compile output bytes differ'
+grep -Fq "$SF_STATE/follower.o:" "$SF_STATE/follower.d" ||
+    fail 'shared compile depfile does not name the follower target'
+grep -Fq "$SF_STATE/value.h" "$SF_STATE/follower.d" ||
+    fail 'shared compile depfile lost a header dependency'
+grep -q 'sf_unused' "$SF_STATE/stderr.owner" || fail 'shared compile warning fixture produced no warning'
+cmp -s "$SF_STATE/stderr.owner" "$SF_STATE/stderr.follower" ||
+    fail 'shared compile did not replay exact compiler diagnostics'
+grep -q '^HIT ' "$SF_STATE/log.follower" || fail 'same-key follower did not report a cache hit'
+
+sf_case audit
+sf_compile warm
+sf_compile audit_owner 1 1 1 & sf_owner=$!
+sf_ready "$SF_STATE/held" || exit 1
+sf_compile audit_peer 1 1 & sf_follower=$!
+sf_join "$sf_follower" audit-peer
+[ "$(sf_count compile)" = 3 ] || fail 'audit did not independently compile both requests'
+: > "$SF_STATE/release"
+sf_join "$sf_owner" audit-owner
+cmp -s "$SF_STATE/audit_owner.o" "$SF_STATE/audit_peer.o" || fail 'independent audit output bytes differ'
+
+sf_case failed
+sf_compile failed_owner 1 0 1 1 & sf_owner=$!
+sf_ready "$SF_STATE/held" || exit 1
+sf_compile retry & sf_follower=$!
+sf_waiting retry || exit 1
+: > "$SF_STATE/release"
+if wait "$sf_owner"; then fail 'failed compiler owner unexpectedly succeeded'; fi
+sf_join "$sf_follower" recovery
+[ "$(sf_count compile)" = 2 ] || fail 'failed owner did not release its compile claim'
+[ -s "$SF_STATE/retry.o" ] || fail 'failed owner prevented successful follower output'
+
+sf_case changed
+sf_compile owner 1 0 1 & sf_owner=$!
+sf_ready "$SF_STATE/held" || exit 1
+sf_compile follower & sf_follower=$!
+sf_waiting follower || exit 1
+printf '#define VALUE 100\n' > "$SF_STATE/value.h"
+: > "$SF_STATE/release"
+sf_join "$sf_owner" changed-owner
+sf_join "$sf_follower" changed-follower
+"$SF_CC" -std=c23 -O1 -DSF_KEY=1 -c "$SF_STATE/value.c" -o "$SF_STATE/expected.o"
+cmp -s "$SF_STATE/follower.o" "$SF_STATE/expected.o" ||
+    fail 'inputs changed during wait but the follower returned stale bytes'
+if cmp -s "$SF_STATE/owner.o" "$SF_STATE/follower.o"; then
+    fail 'changed-input fixture did not distinguish old and new outputs'
+fi
+[ "$(sf_count compile)" = 2 ] || fail 'changed-input follower did not compile current inputs'
+
+for sf_shape in symlink directory; do
+    sf_case "unavailable-$sf_shape"
+    mkdir -p "$SF_STATE/cache"
+    printf 'untouched\n' > "$SF_STATE/sentinel"
+    if [ "$sf_shape" = symlink ]; then
+        ln -s "$SF_STATE/sentinel" "$SF_STATE/cache/flight.lock"
+    else
+        mkdir "$SF_STATE/cache/flight.lock"
+    fi
+    sf_compile first
+    sf_compile second
+    [ "$(sf_count compile)" = 2 ] || fail "$sf_shape lock refusal did not compile independently"
+    cmp -s "$SF_STATE/first.o" "$SF_STATE/second.o" || fail "$sf_shape lock refusal changed output bytes"
+    [ "$(cat "$SF_STATE/sentinel")" = untouched ] || fail 'lock refusal changed the symlink target'
+    grep -q '^BYPASS ' "$SF_STATE/log.second" || fail "$sf_shape lock refusal did not report bypass"
+done
+
+sf_case killed
+sf_compile owner 1 0 1 & sf_owner=$!
+sf_ready "$SF_STATE/held" || exit 1
+sf_compile follower & sf_follower=$!
+sf_waiting follower || exit 1
+sf_native="$(cat "$SF_STATE/owner.zccpid")"
+case "$sf_native" in ''|*[!0-9]*) fail 'compiler wrapper did not identify its owner process'; exit 1 ;; esac
+kill -KILL "$sf_native"
+if wait "$sf_owner"; then fail 'killed compiler owner unexpectedly succeeded'; fi
+sf_join "$sf_follower" killed-owner-recovery
+[ "$(sf_count compile)" = 2 ] || fail 'killed owner did not release the compile claim'
+[ -s "$SF_STATE/follower.o" ] || fail 'killed owner prevented follower output'
+: > "$SF_STATE/release"
+sf_ready "$SF_STATE/released" || exit 1
+
 # The bootstrap executable is itself a compiler-identity input. Rebuilding
 # its unchanged sources must not alter that identity because a private
 # staging filename or a different physical checkout leaked into its bytes.
@@ -303,4 +496,4 @@ if [ "$failures" -ne 0 ]; then
     exit 1
 fi
 
-echo "check_zcc_cache: OK — hits are byte-identical, header edits are misses, bootstrap bytes reproduce and retain source/flag sensitivity"
+echo "check_zcc_cache: OK — hits are byte-identical; concurrent requests share compilation, audits remain independent, failed owners recover, changed inputs stay fresh; bootstrap bytes reproduce and retain source/flag sensitivity"

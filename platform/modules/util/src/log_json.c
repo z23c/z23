@@ -3,6 +3,7 @@
  * Implementation of the structured JSON log helper. */
 
 #include "platform/time_compat.h"
+#include "base/utc_tm.h"
 #include "util/log_json.h"
 #include "util/util.h"
 
@@ -88,9 +89,9 @@ static size_t format_v(char *buf, size_t cap, enum log_json_level level,
         t.tv_nsec = 0;
     }
     struct tm tm;
-    gmtime_r(&t.tv_sec, &tm);
     char ts[64];
-    int ts_n = (int)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm);
+    int ts_n = zcl_utc_tm(t.tv_sec, &tm)
+        ? (int)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm) : 0;
     if (ts_n <= 0) snprintf(ts, sizeof(ts), "1970-01-01T00:00:00");
 
     char ev_safe[64];

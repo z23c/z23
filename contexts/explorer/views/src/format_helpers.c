@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "views/format_helpers.h"
+#include "base/utc_tm.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -14,7 +15,7 @@ void zcl_format_time(char *buf, size_t max, int64_t timestamp)
     if (timestamp <= 0) return;
     time_t t = (time_t)timestamp;
     struct tm tm;
-    if (!gmtime_r(&t, &tm)) return;
+    if (!zcl_utc_tm(t, &tm)) return;
     strftime(buf, max, "%Y-%m-%d %H:%M:%S UTC", &tm);
 }
 

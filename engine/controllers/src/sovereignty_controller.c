@@ -30,6 +30,7 @@
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "base/utc_tm.h"
 #include "services/shielded_history_import_service.h"
 #include "services/sync_trust_policy.h"
 #include "storage/coins_kv.h"
@@ -174,7 +175,7 @@ static void sov_render_stamp(sqlite3 *pdb, const char *key,
     time_t stamp_t = (time_t)stamp;
     struct tm tm_utc;
     char iso[24] = {0};
-    if (gmtime_r(&stamp_t, &tm_utc) &&
+    if (zcl_utc_tm(stamp_t, &tm_utc) &&
         strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tm_utc) > 0)
         json_push_kv_str(field, "iso8601", iso);
     else

@@ -79,6 +79,7 @@ struct sc_workspace {
 struct sc_ctx {
     struct sc_proc *procs;
     size_t proc_count;
+    bool process_observed;
     char *capture;
     int64_t deadline_ms;
 };
@@ -173,14 +174,21 @@ static int64_t sc_source_mtime(const char *dir, size_t depth, size_t *budget)
  * running agents on a box with dozens. A process that exits mid-scan is
  * skipped and the scan continues. A process whose links this user may not
  * read simply does not appear, which is the honest answer for a process this
- * box will not show us. On a system with no /proc the section is empty, which
- * reads the same as "no agent process is running here".
+ * box will not show us. Counts describe only the observable subset. An absent
+ * process backend is reported separately from a scan that observed no match.
  */
-static void sc_collect_procs(struct sc_ctx *ctx)
+static void sc_collect_procs(struct sc_ctx *ctx, const char *process_root)
 {
-    DIR *dir = opendir("/proc");
+#if defined(_WIN32)
+    /* Windows has no /proc process-cwd observation backend. */
+    (void)ctx;
+    (void)process_root;
+#else
+    const char *root = process_root ? process_root : "/proc";
+    DIR *dir = opendir(root);
     struct dirent *entry;
     if (!dir) return;
+    ctx->process_observed = true;
     while ((entry = readdir(dir)) != NULL &&
            ctx->proc_count < SC_MAX_PROCS) {
         const char *name = entry->d_name;
@@ -189,14 +197,16 @@ static void sc_collect_procs(struct sc_ctx *ctx)
         ssize_t n;
         struct sc_proc *p;
         if (name[0] < '1' || name[0] > '9') continue;
-        (void)snprintf(link, sizeof(link), "/proc/%s/cwd", name);
+        if (snprintf(link, sizeof(link), "%s/%s/cwd", root, name) >=
+            (int)sizeof(link)) continue;
         n = readlink(link, target, sizeof(target) - 1);
         if (n <= 0) continue;
         target[n] = 0;
         p = &ctx->procs[ctx->proc_count++];
         p->pid = strtol(name, NULL, 10);
         (void)snprintf(p->cwd, sizeof(p->cwd), "%s", target);
-        (void)snprintf(link, sizeof(link), "/proc/%s/exe", name);
+        if (snprintf(link, sizeof(link), "%s/%s/exe", root, name) >=
+            (int)sizeof(link)) continue;
         n = readlink(link, target, sizeof(target) - 1);
         if (n > 0) {
             const char *slash;
@@ -209,6 +219,7 @@ static void sc_collect_procs(struct sc_ctx *ctx)
         }
     }
     (void)closedir(dir);
+#endif
 }
 
 /* True when `cwd` is the tree itself or anything inside it. The separator
@@ -531,7 +542,7 @@ void zcl_agents_running_json(const struct zcl_agents_options *options,
     }
 
     count = sc_enumerate(options, root, list);
-    sc_collect_procs(&ctx);
+    sc_collect_procs(&ctx, options->process_root);
     sc_classify(&ctx, options, list, count, &process_count, &live_count);
     qsort(list, count, sizeof(*list), sc_compare);
 
@@ -546,6 +557,8 @@ void zcl_agents_running_json(const struct zcl_agents_options *options,
     (void)json_push_kv_str(out, "root", root);
     (void)json_push_kv_int(out, "scanned", (int64_t)count);
     (void)json_push_kv_int(out, "with_process", (int64_t)process_count);
+    (void)json_push_kv_str(out, "process_observation",
+                         ctx.process_observed ? "partial" : "unavailable");
     (void)json_push_kv_int(out, "active", (int64_t)live_count);
     (void)json_push_kv_int(out, "idle", (int64_t)(count - live_count));
     (void)json_push_kv_int(out, "window_hours", SC_WINDOW_HOURS);

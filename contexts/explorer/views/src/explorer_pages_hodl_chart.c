@@ -10,6 +10,7 @@
  * explorer_pages_hodl_rows.c. */
 
 #include "views/explorer_pages_hodl_internal.h"
+#include "base/utc_tm.h"
 #include "controllers/explorer_internal.h"
 #include "models/hodl_wave.h"
 #include "util/safe_alloc.h"
@@ -20,6 +21,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+static void hodl_month_label(time_t stamp, char out[16])
+{
+    struct tm utc;
+    snprintf(out, 16, "?");
+    if (zcl_utc_tm(stamp, &utc))
+        strftime(out, 16, "%Y-%m", &utc);
+}
 
 static int hodl_survival_x(const struct hodl_survival_row *row,
                            int pl, int pw, int64_t h_min, int64_t h_max)
@@ -211,10 +220,8 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
         int64_t hval = h_min + (h_max - h_min) * g / 4;
         int x = pl + pw * g / 4;
         time_t tt = (time_t)hodl_estimated_block_time(hval);
-        struct tm tm_;
         char dbuf[16];
-        gmtime_r(&tt, &tm_);
-        strftime(dbuf, sizeof(dbuf), "%Y-%m", &tm_);
+        hodl_month_label(tt, dbuf);
         APPEND(*off, r, max,
             "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#1b2b35' "
             "opacity='0.46'/>"

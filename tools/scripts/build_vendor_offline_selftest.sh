@@ -63,7 +63,9 @@ probe_mk="$SANDBOX/bootstrap.mk"
     cat <<'MAKE'
 .DEFAULT_GOAL := z23
 .PHONY: z23 windows-headless-run windows-headless-run-selftest
-z23 windows-headless-run windows-headless-run-selftest build/bin/z23-headless-run.exe $(ZCL_TOR_PROVENANCE_GOALS):
+z23 print-node-c23-srcs help doctor doctor-build timings agent-dev-status \
+print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags \
+windows-headless-run windows-headless-run-selftest build/bin/z23-headless-run.exe $(ZCL_TOR_PROVENANCE_GOALS):
 	@printf 'lean=%s\n' '$(ZCL_HOTSWAP_LOOP_ONLY)'
 $(VENDOR_BOOTSTRAP_MK):
 	@mkdir -p build/identity
@@ -89,13 +91,17 @@ probe_bootstrap()
         cat "$fixture/output" >&2
         fail "bootstrap selection probe failed: $*"
     fi
-    if [ "$expected" = skip ]; then
-        grep -q '^lean=1$' "$fixture/output" ||
-            fail "bootstrap helper entered authoritative node parse: $*"
+    if [ "$expected" = skip ] || [ "$expected" = query ]; then
+        if [ "$expected" = skip ]; then
+            grep -q '^lean=1$' "$fixture/output" ||
+                fail "bootstrap helper entered authoritative node parse: $*"
+        elif grep -q '^lean=1$' "$fixture/output"; then
+            fail "source query skipped the full node source declarations: $*"
+        fi
         [ ! -e "$fixture/vendor-contact" ] ||
-            fail "launcher-only goals invoked vendor bootstrap: $*"
+            fail "nonlink goals invoked vendor bootstrap: $*"
         [ ! -e "$fixture/tor-contact" ] ||
-            fail "launcher-only goals invoked Tor bootstrap: $*"
+            fail "nonlink goals invoked Tor bootstrap: $*"
     else
         if grep -q '^lean=1$' "$fixture/output"; then
             fail "node goals entered lean helper parse: $*"
@@ -113,9 +119,14 @@ for goal in windows-headless-run windows-headless-run-selftest \
     probe_bootstrap skip "$goal"
     probe_bootstrap require "$goal" z23
 done
+for goal in print-node-c23-srcs help doctor doctor-build timings agent-dev-status \
+    print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags; do
+    probe_bootstrap query "$goal"
+    probe_bootstrap require "$goal" z23
+done
 probe_bootstrap skip windows-headless-run windows-headless-run-selftest
 probe_bootstrap require z23
 probe_bootstrap require
 
 printf '%s\n' \
-    'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'
+    'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true source_query_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'

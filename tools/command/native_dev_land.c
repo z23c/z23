@@ -102,6 +102,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/file_clone.h"
+#include "platform/file_metadata.h"
 #include "platform/ram_scratch.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
@@ -2949,7 +2950,7 @@ static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
      * is fine. Accept-or-fall-through only: nothing here ever refuses. */
     if (dl_wt_submodule_ready(d->wt, "vendor/tor")) {
         char wt_dir[4096 + 96], wt_pin[80], archive[4096 + 96];
-        struct stat st;
+        struct platform_file_metadata metadata;
         if (snprintf(wt_dir, sizeof(wt_dir), "%s/vendor/tor", d->wt) <
                 (int)sizeof(wt_dir) &&
             snprintf(archive, sizeof(archive), "%s/vendor/tor/libtor.a",
@@ -2958,7 +2959,8 @@ static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
                    DL_GIT_TIMEOUT_MS) == 0) {
             dl_trim(wt_pin);
             if (dl_sha_ok(wt_pin) && strcmp(wt_pin, tip_pin) == 0 &&
-                lstat(archive, &st) == 0)
+                platform_file_metadata_read(archive, &metadata) ==
+                    PLATFORM_FILE_METADATA_OK)
                 return true;
         }
     }

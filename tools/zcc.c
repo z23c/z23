@@ -1235,6 +1235,88 @@ static bool entry_dir(const struct cache *c, const char *kind,
     return mkdir_p(out);
 }
 
+static void logline(const char *disposition, const char *detail,
+                    const struct plan *pl);
+
+/* One fixed inode keeps coordination storage bounded. A byte range selected
+ * by the content key serializes only matching work (or a hash collision).
+ * Ordinary obj/probe eviction never removes this inode. */
+static bool flight_current(int fd, const char *path)
+{
+    struct stat opened, named;
+    return fstat(fd, &opened) == 0 && S_ISREG(opened.st_mode) &&
+           lstat(path, &named) == 0 && S_ISREG(named.st_mode) &&
+           opened.st_dev == named.st_dev && opened.st_ino == named.st_ino;
+}
+
+static int64_t flight_clock_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) // platform-ok: standalone bootstrap deadline
+        return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static off_t flight_offset(const char *key)
+{
+    uint64_t offset = 0;
+    size_t digits = sizeof(off_t) >= 8 ? 15 : 7;
+    for (size_t i = 0; i < digits; i++) {
+        int nibble = zcl_hex_nibble(key[i], false);
+        if (nibble < 0)
+            return (off_t)-1;
+        offset = (offset << 4) | (unsigned)nibble;
+    }
+    return (off_t)offset;
+}
+
+static bool flight_wait(int fd, const char *path, struct flock *lock,
+                        const struct plan *pl, bool *waited)
+{
+    int64_t start = flight_clock_ms();
+    while (start >= 0 && flight_current(fd, path)) {
+        if (fcntl(fd, F_SETLK, lock) == 0)
+            return flight_current(fd, path);
+        if (errno != EACCES && errno != EAGAIN && errno != EINTR)
+            break;
+        if (!*waited)
+            logline("WAIT", "concurrent content", pl);
+        *waited = true;
+        int64_t now = flight_clock_ms();
+        if (now < start || now - start >= 120000)
+            break;
+        struct timespec pause = { .tv_sec = 0, .tv_nsec = 20000000 };
+        (void)nanosleep(&pause, NULL); // platform-ok: standalone bootstrap lock wait
+    }
+    return false;
+}
+
+static int flight_acquire(const struct cache *c, const char *key,
+                           const struct plan *pl, bool *waited)
+{
+    char path[PATH_MAX];
+    *waited = false;
+    off_t offset = flight_offset(key);
+    if (offset < 0)
+        return -1;
+    snprintf(path, sizeof path, "%.3000s/flight.lock", c->root);
+    int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET,
+                          .l_start = offset, .l_len = 1 };
+    if (flight_wait(fd, path, &lock, pl, waited))
+        return fd;
+    close(fd);
+    return -1;
+}
+
+static void flight_release(int fd)
+{
+    if (fd >= 0)
+        close(fd);
+}
+
 /* One byte appended per event; the counter IS the file size, so concurrent
  * makes never need a lock and never lose a count. */
 static void bump(const struct cache *c, const char *name)
@@ -1359,9 +1441,6 @@ static long counter(const struct cache *c, const char *name)
 /* The sibling files one obj entry owns, in the order evict() must remove
  * them: .bin first and always, per rule 1 above. Keep in sync with store(). */
 static const char *const OBJ_EXT[] = { ".bin", ".dep", ".err" };
-
-static void logline(const char *disposition, const char *detail,
-                    const struct plan *pl);
 
 /* A ceiling in MB that cannot overflow when turned into bytes. Without the
  * clamp a large enough ZCC_MAX_MB wraps `mb * 1024 * 1024` NEGATIVE, every
@@ -3090,6 +3169,68 @@ static int exec_direct(char **argv)
     return 127;
 }
 
+static bool flight_revalidate(const struct cache *c, const struct plan *pl,
+                               const char *key, struct deps *deps)
+{
+    char fresh_key[HEXLEN + 1u];
+    deps_free(deps);
+    return content_key(pl, c->tmp, deps, fresh_key) &&
+           strcmp(key, fresh_key) == 0;
+}
+
+/* A nonnegative result owns the compile range; -2 already served the result;
+ * -1 must compile without cache publication because coordination failed or
+ * the caller's input key changed while it waited. */
+static int flight_prepare(const struct cache *c, const struct plan *pl,
+                           const char *key, struct deps *deps,
+                           bool *have_deps)
+{
+    bool waited = false;
+    int fd = flight_acquire(c, key, pl, &waited);
+    if (fd < 0)
+        return -1;
+    if (waited) {
+        if (!flight_revalidate(c, pl, key, deps)) {
+            close(fd);
+            return -1;
+        }
+        *have_deps = true;
+    }
+    if (!serve(c, key, pl))
+        return fd;
+    close(fd);
+    bump(c, "hit");
+    logline("HIT", "concurrent content", pl);
+    return -2;
+}
+
+static void audit_compare(bool audit, bool had_cached, const char *key,
+                           const struct plan *pl, const struct buf *cached)
+{
+    if (!audit || !had_cached)
+        return;
+    struct buf fresh = { 0 };
+    if (read_file(pl->out_path, &fresh)) {
+        bool same = fresh.len == cached->len &&
+                    memcmp(fresh.p, cached->p, fresh.len) == 0;
+        fprintf(stderr, "zcc: AUDIT %s %s (%s)\n",
+                same ? "MATCH" : "DIVERGENCE", key, pl->out_path);
+        if (!same)
+            fprintf(stderr,
+                    "zcc: AUDIT the cached artifact did NOT match a "
+                    "fresh build — the fresh one was kept; report "
+                    "this and run --zcc-clear\n");
+    }
+    buf_free(&fresh);
+}
+
+static bool manifest_store(const struct cache *c, const char *pkey,
+                            const char *ckey, const struct deps *deps,
+                            bool have_pkey, bool have_deps)
+{
+    return have_pkey && have_deps && manifest_write(c, pkey, ckey, deps);
+}
+
 static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
 {
     if (argc < 2) {
@@ -3194,6 +3335,27 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
         }
     }
 
+    int flight_fd = -1;
+    if (!audit) {
+        flight_fd = flight_prepare(&c, &pl, ckey, &deps, &have_deps);
+        if (flight_fd < 0) {
+            if (flight_fd == -2) {
+                if (manifest_store(&c, pkey, ckey, &deps,
+                                   have_pkey, have_deps))
+                    maybe_trim(&c, &pl);
+                deps_free(&deps);
+                plan_free(&pl);
+                return 0;
+            }
+            deps_free(&deps);
+            bump(&c, "bypass");
+            logline("BYPASS", "content coordination unavailable or changed", &pl);
+            plan_free(&pl);
+            return replace_on_bypass ? exec_direct(cc_argv)
+                                     : run_argv(cc_argv, NULL, NULL);
+        }
+    }
+
     /* Miss (or audit): run the real compiler, capturing stderr so a later
      * hit can reproduce the warnings the developer would have seen. */
     char errfile[PATH_MAX];
@@ -3216,24 +3378,13 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
     buf_free(&errbytes);
 
     if (rc == 0) {
-        if (audit && had_cached) {
-            struct buf fresh = { 0 };
-            if (read_file(pl.out_path, &fresh)) {
-                bool same = fresh.len == cached_before.len &&
-                            memcmp(fresh.p, cached_before.p, fresh.len) == 0;
-                fprintf(stderr, "zcc: AUDIT %s %s (%s)\n",
-                        same ? "MATCH" : "DIVERGENCE", ckey, pl.out_path);
-                if (!same)
-                    fprintf(stderr,
-                            "zcc: AUDIT the cached artifact did NOT match a "
-                            "fresh build — the fresh one was kept; report "
-                            "this and run --zcc-clear\n");
-            }
-            buf_free(&fresh);
-        }
+        audit_compare(audit, had_cached, ckey, &pl, &cached_before);
         store(&c, ckey, &pl, errfile);
-        if (have_pkey && have_deps)
-            (void)manifest_write(&c, pkey, ckey, &deps);
+        if (flight_fd >= 0) {
+            close(flight_fd);
+            flight_fd = -1;
+        }
+        (void)manifest_store(&c, pkey, ckey, &deps, have_pkey, have_deps);
         bump(&c, "miss");
         logline("MISS", "compiled and stored", &pl);
         /* The artifact is already written and already handed back; the bound
@@ -3241,6 +3392,7 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
         maybe_trim(&c, &pl);
     }
     buf_free(&cached_before);
+    flight_release(flight_fd);
     deps_free(&deps);
     unlink(errfile);
     plan_free(&pl);

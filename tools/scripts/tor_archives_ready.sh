@@ -161,10 +161,12 @@ primary_checkout() {
 link_from() {
     local src="$1" a linked=0
     [ -n "$src" ] || return 1
-    [ "$(cd "$src" 2>/dev/null && pwd -P)" != "$(pwd -P)" ] || return 1
+    src="$(cd -- "$src" 2>/dev/null && pwd -P)" || return 1
+    [ "$src" != "$(pwd -P)" ] || return 1
     for a in "${ARCHIVES[@]}"; do
         [ -s "$src/$a" ] || return 1
     done
+    [ -s "$src/$TOR_TREE/.provenance" ] || return 1
     # The archives live under a submodule path. Copying bytes into an
     # UNINITIALIZED gitlink is worse than not having them: source-identity
     # capture refuses with "nonempty uninitialized gitlink would omit bytes",
@@ -188,20 +190,17 @@ link_from() {
     # Carry the SOURCE's provenance manifest alongside the copied bytes --
     # never write a fresh one here. The bytes did not change, so the record
     # of what produced them (vendor/tor commit, compiler, configure flags)
-    # is still true; only the copy destination changed. If the source has no
-    # manifest at all (an older checkout that predates this), have_all's
-    # provenance check below fails closed and do_ready falls through to a
-    # real build, same as any other mismatch.
-    if [ -s "$src/$TOR_TREE/.provenance" ]; then
-        cp -a --reflink=auto -- "$src/$TOR_TREE/.provenance" "$ROOT/$TOR_TREE/.provenance" 2>/dev/null || true
-    fi
+    # is still true; only the copy destination changed. A missing donor
+    # manifest was refused before copying; have_all verifies the copied bundle.
+    cp -a --reflink=auto -- "$src/$TOR_TREE/.provenance" "$ROOT/$TOR_TREE/.provenance" 2>/dev/null ||
+        cp -p "$src/$TOR_TREE/.provenance" "$ROOT/$TOR_TREE/.provenance" || return 1
     have_all || return 1
     echo "tor-ready: copied $linked vendored Tor archive(s) from $src (independent inodes; real-Tor link, no rebuild)"
     return 0
 }
 
 usage() {
-    echo "usage: $0 [ready|link-only|check|--selftest]" >&2
+    echo "usage: $0 [ready|link-only] [DONOR] | check | --selftest" >&2
     exit 2
 }
 
@@ -263,7 +262,9 @@ do_ready() {
         echo "tor-ready: FAIL $TOR_TREE has a provenance manifest that does not match its archives -- refusing to silently re-establish it; run 'make check-tor-provenance' for the exact mismatch, or 'make tor-full' to rebuild intentionally" >&2
         return 1
     fi
-    if [ "${1:-}" != no-link ] && link_from "$(primary_checkout)"; then
+    local donor="${2:-}"
+    [ -n "$donor" ] || donor="$(primary_checkout)"
+    if [ "${1:-}" != no-link ] && link_from "$donor"; then
         return 0
     fi
     if [ "${1:-}" = link-only ]; then
@@ -278,9 +279,10 @@ do_ready() {
     return 0
 }
 
+[ "$#" -le 2 ] || usage
 case "${1:-ready}" in
-    ready) do_ready ;;
-    link-only) do_ready link-only ;;
+    ready) do_ready ready "${2:-}" ;;
+    link-only) do_ready link-only "${2:-}" ;;
     check) do_check ;;
     --selftest)
         # The banner must name the knob, the stamp, and the way out. A future
@@ -372,6 +374,53 @@ case "${1:-ready}" in
             echo "tor_archives_ready: selftest FAILED — link_from did not carry the source's .provenance manifest byte-for-byte" >&2
             exit 1
         fi
+        # The selected donor is independent of the shared Git primary.
+        (
+            ROOT="$fixture/explicit donor"
+            mkdir -p "$ROOT"
+            cd "$ROOT"
+            primary_checkout() { printf '%s\n' "$fixture/unavailable"; }
+            ln -s "$fake_primary" ./-donor
+            cp() {
+                [ "${1:-}" != -a ] || return 1
+                printf 'portable copy\n' >> "$fixture/portable-copies"
+                command cp "$@"
+            }
+            do_ready link-only -donor >/dev/null
+            cmp "$fake_primary/$TOR_TREE/.provenance" "$ROOT/$TOR_TREE/.provenance"
+            [ "$(wc -l < "$fixture/portable-copies")" -eq 5 ]
+        ) || {
+            echo 'tor_archives_ready: selftest FAILED — explicit donor was ignored' >&2
+            exit 1
+        }
+        (
+            ROOT="$fixture/default donor"
+            mkdir -p "$ROOT"
+            cd "$ROOT"
+            primary_checkout() { printf '%s\n' "$fake_primary"; }
+            do_ready link-only >/dev/null
+        ) || {
+            echo 'tor_archives_ready: selftest FAILED — primary donor fallback changed' >&2
+            exit 1
+        }
+        # Execute the actual priming recipe against a recording helper.
+        prime="$fixture/prime"
+        mkdir -p "$prime/tools/scripts" "$fake_primary/vendor/lib"
+        printf 'fixture vendor archive\n' > "$fake_primary/vendor/lib/libfixture.a"
+        awk '/^worktree-prime:/ { copying=1 }
+             /^worktree-prime-selftest:/ { copying=0 }
+             copying { print }' "$SCRIPT_ROOT/Makefile" > "$prime/Makefile"
+        printf '#!/bin/sh\nexit 0\n' > "$prime/tools/scripts/copy_vendor_include.sh"
+        printf '#!/bin/sh\nprintf "%%s\\n" "$@" > donor-arguments\n' > \
+            "$prime/tools/scripts/tor_archives_ready.sh"
+        chmod +x "$prime/tools/scripts/"*.sh
+        ln -s "$fake_primary" "$prime/-donor"
+        make -s -C "$prime" worktree-prime SRC=-donor >/dev/null
+        printf 'link-only\n%s\n' "$fake_primary" > "$prime/expected-arguments"
+        cmp "$prime/expected-arguments" "$prime/donor-arguments" || {
+            echo 'tor_archives_ready: selftest FAILED — priming recipe lost explicit donor' >&2
+            exit 1
+        }
         # have_all() must fail closed on a tree whose archives are present
         # but whose .provenance manifest is simply absent -- the exact state
         # a checkout ends up in when its archives were built before the

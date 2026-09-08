@@ -357,7 +357,9 @@ VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
 # vendor work before that containment exists. Mixed goals retain bootstrap.
 ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest \
 	build/bin/z23-headless-run.exe
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS),$(MAKECMDGOALS))),,1),)
+# Read-only build queries link nothing and must not start a vendor configure.
+ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS),$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1401,7 +1403,7 @@ ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest install-hooks setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) \
-	$(ZCL_TOR_PROVENANCE_GOALS)
+	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
 
@@ -2774,6 +2776,7 @@ worktree-prime:
 	  echo "worktree-prime: could not derive a primary checkout; pass SRC=<path>" >&2; \
 	  exit 1; \
 	fi; \
+	src="$$(cd -- "$$src" && pwd -P)"; \
 	if [ ! -d "$$src/vendor/lib" ] || [ -z "$$(ls -A "$$src/vendor/lib" 2>/dev/null)" ]; then \
 	  echo "worktree-prime: $$src/vendor/lib is missing or empty (run 'make vendor' there, or pass SRC=<a primed checkout>)" >&2; \
 	  exit 1; \
@@ -2801,13 +2804,13 @@ worktree-prime:
 	      git submodule update --init vendor/tor >/dev/null 2>&1 \
 	        || echo "worktree-prime: WARNING - vendor/tor init failed; this worktree links the Tor STUB" >&2 ;; \
 	esac; \
-	if ZCL_TOR=full tools/scripts/tor_archives_ready.sh link-only; then \
+	if ZCL_TOR=full tools/scripts/tor_archives_ready.sh link-only "$$src"; then \
 	  :; \
 	else \
 	  echo "worktree-prime: no real Tor archives here or in $$src, so building them"; \
 	  echo "                once from the pinned submodule (a stub-linked worktree"; \
 	  echo "                cannot produce a shippable candidate)"; \
-	  ZCL_TOR=full tools/scripts/tor_archives_ready.sh ready; \
+	  ZCL_TOR=full tools/scripts/tor_archives_ready.sh ready "$$src"; \
 	fi
 
 worktree-prime-selftest:

@@ -4220,7 +4220,8 @@ static bool dp_generation_dependency(const char *root, const char *generation,
                               ? "make vendor"
                               : strncmp(dependency, "build/hotswap/",
                                         14) == 0
-                                    ? "make test_parallel"
+                                    ? "make build/hotswap/zcl_rollback_fixture_a.so "
+                                      "build/hotswap/zcl_rollback_fixture_b.so"
                                     : "make install-hooks";
         proof_whyf(why, why_len,
                    "proof_generation_dependency_unavailable:%s (%s)",
@@ -6283,7 +6284,14 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_job_count_unavailable");
         return false;
     }
-    const char *argv[] = {"make", "--no-print-directory", jobs, "dev-bin", NULL};
+    const char *argv[] = {
+        "make", "--no-print-directory", jobs, "dev-bin",
+#if defined(__linux__)
+        "build/hotswap/zcl_rollback_fixture_a.so",
+        "build/hotswap/zcl_rollback_fixture_b.so",
+#endif
+        NULL,
+    };
     struct zcl_dev_proof_budget budget = proof_step_budget(
         paths, "original-plan", PROOF_COMPILE_DEFAULT_MS);
     struct zcl_dev_proof_step_report report = {0};

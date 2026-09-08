@@ -63,6 +63,7 @@
  */
 
 #include "command/native_command.h"
+#include "base/utc_tm.h"
 
 #include "json/json.h"
 #include "platform/clock.h"
@@ -212,6 +213,16 @@ static const char *dvc_cwd(const struct zcl_command_request *request)
     if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
         return json_get_str(v);
     return ".";
+}
+
+static bool dvc_escape_claim(const char *story, const char *worktree,
+                             const char *branch, char escaped_story[1024],
+                             char escaped_worktree[PATH_MAX + 8],
+                             char escaped_branch[512])
+{
+    return dvc_json_escape(story, escaped_story, 1024) &&
+           dvc_json_escape(worktree, escaped_worktree, PATH_MAX + 8) &&
+           dvc_json_escape(branch, escaped_branch, 512);
 }
 
 void zcl_native_handle_dev_agent_claim(
@@ -428,9 +439,7 @@ void zcl_native_handle_dev_agent_claim(
     /* Whole-file rewrite: keep lines from other worktrees, drop our own
      * (replaced), append the new line. */
     char esc_story[1024], esc_wt[PATH_MAX + 8], esc_br[512];
-    if (!dvc_json_escape(story, esc_story, sizeof(esc_story)) ||
-        !dvc_json_escape(toplevel, esc_wt, sizeof(esc_wt)) ||
-        !dvc_json_escape(branch, esc_br, sizeof(esc_br))) {
+    if (!dvc_escape_claim(story, toplevel, branch, esc_story, esc_wt, esc_br)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT",
                                "escape", false, false,
@@ -454,8 +463,15 @@ void zcl_native_handle_dev_agent_claim(
     {
         time_t now = (time_t)(clock_now_wall_ms() / 1000);
         struct tm tm_utc;
-        gmtime_r(&now, &tm_utc);
-        (void)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+        if (!zcl_utc_tm(now, &tm_utc) ||
+            strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc) == 0) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_FAILED, "CLOCK_UNAVAILABLE",
+                                   "claim", false, false,
+                                   "cannot format the current UTC timestamp",
+                                   "retry after the local clock is available");
+            return;
+        }
     }
 
     char newline[DVC_LINE_CAP];

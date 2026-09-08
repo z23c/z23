@@ -7,6 +7,7 @@
  * below the View layer. */
 
 #include "views/explorer_factoids_internal.h"
+#include "base/utc_tm.h"
 
 /* Read a single REAL/double scalar (SELECT ... LIMIT 1). Returns `def` on
  * empty/error. The i64 helpers truncate, so hodl_history.older_1y_pct must use
@@ -188,7 +189,7 @@ size_t factoids_emit_section_5_records(uint8_t *buf, size_t cap, size_t off,
             time_t day_ts = (time_t)(row.v0 * 86400);
             struct tm tmv;
             char day[16] = "?";
-            if (gmtime_r(&day_ts, &tmv))
+            if (zcl_utc_tm(day_ts, &tmv))
                 strftime(day, sizeof(day), "%Y-%m-%d", &tmv);
             char nstr[32], rcpt[32] = "";
             fmt_comma(nstr, sizeof(nstr), row.v1);

@@ -13,6 +13,7 @@
  *   their own validates_* paths. */
 
 #include "platform/time_compat.h"
+#include "base/utc_tm.h"
 #include "platform/os_proc.h"
 #include "platform/path_compat.h"
 #include "util/log_macros.h"
@@ -466,8 +467,9 @@ static void db_quarantine_files(const char *path)
     char suffix[64];
     time_t now = platform_time_wall_time_t();
     struct tm tmv;
-    gmtime_r(&now, &tmv);
-    strftime(suffix, sizeof(suffix), "corrupt-%Y%m%dT%H%M%SZ", &tmv);
+    snprintf(suffix, sizeof(suffix), "corrupt-%lld", (long long)now);
+    if (zcl_utc_tm(now, &tmv))
+        strftime(suffix, sizeof(suffix), "corrupt-%Y%m%dT%H%M%SZ", &tmv);
 
     snprintf(wal, sizeof(wal), "%s-wal", path);
     snprintf(shm, sizeof(shm), "%s-shm", path);

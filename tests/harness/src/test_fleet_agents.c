@@ -361,6 +361,30 @@ static const struct json_value *fax_host_row(const struct json_value *out,
 }
 
 static int test_fleet_agents_publish(const char *root, const char *ledger);
+static int test_fleet_agents_process_unavailable(const char *root)
+{
+    int failures = 0;
+    struct json_value running;
+    json_init(&running);
+    TEST("agents scan: unavailable process observation preserves workspace data") {
+        struct zcl_agents_options options = {
+            .root = root,
+            .now_unix = FAX_NOW,
+            .process_root = "test-tmp/no-such-agent-process-backend",
+        };
+        zcl_agents_running_json(&options, &running);
+        ASSERT_STR_EQ(json_get_str(json_get(&running, "state")), "observed");
+        ASSERT_STR_EQ(json_get_str(json_get(&running, "process_observation")),
+                      "unavailable");
+        ASSERT(json_get_int(json_get(&running, "scanned")) > 0);
+        ASSERT(json_get_int(json_get(&running, "with_process")) == 0);
+        PASS();
+    }
+_test_next:;
+    json_free(&running);
+    return failures;
+}
+
 int test_fleet_agents(void);
 int test_fleet_agents(void)
 {
@@ -658,6 +682,7 @@ int test_fleet_agents(void)
 _test_next:;
     clock_reset_default();
     failures += test_fleet_agents_publish(root, ledger);
+    failures += test_fleet_agents_process_unavailable(root);
     if (failures == 0) printf("test_fleet_agents: all passed\n");
     else printf("test_fleet_agents: %d FAILED\n", failures);
     return failures;

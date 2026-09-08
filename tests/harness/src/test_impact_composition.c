@@ -3780,7 +3780,9 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
         "if test -f build/change-source; then echo changed >> sample.c; fi; "
         "set -- $$(tools/dev/source-identity.sh capture-record); "
         "sed -i \"s/^BASE_GENERATION=.*/BASE_GENERATION=$$3/\" "
-        "build/dev-loop/restart.env\n";
+        "build/dev-loop/restart.env\n"
+        "build/hotswap/zcl_rollback_fixture_%.so:\n"
+        "\t@mkdir -p build/hotswap; printf '%s\\n' '$*' > $@\n";
     if (!ic_write(root, ".gitignore", "build/\n.cache/\n") ||
         !ic_write(root, "sample.c", "int value = 1;\n") ||
         !ic_write(root, "Makefile", makefile) ||
@@ -3808,6 +3810,37 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
     local[len] = '\0';
     return true;
 }
+
+#if defined(__linux__)
+static bool ic_original_plan_recovers_fixtures(
+    const char *root, const char *local, const char *log)
+{
+    static const char *const fixtures[] = {
+        "build/hotswap/zcl_rollback_fixture_a.so",
+        "build/hotswap/zcl_rollback_fixture_b.so",
+    };
+    char path[4096], generation[4096], why[512];
+    if (snprintf(generation, sizeof(generation), "%s/build/generation", root) >=
+        (int)sizeof(generation)) return false;
+    for (size_t i = 0; i < 2u; i++) {
+        if (snprintf(path, sizeof(path), "%s/%s", root, fixtures[i]) >=
+            (int)sizeof(path) || unlink(path) != 0)
+            return false;
+        if (zcl_dev_proof_test_generation_dependency(
+                root, generation, fixtures[i], why, sizeof(why)) ||
+            !strstr(why, "proof_generation_dependency_unavailable:"))
+            return false;
+    }
+    if (!zcl_dev_proof_test_original_plan_prepare(
+            root, local, log, why, sizeof(why))) return false;
+    for (size_t i = 0; i < 2u; i++) {
+        if (!zcl_dev_proof_test_generation_dependency(
+                root, generation, fixtures[i], why, sizeof(why)))
+            return false;
+    }
+    return true;
+}
+#endif
 
 static int test_pw_original_plan_refreshes_before_sealing(void)
 {
@@ -3838,6 +3871,9 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
         ASSERT(unlink(marker) == 0);
         ASSERT(zcl_dev_proof_test_original_plan_prepare(root, local, log,
                                                         why, sizeof(why)));
+#if defined(__linux__)
+        ASSERT(ic_original_plan_recovers_fixtures(root, local, log));
+#endif
         /* Idempotent preparation still obtains a verified current plan. */
         ASSERT(zcl_dev_proof_test_original_plan_prepare(root, local, log,
                                                         why, sizeof(why)));

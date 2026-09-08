@@ -409,7 +409,7 @@ static void pf_cli_build_argv(char *bin, const char *extra_flag,
 
 /* rc != 0 path of pf_cli: prefer the structured error body over the raw
  * (truncated) stdout line. Fills `error` and logs it. */
-static void pf_cli_report_exit_error(const char *out, int rc,
+static void pf_cli_report_exit_error(char *out, int rc,
                                      const char *command_words, char *error,
                                      size_t error_cap)
 {

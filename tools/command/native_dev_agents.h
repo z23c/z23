@@ -47,6 +47,7 @@ struct zcl_agents_options {
     int64_t since_hours;     /* result-row window; 0 means the whole ledger */
     int64_t now_unix;        /* the caller's "now", in unix seconds */
     bool collect_units;      /* read systemd user units */
+    const char *process_root; /* process fixture root; NULL selects /proc */
 };
 
 /* Fill `out` with the `running` and `units` sections: one row per agent
