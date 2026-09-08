@@ -5,9 +5,11 @@
 #ifndef ZCL_DB_H
 #define ZCL_DB_H
 
+#include "support/log_throttle.h"
 #include "util/sync.h"
 #include "util/wal_checkpoint_stats.h"
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -98,6 +100,18 @@ struct node_db {
      * boot-only "current schema version" banner. Never mistake a background
      * reopen for a boot. See node_db_open_runtime(). */
     bool suppress_migrate_banner;
+
+    /* op_return_index legacy-state refusal handling — the context both
+     * models/op_return_index.c (the ERROR + backoff) and
+     * storage/catalog_completeness.c (the WARN) own their corner of, so
+     * neither needs file-scope mutable state for a per-connection episode.
+     * oprindex_legacy_backoff_secs == 0 means "not currently refusing";
+     * op_return_index_get_cursor() resets it the moment the persisted state
+     * reads back EMPTY/V2 (e.g. after `z23 app oprindex rebuild`). */
+    struct log_throttle oprindex_legacy_log;          /* op_return_index.c ERROR */
+    _Atomic int64_t     oprindex_legacy_backoff_secs;  /* 0 = not refusing */
+    _Atomic int64_t     oprindex_legacy_retry_at_unix; /* next re-check time */
+    struct log_throttle catalog_oprindex_legacy_log;   /* catalog_completeness.c WARN */
 };
 
 /* Open or create the node database at path (e.g. ~/.zclassic-c23/node.db).

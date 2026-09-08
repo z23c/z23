@@ -13,12 +13,15 @@
 #include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
+#include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "script/op_return_push.h"
+#include "support/log_throttle.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -331,6 +334,84 @@ op_return_index_state_version(struct node_db *ndb)
     return OP_RETURN_INDEX_STATE_EMPTY;
 }
 
+bool op_return_index_state_is_legacy_refused(struct node_db *ndb)
+{
+    enum op_return_index_state_version v = op_return_index_state_version(ndb);
+    return v == OP_RETURN_INDEX_STATE_LEGACY_V1 ||
+           v == OP_RETURN_INDEX_STATE_UNKNOWN;
+}
+
+/* How rarely the ERROR line below may repeat while a legacy_v1/unknown
+ * persisted state keeps refusing — the condition (conditions/op_return_
+ * index_legacy_state.c) already names this loudly as a blocker, so the log
+ * itself only needs to stay discoverable, not repeat every poll. */
+#define OP_RETURN_INDEX_LEGACY_LOG_KEEPALIVE_SECS 3600
+/* Exponential re-check backoff for the redundant SQLite classify a caller
+ * polling every second would otherwise repeat: starts here, doubles each
+ * refusal, caps at 15 minutes. */
+#define OP_RETURN_INDEX_LEGACY_BACKOFF_INITIAL_SECS 30
+#define OP_RETURN_INDEX_LEGACY_BACKOFF_CAP_SECS     (15 * 60)
+
+/* True while a prior call already classified `ndb` as refusing and the
+ * backoff window it armed has not yet elapsed — the caller should skip the
+ * SQLite re-check entirely and return the cached refusal. */
+static bool oprindex_legacy_backoff_active(struct node_db *ndb, int64_t now)
+{
+    int64_t backoff = atomic_load_explicit(&ndb->oprindex_legacy_backoff_secs,
+                                           memory_order_relaxed);
+    if (backoff <= 0)
+        return false;
+    return now < atomic_load_explicit(&ndb->oprindex_legacy_retry_at_unix,
+                                      memory_order_relaxed);
+}
+
+/* The state read came back EMPTY/V2 — clear any armed backoff so the very
+ * next legacy sighting (should the state ever regress) logs immediately
+ * rather than inheriting a stale multi-minute backoff. */
+static void oprindex_legacy_backoff_clear(struct node_db *ndb)
+{
+    atomic_store_explicit(&ndb->oprindex_legacy_backoff_secs, 0,
+                          memory_order_relaxed);
+}
+
+/* Advance the exponential backoff (capped) and log the refusal ERROR at
+ * most once per OP_RETURN_INDEX_LEGACY_LOG_KEEPALIVE_SECS — never a
+ * silent reinterpretation, just a throttled repeat of the same loud
+ * refusal. Always returns false. */
+static bool oprindex_legacy_refuse(struct node_db *ndb,
+                                   enum op_return_index_state_version v,
+                                   int64_t now)
+{
+    int64_t prev = atomic_load_explicit(&ndb->oprindex_legacy_backoff_secs,
+                                        memory_order_relaxed);
+    int64_t next = prev > 0 ? prev * 2
+                            : OP_RETURN_INDEX_LEGACY_BACKOFF_INITIAL_SECS;
+    if (next > OP_RETURN_INDEX_LEGACY_BACKOFF_CAP_SECS)
+        next = OP_RETURN_INDEX_LEGACY_BACKOFF_CAP_SECS;
+    atomic_store_explicit(&ndb->oprindex_legacy_backoff_secs, next,
+                          memory_order_relaxed);
+    atomic_store_explicit(&ndb->oprindex_legacy_retry_at_unix, now + next,
+                          memory_order_relaxed);
+
+    uint64_t reps = 0;
+    if (log_throttle_should_emit_changed(&ndb->oprindex_legacy_log,
+                                         prev == 0, now,
+                                         OP_RETURN_INDEX_LEGACY_LOG_KEEPALIVE_SECS,
+                                         &reps))
+        ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR,
+            "[%s] %s:%d %s(): get_cursor: REFUSING persisted state version "
+            "'%s' — this binary writes op_return_index_state.v2 "
+            "(range-declared base_height+base_digest) and will not "
+            "reinterpret an older or unrecognized record as a v2 chain. "
+            "Rebuild the catalog (`z23 app oprindex rebuild`) to re-derive "
+            "it. (%llu occurrence(s) suppressed since last log; next "
+            "re-check backoff=%llds)\n",
+            "op_return_index", __FILE__, __LINE__, __func__,
+            op_return_index_state_version_name(v),
+            (unsigned long long)reps, (long long)next);
+    return false;  // raw-return-ok:legacy-state-throttled-refusal
+}
+
 bool op_return_index_get_cursor(struct node_db *ndb,
                                 struct op_return_index_cursor *out)
 {
@@ -343,25 +424,33 @@ bool op_return_index_get_cursor(struct node_db *ndb,
     out->base_height = 0;
     out->height = -1;
 
+    /* A prior call already classified this connection as refusing a
+     * legacy/unknown persisted state and armed a backoff window — skip the
+     * SQLite re-check entirely and return the cached refusal silently:
+     * there is no new evidence to log, and re-deriving the classification
+     * on every poll is exactly the load this backoff exists to avoid. */
+    int64_t now = platform_time_wall_unix();
+    if (oprindex_legacy_backoff_active(ndb, now))
+        return false;  // raw-return-ok:legacy-state-backoff-not-elapsed
+
     enum op_return_index_state_version v = op_return_index_state_version(ndb);
     switch (v) {
     case OP_RETURN_INDEX_STATE_EMPTY:
+        oprindex_legacy_backoff_clear(ndb);
         return true;                       /* fresh chain — valid state */
     case OP_RETURN_INDEX_STATE_V2:
+        oprindex_legacy_backoff_clear(ndb);
         break;
     case OP_RETURN_INDEX_STATE_LEGACY_V1:
     case OP_RETURN_INDEX_STATE_UNKNOWN:
         /* Loud refusal, never a silent reinterpretation: a v1 digest makes
          * a genesis-rooted claim this binary cannot verify or extend. The
          * operator's escape is `oprindex_rebuild` (op_return_index_
-         * truncate), which drops the v1 record and re-derives. */
-        LOG_FAIL("op_return_index",
-                 "get_cursor: REFUSING persisted state version '%s' — this "
-                 "binary writes op_return_index_state.v2 (range-declared "
-                 "base_height+base_digest) and will not reinterpret an older "
-                 "or unrecognized record as a v2 chain. Rebuild the catalog "
-                 "(`z23 app oprindex rebuild`) to re-derive it.",
-                 op_return_index_state_version_name(v));
+         * truncate), which drops the v1 record and re-derives — see
+         * conditions/op_return_index_legacy_state.c, which names this
+         * loudly as the "op_return_index.legacy_state" blocker so the
+         * remedy is visible in `z23 status` even while this log is quiet. */
+        return oprindex_legacy_refuse(ndb, v, now);
     }
 
     uint8_t rec[OP_RETURN_INDEX_STATE_RECORD_LEN];
@@ -419,6 +508,35 @@ bool op_return_index_get_cursor_heights(struct node_db *ndb,
     return true;
 }
 
+bool op_return_index_legacy_state_cached(struct node_db *ndb)
+{
+    if (!ndb)
+        return false;
+    /* Pure read of the classification a get_cursor[_heights]() call on this
+     * SAME connection already refreshed this poll — no new SQLite I/O. */
+    return atomic_load_explicit(&ndb->oprindex_legacy_backoff_secs,
+                                memory_order_relaxed) > 0;
+}
+
+bool op_return_index_legacy_catalog_warn_due(struct node_db *ndb,
+                                             uint64_t *out_suppressed)
+{
+    if (out_suppressed)
+        *out_suppressed = 0;
+    if (!op_return_index_legacy_state_cached(ndb)) {
+        /* Not currently refusing — reset so the NEXT legacy episode (should
+         * the state ever regress after a rebuild) logs immediately rather
+         * than inheriting a stale keepalive window from this one. */
+        if (ndb)
+            log_throttle_reset(&ndb->catalog_oprindex_legacy_log);
+        return false;
+    }
+    return log_throttle_should_emit(&ndb->catalog_oprindex_legacy_log, 1u,
+                                    platform_time_wall_unix(),
+                                    OP_RETURN_INDEX_LEGACY_LOG_KEEPALIVE_SECS,
+                                    out_suppressed);
+}
+
 bool op_return_index_prune_below(struct node_db *ndb, int32_t base_height)
 {
     if (!ndb || !ndb->open)
@@ -474,6 +592,12 @@ bool op_return_index_truncate(struct node_db *ndb)
      * this is the operator's documented escape from a legacy record. */
     (void)node_db_state_delete(ndb, OP_RETURN_INDEX_CURSOR_KEY_V1);
     (void)node_db_state_delete(ndb, OP_RETURN_INDEX_DIGEST_KEY_V1);
+    /* This IS the rebuild the legacy-state backoff exists to wait for:
+     * clear it now rather than let a caller sit inside up to 15 more
+     * minutes of cached refusal after the fix already landed. The next
+     * get_cursor() re-classifies immediately (finds the fresh EMPTY/V2
+     * record set above) instead of skipping straight to the stale cache. */
+    oprindex_legacy_backoff_clear(ndb);
     return true;
 }
 

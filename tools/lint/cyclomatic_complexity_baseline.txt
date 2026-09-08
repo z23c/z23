@@ -3296,7 +3296,7 @@ tests/harness/src/test_ontology_vocabulary.c:test_ontology_vocabulary_canonical:
 tests/harness/src/test_ontology_vocabulary.c:tv_vocabulary_zero:26
 tests/harness/src/test_op_return_index.c:test_backfill_declared_partial_coverage:17
 tests/harness/src/test_op_return_index.c:test_backfill_e2e:20
-tests/harness/src/test_op_return_index.c:test_cursor_state:34
+tests/harness/src/test_op_return_index.c:test_cursor_state:29
 tests/harness/src/test_op_return_index.c:test_extract_pure:25
 tests/harness/src/test_operator_ux.c:test_explain_sync_marks_run_ahead_cursors:24
 tests/harness/src/test_orphan_utxo_above_tip.c:test_orphan_utxo_above_tip:28

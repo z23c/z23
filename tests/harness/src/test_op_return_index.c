@@ -447,6 +447,9 @@ static int test_digest_pure(void)
 
 /* ── (3b) Persisted cursor state: round-trip + version refusal ────── */
 
+static int test_cursor_state_legacy_backoff(struct node_db *ndb);
+static int test_cursor_state_legacy_catalog_warn(struct node_db *ndb);
+
 static int test_cursor_state(void)
 {
     int failures = 0;
@@ -538,20 +541,110 @@ static int test_cursor_state(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    failures += test_cursor_state_legacy_backoff(&ndb);
+
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* Split out of test_cursor_state (cyclomatic complexity): the legacy-state
+ * backoff/throttle regression — a legacy_v1 refusal logs/re-classifies once
+ * then backs off across 100 repeated polls, catalog_completeness's own WARN
+ * is equally throttled, and both clear the moment the rebuild lands. `ndb`
+ * already carries the planted legacy v1 record from the caller. */
+static int test_cursor_state_legacy_backoff(struct node_db *ndb)
+{
+    int failures = 0;
+
+    printf("cursor state: a legacy refusal logs/re-classifies once, then "
+          "backs off across 100 repeated polls (no log storm)... ");
+    {
+        struct op_return_index_cursor cur;
+        int64_t backoff_after_first = 0, retry_after_first = 0;
+        bool ok = true;
+        for (int i = 0; i < 100; i++) {
+            memset(&cur, 0xEE, sizeof(cur));
+            bool refused = !op_return_index_get_cursor(ndb, &cur);
+            ok = ok && refused;
+            int64_t backoff = atomic_load(&ndb->oprindex_legacy_backoff_secs);
+            int64_t retry_at =
+                atomic_load(&ndb->oprindex_legacy_retry_at_unix);
+            if (i == 0) {
+                /* First poll classifies + logs once and arms the initial
+                 * backoff window. */
+                backoff_after_first = backoff;
+                retry_after_first = retry_at;
+                ok = ok && backoff > 0;
+            } else {
+                /* Every later poll within the same backoff window must be
+                 * served from the cached refusal — no re-classify, no new
+                 * backoff/retry state, i.e. no repeated log. */
+                ok = ok && backoff == backoff_after_first &&
+                     retry_at == retry_after_first;
+            }
+        }
+        ok = ok && op_return_index_state_is_legacy_refused(ndb) &&
+             op_return_index_legacy_state_cached(ndb);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    failures += test_cursor_state_legacy_catalog_warn(ndb);
+    return failures;
+}
+
+/* Split further out of test_cursor_state_legacy_backoff (cyclomatic
+ * complexity): catalog_completeness's own WARN throttle, both sides of the
+ * rebuild. `ndb` still carries the legacy v1 record; this also performs the
+ * documented-escape truncate. */
+static int test_cursor_state_legacy_catalog_warn(struct node_db *ndb)
+{
+    int failures = 0;
+
+    printf("cursor state: catalog_completeness's own legacy-state WARN "
+          "fires once, then throttles across repeated calls... ");
+    {
+        int32_t h = -1, base = 0;
+        uint64_t suppressed = 0;
+        (void)op_return_index_get_cursor_heights(ndb, &h, &base);
+        bool ok = op_return_index_legacy_catalog_warn_due(ndb, &suppressed);
+        for (int i = 0; i < 20; i++) {
+            (void)op_return_index_get_cursor_heights(ndb, &h, &base);
+            bool due = op_return_index_legacy_catalog_warn_due(ndb,
+                                                               &suppressed);
+            ok = ok && !due;   /* throttled: keepalive is 1 hour */
+        }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     printf("cursor state: truncate is the documented escape — it retires the "
           "v1 record and the chain reads EMPTY again... ");
     {
         struct op_return_index_cursor cur;
         memset(&cur, 0xEE, sizeof(cur));
-        bool ok = op_return_index_truncate(&ndb) &&
-                  op_return_index_state_version(&ndb) ==
+        bool ok = op_return_index_truncate(ndb) &&
+                  op_return_index_state_version(ndb) ==
                       OP_RETURN_INDEX_STATE_V2 &&
-                  op_return_index_get_cursor(&ndb, &cur) &&
+                  op_return_index_get_cursor(ndb, &cur) &&
                   cur.base_height == 0 && cur.height == -1;
+        /* The rebuild also clears the cached refusal/backoff — the next
+         * legacy sighting (should the record ever regress) would log
+         * immediately rather than inherit a stale backoff. */
+        ok = ok && atomic_load(&ndb->oprindex_legacy_backoff_secs) == 0 &&
+             !op_return_index_legacy_state_cached(ndb);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    node_db_close(&ndb);
+    printf("cursor state: catalog_completeness's WARN stops firing once the "
+          "rebuild lands... ");
+    {
+        int32_t h = -1, base = 0;
+        uint64_t suppressed = 0;
+        bool got = op_return_index_get_cursor_heights(ndb, &h, &base);
+        bool due = op_return_index_legacy_catalog_warn_due(ndb, &suppressed);
+        bool ok = got && !due;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     return failures;
 }
 

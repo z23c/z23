@@ -187,6 +187,33 @@ bool op_return_index_get_cursor_heights(struct node_db *ndb,
                                         int32_t *out_height,
                                         int32_t *out_base_height);
 
+/* True iff the persisted cursor state is LEGACY_V1 or UNKNOWN — the
+ * refusal classify a lib/-layer caller (storage/catalog_completeness.c)
+ * needs without naming the op_return_index_state_version enum, an app/
+ * type it cannot include (see catalog_completeness.c's forward-declaration
+ * note). Pure classify: never logs, never raises. False for EMPTY/V2 and
+ * for an unusable ndb. */
+bool op_return_index_state_is_legacy_refused(struct node_db *ndb);
+
+/* Cheap variant of the same classify: a pure atomic read of whatever the
+ * MOST RECENT op_return_index_get_cursor[_heights]() call on this exact
+ * connection already found — no new SQLite I/O. Only meaningful right
+ * after such a call on the same `ndb` this poll; used by catalog_
+ * completeness.c to decide its own log cadence without re-deriving what
+ * op_return_index.c already knows. False for an unusable ndb. */
+bool op_return_index_legacy_state_cached(struct node_db *ndb);
+
+/* True exactly when catalog_completeness.c's own "unavailable: op_return_
+ * index.legacy_state" WARN is due for this connection — at most once per
+ * hour while the cached classification above stays legacy/unknown, reset
+ * (so the next episode logs immediately) the moment it clears. Advances
+ * catalog_completeness.c's OWN throttle slot on `ndb`; never touches
+ * op_return_index.c's own ERROR throttle. `*out_suppressed` (if non-NULL)
+ * receives the occurrence count folded into a throttled emission, 0 when
+ * this returns false or on a fresh/no-emit call. */
+bool op_return_index_legacy_catalog_warn_due(struct node_db *ndb,
+                                             uint64_t *out_suppressed);
+
 /* Delete every cataloged row strictly below `base_height` — rows outside
  * the declared range, which the digest chain does not cover and no
  * verifier can reproduce. Called when the base moves up. */
