@@ -9,6 +9,7 @@
 #include "chain/chain.h"                        /* block_index, status helpers */
 #include "chain/checkpoints.h"                  /* get_sha3_utxo_checkpoint */
 #include "services/block_index_loader.h"        /* load_block_index_flat + promote */
+#include "services/sync_benchmark_service.h"    /* SYNC_BENCH_HEADERS phase */
 #include "validation/chainstate.h"              /* block_map_next / _count */
 #include "validation/main_state.h"              /* struct main_state */
 #include "util/blocker.h"
@@ -58,6 +59,12 @@ bool boot_header_seed_import_maybe(const char *datadir, struct main_state *ms)
     if (stat(src, &st) != 0)
         return false; /* nothing downloaded — no-op */
 
+    /* zcl.sync_benchmark.v1: the artifact is present, so this boot is genuinely
+     * attempting a header-seed import — arm the phase. A no-op boot (the
+     * stat-miss case above) never begins it, so the receipt never claims a
+     * headers phase for a boot that never tried one. */
+    sync_benchmark_phase_begin(SYNC_BENCH_HEADERS);
+
     /* Never clobber an already-populated header index (only the fresh
      * instant-on case seeds from a peer artifact). */
     size_t existing = block_map_count(&ms->map_block_index);
@@ -100,6 +107,7 @@ bool boot_header_seed_import_maybe(const char *datadir, struct main_state *ms)
      * link pprev to it by hash. */
     struct zcl_result r = load_block_index_flat(datadir, ms);
     if (!r.ok) {
+        sync_benchmark_phase_end(SYNC_BENCH_HEADERS);
         hsi_name_blocker("header_seed.load_failed", r.message[0] ? r.message
                          : "load_block_index_flat rejected the header seed");
         LOG_WARN(HSI_SUBSYS,
@@ -185,5 +193,6 @@ bool boot_header_seed_import_maybe(const char *datadir, struct main_state *ms)
                  "the locator; install defers to the P2P-supplied checkpoint",
                  count, frontier, cp ? cp->height : -1);
     }
+    sync_benchmark_phase_end(SYNC_BENCH_HEADERS);
     return true;
 }

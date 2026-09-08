@@ -141,7 +141,7 @@ Z23_FLAG("ZCL_ALERTS_DISABLE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ALERT_WEBHOOK_URL", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/event/src/alerts.c:285")
 Z23_FLAG("ZCL_ALLOW_CORRUPT_INDEX", "env_runtime", "-", "-",
-          "undocumented; first use engine/composition/src/boot.c:2161")
+          "undocumented; first use engine/composition/src/boot.c:2162")
 Z23_FLAG("ZCL_ALLOW_PLAINTEXT_WALLET", "env_runtime", "-", "-",
           "undocumented; first use contexts/wallet/modules/wallet/src/wallet_keystore.c:51")
 Z23_FLAG("ZCL_ANCHOR_MINT_DATADIR", "env_runtime", "-", "-",

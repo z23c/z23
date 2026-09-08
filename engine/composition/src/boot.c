@@ -39,6 +39,7 @@
 #include "util/service_state.h"
 #include "services/service_state_driver.h"
 #include "services/chain_tip.h"
+#include "services/sync_benchmark_service.h"
 #include "services/recovery_policy.h"
 #include "services/utxo_recovery_service.h"
 #include "supervisors/staged_sync_supervisor.h"
@@ -3098,6 +3099,12 @@ static bool boot_seq_select_state_source(struct app_context *ctx)
      * the self-heal covers those callers without threading datadir through the
      * install-runtime seam. */
     boot_refold_body_rebind_set_datadir(ctx->datadir);
+    /* zcl.sync_benchmark.v1: arm the phase-timed sync receipt for this boot
+     * right before state-source selection — the single earliest point this
+     * boot's automatic path can name, and the natural counterpart to the
+     * manual ops.debug.rom_fetch.bundle command's own sync_benchmark_init()
+     * call. Idempotent; a re-entrant boot path just resets t0. */
+    sync_benchmark_init(ctx->datadir);
     struct boot_state_source_selection ssel;
     boot_select_state_source(&g_node_db, &g_state, ctx, &ssel);
     bool consumed_auto_refold = ssel.consumed_auto_refold;

@@ -47,6 +47,18 @@ void zcl_native_handle_rom_fetch_status(
     struct json_value body;
     json_init(&body);
     (void)rom_fetch_dump_state_json(&body, NULL);
+
+    /* zcl.sync_benchmark.v1: this is the ONE documented, discoverable command
+     * an operator reads sync-phase timings from — no second undocumented
+     * path, no grepping sync_benchmark.json by hand. Nested under its own
+     * key so the artifact-fetch fields above and the whole-boot phase
+     * receipt below never collide on a name. */
+    struct json_value bench;
+    json_init(&bench);
+    (void)sync_benchmark_dump_state_json(&bench, NULL);
+    json_push_kv(&body, "sync_benchmark", &bench);
+    json_free(&bench);
+
     json_copy(&reply->data, &body);
     json_free(&body);
 }

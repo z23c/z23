@@ -22,6 +22,7 @@
 #include "util/pprev_walk.h"
 #include "net/download.h"
 #include "net/net.h"
+#include "services/sync_benchmark_service.h"
 #include "validation/main_state.h"
 #include "validation/process_block.h"
 #include "consensus/params.h"
@@ -34,6 +35,53 @@
 static int64_t g_last_stall_log = 0;
 static int64_t g_last_stall_reset = 0;
 static int64_t g_last_stale_warn = 0;
+
+/* zcl.sync_benchmark.v1 one-shot guards. Each flips exactly once per process
+ * (matching sync_benchmark_init's per-boot arming in boot.c): the two
+ * *_begun flags stamp SYNC_BENCH_TAIL_DOWNLOAD / SYNC_BENCH_TAIL_FOLD on
+ * their first real call, and g_sb_sovereign_recorded gates the terminal
+ * mark_sovereign + write_receipt(complete=true) pair in
+ * syncsvc_collect_progress so a receipt is never written more than once nor
+ * before the reducer frontier genuinely reaches the peer-agreed tip. */
+static atomic_bool g_sb_tail_download_begun = false;
+static atomic_bool g_sb_tail_fold_begun = false;
+static atomic_bool g_sb_sovereign_recorded = false;
+
+/* One-shot begin helpers (kept out of their callers to hold the callers'
+ * cyclomatic complexity under cap — each of these adds exactly one new
+ * branch, and the callers already sit at the ratchet). */
+static void sb_begin_tail_download_once(void)
+{
+    bool expected = false;
+    if (atomic_compare_exchange_strong(&g_sb_tail_download_begun, &expected,
+                                       true))
+        sync_benchmark_phase_begin(SYNC_BENCH_TAIL_DOWNLOAD);
+}
+
+static void sb_begin_tail_fold_once(void)
+{
+    bool expected = false;
+    if (atomic_compare_exchange_strong(&g_sb_tail_fold_begun, &expected,
+                                       true))
+        sync_benchmark_phase_begin(SYNC_BENCH_TAIL_FOLD);
+}
+
+/* Fires the terminal zcl.sync_benchmark.v1 milestone exactly once: ends
+ * TAIL_DOWNLOAD/TAIL_FOLD, marks sovereignty, and writes the one
+ * complete=true receipt. Called only when the caller has already confirmed
+ * sync_state == SYNC_AT_TIP — the proven "reached the peer-agreed tip"
+ * signal (see syncsvc_note_valid_block). */
+static void sb_record_sovereign_once(void)
+{
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&g_sb_sovereign_recorded, &expected,
+                                        true))
+        return;
+    sync_benchmark_phase_end(SYNC_BENCH_TAIL_DOWNLOAD);
+    sync_benchmark_phase_end(SYNC_BENCH_TAIL_FOLD);
+    sync_benchmark_mark_sovereign();
+    (void)sync_benchmark_write_receipt(true, NULL);
+}
 
 void syncsvc_plan_invalid_block_getheaders(struct sync_getheaders_action *action,
                                            enum sync_state sync_state)
@@ -59,6 +107,13 @@ void syncsvc_plan_block_assignment(struct sync_block_assignment *plan,
     struct sync_block_assignment empty = {0};
     if (!plan) return;
     *plan = empty;
+
+    /* zcl.sync_benchmark.v1: SYNC_BENCH_TAIL_DOWNLOAD begins on this boot's
+     * first block-assignment planning call — the earliest real signal that
+     * tail body download has started. Fires at most once per process; ended
+     * (alongside TAIL_FOLD) in syncsvc_collect_progress once the frontier
+     * reaches the peer-agreed tip. */
+    sb_begin_tail_download_once();
 
     if (!node || node->state < PEER_HANDSHAKE_COMPLETE)
         return;
@@ -162,6 +217,13 @@ void syncsvc_note_valid_block(struct sync_block_acceptance *result,
     if (!result) return;
     *result = empty;
     if (!node) return;
+
+    /* zcl.sync_benchmark.v1: SYNC_BENCH_TAIL_FOLD begins on this boot's first
+     * accepted-block reducer note — the earliest real signal that tail
+     * fold has started. Fires at most once per process; ended (alongside
+     * TAIL_DOWNLOAD) in syncsvc_collect_progress once the frontier reaches
+     * the peer-agreed tip. */
+    sb_begin_tail_fold_once();
 
     /* Match ZClassic C++ tip detection: consider "at tip" when EITHER:
      * (a) our height >= peer's starting_height AND headers caught up, OR
@@ -334,6 +396,31 @@ void syncsvc_collect_progress(struct sync_progress_snapshot *snapshot,
         snapshot->tip_stale_seconds = now_seconds - peer_last_block_time;
         snapshot->tip_stale = snapshot->tip_stale_seconds > 600;
     }
+
+    /* zcl.sync_benchmark.v1: the terminal milestone. SYNC_AT_TIP is this
+     * file's own proven-complete "reached the peer-agreed tip" signal (see
+     * syncsvc_note_valid_block above: it requires a proven body-history
+     * census, not just a height match) — the exact frontier condition the
+     * instrument's honesty contract requires before it may claim sovereignty.
+     * Never fabricates completion on any other sync_state. */
+    if (sync_state == SYNC_AT_TIP)
+        sb_record_sovereign_once();
+}
+
+/* Test-only: rearm the three one-shot zcl.sync_benchmark.v1 guards above so a
+ * test binary that drives multiple independent sync scenarios through this
+ * file's functions can observe each one's begin/end pair, not just the
+ * first. Declared via an in-test `extern` (this file's public surface is
+ * core/modules/sync/include/sync/sync_planner.h, a sealed core/ header this
+ * lane does not touch) — the same pattern test_connect_tip_hot_loop_exit.c
+ * and others already use for test-only hooks. */
+void syncsvc_sync_benchmark_reset_for_testing(void)
+{
+    atomic_store_explicit(&g_sb_tail_download_begun, false,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_sb_tail_fold_begun, false, memory_order_relaxed);
+    atomic_store_explicit(&g_sb_sovereign_recorded, false,
+                          memory_order_relaxed);
 }
 
 bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,

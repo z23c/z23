@@ -10,6 +10,7 @@
 #include "core/utiltime.h"
 #include "platform/fd_path.h"
 #include "crypto/sha3.h"
+#include "services/sync_benchmark_service.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/sync.h"
@@ -589,9 +590,15 @@ bool consensus_state_snapshot_install(
     struct consensus_state_artifact_evidence *evidence = NULL;
     /* This preview/contained verb (see the "Always false" note below) has no
      * datadir capability of its own to key an install-verify receipt on;
-     * every call runs the full content verify. */
+     * every call runs the full content verify.
+     *
+     * zcl.sync_benchmark.v1: SYNC_BENCH_ARTIFACT_VERIFY brackets exactly the
+     * open+content-verify call below (the expensive, real work); it is never
+     * begun for a request that fails NULL validation above. */
+    sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_VERIFY);
     struct zcl_result admitted = artifact_evidence_open_impl(
         request->bundle_path, -1, request->failpoint, result, &evidence);
+    sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_VERIFY);
     bool ok = admitted.ok;
     if (!ok) {
         enum consensus_state_install_status status = CONSENSUS_INSTALL_REFUSED;
@@ -603,8 +610,18 @@ bool consensus_state_snapshot_install(
             status = CONSENSUS_INSTALL_STORE_ERROR;
         return install_fail(result, status, "%s", admitted.message);
     }
+    /* SYNC_BENCH_INSTALL brackets the admission-to-contained-result stretch:
+     * manifest copy, the caller-assertion match, and the verified-contained
+     * status build. sync_benchmark_mark_ready() fires exactly once, the
+     * instant this reaches CONSENSUS_INSTALL_VERIFIED_CONTAINED — the "usable,
+     * not yet sovereign" milestone the header documents: the bundle is
+     * verified and its data is available, even though full activation
+     * authority (bound proof authority, rollback generation, crash proof)
+     * remains future work and this call still returns false. */
+    sync_benchmark_phase_begin(SYNC_BENCH_INSTALL);
     struct consensus_state_bundle_manifest manifest;
     if (!consensus_state_artifact_evidence_manifest_copy(evidence, &manifest)) {
+        sync_benchmark_phase_end(SYNC_BENCH_INSTALL);
         consensus_state_artifact_evidence_free(evidence);
         return install_fail(result, CONSENSUS_INSTALL_REFUSED,
                             "artifact evidence became stale after admission");
@@ -638,8 +655,10 @@ bool consensus_state_snapshot_install(
             manifest.source_clean ? "clean" : "dirty",
             manifest.validation_profile == CONSENSUS_STATE_VALIDATION_FULL
                 ? "full" : "checkpoint_fold");
+        sync_benchmark_mark_ready();
         ok = false;
     }
+    sync_benchmark_phase_end(SYNC_BENCH_INSTALL);
 
     consensus_state_artifact_evidence_free(evidence);
     return ok; /* Always false while activation containment is in force. */
