@@ -628,6 +628,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/db_service.c", CAP_CLOCK|CAP_FS_WR
 ZCL_MODULE_CAPABILITY("engine/composition/src/file_ops.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/mint_anchor_progress.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/rom_bundle_admission.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/rom_fetch_orphan_sweep.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/runtime.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/state_offer_service.c", CAP_NONE, "every reach it has is mediated: time through the platform time seam, the download through rom_fetch, the install through the unchanged boot install request, the signature through the online identity seam")
 ZCL_MODULE_CAPABILITY("core/chainparams/src/subsidy.c", CAP_FS_WRITE, "")

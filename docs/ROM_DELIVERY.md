@@ -200,6 +200,40 @@ legacy two-step `--importblockindex` + boot recovery path (see the
 Tenacity section of the repo's `CLAUDE.md`) — ROM delivery is an
 acceleration, not a hard dependency.
 
+## Interrupted downloads — resume, then reclaim
+
+A ROM fetch that is cut off partway through does not throw away what it
+already has. The per-chunk download path writes two files side by side in
+`<datadir>/bundles/`: the staging file `<name>.part` and its durable resume
+journal `<name>.part.journal`. A chunk's journal bit is only set after the
+chunk's own digest has been checked and the data is on disk
+(`core/modules/net/include/net/rom_journal.h`), so a restarted node re-fetches
+exactly the chunks the journal has not marked — a power cut halfway through a
+20 GB bundle costs seconds, not hours. Nothing is trusted more because it
+survived: the journal header pins the manifest identity, a resume re-hashes a
+random sample of what it kept, and the whole-file digest still has to pass
+before the atomic rename.
+
+The other half of that bargain is eviction. Some pairs are never resumed —
+the operator picked a different bundle, the seeder stopped offering that
+artifact, the node moved on to a newer height — and until now nothing ever
+removed them. `rom_fetch_orphan_sweep_run()`
+(`engine/composition/include/config/rom_fetch_orphan_sweep.h`) is that policy.
+It runs once per boot from `boot_select_state_source`, makes one bounded pass
+over `<datadir>/bundles/`, and removes a pair only when **both** hold:
+
+- no currently-registered ROM artifact carries the pair's target filename —
+  the download has nothing left to resume toward; **and**
+- the newer of the pair's two modification times is at least
+  `ZCL_ROM_FETCH_ORPHAN_HORIZON_SEC` seconds old (default `21600`, six hours).
+  A running transfer touches its journal after every chunk, so a live
+  download — including one this boot just started — is never in reach.
+
+Both files of a pair go together or neither goes. Requiring both conditions is
+deliberately conservative: sweeping a pair that was still wanted costs a full
+re-download, so the sweep only removes what it can positively identify as both
+unwanted and idle, and a malformed horizon value is ignored rather than obeyed.
+
 ## Local bundle bootstrap — byte delivery for a fresh datadir today
 
 > Not to be confused with the legacy, transparent-only starter pack

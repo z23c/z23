@@ -27,6 +27,7 @@
 #include "config/boot_bundle_fetch.h"          /* THE WELD: download-before-autodetect */
 #include "config/boot_header_seed_import.h"    /* headers-as-artifact in-process import */
 #include "config/boot_consensus_bundle_marker.h"
+#include "config/rom_fetch_orphan_sweep.h"      /* once-per-boot stale-partial sweep */
 #include "net/checkpoint_header_fetch.h"       /* pre-arm compiled-checkpoint capture */
 #include "conditions/no_state_source.h"        /* LOUD no-state-source signage */
 #include "jobs/reducer_frontier.h"             /* reducer_frontier_provable_tip_cached */
@@ -754,6 +755,17 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
         nss_classify(ctx, &f);
         no_state_source_raise(&f);
     }
+
+    /* Reclaim the disk abandoned downloads left in <datadir>/bundles/. Runs
+     * ONCE per boot and LAST, after every decision above has already had its
+     * say: whatever this boot is fetching or installing has just touched its
+     * own .part + journal, so the sweep's freshness guard exempts it without
+     * needing to know anything about it. Counts only — nothing here can fail
+     * a boot (config/rom_fetch_orphan_sweep.h). */
+    struct rom_fetch_orphan_sweep_result sweep;
+    (void)rom_fetch_orphan_sweep_run(ctx->datadir,
+                                     rom_fetch_orphan_sweep_horizon_sec(),
+                                     &sweep);
 }
 
 #endif /* _WIN32 */
