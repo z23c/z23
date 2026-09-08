@@ -79,13 +79,13 @@ ZCL_FACT("landing.queue", "land_queue_lock",
          "tools/command/native_dev_land.c",
          "if (flock(fd, nonblocking ? (LOCK_EX | LOCK_NB) : LOCK_EX) != 0) {")
 ZCL_FACT("landing.queue", "land_slot_lock_hostwide",
-         "dev.land's slot.lock is documented as the HOST-WIDE landing slot, taken non-blocking inside step.",
+         "dev.land's step.lock is the queue's own exclusive, NON-BLOCKING step lock, held across the whole step.",
          "tools/command/native_dev_land.c",
-         "*   slot.lock       the HOST-WIDE landing slot, taken NON-BLOCKING inside")
+         "step.lock       the queue's own step lock: exclusive, NON-BLOCKING,")
 ZCL_FACT("landing.queue", "land_slot_lock_call",
-         "dl_step takes the slot lock via dl_slot_lock before picking a row to drive.",
+         "dl_step takes the step lock via dl_step_lock before picking a row to drive.",
          "tools/command/native_dev_land.c",
-         "slot = dl_slot_lock(d.land);")
+         "slot = dl_step_lock(d.land);")
 ZCL_FACT("landing.queue", "train_is_worktree",
          "dev train build's train is a detached git worktree at z23-stack<name>, built by cherry-picking each source's commits, with no lint-fast run inside build.",
          "tools/command/native_dev_train_command.c",
@@ -143,6 +143,6 @@ ZCL_FACT("landing.queue", "hook_admit_pair_call",
          "tools/dev/z23_git_hook.c",
          "if (admit_pair(root, local, base) != 0) return 1;")
 ZCL_FACT("landing.queue", "slot_lock_host_local_by_design",
-         "dev.land's slot lock is deliberately host-local: a second host proving the same tip is documented as not this host's problem.",
+         "dev.land's step lock is deliberately host-local: it is never held across separate step calls, so a second host proving the same tip is not this host's problem.",
          "tools/command/native_dev_land.c",
-         "a second host proving the same tip is not")
+         "host proving the same tip is not this host's problem.")

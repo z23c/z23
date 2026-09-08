@@ -93,7 +93,7 @@ ZCL_FACT("fleet.board", "board_send_uses_zpkgswm",
 ZCL_FACT("fleet.board", "board_ids_before_query",
          "fleet_board_announce_to pages the local ledger via db_fleet_board_ids_before for INV announcements.",
          "engine/composition/src/boot_fleet_board.c",
-         "int n = db_fleet_board_ids_before(ndb, now, before_seq, ids,")
+         "int n = db_fleet_board_ids_before(ndb, now, before_seq, true, ids,")
 ZCL_FACT("fleet.board", "board_have_check",
          "fleet_board_handle_inv asks back only for ids this node does not already hold, via db_fleet_board_have.",
          "engine/composition/src/boot_fleet_board.c",

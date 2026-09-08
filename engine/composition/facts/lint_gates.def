@@ -8,28 +8,24 @@
 
 ZCL_FACT("lint.gates", "gate_wiring_two_files",
          "Adding a lint gate touches Makefile (check-<name> target and LINT_GATES line) and run_lint.sh gate_command().",
-         "tools/lint/check_lint_gate_wiring.sh",
+         "tools/lint/lintc/gate_lint_gate_wiring.c",
          "Adding a lint gate is a TWO-FILE operation")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_a",
          "check_lint_gate_wiring.sh asserts A that every LINT_GATES/LINT_FAST_GATES member has a gate_command() case entry.",
-         "tools/lint/check_lint_gate_wiring.sh",
+         "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate(s) in LINT_GATES/LINT_FAST_GATES with NO gate_command() entry")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_b",
          "check_lint_gate_wiring.sh asserts B that every gate_command() entry is named by one of the two gate lists, else it is dead wiring.",
-         "tools/lint/check_lint_gate_wiring.sh",
+         "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate_command() entries that NO gate list names (dead wiring)")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_c",
          "check_lint_gate_wiring.sh asserts C that every listed gate has a real check-<name> Makefile target for the ZCL_LINT_SERIAL=1 fallback.",
-         "tools/lint/check_lint_gate_wiring.sh",
+         "tools/lint/lintc/gate_lint_gate_wiring.c",
          "listed gate(s) with no 'check-...:' target")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_d",
          "check_lint_gate_wiring.sh asserts D that every gate_command() script path actually exists on disk.",
-         "tools/lint/check_lint_gate_wiring.sh",
+         "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate_command() entries naming a script that does not exist")
-ZCL_FACT("lint.gates", "gate_wiring_2026_incident",
-         "On 2026-08-26 three gates landed in LINT_GATES without a run_lint.sh case entry, making make lint exit 2 tree-wide until wired.",
-         "tools/lint/check_lint_gate_wiring.sh",
-         "On 2026-08-26 three gates landed with step 1 and without step 2")
 ZCL_FACT("lint.gates", "lint_gates_list_defined",
          "The LINT_GATES list, the source of truth for the make lint umbrella, is defined starting with check-lint-gate-wiring as its first member.",
          "Makefile",
@@ -87,17 +83,17 @@ ZCL_FACT("lint.gates", "scan_floor_clang_portability",
          "tools/lint/check_clang_portability.sh",
          "SRC_FLOOR=900")
 ZCL_FACT("lint.gates", "scan_floor_byte_order_measured",
-         "check_byte_order_codec_single.sh documents a measured case where a floor of 800 still let 78 percent of files silently drop.",
+         "check_byte_order_codec_single is ported to the native lint runtime; the shell file is now a 3-line exec shim onto z23-lint.",
          "tools/lint/check_byte_order_codec_single.sh",
-         "this gate could silently lose 2797")
+         "Ported to the C23 lint runtime (check-byte-order-codec-single in")
 ZCL_FACT("lint.gates", "scan_floor_honest_witness",
-         "check_honest_witness.sh names a silent scanned-0-to-0-violations pass as the exact fail-silent hole its gate closes.",
-         "tools/lint/check_honest_witness.sh",
-         "scanned 0 -> 0 violations -> clean")
+         "check_honest_witness's native implementation refuses to report clean off a zero-witness scan when .c files are present, naming that exact fail-silent hole.",
+         "tools/lint/lintc/gate_source_fences.c",
+         "Refusing to report clean off an empty scan.")
 ZCL_FACT("lint.gates", "arm_symbol_baseline_file",
-         "check_arm_symbol_single.sh reads a shrink-only ratchet baseline of path-function pairs from arm_symbol_single_baseline.txt.",
-         "tools/lint/check_arm_symbol_single.sh",
-         "${ZCL_ARM_SYMBOL_BASELINE:-tools/lint/arm_symbol_single_baseline.txt}")
+         "check-arm-symbol-single's native gate reads its shrink-only ratchet baseline path from ZCL_ARM_SYMBOL_BASELINE, defaulting to arm_symbol_single_baseline.txt.",
+         "tools/lint/lintc/gate_arm_symbol_single.c",
+         "c->baseline = env_or(")
 ZCL_FACT("lint.gates", "arm_symbol_baseline_update_manual",
          "The arm_symbol_single baseline is only rewritten by an explicit UPDATE invocation, never automatically by make lint.",
          "tools/lint/check_arm_symbol_single.sh",

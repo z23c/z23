@@ -41,7 +41,7 @@ ZCL_FACT("landing.proof", "build_identity_capture",
 ZCL_FACT("landing.proof", "compiler_root_source",
          "compiler_root is copied from the toolchain capsule's content root.",
          "tools/dev/dev_proof.c",
-         "memcpy(receipt.compiler_root, identity.compiler, 32);")
+         "memcpy(w->receipt.compiler_root, w->identity.compiler, 32);")
 ZCL_FACT("landing.proof", "compiler_id_dropped",
          "The build-plan hasher explicitly skips the COMPILER_ID line before hashing flags/build_graph.",
          "tools/dev/dev_proof.c",
