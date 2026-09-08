@@ -1,8 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * purpose: gate — the lint umbrella's two files must agree (Makefile
- * LINT_GATES/LINT_FAST_GATES vs run_lint.sh's gate_command() case table),
- * plus the lintc family-file line ceiling. Ported from
+ * purpose: gate — the lint umbrella's three files must agree by NAME
+ * (Makefile LINT_GATES/LINT_FAST_GATES, run_lint.sh's gate_command() case
+ * table, and the docs/DEFENSIVE_CODING.md LINT-GATES doc block), plus the
+ * lintc family-file line ceiling. Ported from
  * tools/lint/check_lint_gate_wiring.sh, which is now a 3-line exec shim
  * onto this binary. Selftest: gate_lint_gate_wiring_selftest.c.
  *
@@ -23,6 +24,20 @@
  *   E. no tools/lint/lintc/gate_*.c file exceeds LINT_FAMILY_CEILING,
  *      read out of lintc.h's own #define (never the compiled-in value —
  *      a fixture root can carry a different lintc.h than this binary's).
+ *   F. every LINT_GATES/LINT_FAST_GATES member is named inside the
+ *      <!-- LINT-GATES-BEGIN/END --> block of docs/DEFENSIVE_CODING.md.
+ *   G. every check-* token in that doc block belongs to LINT_GATES or
+ *      LINT_FAST_GATES (no doc-only phantom gate).
+ *
+ * Adding a lint gate is a THREE-file operation: Makefile LINT_GATES,
+ * run_lint.sh gate_command(), and the DEFENSIVE_CODING.md doc block. F/G
+ * catch the third file the same way A/B catch the second — by NAME, not
+ * just by count, so a doc block that swaps one gate for another (same
+ * count, wrong names) still fails. The doc-block extraction mirrors the
+ * awk block scan in tools/scripts/check_doc_accuracy.sh (not literally
+ * shared — that script is bash, this gate is C — but same markers, same
+ * shape: everything between LINT-GATES-BEGIN and LINT-GATES-END, check-*
+ * tokens only).
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -104,6 +119,33 @@ static int lgw_extract_var(const char *makefile, const char *var, struct sr_set 
     return fin(f, line, makefile, rc);
 }
 
+/* ── doc block: <!-- LINT-GATES-BEGIN --> ... <!-- LINT-GATES-END --> ──── */
+static int lgw_extract_doc_block(const char *doc, struct sr_set *out)
+{
+    FILE *f = fopen(doc, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", doc);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int inb = 0, rc = 0;
+    while (rc == 0 && (n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+        if (strstr(line, "<!-- LINT-GATES-BEGIN -->")) {
+            inb = 1;
+            continue;
+        }
+        if (strstr(line, "<!-- LINT-GATES-END -->")) {
+            inb = 0;
+            continue;
+        }
+        if (inb)
+            rc = lgw_scan_tokens(line, out);
+    }
+    return fin(f, line, doc, rc);
+}
+
 /* ── the driver's own outputs (never re-parsed as text elsewhere) ──────── */
 static int lgw_driver_list(const char *driver, struct sr_set *out)
 {
@@ -175,12 +217,14 @@ static int lgw_check_a(const struct sr_set *listed, const struct sr_set *table,
             return 2;
     }
     return lgw_append(out, cap, used,
-                      "\n  Adding a lint gate is a TWO-FILE operation. You did the Makefile half.\n"
-                      "  Add the other half to gate_command() in tools/lint/run_lint.sh, one line\n"
-                      "  per gate, reproducing the Make recipe EXACTLY (script path, args, any\n"
+                      "\n  Adding a lint gate is a THREE-FILE operation. You did the Makefile part.\n"
+                      "  Add the run_lint.sh part to gate_command() in tools/lint/run_lint.sh, one\n"
+                      "  line per gate, reproducing the Make recipe EXACTLY (script path, args, any\n"
                       "  ZCL_LINT_MODE prefix). A recipe with two steps is joined with &&:\n\n"
                       "        <gate>)   echo './tools/lint/<script>.sh --selftest && ./tools/lint/<script>.sh' ;;\n\n"
-                      "  Without it 'make lint' exits 2 for everyone and reports NO gate results.\n");
+                      "  Without it 'make lint' exits 2 for everyone and reports NO gate results.\n"
+                      "  (The doc part — docs/DEFENSIVE_CODING.md's LINT-GATES block — is checked\n"
+                      "  separately below.)\n");
 }
 
 static int lgw_check_b(const struct sr_set *listed, const struct sr_set *table,
@@ -206,6 +250,57 @@ static int lgw_check_b(const struct sr_set *listed, const struct sr_set *table,
                       "\n  Nothing runs these. Either add them to LINT_GATES (or LINT_FAST_GATES)\n"
                       "  in Makefile, or delete the table entry. A gate that never runs is a\n"
                       "  gate that is not protecting anything.\n");
+}
+
+static int lgw_check_f(const struct sr_set *listed, const struct sr_set *doc,
+                       const char *doc_path, char *out, size_t cap, size_t *used, int *fail)
+{
+    int any = 0;
+    for (int i = 0; i < listed->count; i++)
+        if (!sr_has(doc, listed->n[i]))
+            any = 1;
+    if (!any)
+        return 0;
+    *fail = 1;
+    if (lgw_appendf_pub(out, cap, used,
+                    "FAIL: gate(s) in LINT_GATES/LINT_FAST_GATES missing from %s:\n",
+                    doc_path))
+        return 2;
+    for (int i = 0; i < listed->count; i++) {
+        if (sr_has(doc, listed->n[i]))
+            continue;
+        if (lgw_appendf_pub(out, cap, used, "    %s\n", listed->n[i]))
+            return 2;
+    }
+    return lgw_appendf_pub(out, cap, used,
+                      "\n  Adding a lint gate is a THREE-file operation. You wired the Makefile\n"
+                      "  and run_lint.sh; add the gate name to the <!-- LINT-GATES-BEGIN/END -->\n"
+                      "  block in %s too.\n", doc_path);
+}
+static int lgw_check_g(const struct sr_set *listed, const struct sr_set *doc,
+                       const char *doc_path, char *out, size_t cap, size_t *used, int *fail)
+{
+    int any = 0;
+    for (int i = 0; i < doc->count; i++)
+        if (!sr_has(listed, doc->n[i]))
+            any = 1;
+    if (!any)
+        return 0;
+    *fail = 1;
+    if (lgw_appendf_pub(out, cap, used,
+                    "FAIL: gate(s) documented in %s but NOT in Makefile LINT_GATES/LINT_FAST_GATES:\n",
+                    doc_path))
+        return 2;
+    for (int i = 0; i < doc->count; i++) {
+        if (sr_has(listed, doc->n[i]))
+            continue;
+        if (lgw_appendf_pub(out, cap, used, "    %s\n", doc->n[i]))
+            return 2;
+    }
+    return lgw_appendf_pub(out, cap, used,
+                      "\n  %s documents a gate the Makefile does not list. Either add it to\n"
+                      "  LINT_GATES (or LINT_FAST_GATES), or remove it from the doc block.\n",
+                      doc_path);
 }
 
 static int lgw_makefile_has_target(const char *makefile, const char *gate)
@@ -441,9 +536,10 @@ static int lgw_check_e(const char *root, char *out, size_t cap, size_t *used, in
 }
 
 /* ── orchestration ───────────────────────────────────────────────────────── */
-/* Existence of the two source files, plus 1 if either is missing (message
+/* Existence of the three source files, plus 1 if any is missing (message
  * already printed to `out`). */
-static int lgw_paths_exist(const char *makefile, const char *driver, FILE *out)
+static int lgw_paths_exist(const char *makefile, const char *driver, const char *doc,
+                           FILE *out)
 {
     struct stat st;
     if (stat(makefile, &st) != 0) {
@@ -452,6 +548,29 @@ static int lgw_paths_exist(const char *makefile, const char *driver, FILE *out)
     }
     if (stat(driver, &st) != 0) {
         fprintf(out, "FAIL: no run_lint.sh at %s\n", driver);
+        return 1;
+    }
+    if (stat(doc, &st) != 0) {
+        fprintf(out, "FAIL: no %s\n", doc);
+        return 1;
+    }
+    return 0;
+}
+
+/* Loads `doc` (the check-* tokens inside the DEFENSIVE_CODING.md
+ * LINT-GATES block). Returns 0 ok, 1 rejected (message already printed),
+ * 2 die()'d. */
+static int lgw_load_doc_set(const char *doc, FILE *out, struct sr_set *docset)
+{
+    docset->count = 0;
+    int rc = lgw_extract_doc_block(doc, docset);
+    if (rc)
+        return rc;
+    if (docset->count == 0) {
+        fprintf(out, "FAIL: missing or empty <!-- LINT-GATES-BEGIN/END --> block in %s\n",
+               doc);
+        fputs("      Add the canonical gate list so this gate can verify three-way\n"
+             "      parity between the Makefile, run_lint.sh, and the doc.\n", out);
         return 1;
     }
     return 0;
@@ -497,37 +616,43 @@ static int lgw_load_sets(const char *makefile, const char *driver, FILE *out,
 }
 
 static int lgw_run_checks(const char *root, const char *makefile, const char *driver,
-                          const struct sr_set *listed, const struct sr_set *table,
+                          const char *doc, const struct sr_set *listed,
+                          const struct sr_set *table, const struct sr_set *docset,
                           char *faults, size_t cap, size_t *used, int *fail)
 {
     if (lgw_check_a(listed, table, faults, cap, used, fail)) return 2;
     if (lgw_check_b(listed, table, faults, cap, used, fail)) return 2;
     if (lgw_check_c(makefile, listed, faults, cap, used, fail)) return 2;
     if (lgw_check_d(root, driver, table, faults, cap, used, fail)) return 2;
-    return lgw_check_e(root, faults, cap, used, fail);
+    if (lgw_check_e(root, faults, cap, used, fail)) return 2;
+    if (lgw_check_f(listed, docset, doc, faults, cap, used, fail)) return 2;
+    return lgw_check_g(listed, docset, doc, faults, cap, used, fail);
 }
 
 int lgw_check_root(const char *root, FILE *out)
 {
-    char makefile[4096], driver[4096];
+    char makefile[4096], driver[4096], doc[4096];
     if (ovf(snprintf(makefile, sizeof makefile, "%s/Makefile", root), sizeof makefile)
         || ovf(snprintf(driver, sizeof driver, "%s/tools/lint/run_lint.sh", root),
-              sizeof driver))
+              sizeof driver)
+        || ovf(snprintf(doc, sizeof doc, "%s/docs/DEFENSIVE_CODING.md", root), sizeof doc))
         return 2;
-    int rc = lgw_paths_exist(makefile, driver, out);
+    int rc = lgw_paths_exist(makefile, driver, doc, out);
     if (rc)
         return rc;
 
-    struct sr_set listed, table;
+    struct sr_set listed, table, docset;
     rc = lgw_load_sets(makefile, driver, out, &listed, &table);
+    if (rc == 0)
+        rc = lgw_load_doc_set(doc, out, &docset);
     if (rc)
         return rc;
 
     static char faults[LGW_BUF];
     size_t used = 0;
     int fail = 0;
-    rc = lgw_run_checks(root, makefile, driver, &listed, &table, faults, sizeof faults,
-                        &used, &fail);
+    rc = lgw_run_checks(root, makefile, driver, doc, &listed, &table, &docset, faults,
+                        sizeof faults, &used, &fail);
     if (rc)
         return rc;
 
@@ -536,8 +661,9 @@ int lgw_check_root(const char *root, FILE *out)
     if (fail)
         return 1;
     fprintf(out,
-           "OK: lint gate wiring is complete \xe2\x80\x94 %d listed gate(s), %d table entry(ies), exact parity.\n",
-           listed.count, table.count);
+           "OK: lint gate wiring is complete \xe2\x80\x94 %d listed gate(s), %d table entry(ies), "
+           "%d documented, exact parity.\n",
+           listed.count, table.count, docset.count);
     return 0;
 }
 

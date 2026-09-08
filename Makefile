@@ -13412,23 +13412,26 @@ check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN)
 	@./tools/scripts/tor_archives_ready.sh --selftest
 	@./tools/lint/check_tor_provenance.sh
 
-# Adding a lint gate is a TWO-FILE operation and nothing enforced the second
-# file: the Makefile gets a `check-*:` target plus a LINT_GATES line, and
-# tools/lint/run_lint.sh's gate_command() case table gets the invocation,
-# because the parallel driver execs each gate's script directly and never reads
-# the Make recipe. On 2026-08-26 three gates landed with the first half and
-# without the second in one session and `make lint` was FATAL (exit 2) tree-wide
-# until they were wired. The driver already errors loudly, but only when
-# somebody runs the umbrella, and it takes the whole run down — no gate results
-# at all. This asserts the same parity as a gate, both directions, plus a Make
-# target for every listed name (ZCL_LINT_SERIAL=1 needs it) and an existing
-# script behind every table entry.
+# Adding a lint gate is a THREE-FILE operation and nothing enforced the
+# other two: the Makefile gets a `check-*:` target plus a LINT_GATES line,
+# tools/lint/run_lint.sh's gate_command() case table gets the invocation
+# (the parallel driver execs each gate's script directly and never reads
+# the Make recipe), and docs/DEFENSIVE_CODING.md's <!-- LINT-GATES-BEGIN
+# --> block gets the gate name (the doc gate + check_doc_accuracy.sh only
+# catch a drifted doc much later, in t-fast). On 2026-08-26 three gates
+# landed with the first half and without the second in one session and
+# `make lint` was FATAL (exit 2) tree-wide until they were wired. The
+# driver already errors loudly, but only when somebody runs the umbrella,
+# and it takes the whole run down — no gate results at all. This asserts
+# the same parity as a gate, by NAME, in every direction across all three
+# files, plus a Make target for every listed name (ZCL_LINT_SERIAL=1 needs
+# it) and an existing script behind every table entry.
 .PHONY: check-lint-cache
 check-lint-cache:
 	@./tools/lint/lint_cache_selftest.sh
 
 check-lint-gate-wiring: $(LINTC_TOOL)
-	@echo "══ LINT: every listed gate is wired in run_lint.sh, and back ══"
+	@echo "══ LINT: every listed gate is wired in run_lint.sh and the doc block, and back ══"
 	@./tools/lint/check_lint_gate_wiring.sh --selftest
 	@./tools/lint/check_lint_gate_wiring.sh
 

@@ -4,8 +4,11 @@
  * Builds a scratch fixture tree carrying the REAL run_lint.sh and
  * lint_cache.sh (so --list and --print-command are the code under test,
  * not a mock) stripped of its real case table, plants one defect per case
- * (A-G) and asserts lgw_check_root() rejects it and names the offender,
- * then a positive control (H) that a correctly wired fixture passes.
+ * (A-G, I, J) and asserts lgw_check_root() rejects it and names the
+ * offender, then a positive control (H) that a correctly wired
+ * three-file fixture (Makefile, run_lint.sh, DEFENSIVE_CODING.md doc
+ * block) passes. Cases I and J cover the doc-block three-way parity by
+ * name: a listed gate missing from the doc, and a doc-only phantom gate.
  * Sandbox lives under getenv("TMPDIR") else "test-tmp", never /tmp.
  */
 #ifndef _POSIX_C_SOURCE
@@ -123,6 +126,30 @@ static int lgws_make_fixture(const char *repo_root, const char *d)
     return lgws_write_sentinels(d);
 }
 
+/* Writes docs/DEFENSIVE_CODING.md with a LINT-GATES block naming exactly
+ * `gates` — the positive-control shape every case starts from unless it
+ * is deliberately testing a doc mismatch (cases I/J rewrite it after). */
+static int lgws_write_doc(const char *d, const char *const *gates, int n)
+{
+    static char body[LGWS_BUF];
+    size_t used = 0;
+    if (lgw_appendf_pub(body, sizeof body, &used,
+                        "# Defensive Coding\n\n<!-- LINT-GATES-BEGIN -->\n"))
+        return 2;
+    for (int i = 0; i < n; i++)
+        if (lgw_appendf_pub(body, sizeof body, &used, "- `%s`\n", gates[i]))
+            return 2;
+    if (lgw_appendf_pub(body, sizeof body, &used, "<!-- LINT-GATES-END -->\n"))
+        return 2;
+    char dirpath[4096], path[4096];
+    if (ovf(snprintf(dirpath, sizeof dirpath, "%s/docs", d), sizeof dirpath)
+        || ovf(snprintf(path, sizeof path, "%s/docs/DEFENSIVE_CODING.md", d), sizeof path))
+        return 2;
+    if (csr_mkdirs(dirpath))
+        return 2;
+    return csr_write(path, body);
+}
+
 static int lgws_write_makefile(const char *d, const char *const *gates, int n)
 {
     static char body[LGWS_BUF];
@@ -229,6 +256,7 @@ static int lgws_case_a(const char *base, int *fails)
     if (lgws_make_fixture(root, d)) return 2;
     const char *gates[] = { "check-sentinel-wired", "check-sentinel-unwired" };
     if (lgws_write_makefile(d, gates, 2)) return 2;
+    if (lgws_write_doc(d, gates, 2)) return 2;
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
     return lgws_expect_reject("A: a listed gate with no case-table entry is caught",
                               "check-sentinel-unwired", d, fails);
@@ -243,6 +271,7 @@ static int lgws_case_b(const char *base, int *fails)
     if (lgws_make_fixture(root, d)) return 2;
     const char *gates[] = { "check-sentinel-wired" };
     if (lgws_write_makefile(d, gates, 1)) return 2;
+    if (lgws_write_doc(d, gates, 1)) return 2;
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
     if (lgws_wire(d, "check-sentinel-orphan", "./tools/lint/sentinel_b.sh")) return 2;
     return lgws_expect_reject("B: a case-table entry no gate list names is caught",
@@ -257,7 +286,9 @@ static int lgws_case_c(const char *base, int *fails)
     if (cic_repo_root(root, sizeof root)) return 2;
     if (lgws_make_fixture(root, d)) return 2;
     const char *gates[] = { "check-sentinel-wired" };
+    const char *doc_gates[] = { "check-sentinel-wired", "check-sentinel-notgt" };
     if (lgws_write_makefile(d, gates, 1)) return 2;
+    if (lgws_write_doc(d, doc_gates, 2)) return 2;
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
     if (lgws_wire(d, "check-sentinel-notgt", "./tools/lint/sentinel_b.sh")) return 2;
     char mpath[4096];
@@ -281,6 +312,7 @@ static int lgws_case_d(const char *base, int *fails)
     if (lgws_make_fixture(root, d)) return 2;
     const char *gates[] = { "check-sentinel-wired" };
     if (lgws_write_makefile(d, gates, 1)) return 2;
+    if (lgws_write_doc(d, gates, 1)) return 2;
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/does_not_exist.sh")) return 2;
     return lgws_expect_reject("D: a case entry naming a missing script is caught",
                               "does_not_exist.sh", d, fails);
@@ -293,6 +325,8 @@ static int lgws_case_e(const char *base, int *fails)
     char root[4096];
     if (cic_repo_root(root, sizeof root)) return 2;
     if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired" };
+    if (lgws_write_doc(d, gates, 1)) return 2;
     char mpath[4096];
     if (ovf(snprintf(mpath, sizeof mpath, "%s/Makefile", d), sizeof mpath)) return 2;
     if (csr_write(mpath, "# no gate list here at all\n")) return 2;
@@ -309,6 +343,7 @@ static int lgws_case_f(const char *base, int *fails)
     if (lgws_make_fixture(root, d)) return 2;
     const char *gates[] = { "check-sentinel-wired" };
     if (lgws_write_makefile(d, gates, 1)) return 2;
+    if (lgws_write_doc(d, gates, 1)) return 2;
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
     char lintc_dir[4096], hpath[4096], big[4096];
     if (ovf(snprintf(lintc_dir, sizeof lintc_dir, "%s/tools/lint/lintc", d), sizeof lintc_dir)
@@ -335,6 +370,7 @@ static int lgws_case_g(const char *base, int *fails)
     if (lgws_make_fixture(root, d)) return 2;
     const char *gates[] = { "check-sentinel-wired" };
     if (lgws_write_makefile(d, gates, 1)) return 2;
+    if (lgws_write_doc(d, gates, 1)) return 2;
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
     char lintc_dir[4096], hpath[4096], small[4096];
     if (ovf(snprintf(lintc_dir, sizeof lintc_dir, "%s/tools/lint/lintc", d), sizeof lintc_dir)
@@ -356,11 +392,45 @@ static int lgws_case_h(const char *base, int *fails)
     if (lgws_make_fixture(root, d)) return 2;
     const char *gates[] = { "check-sentinel-wired", "check-sentinel-unwired" };
     if (lgws_write_makefile(d, gates, 2)) return 2;
+    if (lgws_write_doc(d, gates, 2)) return 2;
     if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
     if (lgws_wire(d, "check-sentinel-unwired",
                   "./tools/lint/sentinel_b.sh --selftest && ./tools/lint/sentinel_b.sh"))
         return 2;
     return lgws_expect_accept("H: a fully wired tree passes (positive control)", d, fails);
+}
+static int lgws_case_i(const char *base, int *fails)
+{
+    char d[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/i", base), sizeof d)) return 2;
+    if (csr_mkdirs(d)) return 2;
+    char root[4096];
+    if (cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired", "check-sentinel-undocumented" };
+    const char *doc_gates[] = { "check-sentinel-wired" };
+    if (lgws_write_makefile(d, gates, 2)) return 2;
+    if (lgws_write_doc(d, doc_gates, 1)) return 2;
+    if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
+    if (lgws_wire(d, "check-sentinel-undocumented", "./tools/lint/sentinel_b.sh")) return 2;
+    return lgws_expect_reject("I: a listed gate missing from the doc block is caught",
+                              "check-sentinel-undocumented", d, fails);
+}
+static int lgws_case_j(const char *base, int *fails)
+{
+    char d[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/j", base), sizeof d)) return 2;
+    if (csr_mkdirs(d)) return 2;
+    char root[4096];
+    if (cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired" };
+    const char *doc_gates[] = { "check-sentinel-wired", "check-sentinel-phantom" };
+    if (lgws_write_makefile(d, gates, 1)) return 2;
+    if (lgws_write_doc(d, doc_gates, 2)) return 2;
+    if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
+    return lgws_expect_reject("J: a doc-only phantom gate is caught",
+                              "check-sentinel-phantom", d, fails);
 }
 
 /* run_lint.sh cd's to its own resolved root before self-grepping $0, so a
@@ -386,6 +456,7 @@ typedef int (*lgws_case_fn)(const char *, int *);
 static const lgws_case_fn k_lgws_cases[] = {
     lgws_case_a, lgws_case_b, lgws_case_c, lgws_case_d,
     lgws_case_e, lgws_case_f, lgws_case_g, lgws_case_h,
+    lgws_case_i, lgws_case_j,
 };
 
 int check_lint_gate_wiring_selftest(void)
@@ -416,6 +487,6 @@ int check_lint_gate_wiring_selftest(void)
         printf("\xe2\x95\x90\xe2\x95\x90 selftest: FAIL \xe2\x95\x90\xe2\x95\x90\n");
         return 1;
     }
-    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (8/8) \xe2\x95\x90\xe2\x95\x90\n");
+    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (10/10) \xe2\x95\x90\xe2\x95\x90\n");
     return 0;
 }

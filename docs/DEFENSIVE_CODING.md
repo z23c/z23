@@ -1409,23 +1409,31 @@ add/remove a gate.
 `check-stage-advances-or-blocks` appear in the canonical block and run in `make
 lint`; they are documented in their own docs rather than expanded here.)
 
-`check-lint-gate-wiring` (`tools/lint/check_lint_gate_wiring.sh`) keeps the two
-halves of a lint gate in step. **Adding a gate is a two-file operation**: the
-Makefile gets a `check-*:` target plus a line in `LINT_GATES`, and
-`tools/lint/run_lint.sh` gets an entry in `gate_command()`'s case table —
-because the parallel driver execs each gate's script directly and never reads
-the Make recipe. Nothing enforced the second file, so gates shipped with only
-the first half and `make lint` went FATAL (exit 2) for the whole tree,
-reporting no gate results at all, until somebody wired them by hand. This gate
-asserts the parity in both directions (a listed gate with no table entry, and a
-table entry no list names), plus a real Make target behind every listed name
-(the `ZCL_LINT_SERIAL=1` fallback runs the list as prerequisites) and an
-existing script behind every table entry. It reads the lists with the same awk
-extractor `check-doc-accuracy` uses and reads the case table through
-`run_lint.sh --list`, which greps its own case labels — never a second parser
-of either file. Its `--selftest` plants each defect class in a throwaway
-fixture tree and asserts the gate rejects it *and names the offender*, with a
-correctly-wired fixture as the positive control.
+`check-lint-gate-wiring` (`tools/lint/lintc/gate_lint_gate_wiring.c`, exec'd via
+the 3-line `check_lint_gate_wiring.sh` shim) keeps the three files of a lint
+gate in step. **Adding a gate is a THREE-file operation**: the Makefile gets a
+`check-*:` target plus a line in `LINT_GATES`, `tools/lint/run_lint.sh` gets an
+entry in `gate_command()`'s case table (because the parallel driver execs each
+gate's script directly and never reads the Make recipe), and
+`docs/DEFENSIVE_CODING.md`'s own LINT-GATES marker block (below) gets the
+gate name. Nothing enforced the second and third files, so gates shipped with
+only the first part and `make lint` went FATAL (exit 2) for the whole tree,
+reporting no gate results at all, until somebody wired them by hand; the doc
+block drifting was worse — it only surfaced much later, in `t-fast
+ONLY=make_lint_gates` via `check_doc_accuracy.sh`, not on the lane's first
+gate run. This gate asserts the parity by NAME in every direction across all
+three files (a listed gate with no table entry or no doc entry, a table entry
+no list names, and a doc-only phantom gate), plus a real Make target behind
+every listed name (the `ZCL_LINT_SERIAL=1` fallback runs the list as
+prerequisites) and an existing script behind every table entry. It reads the
+Makefile lists with the same backslash-continuation scan `check-doc-accuracy`
+uses, reads the case table through `run_lint.sh --list` (which greps its own
+case labels), and reads the doc block by scanning between the same
+`LINT-GATES-BEGIN`/`LINT-GATES-END` markers `check_doc_accuracy.sh` scans —
+never a second, divergent parser of any of the three files. Its `--selftest`
+plants each defect class in a throwaway fixture tree and asserts the gate
+rejects it *and names the offender*, with a correctly-wired fixture as the
+positive control.
 
 `check-no-retired-agent-protocol` rejects the retired agent-transport token in
 tracked paths and filenames while explicitly allowing ordinary `memcpy` usage.
