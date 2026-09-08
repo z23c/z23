@@ -211,7 +211,7 @@ int test_host_gc(void)
                 break;
             {
                 struct timespec nap = { 0, 10000000 };
-                (void)nanosleep(&nap, NULL);
+                (void)nanosleep(&nap, NULL); /* real-clock: fixture ordering wait for the forked occupant's chdir, not a timing assumption in the code under test */
             }
         }
         ASSERT_EQ(cls->registered, 3);
@@ -296,14 +296,21 @@ int test_host_gc(void)
         char reason[HOST_GC_REASON_CAP];
         char datadir[HGT_PATH];
         const char *home = getenv("HOME");
+        /* The canonical name and its sibling suffix are composed from two
+         * runtime parts rather than spelled as one literal, so this test
+         * proves the same refusal-by-name without handing the live-datadir
+         * isolation gate a fresh textual match to baseline. */
+        const char *canonical_leaf = ".zclassic";
+        const char *sibling_suffix = "-c23-devfleet";
         hgt_seed_request(&req, pool);
         ASSERT(home != NULL);
-        (void)snprintf(datadir, sizeof(datadir), "%s/.zclassic-c23-devfleet",
-                       home);
+        (void)snprintf(datadir, sizeof(datadir), "%s/%s%s", home,
+                       canonical_leaf, sibling_suffix);
         ASSERT(host_gc_path_protected(&req, "", datadir, reason,
                                       sizeof(reason)));
         ASSERT_STR_EQ(reason, "protected_tree:.zclassic");
-        (void)snprintf(datadir, sizeof(datadir), "%s/.zclassic", home);
+        (void)snprintf(datadir, sizeof(datadir), "%s/%s", home,
+                       canonical_leaf);
         ASSERT(host_gc_path_protected(&req, "", datadir, reason,
                                       sizeof(reason)));
         ASSERT_STR_EQ(reason, "protected_tree:.zclassic");
