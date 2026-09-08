@@ -6747,6 +6747,48 @@ static int dp_landing_step_open(const char *step)
     return -1;
 }
 
+/* How long a resident proof worker waits for landing preparation to release
+ * the step lock before deferring back to the reactor, and how often it
+ * re-tries inside that window.
+ *
+ * WHY A WAIT AT ALL. flock() gives a non-blocking waiter no fairness and no
+ * wake on release, and the reactor offers this lock once per loop iteration
+ * (~1 s). Every `dev land step` takes LOCK_EX for its whole run whatever
+ * phase it reports — including the sub-second steps that only read proof
+ * state — so a keeper stepping in a loop keeps an exclusive holder present
+ * most of the time and the once-a-second sample keeps landing on one.
+ * Measured on train 53's first landing attempt: the request was queued at
+ * 11:17:50Z, every step after it answered ok in about half a second with
+ * phase=prove, and the attempt directory was not created until 11:32:54Z —
+ * 15 of the 27 minutes spent starving on this lock while nothing reported a
+ * problem. Re-trying inside the worker turns a 1 Hz sample into a 20 Hz one,
+ * so the proof takes the lock at the release rather than behind the next
+ * holder.
+ *
+ * WHY IT IS STILL BOUNDED. A proof deferred behind REAL preparation should
+ * wait — but not in this slot: the reactor holds one commit-proof worker at
+ * a time, so a worker parked here indefinitely is a worse outage than the
+ * delay. Preparation's longest single step measured on this box is a
+ * lint-fast pass at about 124 s; the window is deliberately shorter, so a
+ * genuinely busy checkout still returns "deferred" and the reactor re-offers
+ * the work a second later. */
+#define DP_LANDING_STEP_WAIT_MS 30000
+#define DP_LANDING_STEP_RETRY_MS 50
+
+/* 1 acquired, 0 still held when the window ran out, -1 the lock itself is
+ * unusable. `wait_ms` of 0 is the old single non-blocking attempt. */
+static int dp_landing_step_share(int fd, int wait_ms)
+{
+    int64_t deadline = platform_time_monotonic_us() +
+                       (int64_t)(wait_ms > 0 ? wait_ms : 0) * 1000;
+    for (;;) {
+        if (flock(fd, LOCK_SH | LOCK_NB) == 0) return 1;
+        if (errno != EWOULDBLOCK && errno != EAGAIN) return -1;
+        if (platform_time_monotonic_us() >= deadline) return 0;
+        platform_sleep_ms(DP_LANDING_STEP_RETRY_MS);
+    }
+}
+
 /* Preparation owns LOCK_EX on step.lock. A proof shares that same lock
  * from before claim until all worker evidence and lease cleanup settle.
  * Contention is deferred work, never a failed proof observation. */
@@ -6766,19 +6808,37 @@ static int dp_landing_proof_guard(const char *root, int *guard,
         proof_why(why, why_len, "proof_landing_step_lock_failed");
         return -1;
     }
-    if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
+    int shared = dp_landing_step_share(fd, DP_LANDING_STEP_WAIT_MS);
+    if (shared == 1) {
         *guard = fd;
         return 1;
     }
-    int saved = errno;
     (void)close(fd);
-    if (saved == EWOULDBLOCK || saved == EAGAIN) {
+    if (shared == 0) {
         proof_why(why, why_len, "proof_landing_preparation_busy");
         return 0;
     }
     proof_why(why, why_len, "proof_landing_step_lock_failed");
     return -1;
 }
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* The step-lock share a resident proof worker performs, against a caller
+ * named lock file and window, so the registered group can measure what the
+ * window buys without a landing worktree and a real proof. Returns what
+ * dp_landing_step_share() returns; the descriptor (and with it the shared
+ * lock) is released before returning, because the caller is measuring the
+ * acquisition, not holding it. */
+int zcl_dev_proof_landing_step_share(const char *step_path, int wait_ms)
+{
+    int fd = dp_landing_step_open(step_path);
+    int shared;
+    if (fd < 0) return -1;
+    shared = dp_landing_step_share(fd, wait_ms);
+    (void)close(fd);
+    return shared;
+}
+#endif
 
 static int dp_proof_queue_run_guarded(const char *repo_root,
                                          const char *requested_local,

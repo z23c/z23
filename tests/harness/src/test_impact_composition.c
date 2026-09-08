@@ -4742,6 +4742,102 @@ static int test_pw_seed_links_replaces_and_copies(void)
     return failures;
 }
 
+
+#if !defined(_WIN32)
+/* Hold an exclusive lock on `path` for `hold_ms` in a child, the way one
+ * `dev land step` holds the queue's step lock for its whole run. The pipe
+ * makes the hold observable: the parent reads one byte once the lock is
+ * actually taken, so the measurement below is never racing the fork. */
+static pid_t ic_step_lock_holder(const char *path, int hold_ms)
+{
+    int ready[2];
+    pid_t child;
+    char byte = 0;
+    if (pipe(ready) != 0) return -1;
+    child = fork();
+    if (child < 0) {
+        (void)close(ready[0]);
+        (void)close(ready[1]);
+        return -1;
+    }
+    if (child == 0) {
+        int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        (void)close(ready[0]);
+        if (fd < 0 || flock(fd, LOCK_EX) != 0) _exit(3);
+        (void)write(ready[1], "1", 1);
+        (void)close(ready[1]);
+        platform_sleep_ms(hold_ms);
+        _exit(0);
+    }
+    (void)close(ready[1]);
+    if (read(ready[0], &byte, 1) != 1) byte = 0;
+    (void)close(ready[0]);
+    if (byte != '1') {
+        (void)waitpid(child, NULL, 0);
+        return -1;
+    }
+    return child;
+}
+#endif
+
+/* The resident proof worker shares the landing step lock before it claims a
+ * queued request. It used to make ONE non-blocking attempt per reactor
+ * iteration, about once a second, while every `dev land step` — including
+ * the sub-second ones that only read proof state — holds that lock
+ * exclusively for its whole run. flock() offers a non-blocking waiter no
+ * fairness and no wake on release, so a keeper stepping in a loop starved
+ * the queued proof: measured on train 53, 15 of a 27 minute landing sat
+ * between "request queued" and "attempt started" while every step answered
+ * ok. The worker now re-tries inside a bounded window and takes the lock at
+ * the release. */
+static int test_ic_landing_step_share_waits_out_a_step(void)
+{
+    int failures = 0;
+    TEST("landing proof: the step-lock share waits out a step instead of starving") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[1024], lock[1200];
+        pid_t holder;
+        int64_t started, elapsed_ms;
+        test_make_tmpdir(root, sizeof(root), "proof_step", "share");
+        ASSERT(snprintf(lock, sizeof(lock), "%s/step.lock", root) > 0 &&
+               (size_t)snprintf(lock, sizeof(lock), "%s/step.lock", root) <
+                   sizeof(lock));
+        /* An unheld lock is shared at once, whatever the window. */
+        ASSERT(zcl_dev_proof_landing_step_share(lock, 0) == 1);
+
+        /* THE DEFECT, reproduced: one non-blocking attempt against a step
+         * that is mid-run reports "busy" and hands the work back. Repeat it
+         * and it keeps reporting busy for as long as the step runs — which
+         * is what a once-a-second reactor sample did for fifteen minutes. */
+        holder = ic_step_lock_holder(lock, 700);
+        ASSERT(holder > 0);
+        ASSERT(zcl_dev_proof_landing_step_share(lock, 0) == 0);
+        ASSERT(zcl_dev_proof_landing_step_share(lock, 0) == 0);
+
+        /* THE FIX: with a window, the same call takes the lock when the step
+         * releases it. It must not return before the step is done (that
+         * would mean it never contended) and must not spend the window. */
+        started = platform_time_monotonic_us();
+        ASSERT(zcl_dev_proof_landing_step_share(lock, 30000) == 1);
+        elapsed_ms = (platform_time_monotonic_us() - started) / 1000;
+        ASSERT(elapsed_ms >= 100);
+        ASSERT(elapsed_ms < 5000);
+        ASSERT(waitpid(holder, NULL, 0) == holder);
+
+        /* A window that expires against a step still running is deferred
+         * work, not a failed proof: the reactor re-offers it. */
+        holder = ic_step_lock_holder(lock, 1500);
+        ASSERT(holder > 0);
+        ASSERT(zcl_dev_proof_landing_step_share(lock, 120) == 0);
+        ASSERT(waitpid(holder, NULL, 0) == holder);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
 /* The bootstrap wrapper and a dependency room file are both copy class, for
  * two unrelated reasons: bin/zcc may only be inherited while the inputs that
  * built it are unchanged, while a room file must be copied because the
@@ -6136,6 +6232,7 @@ int test_impact_composition(void)
     failures += test_pw_identity_names_missing_restart_env();
     failures += test_pw_receipt_refuses_an_older_root_policy();
     failures += test_pw_status_line_reports_warm_or_typed_cold();
+    failures += test_ic_landing_step_share_waits_out_a_step();
     failures += test_pw_seed_links_replaces_and_copies();
     failures += test_pw_seed_room_copy_survives_a_stale_wrapper();
     failures += test_pw_seed_cold_without_seedables();

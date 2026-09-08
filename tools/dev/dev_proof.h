@@ -368,6 +368,13 @@ struct zcl_dev_proof_warm_stats {
 };
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* The landing step-lock share a resident proof worker performs before it
+ * claims a queued request, against a caller named lock file and window.
+ * Preparation holds that lock exclusively for a whole `dev land step`, and a
+ * once-per-loop non-blocking attempt could be starved by a keeper stepping in
+ * a loop; 1 acquired, 0 still held when the window ran out, -1 the lock file
+ * is unusable. Exposed so the group measures what the window buys. */
+int zcl_dev_proof_landing_step_share(const char *step_path, int wait_ms);
 /* Warm-start test seam. The harness proves the donor policy and the
  * link/copy decision against fixture trees; the dev binary compiles the
  * same seam. A release build sees none of it. POSIX-only, like the
