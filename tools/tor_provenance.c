@@ -12,7 +12,22 @@
  * with one small manifest, `<tor tree>/.provenance`:
  *
  *     tor_commit=<40 lowercase hex — git -C vendor/tor rev-parse HEAD>
- *     compiler_id=<tools/dev/build-epoch-key.sh compiler-id output>
+ *     compiler_id=<tools/dev/build-epoch-key.sh compiler-bytes-id output:
+ *                  "sha256:<compiler binary hash> version:<--version first
+ *                  line> triple:<-dumpmachine>" -- bytes-only, deliberately
+ *                  NOT the CPATH/LD_LIBRARY_PATH/COMPILER_PATH/CCACHE_*-
+ *                  bound `compiler-id` mode used for cached-object epochs
+ *                  elsewhere: that form makes the identical compiler yield a
+ *                  different id from a systemd unit than from an
+ *                  interactive shell. Derived identically by the writer
+ *                  (build_tor_full.sh) and every reader
+ *                  (tor_archives_ready.sh, check_tor_provenance.sh) via the
+ *                  one shared function
+ *                  tools/scripts/tor_provenance_lib.sh:zcl_tor_compiler_identity_for_cc.
+ *                  A manifest recorded before this scheme existed has a
+ *                  compiler_id with no "sha256:" prefix; `check` calls that
+ *                  out by name (see below) and `rewrite-compiler-id` updates
+ *                  it in place without a rebuild.>
  *     configure_args_sha256=<sha256 of the NUL-joined configure_opts array>
  *     archive_sha256=<sha256 of libtor.a> <ed25519 donna> <ed25519 ref10> <keccak-tiny>
  *
@@ -34,7 +49,19 @@
  *       set in the environment (the same variable tor_archives_ready.sh's
  *       do_ready() reads to decide to link the offline stub); otherwise
  *       exits 1, because a full build was expected and never happened.
- *       Exits 0 only when every checked field matched.
+ *       Exits 0 only when every checked field matched. On a compiler_id
+ *       mismatch against a pre-bytes-based manifest (no "sha256:" prefix
+ *       recorded), prints an extra line naming that specifically and
+ *       pointing at `rewrite-compiler-id` instead of leaving the reader to
+ *       guess why an apparently-correct compiler still MISMATCHes.
+ *
+ *   rewrite-compiler-id <tor-dir> <new-compiler-id>
+ *       Migration only: update JUST the compiler_id field of an existing
+ *       manifest in place, keeping its tor_commit and configure_args_sha256.
+ *       Refuses (manifest untouched) unless every recorded archive_sha256
+ *       still matches the archive bytes on disk -- a rewrite never fixes a
+ *       manifest whose archives are themselves suspect; that needs a real
+ *       `make tor-full`, not a relabel.
  *
  *   --selftest
  *       Builds a throwaway fixture (under $TMPDIR, default /tmp — same
@@ -98,9 +125,10 @@ static void die_usage(const char *prog)
     fprintf(stderr,
         "usage: %s write <tor-dir> <tor_commit> <compiler_id> <configure_args_sha256>\n"
         "       %s check <tor-dir> [--tor-commit <hex>] [--compiler-id <id>]\n"
+        "       %s rewrite-compiler-id <tor-dir> <new-compiler-id>\n"
         "       %s check-compiler-results <positive-status> <negative-status> <positive-log> <negative-log>\n"
         "       %s --selftest\n",
-        prog, prog, prog, prog);
+        prog, prog, prog, prog, prog);
     exit(2);
 }
 
@@ -391,6 +419,96 @@ static int parse_manifest(const char *manifest_path, provenance_t *pv)
     return 0;
 }
 
+/* Each check_*_field helper prints its own "tor-provenance: <field> ok|
+ * MISMATCH ..." line(s) and returns 1 when the field checked out, 0 on any
+ * mismatch -- split out of cmd_check() so that function's own branch count
+ * does not grow every time a field gains one more diagnostic case. */
+
+static int check_archive_sha256_field(const char *tor_dir, const provenance_t *pv)
+{
+    if (!pv->has_archive_sha256) {
+        printf("tor-provenance: archive_sha256 MISMATCH manifest has no archive_sha256 line\n");
+        return 0;
+    }
+    char actual[ARCHIVE_COUNT][ZSHA256_HEX_LEN];
+    int failing = -1;
+    if (hash_all_archives(tor_dir, actual, &failing) != 0) {
+        printf("tor-provenance: archive_sha256 MISMATCH could not hash %s/%s: %s\n",
+               tor_dir, ARCHIVE_RELPATHS[failing], strerror(errno));
+        return 0;
+    }
+    int mismatch_index = -1;
+    for (int i = 0; i < ARCHIVE_COUNT; i++) {
+        if (strcmp(actual[i], pv->archive_sha256[i]) != 0) {
+            mismatch_index = i;
+            break;
+        }
+    }
+    if (mismatch_index < 0) {
+        printf("tor-provenance: archive_sha256 ok\n");
+        return 1;
+    }
+    printf("tor-provenance: archive_sha256 MISMATCH %s recorded=%s actual=%s\n",
+           ARCHIVE_RELPATHS[mismatch_index],
+           pv->archive_sha256[mismatch_index], actual[mismatch_index]);
+    return 0;
+}
+
+static int check_tor_commit_field(const provenance_t *pv, const char *want_tor_commit)
+{
+    if (!pv->has_tor_commit) {
+        printf("tor-provenance: tor_commit MISMATCH manifest has no tor_commit line\n");
+        return 0;
+    }
+    if (strcmp(pv->tor_commit, want_tor_commit) != 0) {
+        printf("tor-provenance: tor_commit MISMATCH recorded=%s actual=%s\n",
+               pv->tor_commit, want_tor_commit);
+        return 0;
+    }
+    printf("tor-provenance: tor_commit ok\n");
+    return 1;
+}
+
+static int check_compiler_id_field(const provenance_t *pv, const char *want_compiler_id)
+{
+    if (!pv->has_compiler_id) {
+        printf("tor-provenance: compiler_id MISMATCH manifest has no compiler_id line\n");
+        return 0;
+    }
+    if (strcmp(pv->compiler_id, want_compiler_id) == 0) {
+        printf("tor-provenance: compiler_id ok\n");
+        return 1;
+    }
+    printf("tor-provenance: compiler_id MISMATCH recorded=%s actual=%s\n",
+           pv->compiler_id, want_compiler_id);
+    /* "sha256:" prefixes every bytes-based identity this program writes
+     * today (build-epoch-key.sh's compiler-bytes-id mode). A manifest
+     * without it predates that scheme -- point the reader at the one-time
+     * in-place fix instead of leaving them to guess why an
+     * apparently-correct compiler still MISMATCHes. */
+    if (strncmp(pv->compiler_id, "sha256:", 7) != 0) {
+        printf("tor-provenance: compiler_id MISMATCH manifest predates bytes-based compiler identity: run make tor-full (or `z23-tor-provenance rewrite-compiler-id <tor-dir> <new-compiler-id>` to update in place without rebuilding)\n");
+    }
+    return 0;
+}
+
+/* True when none of the four archives exist (a stub build: Tor was never
+ * compiled here, so there is nothing to attest) -- as opposed to "the real
+ * producer ran and left no manifest" (a MISMATCH some caller must rebuild).
+ * Both look identical to parse_manifest(), so this must run first. */
+static int no_archives_present(const char *tor_dir)
+{
+    for (int i = 0; i < ARCHIVE_COUNT; i++) {
+        char apath[PATH_BUF_MAX];
+        struct stat ast;
+        if (join_path(apath, tor_dir, ARCHIVE_RELPATHS[i]) == 0 &&
+            stat(apath, &ast) == 0 && ast.st_size > 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int cmd_check(const char *tor_dir, const char *want_tor_commit, const char *want_compiler_id)
 {
     char manifest_path[PATH_BUF_MAX];
@@ -399,35 +517,14 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
         return 1;
     }
 
-    /* Distinguish "the real producer ran and left no manifest" (a MISMATCH:
-     * archives exist, something upstream must rebuild them) from "the real
-     * producer never ran at all" (a stub build: vendor/tor was never
-     * compiled, so there is nothing here to attest). Both look like "no
-     * manifest" from parse_manifest()'s point of view, but only the first
-     * one should be reported as a defect to fix by rebuilding. The signal
-     * for the second is the SAME one tools/scripts/tor_archives_ready.sh's
-     * do_ready() reads to decide whether to link the offline stub instead of
-     * real Tor: the ZCL_TOR environment variable, "stub" vs. the default
-     * "full". */
-    {
-        int any_archive_present = 0;
-        for (int i = 0; i < ARCHIVE_COUNT; i++) {
-            char apath[PATH_BUF_MAX];
-            struct stat ast;
-            if (join_path(apath, tor_dir, ARCHIVE_RELPATHS[i]) == 0 &&
-                stat(apath, &ast) == 0 && ast.st_size > 0) {
-                any_archive_present = 1;
-                break;
-            }
-        }
-        if (!any_archive_present) {
-            const char *zcl_tor = getenv("ZCL_TOR");
-            printf("tor-provenance: no Tor archives present (stub build) — nothing to attest\n");
-            if (zcl_tor != NULL && strcmp(zcl_tor, "stub") == 0) {
-                return 0;
-            }
-            return 1;
-        }
+    /* The signal for "stub build, nothing to attest" is the SAME one
+     * tools/scripts/tor_archives_ready.sh's do_ready() reads to decide
+     * whether to link the offline stub instead of real Tor: the ZCL_TOR
+     * environment variable, "stub" vs. the default "full". */
+    if (no_archives_present(tor_dir)) {
+        const char *zcl_tor = getenv("ZCL_TOR");
+        printf("tor-provenance: no Tor archives present (stub build) — nothing to attest\n");
+        return (zcl_tor != NULL && strcmp(zcl_tor, "stub") == 0) ? 0 : 1;
     }
 
     provenance_t pv;
@@ -439,62 +536,67 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
     int all_ok = 1;
 
     /* archive_sha256 is always checked — it is the whole point. */
-    if (!pv.has_archive_sha256) {
-        printf("tor-provenance: archive_sha256 MISMATCH manifest has no archive_sha256 line\n");
-        all_ok = 0;
-    } else {
-        char actual[ARCHIVE_COUNT][ZSHA256_HEX_LEN];
-        int failing = -1;
-        if (hash_all_archives(tor_dir, actual, &failing) != 0) {
-            printf("tor-provenance: archive_sha256 MISMATCH could not hash %s/%s: %s\n",
-                   tor_dir, ARCHIVE_RELPATHS[failing], strerror(errno));
-            all_ok = 0;
-        } else {
-            int mismatch_index = -1;
-            for (int i = 0; i < ARCHIVE_COUNT; i++) {
-                if (strcmp(actual[i], pv.archive_sha256[i]) != 0) {
-                    mismatch_index = i;
-                    break;
-                }
-            }
-            if (mismatch_index < 0) {
-                printf("tor-provenance: archive_sha256 ok\n");
-            } else {
-                printf("tor-provenance: archive_sha256 MISMATCH %s recorded=%s actual=%s\n",
-                       ARCHIVE_RELPATHS[mismatch_index],
-                       pv.archive_sha256[mismatch_index], actual[mismatch_index]);
-                all_ok = 0;
-            }
-        }
-    }
+    if (!check_archive_sha256_field(tor_dir, &pv)) all_ok = 0;
 
-    if (want_tor_commit) {
-        if (!pv.has_tor_commit) {
-            printf("tor-provenance: tor_commit MISMATCH manifest has no tor_commit line\n");
-            all_ok = 0;
-        } else if (strcmp(pv.tor_commit, want_tor_commit) != 0) {
-            printf("tor-provenance: tor_commit MISMATCH recorded=%s actual=%s\n",
-                   pv.tor_commit, want_tor_commit);
-            all_ok = 0;
-        } else {
-            printf("tor-provenance: tor_commit ok\n");
-        }
-    }
+    if (want_tor_commit && !check_tor_commit_field(&pv, want_tor_commit)) all_ok = 0;
 
-    if (want_compiler_id) {
-        if (!pv.has_compiler_id) {
-            printf("tor-provenance: compiler_id MISMATCH manifest has no compiler_id line\n");
-            all_ok = 0;
-        } else if (strcmp(pv.compiler_id, want_compiler_id) != 0) {
-            printf("tor-provenance: compiler_id MISMATCH recorded=%s actual=%s\n",
-                   pv.compiler_id, want_compiler_id);
-            all_ok = 0;
-        } else {
-            printf("tor-provenance: compiler_id ok\n");
-        }
-    }
+    if (want_compiler_id && !check_compiler_id_field(&pv, want_compiler_id)) all_ok = 0;
 
     return all_ok ? 0 : 1;
+}
+
+/* ---- rewrite-compiler-id -------------------------------------------
+ * Migration for a manifest written under an older compiler-identity scheme
+ * (or a manifest whose ambient recording drifted, e.g. the CPATH/PATH-bound
+ * `compiler-id` this file used before compiler-bytes-id existed): update
+ * ONLY the compiler_id field, in place, from the archives that are already
+ * on disk. Refuses (leaves the manifest untouched) unless every recorded
+ * archive_sha256 still matches the archive bytes on disk -- if it does not,
+ * the archives themselves are suspect and no compiler-identity fix belongs
+ * here; the caller needs a real rebuild (`make tor-full`), not a relabel.
+ */
+static int cmd_rewrite_compiler_id(const char *tor_dir, const char *new_compiler_id)
+{
+    char manifest_path[PATH_BUF_MAX];
+    if (join_path(manifest_path, tor_dir, TOR_PROVENANCE_NAME) != 0) {
+        fprintf(stderr, "tor-provenance: rewrite-compiler-id: tor-dir path too long\n");
+        return 1;
+    }
+
+    provenance_t pv;
+    if (parse_manifest(manifest_path, &pv) != 0) {
+        fprintf(stderr, "tor-provenance: rewrite-compiler-id: %s is missing or unreadable\n",
+                manifest_path);
+        return 1;
+    }
+    if (!pv.has_tor_commit || !pv.has_configure_args_sha256 || !pv.has_archive_sha256) {
+        fprintf(stderr, "tor-provenance: rewrite-compiler-id: manifest is incomplete; run 'make tor-full' to write a fresh one\n");
+        return 1;
+    }
+
+    char actual[ARCHIVE_COUNT][ZSHA256_HEX_LEN];
+    int failing = -1;
+    if (hash_all_archives(tor_dir, actual, &failing) != 0) {
+        fprintf(stderr, "tor-provenance: rewrite-compiler-id: could not hash %s/%s: %s\n",
+                tor_dir, ARCHIVE_RELPATHS[failing], strerror(errno));
+        return 1;
+    }
+    for (int i = 0; i < ARCHIVE_COUNT; i++) {
+        if (strcmp(actual[i], pv.archive_sha256[i]) != 0) {
+            fprintf(stderr,
+                "tor-provenance: rewrite-compiler-id: refusing -- %s does not match its recorded archive_sha256 (recorded=%s actual=%s); the archives are suspect, run 'make tor-full' to rebuild instead of relabeling\n",
+                ARCHIVE_RELPATHS[i], pv.archive_sha256[i], actual[i]);
+            return 1;
+        }
+    }
+
+    /* cmd_write() re-hashes the (already-verified-unchanged) archives and
+     * atomically replaces the manifest; only compiler_id actually changes. */
+    if (cmd_write(tor_dir, pv.tor_commit, new_compiler_id, pv.configure_args_sha256) != 0)
+        return 1;
+    printf("tor-provenance: rewrite-compiler-id: %s compiler_id updated (tor_commit, configure_args_sha256, and archive_sha256 unchanged)\n",
+           manifest_path);
+    return 0;
 }
 
 /* ---- selftest ----------------------------------------------------------
@@ -758,6 +860,27 @@ out:
     return rc;
 }
 
+/* Parses `check <tor-dir> [--tor-commit <hex>] [--compiler-id <id>]`'s
+ * argv tail out of main() so main()'s own branch count stays under the
+ * complexity cap regardless of how many flags `check` grows. */
+static int run_check_command(const char *prog, int argc, char **argv)
+{
+    if (argc < 3) die_usage(prog);
+    const char *tor_dir = argv[2];
+    const char *want_tor_commit = NULL;
+    const char *want_compiler_id = NULL;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--tor-commit") == 0 && i + 1 < argc) {
+            want_tor_commit = argv[++i];
+        } else if (strcmp(argv[i], "--compiler-id") == 0 && i + 1 < argc) {
+            want_compiler_id = argv[++i];
+        } else {
+            die_usage(prog);
+        }
+    }
+    return cmd_check(tor_dir, want_tor_commit, want_compiler_id);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) die_usage(argv[0]);
@@ -776,21 +899,13 @@ int main(int argc, char **argv)
         return cmd_write(argv[2], argv[3], argv[4], argv[5]);
     }
 
+    if (strcmp(argv[1], "rewrite-compiler-id") == 0) {
+        if (argc != 4) die_usage(argv[0]);
+        return cmd_rewrite_compiler_id(argv[2], argv[3]);
+    }
+
     if (strcmp(argv[1], "check") == 0) {
-        if (argc < 3) die_usage(argv[0]);
-        const char *tor_dir = argv[2];
-        const char *want_tor_commit = NULL;
-        const char *want_compiler_id = NULL;
-        for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "--tor-commit") == 0 && i + 1 < argc) {
-                want_tor_commit = argv[++i];
-            } else if (strcmp(argv[i], "--compiler-id") == 0 && i + 1 < argc) {
-                want_compiler_id = argv[++i];
-            } else {
-                die_usage(argv[0]);
-            }
-        }
-        return cmd_check(tor_dir, want_tor_commit, want_compiler_id);
+        return run_check_command(argv[0], argc, argv);
     }
 
     die_usage(argv[0]);

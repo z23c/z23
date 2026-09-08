@@ -87,7 +87,7 @@ have_all() {
     command -v "${cc%% *}" >/dev/null 2>&1 || return 1
     # Match build_tor_full.sh's probe directory too: Apple Clang's verbose
     # preprocessing output includes its compilation directory.
-    cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cc" "$cc" 2>/dev/null)" || return 1
+    cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$cc" 2>/dev/null)" || return 1
     "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 || \
         tor_alias_check "$cc"
 }
@@ -122,7 +122,7 @@ tor_alias_check() {
         cand_path="$(command -v "$cand" 2>/dev/null)" || continue
         cand_path="$(realpath -- "$cand_path" 2>/dev/null)" || continue
         tor_same_compiler_file "$cand_path" "$primary_path" || continue
-        cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cand" "$cand" 2>/dev/null)" || continue
+        cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$cand" 2>/dev/null)" || continue
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 && return 0
     done
     return 1
@@ -259,7 +259,18 @@ do_ready() {
     # "write a manifest from ambient values inside a check" failure mode
     # this tool exists to prevent.
     if manifest_present && archives_all_present; then
-        echo "tor-ready: FAIL $TOR_TREE has a provenance manifest that does not match its archives -- refusing to silently re-establish it; run 'make check-tor-provenance' for the exact mismatch, or 'make tor-full' to rebuild intentionally" >&2
+        # This probe is best-effort (its caller, the tor-provenance-ready
+        # Make prerequisite, always swallows its exit status with `|| true`
+        # -- see the comment on that target). The real gate is
+        # check-tor-provenance / check_tor_provenance.sh, run right after
+        # this, which prints exactly which field mismatched and, for
+        # compiler_id, both the recorded and actual values (each a readable
+        # "sha256:<hex> version:<line> triple:<value>" preimage, never a
+        # secret). Saying FAIL here -- when this probe is not the judge and
+        # its failure changes nothing -- read as a real gate failure inside
+        # a passing `make lint` once; say WARN instead so there is exactly
+        # one honest verdict per run.
+        echo "tor-ready: WARN (best-effort probe; judged by check-tor-provenance) $TOR_TREE has a provenance manifest that does not match its archives here -- run 'make check-tor-provenance' for the exact mismatch, or 'make tor-full' to rebuild intentionally" >&2
         return 1
     fi
     local donor="${2:-}"
@@ -331,7 +342,7 @@ case "${1:-ready}" in
             exit 1
         }
         selftest_cc="$(zcl_tor_effective_cc "$fake_primary/$TOR_TREE" "$TRIPLE")"
-        selftest_cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$selftest_cc" "$selftest_cc" 2>/dev/null)" || {
+        selftest_cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$selftest_cc" 2>/dev/null)" || {
             echo "tor_archives_ready: selftest FAILED — could not derive a fixture compiler id" >&2
             exit 1
         }
@@ -492,7 +503,7 @@ case "${1:-ready}" in
                 mkdir -p "$fake_wt3/${a%/*}"
                 printf 'fixture tor archive bytes\n' >"$fake_wt3/$a"
             done
-            alias_cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id gcc gcc 2>/dev/null)" || {
+            alias_cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" gcc 2>/dev/null)" || {
                 echo "tor_archives_ready: selftest FAILED — could not derive the gcc alias compiler id" >&2
                 exit 1
             }
@@ -509,6 +520,58 @@ case "${1:-ready}" in
         else
             echo "tor_archives_ready: selftest SKIP — gcc and cc are not the same binary on this host, cannot exercise the alias path"
         fi
+
+        # The actual defect this file was written to close: compiler_id must
+        # be bound to the compiler's BYTES, not to transient environment
+        # variables that differ between an interactive shell and a systemd
+        # unit running the exact same toolchain (CPATH, LD_LIBRARY_PATH,
+        # COMPILER_PATH, CCACHE_*/SCCACHE_*, ...). Two regression checks on
+        # zcl_tor_compiler_identity_for_cc itself, independent of have_all()'s
+        # manifest plumbing above.
+        probe_cc="$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)"
+        if [ -n "$probe_cc" ]; then
+            probe_cc="$(realpath -- "$probe_cc" 2>/dev/null || printf '%s' "$probe_cc")"
+            id_plain="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$probe_cc" 2>/dev/null)" || {
+                echo "tor_archives_ready: selftest FAILED — could not derive a compiler-bytes id for $probe_cc" >&2
+                exit 1
+            }
+            # (a) The SAME compiler binary, reached through unrelated
+            # CPATH/LD_LIBRARY_PATH/COMPILER_PATH values (a stand-in for "an
+            # interactive shell vs. a systemd unit"), must verify identically.
+            id_other_env="$(CPATH="$fixture/nonexistent-cpath" \
+                LD_LIBRARY_PATH="$fixture/nonexistent-ldpath" \
+                COMPILER_PATH="$fixture/nonexistent-compilerpath" \
+                zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$probe_cc" 2>/dev/null)" || {
+                echo "tor_archives_ready: selftest FAILED — could not derive a compiler-bytes id under a different environment" >&2
+                exit 1
+            }
+            if [ "$id_plain" != "$id_other_env" ]; then
+                echo "tor_archives_ready: selftest FAILED — the same compiler binary produced different compiler-bytes ids under different CPATH/LD_LIBRARY_PATH/COMPILER_PATH ($id_plain != $id_other_env)" >&2
+                exit 1
+            fi
+            # (b) A genuinely different compiler BINARY -- a tiny wrapper
+            # script that execs the real compiler counts, since its own bytes
+            # differ -- must MISMATCH, never collide with (a)'s tolerance.
+            wrapper_dir="$fixture/wrapper-bin"
+            mkdir -p "$wrapper_dir"
+            wrapper="$wrapper_dir/wrapper-cc"
+            {
+                printf '#!/bin/sh\n'
+                printf 'exec %q "$@"\n' "$probe_cc"
+            } > "$wrapper"
+            chmod +x "$wrapper"
+            id_wrapper="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$wrapper" 2>/dev/null)" || {
+                echo "tor_archives_ready: selftest FAILED — could not derive a compiler-bytes id for the wrapper fixture" >&2
+                exit 1
+            }
+            if [ "$id_plain" = "$id_wrapper" ]; then
+                echo "tor_archives_ready: selftest FAILED — a different compiler binary (wrapper script) produced the SAME compiler-bytes id as $probe_cc" >&2
+                exit 1
+            fi
+        else
+            echo "tor_archives_ready: selftest SKIP — no cc/gcc on this host, cannot exercise the compiler-bytes-id regression"
+        fi
+
         cleanup_fixture
         trap - EXIT
         echo "tor_archives_ready: selftest PASS"

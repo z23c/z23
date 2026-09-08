@@ -13409,6 +13409,7 @@ z23-tor-provenance: $(TOR_PROVENANCE_BIN)
 # covered where the other vendor trees already are.
 check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN)
 	@echo "══ LINT: bundled Tor archives are bound to their commit + bytes ══"
+	@./tools/scripts/tor_archives_ready.sh --selftest
 	@./tools/lint/check_tor_provenance.sh
 
 # Adding a lint gate is a TWO-FILE operation and nothing enforced the second

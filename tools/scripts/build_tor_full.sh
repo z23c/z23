@@ -320,7 +320,7 @@ zcl_tor_provenance_ensure_bin "$ROOT" || {
     echo "tor-full: could not build the Tor provenance verifier" >&2
     exit 1
 }
-compiler_id="$("$ROOT/tools/dev/build-epoch-key.sh" compiler-id "$effective_cc" "$effective_cc")" || {
+compiler_id="$(zcl_tor_compiler_identity_for_cc "$ROOT" "$effective_cc")" || {
     echo "tor-full: could not derive a compiler identity for $effective_cc" >&2
     exit 1
 }

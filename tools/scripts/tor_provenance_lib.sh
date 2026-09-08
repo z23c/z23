@@ -54,6 +54,28 @@ zcl_tor_effective_cc() {
     printf '%s\n' "$cc"
 }
 
+# The ONE derivation of "what compiler identity does the Tor provenance
+# manifest bind" -- called by build_tor_full.sh (the writer) and every
+# reader (tor_archives_ready.sh's have_all()/tor_alias_check(),
+# tools/lint/check_tor_provenance.sh). Two independent re-derivations of a
+# compiler identity have drifted before (see zcl_tor_effective_cc's comment
+# above); this closes the other half of that gap by giving both writer and
+# readers the same function, not just the same effective-CC string.
+#
+# Bytes-only, via build-epoch-key.sh's `compiler-bytes-id` mode: the
+# resolved compiler binary's sha256, its `--version` first line, and its
+# target triple. Deliberately NOT `compiler-id` (used for cached-object
+# epochs elsewhere) -- that mode binds CPATH/LD_LIBRARY_PATH/COMPILER_PATH/
+# CCACHE_*/SCCACHE_* and more, so the identical compiler yields a different
+# id launched from a systemd unit than from an interactive shell. Tor
+# provenance must survive that launch-shape difference; the cached-object
+# epoch legitimately must not (those variables DO change resolved object
+# bytes via header/library search).
+zcl_tor_compiler_identity_for_cc() {
+    local root="$1" cc="$2"
+    (cd "$root" && "$root/tools/dev/build-epoch-key.sh" compiler-bytes-id "$cc")
+}
+
 # Build (or rebuild) the tool if missing or stale. A build failure is loud
 # and fails closed (returns 1): every caller of z23-tor-provenance treats
 # "cannot verify" the same as "archives absent", never as "archives present".

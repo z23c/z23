@@ -307,6 +307,38 @@ and that no ship or install step will package. Reach for it only when a box
 genuinely cannot build Tor; `check-tor-full-default` is what keeps the
 default honest.
 
+`make check-tor-provenance` binds the four `vendor/tor/` archives to the
+commit, configure flags, and *compiler* that produced them
+(`tools/tor_provenance.c`, `<tor tree>/.provenance`). The compiler is
+identified by its bytes alone — the resolved binary's own sha256, its
+`--version` first line, and its target triple
+(`tools/dev/build-epoch-key.sh compiler-bytes-id`, shared by the writer and
+every reader via `zcl_tor_compiler_identity_for_cc` in
+`tools/scripts/tor_provenance_lib.sh`) — deliberately not the ambient
+environment (CPATH, LD_LIBRARY_PATH, COMPILER_PATH, CCACHE_*/SCCACHE_*, ...)
+`build-epoch-key.sh compiler-id` binds for cached-object epochs elsewhere:
+those vary between an interactive shell and a systemd unit running the exact
+same toolchain, which used to make the gate disagree with itself for no
+real reason.
+
+A manifest written before this scheme has a `compiler_id` line with no
+`sha256:` prefix. `make check-tor-provenance` on such a box fails with
+`compiler_id MISMATCH manifest predates bytes-based compiler identity: run
+make tor-full`. **You do not need to rebuild Tor to fix this** — the
+archives themselves have not changed, only how the compiler is named. Run,
+once, per box/worktree that hits it:
+
+```
+build/bin/z23-tor-provenance rewrite-compiler-id vendor/tor \
+    "$(. tools/scripts/tor_provenance_lib.sh; \
+       zcl_tor_compiler_identity_for_cc "$PWD" "$(zcl_tor_effective_cc "$PWD/vendor/tor" "")")"
+```
+
+This refuses (leaves the manifest untouched) unless every recorded
+`archive_sha256` still matches the archive bytes on disk — if it refuses,
+the archives are suspect and the real fix is `make tor-full`, not a
+relabel.
+
 ### Fast dev builds
 
 The compiler-speed loop is `make dev` or `ZCL_PROFILE=dev make`. It writes

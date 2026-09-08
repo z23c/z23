@@ -2287,7 +2287,7 @@ Z23_FLAG("ZCL_TIMINGS_CACHE", "env_build", "-", "-",
 Z23_FLAG("ZCL_TOOLS_LINK_JOBS", "env_build", "1", "-",
           "undocumented; first use tools/lint/check_standalone_tools_link.sh:351")
 Z23_FLAG("ZCL_TOR", "env_runtime", "full", "-",
-          "first use tools/tor_provenance.c:424; documented at docs/DEVELOPING.md:296: make ZCL_TOR=stub … is the dev-only escape: it links the offline stub,")
+          "first use tools/tor_provenance.c:525; documented at docs/DEVELOPING.md:296: make ZCL_TOR=stub … is the dev-only escape: it links the offline stub,")
 Z23_FLAG("ZCL_TOR_JOBS", "env_build", "-", "-",
           "undocumented; first use tools/scripts/build_tor_full.sh:285")
 Z23_FLAG("ZCL_TOR_STUB_REFUSAL", "env_build", "-", "-",

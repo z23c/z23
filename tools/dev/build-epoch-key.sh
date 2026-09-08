@@ -41,6 +41,20 @@ is_sha256()
     [[ "${1:-}" =~ ^[0-9a-f]{64}$ ]]
 }
 
+# Make's compiler commands are a whitespace-separated argv (normally
+# `cc`, `ccache cc`, or `sccache cc`).  Accept only tokens whose shell
+# interpretation is identical to `read -a`: quotes, escapes, expansions,
+# comments, globs, redirects, assignments in argv[0], and control syntax
+# all fail closed instead of being fingerprinted differently from Make.
+# Top-level (not mode-local) because both `compiler-id` and
+# `compiler-bytes-id` validate a CC command string the same way.
+safe_command()
+{
+    local label="$1" command="$2"
+    [[ "$command" =~ ^[[:space:]]*[A-Za-z0-9_./:+,=%-]+([[:space:]]+[A-Za-z0-9_./:+,=%-]+)*[[:space:]]*$ ]] ||
+        fail "$label contains unsupported shell syntax"
+}
+
 MODE="${1:-}"
 shift || true
 
@@ -50,17 +64,6 @@ compiler-id)
     CXX_COMMAND="${2:-${1:-}}"
     [ -n "$CC_COMMAND" ] || fail 'compiler-id requires the effective CC command'
 
-    # Make's compiler commands are a whitespace-separated argv (normally
-    # `cc`, `ccache cc`, or `sccache cc`).  Accept only tokens whose shell
-    # interpretation is identical to `read -a`: quotes, escapes, expansions,
-    # comments, globs, redirects, assignments in argv[0], and control syntax
-    # all fail closed instead of being fingerprinted differently from Make.
-    safe_command()
-    {
-        local label="$1" command="$2"
-        [[ "$command" =~ ^[[:space:]]*[A-Za-z0-9_./:+,=%-]+([[:space:]]+[A-Za-z0-9_./:+,=%-]+)*[[:space:]]*$ ]] ||
-            fail "$label contains unsupported shell syntax"
-    }
     safe_command CC "$CC_COMMAND"
     safe_command CXX "$CXX_COMMAND"
     read -r -a CC_ARGV <<< "$CC_COMMAND"
@@ -443,6 +446,64 @@ compiler-id)
     printf '%s\n' "$COMPILER_DIGEST"
     ;;
 
+compiler-bytes-id)
+    # A compiler identity bound ONLY to bytes that actually produced object
+    # code: the resolved compiler binary's own sha256, its `--version` first
+    # line, and its target triple (`-dumpmachine`). Deliberately excludes
+    # every ambient environment variable the `compiler-id` mode above binds
+    # (CPATH, LD_LIBRARY_PATH, COMPILER_PATH, CCACHE_*/SCCACHE_*, ...): those
+    # vary between an interactive shell and a systemd unit running the exact
+    # same compiler, which made `compiler-id` disagree with itself across the
+    # two launch shapes for the SAME toolchain. Callers that need identity
+    # to survive that launch-shape difference (Tor provenance: see
+    # tools/scripts/tor_provenance_lib.sh's zcl_tor_compiler_identity_for_cc)
+    # use this mode instead. Callers that need the full cached-object epoch
+    # (which legitimately wants search-root/env sensitivity, since those DO
+    # change generated object bytes via header/library resolution) keep using
+    # `compiler-id`.
+    CC_COMMAND="${1:-}"
+    [ -n "$CC_COMMAND" ] || fail 'compiler-bytes-id requires the effective CC command'
+    safe_command CC "$CC_COMMAND"
+    read -r -a CC_ARGV <<< "$CC_COMMAND"
+    [ "${#CC_ARGV[@]}" -gt 0 ] || fail 'CC parsed to an empty argv'
+    case "${CC_ARGV[0]}" in -*|*=*) fail 'CC argv[0] is not an executable token' ;; esac
+
+    if [[ "${CC_ARGV[0]}" == */* ]]; then
+        RESOLVED_CC="$(readlink -f -- "${CC_ARGV[0]}" 2>/dev/null || true)"
+    else
+        RESOLVED_CC="$(command -v -- "${CC_ARGV[0]}" 2>/dev/null || true)"
+        [ -n "$RESOLVED_CC" ] && RESOLVED_CC="$(readlink -f -- "$RESOLVED_CC" 2>/dev/null || true)"
+    fi
+    [ -n "$RESOLVED_CC" ] && [ -f "$RESOLVED_CC" ] ||
+        fail "compiler command not found or not a regular file: ${CC_ARGV[0]}"
+
+    CC_DIGEST="$(sha256_file "$RESOLVED_CC")" ||
+        fail "could not hash compiler binary: $RESOLVED_CC"
+
+    set +e
+    CC_VERSION_LINE="$("${CC_ARGV[@]}" --version 2>/dev/null | head -n 1)"
+    CC_TRIPLE="$("${CC_ARGV[@]}" -dumpmachine 2>/dev/null)"
+    set -e
+
+    # Neutralize the two bytes this manifest field's own parser refuses
+    # (tools/tor_provenance.c's contains_control_or_eq: '=', CR, LF) and
+    # collapse embedded newlines -- --version can emit more than one line,
+    # and only the first is bound above, but stray control bytes from a
+    # hostile/odd compiler must not corrupt the manifest line format either.
+    sanitize_field()
+    {
+        local s="$1"
+        s="${s//$'\r'/}"
+        s="${s//$'\n'/ }"
+        s="${s//=/_}"
+        printf '%s' "$s"
+    }
+    CC_VERSION_LINE="$(sanitize_field "$CC_VERSION_LINE")"
+    CC_TRIPLE="$(sanitize_field "$CC_TRIPLE")"
+
+    printf 'sha256:%s version:%s triple:%s\n' "$CC_DIGEST" "$CC_VERSION_LINE" "$CC_TRIPLE"
+    ;;
+
 key)
     COMPILER_ID="${1:-}"
     PROFILE="${2:-}"
@@ -549,6 +610,6 @@ build-system-id)
     ;;
 
 *)
-    fail 'usage: build-epoch-key.sh compiler-id CC [CXX] | key COMPILER PROFILE COMPILE_FLAGS LINK_FLAGS BUILD_SYSTEM_ID | build-system-id'
+    fail 'usage: build-epoch-key.sh compiler-id CC [CXX] | compiler-bytes-id CC | key COMPILER PROFILE COMPILE_FLAGS LINK_FLAGS BUILD_SYSTEM_ID | build-system-id'
     ;;
 esac
