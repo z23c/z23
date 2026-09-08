@@ -31,6 +31,16 @@ launchd_pid=''
 launchd_cleanup() {
     local rc=$? cleanup_deadline
     trap - EXIT INT TERM
+    if [ "$rc" -ne 0 ]; then
+        local retained
+        retained="$(mktemp "${TMPDIR:-/tmp}/z23-launchd-failure.XXXXXX")"
+        {
+            printf 'job=%s observed_pid=%s exit_status=%s\n' "$launchd_job" "$launchd_pid" "$rc"
+            launchctl print "$launchd_job" || true
+            if [ -f "$ISO_DD/node.log" ]; then cat "$ISO_DD/node.log"; fi
+        } > "$retained" 2>&1
+        printf 'macos-launchd: supervisor and node evidence retained at %s\n' "$retained" >&2
+    fi
     if launchctl print "$launchd_job" >/dev/null 2>&1; then
         launchctl bootout "$launchd_job" || {
             printf 'macos-launchd: fixture cleanup failed: %s\n' "$launchd_job" >&2
@@ -45,12 +55,6 @@ launchd_cleanup() {
         fi
         sleep 0.2
     done
-    if [ "$rc" -ne 0 ] && [ -f "$ISO_DD/node.log" ]; then
-        local retained
-        retained="$(mktemp "${TMPDIR:-/tmp}/z23-launchd-failure.XXXXXX")"
-        cp "$ISO_DD/node.log" "$retained"
-        printf 'macos-launchd: fixture log retained at %s\n' "$retained" >&2
-    fi
     # launchd owns this process, not the process-group launcher. Remove its
     # exact job before invoking the shared datadir cleanup; never kill a stale PID.
     ISO_NODE_PID=''
@@ -103,6 +107,7 @@ launchd_ready() {
         iso_die "$phase did not produce a new supervisor-owned PID"
     launchd_pid="$candidate"
     ISO_NODE_PID="$candidate"
+    printf 'macos-launchd: phase=%s supervisor_pid=%s previous_pid=%s\n' "$phase" "$candidate" "$previous"
     iso_wait_rpc_ready 90 || iso_die "$phase did not reach successful RPC"
     "$ISO_NODE_BIN" core node bootwait -datadir="$ISO_DD" \
         --timeout_ms=90000 --heartbeat_ms=250 >/dev/null || iso_die "$phase did not finish boot"

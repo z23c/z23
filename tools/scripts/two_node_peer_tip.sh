@@ -39,10 +39,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
+JSONQ_BIN="$REPO_ROOT/build/bin/jsonq"
 PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
 tn_resolve_bin() {
     local p="$1"
@@ -58,6 +59,7 @@ tn_resolve_bin() {
 }
 NODE_BIN="$(tn_resolve_bin "$NODE_BIN")"
 RPC_BIN="$(tn_resolve_bin "$RPC_BIN")"
+JSONQ_BIN="$(tn_resolve_bin "$JSONQ_BIN")"
 PROCESS_GROUP_EXEC="$(tn_resolve_bin "$PROCESS_GROUP_EXEC")"
 . "$REPO_ROOT/tools/scripts/port_probe.sh"
 
@@ -136,9 +138,10 @@ tn_rm_datadir() {
         echo "two-node-peer-tip: WARN: refusing to rm without scratch root '$dd'" >&2
         return 0
     }
-    resolved="$(cd "$dd" && pwd)" || return 0
+    scratch="$(cd "$scratch" && pwd -P)" || return 0
+    resolved="$(cd "$dd" && pwd -P)" || return 0
     case "$resolved" in
-        "$scratch"|"$scratch"/*) ;;
+        "$scratch"/*) ;;
         *)
             echo "two-node-peer-tip: WARN: refusing to rm datadir outside scratch root '$dd'" >&2
             return 0
@@ -177,12 +180,26 @@ tn_rpc() {
 a_rpc() { tn_rpc "$TN_DD_A" "$A_RPC" "$@"; }
 b_rpc() { tn_rpc "$TN_DD_B" "$B_RPC" "$@"; }
 
-# Scrape the integer "result" out of a zcl-rpc JSON line.
+tn_result() {
+    local dd="$1" rp="$2" out error; shift 2
+    out="$(ZCL_DATADIR="$dd" ZCL_RPCPORT="$rp" "$RPC_BIN" "$@" 2>/dev/null)" || return 1
+    error="$(printf '%s' "$out" | "$JSONQ_BIN" raw error 2>/dev/null)" || return 1
+    [ "$error" = null ] || return 1
+    printf '%s' "$out" | "$JSONQ_BIN" raw result 2>/dev/null
+}
 tn_blockcount() {
     local out
-    out="$(tn_rpc "$1" "$2" getblockcount)"
-    # result is the first integer after "result":
-    printf '%s' "$out" | sed -n 's/.*"result"[: ]*\([0-9-]*\).*/\1/p'
+    out="$(tn_result "$1" "$2" getblockcount)" || return 1
+    case "$out" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$out"
+}
+tn_blockhash() {
+    local out
+    out="$(tn_result "$1" "$2" getblockhash "$3")" || return 1
+    [ "${#out}" = 66 ] || return 1
+    case "$out" in \"*\") out="${out#\"}"; out="${out%\"}" ;; *) return 1 ;; esac
+    case "$out" in *[!0-9a-f]*) return 1 ;; esac
+    printf '%s\n' "$out"
 }
 
 # ── Spawn a node in its OWN process group ──────────────────────────
@@ -200,37 +217,41 @@ tn_spawn() {
     echo "$!"   # PID == PGID (setsid leader / Windows job owner)
 }
 
-# Poll a node's RPC until getblockcount answers, or timeout. $1=dd $2=rpc $3=pid $4=secs
+# Poll against an absolute deadline shared with the subsequent tip check.
 tn_wait_rpc() {
-    local dd="$1" rp="$2" pid="$3" secs="$4" deadline t
-    deadline=$(( $(date +%s) + secs ))
+    local dd="$1" rp="$2" pid="$3" deadline="$4" t
     while [ "$(date +%s)" -lt "$deadline" ]; do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             echo "two-node-peer-tip: node (pid $pid) exited during RPC warmup (see $(tn_node_log "$dd"))" >&2
             return 1
         fi
         if [ -f "$dd/.cookie" ]; then
-            t="$(tn_blockcount "$dd" "$rp")"
-            [ -n "$t" ] && return 0
+            t="$(tn_blockcount "$dd" "$rp")" || t=''
+            [ -n "$t" ] && [ "$(date +%s)" -lt "$deadline" ] && return 0
         fi
         sleep 0.5
     done
     return 1
 }
 
-# Poll node ($1 dd, $2 rpc, $3 pid) until its blockcount == $4, or $5 s.
+# Poll for the exact peer tip ($4 height, $6 hash) before absolute deadline $5.
 # Echoes the final observed height; returns 0 on match, 1 on timeout.
 tn_wait_height() {
-    local dd="$1" rp="$2" pid="$3" target="$4" secs="$5" deadline h
-    deadline=$(( $(date +%s) + secs ))
+    local dd="$1" rp="$2" pid="$3" target="$4" deadline="$5" expected="$6" h hash
     h="?"
     while [ "$(date +%s)" -lt "$deadline" ]; do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             echo "two-node-peer-tip: node (pid $pid) died while waiting for height $target" >&2
             return 1
         fi
-        h="$(tn_blockcount "$dd" "$rp")"; [ -n "$h" ] || h="?"
-        [ "$h" = "$target" ] && { echo "$h"; return 0; }
+        h="$(tn_blockcount "$dd" "$rp")" || h='?'
+        if [ "$h" = "$target" ]; then
+            hash="$(tn_blockhash "$dd" "$rp" "$target")" || hash=''
+            if [ "$hash" = "$expected" ] && [ "$(date +%s)" -lt "$deadline" ]; then
+                echo "$h"
+                return 0
+            fi
+        fi
         sleep 1
     done
     echo "$h"
@@ -238,10 +259,16 @@ tn_wait_height() {
 }
 
 # ── Preflight + setup ──────────────────────────────────────────────
+# Sourcing exposes the same pollers to local refusal/deadline fixtures.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 command -v mktemp >/dev/null 2>&1 || tn_die "mktemp not found"
 [ -x "$NODE_BIN" ] || tn_die "$NODE_BIN not built — run make first"
 [ -x "$RPC_BIN" ]  || tn_die "$RPC_BIN not built — run make zcl-rpc"
+[ -x "$JSONQ_BIN" ] || tn_die "$JSONQ_BIN not built — run make jsonq"
 [ -x "$PROCESS_GROUP_EXEC" ] || tn_die "$PROCESS_GROUP_EXEC not built — run make process-group-exec"
+case "$RESYNC_DEADLINE" in ''|*[!0-9]*) tn_die 'recovery budget must be numeric' ;; esac
+[ "$RESYNC_DEADLINE" -gt 0 ] && [ "$RESYNC_DEADLINE" -le 120 ] ||
+    tn_die 'recovery budget must be within the 120-second MVP bound'
 
 for p in "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" \
          "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "$DEAD_SINK"; do
@@ -262,6 +289,7 @@ fi
 # directory. A pre-created mktemp leaf inherits the parent ACL and is refused.
 echo "two-node-peer-tip: scratch-root=$TN_TMP" >&2
 [ -d "$TN_TMP" ] || tn_die "scratch root does not exist: $TN_TMP"
+TN_TMP="$(cd "$TN_TMP" && pwd -P)" || tn_die 'scratch root cannot be canonicalized'
 # MSYS mktemp honors TMPDIR over an absolute /c/... template.
 export TMPDIR="$TN_TMP"
 TN_DD_A="$TN_TMP/$(cd "$TN_TMP" && mktemp -u zcl23-2node-A-XXXXXX)" ||
@@ -289,23 +317,25 @@ echo "two-node-peer-tip: A{dd=$TN_DD_A p2p=$A_PORT rpc=$A_RPC} B{dd=$TN_DD_B p2p
 echo "two-node-peer-tip: [1] spawning miner A + seeding $SEED_BLOCKS blocks..."
 TN_PID_A="$(tn_spawn "$TN_DD_A" "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" "127.0.0.1:$DEAD_SINK")"
 TN_PGID_A="$TN_PID_A"
-tn_wait_rpc "$TN_DD_A" "$A_RPC" "$TN_PID_A" "$RPC_WARMUP" \
+tn_wait_rpc "$TN_DD_A" "$A_RPC" "$TN_PID_A" "$(( $(date +%s) + RPC_WARMUP ))" \
     || tn_die "miner A RPC never came up (see $(tn_node_log "$TN_DD_A"))"
 a_rpc generate "$SEED_BLOCKS" >/dev/null
 A_TIP="$(tn_blockcount "$TN_DD_A" "$A_RPC")"
 echo "two-node-peer-tip:     A tip after seed = ${A_TIP:-?}"
 [ "$A_TIP" = "$SEED_BLOCKS" ] \
     || tn_die "A did not mine to height $SEED_BLOCKS (got ${A_TIP:-?}) — regtest generate broken"
+A_HASH="$(tn_blockhash "$TN_DD_A" "$A_RPC" "$A_TIP")" || tn_die 'miner tip hash unavailable'
 
 # ── Step 2: spawn B (connect-only to A), assert it syncs ───────────
 echo "two-node-peer-tip: [2] spawning follower B (connect-only → A); waiting ≤ ${SYNC_DEADLINE}s for B == $A_TIP..."
+SYNC_END=$(( $(date +%s) + SYNC_DEADLINE ))
 TN_PID_B="$(tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
 TN_PGID_B="$TN_PID_B"
-tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$RPC_WARMUP" \
+tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$SYNC_END" \
     || tn_die "follower B RPC never came up (see $(tn_node_log "$TN_DD_B"))"
 
 STEP2_PASS=no
-if B_FINAL="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$A_TIP" "$SYNC_DEADLINE")"; then
+if B_FINAL="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$A_TIP" "$SYNC_END" "$A_HASH")"; then
     STEP2_PASS=yes
     echo "two-node-peer-tip:     B synced to A tip $A_TIP over native P2P."
 else
@@ -318,6 +348,8 @@ fi
 STEP3_PASS=no
 if [ "$STEP2_PASS" = "yes" ]; then
     echo "two-node-peer-tip: [3] kill-9 B mid-life; A mines +$EXTRA_BLOCKS while B is down..."
+    RECOVERY_BEGAN=$(date +%s)
+    RECOVERY_END=$((RECOVERY_BEGAN + RESYNC_DEADLINE))
     # SIGKILL B's whole process group (mid-block: no graceful shutdown).
     tn_kill_group "$TN_PGID_B"
     wait "$TN_PID_B" 2>/dev/null || true
@@ -331,15 +363,20 @@ if [ "$STEP2_PASS" = "yes" ]; then
     echo "two-node-peer-tip:     A new tip = ${NEW_TIP:-?} (was $A_TIP)"
     [ "$NEW_TIP" = "$((A_TIP + EXTRA_BLOCKS))" ] \
         || tn_die "A did not advance to $((A_TIP + EXTRA_BLOCKS)) (got ${NEW_TIP:-?})"
+    NEW_HASH="$(tn_blockhash "$TN_DD_A" "$A_RPC" "$NEW_TIP")" || tn_die 'new miner tip hash unavailable'
 
     echo "two-node-peer-tip:     restarting B (same datadir); waiting ≤ ${RESYNC_DEADLINE}s for B == $NEW_TIP..."
     TN_PID_B="$(tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
     TN_PGID_B="$TN_PID_B"
-    if ! tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$RPC_WARMUP"; then
+    if ! tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$RECOVERY_END"; then
         echo "two-node-peer-tip:     B RPC never came back after kill-9 restart (see $(tn_node_log "$TN_DD_B"))"
-    elif B_FINAL2="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$NEW_TIP" "$RESYNC_DEADLINE")"; then
+    elif B_FINAL2="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$NEW_TIP" "$RECOVERY_END" "$NEW_HASH")"; then
+        RECOVERY_SECONDS=$(( $(date +%s) - RECOVERY_BEGAN ))
+        [ "$RECOVERY_SECONDS" -ge 0 ] && [ "$RECOVERY_SECONDS" -lt "$RESYNC_DEADLINE" ] ||
+            tn_die 'recovery observation exceeded its shared deadline'
         STEP3_PASS=yes
         echo "two-node-peer-tip:     B recovered + caught up to peer-tip $NEW_TIP after kill-9."
+        echo "two-node-peer-tip: recovery_seconds=$RECOVERY_SECONDS tip_hash=$NEW_HASH"
     else
         echo "two-node-peer-tip:     B did NOT re-reach peer-tip $NEW_TIP within ${RESYNC_DEADLINE}s (stuck at ${B_FINAL2:-?})."
         echo "two-node-peer-tip:     B log tail:"; tail -8 "$(tn_node_log "$TN_DD_B")" 2>/dev/null || true

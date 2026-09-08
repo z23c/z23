@@ -1569,7 +1569,7 @@ Z23_FLAG("ZCL_PEERLESS_OK", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_PEER_SCORE_DECAY_PER_MIN", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_peer_scoring.c:851")
 Z23_FLAG("ZCL_PEER_TIP_TMP", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/two_node_peer_tip.sh:254")
+          "undocumented; first use tools/scripts/two_node_peer_tip.sh:281")
 Z23_FLAG("ZCL_PERF_REPORT_UNDER_TEST", "env_build", "-", "-",
           "undocumented; first use tools/dev/zcode_async_proof_perf_report_selftest.sh:6")
 Z23_FLAG("ZCL_PERSONA_DEF", "env_build", "-", "-",

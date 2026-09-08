@@ -434,7 +434,10 @@ static int mac_runtime_package_reachable(const char *accept_text)
                   ">\"$package_root/code-guide.json\"") != NULL
         && strstr(accept_text,
                   "\"$REPO_ROOT/tools/scripts/macos_launchd_acceptance.sh\" "
-                  "\"$package_root/runtime/z23\"") != NULL;
+                  "\"$package_root/runtime/z23\"") != NULL
+        && strstr(accept_text,
+                  "ZCL_NODE_BIN=\"$package_root/runtime/z23\" bash "
+                  "\"$REPO_ROOT/tools/scripts/two_node_peer_tip.sh\"") != NULL;
 }
 
 /* ── check_root(): the gate body ───────────────────────────────────────── */
@@ -443,13 +446,14 @@ static int mac_check_root(void)
 {
     struct stat st;
     const char *inputs[] = { k_accept, k_matrix, k_catalog, k_release_cutter,
-                            "tools/scripts/macos_launchd_acceptance.sh" };
-    for (int i = 0; i < 5; i++) {
+                            "tools/scripts/macos_launchd_acceptance.sh",
+                            "tools/scripts/two_node_peer_tip.sh" };
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
         if (stat(inputs[i], &st) != 0) {
             fprintf(stderr, "%s: FATAL — missing %s.\n", k_gate, inputs[i]);
             fputs("  This gate is a thin driver over "
                   "tools/scripts/macos_acceptance.sh;\n"
-                  "  with any of its five inputs gone there is nothing to "
+                  "  with any of its inputs gone there is nothing to "
                   "check and\n  a silent pass would be a lie.\n", stderr);
             return 2;
         }

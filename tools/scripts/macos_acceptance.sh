@@ -175,6 +175,7 @@ case "${1:---check}" in
         "$package_root/runtime/z23" code guide >"$package_root/code-guide.json"
         [ -s "$package_root/code-guide.json" ] || die "packaged z23 code guide emitted no response"
         "$REPO_ROOT/tools/scripts/macos_launchd_acceptance.sh" "$package_root/runtime/z23"
+        ZCL_NODE_BIN="$package_root/runtime/z23" bash "$REPO_ROOT/tools/scripts/two_node_peer_tip.sh"
 
         printf 'macos-acceptance: runtime package PASS (darwin-arm64, macOS 14 floor, audited, checksummed, node-free execution)\n'
         printf 'macos-acceptance: UNOBSERVED installed=false synced=false published=false notarized=false\n'

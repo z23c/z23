@@ -412,6 +412,12 @@ static int mac_st_group_wiring(int *rc, const char *sandbox,
     mac_expect_package_reject(rc,
                               "S: deleting native launchd acceptance is caught",
                               t);
+    if (mac_drop_lines_containing_buf(accept, "two_node_peer_tip.sh", t,
+                                      sizeof t))
+        return die("z23-lint: derived buffer overflow\n", "");
+    mac_expect_package_reject(rc,
+                              "T: deleting packaged peer recovery is caught",
+                              t);
     return 0;
 }
 
@@ -457,7 +463,7 @@ int check_macos_acceptance_selftest(void)
     (void)rap_rm_rf(sandbox);
 
     if (st_rc == 0)
-        printf("══ selftest: PASS (21/21) ══\n");
+        printf("══ selftest: PASS (22/22) ══\n");
     else
         printf("══ selftest: FAIL ══\n");
     return st_rc;

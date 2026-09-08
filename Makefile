@@ -7907,7 +7907,7 @@ test-reindex-killmid: zclassic23 zcl-rpc
 .PHONY: test-two-node-peer-tip
 # Runs under bash for `set -o pipefail` parity with the other spawn
 # harnesses; the script itself sets -euo pipefail.
-test-two-node-peer-tip: zclassic23 zcl-rpc process-group-exec
+test-two-node-peer-tip: zclassic23 zcl-rpc jsonq process-group-exec
 	@bash tools/scripts/two_node_peer_tip.sh
 
 # Noise transport two-node/three-node interop acceptance: the evidence
@@ -12807,6 +12807,7 @@ check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN)
 	@./tools/scripts/port_probe.sh --selftest
 	@./tools/scripts/isolated_node_env_selftest.sh
 	@./tools/scripts/service_args_selftest.sh
+	@bash tools/scripts/two_node_peer_tip_selftest.sh
 	@./tools/lint/check_shell_host_assumptions.sh
 
 # Sibling of the gate above, for two more shapes where the shell throws a
