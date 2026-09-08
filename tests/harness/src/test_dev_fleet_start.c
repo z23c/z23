@@ -90,6 +90,32 @@ static bool fsx_commit(const char *dir, const char *message)
     return fsx_git(dir, add) && fsx_git(dir, commit);
 }
 
+/* Pin HOME to `root` for the whole group and hand back the saved value for
+ * fsx_home_restore. The packet-hygiene assertions need every quoted fixture
+ * path to be under the runner's home so the ~ rendering is exercised; a RAM
+ * proof generation runs the whole group outside $HOME, and without this pin
+ * the fixture placement (and with it the ~/ assertion) would depend on the
+ * caller's directory instead of on the test. */
+static char *fsx_home_pin(const char *root)
+{
+    const char *home = getenv("HOME");
+    char *saved = home ? strdup(home) : NULL;
+    setenv("HOME", root, 1);
+    return saved;
+}
+
+/* Put HOME back exactly as it was: restored when it was set, removed when
+ * it was absent. */
+static void fsx_home_restore(char *saved)
+{
+    if (saved) {
+        setenv("HOME", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("HOME");
+    }
+}
+
 /* ── one in-process invocation ─────────────────────────────────────────── */
 
 struct fsx_call {
@@ -327,6 +353,9 @@ int test_dev_fleet_start(void)
     char root[512], main_dir[1024], board[1024], cursor[256] = "";
     test_make_tmpdir(root, sizeof(root), "dev_fleet_start", "fixture");
     (void)snprintf(board, sizeof(board), "%s/board", root);
+    /* Pin HOME at the fixture root for the whole group; see fsx_home_pin.
+     * Restored at _test_next on every exit path. */
+    char *saved_home = fsx_home_pin(root);
 
     TEST("start: the leaf is registered under a dev.fleet MENU with truth") {
         const struct zcl_command_registry *reg = zcl_command_catalog();
@@ -669,6 +698,7 @@ int test_dev_fleet_start(void)
     }
 
 _test_next:;
+    fsx_home_restore(saved_home);
     (void)test_rm_rf_recursive(root);
     if (failures == 0) printf("test_dev_fleet_start: all passed\n");
     else printf("test_dev_fleet_start: %d FAILED\n", failures);
