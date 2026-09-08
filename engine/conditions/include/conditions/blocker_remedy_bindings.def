@@ -114,6 +114,7 @@ ZCL_BLOCKER_REMEDY(catalog.*.lag_exceeded,                     catalog_lag_excee
  * blocker's own reason instead, where it is actually rendered. */
 ZCL_BLOCKER_REMEDY(SUSPECTED_NETSPLIT,                         netsplit_degraded_mode)
 ZCL_BLOCKER_REMEDY(state_auditor.*.mismatch,                   state_auditor_mismatch)
+ZCL_BLOCKER_REMEDY(op_return_index.legacy_state,               op_return_index_legacy_state)
 
 /* ── Cross-condition remedies: a different condition's escalation ladder
  * drives the state that lets the original raiser's own blocker_clear()
