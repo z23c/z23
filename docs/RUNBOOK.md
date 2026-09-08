@@ -482,6 +482,27 @@ shielded state from the start.
 
 ---
 
+## OP_RETURN Catalog Legacy State Refusal
+
+**Symptoms:** `z23 dumpstate blocker` shows `op_return_index.legacy_state`
+(BLOCKER_DEPENDENCY, raised/witnessed by the `op_return_index_legacy_state`
+condition), and `dumpstate catalog_coverage` reports the `op_return_index`
+row as `unavailable: op_return_index.legacy_state`. This means
+`engine/models/src/op_return_index.c`'s `op_return_index_get_cursor()` found
+a `legacy_v1` or `unknown` persisted cursor record — a shape this binary
+correctly REFUSES to reinterpret as its current range-declared `v2` record
+(never a silent reinterpretation of a foreign digest chain) — rather than an
+actual read failure. The refusal logs its ERROR line at most once per hour
+per connection (with an exponential SQLite re-check backoff capped at 15
+minutes) instead of once per poll, and `catalog_completeness`'s own WARN is
+equally throttled, so neither storms the log while the blocker stays named
+and visible. **Fix:** `z23 app oprindex rebuild` (`op_return_index_truncate`)
+drops the legacy record and re-derives the catalog from block bodies from
+scratch; the blocker and both throttled log lines clear as soon as the next
+read finds the fresh `v2` record.
+
+---
+
 ## Onion-Seed Bootstrap (extending peer-discovery-of-last-resort)
 
 **What it's for:** when DNS seeds (`nSeeds=0` today — see
