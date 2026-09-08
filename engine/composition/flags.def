@@ -997,6 +997,78 @@ Z23_FLAG("ZCL_HEX_CODEC_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:578")
 Z23_FLAG("ZCL_HOOKS_STATUS_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/hooks_status.sh:28")
+Z23_FLAG("ZCL_HOST_GC_BINBAK_MIN_AGE_D", "env_build", "60", "-",
+          "days a ~/bin/*.bak-* quarantine backup survives; first use tools/scripts/host_gc.sh:122")
+Z23_FLAG("ZCL_HOST_GC_CACHE_FREEZE_GB", "env_build", "100", "-",
+          "below this free-space floor caches are forbidden to grow, not just capped; first use tools/scripts/host_gc.sh:136")
+Z23_FLAG("ZCL_HOST_GC_CCACHE_BIN", "env_build", "ccache", "-",
+          "fixture seam for the ccache binary the sweep drives; first use tools/scripts/host_gc.sh:80")
+Z23_FLAG("ZCL_HOST_GC_CCACHE_CAP_GB", "env_build", "20", "-",
+          "cap the ccache sweep trims the compiler cache to; first use tools/scripts/host_gc.sh:92")
+Z23_FLAG("ZCL_HOST_GC_HOME", "env_build", "$HOME", "-",
+          "fixture seam for the home directory every sweep path is rooted at; first use tools/scripts/host_gc.sh:78")
+Z23_FLAG("ZCL_HOST_GC_INSTALL_LIB", "env_build", "$HOME/.local/lib/z23/tools", "-",
+          "where install_host_gc.sh copies host_gc.sh and worktree_gc.sh outside every checkout; first use tools/scripts/install_host_gc.sh:24")
+Z23_FLAG("ZCL_HOST_GC_INSTALL_UNITS", "env_build", "$HOME/.config/systemd/user", "-",
+          "where install_host_gc.sh writes the hourly timer/service units; first use tools/scripts/install_host_gc.sh:25")
+Z23_FLAG("ZCL_HOST_GC_JOURNALCTL_BIN", "env_build", "journalctl", "-",
+          "fixture seam for the journalctl binary the journal sweep drives; first use tools/scripts/host_gc.sh:81")
+Z23_FLAG("ZCL_HOST_GC_JOURNAL_CAP", "env_build", "512M", "-",
+          "cap the user journal is vacuumed to; first use tools/scripts/host_gc.sh:94")
+Z23_FLAG("ZCL_HOST_GC_LANES_DIR", "env_build", "$GC_HOME/.z23/lanes", "-",
+          "root the units sweep walks for named-lane worktrees; first use tools/scripts/host_gc.sh:112")
+Z23_FLAG("ZCL_HOST_GC_LOW_DISK_GB", "env_build", "150", "-",
+          "below this free-space floor every sweep's age floors are relaxed; first use tools/scripts/host_gc.sh:135")
+Z23_FLAG("ZCL_HOST_GC_ORPHAN_MIN_AGE_H", "env_build", "24", "-",
+          "hours a parentless process must persist before the orphan sweep reports it; first use tools/scripts/host_gc.sh:125")
+Z23_FLAG("ZCL_HOST_GC_PRESSURE_CRITICAL_FREE_PCT", "env_build", "5", "-",
+          "below this free-space percentage the pressure report also lists the ten largest dirs under $GC_HOME; first use tools/scripts/host_gc.sh:121")
+Z23_FLAG("ZCL_HOST_GC_PRESSURE_MIN_FREE_PCT", "env_build", "15", "-",
+          "below this free-space percentage the pressure report halves every age floor for the run; first use tools/scripts/host_gc.sh:120")
+Z23_FLAG("ZCL_HOST_GC_PROC", "env_build", "/proc", "-",
+          "fixture seam for the procfs root the cwd/orphan scans walk; first use tools/scripts/host_gc.sh:85")
+Z23_FLAG("ZCL_HOST_GC_QUARANTINE_TTL_D", "env_build", "14", "-",
+          "days a quarantined path survives before permanent deletion; first use tools/scripts/host_gc.sh:126")
+Z23_FLAG("ZCL_HOST_GC_REPO", "env_build", "$GC_HOME/github/zclassic23", "-",
+          "fixture seam for the root checkout the units/scratch sweeps consult; first use tools/scripts/host_gc.sh:84")
+Z23_FLAG("ZCL_HOST_GC_SCRATCH_DIR", "env_build", "$GC_HOME/.local/state/zclassic23/scratch", "-",
+          "root the scratch sweep walks for orphaned lane/unit/train scratch dirs; first use tools/scripts/host_gc.sh:116")
+Z23_FLAG("ZCL_HOST_GC_SCRATCH_MIN_AGE_D", "env_build", "7", "-",
+          "days an orphaned scratch dir survives before the scratch sweep quarantines it; first use tools/scripts/host_gc.sh:115")
+Z23_FLAG("ZCL_HOST_GC_STATE", "env_build", "$GC_HOME/.local/state/server-cleanup", "-",
+          "fixture seam for the sweep's own log/quarantine state directory; first use tools/scripts/host_gc.sh:87")
+Z23_FLAG("ZCL_HOST_GC_SYSTEMCTL_BIN", "env_build", "systemctl", "-",
+          "fixture seam for the systemctl binary the sweep status check and installer call; first use tools/scripts/host_gc.sh:137")
+Z23_FLAG("ZCL_HOST_GC_SYSTEM_JOURNAL_CAP", "env_build", "1G", "-",
+          "cap named in the printed sudo command for the root-owned system journal; first use tools/scripts/host_gc.sh:95")
+Z23_FLAG("ZCL_HOST_GC_TESTTMP_MIN_AGE_D", "env_build", "1", "-",
+          "days stale test scratch inside an idle worktree survives; first use tools/scripts/host_gc.sh:123")
+Z23_FLAG("ZCL_HOST_GC_TMP", "env_build", "/tmp", "-",
+          "fixture seam for the /tmp root the tmp and tmplitter sweeps walk; first use tools/scripts/host_gc.sh:79")
+Z23_FLAG("ZCL_HOST_GC_TMPLITTER_MIN_AGE_D", "env_build", "2", "-",
+          "days an unregistered /tmp entry with no worktree behind it survives; first use tools/scripts/host_gc.sh:105")
+Z23_FLAG("ZCL_HOST_GC_TMP_MIN_AGE_D", "env_build", "2", "-",
+          "days a registered idle worktree under /tmp survives; first use tools/scripts/host_gc.sh:101")
+Z23_FLAG("ZCL_HOST_GC_TRAINS_DIR", "env_build", "$GC_HOME/.z23/trains", "-",
+          "root the landed-trains sweep walks, skipping the newest by mtime; first use tools/scripts/host_gc.sh:113")
+Z23_FLAG("ZCL_HOST_GC_UNITS_DIR", "env_build", "$GC_HOME/.z23/units", "-",
+          "root the units sweep walks for landed unit worktrees; first use tools/scripts/host_gc.sh:111")
+Z23_FLAG("ZCL_HOST_GC_UNITS_MIN_AGE_H", "env_build", "12", "-",
+          "hours a patch-equivalent-to-main unit/lane/train worktree survives; first use tools/scripts/host_gc.sh:110")
+Z23_FLAG("ZCL_HOST_GC_WORKTREE_GC", "env_build", "$SCRIPT_DIR/worktree_gc.sh", "-",
+          "fixture seam for the delegate script the worktree sweep execs; first use tools/scripts/host_gc.sh:83")
+Z23_FLAG("ZCL_HOST_GC_WORKTREE_IDLE_D", "env_build", "3", "-",
+          "days a merged+clean named worktree survives before worktree_gc.sh reaps it; first use tools/scripts/host_gc.sh:124")
+Z23_FLAG("ZCL_HOST_GC_Z23P", "env_build", "$GC_HOME/github/.z23p", "-",
+          "fixture seam for the dev-proof generation pool the z23p sweep walks; first use tools/scripts/host_gc.sh:552")
+Z23_FLAG("ZCL_HOST_GC_Z23P_MIN_AGE_H", "env_build", "6", "-",
+          "hours a dev-proof generation survives before the z23p sweep reaps it; first use tools/scripts/host_gc.sh:100")
+Z23_FLAG("ZCL_HOST_GC_ZCC_BIN", "env_build", "$REPO_ROOT/build/bin/zcc", "-",
+          "fixture seam for the zcc evictor binary; first use tools/scripts/host_gc.sh:82")
+Z23_FLAG("ZCL_HOST_GC_ZCC_CAP_MB", "env_build", "15360", "-",
+          "cap the zcc sweep trims the compile cache to; first use tools/scripts/host_gc.sh:93")
+Z23_FLAG("ZCL_HOST_GC_ZCC_DIR", "env_build", "$GC_HOME/.cache/zcc", "-",
+          "fixture seam for the zcc cache directory the zcc sweep measures and trims; first use tools/scripts/host_gc.sh:461")
 Z23_FLAG("ZCL_HOST_WATCHDOG_DOWN_CYCLES", "env_build", "2", "-",
           "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:66")
 Z23_FLAG("ZCL_HOST_WATCHDOG_LOG", "env_build", "-", "-",
@@ -1262,7 +1334,7 @@ Z23_FLAG("ZCL_LINT_CACHE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_LINT_CACHE_DIR_X", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:350")
 Z23_FLAG("ZCL_LINT_CACHE_DUMP", "env_build", "-", "-",
-          "undocumented; first use tools/lint/run_lint.sh:460")
+          "undocumented; first use tools/lint/run_lint.sh:461")
 Z23_FLAG("ZCL_LINT_CACHE_MODE", "env_build", "off", "-",
           "undocumented; first use tools/lint/run_lint.sh:348")
 Z23_FLAG("ZCL_LINT_CACHE_TREE_KEY_X", "env_build", "-", "-",

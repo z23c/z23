@@ -97,6 +97,7 @@ gate_command() {
         check-no-retired-agent-protocol)   echo './tools/lint/check_no_retired_agent_protocol.sh' ;;
         check-build-epoch-integrity)       echo 'tools/dev/build-epoch-integrity-cached.sh' ;;
         check-checkout-lock)               echo 'tools/dev/checkout-lock-selftest.sh' ;;
+        check-host-gc-selftest)            echo 'tools/scripts/host_gc_selftest.sh' ;;
         check-no-stray-untracked-source)   echo './tools/lint/check_no_stray_untracked_source.sh' ;;
         check-codeindex-coverage)          echo './tools/lint/check_codeindex_coverage.sh --selftest && ./tools/lint/check_codeindex_coverage.sh' ;;
         check-mind-owns-rebuild)           echo './tools/lint/check_mind_owns_rebuild.sh --selftest && ./tools/lint/check_mind_owns_rebuild.sh' ;;

@@ -13235,6 +13235,10 @@ check-checkout-lock:
 	@echo "══ LINT: checkout-wide watcher/foreground mutual exclusion ══"
 	@tools/dev/checkout-lock-selftest.sh
 
+check-host-gc-selftest:
+	@echo "══ LINT: host garbage collector fixture regression ══"
+	@tools/scripts/host_gc_selftest.sh
+
 # wf/dx-scanner-immunity — runs FIRST: names any untracked stray .c/.h file
 # under a scanned source dir as "untracked stray file (not a code
 # violation)" before any OTHER gate has a chance to report its content as
@@ -13634,6 +13638,7 @@ LINT_GATES := \
     check-stage-advances-or-blocks \
     check-no-silent-ready \
     check-honest-witness \
+    check-host-gc-selftest \
     check-consensus-parity \
     check-no-new-repair-rung \
     check-no-bare-tmp-fixture \
