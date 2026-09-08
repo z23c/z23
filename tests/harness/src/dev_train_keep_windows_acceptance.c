@@ -70,6 +70,18 @@ static bool keep_equal(const char *root, const char *name, const char *text)
     return fclose(f) == 0 && ok;
 }
 
+static bool keep_contains(const char *root, const char *name, const char *text)
+{
+    char path[1024], bytes[4096];
+    if (!keep_path(root, name, path, sizeof(path))) return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(bytes, 1, sizeof(bytes) - 1, f);
+    bool ok = !ferror(f) && feof(f);
+    bytes[n] = '\0';
+    return fclose(f) == 0 && ok && strstr(bytes, text) != NULL;
+}
+
 static bool keep_absent(const char *root, const char *name)
 {
     char path[1024];
@@ -216,6 +228,25 @@ static bool keep_saved_states(const struct keep_fixture *f)
         keep_saved(f, "unknown", ZCL_COMMAND_STATUS_BLOCKED);
 }
 
+static bool keep_interrupted_picking_recovery(const struct keep_fixture *f)
+{
+    char lock[1024];
+    if (!keep_write(f->train, "KEEP.json",
+                    "{\"state\":\"picking\",\"reason\":\"interrupted\"}\n"))
+        return false;
+    struct zcl_command_reply reply;
+    keep_call(f, "7", false, &reply);
+    bool ok = reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
+        strcmp(reply.error.code, "KEEPER_CRASHED") == 0 &&
+        keep_contains(f->train, "KEEP.json", "\"state\":\"blocked\"") &&
+        keep_contains(f->train, "KEEP.json", "a previous keeper died") &&
+        keep_absent(f->train, "KEEP.json.tmp") && execution_calls == 0 &&
+        keep_path(f->train, "keep.lock", lock, sizeof(lock)) &&
+        DeleteFileA(lock) != 0;
+    json_free(&reply.data);
+    return ok;
+}
+
 static bool keep_cleanup(const struct keep_fixture *f)
 {
     char path[1024];
@@ -250,9 +281,10 @@ int main(void)
         !keep_write(f.land, "outcomes.jsonl",
             "{\"tip\":\"1111111111111111111111111111111111111111\",\"state\":\"landed\"}\n")) goto failed;
     if (!keep_saved_states(&f)) goto failed;
+    if (!keep_interrupted_picking_recovery(&f)) goto failed;
     if (!keep_contention(&f)) goto failed;
     if (!keep_cleanup(&f)) goto failed;
-    puts("dev_train_keep_windows_acceptance: PASS (native dry state and lock contention; no Git planning claim)");
+    puts("dev_train_keep_windows_acceptance: PASS (native dry state, interrupted-picking replacement and lock contention; no Git planning claim)");
     return 0;
 failed:
     fprintf(stderr, "dev_train_keep_windows_acceptance: FAIL fixture=%s executor_calls=%u\n",

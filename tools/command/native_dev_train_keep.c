@@ -38,6 +38,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
+#include "platform/path_replace.h"
 #include "platform/process_lock.h"
 #include "platform/time_compat.h"
 
@@ -163,7 +164,7 @@ static bool dtk_write_atomic(const char *path, const char *text)
         return false;
     bool ok = fputs(text, f) >= 0;
     ok = (fclose(f) == 0) && ok;
-    if (!ok || rename(tmp, path) != 0) {
+    if (!ok || platform_path_replace(tmp, path) != 0) {
         (void)remove(tmp);
         return false;
     }

@@ -252,6 +252,7 @@ ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_SOURCES := \
 	platform/modules/util/src/spawn.c \
 	platform/modules/json/src/json.c \
 	platform/modules/platform/src/directory_compat.c \
+	platform/modules/platform/src/path_replace.c \
 	platform/modules/platform/src/process_lock.c \
 	platform/modules/platform/src/private_file.c \
 	platform/modules/platform/src/state_root.c \
