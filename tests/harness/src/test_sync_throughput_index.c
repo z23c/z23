@@ -256,6 +256,42 @@ static bool st_forward_order_collect(struct st_flat_fixture *fx,
     return true;
 }
 
+/* S7 tooth: two adjacent slots aliasing the same pointer give the
+ * predicate an equal-height pair, the exact case block_index_ptr_cmp_height
+ * reports as tied (returns 0). The predicate's strict `>` test must agree
+ * that a tie is "already in comparator order" and keep reporting sorted.
+ * Split out of st_forward_order_teeth to keep it under the complexity
+ * cap. */
+static void st_forward_order_tooth_equal(struct block_index **parr,
+                                         struct block_index **qcopy, size_t n,
+                                         int *failures)
+{
+    memcpy(qcopy, parr, n * sizeof(*qcopy));
+    qcopy[n - 2] = qcopy[n - 1];
+    ST_CHECK("S7 equal-height adjacent pair still counts as ordered",
+             block_index_ptrs_height_sorted(qcopy, n));
+}
+
+/* S7 tooth: a sorted prefix with a single inversion at the tail must be
+ * rejected by the predicate (it inspects every adjacent pair, not just
+ * gross/full reversal), and the production qsort call the loader makes
+ * when the predicate returns false must still restore full order. Split
+ * out of st_forward_order_teeth to keep it under the complexity cap. */
+static void st_forward_order_tooth_tail_inversion(struct block_index **parr,
+                                                  struct block_index **qcopy,
+                                                  size_t n, int *failures)
+{
+    memcpy(qcopy, parr, n * sizeof(*qcopy));
+    struct block_index *t = qcopy[n - 1];
+    qcopy[n - 1] = qcopy[n - 2];
+    qcopy[n - 2] = t;
+    ST_CHECK("S7 sorted prefix with tail inversion not called sorted",
+             !block_index_ptrs_height_sorted(qcopy, n));
+    qsort(qcopy, n, sizeof(*qcopy), block_index_ptr_cmp_height);
+    ST_CHECK("S7 loader qsort restores order after a tail inversion",
+             block_index_ptrs_height_sorted(qcopy, n));
+}
+
 /* S7 teeth: the height-sorted predicate recognises the ascending
  * collected array and refuses a reversed copy of it. Split out of
  * st_stage_forward_order to keep each stage helper under the complexity
@@ -274,6 +310,8 @@ static void st_forward_order_teeth(struct block_index **parr,
     }
     ST_CHECK("S7 reversed array not called sorted",
              !block_index_ptrs_height_sorted(qcopy, n));
+    st_forward_order_tooth_equal(parr, qcopy, n, failures);
+    st_forward_order_tooth_tail_inversion(parr, qcopy, n, failures);
 }
 
 /* S7 timing: before shape (full qsort over the already-ordered array,
