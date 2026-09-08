@@ -221,6 +221,35 @@ bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
     return true;
 }
 
+bool codeindex_seed_receipt(struct codeindex *ci, char kind_out[32],
+                            long long *files_out)
+{
+    if (!ci || !ci->store || !kind_out || !files_out)
+        LOG_FAIL("codeindex", "null arg to seed_receipt");
+    kind_out[0] = '\0';
+    *files_out = 0;
+    char kind[32], files_text[24];
+    size_t kind_len = 0, files_len = 0;
+    bool kind_found = false, files_found = false;
+    if (!ci_store_meta_get(ci->store, "build_seed_donor", kind,
+                           sizeof(kind) - 1, &kind_len, &kind_found) ||
+        !ci_store_meta_get(ci->store, "build_seed_files", files_text,
+                           sizeof(files_text) - 1, &files_len, &files_found))
+        LOG_FAIL("codeindex", "read seeding receipt failed");
+    /* A generation that was built rather than seeded simply has no receipt,
+     * and a patched one has had its cleared. Both are honest observations. */
+    if (!kind_found || !files_found || kind_len == 0 || files_len == 0)
+        return false;
+    kind[kind_len] = '\0';
+    files_text[files_len] = '\0';
+    char *end = NULL;
+    long long files = strtoll(files_text, &end, 10);
+    if (!end || *end != '\0' || files < 0) return false;
+    memcpy(kind_out, kind, kind_len + 1);
+    *files_out = files;
+    return true;
+}
+
 static bool ci_count_sql(struct ci_store *s, const char *sql, int64_t *out)
 {
     if (out) *out = 0;

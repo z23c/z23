@@ -661,6 +661,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan.c", CAP_FS
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan_doc.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan_file.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_search.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_seed.c", CAP_FS_READ|CAP_FS_WRITE, "reads git's own worktree registry and a sibling checkout's published index image, and refreshes the copy inside this rebuild's private staging inode")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_spare.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_hash.c", CAP_FS_READ|CAP_FS_WRITE, "")

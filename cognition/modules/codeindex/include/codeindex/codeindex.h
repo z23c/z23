@@ -235,6 +235,16 @@ bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32]);
 bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
                              long long *files_out);
 
+/* The seeding self-receipt: which kind of donor checkout this generation was
+ * adopted from and how many files had to be rescanned onto it
+ * (meta.build_seed_donor / meta.build_seed_files, written by
+ * cognition/modules/codeindex/src/codeindex_seed.c). Returns false WITHOUT
+ * logging for a generation that was BUILT rather than seeded, and for a seeded
+ * one that has since been patched in place — the receipt describes exactly the
+ * publication that wrote it. `kind_out` holds 32 bytes. */
+bool codeindex_seed_receipt(struct codeindex *ci, char kind_out[32],
+                            long long *files_out);
+
 /* Exact row counts of the published generation. Never rebuilds. */
 bool codeindex_table_counts(struct codeindex *ci, int64_t *files,
                             int64_t *symbols, int64_t *refs, int64_t *groups);

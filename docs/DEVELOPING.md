@@ -132,6 +132,13 @@ show a file or directory surface. Ask `discover schema <leaf>` for exact input
 keys rather than guessing — and if you guess wrong anyway, the refusal names
 the keys the leaf accepts, so a wrong key costs one call, not a source dive.
 
+The first such query in a fresh worktree seeds its code index from the nearest
+checkout registered in the same git worktree set instead of rescanning the
+tree, rescanning only the files that differ and printing which — `index: seeded
+from the main checkout (2 files refreshed, 1676 ms)` — while any donor it
+cannot verify against this checkout's own source Merkle falls back to the full
+`index: rebuilt` build.
+
 Before creating a reusable helper or importing a library, search the generated
 capability census in [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl).
 It includes package public headers that the interactive code index does not,

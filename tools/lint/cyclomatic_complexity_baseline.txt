@@ -65,7 +65,7 @@ cognition/models/src/agent_session.c:agent_session_authorize_internal:38
 cognition/models/src/zcode_science.c:db_zcode_science_study_list_filtered:18
 cognition/modules/codeindex/src/codeindex.c:codeindex_build_cold_ms:19
 cognition/modules/codeindex/src/codeindex_build.c:ci_rebuild_lock_open:19
-cognition/modules/codeindex/src/codeindex_build.c:codeindex_rebuild_internal:85
+cognition/modules/codeindex/src/codeindex_build.c:codeindex_rebuild_internal:61
 cognition/modules/codeindex/src/codeindex_build.c:collect_dir:20
 cognition/modules/codeindex/src/codeindex_build.c:source_file_sha3:22
 cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:34

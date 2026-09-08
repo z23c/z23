@@ -593,6 +593,99 @@ bool ci_remove_legacy_sidecars(int dirfd)
     return true;
 }
 
+/* Does the store this checkout already holds still describe the same derived
+ * layout this binary writes? A store from an older generation is recomputed,
+ * never patched. */
+static bool rebuild_generation_current(struct ci_store *store)
+{
+    char stored_format[64], stored_schema[64];
+    size_t format_len = 0, schema_len = 0;
+    bool format_found = false, schema_found = false;
+    return store &&
+        ci_store_meta_get(store, "store_format", stored_format,
+                          sizeof(stored_format), &format_len, &format_found) &&
+        ci_store_meta_get(store, "ci_schema_version", stored_schema,
+                          sizeof(stored_schema), &schema_len, &schema_found) &&
+        format_found && format_len == sizeof(CI_STORE_FORMAT) - 1 &&
+        memcmp(stored_format, CI_STORE_FORMAT,
+               sizeof(CI_STORE_FORMAT) - 1) == 0 &&
+        schema_found && schema_len == sizeof(CI_SCHEMA_VERSION) - 1 &&
+        memcmp(stored_schema, CI_SCHEMA_VERSION,
+               sizeof(CI_SCHEMA_VERSION) - 1) == 0;
+}
+
+/* Do the compiler inputs the store's include edges came from still look
+ * exactly as they did when it was published? */
+static bool rebuild_deps_unchanged(struct ci_store *store,
+                                   const uint8_t current_dep_stat[32])
+{
+    uint8_t stored_dep_stat[32];
+    size_t dep_len = 0;
+    bool dep_found = false;
+    return store &&
+        ci_store_meta_get(store, "dep_stat_root_sha3", stored_dep_stat,
+                          sizeof(stored_dep_stat), &dep_len, &dep_found) &&
+        dep_found && dep_len == sizeof(stored_dep_stat) &&
+        memcmp(stored_dep_stat, current_dep_stat, 32) == 0;
+}
+
+/* The one question that decides whether this checkout's OWN previous
+ * generation can be patched: same derived layout, same compiler inputs, and a
+ * Merkle refresh that named the changed leaves instead of rescanning. */
+static bool rebuild_can_patch_in_place(struct codeindex *ci,
+                                       const struct ci_merkle_cost *cost,
+                                       const uint8_t current_dep_stat[32])
+{
+    return ci->store && cost->snapshot_used && !cost->full_rescan &&
+           !cost->inventory_changed &&
+           rebuild_generation_current(ci->store) &&
+           rebuild_deps_unchanged(ci->store, current_dep_stat);
+}
+
+/* The staging inode must still be the private single-linked regular file this
+ * rebuild created, reachable under the name it will be published from. */
+static bool rebuild_stage_identity_holds(int dirfd, int stagefd,
+                                         const char *stage_name,
+                                         const struct ci_stage_identity *id)
+{
+    struct stat stage_st, name_st;
+    return fstat(stagefd, &stage_st) == 0 && S_ISREG(stage_st.st_mode) &&
+           stage_st.st_nlink == 1 && stage_st.st_dev == id->dev &&
+           stage_st.st_ino == id->ino &&
+           fstatat(dirfd, stage_name, &name_st, AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(name_st.st_mode) && name_st.st_nlink == 1 &&
+           name_st.st_dev == stage_st.st_dev &&
+           name_st.st_ino == stage_st.st_ino;
+}
+
+/* The published inode must be exactly the staging inode the rename moved, and
+ * still owner-controlled. */
+static bool rebuild_published_identity_holds(int dirfd, int stagefd)
+{
+    struct stat stage_st, published_st;
+    return fstat(stagefd, &stage_st) == 0 &&
+           fstatat(dirfd, "index.kv", &published_st, AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(published_st.st_mode) && published_st.st_nlink == 1 &&
+           published_st.st_uid == geteuid() &&
+           !(published_st.st_mode & (S_IWGRP | S_IWOTH)) &&
+           published_st.st_dev == stage_st.st_dev &&
+           published_st.st_ino == stage_st.st_ino;
+}
+
+/* One line an AI or a developer can read to know what the first query in this
+ * checkout actually paid for. */
+static void rebuild_report(const struct ci_seed_outcome *seed, bool incremental,
+                           int64_t build_start_ms)
+{
+    long long ms = (long long)(platform_time_monotonic_ms() - build_start_ms);
+    if (seed->seeded)
+        LOG_INFO("codeindex",
+                 "index: seeded from %s (%d files refreshed, %lld ms)",
+                 seed->donor_kind, seed->files_refreshed, ms);
+    else if (!incremental)
+        LOG_INFO("codeindex", "index: rebuilt (%lld ms)", ms);
+}
+
 static bool codeindex_rebuild_internal(struct codeindex *ci,
                                        bool coalesce_if_fresh)
 {
@@ -619,6 +712,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     int changed_count = 0;
     bool incremental = false;
     bool adopted_spare = false;
+    struct ci_seed_outcome seed = {0};
     uint8_t current_dep_stat[32] = {0};
 
     if (!ci_cleanup_orphan_stages(dirfd)) {
@@ -675,33 +769,14 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         failure = "incremental inventory refresh failed";
         goto out;
     }
-    size_t dep_len = 0;
-    bool dep_found = false;
-    uint8_t stored_dep_stat[32];
-    bool dep_unchanged = ci->store &&
-        ci_store_meta_get(ci->store, "dep_stat_root_sha3", stored_dep_stat,
-                          sizeof(stored_dep_stat), &dep_len, &dep_found) &&
-        dep_found && dep_len == sizeof(stored_dep_stat) &&
-        memcmp(stored_dep_stat, current_dep_stat, 32) == 0;
-    char stored_format[64], stored_schema[64];
-    size_t format_len = 0, schema_len = 0;
-    bool format_found = false, schema_found = false;
-    bool generation_current = ci->store &&
-        ci_store_meta_get(ci->store, "store_format", stored_format,
-                          sizeof(stored_format), &format_len, &format_found) &&
-        ci_store_meta_get(ci->store, "ci_schema_version", stored_schema,
-                          sizeof(stored_schema), &schema_len, &schema_found) &&
-        format_found && format_len == sizeof(CI_STORE_FORMAT) - 1 &&
-        memcmp(stored_format, CI_STORE_FORMAT, sizeof(CI_STORE_FORMAT) - 1) == 0 &&
-        schema_found && schema_len == sizeof(CI_SCHEMA_VERSION) - 1 &&
-        memcmp(stored_schema, CI_SCHEMA_VERSION,
-               sizeof(CI_SCHEMA_VERSION) - 1) == 0;
+    /* Two ways out of a full rescan, and the live Merkle leaves are the input
+     * to both: patch THIS checkout's own previous generation, or — when it has
+     * none at all — seed from the nearest sibling checkout that does. */
     int current_count = ci_merkle_leaves(merkle, NULL, 0);
-    bool inventory_same = false;
-    if (coalesce_if_fresh && current_count > 0 && generation_current &&
-        merkle_cost.snapshot_used &&
-        !merkle_cost.full_rescan && !merkle_cost.inventory_changed &&
-        dep_unchanged) {
+    bool patchable = coalesce_if_fresh &&
+        rebuild_can_patch_in_place(ci, &merkle_cost, current_dep_stat);
+    bool seedable = coalesce_if_fresh && !ci->store;
+    if (current_count > 0 && (patchable || seedable)) {
         current_leaves = zcl_calloc((size_t)current_count,
                                     sizeof(*current_leaves),
                                     "ci_incremental_current");
@@ -713,11 +788,15 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
             failure = "collect changed Merkle leaves failed";
             goto out;
         }
+    }
+    if (patchable && current_leaves) {
+        bool inventory_same = false;
         changed_count = ci_store_diff_merkle_leaves(
             ci->store, current_leaves, current_count, changed, current_count,
             &inventory_same);
         incremental = inventory_same;
     }
+    seedable = seedable && current_leaves != NULL;
 
     /* An incremental generation is the previous one plus a handful of changed
      * SQLite pages, so staging it by laying down a fresh full-image clone
@@ -757,8 +836,18 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
             failure = "incremental scan or staging update failed";
             goto out;
         }
+        ci_seed_receipt_clear(st);
         ci_store_close(st);
         st = NULL;
+    } else if (seedable &&
+               ci_seed_stage_generation(ci->root, stagefd, current_leaves,
+                                        current_count, current_dep_stat,
+                                        merkle_root.digest.bytes, &seed)) {
+        /* The staging inode now holds a sibling checkout's generation with
+         * this checkout's differing files rescanned into it. It goes through
+         * the identical verification and publication below; nothing about the
+         * freshness contract is relaxed for having arrived this way. */
+        memcpy(built_dep_stat_root, current_dep_stat, 32);
     } else {
         if (!ci_build_store_memory(ci->root, build_start_ms, &st,
                                    built_source_stat_root,
@@ -799,15 +888,8 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         goto out;
     }
 
-    struct stat stage_st;
-    struct stat stage_name_st;
-    if (fstat(stagefd, &stage_st) != 0 || !S_ISREG(stage_st.st_mode) ||
-        stage_st.st_nlink != 1 || stage_st.st_dev != stage_identity.dev ||
-        stage_st.st_ino != stage_identity.ino ||
-        fstatat(dirfd, stage_name, &stage_name_st, AT_SYMLINK_NOFOLLOW) != 0 ||
-        !S_ISREG(stage_name_st.st_mode) || stage_name_st.st_nlink != 1 ||
-        stage_name_st.st_dev != stage_st.st_dev ||
-        stage_name_st.st_ino != stage_st.st_ino) {
+    if (!rebuild_stage_identity_holds(dirfd, stagefd, stage_name,
+                                      &stage_identity)) {
         failure = "staging inode identity changed";
         goto out;
     }
@@ -829,13 +911,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         goto out;
     }
     stage_name[0] = '\0';
-    struct stat published_st;
-    if (fstatat(dirfd, "index.kv", &published_st, AT_SYMLINK_NOFOLLOW) != 0 ||
-        !S_ISREG(published_st.st_mode) || published_st.st_nlink != 1 ||
-        published_st.st_uid != geteuid() ||
-        (published_st.st_mode & (S_IWGRP | S_IWOTH)) ||
-        published_st.st_dev != stage_st.st_dev ||
-        published_st.st_ino != stage_st.st_ino) {
+    if (!rebuild_published_identity_holds(dirfd, stagefd)) {
         failure = "published index inode identity changed";
         goto out;
     }
@@ -878,6 +954,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
      * Best effort throughout — a failure here costs the next rebuild an
      * ordinary clone and nothing else. */
     if (incremental) (void)ci_spare_publish(dirfd);
+    rebuild_report(&seed, incremental, build_start_ms);
 
 out:
     if (st) ci_store_close(st);

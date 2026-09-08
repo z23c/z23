@@ -277,6 +277,34 @@ int ci_store_diff_merkle_leaves(struct ci_store *store,
                                 struct ci_merkle_leaf *changed, int cap,
                                 bool *inventory_same);
 
+/* ── seeding a cold index from a sibling checkout (codeindex_seed.c) ───
+ * What a seeding attempt did, for the one diagnostic line the cold open
+ * prints. `seeded` false means nothing was adopted and the caller owes the
+ * tree a deterministic cold build. */
+struct ci_seed_outcome {
+    bool seeded;
+    char donor_kind[32];
+    int  files_refreshed;
+};
+
+/* Fill an already-created private staging inode with the nearest sibling
+ * checkout's published generation, refreshed onto THIS checkout's exact
+ * sources. `current`/`current_count` are this checkout's live Merkle leaves in
+ * canonical path order; `dep_stat` and `merkle_root` are the local freshness
+ * keys the refreshed generation must seal. Returns true iff the staging inode
+ * now holds a generation the caller may publish. Fails closed: every refusal
+ * leaves the caller its ordinary cold build, which then truncates the staging
+ * inode before writing. */
+bool ci_seed_stage_generation(const char *root, int stagefd,
+                              const struct ci_merkle_leaf *current,
+                              int current_count, const uint8_t dep_stat[32],
+                              const uint8_t merkle_root[32],
+                              struct ci_seed_outcome *outcome);
+
+/* Drop the seeding receipt from a staging store that is being patched in
+ * place, so the receipt always describes the publication that wrote it. */
+void ci_seed_receipt_clear(struct ci_store *store);
+
 /* ── the publication ritual (codeindex_build.c, POSIX) ────────────────
  * The one cross-process discipline for placing a generation at
  * <root>/.codeindex/index.kv: owner-controlled directory capability,
