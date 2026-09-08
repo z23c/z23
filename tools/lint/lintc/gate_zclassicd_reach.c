@@ -10,6 +10,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <ctype.h>
 #include <dirent.h>
 #include <locale.h>
 #include <regex.h>
@@ -127,6 +128,71 @@ static void zra_sort_uniq(struct zra_list *l)
     l->n = w;
 }
 
+/* A `<path>:8232`-shaped pointer (a first-use comment, a doc reference) is
+ * not a network reach: it names a source location, not an address. A match
+ * on the bare port literals ":8232"/":8034" is exempted when the text
+ * immediately before the colon is a path-like token — one ending in a
+ * source/doc/build-file suffix. Every other alternative in the ERE (the
+ * symbol names, "127.0.0.1:8232", "getblock-from-mirror") still counts. */
+static const char *const k_zra_path_suffix[] = {
+    "Makefile", ".c", ".h", ".def", ".sh", ".mk", ".md", ".txt", ".jsonl"
+};
+
+static int zra_path_char(char c)
+{
+    return (isalnum((unsigned char)c) != 0) || c == '/' || c == '_'
+        || c == '-' || c == '.' || c == '~';
+}
+
+static int zra_preceded_by_path(const char *line, regoff_t start)
+{
+    regoff_t b = start;
+    while (b > 0 && zra_path_char(line[b - 1]))
+        b--;
+    size_t tok_len = (size_t)(start - b);
+    for (size_t i = 0; i < sizeof k_zra_path_suffix / sizeof k_zra_path_suffix[0];
+         i++) {
+        size_t sl = strlen(k_zra_path_suffix[i]);
+        if (tok_len >= sl
+            && memcmp(line + start - (regoff_t)sl, k_zra_path_suffix[i], sl)
+                == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int zra_is_bare_port(const char *m, size_t len)
+{
+    static const char *const ports[] = { ":8034", ":8232" };
+    for (size_t i = 0; i < sizeof ports / sizeof ports[0]; i++)
+        if (len == strlen(ports[i]) && memcmp(m, ports[i], len) == 0)
+            return 1;
+    return 0;
+}
+
+/* One line, possibly several candidate matches: walk them left to right and
+ * accept the first one that is not a path-pointer false positive. */
+static int zra_line_reach(const char *line, const regex_t *hit)
+{
+    const char *p = line;
+    regoff_t base = 0;
+    int flags = 0;
+    regmatch_t pm[1];
+    while (regexec(hit, p, 1, pm, flags) == 0) {
+        regoff_t abs_start = base + pm[0].rm_so;
+        size_t mlen = (size_t)(pm[0].rm_eo - pm[0].rm_so);
+        if (!(zra_is_bare_port(p + pm[0].rm_so, mlen)
+              && zra_preceded_by_path(line, abs_start)))
+            return 1;
+        if (pm[0].rm_eo == pm[0].rm_so)
+            break;
+        base += pm[0].rm_eo;
+        p += pm[0].rm_eo;
+        flags = REG_NOTBOL;
+    }
+    return 0;
+}
+
 /* grep -El: 1 when any line matches. Scan errors are silent, exactly as
  * under the shell gate's `find ... -exec grep -El ... + 2>/dev/null`. */
 static int zra_reaches(const char *full, const regex_t *hit)
@@ -138,7 +204,7 @@ static int zra_reaches(const char *full, const regex_t *hit)
     size_t cap = 0;
     int found = 0;
     while (!found && getline(&line, &cap, f) >= 0)
-        found = regexec(hit, line, 0, NULL, 0) == 0;
+        found = zra_line_reach(line, hit);
     free(line);
     (void)fclose(f);
     return found;
@@ -245,7 +311,7 @@ static int zra_show_reach(const char *root, const char *path,
     int lineno = 0, rc = 0;
     while ((len = getline(&line, &cap, f)) >= 0) {
         lineno++;
-        if (regexec(hit, line, 0, NULL, 0) != 0)
+        if (!zra_line_reach(line, hit))
             continue;
         if (len > 0 && line[len - 1] == '\n')
             line[len - 1] = '\0';
@@ -424,6 +490,53 @@ static int zra_st_fail(const char *root, const char *msg)
     return 2;
 }
 
+/* A `<path>:8232` pointer (first-use comment, doc reference) is not a
+ * reach — it names a source location, not an address; a real address
+ * still counts. */
+static int zra_st_path_pointer(const char *root, char *p, size_t plen)
+{
+    if (ovf(snprintf(p, plen, "%s/engine/services/src/runtime_probe.c",
+                     root), plen)
+        || csr_write(p, "/* first use Makefile:8232 */\n"
+                     "/* see tools/scripts/x.sh:8232 */\n"))
+        return zra_st_fail(root, "");
+    if (zra_st_case(root, 1, NULL))
+        return zra_st_fail(root, "gate_zclassicd_reach_allowlist: SELFTEST "
+            "FAILED — a file:line pointer was treated as reach\n");
+    if (csr_write(p, "static const char *addr = \"127.0.0.1:8232\";\n"))
+        return zra_st_fail(root, "");
+    if (zra_st_case(root, 0, "  + engine/services/src/runtime_probe.c\n"))
+        return zra_st_fail(root, "gate_zclassicd_reach_allowlist: SELFTEST "
+            "FAILED — a 127.0.0.1:8232 address was not treated as reach\n");
+    return 0;
+}
+
+/* a runtime reach outside the allowlist fails; a similarly named metadata
+ * file does NOT escape via near-name confusion — exact-path anchor */
+static int zra_st_runtime_reach(const char *root, char *p, size_t plen)
+{
+    const char *reach = "static const char *probe = \"zclassicd_oracle\";\n";
+    if (ovf(snprintf(p, plen, "%s/engine/services/src/runtime_probe.c",
+                     root), plen)
+        || csr_write(p, reach))
+        return zra_st_fail(root, "");
+    if (zra_st_case(root, 0, "  + engine/services/src/runtime_probe.c\n"))
+        return zra_st_fail(root, "gate_zclassicd_reach_allowlist: SELFTEST "
+            "FAILED — runtime reach was accepted\n");
+    if (unlink(p) != 0)
+        return zra_st_fail(root, "");
+    if (ovf(snprintf(p, plen, "%s/cognition/controllers/include/"
+                     "controllers/agent_impact_rules_extra.def", root),
+            plen)
+        || csr_write(p, reach))
+        return zra_st_fail(root, "");
+    if (zra_st_case(root, 0, "  + cognition/controllers/include/controllers/"
+                    "agent_impact_rules_extra.def\n"))
+        return zra_st_fail(root, "gate_zclassicd_reach_allowlist: SELFTEST "
+            "FAILED — similarly named metadata file escaped\n");
+    return unlink(p) != 0 ? zra_st_fail(root, "") : 0;
+}
+
 int check_zclassicd_reach_allowlist_selftest(void)
 {
     const char *td = env_or("TMPDIR", "/tmp");
@@ -436,7 +549,6 @@ int check_zclassicd_reach_allowlist_selftest(void)
         return die("z23-lint: mkdtemp failed: %s\n", tmpl);
     char p[4096];
     int bad = zra_st_tree(root);
-    const char *reach = "static const char *probe = \"zclassicd_oracle\";\n";
     if (!bad
         && (ovf(snprintf(p, sizeof p, "%s/cognition/controllers/include/"
                          "controllers/agent_impact_rules.def", root), sizeof p)
@@ -451,26 +563,12 @@ int check_zclassicd_reach_allowlist_selftest(void)
     if (zra_st_case(root, 1, NULL))
         return zra_st_fail(root, "gate_zclassicd_reach_allowlist: SELFTEST "
             "FAILED — exact metadata registry was treated as runtime code\n");
-    /* a runtime reach outside the allowlist fails */
-    if (ovf(snprintf(p, sizeof p, "%s/engine/services/src/runtime_probe.c",
-                     root), sizeof p)
-        || csr_write(p, reach))
-        return zra_st_fail(root, "");
-    if (zra_st_case(root, 0, "  + engine/services/src/runtime_probe.c\n"))
-        return zra_st_fail(root, "gate_zclassicd_reach_allowlist: SELFTEST "
-            "FAILED — runtime reach was accepted\n");
-    if (unlink(p) != 0)
-        return zra_st_fail(root, "");
-    /* a similarly named metadata file does NOT escape — exact-path anchor */
-    if (ovf(snprintf(p, sizeof p, "%s/cognition/controllers/include/"
-                     "controllers/agent_impact_rules_extra.def", root),
-            sizeof p)
-        || csr_write(p, reach))
-        return zra_st_fail(root, "");
-    if (zra_st_case(root, 0, "  + cognition/controllers/include/controllers/"
-                    "agent_impact_rules_extra.def\n"))
-        return zra_st_fail(root, "gate_zclassicd_reach_allowlist: SELFTEST "
-            "FAILED — similarly named metadata file escaped\n");
+    int rc = zra_st_runtime_reach(root, p, sizeof p);
+    if (rc)
+        return rc;
+    rc = zra_st_path_pointer(root, p, sizeof p);
+    if (rc)
+        return rc;
     (void)rap_rm_rf(root);
     fputs("gate_zclassicd_reach_allowlist: SELFTEST PASS (exact metadata "
           "excluded; runtime and near-name reaches fail)\n", stdout);
