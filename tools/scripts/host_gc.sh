@@ -51,12 +51,18 @@
 #   zcc      trim the zcc compile cache to 15 GB with its own evictor
 #   z23p     reap dead dev-proof generations (the 158 GB leak)
 #   tmp      registered worktrees under /tmp
+#   tmplitter unregistered /tmp test fixtures (no worktree behind them)
 #   journal  vacuum the user journal to 512 MB
 #   binbak   quarantine ~/bin/*.bak-* older than 60 days
 #   testtmp  stale test scratch in idle worktrees
 #   orphan   kill parentless processes whose checkout was deleted
 #   deadexec WARN on user units whose ExecStart is missing or inside build/
 #   worktree merged+clean named worktrees, via worktree_gc.sh --apply
+#   units    landed units/lanes/trains, by PATCH equivalence (git cherry),
+#            not ancestry — catches cherry-picked lanes worktree_gc.sh can't
+#   scratch  scratch dirs whose owning worktree is gone; .gc_keep pins one
+#   pressure not a sweep: reports free-space % and halves every age floor
+#            above it when low, prints top dirs under $GC_HOME when critical
 #
 # FIXTURE MODE. Every host-global path and external binary is indirected
 # through a ZCL_HOST_GC_* variable so tools/lint/check_host_gc.sh can run
@@ -87,8 +93,32 @@ CCACHE_CAP_GB="${ZCL_HOST_GC_CCACHE_CAP_GB:-20}"
 ZCC_CAP_MB="${ZCL_HOST_GC_ZCC_CAP_MB:-15360}"      # 15 GB
 JOURNAL_CAP="${ZCL_HOST_GC_JOURNAL_CAP:-512M}"
 SYSTEM_JOURNAL_CAP="${ZCL_HOST_GC_SYSTEM_JOURNAL_CAP:-1G}"
-Z23P_MIN_AGE_H="${ZCL_HOST_GC_Z23P_MIN_AGE_H:-24}"
+# Lowered from the original 24h: a live generation is minutes old and the
+# cwd/lock checks below already refuse anything still in use, so 24h of
+# accumulation before the first look was pure waste on a box that mints a
+# ~2 GB generation every few minutes.
+Z23P_MIN_AGE_H="${ZCL_HOST_GC_Z23P_MIN_AGE_H:-6}"
 TMP_MIN_AGE_D="${ZCL_HOST_GC_TMP_MIN_AGE_D:-2}"
+# tmplitter: unregistered /tmp entries (no worktree of any kind, not one of
+# the standing exemptions below). Separate knob from TMP_MIN_AGE_D because
+# these are throwaway test fixtures, not a worktree somebody meant to keep.
+TMPLITTER_MIN_AGE_D="${ZCL_HOST_GC_TMPLITTER_MIN_AGE_D:-2}"
+# units: worktrees under ~/.z23/units and ~/.z23/lanes whose HEAD is
+# patch-equivalent to main (git cherry, not ancestry — every landed unit is
+# cherry-picked into a train, so its HEAD is never main's ancestor and the
+# ancestry-based worktree_gc.sh classifier can never see it as merged).
+UNITS_MIN_AGE_H="${ZCL_HOST_GC_UNITS_MIN_AGE_H:-12}"
+UNITS_DIR="${ZCL_HOST_GC_UNITS_DIR:-$GC_HOME/.z23/units}"
+LANES_DIR="${ZCL_HOST_GC_LANES_DIR:-$GC_HOME/.z23/lanes}"
+TRAINS_DIR="${ZCL_HOST_GC_TRAINS_DIR:-$GC_HOME/.z23/trains}"
+# scratch: dated/named scratch dirs with no worktree behind them any more.
+SCRATCH_MIN_AGE_D="${ZCL_HOST_GC_SCRATCH_MIN_AGE_D:-7}"
+SCRATCH_DIR="${ZCL_HOST_GC_SCRATCH_DIR:-$GC_HOME/.local/state/zclassic23/scratch}"
+# pressure: below this free-space percentage, every age floor above is
+# halved for this run (reported in the summary); below 5% the ten largest
+# directories under $GC_HOME are also printed as a report line.
+PRESSURE_MIN_FREE_PCT="${ZCL_HOST_GC_PRESSURE_MIN_FREE_PCT:-15}"
+PRESSURE_CRITICAL_FREE_PCT="${ZCL_HOST_GC_PRESSURE_CRITICAL_FREE_PCT:-5}"
 BINBAK_MIN_AGE_D="${ZCL_HOST_GC_BINBAK_MIN_AGE_D:-60}"
 TESTTMP_MIN_AGE_D="${ZCL_HOST_GC_TESTTMP_MIN_AGE_D:-1}"
 WORKTREE_IDLE_D="${ZCL_HOST_GC_WORKTREE_IDLE_D:-3}"
@@ -123,8 +153,8 @@ nothing is removed, moved, or killed.
   --dry-run      classify and report only (the default)
   --status       print one screen of host hygiene facts and exit
   --only CAT     run a single category. CAT is one of:
-                 ccache zcc z23p tmp journal binbak testtmp orphan deadexec
-                 worktree
+                 ccache zcc z23p tmp tmplitter journal binbak testtmp orphan
+                 deadexec worktree units scratch
 
 Thresholds: below the low-disk floor the sweep relaxes its age floors; below
 the cache-freeze floor the caches are additionally capped at their current
@@ -303,8 +333,9 @@ quarantine_path() {
 # the set an UNDER-estimate of occupancy, so the occupancy test is advisory
 # and never the only reason a directory survives.
 CWD_SET=""
+CWD_SET_BUILT=0
 build_cwd_set() {
-    local d target
+    local d f target
     CWD_SET=""
     for d in "$PROC_ROOT"/[0-9]*; do
         [ -e "$d" ] || continue
@@ -312,7 +343,27 @@ build_cwd_set() {
         [ -n "$target" ] || continue
         CWD_SET="$CWD_SET
 $target"
+        # Open file descriptors, not just cwd: a litter dir under /tmp can be
+        # held open (a log fd, a mapped file) by a process chdir'd elsewhere.
+        # This is the ONE "is this path in use" set every category below
+        # shares via cwd_occupied(), rather than each writing its own
+        # lsof/fuser-style check.
+        for f in "$d"/fd/*; do
+            [ -e "$f" ] || continue
+            target="$(readlink -- "$f" 2>/dev/null)" || continue
+            case "$target" in /*) ;; *) continue ;; esac
+            CWD_SET="$CWD_SET
+$target"
+        done
     done
+    CWD_SET_BUILT=1
+}
+
+# Build the set once per sweep run, not once per category — categories call
+# this defensively but the cost is only paid the first time.
+ensure_cwd_set() {
+    [ "$CWD_SET_BUILT" = 1 ] && return 0
+    build_cwd_set
 }
 
 # Is this directory, or any directory below it, some process's cwd?
@@ -418,26 +469,42 @@ sweep_zcc() {
         say "zcc: FREEZE active — cap lowered to ${cap_mb}MB (no growth)"
     fi
     say "zcc: current $(human "$before"), cap ${cap_mb}MB"
-    if [ ! -x "$ZCC_BIN" ]; then
+    # Resolve a working evictor before giving up. $REPO_ROOT/build/bin/zcc is
+    # correct for a checkout that has built it; it is silently ABSENT for a
+    # lane worktree that has not, which is exactly the case that made this
+    # sweep report nothing for days without saying why. Fall back to a zcc
+    # on PATH, then the installed copy, before reporting a skip.
+    local bin="$ZCC_BIN"
+    if [ ! -x "$bin" ]; then
+        bin="$(command -v zcc 2>/dev/null || true)"
+    fi
+    if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+        [ -x "$GC_HOME/.local/lib/z23/bin/zcc" ] && bin="$GC_HOME/.local/lib/z23/bin/zcc"
+    fi
+    if [ -z "$bin" ] || [ ! -x "$bin" ]; then
         # Deliberately NOT falling back to an atime sweep. Deleting objects
         # behind the cache's back is worse than leaving it uncapped for one
         # cycle; name the one command that fixes it instead.
-        say "zcc: evictor not built ($ZCC_BIN) — run 'make cc-cache' then rerun"
-        log_line "zcc-skip" "$dir" 0 "evictor not built"
+        say "zcc: evictor not built — checked $ZCC_BIN, PATH, and $GC_HOME/.local/lib/z23/bin/zcc — run 'make cc-cache' then rerun"
+        log_line "zcc-skip" "$dir" 0 "evictor not found: tried $ZCC_BIN, PATH, $GC_HOME/.local/lib/z23/bin/zcc"
         return 0
     fi
     if [ "$APPLY" = 1 ]; then
-        "$ZCC_BIN" --zcc-trim "$cap_mb" >/dev/null 2>&1 || true
-        after="$(dir_bytes "$dir")"
-        freed=$(( before > after ? before - after : 0 ))
-        say "zcc: now $(human "$after"), reclaimed $(human "$freed")"
-        log_line "zcc-trim" "$dir" "$freed" "cap=${cap_mb}MB freeze=$CACHE_FREEZE"
-        add_result zcc "$freed" 1
+        if "$bin" --zcc-trim "$cap_mb" >/dev/null 2>&1; then
+            after="$(dir_bytes "$dir")"
+            freed=$(( before > after ? before - after : 0 ))
+            say "zcc: now $(human "$after"), reclaimed $(human "$freed") (via $bin)"
+            log_line "zcc-trim" "$dir" "$freed" "cap=${cap_mb}MB freeze=$CACHE_FREEZE bin=$bin"
+            add_result zcc "$freed" 1
+        else
+            say "zcc: trim FAILED ($bin --zcc-trim $cap_mb exited non-zero) — cache left untouched"
+            log_line "zcc-trim-failed" "$dir" 0 "bin=$bin cap=${cap_mb}MB"
+        fi
     else
         local cap_bytes=$(( cap_mb * 1024 * 1024 ))
         freed=$(( before > cap_bytes ? before - cap_bytes : 0 ))
-        say "zcc: would reclaim about $(human "$freed")"
-        log_line "zcc-trim" "$dir" "$freed" "cap=${cap_mb}MB freeze=$CACHE_FREEZE"
+        say "zcc: would reclaim about $(human "$freed") (via $bin)"
+        log_line "zcc-trim" "$dir" "$freed" "cap=${cap_mb}MB freeze=$CACHE_FREEZE bin=$bin"
         add_result zcc "$freed" 1
     fi
 }
@@ -458,6 +525,27 @@ sweep_zcc() {
 # Anything failing the last test is REPORTED, never removed — a generation
 # holding uncommitted content is a bug worth a human's attention, not a
 # deletion candidate.
+# A generation directory left behind by dev_proof.c may carry a top-level
+# *.lock/*.pid file naming the pid that created it (state layout is an
+# internal detail of dev_proof.c and may not always be present — this is a
+# best-effort check, never the only reason a generation is kept). When one
+# exists and names a pid that is gone, the creator is PROVABLY dead and the
+# generation is reapable regardless of the age floor; when it names a pid
+# that is alive, the generation is kept regardless of age.
+z23p_creator_status() {
+    local wt="$1" f pid
+    for f in "$wt"/*.lock "$wt"/*.pid; do
+        [ -f "$f" ] || continue
+        pid="$(head -1 -- "$f" 2>/dev/null | tr -dc '0-9')"
+        [ -n "$pid" ] || continue
+        if [ -e "$PROC_ROOT/$pid" ]; then
+            printf 'alive'; return 0
+        fi
+        printf 'dead'; return 0
+    done
+    printf 'unknown'
+}
+
 sweep_z23p() {
     want z23p || return 0
     hdr "dev-proof generations (.z23p, older than ${Z23P_MIN_AGE_H}h)"
@@ -466,13 +554,20 @@ sweep_z23p() {
     build_cwd_set
     local min_age=$(( Z23P_MIN_AGE_H * 3600 ))
     local total=0 removed=0 kept=0 dirty=0 busy=0 young=0 bytes
-    local wt
+    local wt creator
     while IFS= read -r wt; do
         [ -n "$wt" ] || continue
         case "$wt" in "$pool"/*) ;; *) continue ;; esac
         [ -d "$wt" ] || continue
         total=$(( total + 1 ))
-        if [ "$(age_secs "$wt")" -lt "$min_age" ] && [ "$LOW_DISK" = 0 ]; then
+        creator="$(z23p_creator_status "$wt")"
+        if [ "$creator" = "alive" ]; then
+            busy=$(( busy + 1 ))
+            say "z23p: KEEP (creating process still alive): $wt"
+            continue
+        fi
+        if [ "$creator" != "dead" ] \
+            && [ "$(age_secs "$wt")" -lt "$min_age" ] && [ "$LOW_DISK" = 0 ]; then
             young=$(( young + 1 )); continue
         fi
         if worktree_locked "$wt"; then kept=$(( kept + 1 )); continue; fi
@@ -558,7 +653,240 @@ sweep_tmp() {
     say "tmp: $total registered under $GC_TMP — $removed reapable, $kept kept"
 }
 
-# =========================================================== CATEGORY journal
+# ========================================================= CATEGORY tmplitter
+# Unregistered top-level /tmp entries — test fixtures that were never a git
+# worktree of anything, so sweep_tmp() (which only walks `git worktree list`)
+# never sees them. Left alone for TMPLITTER_MIN_AGE_D days in case a test is
+# still running, then deleted outright: they are reproducible fixtures, not
+# work product, so quarantine would just delay the inevitable.
+tmplitter_registered_set() {
+    local repo d
+    for d in "$GC_HOME"/github/*; do
+        [ -d "$d/.git" ] || [ -f "$d/.git" ] || continue
+        worktree_paths "$d"
+    done
+}
+
+sweep_tmplitter() {
+    want tmplitter || return 0
+    hdr "unregistered /tmp litter (older than ${TMPLITTER_MIN_AGE_D}d)"
+    [ -d "$GC_TMP" ] || { say "tmplitter: no $GC_TMP — skipped"; return 0; }
+    ensure_cwd_set
+    local registered
+    registered="$(tmplitter_registered_set)"
+    local min_age=$(( TMPLITTER_MIN_AGE_D * 86400 ))
+    [ "$LOW_DISK" = 1 ] && min_age=$(( min_age / 2 ))
+    local total=0 removed=0 kept=0 entry name bytes
+    for entry in "$GC_TMP"/*; do
+        [ -e "$entry" ] || continue
+        name="$(basename -- "$entry")"
+        case "$name" in
+            zcl-pristine-*|claude-*|systemd-*|.X*|snap-*) continue ;;
+        esac
+        is_protected "$entry" && continue
+        case "$(printf '%s\n' "$registered")" in
+            *"$entry"*) continue ;;
+        esac
+        total=$(( total + 1 ))
+        if [ "$(age_secs "$entry")" -lt "$min_age" ]; then
+            kept=$(( kept + 1 ))
+            continue
+        fi
+        if cwd_occupied "$entry"; then
+            kept=$(( kept + 1 ))
+            say "tmplitter: KEEP (open by a live process): $entry"
+            continue
+        fi
+        refuse_if_protected "$entry" || continue
+        bytes="$(dir_bytes "$entry")"
+        if [ "$APPLY" = 1 ]; then
+            chmod -R u+w -- "$entry" 2>/dev/null || true
+            if rm -rf -- "$entry" 2>/dev/null; then
+                removed=$(( removed + 1 )); add_result tmplitter "$bytes" 1
+                log_line "tmplitter-remove" "$entry" "$bytes" "unregistered fixture"
+            else
+                log_line "tmplitter-remove-failed" "$entry" 0 "rm refused"
+            fi
+        else
+            removed=$(( removed + 1 )); add_result tmplitter "$bytes" 1
+            log_line "tmplitter-remove" "$entry" "$bytes" "unregistered fixture"
+        fi
+    done
+    say "tmplitter: $total unregistered entr(y/ies) — $removed reapable, $kept kept"
+}
+
+# ============================================================= CATEGORY units
+# Worktrees under ~/.z23/units and ~/.z23/lanes. worktree_gc.sh already owns
+# the *named-lane* bucket rules, but its merge test is ANCESTRY (git
+# merge-base --is-ancestor): every landed unit here is cherry-picked (`-x`)
+# into a train, so its HEAD is never an ancestor of main and worktree_gc.sh
+# can never see it as merged. `git cherry main HEAD` answers the right
+# question instead — it diffs PATCH content, not commit identity, so a
+# cherry-picked HEAD reads as "no + line" (nothing left to land) exactly
+# like a fast-forward merge would.
+unit_is_patch_equivalent() {
+    local wt="$1" out
+    out="$(git -C "$wt" cherry main HEAD 2>/dev/null)" || return 1
+    case "$out" in
+        *$'\n+'*|+*) return 1 ;;   # a "+" line: real unlanded content
+        *) return 0 ;;
+    esac
+}
+
+unit_has_review_ref() {
+    git -C "$GC_REPO" show-ref --verify --quiet "refs/review/$(basename -- "$1")"
+}
+
+# One worktree's verdict, shared by the units and trains sweeps below so
+# there is exactly one place that decides "safe to remove", not two rulesets
+# that can quietly drift apart.
+reap_landed_worktree() {
+    local wt="$1" cat="$2" min_age_s="$3" bytes reason
+    [ -d "$wt" ] || return 0
+    if [ "$(age_secs "$wt")" -lt "$min_age_s" ] && [ "$LOW_DISK" = 0 ]; then
+        say "$cat: KEEP (too young): $wt"
+        return 0
+    fi
+    if worktree_locked "$wt"; then
+        say "$cat: KEEP (locked): $wt"; return 0
+    fi
+    ensure_cwd_set
+    if cwd_occupied "$wt"; then
+        say "$cat: KEEP (live process inside): $wt"; return 0
+    fi
+    if ! worktree_clean "$wt"; then
+        say "$cat: KEEP (dirty — uncommitted work): $wt"; return 0
+    fi
+    if unit_has_review_ref "$wt"; then
+        say "$cat: KEEP (refs/review/$(basename -- "$wt") still exists): $wt"; return 0
+    fi
+    if ! unit_is_patch_equivalent "$wt"; then
+        say "$cat: KEEP (unlanded commits — git cherry shows +): $wt"; return 0
+    fi
+    reason="patch-equivalent to main, no review ref, clean, idle"
+    bytes="$(dir_bytes "$wt")"
+    if [ "$APPLY" = 1 ]; then
+        refuse_if_protected "$wt" || return 0
+        if git -C "$GC_REPO" worktree remove --force -- "$wt" 2>/dev/null; then
+            add_result "$cat" "$bytes" 1
+            log_line "$cat-remove" "$wt" "$bytes" "$reason"
+            say "$cat: removed $wt ($(human "$bytes"))"
+        else
+            log_line "$cat-remove-failed" "$wt" 0 "git refused"
+            say "$cat: git refused to remove $wt (left in place)"
+        fi
+    else
+        add_result "$cat" "$bytes" 1
+        log_line "$cat-remove" "$wt" "$bytes" "$reason"
+        say "$cat: would remove $wt ($(human "$bytes")) — $reason"
+    fi
+}
+
+sweep_units() {
+    want units || return 0
+    hdr "landed units and lanes (patch-equivalent to main, older than ${UNITS_MIN_AGE_H}h)"
+    local min_age=$(( UNITS_MIN_AGE_H * 3600 ))
+    [ "$LOW_DISK" = 1 ] && min_age=$(( min_age / 2 ))
+    local root d
+    for root in "$UNITS_DIR" "$LANES_DIR"; do
+        [ -d "$root" ] || { say "units: no $root — skipped"; continue; }
+        for d in "$root"/*; do
+            [ -d "$d/.git" ] || [ -f "$d/.git" ] || continue
+            reap_landed_worktree "$d" units "$min_age"
+        done
+    done
+    if [ "$APPLY" = 1 ]; then
+        git -C "$GC_REPO" worktree prune >/dev/null 2>&1 || true
+    fi
+}
+
+# The newest train dir is a running or just-finished pipeline stage, never a
+# candidate regardless of its own patch-equivalence — sorted by mtime, not
+# by name, because train names are not lexically ordered by recency.
+newest_train_dir() {
+    local root="$1"
+    find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | head -1 | cut -d' ' -f2-
+}
+
+sweep_trains_landed() {
+    want units || return 0
+    [ -d "$TRAINS_DIR" ] || return 0
+    hdr "landed trains (patch-equivalent to main, not the newest)"
+    local newest d
+    newest="$(newest_train_dir "$TRAINS_DIR")"
+    local min_age=$(( UNITS_MIN_AGE_H * 3600 ))
+    [ "$LOW_DISK" = 1 ] && min_age=$(( min_age / 2 ))
+    for d in "$TRAINS_DIR"/*; do
+        [ -d "$d" ] || continue
+        [ "$d" = "$newest" ] && { say "units: KEEP (newest train): $d"; continue; }
+        if [ -d "$d/.git" ] || [ -f "$d/.git" ]; then
+            reap_landed_worktree "$d" units "$min_age"
+        else
+            say "units: $d is not a worktree — left for a human"
+        fi
+    done
+}
+
+# ============================================================= CATEGORY scratch
+# Dated/named directories under $SCRATCH_DIR with no worktree left behind
+# them (their lane, unit, or train is long gone) and nothing live inside.
+# Names in $SCRATCH_DIR/.gc_keep (one per line, exact basename match) are
+# never touched — the standing way to pin a scratch dir open-endedly without
+# editing this script.
+scratch_is_kept_by_name() {
+    local name="$1" keepfile="$SCRATCH_DIR/.gc_keep" line
+    [ -f "$keepfile" ] || return 1
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in \#*) continue ;; esac
+        [ "$line" = "$name" ] && return 0
+    done < "$keepfile"
+    return 1
+}
+
+scratch_has_live_worktree() {
+    local name="$1" root
+    for root in "$LANES_DIR" "$UNITS_DIR" "$TRAINS_DIR"; do
+        [ -e "$root/$name" ] && return 0
+    done
+    return 1
+}
+
+sweep_scratch() {
+    want scratch || return 0
+    hdr "scratch (older than ${SCRATCH_MIN_AGE_D}d, no owning worktree)"
+    [ -d "$SCRATCH_DIR" ] || { say "scratch: no $SCRATCH_DIR — skipped"; return 0; }
+    ensure_cwd_set
+    local min_age=$(( SCRATCH_MIN_AGE_D * 86400 ))
+    [ "$LOW_DISK" = 1 ] && min_age=$(( min_age / 2 ))
+    local total=0 removed=0 kept=0 d name bytes
+    for d in "$SCRATCH_DIR"/*; do
+        [ -d "$d" ] || continue
+        name="$(basename -- "$d")"
+        [ "$name" = "quarantine" ] && continue
+        total=$(( total + 1 ))
+        if scratch_is_kept_by_name "$name"; then
+            kept=$(( kept + 1 )); say "scratch: KEEP (.gc_keep): $d"; continue
+        fi
+        if [ "$(age_secs "$d")" -lt "$min_age" ]; then
+            kept=$(( kept + 1 )); continue
+        fi
+        if cwd_occupied "$d"; then
+            kept=$(( kept + 1 )); say "scratch: KEEP (live process inside): $d"; continue
+        fi
+        if scratch_has_live_worktree "$name"; then
+            kept=$(( kept + 1 )); say "scratch: KEEP (worktree still exists): $d"; continue
+        fi
+        bytes="$(quarantine_path "$d" scratch)" || { kept=$(( kept + 1 )); continue; }
+        removed=$(( removed + 1 )); total=$(( total ));
+        add_result scratch "$bytes" 1
+        say "scratch: quarantine $name ($(human "$bytes"))"
+    done
+    say "scratch: $total dir(s) under $SCRATCH_DIR — $removed reapable, $kept kept"
+}
+
+# ============================================================ CATEGORY journal
 # The user journal is ours to vacuum. The system journal needs root; this
 # script never escalates, so when passwordless sudo is not available it
 # PRINTS the command rather than pretending the cap was applied.
@@ -922,6 +1250,39 @@ print_status() {
     say "  sweep:    tools/scripts/host_gc.sh --apply"
 }
 
+# =========================================================== CATEGORY pressure
+# Not a sweep of its own — a REPORT on how hard the other sweeps should push
+# this run, computed once and read by every age check above via $LOW_DISK.
+# Below PRESSURE_MIN_FREE_PCT free (percentage, not absolute — a floor in GB
+# alone does not scale from a 200 GB box to a 2 TB one) every age floor in
+# this run is already halved by the individual sweeps that check $LOW_DISK;
+# this function's job is only to SAY so once, loudly, and — below the
+# critical percentage — name the ten largest directories under $GC_HOME so
+# the next agent does not have to go hunting for what is actually full.
+free_pct() {
+    df -P -- "$GC_HOME" 2>/dev/null | awk 'NR==2{u=$3+$4; if (u>0) printf "%d", $4*100/u; else print 0}'
+}
+
+report_pressure() {
+    local pct
+    pct="$(free_pct)"
+    [ -n "$pct" ] || pct=100
+    say "host-gc: free space is ${pct}% of $GC_HOME's filesystem"
+    if [ "$pct" -lt "$PRESSURE_MIN_FREE_PCT" ]; then
+        say "host-gc: *** PRESSURE (below ${PRESSURE_MIN_FREE_PCT}%) — every age floor above is halved this run ***"
+        log_line "pressure" "$GC_HOME" 0 "free_pct=$pct floor=${PRESSURE_MIN_FREE_PCT}%"
+    fi
+    if [ "$pct" -lt "$PRESSURE_CRITICAL_FREE_PCT" ]; then
+        say "host-gc: *** CRITICAL (below ${PRESSURE_CRITICAL_FREE_PCT}%) — ten largest dirs under $GC_HOME ***"
+        find "$GC_HOME" -mindepth 1 -maxdepth 1 -type d \
+            ! -name '.zclassic*' 2>/dev/null \
+            | while IFS= read -r d; do printf '%s\t%s\n' "$(dir_bytes "$d")" "$d"; done \
+            | sort -rn | head -10 \
+            | while IFS=$'\t' read -r b d; do say "  $(human "$b")  $d"; done
+        log_line "pressure-critical" "$GC_HOME" 0 "free_pct=$pct floor=${PRESSURE_CRITICAL_FREE_PCT}%"
+    fi
+}
+
 # ------------------------------------------------------------------- driver
 LOW_DISK=0
 CACHE_FREEZE=0
@@ -929,6 +1290,11 @@ FREE_AT_START="$(free_bytes)"
 if [ -n "$FREE_AT_START" ]; then
     [ "$FREE_AT_START" -lt $(( LOW_DISK_GB * 1024 * 1024 * 1024 )) ] && LOW_DISK=1
     [ "$FREE_AT_START" -lt $(( CACHE_FREEZE_GB * 1024 * 1024 * 1024 )) ] && CACHE_FREEZE=1
+fi
+PRESSURE_PCT="$(free_pct)"
+[ -n "$PRESSURE_PCT" ] || PRESSURE_PCT=100
+if [ "$PRESSURE_PCT" -lt "$PRESSURE_MIN_FREE_PCT" ]; then
+    LOW_DISK=1
 fi
 
 if [ "$STATUS" = 1 ]; then
@@ -947,21 +1313,27 @@ if [ "$CACHE_FREEZE" = 1 ]; then
     log_line "cache-freeze" "$GC_HOME" "$FREE_AT_START" "threshold=${CACHE_FREEZE_GB}G"
 fi
 
+report_pressure
+
 sweep_ccache
 sweep_zcc
 sweep_z23p
 sweep_tmp
+sweep_tmplitter
 sweep_journal
 sweep_binbak
 sweep_testtmp
 sweep_orphan
 sweep_deadexec
 sweep_worktree
+sweep_units
+sweep_trains_landed
+sweep_scratch
 sweep_quarantine_expiry
 
 hdr "summary"
 TOTAL=0
-for cat in ccache zcc z23p tmp journal binbak testtmp orphan deadexec worktree quarantine; do
+for cat in ccache zcc z23p tmp tmplitter journal binbak testtmp orphan deadexec worktree units scratch quarantine; do
     b="${CAT_BYTES[$cat]:-0}"; c="${CAT_COUNT[$cat]:-0}"
     TOTAL=$(( TOTAL + b ))
     printf '  %-10s %6s item(s)  %10s\n' "$cat" "$c" "$(human "$b")"
