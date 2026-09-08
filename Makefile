@@ -915,7 +915,8 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/z23_bounded_run.c \
 	tools/dev/z23_git_hook.c \
 	tools/dev/z23_doctor.c \
-	tools/dev/fleet_observe_main.c
+	tools/dev/fleet_observe_main.c \
+	tools/dev/mvp_ledger_main.c
 # The mutation harness proper (operators + campaign core) has no main() and
 # is proved by the registered `mutation_harness` group, so it is linked into
 # the dev binary and the test harness but kept out of the release node — a
@@ -3984,6 +3985,31 @@ $(BIN_DIR)/z23-fleet-observe: tools/dev/fleet_observe.c \
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    -Itools/dev -o $@ $^
+
+# z23-mvp-ledger: measures the 144-loop MVP experiment (agents.tsv,
+# loops.tsv, snapshots.tsv, kpi.tsv, the progress render). Same shape as
+# z23-fleet-observe above: the four mvp_ledger*.c cores carry no main() so
+# tests/harness/src/test_mvp_ledger.c links them directly, and
+# mvp_ledger_main.c is the CLI shim kept out of DEVLOOP_ALL_SRCS via
+# DEV_STANDALONE_SRCS. It reuses fleet_observe.c's ISO-8601 parser, the
+# repo's JSON reader and the portable directory listing rather than growing
+# its own, so the sources named here are the whole dependency set.
+MVP_LEDGER_BIN = $(BIN_DIR)/z23-mvp-ledger$(ZCL_HOST_EXEEXT)
+.PHONY: z23-mvp-ledger
+z23-mvp-ledger: $(MVP_LEDGER_BIN)
+$(MVP_LEDGER_BIN): tools/dev/mvp_ledger.c tools/dev/mvp_ledger_tsv.c \
+		tools/dev/mvp_ledger_plan.c tools/dev/mvp_ledger_join.c \
+		tools/dev/mvp_ledger_kpi.c tools/dev/mvp_ledger_main.c \
+		tools/dev/fleet_observe.c \
+		platform/modules/json/src/json.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/platform/src/directory_compat.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) \
+	    -D_POSIX_C_SOURCE=200809L -Itools/dev \
+	    -Iplatform/modules/json/include -Iplatform/modules/base/include \
+	    -Iplatform/modules/platform/include -Iplatform/modules/util/include \
+	    -o $@ $^
 .PHONY: check-capability-closure
 check-capability-closure:
 	@./tools/lint/check_capability_closure.sh --selftest
@@ -4604,6 +4630,7 @@ else
 DEV_RESTART_PLAN_TARGET = $(DEV_RESTART_PLAN)
 endif
 dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS) \
+	$(MVP_LEDGER_BIN) \
 	$(DEV_RESTART_PLAN_TARGET) \
 	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
