@@ -519,7 +519,16 @@ ZCL_COMMAND_READY_READ(
     "The fetch engine's last attempt (peer, filename, size, chunks done, "
     "ok/fail + detail), in-progress flag, and cumulative "
     "attempts/successes/failures/bytes-installed, read live from this "
-    "node's in-process fetch state at call time.", 0,
+    "node's in-process fetch state at call time. Also carries a "
+    "\"sync_benchmark\" object: the zcl.sync_benchmark.v1 phase-timed sync "
+    "receipt (elapsed_ms per phase, t_ready/t_sovereign milestones, "
+    "resource counters). Today the automatic zero-flag boot path stamps "
+    "headers/artifact_verify/install/tail_download/tail_fold; "
+    "peer_discovery/manifest/artifact_download remain null (with a reason) "
+    "on that path and populate only via the manual "
+    "ops.debug.rom_fetch.bundle command — this is the ONE place an "
+    "operator reads sync timings, live, without parsing "
+    "<datadir>/sync_benchmark.json by hand.", 0,
     "rom,fetch,download,bundle,status",
     "zcl.command.empty_input.v1", "zcl.rom_fetch_status.v1", "", "",
     "z23 ops debug rom_fetch status",
