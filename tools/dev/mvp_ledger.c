@@ -157,6 +157,9 @@ static bool mvl_is_hex(char c)
     return c >= 'A' && c <= 'F';
 }
 
+/* A verdict is written many ways — `LAND 249fa5a1…`, "LAND `249fa5a1…`",
+ * "**LAND** …" — so the markup between the marker and the sha is skipped
+ * rather than made part of the contract. */
 static bool mvl_marker_with_sha(const char *text, const char *marker)
 {
     size_t mlen = strlen(marker);
@@ -166,6 +169,8 @@ static bool mvl_marker_with_sha(const char *text, const char *marker)
         size_t hex = 0;
         const char *q = p + mlen;
 
+        while (*q != '\0' && strchr("`'\"*(<[ ", *q) != NULL)
+            q++;
         while (mvl_is_hex(q[hex]))
             hex++;
         if (hex >= 7)
@@ -275,8 +280,10 @@ static bool mvl_fold_assistant(const struct json_value *root, size_t line_no,
 {
     const struct json_value *msg = json_get(root, "message");
     const char *stamp = mvl_str(root, "timestamp");
+    const char *request = mvl_str(root, "requestId");
     const char *model;
     int64_t unix_s = 0;
+    bool fresh_request;
 
     if (!stamp) {
         mvl_err(err, err_cap, a->agent_id, line_no,
@@ -295,9 +302,37 @@ static bool mvl_fold_assistant(const struct json_value *root, size_t line_no,
     model = mvl_str(msg, "model");
     if (model && a->model[0] == '\0')
         mvl_copy(a->model, sizeof a->model, model);
-    mvl_fold_usage(msg, a);
+    fresh_request = !request || strcmp(request, a->last_request) != 0;
+    if (request)
+        mvl_copy(a->last_request, sizeof a->last_request, request);
+    if (fresh_request)
+        mvl_fold_usage(msg, a);
     mvl_fold_content(msg, a);
     return true;
+}
+
+/* Folds the harness's own `<total_tokens>N tokens left` reminder. It rides
+ * an attachment line, not an assistant line, so it is read separately. */
+static void mvl_fold_budget(const struct json_value *root,
+                            struct mvl_agent *a)
+{
+    const struct json_value *att = json_get(root, "attachment");
+    const char *kind = att ? mvl_str(att, "type") : NULL;
+    const char *text = att ? mvl_str(att, "text") : NULL;
+    const char *open;
+    int64_t left;
+
+    if (!kind || strcmp(kind, "total_tokens_reminder") != 0 || !text)
+        return;
+    open = strstr(text, "<total_tokens>");
+    if (!open)
+        return;
+    left = strtoll(open + strlen("<total_tokens>"), NULL, 10);
+    if (left <= 0)
+        return;
+    if (a->budget_first == 0)
+        a->budget_first = left;
+    a->budget_last = left;
 }
 
 bool mvl_fold_line(const char *line, size_t line_no, struct mvl_agent *agent,
@@ -327,6 +362,8 @@ bool mvl_fold_line(const char *line, size_t line_no, struct mvl_agent *agent,
         ok = false;
     } else if (strcmp(type, "assistant") == 0)
         ok = mvl_fold_assistant(&root, line_no, agent, err, err_cap);
+    else if (strcmp(type, "attachment") == 0)
+        mvl_fold_budget(&root, agent);
     json_free(&root);
     return ok;
 }

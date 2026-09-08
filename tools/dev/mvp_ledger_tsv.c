@@ -39,7 +39,7 @@ const char *mvl_agents_header(void)
     return "agent_id\tdescription\tlane\tkind\tmodel\tfirst_utc\tlast_utc\t"
            "wall_s\tturns\ttool_uses\ttokens_out\tthinking_tokens\t"
            "tokens_in\tinput_tokens\tcache_creation_tokens\t"
-           "cache_read_tokens\toutcome";
+           "cache_read_tokens\tharness_tokens\toutcome";
 }
 
 static const char *mvl_or_dash(const char *s)
@@ -62,7 +62,7 @@ bool mvl_write_agents(const char *path, const struct mvl_agents *agents,
 
         fprintf(f,
                 "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%lld\t%lld\t%lld\t%lld\t%lld"
-                "\t%lld\t%lld\t%lld\t%lld\t%s\n",
+                "\t%lld\t%lld\t%lld\t%lld\t%lld\t%s\n",
                 a->agent_id, mvl_or_dash(a->description), a->lane, a->kind,
                 mvl_or_dash(a->model), mvl_or_dash(a->first_utc),
                 mvl_or_dash(a->last_utc),
@@ -71,7 +71,9 @@ bool mvl_write_agents(const char *path, const struct mvl_agents *agents,
                 (long long)a->tokens_out, (long long)a->thinking_tokens,
                 (long long)a->tokens_in, (long long)a->tokens_input,
                 (long long)a->tokens_cache_creation,
-                (long long)a->tokens_cache_read, mvl_or_dash(a->outcome));
+                (long long)a->tokens_cache_read,
+                (long long)(a->budget_first - a->budget_last),
+                mvl_or_dash(a->outcome));
     }
     if (fclose(f) != 0) {
         mvl_err(err, err_cap, path, 0, "mvl_open: agents.tsv did not close");
@@ -127,7 +129,12 @@ static void mvl_row_from_cells(char **c, struct mvl_agent *a)
     a->tokens_input = strtoll(c[13], NULL, 10);
     a->tokens_cache_creation = strtoll(c[14], NULL, 10);
     a->tokens_cache_read = strtoll(c[15], NULL, 10);
-    mvl_copy(a->outcome, sizeof a->outcome, c[16]);
+    /* harness_tokens is the DIFFERENCE budget_first - budget_last, so
+     * reading it back into budget_first with budget_last zero reproduces
+     * the same cell on the next write. */
+    a->budget_first = strtoll(c[16], NULL, 10);
+    a->budget_last = 0;
+    mvl_copy(a->outcome, sizeof a->outcome, c[17]);
 }
 
 bool mvl_read_agents(const char *path, struct mvl_agents *out, char *err,
@@ -174,7 +181,7 @@ bool mvl_read_agents(const char *path, struct mvl_agents *out, char *err,
             continue;
         if (mvl_split(buf, cells, MVL_AGENT_COLUMNS) != MVL_AGENT_COLUMNS) {
             mvl_err(err, err_cap, path, line_no,
-                    "mvl_tsv_fields: row is not 17 tab-separated cells");
+                    "mvl_tsv_fields: row is not 18 tab-separated cells");
             ok = false;
             break;
         }

@@ -66,7 +66,7 @@ enum {
     MVL_MAX_TRAIN_LANES = 512,
     MVL_MAX_ANCESTRY = 200000,
 
-    MVL_AGENT_COLUMNS = 17,
+    MVL_AGENT_COLUMNS = 18,
     MVL_MILESTONE_LOOPS = 12,   /* the plan's loops per milestone */
     MVL_TOTAL_BAR_WIDTH = 48,   /* the MVP bar, in characters */
 };
@@ -99,6 +99,20 @@ struct mvl_agent {
     char first_utc[MVL_UTC_CAP];
     char last_utc[MVL_UTC_CAP];
     char outcome[MVL_OUTCOME_CAP];
+    /* Scratch, not a column: the transcript splits ONE API request across
+     * one assistant line per content block, and every one of those lines
+     * repeats the SAME `usage` object. Folding them all would multiply the
+     * request's tokens by its block count, so usage is folded once per
+     * requestId. A request's blocks are written contiguously. */
+    char last_request[MVL_ID_CAP];
+    /* Claude Code writes a `<total_tokens>N tokens left` reminder into the
+     * transcript. The difference between the first and last one an agent
+     * saw is the harness's OWN accounting of what that agent spent, and it
+     * is the number the task notification reports — so it is the bridge
+     * between this tool and any hand-copied notification figure. It is a
+     * lower bound: the turns before the first reminder are not in it. */
+    int64_t budget_first;
+    int64_t budget_last;
     int64_t first_unix;
     int64_t last_unix;
     int64_t turns;
