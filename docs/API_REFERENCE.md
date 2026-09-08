@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 875 |
+| Registry entries (branches + leaves) | 876 |
 | Top-level roots | 14 |
 | Branches | 196 |
-| Leaves (dispatchable command paths) | 679 |
-| … `ready` (live handler in this build) | 602 |
+| Leaves (dispatchable command paths) | 680 |
+| … `ready` (live handler in this build) | 603 |
 | … `compat` (metadata only, names a fallback) | 47 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 46 |
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 57 | 10 | 47 |
-| `engine/composition/commands/dev.def` | 106 | 21 | 85 |
+| `engine/composition/commands/dev.def` | 107 | 21 | 86 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -828,6 +828,7 @@ represented by its children's sections.
 | `dev agent mutate` (aliases: `dev.agent.mutation`) | ready | mutate / dev-mutation / **owner** · persistent/high | **`file`**, `line`, `group`, `restore` | `zcl.agent_mutation_check.v1` | `z23 dev agent mutate --file=platform/modules/base/src/hex.c --line=42 --group=hex_codec` | Break one source line and prove a test group notices |
 | `dev agent situation` | ready | read / read / operator · fast/low | `cwd` | `zcl.agent_situation.v1` | `z23 dev agent situation` | Name this checkout's situation and how it was decided |
 | `dev agent rules` | ready | read / read / operator · instant/low | `cwd`, `situation` | `zcl.agent_rules.v1` | `z23 dev agent rules --situation=standalone` | The rules that apply in one checkout situation |
+| `dev agent orient` | ready | read / read / operator · instant/low | **`topic`**, `query` | `zcl.dev_orient.v1` | `z23-dev dev agent orient landing.proof` | What this checkout already knows, as verified rows |
 | `dev agent start` | ready | read / read / operator · fast/low | `cwd`, `files`, `base` | `zcl.agent_start.v1` | `z23 dev agent start` | One opening answer: situation, rules, base, worktree |
 | `dev agent done` | ready | read / read / operator · fast/low | `cwd`, `base` | `zcl.agent_done.v1` | `z23 dev agent done` | Whether this lane is ready to hand back |
 | `dev agent triage` | ready | read / read / operator · fast/low | `cwd`, `base`, `max_age_days`, `limit` | `zcl.agent_triage.v1` | `z23 dev agent triage --base=origin/main` | Bin every local branch as land, rebase, or delete |
