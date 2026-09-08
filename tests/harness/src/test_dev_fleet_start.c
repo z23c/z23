@@ -23,9 +23,11 @@
 #include "kernel/command_registry.h"
 #include "util/spawn.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define FSX_PATH "dev.fleet.start"
@@ -90,6 +92,16 @@ static bool fsx_commit(const char *dir, const char *message)
     return fsx_git(dir, add) && fsx_git(dir, commit);
 }
 
+/* Copy HOME as it stands. Callers that pin inside a window which can fail
+ * before the pin must save first: fsx_home_restore reads a NULL as "HOME was
+ * absent" and unsets it, which would strip the group pin from every later
+ * case rather than putting it back. */
+static char *fsx_home_save(void)
+{
+    const char *home = getenv("HOME");
+    return home ? strdup(home) : NULL;
+}
+
 /* Pin HOME to `root` for the whole group and hand back the saved value for
  * fsx_home_restore. The packet-hygiene assertions need every quoted fixture
  * path to be under the runner's home so the ~ rendering is exercised; a RAM
@@ -98,8 +110,7 @@ static bool fsx_commit(const char *dir, const char *message)
  * caller's directory instead of on the test. */
 static char *fsx_home_pin(const char *root)
 {
-    const char *home = getenv("HOME");
-    char *saved = home ? strdup(home) : NULL;
+    char *saved = fsx_home_save();
     setenv("HOME", root, 1);
     return saved;
 }
@@ -346,6 +357,80 @@ static bool fsx_board_fixture(const char *dir)
     return true;
 }
 
+/* The home-hygiene invariant, stated so it cannot go vacuous. The case above
+ * checks for the literal "/home/" and "/Users/" prefixes, which say nothing
+ * in a RAM proof generation: there the pinned home is under /dev/shm and
+ * neither prefix could appear however badly the packet leaked. Assert the
+ * home this packet was actually rendered against — the pinned fixture root —
+ * is absent, and that a ~ did appear, so the absence is a substitution and
+ * not an empty packet. */
+static int fsx_case_home_prefix_absent(const char *root, const char *board)
+{
+    int failures = 0;
+    TEST("start: the packet never quotes the home it was rendered against") {
+        struct fsx_call c;
+        static char buf[262144];
+        fsx_begin(&c);
+        (void)json_push_kv_str(&c.input, "board_dir", board);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        ASSERT(fsx_run(&c));
+        ASSERT(fsx_ok(&c));
+        size_t n = fsx_serialize(&c, buf, sizeof(buf));
+        ASSERT(n > 0);
+        ASSERT(strstr(buf, root) == NULL);
+        ASSERT(strstr(buf, "~/") != NULL);
+        fsx_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* The other half of the generation shape: a checkout that is NOT under the
+ * operator's home at all. Nothing is rewritten there, so the packet quotes
+ * absolute paths and the home is absent because no path ever touched it.
+ * Pinned separately from the group's own pin, and put back before the next
+ * case runs — this is the one place the group is deliberately not
+ * home-rooted, and it is why the invariant may not be spelled as "a ~
+ * appears somewhere". */
+static int fsx_case_outside_home(const char *root, const char *board)
+{
+    int failures = 0;
+    char elsewhere[1024];
+    /* Saved before the window opens, not inside it: an ASSERT below can jump
+     * to _test_next before the pin runs, and a NULL there would unset HOME
+     * for the rest of the group instead of restoring the group pin. */
+    char *pinned = fsx_home_save();
+    TEST("start: a checkout outside the operator home still hides that home") {
+        struct fsx_call c;
+        static char buf[262144];
+        (void)snprintf(elsewhere, sizeof(elsewhere), "%s/elsewhere-home",
+                       root);
+#if defined(_WIN32)
+        ASSERT(mkdir(elsewhere) == 0 || errno == EEXIST);
+#else
+        ASSERT(mkdir(elsewhere, 0700) == 0 || errno == EEXIST);
+#endif
+        setenv("HOME", elsewhere, 1);
+        fsx_begin(&c);
+        (void)json_push_kv_str(&c.input, "board_dir", board);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        ASSERT(fsx_run(&c));
+        ASSERT(fsx_ok(&c));
+        size_t n = fsx_serialize(&c, buf, sizeof(buf));
+        ASSERT(n > 0);
+        ASSERT(strstr(buf, elsewhere) == NULL);
+        ASSERT(strstr(buf, root) != NULL);
+        fsx_end(&c);
+        PASS();
+    }
+_test_next:;
+    /* Restore the group's own pin on every exit path, including a failed
+     * assertion inside the window above. */
+    fsx_home_restore(pinned);
+    return failures;
+}
+
 int test_dev_fleet_start(void);
 int test_dev_fleet_start(void)
 {
@@ -482,6 +567,9 @@ int test_dev_fleet_start(void)
         fsx_end(&c);
         PASS();
     }
+
+    failures += fsx_case_home_prefix_absent(root, board);
+    failures += fsx_case_outside_home(root, board);
 
     /* (g) the declared latency budget holds */
     TEST("start: the declared latency budget holds on the fixture") {
