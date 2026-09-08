@@ -30,6 +30,30 @@ historical fixture passes, then deploy/restart intentionally.
 
 ## (0) LIVE OPS TRAPS — public service vs private candidates
 
+- **A failed embedded Tor must never hold RPC or the site.** On 2026-09-08 a
+  ship restart raced the departing process: it still held the RPC port, the
+  P2P port, the file-service port and Tor's bootstrap SocksPort. Tor's config
+  parse failed and its thread exited -1 with nobody watching, and
+  `boot_rpc_http_start()`'s bind failed — and because `rpc_http` was the one
+  REQUIRED service in the frontend kernel, `zcl_service_kernel_start_all()`
+  unwound its siblings and returned before `https_explorer`'s start hook was
+  ever called. The chain was at tip the whole time; the public site was down
+  for 27 minutes, and the systemd status line said only `descriptor=no`,
+  which is exactly what a healthy slow bootstrap says. Three rules come out of
+  it. Onion publication and the clearnet frontend share nothing: never make
+  RPC, the explorer or any operator surface wait on a Tor start, and never let
+  one frontend service's start failure cancel the services registered after it
+  (`ZCL_SERVICE_INDEPENDENT`, `engine/modules/kernel/include/kernel/service_kernel.h`).
+  A start that can fail transiently needs a named condition and a retry, not a
+  one-shot — `tor.start_failed`
+  (`engine/conditions/src/tor_start_failed.c`,
+  `engine/composition/src/boot_tor_watch.c`) is the shape. And a readiness
+  line must distinguish "not up yet" from "failed and stayed failed": the
+  legs now carry `tor=failed(port_in_use)` / `tor=starting` / `tor=ok`
+  beside `descriptor=no`, and `frontend=<service> <n>s` while a start hook
+  runs long. The RPC front door itself is still a one-shot — a bind that
+  fails at boot is not retried, only prevented from taking the site with it.
+
 - **FIXED 2026-09-07 — `tools/ship.sh --targets=local` used to write the new
   worker binaries straight into the RUNNING node's executable directory,
   which broke the moment that directory was an immutable

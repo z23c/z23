@@ -500,6 +500,52 @@ and visible. **Fix:** `z23 app oprindex rebuild` (`op_return_index_truncate`)
 drops the legacy record and re-derives the catalog from block bodies from
 scratch; the blocker and both throttled log lines clear as soon as the next
 read finds the fresh `v2` record.
+## Blocker `tor.start_failed` (embedded Tor is not running)
+
+**What it means:** this node asked for an onion (`-tor`, or the onion-node
+profile) and the embedded Tor thread is not running. Either it never started
+or it started and exited. The blocker's reason quotes the most specific
+warning from this boot's `<datadir>/tor.log`, classified as one of
+`port_in_use`, `datadir`, `config_invalid` or `exited`; any onion address in
+the quoted line is replaced with `<onion>` before it reaches the blocker or
+the log.
+
+**Where you see it:** `z23 dumpstate blocker` lists `tor.start_failed`, and
+the systemd status line carries `tor=failed(<reason>)` beside the readiness
+legs — that is how you tell "Tor never came up" from `tor=starting`, which is
+an ordinary slow bootstrap, and from a bare `descriptor=no`, which both states
+produce.
+
+**What the node does on its own:** the `tor_start_failed` condition
+(`engine/conditions/src/tor_start_failed.c`) retries the start through the
+same wrapper that boots Tor, at 5s, 15s, 45s, 135s and then every 5 minutes
+for as long as the node runs. It never gives up. The blocker clears when Tor's
+thread is running again. The commonest cause — `port_in_use` after a restart,
+because the departing process still holds Tor's bootstrap SocksPort — clears
+itself within seconds and needs no operator at all.
+
+**Operator action, by reason:**
+
+- `port_in_use` — something else holds Tor's bootstrap SocksPort (derived from
+  `-port`; see `tor_write_torrc()` in `core/modules/net/src/tor_integration.c`).
+  Usually a previous z23 instance that has not finished exiting. Confirm no
+  second node is running against this datadir, then let the retry take it. If
+  a foreign process owns the port permanently, free it or move this node's
+  `-port`.
+- `datadir` — `<datadir>/tor_data/` is not writable, or a stale `tor_data/lock`
+  survived a hard kill by a different user. Fix the ownership/permissions; the
+  node retires a stale lock itself on every start attempt.
+- `config_invalid` — the generated torrc was rejected. Read the quoted line;
+  this is genuinely a config problem and the retry will keep failing until it
+  is fixed.
+- `exited` — Tor stopped for a reason this node could not classify. Read
+  `<datadir>/tor.log` directly.
+
+**What it does NOT affect:** RPC, the HTTPS explorer, P2P and chain advance
+are all independent of the onion. If any of those are also down while this
+blocker stands, that is a separate fault — look at the boot log's
+`[service-kernel] START FAILED service=<name>` lines, which name exactly which
+frontend service refused and how long each one took.
 
 ---
 
