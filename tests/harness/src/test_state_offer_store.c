@@ -16,10 +16,14 @@
 #include "config/state_offer_service.h"
 #include "config/state_offer_store.h"
 #include "chain/checkpoints.h"
+#include "net/rom_seed.h"
 #include "vcs/zcode_dht_identity.h"
 
+#include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static void fill_bytes(uint8_t out[32], uint8_t first)
@@ -550,6 +554,252 @@ static int no_advertisement_for_a_stale_bundle(void)
     return failures;
 }
 
+/* ── Offer-path composition (the "bundles/bundles/" regression) ──────────
+ *
+ * state_offer_service.c:173 used to build the on-disk path for a registered
+ * artifact as "%s/bundles/%s" against `g_datadir` and `a->filename` — but
+ * `a->filename` already carries the "bundles/" prefix rom_seed_register
+ * stores it under for anything found one level into <datadir>/bundles/
+ * (net/rom_seed.c rom_seed_scan_bundles_subdir), so the path built was
+ * <datadir>/bundles/bundles/<name>.sqlite, which never exists: the manifest
+ * never opened, the bundle was never offered, and the online identity that
+ * gates on "do we hold something offerable" never minted. Both a fleet
+ * node's OWN checkpoint bundle and a peer-registered one hit this — a fresh
+ * node's fast-sync fell back to fold-forward with offers_seen=0 from every
+ * peer even though every peer held the exact right bundle.
+ *
+ * These fixtures use rom_seed's own SQLite-magic-plus-garbage synthetic
+ * content (test_rom_seed.c's gen_content pattern) rather than a
+ * semantically valid zcl.consensus_state_bundle.v1 — building one needs the
+ * ~300-line progress-store fixture test_consensus_state_snapshot_export.c
+ * seeds for its own export tests, which is already exercised there and in
+ * test_consensus_state_snapshot_install.c. What is unique to THIS bug, and
+ * what nothing exercised before, is the path composition itself: does
+ * state_offer_service resolve a registered artifact's catalog filename to
+ * the SAME file rom_seed's own reader (rom_seed_read_chunk) opens? Proved
+ * directly via state_offer_service_test_compose_path() below, plus a
+ * round-trip read through rom_seed_read_chunk() at that exact composed
+ * path to prove it is not just a string match but a genuinely servable
+ * file. */
+
+static void gen_bundle_content(uint8_t *buf, size_t size)
+{
+    static const uint8_t magic[16] = "SQLite format 3";
+    for (size_t i = 0; i < size; i++)
+        buf[i] = (uint8_t)((i * 149u + 13u) & 0xffu);
+    if (size >= 16)
+        memcpy(buf, magic, 16);
+}
+
+static bool write_bundle_file(const char *dir, const char *relname,
+                              const uint8_t *buf, size_t size)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", dir, relname) >=
+        (int)sizeof(path))
+        return false;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return false;
+    size_t off = 0;
+    while (off < size) {
+        ssize_t w = write(fd, buf + off, size - off);
+        if (w <= 0) {
+            close(fd);
+            return false;
+        }
+        off += (size_t)w;
+    }
+    close(fd);
+    return true;
+}
+
+static int catalog_bundles_prefix_resolves(void)
+{
+    int failures = 0;
+    TEST_CASE("a 'bundles/<name>' catalog filename composes to ONE "
+              "'bundles/' segment, not two, and the file it names is the "
+              "one on disk") {
+        char dir[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_path", "prefixed");
+        char bundles_dir[PATH_MAX];
+        snprintf(bundles_dir, sizeof(bundles_dir), "%s/bundles", dir);
+        ASSERT(mkdir(bundles_dir, 0700) == 0);
+
+        uint8_t content[64 * 1024];
+        gen_bundle_content(content, sizeof(content));
+        ASSERT(write_bundle_file(
+            bundles_dir, "consensus-state-bundle-777.sqlite", content,
+            sizeof(content)));
+
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(dir, "bundles/consensus-state-bundle-777.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        ASSERT(strcmp(art.filename, "bundles/consensus-state-bundle-777.sqlite")
+               == 0);
+
+        state_offer_service_start(dir, NULL);
+        char composed[PATH_MAX], expected[PATH_MAX];
+        ASSERT(state_offer_service_test_compose_path(art.filename, composed,
+                                                      sizeof(composed)));
+        snprintf(expected, sizeof(expected),
+                "%s/bundles/consensus-state-bundle-777.sqlite", dir);
+        ASSERT(strcmp(composed, expected) == 0);
+        /* The regression this guards: the old "%s/bundles/%s" composition
+         * would have produced .../bundles/bundles/consensus-state-bundle-
+         * 777.sqlite here instead, and that path does not exist. */
+        ASSERT(access(composed, F_OK) == 0);
+
+        uint8_t *readback = malloc(ROM_SEED_CHUNK_SIZE);
+        ASSERT(readback != NULL);
+        uint32_t got = 0;
+        ASSERT(readback && rom_seed_read_chunk(&art, dir, 0, readback,
+                                               ROM_SEED_CHUNK_SIZE, &got));
+        ASSERT(got == sizeof(content));
+        ASSERT(readback && memcmp(readback, content, sizeof(content)) == 0);
+        free(readback);
+
+        state_offer_service_shutdown();
+        rom_seed_reset();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
+static int catalog_bare_basename_resolves(void)
+{
+    int failures = 0;
+    TEST_CASE("a bare '<name>.sqlite' catalog filename (root-scan shape) "
+              "composes to the datadir root, not a phantom 'bundles/'") {
+        char dir[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_path", "bare");
+
+        uint8_t content[64 * 1024];
+        gen_bundle_content(content, sizeof(content));
+        ASSERT(write_bundle_file(dir, "consensus-state-bundle-778.sqlite",
+                                 content, sizeof(content)));
+
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(dir, "consensus-state-bundle-778.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        ASSERT(strcmp(art.filename, "consensus-state-bundle-778.sqlite") == 0);
+
+        state_offer_service_start(dir, NULL);
+        char composed[PATH_MAX], expected[PATH_MAX];
+        ASSERT(state_offer_service_test_compose_path(art.filename, composed,
+                                                      sizeof(composed)));
+        snprintf(expected, sizeof(expected),
+                "%s/consensus-state-bundle-778.sqlite", dir);
+        ASSERT(strcmp(composed, expected) == 0);
+        ASSERT(access(composed, F_OK) == 0);
+
+        uint8_t *readback = malloc(ROM_SEED_CHUNK_SIZE);
+        ASSERT(readback != NULL);
+        uint32_t got = 0;
+        ASSERT(readback && rom_seed_read_chunk(&art, dir, 0, readback,
+                                               ROM_SEED_CHUNK_SIZE, &got));
+        ASSERT(got == sizeof(content));
+        ASSERT(readback && memcmp(readback, content, sizeof(content)) == 0);
+        free(readback);
+
+        state_offer_service_shutdown();
+        rom_seed_reset();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
+/* Capture stderr (LOG_INFO/LOG_WARN destination — base/log_macros.h
+ * ZCL_LOG_RAW) around one call, mirroring
+ * test_consensus_state_snapshot_export.c's cse_capture_export_stderr. */
+static bool capture_stderr_around_refresh(char *out, size_t out_len,
+                                          uint32_t *out_count)
+{
+    if (out && out_len > 0)
+        out[0] = '\0';
+    mkdir("./test-tmp", 0755);
+    char path[256];
+    snprintf(path, sizeof(path), "./test-tmp/state_offer_refresh_%d.log",
+             (int)getpid());
+
+    fflush(stderr);
+    int saved_fd = dup(STDERR_FILENO);
+    FILE *capf = (saved_fd >= 0) ? fopen(path, "w+") : NULL;
+    if (!capf) {
+        if (saved_fd >= 0)
+            close(saved_fd);
+        *out_count = state_offer_service_test_refresh_and_count();
+        return false;
+    }
+    dup2(fileno(capf), STDERR_FILENO);
+
+    *out_count = state_offer_service_test_refresh_and_count();
+
+    fflush(stderr);
+    dup2(saved_fd, STDERR_FILENO);
+    close(saved_fd);
+
+    if (out && out_len > 0) {
+        long sz = ftell(capf);
+        if (sz > 0) {
+            rewind(capf);
+            size_t n = (size_t)sz < out_len - 1 ? (size_t)sz : out_len - 1;
+            size_t rd = fread(out, 1, n, capf);
+            out[rd] = '\0';
+        }
+    }
+    fclose(capf);
+    unlink(path);
+    return true;
+}
+
+static int missing_bundle_file_fails_closed_with_named_log(void)
+{
+    int failures = 0;
+    TEST_CASE("a registered artifact whose backing file vanished yields "
+              "zero offers plus one named log line naming the path tried") {
+        char dir[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_path", "missing");
+        char bundles_dir[PATH_MAX];
+        snprintf(bundles_dir, sizeof(bundles_dir), "%s/bundles", dir);
+        ASSERT(mkdir(bundles_dir, 0700) == 0);
+
+        uint8_t content[64 * 1024];
+        gen_bundle_content(content, sizeof(content));
+        char relpath[PATH_MAX];
+        snprintf(relpath, sizeof(relpath), "%s/consensus-state-bundle-779.sqlite",
+                bundles_dir);
+        ASSERT(write_bundle_file(bundles_dir,
+                                 "consensus-state-bundle-779.sqlite", content,
+                                 sizeof(content)));
+
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(dir, "bundles/consensus-state-bundle-779.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        /* Registration succeeded (art is in rom_seed's registry); now remove
+         * the backing file so the composed path — correct or not — no
+         * longer exists, exercising the fail-closed branch. */
+        ASSERT(unlink(relpath) == 0);
+
+        state_offer_service_start(dir, NULL);
+        char captured[8192];
+        uint32_t count = 0;
+        ASSERT(capture_stderr_around_refresh(captured, sizeof(captured),
+                                             &count));
+        ASSERT(count == 0);
+        char expected_path[PATH_MAX];
+        snprintf(expected_path, sizeof(expected_path),
+                "%s/bundles/consensus-state-bundle-779.sqlite", dir);
+        ASSERT(strstr(captured, expected_path) != NULL);
+        ASSERT(strstr(captured, "consensus-state-bundle-779.sqlite") != NULL);
+
+        state_offer_service_shutdown();
+        rom_seed_reset();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
@@ -566,6 +816,9 @@ int test_state_offer_store(void)
     failures += endpoint_required();
     failures += unsigned_offer_refused();
     failures += first_boot_peer_offer_is_consumed();
+    failures += catalog_bundles_prefix_resolves();
+    failures += catalog_bare_basename_resolves();
+    failures += missing_bundle_file_fails_closed_with_named_log();
     state_offer_store_reset();
     return failures;
 }

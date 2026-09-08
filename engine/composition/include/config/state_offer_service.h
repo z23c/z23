@@ -45,6 +45,7 @@
 #define ZCL_CONFIG_STATE_OFFER_SERVICE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct msg_processor;
@@ -84,6 +85,22 @@ void state_offer_service_test_hold_artifact(int32_t bundle_height);
 void state_offer_service_test_ensure_identity(int32_t tip);
 /* True iff this node can sign an offer right now. */
 bool state_offer_service_test_have_identity(void);
+/* Force the disk-backed artifact snapshot rebuild (the real
+ * rom_seed_list()->open()->manifest-read path this file uses to decide what
+ * to offer, not the injected `test_hold_artifact` shortcut) and return how
+ * many artifacts it found offerable. `state_offer_service_start` must have
+ * been called first so g_datadir is set. */
+uint32_t state_offer_service_test_refresh_and_count(void);
+/* Compose the absolute path this file resolves for a registered artifact's
+ * catalog filename (rom_seed's stored `a->filename`), WITHOUT touching disk
+ * or the snapshot — the exact function `sosvc_refresh_snapshot_locked` calls
+ * to open the bundle manifest. Returns false only on truncation. Lets a test
+ * pin the composed path against both the bare-basename and
+ * "bundles/<name>" catalog shapes without needing a semantically valid
+ * bundle on disk. `state_offer_service_start` must have been called first so
+ * g_datadir is set. */
+bool state_offer_service_test_compose_path(const char *filename, char *out,
+                                           size_t out_sz);
 #endif
 
 #endif /* ZCL_CONFIG_STATE_OFFER_SERVICE_H */

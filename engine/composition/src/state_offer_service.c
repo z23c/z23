@@ -145,6 +145,22 @@ static bool sosvc_read_manifest(const char *path, int32_t *out_height,
     return true;
 }
 
+/* Compose the absolute path rom_seed's own read path resolves for a
+ * registered artifact: `g_datadir` + "/" + `filename`. `filename` already
+ * carries any "bundles/" prefix rom_seed_register stored it under — a
+ * root-scan artifact is a bare basename, while the bundles/ subdir scan and
+ * every reseed caller (boot_bundle_fetch.c, bundle_exporter.c) register it as
+ * "ROM_SEED_BUNDLES_SUBDIR/<name>" (see net/rom_seed.h) — so no second
+ * "bundles/" belongs here; rom_seed_read_chunk (net/rom_seed.c) and
+ * platform_positioned_file_open_beneath() resolve the SAME `datadir` + "/" +
+ * `filename` shape, and this is the one place in this file that repeats it,
+ * so the two paths cannot re-drift. */
+static bool sosvc_artifact_path(char *out, size_t out_sz, const char *filename)
+{
+    int n = snprintf(out, out_sz, "%s/%s", g_datadir, filename);
+    return n > 0 && (size_t)n < out_sz;
+}
+
 /* Snapshot what this node holds and could offer. Caller holds g_lock. */
 static void sosvc_refresh_snapshot_locked(void)
 {
@@ -170,16 +186,18 @@ static void sosvc_refresh_snapshot_locked(void)
             continue;
 
         char path[1024];
-        if (snprintf(path, sizeof(path), "%s/bundles/%s", g_datadir,
-                     a->filename) >= (int)sizeof(path))
+        if (!sosvc_artifact_path(path, sizeof(path), a->filename))
             continue;
         int32_t height = 0;
         uint8_t block_hash[32], receipt_id[32];
         if (!sosvc_read_manifest(path, &height, block_hash, receipt_id)) {
+            /* Named, once per refresh (this loop runs on the snapshot TTL,
+             * never per peer) — say the exact path tried so a missing or
+             * unreadable bundle is diagnosable from this one line. */
             LOG_INFO(SOSVC_SUBSYS,
-                     "holding '%s' but its manifest does not open — not "
-                     "offered (a bundle we cannot describe is one we must not "
-                     "advertise)", a->filename);
+                     "holding '%s' but '%s' does not open as a bundle "
+                     "manifest — not offered (a bundle we cannot describe is "
+                     "one we must not advertise)", a->filename, path);
             continue;
         }
 
@@ -628,5 +646,20 @@ bool state_offer_service_test_have_identity(void)
     bool have = g_have_identity;
     pthread_mutex_unlock(&g_lock);
     return have;
+}
+
+uint32_t state_offer_service_test_refresh_and_count(void)
+{
+    pthread_mutex_lock(&g_lock);
+    sosvc_refresh_snapshot_locked();
+    uint32_t n = g_artifact_count;
+    pthread_mutex_unlock(&g_lock);
+    return n;
+}
+
+bool state_offer_service_test_compose_path(const char *filename, char *out,
+                                           size_t out_sz)
+{
+    return sosvc_artifact_path(out, out_sz, filename);
 }
 #endif

@@ -92,6 +92,11 @@ Old and new nodes stay readable to each other: an older peer reads its two
 bytes and ignores the rest; a newer peer reading an older message records a
 port with no offers.
 
+An offered artifact lives wherever the ROM seed catalog names it —
+`<datadir>/<name>` for a root-scanned bundle or `<datadir>/bundles/<name>`
+for one found under the datadir's `bundles/` subdirectory — and the offer
+producer composes exactly that one path, never a second `bundles/`.
+
 What a consuming node does with them:
 
 - **Freshness is a refusal, not a preference.** An offer more than 576 blocks
