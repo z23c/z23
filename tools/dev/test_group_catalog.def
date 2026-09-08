@@ -900,6 +900,13 @@ ZCL_TEST_GROUP(dev_land)
 /* Agent worktree construction: detached git worktree plus the proof's
  * vendored dependencies cloned onto independent inodes (never hardlinked). */
 ZCL_TEST_GROUP(dev_lane)
+/* ops.host.gc: the host janitor over dev-proof worktree pools. The group
+ * exists for one property — the sweep never deletes work. Three real git
+ * worktree generations (one with a live process cwd'd inside, one locked,
+ * one back-dated orphan) must classify as in_use / locked / reapable, a
+ * dry run must move nothing, an apply must reclaim only the orphan, and a
+ * canonical datadir must be refused by name. */
+ZCL_TEST_GROUP(host_gc)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 /* The push proof's test dimension must set ZCL_STRESS_TESTS=1 in its own

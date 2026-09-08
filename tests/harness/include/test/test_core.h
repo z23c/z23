@@ -238,6 +238,8 @@ int test_accept_to_mempool(void);
 int test_rpc(void);
 int test_transaction(void);
 int test_net(void);
+/* ops.host.gc — the host janitor over dev-proof worktree pools. */
+int test_host_gc(void);
 int test_netbase_split_host_port(void);
 int test_nat_route_dump(void);
 int test_peer_strategy_worker(void);
