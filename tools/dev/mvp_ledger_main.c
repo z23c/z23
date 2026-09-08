@@ -392,7 +392,9 @@ static bool mvl_progress_tail(const struct mvl_opts *o,
     struct mvl_agents agents = {0};
     struct mvl_kpi kpi = {0};
     char (*lanes)[MVL_LANE_CAP] = NULL;
+    char (*anc)[MVL_ID_CAP] = NULL;
     size_t lane_count = 0;
+    size_t anc_count = 0;
     bool ok;
 
     if (!mvl_agents_alloc(&agents)) {
@@ -406,12 +408,16 @@ static bool mvl_progress_tail(const struct mvl_opts *o,
             fputs(render, stdout);
         ok = mvl_load_verified(o, &lanes, &lane_count, err, err_cap);
     }
+    if (ok)
+        ok = mvl_load_ancestry(o, &anc, &anc_count, err, err_cap);
     if (ok) {
-        mvl_compute_kpi(plan, &agents, lanes, lane_count, NULL, 0, &kpi);
+        mvl_compute_kpi(plan, &agents, lanes, lane_count, anc, anc_count,
+                        &kpi);
         if (mvl_render_kpi(&kpi, render, MVL_RENDER_CAP) < MVL_RENDER_CAP)
             fputs(render, stdout);
     }
     free(lanes);
+    free(anc);
     mvl_agents_free(&agents);
     return ok;
 }
