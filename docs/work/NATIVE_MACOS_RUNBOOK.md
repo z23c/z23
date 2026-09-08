@@ -31,11 +31,22 @@ repeat them.
 | `make t ONLY=<group>` | strict cached per-TU non-LTO harness | `Makefile:2554`; use before push / when chasing optimizer behavior |
 | `make test-parallel TEST_PARALLEL_ARGS=--no-cache` | full uncached suite | `Makefile:2107` |
 | `make pre-push-ci` | mapped focused proof for pushed files | unmapped code fails closed |
-| `make macos-acceptance` | closed 38-group native aggregate with zero eligible skips, followed by an audited temporary `darwin-arm64` runtime cut and node-free execution of its stripped node | the capability matrix supplies 30 unique evidence groups; its eight `ZCL_MACOS_REQUIRED_TEST(...)` rows add the documented baseline groups not already selected there: `crypto`, `sqlite`, `rng`, `os_proc`, `self_backtrace`, `binary_staleness`, `dev_platform`, and `cold_join_sovereign`. The package leg proves local packaging/acceptance only; installed, synced, notarized, and published remain unobserved |
+| `make macos-acceptance` | closed 42-group native aggregate with zero eligible skips, followed by an audited temporary `darwin-arm64` runtime cut and node-free execution of its stripped node | the capability matrix supplies 34 unique evidence groups; its eight `ZCL_MACOS_REQUIRED_TEST(...)` rows add the documented baseline groups not already selected there: `crypto`, `sqlite`, `rng`, `os_proc`, `self_backtrace`, `binary_staleness`, `dev_platform`, and `cold_join_sovereign`. The package leg proves local packaging/acceptance only; installed, synced, notarized, and published remain unobserved |
 
 This exact aggregate, not a green `make lint`, is the macOS evidence base.
 `AGENTS.md`'s baseline is startup and platform-contract evidence only; it is
 not chain-sync acceptance.
+
+The package-execution evidence includes `test_zcode_package_dev` on Darwin:
+real C23 discovery, candidate repair, compile/profile verification, accepted
+publication handoff, and Commons reproduction between two independent worker
+programs and object stores. Seatbelt and resource-limit refusals remain required.
+Compiler-launcher cache diagnostics must not hide source repair coordinates;
+candidate and proof-directory continuations use canonical host paths so Darwin's
+`/tmp` alias does not split an otherwise identical handoff. The fixtures report
+context bytes, elapsed time, and exact proof reuse; metrics they do not observe
+remain explicitly incomplete. Run only through the canonical target:
+`make t-fast-exact ONLY=zcode_package_dev T_FAST_EXACT_ARGS=--no-cache`.
 
 `self_backtrace` is intentionally part of the aggregate: on macOS it proves
 that the unsupported signal-context implementation remains behind the stubbed,

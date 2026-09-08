@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MATRIX="${ZCL_MACOS_CAPABILITY_MATRIX:-$REPO_ROOT/engine/composition/platform/macos_capabilities.def}"
 REGISTRY="$REPO_ROOT/tools/dev/test_group_catalog.def"
-EXPECTED_EXACT_GROUPS='test_arm_hw_tiers,test_binary_ab_fallback,test_binary_staleness,test_blake2b_batch_parity,test_boot_shutdown_marker_persistence,test_chacha20_isa_parity,test_cold_join_sovereign,test_confine,test_crypto,test_dev_activation,test_dev_platform,test_directory_watcher,test_encoding,test_fast_sync_coins_export,test_hw_profile,test_net,test_noise_nk_handshake,test_noise_transport_parity,test_noise_xx_handshake,test_os_proc,test_os_sandbox,test_platform_toolchain,test_rng,test_rpc,test_sandbox_process_budget,test_self_backtrace,test_service_state,test_service_state_driver,test_sha256_isa_parity,test_sha3_256_x4,test_sha3_512_x4,test_sha512_isa_parity,test_sqlite,test_thread_qos,test_tor,test_wallet,test_wallet_backup,test_watcher_lease,test_watcher_record,test_z23_front_door,test_zcode_verify'
+EXPECTED_EXACT_GROUPS='test_arm_hw_tiers,test_binary_ab_fallback,test_binary_staleness,test_blake2b_batch_parity,test_boot_shutdown_marker_persistence,test_chacha20_isa_parity,test_cold_join_sovereign,test_confine,test_crypto,test_dev_activation,test_dev_platform,test_directory_watcher,test_encoding,test_fast_sync_coins_export,test_hw_profile,test_net,test_noise_nk_handshake,test_noise_transport_parity,test_noise_xx_handshake,test_os_proc,test_os_sandbox,test_platform_toolchain,test_rng,test_rpc,test_sandbox_process_budget,test_self_backtrace,test_service_state,test_service_state_driver,test_sha256_isa_parity,test_sha3_256_x4,test_sha3_512_x4,test_sha512_isa_parity,test_sqlite,test_thread_qos,test_tor,test_wallet,test_wallet_backup,test_watcher_lease,test_watcher_record,test_z23_front_door,test_zcode_package_dev,test_zcode_verify'
 
 die() {
     printf 'macos-acceptance: FAIL: %s\n' "$*" >&2
@@ -89,9 +89,9 @@ validate() {
         # Linux-only description cannot silently downgrade qualified
         # Seatbelt, and Seatbelt cannot be overclaimed as resident policy.
         case "$id:$state:$reason:$groups" in
-            package_execution:available:seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits:test_os_sandbox,test_platform_toolchain,test_sandbox_process_budget,test_zcode_verify) ;;
+            package_execution:available:seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits:test_os_sandbox,test_platform_toolchain,test_sandbox_process_budget,test_zcode_package_dev,test_zcode_verify) ;;
             package_execution:*)
-                die "package_execution contract drift: expected available/seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits with its exact four evidence groups; observed $state/$reason/$groups"
+                die "package_execution contract drift: expected available/seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits with its exact five evidence groups; observed $state/$reason/$groups"
                 ;;
             resident_confinement:unavailable:landlock_and_seccomp_are_linux_only:test_os_sandbox,test_confine) ;;
             resident_confinement:*)
@@ -112,8 +112,8 @@ validate() {
     union_actual="$(exact_groups)"
     union_count="$(printf '%s\n' "$union_actual" | tr ',' '\n' |
         awk 'NF {n++} END {print n+0}')"
-    [ "$union_count" = 41 ] ||
-        die "exact evidence union drift: expected 41 groups; observed $union_count"
+    [ "$union_count" = 42 ] ||
+        die "exact evidence union drift: expected 42 groups; observed $union_count"
     [ "$union_actual" = "$EXPECTED_EXACT_GROUPS" ] ||
         die "exact evidence set drift: expected '$EXPECTED_EXACT_GROUPS'; observed '$union_actual'"
 }
@@ -128,7 +128,7 @@ exact_groups() {
 case "${1:---check}" in
     --check)
         validate
-        printf 'macos-acceptance: capability matrix + required baseline PASS (41 exact groups)\n'
+        printf 'macos-acceptance: capability matrix + required baseline PASS (42 exact groups)\n'
         ;;
     --groups)
         validate

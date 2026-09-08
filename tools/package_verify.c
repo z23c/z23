@@ -1192,20 +1192,45 @@ struct pv_compiler {
     uint8_t outcome; /* enum vcs_package_attest_outcome (build verdict) */
 };
 
-/* Sanitize one bounded printable detail line from captured stderr: the
- * first line containing ": error:" when present, else the first non-empty
- * line; non-printables become '?'. */
-/* Scan captured stderr line-by-line (bounded to scan_cap-1 bytes per line)
- * for the first line containing needle1, or needle2 when it is non-NULL;
- * on no match falls back to the first non-empty line, or `fallback` when
- * nothing was captured at all. Copies the chosen line into out (truncated
- * to out_cap). Shared by pv_detail_from_stderr and pv_san_detail_from_stderr,
- * whose only difference is the marker(s), the internal scan width, and the
- * fallback text. */
+/* Recognize compiler file:line[:column] coordinates before the error marker.
+ * These are advisory repair coordinates, never filesystem authority. */
+static bool pv_source_coordinates(const char *line)
+{
+    const char *error = strstr(line, ": error:");
+    if (!error) return false;
+    for (const char *p = line; p < error; p++) {
+        if (*p != ':' || p[1] < '0' || p[1] > '9') continue;
+        const char *number = p + 1;
+        while (number < error && *number >= '0' && *number <= '9')
+            number++;
+        if (number <= error && *number == ':') return true;
+    }
+    return false;
+}
+
+static bool pv_take_diagnostic_line(
+    const char *line, const char *needle1, const char *needle2,
+    bool prefer_source, char *out, size_t out_cap)
+{
+    if (!strstr(line, needle1) && (!needle2 || !strstr(line, needle2)))
+        return false;
+    /* Apple compiler launchers can report a denied cache write before the
+     * source error. Retain that fallback without granting host-cache access. */
+    if (prefer_source && !pv_source_coordinates(line)) {
+        if (!out[0]) snprintf(out, out_cap, "%s", line);
+        return false;
+    }
+    snprintf(out, out_cap, "%s", line);
+    return true;
+}
+
+/* Select a bounded matching diagnostic, preferring source coordinates when
+ * requested. Retain the first matched driver error as fallback, then the
+ * first nonempty line, then the supplied absent-output message. */
 static void pv_scan_marker_line(const char *stderr_buf, const char *needle1,
                                 const char *needle2, size_t scan_cap,
                                 const char *fallback, char *out,
-                                size_t out_cap)
+                                size_t out_cap, bool prefer_source)
 {
     char first[512];
     first[0] = '\0';
@@ -1223,16 +1248,14 @@ static void pv_scan_marker_line(const char *stderr_buf, const char *needle1,
         cur[len] = '\0';
         if (cur[0] && !first[0])
             snprintf(first, sizeof(first), "%s", cur);
-        if (strstr(cur, needle1) != NULL ||
-            (needle2 && strstr(cur, needle2) != NULL)) {
-            snprintf(out, out_cap, "%s", cur);
+        if (pv_take_diagnostic_line(cur, needle1, needle2, prefer_source,
+                                    out, out_cap))
             return;
-        }
         if (!nl)
             break;
         p = nl + 1;
     }
-    snprintf(out, out_cap, "%s", first[0] ? first : fallback);
+    if (!out[0]) snprintf(out, out_cap, "%s", first[0] ? first : fallback);
 }
 
 /* Copy `line` into out as "<prefix>: <line>", non-printables become '?',
@@ -1257,7 +1280,7 @@ static void pv_detail_from_stderr(const char *prefix, const char *stderr_buf,
      * its `: error:` marker and mangle the repair coordinates. */
     char line[512];
     pv_scan_marker_line(stderr_buf, ": error:", NULL, sizeof(line),
-                        "no diagnostics captured", line, sizeof(line));
+                        "no diagnostics captured", line, sizeof(line), true);
     /* The isolated materialization path is attempt-specific and can consume
      * the entire bounded diagnostic before the useful line/column/message.
      * Keep the final source-relative `src/...` suffix when the compiler
@@ -1282,7 +1305,7 @@ static void pv_san_detail_from_stderr(const char *prefix,
     pv_scan_marker_line(stderr_buf, "SUMMARY:", "runtime error:",
                         sizeof(line),
                         "sanitizer findings (report truncated)", line,
-                        sizeof(line));
+                        sizeof(line), false);
     pv_copy_printable_detail(prefix, line, out, out_cap);
 }
 

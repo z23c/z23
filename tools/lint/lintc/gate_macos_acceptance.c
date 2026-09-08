@@ -62,7 +62,7 @@ static const char k_matrix[] = "engine/composition/platform/macos_capabilities.d
 static const char k_catalog[] = "tools/dev/test_group_catalog.def";
 static const char k_release_cutter[] =
     "platform/packaging/release/build_release.sh";
-enum { MAC_EXPECTED_GROUPS = 41 };
+enum { MAC_EXPECTED_GROUPS = 42 };
 
 static const char k_expected_caps[] =
     "arm_acceleration hot_activation kqueue launchd node noise "
@@ -84,7 +84,7 @@ static const char k_expected_union[] =
     "test_service_state_driver,test_sha256_isa_parity,test_sha3_256_x4,"
     "test_sha3_512_x4,test_sha512_isa_parity,test_sqlite,test_thread_qos,"
     "test_tor,test_wallet,test_wallet_backup,test_watcher_lease,"
-    "test_watcher_record,test_z23_front_door,test_zcode_verify";
+    "test_watcher_record,test_z23_front_door,test_zcode_package_dev,test_zcode_verify";
 
 enum { MAC_OUT = 4096 };
 enum { MAC_MATRIX_BUF = 1 << 14, MAC_CATALOG_BUF = 1 << 18,
@@ -230,10 +230,10 @@ static int mac_validate_row_contract(const struct mac_row *row,
                    "package_execution:available:"
                    "seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits:"
                    "test_os_sandbox,test_platform_toolchain,"
-                   "test_sandbox_process_budget,test_zcode_verify") != 0) {
+                   "test_sandbox_process_budget,test_zcode_package_dev,test_zcode_verify") != 0) {
             mac_die(r, "package_execution contract drift: expected "
                    "available/seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits "
-                   "with its exact four evidence groups; observed %s/%s/%s",
+                   "with its exact five evidence groups; observed %s/%s/%s",
                    row->state, row->reason, row->groups);
             return 1;
         }

@@ -4771,15 +4771,11 @@ int test_zcode_package_dev(void)
                    zpd_test_work_toolchain() +
                    zpd_test_commons_join_front_doors() +
                    zpd_test_admitted_single_interpretation();
-#ifndef __APPLE__
-    /* These scenarios execute fetched candidate source and assert Linux's
-     * FULL Landlock/seccomp build lane.  Darwin deliberately refuses that
-     * authority as LOCAL_FALLBACK; portable refusal is pinned by the build
-     * fabric contract, while the planning/read-only cases above still run. */
+    /* Exercise the qualified package verifier on every supported host.
+     * Darwin uses Seatbelt and rlimits; full isolation remains required. */
     failures += zpd_test_work_start() +
                 zpd_test_standard_profile() +
                 zpd_test_twelve_task_benchmark();
-#endif
     secp256k1_context_destroy(ctx);
     return failures;
 }

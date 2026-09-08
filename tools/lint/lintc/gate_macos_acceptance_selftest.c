@@ -342,8 +342,8 @@ static int mac_st_group_contracts(int *rc, const char *sandbox,
         t, sizeof t))
         return die("z23-lint: derived buffer overflow\n", "");
     if (mac_replace1_buf(t,
-        "test_os_sandbox,test_platform_toolchain,test_sandbox_process_budget,test_zcode_verify",
-        "test_os_sandbox,test_net,test_sandbox_process_budget,test_zcode_verify",
+        "test_os_sandbox,test_platform_toolchain,test_sandbox_process_budget,test_zcode_package_dev,test_zcode_verify",
+        "test_os_sandbox,test_net,test_sandbox_process_budget,test_zcode_package_dev,test_zcode_verify",
         t2, sizeof t2))
         return die("z23-lint: derived buffer overflow\n", "");
     PLANT("package_groups.def", t2);

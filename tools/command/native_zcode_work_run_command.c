@@ -273,8 +273,13 @@ bool run_candidate_workspace(const char *store,
                      (unsigned long)getuid(), task_hex);
     if (n <= 0 || (size_t)n >= sizeof(parent)) return false;
     struct zcl_result made = zcl_mkdir_p(parent, 0700);
-    n = snprintf(out, ZWORK_RUN_PATH_MAX, "%s/attempt-%u", parent, attempt);
-    if (!made.ok || n <= 0 || (size_t)n >= ZWORK_RUN_PATH_MAX) return false;
+    char canonical_parent[ZWORK_RUN_PATH_MAX];
+    if (!made.ok || !platform_directory_canonical_real(
+            parent, canonical_parent, sizeof(canonical_parent))) return false;
+    /* Keep run, persisted handoff, and acceptance on the same host path.
+     * In particular, Darwin resolves /tmp beneath /private. */
+    n = snprintf(out, ZWORK_RUN_PATH_MAX, "%s/attempt-%u", canonical_parent, attempt);
+    if (n <= 0 || (size_t)n >= ZWORK_RUN_PATH_MAX) return false;
     if (mkdir(out, 0700) == 0) {
         *created = true;
         if (vcs_tree_materialize(store, source_root, out,

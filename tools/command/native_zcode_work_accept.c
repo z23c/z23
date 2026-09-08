@@ -348,17 +348,18 @@ static bool zwork_accept_datadir(
     const struct vcs_zcode_task_index_entry *entry,
     char datadir[ZWORK_PATH_MAX], struct zcl_command_reply *reply)
 {
-    int n = proof_datadir && proof_datadir[0]
-        ? (platform_directory_canonical_real(
-               proof_datadir, datadir, ZWORK_PATH_MAX)
-            ? (int)strlen(datadir) : -1)
-        : (zwork_task_path(datadir, entry->task_root_hex, "/zbuild")
-            ? (int)strlen(datadir) : -1);
-    if (n > 0 && n < ZWORK_PATH_MAX) return true;
+    char task_datadir[ZWORK_PATH_MAX];
+    const char *path = proof_datadir;
+    if (!path || !path[0])
+        path = zwork_task_path(task_datadir, entry->task_root_hex, "/zbuild")
+            ? task_datadir : NULL;
+    if (path && platform_directory_canonical_real(
+            path, datadir, ZWORK_PATH_MAX)) return true;
     zwork_fail(reply, "ACCEPT_PATH_FAILED", "resolve",
                proof_datadir && proof_datadir[0]
                  ? "explicit proof datadir must resolve to an existing directory"
-                 : "task-local ZBuild path is too long", false, false);
+                 : "task-local ZBuild path must resolve to an existing directory",
+               false, false);
     return false;
 }
 
