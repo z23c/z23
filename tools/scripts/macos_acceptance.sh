@@ -174,6 +174,7 @@ case "${1:---check}" in
         "$REPO_ROOT/platform/packaging/release/build_release.sh" --bin "$REPO_ROOT/build/bin" --out "$package_root/runtime" --platform darwin-arm64
         "$package_root/runtime/z23" code guide >"$package_root/code-guide.json"
         [ -s "$package_root/code-guide.json" ] || die "packaged z23 code guide emitted no response"
+        "$REPO_ROOT/tools/scripts/macos_launchd_acceptance.sh" "$package_root/runtime/z23"
 
         printf 'macos-acceptance: runtime package PASS (darwin-arm64, macOS 14 floor, audited, checksummed, node-free execution)\n'
         printf 'macos-acceptance: UNOBSERVED installed=false synced=false published=false notarized=false\n'

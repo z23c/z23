@@ -125,6 +125,7 @@ ISO_PEER_PGID=""
 ISO_CLEANED=0
 ISO_NODE_BIN="${ISO_NODE_BIN:-./build/bin/zclassic23}"
 ISO_RPC_BIN="${ISO_RPC_BIN:-./build/bin/zcl-rpc}"
+ISO_JSONQ_BIN="${ISO_JSONQ_BIN:-./build/bin/jsonq}"
 
 iso_die() { echo "isolated_node_env: FATAL: $*" >&2; exit 1; }
 
@@ -230,6 +231,7 @@ iso_init() {
     command -v mktemp >/dev/null 2>&1 || iso_die "mktemp not found"
     [ -x "$ISO_NODE_BIN" ] || iso_die "$ISO_NODE_BIN not built — run make first"
     [ -x "$ISO_RPC_BIN" ]  || iso_die "$ISO_RPC_BIN not built — run make zcl-rpc"
+    [ -x "$ISO_JSONQ_BIN" ] || iso_die "$ISO_JSONQ_BIN not built — run make jsonq"
 
     iso_append_published_mesh_ports
 
@@ -437,7 +439,13 @@ iso_wait_peer_listen() {
             echo "isolated_node_env: peer node exited (see $ISO_PEER_DD/node.log)" >&2
             return 1
         fi
-        [ -n "$(ss -tlnH "sport = :$ISO_PEER_PORT" 2>/dev/null)" ] && return 0
+        local rc
+        if z23_tcp_port_listening "$ISO_PEER_PORT"; then
+            return 0
+        else
+            rc=$?
+        fi
+        [ "$rc" -eq 1 ] || return "$rc"
         sleep 0.5
     done
     return 1
@@ -452,14 +460,23 @@ iso_wait_peer_connected() {    local timeout="${1:-60}" deadline n
             echo "isolated_node_env: peer node exited (see $ISO_PEER_DD/node.log)" >&2
             return 1
         fi
-        # Extract the integer after "result": — never tr(1) the whole JSON
-        # line, which would mash version/id digits into a false positive.
-        n="$(iso_rpc getconnectioncount \
-            | sed -n 's/.*"result"[^0-9-]*\(-\{0,1\}[0-9][0-9]*\).*/\1/p' | head -1)"
-        [ -n "$n" ] && [ "$n" -ge 1 ] && return 0
+        n="$(iso_rpc_nonnegative_result getconnectioncount)" || n=""
+        [ -n "$n" ] && [ "$n" != 0 ] && return 0
         sleep 0.5
     done
     return 1
+}
+
+# Require a complete successful envelope and an actual nonnegative integer.
+# Raw JSON retains types: strings such as "0" and "null" must not qualify.
+iso_rpc_nonnegative_result() {
+    local reply error result
+    reply="$(iso_rpc "$1")" || return 1
+    error="$(printf '%s' "$reply" | "$ISO_JSONQ_BIN" raw error 2>/dev/null)" || return 1
+    [ "$error" = null ] || return 1
+    result="$(printf '%s' "$reply" | "$ISO_JSONQ_BIN" raw result 2>/dev/null)" || return 1
+    case "$result" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$result"
 }
 
 # Poll the isolated RPC until getblockcount answers, or timeout. $1=secs.
@@ -473,7 +490,7 @@ iso_wait_rpc_ready() {
         fi
         if [ -f "$ISO_DD/.cookie" ]; then
             local t
-            t="$(iso_rpc getblockcount | tr -dc '0-9-')"
+            t="$(iso_rpc_nonnegative_result getblockcount)" || t=""
             [ -n "$t" ] && return 0
         fi
         sleep 0.5

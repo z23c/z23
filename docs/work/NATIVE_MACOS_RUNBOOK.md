@@ -37,6 +37,18 @@ This exact aggregate, not a green `make lint`, is the macOS evidence base.
 `AGENTS.md`'s baseline is startup and platform-contract evidence only; it is
 not chain-sync acceptance.
 
+The packaged node also runs through a unique isolated LaunchAgent in
+`macos_launchd_acceptance.sh`: successful typed RPC and native boot completion,
+forced-crash recovery, clean stop, and restart that consumes the durable clean
+marker. Shared service discovery checks both GUI and Background domains and
+refuses ambiguous jobs. The fixture checks the supervisor-owned PID and compares
+its mapped executable locator's bytes with the package; this is not kernel-pinned
+execution evidence. It uses private regtest state and removes only its own job.
+The generated installer plist and fixture declare a bounded 300-second shutdown
+grace, matching the canonical node service; fixture clean stops must still finish
+within 40 seconds. Production installation, chain sync, and deployment remain
+unobserved by this acceptance.
+
 The package-execution evidence includes `test_zcode_package_dev` on Darwin:
 real C23 discovery, candidate repair, compile/profile verification, accepted
 publication handoff, and Commons reproduction between two independent worker

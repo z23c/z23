@@ -824,6 +824,8 @@ write_launchd_plist() {
     <key>RunAtLoad</key><true/>
     <key>LimitLoadToSessionType</key><string>$MACOS_LAUNCHD_SESSION</string>
     <key>KeepAlive</key><true/>
+    <!-- Match the canonical node service's bounded shutdown grace. -->
+    <key>ExitTimeOut</key><integer>300</integer>
     <key>ProcessType</key><string>Background</string>
     <key>ThrottleInterval</key><integer>5</integer>
     <key>StandardOutPath</key><string>$datadir_xml/z23.stdout.log</string>
@@ -2041,6 +2043,8 @@ EOF
         || die "selftest: generation_provenance did not print the consistent verdict"
     [ -f "$launchd/org.z23.zclassic.plist" ] \
         || die "selftest: macOS install did not commit a launchd plist"
+    grep -q '<key>ExitTimeOut</key><integer>300</integer>' "$launchd/org.z23.zclassic.plist" \
+        || die "selftest: launchd shutdown grace differs from the node service policy"
     grep -q '&amp; native/bin/z23' "$launchd/org.z23.zclassic.plist" \
         || die "selftest: launchd binary path was not XML escaped"
     grep -q -- '-tor' "$launchd/org.z23.zclassic.plist" \

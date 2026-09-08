@@ -2402,7 +2402,7 @@ endif
 # Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived
 # from the closed capability matrix; unavailable rows run their refusal proof
 # rather than disappearing as hand-maintained skips.
-macos-acceptance: z23 zclassic23-package-verify zclassic23-acme
+macos-acceptance: z23 zclassic23-package-verify zclassic23-acme zcl-rpc process-group-exec
 	@./tools/scripts/macos_acceptance.sh --run
 
 .PHONY: windows-service-install windows-service-status windows-service-remove
@@ -6264,7 +6264,7 @@ $(eval $(call BUILD_NODE_TOOL,wallet-wireframes,tools/wallet_wireframes.c))
 $(eval $(call BUILD_NODE_TOOL,speedrun,tools/speedrun.c))
 
 .PHONY: zcl-rpc
-zcl-rpc: $(ZCL_RPC_BIN)
+zcl-rpc: $(ZCL_RPC_BIN) jsonq
 $(ZCL_RPC_BIN): FORCE tools/zcl-rpc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -o $@ $(filter-out FORCE,$^) \
@@ -12798,10 +12798,12 @@ check-pipefail-status-pipe:
 # Cross-host shell debt must only shrink.  The shared port helper is exercised
 # here too, so a fallback or fail-closed regression cannot hide behind an
 # unchanged spelling baseline.
-check-shell-host-assumptions: $(LINTC_TOOL)
+check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN)
 	@echo "══ LINT: Linux/GNU shell assumptions only shrink ══"
 	@./tools/lint/check_shell_host_assumptions.sh --selftest
 	@./tools/scripts/port_probe.sh --selftest
+	@./tools/scripts/isolated_node_env_selftest.sh
+	@./tools/scripts/service_args_selftest.sh
 	@./tools/lint/check_shell_host_assumptions.sh
 
 # Sibling of the gate above, for two more shapes where the shell throws a

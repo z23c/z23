@@ -1,9 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * check-macos-acceptance family — --selftest. Port of the 20-case
+ * check-macos-acceptance family — --selftest. The 21-case
  * --selftest of tools/lint/check_macos_acceptance.sh (which itself drives
  * tools/scripts/macos_acceptance.sh --check against 16 planted fixtures
- * plus 4 reachability-rail fixtures). Every fixture is a mutation of the
+ * plus 5 reachability-rail fixtures). Every fixture is a mutation of the
  * REAL matrix/Makefile/ACCEPT-script text (never a rewritten mock), planted
  * under a private sandbox — getenv("TMPDIR") or "test-tmp", never /tmp —
  * removed on the way out.
@@ -365,7 +365,7 @@ static int mac_st_group_contracts(int *rc, const char *sandbox,
     return 0;
 }
 
-/* Cases O-R: the four wiring/reachability rails over the Makefile and the
+/* Cases O-S: the five wiring/reachability rails over the Makefile and the
  * ACCEPT script rather than the capability matrix. */
 static int mac_st_group_wiring(int *rc, const char *sandbox,
                                const char *makefile, const char *accept)
@@ -385,7 +385,7 @@ static int mac_st_group_wiring(int *rc, const char *sandbox,
     char no_z23_path[512];
     snprintf(no_z23_path, sizeof no_z23_path, "%s/make_no_z23", sandbox);
     if (mac_replace1_buf(makefile,
-        "macos-acceptance: z23 zclassic23-package-verify zclassic23-acme",
+        "macos-acceptance: z23 zclassic23-package-verify zclassic23-acme zcl-rpc process-group-exec",
         "macos-acceptance: z23", t, sizeof t))
         return die("z23-lint: derived buffer overflow\n", "");
     (void)csr_write(no_z23_path, t);
@@ -405,6 +405,12 @@ static int mac_st_group_wiring(int *rc, const char *sandbox,
         return die("z23-lint: derived buffer overflow\n", "");
     mac_expect_package_reject(rc,
                               "R: deleting packaged-node execution is caught",
+                              t);
+    if (mac_drop_lines_containing_buf(accept, "macos_launchd_acceptance.sh", t,
+                                      sizeof t))
+        return die("z23-lint: derived buffer overflow\n", "");
+    mac_expect_package_reject(rc,
+                              "S: deleting native launchd acceptance is caught",
                               t);
     return 0;
 }
@@ -451,7 +457,7 @@ int check_macos_acceptance_selftest(void)
     (void)rap_rm_rf(sandbox);
 
     if (st_rc == 0)
-        printf("══ selftest: PASS (20/20) ══\n");
+        printf("══ selftest: PASS (21/21) ══\n");
     else
         printf("══ selftest: FAIL ══\n");
     return st_rc;

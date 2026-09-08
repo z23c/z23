@@ -16,12 +16,25 @@ zcl_service_launchd_label() {
 
 zcl_service_launchd_print() {
     local plist="${1:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
-    local label=""
+    local label="" uid="" gui="" background=""
 
     command -v launchctl >/dev/null 2>&1 || return 1
     label="$(zcl_service_launchd_label "$plist" || true)"
     [ -n "$label" ] || return 1
-    launchctl print "gui/$(id -u)/$label" 2>/dev/null
+    uid="$(id -u)" || return 1
+    gui="$(launchctl print "gui/$uid/$label" 2>/dev/null)" || gui=""
+    background="$(launchctl print "user/$uid/$label" 2>/dev/null)" || background=""
+    if [ -n "$gui" ] && [ -n "$background" ]; then
+        printf 'z23-service: ambiguous launchd job in GUI and Background domains\n' >&2
+        return 1
+    fi
+    if [ -n "$gui" ]; then
+        printf '%s\n' "$gui"
+    elif [ -n "$background" ]; then
+        printf '%s\n' "$background"
+    else
+        return 1
+    fi
 }
 
 zcl_service_exec_arg() {

@@ -400,7 +400,9 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
         ASSERT(strstr(service_args, "zcl_service_started_epoch()") != NULL);
         ASSERT(strstr(service_args, "zcl_service_restart_count()") != NULL);
         ASSERT(strstr(service_args,
-                      "launchctl print \"gui/$(id -u)/$label\"") != NULL);
+                      "launchctl print \"gui/$uid/$label\"") != NULL);
+        ASSERT(strstr(service_args,
+                      "launchctl print \"user/$uid/$label\"") != NULL);
         ASSERT(strstr(service_args,
                       "plutil -extract KeepAlive.Crashed raw -o - \"$plist\"")
                != NULL);

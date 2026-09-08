@@ -389,7 +389,8 @@ static int mac_make_target_reachable(const char *makefile_path)
     regex_t re_start, re_recipe, re_next;
     int bad = reg_fail(&re_start, regcomp(&re_start,
         "^macos-acceptance:[[:space:]]+z23[[:space:]]+"
-        "zclassic23-package-verify[[:space:]]+zclassic23-acme[[:space:]]*$",
+        "zclassic23-package-verify[[:space:]]+zclassic23-acme[[:space:]]+"
+        "zcl-rpc[[:space:]]+process-group-exec[[:space:]]*$",
         REG_EXTENDED | REG_NOSUB));
     bad |= reg_fail(&re_recipe, regcomp(&re_recipe,
         "^\t@?\\./tools/scripts/macos_acceptance\\.sh --run[[:space:]]*$",
@@ -430,7 +431,10 @@ static int mac_runtime_package_reachable(const char *accept_text)
                   "--platform darwin-arm64") != NULL
         && strstr(accept_text,
                   "\"$package_root/runtime/z23\" code guide "
-                  ">\"$package_root/code-guide.json\"") != NULL;
+                  ">\"$package_root/code-guide.json\"") != NULL
+        && strstr(accept_text,
+                  "\"$REPO_ROOT/tools/scripts/macos_launchd_acceptance.sh\" "
+                  "\"$package_root/runtime/z23\"") != NULL;
 }
 
 /* ── check_root(): the gate body ───────────────────────────────────────── */
@@ -438,13 +442,14 @@ static int mac_runtime_package_reachable(const char *accept_text)
 static int mac_check_root(void)
 {
     struct stat st;
-    const char *inputs[] = { k_accept, k_matrix, k_catalog, k_release_cutter };
-    for (int i = 0; i < 4; i++) {
+    const char *inputs[] = { k_accept, k_matrix, k_catalog, k_release_cutter,
+                            "tools/scripts/macos_launchd_acceptance.sh" };
+    for (int i = 0; i < 5; i++) {
         if (stat(inputs[i], &st) != 0) {
             fprintf(stderr, "%s: FATAL — missing %s.\n", k_gate, inputs[i]);
             fputs("  This gate is a thin driver over "
                   "tools/scripts/macos_acceptance.sh;\n"
-                  "  with any of its four inputs gone there is nothing to "
+                  "  with any of its five inputs gone there is nothing to "
                   "check and\n  a silent pass would be a lie.\n", stderr);
             return 2;
         }
@@ -508,7 +513,8 @@ static int mac_check_root(void)
               "  The native (Darwin) leg is then unreachable from any "
               "command a\n"
               "  person would type. Restore the exact 'macos-acceptance: z23\n"
-              "  zclassic23-package-verify zclassic23-acme' target and its "
+              "  zclassic23-package-verify zclassic23-acme zcl-rpc "
+              "process-group-exec' target and its "
               "tabbed\n  acceptance recipe.\n", stderr);
         return 1;
     }
