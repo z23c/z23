@@ -998,8 +998,9 @@ git show origin/main:tools/dev/test_group_catalog.def > catalog.def
   lane `-`: still summed into every total, simply not attributed to a loop.
 - `loops` joins those agents to the plan's loops by lane name and writes
   `loops.tsv`. A train assembler is split evenly across the loops whose lane
-  is on that train (`--trains` names the directory holding
-  `trainN/late_picks.txt`); a design workflow is split across the loops whose
+  is on that train; `--trains` names the directory that holds one
+  subdirectory per train, each with a late-pick list naming the lanes that
+  train carries. A design workflow is split across the loops whose
   `evidence=` names it.
 - `snapshot` and `kpi` each append one row to `snapshots.tsv` / `kpi.tsv`.
   The KPI is verified MVP progress per token: base loops verified after t0,

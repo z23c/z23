@@ -4003,7 +4003,8 @@ $(MVP_LEDGER_BIN): tools/dev/mvp_ledger.c tools/dev/mvp_ledger_tsv.c \
 		tools/dev/fleet_observe.c \
 		platform/modules/json/src/json.c \
 		platform/modules/base/src/safe_alloc.c \
-		platform/modules/platform/src/directory_compat.c
+		platform/modules/platform/src/directory_compat.c \
+		platform/modules/platform/src/clock.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) \
 	    -D_POSIX_C_SOURCE=200809L -Itools/dev \

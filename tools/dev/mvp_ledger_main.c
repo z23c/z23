@@ -8,6 +8,7 @@
 #include "mvp_ledger_internal.h"
 
 #include "base/safe_alloc.h"
+#include "platform/time_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -182,6 +183,10 @@ static void mvl_path(char *buf, size_t cap, const char *dir, const char *name)
         buf[0] = '\0';
 }
 
+/* The stamp an appended row carries. `--utc` pins it, which is what makes a
+ * ledger row reproducible; otherwise the wall clock is read through the
+ * platform clock seam rather than from the C library directly, so a test
+ * can substitute a clock source and get a deterministic stamp. */
 static void mvl_now(const char *given, char *out, size_t cap)
 {
     time_t t;
@@ -191,8 +196,8 @@ static void mvl_now(const char *given, char *out, size_t cap)
         (void)snprintf(out, cap, "%s", given);
         return;
     }
-    t = time(NULL);
-    if (gmtime_r(&t, &tmv))
+    t = platform_time_wall_time_t();
+    if (platform_time_utc_tm(t, &tmv))
         (void)strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tmv);
     else
         (void)snprintf(out, cap, "1970-01-01T00:00:00Z");
