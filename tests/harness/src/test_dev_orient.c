@@ -144,8 +144,7 @@ static int dvo_run_checker(const char *facts_dir)
     return rc;
 }
 
-int test_dev_orient(void);
-int test_dev_orient(void)
+static int test_dev_orient_registration(void)
 {
     int failures = 0;
 
@@ -157,7 +156,13 @@ int test_dev_orient(void)
         ASSERT(spec->input_keys && strstr(spec->input_keys, "topic") != NULL);
         ASSERT(spec->input_keys && strstr(spec->input_keys, "query") != NULL);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_orient_listing(void)
+{
+    int failures = 0;
 
     TEST("orient: with no input it lists every topic with a nonzero count") {
         struct dvo_call c;
@@ -197,7 +202,13 @@ int test_dev_orient(void)
         ASSERT_EQ(dvo_int(&c, "count"), 0);
         dvo_end(&c);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_orient_topic(void)
+{
+    int failures = 0;
 
     TEST("orient: one topic returns that topic's rows, fully populated") {
         struct dvo_call c;
@@ -230,7 +241,13 @@ int test_dev_orient(void)
                   dvo_int(&c, "total_topics"));
         dvo_end(&c);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_orient_query(void)
+{
+    int failures = 0;
 
     TEST("orient: query filters across topics and matches key, claim, path") {
         struct dvo_call c;
@@ -261,7 +278,13 @@ int test_dev_orient(void)
         ASSERT_EQ((long long)facts->num_children, dvo_int(&c, "count"));
         dvo_end(&c);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_orient_query_compose(void)
+{
+    int failures = 0;
 
     TEST("orient: query is case-insensitive and composes with topic") {
         struct dvo_call c;
@@ -278,7 +301,13 @@ int test_dev_orient(void)
                           "lint.gates");
         dvo_end(&c);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_orient_unknown_topic(void)
+{
+    int failures = 0;
 
     TEST("orient: an undeclared topic is refused by name, never emptied") {
         struct dvo_call c;
@@ -292,7 +321,13 @@ int test_dev_orient(void)
         ASSERT(strstr(c.reply.error.message, "landing.proof") != NULL);
         dvo_end(&c);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_orient_banner(void)
+{
+    int failures = 0;
 
     TEST("orient: the banner counts the same table the leaf renders") {
         char banner[192];
@@ -309,7 +344,13 @@ int test_dev_orient(void)
         ASSERT(strstr(banner, "dev agent orient") != NULL);
         dvo_end(&c);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_orient_gate_fixture(void)
+{
+    int failures = 0;
 
     TEST("gate: a row whose anchor is gone from its file FAILS the checker") {
         char dir[512];
@@ -364,9 +405,22 @@ int test_dev_orient(void)
         ASSERT_EQ(dvo_run_checker(dir), 1);
         test_rm_rf_recursive(dir);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
 
-_test_next:;
+int test_dev_orient(void);
+int test_dev_orient(void)
+{
+    int failures = test_dev_orient_registration() +
+                   test_dev_orient_listing() +
+                   test_dev_orient_topic() +
+                   test_dev_orient_query() +
+                   test_dev_orient_query_compose() +
+                   test_dev_orient_unknown_topic() +
+                   test_dev_orient_banner() +
+                   test_dev_orient_gate_fixture();
+
     if (failures == 0) printf("test_dev_orient: all passed\n");
     else printf("test_dev_orient: %d FAILED\n", failures);
     return failures;

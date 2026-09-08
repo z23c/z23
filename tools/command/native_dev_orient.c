@@ -148,6 +148,160 @@ static void dvo_push_line(struct json_value *lines, const char *text)
     json_free(&s);
 }
 
+/* The unknown-topic failure: names the bad value and every declared topic,
+ * so the caller needs no second call to learn what does exist. */
+static void dvo_fail_unknown_topic(struct zcl_command_reply *reply,
+                                   const char *topic)
+{
+    char msg[512];
+    char known[320];
+    size_t used = 0;
+
+    known[0] = '\0';
+    for (size_t i = 0; i < DVO_TOPIC_COUNT; i++) {
+        int w = snprintf(known + used, sizeof(known) - used, "%s%s",
+                         used == 0 ? "" : ", ", dvo_topics[i].topic);
+        if (w < 0 || (size_t)w >= sizeof(known) - used)
+            break;
+        used += (size_t)w;
+    }
+    (void)snprintf(msg, sizeof(msg),
+                   "unknown topic \"%s\"; declared topics: %s", topic,
+                   known);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, "UNKNOWN_TOPIC",
+                           "resolve", false, false, msg,
+                           "tools/command/native_dev_orient.c");
+}
+
+/* Does one fact row belong in this call's answer? A topic filter must match
+ * exactly; a query filter matches key, claim or path (case-insensitive). */
+static bool dvo_row_matches(const char *topic, const char *query,
+                            const char *topic_, const char *key_,
+                            const char *claim_, const char *path_)
+{
+    if (topic && strcmp(topic, topic_) != 0)
+        return false;
+    if (!query)
+        return true;
+    return dvo_contains(key_, query) || dvo_contains(claim_, query) ||
+           dvo_contains(path_, query);
+}
+
+/* Append one matched row to facts/lines, honoring DVO_ROW_CAP. */
+static void dvo_emit_row(struct json_value *facts, struct json_value *lines,
+                         struct json_value *row, long long *emitted,
+                         const char *topic_, const char *key_,
+                         const char *claim_, const char *path_,
+                         const char *anchor_)
+{
+    char line[DVO_LINE_MAX];
+
+    if (*emitted >= DVO_ROW_CAP)
+        return;
+    json_set_object(row);
+    (void)json_push_kv_str(row, "topic", topic_);
+    (void)json_push_kv_str(row, "key", key_);
+    (void)json_push_kv_str(row, "claim", claim_);
+    (void)json_push_kv_str(row, "path", path_);
+    (void)json_push_kv_str(row, "anchor", anchor_);
+    (void)json_push_back(facts, row);
+    (void)snprintf(line, sizeof(line), "%s  %s  - %s @%s", key_, claim_,
+                   path_, anchor_);
+    dvo_push_line(lines, line);
+    (*emitted)++;
+}
+
+/* Pass one: per-topic row counts, so the listing is derived from the rows
+ * themselves and can never disagree with them. In "topics" mode this also
+ * fills in the human-readable per-topic listing lines. */
+static void dvo_build_topics(struct json_value *topics,
+                             struct json_value *lines, struct json_value *row,
+                             const char *mode, long long *total_rows)
+{
+    for (size_t i = 0; i < DVO_TOPIC_COUNT; i++) {
+        long long rows = 0;
+
+#define ZCL_FACT_TOPIC(topic_, blurb_)
+#define ZCL_FACT(topic_, key_, claim_, path_, anchor_)                       \
+    if (strcmp(topic_, dvo_topics[i].topic) == 0)                            \
+        rows++;
+#include "../../engine/composition/facts/index.def"
+#undef ZCL_FACT
+#undef ZCL_FACT_TOPIC
+
+        *total_rows += rows;
+        json_set_object(row);
+        (void)json_push_kv_str(row, "topic", dvo_topics[i].topic);
+        (void)json_push_kv_str(row, "blurb", dvo_topics[i].blurb);
+        (void)json_push_kv_int(row, "rows", rows);
+        (void)json_push_back(topics, row);
+
+        if (strcmp(mode, "topics") == 0) {
+            char line[DVO_LINE_MAX];
+            (void)snprintf(line, sizeof(line), "%-16s %3lld rows  %s",
+                           dvo_topics[i].topic, rows, dvo_topics[i].blurb);
+            dvo_push_line(lines, line);
+        }
+    }
+}
+
+/* Pass two: the rows this call asked for, honored only outside "topics"
+ * mode (which never names individual rows). */
+static void dvo_build_facts(struct json_value *facts,
+                            struct json_value *lines, struct json_value *row,
+                            const char *mode, const char *topic,
+                            const char *query, long long *matched,
+                            long long *emitted)
+{
+    if (strcmp(mode, "topics") == 0)
+        return;
+#define ZCL_FACT_TOPIC(topic_, blurb_)
+#define ZCL_FACT(topic_, key_, claim_, path_, anchor_)                       \
+    if (dvo_row_matches(topic, query, topic_, key_, claim_, path_)) {        \
+        (*matched)++;                                                        \
+        dvo_emit_row(facts, lines, row, emitted, topic_, key_, claim_,       \
+                    path_, anchor_);                                         \
+    }
+#include "../../engine/composition/facts/index.def"
+#undef ZCL_FACT
+#undef ZCL_FACT_TOPIC
+}
+
+/* Assemble the reply from the two built arrays and the counters pass one
+ * and pass two produced. Split out of the handler below purely to keep
+ * that function's own decision count small and legible. */
+static void dvo_finish_reply(struct zcl_command_reply *reply,
+                             struct json_value *topics,
+                             struct json_value *facts,
+                             struct json_value *lines, const char *mode,
+                             const char *topic, const char *query,
+                             long long total_rows, long long matched,
+                             long long emitted)
+{
+    (void)json_push_kv_str(&reply->data, "source", DVO_SOURCE);
+    (void)json_push_kv_str(&reply->data, "mode", mode);
+    if (topic)
+        (void)json_push_kv_str(&reply->data, "topic", topic);
+    if (query)
+        (void)json_push_kv_str(&reply->data, "query", query);
+    (void)json_push_kv(&reply->data, "topics", topics);
+    (void)json_push_kv(&reply->data, "facts", facts);
+    (void)json_push_kv_int(&reply->data, "count", emitted);
+    (void)json_push_kv_int(&reply->data, "matched", matched);
+    (void)json_push_kv_bool(&reply->data, "truncated", matched > emitted);
+    (void)json_push_kv_int(&reply->data, "total_rows", total_rows);
+    (void)json_push_kv_int(&reply->data, "total_topics",
+                           (int64_t)DVO_TOPIC_COUNT);
+    (void)json_push_kv(&reply->data, "lines", lines);
+
+    json_free(topics);
+    json_free(facts);
+    json_free(lines);
+
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+}
+
 void zcl_native_handle_dev_orient(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
@@ -168,25 +322,7 @@ void zcl_native_handle_dev_orient(const struct zcl_command_request *request,
     query = dvo_input_str(request, "query");
 
     if (topic && !dvo_known_topic(topic)) {
-        char msg[512];
-        char known[320];
-        size_t used = 0;
-
-        known[0] = '\0';
-        for (size_t i = 0; i < DVO_TOPIC_COUNT; i++) {
-            int w = snprintf(known + used, sizeof(known) - used, "%s%s",
-                             used == 0 ? "" : ", ", dvo_topics[i].topic);
-            if (w < 0 || (size_t)w >= sizeof(known) - used)
-                break;
-            used += (size_t)w;
-        }
-        (void)snprintf(msg, sizeof(msg),
-                       "unknown topic \"%s\"; declared topics: %s", topic,
-                       known);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "UNKNOWN_TOPIC",
-                               "resolve", false, false, msg,
-                               "tools/command/native_dev_orient.c");
+        dvo_fail_unknown_topic(reply, topic);
         return;
     }
 
@@ -200,89 +336,14 @@ void zcl_native_handle_dev_orient(const struct zcl_command_request *request,
     json_set_array(&lines);
     json_init(&row);
 
-    /* Pass one: per-topic row counts, so the listing is derived from the
-     * rows themselves and can never disagree with them. */
-    for (size_t i = 0; i < DVO_TOPIC_COUNT; i++) {
-        long long rows = 0;
-
-#define ZCL_FACT_TOPIC(topic_, blurb_)
-#define ZCL_FACT(topic_, key_, claim_, path_, anchor_)                       \
-    if (strcmp(topic_, dvo_topics[i].topic) == 0)                            \
-        rows++;
-#include "../../engine/composition/facts/index.def"
-#undef ZCL_FACT
-#undef ZCL_FACT_TOPIC
-
-        total_rows += rows;
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "topic", dvo_topics[i].topic);
-        (void)json_push_kv_str(&row, "blurb", dvo_topics[i].blurb);
-        (void)json_push_kv_int(&row, "rows", rows);
-        (void)json_push_back(&topics, &row);
-
-        if (strcmp(mode, "topics") == 0) {
-            char line[DVO_LINE_MAX];
-            (void)snprintf(line, sizeof(line), "%-16s %3lld rows  %s",
-                           dvo_topics[i].topic, rows, dvo_topics[i].blurb);
-            dvo_push_line(&lines, line);
-        }
-    }
-
-    /* Pass two: the rows this call asked for. */
-    if (strcmp(mode, "topics") != 0) {
-#define ZCL_FACT_TOPIC(topic_, blurb_)
-#define ZCL_FACT(topic_, key_, claim_, path_, anchor_)                       \
-    do {                                                                     \
-        bool want = (!topic || strcmp(topic, topic_) == 0) &&                \
-                    (!query || dvo_contains(key_, query) ||                  \
-                     dvo_contains(claim_, query) ||                          \
-                     dvo_contains(path_, query));                            \
-        if (want) {                                                          \
-            matched++;                                                       \
-            if (emitted < DVO_ROW_CAP) {                                     \
-                char line[DVO_LINE_MAX];                                     \
-                json_set_object(&row);                                       \
-                (void)json_push_kv_str(&row, "topic", topic_);               \
-                (void)json_push_kv_str(&row, "key", key_);                   \
-                (void)json_push_kv_str(&row, "claim", claim_);               \
-                (void)json_push_kv_str(&row, "path", path_);                 \
-                (void)json_push_kv_str(&row, "anchor", anchor_);             \
-                (void)json_push_back(&facts, &row);                          \
-                (void)snprintf(line, sizeof(line), "%s  %s  - %s @%s", key_, \
-                               claim_, path_, anchor_);                      \
-                dvo_push_line(&lines, line);                                 \
-                emitted++;                                                   \
-            }                                                                \
-        }                                                                    \
-    } while (0);
-#include "../../engine/composition/facts/index.def"
-#undef ZCL_FACT
-#undef ZCL_FACT_TOPIC
-    }
+    dvo_build_topics(&topics, &lines, &row, mode, &total_rows);
+    dvo_build_facts(&facts, &lines, &row, mode, topic, query, &matched,
+                    &emitted);
 
     json_free(&row);
 
-    (void)json_push_kv_str(&reply->data, "source", DVO_SOURCE);
-    (void)json_push_kv_str(&reply->data, "mode", mode);
-    if (topic)
-        (void)json_push_kv_str(&reply->data, "topic", topic);
-    if (query)
-        (void)json_push_kv_str(&reply->data, "query", query);
-    (void)json_push_kv(&reply->data, "topics", &topics);
-    (void)json_push_kv(&reply->data, "facts", &facts);
-    (void)json_push_kv_int(&reply->data, "count", emitted);
-    (void)json_push_kv_int(&reply->data, "matched", matched);
-    (void)json_push_kv_bool(&reply->data, "truncated", matched > emitted);
-    (void)json_push_kv_int(&reply->data, "total_rows", total_rows);
-    (void)json_push_kv_int(&reply->data, "total_topics",
-                           (int64_t)DVO_TOPIC_COUNT);
-    (void)json_push_kv(&reply->data, "lines", &lines);
-
-    json_free(&topics);
-    json_free(&facts);
-    json_free(&lines);
-
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    dvo_finish_reply(reply, &topics, &facts, &lines, mode, topic, query,
+                     total_rows, matched, emitted);
 }
 
 /* The one-line orientation banner every agent-facing start leaf prints, so
