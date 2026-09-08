@@ -498,3 +498,11 @@ ZCL_BLOCKER_REMEDY(service.declaration_diverged,                OWNER)
  *     without the seed, and inventing one would mean holding the master
  *     identity in the node. ─────────────────────────────────────────────── */
 ZCL_BLOCKER_REMEDY(zcode_dht.own_delegation_expired,            OWNER)
+
+/*   tor.start_failed — the embedded Tor thread is not running while this boot
+ *     asked for an onion (engine/composition/src/boot_tor_watch.c). The
+ *     condition retries the start on an exponential schedule that never gives
+ *     up, so the remedy is a condition and not the operator: the usual cause
+ *     is a bootstrap port a departing process still holds, which frees itself
+ *     within seconds. The operator only sees it if the retries keep failing. */
+ZCL_BLOCKER_REMEDY(tor.start_failed,                            tor_start_failed)

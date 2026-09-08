@@ -8,6 +8,7 @@
 #include "net/netbase.h"
 #include "config/boot.h"
 #include "config/boot_flyclient.h"
+#include "config/boot_tor_watch.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
 #include "validation/main_state.h"
@@ -273,6 +274,10 @@ struct boot_svc_ctx {
     bool defer_offer_service;
     struct bg_validation_service bg_validation;
     struct bg_hash_verification_service bg_hash_verify;
+    /* Watch over the embedded Tor thread: names and retries a Tor start that
+     * failed or whose thread died (config/boot_tor_watch.h). Owned here so
+     * the retry state lives in the service context, never at file scope. */
+    struct boot_tor_watch tor_watch;
     /* sync_watchdog now uses the engine/modules/health periodic ring instead of
      * its own pthread_t — see sync_watchdog_start()/stop(). */
 };
@@ -479,6 +484,17 @@ struct boot_ready_legs {
     bool listener;
     bool pump;
     bool sweep;
+    /* A NON-LEG annotation. It never gates READY — it answers the question
+     * `descriptor=no` on its own cannot: is this node still bootstrapping,
+     * or did Tor fail and stay failed?
+     *
+     *   "tor=ok" / "tor=starting" / "tor=failed(<token>)" / "tor=off"
+     *   (config/boot_tor_watch.h). On 2026-09-08 an operator read
+     *   `descriptor=no` for 27 minutes with no way to tell that the Tor
+     *   thread had already exited on a port conflict.
+     *
+     * Empty string = omit from the status line. */
+    char tor[48];
 };
 
 /* Pure: true only when every leg is confirmed. NULL is not confirmed. */

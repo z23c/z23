@@ -585,6 +585,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_snapshot_offer.c", CAP_FS_WRI
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_stale_locks.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_steps.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_tip_hooks.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_tor_watch.c", CAP_FS_READ, "reads this boot's tor.log to name WHY the embedded Tor thread exited; the retry and the status label need no other reach")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_utxo_parity.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_utxo_replay.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_verify_consensus_bundle.c", CAP_FS_WRITE, "")

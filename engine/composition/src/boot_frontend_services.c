@@ -533,17 +533,36 @@ bool boot_onion_tor_start_early(const struct app_context *app)
     return true;
 }
 
+/* The retry entry point handed to the Tor watch. It is deliberately the SAME
+ * wrapper the frontend kernel starts Tor with, so a retry can never diverge
+ * from a boot: whatever a first start does (identity, handler, torrc), a
+ * retry does. tor_integration_start() and onion_service_start() both return
+ * early when they are already up, so calling this again is a no-op the
+ * moment Tor is healthy. */
 static bool boot_onion_tor_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
     if (!svc || !svc->app_ctx)
         return false;
-    return boot_onion_tor_start_early(svc->app_ctx);
+    bool ok = boot_onion_tor_start_early(svc->app_ctx);
+
+    /* Arm the watch AFTER the first start attempt so the very first failure
+     * is already covered: the watch's detect reads core's live predicates,
+     * not anything this call returned. Arming is idempotent — a retry
+     * re-entering through boot_onion_tor_start() will not reset the
+     * schedule. */
+    if (boot_profile_has_onion(svc->app_ctx) &&
+        app_tor_real_build_linked())
+        boot_tor_watch_arm(&svc->tor_watch, svc->app_ctx->datadir,
+                           boot_onion_tor_start, svc);
+    return ok;
 }
 
 static void boot_onion_tor_stop(void *ctx)
 {
-    (void)ctx;
+    struct boot_svc_ctx *svc = ctx;
+    if (svc)
+        boot_tor_watch_disarm(&svc->tor_watch);
     tor_integration_stop();
     onion_service_stop();
 }

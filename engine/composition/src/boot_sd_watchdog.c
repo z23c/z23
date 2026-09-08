@@ -154,12 +154,13 @@ void boot_ready_legs_describe(const struct boot_ready_legs *l,
         return;
     }
     snprintf(out, cap,
-             "descriptor=%s listener=%s pump=%s sweep=%s rendezvous=%s",
+             "descriptor=%s listener=%s pump=%s sweep=%s rendezvous=%s%s%s",
              l->descriptor ? "yes" : "no",
              l->listener   ? "yes" : "no",
              l->pump       ? "yes" : "no",
              l->sweep      ? "yes" : "no",
-             "unconfirmed");
+             "unconfirmed",
+             l->tor[0] ? " " : "", l->tor);
 }
 
 static void boot_sd_watchdog_collect_ready_legs(struct boot_ready_legs *out)
@@ -170,6 +171,13 @@ static void boot_sd_watchdog_collect_ready_legs(struct boot_ready_legs *out)
 
     /* Descriptor: onion published, or onion was never asked for. */
     out->descriptor = !boot_sd_watchdog_onion_blocks_ready();
+
+    /* Why the descriptor leg is where it is. Not a leg, never gates READY —
+     * an operator staring at `descriptor=no` needs to know whether Tor is
+     * bootstrapping or already dead, and only this says so. Lock-free
+     * atomic loads, safe on the pet thread. */
+    boot_tor_watch_status(svc ? &svc->tor_watch : NULL,
+                          out->tor, sizeof(out->tor));
 
     /* Sweep: the root supervisor is sweeping (or has not swept yet this
      * boot, which is not a wedge). */
