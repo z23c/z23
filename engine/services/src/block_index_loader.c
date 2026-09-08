@@ -168,13 +168,38 @@ block_index_apply_persisted_failure_trust(struct block_index *pindex,
     return BLOCK_FAILURE_TRUST_DEMOTED;
 }
 
-static int cmp_height(const void *a, const void *b)
+/* Height comparator for forward-pass input. Non-static so the
+ * throughput harness times the exact production comparison. */
+int block_index_ptr_cmp_height(const void *a, const void *b)
 {
     const struct block_index *pa = *(const struct block_index *const *)a;
     const struct block_index *pb = *(const struct block_index *const *)b;
     if (pa->nHeight < pb->nHeight) return -1; // raw-return-ok:qsort-comparator
     if (pa->nHeight > pb->nHeight) return 1;
     return 0;
+}
+
+/* True iff pointer array is already non-decreasing by height. The flat
+ * loader collects in file order and genuine files are height-sorted by
+ * the writer, so this lets it skip the qsort (see the call site). */
+bool block_index_ptrs_height_sorted(struct block_index *const *arr, size_t n)
+{
+    for (size_t i = 1; i < n; i++) {
+        if (arr[i - 1]->nHeight > arr[i]->nHeight)
+            return false;
+    }
+    return true;
+}
+
+/* Sort a forward-pass pointer array by height, skipping the qsort when the
+ * array is already ordered (see block_index_ptrs_height_sorted). Kept as
+ * its own function, called unconditionally, so a caller's own branch count
+ * never grows just because this call learned to skip redundant work. */
+static void block_index_sort_forward_pass_input(
+    struct block_index **arr, size_t n)
+{
+    if (!block_index_ptrs_height_sorted(arr, n))
+        qsort(arr, n, sizeof(*arr), block_index_ptr_cmp_height);
 }
 
 /* ── save/load block_index_flat ──────────────────────────── */
@@ -476,7 +501,19 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
             if (arena[i].phashBlock)
                 sorted[n++] = &arena[i];
         }
-        qsort(sorted, n, sizeof(*sorted), cmp_height);
+        /* Genuine flat files are height-sorted by the writer and the arena
+         * above preserves file order, so the collected array is already
+         * the forward-pass order and qsort would be an identity
+         * permutation at O(n log n) cost (~3M pointers on a full index).
+         * block_index_sort_forward_pass_input skips it exactly then and
+         * qsorts exactly otherwise. Skipping is behaviour-identical:
+         * block_index_forward_pass derives every field from the
+         * already-linked pprev (strictly lower height, so always
+         * processed first in ANY height-sorted order), and equal-height
+         * rows share no ancestry — their relative order cannot change any
+         * output. A foreign/legacy unsorted file still takes the qsort,
+         * bit for bit as before. */
+        block_index_sort_forward_pass_input(sorted, n);
         block_index_forward_pass(sorted, n);
         free(sorted);
     } else {
@@ -616,7 +653,8 @@ struct zcl_result load_block_index(struct main_state *ms,
     }
     count = idx;
 
-    qsort(sorted, count, sizeof(struct block_index *), cmp_height);
+    qsort(sorted, count, sizeof(struct block_index *),
+          block_index_ptr_cmp_height);
 
     block_index_forward_pass(sorted, count);
 

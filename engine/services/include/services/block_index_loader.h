@@ -39,7 +39,15 @@ struct node_db;
 struct chain_params;
 struct block_tree_db;
 struct block_index_projection;
+struct block_index;
 struct sqlite3;
+
+/* Height comparator for forward-pass pointer arrays (qsort order), and
+ * the linear already-sorted predicate the flat loader uses to skip the
+ * qsort on writer-ordered files. Both are pure views over nHeight. */
+int block_index_ptr_cmp_height(const void *a, const void *b);
+bool block_index_ptrs_height_sorted(struct block_index *const *arr,
+                                    size_t n);
 
 /* ── Flat file (block_index.bin) ─────────────────────────── */
 
@@ -105,6 +113,27 @@ struct zcl_result block_index_flat_header_at(const char *datadir,
                                              int32_t height,
                                              uint8_t out_hash[32],
                                              uint8_t out_root[32]);
+
+/* Batched cursor over the same integrity-bound flat file. Opening runs
+ * the identical open + embedded-verify + format prologue as
+ * block_index_flat_header_at exactly once; each read then binary-searches
+ * the pinned mapping with the identical lookup and error taxonomy
+ * (same codes; messages carry the cursor/read name instead of _at).
+ * A range of N heights costs one verify instead of N — the per-read
+ * cost drops from O(file size) to O(log rows).
+ *
+ * The cursor holds no lock of any kind (fd + read mapping only), so it
+ * never interacts with the reducer-drive/coins_kv lock order: drive
+ * holds coins_kv, this holds nothing. It snapshots the file at open:
+ * a concurrent atomic replace is not observed mid-scan. Close is
+ * NULL-safe; every open must be closed exactly once. */
+struct block_index_flat_cursor;
+struct zcl_result block_index_flat_cursor_open(
+    const char *datadir, struct block_index_flat_cursor **out);
+struct zcl_result block_index_flat_cursor_read(
+    struct block_index_flat_cursor *cur, int32_t height,
+    uint8_t out_hash[32], uint8_t out_root[32]);
+void block_index_flat_cursor_close(struct block_index_flat_cursor *cur);
 
 /* load_block_index_flat ALWAYS re-derives the pointer-graph-derived fields
  * (nChainWork, nChainTx, skip links, cached branch id) through the canonical

@@ -2366,7 +2366,7 @@ engine/services/src/binary_staleness_service.c:binary_staleness_check_now:26
 engine/services/src/block_index_blocks_hydrate.c:load_block_index_from_blocks_table:64
 engine/services/src/block_index_flat_anchor.c:block_index_flat_anchor_apply:22
 engine/services/src/block_index_flat_anchor.c:block_index_flat_anchor_encode:19
-engine/services/src/block_index_flat_header.c:block_index_flat_header_at:20
+engine/services/src/block_index_flat_header.c:block_index_flat_header_at:7
 engine/services/src/block_index_integrity.c:bii_repair_post_activation_anchor:22
 engine/services/src/block_index_integrity.c:block_index_repair_heights_range:43
 engine/services/src/block_index_integrity.c:block_index_repair_pprev:45

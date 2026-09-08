@@ -338,7 +338,7 @@ ZCL_MODULE_CAPABILITY("engine/services/src/binary_staleness_service.c", CAP_FS_R
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_blocks_hydrate.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_cache_envelope.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_flat_anchor.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/services/src/block_index_flat_header.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/block_index_flat_header.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_flat_save.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_integrity.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/block_index_loader.c", CAP_FS_WRITE|CAP_FS_READ, "")

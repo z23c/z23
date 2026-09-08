@@ -169,6 +169,32 @@ Use when no snapshot source is available, or as the path toward local
 sovereignty. The current end-to-end genesis-to-tip timing/validation claim still
 requires exact-candidate proof; see `docs/HANDOFF.md`.
 
+### Per-stage throughput measurement (`sync_throughput`)
+
+The `sync_throughput` registered test group (`tests/harness/src/test_sync_throughput.c`,
+`make t-fast ONLY=sync_throughput`) is a hermetic, in-process benchmark of the
+seven functions initial block sync spends its time in: header wire
+round-trip, Equihash PoW verify, merkle root computation, structural block
+check, header-range planning (`hrs_partition`), flat block-index point
+reads, and forward-pass input ordering. Every stage calls the real
+production function against a deterministic fixture — no live node, no
+network, no canonical datadir — and every timed stage carries teeth (a
+mutated fixture must fail with the exact historical reject reason) so a
+benchmark of a hollow verifier cannot pass. Budgets are declared in
+reference-box units and scaled for the running host's load by
+`test/test_timing_budget.h`, so a busy machine reports a smaller margin
+rather than a false failure. Two throughput fixes measured here are live in
+`engine/services/src/block_index_flat_header.c` and
+`engine/services/src/block_index_loader.c`: a batched cursor over the flat
+block index (`block_index_flat_cursor_open`/`_read`/`_close`) that pays one
+open+verify for a whole range of heights instead of one per height, and a
+linear already-sorted check (`block_index_ptrs_height_sorted`) that skips
+the forward-pass qsort when a genuine flat file's rows are already in
+writer order. Neither changes a consensus predicate or mandatory
+verification step, and neither holds a lock while sampling — see the
+locking note at the top of `block_index_flat_header.c`. Numbers land in
+`docs/experiments/2026-09-03-sync-throughput.md`.
+
 ---
 
 ## Method 3 (legacy bootstrap, development only): Import from zclassicd

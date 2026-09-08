@@ -577,6 +577,7 @@ int test_fee_estimation(void);
 int test_header_sync(void);
 int test_header_sync_stall(void);
 int test_header_range_sched(void);
+int test_sync_throughput(void);
 int test_hd_keychain(void);
 int test_mnemonic(void);
 int test_bip44(void);

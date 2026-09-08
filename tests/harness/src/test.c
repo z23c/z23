@@ -1600,6 +1600,7 @@ int main(int argc, char **argv)
     failures += test_header_sync();
     failures += test_header_sync_stall();
     failures += test_header_range_sched();
+    failures += test_sync_throughput();
     failures += test_hd_keychain();
     failures += test_mnemonic();
     failures += test_bip44();
