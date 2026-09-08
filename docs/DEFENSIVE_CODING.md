@@ -1234,6 +1234,7 @@ add/remove a gate.
 - `check-architecture-tree`
 - `check-retrieval-historical-evidence`
 - `check-honest-witness`
+- `check-host-gc-selftest`
 - `check-lag-slo-observable`
 - `check-lib-layering`
 - `check-lib-module-order`
