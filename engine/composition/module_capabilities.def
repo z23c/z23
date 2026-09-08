@@ -65,6 +65,7 @@ ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_background_quality.c", CA
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_contract_registry.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_copy_prove_controller.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_cure_status_helpers.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_impact_harness.c", CAP_FS_READ, "reads windows_acceptance.mk and scans tests/harness/src + tools/lint/lintc for harness routing")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_lane_runtime.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_resources.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_security_posture.c", CAP_FS_WRITE, "")

@@ -540,7 +540,12 @@ reads a node or datadir.
 
 `z23 code tests <file.c>` names the group that covers a file, which is the
 `--group=` argument. `--limit=N` takes a sample instead of the whole file, and
-`--target=` points the plan at a build other than `test_parallel`.
+`--target=` points the plan at a build other than `test_parallel`. A
+`tests/harness/src/` file routes from its own `test_<group>.c`/`spec_<group>.c`
+name or its row in the Windows-acceptance sources table rather than a
+per-file rule, and a `tools/` file also picks up any harness or lint-gate
+file that names it inside a string literal as a secondary `test_groups`
+candidate.
 
 **The survivors are the product, not the score.** Each survivor is a specific
 line the group's assertions cannot see, printed as `file:line:col` with the

@@ -51,8 +51,10 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
+#include "command/native_command.h"
 #include "command/native_dev_proof_command.h"
 #include "config/command_catalog.h"
+#include "controllers/agent_impact_harness.h"
 #include "controllers/agent_impact_rules.h"
 #include "dependency_links.h"
 #include "dev_proof.h"
@@ -6177,6 +6179,171 @@ static int test_ic_foreground_proof_command(void)
     return failures;
 }
 
+/* ── harness-file routing (agent_impact_harness.h) ──────────────────────
+ *
+ * The shared rule table above (agent_impact_rules.def) only fires on a
+ * compiled-source dependency edge or a hand-written glob; a file under
+ * tests/harness/src/ is never #included by anything, so it earns neither.
+ * These cover the three structural conventions agent_impact_harness.c
+ * resolves instead of a fourth per-file rule row: test_<group>.c naming,
+ * the Windows-acceptance sources table (including a helper two rows
+ * share), a string-literal name reference, and the genuine no-owner
+ * case that must stay unmatched rather than guess. */
+
+static int test_ic_harness_test_group_naming(void)
+{
+    int failures = 0;
+    TEST("harness routing: test_<group>.c resolves from the catalog, not a "
+         "listed AGENT_IMPACT_RULE row") {
+        char group[ZCL_AGENT_IMPACT_GROUP_MAX];
+        ASSERT(agent_impact_harness_test_group_name(
+            "tests/harness/src/test_dev_land.c", group));
+        ASSERT_STR_EQ(group, "dev_land");
+
+        struct zcl_command_reply reply;
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path",
+                                "tests/harness/src/test_dev_land.c"));
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal", .invoked_name = "code.tests",
+        };
+        zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+        zcl_native_handle_code_tests(&request, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "route")), "dev_land");
+        ASSERT(json_get_bool(json_get(&reply.data, "matched")));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_harness_windows_acceptance_table(void)
+{
+    int failures = 0;
+    TEST("harness routing: a Windows-acceptance SOURCES row is read from "
+         "the table — including a helper file two rows share") {
+        static const char synthetic_table[] =
+            "ZCL_WINDOWS_ACCEPTANCE_alpha_SOURCES := \\\n"
+            "\ttests/harness/src/alpha_windows_acceptance.c \\\n"
+            "\ttests/harness/src/shared_helper.c\n"
+            "ZCL_WINDOWS_ACCEPTANCE_beta_SOURCES := \\\n"
+            "\ttests/harness/src/beta_windows_acceptance.c \\\n"
+            "\ttests/harness/src/shared_helper.c\n";
+        ASSERT(agent_impact_windows_acceptance_table_lists(
+            synthetic_table, "tests/harness/src/alpha_windows_acceptance.c"));
+        ASSERT(agent_impact_windows_acceptance_table_lists(
+            synthetic_table, "tests/harness/src/beta_windows_acceptance.c"));
+        /* the shared helper is linked into BOTH rows. */
+        ASSERT(agent_impact_windows_acceptance_table_lists(
+            synthetic_table, "tests/harness/src/shared_helper.c"));
+        /* a file present nowhere in the table is not a false positive. */
+        ASSERT(!agent_impact_windows_acceptance_table_lists(
+            synthetic_table, "tests/harness/src/unrelated.c"));
+
+        /* the real table: process_group_exec_windows_acceptance.c carries
+         * no per-file AGENT_IMPACT_RULE row (unlike most of its acceptance
+         * siblings), yet code.tests now matches it via this table alone. */
+        struct zcl_command_reply reply;
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path",
+            "tests/harness/src/process_group_exec_windows_acceptance.c"));
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal", .invoked_name = "code.tests",
+        };
+        zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+        zcl_native_handle_code_tests(&request, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "route")),
+                     "make_lint_gates");
+        ASSERT(json_get_bool(json_get(&reply.data, "matched")));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_harness_name_reference_secondary_candidate(void)
+{
+    int failures = 0;
+    TEST("harness routing: a string-literal reference to a tools/ source "
+         "file adds its referencer's own group as a secondary candidate") {
+        ASSERT(agent_impact_string_literal_contains(
+            "ASSERT(strstr(buf, \"zcl-rpc\") != NULL);\n", "zcl-rpc"));
+        ASSERT(agent_impact_string_literal_contains(
+            "fprintf(stderr, \"blocked \\\"binary_missing_zcl_rpc\\\"\");\n",
+            "zcl_rpc"));
+        /* an identifier or comment occurrence outside any string literal
+         * never counts — this is a name-REFERENCE signal, not a grep. */
+        ASSERT(!agent_impact_string_literal_contains(
+            "/* zcl-rpc is mentioned only here, in a comment */\n"
+            "int zcl_rpc_unrelated(void);\n", "zcl-rpc"));
+
+        struct zcl_command_reply reply;
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path", "tools/zcl-rpc.c"));
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal", .invoked_name = "code.tests",
+        };
+        zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+        zcl_native_handle_code_tests(&request, &reply);
+        const struct json_value *groups = json_get(&reply.data, "test_groups");
+        ASSERT(groups && groups->type == JSON_ARR);
+        bool saw_no_hardcoded_home = false, saw_replay_canary = false;
+        for (size_t i = 0; i < groups->num_children; i++) {
+            const char *g = json_get_str(&groups->children[i]);
+            if (g && strcmp(g, "no_hardcoded_home") == 0)
+                saw_no_hardcoded_home = true;
+            if (g && strcmp(g, "replay_canary_verdict") == 0)
+                saw_replay_canary = true;
+        }
+        ASSERT(saw_no_hardcoded_home);
+        ASSERT(saw_replay_canary);
+        /* a secondary candidate never displaces the structural route. */
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "route")),
+                     "make_lint_gates");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_harness_no_owner_stays_unmatched(void)
+{
+    int failures = 0;
+    TEST("harness routing: a harness file with no test_<group> name, no "
+         "acceptance-table row, and no shared rule stays matched:false — "
+         "never a guess") {
+        char group[ZCL_AGENT_IMPACT_GROUP_MAX];
+        ASSERT(!agent_impact_harness_test_group_name(
+            "tests/harness/src/not_a_registered_group_at_all.c", group));
+
+        struct zcl_command_reply reply;
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path",
+            "tests/harness/src/not_a_registered_group_at_all.c"));
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal", .invoked_name = "code.tests",
+        };
+        zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+        zcl_native_handle_code_tests(&request, &reply);
+        ASSERT(!json_get_bool(json_get(&reply.data, "matched")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "route")),
+                     "make_lint_gates");
+        const struct json_value *groups = json_get(&reply.data, "test_groups");
+        ASSERT(groups && groups->type == JSON_ARR && groups->num_children == 0);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -6275,5 +6442,9 @@ int test_impact_composition(void)
     failures += test_ic_changed_set_reads_a_private_generation_worktree();
     failures += test_ic_changed_set_refuses_above_its_ceiling();
     failures += test_ic_watch_overlay_keeps_its_own_ceiling();
+    failures += test_ic_harness_test_group_naming();
+    failures += test_ic_harness_windows_acceptance_table();
+    failures += test_ic_harness_name_reference_secondary_candidate();
+    failures += test_ic_harness_no_owner_stays_unmatched();
     return failures;
 }
