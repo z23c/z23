@@ -153,6 +153,26 @@ static void on_dep_cb(const char *source, const char *dependency, void *user)
         b->err = true;
 }
 
+static bool build_roots_match(const char *root,
+                              const uint8_t built_source_root[32],
+                              const uint8_t built_dep_root[32],
+                              uint8_t source_stat_out[32],
+                              uint8_t dep_stat_out[32])
+{
+    uint8_t current_source_root[32], current_dep_root[32];
+    if (!ci_source_roots_sha3(root, current_source_root, source_stat_out))
+        LOG_FAIL("codeindex", "source freshness scan failed under %s", root);
+    if (memcmp(built_source_root, current_source_root, 32) != 0)
+        LOG_FAIL("codeindex", "source root changed during memory build under %s",
+                 root);
+    if (!ci_deps_scan_roots(root, NULL, NULL, current_dep_root, dep_stat_out))
+        LOG_FAIL("codeindex", "dependency freshness scan failed under %s", root);
+    if (memcmp(built_dep_root, current_dep_root, 32) != 0)
+        LOG_FAIL("codeindex",
+                 "dependency root changed during memory build under %s", root);
+    return true;
+}
+
 bool ci_build_store_memory(const char *root, int64_t build_start_ms,
                            struct ci_store **out_store,
                            uint8_t source_stat_out[32],
@@ -193,13 +213,9 @@ bool ci_build_store_memory(const char *root, int64_t build_start_ms,
              ci_store_meta_set(store, "dep_root_sha3", built_dep_root,
                                sizeof(built_dep_root));
 
-    uint8_t current_source_root[32], current_dep_root[32];
     if (ok)
-        ok = ci_source_roots_sha3(root, current_source_root, source_stat_out) &&
-             memcmp(built_source_root, current_source_root, 32) == 0 &&
-             ci_deps_scan_roots(root, NULL, NULL, current_dep_root,
-                                dep_stat_out) &&
-             memcmp(built_dep_root, current_dep_root, 32) == 0;
+        ok = build_roots_match(root, built_source_root, built_dep_root,
+                               source_stat_out, dep_stat_out);
     if (ok)
         ok = ci_store_meta_set(store, "source_stat_root_sha3",
                                source_stat_out, 32) &&

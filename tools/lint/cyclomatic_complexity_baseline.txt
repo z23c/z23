@@ -68,7 +68,7 @@ cognition/modules/codeindex/src/codeindex_build.c:ci_rebuild_lock_open:19
 cognition/modules/codeindex/src/codeindex_build.c:codeindex_rebuild_internal:85
 cognition/modules/codeindex/src/codeindex_build.c:collect_dir:20
 cognition/modules/codeindex/src/codeindex_build.c:source_file_sha3:22
-cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:37
+cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:34
 cognition/modules/codeindex/src/codeindex_build_windows.c:codeindex_rebuild_internal:40
 cognition/modules/codeindex/src/codeindex_build_windows.c:collect_directory:22
 cognition/modules/codeindex/src/codeindex_capability.c:cap_scan_symbols:24
@@ -2688,7 +2688,6 @@ platform/modules/platform/src/ram_scratch.c:platform_ram_scratch_reserve:19
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read:40
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read#2:26
 platform/modules/platform/src/safe_root_read.c:relative_path_valid:19
-platform/modules/platform/src/state_root.c:ensure_parent:11
 platform/modules/platform/src/state_root.c:state_root_repair_acl:18
 platform/modules/platform/src/storage_probe.c:platform_storage_random_read_median_us:20
 platform/modules/platform/src/temp_directory.c:platform_temp_directory_create:23
