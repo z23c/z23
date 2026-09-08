@@ -4255,6 +4255,73 @@ static void dp_generation_warm(const struct proof_paths *paths,
     (void)warm_start_generation(paths, parent, generation, local, warm);
 }
 
+static bool dp_generation_dependencies(const char *root,
+                                        const char *generation,
+                                        char *why, size_t why_len)
+{
+    /* Preserve the complete ignored compiler-input sets that source identity
+     * seals. Copying a fixed archive/header subset lets a host-specific input
+     * (for example libsecp256k1-darwin.a) appear during `make build-only`,
+     * superseding an otherwise exact isolated proof generation. Provenance
+     * stamps travel with vendor/lib so already verified inputs are not
+     * needlessly rebuilt after the source checkpoint. */
+    static const char *const dependencies[] = {
+        "vendor/lib", "vendor/include",
+        /* The untracked amalgamated C source beside those two. No native
+         * build compiles it, so its absence looks like nothing at all --
+         * until the Windows acceptance link inside a full lint dies with
+         * "No rule to make target 'vendor/sqlite3.c'", naming a missing file
+         * rather than a missing priming step. The Makefile's worktree-prime
+         * comment names this exact trap for hand-primed worktrees; a proof
+         * generation is one more of them. */
+        "vendor/sqlite3.c",
+        "vendor/tor/libtor.a",
+        /* The manifest must travel with the archives it attests: a
+         * generation without it sees archives but no provenance, rebuilds
+         * Tor from source in RAM, and the next warm restart then re-copies
+         * the original libtor.a under a manifest that no longer matches it. */
+        "vendor/tor/.provenance",
+        /* Preserve optional cross-build outputs and download caches when
+         * present so a generation can reuse the submitting checkout's
+         * prepared target inputs without rebuilding or downloading them. */
+        "vendor/.cache",
+        /* The explicit Windows release target's staged lib/include.
+         * The acceptance catalog builds SQLite separately from
+         * vendor/sqlite3.c. build_vendor.sh removes its transient
+         * .build-<target> workspace after successful verification; that
+         * scratch directory is not a compiler input or a prerequisite. */
+        "vendor/cross",
+        "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+        "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+        "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+        "build/githooks",
+#if defined(__linux__)
+        /* Order-only test-binary prerequisites that no admitted executable
+         * links against: the rollback group dlopens these fixture images by
+         * name on Linux. Other hosts report fixture_required=false, matching
+         * the Makefile's Linux-only prerequisites. */
+        "build/hotswap/zcl_rollback_fixture_a.so",
+        "build/hotswap/zcl_rollback_fixture_b.so",
+#endif
+    };
+    if (!dp_generation_build_dirs(generation, why, why_len))
+        return false;
+    for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++)
+        if (!dp_generation_dependency(root, generation,
+                                      dependencies[i], why, why_len))
+            return false;
+    return true;
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+bool zcl_dev_proof_test_generation_dependencies(const char *root,
+                                                const char *generation,
+                                                char *why, size_t why_len)
+{
+    return dp_generation_dependencies(root, generation, why, why_len);
+}
+#endif
+
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local,
                                struct platform_ram_scratch_lease *ram_lease,
@@ -4282,56 +4349,8 @@ static bool generation_prepare(const struct proof_paths *paths,
         return false;
     if (!generation_gitlink_prepare(paths, generation, why, why_len))
         return false;
-    /* Preserve the complete ignored compiler-input sets that source identity
-     * seals. Copying a fixed archive/header subset lets a host-specific input
-     * (for example libsecp256k1-darwin.a) appear during `make build-only`,
-     * superseding an otherwise exact isolated proof generation. Provenance
-     * stamps travel with vendor/lib so already verified inputs are not
-     * needlessly rebuilt after the source checkpoint. */
-    static const char *const dependencies[] = {
-        "vendor/lib", "vendor/include",
-        /* The untracked amalgamated C source beside those two. No native
-         * build compiles it, so its absence looks like nothing at all --
-         * until the Windows acceptance link inside a full lint dies with
-         * "No rule to make target 'vendor/sqlite3.c'", naming a missing file
-         * rather than a missing priming step. The Makefile's worktree-prime
-         * comment names this exact trap for hand-primed worktrees; a proof
-         * generation is one more of them. */
-        "vendor/sqlite3.c",
-        "vendor/tor/libtor.a",
-        /* The manifest must travel with the archives it attests: a
-         * generation without it sees archives but no provenance, rebuilds
-         * Tor from source in RAM, and the next warm restart then re-copies
-         * the original libtor.a under a manifest that no longer matches it. */
-        "vendor/tor/.provenance",
-        /* Preserve optional cross-build outputs and download caches when
-         * present so a generation can reuse the submitting checkout's
-         * prepared target inputs without rebuilding or downloading them. */
-        "vendor/.build-x86_64-w64-mingw32",
-        "vendor/.cache",
-        /* The explicit Windows release target's staged lib/include.
-         * The acceptance catalog builds its SQLite archive separately from
-         * vendor/sqlite3.c; it does not require this optional release tree. */
-        "vendor/cross",
-        "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
-        "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
-        "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
-        "build/githooks",
-#if defined(__linux__)
-        /* Order-only test-binary prerequisites that no admitted executable
-         * links against: the rollback group dlopens these fixture images by
-         * name on Linux. Other hosts report fixture_required=false, matching
-         * the Makefile's Linux-only prerequisites. */
-        "build/hotswap/zcl_rollback_fixture_a.so",
-        "build/hotswap/zcl_rollback_fixture_b.so",
-#endif
-    };
-    if (!dp_generation_build_dirs(generation, why, why_len))
+    if (!dp_generation_dependencies(paths->root, generation, why, why_len))
         return false;
-    for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++)
-        if (!dp_generation_dependency(paths->root, generation,
-                                      dependencies[i], why, why_len))
-            return false;
     if (!generation_hooks_configure(generation, why, why_len))
         return false;
     if (!worktree_exact(generation, local, false, why, why_len)) {
@@ -6246,6 +6265,56 @@ static bool proof_worker_body(const struct proof_paths *paths,
     return dp_worker_publish(&w, started_us, why, why_len);
 }
 
+/* A post-merge hook can queue before the submitting checkout has rebuilt its
+ * restart.env. Prepare through the canonical build before copying or sealing
+ * compiler inputs; preparation is not evidence and never relaxes the checks
+ * that follow it. */
+static bool proof_original_plan_prepare(const struct proof_paths *paths,
+                                        const char *root, const char *local,
+                                        const char *log_path,
+                                        char *why, size_t why_len)
+{
+    char jobs[16];
+    if (!proof_make_jobs_arg(jobs)) {
+        proof_why(why, why_len, "proof_job_count_unavailable");
+        return false;
+    }
+    const char *argv[] = {"make", "--no-print-directory", jobs, "dev-bin", NULL};
+    struct zcl_dev_proof_budget budget = proof_step_budget(
+        paths, "original-plan", PROOF_COMPILE_DEFAULT_MS);
+    struct zcl_dev_proof_step_report report = {0};
+    if (run_step(paths, root, log_path, argv, "original-plan", &budget,
+                  &report) != 0) {
+        if (report.cause == ZCL_DEV_PROOF_KILL_NONE)
+            proof_whyf(why, why_len, "proof_original_plan_prepare_exit_%d",
+                        report.rc);
+        else
+            run_step_why(why, why_len, "original-plan", &report);
+        return false;
+    }
+    if (!worktree_exact(root, local, true, why, why_len)) return false;
+    uint8_t flags[32], graph[32];
+    struct dev_source_record plan_source = {0};
+    if (!proof_plan_roots(root, flags, graph, plan_source.mutation_id,
+                           why, why_len) ||
+        !zcl_dev_source_mutation_verify(root, &plan_source, why, why_len)) {
+        fprintf(stderr, "[devproof] prepared build plan does not match source\n");
+        proof_why(why, why_len, "proof_prepared_build_plan_source_changed");
+        return false;
+    }
+    return true;
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+bool zcl_dev_proof_test_original_plan_prepare(const char *root,
+                                              const char *local,
+                                              const char *log_path,
+                                              char *why, size_t why_len)
+{
+    return proof_original_plan_prepare(NULL, root, local, log_path, why, why_len);
+}
+#endif
+
 static bool proof_worker(const struct proof_paths *paths,
                          const char *local, const char *base,
                          struct platform_ram_scratch_lease *ram_lease,
@@ -6257,6 +6326,16 @@ static bool proof_worker(const struct proof_paths *paths,
     if (paths->phases[0]) (void)remove(paths->phases);
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
     proof_phase_mark(&phases, "worktree_exact_root");
+    char prepare_log[PATH_MAX];
+    if (snprintf(prepare_log, sizeof(prepare_log), "%s/original-plan.log",
+                  paths->logs) >= (int)sizeof(prepare_log)) {
+        proof_why(why, why_len, "proof_original_plan_log_path_invalid");
+        return false;
+    }
+    if (!proof_original_plan_prepare(paths, paths->root, local, prepare_log,
+                                      why, why_len))
+        return false;
+    proof_phase_mark(&phases, "original_plan_prepare");
     char generation[PATH_MAX];
     struct proof_warmstart warm = {0};
     if (!generation_prepare(paths, local, ram_lease, &warm, generation, why,

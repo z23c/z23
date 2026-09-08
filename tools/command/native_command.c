@@ -4217,9 +4217,8 @@ static bool nc_main_prepare_input(struct nc_main_state *st, int *rc)
     return true;
 }
 
-/* One registry leaf currently declares the 16 KiB extended-list budget.
- * The dispatcher must offer the largest declared bounded envelope; the
- * registry still enforces each leaf's own (usually smaller) budget. */
+/* The caller provides this leaf's declared bounded envelope; the registry
+ * still enforces the contract and any smaller caller-requested budget. */
 static bool nc_main_execute(struct nc_main_state *st,
                             const struct zcl_command_registry *reg, char *out,
                             size_t out_cap, size_t *n_out,
@@ -4290,7 +4289,7 @@ static bool nc_main_execute(struct nc_main_state *st,
  * exit code); false means fall through to the ordinary rendering below. */
 static bool nc_main_apply_field_selection(const struct zcl_command_spec *spec,
                                           const char *field_csv, char *out,
-                                          size_t n,
+                                          size_t n, size_t out_cap,
                                           enum zcl_command_exit exit_code,
                                           int *rc)
 {
@@ -4300,10 +4299,18 @@ static bool nc_main_apply_field_selection(const struct zcl_command_spec *spec,
     bool handled = false;
     if (json_read(&env, out, n) && env.type == JSON_OBJ) {
         const struct json_value *data = json_get(&env, "data");
-        char sel[ZCL_COMMAND_EXTENDED_LIST_BUDGET + 1];
+        char *sel = zcl_malloc(out_cap, "native_field_selection");
+        if (!sel) {
+            nc_print_error(spec->path, "ALLOCATION_FAILED", "render",
+                           "could not allocate bounded field selection", spec->path,
+                           "", "", "");
+            json_free(&env);
+            *rc = ZCL_COMMAND_EXIT_INTERNAL;
+            return true;
+        }
         char selerr[320];
         if (data && zcl_native_render_field_selection(
-                        data, field_csv, sel, sizeof(sel), selerr,
+                        data, field_csv, sel, out_cap, selerr,
                         sizeof(selerr))) {
             fputs(sel, stdout);
             handled = true;
@@ -4313,9 +4320,11 @@ static bool nc_main_apply_field_selection(const struct zcl_command_spec *spec,
                    data ? selerr : "this result has no selectable data",
                    spec->path);
             json_free(&env);
+            free(sel);
             *rc = ZCL_COMMAND_EXIT_INVALID;
             return true;
         }
+        free(sel);
     }
     json_free(&env);
     if (handled) {
@@ -4378,6 +4387,16 @@ static bool nc_main_render_prose(const struct zcl_command_spec *spec,
     return false;
 }
 
+static size_t nc_main_response_capacity(const struct zcl_command_spec *spec)
+{
+    size_t budget = spec->budget_bytes > 0
+                        ? (size_t)spec->budget_bytes
+                        : (size_t)ZCL_COMMAND_RESULT_BUDGET;
+    if (budget < ZCL_COMMAND_ERROR_BUDGET)
+        budget = ZCL_COMMAND_ERROR_BUDGET;
+    return budget + 1;
+}
+
 int zcl_native_command_main(const char *root_word, const char *const *args,
                             int nargs, const char *datadir, int rpc_port,
                             enum chain_network network,
@@ -4417,20 +4436,35 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
     if (!nc_main_prepare_input(&st, &rc))
         return rc;
 
-    char out[ZCL_COMMAND_EXTENDED_LIST_BUDGET + 1];
+    size_t out_cap = nc_main_response_capacity(st.spec);
+    char *out = zcl_malloc(out_cap, "native_command_response");
+    if (!out) {
+        json_free(&st.input);
+        nc_print_error(st.spec->path, "ALLOCATION_FAILED", "serialize",
+                       "could not allocate bounded command response", st.spec->path,
+                       "", "", "");
+        return ZCL_COMMAND_EXIT_INTERNAL;
+    }
     size_t n = 0;
     enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INTERNAL;
-    if (!nc_main_execute(&st, reg, out, sizeof(out), &n, &exit_code, &rc))
+    if (!nc_main_execute(&st, reg, out, out_cap, &n, &exit_code, &rc)) {
+        free(out);
         return rc;
+    }
 
-    if (nc_main_apply_field_selection(st.spec, st.field_csv, out, n,
-                                      exit_code, &rc))
+    if (nc_main_apply_field_selection(st.spec, st.field_csv, out, n, out_cap,
+                                      exit_code, &rc)) {
+        free(out);
         return rc;
+    }
 
     if (nc_main_render_prose(st.spec, st.seen_format, st.suggest_next, out, n,
-                             exit_code, &rc))
+                             exit_code, &rc)) {
+        free(out);
         return rc;
+    }
 
     nc_print_doc(out, st.spec->path);
+    free(out);
     return (int)exit_code;
 }

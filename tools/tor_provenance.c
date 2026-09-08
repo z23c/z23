@@ -58,7 +58,15 @@
 #include <errno.h>
 
 #include "base/hex.h"
+#include "platform/file_sync.h"
+#include "platform/path_replace.h"
 #include "zsha256/zsha256.h"
+
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#define O_BINARY 0
+#endif
 
 #define TOR_PROVENANCE_NAME ".provenance"
 #define TOR_COMMIT_HEX_LEN 40
@@ -90,8 +98,9 @@ static void die_usage(const char *prog)
     fprintf(stderr,
         "usage: %s write <tor-dir> <tor_commit> <compiler_id> <configure_args_sha256>\n"
         "       %s check <tor-dir> [--tor-commit <hex>] [--compiler-id <id>]\n"
+        "       %s check-compiler-results <positive-status> <negative-status> <positive-log> <negative-log>\n"
         "       %s --selftest\n",
-        prog, prog, prog);
+        prog, prog, prog, prog);
     exit(2);
 }
 
@@ -115,10 +124,79 @@ static int contains_control_or_eq(const char *s)
     return 0;
 }
 
+enum { COMPILER_LOG_MAX = 65536 };
+
+/* Build glue owns process execution. This native helper owns the verdict,
+ * including refusal of setup failures and incomplete diagnostic evidence. */
+static int compiler_log_read(const char *path, char log[COMPILER_LOG_MAX + 1])
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return 1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return 1;
+    size_t n = fread(log, 1, COMPILER_LOG_MAX + 1, f);
+    int failed = ferror(f);
+    if (fclose(f) != 0) failed = 1;
+    if (failed) return 1;
+    if (n > COMPILER_LOG_MAX) return 2;
+    if (memchr(log, '\0', n)) return 3;
+    log[n] = '\0';
+    return 0;
+}
+
+static const char *compiler_results_reason(unsigned positive, unsigned negative,
+                                           const char *positive_log,
+                                           const char *negative_log)
+{
+    if (positive != 0) return "positive compile failed";
+    if (negative == 0) return "missing-header compile unexpectedly succeeded";
+    if (negative >= 126) return "negative compile did not complete normally";
+    char log[COMPILER_LOG_MAX + 1];
+    int rc = compiler_log_read(positive_log, log);
+    if (rc != 0) return "positive compiler log missing, unreadable, oversized, or invalid";
+    rc = compiler_log_read(negative_log, log);
+    if (rc != 0) return "negative compiler log missing, unreadable, oversized, or invalid";
+    if (!strstr(log, "base/hex.h")) return "negative compile did not diagnose base/hex.h";
+    return NULL;
+}
+
+static int compiler_status_parse(const char *text, unsigned *status)
+{
+    if (!text[0] || strspn(text, "0123456789") != strlen(text)) return 0;
+    char *end;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || *end || value > 255) return 0;
+    *status = (unsigned)value;
+    return 1;
+}
+
+static int cmd_check_compiler_results(const char *positive_text,
+                                      const char *negative_text,
+                                      const char *positive_log,
+                                      const char *negative_log)
+{
+    unsigned positive, negative;
+    if (!compiler_status_parse(positive_text, &positive) ||
+        !compiler_status_parse(negative_text, &negative)) {
+        fprintf(stderr, "tor-provenance: invalid compiler exit status\n");
+        return 1;
+    }
+    const char *why = compiler_results_reason(positive, negative,
+                                               positive_log, negative_log);
+    if (why) {
+        fprintf(stderr, "tor-provenance: compiler check refused: %s (positive=%u, negative=%u; logs %s, %s)\n",
+                why, positive, negative, positive_log, negative_log);
+        return 1;
+    }
+    puts("tor-provenance: required includes compile; omitting hex include fails on base/hex.h");
+    return 0;
+}
+
 /* Hash one file's bytes with a fixed 64 KiB read buffer — no malloc. */
 static int sha256_hex_of_file(const char *path, char out_hex[ZSHA256_HEX_LEN])
 {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_BINARY);
     if (fd < 0) return -1;
     zsha256_ctx ctx;
     zsha256_init(&ctx);
@@ -168,8 +246,8 @@ static int hash_all_archives(const char *tor_dir,
 
 /* ---- write ---------------------------------------------------------- */
 
-static int cmd_write(const char *tor_dir, const char *tor_commit,
-                      const char *compiler_id, const char *configure_args_sha256)
+static int validate_write_inputs(const char *tor_commit, const char *compiler_id,
+                                 const char *configure_args_sha256)
 {
     if (!is_hex_string(tor_commit, TOR_COMMIT_HEX_LEN)) {
         fprintf(stderr, "tor-provenance: write: tor_commit must be exactly %d lowercase hex chars\n",
@@ -190,6 +268,14 @@ static int cmd_write(const char *tor_dir, const char *tor_commit,
         fprintf(stderr, "tor-provenance: write: compiler_id must not contain '=', CR, or LF\n");
         return 1;
     }
+    return 0;
+}
+
+static int cmd_write(const char *tor_dir, const char *tor_commit,
+                      const char *compiler_id, const char *configure_args_sha256)
+{
+    if (validate_write_inputs(tor_commit, compiler_id, configure_args_sha256) != 0)
+        return 1;
 
     char archive_hex[ARCHIVE_COUNT][ZSHA256_HEX_LEN];
     int failing = -1;
@@ -225,7 +311,7 @@ static int cmd_write(const char *tor_dir, const char *tor_commit,
         return 1;
     }
 
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, 0644);
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC | O_BINARY, 0644);
     if (fd < 0) {
         fprintf(stderr, "tor-provenance: write: could not create %s: %s\n", tmp_path, strerror(errno));
         return 1;
@@ -243,14 +329,14 @@ static int cmd_write(const char *tor_dir, const char *tor_commit,
         }
         off += (size_t)w;
     }
-    if (fsync(fd) != 0) {
+    if (platform_file_sync(fd) != 0) {
         fprintf(stderr, "tor-provenance: write: fsync failed: %s\n", strerror(errno));
         close(fd);
         unlink(tmp_path);
         return 1;
     }
     close(fd);
-    if (rename(tmp_path, manifest_path) != 0) {
+    if (platform_path_replace(tmp_path, manifest_path) != 0) {
         fprintf(stderr, "tor-provenance: write: rename failed: %s\n", strerror(errno));
         unlink(tmp_path);
         return 1;
@@ -418,7 +504,7 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
 
 static int write_fixture_archive(const char *path, const char *content)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
     if (fd < 0) return -1;
     size_t len = strlen(content);
     size_t off = 0;
@@ -431,11 +517,63 @@ static int write_fixture_archive(const char *path, const char *content)
     return 0;
 }
 
+static int selftest_compiler_statuses(const char *positive, const char *negative)
+{
+    static const unsigned refused[][2] = {{1, 1}, {0, 0}, {0, 126}, {0, 127}, {0, 128}};
+    if (compiler_results_reason(0, 1, positive, negative) != NULL) return 1;
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); ++i)
+        if (compiler_results_reason(refused[i][0], refused[i][1], positive, negative) == NULL)
+            return 1;
+    unsigned status;
+    if (compiler_status_parse("256", &status) || compiler_status_parse("-1", &status) ||
+        compiler_status_parse("1tail", &status)) return 1;
+    return 0;
+}
+
+static int selftest_compiler_logs(const char *positive, const char *negative,
+                                 const char *directory)
+{
+    if (compiler_results_reason(0, 1, directory, negative) == NULL ||
+        compiler_results_reason(0, 1, positive, directory) == NULL) return 1;
+    if (write_fixture_archive(negative, "unrelated compiler failure\n") != 0 ||
+        compiler_results_reason(0, 1, positive, negative) == NULL) return 1;
+    char oversized[COMPILER_LOG_MAX + 2];
+    memset(oversized, 'x', sizeof(oversized) - 1);
+    memcpy(oversized, "base/hex.h", sizeof("base/hex.h") - 1);
+    oversized[sizeof(oversized) - 1] = '\0';
+    if (write_fixture_archive(negative, oversized) != 0 ||
+        compiler_results_reason(0, 1, positive, negative) == NULL) return 1;
+    if (unlink(negative) != 0 ||
+        compiler_results_reason(0, 1, positive, negative) == NULL) return 1;
+    if (unlink(positive) != 0 ||
+        compiler_results_reason(0, 1, positive, negative) == NULL) return 1;
+    return 0;
+}
+
+static int selftest_compiler_results(const char *base)
+{
+    char positive[PATH_BUF_MAX], negative[PATH_BUF_MAX];
+    if (join_path(positive, base, "compiler-positive.log") != 0 ||
+        join_path(negative, base, "compiler-negative.log") != 0) return 1;
+    int rc = write_fixture_archive(positive, "") ||
+             write_fixture_archive(negative, "fatal error: base/hex.h: missing\n") ||
+             selftest_compiler_statuses(positive, negative) ||
+             selftest_compiler_logs(positive, negative, base);
+    unlink(positive);
+    unlink(negative);
+    if (rc) fprintf(stderr, "tor-provenance: selftest FAILED — compiler evidence judgment\n");
+    return rc;
+}
+
 static int mkdir_p_fixed(const char *path)
 {
     /* Fixed, known-shape fixture directories only — no generic recursive
      * mkdir -p needed. Caller passes exact paths one level at a time. */
+#if defined(_WIN32)
+    if (_mkdir(path) != 0 && errno != EEXIST) return -1;
+#else
     if (mkdir(path, 0755) != 0 && errno != EEXIST) return -1;
+#endif
     return 0;
 }
 
@@ -467,7 +605,11 @@ static int quiet_check(const char *tor_dir, const char *want_commit, const char 
 {
     fflush(stdout);
     int saved = dup(STDOUT_FILENO);
+#if defined(_WIN32)
+    int devnull = open("NUL", O_WRONLY);
+#else
     int devnull = open("/dev/null", O_WRONLY);
+#endif
     if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); close(devnull); }
     int rc = cmd_check(tor_dir, want_commit, want_cc);
     fflush(stdout);
@@ -475,53 +617,96 @@ static int quiet_check(const char *tor_dir, const char *want_commit, const char 
     return rc;
 }
 
-static int run_selftest(void)
+static int selftest_create_directories(const char *base)
 {
-    const char *tmpdir = getenv("TMPDIR");
-    if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
-
-    char base[PATH_BUF_MAX];
-    snprintf(base, sizeof base, "%s/z23-tor-provenance-selftest.%ld", tmpdir, (long)getpid());
-    selftest_rmdir_tree(base); /* clean any stale run with the same pid, best effort */
     if (mkdir_p_fixed(base) != 0) {
         fprintf(stderr, "tor-provenance: selftest: could not create fixture dir %s: %s\n", base, strerror(errno));
         return 1;
     }
-    char d1[PATH_BUF_MAX], d2[PATH_BUF_MAX], d3[PATH_BUF_MAX], d4[PATH_BUF_MAX], d5[PATH_BUF_MAX], d6[PATH_BUF_MAX];
-    if (join_path(d1, base, "src") || join_path(d2, base, "src/ext") ||
-        join_path(d3, base, "src/ext/ed25519") ||
-        join_path(d4, base, "src/ext/ed25519/donna") ||
-        join_path(d5, base, "src/ext/ed25519/ref10") ||
-        join_path(d6, base, "src/ext/keccak-tiny")) {
-        fprintf(stderr, "tor-provenance: selftest: fixture path too long under %s\n", base);
-        return 1;
+    static const char *const directories[] = {
+        "src", "src/ext", "src/ext/ed25519", "src/ext/ed25519/donna",
+        "src/ext/ed25519/ref10", "src/ext/keccak-tiny"
+    };
+    for (size_t i = 0; i < sizeof directories / sizeof directories[0]; ++i) {
+        char path[PATH_BUF_MAX];
+        if (join_path(path, base, directories[i]) || mkdir_p_fixed(path)) {
+            fprintf(stderr, "tor-provenance: selftest: could not create fixture directory %s/%s\n",
+                    base, directories[i]);
+            return 1;
+        }
     }
-    if (mkdir_p_fixed(d1) || mkdir_p_fixed(d2) || mkdir_p_fixed(d3) ||
-        mkdir_p_fixed(d4) || mkdir_p_fixed(d5) || mkdir_p_fixed(d6)) {
-        fprintf(stderr, "tor-provenance: selftest: could not create fixture subdirs under %s\n", base);
-        return 1;
-    }
+    return 0;
+}
 
+static int selftest_create_archives(const char *base)
+{
     for (int i = 0; i < ARCHIVE_COUNT; i++) {
         char path[PATH_BUF_MAX];
-        join_path(path, base, ARCHIVE_RELPATHS[i]);
+        if (join_path(path, base, ARCHIVE_RELPATHS[i]) != 0) {
+            fprintf(stderr, "tor-provenance: selftest: archive path too long under %s\n", base);
+            return 1;
+        }
         char content[128];
-        snprintf(content, sizeof content, "fixture tor archive bytes %d\n", i);
+        snprintf(content, sizeof content, "fixture tor archive bytes %d\r\n\x1a tail\n", i);
         if (write_fixture_archive(path, content) != 0) {
             fprintf(stderr, "tor-provenance: selftest: could not write fixture archive %s\n", path);
             return 1;
         }
+        char expected[ZSHA256_HEX_LEN], actual[ZSHA256_HEX_LEN];
+        zsha256_hex(content, strlen(content), expected);
+        if (sha256_hex_of_file(path, actual) != 0 || strcmp(actual, expected) != 0) {
+            fprintf(stderr, "tor-provenance: selftest FAILED — archive bytes changed in file I/O\n");
+            selftest_rmdir_tree(base);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int selftest_prepare(const char *base)
+{
+    return selftest_create_directories(base) || selftest_create_archives(base) ||
+           selftest_compiler_results(base);
+}
+
+static int run_selftest(void)
+{
+    const char *tmpdir = getenv("TMPDIR");
+#if defined(_WIN32)
+    if (!tmpdir || !*tmpdir) tmpdir = getenv("TEMP");
+    if (!tmpdir || !*tmpdir) tmpdir = ".";
+#else
+    if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+#endif
+
+    char base[PATH_BUF_MAX];
+    snprintf(base, sizeof base, "%s/z23-tor-provenance-selftest.%ld", tmpdir, (long)getpid());
+    selftest_rmdir_tree(base); /* clean any stale run with the same pid, best effort */
+    if (selftest_prepare(base)) {
+        selftest_rmdir_tree(base);
+        return 1;
     }
 
     const char *fake_commit_ok = "0123456789abcdef0123456789abcdef012345aa"; /* 40 hex chars */
-    const char *fake_compiler_id = "selftest-compiler-id";
+    const char *first_compiler_id = "selftest-compiler-id";
+    const char *fake_compiler_id = "selftest-replaced-compiler-id";
     /* 64 hex chars: "0123456789abcdef" repeated 4 times. */
     const char *fake_configure_sha =
         "0123456789abcdef" "0123456789abcdef" "0123456789abcdef" "0123456789abcdef";
 
     int rc = 1;
-    if (cmd_write(base, fake_commit_ok, fake_compiler_id, fake_configure_sha) != 0) {
+    if (cmd_write(base, fake_commit_ok, first_compiler_id, fake_configure_sha) != 0) {
         fprintf(stderr, "tor-provenance: selftest FAILED — write did not succeed\n");
+        goto out;
+    }
+
+    /* Rebuilding Tor must atomically replace an existing manifest too. */
+    if (cmd_write(base, fake_commit_ok, fake_compiler_id, fake_configure_sha) != 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — could not replace manifest\n");
+        goto out;
+    }
+    if (quiet_check(base, fake_commit_ok, first_compiler_id) == 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — replacement retained old identity\n");
         goto out;
     }
 
@@ -534,15 +719,15 @@ static int run_selftest(void)
     {
         char path[PATH_BUF_MAX];
         join_path(path, base, ARCHIVE_RELPATHS[1]);
-        int fd = open(path, O_RDWR);
+        int fd = open(path, O_RDWR | O_BINARY);
         if (fd < 0) {
             fprintf(stderr, "tor-provenance: selftest FAILED — could not reopen %s to corrupt it\n", path);
             goto out;
         }
         char c;
-        if (pread(fd, &c, 1, 0) != 1) { close(fd); goto out; }
+        if (read(fd, &c, 1) != 1) { close(fd); goto out; }
         c ^= 0x01;
-        if (pwrite(fd, &c, 1, 0) != 1) { close(fd); goto out; }
+        if (lseek(fd, 0, SEEK_SET) != 0 || write(fd, &c, 1) != 1) { close(fd); goto out; }
         close(fd);
     }
     if (quiet_check(base, fake_commit_ok, fake_compiler_id) == 0) {
@@ -579,6 +764,11 @@ int main(int argc, char **argv)
 
     if (strcmp(argv[1], "--selftest") == 0) {
         return run_selftest();
+    }
+
+    if (strcmp(argv[1], "check-compiler-results") == 0) {
+        if (argc != 6) die_usage(argv[0]);
+        return cmd_check_compiler_results(argv[2], argv[3], argv[4], argv[5]);
     }
 
     if (strcmp(argv[1], "write") == 0) {

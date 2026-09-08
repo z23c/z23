@@ -246,7 +246,12 @@ ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 # here too: measured on this host,
 # the authoritative parse it would otherwise pay turned a 0.5 s scaffold into a
 # ~17 s one. Its selftest runs in a throwaway repo and needs even less.
+# Tor readiness invokes this helper's own rule before node source capture.
+# Its standalone compile must not recurse into the readiness check it serves.
+ZCL_TOR_PROVENANCE_GOALS := build/bin/z23-tor-provenance \
+	tools/tor-provenance z23-tor-provenance
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
+	$(ZCL_TOR_PROVENANCE_GOALS) \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
 	windows-acceptance-compile windows-acceptance \
@@ -347,12 +352,20 @@ VENDOR_BOOTSTRAP_MK := build/identity/vendor-inputs-ready.mk
 VENDOR_MISSING_INPUTS := $(filter-out $(wildcard $(VENDOR_LIBS)),$(VENDOR_LIBS))
 VENDOR_REPAIR_GOALS := vendor-ready deploy install
 VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
+# windows-make.ps1 builds this launcher before it can contain the build's
+# process tree. It links only Windows system APIs and safe_alloc; do not start
+# vendor work before that containment exists. Mixed goals retain bootstrap.
+ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest \
+	build/bin/z23-headless-run.exe
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS),$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
+ifneq ($(ZCL_BOOTSTRAP_HELPER_ONLY),1)
 ifneq ($(strip $(VENDOR_MISSING_INPUTS) $(VENDOR_REPAIR_REQUESTED)),)
 ifeq ($(strip $(MAKE_RESTARTS)),)
 -include $(VENDOR_BOOTSTRAP_MK)
+endif
 endif
 endif
 endif
@@ -1386,7 +1399,8 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest install-hooks setup \
-	check-% lint lint-% %-selftest docs docs-%
+	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) \
+	$(ZCL_TOR_PROVENANCE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
 
@@ -13302,13 +13316,21 @@ check-tor-full-default: $(LINTC_TOOL)
 # canonical hex codec (platform/modules/base/include/base/hex.h — static
 # inline, adds no link dependency).
 TOR_PROVENANCE_SRCS = tools/tor_provenance.c \
-    contexts/commons/packages/zsha256/src/zsha256.c
-$(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS)
+    contexts/commons/packages/zsha256/src/zsha256.c \
+    platform/modules/platform/src/path_replace.c
+TOR_PROVENANCE_HEADERS = contexts/commons/packages/zsha256/include/zsha256/zsha256.h \
+    platform/modules/base/include/base/hex.h \
+    platform/modules/platform/include/platform/file_sync.h \
+    platform/modules/platform/include/platform/path_replace.h \
+    platform/modules/platform/include/platform/windows_path.h \
+    platform/modules/platform/src/windows_path_internal.h
+$(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS) $(TOR_PROVENANCE_HEADERS) Makefile
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zsha256/include \
 	    -Iplatform/modules/base/include \
+	    -Iplatform/modules/platform/include \
 	    -o $@ $(TOR_PROVENANCE_SRCS)
 
 .PHONY: tools/tor-provenance z23-tor-provenance check-tor-provenance

@@ -278,6 +278,16 @@ size_t zcl_dev_proof_test_admitted_executables(const char **sources,
  * without driving a full proof cycle. */
 bool zcl_dev_proof_test_generation_hooks_configure(const char *generation,
                                                    char *why, size_t why_len);
+/* Exact dependency materialization used by generation_prepare. No proof,
+ * lease or publication authority; POSIX-only like the generation worker. */
+bool zcl_dev_proof_test_generation_dependencies(const char *root,
+                                                const char *generation,
+                                                char *why, size_t why_len);
+/* Canonical submitting-checkout preparation, without a proof lease or receipt. */
+bool zcl_dev_proof_test_original_plan_prepare(const char *root,
+                                              const char *local,
+                                              const char *log_path,
+                                              char *why, size_t why_len);
 /* Seam for the lint-target split: true when a recorded target list is the
  * whole gate set rather than the fast subset. */
 bool zcl_dev_proof_test_lint_targets_are_full(const char *targets);

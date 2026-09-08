@@ -197,23 +197,24 @@ static int avs_prefix_log(const char *log)
     return 0;
 }
 
-static int avs_stub_compile(const char *tu, const char *extra_dir,
+static int avs_stub_compile(const char *cc, const char *tu, const char *extra_dir,
                             const char *includes, int *code)
 {
-    const char *cc = env_or("CC", "cc");
-    char qcc[4096], qtu[8192], qextra[8192], extra[8192], cmd[AVS_CMD];
+    char qtu[8192], qextra[8192], extra[8192], cmd[AVS_CMD];
     extra[0] = '\0';
-    if (sh_single_quote(cc, qcc, sizeof qcc) || sh_single_quote(tu, qtu, sizeof qtu))
+    if (sh_single_quote(tu, qtu, sizeof qtu))
         return 2;
     if (extra_dir && extra_dir[0]) {
         if (sh_single_quote(extra_dir, qextra, sizeof qextra)
             || ovf(snprintf(extra, sizeof extra, "-I%s", qextra), sizeof extra))
             return 2;
     }
+    /* CC is an operator-controlled command prefix, as in Make recipes.
+     * Preserve wrappers and shell-quoted paths; quote fixture paths separately. */
     if (ovf(snprintf(cmd, sizeof cmd,
                      "%s -std=c23 -fsyntax-only -Wall -Wextra -Werror -pedantic "
                      "-D_POSIX_C_SOURCE=200809L -DARENA_VIEW_RAYLIB_STUB %s %s %s 2>&1",
-                     qcc, extra, includes, qtu), sizeof cmd))
+                     cc, extra, includes, qtu), sizeof cmd))
         return 2;
     return capture_cmd(cmd, avs_log, sizeof avs_log, code);
 }
@@ -324,7 +325,7 @@ int check_arena_view_stub_run(int argc, char **argv)
         return 2;
     }
     int code = 0;
-    rc = avs_stub_compile(k_avs_tu, NULL, includes, &code);
+    rc = avs_stub_compile(env_or("CC", "cc"), k_avs_tu, NULL, includes, &code);
     if (rc)
         return rc;
     if (code == 0) {
@@ -371,11 +372,11 @@ static int avs_selftest_prepare(const char *work, char *tdir, char *tu,
     return 0;
 }
 
-static int avs_selftest_fixture_copy(const char *tu, const char *tdir,
+static int avs_selftest_fixture_copy(const char *cc, const char *tu, const char *tdir,
                                      const char *includes, int *failed)
 {
     int rc, code;
-    rc = avs_stub_compile(tu, tdir, includes, &code);
+    rc = avs_stub_compile(cc, tu, tdir, includes, &code);
     if (rc)
         return rc;
     if (code == 0) {
@@ -392,14 +393,14 @@ static int avs_selftest_fixture_copy(const char *tu, const char *tdir,
     return 0;
 }
 
-static int avs_selftest_dropped_decl(const char *tu, const char *tdir,
+static int avs_selftest_dropped_decl(const char *cc, const char *tu, const char *tdir,
                                      const char *stub, const char *includes,
                                      int *failed)
 {
     int rc, code;
     if (avs_drop_decl(k_avs_stub, stub, "LoadFontFromMemory", "codepointCount);"))
         return 2;
-    rc = avs_stub_compile(tu, tdir, includes, &code);
+    rc = avs_stub_compile(cc, tu, tdir, includes, &code);
     if (rc)
         return rc;
     if (code == 0) {
@@ -419,14 +420,14 @@ static int avs_selftest_dropped_decl(const char *tu, const char *tdir,
     return 0;
 }
 
-static int avs_selftest_initwindow(const char *tu, const char *tdir,
+static int avs_selftest_initwindow(const char *cc, const char *tu, const char *tdir,
                                    const char *stub, const char *includes,
                                    int *failed)
 {
     int rc, code;
     if (avs_rewrite_initwindow(k_avs_stub, stub))
         return 2;
-    rc = avs_stub_compile(tu, tdir, includes, &code);
+    rc = avs_stub_compile(cc, tu, tdir, includes, &code);
     if (rc)
         return rc;
     if (code == 0) {
@@ -448,7 +449,7 @@ static int avs_selftest_initwindow(const char *tu, const char *tdir,
 static int avs_selftest_verdict(int failed)
 {
     if (!failed) {
-        if (puts("══ selftest: PASS (3/3) ══") < 0)
+        if (puts("══ selftest: PASS (9/9) ══") < 0)
             return die("z23-lint: write failed\n", "");
         return 0;
     }
@@ -456,21 +457,69 @@ static int avs_selftest_verdict(int failed)
     return 1;
 }
 
-static int avs_selftest_body(const char *work, const char *includes)
+static int avs_selftest_cases(const char *cc, const char *work,
+                              const char *includes, int *failed)
 {
     char tdir[4096], tu[4096], stub[4096];
-    int rc, failed = 0;
+    int rc;
     if (avs_selftest_prepare(work, tdir, tu, stub, sizeof tdir))
         return 2;
-    rc = avs_selftest_fixture_copy(tu, tdir, includes, &failed);
+    rc = avs_selftest_fixture_copy(cc, tu, tdir, includes, failed);
     if (rc)
         return rc;
-    rc = avs_selftest_dropped_decl(tu, tdir, stub, includes, &failed);
+    rc = avs_selftest_dropped_decl(cc, tu, tdir, stub, includes, failed);
     if (rc)
         return rc;
-    rc = avs_selftest_initwindow(tu, tdir, stub, includes, &failed);
+    rc = avs_selftest_initwindow(cc, tu, tdir, stub, includes, failed);
     if (rc)
         return rc;
+    return 0;
+}
+
+static int avs_selftest_wrapper(const char *work, const char *name,
+                                const char *cc, char *command, size_t cap)
+{
+    char path[4096], quoted[8192];
+    if (ovf(snprintf(path, sizeof path, "%s/%s", work, name), sizeof path)
+        || sh_single_quote(path, quoted, sizeof quoted)
+        || ovf(snprintf(command, cap, "%s arena-compiler-sentinel", quoted), cap))
+        return 2;
+    FILE *out = fopen(path, "w");
+    if (!out)
+        return die("z23-lint: cannot open %s\n", path);
+    int rc = 0;
+    /* Invoke the actual selected compiler; neither positive nor negative
+     * fixture verdicts may be supplied by the wrapper itself. */
+    if (fprintf(out, "#!/bin/sh\n"
+                     "[ \"$1\" = arena-compiler-sentinel ] || exit 97\n"
+                     "shift\nexec %s \"$@\"\n", cc) < 0)
+        rc = die("z23-lint: write failed: %s\n", path);
+    if (fclose(out) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", path);
+    if (rc == 0 && chmod(path, 0700) != 0)
+        rc = die("z23-lint: chmod failed: %s\n", path);
+    return rc;
+}
+
+static int avs_selftest_body(const char *work, const char *includes)
+{
+    const char *cc = env_or("CC", "cc");
+    int failed = 0;
+    int rc = avs_selftest_cases(cc, work, includes, &failed);
+    if (rc)
+        return rc;
+    const char *names[] = { "compiler-wrapper", "compiler wrapper" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        char command[AVS_CMD];
+        rc = avs_selftest_wrapper(work, names[i], cc, command, sizeof command);
+        if (rc)
+            return rc;
+        if (printf("  compiler command fixture: %s\n", names[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+        rc = avs_selftest_cases(command, work, includes, &failed);
+        if (rc)
+            return rc;
+    }
     return avs_selftest_verdict(failed);
 }
 

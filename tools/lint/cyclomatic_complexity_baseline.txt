@@ -4545,8 +4545,8 @@ tools/simd_bench.c:main:28
 tools/snapshot_from_coinskv.c:main:17
 tools/soak/main.c:main:55
 tools/tor_provenance.c:cmd_check:22
-tools/tor_provenance.c:cmd_write:19
-tools/tor_provenance.c:run_selftest:26
+tools/tor_provenance.c:cmd_write:16
+tools/tor_provenance.c:run_selftest:19
 tools/verify_anchor_completeness.c:count_chainstate:16
 tools/wallet_check.c:main:22
 tools/wallet_dump.c:dump_text:29

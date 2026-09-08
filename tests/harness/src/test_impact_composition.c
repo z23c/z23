@@ -3719,6 +3719,107 @@ static bool ic_root_set(const uint8_t root[32])
     for (size_t i = 0; i < 32; i++) any |= root[i];
     return any != 0;
 }
+
+static bool ic_original_plan_fixture(const char *root, char local[65])
+{
+    static const char digest[] =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char makefile[] =
+        ".PHONY: dev-bin\ndev-bin:\n"
+        "\t@set -e; test ! -f build/fail; "
+        "if test -f build/no-op; then exit 0; fi; "
+        "if test -f build/change-source; then echo changed >> sample.c; fi; "
+        "set -- $$(tools/dev/source-identity.sh capture-record); "
+        "sed -i \"s/^BASE_GENERATION=.*/BASE_GENERATION=$$3/\" "
+        "build/dev-loop/restart.env\n";
+    if (!ic_write(root, ".gitignore", "build/\n.cache/\n") ||
+        !ic_write(root, "sample.c", "int value = 1;\n") ||
+        !ic_write(root, "Makefile", makefile) ||
+        !ic_write(root, "tools/dev/source-identity.sh", "placeholder\n") ||
+        !ic_write_build_plan(root, digest, digest, "-O1", NULL))
+        return false;
+    char cmd[16384];
+    int n = snprintf(cmd, sizeof(cmd),
+        "cp tools/dev/source-identity.sh '%s/tools/dev/source-identity.sh' && "
+        "cd '%s' && chmod 700 tools/dev/source-identity.sh && git init -q && "
+        "git config user.name fixture && git config user.email fixture@invalid && "
+        "git config commit.gpgsign false && git add -A && git commit -qm first && "
+        "make --no-print-directory dev-bin && "
+        "printf 'int value = 2;\\n' > sample.c && git add sample.c && "
+        "git commit -qm second", root, root);
+    if (n <= 0 || (size_t)n >= sizeof(cmd) || system(cmd) != 0) return false;
+    const char *argv[] = {"git", "rev-parse", "HEAD", NULL};
+    struct zcl_devloop_process_result result = {0};
+    if (!zcl_devloop_process_run(root, argv, 30000, &result) ||
+        result.exit_code != 0 || result.output_truncated)
+        return false;
+    size_t len = strcspn(result.output, "\r\n");
+    if (len != 40 && len != 64) return false;
+    memcpy(local, result.output, len);
+    local[len] = '\0';
+    return true;
+}
+
+static int test_pw_original_plan_refreshes_before_sealing(void)
+{
+    int failures = 0;
+    char *saved_process_env = NULL;
+    bool process_env_changed = false;
+    TEST("proof preparation: prior-commit plan refreshes without accepting stale or changed source") {
+        const char *process_env = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+        if (process_env) {
+            saved_process_env = zcl_strdup(process_env, "proof fixture process environment");
+            ASSERT(saved_process_env != NULL);
+        }
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        process_env_changed = true;
+        char root[4096], local[65], log[4096], marker[4096], why[256];
+        test_make_tmpdir(root, sizeof(root), "proof_plan", "prior_commit");
+        ASSERT(ic_original_plan_fixture(root, local));
+        ASSERT(snprintf(log, sizeof(log), "%s/build/prepare.log", root) <
+               (int)sizeof(log));
+        /* A successful no-op cannot claim that the old commit's plan is
+         * current. The actual source-identity verifier must reject it. */
+        ASSERT(ic_write(root, "build/no-op", "1\n"));
+        ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log,
+                                                         why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_prepared_build_plan_source_changed");
+        ASSERT(snprintf(marker, sizeof(marker), "%s/build/no-op", root) <
+               (int)sizeof(marker));
+        ASSERT(unlink(marker) == 0);
+        ASSERT(zcl_dev_proof_test_original_plan_prepare(root, local, log,
+                                                        why, sizeof(why)));
+        /* Idempotent preparation still obtains a verified current plan. */
+        ASSERT(zcl_dev_proof_test_original_plan_prepare(root, local, log,
+                                                        why, sizeof(why)));
+        ASSERT(ic_write(root, "build/fail", "1\n"));
+        ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log,
+                                                         why, sizeof(why)));
+        ASSERT(strstr(why, "proof_original_plan_prepare_exit_") != NULL);
+        ASSERT(snprintf(marker, sizeof(marker), "%s/build/fail", root) <
+               (int)sizeof(marker));
+        ASSERT(unlink(marker) == 0);
+        /* Even a newly generated token for dirty source is not authority
+         * to replace the exact commit requested by the caller. */
+        ASSERT(ic_write(root, "build/change-source", "1\n"));
+        ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log,
+                                                         why, sizeof(why)));
+        ASSERT_STR_EQ(why, "worktree_not_clean");
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    if (process_env_changed) {
+        int restored = saved_process_env
+            ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved_process_env, 1)
+            : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        if (restored != 0) {
+            fprintf(stderr, "proof fixture: cannot restore process environment\n");
+            failures++;
+        }
+    }
+    free(saved_process_env);
+    return failures;
+}
 #endif
 
 /* The property the whole receipt rests on: one tree at two absolute paths
@@ -4507,6 +4608,82 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
     } _test_next:;
     return failures;
 }
+#if !defined(_WIN32)
+static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
+{
+    int failures = 0;
+    TEST("proof generation: persistent vendor inputs survive successful cleanup") {
+        char donor[4096], generation[4096], source[4096], target[4096];
+        char hidden[4096], why[256] = {0};
+        test_make_tmpdir(donor, sizeof(donor), "gen_deps", "donor");
+        test_make_tmpdir(generation, sizeof(generation), "gen_deps", "copy");
+        static const char *const files[] = {
+            "vendor/lib/libcrypto.a", "vendor/include/openssl/ssl.h",
+            "vendor/sqlite3.c", "vendor/tor/libtor.a", "vendor/tor/.provenance",
+            "vendor/.cache/input.tar",
+            "vendor/cross/x86_64-w64-mingw32/lib/libsqlite3.a",
+            "vendor/cross/x86_64-w64-mingw32/lib/.provenance/libsqlite3.a.stamp",
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "build/githooks/pre-push",
+#if defined(__linux__)
+            "build/hotswap/zcl_rollback_fixture_a.so",
+            "build/hotswap/zcl_rollback_fixture_b.so",
+#endif
+        };
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i)
+            ASSERT(ic_write(donor, files[i], "fixture dependency bytes\n"));
+        /* Successful build_vendor.sh removes this directory. The fixture
+         * deliberately has only persistent outputs, including provenance. */
+        ASSERT(snprintf(source, sizeof(source), "%s/vendor/.build-x86_64-w64-mingw32",
+                        donor) < (int)sizeof(source));
+        ASSERT(access(source, F_OK) != 0);
+        ASSERT(zcl_dev_proof_test_generation_dependencies(
+            donor, generation, why, sizeof(why)));
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+            struct stat before, after;
+            ASSERT(snprintf(source, sizeof(source), "%s/%s", donor, files[i]) <
+                   (int)sizeof(source));
+            ASSERT(snprintf(target, sizeof(target), "%s/%s", generation, files[i]) <
+                   (int)sizeof(target));
+            ASSERT(stat(source, &before) == 0);
+            ASSERT(stat(target, &after) == 0);
+            ASSERT(before.st_size == after.st_size);
+            ASSERT(before.st_ino != after.st_ino || before.st_dev != after.st_dev);
+            char bytes[64] = {0};
+            FILE *copied_file = fopen(target, "rb");
+            ASSERT(copied_file != NULL);
+            size_t count = fread(bytes, 1, sizeof(bytes) - 1, copied_file);
+            ASSERT(fclose(copied_file) == 0);
+            ASSERT(count == strlen("fixture dependency bytes\n"));
+            ASSERT_STR_EQ(bytes, "fixture dependency bytes\n");
+        }
+        /* No stale generation copy may stand in for a missing required
+         * donor input. Cryptographic archive checking remains the existing
+         * vendor-provenance gate's responsibility. */
+        static const char *const required[] = {
+            "vendor/tor/.provenance",
+        };
+        for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
+            ASSERT(snprintf(source, sizeof(source), "%s/%s", donor, required[i]) <
+                   (int)sizeof(source));
+            ASSERT(snprintf(hidden, sizeof(hidden), "%s-hidden", source) <
+                   (int)sizeof(hidden));
+            ASSERT(rename(source, hidden) == 0);
+            bool copied = zcl_dev_proof_test_generation_dependencies(
+                donor, generation, why, sizeof(why));
+            ASSERT(rename(hidden, source) == 0);
+            ASSERT(!copied);
+            ASSERT(strstr(why, "proof_generation_dependency_unavailable:") != NULL);
+            ASSERT(strstr(why, required[i]) != NULL);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 /* `git worktree add` copies the submitting checkout's worktree-scoped
  * core.hooksPath verbatim into the new worktree's own config.worktree.
  * generation_prepare() materializes its own build/githooks copy, then calls
@@ -4665,6 +4842,10 @@ int test_impact_composition(void)
     failures += test_ic_proof_lint_and_test_share_admitted_executables();
     failures += test_ic_proof_prefork_builds_the_shared_targets();
     failures += test_ic_generation_hooks_configure_points_at_its_own_copy();
+#if !defined(_WIN32)
+    failures += test_ic_generation_dependencies_survive_vendor_cleanup();
+    failures += test_pw_original_plan_refreshes_before_sealing();
+#endif
     failures += test_ic_proof_budget_grows_with_groups();
     failures += test_ic_proof_budget_learns_from_this_checkout();
     failures += test_ic_proof_ceiling_env_raises_only();

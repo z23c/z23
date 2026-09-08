@@ -74,9 +74,9 @@ zcl_tor_provenance_ensure_bin() {
         echo "tor-provenance: missing source $src1 or $src2" >&2
         return 1
     fi
-    if [ -x "$bin" ] && [ "$bin" -nt "$src1" ] && [ "$bin" -nt "$src2" ]; then
-        return 0
-    fi
+    # The lean helper goal has no vendor or Tor bootstrap. Let its canonical
+    # rule check the complete source/header closure, rather than letting a
+    # two-source timestamp shortcut reuse a stale platform implementation.
     rel="${bin#"$root"/}"
     if ! make -s -C "$root" "$rel"; then
         echo "tor-provenance: could not build $bin via make -C $root $rel" >&2

@@ -150,4 +150,47 @@ printf 'tamper\n' >> "$fixture/beta/.cache/agent-receipts/000000-lint-fixture.lo
 grep -Eq '"branch":"agent/beta"[^}]*"lint_status":"invalid"' \
     "$fixture/fleet-invalid.json" || die "tampered beta log was trusted"
 
-echo "dev-fleet-selftest: PASS — three worktrees, exact heads/files/red-since, owner-only gates, freshness, and log integrity"
+# A valid fleet can exceed the argv adapter's former 16 KiB scratch buffer
+# while remaining inside this leaf's declared 64 KiB contract. Exercise the
+# actual CLI serialization and field-selection paths, not just the collector.
+mkdir -p "$fixture/alpha/docs/response-budget"
+for ((i = 0; i < 400; i++)); do
+    printf -v name 'file-%04d-with-a-long-enough-name-to-exercise-the-response-budget.txt' "$i"
+    printf 'fixture\n' > "$fixture/alpha/docs/response-budget/$name"
+done
+if ! (cd "$fixture/main" && "$fleet_bin" dev fleet truth > "$fixture/fleet-large.json"); then
+    cat "$fixture/fleet-large.json" >&2
+    die "large fleet failed inside its declared response budget"
+fi
+bytes="$(wc -c < "$fixture/fleet-large.json")"
+[ "$bytes" -gt 16384 ] && [ "$bytes" -le 65536 ] ||
+    die "large fleet fixture did not exercise the declared response envelope"
+grep -Fq 'file-0399-' "$fixture/fleet-large.json" || die "large fleet silently truncated"
+(cd "$fixture/main" && "$fleet_bin" dev fleet truth --field=main_head > "$fixture/fleet-fields.txt")
+grep -Fq "main_head=$main_head" "$fixture/fleet-fields.txt" ||
+    die "field selection failed on a large response"
+# Individual key=value containers retain their separate bounded renderer.
+if (cd "$fixture/main" && "$fleet_bin" dev fleet truth --field=lanes \
+        > "$fixture/fleet-field-large.txt" 2> "$fixture/fleet-field-large.err"); then
+    die "oversized key=value container was silently accepted"
+fi
+grep -Fq 'too large' "$fixture/fleet-field-large.err" ||
+    die "oversized field did not explain its rendering bound"
+[ ! -s "$fixture/fleet-field-large.txt" ] || die "oversized field emitted truncated output"
+if (cd "$fixture/main" && "$fleet_bin" dev fleet truth --budget-bytes=8192 \
+        > "$fixture/fleet-bounded.json"); then
+    die "caller response budget was ignored"
+fi
+grep -Fq 'RESPONSE_BUDGET_EXCEEDED' "$fixture/fleet-bounded.json" ||
+    die "caller budget refusal missing"
+for ((i = 400; i < 1000; i++)); do
+    printf -v name 'file-%04d-with-a-long-enough-name-to-exercise-the-response-budget.txt' "$i"
+    printf 'fixture\n' > "$fixture/alpha/docs/response-budget/$name"
+done
+if (cd "$fixture/main" && "$fleet_bin" dev fleet truth > "$fixture/fleet-overflow.json"); then
+    die "declared leaf response budget was ignored"
+fi
+grep -Fq 'RESPONSE_BUDGET_EXCEEDED' "$fixture/fleet-overflow.json" ||
+    die "declared leaf budget refusal missing"
+
+echo "dev-fleet-selftest: PASS — three worktrees, exact heads/files/red-since, owner-only gates, freshness, log integrity, and bounded large CLI replies"

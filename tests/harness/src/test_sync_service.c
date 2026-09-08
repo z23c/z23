@@ -1887,6 +1887,74 @@ static int test_sync_service_builds_alt_recovery_plan(void)
     return failures;
 }
 
+static int test_sync_service_recovery_ignores_map_order(void)
+{
+    int failures = 0;
+
+    TEST("stall recovery preserves earliest descendants and first-gap fallback") {
+        enum { ENTRY_COUNT = 300 };
+        for (int scenario = 0; scenario < 3; ++scenario) {
+            struct main_state ms;
+            struct p2p_node node = {0};
+            struct sync_stall_recovery recovery;
+            struct block_index tip = {0}, fork = {0};
+            struct uint256 tip_hash = {{0}}, fork_hash = {{0}};
+            struct block_index *entries = zcl_calloc(ENTRY_COUNT, sizeof(*entries), "stall fixture entries");
+            struct uint256 *hashes = zcl_calloc(ENTRY_COUNT, sizeof(*hashes), "stall fixture hashes");
+            ASSERT(entries != NULL);
+            ASSERT(hashes != NULL);
+            main_state_init(&ms);
+            block_index_init(&tip);
+            block_index_init(&fork);
+            tip_hash.data[31] = 250;
+            fork_hash.data[31] = 251;
+            tip.phashBlock = &tip_hash;
+            fork.phashBlock = &fork_hash;
+            tip.nHeight = fork.nHeight = 100;
+            ASSERT(active_chain_move_window_tip(&ms.chain_active, &tip));
+            ASSERT(block_map_reserve(&ms.map_block_index, ENTRY_COUNT));
+            for (size_t i = 0; i < ENTRY_COUNT; ++i) {
+                /* The map's low-eight-byte hash makes these consecutive
+                 * buckets: the required block is deliberately visited last. */
+                uint64_t key = i + 1;
+                memcpy(hashes[i].data, &key, sizeof(key));
+                block_index_init(&entries[i]);
+                entries[i].phashBlock = &hashes[i];
+                entries[i].nHeight = scenario == 2 ? 101 : 102;
+                entries[i].pprev = scenario == 1 ? &entries[ENTRY_COUNT - 1] : &fork;
+                ASSERT(block_map_insert(&ms.map_block_index, &hashes[i], &entries[i]));
+            }
+            struct block_index *needed = &entries[ENTRY_COUNT - 1];
+            needed->nHeight = scenario == 2 ? 102 : 101;
+            needed->pprev = scenario == 2 ? &fork : &tip;
+            if (scenario == 2)
+                entries[ENTRY_COUNT - 2].nStatus = BLOCK_HAVE_DATA;
+            size_t iter = 0, visited = 0;
+            struct block_index *entry = NULL;
+            while (block_map_next(&ms.map_block_index, &iter, NULL, &entry)) {
+                ASSERT(entry == &entries[visited]);
+                ++visited;
+            }
+            ASSERT(visited == ENTRY_COUNT);
+            node.state = PEER_SYNCING_BLOCKS;
+            node.starting_height = 1000;
+            ASSERT(syncsvc_build_stall_recovery(&recovery, &ms, &node,
+                                                0, 0, 3000 + scenario * 1000));
+            ASSERT(recovery.alt_count == (scenario == 1 ? 64 : 1));
+            ASSERT(uint256_eq(&recovery.alt_hashes[0], needed->phashBlock));
+            ASSERT(recovery.alt_heights[0] == needed->nHeight);
+            ASSERT(recovery.next_height == (scenario == 2 ? 102 : 101));
+            syncsvc_free_stall_recovery(&recovery);
+            main_state_free(&ms);
+            free(hashes);
+            free(entries);
+        }
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_sync_service_requests_reset_when_no_alts(void)
 {
     int failures = 0;
@@ -2259,6 +2327,7 @@ int test_sync_service(void)
     failures += test_sync_service_header_chain_policy();
     failures += test_sync_service_builds_alt_recovery_plan();
     failures += test_sync_service_requests_reset_when_no_alts();
+    failures += test_sync_service_recovery_ignores_map_order();
     failures += test_sync_service_applies_alt_recovery();
     failures += test_sync_service_applies_reset_recovery();
     failures += test_sync_service_recovery_header_anchor();

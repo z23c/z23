@@ -368,12 +368,17 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
      * 10 full scans plus two more full scans pins a core and starves every
      * other map reader when run near a deep tip. */
     #define STALL_PROBE_WINDOW 10
-    #define STALL_ALT_CANDIDATES 256
+    #define STALL_ALT_CANDIDATES 64
     bool have_data_at[STALL_PROBE_WINDOW] = {false};
-    struct block_index **cand =
-        zcl_calloc(STALL_ALT_CANDIDATES, sizeof(*cand), "stall cand");
+    struct stall_candidates {
+        struct block_index *descendants[STALL_ALT_CANDIDATES];
+        struct block_index *fallback[STALL_PROBE_WINDOW][STALL_ALT_CANDIDATES];
+        size_t fallback_count[STALL_PROBE_WINDOW];
+    };
+    struct stall_candidates *cand = zcl_calloc(1, sizeof(*cand), "stall cand");
+    if (!cand) return true;
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
     size_t cand_count = 0;
-    bool cand_overflow = false;
     {
         size_t pi = 0;
         struct block_index *px;
@@ -390,22 +395,41 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
                 if (px->nStatus & BLOCK_HAVE_DATA)
                     have_data_at[dh - 1] = true;
             }
-            if (cand && dh <= 512 &&
+            if (tip && dh <= 512 &&
                 !(px->nStatus & BLOCK_FAILED_MASK) &&
                 !(px->nStatus & BLOCK_HAVE_DATA) &&
                 px->phashBlock) {
-                if (cand_count < STALL_ALT_CANDIDATES)
-                    cand[cand_count++] = px;
-                else
-                    cand_overflow = true;
+                /* Keep each possible first-gap fallback independently;
+                 * data later in the map can move that gap forward. */
+                if (dh <= STALL_PROBE_WINDOW &&
+                    cand->fallback_count[dh - 1] < STALL_ALT_CANDIDATES)
+                    cand->fallback[dh - 1][cand->fallback_count[dh - 1]++] = px;
+                if (cand_count == STALL_ALT_CANDIDATES &&
+                    px->nHeight >= cand->descendants[cand_count - 1]->nHeight)
+                    continue;
+                /* Filter BEFORE bounding the pool. Unrelated forks must
+                 * not crowd out a descendant, nor deep descendants H+1. */
+                struct block_index *walk = pprev_walk_until_height(
+                    px, our_h, 100000, "block_sync.alt_descent");
+                if (walk != tip &&
+                    !(walk && walk->phashBlock && tip->phashBlock &&
+                      uint256_eq(walk->phashBlock, tip->phashBlock)))
+                    continue;
+                size_t pos = cand_count;
+                if (pos == STALL_ALT_CANDIDATES) {
+                    --pos;
+                } else {
+                    ++cand_count;
+                }
+                while (pos > 0 &&
+                       cand->descendants[pos - 1]->nHeight > px->nHeight) {
+                    cand->descendants[pos] = cand->descendants[pos - 1];
+                    --pos;
+                }
+                cand->descendants[pos] = px;
             }
         }
     }
-    if (cand_overflow)
-        LOG_INFO("block_sync",
-                 "stall recovery: candidate pool capped at %d "
-                 "(more dataless entries exist in (tip, tip+512])",
-                 STALL_ALT_CANDIDATES);
     for (int probe = 1; probe <= STALL_PROBE_WINDOW; probe++) {
         if (!have_data_at[probe - 1]) {
             recovery->next_height = our_h + probe;
@@ -413,7 +437,6 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
         }
     }
 
-    struct block_index *tip = active_chain_tip(&ms->chain_active);
     if (!tip) {
         free(cand);
         return true;
@@ -429,27 +452,18 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
     }
 
     size_t alt_count = 0;
-    for (size_t ci = 0; cand && ci < cand_count && alt_count < 64; ci++) {
-        struct block_index *alt = cand[ci];
-
-        /* Cycle-safe descent to height our_h. */
-        struct block_index *walk = pprev_walk_until_height(
-            alt, our_h, 100000, "block_sync.alt_descent");
-        if (walk == tip ||
-            (walk && tip && walk->phashBlock && tip->phashBlock &&
-             uint256_eq(walk->phashBlock, tip->phashBlock))) {
-            alt_hashes[alt_count] = *alt->phashBlock;
-            alt_heights[alt_count] = alt->nHeight;
-            alt_count++;
-        }
+    for (size_t ci = 0; ci < cand_count; ci++) {
+        struct block_index *alt = cand->descendants[ci];
+        alt_hashes[alt_count] = *alt->phashBlock;
+        alt_heights[alt_count++] = alt->nHeight;
     }
 
     if (alt_count == 0) {
         /* Fallback: entries at the first gap height, descent not
          * required (matches the old iter3 pass). */
-        for (size_t ci = 0; cand && ci < cand_count && alt_count < 64; ci++) {
-            struct block_index *alt = cand[ci];
-            if (alt->nHeight != recovery->next_height) continue;
+        size_t gap = (size_t)(recovery->next_height - our_h - 1);
+        for (size_t ci = 0; ci < cand->fallback_count[gap]; ci++) {
+            struct block_index *alt = cand->fallback[gap][ci];
             alt_hashes[alt_count] = *alt->phashBlock;
             alt_heights[alt_count] = alt->nHeight;
             alt_count++;

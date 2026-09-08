@@ -123,10 +123,13 @@ ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_consensus_export_fd_io_refusal_SOURCES := \
 	tests/harness/src/consensus_export_fd_io_refusal_acceptance.c \
 	engine/composition/src/consensus_state_snapshot_export_fd_io.c \
-	platform/modules/platform/src/positioned_io.c \
-	vendor/sqlite3.c
+	platform/modules/platform/src/positioned_io.c
 ZCL_WINDOWS_ACCEPTANCE_consensus_export_fd_io_refusal_FLAGS := \
-	-Iengine/composition/src -Wno-unused-but-set-variable -Wno-unused-parameter
+	-Iengine/composition/src
+ZCL_WINDOWS_ACCEPTANCE_consensus_export_fd_io_refusal_LIBDEPS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE)
+ZCL_WINDOWS_ACCEPTANCE_consensus_export_fd_io_refusal_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE)
 ZCL_WINDOWS_ACCEPTANCE_consensus_export_output_seal_refusal_SOURCES := \
 	tests/harness/src/consensus_export_output_seal_refusal_acceptance.c \
 	engine/composition/src/consensus_state_snapshot_output_seal.c
@@ -174,12 +177,11 @@ ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_database_lifetime_SOURCES := \
 	platform/modules/platform/tests/database_lifetime_windows_acceptance.c \
 	engine/models/src/database_lifetime.c \
-	platform/modules/platform/src/clock.c \
-	vendor/sqlite3.c
-ZCL_WINDOWS_ACCEPTANCE_database_lifetime_FLAGS := \
-	-Wno-unused-but-set-variable -Wno-unused-parameter
+	platform/modules/platform/src/clock.c
+ZCL_WINDOWS_ACCEPTANCE_database_lifetime_LIBDEPS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE)
 ZCL_WINDOWS_ACCEPTANCE_database_lifetime_LIBS := \
-	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE) $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_SOURCES := \
 	tests/harness/src/codeindex_freshness_windows_acceptance.c \

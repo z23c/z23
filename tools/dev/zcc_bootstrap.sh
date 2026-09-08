@@ -62,6 +62,11 @@ case "$HOST_SYSTEM" in
 esac
 BOOTSTRAP_FLAGS=(-std=c23 -O2 -D_POSIX_C_SOURCE=200809L
                  "-ffile-prefix-map=$REPO_ROOT=/zclassic23")
+# PE linkers otherwise stamp each bootstrap with wall-clock time, changing
+# the compile-cache identity even when every input byte is identical.
+case "$HOST_SYSTEM" in
+    MSYS*|MINGW*|CYGWIN*) BOOTSTRAP_FLAGS+=(-Wl,--no-insert-timestamp) ;;
+esac
 if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     BOOTSTRAP_FLAGS+=(-D_DARWIN_C_SOURCE -Dst_mtim=st_mtimespec)
 fi
