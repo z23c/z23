@@ -121,6 +121,11 @@ void zcl_native_bridge_project(const struct zcl_command_request *request,
                                const struct json_value *body,
                                struct zcl_command_reply *reply);
 
+/* Keep board lines and signed posts on the same bounded projection page. */
+void zcl_native_fleet_board_project_list(
+    const struct zcl_command_request *request,
+    const struct json_value *body, struct zcl_command_reply *reply);
+
 /* Dispatch lookups. Every bridged leaf resolves to exactly
  * one of the two: a re-homed body function OR a direct JSON-RPC method.
  * Pure lookups — no node contact. The golden catalog test proves the union

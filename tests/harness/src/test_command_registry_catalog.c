@@ -2765,6 +2765,70 @@ static void make_large_body(struct json_value *body)
     json_free(&nested);
 }
 
+static int test_board_list_budget_pages(void)
+{
+    int failures = 0;
+    TEST("board list: large messages page with paired lines and intact posts") {
+        const struct zcl_command_spec *spec =
+            find_spec(zcl_command_catalog(), "fleet.board.list");
+        ASSERT(spec != NULL);
+        struct json_value body, posts;
+        json_init(&body);
+        json_set_object(&body);
+        json_init(&posts);
+        json_set_array(&posts);
+        char text[1801];
+        memset(text, 'x', sizeof(text) - 1);
+        text[sizeof(text) - 1] = 0;
+        for (int i = 0; i < 8; i++) {
+            struct json_value post;
+            json_init(&post);
+            json_set_object(&post);
+            (void)json_push_kv_int(&post, "seq", i);
+            (void)json_push_kv_str(&post, "text", text);
+            (void)json_push_kv_str(&post, "signature", "fixture-signature");
+            (void)json_push_back(&posts, &post);
+            json_free(&post);
+        }
+        (void)json_push_kv(&body, "posts", &posts);
+        json_free(&posts);
+        size_t seen = 0;
+        for (size_t attempt = 0; attempt < 8 && seen < 8; attempt++) {
+            char cursor[24], encoded[ZCL_COMMAND_LIST_BUDGET + 1];
+            (void)snprintf(cursor, sizeof(cursor), "%zu", seen);
+            struct zcl_command_request req = {
+                .spec = spec, .view = "normal", .cursor = cursor,
+            };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, spec->output_schema);
+            zcl_native_fleet_board_project_list(&req, &body, &reply);
+            size_t n = json_write(&reply.data, encoded, sizeof(encoded));
+            ASSERT(n > 0 && n < (size_t)spec->budget_bytes - 512);
+            const struct json_value *rows = json_get(&reply.data, "posts");
+            size_t count = json_size(rows);
+            ASSERT(count > 0 && count < 8);
+            ASSERT_EQ(json_size(json_get(&reply.data, "lines")), count);
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), (int64_t)count);
+            for (size_t i = 0; i < count; i++) {
+                const struct json_value *row = json_at(rows, i);
+                ASSERT_EQ(json_get_int(json_get(row, "seq")), (int64_t)(seen + i));
+                ASSERT_STR_EQ(json_get_str(json_get(row, "text")), text);
+                ASSERT_STR_EQ(json_get_str(json_get(row, "signature")), "fixture-signature");
+            }
+            seen += count;
+            const struct json_value *page = json_get(&reply.data, "_page");
+            ASSERT_EQ(json_get_bool(json_get(page, "truncated")), seen < 8);
+            if (seen < 8)
+                ASSERT_EQ(json_get_int(json_get(page, "next_cursor")), (int64_t)seen);
+            zcl_command_reply_free(&reply);
+        }
+        ASSERT_EQ(seen, (size_t)8);
+        json_free(&body);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_response_budget_views(void)
 {
     int failures = 0;
@@ -4428,6 +4492,7 @@ int test_command_registry_catalog(void)
     failures += test_planned_fail_closed();
     failures += test_envelope_vectors();
     failures += test_dev_branch_leaves();
+    failures += test_board_list_budget_pages();
     failures += test_response_budget_views();
     failures += test_typo_stays_branch();
     failures += test_ops_selftest_registry();

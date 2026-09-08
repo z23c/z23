@@ -199,32 +199,52 @@ static void fb_post_line(const struct json_value *post, char *out, size_t cap)
 }
 
 /* Project a node list reply into the command reply, lines first. */
-static void fb_project_list(struct zcl_command_reply *reply,
-                            const struct json_value *body)
+void zcl_native_fleet_board_project_list(
+    const struct zcl_command_request *request,
+    const struct json_value *body, struct zcl_command_reply *reply)
 {
     const struct json_value *posts = json_get(body, "posts");
-    struct json_value lines;
-    json_init(&lines);
-    json_set_array(&lines);
+    struct json_value rows;
+    json_init(&rows);
+    json_set_array(&rows);
     if (posts && posts->type == JSON_ARR) {
         for (size_t i = 0; i < json_size(posts); i++) {
             char line[FLEET_BOARD_LINE_MAX];
             fb_post_line(json_at(posts, i), line, sizeof(line));
             struct json_value item;
             json_init(&item);
-            json_set_str(&item, line);
-            (void)json_push_back(&lines, &item);
+            json_set_object(&item);
+            (void)json_push_kv_str(&item, "line", line);
+            (void)json_push_kv(&item, "post", json_at(posts, i));
+            (void)json_push_back(&rows, &item);
             json_free(&item);
         }
     }
-    (void)json_push_kv(&reply->data, "lines", &lines);
+    /* Budget both representations together; paging them independently would
+     * disconnect a human-readable line from its signed post. */
+    zcl_native_bridge_project(request, &rows, reply);
+    json_free(&rows);
+    const struct json_value *items = json_get(&reply->data, "items");
+    struct json_value data, lines, selected;
+    json_init(&data);
+    json_set_object(&data);
+    json_init(&lines);
+    json_set_array(&lines);
+    json_init(&selected);
+    json_set_array(&selected);
+    for (size_t i = 0; i < json_size(items); i++) {
+        const struct json_value *item = json_at(items, i);
+        (void)json_push_back(&lines, json_get(item, "line"));
+        (void)json_push_back(&selected, json_get(item, "post"));
+    }
+    (void)json_push_kv(&data, "lines", &lines);
+    (void)json_push_kv(&data, "posts", &selected);
+    (void)json_push_kv_int(&data, "returned", (int64_t)json_size(&selected));
+    (void)json_push_kv(&data, "_page", json_get(&reply->data, "_page"));
     json_free(&lines);
-    if (posts)
-        (void)json_push_kv(&reply->data, "posts", posts);
-    const struct json_value *returned = json_get(body, "returned");
-    if (returned && returned->type == JSON_INT)
-        (void)json_push_kv_int(&reply->data, "returned",
-                               json_get_int(returned));
+    json_free(&selected);
+    json_free(&reply->data);
+    reply->data = data;
 }
 
 /* Copy every key of the node's reply except its transport envelope. */
@@ -345,7 +365,7 @@ void zcl_native_handle_fleet_board_list(
     json_free(&out);
     if (!ok)
         return;
-    fb_project_list(reply, &body);
+    zcl_native_fleet_board_project_list(request, &body, reply);
     json_free(&body);
     (void)zcl_command_reply_add_next(
         reply, "fleet.board.show", "{}",
@@ -484,7 +504,7 @@ void zcl_native_handle_fleet_wiki_list(
     json_free(&out);
     if (!ok)
         return;
-    fb_project_list(reply, &body);
+    zcl_native_fleet_board_project_list(request, &body, reply);
     json_free(&body);
     (void)zcl_command_reply_add_next(reply, "fleet.wiki.read", "{}",
                                      "read one page in full");
@@ -514,6 +534,6 @@ void zcl_native_handle_fleet_wiki_history(
     json_free(&out);
     if (!ok)
         return;
-    fb_project_list(reply, &body);
+    zcl_native_fleet_board_project_list(request, &body, reply);
     json_free(&body);
 }

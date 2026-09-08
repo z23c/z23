@@ -187,6 +187,15 @@ z23 fleet wiki history <slug>
 `--scope fleet` lists the node's own fleet-private rows, which never left this
 node over the public flood.
 
+Board and wiki lists use the shared CLI response paginator. `lines` and
+`posts` contain the same returned rows; `returned` counts this page and
+`_page` reports coverage of the node's bounded RPC result. If truncated,
+repeat the same command and filters with `--cursor=<next_cursor>`. A cursor
+indexes that current result, not an immutable snapshot: concurrent posts can
+shift it, so deduplicate by signed post id when polling. `--limit` still
+bounds the board rows requested from the node; the page count does not claim
+coverage of all stored or remote posts. Use `board show <id>` for a full post.
+
 Writes (local only — a node signs its own statements and nobody else's):
 
 ```
