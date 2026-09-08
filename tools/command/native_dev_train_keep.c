@@ -38,18 +38,14 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
+#include "platform/process_lock.h"
 #include "platform/time_compat.h"
 
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#if !defined(_WIN32)
-#include <sys/file.h>
-#include <unistd.h>
-#endif
 
 #define DTK_LEAF "dev.train.keep"
 
@@ -206,32 +202,6 @@ static void dtk_log(const struct dtk_paths *p, const char *label,
     (void)fclose(f);
 }
 
-/* ── the one-keeper-per-train lock ─────────────────────────────────────── */
-
-static int dtk_lock(const char *path)
-{
-    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (fd < 0)
-        return -1;
-#if !defined(_WIN32)
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        (void)close(fd);
-        return -1;
-    }
-#endif
-    return fd;
-}
-
-static void dtk_unlock(int fd)
-{
-    if (fd < 0)
-        return;
-#if !defined(_WIN32)
-    (void)flock(fd, LOCK_UN);
-#endif
-    (void)close(fd);
-}
-
 /* ── paths ─────────────────────────────────────────────────────────────── */
 
 /* `env` when non-empty, else $HOME + `suffix`. The caller passes the getenv()
@@ -262,7 +232,7 @@ static bool dtk_paths_files(struct dtk_paths *p)
            dtk_join(p->dir, "board_post.txt", p->board, sizeof(p->board));
 }
 
-static bool dtk_paths_init(int train, struct dtk_paths *p)
+static bool dtk_paths_init(int train, struct dtk_paths *p, bool dry_run)
 {
     char trains[DTK_PATH], helpers[DTK_PATH], land[PATH_MAX];
     memset(p, 0, sizeof(*p));
@@ -277,8 +247,12 @@ static bool dtk_paths_init(int train, struct dtk_paths *p)
                   sizeof(trains)) ||
         !dtk_root(getenv("ZCL_TRAIN_HELPER_DIR"),
                   "/.local/state/zclassic23/scratch/northstar", helpers,
-                  sizeof(helpers)) ||
-        !zcl_dev_train_land_dir(land, sizeof(land)))
+                  sizeof(helpers)))
+        return false;
+    bool land_resolved = dry_run
+        ? zcl_dev_train_land_dir_existing(land, sizeof(land))
+        : zcl_dev_train_land_dir(land, sizeof(land));
+    if (!land_resolved)
         return false;
     return dtk_join(p->scratch, p->name, p->dir, sizeof(p->dir)) &&
            dtk_join(trains, p->name, p->wt, sizeof(p->wt)) &&
@@ -333,10 +307,9 @@ static void dtk_state_load(const struct dtk_paths *p, struct dtk_state *st)
     } else {
         (void)snprintf(st->state, sizeof(st->state), "blocked");
         (void)snprintf(st->reason, sizeof(st->reason),
-                      "%s is present but unreadable or not valid JSON; a "
+                      "KEEP.json is present but unreadable or not valid JSON; a "
                       "previous keeper may have died mid-write outside the "
-                      "atomic path — inspect and repair or remove it",
-                      p->state);
+                      "atomic path — inspect and repair or remove it");
     }
     json_free(&v);
 }
@@ -626,7 +599,8 @@ static bool dtk_precheck(const struct dtk_paths *p, const char *base,
     const char *argv[] = {p->land_pre, p->name, base, NULL};
     struct zcl_devloop_process_result r;
     if (!zcl_devloop_process_run(p->scratch, argv, DTK_HELPER_TIMEOUT_MS, &r)) {
-        (void)snprintf(why, cap, "could not run %s", p->land_pre);
+        (void)snprintf(why, cap, "could not run land_pre.sh at %.180s%s",
+                      p->land_pre, strlen(p->land_pre) > 180 ? "..." : "");
         return false;
     }
     dtk_log(p, "land_pre.sh", r.output);
@@ -741,10 +715,23 @@ static void dtk_publish(struct zcl_command_reply *reply,
 
 static void dtk_pass_landing(const struct dtk_paths *p, const char *root,
                              struct dtk_state *st,
-                             struct zcl_command_reply *reply)
+                             struct zcl_command_reply *reply, bool dry_run)
 {
     char outcome[64];
     dtk_outcome_state(p, st->tip, outcome, sizeof(outcome));
+    if (dry_run) {
+        const char *would_state = "landing";
+        if (strcmp(outcome, "landed") == 0)
+            would_state = "landed";
+        else if (outcome[0] && strcmp(outcome, "queued") != 0 &&
+                 strcmp(outcome, "running") != 0)
+            would_state = "blocked";
+        dtk_publish(reply, p, st);
+        (void)json_push_kv_str(&reply->data, "observed_outcome", outcome);
+        (void)json_push_kv_str(&reply->data, "would_state", would_state);
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        return;
+    }
     if (strcmp(outcome, "landed") == 0) {
         dtk_finish_landed(p, root, st->tip);
         dtk_set(st, "landed", "");
@@ -768,7 +755,7 @@ static void dtk_pass_landing(const struct dtk_paths *p, const char *root,
  * keeper gets to make. */
 static void dtk_pass_dry(const struct dtk_paths *p, const struct dtk_pick *picks,
                          size_t n, const char *base, const char *origin,
-                         struct zcl_command_reply *reply)
+                         const char *state, struct zcl_command_reply *reply)
 {
     struct json_value plan;
     json_init(&plan);
@@ -786,10 +773,12 @@ static void dtk_pass_dry(const struct dtk_paths *p, const struct dtk_pick *picks
     json_free(&plan);
     (void)json_push_kv_str(&reply->data, "base", base);
     (void)json_push_kv_str(&reply->data, "origin_main", origin);
+    (void)json_push_kv_str(&reply->data, "origin_main_source",
+                          "local_tracking_ref");
     (void)json_push_kv_str(&reply->data, "worktree", p->wt);
     (void)json_push_kv_str(&reply->data, "land_pre", p->land_pre);
     (void)json_push_kv_str(&reply->data, "land_unit", p->land_unit);
-    (void)json_push_kv_str(&reply->data, "state", "idle");
+    (void)json_push_kv_str(&reply->data, "state", state);
     (void)json_push_kv_int(&reply->data, "picks", (int64_t)n);
     (void)json_push_kv_str(&reply->data, "next",
                           "dev train keep --train=<N> --once");
@@ -811,7 +800,7 @@ static bool dtk_assemble(const struct dtk_paths *p, const char *root,
     }
     f = fopen(p->picks, "wb");
     if (!f) {
-        (void)snprintf(why, cap, "cannot write %s", p->picks);
+        (void)snprintf(why, cap, "cannot write picks.txt in the train directory");
         return false;
     }
     for (size_t i = 0; i < n; i++)
@@ -826,11 +815,16 @@ static bool dtk_assemble(const struct dtk_paths *p, const char *root,
  * is a human rebase, so this only ever refuses. */
 static bool dtk_agree_on_base(const struct dtk_paths *p, const char *root,
                               char base[41], char origin[41],
-                              struct zcl_command_reply *reply)
+                              struct zcl_command_reply *reply, bool dry_run)
 {
     static const char *const fetch[] = {"fetch", "-q", "origin", NULL};
     char why[256];
-    (void)zcl_dev_train_git(root, fetch, NULL, 0, DTK_FETCH_TIMEOUT_MS);
+    if (!dry_run &&
+        zcl_dev_train_git(root, fetch, NULL, 0, DTK_FETCH_TIMEOUT_MS) != 0) {
+        dtk_refuse(reply, "FETCH_FAILED", "base",
+                   "cannot refresh origin/main; the queue was not assembled");
+        return false;
+    }
     if (!dtk_queue_base(p, root, base) ||
         !dtk_rev_parse(root, "origin/main", origin)) {
         dtk_refuse(reply, "NO_BASE", "base",
@@ -867,10 +861,10 @@ static void dtk_pass_cycle(const struct dtk_paths *p, const char *root,
                    "no LAND verdicts in the queue");
         return;
     }
-    if (!dtk_agree_on_base(p, root, base, origin, reply))
+    if (!dtk_agree_on_base(p, root, base, origin, reply, dry_run))
         return;
     if (dry_run) {
-        dtk_pass_dry(p, picks, n, base, origin, reply);
+        dtk_pass_dry(p, picks, n, base, origin, st->state, reply);
         return;
     }
 
@@ -927,11 +921,10 @@ static bool dtk_resume_is_safe(const char *state)
            strcmp(state, "ready") == 0;
 }
 
-/* Resolve the train, its paths and its directory, publishing the typed
- * refusal for whichever of the three is wrong. Returns -1 when the caller
- * must stop, otherwise the held lock fd. */
-static int dtk_open(const struct json_value *input,
-                    struct zcl_command_reply *reply, struct dtk_paths *p)
+/* Resolve paths without creating files. Preview never acquires a write lock. */
+static bool dtk_open(const struct json_value *input,
+                    struct zcl_command_reply *reply, struct dtk_paths *p,
+                    bool dry_run)
 {
     /* The train number arrives as the string the shell typed. It is parsed
      * and range-checked HERE rather than by a new integer rule in the
@@ -944,24 +937,20 @@ static int dtk_open(const struct json_value *input,
         train > DTK_TRAIN_MAX) {
         dtk_refuse(reply, "INVALID_TRAIN", "validate",
                    "--train=<N> must be a whole number 1..9999");
-        return -1;
+        return false;
     }
     (void)json_push_kv_int(&reply->data, "train", (int64_t)train);
-    if (!dtk_paths_init((int)train, p)) {
+    if (!dtk_paths_init((int)train, p, dry_run)) {
         dtk_refuse(reply, "NO_STATE_ROOT", "validate",
                    "cannot resolve the keeper's state paths");
-        return -1;
+        return false;
     }
     (void)json_push_kv_str(&reply->data, "train_dir", p->dir);
     if (!zcl_dev_train_is_dir(p->dir)) {
         dtk_refuse(reply, "NO_TRAIN_DIR", "validate", "no such train directory");
-        return -1;
+        return false;
     }
-    int lock = dtk_lock(p->lock);
-    if (lock < 0)
-        dtk_refuse(reply, "KEEPER_BUSY", "lock",
-                   "another keeper holds this train's lock");
-    return lock;
+    return true;
 }
 
 /* One pass, dispatched on the persisted state. Nothing here loops. */
@@ -974,16 +963,18 @@ static void dtk_dispatch(const struct dtk_paths *p, const char *root,
         dtk_publish(reply, p, &st);
         reply->status = ZCL_COMMAND_STATUS_PASSED;
     } else if (strcmp(st.state, "landing") == 0) {
-        dtk_pass_landing(p, root, &st, reply);
+        dtk_pass_landing(p, root, &st, reply, dry_run);
     } else if (dtk_resume_is_safe(st.state)) {
         dtk_pass_cycle(p, root, &st, reply, dry_run);
     } else {
         char why[256];
         (void)snprintf(why, sizeof(why),
-                      "a previous keeper died in state %s; inspect %s",
-                      st.state, p->wt);
-        dtk_set(&st, "blocked", why);
-        (void)dtk_state_save(p, &st);
+                      "a previous keeper died in state %.31s; inspect %.170s%s",
+                      st.state, p->wt, strlen(p->wt) > 170 ? "..." : "");
+        if (!dry_run) {
+            dtk_set(&st, "blocked", why);
+            (void)dtk_state_save(p, &st);
+        }
         dtk_refuse(reply, "KEEPER_CRASHED", "resume", why);
         dtk_publish(reply, p, &st);
     }
@@ -1006,13 +997,24 @@ void zcl_native_handle_dev_train_keep(const struct zcl_command_request *request,
 #else
     const struct json_value *input = request ? request->input : NULL;
     const struct json_value *dry = input ? json_get(input, "dry_run") : NULL;
+    bool dry_run = dry && dry->type == JSON_BOOL && json_get_bool(dry);
     struct dtk_paths p;
     (void)json_push_kv_str(&reply->data, "leaf", DTK_LEAF);
-    int lock = dtk_open(input, reply, &p);
-    if (lock < 0)
+    if (!dtk_open(input, reply, &p, dry_run))
         return;
-    dtk_dispatch(&p, zcl_dev_train_source_root(request), reply,
-                 dry && dry->type == JSON_BOOL && json_get_bool(dry));
-    dtk_unlock(lock);
+    (void)json_push_kv_bool(&reply->data, "dry_run", dry_run);
+    if (dry_run) {
+        dtk_dispatch(&p, zcl_dev_train_source_root(request), reply, true);
+        return;
+    }
+    struct platform_process_lock lock;
+    platform_process_lock_init(&lock);
+    if (!platform_process_lock_try_acquire(&lock, p.lock, true)) {
+        dtk_refuse(reply, "KEEPER_BUSY", "lock",
+                   "cannot acquire this train's private lock; it may be busy");
+        return;
+    }
+    dtk_dispatch(&p, zcl_dev_train_source_root(request), reply, false);
+    platform_process_lock_release(&lock);
 #endif
 }

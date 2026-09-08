@@ -198,7 +198,6 @@ platform/modules/platform/src/process_lifecycle.c	platform_process_close
 platform/modules/platform/src/process_lifecycle.c	platform_process_open_existing
 platform/modules/platform/src/process_lifecycle.c	platform_process_start_hidden
 platform/modules/platform/src/process_lifecycle.c	platform_process_terminate
-platform/modules/platform/src/state_root.c	platform_state_root
 platform/modules/platform/tests/directory_transaction_windows_acceptance.c	main
 platform/modules/platform/tests/os_proc_pid_image_windows_acceptance.c	main
 platform/modules/platform/tests/os_proc_self_image_windows_acceptance.c	main

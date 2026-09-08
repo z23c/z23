@@ -24,8 +24,6 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
-#include "platform/state_root.h"
-#include "util/spawn.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -48,28 +46,9 @@
 #define DVT_CHECK_MIN_TIMEOUT_MS 30000
 #define DVT_CHECK_MAX_TIMEOUT_MS 3600000
 
-/* Every helper below runs git, walks the checkout, or reads the stack
- * state file, and each one is called only from the dev-build arm of a
- * handler.  A release build compiles those arms out, so the helpers must
- * be compiled out with them or they are dead code the compiler rejects. */
+/* Every helper below runs git, walks the checkout, or reads stack state, and
+ * each one is called only from the dev-build arm of a handler. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-/* ── small shared helpers ─────────────────────────────────────────────── */
-
-const char *zcl_dev_train_source_root(const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
-    return env && env[0] ? env : ".";
-}
-
-void zcl_dev_train_strip(char *s)
-{
-    size_t n = strlen(s);
-    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r'))
-        s[--n] = '\0';
-}
 
 /* Parent directory of `path`, portable across '/'  and '\\' separators.
  * "." when path carries no separator (a bare relative name). */
@@ -119,72 +98,6 @@ static void dvt_stack_path(const char *root, const char *name, char *out,
     char parent[PATH_MAX];
     dvt_dirname(root, parent, sizeof(parent));
     (void)snprintf(out, cap, "%s/z23-stack%s", parent, name);
-}
-
-/* Doc-regen-only and baseline-pin commit subjects, skipped during
- * cherry-pick because the assembler regenerates the same artifacts once at
- * the end and re-pins the baseline against the assembled tree. A lane that
- * pinned its own complexity baseline pinned it against ITS tree, not the
- * train's: cherry-picking that pin makes the train's baseline describe a
- * tree that never existed, so it is skipped like any other regen commit. */
-bool zcl_dev_train_skip_subject(const char *subject)
-{
-    static const char *const prefixes[] = {
-        "Regenerate the generated docs",
-        "Regenerate the capability inventory",
-        "Pin today's complexity",
-        "Count what the stacked lanes added",
-        "Regenerate the catalogs",
-        NULL,
-    };
-    for (size_t i = 0; prefixes[i]; i++) {
-        size_t n = strlen(prefixes[i]);
-        if (strncmp(subject, prefixes[i], n) == 0)
-            return true;
-    }
-    return false;
-}
-
-/* Run one git command. `dir` is passed as `-C <dir>` (omitted when empty).
- * `out`/`out_cap` may be NULL/0 when the caller only wants the exit status.
- * Returns the exit status (0 on success), matching zcl_spawn_capture(). */
-int zcl_dev_train_git(const char *dir, const char *const args[], char *out,
-                   size_t out_cap, int timeout_ms)
-{
-    const char *argv[20];
-    size_t n = 0;
-    static char scratch[1];
-    argv[n++] = "git";
-    if (dir && dir[0]) {
-        argv[n++] = "-C";
-        argv[n++] = dir;
-    }
-    for (size_t i = 0; args[i] && n + 1 < sizeof(argv) / sizeof(argv[0]); i++)
-        argv[n++] = args[i];
-    argv[n] = NULL;
-    if (out && out_cap)
-        out[0] = '\0';
-    return zcl_spawn_capture(argv, out ? out : scratch,
-                             out ? out_cap : sizeof(scratch), timeout_ms);
-}
-
-bool zcl_dev_train_is_dir(const char *path)
-{
-    return platform_directory_probe_real(path) ==
-           PLATFORM_DIRECTORY_PROBE_OK;
-}
-
-/* dev.land's own state directory, derived the way dev.land derives it
- * (platform_state_root() + "/land"). Never a literal path: the two leaves
- * must agree about where the queue is, and only one derivation can keep
- * them agreeing. */
-bool zcl_dev_train_land_dir(char *out, size_t cap)
-{
-    char root[PATH_MAX];
-    if (!out || !cap || !platform_state_root(root, sizeof(root)))
-        return false;
-    int n = snprintf(out, cap, "%s/land", root);
-    return n > 0 && (size_t)n < cap;
 }
 
 /* Gather the conflicted paths (git status --porcelain XY codes with either

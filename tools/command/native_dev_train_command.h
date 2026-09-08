@@ -54,6 +54,9 @@ const char *zcl_dev_train_source_root(const struct zcl_command_request *request)
  * platform_state_root() and so must they. Returns false when the state root
  * cannot be resolved or does not fit. */
 bool zcl_dev_train_land_dir(char *out, size_t cap);
+/* Resolve the same path only from an existing private state root. Never
+ * create directories or repair permissions while inspecting a preview. */
+bool zcl_dev_train_land_dir_existing(char *out, size_t cap);
 
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 

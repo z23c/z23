@@ -28,6 +28,50 @@ static bool runtime_is_wine(void)
     return ntdll && GetProcAddress(ntdll, "wine_get_version") != NULL;
 }
 
+static bool existing_root_missing_is_read_only(const char *actual,
+                                                const wchar_t *dev)
+{
+    char existing[32768], recreated[32768];
+    return platform_state_root_existing(existing, sizeof(existing)) &&
+           strcmp(existing, actual) == 0 && RemoveDirectoryW(dev) &&
+           !platform_state_root_existing(existing, sizeof(existing)) &&
+           GetFileAttributesW(dev) == INVALID_FILE_ATTRIBUTES &&
+           platform_state_root(recreated, sizeof(recreated));
+}
+
+static bool unsafe_root_is_not_repaired(
+    const wchar_t *permissive, const wchar_t *base,
+    wchar_t unsafe_z23[MAX_PATH], wchar_t unsafe_dev[MAX_PATH])
+{
+    char path[3 * MAX_PATH], unsafe_z23_utf8[3 * MAX_PATH], actual[32768];
+    return swprintf(unsafe_z23, MAX_PATH, L"%ls\\z23", permissive) > 0 &&
+           swprintf(unsafe_dev, MAX_PATH, L"%ls\\dev", unsafe_z23) > 0 &&
+           CreateDirectoryW(permissive, NULL) &&
+           CreateDirectoryW(unsafe_z23, NULL) &&
+           CreateDirectoryW(unsafe_dev, NULL) &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, permissive, -1,
+                               path, sizeof(path), NULL, NULL) &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, unsafe_z23, -1,
+                               unsafe_z23_utf8, sizeof(unsafe_z23_utf8), NULL,
+                               NULL) &&
+           SetEnvironmentVariableW(L"ZCL_STATE_ROOT", permissive) &&
+           !platform_state_root_existing(actual, sizeof(actual)) &&
+           !platform_private_directory_ensure(unsafe_z23_utf8) &&
+           SetEnvironmentVariableW(L"ZCL_STATE_ROOT", base);
+}
+
+static bool state_root_read_only_cases(
+    const char *actual, const wchar_t *dev, const wchar_t *permissive,
+    const wchar_t *base, wchar_t unsafe_z23[MAX_PATH],
+    wchar_t unsafe_dev[MAX_PATH])
+{
+    char tiny[4];
+    return !platform_state_root(tiny, sizeof(tiny)) &&
+           existing_root_missing_is_read_only(actual, dev) &&
+           unsafe_root_is_not_repaired(permissive, base, unsafe_z23,
+                                       unsafe_dev);
+}
+
 int main(void)
 {
     wchar_t temp[MAX_PATH], base[MAX_PATH], spoof[MAX_PATH], permissive[MAX_PATH];
@@ -87,12 +131,12 @@ int main(void)
     if (!platform_private_directory_open_validated(actual, &retained))
         return fail("state root is not protected current-SID/private/no-reparse");
     platform_private_directory_close(retained);
-    char tiny[4];
-    if (platform_state_root(tiny, sizeof(tiny)))
-        return fail("truncated state root accepted");
-
     char path_utf8[MAX_PATH * 3];
-    if (!CreateDirectoryW(permissive, NULL) ||
+    wchar_t unsafe_z23[MAX_PATH], unsafe_dev[MAX_PATH];
+    if (!state_root_read_only_cases(actual, dev, permissive, base, unsafe_z23,
+                                    unsafe_dev))
+        return fail("state root read-only cases failed");
+    if (
         !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, permissive, -1,
                              path_utf8, sizeof(path_utf8), NULL, NULL) ||
         platform_private_directory_ensure(path_utf8))
@@ -114,7 +158,8 @@ int main(void)
             return fail("directory reparse point accepted");
         RemoveDirectoryW(link);
     }
-    RemoveDirectoryW(unicode); RemoveDirectoryW(permissive);
+    RemoveDirectoryW(unicode); RemoveDirectoryW(unsafe_dev);
+    RemoveDirectoryW(unsafe_z23); RemoveDirectoryW(permissive);
     RemoveDirectoryW(target); RemoveDirectoryW(spoof);
     if (!RemoveDirectoryW(dev) || !RemoveDirectoryW(z23) ||
         !RemoveDirectoryW(base))
@@ -123,8 +168,46 @@ int main(void)
     return 0;
 }
 #else
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static bool existing_root_modes_are_read_only(char actual[4096])
+{
+    char existing[4096];
+    struct stat info;
+    return platform_state_root_existing(existing, sizeof(existing)) &&
+           strcmp(existing, actual) == 0 && rmdir(actual) == 0 &&
+           !platform_state_root_existing(existing, sizeof(existing)) &&
+           lstat(actual, &info) != 0 && errno == ENOENT &&
+           platform_state_root(actual, 4096) && chmod(actual, 0755) == 0 &&
+           !platform_state_root_existing(existing, sizeof(existing)) &&
+           lstat(actual, &info) == 0 && (info.st_mode & 0777) == 0755 &&
+           chmod(actual, 0700) == 0;
+}
+
+static bool existing_root_refuses_symlink_parent(const char *base)
+{
+    char target[4096], link[4096], target_root[4096], target_z23[4096];
+    char existing[4096];
+    return snprintf(target, sizeof(target), "%s/real-state", base) > 0 &&
+           snprintf(link, sizeof(link), "%s/linked-state", base) > 0 &&
+           mkdir(target, 0700) == 0 &&
+           setenv("XDG_STATE_HOME", target, 1) == 0 &&
+           platform_state_root(target_root, sizeof(target_root)) &&
+           symlink(target, link) == 0 &&
+           setenv("XDG_STATE_HOME", link, 1) == 0 &&
+           !platform_state_root_existing(existing, sizeof(existing)) &&
+           snprintf(target_z23, sizeof(target_z23), "%s/z23", target) > 0 &&
+           unlink(link) == 0 && rmdir(target_root) == 0 &&
+           rmdir(target_z23) == 0 && rmdir(target) == 0;
+}
+
+static bool state_root_read_only_cases(char actual[4096], const char *base)
+{
+    return existing_root_modes_are_read_only(actual) &&
+           existing_root_refuses_symlink_parent(base);
+}
 
 int main(void)
 {
@@ -140,6 +223,8 @@ int main(void)
     if (lstat(actual, &info) != 0 || !S_ISDIR(info.st_mode) ||
         (info.st_mode & 0777) != 0700 || info.st_uid != geteuid())
         return fail("XDG state root is not private");
+    if (!state_root_read_only_cases(actual, base))
+        return fail("existing XDG state root read-only cases failed");
     if (unsetenv("XDG_STATE_HOME") != 0 || setenv("HOME", base, 1) != 0)
         return fail("HOME fallback setup failed");
     char home_root[4096];

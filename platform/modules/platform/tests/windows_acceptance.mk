@@ -24,6 +24,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	datadir_privacy \
 	dev_agent_mail \
 	dev_fleet_capture \
+	dev_train_keep \
 	directory_compat \
 	directory_transaction \
 	disk_space \
@@ -243,6 +244,28 @@ ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_FLAGS := \
 	-Itools
 ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_LIBS := \
 	-ladvapi32 -lshell32 -lole32 -luuid $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+
+ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_SOURCES := \
+	tests/harness/src/dev_train_keep_windows_acceptance.c \
+	tools/command/native_dev_train_keep.c \
+	tools/command/native_dev_train_shared.c \
+	platform/modules/util/src/spawn.c \
+	platform/modules/json/src/json.c \
+	platform/modules/platform/src/directory_compat.c \
+	platform/modules/platform/src/process_lock.c \
+	platform/modules/platform/src/private_file.c \
+	platform/modules/platform/src/state_root.c \
+	platform/modules/platform/src/private_directory.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/base/src/result.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/base/src/log_level.c
+ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_FLAGS := \
+	-DZCL_TESTING -Itools -Itools/dev -ffunction-sections -fdata-sections
+ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_LIBS := \
+	-Wl,--gc-sections -ladvapi32 -lshell32 -lole32 -luuid \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	platform/modules/platform/tests/directory_compat_windows_acceptance.c \

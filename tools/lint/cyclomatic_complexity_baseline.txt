@@ -2688,7 +2688,7 @@ platform/modules/platform/src/ram_scratch.c:platform_ram_scratch_reserve:19
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read:40
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read#2:26
 platform/modules/platform/src/safe_root_read.c:relative_path_valid:19
-platform/modules/platform/src/state_root.c:ensure_parent:16
+platform/modules/platform/src/state_root.c:ensure_parent:11
 platform/modules/platform/src/state_root.c:state_root_repair_acl:18
 platform/modules/platform/src/storage_probe.c:platform_storage_random_read_median_us:20
 platform/modules/platform/src/temp_directory.c:platform_temp_directory_create:23
@@ -2719,7 +2719,7 @@ platform/modules/platform/tests/process_lifecycle_windows_acceptance.c:child_mod
 platform/modules/platform/tests/process_lifecycle_windows_acceptance.c:main:103
 platform/modules/platform/tests/read_mapping_windows_acceptance.c:main:18
 platform/modules/platform/tests/socket_compat_windows_acceptance.c:main:26
-platform/modules/platform/tests/state_root_windows_acceptance.c:main:41
+platform/modules/platform/tests/state_root_windows_acceptance.c:main:40
 platform/modules/platform/tests/watcher_lease_windows_acceptance.c:child_main:17
 platform/modules/platform/tests/watcher_store_windows_acceptance.c:main:34
 platform/modules/util/src/authority_receipt.c:authority_receipt_header_authority_available:16

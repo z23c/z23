@@ -373,6 +373,147 @@ static bool dtkt_setup(struct dtkt_fix *f)
                      f->sha_c);
 }
 
+static int dtkt_dry_local_refs(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    struct json_value input = dtkt_input("7", true);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.train_keep.v1");
+    const char *move[] = {"update-ref", "refs/remotes/origin/main", f->sha_b, NULL};
+    const char *restore[] = {"update-ref", "refs/remotes/origin/main", f->origin_main, NULL};
+    TEST("train keep: dry plan neither fetches nor rewrites local tracking refs") {
+        char raw[256], ref[41];
+        ASSERT(dtkt_git(f->root, move));
+        ASSERT(dtkt_write(f->dir7, "BASE", f->sha_b));
+        ASSERT(dtkt_write(f->root, ".git/FETCH_HEAD", "dry preview sentinel\n"));
+        zcl_command_reply_free(&reply);
+        dtkt_call(f->root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(dtkt_str(&reply, "origin_main_source"), "local_tracking_ref");
+        ASSERT_STR_EQ(dtkt_str(&reply, "origin_main"), f->sha_b);
+        ASSERT(dtkt_arr_len(json_get(&reply.data, "plan")) == 2);
+        ASSERT(dtkt_slurp(f->root, ".git/FETCH_HEAD", raw, sizeof(raw)));
+        ASSERT_STR_EQ(raw, "dry preview sentinel\n");
+        ASSERT(dtkt_rev(f->root, "origin/main", ref));
+        ASSERT_STR_EQ(ref, f->sha_b);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    if (!dtkt_git(f->root, restore) || !dtkt_write(f->dir7, "BASE", f->origin_main)) {
+        fprintf(stderr, "train keep fixture: local base restoration failed\n");
+        failures++;
+    }
+    return failures;
+}
+
+static int dtkt_fetch_failure(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    char missing[1024], path[1024];
+    (void)snprintf(missing, sizeof(missing), "%s/missing-origin.git", f->parent);
+    const char *change[] = {"remote", "set-url", "origin", missing, NULL};
+    const char *restore[] = {"remote", "set-url", "origin", f->bare, NULL};
+    struct json_value input = dtkt_input("7", false);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.train_keep.v1");
+    TEST("train keep: execution refuses failed fetch before saving a cycle") {
+        ASSERT(dtkt_git(f->root, change));
+        zcl_command_reply_free(&reply);
+        dtkt_call(f->root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "FETCH_FAILED");
+        (void)snprintf(path, sizeof(path), "%s/KEEP.json", f->dir7);
+        ASSERT(!dtkt_exists(path));
+        (void)snprintf(path, sizeof(path), "%s/train7", f->trains);
+        ASSERT(platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    if (!dtkt_git(f->root, restore)) {
+        fprintf(stderr, "train keep fixture: origin URL restoration failed\n");
+        failures++;
+    }
+    return failures;
+}
+
+static int dtkt_dry_retirement_unchanged(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    char path[1024], ref[41];
+    ASSERT(dtkt_rev(f->root, "refs/review/lanea", ref));
+    ASSERT_STR_EQ(ref, f->sha_a);
+    (void)snprintf(path, sizeof(path), "%s/train10", f->scratch);
+    ASSERT(platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK);
+    const char *absent[] = {"keep.lock", "keep.log", "board_post.txt"};
+    for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+        (void)snprintf(path, sizeof(path), "%s/%s", f->dir9, absent[i]);
+        ASSERT(!dtkt_exists(path));
+    }
+_test_next:;
+    return failures;
+}
+
+static int dtkt_dry_saved_state(const struct dtkt_fix *f, const char *state,
+                                 enum zcl_command_status expected)
+{
+    int failures = 0;
+    struct json_value input = dtkt_input("9", true);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.train_keep.v1");
+    TEST("train keep: dry preview preserves saved state and pending retirement") {
+        char saved[512], raw[512], row[256];
+        int n = snprintf(saved, sizeof(saved),
+                         "{\"state\":\"%s\",\"tip\":\"%s\",\"reason\":\"preserve me\"}\n",
+                         state, f->sha_a);
+        ASSERT(n > 0 && (size_t)n < sizeof(saved));
+        ASSERT(dtkt_write(f->dir9, "KEEP.json", saved));
+        (void)snprintf(row, sizeof(row), "lanea %s\n", f->sha_a);
+        ASSERT(dtkt_write(f->dir9, "picks.txt", row));
+        (void)snprintf(row, sizeof(row), "{\"tip\":\"%s\",\"state\":\"landed\"}\n", f->sha_a);
+        ASSERT(dtkt_write(f->land, "outcomes.jsonl", row));
+        zcl_command_reply_free(&reply);
+        dtkt_call(f->root, &input, &reply);
+        ASSERT(reply.status == expected);
+        ASSERT_STR_EQ(dtkt_str(&reply, "state"), state);
+        if (strcmp(state, "landing") == 0) {
+            ASSERT_STR_EQ(dtkt_str(&reply, "observed_outcome"), "landed");
+            ASSERT_STR_EQ(dtkt_str(&reply, "would_state"), "landed");
+        }
+        ASSERT(dtkt_slurp(f->dir9, "KEEP.json", raw, sizeof(raw)));
+        ASSERT_STR_EQ(raw, saved);
+        ASSERT(dtkt_dry_retirement_unchanged(f) == 0);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
+static int dtkt_dry_saved_states(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    failures += dtkt_dry_saved_state(f, "landing", ZCL_COMMAND_STATUS_PASSED);
+    failures += dtkt_dry_saved_state(f, "picking", ZCL_COMMAND_STATUS_BLOCKED);
+    failures += dtkt_dry_saved_state(f, "unknown", ZCL_COMMAND_STATUS_BLOCKED);
+    char path[1024];
+    const char *files[] = {"KEEP.json", "picks.txt"};
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        (void)snprintf(path, sizeof(path), "%s/%s", f->dir9, files[i]);
+        if (remove(path) != 0) {
+            fprintf(stderr, "train keep fixture: cleanup failed: %s\n", path);
+            failures++;
+        }
+    }
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", f->land);
+    if (remove(path) != 0) {
+        fprintf(stderr, "train keep fixture: outcome cleanup failed\n");
+        failures++;
+    }
+    return failures;
+}
+
 /* ── the group ────────────────────────────────────────────────────────── */
 
 int test_dev_train_keep(void);
@@ -449,6 +590,9 @@ int test_dev_train_keep(void)
         dtkt_call(f.root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
         ASSERT_STR_EQ(reply.error.code, "NO_PICKS");
+        char lock_path[1024];
+        (void)snprintf(lock_path, sizeof(lock_path), "%s/keep.lock", f.dir7);
+        ASSERT(!dtkt_exists(lock_path));
         zcl_command_reply_free(&reply);
         json_free(&input);
         PASS();
@@ -486,6 +630,10 @@ int test_dev_train_keep(void)
         json_free(&input);
         PASS();
     }
+
+    failures += dtkt_dry_local_refs(&f);
+    failures += dtkt_dry_saved_states(&f);
+    failures += dtkt_fetch_failure(&f);
 
     TEST("train keep: a base that no longer equals origin/main refuses") {
         char base_line[64];
