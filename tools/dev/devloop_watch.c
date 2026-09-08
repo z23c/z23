@@ -286,6 +286,9 @@ struct watch_context {
                       [ZCL_DEVLOOP_PATH_MAX];
     size_t proof_pending_count;
     enum zcl_devloop_publish_mode proof_pending_mode;
+    /* This iteration's exact-commit verdict, established at the reactor
+     * loop head and read (never recomputed) by the cancel poll. */
+    bool commit_preempts;
 };
 
 static volatile sig_atomic_t g_watch_stop;
@@ -467,11 +470,46 @@ static bool watch_commit_proof_claimable(const struct watch_context *ctx)
         ctx->proof_pending_count == 0;
 }
 
+/* True when the synchronous edit cycle at the bottom of the reactor must
+ * yield: an exact commit-proof request is queued for current HEAD on a tree
+ * clean enough for proof_worker() to admit, so the edit epoch this cycle is
+ * proving is already subsumed by the commit whose proof is waiting.
+ *
+ * The FORKED edit worker has had this rule since watch_commit_priority_apply().
+ * The foreground cycle did not, and it is the one that holds the reactor:
+ * while it runs, the loop head that reaps a deferred queue worker and starts
+ * the commit proof is not reached at all. A landing worktree's own
+ * preparation writes enough files to schedule exactly such a cycle, so a
+ * queued landing proof waited behind work that could no longer matter.
+ *
+ * The verdict is established HERE, at the loop head, and nowhere else. The
+ * probe opens the request directory, reads its files and runs bounded git
+ * children; the cancel poll may do none of that, because the process runner
+ * invokes a poll while holding its own non-recursive cancel-poll mutex
+ * (devloop_process.c) — a poll that ran a child would re-enter that mutex and
+ * wedge the watcher for good, which is permanently worse than the scheduling
+ * delay this rule removes. The loop head is also the only place that can act
+ * on the answer, so establishing it once per iteration loses nothing. */
 static bool watch_commit_proof_prioritize(struct watch_context *ctx)
 {
     bool request_current_clean = watch_commit_request_current_clean(ctx);
     watch_commit_priority_apply(ctx, request_current_clean);
+    if (ctx)
+        ctx->commit_preempts = request_current_clean;
     return request_current_clean;
+}
+
+/* The one cancel decision a foreground cycle answers: newer source events, or
+ * the exact-commit verdict this iteration's loop head already established.
+ * Both halves are plain reads — no directory, no file, no child — because a
+ * cancel poll fires hundreds of times a second and runs under the process
+ * runner's cancel-poll mutex. A dirty or moved checkout never reaches here
+ * with the verdict set: watch_commit_request_current_clean() already refused
+ * it, so such a cycle keeps its edit feedback. */
+static bool watch_cycle_should_yield(const struct watch_context *ctx,
+                                     bool changed)
+{
+    return changed || (ctx && ctx->commit_preempts);
 }
 
 static bool mkdirs(const char *path);
@@ -783,6 +821,208 @@ bool zcl_devloop_watch_idle_exit_selftest(void)
     watch_idle_selftest_clear_request(plain);
     (void)unlink(queue_lock);
     return ok;
+}
+
+/* One bounded git command in `root`, succeeding only on a clean exit. */
+static bool watch_fg_git(const char *root, const char *const *argv,
+                         char *out, size_t out_cap)
+{
+    struct zcl_devloop_process_result result = {0};
+    if (out && out_cap)
+        out[0] = '\0';
+    if (!zcl_devloop_process_run(root, argv, 60000, &result) ||
+        result.timed_out || result.term_signal != 0 || result.exit_code != 0 ||
+        result.output_truncated)
+        return false;
+    if (out && out_cap) {
+        size_t len = result.output_len;
+        while (len > 0 && (result.output[len - 1] == '\n' ||
+                           result.output[len - 1] == '\r'))
+            len--;
+        if (len >= out_cap)
+            return false;
+        memcpy(out, result.output, len);
+        out[len] = '\0';
+    }
+    return true;
+}
+
+static bool watch_fg_write(const char *root, const char *rel,
+                           const char *body)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", root, rel);
+    ssize_t wrote;
+    int fd;
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    wrote = write(fd, body, strlen(body));
+    return close(fd) == 0 && wrote == (ssize_t)strlen(body);
+}
+
+/* A repository with one commit, an origin/main ref on it, and the proof
+ * cache ignored so a queued request never dirties the tree. */
+static const char *watch_fg_repo(const char *root, char head[65])
+{
+    const char *init[] = {"git", "init", "--quiet", "--initial-branch=main",
+                          ".", NULL};
+    const char *add[] = {"git", "add", "-A", NULL};
+    const char *commit[] = {"git", "-c", "user.name=watch", "-c",
+                            "user.email=watch@z23.invalid", "commit",
+                            "--quiet", "--no-verify", "--no-gpg-sign", "-m",
+                            "seed", NULL};
+    const char *rev[] = {"git", "rev-parse", "HEAD", NULL};
+    char ref[65];
+    if (!watch_fg_git(root, init, NULL, 0))
+        return "git init";
+    if (!watch_fg_write(root, ".gitignore", ".cache/\n") ||
+        !watch_fg_write(root, "seed.c", "int seed(void){return 0;}\n"))
+        return "seed files";
+    if (!watch_fg_git(root, add, NULL, 0))
+        return "git add";
+    if (!watch_fg_git(root, commit, NULL, 0))
+        return "git commit";
+    if (!watch_fg_git(root, rev, head, 65) || strlen(head) != 40)
+        return "git rev-parse";
+    (void)snprintf(ref, sizeof(ref), "%s", head);
+    {
+        const char *update[] = {"git", "update-ref",
+                                "refs/remotes/origin/main", ref, NULL};
+        if (!watch_fg_git(root, update, NULL, 0))
+            return "git update-ref";
+    }
+    return NULL;
+}
+
+/* The queued exact request the landing step leaves behind for the resident
+ * watcher: same shape proof_request_read() parses. */
+static bool watch_fg_request(const char *root, const char *pair)
+{
+    char dir[PATH_MAX], path[PATH_MAX], body[320], rel[PATH_MAX];
+    int n = snprintf(dir, sizeof(dir), "%s/.cache/zcl-dev-proof/requests",
+                     root);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || !mkdirs(dir))
+        return false;
+    n = snprintf(path, sizeof(path), "%s/%s-%s.request", dir, pair, pair);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    n = snprintf(body, sizeof(body),
+                 "zcl.dev_proof_request.v1\n%s\n%s\n1\n1\n", pair, pair);
+    if (n <= 0 || (size_t)n >= (int)sizeof(body))
+        return false;
+    n = snprintf(rel, sizeof(rel), ".cache/zcl-dev-proof/requests/%s-%s.request",
+                 pair, pair);
+    if (n <= 0 || (size_t)n >= (int)sizeof(rel))
+        return false;
+    return watch_fg_write(root, rel, body) &&
+           zcl_dev_proof_queue_has_pending(root);
+}
+
+/* The poll the reactor actually installs. Declared here so the seam phase
+ * below can install the real one rather than a stand-in. */
+static bool watch_cancel_poll(void *opaque);
+
+/* With an exact request queued for current HEAD on a clean tree, the loop
+ * head establishes the verdict and the cycle yields on it. */
+static const char *watch_fg_queued_phase(struct watch_context *ctx,
+                                         const char *head)
+{
+    if (!watch_fg_request(ctx->root, head))
+        return "queued request fixture";
+    if (!watch_commit_proof_prioritize(ctx) || !ctx->commit_preempts)
+        return "the loop head must see a runnable exact commit";
+    if (!watch_cycle_should_yield(ctx, false))
+        return "a runnable exact commit must cancel the cycle";
+    return NULL;
+}
+
+/* A dirty checkout keeps its edit feedback: the queued proof could not be
+ * admitted there, so cancelling would trade feedback for nothing. */
+static const char *watch_fg_dirty_phase(struct watch_context *ctx)
+{
+    if (!watch_fg_write(ctx->root, "dirty.c",
+                        "int dirty(void){return 1;}\n"))
+        return "dirty fixture";
+    if (watch_commit_proof_prioritize(ctx) || ctx->commit_preempts)
+        return "a dirty checkout must clear the verdict";
+    if (watch_cycle_should_yield(ctx, false))
+        return "a dirty checkout must keep its edit feedback";
+    return NULL;
+}
+
+/* THE SEAM. zcl_devloop_process_run() calls the installed poll while it holds
+ * its own non-recursive cancel-poll mutex, so a poll that opened a directory,
+ * read a file or ran a child would re-enter that mutex and never return. This
+ * phase installs the real watch_cancel_poll through the real seam with the
+ * verdict already set and runs one bounded child: a poll that probes hangs
+ * here instead of answering, and the group's timeout reports it. ctx->fd is
+ * -1 so collect_events() observes no source events without touching a real
+ * descriptor. */
+static const char *watch_fg_seam_phase(struct watch_context *ctx)
+{
+    /* Long enough that the runner is guaranteed to poll before the child
+     * would exit on its own, so the assertion below is about the poll and
+     * not about a race the child happened to win. */
+    const char *argv[] = {"sleep", "30", NULL};
+    struct zcl_devloop_process_result result = {0};
+    int saved_fd = ctx->fd;
+    bool ran;
+    ctx->fd = -1;
+    ctx->commit_preempts = true;
+    zcl_devloop_process_cancel_poll_set(watch_cancel_poll, ctx);
+    ran = zcl_devloop_process_run(ctx->root, argv, 10000, &result);
+    zcl_devloop_process_cancel_poll_clear();
+    /* The cancellation this phase asked for is process-wide state; leaving it
+     * set would cancel the next unrelated bounded child in this binary. */
+    zcl_devloop_process_cancel_clear();
+    ctx->fd = saved_fd;
+    ctx->commit_preempts = false;
+    if (!ran || !result.cancelled || result.timed_out)
+        return "the installed poll must cancel the bounded child";
+    return NULL;
+}
+
+bool zcl_devloop_watch_foreground_yield_selftest(const char *repo_root)
+{
+    /* No injected clock here: the seam phase runs a real bounded child, and
+     * a frozen monotonic clock would stop the runner's own timeout from ever
+     * expiring. Nothing this selftest asserts is time dependent. */
+    struct watch_context ctx = {0};
+    char head[65] = {0};
+    const char *failed = NULL;
+
+    if (!repo_root || !realpath(repo_root, ctx.root))
+        failed = "fixture path";
+    else
+        failed = watch_fg_repo(ctx.root, head);
+    if (failed) {
+        fprintf(stderr, "[devloop] foreground-yield selftest: %s\n", failed);
+        return false;
+    }
+
+    /* Nothing is queued: the loop head establishes no verdict and the cycle
+     * runs. */
+    if (watch_commit_proof_prioritize(&ctx) || ctx.commit_preempts ||
+        watch_cycle_should_yield(&ctx, false))
+        failed = "an empty queue must not cancel the cycle";
+    /* A newer edit still cancels, whatever the verdict says. */
+    else if (!watch_cycle_should_yield(&ctx, true))
+        failed = "a newer edit must cancel the cycle";
+    /* THE PROPERTY: a queued exact commit proof for current HEAD on a clean
+     * tree cancels the obsolete foreground cycle, so the reactor reaches the
+     * loop head that starts it. */
+    else
+        failed = watch_fg_queued_phase(&ctx, head);
+    if (!failed)
+        failed = watch_fg_dirty_phase(&ctx);
+    if (!failed)
+        failed = watch_fg_seam_phase(&ctx);
+    if (failed)
+        fprintf(stderr, "[devloop] foreground-yield selftest: %s\n", failed);
+    return failed == NULL;
 }
 #endif
 
@@ -1950,7 +2190,7 @@ static bool watch_cancel_poll(void *opaque)
             ctx->force_full_source_rescan = false;
         }
     }
-    return changed;
+    return watch_cycle_should_yield(ctx, changed);
 }
 
 static bool watch_start_event_stream(struct watch_context *ctx)

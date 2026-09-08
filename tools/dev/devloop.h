@@ -685,6 +685,12 @@ bool zcl_devloop_watch_stream_backpressure_selftest(const char *repo_root);
 /* Idle-budget exit, landing-root exemption, and stopped-heartbeat reason. */
 bool zcl_devloop_watch_root_is_landing(const char *root);
 bool zcl_devloop_watch_idle_exit_selftest(void);
+/* The foreground edit cycle's cancel rule, against a real repository in
+ * `repo_root`: a queued exact commit proof for current HEAD on a clean tree
+ * cancels the obsolete cycle holding the reactor, a dirty checkout keeps its
+ * edit feedback, and the poll the reactor installs answers a real bounded
+ * child through the real process seam without ever spawning one itself. */
+bool zcl_devloop_watch_foreground_yield_selftest(const char *repo_root);
 #endif
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 bool zcl_devloop_deterministic_compile_failure(

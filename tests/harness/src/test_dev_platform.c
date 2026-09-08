@@ -3217,6 +3217,40 @@ static int test_exact_commit_preempts_edit_proof(void)
     return failures;
 }
 
+/* The forked edit worker yields to a runnable exact commit proof; the
+ * synchronous cycle that holds the reactor did not, so a queued landing
+ * proof waited behind work the commit had already subsumed. */
+static int test_foreground_cycle_yields_to_commit(void)
+{
+    int failures = 0;
+    char base[PATH_MAX] = {0}, repo[PATH_MAX] = {0};
+    const char *current = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = current ? strdup(current) : NULL;
+    TEST("dev platform: a runnable exact commit cancels the obsolete foreground cycle, rate limited, dirty feedback kept") {
+        ASSERT(!current || saved);
+        test_make_tmpdir(base, sizeof(base), "dev_platform", "fg_yield");
+        int n = snprintf(repo, sizeof(repo), "%s/repo", base);
+        ASSERT(n > 0 && (size_t)n < sizeof(repo));
+        ASSERT(mkdir(repo, 0700) == 0);
+        /* The predicate under test runs real git in the fixture repository,
+         * and bounded process execution is refused under ZCL_TESTING unless
+         * the isolated fixture opts in. */
+        ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1",
+                                        1) == 0);
+        ASSERT(zcl_devloop_watch_foreground_yield_selftest(repo));
+        PASS();
+    } _test_next:;
+    if (saved) {
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved, 1);
+        free(saved);
+    } else {
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
+    }
+    if (base[0])
+        test_rm_rf_recursive(base);
+    return failures;
+}
+
 static int test_watcher_stream_backpressure(void)
 {
     int failures = 0;
@@ -3964,6 +3998,7 @@ static int test_dev_platform_platform_arm(void)
 #endif
     failures += test_resident_process_cancellation();
     failures += test_exact_commit_preempts_edit_proof();
+    failures += test_foreground_cycle_yields_to_commit();
     failures += test_watcher_stream_backpressure();
     failures += test_watch_idle_exit();
     failures += test_resident_process_supersession();
