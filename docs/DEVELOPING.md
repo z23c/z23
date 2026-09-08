@@ -972,37 +972,82 @@ time and tokens, to take z23 from that plan to MVP? `build/bin/z23-mvp-ledger`
 evidence rather than from memory. It is built by `make dev-bin`.
 
 ```text
-z23-mvp-ledger agents   --session <dir> --out <dir>
-z23-mvp-ledger loops    --plan <file>  --out <dir> [--trains <dir>] [--ancestry <file>]
+z23-mvp-ledger agents   --session <dir> --out <dir> [--lanes <dir>]
+z23-mvp-ledger loops    --plan <file>  --out <dir> [--trains <dir>] [--ancestry <file>] [--groups <file>]
 z23-mvp-ledger snapshot --plan <file>  --out <dir> [--origin-main <sha>] [--note <text>]
-z23-mvp-ledger kpi      --plan <file>  --out <dir> --since <t0> [--scratch <dir>]
-z23-mvp-ledger progress --plan <file> [--session <dir>]
+z23-mvp-ledger kpi      --plan <file>  --out <dir> --since <t0> [--ancestry <file>] [--groups <file>] [--scratch <dir>]
+z23-mvp-ledger progress --plan <file> [--session <dir>] [--ancestry <file>] [--groups <file>]
+```
+
+The two git inputs are files you produce, both from the SAME ref:
+
+```sh
+git rev-list origin/main > ancestry.txt
+git show origin/main:tools/dev/test_group_catalog.def > catalog.def
 ```
 
 - `agents` reads every `<session>/subagents/agent-*.jsonl`, every
   `<session>/subagents/workflows/*/agent-*.jsonl`, and the orchestrator's own
   `<session>.jsonl`, and writes `agents.tsv`: one row per agent with its lane,
   kind, model, wall, turns, tool uses, and the output / thinking / input /
-  cache-creation / cache-read tokens it spent.
+  cache-creation / cache-read tokens it spent. An agent's lane comes from its
+  description by seven rules (`Lane <name>`, `Resume <name> lane`,
+  `Re-verify <name>`, `Verify <name>`, `Assemble train <n>`, and
+  `Fix …`/`Resurrect …` which take the first word that names a lane that
+  exists under `--lanes` or `--scratch`). Anything else is kind `other` with
+  lane `-`: still summed into every total, simply not attributed to a loop.
 - `loops` joins those agents to the plan's loops by lane name and writes
   `loops.tsv`. A train assembler is split evenly across the loops whose lane
   is on that train (`--trains` names the directory holding
   `trainN/late_picks.txt`); a design workflow is split across the loops whose
   `evidence=` names it.
 - `snapshot` and `kpi` each append one row to `snapshots.tsv` / `kpi.tsv`.
-  The KPI is verified MVP progress per token: base loops a verifier landed
-  after t0, over the TCU the whole system spent.
+  The KPI is verified MVP progress per token: base loops verified after t0,
+  over the TCU the whole system spent.
 - `progress` prints the milestone bars. With `--session` it adds a cost line
   and the KPI line.
 
-Three things to know before reading a number it prints:
+### What verifies a loop
 
-1. **Ancestry is an input, not a subprocess.** `landed` is decided against a
-   file you produce with one `git rev-list origin/main`, passed as
-   `--ancestry`. Without it the column is `-`, never a guessed 0. A plan row
-   whose `evidence=` is a test-group name, a document path or a commit range
-   is therefore not landed as far as this tool is concerned, whatever its
-   hand-set `state=` says.
+A plan row's `evidence=` field is not free text: its **shape** decides what
+it can prove, and the `verified_by` column of `loops.tsv` says which rule
+fired. In the order the tool prefers them:
+
+| `verified_by` | evidence shape | verified when |
+| --- | --- | --- |
+| `landed` | `<sha>`, `<sha>,<sha>,…`, or a range `a..b` | every sha — for a range, the `b` — is in `--ancestry` |
+| `sweep` | `ONLY=<group>` | `<group>` is registered in the `--groups` catalog |
+| `verdict` | anything | the row's lane has a `VERDICT` under `--scratch` starting with `LAND`, written at or after `--since` |
+| `sweep_group_unregistered` | `ONLY=<group>` | never — the catalog at that ref does not register `<group>` |
+| `sweep_not_asked` | `ONLY=<group>` | never — no `--groups` was given |
+| `-` | a doc path, a workflow id, `file:line`, `-` | never |
+
+A **sweep is part of the experiment's definition, not a hole in it**: some
+loops verify a capability that already existed, and the evidence that it
+works is that a named test group covers it and passes. That is why the group
+must be registered *at the ancestry ref* — a group that has since been
+renamed or deleted proves nothing about the tree the loop claims to be done
+in. Such a row is reported as
+`<plan>:<line>: sweep_group_unregistered: … counts as UNVERIFIED` and does
+not stop the run: it is a fact about one plan row, not a malformed input.
+
+A range is proved by its right-hand side alone. `a` is where the work
+started; only `b` says where it ended up.
+
+The KPI line and the `kpi.tsv` row carry the split, so nobody has to guess
+which kind of verification a number is made of:
+
+```text
+kpi: 19 verified loops (4 landed, 8 sweep, +4 sub-rows) for 123076043 TCU = 0.154 loops/MTCU, 6477686 TCU/loop
+```
+
+Three more things to know before reading a number it prints:
+
+1. **Both git inputs are files, not subprocesses.** `landed` is decided
+   against a `git rev-list` output passed as `--ancestry`, and `sweep`
+   against a `git show <ref>:tools/dev/test_group_catalog.def` output passed
+   as `--groups`. Without either, the answer is "not asked" (`-`,
+   `sweep_not_asked`) and never a guessed no. Use the same ref for both.
 2. **A ledger's header is a contract.** Appending to a `snapshots.tsv` or
    `kpi.tsv` whose first line is not this build's header is refused, because
    every earlier row would otherwise be read under the wrong column names.

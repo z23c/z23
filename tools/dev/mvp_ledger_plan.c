@@ -195,6 +195,7 @@ static bool mvl_plan_loop(const char *line, const char *feature,
     }
     l = &plan->loops[plan->loop_count++];
     memset(l, 0, sizeof *l);
+    l->line_no = line_no;
     while (rest[idlen] != '\0' && rest[idlen] != ' ')
         idlen++;
     l->counted = (idlen == 3);

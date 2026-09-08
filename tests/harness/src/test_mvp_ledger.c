@@ -150,6 +150,34 @@ static const char k_plan[] =
 "    L02 Eighth loop | state=QUEUED | loop=- | evidence=- | box=-\n"
 "    L03 Ninth loop | state=QUEUED | loop=- | evidence=- | box=-\n";
 
+/* One row per evidence shape the experiment defines. Kept apart from k_plan
+ * so the byte-for-byte progress render below stays pinned to twelve loops. */
+static const char k_evidence_plan[] =
+"M00 Evidence shapes | done=every shape is decided\n"
+"  F01 Shapes\n"
+"    L01 A commit | state=LANDED | loop=one | evidence="
+    "0123456789abcdef0123456789abcdef01234567 | box=node1\n"
+"    L02 A landed range | state=LANDED | loop=two | evidence="
+    "9999999999..0123456789abcdef0123456789abcdef01234567 | box=node1\n"
+"    L03 An unlanded range | state=LANDED | loop=three | evidence="
+    "0123456789..bbbbbbbbbbbbbbbb | box=node1\n"
+"    L04 A registered sweep | state=LANDED | loop=four | evidence="
+    "ONLY=mvp_ledger | box=node1\n"
+"    L05 A vanished sweep | state=LANDED | loop=five | evidence="
+    "ONLY=ghost_group | box=node1\n"
+"    L06 A doc path | state=LANDED | loop=six | evidence="
+    "docs/DEVELOPING.md | box=node1\n"
+"    L07 Two commits | state=LANDED | loop=seven | evidence="
+    "0123456789abcdef0123456789abcdef01234567,fedcba9876543210 | box=node1\n"
+"    L08 One commit still in flight | state=LANDED | loop=eight | evidence="
+    "0123456789abcdef0123456789abcdef01234567,cccccccccccccccc | box=node1\n";
+
+/* A test_group_catalog.def as `git show <ref>:…` hands it over. */
+static const char k_catalog[] =
+"/* Copyright 2026 Rhett Creighton - Apache License 2.0 */\n"
+"ZCL_TEST_GROUP(mvp_ledger)\n"
+"ZCL_TEST_GROUP(fleet_observe)\n";
+
 /* Byte-for-byte the output of scratch/northstar/progress.sh on k_plan. */
 static const char k_progress[] =
 "       MILESTONE                                            12 LOOPS      "
@@ -202,29 +230,70 @@ static int test_mvp_ledger_classify(void)
 {
     int failures = 0;
 
-    TEST("a description maps to exactly one (lane, kind) by the five rules") {
+    TEST("a description maps to exactly one (lane, kind) by the seven rules") {
         char lane[MVL_LANE_CAP], kind[MVL_KIND_CAP];
+        struct mvl_names known = {0};
 
-        mvl_classify_description("Lane hostgc: native host GC leaf", lane,
-                                 sizeof(lane), kind, sizeof(kind));
+        ASSERT(mvl_names_alloc(&known, 8));
+        ASSERT(mvl_names_add(&known, "hostgc"));
+        ASSERT(mvl_names_add(&known, "landing"));
+        mvl_classify_description("Lane hostgc: native host GC leaf", &known,
+                                 lane, sizeof(lane), kind, sizeof(kind));
         ASSERT_STR_EQ(lane, "hostgc");
         ASSERT_STR_EQ(kind, "build");
-        mvl_classify_description("Verify hostgc lane", lane, sizeof(lane),
-                                 kind, sizeof(kind));
+        mvl_classify_description("Verify hostgc lane", &known, lane,
+                                 sizeof(lane), kind, sizeof(kind));
         ASSERT_STR_EQ(lane, "hostgc");
         ASSERT_STR_EQ(kind, "verify");
-        mvl_classify_description("Re-verify faillocator at 662861e", lane,
-                                 sizeof(lane), kind, sizeof(kind));
+        mvl_classify_description("Re-verify faillocator at 662861e", &known,
+                                 lane, sizeof(lane), kind, sizeof(kind));
         ASSERT_STR_EQ(lane, "faillocator");
         ASSERT_STR_EQ(kind, "verify");
-        mvl_classify_description("Assemble train 54", lane, sizeof(lane),
-                                 kind, sizeof(kind));
+        mvl_classify_description("Assemble train 54", &known, lane,
+                                 sizeof(lane), kind, sizeof(kind));
         ASSERT_STR_EQ(lane, "train54");
         ASSERT_STR_EQ(kind, "assemble");
-        mvl_classify_description("Fix the native landing machine", lane,
+        mvl_classify_description("Resume hostgc lane after the outage",
+                                 &known, lane, sizeof(lane), kind,
+                                 sizeof(kind));
+        ASSERT_STR_EQ(lane, "hostgc");
+        ASSERT_STR_EQ(kind, "build");
+        mvl_names_free(&known);
+        PASS();
+    }
+
+    TEST("a \"Fix …\" agent is attributed to the first word that names a "
+         "lane that exists, and to none when no word does") {
+        char lane[MVL_LANE_CAP], kind[MVL_KIND_CAP];
+        struct mvl_names known = {0};
+
+        ASSERT(mvl_names_alloc(&known, 8));
+        ASSERT(mvl_names_add(&known, "hostgc"));
+        ASSERT(mvl_names_add(&known, "landing"));
+        mvl_classify_description("Fix the native landing machine", &known,
+                                 lane, sizeof(lane), kind, sizeof(kind));
+        ASSERT_STR_EQ(lane, "landing");
+        ASSERT_STR_EQ(kind, "fix");
+        mvl_classify_description("Resurrect hostgc after the crash", &known,
+                                 lane, sizeof(lane), kind, sizeof(kind));
+        ASSERT_STR_EQ(lane, "hostgc");
+        ASSERT_STR_EQ(kind, "fix");
+        /* No word names a lane: the work is still named, its lane is not
+         * asserted. An English word must never be mistaken for a lane. */
+        mvl_classify_description("Fix the broken gate", &known, lane,
+                                 sizeof(lane), kind, sizeof(kind));
+        ASSERT_STR_EQ(lane, "-");
+        ASSERT_STR_EQ(kind, "fix");
+        /* Without the lane set there is nothing to match against. */
+        mvl_classify_description("Fix the native landing machine", NULL, lane,
+                                 sizeof(lane), kind, sizeof(kind));
+        ASSERT_STR_EQ(lane, "-");
+        ASSERT_STR_EQ(kind, "fix");
+        mvl_classify_description("Refresh generated metadata", &known, lane,
                                  sizeof(lane), kind, sizeof(kind));
         ASSERT_STR_EQ(lane, "-");
         ASSERT_STR_EQ(kind, "other");
+        mvl_names_free(&known);
         PASS();
     }
 
@@ -265,7 +334,7 @@ static int test_mvp_ledger_agents(void)
         (void)snprintf(sess, sizeof(sess), "%s/sess", tmp);
         (void)snprintf(out, sizeof(out), "%s/agents.tsv", tmp);
         ASSERT(mvl_agents_alloc(&agents));
-        ASSERT(mvl_scan_session(sess, &agents, err, sizeof(err)));
+        ASSERT(mvl_scan_session(sess, NULL, &agents, err, sizeof(err)));
         ASSERT_EQ((int)agents.count, 4);
         ASSERT(mvl_write_agents(out, &agents, err, sizeof(err)));
         mvl_agents_free(&agents);
@@ -304,7 +373,7 @@ static int test_mvp_ledger_agents(void)
         (void)snprintf(a, sizeof(a), "%s/a.tsv", tmp);
         (void)snprintf(b, sizeof(b), "%s/b.tsv", tmp);
         ASSERT(mvl_agents_alloc(&agents));
-        ASSERT(mvl_scan_session(sess, &agents, err, sizeof(err)));
+        ASSERT(mvl_scan_session(sess, NULL, &agents, err, sizeof(err)));
         ASSERT(mvl_write_agents(a, &agents, err, sizeof(err)));
         mvl_agents_free(&agents);
 
@@ -496,6 +565,7 @@ static int test_mvp_ledger_join(void)
         struct mvl_plan plan = {0};
         struct mvl_agents agents = {0};
         struct mvl_join joins[MVL_MAX_LOOPS];
+        struct mvl_evidence_world world = {0};
         char anc[2][MVL_ID_CAP];
 
         ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
@@ -509,9 +579,11 @@ static int test_mvp_ledger_join(void)
         ASSERT(mvl_plan_alloc(&plan));
         ASSERT(mvl_agents_alloc(&agents));
         ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
-        ASSERT(mvl_scan_session(sess, &agents, err, sizeof(err)));
+        ASSERT(mvl_scan_session(sess, NULL, &agents, err, sizeof(err)));
 
-        mvl_join_loops(&plan, &agents, NULL, anc, 1, joins);
+        world.ancestry = (const char (*)[MVL_ID_CAP])anc;
+        world.ancestry_count = 1;
+        mvl_join_loops(&plan, &agents, NULL, &world, joins);
         /* M00.F01.L01 is lane alpha: its builder and its verifier. */
         ASSERT_EQ((int)joins[0].agents, 2);
         ASSERT_EQ((int)joins[0].verifier_rounds, 1);
@@ -520,6 +592,7 @@ static int test_mvp_ledger_join(void)
         ASSERT_EQ((int)joins[0].tool_uses, 2);
         ASSERT_EQ((int)joins[0].wall_s, 600);
         ASSERT_EQ(joins[0].landed, 1);
+        ASSERT_STR_EQ(mvl_verified_by_name(joins[0].verified_by), "landed");
         /* M00.F01.L02 is lane beta: nobody worked it, and its evidence is
          * not a sha at all. */
         ASSERT_EQ((int)joins[1].agents, 0);
@@ -538,11 +611,11 @@ static int test_mvp_ledger_join(void)
          "and a FIX verdict counts for nothing") {
         char tmp[PATH_MAX], scratch[PATH_MAX], plan_path[PATH_MAX];
         char err[MVL_ERR_CAP] = "";
-        char lanes[8][MVL_LANE_CAP];
+        struct mvl_names lanes = {0};
         struct mvl_plan plan = {0};
         struct mvl_agents agents = {0};
         struct mvl_kpi kpi = {0};
-        size_t count = 0;
+        struct mvl_evidence_world world = {0};
 
         ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
         mvl_mkdir(tmp, "scratch");
@@ -557,19 +630,23 @@ static int test_mvp_ledger_join(void)
         mvl_write_file(tmp, "plan.md", k_plan);
         (void)snprintf(plan_path, sizeof(plan_path), "%s/plan.md", tmp);
 
-        memset(lanes, 0, sizeof(lanes));
-        ASSERT(mvl_verified_lanes(scratch, 0, lanes, 8, &count, err,
-                                  sizeof(err)));
-        ASSERT_EQ((int)count, 1);
-        ASSERT_STR_EQ(lanes[0], "alpha");
+        ASSERT(mvl_names_alloc(&lanes, 8));
+        ASSERT(mvl_verified_lanes(scratch, 0, &lanes, err, sizeof(err)));
+        ASSERT_EQ((int)lanes.count, 1);
+        ASSERT_STR_EQ(lanes.rows[0], "alpha");
 
         ASSERT(mvl_plan_alloc(&plan));
         ASSERT(mvl_agents_alloc(&agents));
         ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
-        mvl_compute_kpi(&plan, &agents, lanes, count, NULL, 0, &kpi);
+        world.verdict_lanes = &lanes;
+        mvl_compute_kpi(&plan, &agents, &world, &kpi);
         /* alpha owns one base loop (L01) and one sub-row (L02b). */
         ASSERT_EQ((int)kpi.verified_loops, 1);
         ASSERT_EQ((int)kpi.verified_subrows, 1);
+        /* Without an ancestry list nothing is landed, and "not asked" must
+         * never be reported as a landing. */
+        ASSERT_EQ((int)kpi.landed_loops, 0);
+        mvl_names_free(&lanes);
         mvl_agents_free(&agents);
         mvl_plan_free(&plan);
         test_rm_rf_recursive(tmp);
@@ -589,13 +666,159 @@ static int test_mvp_ledger_join(void)
         agents.rows[0].tokens_cache_read = 1000;
         agents.rows[0].tokens_in = 3000;
         agents.count = 1;
-        mvl_compute_kpi(&plan, &agents, NULL, 0, NULL, 0, &kpi);
+        mvl_compute_kpi(&plan, &agents, &(struct mvl_evidence_world){0}, &kpi);
         ASSERT_EQ((int)kpi.tokens_raw, 4000);
         ASSERT_EQ((int)kpi.tokens_out, 1000);
         /* 1000*5 + 1000*1 + 1000*1.25 + 1000*0.1 = 7350 */
         ASSERT_EQ((int)kpi.tcu, 7350);
         mvl_agents_free(&agents);
         mvl_plan_free(&plan);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+/* ── what each evidence shape can prove ───────────────────────────────── */
+
+static int test_mvp_ledger_evidence(void)
+{
+    int failures = 0;
+
+    TEST("the shape of an evidence field decides what it can prove") {
+        ASSERT_EQ((int)mvl_evidence_kind_of("-"), (int)MVL_EVIDENCE_NONE);
+        ASSERT_EQ((int)mvl_evidence_kind_of(""), (int)MVL_EVIDENCE_NONE);
+        ASSERT_EQ((int)mvl_evidence_kind_of("0123456789abcdef"),
+                  (int)MVL_EVIDENCE_COMMIT);
+        ASSERT_EQ((int)mvl_evidence_kind_of("0123456789,fedcba9876"),
+                  (int)MVL_EVIDENCE_COMMIT);
+        ASSERT_EQ((int)mvl_evidence_kind_of("35ce708789..9423aaece3"),
+                  (int)MVL_EVIDENCE_RANGE);
+        ASSERT_EQ((int)mvl_evidence_kind_of("ONLY=wallet_backup"),
+                  (int)MVL_EVIDENCE_SWEEP);
+        ASSERT_EQ((int)mvl_evidence_kind_of("docs/DEVELOPING.md"),
+                  (int)MVL_EVIDENCE_OTHER);
+        ASSERT_EQ((int)mvl_evidence_kind_of("wf_29284f91-171,wf_bdb64e24-7aa"),
+                  (int)MVL_EVIDENCE_OTHER);
+        /* Six hex characters are a word that happens to be hex, not a sha:
+         * git's own shortest unambiguous abbreviation is seven. */
+        ASSERT_EQ((int)mvl_evidence_kind_of("decade"),
+                  (int)MVL_EVIDENCE_OTHER);
+        PASS();
+    }
+
+    TEST("a sweep verifies when its group is registered at the ref, refuses "
+         "by name when it is not, and a doc path never verifies") {
+        char tmp[PATH_MAX], plan_path[PATH_MAX], cat_path[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        struct mvl_plan plan = {0};
+        struct mvl_agents agents = {0};
+        struct mvl_kpi kpi = {0};
+        struct mvl_names groups = {0};
+        struct mvl_evidence_world world = {0};
+        char anc[2][MVL_ID_CAP];
+        FILE *sink;
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        mvl_write_file(tmp, "plan.md", k_evidence_plan);
+        mvl_write_file(tmp, "catalog.def", k_catalog);
+        (void)snprintf(plan_path, sizeof(plan_path), "%s/plan.md", tmp);
+        (void)snprintf(cat_path, sizeof(cat_path), "%s/catalog.def", tmp);
+        memset(anc, 0, sizeof(anc));
+        (void)snprintf(anc[0], sizeof(anc[0]),
+                       "0123456789abcdef0123456789abcdef01234567");
+        (void)snprintf(anc[1], sizeof(anc[1]),
+                       "fedcba9876543210fedcba9876543210fedcba98");
+
+        ASSERT(mvl_names_alloc(&groups, 16));
+        ASSERT(mvl_read_groups(cat_path, &groups, err, sizeof(err)));
+        ASSERT_EQ((int)groups.count, 2);
+        ASSERT(mvl_names_has(&groups, "mvp_ledger"));
+        ASSERT(!mvl_names_has(&groups, "ghost_group"));
+
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_agents_alloc(&agents));
+        ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
+        world.ancestry = (const char (*)[MVL_ID_CAP])anc;
+        world.ancestry_count = 2;
+        world.groups = &groups;
+
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[0], &world)),
+                      "landed");
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[1], &world)),
+                      "landed");
+        /* `a..b` is proved by b alone; an unlanded b is not a landing. */
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[2], &world)), "-");
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[3], &world)),
+                      "sweep");
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[4], &world)),
+                      "sweep_group_unregistered");
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[5], &world)), "-");
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[6], &world)),
+                      "landed");
+        /* Every sha of a list must be an ancestor: one still in flight
+         * means the work the row cites is not all landed. */
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[7], &world)), "-");
+
+        mvl_compute_kpi(&plan, &agents, &world, &kpi);
+        ASSERT_EQ((int)kpi.verified_loops, 4);
+        ASSERT_EQ((int)kpi.landed_loops, 3);
+        ASSERT_EQ((int)kpi.sweep_loops, 1);
+        ASSERT_EQ((int)kpi.sweep_unregistered, 1);
+
+        /* The refusal has to reach a reader, and name the plan line. */
+        (void)snprintf(cat_path, sizeof(cat_path), "%s/refusals.txt", tmp);
+        sink = fopen(cat_path, "w");
+        ASSERT(sink != NULL);
+        ASSERT_EQ((int)mvl_report_sweep_refusals(&plan, &world, plan_path,
+                                                 sink), 1);
+        (void)fclose(sink);
+        {
+            char *text = mvl_slurp(cat_path);
+
+            ASSERT(text != NULL);
+            ASSERT(strstr(text, ":7:") != NULL);
+            ASSERT(strstr(text, "sweep_group_unregistered") != NULL);
+            ASSERT(strstr(text, "ONLY=ghost_group") != NULL);
+            free(text);
+        }
+
+        mvl_names_free(&groups);
+        mvl_agents_free(&agents);
+        mvl_plan_free(&plan);
+        test_rm_rf_recursive(tmp);
+        PASS();
+    }
+
+    TEST("without a catalog a sweep is not asked rather than refused, and "
+         "without an ancestry a commit is not landed") {
+        char tmp[PATH_MAX], plan_path[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        struct mvl_plan plan = {0};
+        struct mvl_evidence_world world = {0};
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        mvl_write_file(tmp, "plan.md", k_evidence_plan);
+        (void)snprintf(plan_path, sizeof(plan_path), "%s/plan.md", tmp);
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[0], &world)), "-");
+        ASSERT_STR_EQ(mvl_verified_by_name(
+                          mvl_loop_verified_by(&plan.loops[3], &world)),
+                      "sweep_not_asked");
+        ASSERT(!mvl_is_verified(mvl_loop_verified_by(&plan.loops[3], &world)));
+        mvl_plan_free(&plan);
+        test_rm_rf_recursive(tmp);
         PASS();
     }
 
@@ -611,5 +834,6 @@ int test_mvp_ledger(void)
     failures += test_mvp_ledger_refusals();
     failures += test_mvp_ledger_plan();
     failures += test_mvp_ledger_join();
+    failures += test_mvp_ledger_evidence();
     return failures;
 }

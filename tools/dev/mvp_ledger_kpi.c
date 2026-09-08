@@ -82,23 +82,12 @@ static bool mvl_verdict_is_land(const char *dir, char *err, size_t err_cap)
     return land;
 }
 
-static bool mvl_lane_seen(const char (*lanes)[MVL_LANE_CAP], size_t count,
-                          const char *lane)
-{
-    for (size_t i = 0; i < count; i++)
-        if (strcmp(lanes[i], lane) == 0)
-            return true;
-    return false;
-}
-
 bool mvl_verified_lanes(const char *scratch_dir, int64_t t0_unix,
-                        char (*lanes)[MVL_LANE_CAP], size_t cap,
-                        size_t *count, char *err, size_t err_cap)
+                        struct mvl_names *lanes, char *err, size_t err_cap)
 {
     struct platform_directory_list dirs = {0};
     bool ok = true;
 
-    *count = 0;
     if (!platform_directory_list_real_sorted(scratch_dir, &dirs)) {
         mvl_err(err, err_cap, scratch_dir, 0,
                 "mvl_open: cannot list the scratch directory");
@@ -118,15 +107,11 @@ bool mvl_verified_lanes(const char *scratch_dir, int64_t t0_unix,
             continue;
         if (!mvl_verdict_is_land(path, err, err_cap))
             continue;
-        if (mvl_lane_seen(lanes, *count, lane))
+        if (mvl_names_add(lanes, lane))
             continue;
-        if (*count >= cap) {
-            mvl_err(err, err_cap, scratch_dir, *count,
-                    "mvl_overflow: more verified lanes than the table holds");
-            ok = false;
-            break;
-        }
-        mvl_copy(lanes[(*count)++], MVL_LANE_CAP, lane);
+        mvl_err(err, err_cap, scratch_dir, lanes->count,
+                "mvl_overflow: more verified lanes than the table holds");
+        ok = false;
     }
     platform_directory_list_free(&dirs);
     return ok;
@@ -135,23 +120,25 @@ bool mvl_verified_lanes(const char *scratch_dir, int64_t t0_unix,
 /* ── the KPI itself ───────────────────────────────────────────────────── */
 
 static void mvl_kpi_numerator(const struct mvl_plan *plan,
-                              const char (*lanes)[MVL_LANE_CAP],
-                              size_t lane_count,
-                              const char (*anc)[MVL_ID_CAP], size_t anc_count,
+                              const struct mvl_evidence_world *world,
                               struct mvl_kpi *out)
 {
     for (size_t i = 0; i < plan->loop_count; i++) {
         const struct mvl_loop *l = &plan->loops[i];
-        bool verified = mvl_lane_seen(lanes, lane_count, l->lane);
+        enum mvl_verified_by by = mvl_loop_verified_by(l, world);
 
-        if (verified && l->counted)
-            out->verified_loops++;
-        if (verified && !l->counted)
-            out->verified_subrows++;
-        if (!l->counted || anc_count == 0)
+        if (!l->counted) {
+            out->verified_subrows += mvl_is_verified(by) ? 1 : 0;
             continue;
-        if (mvl_evidence_landed(l->evidence, anc, anc_count))
+        }
+        if (mvl_is_verified(by))
+            out->verified_loops++;
+        if (by == MVL_VERIFIED_LANDED)
             out->landed_loops++;
+        if (by == MVL_VERIFIED_SWEEP)
+            out->sweep_loops++;
+        if (by == MVL_VERIFIED_SWEEP_UNREGISTERED)
+            out->sweep_unregistered++;
     }
 }
 
@@ -175,12 +162,11 @@ static void mvl_kpi_denominator(const struct mvl_agents *agents,
 
 void mvl_compute_kpi(const struct mvl_plan *plan,
                      const struct mvl_agents *agents,
-                     const char (*lanes)[MVL_LANE_CAP], size_t lane_count,
-                     const char (*anc)[MVL_ID_CAP], size_t anc_count,
+                     const struct mvl_evidence_world *world,
                      struct mvl_kpi *out)
 {
     memset(out, 0, sizeof *out);
-    mvl_kpi_numerator(plan, lanes, lane_count, anc, anc_count, out);
+    mvl_kpi_numerator(plan, world, out);
     mvl_kpi_denominator(agents, out);
 }
 
@@ -203,7 +189,8 @@ static int64_t mvl_tcu_per_loop(const struct mvl_kpi *kpi)
 const char *mvl_kpi_header(void)
 {
     return "utc\twindow\tverified_loops\tverified_subrows\tlanded_loops\t"
-           "tokens_raw\ttokens_out\ttcu\tloops_per_mtcu\ttcu_per_loop\tnote";
+           "sweep_loops\tsweep_unregistered\ttokens_raw\ttokens_out\ttcu\t"
+           "loops_per_mtcu\ttcu_per_loop\tnote";
 }
 
 static const char *mvl_kpi_cell(const char *s)
@@ -229,10 +216,11 @@ bool mvl_append_kpi(const char *path, const struct mvl_kpi *kpi,
     }
     if (fresh)
         fprintf(f, "%s\n", mvl_kpi_header());
-    fprintf(f, "%s\t%s\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld.%03lld"
-               "\t%lld\t%s\n",
+    fprintf(f, "%s\t%s\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld"
+               "\t%lld.%03lld\t%lld\t%s\n",
             utc, mvl_kpi_cell(window), (long long)kpi->verified_loops,
             (long long)kpi->verified_subrows, (long long)kpi->landed_loops,
+            (long long)kpi->sweep_loops, (long long)kpi->sweep_unregistered,
             (long long)kpi->tokens_raw, (long long)kpi->tokens_out,
             (long long)kpi->tcu, (long long)(milli / 1000),
             (long long)(milli % 1000), (long long)mvl_tcu_per_loop(kpi),
@@ -248,12 +236,13 @@ size_t mvl_render_kpi(const struct mvl_kpi *kpi, char *out, size_t out_cap)
 {
     int64_t milli = mvl_loops_per_mtcu_milli(kpi);
     int n = snprintf(out, out_cap,
-                     "kpi: %lld verified loops (+%lld sub-rows, %lld landed)"
-                     " for %lld TCU = %lld.%03lld loops/MTCU,"
-                     " %lld TCU/loop\n",
+                     "kpi: %lld verified loops (%lld landed, %lld sweep,"
+                     " +%lld sub-rows) for %lld TCU = %lld.%03lld"
+                     " loops/MTCU, %lld TCU/loop\n",
                      (long long)kpi->verified_loops,
-                     (long long)kpi->verified_subrows,
-                     (long long)kpi->landed_loops, (long long)kpi->tcu,
+                     (long long)kpi->landed_loops,
+                     (long long)kpi->sweep_loops,
+                     (long long)kpi->verified_subrows, (long long)kpi->tcu,
                      (long long)(milli / 1000), (long long)(milli % 1000),
                      (long long)mvl_tcu_per_loop(kpi));
 

@@ -28,17 +28,34 @@
  * fixed count fixed by these enums, and refusing is always the answer to
  * an input that would exceed one.
  *
- * ATTRIBUTION. An agent's lane comes from its description, by five rules
- * (see mvl_classify_description). Descriptions outside those rules land in
- * kind "other" with lane "-": their cost is still summed into every total,
- * it is simply not attributed to a loop. That gap is visible rather than
- * hidden — agents.tsv shows exactly which agents were not attributed. */
+ * One refusal does NOT stop the run, because it is a fact about one plan
+ * row rather than a malformed input:
+ *   sweep_group_unregistered  a row whose evidence is ONLY=<group> naming a
+ *                          group the catalog at the ancestry ref does not
+ *                          register. The row counts as UNVERIFIED and the
+ *                          refusal is reported against its plan line.
+ *
+ * ATTRIBUTION. An agent's lane comes from its description, by exactly seven
+ * rules (see mvl_classify_description). Descriptions outside those rules
+ * land in kind "other" with lane "-": their cost is still summed into every
+ * total, it is simply not attributed to a loop. That gap is visible rather
+ * than hidden — agents.tsv shows exactly which agents were not attributed.
+ *
+ * EVIDENCE. A plan row's evidence= field is not free text to this tool: its
+ * SHAPE decides what it can prove (see enum mvl_evidence_kind). A commit or
+ * a commit range is proved by the ancestry list; `ONLY=<group>` is proved by
+ * the test-group catalog at that same ref — a sweep is how the experiment
+ * verifies a loop whose capability already existed, so it is part of the
+ * definition, not a hole in it. A doc path proves nothing and never will.
+ * Every one of those inputs is a FILE the caller produced with one git
+ * command, so no verdict here depends on a subprocess this tool ran. */
 #ifndef ZCL_TOOLS_DEV_MVP_LEDGER_H
 #define ZCL_TOOLS_DEV_MVP_LEDGER_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 enum {
     MVL_ID_CAP = 48,
@@ -65,6 +82,7 @@ enum {
     MVL_MAX_MILESTONES = 64,
     MVL_MAX_TRAIN_LANES = 512,
     MVL_MAX_ANCESTRY = 200000,
+    MVL_MAX_NAMES = 4096,       /* registered test groups, or known lanes */
 
     MVL_AGENT_COLUMNS = 18,
     MVL_MILESTONE_LOOPS = 12,   /* the plan's loops per milestone */
@@ -131,6 +149,34 @@ struct mvl_agents {
     size_t cap;
 };
 
+/* What a plan row's evidence= field IS, and therefore what it can prove.
+ * The shape is decided by reading the text, never by trusting the row's
+ * hand-set state=. */
+enum mvl_evidence_kind {
+    MVL_EVIDENCE_NONE = 0,  /* "-" or empty: proves nothing */
+    MVL_EVIDENCE_COMMIT,    /* one sha, or a comma-separated list of them:
+                             * landed when EVERY one is an ancestor */
+    MVL_EVIDENCE_RANGE,     /* `a..b`: landed when `b` is an ancestor. `a` is
+                             * where the work started and proves nothing. */
+    MVL_EVIDENCE_SWEEP,     /* `ONLY=<group>`: verified when <group> is a
+                             * registered test group at the ancestry ref */
+    MVL_EVIDENCE_OTHER,     /* a doc path, a workflow id, a file:line — real
+                             * work, but never a proof that a loop is done */
+};
+
+/* How a loop came to be verified, in the order the KPI prefers them. A
+ * loop is verified when this is LANDED, SWEEP or VERDICT; the two SWEEP_
+ * refusals are reasons a sweep row is NOT verified, kept apart from a plain
+ * "no" so a reader can tell "the group is gone" from "nobody asked". */
+enum mvl_verified_by {
+    MVL_VERIFIED_NO = 0,
+    MVL_VERIFIED_LANDED,
+    MVL_VERIFIED_SWEEP,
+    MVL_VERIFIED_VERDICT,
+    MVL_VERIFIED_SWEEP_UNREGISTERED,
+    MVL_VERIFIED_SWEEP_NOT_ASKED,
+};
+
 /* One plan loop line. `counted` is true for the rows the 144-loop universe
  * is made of: `    L<dd> ` exactly, which is the stopgap renderer's own
  * regex. A letter-suffixed row (L02b) is an extra evidence line under the
@@ -141,9 +187,29 @@ struct mvl_loop {
     char state[MVL_STATE_CAP];
     char lane[MVL_LANE_CAP];
     char evidence[MVL_EVIDENCE_CAP];
+    size_t line_no;                 /* the plan line, so a refusal names it */
     int milestone;
     enum mvl_state state_id;
     bool counted;
+};
+
+/* A bounded set of names: the registered test groups at a ref, the lane
+ * directories that exist, the lanes a verifier landed. Membership only —
+ * order is the order they were read. */
+struct mvl_names {
+    char (*rows)[MVL_LANE_CAP];
+    size_t count;
+    size_t cap;
+};
+
+/* Everything outside the plan that a loop's status is decided against.
+ * Every field may be absent, and absent is never "no": it is "not asked",
+ * which the columns and the refusals report as such. */
+struct mvl_evidence_world {
+    const char (*ancestry)[MVL_ID_CAP];
+    size_t ancestry_count;
+    const struct mvl_names *verdict_lanes;  /* LAND VERDICT at or after t0 */
+    const struct mvl_names *groups;         /* registered at the ref */
 };
 
 struct mvl_milestone {
@@ -174,6 +240,7 @@ struct mvl_join {
     char first_utc[MVL_UTC_CAP];
     char last_utc[MVL_UTC_CAP];
     int landed;                     /* 1 yes, 0 no, -1 not asked */
+    enum mvl_verified_by verified_by;
 };
 
 /* ── bounded, caller-owned tables ─────────────────────────────────────── */
@@ -192,16 +259,42 @@ void mvl_plan_free(struct mvl_plan *plan);
  * are accepted and truncated; anything else is refused. */
 bool mvl_parse_timestamp(const char *s, int64_t *out);
 
-/* Derives (lane, kind) from an agent's description, by exactly five rules:
- *   "Lane <name>[: …]"      → <name>, build
- *   "Re-verify <name> …"    → <name>, verify
- *   "Verify <name> …"       → <name>, verify
- *   "Assemble train <n> …"  → train<n>, assemble
- *   anything else           → "-",     other
+/* Derives (lane, kind) from an agent's description, by exactly seven rules:
+ *   "Lane <name>[: …]"       → <name>,  build
+ *   "Resume <name> lane …"   → <name>,  build
+ *   "Re-verify <name> …"     → <name>,  verify
+ *   "Verify <name> …"        → <name>,  verify
+ *   "Assemble train <n> …"   → train<n>, assemble
+ *   "Fix …" / "Resurrect …"  → the first word that names a lane in `known`,
+ *                              or "-" when none does, and kind fix
+ *   anything else            → "-",     other
+ * `known` may be NULL, in which case a Fix/Resurrect row is still kind fix
+ * with lane "-" — the work is named, its lane is simply not asserted.
  * A workflow agent has no description; its caller assigns (workflow id,
  * design) directly. */
-void mvl_classify_description(const char *desc, char *lane, size_t lane_cap,
-                              char *kind, size_t kind_cap);
+void mvl_classify_description(const char *desc, const struct mvl_names *known,
+                              char *lane, size_t lane_cap, char *kind,
+                              size_t kind_cap);
+
+/* ── bounded name sets ────────────────────────────────────────────────── */
+
+bool mvl_names_alloc(struct mvl_names *names, size_t cap);
+void mvl_names_free(struct mvl_names *names);
+bool mvl_names_add(struct mvl_names *names, const char *name);
+bool mvl_names_has(const struct mvl_names *names, const char *name);
+
+/* Every directory name under `lanes_dir` and under `scratch_dir` — the two
+ * places a lane leaves a directory behind. A missing directory contributes
+ * nothing and is not an error: a box with no lanes has no lanes. */
+bool mvl_read_lane_names(const char *lanes_dir, const char *scratch_dir,
+                         struct mvl_names *out, char *err, size_t err_cap);
+
+/* Every `ZCL_TEST_GROUP(<name>)` in a test_group_catalog.def. The caller
+ * produces the file with one `git show <ref>:tools/dev/test_group_catalog.def`
+ * so the sweep decision is made against the SAME ref the ancestry came from,
+ * and this tool still runs no subprocess. */
+bool mvl_read_groups(const char *path, struct mvl_names *out, char *err,
+                     size_t err_cap);
 
 /* Matches one assistant message's text against the outcome vocabulary, in
  * priority order: "LAND <sha>", "FIX <sha>", "READY", "BLOCKED", else "-".
@@ -224,8 +317,8 @@ bool mvl_scan_transcript(const char *path, struct mvl_agent *agent,
 /* Scans `<session>/subagents/agent-*.jsonl`, then every
  * `<session>/subagents/workflows/<wf>/agent-*.jsonl`, then the orchestrator's
  * own `<session>.jsonl`, appending one row each to `out` in that order. */
-bool mvl_scan_session(const char *session_dir, struct mvl_agents *out,
-                      char *err, size_t err_cap);
+bool mvl_scan_session(const char *session_dir, const struct mvl_names *known,
+                      struct mvl_agents *out, char *err, size_t err_cap);
 
 /* agents.tsv: one header line plus one row per agent, tab separated. */
 bool mvl_write_agents(const char *path, const struct mvl_agents *agents,
@@ -254,9 +347,8 @@ size_t mvl_render_cost(const struct mvl_agents *agents, char *out,
 
 /* Reads a `late_picks.txt` and appends its first-column lane names to
  * `lanes`. Comment and blank lines are skipped. */
-bool mvl_read_train_lanes(const char *path, char (*lanes)[MVL_LANE_CAP],
-                          size_t cap, size_t *count, char *err,
-                          size_t err_cap);
+bool mvl_read_train_lanes(const char *path, struct mvl_names *lanes,
+                          char *err, size_t err_cap);
 
 /* Reads one `git rev-list <origin/main>` output into `out`, one full sha per
  * line. This is the whole of the tool's git knowledge: it runs no
@@ -265,16 +357,33 @@ bool mvl_read_train_lanes(const char *path, char (*lanes)[MVL_LANE_CAP],
 bool mvl_read_ancestry(const char *path, char (*out)[MVL_ID_CAP], size_t cap,
                        size_t *count, char *err, size_t err_cap);
 
-/* True when `evidence` (at least seven hex characters) is a prefix of some
- * ancestry sha. */
+/* Reads `evidence` and says what shape it is. Text alone decides. */
+enum mvl_evidence_kind mvl_evidence_kind_of(const char *evidence);
+
+/* True when `evidence` is a commit or a commit range that the ancestry list
+ * contains: every sha of a comma-separated list, or the RIGHT side of a
+ * `a..b` range. A sweep, a doc path and an empty field are never landed. */
 bool mvl_evidence_landed(const char *evidence, const char (*anc)[MVL_ID_CAP],
                          size_t anc_count);
 
+/* What proves this loop, if anything. Evidence is consulted first because
+ * it is checkable by a stranger with the same two files; a verifier's
+ * VERDICT is the fallback. A sweep whose group is not registered at the ref
+ * returns MVL_VERIFIED_SWEEP_UNREGISTERED — a named refusal, not a pass. */
+enum mvl_verified_by mvl_loop_verified_by(const struct mvl_loop *loop,
+                                          const struct mvl_evidence_world *w);
+
+/* True for the three results that mean the loop is verified. */
+bool mvl_is_verified(enum mvl_verified_by by);
+
+/* The column value written for `verified_by`, and the name a refusal uses. */
+const char *mvl_verified_by_name(enum mvl_verified_by by);
+
 /* Fills `joins[0..plan->loop_count)`. `trains_dir` may be NULL (no assembler
- * split); `anc`/`anc_count` may be empty (landed stays -1). */
+ * split); every field of `*world` may be absent (landed stays -1). */
 void mvl_join_loops(const struct mvl_plan *plan,
                     const struct mvl_agents *agents, const char *trains_dir,
-                    const char (*anc)[MVL_ID_CAP], size_t anc_count,
+                    const struct mvl_evidence_world *world,
                     struct mvl_join *joins);
 
 bool mvl_write_loops(const char *path, const struct mvl_plan *plan,
@@ -302,9 +411,11 @@ bool mvl_append_snapshot(const char *path, const struct mvl_plan *plan,
  * It is computed in hundredths with integer arithmetic — a KPI that moved
  * with the host's floating-point rounding would not be a ground fact. */
 struct mvl_kpi {
-    int64_t verified_loops;
+    int64_t verified_loops;         /* landed + sweep + verdict-only */
     int64_t verified_subrows;
     int64_t landed_loops;
+    int64_t sweep_loops;
+    int64_t sweep_unregistered;     /* refused rows, reported not counted */
     int64_t tokens_raw;
     int64_t tokens_out;
     int64_t tcu;
@@ -324,14 +435,20 @@ enum {
  * of its own and no subprocess. A directory name maps to a lane by dropping
  * the leading `v` and any trailing digits. */
 bool mvl_verified_lanes(const char *scratch_dir, int64_t t0_unix,
-                        char (*lanes)[MVL_LANE_CAP], size_t cap,
-                        size_t *count, char *err, size_t err_cap);
+                        struct mvl_names *lanes, char *err, size_t err_cap);
 
 void mvl_compute_kpi(const struct mvl_plan *plan,
                      const struct mvl_agents *agents,
-                     const char (*lanes)[MVL_LANE_CAP], size_t lane_count,
-                     const char (*anc)[MVL_ID_CAP], size_t anc_count,
+                     const struct mvl_evidence_world *world,
                      struct mvl_kpi *out);
+
+/* Writes one `<plan>:<line>: sweep_group_unregistered: …` line to `sink`
+ * for every plan row whose sweep names a group the catalog does not carry,
+ * and returns how many it wrote. A refusal a reader cannot see is not a
+ * refusal, so this runs on every real invocation that resolves evidence. */
+size_t mvl_report_sweep_refusals(const struct mvl_plan *plan,
+                                 const struct mvl_evidence_world *world,
+                                 const char *plan_path, FILE *sink);
 
 const char *mvl_kpi_header(void);
 

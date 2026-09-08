@@ -115,35 +115,176 @@ static bool mvl_prefix(const char *s, const char *pfx, const char **rest)
     return true;
 }
 
-void mvl_classify_description(const char *desc, char *lane, size_t lane_cap,
+/* The rules whose lane is the word immediately after a fixed prefix. */
+static const struct {
+    const char *prefix;
+    const char *kind;
+} k_desc_rules[] = {
+    {"Lane ", "build"},
+    {"Resume ", "build"},
+    {"Re-verify ", "verify"},
+    {"Verify ", "verify"},
+    {"Assemble train ", "assemble"},
+};
+
+static bool mvl_desc_prefixed(const char *desc, char *lane, size_t lane_cap,
                               char *kind, size_t kind_cap)
 {
-    const char *rest = NULL;
-    char token[MVL_LANE_CAP];
+    for (size_t i = 0; i < sizeof k_desc_rules / sizeof k_desc_rules[0]; i++) {
+        const char *rest = NULL;
+        char token[MVL_LANE_CAP];
 
+        if (!mvl_prefix(desc, k_desc_rules[i].prefix, &rest))
+            continue;
+        mvl_token(rest, token, sizeof token);
+        if (token[0] == '\0')
+            return false;
+        if (strcmp(k_desc_rules[i].kind, "assemble") == 0)
+            (void)snprintf(lane, lane_cap, "train%s", token);
+        else
+            mvl_copy(lane, lane_cap, token);
+        mvl_copy(kind, kind_cap, k_desc_rules[i].kind);
+        return true;
+    }
+    return false;
+}
+
+static bool mvl_is_word_byte(char c)
+{
+    bool digit = (c >= '0' && c <= '9');
+    bool lower = (c >= 'a' && c <= 'z');
+    bool upper = (c >= 'A' && c <= 'Z');
+
+    return digit || lower || upper || c == '_' || c == '-';
+}
+
+/* A "Fix …" description names its lane somewhere in the sentence rather
+ * than in a fixed position, so the first word that IS a lane wins. Matching
+ * against the lanes that exist is what keeps this from inventing one: an
+ * English word can never be mistaken for a lane it does not name. */
+static void mvl_first_known_word(const char *text,
+                                 const struct mvl_names *known, char *lane,
+                                 size_t lane_cap)
+{
+    if (!known)
+        return;
+    while (*text != '\0') {
+        char word[MVL_LANE_CAP];
+        size_t n = 0;
+
+        while (*text != '\0' && !mvl_is_word_byte(*text))
+            text++;
+        while (mvl_is_word_byte(text[n]))
+            n++;
+        if (n == 0)
+            return;
+        if (n < sizeof word) {
+            memcpy(word, text, n);
+            word[n] = '\0';
+            if (mvl_names_has(known, word)) {
+                mvl_copy(lane, lane_cap, word);
+                return;
+            }
+        }
+        text += n;
+    }
+}
+
+static bool mvl_desc_fix(const char *desc, const struct mvl_names *known,
+                         char *lane, size_t lane_cap, char *kind,
+                         size_t kind_cap)
+{
+    const char *rest = NULL;
+
+    if (!mvl_prefix(desc, "Fix ", &rest)
+        && !mvl_prefix(desc, "Resurrect ", &rest))
+        return false;
+    mvl_copy(kind, kind_cap, "fix");
+    mvl_first_known_word(rest, known, lane, lane_cap);
+    return true;
+}
+
+void mvl_classify_description(const char *desc, const struct mvl_names *known,
+                              char *lane, size_t lane_cap, char *kind,
+                              size_t kind_cap)
+{
     mvl_copy(lane, lane_cap, "-");
     mvl_copy(kind, kind_cap, "other");
     if (!desc)
         return;
-    if (mvl_prefix(desc, "Lane ", &rest))
-        mvl_copy(kind, kind_cap, "build");
-    else if (mvl_prefix(desc, "Re-verify ", &rest))
-        mvl_copy(kind, kind_cap, "verify");
-    else if (mvl_prefix(desc, "Verify ", &rest))
-        mvl_copy(kind, kind_cap, "verify");
-    else if (mvl_prefix(desc, "Assemble train ", &rest))
-        mvl_copy(kind, kind_cap, "assemble");
-    else
+    if (mvl_desc_prefixed(desc, lane, lane_cap, kind, kind_cap))
         return;
-    mvl_token(rest, token, sizeof token);
-    if (token[0] == '\0') {
-        mvl_copy(kind, kind_cap, "other");
-        return;
+    (void)mvl_desc_fix(desc, known, lane, lane_cap, kind, kind_cap);
+}
+
+/* ── bounded name sets ────────────────────────────────────────────────── */
+
+bool mvl_names_alloc(struct mvl_names *names, size_t cap)
+{
+    names->rows = zcl_calloc(cap, MVL_LANE_CAP, "mvl_names");
+    names->count = 0;
+    names->cap = names->rows ? cap : 0;
+    return names->rows != NULL;
+}
+
+void mvl_names_free(struct mvl_names *names)
+{
+    free(names->rows);
+    names->rows = NULL;
+    names->count = 0;
+    names->cap = 0;
+}
+
+bool mvl_names_has(const struct mvl_names *names, const char *name)
+{
+    if (!names)
+        return false;
+    for (size_t i = 0; i < names->count; i++)
+        if (strcmp(names->rows[i], name) == 0)
+            return true;
+    return false;
+}
+
+/* Adding a name already present is a no-op success: the two lane
+ * directories overlap by design, and a set has no duplicates. */
+bool mvl_names_add(struct mvl_names *names, const char *name)
+{
+    if (name[0] == '\0')
+        return true;
+    if (mvl_names_has(names, name))
+        return true;
+    if (names->count >= names->cap)
+        return false;
+    mvl_copy(names->rows[names->count++], MVL_LANE_CAP, name);
+    return true;
+}
+
+static bool mvl_add_dir_names(const char *dir, struct mvl_names *out,
+                              char *err, size_t err_cap)
+{
+    struct platform_directory_list dirs = {0};
+    bool ok = true;
+
+    if (!dir || !platform_directory_list_real_sorted(dir, &dirs))
+        return true;
+    for (size_t i = 0; i < dirs.count; i++) {
+        if (mvl_names_add(out, dirs.entries[i].name))
+            continue;
+        mvl_err(err, err_cap, dir, i,
+                "mvl_overflow: more lane names than MVL_MAX_NAMES");
+        ok = false;
+        break;
     }
-    if (strcmp(kind, "assemble") == 0)
-        (void)snprintf(lane, lane_cap, "train%s", token);
-    else
-        mvl_copy(lane, lane_cap, token);
+    platform_directory_list_free(&dirs);
+    return ok;
+}
+
+bool mvl_read_lane_names(const char *lanes_dir, const char *scratch_dir,
+                         struct mvl_names *out, char *err, size_t err_cap)
+{
+    if (!mvl_add_dir_names(lanes_dir, out, err, err_cap))
+        return false;
+    return mvl_add_dir_names(scratch_dir, out, err, err_cap);
 }
 
 /* ── outcome matching ─────────────────────────────────────────────────── */
@@ -496,6 +637,7 @@ struct mvl_agent *mvl_next_row(struct mvl_agents *out, char *err,
  * otherwise names the workflow, which makes every agent in it a design
  * agent of that workflow. */
 static bool mvl_scan_agent_dir(const char *dir, const char *wf,
+                               const struct mvl_names *known,
                                struct mvl_agents *out, char *err,
                                size_t err_cap)
 {
@@ -523,8 +665,9 @@ static bool mvl_scan_agent_dir(const char *dir, const char *wf,
             mvl_copy(a->kind, sizeof a->kind, "design");
         } else {
             mvl_read_meta(dir, id, a->description, sizeof a->description);
-            mvl_classify_description(a->description, a->lane, sizeof a->lane,
-                                     a->kind, sizeof a->kind);
+            mvl_classify_description(a->description, known, a->lane,
+                                     sizeof a->lane, a->kind,
+                                     sizeof a->kind);
         }
         mvl_sanitize(a->description);
         if (!mvl_path_of(path, sizeof path, dir, "/", files.entries[i].name,
@@ -566,7 +709,8 @@ static bool mvl_scan_workflows(const char *session_dir,
             ok = false;
             break;
         }
-        ok = mvl_scan_agent_dir(path, dirs.entries[i].name, out, err, err_cap);
+        ok = mvl_scan_agent_dir(path, dirs.entries[i].name, NULL, out, err,
+                                err_cap);
     }
     platform_directory_list_free(&dirs);
     return ok;
@@ -594,8 +738,8 @@ static bool mvl_scan_orchestrator(const char *session_dir,
     return mvl_scan_transcript(path, a, err, err_cap);
 }
 
-bool mvl_scan_session(const char *session_dir, struct mvl_agents *out,
-                      char *err, size_t err_cap)
+bool mvl_scan_session(const char *session_dir, const struct mvl_names *known,
+                      struct mvl_agents *out, char *err, size_t err_cap)
 {
     char subagents[MVL_PATH_CAP];
 
@@ -605,7 +749,7 @@ bool mvl_scan_session(const char *session_dir, struct mvl_agents *out,
                 "mvl_overflow: session path longer than MVL_PATH_CAP");
         return false;
     }
-    if (!mvl_scan_agent_dir(subagents, NULL, out, err, err_cap))
+    if (!mvl_scan_agent_dir(subagents, NULL, known, out, err, err_cap))
         return false;
     if (!mvl_scan_workflows(session_dir, out, err, err_cap))
         return false;

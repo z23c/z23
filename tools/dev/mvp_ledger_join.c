@@ -86,12 +86,79 @@ static bool mvl_read_first_column(const char *path, char *rows, size_t stride,
     return ok;
 }
 
-bool mvl_read_train_lanes(const char *path, char (*lanes)[MVL_LANE_CAP],
-                          size_t cap, size_t *count, char *err,
-                          size_t err_cap)
+bool mvl_read_train_lanes(const char *path, struct mvl_names *lanes,
+                          char *err, size_t err_cap)
 {
-    return mvl_read_first_column(path, lanes[0], MVL_LANE_CAP, cap, count,
-                                 err, err_cap);
+    return mvl_read_first_column(path, lanes->rows[0], MVL_LANE_CAP,
+                                 lanes->cap, &lanes->count, err, err_cap);
+}
+
+/* Reads `ZCL_TEST_GROUP(<name>)` out of a test_group_catalog.def. Anything
+ * else in the file — the licence header, the comments explaining a group —
+ * is not a registration and is passed over. */
+static bool mvl_group_of_line(const char *line, char *dst, size_t cap)
+{
+    const char *p = strstr(line, "ZCL_TEST_GROUP(");
+    const char *end;
+    size_t n;
+
+    if (!p)
+        return false;
+    p += strlen("ZCL_TEST_GROUP(");
+    end = strchr(p, ')');
+    if (!end)
+        return false;
+    n = (size_t)(end - p);
+    if (n == 0 || n >= cap)
+        return false;
+    memcpy(dst, p, n);
+    dst[n] = '\0';
+    return true;
+}
+
+bool mvl_read_groups(const char *path, struct mvl_names *out, char *err,
+                     size_t err_cap)
+{
+    char *buf = zcl_malloc(MVL_LINE_CAP + 2, "mvl_group_line");
+    FILE *f;
+    size_t line_no = 0;
+    bool ok = true;
+
+    if (!buf) {
+        mvl_err(err, err_cap, path, 0, "mvl_overflow: no line buffer");
+        return false;
+    }
+    f = fopen(path, "r");
+    if (!f) {
+        mvl_err(err, err_cap, path, 0,
+                "mvl_open: cannot read the test-group catalog");
+        free(buf);
+        return false;
+    }
+    while (ok) {
+        char group[MVL_LANE_CAP];
+        int rc = mvl_read_line(f, buf, MVL_LINE_CAP + 2);
+
+        if (rc == 0)
+            break;
+        line_no++;
+        if (rc < 0) {
+            mvl_err(err, err_cap, path, line_no,
+                    "mvl_line_too_long: line exceeds MVL_LINE_CAP bytes");
+            ok = false;
+            break;
+        }
+        if (!mvl_group_of_line(buf, group, sizeof group))
+            continue;
+        if (mvl_names_add(out, group))
+            continue;
+        mvl_err(err, err_cap, path, line_no,
+                "mvl_overflow: more test groups than MVL_MAX_NAMES");
+        ok = false;
+    }
+    (void)fclose(f);
+    free(buf);
+    return ok;
 }
 
 bool mvl_read_ancestry(const char *path, char (*out)[MVL_ID_CAP], size_t cap,
@@ -114,17 +181,173 @@ static bool mvl_hex_run(const char *s, size_t want)
     return true;
 }
 
+/* True when the `len` bytes at `sha` are a hex prefix of some ancestry
+ * commit. Seven is git's own shortest unambiguous abbreviation; below that
+ * a "sha" is a word that happens to be hex. */
+static bool mvl_sha_in_ancestry(const char *sha, size_t len,
+                                const char (*anc)[MVL_ID_CAP],
+                                size_t anc_count)
+{
+    if (len < 7 || len > MVL_ID_CAP - 1 || !mvl_hex_run(sha, len))
+        return false;
+    for (size_t i = 0; i < anc_count; i++)
+        if (strncmp(anc[i], sha, len) == 0)
+            return true;
+    return false;
+}
+
+/* The `b` of an `a..b` range, or NULL when there is no range separator. */
+static const char *mvl_range_tip(const char *evidence)
+{
+    const char *dots = strstr(evidence, "..");
+
+    return dots ? dots + 2 : NULL;
+}
+
+static bool mvl_all_hex_list(const char *evidence)
+{
+    size_t start = 0;
+    size_t i = 0;
+
+    for (;; i++) {
+        if (evidence[i] != ',' && evidence[i] != '\0')
+            continue;
+        if (i - start < 7 || !mvl_hex_run(evidence + start, i - start))
+            return false;
+        if (evidence[i] == '\0')
+            return true;
+        start = i + 1;
+    }
+}
+
+enum mvl_evidence_kind mvl_evidence_kind_of(const char *evidence)
+{
+    const char *tip;
+
+    if (!evidence || evidence[0] == '\0' || strcmp(evidence, "-") == 0)
+        return MVL_EVIDENCE_NONE;
+    if (strncmp(evidence, "ONLY=", 5) == 0 && evidence[5] != '\0')
+        return MVL_EVIDENCE_SWEEP;
+    tip = mvl_range_tip(evidence);
+    if (tip)
+        return mvl_hex_run(tip, strlen(tip)) && strlen(tip) >= 7
+               ? MVL_EVIDENCE_RANGE : MVL_EVIDENCE_OTHER;
+    if (mvl_all_hex_list(evidence))
+        return MVL_EVIDENCE_COMMIT;
+    return MVL_EVIDENCE_OTHER;
+}
+
+/* Every sha of a comma list must be an ancestor: the row cites them all as
+ * the work, so one of them still in flight means the work is not landed. */
+static bool mvl_commit_list_landed(const char *evidence,
+                                   const char (*anc)[MVL_ID_CAP],
+                                   size_t anc_count)
+{
+    size_t start = 0;
+
+    for (size_t i = 0;; i++) {
+        if (evidence[i] != ',' && evidence[i] != '\0')
+            continue;
+        if (!mvl_sha_in_ancestry(evidence + start, i - start, anc, anc_count))
+            return false;
+        if (evidence[i] == '\0')
+            return true;
+        start = i + 1;
+    }
+}
+
 bool mvl_evidence_landed(const char *evidence, const char (*anc)[MVL_ID_CAP],
                          size_t anc_count)
 {
-    size_t n = strlen(evidence);
+    enum mvl_evidence_kind kind = mvl_evidence_kind_of(evidence);
+    const char *tip;
 
-    if (n < 7 || !mvl_hex_run(evidence, n))
+    if (anc_count == 0)
         return false;
-    for (size_t i = 0; i < anc_count; i++)
-        if (strncmp(anc[i], evidence, n) == 0)
-            return true;
-    return false;
+    if (kind == MVL_EVIDENCE_COMMIT)
+        return mvl_commit_list_landed(evidence, anc, anc_count);
+    if (kind != MVL_EVIDENCE_RANGE)
+        return false;
+    tip = mvl_range_tip(evidence);
+    return mvl_sha_in_ancestry(tip, strlen(tip), anc, anc_count);
+}
+
+/* ── what proves a loop ───────────────────────────────────────────────── */
+
+static enum mvl_verified_by mvl_sweep_result(const char *evidence,
+                                             const struct mvl_names *groups)
+{
+    if (!groups)
+        return MVL_VERIFIED_SWEEP_NOT_ASKED;
+    return mvl_names_has(groups, evidence + 5) ? MVL_VERIFIED_SWEEP
+                                               : MVL_VERIFIED_SWEEP_UNREGISTERED;
+}
+
+enum mvl_verified_by mvl_loop_verified_by(const struct mvl_loop *loop,
+                                          const struct mvl_evidence_world *w)
+{
+    enum mvl_evidence_kind kind = mvl_evidence_kind_of(loop->evidence);
+    enum mvl_verified_by sweep = MVL_VERIFIED_NO;
+
+    if (kind == MVL_EVIDENCE_COMMIT || kind == MVL_EVIDENCE_RANGE) {
+        if (mvl_evidence_landed(loop->evidence, w->ancestry,
+                                w->ancestry_count))
+            return MVL_VERIFIED_LANDED;
+    }
+    if (kind == MVL_EVIDENCE_SWEEP) {
+        sweep = mvl_sweep_result(loop->evidence, w->groups);
+        if (sweep == MVL_VERIFIED_SWEEP)
+            return MVL_VERIFIED_SWEEP;
+    }
+    if (mvl_names_has(w->verdict_lanes, loop->lane))
+        return MVL_VERIFIED_VERDICT;
+    return sweep;
+}
+
+bool mvl_is_verified(enum mvl_verified_by by)
+{
+    return by == MVL_VERIFIED_LANDED || by == MVL_VERIFIED_SWEEP
+           || by == MVL_VERIFIED_VERDICT;
+}
+
+const char *mvl_verified_by_name(enum mvl_verified_by by)
+{
+    switch (by) {
+    case MVL_VERIFIED_LANDED:
+        return "landed";
+    case MVL_VERIFIED_SWEEP:
+        return "sweep";
+    case MVL_VERIFIED_VERDICT:
+        return "verdict";
+    case MVL_VERIFIED_SWEEP_UNREGISTERED:
+        return "sweep_group_unregistered";
+    case MVL_VERIFIED_SWEEP_NOT_ASKED:
+        return "sweep_not_asked";
+    case MVL_VERIFIED_NO:
+        break;
+    }
+    return "-";
+}
+
+size_t mvl_report_sweep_refusals(const struct mvl_plan *plan,
+                                 const struct mvl_evidence_world *world,
+                                 const char *plan_path, FILE *sink)
+{
+    size_t refused = 0;
+
+    for (size_t i = 0; i < plan->loop_count; i++) {
+        const struct mvl_loop *l = &plan->loops[i];
+
+        if (mvl_loop_verified_by(l, world) != MVL_VERIFIED_SWEEP_UNREGISTERED)
+            continue;
+        refused++;
+        fprintf(sink,
+                "z23-mvp-ledger: %s:%zu: sweep_group_unregistered: %s cites"
+                " %s, which the catalog at the ancestry ref does not"
+                " register — %s counts as UNVERIFIED\n",
+                plan_path, l->line_no, l->id, l->evidence, l->id);
+    }
+    return refused;
 }
 
 /* ── the join ─────────────────────────────────────────────────────────── */
@@ -185,44 +408,32 @@ static void mvl_join_direct(const struct mvl_plan *plan,
     }
 }
 
-static bool mvl_lane_on_train(const char *lane, char (*lanes)[MVL_LANE_CAP],
-                              size_t count)
-{
-    for (size_t i = 0; i < count; i++)
-        if (strcmp(lanes[i], lane) == 0)
-            return true;
-    return false;
-}
-
 static void mvl_split_assembler(const struct mvl_plan *plan,
                                 const struct mvl_agent *a,
                                 const char *trains_dir,
                                 struct mvl_join *joins)
 {
-    char (*lanes)[MVL_LANE_CAP] = zcl_calloc(MVL_MAX_TRAIN_LANES,
-                                             MVL_LANE_CAP, "mvl_train_lanes");
+    struct mvl_names lanes = {0};
     char path[MVL_PATH_CAP];
     char err[MVL_ERR_CAP];
-    size_t count = 0;
     int64_t members = 0;
 
-    if (!lanes)
+    if (!mvl_names_alloc(&lanes, MVL_MAX_TRAIN_LANES))
         return;
     if (!mvl_path_of(path, sizeof path, trains_dir, "/", a->lane,
                      "/late_picks.txt")) {
-        free(lanes);
+        mvl_names_free(&lanes);
         return;
     }
-    if (mvl_read_train_lanes(path, lanes, MVL_MAX_TRAIN_LANES, &count, err,
-                             sizeof err)) {
+    if (mvl_read_train_lanes(path, &lanes, err, sizeof err)) {
         for (size_t i = 0; i < plan->loop_count; i++)
-            if (mvl_lane_on_train(plan->loops[i].lane, lanes, count))
+            if (mvl_names_has(&lanes, plan->loops[i].lane))
                 members++;
         for (size_t i = 0; members > 0 && i < plan->loop_count; i++)
-            if (mvl_lane_on_train(plan->loops[i].lane, lanes, count))
+            if (mvl_names_has(&lanes, plan->loops[i].lane))
                 mvl_add_share(&joins[i], a, members);
     }
-    free(lanes);
+    mvl_names_free(&lanes);
 }
 
 static void mvl_split_design(const struct mvl_plan *plan,
@@ -240,12 +451,12 @@ static void mvl_split_design(const struct mvl_plan *plan,
 
 void mvl_join_loops(const struct mvl_plan *plan,
                     const struct mvl_agents *agents, const char *trains_dir,
-                    const char (*anc)[MVL_ID_CAP], size_t anc_count,
+                    const struct mvl_evidence_world *world,
                     struct mvl_join *joins)
 {
     for (size_t i = 0; i < plan->loop_count; i++) {
         memset(&joins[i], 0, sizeof joins[i]);
-        joins[i].landed = anc_count > 0 ? 0 : -1;
+        joins[i].landed = world->ancestry_count > 0 ? 0 : -1;
     }
     mvl_join_direct(plan, agents, joins);
     for (size_t k = 0; k < agents->count; k++) {
@@ -256,9 +467,11 @@ void mvl_join_loops(const struct mvl_plan *plan,
         if (strcmp(a->kind, "design") == 0)
             mvl_split_design(plan, a, joins);
     }
-    for (size_t i = 0; anc_count > 0 && i < plan->loop_count; i++)
-        if (mvl_evidence_landed(plan->loops[i].evidence, anc, anc_count))
+    for (size_t i = 0; i < plan->loop_count; i++) {
+        joins[i].verified_by = mvl_loop_verified_by(&plan->loops[i], world);
+        if (joins[i].verified_by == MVL_VERIFIED_LANDED)
             joins[i].landed = 1;
+    }
 }
 
 /* ── loops.tsv ────────────────────────────────────────────────────────── */
@@ -279,7 +492,7 @@ bool mvl_write_loops(const char *path, const struct mvl_plan *plan,
     }
     fprintf(f, "id\ttitle\tstate\tlane\tevidence\tagents\ttokens_out\t"
                "tokens_in\ttool_uses\twall_s\tfirst_utc\tlast_utc\t"
-               "verifier_rounds\tlanded\n");
+               "verifier_rounds\tlanded\tverified_by\n");
     for (size_t i = 0; i < plan->loop_count; i++) {
         const struct mvl_loop *l = &plan->loops[i];
         const struct mvl_join *j = &joins[i];
@@ -289,13 +502,14 @@ bool mvl_write_loops(const char *path, const struct mvl_plan *plan,
                        j->landed < 0 ? "-" : (j->landed ? "1" : "0"));
         fprintf(f,
                 "%s\t%s\t%s\t%s\t%s\t%lld\t%lld\t%lld\t%lld\t%lld\t%s\t%s"
-                "\t%lld\t%s\n",
+                "\t%lld\t%s\t%s\n",
                 l->id, mvl_cell(l->title), mvl_cell(l->state),
                 mvl_cell(l->lane), mvl_cell(l->evidence),
                 (long long)j->agents, (long long)j->tokens_out,
                 (long long)j->tokens_in, (long long)j->tool_uses,
                 (long long)j->wall_s, mvl_cell(j->first_utc),
-                mvl_cell(j->last_utc), (long long)j->verifier_rounds, landed);
+                mvl_cell(j->last_utc), (long long)j->verifier_rounds, landed,
+                mvl_verified_by_name(j->verified_by));
     }
     if (fclose(f) != 0) {
         mvl_err(err, err_cap, path, 0, "mvl_open: loops.tsv did not close");
