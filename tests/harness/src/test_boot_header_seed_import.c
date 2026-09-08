@@ -34,6 +34,8 @@
 #include "net/file_service.h"
 #include "services/block_index_flat_anchor.h"
 #include "services/block_index_loader.h"
+#include "services/sync_benchmark_service.h"
+#include "json/json.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "chain/chain.h"
@@ -47,6 +49,7 @@
 #include "platform/time_compat.h"
 
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -387,12 +390,116 @@ static int case_bad_row(void)
     return failures;
 }
 
+/* zcl.sync_benchmark.v1: SYNC_BENCH_HEADERS begins only when this boot
+ * genuinely attempts a header-seed import (the artifact is present), and
+ * ends once the import resolves. Two cases, both on a scratch fixture
+ * (test_mkdtemp — never a real datadir):
+ *   (a) a no-op boot (no bundles/block_index.bin) never begins the phase.
+ *   (b) a real import stamps a non-negative elapsed_ms. */
+static int case_sync_benchmark_headers_phase(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: SYNC_BENCH_HEADERS is honest about no-op vs real import") {
+        chain_params_select(CHAIN_REGTEST);
+
+        char nodir[PATH_MAX];
+        ASSERT(test_mkdtemp(nodir, sizeof(nodir), "hsi_bench_noop") != NULL);
+
+        sync_benchmark_reset_for_test();
+        sync_benchmark_init(nodir);
+
+        struct main_state noop_ms;
+        memset(&noop_ms, 0, sizeof(noop_ms));
+        block_map_init(&noop_ms.map_block_index);
+        active_chain_init(&noop_ms.chain_active);
+
+        /* Stat-miss no-op: no artifact staged, phase never begins. */
+        ASSERT(!boot_header_seed_import_maybe(nodir, &noop_ms));
+
+        struct json_value noop_dump;
+        json_init(&noop_dump);
+        ASSERT(sync_benchmark_dump_state_json(&noop_dump, NULL));
+        const struct json_value *noop_timings = json_get(&noop_dump, "timings_ms");
+        ASSERT(noop_timings != NULL);
+        ASSERT(json_is_null(json_get(noop_timings, "headers")));
+        json_free(&noop_dump);
+
+        block_map_free(&noop_ms.map_block_index);
+        active_chain_free(&noop_ms.chain_active);
+
+        /* Real import: the phase stamps a non-negative elapsed_ms. */
+        char sdir[PATH_MAX];
+        ASSERT(test_mkdtemp(sdir, sizeof(sdir), "hsi_bench_src") != NULL);
+        char cdir[PATH_MAX];
+        ASSERT(test_mkdtemp(cdir, sizeof(cdir), "hsi_bench_dst") != NULL);
+
+        struct main_state seed_ms;
+        memset(&seed_ms, 0, sizeof(seed_ms));
+        block_map_init(&seed_ms.map_block_index);
+        active_chain_init(&seed_ms.chain_active);
+        hsi_build_chain(&seed_ms, 8, -1, true);
+        ASSERT(block_index_flat_anchor_prepare(&seed_ms).ok);
+        save_block_index_flat(sdir, &seed_ms);
+        block_map_free(&seed_ms.map_block_index);
+        active_chain_free(&seed_ms.chain_active);
+
+        char bundles_dir[PATH_MAX];
+        snprintf(bundles_dir, sizeof(bundles_dir), "%s/bundles", cdir);
+        ASSERT(mkdir(bundles_dir, 0700) == 0);
+        char from[PATH_MAX + 32];
+        char to[PATH_MAX + 32];
+        snprintf(from, sizeof(from), "%s/block_index.bin", sdir);
+        snprintf(to, sizeof(to), "%s/block_index.bin", bundles_dir);
+        {
+            /* Copy (not rename) — sdir is a shared fixture root, and
+             * boot_header_seed_import_maybe consumes (renames) its input. */
+            FILE *rf = fopen(from, "rb");
+            ASSERT(rf != NULL);
+            FILE *wf = fopen(to, "wb");
+            ASSERT(wf != NULL);
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), rf)) > 0)
+                ASSERT(fwrite(buf, 1, n, wf) == n);
+            fclose(rf);
+            fclose(wf);
+        }
+
+        sync_benchmark_reset_for_test();
+        sync_benchmark_init(cdir);
+
+        struct main_state cms;
+        memset(&cms, 0, sizeof(cms));
+        block_map_init(&cms.map_block_index);
+        active_chain_init(&cms.chain_active);
+
+        ASSERT(boot_header_seed_import_maybe(cdir, &cms));
+
+        struct json_value dump;
+        json_init(&dump);
+        ASSERT(sync_benchmark_dump_state_json(&dump, NULL));
+        const struct json_value *timings = json_get(&dump, "timings_ms");
+        ASSERT(timings != NULL);
+        const struct json_value *headers = json_get(timings, "headers");
+        ASSERT(headers != NULL);
+        ASSERT(!json_is_null(headers));
+        ASSERT(json_get_int(headers) >= 0);
+        json_free(&dump);
+
+        block_map_free(&cms.map_block_index);
+        active_chain_free(&cms.chain_active);
+        sync_benchmark_reset_for_test();
+    } _test_next:;
+    return failures;
+}
+
 int test_boot_header_seed_import(void)
 {
     printf("\n=== boot_header_seed_import ===\n");
     int failures = 0;
     failures += case_import_roundtrip();
     failures += case_bad_row();
+    failures += case_sync_benchmark_headers_phase();
     printf("=== boot_header_seed_import: %d failure(s) ===\n", failures);
     return failures;
 }

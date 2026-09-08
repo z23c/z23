@@ -29,7 +29,9 @@
 #include "sapling/incremental_merkle_tree.h"
 #include "services/consensus_state_publication_cas.h"
 #include "services/nullifier_backfill_service.h"
+#include "services/sync_benchmark_service.h"
 #include "services/utxo_mirror_sync_service.h"
+#include "json/json.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
 #include "storage/consensus_state_bundle_codec.h"
@@ -2021,6 +2023,47 @@ static void csi_make_tmpdir(char *buf, size_t n)
     test_make_tmpdir(buf, n, "consensus_state_install", "main");
 }
 
+/* zcl.sync_benchmark.v1: a fresh instrument, a genuinely successful install,
+ * then a receipt that proves what actually ran — ARTIFACT_VERIFY and
+ * INSTALL both stamp real elapsed_ms, and t_ready (the "usable, not yet
+ * sovereign" milestone) fires exactly once, at the point the install
+ * reaches CONSENSUS_INSTALL_VERIFIED_CONTAINED. Kept out of the platform-arm
+ * flow above to hold that function's cyclomatic complexity at its ratchet. */
+static int csi_sync_benchmark_install_case(sqlite3 *db, struct csi_fixture *a,
+                                           struct csi_fixture *b)
+{
+    int failures = 0;
+    sync_benchmark_reset_for_test();
+    sync_benchmark_init(NULL);
+    CSI_CHECK("valid complete claim is verified but contained",
+              install(db,b,CONSENSUS_INSTALL_FAIL_NONE,
+                      CONSENSUS_INSTALL_VERIFIED_CONTAINED));
+    CSI_CHECK("contained complete claim preserves generation A",active_is(db,a));
+
+    struct json_value dump;
+    json_init(&dump);
+    bool dumped = sync_benchmark_dump_state_json(&dump, NULL);
+    const struct json_value *timings =
+        dumped ? json_get(&dump, "timings_ms") : NULL;
+    const struct json_value *verify =
+        timings ? json_get(timings, "artifact_verify") : NULL;
+    const struct json_value *install_ms =
+        timings ? json_get(timings, "install") : NULL;
+    const struct json_value *t_ready =
+        timings ? json_get(timings, "t_ready") : NULL;
+    CSI_CHECK("sync_benchmark: ARTIFACT_VERIFY stamped a real elapsed_ms",
+              verify && !json_is_null(verify) && json_get_int(verify) >= 0);
+    CSI_CHECK("sync_benchmark: INSTALL stamped a real elapsed_ms",
+              install_ms && !json_is_null(install_ms) &&
+              json_get_int(install_ms) >= 0);
+    CSI_CHECK("sync_benchmark: t_ready (usable milestone) fired once",
+              t_ready && !json_is_null(t_ready) && json_get_int(t_ready) >= 0);
+    json_free(&dump);
+
+    sync_benchmark_reset_for_test();
+    return failures;
+}
+
 static int test_consensus_state_snapshot_install_platform_arm(void)
 {
     printf("\n=== consensus_state_snapshot_install ===\n");
@@ -2256,10 +2299,7 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
     CSI_CHECK("valid artifact restores after mutation test",
               write_bundle(&b, CSI_VALID));
 
-    CSI_CHECK("valid complete claim is verified but contained",
-              install(db,&b,CONSENSUS_INSTALL_FAIL_NONE,
-                      CONSENSUS_INSTALL_VERIFIED_CONTAINED));
-    CSI_CHECK("contained complete claim preserves generation A",active_is(db,&a));
+    failures += csi_sync_benchmark_install_case(db, &a, &b);
 
     int candidate_dirfd=open(dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
     CSI_CHECK("candidate output directory capability opens",candidate_dirfd>=0);

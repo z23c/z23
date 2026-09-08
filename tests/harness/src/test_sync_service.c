@@ -7,6 +7,7 @@
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"
 #include "json/json.h"
+#include "services/sync_benchmark_service.h"
 #include "sync/sync_planner.h"
 #include "sync/sync_state.h"
 #include "validation/main_state.h"
@@ -18,6 +19,13 @@
 #include "util/safe_alloc.h"
 #include <string.h>
 #include <time.h>
+
+/* Test-only rearm of block_sync_service.c's three sync_benchmark one-shot
+ * guards (TAIL_DOWNLOAD begun / TAIL_FOLD begun / sovereign recorded) — that
+ * file's public surface is the sealed core/ header sync/sync_planner.h, so
+ * this hook is declared here instead, the same pattern other test files in
+ * this suite already use for test-only entry points. */
+extern void syncsvc_sync_benchmark_reset_for_testing(void);
 
 static int test_sync_service_begin_sync(void)
 {
@@ -2210,6 +2218,86 @@ static int test_sync_service_recent_tip_bypasses_headers(void)
     return failures;
 }
 
+/* zcl.sync_benchmark.v1: TAIL_DOWNLOAD begins on the first block-assignment
+ * plan, TAIL_FOLD begins on the first accepted-block note, and both end
+ * (plus mark_sovereign + a single complete=true receipt write) the moment
+ * syncsvc_collect_progress observes sync_state == SYNC_AT_TIP — never on any
+ * other state, and never more than once. Driven on a scratch fixture
+ * (sync_benchmark_init(NULL): stamps accumulate, no datadir write). */
+static int test_sync_service_benchmark_tail_phases(void)
+{
+    int failures = 0;
+
+    TEST("sync_service stamps TAIL_DOWNLOAD/TAIL_FOLD and records sovereignty once") {
+        syncsvc_sync_benchmark_reset_for_testing();
+        sync_benchmark_reset_for_test();
+        sync_benchmark_init(NULL);
+
+        struct p2p_node node;
+        memset(&node, 0, sizeof(node));
+        node.id = 11;
+        node.state = PEER_HANDSHAKE_COMPLETE;
+        node.starting_height = 100200;
+
+        struct sync_block_assignment plan;
+        memset(&plan, 0, sizeof(plan));
+        syncsvc_plan_block_assignment(&plan, &node, 0, 100000);
+        ASSERT(plan.should_assign);
+
+        struct sync_block_acceptance accept;
+        memset(&accept, 0, sizeof(accept));
+        node.state = PEER_SYNCING_BLOCKS;
+        node.starting_height = 100;
+        syncsvc_note_valid_block(&accept, &node, SYNC_BLOCKS_DOWNLOAD,
+                                 100, 100, 0, 0, BODY_HISTORY_COMPLETE);
+        ASSERT(accept.should_set_sync_state);
+        ASSERT(accept.next_sync_state == SYNC_AT_TIP);
+
+        /* Not yet at tip: the terminal milestone must not fire early. */
+        struct sync_progress_snapshot pre;
+        syncsvc_collect_progress(&pre, NULL, SYNC_BLOCKS_DOWNLOAD, 99, 100, 0, 0);
+
+        struct json_value pre_dump;
+        json_init(&pre_dump);
+        ASSERT(sync_benchmark_dump_state_json(&pre_dump, NULL));
+        ASSERT(!json_get_bool(json_get(&pre_dump, "complete")));
+        json_free(&pre_dump);
+
+        /* The frontier reaches the peer-agreed tip: terminal milestone
+         * fires exactly once. */
+        struct sync_progress_snapshot post;
+        syncsvc_collect_progress(&post, NULL, SYNC_AT_TIP, 100, 100, 0, 0);
+        /* A second SYNC_AT_TIP observation must not double-fire. */
+        struct sync_progress_snapshot post2;
+        syncsvc_collect_progress(&post2, NULL, SYNC_AT_TIP, 100, 100, 0, 0);
+
+        struct json_value dump;
+        json_init(&dump);
+        ASSERT(sync_benchmark_dump_state_json(&dump, NULL));
+        ASSERT(json_get_bool(json_get(&dump, "complete")));
+        const struct json_value *timings = json_get(&dump, "timings_ms");
+        ASSERT(timings != NULL);
+        const struct json_value *tail_download =
+            json_get(timings, "tail_download");
+        const struct json_value *tail_fold = json_get(timings, "tail_fold");
+        const struct json_value *t_sovereign =
+            json_get(timings, "t_sovereign");
+        ASSERT(tail_download && !json_is_null(tail_download) &&
+              json_get_int(tail_download) >= 0);
+        ASSERT(tail_fold && !json_is_null(tail_fold) &&
+              json_get_int(tail_fold) >= 0);
+        ASSERT(t_sovereign && !json_is_null(t_sovereign) &&
+              json_get_int(t_sovereign) >= 0);
+        json_free(&dump);
+
+        syncsvc_sync_benchmark_reset_for_testing();
+        sync_benchmark_reset_for_test();
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_sync_service_periodic_tip_evaluator(void)
 {
     int failures = 0;
@@ -2335,6 +2423,7 @@ int test_sync_service(void)
     failures += test_sync_service_genuinely_at_tip();
     failures += test_sync_service_recent_tip_bypasses_headers();
     failures += test_sync_service_periodic_tip_evaluator();
+    failures += test_sync_service_benchmark_tail_phases();
     sync_set_state(SYNC_IDLE, "done");
     return failures;
 }
