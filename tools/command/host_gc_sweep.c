@@ -13,6 +13,7 @@
 
 #include "command/host_gc_priv.h"
 
+#include "platform/time_compat.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
 
@@ -22,7 +23,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 enum {
@@ -69,7 +69,7 @@ static int hg_git(const char *dir, const char *const args[], char *out,
 
 static int64_t hg_now(const struct host_gc_request *req)
 {
-    return req->now ? req->now : (int64_t)time(NULL);
+    return req->now ? req->now : platform_time_wall_unix();
 }
 
 /* mtime age in seconds. A path that cannot be stat()ed reads as 0 — too
