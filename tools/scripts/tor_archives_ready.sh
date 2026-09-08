@@ -104,6 +104,12 @@ have_all() {
 # with any other command name that resolves to the SAME binary as the
 # ambient guess -- never a different one, that would still be a real
 # mismatch -- before have_all() gives up.
+tor_same_compiler_file() {
+    # Darwin's compiler aliases can be hardlinks: realpath keeps their
+    # different names. Require one device/inode, never merely equal bytes.
+    [ "$1" -ef "$2" ]
+}
+
 tor_alias_check() {
     local primary_cc="$1" primary_path cand cand_path tried cid
     primary_path="$(command -v "${primary_cc%% *}" 2>/dev/null)" || return 1
@@ -115,7 +121,7 @@ tor_alias_check() {
         tried="$tried$cand "
         cand_path="$(command -v "$cand" 2>/dev/null)" || continue
         cand_path="$(realpath -- "$cand_path" 2>/dev/null)" || continue
-        [ "$cand_path" = "$primary_path" ] || continue
+        tor_same_compiler_file "$cand_path" "$primary_path" || continue
         cid="$(cd "$SCRIPT_ROOT" && "$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cand" "$cand" 2>/dev/null)" || continue
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 && return 0
     done
@@ -398,6 +404,26 @@ case "${1:-ready}" in
             echo "tor_archives_ready: selftest FAILED — link_from wrote a manifest of its own for a manifest-less donor" >&2
             exit 1
         fi
+        # Exercise the same-file predicate even on hosts whose installed
+        # compilers are not aliases. Equal bytes in a different inode are
+        # deliberately insufficient; only actual aliases may be retried.
+        compiler_fixture="$fixture/compiler-aliases"
+        mkdir -p "$compiler_fixture"
+        printf 'fixture compiler bytes\n' > "$compiler_fixture/primary"
+        chmod 0755 "$compiler_fixture/primary"
+        ln "$compiler_fixture/primary" "$compiler_fixture/hardlink"
+        ln -s primary "$compiler_fixture/symlink"
+        cp "$compiler_fixture/primary" "$compiler_fixture/distinct"
+        if ! tor_same_compiler_file "$compiler_fixture/primary" "$compiler_fixture/hardlink" ||
+           ! tor_same_compiler_file "$compiler_fixture/primary" "$compiler_fixture/symlink"; then
+            echo "tor_archives_ready: selftest FAILED — a hardlink or symlink compiler alias was rejected" >&2
+            exit 1
+        fi
+        if tor_same_compiler_file "$compiler_fixture/primary" "$compiler_fixture/distinct" ||
+           tor_same_compiler_file "$compiler_fixture/primary" "$compiler_fixture/missing"; then
+            echo "tor_archives_ready: selftest FAILED — a distinct or missing compiler was accepted as an alias" >&2
+            exit 1
+        fi
         # have_all() must accept a manifest recorded under one alias for the
         # compiler (e.g. "gcc", what vendor/tor's real configure picked) when
         # the ambient guess in THIS tree resolves to a different alias for
@@ -410,7 +436,7 @@ case "${1:-ready}" in
         gcc_path="$(command -v gcc 2>/dev/null || true)"
         cc_path="$(command -v cc 2>/dev/null || true)"
         if [ -n "$gcc_path" ] && [ -n "$cc_path" ] && \
-           [ "$(realpath -- "$gcc_path" 2>/dev/null)" = "$(realpath -- "$cc_path" 2>/dev/null)" ]; then
+           tor_same_compiler_file "$gcc_path" "$cc_path"; then
             fake_wt3="$fixture/worktree3"
             mkdir -p "$fake_wt3"
             for a in "${ARCHIVES[@]}"; do

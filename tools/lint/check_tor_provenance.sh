@@ -11,7 +11,7 @@ trap 'rm -f "$work/positive.log" "$work/negative.log"; rmdir "$work"' EXIT
 compiler_run() {
     bash -c 'exec '"${CC:-cc}"' "$@"' compiler \
         -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-        -D_POSIX_C_SOURCE=200809L \
+        -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
         -Icontexts/commons/packages/zsha256/include \
         -Iplatform/modules/platform/include \
         -fsyntax-only tools/tor_provenance.c "$@"

@@ -17,10 +17,10 @@
 #endif
 
 /* Compiled-in lint-dimension allowances until this checkout has measured
- * its own. A lane proof runs lint-fast; a landing proof runs the whole
- * gate set, so the two budgets are different sizes of job. */
+ * its own. Publishable proofs use the full landing allowance everywhere;
+ * the default remains available to non-publication feedback callers. */
 #define PROOF_LINT_DEFAULT_MS 600000
-/* A landing runs `make lint` (every gate) plus check-windows-acceptance in
+/* A publishable proof runs `make lint` plus check-windows-acceptance in
  * one invocation, inside a fresh generation whose object tree has never
  * compiled the ~47 one-shot standalone tools check-standalone-tools-link
  * links. It runs alongside the test dimension on purpose: three measured
@@ -256,13 +256,14 @@ bool zcl_dev_proof_test_warm_status_line(const char *warmstart_path,
                                          char *out, size_t out_len);
 /* Seam for the landing-lint regression: the same argv, fallback budget, and
  * recorded target list the proof worker uses for the lint dimension, so a
- * test can prove a landing root runs the whole gate set plus Windows
- * acceptance while a lane root stays on the fast subset, without driving a
- * make or a proof cycle. */
+ * test can prove every root runs the whole gate set plus Windows
+ * acceptance, without driving a make or a proof cycle. */
 bool zcl_dev_proof_test_lint_argv(const char *root, const char *jobs,
                                   const char **argv, size_t argv_cap,
                                   size_t *argc_out, int64_t *fallback_ms,
                                   const char **targets_out);
+/* Same environment normalization performed before any proof child runs. */
+bool zcl_dev_proof_test_prepare_environment(void);
 /* Seam for the shared admitted-executable set: the one table both the lint
  * and the test dimension materialize into a generation. Writes at most
  * `cap` source/target pairs, relative to the submitting checkout and the

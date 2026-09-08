@@ -4332,7 +4332,6 @@ tools/dev/dev_proof_budget.c:zcl_dev_proof_timing_parse_group_line:22
 tools/dev/dev_proof_receipt.c:verdict_payload_valid:16
 tools/dev/dev_proof_receipt.c:zcl_dev_proof_child_receipt_validate:16
 tools/dev/dev_proof_receipt.c:zcl_dev_proof_receipt_parse:18
-tools/dev/dev_proof_receipt.c:zcl_dev_proof_receipt_validate:25
 tools/dev/dev_proof_receipt.c:zcl_dev_verdict_leaf_verify:16
 tools/dev/dev_proof_signer.c:signer_allow_line:17
 tools/dev/dev_workspace.c:cycle_record_publish_named:22

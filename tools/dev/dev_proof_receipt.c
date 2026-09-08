@@ -340,13 +340,56 @@ static bool fail(char *why, size_t why_len, const char *message)
     return false;
 }
 
+/* Only inspect these claims after verifying their producer signature. */
+static bool receipt_validate_coverage(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt,
+    char *why, size_t why_len)
+{
+    uint8_t seal[ZCL_DEV_PROOF_ROOT_BYTES];
+    /* Named before completeness, and named for what it is: a receipt whose
+     * roots were derived under a policy this build does not implement is
+     * refused, never silently compared against roots that mean something
+     * else. A receipt from a NEWER policy gets its own name -- calling it
+     * old would be a lie, and re-running the proof is not the fix for it. */
+    if (receipt->policy_version < PROOF_POLICY_VERSION)
+        return fail(why, why_len, "receipt_schema_old");
+    if (receipt->policy_version > PROOF_POLICY_VERSION)
+        return fail(why, why_len, "receipt_schema_newer_than_this_build");
+    if (receipt->complete != 1)
+        return fail(why, why_len, "receipt_policy_incomplete");
+    if (receipt->dimensions[ZCL_DEV_PROOF_LINT].selected != 1)
+        return fail(why, why_len, "receipt_lint_required");
+    const uint8_t *roots[PROOF_FIXED_ROOTS] = {
+        receipt->source_root, receipt->source_cas_root,
+        receipt->mutation_root, receipt->changed_set_root,
+        receipt->impact_policy_root, receipt->compiler_root,
+        receipt->flags_root, receipt->environment_root,
+        receipt->build_graph_root, receipt->child_set_root,
+    };
+    for (size_t i = 0; i < PROOF_FIXED_ROOTS; i++)
+        if (!root_nonzero(roots[i]))
+            return fail(why, why_len, "receipt_required_root_missing");
+    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++)
+        if (!dimension_complete(&receipt->dimensions[i]))
+            return fail(why, why_len, "receipt_dimension_incomplete");
+    uint8_t child_set[ZCL_DEV_PROOF_ROOT_BYTES];
+    if (!zcl_dev_proof_receipt_child_set_root(receipt, child_set) ||
+        memcmp(child_set, receipt->child_set_root, sizeof(child_set)) != 0)
+        return fail(why, why_len, "receipt_child_set_mismatch");
+    if (!receipt_digest(receipt, seal) ||
+        memcmp(seal, receipt->seal, sizeof(seal)) != 0)
+        return fail(why, why_len, "receipt_seal_mismatch");
+    if (why && why_len) why[0] = 0;
+    return true;
+}
+
 bool zcl_dev_proof_receipt_validate(
     const struct zcl_dev_acceptance_receipt_v1 *receipt,
     const char *local_commit, const char *remote_base,
     char *why, size_t why_len)
 {
     uint8_t local[ZCL_DEV_PROOF_OID_MAX], base[ZCL_DEV_PROOF_OID_MAX];
-    uint8_t local_len = 0, base_len = 0, seal[ZCL_DEV_PROOF_ROOT_BYTES];
+    uint8_t local_len = 0, base_len = 0;
     if (!receipt || !zcl_dev_proof_oid_decode(local_commit, local, &local_len) ||
         !zcl_dev_proof_oid_decode(remote_base, base, &base_len))
         return fail(why, why_len, "receipt_identity_invalid");
@@ -372,39 +415,7 @@ bool zcl_dev_proof_receipt_validate(
         return fail(why, why_len,
                     signer_why ? signer_why
                                : ZCL_DEV_PROOF_SIGNER_WHY_SIGNATURE_INVALID);
-    /* Named before completeness, and named for what it is: a receipt whose
-     * roots were derived under a policy this build does not implement is
-     * refused, never silently compared against roots that mean something
-     * else. A receipt from a NEWER policy gets its own name -- calling it
-     * old would be a lie, and re-running the proof is not the fix for it. */
-    if (receipt->policy_version < PROOF_POLICY_VERSION)
-        return fail(why, why_len, "receipt_schema_old");
-    if (receipt->policy_version > PROOF_POLICY_VERSION)
-        return fail(why, why_len, "receipt_schema_newer_than_this_build");
-    if (receipt->complete != 1)
-        return fail(why, why_len, "receipt_policy_incomplete");
-    const uint8_t *roots[PROOF_FIXED_ROOTS] = {
-        receipt->source_root, receipt->source_cas_root,
-        receipt->mutation_root, receipt->changed_set_root,
-        receipt->impact_policy_root, receipt->compiler_root,
-        receipt->flags_root, receipt->environment_root,
-        receipt->build_graph_root, receipt->child_set_root,
-    };
-    for (size_t i = 0; i < PROOF_FIXED_ROOTS; i++)
-        if (!root_nonzero(roots[i]))
-            return fail(why, why_len, "receipt_required_root_missing");
-    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++)
-        if (!dimension_complete(&receipt->dimensions[i]))
-            return fail(why, why_len, "receipt_dimension_incomplete");
-    uint8_t child_set[ZCL_DEV_PROOF_ROOT_BYTES];
-    if (!zcl_dev_proof_receipt_child_set_root(receipt, child_set) ||
-        memcmp(child_set, receipt->child_set_root, sizeof(child_set)) != 0)
-        return fail(why, why_len, "receipt_child_set_mismatch");
-    if (!receipt_digest(receipt, seal) ||
-        memcmp(seal, receipt->seal, sizeof(seal)) != 0)
-        return fail(why, why_len, "receipt_seal_mismatch");
-    if (why && why_len) why[0] = 0;
-    return true;
+    return receipt_validate_coverage(receipt, why, why_len);
 }
 
 bool zcl_dev_proof_child_receipt_create(

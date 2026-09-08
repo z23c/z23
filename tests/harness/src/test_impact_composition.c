@@ -1329,6 +1329,43 @@ static int test_ic_dev_proof_receipt_admission(void)
     return failures;
 }
 
+static int test_ic_dev_proof_receipt_requires_full_lint(void)
+{
+    int failures = 0;
+    static const char local[] =
+        "1111111111111111111111111111111111111111";
+    static const char base[] =
+        "2222222222222222222222222222222222222222";
+    TEST("proof policy: signed complete receipts require the lint dimension") {
+        struct zcl_dev_acceptance_receipt_v1 receipt =
+            ic_valid_dev_proof_receipt();
+        char why[128];
+        ASSERT(zcl_dev_proof_receipt_validate(&receipt, local, base,
+                                              why, sizeof(why)));
+        /* Keep the signature, child set and all remaining accounting valid:
+         * the only missing authority is mandatory lint coverage. */
+        memset(&receipt.dimensions[ZCL_DEV_PROOF_LINT], 0,
+               sizeof(receipt.dimensions[ZCL_DEV_PROOF_LINT]));
+        ASSERT(zcl_dev_proof_receipt_child_set_root(
+            &receipt, receipt.child_set_root));
+        ASSERT(zcl_dev_proof_receipt_seal(&receipt));
+        ASSERT(!zcl_dev_proof_receipt_validate(&receipt, local, base,
+                                               why, sizeof(why)));
+        ASSERT(strcmp(why, "receipt_lint_required") == 0);
+        receipt = ic_valid_dev_proof_receipt();
+        receipt.dimensions[ZCL_DEV_PROOF_LINT].selected = 2;
+        receipt.dimensions[ZCL_DEV_PROOF_LINT].reused = 2;
+        ASSERT(zcl_dev_proof_receipt_child_set_root(
+            &receipt, receipt.child_set_root));
+        ASSERT(zcl_dev_proof_receipt_seal(&receipt));
+        ASSERT(!zcl_dev_proof_receipt_validate(&receipt, local, base,
+                                               why, sizeof(why)));
+        ASSERT(strcmp(why, "receipt_lint_required") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_dev_proof_child_action_identity(void)
 {
     int failures = 0;
@@ -1414,6 +1451,14 @@ static int test_ic_dev_proof_child_action_identity(void)
         ASSERT(zcl_dev_proof_child_action_v1(
             &changed, ZCL_DEV_PROOF_COMPILE, &action_b, root_b));
         ASSERT(memcmp(root_a, root_b, sizeof(root_a)) != 0);
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_LINT, &action_b, root_b));
+        char lint_input_hex[65];
+        zcl_hex_encode(action_b.input_root_sha3, 32, lint_input_hex);
+        /* Golden input root binds dimension 2, graph 0x06, selected 1,
+         * operation "lint-full", and the empty selector. */
+        ASSERT(strcmp(lint_input_hex,
+            "df01519d7e9678dce5f53ee2705c11d42c9b9078609b286b8a62df39d3caa011") == 0);
         changed.selector = "unexpected";
         ASSERT(!zcl_dev_proof_child_action_v1(
             &changed, ZCL_DEV_PROOF_COMPILE, &action_b, root_b));
@@ -4093,7 +4138,7 @@ static int test_pw_receipt_refuses_an_older_root_policy(void)
         char why[128];
         ASSERT(zcl_dev_proof_receipt_validate(&receipt, local, base,
                                               why, sizeof(why)));
-        ASSERT(ZCL_DEV_PROOF_POLICY_VERSION >= 3u);
+        ASSERT(ZCL_DEV_PROOF_POLICY_VERSION >= 4u);
         struct zcl_dev_acceptance_receipt_v1 old = receipt;
         old.policy_version = ZCL_DEV_PROOF_POLICY_VERSION - 1u;
         ASSERT(zcl_dev_proof_receipt_seal(&old));
@@ -4391,10 +4436,55 @@ static int test_pw_seed_cold_without_seedables(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static bool ic_proof_environment_child(void)
+{
+    static const char *const cleared[] = {
+        "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
+        "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
+    };
+    for (size_t i = 0; i < sizeof(cleared) / sizeof(cleared[0]); i++) {
+        if (setenv(cleared[i], "--just-print", 1) != 0) return false;
+    }
+    if (setenv("ZCL_LINT_CACHE", "1", 1) != 0 ||
+        setenv("ZCL_LINT_MODE", "UPDATE", 1) != 0 ||
+        !zcl_dev_proof_test_prepare_environment())
+        return false;
+    for (size_t i = 0; i < sizeof(cleared) / sizeof(cleared[0]); i++) {
+        if (getenv(cleared[i]) != NULL) return false;
+    }
+    const char *cache = getenv("ZCL_LINT_CACHE");
+    const char *mode = getenv("ZCL_LINT_MODE");
+    return cache && strcmp(cache, "0") == 0 && mode == NULL;
+}
+
+static int test_ic_proof_environment_refuses_inherited_shortcuts(void)
+{
+    int failures = 0;
+    TEST("proof environment: inherited dry-run, cache and update controls are removed") {
+        /* A child owns every injected setting, so assertion failures cannot
+         * leak make or lint controls into the harness or its sibling tests. */
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) _exit(ic_proof_environment_child() ? 0 : 1);
+        int status = 0;
+        pid_t waited;
+        do {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        ASSERT(waited == child);
+        ASSERT(WIFEXITED(status));
+        ASSERT(WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 static int test_ic_landing_proof_lint_argv(void)
 {
     int failures = 0;
-    TEST("proof lint: a landing root runs every gate; a developer root keeps the fast subset") {
+    TEST("proof lint: landing and developer roots both run every gate") {
 #if defined(_WIN32)
         ASSERT(true);
 #else
@@ -4414,8 +4504,7 @@ static int test_ic_landing_proof_lint_argv(void)
         ASSERT(strcmp(argv[0], "make") == 0);
         ASSERT(strcmp(argv[1], "--no-print-directory") == 0);
         ASSERT(strcmp(argv[2], jobs) == 0);
-        /* The whole gate set, not the 27-gate fast subset: a red full-lint
-         * gate must fail the landing rather than reach main unseen. */
+        /* Publication coverage does not depend on a scheduling lock. */
         ASSERT(strcmp(argv[3], "lint") == 0);
         ASSERT(strcmp(argv[4], "check-windows-acceptance") == 0);
         ASSERT(argv[5] == NULL);
@@ -4432,14 +4521,16 @@ static int test_ic_landing_proof_lint_argv(void)
         targets = NULL;
         ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, argv, 8, &argc,
                                             &fallback_ms, &targets));
-        ASSERT(argc == 4);
-        /* A lane proof is not widened: it still pays the fast subset. */
-        ASSERT(strcmp(argv[3], "lint-fast") == 0);
-        ASSERT(argv[4] == NULL);
-        ASSERT(fallback_ms == PROOF_LINT_DEFAULT_MS);
-        ASSERT(fallback_ms < PROOF_LINT_LANDING_MS);
-        ASSERT(strcmp(targets, "lint-fast") == 0);
-        ASSERT(!zcl_dev_proof_test_lint_targets_are_full(targets));
+        ASSERT(argc == 5);
+        ASSERT(strcmp(argv[0], "make") == 0);
+        ASSERT(strcmp(argv[1], "--no-print-directory") == 0);
+        ASSERT(strcmp(argv[2], jobs) == 0);
+        ASSERT(strcmp(argv[3], "lint") == 0);
+        ASSERT(strcmp(argv[4], "check-windows-acceptance") == 0);
+        ASSERT(argv[5] == NULL);
+        ASSERT(fallback_ms == PROOF_LINT_LANDING_MS);
+        ASSERT(strcmp(targets, "lint check-windows-acceptance") == 0);
+        ASSERT(zcl_dev_proof_test_lint_targets_are_full(targets));
 
         ASSERT(test_rm_rf_recursive(land) == 0);
         ASSERT(test_rm_rf_recursive(dev_parent) == 0);
@@ -4561,8 +4652,8 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
         ASSERT(lane_argc == 3 + helper_count);
         for (size_t i = 0; i < helper_count; i++)
             ASSERT(ic_argv_has(lane, helpers[i]));
-        /* A lane proof runs lint-fast, which reads no built artifact, so it
-         * does not pay for the lint umbrella's build set. */
+        /* The helper's explicit no-lint shape remains bounded; ordinary
+         * publication proofs now request the full shape above. */
         ASSERT(!ic_argv_has(lane, "proof-lint-prebuild"));
 
         /* Refused, never truncated, when the caller has no room. */
@@ -4602,6 +4693,10 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
         lint_argc = 0;
         ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, lint_argv, 8, &lint_argc,
                                             &fallback_ms, &targets));
+        ASSERT(zcl_dev_proof_test_prefork_argv(
+            jobs, zcl_dev_proof_test_lint_targets_are_full(targets), lane,
+            PROOF_PREFORK_ARGV_CAP));
+        ASSERT(ic_argv_has(lane, "proof-lint-prebuild"));
         for (size_t i = 3; i < lint_argc; i++)
             ASSERT(!ic_argv_has(lane, lint_argv[i]));
 
@@ -5016,6 +5111,7 @@ int test_impact_composition(void)
     failures += test_ic_dev_proof_contract_is_direct();
     failures += test_ic_lint_helpers_exclude_onion_stress();
     failures += test_ic_dev_proof_receipt_admission();
+    failures += test_ic_dev_proof_receipt_requires_full_lint();
     failures += test_ic_dev_proof_child_action_identity();
     failures += test_ic_resident_proof_queue();
     failures += test_ic_proof_wait_reports_settled_failure();
@@ -5046,6 +5142,9 @@ int test_impact_composition(void)
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();
     failures += test_ic_landing_proof_lint_argv();
+#if !defined(_WIN32)
+    failures += test_ic_proof_environment_refuses_inherited_shortcuts();
+#endif
     failures += test_ic_proof_lint_and_test_share_admitted_executables();
     failures += test_ic_proof_prefork_builds_the_shared_targets();
     failures += test_ic_generation_hooks_configure_points_at_its_own_copy();

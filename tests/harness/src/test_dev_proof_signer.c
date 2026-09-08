@@ -69,9 +69,8 @@ static void dps_restore(void)
         unsetenv("XDG_STATE_HOME");
 }
 
-/* A structurally complete receipt with no dimensions selected: every fixed
- * root non-zero, every dimension trivially complete, so nothing but the
- * signature decides admission. */
+/* A structurally complete policy-4 receipt: mandatory lint is complete and
+ * every fixed root is non-zero, so signature tests reach signer admission. */
 static struct zcl_dev_acceptance_receipt_v1 dps_receipt(void)
 {
     struct zcl_dev_acceptance_receipt_v1 receipt = {0};
@@ -87,6 +86,11 @@ static struct zcl_dev_acceptance_receipt_v1 dps_receipt(void)
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         memset(roots[i], (int)i + 1, ZCL_DEV_PROOF_ROOT_BYTES);
+    struct zcl_dev_proof_dimension *lint =
+        &receipt.dimensions[ZCL_DEV_PROOF_LINT];
+    memset(lint->receipt_root, 0x31, sizeof(lint->receipt_root));
+    lint->selected = 1;
+    lint->ran = 1;
     receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
     receipt.complete = 1;
     receipt.created_unix = 1757030400u;
@@ -462,6 +466,27 @@ static bool dps_put_receipt(const char *dir, const char *local,
            dps_write(path, wire, len, 0600);
 }
 
+static bool dps_put_lint_child(const char *dir,
+                               struct zcl_dev_acceptance_receipt_v1 *receipt)
+{
+    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    struct zcl_dev_proof_dimension *lint =
+        &receipt->dimensions[ZCL_DEV_PROOF_LINT];
+    if (!zcl_dev_proof_child_receipt_create(ZCL_DEV_PROOF_LINT, lint, child) ||
+        !zcl_dev_proof_receipt_child_set_root(receipt, receipt->child_set_root))
+        return false;
+    char cmd[PATH_MAX], path[PATH_MAX], root[65];
+    int n = snprintf(cmd, sizeof(cmd),
+                     "mkdir -p '%s/.cache/zcl-dev-proof/children'", dir);
+    if (n <= 0 || (size_t)n >= sizeof(cmd) || system(cmd) != 0)
+        return false;
+    zcl_hex_encode(lint->receipt_root, sizeof(lint->receipt_root), root);
+    n = snprintf(path, sizeof(path),
+                 "%s/.cache/zcl-dev-proof/children/%s.child", dir, root);
+    return n > 0 && (size_t)n < sizeof(path) &&
+           dps_write(path, child, sizeof(child), 0600);
+}
+
 static int test_dps_hook_admission(void)
 {
     int failures = 0;
@@ -493,6 +518,7 @@ static int test_dps_hook_admission(void)
                                        &receipt.local_commit_len);
         (void)zcl_dev_proof_oid_decode(base, receipt.remote_base,
                                        &receipt.remote_base_len);
+        ASSERT(dps_put_lint_child(dir, &receipt));
         ASSERT(zcl_dev_proof_receipt_seal(&receipt));
         ASSERT(zcl_dev_proof_receipt_serialize(&receipt, wire));
         memset(seed, 0x33, sizeof(seed));
@@ -509,6 +535,19 @@ static int test_dps_hook_admission(void)
                                ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES));
         ASSERT(dps_run(dir, argv, tuple, out, sizeof(out)) != 0);
         ASSERT(strstr(out, "status=receipt_unsigned") != NULL);
+
+        /* A trusted signature still cannot supply missing mandatory lint.
+         * Recompute the child set and signature so only policy refuses it. */
+        struct zcl_dev_acceptance_receipt_v1 no_lint = receipt;
+        memset(&no_lint.dimensions[ZCL_DEV_PROOF_LINT], 0,
+               sizeof(no_lint.dimensions[ZCL_DEV_PROOF_LINT]));
+        ASSERT(zcl_dev_proof_receipt_child_set_root(
+            &no_lint, no_lint.child_set_root));
+        ASSERT(zcl_dev_proof_receipt_seal(&no_lint));
+        ASSERT(zcl_dev_proof_receipt_serialize(&no_lint, wire));
+        ASSERT(dps_put_receipt(dir, local, base, wire, sizeof(wire)));
+        ASSERT(dps_run(dir, argv, tuple, out, sizeof(out)) != 0);
+        ASSERT(strstr(out, "status=receipt_lint_required") != NULL);
 
         /* And the genuine article passes, so the refusals above are the
          * signature talking and not the fixture being wrong. */

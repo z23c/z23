@@ -91,8 +91,11 @@ struct zcl_dev_verdict_leaf_v1 {
  * capsule and to path-neutralised build-plan text, so two boxes with one
  * toolchain agree. Policy 3 binds the host-local plan mutation token to its
  * own source tree separately from the portable graph; copied checkouts have
- * different inode/timestamp tokens even when every build input agrees. */
-#define ZCL_DEV_PROOF_POLICY_VERSION 3u
+ * different inode/timestamp tokens even when every build input agrees.
+ * Policy 4 requires full lint for every publishable proof, including an
+ * inventory-only change. Policy 3 could admit the fast subset under the
+ * same dimension identity, so its receipts cannot establish this claim. */
+#define ZCL_DEV_PROOF_POLICY_VERSION 4u
 
 enum zcl_dev_proof_dimension_id {
     ZCL_DEV_PROOF_GENERATED = 0,

@@ -126,7 +126,7 @@ static const char *proof_dimension_operation(
     static const char *const operations[ZCL_DEV_PROOF_DIMENSIONS] = {
         "capability-inventory-generated",
         "build-only",
-        "lint-fast",
+        "lint-full",
         "test-exact-cache-proof-contracts",
     };
     return dimension >= ZCL_DEV_PROOF_GENERATED &&
@@ -1839,6 +1839,19 @@ static bool dp_path_inside_root(const char *root, const char *path)
  * checkout when its original spelling is recreated in the generation.
  * Resolving prefixes also accounts for directory aliases changing the depth
  * at which a subsequent `..` is interpreted. */
+static bool dp_link_directory_suffix(const char *path, const char *link_text)
+{
+    size_t len = strlen(link_text);
+    if (len == 0 || link_text[len - 1] != '/') return true;
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    if (!S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return false;
+    }
+    return true;
+}
+
 static bool dp_link_prefixes_inside(const char *source, const char *link_text,
                                     const char *source_root)
 {
@@ -1861,8 +1874,9 @@ static bool dp_link_prefixes_inside(const char *source, const char *link_text,
         }
         part += len;
     }
-    /* The original spelling also carries a terminal slash's directory
-     * requirement, which component traversal alone would discard. */
+    /* Check the suffix explicitly: Darwin realpath can normalize away a
+     * symlink target's trailing slash instead of requiring a directory. */
+    if (!dp_link_directory_suffix(prefix, link_text)) return false;
     if (!realpath(source, resolved)) return false;
     if (!dp_path_inside_root(source_root, resolved)) {
         errno = EACCES;
@@ -4440,52 +4454,27 @@ static struct zcl_dev_proof_budget proof_step_budget(
 #define PROOF_BUNDLE_DEFAULT_MS 1800000
 #define PROOF_LINT_ARGV_CAP 6u
 
-static bool proof_root_is_landing(const char *root)
-{
-#if defined(_WIN32)
-    (void)root;
-    return false;
-#else
-    char lock[PATH_MAX];
-    if (!zcl_devloop_landing_queue_lock_path(root, lock, sizeof(lock)))
-        return false;
-    return access(lock, F_OK) == 0;
-#endif
-}
-
-/* Fill the lint-dimension make argv. A landing root (sibling queue.lock)
- * runs the full `lint` target -- every gate, not the 27-gate fast subset --
- * so a red full-lint gate fails the landing instead of reaching main
- * unseen; check-windows-acceptance rides the same invocation, where make
- * runs it once whether or not the umbrella already names it. Every other
- * proof stays on lint-fast: a lane proof pays the fast subset, a landing
- * pays the whole gate set. `jobs` is stored by pointer and must outlive
- * argv. */
+/* Every exact receipt can authorize publication, regardless of the scratch
+ * directory that requested it. Run the same full lint contract everywhere;
+ * lint-fast remains the separate edit-feedback target. Make coalesces the
+ * Windows acceptance target already present in the umbrella. `jobs` must
+ * outlive argv. */
 static bool proof_lint_prepare(const char *root, const char *jobs,
                                const char **argv, size_t argv_cap,
                                int64_t *fallback_ms, const char **targets)
 {
-    bool landing;
+    (void)root;
     if (!jobs || !*jobs || !argv || argv_cap < PROOF_LINT_ARGV_CAP ||
         !fallback_ms || !targets)
         return false;
-    landing = proof_root_is_landing(root);
     argv[0] = "make";
     argv[1] = "--no-print-directory";
     argv[2] = jobs;
-    if (landing) {
-        argv[3] = "lint";
-        argv[4] = "check-windows-acceptance";
-        argv[5] = NULL;
-        *fallback_ms = PROOF_LINT_LANDING_MS;
-        *targets = "lint check-windows-acceptance";
-    } else {
-        argv[3] = "lint-fast";
-        argv[4] = NULL;
-        argv[5] = NULL;
-        *fallback_ms = PROOF_LINT_DEFAULT_MS;
-        *targets = "lint-fast";
-    }
+    argv[3] = "lint";
+    argv[4] = "check-windows-acceptance";
+    argv[5] = NULL;
+    *fallback_ms = PROOF_LINT_LANDING_MS;
+    *targets = "lint check-windows-acceptance";
     return true;
 }
 
@@ -4498,6 +4487,21 @@ static bool proof_lint_targets_are_full(const char *targets)
 {
     return targets && strncmp(targets, "lint", 4) == 0 &&
            (targets[4] == '\0' || targets[4] == ' ');
+}
+
+/* This runs in the isolated proof worker before any generation build. An
+ * interactive Make dry run, replacement gate list, diagnostic dump, or
+ * unsigned lint cache must never become a signed publication observation. */
+static bool proof_prepare_environment(void)
+{
+    static const char *const unset_names[] = {
+        "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
+        "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
+        "ZCL_LINT_MODE",
+    };
+    for (size_t i = 0; i < sizeof(unset_names) / sizeof(unset_names[0]); i++)
+        if (unsetenv(unset_names[i]) != 0) return false;
+    return setenv("ZCL_LINT_CACHE", "0", 1) == 0;
 }
 
 /* Fill the pre-fork make argv: everything EITHER dimension can build, built
@@ -4962,6 +4966,11 @@ bool zcl_dev_proof_test_generation_hooks_configure(const char *generation,
 bool zcl_dev_proof_test_lint_targets_are_full(const char *targets)
 {
     return proof_lint_targets_are_full(targets);
+}
+
+bool zcl_dev_proof_test_prepare_environment(void)
+{
+    return proof_prepare_environment();
 }
 #endif
 
@@ -5827,7 +5836,7 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
     dims[ZCL_DEV_PROOF_GENERATED].selected = w->inventory_only ? 1 : 0;
     bool compile_selected = !w->inventory_only && !w->plan.docs_only;
     dims[ZCL_DEV_PROOF_COMPILE].selected = compile_selected ? 1 : 0;
-    dims[ZCL_DEV_PROOF_LINT].selected = w->inventory_only ? 0 : 1;
+    dims[ZCL_DEV_PROOF_LINT].selected = 1;
     uint32_t test_count = 0;
     if (!build_test_selector(&w->plan, w->inventory_only, w->groups,
                              sizeof(w->groups), &test_count)) {
@@ -5915,8 +5924,8 @@ static bool dp_worker_lint_plan(struct dp_worker *w,
                                 struct zcl_dev_proof_dimension *test,
                                 char *why, size_t why_len)
 {
-    int64_t lint_fallback_ms = PROOF_LINT_DEFAULT_MS;
-    w->lint_targets = "lint-fast";
+    int64_t lint_fallback_ms = PROOF_LINT_LANDING_MS;
+    w->lint_targets = "lint check-windows-acceptance";
     if (!proof_lint_prepare(w->paths->root, w->make_jobs, w->lint_argv,
                             PROOF_LINT_ARGV_CAP, &lint_fallback_ms,
                             &w->lint_targets)) {
@@ -5932,8 +5941,8 @@ static bool dp_worker_lint_plan(struct dp_worker *w,
     /* Only the full gate set reads built artifacts (check-capability-
      * closure walks the undefined symbols of build/bin/z23-dev, and the
      * `lint:` umbrella names it and the confined package verifier as its
-     * own prerequisites), so only it needs the admitted executables. A
-     * lane proof on lint-fast pays none of this. */
+     * own prerequisites), so every publishable proof needs the admitted
+     * executables, including a proof with no selected tests. */
     w->lint_reads_artifacts =
         lint->selected && proof_lint_targets_are_full(w->lint_targets);
     return true;
@@ -6079,11 +6088,6 @@ static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
             w->lint_reads_artifacts, w->binary, w->generation_binary,
             w->admitted, w->depfile_root, why, why_len);
     if (!inputs_ready) {
-        if (!test_selected) {
-            if (!why || !why[0])
-                proof_why(why, why_len, "proof_lint_admission_failed");
-            return false;
-        }
         if (!dp_worker_bundle(w, test_selected, why, why_len)) return false;
     }
     /* The one build both dimensions share. Nothing after this links
@@ -6320,6 +6324,10 @@ static bool proof_worker(const struct proof_paths *paths,
                          struct platform_ram_scratch_lease *ram_lease,
                          char *why, size_t why_len)
 {
+    if (!proof_prepare_environment()) {
+        proof_why(why, why_len, "proof_execution_environment_unavailable");
+        return false;
+    }
     int64_t started_us = platform_time_monotonic_us();
     struct proof_phase_clock phases;
     proof_phase_begin(&phases, paths);

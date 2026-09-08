@@ -596,11 +596,15 @@ compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
 tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
 legacy parity oracle; it is not called by the installed push hook.
 
-The lint dimension's scope depends on what the proof is for. A landing root
--- one with a sibling `queue.lock` -- runs the whole gate set, `make lint`
-plus `check-windows-acceptance`, so a gate the fast subset excludes cannot
-reach main unseen. Every other proof runs `make lint-fast`, which keeps a
-lane's own proof cheap. The generation is handed the built artifacts the
+Every publishable proof runs the whole lint gate set, `make lint` plus
+`check-windows-acceptance`, including inventory-only changes. A scratch
+directory's location or `queue.lock` cannot narrow publication evidence.
+Policy 4 refuses earlier receipts, which could cover only the fast subset,
+and names missing mandatory lint as `receipt_lint_required`. The worker
+clears inherited Make execution overrides and lint cache diagnostics, and
+forces fresh lint using each gate's declared policy before building a generation.
+`make lint-fast` remains available for feedback while editing. The generation
+is handed the built artifacts the
 full gate set reads (the confined package verifier, `build/bin/z23-dev`,
 and the `build/bin/zclassic23` alias) through the same content-checked
 admission the test dimension uses, so it judges the same artifacts the

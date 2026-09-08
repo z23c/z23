@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "gate_package_capabilities_priv.h"
 
 enum { PCS_BUF = 1 << 16 };
