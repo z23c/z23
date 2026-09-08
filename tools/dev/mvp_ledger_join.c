@@ -166,6 +166,15 @@ static void mvl_join_direct(const struct mvl_plan *plan,
         for (size_t k = 0; k < agents->count; k++) {
             const struct mvl_agent *a = &agents->rows[k];
 
+            /* Assemblers and design workflows are attributed ONLY by their
+             * split below. Letting them also match a loop by lane name
+             * would charge the same agent to the same loop twice, which is
+             * exactly what happens when a design row's loop= and evidence=
+             * both name the workflow. */
+            if (strcmp(a->kind, "design") == 0)
+                continue;
+            if (strcmp(a->kind, "assemble") == 0)
+                continue;
             if (strcmp(a->lane, lane) != 0)
                 continue;
             mvl_add_share(&joins[i], a, 1);

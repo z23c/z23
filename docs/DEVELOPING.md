@@ -963,3 +963,58 @@ Escalation is appropriate for consensus or custody risk, destructive
 production action, irreconcilable authority ambiguity, a missing human product
 decision, an assertion that would need weakening, or genuine completion of the
 mission. Otherwise continue through the ordered queue.
+
+## Measuring the MVP experiment
+
+The 144-loop plan of record is also an experiment: what does it cost, in wall
+time and tokens, to take z23 from that plan to MVP? `build/bin/z23-mvp-ledger`
+(sources `tools/dev/mvp_ledger*.c`, test group `mvp_ledger`) answers it from
+evidence rather than from memory. It is built by `make dev-bin`.
+
+```text
+z23-mvp-ledger agents   --session <dir> --out <dir>
+z23-mvp-ledger loops    --plan <file>  --out <dir> [--trains <dir>] [--ancestry <file>]
+z23-mvp-ledger snapshot --plan <file>  --out <dir> [--origin-main <sha>] [--note <text>]
+z23-mvp-ledger kpi      --plan <file>  --out <dir> --since <t0> [--scratch <dir>]
+z23-mvp-ledger progress --plan <file> [--session <dir>]
+```
+
+- `agents` reads every `<session>/subagents/agent-*.jsonl`, every
+  `<session>/subagents/workflows/*/agent-*.jsonl`, and the orchestrator's own
+  `<session>.jsonl`, and writes `agents.tsv`: one row per agent with its lane,
+  kind, model, wall, turns, tool uses, and the output / thinking / input /
+  cache-creation / cache-read tokens it spent.
+- `loops` joins those agents to the plan's loops by lane name and writes
+  `loops.tsv`. A train assembler is split evenly across the loops whose lane
+  is on that train (`--trains` names the directory holding
+  `trainN/late_picks.txt`); a design workflow is split across the loops whose
+  `evidence=` names it.
+- `snapshot` and `kpi` each append one row to `snapshots.tsv` / `kpi.tsv`.
+  The KPI is verified MVP progress per token: base loops a verifier landed
+  after t0, over the TCU the whole system spent.
+- `progress` prints the milestone bars. With `--session` it adds a cost line
+  and the KPI line.
+
+Three things to know before reading a number it prints:
+
+1. **Ancestry is an input, not a subprocess.** `landed` is decided against a
+   file you produce with one `git rev-list origin/main`, passed as
+   `--ancestry`. Without it the column is `-`, never a guessed 0. A plan row
+   whose `evidence=` is a test-group name, a document path or a commit range
+   is therefore not landed as far as this tool is concerned, whatever its
+   hand-set `state=` says.
+2. **A ledger's header is a contract.** Appending to a `snapshots.tsv` or
+   `kpi.tsv` whose first line is not this build's header is refused, because
+   every earlier row would otherwise be read under the wrong column names.
+   Migrate the file, do not force the append.
+3. **`tokens_out` is what the transcript recorded.** Claude Code writes the
+   usage snapshot taken when a message starts, so `tokens_out` is a lower
+   bound on generated tokens; `harness_tokens` beside it is the harness's own
+   per-agent accounting (the difference between the first and last
+   `<total_tokens>` reminder it wrote), which is the quantity a task
+   notification reports.
+
+Every refusal names the file, the line number and the reason
+(`mvl_bad_json`, `mvl_line_too_long`, `mvl_plan_field`, `mvl_tsv_header`,
+`mvl_overflow`, …). Line length is capped and every table is a fixed size, so
+no input can grow the reader without bound.

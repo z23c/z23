@@ -820,6 +820,8 @@ int test_atomic_commit_ordering(void);
 int test_shielded_spend_slice(void);
 int test_coldimport_restart_fragility(void);
 int test_territory(void);
+/* The MVP experiment ledger (tests/harness/src/test_mvp_ledger.c). */
+int test_mvp_ledger(void);
 
 /* Spec-based user story tests (one per feature area) */
 int spec_wallet_dashboard(void);
