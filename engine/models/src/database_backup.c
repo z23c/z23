@@ -51,10 +51,10 @@ static bool backup_has_room(uint64_t available_bytes, uint64_t db_size_bytes)
 }
 
 /* Refuses (LOG_FAIL -> false) unless at least a database-size-plus-margin
- * of free space sits beside ndb->path. Split out of
- * node_db_backup_before_breaking_migration() to keep that caller's own
- * cyclomatic complexity low: every branch here is the space-refusal path,
- * none of it is the actual copy. */
+ * of free space sits beside ndb->path. Kept in its own function so that
+ * node_db_backup_before_breaking_migration()'s own cyclomatic complexity
+ * stays low: every branch here is the space-refusal path, none of it is
+ * the actual copy. */
 static bool backup_check_space(struct node_db *ndb, int old_schema_version,
                                 uint64_t *out_db_size)
 {
@@ -160,7 +160,7 @@ bool node_db_backup_before_breaking_migration(struct node_db *ndb,
 
     uint64_t db_size = 0;
     if (!backup_check_space(ndb, old_schema_version, &db_size))
-        return false;
+        return false; // raw-return-ok:backup_check_space-already-logged-via-log_fail
 
     char bak_path[1200];
     int n = snprintf(bak_path, sizeof(bak_path), "%s.schema%d.bak",
@@ -176,7 +176,7 @@ bool node_db_backup_before_breaking_migration(struct node_db *ndb,
     (void)remove(tmp_path); /* clear any stale temp from a prior crash */
 
     if (!backup_copy_to_tmp_and_rename(ndb, bak_path, tmp_path))
-        return false;
+        return false; // raw-return-ok:backup_copy_to_tmp_and_rename-already-logged-via-log_warn
 
     LOG_WARN("db", "migrate: wrote pre-migration backup %s (schema v%d, "
              "%llu bytes) before applying a breaking schema step",

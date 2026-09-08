@@ -275,10 +275,11 @@ int node_db_schema_compat_floor(struct node_db *ndb)
     return floor;
 }
 
-/* Campaign C3 schema-downgrade / compat-floor recheck, split out of
- * node_db_migrate() to keep that already-pinned function's own cyclomatic
- * complexity from growing. Mirrors (and is independently re-derived from
- * the same node_state keys as) the open-time preflight in database.c, which
+/* Schema-downgrade / compat-floor recheck that node_db_migrate() runs
+ * before applying any migration block, kept in its own function so that
+ * caller's own cyclomatic complexity stays at a single branch on the
+ * result. Mirrors (and is independently re-derived from the same
+ * node_state keys as) the open-time preflight in database.c, which
  * already decided whether to let this open proceed at all — a runtime
  * reopen does not go through that preflight a second time, so this recheck
  * is the only gate it sees.
