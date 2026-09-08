@@ -257,6 +257,529 @@ static uint16_t rfs_free_port(void)
     return port;
 }
 
+/* Reset every slot in sim[0..cap] (and held[0..cap] when given) to "no fd
+ * yet". Shared init step for every case below, so each case's own
+ * complexity is just its distinctive admit/reclaim sequence. */
+static void rfs_reset_slots(size_t cap, struct sim_client *sim, int *held)
+{
+    for (size_t i = 0; i <= cap; i++) {
+        sim[i].client = sim[i].server = -1;
+        if (held)
+            held[i] = -1;
+    }
+}
+
+/* Open and admit `count` live clients into sim[0..count), recording each
+ * server fd in held[] when given and sending a request first when
+ * send_request is set. Stops and returns false on the first failure. */
+static bool rfs_fill_admit(size_t count, struct sim_client *sim, int *held,
+                           bool send_request)
+{
+    bool ok = true;
+    for (size_t i = 0; i < count && ok; i++) {
+        if (!sim_open(&sim[i])) { ok = false; break; }
+        if (send_request)
+            sim_send_request(&sim[i]);
+        if (held)
+            held[i] = sim[i].server;
+        ok = rpc_http_test_queue_admit(sim[i].server);
+        sim[i].server = -1;   /* the queue owns it now */
+    }
+    return ok;
+}
+
+/* Close every simulated client in sim[0..cap]. */
+static void rfs_close_slots(size_t cap, struct sim_client *sim)
+{
+    for (size_t i = 0; i <= cap; i++)
+        sim_close(&sim[i]);
+}
+
+/* ── A full queue of LIVE clients is honest backpressure ──── */
+static bool rfs_case_full_queue_refuses(size_t cap, struct rpc_http_queue_stats *st)
+{
+    struct sim_client sim[SIM_MAX];
+    bool ok = true;
+
+    printf("frontdoor full queue of live clients refuses... ");
+
+    rpc_http_test_queue_reset(-1);
+    rfs_reset_slots(cap, sim, NULL);
+    ok = rfs_fill_admit(cap, sim, NULL, true);
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->depth == cap && st->peak_depth == cap;
+
+    /* Nothing is reclaimable: every peer is connected and inside
+     * the residency deadline. Refusing here is correct, and the
+     * refused fd stays the caller's to close. */
+    ok = ok && sim_open(&sim[cap]);
+    ok = ok && rpc_http_test_queue_admit(sim[cap].server) == false;
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->rejected_busy == 1;
+    ok = ok && st->reclaimed_hangup == 0 && st->reclaimed_stale == 0;
+    ok = ok && st->depth == cap;          /* never overfills */
+
+    rpc_http_test_queue_reset(-1);
+    rfs_close_slots(cap, sim);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+
+/* ── A hung-up client must not hold a slot ─────────────────── */
+/* Assert the reclaim shape shared by rfs_case_reclaims_hangup: the first
+ * `gone` held fds are CLOSED (not merely unlinked), and the queue's next
+ * arrival-order entry is the oldest client still connected. */
+static bool rfs_check_hangup_reclaim(const int *held, size_t gone)
+{
+    bool ok = true;
+    for (size_t i = 0; i < gone; i++)
+        ok = ok && fd_is_closed(held[i]);
+
+    int taken = rpc_http_test_queue_take();
+    ok = ok && taken == held[gone];
+    if (taken >= 0)
+        close(taken);
+    return ok;
+}
+
+static bool rfs_case_reclaims_hangup(size_t cap, struct rpc_http_queue_stats *st)
+{
+    struct sim_client sim[SIM_MAX];
+    int held[SIM_MAX];
+    size_t gone = cap / 2;
+    bool ok;
+
+    printf("frontdoor reclaims slots from clients that hung up... ");
+
+    rpc_http_test_queue_reset(-1);
+    rfs_reset_slots(cap, sim, held);
+    ok = rfs_fill_admit(cap, sim, held, false);
+
+    /* The first `gone` clients give up and close, sending nothing.
+     * Their server ends are now readable-at-EOF: unservable. Before
+     * the fix they kept their slots forever. */
+    for (size_t i = 0; i < gone; i++)
+        sim_hangup(&sim[i]);
+
+    ok = ok && sim_open(&sim[cap]);
+    sim_send_request(&sim[cap]);
+    held[cap] = sim[cap].server;
+    ok = ok && rpc_http_test_queue_admit(sim[cap].server);
+    sim[cap].server = -1;
+
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->reclaimed_hangup == gone;
+    ok = ok && st->reclaimed_stale == 0;
+    ok = ok && st->depth == cap - gone + 1;
+    ok = ok && rfs_check_hangup_reclaim(held, gone);
+
+    rpc_http_test_queue_reset(-1);
+    rfs_close_slots(cap, sim);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+
+/* ── A connected client that waited past the deadline ──────── */
+/* Every held fd closed: the age-based reclaim actually closed them, not
+ * merely unlinked them from the queue. */
+static bool rfs_all_closed(const int *held, size_t count)
+{
+    bool ok = true;
+    for (size_t i = 0; i < count; i++)
+        ok = ok && fd_is_closed(held[i]);
+    return ok;
+}
+
+static bool rfs_case_reclaims_stale(size_t cap, struct rpc_http_queue_stats *st)
+{
+    struct sim_client sim[SIM_MAX];
+    int held[SIM_MAX];
+    bool ok;
+
+    printf("frontdoor reclaims slots past the residency deadline... ");
+
+    /* Deadline 2 ms, then wait past it. Each client stays
+     * CONNECTED with an unread request pending, so the hang-up
+     * probe deliberately cannot fire — this proves the age rule
+     * alone is what reopens the door. (0 is not "instantly stale":
+     * it is the documented way to DISABLE age-based reclaim, same
+     * as ZCL_RPC_TIMEOUT_MS=0 disables the request watchdog.) */
+    rpc_http_test_queue_reset(2);
+    rfs_reset_slots(cap, sim, held);
+    ok = rfs_fill_admit(cap, sim, held, true);
+    rpc_http_test_queue_stats(st);
+    /* An expired deadline must not evict on the way IN — the queue
+     * reclaims only when it would otherwise report itself full. */
+    ok = ok && st->depth == cap && st->reclaimed_stale == 0;
+
+    /* Put every queued entry safely past the 2 ms deadline. */
+    (void)poll(NULL, 0, 25);
+
+    ok = ok && sim_open(&sim[cap]);
+    sim_send_request(&sim[cap]);
+    ok = ok && rpc_http_test_queue_admit(sim[cap].server);
+    sim[cap].server = -1;
+
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->reclaimed_stale == cap;
+    ok = ok && st->reclaimed_hangup == 0;
+    ok = ok && st->depth == 1;
+    ok = ok && rfs_all_closed(held, cap);
+
+    rpc_http_test_queue_reset(-1);
+    rfs_close_slots(cap, sim);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+
+/* ── THE INVARIANT: no run of hang-ups bricks the door ─────── */
+static bool rfs_case_survives_hangup_run(size_t cap, struct rpc_http_queue_stats *st)
+{
+    size_t rounds = cap * 4;
+    bool ok = true;
+
+    printf("frontdoor survives a long run of clients that hang up... ");
+
+    rpc_http_test_queue_reset(-1);
+    for (size_t i = 0; i < rounds; i++) {
+        struct sim_client c;
+        if (!sim_open(&c)) { ok = false; break; }
+
+        if (!rpc_http_test_queue_admit(c.server)) {
+            /* Refused. Every queued peer is a client that already
+             * hung up, so the queue owns nothing servable and MUST
+             * be able to take this one. Against the pre-fix ratchet
+             * this failed on round cap and every round after it,
+             * for the life of the process. */
+            if (!rpc_http_test_queue_admit(c.server)) {
+                ok = false;
+                sim_close(&c);
+                break;
+            }
+        }
+        c.server = -1;        /* the queue owns it now */
+        sim_hangup(&c);       /* the client gives up immediately */
+    }
+
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->admitted == (uint64_t)rounds;
+    ok = ok && st->depth <= cap;
+    /* The run could only get this far by reclaiming. */
+    ok = ok && st->reclaimed_hangup > 0;
+
+    rpc_http_test_queue_reset(-1);
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->depth == 0;
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+
+/* ── The queue owns nothing after it is emptied ────────────── */
+static bool rfs_case_no_fd_leak_on_empty(size_t cap, struct rpc_http_queue_stats *st)
+{
+    struct sim_client sim[SIM_MAX];
+    int held[SIM_MAX];
+    bool ok = true;
+
+    printf("frontdoor queue leaves no fd behind when emptied... ");
+
+    rpc_http_test_queue_reset(-1);
+    for (size_t i = 0; i < cap; i++) {
+        sim[i].client = sim[i].server = -1;
+        held[i] = -1;
+    }
+
+    for (size_t i = 0; i < cap && ok; i++) {
+        if (!sim_open(&sim[i])) { ok = false; break; }
+        sim_send_request(&sim[i]);
+        held[i] = sim[i].server;
+        ok = rpc_http_test_queue_admit(sim[i].server);
+        sim[i].server = -1;
+    }
+
+    rpc_http_test_queue_reset(-1);
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->depth == 0 && st->admitted == 0;
+    for (size_t i = 0; i < cap; i++)
+        ok = ok && fd_is_closed(held[i]);
+
+    for (size_t i = 0; i < cap; i++)
+        sim_close(&sim[i]);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+
+#if !defined(_WIN32)
+/* ── A partial request followed by close must not hold a slot ──
+ *
+ * The live brick: dozens of TCP sockets in CLOSE-WAIT each holding
+ * ~250 unread bytes. A close() with unread data pending reports
+ * POLLIN alone (no POLLHUP until the bytes are drained), and the old
+ * hang-up probe treated "peek returns data" as "peer is alive" — so a
+ * queue full of such entries never shed one and every later client got
+ * an instant 503 while workers idled. socketpair(2) cannot reproduce
+ * this (it reports POLLHUP); only real TCP can. */
+/* One TCP client sends a partial request and half-closes: the server end
+ * holds unread bytes plus FIN, the CLOSE-WAIT shape from the incident.
+ * Waits out loopback delivery so the reclaim below sees the steady state. */
+static bool rfs_open_dead_partial(struct sim_client *dead, int *held_dead)
+{
+    bool ok = tcp_pair_open(&dead->client, &dead->server);
+    sim_send_request(dead);
+    *held_dead = dead->server;
+    ok = ok && rpc_http_test_queue_admit(dead->server);
+    dead->server = -1;   /* the queue owns it now */
+    sim_hangup(dead);    /* FIN joins the unread bytes */
+    (void)poll(NULL, 0, 100);
+    return ok;
+}
+
+/* Take the next queue entry and assert it matches `expect` (arrival order
+ * survives compaction/reclaim); closes whatever fd was actually taken. */
+static bool rfs_take_matches(int expect)
+{
+    int taken = rpc_http_test_queue_take();
+    bool ok = taken == expect;
+    if (taken >= 0)
+        close(taken);
+    return ok;
+}
+
+static bool rfs_case_reclaims_partial_close(size_t cap, struct rpc_http_queue_stats *st)
+{
+    struct sim_client dead = { .client = -1, .server = -1 };
+    struct sim_client sim[SIM_MAX];
+    int held[SIM_MAX];
+    int held_dead = -1;
+    bool ok;
+
+    printf("frontdoor reclaims a partial request followed by close... ");
+
+    rpc_http_test_queue_reset(-1);
+    rfs_reset_slots(cap - 1, sim, held);
+    ok = rfs_open_dead_partial(&dead, &held_dead);
+
+    /* Fill the rest of the queue with live clients, then one more: the
+     * dead partial is reclaimable, so the door is not full. Before the
+     * fix this refused with rejected_busy (the count never
+     * self-corrected). */
+    ok = ok && rfs_fill_admit(cap - 1, sim, held, true);
+    ok = ok && sim_open(&sim[cap - 1]);
+    sim_send_request(&sim[cap - 1]);
+    held[cap - 1] = sim[cap - 1].server;
+    bool admitted = rpc_http_test_queue_admit(sim[cap - 1].server);
+    if (admitted)
+        sim[cap - 1].server = -1;
+    ok = ok && admitted;
+
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->reclaimed_hangup == 1;
+    ok = ok && st->depth == cap;
+    ok = ok && st->rejected_busy == 0;
+    ok = ok && fd_is_closed(held_dead); /* reclaimed means CLOSED */
+    ok = ok && rfs_take_matches(held[0]);
+
+    rpc_http_test_queue_reset(-1);
+    sim_close(&dead);
+    rfs_close_slots(cap - 1, sim);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+
+/* ── N partial-then-close clients never trip busy ──────────── */
+static bool rfs_case_survives_partial_close_run(size_t cap, struct rpc_http_queue_stats *st)
+{
+    size_t rounds = cap * 2;
+    bool ok = true;
+
+    printf("frontdoor survives a run of partial-then-close TCP clients... ");
+
+    rpc_http_test_queue_reset(-1);
+    for (size_t i = 0; i < rounds; i++) {
+        struct sim_client c = { .client = -1, .server = -1 };
+        if (!tcp_pair_open(&c.client, &c.server)) { ok = false; break; }
+        sim_send_request(&c);
+        sim_hangup(&c);   /* unread bytes plus FIN on the server end */
+        if (i + 1 == cap)
+            (void)poll(NULL, 0, 100); /* FINs arrive before first reclaim */
+        if (!rpc_http_test_queue_admit(c.server)) {
+            /* Every queued peer already hung up: refusing here is the
+             * one-way ratchet the incident bricked on. */
+            ok = false;
+            sim_close(&c);
+            break;
+        }
+        c.server = -1;  /* the queue owns it now */
+    }
+
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->admitted == (uint64_t)rounds;
+    ok = ok && st->rejected_busy == 0;
+    ok = ok && st->depth <= cap;
+    ok = ok && st->reclaimed_hangup > 0;
+
+    rpc_http_test_queue_reset(-1);
+    rpc_http_test_queue_stats(st);
+    ok = ok && st->depth == 0;
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+#endif /* !_WIN32 */
+
+/* ── THE WIRE TRUTH: half-closed loopback clients drain ────
+ *
+ * The cases above drive the admission queue over socketpairs with
+ * full close(). This one runs the REAL server on 127.0.0.1, opens N
+ * TCP connections, and half-closes every one of them — FIN sent,
+ * our end still open — which is the exact CLOSE-WAIT shape from the
+ * incident. Half the clients die mid-request (partial bytes, then
+ * FIN); half go silent after connect (then FIN). The server's
+ * connection count must return to zero inside the idle budget with
+ * no further admission to trigger it, and the door must still
+ * answer a fresh client afterwards. Scratch datadir only (repo
+ * test-tmp convention, like test_rpc.c); no live node, no live
+ * datadir, no /tmp. */
+#define RFS_HALFCLOSE_N 16
+
+static bool rfs_halfclose_probe_ok(const struct sockaddr_in *srv)
+{
+    platform_socket_t probe = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                    true, false);
+    bool ok = probe != PLATFORM_SOCKET_INVALID;
+    if (ok && platform_socket_connect(probe, (const struct sockaddr *)srv,
+                                      sizeof(*srv)) == 0) {
+        static const char req[] =
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Content-Length: 2\r\n\r\n{}";
+        ok = ok && platform_socket_send(probe, req, sizeof(req) - 1) > 0;
+        char rbuf[4096];
+        int n = platform_socket_receive(probe, rbuf, sizeof(rbuf) - 1);
+        ok = ok && n > 0;
+        if (ok) {
+            rbuf[n] = '\0';
+            ok = ok && strstr(rbuf, "401") != NULL;
+        }
+    } else {
+        ok = false;
+    }
+    if (probe != PLATFORM_SOCKET_INVALID)
+        platform_socket_close(probe);
+    return ok;
+}
+
+static bool rfs_halfclose_open_clients(platform_socket_t *cli,
+                                       const struct sockaddr_in *srv)
+{
+    static const char partial[] =
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+    bool ok = true;
+
+    for (size_t i = 0; i < RFS_HALFCLOSE_N; i++)
+        cli[i] = PLATFORM_SOCKET_INVALID;
+
+    for (size_t i = 0; i < RFS_HALFCLOSE_N && ok; i++) {
+        cli[i] = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+        ok = ok && cli[i] != PLATFORM_SOCKET_INVALID;
+        if (!ok)
+            break;
+        ok = ok && platform_socket_connect(
+            cli[i], (const struct sockaddr *)srv, sizeof(*srv)) == 0;
+        if (!ok)
+            break;
+        if (i < RFS_HALFCLOSE_N / 2) {
+            /* Mid-request half-close: partial bytes, then FIN. */
+            ok = ok && platform_socket_send(cli[i], partial,
+                sizeof(partial) - 1) > 0;
+        }
+        /* else: silent after connect, then FIN. */
+        rfs_half_close(cli[i]);
+    }
+    return ok;
+}
+
+/* The listener must actually ADMIT all N first: without this wait a slow
+ * accept loop could leave every connection in the listen backlog, depth
+ * would read 0 without proving anything, and the case would be vacuous. */
+static bool rfs_wait_admitted_all(struct rpc_http_queue_stats *hst, size_t n)
+{
+    int waited_ms = 0;
+    while (waited_ms < 5000) {
+        rpc_http_test_queue_stats(hst);
+        if (hst->admitted >= n)
+            return true;
+        rfs_sleep_ms(25);
+        waited_ms += 25;
+    }
+    rpc_http_test_queue_stats(hst);
+    return hst->admitted >= n;
+}
+
+/* Workers must pick up and close every one: the 5 s socket deadlines plus
+ * the peer-gone pre-check bound each connection, and the 10 s queue
+ * residency budget bounds the stragglers. Poll a little past that budget. */
+static bool rfs_wait_depth_zero(struct rpc_http_queue_stats *hst)
+{
+    int waited_ms = 0;
+    while (waited_ms < 12000) {
+        rpc_http_test_queue_stats(hst);
+        if (hst->depth == 0)
+            return true;
+        rfs_sleep_ms(25);
+        waited_ms += 25;
+    }
+    rpc_http_test_queue_stats(hst);
+    return hst->depth == 0;
+}
+
+static bool rfs_halfclose_run(const struct sockaddr_in *srv)
+{
+    platform_socket_t cli[RFS_HALFCLOSE_N];
+    struct rpc_http_queue_stats hst;
+    memset(&hst, 0, sizeof(hst));
+
+    bool ok = rfs_halfclose_open_clients(cli, srv);
+    ok = ok && rfs_wait_admitted_all(&hst, RFS_HALFCLOSE_N);
+    ok = ok && rfs_wait_depth_zero(&hst);
+    /* The door is still alive: a fresh client gets an answer (401 without
+     * credentials), not a hang-up or a 503. */
+    ok = ok && rfs_halfclose_probe_ok(srv);
+
+    for (size_t i = 0; i < RFS_HALFCLOSE_N; i++) {
+        if (cli[i] != PLATFORM_SOCKET_INVALID)
+            platform_socket_close(cli[i]);
+    }
+    return ok;
+}
+
+static bool rfs_case_drains_halfclosed_loopback(void)
+{
+    bool ok;
+    char rpcdir[512];
+
+    printf("frontdoor drains half-closed loopback connections... ");
+
+    test_make_tmpdir(rpcdir, sizeof(rpcdir), "rpc_frontdoor", "halfclose");
+    uint16_t port = rfs_free_port();
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    bool started = port != 0 &&
+        rpc_http_start(&tbl, port, NULL, NULL, rpcdir);
+    ok = started;
+    if (started) {
+        struct sockaddr_in srv;
+        memset(&srv, 0, sizeof(srv));
+        srv.sin_family = AF_INET;
+        srv.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        srv.sin_port = htons(port);
+        ok = rfs_halfclose_run(&srv);
+        rpc_http_stop();
+    }
+    test_rm_rf(rpcdir);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+#undef RFS_HALFCLOSE_N
+
 int test_rpc_frontdoor_slots(void)
 {
     int failures = 0;
@@ -274,476 +797,21 @@ int test_rpc_frontdoor_slots(void)
         return 1;
     }
 
-    /* ── A full queue of LIVE clients is honest backpressure ──── */
-
-    printf("frontdoor full queue of live clients refuses... ");
-    {
-        struct sim_client sim[SIM_MAX];
-        bool ok = true;
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i <= cap; i++)
-            sim[i].client = sim[i].server = -1;
-
-        for (size_t i = 0; i < cap && ok; i++) {
-            if (!sim_open(&sim[i])) { ok = false; break; }
-            sim_send_request(&sim[i]);
-            ok = rpc_http_test_queue_admit(sim[i].server);
-            sim[i].server = -1;   /* the queue owns it now */
-        }
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.depth == cap && st.peak_depth == cap;
-
-        /* Nothing is reclaimable: every peer is connected and inside
-         * the residency deadline. Refusing here is correct, and the
-         * refused fd stays the caller's to close. */
-        ok = ok && sim_open(&sim[cap]);
-        ok = ok && rpc_http_test_queue_admit(sim[cap].server) == false;
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.rejected_busy == 1;
-        ok = ok && st.reclaimed_hangup == 0 && st.reclaimed_stale == 0;
-        ok = ok && st.depth == cap;          /* never overfills */
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i <= cap; i++)
-            sim_close(&sim[i]);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    /* ── A hung-up client must not hold a slot ─────────────────── */
-
-    printf("frontdoor reclaims slots from clients that hung up... ");
-    {
-        struct sim_client sim[SIM_MAX];
-        int held[SIM_MAX];
-        size_t gone = cap / 2;
-        bool ok = true;
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i <= cap; i++) {
-            sim[i].client = sim[i].server = -1;
-            held[i] = -1;
-        }
-
-        for (size_t i = 0; i < cap && ok; i++) {
-            if (!sim_open(&sim[i])) { ok = false; break; }
-            held[i] = sim[i].server;
-            ok = rpc_http_test_queue_admit(sim[i].server);
-            sim[i].server = -1;
-        }
-
-        /* The first `gone` clients give up and close, sending nothing.
-         * Their server ends are now readable-at-EOF: unservable. Before
-         * the fix they kept their slots forever. */
-        for (size_t i = 0; i < gone; i++)
-            sim_hangup(&sim[i]);
-
-        ok = ok && sim_open(&sim[cap]);
-        sim_send_request(&sim[cap]);
-        held[cap] = sim[cap].server;
-        ok = ok && rpc_http_test_queue_admit(sim[cap].server);
-        sim[cap].server = -1;
-
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.reclaimed_hangup == gone;
-        ok = ok && st.reclaimed_stale == 0;
-        ok = ok && st.depth == cap - gone + 1;
-
-        /* Reclaimed means CLOSED, not merely unlinked — the whole point
-         * is that the fd stops being leaked. */
-        for (size_t i = 0; i < gone; i++)
-            ok = ok && fd_is_closed(held[i]);
-
-        /* Arrival order survives compaction: the next entry out is the
-         * oldest client that is still connected. */
-        int taken = rpc_http_test_queue_take();
-        ok = ok && taken == held[gone];
-        if (taken >= 0)
-            close(taken);
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i <= cap; i++)
-            sim_close(&sim[i]);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    /* ── A connected client that waited past the deadline ──────── */
-
-    printf("frontdoor reclaims slots past the residency deadline... ");
-    {
-        struct sim_client sim[SIM_MAX];
-        int held[SIM_MAX];
-        bool ok = true;
-
-        /* Deadline 2 ms, then wait past it. Each client stays
-         * CONNECTED with an unread request pending, so the hang-up
-         * probe deliberately cannot fire — this proves the age rule
-         * alone is what reopens the door. (0 is not "instantly stale":
-         * it is the documented way to DISABLE age-based reclaim, same
-         * as ZCL_RPC_TIMEOUT_MS=0 disables the request watchdog.) */
-        rpc_http_test_queue_reset(2);
-        for (size_t i = 0; i <= cap; i++) {
-            sim[i].client = sim[i].server = -1;
-            held[i] = -1;
-        }
-
-        for (size_t i = 0; i < cap && ok; i++) {
-            if (!sim_open(&sim[i])) { ok = false; break; }
-            sim_send_request(&sim[i]);
-            held[i] = sim[i].server;
-            ok = rpc_http_test_queue_admit(sim[i].server);
-            sim[i].server = -1;
-        }
-        rpc_http_test_queue_stats(&st);
-        /* An expired deadline must not evict on the way IN — the queue
-         * reclaims only when it would otherwise report itself full. */
-        ok = ok && st.depth == cap && st.reclaimed_stale == 0;
-
-        /* Put every queued entry safely past the 2 ms deadline. */
-        (void)poll(NULL, 0, 25);
-
-        ok = ok && sim_open(&sim[cap]);
-        sim_send_request(&sim[cap]);
-        ok = ok && rpc_http_test_queue_admit(sim[cap].server);
-        sim[cap].server = -1;
-
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.reclaimed_stale == cap;
-        ok = ok && st.reclaimed_hangup == 0;
-        ok = ok && st.depth == 1;
-
-        for (size_t i = 0; i < cap; i++)
-            ok = ok && fd_is_closed(held[i]);
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i <= cap; i++)
-            sim_close(&sim[i]);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    /* ── THE INVARIANT: no run of hang-ups bricks the door ─────── */
-
-    printf("frontdoor survives a long run of clients that hang up... ");
-    {
-        size_t rounds = cap * 4;
-        bool ok = true;
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i < rounds; i++) {
-            struct sim_client c;
-            if (!sim_open(&c)) { ok = false; break; }
-
-            if (!rpc_http_test_queue_admit(c.server)) {
-                /* Refused. Every queued peer is a client that already
-                 * hung up, so the queue owns nothing servable and MUST
-                 * be able to take this one. Against the pre-fix ratchet
-                 * this failed on round cap and every round after it,
-                 * for the life of the process. */
-                if (!rpc_http_test_queue_admit(c.server)) {
-                    ok = false;
-                    sim_close(&c);
-                    break;
-                }
-            }
-            c.server = -1;        /* the queue owns it now */
-            sim_hangup(&c);       /* the client gives up immediately */
-        }
-
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.admitted == (uint64_t)rounds;
-        ok = ok && st.depth <= cap;
-        /* The run could only get this far by reclaiming. */
-        ok = ok && st.reclaimed_hangup > 0;
-
-        rpc_http_test_queue_reset(-1);
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.depth == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    /* ── The queue owns nothing after it is emptied ────────────── */
-
-    printf("frontdoor queue leaves no fd behind when emptied... ");
-    {
-        struct sim_client sim[SIM_MAX];
-        int held[SIM_MAX];
-        bool ok = true;
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i < cap; i++) {
-            sim[i].client = sim[i].server = -1;
-            held[i] = -1;
-        }
-
-        for (size_t i = 0; i < cap && ok; i++) {
-            if (!sim_open(&sim[i])) { ok = false; break; }
-            sim_send_request(&sim[i]);
-            held[i] = sim[i].server;
-            ok = rpc_http_test_queue_admit(sim[i].server);
-            sim[i].server = -1;
-        }
-
-        rpc_http_test_queue_reset(-1);
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.depth == 0 && st.admitted == 0;
-        for (size_t i = 0; i < cap; i++)
-            ok = ok && fd_is_closed(held[i]);
-
-        for (size_t i = 0; i < cap; i++)
-            sim_close(&sim[i]);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    /* ── A partial request followed by close must not hold a slot ──
-     *
-     * The live brick: dozens of TCP sockets in CLOSE-WAIT each holding
-     * ~250 unread bytes. A close() with unread data pending reports
-     * POLLIN alone (no POLLHUP until the bytes are drained), and the old
-     * hang-up probe treated "peek returns data" as "peer is alive" — so a
-     * queue full of such entries never shed one and every later client got
-     * an instant 503 while workers idled. socketpair(2) cannot reproduce
-     * this (it reports POLLHUP); only real TCP can. */
-
-    printf("frontdoor reclaims a partial request followed by close... ");
-    {
+    if (!rfs_case_full_queue_refuses(cap, &st)) failures++;
+    if (!rfs_case_reclaims_hangup(cap, &st)) failures++;
+    if (!rfs_case_reclaims_stale(cap, &st)) failures++;
+    if (!rfs_case_survives_hangup_run(cap, &st)) failures++;
+    if (!rfs_case_no_fd_leak_on_empty(cap, &st)) failures++;
 #if defined(_WIN32)
-        printf("SKIP (Windows: WSAPoll RDHUP signaling unverified)\n");
+    printf("frontdoor reclaims a partial request followed by close... "
+           "SKIP (Windows: WSAPoll RDHUP signaling unverified)\n");
+    printf("frontdoor survives a run of partial-then-close TCP clients... "
+           "SKIP (Windows: WSAPoll RDHUP signaling unverified)\n");
 #else
-        struct sim_client dead = { .client = -1, .server = -1 };
-        struct sim_client sim[SIM_MAX];
-        int held[SIM_MAX];
-        int held_dead = -1;
-        bool ok = true;
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i < cap; i++) {
-            sim[i].client = sim[i].server = -1;
-            held[i] = -1;
-        }
-
-        /* One TCP client sends a partial request and closes. The server
-         * end now holds unread bytes plus FIN. */
-        ok = ok && tcp_pair_open(&dead.client, &dead.server);
-        sim_send_request(&dead);
-        held_dead = dead.server;
-        ok = ok && rpc_http_test_queue_admit(dead.server);
-        dead.server = -1;   /* the queue owns it now */
-        sim_hangup(&dead);  /* FIN joins the unread bytes */
-        /* Let the FIN arrive before the reclaim below runs; TCP order
-         * already guarantees data-before-FIN, this only waits out
-         * loopback delivery so the probe sees the steady state. */
-        (void)poll(NULL, 0, 100);
-
-        /* Fill the rest of the queue with live clients. */
-        for (size_t i = 0; i + 1 < cap && ok; i++) {
-            if (!sim_open(&sim[i])) { ok = false; break; }
-            sim_send_request(&sim[i]);
-            held[i] = sim[i].server;
-            ok = rpc_http_test_queue_admit(sim[i].server);
-            sim[i].server = -1;
-        }
-
-        /* One more live client must still be admitted: the dead partial
-         * is reclaimable, so the door is not full. Before the fix this
-         * refused with rejected_busy (the count never self-corrected). */
-        ok = ok && sim_open(&sim[cap - 1]);
-        sim_send_request(&sim[cap - 1]);
-        held[cap - 1] = sim[cap - 1].server;
-        bool admitted = rpc_http_test_queue_admit(sim[cap - 1].server);
-        if (admitted)
-            sim[cap - 1].server = -1;
-        ok = ok && admitted;
-
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.reclaimed_hangup == 1;
-        ok = ok && st.depth == cap;
-        ok = ok && st.rejected_busy == 0;
-
-        /* Reclaimed means CLOSED: the dead fd has exactly one closer. */
-        ok = ok && fd_is_closed(held_dead);
-
-        /* Arrival order survives: the next entry out is the oldest client
-         * that is still connected. */
-        int taken = rpc_http_test_queue_take();
-        ok = ok && taken == held[0];
-        if (taken >= 0)
-            close(taken);
-
-        rpc_http_test_queue_reset(-1);
-        sim_close(&dead);
-        for (size_t i = 0; i < cap; i++)
-            sim_close(&sim[i]);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    if (!rfs_case_reclaims_partial_close(cap, &st)) failures++;
+    if (!rfs_case_survives_partial_close_run(cap, &st)) failures++;
 #endif
-    }
-
-    /* ── N partial-then-close clients never trip busy ──────────── */
-
-    printf("frontdoor survives a run of partial-then-close TCP clients... ");
-    {
-#if defined(_WIN32)
-        printf("SKIP (Windows: WSAPoll RDHUP signaling unverified)\n");
-#else
-        size_t rounds = cap * 2;
-        bool ok = true;
-
-        rpc_http_test_queue_reset(-1);
-        for (size_t i = 0; i < rounds; i++) {
-            struct sim_client c = { .client = -1, .server = -1 };
-            if (!tcp_pair_open(&c.client, &c.server)) { ok = false; break; }
-            sim_send_request(&c);
-            sim_hangup(&c);   /* unread bytes plus FIN on the server end */
-            if (i + 1 == cap)
-                (void)poll(NULL, 0, 100); /* FINs arrive before first reclaim */
-            if (!rpc_http_test_queue_admit(c.server)) {
-                /* Every queued peer already hung up: refusing here is the
-                 * one-way ratchet the incident bricked on. */
-                ok = false;
-                sim_close(&c);
-                break;
-            }
-            c.server = -1;  /* the queue owns it now */
-        }
-
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.admitted == (uint64_t)rounds;
-        ok = ok && st.rejected_busy == 0;
-        ok = ok && st.depth <= cap;
-        ok = ok && st.reclaimed_hangup > 0;
-
-        rpc_http_test_queue_reset(-1);
-        rpc_http_test_queue_stats(&st);
-        ok = ok && st.depth == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-#endif
-    }
-
-    /* ── THE WIRE TRUTH: half-closed loopback clients drain ────
-     *
-     * The cases above drive the admission queue over socketpairs with
-     * full close(). This one runs the REAL server on 127.0.0.1, opens N
-     * TCP connections, and half-closes every one of them — FIN sent,
-     * our end still open — which is the exact CLOSE-WAIT shape from the
-     * incident. Half the clients die mid-request (partial bytes, then
-     * FIN); half go silent after connect (then FIN). The server's
-     * connection count must return to zero inside the idle budget with
-     * no further admission to trigger it, and the door must still
-     * answer a fresh client afterwards. Scratch datadir only (repo
-     * test-tmp convention, like test_rpc.c); no live node, no live
-     * datadir, no /tmp. */
-    printf("frontdoor drains half-closed loopback connections... ");
-    {
-#define RFS_HALFCLOSE_N 16
-        bool ok = true;
-        char rpcdir[512];
-        test_make_tmpdir(rpcdir, sizeof(rpcdir), "rpc_frontdoor",
-                         "halfclose");
-        uint16_t port = rfs_free_port();
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        bool started = port != 0 &&
-            rpc_http_start(&tbl, port, NULL, NULL, rpcdir);
-        ok = ok && started;
-        if (started) {
-            platform_socket_t cli[RFS_HALFCLOSE_N];
-            for (size_t i = 0; i < RFS_HALFCLOSE_N; i++)
-                cli[i] = PLATFORM_SOCKET_INVALID;
-            struct sockaddr_in srv;
-            memset(&srv, 0, sizeof(srv));
-            srv.sin_family = AF_INET;
-            srv.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            srv.sin_port = htons(port);
-            static const char partial[] =
-                "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n";
-            for (size_t i = 0; i < RFS_HALFCLOSE_N && ok; i++) {
-                cli[i] = platform_socket_open(AF_INET, SOCK_STREAM, 0,
-                                              true, false);
-                ok = ok && cli[i] != PLATFORM_SOCKET_INVALID;
-                if (!ok)
-                    break;
-                ok = ok && platform_socket_connect(
-                    cli[i], (struct sockaddr *)&srv,
-                    sizeof(srv)) == 0;
-                if (!ok)
-                    break;
-                if (i < RFS_HALFCLOSE_N / 2) {
-                    /* Mid-request half-close: partial bytes, then FIN. */
-                    ok = ok && platform_socket_send(cli[i], partial,
-                        sizeof(partial) - 1) > 0;
-                }
-                /* else: silent after connect, then FIN. */
-                rfs_half_close(cli[i]);
-            }
-            /* The listener must actually ADMIT all N first: without
-             * this wait a slow accept loop could leave every
-             * connection in the listen backlog, depth would read 0
-             * without proving anything, and the case would be
-             * vacuous. */
-            struct rpc_http_queue_stats hst;
-            memset(&hst, 0, sizeof(hst));
-            int waited_ms = 0;
-            while (waited_ms < 5000) {
-                rpc_http_test_queue_stats(&hst);
-                if (hst.admitted >= RFS_HALFCLOSE_N)
-                    break;
-                rfs_sleep_ms(25);
-                waited_ms += 25;
-            }
-            rpc_http_test_queue_stats(&hst);
-            ok = ok && hst.admitted >= RFS_HALFCLOSE_N;
-            /* Workers must pick up and close every one: the 5 s socket
-             * deadlines plus the peer-gone pre-check bound each
-             * connection, and the 10 s queue residency budget bounds
-             * the stragglers. Poll a little past that budget. */
-            waited_ms = 0;
-            while (waited_ms < 12000) {
-                rpc_http_test_queue_stats(&hst);
-                if (hst.depth == 0)
-                    break;
-                rfs_sleep_ms(25);
-                waited_ms += 25;
-            }
-            rpc_http_test_queue_stats(&hst);
-            ok = ok && hst.depth == 0;
-
-            /* The door is still alive: a fresh client gets an answer
-             * (401 without credentials), not a hang-up or a 503. */
-            if (ok) {
-                platform_socket_t probe = platform_socket_open(
-                    AF_INET, SOCK_STREAM, 0, true, false);
-                ok = ok && probe != PLATFORM_SOCKET_INVALID;
-                if (ok && platform_socket_connect(probe,
-                        (struct sockaddr *)&srv, sizeof(srv)) == 0) {
-                    static const char req[] =
-                        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                        "Content-Length: 2\r\n\r\n{}";
-                    ok = ok && platform_socket_send(probe, req,
-                        sizeof(req) - 1) > 0;
-                    char rbuf[4096];
-                    int n = platform_socket_receive(probe, rbuf,
-                                                    sizeof(rbuf) - 1);
-                    ok = ok && n > 0;
-                    if (ok) {
-                        rbuf[n] = '\0';
-                        ok = ok && strstr(rbuf, "401") != NULL;
-                    }
-                } else {
-                    ok = false;
-                }
-                if (probe != PLATFORM_SOCKET_INVALID)
-                    platform_socket_close(probe);
-            }
-
-            for (size_t i = 0; i < RFS_HALFCLOSE_N; i++) {
-                if (cli[i] != PLATFORM_SOCKET_INVALID)
-                    platform_socket_close(cli[i]);
-            }
-            rpc_http_stop();
-        }
-        test_rm_rf(rpcdir);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-#undef RFS_HALFCLOSE_N
-    }
+    if (!rfs_case_drains_halfclosed_loopback()) failures++;
 
     rpc_http_test_queue_reset(-1);
 

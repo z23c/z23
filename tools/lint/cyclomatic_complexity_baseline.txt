@@ -3418,7 +3418,7 @@ tests/harness/src/test_rom_dump.c:test_rom_dump:31
 tests/harness/src/test_rom_fetch.c:rf_lat_conn_thread:19
 tests/harness/src/test_rom_fetch_onion.c:test_rom_fetch_onion:49
 tests/harness/src/test_rpc_error_envelope.c:test_rpc_error_envelope:121
-tests/harness/src/test_rpc_frontdoor_slots.c:test_rpc_frontdoor_slots:96
+tests/harness/src/test_rpc_frontdoor_slots.c:test_rpc_frontdoor_slots:11
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:392
 tests/harness/src/test_rpc_service_restart.c:test_rpc_service_restart:34
 tests/harness/src/test_running_image_positioned.c:running_image_positioned_probe:16
