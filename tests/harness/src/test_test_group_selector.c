@@ -795,6 +795,14 @@ static void dump_bad_rc(const char *tag, int rc, int expected,
     fprintf(stderr, "%.4000s\n", out ? out : "(null)");
 }
 
+static bool selector_output_contains(const char *out, const char *expected)
+{
+    if (out && strstr(out, expected)) return true;
+    fprintf(stderr, "selector: missing output '%s', captured prefix:\n%.4000s\n",
+            expected, out ? out : "(null)");
+    return false;
+}
+
 static int test_runner_exact_selection(void)
 {
     int failures = 0;
@@ -936,7 +944,7 @@ static int test_runner_exact_selection(void)
                           "proof contract "
                           "group=test_store_e2e_gate "
                           "env=ZCL_STRESS_TESTS") != NULL);
-            ASSERT(strstr(out, "active-proof-contract") != NULL);
+            ASSERT(selector_output_contains(out, "active-proof-contract"));
             ASSERT(strstr(out, "cache PLAN — 0 cacheable, 0 cache HIT") !=
                    NULL);
             ASSERT(strstr(out, "groups_ran=1 groups_cached=0") != NULL);
