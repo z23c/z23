@@ -19,6 +19,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_dev_land_regen.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -948,11 +949,43 @@ static int test_dev_land_regen_refreshes_plan_on_identical_rewrite(void)
     return failures;
 }
 
-/* When no regen target's output changed a tracked artifact's stat identity
- * at all, the phase must leave the restart plan alone: refreshing it on
- * every step, whether or not anything moved, is exactly the redundant
- * extra `make` invocation the stepper's prebuild phase already avoids when
- * the plan file exists. */
+/* Exercise the actual preparation adapter with an existing stale plan. */
+static int test_dev_land_final_plan_preparation(void)
+{
+    int failures = 0;
+    TEST("land: final preparation refreshes an existing plan and preserves make failures") {
+        char root[1024], path[1200], body[128], why[512];
+        size_t len = 0;
+        test_make_tmpdir(root, sizeof(root), "dev_land", "final_plan");
+        ASSERT(dlx_write_dep(root, "Makefile",
+            ".PHONY: FORCE\nFORCE:\n"
+            "build/dev-loop/restart.env: FORCE\n"
+            "\t@mkdir -p build/dev-loop\n"
+            "\t@cp prepared-input build/dev-loop/restart.env\n"));
+        ASSERT(dlx_write_dep(root, "prepared-input", "generation-one\n"));
+        ASSERT(zcl_dev_land_restart_plan_prepare(root, why, sizeof(why)));
+        ASSERT(dlx_write_dep(root, "prepared-input", "generation-two\n"));
+        ASSERT(zcl_dev_land_restart_plan_prepare(root, why, sizeof(why)));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", root) < sizeof(path));
+        ASSERT(dlx_slurp(path, body, sizeof(body), &len));
+        ASSERT(len == strlen("generation-two\n"));
+        ASSERT(memcmp(body, "generation-two\n", len) == 0);
+        ASSERT(dlx_write_dep(root, "Makefile",
+            ".PHONY: FORCE\nFORCE:\n"
+            "build/dev-loop/restart.env: FORCE\n"
+            "\t@echo 'FAIL: final preparation refused' >&2\n\t@exit 1\n"));
+        ASSERT(!zcl_dev_land_restart_plan_prepare(root, why, sizeof(why)));
+        ASSERT(strstr(why, "final preparation refused") != NULL);
+        ASSERT(dlx_slurp(path, body, sizeof(body), &len));
+        ASSERT(len == strlen("generation-two\n"));
+        ASSERT(memcmp(body, "generation-two\n", len) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The earlier document phase need not refresh an untouched plan; final
+ * preparation separately binds the plan after all prerequisites settle. */
 static int test_dev_land_regen_leaves_plan_alone_when_untouched(void)
 {
     int failures = 0;
@@ -2699,6 +2732,7 @@ int test_dev_land(void)
     failures += test_dev_land_regen_failure_fails_row();
     failures += test_dev_land_regen_refreshes_plan_on_identical_rewrite();
     failures += test_dev_land_regen_leaves_plan_alone_when_untouched();
+    failures += test_dev_land_final_plan_preparation();
 
 #endif /* !defined(_WIN32) */
 

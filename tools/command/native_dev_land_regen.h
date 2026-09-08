@@ -7,14 +7,21 @@
  *
  * Split out of tools/command/native_dev_land.c (which was already at its
  * file-size ceiling) rather than grown inside it. native_dev_land.c owns
- * the queue, the rows and every other phase; this file owns exactly one
- * phase's mechanics and is called from one site in dl_step_start(), between
- * the rebase and the lint pass.
+ * the queue and rows; this file owns generated-document refresh and the
+ * final Make restart-plan preparation before proof admission.
  */
 #ifndef ZCL_NATIVE_DEV_LAND_REGEN_H
 #define ZCL_NATIVE_DEV_LAND_REGEN_H
 
 #include <stddef.h>
+#include <stdbool.h>
+
+/* Prepare the native Make restart plan after all landing inputs are ready.
+ * Re-run its FORCE target even when a plan exists: earlier preparation may
+ * have changed source metadata. Uses the bounded real Make adapter; false
+ * leaves a diagnostic and never accepts a stale file after Make failure. */
+bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why,
+                                       size_t why_cap);
 
 /* Run the regen phase in the already-rebased landing worktree `wt` (HEAD is
  * the row's rebased tip, ancestor of `tip_sha`). `tip_sha` is the original

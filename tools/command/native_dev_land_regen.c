@@ -3,8 +3,8 @@
  *          targets in the landing worktree after a successful rebase and
  *          commit whatever they actually changed, so a submission never
  *          fails at push time for staleness a train assembler would
- *          otherwise fix by hand. Called from one site in
- *          tools/command/native_dev_land.c's dl_step_start().
+ *          otherwise fix by hand. Also prepares the final restart plan
+ *          after the landing step finishes its other prerequisites.
  *
  * WHY THREE FIXED TARGETS, NOT A DISCOVERED SET. Exactly one make target
  * regenerates the fleet routing table across two scripts
@@ -226,6 +226,32 @@ static int dlrg_make(const char *wt, const char *target, char *transcript,
     }
     free(buf);
     return rc;
+}
+
+bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why,
+                                       size_t why_cap)
+{
+    char path[4096 + 32];
+    struct stat st;
+    size_t used = 0;
+    if (!wt || !why || why_cap == 0) return false;
+    why[0] = '\0';
+    if (snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", wt) >=
+        (int)sizeof(path)) {
+        (void)snprintf(why, why_cap, "landing restart plan path too long");
+        return false;
+    }
+    /* The earlier document phase may precede source rewrites during lint
+     * or dependency preparation. Mere existence says nothing about the
+     * plan's BASE_GENERATION. The native target's FORCE prerequisite seals
+     * this checkout after every preparation stage has finished. */
+    if (dlrg_make(wt, "build/dev-loop/restart.env", NULL, 0, &used,
+                  why, why_cap) != 0) return false;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        (void)snprintf(why, why_cap, "landing restart plan not produced by make");
+        return false;
+    }
+    return true;
 }
 
 /* "<subject>" truncated to DLRG_SUBJECT_MAX bytes, falling back to the

@@ -6566,7 +6566,74 @@ static int dp_queue_claim_locked(const char *repo_root, const char *requests,
     return 1;
 }
 
-static int proof_queue_run_next_platform(const char *repo_root,
+/* A sibling queue.lock is the existing landing-root marker. Inspect it
+ * without following links so a broken marker cannot turn a landing proof
+ * into an ordinary unguarded proof. The row lock itself is never held here. */
+static int dp_landing_step_path(const char *root, char step[PATH_MAX])
+{
+    char marker[PATH_MAX];
+    struct stat st;
+    if (!zcl_devloop_landing_queue_lock_path(root, marker, sizeof(marker)))
+        return -1;
+    if (lstat(marker, &st) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISREG(st.st_mode) || st.st_uid != geteuid()) return -1;
+    int len = snprintf(step, PATH_MAX, "%s/../step.lock", root);
+    return len > 0 && len < PATH_MAX ? 1 : -1;
+}
+
+/* Open the same persistent inode used by native_dev_land's exclusive step
+ * writer. Only this private regular lock is trusted; a replaced path or
+ * symlink must not give the worker an unrelated lock to hold. */
+static int dp_landing_step_open(const char *step)
+{
+    int fd = open(step, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
+                   0600);
+    if (fd < 0) return -1;
+    struct stat held, named;
+    bool valid = fstat(fd, &held) == 0 && lstat(step, &named) == 0 &&
+        S_ISREG(held.st_mode) && S_ISREG(named.st_mode) &&
+        held.st_uid == geteuid() &&
+        (held.st_mode & (S_IWGRP | S_IWOTH)) == 0 &&
+        held.st_dev == named.st_dev && held.st_ino == named.st_ino;
+    if (valid) return fd;
+    (void)close(fd);
+    return -1;
+}
+
+/* Preparation owns LOCK_EX on step.lock. A proof shares that same lock
+ * from before claim until all worker evidence and lease cleanup settle.
+ * Contention is deferred work, never a failed proof observation. */
+static int dp_landing_proof_guard(const char *root, int *guard,
+                                  char *why, size_t why_len)
+{
+    *guard = -1;
+    char step[PATH_MAX];
+    int landing = dp_landing_step_path(root, step);
+    if (landing == 0) return 1;
+    if (landing < 0) {
+        proof_why(why, why_len, "proof_landing_queue_lock_invalid");
+        return -1;
+    }
+    int fd = dp_landing_step_open(step);
+    if (fd < 0) {
+        proof_why(why, why_len, "proof_landing_step_lock_failed");
+        return -1;
+    }
+    if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
+        *guard = fd;
+        return 1;
+    }
+    int saved = errno;
+    (void)close(fd);
+    if (saved == EWOULDBLOCK || saved == EAGAIN) {
+        proof_why(why, why_len, "proof_landing_preparation_busy");
+        return 0;
+    }
+    proof_why(why, why_len, "proof_landing_step_lock_failed");
+    return -1;
+}
+
+static int dp_proof_queue_run_guarded(const char *repo_root,
                                          char *why, size_t why_len)
 {
     char state[PATH_MAX], requests[PATH_MAX], attempts[PATH_MAX];
@@ -6597,6 +6664,23 @@ static int proof_queue_run_next_platform(const char *repo_root,
     if (why && why_len) why[0] = 0;
     (void)proof_worker_run(&attempt, local, base, why, why_len);
     return 1;
+}
+
+static int proof_queue_run_next_platform(const char *repo_root,
+                                         char *why, size_t why_len)
+{
+    char root[PATH_MAX];
+    if (!repo_root || !platform_directory_canonical_real(repo_root, root,
+                                                         sizeof(root))) {
+        proof_why(why, why_len, "proof_queue_path_invalid");
+        return -1;
+    }
+    int guard = -1;
+    int ready = dp_landing_proof_guard(root, &guard, why, why_len);
+    if (ready <= 0) return ready;
+    int result = dp_proof_queue_run_guarded(root, why, why_len);
+    proof_queue_lock_release(guard);
+    return result;
 }
 
 static bool proof_ensure_platform(const char *repo_root,

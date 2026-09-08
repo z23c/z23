@@ -37,6 +37,9 @@
  *                   touching the queue or the worktree; the caller retries.
  *                   It is never held across separate step calls: a second
  *                   host proving the same tip is not this host's problem.
+ *                   Queued exact proofs retain a shared lock from before
+ *                   request claim through completion, so preparation and
+ *                   proof cannot mutate/read this checkout concurrently.
  *   wt/             the private landing worktree, created once and reused.
  *   logs/           one log per attempt; a failure row names its log.
  * Every outcome also appends to <platform_state_root>/mail/outbox.jsonl when
@@ -3135,56 +3138,6 @@ static bool dl_deps_test_force(void)
 #endif
 }
 
-/* build/dev-loop/restart.env bakes this worktree's own absolute paths
- * (DEV_OBJ_DIR, DEV_LINK_RSP, ...), so unlike the vendored archives it
- * cannot be copied from the submitting checkout: a copy would hand the
- * proof another worktree's paths and every restart plan built into it
- * would name files that do not exist here. It has to be built, once, in
- * this worktree, through the same make target the Makefile itself builds
- * it with. */
-static bool dl_wt_restart_env_ready(const char *wt)
-{
-    char path[4096 + 32];
-    struct stat st;
-    if (!wt || snprintf(path, sizeof(path),
-                        "%s/build/dev-loop/restart.env", wt) >=
-                   (int)sizeof(path))
-        return false;
-    return stat(path, &st) == 0;
-}
-
-static bool dl_wt_restart_env_ensure(const struct dl_dirs *d, char *why,
-                                     size_t why_cap)
-{
-    char *buf;
-    int rc;
-    if (dl_wt_restart_env_ready(d->wt))
-        return true;
-    buf = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.restartenv");
-    if (!buf) {
-        (void)snprintf(why, why_cap, "%s",
-                       "out of memory building the dev-loop restart plan");
-        return false;
-    }
-    {
-        const char *argv[] = { "make", "-C", d->wt,
-                               "build/dev-loop/restart.env", NULL };
-        rc = zcl_spawn_capture(argv, buf, DL_LOG_CAP, DL_LINT_TIMEOUT_MS);
-    }
-    if (rc != 0 || !dl_wt_restart_env_ready(d->wt)) {
-        (void)snprintf(why, why_cap,
-                       "building build/dev-loop/restart.env failed in the "
-                       "landing worktree (the proof's receipt identity "
-                       "capture reads it from this worktree and cannot "
-                       "use a copy from elsewhere): %.300s",
-                       buf);
-        free(buf);
-        return false;
-    }
-    free(buf);
-    return true;
-}
-
 /* Bound on how many extra names one dependency's inode may carry into the
  * leaf's own generation pools before this refuses instead of repairing. A
  * legitimate proof pool holds a handful of generations at once; anything
@@ -3478,7 +3431,7 @@ static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
         if (!dl_wt_dependency_links_repair(d, r, stubbed, why, why_cap))
             return false;
     }
-    if (!stubbed && !dl_wt_restart_env_ensure(d, why, why_cap))
+    if (!stubbed && !zcl_dev_land_restart_plan_prepare(d->wt, why, why_cap))
         return false;
     return true;
 #endif

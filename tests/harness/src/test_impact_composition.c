@@ -72,6 +72,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <dirent.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -4791,6 +4795,206 @@ static int test_ic_generation_hooks_configure_points_at_its_own_copy(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+struct ic_landing_proof_fixture {
+    char parent[4096], root[4096], step[4096];
+    char request[4096], failure[4096];
+    uint8_t request_bytes[320];
+    size_t request_size;
+};
+
+static bool ic_landing_proof_prepare(struct ic_landing_proof_fixture *f,
+                                      const char *tag)
+{
+    static const char local[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char base[] = "1111111111111111111111111111111111111111";
+    test_make_tmpdir(f->parent, sizeof(f->parent), "impact_composition", tag);
+    if (!ic_proof_private_write(f->parent, "queue.lock", "") ||
+        !ic_proof_private_write(f->parent, "step.lock", "") ||
+        !ic_write(f->parent, "wt/.cache/fixture", "isolated landing proof\n"))
+        return false;
+    snprintf(f->root, sizeof(f->root), "%s/wt", f->parent);
+    snprintf(f->step, sizeof(f->step), "%s/step.lock", f->parent);
+    snprintf(f->request, sizeof(f->request),
+              "%s/.cache/zcl-dev-proof/requests/%s-%s.request", f->root, local, base);
+    snprintf(f->failure, sizeof(f->failure),
+              "%s/.cache/zcl-dev-proof/%s-%s.failed", f->root, local, base);
+    struct zcl_dev_proof_status status = {0};
+    if (!zcl_dev_proof_ensure(f->root, local, base, &status)) return false;
+    FILE *input = fopen(f->request, "rb");
+    if (!input) return false;
+    f->request_size = fread(f->request_bytes, 1, sizeof(f->request_bytes), input);
+    bool ok = !ferror(input) && f->request_size > 0 &&
+              f->request_size < sizeof(f->request_bytes);
+    return fclose(input) == 0 && ok;
+}
+
+static bool ic_landing_state_empty(const char *root, const char *name)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s", root, name);
+    DIR *directory = opendir(path);
+    if (!directory) return false;
+    bool empty = true;
+    for (struct dirent *entry = readdir(directory); entry; entry = readdir(directory)) {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+            empty = false;
+    }
+    return closedir(directory) == 0 && empty;
+}
+
+static bool ic_landing_request_unchanged(const struct ic_landing_proof_fixture *f)
+{
+    return ic_bytes_equal(f->request, f->request_bytes, f->request_size) &&
+           access(f->failure, F_OK) != 0 &&
+           zcl_dev_proof_queue_has_pending(f->root) &&
+           ic_landing_state_empty(f->root, "attempts") &&
+           ic_landing_state_empty(f->root, "leases") &&
+           ic_landing_state_empty(f->root, "receipts");
+}
+
+static int test_ic_landing_proof_defers_preparation(void)
+{
+    int failures = 0;
+    TEST("landing proof: preparation lock defers claim without losing request bytes") {
+        struct ic_landing_proof_fixture f = {0};
+        ASSERT(ic_landing_proof_prepare(&f, "landing_defer"));
+        int lock = open(f.step, O_RDWR | O_CLOEXEC);
+        ASSERT(lock >= 0);
+        ASSERT(flock(lock, LOCK_EX | LOCK_NB) == 0);
+        char why[256] = {0};
+        int claimed = zcl_dev_proof_queue_run_next(f.root, why, sizeof(why));
+        bool unchanged = ic_landing_request_unchanged(&f);
+        ASSERT(flock(lock, LOCK_UN) == 0);
+        ASSERT(close(lock) == 0);
+        ASSERT_EQ(claimed, 0);
+        ASSERT_STR_EQ(why, "proof_landing_preparation_busy");
+        ASSERT(unchanged);
+        ASSERT_EQ(zcl_dev_proof_queue_run_next(f.root, why, sizeof(why)), 1);
+        ASSERT(access(f.request, F_OK) != 0);
+        ASSERT(access(f.failure, F_OK) == 0);
+        ASSERT(test_rm_rf_recursive(f.parent) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_landing_proof_refuses_unsafe_lock(void)
+{
+    int failures = 0;
+    TEST("landing proof: unsafe step lock refuses before publishing an attempt") {
+        struct ic_landing_proof_fixture f = {0};
+        ASSERT(ic_landing_proof_prepare(&f, "landing_lock_shape"));
+        ASSERT(unlink(f.step) == 0);
+        ASSERT(symlink("queue.lock", f.step) == 0);
+        char why[256] = {0};
+        ASSERT_EQ(zcl_dev_proof_queue_run_next(f.root, why, sizeof(why)), -1);
+        ASSERT_STR_EQ(why, "proof_landing_step_lock_failed");
+        ASSERT(ic_landing_request_unchanged(&f));
+        ASSERT(unlink(f.step) == 0);
+        ASSERT(mkdir(f.step, 0700) == 0);
+        ASSERT_EQ(zcl_dev_proof_queue_run_next(f.root, why, sizeof(why)), -1);
+        ASSERT_STR_EQ(why, "proof_landing_step_lock_failed");
+        ASSERT(ic_landing_request_unchanged(&f));
+        ASSERT(test_rm_rf_recursive(f.parent) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Fake Git pauses the real worker at its first source check, after queue
+ * claim. FIFOs synchronize the observation without a timing sleep. */
+static bool ic_landing_blocking_git(const char *root, int channels[2],
+                                    char path[8192])
+{
+    if (!ic_write(root, "bin/git", "#!/bin/sh\nprintf r > .proof-ready\n"
+                  "IFS= read -r release < .proof-release\nexit 1\n"))
+        return false;
+    char file[4096], canonical[4096];
+    snprintf(file, sizeof(file), "%s/bin/git", root);
+    if (chmod(file, 0700) != 0 || !realpath(root, canonical)) return false;
+    const char *prior = getenv("PATH");
+    int len = snprintf(path, 8192, "%s/bin:%s", canonical, prior ? prior : "");
+    if (len <= 0 || len >= 8192) return false;
+    static const char *const names[] = {".proof-ready", ".proof-release"};
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(file, sizeof(file), "%s/%s", root, names[i]);
+        if (mkfifo(file, 0600) != 0) return false;
+        channels[i] = open(file, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (channels[i] < 0) return false;
+    }
+    return true;
+}
+
+static pid_t ic_landing_worker_start(const char *root, const char *path,
+                                     const int channels[2])
+{
+    pid_t worker = fork();
+    if (worker != 0) return worker;
+    (void)close(channels[0]);
+    (void)close(channels[1]);
+    if (setpgid(0, 0) != 0 || setenv("PATH", path, 1) != 0 ||
+        setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0) _exit(2);
+    char why[256] = {0};
+    _exit(zcl_dev_proof_queue_run_next(root, why, sizeof(why)) == 1 ? 0 : 3);
+}
+
+struct ic_landing_worker_observation {
+    bool ready, released, settled;
+    int during, during_errno, after, status;
+};
+
+static bool ic_landing_worker_observe(const char *step, pid_t worker,
+                                       const int channels[2],
+                                       struct ic_landing_worker_observation *out)
+{
+    struct pollfd ready = {.fd = channels[0], .events = POLLIN};
+    out->ready = poll(&ready, 1, 10000) == 1 && (ready.revents & POLLIN);
+    int lock = open(step, O_RDWR | O_CLOEXEC);
+    out->during = lock >= 0 ? flock(lock, LOCK_EX | LOCK_NB) : -1;
+    out->during_errno = errno;
+    if (out->during == 0) (void)flock(lock, LOCK_UN);
+    out->released = write(channels[1], "done\n", 5) == 5;
+    if (!out->ready) {
+        (void)kill(-worker, SIGTERM);
+        (void)kill(worker, SIGTERM);
+    }
+    out->settled = waitpid(worker, &out->status, 0) == worker;
+    (void)close(channels[0]);
+    (void)close(channels[1]);
+    out->after = lock >= 0 ? flock(lock, LOCK_EX | LOCK_NB) : -1;
+    if (out->after == 0) (void)flock(lock, LOCK_UN);
+    if (lock >= 0) (void)close(lock);
+    return lock >= 0;
+}
+
+static int test_ic_landing_proof_holds_lock_through_worker(void)
+{
+    int failures = 0;
+    TEST("landing proof: shared step lock survives claim through worker completion") {
+        struct ic_landing_proof_fixture f = {0};
+        ASSERT(ic_landing_proof_prepare(&f, "landing_lifetime"));
+        int channels[2] = {-1, -1};
+        char path[8192];
+        ASSERT(ic_landing_blocking_git(f.root, channels, path));
+        pid_t worker = ic_landing_worker_start(f.root, path, channels);
+        ASSERT(worker >= 0);
+        struct ic_landing_worker_observation observed = {0};
+        ASSERT(ic_landing_worker_observe(f.step, worker, channels, &observed));
+        ASSERT(observed.ready);
+        ASSERT(observed.during != 0 && (observed.during_errno == EWOULDBLOCK ||
+                                        observed.during_errno == EAGAIN));
+        ASSERT(observed.released && observed.settled &&
+                WIFEXITED(observed.status) && WEXITSTATUS(observed.status) == 0);
+        ASSERT_EQ(observed.after, 0);
+        ASSERT(access(f.failure, F_OK) == 0);
+        ASSERT(test_rm_rf_recursive(f.parent) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -4817,6 +5021,9 @@ int test_impact_composition(void)
     failures += test_ic_proof_wait_reports_settled_failure();
     failures += test_ic_proof_retry_command_contract();
 #if !defined(_WIN32)
+    failures += test_ic_landing_proof_defers_preparation();
+    failures += test_ic_landing_proof_refuses_unsafe_lock();
+    failures += test_ic_landing_proof_holds_lock_through_worker();
     failures += test_ic_proof_retry();
     failures += test_ic_proof_next_preserves_root();
 #endif

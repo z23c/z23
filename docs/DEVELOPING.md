@@ -722,6 +722,14 @@ its whole run and a second driver that finds it held gets `STEP_BUSY`
 (retryable) and steps again shortly rather than racing the first driver's
 rebase and lint against the shared landing worktree.
 
+Queued exact proofs take the same lock shared before claiming a request
+and hold it until verification finishes. Requests created by checkout hooks
+therefore remain queued while the landing step prepares the tree. A busy
+preparation lock leaves the request bytes intact and creates no failed proof
+observation. Before requesting proof, the landing step reruns the native
+restart-plan target after lint and dependency preparation, so an existing
+plan cannot retain an earlier source generation.
+
 Each attempt the queue steps proves against its own proof generation, a
 private copy of the tree rooted at `<ram_root>/z23p/<tag>` when RAM scratch is
 reserved or `<dirname(landing_worktree)>/.z23p/<tag>` on disk otherwise
