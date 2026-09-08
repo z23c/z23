@@ -205,7 +205,7 @@ static int t_classifier(void)
 
 /* ── 2. file classification ─────────────────────────────────────────── */
 
-static int t_paths(void)
+static int t_paths_rules(void)
 {
     int failures = 0;
     enum vcs_score_exclude_reason r = VCS_SCORE_EXCLUDE_NONE;
@@ -238,6 +238,14 @@ static int t_paths(void)
              vcs_score_classify_path("out/generated/foo.c", &r) ==
                  VCS_SCORE_FILE_EXCLUDED &&
              r == VCS_SCORE_EXCLUDE_GENERATED_PATH);
+    return failures;
+}
+
+static int t_paths_test_detect(void)
+{
+    int failures = 0;
+    enum vcs_score_exclude_reason r = VCS_SCORE_EXCLUDE_NONE;
+
     ZS_CHECK("path: test detection (segment, prefix, suffix)",
              vcs_score_classify_path("tests/foo.c", &r) ==
                  VCS_SCORE_FILE_TEST &&
@@ -247,7 +255,12 @@ static int t_paths(void)
                  VCS_SCORE_FILE_TEST &&
              vcs_score_classify_path("src/foo_test.c", &r) ==
                  VCS_SCORE_FILE_TEST);
+    return failures;
+}
 
+static int t_paths_scan(void)
+{
+    int failures = 0;
     struct vcs_score_file_scan scan;
     ZS_CHECK("path: generated marker in the head excludes",
              vcs_score_scan_file(
@@ -281,6 +294,15 @@ static int t_paths(void)
     return failures;
 }
 
+static int t_paths(void)
+{
+    int failures = 0;
+    failures += t_paths_rules();
+    failures += t_paths_test_detect();
+    failures += t_paths_scan();
+    return failures;
+}
+
 /* ── 3. unitization + lineage diff (the anti-gaming core) ───────────── */
 
 /* Scan one in-memory file and finalize its unit set. */
@@ -298,15 +320,22 @@ static bool zs_unit_has(struct vcs_score_set *set, const char *unit)
     return vcs_score_set_contains(set, unit, strlen(unit));
 }
 
-static int t_unitization(void)
+static int t_unit_single(void)
 {
     int failures = 0;
-    struct vcs_score_set a, b;
+    struct vcs_score_set a;
 
     ZS_CHECK("unit: one statement is one unit",
              zs_units("src/x.c", "int x = 1;\n", &a) && a.count == 1 &&
              zs_unit_has(&a, "intx=1"));
     vcs_score_set_free(&a);
+    return failures;
+}
+
+static int t_unit_line_split(void)
+{
+    int failures = 0;
+    struct vcs_score_set a, b;
 
     /* Line-splitting: one statement broken across lines (and the opening
      * brace moved to its own line) reproduces the byte-identical units. */
@@ -323,6 +352,13 @@ static int t_unitization(void)
              zs_unit_has(&b, "returna+b"));
     vcs_score_set_free(&a);
     vcs_score_set_free(&b);
+    return failures;
+}
+
+static int t_unit_joining(void)
+{
+    int failures = 0;
+    struct vcs_score_set a, b;
 
     /* Line joining: two statements on one line split at the top-level
      * ';' exactly as if they were on separate lines. */
@@ -341,6 +377,13 @@ static int t_unitization(void)
                       "for (i = 0;\n     i < n;\n     i++) {\n", &a) &&
              a.count == 1 && zs_unit_has(&a, "for(i=0;i<n;i++)"));
     vcs_score_set_free(&a);
+    return failures;
+}
+
+static int t_unit_preproc_dedup(void)
+{
+    int failures = 0;
+    struct vcs_score_set a;
 
     /* Preprocessor lines are self-contained units. */
     ZS_CHECK("unit: preprocessor line",
@@ -353,6 +396,16 @@ static int t_unitization(void)
              zs_units("src/x.c", "int x = 1;\nint x = 1;\n", &a) &&
              a.count == 1);
     vcs_score_set_free(&a);
+    return failures;
+}
+
+static int t_unitization(void)
+{
+    int failures = 0;
+    failures += t_unit_single();
+    failures += t_unit_line_split();
+    failures += t_unit_joining();
+    failures += t_unit_preproc_dedup();
     return failures;
 }
 
@@ -399,17 +452,18 @@ static bool zs_compute(const struct zs_file *files, size_t count,
     return ok;
 }
 
-static int t_lineage_antigaming(void)
+static const char *const k_zs_add =
+    "int add(int a, int b) { return a + b; }\n";
+
+/* Whitespace-only change against the parent lineage: zero. */
+static int t_lineage_whitespace(void)
 {
     int failures = 0;
     struct vcs_score_set lineage;
     struct vcs_score_release s;
-    static const char *k_add =
-        "int add(int a, int b) { return a + b; }\n";
 
-    /* Whitespace-only change against the parent lineage: zero. */
     ZS_CHECK("lineage: parent absorbs", zs_lineage(&lineage,
-        (const struct zs_file[]){{"src/add.c", k_add}}, 1));
+        (const struct zs_file[]){{"src/add.c", k_zs_add}}, 1));
     ZS_CHECK("lineage: whitespace-only change scores 0",
              zs_compute((const struct zs_file[]){{
                  "src/add.c",
@@ -420,10 +474,18 @@ static int t_lineage_antigaming(void)
              s.units_already_rewarded == s.units_total &&
              s.units_total == 2);
     vcs_score_set_free(&lineage);
+    return failures;
+}
 
-    /* Line-splitting attack against the parent lineage: zero. */
+/* Line-splitting attack against the parent lineage: zero. */
+static int t_lineage_split_attack(void)
+{
+    int failures = 0;
+    struct vcs_score_set lineage;
+    struct vcs_score_release s;
+
     ZS_CHECK("lineage: parent absorbs (split attack)", zs_lineage(&lineage,
-        (const struct zs_file[]){{"src/add.c", k_add}}, 1));
+        (const struct zs_file[]){{"src/add.c", k_zs_add}}, 1));
     ZS_CHECK("lineage: line-splitting scores 0",
              zs_compute((const struct zs_file[]){{
                  "src/add.c",
@@ -431,51 +493,83 @@ static int t_lineage_antigaming(void)
                  "           b;\n}\n"}}, 1, &lineage, true, &s) &&
              s.new_source_units == 0 && s.total == 0);
     vcs_score_set_free(&lineage);
+    return failures;
+}
 
-    /* Rename-only: identical content at a new path scores zero (content
-     * hashing, never filenames). */
+/* Rename-only: identical content at a new path scores zero (content
+ * hashing, never filenames). */
+static int t_lineage_rename(void)
+{
+    int failures = 0;
+    struct vcs_score_set lineage;
+    struct vcs_score_release s;
+
     ZS_CHECK("lineage: parent absorbs (rename)", zs_lineage(&lineage,
-        (const struct zs_file[]){{"src/add.c", k_add}}, 1));
+        (const struct zs_file[]){{"src/add.c", k_zs_add}}, 1));
     ZS_CHECK("lineage: rename-only file scores 0",
              zs_compute((const struct zs_file[]){{
-                 "src/plus.c", k_add}}, 1, &lineage, true, &s) &&
+                 "src/plus.c", k_zs_add}}, 1, &lineage, true, &s) &&
              s.new_source_units == 0 && s.total == 0 &&
              s.units_already_rewarded == 2);
     vcs_score_set_free(&lineage);
+    return failures;
+}
 
-    /* Delete-and-re-add: the unit was deleted in the parent but lives in
-     * the GRANDPARENT — the ancestor chain still holds it, so the re-add
-     * scores zero. */
-    {
-        ZS_CHECK("lineage: grandparent + parent absorb",
-                 zs_lineage(&lineage,
-                            (const struct zs_file[]){
-                                {"src/old.c", k_add},      /* grandparent */
-                                {"src/empty.c", "\n"}},    /* parent */
-                            2));
-        ZS_CHECK("lineage: delete-and-re-add scores 0",
-                 zs_compute((const struct zs_file[]){{
-                     "src/old.c", k_add}}, 1, &lineage, true, &s) &&
-                 s.new_source_units == 0 && s.total == 0 &&
-                 s.units_already_rewarded == 2);
-        vcs_score_set_free(&lineage);
-    }
+/* Delete-and-re-add: the unit was deleted in the parent but lives in
+ * the GRANDPARENT — the ancestor chain still holds it, so the re-add
+ * scores zero. */
+static int t_lineage_grandparent(void)
+{
+    int failures = 0;
+    struct vcs_score_set lineage;
+    struct vcs_score_release s;
 
-    /* Within-release copy-paste: the same unit in two files earns once. */
+    ZS_CHECK("lineage: grandparent + parent absorb",
+             zs_lineage(&lineage,
+                        (const struct zs_file[]){
+                            {"src/old.c", k_zs_add},      /* grandparent */
+                            {"src/empty.c", "\n"}},    /* parent */
+                        2));
+    ZS_CHECK("lineage: delete-and-re-add scores 0",
+             zs_compute((const struct zs_file[]){{
+                 "src/old.c", k_zs_add}}, 1, &lineage, true, &s) &&
+             s.new_source_units == 0 && s.total == 0 &&
+             s.units_already_rewarded == 2);
+    vcs_score_set_free(&lineage);
+    return failures;
+}
+
+/* Within-release copy-paste: the same unit in two files earns once. */
+static int t_lineage_duplicate(void)
+{
+    int failures = 0;
+    struct vcs_score_set lineage;
+    struct vcs_score_release s;
+
     ZS_CHECK("lineage: empty", zs_lineage(&lineage, NULL, 0));
     ZS_CHECK("lineage: within-release duplicate earns once",
              zs_compute((const struct zs_file[]){
-                            {"src/a.c", k_add},
-                            {"src/b.c", k_add}}, 2, &lineage, true, &s) &&
+                            {"src/a.c", k_zs_add},
+                            {"src/b.c", k_zs_add}}, 2, &lineage, true,
+                        &s) &&
              s.new_source_units == 2 && s.units_duplicate == 2 &&
              s.raw_line_points == 2);
     vcs_score_set_free(&lineage);
+    return failures;
+}
 
-    /* Copied-source farming: a file copied from the lineage under a new
-     * path AND a new comment scores zero new units. */
+/* Copied-source farming: a file copied from the lineage under a new
+ * path AND a new comment scores zero new units. */
+static int t_lineage_copied(void)
+{
+    int failures = 0;
+    struct vcs_score_set lineage;
+    struct vcs_score_release s;
+
     ZS_CHECK("lineage: parent absorbs (copied source)",
              zs_lineage(&lineage,
-                        (const struct zs_file[]){{"src/add.c", k_add}}, 1));
+                        (const struct zs_file[]){{"src/add.c", k_zs_add}},
+                        1));
     ZS_CHECK("lineage: copied source + comment scores 0",
              zs_compute((const struct zs_file[]){{
                  "src/stolen.c",
@@ -487,92 +581,125 @@ static int t_lineage_antigaming(void)
     return failures;
 }
 
-/* ── 4. scoring: weights, caps, categories, determinism ─────────────── */
-
-static int t_scoring(void)
+static int t_lineage_antigaming(void)
 {
     int failures = 0;
-    struct vcs_score_set lineage;
-    struct vcs_score_release s;
-    ZS_CHECK("scoring: empty lineage", zs_lineage(&lineage, NULL, 0));
+    failures += t_lineage_whitespace();
+    failures += t_lineage_split_attack();
+    failures += t_lineage_rename();
+    failures += t_lineage_grandparent();
+    failures += t_lineage_duplicate();
+    failures += t_lineage_copied();
+    return failures;
+}
 
-    /* Tests out-credit source: the same statement count earns double in
-     * a test file. */
+/* ── 4. scoring: weights, caps, categories, determinism ─────────────── */
+
+/* Tests out-credit source: the same statement count earns double in
+ * a test file. */
+static int t_scoring_weights(const struct vcs_score_set *lineage)
+{
+    int failures = 0;
+    struct vcs_score_release s;
+
     ZS_CHECK("scoring: source weight 1",
              zs_compute((const struct zs_file[]){{
-                 "src/f.c", "int a = 1;\nint b = 2;\n"}}, 1, &lineage,
+                 "src/f.c", "int a = 1;\nint b = 2;\n"}}, 1, lineage,
                  true, &s) &&
              s.new_source_units == 2 && s.new_test_units == 0 &&
              s.raw_line_points == 2);
     ZS_CHECK("scoring: test weight 2 (tests out-credit source)",
              zs_compute((const struct zs_file[]){{
-                 "tests/f.c", "int a = 1;\nint b = 2;\n"}}, 1, &lineage,
+                 "tests/f.c", "int a = 1;\nint b = 2;\n"}}, 1, lineage,
                  true, &s) &&
              s.new_test_units == 2 && s.new_source_units == 0 &&
              s.raw_line_points == 4);
+    return failures;
+}
 
-    /* The 500 line-point cap. */
-    {
-        static char big[65536];
-        size_t off = 0;
-        for (int i = 0; i < 600; i++)
-            off += (size_t)snprintf(big + off, sizeof(big) - off,
-                                    "int v%d = %d;\n", i, i);
-        ZS_CHECK("scoring: 500 line-point cap at 600 new units",
-                 zs_compute((const struct zs_file[]){{
-                     "src/big.c", big}}, 1, &lineage, true, &s) &&
-                 s.raw_line_points == 600 &&
-                 s.line_points == VCS_SCORE_MAX_LINE_POINTS_PER_RELEASE &&
-                 s.line_cap_applied);
-    }
+/* The 500 line-point cap. */
+static int t_scoring_line_cap(const struct vcs_score_set *lineage)
+{
+    int failures = 0;
+    struct vcs_score_release s;
+    static char big[65536];
+    size_t off = 0;
+    for (int i = 0; i < 600; i++)
+        off += (size_t)snprintf(big + off, sizeof(big) - off,
+                                "int v%d = %d;\n", i, i);
+    ZS_CHECK("scoring: 500 line-point cap at 600 new units",
+             zs_compute((const struct zs_file[]){{
+                 "src/big.c", big}}, 1, lineage, true, &s) &&
+             s.raw_line_points == 600 &&
+             s.line_points == VCS_SCORE_MAX_LINE_POINTS_PER_RELEASE &&
+             s.line_cap_applied);
+    return failures;
+}
 
-    /* Categories. */
+/* Categories. */
+static int t_scoring_categories(const struct vcs_score_set *lineage)
+{
+    int failures = 0;
+    struct vcs_score_release s;
+
     ZS_CHECK("scoring: root release is new-package (base 500)",
              zs_compute((const struct zs_file[]){{
-                 "src/f.c", "int a = 1;\n"}}, 1, &lineage, false, &s) &&
+                 "src/f.c", "int a = 1;\n"}}, 1, lineage, false, &s) &&
              s.category == VCS_SCORE_CATEGORY_NEW_PACKAGE &&
              s.category_base == VCS_SCORE_CATEGORY_NEW_PACKAGE_POINTS &&
              s.total == 500 + 1);
     ZS_CHECK("scoring: source update is package-update (base 100)",
              zs_compute((const struct zs_file[]){{
-                 "src/f.c", "int a = 1;\n"}}, 1, &lineage, true, &s) &&
+                 "src/f.c", "int a = 1;\n"}}, 1, lineage, true, &s) &&
              s.category == VCS_SCORE_CATEGORY_PACKAGE_UPDATE &&
              s.category_base == VCS_SCORE_CATEGORY_PACKAGE_UPDATE_MIN &&
              s.total == 100 + 1);
     ZS_CHECK("scoring: test-only update is test-contribution (base 100)",
              zs_compute((const struct zs_file[]){{
-                 "tests/f.c", "int a = 1;\n"}}, 1, &lineage, true, &s) &&
+                 "tests/f.c", "int a = 1;\n"}}, 1, lineage, true, &s) &&
              s.category == VCS_SCORE_CATEGORY_TEST_CONTRIBUTION &&
              s.category_base == VCS_SCORE_CATEGORY_TEST_CONTRIBUTION_MIN &&
              s.total == 100 + 2);
     ZS_CHECK("scoring: empty update is category none (total 0)",
              zs_compute((const struct zs_file[]){{
-                 "src/f.c", "\n\n"}}, 1, &lineage, true, &s) &&
+                 "src/f.c", "\n\n"}}, 1, lineage, true, &s) &&
              s.category == VCS_SCORE_CATEGORY_NONE &&
              s.category_base == 0 && s.total == 0);
+    return failures;
+}
 
-    /* The per-release total cap binds at the top: a root release cannot
-     * pass 5000 even with a saturated line component. */
-    {
-        static char huge[131072];
-        size_t off = 0;
-        for (int i = 0; i < 3000; i++)
-            off += (size_t)snprintf(huge + off, sizeof(huge) - off,
-                                    "int w%d = %d;\n", i, i);
-        ZS_CHECK("scoring: saturated lines stay under the release cap",
-                 zs_compute((const struct zs_file[]){{
-                     "src/huge.c", huge}}, 1, &lineage, false, &s) &&
-                 s.total == 500 + 500 && !s.release_cap_applied &&
-                 s.line_cap_applied);
-    }
+/* The per-release total cap binds at the top: a root release cannot
+ * pass 5000 even with a saturated line component. */
+static int t_scoring_release_cap(const struct vcs_score_set *lineage)
+{
+    int failures = 0;
+    struct vcs_score_release s;
+    static char huge[131072];
+    size_t off = 0;
+    for (int i = 0; i < 3000; i++)
+        off += (size_t)snprintf(huge + off, sizeof(huge) - off,
+                                "int w%d = %d;\n", i, i);
+    ZS_CHECK("scoring: saturated lines stay under the release cap",
+             zs_compute((const struct zs_file[]){{
+                 "src/huge.c", huge}}, 1, lineage, false, &s) &&
+             s.total == 500 + 500 && !s.release_cap_applied &&
+             s.line_cap_applied);
+    return failures;
+}
 
-    /* Excluded files contribute nothing and are named in the report. */
+/* Excluded files contribute nothing and are named in the report, and
+ * oversize-by-declared-size files are never read but named. */
+static int t_scoring_excluded(const struct vcs_score_set *lineage)
+{
+    int failures = 0;
+    struct vcs_score_release s;
+
     ZS_CHECK("scoring: excluded files named (vendored/generated/ext)",
              zs_compute((const struct zs_file[]){
                  {"vendor/v.c", "int q = 1;\n"},
                  {"gen/generated/g.c", "int q = 2;\n"},
                  {"notes.txt", "int q = 3;\n"},
-                 {"src/real.c", "int q = 4;\n"}}, 4, &lineage, true,
+                 {"src/real.c", "int q = 4;\n"}}, 4, lineage, true,
                  &s) &&
              s.files_excluded == 3 && s.files_scored == 1 &&
              s.new_source_units == 1 &&
@@ -580,56 +707,88 @@ static int t_scoring(void)
              s.files[1].reason == VCS_SCORE_EXCLUDE_GENERATED_PATH &&
              s.files[2].reason == VCS_SCORE_EXCLUDE_EXTENSION);
 
-    /* Oversize by declared size: never read, named. */
     {
         struct vcs_score_input_file over = {
             .path = "src/huge.c", .bytes = NULL, .len = 0,
             .declared_size = VCS_SCORE_MAX_FILE_BYTES + 1u,
         };
         ZS_CHECK("scoring: oversize file excluded by declared size",
-                 vcs_score_release_compute(&over, 1, &lineage, true, &s) &&
+                 vcs_score_release_compute(&over, 1, lineage, true, &s) &&
                  s.files_excluded == 1 &&
                  s.files[0].reason == VCS_SCORE_EXCLUDE_OVERSIZE &&
                  s.total == 0);
     }
+    return failures;
+}
 
-    /* Determinism: identical inputs, identical report. */
-    {
-        struct vcs_score_release s2;
-        static const struct zs_file k_files[] = {
-            {"src/f.c", "int a = 1;\nint b = 2;\n"},
-            {"tests/f.c", "int c = 3;\n"},
-        };
-        bool ok1 = zs_compute(k_files, 2, &lineage, false, &s);
-        bool ok2 = zs_compute(k_files, 2, &lineage, false, &s2);
-        ZS_CHECK("scoring: two runs are byte-identical",
-                 ok1 && ok2 && s.total == s2.total &&
-                 s.category == s2.category &&
-                 s.new_source_units == s2.new_source_units &&
-                 s.new_test_units == s2.new_test_units &&
-                 s.units_duplicate == s2.units_duplicate &&
-                 s.semantic_lines == s2.semantic_lines &&
-                 s.file_report_count == s2.file_report_count &&
-                 s.files[0].points == s2.files[0].points &&
-                 s.files[1].points == s2.files[1].points);
-    }
+/* Determinism: identical inputs, identical report. */
+static int t_scoring_determinism(const struct vcs_score_set *lineage)
+{
+    int failures = 0;
+    struct vcs_score_release s;
+    struct vcs_score_release s2;
+    static const struct zs_file k_files[] = {
+        {"src/f.c", "int a = 1;\nint b = 2;\n"},
+        {"tests/f.c", "int c = 3;\n"},
+    };
+    bool ok1 = zs_compute(k_files, 2, lineage, false, &s);
+    bool ok2 = zs_compute(k_files, 2, lineage, false, &s2);
+    ZS_CHECK("scoring: two runs are byte-identical",
+             ok1 && ok2 && s.total == s2.total &&
+             s.category == s2.category &&
+             s.new_source_units == s2.new_source_units &&
+             s.new_test_units == s2.new_test_units &&
+             s.units_duplicate == s2.units_duplicate &&
+             s.semantic_lines == s2.semantic_lines &&
+             s.file_report_count == s2.file_report_count &&
+             s.files[0].points == s2.files[0].points &&
+             s.files[1].points == s2.files[1].points);
+    return failures;
+}
 
-    /* The scoring table carries every owner-directive constant. */
-    {
-        size_t n = 0;
-        const struct vcs_score_category_constant *tbl =
-            vcs_score_category_table(&n);
-        bool names = n == 8 &&
-            tbl[0].min_points == 500 && tbl[0].automatic &&
-            tbl[1].min_points == 100 && tbl[1].max_points == 500 &&
-            tbl[2].min_points == 250 && !tbl[2].automatic &&
-            tbl[3].min_points == 100 && tbl[3].max_points == 500 &&
-            tbl[4].min_points == 100 && !tbl[4].automatic &&
-            tbl[5].min_points == 500 && tbl[5].max_points == 5000 &&
-            tbl[6].min_points == 100 && !tbl[6].automatic &&
-            tbl[7].min_points == 50 && tbl[7].max_points == 500;
-        ZS_CHECK("scoring: owner-directive constants table", names);
-    }
+/* The scoring table carries every owner-directive constant. */
+static bool zs_score_table_first_half(
+    const struct vcs_score_category_constant *tbl)
+{
+    return tbl[0].min_points == 500 && tbl[0].automatic &&
+           tbl[1].min_points == 100 && tbl[1].max_points == 500 &&
+           tbl[2].min_points == 250 && !tbl[2].automatic &&
+           tbl[3].min_points == 100 && tbl[3].max_points == 500;
+}
+
+static bool zs_score_table_second_half(
+    const struct vcs_score_category_constant *tbl)
+{
+    return tbl[4].min_points == 100 && !tbl[4].automatic &&
+           tbl[5].min_points == 500 && tbl[5].max_points == 5000 &&
+           tbl[6].min_points == 100 && !tbl[6].automatic &&
+           tbl[7].min_points == 50 && tbl[7].max_points == 500;
+}
+
+static int t_scoring_table(void)
+{
+    int failures = 0;
+    size_t n = 0;
+    const struct vcs_score_category_constant *tbl =
+        vcs_score_category_table(&n);
+    bool names = n == 8 && zs_score_table_first_half(tbl) &&
+                 zs_score_table_second_half(tbl);
+    ZS_CHECK("scoring: owner-directive constants table", names);
+    return failures;
+}
+
+static int t_scoring(void)
+{
+    int failures = 0;
+    struct vcs_score_set lineage;
+    ZS_CHECK("scoring: empty lineage", zs_lineage(&lineage, NULL, 0));
+    failures += t_scoring_weights(&lineage);
+    failures += t_scoring_line_cap(&lineage);
+    failures += t_scoring_categories(&lineage);
+    failures += t_scoring_release_cap(&lineage);
+    failures += t_scoring_excluded(&lineage);
+    failures += t_scoring_determinism(&lineage);
+    failures += t_scoring_table();
     vcs_score_set_free(&lineage);
     return failures;
 }
@@ -687,7 +846,7 @@ static int t_period_caps(void)
 
 /* ── 6. eligibility library ─────────────────────────────────────────── */
 
-static int t_eligibility_lib(void)
+static int t_elig_gate_strings(void)
 {
     int failures = 0;
     ZS_CHECK("elig: gate strings frozen",
@@ -708,28 +867,47 @@ static int t_eligibility_lib(void)
              strcmp(vcs_reward_gate_string(VCS_REWARD_GATE_VERIFIER_QUORUM),
                     "verifier-quorum") == 0 &&
              VCS_REWARD_GATE_COUNT == 8);
+    return failures;
+}
 
+/* A fully passing eligibility input. */
+static void zs_elig_full_input(struct vcs_reward_eligibility_input *in)
+{
+    memset(in, 0, sizeof(*in));
+    in->manifest_parsed = true;
+    in->root_matches = true;
+    in->chunks_checked = true;
+    in->chunks_verified = 3;
+    in->chunks_total = 3;
+    in->release_verifies = true;
+    in->license_accepted = true;
+    in->lineage_valid = true;
+    in->lineage_detail = "root release (no parent)";
+    in->quorum_verified = true;
+    in->gcc_pass = true;
+    in->clang_pass = true;
+    in->tests_pass = true;
+}
+
+static int t_elig_full_pass(void)
+{
+    int failures = 0;
     struct vcs_reward_eligibility_input in;
-    memset(&in, 0, sizeof(in));
-    in.manifest_parsed = true;
-    in.root_matches = true;
-    in.chunks_checked = true;
-    in.chunks_verified = 3;
-    in.chunks_total = 3;
-    in.release_verifies = true;
-    in.license_accepted = true;
-    in.lineage_valid = true;
-    in.lineage_detail = "root release (no parent)";
-    in.quorum_verified = true;
-    in.gcc_pass = true;
-    in.clang_pass = true;
-    in.tests_pass = true;
-
     struct vcs_reward_eligibility e;
+    zs_elig_full_input(&in);
     vcs_reward_eligibility_evaluate(&in, &e);
     ZS_CHECK("elig: full pass is eligible",
              e.eligible && e.failed_count == 0 &&
              e.gates[0].passed && e.gates[7].passed);
+    return failures;
+}
+
+static int t_elig_single_failures(void)
+{
+    int failures = 0;
+    struct vcs_reward_eligibility_input in;
+    struct vcs_reward_eligibility e;
+    zs_elig_full_input(&in);
 
     struct vcs_reward_eligibility_input bad = in;
     bad.release_verifies = false;
@@ -757,8 +935,17 @@ static int t_eligibility_lib(void)
              !e.gates[VCS_REWARD_GATE_PARENT_LINEAGE].passed &&
              strcmp(e.gates[VCS_REWARD_GATE_PARENT_LINEAGE].detail,
                     "parent release not hosted") == 0);
+    return failures;
+}
 
-    bad = in;
+static int t_elig_quorum(void)
+{
+    int failures = 0;
+    struct vcs_reward_eligibility_input in;
+    struct vcs_reward_eligibility e;
+    zs_elig_full_input(&in);
+
+    struct vcs_reward_eligibility_input bad = in;
     bad.quorum_verified = false;
     bad.gcc_pass = bad.clang_pass = bad.tests_pass = false;
     vcs_reward_eligibility_evaluate(&bad, &e);
@@ -777,9 +964,18 @@ static int t_eligibility_lib(void)
     ZS_CHECK("elig: short chunk verification named",
              !e.eligible && e.failed_count == 1 &&
              !e.gates[VCS_REWARD_GATE_PACKAGE_ROOT].passed);
+    return failures;
+}
+
+static int t_elig_multi_repro(void)
+{
+    int failures = 0;
+    struct vcs_reward_eligibility_input in;
+    struct vcs_reward_eligibility e;
+    zs_elig_full_input(&in);
 
     /* Multiple simultaneous failures are all named. */
-    bad = in;
+    struct vcs_reward_eligibility_input bad = in;
     bad.release_verifies = false;
     bad.quorum_verified = false;
     vcs_reward_eligibility_evaluate(&bad, &e);
@@ -803,6 +999,17 @@ static int t_eligibility_lib(void)
              e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].passed &&
              strstr(e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].detail,
                     "reproduction") != NULL);
+    return failures;
+}
+
+static int t_eligibility_lib(void)
+{
+    int failures = 0;
+    failures += t_elig_gate_strings();
+    failures += t_elig_full_pass();
+    failures += t_elig_single_failures();
+    failures += t_elig_quorum();
+    failures += t_elig_multi_repro();
     return failures;
 }
 
@@ -832,18 +1039,7 @@ static void zs_cmd_free(struct zs_cmd *c)
     json_free(&c->input);
 }
 
-/* Publish one fixture package: manifest + chunks + a signed release by
- * publisher key 0x11. The recipe root is a fixed nonzero pattern (the
- * score/eligible surfaces never read the recipe wire; the attestations
- * commit to the same pattern). corrupt_sig flips one signature byte
- * after signing (the envelope still parses; verification fails). */
-static bool zs_publish(const char *store, const struct zs_file *files,
-                       size_t file_count, const char *semver,
-                       bool has_parent, const uint8_t parent_id[32],
-                       uint64_t sequence, bool corrupt_sig,
-                       uint8_t package_root_out[32],
-                       uint8_t release_id_out[32],
-                       uint8_t recipe_root_out[32])
+static bool zs_publish_dirs(const char *store)
 {
     char dir[4400];
     snprintf(dir, sizeof(dir), "%s/manifests", store);
@@ -853,9 +1049,16 @@ static bool zs_publish(const char *store, const struct zs_file *files,
     if (!zs_mkdir_p(dir))
         return false;
     snprintf(dir, sizeof(dir), "%s/cas/sha3", store);
-    if (!zs_mkdir_p(dir))
-        return false;
+    return zs_mkdir_p(dir);
+}
 
+/* Build, root, serialize, and persist the package manifest, storing one
+ * content-addressed chunk per non-empty file. */
+static bool zs_publish_manifest(const char *store,
+                                const struct zs_file *files,
+                                size_t file_count,
+                                uint8_t package_root_out[32])
+{
     struct vcs_package_manifest m;
     vcs_package_manifest_init(&m);
     bool ok = true;
@@ -901,11 +1104,18 @@ static bool zs_publish(const char *store, const struct zs_file *files,
     snprintf(path, sizeof(path), "%s/manifests/%s", store, root_hex);
     ok = zs_write_file(path, mwire, mwire_len, 0600);
     free(mwire);
-    if (!ok)
-        return false;
+    return ok;
+}
 
-    for (size_t i = 0; i < 32; i++)
-        recipe_root_out[i] = (uint8_t)(0x80 + i);
+/* Build, sign, serialize, and persist one release envelope. */
+static bool zs_publish_release(const char *store, const char *semver,
+                               bool has_parent,
+                               const uint8_t parent_id[32],
+                               uint64_t sequence, bool corrupt_sig,
+                               const uint8_t package_root[32],
+                               const uint8_t recipe_root[32],
+                               uint8_t release_id_out[32])
+{
     struct privkey sk;
     struct pubkey pk;
     if (!zs_keypair(0x11, &sk, &pk))
@@ -915,7 +1125,7 @@ static bool zs_publish(const char *store, const struct zs_file *files,
     rel.schema_version = VCS_PACKAGE_RELEASE_VERSION;
     snprintf(rel.name, sizeof(rel.name), "alice/addpkg");
     snprintf(rel.semver, sizeof(rel.semver), "%s", semver);
-    memcpy(rel.package_root, package_root_out, 32);
+    memcpy(rel.package_root, package_root, 32);
     rel.has_parent = has_parent;
     if (has_parent)
         memcpy(rel.parent_root, parent_id, 32);
@@ -923,7 +1133,7 @@ static bool zs_publish(const char *store, const struct zs_file *files,
     rel.publisher_sequence = sequence;
     snprintf(rel.reward_address, sizeof(rel.reward_address), "t1fixture");
     snprintf(rel.license, sizeof(rel.license), "MIT");
-    memcpy(rel.recipe_root, recipe_root_out, 32);
+    memcpy(rel.recipe_root, recipe_root, 32);
     rel.has_znam = false;
     snprintf(rel.chain_id, sizeof(rel.chain_id), "zclassic-main");
     uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
@@ -945,10 +1155,37 @@ static bool zs_publish(const char *store, const struct zs_file *files,
     memcpy(release_id_out, id, 32);
     char id_hex[65];
     zs_hex_enc(id, 32, id_hex);
+    char path[4400];
     snprintf(path, sizeof(path), "%s/releases/%s", store, id_hex);
-    ok = zs_write_file(path, relwire, relwire_len, 0600);
+    bool ok = zs_write_file(path, relwire, relwire_len, 0600);
     free(relwire);
     return ok;
+}
+
+/* Publish one fixture package: manifest + chunks + a signed release by
+ * publisher key 0x11. The recipe root is a fixed nonzero pattern (the
+ * score/eligible surfaces never read the recipe wire; the attestations
+ * commit to the same pattern). corrupt_sig flips one signature byte
+ * after signing (the envelope still parses; verification fails). */
+static bool zs_publish(const char *store, const struct zs_file *files,
+                       size_t file_count, const char *semver,
+                       bool has_parent, const uint8_t parent_id[32],
+                       uint64_t sequence, bool corrupt_sig,
+                       uint8_t package_root_out[32],
+                       uint8_t release_id_out[32],
+                       uint8_t recipe_root_out[32])
+{
+    if (!zs_publish_dirs(store))
+        return false;
+    if (!zs_publish_manifest(store, files, file_count, package_root_out))
+        return false;
+    uint8_t recipe[32];
+    for (size_t i = 0; i < 32; i++)
+        recipe[i] = (uint8_t)(0x80 + i);
+    memcpy(recipe_root_out, recipe, 32);
+    return zs_publish_release(store, semver, has_parent, parent_id,
+                              sequence, corrupt_sig, package_root_out,
+                              recipe, release_id_out);
 }
 
 static bool zs_store_attestation(const char *store,
@@ -1042,210 +1279,250 @@ static bool zs_gate_failed(const struct json_value *failed,
     return false;
 }
 
-static int t_command(void)
+/* Publish a fixture child release and run the score handler over it. */
+static bool zs_cmd_publish_score(const char *datadir, const char *store,
+                                 const struct zs_file *files,
+                                 size_t count, const char *semver,
+                                 bool has_parent,
+                                 const uint8_t parent_id[32],
+                                 uint64_t sequence, bool corrupt_sig,
+                                 struct zs_cmd *c,
+                                 uint8_t release_id_out[32])
+{
+    uint8_t pr[32], rr[32];
+    char pr_hex[65];
+    bool ok = zs_publish(store, files, count, semver, has_parent,
+                         parent_id, sequence, corrupt_sig, pr,
+                         release_id_out, rr);
+    zs_hex_enc(pr, 32, pr_hex);
+    zs_cmd_init(c, datadir, pr_hex);
+    zcl_native_handle_zcode_reward_score(&c->request, &c->reply);
+    return ok;
+}
+
+/* Publish a fixture child release and run the eligible handler. */
+static bool zs_cmd_publish_eligible(const char *datadir, const char *store,
+                                    const struct zs_file *files,
+                                    size_t count, const char *semver,
+                                    bool has_parent,
+                                    const uint8_t parent_id[32],
+                                    uint64_t sequence, bool corrupt_sig,
+                                    struct zs_cmd *c,
+                                    uint8_t release_id_out[32])
+{
+    uint8_t pr[32], rr[32];
+    char pr_hex[65];
+    bool ok = zs_publish(store, files, count, semver, has_parent,
+                         parent_id, sequence, corrupt_sig, pr,
+                         release_id_out, rr);
+    zs_hex_enc(pr, 32, pr_hex);
+    zs_cmd_init(c, datadir, pr_hex);
+    zcl_native_handle_zcode_reward_eligible(&c->request, &c->reply);
+    return ok;
+}
+
+/* LICENSE is excluded with the extension rule, named per file. */
+static bool zs_cmd_license_excluded_named(const struct json_value *files)
+{
+    bool license_named = false;
+    for (size_t i = 0; files && json_at(files, i); i++) {
+        const struct json_value *row = json_at(files, i);
+        const char *path = json_get_str(json_get(row, "path"));
+        const char *reason = json_get_str(json_get(row, "reason"));
+        if (path && strcmp(path, "LICENSE") == 0 && reason &&
+            strcmp(reason, "not-c-source") == 0)
+            license_named = true;
+    }
+    return license_named;
+}
+
+/* Score the root release: new-package 500 + 8 line points = 508. */
+static int t_cmd_score_root(const char *datadir, const char *pr_hex)
 {
     int failures = 0;
-    char datadir[4400];
-    snprintf(datadir, sizeof(datadir), "test-tmp/zs_cmd_%ld",
-             (long)getpid());
-    char store[4400];
-    snprintf(store, sizeof(store), "%s/zcode", datadir);
-    zs_rm_rf(datadir);
+    struct zs_cmd c;
+    zs_cmd_init(&c, datadir, pr_hex);
+    zcl_native_handle_zcode_reward_score(&c.request, &c.reply);
+    const char *cat = json_get_str(json_get(&c.reply.data, "category"));
+    ZS_CHECK("command: root release scores new-package 508",
+             cat && strcmp(cat, "new-package") == 0 &&
+             json_get_int(json_get(&c.reply.data, "category_base")) ==
+                 500 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "new_source")) == 4 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "new_test")) == 2 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "duplicate_within_release")) == 2 &&
+             json_get_int(json_get(json_get(&c.reply.data, "points"),
+                                   "total")) == 508 &&
+             !json_get_bool(json_get(json_get(&c.reply.data, "points"),
+                                     "line_cap_applied")));
+    ZS_CHECK("command: LICENSE excluded with the named rule",
+             zs_cmd_license_excluded_named(json_get(&c.reply.data,
+                                                    "files")));
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    uint8_t pr[32], ri[32], rr[32];
-    bool f1 = zs_publish(store, k_v1_files,
-                         sizeof(k_v1_files) / sizeof(k_v1_files[0]),
-                         "1.0.0", false, NULL, 1, false, pr, ri, rr);
-    ZS_CHECK("command: v1 fixture publishes", f1);
-    if (!f1)
-        return failures + 1;
-    char pr_hex[65];
-    zs_hex_enc(pr, 32, pr_hex);
+/* Determinism at the command surface: two runs, identical report. */
+static int t_cmd_score_determinism(const char *datadir, const char *pr_hex)
+{
+    int failures = 0;
+    struct zs_cmd c1, c2;
+    zs_cmd_init(&c1, datadir, pr_hex);
+    zcl_native_handle_zcode_reward_score(&c1.request, &c1.reply);
+    zs_cmd_init(&c2, datadir, pr_hex);
+    zcl_native_handle_zcode_reward_score(&c2.request, &c2.reply);
+    ZS_CHECK("command: two score runs are identical",
+             json_get_int(json_get(json_get(&c1.reply.data, "points"),
+                                   "total")) ==
+                 json_get_int(json_get(json_get(&c2.reply.data,
+                                                "points"), "total")) &&
+             json_get_int(json_get(json_get(&c1.reply.data, "units"),
+                                   "new_source")) ==
+                 json_get_int(json_get(json_get(&c2.reply.data,
+                                                "units"),
+                                       "new_source")) &&
+             json_get_int(json_get(json_get(&c1.reply.data, "lines"),
+                                   "semantic")) ==
+                 json_get_int(json_get(json_get(&c2.reply.data,
+                                                "lines"), "semantic")));
+    zs_cmd_free(&c1);
+    zs_cmd_free(&c2);
+    return failures;
+}
 
-    /* Score the root release: new-package 500 + 8 line points = 508. */
-    {
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr_hex);
-        zcl_native_handle_zcode_reward_score(&c.request, &c.reply);
-        const char *cat = json_get_str(json_get(&c.reply.data, "category"));
-        ZS_CHECK("command: root release scores new-package 508",
-                 cat && strcmp(cat, "new-package") == 0 &&
-                 json_get_int(json_get(&c.reply.data, "category_base")) ==
-                     500 &&
+/* Child v2: whitespace-only re-edit of add.c. Zero. */
+static int t_cmd_child_whitespace(const char *datadir, const char *store,
+                                  const uint8_t parent_id[32])
+{
+    int failures = 0;
+    const struct zs_file v2[] = {
+        { "LICENSE", "MIT License\n" },
+        { "src/add.c",
+          "#include  \"add.h\"\nint  add( int a , int b )\n{\n"
+          "    return  a + b ;\n}\n" },
+        { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
+        { "test/test_add.c",
+          "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
+    };
+    struct zs_cmd c;
+    uint8_t ri2[32];
+    bool f2 = zs_cmd_publish_score(datadir, store, v2,
+                                   sizeof(v2) / sizeof(v2[0]), "1.0.1",
+                                   true, parent_id, 2, false, &c, ri2);
+    const char *cat = json_get_str(json_get(&c.reply.data, "category"));
+    ZS_CHECK("command: whitespace-only child scores 0",
+             f2 && cat && strcmp(cat, "none") == 0 &&
+             json_get_int(json_get(json_get(&c.reply.data, "points"),
+                                   "total")) == 0 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "already_rewarded")) ==
                  json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "new_source")) == 4 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "new_test")) == 2 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "duplicate_within_release")) == 2 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "points"),
-                                       "total")) == 508 &&
-                 !json_get_bool(json_get(json_get(&c.reply.data, "points"),
-                                         "line_cap_applied")));
-        /* LICENSE is excluded with the extension rule, named per file. */
-        const struct json_value *files = json_get(&c.reply.data, "files");
-        bool license_named = false;
-        for (size_t i = 0; files && json_at(files, i); i++) {
-            const struct json_value *row = json_at(files, i);
-            const char *path = json_get_str(json_get(row, "path"));
-            const char *reason = json_get_str(json_get(row, "reason"));
-            if (path && strcmp(path, "LICENSE") == 0 && reason &&
-                strcmp(reason, "not-c-source") == 0)
-                license_named = true;
-        }
-        ZS_CHECK("command: LICENSE excluded with the named rule",
-                 license_named);
-        zs_cmd_free(&c);
-    }
+                                       "total")) &&
+             json_get_int(json_get(json_get(&c.reply.data, "lineage"),
+                                   "ancestors_walked")) == 1 &&
+             json_get_bool(json_get(json_get(&c.reply.data, "lineage"),
+                                    "complete")));
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Determinism at the command surface: two runs, identical report. */
-    {
-        struct zs_cmd c1, c2;
-        zs_cmd_init(&c1, datadir, pr_hex);
-        zcl_native_handle_zcode_reward_score(&c1.request, &c1.reply);
-        zs_cmd_init(&c2, datadir, pr_hex);
-        zcl_native_handle_zcode_reward_score(&c2.request, &c2.reply);
-        ZS_CHECK("command: two score runs are identical",
-                 json_get_int(json_get(json_get(&c1.reply.data, "points"),
-                                       "total")) ==
-                     json_get_int(json_get(json_get(&c2.reply.data,
-                                                    "points"), "total")) &&
-                 json_get_int(json_get(json_get(&c1.reply.data, "units"),
-                                       "new_source")) ==
-                     json_get_int(json_get(json_get(&c2.reply.data,
-                                                    "units"),
-                                           "new_source")) &&
-                 json_get_int(json_get(json_get(&c1.reply.data, "lines"),
-                                       "semantic")) ==
-                     json_get_int(json_get(json_get(&c2.reply.data,
-                                                    "lines"), "semantic")));
-        zs_cmd_free(&c1);
-        zs_cmd_free(&c2);
-    }
+/* Child v3: add.c renamed to plus.c, identical content. Zero. */
+static int t_cmd_child_rename(const char *datadir, const char *store,
+                              const uint8_t parent_id[32])
+{
+    int failures = 0;
+    const struct zs_file v3[] = {
+        { "LICENSE", "MIT License\n" },
+        { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
+        { "src/plus.c",
+          "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
+        { "test/test_add.c",
+          "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
+    };
+    struct zs_cmd c;
+    uint8_t ri3[32];
+    bool f3 = zs_cmd_publish_score(datadir, store, v3,
+                                   sizeof(v3) / sizeof(v3[0]), "1.0.2",
+                                   true, parent_id, 2, false, &c, ri3);
+    ZS_CHECK("command: rename-only child scores 0",
+             f3 &&
+             json_get_int(json_get(json_get(&c.reply.data, "points"),
+                                   "total")) == 0 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "new_source")) == 0);
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Child v2: whitespace-only re-edit of add.c. Zero. */
-    {
-        const struct zs_file v2[] = {
-            { "LICENSE", "MIT License\n" },
-            { "src/add.c",
-              "#include  \"add.h\"\nint  add( int a , int b )\n{\n"
-              "    return  a + b ;\n}\n" },
-            { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
-            { "test/test_add.c",
-              "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
-        };
-        uint8_t pr2[32], ri2[32], rr2[32];
-        bool f2 = zs_publish(store, v2, sizeof(v2) / sizeof(v2[0]),
-                             "1.0.1", true, ri, 2, false, pr2, ri2, rr2);
-        char pr2_hex[65];
-        zs_hex_enc(pr2, 32, pr2_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr2_hex);
-        zcl_native_handle_zcode_reward_score(&c.request, &c.reply);
-        const char *cat = json_get_str(json_get(&c.reply.data, "category"));
-        ZS_CHECK("command: whitespace-only child scores 0",
-                 f2 && cat && strcmp(cat, "none") == 0 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "points"),
-                                       "total")) == 0 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "already_rewarded")) ==
-                     json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                           "total")) &&
-                 json_get_int(json_get(json_get(&c.reply.data, "lineage"),
-                                       "ancestors_walked")) == 1 &&
-                 json_get_bool(json_get(json_get(&c.reply.data, "lineage"),
-                                        "complete")));
-        zs_cmd_free(&c);
-    }
+/* Child v4: one genuinely new function. package-update 100 + 2. */
+static int t_cmd_child_newfn(const char *datadir, const char *store,
+                             const uint8_t parent_id[32])
+{
+    int failures = 0;
+    const struct zs_file v4[] = {
+        { "LICENSE", "MIT License\n" },
+        { "src/add.c",
+          "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n"
+          "int sub(int a, int b) { return a - b; }\n" },
+        { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
+        { "test/test_add.c",
+          "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
+    };
+    struct zs_cmd c;
+    uint8_t ri4[32];
+    bool f4 = zs_cmd_publish_score(datadir, store, v4,
+                                   sizeof(v4) / sizeof(v4[0]), "1.1.0",
+                                   true, parent_id, 2, false, &c, ri4);
+    const char *cat = json_get_str(json_get(&c.reply.data, "category"));
+    ZS_CHECK("command: new function scores package-update 102",
+             f4 && cat && strcmp(cat, "package-update") == 0 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "new_source")) == 2 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "already_rewarded")) == 6 &&
+             json_get_int(json_get(json_get(&c.reply.data, "points"),
+                                   "total")) == 102);
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Child v3: add.c renamed to plus.c, identical content. Zero. */
-    {
-        const struct zs_file v3[] = {
-            { "LICENSE", "MIT License\n" },
-            { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
-            { "src/plus.c",
-              "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
-            { "test/test_add.c",
-              "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
-        };
-        uint8_t pr3[32], ri3[32], rr3[32];
-        bool f3 = zs_publish(store, v3, sizeof(v3) / sizeof(v3[0]),
-                             "1.0.2", true, ri, 2, false, pr3, ri3, rr3);
-        char pr3_hex[65];
-        zs_hex_enc(pr3, 32, pr3_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr3_hex);
-        zcl_native_handle_zcode_reward_score(&c.request, &c.reply);
-        ZS_CHECK("command: rename-only child scores 0",
-                 f3 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "points"),
-                                       "total")) == 0 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "new_source")) == 0);
-        zs_cmd_free(&c);
-    }
+/* Child v5: a new test only. test-contribution 100 + 2*2. */
+static int t_cmd_child_newtest(const char *datadir, const char *store,
+                               const uint8_t parent_id[32])
+{
+    int failures = 0;
+    const struct zs_file v5[] = {
+        { "LICENSE", "MIT License\n" },
+        { "src/add.c",
+          "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
+        { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
+        { "test/test_add.c",
+          "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n"
+          "int extra(void) { return add(1, 1) == 2 ? 0 : 1; }\n" },
+    };
+    struct zs_cmd c;
+    uint8_t ri5[32];
+    bool f5 = zs_cmd_publish_score(datadir, store, v5,
+                                   sizeof(v5) / sizeof(v5[0]), "1.1.1",
+                                   true, parent_id, 2, false, &c, ri5);
+    const char *cat = json_get_str(json_get(&c.reply.data, "category"));
+    ZS_CHECK("command: new test scores test-contribution 104",
+             f5 && cat && strcmp(cat, "test-contribution") == 0 &&
+             json_get_int(json_get(json_get(&c.reply.data, "units"),
+                                   "new_test")) == 2 &&
+             json_get_int(json_get(json_get(&c.reply.data, "points"),
+                                   "total")) == 104);
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Child v4: one genuinely new function. package-update 100 + 2. */
-    {
-        const struct zs_file v4[] = {
-            { "LICENSE", "MIT License\n" },
-            { "src/add.c",
-              "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n"
-              "int sub(int a, int b) { return a - b; }\n" },
-            { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
-            { "test/test_add.c",
-              "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
-        };
-        uint8_t pr4[32], ri4[32], rr4[32];
-        bool f4 = zs_publish(store, v4, sizeof(v4) / sizeof(v4[0]),
-                             "1.1.0", true, ri, 2, false, pr4, ri4, rr4);
-        char pr4_hex[65];
-        zs_hex_enc(pr4, 32, pr4_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr4_hex);
-        zcl_native_handle_zcode_reward_score(&c.request, &c.reply);
-        const char *cat = json_get_str(json_get(&c.reply.data, "category"));
-        ZS_CHECK("command: new function scores package-update 102",
-                 f4 && cat && strcmp(cat, "package-update") == 0 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "new_source")) == 2 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "already_rewarded")) == 6 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "points"),
-                                       "total")) == 102);
-        zs_cmd_free(&c);
-    }
-
-    /* Child v5: a new test only. test-contribution 100 + 2*2. */
-    {
-        const struct zs_file v5[] = {
-            { "LICENSE", "MIT License\n" },
-            { "src/add.c",
-              "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
-            { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
-            { "test/test_add.c",
-              "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n"
-              "int extra(void) { return add(1, 1) == 2 ? 0 : 1; }\n" },
-        };
-        uint8_t pr5[32], ri5[32], rr5[32];
-        bool f5 = zs_publish(store, v5, sizeof(v5) / sizeof(v5[0]),
-                             "1.1.1", true, ri, 2, false, pr5, ri5, rr5);
-        char pr5_hex[65];
-        zs_hex_enc(pr5, 32, pr5_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr5_hex);
-        zcl_native_handle_zcode_reward_score(&c.request, &c.reply);
-        const char *cat = json_get_str(json_get(&c.reply.data, "category"));
-        ZS_CHECK("command: new test scores test-contribution 104",
-                 f5 && cat && strcmp(cat, "test-contribution") == 0 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "units"),
-                                       "new_test")) == 2 &&
-                 json_get_int(json_get(json_get(&c.reply.data, "points"),
-                                       "total")) == 104);
-        zs_cmd_free(&c);
-    }
-
-    /* Rejections. */
+/* Rejections: BAD_ROOT on score, UNKNOWN_PACKAGE on eligible. */
+static int t_cmd_rejections(const char *datadir)
+{
+    int failures = 0;
     {
         struct zs_cmd c;
         zs_cmd_init(&c, datadir, "zz");
@@ -1267,167 +1544,225 @@ static int t_command(void)
                  strcmp(c.reply.error.code, "UNKNOWN_PACKAGE") == 0);
         zs_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* Eligible: no allowlist -> the four verification gates fail. */
-    {
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr_hex);
-        zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
-        const struct json_value *failed =
-            json_get(&c.reply.data, "failed_gates");
-        ZS_CHECK("command: no quorum named on all four gates",
-                 !json_get_bool(json_get(&c.reply.data, "eligible")) &&
-                 json_get_int(json_get(&c.reply.data, "failed_count")) ==
-                     4 &&
-                 zs_gate_failed(failed, "verifier-quorum") &&
-                 zs_gate_failed(failed, "gcc-build-passes") &&
-                 zs_gate_failed(failed, "clang-build-passes") &&
-                 zs_gate_failed(failed, "tests-pass"));
-        zs_cmd_free(&c);
-    }
+/* Eligible: no allowlist -> the four verification gates fail. */
+static int t_cmd_elig_no_quorum(const char *datadir, const char *pr_hex)
+{
+    int failures = 0;
+    struct zs_cmd c;
+    zs_cmd_init(&c, datadir, pr_hex);
+    zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
+    const struct json_value *failed =
+        json_get(&c.reply.data, "failed_gates");
+    ZS_CHECK("command: no quorum named on all four gates",
+             !json_get_bool(json_get(&c.reply.data, "eligible")) &&
+             json_get_int(json_get(&c.reply.data, "failed_count")) ==
+                 4 &&
+             zs_gate_failed(failed, "verifier-quorum") &&
+             zs_gate_failed(failed, "gcc-build-passes") &&
+             zs_gate_failed(failed, "clang-build-passes") &&
+             zs_gate_failed(failed, "tests-pass"));
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Eligible: allowlist + 2 approved matching attestations -> pass. */
+/* Eligible: allowlist + 2 approved matching attestations -> pass. */
+static int t_cmd_elig_full_pass(const char *datadir, const char *store,
+                                const uint8_t pr[32],
+                                const uint8_t ri[32],
+                                const uint8_t rr[32],
+                                const char *pr_hex)
+{
+    int failures = 0;
     ZS_CHECK("command: allowlist writes", zs_write_policy(store));
     ZS_CHECK("command: attestation A persists",
              zs_store_attestation(store, pr, ri, rr, 0x22));
     ZS_CHECK("command: attestation B persists",
              zs_store_attestation(store, pr, ri, rr, 0x33));
-    {
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr_hex);
-        zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
-        const struct json_value *gates = json_get(&c.reply.data, "gates");
-        ZS_CHECK("command: full-pass eligibility",
-                 json_get_bool(json_get(&c.reply.data, "eligible")) &&
-                 json_get_int(json_get(&c.reply.data, "failed_count")) ==
-                     0 &&
-                 gates && json_at(gates, 7) != NULL &&
-                 json_at(gates, 8) == NULL);
-        zs_cmd_free(&c);
-    }
+    struct zs_cmd c;
+    zs_cmd_init(&c, datadir, pr_hex);
+    zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
+    const struct json_value *gates = json_get(&c.reply.data, "gates");
+    ZS_CHECK("command: full-pass eligibility",
+             json_get_bool(json_get(&c.reply.data, "eligible")) &&
+             json_get_int(json_get(&c.reply.data, "failed_count")) ==
+                 0 &&
+             gates && json_at(gates, 7) != NULL &&
+             json_at(gates, 8) == NULL);
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Eligible: corrupted release signature named (the license gate
-     * still passes — the envelope parsed, so the SPDX id is allowlist
-     * grammar; the LICENSE file is present). The LICENSE text differs by
-     * one newline so this fixture's package root does NOT collide with
-     * v1's (same release id would clobber v1's persisted envelope). */
-    {
-        const struct zs_file corrupt_files[] = {
-            { "LICENSE", "MIT License\n\n" },
-            { "src/add.c",
-              "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
-            { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
-            { "test/test_add.c",
-              "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
-        };
-        uint8_t pr6[32], ri6[32], rr6[32];
-        bool f6 = zs_publish(store, corrupt_files,
-                             sizeof(corrupt_files) /
-                                 sizeof(corrupt_files[0]),
-                             "1.0.0", false, NULL, 1, true, pr6, ri6, rr6);
-        char pr6_hex[65];
-        zs_hex_enc(pr6, 32, pr6_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr6_hex);
-        zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
-        const struct json_value *failed =
-            json_get(&c.reply.data, "failed_gates");
-        ZS_CHECK("command: bad signature named",
-                 f6 && !json_get_bool(json_get(&c.reply.data, "eligible")) &&
-                 zs_gate_failed(failed, "release-signature-verifies") &&
-                 !zs_gate_failed(failed, "license-accepted") &&
-                 !zs_gate_failed(failed, "parent-lineage-valid"));
-        zs_cmd_free(&c);
-    }
+/* Eligible: corrupted release signature named (the license gate
+ * still passes — the envelope parsed, so the SPDX id is allowlist
+ * grammar; the LICENSE file is present). The LICENSE text differs by
+ * one newline so this fixture's package root does NOT collide with
+ * v1's (same release id would clobber v1's persisted envelope). */
+static int t_cmd_elig_bad_sig(const char *datadir, const char *store)
+{
+    int failures = 0;
+    const struct zs_file corrupt_files[] = {
+        { "LICENSE", "MIT License\n\n" },
+        { "src/add.c",
+          "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
+        { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
+        { "test/test_add.c",
+          "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
+    };
+    struct zs_cmd c;
+    uint8_t ri6[32];
+    bool f6 = zs_cmd_publish_eligible(datadir, store, corrupt_files,
+                                      sizeof(corrupt_files) /
+                                          sizeof(corrupt_files[0]),
+                                      "1.0.0", false, NULL, 1, true, &c,
+                                      ri6);
+    const struct json_value *failed =
+        json_get(&c.reply.data, "failed_gates");
+    ZS_CHECK("command: bad signature named",
+             f6 && !json_get_bool(json_get(&c.reply.data, "eligible")) &&
+             zs_gate_failed(failed, "release-signature-verifies") &&
+             !zs_gate_failed(failed, "license-accepted") &&
+             !zs_gate_failed(failed, "parent-lineage-valid"));
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Eligible: a manifest without a LICENSE file fails the license
-     * gate (the envelope SPDX allowlist is grammar-enforced at parse, so
-     * an off-allowlist license can never persist — the LICENSE text file
-     * is the checkable half). */
-    {
-        const struct zs_file nolicense[] = {
-            { "src/add.c",
-              "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
-            { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
-        };
-        uint8_t pr7[32], ri7[32], rr7[32];
-        bool f7 = zs_publish(store, nolicense,
-                             sizeof(nolicense) / sizeof(nolicense[0]),
-                             "1.0.0", false, NULL, 1, false, pr7, ri7, rr7);
-        ZS_CHECK("command: no-license fixture attestations persist",
-                 f7 && zs_store_attestation(store, pr7, ri7, rr7, 0x22) &&
-                 zs_store_attestation(store, pr7, ri7, rr7, 0x33));
-        char pr7_hex[65];
-        zs_hex_enc(pr7, 32, pr7_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr7_hex);
-        zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
-        const struct json_value *failed =
-            json_get(&c.reply.data, "failed_gates");
-        ZS_CHECK("command: missing LICENSE file named",
-                 !json_get_bool(json_get(&c.reply.data, "eligible")) &&
-                 zs_gate_failed(failed, "license-accepted") &&
-                 json_get_int(json_get(&c.reply.data, "failed_count")) ==
-                     1);
-        zs_cmd_free(&c);
-    }
+/* Eligible: a manifest without a LICENSE file fails the license
+ * gate (the envelope SPDX allowlist is grammar-enforced at parse, so
+ * an off-allowlist license can never persist — the LICENSE text file
+ * is the checkable half). */
+static int t_cmd_elig_no_license(const char *datadir, const char *store)
+{
+    int failures = 0;
+    const struct zs_file nolicense[] = {
+        { "src/add.c",
+          "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n" },
+        { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
+    };
+    struct zs_cmd c;
+    uint8_t pr7[32], ri7[32], rr7[32];
+    bool f7 = zs_publish(store, nolicense,
+                         sizeof(nolicense) / sizeof(nolicense[0]),
+                         "1.0.0", false, NULL, 1, false, pr7, ri7, rr7);
+    ZS_CHECK("command: no-license fixture attestations persist",
+             f7 && zs_store_attestation(store, pr7, ri7, rr7, 0x22) &&
+             zs_store_attestation(store, pr7, ri7, rr7, 0x33));
+    char pr7_hex[65];
+    zs_hex_enc(pr7, 32, pr7_hex);
+    zs_cmd_init(&c, datadir, pr7_hex);
+    zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
+    const struct json_value *failed =
+        json_get(&c.reply.data, "failed_gates");
+    ZS_CHECK("command: missing LICENSE file named",
+             !json_get_bool(json_get(&c.reply.data, "eligible")) &&
+             zs_gate_failed(failed, "license-accepted") &&
+             json_get_int(json_get(&c.reply.data, "failed_count")) ==
+                 1);
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Eligible: a child naming a parent release that is not hosted
-     * fails the lineage gate. */
-    {
-        uint8_t ghost[32];
-        for (size_t i = 0; i < 32; i++)
-            ghost[i] = (uint8_t)(0xee - i);
-        uint8_t pr8[32], ri8[32], rr8[32];
-        bool f8 = zs_publish(store, k_v1_files,
-                             sizeof(k_v1_files) / sizeof(k_v1_files[0]),
-                             "2.0.0", true, ghost, 2, false, pr8, ri8, rr8);
-        ZS_CHECK("command: broken-lineage attestations persist",
-                 f8 && zs_store_attestation(store, pr8, ri8, rr8, 0x22) &&
-                 zs_store_attestation(store, pr8, ri8, rr8, 0x33));
-        char pr8_hex[65];
-        zs_hex_enc(pr8, 32, pr8_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr8_hex);
-        zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
-        const struct json_value *failed =
-            json_get(&c.reply.data, "failed_gates");
-        ZS_CHECK("command: broken lineage named",
-                 !json_get_bool(json_get(&c.reply.data, "eligible")) &&
-                 zs_gate_failed(failed, "parent-lineage-valid") &&
-                 json_get_int(json_get(&c.reply.data, "failed_count")) ==
-                     1);
-        zs_cmd_free(&c);
-    }
+/* Eligible: a child naming a parent release that is not hosted
+ * fails the lineage gate. */
+static int t_cmd_elig_ghost_lineage(const char *datadir,
+                                    const char *store)
+{
+    int failures = 0;
+    uint8_t ghost[32];
+    for (size_t i = 0; i < 32; i++)
+        ghost[i] = (uint8_t)(0xee - i);
+    struct zs_cmd c;
+    uint8_t pr8[32], ri8[32], rr8[32];
+    bool f8 = zs_publish(store, k_v1_files,
+                         sizeof(k_v1_files) / sizeof(k_v1_files[0]),
+                         "2.0.0", true, ghost, 2, false, pr8, ri8, rr8);
+    ZS_CHECK("command: broken-lineage attestations persist",
+             f8 && zs_store_attestation(store, pr8, ri8, rr8, 0x22) &&
+             zs_store_attestation(store, pr8, ri8, rr8, 0x33));
+    char pr8_hex[65];
+    zs_hex_enc(pr8, 32, pr8_hex);
+    zs_cmd_init(&c, datadir, pr8_hex);
+    zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
+    const struct json_value *failed =
+        json_get(&c.reply.data, "failed_gates");
+    ZS_CHECK("command: broken lineage named",
+             !json_get_bool(json_get(&c.reply.data, "eligible")) &&
+             zs_gate_failed(failed, "parent-lineage-valid") &&
+             json_get_int(json_get(&c.reply.data, "failed_count")) ==
+                 1);
+    zs_cmd_free(&c);
+    return failures;
+}
 
-    /* Eligible: a proper child of v1 passes the lineage gate. */
-    {
-        const struct zs_file v4[] = {
-            { "LICENSE", "MIT License\n" },
-            { "src/add.c",
-              "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n"
-              "int sub(int a, int b) { return a - b; }\n" },
-            { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
-            { "test/test_add.c",
-              "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
-        };
-        uint8_t pr9[32], ri9[32], rr9[32];
-        bool f9 = zs_publish(store, v4, sizeof(v4) / sizeof(v4[0]),
-                             "1.1.0", true, ri, 2, false, pr9, ri9, rr9);
-        ZS_CHECK("command: good-child attestations persist",
-                 f9 && zs_store_attestation(store, pr9, ri9, rr9, 0x22) &&
-                 zs_store_attestation(store, pr9, ri9, rr9, 0x33));
-        char pr9_hex[65];
-        zs_hex_enc(pr9, 32, pr9_hex);
-        struct zs_cmd c;
-        zs_cmd_init(&c, datadir, pr9_hex);
-        zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
-        ZS_CHECK("command: child of v1 fully eligible",
-                 json_get_bool(json_get(&c.reply.data, "eligible")) &&
-                 json_get_int(json_get(&c.reply.data, "failed_count")) ==
-                     0);
-        zs_cmd_free(&c);
-    }
+/* Eligible: a proper child of v1 passes the lineage gate. */
+static int t_cmd_elig_good_child(const char *datadir, const char *store,
+                                 const uint8_t parent_id[32])
+{
+    int failures = 0;
+    const struct zs_file v4[] = {
+        { "LICENSE", "MIT License\n" },
+        { "src/add.c",
+          "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n"
+          "int sub(int a, int b) { return a - b; }\n" },
+        { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
+        { "test/test_add.c",
+          "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n" },
+    };
+    struct zs_cmd c;
+    uint8_t pr9[32], ri9[32], rr9[32];
+    bool f9 = zs_publish(store, v4, sizeof(v4) / sizeof(v4[0]),
+                         "1.1.0", true, parent_id, 2, false, pr9, ri9,
+                         rr9);
+    ZS_CHECK("command: good-child attestations persist",
+             f9 && zs_store_attestation(store, pr9, ri9, rr9, 0x22) &&
+             zs_store_attestation(store, pr9, ri9, rr9, 0x33));
+    char pr9_hex[65];
+    zs_hex_enc(pr9, 32, pr9_hex);
+    zs_cmd_init(&c, datadir, pr9_hex);
+    zcl_native_handle_zcode_reward_eligible(&c.request, &c.reply);
+    ZS_CHECK("command: child of v1 fully eligible",
+             json_get_bool(json_get(&c.reply.data, "eligible")) &&
+             json_get_int(json_get(&c.reply.data, "failed_count")) ==
+                 0);
+    zs_cmd_free(&c);
+    return failures;
+}
+
+static int t_command(void)
+{
+    int failures = 0;
+    char datadir[4400];
+    snprintf(datadir, sizeof(datadir), "test-tmp/zs_cmd_%ld",
+             (long)getpid());
+    char store[4400];
+    snprintf(store, sizeof(store), "%s/zcode", datadir);
+    zs_rm_rf(datadir);
+
+    uint8_t pr[32], ri[32], rr[32];
+    bool f1 = zs_publish(store, k_v1_files,
+                         sizeof(k_v1_files) / sizeof(k_v1_files[0]),
+                         "1.0.0", false, NULL, 1, false, pr, ri, rr);
+    ZS_CHECK("command: v1 fixture publishes", f1);
+    if (!f1)
+        return failures + 1;
+    char pr_hex[65];
+    zs_hex_enc(pr, 32, pr_hex);
+
+    failures += t_cmd_score_root(datadir, pr_hex);
+    failures += t_cmd_score_determinism(datadir, pr_hex);
+    failures += t_cmd_child_whitespace(datadir, store, ri);
+    failures += t_cmd_child_rename(datadir, store, ri);
+    failures += t_cmd_child_newfn(datadir, store, ri);
+    failures += t_cmd_child_newtest(datadir, store, ri);
+    failures += t_cmd_rejections(datadir);
+    failures += t_cmd_elig_no_quorum(datadir, pr_hex);
+    failures += t_cmd_elig_full_pass(datadir, store, pr, ri, rr, pr_hex);
+    failures += t_cmd_elig_bad_sig(datadir, store);
+    failures += t_cmd_elig_no_license(datadir, store);
+    failures += t_cmd_elig_ghost_lineage(datadir, store);
+    failures += t_cmd_elig_good_child(datadir, store, ri);
 
     zs_rm_rf(datadir);
     return failures;

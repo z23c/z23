@@ -3799,13 +3799,6 @@ tests/harness/src/test_zcode_reward.c:t_commands:63
 tests/harness/src/test_zcode_reward.c:t_crash_replay:18
 tests/harness/src/test_zcode_reward.c:t_enqueue:17
 tests/harness/src/test_zcode_reward.c:t_roundtrip:38
-tests/harness/src/test_zcode_score.c:t_command:63
-tests/harness/src/test_zcode_score.c:t_eligibility_lib:36
-tests/harness/src/test_zcode_score.c:t_lineage_antigaming:21
-tests/harness/src/test_zcode_score.c:t_paths:20
-tests/harness/src/test_zcode_score.c:t_scoring:62
-tests/harness/src/test_zcode_score.c:t_unitization:18
-tests/harness/src/test_zcode_score.c:zs_publish:24
 tests/harness/src/test_zcode_score_receipt.c:score_store_vertical:24
 tests/harness/src/test_zcode_score_receipt.c:score_transport_package:20
 tests/harness/src/test_zcode_score_receipt.c:shadow_protocol_package_vertical:49
