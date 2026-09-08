@@ -293,6 +293,41 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
 
 /* ── zcl_spawn_capture ───────────────────────────────────────────────── */
 
+static void spawn_capture_kill(pid_t pid)
+{
+    if (kill(-pid, SIGKILL) != 0)
+        (void)kill(pid, SIGKILL);
+}
+
+/* EOF is only an output observation. The child can close stdout before it
+ * exits, so retain the drain's original deadline and cancellation callback
+ * through the wait. Never start a second timeout budget here. */
+static bool spawn_capture_reap(
+    pid_t pid, int *status, int64_t deadline_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx,
+    bool *timed_out, bool *cancelled)
+{
+    if (*timed_out || *cancelled) return spawn_reap(pid, status);
+    for (;;) {
+        if (should_cancel && should_cancel(cancel_ctx)) *cancelled = true;
+        if (deadline_ms && platform_time_monotonic_ms() >= deadline_ms)
+            *timed_out = true;
+        if (*timed_out || *cancelled) {
+            spawn_capture_kill(pid);
+            return spawn_reap(pid, status);
+        }
+        pid_t observed = waitpid(pid, status, WNOHANG);
+        if (observed == pid) return true;
+        if (observed < 0) {
+            if (errno == EINTR) continue;
+            if (errno != ECHILD)
+                LOG_WARN("spawn", "waitpid() after EOF failed: %s", strerror(errno));
+            return false;
+        }
+        (void)poll(NULL, 0, 10);
+    }
+}
+
 /* Parent-side bounded drain shared by pipe and PTY capture. A Linux PTY
  * master reports EIO, rather than zero bytes, when its last slave closes;
  * `pty_eio_is_eof` preserves that platform contract without weakening real
@@ -354,15 +389,17 @@ static int spawn_capture_drain(
      * timeout observation behind 128+SIGHUP. Pipes do not care about the
      * order, so one ordering preserves both transports. */
     if (timed_out || was_cancelled) {
-        if (kill(-pid, SIGKILL) != 0)
-            (void)kill(pid, SIGKILL);
+        spawn_capture_kill(pid);
     }
     close(output_fd);
+    int status = 0;
+    bool reaped = spawn_capture_reap(
+        pid, &status, deadline_ms, should_cancel, cancel_ctx,
+        &timed_out, &was_cancelled);
     if (cancelled) *cancelled = was_cancelled;
     if (timed_out_out) *timed_out_out = timed_out;
 
-    int status = 0;
-    if (!spawn_reap(pid, &status))
+    if (!reaped)
         return 0;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);

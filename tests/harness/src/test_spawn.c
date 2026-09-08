@@ -161,6 +161,45 @@ static int test_spawn_capture_timeout_kills(void)
     return failures;
 }
 
+static int test_spawn_capture_eof_remains_bounded(void)
+{
+    int failures = 0;
+    TEST("spawn: deadline and cancellation remain active after stdout EOF") {
+        const char *argv[] = { "/bin/sh", "-c",
+            "printf eof-marker; exec 1>&-; exec /bin/sleep 5", NULL };
+        char buf[64] = {0};
+        bool timed_out = false;
+        int64_t start = platform_time_monotonic_ms();
+        int rc = zcl_spawn_capture_observed(
+            argv, buf, sizeof(buf), 200, &timed_out);
+        int64_t elapsed = platform_time_monotonic_ms() - start;
+        ASSERT(timed_out);
+        ASSERT(rc == 128 + SIGKILL);
+        ASSERT(elapsed < 1500);
+        ASSERT(strcmp(buf, "eof-marker") == 0);
+
+        unsigned polls = 0;
+        bool cancelled = false;
+        const char *silent[] = { "/bin/sh", "-c",
+            "exec 1>&-; exec /bin/sleep 5", NULL };
+        start = platform_time_monotonic_ms();
+        rc = zcl_spawn_capture_cancelable(
+            silent, buf, sizeof(buf), 5000, spawn_cancel_after_poll, &polls,
+            &cancelled);
+        elapsed = platform_time_monotonic_ms() - start;
+        ASSERT(cancelled);
+        ASSERT(rc == 128 + SIGKILL);
+        ASSERT(elapsed < 1500);
+        const char *done[] = { "/bin/sh", "-c", "exec 1>&-; exit 7", NULL };
+        timed_out = true;
+        rc = zcl_spawn_capture_observed(done, buf, sizeof(buf), 3000, &timed_out);
+        ASSERT(rc == 7);
+        ASSERT(!timed_out);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_capture_cancel_kills(void)
 {
     int failures = 0;
@@ -326,6 +365,7 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_detached_delivers_private_stdin();
     failures += test_spawn_capture_echo();
     failures += test_spawn_capture_timeout_kills();
+    failures += test_spawn_capture_eof_remains_bounded();
     failures += test_spawn_capture_cancel_kills();
     failures += test_spawn_capture_echild_tolerant();
     failures += test_spawn_capture_truncates_oversized();

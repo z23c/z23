@@ -91,7 +91,8 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
                                             const char *log_path);
 
 /* Launch argv[0], capture its stdout into buf, and wait for it to exit or
- * for timeout_ms to elapse. No shell is invoked — same argv[0]/execvp()
+ * for timeout_ms to elapse. The same deadline and cancellation callback remain
+ * active after stdout EOF until the child exits. No shell is invoked — same argv[0]/execvp()
  * contract as zcl_spawn_detached(). Stdin is /dev/null; stderr is NOT
  * captured (redirected to /dev/null) so buf holds stdout only, matching
  * popen(cmd, "r")'s contract at every site this replaces.
