@@ -622,6 +622,7 @@ int test_process_headers_adversarial(void);
 int test_getheaders_serve_fallback(void);
 int test_getheaders_serve_pow_dedup(void);
 int test_net_msg_dos(void);
+int test_net_frame_hardening(void);
 int test_net_handshake_adversarial(void);
 int test_net_ban_persistence(void);
 int test_net_census(void);
