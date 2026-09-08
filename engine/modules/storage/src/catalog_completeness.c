@@ -40,6 +40,7 @@
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -65,6 +66,9 @@ struct node_db;
 extern bool op_return_index_get_cursor_heights(struct node_db *ndb,
                                                int32_t *out_height,
                                                int32_t *out_base_height);
+extern bool op_return_index_legacy_state_cached(struct node_db *ndb);
+extern bool op_return_index_legacy_catalog_warn_due(struct node_db *ndb,
+                                                    uint64_t *out_suppressed);
 
 /* contexts/explorer/models/src/explorer_index.c (models/explorer_index.h) — added
  * alongside this module for exactly this read (see that header). */
@@ -106,9 +110,26 @@ static int64_t cc_get_op_return_cursor(void)
     if (!ndb) return CATALOG_CURSOR_UNAVAILABLE;
     int32_t h = -1, base = 0;
     if (!op_return_index_get_cursor_heights(ndb, &h, &base)) {
-        LOG_WARN("catalog_completeness",
-                 "op_return_index_get_cursor_heights failed (refused or "
-                 "unreadable persisted state)");
+        /* A legacy_v1/unknown persisted state is already named loudly as
+         * the op_return_index.legacy_state blocker (conditions/op_return_
+         * index_legacy_state.c) — report it here by that same name, once
+         * per hour, instead of the generic WARN storming every poll. Any
+         * OTHER get_cursor_heights failure (db not open, ...) keeps the
+         * original unconditional line: it has no named blocker to defer to. */
+        if (op_return_index_legacy_state_cached(ndb)) {
+            uint64_t suppressed = 0;
+            if (op_return_index_legacy_catalog_warn_due(ndb, &suppressed))
+                LOG_WARN("catalog_completeness",
+                         "unavailable: op_return_index.legacy_state — "
+                         "persisted cursor state refused; see that blocker "
+                         "for the remedy (`z23 app oprindex rebuild`) "
+                         "(%llu occurrence(s) suppressed since last log)",
+                         (unsigned long long)suppressed);
+        } else {
+            LOG_WARN("catalog_completeness",
+                     "op_return_index_get_cursor_heights failed (refused or "
+                     "unreadable persisted state)");
+        }
         return CATALOG_CURSOR_UNAVAILABLE;
     }
     /* A positive base_height is DECLARED partial coverage, not a hidden gap:
