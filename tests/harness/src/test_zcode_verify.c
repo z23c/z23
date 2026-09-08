@@ -335,14 +335,39 @@ static void zv_pattern_root(uint8_t seed, uint8_t out[32])
 
 /* ── 1. codec ───────────────────────────────────────────────────────── */
 
-static int t_codec(void)
+static bool zv_codec_roundtrip_one(uint8_t cls, const uint8_t pr[32],
+                                   const uint8_t ri[32], const uint8_t rr[32])
+{
+    struct vcs_package_attest a;
+    if (!zv_attest(&a, cls, pr, ri, rr, 0x42))
+        return false;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_package_attest_serialize(&a, &wire, &wire_len) !=
+        VCS_PACKAGE_ATTEST_OK)
+        return false;
+    struct vcs_package_attest b;
+    bool ok = vcs_package_attest_parse(wire, wire_len, &b) ==
+                  VCS_PACKAGE_ATTEST_OK &&
+              vcs_package_attest_verify(&b) == VCS_PACKAGE_ATTEST_OK &&
+              b.result_class == a.result_class &&
+              b.detail_code == a.detail_code &&
+              strcmp(b.detail, a.detail) == 0 &&
+              b.compiler_count == a.compiler_count &&
+              b.sanitizer_count == a.sanitizer_count &&
+              b.test_ran == a.test_ran &&
+              b.test_exit_code == a.test_exit_code &&
+              b.isolation == a.isolation &&
+              memcmp(b.verifier_pubkey, a.verifier_pubkey, 33) == 0 &&
+              memcmp(b.signature, a.signature, 64) == 0;
+    free(wire);
+    return ok;
+}
+
+static int zv_codec_roundtrip(const uint8_t pr[32], const uint8_t ri[32],
+                               const uint8_t rr[32])
 {
     int failures = 0;
-    uint8_t pr[32], ri[32], rr[32];
-    zv_pattern_root(0x10, pr);
-    zv_pattern_root(0x40, ri);
-    zv_pattern_root(0x80, rr);
-
     /* Roundtrip for every result class. */
     static const uint8_t k_classes[] = {
         VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS,
@@ -353,40 +378,20 @@ static int t_codec(void)
     };
     bool roundtrip = true;
     for (size_t i = 0; i < sizeof(k_classes); i++) {
-        struct vcs_package_attest a;
-        if (!zv_attest(&a, k_classes[i], pr, ri, rr, 0x42)) {
-            roundtrip = false;
-            break;
-        }
-        uint8_t *wire = NULL;
-        size_t wire_len = 0;
-        if (vcs_package_attest_serialize(&a, &wire, &wire_len) !=
-            VCS_PACKAGE_ATTEST_OK) {
-            roundtrip = false;
-            break;
-        }
-        struct vcs_package_attest b;
-        bool ok = vcs_package_attest_parse(wire, wire_len, &b) ==
-                      VCS_PACKAGE_ATTEST_OK &&
-                  vcs_package_attest_verify(&b) == VCS_PACKAGE_ATTEST_OK &&
-                  b.result_class == a.result_class &&
-                  b.detail_code == a.detail_code &&
-                  strcmp(b.detail, a.detail) == 0 &&
-                  b.compiler_count == a.compiler_count &&
-                  b.sanitizer_count == a.sanitizer_count &&
-                  b.test_ran == a.test_ran &&
-                  b.test_exit_code == a.test_exit_code &&
-                  b.isolation == a.isolation &&
-                  memcmp(b.verifier_pubkey, a.verifier_pubkey, 33) == 0 &&
-                  memcmp(b.signature, a.signature, 64) == 0;
-        free(wire);
-        if (!ok) {
+        if (!zv_codec_roundtrip_one(k_classes[i], pr, ri, rr)) {
             roundtrip = false;
             break;
         }
     }
     ZV_CHECK("codec: roundtrip every result class", roundtrip);
+    return failures;
+}
 
+
+static int zv_codec_kat(const uint8_t pr[32], const uint8_t ri[32],
+                         const uint8_t rr[32])
+{
+    int failures = 0;
     /* KAT: the frozen attestation id guards the canonical encoding. */
     struct vcs_package_attest kat;
     bool kat_ok = zv_attest(&kat, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr,
@@ -404,21 +409,13 @@ static int t_codec(void)
              kat_ok && strcmp(kat_hex, k_kat_expect) == 0);
     if (kat_ok && strcmp(kat_hex, k_kat_expect) != 0)
         printf("  zcode_verify: KAT actual %s\n", kat_hex);
+    return failures;
+}
 
-    /* Hostile wires. */
-    struct vcs_package_attest a;
-    if (!zv_attest(&a, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr,
-                   0x42)) {
-        ZV_CHECK("codec: fixture builds", false);
-        return failures + 1;
-    }
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    if (vcs_package_attest_serialize(&a, &wire, &wire_len) !=
-            VCS_PACKAGE_ATTEST_OK) {
-        ZV_CHECK("codec: fixture serializes", false);
-        return failures + 1;
-    }
+
+static int zv_codec_hostile_wire(const uint8_t *wire, size_t wire_len)
+{
+    int failures = 0;
     struct vcs_package_attest out;
     ZV_CHECK("codec: truncated wire",
              vcs_package_attest_parse(wire, wire_len - 10, &out) ==
@@ -458,61 +455,91 @@ static int t_codec(void)
                  vcs_package_attest_parse(bad, wire_len, &out) ==
                      VCS_PACKAGE_ATTEST_ERR_DETAIL_CODE);
     }
-    free(wire);
+    return failures;
+}
 
+static bool zv_codec_validate_fixture(const uint8_t pr[32],
+                                      const uint8_t ri[32],
+                                      const uint8_t rr[32])
+{
+    struct vcs_package_attest m;
+    return zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr,
+                     0x42) &&
+           vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_OK;
+}
+
+static bool zv_codec_validate_reset(struct vcs_package_attest *m,
+                                    const uint8_t pr[32],
+                                    const uint8_t ri[32],
+                                    const uint8_t rr[32], uint8_t cls)
+{
+    return zv_attest(m, cls, pr, ri, rr, 0x42);
+}
+
+static int zv_codec_validate_rules(const uint8_t pr[32], const uint8_t ri[32],
+                                    const uint8_t rr[32])
+{
+    int failures = 0;
     /* Consistency rules via validate() on mutated structs. */
     struct vcs_package_attest m;
     ZV_CHECK("codec: validate accepts the fixture",
-             zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr,
-                       0x42) &&
-             vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_OK);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr, 0x42);
+             zv_codec_validate_fixture(pr, ri, rr));
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_PASS);
     memset(m.package_root, 0, 32);
     ZV_CHECK("codec: zero package root",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_PACKAGE_ROOT);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_PASS);
     m.detail[0] = 0x01;
     ZV_CHECK("codec: non-printable detail",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_DETAIL_TEXT);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_PASS);
     snprintf(m.detail, sizeof(m.detail), "surplus");
     ZV_CHECK("codec: pass class carrying detail",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_DETAIL_FORBIDDEN);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL);
     m.detail_code = VCS_PACKAGE_ATTEST_DETAIL_NONE;
     ZV_CHECK("codec: fail class without detail code",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_DETAIL_REQUIRED);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS);
     m.test_ran = true;
     ZV_CHECK("codec: build-pass with test_ran",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_TEST_CLASS);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS);
     m.test_exit_code = 3;
     ZV_CHECK("codec: non-canonical exit code without a test run",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_TEST_EXIT);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_SANITIZER_FAIL, pr, ri, rr,
-              0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_SANITIZER_FAIL);
     m.sanitizers[0].outcome = VCS_PACKAGE_ATTEST_OUTCOME_PASS;
     ZV_CHECK("codec: sanitizer-fail without findings",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_SANITIZER_FINDINGS);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_PASS);
     m.sanitizers[1].outcome = VCS_PACKAGE_ATTEST_OUTCOME_FAIL;
     ZV_CHECK("codec: findings in a pass class",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_SANITIZER_FINDINGS);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_PASS);
     m.compilers[1].outcome = VCS_PACKAGE_ATTEST_OUTCOME_FAIL;
     ZV_CHECK("codec: failed compiler in a pass class",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_OUTCOME_CLASS);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_PASS);
     {
         struct vcs_package_attest_compiler tmp = m.compilers[0];
         m.compilers[0] = m.compilers[1];
@@ -521,11 +548,44 @@ static int t_codec(void)
     ZV_CHECK("codec: unsorted compilers",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_COMPILER_ORDER);
-    zv_attest(&m, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr, 0x42);
+    zv_codec_validate_reset(&m, pr, ri, rr,
+                            VCS_PACKAGE_ATTEST_RESULT_TEST_PASS);
     m.isolation = 9;
     ZV_CHECK("codec: unknown isolation level",
              vcs_package_attest_validate(&m) ==
                  VCS_PACKAGE_ATTEST_ERR_ISOLATION);
+    return failures;
+}
+
+static int t_codec(void)
+{
+    int failures = 0;
+    uint8_t pr[32], ri[32], rr[32];
+    zv_pattern_root(0x10, pr);
+    zv_pattern_root(0x40, ri);
+    zv_pattern_root(0x80, rr);
+
+    failures += zv_codec_roundtrip(pr, ri, rr);
+    failures += zv_codec_kat(pr, ri, rr);
+
+    /* Hostile wires. */
+    struct vcs_package_attest a;
+    if (!zv_attest(&a, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pr, ri, rr,
+                   0x42)) {
+        ZV_CHECK("codec: fixture builds", false);
+        return failures + 1;
+    }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_package_attest_serialize(&a, &wire, &wire_len) !=
+            VCS_PACKAGE_ATTEST_OK) {
+        ZV_CHECK("codec: fixture serializes", false);
+        return failures + 1;
+    }
+    failures += zv_codec_hostile_wire(wire, wire_len);
+    free(wire);
+
+    zv_codec_validate_rules(pr, ri, rr);
     return failures;
 }
 
@@ -675,207 +735,253 @@ static bool zv_row_rule_is(const struct vcs_verify_quorum *q, size_t i,
     return i < q->row_count && q->rows[i].rule == rule;
 }
 
+static int zq_two_matching(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* 2-of-N approved matching -> verified. */
+    struct vcs_verify_candidate cands[2];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x23);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: two approved matching verify",
+             cands[0].parsed && cands[1].parsed && q.verified &&
+             q.quorum_reached && q.quorum_signers == 2 &&
+             q.quorum_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
+             zv_row_rule_is(&q, 0, VCS_VERIFY_ROW_COUNTED) &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_COUNTED));
+    return failures;
+}
+
+
+static int zq_three_matching(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* Three matching signers count three. */
+    struct vcs_verify_candidate cands[3];
+    for (size_t i = 0; i < 3; i++)
+        cands[i].parsed = zv_attest(
+            &cands[i].attestation, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+            ctx->package_root, ctx->release_id, ctx->recipe_root,
+            (uint8_t)(0x22 + i));
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 3, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: 3-of-N counts three signers",
+             q.verified && q.quorum_signers == 3);
+    return failures;
+}
+
+
+static int zq_mixed_classes(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* Non-matching classes never reach a quorum. */
+    struct vcs_verify_candidate cands[2];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x23);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: different result classes do not verify",
+             !q.verified && !q.quorum_reached &&
+             q.counted == 2);
+    return failures;
+}
+
+
+static int zq_unapproved_signer(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* An unapproved key is named and never counted. */
+    struct vcs_verify_candidate cands[2];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x44); /* not listed */
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: unapproved signer named, no quorum",
+             !q.verified && q.counted == 1 &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_SIGNER_NOT_APPROVED));
+    return failures;
+}
+
+
+static int zq_self_verification(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* Self-verification (publisher == verifier) is rejected even when the
+     * operator foolishly approved the publisher key. */
+    struct vcs_verifier_policy with_self;
+    vcs_verifier_policy_init(&with_self);
+    vcs_verifier_policy_add(&with_self, ctx->publisher, NULL);
+    struct privkey sk;
+    struct pubkey pk;
+    zv_keypair(0x22, &sk, &pk);
+    vcs_verifier_policy_add(&with_self, pk.vch, NULL);
+    struct vcs_verify_candidate cands[2];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x11); /* publisher */
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &with_self, &q);
+    ZV_CHECK("quorum: self-verification rejected",
+             !q.verified && q.counted == 1 &&
+             zv_row_rule_is(&q, 0, VCS_VERIFY_ROW_SELF_VERIFICATION));
+    return failures;
+}
+
+
+static int zq_duplicate_signer(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* A duplicate signer counts once (second attestation differs in the
+     * compiler versions — it still MATCHES on roots+class). */
+    struct vcs_verify_candidate cands[2];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    if (cands[1].parsed)
+        snprintf(cands[1].attestation.compilers[1].version,
+                 sizeof(cands[1].attestation.compilers[1].version),
+                 "14.1.0");
+    /* Re-sign after the field change. */
+    struct privkey sk;
+    struct pubkey pk;
+    zv_keypair(0x22, &sk, &pk);
+    cands[1].parsed = cands[1].parsed &&
+                      zv_sign_attest(&cands[1].attestation, &sk);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: duplicate signer counts once",
+             !q.verified && q.counted == 1 &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_DUPLICATE_SIGNER));
+    return failures;
+}
+
+
+static int zq_fail_class(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* A quorum on a FAIL class is reached but never "verified". */
+    struct vcs_verify_candidate cands[2];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x23);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: fail-class quorum is not verified",
+             !q.verified && q.quorum_reached && q.quorum_signers == 2 &&
+             q.quorum_class == VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL);
+    return failures;
+}
+
+
+static int zq_recipe_mismatch(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* A different recipe root is a named mismatch, never a match. */
+    uint8_t other_recipe[32];
+    zv_pattern_root(0x90, other_recipe);
+    struct vcs_verify_candidate cands[2];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                other_recipe, 0x33);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: recipe mismatch named, no quorum",
+             !q.verified && q.counted == 1 &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_RECIPE_ROOT_MISMATCH));
+    return failures;
+}
+
+
+static int zq_invalid_named(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    /* An invalid signature and an unparseable wire are named invalid. */
+    struct vcs_verify_candidate cands[3];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+                                VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ctx->package_root, ctx->release_id,
+                                ctx->recipe_root, 0x33);
+    if (cands[1].parsed)
+        cands[1].attestation.signature[0] ^= 0x01;
+    cands[2].parsed = false;
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 3, ctx->package_root, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: invalid attestations named",
+             !q.verified && q.counted == 1 &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_ATTESTATION_INVALID) &&
+             zv_row_rule_is(&q, 2, VCS_VERIFY_ROW_ATTESTATION_INVALID) &&
+             !q.rows[2].has_pubkey);
+    return failures;
+}
+
+
 static int t_quorum(void)
 {
     int failures = 0;
     struct zv_quorum_ctx ctx;
     zv_quorum_ctx_init(&ctx);
 
-    /* 2-of-N approved matching -> verified. */
-    {
-        struct vcs_verify_candidate cands[2];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x23);
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 2, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: two approved matching verify",
-                 cands[0].parsed && cands[1].parsed && q.verified &&
-                 q.quorum_reached && q.quorum_signers == 2 &&
-                 q.quorum_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
-                 zv_row_rule_is(&q, 0, VCS_VERIFY_ROW_COUNTED) &&
-                 zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_COUNTED));
-    }
-
-    /* Three matching signers count three. */
-    {
-        struct vcs_verify_candidate cands[3];
-        for (size_t i = 0; i < 3; i++)
-            cands[i].parsed = zv_attest(
-                &cands[i].attestation, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                ctx.package_root, ctx.release_id, ctx.recipe_root,
-                (uint8_t)(0x22 + i));
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 3, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: 3-of-N counts three signers",
-                 q.verified && q.quorum_signers == 3);
-    }
-
-    /* Non-matching classes never reach a quorum. */
-    {
-        struct vcs_verify_candidate cands[2];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x23);
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 2, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: different result classes do not verify",
-                 !q.verified && !q.quorum_reached &&
-                 q.counted == 2);
-    }
-
-    /* An unapproved key is named and never counted. */
-    {
-        struct vcs_verify_candidate cands[2];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x44); /* not listed */
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 2, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: unapproved signer named, no quorum",
-                 !q.verified && q.counted == 1 &&
-                 zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_SIGNER_NOT_APPROVED));
-    }
-
-    /* Self-verification (publisher == verifier) is rejected even when the
-     * operator foolishly approved the publisher key. */
-    {
-        struct vcs_verifier_policy with_self;
-        vcs_verifier_policy_init(&with_self);
-        vcs_verifier_policy_add(&with_self, ctx.publisher, NULL);
-        struct privkey sk;
-        struct pubkey pk;
-        zv_keypair(0x22, &sk, &pk);
-        vcs_verifier_policy_add(&with_self, pk.vch, NULL);
-        struct vcs_verify_candidate cands[2];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x11); /* publisher */
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 2, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &with_self, &q);
-        ZV_CHECK("quorum: self-verification rejected",
-                 !q.verified && q.counted == 1 &&
-                 zv_row_rule_is(&q, 0, VCS_VERIFY_ROW_SELF_VERIFICATION));
-    }
-
-    /* A duplicate signer counts once (second attestation differs in the
-     * compiler versions — it still MATCHES on roots+class). */
-    {
-        struct vcs_verify_candidate cands[2];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        if (cands[1].parsed)
-            snprintf(cands[1].attestation.compilers[1].version,
-                     sizeof(cands[1].attestation.compilers[1].version),
-                     "14.1.0");
-        /* Re-sign after the field change. */
-        struct privkey sk;
-        struct pubkey pk;
-        zv_keypair(0x22, &sk, &pk);
-        cands[1].parsed = cands[1].parsed &&
-                          zv_sign_attest(&cands[1].attestation, &sk);
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 2, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: duplicate signer counts once",
-                 !q.verified && q.counted == 1 &&
-                 zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_DUPLICATE_SIGNER));
-    }
-
-    /* A quorum on a FAIL class is reached but never "verified". */
-    {
-        struct vcs_verify_candidate cands[2];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x23);
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 2, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: fail-class quorum is not verified",
-                 !q.verified && q.quorum_reached && q.quorum_signers == 2 &&
-                 q.quorum_class == VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL);
-    }
-
-    /* A different recipe root is a named mismatch, never a match. */
-    {
-        uint8_t other_recipe[32];
-        zv_pattern_root(0x90, other_recipe);
-        struct vcs_verify_candidate cands[2];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    other_recipe, 0x33);
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 2, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: recipe mismatch named, no quorum",
-                 !q.verified && q.counted == 1 &&
-                 zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_RECIPE_ROOT_MISMATCH));
-    }
-
-    /* An invalid signature and an unparseable wire are named invalid. */
-    {
-        struct vcs_verify_candidate cands[3];
-        cands[0].parsed = zv_attest(&cands[0].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x22);
-        cands[1].parsed = zv_attest(&cands[1].attestation,
-                                    VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ctx.package_root, ctx.release_id,
-                                    ctx.recipe_root, 0x33);
-        if (cands[1].parsed)
-            cands[1].attestation.signature[0] ^= 0x01;
-        cands[2].parsed = false;
-        struct vcs_verify_quorum q;
-        vcs_verify_evaluate(cands, 3, ctx.package_root, ctx.recipe_root,
-                            ctx.publisher, &ctx.policy, &q);
-        ZV_CHECK("quorum: invalid attestations named",
-                 !q.verified && q.counted == 1 &&
-                 zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_ATTESTATION_INVALID) &&
-                 zv_row_rule_is(&q, 2, VCS_VERIFY_ROW_ATTESTATION_INVALID) &&
-                 !q.rows[2].has_pubkey);
-    }
+    zq_two_matching(&ctx);
+    zq_three_matching(&ctx);
+    zq_mixed_classes(&ctx);
+    zq_unapproved_signer(&ctx);
+    zq_self_verification(&ctx);
+    zq_duplicate_signer(&ctx);
+    zq_fail_class(&ctx);
+    zq_recipe_mismatch(&ctx);
+    zq_invalid_named(&ctx);
     return failures;
 }
 
@@ -911,30 +1017,25 @@ static void zv_cmd_free(struct zv_cmd *c)
  * raises the recipe to schema 2 and makes the verifier link and emit
  * bin/<package short name>; NULL keeps the historical library-only,
  * schema-1 fixture byte-for-byte. */
-static bool zv_publish_fixture_ex(const char *store, const char *src_content,
-                                  const char *test_content,
-                                  const char *program_content,
-                                  uint8_t package_root_out[32],
-                                  uint8_t release_id_out[32],
-                                  uint8_t recipe_root_out[32])
+static bool zv_fixture_make_dirs(const char *store)
 {
     char dir[4400];
-    snprintf(dir, sizeof(dir), "%s/manifests", store);
-    if (!zv_mkdir_p(dir))
-        return false;
-    snprintf(dir, sizeof(dir), "%s/releases", store);
-    if (!zv_mkdir_p(dir))
-        return false;
-    snprintf(dir, sizeof(dir), "%s/recipes", store);
-    if (!zv_mkdir_p(dir))
-        return false;
-    snprintf(dir, sizeof(dir), "%s/attestations", store);
-    if (!zv_mkdir_p(dir))
-        return false;
-    snprintf(dir, sizeof(dir), "%s/cas/sha3", store);
-    if (!zv_mkdir_p(dir))
-        return false;
+    static const char *const subdirs[] = {
+        "manifests", "releases", "recipes", "attestations", "cas/sha3",
+    };
+    for (size_t i = 0; i < sizeof(subdirs) / sizeof(subdirs[0]); i++) {
+        snprintf(dir, sizeof(dir), "%s/%s", store, subdirs[i]);
+        if (!zv_mkdir_p(dir))
+            return false;
+    }
+    return true;
+}
 
+static bool zv_fixture_write_files(const char *store, const char *src_content,
+                                   const char *test_content,
+                                   const char *program_content,
+                                   uint8_t package_root_out[32])
+{
     struct {
         const char *path;
         const char *content;
@@ -985,19 +1086,25 @@ static bool zv_publish_fixture_ex(const char *store, const char *src_content,
     snprintf(path, sizeof(path), "%s/manifests/%s", store, root_hex);
     ok = zv_write_file(path, mwire, mwire_len, 0600);
     free(mwire);
-    if (!ok)
-        return false;
+    return ok;
+}
 
+static bool zv_fixture_write_recipe(const char *store,
+                                    const char *program_content,
+                                    uint8_t recipe_root_out[32])
+{
     struct vcs_package_recipe r;
     vcs_package_recipe_init(&r);
-    ok = vcs_package_recipe_add_header(&r, "src/add.h", NULL) &&
-         vcs_package_recipe_add_source(&r, "src/add.c", NULL) &&
-         vcs_package_recipe_add_test_source(&r, "test/test_add.c", NULL) &&
-         vcs_package_recipe_add_include_dir(&r, "src", NULL) &&
-         vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBC,
-                                        NULL) &&
-         (!program_content ||
-          vcs_package_recipe_add_program(&r, "app/main.c", NULL));
+    bool ok = vcs_package_recipe_add_header(&r, "src/add.h", NULL) &&
+              vcs_package_recipe_add_source(&r, "src/add.c", NULL) &&
+              vcs_package_recipe_add_test_source(&r, "test/test_add.c",
+                                                 NULL) &&
+              vcs_package_recipe_add_include_dir(&r, "src", NULL) &&
+              vcs_package_recipe_add_library(&r,
+                                             VCS_PACKAGE_RECIPE_LIB_LIBC,
+                                             NULL) &&
+              (!program_content ||
+               vcs_package_recipe_add_program(&r, "app/main.c", NULL));
     vcs_package_recipe_set_test_limits(&r, 0, 60,
                                        UINT64_C(64) * 1024u * 1024u);
     uint8_t *rwire = NULL;
@@ -1012,12 +1119,18 @@ static bool zv_publish_fixture_ex(const char *store, const char *src_content,
         return false;
     char rroot_hex[65];
     zv_hex_enc(recipe_root_out, 32, rroot_hex);
+    char path[4400];
     snprintf(path, sizeof(path), "%s/recipes/%s", store, rroot_hex);
     ok = zv_write_file(path, rwire, rwire_len, 0600);
     free(rwire);
-    if (!ok)
-        return false;
+    return ok;
+}
 
+static bool zv_fixture_write_release(const char *store,
+                                     const uint8_t package_root[32],
+                                     const uint8_t recipe_root[32],
+                                     uint8_t release_id_out[32])
+{
     struct privkey sk;
     struct pubkey pk;
     if (!zv_keypair(0x11, &sk, &pk))
@@ -1027,13 +1140,13 @@ static bool zv_publish_fixture_ex(const char *store, const char *src_content,
     rel.schema_version = VCS_PACKAGE_RELEASE_VERSION;
     snprintf(rel.name, sizeof(rel.name), "alice/addpkg");
     snprintf(rel.semver, sizeof(rel.semver), "1.0.0");
-    memcpy(rel.package_root, package_root_out, 32);
+    memcpy(rel.package_root, package_root, 32);
     rel.has_parent = false;
     memcpy(rel.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
     rel.publisher_sequence = 1;
     snprintf(rel.reward_address, sizeof(rel.reward_address), "t1fixture");
     snprintf(rel.license, sizeof(rel.license), "MIT");
-    memcpy(rel.recipe_root, recipe_root_out, 32);
+    memcpy(rel.recipe_root, recipe_root, 32);
     rel.has_znam = false;
     snprintf(rel.chain_id, sizeof(rel.chain_id), "zclassic-main");
     uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
@@ -1053,10 +1166,29 @@ static bool zv_publish_fixture_ex(const char *store, const char *src_content,
     memcpy(release_id_out, id, 32);
     char id_hex[65];
     zv_hex_enc(id, 32, id_hex);
+    char path[4400];
     snprintf(path, sizeof(path), "%s/releases/%s", store, id_hex);
-    ok = zv_write_file(path, relwire, relwire_len, 0600);
+    bool ok = zv_write_file(path, relwire, relwire_len, 0600);
     free(relwire);
     return ok;
+}
+
+static bool zv_publish_fixture_ex(const char *store, const char *src_content,
+                                  const char *test_content,
+                                  const char *program_content,
+                                  uint8_t package_root_out[32],
+                                  uint8_t release_id_out[32],
+                                  uint8_t recipe_root_out[32])
+{
+    if (!zv_fixture_make_dirs(store))
+        return false;
+    if (!zv_fixture_write_files(store, src_content, test_content,
+                                program_content, package_root_out))
+        return false;
+    if (!zv_fixture_write_recipe(store, program_content, recipe_root_out))
+        return false;
+    return zv_fixture_write_release(store, package_root_out,
+                                    recipe_root_out, release_id_out);
 }
 
 /* The historical library-only fixture: no program, recipe schema 1. */
@@ -1251,40 +1383,390 @@ static int t_build_receipt_v2(void)
     return failures;
 }
 
-static int t_reproduce(void)
+static int zr_scan_missing(const char *missing, const uint8_t package_root[32],
+                           const uint8_t recipe_root[32])
 {
     int failures = 0;
-    uint8_t package_root[32], recipe_root[32];
-    zv_pattern_root(0x50, package_root);
-    zv_pattern_root(0x51, recipe_root);
+    struct vcs_reproduce_report rep;
+    ZV_CHECK("reproduce: a missing receipts dir is an empty report",
+             vcs_package_reproduce_scan(missing, package_root, recipe_root,
+                                        &rep) &&
+             !rep.reproduced && rep.matching == 0 && rep.row_count == 0);
+    return failures;
+}
 
-    /* Byte-identical outputs reproduce — including the third-party case:
-     * a different compiler version (a distinct receipt id, so a genuinely
-     * separate build event) committing the same output set. */
-    struct vcs_package_build_receipt ref, same, third;
-    ZV_CHECK("reproduce: receipt fixtures build",
-             zv_receipt(&ref, package_root, recipe_root, "14.2.0", 0x40) &&
-             zv_receipt(&same, package_root, recipe_root, "14.2.0", 0x40) &&
-             zv_receipt(&third, package_root, recipe_root,
-                        "15.0.1-third-party", 0x40));
+static int zr_scan_counts(const char *receipts_dir,
+                          const struct vcs_package_build_receipt *ref,
+                          const struct vcs_package_build_receipt *third,
+                          const uint8_t package_root[32],
+                          const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_report rep;
+    ZV_CHECK("reproduce: one build recorded, none reproduced",
+             zv_store_receipt(receipts_dir, ref) &&
+             vcs_package_reproduce_scan(receipts_dir, package_root,
+                                        recipe_root, &rep) &&
+             !rep.reproduced && rep.matching == 1 && rep.row_count == 1 &&
+             rep.rows[0].reference);
+    ZV_CHECK("reproduce: two distinct builds agreeing reproduce",
+             zv_store_receipt(receipts_dir, third) &&
+             vcs_package_reproduce_scan(receipts_dir, package_root,
+                                        recipe_root, &rep) &&
+             rep.reproduced && rep.matching == 2 && rep.row_count == 2 &&
+             rep.rows[0].reference && !rep.rows[1].reference &&
+             rep.rows[1].rule == VCS_REPRODUCE_MATCH);
+    return failures;
+}
+
+static int zr_scan_foreign(const char *receipts_dir,
+                           const uint8_t recipe_root[32],
+                           const uint8_t package_root[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_report rep;
+    /* A foreign package's receipt in the same dir is not counted. */
+    uint8_t foreign_root[32];
+    zv_pattern_root(0x5f, foreign_root);
+    struct vcs_package_build_receipt foreign;
+    ZV_CHECK("reproduce: foreign receipt files but never matches",
+             zv_receipt(&foreign, foreign_root, recipe_root, "14.2.0",
+                        0x40) &&
+             zv_store_receipt(receipts_dir, &foreign) &&
+             vcs_package_reproduce_scan(receipts_dir, package_root,
+                                        recipe_root, &rep) &&
+             rep.reproduced && rep.matching == 2);
+    return failures;
+}
+
+static int zr_scan_diverging(const char *receipts_dir,
+                             const uint8_t package_root[32],
+                             const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_report rep;
+    /* A diverging third build kills the verdict and is named by rule. */
+    struct vcs_package_build_receipt bad;
+    if (!zv_receipt(&bad, package_root, recipe_root, "14.2.0", 0x99))
+        return ++failures;
+    ZV_CHECK("reproduce: diverging third build files",
+             zv_store_receipt(receipts_dir, &bad));
+    bool scan_ok = vcs_package_reproduce_scan(receipts_dir, package_root,
+                                              recipe_root, &rep);
+    bool named = false;
+    for (size_t i = 0; i < rep.row_count; i++)
+        if (rep.rows[i].rule == VCS_REPRODUCE_OUTPUT_HASH_MISMATCH)
+            named = true;
+    ZV_CHECK("reproduce: a diverging build is rejected loudly",
+             scan_ok && !rep.reproduced && rep.matching == 3 && named);
+    return failures;
+}
+
+static int zr_cap_same(const char *base, const uint8_t package_root[32],
+                       const uint8_t recipe_root[32],
+                       const uint8_t cap_a[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_report rep;
+    struct vcs_package_build_receipt c1, c2;
+    /* (a) two matching v2 receipts pinning the SAME capsule: reproduced,
+     * one distinct toolchain, NOT cross-toolchain. */
+    bool cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
+        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
+            VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_set_toolchain_capsule(&c2, cap_a) ==
+            VCS_PACKAGE_BUILD_OK;
+    ZV_CHECK("reproduce: same-capsule fixtures build", cap_fix);
+    char capdir[4400];
+    snprintf(capdir, sizeof(capdir), "%s/caps_same", base);
+    ZV_CHECK("reproduce: same capsule is one toolchain, never cross",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             rep.reproduced && rep.distinct_toolchains == 1 &&
+             !rep.cross_toolchain && rep.row_count == 2 &&
+             rep.rows[0].has_toolchain_capsule &&
+             rep.rows[1].has_toolchain_capsule &&
+             memcmp(rep.rows[0].toolchain_capsule_root, cap_a, 32) == 0);
+    return failures;
+}
+
+static int zr_cap_cross(const char *base, const uint8_t package_root[32],
+                        const uint8_t recipe_root[32],
+                        const uint8_t cap_a[32], const uint8_t cap_b[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_report rep;
+    struct vcs_package_build_receipt c1, c2;
+    /* (b) two matching v2 receipts pinning DIFFERENT capsules: the strong
+     * claim — two toolchains produced byte-identical outputs. */
+    bool cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
+        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
+            VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_set_toolchain_capsule(&c2, cap_b) ==
+            VCS_PACKAGE_BUILD_OK;
+    ZV_CHECK("reproduce: cross-capsule fixtures build", cap_fix);
+    char capdir[4400];
+    snprintf(capdir, sizeof(capdir), "%s/caps_diff", base);
+    ZV_CHECK("reproduce: two distinct capsules report cross_toolchain",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             rep.reproduced && rep.distinct_toolchains == 2 &&
+             rep.cross_toolchain);
+    return failures;
+}
+
+static int zr_cap_v1(const char *base, const uint8_t package_root[32],
+                     const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_report rep;
+    struct vcs_package_build_receipt c1, c2;
+    /* (c) a capsule-less (v1) matching pair: byte-identity proven,
+     * toolchain independence not claimed. */
+    bool cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40);
+    char capdir[4400];
+    snprintf(capdir, sizeof(capdir), "%s/caps_v1", base);
+    ZV_CHECK("reproduce: v1 receipts add zero toolchain diversity",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             rep.reproduced && rep.distinct_toolchains == 0 &&
+             !rep.cross_toolchain &&
+             !rep.rows[0].has_toolchain_capsule);
+    return failures;
+}
+
+static int zr_cap_mixed(const char *base, const uint8_t package_root[32],
+                        const uint8_t recipe_root[32],
+                        const uint8_t cap_a[32], const uint8_t cap_b[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_report rep;
+    struct vcs_package_build_receipt c1, c2;
+    /* (d) a NON-matching row never inflates the counts: an agreeing
+     * same-capsule pair plus a diverging third build pinning a different
+     * capsule still reads one toolchain, not cross. */
+    bool cap_fix =
+        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
+        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
+        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
+            VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_set_toolchain_capsule(&c2, cap_a) ==
+            VCS_PACKAGE_BUILD_OK;
+    struct vcs_package_build_receipt cdiv;
+    cap_fix = cap_fix &&
+        zv_receipt(&cdiv, package_root, recipe_root, "15.0.2", 0x99) &&
+        vcs_package_build_set_toolchain_capsule(&cdiv, cap_b) ==
+            VCS_PACKAGE_BUILD_OK;
+    ZV_CHECK("reproduce: diverging-capsule fixtures build", cap_fix);
+    char capdir[4400];
+    snprintf(capdir, sizeof(capdir), "%s/caps_mixed", base);
+    ZV_CHECK("reproduce: a diverging row's capsule never inflates diversity",
+             cap_fix && zv_store_receipt(capdir, &c1) &&
+             zv_store_receipt(capdir, &c2) &&
+             zv_store_receipt(capdir, &cdiv) &&
+             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
+                                        &rep) &&
+             !rep.reproduced && rep.matching == 3 &&
+             rep.distinct_toolchains == 1 && !rep.cross_toolchain);
+    return failures;
+}
+
+static int zr_capsules(char *base, const uint8_t package_root[32],
+                       const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    /* ── toolchain-capsule diversity: HOW independent the evidence is ──
+     * Fresh receipts dirs per scenario; all fixtures reuse the agreeing
+     * output set (out_seed 0x40) so only the capsule dimension moves. */
+    uint8_t cap_a[32], cap_b[32];
+    zv_pattern_root(0x61, cap_a);
+    zv_pattern_root(0x62, cap_b);
+
+    failures += zr_cap_same(base, package_root, recipe_root, cap_a);
+    failures += zr_cap_cross(base, package_root, recipe_root, cap_a, cap_b);
+    failures += zr_cap_v1(base, package_root, recipe_root);
+    failures += zr_cap_mixed(base, package_root, recipe_root, cap_a, cap_b);
+    return failures;
+}
+
+static int zr_eligibility_gates(void)
+{
+    int failures = 0;
+    struct vcs_reward_eligibility_input in;
+    memset(&in, 0, sizeof(in));
+    in.manifest_parsed = true;
+    in.root_matches = true;
+    in.chunks_checked = true;
+    in.chunks_verified = 1;
+    in.chunks_total = 1;
+    in.release_verifies = true;
+    in.license_accepted = true;
+    in.lineage_valid = true;
+    in.lineage_detail = "root release (no parent)";
+    /* NO quorum facts at all — reproduction alone carries gates 5-8. */
+    in.reproduction_verified = true;
+    struct vcs_reward_eligibility e;
+    vcs_reward_eligibility_evaluate(&in, &e);
+    ZV_CHECK("reproduce: eligible on reproduction without a quorum",
+             e.eligible && e.failed_count == 0 &&
+             e.reproduction_verified &&
+             e.gates[VCS_REWARD_GATE_GCC_BUILD].passed &&
+             e.gates[VCS_REWARD_GATE_CLANG_BUILD].passed &&
+             e.gates[VCS_REWARD_GATE_TESTS_PASS].passed &&
+             e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].passed &&
+             strstr(e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].detail,
+                    "reproduction") != NULL);
+    in.reproduction_verified = false;
+    vcs_reward_eligibility_evaluate(&in, &e);
+    ZV_CHECK("reproduce: without it, gates 5-8 fail as before",
+             !e.eligible && e.failed_count == 4 &&
+             !e.reproduction_verified &&
+             strstr(e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].detail,
+                    "no recorded reproduction") != NULL);
+    return failures;
+}
+
+static void zr_owner_ein(struct vcs_reward_eligibility_input *in,
+                         bool reproduction_verified)
+{
+    memset(in, 0, sizeof(*in));
+    in->manifest_parsed = true;
+    in->root_matches = true;
+    in->chunks_checked = true;
+    in->chunks_verified = 1;
+    in->chunks_total = 1;
+    in->release_verifies = true;
+    in->license_accepted = true;
+    in->lineage_valid = true;
+    in->lineage_detail = "root release (no parent)";
+    in->reproduction_verified = reproduction_verified;
+}
+
+static bool zr_owner_scan(const char *dir, const uint8_t package_root[32],
+                          const uint8_t recipe_root[32],
+                          const uint8_t cap_a[32], const uint8_t cap_b[32],
+                          struct vcs_reproduce_report *rep)
+{
+    struct vcs_package_build_receipt e1, e2;
+    if (!zv_receipt(&e1, package_root, recipe_root, "14.2.0", 0x40) ||
+        !zv_receipt(&e2, package_root, recipe_root, "15.0.1", 0x40) ||
+        vcs_package_build_set_toolchain_capsule(&e1, cap_a) !=
+            VCS_PACKAGE_BUILD_OK ||
+        vcs_package_build_set_toolchain_capsule(&e2, cap_b) !=
+            VCS_PACKAGE_BUILD_OK)
+        return false;
+    if (!zv_store_receipt(dir, &e1) || !zv_store_receipt(dir, &e2))
+        return false;
+    return vcs_package_reproduce_scan(dir, package_root, recipe_root, rep);
+}
+
+static int zr_owner_directive(const uint8_t package_root[32],
+                              const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    char ebase[4400];
+    snprintf(ebase, sizeof(ebase), "test-tmp/zv_repro_elig_%ld",
+             (long)getpid());
+    zv_rm_rf(ebase);
+    uint8_t ecap_a[32], ecap_b[32];
+    zv_pattern_root(0x81, ecap_a);
+    zv_pattern_root(0x82, ecap_b);
+
+    /* (a)+(b) SOLO: two matching receipts pinning the SAME capsule —
+     * one publisher, one machine, rebuilt twice. Must still be
+     * eligible, and the scan must still honestly report
+     * distinct_toolchains=1, cross_toolchain=false (recording never
+     * stops just because it doesn't gate). */
+    char edir_solo[4400];
+    snprintf(edir_solo, sizeof(edir_solo), "%s/solo", ebase);
+    struct vcs_reproduce_report erep;
+    bool solo_scan_ok = zr_owner_scan(edir_solo, package_root, recipe_root,
+                                      ecap_a, ecap_a, &erep);
+    ZV_CHECK("owner directive: solo single-toolchain scan reproduces "
+             "and honestly reports distinct_toolchains=1, "
+             "cross_toolchain=false",
+             solo_scan_ok && erep.reproduced &&
+             erep.distinct_toolchains == 1 && !erep.cross_toolchain);
+
+    struct vcs_reward_eligibility_input ein;
+    zr_owner_ein(&ein, solo_scan_ok && erep.reproduced);
+    struct vcs_reward_eligibility esolo;
+    vcs_reward_eligibility_evaluate(&ein, &esolo);
+    ZV_CHECK("owner directive: a solo single-toolchain reproduction "
+             "still earns FULL reward eligibility (cross-toolchain "
+             "diversity must be evidence, never a publication/"
+             "eligibility gate — owner directive)",
+             esolo.eligible && esolo.failed_count == 0 &&
+             esolo.reproduction_verified);
+
+    /* (c) TWO capsules: strictly more evidence, same verdict. */
+    char edir_cross[4400];
+    snprintf(edir_cross, sizeof(edir_cross), "%s/cross", ebase);
+    struct vcs_reproduce_report erep2;
+    bool cross_scan_ok = zr_owner_scan(edir_cross, package_root,
+                                       recipe_root, ecap_a, ecap_b, &erep2);
+    ZV_CHECK("owner directive: two-capsule scan reports "
+             "distinct_toolchains=2, cross_toolchain=true",
+             cross_scan_ok && erep2.reproduced &&
+             erep2.distinct_toolchains == 2 && erep2.cross_toolchain);
+    zr_owner_ein(&ein, cross_scan_ok && erep2.reproduced);
+    struct vcs_reward_eligibility ecross;
+    vcs_reward_eligibility_evaluate(&ein, &ecross);
+    ZV_CHECK("owner directive: two-toolchain evidence changes NO "
+             "eligibility verdict relative to the solo case above — "
+             "same eligible=true, strictly more evidence; diversity "
+             "is a strength score, not a door (owner directive)",
+             ecross.eligible == esolo.eligible &&
+             ecross.eligible && ecross.failed_count == 0 &&
+             erep.distinct_toolchains != erep2.distinct_toolchains);
+    zv_rm_rf(ebase);
+    return failures;
+}
+
+static int zr_match_checks(const struct vcs_package_build_receipt *ref,
+                           const struct vcs_package_build_receipt *same,
+                           const struct vcs_package_build_receipt *third)
+{
+    int failures = 0;
     struct vcs_reproduce_verdict v;
-    vcs_package_reproduce_compare(&ref, &same, &v);
+    vcs_package_reproduce_compare(ref, same, &v);
     ZV_CHECK("reproduce: identical receipts MATCH",
              v.reproduced && v.rule == VCS_REPRODUCE_MATCH &&
              v.detail[0] == '\0');
-    vcs_package_reproduce_compare(&ref, &third, &v);
+    vcs_package_reproduce_compare(ref, third, &v);
     uint8_t id_ref[32], id_third[32];
-    bool ids = vcs_package_build_id(&ref, id_ref) == VCS_PACKAGE_BUILD_OK &&
-               vcs_package_build_id(&third, id_third) == VCS_PACKAGE_BUILD_OK;
+    bool ids = vcs_package_build_id(ref, id_ref) == VCS_PACKAGE_BUILD_OK &&
+               vcs_package_build_id(third, id_third) == VCS_PACKAGE_BUILD_OK;
     ZV_CHECK("reproduce: third-party toolchain MATCH, distinct ids",
              v.reproduced && v.rule == VCS_REPRODUCE_MATCH && ids &&
              memcmp(id_ref, id_third, 32) != 0);
+    return failures;
+}
+
+static int zr_output_divergences(const struct vcs_package_build_receipt *ref,
+                                 const uint8_t package_root[32],
+                                 const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_verdict v;
 
     /* Every divergence is named, loudly, with the path in the detail. */
     struct vcs_package_build_receipt bad;
     ZV_CHECK("reproduce: diverging fixture builds",
              zv_receipt(&bad, package_root, recipe_root, "14.2.0", 0x99));
-    vcs_package_reproduce_compare(&ref, &bad, &v);
+    vcs_package_reproduce_compare(ref, &bad, &v);
     ZV_CHECK("reproduce: hash divergence named with path and hashes",
              !v.reproduced &&
              v.rule == VCS_REPRODUCE_OUTPUT_HASH_MISMATCH &&
@@ -1310,26 +1792,34 @@ static int t_reproduce(void)
              vcs_package_build_add_output(&short_build, "include/add.h",
                                           hdr_hash, 100) ==
                  VCS_PACKAGE_BUILD_OK);
-    vcs_package_reproduce_compare(&ref, &short_build, &v);
+    vcs_package_reproduce_compare(ref, &short_build, &v);
     ZV_CHECK("reproduce: missing output named",
              !v.reproduced && v.rule == VCS_REPRODUCE_OUTPUT_MISSING &&
              strstr(v.detail, "lib/libaddpkg.a") != NULL);
-    vcs_package_reproduce_compare(&short_build, &ref, &v);
+    vcs_package_reproduce_compare(&short_build, ref, &v);
     ZV_CHECK("reproduce: unexpected output named",
              !v.reproduced && v.rule == VCS_REPRODUCE_OUTPUT_UNEXPECTED &&
              strstr(v.detail, "lib/libaddpkg.a") != NULL);
+    return failures;
+}
 
+static int zr_root_divergences(const struct vcs_package_build_receipt *ref,
+                               const uint8_t package_root[32],
+                               const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_verdict v;
     struct vcs_package_build_receipt other;
     ZV_CHECK("reproduce: root fixtures build",
              zv_receipt(&other, package_root, recipe_root, "14.2.0", 0x40));
     zv_pattern_root(0x52, other.recipe_root);
-    vcs_package_reproduce_compare(&ref, &other, &v);
+    vcs_package_reproduce_compare(ref, &other, &v);
     ZV_CHECK("reproduce: recipe root divergence named",
              !v.reproduced && v.rule == VCS_REPRODUCE_RECIPE_ROOT_MISMATCH);
     ZV_CHECK("reproduce: recipe fixture rebuilds",
              zv_receipt(&other, package_root, recipe_root, "14.2.0", 0x40));
     zv_pattern_root(0x53, other.lock_root);
-    vcs_package_reproduce_compare(&ref, &other, &v);
+    vcs_package_reproduce_compare(ref, &other, &v);
     ZV_CHECK("reproduce: lock root divergence named",
              !v.reproduced && v.rule == VCS_REPRODUCE_LOCK_ROOT_MISMATCH);
     ZV_CHECK("reproduce: dep fixture rebuilds",
@@ -1339,9 +1829,19 @@ static int t_reproduce(void)
     ZV_CHECK("reproduce: dep adds",
              vcs_package_build_add_dep(&other, dep) ==
                  VCS_PACKAGE_BUILD_OK);
-    vcs_package_reproduce_compare(&ref, &other, &v);
+    vcs_package_reproduce_compare(ref, &other, &v);
     ZV_CHECK("reproduce: dependency set divergence named",
              !v.reproduced && v.rule == VCS_REPRODUCE_DEP_SET_MISMATCH);
+    return failures;
+}
+
+static int zr_fail_invalid(const struct vcs_package_build_receipt *ref,
+                           const uint8_t package_root[32],
+                           const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    struct vcs_reproduce_verdict v;
+    struct vcs_package_build_receipt other;
 
     /* A failing build has nothing to reproduce (no vacuous MATCH on an
      * empty output set), and a non-canonical receipt is invalid. */
@@ -1350,17 +1850,17 @@ static int t_reproduce(void)
     other.result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_FAIL;
     other.test_ran = false;
     other.test_exit_code = 0;
-    vcs_package_reproduce_compare(&other, &ref, &v);
+    vcs_package_reproduce_compare(&other, ref, &v);
     ZV_CHECK("reproduce: failing reference named, never vacuous",
              !v.reproduced &&
              v.rule == VCS_REPRODUCE_REFERENCE_NOT_INSTALLABLE);
-    vcs_package_reproduce_compare(&ref, &other, &v);
+    vcs_package_reproduce_compare(ref, &other, &v);
     ZV_CHECK("reproduce: failing rebuild named",
              !v.reproduced &&
              v.rule == VCS_REPRODUCE_REBUILD_NOT_INSTALLABLE);
     struct vcs_package_build_receipt zeroed;
     memset(&zeroed, 0, sizeof(zeroed));
-    vcs_package_reproduce_compare(&zeroed, &ref, &v);
+    vcs_package_reproduce_compare(&zeroed, ref, &v);
     ZV_CHECK("reproduce: invalid reference named",
              !v.reproduced && v.rule == VCS_REPRODUCE_REFERENCE_INVALID);
     ZV_CHECK("reproduce: rule strings stable",
@@ -1369,6 +1869,30 @@ static int t_reproduce(void)
              strcmp(vcs_reproduce_rule_string(
                         VCS_REPRODUCE_OUTPUT_HASH_MISMATCH),
                     "output-hash-mismatch") == 0);
+    return failures;
+}
+
+static int t_reproduce(void)
+{
+    int failures = 0;
+    uint8_t package_root[32], recipe_root[32];
+    zv_pattern_root(0x50, package_root);
+    zv_pattern_root(0x51, recipe_root);
+
+    /* Byte-identical outputs reproduce — including the third-party case:
+     * a different compiler version (a distinct receipt id, so a genuinely
+     * separate build event) committing the same output set. */
+    struct vcs_package_build_receipt ref, same, third;
+    ZV_CHECK("reproduce: receipt fixtures build",
+             zv_receipt(&ref, package_root, recipe_root, "14.2.0", 0x40) &&
+             zv_receipt(&same, package_root, recipe_root, "14.2.0", 0x40) &&
+             zv_receipt(&third, package_root, recipe_root,
+                        "15.0.1-third-party", 0x40));
+    failures += zr_match_checks(&ref, &same, &third);
+
+    failures += zr_output_divergences(&ref, package_root, recipe_root);
+    failures += zr_root_divergences(&ref, package_root, recipe_root);
+    failures += zr_fail_invalid(&ref, package_root, recipe_root);
 
     /* ── the receipts-directory scan ── */
     char base[4400];
@@ -1376,176 +1900,19 @@ static int t_reproduce(void)
     zv_rm_rf(base);
     char missing[4400];
     snprintf(missing, sizeof(missing), "%s/no-such-dir", base);
-    struct vcs_reproduce_report rep;
-    ZV_CHECK("reproduce: a missing receipts dir is an empty report",
-             vcs_package_reproduce_scan(missing, package_root, recipe_root,
-                                        &rep) &&
-             !rep.reproduced && rep.matching == 0 && rep.row_count == 0);
-
+    failures += zr_scan_missing(missing, package_root, recipe_root);
     char receipts_dir[4400];
     snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", base);
-    ZV_CHECK("reproduce: one build recorded, none reproduced",
-             zv_store_receipt(receipts_dir, &ref) &&
-             vcs_package_reproduce_scan(receipts_dir, package_root,
-                                        recipe_root, &rep) &&
-             !rep.reproduced && rep.matching == 1 && rep.row_count == 1 &&
-             rep.rows[0].reference);
-    ZV_CHECK("reproduce: two distinct builds agreeing reproduce",
-             zv_store_receipt(receipts_dir, &third) &&
-             vcs_package_reproduce_scan(receipts_dir, package_root,
-                                        recipe_root, &rep) &&
-             rep.reproduced && rep.matching == 2 && rep.row_count == 2 &&
-             rep.rows[0].reference && !rep.rows[1].reference &&
-             rep.rows[1].rule == VCS_REPRODUCE_MATCH);
-    /* A foreign package's receipt in the same dir is not counted. */
-    uint8_t foreign_root[32];
-    zv_pattern_root(0x5f, foreign_root);
-    struct vcs_package_build_receipt foreign;
-    ZV_CHECK("reproduce: foreign receipt files but never matches",
-             zv_receipt(&foreign, foreign_root, recipe_root, "14.2.0",
-                        0x40) &&
-             zv_store_receipt(receipts_dir, &foreign) &&
-             vcs_package_reproduce_scan(receipts_dir, package_root,
-                                        recipe_root, &rep) &&
-             rep.reproduced && rep.matching == 2);
-    /* A diverging third build kills the verdict and is named by rule. */
-    ZV_CHECK("reproduce: diverging third build files",
-             zv_store_receipt(receipts_dir, &bad));
-    bool scan_ok = vcs_package_reproduce_scan(receipts_dir, package_root,
-                                              recipe_root, &rep);
-    bool named = false;
-    for (size_t i = 0; i < rep.row_count; i++)
-        if (rep.rows[i].rule == VCS_REPRODUCE_OUTPUT_HASH_MISMATCH)
-            named = true;
-    ZV_CHECK("reproduce: a diverging build is rejected loudly",
-             scan_ok && !rep.reproduced && rep.matching == 3 && named);
+    failures += zr_scan_counts(receipts_dir, &ref, &third, package_root,
+                               recipe_root);
+    failures += zr_scan_foreign(receipts_dir, recipe_root, package_root);
+    failures += zr_scan_diverging(receipts_dir, package_root, recipe_root);
 
-    /* ── toolchain-capsule diversity: HOW independent the evidence is ──
-     * Fresh receipts dirs per scenario; all fixtures reuse the agreeing
-     * output set (out_seed 0x40) so only the capsule dimension moves. */
-    uint8_t cap_a[32], cap_b[32];
-    zv_pattern_root(0x61, cap_a);
-    zv_pattern_root(0x62, cap_b);
-    struct vcs_package_build_receipt c1, c2;
-    char capdir[4400];
-
-    /* (a) two matching v2 receipts pinning the SAME capsule: reproduced,
-     * one distinct toolchain, NOT cross-toolchain. */
-    bool cap_fix =
-        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
-        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
-        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
-            VCS_PACKAGE_BUILD_OK &&
-        vcs_package_build_set_toolchain_capsule(&c2, cap_a) ==
-            VCS_PACKAGE_BUILD_OK;
-    ZV_CHECK("reproduce: same-capsule fixtures build", cap_fix);
-    snprintf(capdir, sizeof(capdir), "%s/caps_same", base);
-    ZV_CHECK("reproduce: same capsule is one toolchain, never cross",
-             cap_fix && zv_store_receipt(capdir, &c1) &&
-             zv_store_receipt(capdir, &c2) &&
-             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
-                                        &rep) &&
-             rep.reproduced && rep.distinct_toolchains == 1 &&
-             !rep.cross_toolchain && rep.row_count == 2 &&
-             rep.rows[0].has_toolchain_capsule &&
-             rep.rows[1].has_toolchain_capsule &&
-             memcmp(rep.rows[0].toolchain_capsule_root, cap_a, 32) == 0);
-
-    /* (b) two matching v2 receipts pinning DIFFERENT capsules: the strong
-     * claim — two toolchains produced byte-identical outputs. */
-    cap_fix =
-        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
-        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
-        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
-            VCS_PACKAGE_BUILD_OK &&
-        vcs_package_build_set_toolchain_capsule(&c2, cap_b) ==
-            VCS_PACKAGE_BUILD_OK;
-    ZV_CHECK("reproduce: cross-capsule fixtures build", cap_fix);
-    snprintf(capdir, sizeof(capdir), "%s/caps_diff", base);
-    ZV_CHECK("reproduce: two distinct capsules report cross_toolchain",
-             cap_fix && zv_store_receipt(capdir, &c1) &&
-             zv_store_receipt(capdir, &c2) &&
-             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
-                                        &rep) &&
-             rep.reproduced && rep.distinct_toolchains == 2 &&
-             rep.cross_toolchain);
-
-    /* (c) a capsule-less (v1) matching pair: byte-identity proven,
-     * toolchain independence not claimed. */
-    cap_fix =
-        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
-        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40);
-    snprintf(capdir, sizeof(capdir), "%s/caps_v1", base);
-    ZV_CHECK("reproduce: v1 receipts add zero toolchain diversity",
-             cap_fix && zv_store_receipt(capdir, &c1) &&
-             zv_store_receipt(capdir, &c2) &&
-             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
-                                        &rep) &&
-             rep.reproduced && rep.distinct_toolchains == 0 &&
-             !rep.cross_toolchain &&
-             !rep.rows[0].has_toolchain_capsule);
-
-    /* (d) a NON-matching row never inflates the counts: an agreeing
-     * same-capsule pair plus a diverging third build pinning a different
-     * capsule still reads one toolchain, not cross. */
-    cap_fix =
-        zv_receipt(&c1, package_root, recipe_root, "14.2.0", 0x40) &&
-        zv_receipt(&c2, package_root, recipe_root, "15.0.1", 0x40) &&
-        vcs_package_build_set_toolchain_capsule(&c1, cap_a) ==
-            VCS_PACKAGE_BUILD_OK &&
-        vcs_package_build_set_toolchain_capsule(&c2, cap_a) ==
-            VCS_PACKAGE_BUILD_OK;
-    struct vcs_package_build_receipt cdiv;
-    cap_fix = cap_fix &&
-        zv_receipt(&cdiv, package_root, recipe_root, "15.0.2", 0x99) &&
-        vcs_package_build_set_toolchain_capsule(&cdiv, cap_b) ==
-            VCS_PACKAGE_BUILD_OK;
-    ZV_CHECK("reproduce: diverging-capsule fixtures build", cap_fix);
-    snprintf(capdir, sizeof(capdir), "%s/caps_mixed", base);
-    ZV_CHECK("reproduce: a diverging row's capsule never inflates diversity",
-             cap_fix && zv_store_receipt(capdir, &c1) &&
-             zv_store_receipt(capdir, &c2) &&
-             zv_store_receipt(capdir, &cdiv) &&
-             vcs_package_reproduce_scan(capdir, package_root, recipe_root,
-                                        &rep) &&
-             !rep.reproduced && rep.matching == 3 &&
-             rep.distinct_toolchains == 1 && !rep.cross_toolchain);
+    failures += zr_capsules(base, package_root, recipe_root);
     zv_rm_rf(base);
 
     /* ── the eligibility gates: reproduction outranks the quorum ── */
-    {
-        struct vcs_reward_eligibility_input in;
-        memset(&in, 0, sizeof(in));
-        in.manifest_parsed = true;
-        in.root_matches = true;
-        in.chunks_checked = true;
-        in.chunks_verified = 1;
-        in.chunks_total = 1;
-        in.release_verifies = true;
-        in.license_accepted = true;
-        in.lineage_valid = true;
-        in.lineage_detail = "root release (no parent)";
-        /* NO quorum facts at all — reproduction alone carries gates 5-8. */
-        in.reproduction_verified = true;
-        struct vcs_reward_eligibility e;
-        vcs_reward_eligibility_evaluate(&in, &e);
-        ZV_CHECK("reproduce: eligible on reproduction without a quorum",
-                 e.eligible && e.failed_count == 0 &&
-                 e.reproduction_verified &&
-                 e.gates[VCS_REWARD_GATE_GCC_BUILD].passed &&
-                 e.gates[VCS_REWARD_GATE_CLANG_BUILD].passed &&
-                 e.gates[VCS_REWARD_GATE_TESTS_PASS].passed &&
-                 e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].passed &&
-                 strstr(e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].detail,
-                        "reproduction") != NULL);
-        in.reproduction_verified = false;
-        vcs_reward_eligibility_evaluate(&in, &e);
-        ZV_CHECK("reproduce: without it, gates 5-8 fail as before",
-                 !e.eligible && e.failed_count == 4 &&
-                 !e.reproduction_verified &&
-                 strstr(e.gates[VCS_REWARD_GATE_VERIFIER_QUORUM].detail,
-                        "no recorded reproduction") != NULL);
-    }
+    failures += zr_eligibility_gates();
 
     /* ── owner directive pin (2026-08-25): cross-toolchain diversity is
      * EVIDENCE, NEVER A GATE, all the way through to reward eligibility.
@@ -1560,93 +1927,219 @@ static int t_reproduce(void)
      * REAL vcs_package_reproduce_scan() report end to end and prove the
      * verdict a solo, single-toolchain publisher gets is identical to a
      * two-toolchain publisher's. */
-    {
-        char ebase[4400];
-        snprintf(ebase, sizeof(ebase), "%s/eligibility_toolchain", base);
-        zv_rm_rf(ebase);
-        uint8_t ecap_a[32], ecap_b[32];
-        zv_pattern_root(0x81, ecap_a);
-        zv_pattern_root(0x82, ecap_b);
+    failures += zr_owner_directive(package_root, recipe_root);
+    return failures;
+}
 
-        /* (a)+(b) SOLO: two matching receipts pinning the SAME capsule —
-         * one publisher, one machine, rebuilt twice. Must still be
-         * eligible, and the scan must still honestly report
-         * distinct_toolchains=1, cross_toolchain=false (recording never
-         * stops just because it doesn't gate). */
-        struct vcs_package_build_receipt e1, e2;
-        char edir_solo[4400];
-        snprintf(edir_solo, sizeof(edir_solo), "%s/solo", ebase);
-        struct vcs_reproduce_report erep;
-        bool solo_scan_ok =
-            zv_receipt(&e1, package_root, recipe_root, "14.2.0", 0x40) &&
-            zv_receipt(&e2, package_root, recipe_root, "15.0.1", 0x40) &&
-            vcs_package_build_set_toolchain_capsule(&e1, ecap_a) ==
-                VCS_PACKAGE_BUILD_OK &&
-            vcs_package_build_set_toolchain_capsule(&e2, ecap_a) ==
-                VCS_PACKAGE_BUILD_OK &&
-            zv_store_receipt(edir_solo, &e1) &&
-            zv_store_receipt(edir_solo, &e2) &&
-            vcs_package_reproduce_scan(edir_solo, package_root, recipe_root,
-                                       &erep);
-        ZV_CHECK("owner directive: solo single-toolchain scan reproduces "
-                 "and honestly reports distinct_toolchains=1, "
-                 "cross_toolchain=false",
-                 solo_scan_ok && erep.reproduced &&
-                 erep.distinct_toolchains == 1 && !erep.cross_toolchain);
+static void zc_run_verify(struct zv_cmd *c, const char *datadir,
+                          const char *root_hex)
+{
+    zv_cmd_init(c, datadir, root_hex);
+    zcl_native_handle_zcode_package_verify(&c->request, &c->reply);
+}
 
-        struct vcs_reward_eligibility_input ein;
-        memset(&ein, 0, sizeof(ein));
-        ein.manifest_parsed = true;
-        ein.root_matches = true;
-        ein.chunks_checked = true;
-        ein.chunks_verified = 1;
-        ein.chunks_total = 1;
-        ein.release_verifies = true;
-        ein.license_accepted = true;
-        ein.lineage_valid = true;
-        ein.lineage_detail = "root release (no parent)";
-        ein.reproduction_verified = solo_scan_ok && erep.reproduced;
-        struct vcs_reward_eligibility esolo;
-        vcs_reward_eligibility_evaluate(&ein, &esolo);
-        ZV_CHECK("owner directive: a solo single-toolchain reproduction "
-                 "still earns FULL reward eligibility (cross-toolchain "
-                 "diversity must be evidence, never a publication/"
-                 "eligibility gate — owner directive)",
-                 esolo.eligible && esolo.failed_count == 0 &&
-                 esolo.reproduction_verified);
+static int zc_no_allowlist(const char *datadir, const char *root_hex)
+{
+    int failures = 0;
+    /* No allowlist -> named rejection. */
+    struct zv_cmd c;
+    zc_run_verify(&c, datadir, root_hex);
+    ZV_CHECK("command: NO_APPROVED_VERIFIERS without an allowlist",
+             strcmp(c.reply.error.code, "NO_APPROVED_VERIFIERS") == 0);
+    zv_cmd_free(&c);
+    return failures;
+}
 
-        /* (c) TWO capsules: strictly more evidence, same verdict. */
-        struct vcs_package_build_receipt e3, e4;
-        char edir_cross[4400];
-        snprintf(edir_cross, sizeof(edir_cross), "%s/cross", ebase);
-        struct vcs_reproduce_report erep2;
-        bool cross_scan_ok =
-            zv_receipt(&e3, package_root, recipe_root, "14.2.0", 0x40) &&
-            zv_receipt(&e4, package_root, recipe_root, "15.0.1", 0x40) &&
-            vcs_package_build_set_toolchain_capsule(&e3, ecap_a) ==
-                VCS_PACKAGE_BUILD_OK &&
-            vcs_package_build_set_toolchain_capsule(&e4, ecap_b) ==
-                VCS_PACKAGE_BUILD_OK &&
-            zv_store_receipt(edir_cross, &e3) &&
-            zv_store_receipt(edir_cross, &e4) &&
-            vcs_package_reproduce_scan(edir_cross, package_root, recipe_root,
-                                       &erep2);
-        ZV_CHECK("owner directive: two-capsule scan reports "
-                 "distinct_toolchains=2, cross_toolchain=true",
-                 cross_scan_ok && erep2.reproduced &&
-                 erep2.distinct_toolchains == 2 && erep2.cross_toolchain);
-        ein.reproduction_verified = cross_scan_ok && erep2.reproduced;
-        struct vcs_reward_eligibility ecross;
-        vcs_reward_eligibility_evaluate(&ein, &ecross);
-        ZV_CHECK("owner directive: two-toolchain evidence changes NO "
-                 "eligibility verdict relative to the solo case above — "
-                 "same eligible=true, strictly more evidence; diversity "
-                 "is a strength score, not a door (owner directive)",
-                 ecross.eligible == esolo.eligible &&
-                 ecross.eligible && ecross.failed_count == 0 &&
-                 erep.distinct_toolchains != erep2.distinct_toolchains);
-        zv_rm_rf(ebase);
+static int zc_quorum_short(const char *datadir, const char *store,
+                           const char *root_hex,
+                           const uint8_t package_root[32],
+                           const uint8_t release_id[32],
+                           const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    /* One attestation short of quorum. */
+    ZV_CHECK("command: allowlist writes", zv_write_policy(store));
+    ZV_CHECK("command: attestation A persists",
+             zv_store_attestation(store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                  package_root, release_id, recipe_root,
+                                  0x22));
+    struct zv_cmd c;
+    zc_run_verify(&c, datadir, root_hex);
+    ZV_CHECK("command: one signer is not a quorum",
+             !json_get_bool(json_get(&c.reply.data, "verified")) &&
+             !json_get_bool(json_get(&c.reply.data, "quorum_reached")) &&
+             json_get_int(json_get(&c.reply.data, "quorum_signers")) == 1);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zc_two_match(const char *datadir, const char *store,
+                        const char *root_hex,
+                        const uint8_t package_root[32],
+                        const uint8_t release_id[32],
+                        const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    /* Two approved matching attestations -> verified. */
+    ZV_CHECK("command: attestation B persists",
+             zv_store_attestation(store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                  package_root, release_id, recipe_root,
+                                  0x33));
+    struct zv_cmd c;
+    zc_run_verify(&c, datadir, root_hex);
+    const char *qclass =
+        json_get_str(json_get(&c.reply.data, "quorum_class"));
+    const struct json_value *rows = json_get(&c.reply.data, "rows");
+    ZV_CHECK("command: 2-of-N approved matching verifies",
+             json_get_bool(json_get(&c.reply.data, "verified")) &&
+             json_get_bool(json_get(&c.reply.data, "quorum_reached")) &&
+             json_get_int(json_get(&c.reply.data, "quorum_signers")) == 2 &&
+             qclass && strcmp(qclass, "test-pass") == 0 &&
+             json_get_int(json_get(&c.reply.data,
+                                   "attestations_scanned")) == 2 &&
+             rows && json_at(rows, 1) != NULL);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zc_unapproved(const char *datadir, const char *store,
+                         const char *root_hex,
+                         const uint8_t package_root[32],
+                         const uint8_t release_id[32],
+                         const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    /* A third, unapproved attestation is named and changes nothing. */
+    ZV_CHECK("command: unapproved attestation persists",
+             zv_store_attestation(store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                  package_root, release_id, recipe_root,
+                                  0x44));
+    struct zv_cmd c;
+    zc_run_verify(&c, datadir, root_hex);
+    const struct json_value *rows = json_get(&c.reply.data, "rows");
+    /* readdir order is unspecified — find the unapproved row wherever
+     * it landed. */
+    bool named_unapproved = false;
+    for (size_t i = 0; rows && json_at(rows, i); i++) {
+        const char *rule =
+            json_get_str(json_get(json_at(rows, i), "rule"));
+        if (rule && strcmp(rule, "signer-not-approved") == 0)
+            named_unapproved = true;
     }
+    ZV_CHECK("command: unapproved signer named in rows",
+             json_get_bool(json_get(&c.reply.data, "verified")) &&
+             json_get_int(json_get(&c.reply.data,
+                                   "attestations_scanned")) == 3 &&
+             named_unapproved);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zc_rejections(const char *datadir)
+{
+    int failures = 0;
+    /* Rejections. */
+    struct zv_cmd c;
+    zc_run_verify(&c, datadir, "zz");
+    ZV_CHECK("command: BAD_ROOT",
+             strcmp(c.reply.error.code, "BAD_ROOT") == 0);
+    zv_cmd_free(&c);
+    uint8_t other[32];
+    zv_pattern_root(0x55, other);
+    char other_hex[65];
+    zv_hex_enc(other, 32, other_hex);
+    struct zv_cmd c2;
+    zc_run_verify(&c2, datadir, other_hex);
+    ZV_CHECK("command: UNKNOWN_PACKAGE",
+             strcmp(c2.reply.error.code, "UNKNOWN_PACKAGE") == 0);
+    zv_cmd_free(&c2);
+    return failures;
+}
+
+static int zc_repro_ok(const char *datadir, const char *store,
+                       const char *root_hex,
+                       const uint8_t package_root[32],
+                       const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    /* The reproduction object: two distinct build receipts committing
+     * byte-identical output sets reproduce; the two agreeing receipts
+     * pin DIFFERENT toolchain capsules, so the response must also carry
+     * the strong diversity claim (distinct_toolchains=2, cross_toolchain). */
+    char receipts_dir[4400];
+    snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", store);
+    uint8_t cap1[32], cap2[32];
+    zv_pattern_root(0x71, cap1);
+    zv_pattern_root(0x72, cap2);
+    struct vcs_package_build_receipt r1, r2;
+    ZV_CHECK("command: reproduction receipts build",
+             zv_receipt(&r1, package_root, recipe_root, "14.2.0",
+                        0x40) &&
+             zv_receipt(&r2, package_root, recipe_root,
+                        "15.0.1-third-party", 0x40) &&
+             vcs_package_build_set_toolchain_capsule(&r1, cap1) ==
+                 VCS_PACKAGE_BUILD_OK &&
+             vcs_package_build_set_toolchain_capsule(&r2, cap2) ==
+                 VCS_PACKAGE_BUILD_OK);
+    ZV_CHECK("command: reproduction receipts persist",
+             zv_store_receipt(receipts_dir, &r1) &&
+             zv_store_receipt(receipts_dir, &r2));
+    struct zv_cmd c;
+    zc_run_verify(&c, datadir, root_hex);
+    const struct json_value *repro =
+        json_get(&c.reply.data, "reproduction");
+    ZV_CHECK("command: distinct matching receipts reproduce",
+             repro &&
+             json_get_bool(json_get(repro, "scanned_ok")) &&
+             json_get_bool(json_get(repro, "reproduced")) &&
+             json_get_int(json_get(repro, "matching_receipts")) == 2);
+    ZV_CHECK("command: two pinned capsules report cross_toolchain",
+             repro &&
+             json_get_int(json_get(repro, "distinct_toolchains")) == 2 &&
+             json_get_bool(json_get(repro, "cross_toolchain")));
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zc_repro_diverging(const char *datadir, const char *store,
+                              const char *root_hex,
+                              const uint8_t package_root[32],
+                              const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    /* A diverging third receipt kills the verdict and is named by rule;
+     * that telemetry survives a rejected verdict. */
+    char receipts_dir[4400];
+    snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", store);
+    struct vcs_package_build_receipt r3;
+    ZV_CHECK("command: diverging receipt persists",
+             zv_receipt(&r3, package_root, recipe_root,
+                        "14.2.0-tampered", 0x99) &&
+             zv_store_receipt(receipts_dir, &r3));
+    struct zv_cmd c2;
+    zc_run_verify(&c2, datadir, root_hex);
+    const struct json_value *repro2 =
+        json_get(&c2.reply.data, "reproduction");
+    const struct json_value *rrows =
+        repro2 ? json_get(repro2, "rows") : NULL;
+    bool mismatch_named = false;
+    for (size_t i = 0; rrows && json_at(rrows, i); i++) {
+        const char *rule =
+            json_get_str(json_get(json_at(rrows, i), "rule"));
+        if (rule && strcmp(rule, "output-hash-mismatch") == 0)
+            mismatch_named = true;
+    }
+    ZV_CHECK("command: diverging receipt rejected loudly",
+             repro2 &&
+             !json_get_bool(json_get(repro2, "reproduced")) &&
+             json_get_int(json_get(repro2, "matching_receipts")) == 3 &&
+             mismatch_named);
+    ZV_CHECK("command: the diverging capsule-less row never inflates "
+             "diversity",
+             repro2 &&
+             json_get_int(json_get(repro2, "distinct_toolchains")) == 2 &&
+             json_get_bool(json_get(repro2, "cross_toolchain")));
+    zv_cmd_free(&c2);
     return failures;
 }
 
@@ -1672,177 +2165,18 @@ static int t_command(void)
     char root_hex[65];
     zv_hex_enc(package_root, 32, root_hex);
 
-    /* No allowlist -> named rejection. */
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, root_hex);
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        ZV_CHECK("command: NO_APPROVED_VERIFIERS without an allowlist",
-                 strcmp(c.reply.error.code, "NO_APPROVED_VERIFIERS") == 0);
-        zv_cmd_free(&c);
-    }
-
-    /* One attestation short of quorum. */
-    ZV_CHECK("command: allowlist writes", zv_write_policy(store));
-    ZV_CHECK("command: attestation A persists",
-             zv_store_attestation(store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                  package_root, release_id, recipe_root,
-                                  0x22));
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, root_hex);
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        ZV_CHECK("command: one signer is not a quorum",
-                 !json_get_bool(json_get(&c.reply.data, "verified")) &&
-                 !json_get_bool(json_get(&c.reply.data, "quorum_reached")) &&
-                 json_get_int(json_get(&c.reply.data, "quorum_signers")) == 1);
-        zv_cmd_free(&c);
-    }
-
-    /* Two approved matching attestations -> verified. */
-    ZV_CHECK("command: attestation B persists",
-             zv_store_attestation(store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                  package_root, release_id, recipe_root,
-                                  0x33));
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, root_hex);
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        const char *qclass =
-            json_get_str(json_get(&c.reply.data, "quorum_class"));
-        const struct json_value *rows = json_get(&c.reply.data, "rows");
-        ZV_CHECK("command: 2-of-N approved matching verifies",
-                 json_get_bool(json_get(&c.reply.data, "verified")) &&
-                 json_get_bool(json_get(&c.reply.data, "quorum_reached")) &&
-                 json_get_int(json_get(&c.reply.data, "quorum_signers")) == 2 &&
-                 qclass && strcmp(qclass, "test-pass") == 0 &&
-                 json_get_int(json_get(&c.reply.data,
-                                       "attestations_scanned")) == 2 &&
-                 rows && json_at(rows, 1) != NULL);
-        zv_cmd_free(&c);
-    }
-
-    /* A third, unapproved attestation is named and changes nothing. */
-    ZV_CHECK("command: unapproved attestation persists",
-             zv_store_attestation(store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                  package_root, release_id, recipe_root,
-                                  0x44));
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, root_hex);
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        const struct json_value *rows = json_get(&c.reply.data, "rows");
-        /* readdir order is unspecified — find the unapproved row wherever
-         * it landed. */
-        bool named_unapproved = false;
-        for (size_t i = 0; rows && json_at(rows, i); i++) {
-            const char *rule =
-                json_get_str(json_get(json_at(rows, i), "rule"));
-            if (rule && strcmp(rule, "signer-not-approved") == 0)
-                named_unapproved = true;
-        }
-        ZV_CHECK("command: unapproved signer named in rows",
-                 json_get_bool(json_get(&c.reply.data, "verified")) &&
-                 json_get_int(json_get(&c.reply.data,
-                                       "attestations_scanned")) == 3 &&
-                 named_unapproved);
-        zv_cmd_free(&c);
-    }
-
-    /* Rejections. */
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "zz");
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        ZV_CHECK("command: BAD_ROOT",
-                 strcmp(c.reply.error.code, "BAD_ROOT") == 0);
-        zv_cmd_free(&c);
-    }
-    {
-        uint8_t other[32];
-        zv_pattern_root(0x55, other);
-        char other_hex[65];
-        zv_hex_enc(other, 32, other_hex);
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, other_hex);
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        ZV_CHECK("command: UNKNOWN_PACKAGE",
-                 strcmp(c.reply.error.code, "UNKNOWN_PACKAGE") == 0);
-        zv_cmd_free(&c);
-    }
-
-    /* The reproduction object: two distinct build receipts committing
-     * byte-identical output sets reproduce; a diverging third receipt
-     * kills the verdict and is named by rule. The two agreeing receipts
-     * pin DIFFERENT toolchain capsules, so the response must also carry
-     * the strong diversity claim (distinct_toolchains=2, cross_toolchain)
-     * — and that telemetry survives a rejected verdict. */
-    {
-        char receipts_dir[4400];
-        snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", store);
-        uint8_t cap1[32], cap2[32];
-        zv_pattern_root(0x71, cap1);
-        zv_pattern_root(0x72, cap2);
-        struct vcs_package_build_receipt r1, r2;
-        ZV_CHECK("command: reproduction receipts build",
-                 zv_receipt(&r1, package_root, recipe_root, "14.2.0",
-                            0x40) &&
-                 zv_receipt(&r2, package_root, recipe_root,
-                            "15.0.1-third-party", 0x40) &&
-                 vcs_package_build_set_toolchain_capsule(&r1, cap1) ==
-                     VCS_PACKAGE_BUILD_OK &&
-                 vcs_package_build_set_toolchain_capsule(&r2, cap2) ==
-                     VCS_PACKAGE_BUILD_OK);
-        ZV_CHECK("command: reproduction receipts persist",
-                 zv_store_receipt(receipts_dir, &r1) &&
-                 zv_store_receipt(receipts_dir, &r2));
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, root_hex);
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        const struct json_value *repro =
-            json_get(&c.reply.data, "reproduction");
-        ZV_CHECK("command: distinct matching receipts reproduce",
-                 repro &&
-                 json_get_bool(json_get(repro, "scanned_ok")) &&
-                 json_get_bool(json_get(repro, "reproduced")) &&
-                 json_get_int(json_get(repro, "matching_receipts")) == 2);
-        ZV_CHECK("command: two pinned capsules report cross_toolchain",
-                 repro &&
-                 json_get_int(json_get(repro, "distinct_toolchains")) == 2 &&
-                 json_get_bool(json_get(repro, "cross_toolchain")));
-        zv_cmd_free(&c);
-
-        struct vcs_package_build_receipt r3;
-        ZV_CHECK("command: diverging receipt persists",
-                 zv_receipt(&r3, package_root, recipe_root,
-                            "14.2.0-tampered", 0x99) &&
-                 zv_store_receipt(receipts_dir, &r3));
-        struct zv_cmd c2;
-        zv_cmd_init(&c2, datadir, root_hex);
-        zcl_native_handle_zcode_package_verify(&c2.request, &c2.reply);
-        const struct json_value *repro2 =
-            json_get(&c2.reply.data, "reproduction");
-        const struct json_value *rrows =
-            repro2 ? json_get(repro2, "rows") : NULL;
-        bool mismatch_named = false;
-        for (size_t i = 0; rrows && json_at(rrows, i); i++) {
-            const char *rule =
-                json_get_str(json_get(json_at(rrows, i), "rule"));
-            if (rule && strcmp(rule, "output-hash-mismatch") == 0)
-                mismatch_named = true;
-        }
-        ZV_CHECK("command: diverging receipt rejected loudly",
-                 repro2 &&
-                 !json_get_bool(json_get(repro2, "reproduced")) &&
-                 json_get_int(json_get(repro2, "matching_receipts")) == 3 &&
-                 mismatch_named);
-        ZV_CHECK("command: the diverging capsule-less row never inflates "
-                 "diversity",
-                 repro2 &&
-                 json_get_int(json_get(repro2, "distinct_toolchains")) == 2 &&
-                 json_get_bool(json_get(repro2, "cross_toolchain")));
-        zv_cmd_free(&c2);
-    }
+    failures += zc_no_allowlist(datadir, root_hex);
+    failures += zc_quorum_short(datadir, store, root_hex, package_root,
+                                release_id, recipe_root);
+    failures += zc_two_match(datadir, store, root_hex, package_root,
+                             release_id, recipe_root);
+    failures += zc_unapproved(datadir, store, root_hex, package_root,
+                              release_id, recipe_root);
+    failures += zc_rejections(datadir);
+    failures += zc_repro_ok(datadir, store, root_hex, package_root,
+                            recipe_root);
+    failures += zc_repro_diverging(datadir, store, root_hex, package_root,
+                                   recipe_root);
     zv_rm_rf(datadir);
     return failures;
 }
@@ -1874,6 +2208,157 @@ static bool zv_attest_wire_hex(struct vcs_package_attest *a, uint8_t cls,
     return ok;
 }
 
+static void zi_import_wire(struct zv_cmd *c, const char *datadir,
+                           const char *wire_hex)
+{
+    zv_cmd_init(c, datadir, "");
+    (void)json_push_kv_str(&c->input, "attestation_wire", wire_hex);
+    zcl_native_handle_zcode_package_attest_import(&c->request, &c->reply);
+}
+
+static int zi_valid_wire(const char *datadir, const char *wire_hex,
+                         const char *id_a_hex, const char *signer_a_hex)
+{
+    int failures = 0;
+    /* (a) A third party's signed wire imports and is then counted by
+     * verify. The attestation bytes are built in-memory here — the handler
+     * is the ONLY writer into attestations/ in this test. */
+    struct zv_cmd c;
+    zi_import_wire(&c, datadir, wire_hex);
+    const char *aid =
+        json_get_str(json_get(&c.reply.data, "attestation_id"));
+    const char *signer =
+        json_get_str(json_get(&c.reply.data, "signer_pubkey"));
+    const char *class_name =
+        json_get_str(json_get(&c.reply.data, "result_class"));
+    const char *note = json_get_str(json_get(&c.reply.data, "note"));
+    ZV_CHECK("import: valid wire files",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_bool(json_get(&c.reply.data, "filed")) &&
+             !json_get_bool(json_get(&c.reply.data, "already_present")) &&
+             aid && strcmp(aid, id_a_hex) == 0 &&
+             signer && strcmp(signer, signer_a_hex) == 0 &&
+             class_name && strcmp(class_name, "test-pass") == 0 &&
+             note && strstr(note, "filing is not acceptance") != NULL);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zi_idempotent(const char *datadir, const char *wire_hex)
+{
+    int failures = 0;
+    /* (b) Re-importing the identical wire is an idempotent no-op success. */
+    struct zv_cmd c;
+    zi_import_wire(&c, datadir, wire_hex);
+    ZV_CHECK("import: re-import is idempotent",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             !json_get_bool(json_get(&c.reply.data, "filed")) &&
+             json_get_bool(json_get(&c.reply.data, "already_present")));
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zi_second_and_quorum(const char *datadir, const char *root_hex,
+                                const char *wire_b_hex)
+{
+    int failures = 0;
+    /* A second approved signer's wire imported the same way completes the
+     * quorum — import is the ONLY way these bytes reached the store. */
+    struct zv_cmd c;
+    zi_import_wire(&c, datadir, wire_b_hex);
+    ZV_CHECK("import: second wire files",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_bool(json_get(&c.reply.data, "filed")));
+    zv_cmd_free(&c);
+    struct zv_cmd c2;
+    zv_cmd_init(&c2, datadir, root_hex);
+    zcl_native_handle_zcode_package_verify(&c2.request, &c2.reply);
+    ZV_CHECK("import: verify counts the imported wires",
+             json_get_bool(json_get(&c2.reply.data, "verified")) &&
+             json_get_int(json_get(&c2.reply.data, "quorum_signers")) == 2 &&
+             json_get_int(json_get(&c2.reply.data,
+                                   "attestations_scanned")) == 2);
+    zv_cmd_free(&c2);
+    return failures;
+}
+
+static int zi_tampered(const char *datadir, const char *wire_hex)
+{
+    int failures = 0;
+    /* (c) A wire tampered inside the signed region fails the signature
+     * check with the rule named. */
+    char tampered[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+    snprintf(tampered, sizeof(tampered), "%s", wire_hex);
+    /* byte 20 sits inside package_root (offset 10..42) — signed. */
+    tampered[2 * 20] = tampered[2 * 20] == '0' ? '1' : '0';
+    struct zv_cmd c;
+    zi_import_wire(&c, datadir, tampered);
+    ZV_CHECK("import: tampered wire refused naming the signature rule",
+             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c.reply.error.code, "ATTEST_SIGNATURE") == 0 &&
+             strcmp(c.reply.error.evidence,
+                    vcs_package_attest_error_string(
+                        VCS_PACKAGE_ATTEST_ERR_SIG_VERIFY)) == 0);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zi_broken(const char *datadir, const char *wire_hex)
+{
+    int failures = 0;
+    /* (d) A structurally invalid wire (corrupted magic) fails the parse
+     * with the grammar rule named. */
+    char broken[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+    snprintf(broken, sizeof(broken), "%s", wire_hex);
+    broken[0] = wire_hex[0] == '5' ? '6' : '5'; /* 'Z' -> something else */
+    struct zv_cmd c;
+    zi_import_wire(&c, datadir, broken);
+    ZV_CHECK("import: non-canonical wire refused naming the parse rule",
+             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c.reply.error.code, "ATTEST_INVALID") == 0 &&
+             strcmp(c.reply.error.evidence,
+                    vcs_package_attest_error_string(
+                        VCS_PACKAGE_ATTEST_ERR_WIRE_MAGIC)) == 0);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zi_ghost(const char *datadir)
+{
+    int failures = 0;
+    /* (e) Filing is not acceptance: an attestation for a package this node
+     * has never seen still files (the wire is self-consistent and signed);
+     * verify then names the unknown package rather than crashing. */
+    uint8_t ghost_pkg[32], ghost_rel[32], ghost_recipe[32];
+    zv_pattern_root(0x91, ghost_pkg);
+    zv_pattern_root(0x92, ghost_rel);
+    zv_pattern_root(0x93, ghost_recipe);
+    struct vcs_package_attest g;
+    uint8_t id_g[32];
+    char wire_g_hex[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
+    ZV_CHECK("import: ghost attestation wire builds",
+             zv_attest_wire_hex(&g, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                                ghost_pkg, ghost_rel, ghost_recipe, 0x22,
+                                wire_g_hex, id_g));
+    struct zv_cmd c;
+    zi_import_wire(&c, datadir, wire_g_hex);
+    ZV_CHECK("import: unseen package's attestation still files",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_bool(json_get(&c.reply.data, "filed")));
+    zv_cmd_free(&c);
+
+    char ghost_hex[65];
+    zv_hex_enc(ghost_pkg, 32, ghost_hex);
+    struct zv_cmd c2;
+    zv_cmd_init(&c2, datadir, ghost_hex);
+    zcl_native_handle_zcode_package_verify(&c2.request, &c2.reply);
+    ZV_CHECK("import: verify names the unknown package",
+             c2.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c2.reply.error.code, "UNKNOWN_PACKAGE") == 0);
+    zv_cmd_free(&c2);
+    return failures;
+}
+
 static int t_attest_import(void)
 {
     int failures = 0;
@@ -1897,9 +2382,6 @@ static int t_attest_import(void)
     zv_hex_enc(package_root, 32, root_hex);
     ZV_CHECK("import: allowlist writes", zv_write_policy(store));
 
-    /* (a) A third party's signed wire imports and is then counted by
-     * verify. The attestation bytes are built in-memory here — the handler
-     * is the ONLY writer into attestations/ in this test. */
     struct vcs_package_attest a;
     uint8_t id_a[32];
     char wire_hex[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
@@ -1911,44 +2393,10 @@ static int t_attest_import(void)
     zv_hex_enc(id_a, 32, id_a_hex);
     char signer_a_hex[67];
     zv_hex_enc(a.verifier_pubkey, 33, signer_a_hex);
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_wire", wire_hex);
-        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
-        const char *aid =
-            json_get_str(json_get(&c.reply.data, "attestation_id"));
-        const char *signer =
-            json_get_str(json_get(&c.reply.data, "signer_pubkey"));
-        const char *class_name =
-            json_get_str(json_get(&c.reply.data, "result_class"));
-        const char *note = json_get_str(json_get(&c.reply.data, "note"));
-        ZV_CHECK("import: valid wire files",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 json_get_bool(json_get(&c.reply.data, "filed")) &&
-                 !json_get_bool(json_get(&c.reply.data, "already_present")) &&
-                 aid && strcmp(aid, id_a_hex) == 0 &&
-                 signer && strcmp(signer, signer_a_hex) == 0 &&
-                 class_name && strcmp(class_name, "test-pass") == 0 &&
-                 note && strstr(note, "filing is not acceptance") != NULL);
-        zv_cmd_free(&c);
-    }
 
-    /* (b) Re-importing the identical wire is an idempotent no-op success. */
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_wire", wire_hex);
-        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
-        ZV_CHECK("import: re-import is idempotent",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 !json_get_bool(json_get(&c.reply.data, "filed")) &&
-                 json_get_bool(json_get(&c.reply.data, "already_present")));
-        zv_cmd_free(&c);
-    }
+    failures += zi_valid_wire(datadir, wire_hex, id_a_hex, signer_a_hex);
+    failures += zi_idempotent(datadir, wire_hex);
 
-    /* A second approved signer's wire imported the same way completes the
-     * quorum — import is the ONLY way these bytes reached the store. */
     struct vcs_package_attest b;
     uint8_t id_b[32];
     char wire_b_hex[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
@@ -1956,101 +2404,10 @@ static int t_attest_import(void)
              zv_attest_wire_hex(&b, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
                                 package_root, release_id, recipe_root, 0x33,
                                 wire_b_hex, id_b));
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_wire", wire_b_hex);
-        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
-        ZV_CHECK("import: second wire files",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 json_get_bool(json_get(&c.reply.data, "filed")));
-        zv_cmd_free(&c);
-    }
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, root_hex);
-        zcl_native_handle_zcode_package_verify(&c.request, &c.reply);
-        ZV_CHECK("import: verify counts the imported wires",
-                 json_get_bool(json_get(&c.reply.data, "verified")) &&
-                 json_get_int(json_get(&c.reply.data, "quorum_signers")) == 2 &&
-                 json_get_int(json_get(&c.reply.data,
-                                       "attestations_scanned")) == 2);
-        zv_cmd_free(&c);
-    }
-
-    /* (c) A wire tampered inside the signed region fails the signature
-     * check with the rule named. */
-    {
-        char tampered[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
-        snprintf(tampered, sizeof(tampered), "%s", wire_hex);
-        /* byte 20 sits inside package_root (offset 10..42) — signed. */
-        tampered[2 * 20] = tampered[2 * 20] == '0' ? '1' : '0';
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_wire", tampered);
-        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
-        ZV_CHECK("import: tampered wire refused naming the signature rule",
-                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                 strcmp(c.reply.error.code, "ATTEST_SIGNATURE") == 0 &&
-                 strcmp(c.reply.error.evidence,
-                        vcs_package_attest_error_string(
-                            VCS_PACKAGE_ATTEST_ERR_SIG_VERIFY)) == 0);
-        zv_cmd_free(&c);
-    }
-
-    /* (d) A structurally invalid wire (corrupted magic) fails the parse
-     * with the grammar rule named. */
-    {
-        char broken[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
-        snprintf(broken, sizeof(broken), "%s", wire_hex);
-        broken[0] = wire_hex[0] == '5' ? '6' : '5'; /* 'Z' -> something else */
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_wire", broken);
-        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
-        ZV_CHECK("import: non-canonical wire refused naming the parse rule",
-                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                 strcmp(c.reply.error.code, "ATTEST_INVALID") == 0 &&
-                 strcmp(c.reply.error.evidence,
-                        vcs_package_attest_error_string(
-                            VCS_PACKAGE_ATTEST_ERR_WIRE_MAGIC)) == 0);
-        zv_cmd_free(&c);
-    }
-
-    /* (e) Filing is not acceptance: an attestation for a package this node
-     * has never seen still files (the wire is self-consistent and signed);
-     * verify then names the unknown package rather than crashing. */
-    {
-        uint8_t ghost_pkg[32], ghost_rel[32], ghost_recipe[32];
-        zv_pattern_root(0x91, ghost_pkg);
-        zv_pattern_root(0x92, ghost_rel);
-        zv_pattern_root(0x93, ghost_recipe);
-        struct vcs_package_attest g;
-        uint8_t id_g[32];
-        char wire_g_hex[2 * VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES + 1];
-        ZV_CHECK("import: ghost attestation wire builds",
-                 zv_attest_wire_hex(&g, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                                    ghost_pkg, ghost_rel, ghost_recipe, 0x22,
-                                    wire_g_hex, id_g));
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_wire", wire_g_hex);
-        zcl_native_handle_zcode_package_attest_import(&c.request, &c.reply);
-        ZV_CHECK("import: unseen package's attestation still files",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 json_get_bool(json_get(&c.reply.data, "filed")));
-        zv_cmd_free(&c);
-
-        char ghost_hex[65];
-        zv_hex_enc(ghost_pkg, 32, ghost_hex);
-        struct zv_cmd c2;
-        zv_cmd_init(&c2, datadir, ghost_hex);
-        zcl_native_handle_zcode_package_verify(&c2.request, &c2.reply);
-        ZV_CHECK("import: verify names the unknown package",
-                 c2.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                 strcmp(c2.reply.error.code, "UNKNOWN_PACKAGE") == 0);
-        zv_cmd_free(&c2);
-    }
+    failures += zi_second_and_quorum(datadir, root_hex, wire_b_hex);
+    failures += zi_tampered(datadir, wire_hex);
+    failures += zi_broken(datadir, wire_hex);
+    failures += zi_ghost(datadir);
 
     zv_rm_rf(datadir);
     return failures;
@@ -2235,6 +2592,186 @@ static bool zv_offer_attestation(const char *datadir, const char *store,
     return ok;
 }
 
+static void zo_run_offer(struct zv_cmd *c, const char *datadir,
+                         const char *id_hex)
+{
+    zv_cmd_init(c, datadir, "");
+    (void)json_push_kv_str(&c->input, "attestation_id", id_hex);
+    zcl_native_handle_zcode_package_attest_offer(&c->request, &c->reply);
+}
+
+static int zo_happy(const char *datadir, const char *id_hex,
+                    const char *package_hex, const char *expect_transport_hex,
+                    char first_transport_hex[65])
+{
+    int failures = 0;
+    /* (a) The happy path returns BOTH publish inputs. Publishing only one
+     * is a silent no-op at pull time — pointer-only means a puller learns
+     * which blob to want and finds nobody serving it, provider-only means
+     * the bytes are reachable and nobody knows to ask — so a test that
+     * accepted one would prove nothing this pairing exists to prevent. */
+    struct zv_cmd c;
+    zo_run_offer(&c, datadir, id_hex);
+    const char *transport =
+        json_get_str(json_get(&c.reply.data, "transport_root"));
+    if (transport && strlen(transport) == 64)
+        snprintf(first_transport_hex, 65, "%s", transport);
+    const struct json_value *provider =
+        json_get(&c.reply.data, "provider_publish_input");
+    const struct json_value *pointer =
+        json_get(&c.reply.data, "pointer_publish_input");
+    ZV_CHECK("offer: identifies the attestation and its transport root",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             zv_str_is(&c.reply.data, "attestation_id", id_hex) &&
+             zv_str_is(&c.reply.data, "package_root", package_hex) &&
+             zv_str_is(&c.reply.data, "result_class", "test-pass") &&
+             zv_str_is(&c.reply.data, "namespace",
+                       VCS_PACKAGE_ATTEST_DHT_NAMESPACE));
+    ZV_CHECK("offer: transport_root is the blob root of the exact wire",
+             transport && strcmp(transport, expect_transport_hex) == 0 &&
+             strcmp(transport, id_hex) != 0);
+    ZV_CHECK("offer: BOTH publish inputs are returned",
+             provider != NULL && pointer != NULL);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zo_inputs(const char *datadir, const char *id_hex,
+                     const char *package_hex)
+{
+    int failures = 0;
+    struct zv_cmd c;
+    zo_run_offer(&c, datadir, id_hex);
+    const char *transport =
+        json_get_str(json_get(&c.reply.data, "transport_root"));
+    const struct json_value *provider =
+        json_get(&c.reply.data, "provider_publish_input");
+    const struct json_value *pointer =
+        json_get(&c.reply.data, "pointer_publish_input");
+    ZV_CHECK("offer: the provider input says 'ask me for these bytes'",
+             provider && zv_str_is(provider, "mode", "plan") &&
+             zv_str_is(provider, "kind", "provider") &&
+             zv_str_is(provider, "namespace",
+                       VCS_PACKAGE_ATTEST_DHT_NAMESPACE) &&
+             transport &&
+             zv_str_is(provider, "transport_root", transport) &&
+             json_get(provider, "semantic_root") == NULL);
+    ZV_CHECK("offer: the pointer input binds the package to the blob",
+             pointer && zv_str_is(pointer, "mode", "plan") &&
+             zv_str_is(pointer, "kind", "pointer") &&
+             zv_str_is(pointer, "namespace",
+                       VCS_PACKAGE_ATTEST_DHT_NAMESPACE) &&
+             zv_str_is(pointer, "semantic_root", package_hex) &&
+             transport &&
+             zv_str_is(pointer, "transport_root", transport));
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zo_windows(const char *datadir, const char *id_hex)
+{
+    int failures = 0;
+    struct zv_cmd c;
+    zo_run_offer(&c, datadir, id_hex);
+    const struct json_value *provider =
+        json_get(&c.reply.data, "provider_publish_input");
+    const struct json_value *pointer =
+        json_get(&c.reply.data, "pointer_publish_input");
+    /* NOT the same window. The two kinds have different ceilings, and
+     * a shared one is a real defect: a live seven-daemon flight caught
+     * `offer` handing back a PROVIDER input whose 86400s window is over
+     * the 7200s provider maximum, so an operator running exactly what
+     * offer produced got the pointer published and the provider
+     * refused — pointer-only, the silent no-op offer exists to
+     * prevent. Each input must be publishable AS ITS OWN KIND. */
+    ZV_CHECK("offer: each input's window is legal for its own record "
+             "kind, so running both actually publishes both",
+             provider && pointer &&
+             json_get_int(json_get(provider, "expiry")) -
+                 json_get_int(json_get(provider, "not_before")) <=
+                     (int64_t)VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS &&
+             json_get_int(json_get(pointer, "expiry")) -
+                 json_get_int(json_get(pointer, "not_before")) <=
+                     (int64_t)VCS_ZCODE_DHT_POINTER_MAX_SECONDS);
+    ZV_CHECK("offer: both windows are bounded and non-empty",
+             provider && pointer &&
+             json_get_int(json_get(provider, "expiry")) >
+                 json_get_int(json_get(provider, "not_before")) &&
+             json_get_int(json_get(pointer, "expiry")) >
+                 json_get_int(json_get(pointer, "not_before")));
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zo_idempotent(const char *datadir, const char *id_hex,
+                         const char *first_transport_hex)
+{
+    int failures = 0;
+    /* (b) Idempotent: the transport root is a pure function of the exact
+     * signed bytes, so offering twice yields the identical root. */
+    struct zv_cmd c;
+    zo_run_offer(&c, datadir, id_hex);
+    ZV_CHECK("offer: re-offering yields the identical transport root",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             first_transport_hex[0] &&
+             zv_str_is(&c.reply.data, "transport_root",
+                       first_transport_hex));
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zo_unfiled(const char *datadir)
+{
+    int failures = 0;
+    /* (c) An id nothing is filed under names the missing prerequisite,
+     * and does not crash. */
+    uint8_t ghost[32];
+    zv_pattern_root(0x5c, ghost);
+    char ghost_hex[65];
+    zv_hex_enc(ghost, 32, ghost_hex);
+    struct zv_cmd c;
+    zo_run_offer(&c, datadir, ghost_hex);
+    ZV_CHECK("offer: an unfiled id names ATTESTATION_ABSENT",
+             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c.reply.error.code, "ATTESTATION_ABSENT") == 0 &&
+             strstr(c.reply.error.evidence,
+                    vcs_package_attest_transport_result_string(
+                        VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ABSENT)) != NULL);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zo_malformed(const char *datadir)
+{
+    int failures = 0;
+    /* (d) A malformed id is refused at normalize, by name, before any
+     * store is opened. */
+    static const char *const bad[] = {
+        "",                       /* absent */
+        "deadbeef",               /* too short */
+        "zz00000000000000000000000000000000000000000000000000000000000000",
+        "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        struct zv_cmd c;
+        zv_cmd_init(&c, datadir, "");
+        if (bad[i][0])
+            (void)json_push_kv_str(&c.input, "attestation_id", bad[i]);
+        zcl_native_handle_zcode_package_attest_offer(&c.request,
+                                                     &c.reply);
+        char label[128];
+        snprintf(label, sizeof(label),
+                 "offer: malformed attestation_id [%zu] names "
+                 "BAD_ATTESTATION_ID", i);
+        ZV_CHECK(label,
+                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                 strcmp(c.reply.error.code, "BAD_ATTESTATION_ID") == 0 &&
+                 c.reply.error.message[0] != '\0');
+        zv_cmd_free(&c);
+    }
+    return failures;
+}
+
 static int t_attest_offer(void)
 {
     int failures = 0;
@@ -2290,142 +2827,374 @@ static int t_attest_offer(void)
     }
 
     char first_transport_hex[65] = "";
-    /* (a) The happy path returns BOTH publish inputs. Publishing only one
-     * is a silent no-op at pull time — pointer-only means a puller learns
-     * which blob to want and finds nobody serving it, provider-only means
-     * the bytes are reachable and nobody knows to ask — so a test that
-     * accepted one would prove nothing this pairing exists to prevent. */
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_id", id_hex);
-        zcl_native_handle_zcode_package_attest_offer(&c.request, &c.reply);
-        const char *transport =
-            json_get_str(json_get(&c.reply.data, "transport_root"));
-        if (transport && strlen(transport) == 64)
-            snprintf(first_transport_hex, sizeof(first_transport_hex), "%s",
-                     transport);
-        const struct json_value *provider =
-            json_get(&c.reply.data, "provider_publish_input");
-        const struct json_value *pointer =
-            json_get(&c.reply.data, "pointer_publish_input");
-        ZV_CHECK("offer: identifies the attestation and its transport root",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 zv_str_is(&c.reply.data, "attestation_id", id_hex) &&
-                 zv_str_is(&c.reply.data, "package_root", package_hex) &&
-                 zv_str_is(&c.reply.data, "result_class", "test-pass") &&
-                 zv_str_is(&c.reply.data, "namespace",
-                           VCS_PACKAGE_ATTEST_DHT_NAMESPACE));
-        ZV_CHECK("offer: transport_root is the blob root of the exact wire",
-                 transport && strcmp(transport, expect_transport_hex) == 0 &&
-                 strcmp(transport, id_hex) != 0);
-        ZV_CHECK("offer: BOTH publish inputs are returned",
-                 provider != NULL && pointer != NULL);
-        ZV_CHECK("offer: the provider input says 'ask me for these bytes'",
-                 provider && zv_str_is(provider, "mode", "plan") &&
-                 zv_str_is(provider, "kind", "provider") &&
-                 zv_str_is(provider, "namespace",
-                           VCS_PACKAGE_ATTEST_DHT_NAMESPACE) &&
-                 transport &&
-                 zv_str_is(provider, "transport_root", transport) &&
-                 json_get(provider, "semantic_root") == NULL);
-        ZV_CHECK("offer: the pointer input binds the package to the blob",
-                 pointer && zv_str_is(pointer, "mode", "plan") &&
-                 zv_str_is(pointer, "kind", "pointer") &&
-                 zv_str_is(pointer, "namespace",
-                           VCS_PACKAGE_ATTEST_DHT_NAMESPACE) &&
-                 zv_str_is(pointer, "semantic_root", package_hex) &&
-                 transport &&
-                 zv_str_is(pointer, "transport_root", transport));
-        /* NOT the same window. The two kinds have different ceilings, and
-         * a shared one is a real defect: a live seven-daemon flight caught
-         * `offer` handing back a PROVIDER input whose 86400s window is over
-         * the 7200s provider maximum, so an operator running exactly what
-         * offer produced got the pointer published and the provider
-         * refused — pointer-only, the silent no-op offer exists to
-         * prevent. Each input must be publishable AS ITS OWN KIND. */
-        ZV_CHECK("offer: each input's window is legal for its own record "
-                 "kind, so running both actually publishes both",
-                 provider && pointer &&
-                 json_get_int(json_get(provider, "expiry")) -
-                     json_get_int(json_get(provider, "not_before")) <=
-                         (int64_t)VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS &&
-                 json_get_int(json_get(pointer, "expiry")) -
-                     json_get_int(json_get(pointer, "not_before")) <=
-                         (int64_t)VCS_ZCODE_DHT_POINTER_MAX_SECONDS);
-        ZV_CHECK("offer: both windows are bounded and non-empty",
-                 provider && pointer &&
-                 json_get_int(json_get(provider, "expiry")) >
-                     json_get_int(json_get(provider, "not_before")) &&
-                 json_get_int(json_get(pointer, "expiry")) >
-                     json_get_int(json_get(pointer, "not_before")));
-        zv_cmd_free(&c);
-    }
-
-    /* (b) Idempotent: the transport root is a pure function of the exact
-     * signed bytes, so offering twice yields the identical root. */
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_id", id_hex);
-        zcl_native_handle_zcode_package_attest_offer(&c.request, &c.reply);
-        ZV_CHECK("offer: re-offering yields the identical transport root",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 first_transport_hex[0] &&
-                 zv_str_is(&c.reply.data, "transport_root",
-                           first_transport_hex));
-        zv_cmd_free(&c);
-    }
-
-    /* (c) An id nothing is filed under names the missing prerequisite,
-     * and does not crash. */
-    {
-        uint8_t ghost[32];
-        zv_pattern_root(0x5c, ghost);
-        char ghost_hex[65];
-        zv_hex_enc(ghost, 32, ghost_hex);
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "attestation_id", ghost_hex);
-        zcl_native_handle_zcode_package_attest_offer(&c.request, &c.reply);
-        ZV_CHECK("offer: an unfiled id names ATTESTATION_ABSENT",
-                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                 strcmp(c.reply.error.code, "ATTESTATION_ABSENT") == 0 &&
-                 strstr(c.reply.error.evidence,
-                        vcs_package_attest_transport_result_string(
-                            VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ABSENT)) != NULL);
-        zv_cmd_free(&c);
-    }
-
-    /* (d) A malformed id is refused at normalize, by name, before any
-     * store is opened. */
-    {
-        static const char *const bad[] = {
-            "",                       /* absent */
-            "deadbeef",               /* too short */
-            "zz00000000000000000000000000000000000000000000000000000000000000",
-            "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
-        };
-        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-            struct zv_cmd c;
-            zv_cmd_init(&c, datadir, "");
-            if (bad[i][0])
-                (void)json_push_kv_str(&c.input, "attestation_id", bad[i]);
-            zcl_native_handle_zcode_package_attest_offer(&c.request,
-                                                         &c.reply);
-            char label[128];
-            snprintf(label, sizeof(label),
-                     "offer: malformed attestation_id [%zu] names "
-                     "BAD_ATTESTATION_ID", i);
-            ZV_CHECK(label,
-                     c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                     strcmp(c.reply.error.code, "BAD_ATTESTATION_ID") == 0 &&
-                     c.reply.error.message[0] != '\0');
-            zv_cmd_free(&c);
-        }
-    }
+    failures += zo_happy(datadir, id_hex, package_hex,
+                         expect_transport_hex, first_transport_hex);
+    failures += zo_inputs(datadir, id_hex, package_hex);
+    failures += zo_windows(datadir, id_hex);
+    failures += zo_idempotent(datadir, id_hex, first_transport_hex);
+    failures += zo_unfiled(datadir);
+    failures += zo_malformed(datadir);
 
     test_rm_rf_recursive(datadir);
+    return failures;
+}
+
+static void zp_run_pull(struct zv_cmd *c, const char *datadir,
+                        const char *package_hex)
+{
+    zv_cmd_init(c, datadir, "");
+    (void)json_push_kv_str(&c->input, "package_root", package_hex);
+    zcl_native_handle_zcode_package_attest_pull(&c->request, &c->reply);
+}
+
+static int zp_empty_set(const char *datadir, const char *package_hex)
+{
+    int failures = 0;
+    /* (a) Nobody has attested this package. That is NOT "the bytes could
+     * not be reached", and the two must never collapse into one
+     * not-found: the operator's next step differs completely — wait for a
+     * verifier, versus fix reachability. */
+    g_zv_pointer_records = "[]";
+    struct zv_cmd c;
+    zp_run_pull(&c, datadir, package_hex);
+    const struct json_value *rows = json_get(&c.reply.data, "rows");
+    ZV_CHECK("pull: an empty pointer set is NO_ATTESTATION_POINTERS",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             zv_str_is(&c.reply.data, "status",
+                       "NO_ATTESTATION_POINTERS") &&
+             zv_str_has(&c.reply.data, "blocker", "no_pointer_record") &&
+             json_get_int(json_get(&c.reply.data, "pointers_seen")) == 0 &&
+             json_get_int(json_get(&c.reply.data,
+                                   "distinct_transport_roots")) == 0 &&
+             rows && rows->type == JSON_ARR && json_size(rows) == 0);
+    ZV_CHECK("pull: the lookup asks the attestation pointer key",
+             g_zv_record_begin_calls > 0 && g_zv_pointer_query_exact);
+    zv_cmd_free(&c);
+    return failures;
+}
+
+static int zp_unreachable(const char *datadir, const char *package_hex,
+                          const char *absent_transport)
+{
+    int failures = 0;
+    /* (b) A pointer exists, nobody serves the bytes, and this node does
+     * not already hold them. Distinct status, distinct blocker, and it is
+     * NOT the empty-set status: "nobody has attested this" and "the bytes
+     * are out of reach" send the operator to two different next steps. */
+    char records_one[1024];
+    snprintf(records_one, sizeof(records_one),
+             "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
+             absent_transport);
+    g_zv_pointer_records = records_one;
+    zcl_native_zcode_discovery_test_backend(zv_discover_no_provider,
+                                            zv_route_attest_provider);
+    struct zv_cmd c;
+    zp_run_pull(&c, datadir, package_hex);
+    const struct json_value *rows = json_get(&c.reply.data, "rows");
+    const struct json_value *row = zv_row_for(rows, absent_transport);
+    ZV_CHECK("pull: unreachable bytes are NOT reported as no pointers",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             zv_str_is(&c.reply.data, "status",
+                       "ATTESTATION_BYTES_UNREACHABLE") &&
+             !zv_str_is(&c.reply.data, "status",
+                        "NO_ATTESTATION_POINTERS") &&
+             zv_str_has(&c.reply.data, "blocker",
+                        "no_authenticated_provider") &&
+             json_get_int(json_get(&c.reply.data, "pointers_seen")) == 1 &&
+             json_get_int(json_get(&c.reply.data, "fetched")) == 0 &&
+             json_get_int(json_get(&c.reply.data, "admitted")) == 0 &&
+             json_get_int(json_get(&c.reply.data, "refused")) == 1);
+    ZV_CHECK("pull: the unreachable row names the discovery refusal",
+             row != NULL &&
+             zv_str_is(row, "fetch_outcome",
+                       "PROVIDER_DISCOVERY_FAILED") &&
+             json_get(row, "fetched") &&
+             !json_get_bool(json_get(row, "fetched")) &&
+             !json_get_bool(json_get(row, "admitted")) &&
+             zv_str_has(row, "admit_result",
+                        vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
+    zv_cmd_free(&c);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    return failures;
+}
+
+static int zp_sweep_rows_main(struct zv_cmd *c, const char *good_id,
+                              const char *good_transport,
+                              const char *foreign_transport)
+{
+    int failures = 0;
+    const struct json_value *rows = json_get(&c->reply.data, "rows");
+    const struct json_value *good = zv_row_for(rows, good_transport);
+    const struct json_value *foreign = zv_row_for(rows, foreign_transport);
+
+    ZV_CHECK("pull: one bad row does not abort the sweep — the good "
+             "attestation still lands filed",
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             good != NULL &&
+             json_get_bool(json_get(good, "admitted")) &&
+             json_get_bool(json_get(good, "filed")) &&
+             zv_str_is(good, "attestation_id", good_id) &&
+             zv_str_is(good, "result_class", "test-pass") &&
+             zv_str_is(good, "admit_result",
+                       "ok (blob=ok, attestation=ok)"));
+    ZV_CHECK("pull: the hostile pointer is refused naming the binding "
+             "rule, and stays in the report",
+             foreign != NULL &&
+             !json_get_bool(json_get(foreign, "admitted")) &&
+             !json_get_bool(json_get(foreign, "filed")) &&
+             zv_str_has(foreign, "admit_result",
+                        vcs_package_attest_transport_result_string(
+                            VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING)));
+    return failures;
+}
+
+static int zp_sweep_rows_absent(struct zv_cmd *c,
+                                const char *absent_transport)
+{
+    int failures = 0;
+    const struct json_value *rows = json_get(&c->reply.data, "rows");
+    const struct json_value *absent = zv_row_for(rows, absent_transport);
+    ZV_CHECK("pull: a pointer to bytes this node does not hold names "
+             "the blob rule, not the fetch stub's optimism",
+             absent != NULL &&
+             json_get_bool(json_get(absent, "fetched")) &&
+             !json_get_bool(json_get(absent, "admitted")) &&
+             zv_str_has(absent, "admit_result",
+                        vcs_package_attest_transport_result_string(
+                            VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB)) &&
+             zv_str_has(absent, "admit_result",
+                        vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
+    ZV_CHECK("pull: every row carries a named admit_result",
+             rows && json_size(rows) == 3 &&
+             zv_str_has(json_at(rows, 0), "admit_result", "(blob=") &&
+             zv_str_has(json_at(rows, 1), "admit_result", "(blob=") &&
+             zv_str_has(json_at(rows, 2), "admit_result", "(blob="));
+    return failures;
+}
+
+static void zp_count_rows(const struct json_value *rows,
+                          int64_t *admitted_rows, int64_t *filed_rows,
+                          int64_t *fetched_rows)
+{
+    *admitted_rows = 0;
+    *filed_rows = 0;
+    *fetched_rows = 0;
+    for (size_t i = 0; rows && i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        *admitted_rows += json_get_bool(json_get(row, "admitted")) ? 1 : 0;
+        *filed_rows += json_get_bool(json_get(row, "filed")) ? 1 : 0;
+        *fetched_rows += json_get_bool(json_get(row, "fetched")) ? 1 : 0;
+    }
+}
+
+static int zp_sweep_totals(struct zv_cmd *c)
+{
+    int failures = 0;
+    const struct json_value *rows = json_get(&c->reply.data, "rows");
+    /* Totals must be the rows, counted. A report whose headline
+     * numbers disagree with its own rows is worse than no report. */
+    int64_t admitted_rows = 0, filed_rows = 0, fetched_rows = 0;
+    zp_count_rows(rows, &admitted_rows, &filed_rows, &fetched_rows);
+    ZV_CHECK("pull: totals are internally consistent with the rows",
+             json_get_int(json_get(&c->reply.data, "pointers_seen")) == 4 &&
+             json_get_int(json_get(&c->reply.data,
+                                   "distinct_transport_roots")) == 3 &&
+             json_get_int(json_get(&c->reply.data, "admitted")) ==
+                 admitted_rows &&
+             json_get_int(json_get(&c->reply.data, "filed")) ==
+                 filed_rows &&
+             json_get_int(json_get(&c->reply.data, "fetched")) ==
+                 fetched_rows &&
+             json_get_int(json_get(&c->reply.data, "admitted")) == 1 &&
+             json_get_int(json_get(&c->reply.data, "refused")) == 2 &&
+             json_get_int(json_get(&c->reply.data, "admitted")) +
+                 json_get_int(json_get(&c->reply.data, "refused")) ==
+                 json_get_int(json_get(&c->reply.data,
+                                       "distinct_transport_roots")) &&
+             !json_get_bool(json_get(&c->reply.data, "rows_truncated")));
+    ZV_CHECK("pull: admitted evidence sets the admitted status",
+             zv_str_is(&c->reply.data, "status", "ATTESTATIONS_ADMITTED") &&
+             json_get(&c->reply.data, "blocker") == NULL);
+    return failures;
+}
+
+static int zp_sweep(const char *datadir, const char *package_hex,
+                    const char *store, char *records_all, size_t records_all_sz,
+                    const char *good_id, const char *good_transport,
+                    const char *foreign_id, const char *foreign_transport,
+                    const char *absent_transport)
+{
+    int failures = 0;
+    /* (c) THE case: one hostile pointer and one unreachable pointer in the
+     * same set must not cost the honest verifier's attestation. All three
+     * rows survive, each naming its own rule, and the good one lands
+     * FILED. A sweep that aborted on the first failure would lose exactly
+     * the evidence this command exists to collect. */
+    snprintf(records_all, records_all_sz,
+             "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
+             "{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
+             "{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
+             "{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
+             foreign_transport, absent_transport, good_transport,
+             good_transport /* a republished duplicate */);
+    g_zv_pointer_records = records_all;
+    zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
+                                            zv_route_attest_provider);
+    struct zv_cmd c;
+    zp_run_pull(&c, datadir, package_hex);
+    failures += zp_sweep_rows_main(&c, good_id, good_transport,
+                                   foreign_transport);
+    failures += zp_sweep_rows_absent(&c, absent_transport);
+    failures += zp_sweep_totals(&c);
+    zv_cmd_free(&c);
+
+    /* The filesystem agrees with the report: the honest attestation is
+     * filed, and the one that failed the binding check is not. Refusing
+     * BEFORE filing is the whole security property on this path. */
+    char good_path[4400], foreign_path[4400];
+    snprintf(good_path, sizeof(good_path), "%s/attestations/%s", store,
+             good_id);
+    snprintf(foreign_path, sizeof(foreign_path), "%s/attestations/%s", store,
+             foreign_id);
+    struct stat st;
+    ZV_CHECK("pull: the admitted attestation is on disk",
+             stat(good_path, &st) == 0 && st.st_size > 0);
+    ZV_CHECK("pull: the binding-mismatched attestation is NOT on disk",
+             stat(foreign_path, &st) != 0);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    return failures;
+}
+
+static int zp_idempotent(const char *datadir, const char *package_hex,
+                         const char *good_transport)
+{
+    int failures = 0;
+    /* (d) Re-pulling the same set is idempotent: already_present, not
+     * re-filed, and the totals still add up. */
+    zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
+                                            zv_route_attest_provider);
+    struct zv_cmd c;
+    zp_run_pull(&c, datadir, package_hex);
+    const struct json_value *good =
+        zv_row_for(json_get(&c.reply.data, "rows"), good_transport);
+    ZV_CHECK("pull: re-pulling an already-filed attestation is "
+             "idempotent",
+             good != NULL &&
+             json_get_bool(json_get(good, "admitted")) &&
+             !json_get_bool(json_get(good, "filed")) &&
+             json_get_bool(json_get(good, "already_present")) &&
+             json_get_int(json_get(&c.reply.data, "filed")) == 0 &&
+             json_get_int(json_get(&c.reply.data, "admitted")) == 1);
+    zv_cmd_free(&c);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    return failures;
+}
+
+static int zp_already_held(const char *datadir, const char *package_hex,
+                           const char *store, const uint8_t package_root[32],
+                           const uint8_t release_id[32],
+                           const uint8_t recipe_root[32])
+{
+    int failures = 0;
+    /* (d2) The status ladder must not contradict its own totals.
+     * Admission is deliberately unconditional, so a blob this node
+     * ALREADY HOLDS is admitted and filed even when provider discovery
+     * serves nothing. A ladder that tested fetched before admitted
+     * printed ATTESTATION_BYTES_UNREACHABLE — "no authenticated provider
+     * served the attestation bytes" — in the same reply that reported
+     * filed=1, sending an operator to repair reachability that was never
+     * broken. The evidence landed; the status has to say so. */
+    char held_id[65] = "", held_transport[65] = "";
+    bool held = zv_offer_attestation(
+        datadir, store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, package_root,
+        release_id, recipe_root, 0x44, true, held_id, held_transport);
+    ZV_CHECK("pull: a third attestation is offered but not yet filed",
+             held);
+    char held_path[4400];
+    snprintf(held_path, sizeof(held_path), "%s/attestations/%s", store,
+             held_id);
+    char records_held[1024];
+    snprintf(records_held, sizeof(records_held),
+             "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
+             held_transport);
+    const char *saved_records = g_zv_pointer_records;
+    g_zv_pointer_records = records_held;
+    /* Discovery fails. The bytes are here anyway. */
+    zcl_native_zcode_discovery_test_backend(zv_discover_no_provider,
+                                            zv_route_attest_provider);
+    struct zv_cmd c;
+    zp_run_pull(&c, datadir, package_hex);
+    ZV_CHECK("pull: an attestation admitted from bytes already held is "
+             "NOT reported as unreachable",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             zv_str_is(&c.reply.data, "status", "ATTESTATIONS_ADMITTED") &&
+             !zv_str_is(&c.reply.data, "status",
+                        "ATTESTATION_BYTES_UNREACHABLE"));
+    ZV_CHECK("pull: no blocker is named when evidence actually landed",
+             json_get(&c.reply.data, "blocker") == NULL);
+    ZV_CHECK("pull: the totals that contradicted the old status are the "
+             "ones asserted here",
+             json_get_int(json_get(&c.reply.data, "fetched")) == 0 &&
+             json_get_int(json_get(&c.reply.data, "admitted")) == 1 &&
+             json_get_int(json_get(&c.reply.data, "filed")) == 1 &&
+             json_get_int(json_get(&c.reply.data, "refused")) == 0);
+    struct stat st;
+    ZV_CHECK("pull: the already-held attestation is on disk", held &&
+             stat(held_path, &st) == 0 && st.st_size > 0);
+    zv_cmd_free(&c);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    g_zv_pointer_records = saved_records;
+    return failures;
+}
+
+static int zp_row_cap(const char *datadir, const char *package_hex)
+{
+    int failures = 0;
+    /* (e) The row cap is reported honestly rather than truncating in
+     * silence, and it bounds the rows actually produced. */
+    zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
+                                            zv_route_attest_provider);
+    struct zv_cmd c;
+    zv_cmd_init(&c, datadir, "");
+    (void)json_push_kv_str(&c.input, "package_root", package_hex);
+    (void)json_push_kv_int(&c.input, "maximum_records", 1);
+    zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+    const struct json_value *rows = json_get(&c.reply.data, "rows");
+    ZV_CHECK("pull: rows_truncated is honest at the cap",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_bool(json_get(&c.reply.data, "rows_truncated")) &&
+             json_get_int(json_get(&c.reply.data, "maximum_records")) ==
+                 1 &&
+             json_get_int(json_get(&c.reply.data,
+                                   "distinct_transport_roots")) == 1 &&
+             rows && json_size(rows) == 1 &&
+             json_get_int(json_get(&c.reply.data, "pointers_seen")) == 4);
+    zv_cmd_free(&c);
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
+    return failures;
+}
+
+static int zp_bad_inputs(const char *datadir, const char *package_hex)
+{
+    int failures = 0;
+    /* (f) Bad inputs are refused at normalize, by name. */
+    struct zv_cmd c;
+    zv_cmd_init(&c, datadir, "");
+    (void)json_push_kv_str(&c.input, "package_root", "not-a-root");
+    zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+    ZV_CHECK("pull: a malformed package_root names BAD_PACKAGE_ROOT",
+             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c.reply.error.code, "BAD_PACKAGE_ROOT") == 0);
+    zv_cmd_free(&c);
+
+    zv_cmd_init(&c, datadir, "");
+    (void)json_push_kv_str(&c.input, "package_root", package_hex);
+    (void)json_push_kv_int(&c.input, "maximum_records", 0);
+    zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
+    ZV_CHECK("pull: maximum_records=0 names BAD_MAXIMUM_RECORDS",
+             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c.reply.error.code, "BAD_MAXIMUM_RECORDS") == 0);
+    zv_cmd_free(&c);
     return failures;
 }
 
@@ -2452,35 +3221,11 @@ static int t_attest_pull(void)
     zv_hex_enc(package_root, 32, package_hex);
     /* Function-scoped so the stub's record text outlives the block that
      * builds it — the pointer set is read again by the later cases. */
-    char records_one[1024];
     char records_all[2048];
 
     node_rpc_client_set_test_hook(zv_pull_rpc_hook);
 
-    /* (a) Nobody has attested this package. That is NOT "the bytes could
-     * not be reached", and the two must never collapse into one
-     * not-found: the operator's next step differs completely — wait for a
-     * verifier, versus fix reachability. */
-    g_zv_pointer_records = "[]";
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", package_hex);
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        const struct json_value *rows = json_get(&c.reply.data, "rows");
-        ZV_CHECK("pull: an empty pointer set is NO_ATTESTATION_POINTERS",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 zv_str_is(&c.reply.data, "status",
-                           "NO_ATTESTATION_POINTERS") &&
-                 zv_str_has(&c.reply.data, "blocker", "no_pointer_record") &&
-                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 0 &&
-                 json_get_int(json_get(&c.reply.data,
-                                       "distinct_transport_roots")) == 0 &&
-                 rows && rows->type == JSON_ARR && json_size(rows) == 0);
-        ZV_CHECK("pull: the lookup asks the attestation pointer key",
-                 g_zv_record_begin_calls > 0 && g_zv_pointer_query_exact);
-        zv_cmd_free(&c);
-    }
+    failures += zp_empty_set(datadir, package_hex);
 
     /* Three blobs, one honest and two that must fail named rules:
      *   GOOD    a signed attestation of THIS package, bytes in the store
@@ -2516,284 +3261,25 @@ static int t_attest_pull(void)
     char absent_transport[65];
     zv_hex_enc(absent_root, 32, absent_transport);
 
-    char good_path[4400], foreign_path[4400];
-    snprintf(good_path, sizeof(good_path), "%s/attestations/%s", store,
-             good_id);
-    snprintf(foreign_path, sizeof(foreign_path), "%s/attestations/%s", store,
-             foreign_id);
-
-    /* (b) A pointer exists, nobody serves the bytes, and this node does
-     * not already hold them. Distinct status, distinct blocker, and it is
-     * NOT the empty-set status: "nobody has attested this" and "the bytes
-     * are out of reach" send the operator to two different next steps. */
-    {
-        snprintf(records_one, sizeof(records_one),
-                 "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
-                 absent_transport);
-        g_zv_pointer_records = records_one;
-        zcl_native_zcode_discovery_test_backend(zv_discover_no_provider,
-                                                zv_route_attest_provider);
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", package_hex);
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        const struct json_value *rows = json_get(&c.reply.data, "rows");
-        const struct json_value *row = zv_row_for(rows, absent_transport);
-        ZV_CHECK("pull: unreachable bytes are NOT reported as no pointers",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 zv_str_is(&c.reply.data, "status",
-                           "ATTESTATION_BYTES_UNREACHABLE") &&
-                 !zv_str_is(&c.reply.data, "status",
-                            "NO_ATTESTATION_POINTERS") &&
-                 zv_str_has(&c.reply.data, "blocker",
-                            "no_authenticated_provider") &&
-                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 1 &&
-                 json_get_int(json_get(&c.reply.data, "fetched")) == 0 &&
-                 json_get_int(json_get(&c.reply.data, "admitted")) == 0 &&
-                 json_get_int(json_get(&c.reply.data, "refused")) == 1);
-        ZV_CHECK("pull: the unreachable row names the discovery refusal",
-                 row != NULL &&
-                 zv_str_is(row, "fetch_outcome",
-                           "PROVIDER_DISCOVERY_FAILED") &&
-                 json_get(row, "fetched") &&
-                 !json_get_bool(json_get(row, "fetched")) &&
-                 !json_get_bool(json_get(row, "admitted")) &&
-                 zv_str_has(row, "admit_result",
-                            vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
-        zv_cmd_free(&c);
-        zcl_native_zcode_discovery_test_backend(NULL, NULL);
-    }
     /* Nothing was filed for a row whose bytes never arrived. */
     {
+        char good_path[4400];
+        snprintf(good_path, sizeof(good_path), "%s/attestations/%s", store,
+                 good_id);
         struct stat st;
         ZV_CHECK("pull: an unreachable row files nothing",
                  stat(good_path, &st) != 0);
     }
 
-    /* (c) THE case: one hostile pointer and one unreachable pointer in the
-     * same set must not cost the honest verifier's attestation. All three
-     * rows survive, each naming its own rule, and the good one lands
-     * FILED. A sweep that aborted on the first failure would lose exactly
-     * the evidence this command exists to collect. */
-    {
-        snprintf(records_all, sizeof(records_all),
-                 "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
-                 "{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
-                 "{\"kind\":\"pointer\",\"transport_root\":\"%s\"},"
-                 "{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
-                 foreign_transport, absent_transport, good_transport,
-                 good_transport /* a republished duplicate */);
-        g_zv_pointer_records = records_all;
-        zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
-                                                zv_route_attest_provider);
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", package_hex);
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        const struct json_value *rows = json_get(&c.reply.data, "rows");
-        const struct json_value *good = zv_row_for(rows, good_transport);
-        const struct json_value *foreign = zv_row_for(rows,
-                                                      foreign_transport);
-        const struct json_value *absent = zv_row_for(rows, absent_transport);
-
-        ZV_CHECK("pull: one bad row does not abort the sweep — the good "
-                 "attestation still lands filed",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 good != NULL &&
-                 json_get_bool(json_get(good, "admitted")) &&
-                 json_get_bool(json_get(good, "filed")) &&
-                 zv_str_is(good, "attestation_id", good_id) &&
-                 zv_str_is(good, "result_class", "test-pass") &&
-                 zv_str_is(good, "admit_result",
-                           "ok (blob=ok, attestation=ok)"));
-        ZV_CHECK("pull: the hostile pointer is refused naming the binding "
-                 "rule, and stays in the report",
-                 foreign != NULL &&
-                 !json_get_bool(json_get(foreign, "admitted")) &&
-                 !json_get_bool(json_get(foreign, "filed")) &&
-                 zv_str_has(foreign, "admit_result",
-                            vcs_package_attest_transport_result_string(
-                                VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING)));
-        ZV_CHECK("pull: a pointer to bytes this node does not hold names "
-                 "the blob rule, not the fetch stub's optimism",
-                 absent != NULL &&
-                 json_get_bool(json_get(absent, "fetched")) &&
-                 !json_get_bool(json_get(absent, "admitted")) &&
-                 zv_str_has(absent, "admit_result",
-                            vcs_package_attest_transport_result_string(
-                                VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB)) &&
-                 zv_str_has(absent, "admit_result",
-                            vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
-        ZV_CHECK("pull: every row carries a named admit_result",
-                 rows && json_size(rows) == 3 &&
-                 zv_str_has(json_at(rows, 0), "admit_result", "(blob=") &&
-                 zv_str_has(json_at(rows, 1), "admit_result", "(blob=") &&
-                 zv_str_has(json_at(rows, 2), "admit_result", "(blob="));
-
-        /* Totals must be the rows, counted. A report whose headline
-         * numbers disagree with its own rows is worse than no report. */
-        int64_t admitted_rows = 0, filed_rows = 0, fetched_rows = 0;
-        for (size_t i = 0; rows && i < json_size(rows); i++) {
-            const struct json_value *row = json_at(rows, i);
-            admitted_rows += json_get_bool(json_get(row, "admitted")) ? 1 : 0;
-            filed_rows += json_get_bool(json_get(row, "filed")) ? 1 : 0;
-            fetched_rows += json_get_bool(json_get(row, "fetched")) ? 1 : 0;
-        }
-        ZV_CHECK("pull: totals are internally consistent with the rows",
-                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 4 &&
-                 json_get_int(json_get(&c.reply.data,
-                                       "distinct_transport_roots")) == 3 &&
-                 json_get_int(json_get(&c.reply.data, "admitted")) ==
-                     admitted_rows &&
-                 json_get_int(json_get(&c.reply.data, "filed")) ==
-                     filed_rows &&
-                 json_get_int(json_get(&c.reply.data, "fetched")) ==
-                     fetched_rows &&
-                 json_get_int(json_get(&c.reply.data, "admitted")) == 1 &&
-                 json_get_int(json_get(&c.reply.data, "refused")) == 2 &&
-                 json_get_int(json_get(&c.reply.data, "admitted")) +
-                     json_get_int(json_get(&c.reply.data, "refused")) ==
-                     json_get_int(json_get(&c.reply.data,
-                                           "distinct_transport_roots")) &&
-                 !json_get_bool(json_get(&c.reply.data, "rows_truncated")));
-        ZV_CHECK("pull: admitted evidence sets the admitted status",
-                 zv_str_is(&c.reply.data, "status", "ATTESTATIONS_ADMITTED") &&
-                 json_get(&c.reply.data, "blocker") == NULL);
-        zv_cmd_free(&c);
-        zcl_native_zcode_discovery_test_backend(NULL, NULL);
-    }
-
-    /* The filesystem agrees with the report: the honest attestation is
-     * filed, and the one that failed the binding check is not. Refusing
-     * BEFORE filing is the whole security property on this path. */
-    {
-        struct stat st;
-        ZV_CHECK("pull: the admitted attestation is on disk",
-                 stat(good_path, &st) == 0 && st.st_size > 0);
-        ZV_CHECK("pull: the binding-mismatched attestation is NOT on disk",
-                 stat(foreign_path, &st) != 0);
-    }
-
-    /* (d) Re-pulling the same set is idempotent: already_present, not
-     * re-filed, and the totals still add up. */
-    {
-        zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
-                                                zv_route_attest_provider);
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", package_hex);
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        const struct json_value *good =
-            zv_row_for(json_get(&c.reply.data, "rows"), good_transport);
-        ZV_CHECK("pull: re-pulling an already-filed attestation is "
-                 "idempotent",
-                 good != NULL &&
-                 json_get_bool(json_get(good, "admitted")) &&
-                 !json_get_bool(json_get(good, "filed")) &&
-                 json_get_bool(json_get(good, "already_present")) &&
-                 json_get_int(json_get(&c.reply.data, "filed")) == 0 &&
-                 json_get_int(json_get(&c.reply.data, "admitted")) == 1);
-        zv_cmd_free(&c);
-        zcl_native_zcode_discovery_test_backend(NULL, NULL);
-    }
-
-    /* (d2) The status ladder must not contradict its own totals.
-     * Admission is deliberately unconditional, so a blob this node
-     * ALREADY HOLDS is admitted and filed even when provider discovery
-     * serves nothing. A ladder that tested fetched before admitted
-     * printed ATTESTATION_BYTES_UNREACHABLE — "no authenticated provider
-     * served the attestation bytes" — in the same reply that reported
-     * filed=1, sending an operator to repair reachability that was never
-     * broken. The evidence landed; the status has to say so. */
-    {
-        char held_id[65] = "", held_transport[65] = "";
-        bool held = zv_offer_attestation(
-            datadir, store, VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, package_root,
-            release_id, recipe_root, 0x44, true, held_id, held_transport);
-        ZV_CHECK("pull: a third attestation is offered but not yet filed",
-                 held);
-        char held_path[4400];
-        snprintf(held_path, sizeof(held_path), "%s/attestations/%s", store,
-                 held_id);
-        char records_held[1024];
-        snprintf(records_held, sizeof(records_held),
-                 "[{\"kind\":\"pointer\",\"transport_root\":\"%s\"}]",
-                 held_transport);
-        const char *saved_records = g_zv_pointer_records;
-        g_zv_pointer_records = records_held;
-        /* Discovery fails. The bytes are here anyway. */
-        zcl_native_zcode_discovery_test_backend(zv_discover_no_provider,
-                                                zv_route_attest_provider);
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", package_hex);
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        ZV_CHECK("pull: an attestation admitted from bytes already held is "
-                 "NOT reported as unreachable",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 zv_str_is(&c.reply.data, "status", "ATTESTATIONS_ADMITTED") &&
-                 !zv_str_is(&c.reply.data, "status",
-                            "ATTESTATION_BYTES_UNREACHABLE"));
-        ZV_CHECK("pull: no blocker is named when evidence actually landed",
-                 json_get(&c.reply.data, "blocker") == NULL);
-        ZV_CHECK("pull: the totals that contradicted the old status are the "
-                 "ones asserted here",
-                 json_get_int(json_get(&c.reply.data, "fetched")) == 0 &&
-                 json_get_int(json_get(&c.reply.data, "admitted")) == 1 &&
-                 json_get_int(json_get(&c.reply.data, "filed")) == 1 &&
-                 json_get_int(json_get(&c.reply.data, "refused")) == 0);
-        struct stat st;
-        ZV_CHECK("pull: the already-held attestation is on disk", held &&
-                 stat(held_path, &st) == 0 && st.st_size > 0);
-        zv_cmd_free(&c);
-        zcl_native_zcode_discovery_test_backend(NULL, NULL);
-        g_zv_pointer_records = saved_records;
-    }
-
-    /* (e) The row cap is reported honestly rather than truncating in
-     * silence, and it bounds the rows actually produced. */
-    {
-        zcl_native_zcode_discovery_test_backend(zv_discover_attest_provider,
-                                                zv_route_attest_provider);
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", package_hex);
-        (void)json_push_kv_int(&c.input, "maximum_records", 1);
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        const struct json_value *rows = json_get(&c.reply.data, "rows");
-        ZV_CHECK("pull: rows_truncated is honest at the cap",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 json_get_bool(json_get(&c.reply.data, "rows_truncated")) &&
-                 json_get_int(json_get(&c.reply.data, "maximum_records")) ==
-                     1 &&
-                 json_get_int(json_get(&c.reply.data,
-                                       "distinct_transport_roots")) == 1 &&
-                 rows && json_size(rows) == 1 &&
-                 json_get_int(json_get(&c.reply.data, "pointers_seen")) == 4);
-        zv_cmd_free(&c);
-        zcl_native_zcode_discovery_test_backend(NULL, NULL);
-    }
-
-    /* (f) Bad inputs are refused at normalize, by name. */
-    {
-        struct zv_cmd c;
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", "not-a-root");
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        ZV_CHECK("pull: a malformed package_root names BAD_PACKAGE_ROOT",
-                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                 strcmp(c.reply.error.code, "BAD_PACKAGE_ROOT") == 0);
-        zv_cmd_free(&c);
-
-        zv_cmd_init(&c, datadir, "");
-        (void)json_push_kv_str(&c.input, "package_root", package_hex);
-        (void)json_push_kv_int(&c.input, "maximum_records", 0);
-        zcl_native_handle_zcode_package_attest_pull(&c.request, &c.reply);
-        ZV_CHECK("pull: maximum_records=0 names BAD_MAXIMUM_RECORDS",
-                 c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                 strcmp(c.reply.error.code, "BAD_MAXIMUM_RECORDS") == 0);
-        zv_cmd_free(&c);
-    }
+    failures += zp_unreachable(datadir, package_hex, absent_transport);
+    failures += zp_sweep(datadir, package_hex, store, records_all,
+                         sizeof(records_all), good_id, good_transport,
+                         foreign_id, foreign_transport, absent_transport);
+    failures += zp_idempotent(datadir, package_hex, good_transport);
+    failures += zp_already_held(datadir, package_hex, store, package_root,
+                                release_id, recipe_root);
+    failures += zp_row_cap(datadir, package_hex);
+    failures += zp_bad_inputs(datadir, package_hex);
 
     node_rpc_client_set_test_hook(NULL);
     g_zv_pointer_records = "[]";
@@ -2865,6 +3351,192 @@ static bool zv_gate_refused(struct json_value *result, const char *code,
            zv_str_has(result, "message", rule);
 }
 
+static int zg_no_store(const uint8_t package_root[32])
+{
+    int failures = 0;
+    /* (a) No package store at all: the prerequisite is named, and the
+     * gate never dereferences one. */
+    vcs_package_store_close_global();
+    uint8_t bogus[32];
+    zv_pattern_root(0x0d, bogus);
+    struct vcs_zcode_dht_publish_spec spec;
+    zv_gate_spec(&spec, package_root, bogus);
+    struct json_value result;
+    json_init(&result);
+    bool allowed =
+        boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+    ZV_CHECK("gate: no package store names NO_PACKAGE_STORE",
+             !allowed &&
+             json_get(&result, "ok") &&
+             !json_get_bool(json_get(&result, "ok")) &&
+             zv_str_is(&result, "code", "NO_PACKAGE_STORE"));
+    ZV_CHECK("gate: no package store names z23 join, not flags",
+             zv_str_has(&result, "message", "z23 join") &&
+             !zv_str_has(&result, "message", "-packagehost") &&
+             !zv_str_has(&result, "message", "-buildworker"));
+    json_free(&result);
+    json_init(&result);
+    allowed = boot_zcode_dht_package_pointer_publish_gate(&spec, &result);
+    ZV_CHECK("gate: package pointer with no store names z23 join",
+             !allowed &&
+             zv_str_is(&result, "code", "NO_PACKAGE_STORE") &&
+             zv_str_has(&result, "message", "z23 join") &&
+             !zv_str_has(&result, "message", "-packagehost") &&
+             !zv_str_has(&result, "message", "-buildworker"));
+    json_free(&result);
+    return failures;
+}
+
+static int zg_unheld(const uint8_t package_root[32])
+{
+    int failures = 0;
+    /* (b) A pointer to bytes this node does not hold. */
+    uint8_t missing[32];
+    zv_pattern_root(0x4e, missing);
+    struct vcs_zcode_dht_publish_spec spec;
+    zv_gate_spec(&spec, package_root, missing);
+    struct json_value result;
+    json_init(&result);
+    bool allowed =
+        boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+    ZV_CHECK("gate: unheld bytes name ATTESTATION_NOT_HELD",
+             !allowed &&
+             zv_gate_refused(&result, "ATTESTATION_NOT_HELD",
+                             vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
+    json_free(&result);
+    return failures;
+}
+
+static int zg_junk(struct vcs_package_store *store,
+                   const uint8_t package_root[32])
+{
+    int failures = 0;
+    /* (c) Bytes this node DOES hold that are not an attestation at all.
+     * Possession is not evidence. */
+    static const uint8_t junk[96] = { 0x6e, 0x6f, 0x74, 0x2d, 0x61,
+                                      0x2d, 0x77, 0x69, 0x72, 0x65 };
+    uint8_t junk_root[32] = { 0 };
+    bool put = vcs_blob_put_to(store, junk, sizeof(junk), junk_root) ==
+               VCS_BLOB_OK;
+    struct vcs_zcode_dht_publish_spec spec;
+    zv_gate_spec(&spec, package_root, junk_root);
+    struct json_value result;
+    json_init(&result);
+    bool allowed =
+        put && boot_zcode_dht_attestation_pointer_publish_gate(&spec,
+                                                               &result);
+    ZV_CHECK("gate: held non-attestation bytes name ATTESTATION_INVALID",
+             put && !allowed &&
+             zv_gate_refused(&result, "ATTESTATION_INVALID",
+                             vcs_package_attest_transport_result_string(
+                                 VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST)));
+    json_free(&result);
+    return failures;
+}
+
+static int zg_binding_mismatch(const uint8_t other_root[32],
+                               const uint8_t transport_root[32],
+                               const char *attest_path)
+{
+    int failures = 0;
+    /* (d) THE one that matters: a valid, held attestation whose
+     * package_root is NOT the pointer's semantic_root. The pointer would
+     * be advertising evidence about a package the wire never mentions. It
+     * must be refused, and — because the binding is checked BEFORE the
+     * filer runs — nothing may be written. */
+    struct vcs_zcode_dht_publish_spec spec;
+    zv_gate_spec(&spec, other_root, transport_root);
+    struct json_value result;
+    json_init(&result);
+    bool allowed =
+        boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+    struct stat st;
+    ZV_CHECK("gate: a pointer whose semantic_root is not the "
+             "attestation's package_root names "
+             "ATTESTATION_BINDING_MISMATCH",
+             !allowed &&
+             zv_gate_refused(&result, "ATTESTATION_BINDING_MISMATCH",
+                             vcs_package_attest_transport_result_string(
+                                 VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING)));
+    ZV_CHECK("gate: a binding mismatch files nothing",
+             stat(attest_path, &st) != 0);
+    json_free(&result);
+    return failures;
+}
+
+static int zg_happy(const uint8_t package_root[32],
+                    const uint8_t transport_root[32],
+                    const char *attest_path, size_t wire_len)
+{
+    int failures = 0;
+    /* (e) The happy path: held, valid, correctly bound. It passes, and —
+     * as the header documents — it FILES the attestation even on a plan,
+     * because _admit() is the single filer. */
+    struct vcs_zcode_dht_publish_spec spec;
+    zv_gate_spec(&spec, package_root, transport_root);
+    struct json_value result;
+    json_init(&result);
+    bool allowed =
+        boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+    struct stat st;
+    ZV_CHECK("gate: a held, valid, correctly-bound attestation passes",
+             allowed);
+    ZV_CHECK("gate: passing files the attestation locally (documented, "
+             "not read-only)",
+             stat(attest_path, &st) == 0 &&
+             (size_t)st.st_size == wire_len);
+    json_free(&result);
+
+    json_init(&result);
+    bool again =
+        boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+    ZV_CHECK("gate: re-running the same publish is idempotent", again);
+    json_free(&result);
+    return failures;
+}
+
+static int zg_squatter(struct vcs_package_store *store,
+                       const uint8_t package_root[32])
+{
+    int failures = 0;
+    /* (f) A different object already occupying the attestation id. The id
+     * IS the content hash, so this is impossible for honest wires and
+     * fails closed rather than overwriting. */
+    uint8_t *w2 = NULL;
+    size_t w2_len = 0;
+    uint8_t id2[32], root2[32];
+    bool b2 = zv_gate_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
+                           package_root, 0x33, &w2, &w2_len, id2, root2);
+    bool s2 = b2 && vcs_blob_put_to(store, w2, w2_len, NULL) ==
+                        VCS_BLOB_OK;
+    free(w2);
+    char id2_hex[65] = "", path2[4400] = "";
+    if (b2) {
+        zv_hex_enc(id2, 32, id2_hex);
+        snprintf(path2, sizeof(path2), "%s/attestations/%s",
+                 vcs_package_store_root_dir(store), id2_hex);
+    }
+    static const char squatter[] = "not the attestation these bytes are";
+    bool squatted = s2 &&
+        zv_write_file(path2, squatter, sizeof(squatter) - 1, 0600);
+    struct vcs_zcode_dht_publish_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    if (b2)
+        zv_gate_spec(&spec, package_root, root2);
+    struct json_value result;
+    json_init(&result);
+    bool allowed = squatted &&
+        boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
+    ZV_CHECK("gate: a squatted attestation id names "
+             "ATTESTATION_STORE_CONFLICT",
+             squatted && !allowed &&
+             zv_gate_refused(&result, "ATTESTATION_STORE_CONFLICT",
+                             vcs_package_attest_transport_result_string(
+                                 VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT)));
+    json_free(&result);
+    return failures;
+}
+
 static int t_attest_publish_gate(void)
 {
     int failures = 0;
@@ -2872,38 +3544,7 @@ static int t_attest_publish_gate(void)
     zv_pattern_root(0x31, package_root);
     zv_pattern_root(0x71, other_root);
 
-    /* (a) No package store at all: the prerequisite is named, and the
-     * gate never dereferences one. */
-    vcs_package_store_close_global();
-    {
-        uint8_t bogus[32];
-        zv_pattern_root(0x0d, bogus);
-        struct vcs_zcode_dht_publish_spec spec;
-        zv_gate_spec(&spec, package_root, bogus);
-        struct json_value result;
-        json_init(&result);
-        bool allowed =
-            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
-        ZV_CHECK("gate: no package store names NO_PACKAGE_STORE",
-                 !allowed &&
-                 json_get(&result, "ok") &&
-                 !json_get_bool(json_get(&result, "ok")) &&
-                 zv_str_is(&result, "code", "NO_PACKAGE_STORE"));
-        ZV_CHECK("gate: no package store names z23 join, not flags",
-                 zv_str_has(&result, "message", "z23 join") &&
-                 !zv_str_has(&result, "message", "-packagehost") &&
-                 !zv_str_has(&result, "message", "-buildworker"));
-        json_free(&result);
-        json_init(&result);
-        allowed = boot_zcode_dht_package_pointer_publish_gate(&spec, &result);
-        ZV_CHECK("gate: package pointer with no store names z23 join",
-                 !allowed &&
-                 zv_str_is(&result, "code", "NO_PACKAGE_STORE") &&
-                 zv_str_has(&result, "message", "z23 join") &&
-                 !zv_str_has(&result, "message", "-packagehost") &&
-                 !zv_str_has(&result, "message", "-buildworker"));
-        json_free(&result);
-    }
+    failures += zg_no_store(package_root);
 
     const char *argv[] = { "zclassic23-test", "-packagehost=1",
                            "-packagequota=100000000" };
@@ -2926,51 +3567,9 @@ static int t_attest_publish_gate(void)
     struct vcs_package_store *store = vcs_package_store_global();
     const char *zcode_dir = vcs_package_store_root_dir(store);
 
-    /* (b) A pointer to bytes this node does not hold. */
-    {
-        uint8_t missing[32];
-        zv_pattern_root(0x4e, missing);
-        struct vcs_zcode_dht_publish_spec spec;
-        zv_gate_spec(&spec, package_root, missing);
-        struct json_value result;
-        json_init(&result);
-        bool allowed =
-            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
-        ZV_CHECK("gate: unheld bytes name ATTESTATION_NOT_HELD",
-                 !allowed &&
-                 zv_gate_refused(&result, "ATTESTATION_NOT_HELD",
-                                 vcs_blob_result_string(VCS_BLOB_ERR_ABSENT)));
-        json_free(&result);
-    }
+    failures += zg_unheld(package_root);
+    failures += zg_junk(store, package_root);
 
-    /* (c) Bytes this node DOES hold that are not an attestation at all.
-     * Possession is not evidence. */
-    {
-        static const uint8_t junk[96] = { 0x6e, 0x6f, 0x74, 0x2d, 0x61,
-                                          0x2d, 0x77, 0x69, 0x72, 0x65 };
-        uint8_t junk_root[32] = { 0 };
-        bool put = vcs_blob_put_to(store, junk, sizeof(junk), junk_root) ==
-                   VCS_BLOB_OK;
-        struct vcs_zcode_dht_publish_spec spec;
-        zv_gate_spec(&spec, package_root, junk_root);
-        struct json_value result;
-        json_init(&result);
-        bool allowed =
-            put && boot_zcode_dht_attestation_pointer_publish_gate(&spec,
-                                                                   &result);
-        ZV_CHECK("gate: held non-attestation bytes name ATTESTATION_INVALID",
-                 put && !allowed &&
-                 zv_gate_refused(&result, "ATTESTATION_INVALID",
-                                 vcs_package_attest_transport_result_string(
-                                     VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST)));
-        json_free(&result);
-    }
-
-    /* (d) THE one that matters: a valid, held attestation whose
-     * package_root is NOT the pointer's semantic_root. The pointer would
-     * be advertising evidence about a package the wire never mentions. It
-     * must be refused, and — because the binding is checked BEFORE the
-     * filer runs — nothing may be written. */
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     uint8_t attest_id[32], transport_root[32];
@@ -2990,88 +3589,12 @@ static int t_attest_publish_gate(void)
                  zcode_dir, id_hex);
     }
     if (stored) {
-        struct vcs_zcode_dht_publish_spec spec;
-        zv_gate_spec(&spec, other_root, transport_root);
-        struct json_value result;
-        json_init(&result);
-        bool allowed =
-            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
-        struct stat st;
-        ZV_CHECK("gate: a pointer whose semantic_root is not the "
-                 "attestation's package_root names "
-                 "ATTESTATION_BINDING_MISMATCH",
-                 !allowed &&
-                 zv_gate_refused(&result, "ATTESTATION_BINDING_MISMATCH",
-                                 vcs_package_attest_transport_result_string(
-                                     VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING)));
-        ZV_CHECK("gate: a binding mismatch files nothing",
-                 stat(attest_path, &st) != 0);
-        json_free(&result);
+        failures += zg_binding_mismatch(other_root, transport_root,
+                                        attest_path);
+        failures += zg_happy(package_root, transport_root, attest_path,
+                             wire_len);
     }
-
-    /* (e) The happy path: held, valid, correctly bound. It passes, and —
-     * as the header documents — it FILES the attestation even on a plan,
-     * because _admit() is the single filer. */
-    if (stored) {
-        struct vcs_zcode_dht_publish_spec spec;
-        zv_gate_spec(&spec, package_root, transport_root);
-        struct json_value result;
-        json_init(&result);
-        bool allowed =
-            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
-        struct stat st;
-        ZV_CHECK("gate: a held, valid, correctly-bound attestation passes",
-                 allowed);
-        ZV_CHECK("gate: passing files the attestation locally (documented, "
-                 "not read-only)",
-                 stat(attest_path, &st) == 0 &&
-                 (size_t)st.st_size == wire_len);
-        json_free(&result);
-
-        json_init(&result);
-        bool again =
-            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
-        ZV_CHECK("gate: re-running the same publish is idempotent", again);
-        json_free(&result);
-    }
-
-    /* (f) A different object already occupying the attestation id. The id
-     * IS the content hash, so this is impossible for honest wires and
-     * fails closed rather than overwriting. */
-    {
-        uint8_t *w2 = NULL;
-        size_t w2_len = 0;
-        uint8_t id2[32], root2[32];
-        bool b2 = zv_gate_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS,
-                               package_root, 0x33, &w2, &w2_len, id2, root2);
-        bool s2 = b2 && vcs_blob_put_to(store, w2, w2_len, NULL) ==
-                            VCS_BLOB_OK;
-        free(w2);
-        char id2_hex[65] = "", path2[4400] = "";
-        if (b2) {
-            zv_hex_enc(id2, 32, id2_hex);
-            snprintf(path2, sizeof(path2), "%s/attestations/%s", zcode_dir,
-                     id2_hex);
-        }
-        static const char squatter[] = "not the attestation these bytes are";
-        bool squatted = s2 &&
-            zv_write_file(path2, squatter, sizeof(squatter) - 1, 0600);
-        struct vcs_zcode_dht_publish_spec spec;
-        memset(&spec, 0, sizeof(spec));
-        if (b2)
-            zv_gate_spec(&spec, package_root, root2);
-        struct json_value result;
-        json_init(&result);
-        bool allowed = squatted &&
-            boot_zcode_dht_attestation_pointer_publish_gate(&spec, &result);
-        ZV_CHECK("gate: a squatted attestation id names "
-                 "ATTESTATION_STORE_CONFLICT",
-                 squatted && !allowed &&
-                 zv_gate_refused(&result, "ATTESTATION_STORE_CONFLICT",
-                                 vcs_package_attest_transport_result_string(
-                                     VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT)));
-        json_free(&result);
-    }
+    failures += zg_squatter(store, package_root);
 
     /* Restore the process globals this case borrowed. */
     vcs_package_store_close_global();
@@ -3083,6 +3606,7 @@ static int t_attest_publish_gate(void)
     test_rm_rf_recursive(dd);
     return failures;
 }
+
 
 /* boot_zcode_dht_work_pointer_publish_gate stops THIS node from
  * advertising a work-solution pointer it cannot stand behind. The arms
@@ -3555,6 +4079,266 @@ static bool zv_write_key_file(const char *path, uint8_t seed, mode_t mode)
     return zv_write_file(path, hex, 64, mode);
 }
 
+static void ze_attest_diag(const struct vcs_package_attest *att,
+                           const uint8_t package_root[32],
+                           const uint8_t recipe_root[32],
+                           const uint8_t release_id[32])
+{
+    struct pubkey vk;
+    struct privkey vsk;
+    zv_keypair(0x22, &vsk, &vk);
+    if (vcs_package_attest_verify(att) != VCS_PACKAGE_ATTEST_OK ||
+        att->result_class != VCS_PACKAGE_ATTEST_RESULT_TEST_PASS ||
+        memcmp(att->verifier_pubkey, vk.vch, 33) != 0 ||
+        memcmp(att->package_root, package_root, 32) != 0 ||
+        memcmp(att->recipe_root, recipe_root, 32) != 0 ||
+        memcmp(att->release_id, release_id, 32) != 0 ||
+        !att->test_ran || att->test_exit_code != 0)
+        printf("  zcode_verify: e2e attest mismatch: verify=%d class=%s "
+               "signer=%d proot=%d rroot=%d rid=%d test_ran=%d exit=%u "
+               "isolation=%u detail=%s\n",
+               vcs_package_attest_verify(att),
+               vcs_package_attest_result_string(att->result_class),
+               memcmp(att->verifier_pubkey, vk.vch, 33) == 0,
+               memcmp(att->package_root, package_root, 32) == 0,
+               memcmp(att->recipe_root, recipe_root, 32) == 0,
+               memcmp(att->release_id, release_id, 32) == 0,
+               att->test_ran, att->test_exit_code, att->isolation,
+               att->detail);
+}
+
+static int ze_attest_check(const char *store,
+                           const uint8_t package_root[32],
+                           const uint8_t recipe_root[32],
+                           const uint8_t release_id[32])
+{
+    int failures = 0;
+    struct vcs_package_attest att;
+    bool have_att = zv_read_only_attestation(store, &att);
+    if (have_att) {
+        ze_attest_diag(&att, package_root, recipe_root, release_id);
+        struct pubkey vk;
+        struct privkey vsk;
+        zv_keypair(0x22, &vsk, &vk);
+        ZV_CHECK("e2e: attestation verifies, test-pass, signer, roots",
+                 vcs_package_attest_verify(&att) == VCS_PACKAGE_ATTEST_OK &&
+                 att.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
+                 memcmp(att.verifier_pubkey, vk.vch, 33) == 0 &&
+                 memcmp(att.package_root, package_root, 32) == 0 &&
+                 memcmp(att.recipe_root, recipe_root, 32) == 0 &&
+                 memcmp(att.release_id, release_id, 32) == 0 &&
+                 att.test_ran && att.test_exit_code == 0 &&
+                 (att.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL ||
+                  att.isolation == VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED));
+    } else {
+        ZV_CHECK("e2e: attestation verifies, test-pass, signer, roots",
+                 false);
+    }
+    return failures;
+}
+
+static int ze_pass(const char *base, const uint8_t package_root[32],
+                   const uint8_t recipe_root[32],
+                   const uint8_t release_id[32], const char *root_hex,
+                   const char *store)
+{
+    int failures = 0;
+    /* ── pass fixture: a tiny real C package builds and tests green ── */
+    char key_path[4400];
+    snprintf(key_path, sizeof(key_path), "%s/verifier.key", base);
+    ZV_CHECK("e2e: key file writes (0600)",
+             zv_write_key_file(key_path, 0x22, 0600));
+    char work[4400];
+    snprintf(work, sizeof(work), "%s/work", base);
+    ZV_CHECK("e2e: work dir", zv_mkdir_p(work));
+
+    char out[2048];
+    int rc = zv_run_verifier(root_hex, store, key_path, work, out,
+                             sizeof(out));
+    struct vcs_package_attest att;
+    bool have_att = zv_read_only_attestation(store, &att);
+    ZV_CHECK("e2e: verifier exits 0 and writes one attestation",
+             rc == 0 && have_att);
+    if (rc != 0)
+        printf("  zcode_verify: e2e verifier rc=%d out=%s\n", rc, out);
+    failures += ze_attest_check(store, package_root, recipe_root,
+                                release_id);
+    ZV_CHECK("e2e: produced binaries deleted (work tree empty)",
+             zv_dir_is_empty(work));
+
+    /* A world-readable key file is refused (exit 3, nothing signed). */
+    {
+        char store2[4400];
+        snprintf(store2, sizeof(store2), "%s/store_keymode", base);
+        uint8_t pr2[32], ri2[32], rr2[32];
+        zv_publish_fixture(store2,
+                           "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n",
+                           "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n",
+                           pr2, ri2, rr2);
+        char bad_key[4400];
+        snprintf(bad_key, sizeof(bad_key), "%s/bad.key", base);
+        zv_write_key_file(bad_key, 0x22, 0644);
+        char pr2_hex[65];
+        zv_hex_enc(pr2, 32, pr2_hex);
+        int krc = zv_run_verifier(pr2_hex, store2, bad_key, work, out,
+                                  sizeof(out));
+        ZV_CHECK("e2e: world-readable key refused, no attestation",
+                 krc == 3 && !zv_read_only_attestation(store2, &att));
+    }
+    return failures;
+}
+
+static int ze_buildfail(const char *base, const char *key_path,
+                        const char *work)
+{
+    int failures = 0;
+    char out[2048];
+    /* ── hostile: a syntax-error source builds a build-fail attestation ─ */
+    char store3[4400];
+    snprintf(store3, sizeof(store3), "%s/store_buildfail", base);
+    uint8_t pr3[32], ri3[32], rr3[32];
+    bool f3 = zv_publish_fixture(
+        store3,
+        "#include \"add.h\"\nint add(int a, int b) { return a + ; }\n",
+        "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n",
+        pr3, ri3, rr3);
+    char pr3_hex[65];
+    zv_hex_enc(pr3, 32, pr3_hex);
+    int brc = zv_run_verifier(pr3_hex, store3, key_path, work, out,
+                              sizeof(out));
+    struct vcs_package_attest batt;
+    bool have_batt = zv_read_only_attestation(store3, &batt);
+    ZV_CHECK("e2e: syntax-error source fails closed (build-fail)",
+             f3 && brc == 0 && have_batt &&
+             batt.result_class == VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL &&
+             (batt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_COMPILE_ERROR ||
+              batt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_LINK_ERROR) &&
+             vcs_package_attest_verify(&batt) == VCS_PACKAGE_ATTEST_OK);
+    ZV_CHECK("e2e: hostile work tree cleaned", zv_dir_is_empty(work));
+    return failures;
+}
+
+static int ze_socket(const char *base, const char *key_path,
+                     const char *work)
+{
+    int failures = 0;
+    char out[2048];
+    /* ── hostile: socket() in a test dies by seccomp (network denial) ── */
+    char store4[4400];
+    snprintf(store4, sizeof(store4), "%s/store_socket", base);
+    uint8_t pr4[32], ri4[32], rr4[32];
+    bool f4 = zv_publish_fixture(
+        store4,
+        "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n",
+        "#include <sys/socket.h>\n#include <netinet/in.h>\n"
+        "int main(void) {\n"
+        "    int s = socket(AF_INET, SOCK_STREAM, 0);\n"
+        "    return s >= 0 ? 0 : 1;\n"
+        "}\n",
+        pr4, ri4, rr4);
+    char pr4_hex[65];
+    zv_hex_enc(pr4, 32, pr4_hex);
+    int src = zv_run_verifier(pr4_hex, store4, key_path, work, out,
+                              sizeof(out));
+    struct vcs_package_attest satt;
+    bool have_satt = zv_read_only_attestation(store4, &satt);
+    bool socket_contract = f4 && src == 0 && have_satt &&
+        vcs_package_attest_verify(&satt) == VCS_PACKAGE_ATTEST_OK;
+#if defined(__APPLE__)
+    /* Seatbelt denies socket creation.  The test treats that denial as
+     * success, while the receipt records the qualified full-isolation
+     * backend without borrowing Linux's seccomp signal claim. */
+    socket_contract = socket_contract &&
+        satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL &&
+        satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
+        satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_NONE;
+    ZV_CHECK("e2e: socket() test records full Seatbelt isolation",
+             socket_contract);
+#else
+    socket_contract = socket_contract &&
+        satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL &&
+        satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL &&
+        satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_TEST_SIGNAL;
+    ZV_CHECK("e2e: socket() test killed by sandbox (test-fail/signal)",
+             socket_contract);
+#endif
+    if (!socket_contract)
+        printf("  zcode_verify: socket e2e f4=%d src=%d have=%d "
+               "class=%s detail=%s text=%s out=%s\n", f4, src, have_satt,
+               vcs_package_attest_result_string(satt.result_class),
+               vcs_package_attest_detail_string(satt.detail_code),
+               satt.detail, out);
+    return failures;
+}
+
+static int ze_reproduce(const char *base, const char *root_hex,
+                        const char *store, const char *work)
+{
+    int failures = 0;
+    char out[2048];
+    /* ── reproduction: --reproduce-against proves byte-identity ────── */
+    uint8_t lock_root[32];
+    zv_pattern_root(0x66, lock_root);
+    char lock_hex[65];
+    zv_hex_enc(lock_root, 32, lock_hex);
+    char emit1[4400], emit2[4400], emit3[4400];
+    snprintf(emit1, sizeof(emit1), "%s/emit1", base);
+    snprintf(emit2, sizeof(emit2), "%s/emit2", base);
+    snprintf(emit3, sizeof(emit3), "%s/emit3", base);
+
+    int e1 = zv_run_emit(root_hex, store, emit1, lock_hex, NULL, work,
+                         out, sizeof(out));
+    char report1[4400];
+    snprintf(report1, sizeof(report1), "%s/build-report", emit1);
+    struct stat rst;
+    ZV_CHECK("e2e: emit build exits 0 and writes a build-report",
+             e1 == 0 && stat(report1, &rst) == 0);
+    if (e1 != 0)
+        printf("  zcode_verify: e2e emit rc=%d out=%s\n", e1, out);
+
+    /* The third-party acceptance check: a second, independent build
+     * of the same package reproduces the first byte-for-byte. */
+    int e2 = zv_run_emit(root_hex, store, emit2, lock_hex, report1,
+                         work, out, sizeof(out));
+    ZV_CHECK("e2e: second build reproduces the first (MATCH)",
+             e2 == 0 && strstr(out, "reproduction=MATCH") != NULL);
+    if (e2 != 0)
+        printf("  zcode_verify: e2e reproduce rc=%d out=%s\n", e2, out);
+
+    /* A tampered reference is rejected loudly: exit 6, and no MATCH
+     * line is printed (the MISMATCH rule + detail go to stderr). */
+    uint8_t rwire[VCS_PACKAGE_BUILD_MAX_WIRE_BYTES];
+    size_t rwire_len = 0;
+    struct vcs_package_build_receipt trec;
+    bool tread = zv_read_file(report1, rwire, sizeof(rwire),
+                              &rwire_len) &&
+                 vcs_package_build_parse(rwire, rwire_len, &trec) ==
+                     VCS_PACKAGE_BUILD_OK &&
+                 trec.output_count > 0;
+    uint8_t *twire = NULL;
+    size_t twire_len = 0;
+    bool tser = false;
+    if (tread) {
+        trec.outputs[0].sha3[0] ^= 0xff;
+        tser = vcs_package_build_serialize(&trec, &twire, &twire_len) ==
+               VCS_PACKAGE_BUILD_OK;
+    }
+    char tampered[4400];
+    snprintf(tampered, sizeof(tampered), "%s/tampered-report", base);
+    bool twrote = tser &&
+                  zv_write_file(tampered, twire, twire_len, 0600);
+    free(twire);
+    ZV_CHECK("e2e: tampered reference builds", twrote);
+    int e3 = zv_run_emit(root_hex, store, emit3, lock_hex, tampered,
+                         work, out, sizeof(out));
+    ZV_CHECK("e2e: tampered reference rejected loudly (exit 6)",
+             e3 == 6 && strstr(out, "reproduction=MATCH") == NULL);
+    if (e3 != 6)
+        printf("  zcode_verify: e2e reproduce-mismatch rc=%d out=%s\n",
+               e3, out);
+    return failures;
+}
+
 static int t_verifier_e2e(void)
 {
     int failures = 0;
@@ -3587,219 +4371,20 @@ static int t_verifier_e2e(void)
         "}\n",
         package_root, release_id, recipe_root);
     ZV_CHECK("e2e: pass fixture publishes", fixture);
-    char key_path[4400];
-    snprintf(key_path, sizeof(key_path), "%s/verifier.key", base);
-    ZV_CHECK("e2e: key file writes (0600)",
-             zv_write_key_file(key_path, 0x22, 0600));
-    char work[4400];
-    snprintf(work, sizeof(work), "%s/work", base);
-    ZV_CHECK("e2e: work dir", zv_mkdir_p(work));
-
+    if (!fixture)
+        return failures + 1;
     char root_hex[65];
     zv_hex_enc(package_root, 32, root_hex);
-    char out[2048];
-    int rc = zv_run_verifier(root_hex, store, key_path, work, out,
-                             sizeof(out));
-    struct vcs_package_attest att;
-    bool have_att = zv_read_only_attestation(store, &att);
-    ZV_CHECK("e2e: verifier exits 0 and writes one attestation",
-             rc == 0 && have_att);
-    if (rc != 0)
-        printf("  zcode_verify: e2e verifier rc=%d out=%s\n", rc, out);
-    if (have_att) {
-        struct pubkey vk;
-        struct privkey vsk;
-        zv_keypair(0x22, &vsk, &vk);
-        if (vcs_package_attest_verify(&att) != VCS_PACKAGE_ATTEST_OK ||
-            att.result_class != VCS_PACKAGE_ATTEST_RESULT_TEST_PASS ||
-            memcmp(att.verifier_pubkey, vk.vch, 33) != 0 ||
-            memcmp(att.package_root, package_root, 32) != 0 ||
-            memcmp(att.recipe_root, recipe_root, 32) != 0 ||
-            memcmp(att.release_id, release_id, 32) != 0 ||
-            !att.test_ran || att.test_exit_code != 0)
-            printf("  zcode_verify: e2e attest mismatch: verify=%d class=%s "
-                   "signer=%d proot=%d rroot=%d rid=%d test_ran=%d exit=%u "
-                   "isolation=%u detail=%s\n",
-                   vcs_package_attest_verify(&att),
-                   vcs_package_attest_result_string(att.result_class),
-                   memcmp(att.verifier_pubkey, vk.vch, 33) == 0,
-                   memcmp(att.package_root, package_root, 32) == 0,
-                   memcmp(att.recipe_root, recipe_root, 32) == 0,
-                   memcmp(att.release_id, release_id, 32) == 0,
-                   att.test_ran, att.test_exit_code, att.isolation,
-                   att.detail);
-        ZV_CHECK("e2e: attestation verifies, test-pass, signer, roots",
-                 vcs_package_attest_verify(&att) == VCS_PACKAGE_ATTEST_OK &&
-                 att.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
-                 memcmp(att.verifier_pubkey, vk.vch, 33) == 0 &&
-                 memcmp(att.package_root, package_root, 32) == 0 &&
-                 memcmp(att.recipe_root, recipe_root, 32) == 0 &&
-                 memcmp(att.release_id, release_id, 32) == 0 &&
-                 att.test_ran && att.test_exit_code == 0 &&
-                 (att.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL ||
-                  att.isolation == VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED));
-    } else {
-        ZV_CHECK("e2e: attestation verifies, test-pass, signer, roots",
-                 false);
-    }
-    ZV_CHECK("e2e: produced binaries deleted (work tree empty)",
-             zv_dir_is_empty(work));
 
-    /* A world-readable key file is refused (exit 3, nothing signed). */
-    {
-        char store2[4400];
-        snprintf(store2, sizeof(store2), "%s/store_keymode", base);
-        uint8_t pr2[32], ri2[32], rr2[32];
-        zv_publish_fixture(store2,
-                           "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n",
-                           "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n",
-                           pr2, ri2, rr2);
-        char bad_key[4400];
-        snprintf(bad_key, sizeof(bad_key), "%s/bad.key", base);
-        zv_write_key_file(bad_key, 0x22, 0644);
-        char pr2_hex[65];
-        zv_hex_enc(pr2, 32, pr2_hex);
-        int krc = zv_run_verifier(pr2_hex, store2, bad_key, work, out,
-                                  sizeof(out));
-        ZV_CHECK("e2e: world-readable key refused, no attestation",
-                 krc == 3 && !zv_read_only_attestation(store2, &att));
-    }
-
-    /* ── hostile: a syntax-error source builds a build-fail attestation ─ */
-    {
-        char store3[4400];
-        snprintf(store3, sizeof(store3), "%s/store_buildfail", base);
-        uint8_t pr3[32], ri3[32], rr3[32];
-        bool f3 = zv_publish_fixture(
-            store3,
-            "#include \"add.h\"\nint add(int a, int b) { return a + ; }\n",
-            "#include \"add.h\"\nint main(void) { return add(2, 3) == 5 ? 0 : 1; }\n",
-            pr3, ri3, rr3);
-        char pr3_hex[65];
-        zv_hex_enc(pr3, 32, pr3_hex);
-        int brc = zv_run_verifier(pr3_hex, store3, key_path, work, out,
-                                  sizeof(out));
-        struct vcs_package_attest batt;
-        bool have_batt = zv_read_only_attestation(store3, &batt);
-        ZV_CHECK("e2e: syntax-error source fails closed (build-fail)",
-                 f3 && brc == 0 && have_batt &&
-                 batt.result_class == VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL &&
-                 (batt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_COMPILE_ERROR ||
-                  batt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_LINK_ERROR) &&
-                 vcs_package_attest_verify(&batt) == VCS_PACKAGE_ATTEST_OK);
-        ZV_CHECK("e2e: hostile work tree cleaned", zv_dir_is_empty(work));
-    }
-
-    /* ── hostile: socket() in a test dies by seccomp (network denial) ── */
-    {
-        char store4[4400];
-        snprintf(store4, sizeof(store4), "%s/store_socket", base);
-        uint8_t pr4[32], ri4[32], rr4[32];
-        bool f4 = zv_publish_fixture(
-            store4,
-            "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n",
-            "#include <sys/socket.h>\n#include <netinet/in.h>\n"
-            "int main(void) {\n"
-            "    int s = socket(AF_INET, SOCK_STREAM, 0);\n"
-            "    return s >= 0 ? 0 : 1;\n"
-            "}\n",
-            pr4, ri4, rr4);
-        char pr4_hex[65];
-        zv_hex_enc(pr4, 32, pr4_hex);
-        int src = zv_run_verifier(pr4_hex, store4, key_path, work, out,
-                                  sizeof(out));
-        struct vcs_package_attest satt;
-        bool have_satt = zv_read_only_attestation(store4, &satt);
-        bool socket_contract = f4 && src == 0 && have_satt &&
-            vcs_package_attest_verify(&satt) == VCS_PACKAGE_ATTEST_OK;
-#if defined(__APPLE__)
-        /* Seatbelt denies socket creation.  The test treats that denial as
-         * success, while the receipt records the qualified full-isolation
-         * backend without borrowing Linux's seccomp signal claim. */
-        socket_contract = socket_contract &&
-            satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL &&
-            satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
-            satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_NONE;
-        ZV_CHECK("e2e: socket() test records full Seatbelt isolation",
-                 socket_contract);
-#else
-        socket_contract = socket_contract &&
-            satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL &&
-            satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL &&
-            satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_TEST_SIGNAL;
-        ZV_CHECK("e2e: socket() test killed by sandbox (test-fail/signal)",
-                 socket_contract);
-#endif
-        if (!socket_contract)
-            printf("  zcode_verify: socket e2e f4=%d src=%d have=%d "
-                   "class=%s detail=%s text=%s out=%s\n", f4, src, have_satt,
-                   vcs_package_attest_result_string(satt.result_class),
-                   vcs_package_attest_detail_string(satt.detail_code),
-                   satt.detail, out);
-    }
-
-    /* ── reproduction: --reproduce-against proves byte-identity ────── */
-    {
-        uint8_t lock_root[32];
-        zv_pattern_root(0x66, lock_root);
-        char lock_hex[65];
-        zv_hex_enc(lock_root, 32, lock_hex);
-        char emit1[4400], emit2[4400], emit3[4400];
-        snprintf(emit1, sizeof(emit1), "%s/emit1", base);
-        snprintf(emit2, sizeof(emit2), "%s/emit2", base);
-        snprintf(emit3, sizeof(emit3), "%s/emit3", base);
-
-        int e1 = zv_run_emit(root_hex, store, emit1, lock_hex, NULL, work,
-                             out, sizeof(out));
-        char report1[4400];
-        snprintf(report1, sizeof(report1), "%s/build-report", emit1);
-        struct stat rst;
-        ZV_CHECK("e2e: emit build exits 0 and writes a build-report",
-                 e1 == 0 && stat(report1, &rst) == 0);
-        if (e1 != 0)
-            printf("  zcode_verify: e2e emit rc=%d out=%s\n", e1, out);
-
-        /* The third-party acceptance check: a second, independent build
-         * of the same package reproduces the first byte-for-byte. */
-        int e2 = zv_run_emit(root_hex, store, emit2, lock_hex, report1,
-                             work, out, sizeof(out));
-        ZV_CHECK("e2e: second build reproduces the first (MATCH)",
-                 e2 == 0 && strstr(out, "reproduction=MATCH") != NULL);
-        if (e2 != 0)
-            printf("  zcode_verify: e2e reproduce rc=%d out=%s\n", e2, out);
-
-        /* A tampered reference is rejected loudly: exit 6, and no MATCH
-         * line is printed (the MISMATCH rule + detail go to stderr). */
-        uint8_t rwire[VCS_PACKAGE_BUILD_MAX_WIRE_BYTES];
-        size_t rwire_len = 0;
-        struct vcs_package_build_receipt trec;
-        bool tread = zv_read_file(report1, rwire, sizeof(rwire),
-                                  &rwire_len) &&
-                     vcs_package_build_parse(rwire, rwire_len, &trec) ==
-                         VCS_PACKAGE_BUILD_OK &&
-                     trec.output_count > 0;
-        uint8_t *twire = NULL;
-        size_t twire_len = 0;
-        bool tser = false;
-        if (tread) {
-            trec.outputs[0].sha3[0] ^= 0xff;
-            tser = vcs_package_build_serialize(&trec, &twire, &twire_len) ==
-                   VCS_PACKAGE_BUILD_OK;
-        }
-        char tampered[4400];
-        snprintf(tampered, sizeof(tampered), "%s/tampered-report", base);
-        bool twrote = tser &&
-                      zv_write_file(tampered, twire, twire_len, 0600);
-        free(twire);
-        ZV_CHECK("e2e: tampered reference builds", twrote);
-        int e3 = zv_run_emit(root_hex, store, emit3, lock_hex, tampered,
-                             work, out, sizeof(out));
-        ZV_CHECK("e2e: tampered reference rejected loudly (exit 6)",
-                 e3 == 6 && strstr(out, "reproduction=MATCH") == NULL);
-        if (e3 != 6)
-            printf("  zcode_verify: e2e reproduce-mismatch rc=%d out=%s\n",
-                   e3, out);
-    }
+    failures += ze_pass(base, package_root, recipe_root, release_id,
+                        root_hex, store);
+    char key_path[4400];
+    snprintf(key_path, sizeof(key_path), "%s/verifier.key", base);
+    char work[4400];
+    snprintf(work, sizeof(work), "%s/work", base);
+    failures += ze_buildfail(base, key_path, work);
+    failures += ze_socket(base, key_path, work);
+    failures += ze_reproduce(base, root_hex, store, work);
 
     zv_rm_rf(base);
     return failures;
@@ -3851,6 +4436,152 @@ static const struct vcs_package_build_output *zv_output_named(
         if (strcmp(r->outputs[i].path, want) == 0)
             return &r->outputs[i];
     return NULL;
+}
+
+static int zpr_emit_one(const char *root_hex, const char *store,
+                        const char *emit1, const char *lock_hex,
+                        const char *work1, char *out, size_t out_sz,
+                        struct vcs_package_build_receipt *rec1)
+{
+    int failures = 0;
+    /* Two emits from two DIFFERENT work roots. The work root is the only
+     * input that differs, so an absolute build path that reached the
+     * executable's bytes shows up below as a hash divergence. */
+    int e1 = zv_run_emit(root_hex, store, emit1, lock_hex, NULL, work1, out,
+                         out_sz);
+    if (e1 != 0)
+        printf("  zcode_verify: programs emit rc=%d out=%s\n", e1, out);
+    bool read1 = e1 == 0 && zv_read_receipt(emit1, rec1);
+    const struct vcs_package_build_output *prog_out =
+        read1 ? zv_output_named(rec1, "bin/addpkg") : NULL;
+    ZV_CHECK("programs: the receipt commits bin/<package short name>",
+             read1 && prog_out != NULL &&
+                 rec1->result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
+                 vcs_package_build_installable(rec1));
+    ZV_CHECK("programs: the archive and the public header still emit",
+             read1 && zv_output_named(rec1, "lib/libaddpkg.a") != NULL &&
+                 zv_output_named(rec1, "include/add.h") != NULL);
+    return failures;
+}
+
+static int zpr_exec(const char *emit1,
+                    const struct vcs_package_build_receipt *rec1)
+{
+    int failures = 0;
+    char prog_path[4500];
+    snprintf(prog_path, sizeof(prog_path), "%s/bin/addpkg", emit1);
+    struct stat pst;
+    bool emitted_exec = stat(prog_path, &pst) == 0 && S_ISREG(pst.st_mode) &&
+                        (pst.st_mode & 0111) != 0;
+    ZV_CHECK("programs: the emitted program is a regular executable file",
+             emitted_exec);
+    const struct vcs_package_build_output *prog_out =
+        zv_output_named(rec1, "bin/addpkg");
+    uint8_t emitted_hash[32];
+    uint64_t emitted_bytes = 0;
+    bool hashed = emitted_exec &&
+                  zv_sha3_file(prog_path, emitted_hash, &emitted_bytes);
+    ZV_CHECK("programs: the emitted bytes are exactly what the receipt says",
+             hashed && prog_out && emitted_bytes == prog_out->bytes &&
+                 memcmp(emitted_hash, prog_out->sha3, 32) == 0);
+
+    /* Run it. The verifier never executes a program — this is the test
+     * doing what the person who installed the package would do. */
+    char ran[512];
+    ran[0] = '\0';
+    const char *run_argv[] = { prog_path, NULL };
+    int prc = emitted_exec
+        ? zcl_spawn_capture(run_argv, ran, sizeof(ran), 30000)
+        : -1;
+    ZV_CHECK("programs: running it prints the linked library's answer",
+             prc == 0 && strstr(ran, "addpkg sum=42") != NULL);
+    if (prc != 0)
+        printf("  zcode_verify: programs run rc=%d out=%s\n", prc, ran);
+    return failures;
+}
+
+static int zpr_second_emit(const char *root_hex, const char *store,
+                           const char *emit2, const char *lock_hex,
+                           const char *work2, char *out, size_t out_sz,
+                           const struct vcs_package_build_receipt *rec1)
+{
+    int failures = 0;
+    int e2 = zv_run_emit(root_hex, store, emit2, lock_hex, NULL, work2, out,
+                         out_sz);
+    struct vcs_package_build_receipt rec2;
+    bool read2 = e2 == 0 && zv_read_receipt(emit2, &rec2);
+    const struct vcs_package_build_output *prog_out =
+        zv_output_named(rec1, "bin/addpkg");
+    const struct vcs_package_build_output *prog_out2 =
+        read2 ? zv_output_named(&rec2, "bin/addpkg") : NULL;
+    ZV_CHECK("programs: two work roots produce byte-identical program bytes",
+             prog_out && prog_out2 && prog_out2->bytes == prog_out->bytes &&
+                 memcmp(prog_out2->sha3, prog_out->sha3, 32) == 0);
+    if (e2 != 0)
+        printf("  zcode_verify: programs second emit rc=%d out=%s\n", e2,
+               out);
+    return failures;
+}
+
+static int zpr_reproduce(const char *root_hex, const char *store,
+                         const char *emit1, const char *emit3,
+                         const char *lock_hex, const char *work2, char *out,
+                         size_t out_sz)
+{
+    int failures = 0;
+    /* And the whole receipt still reproduces — the acceptance signal the
+     * install lifecycle's reproduce track depends on. */
+    char report1[4500];
+    snprintf(report1, sizeof(report1), "%s/build-report", emit1);
+    int e3 = zv_run_emit(root_hex, store, emit3, lock_hex, report1, work2,
+                         out, out_sz);
+    ZV_CHECK("programs: a build carrying a program still reproduces (MATCH)",
+             e3 == 0 && strstr(out, "reproduction=MATCH") != NULL);
+    if (e3 != 0)
+        printf("  zcode_verify: programs reproduce rc=%d out=%s\n", e3, out);
+    return failures;
+}
+
+static int zpr_progfail(const char *base, const char *lock_hex,
+                        const char *work1, char *out, size_t out_sz)
+{
+    int failures = 0;
+    struct stat pst;
+    static const char k_src[] =
+        "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n";
+    static const char k_test[] =
+        "#include \"add.h\"\n"
+        "int main(void) { return add(2, 3) == 5 ? 0 : 1; }\n";
+    /* A broken program is a BUILD FAILURE, never a quietly missing output:
+     * an application that does not compile must not be installable. */
+    char store_bad[4400];
+    char emit_bad[4400];
+    snprintf(store_bad, sizeof(store_bad), "%s/store_progfail", base);
+    snprintf(emit_bad, sizeof(emit_bad), "%s/emit_progfail", base);
+    uint8_t br[32], bi[32], brr[32];
+    bool bf = zv_publish_fixture_ex(
+        store_bad, k_src, k_test,
+        "#include \"add.h\"\nint main(void) { return add(1, ; }\n",
+        br, bi, brr);
+    char br_hex[65];
+    zv_hex_enc(br, 32, br_hex);
+    int erc = zv_run_emit(br_hex, store_bad, emit_bad, lock_hex, NULL,
+                          work1, out, out_sz);
+    struct vcs_package_build_receipt bad;
+    bool bad_read = erc == 0 && zv_read_receipt(emit_bad, &bad);
+    char bad_prog[4500];
+    snprintf(bad_prog, sizeof(bad_prog), "%s/bin/addpkg", emit_bad);
+    ZV_CHECK("programs: a program that fails to compile fails the build",
+             bf && bad_read &&
+                 bad.result_class ==
+                     VCS_PACKAGE_BUILD_RESULT_BUILD_FAIL &&
+                 !vcs_package_build_installable(&bad) &&
+                 bad.output_count == 0 &&
+                 stat(bad_prog, &pst) != 0);
+    if (!bad_read)
+        printf("  zcode_verify: programs build-fail rc=%d out=%s\n", erc,
+               out);
+    return failures;
 }
 
 /* A package that declares `app/main.c` is not only a library. The verifier
@@ -3909,118 +4640,25 @@ static int t_verifier_programs(void)
     char lock_hex[65];
     zv_hex_enc(lock_root, 32, lock_hex);
 
-    /* Two emits from two DIFFERENT work roots. The work root is the only
-     * input that differs, so an absolute build path that reached the
-     * executable's bytes shows up below as a hash divergence. */
-    char work1[4400], work2[4400], emit1[4400], emit2[4400];
+    char work1[4400], work2[4400], emit1[4400], emit2[4400], emit3[4400];
     snprintf(work1, sizeof(work1), "%s/work-a", base);
     snprintf(work2, sizeof(work2), "%s/work-bbbbbbbbbbbbbbbbbbbb", base);
     snprintf(emit1, sizeof(emit1), "%s/emit1", base);
     snprintf(emit2, sizeof(emit2), "%s/emit2", base);
+    snprintf(emit3, sizeof(emit3), "%s/emit3", base);
     ZV_CHECK("programs: work dirs", zv_mkdir_p(work1) && zv_mkdir_p(work2));
 
     char out[2048];
-    int e1 = zv_run_emit(root_hex, store, emit1, lock_hex, NULL, work1, out,
-                         sizeof(out));
-    if (e1 != 0)
-        printf("  zcode_verify: programs emit rc=%d out=%s\n", e1, out);
     struct vcs_package_build_receipt rec1;
-    bool read1 = e1 == 0 && zv_read_receipt(emit1, &rec1);
-    const struct vcs_package_build_output *prog_out =
-        read1 ? zv_output_named(&rec1, "bin/addpkg") : NULL;
-    ZV_CHECK("programs: the receipt commits bin/<package short name>",
-             read1 && prog_out != NULL &&
-                 rec1.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
-                 vcs_package_build_installable(&rec1));
-    ZV_CHECK("programs: the archive and the public header still emit",
-             read1 && zv_output_named(&rec1, "lib/libaddpkg.a") != NULL &&
-                 zv_output_named(&rec1, "include/add.h") != NULL);
-
-    char prog_path[4500];
-    snprintf(prog_path, sizeof(prog_path), "%s/bin/addpkg", emit1);
-    struct stat pst;
-    bool emitted_exec = stat(prog_path, &pst) == 0 && S_ISREG(pst.st_mode) &&
-                        (pst.st_mode & 0111) != 0;
-    ZV_CHECK("programs: the emitted program is a regular executable file",
-             emitted_exec);
-    uint8_t emitted_hash[32];
-    uint64_t emitted_bytes = 0;
-    bool hashed = emitted_exec &&
-                  zv_sha3_file(prog_path, emitted_hash, &emitted_bytes);
-    ZV_CHECK("programs: the emitted bytes are exactly what the receipt says",
-             hashed && prog_out && emitted_bytes == prog_out->bytes &&
-                 memcmp(emitted_hash, prog_out->sha3, 32) == 0);
-
-    /* Run it. The verifier never executes a program — this is the test
-     * doing what the person who installed the package would do. */
-    char ran[512];
-    ran[0] = '\0';
-    const char *run_argv[] = { prog_path, NULL };
-    int prc = emitted_exec
-        ? zcl_spawn_capture(run_argv, ran, sizeof(ran), 30000)
-        : -1;
-    ZV_CHECK("programs: running it prints the linked library's answer",
-             prc == 0 && strstr(ran, "addpkg sum=42") != NULL);
-    if (prc != 0)
-        printf("  zcode_verify: programs run rc=%d out=%s\n", prc, ran);
-
-    int e2 = zv_run_emit(root_hex, store, emit2, lock_hex, NULL, work2, out,
-                         sizeof(out));
-    struct vcs_package_build_receipt rec2;
-    bool read2 = e2 == 0 && zv_read_receipt(emit2, &rec2);
-    const struct vcs_package_build_output *prog_out2 =
-        read2 ? zv_output_named(&rec2, "bin/addpkg") : NULL;
-    ZV_CHECK("programs: two work roots produce byte-identical program bytes",
-             prog_out && prog_out2 && prog_out2->bytes == prog_out->bytes &&
-                 memcmp(prog_out2->sha3, prog_out->sha3, 32) == 0);
-    if (e2 != 0)
-        printf("  zcode_verify: programs second emit rc=%d out=%s\n", e2,
-               out);
-
-    /* And the whole receipt still reproduces — the acceptance signal the
-     * install lifecycle's reproduce track depends on. */
-    char report1[4500];
-    snprintf(report1, sizeof(report1), "%s/build-report", emit1);
-    char emit3[4400];
-    snprintf(emit3, sizeof(emit3), "%s/emit3", base);
-    int e3 = zv_run_emit(root_hex, store, emit3, lock_hex, report1, work2,
-                         out, sizeof(out));
-    ZV_CHECK("programs: a build carrying a program still reproduces (MATCH)",
-             e3 == 0 && strstr(out, "reproduction=MATCH") != NULL);
-    if (e3 != 0)
-        printf("  zcode_verify: programs reproduce rc=%d out=%s\n", e3, out);
-
-    /* A broken program is a BUILD FAILURE, never a quietly missing output:
-     * an application that does not compile must not be installable. */
-    {
-        char store_bad[4400];
-        char emit_bad[4400];
-        snprintf(store_bad, sizeof(store_bad), "%s/store_progfail", base);
-        snprintf(emit_bad, sizeof(emit_bad), "%s/emit_progfail", base);
-        uint8_t br[32], bi[32], brr[32];
-        bool bf = zv_publish_fixture_ex(
-            store_bad, k_src, k_test,
-            "#include \"add.h\"\nint main(void) { return add(1, ; }\n",
-            br, bi, brr);
-        char br_hex[65];
-        zv_hex_enc(br, 32, br_hex);
-        int erc = zv_run_emit(br_hex, store_bad, emit_bad, lock_hex, NULL,
-                              work1, out, sizeof(out));
-        struct vcs_package_build_receipt bad;
-        bool bad_read = erc == 0 && zv_read_receipt(emit_bad, &bad);
-        char bad_prog[4500];
-        snprintf(bad_prog, sizeof(bad_prog), "%s/bin/addpkg", emit_bad);
-        ZV_CHECK("programs: a program that fails to compile fails the build",
-                 bf && bad_read &&
-                     bad.result_class ==
-                         VCS_PACKAGE_BUILD_RESULT_BUILD_FAIL &&
-                     !vcs_package_build_installable(&bad) &&
-                     bad.output_count == 0 &&
-                     stat(bad_prog, &pst) != 0);
-        if (!bad_read)
-            printf("  zcode_verify: programs build-fail rc=%d out=%s\n", erc,
-                   out);
-    }
+    memset(&rec1, 0, sizeof(rec1));
+    failures += zpr_emit_one(root_hex, store, emit1, lock_hex, work1, out,
+                             sizeof(out), &rec1);
+    failures += zpr_exec(emit1, &rec1);
+    failures += zpr_second_emit(root_hex, store, emit2, lock_hex, work2, out,
+                                sizeof(out), &rec1);
+    failures += zpr_reproduce(root_hex, store, emit1, emit3, lock_hex, work2,
+                              out, sizeof(out));
+    failures += zpr_progfail(base, lock_hex, work1, out, sizeof(out));
 
     zv_rm_rf(base);
     return failures;
