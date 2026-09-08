@@ -264,11 +264,20 @@ bool rom_fetch_orphan_sweep_run(const char *datadir, uint32_t horizon_sec,
     if (!ros_bundles_dir(datadir, dirpath, sizeof(dirpath)))
         return false;
 
+    /* A datadir that has never downloaded anything has no bundles/ at all.
+     * That is a completed pass with nothing to do, not a failure. */
+    struct stat sd;
+    if (stat(dirpath, &sd) != 0 || !S_ISDIR(sd.st_mode))
+        return true;
+
     struct ros_pair pairs[ROM_FETCH_ORPHAN_SWEEP_MAX_PAIRS];
     memset(pairs, 0, sizeof(pairs));
     int n = ros_collect_pairs(dirpath, pairs, &r->capped);
-    if (n < 0)
-        return false; /* no bundles/ directory yet — nothing to sweep */
+    if (n < 0) {
+        LOG_WARN(ROS_SUBSYS, "skipping the sweep: '%s' could not be read "
+                 "(errno=%d)", dirpath, errno);
+        return false;
+    }
     if (n == 0)
         return true;
 
