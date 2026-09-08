@@ -7,6 +7,8 @@
 #include "mvp_ledger.h"
 #include "mvp_ledger_internal.h"
 
+#include "base/safe_alloc.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -239,7 +241,7 @@ static bool mvl_load_ancestry(const struct mvl_opts *o,
     *anc = NULL;
     if (!o->ancestry)
         return true;
-    *anc = calloc(MVL_MAX_ANCESTRY, MVL_ID_CAP);
+    *anc = zcl_calloc(MVL_MAX_ANCESTRY, MVL_ID_CAP, "mvl_ancestry");
     if (!*anc) {
         (void)snprintf(err, err_cap, "%s:0: mvl_overflow: no ancestry table",
                        o->ancestry);
@@ -265,7 +267,7 @@ static int mvl_mode_loops(const struct mvl_opts *o)
     ok = mvl_load(o, &plan, &agents, err, sizeof err);
     if (ok)
         ok = mvl_load_ancestry(o, &anc, &anc_count, err, sizeof err);
-    joins = ok ? calloc(MVL_MAX_LOOPS, sizeof *joins) : NULL;
+    joins = ok ? zcl_calloc(MVL_MAX_LOOPS, sizeof *joins, "mvl_joins") : NULL;
     if (ok && !joins) {
         (void)snprintf(err, sizeof err, "-:0: mvl_overflow: no join table");
         ok = false;
@@ -324,7 +326,7 @@ static bool mvl_load_verified(const struct mvl_opts *o,
     int64_t t0 = 0;
 
     *count = 0;
-    *lanes = calloc(MVL_MAX_TRAIN_LANES, MVL_LANE_CAP);
+    *lanes = zcl_calloc(MVL_MAX_TRAIN_LANES, MVL_LANE_CAP, "mvl_lanes");
     if (!*lanes) {
         (void)snprintf(err, err_cap, "-:0: mvl_overflow: no lane table");
         return false;
@@ -426,7 +428,7 @@ static int mvl_mode_progress(const struct mvl_opts *o)
     if (!mvl_plan_alloc(&plan))
         return 2;
     ok = mvl_parse_plan(o->plan, &plan, err, sizeof err);
-    render = ok ? calloc(1, MVL_RENDER_CAP) : NULL;
+    render = ok ? zcl_calloc(1, MVL_RENDER_CAP, "mvl_render") : NULL;
     if (ok && !render) {
         (void)snprintf(err, sizeof err, "-:0: mvl_overflow: no render buffer");
         ok = false;
