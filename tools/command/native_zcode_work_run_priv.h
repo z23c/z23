@@ -134,6 +134,7 @@ bool run_codex_runner_path(char out[ZWORK_RUN_PATH_MAX]);
 bool run_add_work_next(struct zcl_command_reply *reply,
                        const char *command, const char *workspace,
                        const char *work_id, const char *adapter,
+                       const char *proof_datadir,
                        const char *reason);
 bool run_candidate_workspace(const char *store,
                              const struct vcs_zcode_task_v1 *task,

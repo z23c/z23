@@ -4358,6 +4358,7 @@ static int zpd_test_admitted_single_interpretation(void)
         ASSERT(json_push_kv_str(&input, "workspace", root));
         ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
         ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        ASSERT(json_push_kv_str(&input, "datadir", datadir));
         struct zcl_command_request request = { .input = &input };
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.zcode_admitted_start_test.v1");
@@ -4366,16 +4367,22 @@ static int zpd_test_admitted_single_interpretation(void)
         char work_id[32];
         (void)snprintf(work_id, sizeof(work_id), "%s",
                        json_get_str(json_get(&reply.data, "work_id")));
+        ASSERT(zpd_next_datadir_is(&reply, "zcode.work.run", absolute_root,
+                                    work_id, absolute_datadir));
+        char continuation[sizeof(reply.next[0].input_json)];
+        (void)snprintf(continuation, sizeof(continuation), "%s",
+                       reply.next[0].input_json);
         zcl_command_reply_free(&reply); json_free(&input);
 
-        json_init(&input); json_set_object(&input);
-        ASSERT(json_push_kv_str(&input, "workspace", root));
-        ASSERT(json_push_kv_str(&input, "work", work_id));
+        json_init(&input);
+        ASSERT(json_read(&input, continuation, strlen(continuation)));
         ASSERT(json_push_kv_str(&input, "adapter", "manual"));
         request.input = &input;
         zcl_command_reply_init(&reply, "zcl.zcode_admitted_run_test.v1");
         zcl_native_handle_zcode_work_run(&request, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(zpd_next_datadir_is(&reply, "zcode.work.status", absolute_root,
+                                    work_id, absolute_datadir));
         char candidate[4400];
         (void)snprintf(candidate, sizeof(candidate), "%s",
                        json_get_str(json_get(&reply.data,
@@ -4407,6 +4414,10 @@ static int zpd_test_admitted_single_interpretation(void)
         ASSERT(strcmp(json_get_str(json_get(&reply.data,
                                             "async_proof_state")),
                       "REQUESTED") == 0);
+        ASSERT(zpd_next_datadir_is(&reply, "zcode.work.status", absolute_root,
+                                    work_id, absolute_datadir));
+        (void)snprintf(continuation, sizeof(continuation), "%s",
+                       reply.next[0].input_json);
         zcl_command_reply_free(&reply); json_free(&input);
 
         /* Regression: repeating run on the same admitted fact used to fail
@@ -4433,16 +4444,14 @@ static int zpd_test_admitted_single_interpretation(void)
         ASSERT(strcmp(json_get_str(json_get(&reply.data,
                                             "next_safe_command")),
                       "zcode work status") == 0);
-        ASSERT(zpd_next_is(&reply, "zcode.work.status", absolute_root,
-                           work_id, NULL));
+        ASSERT(zpd_next_datadir_is(&reply, "zcode.work.status", absolute_root,
+                                    work_id, absolute_datadir));
         zcl_command_reply_free(&reply); json_free(&input);
 
-        /* Status through the same datadir agrees: waiting, background build,
-         * identical async proof state. */
-        json_init(&input); json_set_object(&input);
-        ASSERT(json_push_kv_str(&input, "workspace", root));
-        ASSERT(json_push_kv_str(&input, "work", work_id));
-        ASSERT(json_push_kv_str(&input, "datadir", datadir));
+        /* Follow the emitted continuation without reconstructing its ledger
+         * context: waiting, background build, identical async proof state. */
+        json_init(&input);
+        ASSERT(json_read(&input, continuation, strlen(continuation)));
         request.input = &input;
         zcl_command_reply_init(&reply, "zcl.zcode_admitted_status_test.v1");
         zcl_native_handle_zcode_work_status(&request, &reply);

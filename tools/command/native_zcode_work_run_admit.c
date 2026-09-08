@@ -505,7 +505,7 @@ static bool run_render_async_admission(
     struct zcl_command_reply *reply,
     const struct vcs_zcode_task_index_entry *entry,
     const struct zcl_command_reply *inner, const char *adapter_name,
-    const char *workspace, bool details)
+    const char *workspace, const char *proof_datadir, bool details)
 {
     struct run_admission_facts facts;
     run_admission_facts_read(inner, &facts);
@@ -521,7 +521,7 @@ static bool run_render_async_admission(
         run_async_result_json(reply, adapter_name) &&
         (!details || run_async_details_json(reply, &facts, &expert)) &&
         run_add_work_next(
-            reply, "zcode.work.status", workspace, work_id, NULL,
+            reply, "zcode.work.status", workspace, work_id, NULL, proof_datadir,
             "show the admitted candidate while independent proof arrives");
     ok = ok && run_async_metric_json(reply, inner);
     ok = ok && (!details || run_async_reproduction_json(reply, inner));
@@ -866,6 +866,7 @@ static bool run_admit_render(
          run_admit_render_details(reply, facts, receipt, expert)) &&
         run_add_work_next(
             reply, "zcode.work.status", ctx->workspace, work_id, NULL,
+            ctx->proof_datadir,
             retry_ready
               ? "show the repair state and its exact resumable action"
               : "show the exact build and reproduction state");
@@ -1010,7 +1011,7 @@ bool run_admit(const struct run_admit_context *ctx,
         memory_cleanse(secret, sizeof(secret));
         bool rendered = run_render_async_admission(
             reply, ctx->entry, &inner, ctx->adapter_name, ctx->workspace,
-            ctx->details);
+            ctx->proof_datadir, ctx->details);
         zcl_command_reply_free(&inner);
         if (!rendered)
             run_fail(reply, "ADMISSION_OUTPUT_FAILED", "render",

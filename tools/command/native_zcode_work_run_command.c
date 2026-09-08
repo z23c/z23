@@ -68,6 +68,7 @@ void run_fail(struct zcl_command_reply *reply, const char *code,
 bool run_add_work_next(struct zcl_command_reply *reply,
                        const char *command, const char *workspace,
                        const char *work_id, const char *adapter,
+                       const char *proof_datadir,
                        const char *reason)
 {
     struct json_value input;
@@ -75,6 +76,8 @@ bool run_add_work_next(struct zcl_command_reply *reply,
     bool ok = workspace && workspace[0] && work_id && work_id[0] &&
         json_push_kv_str(&input, "workspace", workspace) &&
         json_push_kv_str(&input, "work", work_id) &&
+        (!proof_datadir || !proof_datadir[0] ||
+         json_push_kv_str(&input, "datadir", proof_datadir)) &&
         (!adapter || json_push_kv_str(&input, "adapter", adapter));
     char wire[sizeof(reply->next[0].input_json)];
     size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
@@ -447,7 +450,8 @@ static bool run_state_is_terminal(const char *state)
 
 static void run_render_terminal(
     struct zcl_command_reply *reply,
-    const struct vcs_zcode_task_index_entry *entry, const char *workspace)
+    const struct vcs_zcode_task_index_entry *entry, const char *workspace,
+    const char *proof_datadir)
 {
     bool proven =
         strcmp(entry->state, VCS_ZCODE_TASK_STATE_PROVEN) == 0;
@@ -468,7 +472,7 @@ static void run_render_terminal(
                          "zcode work status") &&
         json_push_kv_bool(&reply->data, "details_available", true) &&
         run_add_work_next(
-            reply, "zcode.work.status", workspace, work_id, NULL,
+            reply, "zcode.work.status", workspace, work_id, NULL, proof_datadir,
             proven ? "show the accepted work and its publication state" :
             decision ? "show the candidate awaiting your acceptance decision" :
                        "show the exact build and reproduction state");
@@ -485,7 +489,7 @@ static void run_render_terminal(
 static void run_render_awaiting_proof(
     struct zcl_command_reply *reply,
     const struct vcs_zcode_task_index_entry *entry, const char *workspace,
-    const char *pending_state)
+    const char *pending_state, const char *proof_datadir)
 {
     char work_id[32];
     (void)snprintf(work_id, sizeof(work_id), "work-%.12s",
@@ -503,7 +507,7 @@ static void run_render_awaiting_proof(
                          "zcode work status") &&
         json_push_kv_bool(&reply->data, "details_available", true) &&
         run_add_work_next(
-            reply, "zcode.work.status", workspace, work_id, NULL,
+            reply, "zcode.work.status", workspace, work_id, NULL, proof_datadir,
             "show the admitted candidate while independent proof arrives");
     if (!ok)
         run_fail(reply, "HANDOFF_OUTPUT_FAILED", "render",
@@ -520,7 +524,8 @@ static void run_render_admitted(
     if (run_async_proof_pending(proof_datadir, entry->task_root_hex,
                                 entry->latest_candidate_root_hex,
                                 pending_state)) {
-        run_render_awaiting_proof(reply, entry, workspace, pending_state);
+        run_render_awaiting_proof(reply, entry, workspace, pending_state,
+                                  proof_datadir);
         return;
     }
     run_fail(reply, "CANDIDATE_EXECUTION_INCOMPLETE", "build",
@@ -534,7 +539,8 @@ static bool run_lifecycle_handled(struct zcl_command_reply *reply,
                                   const struct run_request *req)
 {
     if (run_state_is_terminal(selection->entry->state)) {
-        run_render_terminal(reply, selection->entry, req->workspace);
+        run_render_terminal(reply, selection->entry, req->workspace,
+                             req->proof_datadir);
         return true;
     }
     if (strcmp(selection->entry->state,
@@ -872,6 +878,7 @@ static bool run_manual_handoff_json(
         json_push_kv_bool(&reply->data, "details_available", true) &&
         run_add_work_next(
             reply, "zcode.work.status", req->workspace, work_id, NULL,
+            req->proof_datadir,
             "after editing the candidate workspace, show its exact next action");
 }
 

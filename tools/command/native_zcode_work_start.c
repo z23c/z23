@@ -29,6 +29,7 @@
 /* Everything the request asked for, already bounded and defaulted. */
 struct zwork_start_inputs {
     const char *workspace;
+    const char *proof_datadir;
     const char *goal;
     const char *profile_name;
     const char *exact_symbol;
@@ -63,6 +64,7 @@ static bool zwork_start_validate(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
     in->workspace = zwork_str(request->input, "workspace");
+    in->proof_datadir = zwork_str(request->input, "datadir");
     in->goal = zwork_str(request->input, "goal");
     in->details = zwork_bool(request->input, "details");
     in->profile_name = zwork_str(request->input, "profile");
@@ -425,12 +427,15 @@ static bool zwork_start_summary_json(
 }
 
 static bool zwork_start_next_json(struct zcl_command_reply *reply,
-                                  const char *workspace, const char *work_id)
+                                  const char *workspace, const char *work_id,
+                                  const char *proof_datadir)
 {
     struct json_value next_input;
     json_init(&next_input); json_set_object(&next_input);
     bool ok = json_push_kv_str(&next_input, "workspace", workspace) &&
         json_push_kv_str(&next_input, "work", work_id) &&
+        (!proof_datadir || !proof_datadir[0] ||
+         json_push_kv_str(&next_input, "datadir", proof_datadir)) &&
         zwork_add_next(
             reply, "zcode.work.run", &next_input,
             "create only the behavior the reuse plan still marks missing");
@@ -461,7 +466,8 @@ static void zwork_start_admitted(
     if (ok) (void)snprintf(work_id, sizeof(work_id), "work-%.12s", task_hex);
     ok = ok && zwork_start_summary_json(reply, work_id, in, profile,
                                         &reuse->plan, &context, &expert);
-    ok = ok && zwork_start_next_json(reply, in->workspace, work_id);
+    ok = ok && zwork_start_next_json(reply, in->workspace, work_id,
+                                     in->proof_datadir);
     json_free(&expert); json_free(&context);
     if (!ok)
         zwork_fail(reply, "WORK_OUTPUT_FAILED", "render",
@@ -546,6 +552,16 @@ void zcl_native_handle_zcode_work_start(
         return;
     }
     in.workspace = canonical_workspace;
+    char canonical_datadir[ZWORK_PATH_MAX];
+    if (in.proof_datadir && in.proof_datadir[0]) {
+        if (!platform_directory_canonical_real(
+                in.proof_datadir, canonical_datadir, sizeof(canonical_datadir))) {
+            zwork_fail(reply, "BAD_DATADIR", "validate",
+                       "datadir must be a real directory", false, false);
+            return;
+        }
+        in.proof_datadir = canonical_datadir;
+    }
     if (!zwork_regular_package_config(in.workspace)) {
         zwork_start_initialization(reply, &in, &profile);
         return;
