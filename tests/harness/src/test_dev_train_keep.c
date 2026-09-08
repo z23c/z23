@@ -347,9 +347,15 @@ static void dtkt_paths(struct dtkt_fix *f)
 static bool dtkt_helpers(const struct dtkt_fix *f)
 {
     return dtkt_write(f->helpers, "land_pre.sh",
-                     "#!/bin/sh\necho \"PRECHECK: OK\"\n") &&
+                     "#!/bin/sh\n"
+                     "printf 'attempt\\n' >> \"$ZCL_TRAIN_SCRATCH_ROOT/$1/precheck_attempts\"\n"
+                     "echo \"PRECHECK: OK\"\n") &&
            dtkt_write(f->helpers, "land_unit.sh",
-                     "#!/bin/sh\necho started $1\n") &&
+                     "#!/bin/sh\n"
+                     "grep -q '\"state\":\"landing\"' "
+                     "\"$ZCL_TRAIN_SCRATCH_ROOT/$1/KEEP.json\" || exit 73\n"
+                     "printf 'attempt\\n' >> \"$ZCL_TRAIN_SCRATCH_ROOT/$1/launch_attempts\"\n"
+                     "echo started $1\n") &&
            dtkt_chmod_x(f->helpers, "land_pre.sh") &&
            dtkt_chmod_x(f->helpers, "land_unit.sh");
 }
@@ -438,6 +444,58 @@ static int dtkt_fetch_failure(const struct dtkt_fix *f)
     return failures;
 }
 
+static int dtkt_save_failure_effects(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    char path[1024], ref[41];
+    const char *absent[] = {"KEEP.json", "READY", "picks.txt", "keep.log",
+                            "precheck_attempts", "launch_attempts"};
+    for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+        (void)snprintf(path, sizeof(path), "%s/%s", f->dir7, absent[i]);
+        ASSERT(!dtkt_exists(path));
+    }
+    (void)snprintf(path, sizeof(path), "%s/train7", f->trains);
+    ASSERT(platform_directory_probe_real(path) == PLATFORM_DIRECTORY_PROBE_MISSING);
+    ASSERT(dtkt_rev(f->root, "refs/review/lanea", ref));
+    ASSERT_STR_EQ(ref, f->sha_a);
+    ASSERT(dtkt_rev(f->root, "refs/review/laneb", ref));
+    ASSERT_STR_EQ(ref, f->sha_b);
+_test_next:;
+    return failures;
+}
+
+static int dtkt_save_failure(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    char blocker[1024];
+    struct json_value input = dtkt_input("7", false);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.train_keep.v1");
+    (void)snprintf(blocker, sizeof(blocker), "%s/KEEP.json.tmp", f->dir7);
+    TEST("train keep: failed picking-state persistence refuses before assembly") {
+        /* A directory at the atomic writer's temporary filename makes its
+         * fopen fail even when tests run as root. KEEP.json stays absent,
+         * so loading the state still takes the real idle-to-picking path. */
+        ASSERT(platform_directory_ensure(blocker, 0700));
+        ASSERT(dtkt_save_failure_effects(f) == 0);
+        zcl_command_reply_free(&reply);
+        dtkt_call(f->root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "STATE_WRITE_FAILED");
+        ASSERT(json_get(&reply.data, "state") == NULL);
+        ASSERT(dtkt_save_failure_effects(f) == 0);
+        ASSERT(platform_directory_probe_real(blocker) == PLATFORM_DIRECTORY_PROBE_OK);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    if (test_rm_rf_recursive(blocker) != 0) {
+        fprintf(stderr, "train keep fixture: state blocker cleanup failed\n");
+        failures++;
+    }
+    return failures;
+}
+
 static int dtkt_dry_retirement_unchanged(const struct dtkt_fix *f)
 {
     int failures = 0;
@@ -511,6 +569,96 @@ static int dtkt_dry_saved_states(const struct dtkt_fix *f)
         fprintf(stderr, "train keep fixture: outcome cleanup failed\n");
         failures++;
     }
+    return failures;
+}
+
+static bool dtkt_launch_failure_fixture(const struct dtkt_fix *f, char dir[1024])
+{
+    char row[2048];
+    (void)snprintf(dir, 1024, "%s/train11", f->scratch);
+    (void)snprintf(row, sizeof(row), "lanea %s %s/v_land.txt\n", f->sha_a, f->dir7);
+    return platform_directory_ensure(dir, 0700) &&
+        dtkt_write(dir, "BASE", f->origin_main) &&
+        dtkt_write(dir, "late_picks.txt", row) &&
+        dtkt_write(f->land, "outcomes.jsonl", "") &&
+        dtkt_write(f->helpers, "land_unit.sh",
+            "#!/bin/sh\n"
+            "grep -q '\"state\":\"landing\"' "
+            "\"$ZCL_TRAIN_SCRATCH_ROOT/$1/KEEP.json\" || exit 73\n"
+            "printf 'attempt\\n' >> \"$ZCL_TRAIN_SCRATCH_ROOT/$1/launch_attempts\"\n"
+            "exit 1\n") && dtkt_chmod_x(f->helpers, "land_unit.sh");
+}
+
+static int dtkt_launch_failure_state(const char *dir)
+{
+    int failures = 0;
+    char raw[2048];
+    ASSERT(dtkt_slurp(dir, "KEEP.json", raw, sizeof(raw)));
+    ASSERT(strstr(raw, "\"state\":\"landing\"") != NULL);
+    ASSERT(dtkt_slurp(dir, "launch_attempts", raw, sizeof(raw)));
+    ASSERT_STR_EQ(raw, "attempt\n");
+_test_next:;
+    return failures;
+}
+
+static int dtkt_launch_failure(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    char dir[1024];
+    struct json_value input = dtkt_input("11", false);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.train_keep.v1");
+    TEST("train keep: failed handoff retains landing intent without a second launch") {
+        ASSERT(dtkt_launch_failure_fixture(f, dir));
+        zcl_command_reply_free(&reply);
+        dtkt_call(f->root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "PRECHECK_REFUSED");
+        ASSERT_STR_EQ(dtkt_str(&reply, "state"), "landing");
+        ASSERT(dtkt_launch_failure_state(dir) == 0);
+        zcl_command_reply_free(&reply);
+        dtkt_call(f->root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(dtkt_str(&reply, "state"), "landing");
+        ASSERT(dtkt_launch_failure_state(dir) == 0);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
+static int dtkt_ready_failure(const struct dtkt_fix *f)
+{
+    int failures = 0;
+    char dir[1024], blocker[1100], row[2048], raw[2048];
+    struct json_value input = dtkt_input("12", false);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.train_keep.v1");
+    (void)snprintf(dir, sizeof(dir), "%s/train12", f->scratch);
+    (void)snprintf(blocker, sizeof(blocker), "%s/READY.tmp", dir);
+    TEST("train keep: failed READY publication prevents precheck and launch") {
+        ASSERT(platform_directory_ensure(dir, 0700));
+        ASSERT(platform_directory_ensure(blocker, 0700));
+        ASSERT(dtkt_write(dir, "BASE", f->origin_main));
+        (void)snprintf(row, sizeof(row), "lanea %s %s/v_land.txt\n", f->sha_a, f->dir7);
+        ASSERT(dtkt_write(dir, "late_picks.txt", row));
+        zcl_command_reply_free(&reply);
+        dtkt_call(f->root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "READY_WRITE_FAILED");
+        ASSERT(json_get(&reply.data, "state") == NULL);
+        ASSERT(dtkt_slurp(dir, "KEEP.json", raw, sizeof(raw)));
+        ASSERT(strstr(raw, "\"state\":\"gating\"") != NULL);
+        const char *absent[] = {"READY", "precheck_attempts", "launch_attempts"};
+        for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+            (void)snprintf(row, sizeof(row), "%s/%s", dir, absent[i]);
+            ASSERT(!dtkt_exists(row));
+        }
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
     return failures;
 }
 
@@ -634,6 +782,7 @@ int test_dev_train_keep(void)
     failures += dtkt_dry_local_refs(&f);
     failures += dtkt_dry_saved_states(&f);
     failures += dtkt_fetch_failure(&f);
+    failures += dtkt_save_failure(&f);
 
     TEST("train keep: a base that no longer equals origin/main refuses") {
         char base_line[64];
@@ -762,6 +911,9 @@ int test_dev_train_keep(void)
         json_free(&input);
         PASS();
     }
+
+    failures += dtkt_launch_failure(&f);
+    failures += dtkt_ready_failure(&f);
 
 _test_next:;
     dtkt_env_clear();

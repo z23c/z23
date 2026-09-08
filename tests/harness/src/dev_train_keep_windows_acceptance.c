@@ -228,12 +228,32 @@ static bool keep_saved_states(const struct keep_fixture *f)
         keep_saved(f, "unknown", ZCL_COMMAND_STATUS_BLOCKED);
 }
 
-static bool keep_interrupted_picking_recovery(const struct keep_fixture *f)
+static bool keep_locked_state_write_failure(const struct keep_fixture *f,
+                                            const char *state,
+                                            const char *lock_path,
+                                            const char *saved)
 {
-    char lock[1024];
-    if (!keep_write(f->train, "KEEP.json",
-                    "{\"state\":\"picking\",\"reason\":\"interrupted\"}\n"))
-        return false;
+    HANDLE held = CreateFileA(state, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (held == INVALID_HANDLE_VALUE) return false;
+    struct zcl_command_reply reply;
+    keep_call(f, "7", false, &reply);
+    bool ok = reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
+        strcmp(reply.error.code, "STATE_WRITE_FAILED") == 0 &&
+        json_get(&reply.data, "state") == NULL &&
+        keep_equal(f->train, "KEEP.json", saved) &&
+        keep_absent(f->train, "KEEP.json.tmp") && execution_calls == 0;
+    json_free(&reply.data);
+    struct platform_process_lock lock;
+    platform_process_lock_init(&lock);
+    ok = ok && platform_process_lock_try_acquire(&lock, lock_path, false);
+    platform_process_lock_release(&lock);
+    return CloseHandle(held) != 0 && ok;
+}
+
+static bool keep_picking_recovery_after_release(const struct keep_fixture *f,
+                                                const char *lock_path)
+{
     struct zcl_command_reply reply;
     keep_call(f, "7", false, &reply);
     bool ok = reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
@@ -241,10 +261,22 @@ static bool keep_interrupted_picking_recovery(const struct keep_fixture *f)
         keep_contains(f->train, "KEEP.json", "\"state\":\"blocked\"") &&
         keep_contains(f->train, "KEEP.json", "a previous keeper died") &&
         keep_absent(f->train, "KEEP.json.tmp") && execution_calls == 0 &&
-        keep_path(f->train, "keep.lock", lock, sizeof(lock)) &&
-        DeleteFileA(lock) != 0;
+        DeleteFileA(lock_path) != 0;
     json_free(&reply.data);
     return ok;
+}
+
+static bool keep_interrupted_picking_recovery(const struct keep_fixture *f)
+{
+    static const char saved[] =
+        "{\"state\":\"picking\",\"reason\":\"interrupted\"}\n";
+    char state[1024], lock_path[1024];
+    if (!keep_write(f->train, "KEEP.json", saved) ||
+        !keep_path(f->train, "KEEP.json", state, sizeof(state)) ||
+        !keep_path(f->train, "keep.lock", lock_path, sizeof(lock_path)))
+        return false;
+    return keep_locked_state_write_failure(f, state, lock_path, saved) &&
+           keep_picking_recovery_after_release(f, lock_path);
 }
 
 static bool keep_cleanup(const struct keep_fixture *f)

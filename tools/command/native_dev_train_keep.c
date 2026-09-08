@@ -494,11 +494,13 @@ static bool dtk_worktree_open(const struct dtk_paths *p, const char *root,
 {
     const char *args[] = {"worktree", "add", "--detach", p->wt, base, NULL};
     if (zcl_dev_train_is_dir(p->wt)) {
-        (void)snprintf(why, cap, "train worktree already exists at %s", p->wt);
+        (void)snprintf(why, cap, "train worktree already exists at %.180s%s",
+                       p->wt, strlen(p->wt) > 180 ? "..." : "");
         return false;
     }
     if (zcl_dev_train_git(root, args, NULL, 0, DTK_FETCH_TIMEOUT_MS) != 0) {
-        (void)snprintf(why, cap, "git worktree add failed at %s", p->wt);
+        (void)snprintf(why, cap, "git worktree add failed at %.190s%s",
+                       p->wt, strlen(p->wt) > 190 ? "..." : "");
         return false;
     }
     return true;
@@ -545,8 +547,8 @@ static bool dtk_gates(const struct dtk_paths *p, char *why, size_t cap)
     };
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
         if (!dtk_make(p, steps[i].argv, steps[i].label)) {
-            (void)snprintf(why, cap, "%s failed; see %s", steps[i].label,
-                          p->log);
+            (void)snprintf(why, cap, "%s failed; see %.170s%s", steps[i].label,
+                          p->log, strlen(p->log) > 170 ? "..." : "");
             return false;
         }
     }
@@ -571,7 +573,8 @@ static bool dtk_regen(const struct dtk_paths *p, char *why, size_t cap)
                                          "regen docs-api-reference"};
     for (size_t i = 0; i < 4; i++) {
         if (!dtk_make(p, steps[i], labels[i])) {
-            (void)snprintf(why, cap, "%s failed; see %s", labels[i], p->log);
+            (void)snprintf(why, cap, "%s failed; see %.170s%s", labels[i],
+                           p->log, strlen(p->log) > 170 ? "..." : "");
             return false;
         }
     }
@@ -583,7 +586,8 @@ static bool dtk_regen(const struct dtk_paths *p, char *why, size_t cap)
     (void)zcl_dev_train_git(p->wt, add, NULL, 0, DTK_GIT_TIMEOUT_MS);
     if (zcl_dev_train_git(p->wt, staged, NULL, 0, DTK_GIT_TIMEOUT_MS) != 0 &&
         zcl_dev_train_git(p->wt, commit, NULL, 0, DTK_GIT_TIMEOUT_MS) != 0) {
-        (void)snprintf(why, cap, "the regen commit failed; see %s", p->log);
+        (void)snprintf(why, cap, "the regen commit failed; see %.180s%s",
+                       p->log, strlen(p->log) > 180 ? "..." : "");
         return false;
     }
     return true;
@@ -606,7 +610,8 @@ static bool dtk_precheck(const struct dtk_paths *p, const char *base,
     }
     dtk_log(p, "land_pre.sh", r.output);
     if (r.exit_code != 0 || !strstr(r.output, "PRECHECK: OK")) {
-        (void)snprintf(why, cap, "land_pre.sh refused; see %s", p->log);
+        (void)snprintf(why, cap, "land_pre.sh refused; see %.190s%s", p->log,
+                       strlen(p->log) > 190 ? "..." : "");
         return false;
     }
     return true;
@@ -618,7 +623,8 @@ static bool dtk_launch(const struct dtk_paths *p, char *why, size_t cap)
     struct zcl_devloop_process_result r;
     if (!zcl_devloop_process_run(p->scratch, argv, DTK_HELPER_TIMEOUT_MS, &r) ||
         r.exit_code != 0) {
-        (void)snprintf(why, cap, "land_unit.sh failed; see %s", p->log);
+        (void)snprintf(why, cap, "land_unit.sh failed; see %.190s%s", p->log,
+                       strlen(p->log) > 190 ? "..." : "");
         dtk_log(p, "land_unit.sh", r.output);
         return false;
     }
@@ -712,6 +718,17 @@ static void dtk_publish(struct zcl_command_reply *reply,
     (void)json_push_kv_str(&reply->data, "log", p->log);
 }
 
+static bool dtk_state_save_or_refuse(const struct dtk_paths *p,
+                                     const struct dtk_state *st,
+                                     struct zcl_command_reply *reply)
+{
+    if (dtk_state_save(p, st))
+        return true;
+    dtk_refuse(reply, "STATE_WRITE_FAILED", "state",
+               "cannot atomically persist keeper state; refusing further work");
+    return false;
+}
+
 /* ── the passes ────────────────────────────────────────────────────────── */
 
 static void dtk_pass_landing(const struct dtk_paths *p, const char *root,
@@ -746,7 +763,8 @@ static void dtk_pass_landing(const struct dtk_paths *p, const char *root,
     } else {
         dtk_set(st, "landing", "dev.land has not finished this tip yet");
     }
-    (void)dtk_state_save(p, st);
+    if (!dtk_state_save_or_refuse(p, st, reply))
+        return;
     dtk_publish(reply, p, st);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
 }
@@ -842,6 +860,47 @@ static bool dtk_agree_on_base(const struct dtk_paths *p, const char *root,
     return true;
 }
 
+static bool dtk_gate_tip(const struct dtk_paths *p, char *why, size_t why_cap,
+                         char tip[41])
+{
+    return dtk_gates(p, why, why_cap) && dtk_regen(p, why, why_cap) &&
+           dtk_rev_parse(p->wt, "HEAD", tip);
+}
+
+/* Publish the gated tip, prove landing preconditions, then persist the
+ * launch intent before handing control to dev.land. */
+static void dtk_handoff(const struct dtk_paths *p, const char *base,
+                        const char *tip, struct dtk_state *st,
+                        struct zcl_command_reply *reply)
+{
+    char ready[64], why[256];
+    (void)snprintf(ready, sizeof(ready), "%s\n", tip);
+    (void)snprintf(st->tip, sizeof(st->tip), "%s", tip);
+    dtk_set(st, "ready", "");
+    if (!dtk_write_atomic(p->ready, ready)) {
+        dtk_refuse(reply, "READY_WRITE_FAILED", "ready",
+                   "cannot atomically publish READY; landing was not attempted");
+        return;
+    }
+    if (!dtk_state_save_or_refuse(p, st, reply))
+        return;
+    if (!dtk_precheck(p, base, why, sizeof(why))) {
+        dtk_refuse(reply, "PRECHECK_REFUSED", "land", why);
+        dtk_publish(reply, p, st);
+        return;
+    }
+    dtk_set(st, "landing", "");
+    if (!dtk_state_save_or_refuse(p, st, reply))
+        return;
+    if (!dtk_launch(p, why, sizeof(why))) {
+        dtk_refuse(reply, "PRECHECK_REFUSED", "land", why);
+        dtk_publish(reply, p, st);
+        return;
+    }
+    dtk_publish(reply, p, st);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+}
+
 static void dtk_pass_cycle(const struct dtk_paths *p, const char *root,
                            struct dtk_state *st,
                            struct zcl_command_reply *reply, bool dry_run)
@@ -872,44 +931,31 @@ static void dtk_pass_cycle(const struct dtk_paths *p, const char *root,
     (void)snprintf(st->base, sizeof(st->base), "%s", base);
     st->picks = (int64_t)n;
     dtk_set(st, "picking", "");
-    (void)dtk_state_save(p, st);
+    if (!dtk_state_save_or_refuse(p, st, reply))
+        return;
     if (!dtk_assemble(p, root, base, picks, n, why, sizeof(why)) ||
         !dtk_rev_parse(p->wt, "HEAD", tip)) {
         dtk_set(st, "blocked", why);
-        (void)dtk_state_save(p, st);
+        if (!dtk_state_save_or_refuse(p, st, reply))
+            return;
         dtk_log(p, "blocked", why);
         dtk_refuse(reply, "ASSEMBLY_BLOCKED", "assemble", why);
         dtk_publish(reply, p, st);
         return;
     }
     dtk_set(st, "gating", "");
-    (void)dtk_state_save(p, st);
-    if (!dtk_gates(p, why, sizeof(why)) || !dtk_regen(p, why, sizeof(why)) ||
-        !dtk_rev_parse(p->wt, "HEAD", tip)) {
+    if (!dtk_state_save_or_refuse(p, st, reply))
+        return;
+    if (!dtk_gate_tip(p, why, sizeof(why), tip)) {
         dtk_set(st, "blocked", why);
-        (void)dtk_state_save(p, st);
+        if (!dtk_state_save_or_refuse(p, st, reply))
+            return;
         dtk_refuse(reply, "GATE_BLOCKED", "gate", why);
         dtk_publish(reply, p, st);
         return;
     }
 
-    char ready[64];
-    (void)snprintf(ready, sizeof(ready), "%s\n", tip);
-    (void)snprintf(st->tip, sizeof(st->tip), "%s", tip);
-    dtk_set(st, "ready", "");
-    (void)dtk_write_atomic(p->ready, ready);
-    (void)dtk_state_save(p, st);
-
-    if (!dtk_precheck(p, base, why, sizeof(why)) ||
-        !dtk_launch(p, why, sizeof(why))) {
-        dtk_refuse(reply, "PRECHECK_REFUSED", "land", why);
-        dtk_publish(reply, p, st);
-        return;
-    }
-    dtk_set(st, "landing", "");
-    (void)dtk_state_save(p, st);
-    dtk_publish(reply, p, st);
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    dtk_handoff(p, base, tip, st, reply);
 }
 
 /* `gating` is the only crash state that resumes on its own: the worktree is
@@ -974,7 +1020,8 @@ static void dtk_dispatch(const struct dtk_paths *p, const char *root,
                       st.state, p->wt, strlen(p->wt) > 170 ? "..." : "");
         if (!dry_run) {
             dtk_set(&st, "blocked", why);
-            (void)dtk_state_save(p, &st);
+            if (!dtk_state_save_or_refuse(p, &st, reply))
+                return;
         }
         dtk_refuse(reply, "KEEPER_CRASHED", "resume", why);
         dtk_publish(reply, p, &st);
