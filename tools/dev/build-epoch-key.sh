@@ -111,31 +111,6 @@ compiler-id)
         esac
     done < <(compgen -e | LC_ALL=C sort -u)
 
-    # Opt-in memoization: everything hashed above (argv strings + the full
-    # admitted-environment preimage) is cheap. Everything below is not — it
-    # spawns the compiler driver a dozen-plus times and walks every header
-    # search root's metadata with `find`. Those are a pure function of the
-    # cheap prefix for the life of one process tree (a toolchain swap mid-run
-    # changes CC_COMMAND, an admitted env var, or a resolved-tool identity,
-    # which all live in the prefix or get re-hashed as part of it before any
-    # cache lookup happens), so a caller that repeats this exact prefix many
-    # times in one run (e.g. build-epoch-session.sh re-verifying on every
-    # acquire) may set ZCL_BUILD_EPOCH_KEY_CACHE_DIR to skip the redundant
-    # work. Unset by default: every caller that does not opt in gets the
-    # unchanged, always-fresh computation below.
-    CACHE_DIR="${ZCL_BUILD_EPOCH_KEY_CACHE_DIR:-}"
-    CACHE_FILE=""
-    if [ -n "$CACHE_DIR" ]; then
-        mkdir -p "$CACHE_DIR" 2>/dev/null || true
-        if [ -d "$CACHE_DIR" ]; then
-            CACHE_FILE="$CACHE_DIR/compiler-id.v3.$(sha256_file "$PREIMAGE")"
-            if [ -s "$CACHE_FILE" ]; then
-                cat -- "$CACHE_FILE"
-                exit 0
-            fi
-        fi
-    fi
-
     # Content-hash ONLY: a tool is identified by its bytes, never by its
     # filesystem metadata. build/bin/zcc (this repo's in-tree compile cache,
     # itself an admitted CC_ARGV token on every native build) is legitimately
@@ -173,6 +148,40 @@ compiler-id)
         printf 'tool\0%s\0%s\0%s\0' \
             "$label" "$resolved" "$digest" \
             >> "$PREIMAGE"
+    }
+
+    fingerprint_search_targets()
+    {
+        local target record='' digest expected targets_fd
+        : > "$WORK/unhashed-targets"
+        while IFS= read -r -d '' target; do
+            [ -f "$target" ] || continue
+            case "${SEEN_TOOL[$target]+seen}" in seen) continue ;; esac
+            SEEN_TOOL["$target"]=1
+            printf '%s\0' "$target" >> "$WORK/unhashed-targets"
+        done < "$WORK/search-targets"
+        # Keep one digest per exact target, in original traversal order, while
+        # avoiding a shell, hash process, and awk process for every SDK file.
+        xargs -0 -r sha256sum -z -- < "$WORK/unhashed-targets" \
+            > "$WORK/target-digests" || fail 'could not hash compiler search targets'
+        exec {targets_fd}< "$WORK/unhashed-targets"
+        while IFS= read -r -d '' record; do
+            IFS= read -r -d '' expected <&"$targets_fd" || fail 'extra search-target digest'
+            digest="${record:0:64}"
+            target="${record:66}"
+            case "${record:64:2}" in
+                '  '|' *') : ;;
+                *) fail 'invalid search-target digest mode' ;;
+            esac
+            is_sha256 "$digest" &&
+                [ "$target" = "$expected" ] || fail 'invalid search-target digest record'
+            printf 'tool\0search-symlink-target\0%s\0%s\0' "$target" "$digest" >> "$PREIMAGE"
+        done < "$WORK/target-digests"
+        [ -z "$record" ] || fail 'unterminated search-target digest'
+        if IFS= read -r -d '' expected <&"$targets_fd"; then
+            fail 'missing search-target digest'
+        fi
+        exec {targets_fd}<&-
     }
 
     # Fingerprint wrappers and explicit compiler argv programs.
@@ -381,6 +390,13 @@ compiler-id)
         done
     done
     LC_ALL=C sort -zu "$WORK/search-roots" -o "$WORK/search-roots"
+    # Qualify multi-operand NUL output before tolerating dangling-link errors.
+    # An unsupported readlink option must never become an empty target scan.
+    physical_work="$(cd "$WORK" && pwd -P)"
+    printf '%s\0%s\0' "$physical_work" "$physical_work" > "$WORK/link-expected"
+    readlink -fz -- "$WORK" "$WORK" > "$WORK/link-probe" &&
+        cmp -s "$WORK/link-expected" "$WORK/link-probe" ||
+        fail 'readlink must support ordered multi-operand NUL resolution'
     while IFS= read -r -d '' root; do
         resolved="$(readlink -f -- "$root" 2>/dev/null || true)"
         [ -n "$resolved" ] && [ -d "$resolved" ] || continue
@@ -406,19 +422,24 @@ compiler-id)
                     grep -q . ||
                 fail "could not inventory compiler search root: $resolved"
         fi
-        while IFS= read -r -d '' linked; do
-            target="$(readlink -f -- "$linked" 2>/dev/null || true)"
-            [ -f "$target" ] && fingerprint_tool search-symlink-target "$target"
-        done < <(find "$resolved" -type l -print0 2>/dev/null)
+        # Resolve the same ordered, NUL-delimited links in bounded argv batches.
+        # SDKs contain thousands of links: one shell/process per link dominates
+        # native proof preparation. No inventory or target digest is reused.
+        find "$resolved" -type l -print0 > "$WORK/search-links" ||
+            fail "could not inventory compiler search links: $resolved"
+        link_rc=0
+        xargs -0 -r readlink -fz -- < "$WORK/search-links" \
+            > "$WORK/search-targets" 2>/dev/null || link_rc=$?
+        # readlink omits unresolvable links, as the scalar walk did. Their link
+        # spelling/metadata remains in the complete inventory above. xargs 123
+        # means a child returned 1..125; launcher/signal failures still refuse.
+        [ "$link_rc" -eq 0 ] || [ "$link_rc" -eq 123 ] ||
+            fail "could not resolve compiler search links: $resolved"
+        fingerprint_search_targets
         printf '\0search-root-end\0' >> "$PREIMAGE"
     done < "$WORK/search-roots"
 
     COMPILER_DIGEST="$(sha256_file "$PREIMAGE")"
-    if [ -n "$CACHE_FILE" ]; then
-        printf '%s\n' "$COMPILER_DIGEST" > "$CACHE_FILE.$$" &&
-            mv -f -- "$CACHE_FILE.$$" "$CACHE_FILE" ||
-            rm -f -- "$CACHE_FILE.$$"
-    fi
     printf '%s\n' "$COMPILER_DIGEST"
     ;;
 

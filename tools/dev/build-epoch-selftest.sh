@@ -205,9 +205,6 @@ fi
 exec 9<&-
 
 phase compiler-id-and-env-sensitivity
-# Every comparison below must execute the real probes, even when the caller
-# uses a memo directory for its own build session.
-unset ZCL_BUILD_EPOCH_KEY_CACHE_DIR
 COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CC_COMMAND")" ||
     fail 'compiler fingerprint failed'
 [[ "$COMPILER_ID" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid compiler fingerprint'
@@ -306,6 +303,34 @@ CYCLIC_COMPILER_ID="$(CPATH="$WORK/cyclic-include" \
     fail 'compiler fingerprint rejected a safely detected include-root cycle'
 [[ "$CYCLIC_COMPILER_ID" =~ ^[0-9a-f]{64}$ ]] ||
     fail 'cyclic include-root produced an invalid compiler fingerprint'
+
+# Batch resolution must retain odd path bytes, duplicate targets, unresolved
+# links, and links outside the search root. Retargeting and target edits must
+# both invalidate the identity even though compiler argv/environment stay put.
+mkdir -p "$WORK/link-include"
+LINK_TARGET="$WORK/link target"$'\n'"header.h"
+printf '#define EPOCH_LINK_PROBE 1\n' > "$LINK_TARGET"
+ln -s "$LINK_TARGET" "$WORK/link-include/first link.h"
+ln -s "$LINK_TARGET" "$WORK/link-include/second.h"
+ln -s "$WORK/missing/target.h" "$WORK/link-include/dangling.h"
+LINK_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+printf '#define EPOCH_LINK_PROBE 2\n' > "$LINK_TARGET"
+LINK_EDIT_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+[ "$LINK_ID" != "$LINK_EDIT_ID" ] || fail 'linked target mutation was omitted'
+cp "$LINK_TARGET" "$WORK/other-target.h"
+rm "$WORK/link-include/first link.h"
+ln -s "$WORK/other-target.h" "$WORK/link-include/first link.h"
+LINK_RETARGET_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+[ "$LINK_EDIT_ID" != "$LINK_RETARGET_ID" ] || fail 'link retarget was omitted'
+
+# Same-path tool replacement must never hit an argv/environment-only memo.
+ID_WRAPPER="$WORK/identity-compiler"
+printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CC_COMMAND" > "$ID_WRAPPER"
+chmod +x "$ID_WRAPPER"
+WRAPPER_ID="$("$KEY_TOOL" compiler-id "$ID_WRAPPER" "$ID_WRAPPER")"
+printf '# same driver behavior, different wrapper bytes\n' >> "$ID_WRAPPER"
+WRAPPER_EDIT_ID="$("$KEY_TOOL" compiler-id "$ID_WRAPPER" "$ID_WRAPPER")"
+[ "$WRAPPER_ID" != "$WRAPPER_EDIT_ID" ] || fail 'same-path tool mutation was omitted'
 if "$KEY_TOOL" compiler-id 'cc; printf unsafe' "$CC_COMMAND" \
         >/dev/null 2>&1; then
     fail 'shell-active CC string was accepted'
@@ -316,23 +341,8 @@ if [ "$COMPILER_ID_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-# From here on CC_COMMAND/CXX_COMMAND and the admitted environment never
-# change again for the rest of this script, so compiler-id's expensive part
-# (a dozen-plus compiler-driver spawns plus a `find` metadata walk of every
-# header search root, measured ~1.5-2.5s/call unloaded) recomputes an
-# answer this run already proved dozens of times over: directly below, and
-# on every build-epoch-session.sh acquire/verify from here on (it
-# re-invokes compiler-id itself). That redundant recomputation, multiplied
-# by process-spawn contention under a loaded parallel test suite, is what
-# pushes this script past its wall-clock budget. Opt the remainder of this
-# run into build-epoch-key.sh's ZCL_BUILD_EPOCH_KEY_CACHE_DIR memoization
-# (see its comment there for why the cache key is safe). This must stay
-# unset above: the block just proven exercises compiler-id's env/ctime
-# sensitivity by calling it twice with an identical cheap prefix (CC_COMMAND
-# + CPATH/C_INCLUDE_PATH string) over a mutated search-root file, and a
-# cache keyed on that cheap prefix must not paper over the difference.
-# Production `make` never sets this variable, so it always recomputes fresh.
-export ZCL_BUILD_EPOCH_KEY_CACHE_DIR="$WORK/.compiler-id-cache"
+# Every acquire and verification recomputes the tool and search-root identity.
+# A process-local argv/environment memo cannot detect same-path mutations.
 
 # Compile-only search roots and indirect tool loaders are not inputs to
 # compiler-id's probes. Every joined and separate spelling must refuse before
@@ -930,6 +940,9 @@ MAKE_RECOVERY_EOF
 
 run_make_recovery()
 {
+    # This fixture supplies an already-probed compiler identity and its own
+    # profile. Keep that probe's deployment environment: the included native
+    # Makefile otherwise exports its release floor and changes Clang builtins.
     local log="$1"
     (
         cd "$ROOT"
@@ -938,6 +951,7 @@ run_make_recovery()
         Z23_EPOCH_FIXTURE_STATE="$STATE" \
         Z23_EPOCH_FIXTURE_SESSION_CALLS="$MAKE_RECOVERY_SESSION_CALLS" \
         make -f "$MAKE_RECOVERY_MK" --no-print-directory \
+            MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET-}" \
             ZCL_EPOCH_PROFILES=test-fast ZCL_DEPFILE_PROFILES= \
             BUILD_DIR="$MAKE_RECOVERY" BIN_DIR="$MAKE_RECOVERY/bin" \
             VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= \
