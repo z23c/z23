@@ -484,7 +484,8 @@ static void asy_report_violations(int nv, const char *baseline,
            k_asy_gate, nv, baseline);
     static char shown[ASY_MAXPAIR][ASY_PAIRKEY];
     for (int i = 0; i < nv; i++)
-        snprintf(shown[i], ASY_PAIRKEY, "%s", violations[i]);
+        snprintf(shown[i], ASY_PAIRKEY, "%.*s", ASY_PAIRKEY - 1,
+                 violations[i]);
     qsort(shown, (size_t)nv, ASY_PAIRKEY, asy_pair_cmp);
     for (int i = 0; i < nv; i++) {
         char *tab = strchr(shown[i], '\t');
@@ -505,7 +506,7 @@ static void asy_report_stale(int ns, const char *baseline,
            k_asy_gate, ns, baseline);
     static char shown2[ASY_MAXPAIR][ASY_PAIRKEY];
     for (int i = 0; i < ns; i++)
-        snprintf(shown2[i], ASY_PAIRKEY, "%s", stale[i]);
+        snprintf(shown2[i], ASY_PAIRKEY, "%.*s", ASY_PAIRKEY - 1, stale[i]);
     qsort(shown2, (size_t)ns, ASY_PAIRKEY, asy_pair_cmp);
     for (int i = 0; i < ns; i++) {
         char *tab = strchr(shown2[i], '\t');
