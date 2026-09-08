@@ -185,31 +185,39 @@ static bool zp_t1_reward(char *out, size_t out_size)
 static char *g_zp_recipe_hex;
 static uint8_t g_zp_recipe_root[32];
 
-static bool zp_use_recipe(const struct vcs_package_manifest *m)
+/* Feed every manifest file into the recipe: headers (with their include
+ * dirs) and sources. A repeat dir (second header) is fine. */
+static bool zp_recipe_add_files(struct vcs_package_recipe *r,
+                                const struct vcs_package_manifest *m)
 {
-    struct vcs_package_recipe r;
-    vcs_package_recipe_init(&r);
     bool ok = true;
     for (size_t i = 0; ok && i < m->count; i++) {
         const char *path = m->files[i].path;
         size_t len = strlen(path);
         if (len > 2 && strcmp(path + len - 2, ".h") == 0) {
-            ok = vcs_package_recipe_add_header(&r, path, NULL);
+            ok = vcs_package_recipe_add_header(r, path, NULL);
             const char *slash = strrchr(path, '/');
             if (ok && slash) {
                 char dir[1024];
                 snprintf(dir, sizeof(dir), "%.*s", (int)(slash - path),
                          path);
-                /* A repeat dir (second header) is fine. */
                 enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
-                if (!vcs_package_recipe_add_include_dir(&r, dir, &rerr) &&
+                if (!vcs_package_recipe_add_include_dir(r, dir, &rerr) &&
                     rerr != VCS_PACKAGE_RECIPE_ERR_LIST_ORDER)
                     ok = false;
             }
         } else if (len > 2 && strcmp(path + len - 2, ".c") == 0) {
-            ok = vcs_package_recipe_add_source(&r, path, NULL);
+            ok = vcs_package_recipe_add_source(r, path, NULL);
         }
     }
+    return ok;
+}
+
+static bool zp_use_recipe(const struct vcs_package_manifest *m)
+{
+    struct vcs_package_recipe r;
+    vcs_package_recipe_init(&r);
+    bool ok = zp_recipe_add_files(&r, m);
     if (ok)
         ok = vcs_package_recipe_add_define(&r, "ZCL_FIXTURE=1", NULL) &&
              vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBC,
@@ -503,6 +511,88 @@ static size_t zp_license_offset(const uint8_t *wire)
 }
 
 /* ── 1: plan happy path ─────────────────────────────────────────────── */
+/* The candidate plan: valid, ready to commit, token == release id,
+ * chunks verified. */
+static int zp_plan_happy_core(struct zp_cmd *c,
+                              const struct vcs_package_release *r,
+                              char *id_hex)
+{
+    int failures = 0;
+    ZP_CHECK("plan: valid candidate passes",
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_bool(json_get(&c->reply.data, "valid")));
+    ZP_CHECK("plan: verified chunks are ready for one commit action",
+             json_get_bool(json_get(&c->reply.data, "ready_to_commit")) &&
+             strcmp(json_get_str(json_get(&c->reply.data, "readiness")),
+                    "ready_to_commit") == 0 &&
+             strcmp(json_get_str(json_get(&c->reply.data, "next_action")),
+                    "zcode package publish commit") == 0);
+    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
+    ZP_CHECK("plan: release id computes",
+             vcs_package_release_id(r, id) == VCS_PACKAGE_RELEASE_OK);
+    zp_hex32(id, id_hex);
+    ZP_CHECK("plan: plan token is the release id",
+             json_get_str(json_get(&c->reply.data, "plan_token")) &&
+             strcmp(json_get_str(json_get(&c->reply.data, "plan_token")),
+                    id_hex) == 0);
+    const struct json_value *pkg = json_get(&c->reply.data, "package");
+    ZP_CHECK("plan: all chunks verified",
+             pkg && json_get_bool(json_get(pkg, "chunks_checked")) &&
+             json_get_int(json_get(pkg, "chunks_verified")) == 3);
+    return failures;
+}
+
+static int zp_plan_happy_accept(struct zp_cmd *c, char *id_hex)
+{
+    int failures = 0;
+    const struct json_value *rel = json_get(&c->reply.data, "release");
+    ZP_CHECK("plan: acceptance accepted, nothing replayed",
+             rel &&
+             strcmp(json_get_str(json_get(rel, "acceptance")),
+                    "accepted") == 0 &&
+             json_get_int(json_get(rel, "replayed_releases")) == 0);
+    ZP_CHECK("plan: no failures",
+             zp_failure_rule(&c->reply, 0) == NULL);
+    struct zcl_present_model_v1 confirmation;
+    char confirmation_error[192];
+    ZP_CHECK("plan: exact output feeds the native confirmation instrument",
+             zcl_native_presentation_publication_confirm_model_from_plan(
+                 &c->reply.data, &confirmation, confirmation_error,
+                 sizeof(confirmation_error)) &&
+             confirmation.kind == ZCL_PRESENT_MODEL_CONFIRMATION &&
+             strcmp(confirmation.exact_root, id_hex) == 0 &&
+             confirmation.action_count == 2);
+    return failures;
+}
+
+/* Without dir the chunk check is honestly skipped, not failed. */
+static int zp_plan_happy_nodir(struct zp_cmd *c, const char *release_hex,
+                               const char *manifest_hex, const char *dd)
+{
+    int failures = 0;
+    zp_publish_input(c, dd, release_hex, manifest_hex, NULL);
+    zcl_native_handle_zcode_package_publish_plan(&c->request, &c->reply);
+    const struct json_value *pkg = json_get(&c->reply.data, "package");
+    ZP_CHECK("plan: no dir skips chunk verification",
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_bool(json_get(&c->reply.data, "valid")) &&
+             pkg && !json_get_bool(json_get(pkg, "chunks_checked")));
+    ZP_CHECK("plan: no dir names the one missing-source action",
+             !json_get_bool(json_get(&c->reply.data, "ready_to_commit")) &&
+             strcmp(json_get_str(json_get(&c->reply.data, "readiness")),
+                    "needs_chunk_source") == 0 &&
+             strcmp(json_get_str(json_get(&c->reply.data, "next_action")),
+                    "rerun zcode package publish plan with dir") == 0);
+    struct zcl_present_model_v1 confirmation;
+    char confirmation_error[192];
+    ZP_CHECK("plan: unchecked chunks cannot produce confirmation chrome",
+             !zcl_native_presentation_publication_confirm_model_from_plan(
+                 &c->reply.data, &confirmation, confirmation_error,
+                 sizeof(confirmation_error)));
+    zp_cmd_free(c);
+    return failures;
+}
+
 static int t_plan_happy(void)
 {
     int failures = 0;
@@ -525,66 +615,12 @@ static int t_plan_happy(void)
     struct zp_cmd c;
     zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
-    ZP_CHECK("plan: valid candidate passes",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_bool(json_get(&c.reply.data, "valid")));
-    ZP_CHECK("plan: verified chunks are ready for one commit action",
-             json_get_bool(json_get(&c.reply.data, "ready_to_commit")) &&
-             strcmp(json_get_str(json_get(&c.reply.data, "readiness")),
-                    "ready_to_commit") == 0 &&
-             strcmp(json_get_str(json_get(&c.reply.data, "next_action")),
-                    "zcode package publish commit") == 0);
-    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
-    ZP_CHECK("plan: release id computes",
-             vcs_package_release_id(&r, id) == VCS_PACKAGE_RELEASE_OK);
     char id_hex[65];
-    zp_hex32(id, id_hex);
-    ZP_CHECK("plan: plan token is the release id",
-             json_get_str(json_get(&c.reply.data, "plan_token")) &&
-             strcmp(json_get_str(json_get(&c.reply.data, "plan_token")),
-                    id_hex) == 0);
-    const struct json_value *pkg = json_get(&c.reply.data, "package");
-    ZP_CHECK("plan: all chunks verified",
-             pkg && json_get_bool(json_get(pkg, "chunks_checked")) &&
-             json_get_int(json_get(pkg, "chunks_verified")) == 3);
-    const struct json_value *rel = json_get(&c.reply.data, "release");
-    ZP_CHECK("plan: acceptance accepted, nothing replayed",
-             rel &&
-             strcmp(json_get_str(json_get(rel, "acceptance")),
-                    "accepted") == 0 &&
-             json_get_int(json_get(rel, "replayed_releases")) == 0);
-    ZP_CHECK("plan: no failures",
-             zp_failure_rule(&c.reply, 0) == NULL);
-    struct zcl_present_model_v1 confirmation;
-    char confirmation_error[192];
-    ZP_CHECK("plan: exact output feeds the native confirmation instrument",
-             zcl_native_presentation_publication_confirm_model_from_plan(
-                 &c.reply.data, &confirmation, confirmation_error,
-                 sizeof(confirmation_error)) &&
-             confirmation.kind == ZCL_PRESENT_MODEL_CONFIRMATION &&
-             strcmp(confirmation.exact_root, id_hex) == 0 &&
-             confirmation.action_count == 2);
+    failures += zp_plan_happy_core(&c, &r, id_hex);
+    failures += zp_plan_happy_accept(&c, id_hex);
     zp_cmd_free(&c);
 
-    /* Without dir the chunk check is honestly skipped, not failed. */
-    zp_publish_input(&c, dd, release_hex, manifest_hex, NULL);
-    zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
-    pkg = json_get(&c.reply.data, "package");
-    ZP_CHECK("plan: no dir skips chunk verification",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_bool(json_get(&c.reply.data, "valid")) &&
-             pkg && !json_get_bool(json_get(pkg, "chunks_checked")));
-    ZP_CHECK("plan: no dir names the one missing-source action",
-             !json_get_bool(json_get(&c.reply.data, "ready_to_commit")) &&
-             strcmp(json_get_str(json_get(&c.reply.data, "readiness")),
-                    "needs_chunk_source") == 0 &&
-             strcmp(json_get_str(json_get(&c.reply.data, "next_action")),
-                    "rerun zcode package publish plan with dir") == 0);
-    ZP_CHECK("plan: unchecked chunks cannot produce confirmation chrome",
-             !zcl_native_presentation_publication_confirm_model_from_plan(
-                 &c.reply.data, &confirmation, confirmation_error,
-                 sizeof(confirmation_error)));
-    zp_cmd_free(&c);
+    failures += zp_plan_happy_nodir(&c, release_hex, manifest_hex, dd);
 
     free(release_hex);
     free(manifest_hex);
@@ -594,34 +630,12 @@ static int t_plan_happy(void)
 }
 
 /* ── 2: license policy ──────────────────────────────────────────────── */
-static int t_license_rules(void)
+/* "Apache-2.0" -> "Apache-2.9" is not on the allowlist: unknown SPDX id. */
+static int zp_license_unknown_id(const char *dd, const char *manifest_hex,
+                                 const char *pkgdir, uint8_t *wire,
+                                 size_t wire_len, size_t loff)
 {
     int failures = 0;
-    chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "license");
-    char pkgdir[512];
-    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
-    struct zp_pkg p;
-    ZP_CHECK("license: package fixture builds", zp_make_package(&p, pkgdir));
-    ZP_CHECK("license: recipe fixture builds", zp_use_recipe(&p.manifest));
-    char *manifest_hex = zp_hex(p.wire, p.wire_len);
-
-    /* Unknown SPDX id: tamper the wire's license bytes in place (same
-     * length), so the wire reaches the parser and the parser names the
-     * license rule. "Apache-2.0" -> "Apache-2.9" is not on the allowlist. */
-    struct vcs_package_release r;
-    ZP_CHECK("license: release signs",
-             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "Apache-2.0",
-                        p.root));
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    char *release_hex = zp_release_hex(&r, &wire, &wire_len);
-    ZP_CHECK("license: wire encodes", release_hex && wire);
-    size_t loff = zp_license_offset(wire);
-    ZP_CHECK("license: tamper target located",
-             loff + 10 <= wire_len &&
-             memcmp(wire + loff, "Apache-2.0", 10) == 0);
     wire[loff + 9] = '9';
     char *bad_hex = zp_hex(wire, wire_len);
     struct zp_cmd c;
@@ -644,11 +658,22 @@ static int t_license_rules(void)
                  0);
     zp_cmd_free(&c);
     free(bad_hex);
+    return failures;
+}
 
-    /* Compound license: "Apache-2.0" -> "MIT OR ISC" (10 bytes) — the
-     * allowlist takes exactly one id, never an expression. */
+/* Compound ("MIT OR ISC") and blanked ids: the allowlist takes exactly one
+ * id, never an expression, never an empty one. */
+static int zp_license_compound_and_blank(const char *dd,
+                                         const char *manifest_hex,
+                                         const char *pkgdir, uint8_t *wire,
+                                         size_t wire_len, size_t loff,
+                                         struct vcs_package_release *r,
+                                         struct zp_pkg *p)
+{
+    int failures = 0;
+    struct zp_cmd c;
     memcpy(wire + loff, "MIT OR ISC", 10);
-    bad_hex = zp_hex(wire, wire_len);
+    char *bad_hex = zp_hex(wire, wire_len);
     zp_publish_input(&c, dd, bad_hex, manifest_hex, pkgdir);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     ZP_CHECK("license: compound id rejected naming the license rule",
@@ -658,13 +683,11 @@ static int t_license_rules(void)
     zp_cmd_free(&c);
     free(bad_hex);
     free(wire);
-    free(release_hex);
 
     /* Missing license: blanked id -> same named rule. */
     ZP_CHECK("license: blank release signs",
-             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "MIT", p.root));
-    wire = NULL;
-    release_hex = zp_release_hex(&r, &wire, &wire_len);
+             zp_release(r, 0x11, 1u, "rhett/ring-buffer", "MIT", p->root));
+    char *release_hex = zp_release_hex(r, &wire, &wire_len);
     loff = zp_license_offset(wire);
     memcpy(wire + loff, "   ", 3);
     bad_hex = zp_hex(wire, wire_len);
@@ -678,25 +701,29 @@ static int t_license_rules(void)
     free(bad_hex);
     free(wire);
     free(release_hex);
+    return failures;
+}
 
-    /* License text absent: a manifest with no LICENSE file. */
+/* License text absent: a manifest with no LICENSE file. */
+static int zp_license_no_file(const char *dd, struct vcs_package_release *r,
+                              struct zp_pkg *p2)
+{
+    int failures = 0;
     char noldir[512];
     snprintf(noldir, sizeof(noldir), "%s/nolicense", dd);
     mkdir(noldir, 0700);
-    struct zp_pkg p2;
-    memset(&p2, 0, sizeof(p2));
-    vcs_package_manifest_init(&p2.manifest);
+    struct zp_cmd c;
     ZP_CHECK("license: no-LICENSE package builds",
-             zp_add_file(&p2, noldir, "src/only.c", "int x;\n",
+             zp_add_file(p2, noldir, "src/only.c", "int x;\n",
                          VCS_PACKAGE_MODE_FILE) &&
-             vcs_package_manifest_serialize(&p2.manifest, &p2.wire,
-                                            &p2.wire_len) &&
-             vcs_package_manifest_root(&p2.manifest, p2.root));
+             vcs_package_manifest_serialize(&p2->manifest, &p2->wire,
+                                            &p2->wire_len) &&
+             vcs_package_manifest_root(&p2->manifest, p2->root));
     ZP_CHECK("license: no-LICENSE release signs",
-             zp_use_recipe(&p2.manifest) &&
-             zp_release(&r, 0x11, 1u, "rhett/no-license", "MIT", p2.root));
-    release_hex = zp_release_hex(&r, NULL, NULL);
-    char *manifest2_hex = zp_hex(p2.wire, p2.wire_len);
+             zp_use_recipe(&p2->manifest) &&
+             zp_release(r, 0x11, 1u, "rhett/no-license", "MIT", p2->root));
+    char *release_hex = zp_release_hex(r, NULL, NULL);
+    char *manifest2_hex = zp_hex(p2->wire, p2->wire_len);
     zp_publish_input(&c, dd, release_hex, manifest2_hex, noldir);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     ZP_CHECK("license: missing LICENSE file rejected naming the rule",
@@ -708,6 +735,48 @@ static int t_license_rules(void)
 
     free(release_hex);
     free(manifest2_hex);
+    return failures;
+}
+
+static int t_license_rules(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "license");
+    char pkgdir[512];
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
+    struct zp_pkg p;
+    ZP_CHECK("license: package fixture builds", zp_make_package(&p, pkgdir));
+    ZP_CHECK("license: recipe fixture builds", zp_use_recipe(&p.manifest));
+    char *manifest_hex = zp_hex(p.wire, p.wire_len);
+
+    /* Unknown SPDX id: tamper the wire's license bytes in place (same
+     * length), so the wire reaches the parser and the parser names the
+     * license rule. */
+    struct vcs_package_release r;
+    ZP_CHECK("license: release signs",
+             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "Apache-2.0",
+                        p.root));
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    char *release_hex = zp_release_hex(&r, &wire, &wire_len);
+    ZP_CHECK("license: wire encodes", release_hex && wire);
+    size_t loff = zp_license_offset(wire);
+    ZP_CHECK("license: tamper target located",
+             loff + 10 <= wire_len &&
+             memcmp(wire + loff, "Apache-2.0", 10) == 0);
+    struct zp_pkg p2;
+    memset(&p2, 0, sizeof(p2));
+    vcs_package_manifest_init(&p2.manifest);
+
+    failures += zp_license_unknown_id(dd, manifest_hex, pkgdir, wire,
+                                      wire_len, loff);
+    failures += zp_license_compound_and_blank(dd, manifest_hex, pkgdir, wire,
+                                              wire_len, loff, &r, &p);
+    failures += zp_license_no_file(dd, &r, &p2);
+
+    free(release_hex);
     free(manifest_hex);
     zp_pkg_free(&p2);
     zp_pkg_free(&p);
@@ -716,25 +785,13 @@ static int t_license_rules(void)
 }
 
 /* ── 3: package structure rules ─────────────────────────────────────── */
-static int t_structure_rules(void)
+/* The grammar-level hostile wires all name the one manifest-grammar
+ * rule (the parse is the exact check; detail says why). */
+static int zp_structure_grammar_cases(const char *dd,
+                                      const char *release_hex)
 {
     int failures = 0;
-    chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "structure");
-    char pkgdir[512];
-    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
-    struct zp_pkg p;
-    ZP_CHECK("structure: package fixture builds",
-             zp_make_package(&p, pkgdir) && zp_use_recipe(&p.manifest));
-    struct vcs_package_release r;
-    ZP_CHECK("structure: release signs",
-             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "MIT", p.root));
-    char *release_hex = zp_release_hex(&r, NULL, NULL);
     struct zp_cmd c;
-
-    /* The grammar-level hostile wires all name the one manifest-grammar
-     * rule (the parse is the exact check; detail says why). */
     struct {
         const char *label;
         const char *path1;
@@ -768,8 +825,14 @@ static int t_structure_rules(void)
         zp_cmd_free(&c);
         free(raw_hex);
     }
+    return failures;
+}
 
-    /* Oversized manifest wire: over the 1 MiB wire bound. */
+/* Oversized manifest wire: over the 1 MiB wire bound. */
+static int zp_structure_oversized(const char *dd, const char *release_hex)
+{
+    int failures = 0;
+    struct zp_cmd c;
     size_t big_len = 2 * (VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES + 1) + 1;
     char *big = malloc(big_len);
     ZP_CHECK("structure: oversized hex allocates", big != NULL);
@@ -786,13 +849,20 @@ static int t_structure_rules(void)
         zp_cmd_free(&c);
         free(big);
     }
+    return failures;
+}
 
-    /* Hidden executable payload: a canonical path under a dot segment with
-     * the executable mode — the grammar allows it, publication forbids it. */
+/* Hidden executable payload: a canonical path under a dot segment with
+ * the executable mode — the grammar allows it, publication forbids it. */
+static int zp_structure_hidden_exec(const char *dd,
+                                    struct vcs_package_release *r,
+                                    uint8_t h1[32])
+{
+    int failures = 0;
+    struct zp_cmd c;
     struct zp_pkg hp;
     memset(&hp, 0, sizeof(hp));
     vcs_package_manifest_init(&hp.manifest);
-    uint8_t h1[32];
     uint8_t h2[32];
     ZP_CHECK("structure: hidden-exec hashes compute",
              vcs_package_chunk_hash((const uint8_t *)"x", 1, h1) &&
@@ -807,8 +877,8 @@ static int t_structure_rules(void)
                                             &hp.wire_len) &&
              vcs_package_manifest_root(&hp.manifest, hp.root));
     ZP_CHECK("structure: hidden-exec release signs",
-             zp_release(&r, 0x11, 1u, "rhett/hidden-exec", "MIT", hp.root));
-    char *hr_hex = zp_release_hex(&r, NULL, NULL);
+             zp_release(r, 0x11, 1u, "rhett/hidden-exec", "MIT", hp.root));
+    char *hr_hex = zp_release_hex(r, NULL, NULL);
     char *hm_hex = zp_hex(hp.wire, hp.wire_len);
     zp_publish_input(&c, dd, hr_hex, hm_hex, NULL);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
@@ -824,8 +894,16 @@ static int t_structure_rules(void)
     free(hr_hex);
     free(hm_hex);
     zp_pkg_free(&hp);
+    return failures;
+}
 
-    /* Over-64MiB package (sizes are manifest facts; no bytes needed). */
+/* Over-64MiB package (sizes are manifest facts; no bytes needed). */
+static int zp_structure_over_cap(const char *dd,
+                                 struct vcs_package_release *r,
+                                 uint8_t h1[32])
+{
+    int failures = 0;
+    struct zp_cmd c;
     struct zp_pkg bp;
     memset(&bp, 0, sizeof(bp));
     vcs_package_manifest_init(&bp.manifest);
@@ -842,9 +920,9 @@ static int t_structure_rules(void)
                                             &bp.wire_len) &&
              vcs_package_manifest_root(&bp.manifest, bp.root));
     ZP_CHECK("structure: over-cap release signs",
-             zp_release(&r, 0x11, 1u, "rhett/too-big", "MIT", bp.root));
-    hr_hex = zp_release_hex(&r, NULL, NULL);
-    hm_hex = zp_hex(bp.wire, bp.wire_len);
+             zp_release(r, 0x11, 1u, "rhett/too-big", "MIT", bp.root));
+    char *hr_hex = zp_release_hex(r, NULL, NULL);
+    char *hm_hex = zp_hex(bp.wire, bp.wire_len);
     zp_publish_input(&c, dd, hr_hex, hm_hex, NULL);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     ZP_CHECK("structure: over-64MiB package rejected naming the rule",
@@ -856,15 +934,22 @@ static int t_structure_rules(void)
     free(hr_hex);
     free(hm_hex);
     zp_pkg_free(&bp);
+    return failures;
+}
 
-    /* Release root != manifest root. */
+/* Release root != manifest root. */
+static int zp_structure_root_mismatch(const char *dd, const struct zp_pkg *p,
+                                      struct vcs_package_release *r)
+{
+    int failures = 0;
+    struct zp_cmd c;
     uint8_t other_root[32];
     memset(other_root, 0x77, 32);
     ZP_CHECK("structure: mismatched release signs",
-             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "MIT",
+             zp_release(r, 0x11, 1u, "rhett/ring-buffer", "MIT",
                         other_root));
-    hr_hex = zp_release_hex(&r, NULL, NULL);
-    hm_hex = zp_hex(p.wire, p.wire_len);
+    char *hr_hex = zp_release_hex(r, NULL, NULL);
+    char *hm_hex = zp_hex(p->wire, p->wire_len);
     zp_publish_input(&c, dd, hr_hex, hm_hex, NULL);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     ZP_CHECK("structure: root mismatch rejected naming the rule",
@@ -875,6 +960,32 @@ static int t_structure_rules(void)
     zp_cmd_free(&c);
     free(hr_hex);
     free(hm_hex);
+    return failures;
+}
+
+static int t_structure_rules(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "structure");
+    char pkgdir[512];
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
+    struct zp_pkg p;
+    ZP_CHECK("structure: package fixture builds",
+             zp_make_package(&p, pkgdir) && zp_use_recipe(&p.manifest));
+    struct vcs_package_release r;
+    ZP_CHECK("structure: release signs",
+             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "MIT", p.root));
+    char *release_hex = zp_release_hex(&r, NULL, NULL);
+    uint8_t h1[32];
+    memset(h1, 0, sizeof(h1));
+
+    failures += zp_structure_grammar_cases(dd, release_hex);
+    failures += zp_structure_oversized(dd, release_hex);
+    failures += zp_structure_hidden_exec(dd, &r, h1);
+    failures += zp_structure_over_cap(dd, &r, h1);
+    failures += zp_structure_root_mismatch(dd, &p, &r);
 
     free(release_hex);
     zp_pkg_free(&p);
@@ -954,73 +1065,68 @@ static int t_chunk_rules(void)
 }
 
 /* ── 5: commit roundtrip + idempotence + failed-plan commit ─────────── */
-static int t_commit_roundtrip(void)
+/* A valid candidate commits locally and performs no network action. */
+static int zp_commit_valid_and_chunks(struct zp_cmd *c)
 {
     int failures = 0;
-    chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "commit");
-    char pkgdir[512];
-    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
-    struct zp_pkg p;
-    ZP_CHECK("commit: package fixture builds", zp_make_package(&p, pkgdir));
-    ZP_CHECK("commit: recipe fixture builds", zp_use_recipe(&p.manifest));
-    struct vcs_package_release r;
-    ZP_CHECK("commit: release signs",
-             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "MIT", p.root));
-    char *release_hex = zp_release_hex(&r, NULL, NULL);
-    char *manifest_hex = zp_hex(p.wire, p.wire_len);
-    struct zp_cmd c;
-
-    zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
-    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
     ZP_CHECK("commit: valid candidate commits locally",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_str(json_get(&c.reply.data, "result")) &&
-             strcmp(json_get_str(json_get(&c.reply.data, "result")),
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_str(json_get(&c->reply.data, "result")) &&
+             strcmp(json_get_str(json_get(&c->reply.data, "result")),
                     "committed") == 0 &&
-             json_get_bool(json_get(&c.reply.data,
+             json_get_bool(json_get(&c->reply.data,
                                     "local_commit_complete")) &&
-             !json_get_bool(json_get(&c.reply.data,
+             !json_get_bool(json_get(&c->reply.data,
                                      "pointer_publication_observed")) &&
-             !json_get_bool(json_get(&c.reply.data,
+             !json_get_bool(json_get(&c->reply.data,
                                      "provider_publication_observed")) &&
-             !json_get_bool(json_get(&c.reply.data,
+             !json_get_bool(json_get(&c->reply.data,
                                      "peer_discovery_observed")) &&
-             !json_get_bool(json_get(&c.reply.data,
+             !json_get_bool(json_get(&c->reply.data,
                                      "exact_fetch_observed")) &&
-             !json_get_bool(json_get(&c.reply.data,
+             !json_get_bool(json_get(&c->reply.data,
                                      "network_publication_performed")) &&
-             c.reply.error.mutated);
+             c->reply.error.mutated);
     ZP_CHECK("commit: all chunks admitted",
-             json_get_int(json_get(&c.reply.data, "chunks_stored")) == 3);
-    {
-        const char *pkg =
-            json_get_str(json_get(&c.reply.data, "package_root"));
-        const char *tr =
-            json_get_str(json_get(&c.reply.data, "transport_root"));
-        const char *next =
-            json_get_str(json_get(&c.reply.data, "next_command"));
-        ZP_CHECK("commit: next_command is a filled pointer publish plan",
-                 pkg && tr && next && strstr(next, pkg) && strstr(next, tr) &&
-                     strstr(next, "zcode network publish") &&
-                     strstr(next, "\"kind\":\"pointer\"") &&
-                     strstr(next, "zclassic23.package"));
-        ZP_CHECK("commit: next_kind is pointer",
-                 json_get_str(json_get(&c.reply.data, "next_kind")) &&
-                     strcmp(json_get_str(json_get(&c.reply.data, "next_kind")),
-                            "pointer") == 0);
-    }
-    zp_cmd_free(&c);
+             json_get_int(json_get(&c->reply.data, "chunks_stored")) == 3);
+    return failures;
+}
 
-    /* On-disk truth: manifest, release envelope, and the CAS chunk. */
+/* The committed candidate's next_command is a filled pointer publish plan. */
+static int zp_commit_pointer_plan(struct zp_cmd *c)
+{
+    int failures = 0;
+    const char *pkg =
+        json_get_str(json_get(&c->reply.data, "package_root"));
+    const char *tr =
+        json_get_str(json_get(&c->reply.data, "transport_root"));
+    const char *next =
+        json_get_str(json_get(&c->reply.data, "next_command"));
+    ZP_CHECK("commit: next_command is a filled pointer publish plan",
+             pkg && tr && next && strstr(next, pkg) && strstr(next, tr) &&
+                 strstr(next, "zcode network publish") &&
+                 strstr(next, "\"kind\":\"pointer\"") &&
+                 strstr(next, "zclassic23.package"));
+    ZP_CHECK("commit: next_kind is pointer",
+             json_get_str(json_get(&c->reply.data, "next_kind")) &&
+                 strcmp(json_get_str(json_get(&c->reply.data, "next_kind")),
+                        "pointer") == 0);
+    return failures;
+}
+
+/* On-disk truth: manifest, release envelope, and the CAS chunk; a
+ * reopened store sees the package complete (CAS-derived). */
+static int zp_commit_on_disk_truth(const char *dd, const struct zp_pkg *p,
+                                   const struct vcs_package_release *r)
+{
+    int failures = 0;
     char path[512];
-    snprintf(path, sizeof(path), "%s/zcode/manifests/%s", dd, p.root_hex);
+    snprintf(path, sizeof(path), "%s/zcode/manifests/%s", dd, p->root_hex);
     struct stat st;
     ZP_CHECK("commit: manifest persisted", stat(path, &st) == 0);
     uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
     ZP_CHECK("commit: release id computes",
-             vcs_package_release_id(&r, id) == VCS_PACKAGE_RELEASE_OK);
+             vcs_package_release_id(r, id) == VCS_PACKAGE_RELEASE_OK);
     char id_hex[65];
     zp_hex32(id, id_hex);
     snprintf(path, sizeof(path), "%s/zcode/releases/%s", dd, id_hex);
@@ -1029,19 +1135,27 @@ static int t_commit_roundtrip(void)
     zp_hex32(g_zp_recipe_root, rc_hex);
     snprintf(path, sizeof(path), "%s/zcode/recipes/%s", dd, rc_hex);
     ZP_CHECK("commit: recipe persisted", stat(path, &st) == 0);
-
-    /* A reopened store sees the package complete (CAS-derived). */
     struct vcs_package_store *s = vcs_package_store_open(dd, 1000000u);
     ZP_CHECK("commit: store reopens", s != NULL);
     if (s) {
         struct vcs_package_store_status pst;
         ZP_CHECK("commit: package complete after reopen",
-                 vcs_package_store_package_status(s, p.root, &pst) &&
+                 vcs_package_store_package_status(s, p->root, &pst) &&
                  pst.complete && pst.present_chunks == 3);
         vcs_package_store_close(s);
     }
+    return failures;
+}
 
-    /* Idempotent recommit: duplicate, not error, nothing mutated. */
+/* Idempotent recommit reports duplicate; a post-commit plan classifies as
+ * a duplicate, still valid. */
+static int zp_commit_duplicate_and_plan(const char *dd,
+                                        const char *release_hex,
+                                        const char *manifest_hex,
+                                        const char *pkgdir)
+{
+    int failures = 0;
+    struct zp_cmd c;
     zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
     zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
     ZP_CHECK("commit: recommit reports duplicate",
@@ -1052,7 +1166,6 @@ static int t_commit_roundtrip(void)
              !c.reply.error.mutated);
     zp_cmd_free(&c);
 
-    /* Plan after commit classifies as a duplicate, still valid. */
     zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     const struct json_value *rel = json_get(&c.reply.data, "release");
@@ -1063,8 +1176,14 @@ static int t_commit_roundtrip(void)
                     "duplicate-release") == 0 &&
              json_get_int(json_get(rel, "replayed_releases")) == 1);
     zp_cmd_free(&c);
+    return failures;
+}
 
-    /* Commit of a release that fails plan names the failed rule. */
+/* Commit of a release that fails plan names the failed rule. */
+static int zp_commit_no_license_rule(const char *dd)
+{
+    int failures = 0;
+    struct zp_cmd c;
     char nodir[512];
     snprintf(nodir, sizeof(nodir), "%s/nolicense", dd);
     mkdir(nodir, 0700);
@@ -1098,6 +1217,38 @@ static int t_commit_roundtrip(void)
     free(r2_hex);
     free(m2_hex);
     zp_pkg_free(&p2);
+    return failures;
+}
+
+static int t_commit_roundtrip(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "commit");
+    char pkgdir[512];
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
+    struct zp_pkg p;
+    ZP_CHECK("commit: package fixture builds", zp_make_package(&p, pkgdir));
+    ZP_CHECK("commit: recipe fixture builds", zp_use_recipe(&p.manifest));
+    struct vcs_package_release r;
+    ZP_CHECK("commit: release signs",
+             zp_release(&r, 0x11, 1u, "rhett/ring-buffer", "MIT", p.root));
+    char *release_hex = zp_release_hex(&r, NULL, NULL);
+    char *manifest_hex = zp_hex(p.wire, p.wire_len);
+    struct zp_cmd c;
+
+    zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    failures += zp_commit_valid_and_chunks(&c);
+    failures += zp_commit_pointer_plan(&c);
+    zp_cmd_free(&c);
+
+    failures += zp_commit_on_disk_truth(dd, &p, &r);
+
+    failures += zp_commit_duplicate_and_plan(dd, release_hex, manifest_hex,
+                                             pkgdir);
+    failures += zp_commit_no_license_rule(dd);
 
     free(release_hex);
     free(manifest_hex);
@@ -1303,45 +1454,15 @@ static void zp_search_input(struct zp_cmd *c, const char *dd,
         (void)json_push_kv_str(&c->input, key, value);
 }
 
-static int t_search(void)
+/* Commit three packages; pin the scratch path stayed under root and the
+ * observed copy removed it. */
+static int zp_search_commit_and_scratch(const char *dd, char *scratch,
+                                        size_t dd_len)
 {
     int failures = 0;
-    chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "search");
-    struct zp_cmd c;
-
-    char scratch[512] = {0};
-    char prefix_tiny[8];
-    char name_tiny[512];
-    size_t dd_len = strlen(dd);
-    size_t name_tiny_cap = dd_len + strlen("/src-") + 3u;
-    ZP_CHECK("search: truncated scratch prefix fails closed",
-             !zp_scratch_path(prefix_tiny, sizeof(prefix_tiny), dd,
-                              "alice/ring-buffer"));
-    ZP_CHECK("search: truncated scratch name fails closed",
-             name_tiny_cap <= sizeof(name_tiny) &&
-             !zp_scratch_path(name_tiny, name_tiny_cap, dd,
-                              "alice/ring-buffer"));
-    char observed_tiny[8];
-    ZP_CHECK("search: truncated observed path fails before mkdir",
-             !zp_commit_one_observed(dd, 0xaa, 1u,
-                                     "alice/ring-buffer", "MIT", 0,
-                                     observed_tiny,
-                                     sizeof(observed_tiny)));
-
-    /* Empty store: a PASSED empty result, not an error. */
-    zp_search_input(&c, dd, NULL, NULL);
-    zcl_native_handle_zcode_package_search(&c.request, &c.reply);
-    ZP_CHECK("search: empty store passes with zero rows",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_int(json_get(&c.reply.data, "total_matches")) == 0 &&
-             json_get_int(json_get(&c.reply.data, "packages_scanned")) == 0);
-    zp_cmd_free(&c);
-
     bool observed_commit = zp_commit_one_observed(
         dd, 0xaa, 1u, "rhett/ring-buffer", "MIT", 1, scratch,
-        sizeof(scratch));
+        512);
     ZP_CHECK("search: three packages commit",
              observed_commit &&
              zp_commit_one(dd, 0xaa, 2u, "rhett/json-lite", "Apache-2.0",
@@ -1355,7 +1476,15 @@ static int t_search(void)
              observed_commit && strncmp(scratch, dd, dd_len) == 0 &&
              scratch[dd_len] == '/' &&
              scratch_stat == -1 && scratch_errno == ENOENT);
+    return failures;
+}
 
+/* Unfiltered/keyword/miss/license/name-prefix filters on the committed
+ * store. */
+static int zp_search_filters(const char *dd)
+{
+    int failures = 0;
+    struct zp_cmd c;
     zp_search_input(&c, dd, NULL, NULL);
     zcl_native_handle_zcode_package_search(&c.request, &c.reply);
     ZP_CHECK("search: unfiltered finds all three, sorted by name",
@@ -1394,7 +1523,14 @@ static int t_search(void)
     ZP_CHECK("search: name prefix filter",
              json_get_int(json_get(&c.reply.data, "total_matches")) == 2);
     zp_cmd_free(&c);
+    return failures;
+}
 
+/* Publisher prefix filter and the limit bound. */
+static int zp_search_publisher_and_limit(const char *dd)
+{
+    int failures = 0;
+    struct zp_cmd c;
     char pub[67];
     ZP_CHECK("search: publisher hex computes", zp_pubkey_hex(0xbb, pub));
     pub[10] = '\0'; /* prefix match on the pubkey hex */
@@ -1402,8 +1538,8 @@ static int t_search(void)
     zcl_native_handle_zcode_package_search(&c.request, &c.reply);
     ZP_CHECK("search: publisher prefix filter",
              json_get_int(json_get(&c.reply.data, "total_matches")) == 1);
-    rows = json_get(&c.reply.data, "results");
-    row0 = rows ? json_at(rows, 0) : NULL;
+    const struct json_value *rows = json_get(&c.reply.data, "results");
+    const struct json_value *row0 = rows ? json_at(rows, 0) : NULL;
     ZP_CHECK("search: publisher row fields",
              row0 &&
              strcmp(json_get_str(json_get(row0, "name")),
@@ -1421,20 +1557,60 @@ static int t_search(void)
              json_get_int(json_get(&c.reply.data, "total_matches")) == 3 &&
              json_get_bool(json_get(&c.reply.data, "items_truncated")));
     zp_cmd_free(&c);
+    return failures;
+}
+
+static int t_search(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "search");
+    struct zp_cmd c;
+
+    char scratch[512] = {0};
+    char prefix_tiny[8];
+    char name_tiny[512];
+    size_t dd_len = strlen(dd);
+    size_t name_tiny_cap = dd_len + strlen("/src-") + 3u;
+    ZP_CHECK("search: truncated scratch prefix fails closed",
+             !zp_scratch_path(prefix_tiny, sizeof(prefix_tiny), dd,
+                              "alice/ring-buffer"));
+    ZP_CHECK("search: truncated scratch name fails closed",
+             name_tiny_cap <= sizeof(name_tiny) &&
+             !zp_scratch_path(name_tiny, name_tiny_cap, dd,
+                              "alice/ring-buffer"));
+    char observed_tiny[8];
+    ZP_CHECK("search: truncated observed path fails before mkdir",
+             !zp_commit_one_observed(dd, 0xaa, 1u,
+                                     "alice/ring-buffer", "MIT", 0,
+                                     observed_tiny,
+                                     sizeof(observed_tiny)));
+
+    /* Empty store: a PASSED empty result, not an error. */
+    zp_search_input(&c, dd, NULL, NULL);
+    zcl_native_handle_zcode_package_search(&c.request, &c.reply);
+    ZP_CHECK("search: empty store passes with zero rows",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_int(json_get(&c.reply.data, "total_matches")) == 0 &&
+             json_get_int(json_get(&c.reply.data, "packages_scanned")) == 0);
+    zp_cmd_free(&c);
+
+    failures += zp_search_commit_and_scratch(dd, scratch, dd_len);
+    failures += zp_search_filters(dd);
+    failures += zp_search_publisher_and_limit(dd);
 
     test_rm_rf_recursive(dd);
     return failures;
 }
 
 /* ── 8: library ─────────────────────────────────────────────────────── */
-static int t_library(void)
+/* Empty store: zero rows and an obvious fetch next command; a missing
+ * datadir names MISSING_DATADIR. */
+static int zp_library_empty_and_missing(const char *dd)
 {
     int failures = 0;
-    chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "library");
     struct zp_cmd c;
-
     zp_cmd_init(&c);
     (void)json_push_kv_str(&c.input, "datadir", dd);
     zcl_native_handle_zcode_package_library(&c.request, &c.reply);
@@ -1457,35 +1633,42 @@ static int t_library(void)
              c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
              strcmp(c.reply.error.code, "MISSING_DATADIR") == 0);
     zp_cmd_free(&c);
+    return failures;
+}
 
-    ZP_CHECK("library: two packages commit",
-             zp_commit_one(dd, 0xaa, 1u, "rhett/ring-buffer", "MIT", 21) &&
-             zp_commit_one(dd, 0xbb, 1u, "bob/json-lite", "Apache-2.0", 22));
-
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    zcl_native_handle_zcode_package_library(&c.request, &c.reply);
-    const struct json_value *rows = json_get(&c.reply.data, "packages");
-    int64_t listed = json_get_int(json_get(&c.reply.data, "count"));
-    bool named_ring = false;
-    bool named_json = false;
-    const struct json_value *named_row = NULL;
+static void zp_library_scan_rows(const struct json_value *rows,
+                                 bool *named_ring, bool *named_json,
+                                 const struct json_value **named_row)
+{
     size_t n_rows = rows ? rows->num_children : 0;
     for (size_t i = 0; i < n_rows; i++) {
         const struct json_value *row = json_at(rows, i);
         const char *name = row ? json_get_str(json_get(row, "name")) : NULL;
         if (name && strcmp(name, "rhett/ring-buffer") == 0) {
-            named_ring = true;
-            named_row = row;
+            *named_ring = true;
+            *named_row = row;
         }
         if (name && strcmp(name, "bob/json-lite") == 0)
-            named_json = true;
+            *named_json = true;
     }
+}
+
+static int zp_library_lists(struct zp_cmd *c, bool named_ring,
+                            bool named_json)
+{
+    int failures = 0;
+    int64_t listed = json_get_int(json_get(&c->reply.data, "count"));
     ZP_CHECK("library: lists both complete packages with index names",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
              listed >= 2 &&
-             json_get_int(json_get(&c.reply.data, "rendered")) == listed &&
+             json_get_int(json_get(&c->reply.data, "rendered")) == listed &&
              named_ring && named_json);
+    return failures;
+}
+
+static int zp_library_named_row(const struct json_value *named_row)
+{
+    int failures = 0;
     ZP_CHECK("library: named row is a complete unpinned seedable package",
              named_row &&
              json_get_str(json_get(named_row, "package_root")) &&
@@ -1497,21 +1680,36 @@ static int t_library(void)
              json_get_int(json_get(named_row, "total_chunks")) == 2 &&
              json_get(named_row, "public_serveable") &&
              json_get(named_row, "public_serveable")->type == JSON_BOOL);
+    return failures;
+}
+
+/* The non-empty shelf points at a fetch of a listed title. */
+static int zp_library_shelf(struct zp_cmd *c,
+                            const struct json_value *named_row,
+                            char *ring_root, size_t ring_root_cap)
+{
+    int failures = 0;
     const char *listed_root =
         named_row ? json_get_str(json_get(named_row, "package_root")) : NULL;
     const char *shelf_next =
-        json_get_str(json_get(&c.reply.data, "next_command"));
+        json_get_str(json_get(&c->reply.data, "next_command"));
     ZP_CHECK("library: non-empty shelf points at fetch of a listed title",
              shelf_next && strstr(shelf_next, "zcode package fetch") != NULL &&
              (strstr(shelf_next, "rhett/ring-buffer") != NULL ||
               strstr(shelf_next, "bob/json-lite") != NULL ||
               (listed_root && strstr(shelf_next, listed_root) != NULL)));
-    char ring_root[65];
     ring_root[0] = '\0';
     if (listed_root)
-        (void)snprintf(ring_root, sizeof(ring_root), "%s", listed_root);
-    zp_cmd_free(&c);
+        (void)snprintf(ring_root, ring_root_cap, "%s", listed_root);
+    return failures;
+}
 
+/* Fetch by local name, by matching name+root, and by root alone — each
+ * finds the same already-complete identity. */
+static int zp_library_fetch_ok(const char *dd, const char *ring_root)
+{
+    int failures = 0;
+    struct zp_cmd c;
     zp_cmd_init(&c);
     (void)json_push_kv_str(&c.input, "datadir", dd);
     (void)json_push_kv_str(&c.input, "name", "rhett/ring-buffer");
@@ -1546,7 +1744,15 @@ static int t_library(void)
              strcmp(json_get_str(json_get(&c.reply.data, "package_root")),
                     ring_root) == 0);
     zp_cmd_free(&c);
+    return failures;
+}
 
+/* A wrong root for a known name fails closed; the limit bound flags
+ * truncation. */
+static int zp_library_fetch_negative(const char *dd, const char *ring_root)
+{
+    int failures = 0;
+    struct zp_cmd c;
     char other_root[65];
     memset(other_root, 'a', 64);
     other_root[64] = '\0';
@@ -1570,6 +1776,39 @@ static int t_library(void)
              json_get_int(json_get(&c.reply.data, "count")) == 1 &&
              json_get_bool(json_get(&c.reply.data, "items_truncated")));
     zp_cmd_free(&c);
+    return failures;
+}
+
+static int t_library(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "library");
+
+    failures += zp_library_empty_and_missing(dd);
+
+    ZP_CHECK("library: two packages commit",
+             zp_commit_one(dd, 0xaa, 1u, "rhett/ring-buffer", "MIT", 21) &&
+             zp_commit_one(dd, 0xbb, 1u, "bob/json-lite", "Apache-2.0", 22));
+
+    struct zp_cmd c;
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    zcl_native_handle_zcode_package_library(&c.request, &c.reply);
+    const struct json_value *rows = json_get(&c.reply.data, "packages");
+    bool named_ring = false;
+    bool named_json = false;
+    const struct json_value *named_row = NULL;
+    zp_library_scan_rows(rows, &named_ring, &named_json, &named_row);
+    failures += zp_library_lists(&c, named_ring, named_json);
+    failures += zp_library_named_row(named_row);
+    char ring_root[65];
+    failures += zp_library_shelf(&c, named_row, ring_root, sizeof(ring_root));
+    zp_cmd_free(&c);
+
+    failures += zp_library_fetch_ok(dd, ring_root);
+    failures += zp_library_fetch_negative(dd, ring_root);
 
     test_rm_rf_recursive(dd);
     return failures;
@@ -1580,27 +1819,20 @@ static int t_library(void)
  * the exact predicate the pointer publish gate applies — and the reply
  * censuses evaluated/reproduced rows. Evidence never fails the view: a
  * complete package with no persisted release reads an error object. */
-static int t_library_reproduction(void)
+/* Package A: committed, ready to carry two distinct matching receipts. */
+static int zp_lib_repro_commit_a(const char *dd, struct zp_pkg *pa)
 {
     int failures = 0;
-    chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "library_repro");
     struct zp_cmd c;
-
-    /* Package A: committed, then two distinct, mutually matching receipts
-     * filed under <dd>/zcode/receipts (different flags strings, different
-     * pinned toolchain capsules — distinct build events, distinct ids). */
     char pkgdir[512];
     snprintf(pkgdir, sizeof(pkgdir), "%s/pkg-a", dd);
-    struct zp_pkg pa;
-    ZP_CHECK("library repro: package A builds", zp_make_package(&pa, pkgdir));
-    ZP_CHECK("library repro: recipe A builds", zp_use_recipe(&pa.manifest));
+    ZP_CHECK("library repro: package A builds", zp_make_package(pa, pkgdir));
+    ZP_CHECK("library repro: recipe A builds", zp_use_recipe(&pa->manifest));
     struct vcs_package_release rel_a;
     ZP_CHECK("library repro: release A signs",
-             zp_release(&rel_a, 0xaa, 1u, "rhett/repro-ok", "MIT", pa.root));
+             zp_release(&rel_a, 0xaa, 1u, "rhett/repro-ok", "MIT", pa->root));
     char *ra_hex = zp_release_hex(&rel_a, NULL, NULL);
-    char *ma_hex = zp_hex(pa.wire, pa.wire_len);
+    char *ma_hex = zp_hex(pa->wire, pa->wire_len);
     zp_publish_input(&c, dd, ra_hex, ma_hex, pkgdir);
     zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
     ZP_CHECK("library repro: package A commits",
@@ -1608,7 +1840,16 @@ static int t_library_reproduction(void)
     zp_cmd_free(&c);
     free(ra_hex);
     free(ma_hex);
+    return failures;
+}
 
+/* Two distinct, mutually matching receipts filed under <dd>/zcode/
+ * receipts (different flags strings, different pinned toolchain capsules
+ * — distinct build events, distinct ids). */
+static int zp_lib_repro_file_receipts(const char *dd,
+                                      const struct zp_pkg *pa)
+{
+    int failures = 0;
     struct vcs_package_build_receipt rca, rcb;
     vcs_package_build_receipt_init(&rca);
     vcs_package_build_receipt_init(&rcb);
@@ -1620,9 +1861,9 @@ static int t_library_reproduction(void)
     memset(out_sha, 0x5a, sizeof(out_sha));
     for (size_t i = 0; i < 2 && rcpts_ok; i++) {
         struct vcs_package_build_receipt *rr = rcpts[i];
-        memcpy(rr->package_root, pa.root, 32);
+        memcpy(rr->package_root, pa->root, 32);
         memcpy(rr->recipe_root, g_zp_recipe_root, 32);
-        memcpy(rr->lock_root, pa.root, 32);
+        memcpy(rr->lock_root, pa->root, 32);
         snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
         snprintf(rr->compiler_version, sizeof(rr->compiler_version),
                  "14.2.0");
@@ -1641,43 +1882,45 @@ static int t_library_reproduction(void)
     }
     ZP_CHECK("library repro: two distinct matching receipts filed",
              rcpts_ok);
+    return failures;
+}
 
-    /* Package B: committed, no receipts of its own — evaluated, not
-     * reproduced. */
-    ZP_CHECK("library repro: package B commits",
-             zp_commit_one(dd, 0xbb, 1u, "bob/repro-none", "ISC", 31));
-
-    /* Package C: committed, then its envelope moved OUT of releases/ (the
-     * index loader keys on content, so the bytes must leave the dir).
-     * Manifest and chunks keep it complete, but no persisted release names
-     * the root — the row is unevaluable, never a failure. The fixture
-     * content must differ from package A's (zp_make_package is
-     * fixed-content: identical bytes would mean the SAME package root). */
+/* Package C: committed, then its envelope moved OUT of releases/ (the
+ * index loader keys on content, so the bytes must leave the dir).
+ * Manifest and chunks keep it complete, but no persisted release names
+ * the root — the row is unevaluable, never a failure. The fixture
+ * content must differ from package A's (zp_make_package is
+ * fixed-content: identical bytes would mean the SAME package root). */
+static int zp_lib_repro_package_c(const char *dd, const struct zp_pkg *pa,
+                                  struct zp_pkg *pc,
+                                  struct vcs_package_release *rel_c)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    char pkgdir[512];
     snprintf(pkgdir, sizeof(pkgdir), "%s/pkg-c", dd);
-    struct zp_pkg pc;
-    memset(&pc, 0, sizeof(pc));
-    vcs_package_manifest_init(&pc.manifest);
+    memset(pc, 0, sizeof(*pc));
+    vcs_package_manifest_init(&pc->manifest);
     mkdir(pkgdir, 0700);
     bool c_built =
-        zp_add_file(&pc, pkgdir, "LICENSE",
+        zp_add_file(pc, pkgdir, "LICENSE",
                     "ISC\nsee the LICENSE file, variant 31\n",
                     VCS_PACKAGE_MODE_FILE) &&
-        zp_add_file(&pc, pkgdir, "src/y.c", "int y_31;\n",
+        zp_add_file(pc, pkgdir, "src/y.c", "int y_31;\n",
                     VCS_PACKAGE_MODE_FILE) &&
-        vcs_package_manifest_serialize(&pc.manifest, &pc.wire,
-                                       &pc.wire_len) &&
-        vcs_package_manifest_root(&pc.manifest, pc.root) &&
-        memcmp(pc.root, pa.root, 32) != 0;
+        vcs_package_manifest_serialize(&pc->manifest, &pc->wire,
+                                       &pc->wire_len) &&
+        vcs_package_manifest_root(&pc->manifest, pc->root) &&
+        memcmp(pc->root, pa->root, 32) != 0;
     if (c_built)
-        zp_hex32(pc.root, pc.root_hex);
+        zp_hex32(pc->root, pc->root_hex);
     ZP_CHECK("library repro: package C builds (distinct root)", c_built);
-    ZP_CHECK("library repro: recipe C builds", zp_use_recipe(&pc.manifest));
-    struct vcs_package_release rel_c;
+    ZP_CHECK("library repro: recipe C builds", zp_use_recipe(&pc->manifest));
     ZP_CHECK("library repro: release C signs",
-             zp_release(&rel_c, 0xcc, 1u, "carol/repro-unreleased", "ISC",
-                        pc.root));
-    char *rc_hex = zp_release_hex(&rel_c, NULL, NULL);
-    char *mc_hex = zp_hex(pc.wire, pc.wire_len);
+             zp_release(rel_c, 0xcc, 1u, "carol/repro-unreleased", "ISC",
+                        pc->root));
+    char *rc_hex = zp_release_hex(rel_c, NULL, NULL);
+    char *mc_hex = zp_hex(pc->wire, pc->wire_len);
     zp_publish_input(&c, dd, rc_hex, mc_hex, pkgdir);
     zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
     ZP_CHECK("library repro: package C commits",
@@ -1688,7 +1931,7 @@ static int t_library_reproduction(void)
     uint8_t id_c[32];
     char id_c_hex[65];
     bool id_c_ok =
-        vcs_package_release_id(&rel_c, id_c) == VCS_PACKAGE_RELEASE_OK;
+        vcs_package_release_id(rel_c, id_c) == VCS_PACKAGE_RELEASE_OK;
     if (id_c_ok)
         zp_hex32(id_c, id_c_hex);
     char envelope[600], envelope_off[600];
@@ -1697,25 +1940,33 @@ static int t_library_reproduction(void)
     snprintf(envelope_off, sizeof(envelope_off), "%s/envelope-c", dd);
     ZP_CHECK("library repro: C's envelope leaves the releases dir",
              id_c_ok && rename(envelope, envelope_off) == 0);
+    return failures;
+}
 
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    zcl_native_handle_zcode_package_library(&c.request, &c.reply);
-    const struct json_value *rows = json_get(&c.reply.data, "packages");
-    const struct json_value *row_a = NULL, *row_b = NULL, *row_c = NULL;
+static void zp_lib_repro_scan_rows(const struct json_value *rows,
+                                   const struct zp_pkg *pc,
+                                   const struct json_value **row_a,
+                                   const struct json_value **row_b,
+                                   const struct json_value **row_c)
+{
     size_t n_rows = rows ? rows->num_children : 0;
     for (size_t i = 0; i < n_rows; i++) {
         const struct json_value *row = json_at(rows, i);
         const char *name = row ? json_get_str(json_get(row, "name")) : NULL;
         if (name && strcmp(name, "rhett/repro-ok") == 0)
-            row_a = row;
+            *row_a = row;
         if (name && strcmp(name, "bob/repro-none") == 0)
-            row_b = row;
+            *row_b = row;
         const char *root_hex =
             row ? json_get_str(json_get(row, "package_root")) : NULL;
-        if (root_hex && strcmp(root_hex, pc.root_hex) == 0)
-            row_c = row;
+        if (root_hex && strcmp(root_hex, pc->root_hex) == 0)
+            *row_c = row;
     }
+}
+
+static int zp_lib_repro_row_a(const struct json_value *row_a)
+{
+    int failures = 0;
     const struct json_value *repro_a =
         row_a ? json_get(row_a, "reproduction") : NULL;
     ZP_CHECK("library repro: row A proves the gate predicate",
@@ -1727,6 +1978,15 @@ static int t_library_reproduction(void)
              json_get_int(json_get(repro_a, "distinct_toolchains")) == 2 &&
              json_get_bool(json_get(repro_a, "cross_toolchain")) &&
              !json_get_bool(json_get(repro_a, "rows_truncated")));
+    return failures;
+}
+
+/* Row B (committed, no receipts of its own) is evaluated, not reproduced;
+ * row C (no persisted release names its root) is unevaluable. */
+static int zp_lib_repro_row_b_c(const struct json_value *row_b,
+                                const struct json_value *row_c)
+{
+    int failures = 0;
     const struct json_value *repro_b =
         row_b ? json_get(row_b, "reproduction") : NULL;
     ZP_CHECK("library repro: row B is evaluated with no matching receipts",
@@ -1743,10 +2003,19 @@ static int t_library_reproduction(void)
              row_c && json_get_bool(json_get(row_c, "complete")) &&
              err_c &&
              strcmp(err_c, "no persisted release names this root") == 0);
-    /* The shelf also carries the transport-carrier packages commit
-     * persists alongside each release — complete tracked packages no
-     * persisted release names. They are the production unnamed-row case:
-     * each must read the same unevaluable error object as C. */
+    return failures;
+}
+
+/* The shelf also carries the transport-carrier packages commit
+ * persists alongside each release — complete tracked packages no
+ * persisted release names. They are the production unnamed-row case:
+ * each must read the same unevaluable error object as C. The reply
+ * census must agree with the rows. */
+static int zp_lib_repro_census(struct zp_cmd *c,
+                               const struct json_value *rows)
+{
+    int failures = 0;
+    size_t n_rows = rows ? rows->num_children : 0;
     size_t unevaluable = 0;
     for (size_t i = 0; i < n_rows; i++) {
         const struct json_value *row = json_at(rows, i);
@@ -1756,11 +2025,44 @@ static int t_library_reproduction(void)
             unevaluable++;
     }
     ZP_CHECK("library repro: census counts agree with the rows",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_int(json_get(&c.reply.data, "count")) == 6 &&
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_int(json_get(&c->reply.data, "count")) == 6 &&
              unevaluable == 4 &&
-             json_get_int(json_get(&c.reply.data, "evaluated_count")) == 2 &&
-             json_get_int(json_get(&c.reply.data, "reproduced_count")) == 1);
+             json_get_int(json_get(&c->reply.data, "evaluated_count")) == 2 &&
+             json_get_int(json_get(&c->reply.data, "reproduced_count")) == 1);
+    return failures;
+}
+
+static int t_library_reproduction(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "library_repro");
+    struct zp_cmd c;
+
+    struct zp_pkg pa;
+    failures += zp_lib_repro_commit_a(dd, &pa);
+    failures += zp_lib_repro_file_receipts(dd, &pa);
+
+    /* Package B: committed, no receipts of its own — evaluated, not
+     * reproduced. */
+    ZP_CHECK("library repro: package B commits",
+             zp_commit_one(dd, 0xbb, 1u, "bob/repro-none", "ISC", 31));
+
+    struct zp_pkg pc;
+    struct vcs_package_release rel_c;
+    failures += zp_lib_repro_package_c(dd, &pa, &pc, &rel_c);
+
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    zcl_native_handle_zcode_package_library(&c.request, &c.reply);
+    const struct json_value *rows = json_get(&c.reply.data, "packages");
+    const struct json_value *row_a = NULL, *row_b = NULL, *row_c = NULL;
+    zp_lib_repro_scan_rows(rows, &pc, &row_a, &row_b, &row_c);
+    failures += zp_lib_repro_row_a(row_a);
+    failures += zp_lib_repro_row_b_c(row_b, row_c);
+    failures += zp_lib_repro_census(&c, rows);
     zp_cmd_free(&c);
 
     zp_pkg_free(&pa);
@@ -1770,6 +2072,363 @@ static int t_library_reproduction(void)
 }
 
 /* ── 9: show ────────────────────────────────────────────────────────── */
+static int zp_show_record(struct zp_cmd *c)
+{
+    int failures = 0;
+    const struct json_value *rel = json_get(&c->reply.data, "release");
+    ZP_CHECK("show: full release record",
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED && rel &&
+             strcmp(json_get_str(json_get(rel, "name")),
+                    "rhett/ring-buffer") == 0 &&
+             strcmp(json_get_str(json_get(rel, "license")), "MIT") == 0 &&
+             json_get_int(json_get(rel, "publisher_sequence")) == 7 &&
+             json_get_str(json_get(rel, "reward_address")) != NULL &&
+             json_get_str(json_get(rel, "publisher")) != NULL &&
+             json_get_str(json_get(rel, "chain_id")) != NULL);
+    return failures;
+}
+
+static int zp_show_summary_and_page(struct zp_cmd *c)
+{
+    int failures = 0;
+    ZP_CHECK("show: manifest summary",
+             json_get_bool(json_get(&c->reply.data, "manifest_present")) &&
+             json_get_int(json_get(&c->reply.data, "files")) == 3 &&
+             json_get_bool(json_get(&c->reply.data, "license_present")) &&
+             json_get_int(json_get(&c->reply.data, "bytes")) > 0 &&
+             json_get_int(json_get(&c->reply.data, "chunks")) == 3);
+    const struct json_value *page =
+        json_get(&c->reply.data, "files_page");
+    const struct json_value *f0 = page ? json_at(page, 0) : NULL;
+    ZP_CHECK("show: bounded file page, sorted paths",
+             f0 &&
+             strcmp(json_get_str(json_get(f0, "path")), "LICENSE") == 0 &&
+             !json_get_bool(json_get(&c->reply.data, "files_truncated")));
+    return failures;
+}
+
+/* No receipts filed yet: reproduction reads as an honest empty
+ * report — not reproduced, and the publish gate would refuse. */
+static int zp_show_zero_receipts(struct zp_cmd *c, char *release_id,
+                                 size_t release_id_cap)
+{
+    int failures = 0;
+    const struct json_value *repro =
+        json_get(&c->reply.data, "reproduction");
+    ZP_CHECK("show: zero receipts report not-reproduced, not publishable",
+             repro &&
+             json_get_int(json_get(repro, "receipts_scanned")) == 0 &&
+             json_get_int(json_get(repro, "receipts_matching")) == 0 &&
+             !json_get_bool(json_get(repro, "reproduced")) &&
+             !json_get_bool(json_get(repro, "publishable")) &&
+             json_get_int(json_get(repro, "distinct_toolchains")) == 0 &&
+             !json_get_bool(json_get(repro, "cross_toolchain")) &&
+             !json_get_bool(json_get(repro, "rows_truncated")));
+    const struct json_value *rel = json_get(&c->reply.data, "release");
+    const char *rid = rel ? json_get_str(json_get(rel, "release_id")) : NULL;
+    snprintf(release_id, release_id_cap, "%s", rid ? rid : "");
+    ZP_CHECK("show: the release names its own id", rid != NULL);
+    return failures;
+}
+
+/* File two distinct, mutually matching installable receipts (the same
+ * package+recipe roots, the same output set, different flags strings —
+ * distinct build events, distinct receipt ids): the gate's exact local
+ * predicate must now read true. The two receipts pin DIFFERENT
+ * toolchain capsules, so the strong diversity claim must read too. */
+static int zp_show_file_cross_receipts(const char *dd, const struct zp_pkg *p)
+{
+    int failures = 0;
+    struct vcs_package_build_receipt ra, rb;
+    vcs_package_build_receipt_init(&ra);
+    vcs_package_build_receipt_init(&rb);
+    struct vcs_package_build_receipt *rcpts[2] = {&ra, &rb};
+    static const char *const rcpt_flags[2] = {"fixture-quick",
+                                              "fixture-standard"};
+    bool rcpts_ok = true;
+    uint8_t out_sha[32];
+    memset(out_sha, 0x5a, sizeof(out_sha));
+    for (size_t i = 0; i < 2 && rcpts_ok; i++) {
+        struct vcs_package_build_receipt *rr = rcpts[i];
+        memcpy(rr->package_root, p->root, 32);
+        memcpy(rr->recipe_root, g_zp_recipe_root, 32);
+        memcpy(rr->lock_root, p->root, 32);
+        snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
+        snprintf(rr->compiler_version, sizeof(rr->compiler_version), "14.2.0");
+        snprintf(rr->flags, sizeof(rr->flags), "%s", rcpt_flags[i]);
+        rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
+        rr->test_ran = false;
+        rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
+        uint8_t cap[32];
+        memset(cap, i == 0 ? 0xc1 : 0xc2, sizeof(cap));
+        rcpts_ok = vcs_package_build_add_output(rr, "lib/ring-buffer.a",
+                                                out_sha, 123) ==
+                       VCS_PACKAGE_BUILD_OK &&
+                   vcs_package_build_set_toolchain_capsule(rr, cap) ==
+                       VCS_PACKAGE_BUILD_OK &&
+                   zp_file_receipt(dd, rr);
+    }
+    uint8_t id_a[32], id_b[32];
+    bool ids_ok = rcpts_ok &&
+        vcs_package_build_id(&ra, id_a) == VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_id(&rb, id_b) == VCS_PACKAGE_BUILD_OK &&
+        memcmp(id_a, id_b, 32) != 0;
+    ZP_CHECK("show: two distinct matching receipts filed", ids_ok);
+    return failures;
+}
+
+static int zp_show_second(const char *dd, const struct zp_pkg *p,
+                          bool *cross_publishable, int *cross_distinct,
+                          bool *cross_flag)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "root", p->root_hex);
+    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
+    const struct json_value *repro =
+        json_get(&c.reply.data, "reproduction");
+    ZP_CHECK("show: two agreeing receipts report reproduced + publishable",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED && repro &&
+             json_get_int(json_get(repro, "receipts_matching")) == 2 &&
+             json_get_bool(json_get(repro, "reproduced")) &&
+             json_get_bool(json_get(repro, "publishable")) &&
+             json_get_int(json_get(repro, "distinct_toolchains")) == 2 &&
+             json_get_bool(json_get(repro, "cross_toolchain")) &&
+             !json_get_bool(json_get(repro, "rows_truncated")));
+    /* Capture this cross-toolchain package's verdict so it can be
+     * compared, below, against a SOLO single-toolchain package's verdict
+     * on an entirely separate package root. */
+    *cross_publishable =
+        repro && json_get_bool(json_get(repro, "publishable"));
+    *cross_distinct =
+        repro ? (int)json_get_int(json_get(repro, "distinct_toolchains"))
+              : -1;
+    *cross_flag = repro && json_get_bool(json_get(repro, "cross_toolchain"));
+    zp_cmd_free(&c);
+    return failures;
+}
+
+/* ── owner directive pin (2026-08-25): cross-toolchain diversity is
+ * EVIDENCE, NEVER A GATE. The owner ruled: "RECORD cross-toolchain
+ * diversity as evidence whenever it is observed, but NEVER GATE
+ * PUBLICATION ON IT. A two-toolchain requirement locks out every
+ * solo publisher working on one machine, which betrays runs-anywhere.
+ * Diversity accumulates from witnesses over time. It is a STRENGTH
+ * SCORE, NOT A DOOR." Prove it end to end on the real show/publish
+ * path: a SEPARATE package whose two agreeing receipts pin the SAME
+ * toolchain capsule (one publisher, one machine, rebuilt twice) must
+ * still read publishable — and the diversity fields must still be
+ * honestly reported, because recording never stops just because it
+ * doesn't gate. */
+static int zp_show_solo_fixture(const char *dd, const struct zp_pkg *p,
+                                struct zp_pkg *p2)
+{
+    int failures = 0;
+    struct zp_cmd c2;
+    char pkgdir2[512];
+    snprintf(pkgdir2, sizeof(pkgdir2), "%s/pkg-solo", dd);
+    memset(p2, 0, sizeof(*p2));
+    vcs_package_manifest_init(&p2->manifest);
+    mkdir(pkgdir2, 0700);
+    /* zp_make_package() always writes the SAME fixed file content
+     * (manifest content is what the package root hashes over, not the
+     * directory path) — reusing it here would collide p2's root with
+     * p's and pollute p's already-filed receipts. Distinct content, a
+     * distinct root, an isolated receipts bucket. */
+    bool p2_built =
+        zp_add_file(p2, pkgdir2, "LICENSE",
+                    "MIT License\n\nsolo publisher, one machine.\n",
+                    VCS_PACKAGE_MODE_FILE) &&
+        zp_add_file(p2, pkgdir2, "src/solo.c",
+                    "int solo_build(void) { return 9; }\n",
+                    VCS_PACKAGE_MODE_FILE) &&
+        vcs_package_manifest_serialize(&p2->manifest, &p2->wire,
+                                       &p2->wire_len) &&
+        vcs_package_manifest_root(&p2->manifest, p2->root) &&
+        memcmp(p2->root, p->root, 32) != 0;
+    if (p2_built)
+        zp_hex32(p2->root, p2->root_hex);
+    ZP_CHECK("owner directive fixture: solo-toolchain package builds "
+             "(distinct root)",
+             p2_built);
+    ZP_CHECK("owner directive fixture: solo-toolchain recipe builds",
+             zp_use_recipe(&p2->manifest));
+    struct vcs_package_release r2;
+    ZP_CHECK("owner directive fixture: solo-toolchain release signs",
+             zp_release(&r2, 0xdd, 1u, "solo/one-machine", "MIT", p2->root));
+    char *r2_hex = zp_release_hex(&r2, NULL, NULL);
+    char *m2_hex = zp_hex(p2->wire, p2->wire_len);
+    zp_publish_input(&c2, dd, r2_hex, m2_hex, pkgdir2);
+    zcl_native_handle_zcode_package_publish_commit(&c2.request, &c2.reply);
+    ZP_CHECK("owner directive fixture: solo-toolchain package commits",
+             c2.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zp_cmd_free(&c2);
+    free(r2_hex);
+    free(m2_hex);
+    return failures;
+}
+
+/* Two same-capsule receipts, deliberately: one publisher, one machine,
+ * rebuilt twice — the exact case the owner ruled must still pass. */
+static int zp_show_solo_receipts(const char *dd, const struct zp_pkg *p2)
+{
+    int failures = 0;
+    struct vcs_package_build_receipt sa, sb;
+    vcs_package_build_receipt_init(&sa);
+    vcs_package_build_receipt_init(&sb);
+    struct vcs_package_build_receipt *srcpts[2] = {&sa, &sb};
+    static const char *const srcpt_flags[2] = {"fixture-quick",
+                                               "fixture-standard"};
+    bool srcpts_ok = true;
+    uint8_t sout_sha[32];
+    memset(sout_sha, 0x5b, sizeof(sout_sha));
+    uint8_t solo_cap[32];
+    memset(solo_cap, 0xc9, sizeof(solo_cap));
+    for (size_t i = 0; i < 2 && srcpts_ok; i++) {
+        struct vcs_package_build_receipt *rr = srcpts[i];
+        memcpy(rr->package_root, p2->root, 32);
+        memcpy(rr->recipe_root, g_zp_recipe_root, 32);
+        memcpy(rr->lock_root, p2->root, 32);
+        snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
+        snprintf(rr->compiler_version, sizeof(rr->compiler_version),
+                 "14.2.0");
+        snprintf(rr->flags, sizeof(rr->flags), "%s", srcpt_flags[i]);
+        rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
+        rr->test_ran = false;
+        rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
+        srcpts_ok = vcs_package_build_add_output(rr, "lib/ring-buffer.a",
+                                                 sout_sha, 123) ==
+                        VCS_PACKAGE_BUILD_OK &&
+                    vcs_package_build_set_toolchain_capsule(rr, solo_cap) ==
+                        VCS_PACKAGE_BUILD_OK &&
+                    zp_file_receipt(dd, rr);
+    }
+    uint8_t sid_a[32], sid_b[32];
+    bool sids_ok = srcpts_ok &&
+        vcs_package_build_id(&sa, sid_a) == VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_id(&sb, sid_b) == VCS_PACKAGE_BUILD_OK &&
+        memcmp(sid_a, sid_b, 32) != 0;
+    ZP_CHECK("owner directive fixture: two same-capsule receipts filed",
+             sids_ok);
+    return failures;
+}
+
+static int zp_show_solo_verdict(const char *dd, const struct zp_pkg *p2,
+                                bool *solo_publishable, int *solo_distinct,
+                                bool *solo_flag)
+{
+    int failures = 0;
+    struct zp_cmd c2;
+    zp_cmd_init(&c2);
+    (void)json_push_kv_str(&c2.input, "datadir", dd);
+    (void)json_push_kv_str(&c2.input, "root", p2->root_hex);
+    zcl_native_handle_zcode_package_show(&c2.request, &c2.reply);
+    const struct json_value *repro2 =
+        json_get(&c2.reply.data, "reproduction");
+    ZP_CHECK("owner directive: a single-toolchain package still PASSES "
+             "publication (cross-toolchain diversity must be evidence, "
+             "never a publication gate — owner directive)",
+             c2.reply.status == ZCL_COMMAND_STATUS_PASSED && repro2 &&
+             json_get_int(json_get(repro2, "receipts_matching")) == 2 &&
+             json_get_bool(json_get(repro2, "reproduced")) &&
+             json_get_bool(json_get(repro2, "publishable")));
+    ZP_CHECK("owner directive: single-toolchain diversity is still "
+             "HONESTLY REPORTED (distinct_toolchains=1, cross_toolchain="
+             "false) — recording never stops just because it doesn't "
+             "gate (owner directive)",
+             repro2 &&
+             json_get_int(json_get(repro2, "distinct_toolchains")) == 1 &&
+             !json_get_bool(json_get(repro2, "cross_toolchain")));
+    *solo_publishable =
+        repro2 && json_get_bool(json_get(repro2, "publishable"));
+    *solo_distinct =
+        repro2 ? (int)json_get_int(json_get(repro2, "distinct_toolchains"))
+               : -1;
+    *solo_flag =
+        repro2 && json_get_bool(json_get(repro2, "cross_toolchain"));
+    zp_cmd_free(&c2);
+    return failures;
+}
+
+static int zp_show_solo_compare(bool solo_publishable, int solo_distinct,
+                                bool solo_flag, bool cross_publishable,
+                                int cross_distinct, bool cross_flag)
+{
+    int failures = 0;
+    ZP_CHECK("owner directive: adding a second toolchain (distinct=1->2, "
+             "cross_toolchain=false->true) changes NO publish verdict — "
+             "same pass, strictly more evidence; diversity is a strength "
+             "score, not a door (owner directive)",
+             solo_publishable && cross_publishable &&
+             solo_publishable == cross_publishable &&
+             solo_distinct == 1 && !solo_flag &&
+             cross_distinct == 2 && cross_flag);
+    return failures;
+}
+
+/* A release envelope not filed under its own id (renamed away) still
+ * loads into the index — the loader keys on CONTENT, not filename — so
+ * show finds the package, but the envelope re-read 404s and the
+ * section degrades to an error string. Show itself stays a working
+ * read-only view. */
+static int zp_show_envelope_degrade(const char *dd, const struct zp_pkg *p,
+                                    const char *release_id)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    char envelope[600], envelope_off[600];
+    snprintf(envelope, sizeof(envelope), "%s/zcode/releases/%s", dd,
+             release_id);
+    char off_id[65];
+    snprintf(off_id, sizeof(off_id), "%s", release_id);
+    off_id[0] = off_id[0] == '0' ? '1' : '0';
+    snprintf(envelope_off, sizeof(envelope_off), "%s/zcode/releases/%s", dd,
+             off_id);
+    ZP_CHECK("show: release envelope renamed off its own id",
+             rename(envelope, envelope_off) == 0);
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "root", p->root_hex);
+    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
+    ZP_CHECK("show: unreadable envelope degrades to reproduction.error",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_str(json_get(&c.reply.data, "reproduction.error")) !=
+                 NULL &&
+             !json_get(&c.reply.data, "reproduction"));
+    zp_cmd_free(&c);
+    return failures;
+}
+
+/* Unknown root and malformed root rejections. */
+static int zp_show_bad_roots(const char *dd)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    char unknown[65];
+    memset(unknown, '9', 64);
+    unknown[64] = '\0';
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "root", unknown);
+    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
+    ZP_CHECK("show: unknown root rejected",
+             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c.reply.error.code, "UNKNOWN_PACKAGE") == 0);
+    zp_cmd_free(&c);
+
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "root", "xyz");
+    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
+    ZP_CHECK("show: bad root hex rejected",
+             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             strcmp(c.reply.error.code, "BAD_ROOT") == 0);
+    zp_cmd_free(&c);
+    return failures;
+}
+
 static int t_show(void)
 {
     int failures = 0;
@@ -1797,295 +2456,35 @@ static int t_show(void)
     (void)json_push_kv_str(&c.input, "datadir", dd);
     (void)json_push_kv_str(&c.input, "root", p.root_hex);
     zcl_native_handle_zcode_package_show(&c.request, &c.reply);
-    const struct json_value *rel = json_get(&c.reply.data, "release");
-    ZP_CHECK("show: full release record",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED && rel &&
-             strcmp(json_get_str(json_get(rel, "name")),
-                    "rhett/ring-buffer") == 0 &&
-             strcmp(json_get_str(json_get(rel, "license")), "MIT") == 0 &&
-             json_get_int(json_get(rel, "publisher_sequence")) == 7 &&
-             json_get_str(json_get(rel, "reward_address")) != NULL &&
-             json_get_str(json_get(rel, "publisher")) != NULL &&
-             json_get_str(json_get(rel, "chain_id")) != NULL);
-    ZP_CHECK("show: manifest summary",
-             json_get_bool(json_get(&c.reply.data, "manifest_present")) &&
-             json_get_int(json_get(&c.reply.data, "files")) == 3 &&
-             json_get_bool(json_get(&c.reply.data, "license_present")) &&
-             json_get_int(json_get(&c.reply.data, "bytes")) > 0 &&
-             json_get_int(json_get(&c.reply.data, "chunks")) == 3);
-    const struct json_value *page =
-        json_get(&c.reply.data, "files_page");
-    const struct json_value *f0 = page ? json_at(page, 0) : NULL;
-    ZP_CHECK("show: bounded file page, sorted paths",
-             f0 &&
-             strcmp(json_get_str(json_get(f0, "path")), "LICENSE") == 0 &&
-             !json_get_bool(json_get(&c.reply.data, "files_truncated")));
-    /* No receipts filed yet: reproduction reads as an honest empty
-     * report — not reproduced, and the publish gate would refuse. */
-    const struct json_value *repro =
-        json_get(&c.reply.data, "reproduction");
-    ZP_CHECK("show: zero receipts report not-reproduced, not publishable",
-             repro &&
-             json_get_int(json_get(repro, "receipts_scanned")) == 0 &&
-             json_get_int(json_get(repro, "receipts_matching")) == 0 &&
-             !json_get_bool(json_get(repro, "reproduced")) &&
-             !json_get_bool(json_get(repro, "publishable")) &&
-             json_get_int(json_get(repro, "distinct_toolchains")) == 0 &&
-             !json_get_bool(json_get(repro, "cross_toolchain")) &&
-             !json_get_bool(json_get(repro, "rows_truncated")));
     char release_id[65];
-    const char *rid = rel ? json_get_str(json_get(rel, "release_id")) : NULL;
-    snprintf(release_id, sizeof(release_id), "%s", rid ? rid : "");
-    ZP_CHECK("show: the release names its own id", rid != NULL);
+    failures += zp_show_record(&c);
+    failures += zp_show_summary_and_page(&c);
+    failures += zp_show_zero_receipts(&c, release_id, sizeof(release_id));
     zp_cmd_free(&c);
 
-    /* File two distinct, mutually matching installable receipts (the same
-     * package+recipe roots, the same output set, different flags strings —
-     * distinct build events, distinct receipt ids): the gate's exact local
-     * predicate must now read true. The two receipts pin DIFFERENT
-     * toolchain capsules, so the strong diversity claim must read too. */
-    struct vcs_package_build_receipt ra, rb;
-    vcs_package_build_receipt_init(&ra);
-    vcs_package_build_receipt_init(&rb);
-    struct vcs_package_build_receipt *rcpts[2] = {&ra, &rb};
-    static const char *const rcpt_flags[2] = {"fixture-quick",
-                                              "fixture-standard"};
-    bool rcpts_ok = true;
-    uint8_t out_sha[32];
-    memset(out_sha, 0x5a, sizeof(out_sha));
-    for (size_t i = 0; i < 2 && rcpts_ok; i++) {
-        struct vcs_package_build_receipt *rr = rcpts[i];
-        memcpy(rr->package_root, p.root, 32);
-        memcpy(rr->recipe_root, g_zp_recipe_root, 32);
-        memcpy(rr->lock_root, p.root, 32);
-        snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
-        snprintf(rr->compiler_version, sizeof(rr->compiler_version), "14.2.0");
-        snprintf(rr->flags, sizeof(rr->flags), "%s", rcpt_flags[i]);
-        rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
-        rr->test_ran = false;
-        rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
-        uint8_t cap[32];
-        memset(cap, i == 0 ? 0xc1 : 0xc2, sizeof(cap));
-        rcpts_ok = vcs_package_build_add_output(rr, "lib/ring-buffer.a",
-                                                out_sha, 123) ==
-                       VCS_PACKAGE_BUILD_OK &&
-                   vcs_package_build_set_toolchain_capsule(rr, cap) ==
-                       VCS_PACKAGE_BUILD_OK &&
-                   zp_file_receipt(dd, rr);
-    }
-    uint8_t id_a[32], id_b[32];
-    bool ids_ok = rcpts_ok &&
-        vcs_package_build_id(&ra, id_a) == VCS_PACKAGE_BUILD_OK &&
-        vcs_package_build_id(&rb, id_b) == VCS_PACKAGE_BUILD_OK &&
-        memcmp(id_a, id_b, 32) != 0;
-    ZP_CHECK("show: two distinct matching receipts filed", ids_ok);
+    failures += zp_show_file_cross_receipts(dd, &p);
 
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "root", p.root_hex);
-    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
-    repro = json_get(&c.reply.data, "reproduction");
-    ZP_CHECK("show: two agreeing receipts report reproduced + publishable",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED && repro &&
-             json_get_int(json_get(repro, "receipts_matching")) == 2 &&
-             json_get_bool(json_get(repro, "reproduced")) &&
-             json_get_bool(json_get(repro, "publishable")) &&
-             json_get_int(json_get(repro, "distinct_toolchains")) == 2 &&
-             json_get_bool(json_get(repro, "cross_toolchain")) &&
-             !json_get_bool(json_get(repro, "rows_truncated")));
-    /* Capture this cross-toolchain package's verdict so it can be
-     * compared, below, against a SOLO single-toolchain package's verdict
-     * on an entirely separate package root. */
-    bool cross_publishable =
-        repro && json_get_bool(json_get(repro, "publishable"));
-    int cross_distinct =
-        repro ? (int)json_get_int(json_get(repro, "distinct_toolchains"))
-              : -1;
-    bool cross_flag = repro && json_get_bool(json_get(repro, "cross_toolchain"));
-    zp_cmd_free(&c);
+    bool cross_publishable = false;
+    int cross_distinct = -1;
+    bool cross_flag = false;
+    failures += zp_show_second(dd, &p, &cross_publishable, &cross_distinct,
+                               &cross_flag);
 
-    /* ── owner directive pin (2026-08-25): cross-toolchain diversity is
-     * EVIDENCE, NEVER A GATE. The owner ruled: "RECORD cross-toolchain
-     * diversity as evidence whenever it is observed, but NEVER GATE
-     * PUBLICATION ON IT. A two-toolchain requirement locks out every
-     * solo publisher working on one machine, which betrays runs-anywhere.
-     * Diversity accumulates from witnesses over time. It is a STRENGTH
-     * SCORE, NOT A DOOR." Prove it end to end on the real show/publish
-     * path: a SEPARATE package whose two agreeing receipts pin the SAME
-     * toolchain capsule (one publisher, one machine, rebuilt twice) must
-     * still read publishable — and the diversity fields must still be
-     * honestly reported, because recording never stops just because it
-     * doesn't gate. */
-    char pkgdir2[512];
-    snprintf(pkgdir2, sizeof(pkgdir2), "%s/pkg-solo", dd);
     struct zp_pkg p2;
-    memset(&p2, 0, sizeof(p2));
-    vcs_package_manifest_init(&p2.manifest);
-    mkdir(pkgdir2, 0700);
-    /* zp_make_package() always writes the SAME fixed file content
-     * (manifest content is what the package root hashes over, not the
-     * directory path) — reusing it here would collide p2's root with
-     * p's and pollute p's already-filed receipts. Distinct content, a
-     * distinct root, an isolated receipts bucket. */
-    bool p2_built =
-        zp_add_file(&p2, pkgdir2, "LICENSE",
-                    "MIT License\n\nsolo publisher, one machine.\n",
-                    VCS_PACKAGE_MODE_FILE) &&
-        zp_add_file(&p2, pkgdir2, "src/solo.c",
-                    "int solo_build(void) { return 9; }\n",
-                    VCS_PACKAGE_MODE_FILE) &&
-        vcs_package_manifest_serialize(&p2.manifest, &p2.wire,
-                                       &p2.wire_len) &&
-        vcs_package_manifest_root(&p2.manifest, p2.root) &&
-        memcmp(p2.root, p.root, 32) != 0;
-    if (p2_built)
-        zp_hex32(p2.root, p2.root_hex);
-    ZP_CHECK("owner directive fixture: solo-toolchain package builds "
-             "(distinct root)",
-             p2_built);
-    ZP_CHECK("owner directive fixture: solo-toolchain recipe builds",
-             zp_use_recipe(&p2.manifest));
-    struct vcs_package_release r2;
-    ZP_CHECK("owner directive fixture: solo-toolchain release signs",
-             zp_release(&r2, 0xdd, 1u, "solo/one-machine", "MIT", p2.root));
-    char *r2_hex = zp_release_hex(&r2, NULL, NULL);
-    char *m2_hex = zp_hex(p2.wire, p2.wire_len);
-    struct zp_cmd c2;
-    zp_publish_input(&c2, dd, r2_hex, m2_hex, pkgdir2);
-    zcl_native_handle_zcode_package_publish_commit(&c2.request, &c2.reply);
-    ZP_CHECK("owner directive fixture: solo-toolchain package commits",
-             c2.reply.status == ZCL_COMMAND_STATUS_PASSED);
-    zp_cmd_free(&c2);
-
-    struct vcs_package_build_receipt sa, sb;
-    vcs_package_build_receipt_init(&sa);
-    vcs_package_build_receipt_init(&sb);
-    struct vcs_package_build_receipt *srcpts[2] = {&sa, &sb};
-    static const char *const srcpt_flags[2] = {"fixture-quick",
-                                               "fixture-standard"};
-    bool srcpts_ok = true;
-    uint8_t sout_sha[32];
-    memset(sout_sha, 0x5b, sizeof(sout_sha));
-    uint8_t solo_cap[32];
-    memset(solo_cap, 0xc9, sizeof(solo_cap));
-    for (size_t i = 0; i < 2 && srcpts_ok; i++) {
-        struct vcs_package_build_receipt *rr = srcpts[i];
-        memcpy(rr->package_root, p2.root, 32);
-        memcpy(rr->recipe_root, g_zp_recipe_root, 32);
-        memcpy(rr->lock_root, p2.root, 32);
-        snprintf(rr->compiler_id, sizeof(rr->compiler_id), "gcc");
-        snprintf(rr->compiler_version, sizeof(rr->compiler_version),
-                 "14.2.0");
-        snprintf(rr->flags, sizeof(rr->flags), "%s", srcpt_flags[i]);
-        rr->isolation = (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL;
-        rr->test_ran = false;
-        rr->result_class = (uint8_t)VCS_PACKAGE_BUILD_RESULT_BUILD_PASS;
-        /* SAME capsule on both receipts, deliberately: one publisher, one
-         * machine, rebuilt twice — the exact case the owner ruled must
-         * still pass. */
-        srcpts_ok = vcs_package_build_add_output(rr, "lib/ring-buffer.a",
-                                                 sout_sha, 123) ==
-                        VCS_PACKAGE_BUILD_OK &&
-                    vcs_package_build_set_toolchain_capsule(rr, solo_cap) ==
-                        VCS_PACKAGE_BUILD_OK &&
-                    zp_file_receipt(dd, rr);
-    }
-    uint8_t sid_a[32], sid_b[32];
-    bool sids_ok = srcpts_ok &&
-        vcs_package_build_id(&sa, sid_a) == VCS_PACKAGE_BUILD_OK &&
-        vcs_package_build_id(&sb, sid_b) == VCS_PACKAGE_BUILD_OK &&
-        memcmp(sid_a, sid_b, 32) != 0;
-    ZP_CHECK("owner directive fixture: two same-capsule receipts filed",
-             sids_ok);
-
-    zp_cmd_init(&c2);
-    (void)json_push_kv_str(&c2.input, "datadir", dd);
-    (void)json_push_kv_str(&c2.input, "root", p2.root_hex);
-    zcl_native_handle_zcode_package_show(&c2.request, &c2.reply);
-    const struct json_value *repro2 =
-        json_get(&c2.reply.data, "reproduction");
-    ZP_CHECK("owner directive: a single-toolchain package still PASSES "
-             "publication (cross-toolchain diversity must be evidence, "
-             "never a publication gate — owner directive)",
-             c2.reply.status == ZCL_COMMAND_STATUS_PASSED && repro2 &&
-             json_get_int(json_get(repro2, "receipts_matching")) == 2 &&
-             json_get_bool(json_get(repro2, "reproduced")) &&
-             json_get_bool(json_get(repro2, "publishable")));
-    ZP_CHECK("owner directive: single-toolchain diversity is still "
-             "HONESTLY REPORTED (distinct_toolchains=1, cross_toolchain="
-             "false) — recording never stops just because it doesn't "
-             "gate (owner directive)",
-             repro2 &&
-             json_get_int(json_get(repro2, "distinct_toolchains")) == 1 &&
-             !json_get_bool(json_get(repro2, "cross_toolchain")));
-    bool solo_publishable =
-        repro2 && json_get_bool(json_get(repro2, "publishable"));
-    int solo_distinct =
-        repro2 ? (int)json_get_int(json_get(repro2, "distinct_toolchains"))
-               : -1;
-    bool solo_flag =
-        repro2 && json_get_bool(json_get(repro2, "cross_toolchain"));
-    ZP_CHECK("owner directive: adding a second toolchain (distinct=1->2, "
-             "cross_toolchain=false->true) changes NO publish verdict — "
-             "same pass, strictly more evidence; diversity is a strength "
-             "score, not a door (owner directive)",
-             solo_publishable && cross_publishable &&
-             solo_publishable == cross_publishable &&
-             solo_distinct == 1 && !solo_flag &&
-             cross_distinct == 2 && cross_flag);
-    zp_cmd_free(&c2);
-    free(r2_hex);
-    free(m2_hex);
+    failures += zp_show_solo_fixture(dd, &p, &p2);
+    failures += zp_show_solo_receipts(dd, &p2);
+    bool solo_publishable = false;
+    int solo_distinct = -1;
+    bool solo_flag = false;
+    failures += zp_show_solo_verdict(dd, &p2, &solo_publishable,
+                                     &solo_distinct, &solo_flag);
+    failures += zp_show_solo_compare(solo_publishable, solo_distinct,
+                                     solo_flag, cross_publishable,
+                                     cross_distinct, cross_flag);
     zp_pkg_free(&p2);
 
-    /* A release envelope not filed under its own id (renamed away) still
-     * loads into the index — the loader keys on CONTENT, not filename — so
-     * show finds the package, but the envelope re-read 404s and the
-     * section degrades to an error string. Show itself stays a working
-     * read-only view. */
-    char envelope[600], envelope_off[600];
-    snprintf(envelope, sizeof(envelope), "%s/zcode/releases/%s", dd,
-             release_id);
-    char off_id[65];
-    snprintf(off_id, sizeof(off_id), "%s", release_id);
-    off_id[0] = off_id[0] == '0' ? '1' : '0';
-    snprintf(envelope_off, sizeof(envelope_off), "%s/zcode/releases/%s", dd,
-             off_id);
-    ZP_CHECK("show: release envelope renamed off its own id",
-             rename(envelope, envelope_off) == 0);
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "root", p.root_hex);
-    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
-    ZP_CHECK("show: unreadable envelope degrades to reproduction.error",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_str(json_get(&c.reply.data, "reproduction.error")) !=
-                 NULL &&
-             !json_get(&c.reply.data, "reproduction"));
-    zp_cmd_free(&c);
-
-    /* Unknown root: FAILED naming UNKNOWN_PACKAGE. */
-    char unknown[65];
-    memset(unknown, '9', 64);
-    unknown[64] = '\0';
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "root", unknown);
-    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
-    ZP_CHECK("show: unknown root rejected",
-             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-             strcmp(c.reply.error.code, "UNKNOWN_PACKAGE") == 0);
-    zp_cmd_free(&c);
-
-    /* Malformed root: FAILED naming BAD_ROOT. */
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "root", "xyz");
-    zcl_native_handle_zcode_package_show(&c.request, &c.reply);
-    ZP_CHECK("show: bad root hex rejected",
-             c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-             strcmp(c.reply.error.code, "BAD_ROOT") == 0);
-    zp_cmd_free(&c);
+    failures += zp_show_envelope_degrade(dd, &p, release_id);
+    failures += zp_show_bad_roots(dd);
 
     free(r_hex);
     free(m_hex);
@@ -2095,22 +2494,12 @@ static int t_show(void)
 }
 
 /* ── 10: index rebuild from the CAS (simulated crash) ────────────────── */
-static int t_index_rebuild(void)
+/* Build, discard (the "crash": every in-memory copy is gone), rebuild
+ * from the persisted CAS bytes — the two projections must agree entry
+ * for entry, because the index holds no truth of its own. */
+static int zp_rebuild_projection(const char *zcode_dir)
 {
     int failures = 0;
-    chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "rebuild");
-    ZP_CHECK("rebuild: two packages commit",
-             zp_commit_one(dd, 0xaa, 1u, "rhett/alpha", "MIT", 11) &&
-             zp_commit_one(dd, 0xbb, 1u, "bob/beta", "ISC", 12));
-
-    char zcode_dir[512];
-    snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", dd);
-
-    /* Build, discard (the "crash": every in-memory copy is gone), rebuild
-     * from the persisted CAS bytes — the two projections must agree entry
-     * for entry, because the index holds no truth of its own. */
     struct vcs_package_index *a = vcs_package_index_build(zcode_dir);
     ZP_CHECK("rebuild: first build", a != NULL);
     struct vcs_package_index *b = vcs_package_index_build(zcode_dir);
@@ -2138,8 +2527,13 @@ static int t_index_rebuild(void)
     }
     vcs_package_index_free(a);
     vcs_package_index_free(b);
+    return failures;
+}
 
-    /* find_root on the rebuilt index (search-by-root used by show). */
+/* find_root on the rebuilt index (search-by-root used by show). */
+static int zp_rebuild_find_root(const char *zcode_dir)
+{
+    int failures = 0;
     struct vcs_package_index *idx = vcs_package_index_build(zcode_dir);
     ZP_CHECK("rebuild: third build", idx != NULL);
     if (idx) {
@@ -2162,6 +2556,24 @@ static int t_index_rebuild(void)
                  strcmp(found->release_id_hex, e0->release_id_hex) == 0);
         vcs_package_index_free(idx);
     }
+    return failures;
+}
+
+static int t_index_rebuild(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "rebuild");
+    ZP_CHECK("rebuild: two packages commit",
+             zp_commit_one(dd, 0xaa, 1u, "rhett/alpha", "MIT", 11) &&
+             zp_commit_one(dd, 0xbb, 1u, "bob/beta", "ISC", 12));
+
+    char zcode_dir[512];
+    snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", dd);
+
+    failures += zp_rebuild_projection(zcode_dir);
+    failures += zp_rebuild_find_root(zcode_dir);
 
     test_rm_rf_recursive(dd);
     return failures;
@@ -2208,6 +2620,210 @@ static bool zp_registry_run(const struct zcl_command_spec *spec,
     return true;
 }
 
+/* The CLI path and the direct-handler path must be the same code, or
+ * cases 1-9 prove nothing about what an operator can actually run. */
+static int zp_registry_leaves_publish(
+    const struct zcl_command_spec *plan,
+    const struct zcl_command_spec *commit)
+{
+    int failures = 0;
+    ZP_CHECK("registry: both publish leaves are registered", plan && commit);
+    ZP_CHECK("registry: both publish leaves bind a handler",
+             plan && commit && plan->handler && commit->handler);
+    ZP_CHECK("registry: plan binds the handler the direct tests call",
+             plan &&
+             plan->handler == zcl_native_handle_zcode_package_publish_plan);
+    ZP_CHECK("registry: commit binds the handler the direct tests call",
+             commit &&
+             commit->handler ==
+                 zcl_native_handle_zcode_package_publish_commit);
+    return failures;
+}
+
+static int zp_registry_leaves_misc(const struct zcl_command_spec *library,
+                                   const struct zcl_command_spec *fetch)
+{
+    int failures = 0;
+    ZP_CHECK("registry: library leaf is registered", library && library->handler);
+    ZP_CHECK("registry: library binds the handler the direct tests call",
+             library &&
+             library->handler == zcl_native_handle_zcode_package_library);
+    ZP_CHECK("registry: fetch leaf is registered", fetch && fetch->handler);
+    ZP_CHECK("registry: fetch binds the handler the direct tests call",
+             fetch && fetch->handler == zcl_native_handle_zcode_package_fetch);
+    ZP_CHECK("registry: fetch does not require root when name is allowed",
+             fetch && fetch->positional_keys &&
+             fetch->positional_keys[0] == '\0');
+    return failures;
+}
+
+static int zp_registry_library_run(const char *dd,
+                                   const struct zcl_command_spec *library,
+                                   char *why, size_t why_size)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    bool library_ran = zp_registry_run(library, &c, why, why_size);
+    ZP_CHECK("registry: library accepts datadir-only input", library_ran);
+    if (!library_ran)
+        printf("    validator refused: %s\n", why);
+    ZP_CHECK("registry: library empty store is a passed empty list",
+             library_ran && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_int(json_get(&c.reply.data, "count")) == 0);
+    zp_cmd_free(&c);
+    return failures;
+}
+
+/* The fetch leaf accepts name without root and root without name. */
+static int zp_registry_fetch_inputs(const char *dd,
+                                    const struct zcl_command_spec *fetch,
+                                    const char *root_hex, char *why,
+                                    size_t why_size)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "name", "rhett/ring-cli");
+    why[0] = 0;
+    bool fetch_name_ok =
+        fetch && zcl_command_registry_input_validate(fetch, &c.input, why,
+                                                     why_size);
+    ZP_CHECK("registry: fetch accepts name without root", fetch_name_ok);
+    if (!fetch_name_ok)
+        printf("    validator refused: %s\n", why);
+    zp_cmd_free(&c);
+
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "root", root_hex);
+    why[0] = 0;
+    ZP_CHECK("registry: fetch still accepts root without name",
+             fetch && zcl_command_registry_input_validate(fetch, &c.input,
+                                                          why, why_size));
+    zp_cmd_free(&c);
+    return failures;
+}
+
+/* plan — the operator's exact input, through input_validate; and a plan
+ * missing recipe_hex still reaches the handler, which names the rule. */
+static int zp_registry_plan_runs(const char *dd,
+                                 const struct zcl_command_spec *plan,
+                                 const char *release_hex,
+                                 const char *manifest_hex, const char *pkgdir,
+                                 char *why, size_t why_size)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    bool plan_ran = zp_registry_run(plan, &c, why, why_size);
+    ZP_CHECK("registry: plan accepts the input the handler requires",
+             plan_ran);
+    if (!plan_ran)
+        printf("    validator refused: %s\n", why);
+    ZP_CHECK("registry: plan validates the candidate through the CLI path",
+             plan_ran && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_bool(json_get(&c.reply.data, "valid")));
+    zp_cmd_free(&c);
+
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    bool norecipe_ran = zp_registry_run(plan, &c, why, why_size);
+    ZP_CHECK("registry: plan without recipe_hex still reaches the handler",
+             norecipe_ran);
+    ZP_CHECK("registry: plan without recipe_hex names recipe-missing",
+             norecipe_ran &&
+             !json_get_bool(json_get(&c.reply.data, "valid")) &&
+             zp_failure_rule(&c.reply, 0) &&
+             strcmp(zp_failure_rule(&c.reply, 0), "recipe-missing") == 0);
+    zp_cmd_free(&c);
+    return failures;
+}
+
+/* The validator is real, not bypassed: an undeclared key is refused, and
+ * `day` (a commit-only window pin) is refused by plan but accepted by
+ * commit. */
+static int zp_registry_validator_real(const char *dd,
+                                      const struct zcl_command_spec *plan,
+                                      const struct zcl_command_spec *commit,
+                                      const char *release_hex,
+                                      const char *manifest_hex, char *why,
+                                      size_t why_size)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_str(&c.input, "not_a_publish_key", "x");
+    why[0] = 0;
+    ZP_CHECK("registry: an undeclared key is refused by input_validate",
+             plan && !zcl_command_registry_input_validate(plan, &c.input,
+                                                          why, why_size) &&
+             strstr(why, "not_a_publish_key") != NULL);
+    zp_cmd_free(&c);
+
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_int(&c.input, "day", 20100);
+    why[0] = 0;
+    ZP_CHECK("registry: plan refuses day (it reads none)",
+             plan && !zcl_command_registry_input_validate(plan, &c.input,
+                                                          why, why_size));
+    ZP_CHECK("registry: commit accepts day (it reads it)",
+             commit && zcl_command_registry_input_validate(commit, &c.input,
+                                                           why, why_size));
+    zp_cmd_free(&c);
+    return failures;
+}
+
+/* commit — the full operator input, through input_validate. */
+static int zp_registry_commit_run(const char *dd,
+                                  const struct zcl_command_spec *commit,
+                                  const char *release_hex,
+                                  const char *manifest_hex,
+                                  const char *pkgdir, char *why,
+                                  size_t why_size)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    (void)json_push_kv_int(&c.input, "day", 20100);
+    why[0] = 0;
+    bool commit_ran = zp_registry_run(commit, &c, why, why_size);
+    ZP_CHECK("registry: commit accepts the input the handler requires",
+             commit_ran);
+    if (!commit_ran)
+        printf("    validator refused: %s\n", why);
+    ZP_CHECK("registry: commit persists through the CLI path",
+             commit_ran && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_str(json_get(&c.reply.data, "result")) &&
+             strcmp(json_get_str(json_get(&c.reply.data, "result")),
+                    "committed") == 0);
+    zp_cmd_free(&c);
+    return failures;
+}
+
 static int t_registry_path(void)
 {
     int failures = 0;
@@ -2231,154 +2847,21 @@ static int t_registry_path(void)
     const struct zcl_command_spec *plan = zp_leaf("zcode.package.publish.plan");
     const struct zcl_command_spec *commit =
         zp_leaf("zcode.package.publish.commit");
-    ZP_CHECK("registry: both publish leaves are registered", plan && commit);
-    ZP_CHECK("registry: both publish leaves bind a handler",
-             plan && commit && plan->handler && commit->handler);
-    /* The CLI path and the direct-handler path must be the same code, or
-     * cases 1-9 prove nothing about what an operator can actually run. */
-    ZP_CHECK("registry: plan binds the handler the direct tests call",
-             plan &&
-             plan->handler == zcl_native_handle_zcode_package_publish_plan);
-    ZP_CHECK("registry: commit binds the handler the direct tests call",
-             commit &&
-             commit->handler ==
-                 zcl_native_handle_zcode_package_publish_commit);
-
     const struct zcl_command_spec *library = zp_leaf("zcode.package.library");
-    ZP_CHECK("registry: library leaf is registered", library && library->handler);
-    ZP_CHECK("registry: library binds the handler the direct tests call",
-             library &&
-             library->handler == zcl_native_handle_zcode_package_library);
-
     const struct zcl_command_spec *fetch = zp_leaf("zcode.package.fetch");
-    ZP_CHECK("registry: fetch leaf is registered", fetch && fetch->handler);
-    ZP_CHECK("registry: fetch binds the handler the direct tests call",
-             fetch && fetch->handler == zcl_native_handle_zcode_package_fetch);
-    ZP_CHECK("registry: fetch does not require root when name is allowed",
-             fetch && fetch->positional_keys &&
-             fetch->positional_keys[0] == '\0');
+    failures += zp_registry_leaves_publish(plan, commit);
+    failures += zp_registry_leaves_misc(library, fetch);
 
     char why[192] = {0};
-    struct zp_cmd c;
-
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    bool library_ran = zp_registry_run(library, &c, why, sizeof(why));
-    ZP_CHECK("registry: library accepts datadir-only input", library_ran);
-    if (!library_ran)
-        printf("    validator refused: %s\n", why);
-    ZP_CHECK("registry: library empty store is a passed empty list",
-             library_ran && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_int(json_get(&c.reply.data, "count")) == 0);
-    zp_cmd_free(&c);
-
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "name", "rhett/ring-cli");
-    why[0] = 0;
-    bool fetch_name_ok =
-        fetch && zcl_command_registry_input_validate(fetch, &c.input, why,
-                                                     sizeof(why));
-    ZP_CHECK("registry: fetch accepts name without root", fetch_name_ok);
-    if (!fetch_name_ok)
-        printf("    validator refused: %s\n", why);
-    zp_cmd_free(&c);
-
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "root", p.root_hex);
-    why[0] = 0;
-    ZP_CHECK("registry: fetch still accepts root without name",
-             fetch && zcl_command_registry_input_validate(fetch, &c.input, why,
-                                                          sizeof(why)));
-    zp_cmd_free(&c);
-
-    /* plan — the operator's exact input, through input_validate. */
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
-    bool plan_ran = zp_registry_run(plan, &c, why, sizeof(why));
-    ZP_CHECK("registry: plan accepts the input the handler requires",
-             plan_ran);
-    if (!plan_ran)
-        printf("    validator refused: %s\n", why);
-    ZP_CHECK("registry: plan validates the candidate through the CLI path",
-             plan_ran && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_bool(json_get(&c.reply.data, "valid")));
-    zp_cmd_free(&c);
-
-    /* recipe_hex is REQUIRED by the handler: dropping it must reach the
-     * handler and be named there, not be swallowed by the validator. */
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
-    bool norecipe_ran = zp_registry_run(plan, &c, why, sizeof(why));
-    ZP_CHECK("registry: plan without recipe_hex still reaches the handler",
-             norecipe_ran);
-    ZP_CHECK("registry: plan without recipe_hex names recipe-missing",
-             norecipe_ran &&
-             !json_get_bool(json_get(&c.reply.data, "valid")) &&
-             zp_failure_rule(&c.reply, 0) &&
-             strcmp(zp_failure_rule(&c.reply, 0), "recipe-missing") == 0);
-    zp_cmd_free(&c);
-
-    /* The validator is real, not bypassed: an undeclared key is refused. */
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
-    (void)json_push_kv_str(&c.input, "not_a_publish_key", "x");
-    why[0] = 0;
-    ZP_CHECK("registry: an undeclared key is refused by input_validate",
-             plan && !zcl_command_registry_input_validate(plan, &c.input, why,
-                                                          sizeof(why)) &&
-             strstr(why, "not_a_publish_key") != NULL);
-    zp_cmd_free(&c);
-
-    /* `day` is a commit-only window pin: the plan handler never reads it, so
-     * the plan leaf must not advertise it (and the commit leaf must). */
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
-    (void)json_push_kv_int(&c.input, "day", 20100);
-    why[0] = 0;
-    ZP_CHECK("registry: plan refuses day (it reads none)",
-             plan && !zcl_command_registry_input_validate(plan, &c.input, why,
-                                                          sizeof(why)));
-    ZP_CHECK("registry: commit accepts day (it reads it)",
-             commit && zcl_command_registry_input_validate(commit, &c.input,
-                                                           why, sizeof(why)));
-    zp_cmd_free(&c);
-
-    /* commit — the full operator input, through input_validate, persisting
-     * into this case's own throwaway datadir. */
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
-    (void)json_push_kv_int(&c.input, "day", 20100);
-    why[0] = 0;
-    bool commit_ran = zp_registry_run(commit, &c, why, sizeof(why));
-    ZP_CHECK("registry: commit accepts the input the handler requires",
-             commit_ran);
-    if (!commit_ran)
-        printf("    validator refused: %s\n", why);
-    ZP_CHECK("registry: commit persists through the CLI path",
-             commit_ran && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_str(json_get(&c.reply.data, "result")) &&
-             strcmp(json_get_str(json_get(&c.reply.data, "result")),
-                    "committed") == 0);
-    zp_cmd_free(&c);
+    failures += zp_registry_library_run(dd, library, why, sizeof(why));
+    failures += zp_registry_fetch_inputs(dd, fetch, p.root_hex, why,
+                                         sizeof(why));
+    failures += zp_registry_plan_runs(dd, plan, release_hex, manifest_hex,
+                                      pkgdir, why, sizeof(why));
+    failures += zp_registry_validator_real(dd, plan, commit, release_hex,
+                                           manifest_hex, why, sizeof(why));
+    failures += zp_registry_commit_run(dd, commit, release_hex, manifest_hex,
+                                       pkgdir, why, sizeof(why));
 
     free(release_hex);
     free(manifest_hex);
@@ -2426,6 +2909,96 @@ static void zp_rpc_reset(bool answers)
     g_zp_rpc_answers = answers;
 }
 
+/* (a) implicit datadir + live cookie: the resident executes it. Its
+ * reply is the caller's reply, and this process wrote no store. */
+static int zp_resident_case_a(const char *dd, const char *release_hex,
+                              const char *manifest_hex, const char *pkgdir,
+                              const char *manifest_path)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    struct stat st;
+    zp_rpc_reset(true);
+    node_rpc_client_set_test_hook(zp_rpc_stub);
+    zcl_native_bridge_bind_rpc(dd, 0);
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    if (g_zp_recipe_hex)
+        (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZP_CHECK("resident: the resident is asked to commit",
+             g_zp_rpc_calls == 1 &&
+             strcmp(g_zp_rpc_method, "zcode_package_publish_commit") == 0);
+    ZP_CHECK("resident: its reply is the caller's reply",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_str(json_get(&c.reply.data, "package_root")) &&
+             strcmp(json_get_str(json_get(&c.reply.data, "package_root")),
+                    "resident-answered") == 0 &&
+             c.reply.error.mutated);
+    ZP_CHECK("resident: this process opened no second store",
+             stat(manifest_path, &st) != 0);
+    /* The resident's working directory is not this process's, so the chunk
+     * source must travel absolute; datadir is the resident's to supply. */
+    ZP_CHECK("resident: the forwarded chunk source is absolute",
+             g_zp_rpc_params && strstr(g_zp_rpc_params, "\"dir\":\"/"));
+    ZP_CHECK("resident: the forwarded input names no datadir",
+             g_zp_rpc_params && !strstr(g_zp_rpc_params, "datadir"));
+    zp_cmd_free(&c);
+    return failures;
+}
+
+/* (c) a cookie a killed node left behind: nothing answers, and the
+ * publish still lands locally rather than failing the operator. */
+static int zp_resident_case_c(char *dd, char *pkgdir, size_t pkgdir_cap,
+                              struct zp_pkg *p,
+                              struct vcs_package_release *r,
+                              char **release_hex, char **manifest_hex,
+                              const char *manifest_path)
+{
+    int failures = 0;
+    struct zp_cmd c;
+    struct stat st;
+    test_rm_rf_recursive(dd);
+    test_make_tmpdir(dd, 256, "zcode_publish", "resident");
+    snprintf(pkgdir, pkgdir_cap, "%s/pkg", dd);
+    zp_pkg_free(p);
+    ZP_CHECK("resident: fixture rebuilds for the stale-cookie case",
+             zp_make_package(p, pkgdir) && zp_use_recipe(&p->manifest));
+    char cookie[512];
+    snprintf(cookie, sizeof(cookie), "%s/.cookie", dd);
+    FILE *cf = fopen(cookie, "w");
+    if (cf) {
+        fputs("__cookie__:test\n", cf);
+        fclose(cf);
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/zcode/manifests/%s", dd, p->root_hex);
+    (void)manifest_path;
+    free(*release_hex);
+    free(*manifest_hex);
+    ZP_CHECK("resident: stale-cookie release signs",
+             zp_release(r, 0x2b, 1u, "alice/stale-cookie", "MIT", p->root));
+    *release_hex = zp_release_hex(r, NULL, NULL);
+    *manifest_hex = zp_hex(p->wire, p->wire_len);
+    zp_rpc_reset(false);
+    zcl_native_bridge_bind_rpc(dd, 0);
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "release_hex", *release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", *manifest_hex);
+    if (g_zp_recipe_hex)
+        (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZP_CHECK("resident: a silent resident falls back to the one-shot commit",
+             g_zp_rpc_calls == 1 &&
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             stat(path, &st) == 0);
+    zp_cmd_free(&c);
+    return failures;
+}
+
 static int t_commit_routes_to_resident(void)
 {
     int failures = 0;
@@ -2458,36 +3031,8 @@ static int t_commit_routes_to_resident(void)
     struct stat st;
     struct zp_cmd c;
 
-    /* (a) implicit datadir + live cookie: the resident executes it. Its
-     *     reply is the caller's reply, and this process wrote no store. */
-    zp_rpc_reset(true);
-    node_rpc_client_set_test_hook(zp_rpc_stub);
-    zcl_native_bridge_bind_rpc(dd, 0);
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    if (g_zp_recipe_hex)
-        (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
-    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
-    ZP_CHECK("resident: the resident is asked to commit",
-             g_zp_rpc_calls == 1 &&
-             strcmp(g_zp_rpc_method, "zcode_package_publish_commit") == 0);
-    ZP_CHECK("resident: its reply is the caller's reply",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_str(json_get(&c.reply.data, "package_root")) &&
-             strcmp(json_get_str(json_get(&c.reply.data, "package_root")),
-                    "resident-answered") == 0 &&
-             c.reply.error.mutated);
-    ZP_CHECK("resident: this process opened no second store",
-             stat(manifest_path, &st) != 0);
-    /* The resident's working directory is not this process's, so the chunk
-     * source must travel absolute; datadir is the resident's to supply. */
-    ZP_CHECK("resident: the forwarded chunk source is absolute",
-             g_zp_rpc_params && strstr(g_zp_rpc_params, "\"dir\":\"/"));
-    ZP_CHECK("resident: the forwarded input names no datadir",
-             g_zp_rpc_params && !strstr(g_zp_rpc_params, "datadir"));
-    zp_cmd_free(&c);
+    failures += zp_resident_case_a(dd, release_hex, manifest_hex, pkgdir,
+                                   manifest_path);
 
     /* (b) an EXPLICIT datadir is the deliberate offline/copy path and is
      *     never routed, cookie or no cookie. */
@@ -2500,42 +3045,9 @@ static int t_commit_routes_to_resident(void)
              stat(manifest_path, &st) == 0);
     zp_cmd_free(&c);
 
-    /* (c) a cookie a killed node left behind: nothing answers, and the
-     *     publish still lands locally rather than failing the operator. */
-    test_rm_rf_recursive(dd);
-    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "resident");
-    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
-    zp_pkg_free(&p);
-    ZP_CHECK("resident: fixture rebuilds for the stale-cookie case",
-             zp_make_package(&p, pkgdir) && zp_use_recipe(&p.manifest));
-    snprintf(cookie, sizeof(cookie), "%s/.cookie", dd);
-    cf = fopen(cookie, "w");
-    if (cf) {
-        fputs("__cookie__:test\n", cf);
-        fclose(cf);
-    }
-    snprintf(manifest_path, sizeof(manifest_path), "%s/zcode/manifests/%s",
-             dd, p.root_hex);
-    free(release_hex);
-    free(manifest_hex);
-    ZP_CHECK("resident: stale-cookie release signs",
-             zp_release(&r, 0x2b, 1u, "alice/stale-cookie", "MIT", p.root));
-    release_hex = zp_release_hex(&r, NULL, NULL);
-    manifest_hex = zp_hex(p.wire, p.wire_len);
-    zp_rpc_reset(false);
-    zcl_native_bridge_bind_rpc(dd, 0);
-    zp_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    if (g_zp_recipe_hex)
-        (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
-    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
-    ZP_CHECK("resident: a silent resident falls back to the one-shot commit",
-             g_zp_rpc_calls == 1 &&
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             stat(manifest_path, &st) == 0);
-    zp_cmd_free(&c);
+    failures += zp_resident_case_c(dd, pkgdir, sizeof(pkgdir), &p, &r,
+                                   &release_hex, &manifest_hex,
+                                   manifest_path);
 
     node_rpc_client_set_test_hook(NULL);
     zcl_native_bridge_bind_rpc("", 0);
