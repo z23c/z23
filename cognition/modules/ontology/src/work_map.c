@@ -4,6 +4,7 @@
 
 #include "base/bytes.h"
 #include "base/log_macros.h"
+#include "codec/cursor.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -100,4 +101,87 @@ enum zcl_work_map_result zcl_work_map_validate(
         if (nodes[i].kind != ZCL_WORK_MAP_LOOP && children[i] == 0)
             return map_refuse(ZCL_WORK_MAP_HIERARCHY, i);
     return map_order_valid(nodes, count);
+}
+
+static const uint8_t map_magic[8] = {'Z','2','3','W','M','A','P','\n'};
+
+static bool map_write_node(struct zcl_codec_writer *writer,
+                            const struct zcl_work_map_node *node)
+{
+    if (!zcl_codec_write_bytes(writer, node->task_root, 32) ||
+        !zcl_codec_write_u16le(writer, node->kind) ||
+        !zcl_codec_write_u16le(writer, node->parent) ||
+        !zcl_codec_write_u16le(writer, node->dependency_count)) return false;
+    for (size_t i = 0; i < node->dependency_count; i++)
+        if (!zcl_codec_write_u16le(writer, node->dependencies[i])) return false;
+    return true;
+}
+
+enum zcl_work_map_result zcl_work_map_serialize(
+    const struct zcl_work_map_node *nodes, size_t count,
+    uint8_t *wire, size_t capacity, size_t *written)
+{
+    if (written) *written = 0;
+    if (!wire || !written) return map_refuse(ZCL_WORK_MAP_BOUNDS, count);
+    enum zcl_work_map_result valid = zcl_work_map_validate(nodes, count);
+    if (valid != ZCL_WORK_MAP_OK) return valid;
+    size_t required = 12 + count * 38;
+    for (size_t i = 0; i < count; i++) required += 2 * nodes[i].dependency_count;
+    if (capacity < required) return map_refuse(ZCL_WORK_MAP_BOUNDS, count);
+    struct zcl_codec_writer writer;
+    zcl_codec_writer_init(&writer, wire, capacity);
+    bool ok = zcl_codec_write_bytes(&writer, map_magic, sizeof(map_magic)) &&
+        zcl_codec_write_u16le(&writer, 1) &&
+        zcl_codec_write_u16le(&writer, (uint16_t)count);
+    for (size_t i = 0; ok && i < count; i++) ok = map_write_node(&writer, &nodes[i]);
+    if (!ok || !zcl_codec_writer_finish(&writer, written))
+        return map_refuse(ZCL_WORK_MAP_WIRE, count);
+    return ZCL_WORK_MAP_OK;
+}
+
+static bool map_read_node(struct zcl_codec_reader *reader,
+                           struct zcl_work_map_node *node)
+{
+    if (!zcl_codec_read_bytes(reader, node->task_root, 32) ||
+        !zcl_codec_read_u16le(reader, &node->kind) ||
+        !zcl_codec_read_u16le(reader, &node->parent) ||
+        !zcl_codec_read_u16le(reader, &node->dependency_count) ||
+        node->dependency_count > ZCL_WORK_MAP_MAX_DEPENDENCIES) return false;
+    for (size_t i = 0; i < node->dependency_count; i++)
+        if (!zcl_codec_read_u16le(reader, &node->dependencies[i])) return false;
+    return true;
+}
+
+static bool map_read_header(struct zcl_codec_reader *reader, uint16_t *count)
+{
+    uint8_t magic[8];
+    uint16_t version = 0;
+    return zcl_codec_read_bytes(reader, magic, sizeof(magic)) &&
+        memcmp(magic, map_magic, sizeof(magic)) == 0 &&
+        zcl_codec_read_u16le(reader, &version) && version == 1 &&
+        zcl_codec_read_u16le(reader, count) && *count > 0 &&
+        *count <= ZCL_WORK_MAP_MAX_NODES;
+}
+
+enum zcl_work_map_result zcl_work_map_parse(
+    const uint8_t *wire, size_t length, struct zcl_work_map_node *nodes,
+    size_t capacity, size_t *count)
+{
+    if (count) *count = 0;
+    if (!wire || !nodes || !count || length > ZCL_WORK_MAP_WIRE_MAX)
+        return map_refuse(ZCL_WORK_MAP_BOUNDS, 0);
+    struct zcl_codec_reader reader;
+    zcl_codec_reader_init(&reader, wire, length);
+    uint16_t parsed = 0;
+    if (!map_read_header(&reader, &parsed)) return map_refuse(ZCL_WORK_MAP_WIRE, 0);
+    if (capacity < parsed) return map_refuse(ZCL_WORK_MAP_BOUNDS, parsed);
+    struct zcl_work_map_node decoded[ZCL_WORK_MAP_MAX_NODES] = {0};
+    for (size_t i = 0; i < parsed; i++)
+        if (!map_read_node(&reader, &decoded[i])) return map_refuse(ZCL_WORK_MAP_WIRE, i);
+    if (!zcl_codec_reader_finish(&reader)) return map_refuse(ZCL_WORK_MAP_WIRE, parsed);
+    enum zcl_work_map_result valid = zcl_work_map_validate(decoded, parsed);
+    if (valid != ZCL_WORK_MAP_OK) return valid;
+    memcpy(nodes, decoded, (size_t)parsed * sizeof(*nodes));
+    *count = parsed;
+    return ZCL_WORK_MAP_OK;
 }

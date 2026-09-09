@@ -730,11 +730,160 @@ static int sg_work_map_bounds(void)
     return failures;
 }
 
+static int sg_work_map_wire(void)
+{
+    int failures = 0;
+    TEST("work map: bounded wire preserves hierarchy and refuses incomplete bytes") {
+        struct zcl_work_map_node nodes[3] = {0}, decoded[3] = {0};
+        for (size_t i = 0; i < 3; i++) {
+            sg_root(nodes[i].task_root, (uint8_t)(i + 1));
+            nodes[i].kind = (uint16_t)(i + 1);
+            nodes[i].parent = i == 0 ? ZCL_WORK_MAP_NO_PARENT : (uint16_t)(i - 1);
+        }
+        uint8_t wire[256], again[256];
+        size_t written = 0, count = 0, repeated = 0;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, 3, wire, sizeof(wire),
+                                         &written), ZCL_WORK_MAP_OK);
+        ASSERT_EQ(zcl_work_map_parse(wire, written, decoded, 3, &count),
+                   ZCL_WORK_MAP_OK);
+        ASSERT_EQ(count, 3);
+        ASSERT(memcmp(nodes, decoded, sizeof(nodes)) == 0);
+        ASSERT_EQ(zcl_work_map_serialize(decoded, count, again, sizeof(again),
+                                         &repeated), ZCL_WORK_MAP_OK);
+        ASSERT_EQ(written, repeated);
+        ASSERT(memcmp(wire, again, written) == 0);
+        ASSERT(zcl_work_map_parse(wire, written - 1, decoded, 3, &count) !=
+               ZCL_WORK_MAP_OK);
+        ASSERT_EQ(count, 0);
+        wire[written] = 0;
+        ASSERT(zcl_work_map_parse(wire, written + 1, decoded, 3, &count) !=
+               ZCL_WORK_MAP_OK);
+        ASSERT_EQ(count, 0);
+        ASSERT(zcl_work_map_parse(wire, written, decoded, 2, &count) !=
+               ZCL_WORK_MAP_OK);
+        ASSERT_EQ(count, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Independent byte fixture: milestone, feature, two loops; last loop needs
+ * the first. Designated bytes expose endian and record offsets explicitly. */
+static const uint8_t sg_map_golden[166] = {
+    [0]='Z', [1]='2', [2]='3', [3]='W', [4]='M', [5]='A', [6]='P', [7]='\n',
+    [8]=1, [10]=4,
+    [12]=1, [44]=1, [46]=255, [47]=255,
+    [50]=2, [82]=2,
+    [88]=3, [120]=3, [122]=1,
+    [126]=4, [158]=3, [160]=1, [162]=1, [164]=2,
+};
+
+static int sg_work_map_golden(void)
+{
+    int failures = 0;
+    TEST("work map: independent wire bytes and exact output capacity") {
+        struct zcl_work_map_node nodes[4] = {0};
+        for (size_t i = 0; i < 4; i++) {
+            nodes[i].task_root[0] = (uint8_t)(i + 1);
+            nodes[i].kind = i < 2 ? (uint16_t)(i + 1) : ZCL_WORK_MAP_LOOP;
+            nodes[i].parent = i == 0 ? ZCL_WORK_MAP_NO_PARENT : i == 1 ? 0 : 1;
+        }
+        nodes[3].dependency_count = 1;
+        nodes[3].dependencies[0] = 2;
+        uint8_t wire[sizeof(sg_map_golden)];
+        size_t written = 999;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, 4, wire, sizeof(wire), &written),
+                   ZCL_WORK_MAP_OK);
+        ASSERT_EQ(written, sizeof(sg_map_golden));
+        ASSERT(memcmp(wire, sg_map_golden, written) == 0);
+        nodes[0].dependencies[15] = UINT16_MAX;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, 4, wire, sizeof(wire), &written),
+                   ZCL_WORK_MAP_OK);
+        ASSERT(memcmp(wire, sg_map_golden, written) == 0);
+        ASSERT_EQ(zcl_work_map_serialize(nodes, 4, wire, sizeof(wire) - 1,
+                                         &written), ZCL_WORK_MAP_BOUNDS);
+        ASSERT_EQ(written, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool sg_map_refusal_atomic(const uint8_t *wire, size_t length)
+{
+    struct zcl_work_map_node nodes[4], before[4];
+    memset(nodes, 0xa5, sizeof(nodes));
+    memcpy(before, nodes, sizeof(nodes));
+    size_t count = 999;
+    enum zcl_work_map_result result = zcl_work_map_parse(
+        wire, length, nodes, 4, &count);
+    return result != ZCL_WORK_MAP_OK && count == 0 &&
+           memcmp(nodes, before, sizeof(nodes)) == 0;
+}
+
+static int sg_work_map_wire_refusals(void)
+{
+    int failures = 0;
+    TEST("work map: wire refusals never expose partial decoded nodes") {
+        for (size_t length = 0; length < sizeof(sg_map_golden); length++)
+            ASSERT(sg_map_refusal_atomic(sg_map_golden, length));
+        static const struct { size_t offset; uint8_t value; } mutations[] = {
+            {0, 0}, {8, 2}, {10, 0}, {10, 205}, {11, 1}, {162, 17},
+            {120, 2}, {122, 0}, {88, 2}, {164, 0}, {164, 4}, {164, 3},
+        };
+        uint8_t wire[sizeof(sg_map_golden) + 1];
+        for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]); i++) {
+            memcpy(wire, sg_map_golden, sizeof(sg_map_golden));
+            wire[mutations[i].offset] = mutations[i].value;
+            ASSERT(sg_map_refusal_atomic(wire, sizeof(sg_map_golden)));
+        }
+        memcpy(wire, sg_map_golden, sizeof(sg_map_golden));
+        wire[sizeof(sg_map_golden)] = 0;
+        ASSERT(sg_map_refusal_atomic(wire, sizeof(wire)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_work_map_wire_full(void)
+{
+    int failures = 0;
+    TEST("work map: all 204 nodes and 16 dependency indices round trip") {
+        struct zcl_work_map_node nodes[ZCL_WORK_MAP_MAX_NODES] = {0};
+        struct zcl_work_map_node decoded[ZCL_WORK_MAP_MAX_NODES] = {0};
+        for (size_t i = 0; i < ZCL_WORK_MAP_MAX_NODES; i++) {
+            sg_root(nodes[i].task_root, (uint8_t)(i + 1));
+            nodes[i].kind = i < 2 ? (uint16_t)(i + 1) : ZCL_WORK_MAP_LOOP;
+            nodes[i].parent = i == 0 ? ZCL_WORK_MAP_NO_PARENT : i == 1 ? 0 : 1;
+            if (i >= 18) {
+                nodes[i].dependency_count = ZCL_WORK_MAP_MAX_DEPENDENCIES;
+                for (size_t d = 0; d < ZCL_WORK_MAP_MAX_DEPENDENCIES; d++)
+                    nodes[i].dependencies[d] = (uint16_t)(d + 2);
+            }
+        }
+        uint8_t wire[ZCL_WORK_MAP_WIRE_MAX];
+        size_t written = 0, count = 0;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, ZCL_WORK_MAP_MAX_NODES,
+                                         wire, sizeof(wire), &written),
+                   ZCL_WORK_MAP_OK);
+        ASSERT_EQ(zcl_work_map_parse(wire, written, decoded,
+                                     ZCL_WORK_MAP_MAX_NODES, &count),
+                   ZCL_WORK_MAP_OK);
+        ASSERT_EQ(count, ZCL_WORK_MAP_MAX_NODES);
+        ASSERT(memcmp(nodes, decoded, sizeof(nodes)) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_story_graph(void)
 {
     int failures = 0;
     failures += sg_work_map_hierarchy();
     failures += sg_work_map_bounds();
+    failures += sg_work_map_wire();
+    failures += sg_work_map_golden();
+    failures += sg_work_map_wire_refusals();
+    failures += sg_work_map_wire_full();
     failures += sg_complete_story();
     failures += sg_unknown_and_incomplete();
     failures += sg_journey_branches();
