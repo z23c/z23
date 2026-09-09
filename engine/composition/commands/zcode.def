@@ -656,6 +656,25 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_toolchain_show)
 
 ZCL_COMMAND_READY_READ(
+    "zcode.work.map", "zcode.work", "", "Inspect one exact work-map hierarchy",
+    "Verifies a complete bounded map from workspace CAS before returning a page "
+    "of milestone, feature and loop task roots with parent and dependency indices. "
+    "Definition integrity grants no acceptance: evidence coverage remains "
+    "unobserved and node status UNKNOWN in this definition view. Limit is 1..4; "
+    "next_offset=-1 ends pagination. Performs no task or workspace mutation.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,work,map,milestone,feature,loop,dependencies",
+    "zcl.zcode_work_map.input.v1", "zcl.zcode_work_map.v1",
+    "workspace,map_root,offset,limit", "map_root",
+    "z23 zcode work map --input='{\"map_root\":\"<sha3-root>\",\"limit\":4}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_work_map)
+
+ZCL_COMMAND_READY_READ(
     "zcode.work.status", "zcode.work", "", "Show one human-first work status",
     "Rebuilds task and candidate state, then read-only re-verifies the exact "
     "receipt ledger. The default is root-free; details=true exposes proof and "

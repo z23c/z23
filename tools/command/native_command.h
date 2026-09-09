@@ -737,6 +737,9 @@ void zcl_native_handle_zcode_work_preflight(
 void zcl_native_handle_zcode_work_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_work_map(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_work_review(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

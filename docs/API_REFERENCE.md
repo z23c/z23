@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 874 |
+| Registry entries (branches + leaves) | 875 |
 | Top-level roots | 14 |
 | Branches | 196 |
-| Leaves (dispatchable command paths) | 678 |
-| … `ready` (live handler in this build) | 601 |
+| Leaves (dispatchable command paths) | 679 |
+| … `ready` (live handler in this build) | 602 |
 | … `compat` (metadata only, names a fallback) | 47 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 46 |
@@ -100,7 +100,7 @@ Per source file:
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
-| `engine/composition/commands/zcode.def` | 249 | 59 | 190 |
+| `engine/composition/commands/zcode.def` | 250 | 59 | 191 |
 | `engine/composition/commands/zcode_science.def` | 25 | 7 | 18 |
 | `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1157,6 +1157,7 @@ represented by its children's sections.
 | `zcode work preflight` | ready | read / read / operator · fast/low | `workspace`, `work`, `datadir` | `zcl.zcode_work_preflight.v1` | `z23 zcode work preflight --input='{"workspace":".","work":"latest"}'` | Check Codex adapter readiness before a model request |
 | `zcode work start` | ready | mutate / app-write / operator · foreground/moderate | **`workspace`**, **`goal`**, `operation`, `profile`, `context_symbol`, `max_cpu_seconds`, `datadir`, `license`, `details` | `zcl.zcode_work_start.v1` | `z23-dev zcode work start --input='{"workspace":".","goal":"Make the parser reject overflowing lengths","profile":"standard"}'` | Start reuse-first C23 work |
 | `zcode work toolchain` | ready | read / read / operator · foreground/moderate | none | `zcl.zcode_toolchain_show.v1` | `z23 zcode work toolchain` | Show this node's C23 compile toolchain capsule |
+| `zcode work map` | ready | read / read / operator · fast/low | `workspace`, **`map_root`**, `offset`, `limit` | `zcl.zcode_work_map.v1` | `z23 zcode work map --input='{"map_root":"<sha3-root>","limit":4}'` | Inspect one exact work-map hierarchy |
 | `zcode work status` | ready | read / read / operator · fast/low | `workspace`, `work`, `datadir`, `details` | `zcl.zcode_work_status.v1` | `z23-dev zcode work status --input='{"work":"latest"}'` | Show one human-first work status |
 | `zcode work show` | ready | read / read / operator · fast/low | `workspace`, `work`, `datadir`, `details` | `zcl.zcode_work_status.v1` | `z23-dev zcode work show --input='{"work":"latest"}'` | Show one human-first work result |
 | `zcode work run` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, `datadir`, `details` | `zcl.zcode_work_run.v1` | `z23-dev zcode work run --input='{"work":"latest","adapter":"manual"}'` | Run one contained adapter handoff |

@@ -7,6 +7,7 @@
 #include "command/native_story_command.h"
 #include "command/native_story_internal.h"
 #include "command/native_zcode_work_map.h"
+#include "command/native_command.h"
 #include "vcs/vcs_object.h"
 #include "sha3/sha3.h"
 #include "vcs/zcode_app_run_observation.h"
@@ -878,6 +879,170 @@ static int sg_work_map_wire_full(void)
     return failures;
 }
 
+static int sg_work_map_command_pages(void)
+{
+    int failures = 0;
+    TEST("work map: complete 204-node coverage paginates without omissions") {
+        struct zcl_work_map_node nodes[ZCL_WORK_MAP_MAX_NODES] = {0};
+        for (size_t i = 0; i < ZCL_WORK_MAP_MAX_NODES; i++) {
+            sg_root(nodes[i].task_root, (uint8_t)(i + 1));
+            nodes[i].kind = i < 2 ? (uint16_t)(i + 1) : ZCL_WORK_MAP_LOOP;
+            nodes[i].parent = i == 0 ? ZCL_WORK_MAP_NO_PARENT : i == 1 ? 0 : 1;
+        }
+        uint8_t wire[ZCL_WORK_MAP_WIRE_MAX], root[32];
+        size_t written = 0;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, ZCL_WORK_MAP_MAX_NODES,
+                  wire, sizeof(wire), &written), ZCL_WORK_MAP_OK);
+        char dir[256], hex[65];
+        test_make_tmpdir(dir, sizeof(dir), "work_map", "pages");
+        ASSERT(vcs_object_store_init(dir));
+        sha3_256(wire, written, root);
+        zcl_hex_encode(root, 32, hex);
+        ASSERT(vcs_object_put_addressed(dir, root, wire, written));
+        for (size_t offset = 0; offset < ZCL_WORK_MAP_MAX_NODES; offset += 4) {
+            struct json_value input;
+            json_init(&input); json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, "workspace", dir));
+            ASSERT(json_push_kv_str(&input, "map_root", hex));
+            ASSERT(json_push_kv_int(&input, "offset", (int64_t)offset));
+            struct zcl_command_request request = { .input = &input };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+            zcl_native_handle_zcode_work_map(&request, &reply);
+            ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "total")), 204);
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 4);
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")),
+                      offset + 4 == 204 ? -1 : (int64_t)(offset + 4));
+            const struct json_value *rows = json_get(&reply.data, "nodes");
+            ASSERT_EQ(json_size(rows), 4);
+            for (size_t i = 0; i < 4; i++) {
+                char expected[65];
+                zcl_hex_encode(nodes[offset + i].task_root, 32, expected);
+                const struct json_value *row = json_at(rows, i);
+                ASSERT_EQ(json_get_int(json_get(row, "index")), (int64_t)(offset + i));
+                ASSERT_STR_EQ(json_get_str(json_get(row, "task_root")), expected);
+            }
+            ASSERT(json_write(&reply.data, NULL, 0) < 4096);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_work_map_command_offpage(void)
+{
+    int failures = 0;
+    TEST("work map: corruption outside requested page refuses the complete map") {
+        char dir[256], hex[65];
+        test_make_tmpdir(dir, sizeof(dir), "work_map", "offpage");
+        ASSERT(vcs_object_store_init(dir));
+        uint8_t wire[sizeof(sg_map_golden)], root[32];
+        memcpy(wire, sg_map_golden, sizeof(wire));
+        wire[126] = 0; /* Fourth node has a zero task root, outside page zero. */
+        sha3_256(wire, sizeof(wire), root);
+        zcl_hex_encode(root, 32, hex);
+        ASSERT(vcs_object_put_addressed(dir, root, wire, sizeof(wire)));
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", dir));
+        ASSERT(json_push_kv_str(&input, "map_root", hex));
+        ASSERT(json_push_kv_int(&input, "limit", 1));
+        struct zcl_command_request request = { .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "WORK_MAP_UNAVAILABLE");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "map_refusal")), ZCL_WORK_MAP_IDENTITY);
+        ASSERT(json_get(&reply.data, "nodes") == NULL);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_work_map_command_inputs(void)
+{
+    int failures = 0;
+    TEST("work map: malformed command inputs refuse explicitly") {
+        static const char *const invalid[] = {
+            "{}", "{\"map_root\":\"bad\"}", "{\"workspace\":1}",
+            "{\"offset\":-1}", "{\"offset\":205}", "{\"offset\":\"0\"}",
+            "{\"limit\":0}", "{\"limit\":5}", "{\"limit\":true}",
+        };
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+            struct json_value input;
+            json_init(&input);
+            ASSERT(json_read(&input, invalid[i], strlen(invalid[i])));
+            if (i >= 2)
+                ASSERT(json_push_kv_str(&input, "map_root",
+                    "0101010101010101010101010101010101010101010101010101010101010101"));
+            struct zcl_command_request request = { .input = &input };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+            zcl_native_handle_zcode_work_map(&request, &reply);
+            ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+            ASSERT_STR_EQ(reply.error.code, "WORK_MAP_INPUT");
+            ASSERT(json_get(&reply.data, "nodes") == NULL);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_work_map_command(void)
+{
+    int failures = 0;
+    TEST("work map: native page exposes hierarchy without inventing acceptance") {
+        char dir[256], hex[65];
+        test_make_tmpdir(dir, sizeof(dir), "work_map", "command");
+        ASSERT(vcs_object_store_init(dir));
+        uint8_t root[32];
+        sha3_256(sg_map_golden, sizeof(sg_map_golden), root);
+        zcl_hex_encode(root, sizeof(root), hex);
+        ASSERT(vcs_object_put_addressed(dir, root, sg_map_golden,
+                                       sizeof(sg_map_golden)));
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", dir));
+        ASSERT(json_push_kv_str(&input, "map_root", hex));
+        ASSERT(json_push_kv_int(&input, "offset", 2));
+        ASSERT(json_push_kv_int(&input, "limit", 1));
+        struct zcl_command_request request = { .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "total")), 4);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")), 3);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "map_root")), hex);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "acceptance_coverage")),
+                      "unobserved");
+        const struct json_value *row = json_at(json_get(&reply.data, "nodes"), 0);
+        ASSERT(row != NULL);
+        ASSERT_EQ(json_get_int(json_get(row, "index")), 2);
+        ASSERT_EQ(json_get_int(json_get(row, "parent")), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "kind")), "loop");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "reason")), "acceptance_not_observed");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int sg_work_map_cas_refusals(void)
 {
     int failures = 0;
@@ -957,6 +1122,10 @@ int test_story_graph(void)
 {
     int failures = 0;
     failures += sg_work_map_cas_refusals();
+    failures += sg_work_map_command();
+    failures += sg_work_map_command_inputs();
+    failures += sg_work_map_command_pages();
+    failures += sg_work_map_command_offpage();
     failures += sg_work_map_hierarchy();
     failures += sg_work_map_bounds();
     failures += sg_work_map_wire();
