@@ -3058,6 +3058,141 @@ static void check_sqlite_52_sqlite_turbo_run_checkpoints_mid_run_pas(int *failur
     else { printf("FAIL\n"); (*failures)++; }
 }
 
+struct sqlite_busy_worker_fixture {
+    _Atomic bool entered;
+    _Atomic bool release;
+    _Atomic bool expired;
+};
+
+static bool sqlite_hold_worker(struct node_db *ndb, void *ctx)
+{
+    (void)ndb;
+    struct sqlite_busy_worker_fixture *gate = ctx;
+    int64_t deadline = platform_time_monotonic_ms() + 5000;
+    atomic_store(&gate->entered, true);
+    while (!atomic_load(&gate->release)) {
+        if (platform_time_monotonic_ms() >= deadline) {
+            atomic_store(&gate->expired, true);
+            break;
+        }
+        platform_sleep_ms(1);
+    }
+    return true;
+}
+
+static bool sqlite_count_worker_call(struct node_db *ndb, void *ctx)
+{
+    (void)ndb;
+    (*(int *)ctx)++;
+    return true;
+}
+
+struct sqlite_busy_state_fixture {
+    char dir[256], path[320];
+    struct node_db ndb;
+    struct db_service svc;
+    struct app_runtime_context runtime;
+    struct sqlite_busy_worker_fixture gate;
+    int refused_calls, queued_calls;
+};
+
+static bool sqlite_busy_state_open(struct sqlite_busy_state_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    test_make_tmpdir(f->dir, sizeof(f->dir), "sqlite", "busy-worker");
+    snprintf(f->path, sizeof(f->path), "%s/node.db", f->dir);
+    db_service_init(&f->svc);
+    bool ok = node_db_open(&f->ndb, f->path);
+    ok = ok && db_service_attach(&f->svc, &f->ndb);
+    ok = ok && db_service_start_test_worker(&f->svc);
+    runtime_set_db_service(&f->runtime, &f->svc);
+    ok = ok && db_service_enqueue_write(&f->svc, sqlite_hold_worker, &f->gate, NULL);
+    int64_t deadline = platform_time_monotonic_ms() + 5000;
+    while (ok && !atomic_load(&f->gate.entered) &&
+           platform_time_monotonic_ms() < deadline)
+        platform_sleep_ms(1);
+    return ok && atomic_load(&f->gate.entered);
+}
+
+static bool sqlite_busy_state_admission(struct sqlite_busy_state_fixture *f)
+{
+    uint8_t value = 0x6b;
+    bool ok = !db_service_try_run_write(&f->svc, sqlite_count_worker_call,
+                                        &f->refused_calls);
+    ok = ok && db_service_enqueue_write(&f->svc, sqlite_count_worker_call,
+                                         &f->queued_calls, NULL);
+    ok = ok && !app_runtime_node_db_state_try_set(
+        &f->ndb, "busy-refused", &value, sizeof(value));
+    return ok;
+}
+
+static bool sqlite_busy_state_persist(struct sqlite_busy_state_fixture *f)
+{
+    uint8_t value = 0x6b, got = 0;
+    size_t len = 0;
+    /* The DB worker stays occupied throughout. The existing detached
+     * fallback must persist evidence without waiting for that worker. */
+    struct zcl_result result = chain_evidence_state_set_retry(
+        &f->ndb, "busy-evidence", &value, sizeof(value), "test.busy-worker");
+    return result.ok && !atomic_load(&f->gate.expired) &&
+           node_db_state_get(&f->ndb, "busy-evidence", &got, sizeof(got), &len) &&
+           len == 1 && got == value;
+}
+
+static bool sqlite_busy_state_lock_timeout(struct sqlite_busy_state_fixture *f)
+{
+    uint8_t value = 0x6b;
+    struct node_db locker = {0};
+    bool locked = node_db_open(&locker, f->path) &&
+                  node_db_begin_immediate(&locker);
+    bool ok = locked;
+    if (locked) {
+        int64_t started = platform_time_monotonic_ms();
+        bool persisted = node_db_state_set_detached(
+            &f->ndb, "busy-lock-refused", &value, sizeof(value));
+        int64_t elapsed = platform_time_monotonic_ms() - started;
+        ok = ok && !persisted && elapsed < 2000;
+        bool rolled_back = node_db_rollback(&locker);
+        ok = ok && rolled_back;
+    }
+    node_db_close(&locker);
+    return ok;
+}
+
+static bool sqlite_busy_state_resume(struct sqlite_busy_state_fixture *f)
+{
+    uint8_t value = 0x6b;
+    return f->refused_calls == 0 && f->queued_calls == 1 &&
+           app_runtime_node_db_state_try_set(
+               &f->ndb, "idle-evidence", &value, sizeof(value)) &&
+           db_service_try_run_write(
+               &f->svc, test_db_service_nested_write_callback, &f->svc);
+}
+
+static void check_state_write_does_not_wait_behind_catchup(int *failures)
+{
+    struct sqlite_busy_state_fixture f;
+    bool ok = sqlite_busy_state_open(&f);
+    if (ok) {
+        ok &= sqlite_busy_state_admission(&f);
+        ok &= sqlite_busy_state_persist(&f);
+        ok &= sqlite_busy_state_lock_timeout(&f);
+    }
+    atomic_store(&f.gate.release, true);
+    bool drained = db_service_flush_write(&f.svc);
+    ok &= drained;
+    if (drained)
+        ok &= sqlite_busy_state_resume(&f);
+    app_runtime_set_current(NULL);
+    db_service_stop(&f.svc);
+    node_db_close(&f.ndb);
+    test_rm_rf_recursive(f.dir);
+    printf("SQLite evidence write bypasses occupied worker: %s\n",
+           ok ? "OK" : "FAIL");
+    if (!ok)
+        (*failures)++;
+}
+
 int test_sqlite(void) {
     int failures = 0;
 
@@ -3247,6 +3382,7 @@ int test_sqlite(void) {
      * path must fall back to a short-lived detached writer, wait out the
      * transient lock, and persist the value anyway. */
     check_sqlite_48_sqlite_node_state_detached_fallback_wait(&failures);
+    check_state_write_does_not_wait_behind_catchup(&failures);
 
     /* 100k-row UTXO open + random-read smoke test. Guards the
      * class of bug the brief worries about: a cache-size tweak that

@@ -29,6 +29,7 @@
 #include "core/serialize.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
+#include "util/storage_pacing.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -226,13 +227,15 @@ static void *scan_parse_worker(void *arg)
     }
     return NULL;
 }
-static int scan_worker_count(int nfiles)
+static int scan_worker_count(int nfiles, uint32_t cpus)
 {
     const char *override = getenv("ZCL_BLOCK_SCAN_WORKERS");
     if (override && override[0]) {
         char *end = NULL;
+        errno = 0;
         long requested = strtol(override, &end, 10);
-        if (end && *end == '\0' && requested > 0) {
+        if (errno != ERANGE && end != override && *end == '\0' &&
+            requested > 0) {
             if (requested > nfiles) requested = nfiles;
             if (requested > 64) requested = 64;
             if (requested < 1) requested = 1;
@@ -241,19 +244,29 @@ static int scan_worker_count(int nfiles)
         fprintf(stderr, "scan: ignoring invalid ZCL_BLOCK_SCAN_WORKERS=%s\n",
                 override);
     }
-    uint32_t cpus = platform_logical_cpu_count();
-    int n = cpus > 0 ? (int)cpus : 1;
+    /* CPU count does not describe disk concurrency. Keep a single reader
+     * on rotating or unclassified storage; only measured solid storage
+     * gets the parallel default. The existing override remains optional. */
+    if (storage_pacing_class() != PLATFORM_STORAGE_CLASS_SOLID)
+        return 1;
+    int n = cpus > 16 ? 16 : (int)cpus;
     if (n > nfiles) n = nfiles;
     if (n > 16) n = 16;
     if (n < 1) n = 1;
     return n;
 }
+#ifdef ZCL_TESTING
+int boot_block_scan_test_worker_count(int nfiles, uint32_t cpus)
+{
+    return scan_worker_count(nfiles, cpus);
+}
+#endif
 static int scan_parse_files_parallel(struct boot_scan_file_result *files,
                                      int nfiles)
 {
     if (nfiles <= 0)
         return 0;
-    int workers = scan_worker_count(nfiles);
+    int workers = scan_worker_count(nfiles, platform_logical_cpu_count());
     printf("  parallel block-file parse: %d files, %d workers\n",
            nfiles, workers);
     if (workers == 1) {

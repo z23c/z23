@@ -76,7 +76,10 @@ struct zcl_result chain_evidence_state_set_retry(struct node_db *ndb,
     }
 
     for (int i = 0; i < CEC_STATE_SET_RETRY_ATTEMPTS; i++) {
-        if (app_runtime_node_db_state_set(ndb, key, value, len))
+        /* A historical catch-up pass can occupy the worker for hours.
+         * Never wait behind it from health collection: use the existing
+         * detached, busy-timeout-bounded fallback when admission is busy. */
+        if (app_runtime_node_db_state_try_set(ndb, key, value, len))
             return ZCL_OK;
 
         struct node_db_status st;

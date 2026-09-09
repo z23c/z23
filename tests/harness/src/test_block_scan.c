@@ -17,6 +17,7 @@
 #include "models/database.h"
 #include "models/wallet_tx.h"
 #include "config/boot_cursor_state.h"
+#include "util/storage_pacing.h"
 #include "wallet/wallet.h"
 #include <fcntl.h>
 #include <stdlib.h>
@@ -24,6 +25,48 @@
 #include <unistd.h>
 
 /* ── block_index_cmp_height ────────────────────────────────────── */
+
+int boot_block_scan_test_worker_count(int nfiles, uint32_t cpus);
+
+static int test_scan_storage_concurrency(void)
+{
+    int failures = 0;
+    const char *value = getenv("ZCL_BLOCK_SCAN_WORKERS");
+    char *saved = value ? strdup(value) : NULL;
+    if (value && !saved)
+        return 1;
+    unsetenv("ZCL_BLOCK_SCAN_WORKERS");
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    failures += boot_block_scan_test_worker_count(28, 32) != 1;
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_UNKNOWN);
+    failures += boot_block_scan_test_worker_count(28, 32) != 1;
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    failures += boot_block_scan_test_worker_count(28, 32) != 16;
+    failures += boot_block_scan_test_worker_count(3, 32) != 3;
+    failures += boot_block_scan_test_worker_count(28, 2) != 2;
+    failures += boot_block_scan_test_worker_count(28, 0) != 1;
+    failures += boot_block_scan_test_worker_count(28, UINT32_MAX) != 16;
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    setenv("ZCL_BLOCK_SCAN_WORKERS", "4", 1);
+    failures += boot_block_scan_test_worker_count(28, 32) != 4;
+    failures += boot_block_scan_test_worker_count(2, 32) != 2;
+    setenv("ZCL_BLOCK_SCAN_WORKERS", "100", 1);
+    failures += boot_block_scan_test_worker_count(100, 32) != 64;
+    const char *invalid[] = {"0", "-1", "4junk", "garbage",
+                            "999999999999999999999999999999999"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        setenv("ZCL_BLOCK_SCAN_WORKERS", invalid[i], 1);
+        failures += boot_block_scan_test_worker_count(28, 32) != 1;
+    }
+    if (saved)
+        setenv("ZCL_BLOCK_SCAN_WORKERS", saved, 1);
+    else
+        unsetenv("ZCL_BLOCK_SCAN_WORKERS");
+    free(saved);
+    storage_pacing_reset_for_testing();
+    printf("block scan storage concurrency: %d failure(s)\n", failures);
+    return failures;
+}
 
 static int test_cmp_height(void)
 {
@@ -507,6 +550,7 @@ int test_block_scan(void)
 
     printf("\n=== Block Scan & Chain Propagation Tests ===\n");
 
+    failures += test_scan_storage_concurrency();
     failures += test_cmp_height();
     failures += test_failed_child_propagation();
     failures += test_nchaintx_propagation();

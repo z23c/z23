@@ -1743,7 +1743,6 @@ engine/composition/src/consensus_state_snapshot_install_activate_backup.c:activa
 engine/composition/src/consensus_state_snapshot_output_seal.c:consensus_export_descriptor_digest#2:18
 engine/composition/src/consensus_state_snapshot_output_seal.c:consensus_export_seal_readonly#2:43
 engine/composition/src/consensus_state_snapshot_output_seal.c:descriptor_has_writable_alias:16
-engine/composition/src/db_service.c:db_service_submit_job:18
 engine/composition/src/file_ops.c:block_files_copy:17
 engine/composition/src/file_ops.c:file_copy:31
 engine/composition/src/mesh_stream.c:mesh_stream_open:29

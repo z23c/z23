@@ -21,7 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define NODE_DB_DETACHED_BUSY_TIMEOUT_MS 30000
+/* Health evidence retries this fallback. A single attempt must not spend
+ * 30 seconds behind a historical writer before the caller can defer. */
+#define NODE_DB_DETACHED_BUSY_TIMEOUT_MS 100
 
 /* The Campaign-C3 newer-schema refusal banner, shared by the open-time
  * preflight in database.c (which fires before anything writes to the

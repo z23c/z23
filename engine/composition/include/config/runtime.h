@@ -43,6 +43,10 @@ void app_runtime_set_current(struct app_runtime_context *runtime);
 struct db_service *app_runtime_db_service(void);
 struct node_db *app_runtime_node_db(void);
 bool app_runtime_node_db_handle_open(const struct node_db *ndb);
+/* Like state_set, but refuses admission behind an occupied DB worker.
+ * An admitted write still waits for its own storage operation. */
+bool app_runtime_node_db_state_try_set(struct node_db *ndb, const char *key,
+                                       const void *value, size_t len);
 bool app_runtime_node_db_state_set(struct node_db *ndb,
                                    const char *key,
                                    const void *value,

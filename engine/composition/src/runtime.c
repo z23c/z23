@@ -61,10 +61,10 @@ static bool app_runtime_node_db_state_set_write(struct node_db *ndb,
     return s->ok;
 }
 
-bool app_runtime_node_db_state_set(struct node_db *ndb,
+static bool app_runtime_node_db_state_set_mode(struct node_db *ndb,
                                    const char *key,
                                    const void *value,
-                                   size_t len)
+                                   size_t len, bool require_idle)
 {
     if (!app_runtime_node_db_handle_open(ndb))
         return false;
@@ -77,10 +77,26 @@ bool app_runtime_node_db_state_set(struct node_db *ndb,
     };
     struct db_service *svc = app_runtime_db_service();
     if (svc && db_service_is_started(svc) &&
-        db_service_node_db(svc) == ndb)
+        db_service_node_db(svc) == ndb) {
+        if (require_idle)
+            return db_service_try_run_write(
+                svc, app_runtime_node_db_state_set_write, &ctx) && ctx.ok;
         return db_service_run_write(
             svc, app_runtime_node_db_state_set_write, &ctx) && ctx.ok;
+    }
     return app_runtime_node_db_state_set_write(ndb, &ctx);
+}
+
+bool app_runtime_node_db_state_set(struct node_db *ndb, const char *key,
+                                   const void *value, size_t len)
+{
+    return app_runtime_node_db_state_set_mode(ndb, key, value, len, false);
+}
+
+bool app_runtime_node_db_state_try_set(struct node_db *ndb, const char *key,
+                                       const void *value, size_t len)
+{
+    return app_runtime_node_db_state_set_mode(ndb, key, value, len, true);
 }
 
 void app_runtime_node_db_sync_flush_if_needed(struct node_db *ndb)

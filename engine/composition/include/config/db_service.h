@@ -44,6 +44,7 @@ struct db_service_job {
     void *ctx;
     db_service_free_fn free_ctx;
     bool async;
+    bool require_idle;
     bool done;
     bool success;
     zcl_cond_t done_cond;
@@ -64,6 +65,7 @@ struct db_service {
     size_t queue_head;
     size_t queue_tail;
     size_t queue_count;
+    bool worker_busy; /* Protected by queue_mutex, including job cleanup. */
     bool started;
     int64_t started_at;
 
@@ -107,6 +109,11 @@ bool db_service_wal_checkpoint(struct db_service *svc);
 bool db_service_run_write(struct db_service *svc,
                           db_service_write_fn fn,
                           void *ctx);
+/* Refuse immediately if another job is queued or executing. Once admitted,
+ * wait for this write to finish; this is not a deadline on disk I/O. A
+ * refused call retains no pointer to ctx. Worker-thread calls run inline. */
+bool db_service_try_run_write(struct db_service *svc,
+                              db_service_write_fn fn, void *ctx);
 /* Queue an asynchronous write.
  *
  * OWNERSHIP: takes `ctx` on EVERY return path. On success the worker frees

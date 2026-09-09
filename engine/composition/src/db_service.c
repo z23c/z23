@@ -166,6 +166,7 @@ static void *db_service_worker_main(void *arg)
             svc->queue_head =
                 (svc->queue_head + 1) % DB_SERVICE_QUEUE_CAP;
             svc->queue_count--;
+            svc->worker_busy = true;
             zcl_cond_broadcast(&svc->queue_cond);
         } else if (svc->stop_requested) {
             zcl_mutex_unlock(&svc->queue_mutex);
@@ -189,8 +190,12 @@ static void *db_service_worker_main(void *arg)
             if (job->free_ctx)
                 job->free_ctx(job->ctx);
             free(job);
+            zcl_mutex_lock(&svc->queue_mutex);
+            svc->worker_busy = false;
+            zcl_mutex_unlock(&svc->queue_mutex);
         } else {
             zcl_mutex_lock(&svc->queue_mutex);
+            svc->worker_busy = false;
             job->done = true;
             zcl_cond_signal(&job->done_cond);
             zcl_mutex_unlock(&svc->queue_mutex);
@@ -203,17 +208,12 @@ static void *db_service_worker_main(void *arg)
     return NULL;
 }
 
-static bool db_service_submit_job(struct db_service *svc,
-                                  struct db_service_job *job)
+/* queue_mutex is held across admission, including any capacity wait. */
+static bool db_service_admit_job_locked(struct db_service *svc,
+                                        struct db_service_job *job)
 {
-    bool queued = false;
-
-    if (!svc || !job || !svc->started || !svc->worker_started)
+    if (job->require_idle && (svc->worker_busy || svc->queue_count > 0))
         return false;
-    if (db_service_is_worker_thread(svc))
-        return db_service_perform_job(svc, job);
-
-    zcl_mutex_lock(&svc->queue_mutex);
     while (!job->async && svc->queue_count >= DB_SERVICE_QUEUE_CAP &&
            !svc->stop_requested)
         zcl_cond_wait(&svc->queue_cond, &svc->queue_mutex);
@@ -223,9 +223,22 @@ static bool db_service_submit_job(struct db_service *svc,
         svc->queue_tail =
             (svc->queue_tail + 1) % DB_SERVICE_QUEUE_CAP;
         svc->queue_count++;
-        queued = true;
         zcl_cond_signal(&svc->queue_cond);
+        return true;
     }
+    return false;
+}
+
+static bool db_service_submit_job(struct db_service *svc,
+                                  struct db_service_job *job)
+{
+    if (!svc || !job || !svc->started || !svc->worker_started)
+        return false;
+    if (db_service_is_worker_thread(svc))
+        return db_service_perform_job(svc, job);
+
+    zcl_mutex_lock(&svc->queue_mutex);
+    bool queued = db_service_admit_job_locked(svc, job);
 
     while (queued && !job->async && !job->done)
         zcl_cond_wait(&job->done_cond, &svc->queue_mutex);
@@ -549,9 +562,9 @@ bool db_service_wal_checkpoint(struct db_service *svc)
     return ran && c.ok;
 }
 
-bool db_service_run_write(struct db_service *svc,
-                          db_service_write_fn fn,
-                          void *ctx)
+static bool db_service_run_write_mode(struct db_service *svc,
+                                      db_service_write_fn fn,
+                                      void *ctx, bool require_idle)
 {
     struct db_service_job job;
 
@@ -562,10 +575,23 @@ bool db_service_run_write(struct db_service *svc,
     job.type = DB_SERVICE_JOB_NONE;
     job.fn = fn;
     job.ctx = ctx;
+    job.require_idle = require_idle;
     zcl_cond_init(&job.done_cond);
     job.success = db_service_submit_job(svc, &job);
     zcl_cond_destroy(&job.done_cond);
     return job.success;
+}
+
+bool db_service_run_write(struct db_service *svc,
+                          db_service_write_fn fn, void *ctx)
+{
+    return db_service_run_write_mode(svc, fn, ctx, false);
+}
+
+bool db_service_try_run_write(struct db_service *svc,
+                              db_service_write_fn fn, void *ctx)
+{
+    return db_service_run_write_mode(svc, fn, ctx, true);
 }
 
 bool db_service_enqueue_write(struct db_service *svc,

@@ -92,6 +92,13 @@ checksum-pinned GLIBC 2.31 sysroot, rebuilds all linked archives through that
 boundary, forces the baseline x86-64/SSE2 CPU, and executes a typed command
 under the old loader before declaring success.
 
+At runtime, block-file startup scanning uses the node's storage classification.
+Rotating disks and storage that could not be classified use one reader;
+solid-state storage uses up to 16 readers, bounded by CPU and file counts.
+No cache-pinning helper or privileged RAM setup is required for this policy.
+`ZCL_BLOCK_SCAN_WORKERS` remains an optional override, capped at 64 and the
+number of files. Invalid values fall back to the automatic policy.
+
 The first build needs internet access once: `make` auto-runs `make vendor`,
 which fetches pinned third-party source tarballs (OpenSSL, libevent, LevelDB,
 zlib, SQLite, the canonical Zcash Sapling prover), verifies each against a
