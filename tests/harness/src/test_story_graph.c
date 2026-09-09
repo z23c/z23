@@ -6,6 +6,9 @@
 #include "ontology/work_map.h"
 #include "command/native_story_command.h"
 #include "command/native_story_internal.h"
+#include "command/native_zcode_work_map.h"
+#include "vcs/vcs_object.h"
+#include "sha3/sha3.h"
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_dev.h"
 
@@ -875,15 +878,92 @@ static int sg_work_map_wire_full(void)
     return failures;
 }
 
+static int sg_work_map_cas_refusals(void)
+{
+    int failures = 0;
+    TEST("work map: addressed malformed and oversized CAS objects refuse atomically") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "work_map", "cas_refusals");
+        ASSERT(vcs_object_store_init(dir));
+        uint8_t wire[ZCL_WORK_MAP_WIRE_MAX + 1] = {0}, root[32];
+        struct zcl_work_map_node nodes[4], before[4];
+        memset(nodes, 0xa5, sizeof(nodes));
+        memcpy(before, nodes, sizeof(nodes));
+        size_t count = 999;
+        sha3_256(wire, sizeof(wire), root);
+        ASSERT(vcs_object_put_addressed(dir, root, wire, sizeof(wire)));
+        ASSERT_EQ(zcl_native_work_map_load(dir, root, nodes, 4, &count),
+                  ZCL_WORK_MAP_BOUNDS);
+        ASSERT_EQ(count, 0);
+        ASSERT(memcmp(nodes, before, sizeof(nodes)) == 0);
+        memcpy(wire, sg_map_golden, sizeof(sg_map_golden));
+        wire[0] ^= 1;
+        sha3_256(wire, sizeof(sg_map_golden), root);
+        ASSERT(vcs_object_put_addressed(dir, root, wire, sizeof(sg_map_golden)));
+        count = 999;
+        ASSERT_EQ(zcl_native_work_map_load(dir, root, nodes, 4, &count),
+                  ZCL_WORK_MAP_WIRE);
+        ASSERT_EQ(count, 0);
+        ASSERT(memcmp(nodes, before, sizeof(nodes)) == 0);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_work_map_cas(void)
+{
+    int failures = 0;
+    TEST("work map: CAS loading verifies exact bounded bytes before exposing nodes") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "work_map", "cas");
+        uint8_t root[32], wrong[32];
+        sha3_256(sg_map_golden, sizeof(sg_map_golden), root);
+        memcpy(wrong, root, sizeof(wrong));
+        wrong[0] ^= 1;
+        struct zcl_work_map_node nodes[4], before[4];
+        memset(nodes, 0xa5, sizeof(nodes));
+        memcpy(before, nodes, sizeof(nodes));
+        size_t count = 999;
+        ASSERT_EQ(zcl_native_work_map_load(dir, root, nodes, 4, &count),
+                  ZCL_WORK_MAP_OBJECT);
+        ASSERT_EQ(count, 0);
+        ASSERT(memcmp(nodes, before, sizeof(nodes)) == 0);
+        ASSERT(!vcs_object_store_initialized(dir));
+        ASSERT(vcs_object_store_init(dir));
+        ASSERT(vcs_object_put_addressed(dir, wrong, sg_map_golden,
+                                        sizeof(sg_map_golden)));
+        ASSERT_EQ(zcl_native_work_map_load(dir, wrong, nodes, 4, &count),
+                  ZCL_WORK_MAP_IDENTITY);
+        ASSERT_EQ(count, 0);
+        ASSERT(memcmp(nodes, before, sizeof(nodes)) == 0);
+        ASSERT(vcs_object_put_addressed(dir, root, sg_map_golden,
+                                        sizeof(sg_map_golden)));
+        ASSERT_EQ(zcl_native_work_map_load(dir, root, nodes, 3, &count),
+                  ZCL_WORK_MAP_BOUNDS);
+        ASSERT_EQ(count, 0);
+        ASSERT(memcmp(nodes, before, sizeof(nodes)) == 0);
+        ASSERT_EQ(zcl_native_work_map_load(dir, root, nodes, 4, &count),
+                   ZCL_WORK_MAP_OK);
+        ASSERT_EQ(count, 4);
+        ASSERT_EQ(nodes[3].dependencies[0], 2);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_story_graph(void)
 {
     int failures = 0;
+    failures += sg_work_map_cas_refusals();
     failures += sg_work_map_hierarchy();
     failures += sg_work_map_bounds();
     failures += sg_work_map_wire();
     failures += sg_work_map_golden();
     failures += sg_work_map_wire_refusals();
     failures += sg_work_map_wire_full();
+    failures += sg_work_map_cas();
     failures += sg_complete_story();
     failures += sg_unknown_and_incomplete();
     failures += sg_journey_branches();

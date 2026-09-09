@@ -3186,3 +3186,4 @@ AGENT_IMPACT_RULE("engine/composition/fleet_facts.def|cognition/modules/fleetfac
 
 /* Inert MVP hierarchy admission has no proof or execution authority. */
 AGENT_IMPACT_RULE("cognition/modules/ontology/include/ontology/work_map.h|cognition/modules/ontology/src/work_map.c", "story_graph make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_zcode_work_map.c|tools/command/native_zcode_work_map.h", "story_graph make_lint_gates")

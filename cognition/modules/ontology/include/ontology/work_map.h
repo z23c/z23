@@ -39,6 +39,7 @@ enum zcl_work_map_result {
     ZCL_WORK_MAP_DEPENDENCY,
     ZCL_WORK_MAP_CYCLE,
     ZCL_WORK_MAP_WIRE,
+    ZCL_WORK_MAP_OBJECT,
 };
 
 /* Validate metadata only, without object IO, allocation or mutation. Every task must
