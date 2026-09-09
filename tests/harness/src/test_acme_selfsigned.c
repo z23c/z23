@@ -267,8 +267,13 @@ int test_acme_selfsigned(void)
         AS_CHECK("an absent file is not reported as self-issued",
                  !acme_certificate_file_is_self_issued(cert_path));
 
-        AS_CHECK("the placeholder pair is written",
-                 acme_selfsigned_write(cert_path, key_path, "node.example.org"));
+        /* Qualify requested creation modes under an explicit mask. Restore
+         * the inherited mask before assertions or any other fixture IO. */
+        mode_t previous_mask = umask(0022);
+        bool pair_written = acme_selfsigned_write(
+            cert_path, key_path, "node.example.org");
+        (void)umask(previous_mask);
+        AS_CHECK("the placeholder pair is written", pair_written);
         AS_CHECK("the certificate on disk is self-issued",
                  acme_certificate_file_is_self_issued(cert_path));
         AS_CHECK("the private key is 0600", file_mode_is(key_path, 0600));
@@ -282,6 +287,16 @@ int test_acme_selfsigned(void)
                  acme_selfsigned_ensure(cert_path, key_path,
                                         "node.example.org") &&
                  file_inode(cert_path, &after) && before == after);
+
+        previous_mask = umask(0077);
+        bool private_pair_written = acme_selfsigned_write(
+            cert_path, key_path, "node.example.org");
+        (void)umask(previous_mask);
+        AS_CHECK("the pair writes under a restrictive caller mask", private_pair_written);
+        AS_CHECK("a restrictive caller mask keeps the certificate private",
+                 file_mode_is(cert_path, 0600));
+        AS_CHECK("the private key remains 0600 under a restrictive mask",
+                 file_mode_is(key_path, 0600));
 
         write_text(junk_path, "this is not a certificate\n");
         AS_CHECK("a file that is not a certificate is not self-issued",
