@@ -593,8 +593,9 @@ static struct zcl_result bf_proof_evaluate(
         if (!rows[i].work_receipt_sha3[0])
             continue;
         struct db_build_action receipt_action;
-        if (!db_build_action_find(ndb, rows[i].action_id, &receipt_action) ||
-            strcmp(receipt_action.task_root_sha3,
+        if (!db_build_action_find(ndb, rows[i].action_id, &receipt_action))
+            return ZCL_ERR(-1, "proof receipt action is unavailable");
+        if (strcmp(receipt_action.task_root_sha3,
                    action.task_root_sha3) != 0 ||
             strcmp(receipt_action.candidate_root_sha3,
                    action.candidate_root_sha3) != 0 ||
