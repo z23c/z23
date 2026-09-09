@@ -51,8 +51,10 @@ static void fb_refuse(struct json_value *result, enum fleet_board_result r)
 static const char *fb_str(const struct json_value *in, const char *key,
                           const char *fallback)
 {
+    /* json_get_str renders a missing key as "", never NULL: without the
+     * emptiness check the fallback would never fire. */
     const char *v = json_get_str(json_get(in, key));
-    return v ? v : fallback;
+    return v[0] ? v : fallback;
 }
 
 static int64_t fb_int(const struct json_value *in, const char *key,

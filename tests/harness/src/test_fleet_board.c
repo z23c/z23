@@ -1354,6 +1354,128 @@ static int test_fleet_board_rpc_concurrency(void)
     return failures;
 }
 
+struct fb_rpc_fixture {
+    struct node_db db;
+    struct db_service service;
+    struct app_runtime_context runtime;
+    struct boot_svc_ctx svc;
+    struct rpc_table table;
+    char dir[256];
+    char warmup_status[256];
+    bool was_warming_up;
+};
+
+static bool fb_rpc_fixture_open(struct fb_rpc_fixture *f, const char *tag)
+{
+    memset(f, 0, sizeof(*f));
+    test_make_tmpdir(f->dir, sizeof(f->dir), "fleetboard", tag);
+    f->service.node_db = &f->db;
+    f->service.started = true;
+    f->runtime.db_service = &f->service;
+    f->svc.node_db = &f->db;
+    f->svc.datadir = f->dir;
+    if (!node_db_open(&f->db, ":memory:")) return false;
+    boot_fleet_board_shutdown();
+    boot_fleet_board_wire(&f->svc);
+    app_runtime_set_current(&f->runtime);
+    rpc_table_init(&f->table);
+    boot_fleet_board_register_rpc(&f->table);
+    f->was_warming_up =
+        rpc_is_in_warmup(f->warmup_status, sizeof(f->warmup_status));
+    set_rpc_warmup_finished();
+    return true;
+}
+
+static void fb_rpc_fixture_close(struct fb_rpc_fixture *f)
+{
+    app_runtime_set_current(NULL);
+    if (f->was_warming_up)
+        set_rpc_warmup_started(f->warmup_status);
+    boot_fleet_board_shutdown();
+    node_db_close(&f->db);
+}
+
+static bool fb_rpc_call(struct fb_rpc_fixture *f, struct json_value *input,
+                        struct json_value *result)
+{
+    struct json_value params;
+    json_init(&params);
+    json_set_array(&params);
+    bool ok = json_push_back(&params, input) &&
+              rpc_table_execute(&f->table, "fleet_board", &params, result);
+    json_free(&params);
+    return ok;
+}
+
+static bool fb_rpc_post(struct fb_rpc_fixture *f, const char *kind,
+                        const char *text, const char *agent,
+                        const char *scope, struct json_value *result)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "op", "post") &&
+              json_push_kv_str(&input, "kind", kind) &&
+              json_push_kv_str(&input, "text", text);
+    if (ok && agent) ok = json_push_kv_str(&input, "agent", agent);
+    if (ok && scope) ok = json_push_kv_str(&input, "scope", scope);
+    if (ok) ok = fb_rpc_call(f, &input, result);
+    json_free(&input);
+    return ok;
+}
+
+static int test_fleet_board_rpc_scope_default(void)
+{
+    int failures = 0;
+    TEST("fleet board: RPC post without scope signs the public default room") {
+        struct fb_rpc_fixture f;
+        ASSERT(fb_rpc_fixture_open(&f, "rpc-scope"));
+        struct json_value out;
+        json_init(&out);
+        bool posted = fb_rpc_post(&f, "note", "scope default acceptance",
+                                  "scope-probe", NULL, &out);
+        if (!posted || !json_get_bool(json_get(&out, "ok"))) {
+            const char *code = json_get_str(json_get(&out, "code"));
+            fprintf(stderr, "fleet board: scope-default post refused: %s\n",
+                    code[0] ? code : "(no code)");
+        }
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        const char *id = json_get_str(json_get(&out, "id"));
+        ASSERT(strlen(id) == 64);
+        char post_id[65];
+        (void)snprintf(post_id, sizeof(post_id), "%s", id);
+        json_free(&out);
+
+        json_init(&out);
+        json_set_object(&out);
+        struct json_value show;
+        json_init(&show);
+        json_set_object(&show);
+        bool shown = json_push_kv_str(&show, "op", "show") &&
+                     json_push_kv_str(&show, "id", post_id) &&
+                     fb_rpc_call(&f, &show, &out);
+        json_free(&show);
+        ASSERT(shown && json_get_bool(json_get(&out, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "scope")), "public");
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "room")),
+                      FLEET_BOARD_ROOM_DEFAULT);
+        json_free(&out);
+
+        /* An unrecognized scope stays a typed refusal, never a default. */
+        json_init(&out);
+        ASSERT(fb_rpc_post(&f, "note", "scope refusal acceptance", NULL,
+                           "bogus", &out));
+        ASSERT(!json_get_bool(json_get(&out, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BAD_SCOPE");
+        json_free(&out);
+
+        fb_rpc_fixture_close(&f);
+        ASSERT(test_rm_rf_recursive(f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static void fb_test_scope(struct fleet_board_post *post, uint8_t scope,
                           const char *room)
 {
@@ -1747,6 +1869,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_peer_churn_limits();
     failures += test_fleet_board_rpc_verification();
     failures += test_fleet_board_rpc_concurrency();
+    failures += test_fleet_board_rpc_scope_default();
     failures += test_fleet_board_durable_wiki();
     failures += test_fleet_board_local_capacity_does_not_score_peer();
     failures += test_fleet_board_peer_inventory_cursor();
