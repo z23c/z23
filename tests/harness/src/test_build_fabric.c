@@ -2309,12 +2309,47 @@ static int bf_interrupt_receipt_prefix(unsigned event, void *context,
     return 0;
 }
 
-static int bf_deny_receipt_read(void *context, int operation,
+static int bf_deny_proof_dependency_read(void *context, int operation,
     const char *table, const char *column, const char *db, const char *trigger)
 {
-    (void)context; (void)column; (void)db; (void)trigger;
+    (void)column; (void)db; (void)trigger;
     return operation == SQLITE_READ && table &&
-        strcmp(table, "build_receipts") == 0 ? SQLITE_DENY : SQLITE_OK;
+        strcmp(table, context) == 0 ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int bf_proof_dependency_read_failures(struct node_db *ndb,
+    const char *dir, const char *action_id, int64_t now)
+{
+    static const char *const tables[] = { "build_jobs", "build_workers" };
+    static const char *const errors[] = {
+        "proof receipt job is unavailable", "proof receipt worker is unavailable",
+    };
+    int failures = 0;
+    TEST("build_fabric: unreadable receipt dependencies are not absent evidence") {
+        int changes = sqlite3_total_changes(ndb->db);
+        for (size_t i = 0; i < 6; i++) {
+            struct build_fabric_proof_evaluation evaluation = {0};
+            ASSERT_EQ(sqlite3_set_authorizer(ndb->db,
+                bf_deny_proof_dependency_read, (void *)tables[i / 3]), SQLITE_OK);
+            struct zcl_result result = i % 3 == 0
+                ? build_fabric_proof_evaluate_readonly(ndb, dir, action_id, now, &evaluation)
+                : i % 3 == 1
+                    ? build_fabric_proof_materialize(ndb, dir, action_id, now, &evaluation)
+                    : build_fabric_proof_evaluate(ndb, dir, action_id, now, &evaluation);
+            (void)sqlite3_set_authorizer(ndb->db, NULL, NULL);
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, errors[i / 3]);
+            ASSERT(!evaluation.policy_satisfied);
+            ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+            result = build_fabric_proof_evaluate_readonly(
+                ndb, dir, action_id, now, &evaluation);
+            ASSERT(result.ok);
+            ASSERT(evaluation.policy_satisfied);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int bf_receipt_query_refusals(struct node_db *ndb, const char *action_id,
@@ -2338,7 +2373,8 @@ static int bf_receipt_query_refusals(struct node_db *ndb, const char *action_id,
         ASSERT_EQ(count, -1);
         for (unsigned i = 0; i < probe->rows; i++)
             ASSERT(memcmp(&rows[i], &zero, sizeof(zero)) == 0);
-        ASSERT_EQ(sqlite3_set_authorizer(ndb->db, bf_deny_receipt_read, NULL), SQLITE_OK);
+        ASSERT_EQ(sqlite3_set_authorizer(ndb->db, bf_deny_proof_dependency_read,
+                                        (void *)"build_receipts"), SQLITE_OK);
         count = db_build_candidate_receipts(ndb, action.task_root_sha3,
             action.candidate_root_sha3, action.proof_policy_root_sha3, rows, 8);
         (void)sqlite3_set_authorizer(ndb->db, NULL, NULL);
@@ -2444,6 +2480,9 @@ static int test_bf_package_proof_conflicts(
         ASSERT(build_fabric_proof_evaluate_readonly(
             ndb, dir, package_action.action_id, now, &initial).ok);
         ASSERT(initial.policy_satisfied);
+        if (scenario == 0)
+            failures += bf_proof_dependency_read_failures(
+                ndb, dir, package_action.action_id, now);
         struct vcs_zcode_work_receipt_v1 failed = *work;
         memcpy(failed.action_root, passed.action_root, 32);
         failed.status = scenario == 1 ? VCS_ZCODE_WORK_PASS : VCS_ZCODE_WORK_FAIL;

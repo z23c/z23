@@ -609,7 +609,7 @@ static struct zcl_result bf_proof_evaluate(
             receipt_action.kind, VCS_BUILD_ACTION_KIND_V1) == 0;
         if (compile_action && !db_build_job_find(
                                   ndb, receipt_action.job_id, &receipt_job))
-            continue;
+            return ZCL_ERR(-1, "proof receipt job is unavailable");
         uint8_t receipt_root[32]; uint8_t *receipt_wire = NULL;
         size_t receipt_len = 0;
         if (!bf_load_dev_object(workspace, rows[i].work_receipt_sha3,
@@ -664,8 +664,9 @@ static struct zcl_result bf_proof_evaluate(
         struct db_build_worker worker;
         char receipt_signer_hex[65];
         zcl_hex_encode(receipt.signer_pubkey, 32, receipt_signer_hex);
-        if (!db_build_worker_find(ndb, rows[i].worker_id, &worker) ||
-            strcmp(worker.signer_pubkey, receipt_signer_hex) != 0)
+        if (!db_build_worker_find(ndb, rows[i].worker_id, &worker))
+            return ZCL_ERR(-1, "proof receipt worker is unavailable");
+        if (strcmp(worker.signer_pubkey, receipt_signer_hex) != 0)
             continue;
         bool current = !worker.revoked &&
             (worker.expires_at == 0 || now < worker.expires_at);
