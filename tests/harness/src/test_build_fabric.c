@@ -21,6 +21,7 @@
 #include "crypto/ed25519.h"
 #include "platform/time_compat.h"
 #include "command/native_command.h"
+#include "command/native_zcode_work_map.h"
 #include "controllers/api_controller.h"
 #include "json/json.h"
 #include "vcs/build_action.h"
@@ -2619,6 +2620,32 @@ static int test_bf_proof_materialization(void)
         ASSERT_EQ(readonly.valid_receipts, 1);
         ASSERT_EQ(readonly.compile_receipts, 1);
         ASSERT(strlen(readonly.proof_set_root_sha3) == 64);
+        struct build_fabric_proof_evaluation mapped = {0};
+        ASSERT(zcl_native_work_map_evaluate(&ndb, dir, action.task_root_sha3,
+            action.candidate_root_sha3, action.proof_policy_root_sha3,
+            action.action_id, now, &mapped).ok);
+        ASSERT_EQ(mapped.valid_receipts, readonly.valid_receipts);
+        ASSERT_STR_EQ(mapped.proof_set_root_sha3, readonly.proof_set_root_sha3);
+        memset(&mapped, 0xa5, sizeof(mapped));
+        ASSERT(!zcl_native_work_map_evaluate(&ndb, dir, action.task_root_sha3,
+            action.candidate_root_sha3, action.proof_policy_root_sha3,
+            action.action_id, -1, &mapped).ok);
+        struct build_fabric_proof_evaluation empty_map_facts = {0};
+        ASSERT(memcmp(&mapped, &empty_map_facts, sizeof(mapped)) == 0);
+        const char *wrong_map_root =
+            "abababababababababababababababababababababababababababababababab";
+        ASSERT(!zcl_native_work_map_evaluate(&ndb, dir, wrong_map_root,
+            action.candidate_root_sha3, action.proof_policy_root_sha3,
+            action.action_id, now, &mapped).ok);
+        ASSERT_EQ(mapped.valid_receipts, 0);
+        ASSERT(mapped.proof_set_root_sha3[0] == '\0');
+        ASSERT(!zcl_native_work_map_evaluate(&ndb, dir, action.task_root_sha3,
+            wrong_map_root, action.proof_policy_root_sha3,
+            action.action_id, now, &mapped).ok);
+        ASSERT(!zcl_native_work_map_evaluate(&ndb, dir, action.task_root_sha3,
+            action.candidate_root_sha3, wrong_map_root,
+            action.action_id, now, &mapped).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
         uint8_t proof_root[32];
         ASSERT(zcl_hex_decode_lower(
             readonly.proof_set_root_sha3, proof_root, 32));

@@ -7,9 +7,32 @@
 #include "base/log_macros.h"
 #include "sha3/sha3.h"
 #include "vcs/vcs_object.h"
+#include "models/build_fabric.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+struct zcl_result zcl_native_work_map_evaluate(
+    struct node_db *ndb, const char *workspace, const char *task_root,
+    const char *candidate_root, const char *policy_root, const char *action_id,
+    int64_t now, struct build_fabric_proof_evaluation *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out || !task_root || !candidate_root || !policy_root || !action_id)
+        return ZCL_ERR(-1, "map evidence requires exact task, candidate, policy and action");
+    struct db_build_action action;
+    if (!db_build_action_find(ndb, action_id, &action))
+        return ZCL_ERR(-1, "map evidence action is unavailable");
+    if (strcmp(task_root, action.task_root_sha3) != 0 ||
+        strcmp(candidate_root, action.candidate_root_sha3) != 0 ||
+        strcmp(policy_root, action.proof_policy_root_sha3) != 0)
+        return ZCL_ERR(-1, "map evidence action does not bind the requested identity");
+    struct build_fabric_proof_evaluation observed = {0};
+    struct zcl_result result = build_fabric_proof_evaluate_readonly(
+        ndb, workspace, action_id, now, &observed);
+    if (result.ok) *out = observed;
+    return result;
+}
 
 enum zcl_work_map_result zcl_native_work_map_load(
     const char *workspace, const uint8_t root[32],
