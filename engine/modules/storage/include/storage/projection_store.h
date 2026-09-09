@@ -62,9 +62,10 @@
  * quarantines the file trio aside (timestamped/pid-unique rename) and
  * reopens a FRESH, empty file — safe because every table here re-derives from
  * the kernel on the next fold. A successful WAL checkpoint + close writes a
- * single-use receipt bound to the exact file identity and SQLite header; an
- * unchanged WAL-free reopen consumes that receipt and skips the O(file-size)
- * scan. Any mismatch, WAL, crash, or malformed receipt takes the full gate.
+ * single-use receipt bound to file identity and a full-content SHA3 digest.
+ * A WAL-free reopen scans O(file-size) bytes to verify that digest and can
+ * then skip SQLite's structural check. Any mismatch, old receipt version,
+ * WAL, crash, or malformed receipt takes the full integrity gate.
  * Idempotent: a second call with the same
  * datadir is a no-op returning true; a different datadir returns false (one
  * process, one projection store). */

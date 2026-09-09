@@ -11,6 +11,9 @@
  *   - dump_state_json reports open status, path, and stage_cursor row count */
 
 #include "test/test_core.h"
+#include "platform/positioned_file.h"
+#include "crypto/sha3.h"
+#include "base/hex.h"
 
 #include "json/json.h"
 #include "storage/consensus_db.h"
@@ -36,6 +39,78 @@
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
+
+/* Keep the genuine digest but align timestamps with the corrupted fixture.
+ * This removes filesystem timestamp resolution from the acceptance witness. */
+static int ps_receipt_line(FILE *fp, const char *line, unsigned version,
+                           const struct platform_positioned_file_snapshot *snap)
+{
+    const char *keys[] = {"mtime_sec=", "mtime_nsec=", "ctime_sec=", "ctime_nsec="};
+    const long long values[] = {snap->modified_seconds, snap->modified_nanoseconds,
+                                snap->changed_seconds, snap->changed_nanoseconds};
+    for (size_t i = 0; i < 4; i++)
+        if (strncmp(line, keys[i], strlen(keys[i])) == 0)
+            return fprintf(fp, "%s%lld\n", keys[i], values[i]);
+    if (strncmp(line, "version=", 8) == 0)
+        return fprintf(fp, "version=%u\n", version);
+    if (version == 1 && strncmp(line, "content_sha3=", 13) == 0) return 0;
+    return fprintf(fp, "%s\n", line);
+}
+
+static bool ps_align_receipt_metadata(const char *path, const char *receipt,
+                                      unsigned version)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snap;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path)) return false;
+    bool ok = platform_positioned_file_snapshot(&file, &snap);
+    platform_positioned_file_close(&file);
+    if (!ok) return false;
+    char text[768] = {0};
+    FILE *fp = fopen(receipt, "rb");
+    if (!fp) return false;
+    size_t got = fread(text, 1, sizeof(text) - 1, fp);
+    ok = !ferror(fp) && feof(fp);
+    fclose(fp);
+    if (!ok || got == 0) return false;
+    fp = fopen(receipt, "wb");
+    if (!fp) return false;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        int wrote = ps_receipt_line(fp, line, version, &snap);
+        if (wrote < 0) ok = false;
+    }
+    return fclose(fp) == 0 && ok;
+}
+
+static bool ps_receipt_digest_matches(const char *path, const char *receipt)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    unsigned char chunk[777], digest[32];
+    size_t got, total = 0;
+    while ((got = fread(chunk, 1, sizeof(chunk), fp)) != 0) {
+        sha3_256_write(&hash, chunk, got);
+        total += got;
+    }
+    bool ok = !ferror(fp) && total > 4096;
+    fclose(fp);
+    sha3_256_finalize(&hash, digest);
+    char expected[80] = "content_sha3=";
+    zcl_hex_encode(digest, sizeof(digest), expected + 13);
+    char text[768] = {0};
+    fp = fopen(receipt, "rb");
+    if (!fp) return false;
+    got = fread(text, 1, sizeof(text) - 1, fp);
+    ok = ok && !ferror(fp) && got > 0 && strstr(text, expected) &&
+         strstr(text, "version=2\n");
+    fclose(fp);
+    return ok;
+}
 
 /* Tiny stage step that advances the cursor by one each time. */
 static job_result_t step_advance_by_one(struct stage_step_ctx *c)
@@ -581,9 +656,7 @@ int test_progress_store(void)
                 uint8_t garbage[4096];
                 memset(garbage, 0xEE, sizeof(garbage));
                 size_t to_write = (size_t)span;
-                size_t wrote = fwrite(garbage, 1,
-                                      to_write < sizeof(garbage)
-                                          ? to_write : sizeof(garbage), f);
+                size_t wrote = fwrite(garbage, 1, to_write, f);
                 PS_CHECK("quarantine: wrote garbage page", wrote > 0);
                 fclose(f);
             }
@@ -719,7 +792,7 @@ int test_progress_store(void)
      *   (b) a deliberately page-garbled store is detected → quarantine file
      *       appears → reopen succeeds with a fresh, queryable, EMPTY store,
      *   (c) it is auto-terminating (one quarantine, not a loop). */
-    {
+    for (unsigned receipt_version = 1; receipt_version <= 2; receipt_version++) {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_quarantine");
         char fpath[512];
@@ -746,6 +819,8 @@ int test_progress_store(void)
         projection_store_close();
         PS_CHECK("proj quarantine: clean close writes fast-open receipt",
                  access(receipt_path, F_OK) == 0);
+        PS_CHECK("proj quarantine: recorded digest covers full fixture",
+                 ps_receipt_digest_matches(fpath, receipt_path));
 
         /* (a) Reopen the HEALTHY file — must NOT quarantine, marker survives. */
         PS_CHECK("proj quarantine: healthy reopen OK",
@@ -796,6 +871,9 @@ int test_progress_store(void)
                 fclose(f);
             }
         }
+
+        PS_CHECK("proj quarantine: align receipt metadata, preserve old digest",
+                 ps_align_receipt_metadata(fpath, receipt_path, receipt_version));
 
         /* (b) Reopen the CORRUPT file — quick_check must fire the quarantine
          *     and reopen a fresh store. open() returns true (self-healed). */

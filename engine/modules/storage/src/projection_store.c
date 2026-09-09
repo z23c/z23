@@ -20,6 +20,8 @@
 #include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "base/serialize_le.h"
+#include "base/hex.h"
+#include "crypto/sha3.h"
 #include "storage/projection_store.h"
 #include "storage/progress_store.h"
 #include "progress_store_directory.h"
@@ -47,7 +49,7 @@
 #define PROJECTION_STORE_FILENAME "progress.kv"
 #define PROJECTION_CLEAN_RECEIPT_SUFFIX ".clean"
 #define PROJECTION_CLEAN_RECEIPT_MAGIC "ZCLPROJCLEAN"
-#define PROJECTION_CLEAN_RECEIPT_VERSION 1
+#define PROJECTION_CLEAN_RECEIPT_VERSION 2
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_tx_lock;
@@ -90,7 +92,33 @@ struct projection_file_identity {
     long long ctime_nsec;
     uint32_t change_counter;
     uint32_t version_valid_for;
+    char content_sha3[65];
 };
+
+static bool projection_content_digest(
+    struct platform_positioned_file *file, uint64_t size, char out[65])
+{
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    unsigned char chunk[4096];
+    uint64_t offset = 0;
+    while (offset < size) {
+        size_t want = size - offset < sizeof(chunk)
+            ? (size_t)(size - offset) : sizeof(chunk);
+        int64_t got = platform_positioned_file_read(file, chunk, want, offset);
+        if (got <= 0 || (uint64_t)got > want) {
+            LOG_ERROR("projection_store", "content digest read failed at %llu",
+                      (unsigned long long)offset);
+            return false;
+        }
+        sha3_256_write(&hash, chunk, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    unsigned char digest[32];
+    sha3_256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+    return true;
+}
 
 static bool projection_file_identity_read(
     const char *path, struct projection_file_identity *out)
@@ -101,15 +129,19 @@ static bool projection_file_identity_read(
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path) ||
-        !platform_positioned_file_snapshot(&file, &before) || before.size < 100)
+    if (!platform_positioned_file_open(&file, path))
         return false;
+    if (!platform_positioned_file_snapshot(&file, &before) || before.size < 100) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
     unsigned char hdr[100];
     int64_t nr = platform_positioned_file_read(&file, hdr, sizeof(hdr), 0);
     /* Field-wise, never memcmp: the snapshot struct's alignment padding is
      * undefined, so a whole-object compare can report an unchanged file as
      * changed and reject a perfectly good projection. */
-    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+    bool stable = projection_content_digest(&file, before.size, out->content_sha3) &&
+        platform_positioned_file_snapshot(&file, &after) &&
         platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable || nr != (int64_t)sizeof(hdr) ||
@@ -158,9 +190,9 @@ static bool projection_receipt_path(char *out, size_t out_n,
     return n > 0 && (size_t)n < out_n;
 }
 
-/* A receipt is single-use and binds the exact post-close file identity. ctime
- * makes an in-place page corruption fail the binding even if an attacker or
- * restore tool puts mtime back; inode rejects replacement. A non-empty WAL is
+/* A receipt is single-use and binds the full post-close file content. File
+ * timestamps can coincide across rapid writes, so metadata alone cannot
+ * qualify a clean reopen. The digest covers every page. A non-empty WAL is
  * always a dirty boot. Any ambiguity falls through to the full quick_check. */
 static bool projection_clean_receipt_consume(const char *path)
 {
@@ -185,16 +217,17 @@ static bool projection_clean_receipt_consume(const char *path)
     int fields = sscanf(
         buf,
         "magic=" PROJECTION_CLEAN_RECEIPT_MAGIC "\n"
-        "version=" "1" "\n"
+        "version=" "2" "\n"
         "dev=%llu\nino=%llu\nsize=%lld\n"
         "mtime_sec=%lld\nmtime_nsec=%lld\n"
         "ctime_sec=%lld\nctime_nsec=%lld\n"
-        "change_counter=%u\nversion_valid_for=%u\n%n",
+        "change_counter=%u\nversion_valid_for=%u\ncontent_sha3=%64[0-9a-f]\n%n",
         &want.dev, &want.ino, &want.size,
         &want.mtime_sec, &want.mtime_nsec,
         &want.ctime_sec, &want.ctime_nsec,
-        &want.change_counter, &want.version_valid_for, &consumed);
-    if (fields != 9 || consumed <= 0 || (size_t)consumed != nr)
+        &want.change_counter, &want.version_valid_for, want.content_sha3, &consumed);
+    if (fields != 10 || strlen(want.content_sha3) != 64 ||
+        consumed <= 0 || (size_t)consumed != nr)
         return false;
 
     struct projection_file_identity have;
@@ -226,11 +259,11 @@ static bool projection_clean_receipt_write(const char *path)
         "dev=%llu\nino=%llu\nsize=%lld\n"
         "mtime_sec=%lld\nmtime_nsec=%lld\n"
         "ctime_sec=%lld\nctime_nsec=%lld\n"
-        "change_counter=%u\nversion_valid_for=%u\n",
+        "change_counter=%u\nversion_valid_for=%u\ncontent_sha3=%s\n",
         PROJECTION_CLEAN_RECEIPT_VERSION,
         id.dev, id.ino, id.size,
         id.mtime_sec, id.mtime_nsec, id.ctime_sec, id.ctime_nsec,
-        id.change_counter, id.version_valid_for);
+        id.change_counter, id.version_valid_for, id.content_sha3);
     if (cn <= 0 || (size_t)cn >= sizeof(content))
         return false;
     (void)platform_private_file_unlink_missing_ok(tmp);
@@ -419,7 +452,7 @@ bool projection_store_open(const char *datadir)
      * observational path regain authority on native Windows. */
     bool verified_clean = false;
 #else
-    bool verified_clean = projection_clean_receipt_consume(display_path);
+    bool verified_clean = projection_clean_receipt_consume(path);
 #endif
 
     /* Integrity gate. progress.kv's projection tables (address_index / txindex
@@ -609,7 +642,7 @@ void projection_store_close(void)
     } else {
 #ifndef _WIN32
         char receipt[PROJECTION_STORE_PATH_MAX + 16];
-        if (projection_receipt_path(receipt, sizeof(receipt), g_display_path))
+        if (projection_receipt_path(receipt, sizeof(receipt), g_path))
             (void)unlink(receipt);
 #endif
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
