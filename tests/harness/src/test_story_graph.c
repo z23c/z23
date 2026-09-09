@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Born-red contracts for bounded rooted development stories. */
 #include "test/test_core.h"
+#include "test/accepted_work_fixture.h"
 #include "base/hex.h"
 #include "ontology/story_graph.h"
 #include "ontology/work_map.h"
@@ -1005,11 +1006,21 @@ static int sg_work_map_command(void)
         char dir[256], hex[65];
         test_make_tmpdir(dir, sizeof(dir), "work_map", "command");
         ASSERT(vcs_object_store_init(dir));
+        struct test_accepted_work_fixture fixture;
+        uint8_t source[32];
+        sg_root(source, 0x71);
+        ASSERT(test_accepted_work_fixture_create(dir, source, 1500, 0x72, &fixture));
+        uint8_t wire[sizeof(sg_map_golden)], task_root[32];
+        memcpy(wire, sg_map_golden, sizeof(wire));
+        ASSERT_EQ(vcs_zcode_task_root(&fixture.accepted.task, task_root), VCS_ZCODE_DEV_OK);
+        uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_task_serialize(&fixture.accepted.task, task_wire), VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(dir, wire + 126, task_wire, sizeof(task_wire)));
+        memcpy(wire + 88, task_root, 32);
         uint8_t root[32];
-        sha3_256(sg_map_golden, sizeof(sg_map_golden), root);
+        sha3_256(wire, sizeof(wire), root);
         zcl_hex_encode(root, sizeof(root), hex);
-        ASSERT(vcs_object_put_addressed(dir, root, sg_map_golden,
-                                       sizeof(sg_map_golden)));
+        ASSERT(vcs_object_put_addressed(dir, root, wire, sizeof(wire)));
         struct json_value input;
         json_init(&input);
         json_set_object(&input);
@@ -1035,6 +1046,32 @@ static int sg_work_map_command(void)
         ASSERT_STR_EQ(json_get_str(json_get(row, "kind")), "loop");
         ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
         ASSERT_STR_EQ(json_get_str(json_get(row, "reason")), "acceptance_not_observed");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "task_resolution")), "verified");
+        ASSERT(json_get_bool(json_get(row, "task_expired")));
+        ASSERT_STR_EQ(json_get_str(json_get(row, "candidate_resolution")), "unobserved");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "review_resolution")), "unobserved");
+        char acceptance[65];
+        zcl_hex_encode(fixture.accepted.task.acceptance_tests_root, 32, acceptance);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "acceptance_tests_root")), acceptance);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "task_resolution_scope")), "requested_page");
+        ASSERT(json_get_int(json_get(&reply.data, "observed_unix")) > 0);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", dir));
+        ASSERT(json_push_kv_str(&input, "map_root", hex));
+        ASSERT(json_push_kv_int(&input, "offset", 3));
+        ASSERT(json_push_kv_int(&input, "limit", 1));
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        row = json_at(json_get(&reply.data, "nodes"), 0);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "task_resolution")), "unobserved");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+        ASSERT(json_get(row, "acceptance_tests_root") == NULL);
+        ASSERT(json_get(row, "source_root") == NULL);
         zcl_command_reply_free(&reply);
         json_free(&input);
         test_rm_rf(dir);

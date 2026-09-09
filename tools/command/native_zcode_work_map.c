@@ -8,6 +8,8 @@
 #include "sha3/sha3.h"
 #include "vcs/vcs_object.h"
 #include "models/build_fabric.h"
+#include "vcs/zcode_dev.h"
+#include "platform/time_compat.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -98,8 +100,41 @@ static bool map_dependencies(struct json_value *row,
     return ok;
 }
 
+static bool map_root_field(struct json_value *row, const char *key,
+                            const uint8_t root[32])
+{
+    char hex[65];
+    zcl_hex_encode(root, 32, hex);
+    return json_push_kv_str(row, key, hex);
+}
+
+static bool map_task_metadata(struct json_value *row,
+    const char *workspace, const uint8_t root[32], int64_t now)
+{
+    uint8_t *wire = NULL, checked[32];
+    size_t length = 0;
+    struct vcs_zcode_task_v1 task;
+    bool verified = vcs_object_load_raw_bounded(workspace, root,
+        VCS_ZCODE_TASK_WIRE_BYTES, &wire, &length) == 0 &&
+        vcs_zcode_task_parse(wire, length, &task) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_task_root(&task, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(root, checked, 32) == 0;
+    free(wire);
+    if (!verified)
+        return json_push_kv_str(row, "task_resolution", "unobserved");
+    return json_push_kv_str(row, "task_resolution", "verified") &&
+        map_root_field(row, "source_root", task.source_root) &&
+        map_root_field(row, "goal_root", task.goal_root) &&
+        map_root_field(row, "acceptance_tests_root", task.acceptance_tests_root) &&
+        map_root_field(row, "proof_policy_root", task.proof_policy_root) &&
+        json_push_kv_str(row, "candidate_resolution", "unobserved") &&
+        json_push_kv_str(row, "review_resolution", "unobserved") &&
+        json_push_kv_bool(row, "task_expired", now >= task.expires_unix);
+}
+
 static bool map_row(struct json_value *rows,
-                    const struct zcl_work_map_node *node, size_t index)
+                    const struct zcl_work_map_node *node, size_t index,
+                    const char *workspace, int64_t now)
 {
     struct json_value row;
     json_init(&row); json_set_object(&row);
@@ -108,6 +143,7 @@ static bool map_row(struct json_value *rows,
     const char *kind = node->kind == ZCL_WORK_MAP_LOOP ? "loop" :
         node->kind == ZCL_WORK_MAP_FEATURE ? "feature" : "milestone";
     bool ok = map_dependencies(&row, node) &&
+        map_task_metadata(&row, workspace, node->task_root, now) &&
         json_push_kv_int(&row, "index", (int64_t)index) &&
         json_push_kv_str(&row, "task_root", root) &&
         json_push_kv_str(&row, "kind", kind) &&
@@ -120,23 +156,32 @@ static bool map_row(struct json_value *rows,
     return ok;
 }
 
+static bool map_observation(struct json_value *data, int64_t now)
+{
+    return json_push_kv_str(data, "definition_coverage", "complete") &&
+        json_push_kv_str(data, "acceptance_coverage", "unobserved") &&
+        json_push_kv_int(data, "observed_unix", now) &&
+        json_push_kv_str(data, "task_resolution_scope", "requested_page");
+}
+
 static bool map_render(struct zcl_command_reply *reply, const char *root,
+                        const char *workspace,
                         const struct zcl_work_map_node *nodes, size_t count,
                         size_t offset, size_t limit)
 {
+    int64_t now = platform_time_wall_unix();
     struct json_value rows;
     json_init(&rows); json_set_array(&rows);
     size_t end = offset + limit;
     if (end > count) end = count;
     bool ok = true;
     for (size_t i = offset; ok && i < end; i++)
-        ok = map_row(&rows, &nodes[i], i);
+        ok = map_row(&rows, &nodes[i], i, workspace, now);
     ok = ok && json_push_kv_str(&reply->data, "map_root", root) &&
         json_push_kv_int(&reply->data, "total", (int64_t)count) &&
         json_push_kv_int(&reply->data, "returned", (int64_t)(end - offset)) &&
         json_push_kv_int(&reply->data, "next_offset", end < count ? (int64_t)end : -1) &&
-        json_push_kv_str(&reply->data, "definition_coverage", "complete") &&
-        json_push_kv_str(&reply->data, "acceptance_coverage", "unobserved") &&
+        map_observation(&reply->data, now) &&
         json_push_kv(&reply->data, "nodes", &rows);
     json_free(&rows);
     return ok;
@@ -152,6 +197,7 @@ void zcl_native_handle_zcode_work_map(
         map_fail(reply, "WORK_MAP_INPUT", "workspace must be a string");
         return;
     }
+    if (!workspace || !workspace[0]) workspace = ".";
     const char *root = json_get_str(json_get(request->input, "map_root"));
     size_t offset = 0, limit = 0;
     uint8_t address[32];
@@ -164,7 +210,7 @@ void zcl_native_handle_zcode_work_map(
     struct zcl_work_map_node nodes[ZCL_WORK_MAP_MAX_NODES];
     size_t count = 0;
     enum zcl_work_map_result result = zcl_native_work_map_load(
-        workspace && workspace[0] ? workspace : ".", address, nodes,
+        workspace, address, nodes,
         ZCL_WORK_MAP_MAX_NODES, &count);
     if (result != ZCL_WORK_MAP_OK) {
         map_fail(reply, "WORK_MAP_UNAVAILABLE", "complete map bytes could not be verified");
@@ -175,6 +221,7 @@ void zcl_native_handle_zcode_work_map(
         map_fail(reply, "WORK_MAP_OFFSET", "offset exceeds the complete map");
         return;
     }
-    if (!map_render(reply, root, nodes, count, offset, limit))
+    if (!map_render(reply, root, workspace,
+                    nodes, count, offset, limit))
         map_fail(reply, "WORK_MAP_OUTPUT", "bounded map page could not be rendered");
 }
