@@ -484,51 +484,88 @@ static int refusal(const char *state, const char *local, const char *base,
     return 1;
 }
 
+/* Read one worker marker, refusing links and files others can write. */
+static bool marker_read(const char *path, char *out, size_t cap)
+{
+    uint8_t buf[192];
+    struct platform_positioned_file file;
+    uint64_t size = 0;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_is_current_user_only(&file) &&
+              platform_positioned_file_size(&file, &size) &&
+              size > 0 && size < sizeof(buf) &&
+              size < cap &&
+              platform_positioned_file_read(&file, buf, (size_t)size, 0) ==
+                  (int64_t)size;
+    platform_positioned_file_close(&file);
+    if (!ok) return false;
+    buf[size] = 0;
+    (void)memcpy(out, buf, (size_t)size + 1);
+    return true;
+}
+
+/* A current-generation lease names its holder as "token pid started"; the
+ * legacy pre-lease marker is just "pid started". */
+static bool marker_parse(const char *text, bool lease, long long *pid,
+                         long long *started)
+{
+    char token[128];
+    int fields = lease ? sscanf(text, "%127s %lld %lld", token, pid, started)
+                       : sscanf(text, "%lld %lld", pid, started);
+    return fields == (lease ? 3 : 2) && *pid > 1 && *started > 0;
+}
+
+static bool marker_pid_alive(long long pid)
+{
+#if defined(_WIN32)
+    if ((unsigned long long)pid > UINT32_MAX) return false;
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    bool alive = process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+    if (process) CloseHandle(process);
+    return alive;
+#else
+    return kill((pid_t)pid, 0) == 0;
+#endif
+}
+
+/* A marker is believed only while the process it names is alive. */
+static bool marker_alive(const char *path, bool lease, int64_t *started)
+{
+    char text[192];
+    long long pid = 0, began = 0;
+    if (!marker_read(path, text, sizeof(text)) ||
+        !marker_parse(text, lease, &pid, &began) ||
+        !marker_pid_alive(pid))
+        return false;
+    *started = (int64_t)began;
+    return true;
+}
+
 static int64_t running_eta(const char *root, const char *local,
                            const char *base)
 {
     char path[PATH_MAX];
+    int64_t started = 0;
+    /* The live lease is the current authority; the legacy pre-lease marker
+     * stays readable so state written by an older generation still reports
+     * as running instead of as a missing receipt. */
     int n = snprintf(path, sizeof(path),
+                     "%s/.cache/zcl-dev-proof/leases/%s-%s.lease",
+                     root, local, base);
+    bool live = n > 0 && (size_t)n < sizeof(path) &&
+                marker_alive(path, true, &started);
+    if (!live) {
+        n = snprintf(path, sizeof(path),
                      "%s/.cache/zcl-dev-proof/%s-%s.running",
                      root, local, base);
-    if (n <= 0 || (size_t)n >= sizeof(path)) return -1;
-#if defined(_WIN32)
-    uint8_t marker[128] = {0};
-    struct platform_positioned_file file;
-    uint64_t marker_size = 0;
-    platform_positioned_file_init(&file);
-    bool opened = platform_positioned_file_open(&file, path) &&
-                  platform_positioned_file_is_current_user_only(&file) &&
-                  platform_positioned_file_size(&file, &marker_size) &&
-                  marker_size > 0 && marker_size < sizeof(marker) &&
-                  platform_positioned_file_read(&file, marker,
-                      (size_t)marker_size, 0) == (int64_t)marker_size;
-    platform_positioned_file_close(&file);
-    long long pid = 0, started = 0;
-    if (!opened || sscanf((const char *)marker, "%lld %lld", &pid,
-                          &started) != 2 || pid <= 1 || started <= 0 ||
-        (unsigned long long)pid > UINT32_MAX)
-        return -1;
-    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
-    bool alive = process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
-    if (process) CloseHandle(process);
-    if (!alive) return -1;
-#else
-    struct stat st;
-    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-        S_ISLNK(st.st_mode) || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
-        return -1;
-    FILE *file = fopen(path, "r");
-    if (!file) return -1;
-    long long pid = 0, started = 0;
-    bool parsed = fscanf(file, "%lld %lld", &pid, &started) == 2;
-    (void)fclose(file);
-    if (!parsed || pid <= 1 || started <= 0 || kill((pid_t)pid, 0) != 0)
-        return -1;
-#endif
+        if (n <= 0 || (size_t)n >= sizeof(path) ||
+            !marker_alive(path, false, &started))
+            return -1;
+    }
     struct timespec now = {0};
     if (timespec_get(&now, TIME_UTC) != TIME_UTC) return -1;
-    int64_t elapsed = (int64_t)now.tv_sec - (int64_t)started;
+    int64_t elapsed = (int64_t)now.tv_sec - started;
     int64_t eta = 900000 - (elapsed > 0 ? elapsed * 1000 : 0);
     return eta > 0 ? eta : 0;
 }

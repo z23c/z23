@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>
@@ -560,6 +561,75 @@ static int test_dps_hook_admission(void)
     } _test_next:;
     return failures;
 }
+
+static int test_dps_hook_running_eta(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX - 64], hook[PATH_MAX], local[65], base[65];
+    char out[4096], tuple[256];
+    TEST("pre-push hook: a live lease reports status=running with an honest "
+         "ETA, a lease whose holder died or which does not parse falls back "
+         "to receipt-missing, and the legacy pre-lease marker still counts") {
+        dps_isolate("hook_running_eta");
+        test_make_tmpdir(dir, sizeof(dir), "dev_proof_signer", "hook_eta");
+        ASSERT(test_abs_path("build/bin/z23-git-hook", hook, sizeof(hook)));
+        ASSERT(access(hook, X_OK) == 0);
+        ASSERT(dps_git_rig(dir, local, base));
+        int n = snprintf(tuple, sizeof(tuple),
+                         "refs/heads/main %s refs/heads/main %s\n", local,
+                         base);
+        ASSERT(n > 0 && (size_t)n < sizeof(tuple));
+        const char *argv[] = {hook, "--hook=pre-push", "origin", "origin",
+                              NULL};
+
+        char marker[PATH_MAX], body[128];
+        n = snprintf(marker, sizeof(marker),
+                     "%s/.cache/zcl-dev-proof/leases/%s-%s.lease",
+                     dir, local, base);
+        ASSERT(n > 0 && (size_t)n < sizeof(marker));
+        char mk[PATH_MAX];
+        n = snprintf(mk, sizeof(mk),
+                     "mkdir -p '%s/.cache/zcl-dev-proof/leases'", dir);
+        ASSERT(n > 0 && (size_t)n < sizeof(mk) && system(mk) == 0);
+        n = snprintf(body, sizeof(body), "hooktest %ld %ld\n",
+                     (long)getpid(), (long)time(NULL));
+        ASSERT(n > 0 && (size_t)n < sizeof(body));
+        ASSERT(dps_write(marker, body, strlen(body), 0600));
+        ASSERT(dps_run(dir, argv, tuple, out, sizeof(out)) != 0);
+        ASSERT(strstr(out, "status=running") != NULL);
+        ASSERT(strstr(out, "eta_ms=0 local=") == NULL);
+
+        /* The holder is gone: no authority, no running claim. */
+        n = snprintf(body, sizeof(body), "hooktest 999999 %ld\n",
+                     (long)time(NULL));
+        ASSERT(n > 0 && (size_t)n < sizeof(body));
+        ASSERT(dps_write(marker, body, strlen(body), 0600));
+        ASSERT(dps_run(dir, argv, tuple, out, sizeof(out)) != 0);
+        ASSERT(strstr(out, "status=receipt-missing") != NULL);
+
+        /* A lease that does not parse cannot claim running either. */
+        ASSERT(dps_write(marker, "garbage\n", 8, 0600));
+        ASSERT(dps_run(dir, argv, tuple, out, sizeof(out)) != 0);
+        ASSERT(strstr(out, "status=receipt-missing") != NULL);
+        ASSERT(unlink(marker) == 0);
+
+        /* The legacy pre-lease marker still reports as running. */
+        n = snprintf(marker, sizeof(marker),
+                     "%s/.cache/zcl-dev-proof/%s-%s.running",
+                     dir, local, base);
+        ASSERT(n > 0 && (size_t)n < sizeof(marker));
+        n = snprintf(body, sizeof(body), "%ld %ld\n",
+                     (long)getpid(), (long)time(NULL));
+        ASSERT(n > 0 && (size_t)n < sizeof(body));
+        ASSERT(dps_write(marker, body, strlen(body), 0600));
+        ASSERT(dps_run(dir, argv, tuple, out, sizeof(out)) != 0);
+        ASSERT(strstr(out, "status=running") != NULL);
+        ASSERT(unlink(marker) == 0);
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 /* Independent wire/domain expectations: do not derive these from the codec. */
@@ -736,6 +806,7 @@ int test_dev_proof_signer(void)
     failures += test_dps_leaf_bounds();
 #if !defined(_WIN32)
     failures += test_dps_hook_admission();
+    failures += test_dps_hook_running_eta();
 #endif
     dps_restore();
     return failures;

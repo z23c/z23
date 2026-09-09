@@ -4422,7 +4422,7 @@ tools/dev/z23_git_hook.c:child_capture:55
 tools/dev/z23_git_hook.c:child_capture#2:23
 tools/dev/z23_git_hook.c:hook_append_arg:20
 tools/dev/z23_git_hook.c:read_exact_at:16
-tools/dev/z23_git_hook.c:running_eta:29
+tools/dev/z23_git_hook.c:running_eta:10
 tools/dev/z23_git_hook.c:selftest:62
 tools/engine_unit.c:append_unit_receipt:27
 tools/engine_unit.c:compose_prompt:23
