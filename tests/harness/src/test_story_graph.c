@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 #include "base/hex.h"
 #include "ontology/story_graph.h"
+#include "ontology/work_map.h"
 #include "command/native_story_command.h"
 #include "command/native_story_internal.h"
 #include "vcs/zcode_app_run_observation.h"
@@ -649,9 +650,91 @@ static int sg_app_run_projection(void)
     return failures;
 }
 
+static int sg_work_map_hierarchy(void)
+{
+    int failures = 0;
+    TEST("work map: exact task hierarchy rejects duplicates and completion cycles") {
+        struct zcl_work_map_node nodes[4] = {0};
+        for (size_t i = 0; i < 4; i++) {
+            sg_root(nodes[i].task_root, (uint8_t)(i + 1));
+            nodes[i].kind = i < 2 ? (uint16_t)(i + 1) : ZCL_WORK_MAP_LOOP;
+            nodes[i].parent = i == 0 ? ZCL_WORK_MAP_NO_PARENT : i == 1 ? 0 : 1;
+        }
+        ASSERT_EQ(zcl_work_map_validate(nodes, 4), ZCL_WORK_MAP_OK);
+        nodes[3].dependency_count = 1;
+        nodes[3].dependencies[0] = 2;
+        ASSERT_EQ(zcl_work_map_validate(nodes, 4), ZCL_WORK_MAP_OK);
+        nodes[2].dependency_count = 1;
+        nodes[2].dependencies[0] = 3;
+        ASSERT_EQ(zcl_work_map_validate(nodes, 4), ZCL_WORK_MAP_CYCLE);
+        nodes[2].dependencies[0] = 0;
+        ASSERT_EQ(zcl_work_map_validate(nodes, 4), ZCL_WORK_MAP_CYCLE);
+        nodes[2].dependency_count = 0;
+        nodes[3].dependencies[0] = 4;
+        ASSERT_EQ(zcl_work_map_validate(nodes, 4), ZCL_WORK_MAP_DEPENDENCY);
+        nodes[3].dependency_count = 0;
+        nodes[3].parent = 0;
+        ASSERT_EQ(zcl_work_map_validate(nodes, 4), ZCL_WORK_MAP_HIERARCHY);
+        nodes[3].parent = 1;
+        memcpy(nodes[3].task_root, nodes[2].task_root, 32);
+        ASSERT_EQ(zcl_work_map_validate(nodes, 4), ZCL_WORK_MAP_IDENTITY);
+        ASSERT_EQ(zcl_work_map_validate(NULL, 4), ZCL_WORK_MAP_BOUNDS);
+        ASSERT_EQ(zcl_work_map_validate(nodes, ZCL_WORK_MAP_MAX_NODES + 1),
+                  ZCL_WORK_MAP_BOUNDS);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_work_map_bounds(void)
+{
+    int failures = 0;
+    TEST("work map: full capacity and dependency boundaries are enforced") {
+        struct zcl_work_map_node nodes[ZCL_WORK_MAP_MAX_NODES] = {0};
+        for (size_t i = 0; i < ZCL_WORK_MAP_MAX_NODES; i++) {
+            sg_root(nodes[i].task_root, (uint8_t)(i + 1));
+            nodes[i].kind = i < 2 ? (uint16_t)(i + 1) : ZCL_WORK_MAP_LOOP;
+            nodes[i].parent = i == 0 ? ZCL_WORK_MAP_NO_PARENT : i == 1 ? 0 : 1;
+            if (i >= 2 && i + 1 < ZCL_WORK_MAP_MAX_NODES) {
+                nodes[i].dependency_count = 1;
+                nodes[i].dependencies[0] = (uint16_t)(i + 1);
+            }
+        }
+        ASSERT_EQ(zcl_work_map_validate(nodes, ZCL_WORK_MAP_MAX_NODES),
+                  ZCL_WORK_MAP_OK);
+        nodes[2].dependency_count = ZCL_WORK_MAP_MAX_DEPENDENCIES;
+        for (size_t d = 0; d < ZCL_WORK_MAP_MAX_DEPENDENCIES; d++)
+            nodes[2].dependencies[d] = (uint16_t)(d + 3);
+        ASSERT_EQ(zcl_work_map_validate(nodes, ZCL_WORK_MAP_MAX_NODES),
+                  ZCL_WORK_MAP_OK);
+        nodes[2].dependency_count++;
+        ASSERT_EQ(zcl_work_map_validate(nodes, ZCL_WORK_MAP_MAX_NODES),
+                  ZCL_WORK_MAP_DEPENDENCY);
+        nodes[2].dependency_count = 2;
+        nodes[2].dependencies[1] = nodes[2].dependencies[0];
+        ASSERT_EQ(zcl_work_map_validate(nodes, ZCL_WORK_MAP_MAX_NODES),
+                  ZCL_WORK_MAP_DEPENDENCY);
+        nodes[2].dependency_count = 1;
+        nodes[2].dependencies[0] = 2;
+        ASSERT_EQ(zcl_work_map_validate(nodes, ZCL_WORK_MAP_MAX_NODES),
+                  ZCL_WORK_MAP_DEPENDENCY);
+        nodes[2].dependency_count = 0;
+        memset(nodes[2].task_root, 0, 32);
+        ASSERT_EQ(zcl_work_map_validate(nodes, ZCL_WORK_MAP_MAX_NODES),
+                  ZCL_WORK_MAP_IDENTITY);
+        ASSERT_EQ(zcl_work_map_validate(nodes, 0), ZCL_WORK_MAP_BOUNDS);
+        ASSERT_EQ(zcl_work_map_validate(nodes, 2), ZCL_WORK_MAP_HIERARCHY);
+        ASSERT_EQ(zcl_work_map_validate(nodes, 1), ZCL_WORK_MAP_HIERARCHY);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_story_graph(void)
 {
     int failures = 0;
+    failures += sg_work_map_hierarchy();
+    failures += sg_work_map_bounds();
     failures += sg_complete_story();
     failures += sg_unknown_and_incomplete();
     failures += sg_journey_branches();
