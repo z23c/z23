@@ -99,6 +99,17 @@ No cache-pinning helper or privileged RAM setup is required for this policy.
 `ZCL_BLOCK_SCAN_WORKERS` remains an optional override, capped at 64 and the
 number of files. Invalid values fall back to the automatic policy.
 
+On rotational disks, an existing block-index projection can be prefetched in
+sequential 64 KiB reads before replay. Automatic SQLite cache sizing admits
+the projection plus 25% growth only when it fits within one eighth of host
+RAM, one quarter of available RAM, one quarter of observed cgroup headroom,
+and a 2 GiB ceiling. Small projections keep the existing cache policy;
+insufficient memory skips this optimization. `ZCL_BIP_PAGE_CACHE_KIB`
+preserves explicit cache control. Prefetch uses a 64 KiB buffer and the
+reclaimable operating-system cache; it does not pin memory or make RAM the
+durable storage authority. SQLite still owns page validation, WAL recovery,
+and writes. Slow-disk startup timing remains to be measured for this path.
+
 The first build needs internet access once: `make` auto-runs `make vendor`,
 which fetches pinned third-party source tarballs (OpenSSL, libevent, LevelDB,
 zlib, SQLite, the canonical Zcash Sapling prover), verifies each against a

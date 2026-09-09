@@ -51,6 +51,13 @@
 #define BIP_PAGE_CACHE_KIB 262144
 #define BIP_MMAP_BYTES     0
 
+struct os_proc_mem;
+/* Optional read-only warmup before catch-up; zero budget means no change. */
+uint64_t block_index_projection_cache_budget(uint64_t bytes,
+                                             const struct os_proc_mem *mem);
+uint64_t block_index_projection_cache_warm(sqlite3_file *file, uint64_t bytes);
+void block_index_projection_cache_prepare(sqlite3 *db);
+
 struct block_index_projection {
     sqlite3       *db;
     event_log_t   *log;

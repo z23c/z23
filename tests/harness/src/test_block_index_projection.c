@@ -42,6 +42,8 @@
 #include "test/test_core.h"
 
 #include "platform/time_compat.h"
+#include "platform/os_proc.h"
+#include "util/storage_pacing.h"
 #include "storage/block_index_projection.h"
 #include "storage/event_log.h"
 #include "storage/event_log_payloads.h"
@@ -1086,6 +1088,126 @@ done:
     return *failures - start_failures;
 }
 
+static int run_cache_budget(int *failures)
+{
+    int start = *failures;
+    const int64_t gib = INT64_C(1073741824);
+    struct os_proc_mem mem = {
+        .sys_total_bytes = 16 * gib, .sys_avail_bytes = 12 * gib,
+        .cgroup_high = -1, .cgroup_max = -1, .cgroup_current = -1,
+    };
+    BIP_CHECK("cache: bounded working set",
+              block_index_projection_cache_budget((uint64_t)gib, &mem)
+              == (uint64_t)(gib + gib / 4));
+    BIP_CHECK("cache: small file keeps baseline",
+              block_index_projection_cache_budget(4096, &mem) == 0);
+    BIP_CHECK("cache: oversized file skipped",
+              block_index_projection_cache_budget(UINT64_MAX, &mem) == 0);
+    BIP_CHECK("cache: missing memory skipped",
+              block_index_projection_cache_budget((uint64_t)gib, NULL) == 0);
+    mem.sys_avail_bytes = gib;
+    BIP_CHECK("cache: low available memory skipped",
+              block_index_projection_cache_budget((uint64_t)gib, &mem) == 0);
+    mem.sys_avail_bytes = 12 * gib;
+    mem.cgroup_max = 4 * gib;
+    mem.cgroup_current = gib;
+    BIP_CHECK("cache: cgroup headroom respected",
+              block_index_projection_cache_budget((uint64_t)gib, &mem) == 0);
+    mem.cgroup_max = -1;
+    mem.cgroup_high = 4 * gib;
+    BIP_CHECK("cache: cgroup high respected",
+              block_index_projection_cache_budget((uint64_t)gib, &mem) == 0);
+    mem.cgroup_current = -1;
+    BIP_CHECK("cache: unknown constrained usage skipped",
+              block_index_projection_cache_budget((uint64_t)gib, &mem) == 0);
+    return *failures - start;
+}
+
+typedef struct {
+    sqlite3_file file;
+    sqlite3_int64 next;
+    int reads;
+    int fail_read;
+    bool invalid;
+} bip_prefetch_fixture_t;
+
+static int bip_prefetch_read(sqlite3_file *file, void *buffer, int amount,
+                             sqlite3_int64 offset)
+{
+    bip_prefetch_fixture_t *f = (bip_prefetch_fixture_t *)file;
+    f->reads++;
+    if (offset != f->next || amount <= 0 || amount > 65536) {
+        f->invalid = true;
+        return SQLITE_IOERR;
+    }
+    if (f->reads == f->fail_read) return SQLITE_IOERR;
+    memset(buffer, 0, (size_t)amount);
+    f->next += amount;
+    return SQLITE_OK;
+}
+
+static int run_cache_prefetch(int *failures)
+{
+    int start = *failures;
+    const sqlite3_io_methods methods = { .iVersion = 1,
+                                         .xRead = bip_prefetch_read };
+    bip_prefetch_fixture_t f = { .file = { .pMethods = &methods } };
+    BIP_CHECK("prefetch: exact sequential reads and tail",
+              block_index_projection_cache_warm(&f.file, 131079) == 131079
+              && f.reads == 3 && f.next == 131079 && !f.invalid);
+    f.next = 0; f.reads = 0; f.fail_read = 2;
+    BIP_CHECK("prefetch: I/O error stops without retry storm",
+              block_index_projection_cache_warm(&f.file, 131079) == 65536
+              && f.reads == 2 && !f.invalid);
+    BIP_CHECK("prefetch: oversized input performs no I/O",
+              block_index_projection_cache_warm(&f.file, UINT64_MAX) == 0
+              && f.reads == 2);
+    BIP_CHECK("prefetch: absent handle falls back",
+              block_index_projection_cache_warm(NULL, 65536) == 0);
+    return *failures - start;
+}
+
+static int run_cache_file(int *failures)
+{
+    int start = *failures;
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "prefetch");
+    char path[320]; snprintf(path, sizeof(path), "%s/p.db", dir);
+    sqlite3 *db = NULL;
+    BIP_CHECK("prefetch file: opens",
+              sqlite3_open(path, &db) == SQLITE_OK);
+    if (!db) return *failures - start;
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE fixture(v BLOB);"
+        "INSERT INTO fixture VALUES(zeroblob(33554432));",
+        NULL, NULL, NULL);
+    BIP_CHECK("prefetch file: materialized pages", rc == SQLITE_OK);
+    if (rc == SQLITE_OK) {
+        struct os_proc_mem mem = {
+            .sys_total_bytes = INT64_C(17179869184),
+            .sys_avail_bytes = INT64_C(12884901888),
+            .cgroup_high = -1, .cgroup_max = -1, .cgroup_current = -1,
+        };
+        os_proc_mem_set_override(&mem);
+        storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+        block_index_projection_cache_prepare(db);
+        block_index_projection_t view = { .db = db };
+        BIP_CHECK("prefetch file: cache policy applied",
+                  bip_pragma_cache_size(&view) == -BIP_PAGE_CACHE_KIB);
+        sqlite3_stmt *stmt = NULL;
+        rc = sqlite3_prepare_v2(db, "SELECT length(v) FROM fixture",
+                                -1, &stmt, NULL);
+        BIP_CHECK("prefetch file: data preserved",
+                  rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW
+                  && sqlite3_column_int64(stmt, 0) == 33554432);
+        sqlite3_finalize(stmt);
+        os_proc_mem_set_override(NULL);
+        storage_pacing_reset_for_testing();
+    }
+    sqlite3_close(db);
+    bip_cleanup_dir(dir);
+    return *failures - start;
+}
+
 int test_block_index_projection(void)
 {
     printf("\n=== block_index_projection tests ===\n");
@@ -1095,6 +1217,9 @@ int test_block_index_projection(void)
     run_payload_roundtrip(&failures);
     run_open_close_clean(&failures);
     run_page_cache_pragmas(&failures);
+    run_cache_budget(&failures);
+    run_cache_prefetch(&failures);
+    run_cache_file(&failures);
     run_single_header_consumed(&failures);
     run_get_by_height(&failures);
     run_iterate_canonical(&failures);

@@ -55,3 +55,22 @@ UTXO-apply, mint-fold and index-import crash fixtures in 4.7 seconds;
 7.0 seconds. The latter exercises state-machine transitions, not a full
 network synchronization or a real-node boot. The crash fixtures use isolated
 temporary databases, not either canonical host's datadir.
+
+The projection now optionally reads its existing SQLite main file sequentially
+through the open VFS handle on rotational storage. A 64 KiB scratch buffer
+feeds the reclaimable OS cache; no bytes are parsed or written by prefetch.
+An I/O error or shutdown request stops the optimization. SQLite continues to
+own recovery and validation. Automatic cache sizing reserves room for 25%
+growth, rounds to KiB, and requires the result to fit the host and observed
+cgroup headroom limits documented in `GETTING_STARTED.md`. This is a page
+cache allowance, not an RSS guarantee or locked-memory allocation.
+
+The focused projection group passed with zero skips in 49.6 seconds after
+adding budget-boundary, ascending-offset, short-tail, read-failure, and real
+SQLite-file fixtures. The real-file fixture creates a 32 MiB value, invokes
+automatic preparation through SQLite's actual VFS, checks the connection's
+cache setting, and reads the retained value's length. The focused top-up
+group also passed with zero skips in 0.2 seconds. These are functional
+results on the build host, not HDD throughput or production startup evidence.
+Remaining measurements are cold projection replay, clean bound-delta restart,
+native status latency under replay, and the one-hour node observation.

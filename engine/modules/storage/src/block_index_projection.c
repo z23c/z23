@@ -258,6 +258,8 @@ block_index_projection_t *block_index_projection_open(const char *path,
         sqlite3_close(db);
         return NULL;
     }
+    if (!getenv("ZCL_BIP_PAGE_CACHE_KIB"))
+        block_index_projection_cache_prepare(db);
 
     block_index_projection_t *p = (block_index_projection_t *)
         zcl_malloc(sizeof(*p), "block_index_projection/handle");
