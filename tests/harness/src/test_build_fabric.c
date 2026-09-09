@@ -2470,6 +2470,48 @@ static int bf_proof_incomplete_receipts(struct node_db *ndb, const char *dir,
     return failures;
 }
 
+static int bf_proof_missing_conflict_object(struct node_db *ndb,
+    const char *dir, const char *action_id, int64_t now,
+    const struct vcs_zcode_work_receipt_v1 *failed)
+{
+    int failures = 0;
+    TEST("build_fabric: unavailable conflicting receipt cannot qualify a proof") {
+        uint8_t root[32];
+        char hex[65], path[1024], backup[1040];
+        ASSERT_EQ(vcs_zcode_work_receipt_id(failed, root), VCS_ZCODE_DEV_OK);
+        zcl_hex_encode(root, 32, hex);
+        int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", dir, hex, hex + 2);
+        ASSERT(n > 0 && (size_t)n < sizeof(path));
+        n = snprintf(backup, sizeof(backup), "%s.hidden", path);
+        ASSERT(n > 0 && (size_t)n < sizeof(backup));
+        ASSERT(vcs_object_has(dir, root));
+        int changes = sqlite3_total_changes(ndb->db);
+        for (unsigned mode = 0; mode < 3; mode++) {
+            ASSERT_EQ(rename(path, backup), 0);
+            bool absent = !vcs_object_has(dir, root);
+            struct build_fabric_proof_evaluation evaluation = {0};
+            struct zcl_result result = mode == 0
+                ? build_fabric_proof_evaluate_readonly(ndb, dir, action_id, now, &evaluation)
+                : mode == 1
+                    ? build_fabric_proof_materialize(ndb, dir, action_id, now, &evaluation)
+                    : build_fabric_proof_evaluate(ndb, dir, action_id, now, &evaluation);
+            int restored = rename(backup, path);
+            ASSERT_EQ(restored, 0);
+            ASSERT(absent && vcs_object_has(dir, root));
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, "proof receipt CAS object is unavailable");
+            ASSERT(!evaluation.policy_satisfied);
+            ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+            result = build_fabric_proof_evaluate_readonly(ndb, dir, action_id, now, &evaluation);
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, "proof_observation_conflict");
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_package_proof_conflicts(
     struct node_db *ndb, const char *dir, int64_t now,
     const struct test_accepted_work_fixture *fixture,
@@ -2563,9 +2605,12 @@ static int test_bf_package_proof_conflicts(
             ASSERT_EQ(vcs_zcode_work_receipt_id(&failed, root), VCS_ZCODE_DEV_OK);
             ASSERT(vcs_object_has(dir, root));
         }
-        if (scenario == 0)
+        if (scenario == 0) {
+            failures += bf_proof_missing_conflict_object(
+                ndb, dir, package_action.action_id, now, &failed);
             failures += bf_proof_incomplete_receipts(
                 ndb, dir, package_action.action_id, now, &passed);
+        }
         PASS();
     } _test_next:;
     if (transaction_open && !node_db_rollback(ndb)) failures++;

@@ -615,7 +615,7 @@ static struct zcl_result bf_proof_evaluate(
         size_t receipt_len = 0;
         if (!bf_load_dev_object(workspace, rows[i].work_receipt_sha3,
                                 &receipt_wire, &receipt_len, receipt_root))
-            continue;
+            return ZCL_ERR(-1, "proof receipt CAS object is unavailable");
         struct vcs_zcode_work_receipt_v1 receipt;
         uint8_t checked_receipt_root[32];
         bool verified = vcs_zcode_work_receipt_parse(
