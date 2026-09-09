@@ -40,6 +40,22 @@ end-to-end via the **local operator proof** on this machine — the relevant
 **MRS = the count of ✅ criteria above** (8/8 = MVP achieved). Current MRS:
 `z23 milestone` (REST `GET /api/v1/milestone`) or
 [`docs/HANDOFF.md`](./HANDOFF.md) — this file does not track a live count.
+
+**Advancing a criterion (agent/operator loop).** One loop per cell: run the
+cell's full-proof harness (or its ledger collector, e.g.
+`tools/scripts/c3_stopwatch_run_and_record.sh`), keep the artifact directory
+it prints regardless of verdict, judge the ledger where one exists
+(`make c3-stopwatch-report`, `make netdisrupt-stopwatch-report`,
+`make soak-evidence-report`), and only then edit the cell: record the run's
+date, verdict, measured number and artifact path, and flip the status column
+only when the cell's own stated gate condition is met — a ◐ cell names its
+remaining condition in prose; meet that condition, not a convenient
+substitute. Never delete a failure record to make room for a PASS: append
+the new run, so the failure history stays visible beside it. When a full
+claim is blocked on an owner decision (sealed core, `vendor/tor`, deploy,
+custody), say so in the cell and name the decision — a named owner gate is
+the honest ◐ state, not a reason to weaken the claim.
+
 **C1, C2, C3, C4, C7** each have a FULL operator claim that run-passes: C1/C2/C4/C7 via their
 `make mvp-verify` members — `ci-install-linger` (real `make install` +
 `systemctl --user start`), `mvp-onion-local` (real onion `<60s`),
