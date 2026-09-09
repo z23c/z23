@@ -811,6 +811,11 @@ void vcs_zcode_task_index_free(struct vcs_zcode_task_index *index)
     free(index);
 }
 
+bool vcs_zcode_task_index_complete(const struct vcs_zcode_task_index *index)
+{
+    return index && index->complete;
+}
+
 size_t vcs_zcode_task_index_task_count(
     const struct vcs_zcode_task_index *index)
 {

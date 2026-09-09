@@ -5968,6 +5968,7 @@ static int test_zd_task_index(void)
          * incomplete. Silently skipping it could hide an active conflicting
          * task and produce a false CLEAR verdict. */
         struct vcs_zcode_task_conflict conflict;
+        ASSERT(!vcs_zcode_task_index_complete(index));
         ASSERT_EQ(vcs_zcode_task_index_conflict(
                       index, workspace, &task_a, &conflict),
                   VCS_ZCODE_TASK_CONFLICT_INCOMPLETE);
@@ -5978,6 +5979,7 @@ static int test_zd_task_index(void)
 
         /* Coordination is a deterministic observation over exact task and
          * scope roots. It neither assigns an owner nor claims execution. */
+        ASSERT(vcs_zcode_task_index_complete(index));
         ASSERT_EQ(vcs_zcode_task_index_conflict(
                       index, workspace, &task_a, &conflict),
                   VCS_ZCODE_TASK_CONFLICT_DUPLICATE_ACTIVE_WORK);
@@ -6030,6 +6032,8 @@ static int test_zd_task_index(void)
         struct vcs_zcode_task_index *timeless =
             vcs_zcode_task_index_build(workspace, 0);
         ASSERT(timeless != NULL);
+        ASSERT(!vcs_zcode_task_index_complete(timeless));
+        ASSERT(!vcs_zcode_task_index_complete(NULL));
         ASSERT_EQ(vcs_zcode_task_index_conflict(
                       timeless, workspace, &clear, &conflict),
                   VCS_ZCODE_TASK_CONFLICT_INCOMPLETE);
@@ -6040,6 +6044,7 @@ static int test_zd_task_index(void)
         struct vcs_zcode_task_index *restarted =
             vcs_zcode_task_index_build(workspace, now);
         ASSERT(restarted != NULL);
+        ASSERT(vcs_zcode_task_index_complete(restarted));
         ASSERT_EQ(vcs_zcode_task_index_task_count(restarted),
                   vcs_zcode_task_index_task_count(index));
         for (size_t i = 0; i < vcs_zcode_task_index_task_count(index); i++) {

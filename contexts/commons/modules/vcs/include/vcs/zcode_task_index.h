@@ -153,6 +153,11 @@ struct vcs_zcode_task_index *vcs_zcode_task_index_build(
     const char *repo_root, int64_t now_unix);
 void vcs_zcode_task_index_free(struct vcs_zcode_task_index *index);
 
+/* Coverage of this scan only; false for NULL, invalid observation time,
+ * corrupt recognized objects, scan failures or exceeded capacity. Complete
+ * coverage is not proof-policy satisfaction or execution authority. */
+bool vcs_zcode_task_index_complete(const struct vcs_zcode_task_index *index);
+
 size_t vcs_zcode_task_index_task_count(
     const struct vcs_zcode_task_index *index);
 const struct vcs_zcode_task_index_entry *vcs_zcode_task_index_task_at(
