@@ -215,9 +215,23 @@ bool zcl_dev_proof_retry(const char *repo_root,
                          const char *local_commit,
                          const char *remote_base,
                          struct zcl_dev_proof_status *out);
-/* The singleton development watcher owns this queue. Notifications only
- * publish immutable pair requests; the resident owner claims and executes at
- * most one leased attempt at a time. */
+/* Scheduling exclusion shared by foreground and resident edit/commit workers.
+ * Returns 1 with an owned descriptor, 0 busy, -1 refusal. Across fork the
+ * parent closes its copy without unlocking; the child releases after work. */
+int zcl_dev_proof_execution_acquire(const char *root, int *guard,
+                                    char *why, size_t why_len);
+void zcl_dev_proof_execution_release(int guard);
+/* Foreground execution of only the explicit pair in an unarmed checkout.
+ * Existing watcher state refuses admission; no watcher state is created.
+ * A bounded child owns both guards through worker/lease cleanup. Requester
+ * cancellation settles that child; requester hard death leaves its guards
+ * owned. Hard death of the actual worker is not descendant containment.
+ * Returns 1 when settled (inspect status, never infer PASS), 0 busy, -1
+ * invalid/unavailable. Existing failed attempts require explicit retry. */
+int zcl_dev_proof_step(const char *root, const char *local, const char *base,
+                        struct zcl_dev_proof_status *out);
+/* Notifications publish immutable requests. All consumers share execution
+ * exclusion; queue claim remains separately locked and bounded. */
 bool zcl_dev_proof_queue_has_pending(const char *repo_root);
 int zcl_dev_proof_queue_run_next(const char *repo_root,
                                  char *why, size_t why_len);
@@ -228,6 +242,10 @@ bool zcl_dev_proof_wait(const char *repo_root,
                         struct zcl_dev_proof_status *out);
 
 #if defined(ZCL_TESTING)
+/* Watcher admission fixture: a held execution guard must preserve pending
+ * edit work without forking a worker or arming a watcher. */
+bool zcl_dev_proof_test_edit_busy(const char *root);
+bool zcl_dev_proof_test_edit_lifetime(const char *root);
 /* The generation's exact required/optional dependency policy and copy path.
  * Missing optional inputs succeed only if the generation also lacks them;
  * a stale generation copy, unsafe source, or inspection/copy error refuses. */

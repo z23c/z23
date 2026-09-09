@@ -33,6 +33,7 @@ enum zcl_dev_proof_kill_cause {
     ZCL_DEV_PROOF_KILL_NONE = 0,
     ZCL_DEV_PROOF_KILL_NO_PROGRESS,
     ZCL_DEV_PROOF_KILL_HARD_CEILING,
+    ZCL_DEV_PROOF_KILL_CANCELLED,
 };
 
 struct zcl_dev_proof_budget {

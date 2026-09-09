@@ -2383,6 +2383,48 @@ static int test_ic_proof_run_watched_kills_only_the_silent(void)
     } _test_next:;
     return failures;
 }
+
+static bool ic_proof_budget_started(const char *log)
+{
+    for (size_t i = 0; i < 250; i++) {
+        struct stat status;
+        if (stat(log, &status) == 0 && status.st_size > 0) return true;
+        platform_sleep_ms(20); /* real-clock: awaits output from a real spawned command before cancellation; virtual time cannot start it. */
+    }
+    return false;
+}
+
+static int test_ic_proof_budget_cancellation(void)
+{
+    int failures = 0;
+    TEST("proof budget: cancellation settles the command group and blocks another step") {
+        char state[4096], log[4096];
+        ic_budget_fixture("cancelled", state);
+        snprintf(log, sizeof(log), "%s/cancel.log", state);
+        (void)unlink(log);
+        const char *argv[] = {"/bin/sh", "-c", "echo ready; sleep 30", NULL};
+        struct zcl_dev_proof_budget budget = {
+            .budget_ms = 30000, .ceiling_ms = 60000, .no_progress_ms = 60000};
+        struct zcl_dev_proof_step step = {0}, refused = {0};
+        ASSERT(zcl_dev_proof_step_start(&step, ".", log, argv, &budget));
+        bool started = ic_proof_budget_started(log);
+        zcl_devloop_process_cancel_request();
+        bool settled = zcl_dev_proof_step_poll(&step);
+        bool restarted = zcl_dev_proof_step_start(&refused, ".", log, argv, &budget);
+        struct zcl_dev_proof_step_report report = {0};
+        int watched = zcl_dev_proof_run_watched(".", log, argv, &budget, &report);
+        zcl_devloop_process_cancel_clear();
+        ASSERT(started && settled && !restarted);
+        ASSERT_EQ(step.report.cause, ZCL_DEV_PROOF_KILL_CANCELLED);
+        ASSERT_EQ(step.report.rc, 130);
+        ASSERT_EQ(refused.report.cause, ZCL_DEV_PROOF_KILL_CANCELLED);
+        ASSERT_EQ(watched, 130);
+        ASSERT_EQ(report.cause, ZCL_DEV_PROOF_KILL_CANCELLED);
+        ASSERT(kill((pid_t)step.child, 0) != 0 && errno == ESRCH);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 #if !defined(_WIN32)
 static int test_ic_proof_steps_run_concurrently(void)
@@ -5072,15 +5114,20 @@ static pid_t ic_landing_worker_start(const char *root, const char *path,
 
 struct ic_landing_worker_observation {
     bool ready, released, settled;
-    int during, during_errno, after, status;
+    int during, during_errno, after, status, execution_during;
 };
 
-static bool ic_landing_worker_observe(const char *step, pid_t worker,
+static bool ic_landing_worker_observe(const char *root, const char *step, pid_t worker,
                                        const int channels[2],
                                        struct ic_landing_worker_observation *out)
 {
     struct pollfd ready = {.fd = channels[0], .events = POLLIN};
     out->ready = poll(&ready, 1, 10000) == 1 && (ready.revents & POLLIN);
+    int execution = -1;
+    char why[160] = {0};
+    out->execution_during = zcl_dev_proof_execution_acquire(root, &execution,
+                                                             why, sizeof(why));
+    if (out->execution_during > 0) zcl_dev_proof_execution_release(execution);
     int lock = open(step, O_RDWR | O_CLOEXEC);
     out->during = lock >= 0 ? flock(lock, LOCK_EX | LOCK_NB) : -1;
     out->during_errno = errno;
@@ -5111,8 +5158,9 @@ static int test_ic_landing_proof_holds_lock_through_worker(void)
         pid_t worker = ic_landing_worker_start(f.root, path, channels);
         ASSERT(worker >= 0);
         struct ic_landing_worker_observation observed = {0};
-        ASSERT(ic_landing_worker_observe(f.step, worker, channels, &observed));
+        ASSERT(ic_landing_worker_observe(f.root, f.step, worker, channels, &observed));
         ASSERT(observed.ready);
+        ASSERT_EQ(observed.execution_during, 0);
         ASSERT(observed.during != 0 && (observed.during_errno == EWOULDBLOCK ||
                                         observed.during_errno == EAGAIN));
         ASSERT(observed.released && observed.settled &&
@@ -5126,10 +5174,345 @@ static int test_ic_landing_proof_holds_lock_through_worker(void)
 }
 #endif
 
+#if !defined(_WIN32)
+static bool ic_foreground_ancestry(struct ic_landing_proof_fixture *f,
+                                    char local[41], char other[41], char base[41])
+{
+    char command[8192];
+    if (snprintf(command, sizeof(command),
+        "git -C %s init -q && git -C %s -c user.name=fixture "
+        "-c user.email=fixture@example.invalid -c commit.gpgsign=false "
+        "commit -qm base --allow-empty && "
+        "git -C %s rev-parse HEAD && git -C %s "
+        "-c user.name=fixture -c user.email=fixture@example.invalid "
+        "-c commit.gpgsign=false commit -qm older --allow-empty && "
+        "git -C %s rev-parse HEAD && git -C %s "
+        "-c user.name=fixture -c user.email=fixture@example.invalid "
+        "-c commit.gpgsign=false commit -qm selected --allow-empty && "
+        "git -C %s rev-parse HEAD", f->root, f->root, f->root, f->root,
+        f->root, f->root, f->root) >= (int)sizeof(command)) return false;
+    FILE *input = popen(command, "r");
+    if (!input) return false;
+    bool ok = fscanf(input, "%40s\n%40s\n%40s", base, other, local) == 3;
+    return pclose(input) == 0 && ok;
+}
+
+static const struct zcl_command_reply *ic_proof_captured_reply;
+
+static void ic_proof_captured_handler(const struct zcl_command_request *request,
+                                        struct zcl_command_reply *reply)
+{
+    (void)request;
+    json_free(&reply->data);
+    *reply = *ic_proof_captured_reply;
+    json_init(&reply->data);
+    json_copy(&reply->data, &ic_proof_captured_reply->data);
+}
+
+static bool ic_proof_reply_serializes(const struct zcl_command_reply *reply)
+{
+    const struct zcl_command_spec *registered = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.proof.step", NULL);
+    if (!registered) return false;
+    struct zcl_command_spec spec = *registered;
+    spec.handler = ic_proof_captured_handler;
+    struct json_value input, doc;
+    json_init(&input);
+    json_init(&doc);
+    json_set_object(&input);
+    bool ready = json_push_kv_str(&input, "root", json_get_str(json_get(&reply->data, "root"))) &&
+        json_push_kv_str(&input, "local_commit", json_get_str(json_get(&reply->data, "local_commit"))) &&
+        json_push_kv_str(&input, "remote_base", json_get_str(json_get(&reply->data, "remote_base")));
+    char wire[8192];
+    enum zcl_command_exit code;
+    ic_proof_captured_reply = reply;
+    size_t len = ready ? zcl_command_registry_execute_json(zcl_command_catalog(),
+        &spec, NULL, &input, false, spec.path, NULL, 0, 0, NULL,
+        wire, sizeof(wire), &code) : 0;
+    ic_proof_captured_reply = NULL;
+    bool ok = len > 0 && code == reply->exit_code && json_read(&doc, wire, len);
+    const char *error = json_get_str(json_get(json_get(&doc, "error"), "code"));
+    ok = ok && error && strcmp(error, reply->error.code) == 0;
+    json_free(&doc);
+    json_free(&input);
+    return ok;
+}
+
+static int test_ic_foreground_selected_pair(void)
+{
+    int failures = 0;
+    char *saved_process_env = NULL;
+    bool process_env_changed = false;
+    TEST("proof step: only selected pair runs; failed worker stays failed without watcher") {
+        const char *process_env = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+        if (process_env) {
+            saved_process_env = zcl_strdup(process_env, "foreground fixture process environment");
+            ASSERT(saved_process_env != NULL);
+        }
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        process_env_changed = true;
+        struct ic_landing_proof_fixture f = {0};
+        ASSERT(ic_landing_proof_prepare(&f, "foreground-selected"));
+        ASSERT(unlink(f.request) == 0);
+        char local[41], other[41], base[41];
+        ASSERT(ic_foreground_ancestry(&f, local, other, base));
+        const char *ancestor_argv[] = {"git", "merge-base", "--is-ancestor", other, local, NULL};
+        struct zcl_devloop_process_result ancestor = {0};
+        ASSERT(zcl_devloop_process_run(f.root, ancestor_argv, 5000, &ancestor));
+        ASSERT_EQ(ancestor.exit_code, 0);
+        snprintf(f.request, sizeof(f.request),
+                 "%s/.cache/zcl-dev-proof/requests/%s-%s.request", f.root, local, base);
+        snprintf(f.failure, sizeof(f.failure),
+                 "%s/.cache/zcl-dev-proof/%s-%s.failed", f.root, local, base);
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_ensure(f.root, other, base, &status));
+        char request[4096], watcher[4096];
+        snprintf(request, sizeof(request), "%s/.cache/zcl-dev-proof/requests/%s-%s.request", f.root, other, base);
+        uint8_t bytes[320];
+        FILE *input = fopen(request, "rb");
+        ASSERT(input != NULL);
+        size_t size = fread(bytes, 1, sizeof(bytes), input);
+        ASSERT(fclose(input) == 0 && size > 0 && size < sizeof(bytes));
+        ASSERT_EQ(zcl_dev_proof_step(f.root, local, base, &status), 1);
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(access(f.failure, F_OK) == 0 && access(f.request, F_OK) != 0);
+        ASSERT(ic_bytes_equal(request, bytes, size));
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_step_conclude(&reply, 1, &status);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "PROOF_FAILED");
+        ASSERT_STR_EQ(reply.next[0].command, "dev.proof.retry");
+        ASSERT(ic_proof_reply_serializes(&reply));
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(zcl_dev_proof_step(f.root, local, base, &status), 1);
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(access(f.request, F_OK) != 0);
+        ASSERT(zcl_dev_proof_retry(f.root, local, base, &status));
+        ASSERT_EQ(zcl_dev_proof_step(f.root, local, base, &status), 1);
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(ic_bytes_equal(request, bytes, size));
+        snprintf(watcher, sizeof(watcher), "%s/.cache/zcl-dev-watch.lock", f.root);
+        ASSERT(access(watcher, F_OK) != 0);
+        ASSERT(test_rm_rf_recursive(f.parent) == 0);
+        PASS();
+    } _test_next:;
+    if (process_env_changed) {
+        int restored = saved_process_env
+            ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved_process_env, 1)
+            : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        if (restored != 0) {
+            fprintf(stderr, "foreground fixture: cannot restore process environment\n");
+            failures++;
+        }
+    }
+    free(saved_process_env);
+    return failures;
+}
+
+static int test_ic_foreground_execution_busy(void)
+{
+    int failures = 0;
+    TEST("proof step: foreground and resident consumers share execution exclusion") {
+        struct ic_landing_proof_fixture f = {0};
+        ASSERT(ic_landing_proof_prepare(&f, "foreground-busy"));
+        int execution = -1;
+        char why[256] = {0};
+        ASSERT_EQ(zcl_dev_proof_execution_acquire(f.root, &execution, why, sizeof(why)), 1);
+        struct zcl_dev_proof_status status = {0};
+        int result = zcl_dev_proof_step(f.root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1111111111111111111111111111111111111111", &status);
+        int resident = zcl_dev_proof_queue_run_next(f.root, why, sizeof(why));
+        bool edit_deferred = zcl_dev_proof_test_edit_busy(f.root);
+        zcl_dev_proof_execution_release(execution);
+        ASSERT(edit_deferred);
+        ASSERT_EQ(result, 0);
+        ASSERT_EQ(resident, 0);
+        ASSERT_STR_EQ(status.detail, "proof_execution_busy");
+        ASSERT_STR_EQ(why, "proof_execution_busy");
+        ASSERT(zcl_dev_proof_test_edit_lifetime(f.root));
+        ASSERT(ic_landing_request_unchanged(&f));
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_step_conclude(&reply, result, &status);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(reply.error.retryable && !reply.error.mutated);
+        ASSERT_STR_EQ(reply.error.code, "PROOF_STEP_BUSY");
+        ASSERT_EQ(reply.next_count, 0);
+        ASSERT(strstr(reply.error.next_action, "retry dev.proof.step") != NULL);
+        ASSERT(ic_proof_reply_serializes(&reply));
+        zcl_command_reply_free(&reply);
+        ASSERT(test_rm_rf_recursive(f.parent) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_foreground_refuses_watcher(void)
+{
+    int failures = 0;
+    TEST("proof step: existing watcher state refuses before claiming or changing requests") {
+        struct ic_landing_proof_fixture f = {0};
+        ASSERT(ic_landing_proof_prepare(&f, "foreground-watcher"));
+        const char marker[] = "123 verify ready proofq1\n";
+        ASSERT(ic_write(f.root, ".cache/zcl-dev-watch.lock", marker));
+        struct zcl_dev_proof_status status = {0};
+        int result = zcl_dev_proof_step(f.root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1111111111111111111111111111111111111111", &status);
+        ASSERT_EQ(result, 0);
+        ASSERT_STR_EQ(status.detail, "proof_foreground_requires_unarmed_checkout");
+        ASSERT(ic_landing_request_unchanged(&f));
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/.cache/zcl-dev-watch.lock", f.root);
+        ASSERT(ic_bytes_equal(path, (const uint8_t *)marker, sizeof(marker) - 1));
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_step_conclude(&reply, result, &status);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "PROOF_STEP_WATCHER_PRESENT");
+        ASSERT(ic_proof_reply_serializes(&reply));
+        zcl_command_reply_free(&reply);
+        ASSERT(test_rm_rf_recursive(f.parent) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static pid_t ic_foreground_requester(const char *root, const char *path,
+                                       const int channels[2])
+{
+    pid_t requester = fork();
+    if (requester != 0) return requester;
+    (void)close(channels[0]);
+    (void)close(channels[1]);
+    if (setpgid(0, 0) != 0 || setenv("PATH", path, 1) != 0 ||
+        setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0) _exit(2);
+    struct zcl_dev_proof_status status = {0};
+    int result = zcl_dev_proof_step(root,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "1111111111111111111111111111111111111111", &status);
+    _exit(result == 1 && status.state == ZCL_DEV_PROOF_STATE_FAILED ? 0 : 3);
+}
+
+static int ic_foreground_guard(const char *root)
+{
+    int guard = -1;
+    char why[160] = {0};
+    int result = zcl_dev_proof_execution_acquire(root, &guard, why, sizeof(why));
+    if (result > 0) zcl_dev_proof_execution_release(guard);
+    return result;
+}
+
+static bool ic_foreground_settled(const char *root)
+{
+    for (size_t i = 0; i < 250; i++) {
+        if (ic_foreground_guard(root) == 1) return true;
+        platform_sleep_ms(20); /* real-clock: observes kernel flock release by the surviving worker; virtual time cannot settle it. */
+    }
+    return false;
+}
+
+static bool ic_foreground_landing_locked(const char *path)
+{
+    int guard = open(path, O_RDWR | O_CLOEXEC);
+    if (guard < 0) return false;
+    int result = flock(guard, LOCK_EX | LOCK_NB);
+    bool held = result < 0 && (errno == EWOULDBLOCK || errno == EAGAIN);
+    if (result == 0) (void)flock(guard, LOCK_UN);
+    (void)close(guard);
+    return held;
+}
+
+static bool ic_foreground_reap(pid_t requester, int *status)
+{
+    for (size_t i = 0; i < 500; i++) {
+        if (waitpid(requester, status, WNOHANG) == requester) return true;
+        platform_sleep_ms(20); /* real-clock: bounds waitpid observation after signal delivery; virtual time cannot reap the process. */
+    }
+    (void)kill(-requester, SIGKILL);
+    (void)kill(requester, SIGKILL);
+    (void)waitpid(requester, status, 0);
+    return false;
+}
+
+static bool ic_foreground_owner_observe(const struct ic_landing_proof_fixture *f,
+                                          pid_t requester, int ready_fd,
+                                          int signal_number)
+{
+    struct pollfd ready = {.fd = ready_fd, .events = POLLIN};
+    bool observed = poll(&ready, 1, 10000) == 1;
+    int before = ic_foreground_guard(f->root);
+    bool landing_before = ic_foreground_landing_locked(f->step);
+    bool sent = kill(requester, signal_number) == 0;
+    int status = 0;
+    bool reaped = ic_foreground_reap(requester, &status);
+    bool outcome = signal_number == SIGKILL
+        ? WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL
+        : WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    int guard_after = ic_foreground_guard(f->root);
+    bool landing_after = ic_foreground_landing_locked(f->step);
+    bool lifetime = signal_number == SIGKILL
+        ? guard_after == 0 && landing_after : guard_after == 1 && !landing_after;
+    return observed && before == 0 && landing_before && sent && reaped &&
+           outcome && lifetime;
+}
+
+static bool ic_foreground_owner_case(int signal_number)
+{
+    struct ic_landing_proof_fixture f = {0};
+    if (!ic_landing_proof_prepare(&f, "foreground-owner")) return false;
+    int channels[2] = {-1, -1};
+    char path[8192];
+    if (!ic_landing_blocking_git(f.root, channels, path)) return false;
+    pid_t requester = ic_foreground_requester(f.root, path, channels);
+    if (requester < 0) return false;
+    bool observed = ic_foreground_owner_observe(&f, requester, channels[0], signal_number);
+    bool released = write(channels[1], "done\n", 5) == 5;
+    bool settled = ic_foreground_settled(f.root);
+    if (!settled) (void)kill(-requester, SIGKILL);
+    (void)close(channels[0]);
+    (void)close(channels[1]);
+    bool cleaned = test_rm_rf_recursive(f.parent) == 0;
+    return observed && released && settled && cleaned;
+}
+
+static int test_ic_foreground_owner_lifetime(void)
+{
+    int failures = 0;
+    TEST("proof step: requester cancellation settles worker; requester death preserves its guard") {
+        ASSERT(ic_foreground_owner_case(SIGTERM));
+        ASSERT(ic_foreground_owner_case(SIGKILL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
+static int test_ic_foreground_proof_command(void)
+{
+    int failures = 0;
+    TEST("proof step: exact foreground execution is discoverable without a watcher") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "dev.proof.step", NULL);
+        ASSERT(spec != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
     ic_isolate_state_root();
+    failures += test_ic_foreground_proof_command();
+#if !defined(_WIN32)
+    failures += test_ic_foreground_selected_pair();
+    failures += test_ic_foreground_execution_busy();
+    failures += test_ic_foreground_refuses_watcher();
+    failures += test_ic_foreground_owner_lifetime();
+#endif
     failures += test_ic_truncated_closure_preserves_groups();
     failures += test_ic_closure_capacity_follows_corpus();
     failures += test_ic_large_plan_preserves_groups();
@@ -5195,6 +5578,7 @@ int test_impact_composition(void)
     failures += test_ic_proof_reads_the_harness_banners();
 #if !defined(_WIN32)
     failures += test_ic_proof_run_watched_kills_only_the_silent();
+    failures += test_ic_proof_budget_cancellation();
     failures += test_ic_proof_steps_run_concurrently();
 #endif
     failures += test_ic_proof_generation_prefers_ram_when_it_fits();

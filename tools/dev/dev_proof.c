@@ -6554,6 +6554,17 @@ static void proof_queue_coalesce(const char *root, const char *requests,
     (void)closedir(dir);
 }
 
+static bool dp_queue_select_exact(const char *root, const char *requested_local,
+                                   const char *requested_base, char selected[PATH_MAX],
+                                   char local[65], char base[65], struct proof_paths *pair)
+{
+    if (!proof_paths_fill(root, requested_local, requested_base, pair)) return false;
+    (void)snprintf(selected, PATH_MAX, "%s", pair->request);
+    return proof_request_read(selected, local, base, NULL, NULL) &&
+           strcmp(local, requested_local) == 0 && strcmp(base, requested_base) == 0 &&
+           proof_request_matches_pair(selected, local, base);
+}
+
 /* Everything the queue lock protects, in one step: pick the oldest pending
  * request, build its paths, publish a lease, move the request into this
  * attempt, and fold away the requests it supersedes. Returns 0 when the
@@ -6561,11 +6572,17 @@ static void proof_queue_coalesce(const char *root, const char *requests,
  * failed. The caller holds and releases the lock. */
 static int dp_queue_claim_locked(const char *repo_root, const char *requests,
                                  const char *attempts,
+                                 const char *requested_local,
+                                 const char *requested_base,
                                  char selected[PATH_MAX], char local[65],
                                  char base[65], struct proof_paths *pair,
                                  struct proof_paths *attempt)
 {
-    if (!proof_queue_select(requests, selected, local, base)) return 0;
+    if (requested_local) {
+        if (!dp_queue_select_exact(repo_root, requested_local, requested_base,
+                                     selected, local, base, pair))
+            return -1;
+    } else if (!proof_queue_select(requests, selected, local, base)) return 0;
     char claimed[PATH_MAX];
     bool prepared = proof_paths_fill(repo_root, local, base, pair) &&
         proof_state_prepare(pair) &&
@@ -6577,8 +6594,9 @@ static int dp_queue_claim_locked(const char *repo_root, const char *requests,
         prepared = false;
     }
     if (!prepared) return -1;
-    proof_queue_coalesce(pair->root, requests, selected, attempts, local,
-                         base);
+    if (!requested_local)
+        proof_queue_coalesce(pair->root, requests, selected, attempts, local,
+                             base);
     return 1;
 }
 
@@ -6650,6 +6668,8 @@ static int dp_landing_proof_guard(const char *root, int *guard,
 }
 
 static int dp_proof_queue_run_guarded(const char *repo_root,
+                                         const char *requested_local,
+                                         const char *requested_base,
                                          char *why, size_t why_len)
 {
     char state[PATH_MAX], requests[PATH_MAX], attempts[PATH_MAX];
@@ -6668,6 +6688,7 @@ static int dp_proof_queue_run_guarded(const char *repo_root,
     }
     struct proof_paths pair, attempt;
     int claimed = dp_queue_claim_locked(repo_root, requests, attempts,
+                                        requested_local, requested_base,
                                         selected, local, base, &pair,
                                         &attempt);
     (void)flock(fd, LOCK_UN);
@@ -6694,7 +6715,12 @@ static int proof_queue_run_next_platform(const char *repo_root,
     int guard = -1;
     int ready = dp_landing_proof_guard(root, &guard, why, why_len);
     if (ready <= 0) return ready;
-    int result = dp_proof_queue_run_guarded(root, why, why_len);
+    int execution = -1;
+    int result = zcl_dev_proof_execution_acquire(root, &execution, why, why_len);
+    if (result > 0) {
+        result = dp_proof_queue_run_guarded(root, NULL, NULL, why, why_len);
+        zcl_dev_proof_execution_release(execution);
+    }
     proof_queue_lock_release(guard);
     return result;
 }
@@ -6909,6 +6935,205 @@ static bool proof_wait_platform(const char *repo_root,
 }
 
 #endif /* _WIN32 */
+
+int zcl_dev_proof_execution_acquire(const char *root, int *guard,
+                                    char *why, size_t why_len)
+{
+    if (!guard) return -1;
+    *guard = -1;
+#if defined(_WIN32)
+    (void)root;
+    proof_why(why, why_len, "windows_native_proof_worker_unavailable");
+    return -1;
+#else
+    char state[PATH_MAX], requests[PATH_MAX], attempts[PATH_MAX], lock[PATH_MAX];
+    char cache[PATH_MAX];
+    if (!proof_queue_directories(root, state, requests, attempts) ||
+        snprintf(cache, sizeof(cache), "%s/.cache", root) >= (int)sizeof(cache) ||
+        !platform_private_directory_ensure(cache) ||
+        !platform_private_directory_ensure(state) ||
+        snprintf(lock, sizeof(lock), "%s/execution.lock", state) >= (int)sizeof(lock)) {
+        proof_why(why, why_len, "proof_execution_path_invalid");
+        return -1;
+    }
+    int fd = dp_landing_step_open(lock);
+    if (fd < 0) {
+        proof_why(why, why_len, "proof_execution_lock_invalid");
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        *guard = fd;
+        return 1;
+    }
+    int saved = errno;
+    (void)close(fd);
+    proof_why(why, why_len, "proof_execution_busy");
+    return saved == EWOULDBLOCK || saved == EAGAIN ? 0 : -1;
+#endif
+}
+
+void zcl_dev_proof_execution_release(int guard)
+{
+#if defined(_WIN32)
+    (void)guard;
+#else
+    proof_queue_lock_release(guard);
+#endif
+}
+
+#if !defined(_WIN32)
+static int dp_foreground_unarmed(const char *root, char *why, size_t why_len)
+{
+    char path[PATH_MAX];
+    struct stat state;
+    if (!zcl_devloop_watch_lock_path(root, path, sizeof(path))) {
+        proof_why(why, why_len, "proof_watcher_state_unavailable");
+        return -1;
+    }
+    if (lstat(path, &state) == 0) {
+        proof_why(why, why_len, "proof_foreground_requires_unarmed_checkout");
+        return 0;
+    }
+    if (errno == ENOENT) return 1;
+    proof_why(why, why_len, "proof_watcher_state_unavailable");
+    return -1;
+}
+
+static volatile sig_atomic_t dp_foreground_signal;
+
+static void dp_foreground_cancel(int signal_number)
+{
+    dp_foreground_signal = signal_number;
+    zcl_devloop_process_cancel_request();
+}
+
+static const int dp_foreground_signals[] = {SIGINT, SIGTERM, SIGCHLD};
+
+static void dp_foreground_restore(const struct sigaction saved[3], size_t count)
+{
+    while (count > 0) {
+        count--;
+        (void)sigaction(dp_foreground_signals[count], &saved[count], NULL);
+    }
+}
+
+static bool dp_foreground_handlers(struct sigaction saved[3])
+{
+    struct sigaction action = {0};
+    sigemptyset(&action.sa_mask);
+    dp_foreground_signal = 0;
+    for (size_t i = 0; i < 3; i++) {
+        action.sa_handler = i == 2 ? SIG_DFL : dp_foreground_cancel;
+        if (sigaction(dp_foreground_signals[i], &action, &saved[i]) != 0) {
+            dp_foreground_restore(saved, i);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int dp_foreground_wait(pid_t worker)
+{
+    bool forwarded = false;
+    for (;;) {
+        if (dp_foreground_signal && !forwarded) {
+            (void)kill(worker, SIGTERM);
+            forwarded = true;
+        }
+        int status = 0;
+        pid_t got = waitpid(worker, &status, WNOHANG);
+        if (got == worker)
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 1 : -1;
+        if (got < 0 && errno != EINTR) return -1;
+        platform_sleep_ms(20);
+    }
+}
+
+/* The bounded worker owns inherited guards, even if its waiting requester
+ * is killed. Hard death of this worker itself is a separate boundary: this
+ * does not assert containment of arbitrary escaped descendants. */
+static int dp_foreground_run(const char *root, const char *local, const char *base,
+                              int *execution, int *landing, char *why, size_t why_len)
+{
+    struct sigaction saved[3];
+    if (zcl_devloop_process_cancel_requested() || !dp_foreground_handlers(saved)) {
+        proof_why(why, why_len, "proof_foreground_signal_setup_failed");
+        return -1;
+    }
+    pid_t worker = fork();
+    if (worker == 0) {
+        zcl_devloop_process_cancel_poll_clear();
+        int result = dp_proof_queue_run_guarded(root, local, base, why, why_len);
+        _exit(result == 1 ? 0 : 1);
+    }
+    if (worker < 0) {
+        dp_foreground_restore(saved, 3);
+        proof_why(why, why_len, "proof_foreground_fork_failed");
+        return -1;
+    }
+    (void)close(*execution);
+    if (*landing >= 0) (void)close(*landing);
+    *execution = -1;
+    *landing = -1;
+    int result = dp_foreground_wait(worker);
+    dp_foreground_restore(saved, 3);
+    if (dp_foreground_signal) zcl_devloop_process_cancel_clear();
+    if (result < 0) proof_why(why, why_len, "proof_foreground_worker_interrupted");
+    return result;
+}
+
+static int dp_proof_step_owned(const char *root, const char *local,
+                                const char *base, struct zcl_dev_proof_status *out,
+                                int *execution, int *landing)
+{
+    if (!proof_ensure_platform(root, local, base, out)) return -1;
+    if (out->state == ZCL_DEV_PROOF_STATE_PASSED ||
+        out->state == ZCL_DEV_PROOF_STATE_FAILED) return 1;
+    char why[256] = {0};
+    if (strcmp(out->detail, "resident_proof_request_queued") != 0) {
+        proof_why(out->detail, sizeof(out->detail), "proof_execution_busy");
+        return 0;
+    }
+    int claimed = dp_foreground_run(root, local, base, execution, landing, why, sizeof(why));
+    if (claimed < 0) {
+        proof_why(out->detail, sizeof(out->detail), why);
+        return -1;
+    }
+    return zcl_dev_proof_status_read(root, local, base, out) ? claimed : -1;
+}
+#endif
+
+int zcl_dev_proof_step(const char *root, const char *local, const char *base,
+                        struct zcl_dev_proof_status *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!local || !local[0] || !base || !base[0]) {
+        out->state = ZCL_DEV_PROOF_STATE_INVALID;
+        proof_why(out->detail, sizeof(out->detail), "proof_step_requires_explicit_pair");
+        return -1;
+    }
+#if defined(_WIN32)
+    (void)root;
+    proof_windows_unavailable(out);
+    return -1;
+#else
+    if (!zcl_dev_proof_status_read(root, local, base, out)) return -1;
+    int landing = -1, execution = -1;
+    int result = dp_foreground_unarmed(out->root, out->detail, sizeof(out->detail));
+    if (result <= 0) return result;
+    result = dp_landing_proof_guard(out->root, &landing, out->detail, sizeof(out->detail));
+    if (result <= 0) return result;
+    result = zcl_dev_proof_execution_acquire(out->root, &execution,
+                                             out->detail, sizeof(out->detail));
+    if (result > 0) {
+        result = dp_proof_step_owned(root, local, base, out, &execution, &landing);
+        zcl_dev_proof_execution_release(execution);
+    }
+    proof_queue_lock_release(landing);
+    return result;
+#endif
+}
 
 /* One public definition per API keeps platform arms from silently drifting
  * as separate external symbols. The active arm remains a private, typed

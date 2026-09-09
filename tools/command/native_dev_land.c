@@ -2438,20 +2438,18 @@ static int dl_rebase_autoresolve(const struct dl_dirs *d, struct dl_row *row,
  * that added a regeneration commit to the tip from one that did not,
  * without having to re-derive it from git. */
 static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
-                     char *why, size_t why_cap, char *regen_note,
-                     size_t regen_note_cap)
+                     const char *observed_main, char *why, size_t why_cap,
+                     char *regen_note, size_t regen_note_cap)
 {
     char buf[DL_GIT_CAP];
-    const char *fetch_args[] = { "fetch", "--quiet", "origin", NULL };
     const char *checkout_args[] = { "checkout", "--quiet", "--force",
                                     "--detach", row->tip, NULL };
-    const char *rebase_args[] = { "rebase", "origin/main", NULL };
+    const char *rebase_args[] = { "rebase", observed_main, NULL };
     const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U",
                                     NULL };
     const char *abort_args[] = { "rebase", "--abort", NULL };
     if (regen_note && regen_note_cap)
         regen_note[0] = '\0';
-    (void)dl_git(d->wt, fetch_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
     if (!dl_rev_parse(d->wt, row->tip, row->local)) {
         /* The tip lives in another checkout: fetch that ONE object rather
          * than every ref the other checkout happens to hold. dl_parse_row
@@ -2468,10 +2466,7 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
             return -1;
         }
     }
-    if (!dl_rev_parse(d->wt, "origin/main", row->base)) {
-        (void)snprintf(why, why_cap, "origin/main is unknown here");
-        return -1;
-    }
+    (void)snprintf(row->base, sizeof(row->base), "%s", observed_main);
     if (dl_git(d->wt, checkout_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
         0) {
         (void)snprintf(why, why_cap, "cannot check the tip out for landing");
@@ -3439,22 +3434,52 @@ static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
 #endif
 }
 
-/* Take the oldest queued request and drive it to the point where the proof
- * has been ASKED FOR. Then return: the answer arrives on a later step. */
-/* A row can be re-driven from "inflight" after a step that already pushed
- * successfully but then failed to persist the "landed" outcome (queue lock
- * contention, an I/O error on the rewrite). Re-proving that tip would waste
- * the proof and, worse, a second push attempt races a commit that is
- * already the tip of origin/main. Before spending a rebase/lint/proof
- * cycle, check whether the tip is already an ancestor of origin/main and,
- * if so, record it as landed directly. */
-static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row)
+/* Observe the remote before deciding whether a request landed or needs
+ * rebase/proof. An unavailable observation preserves the existing request
+ * and proof for retry; it is neither a negative result nor a cached pass. */
+static bool dl_observe_remote_main(const struct dl_dirs *d,
+                                   const struct dl_row *row,
+                                   char observed_main[80], bool mutated,
+                                   struct zcl_command_reply *reply)
+{
+    char buf[DL_GIT_CAP];
+    const char *fetch_args[] = {
+        "fetch", "--quiet", "--no-tags", "--refmap=", "origin",
+        "+refs/heads/main:refs/remotes/origin/main", NULL
+    };
+    observed_main[0] = '\0';
+    /* Request main explicitly: configured fetch mappings may omit it.
+     * Refresh only the local tracking cache even after a remote rewind;
+     * publication still requires ancestry against this actual observation.
+     * Capture the exact fetched commit before any candidate-object fetch
+     * can replace FETCH_HEAD. No cached tracking ref is a fallback. */
+    if (dl_git(d->wt, fetch_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) == 0 &&
+        dl_rev_parse(d->wt, "FETCH_HEAD", observed_main) &&
+        dl_sha_ok(observed_main))
+        return true;
+    observed_main[0] = '\0';
+    dl_log(row, "remote observation unavailable: cannot fetch and resolve "
+                "origin refs/heads/main; retaining request for retry\n");
+    (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED,
+                           "REMOTE_OBSERVATION_UNAVAILABLE", "observe_remote",
+                           true, mutated,
+                           "cannot freshly observe origin main; retry this step",
+                           "origin refs/heads/main fetch or commit resolution failed");
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "%s", "z23-dev dev land step");
+    return false;
+}
+
+/* A push can succeed before its landed outcome is persisted. Reconcile
+ * that row against the freshly observed commit without another proof/push. */
+static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row,
+                              const char *observed_main)
 {
     char buf[DL_GIT_CAP], commit[80];
-    const char *fetch_args[] = { "fetch", "--quiet", "origin", NULL };
     const char *ancestor_args[] = { "merge-base", "--is-ancestor", commit,
-                                    "origin/main", NULL };
-    (void)dl_git(d->wt, fetch_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
+                                    observed_main, NULL };
     if (row->local[0] && dl_sha_ok(row->local)) {
         (void)snprintf(commit, sizeof(commit), "%s", row->local);
     } else if (!dl_rev_parse(d->wt, row->tip, commit)) {
@@ -3544,10 +3569,26 @@ static bool dl_step_after_rebase(const struct dl_dirs *d, struct dl_row *row,
     return dl_step_regen(d, row, reply);
 }
 
+/* A missing observation and a reconciled landing both finish this step.
+ * Only a fresh remote that does not contain the candidate permits proof. */
+static bool dl_reconcile_landing(const struct dl_dirs *d, struct dl_row *row,
+                                  char observed_main[80], bool mutated,
+                                  struct zcl_command_reply *reply)
+{
+    if (!dl_observe_remote_main(d, row, observed_main, mutated, reply))
+        return true;
+    if (!dl_already_landed(d, row, observed_main))
+        return false;
+    if (dl_commit_or_report(d, row, true, reply, "landed"))
+        dl_step_reply(reply, row, "landed");
+    return true;
+}
+
 static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
     char why[1024], detail[512], tickets[512], regen_note[256];
+    char observed_main[80];
     int rebased;
     enum dl_proof p;
 
@@ -3571,12 +3612,9 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    if (dl_already_landed(d, row)) {
-        if (dl_commit_or_report(d, row, true, reply, "landed"))
-            dl_step_reply(reply, row, "landed");
+    if (dl_reconcile_landing(d, row, observed_main, true, reply))
         return;
-    }
-    rebased = dl_rebase(d, row, why, sizeof(why), regen_note,
+    rebased = dl_rebase(d, row, observed_main, why, sizeof(why), regen_note,
                         sizeof(regen_note));
     if (rebased == 0) {
         (void)snprintf(row->state, sizeof(row->state), "conflict");
@@ -3665,12 +3703,73 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
         dl_step_reply(reply, row, "started");
 }
 
+static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
+                          struct zcl_command_reply *reply)
+{
+    char buf[DL_GIT_CAP], observed_main[80];
+    (void)snprintf(row->phase, sizeof(row->phase), "push");
+    {
+        /* No --no-verify: this pushes through the installed pre-push hook
+         * like everyone else. dl_wt_ensure() already armed d->wt's own
+         * hooks, and the exact-receipt admission the hook performs
+         * (tools/dev/z23_git_hook.c) finds the very receipt this step just
+         * obtained for (local, base) at
+         * .cache/zcl-dev-proof/receipts/<local>-<base>.receipt, so the hook
+         * admits in seconds instead of re-running the proof. */
+        const char *push_args[] = { "push", "origin", "HEAD:main", NULL };
+        if (dl_git(d->wt, push_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
+            0) {
+            row->attempt++;
+            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
+            (void)snprintf(row->detail, sizeof(row->detail), "%s",
+                           "the fast-forward push was refused; rebasing");
+            dl_log_path(d, row);
+            dl_log(row, row->detail);
+            dl_log(row, "\n");
+            if (row->attempt > DL_ATTEMPT_MAX) {
+                (void)snprintf(row->state, sizeof(row->state), "failed");
+                (void)snprintf(row->dimension, sizeof(row->dimension),
+                               "push");
+                if (dl_commit_or_report(d, row, true, reply, "failed"))
+                    dl_step_reply(reply, row, "failed");
+                return;
+            }
+            if (dl_commit_or_report(d, row, false, reply, "rebased"))
+                dl_step_reply(reply, row, "rebased");
+            return;
+        }
+    }
+    /* A successful push acknowledgement is not a fresh remote observation.
+     * Keep the inflight request until the remote independently confirms it. */
+    if (!dl_observe_remote_main(d, row, observed_main, true, reply))
+        return;
+    if (!dl_already_landed(d, row, observed_main)) {
+        dl_log(row, "post-push remote main does not confirm the candidate; "
+                    "retaining request for retry\n");
+        (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED,
+                               "REMOTE_RESULT_UNCONFIRMED", "observe_remote",
+                               true, true,
+                               "remote main does not confirm this candidate; retry observation",
+                               observed_main);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "%s", "z23-dev dev land step");
+        return;
+    }
+    (void)snprintf(row->detail, sizeof(row->detail), "%s",
+                   "independently observed the candidate on origin/main");
+    if (dl_commit_or_report(d, row, true, reply, "landed"))
+        dl_step_reply(reply, row, "landed");
+}
+
 /* Read the proof's own state for the in-flight request and act once.
  * Windows refuses step before entering this POSIX-only call graph. */
 [[maybe_unused]] static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
                            struct zcl_command_reply *reply)
 {
-    char detail[512], dimension[48], buf[DL_GIT_CAP];
+    char detail[512], dimension[48];
+    char observed_main[80];
     enum dl_proof p;
 
     /* A prior step can have pushed for real and then failed to persist
@@ -3681,11 +3780,8 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
      * below would misread the row's own successful push as a stranger's
      * commit and spend a whole extra rebase/proof cycle on it. Check
      * first, the same way dl_step_start does before ever starting one. */
-    if (dl_already_landed(d, row)) {
-        if (dl_commit_or_report(d, row, true, reply, "landed"))
-            dl_step_reply(reply, row, "landed");
+    if (dl_reconcile_landing(d, row, observed_main, false, reply))
         return;
-    }
     if (strcmp(row->phase, "prove") != 0) {
         /* A step died between phases. Re-drive from the rebase rather than
          * guessing what the dead step had already done. */
@@ -3746,11 +3842,10 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
      * ran, the receipt is about a base nobody is on any more: rebase again
      * and prove again rather than pushing evidence that no longer applies. */
     {
-        const char *fetch_args[] = { "fetch", "--quiet", "origin", NULL };
         char base_now[80];
-        (void)dl_git(d->wt, fetch_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
-        if (dl_rev_parse(d->wt, "origin/main", base_now) &&
-            strcmp(base_now, row->base) != 0) {
+        if (!dl_observe_remote_main(d, row, base_now, false, reply))
+            return;
+        if (strcmp(base_now, row->base) != 0) {
             row->attempt++;
             (void)snprintf(row->detail, sizeof(row->detail),
                            "origin/main moved to %.12s while proving",
@@ -3779,45 +3874,7 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             return;
         }
     }
-    (void)snprintf(row->phase, sizeof(row->phase), "push");
-    {
-        /* No --no-verify: this pushes through the installed pre-push hook
-         * like everyone else. dl_wt_ensure() already armed d->wt's own
-         * hooks, and the exact-receipt admission the hook performs
-         * (tools/dev/z23_git_hook.c) finds the very receipt this step just
-         * obtained for (local, base) at
-         * .cache/zcl-dev-proof/receipts/<local>-<base>.receipt, so the hook
-         * admits in seconds instead of re-running the proof. */
-        const char *push_args[] = { "push", "origin", "HEAD:main", NULL };
-        if (dl_git(d->wt, push_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
-            0) {
-            row->attempt++;
-            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
-            (void)snprintf(row->detail, sizeof(row->detail), "%s",
-                           "the fast-forward push was refused; rebasing");
-            dl_log_path(d, row);
-            dl_log(row, row->detail);
-            dl_log(row, "\n");
-            if (row->attempt > DL_ATTEMPT_MAX) {
-                (void)snprintf(row->state, sizeof(row->state), "failed");
-                (void)snprintf(row->dimension, sizeof(row->dimension),
-                               "push");
-                if (dl_commit_or_report(d, row, true, reply, "failed"))
-                    dl_step_reply(reply, row, "failed");
-                return;
-            }
-            if (dl_commit_or_report(d, row, false, reply, "rebased"))
-                dl_step_reply(reply, row, "rebased");
-            return;
-        }
-    }
-    (void)snprintf(row->pushed, sizeof(row->pushed), "%s", row->local);
-    (void)snprintf(row->state, sizeof(row->state), "landed");
-    row->phase[0] = '\0';
-    (void)snprintf(row->detail, sizeof(row->detail), "%s",
-                   "fast-forwarded origin/main");
-    if (dl_commit_or_report(d, row, true, reply, "landed"))
-        dl_step_reply(reply, row, "landed");
+    dl_step_push(d, row, reply);
 }
 
 static void dl_step(const struct zcl_command_request *req,

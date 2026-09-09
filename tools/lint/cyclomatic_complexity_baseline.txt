@@ -3036,7 +3036,7 @@ tests/harness/src/test_debug_bundle.c:test_debug_bundle:26
 tests/harness/src/test_dev_fleet_start.c:fsx_repo_fixture:16
 tests/harness/src/test_dev_fleet_start.c:test_dev_fleet_start:44
 tests/harness/src/test_dev_land.c:dlx_regen_conflict:21
-tests/harness/src/test_dev_land.c:test_dev_land:221
+tests/harness/src/test_dev_land.c:test_dev_land:213
 tests/harness/src/test_dev_platform.c:dp_hotswap_cache_fixture_init:17
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:60
@@ -3999,12 +3999,12 @@ tools/command/native_dev_land.c:dl_encode_row:19
 tools/command/native_dev_land.c:dl_escape:17
 tools/command/native_dev_land.c:dl_materialize_file:49
 tools/command/native_dev_land.c:dl_proof_read:16
-tools/command/native_dev_land.c:dl_rebase:17
+tools/command/native_dev_land.c:dl_rebase:16
 tools/command/native_dev_land.c:dl_regen_run:21
 tools/command/native_dev_land.c:dl_status:52
 tools/command/native_dev_land.c:dl_step:17
-tools/command/native_dev_land.c:dl_step_resume:27
-tools/command/native_dev_land.c:dl_step_start:25
+tools/command/native_dev_land.c:dl_step_resume:21
+tools/command/native_dev_land.c:dl_step_start:24
 tools/command/native_dev_land.c:dl_submit:23
 tools/command/native_dev_land.c:dl_watcher_kick:17
 tools/command/native_dev_land.c:dl_worktree_ok:20
@@ -4325,7 +4325,7 @@ tools/dev/dev_failure_store.c:zcl_dev_failure_normalize_error:19
 tools/dev/dev_failure_store.c:zcl_dev_failure_note_coalesced:34
 tools/dev/dev_failure_store.c:zcl_dev_failure_record_failure:84
 tools/dev/dev_proof_budget.c:timing_store:17
-tools/dev/dev_proof_budget.c:zcl_dev_proof_step_start:20
+tools/dev/dev_proof_budget.c:zcl_dev_proof_step_start:15
 tools/dev/dev_proof_budget.c:zcl_dev_proof_timing_parse_group_line:22
 tools/dev/dev_proof_receipt.c:verdict_payload_valid:16
 tools/dev/dev_proof_receipt.c:zcl_dev_proof_child_receipt_validate:16

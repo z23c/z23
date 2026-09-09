@@ -706,10 +706,32 @@ ZCL_COMMAND_DEV_COMMAND(
     "z23-dev dev proof status")
 
 ZCL_COMMAND_DEV_COMMAND(
+    "dev.proof.step", "dev.proof", "",
+    "Execute one explicit proof pair in the foreground without a watcher",
+    "Queues only the explicit local commit and remote base if missing, then "
+    "runs its normal full-policy worker under shared execution exclusion. "
+    "Requires an unarmed checkout: existing watcher state refuses admission. "
+    "Other requests stay untouched; settled failures require explicit retry. "
+    "Only an independently validated signed receipt returns PASS.", 0,
+    "dev,proof,step,foreground,receipt",
+    "zcl.dev_proof_step_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base", "local_commit,remote_base",
+    "z23-dev dev proof step --local_commit=<commit> --remote_base=<base>",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_verify_change,
+    "foreground proof requires the dev binary",
+    "z23-dev dev proof status")
+
+ZCL_COMMAND_DEV_COMMAND(
     "dev.proof.retry", "dev.proof", "",
     "Retry a settled failed proof after repairing its prerequisites",
     "Preserves the failed attempt's evidence and queues a new complete proof "
-    "for the exact commit/base pair. Requires a ready resident proof queue; "
+    "for the exact commit/base pair without starting a watcher; "
     "refuses passed pairs, pending requests and live workers. Retry changes "
     "scheduling only and grants no receipt or publication authority.", 0,
     "dev,proof,retry,receipt,background",

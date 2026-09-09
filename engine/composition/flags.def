@@ -621,7 +621,7 @@ Z23_FLAG("ZCL_DEV_PROBE_TIMEOUT", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_PROOF_TEST_LINK_ERRNO", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof.c:1768")
 Z23_FLAG("ZCL_DEV_PROOF_WARM", "env_test", "-", "-",
-          "first use tests/harness/src/test_impact_composition.c:4273; documented at docs/experiments/2026-09-03-proof-warm-start.md:32: ZCL_DEV_PROOF_WARM=0 forces the cold path for measurement. It is")
+          "first use tests/harness/src/test_impact_composition.c:4315; documented at docs/experiments/2026-09-03-proof-warm-start.md:32: ZCL_DEV_PROOF_WARM=0 forces the cold path for measurement. It is")
 Z23_FLAG("ZCL_DEV_RECOVERY_ACTIVE_COMMAND", "env_build", "-", "-",
           "undocumented; first use tools/dev/recover-dev-lane.sh:312")
 Z23_FLAG("ZCL_DEV_RECOVERY_BLOCK_INDEX", "env_build", "-", "-",
@@ -1144,7 +1144,7 @@ Z23_FLAG("ZCL_LAND_BATCH_MAX", "env_build", "16", "-",
 Z23_FLAG("ZCL_LAND_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:102")
 Z23_FLAG("ZCL_LAND_DEPS_TEST_FORCE", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:3136")
+          "undocumented; first use tools/command/native_dev_land.c:3131")
 Z23_FLAG("ZCL_LAND_GATE_CMD", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:123")
 Z23_FLAG("ZCL_LAND_GATE_TIMEOUT_S", "env_build", "2700", "-",
@@ -1174,7 +1174,7 @@ Z23_FLAG("ZCL_LAND_STATE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_LAND_SUBMITTER", "env_build", "-", "-",
           "undocumented; first use tools/dev/land.sh:159")
 Z23_FLAG("ZCL_LAND_TEST_PICK_DELAY_MS", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:3903")
+          "undocumented; first use tools/command/native_dev_land.c:3960")
 Z23_FLAG("ZCL_LAND_TIMING", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:101")
 Z23_FLAG("ZCL_LAND_WORKTREE", "env_build", "-", "-",
@@ -1643,7 +1643,7 @@ Z23_FLAG("ZCL_PROMPT_TEMPLATES_DEF", "env_build", "-", "-",
 Z23_FLAG("ZCL_PROOF_RAM_RESERVE_BYTES", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof.c:2257")
 Z23_FLAG("ZCL_PROOF_TIMEOUT_MS", "env_runtime", "-", "-",
-          "first use tools/dev/dev_proof_budget.c:73; documented at docs/work/AGENT_SYNC_PLAN.md:80: 1. Land the eight leaves (this lane) and ZCL_PROOF_TIMEOUT_MS. Bar: every devagent_* gr...")
+          "first use tools/dev/dev_proof_budget.c:75; documented at docs/work/AGENT_SYNC_PLAN.md:80: 1. Land the eight leaves (this lane) and ZCL_PROOF_TIMEOUT_MS. Bar: every devagent_* gr...")
 Z23_FLAG("ZCL_PRUNE_KEEP_BLOCKS", "env_runtime", "-", "-",
           "first use engine/services/src/block_pruning_service.c:401; documented at docs/CAPABILITY_INVENTORY.jsonl:1164: {'record':'capability','header':'engine/services/include/services/block_pruning_service...")
 Z23_FLAG("ZCL_PSC_WORKERS", "env_runtime", "-", "-",

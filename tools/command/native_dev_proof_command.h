@@ -8,6 +8,9 @@ struct zcl_command_reply;
 struct zcl_command_request;
 struct zcl_dev_proof_status;
 
+void zcl_dev_proof_step_conclude(struct zcl_command_reply *reply, int result,
+                                 const struct zcl_dev_proof_status *status);
+
 void zcl_native_dev_proof_dispatch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

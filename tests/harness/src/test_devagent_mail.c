@@ -249,11 +249,90 @@ static bool dvx_outbox_empty(void)
     return empty;
 }
 
+static void dvx_import_stream(const char *name, const char *row)
+{
+    char maildir[1024], path[1200];
+    dvx_maildir(maildir, sizeof(maildir));
+    int n = snprintf(path, sizeof(path), "%s/%s.jsonl", maildir, name);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        dvx_fixture_fail("import path exceeds bound");
+    FILE *f = fopen(path, "w");
+    if (!f) dvx_fixture_fail("cannot create imported stream");
+    bool wrote = fputs(row, f) >= 0;
+    if (fclose(f) != 0 || !wrote)
+        dvx_fixture_fail("cannot finish imported stream");
+}
+
+static bool dvx_cursor_refusal_serializes(const struct dvx_call *call)
+{
+    if (!call->request.spec) return false;
+    struct zcl_command_spec spec = *call->request.spec;
+    spec.handler = zcl_native_handle_dev_agent_mail;
+    char wire[8192];
+    enum zcl_command_exit code;
+    size_t len = zcl_command_registry_execute_json(zcl_command_catalog(),
+        &spec, NULL, &call->input, false, DVX_PATH, NULL, 0, 0, NULL,
+        wire, sizeof(wire), &code);
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = len > 0 && code == ZCL_COMMAND_EXIT_FAILED &&
+        json_read(&doc, wire, len);
+    const struct json_value *error = json_get(&doc, "error");
+    const char *error_code = json_get_str(json_get(error, "code"));
+    const char *action = json_get_str(json_get(error, "next_action"));
+    ok = ok && error_code && strcmp(error_code, "MAIL_CURSOR_AMBIGUOUS") == 0 &&
+        action && strcmp(action, "z23-dev dev agent mail pull --since=0") == 0;
+    json_free(&doc);
+    return ok;
+}
+
+static int test_mail_independent_cursor(void)
+{
+    int failures = 0;
+    TEST("mail: scalar resume refuses a later independently sequenced stream") {
+        struct dvx_call p;
+        dvx_isolate("independent_cursor");
+        /* Initialize the directory through the real handler. */
+        dvx_pull(&p, 0, NULL, NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        dvx_end(&p);
+        dvx_import_stream("inbox-a",
+            "{\"seq\":20,\"ts\":\"2026-09-09T00:00:00Z\",\"from\":\"alice\","
+            "\"to\":\"bob\",\"kind\":\"note\",\"body\":\"first\",\"ref\":\"\"}\n");
+        dvx_pull(&p, 0, NULL, NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 1);
+        ASSERT_EQ(dvx_int(&p, "cursor"), 20);
+        dvx_end(&p);
+        dvx_import_stream("inbox-c",
+            "{\"seq\":1,\"ts\":\"2026-09-09T00:00:01Z\",\"from\":\"carol\","
+            "\"to\":\"bob\",\"kind\":\"note\",\"body\":\"later\",\"ref\":\"\"}\n");
+        dvx_pull(&p, 20, "carol", "note");
+        ASSERT(dvx_run(&p));
+        ASSERT(!dvx_ok(&p));
+        ASSERT_STR_EQ(p.reply.error.code, "MAIL_CURSOR_AMBIGUOUS");
+        ASSERT(!p.reply.error.mutated);
+        ASSERT(dvx_arr(&p, "rows") == NULL);
+        ASSERT(dvx_cursor_refusal_serializes(&p));
+        dvx_end(&p);
+        dvx_pull(&p, 0, NULL, NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 2);
+        dvx_end(&p);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_devagent_mail(void);
 int test_devagent_mail(void)
 {
     int failures = 0;
     long long cursor = 0;
+
+    failures += test_mail_independent_cursor();
 
     TEST("mail: the leaf is registered with its post/pull/ack keys") {
         const struct zcl_command_spec *spec =

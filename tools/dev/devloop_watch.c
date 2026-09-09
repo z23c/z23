@@ -786,6 +786,27 @@ bool zcl_devloop_watch_idle_exit_selftest(void)
 }
 #endif
 
+#if defined(ZCL_TESTING)
+static int watch_test_edit_ready = -1;
+static int watch_test_edit_release = -1;
+#endif
+
+static int watch_edit_cycle(struct watch_context *ctx)
+{
+#if defined(ZCL_TESTING)
+    if (watch_test_edit_ready >= 0) {
+        char release = 0;
+        bool ok = write(watch_test_edit_ready, "r", 1) == 1;
+        return ok && read(watch_test_edit_release, &release, 1) == 1 ? 0 : 1;
+    }
+#endif
+    const char *files[ZCL_DEVLOOP_RESTART_SOURCE_MAX];
+    for (size_t i = 0; i < ctx->proof_pending_count; i++)
+        files[i] = ctx->proof_pending[i];
+    return zcl_devloop_run_cycle_mode(ctx->root, files, ctx->proof_pending_count,
+                                      ctx->proof_pending_mode);
+}
+
 static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
 {
     if (!ctx)
@@ -793,9 +814,16 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
     watch_proof_reap(ctx);
     if (ctx->proof_worker_pid > 1 || ctx->proof_pending_count == 0)
         return true;
+    int execution = -1;
+    char why[160] = {0};
+    int ready = zcl_dev_proof_execution_acquire(ctx->root, &execution,
+                                                why, sizeof(why));
+    if (ready <= 0) return ready == 0;
     pid_t child = fork();
-    if (child < 0)
+    if (child < 0) {
+        zcl_dev_proof_execution_release(execution);
         return false;
+    }
     if (child == 0) {
 #if defined(__APPLE__)
         platform_directory_watcher_close(&ctx->directory_watcher);
@@ -807,19 +835,73 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
         zcl_devloop_process_cancel_poll_clear();
         signal(SIGINT, proof_worker_signal);
         signal(SIGTERM, proof_worker_signal);
-        const char *files[ZCL_DEVLOOP_RESTART_SOURCE_MAX];
-        for (size_t i = 0; i < ctx->proof_pending_count; i++)
-            files[i] = ctx->proof_pending[i];
-        int rc = zcl_devloop_run_cycle_mode(
-            ctx->root, files, ctx->proof_pending_count,
-            ctx->proof_pending_mode);
+        int rc = watch_edit_cycle(ctx);
+        zcl_dev_proof_execution_release(execution);
         _exit(rc == 0 ? 0 : 1);
     }
+    /* The child owns the inherited open description until cycle cleanup. */
+    (void)close(execution);
     ctx->proof_worker_pid = child;
     ctx->proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
     ctx->proof_pending_count = 0;
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_edit_busy(const char *root)
+{
+    struct watch_context ctx = {0};
+    if (!root || snprintf(ctx.root, sizeof(ctx.root), "%s", root) >=
+                     (int)sizeof(ctx.root)) return false;
+    ctx.proof_pending_count = 1;
+    return watch_proof_start(&ctx, -1) && ctx.proof_pending_count == 1 &&
+           ctx.proof_worker_pid == 0;
+}
+
+static bool watch_test_edit_observe(const char *root, pid_t child,
+                                      int ready, int release)
+{
+    struct pollfd channel = {.fd = ready, .events = POLLIN};
+    bool observed = poll(&channel, 1, 5000) == 1;
+    int guard = -1;
+    char why[160] = {0};
+    int held = zcl_dev_proof_execution_acquire(root, &guard, why, sizeof(why));
+    if (held > 0) zcl_dev_proof_execution_release(guard);
+    bool released = write(release, "r", 1) == 1;
+    int status = 0;
+    bool settled = waitpid(child, &status, 0) == child;
+    int after = zcl_dev_proof_execution_acquire(root, &guard, why, sizeof(why));
+    if (after > 0) zcl_dev_proof_execution_release(guard);
+    return observed && held == 0 && released && settled &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 0 && after == 1;
+}
+
+bool zcl_dev_proof_test_edit_lifetime(const char *root)
+{
+    struct watch_context ctx = {.fd = -1};
+    if (!root || snprintf(ctx.root, sizeof(ctx.root), "%s", root) >=
+                     (int)sizeof(ctx.root)) return false;
+    int ready[2], release[2];
+    if (pipe(ready) != 0) return false;
+    if (pipe(release) != 0) {
+        (void)close(ready[0]);
+        (void)close(ready[1]);
+        return false;
+    }
+    watch_test_edit_ready = ready[1];
+    watch_test_edit_release = release[0];
+    ctx.proof_pending_count = 1;
+    bool started = watch_proof_start(&ctx, -1);
+    watch_test_edit_ready = watch_test_edit_release = -1;
+    bool ok = started && ctx.proof_worker_pid > 1 && ctx.proof_pending_count == 0;
+    if (ok) ok = watch_test_edit_observe(root, ctx.proof_worker_pid, ready[0], release[1]);
+    (void)close(ready[0]);
+    (void)close(ready[1]);
+    (void)close(release[0]);
+    (void)close(release[1]);
+    return ok;
+}
+#endif
 
 static bool watch_commit_proof_start(struct watch_context *ctx,
                                      int watcher_lock_fd)

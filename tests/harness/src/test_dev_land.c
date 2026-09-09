@@ -156,6 +156,46 @@ static void dlx_end(struct dlx_call *c)
     json_free(&c->input);
 }
 
+/* Serialize the actual captured result without dispatching another push. */
+static const struct zcl_command_reply *g_dlx_captured_reply;
+
+static void dlx_captured_handler(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply)
+{
+    (void)request;
+    json_free(&reply->data);
+    *reply = *g_dlx_captured_reply;
+    json_init(&reply->data);
+    json_copy(&reply->data, &g_dlx_captured_reply->data);
+}
+
+static bool dlx_refusal_serializes(const struct dlx_call *call)
+{
+    if (!call->request.spec) return false;
+    struct zcl_command_spec spec = *call->request.spec;
+    spec.handler = dlx_captured_handler;
+    char wire[8192];
+    enum zcl_command_exit code;
+    g_dlx_captured_reply = &call->reply;
+    size_t len = zcl_command_registry_execute_json(zcl_command_catalog(),
+        &spec, NULL, &call->input, false, DLX_PATH, NULL, 0, 0, NULL,
+        wire, sizeof(wire), &code);
+    g_dlx_captured_reply = NULL;
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = len > 0 && code == ZCL_COMMAND_EXIT_BLOCKED &&
+        json_read(&doc, wire, len);
+    const struct json_value *error = json_get(&doc, "error");
+    const char *error_code = json_get_str(json_get(error, "code"));
+    const char *action = json_get_str(json_get(error, "next_action"));
+    ok = ok && error_code && strcmp(error_code, call->reply.error.code) == 0 &&
+        action && strcmp(action, "z23-dev dev land step") == 0 &&
+        json_get_bool(json_get(error, "retryable")) == call->reply.error.retryable &&
+        json_get_bool(json_get(error, "mutated")) == call->reply.error.mutated;
+    json_free(&doc);
+    return ok;
+}
+
 static bool dlx_ok(const struct dlx_call *c)
 {
     return c->reply.status == ZCL_COMMAND_STATUS_PASSED;
@@ -1026,6 +1066,495 @@ static int test_dev_land_regen_leaves_plan_alone_when_untouched(void)
     return failures;
 }
 
+static int test_dev_land_explicit_main(void)
+{
+    int failures = 0;
+    TEST("land: observes main even when configured fetch excludes it") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], stranger[64], main_now[64];
+        dlx_isolate("main_refspec");
+        ASSERT(dlx_rig_make(&rig, "main_refspec_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        const char *branch[] = { "checkout", "--quiet", "-B", "side",
+                                base, NULL };
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+        const char *other[] = { "update-ref", "refs/heads/other", base, NULL };
+        const char *cached[] = { "update-ref", "refs/remotes/origin/main",
+                                base, NULL };
+        const char *mapping[] = { "config", "--replace-all", "remote.origin.fetch",
+                                 "refs/heads/other:refs/remotes/origin/other", NULL };
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_commit(rig.clone, "stranger.txt", "elsewhere\n", stranger));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_git(rig.bare, other) == 0);
+        ASSERT(dlx_git(rig.clone, cached) == 0);
+        ASSERT(dlx_git(rig.clone, mapping) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
+        ASSERT(strstr(dlx_str(&c, "detail"), "while proving") != NULL);
+        ASSERT_EQ(dlx_int(&c, "attempt"), 2);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, main_now));
+        ASSERT_STR_EQ(main_now, stranger);
+        dlx_restore();
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_missing_main(void)
+{
+    int failures = 0;
+    TEST("land: missing remote main blocks despite a cached tracking ref") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], main_now[64];
+        dlx_isolate("missing_main");
+        ASSERT(dlx_rig_make(&rig, "missing_main_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        const char *remove_main[] = { "update-ref", "-d", "refs/heads/main", NULL };
+        const char *restore_main[] = { "update-ref", "refs/heads/main", base, NULL };
+        ASSERT(dlx_git(rig.bare, remove_main) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "REMOTE_OBSERVATION_UNAVAILABLE");
+        ASSERT(dlx_refusal_serializes(&c));
+        ASSERT(c.reply.error.retryable);
+        ASSERT(!c.reply.error.human_action_required);
+        ASSERT(!c.reply.error.mutated);
+        dlx_end(&c);
+        ASSERT(!dlx_origin_main(&rig, main_now));
+        dlx_begin(&c, "status");
+        (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        const struct json_value *row = json_get(&c.reply.data, "in_flight");
+        ASSERT(row && row->type == JSON_OBJ);
+        ASSERT_EQ(json_get_int(json_get(row, "attempt")), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "prove");
+        dlx_end(&c);
+        ASSERT(dlx_git(rig.bare, restore_main) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_initial_remote_missing(void)
+{
+    int failures = 0;
+    TEST("land: unavailable remote before initial proof remains retryable") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char offline[700];
+        dlx_isolate("initial_remote_missing");
+        ASSERT(dlx_rig_make(&rig, "initial_remote_missing_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        (void)snprintf(offline, sizeof(offline), "%s.offline", rig.bare);
+        ASSERT(rename(rig.bare, offline) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "REMOTE_OBSERVATION_UNAVAILABLE");
+        ASSERT(c.reply.error.retryable);
+        ASSERT(!c.reply.error.human_action_required);
+        ASSERT(c.reply.error.mutated);
+        dlx_end(&c);
+        ASSERT(rename(offline, rig.bare) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        ASSERT_EQ(dlx_int(&c, "attempt"), 1);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_final_observation_missing(void)
+{
+    int failures = 0;
+    TEST("land: second remote observation failure preserves the proven pair") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], main_now[64], upload_pack[700];
+        char landdir[1200], queue_path[1240], calls_path[740], calls[16];
+        char queue_before[16384], queue_after[16384];
+        size_t before_len, after_len, calls_len;
+        dlx_isolate("prepush_remote_missing");
+        ASSERT(dlx_rig_make(&rig, "prepush_remote_missing_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        (void)snprintf(upload_pack, sizeof(upload_pack), "%s.upload-pack", rig.bare);
+        ASSERT(dlx_write(upload_pack,
+            "#!/bin/sh\n"
+            "calls=${0}.calls\n"
+            "count=0\n"
+            "if test -f \"$calls\"; then read -r count < \"$calls\" || exit 70; fi\n"
+            "count=$((count + 1))\n"
+            "printf '%s\\n' \"$count\" > \"$calls\" || exit 70\n"
+            "test \"$count\" -ne 2 || exit 75\n"
+            "exec git-upload-pack \"$@\"\n"));
+        ASSERT(chmod(upload_pack, 0700) == 0);
+        const char *intercept[] = { "config", "remote.origin.uploadpack",
+                                   upload_pack, NULL };
+        const char *restore[] = { "config", "--unset", "remote.origin.uploadpack", NULL };
+        ASSERT(dlx_git(rig.clone, intercept) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(queue_path, sizeof(queue_path), "%s/queue.jsonl", landdir);
+        ASSERT(dlx_slurp(queue_path, queue_before, sizeof(queue_before), &before_len));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "REMOTE_OBSERVATION_UNAVAILABLE");
+        ASSERT(c.reply.error.retryable);
+        ASSERT(!c.reply.error.human_action_required);
+        ASSERT(!c.reply.error.mutated);
+        dlx_end(&c);
+        (void)snprintf(calls_path, sizeof(calls_path), "%s.calls", upload_pack);
+        ASSERT(dlx_slurp(calls_path, calls, sizeof(calls), &calls_len));
+        ASSERT_EQ(calls_len, 2);
+        ASSERT(memcmp(calls, "2\n", 2) == 0);
+        ASSERT(dlx_slurp(queue_path, queue_after, sizeof(queue_after), &after_len));
+        ASSERT_EQ(after_len, before_len);
+        ASSERT(memcmp(queue_before, queue_after, before_len) == 0);
+        ASSERT(dlx_origin_main(&rig, main_now));
+        ASSERT_STR_EQ(main_now, base);
+        dlx_begin(&c, "status");
+        (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        const struct json_value *row = json_get(&c.reply.data, "in_flight");
+        ASSERT(row && row->type == JSON_OBJ);
+        ASSERT_EQ(json_get_int(json_get(row, "attempt")), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "prove");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "base")), base);
+        dlx_end(&c);
+        ASSERT(dlx_git(rig.clone, restore) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_EQ(dlx_int(&c, "attempt"), 1);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_lost_persistence(void)
+{
+    int failures = 0;
+    TEST("land: a queue-commit failure after a real push is reported, "
+        "not silently claimed, and the row self-heals") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], before[64], after[64];
+        dlx_isolate("persistfail");
+        ASSERT(dlx_rig_make(&rig, "persistfail_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_landdir(landdir, sizeof(landdir));
+        /* No write permission on the land dir itself: dl_rewrite_rows can
+         * no longer create queue.jsonl.tmp, but logs/ and wt/ underneath
+         * already exist and are untouched, so the rebase and the real
+         * push still go through. */
+        ASSERT(chmod(landdir, 0500) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "persist"), "failed") == 0);
+        dlx_end(&c);
+        /* The push already happened for real: origin/main moved even
+         * though the queue could not record it. */
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT(strcmp(after, before) != 0);
+        ASSERT(chmod(landdir, 0700) == 0);
+        /* A cached origin/main still contains the pushed commit when the
+         * remote disappears. It cannot establish a fresh observation:
+         * retain the inflight row, then reconcile after access returns. */
+        char offline[700];
+        (void)snprintf(offline, sizeof(offline), "%s.offline", rig.bare);
+        ASSERT(rename(rig.bare, offline) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT(strcmp(dlx_err_code(&c), "REMOTE_OBSERVATION_UNAVAILABLE") == 0);
+        ASSERT(c.reply.error.retryable);
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(json_get(&c.reply.data, "in_flight") != NULL);
+        dlx_end(&c);
+        ASSERT(rename(offline, rig.bare) == 0);
+        /* Recoverable: a later step finds the tip is already an ancestor
+         * of origin/main and records it landed without pushing again. */
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        ASSERT(dlx_str(&c, "persist")[0] == '\0');
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "empty") == 0);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_postpush_observation_missing(void)
+{
+    int failures = 0;
+    TEST("land: successful push awaits independent observation and reconciles once") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[64], after[64], upload_pack[700], hook[700], marker[700];
+        char receive_pack[700], invocations[700];
+        char received[32];
+        size_t received_len;
+        dlx_isolate("postpush_observation_missing");
+        ASSERT(dlx_rig_make(&rig, "postpush_observation_missing_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        (void)snprintf(hook, sizeof(hook), "%s/hooks/post-receive", rig.bare);
+        (void)snprintf(marker, sizeof(marker), "%s/hooks/received", rig.bare);
+        ASSERT(dlx_write(hook,
+            "#!/bin/sh\n"
+            "printf 'received\\n' >> hooks/received || exit 73\n"));
+        ASSERT(chmod(hook, 0700) == 0);
+        (void)snprintf(upload_pack, sizeof(upload_pack), "%s.upload-pack", rig.bare);
+        ASSERT(dlx_write(upload_pack,
+            "#!/bin/sh\n"
+            "test ! -f \"$1/hooks/received\" || exit 75\n"
+            "exec git-upload-pack \"$@\"\n"));
+        ASSERT(chmod(upload_pack, 0700) == 0);
+        (void)snprintf(receive_pack, sizeof(receive_pack), "%s.receive-pack", rig.bare);
+        (void)snprintf(invocations, sizeof(invocations), "%s/hooks/receive-invocations", rig.bare);
+        ASSERT(dlx_write(receive_pack,
+            "#!/bin/sh\n"
+            "printf 'invoked\\n' >> \"$1/hooks/receive-invocations\" || exit 73\n"
+            "exec git-receive-pack \"$@\"\n"));
+        ASSERT(chmod(receive_pack, 0700) == 0);
+        const char *intercept[] = { "config", "remote.origin.uploadpack",
+                                   upload_pack, NULL };
+        const char *count_push[] = { "config", "remote.origin.receivepack",
+                                    receive_pack, NULL };
+        const char *restore[] = { "config", "--unset", "remote.origin.uploadpack", NULL };
+        ASSERT(dlx_git(rig.clone, intercept) == 0);
+        ASSERT(dlx_git(rig.clone, count_push) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        /* Establish the actual mutation before checking its reported state. */
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT(strcmp(after, before) != 0);
+        ASSERT_STR_EQ(after, rig.tip);
+        ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 9);
+        ASSERT(memcmp(received, "received\n", 9) == 0);
+        ASSERT(dlx_slurp(invocations, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 8);
+        ASSERT(memcmp(received, "invoked\n", 8) == 0);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "REMOTE_OBSERVATION_UNAVAILABLE");
+        ASSERT(c.reply.error.retryable);
+        ASSERT(!c.reply.error.human_action_required);
+        ASSERT(c.reply.error.mutated);
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        const struct json_value *row = json_get(&c.reply.data, "in_flight");
+        ASSERT(row && row->type == JSON_OBJ);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "prove");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "tip")), rig.tip);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "base")), before);
+        ASSERT_EQ(json_get_int(json_get(row, "attempt")), 1);
+        dlx_end(&c);
+        ASSERT(dlx_git(rig.clone, restore) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_EQ(dlx_int(&c, "attempt"), 1);
+        dlx_end(&c);
+        ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 9);
+        ASSERT(memcmp(received, "received\n", 9) == 0);
+        ASSERT(dlx_slurp(invocations, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 8);
+        ASSERT(memcmp(received, "invoked\n", 8) == 0);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_postpush_result_unconfirmed(void)
+{
+    int failures = 0;
+    TEST("land: reachable remote must still contain the pushed candidate") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[64], after[64], hook[700], marker[700], received[80];
+        size_t received_len;
+        dlx_isolate("postpush_result_unconfirmed");
+        ASSERT(dlx_rig_make(&rig, "postpush_result_unconfirmed_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        (void)snprintf(hook, sizeof(hook), "%s/hooks/post-receive", rig.bare);
+        (void)snprintf(marker, sizeof(marker), "%s/hooks/received-tip", rig.bare);
+        ASSERT(dlx_write(hook,
+            "#!/bin/sh\n"
+            "read -r old new ref || exit 73\n"
+            "test \"$ref\" = refs/heads/main || exit 74\n"
+            "printf '%s\\n' \"$new\" > hooks/received-tip || exit 75\n"
+            "git update-ref \"$ref\" \"$old\" \"$new\"\n"));
+        ASSERT(chmod(hook, 0700) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, strlen(rig.tip) + 1);
+        ASSERT(memcmp(received, rig.tip, strlen(rig.tip)) == 0);
+        ASSERT(received[received_len - 1] == '\n');
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, before);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(dlx_err_code(&c), "REMOTE_RESULT_UNCONFIRMED");
+        ASSERT(dlx_refusal_serializes(&c));
+        ASSERT(c.reply.error.retryable);
+        ASSERT(!c.reply.error.human_action_required);
+        ASSERT(c.reply.error.mutated);
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        const struct json_value *row = json_get(&c.reply.data, "in_flight");
+        ASSERT(row && row->type == JSON_OBJ);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "prove");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "tip")), rig.tip);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "base")), before);
+        ASSERT_EQ(json_get_int(json_get(row, "attempt")), 1);
+        dlx_end(&c);
+        ASSERT(unlink(hook) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, rig.tip);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
 int test_dev_land(void);
@@ -1488,6 +2017,14 @@ int test_dev_land(void)
         PASS();
     }
 
+    failures += test_dev_land_explicit_main();
+
+    failures += test_dev_land_missing_main();
+
+    failures += test_dev_land_initial_remote_missing();
+
+    failures += test_dev_land_final_observation_missing();
+
     TEST("land: cancel drops one request by sequence number") {
         struct dlx_rig rig;
         struct dlx_call c;
@@ -1631,59 +2168,9 @@ int test_dev_land(void)
         PASS();
     }
 
-    TEST("land: a queue-commit failure after a real push is reported, "
-        "not silently claimed, and the row self-heals") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char landdir[1200], before[64], after[64];
-        dlx_isolate("persistfail");
-        ASSERT(dlx_rig_make(&rig, "persistfail_rig"));
-        ASSERT(dlx_origin_main(&rig, before));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        dlx_end(&c);
-        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
-        dlx_landdir(landdir, sizeof(landdir));
-        /* No write permission on the land dir itself: dl_rewrite_rows can
-         * no longer create queue.jsonl.tmp, but logs/ and wt/ underneath
-         * already exist and are untouched, so the rebase and the real
-         * push still go through. */
-        ASSERT(chmod(landdir, 0500) == 0);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
-        ASSERT(strcmp(dlx_str(&c, "persist"), "failed") == 0);
-        dlx_end(&c);
-        /* The push already happened for real: origin/main moved even
-         * though the queue could not record it. */
-        ASSERT(dlx_origin_main(&rig, after));
-        ASSERT(strcmp(after, before) != 0);
-        ASSERT(chmod(landdir, 0700) == 0);
-        /* Recoverable: a later step finds the tip is already an ancestor
-         * of origin/main and records it landed without pushing again. */
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
-        ASSERT(dlx_str(&c, "persist")[0] == '\0');
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "empty") == 0);
-        dlx_end(&c);
-        dlx_restore();
-        PASS();
-    }
+    failures += test_dev_land_postpush_observation_missing();
+    failures += test_dev_land_postpush_result_unconfirmed();
+    failures += test_dev_land_lost_persistence();
 
     TEST("land: a hooksPath naming no real pre-push cannot skip admission") {
         struct dlx_rig rig;

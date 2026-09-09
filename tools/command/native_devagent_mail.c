@@ -31,7 +31,8 @@
  *           offer|directive. Also an optional pull filter (exact match).
  *   body    post only, required non-empty string, at most 4096 bytes.
  *   since   pull only, optional non-negative integer, default 0: return rows
- *           with seq greater than this cursor.
+ *           with seq greater than this cursor. A positive scalar refuses
+ *           when multiple .jsonl streams make its sequence space ambiguous.
  *   from    post: optional sender name (default $BOARD_AGENT, then $USER,
  *           then "local"). pull: optional exact-match sender filter.
  *   cursor  ack only: required non-negative integer; also accepted as the
@@ -993,6 +994,7 @@ static bool dvm_pull_scan_maildir(const char *maildir,
         return false;
     }
     struct dirent *ent;
+    size_t streams = 0;
     while ((ent = readdir(d)) != NULL) {
         char path[DVM_PATH_CAP];
         const char *dot;
@@ -1006,6 +1008,20 @@ static bool dvm_pull_scan_maildir(const char *maildir,
             continue;
         if (strcmp(ent->d_name, ".jsonl") == 0)
             continue;
+        /* Each imported file has its own sequence space. A scalar from
+         * another stream cannot establish that this stream was consumed. */
+        if (++streams > 1 && filter->since > 0) {
+            (void)closedir(d);
+            free(*rows);
+            *rows = NULL;
+            dvm_fail(reply, "MAIL_CURSOR_AMBIGUOUS",
+                     "multiple mail streams cannot resume one scalar cursor; replay with since=0",
+                     "independent mail sequence spaces");
+            (void)snprintf(reply->error.next_action,
+                sizeof(reply->error.next_action), "%s",
+                "z23-dev dev agent mail pull --since=0");
+            return false;
+        }
         int path_length =
             snprintf(path, sizeof(path), "%s/%s", maildir, ent->d_name);
         if (path_length <= 0 || (size_t)path_length >= sizeof(path)) {

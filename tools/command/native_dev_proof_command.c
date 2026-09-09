@@ -46,8 +46,9 @@ const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
  * also compile proof_ensure()'s real body and pull in the resident
  * dev-loop watcher from native_dev_command.c, an unrelated dependency this
  * mapping logic does not need. */
-static void proof_emit_next(struct zcl_command_reply *reply,
-                            const struct zcl_dev_proof_status *status)
+static void proof_emit_route(struct zcl_command_reply *reply,
+                             const struct zcl_dev_proof_status *status,
+                             const char *command, const char *reason)
 {
     if (status->state == ZCL_DEV_PROOF_STATE_PASSED ||
         status->state == ZCL_DEV_PROOF_STATE_INVALID ||
@@ -64,9 +65,14 @@ static void proof_emit_next(struct zcl_command_reply *reply,
     /* An unrepresentable route is omitted, never shortened or redirected
      * to whichever checkout happens to execute the next command. */
     if (n == 0 || n >= sizeof(input)) return;
+    (void)zcl_command_reply_add_next(reply, command, input, reason);
+}
+
+static void proof_emit_next(struct zcl_command_reply *reply,
+                            const struct zcl_dev_proof_status *status)
+{
     bool failed = status->state == ZCL_DEV_PROOF_STATE_FAILED;
-    (void)zcl_command_reply_add_next(
-        reply, failed ? "dev.proof.retry" : "dev.proof.wait", input,
+    proof_emit_route(reply, status, failed ? "dev.proof.retry" : "dev.proof.wait",
         failed
             ? "after repairing the reported prerequisite, explicitly request a new full proof"
             : "wait for the exact commit/base receipt without running push-time work");
@@ -163,6 +169,37 @@ void zcl_dev_proof_wait_conclude(struct zcl_command_reply *reply,
     proof_emit_status(reply, status, false);
 }
 
+void zcl_dev_proof_step_conclude(struct zcl_command_reply *reply, int result,
+                                 const struct zcl_dev_proof_status *status)
+{
+    if (result < 0) {
+        proof_emit_status(reply, status, false);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_FAILED, "PROOF_STEP_REFUSED", "execute", false,
+            false, "foreground proof could not execute the exact pair", status->detail);
+        return;
+    }
+    if (result == 0) {
+        proof_emit_status(reply, status, false);
+        if (strcmp(status->detail, "proof_foreground_requires_unarmed_checkout") == 0) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                ZCL_COMMAND_EXIT_BLOCKED, "PROOF_STEP_WATCHER_PRESENT", "execute", true,
+                false, "foreground proof requires an unarmed checkout",
+                "use an existing authorized unarmed verification checkout for this exact commit/base pair");
+            return;
+        }
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+            ZCL_COMMAND_EXIT_BLOCKED, "PROOF_STEP_BUSY", "execute", true,
+            false, "proof execution or landing preparation is busy", status->detail);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "%s", "retry dev.proof.step with the same root, local_commit and remote_base after the current execution finishes");
+        return;
+    }
+    zcl_dev_proof_wait_conclude(reply, status);
+    if (status->state == ZCL_DEV_PROOF_STATE_FAILED)
+        proof_emit_next(reply, status);
+}
+
 #ifdef ZCL_DEV_BUILD
 static const char *proof_source_root(const struct zcl_command_request *request)
 {
@@ -186,6 +223,23 @@ static const char *proof_optional_text(const struct json_value *input,
         ? json_get_str(value) : NULL;
 }
 #endif
+
+static void proof_step(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+#ifndef ZCL_DEV_BUILD
+    (void)request;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+        ZCL_COMMAND_EXIT_BLOCKED, "DEV_BUILD_REQUIRED", "dispatch", false,
+        false, "foreground proof requires the dev binary", "make dev-bin");
+#else
+    struct zcl_dev_proof_status status = {0};
+    int result = zcl_dev_proof_step(proof_source_root(request),
+        proof_optional_text(request->input, "local_commit"),
+        proof_optional_text(request->input, "remote_base"), &status);
+    zcl_dev_proof_step_conclude(reply, result, &status);
+#endif
+}
 
 static void proof_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
@@ -324,15 +378,6 @@ static void proof_retry(
             status.detail[0] ? status.detail : "proof_retry_requires_settled_failure");
         return;
     }
-    if (!zcl_native_dev_loop_proof_queue_ready(root)) {
-        proof_emit_status(reply, &status, false);
-        zcl_command_reply_fail(
-            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-            "PROOF_QUEUE_OWNER_STALE", "schedule", true, false,
-            "proof retry requires a ready resident proof queue",
-            "run dev.proof.ensure to arm the development watcher, then retry explicitly");
-        return;
-    }
     /* Capture the resolved pair before the library overwrites status. */
     char local[65], base[65];
     (void)snprintf(local, sizeof(local), "%s", status.local_commit);
@@ -346,7 +391,9 @@ static void proof_retry(
             status.detail);
         return;
     }
-    proof_emit_status(reply, &status, true);
+    proof_emit_status(reply, &status, false);
+    proof_emit_route(reply, &status, "dev.proof.step",
+                      "execute this explicitly retried pair without starting a watcher");
 #endif
 }
 
@@ -468,7 +515,9 @@ void zcl_native_dev_proof_dispatch(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     const char *path = request && request->spec ? request->spec->path : NULL;
-    if (path && strcmp(path, "dev.proof.ensure") == 0)
+    if (path && strcmp(path, "dev.proof.step") == 0)
+        proof_step(request, reply);
+    else if (path && strcmp(path, "dev.proof.ensure") == 0)
         proof_ensure(request, reply);
     else if (path && strcmp(path, "dev.proof.status") == 0)
         proof_status(request, reply);

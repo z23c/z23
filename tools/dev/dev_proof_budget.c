@@ -18,6 +18,7 @@
  * hard ceiling no matter how loud it is. */
 
 #include "dev_proof_budget.h"
+#include "devloop.h"
 
 #include "base/safe_alloc.h"
 #include "platform/private_directory.h"
@@ -64,6 +65,7 @@ const char *zcl_dev_proof_kill_cause_name(enum zcl_dev_proof_kill_cause cause)
     case ZCL_DEV_PROOF_KILL_NONE: return "none";
     case ZCL_DEV_PROOF_KILL_NO_PROGRESS: return "no_progress";
     case ZCL_DEV_PROOF_KILL_HARD_CEILING: return "hard_ceiling";
+    case ZCL_DEV_PROOF_KILL_CANCELLED: return "cancelled";
     }
     return "unknown";
 }
@@ -432,12 +434,17 @@ static bool log_progress_mark(const char *path, int64_t *size, int64_t *mtime)
     return moved;
 }
 
-bool zcl_dev_proof_step_start(struct zcl_dev_proof_step *step, const char *root,
-                              const char *log_path, const char *const argv[],
-                              const struct zcl_dev_proof_budget *budget)
+static bool proof_step_prepare(struct zcl_dev_proof_step *step, const char *root,
+                                 const char *log_path, const char *const argv[],
+                                 const struct zcl_dev_proof_budget *budget)
 {
     if (!step || !root || !log_path || !argv || !budget) return false;
     memset(step, 0, sizeof(*step));
+    if (zcl_devloop_process_cancel_requested()) {
+        step->report.cause = ZCL_DEV_PROOF_KILL_CANCELLED;
+        step->report.rc = 130;
+        return false;
+    }
     if (snprintf(step->log_path, sizeof(step->log_path), "%s", log_path) >=
         (int)sizeof(step->log_path))
         return false;
@@ -445,6 +452,14 @@ bool zcl_dev_proof_step_start(struct zcl_dev_proof_step *step, const char *root,
     step->report.budget_ms = budget->budget_ms;
     step->seen_size = -1;
     step->seen_mtime = -1;
+    return true;
+}
+
+bool zcl_dev_proof_step_start(struct zcl_dev_proof_step *step, const char *root,
+                              const char *log_path, const char *const argv[],
+                              const struct zcl_dev_proof_budget *budget)
+{
+    if (!proof_step_prepare(step, root, log_path, argv, budget)) return false;
     pid_t child = fork();
     if (child < 0) {
         step->report.rc = -1;
@@ -525,13 +540,17 @@ bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
     enum zcl_dev_proof_kill_cause cause = zcl_dev_proof_budget_verdict(
         &step->budget, step->report.elapsed_ms,
         step->report.last_progress_age_ms);
+    if (zcl_devloop_process_cancel_requested())
+        cause = ZCL_DEV_PROOF_KILL_CANCELLED;
     if (cause == ZCL_DEV_PROOF_KILL_NONE) return false;
     step->report.cause = cause;
     (void)kill(-child, SIGTERM);
+    (void)kill(child, SIGTERM);
     platform_sleep_ms(100);
     (void)kill(-child, SIGKILL);
-    (void)waitpid(child, &status, 0);
-    step->report.rc = 124;
+    (void)kill(child, SIGKILL);
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    step->report.rc = cause == ZCL_DEV_PROOF_KILL_CANCELLED ? 130 : 124;
     step->finished = true;
     return true;
 }
@@ -561,14 +580,15 @@ int zcl_dev_proof_run_watched(const char *root, const char *log_path,
                               const struct zcl_dev_proof_budget *budget,
                               struct zcl_dev_proof_step_report *report)
 {
-    struct zcl_dev_proof_step step;
+    struct zcl_dev_proof_step step = {0};
     if (!zcl_dev_proof_step_start(&step, root, log_path, argv, budget)) {
+        int rc = step.report.rc != 0 ? step.report.rc : -1;
         if (report) {
-            memset(report, 0, sizeof(*report));
+            *report = step.report;
             report->budget_ms = budget ? budget->budget_ms : 0;
-            report->rc = -1;
+            report->rc = rc;
         }
-        return -1;
+        return rc;
     }
     (void)zcl_dev_proof_steps_wait(&step, 1);
     if (report) *report = step.report;
