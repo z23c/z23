@@ -76,28 +76,6 @@ static bool bfr_raw_sha3_object(const char *workspace,
     return memcmp(root, observed, 32) == 0;
 }
 
-static bool bfr_proof_set_object(const char *workspace,
-                                 const uint8_t expected_root[32])
-{
-    uint8_t *wire = NULL;
-    size_t wire_len = 0, proof_count = 0;
-    uint8_t proof_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
-    uint8_t observed_root[32];
-    bool valid = vcs_object_load_raw_bounded(
-            workspace, expected_root, VCS_ZCODE_PROOF_SET_WIRE_MAX,
-            &wire, &wire_len) == 0 &&
-        vcs_zcode_proof_set_parse(
-            wire, wire_len, proof_roots,
-            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, &proof_count) ==
-                VCS_ZCODE_DEV_OK &&
-        vcs_zcode_proof_set_root(
-            (const uint8_t (*)[32])proof_roots, proof_count,
-            observed_root) == VCS_ZCODE_DEV_OK &&
-        memcmp(expected_root, observed_root, 32) == 0;
-    free(wire);
-    return valid;
-}
-
 static bool bfr_regression_intent_valid(
     const char *workspace, const struct db_build_action *action,
     const struct db_build_job *job)
@@ -335,7 +313,7 @@ struct zcl_result build_fabric_release_qualify(
                               derived_regression_proof_root, 32) ||
         memcmp(derived_regression_proof_root,
                confirmation.regression_proof_set_root, 32) != 0 ||
-        !bfr_proof_set_object(workspace, derived_regression_proof_root))
+        !vcs_zcode_proof_set_object_valid(workspace, derived_regression_proof_root))
         return bfr_refuse(out, "historical-regression-proof-invalid");
     out->regression_proof_satisfied = true;
 

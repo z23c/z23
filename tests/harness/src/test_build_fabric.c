@@ -2750,6 +2750,9 @@ static int test_bf_map_selected_action(struct node_db *ndb,
         if (qualified) {
             ASSERT_EQ(strlen(json_get_str(json_get(observed, "derived_proof_set_root"))), 64);
             ASSERT(json_get_int(json_get(observed, "valid_receipts")) > 0);
+        } else {
+            ASSERT_STR_EQ(json_get_str(json_get(observed, "derived_proof_set_root")), "");
+            ASSERT_STR_EQ(json_get_str(json_get(observed, "proof_set_retention")), "unobserved");
         }
         ASSERT(!json_get_bool(json_get(observed, "acceptance_qualified")));
         const struct json_value *row = json_at(json_get(&reply.data, "nodes"), 0);
@@ -3042,6 +3045,99 @@ static int test_bf_map_maximum(struct node_db *ndb, const char *workspace,
     return failures;
 }
 
+static bool bf_map_retention_damage(const char *workspace,
+    const uint8_t root[32], unsigned scenario)
+{
+    if (scenario == 0) return true; /* Object is already hidden. */
+    uint8_t wire[VCS_ZCODE_PROOF_SET_WIRE_MAX + 1] = {0};
+    size_t length = scenario == 1 ? 1 : sizeof(wire);
+    if (scenario == 3) {
+        uint8_t member[1][32], other[32];
+        memset(member, 0xe5, sizeof(member));
+        if (vcs_zcode_proof_set_serialize((const uint8_t (*)[32])member,
+                1, wire, sizeof(wire), &length) != VCS_ZCODE_DEV_OK ||
+            vcs_zcode_proof_set_root((const uint8_t (*)[32])member,
+                1, other) != VCS_ZCODE_DEV_OK || memcmp(root, other, 32) == 0)
+            return false;
+    }
+    return vcs_object_put_addressed(workspace, root, wire, length);
+}
+
+static int test_bf_map_retention_refusals(struct node_db *ndb, const char *workspace,
+    struct json_value *input, const char *root_hex)
+{
+    int failures = 0;
+    TEST("work map: missing malformed oversized and misaddressed proof sets lose retention only") {
+        uint8_t root[32];
+        ASSERT(zcl_hex_decode_lower(root_hex, root, 32));
+        char path[1024], backup[1040];
+        int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s",
+                         workspace, root_hex, root_hex + 2);
+        ASSERT(n > 0 && (size_t)n < sizeof(path));
+        n = snprintf(backup, sizeof(backup), "%s.hidden", path);
+        ASSERT(n > 0 && (size_t)n < sizeof(backup));
+        int changes = sqlite3_total_changes(ndb->db);
+        struct zcl_command_request request = { .input = input };
+        for (unsigned scenario = 0; scenario < 4; scenario++) {
+            ASSERT_EQ(rename(path, backup), 0);
+            bool damaged = bf_map_retention_damage(workspace, root, scenario);
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+            zcl_native_handle_zcode_work_map(&request, &reply);
+            int restored = platform_path_replace(backup, path);
+            ASSERT_EQ(restored, 0);
+            ASSERT(damaged);
+            ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+            const struct json_value *selected = json_get(&reply.data, "selected_evidence");
+            ASSERT_STR_EQ(json_get_str(json_get(selected, "proof_set_retention")), "unavailable");
+            ASSERT_STR_EQ(json_get_str(json_get(selected, "derived_proof_set_root")), root_hex);
+            ASSERT(json_get_bool(json_get(selected, "policy_satisfied")));
+            ASSERT(!json_get_bool(json_get(selected, "acceptance_qualified")));
+            zcl_command_reply_free(&reply);
+            zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+            zcl_native_handle_zcode_work_map(&request, &reply);
+            ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+            selected = json_get(&reply.data, "selected_evidence");
+            ASSERT_STR_EQ(json_get_str(json_get(selected, "proof_set_retention")), "verified");
+            ASSERT(!json_get_bool(json_get(selected, "acceptance_qualified")));
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+            zcl_command_reply_free(&reply);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bf_map_retention(struct node_db *ndb, const char *workspace,
+    struct json_value *input, const struct db_build_action *action)
+{
+    int failures = 0;
+    TEST("work map: materialized proof-set retention is verified separately from qualification") {
+        struct build_fabric_proof_evaluation evaluation = {0};
+        ASSERT(build_fabric_proof_materialize(ndb, workspace, action->action_id,
+            platform_time_wall_unix(), &evaluation).ok);
+        ASSERT(evaluation.policy_satisfied);
+        ASSERT_EQ(strlen(evaluation.proof_set_root_sha3), 64);
+        int changes = sqlite3_total_changes(ndb->db);
+        struct zcl_command_request request = { .input = input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *selected = json_get(&reply.data, "selected_evidence");
+        ASSERT_STR_EQ(json_get_str(json_get(selected, "derived_proof_set_root")),
+                      evaluation.proof_set_root_sha3);
+        ASSERT_STR_EQ(json_get_str(json_get(selected, "proof_set_retention")), "verified");
+        ASSERT(!json_get_bool(json_get(selected, "acceptance_qualified")));
+        ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+        zcl_command_reply_free(&reply);
+        failures += test_bf_map_retention_refusals(ndb, workspace, input,
+            evaluation.proof_set_root_sha3);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_map_qualified(const char *workspace,
     const struct test_accepted_work_fixture *fixture,
     const struct db_build_job *job, const struct db_build_action *action,
@@ -3082,6 +3178,7 @@ static int test_bf_map_qualified(const char *workspace,
         ASSERT(json_push_kv_str(&input, "proof_datadir", dir));
         ASSERT(json_push_kv_str(&input, "map_root", hex));
         failures += test_bf_map_selected_action(&ndb, &input, &package_action, true);
+        failures += test_bf_map_retention(&ndb, workspace, &input, &package_action);
         json_free(&input);
         failures += test_bf_map_maximum(&ndb, workspace, dir, nodes,
             &fixture->accepted.task, &package_action);

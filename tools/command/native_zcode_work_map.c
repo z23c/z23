@@ -254,7 +254,15 @@ static struct zcl_result map_selected_read(struct node_db *ndb,
         action->candidate_root_sha3, policy_root, action_id, now, evaluation);
 }
 
-static bool map_selected_facts(struct json_value *observed,
+static const char *map_proof_retention(const char *workspace, const char *root_hex)
+{
+    if (!root_hex[0]) return "unobserved";
+    uint8_t root[32];
+    return zcl_hex_decode_lower(root_hex, root, 32) &&
+        vcs_zcode_proof_set_object_valid(workspace, root) ? "verified" : "unavailable";
+}
+
+static bool map_selected_facts(struct json_value *observed, const char *workspace,
     const struct db_build_action *action,
     const struct build_fabric_proof_evaluation *evaluation)
 {
@@ -265,7 +273,8 @@ static bool map_selected_facts(struct json_value *observed,
         json_push_kv_bool(observed, "policy_satisfied", evaluation->policy_satisfied) &&
         json_push_kv_int(observed, "valid_receipts", evaluation->valid_receipts) &&
         json_push_kv_str(observed, "derived_proof_set_root", evaluation->proof_set_root_sha3) &&
-        json_push_kv_str(observed, "proof_set_retention", "unobserved");
+        json_push_kv_str(observed, "proof_set_retention",
+            map_proof_retention(workspace, evaluation->proof_set_root_sha3));
 }
 
 static bool map_selected_observation(struct json_value *data,
@@ -293,7 +302,7 @@ static bool map_selected_observation(struct json_value *data,
         json_push_kv_int(&observed, "observed_unix", now) &&
         json_push_kv_bool(&observed, "acceptance_qualified", false);
     if (result.ok)
-        ok = ok && map_selected_facts(&observed, &action, &evaluation);
+        ok = ok && map_selected_facts(&observed, workspace, &action, &evaluation);
     else
         ok = ok && json_push_kv_str(&observed, "evidence_resolution", "unavailable") &&
             json_push_kv_str(&observed, "reason", result.message);

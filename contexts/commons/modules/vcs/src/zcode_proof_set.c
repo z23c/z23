@@ -2,12 +2,34 @@
  * purpose: Canonical immutable ZCODE proof-set wire and SHA3 identity. */
 
 #include "vcs/zcode_dev.h"
+#include "vcs/vcs_object.h"
 
 #include "base/bytes.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
 
 #include <string.h>
+#include <stdlib.h>
+
+bool vcs_zcode_proof_set_object_valid(const char *workspace,
+    const uint8_t expected_root[32])
+{
+    if (!workspace || !expected_root) return false;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0, proof_count = 0;
+    uint8_t proof_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
+    uint8_t observed_root[32];
+    bool valid = vcs_object_load_raw_bounded(
+            workspace, expected_root, VCS_ZCODE_PROOF_SET_WIRE_MAX,
+            &wire, &wire_len) == 0 &&
+        vcs_zcode_proof_set_parse(wire, wire_len, proof_roots,
+            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, &proof_count) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_set_root((const uint8_t (*)[32])proof_roots,
+            proof_count, observed_root) == VCS_ZCODE_DEV_OK &&
+        memcmp(expected_root, observed_root, 32) == 0;
+    free(wire);
+    return valid;
+}
 
 enum vcs_zcode_dev_error vcs_zcode_proof_set_serialize(
     const uint8_t (*roots)[32], size_t count, uint8_t *out,

@@ -276,6 +276,10 @@ enum vcs_zcode_dev_error vcs_zcode_proof_set_parse(
     size_t roots_cap, size_t *count);
 enum vcs_zcode_dev_error vcs_zcode_proof_set_root(
     const uint8_t (*receipt_roots)[32], size_t count, uint8_t out[32]);
+/* Bounded read-only verification of the retained proof-set object's canonical
+ * bytes and domain root. Does not verify member receipts or grant acceptance. */
+bool vcs_zcode_proof_set_object_valid(const char *workspace,
+    const uint8_t expected_root[32]);
 
 /* Deterministic identity for one inert human decision. It binds the exact
  * task, candidate, proof policy and verified proof set shown to the human;
