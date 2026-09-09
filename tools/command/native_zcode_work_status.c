@@ -144,6 +144,7 @@ static const char *zwork_status_stage(const struct zwork_status_facts *facts)
             ? "Creating missing code" :
         facts->confirmation_ready ? "Ready for your decision" :
         facts->admitted_stalled ? "Needs attention" :
+        facts->admitted && !facts->proof_in_flight ? "Proof status unknown" :
         "Waiting for independent reproduction";
 }
 

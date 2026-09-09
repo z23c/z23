@@ -4481,6 +4481,8 @@ static int zpd_test_admitted_single_interpretation(void)
         zcl_command_reply_init(&reply, "zcl.zcode_admitted_blind_test.v1");
         zcl_native_handle_zcode_work_status(&request, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "stage")),
+                      "Proof status unknown") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "state")),
                       "CANDIDATE_ADMITTED") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "build_result")),
