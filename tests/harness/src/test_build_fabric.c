@@ -2283,6 +2283,113 @@ static struct zcl_result bf_package_conflict_receipt(
     return ZCL_OK;
 }
 
+struct bf_receipt_prefix_probe {
+    sqlite3 *db;
+    char pass_root[65];
+    unsigned matched;
+    unsigned rows;
+};
+
+static int bf_interrupt_receipt_prefix(unsigned event, void *context,
+                                       void *statement, void *unused)
+{
+    (void)unused;
+    struct bf_receipt_prefix_probe *probe = context;
+    sqlite3_stmt *st = statement;
+    const char *sql = sqlite3_sql(st);
+    if (event != SQLITE_TRACE_ROW || !sql ||
+        !strstr(sql, "FROM build_receipts") ||
+        !strstr(sql, "WHERE action_id IN")) return 0;
+    probe->rows++;
+    const unsigned char *root = sqlite3_column_text(st, 0);
+    if (root && strcmp((const char *)root, probe->pass_root) == 0) {
+        probe->matched++;
+        sqlite3_interrupt(probe->db);
+    }
+    return 0;
+}
+
+static int bf_deny_receipt_read(void *context, int operation,
+    const char *table, const char *column, const char *db, const char *trigger)
+{
+    (void)context; (void)column; (void)db; (void)trigger;
+    return operation == SQLITE_READ && table &&
+        strcmp(table, "build_receipts") == 0 ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int bf_receipt_query_refusals(struct node_db *ndb, const char *action_id,
+                                    struct bf_receipt_prefix_probe *probe)
+{
+    int failures = 0;
+    TEST("build_fabric: failed receipt queries clear partial rows and refuse denied reads") {
+        struct db_build_action action;
+        ASSERT(db_build_action_find(ndb, action_id, &action));
+        struct db_build_receipt rows[8], zero = {0};
+        memset(rows, 0xa5, sizeof(rows));
+        probe->matched = 0;
+        probe->rows = 0;
+        ASSERT_EQ(sqlite3_trace_v2(ndb->db, SQLITE_TRACE_ROW,
+                                  bf_interrupt_receipt_prefix, probe), SQLITE_OK);
+        int count = db_build_candidate_receipts(ndb, action.task_root_sha3,
+            action.candidate_root_sha3, action.proof_policy_root_sha3, rows, 8);
+        (void)sqlite3_trace_v2(ndb->db, 0, NULL, NULL);
+        ASSERT_EQ(probe->matched, 1);
+        ASSERT(probe->rows > 0 && probe->rows <= 8);
+        ASSERT_EQ(count, -1);
+        for (unsigned i = 0; i < probe->rows; i++)
+            ASSERT(memcmp(&rows[i], &zero, sizeof(zero)) == 0);
+        ASSERT_EQ(sqlite3_set_authorizer(ndb->db, bf_deny_receipt_read, NULL), SQLITE_OK);
+        count = db_build_candidate_receipts(ndb, action.task_root_sha3,
+            action.candidate_root_sha3, action.proof_policy_root_sha3, rows, 8);
+        (void)sqlite3_set_authorizer(ndb->db, NULL, NULL);
+        ASSERT_EQ(count, -1);
+        count = db_build_candidate_receipts(ndb, action.task_root_sha3,
+            action.candidate_root_sha3, action.proof_policy_root_sha3, rows, 8);
+        ASSERT(count > 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int bf_proof_incomplete_receipts(struct node_db *ndb, const char *dir,
+    const char *action_id, int64_t now,
+    const struct vcs_zcode_work_receipt_v1 *passed)
+{
+    int failures = 0;
+    TEST("build_fabric: interrupted PASS prefix cannot hide a conflicting receipt") {
+        struct bf_receipt_prefix_probe probe = { .db = ndb->db };
+        uint8_t root[32];
+        ASSERT_EQ(vcs_zcode_work_receipt_id(passed, root), VCS_ZCODE_DEV_OK);
+        zcl_hex_encode(root, 32, probe.pass_root);
+        int changes = sqlite3_total_changes(ndb->db);
+        for (unsigned mode = 0; mode < 3; mode++) {
+            probe.matched = 0;
+            struct build_fabric_proof_evaluation evaluation = {0};
+            ASSERT_EQ(sqlite3_trace_v2(ndb->db, SQLITE_TRACE_ROW,
+                                      bf_interrupt_receipt_prefix, &probe), SQLITE_OK);
+            struct zcl_result result = mode == 0
+                ? build_fabric_proof_evaluate_readonly(ndb, dir, action_id, now, &evaluation)
+                : mode == 1
+                    ? build_fabric_proof_materialize(ndb, dir, action_id, now, &evaluation)
+                    : build_fabric_proof_evaluate(ndb, dir, action_id, now, &evaluation);
+            (void)sqlite3_trace_v2(ndb->db, 0, NULL, NULL);
+            ASSERT_EQ(probe.matched, 1);
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, "proof receipt query could not be read completely");
+            ASSERT(!evaluation.policy_satisfied);
+            ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+            result = build_fabric_proof_evaluate_readonly(
+                ndb, dir, action_id, now, &evaluation);
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, "proof_observation_conflict");
+        }
+        failures += bf_receipt_query_refusals(ndb, action_id, &probe);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_package_proof_conflicts(
     struct node_db *ndb, const char *dir, int64_t now,
     const struct test_accepted_work_fixture *fixture,
@@ -2341,7 +2448,7 @@ static int test_bf_package_proof_conflicts(
         memcpy(failed.action_root, passed.action_root, 32);
         failed.status = scenario == 1 ? VCS_ZCODE_WORK_PASS : VCS_ZCODE_WORK_FAIL;
         failed.exit_status = scenario == 1 ? 0 : scenario == 3 ? 8 : 7;
-        failed.finished_unix--;
+        failed.finished_unix += scenario == 0 ? 1 : -1;
         ASSERT(bf_package_conflict_receipt(
             ndb, dir, fixture, &package_action, &failed, row, scenario != 2).ok);
         int changes = sqlite3_total_changes(ndb->db);
@@ -2373,6 +2480,9 @@ static int test_bf_package_proof_conflicts(
             ASSERT_EQ(vcs_zcode_work_receipt_id(&failed, root), VCS_ZCODE_DEV_OK);
             ASSERT(vcs_object_has(dir, root));
         }
+        if (scenario == 0)
+            failures += bf_proof_incomplete_receipts(
+                ndb, dir, package_action.action_id, now, &passed);
         PASS();
     } _test_next:;
     if (transaction_open && !node_db_rollback(ndb)) failures++;

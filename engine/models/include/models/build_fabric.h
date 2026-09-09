@@ -141,6 +141,9 @@ int db_build_workers_list(struct node_db *ndb, struct db_build_worker *out,
                           size_t max);
 int db_build_job_receipts(struct node_db *ndb, const char *job_id,
                           struct db_build_receipt *out, size_t max);
+/* Returns a bounded count, or -1 on invalid input or any query failure.
+ * Partial rows are cleared on failure. Request max+1 to detect overflow;
+ * a successful LIMIT alone does not establish complete receipt coverage. */
 int db_build_candidate_receipts(
     struct node_db *ndb, const char *task_root_sha3,
     const char *candidate_root_sha3, const char *proof_policy_root_sha3,

@@ -509,6 +509,21 @@ static bool bf_has_local_match(
     return false;
 }
 
+static struct zcl_result bf_candidate_receipts_read(struct node_db *ndb,
+    const struct db_build_action *action, struct db_build_receipt *rows,
+    int *count)
+{
+    *count = db_build_candidate_receipts(
+        ndb, action->task_root_sha3, action->candidate_root_sha3,
+        action->proof_policy_root_sha3, rows,
+        VCS_ZCODE_PROOF_SET_MAX_RECEIPTS + 1u);
+    if (*count < 0)
+        return ZCL_ERR(-1, "proof receipt query could not be read completely");
+    if (*count > (int)VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
+        return ZCL_ERR(-1, "proof receipt set exceeds the bounded maximum");
+    return ZCL_OK;
+}
+
 // long-function-ok:proof-policy-transaction — selection, proof-set creation,
 // and trust promotion must use one verified snapshot of the receipt ledger.
 static struct zcl_result bf_proof_evaluate(
@@ -561,12 +576,10 @@ static struct zcl_result bf_proof_evaluate(
     }
     free(wire);
     struct db_build_receipt rows[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS + 1u];
-    int row_count = db_build_candidate_receipts(
-        ndb, action.task_root_sha3, action.candidate_root_sha3,
-        action.proof_policy_root_sha3, rows,
-        VCS_ZCODE_PROOF_SET_MAX_RECEIPTS + 1u);
-    if (row_count > (int)VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
-        return ZCL_ERR(-1, "proof receipt set exceeds the bounded maximum");
+    int row_count = 0;
+    struct zcl_result receipt_query = bf_candidate_receipts_read(
+        ndb, &action, rows, &row_count);
+    if (!receipt_query.ok) return receipt_query;
     /* Selection consults the shadow/review flags after the durable fields are
      * populated below.  Zero the complete snapshot so a receipt that has not
      * gone through either classifier cannot inherit indeterminate stack bits
