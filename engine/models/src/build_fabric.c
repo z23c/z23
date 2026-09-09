@@ -699,6 +699,65 @@ int db_build_candidate_actions(
     return count;
 }
 
+static bool build_candidate_cursor_valid(struct node_db *ndb,
+    const char *task, const char *after, const char *out)
+{
+    return ndb && ndb->open && out && build_hex_id(task) && after &&
+        (!after[0] || build_hex_id(after));
+}
+
+static bool build_candidate_cursor_read(sqlite3_stmt *st, char *out)
+{
+    if (sqlite3_column_type(st, 0) != SQLITE_TEXT ||
+        sqlite3_column_bytes(st, 0) != BUILD_FABRIC_ID_HEX) {
+        LOG_ERROR("build_fabric", "candidate cursor identity has invalid type or byte length");
+        return false;
+    }
+    const unsigned char *value = sqlite3_column_text(st, 0);
+    if (!value || !build_hex_id((const char *)value)) {
+        LOG_ERROR("build_fabric", "candidate cursor identity is not exact lowercase hex");
+        return false;
+    }
+    memcpy(out, value, BUILD_FABRIC_ID_HEX);
+    out[BUILD_FABRIC_ID_HEX] = '\0';
+    return true;
+}
+
+int db_build_task_candidate_next(struct node_db *ndb, const char *task,
+    const char *after, char out[BUILD_FABRIC_ID_HEX + 1])
+{
+    if (!build_candidate_cursor_valid(ndb, task, after, out)) {
+        if (out) out[0] = '\0';
+        LOG_ERROR("build_fabric", "candidate cursor requires exact task and root cursor");
+        return -1;
+    }
+    char task_copy[BUILD_FABRIC_ID_HEX + 1], cursor[BUILD_FABRIC_ID_HEX + 1];
+    memcpy(task_copy, task, sizeof(task_copy));
+    memcpy(cursor, after, strlen(after) + 1);
+    out[0] = '\0';
+    sqlite3_stmt *st = NULL;
+    AR_PREPARE_RET(ndb, st,
+        "SELECT candidate_root_sha3 FROM build_actions "
+        "INDEXED BY idx_build_actions_zcode_task "
+        "WHERE task_root_sha3=? AND candidate_root_sha3>? "
+        "ORDER BY candidate_root_sha3 LIMIT 1", -1);
+    bool bound = AR_BIND_TEXT(st, 1, task_copy) == SQLITE_OK &&
+        AR_BIND_TEXT(st, 2, cursor) == SQLITE_OK;
+    int step = bound ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:candidate-cursor-read
+    if (step == SQLITE_ROW) {
+        bool decoded = build_candidate_cursor_read(st, out);
+        step = decoded ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:candidate-cursor-completion
+    }
+    bool valid = step == SQLITE_DONE && (!out[0] || build_hex_id(out));
+    AR_FINALIZE(st);
+    if (!valid) {
+        out[0] = '\0';
+        LOG_ERROR("build_fabric", "candidate cursor failed or returned malformed identity");
+        return -1;
+    }
+    return out[0] ? 1 : 0;
+}
+
 int db_build_actions_queued(struct node_db *ndb,
                             struct db_build_action *out, size_t max)
 {

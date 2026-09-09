@@ -153,6 +153,14 @@ int db_build_candidate_actions(
     const char *candidate_root_sha3, const char *proof_policy_root_sha3,
     struct db_build_action *out, size_t max);
 
+/* One indexed successor among locally recorded candidate roots for a task.
+ * Empty after starts enumeration; duplicate actions do not repeat a root.
+ * Returns 1 for a root, 0 for end, -1 for invalid input or query failure.
+ * Clears out on end/failure. This is discovery, not acceptance or a snapshot
+ * across calls; absent local rows do not establish global completeness. */
+int db_build_task_candidate_next(struct node_db *ndb, const char *task,
+    const char *after, char out[BUILD_FABRIC_ID_HEX + 1]);
+
 /* Lease writes are compare-and-swap operations. A queued action can be
  * claimed once; every later mutation must present the exact lease id and
  * expected state. Expired reads are bounded and ordered for crash recovery. */

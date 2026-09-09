@@ -2894,6 +2894,16 @@ static int test_bf_candidate_query_partial(void)
         struct db_build_action actions[3];
         ASSERT_EQ(db_build_candidate_actions(
             &ndb, id_a, id_b, id_c, actions, 3), 2);
+        char candidate[BUILD_FABRIC_ID_HEX + 1];
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, "", candidate), 1);
+        ASSERT_STR_EQ(candidate, id_b);
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, candidate, candidate), 0);
+        ASSERT(candidate[0] == '\0');
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, id_b, candidate), 0);
+        ASSERT(candidate[0] == '\0');
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_d, "", candidate), 0);
+        ASSERT_EQ(db_build_task_candidate_next(NULL, id_a, "", candidate), -1);
+        ASSERT(candidate[0] == '\0');
         struct bf_query_interrupt probe = {.db = ndb.db};
         ASSERT_EQ(sqlite3_trace_v2(ndb.db, SQLITE_TRACE_ROW,
                                    bf_candidate_row_interrupt, &probe), SQLITE_OK);
@@ -2902,6 +2912,52 @@ static int test_bf_candidate_query_partial(void)
         ASSERT_EQ(sqlite3_trace_v2(ndb.db, 0, NULL, NULL), SQLITE_OK);
         int restored = db_build_candidate_actions(
             &ndb, id_a, id_b, id_c, actions, 3);
+        struct bf_query_interrupt cursor_probe = {.db = ndb.db};
+        ASSERT_EQ(sqlite3_trace_v2(ndb.db, SQLITE_TRACE_ROW,
+            bf_candidate_row_interrupt, &cursor_probe), SQLITE_OK);
+        int cursor_interrupted = db_build_task_candidate_next(&ndb, id_a, "", candidate);
+        ASSERT_EQ(sqlite3_trace_v2(ndb.db, 0, NULL, NULL), SQLITE_OK);
+        ASSERT_EQ(cursor_interrupted, -1);
+        ASSERT_EQ(cursor_probe.rows, 1);
+        ASSERT(candidate[0] == '\0');
+        ASSERT_EQ(sqlite3_set_authorizer(ndb.db, bf_candidate_query_deny, NULL), SQLITE_OK);
+        int cursor_denied = db_build_task_candidate_next(&ndb, id_a, "", candidate);
+        ASSERT_EQ(sqlite3_set_authorizer(ndb.db, NULL, NULL), SQLITE_OK);
+        ASSERT_EQ(cursor_denied, -1);
+        ASSERT(candidate[0] == '\0');
+        (void)snprintf(action.candidate_root_sha3,
+            sizeof(action.candidate_root_sha3), "%s", id_c);
+        memset(action.action_id, 'e', BUILD_FABRIC_ID_HEX);
+        action.action_id[BUILD_FABRIC_ID_HEX] = '\0';
+        action.sequence++;
+        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, "", candidate), 1);
+        ASSERT_STR_EQ(candidate, id_b);
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, candidate, candidate), 1);
+        ASSERT_STR_EQ(candidate, id_c);
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, candidate, candidate), 0);
+        /* Deliberately corrupt an isolated projection with a TEXT value whose
+         * SQLite character length hides bytes after an embedded NUL. */
+        char malformed_candidate[66];
+        memcpy(malformed_candidate, id_b, 64);
+        malformed_candidate[64] = '\0';
+        malformed_candidate[65] = 'x';
+        sqlite3_stmt *corrupt = NULL;
+        ASSERT_EQ(sqlite3_prepare_v2(ndb.db,
+            "UPDATE build_actions SET candidate_root_sha3=?", -1, &corrupt, NULL), SQLITE_OK);
+        ASSERT_EQ(sqlite3_bind_text(corrupt, 1, malformed_candidate,
+            sizeof(malformed_candidate), SQLITE_TRANSIENT), SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(corrupt), SQLITE_DONE);
+        ASSERT_EQ(sqlite3_finalize(corrupt), SQLITE_OK);
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, "", candidate), -1);
+        ASSERT(candidate[0] == '\0');
+        ASSERT_EQ(sqlite3_prepare_v2(ndb.db,
+            "UPDATE build_actions SET candidate_root_sha3=?", -1, &corrupt, NULL), SQLITE_OK);
+        ASSERT_EQ(sqlite3_bind_blob(corrupt, 1, id_b, 64, SQLITE_TRANSIENT), SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(corrupt), SQLITE_DONE);
+        ASSERT_EQ(sqlite3_finalize(corrupt), SQLITE_OK);
+        ASSERT_EQ(db_build_task_candidate_next(&ndb, id_a, "", candidate), -1);
+        ASSERT(candidate[0] == '\0');
         node_db_close(&ndb);
         test_rm_rf(dir);
         ASSERT_EQ(probe.rows, 1);
