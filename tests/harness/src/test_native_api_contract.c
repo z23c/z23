@@ -2850,9 +2850,42 @@ static int test_partial_rpc_reply_names_the_timeout(void)
     return failures;
 }
 
+static char *board_unavailable_rpc(const char *method, const char *params)
+{
+    (void)method;
+    (void)params;
+    return NULL;
+}
+
+static int test_board_unavailable_guides_instance_selection(void)
+{
+    int failures = 0;
+    TEST("board unavailable guides explicit instance selection without startup") {
+        const struct zcl_command_spec *spec =
+            find_spec(zcl_command_catalog(), "fleet.board.status");
+        ASSERT(spec != NULL);
+        struct zcl_command_request req = {.spec = spec, .view = "normal"};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        node_rpc_client_set_test_hook(board_unavailable_rpc);
+        zcl_native_handle_fleet_board_status(&req, &reply);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_TRANSIENT);
+        ASSERT_STR_EQ(reply.error.code, "NODE_UNAVAILABLE");
+        ASSERT(!reply.error.mutated);
+        ASSERT(strstr(reply.error.message, "-rpcport=") != NULL);
+        ASSERT(strstr(reply.error.message, "-daemon") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 int test_native_api_contract(void)
 {
     int failures = 0;
+    failures += test_board_unavailable_guides_instance_selection();
     failures += test_every_branch_menu_lists_only_own_children();
     failures += test_every_leaf_dot_path_resolves_from_cli_words();
     failures += test_root_and_discover_aliases_resolve();

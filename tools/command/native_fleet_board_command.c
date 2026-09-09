@@ -6,7 +6,7 @@
  * These leaves run in a one-shot process launched from a checkout, which
  * holds no node state and no host identity. Every one of them therefore asks
  * the LOCAL RUNNING NODE over the `fleet_board` RPC method and FAILS CLOSED
- * when no node answers, naming the exact command that starts one. It never
+ * when no node answers, guiding explicit instance selection. It never
  * falls back to a private file: a board only one process can see is a
  * notebook, and two agents keeping private notebooks is precisely the problem
  * this branch exists to remove.
@@ -40,19 +40,20 @@ static void fb_fail(struct zcl_command_reply *reply,
                            false, message, evidence ? evidence : "fleet.board");
 }
 
-/* The one refusal that matters: there is no node to ask. It names the command
- * that fixes it, because an agent that cannot reach the board needs the next
- * action, not a diagnosis. */
+/* A failed selected endpoint does not establish that every local node is
+ * stopped. Guide discovery before any separately authorized startup. */
 static void fb_no_node(struct zcl_command_reply *reply)
 {
     fb_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_TRANSIENT,
             "NODE_UNAVAILABLE", "dispatch", true,
-            "no local node answered. The board lives in the node, and this "
-            "command never writes a private copy. Start a node with "
-            "`build/bin/zclassic23 -daemon`, then run this again.",
+            "the selected local node did not answer the board call. Run "
+            "`z23-dev status` to inspect local instances, then retry with "
+            "explicit -rpcport=<PORT> and -datadir=<DIR> for the intended "
+            "instance. Check its RPC authentication if it is running. "
+            "The board never writes a private copy.",
             "fleet.board");
     (void)zcl_command_reply_add_next(reply, "core.status", "{}",
-                                     "confirm a local node is running");
+                                     "inspect the selected node and local instances");
 }
 
 /* Serialize one JSON object as the single RPC parameter. The array brackets
@@ -106,7 +107,7 @@ static bool fb_call(struct zcl_command_reply *reply, struct json_value *in,
      * call, the second means it ran it and said no. The board handler always
      * answers with an `ok` field, so an error body WITHOUT one never reached
      * the board — no node, wrong datadir, or no auth cookie — and the caller
-     * needs the command that starts a node, not a protocol message. */
+     * needs endpoint and authentication diagnosis before any startup. */
     const struct json_value *ok = json_get(body, "ok");
     const struct json_value *err = json_get(body, "error");
     const struct json_value *bare_code = json_get(body, "code");
