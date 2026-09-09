@@ -885,6 +885,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/sim/src/simnet_wire_peer.c", CAP_FS_WRITE,
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/anchor_kv.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/block_index_db.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/block_index_projection.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("engine/modules/storage/src/block_index_projection_cache.c", CAP_FS_WRITE, "SQLite cache PRAGMA uses the write-capable sqlite3_exec API; prefetch reads only")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/block_index_projection_binding.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/block_index_projection_status.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/block_parse_cache.c", CAP_FS_WRITE, "")

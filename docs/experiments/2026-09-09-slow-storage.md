@@ -74,3 +74,14 @@ group also passed with zero skips in 0.2 seconds. These are functional
 results on the build host, not HDD throughput or production startup evidence.
 Remaining measurements are cold projection replay, clean bound-delta restart,
 native status latency under replay, and the one-hour node observation.
+
+The source-bound publication run for `581138269` passed all 314 affected
+groups with zero skips in 155.2 seconds. Its full lint run passed 208 of
+209 gates; the capability closure gate identified the new cache source's
+undeclared `sqlite3_exec` reach. The source now declares `CAP_FS_WRITE` for
+that API, although the executed pragma configures only the connection cache.
+This does not reclassify the prefetch reader as a durable writer.
+The temporary publication copy also requires `VENDOR_CC=gcc`, matching the
+Tor build's recorded `CC = gcc`; its copied archive set lacks the configured
+Tor Makefile used to infer that compiler in the original checkout. Archive
+and commit provenance checks passed without modifying the Tor archives.
