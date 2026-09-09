@@ -2777,10 +2777,120 @@ static int test_bf_subordinate_work_admission(void)
     return failures;
 }
 
+static int bf_candidate_query_deny(void *context, int operation,
+                                    const char *first, const char *second,
+                                    const char *database, const char *trigger)
+{
+    (void)context; (void)second; (void)database; (void)trigger;
+    return operation == SQLITE_READ && first &&
+           strcmp(first, "build_actions") == 0 ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int bf_candidate_query_interrupt(void *context)
+{
+    (void)context;
+    return 1;
+}
+
+static int test_bf_candidate_query_errors(void)
+{
+    int failures = 0;
+    TEST("build_fabric: unavailable candidate actions are not an empty list") {
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path),
+                       "candidate_query_errors"));
+        struct db_build_action actions[2];
+        ASSERT_EQ(db_build_candidate_actions(
+            &ndb, id_a, id_b, id_c, actions, 2), 0);
+        ASSERT_EQ(sqlite3_set_authorizer(ndb.db, bf_candidate_query_deny,
+                                         NULL), SQLITE_OK);
+        int denied = db_build_candidate_actions(
+            &ndb, id_a, id_b, id_c, actions, 2);
+        ASSERT_EQ(sqlite3_set_authorizer(ndb.db, NULL, NULL), SQLITE_OK);
+        sqlite3_progress_handler(ndb.db, 1, bf_candidate_query_interrupt, NULL);
+        int interrupted = db_build_candidate_actions(
+            &ndb, id_a, id_b, id_c, actions, 2);
+        sqlite3_progress_handler(ndb.db, 0, NULL, NULL);
+        int restored = db_build_candidate_actions(
+            &ndb, id_a, id_b, id_c, actions, 2);
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        ASSERT(denied < 0);
+        ASSERT(interrupted < 0);
+        ASSERT_EQ(restored, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+struct bf_query_interrupt {
+    sqlite3 *db;
+    unsigned rows;
+};
+
+static int bf_candidate_row_interrupt(unsigned event, void *context,
+                                      void *statement, void *unused)
+{
+    (void)statement; (void)unused;
+    struct bf_query_interrupt *probe = context;
+    if (event == SQLITE_TRACE_ROW) {
+        probe->rows++;
+        sqlite3_interrupt(probe->db);
+    }
+    return 0;
+}
+
+static int test_bf_candidate_query_partial(void)
+{
+    int failures = 0;
+    TEST("build_fabric: interrupted candidate query cannot return partial success") {
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path),
+                       "candidate_query_partial"));
+        struct db_build_job job;
+        bf_job(&job);
+        ASSERT(db_build_job_save(&ndb, &job));
+        struct db_build_action action;
+        bf_action(&action);
+        (void)snprintf(action.task_root_sha3, sizeof(action.task_root_sha3),
+                       "%s", id_a);
+        (void)snprintf(action.candidate_root_sha3,
+                       sizeof(action.candidate_root_sha3), "%s", id_b);
+        (void)snprintf(action.proof_policy_root_sha3,
+                       sizeof(action.proof_policy_root_sha3), "%s", id_c);
+        ASSERT(db_build_action_save(&ndb, &action));
+        (void)snprintf(action.action_id, sizeof(action.action_id), "%s", id_d);
+        action.sequence++;
+        ASSERT(db_build_action_save(&ndb, &action));
+        struct db_build_action actions[3];
+        ASSERT_EQ(db_build_candidate_actions(
+            &ndb, id_a, id_b, id_c, actions, 3), 2);
+        struct bf_query_interrupt probe = {.db = ndb.db};
+        ASSERT_EQ(sqlite3_trace_v2(ndb.db, SQLITE_TRACE_ROW,
+                                   bf_candidate_row_interrupt, &probe), SQLITE_OK);
+        int interrupted = db_build_candidate_actions(
+            &ndb, id_a, id_b, id_c, actions, 3);
+        ASSERT_EQ(sqlite3_trace_v2(ndb.db, 0, NULL, NULL), SQLITE_OK);
+        int restored = db_build_candidate_actions(
+            &ndb, id_a, id_b, id_c, actions, 3);
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        ASSERT_EQ(probe.rows, 1);
+        ASSERT(interrupted < 0);
+        ASSERT_EQ(restored, 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_build_fabric(void)
 {
     int failures = 0;
     failures += test_bf_migration();
+    failures += test_bf_candidate_query_errors();
+    failures += test_bf_candidate_query_partial();
     failures += test_bf_lifecycle();
     failures += test_bf_async_proof_events();
     failures += test_bf_async_timing_samples();

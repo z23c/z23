@@ -7,6 +7,7 @@
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 
+#include <limits.h>
 #include <string.h>
 
 DEFINE_MODEL_CALLBACKS(build_job)
@@ -654,24 +655,48 @@ int db_build_candidate_receipts(
         build_receipt_read(&out[count], st));
 }
 
+static bool build_candidate_query_valid(
+    const struct node_db *ndb, const char *task, const char *candidate,
+    const char *policy, const struct db_build_action *out, size_t max)
+{
+    return ndb && ndb->open && task && candidate && policy && out &&
+           max > 0 && max <= INT_MAX;
+}
+
 int db_build_candidate_actions(
     struct node_db *ndb, const char *task_root_sha3,
     const char *candidate_root_sha3, const char *proof_policy_root_sha3,
     struct db_build_action *out, size_t max)
 {
     sqlite3_stmt *st = NULL;
-    if (!ndb || !ndb->open || !task_root_sha3 || !candidate_root_sha3 ||
-        !proof_policy_root_sha3 || !out || max == 0)
-        return 0;
-    AR_QUERY_LIST(ndb, st,
+    if (!build_candidate_query_valid(ndb, task_root_sha3, candidate_root_sha3,
+                                     proof_policy_root_sha3, out, max)) {
+        LOG_ERROR("build_fabric", "candidate action query requires bounded inputs");
+        return -1;
+    }
+    AR_PREPARE_RET(ndb, st,
         "SELECT " BUILD_ACTION_COLS " FROM build_actions "
         "WHERE task_root_sha3=? AND candidate_root_sha3=? "
-        "AND proof_policy_root_sha3=? ORDER BY action_id LIMIT ?", out, max,
-        AR_BIND_TEXT(st, 1, task_root_sha3);
-        AR_BIND_TEXT(st, 2, candidate_root_sha3);
-        AR_BIND_TEXT(st, 3, proof_policy_root_sha3);
-        AR_BIND_INT(st, 4, (int64_t)max),
-        build_action_read(&out[count], st));
+        "AND proof_policy_root_sha3=? ORDER BY action_id LIMIT ?", -1);
+    bool bound = AR_BIND_TEXT(st, 1, task_root_sha3) == SQLITE_OK &&
+        AR_BIND_TEXT(st, 2, candidate_root_sha3) == SQLITE_OK &&
+        AR_BIND_TEXT(st, 3, proof_policy_root_sha3) == SQLITE_OK &&
+        AR_BIND_INT(st, 4, (int64_t)max) == SQLITE_OK;
+    int count = 0;
+    int step = SQLITE_ERROR;
+    while (bound && (step = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:candidate-read-error-status
+        memset(&out[count], 0, sizeof(out[count]));
+        build_action_read(&out[count], st);
+        count++;
+    }
+    if (!bound || step != SQLITE_DONE) {
+        LOG_ERROR("build_fabric", "candidate action query failed: %s",
+                  sqlite3_errmsg(ndb->db));
+        memset(out, 0, (size_t)count * sizeof(*out));
+        count = -1;
+    }
+    AR_FINALIZE(st);
+    return count;
 }
 
 int db_build_actions_queued(struct node_db *ndb,

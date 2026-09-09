@@ -145,6 +145,9 @@ int db_build_candidate_receipts(
     struct node_db *ndb, const char *task_root_sha3,
     const char *candidate_root_sha3, const char *proof_policy_root_sha3,
     struct db_build_receipt *out, size_t max);
+/* Returns a bounded count, or -1 when the query cannot be read completely.
+ * A count equal to max does not establish complete candidate coverage;
+ * callers requiring it must request one extra row and refuse overflow. */
 int db_build_candidate_actions(
     struct node_db *ndb, const char *task_root_sha3,
     const char *candidate_root_sha3, const char *proof_policy_root_sha3,
