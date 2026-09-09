@@ -14,6 +14,21 @@ naming/ownership) and [`../CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DO
 
 ## 0. The two defects, stated once
 
+> **2026-09-09 update — seams A and B no longer decide C3.** With a
+> `-fileservice=` peer named, the weld runs: three genuine wipe-to-tip
+> stopwatch runs on the maintainer host (artifact dirs under
+> `build/c3-stopwatch/20260909T*`, ledger
+> `~/.local/state/zclassic23-c3-stopwatch/history.jsonl`) all show `H*`
+> climbing 0 → ~3.09M in ~150 s through the ROM fold. The C3 gap that
+> remains is further along: the ~150k-block tail between the ROM-covered
+> prefix and network tip folds at ~98 received bodies/s with a ~12%
+> body-request timeout rate on loopback, where the 600 s budget needs
+> ~420/s sustained (verdict SEAM every run; one peer and three peers
+> produce the same number, so this is tail body-download throughput, not
+> peer starvation). The `sticky_escalator.resnapshot_no_base` /
+> `refold_no_anchor_artifact` blockers in those runs are the same
+> recovery-artifact absences §5 names — downstream noise, not the cause.
+
 There are **two independent seams**, not one. Fixing either alone does not
 produce a working fresh machine.
 
