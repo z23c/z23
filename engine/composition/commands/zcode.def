@@ -665,13 +665,18 @@ ZCL_COMMAND_READY_READ(
     "at most two local candidate roots and a more flag are shown per task. "
     "Absent or unreadable ledgers are explicit; local index rows are neither "
     "verified candidates nor a global or transactional snapshot. "
+    "Optional action_id and node_index select one exact action observation "
+    "through the existing read-only proof evaluator. Task expiry and identity "
+    "mismatches refuse that observation. A derived proof-set root does not "
+    "establish retention, current receiver-policy acceptance or completion. "
     "Definition integrity grants no acceptance: evidence coverage remains "
-    "unobserved and node status UNKNOWN in this definition view. Limit is 1..4; "
+    "unobserved and node status UNKNOWN in this definition view. Limit is a maximum "
+    "of 1..4 rows; the byte budget may shorten a page without truncating rows. "
     "next_offset=-1 ends pagination. Performs no task or workspace mutation.",
     ZCL_COMMAND_RESULT_BUDGET,
     "zcode,work,map,milestone,feature,loop,dependencies",
     "zcl.zcode_work_map.input.v1", "zcl.zcode_work_map.v1",
-    "workspace,map_root,offset,limit,proof_datadir", "map_root",
+    "workspace,map_root,offset,limit,proof_datadir,action_id,node_index", "map_root",
     "z23 zcode work map --input='{\"map_root\":\"<sha3-root>\",\"limit\":4}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

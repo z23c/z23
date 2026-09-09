@@ -179,6 +179,24 @@ static bool bf_load_dev_object(const char *workspace, const char *root_hex,
            vcs_object_load_raw(workspace, root, wire, wire_len) == 0;
 }
 
+static struct zcl_result bf_receipt_load(const char *workspace,
+    const char *root_hex, struct vcs_zcode_work_receipt_v1 *receipt,
+    uint8_t root[32])
+{
+    uint8_t checked[32], *wire = NULL;
+    size_t length = 0;
+    if (!bf_load_dev_object(workspace, root_hex, &wire, &length, root))
+        return ZCL_ERR(-1, "proof receipt CAS object is unavailable");
+    bool intact = vcs_zcode_work_receipt_parse(wire, length, receipt) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(receipt, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(root, checked, 32) == 0;
+    free(wire);
+    if (!intact)
+        return ZCL_ERR(-1, "proof receipt CAS object is corrupt");
+    return ZCL_OK;
+}
+
 static bool bf_receipt_trusted(const struct bf_verified_receipt *receipt)
 {
     return receipt && (receipt->local || receipt->approved);
@@ -314,18 +332,19 @@ static bool bf_package_evidence_wire(
     return true;
 }
 
-static bool bf_package_evidence_verify(
+static struct zcl_result bf_package_evidence_check(
     const char *workspace, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
     const struct vcs_zcode_proof_policy_v1 *policy,
     const struct vcs_zcode_work_receipt_v1 *receipt,
-    bool *test_passed, uint8_t evidence_output[32])
+    bool *eligible, bool *test_passed, uint8_t evidence_output[32])
 {
+    *eligible = false;
     *test_passed = false;
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     if (!bf_package_evidence_wire(workspace, receipt, &wire, &wire_len))
-        LOG_FAIL("zcode.evidence", "receipt evidence could not be loaded");
+        return ZCL_ERR(-1, "proof package evidence is unavailable");
     struct vcs_package_build_receipt package;
     bool standard = policy->minimum_compile_receipts >= 2u ||
                     policy->minimum_test_receipts >= 2u;
@@ -347,7 +366,22 @@ static bool bf_package_evidence_verify(
         *test_passed = package.result_class ==
                 VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
             package.test_ran && package.test_exit_code == 0;
-    return ok;
+    *eligible = ok;
+    return ZCL_OK;
+}
+
+static struct zcl_result bf_package_evidence_verify(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const char *action_kind, bool *eligible, bool *test_passed,
+    uint8_t evidence_output[32])
+{
+    if (!*eligible || strcmp(action_kind, VCS_BUILD_ACTION_KIND_PACKAGE_V1) != 0)
+        return ZCL_OK;
+    return bf_package_evidence_check(workspace, task, candidate, policy,
+        receipt, eligible, test_passed, evidence_output);
 }
 
 static bool bf_trusted_evidence_has_root(
@@ -611,25 +645,17 @@ static struct zcl_result bf_proof_evaluate(
         if (compile_action && !db_build_job_find(
                                   ndb, receipt_action.job_id, &receipt_job))
             return ZCL_ERR(-1, "proof receipt job is unavailable");
-        uint8_t receipt_root[32]; uint8_t *receipt_wire = NULL;
-        size_t receipt_len = 0;
-        if (!bf_load_dev_object(workspace, rows[i].work_receipt_sha3,
-                                &receipt_wire, &receipt_len, receipt_root))
-            return ZCL_ERR(-1, "proof receipt CAS object is unavailable");
         struct vcs_zcode_work_receipt_v1 receipt;
-        uint8_t checked_receipt_root[32];
-        bool verified = vcs_zcode_work_receipt_parse(
-                receipt_wire, receipt_len, &receipt) == VCS_ZCODE_DEV_OK &&
-            vcs_zcode_work_receipt_id(&receipt, checked_receipt_root) ==
-                VCS_ZCODE_DEV_OK &&
-            memcmp(receipt_root, checked_receipt_root, 32) == 0 &&
-            vcs_zcode_work_receipt_verify(&receipt,
+        uint8_t receipt_root[32];
+        struct zcl_result loaded = bf_receipt_load(
+            workspace, rows[i].work_receipt_sha3, &receipt, receipt_root);
+        if (!loaded.ok) return loaded;
+        bool verified = vcs_zcode_work_receipt_verify(&receipt,
                                            receipt.signer_pubkey) ==
                 VCS_ZCODE_DEV_OK &&
             vcs_zcode_work_receipt_validate_for_candidate(
                 &task, &candidate, &receipt, validation_now) ==
                 VCS_ZCODE_DEV_OK;
-        free(receipt_wire);
         uint8_t action_root[32], input_root[32];
         verified = verified && zcl_hex_decode_lower(
             receipt_action.action_id, action_root, 32) &&
@@ -655,11 +681,10 @@ static struct zcl_result bf_proof_evaluate(
         bool package_test_passed = false;
         uint8_t evidence_output[32];
         memcpy(evidence_output, receipt.output_root, sizeof(evidence_output));
-        if (verified && strcmp(receipt_action.kind,
-                              VCS_BUILD_ACTION_KIND_PACKAGE_V1) == 0)
-            verified = bf_package_evidence_verify(
-                workspace, &task, &candidate, &policy, &receipt,
-                &package_test_passed, evidence_output);
+        struct zcl_result package_result = bf_package_evidence_verify(
+            workspace, &task, &candidate, &policy, &receipt,
+            receipt_action.kind, &verified, &package_test_passed, evidence_output);
+        if (!package_result.ok) return package_result;
         if (!verified || valid_count >= VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
             continue;
         struct db_build_worker worker;

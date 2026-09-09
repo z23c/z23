@@ -884,6 +884,101 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
     return true;
 }
 
+static int test_dev_land_integrated_merge(bool signing_failure)
+{
+    int failures = 0;
+    TEST("land: an integrated upstream merge preserves its resolved tree") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64], observed[64], landwt[1300], prepared[64], tree[64], base[64];
+        const char *checkout[] = { "checkout", "--quiet", "keep-tip", NULL };
+        const char *merge[] = { "-c", "user.name=land", "-c",
+            "user.email=land@z23.invalid", "merge", "--quiet",
+            "-s", "ours", "-m", "resolved integration",
+            "origin/main", NULL };
+        const char *head[] = { "rev-parse", "HEAD", NULL };
+        const char *remote[] = { "rev-parse", "main", NULL };
+        const char *ancestor[] = { "merge-base", "--is-ancestor",
+            "origin/main", "HEAD", NULL };
+        const char *resolved[] = { "show", "HEAD:change.txt", NULL };
+        const char *tree_args[] = { "rev-parse", "HEAD^{tree}", NULL };
+        const char *base_args[] = { "rev-parse", "origin/main", NULL };
+        const char *parent_args[] = { "show", "-s", "--format=%P", "HEAD", NULL };
+        const char *signature_args[] = { "log", "-1", "--format=%G?", NULL };
+        const char *message_args[] = { "log", "-1", "--format=%B", NULL };
+        dlx_isolate(signing_failure ? "merge_signfail" : "integratedmerge");
+        ASSERT(dlx_rig_make(&rig, signing_failure ? "merge_signfail_rig" : "integratedmerge_rig"));
+        ASSERT(dlx_regen_conflict(&rig, "change.txt", tip));
+        ASSERT(dlx_sign_arm(rig.clone, signing_failure ? "merge_signfail_key" : "integratedmerge_sign"));
+        ASSERT(dlx_git(rig.clone, checkout) == 0);
+        /* Both parents changed the same source. This fixture's explicit
+         * resolution keeps the submitted version, then integrates main. */
+        ASSERT(dlx_git(rig.clone, merge) == 0);
+        ASSERT(dlx_git(rig.clone, ancestor) == 0);
+        ASSERT(dlx_git_out(rig.clone, head, tip, sizeof(tip)) == 0);
+        ASSERT(dlx_git_out(rig.clone, tree_args, tree, sizeof(tree)) == 0);
+        ASSERT(dlx_git_out(rig.clone, base_args, base, sizeof(base)) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        if (signing_failure) {
+            const char *broken_signer[] = { "config", "gpg.ssh.program", "false", NULL };
+            ASSERT(dlx_git(rig.clone, broken_signer) == 0);
+        }
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        if (signing_failure) {
+            ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
+            ASSERT_STR_EQ(dlx_str(&c, "phase"), "rebase");
+            ASSERT_STR_EQ(dlx_str(&c, "detail"),
+                "cannot prepare a tree-preserving linear landing candidate");
+            dlx_end(&c);
+            ASSERT(dlx_git_out(rig.bare, remote, observed, sizeof(observed)) == 0);
+            ASSERT_STR_EQ(observed, base);
+            PASS();
+            goto _test_next;
+        }
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        ASSERT_STR_EQ(dlx_str(&c, "tip"), tip);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, head, prepared, sizeof(prepared)) == 0);
+        ASSERT(strcmp(prepared, tip) != 0);
+        ASSERT(dlx_git_out(landwt, tree_args, observed, sizeof(observed)) == 0);
+        ASSERT_STR_EQ(observed, tree);
+        ASSERT(dlx_git_out(landwt, parent_args, observed, sizeof(observed)) == 0);
+        ASSERT_STR_EQ(observed, base);
+        ASSERT(dlx_git_out(landwt, signature_args, observed, sizeof(observed)) == 0);
+        ASSERT_STR_EQ(observed, "G");
+        char message[512], expected[512];
+        (void)snprintf(expected, sizeof(expected),
+            "Prepare integrated candidate for linear publication\n\n"
+            "Original-Candidate: %s\nIntegrated-Base: %s\nSource-Tree: %s",
+            tip, base, tree);
+        ASSERT(dlx_git_out(landwt, message_args, message, sizeof(message)) == 0);
+        ASSERT_STR_EQ(message, expected);
+        ASSERT(dlx_git_out(landwt, resolved, observed, sizeof(observed)) == 0);
+        ASSERT_STR_EQ(observed, "mine");
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        ASSERT(dlx_git_out(rig.bare, remote, observed, sizeof(observed)) == 0);
+        ASSERT_STR_EQ(observed, prepared);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 /* The regen phase commits generated-doc drift after a clean rebase and
  * re-requests proof for the new tip. */
 static int test_dev_land_regen_commits_drift(void)
@@ -3174,6 +3269,7 @@ int test_dev_land(void)
         PASS();
     }
 
+
     TEST("land: a rebase conflict confined to the regenerated artifacts is "
         "resolved from the code and recorded as a signed regeneration "
         "commit, not refused") {
@@ -3288,6 +3384,8 @@ int test_dev_land(void)
         PASS();
     }
 
+    failures += test_dev_land_integrated_merge(false);
+    failures += test_dev_land_integrated_merge(true);
     failures += test_dev_land_regen_commits_drift();
     failures += test_dev_land_regen_no_commit_when_clean();
     failures += test_dev_land_regen_failure_fails_row();

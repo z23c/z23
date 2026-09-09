@@ -2429,27 +2429,73 @@ static int dl_rebase_autoresolve(const struct dl_dirs *d, struct dl_row *row,
     return -1;
 }
 
-/* Rebase the row's tip onto origin/main inside the private landing
- * worktree. Returns 1 rebased, 0 conflict, -1 setup failure.
- *
- * `regen_note` is an OUT parameter, always initialised: it is filled only
- * when a conflict on the regenerated artifacts above was auto-resolved,
- * and stays empty on every other path — so a caller can tell a rebase
- * that added a regeneration commit to the tip from one that did not,
- * without having to re-derive it from git. */
-static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
-                     const char *observed_main, char *why, size_t why_cap,
-                     char *regen_note, size_t regen_note_cap)
+/* Preserve the resolved source while giving the integrated proposal a linear
+ * publication identity. The queue retains the original submitted tip. */
+static bool dl_linear_commit(const struct dl_dirs *d, struct dl_row *row,
+    const char *base, const char *tree, char commit[80])
+{
+    char message[512];
+    (void)snprintf(message, sizeof(message),
+        "Prepare integrated candidate for linear publication\n\n"
+        "Original-Candidate: %s\nIntegrated-Base: %s\nSource-Tree: %s",
+        row->tip, base, tree);
+    const char *allow = dl_allow_unsigned();
+    bool fixture = allow && strcmp(allow, "1") == 0 && dl_stub() != NULL;
+    const char *args[10];
+    size_t n = 0;
+    args[n++] = "commit-tree";
+    if (!fixture) args[n++] = "-S";
+    args[n++] = tree;
+    args[n++] = "-p"; args[n++] = base;
+    args[n++] = "-m"; args[n++] = message;
+    args[n] = NULL;
+    if (dl_git(d->wt, args, commit, 80, DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(commit);
+    char checked[80];
+    return dl_rev_parse(d->wt, commit, checked) && strcmp(commit, checked) == 0;
+}
+
+static bool dl_linearize(const struct dl_dirs *d, struct dl_row *row,
+    const char *base, char *why, size_t why_cap)
+{
+    char range[160], merges[80], tree[80], commit[80], checked[80];
+    (void)snprintf(range, sizeof(range), "%s..%s", base, row->tip);
+    const char *merges_args[] = { "rev-list", "--merges", "--max-count=1", range, NULL };
+    const char *tree_args[] = { "rev-parse", "HEAD^{tree}", NULL };
+    const char *checkout_args[] = { "checkout", "--quiet", "--detach", commit, NULL };
+    (void)snprintf(why, why_cap, "cannot prepare a tree-preserving linear landing candidate");
+    if (dl_git(d->wt, merges_args, merges, sizeof(merges), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(merges);
+    if (!merges[0]) return true;
+    if (dl_git(d->wt, tree_args, tree, sizeof(tree), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(tree);
+    if (!dl_linear_commit(d, row, base, tree, commit) ||
+        dl_git(d->wt, checkout_args, NULL, 0, DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(d->wt, tree_args, checked, sizeof(checked), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(checked);
+    if (strcmp(tree, checked) != 0) return false;
+    char note[320];
+    (void)snprintf(note, sizeof(note),
+        "prepared linear candidate %s from %s with exact tree %s\n",
+        commit, row->tip, tree);
+    dl_log(row, note);
+    return true;
+}
+
+/* Resolve and check out the exact submitted tip in the private worktree. */
+static bool dl_tip_checkout(const struct dl_dirs *d, struct dl_row *row,
+                            const char *observed_main, bool *integrated,
+                            char *why, size_t why_cap)
 {
     char buf[DL_GIT_CAP];
+    const char *ancestor_args[] = { "merge-base", "--is-ancestor",
+                                    observed_main, row->tip, NULL };
     const char *checkout_args[] = { "checkout", "--quiet", "--force",
                                     "--detach", row->tip, NULL };
-    const char *rebase_args[] = { "rebase", observed_main, NULL };
-    const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U",
-                                    NULL };
-    const char *abort_args[] = { "rebase", "--abort", NULL };
-    if (regen_note && regen_note_cap)
-        regen_note[0] = '\0';
     if (!dl_rev_parse(d->wt, row->tip, row->local)) {
         /* The tip lives in another checkout: fetch that ONE object rather
          * than every ref the other checkout happens to hold. dl_parse_row
@@ -2463,16 +2509,52 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
         if (!dl_rev_parse(d->wt, row->tip, row->local)) {
             (void)snprintf(why, why_cap,
                            "the landing worktree cannot resolve the tip");
-            return -1;
+            return false;
         }
     }
-    (void)snprintf(row->base, sizeof(row->base), "%s", observed_main);
     if (dl_git(d->wt, checkout_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
         0) {
         (void)snprintf(why, why_cap, "cannot check the tip out for landing");
-        return -1;
+        return false;
     }
-    if (dl_git(d->wt, rebase_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
+    int ancestor = dl_git(d->wt, ancestor_args, buf, sizeof(buf),
+                          DL_GIT_TIMEOUT_MS);
+    if (ancestor != 0 && ancestor != 1) {
+        (void)snprintf(why, why_cap, "cannot establish landing tip ancestry");
+        return false;
+    }
+    *integrated = ancestor == 0;
+    return !*integrated || dl_linearize(d, row, observed_main, why, why_cap);
+}
+
+/* Rebase the row's tip onto origin/main inside the private landing
+ * worktree. Returns 1 prepared, 0 conflict, -1 setup failure.
+ *
+ * `regen_note` is an OUT parameter, always initialised: it is filled only
+ * when a conflict on the regenerated artifacts above was auto-resolved,
+ * and stays empty on every other path — so a caller can tell a rebase
+ * that added a regeneration commit to the tip from one that did not,
+ * without having to re-derive it from git. */
+static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
+                     const char *observed_main, char *why, size_t why_cap,
+                     char *regen_note, size_t regen_note_cap)
+{
+    char buf[DL_GIT_CAP];
+    bool integrated = false;
+    const char *rebase_args[] = { "rebase", observed_main, NULL };
+    const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U",
+                                    NULL };
+    const char *abort_args[] = { "rebase", "--abort", NULL };
+    if (regen_note && regen_note_cap)
+        regen_note[0] = '\0';
+    if (!dl_tip_checkout(d, row, observed_main, &integrated, why, why_cap))
+        return -1;
+    (void)snprintf(row->base, sizeof(row->base), "%s", observed_main);
+    /* Replaying an already-integrated merge discards its resolution and
+     * can reintroduce conflicts from previously published work. Skip only
+     * that replay; preparation and exact proof below remain mandatory. */
+    if (!integrated &&
+        dl_git(d->wt, rebase_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
         0) {
         char paths[DL_GIT_CAP];
         bool seen[DL_REGEN_N] = { false };

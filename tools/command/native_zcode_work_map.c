@@ -153,19 +153,25 @@ static bool map_candidate_metadata(struct json_value *row,
     return ok;
 }
 
-static bool map_task_metadata(struct json_value *row,
-    const char *workspace, const char *datadir, const uint8_t root[32], int64_t now)
+static bool map_task_read(const char *workspace, const uint8_t root[32],
+                          struct vcs_zcode_task_v1 *task)
 {
     uint8_t *wire = NULL, checked[32];
     size_t length = 0;
-    struct vcs_zcode_task_v1 task;
     bool verified = vcs_object_load_raw_bounded(workspace, root,
         VCS_ZCODE_TASK_WIRE_BYTES, &wire, &length) == 0 &&
-        vcs_zcode_task_parse(wire, length, &task) == VCS_ZCODE_DEV_OK &&
-        vcs_zcode_task_root(&task, checked) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_task_parse(wire, length, task) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_task_root(task, checked) == VCS_ZCODE_DEV_OK &&
         memcmp(root, checked, 32) == 0;
     free(wire);
-    if (!verified)
+    return verified;
+}
+
+static bool map_task_metadata(struct json_value *row,
+    const char *workspace, const char *datadir, const uint8_t root[32], int64_t now)
+{
+    struct vcs_zcode_task_v1 task;
+    if (!map_task_read(workspace, root, &task))
         return json_push_kv_str(row, "task_resolution", "unobserved");
     return json_push_kv_str(row, "task_resolution", "verified") &&
         map_root_field(row, "source_root", task.source_root) &&
@@ -209,25 +215,138 @@ static bool map_observation(struct json_value *data, int64_t now)
         json_push_kv_str(data, "task_resolution_scope", "requested_page");
 }
 
+struct map_selection {
+    const char *action_id;
+    size_t node_index;
+};
+
+static bool map_selection_parse(const struct json_value *input, size_t count,
+                                 struct map_selection *selection)
+{
+    const struct json_value *action = json_get(input, "action_id");
+    const struct json_value *node = json_get(input, "node_index");
+    *selection = (struct map_selection){0};
+    if (!action && !node) return true;
+    if (!action || action->type != JSON_STR || !node) return false;
+    selection->action_id = json_get_str(action);
+    uint8_t root[32];
+    return zcl_hex_decode_lower(selection->action_id, root, 32) &&
+        map_page_number(input, "node_index", 0, ZCL_WORK_MAP_MAX_NODES,
+                        &selection->node_index) && selection->node_index < count;
+}
+
+static struct zcl_result map_selected_read(struct node_db *ndb,
+    const char *workspace, const struct zcl_work_map_node *node,
+    const char *action_id, int64_t now, struct db_build_action *action,
+    struct build_fabric_proof_evaluation *evaluation)
+{
+    struct vcs_zcode_task_v1 task;
+    if (!map_task_read(workspace, node->task_root, &task))
+        return ZCL_ERR(-1, "selected task CAS object is unavailable or corrupt");
+    if (now >= task.expires_unix)
+        return ZCL_ERR(-1, "selected task is expired");
+    if (!db_build_action_find(ndb, action_id, action))
+        return ZCL_ERR(-1, "selected action is unavailable");
+    char task_root[65], policy_root[65];
+    zcl_hex_encode(node->task_root, 32, task_root);
+    zcl_hex_encode(task.proof_policy_root, 32, policy_root);
+    return zcl_native_work_map_evaluate(ndb, workspace, task_root,
+        action->candidate_root_sha3, policy_root, action_id, now, evaluation);
+}
+
+static bool map_selected_facts(struct json_value *observed,
+    const struct db_build_action *action,
+    const struct build_fabric_proof_evaluation *evaluation)
+{
+    return json_push_kv_str(observed, "evidence_resolution", "evaluated") &&
+        json_push_kv_str(observed, "action_root", action->action_id) &&
+        json_push_kv_str(observed, "candidate_root", action->candidate_root_sha3) &&
+        json_push_kv_str(observed, "proof_policy_root", action->proof_policy_root_sha3) &&
+        json_push_kv_bool(observed, "policy_satisfied", evaluation->policy_satisfied) &&
+        json_push_kv_int(observed, "valid_receipts", evaluation->valid_receipts) &&
+        json_push_kv_str(observed, "derived_proof_set_root", evaluation->proof_set_root_sha3) &&
+        json_push_kv_str(observed, "proof_set_retention", "unobserved");
+}
+
+static bool map_selected_observation(struct json_value *data,
+    const char *workspace, const char *datadir,
+    const struct zcl_work_map_node *nodes, const struct map_selection *selection,
+    int64_t now)
+{
+    if (!selection->action_id) return true;
+    sqlite3 *db = NULL;
+    struct node_db ndb = {0};
+    struct db_build_action action = {0};
+    struct build_fabric_proof_evaluation evaluation = {0};
+    enum zcl_node_db_ro_status status = ZCL_NODE_DB_RO_NO_DATADIR;
+    if (datadir && datadir[0])
+        status = zcl_native_node_db_open_readonly(datadir, &db, &ndb, NULL, 0);
+    struct zcl_result result = status == ZCL_NODE_DB_RO_OK
+        ? map_selected_read(&ndb, workspace, &nodes[selection->node_index],
+            selection->action_id, now, &action, &evaluation)
+        : ZCL_ERR(-1, "selected evidence ledger is unavailable");
+    zcl_native_node_db_close_readonly(&db, &ndb);
+    struct json_value observed;
+    json_init(&observed); json_set_object(&observed);
+    bool ok = json_push_kv_int(&observed, "node_index", (int64_t)selection->node_index) &&
+        json_push_kv_str(&observed, "observation_scope", "selected_action") &&
+        json_push_kv_int(&observed, "observed_unix", now) &&
+        json_push_kv_bool(&observed, "acceptance_qualified", false);
+    if (result.ok)
+        ok = ok && map_selected_facts(&observed, &action, &evaluation);
+    else
+        ok = ok && json_push_kv_str(&observed, "evidence_resolution", "unavailable") &&
+            json_push_kv_str(&observed, "reason", result.message);
+    ok = ok && json_push_kv(data, "selected_evidence", &observed);
+    json_free(&observed);
+    return ok;
+}
+
+static bool map_page_fit(struct json_value *data, const struct json_value *base,
+    const struct json_value *rows, size_t offset, size_t count)
+{
+    size_t returned = json_size(rows);
+    for (;;) {
+        json_set_object(data);
+        bool ok = true;
+        for (size_t i = 0; ok && i < json_size(base); i++)
+            ok = json_push_kv(data, base->keys[i], &base->children[i]);
+        struct json_value page;
+        json_init(&page); json_set_array(&page);
+        for (size_t i = 0; ok && i < returned; i++)
+            ok = json_push_back(&page, json_at(rows, i));
+        size_t end = offset + returned;
+        ok = ok && json_push_kv_int(data, "returned", (int64_t)returned) &&
+            json_push_kv_int(data, "next_offset", end < count ? (int64_t)end : -1) &&
+            json_push_kv(data, "nodes", &page);
+        json_free(&page);
+        if (!ok) return false;
+        if (json_write(data, NULL, 0) < 4096) return true;
+        if (returned <= 1) return false;
+        returned--;
+    }
+}
+
 static bool map_render(struct zcl_command_reply *reply, const char *root,
                         const char *workspace, const char *datadir,
                         const struct zcl_work_map_node *nodes, size_t count,
-                        size_t offset, size_t limit)
+                        size_t offset, size_t limit, const struct map_selection *selection)
 {
     int64_t now = platform_time_wall_unix();
-    struct json_value rows;
+    struct json_value rows, base;
     json_init(&rows); json_set_array(&rows);
+    json_init(&base); json_set_object(&base);
     size_t end = offset + limit;
     if (end > count) end = count;
     bool ok = true;
     for (size_t i = offset; ok && i < end; i++)
         ok = map_row(&rows, &nodes[i], i, workspace, datadir, now);
-    ok = ok && json_push_kv_str(&reply->data, "map_root", root) &&
-        json_push_kv_int(&reply->data, "total", (int64_t)count) &&
-        json_push_kv_int(&reply->data, "returned", (int64_t)(end - offset)) &&
-        json_push_kv_int(&reply->data, "next_offset", end < count ? (int64_t)end : -1) &&
-        map_observation(&reply->data, now) &&
-        json_push_kv(&reply->data, "nodes", &rows);
+    ok = ok && json_push_kv_str(&base, "map_root", root) &&
+        json_push_kv_int(&base, "total", (int64_t)count) &&
+        map_observation(&base, now) &&
+        map_selected_observation(&base, workspace, datadir, nodes, selection, now) &&
+        map_page_fit(&reply->data, &base, &rows, offset, count);
+    json_free(&base);
     json_free(&rows);
     return ok;
 }
@@ -277,7 +396,14 @@ void zcl_native_handle_zcode_work_map(
         map_fail(reply, "WORK_MAP_OFFSET", "offset exceeds the complete map");
         return;
     }
+    struct map_selection selection;
+    if (!map_selection_parse(request->input, count, &selection)) {
+        map_fail(reply, "WORK_MAP_INPUT", "action_id and in-range node_index must be supplied together");
+        return;
+    }
     if (!map_render(reply, root, workspace, datadir,
-                    nodes, count, offset, limit))
+                    nodes, count, offset, limit, &selection)) {
+        json_set_object(&reply->data);
         map_fail(reply, "WORK_MAP_OUTPUT", "bounded map page could not be rendered");
+    }
 }

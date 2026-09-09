@@ -20,6 +20,7 @@
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "platform/time_compat.h"
+#include "platform/path_replace.h"
 #include "command/native_command.h"
 #include "command/native_zcode_work_map.h"
 #include "controllers/api_controller.h"
@@ -2470,15 +2471,13 @@ static int bf_proof_incomplete_receipts(struct node_db *ndb, const char *dir,
     return failures;
 }
 
-static int bf_proof_missing_conflict_object(struct node_db *ndb,
+static int bf_proof_missing_object(struct node_db *ndb,
     const char *dir, const char *action_id, int64_t now,
-    const struct vcs_zcode_work_receipt_v1 *failed)
+    const uint8_t root[32], const char *error)
 {
     int failures = 0;
     TEST("build_fabric: unavailable conflicting receipt cannot qualify a proof") {
-        uint8_t root[32];
         char hex[65], path[1024], backup[1040];
-        ASSERT_EQ(vcs_zcode_work_receipt_id(failed, root), VCS_ZCODE_DEV_OK);
         zcl_hex_encode(root, 32, hex);
         int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", dir, hex, hex + 2);
         ASSERT(n > 0 && (size_t)n < sizeof(path));
@@ -2495,11 +2494,11 @@ static int bf_proof_missing_conflict_object(struct node_db *ndb,
                 : mode == 1
                     ? build_fabric_proof_materialize(ndb, dir, action_id, now, &evaluation)
                     : build_fabric_proof_evaluate(ndb, dir, action_id, now, &evaluation);
-            int restored = rename(backup, path);
+            int restored = platform_path_replace(backup, path);
             ASSERT_EQ(restored, 0);
             ASSERT(absent && vcs_object_has(dir, root));
             ASSERT(!result.ok);
-            ASSERT_STR_EQ(result.message, "proof receipt CAS object is unavailable");
+            ASSERT_STR_EQ(result.message, error);
             ASSERT(!evaluation.policy_satisfied);
             ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
             ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
@@ -2510,6 +2509,111 @@ static int bf_proof_missing_conflict_object(struct node_db *ndb,
         PASS();
     } _test_next:;
     return failures;
+}
+
+static int bf_proof_corrupt_receipt(struct node_db *ndb,
+    const char *dir, const char *action_id, int64_t now,
+    const struct vcs_zcode_work_receipt_v1 *failed, bool wrong_root)
+{
+    int failures = 0;
+    TEST("build_fabric: corrupt conflicting receipt cannot qualify a proof") {
+        struct vcs_zcode_work_receipt_v1 altered = *failed, parsed;
+        uint8_t root[32], checked[32], wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+        char hex[65], path[1024], backup[1040];
+        ASSERT_EQ(vcs_zcode_work_receipt_id(failed, root), VCS_ZCODE_DEV_OK);
+        if (wrong_root) altered.output_root[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&altered, wire), VCS_ZCODE_DEV_OK);
+        if (!wrong_root) wire[0] ^= 1;
+        int parsed_result = vcs_zcode_work_receipt_parse(wire, sizeof(wire), &parsed);
+        ASSERT_EQ(parsed_result == VCS_ZCODE_DEV_OK, wrong_root);
+        if (wrong_root) {
+            ASSERT_EQ(vcs_zcode_work_receipt_id(&parsed, checked), VCS_ZCODE_DEV_OK);
+            ASSERT(memcmp(root, checked, 32) != 0);
+        }
+        zcl_hex_encode(root, 32, hex);
+        int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", dir, hex, hex + 2);
+        ASSERT(n > 0 && (size_t)n < sizeof(path));
+        n = snprintf(backup, sizeof(backup), "%s.hidden", path);
+        ASSERT(n > 0 && (size_t)n < sizeof(backup));
+        int changes = sqlite3_total_changes(ndb->db);
+        for (unsigned mode = 0; mode < 3; mode++) {
+            ASSERT_EQ(rename(path, backup), 0);
+            FILE *file = fopen(path, "wb");
+            bool written = false;
+            if (file) {
+                size_t bytes = fwrite(wire, 1, sizeof(wire), file);
+                int closed = fclose(file);
+                written = bytes == sizeof(wire) && closed == 0;
+            }
+            struct build_fabric_proof_evaluation evaluation = {0};
+            struct zcl_result result = mode == 0
+                ? build_fabric_proof_evaluate_readonly(ndb, dir, action_id, now, &evaluation)
+                : mode == 1
+                    ? build_fabric_proof_materialize(ndb, dir, action_id, now, &evaluation)
+                    : build_fabric_proof_evaluate(ndb, dir, action_id, now, &evaluation);
+            int restored = platform_path_replace(backup, path);
+            ASSERT_EQ(restored, 0);
+            ASSERT(written);
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, "proof receipt CAS object is corrupt");
+            ASSERT(!evaluation.policy_satisfied);
+            ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+            result = build_fabric_proof_evaluate_readonly(ndb, dir, action_id, now, &evaluation);
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, "proof_observation_conflict");
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int bf_proof_missing_conflict_object(struct node_db *ndb,
+    const char *dir, const char *action_id, int64_t now,
+    const struct vcs_zcode_work_receipt_v1 *failed)
+{
+    int failures = 0;
+    TEST("build_fabric: conflicting receipt dependencies retain complete coverage") {
+        uint8_t root[32], checked[32], *wire = NULL;
+        size_t wire_len = 0;
+        struct vcs_build_artifact_manifest_v1 manifest;
+        ASSERT_EQ(vcs_zcode_work_receipt_id(failed, root), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_object_load_raw_bounded(dir, failed->output_root,
+            VCS_BUILD_ARTIFACT_WIRE_MAX, &wire, &wire_len), 0);
+        bool parsed = vcs_build_artifact_manifest_v1_parse(wire, wire_len, &manifest);
+        free(wire);
+        ASSERT(parsed);
+        ASSERT(vcs_build_artifact_manifest_v1_root(&manifest, checked));
+        ASSERT(memcmp(checked, failed->output_root, 32) == 0);
+        ASSERT_EQ(manifest.chunk_count, 1);
+        failures += bf_proof_missing_object(ndb, dir, action_id, now, root,
+            "proof receipt CAS object is unavailable");
+        failures += bf_proof_missing_object(ndb, dir, action_id, now,
+            failed->output_root, "proof package evidence is unavailable");
+        failures += bf_proof_missing_object(ndb, dir, action_id, now,
+            manifest.chunk_sha3[0], "proof package evidence is unavailable");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool bf_package_action(struct node_db *ndb, struct db_build_job *job,
+    struct db_build_action *action)
+{
+    (void)snprintf(action->kind, sizeof(action->kind), "%s", VCS_BUILD_ACTION_KIND_PACKAGE_V1);
+    (void)snprintf(job->profile, sizeof(job->profile), "%s", VCS_BUILD_PACKAGE_PROFILE_QUICK_V1);
+    (void)snprintf(action->virtual_workdir, sizeof(action->virtual_workdir), "%s", VCS_BUILD_PACKAGE_VIRTUAL_ROOT_V1);
+    (void)snprintf(action->declared_outputs, sizeof(action->declared_outputs), "%s", VCS_BUILD_PACKAGE_OUTPUT_V1);
+    (void)snprintf(action->resource_policy, sizeof(action->resource_policy), "%s", VCS_BUILD_PACKAGE_RESOURCE_POLICY_V1);
+    uint8_t flags[32], environment[32];
+    if (!vcs_build_action_v1_fixed_flags_root_for_kind(action->kind, flags) ||
+        !vcs_build_action_v1_fixed_environment_root_for_kind(action->kind, environment))
+        return false;
+    zcl_hex_encode(flags, 32, action->flags_sha3);
+    zcl_hex_encode(environment, 32, action->environment_sha3);
+    action->sequence++;
+    return bf_canonicalize(job, action) && db_build_job_save(ndb, job) &&
+        db_build_action_save(ndb, action);
 }
 
 static int test_bf_package_proof_conflicts(
@@ -2533,30 +2637,7 @@ static int test_bf_package_proof_conflicts(
         transaction_open = true;
         struct db_build_job package_job = *job;
         struct db_build_action package_action = *action;
-        (void)snprintf(package_action.kind, sizeof(package_action.kind), "%s",
-                       VCS_BUILD_ACTION_KIND_PACKAGE_V1);
-        (void)snprintf(package_job.profile, sizeof(package_job.profile), "%s",
-                       VCS_BUILD_PACKAGE_PROFILE_QUICK_V1);
-        (void)snprintf(package_action.virtual_workdir,
-                       sizeof(package_action.virtual_workdir), "%s",
-                       VCS_BUILD_PACKAGE_VIRTUAL_ROOT_V1);
-        (void)snprintf(package_action.declared_outputs,
-                       sizeof(package_action.declared_outputs), "%s",
-                       VCS_BUILD_PACKAGE_OUTPUT_V1);
-        (void)snprintf(package_action.resource_policy,
-                       sizeof(package_action.resource_policy), "%s",
-                       VCS_BUILD_PACKAGE_RESOURCE_POLICY_V1);
-        uint8_t flags[32], environment[32];
-        ASSERT(vcs_build_action_v1_fixed_flags_root_for_kind(
-            package_action.kind, flags));
-        ASSERT(vcs_build_action_v1_fixed_environment_root_for_kind(
-            package_action.kind, environment));
-        zcl_hex_encode(flags, 32, package_action.flags_sha3);
-        zcl_hex_encode(environment, 32, package_action.environment_sha3);
-        package_action.sequence++;
-        ASSERT(bf_canonicalize(&package_job, &package_action));
-        ASSERT(db_build_job_save(ndb, &package_job));
-        ASSERT(db_build_action_save(ndb, &package_action));
+        ASSERT(bf_package_action(ndb, &package_job, &package_action));
         struct vcs_zcode_work_receipt_v1 passed = *work;
         ASSERT(zcl_hex_decode_lower(
             package_action.action_id, passed.action_root, 32));
@@ -2608,6 +2689,10 @@ static int test_bf_package_proof_conflicts(
         if (scenario == 0) {
             failures += bf_proof_missing_conflict_object(
                 ndb, dir, package_action.action_id, now, &failed);
+            failures += bf_proof_corrupt_receipt(
+                ndb, dir, package_action.action_id, now, &failed, false);
+            failures += bf_proof_corrupt_receipt(
+                ndb, dir, package_action.action_id, now, &failed, true);
             failures += bf_proof_incomplete_receipts(
                 ndb, dir, package_action.action_id, now, &passed);
         }
@@ -2639,6 +2724,94 @@ static bool bf_map_populate_task(struct node_db *ndb, const char *dir,
         if (!db_build_action_save(ndb, &extra)) return false;
     }
     return true;
+}
+
+static int test_bf_map_selected_action(struct node_db *ndb,
+    struct json_value *input, const struct db_build_action *action, bool qualified)
+{
+    int failures = 0;
+    TEST("work map: selected action exposes exact proof observations without credit") {
+        ASSERT(json_push_kv_str(input, "action_id", action->action_id));
+        ASSERT(json_push_kv_int(input, "node_index", 2));
+        struct zcl_command_request request = { .input = input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        int changes = sqlite3_total_changes(ndb->db);
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *observed = json_get(&reply.data, "selected_evidence");
+        ASSERT(observed != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(observed, "evidence_resolution")), "evaluated");
+        ASSERT_STR_EQ(json_get_str(json_get(observed, "action_root")), action->action_id);
+        ASSERT_STR_EQ(json_get_str(json_get(observed, "candidate_root")), action->candidate_root_sha3);
+        ASSERT_STR_EQ(json_get_str(json_get(observed, "proof_policy_root")), action->proof_policy_root_sha3);
+        ASSERT_STR_EQ(json_get_str(json_get(observed, "observation_scope")), "selected_action");
+        ASSERT_EQ(json_get_bool(json_get(observed, "policy_satisfied")), qualified);
+        if (qualified) {
+            ASSERT_EQ(strlen(json_get_str(json_get(observed, "derived_proof_set_root"))), 64);
+            ASSERT(json_get_int(json_get(observed, "valid_receipts")) > 0);
+        }
+        ASSERT(!json_get_bool(json_get(observed, "acceptance_qualified")));
+        const struct json_value *row = json_at(json_get(&reply.data, "nodes"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+        ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bf_map_traversal(const char *dir, const char *ledger, const char *root,
+    const struct db_build_action *action, size_t total)
+{
+    int failures = 0;
+    TEST("work map: byte-limited continuation visits every node exactly once") {
+        size_t visited = 0;
+        while (visited < total) {
+            struct json_value input;
+            json_init(&input); json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, "workspace", dir));
+            ASSERT(json_push_kv_str(&input, "proof_datadir", ledger));
+            ASSERT(json_push_kv_str(&input, "map_root", root));
+            if (action) {
+                ASSERT(json_push_kv_str(&input, "action_id", action->action_id));
+                ASSERT(json_push_kv_int(&input, "node_index", 2));
+            }
+            ASSERT(json_push_kv_int(&input, "offset", (int64_t)visited));
+            struct zcl_command_request request = { .input = &input };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+            zcl_native_handle_zcode_work_map(&request, &reply);
+            json_free(&input);
+            ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+            ASSERT(json_write(&reply.data, NULL, 0) < 4096);
+            const struct json_value *rows = json_get(&reply.data, "nodes");
+            size_t returned = json_size(rows);
+            ASSERT(returned > 0 && returned <= 4 && returned <= total - visited);
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), (int64_t)returned);
+            for (size_t i = 0; i < returned; i++) {
+                const struct json_value *row = json_at(rows, i);
+                ASSERT_EQ(json_get_int(json_get(row, "index")), (int64_t)(visited + i));
+                ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+            }
+            visited += returned;
+            ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")),
+                      visited == total ? -1 : (int64_t)visited);
+            const struct json_value *selected = json_get(&reply.data, "selected_evidence");
+            if (action) {
+                ASSERT_STR_EQ(json_get_str(json_get(selected, "action_root")), action->action_id);
+                ASSERT(!json_get_bool(json_get(selected, "acceptance_qualified")));
+                ASSERT_STR_EQ(json_get_str(json_get(selected, "evidence_resolution")), "evaluated");
+                if (total == ZCL_WORK_MAP_MAX_NODES) {
+                    ASSERT(json_get_bool(json_get(selected, "policy_satisfied")));
+                    ASSERT_EQ(strlen(json_get_str(json_get(selected, "derived_proof_set_root"))), 64);
+                }
+            } else ASSERT(selected == NULL);
+            zcl_command_reply_free(&reply);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_bf_map_candidate_page(struct node_db *ndb, const char *dir,
@@ -2690,6 +2863,7 @@ static int test_bf_map_candidate_page(struct node_db *ndb, const char *dir,
         ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
         ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
         zcl_command_reply_free(&reply);
+        failures += test_bf_map_selected_action(ndb, &input, action, false);
         /* Candidate discovery must expose truncation without pretending the
          * displayed index roots are verified CAS candidates. */
         for (unsigned i = 0; i < 2; i++) {
@@ -2719,13 +2893,35 @@ static int test_bf_map_candidate_page(struct node_db *ndb, const char *dir,
         ASSERT(json_push_kv_str(&input, "workspace", dir));
         ASSERT(json_push_kv_str(&input, "proof_datadir", dir));
         ASSERT(json_push_kv_str(&input, "map_root", hex));
+        ASSERT(json_push_kv_str(&input, "action_id", action->action_id));
+        ASSERT(json_push_kv_int(&input, "node_index", 2));
         zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
         zcl_native_handle_zcode_work_map(&request, &reply);
         ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
-        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 4);
+        int64_t returned = json_get_int(json_get(&reply.data, "returned"));
+        ASSERT(returned > 0 && returned <= 4);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")),
+                  returned == 4 ? -1 : returned);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&reply.data,
+            "selected_evidence"), "evidence_resolution")), "evaluated");
         ASSERT(json_write(&reply.data, NULL, 0) < 4096);
         zcl_command_reply_free(&reply);
+        /* Selection is independent of the displayed page. */
+        ASSERT(json_push_kv_int(&input, "offset", 0));
+        ASSERT(json_push_kv_int(&input, "limit", 1));
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 1);
+        const struct json_value *selected = json_get(&reply.data, "selected_evidence");
+        ASSERT_EQ(json_get_int(json_get(selected, "node_index")), 2);
+        ASSERT_STR_EQ(json_get_str(json_get(selected, "action_root")), action->action_id);
+        ASSERT(!json_get_bool(json_get(selected, "acceptance_qualified")));
+        row = json_at(json_get(&reply.data, "nodes"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+        zcl_command_reply_free(&reply);
         json_free(&input);
+        failures += test_bf_map_traversal(dir, dir, hex, action, 4);
         /* Deliberately corrupt one isolated fixture row after a valid first
          * successor. The page must not publish that successful prefix. */
         ASSERT(node_db_exec(ndb,
@@ -2755,6 +2951,156 @@ static int test_bf_map_candidate_page(struct node_db *ndb, const char *dir,
     return failures;
 }
 
+static bool bf_map_selection_input(struct json_value *input, const char *workspace,
+    const char *ledger, const char *root, const char *expired_root,
+    const struct db_build_action *action, unsigned scenario)
+{
+    bool ok = json_push_kv_str(input, "workspace", workspace) &&
+        json_push_kv_str(input, "map_root", scenario == 6 ? expired_root : root) &&
+        json_push_kv_str(input, "proof_datadir", scenario == 2 ? "" : ledger) &&
+        json_push_kv_str(input, "action_id", scenario == 3
+            ? "0000000000000000000000000000000000000000000000000000000000000000"
+            : action->action_id);
+    if (scenario == 4)
+        return ok && json_push_kv_real(input, "node_index", 2.5);
+    if (scenario == 0) return ok;
+    return ok && json_push_kv_int(input, "node_index",
+        scenario == 1 ? 0 : scenario == 5 ? 3 : 2);
+}
+
+static int test_bf_map_selection_refusals(const char *workspace, const char *ledger,
+    const char *root, const char *expired_root, const struct db_build_action *action)
+{
+    int failures = 0;
+    TEST("work map: malformed selections and unavailable identities never expose positive facts") {
+        for (unsigned scenario = 0; scenario < 7; scenario++) {
+            struct json_value input;
+            json_init(&input); json_set_object(&input);
+            ASSERT(bf_map_selection_input(&input, workspace, ledger, root,
+                expired_root, action, scenario));
+            struct zcl_command_request request = { .input = &input };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+            zcl_native_handle_zcode_work_map(&request, &reply);
+            json_free(&input);
+            const struct json_value *selected = json_get(&reply.data, "selected_evidence");
+            if (scenario == 0 || scenario == 4 || scenario == 5) {
+                ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+                ASSERT(selected == NULL);
+            } else {
+                ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+                ASSERT_STR_EQ(json_get_str(json_get(selected, "evidence_resolution")), "unavailable");
+                ASSERT_STR_EQ(json_get_str(json_get(selected, "reason")), scenario == 1
+                    ? "map evidence action does not bind the requested identity"
+                    : scenario == 2 ? "selected evidence ledger is unavailable"
+                    : scenario == 3 ? "selected action is unavailable"
+                    : "selected task is expired");
+                ASSERT(!json_get_bool(json_get(selected, "acceptance_qualified")));
+                ASSERT(json_get(selected, "policy_satisfied") == NULL);
+                ASSERT(json_get(selected, "derived_proof_set_root") == NULL);
+            }
+            zcl_command_reply_free(&reply);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bf_map_maximum(struct node_db *ndb, const char *workspace,
+    const char *ledger, const struct zcl_work_map_node initial[3],
+    const struct vcs_zcode_task_v1 *task, const struct db_build_action *action)
+{
+    int failures = 0;
+    TEST("work map: maximum admitted graph preserves complete byte-bounded pages") {
+        struct zcl_work_map_node nodes[ZCL_WORK_MAP_MAX_NODES] = {0};
+        memcpy(nodes, initial, 3 * sizeof(*nodes));
+        for (size_t i = 3; i < ZCL_WORK_MAP_MAX_NODES; i++) {
+            nodes[i].kind = ZCL_WORK_MAP_LOOP;
+            nodes[i].parent = 1;
+            sha3_256((const uint8_t *)&i, sizeof(i), nodes[i].task_root);
+        }
+        for (size_t i = 3; i < 6; i++)
+            ASSERT(bf_map_populate_task(ndb, workspace, &nodes[i], task, action,
+                                       (uint8_t)(0xb0 + 2 * i)));
+        for (size_t i = 2; i < 6; i++) {
+            nodes[i].dependency_count = ZCL_WORK_MAP_MAX_DEPENDENCIES;
+            for (size_t d = 0; d < ZCL_WORK_MAP_MAX_DEPENDENCIES; d++)
+                nodes[i].dependencies[d] = (uint16_t)(180 + d);
+        }
+        uint8_t wire[ZCL_WORK_MAP_WIRE_MAX], root[32];
+        size_t length = 0;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, ZCL_WORK_MAP_MAX_NODES,
+            wire, sizeof(wire), &length), ZCL_WORK_MAP_OK);
+        sha3_256(wire, length, root);
+        ASSERT(vcs_object_put_addressed(workspace, root, wire, length));
+        char hex[65];
+        zcl_hex_encode(root, 32, hex);
+        failures += test_bf_map_traversal(workspace, ledger, hex, action, ZCL_WORK_MAP_MAX_NODES);
+        failures += test_bf_map_traversal(workspace, ledger, hex, NULL, ZCL_WORK_MAP_MAX_NODES);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bf_map_qualified(const char *workspace,
+    const struct test_accepted_work_fixture *fixture,
+    const struct db_build_job *job, const struct db_build_action *action,
+    const struct db_build_worker *worker,
+    const struct vcs_zcode_work_receipt_v1 *work, const struct db_build_receipt *row)
+{
+    int failures = 0;
+    struct node_db ndb = {0};
+    char dir[256] = "", path[320];
+    TEST("work map: qualified signed package observation remains separate from completion") {
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path), "map_qualified"));
+        ASSERT(db_build_worker_save(&ndb, worker));
+        struct db_build_job package_job = *job;
+        struct db_build_action package_action = *action;
+        ASSERT(bf_package_action(&ndb, &package_job, &package_action));
+        struct vcs_zcode_work_receipt_v1 passed = *work;
+        ASSERT(zcl_hex_decode_lower(package_action.action_id, passed.action_root, 32));
+        ASSERT(bf_package_conflict_receipt(&ndb, workspace, fixture,
+            &package_action, &passed, row, false).ok);
+        struct zcl_work_map_node nodes[3] = {
+            { .kind = ZCL_WORK_MAP_MILESTONE, .parent = ZCL_WORK_MAP_NO_PARENT },
+            { .kind = ZCL_WORK_MAP_FEATURE, .parent = 0 },
+            { .kind = ZCL_WORK_MAP_LOOP, .parent = 1 },
+        };
+        ASSERT(bf_map_populate_task(&ndb, workspace, &nodes[0], &fixture->accepted.task, &package_action, 0xa1));
+        ASSERT(bf_map_populate_task(&ndb, workspace, &nodes[1], &fixture->accepted.task, &package_action, 0xa3));
+        memcpy(nodes[2].task_root, fixture->accepted.task_root, 32);
+        uint8_t wire[256], root[32];
+        size_t length = 0;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, 3, wire, sizeof(wire), &length), ZCL_WORK_MAP_OK);
+        sha3_256(wire, length, root);
+        ASSERT(vcs_object_put_addressed(workspace, root, wire, length));
+        char hex[65];
+        zcl_hex_encode(root, 32, hex);
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", workspace));
+        ASSERT(json_push_kv_str(&input, "proof_datadir", dir));
+        ASSERT(json_push_kv_str(&input, "map_root", hex));
+        failures += test_bf_map_selected_action(&ndb, &input, &package_action, true);
+        json_free(&input);
+        failures += test_bf_map_maximum(&ndb, workspace, dir, nodes,
+            &fixture->accepted.task, &package_action);
+        struct vcs_zcode_task_v1 expired = fixture->accepted.task;
+        expired.expires_unix = 1;
+        ASSERT(bf_map_populate_task(&ndb, workspace, &nodes[2], &expired, &package_action, 0xe1));
+        ASSERT_EQ(zcl_work_map_serialize(nodes, 3, wire, sizeof(wire), &length), ZCL_WORK_MAP_OK);
+        sha3_256(wire, length, root);
+        ASSERT(vcs_object_put_addressed(workspace, root, wire, length));
+        char expired_hex[65];
+        zcl_hex_encode(root, 32, expired_hex);
+        failures += test_bf_map_selection_refusals(workspace, dir, hex, expired_hex, &package_action);
+        PASS();
+    } _test_next:;
+    if (ndb.db) node_db_close(&ndb);
+    if (dir[0]) test_rm_rf(dir);
+    return failures;
+}
+
 static int test_bf_proof_materialization(void)
 {
     int failures = 0;
@@ -2764,7 +3110,7 @@ static int test_bf_proof_materialization(void)
         ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path),
                        "proof_materialize"));
         ASSERT(vcs_object_store_init(dir));
-        int64_t now = 2000;
+        int64_t now = platform_time_wall_unix();
         static const uint8_t source[] = "proof-materialization-source";
         uint8_t source_root[32];
         sha3_256(source, sizeof(source) - 1u, source_root);
@@ -2974,15 +3320,19 @@ static int test_bf_proof_materialization(void)
         ASSERT(db_build_receipt_save(&ndb, &row));
         db_changes = sqlite3_total_changes(ndb.db);
         memset(&readonly, 0, sizeof(readonly));
-        ASSERT(build_fabric_proof_evaluate_readonly(
-            &ndb, dir, action.action_id, now, &readonly).ok);
+        struct zcl_result corrupt_read = build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &readonly);
+        ASSERT(!corrupt_read.ok);
+        ASSERT_STR_EQ(corrupt_read.message, "proof receipt CAS object is corrupt");
         ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
         ASSERT_EQ(readonly.valid_receipts, 0);
         ASSERT(readonly.proof_set_root_sha3[0] == '\0');
         struct build_fabric_proof_evaluation refused_materialization = {0};
-        ASSERT(build_fabric_proof_materialize(
+        struct zcl_result corrupt_materialization = build_fabric_proof_materialize(
             &ndb, dir, action.action_id, now,
-            &refused_materialization).ok);
+            &refused_materialization);
+        ASSERT(!corrupt_materialization.ok);
+        ASSERT_STR_EQ(corrupt_materialization.message, "proof receipt CAS object is corrupt");
         ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
         ASSERT_EQ(refused_materialization.valid_receipts, 0);
         ASSERT(refused_materialization.proof_set_root_sha3[0] == '\0');
@@ -3109,6 +3459,8 @@ static int test_bf_proof_materialization(void)
         ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
         ASSERT_STR_EQ(observed.trust_state, "QUORUM_MATCHED");
 
+        failures += test_bf_map_qualified(dir, &fixture, &job, &action,
+            &worker, &work, &row);
         struct db_build_receipt filler = row;
         filler.work_receipt_sha3[0] = '\0';
         filler.created_at = now + 1;
