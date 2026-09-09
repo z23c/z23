@@ -821,6 +821,8 @@ REMOTE_COMMAND_CLASS("zcode.passport.verify", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.project.inspect", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.project.init.plan", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.work.context", REMOTE_CLASS_NEVER, "")
+/* Reads caller-selected local workspace and proof-ledger paths. */
+REMOTE_COMMAND_CLASS("zcode.work.map", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.work.preflight", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.project.init.commit", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.project.status", REMOTE_CLASS_NEVER, "")
