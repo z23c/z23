@@ -248,17 +248,29 @@ fi
 
 # ────────────────────────────────────────────────────────────────────
 # C5 — list + sell file via store. Live surface: zmarket_list answers.
-# Per HANDOFF.md the market is a STUB (zmarket_buy parks; no settlement),
-# so the FULL sell-and-receive claim is BLOCKED regardless of liveness.
+# The legacy zmarket_buy/zmarket_offer RPCs remain deliberately contained
+# stubs (they refuse; tests/harness/src/test_file_market.c pins the
+# refusal), but settlement itself SHIPPED as
+# zmarket_purchase_plan/commit/status/retrieve
+# (contexts/market/controllers/src/file_market_controller.c:512-634) and
+# is two-daemon acceptance-proven: make test-market-acceptance (clearnet)
+# and make test-market-onion-acceptance (real onion delivery). The open
+# gap for the FULL store claim is a live REMOTE buyer over the store
+# (ZSLP shop) flow: order-create is POST /store/orders, honored
+# onion-only (core/modules/net/include/net/site_routes.def), and the
+# embedded onion client is GET-only — so remote ordering needs either
+# dynhost POST support (vendor/tor, owner's fork) or a GET-encoded order
+# route beside /market/chunk (sealed core). Both are owner decisions
+# (docs/work/MARKET_ONION_DELIVERY.md item 4).
 # ────────────────────────────────────────────────────────────────────
 if [[ "$NODE_UP" != 1 ]]; then
     set_v 5 "FAIL" "node unreachable" 0
 else
     ML="$(rpc zmarket_list)"
     if printf '%s' "$ML" | grep -qE '"result":[ ]*\['; then
-        set_v 5 "BLOCKED" "zmarket_list answers but market is a STUB (no payment/transfer settlement); proxy via make ci-mvp-gates store_e2e" 0
+        set_v 5 "BLOCKED" "zmarket_list answers; settlement shipped via zmarket_purchase_* (acceptance: make test-market-onion-acceptance) but the store flow's live remote buyer is owner-gated (order-create POST is onion-only, onion client is GET-only); proxy via make ci-mvp-gates store_e2e" 0
     else
-        set_v 5 "BLOCKED" "zmarket_list unreachable; market settlement not wired (HANDOFF.md)" 0
+        set_v 5 "BLOCKED" "zmarket_list unreachable; store live-buyer proof still needs the owner-gated remote order leg" 0
     fi
 fi
 

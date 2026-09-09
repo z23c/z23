@@ -60,8 +60,12 @@ C8 FAIL, shielded-receive surface down => C4 FAIL, node unreachable).
   (receive surface; the funded e2e is `make test-shielded-payment`). If
   `z_gettotalbalance` answers but no z-addr is listed, the live probe reports
   BLOCKED rather than creating one, because `z_getnewaddress` mutates the wallet.
-- **C5** — BLOCKED: `zmarket_list` answers but the market is a stub (no
-  payment/transfer settlement, per `docs/HANDOFF.md`).
+- **C5** — BLOCKED: `zmarket_list` answers; settlement itself shipped as
+  `zmarket_purchase_plan/commit/status/retrieve` (acceptance: `make
+  test-market-acceptance`, `make test-market-onion-acceptance`), but the
+  store flow's live remote buyer is owner-gated: order-create is
+  `POST /store/orders`, honored onion-only, and the embedded onion client
+  is GET-only (`docs/work/MARKET_ONION_DELIVERY.md` item 4).
 - **C6** — BLOCKED to the soak window; the **soak-accrual** line reports
   how far the current continuous uptime has gotten (see below).
 - **C7** — BLOCKED (live kill forbidden by guardrails); surfaces the
