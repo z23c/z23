@@ -84,5 +84,6 @@ FACT_WRITE_API("node_state", node_db_state_set_int,            1)
 FACT_WRITE_API("node_state", node_db_state_delete,             1)
 FACT_WRITE_API("node_state", node_db_runtime_state_set,        1)
 FACT_WRITE_API("node_state", app_runtime_node_db_state_set,    1)
+FACT_WRITE_API("node_state", app_runtime_node_db_state_try_set, 1)
 
 /* clang-format on */

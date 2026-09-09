@@ -36,3 +36,22 @@ the serialized worker for a whole pass; this change lets evidence collection
 avoid that queue, rather than making every database operation preemptible.
 No consensus predicate, wallet acceptance rule, database schema, producer
 authorization, or watchdog threshold changes.
+
+The strict broad run used `make -j12 test-parallel
+TEST_PARALLEL_ARGS="--jobs=12 --no-cache"`: 1,133 groups ran in 272.1 seconds,
+with two failed groups, nine parameter-gated groups and 19 self-skips.
+The writer census identified the new runtime API's missing declaration in
+`fact_store_writers.def`; that declaration is now present. The certificate
+permissions failure came from the host build wrapper imposing umask 077 on
+its child command. The wrapper now preserves the caller's umask for commands
+while keeping its own lock files private. Separate uncached focused reruns
+of `fact_writers` and `acme_selfsigned` each passed one group with zero skips.
+This does not promote the earlier broad run to a pass.
+
+Explicit stress-enabled focused runs also passed without skips:
+`ZCL_STRESS_TESTS=1 make -j12 t-fast ONLY=kill9_recovery` completed its
+UTXO-apply, mint-fold and index-import crash fixtures in 4.7 seconds;
+`ZCL_STRESS_TESTS=1 make -j12 t-fast ONLY=cold_start_sync` completed in
+7.0 seconds. The latter exercises state-machine transitions, not a full
+network synchronization or a real-node boot. The crash fixtures use isolated
+temporary databases, not either canonical host's datadir.
