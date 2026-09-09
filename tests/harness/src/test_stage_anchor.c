@@ -96,10 +96,13 @@ int test_stage_anchor(void)
 {
     printf("\n=== stage_anchor tests ===\n");
     int failures = 0;
+    char fixture_dir[192];
+    test_make_tmpdir(fixture_dir, sizeof(fixture_dir), "stage_anchor", "databases");
 
     /* ── Typed cursor reader distinguishes missing row from schema error ─ */
     {
-        const char *path = "test_stage_cursor_read_contract.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_cursor_read_contract.db", fixture_dir);
         unlink(path);
         sqlite3 *db = NULL;
         SA_CHECK("cursor_read_contract: sqlite open",
@@ -141,7 +144,8 @@ int test_stage_anchor(void)
 
     /* ── ATOMIC advance of multiple behind cursors to the target ──── */
     {
-        const char *path = "test_stage_anchor_advance.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_anchor_advance.db", fixture_dir);
         sqlite3 *db = sa_open(path);
         SA_CHECK("db open", db != NULL);
 
@@ -168,7 +172,8 @@ int test_stage_anchor(void)
 
     /* ── FORWARD-ONLY: a cursor at/above target is NEVER rewound ──── */
     {
-        const char *path = "test_stage_anchor_norewind.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_anchor_norewind.db", fixture_dir);
         sqlite3 *db = sa_open(path);
 
         /* Seed one cursor ABOVE the future target and the rest below it. */
@@ -262,7 +267,8 @@ int test_stage_anchor(void)
 
     /* ── P2: utxo_apply never advances past coins_applied_height ──── */
     {
-        const char *path = "test_stage_anchor_coins_cap.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_anchor_coins_cap.db", fixture_dir);
         sqlite3 *db = sa_open(path);
         SA_CHECK("coins_cap: db open", db != NULL);
 
@@ -318,6 +324,7 @@ int test_stage_anchor(void)
                  !stage_anchor_upstream_cursors_to(NULL, 1, "test", "null", false));
     }
 
+    test_cleanup_tmpdir(fixture_dir);
     if (failures == 0) {
         printf("=== stage_anchor tests: ALL PASS ===\n\n");
     } else {

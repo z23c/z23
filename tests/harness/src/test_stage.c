@@ -119,6 +119,8 @@ int test_stage(void)
 {
     printf("\n=== stage tests ===\n");
     int failures = 0;
+    char fixture_dir[192];
+    test_make_tmpdir(fixture_dir, sizeof(fixture_dir), "stage", "databases");
 
     blocker_module_init();
 
@@ -148,7 +150,8 @@ int test_stage(void)
 
     /* ── ADVANCED commits + survives reopen ──────────────────────── */
     {
-        const char *path = "test_stage_advance.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_advance.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
         STG_CHECK("db open", db != NULL);
@@ -205,7 +208,8 @@ int test_stage(void)
     /* ── BLOCKED leaves cursor untouched, registers a blocker ───── */
     {
         blocker_reset_for_testing();
-        const char *path = "test_stage_blocked.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_blocked.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
 
@@ -229,7 +233,8 @@ int test_stage(void)
 
     /* ── IDLE leaves cursor untouched ─────────────────────────── */
     {
-        const char *path = "test_stage_idle.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_idle.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
 
@@ -248,7 +253,8 @@ int test_stage(void)
 
     /* ── non-monotonic ADVANCED → ERROR + rollback ─────────────── */
     {
-        const char *path = "test_stage_nonmono.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_nonmono.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
 
@@ -271,7 +277,8 @@ int test_stage(void)
 
     /* ── crash-mid-step → rollback ─────────────────────────────── */
     {
-        const char *path = "test_stage_crash.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_crash.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
 
@@ -291,7 +298,8 @@ int test_stage(void)
 
     /* ── stage_set_cursor explicit restore ─────────────────────── */
     {
-        const char *path = "test_stage_restore.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_restore.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
 
@@ -315,7 +323,8 @@ int test_stage(void)
 
     /* ── stage_set_named_cursor exact restore/rewind ───────────── */
     {
-        const char *path = "test_stage_named_restore.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_named_restore.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
 
@@ -345,7 +354,8 @@ int test_stage(void)
 
     /* ── batch pre-commit hook (crash-ordering seam) ─────────────── */
     {
-        const char *path = "test_stage_precommit.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_precommit.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
         STG_CHECK("precommit: db open", db != NULL);
@@ -415,7 +425,8 @@ int test_stage(void)
      * it dirty so a non-advancing drain COMMITs the rewind instead of
      * rolling it back (mirrors stage_run_once's batched shape). */
     {
-        const char *path = "test_stage_batch_cursor.db";
+        char path[256];
+        (void)snprintf(path, sizeof(path), "%s/test_stage_batch_cursor.db", fixture_dir);
         unlink(path);
         sqlite3 *db = open_db_with_schema(path);
         STG_CHECK("batch-cursor: db open", db != NULL);
@@ -505,6 +516,7 @@ int test_stage(void)
 
     blocker_reset_for_testing();
 
+    test_cleanup_tmpdir(fixture_dir);
     if (failures == 0) {
         printf("=== stage tests: ALL PASS ===\n\n");
     } else {
