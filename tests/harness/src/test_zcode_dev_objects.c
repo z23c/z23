@@ -6421,6 +6421,12 @@ static int test_zd_task_index(void)
             json_get(&detail_reply.data, "tasks");
         ASSERT(detail_tasks != NULL);
         const struct json_value *detail_row = json_at(detail_tasks, 0);
+        char acceptance_hex[65];
+        zcl_hex_encode(task_a.acceptance_tests_root, 32, acceptance_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "acceptance_tests_root")), acceptance_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "latest_review_root")), "");
         ASSERT_STR_EQ(json_get_str(json_get(
                           detail_row, "latest_candidate_root")),
                       candidate_root_hex);

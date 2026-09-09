@@ -286,6 +286,10 @@ static void zdev_task_row_detail(
     (void)json_push_kv_str(row, "goal_root", e->goal_root_hex);
     (void)json_push_kv_str(row, "proof_policy_root",
                            e->proof_policy_root_hex);
+    (void)json_push_kv_str(row, "acceptance_tests_root",
+                           e->acceptance_tests_root_hex);
+    (void)json_push_kv_str(row, "latest_review_root",
+                           e->latest_review_root_hex);
     (void)json_push_kv_str(row, "toolchain_capsule_root",
                            e->toolchain_capsule_root_hex);
     zdev_task_row_claimed_paths(row, workspace, e, scope, scope_offset);
