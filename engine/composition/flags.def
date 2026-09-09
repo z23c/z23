@@ -226,7 +226,7 @@ Z23_FLAG("ZCL_BLOCKER_RATE_LIMIT_MS", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_BLOCKER_REMEDY_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_blocker_remedy.c:237")
 Z23_FLAG("ZCL_BLOCK_SCAN_WORKERS", "env_runtime", "-", "-",
-          "first use engine/composition/src/boot_block_file_scan.c:231; documented at docs/BENCHMARKS_LOG.md:28: | 2026-05-24 | 6e0f6a82c | #1 cold import identity | serial 48.9s / default-workers 57....")
+          "first use engine/composition/src/boot_block_file_scan.c:232; documented at docs/BENCHMARKS_LOG.md:28: | 2026-05-24 | 6e0f6a82c | #1 cold import identity | serial 48.9s / default-workers 57....")
 Z23_FLAG("ZCL_BODY_HISTORY_BACKFILL_MODE", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/body_backfill_service.c:76")
 Z23_FLAG("ZCL_BOOTSTRAP_CC", "env_build", "cc", "-",
@@ -2113,7 +2113,7 @@ Z23_FLAG("ZCL_SPECIALISTS_FLOOR", "env_build", "10", "-",
 Z23_FLAG("ZCL_SPECIALISTS_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_specialists.c:511")
 Z23_FLAG("ZCL_SQLITE_CHILD_DB", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_sqlite.c:3071")
+          "undocumented; first use tests/harness/src/test_sqlite.c:3206")
 Z23_FLAG("ZCL_STAGE_STALL_ESCALATE_WINDOWS", "env_runtime", "-", "-",
           "undocumented; first use engine/supervisors/src/staged_sync_supervisor.c:66")
 Z23_FLAG("ZCL_STALE_FACTS_EMIT_BASELINE", "env_build", "0", "-",
