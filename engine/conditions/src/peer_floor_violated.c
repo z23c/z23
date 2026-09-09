@@ -40,9 +40,28 @@ static bool peerless_ok(void)
     return v && v[0] == '1' && v[1] == '\0';
 }
 
+/* Operator-pinned topology (-connect=): the peer set is exactly what the
+ * operator named, seed discovery and rotation are disabled in connman, and
+ * every rung of the remedy ladder below is inert by design. Measuring that
+ * pinned set against the fleet floor (3) pages the operator for their own
+ * explicit configuration — the replay canary's single-oracle wiring fired
+ * this 34 times in 45 minutes with the chain advancing throughout. Same
+ * posture as peerless_ok: the condition does not apply. */
+static _Atomic bool g_connect_only_mode;
+
+void peer_floor_violated_set_connect_only(bool on)
+{
+    atomic_store(&g_connect_only_mode, on);
+}
+
+static bool floor_condition_applies(void)
+{
+    return !peerless_ok() && !atomic_load(&g_connect_only_mode);
+}
+
 static bool detect_peer_floor_violated(void)
 {
-    if (peerless_ok()) {
+    if (!floor_condition_applies()) {
         atomic_store(&g_first_violation_unix, 0);
         return false;
     }
@@ -199,7 +218,7 @@ static enum condition_remedy_result remedy_peer_floor_violated(void)
 static bool witness_peer_floor_violated(int64_t target_at_detect)
 {
     (void)target_at_detect;
-    if (peerless_ok())
+    if (!floor_condition_applies())
         return true;
 
     struct connman *cm = sync_monitor_connman();
@@ -274,6 +293,7 @@ void peer_floor_violated_test_reset(void)
     atomic_store(&g_local_height_at_detect, -1);
     atomic_store(&g_peer_max_at_detect, -1);
     atomic_store(&g_test_remedy_calls, 0);
+    atomic_store(&g_connect_only_mode, false);
 }
 
 int peer_floor_violated_test_remedy_calls(void)

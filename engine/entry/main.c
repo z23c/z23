@@ -59,6 +59,7 @@
 #endif
 #include "session/agent_broker.h"       /* confined metaverse agent + broker modes */
 #include "services/agent_broker_provider.h" /* the broker's real authority, composed pre-fork */
+#include "conditions/peer_floor_violated.h" /* -connect= floor exemption, set beside g_connect_only */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -553,10 +554,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* -connect mode: only connect to specified peers, no seeds */
+    /* -connect mode: only connect to specified peers, no seeds. The peer
+     * floor condition is exempt too: its remedy ladder (seed discovery,
+     * rotation) is inert by design in this mode, so measuring the pinned
+     * set against the fleet floor only accrues false operator_needed
+     * episodes (the replay canary hit 34 in 45 minutes). */
     if (ctx.connect_only) {
         extern bool g_connect_only;
         g_connect_only = true;
+        peer_floor_violated_set_connect_only(true);
     }
 
     printf("z23 starting (datadir=%s)...\n", ctx.datadir);

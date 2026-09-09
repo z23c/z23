@@ -89,6 +89,52 @@ static void cleanup_peer_snapshot_conditions(void)
         sync_set_state(SYNC_IDLE, "test cleanup");
 }
 
+static int run_peer_floor_connect_only_case(void)
+{
+    int failures = 0;
+    /* Operator-pinned topology (-connect=): the fleet floor does not
+     * apply. With the flag set the exact setup that fires the remedy
+     * above must stay quiet; with the flag cleared again the SAME setup
+     * must fire — the exemption is the cause, not a vacuous fixture. */
+    struct fake_clock_peer_snapshot clock;
+    fake_clock_install(&clock, 2500);
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    reset_peer_snapshot_conditions(&cm, &dm, &ms);
+    bool ok = true;
+    register_peer_floor_violated();
+
+    struct p2p_node stuck = {0};
+    stuck.id = 1;
+    stuck.state = PEER_CONNECTED;
+    struct p2p_node *peers[1] = { &stuck };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    peer_floor_violated_set_connect_only(true);
+    condition_engine_tick();
+    fake_clock_set(&clock, 2561);
+    condition_engine_tick();
+    ok = ok && peer_floor_violated_test_remedy_calls() == 0;
+    ok = ok && !stuck.disconnect;
+    PEER_SNAPSHOT_CHECK("peer floor honors connect-only mode", ok);
+
+    /* Control: flag cleared, identical topology — remedy must fire. */
+    peer_floor_violated_test_reset();
+    condition_engine_reset_for_testing();
+    register_peer_floor_violated();
+    condition_engine_tick();
+    fake_clock_set(&clock, 2622);
+    condition_engine_tick();
+    ok = ok && peer_floor_violated_test_remedy_calls() == 1;
+    ok = ok && stuck.disconnect;
+    PEER_SNAPSHOT_CHECK("peer floor fires again once connect-only clears",
+                        ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
 int test_peer_snapshot_conditions(void)
 {
     printf("\n=== peer and snapshot condition tests ===\n");
@@ -204,6 +250,8 @@ int test_peer_snapshot_conditions(void)
         PEER_SNAPSHOT_CHECK("peer floor honors peerless test mode", ok);
         cleanup_peer_snapshot_conditions();
     }
+
+    failures += run_peer_floor_connect_only_case();
 
     {
         struct fake_clock_peer_snapshot clock;

@@ -3,8 +3,12 @@
 #ifndef ZCL_CONDITIONS_PEER_FLOOR_VIOLATED_H
 #define ZCL_CONDITIONS_PEER_FLOOR_VIOLATED_H
 
+#include <stdbool.h>
+
 /* SYMPTOM: outbound healthy peer count stays below PEER_FLOOR_MIN_HEALTHY (3)
- *   for >= PEER_FLOOR_TRIGGER_SECS (60) (unless ZCL_PEERLESS_OK=1).
+ *   for >= PEER_FLOOR_TRIGGER_SECS (60) (unless ZCL_PEERLESS_OK=1 or the
+ *   operator pinned the topology with -connect=, which disables every remedy
+ *   rung in connman, so the condition does not apply there either).
  * REMEDY: if block_source_policy decision=recover — drop stalled outbound +
  *   excess inbound peers, reset addnode backoff, connman_kick_seed_discovery,
  *   kick_local_sync, record WATCHDOG_PEER_FLOOR recovery.
@@ -13,6 +17,11 @@
  *   peers were the only deficit); peers-alone is the old false-ok bug.
  * COND_WARN; poll_secs=5 (backoff 60s, max_attempts 5 -> operator_needed). */
 void register_peer_floor_violated(void);
+
+/* Called once from boot with app_context.connect_only: an operator-pinned
+ * -connect= topology is exempt from the fleet peer floor (see the
+ * floor_condition_applies comment in the .c). */
+void peer_floor_violated_set_connect_only(bool on);
 
 #ifdef ZCL_TESTING
 void peer_floor_violated_test_reset(void);
