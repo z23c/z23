@@ -24,6 +24,8 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
+#include "platform/temp_directory.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
@@ -623,15 +625,28 @@ static bool dlx_queue_outside_home(const char *root)
     return dlx_queue_has_one() && chdir("engine") == 0 && dlx_queue_has_one();
 }
 
+static bool dlx_outside_home(const char *path)
+{
+    const char *home = getenv("HOME");
+    char canonical_home[4096], canonical_path[4096];
+    if (!home || !home[0] ||
+        !platform_directory_canonical_real(home, canonical_home, sizeof(canonical_home)) ||
+        !platform_directory_canonical_real(path, canonical_path, sizeof(canonical_path)))
+        return false;
+    size_t n = strlen(canonical_home);
+    if (n == 1 && canonical_home[0] == '/')
+        return false;
+    return strncmp(canonical_path, canonical_home, n) != 0 ||
+        (canonical_path[n] != '/' && canonical_path[n] != '\0');
+}
+
 static bool dlx_queue_outside_home_child(void)
 {
-    char root[] = "/tmp/z23-land-outside-home-XXXXXX";
-    const char *home = getenv("HOME");
+    char root[PLATFORM_TEMP_PATH_MAX];
     int status = 0;
-    if (!mkdtemp(root))
+    if (!platform_temp_directory_create("z23-land-outside-home-", root, sizeof(root)))
         return false;
-    bool outside = !home || !home[0] ||
-        strncmp(root, home, strlen(home)) != 0;
+    bool outside = dlx_outside_home(root);
     pid_t child = outside ? fork() : -1;
     if (child == 0)
         _exit(dlx_queue_outside_home(root) ? 0 : 1);
