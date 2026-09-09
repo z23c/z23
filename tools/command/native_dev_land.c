@@ -553,7 +553,7 @@ static bool dl_worktree_ok(const char *wt)
             (wt[hlen] == '/' || wt[hlen] == '\0'))
             return true;
     }
-    if (zcl_devagent_checkout_root(".", checkout, sizeof(checkout)) &&
+    if (zcl_devagent_checkout_root(NULL, checkout, sizeof(checkout)) &&
         (slash = strrchr(checkout, '/')) != NULL && slash != checkout) {
         size_t plen = (size_t)(slash - checkout);
         if (strncmp(wt, checkout, plen) == 0 &&

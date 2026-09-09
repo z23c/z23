@@ -587,6 +587,60 @@ static void dlx_submit(struct dlx_call *c, const struct dlx_rig *rig,
     (void)json_push_kv_str(&c->input, "worktree", rig->clone);
 }
 
+static bool dlx_queue_has_one(void)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "status");
+    (void)json_push_kv_bool(&c.input, "json", true);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *rows = dlx_arr(&c, "queued");
+    ok = ok && rows && rows->num_children == 1;
+    dlx_end(&c);
+    return ok;
+}
+
+/* Run only in a child: cwd and fixture environment cannot leak to other cases. */
+static bool dlx_queue_outside_home(const char *root)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (chdir(root) != 0 ||
+        !dlx_write_dep(root, "Makefile", "# fixture\n") ||
+        !dlx_write_dep(root, "engine/composition/commands/root.def", "// fixture\n") ||
+        !dlx_write_dep(root, "tools/dev/test_group_catalog.def", "// fixture\n"))
+        return false;
+    dlx_isolate("outside_home");
+    if (!dlx_rig_make(&rig, "outside_home_rig"))
+        return false;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    dlx_submit(&c, &rig, rig.tip);
+    ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    if (!ok)
+        return false;
+    return dlx_queue_has_one() && chdir("engine") == 0 && dlx_queue_has_one();
+}
+
+static bool dlx_queue_outside_home_child(void)
+{
+    char root[] = "/tmp/z23-land-outside-home-XXXXXX";
+    const char *home = getenv("HOME");
+    int status = 0;
+    if (!mkdtemp(root))
+        return false;
+    bool outside = !home || !home[0] ||
+        strncmp(root, home, strlen(home)) != 0;
+    pid_t child = outside ? fork() : -1;
+    if (child == 0)
+        _exit(dlx_queue_outside_home(root) ? 0 : 1);
+    pid_t waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    int cleanup = test_rm_rf_recursive(root);
+    return outside && child > 0 && waited == child && cleanup == 0 &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 /* origin/main as the bare repo itself reports it. */
 static bool dlx_origin_main(const struct dlx_rig *rig, char out[64])
 {
@@ -1627,6 +1681,11 @@ int test_dev_land(void)
         ASSERT_EQ((long long)dlx_arr(&c, "queued")->num_children, 0);
         dlx_end(&c);
         dlx_restore();
+        PASS();
+    }
+
+    TEST("land: queue survives outside HOME from checkout and nested cwd") {
+        ASSERT(dlx_queue_outside_home_child());
         PASS();
     }
 
