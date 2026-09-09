@@ -11,6 +11,17 @@ Use the **full-binary kill-9 harness** to prove on-disk recovery of a real
 node under `SIGKILL`; use the **sim engine** for fast, hermetic,
 seed-reproducible consensus/boot scenarios.
 
+For the development proof queue (`tools/dev/dev_proof.c`), worker death is
+covered in-process in `tests/harness/src/test_impact_composition.c`:
+requester cancellation and requester hard death (`proof step: requester
+cancellation settles worker; requester death preserves its guard`), and hard
+death of the guard-owning worker itself (`proof step: worker SIGKILL frees
+guards, preserves evidence, admits no completion`). Those tests fork real
+workers, synchronize on a blocking fake-git FIFO seam, and identify the
+guard owner by its published lease pid — no full node and no scenario file.
+The contract they enforce is written out in
+[`DEVELOPING.md`](DEVELOPING.md) §6.
+
 ---
 
 ## Full-binary kill-9 (C7)

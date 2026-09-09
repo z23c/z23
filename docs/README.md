@@ -123,6 +123,9 @@ from a hash, signature, test, or reproduction receipt.
   local grant/revoke store, and `z23 fleet roles list|grant|revoke|check`.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
+- [`CHAOS_HARNESS.md`](CHAOS_HARNESS.md) — the two chaos/kill harnesses (the
+  deterministic sim engine and the full-binary SIGKILL recovery test), and
+  where in-process dev-proof worker-death acceptance lives.
 - [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its
   source definitions, not the generated file.
 - [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl) — generated

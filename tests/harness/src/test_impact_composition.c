@@ -5488,6 +5488,271 @@ static int test_ic_foreground_owner_lifetime(void)
     } _test_next:;
     return failures;
 }
+
+/* Hard death of the guard-owning worker itself: the requester stays alive
+ * while the forked worker named by the published pair lease takes SIGKILL at
+ * its first blocked source check — after claim, with both guards owned and
+ * the request already consumed into the attempt. An unrelated older pair
+ * sits in the same queue the whole time. Every post-condition is observed
+ * into the struct, then asserted one invariant per line; the driver always
+ * reaches its kill backstop and fixture cleanup, whatever fails. */
+struct ic_worker_death_observation {
+    bool ready, guard_busy_during, landing_held_during;
+    bool lease_read, lease_pid_alive;
+    long long worker_pid;
+    char token[192];
+    bool kill_sent, requester_reaped;
+    int requester_exit;
+    int guard_after;
+    bool landing_free_after, worker_gone, lease_intact;
+    bool attempt_request_preserved;
+    int killed_state;
+    bool receipt_absent, retry_refused;
+    char retry_detail[128];
+    bool unrelated_intact, requeued;
+    int requeued_state;
+    int held_consumer;
+    char held_why[64];
+    int first_drain, killed_settled;
+    bool killed_receipt_absent;
+    int second_drain;
+    bool unrelated_failed, leases_empty, attempt_request_preserved_end;
+    int queue_empty;
+    bool retry_admitted;
+    int retry_admitted_state, final_drain, final_state;
+    bool cleaned;
+};
+
+struct ic_worker_death_ctx {
+    struct ic_landing_proof_fixture f;
+    char other_request[4096], other_failure[4096], receipt[4096];
+    char dead_request[4096];
+    int channels[2];
+    pid_t requester;
+};
+
+/* Oldest admissible clocks: queue consumers always prefer pair A, so this
+ * unrelated request is never claimed until pair A has settled. */
+static const char ic_worker_other_body[] =
+    "zcl.dev_proof_request.v1\n"
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+    "2222222222222222222222222222222222222222\n1\n1\n";
+static const char ic_worker_other_leaf[] =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-"
+    "2222222222222222222222222222222222222222";
+
+static bool ic_worker_lease_read(const char *root, char token[192],
+                                 long long *pid_out)
+{
+    char path[4096], text[384];
+    if (snprintf(path, sizeof(path),
+                 "%s/.cache/zcl-dev-proof/leases/"
+                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-"
+                 "1111111111111111111111111111111111111111.lease",
+                 root) >= (int)sizeof(path))
+        return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    size_t size = fread(text, 1, sizeof(text) - 1, file);
+    bool ok = !ferror(file);
+    if (fclose(file) != 0) ok = false;
+    if (!ok || size == 0) return false;
+    text[size] = 0;
+    long long pid = 0, started = 0;
+    if (sscanf(text, "%191s %lld %lld", token, &pid, &started) != 3 ||
+        pid <= 1 || started <= 0)
+        return false;
+    *pid_out = pid;
+    return true;
+}
+
+static bool ic_worker_death_setup(struct ic_worker_death_ctx *c)
+{
+    c->channels[0] = -1;
+    c->channels[1] = -1;
+    c->requester = -1;
+    if (!ic_landing_proof_prepare(&c->f, "worker-hard-death")) return false;
+    char other_rel[4096];
+    snprintf(other_rel, sizeof(other_rel),
+             ".cache/zcl-dev-proof/requests/%s.request",
+             ic_worker_other_leaf);
+    snprintf(c->other_request, sizeof(c->other_request), "%s/%s",
+             c->f.root, other_rel);
+    snprintf(c->other_failure, sizeof(c->other_failure),
+             "%s/.cache/zcl-dev-proof/%s.failed", c->f.root,
+             ic_worker_other_leaf);
+    snprintf(c->receipt, sizeof(c->receipt),
+             "%s/.cache/zcl-dev-proof/receipts/"
+             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-"
+             "1111111111111111111111111111111111111111.receipt", c->f.root);
+    char path[8192];
+    if (!ic_proof_private_write(c->f.root, other_rel,
+                                ic_worker_other_body) ||
+        !ic_landing_blocking_git(c->f.root, c->channels, path))
+        return false;
+    c->requester = ic_foreground_requester(c->f.root, path, c->channels);
+    return c->requester >= 0;
+}
+
+static void ic_worker_death_kill(struct ic_worker_death_ctx *c,
+                                 struct ic_worker_death_observation *o)
+{
+    struct pollfd ready = {.fd = c->channels[0], .events = POLLIN};
+    o->ready = poll(&ready, 1, 10000) == 1 && (ready.revents & POLLIN) != 0;
+    o->guard_busy_during = ic_foreground_guard(c->f.root) == 0;
+    o->landing_held_during = ic_foreground_landing_locked(c->f.step);
+    o->lease_read = ic_worker_lease_read(c->f.root, o->token, &o->worker_pid);
+    o->lease_pid_alive = o->lease_read && o->worker_pid > 1 &&
+        o->worker_pid != (long long)c->requester &&
+        kill((pid_t)o->worker_pid, 0) == 0;
+    if (o->ready && o->lease_pid_alive)
+        o->kill_sent = kill((pid_t)o->worker_pid, SIGKILL) == 0;
+    (void)write(c->channels[1], "done\n", 5);
+    int status = 0;
+    o->requester_reaped = ic_foreground_reap(c->requester, &status);
+    o->requester_exit = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    (void)kill(-c->requester, SIGKILL);
+}
+
+static void ic_worker_death_observe(struct ic_worker_death_ctx *c,
+                                    struct ic_worker_death_observation *o)
+{
+    static const char local[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char base[] = "1111111111111111111111111111111111111111";
+    o->guard_after = ic_foreground_guard(c->f.root);
+    o->landing_free_after = !ic_foreground_landing_locked(c->f.step);
+    o->worker_gone = o->lease_read &&
+        kill((pid_t)o->worker_pid, 0) != 0 && errno == ESRCH;
+    char token_after[192] = {0};
+    long long pid_after = 0;
+    o->lease_intact = o->lease_read &&
+        ic_worker_lease_read(c->f.root, token_after, &pid_after) &&
+        strcmp(token_after, o->token) == 0 && pid_after == o->worker_pid;
+    snprintf(c->dead_request, sizeof(c->dead_request),
+             "%s/.cache/zcl-dev-proof/attempts/%s/request",
+             c->f.root, o->token);
+    o->attempt_request_preserved = o->lease_intact &&
+        ic_bytes_equal(c->dead_request, c->f.request_bytes,
+                       c->f.request_size);
+    struct zcl_dev_proof_status st;
+    memset(&st, 0, sizeof(st));
+    o->killed_state = zcl_dev_proof_status_read(c->f.root, local, base, &st)
+        ? (int)st.state : -1;
+    o->receipt_absent = access(c->receipt, F_OK) != 0;
+    memset(&st, 0, sizeof(st));
+    o->retry_refused = !zcl_dev_proof_retry(c->f.root, local, base, &st);
+    snprintf(o->retry_detail, sizeof(o->retry_detail), "%s", st.detail);
+    o->unrelated_intact = ic_bytes_equal(c->other_request,
+        (const uint8_t *)ic_worker_other_body,
+        sizeof(ic_worker_other_body) - 1);
+}
+
+static void ic_worker_death_recover(struct ic_worker_death_ctx *c,
+                                    struct ic_worker_death_observation *o)
+{
+    static const char local[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char base[] = "1111111111111111111111111111111111111111";
+    struct zcl_dev_proof_status st;
+    memset(&st, 0, sizeof(st));
+    o->requeued = zcl_dev_proof_ensure(c->f.root, local, base, &st);
+    o->requeued_state = (int)st.state;
+    int guard = -1;
+    char why[256] = {0};
+    bool held = zcl_dev_proof_execution_acquire(c->f.root, &guard, why,
+                                                sizeof(why)) == 1;
+    why[0] = 0;
+    o->held_consumer = held
+        ? zcl_dev_proof_queue_run_next(c->f.root, why, sizeof(why)) : -1;
+    snprintf(o->held_why, sizeof(o->held_why), "%s", why);
+    if (held) zcl_dev_proof_execution_release(guard);
+    why[0] = 0;
+    o->first_drain = zcl_dev_proof_queue_run_next(c->f.root, why,
+                                                  sizeof(why));
+    memset(&st, 0, sizeof(st));
+    o->killed_settled = zcl_dev_proof_status_read(c->f.root, local, base,
+                                                  &st)
+        ? (int)st.state : -1;
+    o->killed_receipt_absent = access(c->receipt, F_OK) != 0;
+    o->second_drain = zcl_dev_proof_queue_run_next(c->f.root, why,
+                                                   sizeof(why));
+    o->unrelated_failed = access(c->other_failure, F_OK) == 0;
+    o->queue_empty = zcl_dev_proof_queue_run_next(c->f.root, why,
+                                                  sizeof(why));
+    o->leases_empty = ic_landing_state_empty(c->f.root, "leases");
+    o->attempt_request_preserved_end =
+        ic_bytes_equal(c->dead_request, c->f.request_bytes,
+                       c->f.request_size);
+    memset(&st, 0, sizeof(st));
+    o->retry_admitted = zcl_dev_proof_retry(c->f.root, local, base, &st);
+    o->retry_admitted_state = (int)st.state;
+    o->final_drain = zcl_dev_proof_queue_run_next(c->f.root, why,
+                                                  sizeof(why));
+    memset(&st, 0, sizeof(st));
+    o->final_state = zcl_dev_proof_status_read(c->f.root, local, base, &st)
+        ? (int)st.state : -1;
+}
+
+static void ic_worker_hard_death(struct ic_worker_death_observation *o)
+{
+    struct ic_worker_death_ctx c;
+    memset(&c, 0, sizeof(c));
+    bool live = ic_worker_death_setup(&c);
+    if (live) {
+        ic_worker_death_kill(&c, o);
+        ic_worker_death_observe(&c, o);
+        ic_worker_death_recover(&c, o);
+    }
+    if (c.requester >= 0) (void)kill(-c.requester, SIGKILL);
+    if (c.channels[0] >= 0) (void)close(c.channels[0]);
+    if (c.channels[1] >= 0) (void)close(c.channels[1]);
+    o->cleaned = live && test_rm_rf_recursive(c.f.parent) == 0;
+}
+
+static int test_ic_worker_hard_death_containment(void)
+{
+    int failures = 0;
+    TEST("proof step: worker SIGKILL frees guards, preserves evidence, admits no completion") {
+        struct ic_worker_death_observation o = {0};
+        ic_worker_hard_death(&o);
+        ASSERT(o.ready);
+        ASSERT(o.guard_busy_during);
+        ASSERT(o.landing_held_during);
+        ASSERT(o.lease_read);
+        ASSERT(o.lease_pid_alive);
+        ASSERT(o.kill_sent);
+        ASSERT(o.requester_reaped);
+        ASSERT_EQ(o.requester_exit, 3);
+        ASSERT_EQ(o.guard_after, 1);
+        ASSERT(o.landing_free_after);
+        ASSERT(o.worker_gone);
+        ASSERT(o.lease_intact);
+        ASSERT(o.attempt_request_preserved);
+        ASSERT_EQ(o.killed_state, ZCL_DEV_PROOF_STATE_MISSING);
+        ASSERT(o.receipt_absent);
+        ASSERT(o.retry_refused);
+        ASSERT_STR_EQ(o.retry_detail, "proof_retry_requires_settled_failure");
+        ASSERT(o.unrelated_intact);
+        ASSERT(o.requeued);
+        ASSERT_EQ(o.requeued_state, ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT_EQ(o.held_consumer, 0);
+        ASSERT_STR_EQ(o.held_why, "proof_execution_busy");
+        ASSERT_EQ(o.first_drain, 1);
+        ASSERT_EQ(o.killed_settled, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(o.killed_receipt_absent);
+        ASSERT_EQ(o.second_drain, 1);
+        ASSERT(o.unrelated_failed);
+        ASSERT_EQ(o.queue_empty, 0);
+        ASSERT(o.leases_empty);
+        ASSERT(o.attempt_request_preserved_end);
+        ASSERT(o.retry_admitted);
+        ASSERT_EQ(o.retry_admitted_state, ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT_EQ(o.final_drain, 1);
+        ASSERT_EQ(o.final_state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(o.cleaned);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 static int test_ic_foreground_proof_command(void)
@@ -5512,6 +5777,7 @@ int test_impact_composition(void)
     failures += test_ic_foreground_execution_busy();
     failures += test_ic_foreground_refuses_watcher();
     failures += test_ic_foreground_owner_lifetime();
+    failures += test_ic_worker_hard_death_containment();
 #endif
     failures += test_ic_truncated_closure_preserves_groups();
     failures += test_ic_closure_capacity_follows_corpus();

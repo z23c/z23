@@ -7050,8 +7050,10 @@ static int dp_foreground_wait(pid_t worker)
 }
 
 /* The bounded worker owns inherited guards, even if its waiting requester
- * is killed. Hard death of this worker itself is a separate boundary: this
- * does not assert containment of arbitrary escaped descendants. */
+ * is killed. Hard death of this worker itself frees both guards through the
+ * kernel and leaves the pair MISSING with the dead attempt's evidence
+ * preserved (qualified in impact_composition); containment of arbitrary
+ * escaped descendants remains a separate, unclaimed boundary. */
 static int dp_foreground_run(const char *root, const char *local, const char *base,
                               int *execution, int *landing, char *why, size_t why_len)
 {

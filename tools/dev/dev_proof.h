@@ -225,7 +225,12 @@ void zcl_dev_proof_execution_release(int guard);
  * Existing watcher state refuses admission; no watcher state is created.
  * A bounded child owns both guards through worker/lease cleanup. Requester
  * cancellation settles that child; requester hard death leaves its guards
- * owned. Hard death of the actual worker is not descendant containment.
+ * owned. Hard death of the guard-owning worker is qualified by the
+ * impact_composition acceptance (worker SIGKILL frees guards, preserves
+ * evidence, admits no completion): the kernel releases both guards, the
+ * pair returns to MISSING with its consumed request preserved in the dead
+ * attempt, retry refuses until a failure settles, and requeue plus any
+ * eligible worker continue under the existing lease rules.
  * Returns 1 when settled (inspect status, never infer PASS), 0 busy, -1
  * invalid/unavailable. Existing failed attempts require explicit retry. */
 int zcl_dev_proof_step(const char *root, const char *local, const char *base,

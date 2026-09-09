@@ -734,6 +734,29 @@ observation. Before requesting proof, the landing step reruns the native
 restart-plan target after lint and dependency preparation, so an existing
 plan cannot retain an earlier source generation.
 
+Proof worker crash semantics are qualified by acceptance, not assumed. All
+pair state lives under `.cache/zcl-dev-proof/`: a request is claimed under
+`queue.lock` into a per-attempt directory (`attempts/<pair>.XXXXXX`), a
+lease (`leases/<pair>.lease`, carrying the attempt token, worker pid and
+start time) gates every pair-state write, one `execution.lock` flock gives a
+single worker execution authority, and a shared hold on the landing
+`step.lock` defers landing preparation for the worker's whole lifetime.
+Requester cancellation settles the bounded worker; requester hard death
+leaves the guards owned by the surviving worker. Hard death of the
+guard-owning worker itself is covered by the `impact_composition` acceptance
+"proof step: worker SIGKILL frees guards, preserves evidence, admits no
+completion", which kills the exact lease-named worker mid-execution and then
+proves: the kernel releases both guards; no receipt and no `.failed` marker
+appear, so no false PASS and no stale completion; the pair reads MISSING
+with its consumed request bytes preserved inside the dead attempt; `dev
+proof retry` refuses (`proof_retry_requires_settled_failure`) until a
+failure settles; an unrelated queued request survives untouched; a held
+execution guard still defers another consumer with `proof_execution_busy`;
+and `dev proof ensure` requeues the pair so any eligible worker drains it
+and the unrelated request to a settled failure under the same lease rules,
+after which explicit retry is admitted again. Containment of descendants a
+killed worker may have escaped remains a separate, unclaimed boundary.
+
 Each attempt the queue steps proves against its own proof generation, a
 private copy of the tree rooted at `<ram_root>/z23p/<tag>` when RAM scratch is
 reserved or `<dirname(landing_worktree)>/.z23p/<tag>` on disk otherwise
