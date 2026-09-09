@@ -426,3 +426,27 @@ collectors every 6h (offset 30 minutes apart); both `OnFailure=` into
 `zcl-stopwatch-onfailure.service`, which fires only on a lock/append
 failure, never on a legitimate non-PASS run verdict. See
 `platform/deploy/examples/README.md` for the full unit descriptions.
+
+### Provisioning the fixture peer by hand (no systemd)
+
+When the systemd unit is not installed, the same peer runs as a plain
+process. Measured 2026-09-09: the peer itself syncs wiped-to-tip in
+~8 min via `-addnode=127.0.0.1:8033` peer widening, then serves two
+consecutive C3 PASSes (336 s and 371 s):
+
+```bash
+PEER_DIR=~/.local/state/zclassic23-stopwatch-peer
+mkdir -p "$PEER_DIR" && cp build/bin/zclassic23 "$PEER_DIR/zclassic23.bin"
+"$PEER_DIR/zclassic23.bin" -datadir="$PEER_DIR" \
+  -port=39070 -rpcport=39071 -fsport=39072 -httpsport=39073 \
+  -listen -nolegacyimport -nobgvalidation -showmetrics=0 \
+  -addnode=127.0.0.1:8033
+```
+
+Two traps, both hit for real: (1) a harness or agent runner that kills
+background jobs at a default timeout will kill the peer mid-run and
+produce a garbage artifact — run the peer with no timeout and treat any
+run whose peer died as invalid evidence; (2) the harness defaults already
+point at `127.0.0.1:39070`/`39072`, so a dead fixture peer reads as SKIP
+or SEAM, never as "peer missing" — check `boot_status.json` in the peer
+datadir (`phase=serving`) before trusting a non-PASS verdict.

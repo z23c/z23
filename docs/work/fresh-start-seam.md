@@ -28,6 +28,22 @@ naming/ownership) and [`../CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DO
 > peer starvation). The `sticky_escalator.resnapshot_no_base` /
 > `refold_no_anchor_artifact` blockers in those runs are the same
 > recovery-artifact absences §5 names — downstream noise, not the cause.
+>
+> **2026-09-09 resolution — the tail crawl is serving capacity, not a code
+> defect.** The identical harness against the repo's intended dedicated
+> fixture peer (`platform/deploy/examples/zcl-stopwatch-peer.service`,
+> provisioned as a plain process on ports 39070–39073, itself synced
+> wiped-to-tip in ~8 min) **PASSED**: `H*` reached `network_tip=3244952`
+> in **336 s** of the 600 s budget across 2 boots, with the tail folding
+> ~10–16k blocks per 11 s tick and no sticky-escalator blockers (artifact
+> `build/c3-stopwatch/20260909T181952Z-261433/proof.json`, ledger verdict
+> `pass`); independently reproduced 20 minutes later at **371 s**
+> (`build/c3-stopwatch/20260909T182753Z-276426`; `make c3-stopwatch-report`
+> judges `VERDICT=PASS`). The busy live canonical node's synchronous getdata path
+> (256 preads + hash-verify per batch on one message thread) simply cannot
+> serve the tail at ~420/s while also doing live-node work; the dedicated
+> fixture can. Sealed-core serving changes are therefore optional
+> hardening, owner-gated — not a C3 blocker.
 
 There are **two independent seams**, not one. Fixing either alone does not
 produce a working fresh machine.
