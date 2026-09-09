@@ -583,6 +583,25 @@ build/bin/z23-dev dev proof status
 build/bin/z23-dev dev proof wait
 ```
 
+No resident watcher is armed in a fresh worktree or a one-off agent session
+(the hook request above only re-arms a watcher that already exists), so the
+explicit path is the foreground step — the same bounded worker and signed
+receipt lifecycle, run synchronously for one exact pair:
+
+```bash
+build/bin/z23-dev dev proof step --local_commit=$(git rev-parse HEAD) \
+    --remote_base=$(git rev-parse origin/main)
+```
+
+It takes several minutes (the full lint gate set plus the impacted test
+groups inside one generation worktree); a push before its `passed` receipt
+exists is refused by the pre-push hook. Two operational rules, both learned
+from real failures: do not run other `make` builds in the same checkout
+while a proof is in flight (a superseded source build invalidates the
+attempt), and if the attempt fails on `check-git-hooks-installed` after a
+hook rebuild, run `make install-hooks` to refresh the armed copy, then
+`dev proof retry` and `dev proof step` again.
+
 `dev.proof.ensure` is idempotent and normally runs from `post-commit`,
 `post-merge`, or `post-checkout` -- but only to re-arm a resident proof
 watcher that was already armed on purpose in that worktree (it checks for
