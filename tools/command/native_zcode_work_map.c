@@ -108,8 +108,53 @@ static bool map_root_field(struct json_value *row, const char *key,
     return json_push_kv_str(row, key, hex);
 }
 
+/* Two displayed roots plus one successor probe. These are local index
+ * observations, not candidate validation, a snapshot, or acceptance. */
+static bool map_candidate_roots(struct json_value *row, struct node_db *ndb,
+                                 const uint8_t task_root[32])
+{
+    char task[65], cursor[65] = "";
+    zcl_hex_encode(task_root, 32, task);
+    struct json_value roots, value;
+    json_init(&roots); json_set_array(&roots);
+    json_init(&value);
+    int result = 0;
+    bool ok = true;
+    for (size_t i = 0; ok && i < 3; i++) {
+        result = db_build_task_candidate_next(ndb, task, cursor, cursor);
+        if (result <= 0 || i == 2) break;
+        json_set_str(&value, cursor);
+        ok = json_push_back(&roots, &value);
+    }
+    if (result < 0)
+        ok = ok && json_push_kv_str(row, "candidate_resolution", "query_failed");
+    else
+        ok = ok && json_push_kv_str(row, "candidate_resolution", "local_index") &&
+            json_push_kv(row, "candidate_roots", &roots) &&
+            json_push_kv_bool(row, "candidate_more", result > 0);
+    json_free(&value); json_free(&roots);
+    return ok;
+}
+
+static bool map_candidate_metadata(struct json_value *row,
+    const char *datadir, const uint8_t task_root[32])
+{
+    sqlite3 *db = NULL;
+    struct node_db ndb = {0};
+    enum zcl_node_db_ro_status status = ZCL_NODE_DB_RO_NO_DATADIR;
+    if (datadir && datadir[0])
+        status = zcl_native_node_db_open_readonly(datadir, &db, &ndb, NULL, 0);
+    bool ok = json_push_kv_int(row, "candidate_ledger_status", status);
+    if (status == ZCL_NODE_DB_RO_OK)
+        ok = ok && map_candidate_roots(row, &ndb, task_root);
+    else
+        ok = ok && json_push_kv_str(row, "candidate_resolution", "unobserved");
+    zcl_native_node_db_close_readonly(&db, &ndb);
+    return ok;
+}
+
 static bool map_task_metadata(struct json_value *row,
-    const char *workspace, const uint8_t root[32], int64_t now)
+    const char *workspace, const char *datadir, const uint8_t root[32], int64_t now)
 {
     uint8_t *wire = NULL, checked[32];
     size_t length = 0;
@@ -127,14 +172,14 @@ static bool map_task_metadata(struct json_value *row,
         map_root_field(row, "goal_root", task.goal_root) &&
         map_root_field(row, "acceptance_tests_root", task.acceptance_tests_root) &&
         map_root_field(row, "proof_policy_root", task.proof_policy_root) &&
-        json_push_kv_str(row, "candidate_resolution", "unobserved") &&
+        map_candidate_metadata(row, datadir, root) &&
         json_push_kv_str(row, "review_resolution", "unobserved") &&
         json_push_kv_bool(row, "task_expired", now >= task.expires_unix);
 }
 
 static bool map_row(struct json_value *rows,
                     const struct zcl_work_map_node *node, size_t index,
-                    const char *workspace, int64_t now)
+                    const char *workspace, const char *datadir, int64_t now)
 {
     struct json_value row;
     json_init(&row); json_set_object(&row);
@@ -143,7 +188,7 @@ static bool map_row(struct json_value *rows,
     const char *kind = node->kind == ZCL_WORK_MAP_LOOP ? "loop" :
         node->kind == ZCL_WORK_MAP_FEATURE ? "feature" : "milestone";
     bool ok = map_dependencies(&row, node) &&
-        map_task_metadata(&row, workspace, node->task_root, now) &&
+        map_task_metadata(&row, workspace, datadir, node->task_root, now) &&
         json_push_kv_int(&row, "index", (int64_t)index) &&
         json_push_kv_str(&row, "task_root", root) &&
         json_push_kv_str(&row, "kind", kind) &&
@@ -165,7 +210,7 @@ static bool map_observation(struct json_value *data, int64_t now)
 }
 
 static bool map_render(struct zcl_command_reply *reply, const char *root,
-                        const char *workspace,
+                        const char *workspace, const char *datadir,
                         const struct zcl_work_map_node *nodes, size_t count,
                         size_t offset, size_t limit)
 {
@@ -176,7 +221,7 @@ static bool map_render(struct zcl_command_reply *reply, const char *root,
     if (end > count) end = count;
     bool ok = true;
     for (size_t i = offset; ok && i < end; i++)
-        ok = map_row(&rows, &nodes[i], i, workspace, now);
+        ok = map_row(&rows, &nodes[i], i, workspace, datadir, now);
     ok = ok && json_push_kv_str(&reply->data, "map_root", root) &&
         json_push_kv_int(&reply->data, "total", (int64_t)count) &&
         json_push_kv_int(&reply->data, "returned", (int64_t)(end - offset)) &&
@@ -187,17 +232,28 @@ static bool map_render(struct zcl_command_reply *reply, const char *root,
     return ok;
 }
 
+static bool map_input_paths(const struct json_value *input,
+                            const char **workspace, const char **datadir)
+{
+    const struct json_value *w = json_get(input, "workspace");
+    const struct json_value *d = json_get(input, "proof_datadir");
+    if ((w && w->type != JSON_STR) || (d && d->type != JSON_STR))
+        return false;
+    *workspace = json_get_str(w);
+    *datadir = json_get_str(d);
+    if (!*workspace || !(*workspace)[0]) *workspace = ".";
+    return true;
+}
+
 void zcl_native_handle_zcode_work_map(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply) return;
-    const struct json_value *workspace_value = json_get(request->input, "workspace");
-    const char *workspace = json_get_str(workspace_value);
-    if (workspace_value && workspace_value->type != JSON_STR) {
-        map_fail(reply, "WORK_MAP_INPUT", "workspace must be a string");
+    const char *workspace, *datadir;
+    if (!map_input_paths(request->input, &workspace, &datadir)) {
+        map_fail(reply, "WORK_MAP_INPUT", "workspace and proof_datadir must be strings");
         return;
     }
-    if (!workspace || !workspace[0]) workspace = ".";
     const char *root = json_get_str(json_get(request->input, "map_root"));
     size_t offset = 0, limit = 0;
     uint8_t address[32];
@@ -221,7 +277,7 @@ void zcl_native_handle_zcode_work_map(
         map_fail(reply, "WORK_MAP_OFFSET", "offset exceeds the complete map");
         return;
     }
-    if (!map_render(reply, root, workspace,
+    if (!map_render(reply, root, workspace, datadir,
                     nodes, count, offset, limit))
         map_fail(reply, "WORK_MAP_OUTPUT", "bounded map page could not be rendered");
 }

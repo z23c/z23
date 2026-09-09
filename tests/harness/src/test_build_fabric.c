@@ -2379,6 +2379,144 @@ static int test_bf_package_proof_conflicts(
     return failures;
 }
 
+static bool bf_map_populate_task(struct node_db *ndb, const char *dir,
+    struct zcl_work_map_node *node, const struct vcs_zcode_task_v1 *original,
+    const struct db_build_action *action, uint8_t seed)
+{
+    struct vcs_zcode_task_v1 task = *original;
+    memset(task.goal_root, seed, 32);
+    uint8_t wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    if (vcs_zcode_task_root(&task, node->task_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_serialize(&task, wire) != VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(dir, node->task_root, wire, sizeof(wire)))
+        return false;
+    for (unsigned i = 0; i < 2; i++) {
+        struct db_build_action extra = *action;
+        zcl_hex_encode(node->task_root, 32, extra.task_root_sha3);
+        uint8_t root[32];
+        memset(root, (int)(seed + i), sizeof(root));
+        zcl_hex_encode(root, 32, extra.action_id);
+        zcl_hex_encode(root, 32, extra.candidate_root_sha3);
+        extra.sequence = 200 + seed + i;
+        if (!db_build_action_save(ndb, &extra)) return false;
+    }
+    return true;
+}
+
+static int test_bf_map_candidate_page(struct node_db *ndb, const char *dir,
+    const struct test_accepted_work_fixture *fixture,
+    const struct db_build_action *action)
+{
+    int failures = 0;
+    TEST("work map: existing ledger discovers a candidate without granting acceptance") {
+        struct zcl_work_map_node nodes[4] = {
+            { .kind = ZCL_WORK_MAP_MILESTONE, .parent = ZCL_WORK_MAP_NO_PARENT },
+            { .kind = ZCL_WORK_MAP_FEATURE, .parent = 0 },
+            { .kind = ZCL_WORK_MAP_LOOP, .parent = 1 },
+            { .kind = ZCL_WORK_MAP_LOOP, .parent = 1 },
+        };
+        ASSERT(bf_map_populate_task(ndb, dir, &nodes[0], &fixture->accepted.task, action, 0x91));
+        ASSERT(bf_map_populate_task(ndb, dir, &nodes[1], &fixture->accepted.task, action, 0x93));
+        ASSERT(bf_map_populate_task(ndb, dir, &nodes[3], &fixture->accepted.task, action, 0x95));
+        memcpy(nodes[2].task_root, fixture->accepted.task_root, 32);
+        uint8_t wire[256], root[32];
+        size_t length = 0;
+        ASSERT_EQ(zcl_work_map_serialize(nodes, 4, wire, sizeof(wire), &length),
+                  ZCL_WORK_MAP_OK);
+        sha3_256(wire, length, root);
+        ASSERT(vcs_object_put_addressed(dir, root, wire, length));
+        char hex[65];
+        zcl_hex_encode(root, 32, hex);
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", dir));
+        ASSERT(json_push_kv_str(&input, "proof_datadir", dir));
+        ASSERT(json_push_kv_str(&input, "map_root", hex));
+        ASSERT(json_push_kv_int(&input, "offset", 2));
+        ASSERT(json_push_kv_int(&input, "limit", 1));
+        struct zcl_command_request request = { .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        int changes = sqlite3_total_changes(ndb->db);
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *row = json_at(json_get(&reply.data, "nodes"), 0);
+        ASSERT(row != NULL);
+        ASSERT_EQ(json_get_int(json_get(row, "candidate_ledger_status")), ZCL_NODE_DB_RO_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "candidate_resolution")), "local_index");
+        const struct json_value *roots = json_get(row, "candidate_roots");
+        zcl_hex_encode(fixture->accepted.candidate_root, 32, hex);
+        ASSERT_STR_EQ(json_get_str(json_at(roots, 0)), hex);
+        ASSERT(json_at(roots, 1) == NULL);
+        ASSERT(!json_get_bool(json_get(row, "candidate_more")));
+        ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+        ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+        zcl_command_reply_free(&reply);
+        /* Candidate discovery must expose truncation without pretending the
+         * displayed index roots are verified CAS candidates. */
+        for (unsigned i = 0; i < 2; i++) {
+            struct db_build_action extra = *action;
+            uint8_t candidate[32] = {0};
+            candidate[31] = (uint8_t)(i + 1);
+            zcl_hex_encode(candidate, 32, extra.candidate_root_sha3);
+            memset(candidate, (int)(0x81 + i), sizeof(candidate));
+            zcl_hex_encode(candidate, 32, extra.action_id);
+            extra.sequence = 100 + i;
+            ASSERT(db_build_action_save(ndb, &extra));
+        }
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        row = json_at(json_get(&reply.data, "nodes"), 0);
+        ASSERT(row != NULL);
+        roots = json_get(row, "candidate_roots");
+        ASSERT_EQ(json_size(roots), 2);
+        ASSERT(json_get_bool(json_get(row, "candidate_more")));
+        ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+        ASSERT(json_write(&reply.data, NULL, 0) < 4096);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        json_init(&input); json_set_object(&input);
+        zcl_hex_encode(root, 32, hex);
+        ASSERT(json_push_kv_str(&input, "workspace", dir));
+        ASSERT(json_push_kv_str(&input, "proof_datadir", dir));
+        ASSERT(json_push_kv_str(&input, "map_root", hex));
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 4);
+        ASSERT(json_write(&reply.data, NULL, 0) < 4096);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        /* Deliberately corrupt one isolated fixture row after a valid first
+         * successor. The page must not publish that successful prefix. */
+        ASSERT(node_db_exec(ndb,
+            "UPDATE build_actions SET candidate_root_sha3="
+            "'000000000000000000000000000000000000000000000000000000000000000g' "
+            "WHERE action_id="
+            "'8282828282828282828282828282828282828282828282828282828282828282'"));
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", dir));
+        ASSERT(json_push_kv_str(&input, "proof_datadir", dir));
+        ASSERT(json_push_kv_str(&input, "map_root", hex));
+        ASSERT(json_push_kv_int(&input, "offset", 2));
+        ASSERT(json_push_kv_int(&input, "limit", 1));
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        row = json_at(json_get(&reply.data, "nodes"), 0);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "candidate_resolution")), "query_failed");
+        ASSERT(json_get(row, "candidate_roots") == NULL);
+        ASSERT(json_get(row, "candidate_more") == NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_proof_materialization(void)
 {
     int failures = 0;
@@ -2412,6 +2550,8 @@ static int test_bf_proof_materialization(void)
                        action.proof_policy_root_sha3);
         ASSERT(bf_canonicalize(&job, &action));
         ASSERT(build_fabric_plan(&ndb, &job, &action).ok);
+
+        failures += test_bf_map_candidate_page(&ndb, dir, &fixture, &action);
 
         uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
         uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];

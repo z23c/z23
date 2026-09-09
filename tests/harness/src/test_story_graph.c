@@ -976,6 +976,7 @@ static int sg_work_map_command_inputs(void)
             "{}", "{\"map_root\":\"bad\"}", "{\"workspace\":1}",
             "{\"offset\":-1}", "{\"offset\":205}", "{\"offset\":\"0\"}",
             "{\"limit\":0}", "{\"limit\":5}", "{\"limit\":true}",
+            "{\"proof_datadir\":1}",
         };
         for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
             struct json_value input;
@@ -1028,6 +1029,7 @@ static int sg_work_map_command(void)
         ASSERT(json_push_kv_str(&input, "map_root", hex));
         ASSERT(json_push_kv_int(&input, "offset", 2));
         ASSERT(json_push_kv_int(&input, "limit", 1));
+        ASSERT(json_push_kv_str(&input, "proof_datadir", dir));
         struct zcl_command_request request = { .input = &input };
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
@@ -1049,6 +1051,9 @@ static int sg_work_map_command(void)
         ASSERT_STR_EQ(json_get_str(json_get(row, "task_resolution")), "verified");
         ASSERT(json_get_bool(json_get(row, "task_expired")));
         ASSERT_STR_EQ(json_get_str(json_get(row, "candidate_resolution")), "unobserved");
+        ASSERT_EQ(json_get_int(json_get(row, "candidate_ledger_status")),
+                  ZCL_NODE_DB_RO_ABSENT);
+        ASSERT(json_get(row, "candidate_roots") == NULL);
         ASSERT_STR_EQ(json_get_str(json_get(row, "review_resolution")), "unobserved");
         char acceptance[65];
         zcl_hex_encode(fixture.accepted.task.acceptance_tests_root, 32, acceptance);
