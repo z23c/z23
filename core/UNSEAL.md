@@ -120,3 +120,7 @@ later lane flips it HARD.
 - 2026-09-10T15:58:55Z — REASON: Split the beta6 fast-bootstrap seam and the BIP37 filter refusals out of msgprocessor.c into msg_beta6_bootstrap.c and msg_bloom_filter.c so the shrink-only legacy file returns under its 3031-line ceiling; dispatch rows, semantics and behaviour unchanged (owner-authorized beta6 sealed edit of 2026-09-10)
   old ROOT: e4fd36edb426d883959c7130a384435e72cdbdb66b5db2afb55b6c6a7fdf0482
   by: owner unseal ritual (make core-unseal)
+
+- 2026-09-10T19:55:26Z — REASON: Linear replay of MagicBean getblocks immediate-inv onto origin/main after GitHub rejected merge commits; no consensus predicate change
+  old ROOT: e7852a59d4b3bfa47dffae9b2ffe012b6895416061a42b995b8945d99fd49bf7
+  by: owner unseal ritual (make core-unseal)
