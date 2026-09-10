@@ -400,6 +400,55 @@ static void bp_park_fixture_end(const char *dir)
     test_rm_rf(dir);
 }
 
+/* ── node.db unopenable REFUSES; it must never park ───────────
+ *
+ * This gate used to park alive-degraded here. A fleet node then sat in
+ * systemd `activating (start)` for 15.9 h: the park sends no READY= under
+ * Type=notify, the gate fires at crypto_ready so no RPC was ever bound,
+ * and the still-open "db.open_migrate" step made the heartbeat sweeper
+ * print 1,909 `state=stuck verdict=telemetry` records for a step that had
+ * FAILED 29 s in. The contract is now: close the step as failed (the only
+ * producer of verdict=failure), refuse, and let the unit exit.
+ *
+ * Its own function so the case reads as one contract and test_boot_phase
+ * stays under the complexity cap. Returns its own failure count. */
+static int bp_node_db_gate_refuses(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    char captured[4096];
+    bool gate_rc = true;
+    struct boot_status_snapshot snap;
+    char why[128];
+
+    bp_park_fixture_begin(dir, sizeof(dir), false);
+    boot_step_enter("db.open_migrate");
+    bool captured_ok = bp_capture_gate(dir, captured, sizeof(captured),
+                                       &gate_rc);
+    bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
+    BP_CHECK("serving+node_db_unopened: gate returns (does not park)",
+             captured_ok && !gate_rc);
+    BP_CHECK("serving+node_db_unopened: does not emit PARKED",
+             captured_ok && strstr(captured, "PARKED") == NULL);
+    BP_CHECK("serving+node_db_unopened: REFUSED line names the gate",
+             captured_ok &&
+             strstr(captured, "REFUSED: boot gate 'node_db_unopened'") != NULL);
+    BP_CHECK("serving+node_db_unopened: closes the step as failed",
+             captured_ok &&
+             strstr(captured,
+                    "step=db.open_migrate state=failed verdict=failure")
+                 != NULL);
+    BP_CHECK("serving+node_db_unopened: names one operator command",
+             captured_ok && strstr(captured, "systemctl --user restart")
+                 != NULL);
+    BP_CHECK("serving+node_db_unopened: latches FATAL (exit 1 path)",
+             boot_error_reported());
+    BP_CHECK("serving+node_db_unopened: boot_status names the blocker",
+             status_ok && strcmp(snap.blocker, "node_db_unopened") == 0);
+    bp_park_fixture_end(dir);
+    return failures;
+}
+
 int test_boot_phase(void)
 {
 #if defined(_WIN32)
@@ -532,49 +581,7 @@ int test_boot_phase(void)
         bp_park_fixture_end(dir);
     }
 
-    /* ── node.db unopenable REFUSES; it must never park ───────────
-     *
-     * This gate used to park alive-degraded here. A fleet node then sat in
-     * systemd `activating (start)` for 15.9 h: the park sends no READY= under
-     * Type=notify, the gate fires at crypto_ready so no RPC was ever bound,
-     * and the still-open "db.open_migrate" step made the heartbeat sweeper
-     * print 1,909 `state=stuck verdict=telemetry` records for a step that had
-     * FAILED 29 s in. The contract is now: close the step as failed (the only
-     * producer of verdict=failure), refuse, and let the unit exit. */
-    {
-        char dir[PATH_MAX];
-        char captured[4096];
-        bool gate_rc = true;
-        struct boot_status_snapshot snap;
-        char why[128];
-
-        bp_park_fixture_begin(dir, sizeof(dir), false);
-        boot_step_enter("db.open_migrate");
-        bool captured_ok = bp_capture_gate(dir, captured, sizeof(captured),
-                                           &gate_rc);
-        bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
-        BP_CHECK("serving+node_db_unopened: gate returns (does not park)",
-                 captured_ok && !gate_rc);
-        BP_CHECK("serving+node_db_unopened: does not emit PARKED",
-                 captured_ok && strstr(captured, "PARKED") == NULL);
-        BP_CHECK("serving+node_db_unopened: REFUSED line names the gate",
-                 captured_ok &&
-                 strstr(captured, "REFUSED: boot gate 'node_db_unopened'")
-                     != NULL);
-        BP_CHECK("serving+node_db_unopened: closes the step as failed",
-                 captured_ok &&
-                 strstr(captured,
-                        "step=db.open_migrate state=failed verdict=failure")
-                     != NULL);
-        BP_CHECK("serving+node_db_unopened: names one operator command",
-                 captured_ok && strstr(captured, "systemctl --user restart")
-                     != NULL);
-        BP_CHECK("serving+node_db_unopened: latches FATAL (exit 1 path)",
-                 boot_error_reported());
-        BP_CHECK("serving+node_db_unopened: boot_status names the blocker",
-                 status_ok && strcmp(snap.blocker, "node_db_unopened") == 0);
-        bp_park_fixture_end(dir);
-    }
+    failures += bp_node_db_gate_refuses();
 
     /* ── boot_need_legacy_header_pull (fresh-datadir need_zcd fix) ──
      * MEMORY/bug: on a genuinely fresh/empty datadir both

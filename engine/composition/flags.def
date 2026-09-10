@@ -141,7 +141,7 @@ Z23_FLAG("ZCL_ALERTS_DISABLE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ALERT_WEBHOOK_URL", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/event/src/alerts.c:285")
 Z23_FLAG("ZCL_ALLOW_CORRUPT_INDEX", "env_runtime", "-", "-",
-          "undocumented; first use engine/composition/src/boot.c:2161")
+          "undocumented; first use engine/composition/src/boot.c:2208")
 Z23_FLAG("ZCL_ALLOW_PLAINTEXT_WALLET", "env_runtime", "-", "-",
           "undocumented; first use contexts/wallet/modules/wallet/src/wallet_keystore.c:51")
 Z23_FLAG("ZCL_ANCHOR_MINT_DATADIR", "env_runtime", "-", "-",
@@ -2330,7 +2330,7 @@ Z23_FLAG("ZCL_TESTCACHE_STORE_ROOT", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_parallel.c:1484")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_boot_phase.c:410")
+          "undocumented; first use tests/harness/src/test_boot_phase.c:459")
 Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",
           "undocumented; first use tools/dev/deploy-dev-lane-selftest.sh:82")
 Z23_FLAG("ZCL_TEST_ONLY", "env_test", "-", "-",

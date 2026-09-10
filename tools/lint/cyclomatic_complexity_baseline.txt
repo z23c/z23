@@ -2032,7 +2032,7 @@ engine/models/src/app_event.c:app_event_existing:16
 engine/models/src/app_event.c:app_event_read:18
 engine/models/src/blog_post.c:bounded_utf8_text:38
 engine/models/src/build_proof_event.c:db_build_proof_event_root:23
-engine/models/src/database.c:node_db_open_impl:29
+engine/models/src/database.c:node_db_open_impl:26
 engine/models/src/database_migrate.c:node_db_migrate:19
 engine/models/src/database_migrate.c:node_db_state_set_detached:18
 engine/models/src/database_migrate_features.c:migration_schema_object_matches:20
@@ -2909,7 +2909,7 @@ tests/harness/src/test_boot_header_seed_import.c:hsi_build_chain:16
 tests/harness/src/test_boot_legacy_blocks.c:test_boot_legacy_blocks:40
 tests/harness/src/test_boot_matrix.c:bm_cell2_mint_anchor_headers_only:21
 tests/harness/src/test_boot_matrix.c:bm_cell3_mint_anchor_imported_bodies:24
-tests/harness/src/test_boot_phase.c:test_boot_phase:44
+tests/harness/src/test_boot_phase.c:test_boot_phase:40
 tests/harness/src/test_boot_refold_window_extend.c:test_boot_refold_window_extend:55
 tests/harness/src/test_boot_reindex_terminates.c:test_boot_reindex_terminates:57
 tests/harness/src/test_boot_seniority_epoch_roll.c:bsr_case_epoch_roll:33

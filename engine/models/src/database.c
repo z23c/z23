@@ -632,6 +632,27 @@ static bool db_build_schema(struct node_db *ndb, bool boot_ceremony,
     return true;
 }
 
+/* The schema build plus the boot ceremony's ONE bounded repair.
+ *
+ * A build failure that is not SQLite's corruption verdict is a real schema
+ * regression and still fails the open; so is any failure on a runtime reopen,
+ * which must never rename the canonical store behind the boot owner's back.
+ * The repair is attempted exactly once — the rebuilt store is empty, so a
+ * second failure means the fault was never the old file. */
+static bool db_build_schema_with_repair(struct node_db *ndb, const char *path,
+                                        bool boot_ceremony)
+{
+    bool corrupt = false;
+    if (db_build_schema(ndb, boot_ceremony, &corrupt))
+        return true;
+    if (!corrupt || !boot_ceremony)
+        return false;
+    LOG_WARN("db", "db: %s is malformed (schema build); quarantining the "
+             "family and rebuilding fresh SQLite state", path);
+    return db_quarantine_and_reopen(ndb, path, boot_ceremony) &&
+           db_build_schema(ndb, boot_ceremony, &corrupt);
+}
+
 /* Shared open path. boot_ceremony=true is the one-time boot open (quick_check +
  * migration banner + staging cleanup); false is a runtime reopen that skips all
  * three and names itself (see node_db_open_runtime). */
@@ -725,21 +746,8 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
         }
     }
 
-    bool schema_corrupt = false;
-    if (!db_build_schema(ndb, boot_ceremony, &schema_corrupt)) {
-        /* Not corruption (a real schema regression), or not the boot
-         * ceremony (a runtime reopen never renames the canonical store
-         * behind the owner's back): fail the open, unchanged. */
-        if (!schema_corrupt || !boot_ceremony)
-            return node_db_open_abort(ndb);
-        LOG_WARN("db", "db: %s is malformed (schema build); quarantining the "
-                 "family and rebuilding fresh SQLite state", path);
-        /* ONE bounded repair attempt. The rebuilt store is empty, so the
-         * second build failing means the fault is not the old file. */
-        if (!db_quarantine_and_reopen(ndb, path, boot_ceremony) ||
-            !db_build_schema(ndb, boot_ceremony, &schema_corrupt))
-            return node_db_open_abort(ndb);
-    }
+    if (!db_build_schema_with_repair(ndb, path, boot_ceremony))
+        return node_db_open_abort(ndb);
     /* Crash recovery: staged snapshot rows are never authoritative across
      * process lifetimes. BOOT-only (a reopen must not re-run it every cycle). */
     if (boot_ceremony &&
