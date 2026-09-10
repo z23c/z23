@@ -61,7 +61,18 @@ cat > "$tmp/mockbin/systemctl" <<'EOF'
 set -euo pipefail
 [ "$1" != --user ] || shift
 case "$1" in
-show) cat "$ZCL_SHIP_TEST_PIDFILE" ;;
+show)
+    # The observer asks for the unit's ActiveState/SubState/NRestarts as well
+    # as its MainPID; this unit is plainly running throughout the transaction,
+    # so the state query is answered as such and the pid query keeps reading
+    # the file the fixture controls.
+    for arg in "$@"; do
+        [ "$arg" = ActiveState ] || continue
+        printf 'ActiveState=active\nSubState=running\nNRestarts=0\n'
+        exit 0
+    done
+    cat "$ZCL_SHIP_TEST_PIDFILE"
+    ;;
 daemon-reload)
     if [ "${ZCL_SHIP_TEST_FAIL_ONCE:-}" = reload ] &&
        [ ! -e "$ZCL_SHIP_TEST_FAIL_MARKER" ]; then

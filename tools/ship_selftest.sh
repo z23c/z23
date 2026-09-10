@@ -101,6 +101,25 @@ check_verdict CRASHED    0 1 0 999 300 3 3 5 5 1 0
 check_verdict UNKNOWN    0 0 0 999 300 0 3 5 5 1 0
 # Silence cannot be claimed from a sample that observed nothing.
 check_verdict WATCHING   0 0 0 999 300 0 3 1 5 0 0
+# THE NODE4 DEFECT, at the classifier: an absent pid whose disappearance the
+# unit manager is managing must not convict, so the caller stops counting it
+# toward CRASH_SAMPLES and the streak stays 0. The restart columns are the
+# only other thing that may convict such a sample.
+check_verdict WATCHING   0 1 0 0 300 0 3 0 5 0 0 0 3
+# A crash loop too fast to ever show a pid: systemd's own restart count is the
+# only witness, and past the bound it is CRASHED just as it always was.
+check_verdict CRASHED    0 1 0 0 300 0 3 0 5 0 0 4 3
+# AT the bound is not past it — the restart we asked for, plus backoff, must
+# not spend the whole budget in one poll.
+check_verdict WATCHING   0 1 0 0 300 0 3 0 5 0 0 3 3
+# A bound of 0 means no restart evidence was supplied, never "one convicts".
+check_verdict WATCHING   0 1 0 0 300 0 3 0 5 0 0 9 0
+# A box that is up, exact and answering is QUALIFIED however much it restarted
+# getting there: the columns are evidence about a fault, not a punishment.
+check_verdict QUALIFIED  1 1 1 0 300 0 3 0 5 0 0 9 3
+# The eleven-argument form is still answered exactly as before — the remote
+# leg and the local leg are the same file, but a transcript is not.
+check_verdict CRASHED    0 1 0 0 300 3 3 0 5 0 0
 
 printf '\nship-selftest: 2. the exit-code contract\n'
 for pair in "QUALIFIED 0" "CRASHED 1" "WEDGED 1" "SLOW 3" "UNVERIFIED 3" "UNKNOWN 4"; do
@@ -252,6 +271,61 @@ LINE="observed=1 exists=1 pid=9 start=5 sha=$WANT_SHA ident=yes rpc=no cpu=0 blk
 [ "$(ship_field_num "$LINE" nosuch)" = 0 ] && pass "absent numeric field is 0" || fail "absent numeric"
 [ "$(ship_field_num "garbage" observed)" = 0 ] && pass "garbled transcript reads as no-evidence" \
     || fail "garbled transcript"
+# ── 4b. the unit-state fields ───────────────────────────────────────────────
+# systemd prints Key=Value in an order it chooses and omits what it does not
+# know, so every field is looked up by name and every absence has a value that
+# cannot be mistaken for an answer.
+printf '\nship-selftest: 4b. unit state — restarting must be legible as restarting\n'
+SHOW_RESTARTING='Type=notify
+NRestarts=7
+ActiveState=activating
+SubState=auto-restart'
+[ "$(ship_unit_state_fields_from_text "$SHOW_RESTARTING")" = \
+  "state=activating sub=auto-restart nrestarts=7" ] \
+    && pass "unit state parses whatever order systemd chose" \
+    || fail "unit state parse (got $(ship_unit_state_fields_from_text "$SHOW_RESTARTING"))"
+[ "$(ship_unit_state_fields_from_text "")" = "state=- sub=- nrestarts=0" ] \
+    && pass "no manager answer -> no state, and a restart count of 0" \
+    || fail "empty show output did not degrade"
+# A manager too old for NRestarts, and a fixture that answers something else
+# entirely, must both read as "this field was not answered" rather than as a
+# number nobody said.
+[ "$(ship_unit_state_fields_from_text 'ActiveState=failed
+SubState=failed')" = "state=failed sub=failed nrestarts=0" ] \
+    && pass "absent NRestarts reads 0, not garbage" || fail "absent NRestarts"
+[ "$(ship_unit_state_fields_from_text '12345')" = "state=- sub=- nrestarts=0" ] \
+    && pass "an unrelated answer is not a unit state" || fail "unrelated answer parsed"
+# The observation line is space separated, so no field may carry a space even
+# if a manager somehow emitted one.
+[ "$(ship_unit_state_fields_from_text 'ActiveState=active and then some')" = \
+  "state=active sub=- nrestarts=0" ] \
+    && pass "a spaced value is truncated, never allowed into the line" \
+    || fail "a spaced value reached the observation line"
+# Only systemd's own transitional words excuse an absent pid. `active` with no
+# main process is a unit whose process died under a manager that is NOT
+# bringing it back, and it must still convict.
+for st in activating reloading refreshing; do
+    if ship_state_is_pending "$st"; then pass "$st is a managed restart"
+    else fail "$st was not treated as a managed restart"; fi
+done
+for st in failed inactive active deactivating maintenance - '' garbage; do
+    if ship_state_is_pending "$st"; then
+        fail "'$st' was excused as a managed restart"
+    else
+        pass "'$st' can never excuse an absent pid"
+    fi
+done
+# The extension is append-only: the fields ride the same line, and a line
+# written before they existed still parses to the same five process facts.
+LINE_R="$LINE state=activating sub=auto-restart nrestarts=2"
+[ "$(ship_field "$LINE_R" state)" = activating ] && pass "state field" || fail "state field"
+[ "$(ship_field "$LINE_R" sub)" = auto-restart ] && pass "sub field" || fail "sub field"
+[ "$(ship_field_num "$LINE_R" nrestarts)" = 2 ] && pass "nrestarts field" || fail "nrestarts field"
+[ "$(ship_field "$LINE_R" io)" = 12 ] && pass "the appended fields shift nothing" \
+    || fail "appending unit state shifted an existing field"
+[ -z "$(ship_field "$LINE" state)" ] && pass "a pre-extension line reports no state" \
+    || fail "a pre-extension line invented a state"
+
 # Escalating patience: a late answer is an ANSWER, and the list sticks rather
 # than growing without bound.
 [ "$(ship_rpc_budget 1 "5 20 60")" = 5 ]  && pass "rpc budget 1" || fail "rpc budget 1"
@@ -314,6 +388,49 @@ EOF
 mk_observer no-process <<'EOF'
 #!/bin/sh
 echo "observed=1 exists=0 pid=0 start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0"
+EOF
+
+# THE NODE4 SEQUENCE, poll for poll (7200rpm box, 2026-09-10 22:03Z). The old
+# process is observed, systemd stops it for the candidate, and for three polls
+# the unit has no MainPID at all while it is `activating` — then the candidate
+# comes up under a new pid, boots, and answers. Under the old code the three
+# absent polls were CRASHED at 30s and a healthy node was rolled back. It must
+# reach QUALIFIED, and the three managed-restart polls must be reported as
+# what they were.
+mk_observer managed-restart <<EOF
+#!/bin/sh
+n=\$(cat "\$COUNTER" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" > "\$COUNTER"
+if [ "\$n" -le 2 ]; then
+    echo "observed=1 exists=1 pid=9 start=5 sha=$WANT_SHA ident=yes rpc=no cpu=\$n blkio=0 io=0 state=active sub=running nrestarts=0"
+elif [ "\$n" -le 5 ]; then
+    echo "observed=1 exists=0 pid=0 start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0 state=activating sub=auto-restart nrestarts=1"
+elif [ "\$n" -le 7 ]; then
+    echo "observed=1 exists=1 pid=77 start=91 sha=$WANT_SHA ident=yes rpc=no cpu=\$n blkio=\$((n * 100)) io=0 state=activating sub=start nrestarts=1"
+else
+    echo "observed=1 exists=1 pid=77 start=91 sha=$WANT_SHA ident=yes rpc=ok cpu=\$n blkio=\$((n * 100)) io=0 state=active sub=running nrestarts=1"
+fi
+EOF
+
+# The same absent pid, and the manager says the unit FAILED. Nothing is
+# bringing it back, so this is a death and it must still convict.
+mk_observer failed-unit <<EOF
+#!/bin/sh
+n=\$(cat "\$COUNTER" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" > "\$COUNTER"
+if [ "\$n" -le 1 ]; then
+    echo "observed=1 exists=1 pid=9 start=5 sha=$WANT_SHA ident=yes rpc=no cpu=1 blkio=0 io=0 state=active sub=running nrestarts=0"
+else
+    echo "observed=1 exists=0 pid=0 start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0 state=failed sub=failed nrestarts=1"
+fi
+EOF
+
+# A crash loop fast enough that no poll ever catches a pid: `activating` every
+# time we look, so neither the absent-pid streak nor a changing pid can see
+# it. systemd's own restart count is the only witness, and past the bound it
+# is CRASHED — the true-crash detection that the PENDING rule must not cost.
+mk_observer restart-storm <<'EOF'
+#!/bin/sh
+n=$(cat "$COUNTER" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$COUNTER"
+echo "observed=1 exists=0 pid=0 start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0 state=activating sub=auto-restart nrestarts=$((n - 1))"
 EOF
 
 # Nobody answered at all. Distinct from no-process by construction.
@@ -427,9 +544,35 @@ spawn_await s9    UNVERIFIED  3   wedged              3    600      3     5     
 # Qualification stayed exact: wrong bytes or a missing identity never pass.
 spawn_await s10   UNVERIFIED  3   wrong-bytes         3    600      3     5     1
 spawn_await s11   UNVERIFIED  3   no-identity         3    600      3     5     1
+# ── BAR 6 ── a candidate that is RESTARTING is not a candidate that CRASHED.
+# Three consecutive absent polls while systemd says `activating` (the measured
+# node4 sequence) must reach QUALIFIED, not roll a healthy node back.
+spawn_await s12   QUALIFIED   0   managed-restart    60     60      3     5     1
+# ...and every true-crash detection the old absent-pid streak provided is still
+# in place: a unit the manager reports FAILED still convicts on the same
+# streak, and a crash loop too fast to ever show a pid convicts on systemd's
+# restart count.
+spawn_await s13   CRASHED     1   failed-unit        60     60      3     5     1
+spawn_await s14   CRASHED     1   restart-storm      60    600      3     5     1
 wait_await_pids
-for tag in s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11; do judge_await "$tag"; done
-[ "$AWAIT_N" -eq 11 ] || fail "expected 11 loop scenarios, spawned $AWAIT_N"
+for tag in s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 s13 s14; do judge_await "$tag"; done
+[ "$AWAIT_N" -eq 14 ] || fail "expected 14 loop scenarios, spawned $AWAIT_N"
+# A verdict that cannot show the restart it forgave is a verdict nobody can
+# audit: the summary has to name both the restart count and how many polls
+# were excused, or the next reader is back to guessing "restarting" from
+# "gone". This also proves s12 really went through the PENDING path rather
+# than never observing an absent pid at all.
+s12_out="$(cat "$SANDBOX/s12.out" 2>/dev/null || true)"
+if str_contains "$s12_out" "1 restarts and 3 managed-restart observations"; then
+    pass "the restart count and the excused polls are both reported"
+else
+    fail "the verdict did not report the restarts it forgave: $s12_out"
+fi
+if str_contains "$s12_out" "state=active sub=running nrestarts=1"; then
+    pass "the unit state travels on the observation line"
+else
+    fail "the observation line lost the unit state: $s12_out"
+fi
 
 # ── 6. the two-machine loop, with no second machine ─────────────────────────
 # This is the leg that had a hard-coded 300 and no override: ship.sh polling a
@@ -441,10 +584,21 @@ printf '\nship-selftest: 6. the local polling loop, no remote host\n'
 mkdir -p "$SANDBOX/mockbin"
 cat > "$SANDBOX/mockbin/systemctl" <<'EOF'
 #!/bin/sh
-# Mock user manager: MainPID comes from a file the fixture controls.
-case "${3:-}" in
-    -p) cat "$ZCL_SHIP_TEST_PIDFILE" 2>/dev/null || exit 1 ;;
-esac
+# Mock user manager: MainPID comes from a file the fixture controls, and the
+# unit's ActiveState/SubState/NRestarts from another one when the scenario
+# supplies it. The state query is recognised by the property name in argv
+# rather than by position, exactly as the observer asks it, so a scenario that
+# supplies no state file gets a plainly running unit and the pid file remains
+# the only thing it has to control.
+for _arg in "$@"; do
+    [ "$_arg" = ActiveState ] || continue
+    if [ -r "${ZCL_SHIP_TEST_STATEFILE:-}" ]; then
+        cat "$ZCL_SHIP_TEST_STATEFILE"
+    else
+        printf 'ActiveState=active\nSubState=running\nNRestarts=0\n'
+    fi
+    exit 0
+done
 cat "$ZCL_SHIP_TEST_PIDFILE" 2>/dev/null || exit 1
 EOF
 chmod +x "$SANDBOX/mockbin/systemctl"
@@ -516,6 +670,7 @@ if [ "$mode" = sh ]; then
     # mocked systemctl in front. This is the whole chain under test.
     PATH="$FIXTURE_MOCKBIN:$PATH" \
     ZCL_SHIP_TEST_PIDFILE="$FIXTURE_PIDFILE" \
+    ZCL_SHIP_TEST_STATEFILE="${FIXTURE_STATEFILE:-}" \
     ZCL_SHIP_TEST_STATUS_OK="${FIXTURE_STATUS_OK:-}" \
         sh -c "$1"
     exit $?
@@ -562,6 +717,7 @@ spawn_remote_await() {
         out="$(FIXTURE_TRANSPORT="$4" \
             FIXTURE_MOCKBIN="$SANDBOX/mockbin" \
             FIXTURE_PIDFILE="$SANDBOX/mainpid.$tag" \
+            FIXTURE_STATEFILE="$SANDBOX/state.$tag" \
             FIXTURE_STATUS_OK="${10:-}" \
             ZCL_SHIP_REMOTE_EXEC="$SANDBOX/fake-ssh" \
             SHIP_LIB_TEXT="$SHIP_LIB_TEXT" \
@@ -601,6 +757,18 @@ start_fixture_daemon stamped '' identified
 start_fixture_daemon unstamp '' identified
 # The far side's service names a MainPID that no longer exists.
 printf '999999\n' > "$SANDBOX/mainpid.gone"
+# The far side is between incarnations: no MainPID at all, and its manager
+# says so — `activating`, in auto-restart backoff. This is the node4 shape,
+# over the wire, through the real observer program.
+printf '0\n' > "$SANDBOX/mainpid.restarting"
+printf 'ActiveState=activating\nSubState=auto-restart\nNRestarts=1\n' \
+    > "$SANDBOX/state.restarting"
+# The same absent pid under a manager that has given up. NRestarts is already
+# 4 when the window opens, which must NOT convict: the candidate is on trial
+# for what happens from the first observation on, not for the unit's history.
+printf '999999\n' > "$SANDBOX/mainpid.failed"
+printf 'ActiveState=failed\nSubState=failed\nNRestarts=4\n' \
+    > "$SANDBOX/state.failed"
 # The transport-failure cases never reach a daemon at all.
 printf '1\n' > "$SANDBOX/mainpid.down"
 printf '1\n' > "$SANDBOX/mainpid.empty"
@@ -629,8 +797,19 @@ spawn_remote_await quiet   UNVERIFIED 3  up         4    600      3     5   "$FI
 # ── BAR 2, over the wire ── nothing moving for the whole silence limit on a
 # process that demonstrably exists. That is a wedge and it MUST roll back.
 spawn_remote_await frozen  WEDGED     1  up       600      4      3     5   "$FIXTURE_SHA"
-# The far side LOOKED and found no process. A fault, reachable over the seam.
+# The far side LOOKED and found no process, under a manager that is not
+# restarting anything. A fault, reachable over the seam.
 spawn_remote_await gone    CRASHED    1  up        60    600      3     5   "$FIXTURE_SHA"
+# ── BAR 6, over the wire ── the measured node4 regression. Every poll finds no
+# MainPID and every poll is told the unit is `activating`. The old code called
+# that CRASHED in three polls and rolled back a node that was booting; the
+# window must expire on a non-destructive word instead. Four seconds, because
+# the property is "the absent-pid streak never convicts", and it is the streak
+# limit of 3 that would have.
+spawn_remote_await restarting UNVERIFIED 3 up       4    600      3     5   "$FIXTURE_SHA"
+# ...and the manager saying `failed` about the same absent pid still convicts,
+# with a lifetime restart count already past the bound that must not decide it.
+spawn_remote_await failed  CRASHED    1  up        60    600      3     5   "$FIXTURE_SHA"
 # The identity leg, end to end: the `stamped` daemon was STARTED carrying
 # ZCL_AGENT_EXPECT_* in its real environment, and this leg demands exactly
 # those values. Linux reads them out of /proc/<pid>/environ, darwin out of
@@ -644,7 +823,9 @@ spawn_remote_await stamped QUALIFIED  0  up        30     20      3     5   "$FI
 spawn_remote_await unstamp UNVERIFIED 3  up         4    600      3     5   "$FIXTURE_SHA" 1 \
     "$SELFTEST_SOURCE_ID" "a-commit-the-fixture-never-saw"
 wait_await_pids
-for tag in healthy down empty slow quiet frozen gone stamped unstamp; do judge_remote_await "$tag"; done
+for tag in healthy down empty slow quiet frozen gone restarting failed stamped unstamp; do
+    judge_remote_await "$tag"
+done
 
 # ── 7. the shipped script text ──────────────────────────────────────────────
 # ship.sh's two remote scripts are extracted the same way
@@ -713,6 +894,18 @@ for procsrc in stat io exe environ; do
         pass "linux reader still reads /proc/\\\$_ship_pid/$procsrc"
     else
         fail "linux reader lost /proc/\\\$_ship_pid/$procsrc — host-neutrality ate the original"
+    fi
+done
+# The unit-state evidence is the whole difference between "restarting" and
+# "gone", and no scenario here could notice its removal: the mocked manager
+# answers whatever the library asks it, so a library that stopped asking would
+# simply see no state and go back to convicting a restart. Named by
+# construction, the same way the procfs reads above are.
+for want in 'ship_state_is_pending' 'ship_unit_state_fields' '-p ActiveState'; do
+    if str_contains "$lib_text" "$want"; then
+        pass "the observer still asks the unit manager: $want"
+    else
+        fail "the observer lost $want — a managed restart reads as a crash again"
     fi
 done
 # ...and the darwin branch must exist and be reachable, not merely compile.

@@ -46,9 +46,14 @@
 #
 #   QUALIFIED   exact candidate bytes + deploy identity + the process answered
 #               `status`.                                              exit 0
-#   CRASHED     the process is not staying up — absent, or its pid/start-time
-#               changed across CRASH_SAMPLES consecutive observations. This is
-#               a restart loop, not a slow machine.                     exit 1
+#   CRASHED     the process is not staying up — its pid/start-time changed
+#               across CRASH_SAMPLES consecutive observations, it is absent
+#               while the unit manager reports the unit failed or inactive, or
+#               the unit's automatic-restart counter climbed past
+#               RESTART_BOUND inside the window. This is a restart loop, not a
+#               slow machine, and NOT a managed restart in progress: an absent
+#               pid while the unit is `activating` is PENDING (WATCHING), the
+#               subject of "A RESTART IS NOT A DEATH" below.             exit 1
 #   WEDGED      the process exists and NOTHING about it moved for the whole
 #               silence limit: no bytes, no CPU, no blocked-on-disk ticks.
 #               Proven silence.                                         exit 1
@@ -61,6 +66,42 @@
 #               /proc could not be read — for UNKNOWN_SAMPLES in a row. An
 #               unreachable host is not a failed deploy; it is a host nobody
 #               has looked at. A human decides.                         exit 4
+#
+# ── A RESTART IS NOT A DEATH ────────────────────────────────────────────────
+# Measured on node4 (7200rpm, 2026-09-10 22:03Z). ship activated the candidate,
+# systemd stopped the old process, and for a few seconds the unit had no
+# MainPID at all. The observer read that as exists=0 three polls running and
+# said CRASHED after 30 seconds. The journal for the same 30 seconds reads
+# `Starting` -> `Stopped` -> `Starting`, and 112 seconds later `Started`: a
+# Restart=always unit re-entering a Type=notify boot over a cold datadir. The
+# node was healthy and at the tip. The verdict rolled a good binary off a
+# working box, which is the same defect this file was written to remove — the
+# clock just moved from "how long until healthy" to "how many polls until a
+# pid reappears".
+#
+# exists=0 alone therefore cannot convict. It answers "is there a process
+# right now", and during any managed restart the honest answer is no. What
+# separates gone from restarting is the UNIT MANAGER's own state, which is why
+# every observation now carries it:
+#
+#   state=activating   systemd owns the gap — a queued restart, an auto-restart
+#   sub=auto-restart   backoff, or a Type=notify boot that has not reached
+#   sub=start          READY=1 yet. PENDING. The window and the silence limit
+#                      still bound it; nothing here waits forever.
+#   state=failed       systemd gave up, or the unit is stopped and nothing is
+#   state=inactive     bringing it back. That is a death, and it convicts on
+#                      CRASH_SAMPLES exactly as an absent pid always did.
+#   nrestarts=<n>      NRestarts, systemd's own count of AUTOMATIC restarts.
+#                      A crash loop that is quick enough to show exists=0 on
+#                      every poll never shows a changing pid, so this counter
+#                      is the only witness to it: more than RESTART_BOUND of
+#                      them inside one window is CRASHED, whatever the state
+#                      word says at the instant we look.
+#
+# A missing state field — an old transcript, or a box whose manager would not
+# answer — reads exactly as the code read before this paragraph existed:
+# exists=0 counts toward CRASH_SAMPLES. The new evidence can only ever excuse
+# a disappearance that systemd positively claims to be managing.
 #
 # Fail-safe direction here is the OPPOSITE of a lint gate. A lint gate that
 # cannot see must fail closed. A rollback that cannot see must NOT fire: the
@@ -395,11 +436,58 @@ ship_rpc_probe() {
     timeout "$2" "$1" status >/dev/null 2>&1
 }
 
+# ── unit state (pure text in, three fields out, so a fixture can pin it) ────
+# `systemctl show` prints unordered `Key=Value` lines and simply omits a key
+# it does not know, so every field is looked up by name and every absence has
+# a value: `-` for a word nobody supplied, 0 for a counter this systemd is too
+# old to keep. Neither can be confused with a real answer, and neither may
+# contain a space — the observation line is space separated.
+ship_unit_state_fields_from_text() {
+    _ship_show="${1:-}"
+    _ship_as="$(printf '%s\n' "$_ship_show" |
+        sed -n 's/^ActiveState=\([^ ]*\).*$/\1/p' | sed -n 1p)"
+    _ship_ss="$(printf '%s\n' "$_ship_show" |
+        sed -n 's/^SubState=\([^ ]*\).*$/\1/p' | sed -n 1p)"
+    _ship_nr="$(printf '%s\n' "$_ship_show" |
+        sed -n 's/^NRestarts=\([0-9][0-9]*\).*$/\1/p' | sed -n 1p)"
+    [ -n "$_ship_as" ] || _ship_as=-
+    [ -n "$_ship_ss" ] || _ship_ss=-
+    [ -n "$_ship_nr" ] || _ship_nr=0
+    printf 'state=%s sub=%s nrestarts=%s\n' "$_ship_as" "$_ship_ss" "$_ship_nr"
+}
+
+# ship_unit_state_fields <unit> — the same three fields, asked of the live user
+# manager. A manager that cannot answer degrades to `state=- sub=- nrestarts=0`,
+# which is precisely the pre-existing behaviour: no excuse for an absent pid.
+ship_unit_state_fields() {
+    ship_unit_state_fields_from_text "$(systemctl --user show "$1" \
+        -p ActiveState -p SubState -p NRestarts 2>/dev/null || true)"
+}
+
+# ship_state_is_pending <state-word> — is the unit manager itself responsible
+# for the process being absent right now? Only its own transitional words say
+# so. `active` with no pid is NOT pending: that is a unit whose main process
+# died under a manager that is not restarting it.
+ship_state_is_pending() {
+    case "$1" in
+        activating|reloading|refreshing) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ── observation line ────────────────────────────────────────────────────────
 # One line, space separated key=value, values never contain a space:
 #
 #   observed=<0|1> exists=<0|1> pid=<n> start=<n> sha=<hex|-> \
-#   ident=<yes|no> rpc=<ok|no> cpu=<n> blkio=<n> io=<n>
+#   ident=<yes|no> rpc=<ok|no> cpu=<n> blkio=<n> io=<n> \
+#   state=<word|-> sub=<word|-> nrestarts=<n>
+#
+# The last three are an APPEND-ONLY extension, and the extension went here
+# rather than into a second channel on purpose: one line is what crosses the
+# wire, and a verdict that had to correlate two of them could be handed a
+# matched pair only by luck. Every reader looks fields up by name, so a line
+# written before they existed still parses — it simply reports no unit state,
+# which is the pre-existing behaviour and never an excuse for an absent pid.
 #
 # observed=0 is the ONLY thing that means "no evidence" and it is never
 # confused with exists=0, which is a positive statement that the box looked
@@ -454,23 +542,33 @@ ship_observe() {
     _ship_unit="$1"; _ship_want_sha="$2"; _ship_want_src="$3"
     _ship_want_commit="$4"; _ship_budget="$5"
 
+    # Asked BEFORE the pid, so an absent pid always arrives together with the
+    # manager's own account of why it is absent. Asking afterwards would race
+    # the transition these fields exist to explain.
+    _ship_unit_fields="$(ship_unit_state_fields "$_ship_unit")"
+
     _ship_pid="$(systemctl --user show "$_ship_unit" -p MainPID --value 2>/dev/null)" || {
         ship_no_evidence_line
         return 0
     }
     case "$_ship_pid" in
         ''|*[!0-9]*|0)
-            printf 'observed=1 exists=0 pid=0 start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0\n'
+            printf 'observed=1 exists=0 pid=0 start=0 sha=- ident=no rpc=no cpu=0 blkio=0 io=0 %s\n' \
+                "$_ship_unit_fields"
             return 0
             ;;
     esac
+    # The reader answers the five process facts; the unit fields are appended
+    # to whichever reader ran, so both kernels emit one line of the same shape
+    # and a reader stays a straight line from its own sources.
     if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-        ship_observe_darwin "$_ship_pid" "$_ship_want_sha" "$_ship_want_src" \
-            "$_ship_want_commit" "$_ship_budget"
+        _ship_read="$(ship_observe_darwin "$_ship_pid" "$_ship_want_sha" \
+            "$_ship_want_src" "$_ship_want_commit" "$_ship_budget")"
     else
-        ship_observe_proc "$_ship_pid" "$_ship_want_sha" "$_ship_want_src" \
-            "$_ship_want_commit" "$_ship_budget"
+        _ship_read="$(ship_observe_proc "$_ship_pid" "$_ship_want_sha" \
+            "$_ship_want_src" "$_ship_want_commit" "$_ship_budget")"
     fi
+    printf '%s %s\n' "$_ship_read" "$_ship_unit_fields"
     return 0
 }
 
@@ -601,7 +699,14 @@ ship_rpc_budget() {
 # ── the classifier ──────────────────────────────────────────────────────────
 # ship_verdict <qualified> <observed> <exists> <silent_for> <silence_limit> \
 #              <unstable_streak> <crash_samples> <unknown_streak> \
-#              <unknown_samples> <window_expired> <advances>
+#              <unknown_samples> <window_expired> <advances> \
+#              [restarts_in_window] [restart_bound]
+#
+# The last two are optional and default to "no restart evidence", so a caller
+# written against the eleven-argument form gets exactly the answers it always
+# got. They carry systemd's NRestarts delta since the first observation of
+# THIS window — never its lifetime total, which would convict a unit for
+# crashes that predate the candidate.
 #
 # Nothing in here is a duration except silent_for, and silent_for measures the
 # SUBJECT (how long it has been still) rather than the observer's patience.
@@ -618,8 +723,16 @@ ship_verdict() {
     _ship_unk="$8"; _ship_unkl="$9"
     shift 9
     _ship_we="$1"; _ship_adv="$2"
+    _ship_rex="${3:-0}"; _ship_rbound="${4:-0}"
 
     if [ "$_ship_q" -eq 1 ]; then printf 'QUALIFIED\n'; return 0; fi
+    # A crash loop fast enough to be absent at every poll never shows a
+    # changing pid, so systemd's own restart count is the only witness to it.
+    # A bound of 0 means "no restart evidence was supplied", not "one restart
+    # convicts": the caller passes a positive bound or nothing.
+    if [ "$_ship_rbound" -gt 0 ] && [ "$_ship_rex" -gt "$_ship_rbound" ]; then
+        printf 'CRASHED\n'; return 0
+    fi
     if [ "$_ship_ust" -ge "$_ship_ustl" ]; then printf 'CRASHED\n'; return 0; fi
     if [ "$_ship_unk" -ge "$_ship_unkl" ]; then printf 'UNKNOWN\n'; return 0; fi
     if [ "$_ship_obs" -eq 1 ] && [ "$_ship_ex" -eq 1 ] &&
@@ -702,6 +815,12 @@ ship_deploy_local_verdict_rc() {
 #   SHIP_AWAIT_CRASH_SAMPLES   consecutive absent/unstable observations.
 #   SHIP_AWAIT_UNKNOWN_SAMPLES consecutive no-evidence observations.
 #   SHIP_AWAIT_RPC_BUDGETS     escalating `status` timeouts.
+#   SHIP_AWAIT_RESTART_BOUND   automatic restarts tolerated inside the window.
+#                              Deliberately NOT a ZCL_ override plumbed from
+#                              ship.sh: the remote leg is reached over ssh,
+#                              which forwards no environment, so an override
+#                              only one leg could see would let the two
+#                              machines answer the same box differently.
 #
 # Prints evidence, returns ship_verdict_code, and leaves SHIP_AWAIT_LAST_* set.
 ship_await() {
@@ -713,6 +832,7 @@ ship_await() {
     _ship_crash_n="${SHIP_AWAIT_CRASH_SAMPLES:-3}"
     _ship_unknown_n="${SHIP_AWAIT_UNKNOWN_SAMPLES:-5}"
     _ship_budgets="${SHIP_AWAIT_RPC_BUDGETS:-5 20 60}"
+    _ship_restart_bound="${SHIP_AWAIT_RESTART_BOUND:-3}"
 
     _ship_t0="$(date +%s)"
     _ship_window_end=$((_ship_t0 + _ship_window))
@@ -725,6 +845,9 @@ ship_await() {
     _ship_advances=0
     _ship_unstable=0
     _ship_unknown=0
+    _ship_restart_base=
+    _ship_restarts=0
+    _ship_pending=0
     _ship_attempt=0
     _ship_line=
     _ship_verdict=WATCHING
@@ -744,6 +867,17 @@ ship_await() {
 
         if [ "$_ship_observed" -eq 1 ]; then
             _ship_unknown=0
+            # Restarts are counted from the FIRST observation of this window,
+            # never from the unit's lifetime total: the candidate is not on
+            # trial for a crash that happened last week. A counter that went
+            # backwards means the unit was re-registered, so the baseline
+            # moves with it rather than the arithmetic going negative.
+            _ship_nrestarts="$(ship_field_num "$_ship_line" nrestarts)"
+            if [ -z "$_ship_restart_base" ] ||
+               [ "$_ship_nrestarts" -lt "$_ship_restart_base" ]; then
+                _ship_restart_base="$_ship_nrestarts"
+            fi
+            _ship_restarts=$((_ship_nrestarts - _ship_restart_base))
             if [ "$_ship_exists" -eq 1 ]; then
                 _ship_pid="$(ship_field "$_ship_line" pid)"
                 _ship_start="$(ship_field "$_ship_line" start)"
@@ -775,7 +909,18 @@ ship_await() {
                     _ship_qualified=1
                 fi
             else
-                _ship_unstable=$((_ship_unstable + 1))
+                # No process right now. That is a DEATH only when nothing is
+                # bringing it back: while the manager reports the unit
+                # activating, the gap belongs to systemd — a queued restart,
+                # an auto-restart backoff, or a Type=notify boot that has not
+                # reached READY=1. The window, the silence limit and the
+                # restart bound all still run, so a unit that never returns is
+                # still named; it is just never named CRASHED for restarting.
+                if ship_state_is_pending "$(ship_field "$_ship_line" state)"; then
+                    _ship_pending=$((_ship_pending + 1))
+                else
+                    _ship_unstable=$((_ship_unstable + 1))
+                fi
             fi
         else
             _ship_unknown=$((_ship_unknown + 1))
@@ -789,7 +934,8 @@ ship_await() {
             "$_ship_exists" "$_ship_silent" "$_ship_silence" \
             "$_ship_unstable" "$_ship_crash_n" \
             "$_ship_unknown" "$_ship_unknown_n" \
-            "$_ship_expired" "$_ship_advances")"
+            "$_ship_expired" "$_ship_advances" \
+            "$_ship_restarts" "$_ship_restart_bound")"
         if [ "$_ship_verdict" != WATCHING ]; then break; fi
         sleep "$_ship_poll"
     done
@@ -800,14 +946,17 @@ ship_await() {
     SHIP_AWAIT_LAST_SILENT="$_ship_silent"
     SHIP_AWAIT_LAST_ADVANCES="$_ship_advances"
     SHIP_AWAIT_LAST_ATTEMPTS="$_ship_attempt"
+    SHIP_AWAIT_LAST_RESTARTS="$_ship_restarts"
+    SHIP_AWAIT_LAST_PENDING="$_ship_pending"
 
     # Evidence is printed for EVERY verdict, not only the destructive ones: a
     # rollback that cannot show what justified it is indistinguishable from a
     # rollback that fired on a clock, which is the defect being removed.
-    printf '%s: %s after %ss (%s observations, %s observed advances, still for %ss; window %ss, silence limit %ss)\n' \
+    printf '%s: %s after %ss (%s observations, %s observed advances, still for %ss; %s restarts and %s managed-restart observations; window %ss, silence limit %ss, restart bound %s)\n' \
         "$_ship_label" "$_ship_verdict" "$SHIP_AWAIT_LAST_ELAPSED" \
         "$_ship_attempt" "$_ship_advances" "$_ship_silent" \
-        "$_ship_window" "$_ship_silence"
+        "$_ship_restarts" "$_ship_pending" \
+        "$_ship_window" "$_ship_silence" "$_ship_restart_bound"
     printf '%s: last observation: %s\n' "$_ship_label" "$_ship_line"
 
     return "$(ship_verdict_code "$_ship_verdict")"
