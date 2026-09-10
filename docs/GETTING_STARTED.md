@@ -147,6 +147,8 @@ make -j"$(getconf _NPROCESSORS_ONLN)" build-only
 
 **Where the binaries land:** `build/bin/z23` (the node),
 `build/bin/zclassic-cli` (RPC client), `build/bin/zcl-rpc` (RPC helper).
+`make -j4 z23` builds only `z23`; `zclassic-cli` and `zcl-rpc` need
+`make -j4 all`.
 
 **Sanity check:**
 
@@ -647,6 +649,24 @@ build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -port=8035 -rpcport=18234
 is a worked example of the same pattern: its own datadir, `-port=8035`,
 `-rpcport=18234`, `-addnode=127.0.0.1:8034`, `-nobgvalidation` for a faster
 boot — a template to copy, not something to install as-is.)
+
+A node started this way (no systemd unit) is stopped with the same binary,
+run as its own RPC client against the matching `-datadir`/`-rpcport`:
+
+```bash
+build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -rpcport=18234 stop
+```
+
+**First run without touching mainnet:** the command above dials real
+mainnet peers immediately — there is no flag that makes it stay offline on
+its own. To sanity-check a fresh build without any network I/O, run a
+`-regtest` node pinned to a dead connect sink instead of real peers, the
+same pattern `tools/scripts/isolated_node_env.sh` uses for CI:
+
+```bash
+build/bin/z23 -datadir="$HOME/.zclassic-c23-regtest" -regtest \
+    -port=39001 -rpcport=39002 -connect=127.0.0.1:39999
+```
 
 ### The fast dev loop
 
