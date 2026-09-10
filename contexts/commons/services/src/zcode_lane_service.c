@@ -363,6 +363,75 @@ struct zcl_result zcode_accepted_work_find(
     return projection;
 }
 
+static bool accepted_exact_root(const uint8_t root[32], const char *hex)
+{
+    uint8_t expected[32];
+    return hex && zcl_hex_decode_lower(hex, expected, sizeof(expected)) &&
+        memcmp(root, expected, sizeof(expected)) == 0;
+}
+
+static struct zcl_result accepted_exact_action(
+    struct node_db *ndb, const char *workspace, const char *action_id,
+    const char *task_root, const char *candidate_root, const char *policy_root,
+    const uint8_t proof_root[32], int64_t now)
+{
+    struct db_build_action action;
+    if (!db_build_action_find(ndb, action_id, &action) ||
+        strcmp(action.task_root_sha3, task_root) != 0 ||
+        strcmp(action.candidate_root_sha3, candidate_root) != 0 ||
+        strcmp(action.proof_policy_root_sha3, policy_root) != 0)
+        return ZCL_ERR(-1, "accepted-work-exact-action-mismatch");
+    struct build_fabric_proof_evaluation evaluation = {0};
+    struct zcl_result result = build_fabric_proof_evaluate_readonly(
+        ndb, workspace, action_id, now, &evaluation);
+    if (!result.ok) return result;
+    if (!evaluation.policy_satisfied ||
+        !accepted_exact_root(proof_root, evaluation.proof_set_root_sha3))
+        return ZCL_ERR(-1, "accepted-work-proof-set-or-policy-mismatch");
+    return ZCL_OK;
+}
+
+static bool accepted_exact_inputs(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *action_id, int64_t now, uint8_t root[32])
+{
+    uint8_t action_root[32];
+    return ndb && ndb->open && workspace && accepted_root && action_id &&
+        now > 0 && zcl_hex_decode_lower(accepted_root, root, 32) &&
+        zcl_hex_decode_lower(action_id, action_root, sizeof(action_root));
+}
+
+struct zcl_result zcode_accepted_work_qualify_readonly(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *candidate_root, const char *policy_root,
+    const char *action_id, int64_t now, struct zcode_accepted_work_status *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    uint8_t root[32];
+    if (!out || !accepted_exact_inputs(ndb, workspace, accepted_root,
+                                      action_id, now, root))
+        return ZCL_ERR(-1, "accepted-work-input-invalid");
+    struct zcode_accepted_work_status staged = {0};
+    if (!vcs_zcode_accepted_work_resolve(workspace, root, now, &staged.accepted))
+        return ZCL_ERR(-1, "accepted-work-exact-chain-unavailable");
+    if (!accepted_exact_root(staged.accepted.task_root, task_root) ||
+        !accepted_exact_root(staged.accepted.candidate_root, candidate_root) ||
+        !accepted_exact_root(staged.accepted.proof_policy_root, policy_root) ||
+        staged.accepted.proven.created_unix > now)
+        return ZCL_ERR(-1, "accepted-work-exact-context-mismatch");
+    struct zcl_result result = accepted_exact_action(ndb, workspace, action_id,
+        task_root, candidate_root, policy_root, staged.accepted.proof_set_root, now);
+    if (!result.ok) return result;
+    if (!accepted_signer_current(ndb, staged.accepted.expected_signer, now,
+                                staged.worker_id))
+        return ZCL_ERR(-1, "accepted-work-signer-unapproved-expired-or-revoked");
+    result = accepted_projection_check(ndb, &staged.accepted, false, NULL);
+    if (!result.ok) return result;
+    memcpy(staged.action_id, action_id, sizeof(staged.action_id));
+    *out = staged;
+    return ZCL_OK;
+}
+
 static struct zcl_result lane_prior_validate(
     const char *workspace, const struct db_zcode_lane_receipt *prior,
     const struct vcs_zcode_task_v1 *task,

@@ -3,10 +3,13 @@
 
 #include "test/test_core.h"
 #include "base/hex.h"
+#include "base/cleanse.h"
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "command/native_zcode_discovery.h"
 #include "command/native_zcode_join.h"
+#include "command/native_zcode_work_map.h"
+#include "sha3/sha3.h"
 #include "config/command_catalog.h"
 #include "config/boot_zcode_async_proof.h"
 #include "controllers/rpc_client.h"
@@ -18,6 +21,7 @@
 #include "platform/environment_compat.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
+#include "services/build_fabric_worker.h"
 #include "services/zcode_lane_service.h"
 #include "rpc/server.h"
 #include "storage/event_log.h"
@@ -2336,6 +2340,353 @@ static bool zpd_peer_pointer_board(
     return ok;
 }
 
+static bool zpd_future_acceptance(const char *workspace, const char *datadir,
+    const struct zcode_accepted_work_status *accepted, int64_t now, char root_hex[65])
+{
+    struct db_build_worker worker;
+    uint8_t secret[32] = {0}, pubkey[32] = {0}, root[32];
+    struct vcs_zcode_lane_receipt_v1 future = accepted->accepted.proven;
+    future.created_unix = now + 3600;
+    bool sealed = build_fabric_worker_identity_load(
+        datadir, &worker, secret, pubkey).ok &&
+        vcs_zcode_lane_receipt_seal(&future, secret, pubkey) == VCS_ZCODE_DEV_OK;
+    memory_cleanse(secret, sizeof(secret));
+    uint8_t wire[VCS_ZCODE_LANE_WIRE_BYTES];
+    if (!sealed || vcs_zcode_lane_receipt_id(&future, root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_lane_receipt_serialize(&future, wire) != VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(workspace, root, wire, sizeof(wire))) return false;
+    struct vcs_zcode_accepted_work_v1 checked;
+    if (!vcs_zcode_accepted_work_resolve(workspace, root, now, &checked)) return false;
+    zcl_hex_encode(root, sizeof(root), root_hex);
+    return true;
+}
+
+static bool zpd_exact_acceptance_refuses(
+    struct node_db *ndb, const char *workspace,
+    const struct zcode_accepted_work_status *expected, int tamper, int64_t now)
+{
+    char tuple[5][65];
+    zcl_hex_encode(expected->accepted.accepted_work_root, 32, tuple[0]);
+    zcl_hex_encode(expected->accepted.task_root, 32, tuple[1]);
+    zcl_hex_encode(expected->accepted.candidate_root, 32, tuple[2]);
+    zcl_hex_encode(expected->accepted.proof_policy_root, 32, tuple[3]);
+    memcpy(tuple[4], expected->action_id, sizeof(tuple[4]));
+    if (tamper >= 0 && tamper < 5)
+        tuple[tamper][0] = tuple[tamper][0] == '0' ? '1' : '0';
+    struct zcode_accepted_work_status result, empty = {0};
+    memset(&result, 0xa5, sizeof(result));
+    int changes = sqlite3_total_changes(ndb->db);
+    struct zcl_result qualified = zcode_accepted_work_qualify_readonly(
+        ndb, workspace, tuple[0], tuple[1], tuple[2], tuple[3], tuple[4], now, &result);
+    return !qualified.ok && memcmp(&result, &empty, sizeof(result)) == 0 &&
+        sqlite3_total_changes(ndb->db) == changes;
+}
+
+static bool zpd_exact_tuple_refuses(struct node_db *ndb, const char *workspace,
+    const struct zcode_accepted_work_status *expected)
+{
+    for (int tamper = 0; tamper < 5; tamper++)
+        if (!zpd_exact_acceptance_refuses(ndb, workspace, expected, tamper,
+                                        (int64_t)platform_time_wall_unix())) return false;
+    return true;
+}
+
+static bool zpd_future_path(char *path, size_t capacity,
+    const char *workspace, const char *root)
+{
+    int n = snprintf(path, capacity, "%s/.zvcs/objects/%.2s/%s",
+                     workspace, root, root + 2);
+    return n > 0 && (size_t)n < capacity;
+}
+
+static bool zpd_exact_projection_refuses(struct node_db *ndb, const char *workspace,
+    const struct zcode_accepted_work_status *expected, const char *mutation)
+{
+    if (!node_db_begin(ndb)) return false;
+    bool changed = node_db_exec(ndb, mutation);
+    bool refused = changed && zpd_exact_acceptance_refuses(ndb, workspace,
+        expected, -1, (int64_t)platform_time_wall_unix());
+    bool restored = node_db_rollback(ndb);
+    return restored && refused;
+}
+
+static bool zpd_exact_proof_drift_refuses(struct node_db *ndb, const char *workspace,
+    const struct zcode_accepted_work_status *expected)
+{
+    if (!node_db_begin(ndb)) return false;
+    bool changed = node_db_exec(ndb,
+        "UPDATE build_receipts SET work_receipt_sha3='' WHERE action_id IN "
+        "(SELECT action_id FROM build_actions WHERE kind='c23.review.v1')");
+    struct build_fabric_proof_evaluation proof = {0};
+    int64_t now = (int64_t)platform_time_wall_unix();
+    struct zcl_result result = build_fabric_proof_evaluate_readonly(
+        ndb, workspace, expected->action_id, now, &proof);
+    char accepted_proof[65];
+    zcl_hex_encode(expected->accepted.proof_set_root, 32, accepted_proof);
+    bool different_qualified = changed && result.ok && proof.policy_satisfied &&
+        proof.proof_set_root_sha3[0] &&
+        strcmp(accepted_proof, proof.proof_set_root_sha3) != 0;
+    bool refused = zpd_exact_acceptance_refuses(ndb, workspace, expected, -1, now);
+    bool restored = node_db_rollback(ndb);
+    return restored && different_qualified && refused;
+}
+
+static bool zpd_accepted_map_store(const char *workspace,
+    const struct zcode_accepted_work_status *accepted, char root_hex[65])
+{
+    struct zcl_work_map_node nodes[ZCL_WORK_MAP_MAX_NODES] = {0};
+    for (size_t i = 0; i < ZCL_WORK_MAP_MAX_NODES; i++) {
+        struct vcs_zcode_task_v1 task = accepted->accepted.task;
+        if (i != 2) memset(task.goal_root, (int)(i + 1), 32);
+        uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+        if (vcs_zcode_task_root(&task, nodes[i].task_root) != VCS_ZCODE_DEV_OK ||
+            vcs_zcode_task_serialize(&task, task_wire) != VCS_ZCODE_DEV_OK ||
+            !vcs_object_put_addressed(workspace, nodes[i].task_root,
+                task_wire, sizeof(task_wire))) return false;
+        nodes[i].kind = i < 2 ? (uint16_t)(i + 1) : ZCL_WORK_MAP_LOOP;
+        nodes[i].parent = i == 0 ? ZCL_WORK_MAP_NO_PARENT : i == 1 ? 0 : 1;
+        if (i >= 2 && i < 6) {
+            nodes[i].dependency_count = 16;
+            for (size_t j = 0; j < 16; j++) nodes[i].dependencies[j] = (uint16_t)(180 + j);
+        }
+    }
+    uint8_t wire[ZCL_WORK_MAP_WIRE_MAX], root[32];
+    size_t length = 0;
+    if (zcl_work_map_serialize(nodes, ZCL_WORK_MAP_MAX_NODES,
+            wire, sizeof(wire), &length) != ZCL_WORK_MAP_OK)
+        return false;
+    sha3_256(wire, length, root);
+    if (!vcs_object_put_addressed(workspace, root, wire, length)) return false;
+    zcl_hex_encode(root, sizeof(root), root_hex);
+    return true;
+}
+
+static bool zpd_accepted_map_input(struct json_value *input,
+    const char *workspace, const char *datadir,
+    const char *map_root, const char *accepted_root, const char *action_id, int mode)
+{
+    bool ok = json_push_kv_str(input, "workspace", workspace) &&
+        json_push_kv_str(input, "map_root", map_root) &&
+        json_push_kv_int(input, "offset", 2);
+    if (mode != 0)
+        ok = ok && json_push_kv_str(input, "action_id", action_id) &&
+            json_push_kv_int(input, "node_index", 2);
+    if (mode == 1)
+        ok = ok && json_push_kv_int(input, "accepted_work_root", 7);
+    else
+        ok = ok && json_push_kv_str(input, "accepted_work_root",
+            mode == 2 ? "bad-root" : mode == 3 ? map_root : accepted_root);
+    if (mode != 4)
+        ok = ok && json_push_kv_str(input, "proof_datadir", datadir);
+    return ok;
+}
+
+static bool zpd_accepted_map_refusal(const char *workspace, const char *datadir,
+    const char *map_root, const char *accepted_root, const char *action_id, int mode)
+{
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = zpd_accepted_map_input(&input, workspace, datadir,
+        map_root, accepted_root, action_id, mode);
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+    if (ok) zcl_native_handle_zcode_work_map(&request, &reply);
+    if (mode < 3) {
+        ok = ok && reply.status == ZCL_COMMAND_STATUS_FAILED;
+    } else {
+        const struct json_value *selected = json_get(&reply.data, "selected_evidence");
+        const struct json_value *observed = json_get(selected, "accepted_work");
+        ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED && observed &&
+            json_get_bool(json_get(observed, "qualified")) == (mode == 6) &&
+            (mode == 6 ? json_get(observed, "root") != NULL :
+                !json_get(observed, "root") && json_get(observed, "reason")) &&
+            !json_get_bool(json_get(selected, "acceptance_qualified"));
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool zpd_accepted_map_invalidation(struct node_db *ndb,
+    const char *workspace, const char *datadir, const char *map_root,
+    const char *accepted_root, const struct zcode_accepted_work_status *accepted)
+{
+    struct db_build_worker worker;
+    if (!db_build_worker_find(ndb, accepted->worker_id, &worker)) return false;
+    int64_t now = (int64_t)platform_time_wall_unix();
+    if (!build_fabric_worker_revoke(ndb, worker.worker_id, now).ok) return false;
+    bool refused = zpd_accepted_map_refusal(workspace, datadir, map_root,
+        accepted_root, accepted->action_id, 5);
+    bool restored = build_fabric_worker_approve(ndb, &worker, now).ok;
+    return restored && refused && zpd_accepted_map_refusal(workspace, datadir,
+        map_root, accepted_root, accepted->action_id, 6);
+}
+
+static bool zpd_accepted_map_page_input(struct json_value *page,
+    const struct json_value *input, size_t offset)
+{
+    bool copied = true;
+    for (size_t i = 0; copied && i < json_size(input); i++) {
+        if (strcmp(input->keys[i], "offset") == 0) continue;
+        copied = json_push_kv(page, input->keys[i], &input->children[i]);
+    }
+    return copied && json_push_kv_int(page, "offset", (int64_t)offset);
+}
+
+static bool zpd_accepted_map_page_valid(const struct zcl_command_reply *reply,
+    size_t returned, size_t visited)
+{
+    const struct json_value *selected = json_get(&reply->data, "selected_evidence");
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        json_write(&reply->data, NULL, 0) < 4096 && returned > 0 && returned <= 4 &&
+        returned <= ZCL_WORK_MAP_MAX_NODES - visited &&
+        json_get_bool(json_get(json_get(selected, "accepted_work"), "qualified")) &&
+        !json_get_bool(json_get(selected, "acceptance_qualified"));
+}
+
+static bool zpd_accepted_map_pages(struct json_value *input)
+{
+    size_t visited = 0;
+    while (visited < ZCL_WORK_MAP_MAX_NODES) {
+        struct json_value page_input;
+        json_init(&page_input); json_set_object(&page_input);
+        bool copied = zpd_accepted_map_page_input(&page_input, input, visited);
+        if (!copied) { json_free(&page_input); return false; }
+        struct zcl_command_request request = { .input = &page_input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        json_free(&page_input);
+        const struct json_value *rows = json_get(&reply.data, "nodes");
+        size_t returned = json_size(rows);
+        bool ok = zpd_accepted_map_page_valid(&reply, returned, visited);
+        for (size_t i = 0; ok && i < returned; i++)
+            ok = json_get_int(json_get(json_at(rows, i), "index")) == (int64_t)(visited + i);
+        visited += returned;
+        ok = ok && json_get_int(json_get(&reply.data, "next_offset")) ==
+            (visited == ZCL_WORK_MAP_MAX_NODES ? -1 : (int64_t)visited);
+        zcl_command_reply_free(&reply);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static int zpd_accepted_map_observation(struct node_db *ndb, const char *workspace,
+    const char *datadir, const struct zcode_accepted_work_status *accepted)
+{
+    int failures = 0;
+    TEST("work map qualifies the exact selected acceptance without awarding loop completion") {
+        char map_root[65], accepted_root[65];
+        ASSERT(zpd_accepted_map_store(workspace, accepted, map_root));
+        zcl_hex_encode(accepted->accepted.accepted_work_root, 32, accepted_root);
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", workspace));
+        ASSERT(json_push_kv_str(&input, "proof_datadir", datadir));
+        ASSERT(json_push_kv_str(&input, "map_root", map_root));
+        ASSERT(json_push_kv_str(&input, "action_id", accepted->action_id));
+        ASSERT(json_push_kv_str(&input, "accepted_work_root", accepted_root));
+        ASSERT(json_push_kv_int(&input, "node_index", 2));
+        ASSERT(json_push_kv_int(&input, "offset", 2));
+        struct zcl_command_request request = { .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.zcode_work_map.v1");
+        int changes = sqlite3_total_changes(ndb->db);
+        zcl_native_handle_zcode_work_map(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *selected = json_get(&reply.data, "selected_evidence");
+        const struct json_value *observation = json_get(selected, "accepted_work");
+        ASSERT(json_get_bool(json_get(observation, "qualified")));
+        ASSERT_STR_EQ(json_get_str(json_get(observation, "root")), accepted_root);
+        ASSERT(!json_get_bool(json_get(selected, "acceptance_qualified")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(json_get(&reply.data, "nodes"), 0), "status")), "UNKNOWN");
+        ASSERT(json_write(&reply.data, NULL, 0) < 4096);
+        ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+        zcl_command_reply_free(&reply);
+        ASSERT(zpd_accepted_map_pages(&input));
+        json_free(&input);
+        for (int mode = 0; mode < 5; mode++)
+            ASSERT(zpd_accepted_map_refusal(workspace, datadir, map_root,
+                accepted_root, accepted->action_id, mode));
+        ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+        ASSERT(zpd_accepted_map_invalidation(ndb, workspace, datadir, map_root,
+            accepted_root, accepted));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zpd_exact_acceptance_checks(struct node_db *acceptance_db,
+    const char *root, const char *candidate_source_hex, const char *accepted_root_hex,
+    const char *zbuild_datadir, const struct zcode_accepted_work_status *accepted_status)
+{
+    int failures = 0;
+    TEST("exact acceptance is bounded, readonly and current") {
+        /* A map observation must qualify existing acceptance without writes. */
+        int acceptance_changes = sqlite3_total_changes(acceptance_db->db);
+        ASSERT(node_db_exec(acceptance_db, "PRAGMA query_only=ON"));
+        struct zcode_accepted_work_status readonly_accepted;
+        struct zcl_result readonly_found = zcode_accepted_work_find(
+            acceptance_db, root, candidate_source_hex,
+            (int64_t)platform_time_wall_unix(), false, &readonly_accepted);
+        bool query_only_restored = node_db_exec(
+            acceptance_db, "PRAGMA query_only=OFF");
+        ASSERT(query_only_restored);
+        ASSERT(readonly_found.ok);
+        ASSERT_EQ(sqlite3_total_changes(acceptance_db->db), acceptance_changes);
+
+        char exact_task[65], exact_candidate[65], exact_policy[65];
+        zcl_hex_encode(accepted_status->accepted.task_root, 32, exact_task);
+        zcl_hex_encode(accepted_status->accepted.candidate_root, 32, exact_candidate);
+        zcl_hex_encode(accepted_status->accepted.proof_policy_root, 32, exact_policy);
+        ASSERT(node_db_exec(acceptance_db, "PRAGMA query_only=ON"));
+        readonly_found = zcode_accepted_work_qualify_readonly(
+            acceptance_db, root, accepted_root_hex, exact_task, exact_candidate,
+            exact_policy, accepted_status->action_id,
+            (int64_t)platform_time_wall_unix(), &readonly_accepted);
+        query_only_restored = node_db_exec(acceptance_db, "PRAGMA query_only=OFF");
+        ASSERT(query_only_restored);
+        ASSERT(readonly_found.ok);
+        ASSERT_EQ(sqlite3_total_changes(acceptance_db->db), acceptance_changes);
+        ASSERT(!readonly_accepted.projection_rebuilt);
+        ASSERT_STR_EQ(readonly_accepted.action_id, accepted_status->action_id);
+        const struct zcode_accepted_work_status exact_accepted = readonly_accepted;
+        failures += zpd_accepted_map_observation(acceptance_db, root,
+            zbuild_datadir, &exact_accepted);
+        char future_root[65];
+        int64_t exact_now = (int64_t)platform_time_wall_unix();
+        ASSERT(zpd_future_acceptance(root, zbuild_datadir,
+            &exact_accepted, exact_now, future_root));
+        char future_path[1024];
+        ASSERT(zpd_future_path(future_path, sizeof(future_path), root, future_root));
+        memset(&readonly_accepted, 0xa5, sizeof(readonly_accepted));
+        readonly_found = zcode_accepted_work_qualify_readonly(acceptance_db, root,
+            future_root, exact_task, exact_candidate, exact_policy,
+            exact_accepted.action_id, exact_now, &readonly_accepted);
+        int future_removed = unlink(future_path);
+        ASSERT_EQ(future_removed, 0);
+        ASSERT(!readonly_found.ok);
+        ASSERT_STR_EQ(readonly_found.message, "accepted-work-exact-context-mismatch");
+        const struct zcode_accepted_work_status empty_accepted = {0};
+        ASSERT(memcmp(&readonly_accepted, &empty_accepted, sizeof(readonly_accepted)) == 0);
+        ASSERT(zpd_exact_tuple_refuses(acceptance_db, root, &exact_accepted));
+        ASSERT(zpd_exact_projection_refuses(acceptance_db, root, &exact_accepted,
+            "UPDATE build_workers SET expires_at=1"));
+        ASSERT(zpd_exact_projection_refuses(acceptance_db, root, &exact_accepted,
+            "DELETE FROM zcode_lane_receipts WHERE lane=1"));
+        ASSERT(zpd_exact_projection_refuses(acceptance_db, root, &exact_accepted,
+            "UPDATE build_receipts SET work_receipt_sha3=''"));
+        ASSERT(zpd_exact_proof_drift_refuses(acceptance_db, root, &exact_accepted));
+        ASSERT(exact_accepted.accepted.task.expires_unix > 0);
+        ASSERT(zpd_exact_acceptance_refuses(acceptance_db, root,
+            &exact_accepted, -1, exact_accepted.accepted.task.expires_unix));
+
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int zpd_test_work_start_license_filter(
     secp256k1_context *ctx, const uint8_t secret[32],
     const uint8_t pubkey[33])
@@ -4003,12 +4354,18 @@ static __attribute__((unused)) int zpd_test_work_start(void)
                        resolved_acceptance_hex);
         ASSERT(strcmp(resolved_acceptance_hex, accepted_root_hex) == 0);
 
+        failures += zpd_exact_acceptance_checks(&acceptance_db, root,
+            candidate_source_hex, accepted_root_hex, zbuild_datadir, &accepted_status);
+        const struct zcode_accepted_work_status exact_accepted = accepted_status;
+
         char accepted_worker_id[65];
         (void)snprintf(accepted_worker_id, sizeof(accepted_worker_id), "%s",
                        accepted_status.worker_id);
         ASSERT(build_fabric_worker_revoke(
                    &acceptance_db, accepted_worker_id,
                    (int64_t)platform_time_wall_unix()).ok);
+        ASSERT(zpd_exact_acceptance_refuses(&acceptance_db, root,
+            &exact_accepted, -1, (int64_t)platform_time_wall_unix()));
         ASSERT(!zcode_accepted_work_find(
                     &acceptance_db, root, candidate_source_hex,
                     (int64_t)platform_time_wall_unix(), false,
@@ -4024,12 +4381,16 @@ static __attribute__((unused)) int zpd_test_work_start(void)
             "UPDATE zcode_lane_receipts SET task_root_sha3="
             "'0101010101010101010101010101010101010101010101010101010101010101' "
             "WHERE lane=2"));
+        ASSERT(zpd_exact_acceptance_refuses(&acceptance_db, root,
+            &exact_accepted, -1, (int64_t)platform_time_wall_unix()));
         ASSERT(!zcode_accepted_work_find(
                     &acceptance_db, root, candidate_source_hex,
                     (int64_t)platform_time_wall_unix(), false,
                     &accepted_status).ok);
         ASSERT(node_db_exec(
             &acceptance_db, "DELETE FROM zcode_lane_receipts"));
+        ASSERT(zpd_exact_acceptance_refuses(&acceptance_db, root,
+            &exact_accepted, -1, (int64_t)platform_time_wall_unix()));
         ASSERT(!zcode_accepted_work_find(
                     &acceptance_db, root, candidate_source_hex,
                     (int64_t)platform_time_wall_unix(), false,

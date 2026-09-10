@@ -8,6 +8,7 @@
 #include "sha3/sha3.h"
 #include "vcs/vcs_object.h"
 #include "models/build_fabric.h"
+#include "services/zcode_lane_service.h"
 #include "vcs/zcode_dev.h"
 #include "platform/time_compat.h"
 
@@ -217,6 +218,7 @@ static bool map_observation(struct json_value *data, int64_t now)
 
 struct map_selection {
     const char *action_id;
+    const char *accepted_work_root;
     size_t node_index;
 };
 
@@ -225,11 +227,17 @@ static bool map_selection_parse(const struct json_value *input, size_t count,
 {
     const struct json_value *action = json_get(input, "action_id");
     const struct json_value *node = json_get(input, "node_index");
+    const struct json_value *accepted = json_get(input, "accepted_work_root");
     *selection = (struct map_selection){0};
-    if (!action && !node) return true;
+    if (!action && !node) return !accepted;
     if (!action || action->type != JSON_STR || !node) return false;
     selection->action_id = json_get_str(action);
     uint8_t root[32];
+    if (accepted) {
+        if (accepted->type != JSON_STR) return false;
+        selection->accepted_work_root = json_get_str(accepted);
+        if (!zcl_hex_decode_lower(selection->accepted_work_root, root, 32)) return false;
+    }
     return zcl_hex_decode_lower(selection->action_id, root, 32) &&
         map_page_number(input, "node_index", 0, ZCL_WORK_MAP_MAX_NODES,
                         &selection->node_index) && selection->node_index < count;
@@ -277,6 +285,48 @@ static bool map_selected_facts(struct json_value *observed, const char *workspac
             map_proof_retention(workspace, evaluation->proof_set_root_sha3));
 }
 
+static bool map_accepted_observation(struct json_value *observed,
+    struct node_db *ndb, const char *workspace,
+    const struct map_selection *selection, const struct db_build_action *action,
+    const struct build_fabric_proof_evaluation *evaluation,
+    struct zcl_result prerequisite, int64_t now)
+{
+    if (!selection->accepted_work_root) return true;
+    struct zcode_accepted_work_status accepted = {0};
+    struct zcl_result result = prerequisite;
+    if (result.ok)
+        result = zcode_accepted_work_qualify_readonly(ndb, workspace,
+            selection->accepted_work_root, action->task_root_sha3,
+            action->candidate_root_sha3, action->proof_policy_root_sha3,
+            selection->action_id, now, &accepted);
+    if (result.ok) {
+        char proof_root[65];
+        zcl_hex_encode(accepted.accepted.proof_set_root, 32, proof_root);
+        if (strcmp(proof_root, evaluation->proof_set_root_sha3) != 0)
+            result = ZCL_ERR(-1, "selected proof changed during acceptance observation");
+    }
+    struct json_value value;
+    json_init(&value); json_set_object(&value);
+    bool ok = json_push_kv_bool(&value, "qualified", result.ok) &&
+        json_push_kv_str(&value, "scope", "exact_selected_action");
+    if (result.ok)
+        ok = ok && json_push_kv_str(&value, "root", selection->accepted_work_root);
+    else
+        ok = ok && json_push_kv_str(&value, "reason", result.message);
+    ok = ok && json_push_kv(observed, "accepted_work", &value);
+    json_free(&value);
+    return ok;
+}
+
+static bool map_selected_identity(struct json_value *observed,
+    const struct map_selection *selection, int64_t now)
+{
+    return json_push_kv_int(observed, "node_index", (int64_t)selection->node_index) &&
+        json_push_kv_str(observed, "observation_scope", "selected_action") &&
+        json_push_kv_int(observed, "observed_unix", now) &&
+        json_push_kv_bool(observed, "acceptance_qualified", false);
+}
+
 static bool map_selected_observation(struct json_value *data,
     const char *workspace, const char *datadir,
     const struct zcl_work_map_node *nodes, const struct map_selection *selection,
@@ -294,18 +344,17 @@ static bool map_selected_observation(struct json_value *data,
         ? map_selected_read(&ndb, workspace, &nodes[selection->node_index],
             selection->action_id, now, &action, &evaluation)
         : ZCL_ERR(-1, "selected evidence ledger is unavailable");
-    zcl_native_node_db_close_readonly(&db, &ndb);
     struct json_value observed;
     json_init(&observed); json_set_object(&observed);
-    bool ok = json_push_kv_int(&observed, "node_index", (int64_t)selection->node_index) &&
-        json_push_kv_str(&observed, "observation_scope", "selected_action") &&
-        json_push_kv_int(&observed, "observed_unix", now) &&
-        json_push_kv_bool(&observed, "acceptance_qualified", false);
+    bool ok = map_selected_identity(&observed, selection, now);
     if (result.ok)
         ok = ok && map_selected_facts(&observed, workspace, &action, &evaluation);
     else
         ok = ok && json_push_kv_str(&observed, "evidence_resolution", "unavailable") &&
             json_push_kv_str(&observed, "reason", result.message);
+    ok = ok && map_accepted_observation(&observed, &ndb, workspace,
+        selection, &action, &evaluation, result, now);
+    zcl_native_node_db_close_readonly(&db, &ndb);
     ok = ok && json_push_kv(data, "selected_evidence", &observed);
     json_free(&observed);
     return ok;

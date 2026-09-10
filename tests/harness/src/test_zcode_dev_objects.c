@@ -3910,8 +3910,11 @@ static int test_zd_improve_command(void)
             VCS_ZCODE_DEV_OK);
         struct vcs_zcode_work_result_v1 mismatched_remote = remote_result;
         mismatched_remote.receipt.evidence_root[0] ^= 1u;
+        uint8_t mismatched_seed[32], mismatched_secret[32], mismatched_key[32];
+        zd_root(mismatched_seed, 99);
+        ed25519_keypair(mismatched_key, mismatched_secret, mismatched_seed);
         ASSERT_EQ(vcs_zcode_work_receipt_seal(
-            &mismatched_remote.receipt, remote_secret, remote_key),
+            &mismatched_remote.receipt, mismatched_secret, mismatched_key),
             VCS_ZCODE_DEV_OK);
         char mismatched_observed_id[65];
         ASSERT(build_fabric_receipt_observe_remote(
@@ -3936,6 +3939,15 @@ static int test_zd_improve_command(void)
             (int64_t)platform_time_wall_unix(),
             &mismatched_evaluation).ok);
         ASSERT(!mismatched_evaluation.local_reproduced);
+        ASSERT(build_fabric_worker_approve(&ndb, &mismatched_worker, now).ok);
+        struct zcl_result approved_missing = build_fabric_proof_evaluate_readonly(
+            &ndb, workspace, action_id, (int64_t)platform_time_wall_unix(),
+            &mismatched_evaluation);
+        bool bad_worker_revoked = build_fabric_worker_revoke(
+            &ndb, mismatched_worker.worker_id, now).ok;
+        ASSERT(bad_worker_revoked);
+        ASSERT(!approved_missing.ok);
+        ASSERT_STR_EQ(approved_missing.message, "physical observation is absent from CAS");
         struct vcs_zcode_work_request_v1 wrong_kind_request = remote_request;
         wrong_kind_request.work_kind = VCS_ZCODE_WORK_TEST;
         ASSERT(vcs_zcode_work_request_seal(

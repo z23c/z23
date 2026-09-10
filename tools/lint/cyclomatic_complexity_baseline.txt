@@ -2413,7 +2413,7 @@ engine/services/src/build_fabric_cache.c:bfc_publish:19
 engine/services/src/build_fabric_cache.c:build_fabric_cache_restore:29
 engine/services/src/build_fabric_evidence.c:bf_count_kind:16
 engine/services/src/build_fabric_evidence.c:bf_package_evidence_wire:18
-engine/services/src/build_fabric_evidence.c:bf_proof_evaluate:155
+engine/services/src/build_fabric_evidence.c:bf_proof_evaluate:149
 engine/services/src/build_fabric_evidence.c:build_fabric_receipt_observe_remote:42
 engine/services/src/build_fabric_evidence_parse.c:build_fabric_fuzz_evidence_parse:25
 engine/services/src/build_fabric_evidence_parse.c:build_fabric_test_evidence_parse:19

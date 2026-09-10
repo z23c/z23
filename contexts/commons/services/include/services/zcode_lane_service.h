@@ -56,4 +56,12 @@ struct zcl_result zcode_accepted_work_find(
     const char *source_root_sha3, int64_t now,
     bool rebuild_projection, struct zcode_accepted_work_status *out);
 
+/* Qualify one exact acceptance/action tuple without indexing the workspace,
+ * promoting receipt trust or rebuilding projections. This is not a claim of
+ * source-wide uniqueness. Refusal leaves output empty. */
+struct zcl_result zcode_accepted_work_qualify_readonly(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *candidate_root, const char *policy_root,
+    const char *action_id, int64_t now, struct zcode_accepted_work_status *out);
+
 #endif /* ZCL_SERVICES_ZCODE_LANE_SERVICE_H */

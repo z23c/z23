@@ -558,6 +558,40 @@ static struct zcl_result bf_candidate_receipts_read(struct node_db *ndb,
     return ZCL_OK;
 }
 
+static struct zcl_result bf_observation_authority(struct node_db *ndb,
+    const struct db_build_receipt *row,
+    const struct vcs_zcode_work_receipt_v1 *receipt, int64_t now,
+    bool *bound, bool *approved, bool *local)
+{
+    struct db_build_worker worker;
+    char signer[65];
+    zcl_hex_encode(receipt->signer_pubkey, 32, signer);
+    if (!db_build_worker_find(ndb, row->worker_id, &worker))
+        return ZCL_ERR(-1, "proof receipt worker is unavailable");
+    *bound = strcmp(worker.signer_pubkey, signer) == 0;
+    bool current = !worker.revoked &&
+        (worker.expires_at == 0 || now < worker.expires_at);
+    *approved = worker.approved && current;
+    *local = current && strcmp(row->trust_state, "LOCAL_ACCEPTED") == 0;
+    return ZCL_OK;
+}
+
+static struct zcl_result bf_compile_observation(
+    const char *workspace, const struct db_build_job *job,
+    const struct db_build_action *action, const struct db_build_receipt *row,
+    const struct vcs_zcode_work_receipt_v1 *receipt, bool compile_action,
+    bool *verified)
+{
+    if (!*verified || !compile_action) return ZCL_OK;
+    uint8_t output[32], observation[32];
+    *verified = zcl_hex_decode_lower(row->output_sha3, output, 32) &&
+        zcl_hex_decode_lower(row->observation_sha3, observation, 32) &&
+        memcmp(output, receipt->output_root, 32) == 0 &&
+        memcmp(observation, receipt->evidence_root, 32) == 0;
+    if (!*verified) return ZCL_OK;
+    return build_fabric_observation_verify(workspace, job, action, row);
+}
+
 // long-function-ok:proof-policy-transaction — selection, proof-set creation,
 // and trust promotion must use one verified snapshot of the receipt ledger.
 static struct zcl_result bf_proof_evaluate(
@@ -665,18 +699,17 @@ static struct zcl_result bf_proof_evaluate(
             memcmp(receipt.input_root, input_root, 32) == 0 &&
             receipt.work_kind == expected_kind &&
             bf_receipt_current(&receipt, &rows[i], &policy, now);
-        if (verified && compile_action) {
-            uint8_t projected_output[32], projected_observation[32];
-            verified = zcl_hex_decode_lower(
-                    rows[i].output_sha3, projected_output, 32) &&
-                zcl_hex_decode_lower(
-                    rows[i].observation_sha3, projected_observation, 32) &&
-                memcmp(projected_output, receipt.output_root, 32) == 0 &&
-                memcmp(projected_observation,
-                       receipt.evidence_root, 32) == 0 &&
-                build_fabric_observation_verify(
-                    workspace, &receipt_job, &receipt_action,
-                    &rows[i]).ok;
+        if (!verified) continue;
+        bool bound = false, approved = false, local = false;
+        struct zcl_result authority = bf_observation_authority(ndb, &rows[i],
+            &receipt, now, &bound, &approved, &local);
+        if (!authority.ok) return authority;
+        if (!bound) continue;
+        struct zcl_result observation = bf_compile_observation(workspace,
+            &receipt_job, &receipt_action, &rows[i], &receipt, compile_action, &verified);
+        if (!observation.ok) {
+            if (approved || local) return observation;
+            continue;
         }
         bool package_test_passed = false;
         uint8_t evidence_output[32];
@@ -687,24 +720,13 @@ static struct zcl_result bf_proof_evaluate(
         if (!package_result.ok) return package_result;
         if (!verified || valid_count >= VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
             continue;
-        struct db_build_worker worker;
-        char receipt_signer_hex[65];
-        zcl_hex_encode(receipt.signer_pubkey, 32, receipt_signer_hex);
-        if (!db_build_worker_find(ndb, rows[i].worker_id, &worker))
-            return ZCL_ERR(-1, "proof receipt worker is unavailable");
-        if (strcmp(worker.signer_pubkey, receipt_signer_hex) != 0)
-            continue;
-        bool current = !worker.revoked &&
-            (worker.expires_at == 0 || now < worker.expires_at);
-        bool approved = worker.approved && current;
         valid[valid_count].row = rows[i];
         valid[valid_count].receipt = receipt;
         memcpy(valid[valid_count].root, receipt_root, 32);
         memcpy(valid[valid_count].evidence_output, evidence_output, 32);
         valid[valid_count].work_kind = expected_kind;
         valid[valid_count].approved = approved;
-        valid[valid_count].local =
-            current && strcmp(rows[i].trust_state, "LOCAL_ACCEPTED") == 0;
+        valid[valid_count].local = local;
         valid[valid_count].package_test_passed = package_test_passed;
         valid_count++;
     }

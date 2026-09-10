@@ -2008,6 +2008,41 @@ enum bf_conflict_case {
     BF_CONFLICT_CASE_COUNT,
 };
 
+static int test_bf_conflict_observation_missing(
+    struct node_db *ndb, const char *dir, int64_t now, const char *action_id,
+    const struct db_build_receipt *conflicting)
+{
+    int failures = 0;
+    TEST("build_fabric: missing conflicting observation cannot erase a failure") {
+        char path[1024], hidden[1040];
+        int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", dir,
+                         conflicting->observation_sha3,
+                         conflicting->observation_sha3 + 2);
+        ASSERT(n > 0 && (size_t)n < sizeof(path));
+        n = snprintf(hidden, sizeof(hidden), "%s.hidden", path);
+        ASSERT(n > 0 && (size_t)n < sizeof(hidden));
+        int changes = sqlite3_total_changes(ndb->db);
+        for (unsigned mode = 0; mode < 3; mode++) {
+            ASSERT_EQ(rename(path, hidden), 0);
+            struct build_fabric_proof_evaluation evaluation = {0};
+            struct zcl_result result = mode == 0
+                ? build_fabric_proof_evaluate_readonly(ndb, dir, action_id, now, &evaluation)
+                : mode == 1
+                    ? build_fabric_proof_materialize(ndb, dir, action_id, now, &evaluation)
+                    : build_fabric_proof_evaluate(ndb, dir, action_id, now, &evaluation);
+            int restored = platform_path_replace(hidden, path);
+            ASSERT_EQ(restored, 0);
+            ASSERT(!result.ok);
+            ASSERT_STR_EQ(result.message, "physical observation is absent from CAS");
+            ASSERT(!evaluation.policy_satisfied);
+            ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_proof_conflict_expect(
     struct node_db *ndb, const char *dir, int64_t now, const char *action_id,
     const uint8_t original_root[32], const uint8_t other_root[32],
@@ -2015,6 +2050,9 @@ static int test_bf_proof_conflict_expect(
 {
     int failures = 0;
     TEST("build_fabric: conflict admission preserves evidence and projections") {
+        if (scenario == BF_CONFLICT_FAIL)
+            failures += test_bf_conflict_observation_missing(
+                ndb, dir, now, action_id, other_row);
         bool conflict = scenario == BF_CONFLICT_FAIL ||
             scenario == BF_CONFLICT_SAME_SIGNER ||
             scenario == BF_CONFLICT_OUTPUT || scenario == BF_CONFLICT_LOCAL_OUTPUT;
@@ -3379,8 +3417,10 @@ static int test_bf_proof_materialization(void)
 
         int db_changes = sqlite3_total_changes(ndb.db);
         struct build_fabric_proof_evaluation readonly = {0};
-        ASSERT(build_fabric_proof_evaluate_readonly(
-            &ndb, dir, action.action_id, now, &readonly).ok);
+        struct zcl_result missing_observation = build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &readonly);
+        ASSERT(!missing_observation.ok);
+        ASSERT_STR_EQ(missing_observation.message, "physical observation is absent from CAS");
         ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
         ASSERT_EQ(readonly.valid_receipts, 0);
         ASSERT(readonly.proof_set_root_sha3[0] == '\0');
@@ -3394,8 +3434,10 @@ static int test_bf_proof_materialization(void)
             dir, work.evidence_root, observation_wire,
             sizeof(observation_wire)));
         memset(&readonly, 0, sizeof(readonly));
-        ASSERT(build_fabric_proof_evaluate_readonly(
-            &ndb, dir, action.action_id, now, &readonly).ok);
+        struct zcl_result corrupt_observation = build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &readonly);
+        ASSERT(!corrupt_observation.ok);
+        ASSERT_STR_EQ(corrupt_observation.message, "physical observation is malformed or poisoned");
         ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
         ASSERT_EQ(readonly.valid_receipts, 0);
         ASSERT(readonly.proof_set_root_sha3[0] == '\0');
