@@ -47,8 +47,15 @@ A_PORT=20040; A_RPC=39611; A_FS=39612; A_HTTPS=39613
 B_PORT=20041; B_RPC=39621; B_FS=39622; B_HTTPS=39623
 DEAD_SINK=39998
 MKT_WAIT="${MKT_WAIT:-90}"
-ONI_TOR_WAIT="${ONI_TOR_WAIT:-420}"
+# Bootstrap can sit in loading_descriptors for several minutes, and
+# explorer onion_address is published only after DESCRIPTOR PUBLICATION
+# (after Bootstrapped 100%). 420s lost a run that published ~15s late.
+ONI_TOR_WAIT="${ONI_TOR_WAIT:-900}"
 ONI_RETRIEVE_WAIT="${ONI_RETRIEVE_WAIT:-600}"
+# First onion GET after a fresh HS can miss the circuit (60s fetch
+# timeout collapses to UNKNOWN). Retry until the seller actually
+# answers PENDING, not until UNKNOWN.
+ONI_EARLY_WAIT="${ONI_EARLY_WAIT:-180}"
 MKT_WORK=""; MKT_DD_A=""; MKT_DD_B=""; MKT_PGID_A=""; MKT_PGID_B=""
 MKT_EXTRA_FLAGS=()
 MKT_CLEANED=0
@@ -289,6 +296,38 @@ mkt_wait_at_tip() {
         sleep 0.5
     done
     return 1
+}
+# Onion GET failure, MODERATION_HIDDEN, and the seller payment gate can
+# all surface as DELIVERY_NOT_READY / "seller delivery is UNKNOWN":
+# core maps a failed GET onto PAYMENT_UNKNOWN, and onion_reply_header_parse
+# rejects status > RESOURCE_LIMIT so MODERATION_HIDDEN (enum after that
+# cap) also becomes UNKNOWN. Seller tor.log GET count, file_offers.review_state,
+# and the durable claim status_reason distinguish them without unsealing core/.
+oni_chunk_gets() {
+    grep -ac "HTTP GET /market/chunk/" "$MKT_DD_A/tor.log" 2>/dev/null || true
+}
+oni_chunk_fetches() {
+    grep -ac "initiated fetch to .*\.onion/market/chunk/" \
+        "$MKT_DD_B/tor.log" 2>/dev/null || true
+}
+oni_diag_retrieve() {
+    local tag="${1:-diag}" a_sync a_peers a_h a_gets b_fetches claim st reason review
+    a_sync="$(a_rpc downloadstats 2>/dev/null \
+        | mkt_jget result.sync_state 2>/dev/null || true)"
+    a_peers="$(a_rpc getconnectioncount 2>/dev/null \
+        | mkt_result 2>/dev/null || true)"
+    a_h="$(mkt_height "$MKT_DD_A" "$A_RPC" 2>/dev/null || true)"
+    a_gets="$(oni_chunk_gets)"
+    b_fetches="$(oni_chunk_fetches)"
+    claim="$(mkt_native "$MKT_DD_A" "$A_RPC" core storage query \
+        --input='{"sql":"SELECT status, status_reason FROM market_payment_claims"}' \
+        || true)"
+    st="$(printf '%s' "$claim" | mkt_jget 'data.rows[0][0]' 2>/dev/null || true)"
+    reason="$(printf '%s' "$claim" | mkt_jget 'data.rows[0][1]' 2>/dev/null || true)"
+    review="$(mkt_native "$MKT_DD_A" "$A_RPC" core storage query \
+        --input='{"sql":"SELECT review_state FROM file_offers"}' || true)"
+    review="$(printf '%s' "$review" | mkt_jget 'data.rows[0][0]' 2>/dev/null || true)"
+    mkt_note "retrieve-diag[$tag]: A sync=${a_sync:-?} peers=${a_peers:-?} height=${a_h:-?} review=${review:-?} gets=${a_gets:-0} B fetches=${b_fetches:-0} claim=${st:-none} reason=${reason:-none}"
 }
 # The money gate reads the REDUCER pipeline, not the active chain: the
 # authoritative coins tip AND H* must both reach the mined height.
@@ -759,6 +798,25 @@ onion_pub="$(printf '%s' "$A_OFFER_ROW" | "$JSONQ" get data.rows[0][2])" ||
 [ "$("$FIXTURE_GEN" onion "$onion_pub")" = "$A_ONION" ] ||
     mkt_die "seller offer endpoint row mismatch: $A_OFFER_ROW"
 
+# general-audience.v1 (boot default) serves only reviewed_ok. Committing
+# the offer stores the bytes; serving them still needs this node's own
+# curation mark. Without it the onion /market/chunk handler returns
+# MODERATION_HIDDEN, which the buyer currently reports as UNKNOWN
+# (onion_reply_header_parse rejects status > RESOURCE_LIMIT).
+mkt_note "seller marks its own offer reviewed_ok so general-audience.v1 will serve it"
+A_REVIEW_PLAN="$(printf '%s' "{\"offer_id\":\"$OFFER_ID\",\"review_state\":\"reviewed_ok\",\"mode\":\"plan\"}" \
+    | mkt_native "$MKT_DD_A" "$A_RPC" app market moderation review set --input=- || true)"
+printf '%s' "$A_REVIEW_PLAN" | "$JSONQ" eq ok true ||
+    mkt_die "seller review-set plan refused: $A_REVIEW_PLAN"
+A_REVIEW_TOKEN="$(printf '%s' "$A_REVIEW_PLAN" | "$JSONQ" get data.plan_token)" ||
+    mkt_die "seller review-set plan refused: $A_REVIEW_PLAN"
+A_REVIEW_COMMIT="$(printf '%s' "{\"offer_id\":\"$OFFER_ID\",\"review_state\":\"reviewed_ok\",\"mode\":\"commit\",\"plan_token\":\"$A_REVIEW_TOKEN\"}" \
+    | mkt_native "$MKT_DD_A" "$A_RPC" app market moderation review set --input=- || true)"
+printf '%s' "$A_REVIEW_COMMIT" | "$JSONQ" eq ok true ||
+    mkt_die "seller review-set commit refused: $A_REVIEW_COMMIT"
+printf '%s' "$A_REVIEW_COMMIT" | "$JSONQ" eq data.review_state reviewed_ok ||
+    mkt_die "seller review-set commit refused: $A_REVIEW_COMMIT"
+
 # ── Phase 2: the offer gossips to the buyer ──────────────────────────
 # The buyer is a stranger to A: no review mark exists on B for A's offer,
 # and the boot-default general-audience.v1 profile hides every unreviewed
@@ -936,19 +994,39 @@ mkt_note "purchase payment broadcast: txid=$TXID"
 # answers with the payment-gate refusal status: the onion route serves the
 # authorize-before-read boundary, not just the happy path.
 mkt_note "buyer retrieves before confirmation: the onion route must refuse"
-EARLY_RETRIEVE="$(printf '%s' "{\"plan_id\":\"$PLAN_ID\",\"destination_path\":\"$DESTINATION\"}" \
-    | mkt_native "$MKT_DD_B" "$B_RPC" app market purchase retrieve --input=- || true)"
-printf '%s' "$EARLY_RETRIEVE" | "$JSONQ" eq ok false ||
-    mkt_die "pre-confirmation retrieve was not refused: $EARLY_RETRIEVE"
-printf '%s' "$EARLY_RETRIEVE" | "$JSONQ" eq error.code DELIVERY_NOT_READY ||
-    mkt_die "pre-confirmation retrieve was not refused: $EARLY_RETRIEVE"
-early_msg="$(printf '%s' "$EARLY_RETRIEVE" | "$JSONQ" get error.message 2>/dev/null || true)"
-case "$early_msg" in
-    *PENDING*|*UNKNOWN*) ;;
-    *) mkt_die "pre-confirmation retrieve was not refused: $EARLY_RETRIEVE" ;;
-esac
+EARLY_DEADLINE=$(( $(date +%s) + ONI_EARLY_WAIT ))
+EARLY_LAST_DIAG=0
+while :; do
+    EARLY_RETRIEVE="$(printf '%s' "{\"plan_id\":\"$PLAN_ID\",\"destination_path\":\"$DESTINATION\"}" \
+        | mkt_native "$MKT_DD_B" "$B_RPC" app market purchase retrieve --input=- || true)"
+    rok="$(printf '%s' "$EARLY_RETRIEVE" | mkt_jget ok 2>/dev/null || true)"
+    [ "$rok" = "true" ] &&
+        mkt_die "pre-confirmation retrieve was not refused: $EARLY_RETRIEVE"
+    early_code="$(printf '%s' "$EARLY_RETRIEVE" | "$JSONQ" get error.code 2>/dev/null || true)"
+    early_msg="$(printf '%s' "$EARLY_RETRIEVE" | "$JSONQ" get error.message 2>/dev/null || true)"
+    [ "$early_code" = "DELIVERY_NOT_READY" ] ||
+        mkt_die "pre-confirmation retrieve was not refused: $EARLY_RETRIEVE"
+    case "$early_msg" in
+        *PENDING*) break ;;
+    esac
+    now="$(date +%s)"
+    if [ "$EARLY_LAST_DIAG" -eq 0 ] ||
+       [ $((now - EARLY_LAST_DIAG)) -ge 30 ]; then
+        oni_diag_retrieve "early"
+        EARLY_LAST_DIAG="$now"
+    fi
+    [ "$now" -lt "$EARLY_DEADLINE" ] || {
+        oni_diag_retrieve "early-timeout"
+        mkt_die "pre-confirmation retrieve was not a payment-pending refuse (seller must be serving, not hiding): $EARLY_RETRIEVE"
+    }
+    sleep 2
+done
 [ ! -e "$DESTINATION" ] ||
     mkt_die "destination published before payment confirmation"
+EARLY_GETS="$(oni_chunk_gets)"
+[ "${EARLY_GETS:-0}" -ge 1 ] ||
+    mkt_die "pre-confirmation retrieve never reached seller onion (0 /market/chunk GETs; transport_fail is collapsed to UNKNOWN): $EARLY_RETRIEVE"
+mkt_note "pre-confirmation onion refuse witnessed: $EARLY_GETS seller /market/chunk GET(s), message=$early_msg"
 
 # Mempool relay is trickle, not instant: mining the confirmation before A
 # has the payment produces a coinbase-only block and the purchase never
@@ -1058,8 +1136,27 @@ mkt_wait_rpc "$MKT_DD_B" "$B_RPC" "$MKT_PGID_B" || mkt_die "B onion-retrieve res
 B_ONION="$(oni_wait_onion_address "$MKT_DD_B" "$B_RPC" "buyer B (onion-retrieve restart)")"
 mkt_unlock_wallet "$MKT_DD_B" "$B_RPC" || mkt_die "B onion-retrieve wallet unlock failed"
 
+# Killing B for the no-Tor probe left seller A with zero peers, so
+# sync_get_state() left AT_TIP and paid-chunk auth answers UNKNOWN.
+# Re-link both ways and wait for A at_tip before the authorized retrieve.
+b_rpc addnode "\"127.0.0.1:$A_PORT\"" "\"onetry\"" >/dev/null || true
+mkt_wait_connected "$MKT_DD_B" "$B_RPC" ||
+    mkt_die "B never reconnected outbound to A after onion-retrieve restart"
+a_rpc addnode "\"127.0.0.1:$B_PORT\"" "\"onetry\"" >/dev/null || true
+mkt_wait_connected "$MKT_DD_A" "$A_RPC" ||
+    mkt_die "A never reconnected outbound to B after onion-retrieve restart"
+mkt_wait_at_tip "$MKT_DD_A" "$A_RPC" ||
+    mkt_die "A sync never reached at_tip after onion-retrieve restart"
+A_ONION_STILL="$(oni_onion_address "$MKT_DD_A" "$A_RPC" || true)"
+case "$A_ONION_STILL" in
+    *.onion) ;;
+    *) mkt_die "seller onion vanished after buyer onion-retrieve restart: ${A_ONION_STILL:-empty}" ;;
+esac
+oni_diag_retrieve "pre-retrieve"
+
 mkt_note "buyer retrieves the file over the seller onion service (60 KiB slices)"
 RETRIEVE_DEADLINE=$(( $(date +%s) + ONI_RETRIEVE_WAIT ))
+RETRIEVE_LAST_DIAG=0
 while :; do
     RETRIEVE="$(printf '%s' "{\"plan_id\":\"$PLAN_ID\",\"destination_path\":\"$DESTINATION\"}" \
         | mkt_native "$MKT_DD_B" "$B_RPC" app market purchase retrieve --input=- || true)"
@@ -1067,10 +1164,18 @@ while :; do
     [ "$rok" = "true" ] && break
     case "$RETRIEVE" in
         *DELIVERY_NOT_READY*) ;;
-        *) mkt_die "retrieve failed with a non-delivery error: $RETRIEVE" ;;
+        *) oni_diag_retrieve "non-delivery"; mkt_die "retrieve failed with a non-delivery error: $RETRIEVE" ;;
     esac
-    [ "$(date +%s)" -lt "$RETRIEVE_DEADLINE" ] ||
+    now="$(date +%s)"
+    if [ "$RETRIEVE_LAST_DIAG" -eq 0 ] ||
+       [ $((now - RETRIEVE_LAST_DIAG)) -ge 30 ]; then
+        oni_diag_retrieve "retry"
+        RETRIEVE_LAST_DIAG="$now"
+    fi
+    [ "$now" -lt "$RETRIEVE_DEADLINE" ] || {
+        oni_diag_retrieve "timeout"
         mkt_die "retrieve never authorized over onion: $RETRIEVE"
+    }
     sleep 2
 done
 printf '%s' "$RETRIEVE" | "$JSONQ" eq ok true ||
