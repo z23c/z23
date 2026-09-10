@@ -27,6 +27,8 @@
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
 #include "util/spawn.h"
+#include "dev/dev_git_tree.h"
+#include "sha3/sha3.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1851,9 +1853,233 @@ _test_next:;
 #endif /* !defined(_WIN32) */
 
 int test_dev_land(void);
+#if !defined(_WIN32)
+static bool dlx_tree_bytes(const char *path, const void *bytes, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(bytes, 1, len, f) == len;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool dlx_tree_types_make(struct dlx_rig *rig)
+{
+    if (!dlx_rig_make(rig, "tree_types")) return false;
+    char path[1200];
+    (void)snprintf(path, sizeof(path), "%s/space\tline\n.bin", rig->clone);
+    static const unsigned char bytes[] = { 'A', 0, 'B' };
+    if (!dlx_tree_bytes(path, bytes, sizeof(bytes))) return false;
+    (void)snprintf(path, sizeof(path), "%s/run", rig->clone);
+    if (!dlx_write(path, "") || chmod(path, 0755) != 0) return false;
+    (void)snprintf(path, sizeof(path), "%s/link", rig->clone);
+    if (symlink("../untrusted-target", path) != 0) return false;
+    if (!dlx_commit(rig->clone, "marker", "types\n", rig->tip)) return false;
+    char dependency[64];
+    memcpy(dependency, rig->tip, sizeof(dependency));
+    return dlx_gitlink_commit(rig->clone, "dependency", dependency, "unused", rig->tip);
+}
+
+static bool dlx_tree_types_match(const struct zcl_dev_git_tree *tree)
+{
+    bool executable = false, symlink_bytes = false, binary = false;
+    unsigned char expected[32];
+    static const unsigned char tagged[] = { 0x20, 'A', 0, 'B' };
+    sha3_256(tagged, sizeof(tagged), expected);
+    unsigned char link_hash[32];
+    static const unsigned char link_bytes[] = "\x20../untrusted-target";
+    sha3_256(link_bytes, sizeof(link_bytes) - 1, link_hash);
+    for (size_t i = 0; i < tree->files.count; ++i) {
+        const struct vcs_entry *entry = &tree->files.entries[i];
+        if (!strcmp(entry->path, "run")) executable = entry->mode == 0100755u && entry->size == 0;
+        if (!strcmp(entry->path, "link")) symlink_bytes = entry->mode == 0120000u &&
+            entry->size == 19 && !memcmp(entry->blob, link_hash, 32);
+        if (!strcmp(entry->path, "space\tline\n.bin")) binary = !memcmp(entry->blob, expected, 32);
+    }
+    return executable && symlink_bytes && binary;
+}
+
+static bool dlx_tree_malformed_head(struct dlx_rig *rig, const char *a, const char *b,
+                                   char head[64])
+{
+    char oid[64], tree_oid[64], path[1200];
+    const char *lookup[] = { "rev-parse", "HEAD:change.txt", NULL };
+    if (dlx_git_out(rig->clone, lookup, oid, sizeof(oid)) != 0) return false;
+    unsigned char raw[1024], address[20]; size_t len = 0;
+    for (size_t i = 0; i < sizeof(address); ++i) {
+        unsigned value = 0;
+        if (sscanf(oid + i * 2, "%2x", &value) != 1) return false;
+        address[i] = (unsigned char)value;
+    }
+    const char *names[] = { a, b };
+    for (size_t i = 0; i < 2; ++i) {
+        int n = snprintf((char *)raw + len, sizeof(raw) - len, "100644 %s", names[i]);
+        if (n < 0 || (size_t)n + 1 + sizeof(address) > sizeof(raw) - len) return false;
+        len += (size_t)n + 1;
+        memcpy(raw + len, address, sizeof(address)); len += sizeof(address);
+    }
+    (void)snprintf(path, sizeof(path), "%s/raw-tree", rig->clone);
+    if (!dlx_tree_bytes(path, raw, len)) return false;
+    const char *store[] = { "hash-object", "--literally", "-t", "tree", "-w", path, NULL };
+    if (dlx_git_out(rig->clone, store, tree_oid, sizeof(tree_oid)) != 0) return false;
+    const char *commit[] = { "-c", "user.name=tree", "-c", "user.email=tree@z23.invalid",
+        "commit-tree", tree_oid, "-m", "malformed fixture", NULL };
+    return dlx_git_out(rig->clone, commit, head, 64) == 0;
+}
+
+static int test_dev_land_tree_types(void)
+{
+    int failures = 0;
+    TEST("land: tree observation preserves binary paths, modes and unresolved gitlinks") {
+        struct dlx_rig rig;
+        ASSERT(dlx_tree_types_make(&rig));
+        char expected_link[64];
+        const char *lookup[] = { "rev-parse", "HEAD:dependency", NULL };
+        ASSERT(dlx_git_out(rig.clone, lookup, expected_link, sizeof(expected_link)) == 0);
+        struct zcl_dev_git_tree tree = {0};
+        struct zcl_result r = zcl_dev_git_tree_read(rig.clone, rig.tip, 10000, &tree);
+        bool matched = r.ok && tree.files.count == 7 && tree.gitlinks == 1 && tree.symlinks == 1;
+        if (matched) matched = !strcmp(tree.links[0].path, "dependency") &&
+            !strcmp(tree.links[0].oid, expected_link) && dlx_tree_types_match(&tree);
+        zcl_dev_git_tree_free(&tree);
+        ASSERT(matched);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_land_tree_replacements(void)
+{
+    int failures = 0;
+    TEST("land: exact tree ignores replacement refs and inherited repository override") {
+        struct dlx_rig rig;
+        ASSERT(dlx_rig_make(&rig, "tree_replacement"));
+        char original[64], replacement[64];
+        (void)snprintf(original, sizeof(original), "%s", rig.tip);
+        ASSERT(dlx_commit(rig.clone, "later.txt", "replacement bytes\n", replacement));
+        const char *replace[] = { "replace", original, replacement, NULL };
+        ASSERT(dlx_git(rig.clone, replace) == 0);
+        char saved[4096];
+        const char *prior = getenv("GIT_DIR");
+        bool had = prior != NULL;
+        ASSERT(!prior || strlen(prior) < sizeof(saved));
+        (void)snprintf(saved, sizeof(saved), "%s", prior ? prior : "");
+        ASSERT(setenv("GIT_DIR", rig.bare, 1) == 0);
+        struct zcl_dev_git_tree tree = {0};
+        struct zcl_result r = zcl_dev_git_tree_read(rig.clone, original, 10000, &tree);
+        int restored = had ? setenv("GIT_DIR", saved, 1) : unsetenv("GIT_DIR");
+        bool exact = r.ok && tree.files.count == 2;
+        zcl_dev_git_tree_free(&tree);
+        ASSERT(restored == 0);
+        ASSERT(exact);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool dlx_tree_promisor(struct dlx_rig *rig, char marker[1200], char oid[64])
+{
+    if (!dlx_rig_make(rig, "tree_promisor")) return false;
+    char helper[1200], body[1600], remote[1300], object[1200];
+    (void)snprintf(marker, 1200, "%s/fetch-marker", rig->clone);
+    (void)snprintf(helper, sizeof(helper), "%s/fetch-helper", rig->clone);
+    (void)snprintf(body, sizeof(body), "#!/bin/sh\nprintf invoked > '%s'\nexit 1\n", marker);
+    if (!dlx_write(helper, body) || chmod(helper, 0755) != 0) return false;
+    (void)snprintf(remote, sizeof(remote), "ext::%s", helper);
+    const char *promisor[] = { "config", "remote.trap.promisor", "true", NULL };
+    const char *url[] = { "config", "remote.trap.url", remote, NULL };
+    const char *partial[] = { "config", "extensions.partialClone", "trap", NULL };
+    const char *lookup[] = { "rev-parse", "HEAD:change.txt", NULL };
+    if (dlx_git(rig->clone, promisor) || dlx_git(rig->clone, url) ||
+        dlx_git(rig->clone, partial) || dlx_git_out(rig->clone, lookup, oid, 64)) return false;
+    (void)snprintf(object, sizeof(object), "%s/.git/objects/%.2s/%s", rig->clone, oid, oid + 2);
+    return unlink(object) == 0;
+}
+
+static int test_dev_land_tree_missing(void)
+{
+    int failures = 0;
+    TEST("land: missing promisor blob refuses without invoking its armed remote helper") {
+        struct dlx_rig rig; char marker[1200], oid[64];
+        ASSERT(dlx_tree_promisor(&rig, marker, oid));
+        struct zcl_dev_git_tree tree = {0};
+        struct zcl_result r = zcl_dev_git_tree_read(rig.clone, rig.tip, 10000, &tree);
+        bool refused = !r.ok && !tree.files.entries && !tree.links;
+        zcl_dev_git_tree_free(&tree);
+        ASSERT(refused);
+        ASSERT(!dlx_file_exists(marker));
+        const char *control[] = { "/usr/bin/env", "GIT_ALLOW_PROTOCOL=ext", "git", "-C", rig.clone,
+            "-c", "protocol.ext.allow=always", "cat-file", "blob", oid, NULL };
+        char sink[8];
+        (void)zcl_spawn_capture(control, sink, sizeof(sink), 5000);
+        ASSERT(dlx_file_exists(marker));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_land_tree_malformed(void)
+{
+    int failures = 0;
+    TEST("land: duplicate, ancestor-collision and traversal trees refuse") {
+        struct dlx_rig rig;
+        ASSERT(dlx_rig_make(&rig, "tree_malformed"));
+        const char *first[] = { "same", "a", "../escape" };
+        const char *second[] = { "same", "a/b", "valid" };
+        for (size_t i = 0; i < 3; ++i) {
+            char head[64];
+            ASSERT(dlx_tree_malformed_head(&rig, first[i], second[i], head));
+            struct zcl_dev_git_tree tree = {0};
+            struct zcl_result r = zcl_dev_git_tree_read(rig.clone, head, 10000, &tree);
+            bool refused = !r.ok && !tree.files.entries && !tree.links && tree.gitlinks == 0;
+            zcl_dev_git_tree_free(&tree);
+            ASSERT(refused);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
+static int test_dev_land_exact_tree(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: committed blob bytes retain canonical hashes despite dirty worktree") {
+        struct dlx_rig rig;
+        ASSERT(dlx_rig_make(&rig, "exact_tree"));
+        char path[1200];
+        (void)snprintf(path, sizeof(path), "%s/change.txt", rig.clone);
+        ASSERT(dlx_write(path, "different worktree bytes\n"));
+        struct zcl_dev_git_tree tree = {0};
+        struct zcl_result r = zcl_dev_git_tree_read(rig.clone, rig.tip, 10000, &tree);
+        unsigned char expected[32];
+        static const unsigned char tagged[] = { 0x20, 'o', 'n', 'e', '\n' };
+        sha3_256(tagged, sizeof(tagged), expected);
+        bool matched = r.ok && tree.files.count == 2;
+        if (matched)
+            matched = strcmp(tree.files.entries[0].path, "change.txt") == 0 &&
+                tree.files.entries[0].size == 4 &&
+                memcmp(tree.files.entries[0].blob, expected, 32) == 0;
+        matched = matched && tree.gitlinks == 0 && tree.symlinks == 0;
+        zcl_dev_git_tree_free(&tree);
+        ASSERT(matched);
+        PASS();
+    } _test_next:;
+#endif
+    return failures;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
+    failures += test_dev_land_exact_tree();
+#if !defined(_WIN32)
+    failures += test_dev_land_tree_types();
+    failures += test_dev_land_tree_malformed();
+    failures += test_dev_land_tree_replacements();
+    failures += test_dev_land_tree_missing();
+#endif
 
     TEST("land: the leaf is registered with its verb and row keys") {
         const struct zcl_command_spec *spec =
