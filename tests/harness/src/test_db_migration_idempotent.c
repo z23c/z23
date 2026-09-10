@@ -1352,6 +1352,9 @@ static int t_additive_migration_keeps_floor(void)
         db_mig_close_raw_handle(&ndb);
         PASS();
     } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
 
 /* ── The deferred-quick_check corruption heal ───────────────────────────
  *
@@ -1572,9 +1575,12 @@ static int t_older_binary_within_floor_opens_read_compatible(void)
             "SELECT count(*) FROM schema_migrations");
         ASSERT_EQ(ledger_after, ledger_before);
         sqlite3_close(raw);
-/* A schema failure that is NOT the store being malformed must still refuse:
- * the repair is scoped to SQLite's own corruption verdict, and a runtime
- * reopen never renames the canonical store behind the boot owner's back. */
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int t_malformed_store_repair_is_boot_only(void)
 {
     int failures = 0;
