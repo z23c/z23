@@ -11,8 +11,30 @@
  * every wallet key, chain-state write, and progress cursor silently vanishes
  * on the next restart with no operator page. This closes that hole: name a
  * PERMANENT blocker (an unopenable node.db is not something a bounded retry
- * fixes — it needs an operator to look at disk/permissions/corruption) and
- * park like the sibling gates instead of degrading silently. */
+ * fixes — it needs an operator to look at disk/permissions/corruption).
+ *
+ * WHAT IT DOES INSTEAD OF PARKING, and why (measured, fleet node,
+ * 2026-09-09/10). This gate fires at stage crypto_ready: no RPC bound,
+ * serving=false, boot_status.json blocker=node_db_unopened. A parked process
+ * there answers nothing an operator can ask, and it sends no READY=, so under
+ * the unit's Type=notify systemd showed `activating (start)` for 15.9 h
+ * (TimeoutStartSec) before a watchdog SIGABRT — with `systemctl status` never
+ * once saying failed. Worse, the open "db.open_migrate" step was never closed,
+ * so the boot-step reporter printed 1,909 records reading
+ *
+ *   [boot-step] step=db.open_migrate state=stuck verdict=telemetry
+ *               elapsed_ms=57432288 budget_ms=30000 progress_delta=0
+ *
+ * for a step that had actually FAILED 29 s into the boot. So: close the step
+ * as `failed` (the only producer of verdict=failure — one record, greppable,
+ * and the sweeper stops), then REFUSE rather than park, naming the one command
+ * the operator runs. The unit exits non-zero, systemd says failed within
+ * seconds, and Restart= owns the retry.
+ *
+ * THE REPAIR RUNS FIRST. node.db being malformed no longer reaches this gate
+ * at all: models/database.c quarantines the SQLite family and rebuilds fresh
+ * (see db_build_schema there). Reaching this gate now means the store could
+ * not be opened even after that repair — genuinely an operator's problem. */
 
 #include "config/boot_internal.h"
 
@@ -25,9 +47,13 @@
 
 bool boot_node_db_open_failed_gate(const char *datadir)
 {
+    const char *dd = datadir ? datadir : "(unset)";
+    char inspect[1100];
+    char retry[1100];
+    char evidence[1200];
+
     fprintf(stderr, "Warning: SQLite database unavailable\n");
-    event_emitf(EV_DB_ERROR, 0, "SQLite open failed at %s/node.db",
-                datadir ? datadir : "(unset)");
+    event_emitf(EV_DB_ERROR, 0, "SQLite open failed at %s/node.db", dd);
 
     struct blocker_record rec;
     if (blocker_init(&rec, "node_db_unopened", "boot.node_db",
@@ -37,14 +63,41 @@ bool boot_node_db_open_failed_gate(const char *datadir)
                      "chain state, or progress") &&
         blocker_set(&rec) == 0)
         event_emitf(EV_OPERATOR_NEEDED, 0,
-                    "check=node_db_unopened datadir=%s",
-                    datadir ? datadir : "(unset)");
+                    "check=node_db_unopened datadir=%s", dd);
 
     LOG_WARN("boot.node_db",
              "[boot] node.db failed to open at %s/node.db — NOT continuing "
-             "RAM-only; parking alive-degraded after paging the operator",
-             datadir ? datadir : "(unset)");
-    return boot_park_until_shutdown("node_db_unopened");
+             "RAM-only and NOT parking; refusing the boot so the unit exits",
+             dd);
+
+    /* Close the step BEFORE the refusal renders: this is the one record that
+     * says verdict=failure, and it must not be sequenced behind anything. */
+    (void)boot_step_fail("node_db_unopened");
+
+    (void)snprintf(inspect, sizeof(inspect),
+                   "ls -l %s/node.db %s/node.db-wal %s/node.db.corrupt-*",
+                   dd, dd, dd);
+    (void)snprintf(retry, sizeof(retry),
+                   "mv %s/node.db %s/node.db.unopenable-$(date -u +%%Y%%m%%dT%%H%%M%%SZ) "
+                   "&& systemctl --user restart zclassic23", dd, dd);
+    (void)snprintf(evidence, sizeof(evidence),
+                   "datadir=%s store=node.db stage=db.open_migrate", dd);
+
+    const struct boot_error_next next[] = {
+        { inspect,
+          "look at the store first: a permission/ownership change, a full or "
+          "read-only filesystem, and an already-quarantined "
+          "node.db.corrupt-<UTC> each point at a different cause" },
+        { retry,
+          "move the unopenable store aside (nothing is deleted) and restart. "
+          "The node rebuilds node.db from the chain it already has on disk" },
+    };
+    return boot_refuse_at_permanent_gate(
+        "node_db_unopened",
+        "node.db could not be opened and the bounded rebuild did not recover "
+        "it. The node is NOT running: booting on would mean no persistence "
+        "for wallet keys, chain state, or the progress cursor",
+        next, 2, evidence);
 }
 
 /* Why the node.db open step reports progress.

@@ -552,6 +552,86 @@ static bool node_db_open_abort(struct node_db *ndb)
     return false;
 }
 
+/* ── The malformed-store repair, and the two verdicts that reach it ──
+ *
+ * A boot open that finds node.db malformed does not fail the node: it
+ * renames the whole SQLite family aside (node.db / -wal / -shm, each to
+ * `<name>.corrupt-<UTC>` — copy-first, nothing is deleted) and rebuilds
+ * fresh state at the same path. That repair already existed; what was
+ * missing is the second way SQLite delivers the same verdict.
+ *
+ * `PRAGMA quick_check` is only ONE of them, and it is the one the fast
+ * restart path SKIPS (boot_shutdown_marker_quick_check_probe defers it to
+ * the background on an unverified shutdown marker). When it is skipped the
+ * corruption instead surfaces from the first baseline DDL statement that
+ * has to read a damaged page — measured on a fleet node as
+ *
+ *   [db] schema[10] failed: database disk image is malformed
+ *        (sql=CREATE INDEX IF NOT EXISTS idx_tx_block ON transactions(...))
+ *
+ * — and that path used to `return false` all the way out of the open, so
+ * the node reached its node_db_unopened boot gate with a store the code
+ * two branches above knows exactly how to repair. Same fault, same repair,
+ * one attempt: the retry runs the schema build once more on the fresh
+ * store and any second failure aborts the open for real. */
+static bool db_error_is_corruption(sqlite3 *db)
+{
+    if (!db)
+        return false;
+    /* Mask the extended result code: SQLITE_CORRUPT_VTAB / _SEQUENCE /
+     * _INDEX all carry SQLITE_CORRUPT in the low byte. */
+    int rc = sqlite3_errcode(db) & 0xff;
+    return rc == SQLITE_CORRUPT || rc == SQLITE_NOTADB;
+}
+
+/* Close the damaged handle, rename the family aside, and open a fresh
+ * store at the same path. False only when the pathname lease cannot be
+ * rebound or the fresh open itself fails. */
+static bool db_quarantine_and_reopen(struct node_db *ndb, const char *path,
+                                     bool boot_ceremony)
+{
+    struct db_lifetime_scope scope;
+    if (ndb->db) {
+        sqlite3_close(ndb->db);
+        ndb->db = NULL;
+    }
+    db_quarantine_files(path);
+    if (!node_db_owner_lease_rebind(ndb))
+        return false;
+    db_lifetime_scope_enter(&scope, ndb->lifetime_owner,
+                            boot_ceremony ? DB_LIFETIME_BACKING_OWNER
+                                          : DB_LIFETIME_HANDLE_OWNER,
+                            ndb->lifetime_generation);
+    bool opened = db_open_raw(&ndb->db, path);
+    ndb->lifetime_generation = db_lifetime_scope_generation();
+    db_lifetime_scope_leave(&scope);
+    return opened;
+}
+
+/* Baseline DDL + versioned migration as one step. `*corrupt_out` says the
+ * failure was SQLite naming the STORE malformed rather than a schema
+ * regression — only that verdict earns the repair above. */
+static bool db_build_schema(struct node_db *ndb, bool boot_ceremony,
+                            bool *corrupt_out)
+{
+    *corrupt_out = false;
+    if (!create_schema(ndb)) {
+        *corrupt_out = db_error_is_corruption(ndb->db);
+        return false;
+    }
+    ndb->open = true; /* node_db_migrate uses node_db_state_* helpers. */
+    /* Runtime reopen is already at current schema — suppress the banner. */
+    ndb->suppress_migrate_banner = !boot_ceremony;
+    int migrated = node_db_migrate(ndb, NULL);
+    ndb->suppress_migrate_banner = false;
+    ndb->open = false;
+    if (migrated < 0) {
+        *corrupt_out = db_error_is_corruption(ndb->db);
+        return false;
+    }
+    return true;
+}
+
 /* Shared open path. boot_ceremony=true is the one-time boot open (quick_check +
  * migration banner + staging cleanup); false is a runtime reopen that skips all
  * three and names itself (see node_db_open_runtime). */
@@ -639,36 +719,27 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
             if (!qc_ok) {
                 LOG_INFO("db", "db: %s is malformed; rebuilding fresh SQLite state",
                          path);
-                sqlite3_close(ndb->db);
-                ndb->db = NULL;
-                db_quarantine_files(path);
-                if (!node_db_owner_lease_rebind(ndb))
-                    return node_db_open_abort(ndb);
-                db_lifetime_scope_enter(
-                    &open_scope, ndb->lifetime_owner,
-                    boot_ceremony ? DB_LIFETIME_BACKING_OWNER
-                                  : DB_LIFETIME_HANDLE_OWNER,
-                    ndb->lifetime_generation);
-                raw_opened = db_open_raw(&ndb->db, path);
-                ndb->lifetime_generation = db_lifetime_scope_generation();
-                db_lifetime_scope_leave(&open_scope);
-                if (!raw_opened)
+                if (!db_quarantine_and_reopen(ndb, path, boot_ceremony))
                     return node_db_open_abort(ndb);
             }
         }
     }
 
-    if (!create_schema(ndb))
-        return node_db_open_abort(ndb);
-
-    ndb->open = true; /* node_db_migrate uses node_db_state_* helpers. */
-    /* Runtime reopen is already at current schema — suppress the banner. */
-    ndb->suppress_migrate_banner = !boot_ceremony;
-    int migrated = node_db_migrate(ndb, NULL);
-    ndb->suppress_migrate_banner = false;
-    ndb->open = false;
-    if (migrated < 0)
-        return node_db_open_abort(ndb);
+    bool schema_corrupt = false;
+    if (!db_build_schema(ndb, boot_ceremony, &schema_corrupt)) {
+        /* Not corruption (a real schema regression), or not the boot
+         * ceremony (a runtime reopen never renames the canonical store
+         * behind the owner's back): fail the open, unchanged. */
+        if (!schema_corrupt || !boot_ceremony)
+            return node_db_open_abort(ndb);
+        LOG_WARN("db", "db: %s is malformed (schema build); quarantining the "
+                 "family and rebuilding fresh SQLite state", path);
+        /* ONE bounded repair attempt. The rebuilt store is empty, so the
+         * second build failing means the fault is not the old file. */
+        if (!db_quarantine_and_reopen(ndb, path, boot_ceremony) ||
+            !db_build_schema(ndb, boot_ceremony, &schema_corrupt))
+            return node_db_open_abort(ndb);
+    }
     /* Crash recovery: staged snapshot rows are never authoritative across
      * process lifetimes. BOOT-only (a reopen must not re-run it every cycle). */
     if (boot_ceremony &&

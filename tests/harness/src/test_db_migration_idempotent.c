@@ -1352,6 +1352,141 @@ static int t_additive_migration_keeps_floor(void)
         db_mig_close_raw_handle(&ndb);
         PASS();
     } _test_next:;
+
+/* ── The deferred-quick_check corruption heal ───────────────────────────
+ *
+ * A fleet node sat in systemd `activating (start)` for 15.9 h on this exact
+ * shape. Its node.db held a damaged page; the fast-restart path had DEFERRED
+ * `PRAGMA quick_check` to the background, so the open's own malformed-store
+ * repair (quarantine the family, rebuild fresh) never ran. The corruption
+ * instead surfaced from the first baseline DDL statement that had to read the
+ * damaged table:
+ *
+ *   [db] schema[10] failed: database disk image is malformed
+ *        (sql=CREATE INDEX IF NOT EXISTS idx_tx_block ON transactions(...))
+ *
+ * and that verdict used to abort the open, taking the node to its
+ * node_db_unopened boot gate with a store the same file knew how to repair.
+ *
+ * The fixture reproduces it exactly and cheaply: build a normal store, put
+ * rows in `transactions`, drop idx_tx_block so the DDL must SCAN that table,
+ * fill the table's own root page with garbage, and arm a skip probe that
+ * defers quick_check the way the fast restart does. */
+
+static bool db_mig_skip_quick_check_always(const char *path)
+{
+    (void)path;
+    return true;
+}
+
+/* Read one integer out of `sql`'s first column. False on any SQLite error. */
+static bool db_mig_query_int(sqlite3 *db, const char *sql, int64_t *out)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_step(st) == SQLITE_ROW;
+    if (ok)
+        *out = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* Overwrite the 1-based page `page` of the SQLite file at `path` with 0xA5.
+ * Page 1 (the header + schema root) is deliberately left intact so the
+ * store still passes the schema preflight — the damage has to be found by
+ * the DDL, not by the marker read. */
+static bool db_mig_scribble_page(const char *path, int64_t page,
+                                 int64_t page_size)
+{
+    if (page < 2 || page_size < 512)
+        return false;
+    unsigned char *junk = malloc((size_t)page_size);
+    if (!junk)
+        return false;
+    memset(junk, 0xA5, (size_t)page_size);
+    FILE *f = fopen(path, "r+b");
+    bool ok = f != NULL &&
+              fseek(f, (long)((page - 1) * page_size), SEEK_SET) == 0 &&
+              fwrite(junk, 1, (size_t)page_size, f) == (size_t)page_size;
+    if (f && fclose(f) != 0)
+        ok = false;
+    free(junk);
+    return ok;
+}
+
+/* True iff `dir` holds at least one quarantined `node.db.corrupt-*`. */
+static bool db_mig_has_quarantined_family(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return false;
+    bool found = false;
+    const struct dirent *e;
+    while (!found && (e = readdir(d)) != NULL)
+        found = strncmp(e->d_name, "node.db.corrupt-", 16) == 0;
+    closedir(d);
+    return found;
+}
+
+static int t_malformed_store_heals_when_quick_check_deferred(void)
+{
+    int failures = 0;
+    char dir[256];
+    char dbpath[512];
+    db_mig_path(dir, sizeof(dir), "malformed_deferred_qc");
+    mkdir_p(dir);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: malformed store heals when quick_check is deferred") {
+        int64_t page_size = 0;
+        int64_t rootpage = 0;
+        {
+            struct node_db seed;
+            ASSERT(node_db_open(&seed, dbpath));
+            for (int i = 0; i < 256; i++) {
+                char sql[256];
+                snprintf(sql, sizeof(sql),
+                         "INSERT OR IGNORE INTO transactions"
+                         "(txid,block_hash,block_height,tx_index,file_num,"
+                         "file_pos,is_coinbase) VALUES"
+                         "(randomblob(32),randomblob(32),%d,0,0,0,0)", i);
+                ASSERT(node_db_exec(&seed, sql));
+            }
+            /* The DDL only scans the table when the index is missing — which
+             * is precisely the state the fleet node's store was in. */
+            ASSERT(node_db_exec(&seed, "DROP INDEX IF EXISTS idx_tx_block"));
+            ASSERT(db_mig_query_int(seed.db, "PRAGMA page_size", &page_size));
+            ASSERT(db_mig_query_int(seed.db,
+                "SELECT rootpage FROM sqlite_master"
+                " WHERE type='table' AND name='transactions'", &rootpage));
+            node_db_close(&seed);
+        }
+        ASSERT(rootpage >= 2 && page_size >= 512);
+        ASSERT(db_mig_scribble_page(dbpath, rootpage, page_size));
+        ASSERT(!db_mig_has_quarantined_family(dir));
+
+        node_db_set_quick_check_skip_probe(db_mig_skip_quick_check_always);
+        struct node_db healed;
+        bool opened = node_db_open(&healed, dbpath);
+        node_db_set_quick_check_skip_probe(NULL);
+
+        /* The whole point: the boot open SUCCEEDS on a rebuilt store instead
+         * of failing out to the node_db_unopened gate. */
+        ASSERT(opened);
+        ASSERT(healed.open);
+        ASSERT_EQ(node_db_schema_version(&healed), NODE_DB_SCHEMA_LATEST);
+        /* Copy-first: the damaged family was renamed aside, never deleted. */
+        ASSERT(db_mig_has_quarantined_family(dir));
+        /* The rebuilt store is writable, and empty of the seeded rows. */
+        int64_t rows = -1;
+        ASSERT(db_mig_query_int(healed.db,
+                                "SELECT COUNT(*) FROM transactions", &rows));
+        ASSERT_EQ(rows, 0);
+        node_db_close(&healed);
+        PASS();
+    } _test_next:;
+    node_db_set_quick_check_skip_probe(NULL);
     test_cleanup_tmpdir(dir);
     return failures;
 }
@@ -1437,6 +1572,48 @@ static int t_older_binary_within_floor_opens_read_compatible(void)
             "SELECT count(*) FROM schema_migrations");
         ASSERT_EQ(ledger_after, ledger_before);
         sqlite3_close(raw);
+/* A schema failure that is NOT the store being malformed must still refuse:
+ * the repair is scoped to SQLite's own corruption verdict, and a runtime
+ * reopen never renames the canonical store behind the boot owner's back. */
+static int t_malformed_store_repair_is_boot_only(void)
+{
+    int failures = 0;
+    char dir[256];
+    char dbpath[512];
+    db_mig_path(dir, sizeof(dir), "malformed_runtime_reopen");
+    mkdir_p(dir);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: a runtime reopen never quarantines the canonical store") {
+        int64_t page_size = 0;
+        int64_t rootpage = 0;
+        {
+            struct node_db seed;
+            ASSERT(node_db_open(&seed, dbpath));
+            for (int i = 0; i < 256; i++) {
+                char sql[256];
+                snprintf(sql, sizeof(sql),
+                         "INSERT OR IGNORE INTO transactions"
+                         "(txid,block_hash,block_height,tx_index,file_num,"
+                         "file_pos,is_coinbase) VALUES"
+                         "(randomblob(32),randomblob(32),%d,0,0,0,0)", i);
+                ASSERT(node_db_exec(&seed, sql));
+            }
+            ASSERT(node_db_exec(&seed, "DROP INDEX IF EXISTS idx_tx_block"));
+            ASSERT(db_mig_query_int(seed.db, "PRAGMA page_size", &page_size));
+            ASSERT(db_mig_query_int(seed.db,
+                "SELECT rootpage FROM sqlite_master"
+                " WHERE type='table' AND name='transactions'", &rootpage));
+            node_db_close(&seed);
+        }
+        ASSERT(db_mig_scribble_page(dbpath, rootpage, page_size));
+
+        struct node_db reopened;
+        bool opened = node_db_open_runtime(&reopened, dbpath,
+                                           "db_mig.malformed_runtime");
+        node_db_close(&reopened);
+        ASSERT(!opened);
+        ASSERT(!db_mig_has_quarantined_family(dir));
         PASS();
     } _test_next:;
     test_cleanup_tmpdir(dir);
@@ -1616,5 +1793,7 @@ int test_db_migration_idempotent(void)
     failures += t_floor_above_latest_refuses_with_typed_error();
     failures += t_backup_flag_writes_file_before_breaking_step();
     failures += t_backup_flag_refuses_on_insufficient_space();
+    failures += t_malformed_store_heals_when_quick_check_deferred();
+    failures += t_malformed_store_repair_is_boot_only();
     return failures;
 }

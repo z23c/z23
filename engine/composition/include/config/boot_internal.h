@@ -7,6 +7,7 @@
 
 #include "net/netbase.h"
 #include "config/boot.h"
+#include "config/boot_error.h"
 #include "config/boot_flyclient.h"
 #include "config/boot_tor_watch.h"
 #include "config/db_service.h"
@@ -668,6 +669,20 @@ bool anchor_snapshot_verified_reachable(struct node_db *ndb,
  * other boot-storage-gate call sites (boot_node_db_gate.c) use the SAME
  * park path instead of duplicating the wait loop. */
 bool boot_park_until_shutdown(const char *gate_name);
+
+/* Refuse the boot at a PERMANENT gate instead of parking at it: name the
+ * blocker in boot_status.json, render one typed FATAL block carrying the
+ * operator's own next command, and return false so app_init stops and main
+ * exits non-zero. Never returns true.
+ *
+ * Choose this over boot_park_until_shutdown() whenever the gate fires before
+ * the node serves anything. A park sends no READY=, so under Type=notify the
+ * unit sits in `activating (start)` until TimeoutStartSec — 15.9 h on a fleet
+ * node — while the process answers no RPC and the operator's `systemctl
+ * status` never says failed. Defined in boot.c. */
+bool boot_refuse_at_permanent_gate(const char *gate_name, const char *message,
+                                   const struct boot_error_next *next,
+                                   size_t next_count, const char *evidence);
 
 /* ── engine/composition/src/boot_node_db_gate.c ──────────────────────────────────────
  * #7 supervision-coverage fix: node.db failing to open used to log a
