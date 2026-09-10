@@ -1269,7 +1269,7 @@ Z23_FLAG("ZCL_LAND_STATE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_LAND_SUBMITTER", "env_build", "-", "-",
           "undocumented; first use tools/dev/land.sh:159")
 Z23_FLAG("ZCL_LAND_TEST_PICK_DELAY_MS", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:4333")
+          "undocumented; first use tools/command/native_dev_land.c:4342")
 Z23_FLAG("ZCL_LAND_TIMING", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:101")
 Z23_FLAG("ZCL_LAND_WORKTREE", "env_build", "-", "-",

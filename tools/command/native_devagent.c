@@ -15,6 +15,7 @@
 #include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
+#include "platform/path_compat.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -351,7 +352,7 @@ bool zcl_devagent_checkout_root(const char *start, char *out, size_t out_cap)
              * queue rows silently drop. realpath also resolves symlinked
              * checkouts to the one true path. */
             char resolved[PATH_MAX];
-            if (!realpath(dir, resolved))
+            if (!platform_path_identity(resolved, sizeof(resolved), dir))
                 return false;
             int n = snprintf(out, out_cap, "%s", resolved);
             return n > 0 && (size_t)n < out_cap;

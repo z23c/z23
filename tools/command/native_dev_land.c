@@ -3643,6 +3643,14 @@ static bool dl_wt_hook_links_ensure(const struct dl_dirs *d, char *why,
                            k_links[i]);
             return false;
         }
+#if defined(_WIN32)
+        if (stat(link, &st) == 0)
+            continue;
+        (void)snprintf(why, why_cap,
+                       "landing_worktree_hook_links_posix_only:%s",
+                       k_links[i]);
+        return false;
+#else
         if (lstat(link, &st) == 0)
             continue;
         if (symlink("z23-git-hook", link) != 0) {
@@ -3651,6 +3659,7 @@ static bool dl_wt_hook_links_ensure(const struct dl_dirs *d, char *why,
             return false;
         }
         *repaired = true;
+#endif
     }
     return true;
 }
