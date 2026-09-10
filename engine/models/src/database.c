@@ -596,8 +596,11 @@ static bool db_quarantine_and_reopen(struct node_db *ndb, const char *path,
         ndb->db = NULL;
     }
     db_quarantine_files(path);
-    if (!node_db_owner_lease_rebind(ndb))
+    if (!node_db_owner_lease_rebind(ndb)) {
+        LOG_FAIL("db", "db: quarantine could not rebind the pathname lease "
+                 "for %s; the fresh store was not reopened", path);
         return false;
+    }
     db_lifetime_scope_enter(&scope, ndb->lifetime_owner,
                             boot_ceremony ? DB_LIFETIME_BACKING_OWNER
                                           : DB_LIFETIME_HANDLE_OWNER,
