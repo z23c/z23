@@ -19,6 +19,7 @@
 #include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "rpc/protocol.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,71 @@ static void fb_no_node(struct zcl_command_reply *reply)
             "fleet.board");
     (void)zcl_command_reply_add_next(reply, "core.status", "{}",
                                      "inspect the selected node and local instances");
+}
+
+/* A node ANSWERED (it is up, reachable, and its auth cookie was accepted)
+ * but its JSON-RPC error names -32601 "method not found": the running
+ * binary predates the fleet_board RPC. That is generation skew on a live
+ * node, never an unreachable one, so it must never render as
+ * NODE_UNAVAILABLE nor suggest starting anything. The body can arrive
+ * either bare (node_rpc_call already unwrapped the JSON-RPC envelope and
+ * handed back just the error object) or enveloped (a raw
+ * `{"result":...,"error":{...},"id":...}` reply, as a stubbed test or a
+ * transport that did not unwrap it), so check both shapes the same way. */
+static bool fb_method_not_found(const struct json_value *body, char *message,
+                                size_t message_len)
+{
+    if (message && message_len)
+        message[0] = '\0';
+    const struct json_value *err = json_get(body, "error");
+    const struct json_value *obj =
+        (err && err->type == JSON_OBJ) ? err : body;
+    const struct json_value *code_v = json_get(obj, "code");
+    if (!code_v || code_v->type != JSON_INT)
+        return false;
+    if (json_get_int(code_v) != RPC_METHOD_NOT_FOUND)
+        return false;
+    const char *msg = json_get_str(json_get(obj, "message"));
+    if (message && message_len && msg && msg[0])
+        snprintf(message, message_len, "%s", msg);
+    return true;
+}
+
+/* The node answered but its running image has no fleet_board RPC — a
+ * generation-skew node, not an unreachable one. Name the cause, carry the
+ * node's own -32601 message as evidence, and point at redeploying THAT
+ * node, never at starting one. */
+static void fb_rpc_unsupported(struct zcl_command_reply *reply,
+                               const char *node_message)
+{
+    char message[416];
+    (void)snprintf(message, sizeof(message),
+        "the selected node answered but its running image has no "
+        "fleet_board RPC method (JSON-RPC -32601: %s) — this is a node "
+        "running an older build (generation skew), not an unreachable "
+        "node. Redeploy or upgrade that node's running image, then retry. "
+        "`z23-dev status` will not fix this.",
+        node_message && node_message[0] ? node_message : "Method not found");
+    fb_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_INVALID,
+            "BOARD_RPC_UNSUPPORTED", "dispatch", false, message,
+            "fleet.board");
+    (void)zcl_command_reply_add_next(reply, "core.status", "{}",
+        "identify the selected node's running build so it can be "
+        "redeployed/upgraded to a build with the fleet_board RPC");
+}
+
+/* The board handler was never reached: no `ok` field came back, only a
+ * transport-shaped error. Split out of fb_call so that call stays under the
+ * complexity cap — this one decision (which of the two distinct refusals
+ * applies) lives in exactly one place. */
+static void fb_handle_no_answer(struct zcl_command_reply *reply,
+                                const struct json_value *body)
+{
+    char node_message[320];
+    if (fb_method_not_found(body, node_message, sizeof(node_message)))
+        fb_rpc_unsupported(reply, node_message);
+    else
+        fb_no_node(reply);
 }
 
 /* Serialize one JSON object as the single RPC parameter. The array brackets
@@ -131,7 +197,7 @@ static bool fb_call(struct zcl_command_reply *reply, struct json_value *in,
         (bare_code && bare_code->type == JSON_INT && bare_msg &&
          bare_msg->type == JSON_STR);
     if (!board_answered && transport_error) {
-        fb_no_node(reply);
+        fb_handle_no_answer(reply, body);
         json_free(body);
         return false;
     }

@@ -2882,10 +2882,76 @@ static int test_board_unavailable_guides_instance_selection(void)
     return failures;
 }
 
+/* A REAL installed node whose running image predates the fleet_board RPC
+ * answers JSON-RPC -32601 "Method not found" — it responded, it is just
+ * missing the method (generation skew). node_rpc_call may hand that back
+ * bare (its own envelope already stripped by rpc_client.c) or enveloped
+ * (a stub, or a transport that left the envelope on) — cover both shapes,
+ * distinct from board_unavailable_rpc's NULL (no answer at all) above. */
+static char *board_method_not_found_bare_rpc(const char *method,
+                                             const char *params)
+{
+    (void)method;
+    (void)params;
+    return strdup("{\"code\":-32601,\"message\":\"Method not found\"}");
+}
+
+static char *board_method_not_found_enveloped_rpc(const char *method,
+                                                   const char *params)
+{
+    (void)method;
+    (void)params;
+    return strdup("{\"result\":null,\"error\":{\"code\":-32601,"
+                 "\"message\":\"Method not found\"},\"id\":1}");
+}
+
+/* One case body shared by the bare and enveloped fixtures: only the hook
+ * differs, so the assertions cannot silently drift between the two. */
+static int test_board_method_not_found_case(node_rpc_test_fn hook)
+{
+    int failures = 0;
+    TEST("board method-not-found names generation skew, not NODE_UNAVAILABLE") {
+        const struct zcl_command_spec *spec =
+            find_spec(zcl_command_catalog(), "fleet.board.status");
+        ASSERT(spec != NULL);
+        struct zcl_command_request req = {.spec = spec, .view = "normal"};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        node_rpc_client_set_test_hook(hook);
+        zcl_native_handle_fleet_board_status(&req, &reply);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "BOARD_RPC_UNSUPPORTED");
+        ASSERT(strcmp(reply.error.code, "NODE_UNAVAILABLE") != 0);
+        ASSERT(!reply.error.mutated);
+        ASSERT(strstr(reply.error.message, "Method not found") != NULL);
+        ASSERT(strstr(reply.error.message, "-32601") != NULL);
+        ASSERT(strstr(reply.error.message, "generation skew") != NULL);
+        ASSERT(strstr(reply.error.message, "did not answer") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+static int test_board_method_not_found_bare(void)
+{
+    return test_board_method_not_found_case(board_method_not_found_bare_rpc);
+}
+
+static int test_board_method_not_found_enveloped(void)
+{
+    return test_board_method_not_found_case(
+        board_method_not_found_enveloped_rpc);
+}
+
 int test_native_api_contract(void)
 {
     int failures = 0;
     failures += test_board_unavailable_guides_instance_selection();
+    failures += test_board_method_not_found_bare();
+    failures += test_board_method_not_found_enveloped();
     failures += test_every_branch_menu_lists_only_own_children();
     failures += test_every_leaf_dot_path_resolves_from_cli_words();
     failures += test_root_and_discover_aliases_resolve();
