@@ -79,7 +79,10 @@ static bool boot_moderation_may_serve_chunk(const uint8_t offer_id[32],
                                             void *ctx)
 {
     (void)ctx;
-    return market_moderation_may_serve_offer_id(offer_id);
+    if (market_moderation_may_serve_offer_id(offer_id))
+        return true;
+    market_moderation_observe_serve_refusal(offer_id);
+    return false;
 }
 
 void boot_wire_file_market_delivery(struct boot_svc_ctx *svc)

@@ -1039,6 +1039,64 @@ static int test_mmt_relay_leg_defaults_open_and_stays_closed(void)
     return failures;
 }
 
+static int test_mmt_serve_hide_names_unreviewed(void)
+{
+    int failures = 0;
+    TEST("market moderation: unreviewed serve refusal is a named blocker") {
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        ASSERT(node_db_open(&ndb, ":memory:") && ndb.open);
+        rpc_market_set_state(&ndb);
+        ASSERT(market_moderation_set_active_profile(
+                   MARKET_MODERATION_PROFILE_DEFAULT).ok);
+
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        struct file_offer offer;
+        ASSERT(mmt_signed_offer(&offer, 0xa1, 17, now));
+        ASSERT(db_file_offer_save(&ndb, &offer));
+        ASSERT(!market_moderation_may_serve_offer_id(offer.offer_id));
+
+        market_moderation_observe_serve_refusal(offer.offer_id);
+        struct market_moderation_serve_hide hide;
+        memset(&hide, 0, sizeof(hide));
+        market_moderation_last_serve_hide(&hide);
+        ASSERT(hide.present);
+        ASSERT(memcmp(hide.offer_id, offer.offer_id, 32) == 0);
+        ASSERT_EQ(strcmp(hide.blocker, MARKET_MODERATION_BLOCKER_UNREVIEWED),
+                  0);
+        ASSERT(strstr(hide.message, "hidden until reviewed") != NULL);
+
+        struct rpc_table table;
+        rpc_table_init(&table);
+        register_market_rpc_commands(&table);
+        set_rpc_warmup_finished();
+        struct json_value status;
+        ASSERT(mmt_rpc(&table, "zmarket_status", NULL, &status));
+        const struct json_value *serve_hide = json_get(&status, "serve_hide");
+        ASSERT(serve_hide && serve_hide->type == JSON_OBJ);
+        ASSERT_EQ(strcmp(mmt_kv_str(serve_hide, "blocker"),
+                         MARKET_MODERATION_BLOCKER_UNREVIEWED), 0);
+        ASSERT(strstr(mmt_kv_str(serve_hide, "message"),
+                      "hidden until reviewed") != NULL);
+        json_free(&status);
+
+        ASSERT(market_moderation_set_review_state(
+                   offer.offer_id, MARKET_REVIEW_SENSITIVE).ok);
+        ASSERT(!market_moderation_may_serve_offer_id(offer.offer_id));
+        market_moderation_observe_serve_refusal(offer.offer_id);
+        market_moderation_last_serve_hide(&hide);
+        ASSERT(hide.present);
+        ASSERT_EQ(strcmp(hide.blocker, MARKET_MODERATION_BLOCKER_SERVE_HIDDEN),
+                  0);
+
+        node_db_close(&ndb);
+        rpc_market_set_state(NULL);
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
 int test_file_market_moderation(void)
 {
     int failures = 0;
@@ -1049,6 +1107,7 @@ int test_file_market_moderation(void)
     failures += test_mmt_serving_gate_fails_closed();
     failures += test_mmt_policy_file_fails_closed();
     failures += test_mmt_relay_leg_defaults_open_and_stays_closed();
+    failures += test_mmt_serve_hide_names_unreviewed();
     printf("=== file_market_moderation: %d failures ===\n", failures);
     return failures;
 }

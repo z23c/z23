@@ -656,6 +656,21 @@ static bool rpc_zmarket_status(const struct json_value *params, bool help,
             json_push_kv_int(result, "offers_persisted", persisted);
     }
 
+    struct market_moderation_serve_hide hide;
+    memset(&hide, 0, sizeof(hide));
+    market_moderation_last_serve_hide(&hide);
+    if (hide.present) {
+        char hex[65];
+        HexStr(hide.offer_id, 32, false, hex, sizeof(hex));
+        struct json_value serve_hide = {0};
+        json_set_object(&serve_hide);
+        json_push_kv_str(&serve_hide, "blocker", hide.blocker);
+        json_push_kv_str(&serve_hide, "offer_id", hex);
+        json_push_kv_str(&serve_hide, "message", hide.message);
+        json_push_kv(result, "serve_hide", &serve_hide);
+        json_free(&serve_hide);
+    }
+
     return true;
 }
 

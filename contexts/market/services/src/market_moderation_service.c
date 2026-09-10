@@ -21,6 +21,8 @@
 
 #include "models/database.h"
 #include "models/file_offer.h"
+#include "models/review_state.h"
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
@@ -296,11 +298,15 @@ static struct node_db *g_mm_ndb = NULL;
 static char g_mm_datadir[1024] = "";
 static _Atomic int g_mm_active_profile = MARKET_MODERATION_PROFILE_DEFAULT;
 static _Atomic int g_mm_active_relay = MARKET_MODERATION_RELAY_ALL;
+static struct market_moderation_serve_hide g_mm_last_serve_hide;
 
 void market_moderation_set_context(struct node_db *ndb, const char *datadir)
 {
     pthread_mutex_lock(&g_mm_mutex);
     g_mm_ndb = ndb;
+    memset(&g_mm_last_serve_hide, 0, sizeof(g_mm_last_serve_hide));
+    if (!datadir || !datadir[0])
+        g_mm_datadir[0] = '\0';
     if (datadir) {
         snprintf(g_mm_datadir, sizeof(g_mm_datadir), "%s", datadir);
         char error[192] = {0};
@@ -483,6 +489,56 @@ bool market_moderation_may_serve_offer_id(const uint8_t offer_id[32])
     if (!offer_id) return false; // raw-return-ok:null-id-hides-fail-closed
     return mm_may_serve_with_review(
         market_moderation_review_state_for_offer_id(offer_id));
+}
+
+static void mm_note_serve_hide(const uint8_t offer_id[32],
+                               const char *blocker, const char *message)
+{
+    pthread_mutex_lock(&g_mm_mutex);
+    memset(&g_mm_last_serve_hide, 0, sizeof(g_mm_last_serve_hide));
+    g_mm_last_serve_hide.present = true;
+    if (offer_id)
+        memcpy(g_mm_last_serve_hide.offer_id, offer_id, 32);
+    snprintf(g_mm_last_serve_hide.blocker,
+             sizeof(g_mm_last_serve_hide.blocker), "%s",
+             blocker ? blocker : MARKET_MODERATION_BLOCKER_SERVE_HIDDEN);
+    snprintf(g_mm_last_serve_hide.message,
+             sizeof(g_mm_last_serve_hide.message), "%s",
+             message ? message : "this node will not serve these bytes");
+    pthread_mutex_unlock(&g_mm_mutex);
+}
+
+void market_moderation_observe_serve_refusal(const uint8_t offer_id[32])
+{
+    const char *blocker = MARKET_MODERATION_BLOCKER_SERVE_HIDDEN;
+    const char *message = "this node will not serve these bytes";
+    int review = MARKET_REVIEW_UNREVIEWED;
+    if (offer_id) {
+        review = market_moderation_review_state_for_offer_id(offer_id);
+        if (review == MARKET_REVIEW_UNREVIEWED) {
+            blocker = MARKET_MODERATION_BLOCKER_UNREVIEWED;
+            message = "your offer is hidden until reviewed";
+        }
+    }
+    mm_note_serve_hide(offer_id, blocker, message);
+    char hex[65];
+    memset(hex, 0, sizeof(hex));
+    if (offer_id)
+        zcl_hex_encode(offer_id, 32, hex);
+    else
+        memcpy(hex, "(null)", 7);
+    LOG_WARN(MM_TAG, "serve refused: blocker=%s offer_id=%s %s",
+             blocker, hex, message);
+}
+
+void market_moderation_last_serve_hide(
+    struct market_moderation_serve_hide *out)
+{
+    if (!out)
+        return;
+    pthread_mutex_lock(&g_mm_mutex);
+    *out = g_mm_last_serve_hide;
+    pthread_mutex_unlock(&g_mm_mutex);
 }
 
 bool market_moderation_may_relay_root(const uint8_t root_hash[32])

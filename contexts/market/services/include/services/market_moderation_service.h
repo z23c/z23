@@ -203,6 +203,25 @@ int market_moderation_review_state_for_offer_id(const uint8_t offer_id[32]);
 bool market_moderation_may_serve_root(const uint8_t root_hash[32]);
 bool market_moderation_may_serve_offer_id(const uint8_t offer_id[32]);
 
+/* Named last serve-hide the operator can read without Tor logs. The
+ * core delivery callback is still bool (sealed); this is the engine
+ * surface that names WHY this node refused to hand bytes out. */
+#define MARKET_MODERATION_SERVE_HIDE_BLOCKER_MAX 48
+#define MARKET_MODERATION_SERVE_HIDE_MESSAGE_MAX 96
+#define MARKET_MODERATION_BLOCKER_UNREVIEWED "offer_unreviewed_hidden"
+#define MARKET_MODERATION_BLOCKER_SERVE_HIDDEN "offer_serve_hidden"
+
+struct market_moderation_serve_hide {
+    bool present;
+    uint8_t offer_id[32];
+    char blocker[MARKET_MODERATION_SERVE_HIDE_BLOCKER_MAX];
+    char message[MARKET_MODERATION_SERVE_HIDE_MESSAGE_MAX];
+};
+
+void market_moderation_observe_serve_refusal(const uint8_t offer_id[32]);
+void market_moderation_last_serve_hide(
+    struct market_moderation_serve_hide *out);
+
 /* ── The relay gate (RELAY leg) ──────────────────────────────────────
  * May this node rebroadcast somebody else's offer announcement? A
  * SEPARATE question from may_serve with a SEPARATE setting and the
