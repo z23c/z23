@@ -1646,6 +1646,135 @@ _test_next:;
     return failures;
 }
 
+/* Model a damaged local projection, while the proof stub deliberately admits
+ * the pair. The real client must still enforce ancestry before dispatch. */
+static bool dlx_replace_prepared_candidate(const char *ancestor)
+{
+    char land[1200], wt[1400], path[1400], wire[8192], divergent[64];
+    size_t length;
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(wt, sizeof(wt), "%s/wt", land);
+    const char *commit[] = { "-c", "user.name=land", "-c",
+        "user.email=land@z23.invalid", "commit-tree", "HEAD^{tree}",
+        "-p", ancestor, "-m", "divergent prepared candidate", NULL };
+    if (dlx_git_out(wt, commit, divergent, sizeof(divergent)) != 0 ||
+        strlen(divergent) != 40)
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    if (!dlx_slurp(path, wire, sizeof(wire), &length)) return false;
+    wire[length] = '\0';
+    char *local = strstr(wire, "\"local\":\"");
+    if (!local || strlen(local + 9) < 41 || local[49] != '"') return false;
+    memcpy(local + 9, divergent, 40);
+    return dlx_write(path, wire);
+}
+
+static int test_dev_land_nonfastforward_client_guard(void)
+{
+    int failures = 0;
+    TEST("land: expected-base comparison never authorizes non-fast-forward dispatch") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char ancestor[64], base[64], after[64], wrapper[700], marker[700];
+        dlx_isolate("nonfastforward_client");
+        ASSERT(dlx_rig_make(&rig, "nonfastforward_client_rig"));
+        ASSERT(dlx_origin_main(&rig, ancestor));
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_origin_main(&rig, base));
+        ASSERT(dlx_commit(rig.clone, "third.txt", "three\n", rig.tip));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        ASSERT(dlx_replace_prepared_candidate(ancestor));
+        (void)snprintf(wrapper, sizeof(wrapper), "%s.receive-pack", rig.bare);
+        (void)snprintf(marker, sizeof(marker), "%s/hooks/push-invoked", rig.bare);
+        ASSERT(dlx_write(wrapper, "#!/bin/sh\n"
+            "printf 'invoked\\n' > \"$1/hooks/push-invoked\" || exit 73\n"
+            "exec git-receive-pack \"$@\"\n"));
+        ASSERT(chmod(wrapper, 0700) == 0);
+        const char *intercept[] = { "config", "remote.origin.receivepack", wrapper, NULL };
+        ASSERT(dlx_git(rig.clone, intercept) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(!dlx_file_exists(marker));
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, base);
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "attempt")), 2);
+        char log[8192];
+        size_t log_length;
+        ASSERT(dlx_slurp(dlx_str(&c, "log_path"), log, sizeof(log), &log_length));
+        log[log_length] = '\0';
+        ASSERT(strstr(log, "proven base is not an ancestor of candidate") != NULL);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_expected_base_race(void)
+{
+    int failures = 0;
+    TEST("land: a fast-forward push still requires the proven remote base") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char ancestor[64], after[64], wrapper[700], marker[700], script[1800];
+        dlx_isolate("expected_base_race");
+        ASSERT(dlx_rig_make(&rig, "expected_base_race_rig"));
+        ASSERT(dlx_origin_main(&rig, ancestor));
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        char base[64];
+        ASSERT(dlx_origin_main(&rig, base));
+        ASSERT(dlx_commit(rig.clone, "third.txt", "three\n", rig.tip));
+        const char *protect[] = { "config", "receive.denyNonFastForwards", "true", NULL };
+        ASSERT(dlx_git(rig.bare, protect) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        (void)snprintf(wrapper, sizeof(wrapper), "%s.receive-pack", rig.bare);
+        (void)snprintf(marker, sizeof(marker), "%s/hooks/base-rewound", rig.bare);
+        (void)snprintf(script, sizeof(script),
+            "#!/bin/sh\n"
+            "git -C \"$1\" update-ref refs/heads/main %s %s || exit 73\n"
+            "printf 'rewound\\n' > \"$1/hooks/base-rewound\" || exit 74\n"
+            "exec git-receive-pack \"$@\"\n", ancestor, base);
+        ASSERT(dlx_write(wrapper, script));
+        ASSERT(chmod(wrapper, 0700) == 0);
+        const char *intercept[] = { "config", "remote.origin.receivepack", wrapper, NULL };
+        ASSERT(dlx_git(rig.clone, intercept) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_file_exists(marker));
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, ancestor);
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "attempt")), 2);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_postpush_result_unconfirmed(void)
 {
     int failures = 0;
@@ -2339,6 +2468,8 @@ int test_dev_land(void)
 
     failures += test_dev_land_postpush_observation_missing();
     failures += test_dev_land_postpush_result_unconfirmed();
+    failures += test_dev_land_expected_base_race();
+    failures += test_dev_land_nonfastforward_client_guard();
     failures += test_dev_land_lost_persistence();
 
     TEST("land: a hooksPath naming no real pre-push cannot skip admission") {

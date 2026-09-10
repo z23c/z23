@@ -162,9 +162,12 @@ and uncertain acknowledgements remain first-class results. Duplicate dispatch
 reconciles the existing intent and results before any further mutation.
 
 Current landing adapter: `tools/command/native_dev_land.c` persists local queue
-progress and runs `git push origin HEAD:main` through its installed hook, but the
-push lacks an explicit expected-old-value argument. Its crash reconciliation
-is not the immutable intent/result/remote-receipt chain defined here.
+progress and pushes the exact prepared commit through its installed hook. It
+checks the proven base is an ancestor of that commit with Git replacement
+objects disabled, then binds the remote update to that exact expected base.
+The expected-base lease cannot authorize non-fast-forward history replacement.
+Its crash reconciliation is not the immutable intent/result/remote-receipt
+chain defined here.
 `tools/ship.sh` still contains `git push --no-verify origin main`; retire that
 publication path without granting deployment authority. Retain the existing
 publish-callsite gate. Use both verified fast-forward ancestry and a server-side

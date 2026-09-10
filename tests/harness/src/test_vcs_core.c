@@ -1881,6 +1881,66 @@ static int t_generated_paths_ignored(const char *dir)
     return failures;
 }
 
+/* A write/search-only parent permits mkdir/link but refuses the directory
+ * open required by a durability barrier. Restore permissions before checks. */
+#if !defined(_WIN32)
+static int t_store_init_parent_barrier(const char *path)
+{
+    int failures = 0;
+    bool restricted = chmod(path, 0300) == 0;
+    bool initialized = restricted && vcs_object_store_init(path);
+    bool init_retry = restricted && vcs_object_store_init(path);
+    bool restored = chmod(path, 0700) == 0;
+    VC_CHECK("store init refuses unflushable parent", restricted && restored && !initialized);
+    VC_CHECK("store init retry cannot bypass parent barrier", !init_retry);
+    VC_CHECK("store init retry", vcs_object_store_init(path));
+    return failures;
+}
+
+static int t_object_shard_parent_barrier(const char *path)
+{
+    int failures = 0;
+    char objects[4096];
+    int n = snprintf(objects, sizeof(objects), "%s/.zvcs/objects", path);
+    VC_CHECK("shard parent path", n > 0 && (size_t)n < sizeof(objects));
+    if (n <= 0 || (size_t)n >= sizeof(objects)) return failures;
+    bool restricted = chmod(objects, 0300) == 0;
+    const uint8_t bytes[] = "new shard needs its parent barrier";
+    uint8_t root[32];
+    bool put = restricted && vcs_object_put(path, bytes, sizeof(bytes), VCS_TAG_BLOB, root);
+    bool put_retry = restricted && vcs_object_put(path, bytes, sizeof(bytes), VCS_TAG_BLOB, root);
+    bool repaired = false;
+    bool repair_retry = restricted && vcs_object_put_repair(path, bytes, sizeof(bytes),
+        VCS_TAG_BLOB, root, &repaired);
+    bool addressed_retry = restricted && vcs_object_put_addressed_repair(path, root,
+        bytes, sizeof(bytes), &repaired);
+    bool restored = chmod(objects, 0700) == 0;
+    VC_CHECK("new shard refuses unflushable parent", restricted && restored && !put);
+    VC_CHECK("dedup retry cannot bypass parent barrier", !put_retry);
+    VC_CHECK("verified repair retry cannot bypass parent barrier", !repair_retry);
+    VC_CHECK("addressed repair retry cannot bypass parent barrier", !addressed_retry);
+    VC_CHECK("object retry after restored parent", vcs_object_put(path, bytes, sizeof(bytes), VCS_TAG_BLOB, root));
+    return failures;
+}
+
+static int t_object_parent_barriers(const char *repo)
+{
+    int failures = 0;
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/parent-barriers", repo);
+    VC_CHECK("parent barriers fixture path", n > 0 && (size_t)n < sizeof(path));
+    if (failures) return failures;
+    VC_CHECK("parent barriers fixture mkdir", mkdir(path, 0700) == 0);
+    if (failures) return failures;
+    /* Root bypasses the permission fault; it cannot qualify this witness. */
+    VC_CHECK("parent barriers require unprivileged permission enforcement", geteuid() != 0);
+    if (failures) return failures;
+    failures += t_store_init_parent_barrier(path);
+    failures += t_object_shard_parent_barrier(path);
+    return failures;
+}
+#endif
+
 /* ── test 2/3: object store dedup + verify-on-read ──────────────── */
 static int t_object_store(const char *repo)
 {
@@ -2822,6 +2882,9 @@ int test_vcs_core(void)
 
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "objstore");
     failures += t_object_store(dir);
+#if !defined(_WIN32)
+    failures += t_object_parent_barriers(dir);
+#endif
     test_rm_rf_recursive(dir);
 
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "ignored");

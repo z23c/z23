@@ -74,6 +74,22 @@ static bool ensure_dir(const char *path)
 #endif
 }
 
+/* Persist the directory entries created by store_init, deepest first.
+ * Existing directories also need the barrier after a prior failed attempt. */
+static bool store_parents_flush(const char *repo_root)
+{
+    static const char *const parents[] = {"objects", ""};
+    char path[VCS_OBJECT_PATH_MAX];
+    for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); i++) {
+        if (!zvcs_path(repo_root, parents[i], path, sizeof(path)) ||
+            !platform_private_parent_flush(path))
+            LOG_FAIL("vcs", "object store parent barrier failed");
+    }
+    if (!platform_private_parent_flush(repo_root))
+        LOG_FAIL("vcs", "repository parent barrier failed");
+    return true;
+}
+
 bool vcs_object_store_init(const char *repo_root)
 {
     if (!repo_root || !repo_root[0])
@@ -87,7 +103,7 @@ bool vcs_object_store_init(const char *repo_root)
         LOG_FAIL("vcs", "mkdir objects: %s", strerror(errno));
     if (!zvcs_path(repo_root, "objects/tmp", path, sizeof(path)) || !ensure_dir(path))
         LOG_FAIL("vcs", "mkdir objects/tmp: %s", strerror(errno));
-    return true;
+    return store_parents_flush(repo_root);
 }
 
 bool vcs_object_store_initialized(const char *repo_root)
@@ -130,6 +146,23 @@ bool vcs_object_has(const char *repo_root, const uint8_t hash[32])
            PLATFORM_FILE_METADATA_OK;
 }
 
+/* A completed file may survive a failed directory barrier. Repeat both
+ * namespace barriers on dedup, rather than accepting existence as durability. */
+static bool object_parents_flush(const char *repo_root, const uint8_t addr[32])
+{
+    char path[VCS_OBJECT_PATH_MAX];
+    if (!object_path(repo_root, addr, path, sizeof(path)))
+        LOG_FAIL("vcs", "object barrier path too long");
+    char *leaf = strrchr(path, '/');
+    if (!leaf) LOG_FAIL("vcs", "object barrier parent missing");
+    *leaf = 0;
+    if (!platform_private_parent_flush(path) ||
+        !zvcs_path(repo_root, "objects", path, sizeof(path)) ||
+        !platform_private_parent_flush(path))
+        LOG_FAIL("vcs", "object namespace barrier failed");
+    return true;
+}
+
 /* Write content[0..len) into the object addressed by addr, atomically and
  * idempotently. Shared by the content-addressed put and the manifest's
  * structural-address put. */
@@ -143,7 +176,7 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
     struct platform_file_metadata metadata;
     if (!replace && platform_file_metadata_read(final, &metadata) ==
                         PLATFORM_FILE_METADATA_OK)
-        return true;  /* dedup */
+        return object_parents_flush(repo_root, addr);  /* dedup */
 
     char hex[65];
     zcl_hex_encode(addr, 32, hex);
@@ -191,7 +224,7 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
         (void)platform_private_file_retire_if_identity(
             &staged, tmp, &staged_identity);
     platform_private_file_close(&staged);
-    if (ok) ok = platform_private_parent_flush(sharddir);
+    if (ok) ok = object_parents_flush(repo_root, addr);
     if (!ok) LOG_FAIL("vcs", "durable object publication failed");
     return ok;
 }
@@ -237,7 +270,7 @@ bool vcs_object_put_repair(const char *repo_root, const uint8_t *content,
         bool same = existing_len == len &&
             (len == 0 || memcmp(existing, content, len) == 0);
         free(existing);
-        return same;
+        return same && object_parents_flush(repo_root, out_hash);
     }
     bool ok = object_write_mode(repo_root, out_hash, content, len, existed);
     if (ok && repaired) *repaired = existed;
@@ -261,7 +294,7 @@ bool vcs_object_put_addressed_repair(const char *repo_root,
     if (loaded == 0 && existing_len == len &&
         (len == 0 || memcmp(existing, content, len) == 0)) {
         free(existing);
-        return true;
+        return object_parents_flush(repo_root, address);
     }
     free(existing);
     bool ok = object_write_mode(repo_root, address, content, len, existed);

@@ -3785,6 +3785,36 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
         dl_step_reply(reply, row, "started");
 }
 
+/* The lease adds an expected-old-value comparison; it never grants history
+ * replacement. Verify the exact proven pair's fast-forward ancestry first. */
+static bool dl_push_proven_pair(const struct dl_dirs *d,
+                                const struct dl_row *row,
+                                char *out, size_t out_cap)
+{
+    const char *ancestry[] = { "--no-replace-objects", "merge-base",
+        "--is-ancestor", row->base, row->local, NULL };
+    int rc = dl_git(d->wt, ancestry, out, out_cap, DL_GIT_TIMEOUT_MS);
+    if (rc != 0) {
+        if (rc == 1 || !out[0])
+            (void)snprintf(out, out_cap, "%s", rc == 1
+                ? "publication refused: proven base is not an ancestor of candidate"
+                : "publication refused: cannot establish proven-pair ancestry");
+        return false;
+    }
+    char lease[128], refspec[128];
+    int n = snprintf(lease, sizeof(lease), "--force-with-lease=refs/heads/main:%s",
+                     row->base);
+    int m = snprintf(refspec, sizeof(refspec), "%s:refs/heads/main", row->local);
+    if (n <= 0 || (size_t)n >= sizeof(lease) ||
+        m <= 0 || (size_t)m >= sizeof(refspec)) {
+        (void)snprintf(out, out_cap, "%s",
+            "publication refused: exact ref arguments exceed bounded capacity");
+        return false;
+    }
+    const char *push[] = { "push", lease, "origin", refspec, NULL };
+    return dl_git(d->wt, push, out, out_cap, DL_GIT_TIMEOUT_MS) == 0;
+}
+
 static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
@@ -3798,14 +3828,14 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
          * obtained for (local, base) at
          * .cache/zcl-dev-proof/receipts/<local>-<base>.receipt, so the hook
          * admits in seconds instead of re-running the proof. */
-        const char *push_args[] = { "push", "origin", "HEAD:main", NULL };
-        if (dl_git(d->wt, push_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
-            0) {
+        if (!dl_push_proven_pair(d, row, buf, sizeof(buf))) {
             row->attempt++;
             (void)snprintf(row->phase, sizeof(row->phase), "rebase");
             (void)snprintf(row->detail, sizeof(row->detail), "%s",
                            "the fast-forward push was refused; rebasing");
             dl_log_path(d, row);
+            dl_log(row, buf);
+            dl_log(row, "\n");
             dl_log(row, row->detail);
             dl_log(row, "\n");
             if (row->attempt > DL_ATTEMPT_MAX) {

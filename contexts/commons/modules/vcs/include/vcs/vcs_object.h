@@ -40,14 +40,17 @@ enum vcs_object_tag {
 
 /* Ensure the object store directory tree exists under <repo_root>/.zvcs/
  * (objects/ and objects/tmp/). Idempotent. Returns false only on a real
- * mkdir error (not EEXIST). */
+ * mkdir or parent-directory barrier error (not EEXIST). Parent barriers are
+ * repeated on retry, including when all directories already exist. */
 bool vcs_object_store_init(const char *repo_root);
 /* Read-only exact probe for the directory tree created by store_init. */
 bool vcs_object_store_initialized(const char *repo_root);
 
 /* Store content[0..len) under tag. Writes out_hash[32] = SHA3(tag||content)
  * on success (even when the object already existed). Atomic + idempotent:
- * an existing object is left untouched and the call succeeds. Returns false
+ * an existing object is left untouched and its namespace barriers are retried.
+ * The shard and its parent must pass their platform directory barriers.
+ * Returns false
  * on a null arg or any filesystem error. len==0 is valid. */
 bool vcs_object_put(const char *repo_root, const uint8_t *content, size_t len,
                     uint8_t tag, uint8_t out_hash[32]);

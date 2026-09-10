@@ -6,6 +6,7 @@
 #include "test/public_shape_fixture.h"
 
 #include "base/hex.h"
+#include "base/bytes.h"
 #include "codeindex/codeindex_merkle.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
@@ -43,6 +44,7 @@
 #include "vcs/zcode_agent_context.h"
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_publication.h"
 #include "vcs/zcode_work_context.h"
 #include "vcs/zcode_work_node.h"
 #include "vcs/zcode_work_swarm.h"
@@ -6909,6 +6911,298 @@ static int test_zd_task_context(void)
     return failures;
 }
 
+static bool zd_publication_wire_refused(const uint8_t *wire, size_t length)
+{
+    struct vcs_zcode_publication_v1 out;
+    uint8_t zero[sizeof(out)] = {0};
+    memset(&out, 0xa5, sizeof(out));
+    return vcs_zcode_publication_parse(wire, length, &out) != VCS_ZCODE_DEV_OK &&
+           memcmp(&out, zero, sizeof(out)) == 0;
+}
+
+static bool zd_publication_bad_wires(const uint8_t golden[440])
+{
+    for (size_t length = 0; length < 440; length++)
+        if (!zd_publication_wire_refused(golden, length)) return false;
+    uint8_t wire[441];
+    memcpy(wire, golden, 440);
+    wire[440] = 0;
+    if (!zd_publication_wire_refused(wire, sizeof(wire))) return false;
+    const size_t bad_offsets[] = {0, 8, 10, 11, 12, 13, 14, 15, 160, 292, 324};
+    for (size_t i = 0; i < sizeof(bad_offsets) / sizeof(bad_offsets[0]); i++) {
+        memcpy(wire, golden, 440);
+        wire[bad_offsets[i]] = 0x7f;
+        if (!zd_publication_wire_refused(wire, 440)) return false;
+    }
+    const size_t zero_offsets[] = {16, 48, 80, 112, 272, 304, 344, 376};
+    for (size_t i = 0; i < sizeof(zero_offsets) / sizeof(zero_offsets[0]); i++) {
+        memcpy(wire, golden, 440);
+        memset(wire + zero_offsets[i], 0, zero_offsets[i] == 376 ? 64 : 32);
+        if (!zd_publication_wire_refused(wire, 440)) return false;
+    }
+    memcpy(wire, golden, 440);
+    memset(wire + 336, 0, 8);
+    if (!zd_publication_wire_refused(wire, 440)) return false;
+    memcpy(wire, golden, 440);
+    memset(wire + 144, 'a', 128);
+    return zd_publication_wire_refused(wire, 440);
+}
+
+static bool zd_publication_bad_refs(const uint8_t golden[440])
+{
+    static const char *const refs[] = {"", "HEAD", "refs/", "refs//main",
+        "refs/heads/", "refs/heads/.hidden", "refs/heads/a..b",
+        "refs/heads/a.lock", "refs/heads/a.", "refs/heads/a b",
+        "refs/heads/a@{b", "refs/heads/a~1", "refs/heads/a\\b"};
+    uint8_t wire[440];
+    for (size_t i = 0; i < sizeof(refs) / sizeof(refs[0]); i++) {
+        memcpy(wire, golden, sizeof(wire));
+        memset(wire + 144, 0, 128);
+        memcpy(wire + 144, refs[i], strlen(refs[i]));
+        if (!zd_publication_wire_refused(wire, sizeof(wire))) return false;
+    }
+    return true;
+}
+
+static bool zd_publication_binding_mutations(const uint8_t golden[440],
+    const uint8_t pubkey[32], const uint8_t expected_root[32])
+{
+    const size_t offsets[] = {10, 16, 48, 80, 112, 155, 272, 304, 336, 344, 376};
+    for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+        uint8_t wire[440], root[32];
+        struct vcs_zcode_publication_v1 changed;
+        memcpy(wire, golden, sizeof(wire));
+        if (offsets[i] == 10) wire[10] = VCS_ZCODE_PUBLICATION_GIT_OID_32;
+        else wire[offsets[i]] ^= 1;
+        if (vcs_zcode_publication_parse(wire, sizeof(wire), &changed) != VCS_ZCODE_DEV_OK ||
+            vcs_zcode_publication_root(&changed, root) != VCS_ZCODE_DEV_OK ||
+            memcmp(root, expected_root, 32) == 0 ||
+            vcs_zcode_publication_verify(&changed, pubkey) != VCS_ZCODE_DEV_ERR_SIGNATURE)
+            return false;
+    }
+    return true;
+}
+
+static bool zd_publication_extended_roundtrip(
+    const struct vcs_zcode_publication_v1 *original,
+    const uint8_t secret[32], const uint8_t pubkey[32])
+{
+    struct vcs_zcode_publication_v1 intent = *original, parsed;
+    intent.git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_32;
+    memset(intent.expected_base, 0x51, 32);
+    memset(intent.head_commit, 0x62, 32);
+    memset(intent.target_ref, 'a', 127);
+    memcpy(intent.target_ref, "refs/heads/", 11);
+    intent.target_ref[127] = 0;
+    uint8_t wire[440], wrong_signer[32];
+    memcpy(wrong_signer, pubkey, 32);
+    wrong_signer[0] ^= 1;
+    return vcs_zcode_publication_seal(&intent, secret, pubkey) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_publication_serialize(&intent, wire) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_publication_parse(wire, sizeof(wire), &parsed) == VCS_ZCODE_DEV_OK &&
+        parsed.git_object_format == VCS_ZCODE_PUBLICATION_GIT_OID_32 &&
+        parsed.expected_base[31] == 0x51 && parsed.head_commit[31] == 0x62 &&
+        strlen(parsed.target_ref) == 127 &&
+        vcs_zcode_publication_verify(&parsed, pubkey) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_publication_verify(&parsed, wrong_signer) == VCS_ZCODE_DEV_ERR_SIGNATURE;
+}
+
+static bool zd_publication_load_refused(const char *dir, const uint8_t root[32],
+                                       const uint8_t signer[32])
+{
+    struct vcs_zcode_publication_v1 out;
+    uint8_t zero[sizeof(out)] = {0};
+    memset(&out, 0xa5, sizeof(out));
+    return !vcs_zcode_publication_load_verified(dir, root, signer, &out) &&
+        memcmp(&out, zero, sizeof(out)) == 0;
+}
+
+static bool zd_publication_cas(const uint8_t wire[440], const uint8_t root[32],
+                                const uint8_t signer[32])
+{
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "publication_intent");
+    struct vcs_repo *repo = vcs_open(dir);
+    if (!repo) { test_rm_rf(dir); return false; }
+    vcs_close(repo);
+    uint8_t wrong_root[32], missing[32], oversized_root[32], wrong_signer[32];
+    memcpy(wrong_root, root, 32); wrong_root[0] ^= 1;
+    memcpy(missing, root, 32); missing[0] ^= 2;
+    memcpy(oversized_root, root, 32); oversized_root[0] ^= 3;
+    memcpy(wrong_signer, signer, 32); wrong_signer[0] ^= 1;
+    uint8_t oversized[441], loaded_wire[440];
+    memcpy(oversized, wire, 440); oversized[440] = 0;
+    struct vcs_zcode_publication_v1 out;
+    bool ok = vcs_object_put_addressed(dir, root, wire, 440) &&
+        vcs_zcode_publication_load_verified(dir, root, signer, &out) &&
+        vcs_zcode_publication_serialize(&out, loaded_wire) == VCS_ZCODE_DEV_OK &&
+        memcmp(loaded_wire, wire, 440) == 0 &&
+        vcs_object_put_addressed(dir, wrong_root, wire, 440) &&
+        zd_publication_load_refused(dir, wrong_root, signer) &&
+        zd_publication_load_refused(dir, missing, signer) &&
+        zd_publication_load_refused(dir, root, wrong_signer) &&
+        vcs_object_put_addressed(dir, oversized_root, oversized, sizeof(oversized)) &&
+        zd_publication_load_refused(dir, oversized_root, signer);
+    test_rm_rf(dir);
+    return ok;
+}
+
+static bool zd_publication_store_refused(const char *dir,
+    const struct vcs_zcode_publication_v1 *intent, const uint8_t signer[32])
+{
+    uint8_t out[32];
+    memset(out, 0xa5, sizeof(out));
+    return !vcs_zcode_publication_store_verified(dir, intent, signer, out) &&
+        !zcl_bytes_any_set(out, sizeof(out));
+}
+
+static bool zd_publication_store_invalid(const char *dir,
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t signer[32], const uint8_t root[32])
+{
+    uint8_t wrong_signer[32], invalid_root[32];
+    struct vcs_zcode_publication_v1 invalid = *intent;
+    memcpy(wrong_signer, signer, 32); wrong_signer[0] ^= 1;
+    invalid.signature[0] ^= 1;
+    bool ok = vcs_zcode_publication_root(&invalid, invalid_root) == VCS_ZCODE_DEV_OK &&
+        zd_publication_store_refused(dir, &invalid, signer) &&
+        !vcs_object_has(dir, invalid_root) &&
+        zd_publication_store_refused(dir, NULL, signer) &&
+        zd_publication_store_refused(dir, intent, NULL) &&
+        zd_publication_store_refused(NULL, intent, signer) &&
+        zd_publication_store_refused(dir, intent, wrong_signer) &&
+        !vcs_object_has(dir, root);
+    invalid = *intent;
+    invalid.schema_version = 0;
+    return ok && zd_publication_store_refused(dir, &invalid, signer) &&
+        !vcs_object_has(dir, root);
+}
+
+static bool zd_publication_store_collision(
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t signer[32], const uint8_t root[32])
+{
+    char dir[512];
+    /* A successful generic dedup put does not verify occupied CAS bytes. */
+    test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "publication_collision");
+    uint8_t corrupt[1] = {0x71}, *raw = NULL;
+    size_t length = 0;
+    bool ok = vcs_object_store_init(dir) &&
+        vcs_object_put_addressed(dir, root, corrupt, sizeof(corrupt));
+    if (ok) ok = zd_publication_store_refused(dir, intent, signer) &&
+        vcs_object_load_raw_bounded(dir, root, 1, &raw, &length) == 0 &&
+        length == 1 && raw[0] == corrupt[0];
+    free(raw);
+    test_rm_rf(dir);
+    return ok;
+}
+
+#if !defined(_WIN32)
+static bool zd_publication_store_parent(const char *dir,
+    const struct vcs_zcode_publication_v1 *intent, const uint8_t signer[32])
+{
+    uint8_t root[32];
+    memset(root, 0xa5, sizeof(root));
+    bool restricted = chmod(dir, 0300) == 0;
+    bool initialized = restricted && vcs_object_store_init(dir);
+    bool stored = restricted && vcs_zcode_publication_store_verified(dir, intent, signer, root);
+    bool restored = chmod(dir, 0700) == 0;
+    return restricted && restored && !initialized && !stored &&
+        !zcl_bytes_any_set(root, sizeof(root));
+}
+#endif
+
+static bool zd_publication_store(const struct vcs_zcode_publication_v1 *intent,
+                                 const uint8_t signer[32], const uint8_t root[32])
+{
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "publication_store");
+    uint8_t stored[32];
+    struct vcs_zcode_publication_v1 loaded;
+    bool ok = zd_publication_store_refused(dir, intent, signer) &&
+        !vcs_object_store_initialized(dir) && vcs_object_store_init(dir) &&
+        zd_publication_store_invalid(dir, intent, signer, root);
+#if !defined(_WIN32)
+    if (ok) ok = zd_publication_store_parent(dir, intent, signer);
+#endif
+    if (ok) ok = vcs_zcode_publication_store_verified(dir, intent, signer, stored) &&
+        memcmp(stored, root, 32) == 0 &&
+        vcs_zcode_publication_load_verified(dir, stored, signer, &loaded) &&
+        vcs_zcode_publication_store_verified(dir, intent, signer, stored) &&
+        memcmp(stored, root, 32) == 0;
+    test_rm_rf(dir);
+    return ok && zd_publication_store_collision(intent, signer, root);
+}
+
+static int test_zd_publication_intent(void)
+{
+    int failures = 0;
+    TEST("publication intent: canonical signed bytes bind every publication field") {
+        uint8_t seed[32] = {71}, secret[32], pubkey[32];
+        ed25519_keypair(pubkey, secret, seed);
+        struct vcs_zcode_publication_v1 intent = {
+            .schema_version = 1,
+            .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+            .target_ref = "refs/heads/main",
+            .created_unix = 1234,
+        };
+        memset(intent.candidate_root, 1, 32);
+        memset(intent.proof_set_root, 2, 32);
+        memset(intent.target_identity_root, 3, 32);
+        memset(intent.authority_root, 4, 32);
+        memset(intent.expected_base, 5, 20);
+        memset(intent.head_commit, 6, 20);
+        ASSERT_EQ(vcs_zcode_publication_seal(&intent, secret, pubkey), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_publication_verify(&intent, pubkey), VCS_ZCODE_DEV_OK);
+        uint8_t wire[VCS_ZCODE_PUBLICATION_WIRE_BYTES], golden[440] = {0};
+        ASSERT_EQ(vcs_zcode_publication_serialize(&intent, wire), VCS_ZCODE_DEV_OK);
+        memcpy(golden, "ZCPUBI\r\n", 8);
+        golden[8] = 1;
+        golden[10] = 1;
+        memset(golden + 16, 1, 32);
+        memset(golden + 48, 2, 32);
+        memset(golden + 80, 3, 32);
+        memset(golden + 112, 4, 32);
+        memcpy(golden + 144, "refs/heads/main", 15);
+        memset(golden + 272, 5, 20);
+        memset(golden + 304, 6, 20);
+        golden[336] = 0xd2;
+        golden[337] = 0x04;
+        memcpy(golden + 344, pubkey, 32);
+        struct sha3_256_ctx sha;
+        uint8_t signing_root[32], expected_root[32], root[32];
+        static const char signing_domain[] = "zcl.zcode.publication.signing.v1";
+        sha3_256_init(&sha);
+        sha3_256_write(&sha, (const uint8_t *)signing_domain, sizeof(signing_domain));
+        sha3_256_write(&sha, golden, 376);
+        sha3_256_finalize(&sha, signing_root);
+        ed25519_sign(golden + 376, signing_root, 32, secret, pubkey);
+        ASSERT(memcmp(wire, golden, sizeof(golden)) == 0);
+        static const char domain[] = "zcl.zcode.publication.v1";
+        sha3_256_init(&sha);
+        sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+        sha3_256_write(&sha, golden, sizeof(golden));
+        sha3_256_finalize(&sha, expected_root);
+        ASSERT_EQ(vcs_zcode_publication_root(&intent, root), VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(root, expected_root, 32) == 0);
+        ASSERT(zd_publication_bad_wires(golden));
+        ASSERT(zd_publication_bad_refs(golden));
+        ASSERT(zd_publication_binding_mutations(golden, pubkey, root));
+        ASSERT(zd_publication_extended_roundtrip(&intent, secret, pubkey));
+        ASSERT(zd_publication_cas(golden, root, pubkey));
+        ASSERT(zd_publication_store(&intent, pubkey, root));
+        struct vcs_zcode_publication_v1 parsed;
+        ASSERT_EQ(vcs_zcode_publication_parse(wire, sizeof(wire), &parsed), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_publication_verify(&parsed, pubkey), VCS_ZCODE_DEV_OK);
+        parsed.signature[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_publication_root(&parsed, expected_root), VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(root, expected_root, 32) != 0);
+        ASSERT_EQ(vcs_zcode_publication_verify(&parsed, pubkey), VCS_ZCODE_DEV_ERR_SIGNATURE);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_dev_objects(void)
 {
     int failures = 0;
@@ -6919,6 +7213,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_policy_and_task();
     failures += test_zd_candidate_review();
     failures += test_zd_lane_receipt();
+    failures += test_zd_publication_intent();
     failures += test_zd_receipt();
     failures += test_zd_work_context();
     failures += test_zd_work_swarm();
