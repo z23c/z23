@@ -336,9 +336,9 @@ sp_log "       merchant z-address seeded: ${ZADDR:0:28}..."
 
 # ── Stage 3: TOKEN_GENESIS (real ZSLP GENESIS on-chain) ────────────
 sp_log "[3/11] TOKEN_GENESIS: creating the $TOKEN_TICKER access token on-chain (plan → commit)..."
-TOKEN_PLAN="$(sp_cli app tokens create --input="{\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000}")"
+TOKEN_PLAN="$(sp_cli app tokens create --input="{\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000,\"wallet_scope\":\"dev\",\"idempotency_key\":\"opproof-genesis-plan\"}")"
 str_contains "$TOKEN_PLAN" '"stage":"plan"' || sp_fail TOKEN_GENESIS "create did not answer a plan: $TOKEN_PLAN"
-TOKEN_OUT="$(sp_cli app tokens create --input="{\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000,\"confirm\":true}")"
+TOKEN_OUT="$(sp_cli app tokens create --input="{\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000,\"wallet_scope\":\"dev\",\"idempotency_key\":\"opproof-genesis-commit\",\"confirm\":true}")"
 str_contains "$TOKEN_OUT" '"ok":true' || sp_fail TOKEN_GENESIS "$TOKEN_OUT"
 TOKEN_ID="$(sp_json_str "$TOKEN_OUT" token_id)"
 case "$TOKEN_ID" in
