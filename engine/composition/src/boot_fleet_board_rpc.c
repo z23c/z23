@@ -45,7 +45,8 @@ static void fb_error(struct json_value *result, const char *code,
 
 static void fb_refuse(struct json_value *result, enum fleet_board_result r)
 {
-    fb_error(result, "BOARD_REFUSED", fleet_board_result_string(r));
+    fb_error(result, r == FLEET_BOARD_ERR_BUSY ? "BOARD_BUSY" : "BOARD_REFUSED",
+             fleet_board_result_string(r));
 }
 
 static const char *fb_str(const struct json_value *in, const char *key,

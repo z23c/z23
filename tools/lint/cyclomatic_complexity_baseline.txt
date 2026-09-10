@@ -4065,7 +4065,7 @@ tools/command/native_epoch_command.c:ep_verify_at_height:21
 tools/command/native_epoch_command.c:zcl_native_handle_core_epoch_anchor:18
 tools/command/native_epoch_command.c:zcl_native_handle_core_epoch_status:16
 tools/command/native_epoch_command.c:zcl_native_handle_core_epoch_verify:19
-tools/command/native_fleet_board_command.c:fb_call:25
+tools/command/native_fleet_board_command.c:fb_call:21
 tools/command/native_fleet_command.c:fleet_snapshot:18
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_predict:22
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_result:39

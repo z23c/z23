@@ -481,12 +481,12 @@ enum fleet_board_result db_fleet_board_post_ingest(
     struct node_db_status db_status;
     node_db_get_status(ndb, &db_status);
     if (db_status.tx_open)
-        return FLEET_BOARD_ERR_CAPACITY;
+        return FLEET_BOARD_ERR_BUSY;
     board_write_lock();
     node_db_get_status(ndb, &db_status);
     if (db_status.tx_open) {
         zcl_mutex_unlock(&s_board_write_lock);
-        return FLEET_BOARD_ERR_CAPACITY;
+        return FLEET_BOARD_ERR_BUSY;
     }
     if (db_fleet_board_have(ndb, post->id)) {
         zcl_mutex_unlock(&s_board_write_lock);

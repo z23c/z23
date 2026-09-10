@@ -73,6 +73,19 @@ static bool fb_params(const struct json_value *obj, char *out, size_t cap)
     return true;
 }
 
+static void fb_board_refusal(struct zcl_command_reply *reply,
+                             const struct json_value *body)
+{
+    const char *code = json_get_str(json_get(body, "code"));
+    const char *msg = json_get_str(json_get(body, "message"));
+    bool busy = code && strcmp(code, "BOARD_BUSY") == 0;
+    fb_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            busy ? ZCL_COMMAND_EXIT_TRANSIENT : ZCL_COMMAND_EXIT_INVALID,
+            code && code[0] ? code : "BOARD_REFUSED", "execute", busy,
+            msg && msg[0] ? msg : "the board refused this request",
+            "fleet.board");
+}
+
 /* One round trip. On success `body` holds the node's reply object and the
  * caller owns it; on failure the reply is already filled in. */
 static bool fb_call(struct zcl_command_reply *reply, struct json_value *in,
@@ -134,12 +147,7 @@ static bool fb_call(struct zcl_command_reply *reply, struct json_value *in,
         return false;
     }
     if (ok && ok->type == JSON_BOOL && !json_get_bool(ok)) {
-        const char *code = json_get_str(json_get(body, "code"));
-        const char *msg = json_get_str(json_get(body, "message"));
-        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                code && code[0] ? code : "BOARD_REFUSED", "execute", false,
-                msg && msg[0] ? msg : "the board refused this request",
-                "fleet.board");
+        fb_board_refusal(reply, body);
         json_free(body);
         return false;
     }

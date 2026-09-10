@@ -149,6 +149,7 @@ enum fleet_board_result {
      * ERR_CAPACITY, which is the whole store being full regardless of who
      * is asking — this refusal is about ONE key, not the ledger. */
     FLEET_BOARD_ERR_QUOTA,
+    FLEET_BOARD_ERR_BUSY,
 };
 
 const char *fleet_board_result_string(enum fleet_board_result r);

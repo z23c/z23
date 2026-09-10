@@ -20,6 +20,8 @@
 #include "crypto/ed25519.h"
 #include "models/database.h"
 #include "models/fleet_board_post.h"
+#include "command/native_command.h"
+#include "controllers/rpc_client.h"
 #include "session/fleet_board_proto.h"
 #include "chain/chainparams.h"
 #include "net/fast_sync.h"
@@ -441,6 +443,37 @@ static int test_fleet_board_kind_ceiling_refuses_unknown(void)
         ASSERT_EQ(db_fleet_board_post_ingest(&db, &bogus, now, &stored),
                   FLEET_BOARD_ERR_KIND);
         ASSERT(!stored);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_transaction_busy(void)
+{
+    int failures = 0;
+    TEST("fleet board: transaction contention is distinct from exhausted capacity") {
+        struct node_db db = {0};
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], key[32];
+        fb_test_identity(7, seed, key);
+        struct fleet_board_post post;
+        fb_test_compose(&post, FLEET_BOARD_KIND_NOTE, "lane-a", "busy witness", 100, 1000);
+        ASSERT_EQ(fleet_board_post_sign(&post, seed, key), FLEET_BOARD_OK);
+        ASSERT(node_db_begin(&db));
+        int changes = sqlite3_total_changes(db.db);
+        bool stored = true;
+        enum fleet_board_result result = db_fleet_board_post_ingest(&db, &post, 100, &stored);
+        bool absent = !db_fleet_board_have(&db, post.id);
+        bool unchanged = sqlite3_total_changes(db.db) == changes;
+        struct node_db_status status;
+        node_db_get_status(&db, &status);
+        bool rolled_back = node_db_rollback(&db);
+        ASSERT(rolled_back);
+        ASSERT_STR_EQ(fleet_board_result_string(result), "board database transaction is busy");
+        ASSERT(!stored && absent && unchanged && status.tx_open);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &post, 100, &stored), FLEET_BOARD_OK);
+        ASSERT(stored && db_fleet_board_have(&db, post.id));
         node_db_close(&db);
         PASS();
     } _test_next:;
@@ -892,6 +925,21 @@ static int test_fleet_board_two_nodes(void)
     return failures;
 }
 
+static bool fb_test_busy_frame(struct node_db *db, struct msg_processor *mp,
+    struct p2p_node *node, const uint8_t *frame, size_t frame_len,
+    const uint8_t post_id[32])
+{
+    if (!node_db_begin(db)) return false;
+    int changes = sqlite3_total_changes(db->db);
+    int score = atomic_load(&node->misbehavior);
+    bool handled = boot_fleet_board_frame(mp, node, frame, frame_len, NULL);
+    bool absent = !db_fleet_board_have(db, post_id);
+    bool unchanged = changes == sqlite3_total_changes(db->db);
+    bool unpenalized = score == atomic_load(&node->misbehavior);
+    bool restored = node_db_rollback(db);
+    return restored && handled && absent && unchanged && unpenalized;
+}
+
 static int test_fleet_board_local_capacity_does_not_score_peer(void)
 {
     int failures = 0;
@@ -948,6 +996,9 @@ static int test_fleet_board_local_capacity_does_not_score_peer(void)
         ASSERT(boot_fleet_board_frame(&mp, &node, frame, frame_len, NULL));
         ASSERT_EQ(atomic_load(&node.misbehavior), score_before);
         ASSERT(!db_fleet_board_have(&db, capacity.id));
+
+        db_fleet_board_test_set_store_limits(10, 1024 * 1024);
+        ASSERT(fb_test_busy_frame(&db, &mp, &node, frame, frame_len, capacity.id));
 
         fb_test_compose(&future, FLEET_BOARD_KIND_NOTE, "score-fixture",
                         "signed future post remains sender fault",
@@ -1424,6 +1475,70 @@ static bool fb_rpc_post(struct fb_rpc_fixture *f, const char *kind,
     return ok;
 }
 
+static struct rpc_table *fb_native_test_table;
+
+static char *fb_native_rpc(const char *method, const char *params)
+{
+    struct json_value input, output;
+    json_init(&input); json_init(&output);
+    char *wire = NULL;
+    if (fb_native_test_table && json_read(&input, params, strlen(params)) &&
+        rpc_table_execute(fb_native_test_table, method, &input, &output)) {
+        size_t length = json_write(&output, NULL, 0);
+        if (length < 4096) {
+            wire = malloc(length + 1);
+            if (wire) (void)json_write(&output, wire, length + 1);
+        }
+    }
+    json_free(&input); json_free(&output);
+    return wire;
+}
+
+static int test_fleet_board_native_busy(void)
+{
+    int failures = 0;
+    struct fb_rpc_fixture fixture;
+    bool opened = false;
+    TEST("fleet board: native busy refusal is transient and retries after rollback") {
+        ASSERT(fb_rpc_fixture_open(&fixture, "native-busy"));
+        opened = true;
+        struct json_value setup;
+        json_init(&setup);
+        ASSERT(fb_rpc_post(&fixture, "note", "identity setup", "fixture", NULL, &setup));
+        ASSERT(json_get_bool(json_get(&setup, "ok")));
+        json_free(&setup);
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "kind", "note"));
+        ASSERT(json_push_kv_str(&input, "text", "native transaction witness"));
+        struct zcl_command_request request = { .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.fleet_board_post.v1");
+        fb_native_test_table = &fixture.table;
+        node_rpc_client_set_test_hook(fb_native_rpc);
+        ASSERT(node_db_begin(&fixture.db));
+        int changes = sqlite3_total_changes(fixture.db.db);
+        zcl_native_handle_fleet_board_post(&request, &reply);
+        bool unchanged = changes == sqlite3_total_changes(fixture.db.db);
+        bool restored = node_db_rollback(&fixture.db);
+        ASSERT(restored && unchanged);
+        ASSERT_STR_EQ(reply.error.code, "BOARD_BUSY");
+        ASSERT(reply.error.retryable && !reply.error.mutated);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_TRANSIENT);
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.fleet_board_post.v1");
+        zcl_native_handle_fleet_board_post(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    fb_native_test_table = NULL;
+    if (opened) fb_rpc_fixture_close(&fixture);
+    return failures;
+}
+
 static int test_fleet_board_rpc_scope_default(void)
 {
     int failures = 0;
@@ -1859,6 +1974,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_store();
     failures += test_fleet_board_agents_kind();
     failures += test_fleet_board_kind_ceiling_refuses_unknown();
+    failures += test_fleet_board_transaction_busy();
     failures += test_fleet_board_store_boundaries();
     failures += test_fleet_board_byte_boundary();
     failures += test_fleet_board_corrupt_reads();
@@ -1870,6 +1986,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_verification();
     failures += test_fleet_board_rpc_concurrency();
     failures += test_fleet_board_rpc_scope_default();
+    failures += test_fleet_board_native_busy();
     failures += test_fleet_board_durable_wiki();
     failures += test_fleet_board_local_capacity_does_not_score_peer();
     failures += test_fleet_board_peer_inventory_cursor();

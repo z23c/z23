@@ -370,6 +370,7 @@ static void fleet_board_offend(struct msg_processor *mp, struct p2p_node *node,
 static bool fleet_board_ingest_refused_locally(enum fleet_board_result result)
 {
     return result == FLEET_BOARD_ERR_CAPACITY ||
+           result == FLEET_BOARD_ERR_BUSY ||
            result == FLEET_BOARD_ERR_ARGS ||
            /* A role is THIS box's decision about the author's key. The peer
             * that relayed the post did nothing wrong and often is not even

@@ -51,6 +51,7 @@ static const char *const k_result_strings[] = {
     [FLEET_BOARD_ERR_TRUNCATED] = "wire bytes end early",
     [FLEET_BOARD_ERR_TRAILING]  = "wire bytes carry trailing data",
     [FLEET_BOARD_ERR_CAPACITY]  = "output buffer too small",
+    [FLEET_BOARD_ERR_BUSY]      = "board database transaction is busy",
     [FLEET_BOARD_ERR_ID]        = "id does not match the bytes",
     [FLEET_BOARD_ERR_SIGNATURE] = "signature does not verify",
     [FLEET_BOARD_ERR_ROLE]      =
@@ -61,7 +62,7 @@ static const char *const k_result_strings[] = {
         "rolling window, or too many stored for this key already",
 };
 static_assert(sizeof k_result_strings / sizeof k_result_strings[0] ==
-                  (size_t)FLEET_BOARD_ERR_QUOTA + 1u,
+                  (size_t)FLEET_BOARD_ERR_BUSY + 1u,
               "every fleet_board_result value needs its own fixed phrase");
 
 const char *fleet_board_result_string(enum fleet_board_result r)
