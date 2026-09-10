@@ -6,10 +6,10 @@
  * Row shape and the rule against weakening an anchor: see index.def and
  * docs/zrc/0006-knowledge-in-the-checkout.md. */
 
-ZCL_FACT("lint.gates", "gate_wiring_two_files",
-         "Adding a lint gate touches Makefile (check-<name> target and LINT_GATES line) and run_lint.sh gate_command().",
+ZCL_FACT("lint.gates", "gate_wiring_three_files",
+         "Adding a lint gate touches three files: Makefile (check-<name> target and LINT_GATES line), run_lint.sh gate_command(), and the DEFENSIVE_CODING.md gate block.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
-         "Adding a lint gate is a TWO-FILE operation")
+         "Adding a lint gate is a THREE-FILE operation")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_a",
          "check_lint_gate_wiring.sh asserts A that every LINT_GATES/LINT_FAST_GATES member has a gate_command() case entry.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
