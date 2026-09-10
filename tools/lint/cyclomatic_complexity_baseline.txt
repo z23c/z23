@@ -1354,7 +1354,7 @@ core/modules/net/src/https_server_install.c:public_install_filepath_under_root:1
 core/modules/net/src/https_server_redirect.c:acme_challenge_filepath_under_root:16
 core/modules/net/src/https_server_redirect.c:https_server_handle_http_client_fd:22
 core/modules/net/src/msg_blocks.c:process_block_msg:65
-core/modules/net/src/msg_blocks.c:process_getblocks:19
+core/modules/net/src/msg_blocks.c:process_getblocks:7
 core/modules/net/src/msg_blocks.c:process_getdata:22
 core/modules/net/src/msg_blocks.c:self_suspicion_record:17
 core/modules/net/src/msg_compact.c:compact_submit_block:18
@@ -3261,7 +3261,7 @@ tests/harness/src/test_net.c:test_net_net_service_get_key_torv3_distinctness:17
 tests/harness/src/test_net.c:test_net_onion_service_signed_blog_fails_closed_withou:17
 tests/harness/src/test_net.c:test_net_restore_baseline_so_later_tests_don:16
 tests/harness/src/test_net_bootstrap.c:test_net_bootstrap:44
-tests/harness/src/test_net_msg_dos.c:test_net_msg_dos:109
+tests/harness/src/test_net_msg_dos.c:test_net_msg_dos:103
 tests/harness/src/test_netbase_split_host_port.c:test_netbase_split_host_port:21
 tests/harness/src/test_netsplit_detector.c:test_live_surface:18
 tests/harness/src/test_network_crawler.c:test_network_crawler:51

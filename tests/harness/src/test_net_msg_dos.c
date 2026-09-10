@@ -122,6 +122,92 @@ static const struct msg_dispatch_entry *dos_find_entry(const char *cmd)
     return NULL;
 }
 
+static int dos_getblocks_have_data_plan(struct msg_processor *mp,
+                                        struct block_locator *loc,
+                                        const struct uint256 *child_hash);
+
+static int dos_getblocks_active_control(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        struct block_locator *loc,
+                                        const struct uint256 *genesis,
+                                        const struct chain_params *cp)
+{
+    int failures = 0;
+    struct block ctrl_child;
+    struct uint256 child_hash;
+    struct byte_stream s;
+    unsigned char stop[32] = {0};
+    struct arith_uint256 ctrl_pow_limit;
+    bool built, ret, ctrl_mined, ctrl_admitted = false;
+
+    block_init(&ctrl_child);
+    ctrl_child.header.nVersion = 4;
+    ctrl_child.header.hashPrevBlock = *genesis;
+    uint256_set_null(&ctrl_child.header.hashMerkleRoot);
+    ctrl_child.header.hashMerkleRoot.data[0] = 2;
+    uint256_set_null(&ctrl_child.header.hashFinalSaplingRoot);
+    ctrl_child.header.nTime = 1700000000u;
+    uint256_to_arith(&ctrl_pow_limit, &cp->consensus.powLimit);
+    ctrl_child.header.nBits = arith_uint256_get_compact(&ctrl_pow_limit, false);
+    ctrl_mined = mine_block_pow(&ctrl_child, 1, cp, 0);
+    DOS_CHECK("getblocks control: regtest child mined", ctrl_mined);
+    uint256_set_null(&child_hash);
+    if (ctrl_mined)
+        block_header_get_hash(&ctrl_child.header, &child_hash);
+    if (ctrl_mined) {
+        struct byte_stream hs;
+        stream_init(&hs, 512);
+        stream_write_compact_size(&hs, 1);
+        block_header_serialize(&ctrl_child.header, &hs);
+        stream_write_compact_size(&hs, 0);
+        ctrl_admitted = process_headers(mp, node, &hs);
+        DOS_CHECK("getblocks control: child admitted via headers",
+                  ctrl_admitted);
+        stream_free(&hs);
+    }
+    block_free(&ctrl_child);
+
+    stream_init(&s, 64);
+    built = block_locator_serialize(loc, &s);
+    built = built && stream_write_bytes(&s, stop, sizeof(stop));
+    ret = process_getblocks(mp, node, &s);
+    DOS_CHECK("getblocks headers-only child is not announced",
+              ctrl_admitted && ret && node->inventory_to_send_count == 0);
+    stream_free(&s);
+    failures += dos_getblocks_have_data_plan(mp, loc, &child_hash);
+    return failures;
+}
+
+static int dos_getblocks_have_data_plan(struct msg_processor *mp,
+                                        struct block_locator *loc,
+                                        const struct uint256 *child_hash)
+{
+    int failures = 0;
+    struct block_index *child_bi;
+    struct inv_item planned[GETBLOCKS_INV_LIMIT];
+    struct uint256 stop;
+    size_t n;
+
+    child_bi = block_map_find(&mp->main_state->map_block_index, child_hash);
+    DOS_CHECK("getblocks control: child is indexed", child_bi != NULL);
+    if (!child_bi)
+        return failures;
+    uint256_set_null(&stop);
+    n = msg_blocks_plan_getblocks_inv(mp, loc, &stop, planned,
+                                      GETBLOCKS_INV_LIMIT);
+    DOS_CHECK("getblocks plan: headers-only yields zero invs", n == 0);
+    child_bi->nStatus |= BLOCK_HAVE_DATA;
+    n = msg_blocks_plan_getblocks_inv(mp, loc, &stop, planned,
+                                      GETBLOCKS_INV_LIMIT);
+    DOS_CHECK("getblocks plan: HAVE_DATA body is announced",
+              n == 1 && uint256_eq(&planned[0].hash, child_hash));
+    child_bi->nStatus &= ~BLOCK_HAVE_DATA;
+    n = msg_blocks_plan_getblocks_inv(mp, loc, &stop, planned,
+                                      GETBLOCKS_INV_LIMIT);
+    DOS_CHECK("getblocks plan: dropping HAVE_DATA stops announce", n == 0);
+    return failures;
+}
+
 int test_net_msg_dos(void);
 int test_net_msg_dos(void)
 {
@@ -224,78 +310,9 @@ int test_net_msg_dos(void)
                   atomic_load(&node.misbehavior) == 0 && !node.disconnect);
         stream_free(&s);
 
-        /* Control: same payload from a fully-active peer is served. Needs a
-         * successor PAST the locator hit to exist, so first admit one mined
-         * regtest child of genesis through the honest headers path (same
-         * recipe as replay case E) — otherwise serving zero items is the
-         * correct answer for a height-0 chain and proves nothing. */
         dos_setup_stack_node(&node);
         node.state = PEER_ACTIVE;
-
-        struct block ctrl_child;
-        block_init(&ctrl_child);
-        ctrl_child.header.nVersion = 4;
-        ctrl_child.header.hashPrevBlock = gh;
-        uint256_set_null(&ctrl_child.header.hashMerkleRoot);
-        ctrl_child.header.hashMerkleRoot.data[0] = 2; /* distinct from E */
-        uint256_set_null(&ctrl_child.header.hashFinalSaplingRoot);
-        ctrl_child.header.nTime = 1700000000u;
-        struct arith_uint256 ctrl_pow_limit;
-        uint256_to_arith(&ctrl_pow_limit, &cp->consensus.powLimit);
-        ctrl_child.header.nBits =
-            arith_uint256_get_compact(&ctrl_pow_limit, false);
-        bool ctrl_mined = mine_block_pow(&ctrl_child, 1, cp, 0);
-        DOS_CHECK("getblocks control: regtest child mined", ctrl_mined);
-        struct uint256 child_hash;
-        uint256_set_null(&child_hash);
-        if (ctrl_mined)
-            block_header_get_hash(&ctrl_child.header, &child_hash);
-        bool ctrl_admitted = false;
-        if (ctrl_mined) {
-            struct byte_stream hs;
-            stream_init(&hs, 512);
-            stream_write_compact_size(&hs, 1);
-            block_header_serialize(&ctrl_child.header, &hs);
-            stream_write_compact_size(&hs, 0);
-            ctrl_admitted = process_headers(&mp, &node, &hs);
-            DOS_CHECK("getblocks control: child admitted via headers",
-                      ctrl_admitted);
-            stream_free(&hs);
-        }
-        block_free(&ctrl_child);
-
-        stream_init(&s, 64);
-        built = block_locator_serialize(&loc, &s);
-        built = built && stream_write_bytes(&s, stop, sizeof(stop));
-        ret = process_getblocks(&mp, &node, &s);
-        /* Headers-only children must not be announced: a MagicBean peer
-         * would getdata them, sit on notfound, and stall slow-sync. */
-        DOS_CHECK("getblocks headers-only child is not announced",
-                  ctrl_admitted && ret == true &&
-                  node.inventory_to_send_count == 0);
-        stream_free(&s);
-
-        struct block_index *child_bi = block_map_find(
-            &mp.main_state->map_block_index, &child_hash);
-        DOS_CHECK("getblocks control: child is indexed", child_bi != NULL);
-        if (child_bi) {
-            struct inv_item planned[GETBLOCKS_INV_LIMIT];
-            struct uint256 stop;
-            uint256_set_null(&stop);
-            size_t n = msg_blocks_plan_getblocks_inv(
-                &mp, &loc, &stop, planned, GETBLOCKS_INV_LIMIT);
-            DOS_CHECK("getblocks plan: headers-only yields zero invs", n == 0);
-            child_bi->nStatus |= BLOCK_HAVE_DATA;
-            n = msg_blocks_plan_getblocks_inv(
-                &mp, &loc, &stop, planned, GETBLOCKS_INV_LIMIT);
-            DOS_CHECK("getblocks plan: HAVE_DATA body is announced",
-                      n == 1 && uint256_eq(&planned[0].hash, &child_hash));
-            child_bi->nStatus &= ~BLOCK_HAVE_DATA;
-            n = msg_blocks_plan_getblocks_inv(
-                &mp, &loc, &stop, planned, GETBLOCKS_INV_LIMIT);
-            DOS_CHECK("getblocks plan: dropping HAVE_DATA stops announce",
-                      n == 0);
-        }
+        failures += dos_getblocks_active_control(&mp, &node, &loc, &gh, cp);
         /* loc.vhave points at stack storage — release only the shell. */
         loc.vhave = NULL;
         loc.num_hashes = 0;
