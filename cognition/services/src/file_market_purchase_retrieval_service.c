@@ -3,8 +3,10 @@
 
 #include "services/file_market_purchase_service.h"
 #include "services/file_market_purchase_internal.h"
+#include "services/market_moderation_service.h"
 
 #include "base/hex.h"
+#include "base/log_macros.h"
 #include "crypto/sha3.h"
 #include "models/database.h"
 #include "models/file_offer.h"
@@ -18,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define MP_RETRIEVE_TAG "market.retrieve"
 
 enum file_market_delivery_status market_purchase_fetch_endpoint(
     void *ctx, const uint8_t peer_ip[16], uint16_t peer_port,
@@ -291,6 +295,25 @@ static struct zcl_result mp_publish_download(
     return ZCL_OK;
 }
 
+struct zcl_result market_purchase_delivery_error(
+    const uint8_t offer_id[32],
+    enum file_market_delivery_status status)
+{
+    struct market_moderation_serve_hide hide;
+    if ((status == FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN ||
+         status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN) &&
+        market_moderation_retrieve_unreviewed_hide(offer_id, &hide)) {
+        LOG_ERROR(MP_RETRIEVE_TAG,
+                  "retrieve refused unreviewed hide: blocker=%s %s",
+                  hide.blocker, hide.message);
+        return ZCL_ERR(-76, "%s (%s)", hide.message, hide.blocker);
+    }
+    LOG_ERROR(MP_RETRIEVE_TAG, "seller delivery is %s",
+              file_market_delivery_status_string(status));
+    return ZCL_ERR(-76, "seller delivery is %s",
+                   file_market_delivery_status_string(status));
+}
+
 struct zcl_result market_purchase_retrieve(
     const struct market_purchase_runtime *rt, const uint8_t plan_id[32],
     const char *destination_path, struct market_purchase_view *out)
@@ -426,8 +449,7 @@ struct zcl_result market_purchase_retrieve(
         }
         if (!exact) {
             mp_chunk_discard(&chunk);
-            result = ZCL_ERR(-76, "seller delivery is %s",
-                file_market_delivery_status_string(status));
+            result = market_purchase_delivery_error(offer.offer_id, status);
             break;
         }
         uint64_t offset = (uint64_t)i * FILE_MARKET_CHUNK_SIZE;

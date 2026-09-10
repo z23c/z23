@@ -146,4 +146,11 @@ struct zcl_result market_purchase_retrieve(
     const uint8_t plan_id[32], const char *destination_path,
     struct market_purchase_view *out);
 
+/* Map a failed seller delivery status onto a retrieve error. Unreviewed
+ * local hides that collapsed to UNKNOWN/MODERATION_HIDDEN are named
+ * offer_unreviewed_hidden instead of payment UNKNOWN. */
+struct zcl_result market_purchase_delivery_error(
+    const uint8_t offer_id[32],
+    enum file_market_delivery_status status);
+
 #endif

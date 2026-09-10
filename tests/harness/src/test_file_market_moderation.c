@@ -14,6 +14,8 @@
 #include "net/file_market.h"
 #include "services/market_moderation_service.h"
 #include "services/market_moderation_view_service.h"
+#include "services/file_market_purchase_service.h"
+#include "net/file_market_delivery.h"
 #include "base/hex.h"
 #include "json/json.h"
 #include "rpc/server.h"
@@ -1097,6 +1099,65 @@ static int test_mmt_serve_hide_names_unreviewed(void)
     return failures;
 }
 
+static int test_mmt_retrieve_names_unreviewed_unknown(void)
+{
+    int failures = 0;
+    TEST("market retrieve: unreviewed UNKNOWN is named offer_unreviewed_hidden") {
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        ASSERT(node_db_open(&ndb, ":memory:") && ndb.open);
+        rpc_market_set_state(&ndb);
+        ASSERT(market_moderation_set_active_profile(
+                   MARKET_MODERATION_PROFILE_DEFAULT).ok);
+
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        struct file_offer offer;
+        ASSERT(mmt_signed_offer(&offer, 0xb2, 19, now));
+        ASSERT(db_file_offer_save(&ndb, &offer));
+
+        struct zcl_result named = market_purchase_delivery_error(
+            offer.offer_id, FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN);
+        ASSERT(!named.ok);
+        ASSERT_EQ(named.code, -76);
+        ASSERT(strstr(named.message, MARKET_MODERATION_BLOCKER_UNREVIEWED) !=
+               NULL);
+        ASSERT(strstr(named.message, "hidden until reviewed") != NULL);
+        ASSERT(strstr(named.message, "offer_unreviewed_hidden") != NULL);
+
+        struct market_moderation_serve_hide hide;
+        memset(&hide, 0, sizeof(hide));
+        market_moderation_last_serve_hide(&hide);
+        ASSERT(hide.present);
+        ASSERT_EQ(strcmp(hide.blocker, MARKET_MODERATION_BLOCKER_UNREVIEWED),
+                  0);
+
+        struct zcl_result hidden = market_purchase_delivery_error(
+            offer.offer_id, FILE_MARKET_DELIVERY_MODERATION_HIDDEN);
+        ASSERT(!hidden.ok);
+        ASSERT(strstr(hidden.message, "offer_unreviewed_hidden") != NULL);
+
+        struct zcl_result pending = market_purchase_delivery_error(
+            offer.offer_id, FILE_MARKET_DELIVERY_PAYMENT_PENDING);
+        ASSERT(!pending.ok);
+        ASSERT(strstr(pending.message, "PENDING") != NULL);
+        ASSERT(strstr(pending.message, "offer_unreviewed_hidden") == NULL);
+
+        ASSERT(market_moderation_set_review_state(
+                   offer.offer_id, MARKET_REVIEW_REVIEWED_OK).ok);
+        struct zcl_result ok_unknown = market_purchase_delivery_error(
+            offer.offer_id, FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN);
+        ASSERT(!ok_unknown.ok);
+        ASSERT(strstr(ok_unknown.message, "UNKNOWN") != NULL);
+        ASSERT(strstr(ok_unknown.message, "offer_unreviewed_hidden") == NULL);
+
+        node_db_close(&ndb);
+        rpc_market_set_state(NULL);
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
 int test_file_market_moderation(void)
 {
     int failures = 0;
@@ -1108,6 +1169,7 @@ int test_file_market_moderation(void)
     failures += test_mmt_policy_file_fails_closed();
     failures += test_mmt_relay_leg_defaults_open_and_stays_closed();
     failures += test_mmt_serve_hide_names_unreviewed();
+    failures += test_mmt_retrieve_names_unreviewed_unknown();
     printf("=== file_market_moderation: %d failures ===\n", failures);
     return failures;
 }

@@ -222,6 +222,13 @@ void market_moderation_observe_serve_refusal(const uint8_t offer_id[32]);
 void market_moderation_last_serve_hide(
     struct market_moderation_serve_hide *out);
 
+/* Buyer retrieve names an unreviewed hide without parsing onion status
+ * in core/. True only when this node's local review_state is unreviewed
+ * and the serving gate would hide; fills *out with the named blocker. */
+bool market_moderation_retrieve_unreviewed_hide(
+    const uint8_t offer_id[32],
+    struct market_moderation_serve_hide *out);
+
 /* ── The relay gate (RELAY leg) ──────────────────────────────────────
  * May this node rebroadcast somebody else's offer announcement? A
  * SEPARATE question from may_serve with a SEPARATE setting and the

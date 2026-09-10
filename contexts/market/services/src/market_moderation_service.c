@@ -541,6 +541,27 @@ void market_moderation_last_serve_hide(
     pthread_mutex_unlock(&g_mm_mutex);
 }
 
+bool market_moderation_retrieve_unreviewed_hide(
+    const uint8_t offer_id[32],
+    struct market_moderation_serve_hide *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!offer_id)
+        return false;
+    if (market_moderation_review_state_for_offer_id(offer_id) !=
+        MARKET_REVIEW_UNREVIEWED)
+        return false;
+    if (market_moderation_may_serve_offer_id(offer_id))
+        return false;
+    market_moderation_observe_serve_refusal(offer_id);
+    market_moderation_last_serve_hide(out);
+    return out->present &&
+        strcmp(out->blocker, MARKET_MODERATION_BLOCKER_UNREVIEWED) == 0 &&
+        strcmp(out->blocker, "offer_unreviewed_hidden") == 0;
+}
+
 bool market_moderation_may_relay_root(const uint8_t root_hash[32])
 {
     /* Malformed input, not a policy question: there is nothing to relay. */
