@@ -115,6 +115,22 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
 int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
                        int timeout_ms);
 
+/* Exact binary stdout from a trusted local program. cap counts payload bytes;
+ * no terminator is appended. Success requires EOF, observed exit zero, and no
+ * overflow or transport error within a positive deadline. Partial bytes never
+ * qualify as success. This grants no sandbox or downloaded-code authority. */
+struct zcl_spawn_binary_observation {
+    size_t output_len;
+    bool overflow;
+    bool eof;
+    bool timed_out;
+    bool exit_observed;
+    int exit_code;
+};
+struct zcl_result zcl_spawn_capture_binary(
+    const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    struct zcl_spawn_binary_observation *out);
+
 /* The same bounded capture with the deadline outcome preserved separately
  * from the child's status. `timed_out` is always initialized when non-NULL
  * and is true only when this function killed the process group because the

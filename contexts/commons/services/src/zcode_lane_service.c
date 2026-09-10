@@ -432,6 +432,32 @@ struct zcl_result zcode_accepted_work_qualify_readonly(
     return ZCL_OK;
 }
 
+struct zcl_result zcode_publication_check_accepted_readonly(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *policy_root, const char *action_id,
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t expected_signer[32], int64_t now,
+    struct zcode_accepted_work_status *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out || !intent || !expected_signer || now <= 0)
+        return ZCL_ERR(-1, "publication-accepted-input-invalid");
+    if (vcs_zcode_publication_verify(intent, expected_signer) != VCS_ZCODE_DEV_OK ||
+        intent->created_unix > now)
+        return ZCL_ERR(-1, "publication-signature-or-time-invalid");
+    char candidate[65];
+    zcl_hex_encode(intent->candidate_root, 32, candidate);
+    struct zcode_accepted_work_status staged = {0};
+    struct zcl_result result = zcode_accepted_work_qualify_readonly(ndb, workspace,
+        accepted_root, task_root, candidate, policy_root, action_id, now, &staged);
+    if (!result.ok) return result;
+    if (memcmp(intent->proof_set_root, staged.accepted.proof_set_root, 32) != 0 ||
+        intent->created_unix < staged.accepted.proven.created_unix)
+        return ZCL_ERR(-1, "publication-accepted-proof-or-time-mismatch");
+    *out = staged;
+    return ZCL_OK;
+}
+
 static struct zcl_result lane_prior_validate(
     const char *workspace, const struct db_zcode_lane_receipt *prior,
     const struct vcs_zcode_task_v1 *task,

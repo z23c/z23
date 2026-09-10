@@ -356,6 +356,133 @@ static int test_spawn_pty_capture_observes_terminal(void)
 
 static int test_spawn_platform_arm(void);
 
+static int test_spawn_binary_exact(void)
+{
+    int failures = 0;
+    TEST("spawn: exact binary capture distinguishes NUL, capacity and overflow") {
+        const char *argv[] = { "/usr/bin/printf", "A\\000B", NULL };
+        unsigned char buf[4] = { 9, 9, 9, 9 };
+        struct zcl_spawn_binary_observation out = {0};
+        struct zcl_result r = zcl_spawn_capture_binary(argv, buf, 3, 3000, &out);
+        ASSERT(r.ok);
+        ASSERT(out.output_len == 3 && out.eof && out.exit_observed);
+        ASSERT(!out.overflow && !out.timed_out && out.exit_code == 0);
+        ASSERT(buf[0] == 'A' && buf[1] == 0 && buf[2] == 'B' && buf[3] == 9);
+        r = zcl_spawn_capture_binary(argv, buf, 2, 3000, &out);
+        ASSERT(!r.ok && out.overflow && out.output_len == 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_binary_large(void)
+{
+    int failures = 0;
+    TEST("spawn: exact binary capture exceeds 64 KiB without losing bytes") {
+        static char input[100000];
+        static char output[sizeof(input)];
+        memset(input, 'Q', sizeof(input) - 1);
+        input[sizeof(input) - 1] = '\0';
+        const char *argv[] = { "/usr/bin/printf", "%s", input, NULL };
+        struct zcl_spawn_binary_observation out = {0};
+        struct zcl_result r = zcl_spawn_capture_binary(
+            argv, output, sizeof(output) - 1, 5000, &out);
+        ASSERT(r.ok);
+        ASSERT(out.output_len == sizeof(input) - 1);
+        ASSERT(memcmp(input, output, out.output_len) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_binary_refusals(void)
+{
+    int failures = 0;
+    TEST("spawn: exact bytes do not excuse nonzero exit or EOF stall") {
+        char buf[8] = {0};
+        struct zcl_spawn_binary_observation out = {0};
+        const char *bad[] = { "/bin/sh", "-c", "printf valid; exit 7", NULL };
+        struct zcl_result r = zcl_spawn_capture_binary(bad, buf, sizeof(buf), 3000, &out);
+        ASSERT(!r.ok && out.exit_observed && out.exit_code == 7);
+        ASSERT(out.output_len == 5 && out.eof);
+        const char *stall[] = { "/bin/sh", "-c", "exec 1>&-; exec sleep 5", NULL };
+        r = zcl_spawn_capture_binary(stall, buf, sizeof(buf), 200, &out);
+        ASSERT(!r.ok && out.eof && out.timed_out);
+        r = zcl_spawn_capture_binary(bad, buf, sizeof(buf), 0, &out);
+        ASSERT(!r.ok && out.output_len == 0 && !out.exit_observed);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_binary_unknown_exit(void)
+{
+    int failures = 0;
+    TEST("spawn: exact capture refuses unknown exit under SA_NOCLDWAIT") {
+        struct sigaction old = {0};
+        struct sigaction sa = { .sa_handler = SIG_DFL, .sa_flags = SA_NOCLDWAIT };
+        ASSERT(sigaction(SIGCHLD, NULL, &old) == 0);
+        ASSERT(sigaction(SIGCHLD, &sa, NULL) == 0);
+        const char *argv[] = { "/usr/bin/printf", "valid", NULL };
+        char buf[8];
+        struct zcl_spawn_binary_observation out = {0};
+        struct zcl_result r = zcl_spawn_capture_binary(argv, buf, sizeof(buf), 3000, &out);
+        int restored = sigaction(SIGCHLD, &old, NULL);
+        ASSERT(restored == 0);
+        ASSERT(!r.ok && !out.exit_observed && out.eof);
+        ASSERT(out.output_len == 5);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_binary_empty(void)
+{
+    int failures = 0;
+    TEST("spawn: empty binary stdout preserves payload and excludes stderr") {
+        const char *argv[] = { "/bin/sh", "-c", "printf diagnostic >&2", NULL };
+        unsigned char buf[2] = { 73, 91 };
+        struct zcl_spawn_binary_observation out = {0};
+        struct zcl_result r = zcl_spawn_capture_binary(argv, buf, sizeof(buf), 3000, &out);
+        ASSERT(r.ok && out.output_len == 0);
+        ASSERT(buf[0] == 73 && buf[1] == 91);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int spawn_binary_closed_child(unsigned mask)
+{
+    for (unsigned fd = 0; fd < 3; ++fd)
+        if (mask & (1u << fd)) close((int)fd);
+    const char *argv[] = { "/usr/bin/printf", "A\\000B", NULL };
+    unsigned char buf[4] = { 0, 0, 0, 93 };
+    struct zcl_spawn_binary_observation out = {0};
+    struct zcl_result r = zcl_spawn_capture_binary(argv, buf, 3, 3000, &out);
+    if (!r.ok || out.output_len != 3) return 1;
+    return memcmp(buf, "A\0B", 3) != 0 || buf[3] != 93;
+}
+
+static int test_spawn_binary_closed_stdio(void)
+{
+    int failures = 0;
+    TEST("spawn: exact capture works with every closed standard descriptor set") {
+        for (unsigned mask = 1; mask < 8; ++mask) {
+            pid_t pid = fork();
+            ASSERT(pid >= 0);
+            if (pid == 0) _exit(spawn_binary_closed_child(mask));
+            int status = 0;
+            pid_t observed;
+            do { observed = waitpid(pid, &status, 0); }
+            while (observed < 0 && errno == EINTR);
+            ASSERT(observed == pid);
+            ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_platform_arm(void)
 {
     int failures = 0;
@@ -371,6 +498,12 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_capture_truncates_oversized();
     failures += test_spawn_capture_real_exit_code();
     failures += test_spawn_pty_capture_observes_terminal();
+    failures += test_spawn_binary_exact();
+    failures += test_spawn_binary_large();
+    failures += test_spawn_binary_refusals();
+    failures += test_spawn_binary_unknown_exit();
+    failures += test_spawn_binary_empty();
+    failures += test_spawn_binary_closed_stdio();
 
     printf("Spawn: %d failures\n", failures);
     return failures;

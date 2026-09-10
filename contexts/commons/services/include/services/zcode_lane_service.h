@@ -7,6 +7,7 @@
 #include "base/result.h"
 #include "models/database.h"
 #include "vcs/zcode_accepted_work.h"
+#include "vcs/zcode_publication.h"
 
 #include <stdint.h>
 
@@ -63,5 +64,16 @@ struct zcl_result zcode_accepted_work_qualify_readonly(
     struct node_db *ndb, const char *workspace, const char *accepted_root,
     const char *task_root, const char *candidate_root, const char *policy_root,
     const char *action_id, int64_t now, struct zcode_accepted_work_status *out);
+
+/* Bind signed publication coordinates to one currently qualifying acceptance.
+ * Read-only: does not store intent, attach a queue entry or permit dispatch.
+ * Target/ref authority and candidate-to-Git-content verification remain
+ * separate mandatory checks. Refusal clears the accepted-work output. */
+struct zcl_result zcode_publication_check_accepted_readonly(
+    struct node_db *ndb, const char *workspace, const char *accepted_root,
+    const char *task_root, const char *policy_root, const char *action_id,
+    const struct vcs_zcode_publication_v1 *intent,
+    const uint8_t expected_signer[32], int64_t now,
+    struct zcode_accepted_work_status *out);
 
 #endif /* ZCL_SERVICES_ZCODE_LANE_SERVICE_H */

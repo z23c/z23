@@ -2745,7 +2745,7 @@ platform/modules/util/src/self_backtrace.c:self_backtrace_dump_all:26
 platform/modules/util/src/shutdown_stagewatch.c:shutdown_stagewatch_complete:16
 platform/modules/util/src/shutdown_stagewatch.c:shutdown_stagewatch_read_exit_reason:18
 platform/modules/util/src/spawn.c:spawn_capture_drain:30
-platform/modules/util/src/spawn.c:spawn_capture_impl:16
+platform/modules/util/src/spawn.c:spawn_capture_impl:11
 platform/modules/util/src/spawn.c:spawn_pty_capture_observed_platform#2:22
 platform/modules/util/src/spawn.c:zcl_argv_split:17
 platform/modules/util/src/spawn.c:zcl_spawn_detached_input#2:33

@@ -69,6 +69,89 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static bool zd_publication_check(struct node_db *ndb, const char *workspace,
+    const char *action, const struct zcode_lane_status *lane,
+    const struct vcs_zcode_publication_v1 *intent, const uint8_t signer[32],
+    struct zcode_accepted_work_status *out)
+{
+    return zcode_publication_check_accepted_readonly(ndb, workspace,
+        lane->receipt_root_sha3, lane->task_root_sha3, lane->proof_policy_root_sha3,
+        action, intent, signer, lane->created_at, out).ok;
+}
+
+static bool zd_publication_binding_refused(struct node_db *ndb, const char *workspace,
+    const char *action, const struct zcode_lane_status *lane,
+    const struct vcs_zcode_publication_v1 *intent, const uint8_t signer[32])
+{
+    struct zcode_accepted_work_status out;
+    memset(&out, 0xa5, sizeof(out));
+    return !zd_publication_check(ndb, workspace, action, lane, intent, signer, &out) &&
+        !zcl_bytes_any_set((const uint8_t *)&out, sizeof(out));
+}
+
+static bool zd_publication_binding(struct node_db *ndb, const char *workspace,
+    const char *action, const struct zcode_lane_status *lane,
+    const uint8_t secret[32], const uint8_t signer[32])
+{
+    struct vcs_zcode_publication_v1 intent = {
+        .schema_version = 1, .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+        .target_ref = "refs/heads/main", .created_unix = lane->created_at,
+    };
+    memset(intent.target_identity_root, 7, 32);
+    memset(intent.authority_root, 8, 32); /* Inert coordinates, not a grant. */
+    memset(intent.expected_base, 1, 20);
+    memset(intent.head_commit, 2, 20);
+    if (!zcl_hex_decode_lower(lane->candidate_root_sha3, intent.candidate_root, 32) ||
+        !zcl_hex_decode_lower(lane->proof_set_root_sha3, intent.proof_set_root, 32) ||
+        vcs_zcode_publication_seal(&intent, secret, signer) != VCS_ZCODE_DEV_OK)
+        return false;
+    struct zcode_accepted_work_status out;
+    if (!zd_publication_check(ndb, workspace, action, lane, &intent, signer, &out) ||
+        memcmp(out.accepted.proof_set_root, intent.proof_set_root, 32) != 0)
+        return false;
+    for (unsigned i = 0; i < 4; i++) {
+        struct vcs_zcode_publication_v1 wrong = intent;
+        if (i == 0) wrong.proof_set_root[0] ^= 1;
+        if (i == 1) wrong.candidate_root[0] ^= 1;
+        if (i == 2) wrong.created_unix++;
+        if (i == 3) wrong.created_unix--;
+        if (vcs_zcode_publication_seal(&wrong, secret, signer) != VCS_ZCODE_DEV_OK ||
+            !zd_publication_binding_refused(ndb, workspace, action, lane, &wrong, signer))
+            return false;
+    }
+    uint8_t wrong_signer[32];
+    memcpy(wrong_signer, signer, 32); wrong_signer[0] ^= 1;
+    bool key_refused = zd_publication_binding_refused(ndb, workspace, action,
+                                                     lane, &intent, wrong_signer);
+    intent.signature[0] ^= 1;
+    return key_refused &&
+        zd_publication_binding_refused(ndb, workspace, action, lane, &intent, signer);
+}
+
+static bool zd_query_only(struct node_db *ndb, int *out)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_prepare_v2(ndb->db, "PRAGMA query_only", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW;
+    if (ok) *out = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool zd_publication_binding_readonly(struct node_db *ndb, const char *workspace,
+    const char *action, const struct zcode_lane_status *lane,
+    const uint8_t secret[32], const uint8_t signer[32])
+{
+    int prior = 0;
+    if (!zd_query_only(ndb, &prior)) return false;
+    int before = sqlite3_total_changes(ndb->db);
+    bool enabled = node_db_exec(ndb, "PRAGMA query_only=ON");
+    bool ok = enabled && zd_publication_binding(ndb, workspace, action, lane, secret, signer);
+    int after = sqlite3_total_changes(ndb->db);
+    bool restored = node_db_exec(ndb, prior ? "PRAGMA query_only=ON" : "PRAGMA query_only=OFF");
+    return ok && restored && before == after;
+}
+
 static void zd_root(uint8_t out[32], uint8_t value)
 {
     memset(out, value, 32);
@@ -4297,6 +4380,8 @@ static int test_zd_improve_command(void)
             &ndb, workspace, action_id, VCS_ZCODE_LANE_PROVEN,
             (int64_t)platform_time_wall_unix(), proven_secret, proven_key,
             &proven_status).ok);
+        ASSERT(zd_publication_binding_readonly(&ndb, workspace, action_id, &proven_status,
+                                      proven_secret, proven_key));
         memset(proven_secret, 0, sizeof(proven_secret));
         node_db_close(&ndb);
         (void)snprintf(accepted_receipt_saved,
