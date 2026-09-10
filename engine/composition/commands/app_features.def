@@ -556,7 +556,9 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_READ(
     "app.tokens.list", "app.tokens", "", "List ZSLP tokens on the network",
     "Every ZSLP token seen on the network, read live at call time; bounded to "
-    "the list budget row cap, not full token history.", ZCL_COMMAND_LIST_BUDGET,
+    "the list budget row cap, not full token history. Each token_id is in "
+    "display order (same as a txid): the exact id app.tokens.create "
+    "answered and app.tokens.mint/send/burn accept.", ZCL_COMMAND_LIST_BUDGET,
     "tokens,zslp,list", "zcl.command.empty_input.v1", "zcl.app_token_index.v1",
     "", "", "z23 app tokens list",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
@@ -569,7 +571,9 @@ ZCL_COMMAND_READY_COMMAND(
     "app.tokens.create", "app.tokens", "", "Create a ZSLP token",
     "Prepare one exact signed ZSLP GENESIS under an explicit custody wallet, "
     "atomically reserve its fee inputs, then commit only by durable plan ID. "
-    "Private wallet material never appears in the receipt.", 0,
+    "Private wallet material never appears in the receipt. Answers the new "
+    "token_id as the GENESIS txid in display order (same as a txid), the "
+    "form every other token command accepts.", 0,
     "tokens,zslp,create,genesis", "zcl.app_token_create.input.v1",
     "zcl.app_token_txresult.v1", "wallet_scope,ticker,name,decimals,supply,idempotency_key,plan_id,confirm", "wallet_scope",
     "z23 app tokens create --input='{\"wallet_scope\":\"dev\",\"ticker\":\"DEMO\",\"name\":\"Demo Token\",\"decimals\":0,\"supply\":\"1000\",\"idempotency_key\":\"demo-genesis-1\"}'",
@@ -585,7 +589,8 @@ ZCL_COMMAND_READY_COMMAND(
     "app.tokens.send", "app.tokens", "", "Send ZSLP token units",
     "Prepare one exact signed token transfer under an explicit custody wallet, "
     "atomically reserve its token and fee inputs, then commit only by durable "
-    "plan ID. The private recipient is omitted from receipts.", 0,
+    "plan ID. The private recipient is omitted from receipts. token_id is in "
+    "display order (same as a txid), as app.tokens.create/list print it.", 0,
     "tokens,zslp,send", "zcl.app_token_send.input.v1",
     "zcl.app_token_txresult.v1", "wallet_scope,token_id,to,units,idempotency_key,plan_id,confirm", "wallet_scope",
     "z23 app tokens send --input='{\"wallet_scope\":\"dev\",\"token_id\":\"<64-hex>\",\"to\":\"t1...\",\"units\":\"25\",\"idempotency_key\":\"token-send-1\"}'",
@@ -601,7 +606,8 @@ ZCL_COMMAND_READY_COMMAND(
     "app.tokens.mint", "app.tokens", "", "Mint ZSLP token units",
     "Prepare one exact authorized MINT under an explicit custody wallet, "
     "atomically reserve its unique mint baton and fee inputs, then commit only "
-    "by durable plan ID.", 0,
+    "by durable plan ID. token_id is in display order (same as a txid), as "
+    "app.tokens.create/list print it.", 0,
     "tokens,zslp,mint", "zcl.app_token_send.input.v1",
     "zcl.app_token_txresult.v1", "wallet_scope,token_id,to,units,idempotency_key,plan_id,confirm", "wallet_scope",
     "z23 app tokens mint --input='{\"wallet_scope\":\"dev\",\"token_id\":\"<64-hex>\",\"to\":\"t1...\",\"units\":\"100\",\"idempotency_key\":\"token-mint-1\"}'",
@@ -617,7 +623,9 @@ ZCL_COMMAND_READY_COMMAND(
     "app.tokens.burn", "app.tokens", "", "Burn ZSLP token units",
     "Prepare one exact explicit burn under an explicit custody wallet, "
     "atomically reserve its VALID token and fee inputs, then commit only by "
-    "durable plan ID. Supply changes only after strict confirmation.", 0,
+    "durable plan ID. Supply changes only after strict confirmation. token_id "
+    "is in display order (same as a txid), as app.tokens.create/list print "
+    "it.", 0,
     "tokens,zslp,burn,supply", "zcl.app_token_burn.input.v1",
     "zcl.app_token_txresult.v1", "wallet_scope,token_id,units,idempotency_key,plan_id,confirm", "wallet_scope",
     "z23 app tokens burn --input='{\"wallet_scope\":\"dev\",\"token_id\":\"<64-hex>\",\"units\":\"10\",\"idempotency_key\":\"token-burn-1\"}'",

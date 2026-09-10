@@ -493,7 +493,7 @@ int db_zslp_token_list(struct node_db *ndb,
     while (count < (int)max_out && AR_STEP_ROW(s)) {
         memset(&out[count], 0, sizeof(out[count]));
         zslp_read_id_column(s, 0, out[count].token_id,
-                           sizeof(out[count].token_id));
+                            sizeof(out[count].token_id));
         AR_READ_STR(s, 1, out[count].ticker, sizeof(out[count].ticker));
         AR_READ_STR(s, 2, out[count].name, sizeof(out[count].name));
         out[count].decimals = (int)AR_COL_INT(s, 3);
@@ -595,7 +595,7 @@ int db_zslp_asset_list(struct node_db *ndb,
     while ((size_t)count < max_out && AR_STEP_ROW(s)) {
         memset(&out[count], 0, sizeof(out[count]));
         zslp_read_id_column(s, 0, out[count].token_id,
-                           sizeof(out[count].token_id));
+                            sizeof(out[count].token_id));
         AR_READ_STR(s, 1, out[count].ticker, sizeof(out[count].ticker));
         AR_READ_STR(s, 2, out[count].name, sizeof(out[count].name));
         out[count].decimals = (int)AR_COL_INT(s, 3);
@@ -646,7 +646,7 @@ int db_zslp_transfer_list_by_token(struct node_db *ndb, const char *token_key,
         memset(&out[count], 0, sizeof(out[count]));
         zslp_read_id_column(s, 0, out[count].txid, sizeof(out[count].txid));
         zslp_read_id_column(s, 1, out[count].token_id,
-                           sizeof(out[count].token_id));
+                            sizeof(out[count].token_id));
         out[count].block_height = AR_COL_INT(s, 2);
         out[count].tx_type = AR_COL_INT(s, 3);
         out[count].amount = AR_COL_INT(s, 4);
