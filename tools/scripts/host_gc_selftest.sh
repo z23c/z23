@@ -140,6 +140,69 @@ out="$(ZCL_HOST_GC_ZCC_BIN="$WORK/no-such-zcc" PATH="/usr/bin:/bin" \
 assert_contains "$out" "evictor not built" "zcc dry-run reports why no evictor was found"
 assert_contains "$out" "$WORK/no-such-zcc" "zcc dry-run names every path it tried"
 
+# zcc apply must measure the cache by reading the evictor's own report line
+# — NEVER by walking the tree itself before and/or after the trim (the
+# 2026-09-10 HDD incident: three du -sb walks of a multi-million-file cache
+# per hourly run, one alone 27 minutes in D state). A fake evictor proves
+# (a) held/freed come straight from its report line, (b) it is invoked
+# exactly once, and (c) du is never invoked on the zcc dir in the apply
+# path; a PATH-shadowed `du` records every call it would have made.
+ZCC_STUB_OK="$WORK/zcc-stub-ok"
+cat > "$ZCC_STUB_OK" <<'STUBEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${ZCC_STUB_COUNT_FILE:?}"
+printf 'x' >> "$ZCC_STUB_COUNT_FILE"
+cap="${2:-0}"
+echo "zcc: 42 MB held, ${cap} MB ceiling, 7 MB freed"
+STUBEOF
+chmod +x -- "$ZCC_STUB_OK"
+
+ZCC_STUB_GARBAGE="$WORK/zcc-stub-garbage"
+cat > "$ZCC_STUB_GARBAGE" <<'STUBEOF'
+#!/usr/bin/env bash
+echo "not a trim report"
+STUBEOF
+chmod +x -- "$ZCC_STUB_GARBAGE"
+
+DU_SHADOW_DIR="$WORK/du-shadow"
+mkdir -p -- "$DU_SHADOW_DIR"
+DU_CALL_LOG="$WORK/du-calls.log"
+: > "$DU_CALL_LOG"
+cat > "$DU_SHADOW_DIR/du" <<DUEOF
+#!/usr/bin/env bash
+printf 'du-called %s\n' "\$*" >> "$DU_CALL_LOG"
+printf '0\t%s\n' "\${*: -1}"
+DUEOF
+chmod +x -- "$DU_SHADOW_DIR/du"
+
+ZCC_STUB_COUNT="$WORK/zcc-stub-count"
+: > "$ZCC_STUB_COUNT"
+out="$(ZCL_HOST_GC_ZCC_BIN="$ZCC_STUB_OK" ZCC_STUB_COUNT_FILE="$ZCC_STUB_COUNT" \
+    PATH="$DU_SHADOW_DIR:$PATH" run_hostgc zcc apply)"
+log="$(cat -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
+assert_contains "$out" "reclaimed 7" \
+    "zcc apply reports the freed amount straight from the evictor's report line"
+assert_contains "$log" "zcc-trim" "zcc apply logs a zcc-trim row"
+calls="$(wc -c < "$ZCC_STUB_COUNT")"
+[ "$calls" = 1 ] || fail "zcc apply invoked the evictor $calls time(s), expected exactly 1"
+if [ -s "$DU_CALL_LOG" ]; then
+    fail "zcc apply called du, which the one-walk invariant forbids: $(cat -- "$DU_CALL_LOG")"
+else
+    pass "zcc apply never calls du — held/freed come from the evictor's report alone"
+fi
+
+# A stub that prints garbage must fail loudly (zcc-trim-failed), never a
+# silent 0-freed success row.
+: > "$DU_CALL_LOG"
+out="$(ZCL_HOST_GC_ZCC_BIN="$ZCC_STUB_GARBAGE" PATH="$DU_SHADOW_DIR:$PATH" \
+    run_hostgc zcc apply)"
+log="$(cat -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
+assert_contains "$log" "zcc-trim-failed" \
+    "zcc apply with an unparsable evictor report logs zcc-trim-failed, not a success"
+assert_not_contains "$out" "reclaimed" \
+    "zcc apply with an unparsable evictor report never claims a reclaim"
+
 # -------------------------------------------------------------------- units
 land_a_unit() {
     local name="$1" land="$2" dir

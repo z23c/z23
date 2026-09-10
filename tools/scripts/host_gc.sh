@@ -459,20 +459,35 @@ sweep_ccache() {
 # eviction the cache performs on itself). Using it rather than an atime sort
 # keeps ONE eviction policy: an external sweeper deleting entries the cache
 # still believes it owns is how a cache index goes stale.
+#
+# ONE WALK PER RUN. `du -sb` over a multi-million-file cache is expensive on
+# a rotational box: measured on a fleet HDD host 2026-09-10, the hourly unit
+# ran 18:49-19:19 (30 min wall, 1.9s CPU, all I/O wait) with the `du -sb --
+# ~/.cache/zcc` call alone sitting 27 min in D state, holding
+# /proc/pressure/io avg10 at 60-67% for the whole hour and starving the live
+# node — even with Nice=19 + IOSchedulingClass=idle, which does not help a
+# seek-bound HDD. The evictor (`zcc --zcc-trim`) already walks the tree once
+# to do the eviction and prints what it found in its own report line
+# ("zcc: N MB held, N MB ceiling, N MB freed"); the APPLY path below reads
+# THAT line instead of measuring the directory again, so a normal apply run
+# costs exactly the evictor's one walk, never du before AND after it.
+# CACHE_FREEZE and dry-run still need to know the current size before they
+# can decide what cap to ask the evictor for (or, in dry-run, before the
+# evictor runs at all), so each keeps exactly one measurement of its own —
+# never a second on top of it.
 sweep_zcc() {
     want zcc || return 0
     hdr "zcc cache (cap $(( ZCC_CAP_MB / 1024 ))G)"
     local dir="${ZCL_HOST_GC_ZCC_DIR:-$GC_HOME/.cache/zcc}" before after freed
     [ -d "$dir" ] || { say "zcc: no cache directory — skipped"; return 0; }
-    before="$(dir_bytes "$dir")"
     local cap_mb="$ZCC_CAP_MB"
     if [ "$CACHE_FREEZE" = 1 ]; then
+        before="$(dir_bytes "$dir")"
         local held_mb=$(( before / 1024 / 1024 ))
         [ "$held_mb" -lt "$cap_mb" ] && cap_mb="$held_mb"
         [ "$cap_mb" -lt 64 ] && cap_mb=64
         say "zcc: FREEZE active — cap lowered to ${cap_mb}MB (no growth)"
     fi
-    say "zcc: current $(human "$before"), cap ${cap_mb}MB"
     # Resolve a working evictor before giving up. $REPO_ROOT/build/bin/zcc is
     # correct for a checkout that has built it; it is silently ABSENT for a
     # lane worktree that has not, which is exactly the case that made this
@@ -494,17 +509,32 @@ sweep_zcc() {
         return 0
     fi
     if [ "$APPLY" = 1 ]; then
-        if "$bin" --zcc-trim "$cap_mb" >/dev/null 2>&1; then
-            after="$(dir_bytes "$dir")"
-            freed=$(( before > after ? before - after : 0 ))
-            say "zcc: now $(human "$after"), reclaimed $(human "$freed") (via $bin)"
-            log_line "zcc-trim" "$dir" "$freed" "cap=${cap_mb}MB freeze=$CACHE_FREEZE bin=$bin"
-            add_result zcc "$freed" 1
+        # ONE call, ONE walk: no dir_bytes before or after. held/freed come
+        # only from the evictor's own report line — see the ONE WALK
+        # comment above the category.
+        local trim_out held_mb freed_mb
+        if trim_out="$("$bin" --zcc-trim "$cap_mb" 2>&1)"; then
+            held_mb="$(printf '%s\n' "$trim_out" | sed -n 's/^zcc: \([0-9][0-9]*\) MB held,.*/\1/p')"
+            freed_mb="$(printf '%s\n' "$trim_out" | sed -n 's/.* \([0-9][0-9]*\) MB freed$/\1/p')"
+            if [ -n "$held_mb" ] && [ -n "$freed_mb" ]; then
+                after=$(( held_mb * 1024 * 1024 ))
+                freed=$(( freed_mb * 1024 * 1024 ))
+                say "zcc: now $(human "$after"), reclaimed $(human "$freed") (via $bin)"
+                log_line "zcc-trim" "$dir" "$freed" "cap=${cap_mb}MB freeze=$CACHE_FREEZE bin=$bin"
+                add_result zcc "$freed" 1
+            else
+                # Unparsable output is a failed trim, not a silent 0-freed
+                # success — never report a success row without a real number.
+                say "zcc: trim FAILED (could not parse '$bin --zcc-trim $cap_mb' report: ${trim_out:-<empty output>}) — cache left untouched"
+                log_line "zcc-trim-failed" "$dir" 0 "bin=$bin cap=${cap_mb}MB unparsable-report"
+            fi
         else
             say "zcc: trim FAILED ($bin --zcc-trim $cap_mb exited non-zero) — cache left untouched"
             log_line "zcc-trim-failed" "$dir" 0 "bin=$bin cap=${cap_mb}MB"
         fi
     else
+        [ -n "${before:-}" ] || before="$(dir_bytes "$dir")"
+        say "zcc: current $(human "$before"), cap ${cap_mb}MB"
         local cap_bytes=$(( cap_mb * 1024 * 1024 ))
         freed=$(( before > cap_bytes ? before - cap_bytes : 0 ))
         say "zcc: would reclaim about $(human "$freed") (via $bin)"
