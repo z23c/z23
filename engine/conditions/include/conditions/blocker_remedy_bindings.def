@@ -451,7 +451,12 @@ ZCL_BLOCKER_REMEDY(db.maintenance_slow,                         OWNER)
  *   - node_db_unopened: node.db failed to open at boot
  *     (engine/composition/src/boot_node_db_gate.c) — BLOCKER_PERMANENT; an unopenable
  *     database needs an operator to look at disk/permissions/corruption,
- *     not an auto-retry. ─────────────────────────────────────────────── */
+ *     not an auto-retry. OWNER here is exact rather than pessimistic: the
+ *     one auto-repair that DOES exist for this fault — a malformed store,
+ *     quarantined and rebuilt fresh by models/database.c — already ran and
+ *     did not recover it before the gate was reached. The gate refuses (it
+ *     no longer parks) and its typed FATAL block carries the operator's two
+ *     commands. ──────────────────────────────────────────────────────── */
 ZCL_BLOCKER_REMEDY(api_cache_refresh_stalled,                   OWNER)
 ZCL_BLOCKER_REMEDY(api_lookup_stalled,                           OWNER)
 ZCL_BLOCKER_REMEDY(chain_integrity_restore_stuck,               OWNER)
