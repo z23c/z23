@@ -22,7 +22,10 @@
 #                    (100) so the wallet holds spendable transparent coinbase,
 #                    plus one z_getnewaddress so the merchant Sapling keystore
 #                    is seeded (order minting refuses an unseeded keystore).
-#   3.  TOKEN_GENESIS app.tokens.create plan → confirm:true → real ZSLP
+#   2b. CUSTODY      unlock the encrypted-at-rest wallet and take a
+#                    current-key encrypted backup — the ZSLP intent plan leg
+#                    reserves real custody and refuses anything less.
+#   3.  TOKEN_GENESIS app.tokens.create plan → commit by plan_id → real ZSLP
 #                    GENESIS on-chain (the store's access token gate settles in
 #                    ZSLP: zslp_mint only accepts the 64-hex genesis token_id,
 #                    never a ticker), then mines TOKEN_CONFS blocks so the
@@ -115,6 +118,14 @@ SP_PID=""
 SP_PGID=""
 SP_CLEANED=0
 SP_KEEP="${ZCL_STOREPROOF_KEEP:-0}"
+# Throwaway wallet custody passphrases for this run's throwaway /tmp regtest
+# datadir. They never ride argv: the wallet passphrase is written to a 0600
+# credential file the node reads at boot (CREDENTIALS_DIRECTORY), and the
+# backup password is fed to the backup command on stdin. The ZSLP intent
+# contract refuses to plan against a plaintext, locked, or un-backed-up
+# wallet, so an operator proof has to hold real custody like any operator.
+SP_WALLET_PASS="${ZCL_STOREPROOF_WALLET_PASS:-store-operator-proof-wallet-pass}"
+SP_BACKUP_PASS="${ZCL_STOREPROOF_BACKUP_PASS:-store-operator-proof-backup-pass}"
 
 sp_log()  { echo "store-sell-operator-proof: $*"; }
 sp_skip() { sp_log "VERDICT=SKIP reason=$*"; exit 0; }
@@ -183,6 +194,16 @@ sp_cli() {
     out="$(ZCL_DATADIR="$SP_DD" ZCL_RPCPORT="$SP_RPC" "$NODE_BIN" "$@" 2>&1)" || true
     printf '%s\n' "$out" | grep '^{' | tail -1 || true
 }
+# Same wrapper, but the JSON input rides stdin (--input=-) instead of argv: a
+# wallet passphrase must never be visible in a process argument list.
+sp_cli_input() {
+    local payload="$1"
+    shift
+    local out
+    out="$(printf '%s' "$payload" | ZCL_DATADIR="$SP_DD" ZCL_RPCPORT="$SP_RPC" \
+        "$NODE_BIN" "$@" --input=- 2>&1)" || true
+    printf '%s\n' "$out" | grep '^{' | tail -1 || true
+}
 sp_json_int() { printf '%s' "$1" | sed -n "s/.*\"$2\":\([0-9][0-9]*\).*/\1/p"; }
 sp_json_str() { printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"; }
 
@@ -227,12 +248,28 @@ done
 
 sp_log "datadir=$SP_DD ports{p2p=$SP_PORT rpc=$SP_RPC fs=$SP_FS https=$SP_HTTPS} sink=$DEAD_SINK"
 
+# ── Wallet custody credential (read by the node at boot) ───────────
+# No -allow-plaintext-wallet: the wallet-passphrase credential encrypts key
+# writes at rest (WKS1), which is what the ZSLP intent plan leg demands
+# (vault_intent_controller.c refuses WALLET_NOT_ENCRYPTED otherwise). 0700
+# directory, 0600 file, inside the throwaway datadir that cleanup removes.
+SP_CRED_DIR="$SP_DD/cred"
+install -d -m 700 "$SP_CRED_DIR" || { sp_log "FATAL: could not create the credential directory" >&2; exit 2; }
+install -m 600 /dev/null "$SP_CRED_DIR/wallet-passphrase" || { sp_log "FATAL: could not create the wallet passphrase credential" >&2; exit 2; }
+printf '%s\n' "$SP_WALLET_PASS" >"$SP_CRED_DIR/wallet-passphrase"
+export CREDENTIALS_DIRECTORY="$SP_CRED_DIR"
+
 # ── Stage 1: SPAWN ─────────────────────────────────────────────────
 sp_log "[1/11] SPAWN: booting isolated regtest node..."
+# -operator-lane=dev persists the dev operator lane the token genesis plans
+# under (a wallet_scope that does not match the persisted lane is CONFLICTED);
+# -wallet-no-phrase-backup is the non-interactive first-run acknowledgement
+# for a throwaway wallet that will be destroyed with the datadir.
 setsid "$NODE_BIN" \
     -datadir="$SP_DD" -regtest -regtestshielded \
     -port="$SP_PORT" -rpcport="$SP_RPC" -fsport="$SP_FS" -httpsport="$SP_HTTPS" \
     -connect=127.0.0.1:"$DEAD_SINK" \
+    -operator-lane=dev -wallet-no-phrase-backup \
     -nobgvalidation -nolegacyimport -nofilesync -showmetrics=0 \
     >"$SP_DD/node.log" 2>&1 &
 SP_PID=$!
@@ -341,6 +378,25 @@ case "$ZADDR" in
 esac
 sp_log "       height=$HEIGHT taddr=$TADDR (first $((MATURE_BLOCKS - 100)) coinbases mature)"
 sp_log "       merchant z-address seeded: ${ZADDR:0:28}..."
+
+# ── Stage 2b: CUSTODY (encrypted at rest, unlocked, currently backed up) ──
+# The ZSLP intent plan leg reserves real custody, so it refuses anything less
+# than a real operator's wallet posture: encrypted at rest, unlocked, and
+# covered by a current-key encrypted backup under 24 hours old
+# (vi_context_ready, contexts/wallet/controllers/src/vault_intent_controller.c).
+# The backup is taken AFTER every key this proof derives up front, because the
+# gate compares the backup's key count against the live keystore's.
+sp_log "[2b/11] CUSTODY: unlocking the encrypted wallet and taking a current-key encrypted backup..."
+SEC_STATUS="$(sp_cli core wallet security status)"
+str_contains "$SEC_STATUS" '"ok":true' || sp_fail CUSTODY "wallet security status refused: $SEC_STATUS"
+str_contains "$SEC_STATUS" '"encrypted_at_rest":true' || sp_fail CUSTODY "the wallet is not encrypted at rest — the passphrase credential did not take: $SEC_STATUS"
+if ! str_contains "$SEC_STATUS" '"unlocked":true'; then
+    UNLOCK_OUT="$(sp_cli_input "{\"passphrase\":\"$SP_WALLET_PASS\",\"timeout_seconds\":3600}" core wallet security unlock)"
+    str_contains "$UNLOCK_OUT" '"unlocked":true' || sp_fail CUSTODY "wallet unlock refused: $UNLOCK_OUT"
+fi
+BACKUP_OUT="$(sp_cli_input "{\"confirm\":true,\"password\":\"$SP_BACKUP_PASS\"}" core wallet backup now)"
+str_contains "$BACKUP_OUT" '"ok":true' || sp_fail CUSTODY "wallet backup refused: $BACKUP_OUT"
+sp_log "       wallet encrypted at rest, unlocked, current-key encrypted backup taken"
 
 # ── Stage 3: TOKEN_GENESIS (real ZSLP GENESIS on-chain) ────────────
 # app.tokens.create is a durable custody intent, not a one-shot RPC: the plan
