@@ -272,12 +272,17 @@ static void hg_mark_target(struct hg_scan *scan, const char *target)
 
 static void hg_mark_link(struct hg_scan *scan, const char *link)
 {
+#if defined(_WIN32)
+    (void)scan;
+    (void)link;
+#else
     char target[PATH_MAX];
     ssize_t n = readlink(link, target, sizeof(target) - 1);
     if (n <= 0)
         return;
     target[n] = '\0';
     hg_mark_target(scan, target);
+#endif
 }
 
 static void hg_mark_fds(struct hg_scan *scan, const char *procdir)

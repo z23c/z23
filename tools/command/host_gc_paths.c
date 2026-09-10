@@ -73,6 +73,12 @@ bool hg_under(const char *dir, const char *path)
 
 static uint64_t hg_walk(const char *path, int depth, long *budget)
 {
+#if defined(_WIN32)
+    (void)path;
+    (void)depth;
+    (void)budget;
+    return 0;
+#else
     DIR *d;
     struct dirent *e;
     struct stat st;
@@ -96,6 +102,7 @@ static uint64_t hg_walk(const char *path, int depth, long *budget)
     }
     (void)closedir(d);
     return total;
+#endif
 }
 
 uint64_t hg_dir_bytes(const char *path)
@@ -269,9 +276,13 @@ bool host_gc_path_protected(const struct host_gc_request *req,
     }
     if (hg_protected_core(home, repo, norm, reason, reason_cap))
         return true;
+#if !defined(_WIN32)
     if (realpath(norm, real) != NULL && strcmp(real, norm) != 0 &&
         hg_protected_core(home, repo, real, reason, reason_cap))
         return true;
+#else
+    (void)real;
+#endif
     if (hg_holds_chain_data(norm)) {
         (void)snprintf(reason, reason_cap, "holds_chain_data");
         return true;
