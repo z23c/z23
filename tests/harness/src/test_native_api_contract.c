@@ -2269,70 +2269,6 @@ static int test_app_write_native_e2e(void)
         zcl_command_reply_free(&reply);
         json_free(&token_plan);
 
-        /* 6b. The plan leg's own MISSING_INPUT refusal must actually fire.
-         * json_get_str() answers "" for an ABSENT key, never NULL
-         * (platform/modules/json/src/json.c:265), so a bare != NULL test on a
-         * required text field is true even when the caller sent nothing at
-         * all: the refusal that names the missing field was unreachable, and
-         * a plan with no idempotency key reached a custody reservation with
-         * only the node behind it. Absent AND empty must both be refused, and
-         * refused before any RPC leaves this process. */
-        struct json_value token_missing;
-        json_init(&token_missing);
-        json_set_object(&token_missing);
-        (void)json_push_kv_str(&token_missing, "wallet_scope", "dev");
-        (void)json_push_kv_str(
-            &token_missing, "token_id",
-            "2222222222222222222222222222222222222222222222222222222222222222");
-        (void)json_push_kv_str(&token_missing, "to", "t1stub");
-        (void)json_push_kv_str(&token_missing, "units", "25");
-        struct zcl_command_request token_missing_req = {
-            .spec = token_spec, .input = &token_missing, .view = "normal",
-        };
-        int token_calls_before = g_app_token_send_calls;
-        zcl_command_reply_init(&reply, token_spec->output_schema);
-        zcl_native_handle_token_send(&token_missing_req, &reply);
-        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
-        ASSERT_STR_EQ(reply.error.code, "MISSING_INPUT");
-        ASSERT(!reply.error.mutated);
-        ASSERT_EQ(g_app_token_send_calls, token_calls_before);
-        zcl_command_reply_free(&reply);
-
-        (void)json_push_kv_str(&token_missing, "idempotency_key", "");
-        zcl_command_reply_init(&reply, token_spec->output_schema);
-        zcl_native_handle_token_send(&token_missing_req, &reply);
-        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
-        ASSERT_STR_EQ(reply.error.code, "MISSING_INPUT");
-        ASSERT(!reply.error.mutated);
-        ASSERT_EQ(g_app_token_send_calls, token_calls_before);
-        zcl_command_reply_free(&reply);
-        json_free(&token_missing);
-
-        /* The same hole seen from the operation side: an empty recipient is
-         * not a recipient. */
-        struct json_value token_empty_to;
-        json_init(&token_empty_to);
-        json_set_object(&token_empty_to);
-        (void)json_push_kv_str(&token_empty_to, "wallet_scope", "dev");
-        (void)json_push_kv_str(
-            &token_empty_to, "token_id",
-            "2222222222222222222222222222222222222222222222222222222222222222");
-        (void)json_push_kv_str(&token_empty_to, "to", "");
-        (void)json_push_kv_str(&token_empty_to, "units", "25");
-        (void)json_push_kv_str(&token_empty_to, "idempotency_key",
-                               "native-token-send-2");
-        struct zcl_command_request token_empty_to_req = {
-            .spec = token_spec, .input = &token_empty_to, .view = "normal",
-        };
-        zcl_command_reply_init(&reply, token_spec->output_schema);
-        zcl_native_handle_token_send(&token_empty_to_req, &reply);
-        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
-        ASSERT_STR_EQ(reply.error.code, "MISSING_INPUT");
-        ASSERT(!reply.error.mutated);
-        ASSERT_EQ(g_app_token_send_calls, token_calls_before);
-        zcl_command_reply_free(&reply);
-        json_free(&token_empty_to);
-
         /* 6. Private seller content is a two-step no-funds app write: plan
          * mints a token and mutates nothing, commit binds the bytes and is
          * the only mutating leg, and neither ever echoes the path. */
@@ -2630,6 +2566,92 @@ static char *zslp_wallet_not_encrypted_stub_rpc(const char *method,
                       "\"message\":\"wallet must be encrypted before a "
                       "ZSLP transfer can be planned\",\"retryable\":false}");
     return NULL;
+}
+
+/* The ZSLP plan leg's own MISSING_INPUT refusal must actually fire. The JSON
+ * reader answers "" for a key that is ABSENT, never NULL
+ * (platform/modules/json/src/json.c), so a bare != NULL test on a required
+ * text field is true even when the caller sent nothing at all: the refusal
+ * that names the missing field was unreachable, and a plan with no
+ * idempotency key reached a custody reservation with only the node behind it.
+ * Absent AND empty must both be refused, and refused before any RPC leaves
+ * this process. */
+static int test_zslp_plan_requires_named_inputs(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+
+    TEST("zslp intent plan: an absent or empty required field is refused "
+         "before any RPC") {
+        g_app_token_send_calls = 0;
+        node_rpc_client_set_test_hook(app_write_stub_rpc);
+
+        const struct zcl_command_spec *token_spec =
+            find_spec(reg, "app.tokens.send");
+        ASSERT(token_spec != NULL);
+
+        struct zcl_command_reply reply;
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "wallet_scope", "dev");
+        (void)json_push_kv_str(
+            &input, "token_id",
+            "2222222222222222222222222222222222222222222222222222222222222222");
+        (void)json_push_kv_str(&input, "to", "t1stub");
+        (void)json_push_kv_str(&input, "units", "25");
+        struct zcl_command_request request = {
+            .spec = token_spec, .input = &input, .view = "normal",
+        };
+
+        /* No idempotency_key at all. */
+        zcl_command_reply_init(&reply, token_spec->output_schema);
+        zcl_native_handle_token_send(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "MISSING_INPUT");
+        ASSERT(!reply.error.mutated);
+        ASSERT_EQ(g_app_token_send_calls, 0);
+        zcl_command_reply_free(&reply);
+
+        /* An empty idempotency_key is the same request wearing a key. */
+        (void)json_push_kv_str(&input, "idempotency_key", "");
+        zcl_command_reply_init(&reply, token_spec->output_schema);
+        zcl_native_handle_token_send(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "MISSING_INPUT");
+        ASSERT(!reply.error.mutated);
+        ASSERT_EQ(g_app_token_send_calls, 0);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        /* The same hole seen from the operation side: an empty recipient is
+         * not a recipient. */
+        struct json_value empty_to;
+        json_init(&empty_to);
+        json_set_object(&empty_to);
+        (void)json_push_kv_str(&empty_to, "wallet_scope", "dev");
+        (void)json_push_kv_str(
+            &empty_to, "token_id",
+            "2222222222222222222222222222222222222222222222222222222222222222");
+        (void)json_push_kv_str(&empty_to, "to", "");
+        (void)json_push_kv_str(&empty_to, "units", "25");
+        (void)json_push_kv_str(&empty_to, "idempotency_key",
+                               "native-token-send-2");
+        struct zcl_command_request empty_to_request = {
+            .spec = token_spec, .input = &empty_to, .view = "normal",
+        };
+        zcl_command_reply_init(&reply, token_spec->output_schema);
+        zcl_native_handle_token_send(&empty_to_request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "MISSING_INPUT");
+        ASSERT(!reply.error.mutated);
+        ASSERT_EQ(g_app_token_send_calls, 0);
+        zcl_command_reply_free(&reply);
+        json_free(&empty_to);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
 }
 
 static int test_zslp_intent_refusal_surfaces_node_message(void)
@@ -3089,6 +3111,7 @@ int test_native_api_contract(void)
     failures += test_raw_native_pipeline_mines_exact_signed_bytes();
     failures += test_app_write_native_e2e();
     failures += test_zslp_intent_refusal_surfaces_node_message();
+    failures += test_zslp_plan_requires_named_inputs();
     failures += test_native_bridge_resident_binding();
     failures += test_status_frontdoor_preserves_rpc_error();
     failures += test_status_brief_body_schema_skew_tolerance();

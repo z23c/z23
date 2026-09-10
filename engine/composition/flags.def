@@ -1596,7 +1596,7 @@ Z23_FLAG("ZCL_OWP_SCAN_ROOTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_PACKAGE_SIGN_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/commons_journey_acceptance.sh:65")
 Z23_FLAG("ZCL_PARAMS_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/store_sell_operator_proof.sh:193")
+          "undocumented; first use tools/scripts/store_sell_operator_proof.sh:350")
 Z23_FLAG("ZCL_PARAMS_TESTS", "env_test", "-", "-",
           "first use tests/harness/src/test_crypto_perf_selftest.c:233; documented at docs/SIMULATOR.md:133: | Sapling shielded send (t→z, z→z) | A | Params-gated (ZCL_PARAMS_TESTS=1 or --only=sim...")
 Z23_FLAG("ZCL_PARITY_CANON_DATADIR", "env_build", "-", "-",
