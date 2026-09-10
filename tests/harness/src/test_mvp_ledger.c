@@ -676,6 +676,56 @@ static int test_mvp_ledger_join(void)
         PASS();
     }
 
+    TEST("kpi sums every --session's tokens into one denominator: one "
+         "session matches the known single-session totals byte-identically, "
+         "and scanning a second session into the same table sums exactly, "
+         "not by adding two separately rounded per-session TCUs") {
+        char tmp1[PATH_MAX], tmp2[PATH_MAX], sess1[PATH_MAX], sess2[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        struct mvl_plan plan = {0};
+        struct mvl_agents agents = {0};
+        struct mvl_kpi kpi = {0};
+        struct mvl_evidence_world world = {0};
+
+        ASSERT(test_mkdtemp(tmp1, sizeof(tmp1), "mvpledger") != NULL);
+        ASSERT(test_mkdtemp(tmp2, sizeof(tmp2), "mvpledger") != NULL);
+        mvl_build_session(tmp1);
+        mvl_build_session(tmp2);
+        (void)snprintf(sess1, sizeof(sess1), "%s/sess", tmp1);
+        (void)snprintf(sess2, sizeof(sess2), "%s/sess", tmp2);
+
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_agents_alloc(&agents));
+
+        /* One --session: byte-identical to the totals test_mvp_ledger_agents
+         * proves agents.tsv carries for this fixture (tokens_out 80+20+5+9,
+         * tokens_in 3312+555+111+333). */
+        ASSERT(mvl_scan_session(sess1, NULL, &agents, err, sizeof(err)));
+        ASSERT_EQ((int)agents.count, 4);
+        mvl_compute_kpi(&plan, &agents, &world, &kpi);
+        ASSERT_EQ((int)kpi.tokens_out, 114);
+        ASSERT_EQ((int)kpi.tokens_raw, 4425);
+        ASSERT_EQ((int)kpi.tcu, 1468);
+
+        /* A second --session folds into the SAME agents table (exactly what
+         * mvl_scan_with_lanes in mvp_ledger_main.c does once per repeated
+         * flag), so the denominator sums both sessions' tokens before TCU is
+         * priced once — not 1468+1468=2936, which is what adding two
+         * independently-rounded per-session TCUs would give. */
+        ASSERT(mvl_scan_session(sess2, NULL, &agents, err, sizeof(err)));
+        ASSERT_EQ((int)agents.count, 8);
+        mvl_compute_kpi(&plan, &agents, &world, &kpi);
+        ASSERT_EQ((int)kpi.tokens_out, 228);
+        ASSERT_EQ((int)kpi.tokens_raw, 8850);
+        ASSERT_EQ((int)kpi.tcu, 2937);
+
+        mvl_agents_free(&agents);
+        mvl_plan_free(&plan);
+        test_rm_rf_recursive(tmp1);
+        test_rm_rf_recursive(tmp2);
+        PASS();
+    }
+
 _test_next:;
     return failures;
 }

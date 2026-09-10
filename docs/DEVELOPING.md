@@ -975,7 +975,7 @@ evidence rather than from memory. It is built by `make dev-bin`.
 z23-mvp-ledger agents   --session <dir> --out <dir> [--lanes <dir>]
 z23-mvp-ledger loops    --plan <file>  --out <dir> [--trains <dir>] [--ancestry <file>] [--groups <file>]
 z23-mvp-ledger snapshot --plan <file>  --out <dir> [--origin-main <sha>] [--note <text>]
-z23-mvp-ledger kpi      --plan <file>  --out <dir> --since <t0> [--ancestry <file>] [--groups <file>] [--scratch <dir>]
+z23-mvp-ledger kpi      --plan <file>  --out <dir> --since <t0> [--session <dir>]... [--ancestry <file>] [--groups <file>] [--scratch <dir>]
 z23-mvp-ledger progress --plan <file> [--session <dir>] [--ancestry <file>] [--groups <file>]
 ```
 

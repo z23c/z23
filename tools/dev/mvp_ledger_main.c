@@ -19,7 +19,10 @@ enum { MVL_RENDER_CAP = 65536 };
 
 struct mvl_opts {
     const char *mode;
-    const char *session;
+    /* Repeatable: one slot per --session occurrence, folded into one
+     * agents table by mvl_scan_all_sessions. */
+    const char *sessions[MVL_MAX_SESSIONS];
+    size_t session_count;
     const char *plan;
     const char *out;
     const char *trains;
@@ -70,10 +73,13 @@ static void mvl_usage(void)
 "  kpi       append one row to <out>/kpi.tsv — verified MVP progress per\n"
 "            token. Columns: utc window verified_loops verified_subrows\n"
 "            landed_loops sweep_loops sweep_unregistered tokens_raw\n"
-"            tokens_out tcu loops_per_mtcu tcu_per_loop note.\n"
+"            tokens_out tcu loops_per_mtcu tcu_per_loop note. With\n"
+"            --session it scans every listed session directly instead of\n"
+"            reading <out>/agents.tsv.\n"
 "  progress  print the per-milestone bars and the MVP bar; with --session,\n"
 "            add the cost line and the KPI line.\n"
-"\n"
+"\n", stdout);
+    fputs(
 "WHAT VERIFIES A LOOP (the verified_by column, in this order)\n"
 "  landed    evidence is a commit, a comma-separated list of them, or a\n"
 "            range `a..b`, and every sha (the `b` of a range) is in\n"
@@ -90,7 +96,9 @@ static void mvl_usage(void)
 "\n"
 "OPTIONS\n"
 "  --session <dir>      the session directory holding subagents/ (its\n"
-"                       sibling <dir>.jsonl is the orchestrator transcript)\n"
+"                       sibling <dir>.jsonl is the orchestrator transcript).\n"
+"                       Repeatable: every session's agents fold into one\n"
+"                       table, one orchestrator row per session.\n"
 "  --plan <file>        the plan of record (TODO grammar)\n"
 "  --out <dir>          where agents/loops/snapshots/kpi .tsv live\n"
 "  --trains <dir>       holds trainN/late_picks.txt for the assembler split\n"
@@ -123,13 +131,43 @@ static const char *mvl_arg(int argc, char **argv, int *i)
     return argv[*i];
 }
 
+/* --session is repeatable, unlike every other flag: each occurrence names
+ * one more session directory. Returns true and advances `*i` when `argv[*i]`
+ * was "--session"; leaves `*i` untouched otherwise. `*matched` reports which
+ * happened, `*ok` reports a missing value or a table this build's cap can't
+ * hold. */
+static void mvl_parse_session_flag(int argc, char **argv, int *i,
+                                   struct mvl_opts *o, bool *matched, bool *ok)
+{
+    const char *value;
+
+    *matched = false;
+    if (strcmp(argv[*i], "--session") != 0)
+        return;
+    *matched = true;
+    value = mvl_arg(argc, argv, i);
+    if (!value) {
+        fprintf(stderr, "z23-mvp-ledger: --session needs a value\n");
+        *ok = false;
+        return;
+    }
+    if (o->session_count >= MVL_MAX_SESSIONS) {
+        fprintf(stderr,
+               "z23-mvp-ledger: more than %d --session directories\n",
+               MVL_MAX_SESSIONS);
+        *ok = false;
+        return;
+    }
+    o->sessions[o->session_count++] = value;
+    *ok = true;
+}
+
 static bool mvl_parse_opts(int argc, char **argv, struct mvl_opts *o)
 {
     static const struct {
         const char *flag;
         size_t offset;
     } table[] = {
-        {"--session", offsetof(struct mvl_opts, session)},
         {"--plan", offsetof(struct mvl_opts, plan)},
         {"--out", offsetof(struct mvl_opts, out)},
         {"--trains", offsetof(struct mvl_opts, trains)},
@@ -145,7 +183,14 @@ static bool mvl_parse_opts(int argc, char **argv, struct mvl_opts *o)
 
     for (int i = 2; i < argc; i++) {
         bool matched = false;
+        bool session_ok = true;
 
+        mvl_parse_session_flag(argc, argv, &i, o, &matched, &session_ok);
+        if (matched) {
+            if (!session_ok)
+                return false;
+            continue;
+        }
         for (size_t k = 0; k < sizeof table / sizeof table[0]; k++) {
             const char **slot;
 
@@ -174,6 +219,15 @@ static bool mvl_need(const char *value, const char *flag)
     if (value)
         return true;
     fprintf(stderr, "z23-mvp-ledger: %s is required for this mode\n", flag);
+    return false;
+}
+
+static bool mvl_need_session(const struct mvl_opts *o)
+{
+    if (o->session_count > 0)
+        return true;
+    fprintf(stderr,
+           "z23-mvp-ledger: --session is required for this mode\n");
     return false;
 }
 
@@ -361,9 +415,38 @@ static bool mvl_scan_with_lanes(const struct mvl_opts *o,
     struct mvl_names known = {0};
     bool ok = mvl_load_lane_names(o, &known, err, err_cap);
 
-    if (ok)
-        ok = mvl_scan_session(o->session, &known, agents, err, err_cap);
+    for (size_t i = 0; ok && i < o->session_count; i++)
+        ok = mvl_scan_session(o->sessions[i], &known, agents, err, err_cap);
     mvl_names_free(&known);
+    return ok;
+}
+
+/* `loops`, `snapshot` and a session-less `kpi` read the agents table an
+ * earlier `agents` run wrote to --out; `kpi` with one or more --session
+ * scans them directly instead, exactly as `progress --session` does, so
+ * `z23-mvp-ledger kpi --session A --session B ...` needs no separate
+ * `agents` pass and sums every listed session's tokens into one table. */
+static bool mvl_load_for_kpi(const struct mvl_opts *o, struct mvl_plan *plan,
+                             struct mvl_agents *agents, char *err,
+                             size_t err_cap)
+{
+    char path[MVL_PATH_CAP];
+    bool ok;
+
+    if (!mvl_plan_alloc(plan) || !mvl_agents_alloc(agents)) {
+        (void)snprintf(err, err_cap, "-:0: mvl_overflow: no tables");
+        return false;
+    }
+    if (!mvl_parse_plan(o->plan, plan, err, err_cap))
+        return false;
+    if (o->session_count > 0) {
+        ok = mvl_scan_with_lanes(o, agents, err, err_cap);
+    } else {
+        mvl_path(path, sizeof path, o->out, "agents.tsv");
+        ok = mvl_read_agents(path, agents, err, err_cap);
+    }
+    if (ok)
+        mvl_apply_since(agents, o->since);
     return ok;
 }
 
@@ -374,7 +457,7 @@ static int mvl_mode_agents(const struct mvl_opts *o)
     char path[MVL_PATH_CAP];
     bool ok;
 
-    if (!mvl_need(o->session, "--session") || !mvl_need(o->out, "--out"))
+    if (!mvl_need_session(o) || !mvl_need(o->out, "--out"))
         return 2;
     if (!mvl_agents_alloc(&agents))
         return 2;
@@ -475,7 +558,7 @@ static int mvl_mode_kpi(const struct mvl_opts *o)
     mvl_now(o->utc, utc, sizeof utc);
     (void)snprintf(window, sizeof window, "%s..%s",
                    o->since ? o->since : "all", utc);
-    ok = mvl_load(o, &plan, &agents, err, sizeof err);
+    ok = mvl_load_for_kpi(o, &plan, &agents, err, sizeof err);
     if (ok)
         ok = mvl_world_load(o, &world, err, sizeof err);
     if (ok) {
@@ -547,7 +630,7 @@ static int mvl_mode_progress(const struct mvl_opts *o)
         if (mvl_render_progress(&plan, render, MVL_RENDER_CAP)
             < MVL_RENDER_CAP)
             fputs(render, stdout);
-        if (o->session)
+        if (o->session_count > 0)
             ok = mvl_progress_tail(o, &plan, render, err, sizeof err);
     }
     if (!ok)

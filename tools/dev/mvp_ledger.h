@@ -87,6 +87,11 @@ enum {
     MVL_AGENT_COLUMNS = 18,
     MVL_MILESTONE_LOOPS = 12,   /* the plan's loops per milestone */
     MVL_TOTAL_BAR_WIDTH = 48,   /* the MVP bar, in characters */
+
+    /* --session is repeatable: each occurrence names one more session
+     * directory to fold into the same agents table, so `agents`, `loops`
+     * and `kpi` sum every listed session's tokens into one denominator. */
+    MVL_MAX_SESSIONS = 32,
 };
 
 /* Plan states, in the order the progress bar paints them. MVL_STATE_OTHER
