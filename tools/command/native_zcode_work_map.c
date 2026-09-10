@@ -212,6 +212,7 @@ static bool map_observation(struct json_value *data, int64_t now)
 {
     return json_push_kv_str(data, "definition_coverage", "complete") &&
         json_push_kv_str(data, "acceptance_coverage", "unobserved") &&
+        json_push_kv_str(data, "next_action", "verify_acceptance") &&
         json_push_kv_int(data, "observed_unix", now) &&
         json_push_kv_str(data, "task_resolution_scope", "requested_page");
 }

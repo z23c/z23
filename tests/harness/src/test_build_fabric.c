@@ -2793,6 +2793,8 @@ static int test_bf_map_selected_action(struct node_db *ndb,
             ASSERT_STR_EQ(json_get_str(json_get(observed, "proof_set_retention")), "unobserved");
         }
         ASSERT(!json_get_bool(json_get(observed, "acceptance_qualified")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "next_action")),
+                      "verify_acceptance");
         const struct json_value *row = json_at(json_get(&reply.data, "nodes"), 0);
         ASSERT_STR_EQ(json_get_str(json_get(row, "status")), "UNKNOWN");
         ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
