@@ -386,6 +386,16 @@ static bool beta6_advertises_node_bootstrap(uint64_t local_services, bool in_ban
     return (local_services & NODE_BOOTSTRAP) != 0 || in_band || listening;
 }
 
+/* Is this node actually answering beta6 clients? Either wire counts — in-band
+ * on the ordinary P2P port (the production path) or the optional side listener
+ * — and both still respect the security posture, which is what gates public
+ * serving at all. The beta6 wire answers from an already-hashed snapshot, so
+ * unlike the z23 paths it does not additionally require being at tip. */
+static bool beta6_is_serving(bool in_band, bool listening, bool security_posture_ok)
+{
+    return (in_band || listening) && security_posture_ok;
+}
+
 /* The single named fact keeping this node from serving beta6 clients, in the
  * order an operator has to fix them; empty while it is serving.
  * `posture_blocker` is NULL when the security posture allows public serving. */
@@ -463,11 +473,8 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
         agent_security_posture_allows_public_serving(&security_posture);
     bool p2p_serving = transport_ready && security_posture_ok;
     bool addr_relay_ready = counts.addrman_entries > 0;
-    /* The beta6 wire answers from an already-hashed snapshot and does not
-     * depend on the ordinary P2P transport being at tip; it does still respect
-     * the security posture, which is what gates public serving. In-band or on
-     * the side listener, either one is this node serving beta6 clients. */
-    bool beta6_fast = (beta6_in_band || beta6_listening) && security_posture_ok;
+    bool beta6_fast =
+        beta6_is_serving(beta6_in_band, beta6_listening, security_posture_ok);
     bool zcl23_fast = p2p_serving && node_zcl23;
 
     json_set_object(result);
