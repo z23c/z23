@@ -1049,7 +1049,7 @@ contexts/market/controllers/src/zslp_controller.c:zslp_mint_with_receipt:19
 contexts/market/controllers/src/zslp_controller.c:zslp_send_with_receipt:18
 contexts/market/controllers/src/zslp_intent_controller.c:rpc_zslp_intent:40
 contexts/market/controllers/src/zslp_intent_controller.c:ztic_prepare:35
-contexts/market/controllers/src/zslp_intent_native_handler.c:ztin_run:40
+contexts/market/controllers/src/zslp_intent_native_handler.c:ztin_run:38
 contexts/market/models/src/market_content.c:db_market_content_list_snapshot:16
 contexts/market/models/src/market_content.c:db_market_content_registration_identity:24
 contexts/market/models/src/market_payment_claim.c:db_market_payment_observe_authority:28

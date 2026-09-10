@@ -19,32 +19,61 @@
 static void ztin_fail(struct zcl_command_reply *reply,
                       enum zcl_command_status status,
                       enum zcl_command_exit exit_code, const char *code,
-                      const char *phase, const char *message,
+                      const char *phase, bool retryable, const char *message,
                       const char *evidence)
 {
     LOG_ERROR(ZTIN_TAG, "%s: %s (%s)", code, message,
               evidence && evidence[0] ? evidence : "-");
-    zcl_command_reply_fail(reply, status, exit_code, code, phase, false, false,
-                           message, evidence ? evidence : "");
+    zcl_command_reply_fail(reply, status, exit_code, code, phase, retryable,
+                           false, message, evidence ? evidence : "");
 }
 
-static bool ztin_rpc_error(const struct json_value *body, const char **message)
+/* Out params are always non-NULL: this is a private helper called from one
+ * site below with real locals, never with an optional pointer. */
+static bool ztin_rpc_error(const struct json_value *body, const char **message,
+                           const char **code, bool *retryable)
 {
+    *message = NULL;
+    *code = NULL;
+    *retryable = false;
     if (!body) return true;
     if (body->type == JSON_STR) {
-        if (message) *message = json_get_str(body);
+        *message = json_get_str(body);
         return true;
     }
     if (body->type != JSON_OBJ) return false;
     const struct json_value *error = json_get(body, "error");
     if (error && !json_is_null(error)) {
-        if (message)
-            *message = error->type == JSON_OBJ
-                ? json_get_str(json_get(error, "message"))
-                : json_get_str(error);
+        *message = error->type == JSON_OBJ
+            ? json_get_str(json_get(error, "message"))
+            : json_get_str(error);
         return true;
     }
-    return false;
+    /* node_rpc_call returns the envelope's error VALUE bare on failure
+     * ({ok:false,code,message,...}) — no "error" key. Without this rung
+     * every node-side refusal (e.g. WALLET_NOT_ENCRYPTED) falls through to
+     * the status check below and is misreported as "expected planned, got
+     * absent" instead of the node's own code and message. Mirrors
+     * tools/command/native_overlay_intent_command.c's noic_rpc_error(). */
+    const struct json_value *ok = json_get(body, "ok");
+    const struct json_value *msg = json_get(body, "message");
+    bool bare_refusal = ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
+        msg && msg->type == JSON_STR;
+    if (!bare_refusal) return false;
+    *message = json_get_str(msg);
+    *code = json_get_str(json_get(body, "code"));
+    *retryable = json_get_bool_or(body, "retryable", false);
+    return true;
+}
+
+/* Copies val into dst, falling back to a default when val is absent — kept
+ * out of ztin_run() so its call site is a single statement, not a new
+ * branch, and does not grow ztin_run's pinned cyclomatic baseline. */
+static void ztin_copy_or(char *dst, size_t n, const char *val,
+                         const char *fallback)
+{
+    bool present = val && val[0];
+    snprintf(dst, n, "%s", present ? val : fallback);
 }
 
 static void ztin_merge(struct json_value *dst, const struct json_value *src)
@@ -67,7 +96,7 @@ static void ztin_run(const struct zcl_command_request *request,
     const char *plan_id = json_get_str(json_get(request->input, "plan_id"));
     if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
         ztin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                  "WALLET_SCOPE_REQUIRED", "normalize",
+                  "WALLET_SCOPE_REQUIRED", "normalize", false,
                   "wallet_scope must explicitly be dev or prod", path);
         return;
     }
@@ -76,7 +105,7 @@ static void ztin_run(const struct zcl_command_request *request,
     if ((confirm && (!plan_id || strlen(plan_id) != 64)) ||
         (!confirm && (!common_plan_inputs || !operation_inputs_present))) {
         ztin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                  "MISSING_INPUT", "normalize",
+                  "MISSING_INPUT", "normalize", false,
                   confirm
                     ? "commit requires wallet_scope, 64-hex plan_id, and confirm:true"
                     : "plan requires wallet_scope, operation fields, and idempotency_key",
@@ -98,7 +127,7 @@ static void ztin_run(const struct zcl_command_request *request,
     char *params = rpc_arg_builder_to_json(&args);
     if (!params) {
         ztin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                  "ARG_BUILD_FAILED", "normalize",
+                  "ARG_BUILD_FAILED", "normalize", false,
                   "could not encode ZSLP intent parameters", path);
         return;
     }
@@ -108,7 +137,7 @@ static void ztin_run(const struct zcl_command_request *request,
     if (!raw) {
         ztin_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                   ZCL_COMMAND_EXIT_TRANSIENT, "NODE_UNAVAILABLE", "dispatch",
-                  "the node did not answer zslp_intent", "zslp_intent");
+                  false, "the node did not answer zslp_intent", "zslp_intent");
         return;
     }
     struct json_value body;
@@ -117,18 +146,23 @@ static void ztin_run(const struct zcl_command_request *request,
     if (!parsed) {
         json_free(&body);
         ztin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                  "BAD_RPC_BODY", "serialize",
+                  "BAD_RPC_BODY", "serialize", false,
                   "zslp_intent returned an unparseable body", "zslp_intent");
         return;
     }
     const char *error = NULL;
-    if (ztin_rpc_error(&body, &error) || body.type != JSON_OBJ) {
+    const char *node_code = NULL;
+    bool retryable = false;
+    if (ztin_rpc_error(&body, &error, &node_code, &retryable) ||
+        body.type != JSON_OBJ) {
         char message[256];
-        snprintf(message, sizeof(message), "%s",
-                 error && error[0] ? error : "zslp_intent reported an error");
+        char code[64];
+        ztin_copy_or(message, sizeof(message), error,
+                    "zslp_intent reported an error");
+        ztin_copy_or(code, sizeof(code), node_code, "ZSLP_INTENT_REFUSED");
         json_free(&body);
         ztin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                  "ZSLP_INTENT_REFUSED", "execute", message, "zslp_intent");
+                  code, "execute", retryable, message, "zslp_intent");
         return;
     }
     const char *status = json_get_str(json_get(&body, "status"));
@@ -140,7 +174,7 @@ static void ztin_run(const struct zcl_command_request *request,
                  status && status[0] ? status : "absent");
         json_free(&body);
         ztin_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                  "ZSLP_INTENT_INCOMPLETE", "execute", message,
+                  "ZSLP_INTENT_INCOMPLETE", "execute", false, message,
                   "zslp_intent");
         return;
     }

@@ -2548,6 +2548,69 @@ static int test_app_write_native_e2e(void)
     return failures;
 }
 
+/* ── a bare {ok:false} ZSLP refusal must surface the node's own code/message ─
+ * WITNESS: when the plan leg of a ZSLP transfer is refused by the node with a
+ * bare `{"ok":false,"code":"WALLET_NOT_ENCRYPTED","message":...}` body (no
+ * "error" key and no "status" field), zslp_intent_native_handler.c fell
+ * through the RPC-error check straight into the status-mismatch branch and
+ * reported the unrelated "ZSLP intent expected planned, got absent" —
+ * hiding WALLET_NOT_ENCRYPTED entirely. The sibling path in
+ * tools/command/native_overlay_intent_command.c already decodes this bare
+ * shape; this proves the ZSLP native handler does the same. */
+static char *zslp_wallet_not_encrypted_stub_rpc(const char *method,
+                                                const char *params_json)
+{
+    (void)params_json;
+    if (method && strcmp(method, "zslp_intent") == 0)
+        return strdup("{\"ok\":false,\"code\":\"WALLET_NOT_ENCRYPTED\","
+                      "\"message\":\"wallet must be encrypted before a "
+                      "ZSLP transfer can be planned\",\"retryable\":false}");
+    return NULL;
+}
+
+static int test_zslp_intent_refusal_surfaces_node_message(void)
+{
+    int failures = 0;
+    TEST("zslp intent plan: a bare {ok:false} refusal surfaces the node's "
+         "own code and message, not \"expected planned, got absent\"") {
+        const struct zcl_command_spec *token_spec =
+            find_spec(zcl_command_catalog(), "app.tokens.send");
+        ASSERT(token_spec != NULL);
+        struct json_value plan_in;
+        json_init(&plan_in);
+        json_set_object(&plan_in);
+        (void)json_push_kv_str(&plan_in, "wallet_scope", "dev");
+        (void)json_push_kv_str(
+            &plan_in, "token_id",
+            "2222222222222222222222222222222222222222222222222222222222222222");
+        (void)json_push_kv_str(&plan_in, "to", "t1stub");
+        (void)json_push_kv_str(&plan_in, "units", "25");
+        (void)json_push_kv_str(&plan_in, "idempotency_key",
+                               "native-token-send-refusal-1");
+        struct zcl_command_request req = {
+            .spec = token_spec, .input = &plan_in, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        node_rpc_client_set_test_hook(zslp_wallet_not_encrypted_stub_rpc);
+        zcl_command_reply_init(&reply, token_spec->output_schema);
+        zcl_native_handle_token_send(&req, &reply);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "WALLET_NOT_ENCRYPTED");
+        ASSERT_STR_EQ(reply.error.message,
+                      "wallet must be encrypted before a ZSLP transfer can "
+                      "be planned");
+        ASSERT(!reply.error.retryable);
+        ASSERT(strstr(reply.error.message, "expected planned") == NULL);
+        ASSERT(!reply.error.mutated);
+        zcl_command_reply_free(&reply);
+        json_free(&plan_in);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 /* ── a node that answers only PART of a reply must read as a slow node ─────
  * The node writes HTTP response headers before its handler blocks, so a
  * deadline that fires while the handler waits on the node.db write lock left
@@ -2961,6 +3024,7 @@ int test_native_api_contract(void)
     failures += test_wallet_mutating_native_e2e();
     failures += test_raw_native_pipeline_mines_exact_signed_bytes();
     failures += test_app_write_native_e2e();
+    failures += test_zslp_intent_refusal_surfaces_node_message();
     failures += test_native_bridge_resident_binding();
     failures += test_status_frontdoor_preserves_rpc_error();
     failures += test_status_brief_body_schema_skew_tolerance();
