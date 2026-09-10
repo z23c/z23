@@ -74,9 +74,12 @@
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "net/peer_scoring.h"
+#include "net/protocol.h"
 #include "net/version.h"
 #include "net/zmsg.h"
 #include "core/hash.h"
+#include "core/uint256.h"
+#include "primitives/block.h"
 #include "validation/chainstate.h"
 #include "validation/process_block.h"  /* accept_block_header */
 
@@ -243,6 +246,10 @@ int test_net_msg_dos(void)
             arith_uint256_get_compact(&ctrl_pow_limit, false);
         bool ctrl_mined = mine_block_pow(&ctrl_child, 1, cp, 0);
         DOS_CHECK("getblocks control: regtest child mined", ctrl_mined);
+        struct uint256 child_hash;
+        uint256_set_null(&child_hash);
+        if (ctrl_mined)
+            block_header_get_hash(&ctrl_child.header, &child_hash);
         bool ctrl_admitted = false;
         if (ctrl_mined) {
             struct byte_stream hs;
@@ -261,10 +268,34 @@ int test_net_msg_dos(void)
         built = block_locator_serialize(&loc, &s);
         built = built && stream_write_bytes(&s, stop, sizeof(stop));
         ret = process_getblocks(&mp, &node, &s);
-        DOS_CHECK("getblocks active control: served",
+        /* Headers-only children must not be announced: a MagicBean peer
+         * would getdata them, sit on notfound, and stall slow-sync. */
+        DOS_CHECK("getblocks headers-only child is not announced",
                   ctrl_admitted && ret == true &&
-                  node.inventory_to_send_count == 1);
+                  node.inventory_to_send_count == 0);
         stream_free(&s);
+
+        struct block_index *child_bi = block_map_find(
+            &mp.main_state->map_block_index, &child_hash);
+        DOS_CHECK("getblocks control: child is indexed", child_bi != NULL);
+        if (child_bi) {
+            struct inv_item planned[GETBLOCKS_INV_LIMIT];
+            struct uint256 stop;
+            uint256_set_null(&stop);
+            size_t n = msg_blocks_plan_getblocks_inv(
+                &mp, &loc, &stop, planned, GETBLOCKS_INV_LIMIT);
+            DOS_CHECK("getblocks plan: headers-only yields zero invs", n == 0);
+            child_bi->nStatus |= BLOCK_HAVE_DATA;
+            n = msg_blocks_plan_getblocks_inv(
+                &mp, &loc, &stop, planned, GETBLOCKS_INV_LIMIT);
+            DOS_CHECK("getblocks plan: HAVE_DATA body is announced",
+                      n == 1 && uint256_eq(&planned[0].hash, &child_hash));
+            child_bi->nStatus &= ~BLOCK_HAVE_DATA;
+            n = msg_blocks_plan_getblocks_inv(
+                &mp, &loc, &stop, planned, GETBLOCKS_INV_LIMIT);
+            DOS_CHECK("getblocks plan: dropping HAVE_DATA stops announce",
+                      n == 0);
+        }
         /* loc.vhave points at stack storage — release only the shell. */
         loc.vhave = NULL;
         loc.num_hashes = 0;

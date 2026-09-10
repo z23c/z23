@@ -33,77 +33,176 @@
 #define MANIFEST_REFRESH_BLOCKS 1000
 #define MSG_BLOCK_RETRYABLE_LOG_KEEPALIVE_SECS 15
 static struct log_throttle g_msg_block_retryable_log = LOG_THROTTLE_INIT;
+
+bool msg_blocks_should_announce_getblocks(const struct block_index *pindex)
+{
+    return pindex && pindex->phashBlock &&
+           (pindex->nStatus & BLOCK_HAVE_DATA) != 0;
+}
+
+static size_t msg_blocks_collect_getblocks_from(
+    struct msg_processor *mp, struct block_index *pindex,
+    const struct uint256 *hash_stop, struct inv_item *out, size_t cap)
+{
+    size_t n = 0;
+    struct block_index *tip;
+
+    if (!mp || !mp->main_state || !out || cap == 0)
+        return 0;
+    tip = active_chain_tip(&mp->main_state->chain_active);
+    for (; pindex && n < cap;
+         pindex = main_state_best_known_successor(mp->main_state, pindex)) {
+        if (!msg_blocks_should_announce_getblocks(pindex))
+            break;
+        inv_item_init_typed(&out[n], MSG_BLOCK, pindex->phashBlock);
+        n++;
+        if (hash_stop && !uint256_is_null(hash_stop) &&
+            uint256_eq(pindex->phashBlock, hash_stop))
+            break;
+        if (pindex == tip)
+            break;
+    }
+    return n;
+}
+
+static struct block_index *msg_blocks_getblocks_start(
+    struct msg_processor *mp, const struct block_locator *locator)
+{
+    struct active_chain *chain;
+    struct block_index *pindex = NULL;
+
+    if (!mp || !mp->main_state || !mp->params)
+        return NULL;
+    chain = &mp->main_state->chain_active;
+    if (locator) {
+        for (size_t i = 0; i < locator->num_hashes; i++) {
+            struct block_index *found = block_map_find(
+                &mp->main_state->map_block_index, &locator->vhave[i]);
+            if (found && (active_chain_contains(chain, found) ||
+                          (found->phashBlock &&
+                           uint256_eq(found->phashBlock,
+                                      &mp->params->consensus.hashGenesisBlock)))) {
+                pindex = found;
+                break;
+            }
+        }
+    }
+    if (!pindex)
+        pindex = block_map_find(&mp->main_state->map_block_index,
+                                &mp->params->consensus.hashGenesisBlock);
+    if (!pindex)
+        pindex = active_chain_at(chain, 0);
+    if (pindex)
+        pindex = main_state_best_known_successor(mp->main_state, pindex);
+    return pindex;
+}
+
+size_t msg_blocks_plan_getblocks_inv(struct msg_processor *mp,
+                                     const struct block_locator *locator,
+                                     const struct uint256 *hash_stop,
+                                     struct inv_item *out, size_t cap)
+{
+    return msg_blocks_collect_getblocks_from(
+        mp, msg_blocks_getblocks_start(mp, locator), hash_stop, out, cap);
+}
+
+static bool msg_blocks_send_inv_now(struct msg_processor *mp,
+                                    struct p2p_node *node,
+                                    const struct inv_item *items, size_t count)
+{
+    struct byte_stream msg;
+    size_t i;
+
+    if (!mp || !mp->params || !node || !items || count == 0)
+        return true;
+    if (count > MAX_INV_SZ)
+        count = MAX_INV_SZ;
+    stream_init(&msg, count * 36 + 9);
+    if (!stream_write_compact_size(&msg, count)) {
+        stream_free(&msg);
+        LOG_FAIL("net", "getblocks inv compact-size write failed for %s",
+                 node->addr_name);
+    }
+    for (i = 0; i < count; i++) {
+        if (!inv_item_serialize(&items[i], &msg)) {
+            stream_free(&msg);
+            LOG_FAIL("net", "getblocks inv item %zu serialize failed for %s",
+                     i, node->addr_name);
+        }
+    }
+    p2p_node_begin_message(node, "inv", mp->params->pchMessageStart);
+    p2p_node_write_message_data(node, msg.data, msg.size);
+    stream_free(&msg);
+    return p2p_node_end_message(node);
+}
+
+static void msg_blocks_continue_after_hash_continue(
+    struct msg_processor *mp, struct p2p_node *node,
+    struct block_index *served)
+{
+    struct inv_item more[GETBLOCKS_INV_LIMIT];
+    struct uint256 stop;
+    size_t n;
+
+    if (!mp || !node || !served || !served->phashBlock)
+        return;
+    if (uint256_is_null(&node->hash_continue) ||
+        !uint256_eq(served->phashBlock, &node->hash_continue))
+        return;
+    uint256_set_null(&node->hash_continue);
+    uint256_set_null(&stop);
+    n = msg_blocks_collect_getblocks_from(
+        mp, main_state_best_known_successor(mp->main_state, served),
+        &stop, more, GETBLOCKS_INV_LIMIT);
+    if (n > 0)
+        (void)msg_blocks_send_inv_now(mp, node, more, n);
+    if (n == GETBLOCKS_INV_LIMIT)
+        node->hash_continue = more[n - 1].hash;
+}
+
 bool process_getblocks(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s)
 {
+    struct block_locator locator;
+    struct uint256 hash_stop;
+    struct inv_item items[GETBLOCKS_INV_LIMIT];
+    size_t n;
+
     /* Handshake guard: serving inventory to a peer we have not finished
      * negotiating with (the post-version, pre-verack window) spends the
-     * relay's most expensive path — up to 500 ring-indexed pushes — for
-     * a peer that may not even share our network. Drop quietly; a
-     * legitimate peer re-requests after handshake. */
+     * relay's most expensive path — up to 500 invs — for a peer that may
+     * not even share our network. Drop quietly; a legitimate peer
+     * re-requests after handshake. */
     if (node->state < PEER_HANDSHAKE_COMPLETE) {
         LOG_ERROR("net", "getblocks from pre-handshake peer %s dropped",
                   node->addr_name);
         return true;
     }
 
-    struct block_locator locator;
     block_locator_init(&locator);
     if (!block_locator_deserialize(&locator, s)) {
         block_locator_free(&locator);
         LOG_FAIL("net", "failed to deserialize getblocks locator from %s",
                  node->addr_name);
     }
-    struct uint256 hash_stop;
     if (!stream_read(s, hash_stop.data, 32)) {
         block_locator_free(&locator);
         LOG_FAIL("net", "failed to read getblocks hash_stop from %s",
                  node->addr_name);
     }
-    struct block_index *pindex = NULL;
-    struct active_chain *chain = &mp->main_state->chain_active;
-    for (size_t i = 0; i < locator.num_hashes; i++) {
-        struct block_index *found = block_map_find(
-            &mp->main_state->map_block_index, &locator.vhave[i]);
-        if (found && (active_chain_contains(chain, found) ||
-                      (found->phashBlock &&
-                       uint256_eq(found->phashBlock,
-                                  &mp->params->consensus.hashGenesisBlock)))) {
-            pindex = found;
-            break;
-        }
-    }
+    /* Immediate inv, not the trickle queue: MagicBean/zclassicd IBD waits
+     * on this reply. Trickle is 1/N peers per cycle, so a legacy Windows
+     * peer behind a busy node never sees the batch. Bitcoin Core sends
+     * the inv from ProcessGetBlocks itself. Only announce HAVE_DATA. */
+    n = msg_blocks_plan_getblocks_inv(mp, &locator, &hash_stop, items,
+                                      GETBLOCKS_INV_LIMIT);
     block_locator_free(&locator);
-    if (!pindex)
-        pindex = block_map_find(&mp->main_state->map_block_index,
-                                &mp->params->consensus.hashGenesisBlock);
-    if (!pindex)
-        pindex = active_chain_at(chain, 0);
-
-    int limit = 500;
-    struct block_index *tip = active_chain_tip(chain);
-
-    if (pindex)
-        pindex = main_state_best_known_successor(mp->main_state, pindex);
-
-    for (; pindex && limit > 0;
-         pindex = main_state_best_known_successor(mp->main_state, pindex)) {
-        if (!pindex || !pindex->phashBlock)
-            break;
-
-        struct inv_item inv;
-        inv_item_init_typed(&inv, MSG_BLOCK, pindex->phashBlock);
-        p2p_node_push_inventory(node, &inv);
-        limit--;
-
-        if (!uint256_is_null(&hash_stop) &&
-            uint256_eq(pindex->phashBlock, &hash_stop))
-            break;
-
-        if (pindex == tip)
-            break;
-    }
-
+    if (n > 0 && !msg_blocks_send_inv_now(mp, node, items, n))
+        return false;
+    if (n == GETBLOCKS_INV_LIMIT)
+        node->hash_continue = items[n - 1].hash;
+    else
+        uint256_set_null(&node->hash_continue);
     return true;
 }
 
@@ -214,6 +313,7 @@ bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
                                                     blk_data.size);
                         p2p_node_end_message(node);
                         sent = true;
+                        msg_blocks_continue_after_hash_continue(mp, node, bi);
                     }
                     stream_free(&blk_data);
                 }

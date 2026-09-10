@@ -228,12 +228,26 @@ bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
                                        int our_height, int64_t now_seconds);
 
 /* msg_blocks.c — block handling */
+enum { GETBLOCKS_INV_LIMIT = 500 };
+
 bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s);
 bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
                      struct byte_stream *s);
 bool process_getblocks(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s);
+
+/* Legacy zclassicd IBD (getblocks) may only learn about bodies we can
+ * actually serve. Headers-only index entries must not be announced. */
+bool msg_blocks_should_announce_getblocks(const struct block_index *pindex);
+
+/* Collect up to `cap` MSG_BLOCK invs for a getblocks locator, stopping at
+ * the first missing body, hash_stop, or the active tip. Does not send. */
+struct block_locator;
+size_t msg_blocks_plan_getblocks_inv(struct msg_processor *mp,
+                                     const struct block_locator *locator,
+                                     const struct uint256 *hash_stop,
+                                     struct inv_item *out, size_t cap);
 
 /* msg_tx.c — transaction relay */
 bool process_tx_msg(struct msg_processor *mp, struct p2p_node *node,

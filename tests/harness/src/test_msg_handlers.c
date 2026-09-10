@@ -12,6 +12,7 @@
  */
 
 #include "test/test_core.h"
+#include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "core/hash.h"
 #include "net/msgprocessor.h"
@@ -272,6 +273,28 @@ static int test_p148_should_mark_seen_accepts_active(void)
         ASSERT(msg_blocks_should_mark_seen(&ac, &tip));
 
         active_chain_free(&ac);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_should_announce_getblocks(void)
+{
+    int failures = 0;
+    TEST("getblocks announce requires HAVE_DATA and a hash") {
+        struct block_index bi;
+        struct uint256 hash;
+        uint256_set_null(&hash);
+        hash.data[0] = 1;
+        block_index_init(&bi);
+        ASSERT(!msg_blocks_should_announce_getblocks(NULL));
+        ASSERT(!msg_blocks_should_announce_getblocks(&bi));
+        bi.phashBlock = &hash;
+        ASSERT(!msg_blocks_should_announce_getblocks(&bi));
+        bi.nStatus = BLOCK_HAVE_DATA;
+        ASSERT(msg_blocks_should_announce_getblocks(&bi));
+        bi.nStatus = BLOCK_VALID_TREE;
+        ASSERT(!msg_blocks_should_announce_getblocks(&bi));
         PASS();
     } _test_next:;
     return failures;
@@ -1042,6 +1065,7 @@ int test_msg_handlers(void)
     failures += test_p148_should_mark_seen_rejects_null();
     failures += test_p148_should_mark_seen_rejects_orphan();
     failures += test_p148_should_mark_seen_accepts_active();
+    failures += test_should_announce_getblocks();
     failures += test_source_header_echo_policy();
     failures += test_block_validation_retryable_classifier();
     failures += test_process_block_msg_reducer_pending_stays_retryable();
