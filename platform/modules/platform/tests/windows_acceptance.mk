@@ -191,6 +191,7 @@ ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_SOURCES := \
 	tests/harness/src/codeindex_freshness_windows_acceptance.c \
 	cognition/modules/codeindex/src/codeindex_build_windows.c \
 	cognition/modules/codeindex/src/codeindex_merkle.c \
+	cognition/modules/codeindex/src/codeindex_merkle_inventory.c \
 	cognition/modules/codeindex/src/codeindex_merkle_sources.c \
 	cognition/modules/codeindex/src/codeindex_merkle_settled.c \
 	cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c \

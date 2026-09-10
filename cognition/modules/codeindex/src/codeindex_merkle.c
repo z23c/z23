@@ -19,6 +19,7 @@
 
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_merkle.h"
+#include "codeindex_merkle_internal.h"
 
 #include "base/hex.h"
 #include "base/serialize_le.h"
@@ -63,24 +64,6 @@ static const char merkle_snapshot_name[] = "source_tree.merkle";
 static const char merkle_snapshot_seal_domain[] =
     "zcl.codeindex.source_tree.merkle.seal.v1";
 /* ── records ─────────────────────────────────────────────────────────── */
-
-struct merkle_leaf_rec {
-    char                   path[256];
-    struct zcl_sha3_digest digest;
-    struct zcl_sha3_digest content_digest;
-    uint64_t               size;
-    struct ci_merkle_stat_key key;
-    bool                   dirty; /* digest differs from the snapshot's */
-};
-
-struct merkle_node_rec {
-    char                   path[256];
-    struct zcl_sha3_digest digest;
-    uint32_t               direct_children;
-    uint32_t               file_count;
-    uint32_t               dir_count;
-    uint64_t               total_bytes;
-};
 
 struct ci_merkle {
     struct merkle_leaf_rec *leaves;
@@ -277,13 +260,7 @@ static bool merkle_leaf_digest(const char *root, const char *relpath,
 
 /* ── the snapshot: a flat, sorted, self-describing byte image ─────────── */
 
-struct merkle_snapshot {
-    struct merkle_leaf_rec *leaves;
-    uint32_t                nleaves;
-    struct merkle_node_rec *nodes;
-    uint32_t                nnodes;
-};
-static void merkle_snapshot_free(struct merkle_snapshot *s)
+void merkle_snapshot_free(struct merkle_snapshot *s)
 {
     if (!s) return;
     free(s->leaves);
@@ -505,7 +482,7 @@ static _Atomic uint64_t g_merkle_tmp_seq = 1;
  * owner-controlled posture codeindex_build.c requires of the same directory: a
  * cache another user can write is a cache that can answer for us. */
 #if defined(_WIN32)
-static bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
+bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
                                  bool *found)
 {
     *found = false;
@@ -557,7 +534,7 @@ static int merkle_open_dir(const char *root, bool create)
 /* Load the snapshot. A missing, truncated, wrong-format, or out-of-order image
  * is simply not a snapshot: *found stays false and the caller does a cold pass.
  * Never an error return, because there is nothing to reconcile. */
-static bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
+bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
                                  bool *found)
 {
     *found = false;
@@ -685,7 +662,7 @@ static int merkle_node_cmp(const void *a, const void *b)
                   ((const struct merkle_node_rec *)b)->path);
 }
 
-static const struct merkle_leaf_rec *
+const struct merkle_leaf_rec *
 merkle_find_leaf(const struct merkle_leaf_rec *v, uint32_t n, const char *path)
 {
     if (!v || n == 0) return NULL;
@@ -694,7 +671,7 @@ merkle_find_leaf(const struct merkle_leaf_rec *v, uint32_t n, const char *path)
     return bsearch(&probe, v, n, sizeof(*v), merkle_leaf_cmp);
 }
 
-static const struct merkle_node_rec *
+const struct merkle_node_rec *
 merkle_find_node(const struct merkle_node_rec *v, uint32_t n, const char *path)
 {
     if (!v || n == 0) return NULL;
@@ -1096,72 +1073,6 @@ struct ci_merkle *ci_merkle_build_cold(const char *root,
                                        struct ci_merkle_cost *cost)
 {
     return merkle_run(root, false, cost);
-}
-
-struct merkle_inventory_match {
-    const struct merkle_snapshot *snap;
-    uint32_t seen;
-    bool mismatch;
-};
-
-static bool merkle_inventory_key_cb(const char *relpath,
-                                    const struct ci_merkle_stat_key *live,
-                                    void *user)
-{
-    struct merkle_inventory_match *m = user;
-    if (m->mismatch)
-        return false;
-    m->seen++;
-    const struct merkle_leaf_rec *prev =
-        merkle_find_leaf(m->snap->leaves, m->snap->nleaves, relpath);
-    if (!prev || memcmp(&prev->key, live, sizeof(*live)) != 0) {
-        m->mismatch = true;
-        return false;
-    }
-    return true;
-}
-
-bool ci_merkle_snapshot_inventory_current(const char *root,
-                                          bool *have_snapshot,
-                                          bool *unchanged,
-                                          uint8_t digest_out[32])
-{
-    if (have_snapshot) *have_snapshot = false;
-    if (unchanged) *unchanged = false;
-    if (!root || !have_snapshot || !unchanged || !digest_out)
-        LOG_FAIL("codeindex", "null arg to snapshot_inventory_current");
-
-    struct merkle_snapshot snap;
-    bool found = false;
-    if (!merkle_snapshot_load(root, &snap, &found))
-        LOG_FAIL("codeindex", "load merkle snapshot for inventory current");
-    if (!found)
-        return true;
-
-    *have_snapshot = true;
-    struct merkle_inventory_match match = {
-        .snap = &snap, .seen = 0, .mismatch = false,
-    };
-    bool enumerated =
-        ci_enumerate_merkle_sources(root, merkle_inventory_key_cb, &match);
-    if (!enumerated && !match.mismatch) {
-        merkle_snapshot_free(&snap);
-        LOG_FAIL("codeindex", "enumerate inventory for snapshot current");
-    }
-    if (match.mismatch || match.seen != snap.nleaves) {
-        merkle_snapshot_free(&snap);
-        return true;
-    }
-    const struct merkle_node_rec *root_node =
-        merkle_find_node(snap.nodes, snap.nnodes, "");
-    if (!root_node) {
-        merkle_snapshot_free(&snap);
-        LOG_FAIL("codeindex", "snapshot missing root node");
-    }
-    memcpy(digest_out, root_node->digest.bytes, 32);
-    *unchanged = true;
-    merkle_snapshot_free(&snap);
-    return true;
 }
 
 void ci_merkle_free(struct ci_merkle *m)
