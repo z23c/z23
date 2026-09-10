@@ -297,7 +297,7 @@ ZCL_COMMAND_READY_READ(
     "zcl.core_sync_frontier_offline.input.v1",
     "zcl.core_sync_frontier_offline.v1", "datadir", "",
     "z23 core sync frontier offline "
-    "--input='{\"datadir\":\"/home/you/.zclassic-c23\"}'",
+    "--input='{\"datadir\":\"$HOME/.zclassic-c23\"}'",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
     ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,

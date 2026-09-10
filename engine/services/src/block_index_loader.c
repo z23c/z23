@@ -4,6 +4,11 @@
  * block tree. The flat writer lives in block_index_flat_save.c, the SQLite
  * cache in block_index_sqlite_cache.c, and the post-load pointer-graph
  * derivation plus header-frontier promotion in block_index_post_load.c. */
+// one-result-type-ok:height-sorted-predicate — block_index_ptrs_height_sorted
+// is a pure total classification (already height-sorted, or not) over a
+// caller-owned array; it never fails, so zcl_result would only relabel
+// true/false as OK/ERR. Every other exported function in this file already
+// returns struct zcl_result.
 
 #include "platform/time_compat.h"
 #include "platform/read_mapping.h"

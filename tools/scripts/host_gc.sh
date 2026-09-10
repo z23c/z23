@@ -265,8 +265,12 @@ now_epoch() { date +%s; }
 # mtime age in seconds; a vanished path reads as 0 (too young to touch),
 # which is the fail-safe direction.
 age_secs() {
-    local m
-    m="$(stat -c %Y -- "$1" 2>/dev/null)" || { printf '0'; return; }
+    local flag fmt m
+    case "$(uname -s 2>/dev/null)" in
+        Darwin|*BSD*) flag='-f' fmt='%m' ;;
+        *)            flag='-c' fmt='%Y' ;;
+    esac
+    m="$(stat "$flag" "$fmt" -- "$1" 2>/dev/null)" || { printf '0'; return; }
     printf '%s' "$(( $(now_epoch) - m ))"
 }
 

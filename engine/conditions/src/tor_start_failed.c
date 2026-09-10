@@ -36,6 +36,7 @@ static bool urgent_tor_start_failed(void)
 static void tor_raise_blocker(const char *reason)
 {
     struct blocker_record r;
+    /* blocker-id: tor.start_failed */
     if (blocker_init(&r, BOOT_TOR_START_FAILED_BLOCKER,
                      BOOT_TOR_START_FAILED_OWNER, BLOCKER_DEPENDENCY, reason))
         (void)blocker_set(&r);
