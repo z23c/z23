@@ -327,6 +327,121 @@ static bool pd_zcl23_window_closes_at_own_allowance(
                (uint32_t)legacy_allowance;
 }
 
+/* D4 helpers — a DEFERRED request is parked and answered once, from this
+ * node's side, when the peer's serve window rolls.
+ *
+ * The peer that needs this is the stock legacy client: MAX_HEADERS_RESULTS
+ * 160, no `sendheaders`, no headers-sync timeout, and it chains its next
+ * getheaders only off a full reply to the last one. A silent defer leaves it
+ * with nothing in flight and nothing to wake it. What these pin is the whole
+ * contract of the fix: the defer parks the request; the replay stays quiet
+ * while the window is still open; once the window rolls the request is served
+ * exactly once with a reply on the wire, counted as a REPLAY and not as a
+ * fresh defer; a second tick with no new request does nothing (so no
+ * request/defer loop can form); and the unrelated snapshot-serving defer
+ * never arms the slot at all. Time is injected through the window fields
+ * exactly as D3 does — no sleeps, no polling. Kept out of the test body so
+ * the pinned test function does not grow, and split across four helpers so
+ * each stays under the complexity cap. */
+
+/* Fill this peer's window, then ask once more so the last request is deferred
+ * — and report whether that defer parked it. */
+static bool pd_park_deferred_request(struct msg_processor *mp,
+                                     struct byte_stream *req,
+                                     struct p2p_node *node)
+{
+    const int allowance =
+        (int)getheaders_serve_request_allowance(node->services);
+    for (int i = 0; i < allowance + 1; i++) {
+        req->read_pos = 0;   /* re-send the identical request */
+        (void)process_getheaders(mp, node, req);
+        pd_drain_send_queue(node);
+        pd_clear_fixture_disconnect(node);
+    }
+    return node->getheaders_deferred_len > 0 &&
+           node->getheaders_rate_window_count == (uint32_t)allowance;
+}
+
+/* While the window is still open the send tick must do nothing at all: no
+ * reply, no replay count, and the request still parked. */
+static bool pd_replay_quiet_before_roll(struct msg_processor *mp,
+                                        struct p2p_node *node)
+{
+    uint64_t replays_before = getheaders_replayed_deferred();
+    bool early = getheaders_replay_deferred(mp, node);
+    bool quiet = !early && pd_queued_headers_count(node) < 0 &&
+                 getheaders_replayed_deferred() == replays_before &&
+                 node->getheaders_deferred_len > 0;
+    pd_drain_send_queue(node);
+    pd_clear_fixture_disconnect(node);
+    return quiet;
+}
+
+/* Roll the window through the fields (D3's injection), then tick with NO new
+ * request from the peer: exactly one reply goes out, it counts as a replay
+ * and not as a second defer, the slot disarms, and a further tick is inert. */
+static bool pd_replay_once_after_roll(struct msg_processor *mp,
+                                      struct p2p_node *node)
+{
+    uint64_t replays_before = getheaders_replayed_deferred();
+    uint64_t defers_before = getheaders_deferred_rate_window();
+    node->getheaders_rate_window_start =
+        platform_time_wall_time_t() - GETHEADERS_SERVE_WINDOW_SECS - 1;
+    node->getheaders_deferred_replay_after = platform_time_wall_time_t() - 1;
+
+    bool replayed = getheaders_replay_deferred(mp, node);
+    int64_t wire = pd_queued_headers_count(node);
+    pd_drain_send_queue(node);
+    pd_clear_fixture_disconnect(node);
+    bool served_once = replayed && wire == 1 &&
+                       getheaders_replayed_deferred() == replays_before + 1 &&
+                       getheaders_deferred_rate_window() == defers_before &&
+                       node->getheaders_deferred_len == 0;
+
+    bool again = getheaders_replay_deferred(mp, node);
+    bool once_only = !again && pd_queued_headers_count(node) < 0 &&
+                     getheaders_replayed_deferred() == replays_before + 1;
+    pd_drain_send_queue(node);
+    pd_clear_fixture_disconnect(node);
+    return served_once && once_only;
+}
+
+/* D4b — the OTHER defer (peer snapshot serving) must not arm the slot: that
+ * peer is being served a snapshot, not left waiting on a headers reply. */
+static bool pd_snapshot_defer_parks_nothing(struct msg_processor *mp,
+                                            struct byte_stream *req,
+                                            node_id_t node_id)
+{
+    struct p2p_node snap;
+    pd_setup_node(&snap);
+    snap.id = node_id;
+    snap.swarm_manifest_sent = true;
+    req->read_pos = 0;
+    bool handled = process_getheaders(mp, &snap, req);
+    bool unarmed = handled && snap.getheaders_deferred_len == 0 &&
+                   pd_queued_headers_count(&snap) < 0 &&
+                   !getheaders_replay_deferred(mp, &snap);
+    pd_drain_send_queue(&snap);
+    return unarmed;
+}
+
+/* The one pin the test body carries: the four stages above, in order, on one
+ * fresh legacy peer (services=0 — the client with no retry timer). */
+static bool pd_deferred_request_replays_once(struct msg_processor *mp,
+                                             struct byte_stream *req,
+                                             node_id_t node_id)
+{
+    struct p2p_node node;
+    pd_setup_node(&node);
+    node.id = node_id;
+    node.services = 0;
+    bool parked = pd_park_deferred_request(mp, req, &node);
+    bool quiet = pd_replay_quiet_before_roll(mp, &node);
+    bool once = pd_replay_once_after_roll(mp, &node);
+    return parked && quiet && once &&
+           pd_snapshot_defer_parks_nothing(mp, req, node_id + 1);
+}
+
 static bool pd_build_getheaders(struct byte_stream *buf,
                                 const struct uint256 *locator_hashes,
                                 size_t num_hashes,
@@ -873,6 +988,16 @@ int test_getheaders_serve_pow_dedup(void)
                      st_after.getheaders_served_requests -
                          st_before.getheaders_served_requests == 1 &&
                      getheaders_deferred_rate_window() == defer_stable);
+
+            /* D4 — a deferred request is PARKED and answered once the window
+             * rolls, without the peer asking again: a legacy client has no
+             * retry timer, so silence costs it minutes per window. One pin,
+             * whole contract in the helper above; no growth here. */
+            PD_CHECK("D4: a deferred getheaders is replayed exactly once "
+                     "when the window rolls, unasked, without spending a "
+                     "second defer — and the snapshot defer parks nothing",
+                     pd_deferred_request_replays_once(&mp, &req_d,
+                                                      flood_id + 3));
 
             stream_free(&req_d);
             stream_free(&buf_d);

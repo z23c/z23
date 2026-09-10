@@ -2351,6 +2351,11 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
         peer_lifecycle_note_active(node);
     }
 
+    /* Answer the one getheaders this peer's serve window deferred, if its
+     * window has rolled — a legacy client has no retry timer and would
+     * otherwise sit silent until an unrelated inv woke it. No-op otherwise. */
+    (void)getheaders_replay_deferred(mp, node);
+
     /* Offer fast sync to ZCL23 peers that are behind us */
     mp_snapshot_maybe_offer(mp, node);
 

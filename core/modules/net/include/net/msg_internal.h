@@ -211,6 +211,34 @@ uint32_t getheaders_serve_request_allowance(uint64_t services);
  * branches on it. */
 uint64_t getheaders_deferred_rate_window(void);
 
+/* getheaders_replay_deferred() — answer the ONE request that peer's serve
+ * window deferred, now that the window has rolled.
+ *
+ * A defer is silent, and a stock legacy client (MAX_HEADERS_RESULTS=160, no
+ * `sendheaders`, no headers-sync timeout) chains its next getheaders only
+ * off a full reply: silence leaves it with nothing in flight and no retry
+ * timer, so it stalls until an unrelated block inv wakes it. This closes
+ * that gap from this side. Call it from the per-peer send tick
+ * (msgprocessor.c::msg_send_messages); it is a no-op unless that peer has a
+ * request parked (struct p2p_node::getheaders_deferred_req), is not
+ * disconnecting, and its window has rolled.
+ *
+ * The parked request is disarmed BEFORE it is served and the replay draws
+ * an admission from the new window like any other request, so the header
+ * budget is unchanged and a peer gets at most one replay per window — a
+ * request/defer loop cannot form. Returns true when a parked request was
+ * replayed (the reply's own outcome is the serve path's, not this
+ * function's: a replay never punishes). Single message-handler thread only,
+ * like the window fields it reads. */
+bool getheaders_replay_deferred(struct msg_processor *mp,
+                                struct p2p_node *node);
+
+/* Deferred getheaders requests REPLAYED once their serve window rolled,
+ * process-wide since start. Bounded by getheaders_deferred_rate_window()
+ * and, per peer, by one per window. Exposed for the offline serve
+ * regression tests and operator diagnostics; nothing branches on it. */
+uint64_t getheaders_replayed_deferred(void);
+
 /* Serve-path verification receipts — the bound on how often a peer can make
  * this node REDO an Equihash verification it has already done.
  *

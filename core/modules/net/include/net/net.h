@@ -259,6 +259,16 @@ struct ban_entry {
 #define MAX_ASKFOR_ENTRIES 50000
 #define MAX_INVENTORY_KNOWN 50000
 
+/* Bytes reserved per peer for the ONE deferred getheaders payload parked for
+ * replay (see getheaders_deferred_req in struct p2p_node below). A getheaders
+ * payload is nVersion (4) + the locator's compact_size (<= 3 for the counts
+ * this node accepts) + MAX_LOCATOR_HASHES (64) * 32 + hash_stop (32) = 2087
+ * bytes at this node's own ceiling; rounded up so the 65-entry locators some
+ * legacy MagicBean peers send still fit whole. Fixed, never allocated: at the
+ * 125-peer default this is ~272 KB of node state that the hostile path cannot
+ * grow. An oversized payload is simply not parked. */
+#define GETHEADERS_DEFERRED_REQ_MAX_BYTES 2176
+
 struct askfor_entry {
     int64_t request_time;
     struct inv_item inv;
@@ -382,6 +392,36 @@ struct p2p_node {
      * starts from a fresh window exactly like any other per-peer slot here. */
     int64_t getheaders_rate_window_start;
     uint32_t getheaders_rate_window_count;
+
+    /* The ONE getheaders request that serve window deferred, parked so it can
+     * be answered once the window rolls (msg_headers.c::
+     * getheaders_park_deferred / getheaders_replay_deferred, driven from
+     * msgprocessor.c::msg_send_messages).
+     *
+     * A defer is silent by design — no reply, no offence. A ZCL23 peer
+     * re-asks on its own scheduler poll, so silence costs it a poll. A stock
+     * legacy client (Bitcoin-Core-0.11 lineage: MAX_HEADERS_RESULTS=160, no
+     * `sendheaders`, no headers-sync timeout) only sends its next getheaders
+     * after a full reply to the last one, and has no retry timer: a deferred
+     * request leaves it with nothing in flight and nothing to wake it, so it
+     * stalls until an unrelated block inv arrives — minutes per exhausted
+     * window, and a bootstrapping client can lose a quarter hour that way.
+     * Parking the request bytes lets this node, not the peer, close that gap.
+     *
+     * The replay draws an admission from the NEW window exactly like any
+     * other request, so the header budget is untouched; only the rate-window
+     * defer arms the slot (the snapshot-serving defer does not), and the slot
+     * is disarmed before the replay runs, so a peer gets at most one replay
+     * per window and a request/defer loop cannot form. Fixed bytes, so the
+     * hostile path allocates nothing; zero-initialised by p2p_node_create
+     * (calloc), where len==0 reads as "nothing parked", and, like the window
+     * above, the whole slot dies with the connection.
+     *
+     * Written and read only on the single message-handler thread (the
+     * dispatcher and the send tick both run there), so no lock. */
+    uint8_t getheaders_deferred_req[GETHEADERS_DEFERRED_REQ_MAX_BYTES];
+    uint16_t getheaders_deferred_len;
+    int64_t getheaders_deferred_replay_after;
 
     struct inv_item *inventory_to_send;
     size_t inventory_to_send_count;
