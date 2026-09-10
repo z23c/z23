@@ -329,6 +329,19 @@ static bool dva_marker_present(const char *dir, const char *rel)
     return n > 0 && (size_t)n < sizeof(path) && access(path, R_OK) == 0;
 }
 
+/* POSIX realpath resolves a symlink checkout to the one true path. MinGW
+ * has no realpath, so Windows uses the lexical identity helper. Kept out
+ * of the walk so zcl_devagent_checkout_root stays under the complexity cap. */
+static bool dva_canonicalize(const char *dir, char *resolved, size_t resolved_cap)
+{
+#if defined(_WIN32)
+    return platform_path_identity(resolved, resolved_cap, dir);
+#else
+    (void)resolved_cap;
+    return realpath(dir, resolved) != NULL;
+#endif
+}
+
 bool zcl_devagent_checkout_root(const char *start, char *out, size_t out_cap)
 {
     if (!out || out_cap == 0)
@@ -351,17 +364,10 @@ bool zcl_devagent_checkout_root(const char *start, char *out, size_t out_cap)
             /* Canonicalize before answering. A caller that passes "." or a
              * relative start walks relative to its cwd and would otherwise
              * get "." back — a string downstream validators reject and
-             * queue rows silently drop. POSIX realpath also resolves a
-             * symlinked checkout to the one true path; MinGW has no
-             * realpath, so Windows uses the lexical identity helper. */
+             * queue rows silently drop. */
             char resolved[PATH_MAX];
-#if defined(_WIN32)
-            if (!platform_path_identity(resolved, sizeof(resolved), dir))
+            if (!dva_canonicalize(dir, resolved, sizeof(resolved)))
                 return false;
-#else
-            if (realpath(dir, resolved) == NULL)
-                return false;
-#endif
             int n = snprintf(out, out_cap, "%s", resolved);
             return n > 0 && (size_t)n < out_cap;
         }
