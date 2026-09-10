@@ -1042,6 +1042,73 @@ static const char *dl_hooks_stub_dir(void)
 #endif
 }
 
+/* Byte-for-byte equality of two existing regular files, so a refresh only
+ * rewrites when the installed copy really drifted. Any read or size
+ * mismatch is simply "not identical"; callers treat that as repair work,
+ * never as a hard failure of its own. */
+static bool dl_bytes_identical(const char *a, const char *b)
+{
+#if defined(_WIN32)
+    (void)a; (void)b;
+    return false;
+#else
+    FILE *fa = a ? fopen(a, "rb") : NULL;
+    FILE *fb = b ? fopen(b, "rb") : NULL;
+    char ba[65536], bb[65536];
+    bool same = fa && fb;
+    while (same) {
+        size_t na = fread(ba, 1, sizeof ba, fa);
+        size_t nb = fread(bb, 1, sizeof bb, fb);
+        same = na == nb && memcmp(ba, bb, na) == 0;
+        if (na < sizeof ba || nb < sizeof bb)
+            break; /* EOF on at least one side; lengths already compared */
+    }
+    if (fa) {
+        if (ferror(fa))
+            same = false;
+        (void)fclose(fa);
+    }
+    if (fb) {
+        if (ferror(fb))
+            same = false;
+        (void)fclose(fb);
+    }
+    return same;
+#endif
+}
+
+/* True when the installed hook copy matches the binary the worktree's own
+ * build produced — the exact byte equality check-git-hooks-installed
+ * demands of a proof generation. A worktree with no built binary yet
+ * (a fixture, or a fresh clone before its first lint pass) has nothing
+ * to drift from and counts as fresh. */
+static bool dl_wt_hooks_fresh(const char *wt)
+{
+    char out[DL_GIT_CAP], bin[4096 + 96], installed[4096 + 16];
+    const char *args[] = { "config", "--worktree", "--get",
+                           "core.hooksPath", NULL };
+    struct stat st;
+    if (dl_git(wt, args, out, sizeof(out), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(out);
+    if (!out[0])
+        return false;
+    if (snprintf(bin, sizeof(bin), "%s/build/bin/z23-git-hook", wt) >=
+            (int)sizeof(bin) ||
+        stat(bin, &st) != 0 || !S_ISREG(st.st_mode))
+        return true;
+    if (out[0] == '/') {
+        if (snprintf(installed, sizeof(installed), "%s/z23-git-hook",
+                     out) >= (int)sizeof(installed))
+            return false;
+    } else {
+        if (snprintf(installed, sizeof(installed), "%s/%s/z23-git-hook",
+                     wt, out) >= (int)sizeof(installed))
+            return false;
+    }
+    return dl_bytes_identical(bin, installed);
+}
+
 /* Arm this worktree's own pre-push hook so the push below is admitted, or
  * refused, the same way an operator's checkout would be: `make
  * install-hooks` writes a --worktree-scoped core.hooksPath, which `git
@@ -1052,7 +1119,8 @@ static bool dl_wt_hooks_ensure(const char *wt, char *why, size_t why_cap)
 {
     const char *stub_dir = dl_hooks_stub_dir();
     char buf[DL_GIT_CAP];
-    if (dl_wt_hooks_ready(wt))
+    if (dl_wt_hooks_ready(wt) &&
+        (stub_dir || dl_wt_hooks_fresh(wt)))
         return true;
     if (stub_dir) {
         const char *ext_args[] = { "config", "extensions.worktreeConfig",
@@ -3482,6 +3550,123 @@ scan_failed:
  * refuses with the failing dependency's own typed reason; none of them
  * silently continues past a missing one. */
 
+/* Keep the landing worktree's installed native hooks byte-identical to the
+ * binary its own lint prerequisites just rebuilt. The proof generation
+ * copies build/githooks into its private generation, and
+ * check-git-hooks-installed compares that copy against the generation's
+ * freshly built binary: a stale installed copy fails a whole proof cycle
+ * at the lint dimension even though nothing in the candidate is wrong —
+ * observed 2026-09-10, when a landing worktree created 2026-09-08 held a
+ * hook binary two days older than the one its own `make lint-fast` just
+ * linked. This is the same repair `make install-hooks` performs, scoped
+ * to the one file that can drift between a worktree's creation and its
+ * nth rebase, plus the four symlinks that name it. */
+/* The four installed hook names are symlinks to the one native binary;
+ * recreate any that went missing rather than failing a whole proof over a
+ * name. */
+static bool dl_wt_hook_links_ensure(const struct dl_dirs *d, char *why,
+                                     size_t why_cap, bool *repaired)
+{
+    static const char *const k_links[] = {
+        "pre-push", "post-commit", "post-merge", "post-checkout"
+    };
+    char link[4096 + 96];
+    for (size_t i = 0; i < sizeof(k_links) / sizeof(k_links[0]); i++) {
+        struct stat st;
+        if (snprintf(link, sizeof(link), "%s/build/githooks/%s", d->wt,
+                     k_links[i]) >= (int)sizeof(link)) {
+            (void)snprintf(why, why_cap,
+                           "landing_worktree_hooks_path_too_long:%s",
+                           k_links[i]);
+            return false;
+        }
+        if (lstat(link, &st) == 0)
+            continue;
+        if (symlink("z23-git-hook", link) != 0) {
+            (void)snprintf(why, why_cap,
+                           "landing_worktree_hook_link_failed:%s", k_links[i]);
+            return false;
+        }
+        *repaired = true;
+    }
+    return true;
+}
+
+/* True when the installed hook copy already matches `bin` byte for byte;
+ * a missing, non-regular, or drifted copy is repair work, not a failure. */
+static bool dl_wt_hooks_installed_matches(const char *bin,
+                                           const char *installed)
+{
+    struct stat installed_st;
+    return stat(installed, &installed_st) == 0 &&
+           S_ISREG(installed_st.st_mode) &&
+           dl_bytes_identical(bin, installed);
+}
+
+static bool dl_wt_hooks_refresh(const struct dl_dirs *d,
+                                const struct dl_row *row,
+                                char *why, size_t why_cap)
+{
+#if defined(_WIN32)
+    (void)d; (void)row;
+    (void)snprintf(why, why_cap, "%s",
+                   "STEP_WINDOWS_UNAVAILABLE: POSIX landing hooks");
+    return false;
+#else
+    char bin[4096 + 96], submitter[4096 + 96], installed[4096 + 96];
+    struct stat bin_st;
+    bool repaired = false;
+    if (snprintf(bin, sizeof(bin), "%s/build/bin/z23-git-hook", d->wt) >=
+            (int)sizeof(bin) ||
+        snprintf(installed, sizeof(installed),
+                 "%s/build/githooks/z23-git-hook", d->wt) >=
+            (int)sizeof(installed)) {
+        (void)snprintf(why, why_cap, "%s",
+                       "landing_worktree_hooks_path_too_long");
+        return false;
+    }
+    if (stat(bin, &bin_st) != 0 || !S_ISREG(bin_st.st_mode)) {
+        /* The lint pass normally links the binary itself. When it did not
+         * (a stubbed step, or a worktree whose build was cleaned), the
+         * submitting checkout's own build of the same source is the same
+         * deterministic bytes the proof generation will build, so it is
+         * an honest source for the installed copy — never a silent pass:
+         * if neither tree holds a binary, the named refusal below stands. */
+        if (!row->worktree[0] ||
+            snprintf(submitter, sizeof(submitter),
+                     "%s/build/bin/z23-git-hook", row->worktree) >=
+                (int)sizeof(submitter) ||
+            stat(submitter, &bin_st) != 0 || !S_ISREG(bin_st.st_mode)) {
+            (void)snprintf(why, why_cap, "%s",
+                           "landing_worktree_hook_binary_missing "
+                           "(lint-fast prerequisites should have built it)");
+            return false;
+        }
+        (void)snprintf(bin, sizeof(bin), "%s", submitter);
+    }
+    if (!dl_wt_hooks_installed_matches(bin, installed)) {
+        if (!dl_mkdir_parents(installed) ||
+            !dl_materialize_file(bin, installed, &bin_st, NULL)) {
+            (void)snprintf(why, why_cap,
+                           "landing_worktree_hook_refresh_failed:%.80s",
+                           installed);
+            return false;
+        }
+        repaired = true;
+    }
+    if (!dl_wt_hook_links_ensure(d, why, why_cap, &repaired))
+        return false;
+    if (repaired) {
+        char note[96];
+        (void)snprintf(note, sizeof(note),
+                       "hooks: refreshed the installed native hooks from "
+                       "the rebuilt binary\n");
+        dl_log(row, note);
+    }
+    return true;
+#endif
+}
+
 static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
                                     const struct dl_row *r, bool stubbed,
                                     char *why, size_t why_cap)
@@ -3495,6 +3680,12 @@ static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
     return false;
 #else
     if (!stubbed || dl_deps_test_force()) {
+        /* The installed native hooks must match the binary the lint pass
+         * just rebuilt, or the proof's own generation fails its hook gate
+         * on a drift this worktree acquired by aging. First prerequisite,
+         * so a hooks miss refuses before any vendor copy runs. */
+        if (!dl_wt_hooks_refresh(d, r, why, why_cap))
+            return false;
         if (!dl_wt_vendor_ensure(d, r, why, why_cap))
             return false;
 #if defined(__linux__)

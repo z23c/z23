@@ -2745,7 +2745,6 @@ platform/modules/util/src/self_backtrace.c:self_backtrace_dump_all:26
 platform/modules/util/src/shutdown_stagewatch.c:shutdown_stagewatch_complete:16
 platform/modules/util/src/shutdown_stagewatch.c:shutdown_stagewatch_read_exit_reason:18
 platform/modules/util/src/spawn.c:spawn_capture_drain:30
-platform/modules/util/src/spawn.c:spawn_capture_impl:11
 platform/modules/util/src/spawn.c:spawn_pty_capture_observed_platform#2:22
 platform/modules/util/src/spawn.c:zcl_argv_split:17
 platform/modules/util/src/spawn.c:zcl_spawn_detached_input#2:33
@@ -3036,7 +3035,7 @@ tests/harness/src/test_debug_bundle.c:test_debug_bundle:26
 tests/harness/src/test_dev_fleet_start.c:fsx_repo_fixture:16
 tests/harness/src/test_dev_fleet_start.c:test_dev_fleet_start:44
 tests/harness/src/test_dev_land.c:dlx_regen_conflict:21
-tests/harness/src/test_dev_land.c:test_dev_land:213
+tests/harness/src/test_dev_land.c:test_dev_land:223
 tests/harness/src/test_dev_platform.c:dp_hotswap_cache_fixture_init:17
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:60
@@ -4298,7 +4297,6 @@ tools/dev/dev_failure_store.c:zcl_dev_failure_normalize_error:19
 tools/dev/dev_failure_store.c:zcl_dev_failure_note_coalesced:34
 tools/dev/dev_failure_store.c:zcl_dev_failure_record_failure:84
 tools/dev/dev_proof_budget.c:timing_store:17
-tools/dev/dev_proof_budget.c:zcl_dev_proof_step_start:15
 tools/dev/dev_proof_budget.c:zcl_dev_proof_timing_parse_group_line:22
 tools/dev/dev_proof_receipt.c:verdict_payload_valid:16
 tools/dev/dev_proof_receipt.c:zcl_dev_proof_child_receipt_validate:16
@@ -4395,7 +4393,6 @@ tools/dev/z23_git_hook.c:child_capture:55
 tools/dev/z23_git_hook.c:child_capture#2:23
 tools/dev/z23_git_hook.c:hook_append_arg:20
 tools/dev/z23_git_hook.c:read_exact_at:16
-tools/dev/z23_git_hook.c:running_eta:10
 tools/dev/z23_git_hook.c:selftest:62
 tools/engine_unit.c:append_unit_receipt:27
 tools/engine_unit.c:compose_prompt:23

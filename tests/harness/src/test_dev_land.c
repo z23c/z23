@@ -415,6 +415,31 @@ static bool dlx_file_exists(const char *path)
     return path && path[0] && stat(path, &st) == 0;
 }
 
+/* An installed hook name: a symlink whose target is the one native hook
+ * binary, exactly what install_git_hooks.sh lays down and the hooks
+ * refresh relinks. */
+static bool dlx_hook_link(const char *path)
+{
+    struct stat st;
+    char target[256];
+    ssize_t n;
+    if (!path || lstat(path, &st) != 0 || !S_ISLNK(st.st_mode))
+        return false;
+    n = readlink(path, target, sizeof(target) - 1);
+    if (n <= 0)
+        return false;
+    target[n] = '\0';
+    return strcmp(target, "z23-git-hook") == 0;
+}
+
+/* The submitting checkout's own hook build, which every forced-deps
+ * fixture must now carry: the hooks refresh shares the forced prerequisite
+ * set with vendor and hotswap materialization. */
+static bool dlx_plant_hook_bin(const char *dir)
+{
+    return dlx_write_dep(dir, "build/bin/z23-git-hook", "hook\n");
+}
+
 /* Whole-file slurp for a byte-identical before/after comparison. Bounded:
  * queue.jsonl in these tests is a handful of rows, never near this cap. */
 static bool dlx_slurp(const char *path, char *out, size_t cap, size_t *len)
@@ -3287,7 +3312,10 @@ int test_dev_land(void)
                              "fake\n"));
         /* Forces dl_wt_vendor_ensure()/dl_wt_hotswap_ensure() to run for
          * real even though ZCL_LAND_PROOF_STUB replaces the proof itself —
-         * see dl_deps_test_force()'s comment in native_dev_land.c. */
+         * see dl_deps_test_force()'s comment in native_dev_land.c. The
+         * hooks refresh shares the forced prerequisite set, so the
+         * submitting checkout also carries a hook binary to install from. */
+        ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -3489,6 +3517,7 @@ int test_dev_land(void)
         ASSERT(dlx_write_dep(rig.clone,
                              "build/hotswap/zcl_rollback_fixture_b.so",
                              "fake\n"));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -3571,6 +3600,7 @@ int test_dev_land(void)
          * worktree cannot materialize what does not exist anywhere, so the
          * step must refuse by name rather than silently proceed to a proof
          * request the real dependencies[] check would only fail later. */
+        ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -3626,6 +3656,7 @@ int test_dev_land(void)
         ASSERT(dlx_write_dep(
             rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
             "fake\n"));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -3689,6 +3720,7 @@ int test_dev_land(void)
          * gitlink — exactly the staleness dl_wt_vendor_tor_pin_matches()
          * exists to catch: the tip still pins rev_b. */
         ASSERT(dlx_submodule_checkout(rig.clone, "vendor/tor", sub.rev_a));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -3711,6 +3743,146 @@ int test_dev_land(void)
         (void)snprintf(check, sizeof(check), "%s/wt/vendor/tor/libtor.a",
                        wt);
         ASSERT(!dlx_file_exists(check));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a landing worktree whose installed native hooks drifted "
+        "from the binary its own lint rebuilt is repaired before the proof "
+        "is asked for, and missing hook names are relinked") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landwt[1200], bin[1400], installed[1400], link[1400], tip2[64];
+        char bin_body[256] = {0}, installed_body[256] = {0};
+        dlx_isolate("hooksrefresh");
+        ASSERT(dlx_rig_make(&rig, "hooksrefresh_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        /* Row 1 without forcing: the step only creates the landing
+         * worktree. */
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        /* Land row 1 so the next step takes a fresh row through
+         * dl_step_start. */
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        dlx_landdir(landwt, sizeof(landwt));
+        (void)snprintf(landwt + strlen(landwt),
+                       sizeof(landwt) - strlen(landwt), "/wt");
+        /* The drift this repair exists for: the worktree's freshly linked
+         * hook binary no longer matches the installed copy, and two of
+         * the four hook names are gone. */
+        (void)snprintf(bin, sizeof(bin), "%s/build/bin/z23-git-hook",
+                       landwt);
+        (void)snprintf(installed, sizeof(installed),
+                       "%s/build/githooks/z23-git-hook", landwt);
+        ASSERT(dlx_write_dep(landwt, "build/bin/z23-git-hook",
+                             "#!/bin/sh\nrebuilt today\n"));
+        (void)snprintf(bin, sizeof(bin), "%s/build/bin/z23-git-hook",
+                       landwt);
+        ASSERT(chmod(bin, 0755) == 0);
+        ASSERT(dlx_write_dep(landwt, "build/githooks/z23-git-hook",
+                             "old hook bytes\n"));
+        /* Two of the four hook names are gone — the fixture worktree never
+         * had install-hooks run, so at most stray files exist here. */
+        (void)snprintf(link, sizeof(link),
+                       "%s/build/githooks/post-commit", landwt);
+        (void)unlink(link);
+        (void)snprintf(link, sizeof(link),
+                       "%s/build/githooks/post-merge", landwt);
+        (void)unlink(link);
+        /* Row 2 with dependency forcing on: vendor deps present in the
+         * submitting checkout, so the step's only obstacle would be an
+         * unrepaired hook drift. */
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_a.so",
+                             "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_b.so",
+                             "fake\n"));
+        ASSERT(dlx_commit(rig.clone, "two.txt", "two\n", tip2));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, tip2);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        /* The installed copy now matches the rebuilt binary byte for
+         * byte, and both removed names are links to it again. */
+        ASSERT(dlx_slurp(bin, bin_body, sizeof(bin_body), NULL));
+        ASSERT(dlx_slurp(installed, installed_body,
+                         sizeof(installed_body), NULL));
+        ASSERT(strcmp(bin_body, installed_body) == 0);
+        ASSERT(strcmp(installed_body, "#!/bin/sh\nrebuilt today\n") == 0);
+        (void)snprintf(link, sizeof(link),
+                       "%s/build/githooks/post-commit", landwt);
+        ASSERT(dlx_hook_link(link));
+        (void)snprintf(link, sizeof(link),
+                       "%s/build/githooks/post-merge", landwt);
+        ASSERT(dlx_hook_link(link));
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a landing worktree with no rebuilt hook binary at all "
+        "fails the step by name instead of asking a proof for hooks it "
+        "cannot vouch for") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("hooksmissing");
+        ASSERT(dlx_rig_make(&rig, "hooksmissing_rig"));
+        /* Neither the landing worktree nor the submitting checkout carries
+         * a hook binary: the refresh must refuse by name rather than ask
+         * a proof for hooks it cannot vouch for. */
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "landing_worktree_hook_binary_missing") != NULL);
         dlx_end(&c);
         unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
         dlx_restore();
@@ -3745,6 +3917,7 @@ int test_dev_land(void)
             rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
             "fake\n"));
         ASSERT(dlx_submodule_uninit(rig.clone, "vendor/tor"));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -3806,6 +3979,7 @@ int test_dev_land(void)
         ASSERT(dlx_write_dep(rig.clone,
                              "build/hotswap/zcl_rollback_fixture_b.so",
                              "fake\n"));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
