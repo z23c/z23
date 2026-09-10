@@ -913,25 +913,25 @@ static const char k_xp_accepted_plan[] =
  * carries them: the agent is the worktree's last path element. */
 static const char k_xp_outcomes[] =
 "{\"seq\":11,\"ts\":\"2026-09-09T01:00:00Z\",\"state\":\"landed\","
- "\"worktree\":\"/home/x/.z23/lanes/alpha\",\"detail\":\"pushed\"}\n"
+ "\"worktree\":\"work/lanes/alpha\",\"detail\":\"pushed\"}\n"
 "{\"seq\":12,\"ts\":\"2026-09-09T02:00:00Z\",\"state\":\"landed\","
- "\"worktree\":\"/home/x/.z23/lanes/alpha\",\"detail\":\"pushed\"}\n"
+ "\"worktree\":\"work/lanes/alpha\",\"detail\":\"pushed\"}\n"
 "{\"seq\":13,\"ts\":\"2026-09-09T03:00:00Z\",\"state\":\"landed\","
- "\"worktree\":\"/home/x/.z23/lanes/alpha\",\"detail\":\"pushed\"}\n"
+ "\"worktree\":\"work/lanes/alpha\",\"detail\":\"pushed\"}\n"
 "{\"seq\":14,\"ts\":\"2026-09-09T04:00:00Z\",\"state\":\"failed\","
- "\"worktree\":\"/home/x/.z23/lanes/beta\","
+ "\"worktree\":\"work/lanes/beta\","
  "\"detail\":\"head_changed while the proof ran\"}\n"
 "{\"seq\":15,\"ts\":\"2026-09-09T05:00:00Z\",\"state\":\"failed\","
- "\"worktree\":\"/home/x/.z23/lanes/gamma\","
+ "\"worktree\":\"work/lanes/gamma\","
  "\"detail\":\"child_proof_failed_exit_2\"}\n"
 "{\"seq\":16,\"ts\":\"2026-09-09T06:00:00Z\",\"state\":\"cancelled\","
- "\"worktree\":\"/home/x/.z23/lanes/gamma\","
+ "\"worktree\":\"work/lanes/gamma\","
  "\"detail\":\"cancelled by the operator\"}\n"
 "{\"seq\":17,\"ts\":\"2026-09-09T07:00:00Z\",\"state\":\"failed\","
- "\"worktree\":\"/home/x/.z23/trains/54\","
+ "\"worktree\":\"work/trains/54\","
  "\"detail\":\"child_proof_failed_exit_2\"}\n"
 "{\"seq\":18,\"ts\":\"2026-09-09T08:00:00Z\",\"state\":\"failed\","
- "\"worktree\":\"/home/x/.z23/trains/train55\","
+ "\"worktree\":\"work/trains/train55\","
  "\"detail\":\"child_proof_failed_exit_2\"}\n";
 
 static void mvl_xp_ancestry(char (*anc)[MVL_ID_CAP],
