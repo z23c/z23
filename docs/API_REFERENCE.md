@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 876 |
+| Registry entries (branches + leaves) | 877 |
 | Top-level roots | 14 |
 | Branches | 196 |
-| Leaves (dispatchable command paths) | 680 |
-| … `ready` (live handler in this build) | 603 |
+| Leaves (dispatchable command paths) | 681 |
+| … `ready` (live handler in this build) | 604 |
 | … `compat` (metadata only, names a fallback) | 47 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 46 |
@@ -91,7 +91,7 @@ Per source file:
 | `.def` file | Entries | Branches | Leaves |
 |---|---|---|---|
 | `engine/composition/commands/root.def` | 10 | 5 | 5 |
-| `engine/composition/commands/core.def` | 121 | 29 | 92 |
+| `engine/composition/commands/core.def` | 122 | 29 | 93 |
 | `engine/composition/commands/apps.def` | 16 | 3 | 13 |
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
@@ -250,7 +250,7 @@ represented by its children's sections.
 | `core sync validation` | ready | read / read / public · fast/low | none | `zcl.validation_status.v1` | `z23 core sync validation` | Background validation progress |
 | `core sync blockers` | ready | read / read / public · fast/low | none | `zcl.blockers.v1` | `z23 core sync blockers` | Active named sync blockers |
 | `core sync diagnose` | ready | read / read / operator · fast/moderate | none | `zcl.syncdiag.v1` | `z23 core sync diagnose` | Diagnose why sync is not advancing |
-| `core sync frontier offline` | ready | read / read / operator · fast/low | `datadir` | `zcl.core_sync_frontier_offline.v1` | `z23 core sync frontier offline --input='{"datadir":"/home/you/.zclassic-c23"}'` | H* (reducer frontier) of a STOPPED/COPIED datadir |
+| `core sync frontier offline` | ready | read / read / operator · fast/low | `datadir` | `zcl.core_sync_frontier_offline.v1` | `z23 core sync frontier offline --input='{"datadir":"$HOME/.zclassic-c23"}'` | H* (reducer frontier) of a STOPPED/COPIED datadir |
 
 #### `core.anchor` — Generic ZANC digest-anchor composition and inspection
 
@@ -401,6 +401,7 @@ represented by its children's sections.
 | `core storage integrity` | planned | read / read / operator · foreground/moderate | none | `zcl.storage_integrity.v1` | `z23 core storage integrity` | Verify raw storage integrity — *a distinct storage-integrity handler is a Wave 2.2 deliverable* |
 | `core storage query` | ready | read / read / operator · fast/moderate | **`sql`**, `limit` | `zcl.storage_query.v1` | `z23 core storage query --sql='SELECT ...'` | Run one SELECT-only query over node.db |
 | `core storage query offline` | ready | read / read / operator · fast/moderate | `datadir`, `sql`, `limit` | `zcl.storage_query.v1` | `z23 core storage query offline --input='{"datadir":"/home/you/.zclassic-c23","sql":"SELECT ..."}'` | Run one SELECT-only query over a STOPPED/COPIED datadir's node.db |
+| `core storage schema offline` | ready | read / read / operator · fast/low | `datadir` | `zcl.storage_schema.v1` | `z23 core storage schema offline --input='{"datadir":"/home/you/.zclassic-c23"}'` | Rolling-upgrade schema verdict for a datadir's node.db |
 
 #### `core.mining` — Mining info and benchmarks
 
