@@ -2259,6 +2259,10 @@ Z23_FLAG("ZCL_STOREPROOF_KEEP", "env_build", "0", "-",
           "undocumented; first use tools/scripts/store_sell_operator_proof.sh:138")
 Z23_FLAG("ZCL_STOREPROOF_WALLET_PASS", "env_build", "-", "-",
           "undocumented; first use tools/scripts/store_sell_operator_proof.sh:145")
+Z23_FLAG("ZCL_STORE_LISTING_CHILD_DB", "env_test", "-", "-",
+          "path to the node.db a forked holder process opens to hold the owner lease; first use tests/harness/src/test_store_listing.c:961")
+Z23_FLAG("ZCL_STORE_LISTING_READY", "env_test", "-", "-",
+          "path the forked holder process touches once it holds the lease, so the parent's sl_wait_file() can proceed; first use tests/harness/src/test_store_listing.c:962")
 Z23_FLAG("ZCL_STRAY_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_git_scan_b.c:1187")
 Z23_FLAG("ZCL_STRESS_TESTS", "env_test", "-", "-",

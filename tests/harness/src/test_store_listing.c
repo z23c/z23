@@ -45,6 +45,8 @@
 #include "models/store_blob.h"
 #include "rpc/server.h"
 
+#include <time.h>
+
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -925,7 +927,8 @@ static bool sl_wait_file(const char *path)
 #if defined(_WIN32)
         Sleep(20);
 #else
-        usleep(20000);
+        struct timespec tick = { .tv_sec = 0, .tv_nsec = 20000000L };
+        nanosleep(&tick, NULL); /* real-clock: bounded wait for a child process file, no timing asserted */
 #endif
     }
     return false;
