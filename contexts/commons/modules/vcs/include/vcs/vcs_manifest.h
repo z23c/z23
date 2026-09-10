@@ -42,6 +42,11 @@ struct vcs_manifest {
 void vcs_manifest_init(struct vcs_manifest *m);
 void vcs_manifest_free(struct vcs_manifest *m);
 
+/* Current snapshot exclusion policy. This classifies additional paths only;
+ * it never removes an entry from an already committed source manifest or
+ * proves that excluded content is covered by a dependency closure. */
+bool vcs_path_ignored(const char *relpath);
+
 /* Build a manifest from the tracked worktree under repo_root. If idx is
  * non-NULL its stat_cache is consulted (a matching mtime_ns/size/ctime_ns
  * reuses the cached blob hash instead of re-reading the file) and every

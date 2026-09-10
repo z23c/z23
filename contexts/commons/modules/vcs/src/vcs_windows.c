@@ -18,20 +18,7 @@ struct vcs_repo {
 bool vcs_tree_load(const char *repo_root, const uint8_t tree_hash[32],
                    struct vcs_manifest *out)
 {
-    if (!repo_root || !tree_hash || !out) return false;
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    if (vcs_object_load_raw(repo_root, tree_hash, &wire, &wire_len) != 0)
-        return false;
-    bool ok = vcs_manifest_parse(wire, wire_len, out);
-    free(wire);
-    uint8_t checked[32];
-    if (!ok || !vcs_manifest_tree_hash(out, checked) ||
-        memcmp(checked, tree_hash, 32) != 0) {
-        if (ok) vcs_manifest_free(out);
-        return false;
-    }
-    return true;
+    return vcs_tree_load_bounded(repo_root, tree_hash, SIZE_MAX, SIZE_MAX, out);
 }
 struct vcs_repo *vcs_open(const char *root)
 {

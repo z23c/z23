@@ -29,6 +29,8 @@
 #include "util/spawn.h"
 #include "dev/dev_git_tree.h"
 #include "sha3/sha3.h"
+#include "vcs/vcs.h"
+#include "vcs/vcs_object.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2070,10 +2072,239 @@ static int test_dev_land_exact_tree(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* State threaded between the three phases below: one worktree fixture whose
+ * committed content is bound by a single captured source_root across mode
+ * refusal, bounded-admission refusal, and post-commit drift detection. Split
+ * out of one TEST body (each phase kept its own assertions verbatim) only to
+ * bring per-function cyclomatic complexity under the lint cap. */
+struct dlx_source_binding_state {
+    struct dlx_rig rig;
+    char change_path[1200];
+    char seed_path[1200];
+    uint8_t source[32];
+    uint8_t wrong_root[32];
+    size_t wire_len;
+};
+
+/* Fixture with two 0600 files, plus the mode-refusal check: an admission
+ * comparator refuses unrepresentable file modes before it looks at content. */
+static bool dlx_source_binding_setup_fixture(struct dlx_source_binding_state *st)
+{
+    if (!dlx_rig_make(&st->rig, "source_binding")) return false;
+    char exclude[1200];
+    (void)snprintf(exclude, sizeof(exclude), "%s/.git/info/exclude", st->rig.clone);
+    if (!dlx_write(exclude, ".zvcs/\n")) return false;
+    (void)snprintf(st->change_path, sizeof(st->change_path), "%s/change.txt", st->rig.clone);
+    (void)snprintf(st->seed_path, sizeof(st->seed_path), "%s/seed.txt", st->rig.clone);
+    if (chmod(st->change_path, 0600) != 0) return false;
+    if (chmod(st->seed_path, 0600) != 0) return false;
+    if (vcs_tree_capture_path(st->rig.clone, st->source) != 0) return false;
+    struct zcl_dev_git_source_check mode_check = {0};
+    struct zcl_result mode_result = zcl_dev_git_tree_check_source(
+        st->rig.clone, st->rig.tip, st->source, 10000, &mode_check);
+    if (mode_result.ok) return false;
+    if (!mode_check.observed) return false;
+    if (mode_check.unrepresentable_modes != 2) return false;
+    return true;
+}
+
+/* Representable modes admitted under an exact entry budget; stashes an
+ * object addressed under a wrong root for the next phase's refusal checks. */
+static bool dlx_source_binding_setup_admit(struct dlx_source_binding_state *st)
+{
+    if (chmod(st->change_path, 0644) != 0) return false;
+    if (chmod(st->seed_path, 0644) != 0) return false;
+    if (vcs_tree_capture_path(st->rig.clone, st->source) != 0) return false;
+    struct vcs_manifest admitted = {0};
+    if (!vcs_tree_load_bounded(st->rig.clone, st->source, 8u * 1024u * 1024u, 2, &admitted))
+        return false;
+    if (admitted.count != 2) { vcs_manifest_free(&admitted); return false; }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (!vcs_manifest_serialize(&admitted, &wire, &wire_len)) {
+        vcs_manifest_free(&admitted);
+        return false;
+    }
+    memset(st->wrong_root, 0, sizeof(st->wrong_root));
+    st->wrong_root[0] = 0xA5;
+    bool put_ok = vcs_object_put_addressed(st->rig.clone, st->wrong_root, wire, wire_len);
+    free(wire);
+    vcs_manifest_free(&admitted);
+    if (!put_ok) return false;
+    st->wire_len = wire_len;
+    return true;
+}
+
+static bool dlx_source_binding_setup(struct dlx_source_binding_state *st)
+{
+    if (!dlx_source_binding_setup_fixture(st)) return false;
+    if (!dlx_source_binding_setup_admit(st)) return false;
+    return true;
+}
+
+/* Bounded admission refuses a wrong structural root, an over-large declared
+ * entry count, a truncated byte budget and a too-small entry budget, while
+ * the exact root/byte-budget/entry-budget combination — and the unbounded
+ * loader — both admit the same two entries. */
+/* A wrong structural root and an over-large declared entry count are both
+ * refused, each leaving the output manifest empty. */
+static bool dlx_source_binding_bounds_refusals(struct dlx_source_binding_state *st)
+{
+    struct vcs_manifest admitted = {0};
+    if (vcs_tree_load_bounded(st->rig.clone, st->wrong_root, st->wire_len, 2, &admitted))
+        return false;
+    if (admitted.entries || admitted.count != 0) return false;
+    uint8_t excessive[9] = {VCS_MANIFEST_VERSION, 0xff, 0xff, 0xff, 0xff,
+                            0xff, 0xff, 0xff, 0xff};
+    uint8_t excessive_root[32] = {0xA6};
+    if (!vcs_object_put_addressed(st->rig.clone, excessive_root, excessive, sizeof(excessive)))
+        return false;
+    if (vcs_tree_load_bounded(st->rig.clone, excessive_root, sizeof(excessive), 2, &admitted))
+        return false;
+    if (admitted.entries || admitted.count != 0) return false;
+    return true;
+}
+
+/* The exact root/byte-budget/entry-budget combination admits; a truncated
+ * byte budget and a too-small entry budget both refuse; the unbounded
+ * loader admits the same two entries. */
+static bool dlx_source_binding_bounds_admits(struct dlx_source_binding_state *st)
+{
+    struct vcs_manifest admitted = {0};
+    if (!vcs_tree_load_bounded(st->rig.clone, st->source, st->wire_len, 2, &admitted))
+        return false;
+    vcs_manifest_free(&admitted);
+    if (vcs_tree_load_bounded(st->rig.clone, st->source, st->wire_len - 1, 2, &admitted))
+        return false;
+    if (admitted.entries || admitted.count != 0) return false;
+    if (vcs_tree_load_bounded(st->rig.clone, st->source, st->wire_len, 1, &admitted))
+        return false;
+    if (admitted.entries || admitted.count != 0) return false;
+    if (!vcs_tree_load(st->rig.clone, st->source, &admitted)) return false;
+    if (admitted.count != 2) { vcs_manifest_free(&admitted); return false; }
+    vcs_manifest_free(&admitted);
+    return true;
+}
+
+static bool dlx_source_binding_bounds(struct dlx_source_binding_state *st)
+{
+    if (!dlx_source_binding_bounds_refusals(st)) return false;
+    if (!dlx_source_binding_bounds_admits(st)) return false;
+    return true;
+}
+
+/* An exact match, then one committed edit at a time: a same-size content
+ * change, an excluded extra, an unexpected extra, and a missing file — each
+ * observed and reported by exactly the field it should set. */
+/* The initial exact match: every field a complete match sets, and the
+ * root/head the check reports back verbatim. */
+static bool dlx_source_binding_drift_initial(struct dlx_source_binding_state *st)
+{
+    struct zcl_dev_git_source_check check = {0};
+    struct zcl_result r = zcl_dev_git_tree_check_source(
+        st->rig.clone, st->rig.tip, st->source, 10000, &check);
+    if (!r.ok) return false;
+    if (!check.observed) return false;
+    if (!check.complete_content_matches) return false;
+    if (check.matched != 2) return false;
+    if (memcmp(check.source_root, st->source, 32) != 0) return false;
+    if (strcmp(check.head, st->rig.tip) != 0) return false;
+    return true;
+}
+
+/* A same-size content change is caught as `changed`, not silently accepted. */
+static bool dlx_source_binding_drift_changed(struct dlx_source_binding_state *st)
+{
+    if (!dlx_commit(st->rig.clone, "change.txt", "two\n", st->rig.tip)) return false;
+    struct zcl_dev_git_source_check check = {0};
+    struct zcl_result r = zcl_dev_git_tree_check_source(
+        st->rig.clone, st->rig.tip, st->source, 10000, &check);
+    if (r.ok) return false;
+    if (!check.observed) return false;
+    if (check.changed != 1) return false;
+    if (check.source_projection_matches) return false;
+    if (check.complete_content_matches) return false;
+    return true;
+}
+
+/* An excluded extra is classified as `excluded`: the projection still
+ * matches (exclusions are outside its scope) but complete content does not. */
+static bool dlx_source_binding_drift_excluded(struct dlx_source_binding_state *st)
+{
+    if (!dlx_commit(st->rig.clone, "change.txt", "one\n", st->rig.tip)) return false;
+    if (!dlx_commit(st->rig.clone, "extra.log", "excluded\n", st->rig.tip)) return false;
+    struct zcl_dev_git_source_check check = {0};
+    struct zcl_result r = zcl_dev_git_tree_check_source(
+        st->rig.clone, st->rig.tip, st->source, 10000, &check);
+    if (r.ok) return false;
+    if (!check.observed) return false;
+    if (check.excluded != 1) return false;
+    if (!check.source_projection_matches) return false;
+    if (check.complete_content_matches) return false;
+    return true;
+}
+
+/* An extra committed path the manifest never expected is `unexpected`,
+ * distinct from the excluded one that is still committed alongside it. */
+static bool dlx_source_binding_drift_unexpected(struct dlx_source_binding_state *st)
+{
+    if (!dlx_commit(st->rig.clone, "extra.txt", "unexpected\n", st->rig.tip)) return false;
+    struct zcl_dev_git_source_check check = {0};
+    struct zcl_result r = zcl_dev_git_tree_check_source(
+        st->rig.clone, st->rig.tip, st->source, 10000, &check);
+    if (r.ok) return false;
+    if (!check.observed) return false;
+    if (check.unexpected != 1) return false;
+    if (check.excluded != 1) return false;
+    return true;
+}
+
+/* A canonical file removed from the worktree is `missing`. */
+static bool dlx_source_binding_drift_missing(struct dlx_source_binding_state *st)
+{
+    if (unlink(st->change_path) != 0) return false;
+    if (!dlx_commit(st->rig.clone, "seed.txt", "seed\n", st->rig.tip)) return false;
+    struct zcl_dev_git_source_check check = {0};
+    struct zcl_result r = zcl_dev_git_tree_check_source(
+        st->rig.clone, st->rig.tip, st->source, 10000, &check);
+    if (r.ok) return false;
+    if (!check.observed) return false;
+    if (check.missing != 1) return false;
+    return true;
+}
+
+static bool dlx_source_binding_drift(struct dlx_source_binding_state *st)
+{
+    if (!dlx_source_binding_drift_initial(st)) return false;
+    if (!dlx_source_binding_drift_changed(st)) return false;
+    if (!dlx_source_binding_drift_excluded(st)) return false;
+    if (!dlx_source_binding_drift_unexpected(st)) return false;
+    if (!dlx_source_binding_drift_missing(st)) return false;
+    return true;
+}
+#endif
+
+static int test_dev_land_source_binding(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: canonical source root binds exact committed content, including same-size changes") {
+        struct dlx_source_binding_state st = {0};
+        ASSERT(dlx_source_binding_setup(&st));
+        ASSERT(dlx_source_binding_bounds(&st));
+        ASSERT(dlx_source_binding_drift(&st));
+        PASS();
+    } _test_next:;
+#endif
+    return failures;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
     failures += test_dev_land_exact_tree();
+    failures += test_dev_land_source_binding();
 #if !defined(_WIN32)
     failures += test_dev_land_tree_types();
     failures += test_dev_land_tree_malformed();

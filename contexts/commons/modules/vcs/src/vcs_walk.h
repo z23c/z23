@@ -12,12 +12,12 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "vcs/vcs_manifest.h"
 
 /* True iff a repo-relative path is in the ZVCS ignore set:
  *   source-control/build roots plus checkout-local agent worktrees/caches;
  *   basename globs for databases, logs, test artifacts, and local tokens.
  * A directory whose name triggers a prefix rule is pruned (not descended). */
-bool vcs_path_ignored(const char *relpath);
 
 /* Per-tracked-file callback. relpath is repo-relative ('/'-separated). Return
  * false to abort the walk. */

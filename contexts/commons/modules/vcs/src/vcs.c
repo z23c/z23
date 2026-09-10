@@ -86,22 +86,7 @@ static bool manifest_store(const char *repo, const struct vcs_manifest *m,
 bool manifest_load(const char *repo, const uint8_t tree_hash[32],
                    struct vcs_manifest *out)
 {
-    uint8_t *ser = NULL;
-    size_t serlen = 0;
-    if (vcs_object_load_raw(repo, tree_hash, &ser, &serlen) != 0)
-        LOG_FAIL("vcs", "load manifest object");
-    bool parsed = vcs_manifest_parse(ser, serlen, out);
-    free(ser);
-    if (!parsed)
-        LOG_FAIL("vcs", "parse manifest object");
-    /* recompute-never-trust: re-derive tree_hash and verify it addresses this
-     * object. */
-    uint8_t got[32];
-    if (!vcs_manifest_tree_hash(out, got) || memcmp(got, tree_hash, 32) != 0) {
-        vcs_manifest_free(out);
-        LOG_FAIL("vcs", "manifest tree_hash mismatch (corruption)");
-    }
-    return true;
+    return vcs_tree_load_bounded(repo, tree_hash, SIZE_MAX, SIZE_MAX, out);
 }
 
 bool vcs_tree_load(const char *repo_root, const uint8_t tree_hash[32],

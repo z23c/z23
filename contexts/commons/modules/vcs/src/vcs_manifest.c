@@ -3,6 +3,7 @@
  * vcs_manifest — implementation. See vcs/vcs_manifest.h. */
 
 #include "vcs/vcs_manifest.h"
+#include "vcs/vcs.h"
 #include "vcs/vcs_index.h"
 #include "vcs/vcs_object.h"
 
@@ -32,6 +33,35 @@ void vcs_manifest_free(struct vcs_manifest *m)
     m->entries = NULL;
     m->count = 0;
     m->cap = 0;
+}
+
+bool vcs_tree_load_bounded(const char *repo_root, const uint8_t tree_hash[32],
+                           size_t maximum_bytes, size_t maximum_entries,
+                           struct vcs_manifest *out)
+{
+    if (out) vcs_manifest_init(out);
+    if (!repo_root || !tree_hash || !out)
+        LOG_FAIL("vcs", "null argument to bounded tree load");
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_object_load_raw_bounded(repo_root, tree_hash, maximum_bytes,
+                                   &wire, &wire_len) != 0)
+        LOG_FAIL("vcs", "bounded manifest object read refused");
+    if (wire_len < 9 || wire[0] != VCS_MANIFEST_VERSION ||
+        vcs_rd_u64le(wire + 1) > maximum_entries) {
+        free(wire);
+        LOG_FAIL("vcs", "manifest header or entry budget refused");
+    }
+    bool parsed = vcs_manifest_parse(wire, wire_len, out);
+    free(wire);
+    if (!parsed)
+        LOG_FAIL("vcs", "bounded manifest parse refused");
+    uint8_t checked[32];
+    if (!vcs_manifest_tree_hash(out, checked) || memcmp(checked, tree_hash, 32) != 0) {
+        vcs_manifest_free(out);
+        LOG_FAIL("vcs", "bounded manifest structural root mismatch");
+    }
+    return true;
 }
 
 bool vcs_manifest_add(struct vcs_manifest *m, const char *path, uint32_t mode,

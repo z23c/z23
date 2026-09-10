@@ -8,6 +8,7 @@
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
 #include "vcs/vcs_object.h"
+#include "vcs/vcs.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -347,6 +348,104 @@ struct zcl_result zcl_dev_git_tree_read(
     if (!r.ok) {
         zcl_dev_git_tree_free(out);
     }
+    return r;
+#endif
+}
+
+#ifndef _WIN32
+static int dgt_entry_path_compare(const void *key, const void *value)
+{
+    const struct vcs_entry *entry = value;
+    return strcmp(key, entry->path);
+}
+
+static const struct vcs_entry *dgt_find(const struct vcs_manifest *tree, const char *path)
+{
+    if (!tree->count) return NULL;
+    return bsearch(path, tree->entries, tree->count, sizeof(*tree->entries), dgt_entry_path_compare);
+}
+
+static void dgt_expected_check(const struct vcs_manifest *expected,
+                               const struct vcs_manifest *observed,
+                               struct zcl_dev_git_source_check *check)
+{
+    for (size_t i = 0; i < expected->count; ++i) {
+        const struct vcs_entry *a = &expected->entries[i];
+        if (a->mode != 0100644u && a->mode != 0100755u) ++check->unrepresentable_modes;
+        const struct vcs_entry *b = dgt_find(observed, a->path);
+        if (!b) { ++check->missing; continue; }
+        if (a->mode != b->mode || a->size != b->size || memcmp(a->blob, b->blob, 32))
+            ++check->changed;
+        else ++check->matched;
+    }
+}
+
+static void dgt_extra_check(const struct vcs_manifest *expected,
+                            const struct zcl_dev_git_tree *observed,
+                            struct zcl_dev_git_source_check *check)
+{
+    for (size_t i = 0; i < observed->files.count; ++i) {
+        const char *path = observed->files.entries[i].path;
+        if (dgt_find(expected, path)) continue;
+        if (vcs_path_ignored(path)) ++check->excluded;
+        else ++check->unexpected;
+    }
+    check->gitlinks = observed->gitlinks;
+    check->symlinks = observed->symlinks;
+    check->source_projection_matches = !check->missing && !check->changed &&
+        !check->unexpected && !check->unrepresentable_modes;
+    check->complete_content_matches = check->source_projection_matches &&
+        !check->excluded && !check->gitlinks && !check->symlinks;
+}
+
+static struct zcl_result dgt_source_observe(
+    const char *repo, const char *head, const uint8_t source_root[32],
+    int64_t deadline, const struct vcs_manifest *expected,
+    struct zcl_dev_git_source_check *out)
+{
+    int64_t remaining = deadline - platform_time_monotonic_ms();
+    if (remaining <= 0) return ZCL_ERR(-1, "git-source: manifest deadline exhausted");
+    struct zcl_dev_git_tree observed = {0};
+    struct zcl_result r = zcl_dev_git_tree_read(repo, head,
+        remaining > INT_MAX ? INT_MAX : (int)remaining, &observed);
+    if (!r.ok) return r;
+    struct zcl_dev_git_source_check check = {0};
+    dgt_expected_check(expected, &observed.files, &check);
+    dgt_extra_check(expected, &observed, &check);
+    zcl_dev_git_tree_free(&observed);
+    if (platform_time_monotonic_ms() >= deadline)
+        return ZCL_ERR(-1, "git-source: comparison deadline exhausted");
+    memcpy(check.source_root, source_root, 32);
+    (void)snprintf(check.head, sizeof(check.head), "%s", head);
+    check.observed = true;
+    *out = check;
+    if (!check.complete_content_matches)
+        return ZCL_ERR(-1, "git-source: content unresolved (missing=%zu changed=%zu unexpected=%zu excluded=%zu links=%zu symlinks=%zu modes=%zu)",
+            check.missing, check.changed, check.unexpected, check.excluded,
+            check.gitlinks, check.symlinks, check.unrepresentable_modes);
+    return ZCL_OK;
+}
+#endif
+
+struct zcl_result zcl_dev_git_tree_check_source(
+    const char *repo, const char *head, const uint8_t source_root[32],
+    int timeout_ms, struct zcl_dev_git_source_check *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out || !repo || !head || !source_root || timeout_ms <= 0)
+        return ZCL_ERR(-1, "git-source: missing bounded comparison inputs");
+#ifdef _WIN32
+    return ZCL_ERR(-1, "git-source: native binary capture unavailable on Windows");
+#else
+    if (!dgt_oid(head, strlen(head))) return ZCL_ERR(-1, "git-source: exact head required");
+    int64_t deadline = platform_time_monotonic_ms() + timeout_ms;
+    struct vcs_manifest expected;
+    if (!vcs_tree_load_bounded(repo, source_root, 8u * 1024u * 1024u,
+                               DGT_ENTRY_MAX, &expected))
+        return ZCL_ERR(-1, "git-source: canonical source manifest unavailable");
+    struct zcl_result r = dgt_source_observe(repo, head, source_root,
+                                            deadline, &expected, out);
+    vcs_manifest_free(&expected);
     return r;
 #endif
 }

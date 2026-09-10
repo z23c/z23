@@ -89,6 +89,14 @@ int vcs_tree_capture_into(const char *scan_root, const char *object_store_root,
 bool vcs_tree_load(const char *repo_root, const uint8_t tree_hash[32],
                    struct vcs_manifest *out);
 
+/* Bounded admission: wire bytes are checked before reading/allocating them,
+ * and the advertised entry count before parsing entries. SIZE_MAX retains
+ * the object store's global ceiling. Caller supplies an empty output, which
+ * remains empty on refusal. Successful output has its structural root verified. */
+bool vcs_tree_load_bounded(const char *repo_root, const uint8_t tree_hash[32],
+                           size_t maximum_bytes, size_t maximum_entries,
+                           struct vcs_manifest *out);
+
 /* Rebuild one captured tree from verified CAS blobs into an existing empty
  * destination. Files are created with O_EXCL and either their captured mode
  * (file_mode 0) or the caller-selected 0400/0600 mode; source paths must
