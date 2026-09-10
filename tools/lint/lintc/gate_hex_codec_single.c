@@ -32,7 +32,7 @@
 #include <unistd.h>
 #include "lintc.h"
 
-enum { HCS_MAXF = 4096, HCS_PATH = RS_PATH, HCS_MAXR = RS_MAX, HCS_LINE = 8192 };
+enum { HCS_MAXF = 8192, HCS_PATH = RS_PATH, HCS_MAXR = RS_MAX, HCS_LINE = 8192 };
 
 static const char k_hcs_gate[] = "check_hex_codec_single";
 static const char k_hcs_base_default[] = "tools/lint/hex_codec_baseline.txt";

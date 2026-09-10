@@ -74,16 +74,16 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 877 |
+| Registry entries (branches + leaves) | 879 |
 | Top-level roots | 14 |
-| Branches | 196 |
-| Leaves (dispatchable command paths) | 681 |
-| … `ready` (live handler in this build) | 604 |
+| Branches | 197 |
+| Leaves (dispatchable command paths) | 682 |
+| … `ready` (live handler in this build) | 605 |
 | … `compat` (metadata only, names a fallback) | 47 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 46 |
 | Leaves with `effect=mutate` | 246 |
-| Leaves with `effect=destructive` | 5 |
+| Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 128 |
 
 Per source file:
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 16 | 3 | 13 |
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
-| `engine/composition/commands/ops.def` | 57 | 10 | 47 |
+| `engine/composition/commands/ops.def` | 59 | 11 | 48 |
 | `engine/composition/commands/dev.def` | 107 | 21 | 86 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
@@ -957,6 +957,12 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops recovery status` | ready | read / read / operator · fast/low | none | `zcl.recovery_status.v1` | `z23 ops recovery status` | Refold and recovery progress |
 | `ops recovery rebuild` | planned | destructive / core-recovery / **owner**, job, plan-commit · background/high | `depth` | `zcl.recovery_rebuild.v1` | `z23 ops recovery rebuild --depth=100` | Rebuild recent chain state — *recovery rebuild plan/commit handshake is a Wave 2.2 deliverable* |
+
+#### `ops.host` — Host maintenance
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops host gc` | ready | destructive / dev-mutation / operator · maintenance/moderate | `apply`, `floor_hours`, `roots` | `zcl.host_gc.v1` | `z23 ops host gc --apply=false` | Classify and reclaim dead dev-proof worktree generations |
 
 #### `ops.telemetry` — Canonical typed telemetry tree
 
