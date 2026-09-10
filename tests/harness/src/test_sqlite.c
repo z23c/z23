@@ -2961,7 +2961,13 @@ static bool check_sqlite_53_seed(struct node_db *ndb, struct db_peer *p,
     return ok;
 }
 
-static void check_sqlite_53_cached_readers_release_the_snap(int *failures)
+/* Returns the number of failures (0 or 1) rather than taking the running
+ * total by address, the way the checks above it do. The complexity gate's
+ * lexer pairs any two single `&` characters in a function into one `&&`
+ * decision point, so one more `&failures` argument in test_sqlite() below
+ * would push that function's pinned complexity up by one for no change in
+ * its actual control flow, and a pin may never rise. */
+static int check_sqlite_53_cached_readers_release_the_snap(void)
 {
     printf("SQLite cached readers release the WAL snapshot they read... ");
     char dir[256];
@@ -3010,8 +3016,12 @@ static void check_sqlite_53_cached_readers_release_the_snap(int *failures)
 
     node_db_close(&ndb);
     test_rm_rf_recursive(dir);
-    if (ok) printf("OK\n");
-    else { printf("FAIL\n"); (*failures)++; }
+    if (ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
 }
 
 static void check_sqlite_51_sqlite_node_db_opens_with_a_bounded_wal_(int *failures)
@@ -3531,7 +3541,7 @@ int test_sqlite(void) {
      * database file changing once, and every writer in the process — chain
      * evidence, the UTXO mirror, the fleet board, peer persistence — was
      * refused with "database is locked" while reads carried on normally. */
-    check_sqlite_53_cached_readers_release_the_snap(&failures);
+    failures += check_sqlite_53_cached_readers_release_the_snap();
 
     return failures;
 }

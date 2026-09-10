@@ -2212,7 +2212,7 @@ Z23_FLAG("ZCL_SPECIALISTS_FLOOR", "env_build", "10", "-",
 Z23_FLAG("ZCL_SPECIALISTS_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_specialists.c:511")
 Z23_FLAG("ZCL_SQLITE_CHILD_DB", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_sqlite.c:3206")
+          "undocumented; first use tests/harness/src/test_sqlite.c:3310")
 Z23_FLAG("ZCL_STAGE_STALL_ESCALATE_WINDOWS", "env_runtime", "-", "-",
           "undocumented; first use engine/supervisors/src/staged_sync_supervisor.c:66")
 Z23_FLAG("ZCL_STALE_FACTS_EMIT_BASELINE", "env_build", "0", "-",
