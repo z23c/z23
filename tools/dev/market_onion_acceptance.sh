@@ -14,7 +14,7 @@
 # clearnet file-service connection was used: the onion offer carries no
 # usable clearnet endpoint (peer_ip zero, peer_port 0), and both tor.log
 # files name the /market/chunk traffic. The negative half restarts B
-# WITHOUT -tor before any successful retrieve and asserts the named
+# with -no-tor before any successful retrieve and asserts the named
 # ONION_DELIVERY_UNAVAILABLE refusal — there is never a clearnet fallback
 # against a signed onion offer.
 #
@@ -1017,12 +1017,20 @@ done
 # ── Phase 6 (negative): retrieve without Tor refuses by name ─────────
 # A completed retrieve replays idempotently without touching the transport
 # gate, so the no-Tor refusal must be proven BEFORE the successful
-# retrieve: kill B, bring the same datadir up WITHOUT -tor, and the signed
-# onion offer must refuse with ONION_DELIVERY_UNAVAILABLE — never a
+# retrieve: kill B, bring the same datadir up with Tor turned OFF, and the
+# signed onion offer must refuse with ONION_DELIVERY_UNAVAILABLE — never a
 # clearnet fallback.
-mkt_note "restarting B WITHOUT -tor: the onion offer must refuse retrieval by name"
+#
+# Tor now starts by DEFAULT on any build that links it (engine/composition
+# commit 629b524cde, "Start Tor by default and refuse -no-tor on a serving
+# lane"); merely omitting -tor no longer disables it, so this restart must
+# pass -no-tor explicitly. -operator-lane=dev (set unconditionally by
+# mkt_spawn) is not a network-serving lane, so -no-tor is honoured rather
+# than refused (engine/composition/src/app_context.c: app_tor_should_start,
+# app_tor_policy_refusal_code).
+mkt_note "restarting B with -no-tor: the onion offer must refuse retrieval by name"
 mkt_kill_group "$MKT_PGID_B"; MKT_PGID_B=""
-MKT_EXTRA_FLAGS=()
+MKT_EXTRA_FLAGS=("-no-tor")
 MKT_PGID_B="$(mkt_spawn "$MKT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$DEAD_SINK")"
 mkt_wait_rpc "$MKT_DD_B" "$B_RPC" "$MKT_PGID_B" || mkt_die "B no-Tor restart failed"
 mkt_unlock_wallet "$MKT_DD_B" "$B_RPC" || mkt_die "B no-Tor wallet unlock failed"
