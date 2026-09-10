@@ -15,7 +15,9 @@
 #include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
+#if defined(_WIN32)
 #include "platform/path_compat.h"
+#endif
 
 #include <limits.h>
 #include <stdio.h>
@@ -349,11 +351,17 @@ bool zcl_devagent_checkout_root(const char *start, char *out, size_t out_cap)
             /* Canonicalize before answering. A caller that passes "." or a
              * relative start walks relative to its cwd and would otherwise
              * get "." back — a string downstream validators reject and
-             * queue rows silently drop. realpath also resolves symlinked
-             * checkouts to the one true path. */
+             * queue rows silently drop. POSIX realpath also resolves a
+             * symlinked checkout to the one true path; MinGW has no
+             * realpath, so Windows uses the lexical identity helper. */
             char resolved[PATH_MAX];
+#if defined(_WIN32)
             if (!platform_path_identity(resolved, sizeof(resolved), dir))
                 return false;
+#else
+            if (realpath(dir, resolved) == NULL)
+                return false;
+#endif
             int n = snprintf(out, out_cap, "%s", resolved);
             return n > 0 && (size_t)n < out_cap;
         }
