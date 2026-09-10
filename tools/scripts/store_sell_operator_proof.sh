@@ -429,7 +429,14 @@ sp_wait_rpc() {
             sp_fail "$stage" "node exited during RPC warmup (see $dd/node.log)"
         fi
         if [ -f "$dd/.cookie" ]; then
-            t="$(ZCL_DATADIR="$dd" ZCL_RPCPORT="$rpc" "$RPC_BIN" getblockcount 2>/dev/null | sed -n 's/.*"result"[: ]*\([0-9-]*\).*/\1/p')"
+            # A node whose RPC is not serving yet makes zcl-rpc exit nonzero,
+            # and under `set -e` that killed the whole run mid-restart with a
+            # bare status and no verdict. Not answering YET is the normal state
+            # of this loop, so the status is absorbed and the deadline above is
+            # the only thing that decides.
+            t="$(ZCL_DATADIR="$dd" ZCL_RPCPORT="$rpc" \
+                 "$RPC_BIN" getblockcount 2>/dev/null || true)"
+            t="$(printf '%s' "$t" | sed -n 's/.*"result"[: ]*\([0-9-]*\).*/\1/p')"
             [ -n "$t" ] && return 0
         fi
         sleep 0.5
