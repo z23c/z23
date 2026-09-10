@@ -267,6 +267,74 @@ static int t_list_and_serve(void)
     return failures;
 }
 
+/* ── (1b) catalog and product detail name token_id and content hash ─
+ *
+ * A remote buyer must discover both without an out-of-band copy. The
+ * catalog used to render token_id only as the word "tokens" in prose;
+ * content_hash used to appear only on the too-large-to-inline page. */
+
+static int t_storefront_identity(void)
+{
+    int failures = 0;
+    char dir[256];
+    SL_CHECK("identity fixture datadir", sl_mk_datadir(dir, sizeof(dir),
+                                                       "identity"));
+
+    char file[512];
+    snprintf(file, sizeof(file), "%s/guide.bin", dir);
+    SL_CHECK("identity payload file",
+             sl_write_file(file, SL_FILE, sizeof(SL_FILE)));
+
+    struct json_value input;
+    struct zcl_command_reply reply;
+    sl_input_open(&input, dir);
+    (void)json_push_kv_str(&input, "name", "Field Guide");
+    (void)json_push_kv_str(&input, "token_id", "guide");
+    (void)json_push_kv_real(&input, "price_zcl", 0.25);
+    (void)json_push_kv_str(&input, "content_path", file);
+    sl_call(zcl_native_handle_store_list_product, &input, &reply);
+    json_free(&input);
+
+    SL_CHECK("identity: list-product OK",
+             reply.exit_code == ZCL_COMMAND_EXIT_OK);
+    int64_t product_id = json_get_int(json_get(&reply.data, "id"));
+    SL_CHECK("identity: assigned a product id", product_id > 0);
+    zcl_command_reply_free(&reply);
+
+    uint8_t want[32];
+    zcl_sha3_256(SL_FILE, sizeof(SL_FILE), want);
+    char want_hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(want_hex + i * 2, 3, "%02x", want[i]);
+
+    uint8_t page[65536];
+    size_t n = store_handle_request("GET", "/store", NULL, 0, page,
+                                    sizeof(page), dir);
+    page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
+    SL_CHECK("identity catalog: token_id is machine-readable",
+             strstr((char *)page, "class='token-id'>GUIDE") != NULL);
+
+    char show_path[64];
+    snprintf(show_path, sizeof(show_path), "/store/products/%lld",
+             (long long)product_id);
+    n = store_handle_request("GET", show_path, NULL, 0, page,
+                             sizeof(page), dir);
+    page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
+    SL_CHECK("identity detail: serves a page", n > 0);
+    SL_CHECK("identity detail: token_id is machine-readable",
+             strstr((char *)page, "class='token-id'>GUIDE") != NULL);
+    SL_CHECK("identity detail: data-token-id names the access token",
+             strstr((char *)page, "data-token-id='GUIDE'") != NULL);
+    SL_CHECK("identity detail: content_hash is SHA3-256 of the file bytes",
+             strstr((char *)page, want_hex) != NULL);
+    SL_CHECK("identity detail: data-content-hash carries the same digest",
+             strstr((char *)page, "data-content-hash='") != NULL &&
+             strstr((char *)page, want_hex) != NULL);
+
+    test_rm_rf(dir);
+    return failures;
+}
+
 /* ── (2) refusals write nothing ───────────────────────────────────── */
 
 static int t_refusals(void)
@@ -737,6 +805,7 @@ int test_store_listing(void)
     int failures = 0;
     printf("\n=== Store listing (typed merchant surface) ===\n");
     failures += t_list_and_serve();
+    failures += t_storefront_identity();
     failures += t_refusals();
     failures += t_input_errors();
     failures += t_json_path_still_works();

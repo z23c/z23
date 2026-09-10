@@ -358,10 +358,11 @@ const char *store_order_status_class(int status)
 }
 
 static const char PRODUCT_CARD_TEMPLATE[] =
-    "<div class='product'>"
+    "<div class='product' data-token-id='{{token_id}}'>"
     "<h3><a href='/store/products/{{id}}'>{{name}}</a></h3>"
     "<p>{{description}}</p>"
     "<div class='price'>{{price}} ZCL</div>"
+    "<p class='meta'>Access token: <code class='token-id'>{{token_id}}</code></p>"
     "<a href='/store/products/{{id}}' class='btn'>View</a>"
     "</div>";
 
@@ -435,6 +436,8 @@ size_t serve_product_list(sqlite3 *db, uint8_t *resp, size_t max)
             { "name",        products[i].name[0] ? products[i].name : "?" },
             { "description", products[i].description },
             { "price",       price_str },
+            { "token_id",    products[i].token_id[0] ? products[i].token_id
+                                                     : "" },
         };
 
         size_t rendered = template_render(PRODUCT_CARD_TEMPLATE,
@@ -478,6 +481,19 @@ size_t serve_product_detail(sqlite3 *db, int64_t product_id,
     html_escape(safe_token, sizeof(safe_token),
                 product.token_id[0] ? product.token_id : "TOKENS");
 
+    /* Buyers must be able to discover token_id and the payload SHA3-256
+     * from the product page itself. token_id used to appear only as the
+     * word "tokens" in prose; content_hash used to appear only on the
+     * too-large-to-inline download page, never for a product small enough
+     * to actually deliver. Empty hash_hex means this listing has no file. */
+    char hash_hex[65];
+    hash_hex[0] = '\0';
+    if (product.has_content) {
+        for (int i = 0; i < 32; i++)
+            (void)snprintf(hash_hex + i * 2, 3, "%02x",
+                           product.content_hash[i]);
+    }
+
     /* Sized for the design-system CSS (~14 KB) plus the ~5 KB embedded PoW
      * solver (STORE_ORDER_POW_JS) — the other product pages stay at the
      * smaller shared buffers used elsewhere in this file. */
@@ -506,10 +522,13 @@ size_t serve_product_detail(sqlite3 *db, int64_t product_id,
 
     n = snprintf(body + off, sizeof(body) - off,
         "<h1>%s</h1>"
-        "<div class='product'>"
+        "<div class='product' data-token-id='%s' data-content-hash='%s'>"
         "<p>%s</p>"
         "<div class='price'>%s ZCL</div>"
         "<p>You will receive <b>%lld</b> %s tokens.</p>"
+        "<p class='meta'>Access token: <code class='token-id'>%s</code></p>"
+        "<p class='meta'>Content hash (SHA3-256): "
+        "<code class='content-hash'>%s</code></p>"
         "<h3>Purchase</h3>"
         "<form id='orderForm' method='post' action='/store/orders' "
         "data-pow-seed='%s' data-pow-token='%s' "
@@ -536,10 +555,14 @@ size_t serve_product_detail(sqlite3 *db, int64_t product_id,
         "<p><a href='/store/products'>&larr; Back to store</a></p>"
         "<script>%s%s</script>",
         safe_name,
+        safe_token,
+        hash_hex,
         safe_desc,
         detail_price,
         (long long)product.tokens_per_purchase,
         safe_token,
+        safe_token,
+        hash_hex,
         pow_ch.seed_hex,
         pow_ch.token_hex,
         (long long)pow_ts,
