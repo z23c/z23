@@ -192,6 +192,26 @@ else
     pass "zcc apply never calls du — held/freed come from the evictor's report alone"
 fi
 
+# A cache FREEZE (free space under the freeze floor — the state a proof
+# generation on a full tmpfs is always in) must not buy the second walk
+# back: the apply path records the freeze from the evictor's held figure
+# instead of measuring first.
+: > "$DU_CALL_LOG"
+: > "$ZCC_STUB_COUNT"
+out="$(ZCL_HOST_GC_ZCC_BIN="$ZCC_STUB_OK" ZCC_STUB_COUNT_FILE="$ZCC_STUB_COUNT" \
+    ZCL_HOST_GC_CACHE_FREEZE_GB=1000000 \
+    PATH="$DU_SHADOW_DIR:$PATH" run_hostgc zcc apply)"
+assert_contains "$out" "FREEZE active" "zcc apply under a cache freeze says so"
+assert_contains "$out" "reclaimed 7" \
+    "zcc apply under a cache freeze still reports the evictor's freed amount"
+calls="$(wc -c < "$ZCC_STUB_COUNT")"
+[ "$calls" = 1 ] || fail "zcc apply under a freeze invoked the evictor $calls time(s), expected exactly 1"
+if [ -s "$DU_CALL_LOG" ]; then
+    fail "zcc apply under a cache freeze called du, which the one-walk invariant forbids: $(cat -- "$DU_CALL_LOG")"
+else
+    pass "zcc apply under a cache freeze never calls du — the freeze is recorded from the evictor's held figure"
+fi
+
 # A stub that prints garbage must fail loudly (zcc-trim-failed), never a
 # silent 0-freed success row.
 : > "$DU_CALL_LOG"

@@ -471,17 +471,20 @@ sweep_ccache() {
 # ("zcc: N MB held, N MB ceiling, N MB freed"); the APPLY path below reads
 # THAT line instead of measuring the directory again, so a normal apply run
 # costs exactly the evictor's one walk, never du before AND after it.
-# CACHE_FREEZE and dry-run still need to know the current size before they
-# can decide what cap to ask the evictor for (or, in dry-run, before the
-# evictor runs at all), so each keeps exactly one measurement of its own —
-# never a second on top of it.
+# Dry-run still needs the current size before the evictor runs at all, so it
+# keeps exactly one measurement of its own — never a second on top of it.
+# A cache FREEZE on the apply path is recorded from the evictor's held
+# figure, never measured first: trimming to min(held, cap) frees exactly
+# what trimming to cap frees, so the freeze changes the log row, not the
+# eviction, and buying it with a walk of its own would put the second walk
+# back on every low-disk box.
 sweep_zcc() {
     want zcc || return 0
     hdr "zcc cache (cap $(( ZCC_CAP_MB / 1024 ))G)"
     local dir="${ZCL_HOST_GC_ZCC_DIR:-$GC_HOME/.cache/zcc}" before after freed
     [ -d "$dir" ] || { say "zcc: no cache directory — skipped"; return 0; }
     local cap_mb="$ZCC_CAP_MB"
-    if [ "$CACHE_FREEZE" = 1 ]; then
+    if [ "$CACHE_FREEZE" = 1 ] && [ "$APPLY" != 1 ]; then
         before="$(dir_bytes "$dir")"
         local held_mb=$(( before / 1024 / 1024 ))
         [ "$held_mb" -lt "$cap_mb" ] && cap_mb="$held_mb"
@@ -517,6 +520,11 @@ sweep_zcc() {
             held_mb="$(printf '%s\n' "$trim_out" | sed -n 's/^zcc: \([0-9][0-9]*\) MB held,.*/\1/p')"
             freed_mb="$(printf '%s\n' "$trim_out" | sed -n 's/.* \([0-9][0-9]*\) MB freed$/\1/p')"
             if [ -n "$held_mb" ] && [ -n "$freed_mb" ]; then
+                if [ "$CACHE_FREEZE" = 1 ] && [ "$held_mb" -lt "$cap_mb" ]; then
+                    cap_mb="$held_mb"
+                    [ "$cap_mb" -lt 64 ] && cap_mb=64
+                    say "zcc: FREEZE active — cap held at ${cap_mb}MB (no growth)"
+                fi
                 after=$(( held_mb * 1024 * 1024 ))
                 freed=$(( freed_mb * 1024 * 1024 ))
                 say "zcc: now $(human "$after"), reclaimed $(human "$freed") (via $bin)"

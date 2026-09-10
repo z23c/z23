@@ -1069,7 +1069,7 @@ Z23_FLAG("ZCL_HOST_GC_WORKTREE_GC", "env_build", "$SCRIPT_DIR/worktree_gc.sh", "
 Z23_FLAG("ZCL_HOST_GC_WORKTREE_IDLE_D", "env_build", "3", "-",
           "days a merged+clean named worktree survives before worktree_gc.sh reaps it; first use tools/scripts/host_gc.sh:124")
 Z23_FLAG("ZCL_HOST_GC_Z23P", "env_build", "$GC_HOME/github/.z23p", "-",
-          "fixture seam for the dev-proof generation pool the z23p sweep walks; first use tools/scripts/host_gc.sh:586")
+          "fixture seam for the dev-proof generation pool the z23p sweep walks; first use tools/scripts/host_gc.sh:594")
 Z23_FLAG("ZCL_HOST_GC_Z23P_MIN_AGE_H", "env_build", "6", "-",
           "hours a dev-proof generation survives before the z23p sweep reaps it; first use tools/scripts/host_gc.sh:100")
 Z23_FLAG("ZCL_HOST_GC_ZCC_BIN", "env_build", "$REPO_ROOT/build/bin/zcc", "-",
@@ -1077,7 +1077,7 @@ Z23_FLAG("ZCL_HOST_GC_ZCC_BIN", "env_build", "$REPO_ROOT/build/bin/zcc", "-",
 Z23_FLAG("ZCL_HOST_GC_ZCC_CAP_MB", "env_build", "15360", "-",
           "cap the zcc sweep trims the compile cache to; first use tools/scripts/host_gc.sh:93")
 Z23_FLAG("ZCL_HOST_GC_ZCC_DIR", "env_build", "$GC_HOME/.cache/zcc", "-",
-          "fixture seam for the zcc cache directory the zcc sweep measures and trims; first use tools/scripts/host_gc.sh:481")
+          "fixture seam for the zcc cache directory the zcc sweep measures and trims; first use tools/scripts/host_gc.sh:484")
 Z23_FLAG("ZCL_HOST_WATCHDOG_DOWN_CYCLES", "env_build", "2", "-",
           "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:66")
 Z23_FLAG("ZCL_HOST_WATCHDOG_LOG", "env_build", "-", "-",
