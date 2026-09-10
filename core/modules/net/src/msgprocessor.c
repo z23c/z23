@@ -1536,6 +1536,70 @@ static bool mp_sendcmpct(struct msg_processor *mp, struct p2p_node *node,
     return process_sendcmpct(mp, node, s);
 }
 
+/* ── zclassicd v2.1.2-beta6 fast-bootstrap seam ──────────────────
+ * A stock beta6 client only fast-syncs from a peer it reaches on the
+ * ORDINARY P2P port, so the eight snapshot commands have to be answered
+ * on a normal peer connection. The server itself is engine/services
+ * (beta6_bootstrap_*.c), above net in the module order: this seam copies
+ * the bounded payload out of the receive stream and hands
+ * (node, command, payload) to it. No hook installed — the default, and
+ * every node that has not set -beta6-bootstrap-source — means the message
+ * is ignored, exactly as before this seam existed. */
+void msg_processor_set_beta6_bootstrap(
+    struct msg_processor *mp,
+    msg_beta6_bootstrap_armed_fn armed,
+    msg_beta6_bootstrap_message_fn message)
+{
+    if (!mp)
+        return;
+    mp->beta6_armed = armed;
+    mp->beta6_message = message;
+}
+
+static bool mp_beta6_bootstrap(struct msg_processor *mp, struct p2p_node *node,
+                               struct byte_stream *s, const char *command)
+{
+    if (!mp || !node || !s)
+        return true;
+    if (!mp->beta6_message)
+        return true;   /* server not wired on this node: ignore, as before */
+    size_t len = stream_remaining(s);
+    /* The largest beta6 request is a chunk request (a few dozen bytes); the
+     * frame layer already bounds this at MAX_PROTOCOL_MESSAGE_LENGTH. */
+    if (len > MAX_PROTOCOL_MESSAGE_LENGTH)
+        return true;
+    unsigned char *buf = NULL;
+    if (len > 0) {
+        buf = zcl_malloc(len, "beta6_bootstrap_payload");
+        if (!buf)
+            return true;
+        if (!stream_read_bytes(s, buf, len)) {
+            free(buf);
+            return true;
+        }
+    }
+    bool ok = mp->beta6_message(mp, node, command, buf, len);
+    free(buf);
+    return ok;
+}
+
+/* One row per beta6 command, all routed to the seam above. */
+#define ZCL_BETA6_ROW(fn, command)                                      \
+    static bool fn(struct msg_processor *mp, struct p2p_node *node,     \
+                   struct byte_stream *s)                               \
+    {                                                                   \
+        return mp_beta6_bootstrap(mp, node, s, command);                \
+    }
+ZCL_BETA6_ROW(mp_beta6_getbsman, "getbsman")
+ZCL_BETA6_ROW(mp_beta6_bsman, "bsman")
+ZCL_BETA6_ROW(mp_beta6_getbschk, "getbschk")
+ZCL_BETA6_ROW(mp_beta6_bschk, "bschk")
+ZCL_BETA6_ROW(mp_beta6_getbspman, "getbspman")
+ZCL_BETA6_ROW(mp_beta6_bspman, "bspman")
+ZCL_BETA6_ROW(mp_beta6_getbspchk, "getbspchk")
+ZCL_BETA6_ROW(mp_beta6_bspchk, "bspchk")
+#undef ZCL_BETA6_ROW
+
 static const struct msg_dispatch_entry g_msg_dispatch[] = {
     /* ── Bitcoin P2P ── */
     { "version",      mp_handle_version,      false, false, "p2p" },
@@ -1594,6 +1658,19 @@ static const struct msg_dispatch_entry g_msg_dispatch[] = {
     { "zparamman",    mp_handle_param_manifest,  true, true, "params" },
     { "zparamcreq",   mp_handle_param_chunk_req, true, true, "params" },
     { "zparamdata",   mp_handle_param_chunk,     true, true, "params" },
+    /* ── zclassicd v2.1.2-beta6 fast bootstrap (engine/services) ──
+     * The client completes an ordinary version/verack handshake before it
+     * asks for anything, so every row requires the handshake; none is
+     * ZCL23-only, because a beta6 client is precisely a peer that is not a
+     * z23 node. With no server wired the seam ignores all eight. */
+    { "getbsman",     mp_beta6_getbsman,     true, false, "beta6boot" },
+    { "bsman",        mp_beta6_bsman,        true, false, "beta6boot" },
+    { "getbschk",     mp_beta6_getbschk,     true, false, "beta6boot" },
+    { "bschk",        mp_beta6_bschk,        true, false, "beta6boot" },
+    { "getbspman",    mp_beta6_getbspman,    true, false, "beta6boot" },
+    { "bspman",       mp_beta6_bspman,       true, false, "beta6boot" },
+    { "getbspchk",    mp_beta6_getbspchk,    true, false, "beta6boot" },
+    { "bspchk",       mp_beta6_bspchk,       true, false, "beta6boot" },
     /* sentinel */
     { "",             NULL,                  false, false, NULL }
 };
@@ -1692,6 +1769,8 @@ void msg_processor_init(struct msg_processor *mp,
     mp->utxo_sha3_compute = NULL;
     mp->utxo_sha3_compute_ctx = NULL;
     mp->block_intake = NULL;
+    mp->beta6_armed = NULL;
+    mp->beta6_message = NULL;
     mp->zcode_swarm_frame = NULL;
     mp->zcode_swarm_tick = NULL;
     mp->zcode_swarm_ctx = NULL;

@@ -24,6 +24,14 @@
 
 #include "services/beta6_bootstrap.h"
 
+#include "chain/chainparams.h"
+#include "net/msg_internal.h"
+#include "net/msgprocessor.h"
+#include "net/net.h"
+#include "net/protocol.h"
+#include "net/version.h"
+#include "util/sync.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -161,6 +169,79 @@ static bool fixture_build(const char *dir)
            fixture_write(dir, "chainstate/000007.ldb", 20) &&
            fixture_anchor(dir, "3126937 00000663e40f1fe0bc32a7e7282fac25de5fe8ec"
                                "efd9c627e2fd948d388f7053");
+}
+
+/* ── in-band seam fixtures ───────────────────────────────────────────
+ * The seam under test is core/modules/net's dispatch rows plus the engine
+ * server they route to. Both halves are exercised without a socket: a
+ * recording hook proves the ROUTING, and the real engine server proves the
+ * FRAMING by leaving its reply on the peer's send queue, which
+ * p2p_node_end_message fills without ever touching the file descriptor. */
+
+static int g_seam_calls;
+static char g_seam_command[16];
+static unsigned char g_seam_payload[64];
+static size_t g_seam_payload_len;
+
+static bool seam_record(struct msg_processor *mp, struct p2p_node *node,
+                        const char *command, const unsigned char *payload,
+                        size_t payload_len)
+{
+    (void)mp;
+    (void)node;
+    g_seam_calls++;
+    snprintf(g_seam_command, sizeof(g_seam_command), "%s", command);
+    g_seam_payload_len = payload_len < sizeof(g_seam_payload) ? payload_len
+                                                              : sizeof(g_seam_payload);
+    if (g_seam_payload_len > 0)
+        memcpy(g_seam_payload, payload, g_seam_payload_len);
+    return true;
+}
+
+static bool seam_armed_true(void)
+{
+    return true;
+}
+
+/* Feed one message through the REAL dispatch table, the way
+ * msg_process_messages does, so the test cannot pass on a row that is not
+ * actually wired. */
+static bool seam_dispatch(struct msg_processor *mp, struct p2p_node *node,
+                          const char *command, const unsigned char *payload,
+                          size_t payload_len)
+{
+    for (const struct msg_dispatch_entry *e = msg_get_dispatch_table(); e->handler;
+         e++) {
+        if (strcmp(e->command, command) != 0)
+            continue;
+        struct byte_stream s;
+        stream_init_from_data(&s, payload, payload_len);
+        bool ok = e->handler(mp, node, &s);
+        stream_free(&s);
+        return ok;
+    }
+    return false;
+}
+
+static void seam_addr_loopback(struct net_address *addr)
+{
+    net_address_init(addr);
+    addr->svc.addr.ip[10] = 0xff;
+    addr->svc.addr.ip[11] = 0xff;
+    addr->svc.addr.ip[12] = 127;
+    addr->svc.addr.ip[15] = 1;
+    addr->svc.port = 38033;
+}
+
+static void seam_drain(struct p2p_node *node)
+{
+    while (node->send_head) {
+        struct send_segment *next = node->send_head->next;
+        send_segment_free(node->send_head);
+        node->send_head = next;
+    }
+    node->send_tail = NULL;
+    node->send_size = 0;
 }
 
 int test_beta6_bootstrap(void);
@@ -416,6 +497,161 @@ int test_beta6_bootstrap(void)
         ASSERT(!beta6_bs_arm(dir, "main", err, sizeof(err)));
         ASSERT(strstr(err, "no compiled fast-sync anchor") != NULL);
         ASSERT(!beta6_bs_is_armed());
+        test_rm_rf(dir);
+        PASS();
+    }
+
+    /* ───────────────── in-band P2P seam (the production path) ───────── */
+
+    TEST("the dispatch table routes all eight beta6 commands after handshake") {
+        static const char *const names[] = { "getbsman",  "bsman",     "getbschk",
+                                             "bschk",     "getbspman", "bspman",
+                                             "getbspchk", "bspchk" };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            const struct msg_dispatch_entry *found = NULL;
+            for (const struct msg_dispatch_entry *e = msg_get_dispatch_table();
+                 e->handler; e++) {
+                if (strcmp(e->command, names[i]) == 0)
+                    found = e;
+            }
+            if (!found)
+                printf("\n  no dispatch row for %s\n", names[i]);
+            ASSERT(found != NULL);
+            /* A beta6 client is by definition NOT a z23 node, so gating these
+             * on NODE_ZCL23 would ignore every real client. */
+            ASSERT(!found->zcl23_only);
+            /* It completes an ordinary version/verack before it asks for
+             * anything (bootstrap.cpp:1866-1937). */
+            ASSERT(found->requires_handshake);
+        }
+        PASS();
+    }
+
+    TEST("with no beta6 server wired the commands are ignored and the bit clear") {
+        struct net_manager nm;
+        struct msg_processor mp;
+        struct p2p_node node;
+        memset(&mp, 0, sizeof(mp));
+        memset(&node, 0, sizeof(node));
+        net_manager_init(&nm);
+        nm.local_host_nonce = 7;
+        mp.net_mgr = &nm;
+        node.version = PROTOCOL_VERSION;
+        seam_addr_loopback(&node.addr);
+        g_seam_calls = 0;
+
+        const unsigned char request[12] = { 0 };
+        /* Dispatched, and dropped: the same thing this node did before the
+         * seam existed. Nothing is enqueued for the peer. */
+        ASSERT(seam_dispatch(&mp, &node, "getbschk", request, sizeof(request)));
+        ASSERT_EQ(g_seam_calls, 0);
+        ASSERT(node.send_head == NULL);
+
+        struct version_message ver;
+        msg_version_build(&ver, &mp, &node, 1);
+        ASSERT((ver.services & NODE_BOOTSTRAP) == 0);
+        net_manager_free(&nm);
+        PASS();
+    }
+
+    TEST("an armed server receives the exact payload and puts the bit in version") {
+        struct net_manager nm;
+        struct msg_processor mp;
+        struct p2p_node node;
+        memset(&mp, 0, sizeof(mp));
+        memset(&node, 0, sizeof(node));
+        net_manager_init(&nm);
+        nm.local_host_nonce = 7;
+        mp.net_mgr = &nm;
+        node.version = PROTOCOL_VERSION;
+        seam_addr_loopback(&node.addr);
+        msg_processor_set_beta6_bootstrap(&mp, seam_armed_true, seam_record);
+
+        g_seam_calls = 0;
+        const unsigned char request[8] = { 0x02, 0, 0, 0, 0x00, 0x00, 0x10, 0x00 };
+        ASSERT(seam_dispatch(&mp, &node, "getbschk", request, sizeof(request)));
+        ASSERT_EQ(g_seam_calls, 1);
+        ASSERT_STR_EQ(g_seam_command, "getbschk");
+        ASSERT_EQ((int)g_seam_payload_len, (int)sizeof(request));
+        ASSERT(memcmp(g_seam_payload, request, sizeof(request)) == 0);
+
+        struct version_message ver;
+        msg_version_build(&ver, &mp, &node, 1);
+        ASSERT((ver.services & NODE_BOOTSTRAP) != 0);
+        /* And the ordinary bits are untouched. */
+        ASSERT((ver.services & NODE_NETWORK) != 0);
+        ASSERT((ver.services & NODE_ZCL23) != 0);
+
+        /* Uninstalling restores the pre-seam behaviour exactly. */
+        msg_processor_set_beta6_bootstrap(&mp, NULL, NULL);
+        g_seam_calls = 0;
+        ASSERT(seam_dispatch(&mp, &node, "getbsman", NULL, 0));
+        ASSERT_EQ(g_seam_calls, 0);
+        msg_version_build(&ver, &mp, &node, 1);
+        ASSERT((ver.services & NODE_BOOTSTRAP) == 0);
+        net_manager_free(&nm);
+        PASS();
+    }
+
+    TEST("the in-band server answers getbsman with the cached manifest, framed") {
+        char dir[512];
+        char err[256] = { 0 };
+        struct chain_params params;
+        struct msg_processor mp;
+        struct p2p_node node;
+        const unsigned char magic[4] = { 0x24, 0xe9, 0x27, 0x64 };
+
+        beta6_bs_disarm();
+        beta6_bs_inband_disarm();
+        memset(&params, 0, sizeof(params));
+        memcpy(params.pchMessageStart, magic, sizeof(magic));
+        memset(&mp, 0, sizeof(mp));
+        mp.params = &params;
+        memset(&node, 0, sizeof(node));
+        zcl_mutex_init(&node.cs_send);
+        seam_addr_loopback(&node.addr);
+
+        /* Nothing armed: a NAMED reject, promptly, never a stall — the client
+         * aborts a stream that goes quiet for 60 s. */
+        ASSERT(!beta6_bs_inband_armed());
+        ASSERT(beta6_bs_inband_serve(&mp, &node, "getbsman", NULL, 0));
+        ASSERT(node.send_head != NULL);
+        ASSERT(memcmp(node.send_head->data, magic, 4) == 0);
+        ASSERT_STR_EQ((const char *)node.send_head->data + 4, "reject");
+        seam_drain(&node);
+
+        test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "inband");
+        ASSERT(fixture_build(dir));
+        ASSERT(beta6_bs_arm(dir, "main", err, sizeof(err)));
+        ASSERT(beta6_bs_inband_arm("main", "", err, sizeof(err)));
+        ASSERT(beta6_bs_inband_armed());
+
+        ASSERT(beta6_bs_inband_serve(&mp, &node, "getbsman", NULL, 0));
+        ASSERT(node.send_head != NULL);
+        const unsigned char *frame = node.send_head->data;
+        ASSERT(node.send_head->size > 24);
+        ASSERT(memcmp(frame, magic, 4) == 0);
+        ASSERT_STR_EQ((const char *)frame + 4, "bsman");
+        /* The framed payload is the real manifest: decode it back and read the
+         * height a beta6 client would install from. */
+        struct byte_stream body;
+        stream_init_from_data(&body, frame + 24, node.send_head->size - 24);
+        struct beta6_bs_manifest decoded;
+        ASSERT(beta6_bs_manifest_decode(&body, &decoded));
+        stream_free(&body);
+        ASSERT_EQ(decoded.height, 3126937);
+        ASSERT_EQ((int)decoded.file_count, 3);
+        beta6_bs_manifest_free(&decoded);
+        seam_drain(&node);
+
+        /* An unsolicited SERVER reply is dropped, not parsed and not answered. */
+        ASSERT(beta6_bs_inband_serve(&mp, &node, "bschk", NULL, 0));
+        ASSERT(node.send_head == NULL);
+
+        beta6_bs_inband_disarm();
+        ASSERT(!beta6_bs_inband_armed());
+        beta6_bs_disarm();
+        zcl_mutex_destroy(&node.cs_send);
         test_rm_rf(dir);
         PASS();
     }

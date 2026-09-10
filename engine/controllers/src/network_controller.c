@@ -350,8 +350,8 @@ static bool rpc_getnetworkinfo(const struct json_value *params, bool help,
  * offered one (how many peers are advertising state to us, and how new).
  *
  * Deliberately separate from `beta6_snapshot_bootstrap`: NODE_BOOTSTRAP is
- * zclassicd beta6's service bit, advertised only by the opt-in beta6
- * snapshot listener, and it carries no port a stranger could dial for z23
+ * zclassicd beta6's service bit, advertised only when the opt-in beta6
+ * snapshot server is armed, and it carries no port a stranger could dial for z23
  * state. The z23 state source is advertised by the zfileaddr message instead,
  * because a service bit carries no file-service port (net/protocol.h). */
 static void network_push_state_source(struct json_value *result)
@@ -374,14 +374,16 @@ static void network_push_state_source(struct json_value *result)
     json_free(&src);
 }
 
-/* NODE_BOOTSTRAP as a beta6 client sees it. The beta6 snapshot service runs on
- * its own listener (engine/services/src/beta6_bootstrap_listen.c), and the
- * version message that listener sends is where the bit is actually advertised
- * — so a running listener IS this node advertising it, whether or not the
- * ordinary P2P connman also carries the bit. */
-static bool beta6_advertises_node_bootstrap(uint64_t local_services, bool listening)
+/* NODE_BOOTSTRAP as a beta6 client sees it. Two independent ways this node can
+ * be advertising it: the in-band seam, which puts the bit into the ORDINARY
+ * P2P `version` (engine/services/src/beta6_bootstrap_inband.c — the production
+ * path, because that is the only port a stock client dials), or the optional
+ * side listener, whose own version message carries it
+ * (engine/services/src/beta6_bootstrap_listen.c). */
+static bool beta6_advertises_node_bootstrap(uint64_t local_services, bool in_band,
+                                            bool listening)
 {
-    return (local_services & NODE_BOOTSTRAP) != 0 || listening;
+    return (local_services & NODE_BOOTSTRAP) != 0 || in_band || listening;
 }
 
 /* The single named fact keeping this node from serving beta6 clients, in the
@@ -395,7 +397,9 @@ static const char *beta6_current_blocker(bool serving, const char *posture_block
         return posture_blocker;
     if (!beta6_bs_is_armed())
         return "beta6_bootstrap_source_not_configured";
-    return "beta6_bootstrap_listen_not_configured";
+    /* Armed, but nothing is answering: the in-band seam did not install and
+     * no side listener was configured either. */
+    return "beta6_bootstrap_serving_not_installed";
 }
 
 /* What this node would actually hand a beta6 client: which directory is armed
@@ -406,6 +410,10 @@ static void network_push_beta6_source(struct json_value *beta6)
 {
     const struct beta6_bs_manifest *manifest = beta6_bs_manifest();
     json_push_kv_str(beta6, "source_dir", beta6_bs_source_dir());
+    /* Which wire is actually answering. `in_band` is the production path (the
+     * node's own P2P port); `listen_port` is the optional side socket, 0 when
+     * none was configured. */
+    json_push_kv_bool(beta6, "in_band", beta6_bs_inband_armed());
     json_push_kv_int(beta6, "listen_port", (int64_t)beta6_bs_listen_port());
     json_push_kv_int(beta6, "manifest_version",
                      manifest ? (int64_t)manifest->version : 0);
@@ -440,8 +448,10 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     bool node_network = (counts.local_services & NODE_NETWORK) != 0;
     bool node_zcl23 = (counts.local_services & NODE_ZCL23) != 0;
     bool beta6_listening = beta6_bs_listen_running();
-    bool node_bootstrap =
-        beta6_advertises_node_bootstrap(counts.local_services, beta6_listening);
+    bool beta6_in_band = beta6_bs_inband_armed();
+    bool node_bootstrap = beta6_advertises_node_bootstrap(counts.local_services,
+                                                          beta6_in_band,
+                                                          beta6_listening);
     bool protocol_ok = PROTOCOL_VERSION >= MIN_PEER_PROTO_VERSION;
     bool listening = counts.listen_socket_count > 0;
     bool has_tip = advertised_height > 0;
@@ -453,10 +463,11 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
         agent_security_posture_allows_public_serving(&security_posture);
     bool p2p_serving = transport_ready && security_posture_ok;
     bool addr_relay_ready = counts.addrman_entries > 0;
-    /* The beta6 wire is served by its own listener and does not depend on the
-     * ordinary P2P transport being at tip; it does still respect the security
-     * posture, which is what gates public serving. */
-    bool beta6_fast = beta6_listening && security_posture_ok;
+    /* The beta6 wire answers from an already-hashed snapshot and does not
+     * depend on the ordinary P2P transport being at tip; it does still respect
+     * the security posture, which is what gates public serving. In-band or on
+     * the side listener, either one is this node serving beta6 clients. */
+    bool beta6_fast = (beta6_in_band || beta6_listening) && security_posture_ok;
     bool zcl23_fast = p2p_serving && node_zcl23;
 
     json_set_object(result);

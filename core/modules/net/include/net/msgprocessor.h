@@ -212,6 +212,19 @@ typedef bool (*msg_zcode_swarm_frame_fn)(struct msg_processor *mp,
 typedef void (*msg_zcode_swarm_tick_fn)(struct msg_processor *mp,
                                         struct p2p_node *node, void *ctx);
 
+/* zclassicd v2.1.2-beta6 fast-bootstrap seam. The server lives in
+ * engine/services (beta6_bootstrap_*.c), above net in the module order, so
+ * this seam knows nothing about the beta6 wire: `armed` says whether the node
+ * may advertise NODE_BOOTSTRAP, and `message` is handed the raw payload of one
+ * of the eight beta6 commands. Both NULL is the default and the pre-existing
+ * behaviour — the bit stays clear and the commands are ignored. */
+typedef bool (*msg_beta6_bootstrap_armed_fn)(void);
+typedef bool (*msg_beta6_bootstrap_message_fn)(struct msg_processor *mp,
+                                               struct p2p_node *node,
+                                               const char *command,
+                                               const unsigned char *payload,
+                                               size_t payload_len);
+
 struct msg_processor {
     struct main_state *main_state;
     struct tx_mempool *mempool;
@@ -297,6 +310,11 @@ struct msg_processor {
     msg_zcode_swarm_frame_fn zcode_swarm_frame;
     msg_zcode_swarm_tick_fn zcode_swarm_tick;
     void *zcode_swarm_ctx;
+
+    /* beta6 fast-bootstrap seam (see the typedefs above). NULL = this node
+     * neither advertises NODE_BOOTSTRAP nor answers the eight commands. */
+    msg_beta6_bootstrap_armed_fn beta6_armed;
+    msg_beta6_bootstrap_message_fn beta6_message;
 };
 
 /* ── P2P message dispatch table ──────────────────────────────────
@@ -456,6 +474,14 @@ void msg_processor_set_zcode_swarm(
     msg_zcode_swarm_frame_fn frame,
     msg_zcode_swarm_tick_fn tick,
     void *ctx);
+
+/* zclassicd beta6 fast-bootstrap: wire the engine server. Both NULL
+ * uninstalls it. The eight dispatch rows live in msgprocessor.c and the
+ * services bit is ORed in by msg_version_build. */
+void msg_processor_set_beta6_bootstrap(
+    struct msg_processor *mp,
+    msg_beta6_bootstrap_armed_fn armed,
+    msg_beta6_bootstrap_message_fn message);
 
 /* Fairness contract for the connman message cycle: inbound work for one
  * peer must yield back to the send phase regularly so queued block requests

@@ -396,6 +396,13 @@ void msg_version_build(struct version_message *ver,
         ver->services |= NODE_BLOOM;
     if (mp->net_mgr && mp->net_mgr->noise_enabled)
         ver->services |= NODE_NOISE_TRANSPORT;
+    /* A zclassicd v2.1.2-beta6 client refuses to fast-sync from a bootstrap
+     * peer whose version does not carry NODE_BOOTSTRAP, and it looks for it
+     * on the ORDINARY P2P port. Advertised only while the engine's beta6
+     * snapshot server says it is armed and can actually answer the eight
+     * commands — never as a standing claim. */
+    if (mp->beta6_armed && mp->beta6_armed())
+        ver->services |= NODE_BOOTSTRAP;
     ver->timestamp = (int64_t)platform_time_wall_time_t();
     ver->addr_recv = node->addr;
     if (g_has_external_ip) {

@@ -158,15 +158,32 @@ configured**: no flag, no advertised bit, no listener, no behaviour change.
 ### Enabling it
 
 ```sh
-z23 \
-  -beta6-bootstrap-source=/absolute/path/to/snapshot \
-  -beta6-bootstrap-listen=<bind-ip>:<port>
+z23 -beta6-bootstrap-source=/absolute/path/to/snapshot
 ```
 
-Both accept an environment fallback (`ZCL_BETA6_BOOTSTRAP_SOURCE`,
-`ZCL_BETA6_BOOTSTRAP_LISTEN`). Set only the source and the snapshot is armed
-and described in `core sync status` but never served; the listener is what puts
-it on the wire.
+That one flag is the whole production configuration. With it the node
+advertises `NODE_BOOTSTRAP` in the `version` message of its **ordinary P2P
+connections** and answers the eight messages **in-band on its own P2P port** —
+which is the only place a stock beta6 client looks, because the bootstrap peers
+are compiled into its binary and it dials them on port 8033.
+
+There is a second, optional flag for hosts that want the service on a socket of
+its own as well:
+
+```sh
+z23 -beta6-bootstrap-source=/absolute/path/to/snapshot \
+    -beta6-bootstrap-listen=<bind-ip>:<port>
+```
+
+A dedicated listener is reachable only by a client explicitly pointed at it
+with `-bootstrappeer=<ip>:<port>`, so it is useful for testing and for putting
+the service on a second interface — not for serving stock clients, which never
+dial it. Both flags accept an environment fallback
+(`ZCL_BETA6_BOOTSTRAP_SOURCE`, `ZCL_BETA6_BOOTSTRAP_LISTEN`).
+
+With no source the service is entirely dormant: the bit stays out of the
+services word, the eight commands are ignored, and nothing about this node's
+behaviour changes.
 
 ### What the source directory must contain
 
@@ -207,21 +224,38 @@ the byte-identical manifest they require.
 Serving is metered per client address group (IPv4 `/24`, IPv6 `/64`) against a
 rolling 24-hour cap with a bandwidth throttle, matching the legacy server's
 accounting.
+Serving is metered per client address group (IPv4 `/24`, IPv6 `/64`) against a
+rolling 24-hour cap. The in-band path runs on the shared message thread, so a
+bucket over its cap is refused **by name** through a beta6 `reject` rather than
+slowed with a sleep: parking that thread would stall every other peer, and a
+beta6 client aborts a stream that goes quiet for 60 s anyway. The dedicated
+listener, which owns a thread per session, still spaces requests out instead.
 
 `core sync status` reports the state under `beta6_snapshot_bootstrap`:
-`serving` flips true when the listener is up, `current_blocker` empties, and
-the object carries the source directory plus the manifest's height, file count
-and byte total. While the source is unset the blocker reads
-`beta6_bootstrap_source_not_configured`; with a source but no listener it reads
-`beta6_bootstrap_listen_not_configured`.
+`serving` flips true once the service is answering — `in_band` true for the
+ordinary P2P port, a non-zero `listen_port` for the optional side socket, or
+both — `current_blocker` empties, and the object carries the source directory
+plus the manifest's height, file count and byte total. While the source is
+unset the blocker reads `beta6_bootstrap_source_not_configured`; armed with
+nothing on the wire it reads `beta6_bootstrap_serving_not_installed`.
 
 ### Deployment note
 
 beta6's compiled bootstrap peers are contacted on the ordinary P2P port, and a
-stock beta6 client will only fast-sync from a peer it reaches there. z23's own
-peer-to-peer listener owns that port, and its `version` message is built in the
-sealed consensus core, so this server is a **separate socket**: to serve stock
-clients without modification, give it the P2P port on its own address or
-interface (or move z23's P2P listener elsewhere on that host). On any other
-port it is reachable only by a client explicitly pointed at it with
-`-bootstrappeer=<ip>:<port>`, which is the shape used for testing.
+stock beta6 client will only fast-sync from a peer it reaches there. On a
+production host that port is z23's own peer-to-peer socket, which is why the
+in-band path — not the dedicated listener — is the deployment shape: arm
+`-beta6-bootstrap-source` and z23's ordinary `version` starts carrying
+`NODE_BOOTSTRAP`, so a stock client that dials the compiled peer gets its
+snapshot from the connection it already opened.
+
+The service word and the eight dispatch rows live in the sealed consensus core
+(`core/modules/net`), added under the owner unseal ritual on 2026-09-10. The
+core half is a seam and nothing more: two function pointers the engine installs
+at boot. With them unset — every node that has not named a source directory —
+the bit stays clear and the eight commands are ignored, exactly as before.
+
+The dedicated listener stays available (`-beta6-bootstrap-listen=<ip>:<port>`)
+for a second interface or for testing. On any port other than the compiled one
+it is reachable only by a client explicitly pointed at it with
+`-bootstrappeer=<ip>:<port>`.

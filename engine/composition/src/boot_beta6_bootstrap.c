@@ -1,13 +1,20 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Boot wiring for the optional zclassicd beta6 bootstrap snapshot server.
  *
- * Dormant by default. Two flags arm it, each with an environment fallback so a
+ * Dormant by default. One flag arms it, with an environment fallback so a
  * service unit can set it without rewriting an argv line:
  *
  *   -beta6-bootstrap-source=<ABSOLUTE dir>   ZCL_BETA6_BOOTSTRAP_SOURCE
+ *
+ * That alone is the production path: the node advertises NODE_BOOTSTRAP and
+ * answers the eight messages IN-BAND on its ordinary P2P peers, which is the
+ * only place a stock beta6 client looks. A second, optional flag additionally
+ * opens the legacy side listener, for hosts that want the service on its own
+ * address:
+ *
  *   -beta6-bootstrap-listen=<ip>:<port>      ZCL_BETA6_BOOTSTRAP_LISTEN
  *
- * With neither set this service starts nothing and changes no behaviour: the
+ * With the source unset this service starts nothing and changes no behaviour: the
  * NODE_BOOTSTRAP bit stays unadvertised and the eight beta6 messages stay
  * unanswered, exactly as before. Arming SHA-256-hashes the whole serve tree
  * once, here at boot, so no request path ever hashes; a failure is named and
@@ -21,6 +28,7 @@
 #include "config/boot_internal.h"
 #include "services/beta6_bootstrap.h"
 #include "chain/chainparams.h"
+#include "net/msgprocessor.h"
 #include "base/log_macros.h"
 #include "util/util.h"
 
@@ -83,13 +91,26 @@ static bool boot_beta6_bootstrap_start(void *ctx)
              (int)manifest->version, (int)manifest->height, manifest->file_count,
              (unsigned long long)manifest->snapshot_bytes);
 
+    /* The production path: advertise NODE_BOOTSTRAP and answer the eight
+     * messages on this node's ORDINARY P2P peers, because that is the only
+     * port a stock beta6 client will fast-sync from. Installed before the
+     * optional side listener so a node that names only a source directory
+     * already serves stock clients. */
+    if (beta6_bs_inband_arm(svc->params->strNetworkID, svc->app_ctx->params_dir, err,
+                            sizeof(err))) {
+        msg_processor_set_beta6_bootstrap(svc->msg_processor, beta6_bs_inband_armed,
+                                          beta6_bs_inband_serve);
+        LOG_INFO("beta6boot",
+                 "serving beta6 bootstrap snapshots in-band on the P2P port "
+                 "(NODE_BOOTSTRAP advertised)");
+    } else {
+        LOG_WARN("beta6boot", "in-band beta6 bootstrap serving NOT armed: %s", err);
+    }
+
     const char *listen =
         flag_or_env("-beta6-bootstrap-listen", getenv("ZCL_BETA6_BOOTSTRAP_LISTEN"));
-    if (!listen[0]) {
-        LOG_INFO("beta6boot",
-                 "no -beta6-bootstrap-listen=<ip>:<port>; snapshot armed but not served");
+    if (!listen[0])
         return true;
-    }
     char ip[64] = { 0 };
     uint16_t port = 0;
     if (!parse_listen(listen, ip, sizeof(ip), &port)) {
@@ -106,7 +127,14 @@ static bool boot_beta6_bootstrap_start(void *ctx)
 
 static void boot_beta6_bootstrap_stop(void *ctx)
 {
-    (void)ctx;
+    struct boot_svc_ctx *svc = ctx;
+    /* Uninstall the seam BEFORE releasing what it reads: with the hooks
+     * cleared the dispatch table ignores the eight commands again and the
+     * services word drops NODE_BOOTSTRAP, exactly as on a node that never
+     * configured a source. */
+    if (svc && svc->msg_processor)
+        msg_processor_set_beta6_bootstrap(svc->msg_processor, NULL, NULL);
+    beta6_bs_inband_disarm();
     beta6_bs_listen_stop();
     beta6_bs_disarm();
 }

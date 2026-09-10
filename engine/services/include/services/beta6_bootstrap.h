@@ -225,7 +225,34 @@ void beta6_bs_quota_clear(void);
  * stop. */
 void beta6_bs_quota_configure(int64_t max_bytes_per_day, int64_t throttle_kbps);
 
-/* ── Listener ────────────────────────────────────────────────────────── */
+/* ── In-band P2P serving (the production path) ───────────────────────── */
+
+/* A beta6 client only fast-syncs from a peer it reaches on the ORDINARY P2P
+ * port, which on any real deployment is z23's own peer-to-peer socket. These
+ * three functions are the engine half of the core/modules/net seam declared in
+ * net/msgprocessor.h; the boot glue installs them once the snapshot is armed.
+ * Until then nothing is installed, NODE_BOOTSTRAP stays out of the services
+ * word, and the eight commands are ignored. */
+struct msg_processor;
+struct p2p_node;
+
+/* Cache the manifest wire bytes and remember which network and zk-SNARK
+ * parameter directory this node serves. Requires an already-armed snapshot;
+ * returns false with a named reason otherwise. */
+bool beta6_bs_inband_arm(const char *network, const char *params_dir, char *err,
+                         size_t err_size);
+void beta6_bs_inband_disarm(void);
+/* True when this node will both advertise NODE_BOOTSTRAP and answer the eight
+ * messages on an ordinary peer connection. */
+bool beta6_bs_inband_armed(void);
+/* Answer one beta6 message from `node`. Refusals are by name through a beta6
+ * `reject`; the four reply commands are dropped. Never blocks: this runs on
+ * the shared message thread. */
+bool beta6_bs_inband_serve(struct msg_processor *mp, struct p2p_node *node,
+                           const char *command, const unsigned char *payload,
+                           size_t payload_len);
+
+/* ── Listener (optional; superseded by the in-band path above) ────────── */
 
 /* Start the beta6 bootstrap listener on `bind_ip`:`port`, framing messages
  * with the active network's 4-byte `magic` and serving the already-armed
