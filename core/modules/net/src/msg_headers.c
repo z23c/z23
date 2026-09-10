@@ -449,25 +449,30 @@ uint64_t getheaders_replayed_deferred(void)
  * `s` is positioned at the START of the still-unread payload: process_getheaders
  * defers before it deserializes the locator, so read_pos is exactly the byte
  * the peer's request begins at. The copy is a plain memcpy into fixed node
- * bytes — nothing is allocated on a path a hostile peer drives, and a payload
- * that does not fit (or an empty one) is simply not parked, leaving the slot
- * disarmed rather than truncating a request into a different one. A later
- * defer inside the same window overwrites the slot: the newest locator is the
- * one worth answering, and the peer only ever waits on its latest ask.
+ * bytes — nothing is allocated on a path a hostile peer drives. A payload that
+ * does not fit (or an empty one) is simply not parked, and it leaves whatever
+ * is already parked alone: that earlier request is still one the peer is owed,
+ * and it must not be traded for a request that cannot be answered at all. A
+ * later PARKABLE defer inside the same window overwrites the slot, and a
+ * request that gets SERVED disarms it (process_getheaders): the newest locator
+ * is the one worth answering, and the peer only ever waits on its latest ask.
  *
- * replay_after is the window's own roll time, floored at now so a backdated
- * or clock-jumped window_start cannot arm a replay for the past window. The
- * ARM FLAG is the length, not replay_after: the not-parked path leaves the
- * length at zero (disarmed) and replay_after at now, only so the defer log's
- * replay_in reads 0 instead of an epoch-sized negative. */
+ * replay_after is the window's own roll time, floored at now+1 so a backdated
+ * or clock-jumped window_start can neither arm a replay for the past window
+ * nor one that is already due in this same second (the replay guard is
+ * `now < replay_after`, so a floor of now would refire every tick until the
+ * second turned). The ARM FLAG is the length, not replay_after: the not-parked
+ * path with an empty slot leaves the length at zero (disarmed) and sets
+ * replay_after only so the defer log's replay_in reads 0 instead of an
+ * epoch-sized negative. */
 static void getheaders_park_deferred(struct p2p_node *node,
                                      const struct byte_stream *s,
                                      int64_t now_unix)
 {
     size_t len = s->size > s->read_pos ? s->size - s->read_pos : 0;
     if (len == 0 || len > GETHEADERS_DEFERRED_REQ_MAX_BYTES) {
-        node->getheaders_deferred_len = 0;
-        node->getheaders_deferred_replay_after = now_unix;
+        if (node->getheaders_deferred_len == 0)
+            node->getheaders_deferred_replay_after = now_unix;
         return; // raw-return-ok:payload-does-not-fit-the-parking-slot
     }
     memcpy(node->getheaders_deferred_req, s->data + s->read_pos, len);
@@ -475,7 +480,7 @@ static void getheaders_park_deferred(struct p2p_node *node,
     int64_t rolls_at =
         node->getheaders_rate_window_start + GETHEADERS_SERVE_WINDOW_SECS;
     node->getheaders_deferred_replay_after =
-        rolls_at > now_unix ? rolls_at : now_unix;
+        rolls_at > now_unix ? rolls_at : now_unix + 1;
 }
 
 /* Build the wire header for `iter` from the IN-MEMORY INDEX ALONE. Returns
@@ -1209,6 +1214,14 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
         LOG_FAIL("net", "failed to read getheaders hash_stop from %s",
                  node->addr_name);
     }
+
+    /* A request that is about to be SERVED supersedes anything parked from
+     * the old window: the peer is waiting on THIS ask now, so an older
+     * locator must not replay behind it and spend an admission on a page
+     * nobody is waiting for. Only here, past the parse: a malformed ask is
+     * admitted but never answered, and it must not take the owed park with
+     * it, or the peer is back to the silence the park exists to end. */
+    node->getheaders_deferred_len = 0;
 
     struct active_chain *chain = &mp->main_state->chain_active;
     struct block_index *iter = NULL;

@@ -338,11 +338,15 @@ static bool pd_zcl23_window_closes_at_own_allowance(
  * while the window is still open; once the window rolls the request is served
  * exactly once with a reply on the wire, counted as a REPLAY and not as a
  * fresh defer; a second tick with no new request does nothing (so no
- * request/defer loop can form); and the unrelated snapshot-serving defer
- * never arms the slot at all. Time is injected through the window fields
- * exactly as D3 does — no sleeps, no polling. Kept out of the test body so
- * the pinned test function does not grow, and split across four helpers so
- * each stays under the complexity cap. */
+ * request/defer loop can form); the unrelated snapshot-serving defer never
+ * arms the slot at all; a request the peer gets SERVED after the roll
+ * supersedes the parked one, so the stale locator never replays behind it;
+ * and the two asks that can never be answered — an unparkable (empty) one
+ * inside the closed window and a malformed one after the roll — leave the
+ * owed park in place instead of taking it with them. Time is injected
+ * through the window fields exactly as D3 does — no sleeps, no polling. Kept
+ * out of the test body so the pinned test function does not grow, and split
+ * across seven helpers so each stays under the complexity cap. */
 
 /* Fill this peer's window, then ask once more so the last request is deferred
  * — and report whether that defer parked it. */
@@ -353,6 +357,9 @@ static bool pd_park_deferred_request(struct msg_processor *mp,
     const int allowance =
         (int)getheaders_serve_request_allowance(node->services);
     for (int i = 0; i < allowance + 1; i++) {
+        /* Hold the window open by injection (D3 rolls it the same way), so
+         * the pin cannot depend on how long allowance+1 serves take here. */
+        node->getheaders_rate_window_start = platform_time_wall_time_t();
         req->read_pos = 0;   /* re-send the identical request */
         (void)process_getheaders(mp, node, req);
         pd_drain_send_queue(node);
@@ -425,8 +432,106 @@ static bool pd_snapshot_defer_parks_nothing(struct msg_processor *mp,
     return unarmed;
 }
 
-/* The one pin the test body carries: the four stages above, in order, on one
- * fresh legacy peer (services=0 — the client with no retry timer). */
+/* D4c — a request SERVED after the window rolls supersedes the parked one:
+ * the peer is waiting on THIS ask now, so the older locator must not replay
+ * behind it and spend an admission on a page nobody is waiting for. The
+ * ordering is the real one: the dispatcher can serve the peer's new ask in
+ * the cycle before the send tick would have replayed the old one. */
+static bool pd_served_ask_supersedes_parked(struct msg_processor *mp,
+                                            struct byte_stream *req,
+                                            node_id_t node_id)
+{
+    struct p2p_node node;
+    pd_setup_node(&node);
+    node.id = node_id;
+    node.services = 0;
+    if (!pd_park_deferred_request(mp, req, &node))
+        return false;
+    uint64_t replays_before = getheaders_replayed_deferred();
+    node.getheaders_rate_window_start =
+        platform_time_wall_time_t() - GETHEADERS_SERVE_WINDOW_SECS - 1;
+    node.getheaders_deferred_replay_after = platform_time_wall_time_t() - 1;
+    req->read_pos = 0;
+    (void)process_getheaders(mp, &node, req);
+    bool served = pd_queued_headers_count(&node) == 1 &&
+                  node.getheaders_rate_window_count == 1 &&
+                  node.getheaders_deferred_len == 0;
+    pd_drain_send_queue(&node);
+    pd_clear_fixture_disconnect(&node);
+    bool inert = !getheaders_replay_deferred(mp, &node) &&
+                 pd_queued_headers_count(&node) < 0 &&
+                 getheaders_replayed_deferred() == replays_before;
+    pd_drain_send_queue(&node);
+    return served && inert;
+}
+
+/* D4d — an EMPTY ask inside the closed window is deferred but cannot be
+ * parked; it must leave the park it found (the peer's answerable ask) alone,
+ * and count as a defer, not evict. */
+static bool pd_unparkable_ask_keeps_park(struct msg_processor *mp,
+                                         struct byte_stream *req,
+                                         node_id_t node_id)
+{
+    struct p2p_node node;
+    pd_setup_node(&node);
+    node.id = node_id;
+    node.services = 0;
+    if (!pd_park_deferred_request(mp, req, &node))
+        return false;
+    uint16_t parked_len = node.getheaders_deferred_len;
+    uint64_t defers_before = getheaders_deferred_rate_window();
+    struct byte_stream empty;
+    stream_init(&empty, 8);
+    empty.read_pos = 0;
+    bool handled = process_getheaders(mp, &node, &empty);
+    stream_free(&empty);
+    bool kept = handled && node.getheaders_deferred_len == parked_len &&
+                getheaders_deferred_rate_window() == defers_before + 1 &&
+                pd_queued_headers_count(&node) < 0;
+    pd_drain_send_queue(&node);
+    return kept;
+}
+
+/* D4e — a MALFORMED ask after the roll is admitted but never answered; the
+ * park must survive it and the next tick still replays the owed request once.
+ * (The defect this pins: a disarm on admission instead of on serve.) */
+static bool pd_malformed_ask_after_roll_keeps_park(struct msg_processor *mp,
+                                                   struct byte_stream *req,
+                                                   node_id_t node_id)
+{
+    struct p2p_node node;
+    pd_setup_node(&node);
+    node.id = node_id;
+    node.services = 0;
+    if (!pd_park_deferred_request(mp, req, &node))
+        return false;
+    uint64_t replays_before = getheaders_replayed_deferred();
+    node.getheaders_rate_window_start =
+        platform_time_wall_time_t() - GETHEADERS_SERVE_WINDOW_SECS - 1;
+    node.getheaders_deferred_replay_after = platform_time_wall_time_t() - 1;
+    static const uint8_t version_only[4] = {1, 0, 0, 0};
+    struct byte_stream bad;   /* nVersion only: no locator, no hash_stop */
+    stream_init(&bad, 8);
+    (void)stream_write_bytes(&bad, version_only, sizeof version_only);
+    bad.read_pos = 0;
+    bool handled = process_getheaders(mp, &node, &bad);
+    stream_free(&bad);
+    bool kept = !handled && node.getheaders_deferred_len > 0 &&
+                pd_queued_headers_count(&node) < 0;
+    pd_drain_send_queue(&node);
+    pd_clear_fixture_disconnect(&node);
+    bool replayed = getheaders_replay_deferred(mp, &node) &&
+                    pd_queued_headers_count(&node) == 1 &&
+                    getheaders_replayed_deferred() == replays_before + 1 &&
+                    node.getheaders_deferred_len == 0;
+    pd_drain_send_queue(&node);
+    return kept && replayed;
+}
+
+/* The one pin the test body carries: the stages above, in order, on one
+ * fresh legacy peer (services=0 — the client with no retry timer), then the
+ * snapshot defer, the served-ask supersession, and the two unanswerable asks
+ * on their own fresh peers. */
 static bool pd_deferred_request_replays_once(struct msg_processor *mp,
                                              struct byte_stream *req,
                                              node_id_t node_id)
@@ -439,7 +544,10 @@ static bool pd_deferred_request_replays_once(struct msg_processor *mp,
     bool quiet = pd_replay_quiet_before_roll(mp, &node);
     bool once = pd_replay_once_after_roll(mp, &node);
     return parked && quiet && once &&
-           pd_snapshot_defer_parks_nothing(mp, req, node_id + 1);
+           pd_snapshot_defer_parks_nothing(mp, req, node_id + 1) &&
+           pd_served_ask_supersedes_parked(mp, req, node_id + 2) &&
+           pd_unparkable_ask_keeps_park(mp, req, node_id + 3) &&
+           pd_malformed_ask_after_roll_keeps_park(mp, req, node_id + 4);
 }
 
 static bool pd_build_getheaders(struct byte_stream *buf,
@@ -904,10 +1012,10 @@ int test_getheaders_serve_pow_dedup(void)
             PD_CHECK("D2: served stops EXACTLY at the window allowance",
                      st_after.getheaders_served_requests -
                          st_before.getheaders_served_requests ==
-                     allowance - burst);
+                     (uint64_t)(allowance - burst));
             PD_CHECK("D2: the window admitted the allowance and no more",
                      st_after.getheaders_served_requests -
-                         served_at_window_start == allowance);
+                         served_at_window_start == (uint64_t)allowance);
             PD_CHECK("D2: every request past the allowance is deferred",
                      deferred_seen == flood_extra &&
                      served_seen == allowance - burst);
@@ -952,7 +1060,8 @@ int test_getheaders_serve_pow_dedup(void)
                 PD_CHECK("D2: the window is per-peer, not global",
                          other_served && other_queued &&
                          other.getheaders_rate_window_count == 1 &&
-                         flooder.getheaders_rate_window_count == allowance);
+                         flooder.getheaders_rate_window_count ==
+                             (uint32_t)allowance);
             }
 
             /* D2c — the allowance is drawn from the REQUESTING peer's own
@@ -995,7 +1104,9 @@ int test_getheaders_serve_pow_dedup(void)
              * whole contract in the helper above; no growth here. */
             PD_CHECK("D4: a deferred getheaders is replayed exactly once "
                      "when the window rolls, unasked, without spending a "
-                     "second defer — and the snapshot defer parks nothing",
+                     "second defer — the snapshot defer parks nothing, a "
+                     "served ask supersedes the park, and unanswerable "
+                     "asks leave it in place",
                      pd_deferred_request_replays_once(&mp, &req_d,
                                                       flood_id + 3));
 

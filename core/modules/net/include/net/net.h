@@ -411,11 +411,16 @@ struct p2p_node {
      * The replay draws an admission from the NEW window exactly like any
      * other request, so the header budget is untouched; only the rate-window
      * defer arms the slot (the snapshot-serving defer does not), and the slot
-     * is disarmed before the replay runs, so a peer gets at most one replay
-     * per window and a request/defer loop cannot form. Fixed bytes, so the
-     * hostile path allocates nothing; zero-initialised by p2p_node_create
-     * (calloc), where len==0 reads as "nothing parked", and, like the window
-     * above, the whole slot dies with the connection.
+     * is disarmed before the replay runs — or by any request of the peer's
+     * that gets served first, since its newest ask supersedes the parked one
+     * — so a peer gets at most one replay per window and a request/defer
+     * loop cannot form. The one replay of a locator the peer has moved past
+     * is the ask it could not have answered anyway: an empty or oversized
+     * request is never parked and never evicts the park it found (see
+     * getheaders_park_deferred). Fixed bytes, so the hostile path allocates
+     * nothing; zero-initialised by p2p_node_create (calloc), where len==0
+     * reads as "nothing parked", and, like the window above, the whole slot
+     * dies with the connection.
      *
      * Written and read only on the single message-handler thread (the
      * dispatcher and the send tick both run there), so no lock. */
