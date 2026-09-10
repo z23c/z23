@@ -686,15 +686,18 @@ static int zpy_book_windows(struct zpy_book_fx *fx,
 static struct vcs_service_book *zpy_book_reload(struct zpy_book_fx *fx,
                                                 struct vcs_service_book *book,
                                                 size_t events_before,
-                                                int *failures)
+                                                int *fail_out)
 {
+    int failures = 0;
     char dump_before[1024];
     zpy_book_dump(book, fx->key_a, 20000, dump_before, sizeof(dump_before));
     vcs_service_book_free(book);
     book = vcs_service_book_load(fx->zcode_dir);
     ZPY_CHECK("book: reload succeeds", book != NULL);
-    if (!book)
+    if (!book) {
+        if (fail_out) *fail_out += failures + 1;
         return NULL;
+    }
     char dump_after[1024];
     zpy_book_dump(book, fx->key_a, 20000, dump_after, sizeof(dump_after));
     ZPY_CHECK("book: the replayed book is byte-identical",
@@ -710,6 +713,7 @@ static struct vcs_service_book *zpy_book_reload(struct zpy_book_fx *fx,
     ZPY_CHECK("book: publish redelivery after reload is deduped",
               vcs_service_record_publish(book, fx->key_a, fx->rel1, 20002) ==
                   VCS_SERVICE_RECORD_DUPLICATE);
+    if (fail_out) *fail_out += failures;
     return book;
 }
 
