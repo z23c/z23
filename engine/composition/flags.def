@@ -1740,7 +1740,7 @@ Z23_FLAG("ZCL_PROMPT_TEMPLATE_ROW_FLOOR", "env_build", "8", "-",
 Z23_FLAG("ZCL_PROMPT_TEMPLATES_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_def_parsers.c:626")
 Z23_FLAG("ZCL_PROOF_RAM_RESERVE_BYTES", "env_runtime", "-", "-",
-          "undocumented; first use tools/dev/dev_proof.c:2270")
+          "undocumented; first use tools/dev/dev_proof.c:2289")
 Z23_FLAG("ZCL_PROOF_TIMEOUT_MS", "env_runtime", "-", "-",
           "first use tools/dev/dev_proof_budget.c:75; documented at docs/work/AGENT_SYNC_PLAN.md:80: 1. Land the eight leaves (this lane) and ZCL_PROOF_TIMEOUT_MS. Bar: every devagent_* gr...")
 Z23_FLAG("ZCL_PRUNE_KEEP_BLOCKS", "env_runtime", "-", "-",
