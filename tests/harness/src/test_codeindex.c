@@ -26,6 +26,7 @@
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
 #include "codeindex/codeindex_context.h"
+#include "codeindex/codeindex_merkle.h"
 #include "platform/time_compat.h"
 #include "test/test_timing_budget.h"
 
@@ -681,6 +682,32 @@ static bool set_contains(char set[64][64], int n, const char *s)
 {
     for (int i = 0; i < n; i++) if (strcmp(set[i], s) == 0) return true;
     return false;
+}
+
+static int test_codeindex_metrics_warm_view(int64_t files_indexed)
+{
+    int failures = 0;
+    struct codeindex *idx = codeindex_open_existing(MET_FIX);
+    bool current = false;
+    int64_t nfiles = 0, nsymbols = 0, nrefs = 0, ngroups = 0;
+    bool have_snap = false, unchanged = false;
+    uint8_t digest[32];
+    CI_CHECK("metrics fixture reopen for source-view", idx != NULL);
+    CI_CHECK("source view is current after a sealed index",
+             idx &&
+             codeindex_source_view_is_current(idx, &current) &&
+             current);
+    CI_CHECK("cached table counts are present after rebuild",
+             idx &&
+             codeindex_table_counts(idx, &nfiles, &nsymbols,
+                                    &nrefs, &ngroups) &&
+             nfiles == files_indexed && ngroups > 0);
+    CI_CHECK("sealed snapshot exists after the fixture index",
+             ci_merkle_snapshot_inventory_current(
+                 MET_FIX, &have_snap, &unchanged, digest) &&
+             have_snap);
+    if (idx) codeindex_close(idx);
+    return failures;
 }
 
 static int test_codeindex_platform_arm(void)
@@ -1812,6 +1839,11 @@ static int test_codeindex_platform_arm(void)
                  !json_get_bool(json_get(&reply.data, "stale")) &&
                  cold_files == files_indexed && cold_files > 0);
         zcl_command_reply_free(&reply);
+
+        /* Warm source-view freshness must not rebuild the Merkle tree.
+         * The sealed snapshot plus live inventory keys is enough to
+         * keep code.index.metrics inside its 750 ms FOREGROUND bucket. */
+        failures += test_codeindex_metrics_warm_view(files_indexed);
 
         CI_CHECK("metrics stale edit writes",
                  mk_write(MET_FIX, "core/modules/net/src/metrics_fix.c",

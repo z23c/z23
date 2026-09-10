@@ -268,6 +268,68 @@ static bool ci_count_sql(struct ci_store *s, const char *sql, int64_t *out)
     return ok;
 }
 
+static bool ci_meta_i64(struct ci_store *s, const char *key, int64_t *out)
+{
+    char text[32];
+    size_t len = 0;
+    bool found = false;
+    if (!s || !key || !out) return false;
+    if (!ci_store_meta_get(s, key, text, sizeof(text) - 1, &len, &found) ||
+        !found || len == 0 || len >= sizeof(text))
+        return false;
+    text[len] = '\0';
+    char *end = NULL;
+    long long v = strtoll(text, &end, 10);
+    if (!end || end == text || *end != '\0') return false;
+    *out = (int64_t)v;
+    return true;
+}
+
+static bool ci_meta_put_i64(struct ci_store *s, const char *key, int64_t v)
+{
+    char text[24];
+    int n = snprintf(text, sizeof(text), "%lld", (long long)v);
+    if (n <= 0 || (size_t)n >= sizeof(text)) return false;
+    return ci_store_meta_set(s, key, text, (size_t)n);
+}
+
+bool ci_store_write_table_count_meta(struct ci_store *s)
+{
+    int64_t files = 0, symbols = 0, refs = 0, groups = 0;
+    if (!s) return false;
+    if (!ci_count_sql(s, "SELECT COUNT(*) FROM files", &files) ||
+        !ci_count_sql(s, "SELECT COUNT(*) FROM symbols", &symbols) ||
+        !ci_count_sql(s, "SELECT COUNT(*) FROM refs", &refs) ||
+        !ci_count_sql(s, "SELECT COUNT(*) FROM groups", &groups))
+        return false;
+    return ci_meta_put_i64(s, "metrics_n_files", files) &&
+           ci_meta_put_i64(s, "metrics_n_symbols", symbols) &&
+           ci_meta_put_i64(s, "metrics_n_refs", refs) &&
+           ci_meta_put_i64(s, "metrics_n_groups", groups);
+}
+
+static bool ci_table_counts_from_meta(struct ci_store *s, int64_t *files,
+                                      int64_t *symbols, int64_t *refs,
+                                      int64_t *groups)
+{
+    return ci_meta_i64(s, "metrics_n_files", files) &&
+           ci_meta_i64(s, "metrics_n_symbols", symbols) &&
+           ci_meta_i64(s, "metrics_n_refs", refs) &&
+           ci_meta_i64(s, "metrics_n_groups", groups);
+}
+
+static bool ci_table_counts_from_sql(struct ci_store *s, int64_t *files,
+                                     int64_t *symbols, int64_t *refs,
+                                     int64_t *groups)
+{
+    if (!ci_count_sql(s, "SELECT COUNT(*) FROM files", files) ||
+        !ci_count_sql(s, "SELECT COUNT(*) FROM symbols", symbols) ||
+        !ci_count_sql(s, "SELECT COUNT(*) FROM refs", refs) ||
+        !ci_count_sql(s, "SELECT COUNT(*) FROM groups", groups))
+        LOG_FAIL("codeindex", "count index tables");
+    return true;
+}
+
 bool codeindex_table_counts(struct codeindex *ci, int64_t *files,
                             int64_t *symbols, int64_t *refs, int64_t *groups)
 {
@@ -277,12 +339,9 @@ bool codeindex_table_counts(struct codeindex *ci, int64_t *files,
     if (groups) *groups = 0;
     if (!ci || !ci->store || !files || !symbols || !refs || !groups)
         LOG_FAIL("codeindex", "null arg to table_counts");
-    if (!ci_count_sql(ci->store, "SELECT COUNT(*) FROM files", files) ||
-        !ci_count_sql(ci->store, "SELECT COUNT(*) FROM symbols", symbols) ||
-        !ci_count_sql(ci->store, "SELECT COUNT(*) FROM refs", refs) ||
-        !ci_count_sql(ci->store, "SELECT COUNT(*) FROM groups", groups))
-        LOG_FAIL("codeindex", "count index tables");
-    return true;
+    if (ci_table_counts_from_meta(ci->store, files, symbols, refs, groups))
+        return true;
+    return ci_table_counts_from_sql(ci->store, files, symbols, refs, groups);
 }
 
 int codeindex_group_metrics(struct codeindex *ci, struct ci_group_metric *out,

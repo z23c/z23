@@ -68,7 +68,7 @@ cognition/modules/codeindex/src/codeindex_build.c:ci_rebuild_lock_open:19
 cognition/modules/codeindex/src/codeindex_build.c:codeindex_rebuild_internal:61
 cognition/modules/codeindex/src/codeindex_build.c:collect_dir:20
 cognition/modules/codeindex/src/codeindex_build.c:source_file_sha3:22
-cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:34
+cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:28
 cognition/modules/codeindex/src/codeindex_build_windows.c:codeindex_rebuild_internal:40
 cognition/modules/codeindex/src/codeindex_build_windows.c:collect_directory:22
 cognition/modules/codeindex/src/codeindex_capability.c:cap_scan_symbols:24
@@ -101,7 +101,7 @@ cognition/modules/codeindex/src/codeindex_group.c:ci_group_for_path:21
 cognition/modules/codeindex/src/codeindex_impact.c:codeindex_forward_closure:41
 cognition/modules/codeindex/src/codeindex_impact.c:codeindex_reverse_includes:17
 cognition/modules/codeindex/src/codeindex_impact.c:impact_closure_impl:36
-cognition/modules/codeindex/src/codeindex_incremental.c:ci_build_store_incremental:19
+cognition/modules/codeindex/src/codeindex_incremental.c:ci_build_store_incremental:18
 cognition/modules/codeindex/src/codeindex_incremental.c:ci_store_diff_merkle_leaves:21
 cognition/modules/codeindex/src/codeindex_incremental.c:incremental_replace_file:19
 cognition/modules/codeindex/src/codeindex_inventory.c:inv_body_for_occurrence:16

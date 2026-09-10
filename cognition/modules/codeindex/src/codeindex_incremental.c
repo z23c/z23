@@ -156,6 +156,15 @@ static bool incremental_source_root(struct ci_store *store, uint8_t out[32])
     return ok;
 }
 
+static bool incremental_stamp_projection_and_counts(struct ci_store *store)
+{
+    uint8_t projection_root[32];
+    return ci_store_retrieval_projection_root(store, projection_root) &&
+           ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META,
+                             projection_root, sizeof(projection_root)) &&
+           ci_store_write_table_count_meta(store);
+}
+
 bool ci_build_store_incremental(const char *root, struct ci_store *store,
                                 const struct ci_merkle_leaf *changed,
                                 int changed_count,
@@ -169,16 +178,14 @@ bool ci_build_store_incremental(const char *root, struct ci_store *store,
     bool ok = tx_open;
     for (int i = 0; ok && i < changed_count; i++)
         ok = incremental_replace_file(root, store, changed[i].path);
-    uint8_t source_root[32], projection_root[32];
+    uint8_t source_root[32];
     if (ok) ok = incremental_source_root(store, source_root);
     if (ok)
         ok = ci_store_meta_set(store, "source_root_sha3", source_root, 32) &&
              ci_store_meta_set(store, "dep_stat_root_sha3", dep_stat, 32) &&
              ci_store_meta_set(store, "source_merkle_root_sha3", merkle_root, 32);
     if (ok)
-        ok = ci_store_retrieval_projection_root(store, projection_root) &&
-             ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META,
-                               projection_root, sizeof(projection_root));
+        ok = incremental_stamp_projection_and_counts(store);
     if (!ok) {
         if (tx_open) (void)ci_store_rollback(store);
         LOG_FAIL("codeindex", "incremental changed-row replacement failed");

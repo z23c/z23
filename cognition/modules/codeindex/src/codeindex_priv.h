@@ -115,6 +115,10 @@ bool ci_store_put_ref(struct ci_store *s, const char *callee,
 bool ci_store_put_group(struct ci_store *s, const struct ci_group *g);
 bool ci_store_meta_set(struct ci_store *s, const char *k, const void *v,
                        size_t vlen);
+/* Record COUNT(*) of files/symbols/refs/groups in meta so a warm metrics
+ * read does not scan the 608k-row refs table. Written at generation
+ * commit; readers fall back to COUNT(*) when a key is absent. */
+bool ci_store_write_table_count_meta(struct ci_store *s);
 /* Serialize a committed in-memory store directly into an already-open private
  * regular-file capability. No pathname is opened or followed. */
 bool ci_store_write_image_fd(struct ci_store *s, int fd);

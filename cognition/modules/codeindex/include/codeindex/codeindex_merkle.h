@@ -178,6 +178,16 @@ struct ci_merkle *ci_merkle_refresh(const char *root, struct ci_merkle_cost *cos
 struct ci_merkle *ci_merkle_refresh_reconciled(
     const char *root, struct ci_merkle_cost *cost);
 
+/* Source-view freshness without building a Merkle tree. Loads the sealed
+ * snapshot, stats the live inventory, and if every (dev,ino,size,mtime,ctime)
+ * key matches, copies the snapshot root digest. A missing snapshot is not
+ * an error: *have_snapshot is false. Inventory drift sets *unchanged false
+ * without hashing file bytes. */
+bool ci_merkle_snapshot_inventory_current(const char *root,
+                                          bool *have_snapshot,
+                                          bool *unchanged,
+                                          uint8_t digest_out[32]);
+
 /* Same, but never reads or writes the snapshot: every leaf is re-read. This is
  * the from-scratch reference path — determinism and incrementality are both
  * measured against it. */

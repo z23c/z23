@@ -173,6 +173,26 @@ static bool build_roots_match(const char *root,
     return true;
 }
 
+static bool write_cold_receipt_and_counts(struct ci_store *store,
+                                          int64_t build_start_ms,
+                                          size_t nids)
+{
+    char cold_ms_text[24], cold_files_text[24];
+    int64_t cold_ms = platform_time_monotonic_ms() - build_start_ms;
+    if (cold_ms < 0) cold_ms = 0;
+    int ms_n = snprintf(cold_ms_text, sizeof(cold_ms_text), "%lld",
+                        (long long)cold_ms);
+    int files_n = snprintf(cold_files_text, sizeof(cold_files_text),
+                           "%llu", (unsigned long long)nids);
+    return ms_n > 0 && (size_t)ms_n < sizeof(cold_ms_text) &&
+           files_n > 0 && (size_t)files_n < sizeof(cold_files_text) &&
+           ci_store_meta_set(store, "build_cold_ms", cold_ms_text,
+                             (size_t)ms_n) &&
+           ci_store_meta_set(store, "build_cold_files", cold_files_text,
+                             (size_t)files_n) &&
+           ci_store_write_table_count_meta(store);
+}
+
 bool ci_build_store_memory(const char *root, int64_t build_start_ms,
                            struct ci_store **out_store,
                            uint8_t source_stat_out[32],
@@ -239,21 +259,8 @@ bool ci_build_store_memory(const char *root, int64_t build_start_ms,
      * incremental path clones a prior generation and never rewrites these
      * keys, so they always describe the last cold build. Additive meta keys
      * with a presence check: no store-format change. */
-    char cold_ms_text[24], cold_files_text[24];
-    if (ok) {
-        int64_t cold_ms = platform_time_monotonic_ms() - build_start_ms;
-        if (cold_ms < 0) cold_ms = 0;
-        int ms_n = snprintf(cold_ms_text, sizeof(cold_ms_text), "%lld",
-                            (long long)cold_ms);
-        int files_n = snprintf(cold_files_text, sizeof(cold_files_text),
-                               "%llu", (unsigned long long)build.nids);
-        ok = ms_n > 0 && (size_t)ms_n < sizeof(cold_ms_text) &&
-             files_n > 0 && (size_t)files_n < sizeof(cold_files_text) &&
-             ci_store_meta_set(store, "build_cold_ms", cold_ms_text,
-                               (size_t)ms_n) &&
-             ci_store_meta_set(store, "build_cold_files", cold_files_text,
-                               (size_t)files_n);
-    }
+    if (ok)
+        ok = write_cold_receipt_and_counts(store, build_start_ms, build.nids);
 
     if (!ok) {
         if (tx_open) (void)ci_store_rollback(store);
