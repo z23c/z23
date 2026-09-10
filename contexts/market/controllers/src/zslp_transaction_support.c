@@ -73,11 +73,16 @@ bool zslp_controller_parse_amount(const struct json_value *value,
 void zslp_controller_render_validity(struct json_value *out,
                                      const struct db_zslp_token_info *token)
 {
-    struct uint256 token_id;
-    uint256_set_hex(&token_id, token->token_id);
+    /* token->token_id is the DISPLAY-order id the projection renders and
+     * app.tokens.create answers; the strict overlay keys on the 32 internal
+     * bytes.  One conversion, through the model boundary that owns it
+     * (models/zslp.h) — an application-local token key has no chain identity
+     * and renders UNKNOWN. */
+    uint8_t token_bytes[32];
     struct zslp_token_validity_summary strict;
-    if (!uint256_is_null(&token_id) && zslp_validity_token_summary(
-            app_runtime_node_db(), token_id.data, &strict)) {
+    if (db_zslp_token_id_to_bytes(token->token_id, token_bytes) &&
+        zslp_validity_token_summary(
+            app_runtime_node_db(), token_bytes, &strict)) {
         json_push_kv_str(out, "validity", "VALID_HISTORY_ONLY");
         json_push_kv_int(out, "validated_height", strict.validated_height);
         int32_t tip = reducer_frontier_provable_tip_cached();

@@ -14,7 +14,6 @@
 
 #include "services/property_catalog.h"
 
-#include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -128,9 +127,14 @@ static bool pc_znam_list(void *opaque, struct metaverse_znam_record *out,
 static bool pc_zslp_copy(const struct db_zslp_token_info *token,
                          struct metaverse_zslp_record *out)
 {
+    /* db_zslp_token_info::token_id is the DISPLAY-order id every wallet
+     * surface speaks (models/zslp.h); genesis_root is the 32 internal bytes
+     * the catalog keys on, so recover them through the model boundary and
+     * never with a forward hex decode. */
+    static_assert(METAVERSE_ROOT_BYTES == 32,
+                  "a ZSLP genesis root is a 32-byte transaction id");
     if (!token || !out ||
-        !zcl_hex_decode(token->token_id, out->genesis_root,
-                        sizeof(out->genesis_root)))
+        !db_zslp_token_id_to_bytes(token->token_id, out->genesis_root))
         return false;
     snprintf(out->ticker, sizeof(out->ticker), "%s", token->ticker);
     snprintf(out->name, sizeof(out->name), "%s", token->name);

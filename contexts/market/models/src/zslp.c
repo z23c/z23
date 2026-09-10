@@ -17,11 +17,69 @@
 #include "models/zslp.h"
 #include "models/activerecord.h"
 #include "models/model_text.h"
-#include "base/hex.h"
+#include "core/uint256.h"
 #include "event/event.h"
 #include <limits.h>
 #include <string.h>
 #include <stdio.h>
+
+/* ── Token-id byte order ───────────────────────────────────────── */
+
+/* Contract and rationale: models/zslp.h, "Token-id byte order at the model
+ * boundary". */
+void db_zslp_token_id_render(const uint8_t token_id[32], char out[65])
+{
+    struct uint256 id;
+
+    if (!token_id || !out)
+        return;
+    memcpy(id.data, token_id, 32);
+    uint256_get_hex(&id, out);
+}
+
+bool db_zslp_token_id_to_bytes(const char *rendered, uint8_t out[32])
+{
+    struct uint256 id;
+
+    if (!rendered || !out || strlen(rendered) != 64 ||
+        !model_string_is_hex(rendered))
+        return false;
+    uint256_set_hex(&id, rendered);
+    memcpy(out, id.data, 32);
+    return true;
+}
+
+/* Read one identity result column (`token_id` or `txid`). A 32-byte blob is
+ * a chain identity and renders in display order; anything else is an
+ * application-local key and renders verbatim, upcased the way the key
+ * columns are stored. */
+static void zslp_read_id_column(sqlite3_stmt *s, int col, char *out,
+                                size_t out_len)
+{
+    if (sqlite3_column_type(s, col) == SQLITE_BLOB &&
+        sqlite3_column_bytes(s, col) == 32) {
+        char hex[65];
+        db_zslp_token_id_render(sqlite3_column_blob(s, col), hex);
+        snprintf(out, out_len, "%s", hex);
+        return;
+    }
+    AR_READ_STR(s, col, out, out_len);
+    model_ascii_upcase(out);
+}
+
+/* Bind the two halves of a token_id WHERE clause: `blob_pos` matches the
+ * 32 internal bytes a display-order key names (NULL, which matches nothing,
+ * when the key is not a chain id), `text_pos` matches an application-local
+ * key. `key_bytes` must outlive the step — AR_BIND_BLOB is SQLITE_STATIC. */
+static void zslp_bind_token_key(sqlite3_stmt *s, int blob_pos, int text_pos,
+                                const char *upcased_key, uint8_t key_bytes[32])
+{
+    if (db_zslp_token_id_to_bytes(upcased_key, key_bytes))
+        AR_BIND_BLOB(s, blob_pos, key_bytes, 32);
+    else
+        AR_BIND_NULL(s, blob_pos);
+    AR_BIND_TEXT(s, text_pos, upcased_key);
+}
 
 /* ── Callbacks ─────────────────────────────────────────────────── */
 
@@ -377,6 +435,7 @@ bool db_zslp_token_find(struct node_db *ndb, const char *token_key,
 {
     sqlite3_stmt *s = NULL;
     char lookup[ZSLP_TOKEN_KEY_MAX + 1];
+    uint8_t key_bytes[32];
 
     if (!ndb || !ndb->open || !token_key || !out)
         return false;
@@ -386,25 +445,23 @@ bool db_zslp_token_find(struct node_db *ndb, const char *token_key,
     model_ascii_upcase(lookup);
 
     if (sqlite3_prepare_v2(ndb->db,
-            "SELECT CASE WHEN typeof(token_id)='blob' THEN hex(token_id) "
-            "            ELSE upper(CAST(token_id AS TEXT)) END,"
+            "SELECT token_id,"
             "       ticker,name,decimals,genesis_height,total_minted "
             "FROM zslp_tokens "
-            "WHERE (typeof(token_id)='blob' AND hex(token_id)=?) "
+            "WHERE (typeof(token_id)='blob' AND token_id=?) "
             "   OR (typeof(token_id)!='blob' AND upper(CAST(token_id AS TEXT))=?) "
             "LIMIT 1",
             -1, &s, NULL) != SQLITE_OK || !s)
         return false;
 
-    AR_BIND_TEXT(s, 1, lookup);
-    AR_BIND_TEXT(s, 2, lookup);
+    zslp_bind_token_key(s, 1, 2, lookup, key_bytes);
     if (!AR_STEP_ROW(s)) {
         AR_FINALIZE(s);
         return false;
     }
 
     memset(out, 0, sizeof(*out));
-    AR_READ_STR(s, 0, out->token_id, sizeof(out->token_id));
+    zslp_read_id_column(s, 0, out->token_id, sizeof(out->token_id));
     AR_READ_STR(s, 1, out->ticker, sizeof(out->ticker));
     AR_READ_STR(s, 2, out->name, sizeof(out->name));
     out->decimals = (int)AR_COL_INT(s, 3);
@@ -424,8 +481,7 @@ int db_zslp_token_list(struct node_db *ndb,
         return 0;
 
     if (sqlite3_prepare_v2(ndb->db,
-            "SELECT CASE WHEN typeof(token_id)='blob' THEN hex(token_id) "
-            "            ELSE upper(CAST(token_id AS TEXT)) END,"
+            "SELECT token_id,"
             "       ticker,name,decimals,genesis_height,total_minted "
             "FROM zslp_tokens "
             "ORDER BY ticker ASC, genesis_height DESC "
@@ -436,7 +492,8 @@ int db_zslp_token_list(struct node_db *ndb,
     AR_BIND_INT(s, 1, (int)max_out);
     while (count < (int)max_out && AR_STEP_ROW(s)) {
         memset(&out[count], 0, sizeof(out[count]));
-        AR_READ_STR(s, 0, out[count].token_id, sizeof(out[count].token_id));
+        zslp_read_id_column(s, 0, out[count].token_id,
+                           sizeof(out[count].token_id));
         AR_READ_STR(s, 1, out[count].ticker, sizeof(out[count].ticker));
         AR_READ_STR(s, 2, out[count].name, sizeof(out[count].name));
         out[count].decimals = (int)AR_COL_INT(s, 3);
@@ -464,19 +521,20 @@ int db_zslp_asset_lookup(struct node_db *ndb, const uint8_t token_id[32],
 
     if (!ndb || !ndb->open || !token_id || !out)
         return -1;
-    zcl_hex_encode(token_id, 32, key);
+    /* A TEXT chain-asset row was written from a broadcast txid string
+     * (zslp_command_finalize_genesis), so it too is display order. */
+    db_zslp_token_id_render(token_id, key);
     model_ascii_upcase(key);
     if (sqlite3_prepare_v2(ndb->db,
-            "SELECT CASE WHEN typeof(token_id)='blob' THEN hex(token_id) "
-            "            ELSE upper(CAST(token_id AS TEXT)) END,"
+            "SELECT token_id,"
             "       ticker,name,decimals,genesis_height,total_minted "
             "FROM zslp_tokens WHERE " ZSLP_CHAIN_ASSET_WHERE " AND "
-            "((typeof(token_id)='blob' AND hex(token_id)=?) OR "
+            "((typeof(token_id)='blob' AND token_id=?) OR "
             " (typeof(token_id)!='blob' AND "
             "  upper(CAST(token_id AS TEXT))=?)) LIMIT 1",
             -1, &s, NULL) != SQLITE_OK || !s)
         return -1;
-    AR_BIND_TEXT(s, 1, key);
+    AR_BIND_BLOB(s, 1, token_id, 32);
     AR_BIND_TEXT(s, 2, key);
     if (!AR_STEP_ROW(s)) {
         int rc = sqlite3_errcode(ndb->db);
@@ -484,7 +542,7 @@ int db_zslp_asset_lookup(struct node_db *ndb, const uint8_t token_id[32],
         return rc == SQLITE_OK || rc == SQLITE_DONE ? 0 : -1;
     }
     memset(out, 0, sizeof(*out));
-    AR_READ_STR(s, 0, out->token_id, sizeof(out->token_id));
+    zslp_read_id_column(s, 0, out->token_id, sizeof(out->token_id));
     AR_READ_STR(s, 1, out->ticker, sizeof(out->ticker));
     AR_READ_STR(s, 2, out->name, sizeof(out->name));
     out->decimals = (int)AR_COL_INT(s, 3);
@@ -527,8 +585,7 @@ int db_zslp_asset_list(struct node_db *ndb,
     if (!ndb || !ndb->open || !out || max_out == 0)
         return 0;
     if (sqlite3_prepare_v2(ndb->db,
-            "SELECT CASE WHEN typeof(token_id)='blob' THEN hex(token_id) "
-            "            ELSE upper(CAST(token_id AS TEXT)) END,"
+            "SELECT token_id,"
             "       ticker,name,decimals,genesis_height,total_minted "
             "FROM zslp_tokens WHERE " ZSLP_CHAIN_ASSET_WHERE " "
             "ORDER BY ticker ASC, genesis_height DESC LIMIT ?",
@@ -537,7 +594,8 @@ int db_zslp_asset_list(struct node_db *ndb,
     AR_BIND_INT(s, 1, (int64_t)max_out);
     while ((size_t)count < max_out && AR_STEP_ROW(s)) {
         memset(&out[count], 0, sizeof(out[count]));
-        AR_READ_STR(s, 0, out[count].token_id, sizeof(out[count].token_id));
+        zslp_read_id_column(s, 0, out[count].token_id,
+                           sizeof(out[count].token_id));
         AR_READ_STR(s, 1, out[count].ticker, sizeof(out[count].ticker));
         AR_READ_STR(s, 2, out[count].name, sizeof(out[count].name));
         out[count].decimals = (int)AR_COL_INT(s, 3);
@@ -557,6 +615,7 @@ int db_zslp_transfer_list_by_token(struct node_db *ndb, const char *token_key,
 {
     sqlite3_stmt *s = NULL;
     char lookup[ZSLP_TOKEN_KEY_MAX + 1];
+    uint8_t key_bytes[32];
     int count = 0;
 
     if (!ndb || !ndb->open || !token_key || !out || max_out == 0)
@@ -566,27 +625,28 @@ int db_zslp_transfer_list_by_token(struct node_db *ndb, const char *token_key,
     snprintf(lookup, sizeof(lookup), "%s", token_key);
     model_ascii_upcase(lookup);
 
+    /* txid renders in display order for the same reason token_id does: it is
+     * the string an operator pastes into getrawtransaction. */
     if (sqlite3_prepare_v2(ndb->db,
-            "SELECT hex(txid),"
-            "       CASE WHEN typeof(token_id)='blob' THEN hex(token_id) "
-            "            ELSE upper(CAST(token_id AS TEXT)) END,"
+            "SELECT txid,"
+            "       token_id,"
             "       block_height,tx_type,amount,vout,"
             "       CASE WHEN to_addr IS NULL THEN '' ELSE hex(to_addr) END "
             "FROM zslp_transfers "
-            "WHERE (typeof(token_id)='blob' AND hex(token_id)=?) "
+            "WHERE (typeof(token_id)='blob' AND token_id=?) "
             "   OR (typeof(token_id)!='blob' AND upper(CAST(token_id AS TEXT))=?) "
             "ORDER BY block_height DESC, vout ASC "
             "LIMIT ?",
             -1, &s, NULL) != SQLITE_OK || !s)
         return 0;
 
-    AR_BIND_TEXT(s, 1, lookup);
-    AR_BIND_TEXT(s, 2, lookup);
+    zslp_bind_token_key(s, 1, 2, lookup, key_bytes);
     AR_BIND_INT(s, 3, (int)max_out);
     while (count < (int)max_out && AR_STEP_ROW(s)) {
         memset(&out[count], 0, sizeof(out[count]));
-        AR_READ_STR(s, 0, out[count].txid, sizeof(out[count].txid));
-        AR_READ_STR(s, 1, out[count].token_id, sizeof(out[count].token_id));
+        zslp_read_id_column(s, 0, out[count].txid, sizeof(out[count].txid));
+        zslp_read_id_column(s, 1, out[count].token_id,
+                           sizeof(out[count].token_id));
         out[count].block_height = AR_COL_INT(s, 2);
         out[count].tx_type = AR_COL_INT(s, 3);
         out[count].amount = AR_COL_INT(s, 4);

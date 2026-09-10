@@ -182,18 +182,6 @@ static int sim_test_count_rows(struct node_db *ndb, const char *sql)
     return n;
 }
 
-static void sim_test_hex_bytes(const uint8_t *data, size_t len,
-                               char *out, size_t out_len)
-{
-    if (!out || out_len == 0)
-        return;
-    out[0] = '\0';
-    if (!data || out_len < len * 2 + 1)
-        return;
-    for (size_t i = 0; i < len; i++)
-        snprintf(out + (i * 2), out_len - (i * 2), "%02X", data[i]);
-}
-
 static void sim_test_slp_wire_token_id(const struct uint256 *internal,
                                        struct uint256 *wire)
 {
@@ -467,9 +455,10 @@ int test_simnet(void)
                            slp_genesis_height);
     SN_CHECK("fold SLP GENESIS into token projection", applied_slp_genesis);
 
+    /* The projection keys tokens by the DISPLAY-order genesis txid — the
+     * same string app.tokens.create answers (models/zslp.h). */
     char slp_token_hex[65];
-    sim_test_hex_bytes(slp_token_id.data, 32, slp_token_hex,
-                       sizeof(slp_token_hex));
+    uint256_get_hex(&slp_token_id, slp_token_hex);
     struct db_zslp_token_info slp_info;
     memset(&slp_info, 0, sizeof(slp_info));
     bool found_slp_token =

@@ -667,34 +667,19 @@ case "$HEIGHT_AT_GENESIS" in
 esac
 sp_mine_to "$((HEIGHT_AT_GENESIS + TOKEN_CONFS))" TOKEN_GENESIS
 TOK_LIST="$(sp_cli app tokens list)"
-# The two ZSLP surfaces print this one identity in MIRRORED strings, so the
-# membership check compares the 32 bytes, never the text:
-#   * app.tokens.create answers the genesis txid in DISPLAY order — the form
-#     every wallet-facing surface parses back with uint256_set_hex, including
-#     the store's own access gate (store_ledger_access_balance,
-#     engine/controllers/src/store_access_gate.c:39) and app.tokens.mint/send/
-#     burn. That is the id this proof lists the product under, and the id the
-#     token gate must credit.
-#   * app.tokens.list renders the SAME bytes forward and uppercase, because the
-#     explorer index reads them with SQL hex() (contexts/market/models/src/
-#     zslp.c:389), which does not apply the txid display reversal.
-# Two commands in one branch printing one identity in two orders is a product
-# defect an operator hits the moment they paste a listed id into mint or into
-# a product listing; it is reported separately. This proof still asserts the
-# genesis is indexed — under the exact bytes it minted, and under the ticker
-# it asked for.
-sp_hex_reverse() {
-    local hex="$1" out="" i
-    for (( i=${#hex} - 2; i >= 0; i -= 2 )); do
-        out="$out${hex:i:2}"
-    done
-    printf '%s\n' "$out"
-}
-TOKEN_ID_INDEXED="$(sp_hex_reverse "$TOKEN_ID")"
-tok_hit="$(printf '%s\n' "$TOK_LIST" | grep -i "\"token_id\":\"$TOKEN_ID_INDEXED\"" || true)"
-[ -n "$tok_hit" ] || sp_fail TOKEN_GENESIS "token $TOKEN_ID (indexed byte order $TOKEN_ID_INDEXED) not indexed after $TOKEN_CONFS confirmations: $TOK_LIST"
+# Both ZSLP surfaces print this one identity as one string: app.tokens.create
+# answers the genesis txid in DISPLAY order — the form every wallet-facing
+# surface parses back with uint256_set_hex, including the store's own access
+# gate (store_ledger_access_balance, engine/controllers/src/store_access_gate.c)
+# and app.tokens.mint/send/burn — and app.tokens.list renders the stored blob
+# through the same model boundary (contexts/market/models/src/zslp.c,
+# db_zslp_token_id_render). So the membership check compares the id verbatim:
+# a mismatch here means an operator who pastes a listed id into mint would name
+# a different token.
+tok_hit="$(printf '%s\n' "$TOK_LIST" | grep -i "\"token_id\":\"$TOKEN_ID\"" || true)"
+[ -n "$tok_hit" ] || sp_fail TOKEN_GENESIS "token $TOKEN_ID not indexed under the id create answered after $TOKEN_CONFS confirmations: $TOK_LIST"
 str_contains "$TOK_LIST" "\"ticker\":\"$TOKEN_TICKER\"" || sp_fail TOKEN_GENESIS "the indexed token does not carry ticker $TOKEN_TICKER: $TOK_LIST"
-sp_log "       token_id=${TOKEN_ID:0:16}... confirmed at height $(sp_blockcount), indexed as ${TOKEN_ID_INDEXED:0:16}..."
+sp_log "       token_id=${TOKEN_ID:0:16}... confirmed at height $(sp_blockcount), indexed under the same id"
 
 # ── Stage 4: LIST_PRODUCT (binary blob with embedded NULs) ─────────
 sp_log "[4/11] LIST_PRODUCT: listing a product with a binary blob (embedded NULs)..."

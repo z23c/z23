@@ -241,11 +241,12 @@ static bool apply_slp(struct node_db *ndb, const struct transaction *tx, int hei
     return true;
 }
 
-/* Hex-encode a 32-byte token id the way `db_zslp_token_find` expects to look
- * it up — the projection keys tokens by uppercase-hex txid. */
+/* Render a 32-byte token id the way `db_zslp_token_find` expects to look
+ * it up: DISPLAY order, the same string app.tokens.create answers and
+ * app.tokens.mint parses back (models/zslp.h, "Token-id byte order"). */
 static void token_hex(const struct uint256 *id, char out[65])
 {
-    for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02X", id->data[i]);
+    uint256_get_hex(id, out);
 }
 
 /* SLP wire token_id is big-endian; struct uint256 is little-endian

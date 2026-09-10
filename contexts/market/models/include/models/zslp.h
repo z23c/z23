@@ -46,6 +46,30 @@ struct db_zslp_transfer_info {
     char to_addr_hex[ZSLP_ADDR_HASH_HEX_MAX + 1];
 };
 
+/* ── Token-id byte order at the model boundary ──────────────────────
+ *
+ * A chain token id IS its GENESIS txid, and every wallet-facing surface
+ * speaks that txid's DISPLAY order — the reversed form uint256_get_hex
+ * prints and uint256_set_hex parses.  app.tokens.create answers it
+ * (contexts/market/services/src/zslp_transaction_intent_service.c),
+ * app.tokens.mint/send/burn parse it back
+ * (contexts/market/controllers/src/zslp_intent_controller.c), and the store
+ * access gate keys the ledger the same way
+ * (engine/controllers/src/store_access_gate.c).
+ *
+ * The `token_id` BLOB column holds the 32 INTERNAL bytes, so SQL hex() over
+ * it renders the byte-REVERSAL of that identity: a listed id pasted into
+ * mint would name a different token.  Every read below therefore renders
+ * through db_zslp_token_id_render() and accepts db_zslp_token_id_to_bytes()
+ * — the only byte-order conversion this model performs, so the projection
+ * and the wallet name one token with one string.
+ *
+ * A `token_id` column may instead hold an application-local TEXT key (for
+ * example ZCL23ACCESS, written by db_zslp_token_save_key).  Such a key has
+ * no byte order: it renders verbatim, upcased, and to_bytes refuses it. */
+void db_zslp_token_id_render(const uint8_t token_id[32], char out[65]);
+bool db_zslp_token_id_to_bytes(const char *rendered, uint8_t out[32]);
+
 /* Lifecycle callbacks */
 struct ar_callbacks *db_zslp_token_callbacks(void);
 struct ar_callbacks *db_zslp_transfer_callbacks(void);
