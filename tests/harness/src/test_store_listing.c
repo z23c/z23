@@ -29,12 +29,15 @@
 
 #include "command/native_command.h"
 #include "controllers/store_controller.h"
+#include "controllers/store_sell_controller.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "models/database.h"
+#include "models/database_owner_lease.h"
 #include "models/store.h"
 #include "models/store_blob.h"
+#include "rpc/server.h"
 
 #define SL_CHECK(name, expr) do {                                      \
     printf("store_listing: %s... ", (name));                           \
@@ -567,6 +570,168 @@ static int t_json_path_still_works(void)
     return failures;
 }
 
+
+/* ── (5) the node-side listing surface ────────────────────────────────
+ *
+ * A booted node holds a single-owner lease on node.db, so the merchant CLI
+ * cannot open it and `app.store.list-product` proxies storesell_list_product
+ * into the node instead. These cases exercise the in-node half by name: the
+ * method is looked up in a real rpc_table built by the same registration
+ * function boot_frontend_services.c calls, and invoked through the table's
+ * function pointer — a renamed or unregistered method fails here, not in
+ * production. No socket and no node: the method runs in-process against the
+ * fixture datadir, which is exactly what it does inside a node. */
+
+/* params for storesell_list_product: [ {product}, "<datadir>" ]. */
+static void sl_sell_params(struct json_value *params, const char *datadir,
+                           const char *name, const char *token,
+                           double price_zcl)
+{
+    struct json_value product;
+    json_init(&product);
+    json_set_object(&product);
+    (void)json_push_kv_str(&product, "name", name);
+    (void)json_push_kv_str(&product, "token_id", token);
+    (void)json_push_kv_real(&product, "price_zcl", price_zcl);
+
+    struct json_value dd;
+    json_init(&dd);
+    json_set_str(&dd, datadir);
+
+    json_init(params);
+    json_set_array(params);
+    (void)json_push_back(params, &product);
+    (void)json_push_back(params, &dd);
+    json_free(&product);
+    json_free(&dd);
+}
+
+static const char *sl_res_str(const struct json_value *result, const char *key)
+{
+    const char *s = json_get_str(json_get(result, key));
+    return s ? s : "";
+}
+
+static bool sl_res_ok(const struct json_value *result)
+{
+    const struct json_value *v = json_get(result, "ok");
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
+static int t_node_side_rpc(void)
+{
+    int failures = 0;
+    char dir[256];
+    SL_CHECK("node rpc: fixture datadir", sl_mk_datadir(dir, sizeof(dir),
+                                                        "nodeside"));
+
+    struct rpc_table table;
+    rpc_table_init(&table);
+    register_store_sell_rpc_commands(&table);
+    const struct rpc_command *cmd =
+        rpc_table_find(&table, "storesell_list_product");
+    SL_CHECK("node rpc: storesell_list_product is registered", cmd != NULL);
+    if (!cmd) {
+        test_rm_rf(dir);
+        return failures;
+    }
+    rpc_store_sell_set_state(dir);
+
+    /* (a) the listing a running node performs on the merchant's behalf */
+    struct json_value params;
+    sl_sell_params(&params, dir, "Node Side Guide", "nodeside", 0.25);
+
+    struct json_value result;
+    json_init(&result);
+    SL_CHECK("node rpc: call answered", cmd->actor(&params, false, &result));
+    SL_CHECK("node rpc: ok", sl_res_ok(&result));
+    SL_CHECK("node rpc: reports the mutation",
+             json_get_bool(json_get(&result, "mutated")));
+    SL_CHECK("node rpc: token_id normalized exactly as the CLI route does",
+             strcmp(sl_res_str(&result, "token_id"), "NODESIDE") == 0);
+    SL_CHECK("node rpc: the product is on record", sl_product_count(dir) == 1);
+    json_free(&result);
+
+    /* (b) the SAME refusal wording the in-process route produces, carried as
+     *     a successful call reporting a refusal — and nothing written. */
+    json_init(&result);
+    SL_CHECK("node rpc: duplicate call answered",
+             cmd->actor(&params, false, &result));
+    SL_CHECK("node rpc: duplicate token_id refused",
+             strcmp(sl_res_str(&result, "code"), "DUPLICATE_TOKEN_ID") == 0);
+    SL_CHECK("node rpc: a refusal is ok:false, not an RPC error",
+             !sl_res_ok(&result));
+    SL_CHECK("node rpc: refusal carries the typed exit code",
+             json_get_int(json_get(&result, "exit")) ==
+                 (int64_t)ZCL_COMMAND_EXIT_INVALID);
+    SL_CHECK("node rpc: the refusal wrote nothing",
+             sl_product_count(dir) == 1);
+    json_free(&result);
+    json_free(&params);
+
+    /* (c) a node serves exactly one store: a call naming another datadir is
+     *     refused rather than served this node's database. */
+    char other[256];
+    SL_CHECK("node rpc: second fixture datadir",
+             sl_mk_datadir(other, sizeof(other), "nodeside-other"));
+    sl_sell_params(&params, other, "Elsewhere", "elsewhere", 0.25);
+    json_init(&result);
+    SL_CHECK("node rpc: foreign datadir answered",
+             cmd->actor(&params, false, &result));
+    SL_CHECK("node rpc: foreign datadir refused",
+             strcmp(sl_res_str(&result, "code"), "DATADIR_MISMATCH") == 0);
+    SL_CHECK("node rpc: foreign datadir wrote nothing there",
+             sl_product_count(other) == 0);
+    SL_CHECK("node rpc: foreign datadir wrote nothing here",
+             sl_product_count(dir) == 1);
+    json_free(&result);
+    json_free(&params);
+
+    /* (d) a malformed call is refused by name, not crashed through. */
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    SL_CHECK("node rpc: empty params answered",
+             cmd->actor(&params, false, &result));
+    SL_CHECK("node rpc: empty params refused",
+             strcmp(sl_res_str(&result, "code"), "INVALID_ARGS") == 0);
+    json_free(&result);
+    json_free(&params);
+
+    rpc_store_sell_set_state("");
+    test_rm_rf(other);
+    test_rm_rf(dir);
+    return failures;
+}
+
+/* ── (6) the CLI leaf never opens a database another process owns ────
+ *
+ * The lease probe is the whole repair: with no owner the leaf writes in
+ * process (cases 1-4 above all rely on that), and with an owner it must NOT
+ * open node.db. This pins the idle half here — the owned half needs a second
+ * process holding the lease, which is what the operator proof exercises. */
+static int t_idle_datadir_is_written_in_process(void)
+{
+    int failures = 0;
+    char dir[256];
+    SL_CHECK("lease: fixture datadir", sl_mk_datadir(dir, sizeof(dir),
+                                                     "lease-idle"));
+    char path[512];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    SL_CHECK("lease: an idle fixture is unowned",
+             node_db_owner_lease_probe(path) == NODE_DB_OWNER_LEASE_UNOWNED);
+
+    struct zcl_command_reply reply;
+    sl_list_product(dir, "Idle Datadir", "IDLE", 0.25, NULL, NULL, &reply);
+    SL_CHECK("lease: an unowned datadir is still listed in-process",
+             reply.exit_code == ZCL_COMMAND_EXIT_OK);
+    zcl_command_reply_free(&reply);
+    SL_CHECK("lease: the product is on record", sl_product_count(dir) == 1);
+
+    test_rm_rf(dir);
+    return failures;
+}
+
 int test_store_listing(void)
 {
     int failures = 0;
@@ -575,6 +740,8 @@ int test_store_listing(void)
     failures += t_refusals();
     failures += t_input_errors();
     failures += t_json_path_still_works();
+    failures += t_node_side_rpc();
+    failures += t_idle_datadir_is_written_in_process();
     printf("Store listing: %d failures\n", failures);
     return failures;
 }
