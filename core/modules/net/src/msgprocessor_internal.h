@@ -82,6 +82,36 @@ bool mp_handle_zcode_swarm(struct msg_processor *mp,
                            struct p2p_node *node,
                            struct byte_stream *s);
 
+/* msg_bloom_filter.c — the three BIP37 filter commands, all refused. */
+bool mp_handle_filterload(struct msg_processor *mp, struct p2p_node *node,
+                          struct byte_stream *s);
+bool mp_handle_filteradd(struct msg_processor *mp, struct p2p_node *node,
+                         struct byte_stream *s);
+bool mp_handle_filterclear(struct msg_processor *mp, struct p2p_node *node,
+                           struct byte_stream *s);
+
+/* msg_beta6_bootstrap.c — the eight zclassicd v2.1.2-beta6 fast-bootstrap
+ * commands. Each copies its bounded payload out of the receive stream and
+ * hands it to the engine-installed server; with no server wired all eight are
+ * ignored, which is what every node that has not set -beta6-bootstrap-source
+ * does. */
+bool mp_beta6_getbsman(struct msg_processor *mp, struct p2p_node *node,
+                       struct byte_stream *s);
+bool mp_beta6_bsman(struct msg_processor *mp, struct p2p_node *node,
+                    struct byte_stream *s);
+bool mp_beta6_getbschk(struct msg_processor *mp, struct p2p_node *node,
+                       struct byte_stream *s);
+bool mp_beta6_bschk(struct msg_processor *mp, struct p2p_node *node,
+                    struct byte_stream *s);
+bool mp_beta6_getbspman(struct msg_processor *mp, struct p2p_node *node,
+                        struct byte_stream *s);
+bool mp_beta6_bspman(struct msg_processor *mp, struct p2p_node *node,
+                     struct byte_stream *s);
+bool mp_beta6_getbspchk(struct msg_processor *mp, struct p2p_node *node,
+                        struct byte_stream *s);
+bool mp_beta6_bspchk(struct msg_processor *mp, struct p2p_node *node,
+                     struct byte_stream *s);
+
 /* msgprocessor_snapshot.c lifecycle hook invoked from msg_send_messages.
  * Encapsulates the heavy snapshot/swarm/fast-sync state machine. */
 

@@ -14,6 +14,9 @@
  *                               (dispatched directly via process_*)
  *   msgprocessor_pingpong.c   — ping/pong/feefilter/reject
  *   msgprocessor_snapshot.c   — every ZCL23 fast-sync/snapshot message
+ *   msg_bloom_filter.c        — the three BIP37 filter commands
+ *   msg_beta6_bootstrap.c     — the eight zclassicd beta6 bootstrap commands
+ *                               and the engine seam they route to
  *
  * The ZCL Messaging (zmsg), ZCL Market (zfile*) and ZCL Game (zgame)
  * handlers stay here because they are independent application
@@ -814,48 +817,6 @@ static bool handle_tx_msg(struct msg_processor *mp, struct p2p_node *node,
     return process_tx_msg(mp, node, s);
 }
 
-/* ── BIP37 bloom filter handlers ─────────────────────────────────
- * BIP37 is a known privacy leak: a peer can probe which addresses a
- * node owns by watching false-positive rates across crafted filters.
- * Default OFF — enable only with ZCL_ENABLE_BIP37=1. When disabled,
- * filterload/filteradd/filterclear score the peer as misbehaving. */
-
-/* Shared reject path for the three BIP37 filter commands. When BIP37 is
- * disabled (the default) the peer is scored as misbehaving and dropped.
- * Full BIP37 filter loading is not implemented — reject even when enabled
- * until a use case justifies it. */
-static bool handle_bip37_rejected(struct msg_processor *mp, struct p2p_node *node,
-                                  struct byte_stream *s, const char *cmd)
-{
-    (void)s;
-    if (!bip37_enabled()) {
-        char reason[64];
-        snprintf(reason, sizeof(reason), "%s rejected: BIP37 disabled", cmd);
-        peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_PROTOCOL_VIOLATION, reason);
-        LOG_FAIL("bip37", "%s from %s — BIP37 disabled, disconnecting",
-                 cmd, node->addr_name);
-    }
-    return true;
-}
-
-static bool handle_filterload(struct msg_processor *mp, struct p2p_node *node,
-                               struct byte_stream *s)
-{
-    return handle_bip37_rejected(mp, node, s, "filterload");
-}
-
-static bool handle_filteradd(struct msg_processor *mp, struct p2p_node *node,
-                              struct byte_stream *s)
-{
-    return handle_bip37_rejected(mp, node, s, "filteradd");
-}
-
-static bool handle_filterclear(struct msg_processor *mp, struct p2p_node *node,
-                                struct byte_stream *s)
-{
-    return handle_bip37_rejected(mp, node, s, "filterclear");
-}
-
 /* ── ZCL Messaging handlers ───────────────────────────────────── */
 
 static bool handle_zmsg(struct msg_processor *mp, struct p2p_node *node,
@@ -1536,70 +1497,6 @@ static bool mp_sendcmpct(struct msg_processor *mp, struct p2p_node *node,
     return process_sendcmpct(mp, node, s);
 }
 
-/* ── zclassicd v2.1.2-beta6 fast-bootstrap seam ──────────────────
- * A stock beta6 client only fast-syncs from a peer it reaches on the
- * ORDINARY P2P port, so the eight snapshot commands have to be answered
- * on a normal peer connection. The server itself is engine/services
- * (beta6_bootstrap_*.c), above net in the module order: this seam copies
- * the bounded payload out of the receive stream and hands
- * (node, command, payload) to it. No hook installed — the default, and
- * every node that has not set -beta6-bootstrap-source — means the message
- * is ignored, exactly as before this seam existed. */
-void msg_processor_set_beta6_bootstrap(
-    struct msg_processor *mp,
-    msg_beta6_bootstrap_armed_fn armed,
-    msg_beta6_bootstrap_message_fn message)
-{
-    if (!mp)
-        return;
-    mp->beta6_armed = armed;
-    mp->beta6_message = message;
-}
-
-static bool mp_beta6_bootstrap(struct msg_processor *mp, struct p2p_node *node,
-                               struct byte_stream *s, const char *command)
-{
-    if (!mp || !node || !s)
-        return true;
-    if (!mp->beta6_message)
-        return true;   /* server not wired on this node: ignore, as before */
-    size_t len = stream_remaining(s);
-    /* The largest beta6 request is a chunk request (a few dozen bytes); the
-     * frame layer already bounds this at MAX_PROTOCOL_MESSAGE_LENGTH. */
-    if (len > MAX_PROTOCOL_MESSAGE_LENGTH)
-        return true;
-    unsigned char *buf = NULL;
-    if (len > 0) {
-        buf = zcl_malloc(len, "beta6_bootstrap_payload");
-        if (!buf)
-            return true;
-        if (!stream_read_bytes(s, buf, len)) {
-            free(buf);
-            return true;
-        }
-    }
-    bool ok = mp->beta6_message(mp, node, command, buf, len);
-    free(buf);
-    return ok;
-}
-
-/* One row per beta6 command, all routed to the seam above. */
-#define ZCL_BETA6_ROW(fn, command)                                      \
-    static bool fn(struct msg_processor *mp, struct p2p_node *node,     \
-                   struct byte_stream *s)                               \
-    {                                                                   \
-        return mp_beta6_bootstrap(mp, node, s, command);                \
-    }
-ZCL_BETA6_ROW(mp_beta6_getbsman, "getbsman")
-ZCL_BETA6_ROW(mp_beta6_bsman, "bsman")
-ZCL_BETA6_ROW(mp_beta6_getbschk, "getbschk")
-ZCL_BETA6_ROW(mp_beta6_bschk, "bschk")
-ZCL_BETA6_ROW(mp_beta6_getbspman, "getbspman")
-ZCL_BETA6_ROW(mp_beta6_bspman, "bspman")
-ZCL_BETA6_ROW(mp_beta6_getbspchk, "getbspchk")
-ZCL_BETA6_ROW(mp_beta6_bspchk, "bspchk")
-#undef ZCL_BETA6_ROW
-
 static const struct msg_dispatch_entry g_msg_dispatch[] = {
     /* ── Bitcoin P2P ── */
     { "version",      mp_handle_version,      false, false, "p2p" },
@@ -1626,9 +1523,9 @@ static const struct msg_dispatch_entry g_msg_dispatch[] = {
     { "getblocktxn", process_getblocktxn,    true,  false, "compact" },
     { "blocktxn",    process_blocktxn,       true,  false, "compact" },
     /* ── BIP37 bloom filters (gated by ZCL_ENABLE_BIP37) ── */
-    { "filterload",   handle_filterload,     true,  false, "bloom" },
-    { "filteradd",    handle_filteradd,      true,  false, "bloom" },
-    { "filterclear",  handle_filterclear,    true,  false, "bloom" },
+    { "filterload",   mp_handle_filterload,  true,  false, "bloom" },
+    { "filteradd",    mp_handle_filteradd,   true,  false, "bloom" },
+    { "filterclear",  mp_handle_filterclear, true,  false, "bloom" },
     /* ── ZCL23 File Service ── */
     { "zfileaddr",    handle_zfileaddr,      true,  true,  "filesvc" },
     /* ── ZCL Messaging ── */
