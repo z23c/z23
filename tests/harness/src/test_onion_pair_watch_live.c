@@ -40,10 +40,15 @@
  *     DESCRIPTOR_NOT_UPLOADED, CLIENT_TOR_NOT_READY,   a code verdict — see
  *     INTRODUCE1_NOT_SEEN, RENDEZVOUS1_NOT_SEEN,        test_onion_bootstrap.c
  *     CIRCUIT_NOT_READY, P2P_FRAMING_NOT_SEEN)          for the same doctrine)
+ *   exit 1 with ENV_MISSING_BINARY                    -> UNOBSERVED: the
+ *     (build/bin/z23, zclassic23 or zcl-rpc absent)      environment has no
+ *     runtime binaries. A proof generation never builds them (only z23-dev
+ *     and the test runner), so the pairing cannot be observed there — a
+ *     fact about the box, not about the code.
  *   any other nonzero exit, or a wedge                -> FAIL, with the
- *     (ENV_MISSING_BINARY, PORT_QUAD_EXHAUSTED,          script's last 20
- *     SPAWN_A_FAILED, RPC_A_NOT_READY, SPAWN_B_FAILED,   lines
- *     RPC_B_NOT_READY, DIAL_NOT_ATTEMPTED)
+ *     (PORT_QUAD_EXHAUSTED, SPAWN_A_FAILED,              script's last 20
+ *     RPC_A_NOT_READY, SPAWN_B_FAILED, RPC_B_NOT_READY,  lines
+ *     DIAL_NOT_ATTEMPTED)
  *
  * Deliberately NOT SKIP: this project's push gate refuses any receipt
  * carrying a "SKIP (" line, and a busy box's honest "Tor missed its window"
@@ -103,6 +108,16 @@ static bool opw_is_timeout_verdict(const char *tail)
             return true;
     }
     return false;
+}
+
+/* The script found no build/bin/z23, zclassic23 or zcl-rpc to spawn. A proof
+ * generation never builds the runtime binaries, so the pairing cannot be
+ * observed there: a fact about the environment, mapped UNOBSERVED (never FAIL,
+ * never SKIP) and never cached as green. On a dev box it means `make` has not
+ * produced the binaries yet. */
+static bool opw_is_missing_binary_verdict(const char *tail)
+{
+    return tail && strstr(tail, "PAIR_PROBE=ENV_MISSING_BINARY") != NULL;
 }
 
 static bool opw_is_paired(const char *tail)
@@ -285,6 +300,12 @@ int test_onion_pair_watch_live(void)
         printf("UNOBSERVED (real Tor bootstrap/rendezvous did not complete "
                "inside its own deadline windows on this box/network — a "
                "box/network fact, not a code verdict; see the tail below)\n");
+        printf("  %s", tail);
+    } else if (opw_is_missing_binary_verdict(tail)) {
+        printf("UNOBSERVED (this environment carries no z23/zclassic23/zcl-rpc "
+               "runtime binaries, so the two-node pairing cannot be exercised "
+               "here — PAIR_PROBE=ENV_MISSING_BINARY; a proof generation never "
+               "builds them; run `make` on a dev box to observe it)\n");
         printf("  %s", tail);
     } else {
         printf("FAIL (exit=%d; last %d lines of %s:)\n", rc, 20, out_path);
