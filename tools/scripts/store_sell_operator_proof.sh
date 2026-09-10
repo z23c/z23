@@ -112,6 +112,14 @@ WALLET_SCOPE=dev
 # by it, so a repeated plan leg returns the SAME reservation instead of
 # reserving the genesis fee twice.
 TOKEN_IDEMPOTENCY_KEY="store-operator-proof-genesis-1"
+# How long this proof's own native-CLI calls wait for the node to answer. The
+# CLI default is 10 s (engine/controllers/src/rpc_client.c, ZCL_RPC_DEADLINE_MS)
+# — right for an interactive operator, wrong for a proof that asks a node still
+# folding a freshly mined chain to run a synchronous whole-wallet backup, or
+# even to read backup status while the wallet lock is held. A node that is
+# working is not a node that is wedged, so the client waits instead of
+# abandoning the call; every gate the node enforces is unchanged.
+SP_RPC_DEADLINE_MS=120000
 
 # Isolation port quads (two_node uses 39070/39080, iso env defaults 39030).
 # The store node keeps 391x0; the witness peer takes the next quad.
@@ -144,6 +152,21 @@ sp_fail() {
     sp_log "VERDICT=FAIL stage=$1"
     exit 1
 }
+# This file's contract is that a failure NAMES itself. `set -e` breaks that
+# promise on its own: any command the script did not guard kills the run with a
+# bare status and no verdict line at all, which is unreadable from a make log
+# (observed: a restart that exited 1 between two stages, printing nothing).
+# The ERR trap closes that hole — it never converts a failure into a pass, it
+# only makes an unguarded one say where it happened. set -E propagates it into
+# functions and command substitutions; sp_fail/sp_skip exit deliberately and do
+# not trip it.
+set -E
+sp_unexpected() {
+    local status="$1" line="$2"
+    sp_log "FAIL stage=UNNAMED: the proof exited $status at line $line without reaching a stage verdict"
+    sp_log "VERDICT=FAIL stage=UNNAMED"
+}
+trap 'sp_unexpected "$?" "$LINENO"' ERR
 
 # ── Port guards (same discipline as isolated_node_env.sh) ──────────
 sp_assert_not_live_port() {
@@ -209,7 +232,8 @@ sp_rpc() {
 # exited the run with no verdict at all).
 sp_cli() {
     local out
-    out="$(ZCL_DATADIR="$SP_DD" ZCL_RPCPORT="$SP_RPC" "$NODE_BIN" "$@" 2>&1)" || true
+    out="$(ZCL_DATADIR="$SP_DD" ZCL_RPCPORT="$SP_RPC" \
+        ZCL_RPC_DEADLINE_MS="$SP_RPC_DEADLINE_MS" "$NODE_BIN" "$@" 2>&1)" || true
     printf '%s\n' "$out" | grep '^{' | tail -1 || true
 }
 # Same wrapper, but the JSON input rides stdin (--input=-) instead of argv: a
@@ -219,14 +243,26 @@ sp_cli_input() {
     shift
     local out
     out="$(printf '%s' "$payload" | ZCL_DATADIR="$SP_DD" ZCL_RPCPORT="$SP_RPC" \
+        ZCL_RPC_DEADLINE_MS="$SP_RPC_DEADLINE_MS" \
         "$NODE_BIN" "$@" --input=- 2>&1)" || true
     printf '%s\n' "$out" | grep '^{' | tail -1 || true
 }
 sp_json_int() { printf '%s' "$1" | sed -n "s/.*\"$2\":\([0-9][0-9]*\).*/\1/p"; }
 sp_json_str() { printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"; }
 
+# zcl-rpc hard-caps curl at --max-time 30, so a getblockcount issued while the
+# node holds cs_main for a mining batch can come back with no body at all. That
+# is a CLIENT read that did not complete, not a chain without a height, so the
+# read is retried a bounded number of times; callers still decide what an
+# unreadable height means for their stage.
 sp_blockcount() {
-    sp_rpc getblockcount | sed -n 's/.*"result"[: ]*\([0-9-]*\).*/\1/p'
+    local i h
+    for i in $(seq 1 10); do
+        h="$(sp_rpc getblockcount | sed -n 's/.*"result"[: ]*\([0-9-]*\).*/\1/p')"
+        [ -n "$h" ] && { printf '%s\n' "$h"; return 0; }
+        sleep 1
+    done
+    return 0
 }
 sp_connection_count() {
     sp_rpc getconnectioncount | sed -n 's/.*"result"[: ]*\([0-9]*\).*/\1/p'
@@ -267,17 +303,40 @@ sp_wait_sync_live() {
     done
     sp_fail "$stage" "sync state stayed '${state:-?}' — the money gate reads anything else as not live"
 }
-sp_wait_fold() {
-    local stage="$1" tip="$2" deadline dump coins hstar
-    deadline=$(( $(date +%s) + 120 ))
+# The money gate publishes numbers only when the exact coins tip, the network
+# target and the freshness classification hold STILL for the whole observation
+# (wallet_money_snapshot_build re-reads every authority and answers STALE if
+# any of them moved). A regtest node that is still landing a mine batch it
+# accepted after the client's reply deadline moves all three, so this wait
+# demands the same stability the gate does: peers, a live sync state, the
+# reducer folded exactly to the tip, and a tip that did not move across the
+# whole reading. Without it the token plan is refused "wallet coins tip is 1
+# blocks behind network tip" for a node that is perfectly healthy, just busy.
+sp_wait_money_ready() {
+    local stage="$1" deadline tip tip_after dump coins hstar peers state
+    deadline=$(( $(date +%s) + 240 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
+        tip="$(sp_blockcount)"
+        case "$tip" in
+            ''|*[!0-9]*) sleep 2; continue ;;
+        esac
         dump="$(sp_cli dumpstate reducer_frontier)"
         coins="$(sp_json_int "$dump" coins_best_height)"
         hstar="$(sp_json_int "$dump" hstar)"
-        [ "$coins" = "$tip" ] && [ "$hstar" = "$tip" ] && return 0
-        sleep 1
+        peers="$(sp_connection_count)"
+        state="$(sp_sync_state)"
+        tip_after="$(sp_blockcount)"
+        case "$state" in
+            blocks_download|connecting_blocks|at_tip) ;;
+            *) sleep 2; continue ;;
+        esac
+        if [ "$coins" = "$tip" ] && [ "$hstar" = "$tip" ] &&
+           [ "$tip_after" = "$tip" ] && [ -n "$peers" ] && [ "$peers" -ge 1 ]; then
+            return 0
+        fi
+        sleep 2
     done
-    sp_fail "$stage" "reducer frontier stalled at coins_best_height=${coins:-?} hstar=${hstar:-?}, expected both at $tip: $dump"
+    sp_fail "$stage" "the wallet money authorities never settled: tip=${tip:-?}->${tip_after:-?} coins_best_height=${coins:-?} hstar=${hstar:-?} peers=${peers:-?} sync=${state:-?}"
 }
 
 # ── Preflight ──────────────────────────────────────────────────────
@@ -423,25 +482,24 @@ sp_mine_to() {
             refusals=$(( refusals + 1 ))
             [ "$refusals" -lt 15 ] || sp_fail "$stage" "mint refused persisted across $refusals retries (a fresh self-mined node must read sovereign): $(printf '%s' "$out" | head -c 200)"
             sleep 2
-            h="$(sp_blockcount)"
-            [ -n "$h" ] || sp_fail "$stage" "getblockcount silent after a refused mint (target $target)"
+            h2="$(sp_blockcount)"
+            [ -n "$h2" ] && h="$h2"
             continue
         fi
         refusals=0
         h2="$(sp_blockcount)"
-        if [ -z "$h2" ]; then
-            sp_fail "$stage" "getblockcount silent mid-mining at height $h (target $target)"
-        fi
-        if [ "$h2" -le "$h" ]; then
-            # No progress THIS poll. Not yet a failure: an empty body means
-            # the curl side of zcl-rpc gave up at --max-time 30 while the
+        if [ -z "$h2" ] || [ "$h2" -le "$h" ]; then
+            # No READABLE progress THIS poll. Not yet a failure: an empty body
+            # means the curl side of zcl-rpc gave up at --max-time 30 while the
             # server may still be working (mining the batch behind the
-            # catchup lean-index/wallet scan), and a slow getblockcount can
-            # just be the same lock contention. HEIGHT over TIME is the
-            # verdict: fail only after a sustained no-progress window
-            # (12 polls x 5 s = 60 s of a frozen tip is never a transient).
+            # catchup lean-index/wallet scan), and a slow or silent
+            # getblockcount is that same lock contention seen from the client
+            # side — the height it could not read is not a height that stopped
+            # advancing. HEIGHT over TIME is the verdict: fail only after a
+            # sustained no-progress window (12 polls x 5 s = 60 s of a tip that
+            # never reads higher is never a transient).
             stall=$(( stall + 1 ))
-            [ "$stall" -lt 12 ] || sp_fail "$stage" "chain tip frozen at height $h2 for $(( stall * 5 ))s (target $target): $(printf '%s' "$out" | head -c 200)"
+            [ "$stall" -lt 12 ] || sp_fail "$stage" "chain tip stuck at height $h for $(( stall * 5 ))s (target $target, last read '${h2:-silent}'): $(printf '%s' "$out" | head -c 200)"
             sleep 5
             continue
         fi
@@ -515,8 +573,8 @@ esac
 [ "$HEIGHT_AFTER_RESTART" -ge "$HEIGHT" ] || sp_fail SETTLE "height fell from $HEIGHT to $HEIGHT_AFTER_RESTART across the restart — the funding chain did not survive"
 sp_wait_connected SETTLE
 sp_wait_sync_live SETTLE
-sp_wait_fold SETTLE "$HEIGHT_AFTER_RESTART"
-sp_log "       restarted at height $HEIGHT_AFTER_RESTART, peer linked, sync=$(sp_sync_state), coins+H* folded to $HEIGHT_AFTER_RESTART"
+sp_wait_money_ready SETTLE
+sp_log "       restarted at height $(sp_blockcount), peer linked, sync=$(sp_sync_state), money authorities settled"
 
 # ── Stage 2b: CUSTODY (encrypted at rest, unlocked, currently backed up) ──
 # The ZSLP intent plan leg reserves real custody, so it refuses anything less
@@ -566,6 +624,11 @@ sp_log "       wallet encrypted at rest, unlocked, current-key encrypted backup 
 # proof speaks that contract exactly — it never re-sends the genesis fields on
 # the commit leg, so the bytes that get signed are the bytes that were planned.
 sp_log "[3/11] TOKEN_GENESIS: creating the $TOKEN_TICKER access token on-chain (plan → commit)..."
+# The custody work above takes real time, and a mine batch the node accepted
+# after the client gave up can still be landing blocks underneath it. The plan
+# leg reads the money authorities at call time, so settle them again here
+# rather than let a moving tip surface as a money refusal on a healthy node.
+sp_wait_money_ready TOKEN_GENESIS
 TOKEN_PLAN="$(sp_cli app tokens create --input="{\"wallet_scope\":\"$WALLET_SCOPE\",\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000,\"idempotency_key\":\"$TOKEN_IDEMPOTENCY_KEY\"}")"
 str_contains "$TOKEN_PLAN" '"stage":"plan"' || sp_fail TOKEN_GENESIS "create did not answer a plan: $TOKEN_PLAN"
 str_contains "$TOKEN_PLAN" '"committed":false' || sp_fail TOKEN_GENESIS "the plan leg claims it committed: $TOKEN_PLAN"
@@ -588,7 +651,14 @@ esac
 case "$TOKEN_ID" in
     *[!0-9a-fA-F]*) sp_fail TOKEN_GENESIS "token_id '$TOKEN_ID' is not hex: $TOKEN_OUT" ;;
 esac
-sp_mine_to "$((HEIGHT_AFTER_RESTART + TOKEN_CONFS))" TOKEN_GENESIS
+# Bury the GENESIS from where it actually landed: the commit broadcast into a
+# chain whose height this stage reads now, not from the height recorded before
+# the custody work.
+HEIGHT_AT_GENESIS="$(sp_blockcount)"
+case "$HEIGHT_AT_GENESIS" in
+    ''|*[!0-9]*) sp_fail TOKEN_GENESIS "getblockcount answered '${HEIGHT_AT_GENESIS:-?}' after the genesis commit" ;;
+esac
+sp_mine_to "$((HEIGHT_AT_GENESIS + TOKEN_CONFS))" TOKEN_GENESIS
 TOK_LIST="$(sp_cli app tokens list)"
 # The two ZSLP surfaces print this one identity in MIRRORED strings, so the
 # membership check compares the 32 bytes, never the text:
