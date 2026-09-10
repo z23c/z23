@@ -21,13 +21,19 @@
  *   6. the products.json loader still works on a datadir the command never
  *      touched, and app.store.products reads those rows back — one record,
  *      two writers
+ *   7. when a second process holds the node.db owner lease, the shipped
+ *      list-product handler does not report STORE_NOT_INITIALISED — it
+ *      proxies storesell_list_product and names STORE_NODE_UNREACHABLE
+ *      when that node does not answer
  *
- * No node, no network, no wallet: every case is an in-process call against a
- * fixture datadir under ./test-tmp. */
+ * No live node, no wallet: every case is a fixture datadir under ./test-tmp.
+ * The live-lease case forks a holder process; RPC is stubbed at the client
+ * hook so a host node is never contacted. */
 
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "controllers/rpc_client.h"
 #include "controllers/store_controller.h"
 #include "controllers/store_sell_controller.h"
 #include "crypto/sha3.h"
@@ -38,6 +44,12 @@
 #include "models/store.h"
 #include "models/store_blob.h"
 #include "rpc/server.h"
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#endif
 
 #define SL_CHECK(name, expr) do {                                      \
     printf("store_listing: %s... ", (name));                           \
@@ -868,8 +880,9 @@ static int t_node_side_rpc(void)
  *
  * The lease probe is the whole repair: with no owner the leaf writes in
  * process (cases 1-4 above all rely on that), and with an owner it must NOT
- * open node.db. This pins the idle half here — the owned half needs a second
- * process holding the lease, which is what the operator proof exercises. */
+ * open node.db. This pins the idle half; t_live_lease_lists_through_node
+ * holds a real lease in a child and drives the shipped handler in the parent.
+ */
 static int t_idle_datadir_is_written_in_process(void)
 {
     int failures = 0;
@@ -892,8 +905,214 @@ static int t_idle_datadir_is_written_in_process(void)
     return failures;
 }
 
+/* ── (7) a LIVE owner lease is proxied, never STORE_NOT_INITIALISED ── */
+
+static bool sl_touch(const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    int rc = fputc('R', f);
+    return fclose(f) == 0 && rc != EOF;
+}
+
+static bool sl_wait_file(const char *path)
+{
+    for (int i = 0; i < 200; i++) {
+        struct stat st;
+        if (stat(path, &st) == 0 && st.st_size > 0)
+            return true;
+#if defined(_WIN32)
+        Sleep(20);
+#else
+        usleep(20000);
+#endif
+    }
+    return false;
+}
+
+#ifdef ZCL_TESTING
+/* Shape the HTTP client actually returns when the node cookie is missing.
+ * Installing this hook is mandatory isolation: the unhooked client would
+ * resolve this host's real node cookie. */
+static char *sl_rpc_cookie_missing(const char *method, const char *params)
+{
+    (void)method;
+    (void)params;
+    const char *body =
+        "{\"error\":{\"code\":-32603,\"message\":"
+        "\"cannot read RPC auth cookie — is the node running and is the "
+        "selected datadir correct?\"}}";
+    size_t n = strlen(body);
+    char *out = malloc(n + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, body, n + 1);
+    return out;
+}
+#endif
+
+#if defined(_WIN32)
+static int sl_win_hold_lease_role(void)
+{
+    const char *path = getenv("ZCL_STORE_LISTING_CHILD_DB");
+    const char *ready = getenv("ZCL_STORE_LISTING_READY");
+    if (!path || !path[0] || !ready || !ready[0])
+        return 1;
+    struct node_db ndb = {0};
+    if (!node_db_open(&ndb, path))
+        return 2;
+    if (!sl_touch(ready)) {
+        node_db_close(&ndb);
+        return 3;
+    }
+    for (;;)
+        Sleep(250);
+    return 0;
+}
+
+static void *sl_spawn_hold_lease(const char *dir, const char *path,
+                                 const char *ready)
+{
+    char log_path[600];
+    snprintf(log_path, sizeof(log_path), "%s/hold-lease.log", dir);
+    if (_putenv_s("ZCL_STORE_LISTING_CHILD_DB", path) != 0)
+        return NULL;
+    if (_putenv_s("ZCL_STORE_LISTING_READY", ready) != 0)
+        return NULL;
+    return test_spawn_self_with_role("test_store_listing", "hold-lease",
+                                     log_path);
+}
+#else
+static void sl_posix_hold_lease(const char *db_path, const char *ready_path,
+                                int wait_fd)
+{
+    struct node_db ndb = {0};
+    if (!node_db_open(&ndb, db_path))
+        _exit(2);
+    if (!sl_touch(ready_path)) {
+        node_db_close(&ndb);
+        _exit(3);
+    }
+    char b = 0;
+    if (read(wait_fd, &b, 1) != 1) {
+        node_db_close(&ndb);
+        _exit(4);
+    }
+    node_db_close(&ndb);
+    _exit(0);
+}
+#endif
+
+static int sl_assert_live_reply(const struct zcl_command_reply *reply,
+                                bool *unreachable, bool *listed)
+{
+    int failures = 0;
+    *unreachable = strcmp(reply->error.code, "STORE_NODE_UNREACHABLE") == 0;
+    *listed = reply->exit_code == ZCL_COMMAND_EXIT_OK;
+    SL_CHECK("live lease: not STORE_NOT_INITIALISED",
+             strcmp(reply->error.code, "STORE_NOT_INITIALISED") != 0);
+    SL_CHECK("live lease: listed through the node or named UNREACHABLE",
+             *unreachable || *listed);
+    if (*unreachable)
+        SL_CHECK("live lease: UNREACHABLE is TRANSIENT",
+                 reply->exit_code == ZCL_COMMAND_EXIT_TRANSIENT);
+    else if (*listed)
+        SL_CHECK("live lease: token_id normalized",
+                 strcmp(sl_str(reply, "token_id"), "LIVELEASE") == 0);
+    return failures;
+}
+
+static int t_live_lease_lists_through_node(void)
+{
+    int failures = 0;
+    char dir[256];
+    SL_CHECK("live lease: fixture datadir",
+             sl_mk_datadir(dir, sizeof(dir), "lease-live"));
+    char path[512], ready[512];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    snprintf(ready, sizeof(ready), "%s/lease.ready", dir);
+
+#ifdef ZCL_TESTING
+    node_rpc_client_set_test_hook(sl_rpc_cookie_missing);
+#endif
+
+#if defined(_WIN32)
+    void *hp = sl_spawn_hold_lease(dir, path, ready);
+    SL_CHECK("live lease: child spawned", hp != NULL);
+#else
+    int done[2] = { -1, -1 };
+    pid_t child = -1;
+    bool piped = pipe(done) == 0;
+    SL_CHECK("live lease: done pipe", piped);
+    if (piped) {
+        child = fork();
+        if (child == 0) {
+            close(done[1]);
+            sl_posix_hold_lease(path, ready, done[0]);
+        }
+        close(done[0]);
+        done[0] = -1;
+    }
+    SL_CHECK("live lease: fork", child > 0);
+#endif
+
+    SL_CHECK("live lease: child acquired the owner lock", sl_wait_file(ready));
+    SL_CHECK("live lease: probe is LIVE",
+             node_db_owner_lease_probe(path) == NODE_DB_OWNER_LEASE_LIVE);
+
+    struct zcl_command_reply reply;
+    sl_list_product(dir, "Live Lease", "LIVELEASE", 0.25, NULL, NULL, &reply);
+    bool unreachable = false, listed = false;
+    failures += sl_assert_live_reply(&reply, &unreachable, &listed);
+    zcl_command_reply_free(&reply);
+
+#if defined(_WIN32)
+    if (hp) {
+        test_self_child_kill(hp);
+        (void)test_self_child_wait(hp);
+    }
+    _putenv_s("ZCL_STORE_LISTING_CHILD_DB", "");
+    _putenv_s("ZCL_STORE_LISTING_READY", "");
+#else
+    if (child > 0 && done[1] >= 0) {
+        char d = 'D';
+        (void)write(done[1], &d, 1);
+        int status = 0;
+        SL_CHECK("live lease: child released",
+                 waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+                     WEXITSTATUS(status) == 0);
+    }
+    if (done[1] >= 0)
+        close(done[1]);
+#endif
+
+#ifdef ZCL_TESTING
+    node_rpc_client_set_test_hook(NULL);
+#endif
+
+    if (unreachable)
+        SL_CHECK("live lease: wrote nothing while the node was down",
+                 sl_product_count(dir) == 0);
+    else if (listed)
+        SL_CHECK("live lease: product is on record", sl_product_count(dir) == 1);
+
+    test_rm_rf(dir);
+    return failures;
+}
+
 int test_store_listing(void)
 {
+#if defined(_WIN32)
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        if (strcmp(fork_role, "hold-lease") == 0)
+            return sl_win_hold_lease_role();
+        fprintf(stderr, "test_store_listing: unknown fork role '%s'\n",
+                fork_role);
+        return 1;
+    }
+#endif
     int failures = 0;
     printf("\n=== Store listing (typed merchant surface) ===\n");
     failures += t_list_and_serve();
@@ -904,6 +1123,7 @@ int test_store_listing(void)
     failures += t_json_path_still_works();
     failures += t_node_side_rpc();
     failures += t_idle_datadir_is_written_in_process();
+    failures += t_live_lease_lists_through_node();
     printf("Store listing: %d failures\n", failures);
     return failures;
 }

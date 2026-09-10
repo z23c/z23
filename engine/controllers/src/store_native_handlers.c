@@ -659,15 +659,31 @@ static void sn_copy_body(struct json_value *dst, const struct json_value *src)
     }
 }
 
+/* The loopback client never returns NULL on a down node: cookie-miss and
+ * connect-refused arrive as a JSON-RPC `error` object. That is "the node
+ * did not answer the listing", not a storesell refusal (those ride `ok`). */
+static void sn_fail_node_unreachable(struct store_sell_outcome *out,
+                                     const char *why, const char *evidence)
+{
+    sn_out_fail(out, ZCL_COMMAND_EXIT_TRANSIENT, "STORE_NODE_UNREACHABLE",
+                (why && why[0])
+                    ? why
+                    : "a node owns this store's database but did not answer "
+                      "the listing — the product was NOT listed; check the "
+                      "node's RPC port and cookie",
+                evidence ? evidence : "storesell_list_product");
+}
+
 /* Rebuild the node's outcome from its RPC body. A refusal rides a SUCCESSFUL
  * call as {ok:false, code, message, evidence, exit} carrying the very fields
  * the in-process route fills, so an operator reads the identical refusal
  * whether or not a node was up. */
-static void sn_outcome_from_rpc(const char *raw, struct store_sell_outcome *out)
+static void sn_outcome_from_rpc(const char *raw, const char *datadir,
+                                struct store_sell_outcome *out)
 {
     struct json_value doc;
     json_init(&doc);
-    if (!json_read(&doc, raw, strlen(raw)) || doc.type != JSON_OBJ) {
+    if (!raw || !json_read(&doc, raw, strlen(raw)) || doc.type != JSON_OBJ) {
         json_free(&doc);
         sn_out_fail(out, ZCL_COMMAND_EXIT_INTERNAL, "STORE_RPC_BAD_BODY",
                     "the node answered the listing with a body this command "
@@ -679,9 +695,7 @@ static void sn_outcome_from_rpc(const char *raw, struct store_sell_outcome *out)
         const char *why = err->type == JSON_OBJ
                               ? json_get_str(json_get(err, "message"))
                               : json_get_str(err);
-        sn_out_fail(out, ZCL_COMMAND_EXIT_FAILED, "STORE_RPC_ERROR",
-                    why && why[0] ? why : "the node reported an error",
-                    "storesell_list_product");
+        sn_fail_node_unreachable(out, why, datadir);
         json_free(&doc);
         return;
     }
@@ -689,9 +703,14 @@ static void sn_outcome_from_rpc(const char *raw, struct store_sell_outcome *out)
         const char *code = json_get_str(json_get(&doc, "code"));
         const char *msg = json_get_str(json_get(&doc, "message"));
         const char *ev = json_get_str(json_get(&doc, "evidence"));
+        if (!code || !code[0]) {
+            sn_fail_node_unreachable(out, msg, datadir);
+            json_free(&doc);
+            return;
+        }
         sn_out_fail(out, sn_exit_of(json_get_int(json_get(&doc, "exit"))),
-                    code && code[0] ? code : "STORE_REFUSED",
-                    msg && msg[0] ? msg : "the store refused the listing", ev);
+                    code, msg && msg[0] ? msg : "the store refused the listing",
+                    ev);
         json_free(&doc);
         return;
     }
@@ -721,13 +740,10 @@ static void sn_list_through_node(const struct json_value *in,
     char *raw = node_rpc_call("storesell_list_product", params);
     free(params);
     if (!raw) {
-        sn_out_fail(out, ZCL_COMMAND_EXIT_TRANSIENT, "STORE_NODE_UNREACHABLE",
-                    "a node owns this store's database but did not answer "
-                    "the listing — the product was NOT listed; check the "
-                    "node's RPC port and cookie", datadir);
+        sn_fail_node_unreachable(out, NULL, datadir);
         return;
     }
-    sn_outcome_from_rpc(raw, out);
+    sn_outcome_from_rpc(raw, datadir, out);
     free(raw);
 }
 
