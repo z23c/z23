@@ -2173,7 +2173,6 @@ engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_call_with_timeout:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_fill_missing_creds:20
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_conf:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_result_string_array:20
-engine/modules/rpc/src/rpc_timeout.c:rpc_timeout_set_method:20
 engine/modules/sim/src/postmortem.c:json_escape_string:16
 engine/modules/sim/src/postmortem.c:postmortem_capsule_compress:32
 engine/modules/sim/src/postmortem.c:postmortem_capsule_load_tape:16

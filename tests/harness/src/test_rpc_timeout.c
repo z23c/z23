@@ -219,6 +219,27 @@ static int test_proof_methods_receive_bounded_extension(void)
         close(generic_pair[0]);
         close(generic_pair[1]);
         PASS();
+    }
+    TEST("rpc_timeout: generatetoaddress mining receives its bounded extension") {
+        fresh_mgr();
+        int mine_pair[2] = { -1, -1 };
+        int generic_pair[2] = { -1, -1 };
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, mine_pair) == 0);
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, generic_pair) == 0);
+        int mine = rpc_timeout_register(&mgr, mine_pair[0], 0);
+        int generic = rpc_timeout_register(&mgr, generic_pair[0], 0);
+        ASSERT(mine >= 0 && generic >= 0);
+        rpc_timeout_set_method(&mgr, mine, "generatetoaddress");
+        rpc_timeout_set_method(&mgr, generic, "getwalletinfo");
+        ASSERT(mgr.slots[mine].timeout_ms == RPC_MINING_TIMEOUT_MS);
+        ASSERT(mgr.slots[generic].timeout_ms == 10000);
+        rpc_timeout_unregister(&mgr, mine);
+        rpc_timeout_unregister(&mgr, generic);
+        close(mine_pair[0]);
+        close(mine_pair[1]);
+        close(generic_pair[0]);
+        close(generic_pair[1]);
+        PASS();
     } _test_next:;
     return failures;
 }

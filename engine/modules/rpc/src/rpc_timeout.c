@@ -153,6 +153,53 @@ int rpc_timeout_register(struct rpc_timeout_mgr *mgr,
     return slot;
 }
 
+/* Per-method timeout extensions. A `budget_ms` of 0 means "use the
+ * manager's configured proof_timeout_ms" (vault surfaces share one
+ * operator-tunable budget rather than a compile-time constant).
+ *
+ * Shielded planning performs a real, non-broadcast Sapling proof preflight
+ * before it persists a reservation, and commit rebuilds the exact proof
+ * before durable relay — those get the proof-building budget. Onion market
+ * retrieval, mesh fleet collection, and regtest mining each do real,
+ * unavoidable work inside one RPC that legitimately exceeds the generic
+ * 10 s ceiling; see the constant comments in rpc_timeout.h for each case.
+ * The generic deadline still wins when an operator configured it higher —
+ * a method label can extend a slot, never shorten one. */
+struct rpc_timeout_method_budget {
+    const char *method;
+    int         budget_ms;
+};
+
+static const struct rpc_timeout_method_budget k_method_budgets[] = {
+    { "getnewaddress",             RPC_WALLET_MUTATION_TIMEOUT_MS },
+    { "z_getnewaddress",           RPC_WALLET_MUTATION_TIMEOUT_MS },
+    { "z_sendmany",                0 },
+    { "rescanwitnesses",           0 },
+    { "vault_intent_plan",         0 },
+    { "vault_intent_fanout_plan",  0 },
+    { "vault_intent_commit",       0 },
+    { "zmarket_purchase_retrieve", RPC_MARKET_DELIVERY_TIMEOUT_MS },
+    { "mesh_machines",             RPC_MESH_COLLECT_TIMEOUT_MS },
+    { "generatetoaddress",         RPC_MINING_TIMEOUT_MS },
+    { "generate",                  RPC_MINING_TIMEOUT_MS },
+};
+
+/* Returns the extended budget for `method`, or 0 if the method has no
+ * table entry (caller keeps the slot's current timeout). */
+static int rpc_timeout_method_budget_ms(const struct rpc_timeout_mgr *mgr,
+                                         const char *method)
+{
+    size_t n = sizeof(k_method_budgets) / sizeof(k_method_budgets[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(method, k_method_budgets[i].method) == 0) {
+            return k_method_budgets[i].budget_ms
+                       ? k_method_budgets[i].budget_ms
+                       : mgr->proof_timeout_ms;
+        }
+    }
+    return 0;
+}
+
 void rpc_timeout_set_method(struct rpc_timeout_mgr *mgr,
                              int slot, const char *method)
 {
@@ -164,37 +211,9 @@ void rpc_timeout_set_method(struct rpc_timeout_mgr *mgr,
         size_t n = strnlen(method, RPC_TIMEOUT_METHOD_LEN - 1);
         memcpy(mgr->slots[slot].method, method, n);
         mgr->slots[slot].method[n] = '\0';
-        /* Shielded planning performs a real, non-broadcast Sapling proof
-         * preflight before it persists a reservation, and commit rebuilds
-         * the exact proof before durable relay. Keep the ordinary 10-second
-         * worker ceiling for every other method, but give these exact owner
-         * surfaces the bounded proof-building budget. The
-         * generic deadline still wins when an operator configured it higher;
-         * a method label can extend a slot, never shorten one. */
-        if ((strcmp(method, "getnewaddress") == 0 ||
-             strcmp(method, "z_getnewaddress") == 0) &&
-            RPC_WALLET_MUTATION_TIMEOUT_MS > mgr->slots[slot].timeout_ms) {
-            mgr->slots[slot].timeout_ms = RPC_WALLET_MUTATION_TIMEOUT_MS;
-        }
-        if ((strcmp(method, "z_sendmany") == 0 ||
-             strcmp(method, "rescanwitnesses") == 0 ||
-             strcmp(method, "vault_intent_plan") == 0 ||
-             strcmp(method, "vault_intent_fanout_plan") == 0 ||
-             strcmp(method, "vault_intent_commit") == 0) &&
-            mgr->proof_timeout_ms > mgr->slots[slot].timeout_ms) {
-            mgr->slots[slot].timeout_ms = mgr->proof_timeout_ms;
-        }
-        /* Onion market retrieval is sequential blocking embedded-Tor
-         * fetches inside one RPC (see RPC_MARKET_DELIVERY_TIMEOUT_MS). */
-        if (strcmp(method, "zmarket_purchase_retrieve") == 0 &&
-            RPC_MARKET_DELIVERY_TIMEOUT_MS > mgr->slots[slot].timeout_ms) {
-            mgr->slots[slot].timeout_ms = RPC_MARKET_DELIVERY_TIMEOUT_MS;
-        }
-        /* Mesh fleet collection waits collectively for up to 8 status
-         * receipts inside one RPC (see RPC_MESH_COLLECT_TIMEOUT_MS). */
-        if (strcmp(method, "mesh_machines") == 0 &&
-            RPC_MESH_COLLECT_TIMEOUT_MS > mgr->slots[slot].timeout_ms) {
-            mgr->slots[slot].timeout_ms = RPC_MESH_COLLECT_TIMEOUT_MS;
+        int budget = rpc_timeout_method_budget_ms(mgr, method);
+        if (budget > mgr->slots[slot].timeout_ms) {
+            mgr->slots[slot].timeout_ms = budget;
         }
     }
     pthread_mutex_unlock(&mgr->lock);

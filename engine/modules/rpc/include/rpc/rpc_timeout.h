@@ -74,6 +74,13 @@ extern "C" {
  * truncated, unparseable body to the caller, so this method gets a bounded
  * 20 s budget — extend, never shorten, same as the proof budget. */
 #define RPC_MESH_COLLECT_TIMEOUT_MS 20000
+/* Regtest mining (generatetoaddress/generate) does real proof-of-work
+ * inside the RPC call — five blocks legitimately exceed the generic 10 s
+ * ceiling on a loaded host. The watchdog would shutdown() the socket while
+ * the worker keeps mining in the background, surfacing to the caller as a
+ * connection failure even though the call ultimately succeeds. Give it the
+ * same bounded patience as a wallet mutation — extend, never shorten. */
+#define RPC_MINING_TIMEOUT_MS 60000
 
 struct rpc_timeout_slot {
     bool     in_use;
