@@ -115,11 +115,185 @@ static enum body_history_probe bb_probe(int64_t height,
     return BODY_HISTORY_PROBE_MISSING;
 }
 
+static bool bb_queue_has_room(struct download_manager *dm,
+                              enum bb_backfill_mode mode)
+{
+    uint64_t in_flight = 0, queued = 0;
+
+    if (mode == BB_BACKFILL_NORMAL)
+        return true;
+    dl_get_stats(dm, NULL, NULL, NULL, &in_flight, &queued);
+    return queued <= BODY_HISTORY_QUEUE_HEADROOM &&
+           in_flight < dl_get_max_in_flight_total() / 4;
+}
+
+static size_t bb_drop_in_flight(struct download_manager *dm,
+                                struct uint256 *hashes, int32_t *heights,
+                                size_t n)
+{
+    size_t keep = 0;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        if (dl_is_in_flight(dm, &hashes[i]))
+            continue;
+        hashes[keep] = hashes[i];
+        heights[keep] = heights[i];
+        keep++;
+    }
+    return keep;
+}
+
+static void bb_note_enqueued(size_t added, int64_t lo, size_t n, int tip_h,
+                             const char *why, body_backfill_wake_fn wake,
+                             void *wake_ctx)
+{
+    const char *label = why ? why : "census";
+
+    body_history_global_lock();
+    body_history_global_census()->blocks_enqueued += (uint64_t)added;
+    body_history_global_unlock();
+    LOG_WARN("body_backfill",
+             "[body-history] backfill queued %zu below-tip "
+             "bodies (%s window [%lld..%lld] tip=%d)",
+             added, label, (long long)lo,
+             (long long)(lo + (int64_t)n - 1), tip_h);
+    event_emitf(EV_BLOCK_REQUESTED, 0,
+                "body_history backfill queued=%zu lo=%lld "
+                "hi=%lld tip=%d why=%s",
+                added, (long long)lo,
+                (long long)(lo + (int64_t)n - 1), tip_h, label);
+    if (wake)
+        wake(wake_ctx);
+}
+
+/* Hand a probed window's missing hashes to the history download lane.
+ * Returns the number actually accepted by the download manager. */
+static int bb_try_enqueue(struct download_manager *dm,
+                          const uint8_t *classes,
+                          const struct uint256 *hashes, size_t n, int64_t lo,
+                          int tip_h, enum bb_backfill_mode mode,
+                          const char *why, body_backfill_wake_fn wake,
+                          void *wake_ctx)
+{
+    size_t enq_cap;
+    struct uint256 *eh;
+    int32_t *ehh;
+    size_t keep;
+    size_t added;
+
+    if (!dm || !classes || !hashes || n == 0 || lo < 0)
+        return 0;
+    if (!bb_queue_has_room(dm, mode))
+        return 0;
+
+    enq_cap = (mode == BB_BACKFILL_NORMAL)
+                  ? BODY_HISTORY_ENQUEUE_MAX_NORMAL
+                  : BODY_HISTORY_ENQUEUE_MAX;
+    eh = zcl_malloc(enq_cap * sizeof(*eh), "body_history_enq_h");
+    ehh = zcl_malloc(enq_cap * sizeof(*ehh), "body_history_enq_n");
+    if (!eh || !ehh) {
+        free(eh);
+        free(ehh);
+        LOG_WARN("body_backfill",
+                 "[body-history] backfill alloc failed — census "
+                 "verdict still published");
+        return 0;
+    }
+
+    keep = bb_drop_in_flight(
+        dm, eh, ehh,
+        body_history_census_collect_missing(lo, classes, hashes, n, eh, ehh,
+                                            enq_cap));
+    added = 0;
+    if (keep > 0)
+        added = dl_queue_blocks_class(dm, eh, ehh, keep, DL_WORK_HISTORY);
+    if (added > 0)
+        bb_note_enqueued(added, lo, n, tip_h, why, wake, wake_ctx);
+    free(eh);
+    free(ehh);
+    return (int)added;
+}
+
+/* Probe [fill_lo, fill_hi] against the live index and enqueue missing
+ * bodies. Does not move the census cursor — this is a fill of a hole the
+ * census already named, not a measurement step. */
+static int bb_enqueue_range(struct main_state *ms, struct download_manager *dm,
+                            int64_t fill_lo, int64_t fill_hi, int tip_h,
+                            enum bb_backfill_mode mode, const char *why,
+                            body_backfill_wake_fn wake, void *wake_ctx)
+{
+    if (!ms || !dm || fill_lo < 0 || fill_lo > fill_hi)
+        return 0;
+
+    size_t cap = (size_t)(fill_hi - fill_lo + 1);
+    uint8_t *classes = zcl_malloc(cap, "body_history_fill_cls");
+    struct uint256 *hashes =
+        zcl_malloc(cap * sizeof(*hashes), "body_history_fill_h");
+    if (!classes || !hashes) {
+        free(classes);
+        free(hashes);
+        LOG_WARN("body_backfill",
+                 "[body-history] %s fill [%lld..%lld] alloc failed",
+                 why ? why : "range", (long long)fill_lo,
+                 (long long)fill_hi);
+        return 0;
+    }
+
+    struct bb_probe_ctx pc = { .ms = ms };
+    zcl_mutex_lock(&ms->cs_main);
+    size_t n = body_history_census_probe_window(fill_lo, fill_hi, bb_probe,
+                                                &pc, classes, hashes, cap);
+    zcl_mutex_unlock(&ms->cs_main);
+    int enqueued = bb_try_enqueue(dm, classes, hashes, n, fill_lo, tip_h,
+                                  mode, why, wake, wake_ctx);
+    free(classes);
+    free(hashes);
+    return enqueued;
+}
+
+/* Request missing bodies after one census pass. Prefer the current window
+ * when it contains the lowest hole; otherwise probe that hole without
+ * moving the census cursor. */
+static int bb_enqueue_after_census(
+    struct main_state *ms, struct download_manager *dm, bool may_enqueue,
+    const uint8_t *classes, const struct uint256 *hashes, size_t n,
+    int64_t lo, int64_t hi, int tip_h, enum bb_backfill_mode mode,
+    const struct body_history_pass_result *res,
+    const struct body_history_verdict *verdict,
+    body_backfill_wake_fn wake, void *wake_ctx)
+{
+    int64_t lowest;
+    int64_t fill_hi;
+    int enqueued = 0;
+    bool lowest_in_window;
+
+    if (!may_enqueue || !res)
+        return 0;
+    lowest = verdict ? verdict->lowest_missing : -1;
+    lowest_in_window = lowest >= lo && lowest <= hi;
+    if (res->missing > 0 && (lowest < 0 || lowest_in_window))
+        enqueued = bb_try_enqueue(dm, classes, hashes, n, lo, tip_h, mode,
+                                  "census", wake, wake_ctx);
+    if (enqueued > 0 || lowest < 0 || lowest_in_window)
+        return enqueued;
+    fill_hi = lowest + BODY_HISTORY_CENSUS_BUDGET - 1;
+    if (fill_hi > (int64_t)tip_h)
+        fill_hi = (int64_t)tip_h;
+    return bb_enqueue_range(ms, dm, lowest, fill_hi, tip_h, mode,
+                            "lowest_missing", wake, wake_ctx);
+}
+
 /* One bounded census pass over [0, tip], plus a rate-limited enqueue of the
  * missing bodies it found. `tip_work_pending` is true when the above-tip
  * pass still has work; the census still RUNS (the report must stay fresh)
  * but the backfill holds off so live sync keeps the queue. `census_only`
  * does the same for the boot catch-up burst, which runs slices back-to-back.
+ *
+ * The enqueue half prefers the published lowest known hole over the current
+ * census window. Otherwise a descending cursor (and the census-only burst)
+ * can spend every enqueue-capable pass in a held tip band and never request
+ * the hole that is pausing background validation.
  *
  * Returns the number of below-tip bodies handed to the download manager. */
 int body_backfill_pass(struct main_state *ms, struct download_manager *dm,
@@ -176,6 +350,9 @@ int body_backfill_pass(struct main_state *ms, struct download_manager *dm,
     struct body_history_pass_result res;
     struct body_history_verdict verdict;
     memset(&res, 0, sizeof(res));
+    memset(&verdict, 0, sizeof(verdict));
+    verdict.lowest_missing = -1;
+    verdict.lowest_unmeasured = -1;
     body_history_global_lock();
     struct body_history_census *census = body_history_global_census();
     bool folded = body_history_census_fold(census,
@@ -202,71 +379,12 @@ int body_backfill_pass(struct main_state *ms, struct download_manager *dm,
      * read the index. */
     body_history_publish((folded && evaluated) ? &verdict : NULL);
 
-    int enqueued = 0;
     enum bb_backfill_mode mode = bb_backfill_mode();
-    if (mode != BB_BACKFILL_OFF && folded && res.missing > 0 &&
-        !tip_work_pending && !census_only) {
-        uint64_t in_flight = 0, queued = 0;
-        dl_get_stats(dm, NULL, NULL, NULL, &in_flight, &queued);
-        if (mode == BB_BACKFILL_NORMAL ||
-            (queued <= BODY_HISTORY_QUEUE_HEADROOM &&
-             in_flight < dl_get_max_in_flight_total() / 4)) {
-            /* The throttled drip takes 64 of the window's holes and lets
-             * the cursor descend past the rest, so a window with more than
-             * 64 of them needs another whole sweep to finish. Under the
-             * operator-selected NORMAL policy, drain the window instead:
-             * one descent then requests every missing body exactly once. */
-            size_t enq_cap = (mode == BB_BACKFILL_NORMAL)
-                                 ? BODY_HISTORY_ENQUEUE_MAX_NORMAL
-                                 : BODY_HISTORY_ENQUEUE_MAX;
-            struct uint256 *eh =
-                zcl_malloc(enq_cap * sizeof(*eh), "body_history_enq_h");
-            int32_t *ehh =
-                zcl_malloc(enq_cap * sizeof(*ehh), "body_history_enq_n");
-            if (eh && ehh) {
-                size_t want = body_history_census_collect_missing(
-                    lo, classes, hashes, n, eh, ehh, enq_cap);
-                /* Drop anything already in flight so a slow peer's
-                 * outstanding request is not duplicated. */
-                size_t keep = 0;
-                for (size_t i = 0; i < want; i++) {
-                    if (dl_is_in_flight(dm, &eh[i]))
-                        continue;
-                    eh[keep] = eh[i];
-                    ehh[keep] = ehh[i];
-                    keep++;
-                }
-                if (keep > 0) {
-                    size_t added = dl_queue_blocks_class(
-                        dm, eh, ehh, keep, DL_WORK_HISTORY);
-                    enqueued = (int)added;
-                    if (added > 0) {
-                        body_history_global_lock();
-                        body_history_global_census()->blocks_enqueued +=
-                            (uint64_t)added;
-                        body_history_global_unlock();
-                        LOG_WARN("body_backfill",
-                                 "[body-history] backfill queued %zu below-tip "
-                                 "bodies (window [%lld..%lld] tip=%d)",
-                                 added, (long long)lo, (long long)hi, tip_h);
-                        event_emitf(EV_BLOCK_REQUESTED, 0,
-                                    "body_history backfill queued=%zu lo=%lld "
-                                    "hi=%lld tip=%d",
-                                    added, (long long)lo, (long long)hi, tip_h);
-                        if (wake)
-                            wake(wake_ctx);
-                    }
-                }
-            } else {
-                LOG_WARN("body_backfill",
-                         "[body-history] backfill alloc failed — census "
-                         "verdict still published");
-            }
-            free(eh);
-            free(ehh);
-        }
-    }
-
+    bool may_enqueue = mode != BB_BACKFILL_OFF && folded &&
+                       !tip_work_pending && !census_only;
+    int enqueued = bb_enqueue_after_census(
+        ms, dm, may_enqueue, classes, hashes, n, lo, hi, tip_h, mode,
+        &res, evaluated ? &verdict : NULL, wake, wake_ctx);
     free(classes);
     free(hashes);
     return enqueued;

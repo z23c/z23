@@ -4309,6 +4309,11 @@ static bool dp_generation_dependencies(const char *root,
          * Tor from source in RAM, and the next warm restart then re-copies
          * the original libtor.a under a manifest that no longer matches it. */
         "vendor/tor/.provenance",
+        /* The generated Tor Makefile records the CC= string provenance
+         * binds. Copying archives and .provenance without it makes
+         * check-tor-provenance fall back to ${CC:-cc}, a different
+         * compiler identity than the gcc that wrote the archives. */
+        "vendor/tor/Makefile",
         /* Preserve optional cross-build outputs and download caches when
          * present so a generation can reuse the submitting checkout's
          * prepared target inputs without rebuilding or downloading them. */

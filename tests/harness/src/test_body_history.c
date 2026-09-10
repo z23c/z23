@@ -1259,14 +1259,93 @@ static int test_bh_normal_backfill_drains_the_window_it_measured(void)
 
         /* What it collected is the real work: the lowest hole first, and
          * every entry a height the pass actually marked missing. */
-        struct uint256 want0;
-        bh_fake_hash(&want0, 0);
-        ASSERT(uint256_eq(&out_h[0], &want0));
+        struct uint256 want0_drain;
+        bh_fake_hash(&want0_drain, 0);
+        ASSERT(uint256_eq(&out_h[0], &want0_drain));
         ASSERT(out_n[0] == 0);
         ASSERT(out_n[drain - 1] == (int32_t)(n_holes - 1));
 
         free(out_h);
         free(out_n);
+        free(classes);
+        free(hashes);
+        body_coverage_free(&held);
+        body_coverage_free(&measured);
+        bh_fake_chain_free(&chain);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The descending census cursor (and the census-only burst) can sit in a
+ * held tip band while a known hole below the tip pauses background
+ * validation. The backfill pass must collect that named lowest hole even
+ * when the current census window has nothing to request. */
+static int test_bh_lowest_missing_fill_when_cursor_is_at_tip(void)
+{
+    int failures = 0;
+    TEST("lowest known hole is collected while the census cursor sits at the tip") {
+        const int64_t budget = 256;
+        const int64_t tip = budget * 3 - 1;
+        struct bh_fake_chain chain;
+        ASSERT(bh_fake_chain_init(&chain, tip + 1));
+        for (int64_t h = 10; h <= 40; h++)
+            chain.have_data[h] = 0;
+
+        struct body_coverage_map held, measured;
+        body_coverage_init(&held);
+        body_coverage_init(&measured);
+        struct body_history_census census;
+        body_history_census_init(&census);
+
+        ASSERT(bh_run_full_census(&census, &held, &measured, &chain, tip,
+                                  budget, NULL, NULL, 0, NULL) == 31);
+        struct body_history_verdict v;
+        ASSERT(body_history_evaluate(&held, &measured, 0, tip, &v));
+        ASSERT(v.status == BODY_HISTORY_INCOMPLETE);
+        ASSERT(v.lowest_missing == 10);
+        ASSERT(v.missing_count == 31);
+
+        /* Wrap: a new sweep starts at the tip, matching the live cursor
+         * after sweeps_completed increments. That window is fully held. */
+        body_history_census_init(&census);
+        int64_t lo = 0, hi = 0;
+        ASSERT(body_history_census_plan(&census, 0, tip, budget, &lo, &hi));
+        ASSERT(hi == tip);
+        ASSERT(lo > v.lowest_missing);
+
+        uint8_t *classes = malloc((size_t)budget);
+        struct uint256 *hashes = malloc((size_t)budget * sizeof(*hashes));
+        ASSERT(classes && hashes);
+        size_t n = body_history_census_probe_window(lo, hi, bh_fake_probe,
+                                                    &chain, classes, hashes,
+                                                    (size_t)budget);
+        struct uint256 out_h[64];
+        int32_t out_n[64];
+        ASSERT(body_history_census_collect_missing(
+                   lo, classes, hashes, n, out_h, out_n, 64) == 0);
+
+        int64_t fill_lo = v.lowest_missing;
+        int64_t fill_hi = fill_lo + budget - 1;
+        if (fill_hi > tip)
+            fill_hi = tip;
+        n = body_history_census_probe_window(fill_lo, fill_hi, bh_fake_probe,
+                                             &chain, classes, hashes,
+                                             (size_t)budget);
+        size_t fill_got = body_history_census_collect_missing(
+            fill_lo, classes, hashes, n, out_h, out_n, 64);
+        ASSERT(fill_got == 31);
+        ASSERT(out_n[0] == 10);
+
+        struct download_manager dm;
+        dl_init(&dm);
+        ASSERT(dl_queue_blocks_class(&dm, out_h, out_n, fill_got,
+                                     DL_WORK_HISTORY) == fill_got);
+        uint64_t queued = 0;
+        dl_get_stats(&dm, NULL, NULL, NULL, NULL, &queued);
+        ASSERT(queued == 31);
+        dl_free(&dm);
+
         free(classes);
         free(hashes);
         body_coverage_free(&held);
@@ -1291,6 +1370,7 @@ int test_body_history(void)
     failures += test_bh_evaluate_failure_paths_are_unknown();
     failures += test_bh_below_tip_hole_found_and_enqueued();
     failures += test_bh_normal_backfill_drains_the_window_it_measured();
+    failures += test_bh_lowest_missing_fill_when_cursor_is_at_tip();
     failures += test_bh_one_contiguous_hole_from_height_one();
     failures += test_bh_census_is_bounded_and_resumable();
     failures += test_bh_at_tip_requires_proven_history();

@@ -486,6 +486,27 @@ static struct block_index *resolve_body_queue_target(
     return NULL;
 }
 
+static bool queue_body_uses_history_lane(enum body_queue_selector selector,
+                                         int served_tip, int target_height)
+{
+    return selector == BODY_QUEUE_ACTIVE_FRONTIER &&
+           served_tip >= 0 &&
+           target_height + (int)DL_TIP_BIAS_RESERVE < served_tip;
+}
+
+static void queue_body_push(struct download_manager *dm,
+                            const struct uint256 *hash, int target_height,
+                            bool history_lane)
+{
+    int32_t height = (int32_t)target_height;
+
+    if (history_lane) {
+        (void)dl_queue_blocks_class(dm, hash, &height, 1, DL_WORK_HISTORY);
+        return;
+    }
+    dl_queue_priority(dm, hash, target_height);
+}
+
 static struct zcl_result queue_body_target(
     int target_height,
     const char *reason,
@@ -533,8 +554,14 @@ static struct zcl_result queue_body_target(
     }
     already_have_data = (target->nStatus & BLOCK_HAVE_DATA) != 0;
     target_hash = *target->phashBlock;
+    int served_tip = active_chain_height(&ms->chain_active);
     if (selector == BODY_QUEUE_BEST_HEADER_ANCESTOR)
-        local_h = active_chain_height(&ms->chain_active);
+        local_h = served_tip;
+    /* Mid-chain refetch uses the history lane. FORWARD assignment prefers
+     * the tip-adjacent reserve, so a height millions below tip sat queued
+     * and unwitnessed. */
+    bool history_lane =
+        queue_body_uses_history_lane(selector, served_tip, target_height);
     zcl_mutex_unlock(&ms->cs_main);
 
     /* Receipt can win the race after a Condition's final witness check but
@@ -546,7 +573,7 @@ static struct zcl_result queue_body_target(
         return ZCL_OK;
 
     msg_processor_clear_seen_block(&target_hash);
-    dl_queue_priority(dm, &target_hash, target_height);
+    queue_body_push(dm, &target_hash, target_height, history_lane);
 
     struct connman *cm = sync_monitor_connman();
     reset_local_addnode_backoff(cm);

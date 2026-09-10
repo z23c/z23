@@ -2397,7 +2397,6 @@ engine/services/src/blog_publication.c:blog_anchor_script_parse:24
 engine/services/src/blog_publication.c:blog_publication_import_event:18
 engine/services/src/blog_publication.c:blog_publication_observe_projection:21
 engine/services/src/blog_publication.c:blog_publication_validate_request:24
-engine/services/src/body_backfill_service.c:body_backfill_pass:26
 engine/services/src/build_fabric_admission.c:bfa_preserved_receipt_signature_valid:16
 engine/services/src/build_fabric_admission.c:build_fabric_clean_shadow_compare:30
 engine/services/src/build_fabric_admission.c:build_fabric_observation_verify:23

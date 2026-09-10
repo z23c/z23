@@ -5010,6 +5010,7 @@ static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
         static const char *const files[] = {
             "vendor/lib/libcrypto.a", "vendor/include/openssl/ssl.h",
             "vendor/sqlite3.c", "vendor/tor/libtor.a", "vendor/tor/.provenance",
+            "vendor/tor/Makefile",
             "vendor/.cache/input.tar",
             "vendor/cross/x86_64-w64-mingw32/lib/libsqlite3.a",
             "vendor/cross/x86_64-w64-mingw32/lib/.provenance/libsqlite3.a.stamp",
@@ -5054,6 +5055,7 @@ static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
          * vendor-provenance gate's responsibility. */
         static const char *const required[] = {
             "vendor/tor/.provenance",
+            "vendor/tor/Makefile",
         };
         for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
             ASSERT(snprintf(source, sizeof(source), "%s/%s", donor, required[i]) <

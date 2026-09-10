@@ -44,6 +44,12 @@ typedef void (*body_backfill_wake_fn)(void *ctx);
  *                     true by construction rather than by arithmetic over
  *                     the queue-headroom gate.
  *
+ * When enqueue is allowed, the pass requests the published lowest known
+ * hole even if the descending census cursor is currently in a held tip
+ * band. Otherwise the cursor and the census-only burst spend the whole
+ * tick measuring already-held heights and the hole that is pausing
+ * background validation is never handed to the download manager.
+ *
  * Every exit path publishes a verdict — a pass that could not measure
  * publishes BODY_HISTORY_UNKNOWN rather than staying silent, because
  * silence is what a caller would read as "fine". */
