@@ -691,8 +691,29 @@ OFFER_COUNT="$(mkt_native "$MKT_DD_A" "$A_RPC" core storage query \
     --input='{"sql":"SELECT COUNT(*) AS n FROM file_offers"}' || true)"
 [ "$(printf '%s' "$OFFER_COUNT" | mkt_jget data.rows[0][0] 2>/dev/null || true)" = "0" ] ||
     mkt_die "offer plan mutated seller storage: $OFFER_COUNT"
-[ "$(a_rpc zmarket_list | mkt_result)" = "[]" ] ||
-    mkt_die "offer plan touched the seller gossip cache"
+# zmarket_list's shape depends on the node's moderation profile (see
+# market_list_json / f0d5907e28): a bare array, or an object carrying
+# offers/offer_count/hidden_count — a hidden offer is still a cache entry,
+# so hidden_count must also be 0 for the plan to count as untouched.
+GOSSIP_LIST="$(a_rpc zmarket_list | mkt_result)"
+gossip_kind="$(printf '%s' "$GOSSIP_LIST" | "$JSONQ" type . || true)"
+case "$gossip_kind" in
+    array)
+        [ "$(printf '%s' "$GOSSIP_LIST" | "$JSONQ" count .)" = "0" ] ||
+            mkt_die "offer plan touched the seller gossip cache"
+        ;;
+    object)
+        [ "$(printf '%s' "$GOSSIP_LIST" | "$JSONQ" count offers)" = "0" ] ||
+            mkt_die "offer plan touched the seller gossip cache"
+        printf '%s' "$GOSSIP_LIST" | "$JSONQ" eq offer_count 0 ||
+            mkt_die "offer plan touched the seller gossip cache"
+        printf '%s' "$GOSSIP_LIST" | "$JSONQ" eq hidden_count 0 ||
+            mkt_die "offer plan touched the seller gossip cache"
+        ;;
+    *)
+        mkt_die "offer plan touched the seller gossip cache"
+        ;;
+esac
 
 mkt_note "seller commits the offer — Tor ready + no -externalip must select the v2 onion endpoint"
 OFFER_COMMIT="$(printf '%s' "{\"filepath\":\"$FIXTURE\",\"price_per_mb_zat\":$PRICE_PER_MB_ZAT,\"confirm\":true}" \
