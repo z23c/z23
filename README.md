@@ -2,171 +2,186 @@
 
 # Z23
 
-**Software made for you, not imposed on you.**
+**One C23 binary: a ZClassic full node you own, and a software commons that
+answers to you.**
 
-Z23 is one C23 binary with two sovereign systems: a ZClassic full node and an
-optional commons for creating, verifying, reproducing, and preserving C23
-software. Both answer to the person running the node—not to an AI vendor, a
-package registry, or a hosted service.
+Z23 compiles to a single self-contained executable holding two sovereign
+systems. The first is a ZClassic full node — P2P, transparent and shielded
+wallet state, RPC, and its own block explorer. The second is an optional
+commons for creating, verifying, reproducing, and preserving C23 software.
+Both answer to the person running the node, not to an AI vendor, a package
+registry, or a hosted service.
 
-> **Status: pre-v1.** The full-node implementation and Commons primitives are
-> real, but the complete [public-node acceptance contract](docs/MVP.md) and
-> multihost Commons Alpha journey are not yet complete. Z23 is software to
-> inspect and test, not a promise that those remaining gates have passed.
+> **Status: pre-v1.** This is software to build, run, and inspect — not a
+> finished product. The public-node acceptance contract is eight binary
+> criteria — install, onion bootstrap, cold-start sync, shielded receive,
+> store sale, seven-day soak, `kill -9` recovery, consensus parity — and it is
+> not yet complete. Each one is tracked with its evidence, passing and
+> failing, in [`docs/MVP.md`](docs/MVP.md). Rather than take a readiness number
+> from this page, ask a running node for its own: `build/bin/z23 milestone`.
 
 ![A user-owned Z23 node containing a full node and C23 Commons, with replaceable AI workers outside its authority boundary](docs/assets/z23-hero.svg)
 
-**Public start here: [Get started →](docs/GETTING_STARTED.md)**
+## Start here
 
-## From an idea to something you can see
+```bash
+git clone https://github.com/z23c/z23.git
+cd z23
+make doctor
+make setup
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
+build/bin/z23 discover help
+```
 
-The product journey is deliberately human-sized:
+On Linux that needs `gcc` 14+ (or `clang` with working `-std=c23`), GNU
+`make`, a C++ compiler, and the usual fetch and checksum tools. There is no
+Rust toolchain and no Rust library anywhere in the tree: shielded proving and
+verification are native C23. You do not need the Zcash proving parameters to
+sync and validate — the verifying keys are compiled in — only to *send*
+shielded. The first build fetches pinned third-party sources, verifies each
+against a pinned SHA-256, and compiles them locally; after that, builds are
+offline. Prerequisites in full, macOS, Windows, and the container-free
+`make portable` build are in [Getting Started](docs/GETTING_STARTED.md).
 
-**DESCRIBE → REUSE → CREATE → SEE → KEEP → SHARE**
+## Run a node
 
-Describe the behavior you want. Reuse existing C23 before creating what is
-missing. Build and test it, then **see the real consequence** before deciding
-whether to keep an exact version. Sharing comes last.
+```bash
+build/bin/z23
+```
 
-![The Z23 journey from describing behavior through sharing an accepted exact version, with SEE at the center](docs/assets/z23-journey.svg)
+The node starts on `~/.zclassic-c23` with P2P on `8033` and RPC on `18232`. A
+fresh datadir starts honestly empty — `getblockcount` returns `0` until real
+state lands, never a phantom tip. `build/bin/z23 status` reports readiness and
+the one next action worth taking; when sync stops, `core sync diagnose` says why
+and `ops logs --pattern='<regex>'` returns bounded diagnostics. To survive
+logout and reboot, use the shipped `systemd --user` unit:
 
-`zhello` is the smallest prompt-to-pixel example: a reusable painter plus a
-native window. `zdemo` shows the same package shape after customization. Their
-headless modes render the real frames and check deterministic digests; their
-windowed modes put the consequence on screen.
+```bash
+sudo bash platform/deploy/setup.sh
+systemctl --user start zclassic23
+```
+
+**Tor is bundled, and it is on.** A plain `make` builds the pinned embedded Tor
+and links it, so the node reaches the onion network and publishes its own
+`.onion` with no flag; `-no-tor` is the opt-out. Resolving no hostnames is
+deliberate and permanent — the first boot prints `dns_seeds=0` because this
+project trusts no DNS seeder and no certificate authority. The compiled seeds
+are raw addresses plus onion directory nodes; peers gossip the rest.
+
+The node is also its own web server, with no reverse proxy in front of it. The
+explorer (`/explorer`, JSON API under `/api`) is served on the node's `.onion`
+by default; add a certificate and key under the datadir's `ssl` directory and it
+also serves HTTPS on `8443` near tip
+([runbook](docs/BLOCK_EXPLORER_HOSTING.md)).
+
+## What reaching the tip actually costs
+
+**Full P2P sync from genesis** is the default and needs nothing you do not
+already have — it is what `build/bin/z23` with no flags does. It is also the
+slowest, because it validates the chain itself: proof-of-work, scripts, and
+shielded proofs. Headers arrive quickly, bodies are the long pole, and a full
+run takes hours. Choose it for state that is entirely self-derived.
+
+**A peer's signed state offer** makes a first sync short without making it
+credulous. Peers append a bundle height, digest, and producer to the handshake;
+your node picks the newest offer within 576 blocks of that peer's own tip,
+verifies each chunk before import, and installs it against the checkpoint
+compiled into your own binary — no flag from you. If nothing acceptable arrives
+within two minutes of your first peer, the node names
+`bootstrap.stale_offers_only`, prints the newest height it did see, and folds
+from genesis rather than dropping back silently. That machinery is built and
+code-tested; a full fresh z23-to-z23 run to tip is not yet the proven everyday
+path.
+
+**Import from an existing `zclassicd` datadir**, if you already run the legacy
+C++ node, is today's proven cold start. Headers first, then a normal boot;
+skipping the first step leaves a header hole and the node pins.
+
+```bash
+build/bin/z23 --importblockindex "$HOME/.zclassic"
+build/bin/z23
+```
+
+Naming a peer you already know shortens any of these — `-addnode=HOST:8033`,
+plus `-fileservice=HOST` to pull the header seed and state bundle from that
+host's file service. Every path, with its measured evidence, is in
+[Sync](docs/SYNC.md).
+
+## Consensus parity is the inviolable target
+
+Z23 shares one network with the legacy `zclassicd` clients: same P2P protocol,
+same blocks, and consensus divergence is a defect rather than a feature. A
+read-only parity service diffs the UTXO set and tip against a local `zclassicd`
+oracle whenever one resolves, and a from-genesis replay canary re-validates full
+history through the current reducer — both are criterion 8, with their standing
+verdicts, in [`docs/MVP.md`](docs/MVP.md).
+
+## The C23 Commons
+
+The same binary carries a commons for C23 software: content-addressed source
+and packages, authenticated fetch of inert bytes, bounded build and test work,
+and receipts another machine can re-check. The authority boundaries are the
+point. Fetching bytes does not authorize building them, building does not
+authorize installation, execution, or deployment, and chain work always has
+priority over package work.
+
+![Inert bytes travel between nodes, then each receiver verifies, rebuilds, and accepts or refuses locally](docs/assets/z23-verification.svg)
+
+AI workers may search, propose, build, and test. They do not become a source of
+truth, because what Z23 keeps is what another machine can check without them. A
+hash identifies exact bytes; a signature identifies the key that made a
+statement; a receipt records one bound observation. None of them alone shows
+that arbitrary code is safe, correct, or useful, so acceptance stays a local
+decision about one exact version — and the durability test is blunt: the
+original worker, publisher, or company can disappear, and the accepted source
+and evidence can still be checked and reproduced here. Start at
+`build/bin/z23 zcode guide`.
+
+## Working on Z23 itself
+
+The command registry is generated from the running program, so no document can
+drift away from it. Descend with `discover help <path>`, search with
+`discover search <query>`, and read a leaf's exact input keys with
+`discover schema <leaf>`. The source tree answers the same way — ask it instead
+of grepping it, and ask it which tests own the file you touched:
+
+```bash
+build/bin/z23 code map
+build/bin/z23 code room engine/reducer/services/src/reducer_ingest_service.c
+build/bin/z23 code tests engine/reducer/services/src/reducer_ingest_service.c
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>
+```
+
+`make t-list` lists every registered group, `ONLY=` is mandatory for `t-fast`,
+and `make test-parallel` runs the whole set. `make lint-fast` gives feedback
+while editing; publishing needs the full `make lint` gate set plus the impacted
+groups, run in one isolated worktree against the exact commit pair and ending
+in a signed receipt the pre-push hook requires, so a green push means the
+evidence exists rather than that nobody looked.
+
+The tree is authority-first: sealed consensus, crypto, and proofs in `core`,
+the single chain-state-advancing room in `engine/reducer`, feature-first product
+rooms in `contexts`, what the system needs from the outside world in
+`platform/ports` and how an OS provides it in `platform/adapters`. Reusable
+modules live beneath the authority that owns them, and the build refuses a file
+placed outside its room; `build/bin/z23 code context-map` prints the view it
+generates.
+
+Building software here runs DESCRIBE → REUSE → CREATE → SEE → KEEP → SHARE, so
+seeing the consequence comes before deciding to keep it. `zhello` is the
+smallest prompt-to-pixel example — a reusable painter plus a native window — and
+`zdemo` is the same package shape after customization. Headless modes render the
+real frames and check deterministic digests; windowed modes put the consequence
+on screen.
 
 ```bash
 make zhello-selftest
 make zdemo ZDEMO_ARGS=--frames=2
 ```
 
-That vignette is small on purpose. The larger goal is the same: shorten the
-distance between an intention and observable behavior without hiding which
-source, proof, or version produced it.
-
-## One binary, two sovereign systems
-
-**The full node — available today.** Z23 is a C23 implementation of a ZClassic
-full node with P2P, transparent and shielded wallet state, RPC, and explorer
-surfaces. Builds link the embedded Tor onion service when its vendored archive
-is present. Consensus compatibility with `zclassicd` is the inviolable target;
-fresh full-history parity, cold-sync, and reliability acceptance remain open
-pre-v1 gates.
-
-**The C23 Commons — optional and developing.** The tree has content-addressed
-source and package objects, authenticated inert fetch, bounded build/test work,
-typed discovery, exact roots, scoped evidence and receipts, reproduction
-primitives, and local policy. Fetching bytes does not authorize building them;
-building does not authorize installation, execution, or deployment. The
-blockchain always has priority over package work.
-
-The systems complement one another without sharing authority: the node
-provides durable peer-to-peer infrastructure, while every operator decides
-locally what software and evidence to accept.
-
-## Replaceable workers, durable results
-
-AI workers may search, propose, build, and test. They do not become a source of
-truth. Z23 is designed to preserve the things another machine can check:
-content roots, signatures, dependency graphs, bounded actions, receipts, and
-reproduction results.
-
-![Inert bytes travel between nodes, then each receiver verifies, rebuilds, and accepts or refuses locally](docs/assets/z23-verification.svg)
-
-A hash identifies exact bytes. A signature identifies the key that made a
-statement. A receipt records one bound observation. None of them alone proves
-that arbitrary code is safe, correct, or useful. Acceptance remains a local
-human and machine-policy decision about one exact version.
-
-The intended durability test is simple: the original worker, publisher,
-registry, or company can disappear, and the accepted source and evidence can
-still be independently checked and reproduced.
-
-## The intent compiler Z23 is building
-
-Z23 is assembling existing primitives into a compilation model for intent:
-
-**stories → ontology → predicates → focus → heuristics → evidence → experience**
-
-![The seven-stage intent compilation model, with experience feeding the next story](docs/assets/z23-intent-compiler.svg)
-
-Stories capture desired behavior. Ontology gives the domain stable names.
-Predicates turn expectations into checkable conditions. Focus selects bounded
-context. Heuristics help replaceable workers propose a change. Evidence binds
-what was actually observed. Experience is the consequence the user sees—and
-it informs the next story.
-
-This is **direction, not a claim of a finished monolithic compiler**.
-StoryGraph, ontology, focus, evidence, and typed discovery primitives exist in
-the tree today; the complete seven-stage journey is still being assembled and
-accepted.
-
-## Architecture you can read at a glance
-
-The five layers in the hero are also the physical source tree:
-
-```text
-core/                       sealed consensus, math, crypto, primitives, proofs
-engine/                     composition, execution, and the one-writer reducer
-  reducer/                  the only authoritative chain-state advancement room
-contexts/                   feature-first product rooms
-  wallet/services/...       feature + role + purpose in one path
-  explorer/...
-  naming/...
-  messaging/...
-  market/...
-  commons/...
-cognition/                  stories, ontology, focus, evidence, experience
-platform/
-  ports/                     what the system needs from the outside world
-  adapters/                  how an OS or infrastructure provides it
-tests/                      the canonical test harness and specifications
-tools/                      developer and operator tooling
-```
-
-Reusable modules live beneath the authority that owns them—for example,
-`core/modules/validation`, `contexts/wallet/modules/keys`, and
-`cognition/modules/ontology`. Product behavior stays with its feature instead
-of being scattered across global shape folders. The build rejects an unknown
-room, legacy root, duplicate module owner, module-manifest mismatch, or reducer
-path outside `engine/reducer`.
-
-Ask the binary for the generated view rather than memorizing the tree:
-
-```bash
-build/bin/z23 code map
-build/bin/z23 code context-map
-build/bin/z23 code room engine/reducer/services/src/reducer_ingest_service.c
-```
-
-## Build and ask the binary
-
-```bash
-git clone https://github.com/z23c/z23.git
-cd z23
-make setup
-make -j"$(getconf _NPROCESSORS_ONLN)" z23
-build/bin/z23 discover help
-build/bin/z23 zcode guide
-```
-
-The native command registry is generated from the running program. Descend
-with `discover help <path>`, search with `discover search <query>`, and inspect
-a leaf's exact keys with `discover schema <leaf>`. Once a node is running,
-`build/bin/z23 status` reports readiness and one next action. If sync stops,
-use `build/bin/z23 core sync diagnose`; inspect bounded diagnostics with
-`build/bin/z23 ops logs --pattern='<regex>'`.
-
-Contributors can use `make dev-bin`, then ask `code tests <path>` for the
-returned registered parallel group instead of guessing which proof to run.
-
 ## Go deeper
 
-- **Use the node:** [Getting Started](docs/GETTING_STARTED.md), [C23 Commons Quickstart](docs/C23_COMMONS_QUICKSTART.md), [MVP acceptance](docs/MVP.md)
-- **Understand the system:** [How the Node Works](docs/HOW_THE_NODE_WORKS.md), [Framework](docs/FRAMEWORK.md), [API Reference](docs/API_REFERENCE.md)
-- **Build with it:** [Developing](docs/DEVELOPING.md), [Codebase Map](docs/CODEBASE_MAP.md), [Forward Plan](docs/work/FORWARD_PLAN.md)
-- **License:** [Apache-2.0](LICENSE)
-
-Z23's north star is useful software that remains under the user's control:
-exact, inspectable, reproducible, and usable without asking a vanished
-intermediary for permission.
+- **Run it:** [Getting Started](docs/GETTING_STARTED.md) · [Sync](docs/SYNC.md) · [MVP acceptance](docs/MVP.md) · [Windows](docs/WINDOWS.md)
+- **Understand it:** [How the Node Works](docs/HOW_THE_NODE_WORKS.md) · [Framework](docs/FRAMEWORK.md) · [API Reference](docs/API_REFERENCE.md)
+- **Build with it:** [Developing](docs/DEVELOPING.md) · [Codebase Map](docs/CODEBASE_MAP.md) · [Commons Quickstart](docs/C23_COMMONS_QUICKSTART.md) · [Forward Plan](docs/work/FORWARD_PLAN.md)
+- **License:** [Apache-2.0](LICENSE), with upstream notices preserved in [NOTICE](NOTICE)
