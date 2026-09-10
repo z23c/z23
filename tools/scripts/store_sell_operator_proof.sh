@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # store_sell_operator_proof.sh — MVP criterion #5 "rung A" OPERATOR proof:
-# a full-binary, real-chain, single-node regtest run of
+# a full-binary, real-chain, isolated regtest run of
 #
 #   "Operator lists product → buyer pays shielded → buyer receives file"
 #
@@ -13,15 +13,20 @@
 # (app.store.*), and real regtest blocks mined by the node itself.
 #
 # Stages (each one names itself on failure):
-#   1.  SPAWN        isolated regtest node (fresh mktemp datadir, 391xx ports,
-#                    dead -connect sink, no Tor, no legacy import,
+#   1.  SPAWN        an isolated regtest witness peer and, beside it, the
+#                    isolated regtest store node that -connects to it (fresh
+#                    mktemp datadirs, 391xx ports, no Tor, no legacy import,
 #                    -regtestshielded so Overwinter+Sapling are active —
 #                    regtest otherwise pins them NO_ACTIVATION and no shielded
-#                    tx can ever enter its mempool).
+#                    tx can ever enter its mempool). The peer is load-bearing:
+#                    the wallet money gate reads a peerless node as UNKNOWN.
 #   2.  FUND         getnewaddress + generatetoaddress past COINBASE_MATURITY
 #                    (100) so the wallet holds spendable transparent coinbase,
 #                    plus one z_getnewaddress so the merchant Sapling keystore
 #                    is seeded (order minting refuses an unseeded keystore).
+#   2a. SETTLE       restart the store node so the forward-folded coins set
+#                    stamps its authority, then wait for the peer link, the
+#                    live sync state, and the reducer fold the money gate reads.
 #   2b. CUSTODY      unlock the encrypted-at-rest wallet and take a
 #                    current-key encrypted backup — the ZSLP intent plan leg
 #                    reserves real custody and refuses anything less.
@@ -59,12 +64,12 @@
 #   VERDICT=FAIL stage=<name>  a stage failed; the stage is named
 #
 # SAFETY (mirrors isolated_node_env.sh / two_node_peer_tip.sh):
-#   - /tmp-only datadir (mktemp -d under /tmp/zcl23-storeproof-*), re-asserted
+#   - /tmp-only datadirs (mktemp -d under /tmp/zcl23-storeproof-*), re-asserted
 #     under /tmp before rm -rf; kept instead when ZCL_STOREPROOF_KEEP=1.
 #   - 391xx isolation ports ONLY; every chosen port is checked against the
 #     live refuse-set AND ss(8)-LISTEN-probed before spawn.
-#   - Node spawned under setsid → its OWN process group; cleanup kill -KILLs
-#     the whole GROUP (no orphan survives a harness crash).
+#   - Each node spawned under setsid → its OWN process group; cleanup kill
+#     -KILLs the whole GROUP (no orphan survives a harness crash).
 #   - Never touches the live node (8033/18232), the zclassicd oracle
 #     (8034/8232), their datadirs, or their systemd units.
 #
@@ -108,14 +113,19 @@ WALLET_SCOPE=dev
 # reserving the genesis fee twice.
 TOKEN_IDEMPOTENCY_KEY="store-operator-proof-genesis-1"
 
-# Isolation port quad (two_node uses 39070/39080, iso env defaults 39030).
+# Isolation port quads (two_node uses 39070/39080, iso env defaults 39030).
+# The store node keeps 391x0; the witness peer takes the next quad.
 SP_PORT=39110; SP_RPC=39111; SP_FS=39112; SP_HTTPS=39113
+PEER_PORT=39114; PEER_RPC=39115; PEER_FS=39116; PEER_HTTPS=39117
 DEAD_SINK=39999
 
 # ── State ──────────────────────────────────────────────────────────
 SP_DD=""
 SP_PID=""
 SP_PGID=""
+PEER_DD=""
+PEER_PID=""
+PEER_PGID=""
 SP_CLEANED=0
 SP_KEEP="${ZCL_STOREPROOF_KEEP:-0}"
 # Throwaway wallet custody passphrases for this run's throwaway /tmp regtest
@@ -152,31 +162,39 @@ sp_assert_port_free() {
     return 0
 }
 
-# ── Cleanup: kill the process group + rm the /tmp datadir ──────────
+# ── Cleanup: kill the process groups + rm the /tmp datadirs ────────
+sp_kill_group() {
+    local pgid="$1" i
+    [ -n "$pgid" ] || return 0
+    kill -TERM "-$pgid" 2>/dev/null || true
+    for i in $(seq 1 25); do
+        kill -0 "-$pgid" 2>/dev/null || break
+        sleep 0.2
+    done
+    kill -KILL "-$pgid" 2>/dev/null || true
+}
+sp_rm_datadir() {
+    local dd="$1"
+    [ -n "$dd" ] && [ -d "$dd" ] || return 0
+    if [ "$SP_KEEP" = "1" ]; then
+        sp_log "KEEP=1: datadir preserved at $dd"
+        return 0
+    fi
+    case "$dd" in
+        /tmp/zcl23-storeproof-*) rm -rf "$dd" 2>/dev/null || true ;;
+        *) sp_log "WARN: refusing to rm non-/tmp datadir '$dd'" >&2 ;;
+    esac
+}
 sp_cleanup() {
     [ "$SP_CLEANED" = "1" ] && return 0
     SP_CLEANED=1
-    if [ -n "$SP_PGID" ]; then
-        kill -TERM "-$SP_PGID" 2>/dev/null || true
-        local i
-        for i in $(seq 1 25); do
-            kill -0 "-$SP_PGID" 2>/dev/null || break
-            sleep 0.2
-        done
-        kill -KILL "-$SP_PGID" 2>/dev/null || true
-    fi
-    # Belt-and-suspenders: only ever matches our throwaway datadir string.
+    sp_kill_group "$SP_PGID"
+    sp_kill_group "$PEER_PGID"
+    # Belt-and-suspenders: only ever matches our throwaway datadir strings.
     [ -n "$SP_DD" ] && pkill -KILL -f -- "-datadir=$SP_DD" 2>/dev/null || true
-    if [ -n "$SP_DD" ] && [ -d "$SP_DD" ]; then
-        if [ "$SP_KEEP" = "1" ]; then
-            sp_log "KEEP=1: datadir preserved at $SP_DD"
-        else
-            case "$SP_DD" in
-                /tmp/zcl23-storeproof-*) rm -rf "$SP_DD" 2>/dev/null || true ;;
-                *) sp_log "WARN: refusing to rm non-/tmp datadir '$SP_DD'" >&2 ;;
-            esac
-        fi
-    fi
+    [ -n "$PEER_DD" ] && pkill -KILL -f -- "-datadir=$PEER_DD" 2>/dev/null || true
+    sp_rm_datadir "$SP_DD"
+    sp_rm_datadir "$PEER_DD"
 }
 
 # ── RPC + native-CLI wrappers, pinned to the ISOLATED node ONLY ────
@@ -210,6 +228,57 @@ sp_json_str() { printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"; }
 sp_blockcount() {
     sp_rpc getblockcount | sed -n 's/.*"result"[: ]*\([0-9-]*\).*/\1/p'
 }
+sp_connection_count() {
+    sp_rpc getconnectioncount | sed -n 's/.*"result"[: ]*\([0-9]*\).*/\1/p'
+}
+sp_sync_state() {
+    sp_rpc downloadstats | sed -n 's/.*"sync_state":"\([a-z_]*\)".*/\1/p'
+}
+
+# ── Money-gate readiness waits ─────────────────────────────────────
+# The wallet money gate does not read the active chain: it reads the REDUCER
+# frontier (coins_best_height and H* must both stand at the mined tip), the
+# peer set (a peerless node's money is UNKNOWN by construction), and the sync
+# FSM (only blocks_download / connecting_blocks / at_tip count as live). Each
+# wait below is one of those three authorities, and each fails the stage by
+# name instead of letting the token plan report a confusing money refusal.
+sp_wait_connected() {
+    local stage="$1" deadline n
+    deadline=$(( $(date +%s) + 90 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        n="$(sp_connection_count)"
+        case "$n" in
+            ''|*[!0-9]*) ;;
+            *) [ "$n" -ge 1 ] && return 0 ;;
+        esac
+        sleep 1
+    done
+    sp_fail "$stage" "the store node never connected to the witness peer (getconnectioncount stayed ${n:-?})"
+}
+sp_wait_sync_live() {
+    local stage="$1" deadline state
+    deadline=$(( $(date +%s) + 90 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        state="$(sp_sync_state)"
+        case "$state" in
+            blocks_download|connecting_blocks|at_tip) return 0 ;;
+        esac
+        sleep 1
+    done
+    sp_fail "$stage" "sync state stayed '${state:-?}' — the money gate reads anything else as not live"
+}
+sp_wait_fold() {
+    local stage="$1" tip="$2" deadline dump coins hstar
+    deadline=$(( $(date +%s) + 120 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        dump="$(sp_cli dumpstate reducer_frontier)"
+        coins="$(sp_json_int "$dump" coins_best_height)"
+        hstar="$(sp_json_int "$dump" hstar)"
+        [ "$coins" = "$tip" ] && [ "$hstar" = "$tip" ] && return 0
+        sleep 1
+    done
+    sp_fail "$stage" "reducer frontier stalled at coins_best_height=${coins:-?} hstar=${hstar:-?}, expected both at $tip: $dump"
+}
 
 # ── Preflight ──────────────────────────────────────────────────────
 command -v ss     >/dev/null 2>&1 || { sp_log "FATAL: ss(8) not found" >&2; exit 2; }
@@ -224,29 +293,38 @@ for f in sapling-spend.params sapling-output.params sprout-groth16.params sprout
     [ -r "$PARAMS_DIR/$f" ] || sp_skip "sapling-params-missing ($PARAMS_DIR/$f)"
 done
 
-for p in "$SP_PORT" "$SP_RPC" "$SP_FS" "$SP_HTTPS" "$DEAD_SINK"; do
+for p in "$SP_PORT" "$SP_RPC" "$SP_FS" "$SP_HTTPS" \
+         "$PEER_PORT" "$PEER_RPC" "$PEER_FS" "$PEER_HTTPS" "$DEAD_SINK"; do
     sp_assert_not_live_port "$p"
 done
 
-SP_DD="$(mktemp -d /tmp/zcl23-storeproof-XXXXXX)" || { sp_log "FATAL: mktemp failed" >&2; exit 2; }
-case "$SP_DD" in
-    /tmp/zcl23-storeproof-*) : ;;
-    *) sp_log "FATAL: bad datadir $SP_DD" >&2; exit 2 ;;
-esac
-if [ -n "${HOME:-}" ]; then
-    case "$SP_DD" in
-        "$HOME"/.zclassic-c23*) sp_log "FATAL: datadir under live tree — refusing" >&2; exit 2 ;;
+sp_mktemp_datadir() {
+    local dd
+    dd="$(mktemp -d /tmp/zcl23-storeproof-XXXXXX)" || { sp_log "FATAL: mktemp failed" >&2; exit 2; }
+    case "$dd" in
+        /tmp/zcl23-storeproof-*) : ;;
+        *) sp_log "FATAL: bad datadir $dd" >&2; exit 2 ;;
     esac
-fi
+    if [ -n "${HOME:-}" ]; then
+        case "$dd" in
+            "$HOME"/.zclassic-c23*) sp_log "FATAL: datadir under live tree — refusing" >&2; exit 2 ;;
+        esac
+    fi
+    printf '%s\n' "$dd"
+}
+SP_DD="$(sp_mktemp_datadir)"
+PEER_DD="$(sp_mktemp_datadir)"
 
 # Arm the cleanup trap BEFORE any abortable post-mint step.
 trap sp_cleanup EXIT INT TERM
 
-for p in "$SP_PORT" "$SP_RPC" "$SP_FS" "$SP_HTTPS"; do
+for p in "$SP_PORT" "$SP_RPC" "$SP_FS" "$SP_HTTPS" \
+         "$PEER_PORT" "$PEER_RPC" "$PEER_FS" "$PEER_HTTPS"; do
     sp_assert_port_free "$p"
 done
 
 sp_log "datadir=$SP_DD ports{p2p=$SP_PORT rpc=$SP_RPC fs=$SP_FS https=$SP_HTTPS} sink=$DEAD_SINK"
+sp_log "witness peer datadir=$PEER_DD ports{p2p=$PEER_PORT rpc=$PEER_RPC fs=$PEER_FS https=$PEER_HTTPS}"
 
 # ── Wallet custody credential (read by the node at boot) ───────────
 # No -allow-plaintext-wallet: the wallet-passphrase credential encrypts key
@@ -260,36 +338,54 @@ printf '%s\n' "$SP_WALLET_PASS" >"$SP_CRED_DIR/wallet-passphrase"
 export CREDENTIALS_DIRECTORY="$SP_CRED_DIR"
 
 # ── Stage 1: SPAWN ─────────────────────────────────────────────────
-sp_log "[1/11] SPAWN: booting isolated regtest node..."
+# One isolated regtest node runs the store; one isolated witness peer sits
+# beside it. The peer is not decoration: the wallet money gate classifies a
+# peerless node's money as UNKNOWN by construction
+# (wallet_money_freshness_classify refuses peer_count == 0,
+# contexts/wallet/services/src/wallet_money_service.c), and the token genesis
+# reserves real custody through that gate. A store operator has peers, so the
+# proof has one too.
 # -operator-lane=dev persists the dev operator lane the token genesis plans
 # under (a wallet_scope that does not match the persisted lane is CONFLICTED);
 # -wallet-no-phrase-backup is the non-interactive first-run acknowledgement
 # for a throwaway wallet that will be destroyed with the datadir.
-setsid "$NODE_BIN" \
-    -datadir="$SP_DD" -regtest -regtestshielded \
-    -port="$SP_PORT" -rpcport="$SP_RPC" -fsport="$SP_FS" -httpsport="$SP_HTTPS" \
-    -connect=127.0.0.1:"$DEAD_SINK" \
-    -operator-lane=dev -wallet-no-phrase-backup \
-    -nobgvalidation -nolegacyimport -nofilesync -showmetrics=0 \
-    >"$SP_DD/node.log" 2>&1 &
-SP_PID=$!
-SP_PGID="$SP_PID"   # setsid leader: PGID == PID
-
-deadline=$(( $(date +%s) + RPC_WARMUP ))
-ready=no
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if ! kill -0 "$SP_PID" 2>/dev/null; then
-        tail -20 "$SP_DD/node.log" >&2 || true
-        sp_fail SPAWN "node exited during RPC warmup (see $SP_DD/node.log)"
-    fi
-    if [ -f "$SP_DD/.cookie" ]; then
-        t="$(sp_blockcount)"
-        [ -n "$t" ] && { ready=yes; break; }
-    fi
-    sleep 0.5
-done
-[ "$ready" = "yes" ] || { tail -20 "$SP_DD/node.log" >&2 || true; sp_fail SPAWN "RPC never came up within ${RPC_WARMUP}s"; }
-sp_log "       node up (pid $SP_PID), chain height $(sp_blockcount)"
+sp_spawn_node() {
+    local dd="$1" p2p="$2" rpc="$3" fs="$4" https="$5" connect="$6"
+    setsid "$NODE_BIN" \
+        -datadir="$dd" -regtest -regtestshielded \
+        -port="$p2p" -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
+        -connect="$connect" \
+        -operator-lane=dev -wallet-no-phrase-backup \
+        -nobgvalidation -nolegacyimport -nofilesync -showmetrics=0 \
+        >>"$dd/node.log" 2>&1 &
+    printf '%s\n' "$!"
+}
+# RPC-up on a specific node: the cookie exists AND getblockcount answers.
+sp_wait_rpc() {
+    local dd="$1" rpc="$2" pid="$3" stage="$4" deadline t
+    deadline=$(( $(date +%s) + RPC_WARMUP ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            tail -20 "$dd/node.log" >&2 || true
+            sp_fail "$stage" "node exited during RPC warmup (see $dd/node.log)"
+        fi
+        if [ -f "$dd/.cookie" ]; then
+            t="$(ZCL_DATADIR="$dd" ZCL_RPCPORT="$rpc" "$RPC_BIN" getblockcount 2>/dev/null | sed -n 's/.*"result"[: ]*\([0-9-]*\).*/\1/p')"
+            [ -n "$t" ] && return 0
+        fi
+        sleep 0.5
+    done
+    tail -20 "$dd/node.log" >&2 || true
+    sp_fail "$stage" "RPC never came up within ${RPC_WARMUP}s (see $dd/node.log)"
+}
+sp_log "[1/11] SPAWN: booting the isolated witness peer and the store node..."
+PEER_PID="$(sp_spawn_node "$PEER_DD" "$PEER_PORT" "$PEER_RPC" "$PEER_FS" "$PEER_HTTPS" "127.0.0.1:$DEAD_SINK")"
+PEER_PGID="$PEER_PID"   # setsid leader: PGID == PID
+sp_wait_rpc "$PEER_DD" "$PEER_RPC" "$PEER_PID" SPAWN
+SP_PID="$(sp_spawn_node "$SP_DD" "$SP_PORT" "$SP_RPC" "$SP_FS" "$SP_HTTPS" "127.0.0.1:$PEER_PORT")"
+SP_PGID="$SP_PID"
+sp_wait_rpc "$SP_DD" "$SP_RPC" "$SP_PID" SPAWN
+sp_log "       peer up (pid $PEER_PID), node up (pid $SP_PID), chain height $(sp_blockcount)"
 
 # Mine in batches of 20 up to a TARGET HEIGHT, asserting progress by
 # getblockcount rather than by the RPC body: zcl-rpc hard-caps curl at
@@ -379,6 +475,26 @@ esac
 sp_log "       height=$HEIGHT taddr=$TADDR (first $((MATURE_BLOCKS - 100)) coinbases mature)"
 sp_log "       merchant z-address seeded: ${ZADDR:0:28}..."
 
+# ── Stage 2a: SETTLE (restart, then let the money authorities catch up) ──
+# The forward-folded coins set only becomes an AUTHORITY at boot: a node that
+# mined its first coins into an empty coins_kv leaves the set populated but
+# unstamped, and coins_kv_boot_rebuild_if_needed stamps it on the NEXT boot
+# (engine/modules/storage/src/coins_kv_boot_rebuild.c). Until that stamp lands
+# the money gate answers "authoritative wallet coins tip is unavailable" and no
+# custody plan can be reserved — so the operator proof restarts the store node
+# exactly once, after funding, before any custody work.
+sp_log "[2a/11] SETTLE: restarting the store node so the forward-folded coins set stamps its authority..."
+sp_kill_group "$SP_PGID"; SP_PGID=""; SP_PID=""
+SP_PID="$(sp_spawn_node "$SP_DD" "$SP_PORT" "$SP_RPC" "$SP_FS" "$SP_HTTPS" "127.0.0.1:$PEER_PORT")"
+SP_PGID="$SP_PID"
+sp_wait_rpc "$SP_DD" "$SP_RPC" "$SP_PID" SETTLE
+HEIGHT_AFTER_RESTART="$(sp_blockcount)"
+[ "$HEIGHT_AFTER_RESTART" = "$MATURE_BLOCKS" ] || sp_fail SETTLE "height is ${HEIGHT_AFTER_RESTART:-?} after the restart, expected $MATURE_BLOCKS — the funding chain did not survive"
+sp_wait_connected SETTLE
+sp_wait_sync_live SETTLE
+sp_wait_fold SETTLE "$MATURE_BLOCKS"
+sp_log "       restarted at height $HEIGHT_AFTER_RESTART, peer linked, sync=$(sp_sync_state), coins+H* folded to $MATURE_BLOCKS"
+
 # ── Stage 2b: CUSTODY (encrypted at rest, unlocked, currently backed up) ──
 # The ZSLP intent plan leg reserves real custody, so it refuses anything less
 # than a real operator's wallet posture: encrypted at rest, unlocked, and
@@ -432,11 +548,34 @@ case "$TOKEN_ID" in
 esac
 sp_mine_to "$((MATURE_BLOCKS + TOKEN_CONFS))" TOKEN_GENESIS
 TOK_LIST="$(sp_cli app tokens list)"
-# app.tokens.create answers the token_id lowercase; the index renders it
-# uppercase — same 32 bytes, so the membership check is case-insensitive.
-tok_hit="$(printf '%s\n' "$TOK_LIST" | grep -i "$TOKEN_ID" || true)"
-[ -n "$tok_hit" ] || sp_fail TOKEN_GENESIS "token $TOKEN_ID not indexed after $TOKEN_CONFS confirmations: $TOK_LIST"
-sp_log "       token_id=${TOKEN_ID:0:16}... confirmed at height $(sp_blockcount), indexed"
+# The two ZSLP surfaces print this one identity in MIRRORED strings, so the
+# membership check compares the 32 bytes, never the text:
+#   * app.tokens.create answers the genesis txid in DISPLAY order — the form
+#     every wallet-facing surface parses back with uint256_set_hex, including
+#     the store's own access gate (store_ledger_access_balance,
+#     engine/controllers/src/store_access_gate.c:39) and app.tokens.mint/send/
+#     burn. That is the id this proof lists the product under, and the id the
+#     token gate must credit.
+#   * app.tokens.list renders the SAME bytes forward and uppercase, because the
+#     explorer index reads them with SQL hex() (contexts/market/models/src/
+#     zslp.c:389), which does not apply the txid display reversal.
+# Two commands in one branch printing one identity in two orders is a product
+# defect an operator hits the moment they paste a listed id into mint or into
+# a product listing; it is reported separately. This proof still asserts the
+# genesis is indexed — under the exact bytes it minted, and under the ticker
+# it asked for.
+sp_hex_reverse() {
+    local hex="$1" out="" i
+    for (( i=${#hex} - 2; i >= 0; i -= 2 )); do
+        out="$out${hex:i:2}"
+    done
+    printf '%s\n' "$out"
+}
+TOKEN_ID_INDEXED="$(sp_hex_reverse "$TOKEN_ID")"
+tok_hit="$(printf '%s\n' "$TOK_LIST" | grep -i "\"token_id\":\"$TOKEN_ID_INDEXED\"" || true)"
+[ -n "$tok_hit" ] || sp_fail TOKEN_GENESIS "token $TOKEN_ID (indexed byte order $TOKEN_ID_INDEXED) not indexed after $TOKEN_CONFS confirmations: $TOK_LIST"
+str_contains "$TOK_LIST" "\"ticker\":\"$TOKEN_TICKER\"" || sp_fail TOKEN_GENESIS "the indexed token does not carry ticker $TOKEN_TICKER: $TOK_LIST"
+sp_log "       token_id=${TOKEN_ID:0:16}... confirmed at height $(sp_blockcount), indexed as ${TOKEN_ID_INDEXED:0:16}..."
 
 # ── Stage 4: LIST_PRODUCT (binary blob with embedded NULs) ─────────
 sp_log "[4/11] LIST_PRODUCT: listing a product with a binary blob (embedded NULs)..."
