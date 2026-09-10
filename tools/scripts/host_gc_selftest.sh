@@ -223,6 +223,59 @@ assert_contains "$log" "zcc-trim-failed" \
 assert_not_contains "$out" "reclaimed" \
     "zcc apply with an unparsable evictor report never claims a reclaim"
 
+# A stub that outruns its wall-clock budget must be given up on
+# (zcc-trim-timeout), never left to block the rest of the run — the
+# 2026-09-10 HDD incident: the evictor's own walk alone ran past the unit's
+# 30-minute TimeoutStartSec and systemd SIGKILLed the whole sweep mid-walk,
+# so nothing after zcc ever ran that hour.
+ZCC_STUB_SLOW="$WORK/zcc-stub-slow"
+cat > "$ZCC_STUB_SLOW" <<'STUBEOF'
+#!/usr/bin/env bash
+sleep 5
+echo "zcc: 42 MB held, 0 MB ceiling, 0 MB freed"
+STUBEOF
+chmod +x -- "$ZCC_STUB_SLOW"
+
+: > "$DU_CALL_LOG"
+log_lines_before="$(wc -l < "$STATE_FX/host_gc.log" 2>/dev/null || echo 0)"
+set +e
+out="$(ZCL_HOST_GC_ZCC_BIN="$ZCC_STUB_SLOW" ZCL_HOST_GC_ZCC_BUDGET_S=1 \
+    PATH="$DU_SHADOW_DIR:$PATH" run_hostgc zcc apply)"
+rc_zcc=$?
+set -e
+# Only the log rows THIS call appended — the fixture's log file accumulates
+# across every section in this script, and an earlier section already
+# logged a real zcc-trim success row.
+new_log="$(tail -n "+$(( log_lines_before + 1 ))" -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
+assert_contains "$out" "trim gave up after 1s" \
+    "zcc apply past its budget says it gave up, not that it failed silently"
+assert_contains "$new_log" "zcc-trim-timeout" \
+    "zcc apply past its budget logs zcc-trim-timeout"
+assert_not_contains "$new_log" "$(printf 'zcc-trim\t')" \
+    "zcc apply past its budget never logs a zcc-trim success row"
+assert_not_contains "$out" "reclaimed" \
+    "zcc apply past its budget never claims a reclaim"
+[ "$rc_zcc" -eq 0 ] || fail "zcc apply past its budget changed the run's own exit status to $rc_zcc"
+
+# A full run (no --only) must run every OTHER category before zcc, so a
+# slow zcc walk can never again starve them the way it did on 2026-09-10.
+# --only runs a single category in isolation (see run_hostgc above), and a
+# real full --apply run here would call the REAL ccache/journalctl/systemctl
+# binaries against this box's actual state unless every one of the sweeps'
+# own binary-seam flags were separately stubbed out — more fixture surface
+# than this invariant is worth touching live-host-adjacent tools for. The
+# invariant itself ("sweep_zcc is the last call in the driver, right before
+# the summary") is a static property of host_gc.sh's own driver section
+# (search for "^sweep_" calls between "^report_pressure$" and
+# '^hdr "summary"$'), so assert it there directly instead of executing it.
+driver_calls="$(awk '/^report_pressure$/{p=1} p && /^sweep_[a-z0-9_]+$/{print} /^hdr "summary"$/{exit}' "$HOSTGC")"
+assert_contains "$driver_calls" "sweep_zcc" \
+    "the driver still calls sweep_zcc somewhere in its sweep list"
+last_call="$(printf '%s\n' "$driver_calls" | tail -1)"
+[ "$last_call" = "sweep_zcc" ] \
+    && pass "sweep_zcc is the LAST sweep call in the driver — a slow zcc walk can no longer starve any other category" \
+    || fail "sweep_zcc is not the last sweep call in the driver (last call is '$last_call') — a slow zcc walk would again starve whatever runs after it"
+
 # -------------------------------------------------------------------- units
 land_a_unit() {
     local name="$1" land="$2" dir

@@ -514,9 +514,22 @@ sweep_zcc() {
     if [ "$APPLY" = 1 ]; then
         # ONE call, ONE walk: no dir_bytes before or after. held/freed come
         # only from the evictor's own report line — see the ONE WALK
-        # comment above the category.
-        local trim_out held_mb freed_mb
-        if trim_out="$("$bin" --zcc-trim "$cap_mb" 2>&1)"; then
+        # comment above the category. That one walk is still unbounded work
+        # on a cold rotational disk holding tens of thousands of small
+        # files, so it runs under a wall-clock budget: on 2026-09-10 the
+        # walk alone ran past this unit's 30-minute TimeoutStartSec and
+        # systemd SIGKILLed the whole sweep mid-walk, so every category
+        # after zcc silently never ran. `timeout --foreground` gives the
+        # evictor's own SIGTERM/SIGKILL handling a chance and keeps the
+        # budget itself in the foreground process group so it is not
+        # swallowed by this script's own signal handling.
+        local budget="${ZCL_HOST_GC_ZCC_BUDGET_S:-900}"
+        local trim_out held_mb freed_mb rc=0
+        trim_out="$(timeout --foreground "$budget" "$bin" --zcc-trim "$cap_mb" 2>&1)" || rc=$?
+        if [ "$rc" -eq 124 ]; then
+            say "zcc: trim gave up after ${budget}s (cache left untouched; raise ZCL_HOST_GC_ZCC_BUDGET_S on a box whose walk is slower) — ${budget}s of the unit's TimeoutStartSec were spent"
+            log_line "zcc-trim-timeout" "$dir" 0 "bin=$bin cap=${cap_mb}MB budget=${budget}s"
+        elif [ "$rc" -eq 0 ]; then
             held_mb="$(printf '%s\n' "$trim_out" | sed -n 's/^zcc: \([0-9][0-9]*\) MB held,.*/\1/p')"
             freed_mb="$(printf '%s\n' "$trim_out" | sed -n 's/.* \([0-9][0-9]*\) MB freed$/\1/p')"
             if [ -n "$held_mb" ] && [ -n "$freed_mb" ]; then
@@ -1357,8 +1370,15 @@ fi
 
 report_pressure
 
+# sweep_zcc runs LAST among the sweeps (see the ZCC_TRIM_BUDGET_S comment
+# above sweep_zcc): its evictor does its own single walk of a cache that can
+# hold tens of thousands of files on a slow disk, and on 2026-09-10 that one
+# walk alone ran past the unit's 30-minute TimeoutStartSec and got SIGKILLed
+# mid-sweep — every category listed after it that hour never ran at all.
+# Every other category here is cheap (a du, a journalctl call, a worktree
+# walk bounded by a small registry) and belongs before it so a slow zcc walk
+# can never starve them again.
 sweep_ccache
-sweep_zcc
 sweep_z23p
 sweep_tmp
 sweep_tmplitter
@@ -1372,6 +1392,7 @@ sweep_units
 sweep_trains_landed
 sweep_scratch
 sweep_quarantine_expiry
+sweep_zcc
 
 hdr "summary"
 TOTAL=0
