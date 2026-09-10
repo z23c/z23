@@ -27,6 +27,7 @@
 #include "controllers/api_controller.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/store_buyer_controller.h"
+#include "controllers/store_sell_controller.h"
 #include "net/file_service.h"
 #include "net/rom_seed.h"
 #include "config/rom_bundle_admission.h"
@@ -547,8 +548,8 @@ static void boot_onion_tor_stop(void *ctx)
     onion_service_stop();
 }
 
-/* Store BUYER — the programmatic buying half of the store, gated on the same
- * profile as the store itself.
+/* Store BUYER + SELLER — the programmatic buying and listing halves of the
+ * store, gated on the same profile as the store itself.
  *
  * This is a plain command registration rather than a service spec because it
  * must happen while the RPC table is still being built: app_init_services
@@ -562,6 +563,11 @@ void boot_register_store_buyer_rpc(struct boot_svc_ctx *svc)
         return;
     rpc_store_buyer_set_state(svc->app_ctx->datadir);
     register_store_buyer_rpc_commands(svc->rpc_table);
+    /* The selling half. A merchant CLI cannot open node.db while this node
+     * holds its lease, so `app.store.list-product` proxies storesell_* in
+     * here exactly as the buyer leaves proxy storebuy_*. */
+    rpc_store_sell_set_state(svc->app_ctx->datadir);
+    register_store_sell_rpc_commands(svc->rpc_table);
 }
 
 static bool boot_store_payment_start(void *ctx)

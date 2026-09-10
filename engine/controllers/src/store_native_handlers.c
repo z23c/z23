@@ -33,21 +33,36 @@
  * the buffer it stores, and db_store_blob_find re-hashes on read), never of
  * the path or the size.
  *
- * The store's own HTTP surface opens `<datadir>/node.db` per request
- * (store_handle_request → node_db_open_runtime), so a product committed here
- * is visible to /store on the very next request with no node restart. These
- * handlers open the same file the same way, which also means the command
- * works against a stopped node's datadir.
+ * WHERE THE WRITE HAPPENS. A booted node holds a single-owner lease on
+ * `<datadir>/node.db` (engine/models/src/database_owner_lease.c), so this
+ * short-lived CLI process cannot open it while a node is up — it used to
+ * meet DATABASE_OWNERSHIP_CONFLICT and report STORE_NOT_INITIALISED, which
+ * meant no product could be listed on a running store at all. The leaf now
+ * probes that lease and routes: a live lease sends the listing to the node
+ * over `storesell_list_product` (the same shape the buyer leaves use for
+ * storebuy_*), an idle datadir is written in-process exactly as before, and
+ * an unreadable lease is refused rather than raced. Both routes execute the
+ * SAME body, store_sell_list_product_apply().
  *
- * Bound by engine/composition/commands/app_features.def. */
+ * The store's own HTTP surface opens `<datadir>/node.db` per request
+ * (store_handle_request → node_db_open_runtime), so a product committed
+ * either way is visible to /store on the very next request with no node
+ * restart.
+ *
+ * Bound by engine/composition/commands/app_features.def; the node-side RPC
+ * method is engine/controllers/src/store_sell_controller.c. */
 
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 #include "controllers/native_handler_body.h"
+#include "controllers/rpc_client.h"
+#include "controllers/rpc_params.h"
+#include "controllers/store_sell_controller.h"
 #include "core/amount.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "models/database.h"
+#include "models/database_owner_lease.h"
 #include "models/model_text.h"
 #include "models/store.h"
 #include "models/store_blob.h"
@@ -107,6 +122,37 @@ static const char *sn_datadir(const struct zcl_command_request *request)
     return (dd && dd[0]) ? dd : NULL;
 }
 
+/* ── transport-neutral outcome ──────────────────────────────────────
+ *
+ * The listing body below is called from two processes (the node over
+ * storesell_list_product, the CLI when no node holds the database lease), so
+ * it fills this instead of a reply envelope. */
+void store_sell_outcome_init(struct store_sell_outcome *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->exit_code = ZCL_COMMAND_EXIT_OK;
+    json_init(&out->data);
+    json_set_object(&out->data);
+}
+
+void store_sell_outcome_free(struct store_sell_outcome *out)
+{
+    json_free(&out->data);
+}
+
+static void sn_out_fail(struct store_sell_outcome *out,
+                        enum zcl_command_exit exit_code, const char *code,
+                        const char *message, const char *evidence)
+{
+    out->ok = false;
+    out->mutated = false;
+    out->exit_code = exit_code;
+    (void)snprintf(out->code, sizeof(out->code), "%s", code);
+    (void)snprintf(out->message, sizeof(out->message), "%s", message);
+    (void)snprintf(out->evidence, sizeof(out->evidence), "%s",
+                   evidence ? evidence : "");
+}
+
 /* Open `<datadir>/node.db` for a read/write store operation.
  *
  * The file must already EXIST: node_db_open_runtime would happily create and
@@ -114,29 +160,36 @@ static const char *sn_datadir(const struct zcl_command_request *request)
  * node.db somewhere and report success for a listing no store will ever
  * serve. A missing file is reported as STORE_NOT_INITIALISED instead.
  *
- * On failure the reply is already filled and false is returned. On success
- * the caller owns `ndb` and must node_db_close() it. */
-static bool sn_open_db(const char *datadir, struct zcl_command_reply *reply,
+ * The caller has already established that no OTHER process owns the lease on
+ * this path (zcl_native_handle_store_list_product probes it, and inside the
+ * node the owner is this very process), so a refusal here is a real database
+ * fault, never "a node is running".
+ *
+ * On failure `out` is already filled and false is returned. On success the
+ * caller owns `ndb` and must node_db_close() it. */
+static bool sn_open_db(const char *datadir, struct store_sell_outcome *out,
                        struct node_db *ndb, const char *reason)
 {
     char path[1024];
     int n = snprintf(path, sizeof(path), "%s/node.db", datadir);
     if (n <= 0 || (size_t)n >= sizeof(path)) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "DATADIR_PATH_TOO_LONG",
-                "datadir path is too long to address node.db", datadir);
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "DATADIR_PATH_TOO_LONG",
+                    "datadir path is too long to address node.db", datadir);
         return false;
     }
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "STORE_NOT_INITIALISED",
-                "no node.db at this datadir — boot the node once to create "
-                "the store schema, or pass the right datadir", path);
+        sn_out_fail(out, ZCL_COMMAND_EXIT_BLOCKED, "STORE_NOT_INITIALISED",
+                    "no node.db at this datadir — boot the node once to "
+                    "create the store schema, or pass the right datadir",
+                    path);
         return false;
     }
     memset(ndb, 0, sizeof(*ndb));
     if (!node_db_open_runtime(ndb, path, reason)) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "STORE_NOT_INITIALISED",
-                "node.db exists but could not be opened for the store", path);
+        sn_out_fail(out, ZCL_COMMAND_EXIT_BLOCKED, "STORE_DB_UNOPENABLE",
+                    "node.db exists but could not be opened for the store",
+                    path);
         return false;
     }
     return true;
@@ -295,24 +348,40 @@ static void sn_render_product(struct json_value *into,
     }
 }
 
-/* ── app.store.list-product ─────────────────────────────────────────── */
-void zcl_native_handle_store_list_product(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
-{
-    const struct json_value *in = request->input;
+/* ── the one listing implementation ─────────────────────────────────
+ *
+ * Everything from here to store_sell_list_product_apply() runs in whichever
+ * process OWNS <datadir>/node.db — the node when one is up (reached through
+ * storesell_list_product), the CLI process only when no node holds the lease.
+ * It renders no transport envelope: it fills a store_sell_outcome, and the
+ * caller shapes that into a typed CLI reply or an RPC body. One body means
+ * one set of validations and one wording per refusal on both routes. */
 
-    /* name */
-    const char *name_in = json_get_str(json_get(in, "name"));
-    if (!name_in || !name_in[0]) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_NAME",
-                "name is required", "name");
-        return;
+/* The validated product, before anything is written. */
+struct sn_draft {
+    const char *name;
+    const char *description;
+    char token_id[STORE_PRODUCT_TOKEN_MAX + 1];
+    int64_t price_zat;
+    int tokens;
+};
+
+/* name + token_id: the two fields a buyer sees. */
+static bool sn_validate_identity(const struct json_value *in,
+                                 struct sn_draft *d,
+                                 struct store_sell_outcome *out)
+{
+    d->name = json_get_str(json_get(in, "name"));
+    if (!d->name || !d->name[0]) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "MISSING_NAME",
+                    "name is required", "name");
+        return false;
     }
-    if (strlen(name_in) > STORE_PRODUCT_NAME_MAX) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "NAME_TOO_LONG",
-                "name exceeds the 255-character product-name limit", "name");
-        return;
+    if (strlen(d->name) > STORE_PRODUCT_NAME_MAX) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "NAME_TOO_LONG",
+                    "name exceeds the 255-character product-name limit",
+                    "name");
+        return false;
     }
 
     /* token_id — the buyer-visible identity. `/store/access?token=X` resolves
@@ -321,154 +390,164 @@ void zcl_native_handle_store_list_product(
      * it to be empty. */
     const char *token_in = json_get_str(json_get(in, "token_id"));
     if (!token_in || !token_in[0]) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_TOKEN_ID",
-                "token_id is required — it is the id a buyer's "
-                "/store/access request resolves to this product",
-                "token_id");
-        return;
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "MISSING_TOKEN_ID",
+                    "token_id is required — it is the id a buyer's "
+                    "/store/access request resolves to this product",
+                    "token_id");
+        return false;
     }
-    char token_id[STORE_PRODUCT_TOKEN_MAX + 1];
     if (strlen(token_in) > STORE_PRODUCT_TOKEN_MAX) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_TOKEN_ID",
-                "token_id exceeds the 64-character limit", "token_id");
-        return;
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "BAD_TOKEN_ID",
+                    "token_id exceeds the 64-character limit", "token_id");
+        return false;
     }
-    (void)snprintf(token_id, sizeof(token_id), "%s", token_in);
+    (void)snprintf(d->token_id, sizeof(d->token_id), "%s", token_in);
     /* Normalize exactly as the model's before_validate hook does, so the
      * duplicate check below tests the value that will actually be stored. */
-    model_trim_ascii(token_id);
-    model_ascii_upcase(token_id);
-    if (!sn_token_charset_ok(token_id)) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_TOKEN_ID",
-                "token_id must be non-empty and use only letters, digits, "
-                "'-' or '_' (it is upcased and used verbatim in "
-                "/store/access?token=...)", token_in);
-        return;
+    model_trim_ascii(d->token_id);
+    model_ascii_upcase(d->token_id);
+    if (!sn_token_charset_ok(d->token_id)) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "BAD_TOKEN_ID",
+                    "token_id must be non-empty and use only letters, "
+                    "digits, '-' or '_' (it is upcased and used verbatim in "
+                    "/store/access?token=...)", token_in);
+        return false;
     }
+    return true;
+}
 
-    /* price */
-    int64_t price_zat = 0;
-    switch (sn_parse_price(in, &price_zat)) {
+static bool sn_validate_price(const struct json_value *in, struct sn_draft *d,
+                              struct store_sell_outcome *out)
+{
+    switch (sn_parse_price(in, &d->price_zat)) {
     case SN_PRICE_OK:
-        break;
+        return true;
     case SN_PRICE_MISSING:
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_PRICE",
-                "a price is required: pass price_zcl (decimal ZCL) or "
-                "price_zatoshi (integer zatoshi)", "price_zcl");
-        return;
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "MISSING_PRICE",
+                    "a price is required: pass price_zcl (decimal ZCL) or "
+                    "price_zatoshi (integer zatoshi)", "price_zcl");
+        return false;
     case SN_PRICE_CONFLICT:
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "PRICE_CONFLICT",
-                "pass price_zcl or price_zatoshi, not both — one price, one "
-                "unit", "price_zcl,price_zatoshi");
-        return;
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "PRICE_CONFLICT",
+                    "pass price_zcl OR price_zatoshi, never both — two units "
+                    "for one field is how a ZCL price gets stored as zatoshi",
+                    "price_zcl+price_zatoshi");
+        return false;
     case SN_PRICE_MALFORMED:
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_PRICE",
-                "price must be a plain number in the unit its key names: "
-                "price_zcl accepts decimals, price_zatoshi whole zatoshi. No "
-                "currency suffix or other trailing text is accepted.",
-                "price");
-        return;
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "BAD_PRICE",
+                    "price must be a number (price_zatoshi must be a whole "
+                    "number of zatoshi)", "price");
+        return false;
     case SN_PRICE_OUT_OF_RANGE:
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "PRICE_OUT_OF_RANGE",
-                "price must be at least 1 zatoshi and at most MAX_MONEY",
-                "price");
-        return;
+    default:
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "PRICE_OUT_OF_RANGE",
+                    "price must be at least 1 zatoshi and no more than the "
+                    "money supply", "price");
+        return false;
     }
+}
 
-    /* tokens_per_purchase */
+/* tokens_per_purchase + the optional description. */
+static bool sn_validate_terms(const struct json_value *in, struct sn_draft *d,
+                              struct store_sell_outcome *out)
+{
     int64_t tokens = json_get_int_or(in, "tokens_per_purchase", 1);
     if (tokens < 1 || tokens > 10000) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_TOKENS_PER_PURCHASE",
-                "tokens_per_purchase must be between 1 and 10000",
-                "tokens_per_purchase");
-        return;
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "BAD_TOKENS_PER_PURCHASE",
+                    "tokens_per_purchase must be between 1 and 10000",
+                    "tokens_per_purchase");
+        return false;
     }
+    d->tokens = (int)tokens;
 
-    /* description (optional) */
-    const char *desc = json_get_str_or(in, "description", "");
-    if (desc && strlen(desc) > STORE_PRODUCT_DESC_MAX) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "DESCRIPTION_TOO_LONG",
-                "description exceeds the 1023-character limit", "description");
-        return;
+    d->description = json_get_str_or(in, "description", "");
+    if (d->description && strlen(d->description) > STORE_PRODUCT_DESC_MAX) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "DESCRIPTION_TOO_LONG",
+                    "description exceeds the 1023-character limit",
+                    "description");
+        return false;
     }
+    return true;
+}
 
-    const char *datadir = sn_datadir(request);
-    if (!datadir) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
-                "no datadir given and no --datadir default", "datadir");
-        return;
-    }
-
-    /* content (optional, but all-or-nothing when asked for) — read BEFORE
-     * opening the database so an unreadable file costs no write lock. */
+/* Read the attached file, if one was asked for. All-or-nothing: a merchant
+ * who asked for a file and got a product that cannot deliver one has been
+ * lied to, so an unreadable/empty/over-cap path writes nothing. */
+static bool sn_stage_content(const struct json_value *in,
+                             struct sn_content *content,
+                             struct store_sell_outcome *out)
+{
     const char *content_path = json_get_str_or(in, "content_path", NULL);
-    struct sn_content content = { .bytes = NULL, .len = 0 };
-    if (content_path && content_path[0]) {
-        switch (sn_read_content(content_path, &content)) {
-        case SN_CONTENT_OK:
-            break;
-        case SN_CONTENT_UNREADABLE:
-            sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "CONTENT_UNREADABLE",
+    content->bytes = NULL;
+    content->len = 0;
+    if (!content_path || !content_path[0])
+        return true;
+
+    switch (sn_read_content(content_path, content)) {
+    case SN_CONTENT_OK:
+        return true;
+    case SN_CONTENT_UNREADABLE:
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "CONTENT_UNREADABLE",
                     "content_path could not be opened or read", content_path);
-            return;
-        case SN_CONTENT_EMPTY:
-            sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "CONTENT_EMPTY",
+        return false;
+    case SN_CONTENT_EMPTY:
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "CONTENT_EMPTY",
                     "content_path is an empty file — there is nothing to "
                     "deliver to a buyer", content_path);
-            return;
-        case SN_CONTENT_TOO_LARGE: {
-            char ev[128];
-            (void)snprintf(ev, sizeof(ev),
-                           "%s (cap %d bytes)", content_path,
-                           STORE_BLOB_INLINE_MAX);
-            sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "CONTENT_TOO_LARGE",
+        return false;
+    case SN_CONTENT_TOO_LARGE: {
+        char ev[128];
+        (void)snprintf(ev, sizeof(ev), "%s (cap %d bytes)", content_path,
+                       STORE_BLOB_INLINE_MAX);
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "CONTENT_TOO_LARGE",
                     "content_path exceeds the inline-serve cap; the store "
                     "could not stream it to a buyer, so the product is "
                     "refused rather than listed undeliverable", ev);
-            return;
-        }
-        case SN_CONTENT_ALLOC:
-            sn_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "CONTENT_ALLOC_FAILED",
+        return false;
+    }
+    case SN_CONTENT_ALLOC:
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INTERNAL, "CONTENT_ALLOC_FAILED",
                     "could not allocate the content read buffer",
                     content_path);
-            return;
-        case SN_CONTENT_NONE:
-        default:
-            sn_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "CONTENT_UNKNOWN",
+        return false;
+    case SN_CONTENT_NONE:
+    default:
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INTERNAL, "CONTENT_UNKNOWN",
                     "content read returned an unexpected status",
                     content_path);
-            return;
-        }
+        return false;
     }
+}
 
-    struct node_db ndb;
-    if (!sn_open_db(datadir, reply, &ndb, "store.list_product")) {
-        free(content.bytes);
-        return;
-    }
-
-    /* duplicate token id */
+/* Write the blob (if any) and the product row, then re-read the row so the
+ * answer describes what the store will serve rather than what was asked for.
+ * `ndb` is open and stays the caller's to close. */
+static void sn_write_product(struct node_db *ndb, const struct json_value *in,
+                             const struct sn_draft *d,
+                             const struct sn_content *content,
+                             struct store_sell_outcome *out)
+{
     struct db_store_product existing;
-    if (db_store_product_find_by_token(&ndb, token_id, &existing)) {
+    if (db_store_product_find_by_token(ndb, d->token_id, &existing)) {
         char ev[128];
-        (void)snprintf(ev, sizeof(ev), "%s (product id %lld)", token_id,
+        (void)snprintf(ev, sizeof(ev), "%s (product id %lld)", d->token_id,
                        (long long)existing.id);
-        node_db_close(&ndb);
-        free(content.bytes);
-        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "DUPLICATE_TOKEN_ID",
-                "an active product already carries this token_id; a buyer's "
-                "/store/access request could not tell the two apart", ev);
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INVALID, "DUPLICATE_TOKEN_ID",
+                    "an active product already carries this token_id; a "
+                    "buyer's /store/access request could not tell the two "
+                    "apart", ev);
         return;
     }
 
     struct db_store_product product;
     memset(&product, 0, sizeof(product));
-    (void)snprintf(product.name, sizeof(product.name), "%s", name_in);
+    (void)snprintf(product.name, sizeof(product.name), "%s", d->name);
     (void)snprintf(product.description, sizeof(product.description), "%s",
-                   desc ? desc : "");
-    (void)snprintf(product.token_id, sizeof(product.token_id), "%s", token_id);
-    product.price_zatoshi = price_zat;
-    product.tokens_per_purchase = (int)tokens;
+                   d->description ? d->description : "");
+    (void)snprintf(product.token_id, sizeof(product.token_id), "%s",
+                   d->token_id);
+    product.price_zatoshi = d->price_zat;
+    product.tokens_per_purchase = d->tokens;
     product.active = true;
 
     /* Store the bytes first: the blob is content-addressed and INSERT OR
@@ -476,49 +555,237 @@ void zcl_native_handle_store_list_product(
      * of the same file dedupes. Stamping the hash onto the product record
      * BEFORE the insert means the product row is never briefly visible to
      * /store without its payload. */
-    if (content.bytes) {
-        if (!db_store_blob_put(&ndb, content.bytes, content.len,
+    if (content->bytes) {
+        if (!db_store_blob_put(ndb, content->bytes, content->len,
                                json_get_str_or(in, "content_type", NULL),
                                json_get_str_or(in, "content_filename", NULL),
                                product.content_hash)) {
-            node_db_close(&ndb);
-            free(content.bytes);
-            sn_fail(reply, ZCL_COMMAND_EXIT_FAILED, "BLOB_STORE_FAILED",
-                    "the file payload could not be stored", content_path);
+            sn_out_fail(out, ZCL_COMMAND_EXIT_FAILED, "BLOB_STORE_FAILED",
+                        "the file payload could not be stored",
+                        json_get_str_or(in, "content_path", ""));
             return;
         }
         product.has_content = true;
     }
 
-    if (!db_store_product_save(&ndb, &product)) {
-        node_db_close(&ndb);
-        free(content.bytes);
-        sn_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SAVE_FAILED",
-                "the product did not validate or persist", token_id);
+    if (!db_store_product_save(ndb, &product)) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_FAILED, "SAVE_FAILED",
+                    "the product did not validate or persist", d->token_id);
         return;
     }
-    int64_t product_id = sqlite3_last_insert_rowid(ndb.db);
+    int64_t product_id = sqlite3_last_insert_rowid(ndb->db);
 
-    /* Read the row back so the reply describes what the store will serve,
-     * not what the caller asked for. */
     struct db_store_product saved;
-    bool reread = db_store_product_find_active(&ndb, product_id, &saved);
+    if (!db_store_product_find_active(ndb, product_id, &saved)) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_FAILED, "SAVE_UNCONFIRMED",
+                    "the product was written but could not be read back as "
+                    "an active product", d->token_id);
+        return;
+    }
+
+    sn_render_product(&out->data, &saved);
+    if (saved.has_content)
+        (void)json_push_kv_int(&out->data, "content_bytes",
+                               (int64_t)content->len);
+    out->ok = true;
+    out->mutated = true;
+}
+
+void store_sell_list_product_apply(const struct json_value *in,
+                                   const char *datadir,
+                                   struct store_sell_outcome *out)
+{
+    struct sn_draft draft;
+    memset(&draft, 0, sizeof(draft));
+    if (!sn_validate_identity(in, &draft, out) ||
+        !sn_validate_price(in, &draft, out) ||
+        !sn_validate_terms(in, &draft, out))
+        return;
+
+    /* Read the payload BEFORE opening the database so an unreadable file
+     * costs no write lock. */
+    struct sn_content content;
+    if (!sn_stage_content(in, &content, out))
+        return;
+
+    struct node_db ndb;
+    if (!sn_open_db(datadir, out, &ndb, "store.list_product")) {
+        free(content.bytes);
+        return;
+    }
+    sn_write_product(&ndb, in, &draft, &content, out);
     node_db_close(&ndb);
     free(content.bytes);
 
-    if (!reread) {
-        sn_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SAVE_UNCONFIRMED",
-                "the product was written but could not be read back as an "
-                "active product", token_id);
+    if (out->ok)
+        (void)json_push_kv_str(&out->data, "datadir", datadir);
+}
+
+/* ── app.store.list-product ─────────────────────────────────────────
+ *
+ * The leaf itself only decides WHERE the listing runs. A booted node holds a
+ * single-owner lease on node.db, so opening it here would be refused; the
+ * lease probe is how this command tells "a node owns this store" from "the
+ * datadir is idle", and it routes rather than guesses. */
+
+static enum zcl_command_exit sn_exit_of(int64_t wire)
+{
+    switch (wire) {
+    case ZCL_COMMAND_EXIT_INVALID:   return ZCL_COMMAND_EXIT_INVALID;
+    case ZCL_COMMAND_EXIT_BLOCKED:   return ZCL_COMMAND_EXIT_BLOCKED;
+    case ZCL_COMMAND_EXIT_DENIED:    return ZCL_COMMAND_EXIT_DENIED;
+    case ZCL_COMMAND_EXIT_TRANSIENT: return ZCL_COMMAND_EXIT_TRANSIENT;
+    case ZCL_COMMAND_EXIT_INTERNAL:  return ZCL_COMMAND_EXIT_INTERNAL;
+    case ZCL_COMMAND_EXIT_FAILED:
+    default:                         return ZCL_COMMAND_EXIT_FAILED;
+    }
+}
+
+/* Copy the product fields the node answered, minus the envelope keys the
+ * outcome expresses structurally. */
+static void sn_copy_body(struct json_value *dst, const struct json_value *src)
+{
+    static const char *envelope[] = { "ok", "code", "message", "evidence",
+                                      "exit", "mutated" };
+    for (size_t i = 0; i < src->num_children; i++) {
+        const char *k = src->keys ? src->keys[i] : NULL;
+        if (!k || !k[0])
+            continue;
+        bool skip = false;
+        for (size_t j = 0; j < sizeof(envelope) / sizeof(envelope[0]); j++)
+            if (strcmp(k, envelope[j]) == 0) { skip = true; break; }
+        if (!skip)
+            (void)json_push_kv(dst, k, &src->children[i]);
+    }
+}
+
+/* Rebuild the node's outcome from its RPC body. A refusal rides a SUCCESSFUL
+ * call as {ok:false, code, message, evidence, exit} carrying the very fields
+ * the in-process route fills, so an operator reads the identical refusal
+ * whether or not a node was up. */
+static void sn_outcome_from_rpc(const char *raw, struct store_sell_outcome *out)
+{
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, raw, strlen(raw)) || doc.type != JSON_OBJ) {
+        json_free(&doc);
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INTERNAL, "STORE_RPC_BAD_BODY",
+                    "the node answered the listing with a body this command "
+                    "could not read", "storesell_list_product");
+        return;
+    }
+    const struct json_value *err = json_get(&doc, "error");
+    if (err && !json_is_null(err)) {
+        const char *why = err->type == JSON_OBJ
+                              ? json_get_str(json_get(err, "message"))
+                              : json_get_str(err);
+        sn_out_fail(out, ZCL_COMMAND_EXIT_FAILED, "STORE_RPC_ERROR",
+                    why && why[0] ? why : "the node reported an error",
+                    "storesell_list_product");
+        json_free(&doc);
+        return;
+    }
+    if (!json_get_bool_or(&doc, "ok", false)) {
+        const char *code = json_get_str(json_get(&doc, "code"));
+        const char *msg = json_get_str(json_get(&doc, "message"));
+        const char *ev = json_get_str(json_get(&doc, "evidence"));
+        sn_out_fail(out, sn_exit_of(json_get_int(json_get(&doc, "exit"))),
+                    code && code[0] ? code : "STORE_REFUSED",
+                    msg && msg[0] ? msg : "the store refused the listing", ev);
+        json_free(&doc);
+        return;
+    }
+    out->ok = true;
+    out->mutated = json_get_bool_or(&doc, "mutated", false);
+    sn_copy_body(&out->data, &doc);
+    json_free(&doc);
+}
+
+/* Hand the listing to the node that owns the database. */
+static void sn_list_through_node(const struct json_value *in,
+                                 const char *datadir,
+                                 struct store_sell_outcome *out)
+{
+    struct rpc_arg_builder p;
+    rpc_arg_builder_init(&p);
+    rpc_arg_builder_push_value(&p, in);
+    rpc_arg_builder_push_str(&p, datadir);
+    char *params = rpc_arg_builder_to_json(&p);
+    if (!params) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
+                    "could not encode the storesell_list_product parameters",
+                    "app.store.list-product");
+        return;
+    }
+    zcl_native_bridge_ensure_rpc();
+    char *raw = node_rpc_call("storesell_list_product", params);
+    free(params);
+    if (!raw) {
+        sn_out_fail(out, ZCL_COMMAND_EXIT_TRANSIENT, "STORE_NODE_UNREACHABLE",
+                    "a node owns this store's database but did not answer "
+                    "the listing — the product was NOT listed; check the "
+                    "node's RPC port and cookie", datadir);
+        return;
+    }
+    sn_outcome_from_rpc(raw, out);
+    free(raw);
+}
+
+static void sn_reply_from_outcome(struct zcl_command_reply *reply,
+                                  const struct store_sell_outcome *out)
+{
+    if (!out->ok) {
+        sn_fail(reply, out->exit_code, out->code, out->message, out->evidence);
+        return;
+    }
+    for (size_t i = 0; i < out->data.num_children; i++) {
+        const char *k = out->data.keys ? out->data.keys[i] : NULL;
+        if (k && k[0])
+            (void)json_push_kv(&reply->data, k, &out->data.children[i]);
+    }
+    reply->error.mutated = out->mutated;
+}
+
+void zcl_native_handle_store_list_product(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    const char *datadir = sn_datadir(request);
+    if (!datadir) {
+        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
+                "no datadir given and no --datadir default", "datadir");
+        return;
+    }
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/node.db", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        sn_fail(reply, ZCL_COMMAND_EXIT_INVALID, "DATADIR_PATH_TOO_LONG",
+                "datadir path is too long to address node.db", datadir);
         return;
     }
 
-    sn_render_product(&reply->data, &saved);
-    if (saved.has_content)
-        (void)json_push_kv_int(&reply->data, "content_bytes",
-                               (int64_t)content.len);
-    (void)json_push_kv_str(&reply->data, "datadir", datadir);
-    reply->error.mutated = true;
+    struct store_sell_outcome out;
+    store_sell_outcome_init(&out);
+    switch (node_db_owner_lease_probe(path)) {
+    case NODE_DB_OWNER_LEASE_LIVE:
+        /* A node owns node.db. Never open it here — that is the refusal an
+         * operator used to meet as STORE_NOT_INITIALISED. */
+        sn_list_through_node(request->input, datadir, &out);
+        break;
+    case NODE_DB_OWNER_LEASE_PROBE_ERROR:
+        sn_out_fail(&out, ZCL_COMMAND_EXIT_BLOCKED, "STORE_LEASE_UNREADABLE",
+                    "could not tell whether a node owns this store's "
+                    "database, so the listing is refused rather than raced",
+                    path);
+        break;
+    case NODE_DB_OWNER_LEASE_UNOWNED:
+    case NODE_DB_OWNER_LEASE_OWNED_SELF:
+    default:
+        store_sell_list_product_apply(request->input, datadir, &out);
+        break;
+    }
+    sn_reply_from_outcome(reply, &out);
+    store_sell_outcome_free(&out);
 }
 
 /* ── app.store.products ─────────────────────────────────────────────── */
