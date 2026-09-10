@@ -41,7 +41,7 @@ ZCL_FACT("landing.queue", "land_wt_ensure_fn",
 ZCL_FACT("landing.queue", "land_already_landed_fn",
          "dl_already_landed short-circuits a row whose tip is already an ancestor of origin/main.",
          "tools/command/native_dev_land.c",
-         "static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row)")
+         "static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row,")
 ZCL_FACT("landing.queue", "land_rebase_fn",
          "dl_rebase fetches origin, checks out the tip, and rebases it onto origin/main, aborting on conflict.",
          "tools/command/native_dev_land.c",
