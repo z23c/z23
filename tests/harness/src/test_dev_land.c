@@ -29,6 +29,12 @@
 #include "util/spawn.h"
 #include "dev/dev_git_tree.h"
 #include "sha3/sha3.h"
+
+/* Hermetic seams from native_dev_land.c (ZCL_TESTING build): the idle-note
+ * judgment dl_proof_read applies to a real proof status, and its bound. */
+bool zcl_native_dev_land_test_idle_note(int64_t age_s, char *detail,
+                                        size_t cap);
+int64_t zcl_native_dev_land_test_idle_bound(void);
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
 
@@ -438,6 +444,28 @@ static bool dlx_hook_link(const char *path)
 static bool dlx_plant_hook_bin(const char *dir)
 {
     return dlx_write_dep(dir, "build/bin/z23-git-hook", "hook\n");
+}
+
+static bool dlx_json_field(const char *hay, const char *key,
+                            char *out, size_t cap)
+{
+    char needle[64];
+    const char *at;
+    size_t n = 0;
+    if (snprintf(needle, sizeof(needle), "\"%s\":\"", key) >=
+            (int)sizeof(needle))
+        return false;
+    at = strstr(hay, needle);
+    if (!at)
+        return false;
+    at += strlen(needle);
+    while (at[n] && at[n] != '"' && n + 1 < cap)
+        n++;
+    if (at[n] != '"' || n == 0)
+        return false;
+    memcpy(out, at, n);
+    out[n] = '\0';
+    return true;
 }
 
 /* Whole-file slurp for a byte-identical before/after comparison. Bounded:
@@ -3856,6 +3884,32 @@ int test_dev_land(void)
         ASSERT(dlx_hook_link(link));
         unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
         dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a queued proof request no worker claims past the idle "
+        "bound is named, not read as an ordinary pending") {
+        char detail[192];
+        /* The 36-hour silent-resident shape in miniature: a pending detail
+         * for a request whose age crosses the bound gains the named note,
+         * a fresh one does not, and the bound follows its environment
+         * override. The judgment is dl_proof_read's; the seam runs exactly
+         * that function's helper without forking a resident in a rig. */
+        setenv("ZCL_LAND_PROOF_IDLE_SEC", "900", 1);
+        (void)snprintf(detail, sizeof(detail), "%s",
+                       "resident_proof_request_queued");
+        ASSERT(!zcl_native_dev_land_test_idle_note(899, detail,
+                                                   sizeof(detail)));
+        ASSERT(strcmp(detail, "resident_proof_request_queued") == 0);
+        ASSERT(zcl_native_dev_land_test_idle_note(901, detail,
+                                                  sizeof(detail)));
+        ASSERT(strstr(detail, "resident_proof_request_queued;") != NULL);
+        ASSERT(strstr(detail, "proof_request_idle_age_s=901") != NULL);
+        ASSERT(strstr(detail, "no worker has claimed") != NULL);
+        setenv("ZCL_LAND_PROOF_IDLE_SEC", "1", 1);
+        ASSERT(zcl_native_dev_land_test_idle_bound() == 1);
+        unsetenv("ZCL_LAND_PROOF_IDLE_SEC");
+        ASSERT(zcl_native_dev_land_test_idle_bound() == 900);
         PASS();
     }
 

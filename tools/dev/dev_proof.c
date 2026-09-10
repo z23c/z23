@@ -1119,6 +1119,18 @@ static bool proof_status_read_platform(const char *repo_root,
         out->eta_ms = zcl_dev_proof_ceiling_ms();
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
                        "resident_proof_request_queued");
+        /* The request is still in the queue directory, so no worker ever
+         * claimed it (a claim renames it into the attempt directory). Age
+         * since its write is the honest "how long has nothing consumed
+         * this" number — the difference between a freshly queued request
+         * and one that has sat for hours behind a silent resident, which
+         * the RUNNING state alone cannot express. */
+        struct stat request_st;
+        if (stat(paths.request, &request_st) == 0) {
+            int64_t now = platform_time_wall_unix();
+            int64_t written = (int64_t)request_st.st_mtime;
+            out->request_age_s = now > written ? now - written : 0;
+        }
         return true;
     }
     if (proof_private_regular(paths.request)) {

@@ -73,6 +73,13 @@ struct zcl_dev_proof_status {
     int64_t started_unix;
     int64_t eta_ms;
     int64_t worker_id;
+    /* Seconds since the still-queued request was written and no worker
+     * claimed it (claiming renames the request into its attempt dir, so a
+     * present request means an unstarted one). 0 when no request is
+     * queued. This is the honest liveness number behind
+     * resident_proof_request_queued: state RUNNING is a claim about a
+     * worker, and an unclaimed request has none. */
+    int64_t request_age_s;
     bool receipt_reused;
 };
 

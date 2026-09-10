@@ -1792,6 +1792,20 @@ static int test_ic_proof_retry(void)
         ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
         ASSERT(strcmp(status.detail, "resident_proof_request_queued") == 0);
+        /* The queued status also carries the request's unclaimed age — the
+         * honest liveness number behind RUNNING. A freshly written request
+         * reads young; the same request backdated two hours reads its real
+         * age, so a silent resident can no longer masquerade as "a worker
+         * is coming" for a day (observed 36h, 2026-09-09). */
+        ASSERT(status.request_age_s >= 0 && status.request_age_s < 60);
+        struct timespec aged[2];
+        aged[0].tv_sec = time(NULL) - 7200;
+        aged[0].tv_nsec = 0;
+        aged[1] = aged[0];
+        ASSERT(utimensat(AT_FDCWD, request, aged, 0) == 0);
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT(status.request_age_s >= 7199);
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
 
         /* Crash window 1: B claimed the request and produced logs, but

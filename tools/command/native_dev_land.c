@@ -1401,6 +1401,54 @@ static enum dl_proof dl_proof_request(const char *wt, const char *local,
 #endif
 }
 
+/* How long a queued, never-claimed proof request may read as an ordinary
+ * pending state before the land status names its idleness. Default 15
+ * minutes (a claim follows a healthy resident within seconds); tests lower
+ * it through the environment the same way other bounds are forced. */
+static int64_t dl_proof_idle_bound_s(void)
+{
+    const char *forced = getenv("ZCL_LAND_PROOF_IDLE_SEC");
+    if (forced && forced[0]) {
+        long parsed = strtol(forced, NULL, 10);
+        if (parsed >= 0)
+            return (int64_t)parsed;
+    }
+    return 900;
+}
+
+/* Append the named-idleness note to a pending detail when the unclaimed
+ * request's age crosses the idle bound. Split out so the land-side unit
+ * seam can exercise exactly this judgment hermetically. */
+static void dl_proof_idle_note_append(int64_t age_s, char *detail, size_t cap)
+{
+    if (age_s < dl_proof_idle_bound_s())
+        return;
+    char idle[96];
+    (void)snprintf(idle, sizeof(idle),
+                   "; proof_request_idle_age_s=%lld "
+                   "(no worker has claimed the queued request)",
+                   (long long)age_s);
+    if (detail && detail[0] && cap > strlen(detail) + 1)
+        (void)strncat(detail, idle, cap - strlen(detail) - 1);
+}
+
+#if defined(ZCL_TESTING)
+/* Hermetic seam for test_dev_land: the same judgment dl_proof_read applies
+ * to a real status, without needing a resident watcher in a fixture rig. */
+bool zcl_native_dev_land_test_idle_note(int64_t age_s, char *detail,
+                                        size_t cap)
+{
+    size_t before = detail ? strlen(detail) : 0;
+    dl_proof_idle_note_append(age_s, detail, cap);
+    return detail ? strlen(detail) > before : false;
+}
+
+int64_t zcl_native_dev_land_test_idle_bound(void)
+{
+    return dl_proof_idle_bound_s();
+}
+#endif
+
 static enum dl_proof dl_proof_read(const char *wt, const char *local,
                                    const char *base, char *dimension,
                                    size_t dim_cap, char *detail, size_t cap)
@@ -1440,6 +1488,14 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
                        status.detail[0] ? status.detail
                                         : zcl_dev_proof_state_name(
                                               status.state));
+        /* An unclaimed request that has sat past the idle bound is named,
+         * not left as a bare "queued": a driver reading this status must
+         * be able to tell "a worker is coming" from "nothing has consumed
+         * this request for N seconds" — the difference between waiting
+         * and investigating the resident. Observed live 2026-09-09/10: a
+         * request sat 36 hours behind an alive-but-silent watcher while
+         * every consumer read an ordinary "proving" state. */
+        dl_proof_idle_note_append(status.request_age_s, detail, cap);
         switch (status.state) {
         case ZCL_DEV_PROOF_STATE_PASSED:
             return DL_PROOF_PASSED;
