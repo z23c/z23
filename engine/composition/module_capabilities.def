@@ -665,7 +665,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_inventory_body.
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_inventory_evidence.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_inventory_scan.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle.c", CAP_FS_WRITE|CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle_inventory.c", CAP_FS_READ, "stats live indexed sources against a sealed Merkle snapshot")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle_inventory.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_owner.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan.c", CAP_FS_WRITE, "")
