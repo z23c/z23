@@ -96,6 +96,14 @@ TOKEN_TICKER="${TOKEN_TICKER:-OPPROOF}" # ZSLP ticker; the on-chain token_id
                                         # (64-hex genesis txid) is minted live
                                         # in stage 3 — zslp_mint only accepts
                                         # the hex id, never the ticker.
+# The custody scope the token genesis is planned and committed under. The
+# node boots with -operator-lane=dev, and the ZSLP intent contract refuses
+# any plan whose wallet_scope does not match the persisted operator lane.
+WALLET_SCOPE=dev
+# One stable key per proof run: the ZSLP intent contract keys the durable plan
+# by it, so a repeated plan leg returns the SAME reservation instead of
+# reserving the genesis fee twice.
+TOKEN_IDEMPOTENCY_KEY="store-operator-proof-genesis-1"
 
 # Isolation port quad (two_node uses 39070/39080, iso env defaults 39030).
 SP_PORT=39110; SP_RPC=39111; SP_FS=39112; SP_HTTPS=39113
@@ -335,11 +343,29 @@ sp_log "       height=$HEIGHT taddr=$TADDR (first $((MATURE_BLOCKS - 100)) coinb
 sp_log "       merchant z-address seeded: ${ZADDR:0:28}..."
 
 # ── Stage 3: TOKEN_GENESIS (real ZSLP GENESIS on-chain) ────────────
+# app.tokens.create is a durable custody intent, not a one-shot RPC: the plan
+# leg names the wallet scope and an idempotency key and atomically reserves
+# the genesis fee, and the commit leg names ONLY the 64-hex plan_id it
+# answered plus confirm:true (contract row: app.tokens.create in
+# engine/composition/commands/app_features.def; enforced in
+# contexts/market/controllers/src/zslp_intent_native_handler.c). The operator
+# proof speaks that contract exactly — it never re-sends the genesis fields on
+# the commit leg, so the bytes that get signed are the bytes that were planned.
 sp_log "[3/11] TOKEN_GENESIS: creating the $TOKEN_TICKER access token on-chain (plan → commit)..."
-TOKEN_PLAN="$(sp_cli app tokens create --input="{\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000,\"wallet_scope\":\"dev\",\"idempotency_key\":\"opproof-genesis-plan\"}")"
+TOKEN_PLAN="$(sp_cli app tokens create --input="{\"wallet_scope\":\"$WALLET_SCOPE\",\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000,\"idempotency_key\":\"$TOKEN_IDEMPOTENCY_KEY\"}")"
 str_contains "$TOKEN_PLAN" '"stage":"plan"' || sp_fail TOKEN_GENESIS "create did not answer a plan: $TOKEN_PLAN"
-TOKEN_OUT="$(sp_cli app tokens create --input="{\"ticker\":\"$TOKEN_TICKER\",\"name\":\"Operator Proof Token\",\"decimals\":0,\"supply\":1000,\"wallet_scope\":\"dev\",\"idempotency_key\":\"opproof-genesis-commit\",\"confirm\":true}")"
+str_contains "$TOKEN_PLAN" '"committed":false' || sp_fail TOKEN_GENESIS "the plan leg claims it committed: $TOKEN_PLAN"
+TOKEN_PLAN_ID="$(sp_json_str "$TOKEN_PLAN" plan_id)"
+case "$TOKEN_PLAN_ID" in
+    ????????????????????????????????????????????????????????????????) : ;;
+    *) sp_fail TOKEN_GENESIS "plan_id '${TOKEN_PLAN_ID:-?}' is not a 64-char durable plan id: $TOKEN_PLAN" ;;
+esac
+case "$TOKEN_PLAN_ID" in
+    *[!0-9a-fA-F]*) sp_fail TOKEN_GENESIS "plan_id '$TOKEN_PLAN_ID' is not hex: $TOKEN_PLAN" ;;
+esac
+TOKEN_OUT="$(sp_cli app tokens create --input="{\"wallet_scope\":\"$WALLET_SCOPE\",\"plan_id\":\"$TOKEN_PLAN_ID\",\"confirm\":true}")"
 str_contains "$TOKEN_OUT" '"ok":true' || sp_fail TOKEN_GENESIS "$TOKEN_OUT"
+str_contains "$TOKEN_OUT" '"committed":true' || sp_fail TOKEN_GENESIS "the commit leg did not commit: $TOKEN_OUT"
 TOKEN_ID="$(sp_json_str "$TOKEN_OUT" token_id)"
 case "$TOKEN_ID" in
     ????????????????????????????????????????????????????????????????) : ;;
