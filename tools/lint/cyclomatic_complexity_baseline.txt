@@ -1363,7 +1363,7 @@ core/modules/net/src/msg_headers.c:exec_getheaders_action:20
 core/modules/net/src/msg_headers.c:getheaders_index_header_servable:27
 core/modules/net/src/msg_headers.c:headers_start_from_locator:17
 core/modules/net/src/msg_headers.c:msg_try_range_parallel_getheaders:35
-core/modules/net/src/msg_headers.c:process_getheaders:22
+core/modules/net/src/msg_headers.c:process_getheaders:21
 core/modules/net/src/msg_headers.c:process_headers:115
 core/modules/net/src/msg_headers.c:push_getheaders_from:39
 core/modules/net/src/msg_tx.c:process_inv:26
@@ -3136,7 +3136,7 @@ tests/harness/src/test_game.c:test_game:66
 tests/harness/src/test_gap_fill_frontier_window.c:test_gap_fill_frontier_window:19
 tests/harness/src/test_generatetoaddress.c:test_generatetoaddress:38
 tests/harness/src/test_getheaders_serve_fallback.c:test_getheaders_serve_fallback:79
-tests/harness/src/test_getheaders_serve_pow_dedup.c:test_getheaders_serve_pow_dedup:62
+tests/harness/src/test_getheaders_serve_pow_dedup.c:test_getheaders_serve_pow_dedup:61
 tests/harness/src/test_getheaders_serve_receipt.c:test_getheaders_serve_receipt:46
 tests/harness/src/test_groth16_msm_parity.c:test_groth16_msm_parity:28
 tests/harness/src/test_groth16_r1cs_oracle.c:antivacuous_select_y:24

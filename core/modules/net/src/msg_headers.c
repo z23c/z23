@@ -1059,6 +1059,22 @@ void msg_headers_get_stats(struct msg_headers_stats *out)
         atomic_load(&g_getheaders_served_requests);
 }
 
+/* getheaders_serve_page() / getheaders_serve_request_allowance() — see the
+ * declarations and rationale in net/msg_internal.h. Kept next to the two call
+ * sites that use the same choice: the serve-window gate below and the
+ * reply-count bound further down in this function. */
+int getheaders_serve_page(uint64_t services)
+{
+    return peer_supports_fast_sync(services) ? GETHEADERS_SERVE_PAGE_FAST_SYNC
+                                              : GETHEADERS_SERVE_PAGE_LEGACY;
+}
+
+uint32_t getheaders_serve_request_allowance(uint64_t services)
+{
+    return GETHEADERS_SERVE_HEADERS_PER_WINDOW /
+           (uint32_t)getheaders_serve_page(services);
+}
+
 bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s)
 {
@@ -1076,17 +1092,24 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
     atomic_store(&g_getheaders_deferred_streak, false);
 
     /* ── per-peer serve window ─────────────────────────────────────────
-     * Each answered request serves up to 2000 headers — one Equihash
-     * verification each (~0.8 s of a core) and ~2.9 MB of wire — so an
-     * unbounded peer, not this node, chooses the serve bill. Honest IBD
-     * re-asks at its own scheduler-driven pace (roughly one request per
-     * poll, ~6/min), orders of magnitude below what an unbounded wire loop
-     * can demand, so the allowance (net/msg_internal.h) is set generously
-     * against the honest pace and exceeding it costs the peer nothing
-     * permanent: the request is DEFERRED — no reply, no disconnect, no
-     * offence, no ban-score. A deferred peer simply sees its next request go
-     * unanswered and retries; punishing here could only hurt a peer we
-     * mis-measured. Same fixed window as the addr limit
+     * Each answered request serves up to getheaders_serve_page(services)
+     * headers — one Equihash verification each (~0.8 s of a core) and up to
+     * ~2.9 MB of wire — so an unbounded peer, not this node, chooses the
+     * serve bill. Honest IBD re-asks at its own pace: a ZCL23 peer taking
+     * full 2000-header pages re-asks roughly once per scheduler poll
+     * (~6/min); a legacy peer (MAX_HEADERS_RESULTS=160, no NODE_ZCL23) chains
+     * a new getheaders after every 160-header reply, so it legitimately re-
+     * asks far more often while behind. The allowance
+     * (getheaders_serve_request_allowance(), net/msg_internal.h) is a fixed
+     * HEADER budget per window translated into a request count by that
+     * peer's own page size, so both cases cost this node the same header-
+     * serving bill; it is set generously against the honest pace — several
+     * scheduler polls, or several legacy pages, land in every window, and an
+     * RTT-bound pipelining burst still fits — and exceeding it costs the
+     * peer nothing permanent: the request is DEFERRED — no reply, no
+     * disconnect, no offence, no ban-score. A deferred peer simply sees its
+     * next request go unanswered and retries; punishing here could only hurt
+     * a peer we mis-measured. Same fixed window as the addr limit
      * (msgprocessor_inv.c::process_addr): roll on expiry, count admitted
      * requests, defer the rest. Counted + rising-edge logged so a deferred
      * peer's header sync never goes quiet without a name and a number. The
@@ -1098,16 +1121,16 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
         node->getheaders_rate_window_start = now_unix;
         node->getheaders_rate_window_count = 0;
     }
-    if (node->getheaders_rate_window_count >=
-        GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW) {
+    uint32_t allowance = getheaders_serve_request_allowance(node->services);
+    if (node->getheaders_rate_window_count >= allowance) {
         uint64_t n =
             atomic_fetch_add(&g_getheaders_deferred_rate_window, 1) + 1;
         if (getheaders_suppress_rising_edge(&g_getheaders_rate_streak))
             LOG_WARN("headers",
                      "process_getheaders: deferring getheaders from %s — "
                      "per-peer serve window exhausted "
-                     "(deferred_rate_window=%llu)",
-                     node->addr_name, (unsigned long long)n);
+                     "(deferred_rate_window=%llu allowance=%u)",
+                     node->addr_name, (unsigned long long)n, allowance);
         return true;
     }
     atomic_store(&g_getheaders_rate_streak, false);
@@ -1149,7 +1172,7 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
      * — the receiver drops the whole oversized reply and never learns our tip.
      * getheaders_try_append_header() stops the batch at the byte budget, so we
      * emit exactly the count that fits under the cap. */
-    const int max_headers = peer_supports_fast_sync(node->services) ? 2000 : 160;
+    const int max_headers = getheaders_serve_page(node->services);
     struct byte_stream body;
     stream_init(&body, 65536);
     int count = 0;

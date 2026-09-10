@@ -139,20 +139,61 @@ uint64_t getheaders_serve_refusals_no_header_bytes(void);
 /* Per-peer getheaders SERVE window. Answering one request costs up to
  * ~2000 Equihash verifications (~0.8 s of a core) and ~2.9 MB of wire, so
  * without a bound one peer chooses this node's serve bill: measured honest
- * IBD re-asks at roughly one request per scheduler poll (~6/min), while an
- * unbounded peer drives the same wire at its own send rate — about three
- * orders of magnitude more serving than any honest client needs.
+ * IBD re-asks at roughly one request per scheduler poll (~6/min) when the
+ * peer takes full 2000-header pages, while an unbounded peer drives the same
+ * wire at its own send rate — about three orders of magnitude more serving
+ * than any honest client needs.
  *
- * GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW is the sustained allowance. It is
- * deliberately GENEROUS against the honest pace — several scheduler polls
- * land in every window, and an RTT-bound pipelining burst still fits —
- * because the response to exceeding it is DEFER, not disconnect: an honest
- * peer that somehow lands above the allowance just sees its next request go
- * unanswered and retries, losing nothing. Exposed so tests and operators can
- * see the chosen thresholds; the window itself is per-peer state on
- * struct p2p_node, so it dies with the connection. */
+ * The bound is fundamentally a HEADER budget, not a request-count budget: a
+ * legacy ZClassic peer (MagicBean / pre-ZCL23, no NODE_ZCL23 service bit)
+ * caps inbound headers at MAX_HEADERS_RESULTS=160 (see the reply-size comment
+ * in msg_headers.c) and therefore has to chase its own sync with a new
+ * getheaders after every 160-header reply — a stock client with a chain
+ * behind can legitimately want far more than 30 requests a minute even
+ * though it is perfectly honest. Charging every peer the same 30 REQUESTS
+ * regardless of reply size measured ~2000 headers/min for a fresh legacy
+ * client (a day to sync 3.25M headers) and left a bootstrapped legacy client
+ * stuck for 14+ minutes on "per-peer serve window exhausted" once it hit the
+ * allowance. GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW is retained as the
+ * allowance for a peer taking full 2000-header (fast-sync) pages — 30 pages x
+ * 2000 headers = GETHEADERS_SERVE_HEADERS_PER_WINDOW, the actual header
+ * budget for the window. A peer taking smaller pages gets proportionally
+ * more requests out of the SAME header budget: same serving cost to this
+ * node either way.
+ *
+ * It is deliberately GENEROUS against the honest pace — several scheduler
+ * polls (or, for a legacy peer, several 160-header pages) land in every
+ * window, and an RTT-bound pipelining burst still fits — because the
+ * response to exceeding it is DEFER, not disconnect: an honest peer that
+ * somehow lands above the allowance just sees its next request go unanswered
+ * and retries, losing nothing. Exposed so tests and operators can see the
+ * chosen thresholds; the window itself is per-peer state on struct p2p_node,
+ * so it dies with the connection. */
 #define GETHEADERS_SERVE_WINDOW_SECS 60
 #define GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW 30u
+#define GETHEADERS_SERVE_HEADERS_PER_WINDOW \
+    (GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW * 2000u)
+
+/* Reply page sizes the serve loop chooses between (see the reply-size
+ * comment in msg_headers.c): ZCL23 peers (NODE_ZCL23 service bit, fast sync)
+ * get the large page; legacy ZClassic peers (MAX_HEADERS_RESULTS=160, ban on
+ * a larger inbound batch) get the small one. */
+#define GETHEADERS_SERVE_PAGE_FAST_SYNC 2000
+#define GETHEADERS_SERVE_PAGE_LEGACY 160
+
+/* getheaders_serve_page() — the reply page size this node uses for a peer
+ * advertising `services`: GETHEADERS_SERVE_PAGE_FAST_SYNC for a ZCL23 peer,
+ * GETHEADERS_SERVE_PAGE_LEGACY otherwise. Implemented in msg_headers.c next
+ * to the reply loop that uses the same choice. */
+int getheaders_serve_page(uint64_t services);
+
+/* getheaders_serve_request_allowance() — the per-peer serve-window REQUEST
+ * allowance derived from the fixed header budget
+ * (GETHEADERS_SERVE_HEADERS_PER_WINDOW) and that peer's page size: 30 for a
+ * ZCL23 peer taking 2000-header pages, 375 for a legacy peer taking
+ * 160-header pages. Same header-serving cost to this node either way.
+ * Implemented in msg_headers.c next to the serve-window gate that uses it. */
+uint32_t getheaders_serve_request_allowance(uint64_t services);
 
 /* getheaders requests DEFERRED by that per-peer serve window, process-wide
  * since start. A non-zero and climbing value names a peer (or peers) asking

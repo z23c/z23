@@ -619,11 +619,20 @@ int test_getheaders_serve_pow_dedup(void)
          *
          * Each reply costs real Equihash work, so the serve path bounds how
          * OFTEN one peer may ask (GETHEADERS_SERVE_* in net/msg_internal.h).
-         * An honest IBD peer re-asks at its scheduler-driven pace, orders of
-         * magnitude under the allowance; a flood must get exactly the
-         * allowance worth of replies and DEFER the rest — no reply, no
-         * disconnect, no offence. Pins:
+         * The bound is a fixed HEADER budget per window
+         * (GETHEADERS_SERVE_HEADERS_PER_WINDOW), translated into a REQUEST
+         * allowance by that peer's own reply page size
+         * (getheaders_serve_request_allowance() /
+         * getheaders_serve_page()) — a legacy peer taking small pages gets
+         * proportionally more requests out of the same header budget. An
+         * honest IBD peer re-asks at its scheduler-driven (or, for a legacy
+         * peer, page-chained) pace, orders of magnitude under the allowance;
+         * a flood must get exactly the allowance worth of replies and DEFER
+         * the rest — no reply, no disconnect, no offence. Pins:
          *
+         *   D0 the allowance helpers: legacy (services=0) gets 375, a ZCL23
+         *      peer gets 30, and both draw down the SAME header budget
+         *      (allowance * page size is invariant across the two);
          *   D1 an honest burst is fully served;
          *   D2 the flood: served stops exactly at the allowance, every
          *      excess request is deferred silently (true return, zero wire
@@ -639,11 +648,25 @@ int test_getheaders_serve_pow_dedup(void)
          * lets the roll condition do the rest. No sleeps: the production
          * read is now >= window_start + WINDOW_SECS, so a start far enough
          * in the past is deterministic no matter how slowly this runs. */
+            PD_CHECK("D0: legacy services get a 375-request allowance",
+                     getheaders_serve_request_allowance(0) == 375u);
+            PD_CHECK("D0: a ZCL23 peer gets a 30-request allowance",
+                     getheaders_serve_request_allowance(NODE_ZCL23) == 30u);
+            PD_CHECK("D0: both allowances draw down the same header budget",
+                     getheaders_serve_request_allowance(0) *
+                             (uint32_t)getheaders_serve_page(0) ==
+                     getheaders_serve_request_allowance(NODE_ZCL23) *
+                             (uint32_t)getheaders_serve_page(NODE_ZCL23));
             struct p2p_node flooder;
             pd_setup_node(&flooder);
             node_id_t flood_id = flooder.id;
+            /* pd_setup_node() memset()s the fixture, so flooder.services is
+             * 0 — a legacy (non-ZCL23) peer, taking 160-header pages, whose
+             * derived allowance (375) differs from the ZCL23 allowance (30)
+             * even though both draw on the same fixed header budget; see
+             * getheaders_serve_request_allowance() in net/msg_internal.h. */
             const int allowance =
-                (int)GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW;
+                (int)getheaders_serve_request_allowance(flooder.services);
 
             /* hash_stop-only form anchored at h[2]: every admitted request
              * serves exactly ONE header (h[3], B2's shape with a successor),
@@ -788,8 +811,7 @@ int test_getheaders_serve_pow_dedup(void)
             flooder.getheaders_rate_window_start =
                 platform_time_wall_time_t() -
                 GETHEADERS_SERVE_WINDOW_SECS - 1;
-            flooder.getheaders_rate_window_count =
-                GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW;
+            flooder.getheaders_rate_window_count = (uint32_t)allowance;
             req_d.read_pos = 0;
             bool resumed = process_getheaders(&mp, &flooder, &req_d);
             int64_t resumed_wire = pd_queued_headers_count(&flooder);
