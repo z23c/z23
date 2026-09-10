@@ -28,6 +28,19 @@ static void ztin_fail(struct zcl_command_reply *reply,
                            false, message, evidence ? evidence : "");
 }
 
+/* json_get_str() answers "" for a key that is ABSENT, and "" for a key that is
+ * present but empty — it never answers NULL (platform/modules/json/src/json.c).
+ * A required text field therefore has to be tested for CONTENT: a bare
+ * `json_get_str(...) != NULL` is true for a request that carried nothing at
+ * all, which is how this file's own MISSING_INPUT refusal became unreachable
+ * and let a plan with no idempotency key through to a custody reservation with
+ * only the node behind it. */
+static const char *ztin_text(const struct json_value *parent, const char *key)
+{
+    const char *value = json_get_str(json_get(parent, key));
+    return value && value[0] ? value : NULL;
+}
+
 /* Out params are always non-NULL: this is a private helper called from one
  * site below with real locals, never with an optional pointer. */
 static bool ztin_rpc_error(const struct json_value *body, const char **message,
@@ -91,9 +104,9 @@ static void ztin_run(const struct zcl_command_request *request,
 {
     if (!request || !request->spec || !reply || !operation) return;
     const char *path = request->spec->path;
-    const char *scope = json_get_str(json_get(request->input, "wallet_scope"));
+    const char *scope = ztin_text(request->input, "wallet_scope");
     bool confirm = json_get_bool_or(request->input, "confirm", false);
-    const char *plan_id = json_get_str(json_get(request->input, "plan_id"));
+    const char *plan_id = ztin_text(request->input, "plan_id");
     if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
         ztin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                   "WALLET_SCOPE_REQUIRED", "normalize", false,
@@ -101,7 +114,7 @@ static void ztin_run(const struct zcl_command_request *request,
         return;
     }
     bool common_plan_inputs =
-        json_get_str(json_get(request->input, "idempotency_key")) != NULL;
+        ztin_text(request->input, "idempotency_key") != NULL;
     if ((confirm && (!plan_id || strlen(plan_id) != 64)) ||
         (!confirm && (!common_plan_inputs || !operation_inputs_present))) {
         ztin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -206,8 +219,8 @@ void zcl_native_handle_token_create(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "ticker")) &&
-        json_get_str(json_get(input, "name")) &&
+    bool present = input && ztin_text(input, "ticker") &&
+        ztin_text(input, "name") &&
         json_get(input, "decimals") && json_get(input, "supply");
     ztin_run(request, reply, "genesis", present);
 }
@@ -216,8 +229,8 @@ void zcl_native_handle_token_send(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "token_id")) &&
-        json_get_str(json_get(input, "to")) && json_get(input, "units");
+    bool present = input && ztin_text(input, "token_id") &&
+        ztin_text(input, "to") && json_get(input, "units");
     ztin_run(request, reply, "send", present);
 }
 
@@ -225,8 +238,8 @@ void zcl_native_handle_token_mint(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "token_id")) &&
-        json_get_str(json_get(input, "to")) && json_get(input, "units");
+    bool present = input && ztin_text(input, "token_id") &&
+        ztin_text(input, "to") && json_get(input, "units");
     ztin_run(request, reply, "mint", present);
 }
 
@@ -234,7 +247,7 @@ void zcl_native_handle_token_burn(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "token_id")) &&
+    bool present = input && ztin_text(input, "token_id") &&
         json_get(input, "units");
     ztin_run(request, reply, "burn", present);
 }
