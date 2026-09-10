@@ -1073,10 +1073,17 @@ ZCL_COMMAND_PLANNED_COMMAND(
  * addresses, memo-bound reconciliation, token-gated download — and its
  * merchant side is executable here.
  *
- * These leaves address `<datadir>/node.db` directly (input.datadir, else the
- * process --datadir), exactly as the /store HTTP handler does on every
- * request. That is why a product listed here needs no restart to appear, and
- * why the command also works against a stopped node's datadir. */
+ * These leaves address `<datadir>/node.db` (input.datadir, else the process
+ * --datadir), exactly as the /store HTTP handler does on every request, so a
+ * product listed here needs no restart to appear.
+ *
+ * A BOOTED NODE OWNS THAT FILE. It holds a single-owner lease on node.db, so
+ * app.store.list-product probes the lease and routes: with a node up the
+ * listing is executed inside it over the storesell_list_product RPC, with the
+ * datadir idle it is written in this process. Either way the same body runs
+ * and the same refusals come back, and the command still works against a
+ * stopped node's datadir. app.store.products is read-only (SQLITE_OPEN_
+ * READONLY, no lease) and needs no such routing. */
 
 ZCL_COMMAND_READY_COMMAND(
     "app.store.list-product", "app.store", "",
