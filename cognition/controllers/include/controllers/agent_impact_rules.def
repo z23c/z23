@@ -8,6 +8,7 @@
  *
  * Patterns use shell/fnmatch syntax. Keep groups space-separated. */
 
+AGENT_IMPACT_RULE("tests/harness/src/test_zcode_policy.c", "zcode_policy")
 AGENT_IMPACT_RULE("tests/harness/src/lint_gate_deploy_contracts.c", "make_lint_gates_shard_06 make_lint_gates_shard_07")
 AGENT_IMPACT_RULE("tests/harness/src/lint_gate_operator_contracts.c", "make_lint_gates_shard_05")
 AGENT_IMPACT_RULE("cognition/modules/codeindex/include/codeindex/codeindex_inventory.h|cognition/modules/codeindex/src/codeindex_inventory*.c|tests/harness/include/test/code_inventory_semantic_fixture.h|tests/harness/src/code_inventory_semantic_fixture.c|tests/harness/src/test_code_inventory.c|tools/gen_capability_inventory.c|tools/lint/check_capability_inventory_generated.sh|tools/command/native_code_guide_command.c", "code_inventory command_registry_catalog native_api_contract make_lint_gates")
