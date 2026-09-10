@@ -53,7 +53,7 @@
 #                     optional immutable host; never inferred from remoteness
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$REPO_ROOT"
 
 # Defined early — before --selftest and --selftest-dev-guard, both of which
@@ -470,8 +470,8 @@ ship_prepare_hardlink_report() {
     local root="$1" dry="$2" tool n unit rc err_file err
     tool="$(ship_hardlink_tool_path)"
     err_file="$(mktemp "$(ship_scratch_root)/z23-ship-hardlink-count.XXXXXX")"
-    n="$("$tool" --count "$root" 2>"$err_file")"
-    rc=$?
+    rc=0
+    n="$("$tool" --count "$root" 2>"$err_file")" || rc=$?
     if [ "$rc" -ne 0 ]; then
         err="$(cat "$err_file")"
         rm -f "$err_file"

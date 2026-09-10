@@ -160,6 +160,24 @@ int test_build_profile(void)
         PASS();
     }
 
+    TEST("ship_prepare_hardlink_report captures --count's exit status "
+         "without tripping set -e before die() can print it") {
+        /* ship_prepare_all() calls this function directly, with no
+         * enclosing `|| rc=$?`. Under `set -euo pipefail`, a bare
+         *   n="$("$tool" --count "$root" 2>"$err_file")"
+         *   rc=$?
+         * exits the whole script on a refusing tool (e.g. a symlinked
+         * worktree root) before the next line's rc=$? — let alone the
+         * die() below it — ever runs: ship prints nothing and exits 1
+         * right after "prepare git-hooks". The fix assigns rc=0 first and
+         * lets `|| rc=$?` catch the failure inline, so die() still
+         * executes and forwards the tool's stderr. */
+        ASSERT(file_contains("tools/ship.sh", "    rc=0"));
+        ASSERT(file_contains("tools/ship.sh",
+                             "n=\"$(\"$tool\" --count \"$root\" 2>\"$err_file\")\" || rc=$?"));
+        PASS();
+    }
+
 _test_next:
     return failures;
 }
