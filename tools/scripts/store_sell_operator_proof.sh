@@ -401,10 +401,11 @@ sp_log "       peer up (pid $PEER_PID), node up (pid $SP_PID), chain height $(sp
 # while the server keeps working); only a tip frozen for a sustained 60 s
 # window fails the stage.
 sp_mine_to() {
-    local target="$1" stage="$2" h n out h2 attempt stall
+    local target="$1" stage="$2" h n out h2 refusals stall
     h="$(sp_blockcount)"
     [ -n "$h" ] || sp_fail "$stage" "getblockcount silent"
     stall=0
+    refusals=0
     while [ "$h" -lt "$target" ]; do
         n=$(( target - h ))
         [ "$n" -gt 20 ] && n=20
@@ -413,15 +414,20 @@ sp_mine_to() {
         if [ -n "$mine_err" ]; then
             sp_skip "regtest-mining-unavailable ($(printf '%s' "$out" | head -c 200))"
         fi
-        attempt=0
-        while str_contains "$out" 'mint refused' && [ "$attempt" -lt 15 ]; do
-            sleep 2
-            attempt=$(( attempt + 1 ))
-            out="$(sp_rpc generatetoaddress "$n" "\"$TADDR\"")"
-        done
         if str_contains "$out" 'mint refused'; then
-            sp_fail "$stage" "mint refused persisted across $attempt retries (a fresh self-mined node must read sovereign): $(printf '%s' "$out" | head -c 200)"
+            # A refused batch may still have mined part of itself before the
+            # gate closed, so a retry must re-read the height and ask for the
+            # REMAINING blocks — re-sending the original count is how this
+            # loop used to overshoot the target (observed: 107 for a target of
+            # 105, which then failed the stage's own height assertion).
+            refusals=$(( refusals + 1 ))
+            [ "$refusals" -lt 15 ] || sp_fail "$stage" "mint refused persisted across $refusals retries (a fresh self-mined node must read sovereign): $(printf '%s' "$out" | head -c 200)"
+            sleep 2
+            h="$(sp_blockcount)"
+            [ -n "$h" ] || sp_fail "$stage" "getblockcount silent after a refused mint (target $target)"
+            continue
         fi
+        refusals=0
         h2="$(sp_blockcount)"
         if [ -z "$h2" ]; then
             sp_fail "$stage" "getblockcount silent mid-mining at height $h (target $target)"
@@ -442,6 +448,12 @@ sp_mine_to() {
         stall=0
         h="$h2"
     done
+    # One batch the node finished AFTER the client's 30 s curl deadline can
+    # land blocks this loop never saw it start, so the tip is allowed to sit a
+    # little past the target — but only by one batch. More than that is a
+    # runaway miner, not a slow reply, and the stage says so.
+    [ "$h" -ge "$target" ] || sp_fail "$stage" "chain height $h is below the mining target $target"
+    [ "$h" -le "$(( target + 20 ))" ] || sp_fail "$stage" "chain height $h overshot the mining target $target by more than one batch"
 }
 
 # ── Stage 2: FUND ──────────────────────────────────────────────────
@@ -458,7 +470,13 @@ done
 [ -n "$TADDR" ] || sp_fail FUND "getnewaddress returned nothing after 20 tries"
 sp_mine_to "$MATURE_BLOCKS" FUND
 HEIGHT="$(sp_blockcount)"
-[ "$HEIGHT" = "$MATURE_BLOCKS" ] || sp_fail FUND "height is ${HEIGHT:-?}, expected $MATURE_BLOCKS"
+# sp_mine_to already bounded the tip to [target, target+one batch]; what this
+# stage needs from the number is the maturity property: at least MATURE_BLOCKS,
+# so the first MATURE_BLOCKS-100 coinbases are spendable.
+case "$HEIGHT" in
+    ''|*[!0-9]*) sp_fail FUND "getblockcount answered '${HEIGHT:-?}' after mining" ;;
+esac
+[ "$HEIGHT" -ge "$MATURE_BLOCKS" ] || sp_fail FUND "height is $HEIGHT, expected at least $MATURE_BLOCKS"
 # Seed + persist the merchant Sapling keystore: the shielded order mint
 # (zslp_generate_payment_address) refuses an unseeded keystore, so the
 # seller's node must hold at least one z-address before any order.
@@ -489,11 +507,16 @@ SP_PID="$(sp_spawn_node "$SP_DD" "$SP_PORT" "$SP_RPC" "$SP_FS" "$SP_HTTPS" "127.
 SP_PGID="$SP_PID"
 sp_wait_rpc "$SP_DD" "$SP_RPC" "$SP_PID" SETTLE
 HEIGHT_AFTER_RESTART="$(sp_blockcount)"
-[ "$HEIGHT_AFTER_RESTART" = "$MATURE_BLOCKS" ] || sp_fail SETTLE "height is ${HEIGHT_AFTER_RESTART:-?} after the restart, expected $MATURE_BLOCKS — the funding chain did not survive"
+case "$HEIGHT_AFTER_RESTART" in
+    ''|*[!0-9]*) sp_fail SETTLE "getblockcount answered '${HEIGHT_AFTER_RESTART:-?}' after the restart" ;;
+esac
+# A restart may not lose a single mined block: the funding chain is what every
+# later stage spends.
+[ "$HEIGHT_AFTER_RESTART" -ge "$HEIGHT" ] || sp_fail SETTLE "height fell from $HEIGHT to $HEIGHT_AFTER_RESTART across the restart — the funding chain did not survive"
 sp_wait_connected SETTLE
 sp_wait_sync_live SETTLE
-sp_wait_fold SETTLE "$MATURE_BLOCKS"
-sp_log "       restarted at height $HEIGHT_AFTER_RESTART, peer linked, sync=$(sp_sync_state), coins+H* folded to $MATURE_BLOCKS"
+sp_wait_fold SETTLE "$HEIGHT_AFTER_RESTART"
+sp_log "       restarted at height $HEIGHT_AFTER_RESTART, peer linked, sync=$(sp_sync_state), coins+H* folded to $HEIGHT_AFTER_RESTART"
 
 # ── Stage 2b: CUSTODY (encrypted at rest, unlocked, currently backed up) ──
 # The ZSLP intent plan leg reserves real custody, so it refuses anything less
@@ -510,8 +533,27 @@ if ! str_contains "$SEC_STATUS" '"unlocked":true'; then
     UNLOCK_OUT="$(sp_cli_input "{\"passphrase\":\"$SP_WALLET_PASS\",\"timeout_seconds\":3600}" core wallet security unlock)"
     str_contains "$UNLOCK_OUT" '"unlocked":true' || sp_fail CUSTODY "wallet unlock refused: $UNLOCK_OUT"
 fi
-BACKUP_OUT="$(sp_cli_input "{\"confirm\":true,\"password\":\"$SP_BACKUP_PASS\"}" core wallet backup now)"
-str_contains "$BACKUP_OUT" '"ok":true' || sp_fail CUSTODY "wallet backup refused: $BACKUP_OUT"
+# core.wallet.backup.now is contract-idempotent and runs synchronously inside
+# the node, but the native CLI gives up on its own reply deadline (~10 s) while
+# a node that is still folding blocks can take longer to copy and verify every
+# wallet table. The verdict is therefore the END STATE the ZSLP plan leg
+# actually reads — core.wallet.backup.status reporting an encrypted backup —
+# never the exit status of one call: a call whose write did land is accepted on
+# the next status read, a call whose write did not land is retried, and a
+# backup that never lands fails this stage by name instead of surfacing later
+# as a confusing ENCRYPTED_BACKUP_REQUIRED refusal from the token genesis.
+BACKUP_OUT=""
+BACKUP_STATUS=""
+backup_ready=no
+for _ in 1 2 3; do
+    BACKUP_OUT="$(sp_cli_input "{\"confirm\":true,\"password\":\"$SP_BACKUP_PASS\"}" core wallet backup now)"
+    BACKUP_STATUS="$(sp_cli core wallet backup status)"
+    if str_contains "$BACKUP_STATUS" '"encrypted_backup_available":true'; then
+        backup_ready=yes
+        break
+    fi
+done
+[ "$backup_ready" = "yes" ] || sp_fail CUSTODY "no encrypted wallet backup exists after 3 attempts; last reply: $BACKUP_OUT; status: $BACKUP_STATUS"
 sp_log "       wallet encrypted at rest, unlocked, current-key encrypted backup taken"
 
 # ── Stage 3: TOKEN_GENESIS (real ZSLP GENESIS on-chain) ────────────
@@ -546,7 +588,7 @@ esac
 case "$TOKEN_ID" in
     *[!0-9a-fA-F]*) sp_fail TOKEN_GENESIS "token_id '$TOKEN_ID' is not hex: $TOKEN_OUT" ;;
 esac
-sp_mine_to "$((MATURE_BLOCKS + TOKEN_CONFS))" TOKEN_GENESIS
+sp_mine_to "$((HEIGHT_AFTER_RESTART + TOKEN_CONFS))" TOKEN_GENESIS
 TOK_LIST="$(sp_cli app tokens list)"
 # The two ZSLP surfaces print this one identity in MIRRORED strings, so the
 # membership check compares the 32 bytes, never the text:
@@ -660,9 +702,16 @@ sp_log "       broadcast txid=$OPID (wallet-recorded, unconfirmed)"
 
 # ── Stage 8: CONFIRM ───────────────────────────────────────────────
 sp_log "[8/11] CONFIRM: mining $CONFIRM_BLOCKS blocks to bury the payment ≥3 deep..."
-sp_mine_to "$((MATURE_BLOCKS + TOKEN_CONFS + CONFIRM_BLOCKS))" CONFIRM
+HEIGHT_AT_PAY="$(sp_blockcount)"
+case "$HEIGHT_AT_PAY" in
+    ''|*[!0-9]*) sp_fail CONFIRM "getblockcount answered '${HEIGHT_AT_PAY:-?}' before burying the payment" ;;
+esac
+sp_mine_to "$((HEIGHT_AT_PAY + CONFIRM_BLOCKS))" CONFIRM
 HEIGHT2="$(sp_blockcount)"
-[ "$HEIGHT2" = "$((MATURE_BLOCKS + TOKEN_CONFS + CONFIRM_BLOCKS))" ] || sp_fail CONFIRM "height is ${HEIGHT2:-?}, expected $((MATURE_BLOCKS + TOKEN_CONFS + CONFIRM_BLOCKS))"
+# The burial DEPTH is the property, and it is measured directly below from the
+# payment tx's own confirmations; the height only has to have advanced by the
+# blocks this stage asked for.
+[ "$HEIGHT2" -ge "$((HEIGHT_AT_PAY + CONFIRM_BLOCKS))" ] || sp_fail CONFIRM "height is ${HEIGHT2:-?}, expected at least $((HEIGHT_AT_PAY + CONFIRM_BLOCKS))"
 # The payment must now be mined and buried ≥3 deep (the merchant reconcile
 # credits at height ≤ tip−3). gettransaction confirmations is the exact
 # measurement; the old getrawmempool inverse-check has no RPC surface here.
