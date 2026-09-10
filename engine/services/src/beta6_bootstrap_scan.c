@@ -16,6 +16,7 @@
 #include "services/beta6_bootstrap.h"
 
 #include "crypto/sha256.h"
+#include "base/safe_alloc.h"
 #include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
 
@@ -80,7 +81,8 @@ static bool scan_reserve(struct beta6_scan *scan)
         scan_fail(scan, "beta6 bootstrap source holds too many files: %s", scan->root);
         return false;
     }
-    struct beta6_bs_file *grown = realloc(scan->files, next * sizeof(*grown));
+    struct beta6_bs_file *grown =
+        zcl_realloc(scan->files, next * sizeof(*grown), "beta6 bootstrap file list");
     if (!grown) {
         scan_fail(scan, "out of memory scanning beta6 bootstrap source: %s", scan->root);
         return false;
@@ -216,7 +218,7 @@ bool beta6_bs_collect_files(const char *source_dir, struct beta6_bs_manifest *ma
     }
 
     struct beta6_scan scan = { .root = source_dir, .err = err, .err_size = err_size };
-    scan.buffer = malloc(BETA6_HASH_BUFFER_BYTES);
+    scan.buffer = zcl_malloc(BETA6_HASH_BUFFER_BYTES, "beta6 bootstrap hash buffer");
     if (!scan.buffer) {
         scan_fail(&scan, "out of memory scanning beta6 bootstrap source: %s", source_dir);
         return false;

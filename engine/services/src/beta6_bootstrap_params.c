@@ -14,6 +14,7 @@
  */
 #include "services/beta6_bootstrap.h"
 
+#include "base/safe_alloc.h"
 #include "platform/positioned_file.h"
 
 #include <stdio.h>
@@ -84,7 +85,8 @@ bool beta6_bs_param_manifest(const char *params_dir, const char *network,
     snprintf(manifest->network, sizeof(manifest->network), "%s", network);
     manifest->chunk_size = BETA6_BS_CHUNK_SIZE;
 
-    struct beta6_bs_file *files = calloc(BETA6_PARAM_COUNT, sizeof(*files));
+    struct beta6_bs_file *files =
+        zcl_calloc(BETA6_PARAM_COUNT, sizeof(*files), "beta6 zcash param manifest");
     if (!files) {
         set_msg(err, err_size, "out of memory building the beta6 zcash param manifest");
         return false;

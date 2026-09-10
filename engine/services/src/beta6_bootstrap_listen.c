@@ -18,13 +18,26 @@
  *
  * Everything served comes from the already-armed, already-hashed manifest; the
  * source tree is opened read-only and this module never writes to it.
+ *
+ * // supervisor-ok:owned-optout-listener — this service owns its own lifecycle
+ * and there is nothing for a supervisor to restart: it exists only while an
+ * operator has named BOTH a snapshot directory and a listen address, it holds
+ * no state a stall could corrupt (every reply is a bounded read of an
+ * immutable, already-hashed manifest), and beta6_bs_listen_stop() shuts down
+ * the accept socket and every session socket and then joins all of those
+ * threads. A dead listener degrades exactly to the pre-existing behaviour —
+ * beta6 clients fall back to ordinary P2P sync — so restarting it blindly
+ * would be less honest than leaving it stopped and reporting it stopped
+ * through `beta6_snapshot_bootstrap.serving`.
  */
 #include "services/beta6_bootstrap.h"
 
 #include "core/hash.h"
 #include "platform/socket_compat.h"
+#include "base/safe_alloc.h"
 #include "base/log_macros.h"
 #include "util/sync.h"
+#include "util/thread_registry.h"
 
 #include <pthread.h>
 #include <time.h>
@@ -63,12 +76,26 @@ struct beta6_session {
     struct beta6_listener *listener;
     char peer_ip[64];
     char quota_key[80];
+    int slot;
+};
+
+/* One row per live session, and the thread is JOINABLE rather than detached.
+ * A detached download thread would still be reading g_listener.manifest_bytes
+ * after beta6_bs_listen_stop() freed it, so shutdown shuts each session socket
+ * down and joins its thread before releasing anything it can reach. A finished
+ * row stays occupied until something joins it: the next accept reaps them
+ * lazily, and stop() reaps whatever is left. */
+struct beta6_session_slot {
+    bool used;
+    bool finished;
+    platform_socket_t socket;
+    pthread_t tid;
 };
 
 static struct beta6_listener g_listener;
 static zcl_mutex_t g_session_lock;
 static bool g_session_lock_ready;
-static int g_session_count;
+static struct beta6_session_slot g_sessions[BETA6_MAX_SESSIONS];
 
 static void session_lock_init_once(void)
 {
@@ -138,7 +165,7 @@ static bool receive_message(platform_socket_t socket, const unsigned char magic[
 
     unsigned char *body = NULL;
     if (size > 0) {
-        body = malloc(size);
+        body = zcl_malloc(size, "beta6 bootstrap message body");
         if (!body)
             return false;
         if (!receive_exact(socket, body, size)) {
@@ -257,7 +284,7 @@ static bool serve_chunk(struct beta6_session *session, const unsigned char *payl
         return send_message(session, "reject", NULL, 0);
     }
 
-    unsigned char *data = malloc(request.length);
+    unsigned char *data = zcl_malloc(request.length, "beta6 bootstrap chunk");
     if (!data)
         return false;
     char err[256] = { 0 };
@@ -321,10 +348,15 @@ static void *session_thread(void *opaque)
             break;
     }
 
-    platform_socket_shutdown_both(session->socket);
-    platform_socket_close(session->socket);
+    /* Retire the socket under the lock and publish `finished` last, so a
+     * concurrent stop() either sees a live socket it may shut down or a
+     * finished row it may only join — never a descriptor number this thread
+     * has already closed. */
     LOCK(g_session_lock);
-    g_session_count--;
+    platform_socket_shutdown_both(g_sessions[session->slot].socket);
+    platform_socket_close(g_sessions[session->slot].socket);
+    g_sessions[session->slot].socket = PLATFORM_SOCKET_INVALID;
+    g_sessions[session->slot].finished = true;
     UNLOCK(g_session_lock);
     free(session);
     return NULL;
@@ -332,38 +364,69 @@ static void *session_thread(void *opaque)
 
 /* ── accept loop ─────────────────────────────────────────────────────── */
 
-static bool session_slot_take(void)
+/* Join and free every row whose thread has already returned. Caller holds the
+ * session lock; the join is done outside it because a finished thread cannot
+ * need the lock again. */
+static void sessions_reap_finished_locked(void)
+{
+    for (int i = 0; i < BETA6_MAX_SESSIONS; i++) {
+        if (!g_sessions[i].used || !g_sessions[i].finished)
+            continue;
+        pthread_t tid = g_sessions[i].tid;
+        UNLOCK(g_session_lock);
+        pthread_join(tid, NULL);
+        LOCK(g_session_lock);
+        g_sessions[i].used = false;
+        g_sessions[i].finished = false;
+    }
+}
+
+/* Reserve a session row, reaping finished ones first. Returns its index, or
+ * -1 when BETA6_MAX_SESSIONS clients are already being served. */
+static int session_slot_take(platform_socket_t socket)
 {
     session_lock_init_once();
     LOCK(g_session_lock);
-    bool taken = g_session_count < BETA6_MAX_SESSIONS;
-    if (taken)
-        g_session_count++;
+    sessions_reap_finished_locked();
+    int slot = -1;
+    for (int i = 0; i < BETA6_MAX_SESSIONS && slot < 0; i++) {
+        if (!g_sessions[i].used)
+            slot = i;
+    }
+    if (slot >= 0) {
+        g_sessions[slot].used = true;
+        g_sessions[slot].finished = false;
+        g_sessions[slot].socket = socket;
+    }
     UNLOCK(g_session_lock);
-    return taken;
+    return slot;
 }
 
-static void session_slot_release(void)
+/* Give a reserved row back without a thread ever having run in it. */
+static void session_slot_abandon(int slot)
 {
     LOCK(g_session_lock);
-    g_session_count--;
+    g_sessions[slot].used = false;
+    g_sessions[slot].socket = PLATFORM_SOCKET_INVALID;
     UNLOCK(g_session_lock);
 }
 
 static void spawn_session(platform_socket_t accepted, const struct sockaddr_in *from)
 {
-    if (!session_slot_take()) {
+    int slot = session_slot_take(accepted);
+    if (slot < 0) {
         platform_socket_close(accepted);
         return;
     }
-    struct beta6_session *session = calloc(1, sizeof(*session));
+    struct beta6_session *session = zcl_calloc(1, sizeof(*session), "beta6 bootstrap session");
     if (!session) {
-        session_slot_release();
+        session_slot_abandon(slot);
         platform_socket_close(accepted);
         return;
     }
     session->socket = accepted;
     session->listener = &g_listener;
+    session->slot = slot;
     if (!platform_socket_format_address(AF_INET, &from->sin_addr, session->peer_ip,
                                         sizeof(session->peer_ip)))
         snprintf(session->peer_ip, sizeof(session->peer_ip), "unknown");
@@ -371,14 +434,35 @@ static void spawn_session(platform_socket_t accepted, const struct sockaddr_in *
                             sizeof(session->quota_key)))
         snprintf(session->quota_key, sizeof(session->quota_key), "unknown");
 
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, session_thread, session) != 0) {
-        session_slot_release();
+    if (thread_registry_spawn("beta6-bs-session", session_thread, session,
+                              &g_sessions[slot].tid) != 0) {
+        session_slot_abandon(slot);
         platform_socket_close(accepted);
         free(session);
-        return;
     }
-    pthread_detach(thread);
+}
+
+/* Shut every live session socket down, then join every session thread. Called
+ * only after the accept thread has stopped, so no new row can appear. */
+static void sessions_stop_all(void)
+{
+    LOCK(g_session_lock);
+    for (int i = 0; i < BETA6_MAX_SESSIONS; i++) {
+        if (g_sessions[i].used && !g_sessions[i].finished &&
+            g_sessions[i].socket != PLATFORM_SOCKET_INVALID)
+            platform_socket_shutdown_both(g_sessions[i].socket);
+    }
+    for (int i = 0; i < BETA6_MAX_SESSIONS; i++) {
+        if (!g_sessions[i].used)
+            continue;
+        pthread_t tid = g_sessions[i].tid;
+        UNLOCK(g_session_lock);
+        pthread_join(tid, NULL);
+        LOCK(g_session_lock);
+        g_sessions[i].used = false;
+        g_sessions[i].finished = false;
+    }
+    UNLOCK(g_session_lock);
 }
 
 static void *accept_thread(void *opaque)
@@ -417,7 +501,7 @@ static bool encode_cached_manifest(char *err, size_t err_size)
                  "the beta6 bootstrap manifest does not fit in one P2P message");
         return false;
     }
-    g_listener.manifest_bytes = malloc(out.size);
+    g_listener.manifest_bytes = zcl_malloc(out.size, "beta6 bootstrap manifest");
     if (!g_listener.manifest_bytes) {
         stream_free(&out);
         snprintf(err, err_size, "out of memory encoding the beta6 bootstrap manifest");
@@ -490,7 +574,8 @@ bool beta6_bs_listen_start(const char *bind_ip, uint16_t port, const unsigned ch
 
     session_lock_init_once();
     g_listener.running = true;
-    if (pthread_create(&g_listener.thread, NULL, accept_thread, NULL) != 0) {
+    if (thread_registry_spawn("beta6-bs-accept", accept_thread, NULL,
+                              &g_listener.thread) != 0) {
         g_listener.running = false;
         platform_socket_close(g_listener.socket);
         free(g_listener.manifest_bytes);
@@ -511,6 +596,7 @@ void beta6_bs_listen_stop(void)
     platform_socket_shutdown_both(g_listener.socket);
     platform_socket_close(g_listener.socket);
     pthread_join(g_listener.thread, NULL);
+    sessions_stop_all();
     free(g_listener.manifest_bytes);
     g_listener.manifest_bytes = NULL;
     g_listener.running = false;

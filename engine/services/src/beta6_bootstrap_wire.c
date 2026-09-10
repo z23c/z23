@@ -14,6 +14,7 @@
  * uint256_set_hex serializes exactly as the C++ one does.
  */
 #include "services/beta6_bootstrap.h"
+#include "base/safe_alloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -151,7 +152,8 @@ bool beta6_bs_manifest_decode(struct byte_stream *in, struct beta6_bs_manifest *
     if (!stream_read_compact_size(in, &count) || count > BETA6_BS_MAX_FILES)
         return false;
     if (count > 0) {
-        out->files = calloc((size_t)count, sizeof(*out->files));
+        out->files = zcl_calloc((size_t)count, sizeof(*out->files),
+                                "beta6 bootstrap manifest files");
         if (!out->files)
             return false;
     }
