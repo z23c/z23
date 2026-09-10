@@ -74,10 +74,15 @@ SYNC_DEADLINE="${SYNC_DEADLINE:-120}"   # step 2 budget (s)
 RESYNC_DEADLINE="${RESYNC_DEADLINE:-120}" # step 3 re-sync budget (s)
 RPC_WARMUP="${RPC_WARMUP:-60}"       # per-node RPC warmup budget (s)
 
-# Two disjoint 39xxx quads (A: 39070.., B: 39080..). 39999 is the dead
-# sink that keeps A off the live network while still listening for B.
-A_PORT=39070; A_RPC=39071; A_FS=39072; A_HTTPS=39073
-B_PORT=39080; B_RPC=39081; B_FS=39082; B_HTTPS=39083
+# Two disjoint 39xxx quads (A: 39090.., B: 39080..), each env-overridable by
+# its base. 39070.. is NOT free on an operator host: the dedicated
+# zcl-stopwatch-peer fixture (platform/deploy/examples, the C3 stopwatch peer)
+# keeps listening there between runs, and this harness refuses any quad that is
+# already bound instead of guessing. 39999 is the dead sink that keeps A off the
+# live network while still listening for B.
+A_BASE="${ZCL_2NODE_A_BASE:-39090}"; B_BASE="${ZCL_2NODE_B_BASE:-39080}"
+A_PORT=$A_BASE; A_RPC=$((A_BASE + 1)); A_FS=$((A_BASE + 2)); A_HTTPS=$((A_BASE + 3))
+B_PORT=$B_BASE; B_RPC=$((B_BASE + 1)); B_FS=$((B_BASE + 2)); B_HTTPS=$((B_BASE + 3))
 DEAD_SINK=39999
 
 # ── State ──────────────────────────────────────────────────────────

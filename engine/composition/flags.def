@@ -52,6 +52,10 @@
  * (shrink-only registry).
  */
 
+Z23_FLAG("ZCL_2NODE_A_BASE", "env_build", "39090", "-",
+          "node A port quad base (p2p, rpc, fs, https) for make test-two-node-peer-tip; 39070 stays reserved for the stopwatch peer fixture; first use tools/scripts/two_node_peer_tip.sh:83")
+Z23_FLAG("ZCL_2NODE_B_BASE", "env_build", "39080", "-",
+          "node B port quad base (p2p, rpc, fs, https) for make test-two-node-peer-tip; first use tools/scripts/two_node_peer_tip.sh:83")
 Z23_FLAG("ZCL_ACME_LIVE_AGREE_TOS", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_acme_worker.c:209")
 Z23_FLAG("ZCL_ACME_LIVE_DOMAIN", "env_test", "-", "-",
@@ -1569,7 +1573,7 @@ Z23_FLAG("ZCL_PEERLESS_OK", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_PEER_SCORE_DECAY_PER_MIN", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_peer_scoring.c:851")
 Z23_FLAG("ZCL_PEER_TIP_TMP", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/two_node_peer_tip.sh:281")
+          "undocumented; first use tools/scripts/two_node_peer_tip.sh:286")
 Z23_FLAG("ZCL_PERF_REPORT_UNDER_TEST", "env_build", "-", "-",
           "undocumented; first use tools/dev/zcode_async_proof_perf_report_selftest.sh:6")
 Z23_FLAG("ZCL_PERSONA_DEF", "env_build", "-", "-",
