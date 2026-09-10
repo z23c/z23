@@ -3035,7 +3035,7 @@ tests/harness/src/test_debug_bundle.c:test_debug_bundle:26
 tests/harness/src/test_dev_fleet_start.c:fsx_repo_fixture:16
 tests/harness/src/test_dev_fleet_start.c:test_dev_fleet_start:44
 tests/harness/src/test_dev_land.c:dlx_regen_conflict:21
-tests/harness/src/test_dev_land.c:test_dev_land:223
+tests/harness/src/test_dev_land.c:test_dev_land:233
 tests/harness/src/test_dev_platform.c:dp_hotswap_cache_fixture_init:17
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:60

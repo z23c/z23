@@ -691,7 +691,17 @@ static bool resident_armed(const char *root)
  * only forks the watcher where <root>/.cache/zcl-dev-watch.lock already
  * exists, i.e. where a developer previously started one on purpose; a
  * worktree that never ran `dev loop ensure` / `dev proof ensure` stays
- * quiet forever. */
+ * quiet forever.
+ *
+ * The landing worktree is the one armed worktree whose HEAD moves on
+ * purpose without anyone wanting the move scheduled: `dev land step`
+ * checks the request tip out, rebases it, and only then asks for the exact
+ * rebased pair itself. A post-checkout fork in that window enqueues a
+ * proof for a commit the very next second replaces (observed 2026-09-10:
+ * a doomed b42b8ee4/0cb9e7937 request claimed a worker slot and settled
+ * as head_changed_during_proof). The landing step therefore sets
+ * ZCL_LAND_HOOK_QUIET around its own git activity; a developer's checkout
+ * never sets it, so their hooks keep scheduling exactly as before. */
 static int notify_proof(void)
 {
 #if defined(_WIN32)
@@ -703,6 +713,7 @@ static int notify_proof(void)
     return 0;
 #else
     char root[PATH_MAX], binary[PATH_MAX];
+    if (getenv("ZCL_LAND_HOOK_QUIET")) return 0;
     if (!repo_root(root)) return 0;
     if (!resident_armed(root)) return 0;
     int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev", root);

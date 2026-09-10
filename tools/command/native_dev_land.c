@@ -4215,6 +4215,13 @@ static void dl_step(const struct zcl_command_request *req,
      * proof request, status read, push) — never just the request. Released
      * on every exit path via dl_unlock(), including every early return
      * this function takes. */
+    /* Every git checkout and rebase below fires the landing worktree's
+     * armed post-* hooks. Their proof scheduling is for developer
+     * checkouts whose HEAD is a person's commit; this step's transient
+     * HEAD would enqueue doomed pairs (see notify_proof's comment), so
+     * this one-shot process quiets them for its whole lifetime. The env
+     * dies with the process; a developer's own hooks are unaffected. */
+    (void)setenv("ZCL_LAND_HOOK_QUIET", "1", 1);
     slot = dl_step_lock(d.land);
     if (slot < 0) {
         dl_step_busy(reply, d.land);

@@ -3889,6 +3889,72 @@ int test_dev_land(void)
         PASS();
     }
 
+    TEST("land: a step quiets the armed hooks' proof scheduling for its "
+        "own transient checkouts, so a rebase's throwaway HEAD can never "
+        "enqueue a doomed proof pair") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char hooks[1200], markdir[1400], marker[1440], script[1500];
+        char body[64] = {0}, tip2[64];
+        bool fired = false;
+        dlx_isolate("hookquiet");
+        ASSERT(dlx_rig_make(&rig, "hookquiet_rig"));
+        /* A post-checkout hook that records the guard env it inherited.
+         * dl_tip_checkout fires it on every step that starts a row, which
+         * is exactly the window the guard exists for. */
+        test_make_tmpdir(markdir, sizeof(markdir), "dev_land", "hookmark");
+        (void)snprintf(marker, sizeof(marker), "%s/marker", markdir);
+        (void)snprintf(hooks, sizeof(hooks), "%s/post-checkout",
+                       g_dlx_hooks_ok);
+        (void)snprintf(script, sizeof(script),
+                       "#!/bin/sh\nprintf '%%s' \"${ZCL_LAND_HOOK_QUIET:-"
+                       "unset}\" > '%s'\n", marker);
+        ASSERT(dlx_write(hooks, script));
+        ASSERT(chmod(hooks, 0755) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        /* Row 2 drives another tip checkout through the armed hook. */
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        ASSERT(dlx_commit(rig.clone, "two.txt", "two\n", tip2));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, tip2);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        /* The hook ran during the step and saw the guard set to exactly
+         * "1". An absent marker means the hook never fired and this case
+         * proved nothing; "unset" means the step leaked its transient
+         * checkouts to the proof scheduler. */
+        for (int i = 0; i < 40 && !fired; i++) {
+            fired = dlx_slurp(marker, body, sizeof(body), NULL);
+            if (!fired)
+                platform_sleep_ms(50);
+        }
+        ASSERT(fired);
+        ASSERT(strcmp(body, "1") == 0);
+        dlx_restore();
+        PASS();
+    }
+
     TEST("land: an uninitialised vendor/tor in the SUBMITTING checkout "
         "refuses by name and by fix, never as a phantom pin mismatch") {
         struct dlx_rig rig;
