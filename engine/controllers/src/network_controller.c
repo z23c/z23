@@ -22,6 +22,7 @@
 #include "net/protocol.h"
 #include "net/tor_integration.h"
 #include "net/version.h"
+#include "services/beta6_bootstrap.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -349,10 +350,10 @@ static bool rpc_getnetworkinfo(const struct json_value *params, bool help,
  * offered one (how many peers are advertising state to us, and how new).
  *
  * Deliberately separate from `beta6_snapshot_bootstrap`: NODE_BOOTSTRAP is
- * zclassicd beta6's service bit and z23 does not implement that wire, so
- * `beta6_NODE_BOOTSTRAP_not_advertised` stays true and honest. The z23 state
- * source is advertised by the zfileaddr message instead, because a service bit
- * carries no file-service port (net/protocol.h). */
+ * zclassicd beta6's service bit, advertised only by the opt-in beta6
+ * snapshot listener, and it carries no port a stranger could dial for z23
+ * state. The z23 state source is advertised by the zfileaddr message instead,
+ * because a service bit carries no file-service port (net/protocol.h). */
 static void network_push_state_source(struct json_value *result)
 {
     struct state_offer_store_status st;
@@ -371,6 +372,25 @@ static void network_push_state_source(struct json_value *result)
                      (int64_t)st.newest_height_seen);
     json_push_kv(result, "state_source", &src);
     json_free(&src);
+}
+
+/* What this node would actually hand a beta6 client: which directory is armed
+ * and what the cached manifest says it covers. Present (with an empty source
+ * and -1 height) even when dormant, so an operator can tell "not configured"
+ * from "configured and empty" without a second call. */
+static void network_push_beta6_source(struct json_value *beta6)
+{
+    const struct beta6_bs_manifest *manifest = beta6_bs_manifest();
+    json_push_kv_str(beta6, "source_dir", beta6_bs_source_dir());
+    json_push_kv_int(beta6, "listen_port", (int64_t)beta6_bs_listen_port());
+    json_push_kv_int(beta6, "manifest_version",
+                     manifest ? (int64_t)manifest->version : 0);
+    json_push_kv_int(beta6, "manifest_height",
+                     manifest ? (int64_t)manifest->height : -1);
+    json_push_kv_int(beta6, "manifest_files",
+                     manifest ? (int64_t)manifest->file_count : 0);
+    json_push_kv_int(beta6, "manifest_bytes",
+                     manifest ? (int64_t)manifest->snapshot_bytes : 0);
 }
 
 static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
@@ -395,7 +415,14 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     bool has_connman = ctx->connman != NULL;
     bool node_network = (counts.local_services & NODE_NETWORK) != 0;
     bool node_zcl23 = (counts.local_services & NODE_ZCL23) != 0;
-    bool node_bootstrap = (counts.local_services & NODE_BOOTSTRAP) != 0;
+    /* The beta6 snapshot service runs on its own listener (see
+     * engine/services/src/beta6_bootstrap_listen.c), and the version message
+     * that listener sends is where NODE_BOOTSTRAP is actually advertised — so
+     * a running listener IS this node advertising the bit to beta6 clients,
+     * whether or not the ordinary P2P connman also carries it. */
+    bool beta6_listening = beta6_bs_listen_running();
+    bool node_bootstrap =
+        (counts.local_services & NODE_BOOTSTRAP) != 0 || beta6_listening;
     bool protocol_ok = PROTOCOL_VERSION >= MIN_PEER_PROTO_VERSION;
     bool listening = counts.listen_socket_count > 0;
     bool has_tip = advertised_height > 0;
@@ -407,7 +434,10 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
         agent_security_posture_allows_public_serving(&security_posture);
     bool p2p_serving = transport_ready && security_posture_ok;
     bool addr_relay_ready = counts.addrman_entries > 0;
-    bool beta6_fast = p2p_serving && node_bootstrap;
+    /* The beta6 wire is served by its own listener and does not depend on the
+     * ordinary P2P transport being at tip; it does still respect the security
+     * posture, which is what gates public serving. */
+    bool beta6_fast = beta6_listening && security_posture_ok;
     bool zcl23_fast = p2p_serving && node_zcl23;
 
     json_set_object(result);
@@ -561,11 +591,14 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
                      NODE_BOOTSTRAP);
     json_push_kv_bool(&beta6, "advertised", node_bootstrap);
     json_push_kv_bool(&beta6, "serving", beta6_fast);
-    json_push_kv_int(&beta6, "chunk_size_bytes", 1024 * 1024);
+    json_push_kv_int(&beta6, "chunk_size_bytes", BETA6_BS_CHUNK_SIZE);
+    network_push_beta6_source(&beta6);
     json_push_kv_str(&beta6, "current_blocker",
+                     beta6_fast ? "" :
                      !security_posture_ok ? security_posture.status :
-                     node_bootstrap ? "" :
-                     "NODE_BOOTSTRAP service not implemented in zclassic23");
+                     !beta6_bs_is_armed()
+                         ? "beta6_bootstrap_source_not_configured" :
+                     "beta6_bootstrap_listen_not_configured");
     json_push_str_array(&beta6, "messages", beta6_msgs,
                         sizeof(beta6_msgs) / sizeof(beta6_msgs[0]));
     json_push_kv(result, "beta6_snapshot_bootstrap", &beta6);

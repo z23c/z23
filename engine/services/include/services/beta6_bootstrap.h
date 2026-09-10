@@ -173,6 +173,15 @@ bool beta6_bs_validate_chunk_range(uint64_t offset, uint64_t length, uint64_t fi
 bool beta6_bs_read_chunk(const struct beta6_bs_chunk_request *request, unsigned char *out,
                          size_t out_capacity, char *err, size_t err_size);
 
+/* The bounded read both serve paths share: validate the range, open the file
+ * beneath `root` without following a link, prove its size and mtime still
+ * match `file`, then one positioned read of exactly request->length bytes.
+ * `label` names the service in a refusal ("bootstrap" / "zcash param"). */
+bool beta6_bs_read_file_chunk(const char *root, const struct beta6_bs_file *file,
+                              const struct beta6_bs_chunk_request *request,
+                              const char *label, unsigned char *out, size_t out_capacity,
+                              char *err, size_t err_size);
+
 /* ── Zcash parameter files ───────────────────────────────────────────── */
 
 /* Build the manifest of zk-SNARK parameter files held in `params_dir` whose
@@ -218,10 +227,12 @@ void beta6_bs_quota_configure(int64_t max_bytes_per_day, int64_t throttle_kbps);
 
 /* ── Listener ────────────────────────────────────────────────────────── */
 
-/* Start the dedicated beta6 bootstrap listener on 127.0.0.1-or-any:`port`,
- * serving the already-armed snapshot plus `params_dir`. Returns false with a
+/* Start the beta6 bootstrap listener on `bind_ip`:`port`, framing messages
+ * with the active network's 4-byte `magic` and serving the already-armed
+ * snapshot plus the zk-SNARK parameters in `params_dir`. Returns false with a
  * named reason when the service is not armed or the socket cannot be bound. */
-bool beta6_bs_listen_start(uint16_t port, const char *params_dir, char *err,
+bool beta6_bs_listen_start(const char *bind_ip, uint16_t port, const unsigned char magic[4],
+                           const char *network, const char *params_dir, char *err,
                            size_t err_size);
 void beta6_bs_listen_stop(void);
 bool beta6_bs_listen_running(void);

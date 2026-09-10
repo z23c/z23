@@ -734,6 +734,7 @@ bool boot_register_frontend_services(struct boot_svc_ctx *svc)
             .ctx = svc,
             .flags = ZCL_SERVICE_OPTIONAL,
         },
+        boot_beta6_bootstrap_spec(svc),
     };
 
     for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {

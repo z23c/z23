@@ -333,6 +333,13 @@ bool boot_profile_has_onion(const struct app_context *ctx);
  * isolation. Its start hook clears RPC warmup; its stop hook re-arms it. */
 struct zcl_service_spec boot_frontend_rpc_http_spec(struct boot_svc_ctx *svc);
 
+/* The optional zclassicd v2.1.2-beta6 bootstrap snapshot server
+ * (engine/composition/src/boot_beta6_bootstrap.c). Its start hook is a no-op
+ * unless -beta6-bootstrap-source names a serve directory that passes the beta6
+ * preflight, so a node that has not opted in advertises nothing new and
+ * answers none of the beta6 messages. */
+struct zcl_service_spec boot_beta6_bootstrap_spec(struct boot_svc_ctx *svc);
+
 /* The node.db-writing store payment worker spec. Runtime registration starts
  * it only after running=true and reverse-order runtime shutdown joins it before
  * the DB/WAL/state durability boundary. */

@@ -202,6 +202,7 @@ void apply_argv_loglevel(void)
  * grepping `Get(Bool)?Arg\("-[a-zA-Z0-9_-]+"` across the tree and excluding
  * test-only fixture keys (test_encoding.c's "-foo"/"-noexist"/"-debug"). */
 static const char *const k_extra_getarg_flags[] = {
+    "-beta6-bootstrap-source", "-beta6-bootstrap-listen",
     "-pin-reducer", "-nopin-reducer",
     "-rombundlereplicadir",
     "-romseed", "-noromseed",
