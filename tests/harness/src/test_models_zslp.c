@@ -64,7 +64,6 @@ static bool tzslp_seed_strict_rows(struct node_db *ndb,
  * back as a lookup key. Returns NULL on success, else what diverged. */
 static const char *tzslp_check_display_identity(struct node_db *ndb,
                                                 const uint8_t token[32],
-                                                const uint8_t txid[32],
                                                 const char *want,
                                                 const char *want_txid)
 {
@@ -95,7 +94,6 @@ static const char *tzslp_check_display_identity(struct node_db *ndb,
         return "a transfer row renders a different id than create answered";
     if (strcmp(xfers[0].txid, want_txid) != 0)
         return "a transfer row renders its txid in the wrong byte order";
-    (void)txid;
     return NULL;
 }
 
@@ -119,6 +117,65 @@ static const char *tzslp_check_strict_columns(struct node_db *ndb,
     if (!strict.baton_active)
         return "validity render reports no mint baton for a live baton";
     return NULL;
+}
+
+
+/* The whole contract in one case: save a chain GENESIS and its transfer
+ * row, seed the strict overlay, then require every read to name the token
+ * with the exact string app.tokens.create answered. */
+static int tzslp_test_display_order(void)
+{
+    char dbdir[256];
+    char dbpath[320];
+    struct node_db ndb;
+    const char *why = NULL;
+    char cmd[384];
+
+    test_make_tmpdir(dbdir, sizeof(dbdir), "models_zslp", "display_order");
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
+    memset(&ndb, 0, sizeof(ndb));
+    printf("ZSLP projection renders the id app.tokens.create answered... ");
+    if (!node_db_open(&ndb, dbpath)) {
+        why = "node_db_open failed";
+    } else {
+        /* Deliberately NOT a palindrome: a byte-reversed rendering of these
+         * ids is a visibly different string. */
+        struct uint256 token_u;
+        struct uint256 txid_u;
+        uint8_t addr_hash[20];
+        char want[65];
+        char want_txid[65];
+
+        for (int i = 0; i < 32; i++) {
+            token_u.data[i] = (uint8_t)(0x10 + i);
+            txid_u.data[i] = (uint8_t)(0xf0 - i);
+        }
+        memset(addr_hash, 0x44, sizeof(addr_hash));
+        /* The exact strings zti_view answers for a GENESIS intent. */
+        uint256_get_hex(&token_u, want);
+        uint256_get_hex(&txid_u, want_txid);
+
+        if (!db_zslp_token_save(&ndb, token_u.data, "OPPROOF",
+                                "Operator Proof Token", 0, "", 100, 1000))
+            why = "db_zslp_token_save failed";
+        else if (!db_zslp_transfer_save(&ndb, txid_u.data, 100, token_u.data,
+                                        1, 1000, 1, addr_hash))
+            why = "db_zslp_transfer_save failed";
+        else if (!tzslp_seed_strict_rows(&ndb, token_u.data, txid_u.data, 100))
+            why = "seeding the strict overlay rows failed";
+        else if (!(why = tzslp_check_display_identity(&ndb, token_u.data,
+                                                      want, want_txid)))
+            why = tzslp_check_strict_columns(&ndb, want, 100);
+        node_db_close(&ndb);
+    }
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dbdir);
+    system(cmd);
+    if (!why) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (%s)\n", why);
+    return 1;
 }
 
 int test_model_zslp(void)
@@ -409,64 +466,7 @@ int test_model_zslp(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("ZSLP projection renders the id app.tokens.create answered... ");
-    {
-        char dbdir[256];
-        char dbpath[320];
-        struct node_db ndb;
-        const char *why = NULL;
-        bool ok;
-        test_make_tmpdir(dbdir, sizeof(dbdir), "models_zslp", "display_order");
-        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
-        memset(&ndb, 0, sizeof(ndb));
-        ok = node_db_open(&ndb, dbpath);
-        if (!ok)
-            why = "node_db_open failed";
-
-        if (ok) {
-            /* Deliberately NOT a palindrome: a byte-reversed rendering of
-             * this id is a visibly different string. */
-            struct uint256 token_u;
-            struct uint256 txid_u;
-            uint8_t addr_hash[20];
-            char want[65];
-            char want_txid[65];
-
-            for (int i = 0; i < 32; i++) {
-                token_u.data[i] = (uint8_t)(0x10 + i);
-                txid_u.data[i] = (uint8_t)(0xf0 - i);
-            }
-            memset(addr_hash, 0x44, sizeof(addr_hash));
-            /* The exact string zti_view answers for a GENESIS intent. */
-            uint256_get_hex(&token_u, want);
-            uint256_get_hex(&txid_u, want_txid);
-
-            if (!db_zslp_token_save(&ndb, token_u.data, "OPPROOF",
-                                    "Operator Proof Token", 0, "", 100, 1000))
-                why = "db_zslp_token_save failed";
-            else if (!db_zslp_transfer_save(&ndb, txid_u.data, 100,
-                                            token_u.data, 1, 1000, 1,
-                                            addr_hash))
-                why = "db_zslp_transfer_save failed";
-            else if (!tzslp_seed_strict_rows(&ndb, token_u.data, txid_u.data,
-                                             100))
-                why = "seeding the strict overlay rows failed";
-            else if ((why = tzslp_check_display_identity(
-                          &ndb, token_u.data, txid_u.data, want,
-                          want_txid)) != NULL)
-                ok = false;
-            else if ((why = tzslp_check_strict_columns(&ndb, want, 100)) !=
-                     NULL)
-                ok = false;
-            node_db_close(&ndb);
-        }
-
-        char cmd[384];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", dbdir);
-        system(cmd);
-        if (!why) printf("OK\n");
-        else { printf("FAIL (%s)\n", why); failures++; }
-    }
+    failures += tzslp_test_display_order();
 
     return failures;
 }
