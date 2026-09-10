@@ -399,7 +399,7 @@ Z23_FLAG("ZCL_CORPUS_STORE_ROOT", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_CRASH_DATADIR", "env_runtime", "-", "-",
           "first use tools/crash_recovery_test.c:139; documented at docs/TENACITY.md:205: ZCL_CRASH_DATADIR unset). All valuable as a regression floor; none sample the")
 Z23_FLAG("ZCL_CRASH_REQUIRE_TEETH", "env_runtime", "-", "-",
-          "first use tools/crash_recovery_test.c:807; documented at docs/CHAOS_HARNESS.md:64: > with ZCL_CRASH_REQUIRE_TEETH=1).")
+          "first use tools/crash_recovery_test.c:860; documented at docs/CHAOS_HARNESS.md:64: > with ZCL_CRASH_REQUIRE_TEETH=1).")
 Z23_FLAG("ZCL_CROSS_TRIPLE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tor_archives_ready.sh:49")
 Z23_FLAG("ZCL_CRYPTO_PERF_BASELINE", "env_build", "-", "-",
@@ -1870,6 +1870,8 @@ Z23_FLAG("ZCL_RPC_COOKIE_ROTATE_SEC", "env_runtime", "-", "-",
           "first use engine/modules/rpc/src/httpserver_auth.c:194; documented at docs/RUNBOOK.md:596: echo 'Rotation interval: ${ZCL_RPC_COOKIE_ROTATE_SEC:-86400}s'")
 Z23_FLAG("ZCL_RPCPORT", "env_runtime", "18232", "-",
           "first use engine/entry/main_cli_modes.c:2434; documented at docs/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
+Z23_FLAG("ZCL_RPC_MAX_TIME_SECS", "env_runtime", "30", "-",
+          "first use tools/zcl-rpc.c:254; bounds curl's --max-time for a single zcl-rpc call (POSIX transport); refused with a named stderr error if set to a non-numeric or non-positive value.")
 Z23_FLAG("ZCL_RPC_QUEUE_WAIT_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/rpc/src/httpserver.c:327")
 Z23_FLAG("ZCL_RPC_TIMEOUT_MS", "env_build", "120000", "-",

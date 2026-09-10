@@ -19,6 +19,7 @@
 #include <unistd.h>
 #endif
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -242,9 +243,33 @@ static int rpc_call_windows(const char *host, int port, const char *cookie,
     return total > 0 ? (int)total : -1;
 }
 #else
+/* Bound curl's own budget for the single RPC call below. Defaults to 30s;
+ * a caller that needs longer for a heavy call (e.g. `generate N` mining
+ * real blocks under load) opts in explicitly via ZCL_RPC_MAX_TIME_SECS
+ * rather than every caller silently waiting longer against a wedged node.
+ * A malformed override (non-numeric or <= 0) is refused with a named
+ * error instead of a silent fallback. */
+static int rpc_max_time_secs(void)
+{
+    const char *raw = getenv("ZCL_RPC_MAX_TIME_SECS");
+    if (!raw || raw[0] == '\0') return 30;
+    char *end = NULL;
+    long v = strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || v <= 0 || v > INT_MAX) {
+        fprintf(stderr,
+                "zcl-rpc: ZCL_RPC_MAX_TIME_SECS must be a positive integer "
+                "number of seconds, got '%s'\n", raw);
+        return -1;
+    }
+    return (int)v;
+}
+
 static int rpc_call_posix(const char *host, int port, const char *cookie,
                           const char *body, char *out, size_t out_len)
 {
+    int max_time_secs = rpc_max_time_secs();
+    if (max_time_secs < 0) return -1;
+
     /* Write body to temp file to avoid shell quoting issues */
     char tmpf[] = "/tmp/zcl-rpc-XXXXXX";
     int tfd = mkstemp(tmpf);
@@ -273,10 +298,10 @@ static int rpc_call_posix(const char *host, int port, const char *cookie,
     }
     char cmd[16384];
     int cmd_n = snprintf(cmd, sizeof(cmd),
-        "curl -s --max-time 30 --user %s "
+        "curl -s --max-time %d --user %s "
         "-d @%s -H 'content-type:text/plain;' "
         "http://%s:%d/ 2>/dev/null",
-        quoted_cookie, tmpf, host, port);
+        max_time_secs, quoted_cookie, tmpf, host, port);
     if (cmd_n <= 0 || (size_t)cmd_n >= sizeof(cmd)) {
         fprintf(stderr, "zcl-rpc: curl command is too long\n");
         unlink(tmpf);

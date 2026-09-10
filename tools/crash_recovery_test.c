@@ -266,25 +266,74 @@ static void sleep_ms(int ms)
 
 /* ── RPC via zcl-rpc subprocess ─────────────────────────────── */
 
+/* zcl-rpc's stderr is captured to this bounded scratch file (inside the
+ * already-isolated test datadir, never /tmp of our own) so a failing call
+ * can name itself instead of vanishing into 2>/dev/null. */
+#define CR_RPC_STDERR_CAP 512
+
+/* Read up to CR_RPC_STDERR_CAP bytes of a failed zcl-rpc invocation's
+ * stderr and print it, with zcl-rpc's own exit status, on our stderr. The
+ * file is removed afterward so stale text never leaks into the next call. */
+static void cr_report_rpc_failure(const char *method, int rc,
+                                   const char *errpath)
+{
+    char detail[CR_RPC_STDERR_CAP + 1] = "";
+    FILE *ef = fopen(errpath, "r");
+    if (ef) {
+        size_t n = fread(detail, 1, sizeof(detail) - 1, ef);
+        detail[n] = '\0';
+        fclose(ef);
+    }
+    remove(errpath);
+    int exit_code = -1;
+    if (rc >= 0) {
+        if (WIFEXITED(rc)) exit_code = WEXITSTATUS(rc);
+        else if (WIFSIGNALED(rc)) exit_code = -WTERMSIG(rc);
+    }
+    fprintf(stderr,
+            "crash_recovery_test: rpc '%s' failed (exit=%d): %s\n",
+            method, exit_code, detail[0] ? detail : "(no stderr captured)");
+}
+
 /* Invoke `build/bin/zcl-rpc <method>` with the crash datadir in the env so
  * zcl-rpc finds the right cookie file. Returns -1 on any exec or
- * read error, otherwise the number of bytes written to `out`. */
-static int cr_rpc(const struct cr_config *cfg, const char *method,
-                  char *out, size_t out_cap)
+ * read error, otherwise the number of bytes written to `out`. On failure,
+ * when `report_failure` is set, zcl-rpc's own stderr and exit status are
+ * surfaced via cr_report_rpc_failure() instead of being silently
+ * discarded. `report_failure` is false only for the RPC-readiness poll,
+ * where "not up yet" is the expected outcome of most attempts and would
+ * otherwise flood the log with hundreds of identical lines. */
+static int cr_rpc_report(const struct cr_config *cfg, const char *method,
+                         char *out, size_t out_cap, bool report_failure)
 {
-    char cmd[1024];
+    char errpath[640];
+    snprintf(errpath, sizeof(errpath), "%s/.cr_rpc_stderr", cfg->datadir);
+    char cmd[2048];
     /* Quote is fine: method is a fixed string under caller control. */
+    /* This harness's own calls (notably `generate N`, which does real
+     * mining/disk work per block) opt in to a wider zcl-rpc budget than
+     * the tool's 30s default; that stays a per-caller decision, not a
+     * change to every zcl-rpc invocation on the host. */
     snprintf(cmd, sizeof(cmd),
-             "ZCL_DATADIR=%s ZCL_RPCPORT=%d " CR_RPC_BIN " %s 2>/dev/null",
-             cfg->datadir, cfg->rpc_port, method);
+             "ZCL_DATADIR=%s ZCL_RPCPORT=%d ZCL_RPC_MAX_TIME_SECS=120 "
+             CR_RPC_BIN " %s 2>%s",
+             cfg->datadir, cfg->rpc_port, method, errpath);
     FILE *p = popen(cmd, "r");
     if (!p) return -1;
     size_t total = fread(out, 1, out_cap - 1, p);
     out[total] = '\0';
     bool complete = !ferror(p) && total < out_cap - 1;
     int rc = pclose(p);
-    if (rc != 0 || !complete) return -1;
-    return (int)total;
+    if (rc == 0 && complete) return (int)total;
+    if (report_failure) cr_report_rpc_failure(method, rc, errpath);
+    else remove(errpath);
+    return -1;
+}
+
+static int cr_rpc(const struct cr_config *cfg, const char *method,
+                  char *out, size_t out_cap)
+{
+    return cr_rpc_report(cfg, method, out, out_cap, true);
 }
 
 /* A successful transport alone is not a successful RPC observation. */
@@ -541,19 +590,23 @@ static pid_t cr_spawn_node(const struct cr_config *cfg)
 }
 
 /* Poll the RPC port until we get a valid getblockcount response
- * OR the timeout elapses. Returns true on success. */
+ * OR the timeout elapses. Returns true on success. Each poll attempt is
+ * quiet ("not up yet" is the expected outcome of most of them); if the
+ * whole wait times out, one final reporting attempt surfaces the real
+ * failure reason instead of leaving it silently discarded. */
 static bool cr_wait_for_rpc_ready(const struct cr_config *cfg, int timeout_ms)
 {
     int64_t deadline = now_ms() + timeout_ms;
     char buf[1024];
     while (now_ms() < deadline) {
-        int n = cr_rpc(cfg, "getblockcount", buf, sizeof(buf));
+        int n = cr_rpc_report(cfg, "getblockcount", buf, sizeof(buf), false);
         if (n > 0) {
             int64_t count = 0;
             if (parse_result_i64(buf, &count)) return true;
         }
         sleep_ms(100);
     }
+    (void)cr_rpc(cfg, "getblockcount", buf, sizeof(buf));
     return false;
 }
 
