@@ -379,6 +379,49 @@ static bool board_insert(struct node_db *ndb,
     return false;
 }
 
+/* True when this id needs no append at all: the board already holds it, or
+ * the store has already refused it in a way that will not change. Caller
+ * holds the board write lock. */
+static bool board_skip_known_id(struct node_db *ndb, const uint8_t id[32],
+                                enum fleet_board_result *out)
+{
+    if (db_fleet_board_have(ndb, id)) {
+        *out = FLEET_BOARD_OK;
+        return true;
+    }
+    if (board_quarantined(id)) {
+        *out = FLEET_BOARD_ERR_STORAGE;
+        return true;
+    }
+    return false;
+}
+
+/* The append failed. Say which of the two failures it was, put the database's
+ * own code and message in the log so the cause is never guessed from the
+ * outside again, and quarantine the post when re-offering it would fail
+ * identically. Caller holds the board write lock. */
+static enum fleet_board_result board_append_failed(
+    struct node_db *ndb, const struct db_fleet_board_post *record,
+    int insert_rc)
+{
+    enum fleet_board_result why = board_insert_result(insert_rc);
+    char id_hex[65];
+    fleet_board_id_to_hex(record->post.id, id_hex);
+    LOG_WARN("fleet.board",
+             "post seq=%lld id=%.16s could not be appended: %s "
+             "(sqlite rc=%d: %s)",
+             (long long)record->seq, id_hex, fleet_board_result_string(why),
+             insert_rc, sqlite3_errmsg(ndb->db));
+    if (why == FLEET_BOARD_ERR_STORAGE) {
+        board_quarantine_add(record->post.id);
+        LOG_WARN("fleet.board",
+                 "quarantined post id=%.16s: the store rejected it and will "
+                 "reject it again; the board keeps ingesting every other "
+                 "post", id_hex);
+    }
+    return why;
+}
+
 static bool board_aggregate_checked(struct node_db *ndb, struct qb *q,
                                     int64_t *out)
 {
@@ -526,6 +569,26 @@ static enum fleet_board_result board_ingest_admissible(
     return board_role_allows(post) ? FLEET_BOARD_OK : FLEET_BOARD_ERR_ROLE;
 }
 
+/* Every refusal that can be decided before the board write lock is taken:
+ * admissibility, then the canonical body size the ledger stores alongside the
+ * row. The canonical size is measured once and needs no buffer — canonical()
+ * reports the size it would have written. */
+static enum fleet_board_result board_ingest_prepare(
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    size_t *body_len_out)
+{
+    enum fleet_board_result r = board_ingest_admissible(ndb, post, now);
+    if (r != FLEET_BOARD_OK)
+        return r;
+    size_t body_len = 0;
+    (void)fleet_board_post_canonical(post, NULL, 0, &body_len);
+    if (body_len == 0 || body_len > FLEET_BOARD_BODY_MAX)
+        return FLEET_BOARD_ERR_CAPACITY;
+    *body_len_out = body_len;
+    return FLEET_BOARD_OK;
+}
+
+
 enum fleet_board_result db_fleet_board_post_ingest(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
     bool *stored_out)
@@ -535,17 +598,11 @@ enum fleet_board_result db_fleet_board_post_ingest(
     if (!ndb || !ndb->open || !post)
         return FLEET_BOARD_ERR_ARGS;
 
-    enum fleet_board_result r = board_ingest_admissible(ndb, post, now);
+    size_t body_len = 0;
+    enum fleet_board_result r = board_ingest_prepare(ndb, post, now,
+                                                     &body_len);
     if (r != FLEET_BOARD_OK)
         return r;
-
-    /* The canonical size is measured once here and stored, so the ledger can
-     * cap and report its own footprint with one SQL aggregate. Measuring it
-     * needs no buffer: canonical() reports the size it would have written. */
-    size_t body_len = 0;
-    (void)fleet_board_post_canonical(post, NULL, 0, &body_len);
-    if (body_len == 0 || body_len > FLEET_BOARD_BODY_MAX)
-        return FLEET_BOARD_ERR_CAPACITY;
 
     /* Serialize only board writers in-process. This avoids BEGIN IMMEDIATE's
      * node-wide busy wait and never joins an open consensus transaction. */
@@ -559,13 +616,10 @@ enum fleet_board_result db_fleet_board_post_ingest(
         zcl_mutex_unlock(&s_board_write_lock);
         return FLEET_BOARD_ERR_BUSY;
     }
-    if (db_fleet_board_have(ndb, post->id)) {
+    enum fleet_board_result known = FLEET_BOARD_OK;
+    if (board_skip_known_id(ndb, post->id, &known)) {
         zcl_mutex_unlock(&s_board_write_lock);
-        return FLEET_BOARD_OK;
-    }
-    if (board_quarantined(post->id)) {
-        zcl_mutex_unlock(&s_board_write_lock);
-        return FLEET_BOARD_ERR_STORAGE;
+        return known;
     }
     if (!board_append_fits(ndb, (int64_t)body_len)) {
         zcl_mutex_unlock(&s_board_write_lock);
@@ -586,22 +640,8 @@ enum fleet_board_result db_fleet_board_post_ingest(
 
     int insert_rc = SQLITE_OK;
     if (!board_insert(ndb, &record, &insert_rc)) {
-        enum fleet_board_result why = board_insert_result(insert_rc);
-        char id_hex[65];
-        fleet_board_id_to_hex(record.post.id, id_hex);
-        LOG_WARN("fleet.board",
-                 "post seq=%lld id=%.16s could not be appended: %s "
-                 "(sqlite rc=%d: %s)",
-                 (long long)record.seq, id_hex,
-                 fleet_board_result_string(why), insert_rc,
-                 sqlite3_errmsg(ndb->db));
-        if (why == FLEET_BOARD_ERR_STORAGE) {
-            board_quarantine_add(record.post.id);
-            LOG_WARN("fleet.board",
-                     "quarantined post id=%.16s: the store rejected it and "
-                     "will reject it again; the board keeps ingesting every "
-                     "other post", id_hex);
-        }
+        enum fleet_board_result why =
+            board_append_failed(ndb, &record, insert_rc);
         zcl_mutex_unlock(&s_board_write_lock);
         return why;
     }

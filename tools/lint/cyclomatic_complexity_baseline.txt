@@ -2047,7 +2047,7 @@ engine/models/src/database_owner_lease.c:node_db_owner_lease_rebind:16
 engine/models/src/database_schema_preflight.c:inspect_schema:19
 engine/models/src/database_schema_preflight.c:node_db_schema_preflight_existing:24
 engine/models/src/fleet_board_post.c:db_fleet_board_ids_before:18
-engine/models/src/fleet_board_post.c:db_fleet_board_post_ingest:17
+engine/models/src/fleet_board_post.c:db_fleet_board_post_ingest:16
 engine/models/src/mesh_capability_grant.c:capability_immutable_equal:19
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_complete:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_insert:17
