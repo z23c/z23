@@ -760,6 +760,29 @@ onion_pub="$(printf '%s' "$A_OFFER_ROW" | "$JSONQ" get data.rows[0][2])" ||
     mkt_die "seller offer endpoint row mismatch: $A_OFFER_ROW"
 
 # ── Phase 2: the offer gossips to the buyer ──────────────────────────
+# The buyer is a stranger to A: no review mark exists on B for A's offer,
+# and the boot-default general-audience.v1 profile hides every unreviewed
+# offer by construction (contexts/market/services/include/services/
+# market_moderation_service.h — "FAIL CLOSED BY CONSTRUCTION"). A real
+# first-contact buyer opts into the documented open-view profile before
+# browsing an unreviewed seller's catalog (docs/API_REFERENCE.md:
+# `app market moderation profile set`, plan-then-commit); the acceptance
+# does the same so it exercises what a buyer actually does, not a gap in
+# the product's default moderation posture.
+mkt_note "buyer opts into the open-view moderation profile (first contact with an unreviewed seller)"
+B_PROFILE_PLAN="$(printf '%s' '{"profile":"open-view","mode":"plan"}' \
+    | mkt_native "$MKT_DD_B" "$B_RPC" app market moderation profile set --input=- || true)"
+printf '%s' "$B_PROFILE_PLAN" | "$JSONQ" eq ok true ||
+    mkt_die "buyer profile-set plan refused: $B_PROFILE_PLAN"
+B_PROFILE_TOKEN="$(printf '%s' "$B_PROFILE_PLAN" | "$JSONQ" get data.plan_token)" ||
+    mkt_die "buyer profile-set plan refused: $B_PROFILE_PLAN"
+B_PROFILE_COMMIT="$(printf '%s' "{\"profile\":\"open-view\",\"mode\":\"commit\",\"plan_token\":\"$B_PROFILE_TOKEN\"}" \
+    | mkt_native "$MKT_DD_B" "$B_RPC" app market moderation profile set --input=- || true)"
+printf '%s' "$B_PROFILE_COMMIT" | "$JSONQ" eq ok true ||
+    mkt_die "buyer profile-set commit refused: $B_PROFILE_COMMIT"
+printf '%s' "$B_PROFILE_COMMIT" | "$JSONQ" eq data.profile open-view ||
+    mkt_die "buyer profile-set commit refused: $B_PROFILE_COMMIT"
+
 mkt_note "waiting for the signed v2 offer to gossip to the buyer"
 LIST_DEADLINE=$(( $(date +%s) + MKT_WAIT ))
 while :; do
@@ -767,8 +790,15 @@ while :; do
     case "$BUYER_LIST" in
         *"$OFFER_ID"*) break ;;
     esac
-    [ "$(date +%s)" -lt "$LIST_DEADLINE" ] ||
+    if [ "$(date +%s)" -ge "$LIST_DEADLINE" ]; then
+        # hidden_count is "arrived but not listable" (a moderation gate),
+        # never a gossip failure — say which one actually happened.
+        BUYER_HIDDEN="$(printf '%s' "$BUYER_LIST" | "$JSONQ" get data.hidden_count 2>/dev/null || true)"
+        if [ -n "$BUYER_HIDDEN" ] && [ "$BUYER_HIDDEN" != "0" ]; then
+            mkt_die "offer arrived (hidden_count=$BUYER_HIDDEN) but never became listable to the buyer: $BUYER_LIST"
+        fi
         mkt_die "offer never gossiped to the buyer: $BUYER_LIST"
+    fi
     sleep 1
 done
 BUYER_ENTRY="$(b_rpc zmarket_list | mkt_result)"
