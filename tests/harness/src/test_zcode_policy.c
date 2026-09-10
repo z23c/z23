@@ -601,7 +601,6 @@ static int zpy_book_sybil(struct zpy_book_fx *fx,
                           struct vcs_service_book *book)
 {
     int failures = 0;
-    struct vcs_service_key_totals kt;
     ZPY_CHECK("book: bad inputs rejected",
               vcs_service_credit_upload(book, fx->key_a, fx->req2, 0,
                                         20000) ==

@@ -1751,6 +1751,7 @@ static int zp_library_fetch_ok(const char *dd, const char *ring_root)
  * truncation. */
 static int zp_library_fetch_negative(const char *dd, const char *ring_root)
 {
+    (void)ring_root;
     int failures = 0;
     struct zp_cmd c;
     char other_root[65];

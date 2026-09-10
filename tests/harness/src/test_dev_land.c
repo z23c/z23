@@ -446,28 +446,6 @@ static bool dlx_plant_hook_bin(const char *dir)
     return dlx_write_dep(dir, "build/bin/z23-git-hook", "hook\n");
 }
 
-static bool dlx_json_field(const char *hay, const char *key,
-                            char *out, size_t cap)
-{
-    char needle[64];
-    const char *at;
-    size_t n = 0;
-    if (snprintf(needle, sizeof(needle), "\"%s\":\"", key) >=
-            (int)sizeof(needle))
-        return false;
-    at = strstr(hay, needle);
-    if (!at)
-        return false;
-    at += strlen(needle);
-    while (at[n] && at[n] != '"' && n + 1 < cap)
-        n++;
-    if (at[n] != '"' || n == 0)
-        return false;
-    memcpy(out, at, n);
-    out[n] = '\0';
-    return true;
-}
-
 /* Whole-file slurp for a byte-identical before/after comparison. Bounded:
  * queue.jsonl in these tests is a handful of rows, never near this cap. */
 static bool dlx_slurp(const char *path, char *out, size_t cap, size_t *len)
