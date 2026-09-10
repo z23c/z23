@@ -192,8 +192,13 @@ struct mvl_loop {
     char state[MVL_STATE_CAP];
     char lane[MVL_LANE_CAP];
     char evidence[MVL_EVIDENCE_CAP];
+    /* The agent an `INDEPENDENT REVIEW by <agent>` note names, anywhere in
+     * the row. Empty when nobody independent looked: the XP game pays an
+     * unreviewed author half, and never pays a review nobody wrote. */
+    char reviewer[MVL_LANE_CAP];
     size_t line_no;                 /* the plan line, so a refusal names it */
     int milestone;
+    int feature;                    /* index into mvl_plan.features, or -1 */
     enum mvl_state state_id;
     bool counted;
 };
@@ -221,11 +226,28 @@ struct mvl_milestone {
     char id[8];
     char title[MVL_TITLE_CAP];
     int64_t counts[MVL_STATE_COUNT];
+    size_t line_no;
+    /* The milestone's OWN line carries state=ACCEPTED. Child completion
+     * alone never closes a parent, so nothing else opens milestone XP. */
+    bool accepted;
+};
+
+/* One feature line. It exists so a parent can be scored on its own
+ * acceptance rather than on its children's: `accepted` is the only thing
+ * that opens feature XP, exactly as the milestone rule reads. */
+struct mvl_feature {
+    char id[8];
+    char title[MVL_TITLE_CAP];
+    size_t line_no;
+    int milestone;
+    bool accepted;
 };
 
 struct mvl_plan {
     struct mvl_milestone *milestones;
     size_t milestone_count;
+    struct mvl_feature *features;
+    size_t feature_count;
     struct mvl_loop *loops;
     size_t loop_count;
     int64_t totals[MVL_STATE_COUNT];
@@ -465,5 +487,206 @@ bool mvl_append_kpi(const char *path, const struct mvl_kpi *kpi,
 
 /* The one-line KPI tail `progress` and `kpi` both print. */
 size_t mvl_render_kpi(const struct mvl_kpi *kpi, char *out, size_t out_cap);
+
+/* ── the XP game (mode `xp`) ──────────────────────────────────────────── */
+
+/* WHY. The owner's KPI is verified MVP progress per token, and a KPI nobody
+ * competes on moves slowly. `xp` is that KPI turned into a score: it pays
+ * for the things the plan of record says are worth the most, and it pays
+ * for NOTHING a worker can assert about itself. Every point traces to one
+ * of four facts a stranger can recheck — a commit reachable from
+ * origin/main, a registered sweep group, a dev.land outcome row, or an
+ * INDEPENDENT REVIEW note in the plan. There is no hand-set XP, no bonus
+ * for lines, commits or messages, and no rule that reads a state= a worker
+ * typed about its own work.
+ *
+ * The rules are stated once, in docs/work/MVP_GAME_MAP.md ("XP rules v1"),
+ * and implemented here. Where a rule needs a signal this tool cannot see,
+ * it pays nothing and SAYS SO in the report rather than guessing:
+ *   - the speed bonus needs per-loop wall clocks, which exist only when an
+ *     agents.tsv was measured (mvl_xp_board.speed_asked);
+ *   - the "put origin/main red" penalty needs a red-main signal, which no
+ *     input this tool reads carries (mvl_xp_board.main_red_asked, always
+ *     false in v1). */
+
+enum {
+    MVL_MAX_FEATURES = 512,
+    MVL_MAX_OUTCOMES = 8192,
+    MVL_MAX_XP_EVENTS = 8192,
+    MVL_MAX_XP_AGENTS = 1024,
+
+    /* v1 payouts, in XP. A percentage is applied as a numerator over 100
+     * with integer arithmetic, so a score never moves with the host's
+     * floating point — the same reason the KPI carries TCU in hundredths. */
+    MVL_XP_LOOP = 100,
+    MVL_XP_FEATURE = 500,
+    MVL_XP_MILESTONE = 2000,
+    MVL_XP_REVIEW_PCT = 25,       /* the reviewer's cut of base x mult */
+    MVL_XP_PROVISIONAL_PCT = 50,  /* an unreviewed author's cut */
+    MVL_XP_SPEED_PCT = 50,        /* faster than the median close */
+    MVL_XP_FAIL_PENALTY = 50,     /* subtracted per non-base-move failure */
+    MVL_XP_COMBO = 100,
+    MVL_XP_COMBO_RUN = 3,         /* landings in a row that pay a combo */
+    MVL_XP_PCT = 100,
+
+    MVL_XP_MULT_P0 = 3,
+    MVL_XP_MULT_P1 = 2,
+    MVL_XP_MULT_P2 = 1,
+};
+
+/* What one XP event was paid for. The kind is the audit trail's verb: with
+ * the subject and the evidence beside it, a reader can walk any row of
+ * xp.tsv back to the fact that produced it. */
+enum mvl_xp_kind {
+    MVL_XP_KIND_LOOP = 0,
+    MVL_XP_KIND_REVIEW,
+    MVL_XP_KIND_SPEED,
+    MVL_XP_KIND_FEATURE,
+    MVL_XP_KIND_MILESTONE,
+    MVL_XP_KIND_PENALTY,
+    MVL_XP_KIND_COMBO,
+    MVL_XP_KIND_COUNT,
+};
+
+const char *mvl_xp_kind_name(enum mvl_xp_kind kind);
+
+/* One credited or penalized event — one row of xp_events.tsv. `evidence` is
+ * the sha, the sweep group, the outcome's detail or the review note excerpt
+ * the payment was derived from; an event with no evidence is never
+ * written, because it could not be rechecked. */
+struct mvl_xp_event {
+    char agent[MVL_LANE_CAP];
+    char subject[MVL_ID_TEXT_CAP];      /* M05.F01.L01, or `outcome <seq>` */
+    char evidence[MVL_EVIDENCE_CAP];
+    int64_t xp;
+    int multiplier;
+    enum mvl_xp_kind kind;
+    bool provisional;                   /* an unreviewed author's half */
+};
+
+struct mvl_xp_events {
+    struct mvl_xp_event *rows;
+    size_t count;
+    size_t cap;
+};
+
+/* One scored agent — one row of xp.tsv. The agent identity is the LANE the
+ * ledger already attributes work by: a plan row's loop=, an outcome row's
+ * worktree basename, an agents.tsv row's lane, a review note's named
+ * reviewer. `rank` is 0 for an agent with no measured tokens: it is
+ * unranked, not last, because a ratio with a zero denominator is not a
+ * worse ratio. */
+struct mvl_xp_agent {
+    char agent[MVL_LANE_CAP];
+    int64_t loops;
+    int64_t reviewed;
+    int64_t xp;
+    int64_t tcu;
+    int rank;
+};
+
+struct mvl_xp_board {
+    struct mvl_xp_agent *rows;
+    size_t count;
+    size_t cap;
+    int multipliers[MVL_MAX_MILESTONES];
+    int64_t median_wall_s;
+    /* False when no loop carried a wall clock, so the speed bonus was not
+     * asked rather than answered no. A report says which. */
+    bool speed_asked;
+    /* False in v1 and reported as such: no input this tool reads says an
+     * event put origin/main red, so no -200 row is ever written. */
+    bool main_red_asked;
+    bool outcomes_present;
+};
+
+/* One dev.land outcome row. `agent` is the worktree's last path element,
+ * which is the lane the ledger attributes every other fact by. */
+struct mvl_outcome {
+    char agent[MVL_LANE_CAP];
+    char state[MVL_OUTCOME_CAP];
+    char detail[MVL_EVIDENCE_CAP];
+    char utc[MVL_UTC_CAP];
+    int64_t seq;
+    size_t line_no;
+};
+
+struct mvl_outcomes {
+    struct mvl_outcome *rows;
+    size_t count;
+    size_t cap;
+    bool present;                       /* false when the file was absent */
+};
+
+bool mvl_xp_alloc(struct mvl_xp_board *board, struct mvl_xp_events *events);
+void mvl_xp_free(struct mvl_xp_board *board, struct mvl_xp_events *events);
+bool mvl_outcomes_alloc(struct mvl_outcomes *outcomes);
+void mvl_outcomes_free(struct mvl_outcomes *outcomes);
+
+/* Reads `~/.local/state/z23/dev/land/outcomes.jsonl`, one JSON object per
+ * line. A line that is not one JSON object, or carries no string "state",
+ * is REFUSED BY NAME to `refusals` (which may be NULL) and skipped: one bad
+ * row of an append-only operational log is a fact about that row, not a
+ * reason to score nothing. A missing file is not an error either — the
+ * table stays empty, `present` stays false, and the gap is reported the
+ * same way. Only an over-long line or a table overflow returns false. */
+bool mvl_read_outcomes(const char *path, struct mvl_outcomes *out,
+                       FILE *refusals, char *err, size_t err_cap);
+
+/* The priority multiplier a milestone's own TITLE earns, by exactly two
+ * keyword sets (see docs/work/MVP_GAME_MAP.md for the table and the words):
+ * x3 when the title names consensus, wallet, custody, a shielded payment, a
+ * node, sync, the store or reaching tip; x2 when it names the proof,
+ * publication, receipt, evidence, candidate or lifecycle machinery those
+ * depend on; x1 otherwise. Nothing outside the title decides it. */
+int mvl_milestone_multiplier(const char *title);
+
+/* Scores the whole board. Reads the same inputs `loops` and `kpi` do — the
+ * plan, the measured agents, the evidence world — plus the outcome rows.
+ * `outcomes` may be an empty table (no penalties, no combos). Every payment
+ * appends one event; the board is ranked before it returns. */
+bool mvl_compute_xp(const struct mvl_plan *plan,
+                    const struct mvl_agents *agents,
+                    const struct mvl_evidence_world *world,
+                    const struct mvl_outcomes *outcomes,
+                    struct mvl_xp_board *board, struct mvl_xp_events *events,
+                    char *err, size_t err_cap);
+
+/* The scored row for `agent`, or NULL. */
+const struct mvl_xp_agent *mvl_xp_find(const struct mvl_xp_board *board,
+                                       const char *agent);
+
+/* XP per million TCU, in thousandths — integer arithmetic for the same
+ * reason the KPI uses it. Zero for an agent with no measured tokens: the
+ * caller must read `rank == 0` as unranked, never as a last place. */
+int64_t mvl_xp_per_mtcu_milli(const struct mvl_xp_agent *agent);
+
+/* Folds `<experiments>/tokens_extra.tsv` — the TCU of agents whose
+ * transcripts this box never held (Agent B, Grok, Codex), posted as TOKENS
+ * mail rows. Header, exactly:
+ *   agent<TAB>loop<TAB>in<TAB>out<TAB>cache_write<TAB>cache_read<TAB>utc
+ * A different first line is refused (mvl_tsv_header) rather than guessed
+ * at. A missing file contributes nothing and is not an error. The board is
+ * re-ranked before it returns. */
+bool mvl_read_tokens_extra(const char *path, struct mvl_xp_board *board,
+                           char *err, size_t err_cap);
+
+const char *mvl_tokens_extra_header(void);
+const char *mvl_xp_header(void);
+const char *mvl_xp_events_header(void);
+bool mvl_write_xp(const char *path, const struct mvl_xp_board *board,
+                  char *err, size_t err_cap);
+bool mvl_write_xp_events(const char *path, const struct mvl_xp_events *events,
+                         char *err, size_t err_cap);
+
+/* The leaderboard, and the same numbers as one JSON object for a board
+ * post. Both print the multiplier table, because a score whose weights are
+ * invisible is not auditable. snprintf semantics. */
+size_t mvl_render_xp(const struct mvl_plan *plan,
+                     const struct mvl_xp_board *board, char *out,
+                     size_t out_cap);
+size_t mvl_render_xp_json(const struct mvl_plan *plan,
+                          const struct mvl_xp_board *board, char *out,
+                          size_t out_cap);
 
 #endif /* ZCL_TOOLS_DEV_MVP_LEDGER_H */

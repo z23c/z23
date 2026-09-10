@@ -876,6 +876,462 @@ _test_next:;
     return failures;
 }
 
+/* ── the XP game (mode `xp`) ──────────────────────────────────────────── */
+
+/* Three landed loops over two milestones. M00's title names nothing the
+ * multiplier table knows, so it pays x1; M05's title names consensus, so it
+ * pays x3. L02 carries no INDEPENDENT REVIEW note, so its author is paid
+ * provisionally. Neither feature line carries state=ACCEPTED, so no feature
+ * and no milestone XP is earned however complete the loops are. */
+static const char k_xp_plan[] =
+"M00 Alpha groundwork | done=alpha is done\n"
+"  F01 Feature one\n"
+"    L01 First loop | state=LANDED | loop=alpha | evidence="
+    "0123456789abcdef0123456789abcdef01234567 | box=node1"
+    " | note=INDEPENDENT REVIEW by rev1 (gates green)\n"
+"    L02 Second loop | state=LANDED | loop=beta | evidence="
+    "1111111111111111111111111111111111111111 | box=node1\n"
+"M05 Consensus-compatible state and fault recovery | done=consensus holds\n"
+"  F01 Consensus loops\n"
+"    L01 Third loop | state=LANDED | loop=gamma | evidence="
+    "2222222222222222222222222222222222222222 | box=node1"
+    " | note=INDEPENDENT REVIEW by rev1\n";
+
+/* The same three loops with the parent lines ACCEPTED, which is the ONLY
+ * thing that opens feature and milestone XP. */
+static const char k_xp_accepted_plan[] =
+"M00 Alpha groundwork | state=ACCEPTED | done=alpha is done\n"
+"  F01 Feature one | state=ACCEPTED\n"
+"    L01 First loop | state=LANDED | loop=alpha | evidence="
+    "0123456789abcdef0123456789abcdef01234567 | box=node1"
+    " | note=INDEPENDENT REVIEW by rev1\n"
+"    L02 Second loop | state=LANDED | loop=alpha | evidence="
+    "1111111111111111111111111111111111111111 | box=node1"
+    " | note=INDEPENDENT REVIEW by rev1\n";
+
+/* dev.land outcome rows, exactly as ~/.local/state/z23/dev/land/outcomes.jsonl
+ * carries them: the agent is the worktree's last path element. */
+static const char k_xp_outcomes[] =
+"{\"seq\":11,\"ts\":\"2026-09-09T01:00:00Z\",\"state\":\"landed\","
+ "\"worktree\":\"/home/x/.z23/lanes/alpha\",\"detail\":\"pushed\"}\n"
+"{\"seq\":12,\"ts\":\"2026-09-09T02:00:00Z\",\"state\":\"landed\","
+ "\"worktree\":\"/home/x/.z23/lanes/alpha\",\"detail\":\"pushed\"}\n"
+"{\"seq\":13,\"ts\":\"2026-09-09T03:00:00Z\",\"state\":\"landed\","
+ "\"worktree\":\"/home/x/.z23/lanes/alpha\",\"detail\":\"pushed\"}\n"
+"{\"seq\":14,\"ts\":\"2026-09-09T04:00:00Z\",\"state\":\"failed\","
+ "\"worktree\":\"/home/x/.z23/lanes/beta\","
+ "\"detail\":\"head_changed while the proof ran\"}\n"
+"{\"seq\":15,\"ts\":\"2026-09-09T05:00:00Z\",\"state\":\"failed\","
+ "\"worktree\":\"/home/x/.z23/lanes/gamma\","
+ "\"detail\":\"child_proof_failed_exit_2\"}\n"
+"{\"seq\":16,\"ts\":\"2026-09-09T06:00:00Z\",\"state\":\"cancelled\","
+ "\"worktree\":\"/home/x/.z23/lanes/gamma\","
+ "\"detail\":\"cancelled by the operator\"}\n"
+"{\"seq\":17,\"ts\":\"2026-09-09T07:00:00Z\",\"state\":\"failed\","
+ "\"worktree\":\"/home/x/.z23/trains/54\","
+ "\"detail\":\"child_proof_failed_exit_2\"}\n"
+"{\"seq\":18,\"ts\":\"2026-09-09T08:00:00Z\",\"state\":\"failed\","
+ "\"worktree\":\"/home/x/.z23/trains/train55\","
+ "\"detail\":\"child_proof_failed_exit_2\"}\n";
+
+static void mvl_xp_ancestry(char (*anc)[MVL_ID_CAP],
+                            struct mvl_evidence_world *world)
+{
+    (void)snprintf(anc[0], MVL_ID_CAP,
+                   "0123456789abcdef0123456789abcdef01234567");
+    (void)snprintf(anc[1], MVL_ID_CAP,
+                   "1111111111111111111111111111111111111111");
+    (void)snprintf(anc[2], MVL_ID_CAP,
+                   "2222222222222222222222222222222222222222");
+    world->ancestry = (const char (*)[MVL_ID_CAP])anc;
+    world->ancestry_count = 3;
+}
+
+/* The XP a named event kind paid one agent, summed over its events. */
+static int64_t mvl_xp_paid(const struct mvl_xp_events *events,
+                           const char *agent, enum mvl_xp_kind kind)
+{
+    int64_t sum = 0;
+
+    for (size_t i = 0; i < events->count; i++)
+        if (strcmp(events->rows[i].agent, agent) == 0
+            && events->rows[i].kind == kind)
+            sum += events->rows[i].xp;
+    return sum;
+}
+
+static bool mvl_xp_any_provisional(const struct mvl_xp_events *events,
+                                   const char *agent)
+{
+    for (size_t i = 0; i < events->count; i++)
+        if (strcmp(events->rows[i].agent, agent) == 0
+            && events->rows[i].provisional)
+            return true;
+    return false;
+}
+
+static int test_mvp_ledger_xp(void)
+{
+    int failures = 0;
+
+    TEST("the milestone multiplier is read from the plan's own titles: a "
+         "consensus, wallet, node, sync or store/payment milestone pays x3, "
+         "the proof and publication machinery x2, everything else x1") {
+        ASSERT_EQ(mvl_milestone_multiplier(
+                      "Consensus-compatible state and fault recovery"), 3);
+        ASSERT_EQ(mvl_milestone_multiplier(
+                      "A real shielded payment buys the exact file"), 3);
+        ASSERT_EQ(mvl_milestone_multiplier(
+                      "A stranger installs, connects, and reaches tip"), 3);
+        ASSERT_EQ(mvl_milestone_multiplier(
+                      "Exact, reusable proof without false green"), 2);
+        ASSERT_EQ(mvl_milestone_multiplier(
+                      "Crash-safe publication and independent receipts"), 2);
+        ASSERT_EQ(mvl_milestone_multiplier(
+                      "One canonical proposal and worker lifecycle"), 2);
+        ASSERT_EQ(mvl_milestone_multiplier("Private fleet Insight"), 1);
+        ASSERT_EQ(mvl_milestone_multiplier("Alpha groundwork"), 1);
+        PASS();
+    }
+
+    TEST("a landed loop pays 100 x its milestone multiplier, and only half "
+         "of it — marked provisional — until an INDEPENDENT REVIEW note "
+         "names a reviewer, who is then paid a quarter of the same base") {
+        char tmp[PATH_MAX], plan_path[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        char anc[3][MVL_ID_CAP];
+        struct mvl_plan plan = {0};
+        struct mvl_agents agents = {0};
+        struct mvl_evidence_world world = {0};
+        struct mvl_outcomes outcomes = {0};
+        struct mvl_xp_board board = {0};
+        struct mvl_xp_events events = {0};
+        const struct mvl_xp_agent *row;
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        mvl_write_file(tmp, "plan.md", k_xp_plan);
+        (void)snprintf(plan_path, sizeof(plan_path), "%s/plan.md", tmp);
+        memset(anc, 0, sizeof(anc));
+        mvl_xp_ancestry(anc, &world);
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_agents_alloc(&agents));
+        ASSERT(mvl_outcomes_alloc(&outcomes));
+        ASSERT(mvl_xp_alloc(&board, &events));
+        ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
+        ASSERT(mvl_compute_xp(&plan, &agents, &world, &outcomes, &board,
+                              &events, err, sizeof(err)));
+
+        /* M00 pays x1: alpha reviewed = 100, beta unreviewed = 50. */
+        row = mvl_xp_find(&board, "alpha");
+        ASSERT(row != NULL);
+        ASSERT_EQ((int)row->xp, 100);
+        ASSERT_EQ((int)row->loops, 1);
+        ASSERT_EQ((int)row->reviewed, 1);
+        ASSERT(!mvl_xp_any_provisional(&events, "alpha"));
+
+        row = mvl_xp_find(&board, "beta");
+        ASSERT(row != NULL);
+        ASSERT_EQ((int)row->xp, 50);
+        ASSERT_EQ((int)row->reviewed, 0);
+        ASSERT(mvl_xp_any_provisional(&events, "beta"));
+
+        /* M05's title names consensus, so its landed loop pays 100 x 3. */
+        row = mvl_xp_find(&board, "gamma");
+        ASSERT(row != NULL);
+        ASSERT_EQ((int)row->xp, 300);
+
+        /* The reviewer is paid 25% of each base x multiplier he reviewed:
+         * 25 for the M00 loop and 75 for the M05 loop. */
+        row = mvl_xp_find(&board, "rev1");
+        ASSERT(row != NULL);
+        ASSERT_EQ((int)row->xp, 100);
+        ASSERT_EQ((int)mvl_xp_paid(&events, "rev1", MVL_XP_KIND_REVIEW), 100);
+
+        /* Every credited event carries the evidence it was credited from. */
+        {
+            bool found = false;
+
+            for (size_t i = 0; i < events.count; i++)
+                if (strcmp(events.rows[i].agent, "gamma") == 0
+                    && strstr(events.rows[i].evidence, "22222222") != NULL
+                    && strcmp(events.rows[i].subject, "M05.F01.L01") == 0)
+                    found = true;
+            ASSERT(found);
+        }
+
+        mvl_xp_free(&board, &events);
+        mvl_outcomes_free(&outcomes);
+        mvl_agents_free(&agents);
+        mvl_plan_free(&plan);
+        test_rm_rf_recursive(tmp);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+/* A parent is closed by its OWN acceptance, and the dev.land ledger's rows
+ * cost and pay on their own terms. */
+static int test_mvp_ledger_xp_parents(void)
+{
+    int failures = 0;
+
+    TEST("feature and milestone XP are refused while their own plan line "
+         "lacks state=ACCEPTED, however many child loops landed, and are "
+         "paid once it carries it") {
+        char tmp[PATH_MAX], plan_path[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        char anc[3][MVL_ID_CAP];
+        struct mvl_plan plan = {0};
+        struct mvl_agents agents = {0};
+        struct mvl_evidence_world world = {0};
+        struct mvl_outcomes outcomes = {0};
+        struct mvl_xp_board board = {0};
+        struct mvl_xp_events events = {0};
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        mvl_write_file(tmp, "plan.md", k_xp_plan);
+        (void)snprintf(plan_path, sizeof(plan_path), "%s/plan.md", tmp);
+        memset(anc, 0, sizeof(anc));
+        mvl_xp_ancestry(anc, &world);
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_agents_alloc(&agents));
+        ASSERT(mvl_outcomes_alloc(&outcomes));
+        ASSERT(mvl_xp_alloc(&board, &events));
+        ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
+        ASSERT(mvl_compute_xp(&plan, &agents, &world, &outcomes, &board,
+                              &events, err, sizeof(err)));
+        /* Every loop of M00.F01 and of M05.F01 is landed. Neither parent
+         * line is ACCEPTED, so neither pays anything at all. */
+        ASSERT_EQ((int)mvl_xp_paid(&events, "alpha", MVL_XP_KIND_FEATURE), 0);
+        ASSERT_EQ((int)mvl_xp_paid(&events, "gamma", MVL_XP_KIND_FEATURE), 0);
+        ASSERT_EQ((int)mvl_xp_paid(&events, "alpha",
+                                   MVL_XP_KIND_MILESTONE), 0);
+        mvl_xp_free(&board, &events);
+        mvl_plan_free(&plan);
+
+        /* The same loops under an ACCEPTED feature and milestone: one
+         * author owns both loops, so he collects the whole 500 and 2000. */
+        mvl_write_file(tmp, "accepted.md", k_xp_accepted_plan);
+        (void)snprintf(plan_path, sizeof(plan_path), "%s/accepted.md", tmp);
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_xp_alloc(&board, &events));
+        ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
+        ASSERT(mvl_compute_xp(&plan, &agents, &world, &outcomes, &board,
+                              &events, err, sizeof(err)));
+        ASSERT_EQ((int)mvl_xp_paid(&events, "alpha", MVL_XP_KIND_FEATURE),
+                  500);
+        ASSERT_EQ((int)mvl_xp_paid(&events, "alpha", MVL_XP_KIND_MILESTONE),
+                  2000);
+
+        mvl_xp_free(&board, &events);
+        mvl_outcomes_free(&outcomes);
+        mvl_agents_free(&agents);
+        mvl_plan_free(&plan);
+        test_rm_rf_recursive(tmp);
+        PASS();
+    }
+
+    TEST("a failed landing costs 50 XP unless the base moved under it, and "
+         "three consecutive landings with no failure between them pay a "
+         "100 XP combo; a cancelled landing costs and pays nothing") {
+        char tmp[PATH_MAX], plan_path[PATH_MAX], out_path[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        char anc[3][MVL_ID_CAP];
+        struct mvl_plan plan = {0};
+        struct mvl_agents agents = {0};
+        struct mvl_evidence_world world = {0};
+        struct mvl_outcomes outcomes = {0};
+        struct mvl_xp_board board = {0};
+        struct mvl_xp_events events = {0};
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        mvl_write_file(tmp, "plan.md", k_xp_plan);
+        mvl_write_file(tmp, "outcomes.jsonl", k_xp_outcomes);
+        (void)snprintf(plan_path, sizeof(plan_path), "%s/plan.md", tmp);
+        (void)snprintf(out_path, sizeof(out_path), "%s/outcomes.jsonl", tmp);
+        memset(anc, 0, sizeof(anc));
+        mvl_xp_ancestry(anc, &world);
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_agents_alloc(&agents));
+        ASSERT(mvl_outcomes_alloc(&outcomes));
+        ASSERT(mvl_xp_alloc(&board, &events));
+        ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
+        ASSERT(mvl_read_outcomes(out_path, &outcomes, NULL, err,
+                                 sizeof(err)));
+        ASSERT_EQ((int)outcomes.count, 8);
+        ASSERT(outcomes.present);
+        ASSERT(mvl_compute_xp(&plan, &agents, &world, &outcomes, &board,
+                              &events, err, sizeof(err)));
+
+        /* beta's failure says head_changed: the base moved under it, which
+         * is not a mistake anyone made. No penalty row at all. */
+        ASSERT_EQ((int)mvl_xp_paid(&events, "beta", MVL_XP_KIND_PENALTY), 0);
+        /* gamma's failure is its own, and its cancelled row is free. */
+        ASSERT_EQ((int)mvl_xp_paid(&events, "gamma", MVL_XP_KIND_PENALTY),
+                  -50);
+        ASSERT_EQ((int)mvl_xp_find(&board, "gamma")->xp, 250);
+        /* alpha landed three times with nothing failed between. */
+        ASSERT_EQ((int)mvl_xp_paid(&events, "alpha", MVL_XP_KIND_COMBO), 100);
+        ASSERT_EQ((int)mvl_xp_find(&board, "alpha")->xp, 200);
+        /* A worktree under trains/<n> is the lane `Assemble train <n>`
+         * names, not the bare number the directory is called. */
+        ASSERT_EQ((int)mvl_xp_paid(&events, "train54", MVL_XP_KIND_PENALTY),
+                  -50);
+        /* That directory also holds already-prefixed names, which must not
+         * become traintrain55. */
+        ASSERT_EQ((int)mvl_xp_paid(&events, "train55", MVL_XP_KIND_PENALTY),
+                  -50);
+        ASSERT(mvl_xp_find(&board, "traintrain55") == NULL);
+
+        mvl_xp_free(&board, &events);
+        mvl_outcomes_free(&outcomes);
+        mvl_agents_free(&agents);
+        mvl_plan_free(&plan);
+        test_rm_rf_recursive(tmp);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* The token-efficiency league, and the two inputs it may not have. */
+static int test_mvp_ledger_xp_league(void)
+{
+    int failures = 0;
+
+
+    TEST("an agent with XP but no measured tokens is unranked rather than "
+         "divided by zero, and never displaces a ranked agent") {
+        char tmp[PATH_MAX], plan_path[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        char anc[3][MVL_ID_CAP];
+        char render[16384];
+        struct mvl_plan plan = {0};
+        struct mvl_agents agents = {0};
+        struct mvl_evidence_world world = {0};
+        struct mvl_outcomes outcomes = {0};
+        struct mvl_xp_board board = {0};
+        struct mvl_xp_events events = {0};
+        const struct mvl_xp_agent *row;
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        mvl_write_file(tmp, "plan.md", k_xp_plan);
+        (void)snprintf(plan_path, sizeof(plan_path), "%s/plan.md", tmp);
+        memset(anc, 0, sizeof(anc));
+        mvl_xp_ancestry(anc, &world);
+        ASSERT(mvl_plan_alloc(&plan));
+        ASSERT(mvl_agents_alloc(&agents));
+        ASSERT(mvl_outcomes_alloc(&outcomes));
+        ASSERT(mvl_xp_alloc(&board, &events));
+        ASSERT(mvl_parse_plan(plan_path, &plan, err, sizeof(err)));
+        /* Only lane alpha was measured: 200000 output tokens is exactly
+         * one million TCU, so its ratio is its XP with no rounding. */
+        (void)snprintf(agents.rows[0].agent_id,
+                       sizeof(agents.rows[0].agent_id), "a1");
+        (void)snprintf(agents.rows[0].lane,
+                       sizeof(agents.rows[0].lane), "alpha");
+        (void)snprintf(agents.rows[0].kind,
+                       sizeof(agents.rows[0].kind), "build");
+        agents.rows[0].tokens_out = 200000;
+        agents.count = 1;
+        ASSERT(mvl_compute_xp(&plan, &agents, &world, &outcomes, &board,
+                              &events, err, sizeof(err)));
+
+        row = mvl_xp_find(&board, "alpha");
+        ASSERT(row != NULL);
+        ASSERT_EQ((int)row->tcu, 1000000);
+        ASSERT_EQ(row->rank, 1);
+        ASSERT_EQ((int)mvl_xp_per_mtcu_milli(row), 100000);
+
+        /* gamma outscores alpha but spent no measured token, so it is not
+         * in the league at all. */
+        row = mvl_xp_find(&board, "gamma");
+        ASSERT(row != NULL);
+        ASSERT_EQ((int)row->xp, 300);
+        ASSERT_EQ((int)row->tcu, 0);
+        ASSERT_EQ(row->rank, 0);
+        ASSERT_EQ((int)mvl_xp_per_mtcu_milli(row), 0);
+
+        ASSERT(mvl_render_xp(&plan, &board, render, sizeof(render))
+               < sizeof(render));
+        ASSERT(strstr(render, "unranked (no TOKENS rows)") != NULL);
+        ASSERT(strstr(render, "M05 x3") != NULL);
+        ASSERT(strstr(render, "M00 x1") != NULL);
+
+        mvl_xp_free(&board, &events);
+        mvl_outcomes_free(&outcomes);
+        mvl_agents_free(&agents);
+        mvl_plan_free(&plan);
+        test_rm_rf_recursive(tmp);
+        PASS();
+    }
+
+    TEST("a missing outcomes file is a reported gap, never a crash and "
+         "never a guessed penalty") {
+        char tmp[PATH_MAX], gap_path[PATH_MAX], missing[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        struct mvl_outcomes outcomes = {0};
+        FILE *sink;
+        char *text;
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        (void)snprintf(missing, sizeof(missing), "%s/absent.jsonl", tmp);
+        (void)snprintf(gap_path, sizeof(gap_path), "%s/gap.txt", tmp);
+        sink = fopen(gap_path, "w");
+        ASSERT(sink != NULL);
+        ASSERT(mvl_outcomes_alloc(&outcomes));
+        ASSERT(mvl_read_outcomes(missing, &outcomes, sink, err,
+                                 sizeof(err)));
+        (void)fclose(sink);
+        ASSERT_EQ((int)outcomes.count, 0);
+        ASSERT(!outcomes.present);
+        text = mvl_slurp(gap_path);
+        ASSERT(text != NULL);
+        ASSERT(strstr(text, "absent.jsonl") != NULL);
+        ASSERT(strstr(text, "mvl_open") != NULL);
+        free(text);
+        mvl_outcomes_free(&outcomes);
+        test_rm_rf_recursive(tmp);
+        PASS();
+    }
+
+    TEST("tokens_extra.tsv adds an unmeasured agent's own TCU, and a file "
+         "whose header is not this build's is refused by line number") {
+        char tmp[PATH_MAX], path[PATH_MAX];
+        char err[MVL_ERR_CAP] = "";
+        struct mvl_xp_board board = {0};
+        struct mvl_xp_events events = {0};
+        const struct mvl_xp_agent *row;
+
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "mvpledger") != NULL);
+        mvl_write_file(tmp, "tokens_extra.tsv",
+                       "agent\tloop\tin\tout\tcache_write\tcache_read\tutc\n"
+                       "grok\tdelta\t0\t200000\t0\t0\t2026-09-09T01:00:00Z\n");
+        (void)snprintf(path, sizeof(path), "%s/tokens_extra.tsv", tmp);
+        ASSERT(mvl_xp_alloc(&board, &events));
+        ASSERT(mvl_read_tokens_extra(path, &board, err, sizeof(err)));
+        row = mvl_xp_find(&board, "grok");
+        ASSERT(row != NULL);
+        ASSERT_EQ((int)row->tcu, 1000000);
+        mvl_xp_free(&board, &events);
+
+        mvl_write_file(tmp, "wrong.tsv", "agent\tout\n" "grok\t1\n");
+        (void)snprintf(path, sizeof(path), "%s/wrong.tsv", tmp);
+        ASSERT(mvl_xp_alloc(&board, &events));
+        ASSERT(!mvl_read_tokens_extra(path, &board, err, sizeof(err)));
+        ASSERT(strstr(err, ":1:") != NULL);
+        ASSERT(strstr(err, "mvl_tsv_header") != NULL);
+        mvl_xp_free(&board, &events);
+        test_rm_rf_recursive(tmp);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
 int test_mvp_ledger(void)
 {
     int failures = 0;
@@ -885,5 +1341,8 @@ int test_mvp_ledger(void)
     failures += test_mvp_ledger_plan();
     failures += test_mvp_ledger_join();
     failures += test_mvp_ledger_evidence();
+    failures += test_mvp_ledger_xp();
+    failures += test_mvp_ledger_xp_parents();
+    failures += test_mvp_ledger_xp_league();
     return failures;
 }

@@ -150,12 +150,21 @@ static void mvl_title_of(const char *rest, char *dst, size_t cap)
     dst[n] = '\0';
 }
 
+/* A parent line is ACCEPTED only when its OWN state= says so. Nothing a
+ * child row carries can set this, which is the whole point of the rule. */
+static bool mvl_line_accepted(const char *line)
+{
+    char state[MVL_STATE_CAP];
+
+    if (!mvl_field(line, "state", state, sizeof state))
+        return false;
+    return strcmp(state, "ACCEPTED") == 0;
+}
+
 static bool mvl_plan_milestone(const char *line, struct mvl_plan *plan,
                                size_t line_no, char *err, size_t err_cap)
 {
     struct mvl_milestone *m;
-    char *done;
-    char title[MVL_TITLE_CAP];
 
     if (plan->milestone_count >= MVL_MAX_MILESTONES) {
         mvl_err(err, err_cap, "plan", line_no,
@@ -166,12 +175,59 @@ static bool mvl_plan_milestone(const char *line, struct mvl_plan *plan,
     memset(m, 0, sizeof *m);
     mvl_copy(m->id, sizeof m->id, line);
     m->id[3] = '\0';
-    mvl_copy(title, sizeof title, line + 4);
-    done = strstr(title, " | done=");
-    if (done)
-        *done = '\0';
-    mvl_copy(m->title, sizeof m->title, title);
+    mvl_title_of(line + 4, m->title, sizeof m->title);
+    m->line_no = line_no;
+    m->accepted = mvl_line_accepted(line);
     return true;
+}
+
+/* Records the feature line and hands back its id, which the loop rows under
+ * it compose their own ids from. A feature past the table's bound is
+ * refused rather than absorbed, exactly as a milestone is. */
+static bool mvl_plan_feature(const char *line, char *feature, size_t feat_cap,
+                             struct mvl_plan *plan, size_t line_no, char *err,
+                             size_t err_cap)
+{
+    struct mvl_feature *f;
+
+    mvl_copy(feature, feat_cap, line + 2);
+    feature[3] = '\0';
+    if (plan->feature_count >= MVL_MAX_FEATURES) {
+        mvl_err(err, err_cap, "plan", line_no,
+                "mvl_overflow: more features than MVL_MAX_FEATURES");
+        return false;
+    }
+    f = &plan->features[plan->feature_count++];
+    memset(f, 0, sizeof *f);
+    mvl_copy(f->id, sizeof f->id, feature);
+    mvl_title_of(line + 6, f->title, sizeof f->title);
+    f->line_no = line_no;
+    f->milestone = (int)plan->milestone_count - 1;
+    f->accepted = mvl_line_accepted(line);
+    return true;
+}
+
+/* The agent an `INDEPENDENT REVIEW by <agent>` note names. The phrase is
+ * matched anywhere in the row rather than inside one note= field, because a
+ * plan row carries several note= fields and a review is a review wherever
+ * the reviewer wrote it. */
+static void mvl_loop_reviewer(const char *line, char *dst, size_t cap)
+{
+    static const char k_phrase[] = "INDEPENDENT REVIEW by ";
+    const char *p = strstr(line, k_phrase);
+    size_t n = 0;
+
+    dst[0] = '\0';
+    if (!p)
+        return;
+    p += sizeof k_phrase - 1;
+    while (p[n] != '\0' && p[n] != ' ' && p[n] != ',' && p[n] != '|'
+           && p[n] != '(' && p[n] != ')')
+        n++;
+    if (n == 0 || n >= cap)
+        return;
+    memcpy(dst, p, n);
+    dst[n] = '\0';
 }
 
 static bool mvl_plan_loop(const char *line, const char *feature,
@@ -203,8 +259,10 @@ static bool mvl_plan_loop(const char *line, const char *feature,
                    plan->milestones[plan->milestone_count - 1].id, feature,
                    (int)idlen, rest);
     l->milestone = (int)plan->milestone_count - 1;
+    l->feature = plan->feature_count > 0 ? (int)plan->feature_count - 1 : -1;
     mvl_title_of(rest + idlen + (rest[idlen] == ' ' ? 1 : 0), l->title,
                  sizeof l->title);
+    mvl_loop_reviewer(line, l->reviewer, sizeof l->reviewer);
     if (!mvl_field(line, "state", state, sizeof state)
         || !mvl_field(line, "loop", l->lane, sizeof l->lane)
         || !mvl_field(line, "evidence", l->evidence, sizeof l->evidence)) {
@@ -229,11 +287,9 @@ static bool mvl_plan_line(const char *line, char *feature, size_t feat_cap,
     if (line[0] == 'M' && mvl_two_digits(line + 1) && line[3] == ' ')
         return mvl_plan_milestone(line, plan, line_no, err, err_cap);
     if (strncmp(line, "  F", 3) == 0 && mvl_two_digits(line + 3)
-        && line[5] == ' ') {
-        mvl_copy(feature, feat_cap, line + 2);
-        feature[3] = '\0';
-        return true;
-    }
+        && line[5] == ' ')
+        return mvl_plan_feature(line, feature, feat_cap, plan, line_no, err,
+                                err_cap);
     if (strncmp(line, "    L", 5) == 0 && mvl_two_digits(line + 5))
         return mvl_plan_loop(line, feature, plan, line_no, err, err_cap);
     return true;
@@ -398,4 +454,153 @@ size_t mvl_render_cost(const struct mvl_agents *agents, char *out,
                        (long long)tokens_out, (long long)tokens_in,
                        (long long)tool_uses, (long long)(wall / 3600),
                        (long long)((wall % 3600) * 10 / 3600), agents->count);
+}
+
+/* ── the XP leaderboard (mode `xp`) ───────────────────────────────────── */
+
+/* The multiplier table is printed with every leaderboard on purpose: a
+ * score whose weights are invisible cannot be checked, and these weights
+ * are derived from the plan's own milestone titles. */
+static size_t mvl_render_multipliers(const struct mvl_plan *plan,
+                                     const struct mvl_xp_board *board,
+                                     char *out, size_t cap, size_t used)
+{
+    used = mvl_appendf(out, cap, used,
+                       "multipliers (from the plan's own milestone"
+                       " titles)\n");
+    for (size_t i = 0; i < plan->milestone_count; i++) {
+        used = mvl_appendf(out, cap, used, "  %s x%d  ",
+                           plan->milestones[i].id, board->multipliers[i]);
+        used = mvl_pad(out, cap, used, plan->milestones[i].title, 56);
+        used = mvl_appendf(out, cap, used, "\n");
+    }
+    return mvl_appendf(out, cap, used, "\n");
+}
+
+static size_t mvl_render_xp_row(const struct mvl_xp_agent *a, char *out,
+                                size_t cap, size_t used)
+{
+    int64_t milli = mvl_xp_per_mtcu_milli(a);
+
+    if (a->rank > 0)
+        used = mvl_appendf(out, cap, used, "%4d ", a->rank);
+    else
+        used = mvl_appendf(out, cap, used, "   - ");
+    used = mvl_pad(out, cap, used, a->agent, 20);
+    used = mvl_appendf(out, cap, used, " %5lld %8lld %9lld %13lld  ",
+                       (long long)a->loops, (long long)a->reviewed,
+                       (long long)a->xp, (long long)a->tcu);
+    if (a->tcu <= 0)
+        return mvl_appendf(out, cap, used, "unranked (no TOKENS rows)\n");
+    return mvl_appendf(out, cap, used, "%lld.%03lld\n",
+                       (long long)(milli / 1000),
+                       (long long)(milli < 0 ? -milli % 1000 : milli % 1000));
+}
+
+/* The gaps this run could not answer. A rule that had no signal says so
+ * here rather than paying a guessed bonus or a guessed penalty. */
+static size_t mvl_render_xp_gaps(const struct mvl_xp_board *board, char *out,
+                                 size_t cap, size_t used)
+{
+    if (board->speed_asked)
+        used = mvl_appendf(out, cap, used,
+                           "speed bonus: +%d%% under the median close of"
+                           " %lld s\n", MVL_XP_SPEED_PCT,
+                           (long long)board->median_wall_s);
+    else
+        used = mvl_appendf(out, cap, used,
+                           "speed bonus: NOT ASKED — no scored loop carried"
+                           " a wall clock (no measured agents.tsv), so no"
+                           " loop was paid one\n");
+    used = mvl_appendf(out, cap, used,
+                       "origin/main-red penalty: NOT ASKED — no input this"
+                       " tool reads names an event that put origin/main"
+                       " red, so no -200 row exists\n");
+    return mvl_appendf(out, cap, used,
+                       "dev.land outcomes: %s\n",
+                       board->outcomes_present
+                           ? "read"
+                           : "ABSENT — no penalty and no combo scored");
+}
+
+size_t mvl_render_xp(const struct mvl_plan *plan,
+                     const struct mvl_xp_board *board, char *out,
+                     size_t out_cap)
+{
+    size_t used = mvl_appendf(out, out_cap, 0,
+                              "XP — verified MVP progress per token, scored"
+                              " (rules v1, evidence only)\n\n");
+
+    used = mvl_render_multipliers(plan, board, out, out_cap, used);
+    used = mvl_appendf(out, out_cap, used, "rank ");
+    used = mvl_pad(out, out_cap, used, "agent", 20);
+    used = mvl_appendf(out, out_cap, used,
+                       " loops reviewed        XP           TCU  "
+                       "xp/MTCU\n");
+    for (size_t i = 0; i < board->count; i++)
+        used = mvl_render_xp_row(&board->rows[i], out, out_cap, used);
+    used = mvl_appendf(out, out_cap, used, "\n");
+    return mvl_render_xp_gaps(board, out, out_cap, used);
+}
+
+/* A JSON string cell. Lane names are word-shaped, but a quote or a
+ * backslash arriving from a plan row must never break the object. */
+static size_t mvl_render_json_str(const char *s, char *out, size_t cap,
+                                  size_t used)
+{
+    used = mvl_appendf(out, cap, used, "\"");
+    for (size_t i = 0; s[i] != '\0'; i++) {
+        unsigned char b = (unsigned char)s[i];
+
+        if (b == '"' || b == '\\')
+            used = mvl_appendf(out, cap, used, "\\%c", (char)b);
+        else if (b < 0x20)
+            used = mvl_appendf(out, cap, used, " ");
+        else
+            used = mvl_appendf(out, cap, used, "%c", (char)b);
+    }
+    return mvl_appendf(out, cap, used, "\"");
+}
+
+static size_t mvl_render_json_agent(const struct mvl_xp_agent *a, char *out,
+                                    size_t cap, size_t used, bool first)
+{
+    used = mvl_appendf(out, cap, used, first ? "{" : ",{");
+    used = mvl_appendf(out, cap, used, "\"agent\":");
+    used = mvl_render_json_str(a->agent, out, cap, used);
+    return mvl_appendf(out, cap, used,
+                       ",\"loops\":%lld,\"reviewed\":%lld,\"xp\":%lld,"
+                       "\"tcu\":%lld,\"xp_per_mtcu_milli\":%lld,"
+                       "\"rank\":%d,\"ranked\":%s}",
+                       (long long)a->loops, (long long)a->reviewed,
+                       (long long)a->xp, (long long)a->tcu,
+                       (long long)mvl_xp_per_mtcu_milli(a), a->rank,
+                       a->rank > 0 ? "true" : "false");
+}
+
+size_t mvl_render_xp_json(const struct mvl_plan *plan,
+                          const struct mvl_xp_board *board, char *out,
+                          size_t out_cap)
+{
+    size_t used = mvl_appendf(out, out_cap, 0,
+                              "{\"kind\":\"mvp_xp_v1\",\"multipliers\":{");
+
+    for (size_t i = 0; i < plan->milestone_count; i++) {
+        used = mvl_appendf(out, out_cap, used, i == 0 ? "" : ",");
+        used = mvl_render_json_str(plan->milestones[i].id, out, out_cap,
+                                   used);
+        used = mvl_appendf(out, out_cap, used, ":%d",
+                           board->multipliers[i]);
+    }
+    used = mvl_appendf(out, out_cap, used,
+                       "},\"speed_asked\":%s,\"median_wall_s\":%lld,"
+                       "\"main_red_asked\":false,\"outcomes_present\":%s,"
+                       "\"agents\":[",
+                       board->speed_asked ? "true" : "false",
+                       (long long)board->median_wall_s,
+                       board->outcomes_present ? "true" : "false");
+    for (size_t i = 0; i < board->count; i++)
+        used = mvl_render_json_agent(&board->rows[i], out, out_cap, used,
+                                     i == 0);
+    return mvl_appendf(out, out_cap, used, "]}\n");
 }

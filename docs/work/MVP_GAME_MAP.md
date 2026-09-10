@@ -141,3 +141,111 @@ Register implemented tests in the canonical runner, prove RED before repair,
 run focused acceptance, required architecture/generated-interface gates, public
 build and lint, and obtain non-author review before integration. Keep the full
 map and launch acceptance unfinished until their actual requirements qualify.
+
+## XP rules v1
+
+The owner's KPI is VERIFIED MVP PROGRESS PER TOKEN. `z23-mvp-ledger xp`
+scores that KPI as a game so the most important work is also the
+highest-scoring work. Every point is derived from evidence a stranger can
+recheck — a commit reachable from `origin/main`, a registered sweep group, a
+`dev.land` outcome row, or an `INDEPENDENT REVIEW by <agent>` note in the
+plan of record. **XP is never hand-set**, never awarded for lines, commits,
+messages or CPU time, and never read from a `state=` a worker typed about
+its own work. A rule with no signal pays nothing and says so in the report
+rather than guessing.
+
+The agent identity is the LANE this ledger already attributes work by: a
+plan row's `loop=`, an outcome row's worktree name (`…/trains/<n>` reads as
+`train<n>`), an `agents.tsv` row's lane, a review note's named reviewer.
+
+1. **LOOP XP** — 100 per base plan loop (an `L<nn>` row, not a letter-suffixed
+   sub-row) whose `state=LANDED` and whose evidence is verified: every sha of
+   the row reachable from `origin/main`, or `ONLY=<group>` naming a group the
+   catalog at that same ref registers. Multiplied by the milestone
+   multiplier below. A verifier's LAND verdict counts toward the KPI but not
+   toward XP: it is not recheckable from the two files this tool was handed.
+2. **REVIEW XP** — a loop is REVIEWED when its plan row carries the exact
+   phrase `INDEPENDENT REVIEW by <agent>`. The reviewer earns 25% of that
+   loop's base × multiplier. An unreviewed loop pays its author only 50%,
+   and the event is marked `provisional` in `xp_events.tsv` until a review
+   note lands.
+3. **FEATURE XP** — 500 × multiplier, and ONLY when every loop under the
+   feature is verified AND the feature's own plan line carries
+   `state=ACCEPTED`. Child completion alone never closes a parent. The pot
+   is split evenly over the distinct authors under the feature.
+4. **MILESTONE XP** — 2000 × multiplier under the identical rule: every child
+   loop verified AND the milestone's own line carrying `state=ACCEPTED`.
+5. **SPEED BONUS** — +50% of base × multiplier on a loop closed in less wall
+   time than the median close of all scored loops. The clock comes from the
+   loop's joined agents, so it exists only when an `agents.tsv` was measured;
+   without it the bonus is reported NOT ASKED and nobody is paid one.
+6. **PENALTIES** — −50 per `failed` row of the `dev.land` outcome ledger whose
+   `detail` does NOT contain `head_changed` or `origin/main moved`: a base
+   that moved under a landing is not a mistake anyone made. `cancelled` rows
+   cost and pay nothing. A −200 "put origin/main red" penalty is DEFINED but
+   NOT SCORED in v1: no input this tool reads carries a red-main signal, so
+   no such row is ever written, and the leaderboard says so.
+7. **COMBO** — +100 for every 3 consecutive `landed` outcome rows by the same
+   agent, in timestamp order, with no `failed` row between them.
+8. **TOKEN-EFFICIENCY LEAGUE** — `xp_per_mtcu = XP / (TCU / 1e6)`, carried in
+   thousandths with integer arithmetic, over the same per-agent TCU the
+   `kpi` mode prices (out × 5 + in × 1 + cache_write × 1.25 + cache_read ×
+   0.1). An agent with no measured tokens prints as
+   `unranked (no TOKENS rows)` and takes no rank: a ratio with a zero
+   denominator is not a worse ratio.
+
+### The milestone multiplier table
+
+The multiplier is read from the plan's own milestone TITLE, by two keyword
+sets, and is printed with every leaderboard so it can be audited:
+
+- **×3** when the title names `consensus`, `wallet`, `custody`, `payment`,
+  `shielded`, `node`, `sync`, `store` or `reaches tip` — consensus, custody,
+  the money, and the node's own state.
+- **×2** when it names `proof`, `publication`, `receipt`, `evidence`,
+  `lifecycle` or `candidate` — the machinery correctness depends on.
+- **×1** otherwise.
+
+Against the 2026-09-08 plan of record that is:
+
+| id | multiplier | title |
+| --- | --- | --- |
+| M00 | ×1 | One launch contract and one work map |
+| M01 | ×2 | One canonical proposal and worker lifecycle |
+| M02 | ×2 | Exact, reusable proof without false green |
+| M03 | ×2 | Crash-safe publication and independent receipts |
+| M04 | ×3 | A stranger installs, connects, and reaches tip |
+| M05 | ×3 | Consensus-compatible state and fault recovery |
+| M06 | ×3 | A real shielded payment buys the exact file |
+| M07 | ×1 | Describe → reuse → create → see → keep → share |
+| M08 | ×1 | Private fleet Insight |
+| M09 | ×1 | Native platforms and transactional Control |
+| M10 | ×2 | Integrated proof under races, attacks, and load |
+| M11 | ×2 | Protected seven-day evidence and an unaided launch |
+
+A milestone renamed in the plan changes its own multiplier and nothing else.
+
+### Artifacts and inputs
+
+`xp` writes two files beside `kpi.tsv` in the `--out` directory:
+
+- `xp.tsv` — `agent loops reviewed xp tcu xp_per_mtcu rank`, one row per agent.
+- `xp_events.tsv` — `agent kind subject xp multiplier provisional evidence`,
+  one row per credited or penalized event, so every XP total walks back to
+  the commit, sweep group, outcome sequence or review note that produced it.
+
+`--json` prints the same numbers as one JSON object for a board post.
+
+Agents whose transcripts this box never held (Agent B, Grok, Codex) post
+their spend as TOKENS mail rows, folded from `<out>/tokens_extra.tsv`. Its
+header is exactly, and a different first line is refused by line number
+(`mvl_tsv_header`) rather than guessed at:
+
+```text
+agent	loop	in	out	cache_write	cache_read	utc
+```
+
+A missing plan, agents table, outcome ledger or `tokens_extra.tsv` is a
+reported gap contributing zero — never a crash, and never a guessed number.
+A malformed plan row is refused by its line number, and a malformed outcome
+row is named on stderr and skipped rather than silently dropped.

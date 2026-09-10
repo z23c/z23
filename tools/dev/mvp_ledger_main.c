@@ -15,7 +15,12 @@
 #include <string.h>
 #include <time.h>
 
-enum { MVL_RENDER_CAP = 65536 };
+enum {
+    MVL_RENDER_CAP = 65536,
+    /* The leaderboard carries one line per scored agent, and the board is
+     * bounded at MVL_MAX_XP_AGENTS rows. */
+    MVL_XP_RENDER_CAP = 1048576,
+};
 
 struct mvl_opts {
     const char *mode;
@@ -34,6 +39,8 @@ struct mvl_opts {
     const char *scratch;
     const char *groups;
     const char *lanes;
+    const char *outcomes;
+    bool json;
 };
 
 /* The evidence world, plus the tables its view points into. One loader and
@@ -76,6 +83,14 @@ static void mvl_usage(void)
 "            tokens_out tcu loops_per_mtcu tcu_per_loop note. With\n"
 "            --session it scans every listed session directly instead of\n"
 "            reading <out>/agents.tsv.\n"
+"  xp        score that same KPI as a game and print the leaderboard.\n"
+"            Writes <out>/xp.tsv (agent loops reviewed xp tcu xp_per_mtcu\n"
+"            rank) and <out>/xp_events.tsv (agent kind subject xp\n"
+"            multiplier provisional evidence), so every point walks back\n"
+"            to a commit, a sweep group, an outcome row or a review note.\n"
+"            XP is never hand-set. Rules v1 live in\n"
+"            docs/work/MVP_GAME_MAP.md; --json prints the same numbers as\n"
+"            one JSON object for a board post.\n"
 "  progress  print the per-milestone bars and the MVP bar; with --session,\n"
 "            add the cost line and the KPI line.\n"
 "\n", stdout);
@@ -115,6 +130,11 @@ static void mvl_usage(void)
 "  --scratch <dir>      holds v<lane>/VERDICT (default\n"
 "                       $HOME/.local/state/zclassic23/scratch)\n"
 "  --utc <stamp>        the appended row's timestamp (default: now)\n"
+"  --outcomes <file>    the dev.land outcome ledger `xp` reads penalties\n"
+"                       and combos from (default\n"
+"                       $HOME/.local/state/z23/dev/land/outcomes.jsonl).\n"
+"                       A missing file is a reported gap, not a refusal.\n"
+"  --json               `xp` prints one JSON object instead of the table\n"
 "\n"
 "An append refuses when the ledger's first line is not this build's header.\n"
 "Exit status is 0 only when every input parsed. Every refusal names the\n"
@@ -179,6 +199,7 @@ static bool mvl_parse_opts(int argc, char **argv, struct mvl_opts *o)
         {"--groups", offsetof(struct mvl_opts, groups)},
         {"--lanes", offsetof(struct mvl_opts, lanes)},
         {"--utc", offsetof(struct mvl_opts, utc)},
+        {"--outcomes", offsetof(struct mvl_opts, outcomes)},
     };
 
     for (int i = 2; i < argc; i++) {
@@ -189,6 +210,10 @@ static bool mvl_parse_opts(int argc, char **argv, struct mvl_opts *o)
         if (matched) {
             if (!session_ok)
                 return false;
+            continue;
+        }
+        if (strcmp(argv[i], "--json") == 0) {
+            o->json = true;
             continue;
         }
         for (size_t k = 0; k < sizeof table / sizeof table[0]; k++) {
@@ -577,6 +602,125 @@ static int mvl_mode_kpi(const struct mvl_opts *o)
     return ok ? 0 : 1;
 }
 
+/* ── mode `xp`: the same KPI, scored ──────────────────────────────────── */
+
+static void mvl_outcomes_path(const struct mvl_opts *o, char *out, size_t cap)
+{
+    const char *home = getenv("HOME");
+
+    if (o->outcomes)
+        (void)snprintf(out, cap, "%s", o->outcomes);
+    else
+        (void)snprintf(out, cap, "%s/.local/state/z23/dev/land/outcomes.jsonl",
+                       home ? home : ".");
+}
+
+/* Both machine artifacts, beside the kpi.tsv this mode is the game of.
+ * Every credited or penalized event lands in xp_events.tsv carrying the
+ * evidence it came from, so any XP row walks back to a source. */
+static bool mvl_xp_write_all(const struct mvl_opts *o,
+                             const struct mvl_xp_board *board,
+                             const struct mvl_xp_events *events, char *err,
+                             size_t err_cap)
+{
+    char path[MVL_PATH_CAP];
+
+    mvl_path(path, sizeof path, o->out, "xp.tsv");
+    if (!mvl_write_xp(path, board, err, err_cap))
+        return false;
+    mvl_path(path, sizeof path, o->out, "xp_events.tsv");
+    return mvl_write_xp_events(path, events, err, err_cap);
+}
+
+static void mvl_xp_print(const struct mvl_opts *o,
+                         const struct mvl_plan *plan,
+                         const struct mvl_xp_board *board, char *render)
+{
+    size_t want = o->json
+                  ? mvl_render_xp_json(plan, board, render, MVL_XP_RENDER_CAP)
+                  : mvl_render_xp(plan, board, render, MVL_XP_RENDER_CAP);
+
+    if (want < MVL_XP_RENDER_CAP)
+        fputs(render, stdout);
+    else
+        fprintf(stderr,
+                "z23-mvp-ledger: -:0: mvl_overflow: the leaderboard needs"
+                " %zu bytes, more than the render buffer holds\n", want);
+}
+
+/* Scores the board and writes both artifacts. Split from the mode so the
+ * mode itself stays a lifetime: allocate, run, release. */
+static bool mvl_xp_run(const struct mvl_opts *o, const struct mvl_plan *plan,
+                       const struct mvl_agents *agents,
+                       const struct mvl_world *world,
+                       struct mvl_xp_board *board,
+                       struct mvl_xp_events *events, char *err,
+                       size_t err_cap)
+{
+    struct mvl_outcomes outcomes = {0};
+    char path[MVL_PATH_CAP];
+    bool ok;
+
+    if (!mvl_outcomes_alloc(&outcomes)) {
+        (void)snprintf(err, err_cap, "-:0: mvl_overflow: no outcome table");
+        return false;
+    }
+    mvl_outcomes_path(o, path, sizeof path);
+    ok = mvl_read_outcomes(path, &outcomes, stderr, err, err_cap);
+    if (ok)
+        ok = mvl_compute_xp(plan, agents, &world->view, &outcomes, board,
+                            events, err, err_cap);
+    mvl_outcomes_free(&outcomes);
+    if (!ok)
+        return false;
+    mvl_path(path, sizeof path, o->out, "tokens_extra.tsv");
+    if (!mvl_read_tokens_extra(path, board, err, err_cap))
+        return false;
+    return mvl_xp_write_all(o, board, events, err, err_cap);
+}
+
+static int mvl_mode_xp(const struct mvl_opts *o)
+{
+    struct mvl_plan plan = {0};
+    struct mvl_agents agents = {0};
+    struct mvl_world world = {0};
+    struct mvl_xp_board board = {0};
+    struct mvl_xp_events events = {0};
+    char err[MVL_ERR_CAP] = "";
+    char *render;
+    bool ok;
+
+    if (!mvl_need(o->plan, "--plan") || !mvl_need(o->out, "--out"))
+        return 2;
+    ok = mvl_load_for_kpi(o, &plan, &agents, err, sizeof err);
+    if (ok)
+        ok = mvl_world_load(o, &world, err, sizeof err);
+    if (ok && !mvl_xp_alloc(&board, &events)) {
+        (void)snprintf(err, sizeof err, "-:0: mvl_overflow: no XP tables");
+        ok = false;
+    }
+    render = ok ? zcl_calloc(1, MVL_XP_RENDER_CAP, "mvl_xp_render") : NULL;
+    if (ok && !render) {
+        (void)snprintf(err, sizeof err, "-:0: mvl_overflow: no render buffer");
+        ok = false;
+    }
+    if (ok) {
+        ok = mvl_xp_run(o, &plan, &agents, &world, &board, &events, err,
+                        sizeof err);
+        mvl_report_sweeps(o, &plan, &world);
+    }
+    if (ok)
+        mvl_xp_print(o, &plan, &board, render);
+    else
+        fprintf(stderr, "z23-mvp-ledger: %s\n", err);
+    free(render);
+    mvl_xp_free(&board, &events);
+    mvl_world_free(&world);
+    mvl_agents_free(&agents);
+    mvl_plan_free(&plan);
+    return ok ? 0 : 1;
+}
+
 /* The cost and KPI tails `progress` prints when a session was given. */
 static bool mvl_progress_tail(const struct mvl_opts *o,
                               const struct mvl_plan *plan, char *render,
@@ -660,6 +804,8 @@ int main(int argc, char **argv)
         return mvl_mode_snapshot(&o);
     if (strcmp(o.mode, "kpi") == 0)
         return mvl_mode_kpi(&o);
+    if (strcmp(o.mode, "xp") == 0)
+        return mvl_mode_xp(&o);
     if (strcmp(o.mode, "progress") == 0)
         return mvl_mode_progress(&o);
     fprintf(stderr, "z23-mvp-ledger: unknown mode %s\n", o.mode);

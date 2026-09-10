@@ -40,6 +40,11 @@ bool mvl_check_header(const char *path, const char *want, char *err,
 /* True when `path` has no first line yet (absent, or present and empty). */
 bool mvl_ledger_is_fresh(const char *path);
 
+/* Sorts the XP board into league order and stamps every row's rank: ranked
+ * agents first by ratio, then the rows with no measured tokens, which keep
+ * rank 0 (unranked). Re-run after any fold that adds TCU. */
+void mvl_xp_rank(struct mvl_xp_board *board);
+
 /* Claims the next zeroed row of the bounded agent table. */
 struct mvl_agent *mvl_next_row(struct mvl_agents *out, char *err,
                                size_t err_cap);

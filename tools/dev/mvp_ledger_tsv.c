@@ -202,8 +202,10 @@ bool mvl_plan_alloc(struct mvl_plan *plan)
     memset(plan, 0, sizeof *plan);
     plan->milestones = zcl_calloc(MVL_MAX_MILESTONES,
                                   sizeof *plan->milestones, "mvl_milestones");
+    plan->features = zcl_calloc(MVL_MAX_FEATURES, sizeof *plan->features,
+                                "mvl_features");
     plan->loops = zcl_calloc(MVL_MAX_LOOPS, sizeof *plan->loops, "mvl_loops");
-    if (plan->milestones && plan->loops)
+    if (plan->milestones && plan->features && plan->loops)
         return true;
     mvl_plan_free(plan);
     return false;
@@ -212,6 +214,7 @@ bool mvl_plan_alloc(struct mvl_plan *plan)
 void mvl_plan_free(struct mvl_plan *plan)
 {
     free(plan->milestones);
+    free(plan->features);
     free(plan->loops);
     memset(plan, 0, sizeof *plan);
 }
@@ -259,4 +262,258 @@ bool mvl_ledger_is_fresh(const char *path)
     c = fgetc(f);
     (void)fclose(f);
     return c == EOF;
+}
+
+/* ── the XP game: bounded tables ──────────────────────────────────────── */
+
+bool mvl_xp_alloc(struct mvl_xp_board *board, struct mvl_xp_events *events)
+{
+    memset(board, 0, sizeof *board);
+    memset(events, 0, sizeof *events);
+    board->rows = zcl_calloc(MVL_MAX_XP_AGENTS, sizeof *board->rows,
+                             "mvl_xp_agents");
+    events->rows = zcl_calloc(MVL_MAX_XP_EVENTS, sizeof *events->rows,
+                              "mvl_xp_events");
+    if (!board->rows || !events->rows) {
+        mvl_xp_free(board, events);
+        return false;
+    }
+    board->cap = MVL_MAX_XP_AGENTS;
+    events->cap = MVL_MAX_XP_EVENTS;
+    return true;
+}
+
+void mvl_xp_free(struct mvl_xp_board *board, struct mvl_xp_events *events)
+{
+    free(board->rows);
+    free(events->rows);
+    memset(board, 0, sizeof *board);
+    memset(events, 0, sizeof *events);
+}
+
+bool mvl_outcomes_alloc(struct mvl_outcomes *outcomes)
+{
+    memset(outcomes, 0, sizeof *outcomes);
+    outcomes->rows = zcl_calloc(MVL_MAX_OUTCOMES, sizeof *outcomes->rows,
+                                "mvl_outcomes");
+    outcomes->cap = outcomes->rows ? MVL_MAX_OUTCOMES : 0;
+    return outcomes->rows != NULL;
+}
+
+void mvl_outcomes_free(struct mvl_outcomes *outcomes)
+{
+    free(outcomes->rows);
+    memset(outcomes, 0, sizeof *outcomes);
+}
+
+/* ── the XP game: tokens_extra.tsv ────────────────────────────────────── */
+
+enum {
+    MVL_EXTRA_COLUMNS = 7,
+    MVL_EXTRA_IN = 2,
+    MVL_EXTRA_OUT = 3,
+    MVL_EXTRA_CACHE_WRITE = 4,
+    MVL_EXTRA_CACHE_READ = 5,
+};
+
+const char *mvl_tokens_extra_header(void)
+{
+    return "agent\tloop\tin\tout\tcache_write\tcache_read\tutc";
+}
+
+/* Prices one posted row exactly as the KPI prices a measured agent, in
+ * integer hundredths, so an agent whose transcript this box never held is
+ * in the same league as one whose transcript it did. */
+static int64_t mvl_extra_tcu(char **cells)
+{
+    int64_t hundredths;
+
+    hundredths = strtoll(cells[MVL_EXTRA_OUT], NULL, 10) * MVL_TCU_OUT;
+    hundredths += strtoll(cells[MVL_EXTRA_IN], NULL, 10) * MVL_TCU_INPUT;
+    hundredths += strtoll(cells[MVL_EXTRA_CACHE_WRITE], NULL, 10)
+                  * MVL_TCU_CACHE_CREATION;
+    hundredths += strtoll(cells[MVL_EXTRA_CACHE_READ], NULL, 10)
+                  * MVL_TCU_CACHE_READ;
+    return hundredths / MVL_TCU_SCALE;
+}
+
+static bool mvl_extra_row(struct mvl_xp_board *board, char **cells)
+{
+    struct mvl_xp_agent *row = NULL;
+
+    for (size_t i = 0; i < board->count; i++)
+        if (strcmp(board->rows[i].agent, cells[0]) == 0)
+            row = &board->rows[i];
+    if (!row) {
+        if (board->count >= board->cap)
+            return false;
+        row = &board->rows[board->count++];
+        memset(row, 0, sizeof *row);
+        mvl_copy(row->agent, sizeof row->agent, cells[0]);
+    }
+    row->tcu += mvl_extra_tcu(cells);
+    return true;
+}
+
+bool mvl_read_tokens_extra(const char *path, struct mvl_xp_board *board,
+                           char *err, size_t err_cap)
+{
+    char *buf = zcl_malloc(MVL_LINE_CAP + 2, "mvl_extra_line");
+    char *cells[MVL_EXTRA_COLUMNS];
+    FILE *f;
+    size_t line_no = 0;
+    bool ok = true;
+
+    if (!buf) {
+        mvl_err(err, err_cap, path, 0, "mvl_overflow: no line buffer");
+        return false;
+    }
+    f = fopen(path, "r");
+    if (!f) {
+        free(buf);
+        return true;
+    }
+    while (ok) {
+        int rc = mvl_read_line(f, buf, MVL_LINE_CAP + 2);
+
+        if (rc == 0)
+            break;
+        line_no++;
+        if (rc < 0) {
+            mvl_err(err, err_cap, path, line_no,
+                    "mvl_line_too_long: line exceeds MVL_LINE_CAP bytes");
+            ok = false;
+            break;
+        }
+        if (line_no == 1) {
+            if (strcmp(buf, mvl_tokens_extra_header()) != 0) {
+                mvl_err(err, err_cap, path, line_no,
+                        "mvl_tsv_header: not this build's tokens_extra.tsv"
+                        " header");
+                ok = false;
+            }
+            continue;
+        }
+        if (buf[0] == '\0')
+            continue;
+        if (mvl_split(buf, cells, MVL_EXTRA_COLUMNS) != MVL_EXTRA_COLUMNS) {
+            mvl_err(err, err_cap, path, line_no,
+                    "mvl_tsv_fields: row is not 7 tab-separated cells");
+            ok = false;
+            break;
+        }
+        if (mvl_extra_row(board, cells))
+            continue;
+        mvl_err(err, err_cap, path, line_no,
+                "mvl_overflow: more agents than MVL_MAX_XP_AGENTS");
+        ok = false;
+    }
+    (void)fclose(f);
+    free(buf);
+    if (ok)
+        mvl_xp_rank(board);
+    return ok;
+}
+
+/* ── the XP game: xp.tsv and xp_events.tsv ────────────────────────────── */
+
+const char *mvl_xp_header(void)
+{
+    return "agent\tloops\treviewed\txp\ttcu\txp_per_mtcu\trank";
+}
+
+const char *mvl_xp_events_header(void)
+{
+    return "agent\tkind\tsubject\txp\tmultiplier\tprovisional\tevidence";
+}
+
+const char *mvl_xp_kind_name(enum mvl_xp_kind kind)
+{
+    switch (kind) {
+    case MVL_XP_KIND_LOOP:
+        return "loop";
+    case MVL_XP_KIND_REVIEW:
+        return "review";
+    case MVL_XP_KIND_SPEED:
+        return "speed";
+    case MVL_XP_KIND_FEATURE:
+        return "feature";
+    case MVL_XP_KIND_MILESTONE:
+        return "milestone";
+    case MVL_XP_KIND_PENALTY:
+        return "penalty";
+    case MVL_XP_KIND_COMBO:
+        return "combo";
+    case MVL_XP_KIND_COUNT:
+        break;
+    }
+    return "-";
+}
+
+bool mvl_write_xp(const char *path, const struct mvl_xp_board *board,
+                  char *err, size_t err_cap)
+{
+    FILE *f = fopen(path, "w");
+
+    if (!f) {
+        mvl_err(err, err_cap, path, 0, "mvl_open: cannot write xp.tsv");
+        return false;
+    }
+    fprintf(f, "%s\n", mvl_xp_header());
+    for (size_t i = 0; i < board->count; i++) {
+        const struct mvl_xp_agent *a = &board->rows[i];
+        int64_t milli = mvl_xp_per_mtcu_milli(a);
+        char ratio[32];
+        char rank[16];
+
+        if (a->tcu > 0)
+            (void)snprintf(ratio, sizeof ratio, "%lld.%03lld",
+                           (long long)(milli / 1000),
+                           (long long)(milli < 0 ? -milli % 1000
+                                                 : milli % 1000));
+        else
+            (void)snprintf(ratio, sizeof ratio, "unranked");
+        if (a->rank > 0)
+            (void)snprintf(rank, sizeof rank, "%d", a->rank);
+        else
+            (void)snprintf(rank, sizeof rank, "-");
+        fprintf(f, "%s\t%lld\t%lld\t%lld\t%lld\t%s\t%s\n", a->agent,
+                (long long)a->loops, (long long)a->reviewed,
+                (long long)a->xp, (long long)a->tcu, ratio, rank);
+    }
+    if (fclose(f) != 0) {
+        mvl_err(err, err_cap, path, 0, "mvl_open: xp.tsv did not close");
+        return false;
+    }
+    return true;
+}
+
+bool mvl_write_xp_events(const char *path, const struct mvl_xp_events *events,
+                         char *err, size_t err_cap)
+{
+    FILE *f = fopen(path, "w");
+
+    if (!f) {
+        mvl_err(err, err_cap, path, 0, "mvl_open: cannot write xp_events.tsv");
+        return false;
+    }
+    fprintf(f, "%s\n", mvl_xp_events_header());
+    for (size_t i = 0; i < events->count; i++) {
+        const struct mvl_xp_event *e = &events->rows[i];
+        char evidence[MVL_EVIDENCE_CAP];
+
+        mvl_copy(evidence, sizeof evidence,
+                 e->evidence[0] != '\0' ? e->evidence : "-");
+        mvl_sanitize(evidence);
+        fprintf(f, "%s\t%s\t%s\t%lld\t%d\t%s\t%s\n", e->agent,
+                mvl_xp_kind_name(e->kind), e->subject, (long long)e->xp,
+                e->multiplier, e->provisional ? "provisional" : "-",
+                evidence);
+    }
+    if (fclose(f) != 0) {
+        mvl_err(err, err_cap, path, 0,
+                "mvl_open: xp_events.tsv did not close");
+        return false;
+    }
+    return true;
 }

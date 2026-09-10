@@ -998,6 +998,7 @@ z23-mvp-ledger agents   --session <dir> --out <dir> [--lanes <dir>]
 z23-mvp-ledger loops    --plan <file>  --out <dir> [--trains <dir>] [--ancestry <file>] [--groups <file>]
 z23-mvp-ledger snapshot --plan <file>  --out <dir> [--origin-main <sha>] [--note <text>]
 z23-mvp-ledger kpi      --plan <file>  --out <dir> --since <t0> [--session <dir>]... [--ancestry <file>] [--groups <file>] [--scratch <dir>]
+z23-mvp-ledger xp       --plan <file>  --out <dir> [--session <dir>]... [--ancestry <file>] [--groups <file>] [--outcomes <file>] [--json]
 z23-mvp-ledger progress --plan <file> [--session <dir>] [--ancestry <file>] [--groups <file>]
 ```
 
@@ -1027,6 +1028,14 @@ git show origin/main:tools/dev/test_group_catalog.def > catalog.def
 - `snapshot` and `kpi` each append one row to `snapshots.tsv` / `kpi.tsv`.
   The KPI is verified MVP progress per token: base loops verified after t0,
   over the TCU the whole system spent.
+- `xp` scores that same KPI as a game and prints the leaderboard, writing
+  `xp.tsv` and `xp_events.tsv` beside `kpi.tsv`; `--json` prints the same
+  numbers as one JSON object for a board post. Every point traces to a
+  commit on `origin/main`, a registered sweep group, a dev.land outcome row
+  or an `INDEPENDENT REVIEW by <agent>` note, and XP is never hand-set. The
+  rules, the milestone multiplier table and the `tokens_extra.tsv` format
+  are stated once in [`docs/work/MVP_GAME_MAP.md`](./work/MVP_GAME_MAP.md)
+  under "XP rules v1".
 - `progress` prints the milestone bars. With `--session` it adds a cost line
   and the KPI line.
 
