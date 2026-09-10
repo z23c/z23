@@ -569,6 +569,24 @@ const char *zcl_command_status_name(enum zcl_command_status value);
  * tools/lint/file_size_policy_baseline.txt. */
 bool command_registry_devagent_input_extra_bool_key(const char *key);
 bool command_registry_devagent_input_seq_ok(const struct json_value *value);
+bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
+                                            const struct json_value *value,
+                                            bool *type_ok);
+/* Per-key JSON type/range for zcl_command_registry_input_validate().
+ * Returns true when this arm owns `key` (even if *type_ok is false). */
+bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
+                                          const char *key,
+                                          const struct json_value *value,
+                                          bool *type_ok);
+bool command_registry_input_key_declared(const struct zcl_command_spec *spec,
+                                         const struct json_value *input,
+                                         size_t i, char *why, size_t why_size);
+bool command_registry_input_type_why(const char *key,
+                                     const struct json_value *value, char *why,
+                                     size_t why_size);
+bool command_registry_input_required_discovery(
+    const struct zcl_command_spec *spec, const struct json_value *input,
+    char *why, size_t why_size);
 
 #ifdef __cplusplus
 }

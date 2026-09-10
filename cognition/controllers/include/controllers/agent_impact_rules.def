@@ -831,7 +831,7 @@ AGENT_IMPACT_RULE("tools/command/cli_render.c|tools/command/cli_render.h|tests/h
 AGENT_IMPACT_RULE("engine/models/src/principal.c|engine/models/include/models/principal.h|engine/models/src/auth_challenge.c|engine/models/include/models/auth_challenge.h", "principal_authz auth_login command_authority models make_lint_gates")
 AGENT_IMPACT_RULE("engine/models/src/authz_policy.c|engine/models/include/models/authz_policy.h|engine/services/src/auth_login_service.c|engine/services/include/services/auth_login_service.h", "principal_authz auth_login command_authority make_lint_gates")
 AGENT_IMPACT_RULE("engine/controllers/src/account_controller.c|engine/composition/commands/accounts.def", "command_authority command_registry_catalog native_api_contract make_lint_gates")
-AGENT_IMPACT_RULE("engine/modules/kernel/src/command_registry.c|engine/modules/kernel/include/kernel/command_registry.h", "command_authority command_registry_catalog command_input_bounds native_api_contract command_handler_snapshot hotswap_module make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/kernel/src/command_registry.c|engine/modules/kernel/src/command_registry_input_types.c|engine/modules/kernel/include/kernel/command_registry.h", "command_authority command_registry_catalog command_input_bounds native_api_contract command_handler_snapshot hotswap_module make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_principal_authz.c", "principal_authz make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_auth_login.c", "auth_login make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_command_authority.c", "command_authority make_lint_gates")
