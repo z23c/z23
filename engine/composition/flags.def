@@ -2046,7 +2046,7 @@ Z23_FLAG("ZCL_SHIP_PROOF_SERVER", "env_build", "-", "-",
 Z23_FLAG("ZCL_SHIP_REMOTE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/proof_server_pin.sh:5")
 Z23_FLAG("ZCL_SHIP_REMOTE_EXEC", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/ship_progress_lib.sh:824")
+          "undocumented; first use tools/scripts/ship_progress_lib.sh:973")
 Z23_FLAG("ZCL_SHIP_REMOTE_HEALTH_SECONDS", "env_build", "900", "-",
           "undocumented; first use tools/ship.sh:162")
 Z23_FLAG("ZCL_SHIP_REMOTE_SILENCE_SECONDS", "env_build", "300", "-",
@@ -2060,17 +2060,19 @@ Z23_FLAG("ZCL_SHIP_RPC_BUDGETS", "env_build", "-", "-",
 Z23_FLAG("ZCL_SHIP_STAGE_JOBS", "env_build", "4", "-",
           "undocumented; first use tools/ship.sh:215")
 Z23_FLAG("ZCL_SHIP_TEST_FAIL_ALWAYS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:73")
+          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:84")
 Z23_FLAG("ZCL_SHIP_TEST_FAIL_MARKER", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:67")
+          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:78")
 Z23_FLAG("ZCL_SHIP_TEST_FAIL_ONCE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:66")
+          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:77")
 Z23_FLAG("ZCL_SHIP_TEST_OLD", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:81")
+          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:92")
 Z23_FLAG("ZCL_SHIP_TEST_PIDFILE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:64")
+          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:74")
 Z23_FLAG("ZCL_SHIP_TEST_SOURCE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:89")
+          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:100")
+Z23_FLAG("ZCL_SHIP_TEST_STATEFILE", "env_build", "-", "-",
+          "undocumented; first use tools/ship_selftest.sh:595")
 Z23_FLAG("ZCL_SHIP_UNKNOWN_SAMPLES", "env_build", "5", "-",
           "undocumented; first use tools/ship.sh:167")
 Z23_FLAG("ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
