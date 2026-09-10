@@ -815,15 +815,23 @@ else
 fi
 buyer_match=0
 buyer_i=0
+buyer_seen=""
 while [ "$buyer_i" -lt "$buyer_n" ]; do
     if [ -n "$buyer_pref" ]; then
         buyer_at="${buyer_pref}[$buyer_i]"
     else
         buyer_at="[$buyer_i]"
     fi
-    buyer_oid="$(printf '%s' "$BUYER_ENTRY" | "$JSONQ" get "$buyer_at.offer_id")" ||
-        mkt_die "buyer market list entry mismatch: $BUYER_ENTRY"
-    if [ "$buyer_oid" = "$OFFER_ID" ]; then
+    # A row can legitimately lack offer_id: unauthenticated entries (e.g.
+    # a seller's own fast-sync bundle self-announce, filename
+    # "block_index.bin") never carry one (contexts/market/controllers/src/
+    # file_market_controller.c:95-169) and sit next to the authenticated
+    # offer row in the same list — skip such rows instead of dying.
+    buyer_oid="$(printf '%s' "$BUYER_ENTRY" | "$JSONQ" get "$buyer_at.offer_id" 2>/dev/null || true)"
+    buyer_fname="$(printf '%s' "$BUYER_ENTRY" | "$JSONQ" get "$buyer_at.filename" 2>/dev/null || true)"
+    buyer_authed="$(printf '%s' "$BUYER_ENTRY" | "$JSONQ" get "$buyer_at.authenticated" 2>/dev/null || true)"
+    buyer_seen="${buyer_seen}${buyer_seen:+, }filename=${buyer_fname:-?} authenticated=${buyer_authed:-?} offer_id=${buyer_oid:-<none>}"
+    if [ -n "$buyer_oid" ] && [ "$buyer_oid" = "$OFFER_ID" ]; then
         buyer_match=$((buyer_match + 1))
         printf '%s' "$BUYER_ENTRY" | "$JSONQ" eq "$buyer_at.root_hash" "$EXPECT_ROOT" ||
             mkt_die "buyer market list entry mismatch: $BUYER_ENTRY"
@@ -842,7 +850,8 @@ while [ "$buyer_i" -lt "$buyer_n" ]; do
     fi
     buyer_i=$((buyer_i + 1))
 done
-[ "$buyer_match" = 1 ] || mkt_die "buyer market list entry mismatch: $BUYER_ENTRY"
+[ "$buyer_match" = 1 ] ||
+    mkt_die "buyer market list entry mismatch: expected exactly one row with offer_id=$OFFER_ID, matched $buyer_match; rows seen: $buyer_seen"
 B_OFFER_ROW="$(mkt_native "$MKT_DD_B" "$B_RPC" core storage query \
     --input="{\"sql\":\"SELECT endpoint_type, peer_port FROM file_offers WHERE offer_id=x'$OFFER_ID'\"}" || true)"
 [ "$(printf '%s' "$B_OFFER_ROW" | "$JSONQ" count data.rows 2>/dev/null || true)" = "1" ] &&
