@@ -1419,7 +1419,7 @@ static int64_t dl_proof_idle_bound_s(void)
 /* Append the named-idleness note to a pending detail when the unclaimed
  * request's age crosses the idle bound. Split out so the land-side unit
  * seam can exercise exactly this judgment hermetically. */
-static void dl_proof_idle_note_append(int64_t age_s, char *detail, size_t cap)
+[[maybe_unused]] static void dl_proof_idle_note_append(int64_t age_s, char *detail, size_t cap)
 {
     if (age_s < dl_proof_idle_bound_s())
         return;
