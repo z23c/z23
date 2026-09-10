@@ -1424,12 +1424,19 @@ static void dl_proof_idle_note_append(int64_t age_s, char *detail, size_t cap)
     if (age_s < dl_proof_idle_bound_s())
         return;
     char idle[96];
-    (void)snprintf(idle, sizeof(idle),
-                   "; proof_request_idle_age_s=%lld "
-                   "(no worker has claimed the queued request)",
-                   (long long)age_s);
-    if (detail && detail[0] && cap > strlen(detail) + 1)
-        (void)strncat(detail, idle, cap - strlen(detail) - 1);
+    int wrote = snprintf(idle, sizeof(idle),
+                         "; proof_request_idle_age_s=%lld "
+                         "(no worker has claimed the queued request)",
+                         (long long)age_s);
+    if (wrote <= 0 || detail == NULL || detail[0] == '\0')
+        return;
+    size_t used = strlen(detail);
+    if (used + 1 >= cap)
+        return;
+    size_t room = cap - used - 1;
+    size_t add = (size_t)wrote < room ? (size_t)wrote : room;
+    memcpy(detail + used, idle, add);
+    detail[used + add] = '\0';
 }
 
 #if defined(ZCL_TESTING)

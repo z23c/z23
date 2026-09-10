@@ -1914,7 +1914,6 @@ engine/controllers/src/status_native_helpers.c:status_push_dumpstate_json:21
 engine/controllers/src/store_controller.c:store_handle_request:27
 engine/controllers/src/store_controller_schema.c:store_attach_content_from_path:17
 engine/controllers/src/store_controller_schema.c:store_ensure_schema:24
-engine/controllers/src/store_native_handlers.c:zcl_native_handle_store_list_product:9
 engine/controllers/src/swap_controller.c:rpc_swap_redeem:24
 engine/controllers/src/swap_controller.c:rpc_swap_refund:20
 engine/controllers/src/sync_controller_blocks.c:advance_wallet_witnesses:29
@@ -3035,7 +3034,7 @@ tests/harness/src/test_debug_bundle.c:test_debug_bundle:26
 tests/harness/src/test_dev_fleet_start.c:fsx_repo_fixture:16
 tests/harness/src/test_dev_fleet_start.c:test_dev_fleet_start:44
 tests/harness/src/test_dev_land.c:dlx_regen_conflict:21
-tests/harness/src/test_dev_land.c:test_dev_land:233
+tests/harness/src/test_dev_land.c:test_dev_land:230
 tests/harness/src/test_dev_platform.c:dp_hotswap_cache_fixture_init:17
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:60

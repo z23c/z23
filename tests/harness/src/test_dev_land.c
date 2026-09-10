@@ -3950,7 +3950,6 @@ int test_dev_land(void)
         struct dlx_call c;
         char hooks[1200], markdir[1400], marker[1440], script[1500];
         char body[64] = {0}, tip2[64];
-        bool fired = false;
         dlx_isolate("hookquiet");
         ASSERT(dlx_rig_make(&rig, "hookquiet_rig"));
         /* A post-checkout hook that records the guard env it inherited.
@@ -3998,11 +3997,11 @@ int test_dev_land(void)
          * "1". An absent marker means the hook never fired and this case
          * proved nothing; "unset" means the step leaked its transient
          * checkouts to the proof scheduler. */
-        for (int i = 0; i < 40 && !fired; i++) {
-            fired = dlx_slurp(marker, body, sizeof(body), NULL);
-            if (!fired)
-                platform_sleep_ms(50);
-        }
+        /* post-checkout is synchronous inside the step's own git calls, so
+         * the marker exists by the time the step replies — assert the
+         * outcome directly rather than poll toward a wall-clock deadline
+         * (check-no-real-clock-test-deadline exists exactly for this). */
+        char fired = dlx_slurp(marker, body, sizeof(body), NULL);
         ASSERT(fired);
         ASSERT(strcmp(body, "1") == 0);
         dlx_restore();
