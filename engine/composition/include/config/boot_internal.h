@@ -670,6 +670,19 @@ bool anchor_snapshot_verified_reachable(struct node_db *ndb,
  * park path instead of duplicating the wait loop. */
 bool boot_park_until_shutdown(const char *gate_name);
 
+/* True while g_boot_app_ctx names a live -export-consensus-bundle run.
+ * boot.c owns g_boot_app_ctx (kept static there); this accessor lets
+ * boot_refuse.c's boot_gate_export_refusal() read it without exposing the
+ * context pointer itself. Defined in boot.c. */
+bool boot_export_mode_active(void);
+
+/* Shared by boot_park_until_shutdown() (boot.c) and
+ * boot_refuse_at_permanent_gate() (boot_refuse.c): true when the gate was
+ * handled by a one-shot -export-consensus-bundle refusal, false when the
+ * caller should proceed with its own (park or refuse) behaviour. Defined in
+ * boot_refuse.c. */
+bool boot_gate_export_refusal(const char *name);
+
 /* Refuse the boot at a PERMANENT gate instead of parking at it: name the
  * blocker in boot_status.json, render one typed FATAL block carrying the
  * operator's own next command, and return false so app_init stops and main
@@ -679,7 +692,7 @@ bool boot_park_until_shutdown(const char *gate_name);
  * the node serves anything. A park sends no READY=, so under Type=notify the
  * unit sits in `activating (start)` until TimeoutStartSec — 15.9 h on a fleet
  * node — while the process answers no RPC and the operator's `systemctl
- * status` never says failed. Defined in boot.c. */
+ * status` never says failed. Defined in boot_refuse.c. */
 bool boot_refuse_at_permanent_gate(const char *gate_name, const char *message,
                                    const struct boot_error_next *next,
                                    size_t next_count, const char *evidence);
