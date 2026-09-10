@@ -158,8 +158,12 @@ uint64_t getheaders_serve_refusals_no_header_bytes(void);
  * allowance for a peer taking full 2000-header (fast-sync) pages — 30 pages x
  * 2000 headers = GETHEADERS_SERVE_HEADERS_PER_WINDOW, the actual header
  * budget for the window. A peer taking smaller pages gets proportionally
- * more requests out of the SAME header budget: same serving cost to this
- * node either way.
+ * more requests out of the SAME header budget. The realized cost is close,
+ * not equal: a fast-sync reply is byte-capped at MAX_PROTOCOL_MESSAGE_LENGTH
+ * (about 1400 Equihash headers, see getheaders_try_append_header()), so a
+ * ZCL23 window realizes ~42k headers against the legacy 60k — the legacy
+ * ceiling is the larger by ~1.4x, about 23 s of Equihash verification per
+ * 60 s window for one peer at ~385 us a header.
  *
  * It is deliberately GENEROUS against the honest pace — several scheduler
  * polls (or, for a legacy peer, several 160-header pages) land in every
@@ -171,15 +175,18 @@ uint64_t getheaders_serve_refusals_no_header_bytes(void);
  * so it dies with the connection. */
 #define GETHEADERS_SERVE_WINDOW_SECS 60
 #define GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW 30u
-#define GETHEADERS_SERVE_HEADERS_PER_WINDOW \
-    (GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW * 2000u)
-
 /* Reply page sizes the serve loop chooses between (see the reply-size
  * comment in msg_headers.c): ZCL23 peers (NODE_ZCL23 service bit, fast sync)
  * get the large page; legacy ZClassic peers (MAX_HEADERS_RESULTS=160, ban on
  * a larger inbound batch) get the small one. */
 #define GETHEADERS_SERVE_PAGE_FAST_SYNC 2000
 #define GETHEADERS_SERVE_PAGE_LEGACY 160
+
+/* The header budget is DERIVED from the fast-sync allowance and page so the
+ * three numbers cannot drift apart: 30 x 2000 = 60000 headers per window. */
+#define GETHEADERS_SERVE_HEADERS_PER_WINDOW \
+    (GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW * \
+     (unsigned)GETHEADERS_SERVE_PAGE_FAST_SYNC)
 
 /* getheaders_serve_page() — the reply page size this node uses for a peer
  * advertising `services`: GETHEADERS_SERVE_PAGE_FAST_SYNC for a ZCL23 peer,

@@ -287,6 +287,46 @@ static int64_t pd_queued_headers_count(struct p2p_node *node)
  * `buf`: locator (version + hashes) then hash_stop. The caller wraps
  * buf->data in a read view for process_getheaders and stream_free()s `buf`
  * afterwards. */
+/* D2c helper — drives a fresh ZCL23 peer through allowance+5 identical
+ * requests inside one window and reports whether its window closed at ITS
+ * OWN allowance (GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW, the fast-sync
+ * arm) while the legacy flooder's window still holds the legacy allowance.
+ * This is the one assertion that ties the gate to the requesting peer's
+ * services: a gate reading allowance(0) for everyone would hand every ZCL23
+ * peer 375 x 2000-header pages and still pass D0-D3. Kept out of the test
+ * body so the pinned test function does not grow. */
+static bool pd_zcl23_window_closes_at_own_allowance(
+    struct msg_processor *mp, struct byte_stream *req, node_id_t fast_id,
+    const struct p2p_node *flooder, int legacy_allowance)
+{
+    struct p2p_node fast;
+    pd_setup_node(&fast);
+    fast.id = fast_id;
+    fast.services = NODE_ZCL23;
+    const int fast_allowance =
+        (int)getheaders_serve_request_allowance(fast.services);
+    const int extra = 5;
+    int served = 0;
+    int deferred = 0;
+    for (int i = 0; i < fast_allowance + extra; i++) {
+        req->read_pos = 0;   /* re-send the identical request */
+        bool answered = process_getheaders(mp, &fast, req);
+        bool queued = pd_queued_headers_count(&fast) >= 0;
+        pd_drain_send_queue(&fast);
+        pd_clear_fixture_disconnect(&fast);
+        if (answered && queued)
+            served++;
+        else
+            deferred++;
+    }
+    return fast_allowance == (int)GETHEADERS_SERVE_MAX_REQUESTS_PER_WINDOW &&
+           fast_allowance < legacy_allowance && served == fast_allowance &&
+           deferred == extra &&
+           fast.getheaders_rate_window_count == (uint32_t)fast_allowance &&
+           flooder->getheaders_rate_window_count ==
+               (uint32_t)legacy_allowance;
+}
+
 static bool pd_build_getheaders(struct byte_stream *buf,
                                 const struct uint256 *locator_hashes,
                                 size_t num_hashes,
@@ -799,6 +839,14 @@ int test_getheaders_serve_pow_dedup(void)
                          other.getheaders_rate_window_count == 1 &&
                          flooder.getheaders_rate_window_count == allowance);
             }
+
+            /* D2c — the allowance is drawn from the REQUESTING peer's own
+             * services: a ZCL23 peer's window closes at 30 while the legacy
+             * flooder's holds 375 (helper above; one pin, no growth here). */
+            PD_CHECK("D2c: a ZCL23 peer's window closes at ITS allowance "
+                     "(30 pages), the legacy flooder's at 375",
+                     pd_zcl23_window_closes_at_own_allowance(
+                         &mp, &req_d, flood_id + 2, &flooder, allowance));
 
             /* D3 — expiry restores service. Backdate the window start to the
              * exact window boundary and leave the count exhausted (time

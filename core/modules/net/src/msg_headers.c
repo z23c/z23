@@ -1071,8 +1071,13 @@ int getheaders_serve_page(uint64_t services)
 
 uint32_t getheaders_serve_request_allowance(uint64_t services)
 {
-    return GETHEADERS_SERVE_HEADERS_PER_WINDOW /
-           (uint32_t)getheaders_serve_page(services);
+    /* Both pages are positive compile-time constants today; the clamp keeps
+     * a future page of zero (or a negative int) from becoming a divide by
+     * zero or an effectively unbounded allowance. */
+    int page = getheaders_serve_page(services);
+    if (page <= 0)
+        page = GETHEADERS_SERVE_PAGE_LEGACY;
+    return GETHEADERS_SERVE_HEADERS_PER_WINDOW / (uint32_t)page;
 }
 
 bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
