@@ -940,6 +940,126 @@ static bool fb_test_busy_frame(struct node_db *db, struct msg_processor *mp,
     return restored && handled && absent && unchanged && unpenalized;
 }
 
+/* node1, 2026-09-10 09:50Z: every board append failed for minutes while other
+ * subsystems held the node database's write lock, and the operator was told
+ * "missing argument" — a caller bug — for what was plain contention. Two
+ * connections reproduce that exactly: one holds the write lock, the other's
+ * append meets SQLITE_BUSY inside the insert itself, which is a different
+ * seam from an already-open transaction on this same connection. */
+static int test_fleet_board_busy_append_names_contention(void)
+{
+    int failures = 0;
+    TEST("fleet board: a write-locked database is contention, not a bad argument") {
+        char dbdir[256];
+        char dbpath[320];
+        struct node_db writer, board;
+        memset(&writer, 0, sizeof(writer));
+        memset(&board, 0, sizeof(board));
+        test_make_tmpdir(dbdir, sizeof(dbdir), "fleet_board_busy", "zcl");
+        (void)snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
+
+        ASSERT(node_db_open(&board, dbpath));
+        ASSERT(node_db_open(&writer, dbpath));
+        /* Fail fast rather than spend the production 10 s busy timeout. */
+        (void)sqlite3_busy_timeout(board.db, 0);
+        db_fleet_board_test_clear_quarantine();
+
+        uint8_t seed[32], pk[32];
+        fb_test_identity(9, seed, pk);
+        struct fleet_board_post post;
+        fb_test_compose(&post, FLEET_BOARD_KIND_NOTE, "lane-busy",
+                        "append meets a locked database", 100, 1000);
+        ASSERT_EQ(fleet_board_post_sign(&post, seed, pk), FLEET_BOARD_OK);
+
+        /* The OTHER connection holds the write lock. This board connection
+         * has no transaction of its own, so it reaches the append. */
+        ASSERT(node_db_begin_immediate(&writer));
+        struct node_db_status status;
+        node_db_get_status(&board, &status);
+        ASSERT(!status.tx_open);
+
+        bool stored = true;
+        enum fleet_board_result r =
+            db_fleet_board_post_ingest(&board, &post, 100, &stored);
+        ASSERT_STR_EQ(fleet_board_result_string(r),
+                      "board database transaction is busy");
+        ASSERT(!stored && !db_fleet_board_have(&board, post.id));
+
+        /* Contention is never quarantined: once the lock clears, the very
+         * same post appends, so the board recovers with no restart. */
+        ASSERT(node_db_rollback(&writer));
+        ASSERT_EQ(db_fleet_board_post_ingest(&board, &post, 100, &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored && db_fleet_board_have(&board, post.id));
+
+        node_db_close(&writer);
+        node_db_close(&board);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The other half of the same wedge: an append the store will refuse on every
+ * future round must not be retried forever, and must never stop the posts
+ * behind it from landing. */
+static int test_fleet_board_permanent_refusal_quarantines(void)
+{
+    int failures = 0;
+    TEST("fleet board: a permanently rejected post is quarantined, others keep landing") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        db_fleet_board_test_clear_quarantine();
+
+        uint8_t seed[32], pk[32];
+        fb_test_identity(13, seed, pk);
+        struct fleet_board_post first, poison, other;
+        fb_test_compose(&first, FLEET_BOARD_KIND_NOTE, "lane-poison",
+                        "first post by this agent", 100, 1000);
+        ASSERT_EQ(fleet_board_post_sign(&first, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &first, 100, NULL),
+                  FLEET_BOARD_OK);
+
+        /* A constraint this post can never satisfy, so the append fails
+         * identically every time gossip re-offers the id. */
+        ASSERT(node_db_exec(&db,
+            "CREATE UNIQUE INDEX fb_one_post_per_agent "
+            "ON fleet_board_posts(agent)"));
+
+        fb_test_compose(&poison, FLEET_BOARD_KIND_NOTE, "lane-poison",
+                        "second post by the same agent", 101, 1000);
+        ASSERT_EQ(fleet_board_post_sign(&poison, seed, pk), FLEET_BOARD_OK);
+        bool stored = true;
+        enum fleet_board_result r =
+            db_fleet_board_post_ingest(&db, &poison, 101, &stored);
+        /* The operator must never be told that a well-formed, signed,
+         * admissible post was a missing argument: that phrasing sent
+         * node1's wedge to entirely the wrong seam. */
+        ASSERT(strcmp(fleet_board_result_string(r), "missing argument") != 0);
+        ASSERT_EQ(r, FLEET_BOARD_ERR_STORAGE);
+        ASSERT(!stored && !db_fleet_board_have(&db, poison.id));
+
+        /* Quarantined: the refusal stands even once the constraint is gone,
+         * so gossip cannot spend every round re-failing one id. */
+        ASSERT(node_db_exec(&db, "DROP INDEX fb_one_post_per_agent"));
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &poison, 102, &stored),
+                  FLEET_BOARD_ERR_STORAGE);
+
+        /* And the board never wedged: an unrelated post still appends. */
+        fb_test_compose(&other, FLEET_BOARD_KIND_NOTE, "lane-clean",
+                        "an unrelated post still lands", 103, 1000);
+        ASSERT_EQ(fleet_board_post_sign(&other, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &other, 103, &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored && db_fleet_board_have(&db, other.id));
+
+        db_fleet_board_test_clear_quarantine();
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_board_local_capacity_does_not_score_peer(void)
 {
     int failures = 0;
@@ -1975,6 +2095,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_agents_kind();
     failures += test_fleet_board_kind_ceiling_refuses_unknown();
     failures += test_fleet_board_transaction_busy();
+    failures += test_fleet_board_busy_append_names_contention();
+    failures += test_fleet_board_permanent_refusal_quarantines();
     failures += test_fleet_board_store_boundaries();
     failures += test_fleet_board_byte_boundary();
     failures += test_fleet_board_corrupt_reads();

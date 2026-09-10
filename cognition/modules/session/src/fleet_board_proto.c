@@ -60,9 +60,12 @@ static const char *const k_result_strings[] = {
     [FLEET_BOARD_ERR_QUOTA]     =
         "this key has spent its public-post quota: too many posts in the "
         "rolling window, or too many stored for this key already",
+    [FLEET_BOARD_ERR_STORAGE]   =
+        "board storage could not append the post; the node log names the "
+        "database cause",
 };
 static_assert(sizeof k_result_strings / sizeof k_result_strings[0] ==
-                  (size_t)FLEET_BOARD_ERR_BUSY + 1u,
+                  (size_t)FLEET_BOARD_ERR_STORAGE + 1u,
               "every fleet_board_result value needs its own fixed phrase");
 
 const char *fleet_board_result_string(enum fleet_board_result r)

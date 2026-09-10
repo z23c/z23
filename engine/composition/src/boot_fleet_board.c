@@ -372,6 +372,10 @@ static bool fleet_board_ingest_refused_locally(enum fleet_board_result result)
     return result == FLEET_BOARD_ERR_CAPACITY ||
            result == FLEET_BOARD_ERR_BUSY ||
            result == FLEET_BOARD_ERR_ARGS ||
+           /* The append failed inside OUR store. The peer relayed a post
+            * that decoded, verified and passed every admission rule, so a
+            * database fault on this box must never become their offence. */
+           result == FLEET_BOARD_ERR_STORAGE ||
            /* A role is THIS box's decision about the author's key. The peer
             * that relayed the post did nothing wrong and often is not even
             * the author, so scoring it for our own policy would ban the

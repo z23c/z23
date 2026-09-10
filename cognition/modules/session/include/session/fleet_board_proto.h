@@ -150,6 +150,13 @@ enum fleet_board_result {
      * is asking — this refusal is about ONE key, not the ledger. */
     FLEET_BOARD_ERR_QUOTA,
     FLEET_BOARD_ERR_BUSY,
+    /* The post is well-formed, admissible and within quota, and the append
+     * itself failed in the store. Distinct from ERR_BUSY, which is the
+     * write lock being held right now and clears by itself, and from
+     * ERR_ARGS, which is a caller passing no post at all: this box accepted
+     * the post and could not durably record it. The store names the sqlite
+     * cause in the log; nothing about the sending peer is wrong. */
+    FLEET_BOARD_ERR_STORAGE,
 };
 
 const char *fleet_board_result_string(enum fleet_board_result r);

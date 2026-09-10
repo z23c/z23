@@ -196,6 +196,9 @@ bool fleet_board_dump_state_json(struct json_value *out, const char *key);
  * FLEET_BOARD_STORE_MAX_{POSTS,BYTES}; zero restores those defaults. */
 void db_fleet_board_test_set_store_limits(int64_t max_posts,
                                           int64_t max_bytes);
+/* Empties the permanent-refusal quarantine so one group's poisoned post does
+ * not follow the process into the next group. */
+void db_fleet_board_test_clear_quarantine(void);
 #endif
 
 #endif /* ZCL_DB_MODEL_FLEET_BOARD_POST_H */

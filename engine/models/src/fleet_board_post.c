@@ -272,8 +272,61 @@ int db_fleet_board_room_list(struct node_db *ndb,
 
 /* The AR-lifecycle insert. Split out so ingest can keep its decision logic
  * readable and its one write in one place. */
-static bool board_insert(struct node_db *ndb,
-                         const struct db_fleet_board_post *record)
+/* A post the store refused for a reason that will not change by itself.
+ * Gossip re-offers the same ids every round, so without this the board would
+ * spend every round re-failing one post. The ring is deliberately small and
+ * in-memory: it exists to stop a hot loop, not to remember a verdict, and a
+ * restart legitimately gives the post another chance. Guarded by the board
+ * write lock, which every caller below already holds. */
+#define BOARD_QUARANTINE_SLOTS 64u
+static uint8_t s_board_quarantine[BOARD_QUARANTINE_SLOTS][32];
+static unsigned s_board_quarantine_next;
+static unsigned s_board_quarantine_used;
+
+/* Caller holds the board write lock. */
+static bool board_quarantined(const uint8_t id[32])
+{
+    for (unsigned i = 0; i < s_board_quarantine_used; i++)
+        if (memcmp(s_board_quarantine[i], id, 32) == 0)
+            return true;
+    return false;
+}
+
+/* Caller holds the board write lock. */
+static void board_quarantine_add(const uint8_t id[32])
+{
+    memcpy(s_board_quarantine[s_board_quarantine_next], id, 32);
+    s_board_quarantine_next = (s_board_quarantine_next + 1u) %
+                              BOARD_QUARANTINE_SLOTS;
+    if (s_board_quarantine_used < BOARD_QUARANTINE_SLOTS)
+        s_board_quarantine_used++;
+}
+
+#ifdef ZCL_TESTING
+void db_fleet_board_test_clear_quarantine(void)
+{
+    board_write_lock();
+    s_board_quarantine_next = 0;
+    s_board_quarantine_used = 0;
+    zcl_mutex_unlock(&s_board_write_lock);
+}
+#endif
+
+/* The write lock this node holds only serialises ITS OWN board writers. The
+ * node database is shared with every other subsystem and with the runtime
+ * reopens, so a perfectly good append still meets SQLITE_BUSY when one of
+ * them holds the write lock. That is a moment to retry, not a fault in the
+ * post and not a fault in the caller's arguments. Anything else means the
+ * store rejected the row itself and re-offering it will fail identically. */
+static enum fleet_board_result board_insert_result(int rc)
+{
+    if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED)
+        return FLEET_BOARD_ERR_BUSY;
+    return FLEET_BOARD_ERR_STORAGE;
+}
+
+static bool board_insert_stmt(struct node_db *ndb,
+                              const struct db_fleet_board_post *record)
 {
     struct ar_callbacks *cbs = db_fleet_board_post_callbacks();
     struct qb q;
@@ -306,6 +359,24 @@ static bool board_insert(struct node_db *ndb,
     /* ar-lifecycle-ok:qb-adhoc-save-expands-to-AR_BEGIN_SAVE-and-AR_FINISH_SAVE */
     QB_ADHOC_SAVE(ndb, &q, s, cbs, "fleet_board_post", record,
                   db_fleet_board_post_validate);
+}
+
+/* Same append, with the database's own verdict carried back out. The two
+ * checked reads the caller runs immediately before this (have / append_fits)
+ * both complete successfully on this connection, so the connection's error
+ * code is SQLITE_OK on entry and any code left behind by a failure here is
+ * this statement's own. */
+static bool board_insert(struct node_db *ndb,
+                         const struct db_fleet_board_post *record,
+                         int *rc_out)
+{
+    if (rc_out)
+        *rc_out = SQLITE_OK;
+    if (board_insert_stmt(ndb, record))
+        return true;
+    if (rc_out)
+        *rc_out = sqlite3_errcode(ndb->db);
+    return false;
 }
 
 static bool board_aggregate_checked(struct node_db *ndb, struct qb *q,
@@ -492,6 +563,10 @@ enum fleet_board_result db_fleet_board_post_ingest(
         zcl_mutex_unlock(&s_board_write_lock);
         return FLEET_BOARD_OK;
     }
+    if (board_quarantined(post->id)) {
+        zcl_mutex_unlock(&s_board_write_lock);
+        return FLEET_BOARD_ERR_STORAGE;
+    }
     if (!board_append_fits(ndb, (int64_t)body_len)) {
         zcl_mutex_unlock(&s_board_write_lock);
         return FLEET_BOARD_ERR_CAPACITY;
@@ -509,11 +584,26 @@ enum fleet_board_result db_fleet_board_post_ingest(
     fleet_board_chain_step(record.chain_prev, record.post.id,
                            record.chain_hash);
 
-    if (!board_insert(ndb, &record)) {
-        LOG_WARN("fleet.board", "post seq=%lld could not be appended",
-                 (long long)record.seq);
+    int insert_rc = SQLITE_OK;
+    if (!board_insert(ndb, &record, &insert_rc)) {
+        enum fleet_board_result why = board_insert_result(insert_rc);
+        char id_hex[65];
+        fleet_board_id_to_hex(record.post.id, id_hex);
+        LOG_WARN("fleet.board",
+                 "post seq=%lld id=%.16s could not be appended: %s "
+                 "(sqlite rc=%d: %s)",
+                 (long long)record.seq, id_hex,
+                 fleet_board_result_string(why), insert_rc,
+                 sqlite3_errmsg(ndb->db));
+        if (why == FLEET_BOARD_ERR_STORAGE) {
+            board_quarantine_add(record.post.id);
+            LOG_WARN("fleet.board",
+                     "quarantined post id=%.16s: the store rejected it and "
+                     "will reject it again; the board keeps ingesting every "
+                     "other post", id_hex);
+        }
         zcl_mutex_unlock(&s_board_write_lock);
-        return FLEET_BOARD_ERR_ARGS;
+        return why;
     }
     zcl_mutex_unlock(&s_board_write_lock);
     if (stored_out)
