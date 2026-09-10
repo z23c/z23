@@ -1309,6 +1309,12 @@ ZCL_TEST_GROUP(astro)
  * standalone `make fbsh` artifact, deliberately not a prerequisite of
  * the test binaries) and skips when it is absent. */
 ZCL_TEST_GROUP(freebsd_sh)
+/* beta6 bootstrap serve lane: the zclassicd v2.1.2-beta6 snapshot server this
+ * node offers legacy clients. The manifest cases compare against byte vectors
+ * written out from the beta6 C++ serializer definitions rather than captured
+ * from this encoder, because a stock beta6 binary — which nobody here can
+ * change — is the only consumer that matters. */
+ZCL_TEST_GROUP(beta6_bootstrap)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)

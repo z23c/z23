@@ -164,6 +164,10 @@ static struct beta6_quota_bucket *bucket_insert(const char *key, int64_t now_ms)
     struct beta6_quota_bucket *bucket = &g_buckets[g_bucket_count++];
     memset(bucket, 0, sizeof(*bucket));
     snprintf(bucket->key, sizeof(bucket->key), "%s", key);
+    /* Stamp the window at insertion rather than leaving it 0 and treating 0 as
+     * "fresh" later: a caller whose clock origin IS 0 would otherwise reset
+     * the counter on every charge and never reach its cap. */
+    bucket->window_start_ms = now_ms;
     bucket->used = true;
     return bucket;
 }
@@ -208,8 +212,7 @@ void beta6_bs_quota_charge(const char *key, bool whitelisted, int64_t now_ms,
     struct beta6_quota_bucket *bucket = bucket_find(key);
     if (!bucket)
         bucket = bucket_insert(key, now_ms);
-    if (bucket->window_start_ms == 0 ||
-        now_ms - bucket->window_start_ms >= BETA6_BS_QUOTA_WINDOW_MS) {
+    if (now_ms - bucket->window_start_ms >= BETA6_BS_QUOTA_WINDOW_MS) {
         bucket->window_start_ms = now_ms;
         bucket->bytes_served = 0;
         bucket->next_allowed_ms = 0;

@@ -28,13 +28,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* A flag's value from argv, else its environment fallback, else "". */
-static const char *flag_or_env(const char *flag, const char *env_name)
+/* A flag's value from argv, else its environment fallback, else "".
+ *
+ * The caller passes the already-read environment value rather than its name so
+ * the getenv("ZCL_...") text stays at the call site, where the closed flag
+ * catalog (tools/lint/lintc/gate_flag_registry.c) can see which flags this
+ * file actually reads. */
+static const char *flag_or_env(const char *flag, const char *from_env)
 {
     const char *value = GetArg(flag, NULL);
     if (value && value[0])
         return value;
-    const char *from_env = getenv(env_name);
     return from_env ? from_env : "";
 }
 
@@ -64,7 +68,7 @@ static bool boot_beta6_bootstrap_start(void *ctx)
         return true;
 
     const char *source =
-        flag_or_env("-beta6-bootstrap-source", "ZCL_BETA6_BOOTSTRAP_SOURCE");
+        flag_or_env("-beta6-bootstrap-source", getenv("ZCL_BETA6_BOOTSTRAP_SOURCE"));
     if (!source[0])
         return true;
 
@@ -80,7 +84,7 @@ static bool boot_beta6_bootstrap_start(void *ctx)
              (unsigned long long)manifest->snapshot_bytes);
 
     const char *listen =
-        flag_or_env("-beta6-bootstrap-listen", "ZCL_BETA6_BOOTSTRAP_LISTEN");
+        flag_or_env("-beta6-bootstrap-listen", getenv("ZCL_BETA6_BOOTSTRAP_LISTEN"));
     if (!listen[0]) {
         LOG_INFO("beta6boot",
                  "no -beta6-bootstrap-listen=<ip>:<port>; snapshot armed but not served");

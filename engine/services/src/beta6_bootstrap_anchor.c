@@ -179,17 +179,10 @@ bool beta6_bs_source_paths_exist(const char *source_dir)
            dir_exists(source_dir, "chainstate");
 }
 
-bool beta6_bs_is_data_path(const char *relative_path)
+/* Every "/"-separated component is non-empty and is neither "." nor ".."
+ * (IsSafeBootstrapSnapshotPath, bootstrap.cpp:3374-3387). */
+static bool components_are_safe(const char *relative_path)
 {
-    if (!relative_path || relative_path[0] == '\0' || relative_path[0] == '/')
-        return false;
-    if (strlen(relative_path) >= BETA6_BS_MAX_PATH_LEN)
-        return false;
-    if (strchr(relative_path, '\\'))
-        return false;
-
-    /* No "." or ".." component, and no empty component (a "//" run).
-     * IsSafeBootstrapSnapshotPath, bootstrap.cpp:3374-3387. */
     const char *segment = relative_path;
     while (*segment) {
         const char *end = strchr(segment, '/');
@@ -203,6 +196,19 @@ bool beta6_bs_is_data_path(const char *relative_path)
             break;
         segment = end + 1;
     }
+    return true;
+}
+
+bool beta6_bs_is_data_path(const char *relative_path)
+{
+    if (!relative_path || relative_path[0] == '\0' || relative_path[0] == '/')
+        return false;
+    if (strlen(relative_path) >= BETA6_BS_MAX_PATH_LEN)
+        return false;
+    if (strchr(relative_path, '\\'))
+        return false;
+    if (!components_are_safe(relative_path))
+        return false;
 
     /* First component must be blocks or chainstate. */
     return strncmp(relative_path, "blocks/", 7) == 0 ||

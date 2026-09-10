@@ -131,3 +131,97 @@ shows the assisted seed being accepted:
 - **One-archive form (future).** Today a release ships the two payload files plus
   `SHA256SUMS` + `manifest.json` side by side; a single bundled archive may be
   added later. The drop-in-and-boot flow above is unchanged either way.
+
+## Serving beta6 clients
+
+Everything above is about a **z23** node bootstrapping itself. This section is
+the other direction: a z23 node acting as the fast-sync **server** for the
+legacy `zclassicd v2.1.2-beta6` client.
+
+beta6 ships a fast-bootstrap path of its own. Its client dials a compiled
+bootstrap peer, requires that peer's `version` to advertise the
+`NODE_BOOTSTRAP` service bit (`1 << 24`), and then drives eight messages over
+that socket — `getbsman`/`bsman` and `getbschk`/`bschk` for the chain snapshot,
+`getbspman`/`bspman` and `getbspchk`/`bspchk` for the zk-SNARK parameter files.
+When the peer does not advertise the bit, the client logs
+
+```
+bootstrap peer does not advertise NODE_BOOTSTRAP
+```
+
+three times and falls back to a multi-day peer-to-peer sync. A beta6 user who
+appears "stuck at 13%" is on that fallback.
+
+z23 can answer those eight messages byte for byte. It is **off unless
+configured**: no flag, no advertised bit, no listener, no behaviour change.
+
+### Enabling it
+
+```sh
+z23 \
+  -beta6-bootstrap-source=/absolute/path/to/snapshot \
+  -beta6-bootstrap-listen=<bind-ip>:<port>
+```
+
+Both accept an environment fallback (`ZCL_BETA6_BOOTSTRAP_SOURCE`,
+`ZCL_BETA6_BOOTSTRAP_LISTEN`). Set only the source and the snapshot is armed
+and described in `core sync status` but never served; the listener is what puts
+it on the wire.
+
+### What the source directory must contain
+
+The path must be **absolute** and must hold the three subtrees the beta6 server
+preflight requires:
+
+```
+<source>/blocks/
+<source>/blocks/index/
+<source>/chainstate/
+```
+
+Three optional sidecars sit **beside** the directory, never inside it, so the
+manifest scan cannot pick them up:
+
+| sidecar | contents | effect |
+| --- | --- | --- |
+| `<source>.anchor` | `<height> <blockhash>` | serve as a v1 anchor snapshot; the pair must name a **compiled** beta6 fast-sync anchor |
+| `<source>.meta` | `<height> <blockhash> <chainstate-commitment>` | serve as a v2 self-snapshot with its own chainstate commitment |
+| `<source>.blocktip` | `<height> <blockhash>` | when above the anchor, serve a v3 manifest advertising the post-anchor block bundle |
+
+Refusals are by name. An `.anchor` naming a height/hash pair that is not a
+compiled anchor is **refused**, not silently downgraded — a client that trusted
+a fabricated anchor would install unverifiable state.
+
+The directory is opened read-only. Nothing in this path ever writes into it, so
+it is safe to point at a copy that another process is reading.
+
+### What the node does with it
+
+At startup — once, never per request — the node walks the tree, SHA-256s every
+file, and caches the manifest. Requests are then answered from that cache:
+every chunk is a single bounded positioned read of at most 1 MiB, and no file
+is ever loaded into memory. Because the cached manifest bytes are shared by
+every connection, the up-to-four parallel streams a beta6 client opens all see
+the byte-identical manifest they require.
+
+Serving is metered per client address group (IPv4 `/24`, IPv6 `/64`) against a
+rolling 24-hour cap with a bandwidth throttle, matching the legacy server's
+accounting.
+
+`core sync status` reports the state under `beta6_snapshot_bootstrap`:
+`serving` flips true when the listener is up, `current_blocker` empties, and
+the object carries the source directory plus the manifest's height, file count
+and byte total. While the source is unset the blocker reads
+`beta6_bootstrap_source_not_configured`; with a source but no listener it reads
+`beta6_bootstrap_listen_not_configured`.
+
+### Deployment note
+
+beta6's compiled bootstrap peers are contacted on the ordinary P2P port, and a
+stock beta6 client will only fast-sync from a peer it reaches there. z23's own
+peer-to-peer listener owns that port, and its `version` message is built in the
+sealed consensus core, so this server is a **separate socket**: to serve stock
+clients without modification, give it the P2P port on its own address or
+interface (or move z23's P2P listener elsewhere on that host). On any other
+port it is reachable only by a client explicitly pointed at it with
+`-bootstrappeer=<ip>:<port>`, which is the shape used for testing.

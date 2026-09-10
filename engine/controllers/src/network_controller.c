@@ -374,6 +374,30 @@ static void network_push_state_source(struct json_value *result)
     json_free(&src);
 }
 
+/* NODE_BOOTSTRAP as a beta6 client sees it. The beta6 snapshot service runs on
+ * its own listener (engine/services/src/beta6_bootstrap_listen.c), and the
+ * version message that listener sends is where the bit is actually advertised
+ * — so a running listener IS this node advertising it, whether or not the
+ * ordinary P2P connman also carries the bit. */
+static bool beta6_advertises_node_bootstrap(uint64_t local_services, bool listening)
+{
+    return (local_services & NODE_BOOTSTRAP) != 0 || listening;
+}
+
+/* The single named fact keeping this node from serving beta6 clients, in the
+ * order an operator has to fix them; empty while it is serving.
+ * `posture_blocker` is NULL when the security posture allows public serving. */
+static const char *beta6_current_blocker(bool serving, const char *posture_blocker)
+{
+    if (serving)
+        return "";
+    if (posture_blocker)
+        return posture_blocker;
+    if (!beta6_bs_is_armed())
+        return "beta6_bootstrap_source_not_configured";
+    return "beta6_bootstrap_listen_not_configured";
+}
+
 /* What this node would actually hand a beta6 client: which directory is armed
  * and what the cached manifest says it covers. Present (with an empty source
  * and -1 height) even when dormant, so an operator can tell "not configured"
@@ -415,14 +439,9 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     bool has_connman = ctx->connman != NULL;
     bool node_network = (counts.local_services & NODE_NETWORK) != 0;
     bool node_zcl23 = (counts.local_services & NODE_ZCL23) != 0;
-    /* The beta6 snapshot service runs on its own listener (see
-     * engine/services/src/beta6_bootstrap_listen.c), and the version message
-     * that listener sends is where NODE_BOOTSTRAP is actually advertised — so
-     * a running listener IS this node advertising the bit to beta6 clients,
-     * whether or not the ordinary P2P connman also carries it. */
     bool beta6_listening = beta6_bs_listen_running();
     bool node_bootstrap =
-        (counts.local_services & NODE_BOOTSTRAP) != 0 || beta6_listening;
+        beta6_advertises_node_bootstrap(counts.local_services, beta6_listening);
     bool protocol_ok = PROTOCOL_VERSION >= MIN_PEER_PROTO_VERSION;
     bool listening = counts.listen_socket_count > 0;
     bool has_tip = advertised_height > 0;
@@ -594,11 +613,10 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     json_push_kv_int(&beta6, "chunk_size_bytes", BETA6_BS_CHUNK_SIZE);
     network_push_beta6_source(&beta6);
     json_push_kv_str(&beta6, "current_blocker",
-                     beta6_fast ? "" :
-                     !security_posture_ok ? security_posture.status :
-                     !beta6_bs_is_armed()
-                         ? "beta6_bootstrap_source_not_configured" :
-                     "beta6_bootstrap_listen_not_configured");
+                     beta6_current_blocker(beta6_fast,
+                                           security_posture_ok
+                                               ? NULL
+                                               : security_posture.status));
     json_push_str_array(&beta6, "messages", beta6_msgs,
                         sizeof(beta6_msgs) / sizeof(beta6_msgs[0]));
     json_push_kv(result, "beta6_snapshot_bootstrap", &beta6);
