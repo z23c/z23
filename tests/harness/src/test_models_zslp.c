@@ -3,8 +3,123 @@
 
 #include "test/test_core.h"
 #include "models/zslp.h"
+#include "models/zslp_validity.h"
 #include "services/zslp_service.h"
+#include "core/uint256.h"
 #include <unistd.h>
+
+
+/* ── One identity, one byte order ──────────────────────────────────
+ *
+ * A chain token id IS its GENESIS txid, and every wallet-facing surface
+ * speaks that txid's DISPLAY order: the intent service answers
+ * app.tokens.create with uint256_get_hex (contexts/market/services/src/
+ * zslp_transaction_intent_service.c), app.tokens.mint/send/burn parse the
+ * answer back with uint256_set_hex (contexts/market/controllers/src/
+ * zslp_intent_controller.c), and the store access gate keys the ledger the
+ * same way (engine/controllers/src/store_access_gate.c). The projection
+ * reads below must render the SAME string. When they render the stored
+ * blob forward instead, an operator who pastes a listed id into mint names
+ * a DIFFERENT token, and zslp_controller_render_validity — which recovers
+ * the 32 bytes from this very field with uint256_set_hex — looks up the
+ * mirrored key and reports validated_height=-1 with every strict column
+ * dead for a token that really minted. */
+
+static void tzslp_hex_forward(const uint8_t *bytes, size_t n, char *out)
+{
+    for (size_t i = 0; i < n; i++)
+        snprintf(out + i * 2, 3, "%02x", bytes[i]);
+    out[n * 2] = '\0';
+}
+
+/* Seed the two strict-overlay rows a confirmed GENESIS of 1000 units with a
+ * live mint baton leaves behind, keyed the way the overlay keys them: the
+ * 32 internal bytes. */
+static bool tzslp_seed_strict_rows(struct node_db *ndb,
+                                   const uint8_t token[32],
+                                   const uint8_t txid[32], int height)
+{
+    char token_hex[65];
+    char txid_hex[65];
+    char sql[512];
+
+    tzslp_hex_forward(token, 32, token_hex);
+    tzslp_hex_forward(txid, 32, txid_hex);
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO zslp_validity(txid,token_id,tx_type,status,reason,"
+             "block_height,input_units,output_units,burned_units,"
+             "minted_units,baton_vout) "
+             "VALUES(x'%s',x'%s',1,1,'',%d,0,1000,0,1000,2)",
+             txid_hex, token_hex, height);
+    if (!node_db_exec(ndb, sql))
+        return false;
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO zslp_ledger(token_id,txid,vout,amount,address,"
+             "created_height,role) VALUES(x'%s',x'%s',2,0,NULL,%d,2)",
+             token_hex, txid_hex, height);
+    return node_db_exec(ndb, sql);
+}
+
+/* Every projection read renders the one display-order id, and accepts it
+ * back as a lookup key. Returns NULL on success, else what diverged. */
+static const char *tzslp_check_display_identity(struct node_db *ndb,
+                                                const uint8_t token[32],
+                                                const uint8_t txid[32],
+                                                const char *want,
+                                                const char *want_txid)
+{
+    struct db_zslp_token_info found;
+    struct db_zslp_token_info listed[4];
+    struct db_zslp_transfer_info xfers[4];
+
+    memset(&found, 0, sizeof(found));
+    memset(listed, 0, sizeof(listed));
+    memset(xfers, 0, sizeof(xfers));
+
+    if (!db_zslp_token_find(ndb, want, &found))
+        return "db_zslp_token_find rejects the id app.tokens.create answered";
+    if (strcmp(found.token_id, want) != 0)
+        return "db_zslp_token_find renders a different id than create answered";
+    if (db_zslp_token_list(ndb, listed, 4) != 1)
+        return "db_zslp_token_list did not return the one saved token";
+    if (strcmp(listed[0].token_id, want) != 0)
+        return "db_zslp_token_list renders a different id than create answered";
+    memset(&found, 0, sizeof(found));
+    if (db_zslp_asset_lookup(ndb, token, &found) != 1)
+        return "db_zslp_asset_lookup did not find the chain asset";
+    if (strcmp(found.token_id, want) != 0)
+        return "db_zslp_asset_lookup renders a different id than create answered";
+    if (db_zslp_transfer_list_by_token(ndb, want, xfers, 4) != 1)
+        return "db_zslp_transfer_list_by_token rejects the created id";
+    if (strcmp(xfers[0].token_id, want) != 0)
+        return "a transfer row renders a different id than create answered";
+    if (strcmp(xfers[0].txid, want_txid) != 0)
+        return "a transfer row renders its txid in the wrong byte order";
+    (void)txid;
+    return NULL;
+}
+
+/* Exactly what zslp_controller_render_validity does with the rendered
+ * field: recover the 32 bytes and read the strict overlay. */
+static const char *tzslp_check_strict_columns(struct node_db *ndb,
+                                              const char *rendered,
+                                              int height)
+{
+    struct uint256 recovered;
+    struct zslp_token_validity_summary strict;
+
+    uint256_set_hex(&recovered, rendered);
+    memset(&strict, 0, sizeof(strict));
+    if (!zslp_validity_token_summary(ndb, recovered.data, &strict))
+        return "zslp_validity_token_summary failed for the rendered id";
+    if (strict.validated_height != height)
+        return "validity render reports validated_height=-1 for a minted token";
+    if (strict.total_minted != 1000 || strict.circulating_supply != 1000)
+        return "validity render reports zero strict minted/circulating units";
+    if (!strict.baton_active)
+        return "validity render reports no mint baton for a live baton";
+    return NULL;
+}
 
 int test_model_zslp(void)
 {
@@ -292,6 +407,65 @@ int test_model_zslp(void)
         if (!zslp_service_validate_token_key("ZCL-23").ok)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("ZSLP projection renders the id app.tokens.create answered... ");
+    {
+        char dbdir[256];
+        char dbpath[320];
+        struct node_db ndb;
+        const char *why = NULL;
+        bool ok;
+        test_make_tmpdir(dbdir, sizeof(dbdir), "models_zslp", "display_order");
+        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
+        memset(&ndb, 0, sizeof(ndb));
+        ok = node_db_open(&ndb, dbpath);
+        if (!ok)
+            why = "node_db_open failed";
+
+        if (ok) {
+            /* Deliberately NOT a palindrome: a byte-reversed rendering of
+             * this id is a visibly different string. */
+            struct uint256 token_u;
+            struct uint256 txid_u;
+            uint8_t addr_hash[20];
+            char want[65];
+            char want_txid[65];
+
+            for (int i = 0; i < 32; i++) {
+                token_u.data[i] = (uint8_t)(0x10 + i);
+                txid_u.data[i] = (uint8_t)(0xf0 - i);
+            }
+            memset(addr_hash, 0x44, sizeof(addr_hash));
+            /* The exact string zti_view answers for a GENESIS intent. */
+            uint256_get_hex(&token_u, want);
+            uint256_get_hex(&txid_u, want_txid);
+
+            if (!db_zslp_token_save(&ndb, token_u.data, "OPPROOF",
+                                    "Operator Proof Token", 0, "", 100, 1000))
+                why = "db_zslp_token_save failed";
+            else if (!db_zslp_transfer_save(&ndb, txid_u.data, 100,
+                                            token_u.data, 1, 1000, 1,
+                                            addr_hash))
+                why = "db_zslp_transfer_save failed";
+            else if (!tzslp_seed_strict_rows(&ndb, token_u.data, txid_u.data,
+                                             100))
+                why = "seeding the strict overlay rows failed";
+            else if ((why = tzslp_check_display_identity(
+                          &ndb, token_u.data, txid_u.data, want,
+                          want_txid)) != NULL)
+                ok = false;
+            else if ((why = tzslp_check_strict_columns(&ndb, want, 100)) !=
+                     NULL)
+                ok = false;
+            node_db_close(&ndb);
+        }
+
+        char cmd[384];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", dbdir);
+        system(cmd);
+        if (!why) printf("OK\n");
+        else { printf("FAIL (%s)\n", why); failures++; }
     }
 
     return failures;
