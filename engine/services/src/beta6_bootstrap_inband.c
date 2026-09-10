@@ -38,11 +38,11 @@
 #include "net/protocol.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "platform/clock.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 /* protocol.h:REJECT_INVALID — the code a beta6 client prints beside the
  * reason string when it logs "bootstrap peer rejected <cmd>: <reason>". */
@@ -67,9 +67,11 @@ static bool send_reply(struct msg_processor *mp, struct p2p_node *node,
                        size_t payload_len)
 {
     if (payload_len > BETA6_BS_MAX_MESSAGE_LEN)
-        return false;
+        LOG_FAIL("beta6boot", "beta6 %s reply of %zu bytes is over the message cap",
+                 command, payload_len);
     if (!p2p_node_begin_message(node, command, mp->params->pchMessageStart))
-        return false;
+        LOG_FAIL("beta6boot", "could not begin the beta6 %s reply to peer %s", command,
+                 node->addr_name);
     if (payload_len > 0)
         p2p_node_write_message_data(node, payload, payload_len);
     return p2p_node_end_message(node);
@@ -108,7 +110,7 @@ static bool peer_quota_key(const struct p2p_node *node, char *out, size_t out_si
     char ip[64] = { 0 };
     if (net_addr_to_string(&node->addr.svc.addr, ip, sizeof(ip)) <= 0)
         return false;
-    return beta6_bs_quota_key(ip, out, out_size);
+    return beta6_bs_quota_key(ip, out, out_size).ok;
 }
 
 /* ── serve handlers ──────────────────────────────────────────────────── */
@@ -123,15 +125,15 @@ static bool serve_snapshot_manifest(struct msg_processor *mp, struct p2p_node *n
 static bool serve_param_manifest(struct msg_processor *mp, struct p2p_node *node)
 {
     struct beta6_bs_manifest manifest;
-    char err[256] = { 0 };
-    if (!beta6_bs_param_manifest(s_params_dir, s_network, &manifest, err, sizeof(err))) {
+    struct zcl_result built = beta6_bs_param_manifest(s_params_dir, s_network, &manifest);
+    if (!built.ok) {
         LOG_INFO("beta6boot", "peer %s: no zcash params to serve: %s", node->addr_name,
-                 err);
-        return send_reject(mp, node, "getbspman", err);
+                 built.message);
+        return send_reject(mp, node, "getbspman", built.message);
     }
     struct byte_stream out;
     stream_init(&out, 4096);
-    bool ok = beta6_bs_manifest_encode(&manifest, &out) &&
+    bool ok = beta6_bs_manifest_encode(&manifest, &out).ok &&
               send_reply(mp, node, "bspman", out.data, out.size);
     stream_free(&out);
     beta6_bs_manifest_free(&manifest);
@@ -144,9 +146,25 @@ static bool decode_chunk_request(const unsigned char *payload, size_t payload_le
 {
     struct byte_stream in;
     stream_init_from_data(&in, payload, payload_len);
-    bool ok = beta6_bs_chunk_request_decode(&in, request) && stream_remaining(&in) == 0;
+    bool ok = beta6_bs_chunk_request_decode(&in, request).ok && stream_remaining(&in) == 0;
     stream_free(&in);
     return ok && request->length > 0 && request->length <= BETA6_BS_CHUNK_SIZE;
+}
+
+/* Charge the peer's bucket, or name the refusal. The in-band path NEVER
+ * spaces a send out — it runs on the shared message thread — so both quota
+ * codes come back here as one prompt refusal. */
+static bool quota_admits(const struct p2p_node *node, uint32_t bytes)
+{
+    char quota_key[80] = { 0 };
+    if (!peer_quota_key(node, quota_key, sizeof(quota_key)))
+        return true; /* an unaddressable peer is charged to no bucket */
+    int64_t now_ms = clock_now_wall_ms();
+    struct zcl_result allowed = beta6_bs_quota_check(quota_key, node->whitelisted, now_ms);
+    if (!allowed.ok)
+        return false;
+    beta6_bs_quota_charge(quota_key, node->whitelisted, now_ms, bytes);
+    return true;
 }
 
 static bool serve_chunk(struct msg_processor *mp, struct p2p_node *node,
@@ -158,39 +176,31 @@ static bool serve_chunk(struct msg_processor *mp, struct p2p_node *node,
         LOG_INFO("beta6boot", "peer %s: malformed %s", node->addr_name, command);
         return send_reject(mp, node, command, "malformed bootstrap chunk request");
     }
-
-    char quota_key[80] = { 0 };
-    bool stop = false;
-    if (peer_quota_key(node, quota_key, sizeof(quota_key))) {
-        int64_t now_ms = (int64_t)time(NULL) * 1000;
-        if (!beta6_bs_quota_allow(quota_key, node->whitelisted, now_ms, &stop)) {
-            LOG_INFO("beta6boot", "peer %s: %s refused, over the daily serve cap",
-                     node->addr_name, command);
-            return send_reject(mp, node, command,
-                               "over the daily beta6 bootstrap serve cap");
-        }
-        beta6_bs_quota_charge(quota_key, node->whitelisted, now_ms, request.length);
+    if (!quota_admits(node, request.length)) {
+        LOG_INFO("beta6boot", "peer %s: %s refused, over the daily serve cap",
+                 node->addr_name, command);
+        return send_reject(mp, node, command, "over the daily beta6 bootstrap serve cap");
     }
 
     unsigned char *data = zcl_malloc(request.length, "beta6 inband chunk");
     if (!data)
-        return false;
-    char err[256] = { 0 };
-    bool read_ok = params ? beta6_bs_read_param_chunk(s_params_dir, s_network, &request,
-                                                      data, request.length, err,
-                                                      sizeof(err))
-                          : beta6_bs_read_chunk(&request, data, request.length, err,
-                                                sizeof(err));
-    if (!read_ok) {
-        LOG_INFO("beta6boot", "peer %s: %s refused: %s", node->addr_name, command, err);
+        LOG_FAIL("beta6boot", "out of memory for a %u byte beta6 chunk",
+                 (unsigned)request.length);
+    struct zcl_result chunk = params ? beta6_bs_read_param_chunk(s_params_dir, s_network,
+                                                                 &request, data,
+                                                                 request.length)
+                                     : beta6_bs_read_chunk(&request, data, request.length);
+    if (!chunk.ok) {
+        LOG_INFO("beta6boot", "peer %s: %s refused: %s", node->addr_name, command,
+                 chunk.message);
         free(data);
-        return send_reject(mp, node, command, err);
+        return send_reject(mp, node, command, chunk.message);
     }
 
     struct byte_stream out;
     stream_init(&out, request.length + 32);
     bool ok = beta6_bs_chunk_encode(request.file_index, request.offset, data,
-                                    request.length, &out) &&
+                                    request.length, &out).ok &&
               send_reply(mp, node, params ? "bspchk" : "bschk", out.data, out.size);
     stream_free(&out);
     free(data);
@@ -199,15 +209,10 @@ static bool serve_chunk(struct msg_processor *mp, struct p2p_node *node,
 
 /* ── seam ────────────────────────────────────────────────────────────── */
 
-bool beta6_bs_inband_serve(struct msg_processor *mp, struct p2p_node *node,
-                           const char *command, const unsigned char *payload,
-                           size_t payload_len)
+static bool inband_dispatch(struct msg_processor *mp, struct p2p_node *node,
+                            const char *command, const unsigned char *payload,
+                            size_t payload_len)
 {
-    if (!mp || !mp->params || !node || !command)
-        return true;
-    if (!s_ready || !beta6_bs_is_armed())
-        return send_reject(mp, node, command, "beta6 bootstrap serving is not armed");
-
     if (strcmp(command, "getbsman") == 0)
         return serve_snapshot_manifest(mp, node);
     if (strcmp(command, "getbspman") == 0)
@@ -225,39 +230,62 @@ bool beta6_bs_inband_serve(struct msg_processor *mp, struct p2p_node *node,
     return true;
 }
 
-bool beta6_bs_inband_armed(void)
+struct zcl_result beta6_bs_inband_serve(struct msg_processor *mp, struct p2p_node *node,
+                                        const char *command,
+                                        const unsigned char *payload,
+                                        size_t payload_len)
 {
-    return s_ready && beta6_bs_is_armed();
+    if (!mp || !mp->params || !node || !command)
+        return ZCL_OK;
+    struct zcl_result serving = beta6_bs_inband_status();
+    if (!serving.ok) {
+        if (!send_reject(mp, node, command, "beta6 bootstrap serving is not armed"))
+            return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                           "could not tell peer %s that beta6 serving is not armed",
+                           node->addr_name);
+        return ZCL_OK;
+    }
+    if (!inband_dispatch(mp, node, command, payload, payload_len))
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "could not enqueue the beta6 %s reply to peer %s", command,
+                       node->addr_name);
+    return ZCL_OK;
 }
 
-bool beta6_bs_inband_arm(const char *network, const char *params_dir, char *err,
-                         size_t err_size)
+struct zcl_result beta6_bs_inband_status(void)
 {
-    if (!beta6_bs_is_armed()) {
-        snprintf(err, err_size,
-                 "the beta6 bootstrap service is not armed; set -beta6-bootstrap-source");
-        return false;
-    }
+    if (!s_ready)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "the beta6 in-band bootstrap manifest is not cached");
+    return beta6_bs_status();
+}
+
+struct zcl_result beta6_bs_inband_arm(const char *network, const char *params_dir)
+{
+    struct zcl_result armed = beta6_bs_status();
+    if (!armed.ok)
+        return armed;
     beta6_bs_inband_disarm();
 
     struct byte_stream out;
     stream_init(&out, 65536);
-    if (!beta6_bs_manifest_encode(beta6_bs_manifest(), &out)) {
+    struct zcl_result encoded = beta6_bs_manifest_encode(beta6_bs_manifest(), &out);
+    if (!encoded.ok) {
         stream_free(&out);
-        snprintf(err, err_size, "could not encode the beta6 bootstrap manifest");
-        return false;
+        return encoded;
     }
     if (out.size > BETA6_BS_MAX_MESSAGE_LEN) {
         stream_free(&out);
-        snprintf(err, err_size,
-                 "the beta6 bootstrap manifest does not fit in one P2P message");
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "the beta6 bootstrap manifest is %zu bytes and does not fit in "
+                       "one P2P message",
+                       out.size);
     }
     s_manifest_bytes = zcl_malloc(out.size, "beta6 inband manifest");
     if (!s_manifest_bytes) {
         stream_free(&out);
-        snprintf(err, err_size, "out of memory encoding the beta6 bootstrap manifest");
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "out of memory encoding the beta6 bootstrap manifest");
     }
     memcpy(s_manifest_bytes, out.data, out.size);
     s_manifest_len = out.size;
@@ -266,7 +294,7 @@ bool beta6_bs_inband_arm(const char *network, const char *params_dir, char *err,
     snprintf(s_network, sizeof(s_network), "%s", network ? network : "");
     snprintf(s_params_dir, sizeof(s_params_dir), "%s", params_dir ? params_dir : "");
     s_ready = true;
-    return true;
+    return ZCL_OK;
 }
 
 void beta6_bs_inband_disarm(void)

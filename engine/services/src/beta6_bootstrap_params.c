@@ -42,12 +42,6 @@ static const struct {
 
 #define BETA6_PARAM_COUNT (sizeof(k_param_specs) / sizeof(k_param_specs[0]))
 
-static void set_msg(char *err, size_t err_size, const char *message)
-{
-    if (err && err_size)
-        snprintf(err, err_size, "%s", message);
-}
-
 /* Present with the compiled size, opened without following a link. Fills the
  * manifest entry (including the handle-bound mtime the chunk read re-proves).
  * A file that is absent or the wrong size is simply not advertised, exactly as
@@ -57,8 +51,9 @@ static bool describe_param(const char *params_dir, size_t index,
 {
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open_beneath(&file, params_dir, k_param_specs[index].name))
-        return false;
+    if (!platform_positioned_file_open_beneath(&file, params_dir,
+                                               k_param_specs[index].name))
+        return false;  // raw-return-ok:an absent parameter file is simply not advertised
     struct platform_positioned_file_snapshot stamp;
     uint64_t size = 0;
     bool ok = platform_positioned_file_size(&file, &size) &&
@@ -75,22 +70,22 @@ static bool describe_param(const char *params_dir, size_t index,
     return true;
 }
 
-bool beta6_bs_param_manifest(const char *params_dir, const char *network,
-                             struct beta6_bs_manifest *manifest, char *err,
-                             size_t err_size)
+struct zcl_result beta6_bs_param_manifest(const char *params_dir, const char *network,
+                                          struct beta6_bs_manifest *manifest)
 {
     if (!params_dir || !network || !manifest)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 zcash param manifest needs a directory, a network "
+                       "and an output");
     beta6_bs_manifest_init(manifest);
     snprintf(manifest->network, sizeof(manifest->network), "%s", network);
     manifest->chunk_size = BETA6_BS_CHUNK_SIZE;
 
     struct beta6_bs_file *files =
         zcl_calloc(BETA6_PARAM_COUNT, sizeof(*files), "beta6 zcash param manifest");
-    if (!files) {
-        set_msg(err, err_size, "out of memory building the beta6 zcash param manifest");
-        return false;
-    }
+    if (!files)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "out of memory building the beta6 zcash param manifest");
     size_t count = 0;
     uint64_t total = 0;
     for (size_t i = 0; i < BETA6_PARAM_COUNT; i++) {
@@ -101,41 +96,42 @@ bool beta6_bs_param_manifest(const char *params_dir, const char *network,
     }
     if (count == 0) {
         free(files);
-        set_msg(err, err_size, "no zcash parameters available to serve");
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "no zcash parameters available to serve from %s", params_dir);
     }
     manifest->files = files;
     manifest->file_count = count;
     manifest->snapshot_bytes = total;
-    return true;
+    return ZCL_OK;
 }
 
-bool beta6_bs_read_param_chunk(const char *params_dir, const char *network,
-                               const struct beta6_bs_chunk_request *request,
-                               unsigned char *out, size_t out_capacity, char *err,
-                               size_t err_size)
+struct zcl_result beta6_bs_read_param_chunk(const char *params_dir, const char *network,
+                                            const struct beta6_bs_chunk_request *request,
+                                            unsigned char *out, size_t out_capacity)
 {
     if (!params_dir || !request || !out)
-        return false;
-    if (request->length == 0 || request->length > BETA6_BS_CHUNK_SIZE) {
-        set_msg(err, err_size, "invalid zcash param chunk length");
-        return false;
-    }
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 zcash param chunk read needs a directory, a request "
+                       "and a buffer");
+    if (request->length == 0 || request->length > BETA6_BS_CHUNK_SIZE)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED, "invalid zcash param chunk length %u",
+                       (unsigned)request->length);
 
     struct beta6_bs_manifest manifest;
-    if (!beta6_bs_param_manifest(params_dir, network, &manifest, err, err_size))
-        return false;
-    bool ok = false;
-    if (request->file_index >= manifest.file_count) {
-        set_msg(err, err_size, "zcash param chunk file index out of range");
-    } else {
+    struct zcl_result built = beta6_bs_param_manifest(params_dir, network, &manifest);
+    if (!built.ok)
+        return built;
+    struct zcl_result chunk = ZCL_OK;
+    if (request->file_index >= manifest.file_count)
+        chunk = ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                        "zcash param chunk file index %u is out of range (%zu served)",
+                        (unsigned)request->file_index, manifest.file_count);
+    else
         /* Param paths are bare compiled file names, not blocks/ or chainstate/
          * data paths, so they use the same bounded reader with the manifest's
-         * own path rather than beta6_bs_is_data_path. */
-        ok = beta6_bs_read_file_chunk(params_dir, &manifest.files[request->file_index],
-                                      request, "zcash param", out, out_capacity, err,
-                                      err_size);
-    }
+         * own path rather than beta6_bs_check_data_path. */
+        chunk = beta6_bs_read_file_chunk(params_dir, &manifest.files[request->file_index],
+                                        request, "zcash param", out, out_capacity);
     beta6_bs_manifest_free(&manifest);
-    return ok;
+    return chunk;
 }

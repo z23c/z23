@@ -77,13 +77,19 @@ const struct beta6_bs_anchor *beta6_bs_find_anchor(int32_t height,
     return NULL;
 }
 
-bool beta6_bs_sidecar_path(const char *source_dir, const char *suffix, char *out,
-                           size_t out_size)
+struct zcl_result beta6_bs_sidecar_path(const char *source_dir, const char *suffix,
+                                        char *out, size_t out_size)
 {
     if (!source_dir || !suffix || !out || out_size == 0)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 sidecar path needs a source directory, a suffix "
+                       "and a buffer");
     int written = snprintf(out, out_size, "%s%s", source_dir, suffix);
-    return written > 0 && (size_t)written < out_size;
+    if (written <= 0 || (size_t)written >= out_size)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 sidecar path does not fit in %zu bytes: %s%s",
+                       out_size, source_dir, suffix);
+    return ZCL_OK;
 }
 
 /* Read the first line of a sidecar into `line`. The sidecars are tiny
@@ -93,7 +99,7 @@ static bool sidecar_read_line(const char *sidecar_path, char *line, size_t line_
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, sidecar_path))
-        return false;
+        return false;  // raw-return-ok:an absent sidecar is the normal case
     int64_t got = platform_positioned_file_read(&file, line, line_size - 1, 0);
     platform_positioned_file_close(&file);
     if (got <= 0)
@@ -121,45 +127,63 @@ static bool parse_block_hash(const char *hex, struct uint256 *out)
     return true;
 }
 
-bool beta6_bs_read_height_hash_sidecar(const char *sidecar_path, int32_t *height,
-                                       struct uint256 *hash_block)
+struct zcl_result beta6_bs_read_height_hash_sidecar(const char *sidecar_path,
+                                                    int32_t *height,
+                                                    struct uint256 *hash_block)
 {
     if (!sidecar_path || !height || !hash_block)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 height/hash sidecar read needs a path and both outputs");
     char line[256];
     if (!sidecar_read_line(sidecar_path, line, sizeof(line)))
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 sidecar is absent or unreadable: %s", sidecar_path);
     int parsed_height = -1;
     char hash_hex[160] = { 0 };
     if (sscanf(line, "%d %159s", &parsed_height, hash_hex) != 2)
-        return false;
-    if (parsed_height < 0 || !parse_block_hash(hash_hex, hash_block))
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 sidecar is not '<height> <blockhash>': %s", sidecar_path);
+    if (parsed_height < 0)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED, "beta6 sidecar height is negative: %s",
+                       sidecar_path);
+    if (!parse_block_hash(hash_hex, hash_block))
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 sidecar block hash is not 64 hex characters: %s",
+                       sidecar_path);
     *height = parsed_height;
-    return true;
+    return ZCL_OK;
 }
 
-bool beta6_bs_read_meta_sidecar(const char *sidecar_path, int32_t *height,
-                                struct uint256 *hash_block,
-                                struct uint256 *hash_chainstate)
+struct zcl_result beta6_bs_read_meta_sidecar(const char *sidecar_path, int32_t *height,
+                                             struct uint256 *hash_block,
+                                             struct uint256 *hash_chainstate)
 {
     if (!sidecar_path || !height || !hash_block || !hash_chainstate)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 .meta sidecar read needs a path and all three outputs");
     char line[256];
     if (!sidecar_read_line(sidecar_path, line, sizeof(line)))
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 .meta sidecar is absent or unreadable: %s", sidecar_path);
     int parsed_height = -1;
     char hash_hex[128] = { 0 };
     char commitment_hex[128] = { 0 };
     if (sscanf(line, "%d %127s %127s", &parsed_height, hash_hex, commitment_hex) != 3)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 .meta sidecar is not "
+                       "'<height> <blockhash> <chainstate>': %s",
+                       sidecar_path);
     if (parsed_height < 0 || !parse_block_hash(hash_hex, hash_block) ||
         !parse_block_hash(commitment_hex, hash_chainstate))
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 .meta sidecar height or hashes are malformed: %s",
+                       sidecar_path);
     if (uint256_is_null(hash_chainstate))
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 .meta sidecar chainstate commitment is null: %s",
+                       sidecar_path);
     *height = parsed_height;
-    return true;
+    return ZCL_OK;
 }
 
 static bool dir_exists(const char *parent, const char *child)
@@ -171,12 +195,18 @@ static bool dir_exists(const char *parent, const char *child)
     return platform_directory_probe_real(path) == PLATFORM_DIRECTORY_PROBE_OK;
 }
 
-bool beta6_bs_source_paths_exist(const char *source_dir)
+struct zcl_result beta6_bs_require_source_paths(const char *source_dir)
 {
+    static const char *const k_required[] = { "blocks", "blocks/index", "chainstate" };
     if (!source_dir || source_dir[0] == '\0')
-        return false;
-    return dir_exists(source_dir, "blocks") && dir_exists(source_dir, "blocks/index") &&
-           dir_exists(source_dir, "chainstate");
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED, "beta6 bootstrap source directory is empty");
+    for (size_t i = 0; i < sizeof(k_required) / sizeof(k_required[0]); i++) {
+        if (!dir_exists(source_dir, k_required[i]))
+            return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                           "beta6 bootstrap source has no %s/ directory: %s",
+                           k_required[i], source_dir);
+    }
+    return ZCL_OK;
 }
 
 /* Every "/"-separated component is non-empty and is neither "." nor ".."
@@ -199,18 +229,29 @@ static bool components_are_safe(const char *relative_path)
     return true;
 }
 
-bool beta6_bs_is_data_path(const char *relative_path)
+struct zcl_result beta6_bs_check_data_path(const char *relative_path)
 {
-    if (!relative_path || relative_path[0] == '\0' || relative_path[0] == '/')
-        return false;
+    if (!relative_path || relative_path[0] == '\0')
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED, "beta6 snapshot path is empty");
+    if (relative_path[0] == '/')
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED, "beta6 snapshot path is absolute: %s",
+                       relative_path);
     if (strlen(relative_path) >= BETA6_BS_MAX_PATH_LEN)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 snapshot path is %u bytes or longer: %s",
+                       (unsigned)BETA6_BS_MAX_PATH_LEN, relative_path);
     if (strchr(relative_path, '\\'))
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 snapshot path holds a backslash: %s", relative_path);
     if (!components_are_safe(relative_path))
-        return false;
-
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 snapshot path has an empty, '.' or '..' component: %s",
+                       relative_path);
     /* First component must be blocks or chainstate. */
-    return strncmp(relative_path, "blocks/", 7) == 0 ||
-           strncmp(relative_path, "chainstate/", 11) == 0;
+    if (strncmp(relative_path, "blocks/", 7) != 0 &&
+        strncmp(relative_path, "chainstate/", 11) != 0)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 snapshot path is outside blocks/ and chainstate/: %s",
+                       relative_path);
+    return ZCL_OK;
 }

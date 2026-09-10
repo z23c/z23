@@ -69,6 +69,70 @@ static bool parse_listen(const char *spec, char *ip, size_t ip_size, uint16_t *p
     return true;
 }
 
+/* core/modules/net's seam is a plain bool query and a plain bool handler —
+ * net knows nothing about struct zcl_result, which lives above it in the
+ * module order. These two adapters are the whole conversion: the engine side
+ * keeps its named reasons, the wire side keeps its two-state answer. */
+static bool beta6_inband_armed_hook(void)
+{
+    return beta6_bs_inband_status().ok;
+}
+
+static bool beta6_inband_message_hook(struct msg_processor *mp, struct p2p_node *node,
+                                      const char *command,
+                                      const unsigned char *payload, size_t payload_len)
+{
+    struct zcl_result served =
+        beta6_bs_inband_serve(mp, node, command, payload, payload_len);
+    if (!served.ok)
+        LOG_WARN("beta6boot", "beta6 %s not answered: %s", command, served.message);
+    return served.ok;
+}
+
+/* The optional side listener, for hosts that want the service on its own
+ * address. Split out so the start hook stays inside the complexity cap. */
+static void start_side_listener(struct boot_svc_ctx *svc)
+{
+    const char *listen =
+        flag_or_env("-beta6-bootstrap-listen", getenv("ZCL_BETA6_BOOTSTRAP_LISTEN"));
+    if (!listen[0])
+        return;
+    char ip[64] = { 0 };
+    uint16_t port = 0;
+    if (!parse_listen(listen, ip, sizeof(ip), &port)) {
+        LOG_WARN("beta6boot", "-beta6-bootstrap-listen must be <ip>:<port>, got '%s'",
+                 listen);
+        return;
+    }
+    struct zcl_result started =
+        beta6_bs_listen_start(ip, port, svc->params->pchMessageStart,
+                              svc->params->strNetworkID, svc->app_ctx->params_dir);
+    if (!started.ok)
+        LOG_WARN("beta6boot", "beta6 bootstrap listener did not start: %s",
+                 started.message);
+}
+
+/* The production path: advertise NODE_BOOTSTRAP and answer the eight messages
+ * on this node's ORDINARY P2P peers, because that is the only port a stock
+ * beta6 client will fast-sync from. Installed before the optional side
+ * listener so a node that names only a source directory already serves stock
+ * clients. */
+static void install_inband_seam(struct boot_svc_ctx *svc)
+{
+    struct zcl_result armed =
+        beta6_bs_inband_arm(svc->params->strNetworkID, svc->app_ctx->params_dir);
+    if (!armed.ok) {
+        LOG_WARN("beta6boot", "in-band beta6 bootstrap serving NOT armed: %s",
+                 armed.message);
+        return;
+    }
+    msg_processor_set_beta6_bootstrap(svc->msg_processor, beta6_inband_armed_hook,
+                                      beta6_inband_message_hook);
+    LOG_INFO("beta6boot",
+             "serving beta6 bootstrap snapshots in-band on the P2P port "
+             "(NODE_BOOTSTRAP advertised)");
+}
+
 static bool boot_beta6_bootstrap_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
@@ -80,9 +144,9 @@ static bool boot_beta6_bootstrap_start(void *ctx)
     if (!source[0])
         return true;
 
-    char err[512] = { 0 };
-    if (!beta6_bs_arm(source, svc->params->strNetworkID, err, sizeof(err))) {
-        LOG_WARN("beta6boot", "beta6 bootstrap serve NOT armed: %s", err);
+    struct zcl_result armed = beta6_bs_arm(source, svc->params->strNetworkID);
+    if (!armed.ok) {
+        LOG_WARN("beta6boot", "beta6 bootstrap serve NOT armed: %s", armed.message);
         return true;
     }
     const struct beta6_bs_manifest *manifest = beta6_bs_manifest();
@@ -91,37 +155,8 @@ static bool boot_beta6_bootstrap_start(void *ctx)
              (int)manifest->version, (int)manifest->height, manifest->file_count,
              (unsigned long long)manifest->snapshot_bytes);
 
-    /* The production path: advertise NODE_BOOTSTRAP and answer the eight
-     * messages on this node's ORDINARY P2P peers, because that is the only
-     * port a stock beta6 client will fast-sync from. Installed before the
-     * optional side listener so a node that names only a source directory
-     * already serves stock clients. */
-    if (beta6_bs_inband_arm(svc->params->strNetworkID, svc->app_ctx->params_dir, err,
-                            sizeof(err))) {
-        msg_processor_set_beta6_bootstrap(svc->msg_processor, beta6_bs_inband_armed,
-                                          beta6_bs_inband_serve);
-        LOG_INFO("beta6boot",
-                 "serving beta6 bootstrap snapshots in-band on the P2P port "
-                 "(NODE_BOOTSTRAP advertised)");
-    } else {
-        LOG_WARN("beta6boot", "in-band beta6 bootstrap serving NOT armed: %s", err);
-    }
-
-    const char *listen =
-        flag_or_env("-beta6-bootstrap-listen", getenv("ZCL_BETA6_BOOTSTRAP_LISTEN"));
-    if (!listen[0])
-        return true;
-    char ip[64] = { 0 };
-    uint16_t port = 0;
-    if (!parse_listen(listen, ip, sizeof(ip), &port)) {
-        LOG_WARN("beta6boot", "-beta6-bootstrap-listen must be <ip>:<port>, got '%s'",
-                 listen);
-        return true;
-    }
-    if (!beta6_bs_listen_start(ip, port, svc->params->pchMessageStart,
-                               svc->params->strNetworkID, svc->app_ctx->params_dir, err,
-                               sizeof(err)))
-        LOG_WARN("beta6boot", "beta6 bootstrap listener did not start: %s", err);
+    install_inband_seam(svc);
+    start_side_listener(svc);
     return true;
 }
 

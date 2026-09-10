@@ -12,6 +12,10 @@
  *    lexicographic, so a growable block bundle only appends indices at the tail
  *    and never shifts a chainstate file's nFileIndex mid-download
  *    (bootstrap.cpp:3498-3508).
+ *
+ * The recursive walk carries its refusal in the scan record rather than
+ * returning it, because every step must still free the directory listing it
+ * owns; the exported entry point publishes that reason as its zcl_result.
  */
 #include "services/beta6_bootstrap.h"
 
@@ -35,14 +39,13 @@ struct beta6_scan {
     size_t capacity;
     uint64_t total_bytes;
     unsigned char *buffer;
-    char *err;
-    size_t err_size;
+    struct zcl_result failure;
 };
 
-static void scan_fail(struct beta6_scan *scan, const char *fmt, const char *arg)
+static bool scan_fail(struct beta6_scan *scan, const char *fmt, const char *arg)
 {
-    if (scan->err && scan->err_size)
-        snprintf(scan->err, scan->err_size, fmt, arg);
+    scan->failure = zcl_result_make(BETA6_BS_ERR_REFUSED, __FILE__, __LINE__, fmt, arg);
+    return false;
 }
 
 /* HashBootstrapSnapshotFile: SHA-256 the whole file, then store it the way
@@ -77,16 +80,14 @@ static bool scan_reserve(struct beta6_scan *scan)
     size_t next = scan->capacity ? scan->capacity * 2 : 256;
     if (next > BETA6_BS_MAX_FILES)
         next = BETA6_BS_MAX_FILES;
-    if (next <= scan->count) {
-        scan_fail(scan, "beta6 bootstrap source holds too many files: %s", scan->root);
-        return false;
-    }
+    if (next <= scan->count)
+        return scan_fail(scan, "beta6 bootstrap source holds too many files: %s",
+                         scan->root);
     struct beta6_bs_file *grown =
         zcl_realloc(scan->files, next * sizeof(*grown), "beta6 bootstrap file list");
-    if (!grown) {
-        scan_fail(scan, "out of memory scanning beta6 bootstrap source: %s", scan->root);
-        return false;
-    }
+    if (!grown)
+        return scan_fail(scan, "out of memory scanning beta6 bootstrap source: %s",
+                         scan->root);
     scan->files = grown;
     scan->capacity = next;
     return true;
@@ -96,20 +97,19 @@ static bool scan_reserve(struct beta6_scan *scan)
  * the serve root. */
 static bool scan_record_file(struct beta6_scan *scan, const char *relative)
 {
-    if (!beta6_bs_is_data_path(relative)) {
-        scan_fail(scan, "beta6 bootstrap source contains unsafe relative path: %s",
-                  relative);
+    struct zcl_result safe = beta6_bs_check_data_path(relative);
+    if (!safe.ok) {
+        scan->failure = safe;
         return false;
     }
     if (!scan_reserve(scan))
-        return false;
+        return false;  // raw-return-ok:scan_reserve already recorded the named reason
 
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open_beneath(&file, scan->root, relative)) {
-        scan_fail(scan, "could not open beta6 bootstrap snapshot file: %s", relative);
-        return false;
-    }
+    if (!platform_positioned_file_open_beneath(&file, scan->root, relative))
+        return scan_fail(scan, "could not open beta6 bootstrap snapshot file: %s",
+                         relative);
     struct platform_positioned_file_snapshot stamp;
     uint64_t size = 0;
     bool ok = platform_positioned_file_size(&file, &size) &&
@@ -120,14 +120,12 @@ static bool scan_record_file(struct beta6_scan *scan, const char *relative)
     if (ok)
         ok = hash_file(scan, &file, size, &entry->sha256);
     platform_positioned_file_close(&file);
-    if (!ok) {
-        scan_fail(scan, "error reading beta6 bootstrap snapshot file: %s", relative);
-        return false;
-    }
-    if (size > UINT64_MAX - scan->total_bytes) {
-        scan_fail(scan, "beta6 bootstrap snapshot byte size overflow: %s", relative);
-        return false;
-    }
+    if (!ok)
+        return scan_fail(scan, "error reading beta6 bootstrap snapshot file: %s",
+                         relative);
+    if (size > UINT64_MAX - scan->total_bytes)
+        return scan_fail(scan, "beta6 bootstrap snapshot byte size overflow: %s",
+                         relative);
 
     snprintf(entry->path, sizeof(entry->path), "%s", relative);
     entry->size = size;
@@ -152,11 +150,9 @@ static bool scan_children(struct beta6_scan *scan, const char *relative_prefix,
     char relative[BETA6_BS_MAX_PATH_LEN];
     for (size_t i = 0; i < list->count; i++) {
         if (!join_relative(relative, sizeof(relative), relative_prefix,
-                           list->entries[i].name)) {
-            scan_fail(scan, "beta6 bootstrap source path is too long under: %s",
-                      relative_prefix);
-            return false;
-        }
+                           list->entries[i].name))
+            return scan_fail(scan, "beta6 bootstrap source path is too long under: %s",
+                             relative_prefix);
         bool ok = are_dirs ? scan_directory(scan, relative)
                            : scan_record_file(scan, relative);
         if (!ok)
@@ -172,17 +168,15 @@ static bool scan_directory(struct beta6_scan *scan, const char *relative_prefix)
                       ? snprintf(absolute, sizeof(absolute), "%s/%s", scan->root,
                                  relative_prefix)
                       : snprintf(absolute, sizeof(absolute), "%s", scan->root);
-    if (written <= 0 || (size_t)written >= sizeof(absolute)) {
-        scan_fail(scan, "beta6 bootstrap source path is too long: %s", relative_prefix);
-        return false;
-    }
+    if (written <= 0 || (size_t)written >= sizeof(absolute))
+        return scan_fail(scan, "beta6 bootstrap source path is too long: %s",
+                         relative_prefix);
 
     struct platform_directory_list dirs = { 0 };
     struct platform_directory_list files = { 0 };
-    if (!platform_directory_list_children_sorted(absolute, &dirs, &files)) {
-        scan_fail(scan, "could not read beta6 bootstrap source directory: %s", absolute);
-        return false;
-    }
+    if (!platform_directory_list_children_sorted(absolute, &dirs, &files))
+        return scan_fail(scan, "could not read beta6 bootstrap source directory: %s",
+                         absolute);
     bool ok = scan_children(scan, relative_prefix, &files, false) &&
               scan_children(scan, relative_prefix, &dirs, true);
     platform_directory_list_free(&dirs);
@@ -206,38 +200,36 @@ static int compare_files(const void *lhs, const void *rhs)
     return strcmp(a->path, b->path);
 }
 
-bool beta6_bs_collect_files(const char *source_dir, struct beta6_bs_manifest *manifest,
-                            char *err, size_t err_size)
+struct zcl_result beta6_bs_collect_files(const char *source_dir,
+                                         struct beta6_bs_manifest *manifest)
 {
     if (!source_dir || !manifest)
-        return false;
-    if (!beta6_bs_source_paths_exist(source_dir)) {
-        if (err && err_size)
-            snprintf(err, err_size, "beta6 bootstrap source is incomplete: %s", source_dir);
-        return false;
-    }
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 bootstrap collect needs a source directory and a manifest");
+    struct zcl_result present = beta6_bs_require_source_paths(source_dir);
+    if (!present.ok)
+        return present;
 
-    struct beta6_scan scan = { .root = source_dir, .err = err, .err_size = err_size };
+    struct beta6_scan scan = { .root = source_dir, .failure = ZCL_OK };
     scan.buffer = zcl_malloc(BETA6_HASH_BUFFER_BYTES, "beta6 bootstrap hash buffer");
-    if (!scan.buffer) {
-        scan_fail(&scan, "out of memory scanning beta6 bootstrap source: %s", source_dir);
-        return false;
-    }
+    if (!scan.buffer)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "out of memory scanning beta6 bootstrap source: %s", source_dir);
     bool ok = scan_directory(&scan, "");
     free(scan.buffer);
     if (!ok) {
         free(scan.files);
-        return false;
+        return scan.failure;
     }
     if (scan.count == 0) {
-        scan_fail(&scan, "beta6 bootstrap source holds no files: %s", source_dir);
         free(scan.files);
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED, "beta6 bootstrap source holds no files: %s",
+                       source_dir);
     }
 
     qsort(scan.files, scan.count, sizeof(*scan.files), compare_files);
     manifest->files = scan.files;
     manifest->file_count = scan.count;
     manifest->snapshot_bytes = scan.total_bytes;
-    return true;
+    return ZCL_OK;
 }

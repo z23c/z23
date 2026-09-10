@@ -256,7 +256,7 @@ int test_beta6_bootstrap(void)
         build_v1(&manifest);
         struct byte_stream out;
         stream_init(&out, 256);
-        ASSERT(beta6_bs_manifest_encode(&manifest, &out));
+        ASSERT(beta6_bs_manifest_encode(&manifest, &out).ok);
         ASSERT(wire_is(out.data, out.size, k_manifest_v1_hex));
         stream_free(&out);
         PASS();
@@ -268,7 +268,7 @@ int test_beta6_bootstrap(void)
         build_v3(&manifest, &file);
         struct byte_stream out;
         stream_init(&out, 256);
-        ASSERT(beta6_bs_manifest_encode(&manifest, &out));
+        ASSERT(beta6_bs_manifest_encode(&manifest, &out).ok);
         ASSERT(wire_is(out.data, out.size, k_manifest_v3_hex));
         stream_free(&out);
         PASS();
@@ -284,7 +284,7 @@ int test_beta6_bootstrap(void)
         tag_hash(&manifest.hash_block_tip, 0x66);
         struct byte_stream out;
         stream_init(&out, 256);
-        ASSERT(beta6_bs_manifest_encode(&manifest, &out));
+        ASSERT(beta6_bs_manifest_encode(&manifest, &out).ok);
         ASSERT(wire_is(out.data, out.size, k_manifest_v1_hex));
         stream_free(&out);
         PASS();
@@ -297,7 +297,7 @@ int test_beta6_bootstrap(void)
         struct byte_stream in;
         stream_init_from_data(&in, bytes, len);
         struct beta6_bs_manifest decoded;
-        ASSERT(beta6_bs_manifest_decode(&in, &decoded));
+        ASSERT(beta6_bs_manifest_decode(&in, &decoded).ok);
         ASSERT_EQ(decoded.version, 3);
         ASSERT_STR_EQ(decoded.network, "main");
         ASSERT_EQ(decoded.height, 2);
@@ -320,7 +320,7 @@ int test_beta6_bootstrap(void)
         };
         struct byte_stream out;
         stream_init(&out, 32);
-        ASSERT(beta6_bs_chunk_request_encode(&request, &out));
+        ASSERT(beta6_bs_chunk_request_encode(&request, &out).ok);
         ASSERT(wire_is(out.data, out.size,
                        "04030201" "0010000000000000" "00001000"));
         stream_free(&out);
@@ -331,7 +331,7 @@ int test_beta6_bootstrap(void)
         const unsigned char data[3] = { 0xde, 0xad, 0xbe };
         struct byte_stream out;
         stream_init(&out, 32);
-        ASSERT(beta6_bs_chunk_encode(7, 0, data, sizeof(data), &out));
+        ASSERT(beta6_bs_chunk_encode(7, 0, data, sizeof(data), &out).ok);
         ASSERT(wire_is(out.data, out.size,
                        "07000000" "0000000000000000" "03" "deadbe"));
         stream_free(&out);
@@ -341,79 +341,72 @@ int test_beta6_bootstrap(void)
     /* ────────────────────────── chunk bounds ────────────────────────── */
 
     TEST("a chunk range must be aligned, in range, and exactly sized") {
-        char err[256];
         const uint64_t size = (uint64_t)BETA6_BS_CHUNK_SIZE + 100;
         /* A full leading chunk. */
         ASSERT(beta6_bs_validate_chunk_range(0, BETA6_BS_CHUNK_SIZE, size,
-                                             BETA6_BS_CHUNK_SIZE, "t", err,
-                                             sizeof(err)));
+                                             BETA6_BS_CHUNK_SIZE, "t").ok);
         /* The short final chunk must be exactly the remainder. */
         ASSERT(beta6_bs_validate_chunk_range(BETA6_BS_CHUNK_SIZE, 100, size,
-                                             BETA6_BS_CHUNK_SIZE, "t", err,
-                                             sizeof(err)));
+                                             BETA6_BS_CHUNK_SIZE, "t").ok);
         ASSERT(!beta6_bs_validate_chunk_range(BETA6_BS_CHUNK_SIZE, 99, size,
-                                              BETA6_BS_CHUNK_SIZE, "t", err,
-                                              sizeof(err)));
+                                              BETA6_BS_CHUNK_SIZE, "t").ok);
         /* An unaligned offset. */
-        ASSERT(!beta6_bs_validate_chunk_range(1, 100, size, BETA6_BS_CHUNK_SIZE, "t",
-                                              err, sizeof(err)));
+        ASSERT(!beta6_bs_validate_chunk_range(1, 100, size, BETA6_BS_CHUNK_SIZE,
+                                              "t").ok);
         /* Past the end, and a length that would overflow offset+length. */
         ASSERT(!beta6_bs_validate_chunk_range(2 * (uint64_t)BETA6_BS_CHUNK_SIZE, 1,
-                                              size, BETA6_BS_CHUNK_SIZE, "t", err,
-                                              sizeof(err)));
+                                              size, BETA6_BS_CHUNK_SIZE, "t").ok);
         ASSERT(!beta6_bs_validate_chunk_range(0, UINT64_MAX, size,
-                                              BETA6_BS_CHUNK_SIZE, "t", err,
-                                              sizeof(err)));
+                                              BETA6_BS_CHUNK_SIZE, "t").ok);
         PASS();
     }
 
     /* ─────────────────── path safety / service gating ────────────────── */
 
     TEST("only blocks/ and chainstate/ relative paths are serve data paths") {
-        ASSERT(beta6_bs_is_data_path("blocks/blk00000.dat"));
-        ASSERT(beta6_bs_is_data_path("blocks/index/000005.ldb"));
-        ASSERT(beta6_bs_is_data_path("chainstate/000007.ldb"));
-        ASSERT(!beta6_bs_is_data_path("wallet.dat"));
-        ASSERT(!beta6_bs_is_data_path("blocks/../../etc/passwd"));
-        ASSERT(!beta6_bs_is_data_path("blocks/./x"));
-        ASSERT(!beta6_bs_is_data_path("/etc/passwd"));
-        ASSERT(!beta6_bs_is_data_path("blocks//x"));
-        ASSERT(!beta6_bs_is_data_path(""));
+        ASSERT(beta6_bs_check_data_path("blocks/blk00000.dat").ok);
+        ASSERT(beta6_bs_check_data_path("blocks/index/000005.ldb").ok);
+        ASSERT(beta6_bs_check_data_path("chainstate/000007.ldb").ok);
+        ASSERT(!beta6_bs_check_data_path("wallet.dat").ok);
+        ASSERT(!beta6_bs_check_data_path("blocks/../../etc/passwd").ok);
+        ASSERT(!beta6_bs_check_data_path("blocks/./x").ok);
+        ASSERT(!beta6_bs_check_data_path("/etc/passwd").ok);
+        ASSERT(!beta6_bs_check_data_path("blocks//x").ok);
+        ASSERT(!beta6_bs_check_data_path("").ok);
         PASS();
     }
 
     TEST("a disarmed node serves no manifest, no chunk and no listener") {
         beta6_bs_disarm();
-        char err[256] = { 0 };
         unsigned char scratch[16];
         struct beta6_bs_chunk_request request = { .file_index = 0, .offset = 0,
                                                   .length = 16 };
-        ASSERT(!beta6_bs_is_armed());
+        ASSERT(!beta6_bs_status().ok);
         ASSERT(beta6_bs_manifest() == NULL);
         ASSERT_STR_EQ(beta6_bs_source_dir(), "");
-        ASSERT(!beta6_bs_read_chunk(&request, scratch, sizeof(scratch), err,
-                                    sizeof(err)));
+        struct zcl_result chunk =
+            beta6_bs_read_chunk(&request, scratch, sizeof(scratch));
+        ASSERT(!chunk.ok);
         /* The refusal names the service, not a generic failure. */
-        ASSERT(strstr(err, "not enabled") != NULL);
+        ASSERT(strstr(chunk.message, "not armed") != NULL);
 
         const unsigned char magic[4] = { 0x24, 0xe9, 0x27, 0x64 };
-        err[0] = '\0';
-        ASSERT(!beta6_bs_listen_start("127.0.0.1", 0, magic, "main", "", err,
-                                      sizeof(err)));
-        ASSERT(strstr(err, "not armed") != NULL);
-        ASSERT(!beta6_bs_listen_running());
+        struct zcl_result started =
+            beta6_bs_listen_start("127.0.0.1", 0, magic, "main", "");
+        ASSERT(!started.ok);
+        ASSERT(strstr(started.message, "not armed") != NULL);
+        ASSERT(!beta6_bs_listen_status().ok);
         PASS();
     }
 
     TEST("arming refuses a relative path and an incomplete source tree") {
-        char err[256] = { 0 };
-        ASSERT(!beta6_bs_arm("relative/dir", "main", err, sizeof(err)));
-        ASSERT(strstr(err, "ABSOLUTE") != NULL);
-        err[0] = '\0';
-        ASSERT(!beta6_bs_arm("/nonexistent-beta6-serve-dir", "main", err,
-                             sizeof(err)));
-        ASSERT(strstr(err, "incomplete") != NULL);
-        ASSERT(!beta6_bs_is_armed());
+        struct zcl_result relative = beta6_bs_arm("relative/dir", "main");
+        ASSERT(!relative.ok);
+        ASSERT(strstr(relative.message, "ABSOLUTE") != NULL);
+        struct zcl_result missing = beta6_bs_arm("/nonexistent-beta6-serve-dir", "main");
+        ASSERT(!missing.ok);
+        ASSERT(strstr(missing.message, "incomplete") != NULL);
+        ASSERT(!beta6_bs_status().ok);
         PASS();
     }
 
@@ -446,8 +439,7 @@ int test_beta6_bootstrap(void)
         test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "serve");
         ASSERT(fixture_build(dir));
 
-        char err[256] = { 0 };
-        ASSERT(beta6_bs_arm(dir, "main", err, sizeof(err)));
+        ASSERT(beta6_bs_arm(dir, "main").ok);
         const struct beta6_bs_manifest *manifest = beta6_bs_manifest();
         ASSERT(manifest != NULL);
         /* No .blocktip sidecar, so this is a plain v1 anchor manifest. */
@@ -464,22 +456,23 @@ int test_beta6_bootstrap(void)
         unsigned char data[20];
         struct beta6_bs_chunk_request request = { .file_index = 0, .offset = 0,
                                                   .length = 20 };
-        ASSERT(beta6_bs_read_chunk(&request, data, sizeof(data), err, sizeof(err)));
+        ASSERT(beta6_bs_read_chunk(&request, data, sizeof(data)).ok);
         for (size_t i = 0; i < sizeof(data); i++)
             ASSERT_EQ((int)data[i], 0xAB);
 
         /* An index past the manifest, and a misaligned offset, are refused by
          * name rather than silently short-served. */
-        err[0] = '\0';
         struct beta6_bs_chunk_request unknown = { .file_index = 99, .offset = 0,
                                                   .length = 20 };
-        ASSERT(!beta6_bs_read_chunk(&unknown, data, sizeof(data), err, sizeof(err)));
-        ASSERT(strstr(err, "out of range") != NULL);
-        err[0] = '\0';
+        struct zcl_result out_of_range =
+            beta6_bs_read_chunk(&unknown, data, sizeof(data));
+        ASSERT(!out_of_range.ok);
+        ASSERT(strstr(out_of_range.message, "out of range") != NULL);
         struct beta6_bs_chunk_request skewed = { .file_index = 0, .offset = 1,
                                                  .length = 19 };
-        ASSERT(!beta6_bs_read_chunk(&skewed, data, sizeof(data), err, sizeof(err)));
-        ASSERT(strstr(err, "not aligned") != NULL);
+        struct zcl_result unaligned = beta6_bs_read_chunk(&skewed, data, sizeof(data));
+        ASSERT(!unaligned.ok);
+        ASSERT(strstr(unaligned.message, "not aligned") != NULL);
 
         beta6_bs_disarm();
         test_rm_rf(dir);
@@ -493,10 +486,10 @@ int test_beta6_bootstrap(void)
         ASSERT(fixture_anchor(dir, "12345 11111111111111111111111111111111"
                                    "11111111111111111111111111111111"));
 
-        char err[256] = { 0 };
-        ASSERT(!beta6_bs_arm(dir, "main", err, sizeof(err)));
-        ASSERT(strstr(err, "no compiled fast-sync anchor") != NULL);
-        ASSERT(!beta6_bs_is_armed());
+        struct zcl_result armed = beta6_bs_arm(dir, "main");
+        ASSERT(!armed.ok);
+        ASSERT(strstr(armed.message, "no compiled fast-sync anchor") != NULL);
+        ASSERT(!beta6_bs_status().ok);
         test_rm_rf(dir);
         PASS();
     }
@@ -595,7 +588,6 @@ int test_beta6_bootstrap(void)
 
     TEST("the in-band server answers getbsman with the cached manifest, framed") {
         char dir[512];
-        char err[256] = { 0 };
         struct chain_params params;
         struct msg_processor mp;
         struct p2p_node node;
@@ -613,8 +605,8 @@ int test_beta6_bootstrap(void)
 
         /* Nothing armed: a NAMED reject, promptly, never a stall — the client
          * aborts a stream that goes quiet for 60 s. */
-        ASSERT(!beta6_bs_inband_armed());
-        ASSERT(beta6_bs_inband_serve(&mp, &node, "getbsman", NULL, 0));
+        ASSERT(!beta6_bs_inband_status().ok);
+        ASSERT(beta6_bs_inband_serve(&mp, &node, "getbsman", NULL, 0).ok);
         ASSERT(node.send_head != NULL);
         ASSERT(memcmp(node.send_head->data, magic, 4) == 0);
         ASSERT_STR_EQ((const char *)node.send_head->data + 4, "reject");
@@ -622,11 +614,11 @@ int test_beta6_bootstrap(void)
 
         test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "inband");
         ASSERT(fixture_build(dir));
-        ASSERT(beta6_bs_arm(dir, "main", err, sizeof(err)));
-        ASSERT(beta6_bs_inband_arm("main", "", err, sizeof(err)));
-        ASSERT(beta6_bs_inband_armed());
+        ASSERT(beta6_bs_arm(dir, "main").ok);
+        ASSERT(beta6_bs_inband_arm("main", "").ok);
+        ASSERT(beta6_bs_inband_status().ok);
 
-        ASSERT(beta6_bs_inband_serve(&mp, &node, "getbsman", NULL, 0));
+        ASSERT(beta6_bs_inband_serve(&mp, &node, "getbsman", NULL, 0).ok);
         ASSERT(node.send_head != NULL);
         const unsigned char *frame = node.send_head->data;
         ASSERT(node.send_head->size > 24);
@@ -637,7 +629,7 @@ int test_beta6_bootstrap(void)
         struct byte_stream body;
         stream_init_from_data(&body, frame + 24, node.send_head->size - 24);
         struct beta6_bs_manifest decoded;
-        ASSERT(beta6_bs_manifest_decode(&body, &decoded));
+        ASSERT(beta6_bs_manifest_decode(&body, &decoded).ok);
         stream_free(&body);
         ASSERT_EQ(decoded.height, 3126937);
         ASSERT_EQ((int)decoded.file_count, 3);
@@ -645,11 +637,11 @@ int test_beta6_bootstrap(void)
         seam_drain(&node);
 
         /* An unsolicited SERVER reply is dropped, not parsed and not answered. */
-        ASSERT(beta6_bs_inband_serve(&mp, &node, "bschk", NULL, 0));
+        ASSERT(beta6_bs_inband_serve(&mp, &node, "bschk", NULL, 0).ok);
         ASSERT(node.send_head == NULL);
 
         beta6_bs_inband_disarm();
-        ASSERT(!beta6_bs_inband_armed());
+        ASSERT(!beta6_bs_inband_status().ok);
         beta6_bs_disarm();
         zcl_mutex_destroy(&node.cs_send);
         test_rm_rf(dir);
@@ -660,14 +652,14 @@ int test_beta6_bootstrap(void)
 
     TEST("quota buckets collapse to the IPv4 /24 and the IPv6 /64") {
         char key[80];
-        ASSERT(beta6_bs_quota_key("203.0.113.7", key, sizeof(key)));
+        ASSERT(beta6_bs_quota_key("203.0.113.7", key, sizeof(key)).ok);
         ASSERT_STR_EQ(key, "v4/24:203.0.113");
-        ASSERT(beta6_bs_quota_key("203.0.113.250", key, sizeof(key)));
+        ASSERT(beta6_bs_quota_key("203.0.113.250", key, sizeof(key)).ok);
         ASSERT_STR_EQ(key, "v4/24:203.0.113");
-        ASSERT(beta6_bs_quota_key("2001:db8:1:2:3:4:5:6", key, sizeof(key)));
+        ASSERT(beta6_bs_quota_key("2001:db8:1:2:3:4:5:6", key, sizeof(key)).ok);
         ASSERT_STR_EQ(key, "v6/64:2001:db8:1:2");
         /* Neither tagged form can alias the other, or a bare identity. */
-        ASSERT(beta6_bs_quota_key("someonion.onion", key, sizeof(key)));
+        ASSERT(beta6_bs_quota_key("someonion.onion", key, sizeof(key)).ok);
         ASSERT_STR_EQ(key, "someonion.onion");
         PASS();
     }
@@ -675,32 +667,33 @@ int test_beta6_bootstrap(void)
     TEST("a bucket over its daily cap is throttled, then stopped when told to") {
         beta6_bs_quota_clear();
         beta6_bs_quota_configure(1000, 1024);
-        bool stop = true;
-        /* Nothing served to this bucket yet: allowed, and no stop. */
-        ASSERT(beta6_bs_quota_allow("v4/24:203.0.113", false, 0, &stop));
-        ASSERT(!stop);
+        /* Nothing served to this bucket yet: allowed. */
+        ASSERT(beta6_bs_quota_check("v4/24:203.0.113", false, 0).ok);
         beta6_bs_quota_charge("v4/24:203.0.113", false, 0, 900);
-        ASSERT(beta6_bs_quota_allow("v4/24:203.0.113", false, 0, &stop));
-        /* Crossing the cap arms the spacing gap. */
+        ASSERT(beta6_bs_quota_check("v4/24:203.0.113", false, 0).ok);
+        /* Crossing the cap arms the spacing gap, which is a RETRY refusal,
+         * never the hard stop. */
         beta6_bs_quota_charge("v4/24:203.0.113", false, 0, 200);
-        ASSERT(!beta6_bs_quota_allow("v4/24:203.0.113", false, 0, &stop));
-        ASSERT(!stop);
+        struct zcl_result spaced = beta6_bs_quota_check("v4/24:203.0.113", false, 0);
+        ASSERT(!spaced.ok);
+        ASSERT_EQ(spaced.code, BETA6_BS_ERR_QUOTA_SPACING);
         /* Another bucket is unaffected, and the window rolls over. */
-        ASSERT(beta6_bs_quota_allow("v4/24:198.51.100", false, 0, &stop));
-        ASSERT(beta6_bs_quota_allow("v4/24:203.0.113", false,
-                                    BETA6_BS_QUOTA_WINDOW_MS, &stop));
+        ASSERT(beta6_bs_quota_check("v4/24:198.51.100", false, 0).ok);
+        ASSERT(beta6_bs_quota_check("v4/24:203.0.113", false,
+                                    BETA6_BS_QUOTA_WINDOW_MS).ok);
 
         /* Throttle off means a hard stop instead of a slow trickle. */
         beta6_bs_quota_clear();
         beta6_bs_quota_configure(1000, 0);
         beta6_bs_quota_charge("v4/24:203.0.113", false, 0, 1000);
-        ASSERT(!beta6_bs_quota_allow("v4/24:203.0.113", false, 0, &stop));
-        ASSERT(stop);
+        struct zcl_result stopped = beta6_bs_quota_check("v4/24:203.0.113", false, 0);
+        ASSERT(!stopped.ok);
+        ASSERT_EQ(stopped.code, BETA6_BS_ERR_QUOTA_STOPPED);
 
         /* A whitelisted peer and a zero cap both bypass the accounting. */
-        ASSERT(beta6_bs_quota_allow("v4/24:203.0.113", true, 0, &stop));
+        ASSERT(beta6_bs_quota_check("v4/24:203.0.113", true, 0).ok);
         beta6_bs_quota_configure(0, 0);
-        ASSERT(beta6_bs_quota_allow("v4/24:203.0.113", false, 0, &stop));
+        ASSERT(beta6_bs_quota_check("v4/24:203.0.113", false, 0).ok);
 
         beta6_bs_quota_clear();
         beta6_bs_quota_configure(BETA6_BS_DEFAULT_MAX_BYTES_PER_DAY,

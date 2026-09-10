@@ -97,21 +97,28 @@ static bool ipv6_prefix_key(const char *ip, char *out, size_t out_size)
     return written > 0 && (size_t)written < out_size;
 }
 
-bool beta6_bs_quota_key(const char *ip, char *out, size_t out_size)
+struct zcl_result beta6_bs_quota_key(const char *ip, char *out, size_t out_size)
 {
     if (!ip || !out || out_size == 0)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 quota key needs an address and a buffer");
     unsigned int octets[4];
     int written;
+    bool fits;
     if (parse_ipv4(ip, octets)) {
         written = snprintf(out, out_size, "v4/24:%u.%u.%u", octets[0], octets[1],
                            octets[2]);
+        fits = written > 0 && (size_t)written < out_size;
     } else if (strchr(ip, ':')) {
-        return ipv6_prefix_key(ip, out, out_size);
+        fits = ipv6_prefix_key(ip, out, out_size);
     } else {
         written = snprintf(out, out_size, "%s", ip);
+        fits = written > 0 && (size_t)written < out_size;
     }
-    return written > 0 && (size_t)written < out_size;
+    if (!fits)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 quota key for %s does not fit in %zu bytes", ip, out_size);
+    return ZCL_OK;
 }
 
 static struct beta6_quota_bucket *bucket_find(const char *key)
@@ -172,30 +179,41 @@ static struct beta6_quota_bucket *bucket_insert(const char *key, int64_t now_ms)
     return bucket;
 }
 
-bool beta6_bs_quota_allow(const char *key, bool whitelisted, int64_t now_ms, bool *stop)
+/* The bucket decision, taken under the lock. 0 = serve, and the two negative
+ * codes are the ones the caller branches on (see the header). */
+static int quota_verdict_locked(const char *key, bool whitelisted, int64_t now_ms)
 {
-    if (stop)
-        *stop = false;
+    if (whitelisted || g_max_bytes_per_day <= 0)
+        return 0;
+    struct beta6_quota_bucket *bucket = bucket_find(key);
+    if (!bucket || now_ms - bucket->window_start_ms >= BETA6_BS_QUOTA_WINDOW_MS ||
+        bucket->bytes_served < (uint64_t)g_max_bytes_per_day)
+        return 0;
+    if (g_throttle_kbps <= 0)
+        return BETA6_BS_ERR_QUOTA_STOPPED;
+    return now_ms >= bucket->next_allowed_ms ? 0 : BETA6_BS_ERR_QUOTA_SPACING;
+}
+
+struct zcl_result beta6_bs_quota_check(const char *key, bool whitelisted,
+                                       int64_t now_ms)
+{
     if (!key)
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED, "beta6 quota check needs a bucket key");
     quota_lock_init_once();
     LOCK(g_quota_lock);
-    bool allowed = true;
-    if (!whitelisted && g_max_bytes_per_day > 0) {
-        struct beta6_quota_bucket *bucket = bucket_find(key);
-        if (bucket && now_ms - bucket->window_start_ms < BETA6_BS_QUOTA_WINDOW_MS &&
-            bucket->bytes_served >= (uint64_t)g_max_bytes_per_day) {
-            if (g_throttle_kbps <= 0) {
-                if (stop)
-                    *stop = true;
-                allowed = false;
-            } else {
-                allowed = now_ms >= bucket->next_allowed_ms;
-            }
-        }
-    }
+    int verdict = quota_verdict_locked(key, whitelisted, now_ms);
     UNLOCK(g_quota_lock);
-    return allowed;
+    if (verdict == BETA6_BS_ERR_QUOTA_STOPPED)
+        return ZCL_ERR(BETA6_BS_ERR_QUOTA_STOPPED,
+                       "beta6 bucket %s is over the daily serve cap and throttling "
+                       "is off",
+                       key);
+    if (verdict == BETA6_BS_ERR_QUOTA_SPACING)
+        return ZCL_ERR(BETA6_BS_ERR_QUOTA_SPACING,
+                       "beta6 bucket %s is over the daily serve cap; throttled until "
+                       "the next spacing gap",
+                       key);
+    return ZCL_OK;
 }
 
 void beta6_bs_quota_charge(const char *key, bool whitelisted, int64_t now_ms,

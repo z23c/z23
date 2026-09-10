@@ -405,7 +405,7 @@ static const char *beta6_current_blocker(bool serving, const char *posture_block
         return "";
     if (posture_blocker)
         return posture_blocker;
-    if (!beta6_bs_is_armed())
+    if (!beta6_bs_status().ok)
         return "beta6_bootstrap_source_not_configured";
     /* Armed, but nothing is answering: the in-band seam did not install and
      * no side listener was configured either. */
@@ -423,7 +423,7 @@ static void network_push_beta6_source(struct json_value *beta6)
     /* Which wire is actually answering. `in_band` is the production path (the
      * node's own P2P port); `listen_port` is the optional side socket, 0 when
      * none was configured. */
-    json_push_kv_bool(beta6, "in_band", beta6_bs_inband_armed());
+    json_push_kv_bool(beta6, "in_band", beta6_bs_inband_status().ok);
     json_push_kv_int(beta6, "listen_port", (int64_t)beta6_bs_listen_port());
     json_push_kv_int(beta6, "manifest_version",
                      manifest ? (int64_t)manifest->version : 0);
@@ -457,8 +457,8 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     bool has_connman = ctx->connman != NULL;
     bool node_network = (counts.local_services & NODE_NETWORK) != 0;
     bool node_zcl23 = (counts.local_services & NODE_ZCL23) != 0;
-    bool beta6_listening = beta6_bs_listen_running();
-    bool beta6_in_band = beta6_bs_inband_armed();
+    bool beta6_listening = beta6_bs_listen_status().ok;
+    bool beta6_in_band = beta6_bs_inband_status().ok;
     bool node_bootstrap = beta6_advertises_node_bootstrap(counts.local_services,
                                                           beta6_in_band,
                                                           beta6_listening);

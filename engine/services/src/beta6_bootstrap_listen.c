@@ -19,6 +19,14 @@
  * Everything served comes from the already-armed, already-hashed manifest; the
  * source tree is opened read-only and this module never writes to it.
  *
+ * Both threads this file spawns carry a liveness contract on the supervisor
+ * tree (util/thread_liveness.h): one for the accept loop and one shared by the
+ * per-connection session cohort, the same shape core/modules/net's own
+ * listener/worker pairs use. Both are dormant-until-event contracts
+ * (deadline 0, progress-quiet 0) because an accept loop with no client and a
+ * session waiting on a slow peer are both legitimately silent — they are
+ * present in the tree and heartbeat when they do work, never falsely flagged.
+ *
  * // supervisor-ok:owned-optout-listener — this service owns its own lifecycle
  * and there is nothing for a supervisor to restart: it exists only while an
  * operator has named BOTH a snapshot directory and a listen address, it holds
@@ -33,10 +41,12 @@
 #include "services/beta6_bootstrap.h"
 
 #include "core/hash.h"
+#include "platform/clock.h"
 #include "platform/socket_compat.h"
 #include "base/safe_alloc.h"
 #include "base/log_macros.h"
 #include "util/sync.h"
+#include "util/thread_liveness.h"
 #include "util/thread_registry.h"
 
 #include <pthread.h>
@@ -97,6 +107,12 @@ static zcl_mutex_t g_session_lock;
 static bool g_session_lock_ready;
 static struct beta6_session_slot g_sessions[BETA6_MAX_SESSIONS];
 
+/* Supervisor liveness: one contract for the accept loop, one shared by the
+ * session cohort (every session thread beats the same child, the way the RPC
+ * worker pool does). */
+static struct thread_liveness_child g_accept_liveness = { .id = SUPERVISOR_INVALID_ID };
+static struct thread_liveness_child g_session_liveness = { .id = SUPERVISOR_INVALID_ID };
+
 static void session_lock_init_once(void)
 {
     if (!g_session_lock_ready) {
@@ -111,13 +127,15 @@ static bool send_message(struct beta6_session *session, const char *command,
                          const unsigned char *payload, size_t payload_len)
 {
     if (payload_len > BETA6_BS_MAX_MESSAGE_LEN)
-        return false;
+        LOG_FAIL("beta6boot", "beta6 %s reply of %zu bytes is over the message cap",
+                 command, payload_len);
     unsigned char header[BETA6_MSG_HEADER_SIZE];
     memset(header, 0, sizeof(header));
     memcpy(header, session->listener->magic, 4);
     size_t command_len = strlen(command);
     if (command_len > BETA6_COMMAND_SIZE)
-        return false;
+        LOG_FAIL("beta6boot", "beta6 command '%s' is longer than the 12-byte field",
+                 command);
     memcpy(header + 4, command, command_len);
     uint32_t size = (uint32_t)payload_len;
     memcpy(header + 16, &size, 4);
@@ -126,11 +144,11 @@ static bool send_message(struct beta6_session *session, const char *command,
     hash256(payload ? payload : (const unsigned char *)"", payload_len, digest);
     memcpy(header + 20, digest, 4);
 
-    if (!platform_socket_send_all(session->socket, header, sizeof(header)))
-        return false;
-    if (payload_len == 0)
-        return true;
-    return platform_socket_send_all(session->socket, payload, payload_len);
+    /* A peer that closed or stalled its socket mid-send is an ordinary
+     * disconnect the session loop ends on, not a node fault to log. */
+    return platform_socket_send_all(session->socket, header, sizeof(header)) &&
+           (payload_len == 0 ||
+            platform_socket_send_all(session->socket, payload, payload_len));
 }
 
 static bool receive_exact(platform_socket_t socket, unsigned char *out, size_t len)
@@ -152,7 +170,7 @@ static bool receive_message(platform_socket_t socket, const unsigned char magic[
 {
     unsigned char header[BETA6_MSG_HEADER_SIZE];
     if (!receive_exact(socket, header, sizeof(header)))
-        return false;
+        return false;  // raw-return-ok:a closed or idle bootstrap socket ends the session
     if (memcmp(header, magic, 4) != 0)
         return false;
     memcpy(command, header + 4, BETA6_COMMAND_SIZE);
@@ -203,7 +221,7 @@ static bool send_version(struct beta6_session *session)
     uint64_t services = BETA6_NODE_NETWORK | BETA6_NODE_BOOTSTRAP;
     bool ok = stream_write_i32_le(&payload, BETA6_PROTOCOL_VERSION) &&
               stream_write_u64_le(&payload, services) &&
-              stream_write_i64_le(&payload, (int64_t)time(NULL)) &&
+              stream_write_i64_le(&payload, clock_now_wall_ms() / 1000) &&
               write_address(&payload, services) && write_address(&payload, services) &&
               stream_write_u64_le(&payload, 0) &&
               stream_write_compact_size(&payload, strlen(user_agent)) &&
@@ -231,15 +249,17 @@ static bool serve_snapshot_manifest(struct beta6_session *session)
 static bool serve_param_manifest(struct beta6_session *session)
 {
     struct beta6_bs_manifest manifest;
-    char err[256] = { 0 };
-    if (!beta6_bs_param_manifest(session->listener->params_dir, session->listener->network,
-                                 &manifest, err, sizeof(err))) {
-        LOG_INFO("beta6boot", "peer %s: no zcash params to serve: %s", session->peer_ip, err);
+    struct zcl_result built = beta6_bs_param_manifest(session->listener->params_dir,
+                                                      session->listener->network,
+                                                      &manifest);
+    if (!built.ok) {
+        LOG_INFO("beta6boot", "peer %s: no zcash params to serve: %s", session->peer_ip,
+                 built.message);
         return send_message(session, "reject", NULL, 0);
     }
     struct byte_stream out;
     stream_init(&out, 4096);
-    bool ok = beta6_bs_manifest_encode(&manifest, &out) &&
+    bool ok = beta6_bs_manifest_encode(&manifest, &out).ok &&
               send_message(session, "bspman", out.data, out.size);
     stream_free(&out);
     beta6_bs_manifest_free(&manifest);
@@ -251,13 +271,14 @@ static bool serve_param_manifest(struct beta6_session *session)
 static bool quota_gate(struct beta6_session *session, uint32_t bytes)
 {
     for (int attempt = 0; attempt < 64; attempt++) {
-        bool stop = false;
-        int64_t now_ms = (int64_t)time(NULL) * 1000;
-        if (beta6_bs_quota_allow(session->quota_key, false, now_ms, &stop)) {
+        int64_t now_ms = clock_now_wall_ms();
+        struct zcl_result allowed = beta6_bs_quota_check(session->quota_key, false,
+                                                         now_ms);
+        if (allowed.ok) {
             beta6_bs_quota_charge(session->quota_key, false, now_ms, bytes);
             return true;
         }
-        if (stop)
+        if (allowed.code != BETA6_BS_ERR_QUOTA_SPACING)
             return false;
         struct timespec pause = { .tv_sec = 0, .tv_nsec = 200 * 1000 * 1000 };
         nanosleep(&pause, NULL);
@@ -271,7 +292,8 @@ static bool serve_chunk(struct beta6_session *session, const unsigned char *payl
     struct byte_stream in;
     stream_init_from_data(&in, payload, payload_len);
     struct beta6_bs_chunk_request request;
-    bool decoded = beta6_bs_chunk_request_decode(&in, &request) && stream_remaining(&in) == 0;
+    bool decoded = beta6_bs_chunk_request_decode(&in, &request).ok &&
+                   stream_remaining(&in) == 0;
     stream_free(&in);
     const char *command = params ? "getbspchk" : "getbschk";
     if (!decoded || request.length == 0 || request.length > BETA6_BS_CHUNK_SIZE) {
@@ -286,23 +308,25 @@ static bool serve_chunk(struct beta6_session *session, const unsigned char *payl
 
     unsigned char *data = zcl_malloc(request.length, "beta6 bootstrap chunk");
     if (!data)
-        return false;
-    char err[256] = { 0 };
-    bool ok = params ? beta6_bs_read_param_chunk(session->listener->params_dir,
-                                                 session->listener->network, &request, data,
-                                                 request.length, err, sizeof(err))
-                     : beta6_bs_read_chunk(&request, data, request.length, err, sizeof(err));
-    if (!ok) {
-        LOG_INFO("beta6boot", "peer %s: %s refused: %s", session->peer_ip, command, err);
+        LOG_FAIL("beta6boot", "out of memory for a %u byte beta6 chunk",
+                 (unsigned)request.length);
+    struct zcl_result chunk =
+        params ? beta6_bs_read_param_chunk(session->listener->params_dir,
+                                           session->listener->network, &request, data,
+                                           request.length)
+               : beta6_bs_read_chunk(&request, data, request.length);
+    if (!chunk.ok) {
+        LOG_INFO("beta6boot", "peer %s: %s refused: %s", session->peer_ip, command,
+                 chunk.message);
         free(data);
         return send_message(session, "reject", NULL, 0);
     }
 
     struct byte_stream out;
     stream_init(&out, request.length + 32);
-    ok = beta6_bs_chunk_encode(request.file_index, request.offset, data, request.length,
-                               &out) &&
-         send_message(session, params ? "bspchk" : "bschk", out.data, out.size);
+    bool ok = beta6_bs_chunk_encode(request.file_index, request.offset, data,
+                                    request.length, &out).ok &&
+              send_message(session, params ? "bspchk" : "bschk", out.data, out.size);
     stream_free(&out);
     free(data);
     return ok;
@@ -342,6 +366,7 @@ static void *session_thread(void *opaque)
         if (!receive_message(session->socket, session->listener->magic, command, &payload,
                              &payload_len))
             break;
+        thread_liveness_beat(&g_session_liveness, -1);
         bool ok = dispatch(session, command, payload, payload_len);
         free(payload);
         if (!ok)
@@ -431,9 +456,10 @@ static void spawn_session(platform_socket_t accepted, const struct sockaddr_in *
                                         sizeof(session->peer_ip)))
         snprintf(session->peer_ip, sizeof(session->peer_ip), "unknown");
     if (!beta6_bs_quota_key(session->peer_ip, session->quota_key,
-                            sizeof(session->quota_key)))
+                            sizeof(session->quota_key)).ok)
         snprintf(session->quota_key, sizeof(session->quota_key), "unknown");
 
+    // supervised:beta6-bs-session (g_session_liveness, registered in listen_start)
     if (thread_registry_spawn("beta6-bs-session", session_thread, session,
                               &g_sessions[slot].tid) != 0) {
         session_slot_abandon(slot);
@@ -473,6 +499,7 @@ static void *accept_thread(void *opaque)
         size_t from_size = sizeof(from);
         platform_socket_t accepted =
             platform_socket_accept(g_listener.socket, (struct sockaddr *)&from, &from_size);
+        thread_liveness_beat(&g_accept_liveness, -1);
         if (accepted == PLATFORM_SOCKET_INVALID) {
             if (g_listener.stopping)
                 break;
@@ -485,107 +512,123 @@ static void *accept_thread(void *opaque)
 
 /* ── lifecycle ───────────────────────────────────────────────────────── */
 
-static bool encode_cached_manifest(char *err, size_t err_size)
+static struct zcl_result encode_cached_manifest(void)
 {
     const struct beta6_bs_manifest *manifest = beta6_bs_manifest();
     struct byte_stream out;
     stream_init(&out, 65536);
-    if (!beta6_bs_manifest_encode(manifest, &out)) {
+    struct zcl_result encoded = beta6_bs_manifest_encode(manifest, &out);
+    if (!encoded.ok) {
         stream_free(&out);
-        snprintf(err, err_size, "could not encode the beta6 bootstrap manifest");
-        return false;
+        return encoded;
     }
     if (out.size > BETA6_BS_MAX_MESSAGE_LEN) {
         stream_free(&out);
-        snprintf(err, err_size,
-                 "the beta6 bootstrap manifest does not fit in one P2P message");
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "the beta6 bootstrap manifest is %zu bytes and does not fit in "
+                       "one P2P message",
+                       out.size);
     }
     g_listener.manifest_bytes = zcl_malloc(out.size, "beta6 bootstrap manifest");
     if (!g_listener.manifest_bytes) {
         stream_free(&out);
-        snprintf(err, err_size, "out of memory encoding the beta6 bootstrap manifest");
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "out of memory encoding the beta6 bootstrap manifest");
     }
     memcpy(g_listener.manifest_bytes, out.data, out.size);
     g_listener.manifest_len = out.size;
     stream_free(&out);
-    return true;
+    return ZCL_OK;
 }
 
-static bool bind_listen_socket(const char *bind_ip, uint16_t port, char *err,
-                               size_t err_size)
+static struct zcl_result bind_listen_socket(const char *bind_ip, uint16_t port)
 {
     struct sockaddr_in address;
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
-    if (platform_socket_parse_address(AF_INET, bind_ip, &address.sin_addr) != 1) {
-        snprintf(err, err_size, "beta6 bootstrap listen address is not an IPv4 address");
-        return false;
-    }
+    if (platform_socket_parse_address(AF_INET, bind_ip, &address.sin_addr) != 1)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 bootstrap listen address is not an IPv4 address: %s",
+                       bind_ip);
     platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0, false, true);
-    if (sock == PLATFORM_SOCKET_INVALID) {
-        snprintf(err, err_size, "could not create the beta6 bootstrap listen socket");
-        return false;
-    }
+    if (sock == PLATFORM_SOCKET_INVALID)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "could not create the beta6 bootstrap listen socket");
     platform_socket_set_reuse_address(sock, 1);
     if (platform_socket_bind(sock, (struct sockaddr *)&address, sizeof(address)) != 0 ||
         platform_socket_listen(sock, 16) != 0) {
         platform_socket_close(sock);
-        snprintf(err, err_size, "could not bind the beta6 bootstrap listen port");
-        return false;
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "could not bind the beta6 bootstrap listen port %s:%u", bind_ip,
+                       (unsigned)port);
     }
     g_listener.socket = sock;
     g_listener.port = port;
-    return true;
+    return ZCL_OK;
 }
 
-bool beta6_bs_listen_start(const char *bind_ip, uint16_t port, const unsigned char magic[4],
-                           const char *network, const char *params_dir, char *err,
-                           size_t err_size)
+/* Put both threads on the supervisor tree before either can run. Dormant
+ * contracts (0, 0): an accept loop with no client and a session waiting on a
+ * slow peer are both legitimately quiet, so neither gate is armed and no
+ * progress marker is faked. */
+static void register_liveness(void)
 {
-    if (g_listener.running) {
-        snprintf(err, err_size, "the beta6 bootstrap listener is already running");
-        return false;
-    }
-    if (!beta6_bs_is_armed()) {
-        snprintf(err, err_size,
-                 "the beta6 bootstrap service is not armed; set -beta6-bootstrap-source");
-        return false;
-    }
-    if (!bind_ip || !magic || !network) {
-        snprintf(err, err_size, "the beta6 bootstrap listener needs an address and network");
-        return false;
-    }
+    if (thread_liveness_register(&g_accept_liveness, "beta6-bs-accept", 0, 0) ==
+        SUPERVISOR_INVALID_ID)
+        LOG_WARN("beta6boot", "beta6 accept-thread liveness registration failed");
+    if (thread_liveness_register(&g_session_liveness, "beta6-bs-session", 0, 0) ==
+        SUPERVISOR_INVALID_ID)
+        LOG_WARN("beta6boot", "beta6 session-thread liveness registration failed");
+}
+
+struct zcl_result beta6_bs_listen_start(const char *bind_ip, uint16_t port,
+                                        const unsigned char magic[4],
+                                        const char *network, const char *params_dir)
+{
+    if (g_listener.running)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "the beta6 bootstrap listener is already running");
+    struct zcl_result armed = beta6_bs_status();
+    if (!armed.ok)
+        return armed;
+    if (!bind_ip || !magic || !network)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "the beta6 bootstrap listener needs an address and network");
 
     memset(&g_listener, 0, sizeof(g_listener));
     memcpy(g_listener.magic, magic, 4);
     snprintf(g_listener.network, sizeof(g_listener.network), "%s", network);
     snprintf(g_listener.params_dir, sizeof(g_listener.params_dir), "%s",
              params_dir ? params_dir : "");
-    if (!encode_cached_manifest(err, err_size))
-        return false;
-    if (!bind_listen_socket(bind_ip, port, err, err_size)) {
+    struct zcl_result cached = encode_cached_manifest();
+    if (!cached.ok)
+        return cached;
+    struct zcl_result bound = bind_listen_socket(bind_ip, port);
+    if (!bound.ok) {
         free(g_listener.manifest_bytes);
         g_listener.manifest_bytes = NULL;
-        return false;
+        return bound;
     }
 
     session_lock_init_once();
+    register_liveness();
     g_listener.running = true;
+    // supervised:beta6-bs-accept (g_accept_liveness, registered just above)
     if (thread_registry_spawn("beta6-bs-accept", accept_thread, NULL,
                               &g_listener.thread) != 0) {
         g_listener.running = false;
         platform_socket_close(g_listener.socket);
         free(g_listener.manifest_bytes);
         g_listener.manifest_bytes = NULL;
-        snprintf(err, err_size, "could not start the beta6 bootstrap accept thread");
-        return false;
+        thread_liveness_retire(&g_accept_liveness);
+        thread_liveness_retire(&g_session_liveness);
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "could not start the beta6 bootstrap accept thread");
     }
     LOG_INFO("beta6boot", "serving beta6 bootstrap snapshots on %s:%u from %s", bind_ip,
              (unsigned)port, beta6_bs_source_dir());
-    return true;
+    return ZCL_OK;
 }
 
 void beta6_bs_listen_stop(void)
@@ -597,15 +640,20 @@ void beta6_bs_listen_stop(void)
     platform_socket_close(g_listener.socket);
     pthread_join(g_listener.thread, NULL);
     sessions_stop_all();
+    thread_liveness_retire(&g_accept_liveness);
+    thread_liveness_retire(&g_session_liveness);
     free(g_listener.manifest_bytes);
     g_listener.manifest_bytes = NULL;
     g_listener.running = false;
     g_listener.stopping = false;
 }
 
-bool beta6_bs_listen_running(void)
+struct zcl_result beta6_bs_listen_status(void)
 {
-    return g_listener.running;
+    if (!g_listener.running)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "the beta6 bootstrap listener is not running");
+    return ZCL_OK;
 }
 
 uint16_t beta6_bs_listen_port(void)
