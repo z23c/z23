@@ -1,0 +1,42 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * HOST NEEDS — the one place a registered test group declares the input its
+ * host must already carry for the group to observe anything.
+ *
+ * These rows exist because a proof generation is a deliberately narrow tree:
+ * it never builds the node runtime binaries, and it carries none of an
+ * operator's multi-gigabyte fixtures. A group whose only honest verdict in
+ * such a tree is SKIP or UNOBSERVED must be left OUT of the universal
+ * closure selector, so the runner counts it as gated instead of forcing the
+ * whole proof to refuse on `test_accounting_incomplete`.
+ *
+ * This is a SELECTION rule and nothing else:
+ *   - the group still runs everywhere its input exists (a dev box with
+ *     build/bin/z23, an operator with the fold fixture exported);
+ *   - an exact impact plan that names the group still selects it, and a SKIP
+ *     or UNOBSERVED there still refuses the proof;
+ *   - every gated group is NAMED in the attempt test-selection log, so
+ *     nothing is quietly dropped.
+ *
+ * Include with ZCL_TEST_GROUP_NEED(full_id, kind, value):
+ *   ZCL_HOST_NEED_FILE  value is a path relative to the tree the runner execs
+ *                       in; the need is met when that path exists there.
+ *   ZCL_HOST_NEED_ENV   value is an environment variable name; the need is
+ *                       met when it is set to a non-empty string.
+ * The id is the canonical full catalog id (`test_`/`spec_` prefix included),
+ * exactly as zcl_test_group_catalog_at() spells it. An unregistered group or
+ * an unknown kind is a refusal, never a silently ignored row.
+ */
+
+/* tests/harness/src/test_onion_pair_watch_live.c reports
+ * PAIR_PROBE=ENV_MISSING_BINARY (UNOBSERVED) when the tree it runs in has no
+ * z23/zclassic23/zcl-rpc runtime binary to pair. A proof generation never
+ * builds those, by design. */
+ZCL_TEST_GROUP_NEED("test_onion_pair_watch_live",
+                    ZCL_HOST_NEED_FILE, "build/bin/z23")
+
+/* tests/harness/src/test_self_folded_anchor.c's heavy leg prints SKIP unless
+ * ZCL_SELF_FOLD_ANCHOR_FIXTURE names a real `-mint-anchor` artifact. Nothing
+ * inside a proof can produce one; it is provisioned by an operator. */
+ZCL_TEST_GROUP_NEED("test_self_folded_anchor_heavy", ZCL_HOST_NEED_ENV,
+                    "ZCL_SELF_FOLD_ANCHOR_FIXTURE")

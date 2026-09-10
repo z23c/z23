@@ -66,6 +66,7 @@
 #include "kernel/command_registry.h"
 #include "test/testcache.h"
 #include "test_group_catalog.h"
+#include "test_group_host_need.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,6 +88,10 @@
 #define IC_FIX_MACRO  IC_FIX_ROOT "/macro"
 #define IC_FIX_NODEPS IC_FIX_ROOT "/nodeps"
 #define IC_FIX_SNAPSHOT IC_FIX_ROOT "/snapshot"
+/* Two stand-in execution trees for the host-need contract: one as bare as a
+ * proof generation, one carrying the runtime binary a dev box has. */
+#define IC_FIX_HOST_BARE IC_FIX_ROOT "/host_bare"
+#define IC_FIX_HOST_FULL IC_FIX_ROOT "/host_full"
 
 /* ── fixture helpers ──────────────────────────────────────────────────── */
 
@@ -102,6 +107,75 @@ static bool ic_write(const char *dir, const char *rel, const char *content)
     if (content && content[0]) fwrite(content, 1, strlen(content), f);
     fclose(f);
     return true;
+}
+
+/* Whole-item membership in a comma-separated selector. A substring test would
+ * find `test_onion_pair_watch` inside `test_onion_pair_watch_live` and call a
+ * gated group selected. */
+static bool ic_selector_has(const char *selector, const char *full)
+{
+    size_t full_len = strlen(full);
+    for (const char *scan = selector; *scan;) {
+        const char *end = strchr(scan, ',');
+        size_t item_len = end ? (size_t)(end - scan) : strlen(scan);
+        if (item_len == full_len && memcmp(scan, full, full_len) == 0)
+            return true;
+        if (!end) break;
+        scan = end + 1;
+    }
+    return false;
+}
+
+/* A tree shaped like a proof generation: real enough to name as a root, with
+ * no build/bin/z23 in it. */
+static bool ic_host_need_bare_root(const char *dir)
+{
+    char rm[4096];
+    (void)snprintf(rm, sizeof(rm), "rm -rf %s", dir);
+    system(rm);
+    return ic_write(dir, "Makefile", "# bare execution tree\n");
+}
+
+/* A tree shaped like a dev box: the runtime binary the pairing group needs is
+ * present, so the group's host need is met. */
+static bool ic_host_need_full_root(const char *dir)
+{
+    char rm[4096];
+    (void)snprintf(rm, sizeof(rm), "rm -rf %s", dir);
+    system(rm);
+    return ic_write(dir, "Makefile", "# dev execution tree\n") &&
+           ic_write(dir, "build/bin/z23", "#!/bin/sh\n");
+}
+
+/* The operator-provisioned fold fixture, present or absent. The path never has
+ * to exist: the declared need is that the assignment is made at all, exactly
+ * as the heavy leg reads it. This case owns the variable only for its own
+ * duration -- ic_host_fixture_save()/restore() put back whatever an operator
+ * running the suite had set, so no later group loses its fixture. */
+static void ic_host_fixture_env(bool present)
+{
+    if (present)
+        setenv("ZCL_SELF_FOLD_ANCHOR_FIXTURE",
+               IC_FIX_ROOT "/anchor.snapshot", 1);
+    else
+        unsetenv("ZCL_SELF_FOLD_ANCHOR_FIXTURE");
+}
+
+static bool ic_host_fixture_save(char *saved, size_t saved_len)
+{
+    const char *current = getenv("ZCL_SELF_FOLD_ANCHOR_FIXTURE");
+    saved[0] = '\0';
+    if (!current) return false;
+    (void)snprintf(saved, saved_len, "%s", current);
+    return true;
+}
+
+static void ic_host_fixture_restore(const char *saved, bool was_set)
+{
+    if (was_set)
+        setenv("ZCL_SELF_FOLD_ANCHOR_FIXTURE", saved, 1);
+    else
+        unsetenv("ZCL_SELF_FOLD_ANCHOR_FIXTURE");
 }
 
 #if !defined(_WIN32)
@@ -695,6 +769,11 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
 static int test_ic_capacity_bound_runs_everything(void)
 {
     int failures = 0;
+    /* Function scope so the operator's own fixture assignment is put back even
+     * when an ASSERT below jumps straight to the case exit. */
+    static char ic_fixture_saved[4096];
+    bool ic_fixture_was_set =
+        ic_host_fixture_save(ic_fixture_saved, sizeof(ic_fixture_saved));
     TEST("impact composition: a capacity bound runs the whole catalog") {
         const char *files[] = { "core/modules/net/src/tor_integration.c" };
 
@@ -741,29 +820,71 @@ static int test_ic_capacity_bound_runs_everything(void)
         ASSERT(!roomy.closure_universal);
         ASSERT(roomy.closure_groups_len > capped.closure_groups_len);
 
-        /* (b) the proof runner turns a universal plan into the whole catalog,
-         * and an ordinary plan into just its own groups. */
+        /* (b) the proof runner turns a universal plan into the whole catalog
+         * MINUS the groups whose declared host need this tree cannot meet,
+         * and an ordinary plan into just its own groups.
+         *
+         * A proof generation carries no runtime binaries and no operator
+         * fixture, so onion_pair_watch_live and self_folded_anchor_heavy can
+         * only report UNOBSERVED/SKIP there -- verdicts the suite accounting
+         * refuses. They are left out of the universal selector and NAMED, not
+         * silently dropped. */
         static char selector[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
                              (ZCL_TEST_GROUP_FULL_MAX + 1)];
+        char gated[PROOF_HOST_GATED_MAX];
         uint32_t selected = 0;
         memset(selector, 0, sizeof(selector));
+        ASSERT(ic_host_need_bare_root(IC_FIX_HOST_BARE));
+        ic_host_fixture_env(false);
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &capped, false, selector, sizeof(selector), &selected));
-        ASSERT((size_t)selected == zcl_test_group_catalog_count());
-        ASSERT(zcl_test_group_catalog_count() > 0);
+                   &capped, IC_FIX_HOST_BARE, false, selector,
+                   sizeof(selector), &selected, gated, sizeof(gated)));
+        ASSERT(zcl_test_group_catalog_count() > 2);
+        ASSERT((size_t)selected == zcl_test_group_catalog_count() - 2);
+        ASSERT(!ic_selector_has(selector, "test_onion_pair_watch_live"));
+        ASSERT(!ic_selector_has(selector, "test_self_folded_anchor_heavy"));
         for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
-            char needle[ZCL_TEST_GROUP_FULL_MAX + 2];
-            (void)snprintf(needle, sizeof(needle), "%s",
-                           zcl_test_group_catalog_at(i));
-            ASSERT(strstr(selector, needle) != NULL);
+            const char *full = zcl_test_group_catalog_at(i);
+            if (strcmp(full, "test_onion_pair_watch_live") == 0 ||
+                strcmp(full, "test_self_folded_anchor_heavy") == 0)
+                continue;
+            ASSERT(ic_selector_has(selector, full));
         }
+        /* (b2) the selection note says exactly what was left out and why.
+         * Printed as the note itself reads, so this log is the evidence a
+         * reviewer needs without driving a proof cycle. */
+        printf("\n    test_selection=universal reason=closure-universal "
+               "groups_selected=%u\n    host_gated=%s\n  ",
+               (unsigned)selected, gated[0] ? gated : "-");
+        ASSERT(strstr(gated,
+                      "test_onion_pair_watch_live:file:build/bin/z23") != NULL);
+        ASSERT(strstr(gated, "test_self_folded_anchor_heavy:env:"
+                             "ZCL_SELF_FOLD_ANCHOR_FIXTURE") != NULL);
+
+        /* (b3) give the tree the binary and the operator the fixture and both
+         * groups come straight back: this is a host fact, not a demotion. */
+        memset(selector, 0, sizeof(selector));
+        selected = 0;
+        ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
+        ic_host_fixture_env(true);
+        ASSERT(zcl_dev_proof_test_build_test_selector(
+                   &capped, IC_FIX_HOST_FULL, false, selector,
+                   sizeof(selector), &selected, gated, sizeof(gated)));
+        ASSERT((size_t)selected == zcl_test_group_catalog_count());
+        ASSERT(gated[0] == '\0');
+        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++)
+            ASSERT(ic_selector_has(selector, zcl_test_group_catalog_at(i)));
+        ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
+
         uint32_t exact_selected = 0;
         memset(selector, 0, sizeof(selector));
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &roomy, false, selector, sizeof(selector),
-                   &exact_selected));
+                   &roomy, IC_FIX_HOST_BARE, false, selector, sizeof(selector),
+                   &exact_selected, gated, sizeof(gated)));
         ASSERT(exact_selected > 0);
         ASSERT((size_t)exact_selected < zcl_test_group_catalog_count());
+        /* An exact plan is never host-gated: the note stays empty. */
+        ASSERT(gated[0] == '\0');
 
         /* (c) no index at all is NOT capacity. It is the planner failing to
          * ask, and it still refuses. */
@@ -784,6 +905,84 @@ static int test_ic_capacity_bound_runs_everything(void)
         ASSERT(strcmp(why, "no-code-index") == 0);
 
         system("rm -rf " IC_FIX_GROUP);
+        system("rm -rf " IC_FIX_HOST_BARE);
+        system("rm -rf " IC_FIX_HOST_FULL);
+        PASS();
+    } _test_next:;
+    ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
+    return failures;
+}
+
+/* ── T4c: the host-need table itself ──────────────────────────────────
+ *
+ * The selector above is only as honest as the table it reads. This pins the
+ * table's own contract: it validates, it resolves the two declared rows to
+ * the exact kind and value they claim, it answers NONE for an ordinary group,
+ * and asking about a group that is not registered is a REFUSAL rather than a
+ * quiet "no need" that would let a typo silently un-gate a group. */
+
+static int test_ic_host_need_table_is_closed(void)
+{
+    int failures = 0;
+    TEST("impact composition: the host-need table is closed and typed") {
+        struct zcl_test_group_host_need need;
+
+        ASSERT(zcl_test_group_host_needs_valid());
+
+        /* Both declared rows resolve to exactly what they declare. */
+        memset(&need, 0, sizeof(need));
+        ASSERT(zcl_test_group_host_need("test_onion_pair_watch_live", &need));
+        ASSERT(need.kind == ZCL_HOST_NEED_FILE);
+        ASSERT(strcmp(need.value, "build/bin/z23") == 0);
+        ASSERT(strcmp(zcl_test_group_host_need_kind_name(need.kind),
+                      "file") == 0);
+        /* The file need is asked of the tree handed in, not of the caller's
+         * own checkout: the same need is unmet in a bare tree and met in one
+         * that carries the binary. */
+        ASSERT(ic_host_need_bare_root(IC_FIX_HOST_BARE));
+        ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
+        ASSERT(!zcl_test_group_host_need_met(IC_FIX_HOST_BARE, &need));
+        ASSERT(zcl_test_group_host_need_met(IC_FIX_HOST_FULL, &need));
+
+        memset(&need, 0, sizeof(need));
+        ASSERT(zcl_test_group_host_need("test_self_folded_anchor_heavy",
+                                        &need));
+        ASSERT(need.kind == ZCL_HOST_NEED_ENV);
+        ASSERT(strcmp(need.value, "ZCL_SELF_FOLD_ANCHOR_FIXTURE") == 0);
+        ASSERT(strcmp(zcl_test_group_host_need_kind_name(need.kind),
+                      "env") == 0);
+        char saved[4096];
+        bool was_set = ic_host_fixture_save(saved, sizeof(saved));
+        ic_host_fixture_env(false);
+        ASSERT(!zcl_test_group_host_need_met(IC_FIX_HOST_FULL, &need));
+        ic_host_fixture_env(true);
+        ASSERT(zcl_test_group_host_need_met(IC_FIX_HOST_FULL, &need));
+        ic_host_fixture_restore(saved, was_set);
+
+        /* An ordinary group declares nothing and is never gated. */
+        memset(&need, 0, sizeof(need));
+        ASSERT(zcl_test_group_host_need("test_impact_composition", &need));
+        ASSERT(need.kind == ZCL_HOST_NEED_NONE);
+        ASSERT(zcl_test_group_host_need_met(IC_FIX_HOST_BARE, &need));
+
+        /* A group that is not in the catalog is a refusal, not an answer. */
+        memset(&need, 0, sizeof(need));
+        ASSERT(!zcl_test_group_host_need("test_no_such_group_at_all", &need));
+        ASSERT(!zcl_test_group_host_need("", &need));
+        ASSERT(!zcl_test_group_host_need(NULL, &need));
+        ASSERT(!zcl_test_group_host_need("test_onion_pair_watch_live", NULL));
+
+        /* An unknown kind cannot pass as met. */
+        struct zcl_test_group_host_need bogus = {
+            (enum zcl_test_group_host_need_kind)99,
+            "test_onion_pair_watch_live", "build/bin/z23"
+        };
+        ASSERT(!zcl_test_group_host_need_met(IC_FIX_HOST_FULL, &bogus));
+        ASSERT(zcl_test_group_host_need_kind_name(bogus.kind) == NULL);
+        ASSERT(!zcl_test_group_host_need_met(IC_FIX_HOST_FULL, NULL));
+
+        system("rm -rf " IC_FIX_HOST_BARE);
+        system("rm -rf " IC_FIX_HOST_FULL);
         PASS();
     } _test_next:;
     return failures;
@@ -5801,6 +6000,7 @@ int test_impact_composition(void)
     failures += test_ic_macro_only_header_has_dependents();
     failures += test_ic_incomplete_dimension_refuses_proof();
     failures += test_ic_capacity_bound_runs_everything();
+    failures += test_ic_host_need_table_is_closed();
     failures += test_ic_every_selection_has_a_reason();
     failures += test_ic_union_never_loses_a_rule_group();
     failures += test_ic_dimension_applicability_and_exact_execution();

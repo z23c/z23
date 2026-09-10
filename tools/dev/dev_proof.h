@@ -54,6 +54,12 @@
  * and the NULL terminator: 13 slots, exactly. */
 #define PROOF_PREFORK_ARGV_CAP 13u
 
+/* Room for the `host_gated=` line of the test-selection note: every group the
+ * universal selector left out because this tree cannot meet its declared host
+ * need, spelled `<group>:<kind>:<value>` and comma-joined. Overflowing this
+ * refuses the selection rather than writing a truncated explanation. */
+#define PROOF_HOST_GATED_MAX 4096u
+
 enum zcl_dev_proof_state {
     ZCL_DEV_PROOF_STATE_INVALID = -1,
     ZCL_DEV_PROOF_STATE_MISSING = 0,
@@ -267,11 +273,14 @@ bool zcl_dev_proof_test_generation_dependency(const char *root,
                                               char *why, size_t why_len);
 /* Seam for the selection regression: the same builder the proof worker uses,
  * so a test can prove a universal plan selects the whole catalog without
- * running a proof cycle. */
+ * running a proof cycle. `root` is the tree the runner would exec in, and the
+ * one the declared host needs are asked of; `gated_out` receives the same
+ * `host_gated=` list the selection note carries. */
 struct zcl_devloop_plan;
 bool zcl_dev_proof_test_build_test_selector(
-    const struct zcl_devloop_plan *plan, bool inventory_only,
-    char *out, size_t out_size, uint32_t *count_out);
+    const struct zcl_devloop_plan *plan, const char *root, bool inventory_only,
+    char *out, size_t out_size, uint32_t *count_out, char *gated_out,
+    size_t gated_size);
 /* Seam for the stress-env regression: the exact call the test dimension
  * makes right before it launches its runner, so a test can prove
  * ZCL_STRESS_TESTS lands in this process's own environ (and therefore in

@@ -699,6 +699,28 @@ catalog instead of a group list. Only a dimension the index could not answer at
 all — no code index, no include graph, a query error — stays `unavailable` and
 still makes `proof_admissible` false.
 
+A universal selection subtracts exactly one thing: a group whose declared
+**host need** the proof generation cannot meet. The needs are data, declared
+once in `tools/dev/test_group_host_needs.def` — a `ZCL_HOST_NEED_FILE` row
+names a path that must exist in the tree the runner execs in, a
+`ZCL_HOST_NEED_ENV` row names an environment variable that must be set — and
+`tools/dev/test_group_host_need.c` resolves them against that generation, never
+against your own checkout. A need row naming an unregistered group, an unknown
+need kind, or an empty value is a refusal, not a skipped row. This exists
+because a proof generation deliberately builds no node runtime binaries and
+carries no operator fixture, so `test_onion_pair_watch_live` can only report
+`UNOBSERVED` (`PAIR_PROBE=ENV_MISSING_BINARY`) and `test_self_folded_anchor_heavy`
+can only `SKIP` there — verdicts the suite accounting refuses, which used to
+fail every universal-closure proof with `test_accounting_incomplete` even when
+zero groups failed. An omitted group is counted by the runner as gated and is
+named in the attempt's `logs/*.test-selection.log`, which now carries a second
+line, `host_gated=<group>:<kind>:<value>,…` (or `host_gated=-`), so nothing is
+dropped quietly. Nothing else changes: the groups still run everywhere their
+input exists — a dev box with `build/bin/z23`, an operator who exported
+`ZCL_SELF_FOLD_ANCHOR_FIXTURE` — an exact impact plan that names one still
+selects it, and a `SKIP` or `UNOBSERVED` from a selected group still refuses
+the proof.
+
 Windows installs the same receipt policy as native PE hooks in an
 immutable content-addressed generation. Admission launches no console window;
 its bounded Git children use the parent Git-for-Windows image and a

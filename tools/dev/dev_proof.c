@@ -10,6 +10,7 @@
 #include "dev_proof_budget.h"
 #include "devloop.h"
 #include "test_group_catalog.h"
+#include "test_group_host_need.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -4579,9 +4580,13 @@ static bool inventory_output_only(const char *const *files, size_t count)
 
 /* Record the test-selection shape beside the dimension logs. "universal" is
  * the whole catalog, chosen because the plan's closure was capacity-bounded;
- * "exact" is the enumerated plan. */
+ * "exact" is the enumerated plan. `host_gated` names every catalog group the
+ * universal selector left out because this tree cannot meet the group's
+ * declared host need, and which need it was -- so a reader of this file never
+ * has to infer a smaller run from a count. "-" means nothing was left out. */
 static bool proof_note_test_selection(const struct proof_paths *paths,
-                                      bool universal, uint32_t selected)
+                                      bool universal, uint32_t selected,
+                                      const char *host_gated)
 {
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s.test-selection.log", paths->logs,
@@ -4593,6 +4598,8 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
                   universal ? "universal" : "exact",
                   universal ? "closure-universal" : "impact-plan",
                   (unsigned)selected);
+    (void)fprintf(f, "host_gated=%s\n",
+                  (host_gated && host_gated[0]) ? host_gated : "-");
     return fclose(f) == 0;
 }
 
@@ -4627,17 +4634,64 @@ static bool dp_selector_has(const char *out, const char *full)
     return duplicate;
 }
 
+/* Name one host-gated group in the selection note: which group, which kind of
+ * need, and the exact path or environment name that was missing. Refuses
+ * rather than truncating -- a half-written explanation is worse than none. */
+static bool dp_gated_note(char *gated, size_t gated_size, size_t *gated_pos,
+                          const struct zcl_test_group_host_need *need)
+{
+    const char *kind = zcl_test_group_host_need_kind_name(need->kind);
+    if (!kind || !gated || gated_size == 0) return false;
+    int n = snprintf(gated + *gated_pos, gated_size - *gated_pos,
+                     "%s%s:%s:%s", *gated_pos ? "," : "", need->group, kind,
+                     need->value);
+    if (n <= 0 || (size_t)n >= gated_size - *gated_pos) return false;
+    *gated_pos += (size_t)n;
+    return true;
+}
+
+/* Should the universal closure carry this group on this host? A group whose
+ * declared input this tree does not have can only report SKIP or UNOBSERVED,
+ * which the suite accounting refuses -- so it is left out here and counted as
+ * gated by the runner. Leaving it out is a SELECTION decision only: an exact
+ * plan that names the group still runs it, and a SKIP there still refuses.
+ * `included` is only meaningful when the call returns true; a false is a
+ * refusal (unregistered group or malformed need row), never an exclusion. */
+static bool dp_selector_host_admits(const char *root, const char *full,
+                                    char *gated, size_t gated_size,
+                                    size_t *gated_pos, bool *included)
+{
+    struct zcl_test_group_host_need need;
+    *included = true;
+    if (!zcl_test_group_host_need(full, &need)) return false;
+    if (need.kind == ZCL_HOST_NEED_NONE) return true;
+    if (zcl_test_group_host_need_met(root, &need)) return true;
+    *included = false;
+    return dp_gated_note(gated, gated_size, gated_pos, &need);
+}
+
 /* A capacity-bounded plan reaches more groups than it can enumerate. The
  * plan already turned that into the universal closure, so the proof runs
  * the whole catalog: a large run is the honest price of a change whose
- * blast radius does not fit in a list. */
-static bool dp_selector_universal(char *out, size_t out_size, size_t *pos,
-                                  uint32_t *count)
+ * blast radius does not fit in a list. The one subtraction is a group whose
+ * declared host need this tree cannot meet; every such group is named in
+ * `gated`. `root` is the tree the test runner will exec in, so the question
+ * asked is about that tree and not about the submitting checkout. */
+static bool dp_selector_universal(const char *root, char *out, size_t out_size,
+                                  size_t *pos, uint32_t *count, char *gated,
+                                  size_t gated_size)
 {
+    size_t gated_pos = 0;
+    if (!gated || gated_size == 0) return false;
+    gated[0] = '\0';
     for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
-        if (!dp_selector_append(out, out_size, pos,
-                                zcl_test_group_catalog_at(i)))
+        const char *full = zcl_test_group_catalog_at(i);
+        bool included = false;
+        if (!dp_selector_host_admits(root, full, gated, gated_size, &gated_pos,
+                                     &included))
             return false;
+        if (!included) continue;
+        if (!dp_selector_append(out, out_size, pos, full)) return false;
         (*count)++;
     }
     return true;
@@ -4659,11 +4713,21 @@ static bool dp_selector_groups(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
     return true;
 }
 
+/* `root` is the tree the test dimension execs in -- the proof generation, not
+ * the submitting checkout -- because that is the tree whose contents decide
+ * whether a host-gated group could observe anything. `gated_out` receives the
+ * comma-separated host-gated list for the selection note; it is emptied on
+ * every path, so an exact selection reports no gating rather than stale text. */
 static bool build_test_selector(const struct zcl_devloop_plan *plan,
-                                bool inventory_only, char *out,
-                                size_t out_size, uint32_t *count_out)
+                                const char *root, bool inventory_only,
+                                char *out, size_t out_size,
+                                uint32_t *count_out, char *gated_out,
+                                size_t gated_size)
 {
-    if (!plan || !out || out_size == 0 || !count_out) return false;
+    if (!plan || !out || out_size == 0 || !count_out || !gated_out ||
+        gated_size == 0)
+        return false;
+    gated_out[0] = '\0';
     if (inventory_only) {
         (void)snprintf(out, out_size, "%s", "code_inventory");
         *count_out = 1;
@@ -4672,7 +4736,8 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
     size_t pos = 0;
     uint32_t count = 0;
     if (plan->closure_universal) {
-        if (!dp_selector_universal(out, out_size, &pos, &count) ||
+        if (!dp_selector_universal(root, out, out_size, &pos, &count,
+                                   gated_out, gated_size) ||
             count == 0)
             return false;
         *count_out = count;
@@ -4689,10 +4754,12 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
 
 #if defined(ZCL_TESTING)
 bool zcl_dev_proof_test_build_test_selector(
-    const struct zcl_devloop_plan *plan, bool inventory_only,
-    char *out, size_t out_size, uint32_t *count_out)
+    const struct zcl_devloop_plan *plan, const char *root, bool inventory_only,
+    char *out, size_t out_size, uint32_t *count_out, char *gated_out,
+    size_t gated_size)
 {
-    return build_test_selector(plan, inventory_only, out, out_size, count_out);
+    return build_test_selector(plan, root, inventory_only, out, out_size,
+                               count_out, gated_out, gated_size);
 }
 #endif
 
@@ -5851,8 +5918,14 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
     dims[ZCL_DEV_PROOF_COMPILE].selected = compile_selected ? 1 : 0;
     dims[ZCL_DEV_PROOF_LINT].selected = 1;
     uint32_t test_count = 0;
-    if (!build_test_selector(&w->plan, w->inventory_only, w->groups,
-                             sizeof(w->groups), &test_count)) {
+    char host_gated[PROOF_HOST_GATED_MAX] = {0};
+    /* w->execution.root is the generation the test dimension execs in; the
+     * host needs must be asked of that tree, never of the submitting
+     * checkout, or a dev box's binaries would excuse a generation that has
+     * none. */
+    if (!build_test_selector(&w->plan, w->execution.root, w->inventory_only,
+                             w->groups, sizeof(w->groups), &test_count,
+                             host_gated, sizeof(host_gated))) {
         proof_why(why, why_len, "test_selection_invalid_or_truncated");
         return false;
     }
@@ -5861,7 +5934,7 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
      * log. Without this a universal selection looks like an unexplained
      * whole-catalog run. */
     if (!proof_note_test_selection(&w->execution, w->plan.closure_universal,
-                                   test_count)) {
+                                   test_count, host_gated)) {
         proof_why(why, why_len, "test_selection_note_unwritable");
         return false;
     }
