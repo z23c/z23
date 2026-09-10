@@ -1333,17 +1333,17 @@ Z23_FLAG("ZCL_LINT_BIN_DIR", "env_build", "build/bin", "-",
 Z23_FLAG("ZCL_LINT_BUDGET_SEC", "env_build", "75", "-",
           "undocumented; first use tools/lint/run_lint.sh:81")
 Z23_FLAG("ZCL_LINT_CACHE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/run_lint.sh:544")
+          "undocumented; first use tools/lint/run_lint.sh:545")
 Z23_FLAG("ZCL_LINT_CACHE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/lint_cache.sh:344")
 Z23_FLAG("ZCL_LINT_CACHE_DIR_X", "env_build", "-", "-",
-          "undocumented; first use tools/lint/run_lint.sh:350")
+          "undocumented; first use tools/lint/run_lint.sh:351")
 Z23_FLAG("ZCL_LINT_CACHE_DUMP", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:461")
 Z23_FLAG("ZCL_LINT_CACHE_MODE", "env_build", "off", "-",
-          "undocumented; first use tools/lint/run_lint.sh:348")
-Z23_FLAG("ZCL_LINT_CACHE_TREE_KEY_X", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:349")
+Z23_FLAG("ZCL_LINT_CACHE_TREE_KEY_X", "env_build", "-", "-",
+          "undocumented; first use tools/lint/run_lint.sh:350")
 Z23_FLAG("ZCL_LINT_GATES_DIR_X", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:78")
 Z23_FLAG("ZCL_LINT_GATE_TIMING", "env_test", "-", "-",
@@ -1367,7 +1367,7 @@ Z23_FLAG("ZCL_LINT_TU_CACHE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_LINT_TU_CACHE_GENERATIONS", "env_build", "6", "-",
           "undocumented; first use tools/lint/tu_result_cache.sh:162")
 Z23_FLAG("ZCL_LINT_VERBOSE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/run_lint.sh:626")
+          "undocumented; first use tools/lint/run_lint.sh:627")
 Z23_FLAG("ZCL_LOGROTATE_ROTATE_BYTES", "env_build", "536870912", "-",
           "undocumented; first use tools/scripts/zcl-logrotate.sh:56")
 Z23_FLAG("ZCL_LOGROTATE_TARGETS", "env_build", "-", "-",
