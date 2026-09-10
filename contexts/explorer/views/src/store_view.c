@@ -15,6 +15,7 @@
 #include "views/site_css.h"
 #include "views/site_layout.h"
 #include "controllers/zslp_controller.h"
+#include "json/json.h"
 #include "models/database.h"
 #include "models/store_blob.h"
 #include "platform/time_compat.h"
@@ -337,6 +338,71 @@ size_t store_error_response(const char *status_code,
         status_code, "text/html; charset=utf-8", resp, max);
 }
 
+size_t store_json_response(const char *status_code,
+                           const char *body, size_t body_len,
+                           uint8_t *resp, size_t max)
+{
+    if (!status_code || !status_code[0])
+        status_code = "200 OK";
+    return store_wrap_response(body, body_len, status_code,
+                               "engine/application/json", resp, max);
+}
+
+/* SHA3-256 payload digest as lowercase hex. Empty when the listing has
+ * no file — buyers must not invent a hash for a text-only product. */
+static void store_hash_hex(const uint8_t hash[32], bool has, char out[65])
+{
+    out[0] = '\0';
+    if (!has || !hash)
+        return;
+    for (int i = 0; i < 32; i++)
+        (void)snprintf(out + i * 2, 3, "%02x", hash[i]);
+}
+
+static bool store_product_json(const struct db_store_product *p,
+                               struct json_value *out)
+{
+    char hash_hex[65];
+
+    if (!p || !out)
+        return false;
+    json_init(out);
+    json_set_object(out);
+    store_hash_hex(p->content_hash, p->has_content, hash_hex);
+    if (!json_push_kv_int(out, "id", p->id) ||
+        !json_push_kv_str(out, "name", p->name[0] ? p->name : "?") ||
+        !json_push_kv_str(out, "description", p->description) ||
+        !json_push_kv_int(out, "price_zatoshi", p->price_zatoshi) ||
+        !json_push_kv_str(out, "token_id",
+                          p->token_id[0] ? p->token_id : "") ||
+        !json_push_kv_int(out, "tokens_per_purchase",
+                          (int64_t)p->tokens_per_purchase) ||
+        !json_push_kv_bool(out, "has_content", p->has_content) ||
+        !json_push_kv_str(out, "content_hash", hash_hex)) {
+        json_free(out);
+        return false;
+    }
+    return true;
+}
+
+static size_t store_emit_json(struct json_value *doc, const char *status,
+                              uint8_t *resp, size_t max)
+{
+    char body[32768];
+    size_t need;
+
+    if (!doc)
+        return 0;
+    need = json_write(doc, NULL, 0);
+    if (need >= sizeof(body) ||
+        json_write(doc, body, sizeof(body)) != need) {
+        json_free(doc);
+        return 0;
+    }
+    json_free(doc);
+    return store_json_response(status, body, need, resp, max);
+}
+
 const char *store_order_status_text(int status)
 {
     switch (status) {
@@ -459,6 +525,50 @@ size_t serve_product_list(sqlite3 *db, uint8_t *resp, size_t max)
     return store_html_response(body, off, resp, max);
 }
 
+size_t serve_product_list_json(sqlite3 *db, uint8_t *resp, size_t max)
+{
+    struct node_db ndb = { .db = db, .open = true };
+    struct db_store_product products[64];
+    struct json_value doc, arr, item;
+    int count;
+    int i;
+
+    json_init(&doc);
+    json_init(&arr);
+    json_set_object(&doc);
+    json_set_array(&arr);
+
+    count = db_store_product_list_active(&ndb, products,
+        sizeof(products) / sizeof(products[0]));
+    for (i = 0; i < count; i++) {
+        /* list_active does not SELECT content_hash; re-find so the GET
+         * catalog reports the payload digest a buyer will verify. */
+        struct db_store_product full;
+        json_init(&item);
+        if (!db_store_product_find_active(&ndb, products[i].id, &full))
+            full = products[i];
+        if (!store_product_json(&full, &item)) {
+            json_free(&arr);
+            json_free(&doc);
+            return 0;
+        }
+        if (!json_push_back(&arr, &item)) {
+            json_free(&item);
+            json_free(&arr);
+            json_free(&doc);
+            return 0;
+        }
+        json_free(&item);
+    }
+    if (!json_push_kv(&doc, "products", &arr)) {
+        json_free(&arr);
+        json_free(&doc);
+        return 0;
+    }
+    json_free(&arr);
+    return store_emit_json(&doc, "200 OK", resp, max);
+}
+
 /* GET /store/product/:id — product detail */
 size_t serve_product_detail(sqlite3 *db, int64_t product_id,
                                     uint8_t *resp, size_t max)
@@ -487,12 +597,7 @@ size_t serve_product_detail(sqlite3 *db, int64_t product_id,
      * too-large-to-inline download page, never for a product small enough
      * to actually deliver. Empty hash_hex means this listing has no file. */
     char hash_hex[65];
-    hash_hex[0] = '\0';
-    if (product.has_content) {
-        for (int i = 0; i < 32; i++)
-            (void)snprintf(hash_hex + i * 2, 3, "%02x",
-                           product.content_hash[i]);
-    }
+    store_hash_hex(product.content_hash, product.has_content, hash_hex);
 
     /* Sized for the design-system CSS (~14 KB) plus the ~5 KB embedded PoW
      * solver (STORE_ORDER_POW_JS) — the other product pages stay at the
@@ -581,6 +686,25 @@ size_t serve_product_detail(sqlite3 *db, int64_t product_id,
     if (n > 0) off += (size_t)n;
 
     return store_html_response(body, off, resp, max);
+}
+
+size_t serve_product_detail_json(sqlite3 *db, int64_t product_id,
+                                 uint8_t *resp, size_t max)
+{
+    struct node_db ndb = { .db = db, .open = true };
+    struct db_store_product product;
+    struct json_value doc;
+
+    memset(&product, 0, sizeof(product));
+    if (!db_store_product_find_active(&ndb, product_id, &product)) {
+        const char *body = "{\"error\":\"not_found\"}";
+        return store_json_response("404 Not Found", body, strlen(body),
+                                   resp, max);
+    }
+    json_init(&doc);
+    if (!store_product_json(&product, &doc))
+        return 0;
+    return store_emit_json(&doc, "200 OK", resp, max);
 }
 
 /* GET /store/order/:id — check status */

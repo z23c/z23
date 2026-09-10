@@ -73,6 +73,14 @@ size_t store_error_response(const char *status_code,
                             const char *body, size_t body_len,
                             uint8_t *resp, size_t max);
 
+/* Wrap `body` as an `engine/application/json` HTTP response with the given
+ * status line (e.g. "200 OK" or "404 Not Found"). GET /store.json and
+ * GET /store/products/:id.json use this so a GET-only onion client can
+ * discover token_id and content_hash without parsing HTML. */
+size_t store_json_response(const char *status_code,
+                           const char *body, size_t body_len,
+                           uint8_t *resp, size_t max);
+
 /* Wrap arbitrary (possibly NUL-containing) bytes as a 200 OK response
  * with `content_type` and Content-Length. When `download_filename` is
  * non-NULL, adds Content-Disposition: attachment. Returns total bytes
@@ -98,6 +106,9 @@ size_t serve_order_index(sqlite3 *db, uint8_t *resp, size_t max);
 size_t serve_product_list(sqlite3 *db, uint8_t *resp, size_t max);
 size_t serve_product_detail(sqlite3 *db, int64_t product_id,
                             uint8_t *resp, size_t max);
+size_t serve_product_list_json(sqlite3 *db, uint8_t *resp, size_t max);
+size_t serve_product_detail_json(sqlite3 *db, int64_t product_id,
+                                 uint8_t *resp, size_t max);
 size_t serve_order_status(sqlite3 *db, int64_t order_id,
                           uint8_t *resp, size_t max);
 

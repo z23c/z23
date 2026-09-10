@@ -188,6 +188,58 @@ static bool route_is_product_show(const char *path)
            path_has_prefix(path, "/store/products/");
 }
 
+static bool route_is_product_json_index(const char *path)
+{
+    return path_eq(path, "/store.json") ||
+           path_eq(path, "/store/products.json");
+}
+
+static bool route_is_product_page(const char *path)
+{
+    return route_is_product_index(path) ||
+           route_is_product_show(path) ||
+           route_is_product_json_index(path);
+}
+
+static size_t store_invalid_product(uint8_t *resp, size_t max)
+{
+    const char *err_body = "<h1>Invalid product</h1>"
+        "<p>Product id must be a positive integer.</p>"
+        "<p><a href='/store/products'>&larr; Back to store</a></p>";
+    return store_error_response("400 Bad Request",
+        err_body, strlen(err_body), resp, max);
+}
+
+/* HTML catalog/detail plus the GET-only JSON twins. JSON lives on
+ * /store.json, /store/products.json, and /store/products/:id.json so a
+ * GET-only onion client can discover token_id and content_hash without
+ * parsing HTML. POST is unchanged and still owner-gated on the wire. */
+static size_t store_serve_product_page(sqlite3 *db, const char *path,
+                                       uint8_t *resp, size_t max)
+{
+    int64_t id = -1;
+    char stripped[512];
+    size_t n;
+
+    if (route_is_product_json_index(path))
+        return serve_product_list_json(db, resp, max);
+    if (route_is_product_index(path))
+        return serve_product_list(db, resp, max);
+
+    n = path ? strlen(path) : 0;
+    if (n >= 5 && n < sizeof(stripped) &&
+        strcmp(path + n - 5, ".json") == 0) {
+        memcpy(stripped, path, n - 5);
+        stripped[n - 5] = '\0';
+        if (!parse_positive_path_id(stripped, &id))
+            return store_invalid_product(resp, max);
+        return serve_product_detail_json(db, id, resp, max);
+    }
+    if (!parse_positive_path_id(path, &id))
+        return store_invalid_product(resp, max);
+    return serve_product_detail(db, id, resp, max);
+}
+
 static bool route_is_order_show(const char *path)
 {
     return path_has_prefix(path, "/store/order/") ||
@@ -374,20 +426,8 @@ size_t store_handle_request(const char *method, const char *path,
 
     size_t result = 0;
 
-    if (route_is_product_index(path)) {
-        result = serve_product_list(db, response, response_max);
-
-    } else if (route_is_product_show(path)) {
-        int64_t id = -1;
-        if (!parse_positive_path_id(path, &id)) {
-            const char *err_body = "<h1>Invalid product</h1>"
-                "<p>Product id must be a positive integer.</p>"
-                "<p><a href='/store/products'>&larr; Back to store</a></p>";
-            result = store_error_response("400 Bad Request",
-                err_body, strlen(err_body), response, response_max);
-        } else {
-            result = serve_product_detail(db, id, response, response_max);
-        }
+    if (route_is_product_page(path)) {
+        result = store_serve_product_page(db, path, response, response_max);
 
     } else if (route_is_order_index(path) &&
                method && strcmp(method, "GET") == 0) {

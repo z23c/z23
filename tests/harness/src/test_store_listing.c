@@ -335,6 +335,98 @@ static int t_storefront_identity(void)
     return failures;
 }
 
+/* ── (1c) GET-only JSON catalog names the same identity ─────────────
+ *
+ * Onion fetch is GET-only. A remote buyer that cannot POST still has to
+ * discover token_id and the payload SHA3-256 from the store itself. */
+static const char *sl_http_body(char *page)
+{
+    char *p = strstr(page, "\r\n\r\n");
+    return p ? p + 4 : page;
+}
+
+static int t_storefront_json(void)
+{
+    int failures = 0;
+    char dir[256];
+    SL_CHECK("json identity fixture datadir",
+             sl_mk_datadir(dir, sizeof(dir), "identity-json"));
+
+    char file[512];
+    snprintf(file, sizeof(file), "%s/guide.bin", dir);
+    SL_CHECK("json identity payload file",
+             sl_write_file(file, SL_FILE, sizeof(SL_FILE)));
+
+    struct json_value input;
+    struct zcl_command_reply reply;
+    sl_input_open(&input, dir);
+    (void)json_push_kv_str(&input, "name", "Field Guide");
+    (void)json_push_kv_str(&input, "token_id", "guide");
+    (void)json_push_kv_real(&input, "price_zcl", 0.25);
+    (void)json_push_kv_str(&input, "content_path", file);
+    sl_call(zcl_native_handle_store_list_product, &input, &reply);
+    json_free(&input);
+
+    SL_CHECK("json identity: list-product OK",
+             reply.exit_code == ZCL_COMMAND_EXIT_OK);
+    int64_t product_id = json_get_int(json_get(&reply.data, "id"));
+    SL_CHECK("json identity: assigned a product id", product_id > 0);
+    zcl_command_reply_free(&reply);
+
+    uint8_t want[32];
+    zcl_sha3_256(SL_FILE, sizeof(SL_FILE), want);
+    char want_hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(want_hex + i * 2, 3, "%02x", want[i]);
+
+    uint8_t page[65536];
+    size_t n = store_handle_request("GET", "/store.json", NULL, 0, page,
+                                    sizeof(page), dir);
+    page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
+    SL_CHECK("json catalog: Content-Type is JSON",
+             strstr((char *)page, "engine/application/json") != NULL);
+
+    struct json_value cat;
+    json_init(&cat);
+    SL_CHECK("json catalog: body parses with identity",
+             json_read(&cat, sl_http_body((char *)page),
+                       strlen(sl_http_body((char *)page))) &&
+             strstr(sl_http_body((char *)page), "\"token_id\":\"GUIDE\"") &&
+             strstr(sl_http_body((char *)page), want_hex) != NULL);
+    json_free(&cat);
+
+    char show_path[80];
+    snprintf(show_path, sizeof(show_path), "/store/products/%lld.json",
+             (long long)product_id);
+    n = store_handle_request("GET", show_path, NULL, 0, page,
+                             sizeof(page), dir);
+    page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
+    SL_CHECK("json detail: Content-Type is JSON",
+             strstr((char *)page, "engine/application/json") != NULL);
+
+    struct json_value detail;
+    json_init(&detail);
+    SL_CHECK("json detail: body parses with identity",
+             json_read(&detail, sl_http_body((char *)page),
+                       strlen(sl_http_body((char *)page))) &&
+             strcmp(json_get_str(json_get(&detail, "token_id")),
+                    "GUIDE") == 0 &&
+             strcmp(json_get_str(json_get(&detail, "content_hash")),
+                    want_hex) == 0 &&
+             json_get_bool(json_get(&detail, "has_content")));
+    json_free(&detail);
+
+    n = store_handle_request("GET", "/store/products/99999.json", NULL, 0,
+                             page, sizeof(page), dir);
+    page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
+    SL_CHECK("json missing: 404 not_found",
+             strstr((char *)page, "404 Not Found") != NULL &&
+             strstr((char *)page, "not_found") != NULL);
+
+    test_rm_rf(dir);
+    return failures;
+}
+
 /* ── (2) refusals write nothing ───────────────────────────────────── */
 
 static int t_refusals(void)
@@ -806,6 +898,7 @@ int test_store_listing(void)
     printf("\n=== Store listing (typed merchant surface) ===\n");
     failures += t_list_and_serve();
     failures += t_storefront_identity();
+    failures += t_storefront_json();
     failures += t_refusals();
     failures += t_input_errors();
     failures += t_json_path_still_works();
