@@ -379,6 +379,30 @@ int zcl_dev_proof_landing_step_share(const char *step_path, int wait_ms);
  * link/copy decision against fixture trees; the dev binary compiles the
  * same seam. A release build sees none of it. POSIX-only, like the
  * warm-start machinery itself. */
+/* Generation-pool hygiene seams, aimed at a fixture pool instead of this
+ * host's. `parent` is the pool directory and `in_use` the one generation
+ * that must never be taken ("" for none); both counters are INCREMENTED,
+ * never reset, exactly as the internal reaps report.
+ *
+ * The first is the age reap generation_prepare() runs after it has taken
+ * its generation -- the pass that reclaims an abandoned lane's sole
+ * complete generation. The second is the pressure pass it runs BEFORE it
+ * reserves RAM, told what the pool has free and what the reservation
+ * needs, so a test can simulate a full pool without one. Neither grants
+ * any proof, lease, or admission authority; both are advisory hygiene. */
+void zcl_dev_proof_test_generation_pool_reap(const char *repo_root,
+                                             const char *parent,
+                                             const char *in_use,
+                                             size_t *removed_out,
+                                             uint64_t *bytes_out);
+void zcl_dev_proof_test_pool_pressure_reap(const char *repo_root,
+                                           const char *parent,
+                                           const char *in_use,
+                                           uint64_t free_bytes,
+                                           uint64_t need_bytes,
+                                           const char *phases,
+                                           size_t *removed_out,
+                                           uint64_t *bytes_out);
 bool zcl_dev_proof_warm_tag(const char *name);
 /* The ZCL_DEV_PROOF_WARM=0/"off"/"no" opt-out, exposed so the harness
  * proves the cold-forcing switch it gates on. */

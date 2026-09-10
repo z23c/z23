@@ -2150,11 +2150,24 @@ static bool depfile_tree_copy(const char *source, const char *target,
  * approve again. */
 #define PROOF_WARM_REMOVE_TIMEOUT_MS 600000
 #define PROOF_WARM_REAP_MAX 8
+/* How many candidates the pressure pass below may take to git. It runs on
+ * the proof's hot path and stops the moment the pool has room, so the cap
+ * only bounds the pathological case of a pool where nothing will delete. */
+#define PROOF_POOL_PRESSURE_MAX 32
 /* An active proof stamps its generation when it takes it and builds for up
  * to an hour on a loaded host, so anything touched within the hour may
  * still be working. Marker-less generations get a full day: without a
  * marker there is no pair lease to consult, and age is the only signal. */
 #define PROOF_WARM_IDLE_ACTIVE_SECONDS (60 * 60)
+/* A complete generation nobody has touched in half a day is not a donor
+ * being kept for the next proof, it is an abandoned lane's leftover. Being
+ * superseded used to be the only way one could ever be reclaimed, so a
+ * lane that proved once and stopped held its entire tree forever:
+ * nineteen such generations held 34 GiB of a 47 GiB tmpfs and the next
+ * proof was refused its RAM reservation. Long enough that an overnight
+ * pause keeps its donor, short enough that a dead lane does not outlive
+ * the day. */
+#define PROOF_WARM_IDLE_ABANDONED_SECONDS (12 * 60 * 60)
 #define PROOF_WARM_IDLE_UNMARKED_SECONDS (24 * 60 * 60)
 
 static bool warm_tag_name(const char *name)
@@ -3788,6 +3801,22 @@ static void dp_reap_remove(const struct proof_paths *paths,
     }
 }
 
+/* May the reaper take this surveyed entry? Everything the survey returned
+ * is already idle and unclaimed; this is the policy on top of that. An
+ * entry without a marker is here only because it aged past the unmarked
+ * window, so it goes. A complete one goes when a newer same-root sibling
+ * supersedes it as donor -- and, the abandoned-lane case, when nothing has
+ * touched it for half a day, because a lane that stopped proving leaves a
+ * sole complete generation no sibling will ever supersede. */
+static bool dp_reap_eligible(const struct warm_reap_entry *entries,
+                             size_t count, size_t i, int64_t now)
+{
+    if (!entries[i].complete) return true;
+    if (now - entries[i].touched > PROOF_WARM_IDLE_ABANDONED_SECONDS)
+        return true;
+    return dp_reap_superseded(entries, count, i);
+}
+
 static void generation_pool_reap_ex(const struct proof_paths *paths,
                                     const char *parent, const char *in_use,
                                     size_t max_attempts, size_t *removed_out,
@@ -3808,8 +3837,7 @@ static void generation_pool_reap_ex(const struct proof_paths *paths,
     for (size_t i = 0; collect_ok && entries && i < count &&
              attempts < max_attempts;
          i++) {
-        if (entries[i].complete && !dp_reap_superseded(entries, count, i))
-            continue;
+        if (!dp_reap_eligible(entries, count, i, now)) continue;
         /* The cap counts candidates that reach git, not directory
          * entries: the queries plus the delete are the only expensive
          * part, and bounding them is what keeps a fast proof fast. */
@@ -3824,6 +3852,123 @@ static void generation_pool_reap(const struct proof_paths *paths,
 {
     generation_pool_reap_ex(paths, parent, in_use, PROOF_WARM_REAP_MAX, NULL,
                             NULL);
+}
+
+/* Free bytes a RAM pool must still show for dp_generation_pool()'s
+ * reservation to be granted: what this proof asks to reserve, on top of the
+ * platform floor the reservation refuses to spend below. Reading the same
+ * two numbers the reservation reads is what makes the pass below evict
+ * under real pressure only, never as a matter of course. */
+static uint64_t dp_pool_pressure_need(void)
+{
+    return proof_ram_reserve_bytes() + PLATFORM_RAM_SCRATCH_MIN_FREE_BYTES;
+}
+
+/* The idlest surveyed generation not yet considered, or `count` when none
+ * is left. A considered entry has had its path cleared by the caller. */
+static size_t dp_pressure_oldest(const struct warm_reap_entry *entries,
+                                 size_t count)
+{
+    size_t best = count;
+    for (size_t i = 0; i < count; i++) {
+        if (!entries[i].path[0]) continue;
+        if (best == count || entries[i].touched < entries[best].touched)
+            best = i;
+    }
+    return best;
+}
+
+/* One eviction's row in phases.txt: which generation went, how long it had
+ * been idle, and what it gave back. Display only, like every other note. */
+static void dp_pressure_note(const struct proof_paths *paths,
+                             const struct warm_reap_entry *entry, int64_t now,
+                             uint64_t freed)
+{
+    if (!paths->phases[0]) return;
+    char note[PATH_MAX + 96];
+    (void)snprintf(note, sizeof(note),
+                   "generation=%s idle_seconds=%lld bytes=%llu", entry->path,
+                   (long long)(now - entry->touched),
+                   (unsigned long long)freed);
+    (void)zcl_dev_proof_phase_note(paths->phases, "generation_pool_evicted",
+                                   note);
+}
+
+/* Reclaim RAM before asking for it. The reaper above is hygiene that runs
+ * after this proof has already taken its generation, and by then the
+ * reservation has been granted or refused; a pool full of abandoned donors
+ * therefore refuses today's proof and only tidies itself for tomorrow's.
+ * This pass runs first, and ONLY when the pool cannot currently satisfy the
+ * reservation: it evicts idle donors oldest-touched first and stops the
+ * moment enough is free, so a pool with room keeps every donor it has.
+ *
+ * It borrows the reaper's safety whole rather than restating it. Every
+ * entry it can see survived dp_reap_survey(), which already excluded the
+ * caller's own generation, anything holding a live proof lease, and
+ * anything touched within an active build's hour; every delete still goes
+ * through dp_reap_remove(), which re-proves detached, clean, and
+ * unchanged-since-surveyed before it runs. Advisory throughout: a delete
+ * that refuses leaves the pool exactly as full as it found it, and the
+ * reservation then refuses as it does today. */
+static void dp_pool_pressure_reap(const struct proof_paths *paths,
+                                  const char *parent, const char *in_use,
+                                  uint64_t free_bytes, uint64_t need_bytes,
+                                  size_t *removed_out, uint64_t *bytes_out)
+{
+    if (free_bytes >= need_bytes) return;
+    DIR *dir = opendir(parent);
+    if (!dir) return;
+    int64_t now = platform_time_wall_unix();
+    struct warm_reap_entry *entries = NULL;
+    size_t count = 0;
+    bool collect_ok = dp_reap_collect(dir, parent, in_use, now, &entries,
+                                      &count);
+    (void)closedir(dir);
+    uint64_t reclaimed = 0;
+    for (size_t attempts = 0;
+         collect_ok && entries && attempts < PROOF_POOL_PRESSURE_MAX &&
+             free_bytes + reclaimed < need_bytes;
+         attempts++) {
+        size_t victim = dp_pressure_oldest(entries, count);
+        if (victim == count) break;
+        size_t removed = 0;
+        uint64_t before = reclaimed;
+        dp_reap_remove(paths, &entries[victim], &removed, &reclaimed);
+        if (removed) dp_pressure_note(paths, &entries[victim], now,
+                                      reclaimed - before);
+        if (removed && removed_out) (*removed_out)++;
+        /* Considered once: a generation git declined to delete is not a
+         * candidate the next turn of this loop should retry. */
+        entries[victim].path[0] = 0;
+    }
+    if (bytes_out) *bytes_out += reclaimed;
+    free(entries);
+}
+
+/* Ask the RAM pool for room before the reservation asks the kernel. Only
+ * the RAM pool is ever under this pressure -- the disk pool never refuses
+ * -- so the path is resolved here rather than taken from
+ * dp_generation_pool(), which has not run yet and which would answer "no
+ * RAM root at all" for exactly the full pool this exists to relieve: its
+ * default guard is the same floor the pool has fallen below. Asking for one
+ * byte of headroom asks only whether the root is there. The generation this
+ * proof is about to take is named in use, so it can never be its own
+ * victim. */
+static void dp_generation_pool_relieve(const struct proof_paths *paths,
+                                       const char *generation_tag)
+{
+    char ram_root[PATH_MAX];
+    if (!platform_ram_scratch_root(ram_root, sizeof(ram_root), 1)) return;
+    char parent[PATH_MAX], in_use[PATH_MAX];
+    if (snprintf(parent, sizeof(parent), "%s/z23p", ram_root) >=
+            (int)sizeof(parent) ||
+        snprintf(in_use, sizeof(in_use), "%s/%s", parent, generation_tag) >=
+            (int)sizeof(in_use))
+        return;
+    uint64_t free_bytes = 0;
+    if (!platform_disk_space_available(ram_root, &free_bytes)) return;
+    dp_pool_pressure_reap(paths, parent, in_use, free_bytes,
+                          dp_pool_pressure_need(), NULL, NULL);
 }
 
 /* An explicit sweep of both this checkout's own generation pools (disk
@@ -3895,6 +4040,37 @@ bool zcl_dev_proof_generation_pool_sweep(const char *repo_root,
  * it. POSIX-only because the warm start itself lives in the POSIX arm
  * above. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+void zcl_dev_proof_test_generation_pool_reap(const char *repo_root,
+                                             const char *parent,
+                                             const char *in_use,
+                                             size_t *removed_out,
+                                             uint64_t *bytes_out)
+{
+    struct proof_paths paths;
+    memset(&paths, 0, sizeof(paths));
+    (void)snprintf(paths.root, sizeof(paths.root), "%s", repo_root);
+    generation_pool_reap_ex(&paths, parent, in_use, PROOF_POOL_SWEEP_MAX,
+                            removed_out, bytes_out);
+}
+
+void zcl_dev_proof_test_pool_pressure_reap(const char *repo_root,
+                                           const char *parent,
+                                           const char *in_use,
+                                           uint64_t free_bytes,
+                                           uint64_t need_bytes,
+                                           const char *phases,
+                                           size_t *removed_out,
+                                           uint64_t *bytes_out)
+{
+    struct proof_paths paths;
+    memset(&paths, 0, sizeof(paths));
+    (void)snprintf(paths.root, sizeof(paths.root), "%s", repo_root);
+    if (phases)
+        (void)snprintf(paths.phases, sizeof(paths.phases), "%s", phases);
+    dp_pool_pressure_reap(&paths, parent, in_use, free_bytes, need_bytes,
+                          removed_out, bytes_out);
+}
+
 bool zcl_dev_proof_warm_tag(const char *name)
 {
     return warm_tag_name(name);
@@ -4389,6 +4565,9 @@ static bool generation_prepare(const struct proof_paths *paths,
     if (!dp_generation_parent_dir(paths->root, root_parent, why, why_len))
         return false;
     dp_generation_tag(paths->root, local, generation_tag);
+    /* Before the reservation rather than after it; see
+     * dp_pool_pressure_reap() for why both passes exist. */
+    dp_generation_pool_relieve(paths, generation_tag);
     char ram_root[PATH_MAX];
     bool ram_backed = false, ram_reserve_refused = false;
     if (!dp_generation_pool(root_parent, ram_lease, parent, ram_root,

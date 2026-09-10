@@ -3928,6 +3928,176 @@ static int test_pw_generation_pool_sweep(void)
     return failures;
 }
 
+
+/* ── generation-pool hygiene fixtures ─────────────────────────────────── */
+#if !defined(_WIN32)
+
+/* A checkout with one commit and an empty generation pool beside it, laid
+ * out exactly as the pool sits beside a real checkout. */
+static bool ic_pool_repo(const char *root, char *repo, size_t repo_len,
+                         char *pool, size_t pool_len)
+{
+    char cmd[8192];
+    if (snprintf(repo, repo_len, "%s/checkout", root) >= (int)repo_len ||
+        snprintf(pool, pool_len, "%s/.z23p", root) >= (int)pool_len)
+        return false;
+    if (snprintf(cmd, sizeof(cmd),
+                 "mkdir -p '%s' '%s' && cd '%s' && git init -q && "
+                 "git -c user.name=t -c user.email=t@t.invalid "
+                 "commit --allow-empty -q -m init", repo, pool, repo) >=
+            (int)sizeof(cmd))
+        return false;
+    return system(cmd) == 0;
+}
+
+/* One pool entry that looks exactly like a finished proof generation: a
+ * detached worktree carrying a build-complete marker, with the directory
+ * itself backdated to `idle_seconds` ago -- the same mtime the reaper
+ * reads. Each entry names its own marker root, so no entry is ever the
+ * superseded one: this is the abandoned-lane shape, a sole complete
+ * generation no sibling will replace. */
+static bool ic_pool_generation(const char *repo, const char *pool, char fill,
+                               const char *marker_root, int64_t idle_seconds,
+                               char *out, size_t out_len)
+{
+    static const char local[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char base[] = "1111111111111111111111111111111111111111";
+    char tag[33], cmd[8192], ballast[4096];
+    memset(tag, fill, 32);
+    tag[32] = 0;
+    if (snprintf(out, out_len, "%s/%s", pool, tag) >= (int)out_len ||
+        snprintf(cmd, sizeof(cmd),
+                 "git -C '%s' worktree add --detach -q '%s' HEAD", repo,
+                 out) >= (int)sizeof(cmd) ||
+        system(cmd) != 0)
+        return false;
+    memset(ballast, 'x', sizeof(ballast) - 1);
+    ballast[sizeof(ballast) - 1] = 0;
+    struct zcl_dev_proof_build_identity_v1 identity;
+    memset(&identity, 0x5a, sizeof(identity));
+    if (!ic_write(out, "build/ballast", ballast) ||
+        !zcl_dev_proof_warm_marker_write(out, marker_root, local, base,
+                                         1700000000LL, &identity))
+        return false;
+    int64_t when = platform_time_wall_unix() - idle_seconds;
+    const struct timespec stamp[2] = {
+        { .tv_sec = (time_t)when, .tv_nsec = 0 },
+        { .tv_sec = (time_t)when, .tv_nsec = 0 },
+    };
+    return utimensat(AT_FDCWD, out, stamp, 0) == 0;
+}
+
+static bool ic_file_has(const char *path, const char *needle)
+{
+    char buffer[65536];
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t got = fread(buffer, 1, sizeof(buffer) - 1, f);
+    (void)fclose(f);
+    buffer[got] = 0;
+    return strstr(buffer, needle) != NULL;
+}
+
+#endif
+
+static int test_pw_abandoned_generation_reaped_by_age(void)
+{
+    int failures = 0;
+    TEST("proof generation pool: a complete generation nobody supersedes is "
+        "reaped once abandoned, and kept while it is not") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096], repo[4096], pool[4096];
+        char gen_dead[4096], gen_recent[4096];
+        struct stat probe;
+        test_make_tmpdir(root, sizeof(root), "proof_pool_age", "age");
+        ASSERT(ic_pool_repo(root, repo, sizeof(repo), pool, sizeof(pool)));
+        /* Neither is superseded and neither holds a lease. Before the
+         * abandoned rule both lived forever; now age alone separates
+         * them, and nothing else about them differs. */
+        ASSERT(ic_pool_generation(repo, pool, 'a', "/fixtures/pool-dead",
+                                  13 * 60 * 60, gen_dead, sizeof(gen_dead)));
+        ASSERT(ic_pool_generation(repo, pool, 'b', "/fixtures/pool-recent",
+                                  11 * 60 * 60, gen_recent,
+                                  sizeof(gen_recent)));
+        size_t removed = 0;
+        uint64_t bytes = 0;
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        zcl_dev_proof_test_generation_pool_reap(repo, pool, "", &removed,
+                                                &bytes);
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(removed == 1);
+        ASSERT(bytes > 0);
+        ASSERT(stat(gen_dead, &probe) != 0);
+        ASSERT(stat(gen_recent, &probe) == 0);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pw_pressure_evicts_oldest_until_satisfied(void)
+{
+    int failures = 0;
+    TEST("proof generation pool: RAM pressure evicts the idlest donor "
+        "first, stops as soon as the reservation fits, and never takes a "
+        "generation still in use") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096], repo[4096], pool[4096], phases[4096];
+        char gen_old[4096], gen_mid[4096], gen_hot[4096];
+        struct stat probe;
+        test_make_tmpdir(root, sizeof(root), "proof_pool_pressure", "press");
+        ASSERT(ic_pool_repo(root, repo, sizeof(repo), pool, sizeof(pool)));
+        ASSERT(snprintf(phases, sizeof(phases), "%s/phases.txt", root) > 0);
+        ASSERT(ic_pool_generation(repo, pool, 'a', "/fixtures/pool-old",
+                                  5 * 60 * 60, gen_old, sizeof(gen_old)));
+        ASSERT(ic_pool_generation(repo, pool, 'b', "/fixtures/pool-mid",
+                                  3 * 60 * 60, gen_mid, sizeof(gen_mid)));
+        ASSERT(ic_pool_generation(repo, pool, 'c', "/fixtures/pool-hot",
+                                  10 * 60, gen_hot, sizeof(gen_hot)));
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        /* A pool that already satisfies the reservation keeps every donor
+         * it has: the pass is pressure relief, not a policy. */
+        size_t removed = 0;
+        uint64_t bytes = 0;
+        zcl_dev_proof_test_pool_pressure_reap(repo, pool, "", 4096, 4096,
+                                              phases, &removed, &bytes);
+        ASSERT(removed == 0);
+        ASSERT(stat(gen_old, &probe) == 0);
+        /* One byte short. The idlest donor goes and the pass stops there,
+         * with a newer idle donor still standing beside it. */
+        zcl_dev_proof_test_pool_pressure_reap(repo, pool, "", 4096, 4097,
+                                              phases, &removed, &bytes);
+        ASSERT(removed == 1);
+        ASSERT(bytes > 0);
+        ASSERT(stat(gen_old, &probe) != 0);
+        ASSERT(stat(gen_mid, &probe) == 0);
+        ASSERT(stat(gen_hot, &probe) == 0);
+        /* A need nothing could satisfy still refuses the generation this
+         * proof is holding and the one touched within the hour. */
+        removed = 0;
+        zcl_dev_proof_test_pool_pressure_reap(repo, pool, gen_mid, 0,
+                                              UINT64_MAX, phases, &removed,
+                                              &bytes);
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(removed == 0);
+        ASSERT(stat(gen_mid, &probe) == 0);
+        ASSERT(stat(gen_hot, &probe) == 0);
+        /* Every eviction is on the record with its path and its cost. */
+        ASSERT(ic_file_has(phases, "generation_pool_evicted"));
+        ASSERT(ic_file_has(phases, gen_old));
+        ASSERT(ic_file_has(phases, "idle_seconds="));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pw_marker_identity_invalidates_stale_donor(void)
 {
     int failures = 0;
@@ -6455,6 +6625,8 @@ int test_impact_composition(void)
     failures += test_pw_pick_newest_complete_idle();
     failures += test_pw_marker_round_trip_and_refusals();
     failures += test_pw_generation_pool_sweep();
+    failures += test_pw_abandoned_generation_reaped_by_age();
+    failures += test_pw_pressure_evicts_oldest_until_satisfied();
     failures += test_pw_marker_identity_invalidates_stale_donor();
     failures += test_pw_identity_survives_a_second_checkout_path();
     failures += test_pw_identity_keeps_its_four_roots_apart();
