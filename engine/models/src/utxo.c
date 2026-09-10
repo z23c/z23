@@ -163,7 +163,10 @@ bool db_utxo_find(struct node_db *ndb, const uint8_t txid[32], uint32_t vout,
     sqlite3_reset(s);
     AR_BIND_BLOB(s, 1, txid, 32);
     AR_BIND_INT(s, 2, (int)vout);
-    if (!AR_STEP_ROW(s)) return false;
+    if (!AR_STEP_ROW(s)) {
+        sqlite3_reset(s);
+        return false;
+    }
     memset(out, 0, sizeof(*out));
     memcpy(out->txid, txid, 32);
     out->vout = vout;
@@ -185,6 +188,10 @@ bool db_utxo_find(struct node_db *ndb, const uint8_t txid[32], uint32_t vout,
     }
     out->height = (int)AR_COL_INT(s, 4);
     out->is_coinbase = AR_COL_INT(s, 5) != 0;
+    /* Every column is copied out above, so the row can be released now. A
+     * cached reader parked on a row holds this connection's read transaction
+     * open and pins the WAL snapshot behind it — see AR_FIND_ONE_CACHED. */
+    sqlite3_reset(s);
     return true;
 }
 

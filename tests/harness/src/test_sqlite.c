@@ -2920,6 +2920,100 @@ static bool check_sqlite_51_ledger_and_periodic_state(struct wal_ckpt_record *dr
     return ok;
 }
 
+/* Answer the one question the live node asks every five minutes: can this
+ * connection still checkpoint? SQLITE_LOCKED here means the connection is
+ * inside a transaction it did not declare — a cached reader parked on a row. */
+static int sqlite_53_checkpoint_rc(struct node_db *ndb)
+{
+    int log_frames = -1, ckpt_frames = -1;
+    return sqlite3_wal_checkpoint_v2(ndb->db, NULL, SQLITE_CHECKPOINT_PASSIVE,
+                                     &log_frames, &ckpt_frames);
+}
+
+static bool check_sqlite_53_seed(struct node_db *ndb, struct db_peer *p,
+                                 struct db_utxo *u, bool ok)
+{
+    static uint8_t script[] = {0x76, 0xa9, 0x14};
+
+    memset(p, 0, sizeof(*p));
+    p->ip[10] = 0xFF; p->ip[11] = 0xFF;
+    p->ip[12] = 127; p->ip[13] = 0; p->ip[14] = 0; p->ip[15] = 1;
+    p->port = 8033;
+    p->services = 1;
+    p->last_seen = 1700000000;
+
+    memset(u, 0, sizeof(*u));
+    memset(u->txid, 0xAA, 32);
+    u->vout = 0;
+    u->value = 50000000;
+    u->script = script;
+    u->script_len = sizeof(script);
+    u->script_type = SCRIPT_P2PKH;
+    u->has_address = true;
+    memset(u->address_hash, 0x42, 20);
+    u->height = 100;
+
+    ok = ok && db_peer_save(ndb, p);
+    ok = ok && db_utxo_save(ndb, u);
+    /* A clean connection checkpoints. Anything else and the rest of this
+     * check would be measuring the fixture, not the readers. */
+    ok = ok && sqlite_53_checkpoint_rc(ndb) != SQLITE_LOCKED;
+    return ok;
+}
+
+static void check_sqlite_53_cached_readers_release_the_snap(int *failures)
+{
+    printf("SQLite cached readers release the WAL snapshot they read... ");
+    char dir[256];
+    char dbpath[512];
+    test_make_tmpdir(dir, sizeof(dir), "sqlite", "cached_reader_snapshot");
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool ok = node_db_open(&ndb, dbpath);
+
+    struct db_peer p;
+    struct db_utxo u;
+    ok = check_sqlite_53_seed(&ndb, &p, &u, ok);
+
+    /* Each of these three reads runs on a statement node_db caches for the
+     * life of the connection. A hit used to leave that statement standing on
+     * its row, which is how a live node reached "database is locked" on every
+     * writer while its reads kept working and its WAL kept growing. */
+    struct db_peer found_peer;
+    ok = ok && db_peer_find_by_addr(&ndb, p.ip, p.port, &found_peer);
+    ok = ok && sqlite_53_checkpoint_rc(&ndb) != SQLITE_LOCKED;
+
+    ok = ok && db_peer_count(&ndb) == 1;
+    ok = ok && sqlite_53_checkpoint_rc(&ndb) != SQLITE_LOCKED;
+
+    struct db_utxo found_utxo;
+    memset(&found_utxo, 0, sizeof(found_utxo));
+    ok = ok && db_utxo_find(&ndb, u.txid, u.vout, &found_utxo);
+    ok = ok && found_utxo.value == u.value;
+    free(found_utxo.script);
+    ok = ok && sqlite_53_checkpoint_rc(&ndb) != SQLITE_LOCKED;
+
+    /* A miss must release the statement too — the same connection is the one
+     * every other subsystem writes through. */
+    struct db_peer absent_peer;
+    uint8_t absent_ip[16];
+    memset(absent_ip, 0, sizeof(absent_ip));
+    absent_ip[15] = 9;
+    ok = ok && !db_peer_find_by_addr(&ndb, absent_ip, 9999, &absent_peer);
+    ok = ok && sqlite_53_checkpoint_rc(&ndb) != SQLITE_LOCKED;
+
+    /* And the connection can still write after all of that. */
+    p.last_seen = 1700000200;
+    ok = ok && db_peer_save(&ndb, &p);
+
+    node_db_close(&ndb);
+    test_rm_rf_recursive(dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
 static void check_sqlite_51_sqlite_node_db_opens_with_a_bounded_wal_(int *failures)
 {
     printf("SQLite node.db opens with a bounded WAL and reports what "
@@ -3425,6 +3519,19 @@ int test_sqlite(void) {
      * checkpoint mid-run, and the error-path restore must return every
      * bound (not just the autocheckpoint). */
     check_sqlite_52_sqlite_turbo_run_checkpoints_mid_run_pas(&failures);
+
+    /* ── Cached readers must not pin the snapshot ──────────────────────
+     *
+     * node.db caches a handful of prepared SELECTs for the life of the
+     * connection. Two of them returned their row to the caller without
+     * resetting the statement, which leaves the connection inside an
+     * implicit read transaction for as long as nobody calls that reader
+     * again. On node1 that turned into a permanent wedge: every checkpoint
+     * answered SQLITE_LOCKED, the WAL grew for over an hour without the
+     * database file changing once, and every writer in the process — chain
+     * evidence, the UTXO mirror, the fleet board, peer persistence — was
+     * refused with "database is locked" while reads carried on normally. */
+    check_sqlite_53_cached_readers_release_the_snap(&failures);
 
     return failures;
 }

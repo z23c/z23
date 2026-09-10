@@ -402,11 +402,23 @@ static inline void ar_errors_full_messages(const struct ar_errors *e,
     } \
 } while (0)
 
+/* A cached statement left standing on a row keeps its connection inside an
+ * implicit read transaction. That pins the WAL snapshot it read: every
+ * sqlite3_wal_checkpoint_v2() on the connection answers SQLITE_LOCKED, so the
+ * write-ahead log is never folded back into the database file, and the
+ * connection's own next write is refused against the now-stale snapshot with
+ * SQLITE_BUSY_SNAPSHOT — reported as plain "database is locked" — without
+ * ever consulting the busy timeout, so no amount of retrying clears it. The
+ * row is read here and the statement is released here, on the found path as
+ * well as the missing one. */
 #define AR_FIND_ONE_CACHED(stmt, out, row_code) do { \
-    if (!AR_STEP_ROW(stmt)) \
+    if (!AR_STEP_ROW(stmt)) { \
+        sqlite3_reset(stmt); \
         return false; \
+    } \
     memset((out), 0, sizeof(*(out))); \
     row_code; \
+    sqlite3_reset(stmt); \
     return true; \
 } while (0)
 
@@ -640,6 +652,7 @@ static inline void ar_errors_full_messages(const struct ar_errors *e,
     int _c = 0; \
     if (AR_STEP_ROW(stmt)) \
         _c = (int)AR_COL_INT(stmt, 0); \
+    sqlite3_reset(stmt); \
     return _c; \
 } while (0)
 
