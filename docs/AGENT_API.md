@@ -1075,17 +1075,26 @@ versioned as `zcl.bootstrap_status.v1` and separates two surfaces:
   path used by zclassicd when its beta6 snapshot bootstrap is disabled with
   `-bootstrap=0`, or after its snapshot stage has completed.
 - `beta6_snapshot_bootstrap`: the zclassicd v2.1.2-beta6 fast-bootstrap
-  snapshot protocol. A compatible server must advertise `NODE_BOOTSTRAP`
-  (`1 << 24`) and answer `getbsman/bsman`, `getbschk/bschk`,
-  `getbspman/bspman`, and `getbspchk/bspchk`. z23 must not advertise
-  that bit until the matching C service is implemented.
+  snapshot protocol. A compatible server advertises `NODE_BOOTSTRAP`
+  (`1 << 24`) and answers `getbsman/bsman`, `getbschk/bschk`,
+  `getbspman/bspman`, and `getbspchk/bspchk`; z23 implements this service and
+  advertises the bit whenever `-beta6-bootstrap-source` is armed (see
+  [`docs/BOOTSTRAPPING.md`](./BOOTSTRAPPING.md) "Serving beta6 clients"). The
+  object's own `advertised` and `serving` fields can disagree: `advertised`
+  and the wire-level bit follow only whether the service is armed, while
+  `serving` additionally ANDs in this node's own security posture, so a node
+  actively answering beta6 clients can still report `serving=false` with
+  `current_blocker=review_required_bootstrap_trust` while its posture review
+  is outstanding — check `advertised`/`in_band` before concluding a node is
+  not helping fast-sync.
 
 The key booleans are `serving_p2p_bootstrap`,
 `serving_addr_bootstrap`, `serving_snapshot_bootstrap`,
 `zclassic23_fast_sync_compatible`, `zclassicd_beta6_p2p_compatible`, and
 `zclassicd_beta6_fast_bootstrap_compatible`. `blockers[]` names missing
-requirements such as `not_listening`, `provable_tip_not_published`, or
-`beta6_NODE_BOOTSTRAP_not_advertised`.
+requirements such as `not_listening`, `provable_tip_not_published`,
+`beta6_NODE_BOOTSTRAP_not_advertised`, or a security-posture status such as
+`review_required_bootstrap_trust`.
 
 For a fresh z23 node, consume `readiness`,
 `fresh_node_next_action`, and `zclassic23_bootstrap`

@@ -185,10 +185,22 @@ With no source the service is entirely dormant: the bit stays out of the
 services word, the eight commands are ignored, and nothing about this node's
 behaviour changes.
 
+The chain snapshot and the zk-SNARK parameter files ride the same eight
+messages, but the parameter half has its own prerequisite: the node's own
+`-paramsdir`. Without it configured, every `getbspman` request gets a beta6
+reject ("no zcash parameters available to serve") while the chain snapshot
+keeps serving normally. A fresh beta6 install needs both halves from its
+bootstrap peer, so a node meant to serve stock clients needs its own zk-SNARK
+parameters installed and `-paramsdir` pointed at them.
+
 ### What the source directory must contain
 
 The path must be **absolute** and must hold the three subtrees the beta6 server
-preflight requires:
+preflight requires — and **nothing else**: every file the manifest scan finds
+is checked against `blocks/` or `chainstate/` and refused by name ("beta6
+snapshot path is outside blocks/ and chainstate/") otherwise, so the source can
+never be a live datadir — `wallet.dat`, `peers.dat`, lock files, and logs all
+refuse arming.
 
 ```
 <source>/blocks/
@@ -196,21 +208,61 @@ preflight requires:
 <source>/chainstate/
 ```
 
-Three optional sidecars sit **beside** the directory, never inside it, so the
-manifest scan cannot pick them up:
+One sidecar is **mandatory**, sitting **beside** the directory (never inside
+it, so the manifest scan cannot pick it up):
 
 | sidecar | contents | effect |
 | --- | --- | --- |
-| `<source>.anchor` | `<height> <blockhash>` | serve as a v1 anchor snapshot; the pair must name a **compiled** beta6 fast-sync anchor |
-| `<source>.meta` | `<height> <blockhash> <chainstate-commitment>` | serve as a v2 self-snapshot with its own chainstate commitment |
-| `<source>.blocktip` | `<height> <blockhash>` | when above the anchor, serve a v3 manifest advertising the post-anchor block bundle |
+| `<source>.anchor` | `<height> <blockhash>` (bare 64-hex hash, no `0x`) | required unless `.meta` is present; the pair must name a **compiled** beta6 fast-sync anchor — currently mainnet height `3126937`, hash `00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053`. Serves a v1 manifest. |
+| `<source>.meta` | `<height> <blockhash> <chainstate-commitment>` | an alternative to `.anchor` that self-declares its own chainstate commitment instead of matching a compiled anchor. No z23 tool produces this file today; treat it as the trust shortcut the anchor exists to avoid, not a normal path. Serves a v2 manifest. |
+| `<source>.blocktip` | `<height> <blockhash>` | optional, honoured only alongside `.anchor`; when its height is past the anchor, upgrades the manifest to v3 (a growable block bundle riding on the pinned anchor chainstate). |
 
-Refusals are by name. An `.anchor` naming a height/hash pair that is not a
-compiled anchor is **refused**, not silently downgraded — a client that trusted
-a fabricated anchor would install unverifiable state.
+With neither `.anchor` nor `.meta` present, arming fails outright ("beta6
+bootstrap source has no readable .anchor marker beside ..."). Refusals are by
+name: an `.anchor` naming a height/hash pair that is not a compiled anchor is
+refused, not silently downgraded.
 
-The directory is opened read-only. Nothing in this path ever writes into it, so
-it is safe to point at a copy that another process is reading.
+The server does not check any bytes against a sidecar's declared identity —
+that is the client's job, which recomputes the chainstate commitment itself.
+Naming the wrong tree, or the right tree with a doctored sidecar, publishes a
+false identity that only a correctly-implemented client catches; get the
+pairing right before arming.
+
+The directory is opened read-only, but the tree must also stay byte-for-byte
+immutable for as long as the service is armed: arming SHA-256s the whole tree
+once (10-25 s for roughly 10 GiB), and every later chunk read re-checks the
+file's size and mtime against what was hashed at arm time, refusing ("...file
+changed after manifest creation") the moment either moved. An rsync-in-place
+refresh or a backup tool that rewrites mtimes breaks every chunk while the
+service keeps advertising `NODE_BOOTSTRAP`. Re-bake into a new, differently
+named directory (see below) and re-point `-beta6-bootstrap-source` instead of
+updating one in place.
+
+### Producing the snapshot
+
+z23 does not mint a beta6-compatible snapshot itself; the source tree comes
+from the legacy `zclassicd` binary's own producer. On a v2.1.2-beta6 build,
+`-bootstrapserve=auto` retains and serves the snapshot that node fast-synced
+with, logging `Auto-serve: re-deriving chainstate@anchor by replaying
+genesis..<h>` and then `Auto-serve: built and installed a v3 anchor serve
+snapshot (chainstate@<h>, blocks to <tip>)` when it finishes; it writes
+`<datadir>/bootstrap-serve-source` plus `bootstrap-serve-source.anchor` and
+`.blocktip` sidecars in exactly the format above.
+
+Run that producer on an **isolated copy** of a beta6 datadir — `cp -a`, never a
+hardlinked copy, and never the datadir a running node is using. From the
+result, copy only `blocks/` and `chainstate/` into a fresh, height-named
+directory outside every datadir, write the `.anchor`/`.blocktip` sidecars
+beside it, and make the tree read-only (`chmod -R a-w`) before arming — the
+immutability rule above means any later change needs a new height-named
+directory, not an in-place edit. Arm it through an `Environment=` drop-in
+naming the new path and restart through the normal deploy, rather than editing
+a live unit in place.
+
+A rollback (`invalidateblock` or similar) does not produce a servable
+snapshot: it persists `BLOCK_FAILED_*` markers into `blocks/index`, and every
+client that fast-syncs from that tree parks at the anchor instead of reaching
+tip.
 
 ### What the node does with it
 
@@ -222,22 +274,46 @@ every connection, the up-to-four parallel streams a beta6 client opens all see
 the byte-identical manifest they require.
 
 Serving is metered per client address group (IPv4 `/24`, IPv6 `/64`) against a
-rolling 24-hour cap with a bandwidth throttle, matching the legacy server's
-accounting.
-Serving is metered per client address group (IPv4 `/24`, IPv6 `/64`) against a
-rolling 24-hour cap. The in-band path runs on the shared message thread, so a
-bucket over its cap is refused **by name** through a beta6 `reject` rather than
-slowed with a sleep: parking that thread would stall every other peer, and a
-beta6 client aborts a stream that goes quiet for 60 s anyway. The dedicated
-listener, which owns a thread per session, still spaces requests out instead.
+rolling 24-hour cap — 100 GiB by compiled default. The in-band path runs on
+the shared message thread, so a bucket over its cap is refused **by name**
+through a beta6 `reject` rather than slowed with a sleep: parking that thread
+would stall every other peer, and a beta6 client aborts a stream that goes
+quiet for 60 s anyway. The dedicated listener, which owns a thread per
+session, still spaces requests out instead.
 
-`core sync status` reports the state under `beta6_snapshot_bootstrap`:
-`serving` flips true once the service is answering — `in_band` true for the
-ordinary P2P port, a non-zero `listen_port` for the optional side socket, or
-both — `current_blocker` empties, and the object carries the source directory
-plus the manifest's height, file count and byte total. While the source is
-unset the blocker reads `beta6_bootstrap_source_not_configured`; armed with
-nothing on the wire it reads `beta6_bootstrap_serving_not_installed`.
+### Status
+
+Query `bootstrapstatus` (native RPC) or `GET /api/v1/bootstrap` (REST; `GET
+/api/v1/bootstrapstatus` is a compatibility alias). The response's
+`beta6_snapshot_bootstrap` object carries `source_dir`, `in_band`,
+`listen_port`, `manifest_version`, `manifest_height`, `manifest_files`,
+`manifest_bytes`, `advertised`, `serving`, and `current_blocker`; the
+top-level `p2p` object separately carries `node_bootstrap` — the bit as sent
+in this node's own `version` message.
+
+`advertised` and `serving` answer different questions and can disagree. The
+`version` message sets `NODE_BOOTSTRAP`, and the in-band path answers
+requests, purely from whether the service is **armed** — a source directory
+that passed preflight — with no check of this node's own security posture.
+`serving` in the status response ANDs that armed/listening state with the
+posture check, so a node that is actively answering beta6 clients on the wire
+can still report `serving=false` with
+`current_blocker=review_required_bootstrap_trust` while its own posture
+review is outstanding. Don't disarm a node on the strength of `serving=false`
+alone — check whether it is actually on the wire (`advertised`, `in_band`)
+first; today the posture gates the *report*, not the *wire*.
+
+`current_blocker` inside `beta6_snapshot_bootstrap` names one of, in order:
+`beta6_bootstrap_source_not_configured` (no source armed),
+`beta6_bootstrap_serving_not_installed` (armed, but neither the in-band seam
+nor the side listener is answering), or `review_required_bootstrap_trust`
+(this node's own security posture — trusted/borrowed state present, or full
+history validation incomplete — has not cleared review); it is empty while
+`serving` is true. The top-level `blockers[]` is a broader readiness list: it
+surfaces the same posture status string (so `review_required_bootstrap_trust`
+can appear there too) plus `beta6_NODE_BOOTSTRAP_not_advertised` when the
+service bit itself is not on the wire — it does not repeat
+`current_blocker`'s other two values.
 
 ### Deployment note
 
