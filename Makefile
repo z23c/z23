@@ -1556,20 +1556,25 @@ ifeq ($(strip $(ZCL_EPOCH_PROFILES)),)
 BUILD_COMPILER_ID := $(ZCL_ZERO_SHA256)
 BUILD_SYSTEM_ID := $(ZCL_ZERO_SHA256)
 else
-BUILD_COMPILER_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) compiler-id "$(CC)" "$(CXX)" 2>/dev/null))
+# compiler-id fails closed: it refuses (non-zero, with a message naming the
+# probe it could not observe) rather than hashing a short preimage. $(shell)
+# then yields the empty string, the validity assert below turns that into a
+# hard $(error), and the driver script's own stderr is deliberately NOT
+# swallowed here so the parse says WHICH probe failed.
+BUILD_COMPILER_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) compiler-id "$(CC)" "$(CXX)"))
 BUILD_COMPILER_ID_VALID := $(shell printf '%s\n' '$(BUILD_COMPILER_ID)' | awk '$$0 ~ /^[0-9a-f]{64}$$/ { print "yes" }')
 ifneq ($(BUILD_COMPILER_ID_VALID),yes)
-$(error compiler/toolchain fingerprint failed; refusing to select a compile epoch)
+$(error compiler/toolchain fingerprint failed - see the build-epoch-key message above; refusing to select a compile epoch)
 endif
 # Fingerprint of every build-system input that changes compile/link semantics
 # without changing a tracked TU (this Makefile's flag variables and per-object
 # overrides, plus the epoch driver scripts). This is what keeps a Makefile
 # CFLAGS edit — which touches no source file — busting every epoch now that
 # the source identity no longer does.
-BUILD_SYSTEM_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) build-system-id 2>/dev/null))
+BUILD_SYSTEM_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) build-system-id))
 BUILD_SYSTEM_ID_VALID := $(shell printf '%s\n' '$(BUILD_SYSTEM_ID)' | awk '$$0 ~ /^[0-9a-f]{64}$$/ { print "yes" }')
 ifneq ($(BUILD_SYSTEM_ID_VALID),yes)
-$(error build-system fingerprint failed; refusing to select a compile epoch)
+$(error build-system fingerprint failed - see the build-epoch-key message above; refusing to select a compile epoch)
 endif
 endif
 

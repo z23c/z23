@@ -180,13 +180,104 @@ check_stamp()
         fail 'compile-session stamp does not match the requested epoch'
 }
 
+# Scratch root for the opt-in compiler-identity preimages the refusal path
+# keeps. TMPDIR when the caller set one (the selftest points it inside its own
+# work directory); otherwise this project's state scratch, never a bare /tmp.
+diag_root()
+{
+    local root="${TMPDIR:-}"
+    [ -n "$root" ] ||
+        root="${XDG_STATE_HOME:-${HOME:-.}/.local/state}/zclassic23/scratch"
+    mkdir -p -- "$root" 2>/dev/null || return 1
+    printf '%s\n' "$root"
+}
+
+# Best-effort removal of a diagnosis directory this function created. Only the
+# flat preimage/field files this script and the key tool write live in it.
+discard_diag()
+{
+    local diag="$1"
+    [ -n "$diag" ] && [ -d "$diag" ] || return 0
+    rm -f -- "$diag"/*.preimage "$diag"/first.fields "$diag"/second.fields \
+        "$diag"/third 2>/dev/null || true
+    rmdir -- "$diag" 2>/dev/null || true
+}
+
+# Name the first record where two compiler preimages disagree, so a refusal
+# says WHICH input moved instead of only that two digests differ. Purely
+# advisory: every failure here is swallowed and the refusal still fires.
+describe_compiler_preimage_difference()
+{
+    local diag="$1" first="$2" second="$3" left right summary
+    [ -n "$diag" ] && [ -n "$second" ] || return 0
+    left="$diag/$first.preimage"
+    right="$diag/$second.preimage"
+    [ -f "$left" ] && [ -f "$right" ] || return 0
+    if [ "$first" = "$second" ]; then
+        printf 'build-epoch-session: the re-derived compiler identity is stable (two derivations agree byte-for-byte), so this epoch really was keyed to a different toolchain\n' >&2
+        return 0
+    fi
+    tr '\0' '\n' < "$left" > "$diag/first.fields" 2>/dev/null || return 0
+    tr '\0' '\n' < "$right" > "$diag/second.fields" 2>/dev/null || return 0
+    # `diff` exits 1 on a difference -- which is the whole point here -- so the
+    # pipeline must never be allowed to trip errexit/pipefail and kill the
+    # refusal this function only exists to explain.
+    summary="$(diff -- "$diag/first.fields" "$diag/second.fields" 2>/dev/null |
+        head -n 6 || true)"
+    [ -n "$summary" ] || return 0
+    printf 'build-epoch-session: first differing compiler-identity record:\n' >&2
+    printf '%s\n' "$summary" | sed 's/^/build-epoch-session:   /' >&2
+}
+
 verify_authority()
 {
     local actual_compiler actual_epoch actual_build_system
-    actual_compiler="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")" ||
-        fail 'compiler fingerprint revalidation failed'
-    [ "$actual_compiler" = "$COMPILER_ID" ] ||
-        fail "compiler/toolchain changed during build expected=$COMPILER_ID actual=$actual_compiler"
+    local derive_rc=0 recheck third="" diag="" root=""
+    set +e
+    actual_compiler="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    derive_rc=$?
+    set -e
+    if [ "$derive_rc" -ne 0 ] || [ "$actual_compiler" != "$COMPILER_ID" ]; then
+        # A real toolchain change is PERSISTENT; a degraded probe (a child the
+        # host could not fork under saturation) is not. Re-derive exactly once
+        # and refuse only on a disagreement that reproduces. The retry costs
+        # one derivation and only ever on this path -- never on the happy one.
+        # Both derivations from here on keep their preimage, so the refusal can
+        # name the record that moved instead of only two opaque digests.
+        [ "$derive_rc" -eq 0 ] || actual_compiler="unavailable(rc=$derive_rc)"
+        root="$(diag_root || printf '')"
+        [ -z "$root" ] ||
+            diag="$(mktemp -d "$root/zcl-build-epoch-diag.XXXXXX" 2>/dev/null || printf '')"
+        recheck="$(ZCL_BUILD_EPOCH_DIAG_DIR="$diag" \
+            "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")" || {
+            discard_diag "$diag"
+            fail "compiler fingerprint revalidation failed twice (first attempt: $actual_compiler)"
+        }
+        if [ "$recheck" != "$COMPILER_ID" ]; then
+            # Reproducible disagreement: refuse, exactly as before this fix.
+            # Derive once more with the preimage kept so the two field lists
+            # can be diffed -- an unstable identity names the record that
+            # moves, a stable one says the toolchain genuinely is not the
+            # keyed one.
+            if [ -n "$diag" ]; then
+                ZCL_BUILD_EPOCH_DIAG_DIR="$diag" \
+                    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" \
+                    >"$diag/third" 2>/dev/null || true
+                third="$(cat "$diag/third" 2>/dev/null || printf '')"
+                describe_compiler_preimage_difference "$diag" \
+                    "$recheck" "$third"
+                printf 'build-epoch-session: compiler-identity preimages kept in %s\n' \
+                    "$diag" >&2
+            fi
+            fail "compiler/toolchain changed during build expected=$COMPILER_ID actual=$actual_compiler recheck=$recheck"
+        fi
+        # The disagreement did not reproduce: this box degraded one probe, the
+        # toolchain did not move. Say so loudly enough to be greppable, and
+        # keep building.
+        printf 'build-epoch-session: compiler fingerprint disagreed once (%s) and re-derived as expected (%s); treating it as a degraded probe, not a toolchain change\n' \
+            "$actual_compiler" "$recheck" >&2
+        discard_diag "$diag"
+    fi
     actual_build_system="$("$KEY_TOOL" build-system-id)" ||
         fail 'build-system fingerprint revalidation failed'
     actual_epoch="$("$KEY_TOOL" key \

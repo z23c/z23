@@ -1211,5 +1211,190 @@ fi
 [ "$CURRENT_RC" -eq 0 ] || fail 'current B publisher failed behind stale A'
 [ "$($STABLE)" = B ] || fail 'stale A overwrote the current B alias'
 
-printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true late_marker_refusal=true make_recovery=true warm_no_rewrite=true compiler_id=%s\n' \
+phase compiler-id-degraded-probe-refused
+# The compiler fingerprint used to absorb EVERY child failure inside its own
+# probe pipeline, so one transient fork failure on a saturated host produced a
+# different -- but perfectly well-formed -- digest at exit 0, and the session
+# refused an unchanged toolchain with "compiler/toolchain changed during
+# build". These assertions pin the fix from both sides:
+#   A1 a failing probe REFUSES instead of hashing a short preimage;
+#   A2 a genuinely different driver still moves the digest and is still refused
+#      (the gate is not weakened);
+#   A3 a ONE-SHOT flake is re-derived once and tolerated (the noise is gone);
+#   A4 back-to-back derivations are byte-identical (catches the next `|| true`).
+# The fixture driver answers every compiler-id probe itself: no real compile,
+# no /usr inventory, everything under $WORK, well under a second of wall.
+SHIM_DIR="$WORK/degraded-probe"
+SHIM_ROOT="$SHIM_DIR/root"
+SHIM_CC="$SHIM_DIR/bin/cc"
+SHIM_TMP="$SHIM_DIR/tmp"
+mkdir -p "$SHIM_DIR/bin" "$SHIM_TMP" \
+    "$SHIM_ROOT/include" "$SHIM_ROOT/programs" "$SHIM_ROOT/libraries"
+printf '#define ZCL_SHIM_HEADER 1\n' > "$SHIM_ROOT/include/shim.h"
+printf 'fixture linker\n' > "$SHIM_ROOT/programs/ld"
+chmod +x "$SHIM_ROOT/programs/ld"
+cat > "$SHIM_CC" <<'SHIM_EOF'
+#!/bin/sh
+# Hermetic compiler-driver fixture for the degraded-probe regression.
+#   ZCL_SHIM_ROOT         directory this driver reports as its search space
+#   ZCL_SHIM_VERSION_TAG  --version payload (a real toolchain change)
+#   ZCL_SHIM_FLAKE_ALWAYS every verbose preprocessing probe fails
+#   ZCL_SHIM_FLAKE_ONCE   sentinel path: the first verbose probe fails, once
+#   ZCL_SHIM_NO_SEARCH    verbose probe succeeds but reports no search roots
+set -u
+verbose=0
+preprocess=0
+for arg in "$@"; do
+    case "$arg" in
+        --version)
+            if [ -n "${ZCL_SHIM_VERSION_COUNTER:-}" ]; then
+                count=$(cat "$ZCL_SHIM_VERSION_COUNTER" 2>/dev/null || echo 0)
+                count=$((count + 1))
+                printf '%s\n' "$count" > "$ZCL_SHIM_VERSION_COUNTER"
+                printf 'zcl-shim-cc unstable-%s\n' "$count"
+                exit 0
+            fi
+            printf 'zcl-shim-cc %s\n' "${ZCL_SHIM_VERSION_TAG:-1}"
+            exit 0 ;;
+        -dumpmachine) printf 'x86_64-zcl-shim-linux\n'; exit 0 ;;
+        -dumpversion|-dumpfullversion) printf '23.0.0\n'; exit 0 ;;
+        -print-search-dirs)
+            printf 'install: %s/\n' "$ZCL_SHIM_ROOT"
+            printf 'programs: =%s/programs\n' "$ZCL_SHIM_ROOT"
+            printf 'libraries: =%s/libraries\n' "$ZCL_SHIM_ROOT"
+            exit 0 ;;
+        -print-prog-name=*)
+            printf '%s/programs/%s\n' "$ZCL_SHIM_ROOT" "${arg#-print-prog-name=}"
+            exit 0 ;;
+        -print-file-name=*)
+            printf '%s/libraries/%s\n' "$ZCL_SHIM_ROOT" "${arg#-print-file-name=}"
+            exit 0 ;;
+        -v) verbose=1 ;;
+        -E) preprocess=1 ;;
+    esac
+done
+if [ "$verbose" = 1 ] && [ "$preprocess" = 1 ]; then
+    if [ -n "${ZCL_SHIM_FLAKE_ONCE:-}" ] && [ -e "$ZCL_SHIM_FLAKE_ONCE" ]; then
+        rm -f -- "$ZCL_SHIM_FLAKE_ONCE"
+        printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
+        exit 1
+    fi
+    if [ -n "${ZCL_SHIM_FLAKE_ALWAYS:-}" ]; then
+        printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
+        exit 1
+    fi
+    printf 'Using built-in specs.\n' >&2
+    if [ -z "${ZCL_SHIM_NO_SEARCH:-}" ]; then
+        printf '#include <...> search starts here:\n' >&2
+        printf ' %s/include\n' "$ZCL_SHIM_ROOT" >&2
+        printf 'End of search list.\n' >&2
+    fi
+    exit 0
+fi
+printf '#define ZCL_SHIM_CC 1\n'
+exit 0
+SHIM_EOF
+chmod +x "$SHIM_CC"
+export ZCL_SHIM_ROOT="$SHIM_ROOT"
+
+# A4: the whole contract in two lines -- a fingerprint that cannot observe all
+# of its inputs must never hash a short preimage, so two derivations of one
+# unchanged toolchain are byte-identical.
+SHIM_ID="$("$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC")" ||
+    fail 'fixture driver did not produce a compiler fingerprint'
+[[ "$SHIM_ID" =~ ^[0-9a-f]{64}$ ]] || fail 'fixture compiler fingerprint is malformed'
+[ "$SHIM_ID" = "$("$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC")" ] ||
+    fail 'back-to-back compiler fingerprints of one unchanged driver disagreed'
+
+# A1: one failing probe must refuse, naming the probe -- never a digest.
+if ZCL_SHIM_FLAKE_ALWAYS=1 "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" \
+        > "$SHIM_DIR/flake.out" 2> "$SHIM_DIR/flake.err"; then
+    fail 'compiler-id returned a digest while a compiler probe was failing'
+fi
+[ ! -s "$SHIM_DIR/flake.out" ] ||
+    fail 'refused compiler-id still printed a fingerprint'
+grep -Fq 'include-search' "$SHIM_DIR/flake.err" ||
+    fail 'degraded compiler-id did not name the failing probe'
+
+# A driver that answers but reports no search roots is degraded too: its
+# header authority would be empty.
+if ZCL_SHIM_NO_SEARCH=1 "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" \
+        >/dev/null 2> "$SHIM_DIR/stub.err"; then
+    fail 'compiler-id accepted a driver that reported no include search roots'
+fi
+grep -Fq 'no include search roots' "$SHIM_DIR/stub.err" ||
+    fail 'empty include-search refusal did not name the missing search roots'
+
+# A2 (first half): a REAL toolchain change still moves the identity.
+SHIM_ID_CHANGED="$(ZCL_SHIM_VERSION_TAG=2 "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC")" ||
+    fail 'changed fixture driver did not produce a compiler fingerprint'
+[ "$SHIM_ID_CHANGED" != "$SHIM_ID" ] ||
+    fail 'a changed compiler version line disappeared from the fingerprint'
+
+SHIM_EPOCH="$(epoch_key "$SHIM_ID" "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$BSYS_REAL")"
+shim_acquire()
+{
+    local log="$1"
+    shift
+    local root="$WORK/shim-sessions"
+    local session="$root/epochs/$SHIM_EPOCH/.build-session"
+    local lease="$root/epochs/$SHIM_EPOCH/.leases/selftest-$$"
+    set_state "$SOURCE_A" "$MUTATION_A1"
+    env "$@" TMPDIR="$SHIM_TMP" STATE_FILE="$STATE" \
+        "$SESSION_TOOL" acquire "$session" "$lease" \
+        "$root" "$WORK/shim-candidates" 5 "$SOURCE_A" 1 "$MUTATION_A1" \
+        "$SHIM_ID" "$SHIM_EPOCH" "$PROFILE" "$COMPILE_FLAGS" \
+        "$LINK_FLAGS" "$SHIM_CC" "$SHIM_CC" "$$" "$VERIFY" \
+        > "$log" 2>&1
+}
+
+# A2 (second half): the session still refuses that changed toolchain, and the
+# refusal now names all three digests plus the record that moved.
+SHIM_CHANGED_LOG="$SHIM_DIR/session-changed.log"
+if shim_acquire "$SHIM_CHANGED_LOG" ZCL_SHIM_VERSION_TAG=2; then
+    fail 'session accepted a toolchain whose identity really had changed'
+fi
+grep -Fq 'compiler/toolchain changed during build' "$SHIM_CHANGED_LOG" ||
+    fail 'changed toolchain was not refused with the toolchain-change message'
+grep -Fq "expected=$SHIM_ID" "$SHIM_CHANGED_LOG" ||
+    fail 'toolchain-change refusal did not name the expected fingerprint'
+grep -Fq "recheck=$SHIM_ID_CHANGED" "$SHIM_CHANGED_LOG" ||
+    fail 'toolchain-change refusal did not name the reproducing re-derivation'
+grep -Fq 'compiler-identity preimages kept in' "$SHIM_CHANGED_LOG" ||
+    fail 'toolchain-change refusal did not keep the identity preimages'
+SHIM_PREIMAGES="$(find "$SHIM_TMP" -name '*.preimage' -type f 2>/dev/null | wc -l)"
+[ "$SHIM_PREIMAGES" -ge 1 ] ||
+    fail 'refusal path wrote no compiler-identity preimage to diagnose with'
+
+# A3: a ONE-SHOT flake is re-derived and tolerated -- no refusal, no false
+# "toolchain changed" on a box that merely ran out of forks for a moment.
+SHIM_SENTINEL="$SHIM_DIR/flake-once"
+SHIM_FLAKE_LOG="$SHIM_DIR/session-flake.log"
+: > "$SHIM_SENTINEL"
+shim_acquire "$SHIM_FLAKE_LOG" ZCL_SHIM_FLAKE_ONCE="$SHIM_SENTINEL" ||
+    fail 'a one-shot compiler probe flake refused an unchanged toolchain'
+if grep -Fq 'compiler/toolchain changed during build' "$SHIM_FLAKE_LOG"; then
+    fail 'one-shot compiler probe flake printed the toolchain-change refusal'
+fi
+[ ! -e "$SHIM_SENTINEL" ] ||
+    fail 'the one-shot flake fixture never fired; A3 proved nothing'
+grep -Fq 'unavailable(rc=' "$SHIM_FLAKE_LOG" ||
+    fail 'tolerated flake was not reported as a degraded derivation'
+
+# An identity that never reproduces is still refused -- and the refusal must
+# NAME the record that moved. (The diff that names it exits non-zero by
+# construction; if that ever trips errexit again, the session dies silently
+# with no refusal at all, which is strictly worse than the bug being fixed.)
+SHIM_UNSTABLE_LOG="$SHIM_DIR/session-unstable.log"
+: > "$SHIM_DIR/version-counter"
+if shim_acquire "$SHIM_UNSTABLE_LOG" \
+        ZCL_SHIM_VERSION_COUNTER="$SHIM_DIR/version-counter"; then
+    fail 'session accepted a compiler identity that never reproduced'
+fi
+grep -Fq 'compiler/toolchain changed during build' "$SHIM_UNSTABLE_LOG" ||
+    fail 'never-reproducing compiler identity was not refused explicitly'
+grep -Fq 'first differing compiler-identity record' "$SHIM_UNSTABLE_LOG" ||
+    fail 'refusal did not name the compiler-identity record that moved'
+
+printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true late_marker_refusal=true make_recovery=true warm_no_rewrite=true degraded_probe_refused=true flake_retried=true compiler_id=%s\n' \
     "$COMPILER_ID"

@@ -143,7 +143,18 @@ compiler-id)
             [ -n "$resolved" ] &&
                 resolved="$(readlink -f -- "$resolved" 2>/dev/null || true)"
         fi
-        [ -n "$resolved" ] && [ -f "$resolved" ] || return 0
+        # A token the driver named but that resolves to nothing (clang answers
+        # `-print-prog-name=cc1` with the bare name; both drivers answer
+        # `-print-file-name=libdl.so` with the bare name) is a REAL fact about
+        # this toolchain, and it used to leave an invisible hole in the
+        # preimage: an identical hole appears when the resolution itself fails
+        # transiently, so a short preimage still hashed to a well-formed
+        # digest. Bind the absence explicitly instead. Only the requested
+        # spelling is bound; nothing about the resolver's mood is.
+        if [ -z "$resolved" ] || [ ! -f "$resolved" ]; then
+            printf 'tool\0%s\0%s\0absent\0' "$label" "$requested" >> "$PREIMAGE"
+            return 0
+        fi
         case "${SEEN_TOOL[$resolved]+seen}" in seen) return 0 ;; esac
         SEEN_TOOL["$resolved"]=1
         digest="$(sha256_file "$resolved")" ||
@@ -248,6 +259,21 @@ compiler-id)
         printf -v "$output_name" '%s' "$probe_text"
     }
 
+    # A stable non-zero rc IS part of some drivers' identity, so rc stays
+    # hashed. A non-zero rc whose output carries a resource-exhaustion shape is
+    # something else entirely: the host could not fork/exec the child, and
+    # recording that as "the compiler's identity" is exactly how a saturated
+    # box mints a different-but-well-formed digest for an unchanged toolchain.
+    # Refuse instead; the caller re-derives or the build stops.
+    probe_output_is_transient()
+    {
+        case "$1" in
+            *'Resource temporarily unavailable'*|*'Cannot allocate memory'*| \
+            *'fork:'*|*'cannot execute'*) return 0 ;;
+        esac
+        return 1
+    }
+
     probe()
     {
         local label="$1" output rc
@@ -256,6 +282,9 @@ compiler-id)
         output="$("${CC_ARGV[@]}" "$@" </dev/null 2>&1)"
         rc=$?
         set -e
+        if [ "$rc" -ne 0 ] && probe_output_is_transient "$output"; then
+            fail "compiler probe $label failed transiently rc=$rc: $output"
+        fi
         if [ "$label" = c-include-search ]; then
             canonical_probe_directory output "${CC_ARGV[@]}"
         fi
@@ -306,6 +335,9 @@ compiler-id)
         output="$("${CXX_ARGV[@]}" "$@" </dev/null 2>&1)"
         rc=$?
         set -e
+        if [ "$rc" -ne 0 ] && probe_output_is_transient "$output"; then
+            fail "C++ compiler probe $label failed transiently rc=$rc: $output"
+        fi
         if [ "$label" = include-search ]; then
             canonical_probe_directory output "${CXX_ARGV[@]}"
         fi
@@ -320,12 +352,19 @@ compiler-id)
     # GCC/Clang drivers dispatch to these programs. Hash the resolved bytes,
     # not just a marketing version line, so an in-place toolchain replacement
     # cannot silently reuse old cached objects.
+    # Audited 2026-09-11 on gcc 14.2.0 and clang 20.1.8: every name below
+    # returns rc=0 on both drivers (an unknown program is answered with the
+    # bare name, never a non-zero exit). A non-zero rc here is therefore a
+    # failure to RUN the driver, not a fact about the toolchain, and dropping
+    # the record silently shortened the preimage. Refuse instead.
+    driver_error="$WORK/driver-query.error"
     for program in cc1 cc1plus collect2 lto1 as ld; do
         set +e
-        resolved="$("${CC_ARGV[@]}" "-print-prog-name=$program" 2>/dev/null)"
+        resolved="$("${CC_ARGV[@]}" "-print-prog-name=$program" 2>"$driver_error")"
         rc=$?
         set -e
-        [ "$rc" -eq 0 ] || continue
+        [ "$rc" -eq 0 ] ||
+            fail "driver could not report program $program rc=$rc: $(cat "$driver_error" 2>/dev/null)"
         fingerprint_tool "driver-$program" "$resolved"
     done
 
@@ -338,8 +377,18 @@ compiler-id)
     # GCC accepts arbitrary -fuse-ld=<name> values and searches for ld.<name>
     # in its program path. Fingerprint every available linker-shaped executable
     # in the admitted driver/PATH search, not only today's bfd/lld/mold names.
-    program_dirs="$("${CC_ARGV[@]}" -print-search-dirs 2>/dev/null |
+    set +e
+    search_dirs_output="$("${CC_ARGV[@]}" -print-search-dirs 2>"$driver_error")"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] ||
+        fail "driver could not report search dirs rc=$rc: $(cat "$driver_error" 2>/dev/null)"
+    program_dirs="$(printf '%s\n' "$search_dirs_output" |
         sed -n 's/^programs: *=//p')"
+    # An empty programs list silently deleted the whole ld* sweep below, so a
+    # failed/garbled query looked identical to a toolchain with no linkers.
+    [ -n "$program_dirs" ] ||
+        fail 'driver reported no program search dirs'
     IFS=: read -r -a linker_dirs <<< "${program_dirs}:${PATH:-}"
     for linker_dir in "${linker_dirs[@]}"; do
         [ -n "$linker_dir" ] || linker_dir=.
@@ -353,10 +402,14 @@ compiler-id)
             libc.so libm.so libpthread.so libdl.so Scrt1.o crt1.o crti.o \
             crtn.o crtbegin.o crtbeginS.o crtend.o crtendS.o; do
         set +e
-        resolved="$("${CXX_ARGV[@]}" "-print-file-name=$asset" 2>/dev/null)"
+        resolved="$("${CXX_ARGV[@]}" "-print-file-name=$asset" 2>"$driver_error")"
         rc=$?
         set -e
-        [ "$rc" -eq 0 ] || continue
+        # Same audit as the program loop above: rc=0 for every asset on both
+        # drivers, with a bare name for the ones they cannot place (now bound
+        # as an explicit `absent` record by fingerprint_tool).
+        [ "$rc" -eq 0 ] ||
+            fail "driver could not report asset $asset rc=$rc: $(cat "$driver_error" 2>/dev/null)"
         fingerprint_tool "driver-asset-$asset" "$resolved"
     done
 
@@ -368,8 +421,18 @@ compiler-id)
     collect_search_roots()
     {
         local -n argv_ref="$1"
-        local output in_list=0 line root
-        output="$("${argv_ref[@]}" -E -x c -v - </dev/null 2>&1 || true)"
+        local output in_list=0 line root probe_rc=0
+        # This probe carries the bulk of the preimage: every file under every
+        # include search root. A `|| true` here turned one failed fork into a
+        # silently EMPTY inventory -- a different, well-formed digest for an
+        # unchanged toolchain, which is precisely what the gate then reported
+        # as "compiler/toolchain changed during build". Fail closed.
+        set +e
+        output="$("${argv_ref[@]}" -E -x c -v - </dev/null 2>&1)"
+        probe_rc=$?
+        set -e
+        [ "$probe_rc" -eq 0 ] ||
+            fail "compiler include-search probe failed rc=$probe_rc: $output"
         while IFS= read -r line; do
             case "$line" in
                 '#include <...> search starts here:') in_list=1; continue ;;
@@ -393,6 +456,12 @@ compiler-id)
         done
     done
     LC_ALL=C sort -zu "$WORK/search-roots" -o "$WORK/search-roots"
+    # A working driver always names at least one system include root. Zero
+    # roots means the probe answered but said nothing usable (a stub/degraded
+    # driver): hashing that short preimage would mint an identity with no
+    # header authority behind it at all.
+    [ -s "$WORK/search-roots" ] ||
+        fail 'compiler reported no include search roots'
     # Qualify multi-operand NUL output before tolerating dangling-link errors.
     # An unsupported readlink option must never become an empty target scan.
     physical_work="$(cd "$WORK" && pwd -P)"
@@ -443,6 +512,17 @@ compiler-id)
     done < "$WORK/search-roots"
 
     COMPILER_DIGEST="$(sha256_file "$PREIMAGE")"
+    # Opt-in diagnosis. Two opaque 64-hex strings cannot say WHICH recorded
+    # input moved; the NUL-separated preimage can. Off by default (it is a
+    # multi-megabyte copy), never fatal, and named by its own digest so two
+    # derivations land side by side ready to diff.
+    if [ -n "${ZCL_BUILD_EPOCH_DIAG_DIR:-}" ]; then
+        if mkdir -p -- "$ZCL_BUILD_EPOCH_DIAG_DIR" 2>/dev/null; then
+            cp -f -- "$PREIMAGE" \
+                "$ZCL_BUILD_EPOCH_DIAG_DIR/$COMPILER_DIGEST.preimage" \
+                2>/dev/null || true
+        fi
+    fi
     printf '%s\n' "$COMPILER_DIGEST"
     ;;
 
