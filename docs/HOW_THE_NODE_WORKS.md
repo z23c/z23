@@ -36,7 +36,7 @@ Each stage stores a **cursor** in `consensus.db`. For the first seven stages the
 cursor is "the next height to process", not "the highest done"; `tip_finalize` is
 the one exception — its cursor is the served tip itself (the highest finalized
 height), which the frontier code normalizes to the same "next height" frame when
-comparing stages (`reducer_frontier.c:149` `frontier_next_cursor` — served tip C is
+comparing stages (`reducer_frontier.c:221` `frontier_next_cursor` — served tip C is
 treated as next-height C+1). A stage may
 only run at heights its upstream stage has already finished (the upstream cursor is
 its floor). It does one of two
@@ -64,9 +64,10 @@ writes the kernel under a narrower contract. Neither is another forward stage.
 finalized height. External readers (`getblockcount`, the height we advertise to
 peers) report the height that `tip_finalize` has published. During process
 startup, the public REST/native status surfaces may read the durable
-`tip_finalize` cursor before the in-memory H* cache has been published, so the
+`tip_finalize` cursor before the in-memory `H*` cache — the deepest provably-consistent height
+`getblockcount` serves — has been published, so the
 website does not briefly fall back to height 0 while the node is already at tip.
-At the live head, the applied active tip can briefly sit one block above H*
+At the live head, the applied active tip can briefly sit one block above `H*`
 while the reducer waits for a successor. Once that head is fully UTXO-applied,
 is exactly the best header (height and hash), has no failed verdict, and the
 only hold is `lookahead_tip_missing`, the post-drain path publishes that one
@@ -129,9 +130,10 @@ no new command route or schema.
   proofs, ZIP-209.
 - Reorg handling via the saved inverse coin changes.
 - The eight code "shapes" (controller / service / model / job / supervisor /
-  condition / event / storage-adapter). Seven live one-folder-each under `app/`
-  (`controllers`, `services`, `models`, `jobs`, `supervisors`, `conditions`,
-  `events`); the Storage Adapter shape lives in the top-level `platform/adapters/` + `platform/ports/`
+  condition / event / storage-adapter). Six live one-folder-each under `engine/`
+  (`controllers`, `services`, `models`, `jobs`, `supervisors`, `conditions`);
+  `event` has no folder — it is owned by `engine/modules/event/` +
+  `engine/modules/storage/src/event_log.c`. The Storage Adapter shape lives in the top-level `platform/adapters/` + `platform/ports/`
   trees (`contexts/explorer/views/` holds explorer templates and is not one of the eight). Shape
   placement is lint-enforced; per `docs/FRAMEWORK.md` Model/Condition/Job and the
   Storage Adapter are real and enforced, Supervisor is partial, Controller/Service
