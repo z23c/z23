@@ -223,6 +223,25 @@ bool zcl_test_group_plan_selects(const char *plan_id, const char *full_id)
            declared_family_selects(plan_id, full_id);
 }
 
+bool zcl_test_group_family_expand(const char *plan_id,
+                                  zcl_test_group_visit_fn visit, void *ctx)
+{
+    char primary[ZCL_TEST_GROUP_FULL_MAX];
+    if (!zcl_test_group_resolve_exact(plan_id, primary))
+        return false;
+    if (visit && !visit(primary, ctx))
+        return false;
+    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+        const char *full = g_test_groups[i];
+        if (strcmp(full, primary) == 0 ||
+            !declared_family_selects(plan_id, full))
+            continue;
+        if (visit && !visit(full, ctx))
+            return false;
+    }
+    return true;
+}
+
 bool zcl_test_group_is_integration_only(const char *full_id)
 {
     if (!zcl_test_group_catalog_contains(full_id))

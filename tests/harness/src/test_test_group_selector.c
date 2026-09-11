@@ -550,6 +550,122 @@ static int test_registry_exact_resolution(void)
     return failures;
 }
 
+/* ── declared-family expansion ────────────────────────────────────
+ *
+ * zcl_test_group_family_expand() is what the proof selector and the plan
+ * builder both call. Before it existed the proof resolved an impact-rule
+ * token EXACTLY, so `make_lint_gates` -- the token every README/Makefile/docs
+ * rule names -- selected the one group whose body is the root-file check and
+ * the sandbox cleanup, and none of the shards that actually read those files.
+ * A README rewrite landed through such a proof and left main red on
+ * test_make_lint_gates_shard_08 and test_make_lint_gates_realroot for six
+ * hours. */
+
+#define FAMILY_EXPAND_MAX 64
+
+struct family_expansion {
+    char ids[FAMILY_EXPAND_MAX][ZCL_TEST_GROUP_FULL_MAX];
+    size_t len;
+    bool overflowed;
+};
+
+static bool family_expansion_collect(const char *full_id, void *ctx)
+{
+    struct family_expansion *seen = ctx;
+    if (seen->len >= FAMILY_EXPAND_MAX) {
+        seen->overflowed = true;
+        return false;
+    }
+    snprintf(seen->ids[seen->len], ZCL_TEST_GROUP_FULL_MAX, "%s", full_id);
+    seen->len++;
+    return true;
+}
+
+static bool family_expansion_has(const struct family_expansion *seen,
+                                 const char *full_id)
+{
+    for (size_t i = 0; i < seen->len; i++)
+        if (strcmp(seen->ids[i], full_id) == 0)
+            return true;
+    return false;
+}
+
+static int test_declared_family_expansion(void)
+{
+    int failures = 0;
+    TEST("test group selector: a declared family token reaches every shard") {
+        struct family_expansion lint = {0};
+        ASSERT(zcl_test_group_family_expand("make_lint_gates",
+                                            family_expansion_collect, &lint));
+        ASSERT(!lint.overflowed);
+        /* The primary comes first: the expansion is a superset of the exact
+         * resolution, never a replacement for it. */
+        ASSERT(lint.len > 1);
+        ASSERT(strcmp(lint.ids[0], "test_make_lint_gates") == 0);
+        for (unsigned shard = 1; shard <= 8; shard++) {
+            char id[ZCL_TEST_GROUP_FULL_MAX];
+            snprintf(id, sizeof(id), "test_make_lint_gates_shard_%02u", shard);
+            ASSERT(family_expansion_has(&lint, id));
+        }
+        ASSERT(family_expansion_has(&lint, "test_make_lint_gates_realroot"));
+        ASSERT(family_expansion_has(&lint, "test_make_lint_gates_partition"));
+        ASSERT(family_expansion_has(&lint, "test_make_lint_gates_heavy_01"));
+        ASSERT(family_expansion_has(&lint, "test_make_lint_gates_heavy_02"));
+        /* Every member is a registered group, and the shard list is derived
+         * from the catalog rather than written down here: a shard added to
+         * the registry joins the family with no edit to this test. */
+        size_t registered = 0;
+        for (size_t i = 0; i < lint.len; i++)
+            ASSERT(zcl_test_group_catalog_contains(lint.ids[i]));
+        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++)
+            if (strncmp(zcl_test_group_catalog_at(i), "test_make_lint_gates",
+                        strlen("test_make_lint_gates")) == 0)
+                registered++;
+        ASSERT(lint.len == registered);
+
+        /* An exact single-group token still yields exactly one group. */
+        struct family_expansion exact = {0};
+        ASSERT(zcl_test_group_family_expand("test_api",
+                                            family_expansion_collect, &exact));
+        ASSERT(exact.len == 1);
+        ASSERT(strcmp(exact.ids[0], "test_api") == 0);
+
+        /* And a legacy prefixless token with NO declared family expands to
+         * its primary alone. This is the guard against a bare substring
+         * rule: "api" must not drag in test_native_api_contract merely
+         * because the name contains it. */
+        struct family_expansion legacy = {0};
+        ASSERT(zcl_test_group_family_expand("api", family_expansion_collect,
+                                            &legacy));
+        ASSERT(legacy.len == 1);
+        ASSERT(strcmp(legacy.ids[0], "test_api") == 0);
+        ASSERT(!family_expansion_has(&legacy, "test_native_api_contract"));
+
+        /* An unknown token still fails, with and without a visitor, and a
+         * NULL visitor is the admission question the plan builder asks. */
+        struct family_expansion missing = {0};
+        ASSERT(!zcl_test_group_family_expand("api_missing",
+                                             family_expansion_collect,
+                                             &missing));
+        ASSERT(missing.len == 0);
+        ASSERT(!zcl_test_group_family_expand("api_missing", NULL, NULL));
+        ASSERT(!zcl_test_group_family_expand(NULL, NULL, NULL));
+        ASSERT(!zcl_test_group_family_expand("", NULL, NULL));
+        ASSERT(zcl_test_group_family_expand("make_lint_gates", NULL, NULL));
+
+        /* A visitor that refuses aborts the walk and the expansion reports
+         * failure, so a caller out of room refuses instead of quietly
+         * running a narrower set than the plan asked for. */
+        struct family_expansion tiny = {0};
+        tiny.len = FAMILY_EXPAND_MAX;
+        ASSERT(!zcl_test_group_family_expand("make_lint_gates",
+                                             family_expansion_collect, &tiny));
+        ASSERT(tiny.overflowed);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_native_catalog_resolution(void)
 {
     int failures = 0;
@@ -1059,6 +1175,7 @@ int test_test_group_selector(void)
     failures += test_tmpdir_recursive_cleanup();
     failures += test_selector_predicate();
     failures += test_registry_exact_resolution();
+    failures += test_declared_family_expansion();
     failures += test_native_catalog_resolution();
     failures += test_process_sensitive_groups_are_catalog_exclusive();
     failures += test_runner_exact_selection();

@@ -57,6 +57,26 @@ bool zcl_test_group_resolve_exact(
  * exist or this returns false. */
 bool zcl_test_group_plan_selects(const char *plan_id, const char *full_id);
 
+/* Visitor for one expanded execution-set member. Return false to abort the
+ * walk; the expansion then reports failure so a caller that ran out of room
+ * refuses instead of silently running a narrower set. */
+typedef bool (*zcl_test_group_visit_fn)(const char *full_id, void *ctx);
+
+/* Expand ONE plan token to the execution set it stands for, in canonical
+ * registry order: the exact primary first, then every catalog group the
+ * token's DECLARED proof family selects. Declared families only — a bare
+ * substring would let a short token such as "net" drag in every group whose
+ * name merely contains it, a selection nobody wrote down. A token with no
+ * exact primary refuses exactly as zcl_test_group_resolve_exact() refuses,
+ * so an unknown token still fails closed. `visit` may be NULL to ask only
+ * whether the token expands at all, which is what an admission check needs.
+ *
+ * This is the ONE expansion both the proof selector (tools/dev/dev_proof.c)
+ * and the plan builder (tools/dev/devloop_plan.c) call, so the set a plan
+ * admits and the set the proof runs cannot drift apart. */
+bool zcl_test_group_family_expand(const char *plan_id,
+                                  zcl_test_group_visit_fn visit, void *ctx);
+
 /* Expand plan IDs to a deterministic, deduplicated exact execution set in
  * canonical registry order. Returns the total selected count. When total is
  * greater than cap, the first cap rows are retained and *truncated is true. A

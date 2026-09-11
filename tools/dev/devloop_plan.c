@@ -346,12 +346,16 @@ static bool plan_group_ids_valid(const struct zcl_devloop_plan *plan)
 {
     if (!plan)
         return false;
-    char full[ZCL_TEST_GROUP_FULL_MAX];
+    /* Asked through the SAME expansion the proof selector runs, so a token
+     * this plan admits is exactly a token the proof can turn into groups.
+     * A NULL visitor asks only "does this token expand?" — which is the
+     * question admission has always asked, and it still refuses on a token
+     * with no exact primary. */
     for (size_t i = 0; i < plan->path_groups_len; i++)
-        if (!zcl_test_group_resolve_exact(plan->path_groups[i], full))
+        if (!zcl_test_group_family_expand(plan->path_groups[i], NULL, NULL))
             return false;
     for (size_t i = 0; i < plan->closure_groups_len; i++)
-        if (!zcl_test_group_resolve_exact(plan->closure_groups[i], full))
+        if (!zcl_test_group_family_expand(plan->closure_groups[i], NULL, NULL))
             return false;
     return true;
 }

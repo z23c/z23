@@ -1300,6 +1300,70 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
     return failures;
 }
 
+/* The regression that cost main six red hours. A README edit plans exactly
+ * one token, `make_lint_gates`, and the proof selector used to resolve that
+ * token EXACTLY: it ran test_make_lint_gates, whose body is the repository
+ * root-file check plus the sandbox cleanup, and not one of the shards where
+ * the README-reading contracts actually live. The rewrite passed its proof
+ * and left test_make_lint_gates_shard_08 and test_make_lint_gates_realroot
+ * red on main until the ship gate's full suite found them.
+ *
+ * The shard a given contract lands in is decided by lint_owner_of()'s weight
+ * bin-packing at RUN time, so this asserts the WHOLE family from the catalog
+ * rather than a shard number: a shard added to the registry is covered here
+ * with no edit. */
+static int test_ic_lint_token_selects_every_shard(void)
+{
+    int failures = 0;
+    TEST("impact composition: a README edit proves every lint shard") {
+        const char *files[] = { "README.md" };
+        struct zcl_devloop_plan plan;
+        ASSERT(zcl_devloop_plan_files(files, 1, &plan));
+        ASSERT(plan.docs_only);
+        ASSERT(!plan.closure_universal);
+        ASSERT(ic_group_in(plan.path_groups, plan.path_groups_len,
+                           "make_lint_gates"));
+        /* No fixture index exists at this path; a docs-only change has no
+         * symbol closure to ask for, so the dimensions close and the plan
+         * becomes admissible without one. */
+        ASSERT(zcl_devloop_plan_add_closure("test-tmp/no-such-impact-index",
+                                            files, 1, &plan));
+        const char *why = "unset";
+        ASSERT(zcl_devloop_plan_proof_admissible(&plan, &why));
+        ASSERT(strcmp(why, "") == 0);
+
+        static char selector[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
+                             (ZCL_TEST_GROUP_FULL_MAX + 1)];
+        char gated[PROOF_HOST_GATED_MAX];
+        uint32_t selected = 0;
+        memset(selector, 0, sizeof(selector));
+        ASSERT(zcl_dev_proof_test_build_test_selector(
+                   &plan, ".", false, selector, sizeof(selector), &selected,
+                   gated, sizeof(gated)));
+        /* An exact plan is never host-gated; nothing here is dropped. */
+        ASSERT(gated[0] == '\0');
+        ASSERT(ic_selector_has(selector, "test_make_lint_gates"));
+        size_t family = 0;
+        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+            const char *full = zcl_test_group_catalog_at(i);
+            if (strncmp(full, "test_make_lint_gates",
+                        strlen("test_make_lint_gates")) != 0)
+                continue;
+            family++;
+            ASSERT(ic_selector_has(selector, full));
+        }
+        ASSERT(family > 1);
+        ASSERT((size_t)selected == family);
+        /* Widened, not unfocused: a lint token still selects nothing outside
+         * its own family. */
+        ASSERT(!ic_selector_has(selector, "test_api"));
+        printf("\n    README.md test_selection=exact groups_selected=%u\n  ",
+               (unsigned)selected);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_snapshot_overlays_current_symbols(void)
 {
     int failures = 0;
@@ -6600,6 +6664,7 @@ int test_impact_composition(void)
     failures += test_ic_every_selection_has_a_reason();
     failures += test_ic_union_never_loses_a_rule_group();
     failures += test_ic_dimension_applicability_and_exact_execution();
+    failures += test_ic_lint_token_selects_every_shard();
     failures += test_ic_snapshot_overlays_current_symbols();
     failures += test_ic_code_capsule_stays_with_code_owner();
     failures += test_ic_generated_inventory_stays_focused();

@@ -5,3 +5,13 @@
  */
 
 ZCL_TEST_PROOF_FAMILY("oracle_policy", "test_*oracle")
+
+/* The lint-gate umbrella. `make_lint_gates` names ONE catalog group whose own
+ * body is only the repository-root check and the sandbox cleanup; every
+ * README-, Makefile- and docs-reading contract lives in a SHARD, and
+ * lint_owner_of() bin-packs those contracts into
+ * test_make_lint_gates_shard_01..08 by a weight table at RUN time. No static
+ * pin on a shard number can survive a re-pack, so the family is declared by
+ * prefix and derives its members from the catalog: whatever shard, realroot,
+ * partition or heavy group the registry carries is what the token selects. */
+ZCL_TEST_PROOF_FAMILY("make_lint_gates", "test_make_lint_gates*")

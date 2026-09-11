@@ -4904,19 +4904,49 @@ static bool dp_selector_universal(const char *root, char *out, size_t out_size,
     return true;
 }
 
-/* One of the plan's two group lists, resolved and appended without
- * repeating anything the selector already carries. */
+/* Where one token's expansion lands. */
+struct dp_selector_sink {
+    char *out;
+    size_t out_size;
+    size_t *pos;
+    uint32_t *count;
+};
+
+static bool dp_selector_visit(const char *full, void *ctx)
+{
+    struct dp_selector_sink *sink = ctx;
+    if (dp_selector_has(sink->out, full)) return true;
+    if (!dp_selector_append(sink->out, sink->out_size, sink->pos, full))
+        return false;
+    (*sink->count)++;
+    return true;
+}
+
+/* One of the plan's two group lists, EXPANDED and appended without repeating
+ * anything the selector already carries.
+ *
+ * Exact resolution alone used to be the whole rule, and that is how a README
+ * rewrite reached main having run zero README-reading checks: the impact rule
+ * names the umbrella token `make_lint_gates`, exact resolution turned it into
+ * the single group test_make_lint_gates -- whose body is the root-file check
+ * and the sandbox cleanup -- and every contract that actually reads README.md
+ * sits in a shard the token never selected. main was red on
+ * test_make_lint_gates_shard_08 and test_make_lint_gates_realroot for six
+ * hours until the full suite caught it.
+ *
+ * The expansion is zcl_test_group_family_expand(), the same one the plan
+ * builder admits tokens with, so what a plan accepts and what the proof runs
+ * are one decision. A token that is neither a group nor a family still
+ * refuses here, exactly as before. */
 static bool dp_selector_groups(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
                                size_t len, char *out, size_t out_size,
                                size_t *pos, uint32_t *count)
 {
-    for (size_t i = 0; i < len; i++) {
-        char full[128];
-        if (!zcl_test_group_resolve_exact(groups[i], full)) return false;
-        if (dp_selector_has(out, full)) continue;
-        if (!dp_selector_append(out, out_size, pos, full)) return false;
-        (*count)++;
-    }
+    struct dp_selector_sink sink = {out, out_size, pos, count};
+    for (size_t i = 0; i < len; i++)
+        if (!zcl_test_group_family_expand(groups[i], dp_selector_visit,
+                                          &sink))
+            return false;
     return true;
 }
 
