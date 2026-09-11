@@ -20,6 +20,17 @@ bool bg_validation_authority_claim_is_complete(
     int verified_height, int chain_height, int coins_height,
     int64_t script_skips, bool coverage_complete);
 
+/* The part of that claim a cheap status read can actually check: the same
+ * predicate with the coins-frontier equality satisfied by construction,
+ * because deriving the frontier costs the process lock and a full scan.
+ * A false is therefore a DEFINITE incompleteness (short walk, or a tx left
+ * unverified for want of undo); a true means only that nothing visible
+ * without that scan is missing — bg_validation_authority_publish remains
+ * the only thing that may call a chain fully validated. */
+bool bg_validation_authority_walk_is_complete(
+    int verified_height, int chain_height, int64_t script_skips,
+    bool coverage_complete);
+
 /* Recompute the authoritative coins SHA3 and bind a complete walk to CEC.
  * `external_seeded` selects the assisted-snapshot evidence preflight; false
  * requires a genuine no-snapshot genesis-history campaign. A non-ok result

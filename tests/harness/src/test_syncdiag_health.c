@@ -5,6 +5,120 @@
 
 #include "test/syncdiag_rpc_fixture.h"
 
+#include "services/bg_validation_service.h"
+
+/* Sibling-private tally seam in bg_validation_verify_block.c — the block
+ * verifier's one call per block. Driving it here plants the same
+ * undo_missing_blocks value a real undo-less walk would. */
+bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,
+                                   uint64_t *blocks_out, uint64_t *txs_out);
+
+/* One `validationstatus` call through the registered RPC table. */
+static bool vs_call(struct rpc_table *tbl, struct json_value *out)
+{
+    struct json_value params;
+    json_init(&params);
+    json_set_object(&params);
+    bool ok = rpc_table_execute(tbl, "validationstatus", &params, out);
+    json_free(&params);
+    return ok;
+}
+
+/* With no service at all the coverage fields must still be present and
+ * fail-closed: a missing key can never be read as "verified". */
+static bool vs_uninitialized_is_fail_closed(struct rpc_table *tbl)
+{
+    struct json_value r;
+    json_init(&r);
+    bool ok = vs_call(tbl, &r);
+    ok = ok && strcmp(json_get_str(json_get(&r, "state")),
+                      "not_initialized") == 0;
+    ok = ok && json_get_int(json_get(&r, "script_verif_skipped_no_undo")) == 0;
+    ok = ok && json_get_int(json_get(&r, "undo_missing_blocks")) == 0;
+    ok = ok && json_get_bool(json_get(&r, "verification_incomplete"));
+    json_free(&r);
+    return ok;
+}
+
+/* A walk sitting at tip and reading COMPLETE, with 7 txs left unverified
+ * across 2 blocks for want of undo: the undo term alone must make it
+ * incomplete, and both counts must be reported. */
+static bool vs_undo_gap_is_incomplete(struct rpc_table *tbl)
+{
+    struct json_value r;
+    json_init(&r);
+    bool ok = vs_call(tbl, &r);
+    ok = ok && json_get_int(json_get(&r, "verified_height")) == 100;
+    ok = ok && json_get_int(json_get(&r, "script_verif_skipped_no_undo")) == 7;
+    ok = ok && json_get_int(json_get(&r, "undo_missing_blocks")) == 2;
+    ok = ok && json_get_bool(json_get(&r, "verification_incomplete"));
+    json_free(&r);
+    return ok;
+}
+
+/* The verification_incomplete verdict for whatever progress is installed;
+ * `called` reports that the RPC itself succeeded. */
+static bool vs_reports_incomplete(struct rpc_table *tbl, bool *called)
+{
+    struct json_value r;
+    json_init(&r);
+    *called = vs_call(tbl, &r);
+    bool incomplete = json_get_bool(json_get(&r, "verification_incomplete"));
+    json_free(&r);
+    return incomplete;
+}
+
+/* `validationstatus` is the RPC operators and the native fleet status call.
+ * It reported verified_height 669755 with sigs_verified 0 on an index that
+ * had no undo data at all, and nothing in the reply said the transparent
+ * scripts had never been checked. Pin the coverage fields. */
+static int syncdiag_case_validationstatus_coverage(void)
+{
+    int failures = 0;
+    static struct bg_validation_service svc;
+    struct bg_validation_service *saved = g_bg_validation;
+
+    printf("validationstatus: names incomplete script coverage... ");
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    register_event_rpc_commands(&tbl);
+    if (rpc_is_in_warmup(NULL, 0))
+        set_rpc_warmup_finished();
+    bg_validation_reset_undo_skip_stats();
+
+    g_bg_validation = NULL;
+    bool ok = vs_uninitialized_is_fail_closed(&tbl);
+
+    memset(&svc, 0, sizeof(svc));
+    atomic_store(&svc.progress.verified_height, 100);
+    atomic_store(&svc.progress.chain_height, 100);
+    atomic_store(&svc.progress.script_verif_skipped_no_undo, 7);
+    atomic_store(&svc.progress.state, BG_VALIDATION_COMPLETE);
+    g_bg_validation = &svc;
+    uint64_t b = 0, t = 0;
+    bg_validation_note_undo_skips(4, false, &b, &t);
+    bg_validation_note_undo_skips(3, false, &b, &t);
+    ok = ok && vs_undo_gap_is_incomplete(&tbl);
+
+    /* A short walk with zero skips is incomplete for the other reason —
+     * the predicate's height term, not the undo term. */
+    atomic_store(&svc.progress.script_verif_skipped_no_undo, 0);
+    atomic_store(&svc.progress.verified_height, 99);
+    bool called = false;
+    ok = ok && vs_reports_incomplete(&tbl, &called) && called;
+
+    /* Full walk, no skips, COMPLETE: nothing this status can see is
+     * missing. */
+    atomic_store(&svc.progress.verified_height, 100);
+    ok = ok && !vs_reports_incomplete(&tbl, &called) && called;
+
+    g_bg_validation = saved;
+    bg_validation_reset_undo_skip_stats();
+    if (ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 int syncdiag_cases_health(void)
 {
     int failures = 0;
@@ -536,6 +650,7 @@ int syncdiag_cases_health(void)
         json_free(&result);
     }
 
+    failures += syncdiag_case_validationstatus_coverage();
 
     return failures;
 }

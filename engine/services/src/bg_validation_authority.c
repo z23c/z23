@@ -38,6 +38,15 @@ bool bg_validation_authority_claim_is_complete(
            coins_height == chain_height && script_skips == 0;
 }
 
+bool bg_validation_authority_walk_is_complete(
+    int verified_height, int chain_height, int64_t script_skips,
+    bool coverage_complete)
+{
+    return bg_validation_authority_claim_is_complete(
+        verified_height, chain_height, chain_height, script_skips,
+        coverage_complete);
+}
+
 static struct zcl_result bgv_auth_refuse(const char *reason)
 {
     struct blocker_record rec;

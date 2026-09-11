@@ -14,6 +14,7 @@
 #include "event_agent_summary.h"
 #include "controllers/event_operator_snapshot_controller.h"
 #include "config/boot.h"
+#include "services/bg_validation_authority.h"
 #include "services/bg_validation_service.h"
 #include "services/block_index_integrity.h"
 #include "services/chain_state_service.h"
@@ -575,12 +576,30 @@ static bool rpc_validationstatus(const struct json_value *params, bool help,
         "\nResult:\n"
         "  { \"state\": \"...\", \"verified_height\": N, \"chain_height\": N,\n"
         "    \"percent\": N.N, \"sigs_verified\": N, \"proofs_verified\": N,\n"
-        "    \"blocks_per_sec\": N }\n");
+        "    \"blocks_per_sec\": N,\n"
+        "    \"script_verif_skipped_no_undo\": N,\n"
+        "    \"undo_missing_blocks\": N,\n"
+        "    \"verification_incomplete\": true|false }\n"
+        "\nverified_height on its own does NOT mean the transparent scripts\n"
+        "below it were checked: a block whose undo (revXXXXX.dat) data is\n"
+        "absent advances the height with its non-coinbase txs left\n"
+        "unverified, which after a header-only snapshot import is every\n"
+        "block. script_verif_skipped_no_undo counts those txs and\n"
+        "undo_missing_blocks the blocks they sat in.\n"
+        "verification_incomplete is true whenever this status can see the\n"
+        "walk is short or has such a gap; it is fail-closed, and only\n"
+        "bg_validation authority publication (which also proves the coins\n"
+        "frontier) may call a chain fully validated.\n");
 
     json_set_object(result);
 
     if (!g_bg_validation) {
         json_push_kv_str(result, "state", "not_initialized");
+        /* Same field shape as a live read, so a caller never has to treat a
+         * missing key as "verified": nothing has been walked at all here. */
+        json_push_kv_int(result, "script_verif_skipped_no_undo", 0);
+        json_push_kv_int(result, "undo_missing_blocks", 0);
+        json_push_kv_bool(result, "verification_incomplete", true);
         return true;
     }
 
@@ -599,6 +618,22 @@ static bool rpc_validationstatus(const struct json_value *params, bool help,
     json_push_kv_int(result, "sigs_verified", p.sigs_verified);
     json_push_kv_int(result, "proofs_verified", p.proofs_verified);
     json_push_kv_int(result, "blocks_per_sec", p.blocks_per_sec);
+
+    /* Coverage honesty. This is the RPC every operator and the native fleet
+     * status actually call, and it reported verified_height 669755 with
+     * sigs_verified 0 on a node whose whole index had no undo data — nothing
+     * in the reply said the transparent scripts were never checked. The
+     * health document already carried the counter; carry it here too. */
+    json_push_kv_int(result, "script_verif_skipped_no_undo",
+                     p.script_verif_skipped_no_undo);
+    struct bg_validation_undo_skip_stats us =
+        bg_validation_get_undo_skip_stats();
+    json_push_kv_int(result, "undo_missing_blocks", (int64_t)us.blocks);
+    json_push_kv_bool(result, "verification_incomplete",
+                      !bg_validation_authority_walk_is_complete(
+                          p.verified_height, p.chain_height,
+                          p.script_verif_skipped_no_undo,
+                          p.state == BG_VALIDATION_COMPLETE));
 
     return true;
 }

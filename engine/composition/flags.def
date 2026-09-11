@@ -145,7 +145,7 @@ Z23_FLAG("ZCL_ALLOW_CORRUPT_INDEX", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ALLOW_PLAINTEXT_WALLET", "env_runtime", "-", "-",
           "undocumented; first use contexts/wallet/modules/wallet/src/wallet_keystore.c:51")
 Z23_FLAG("ZCL_ANCHOR_MINT_DATADIR", "env_runtime", "-", "-",
-          "undocumented; first use engine/controllers/src/event_controller.c:443")
+          "undocumented; first use engine/controllers/src/event_controller.c:444")
 Z23_FLAG("ZCL_ANCHOR_SNAPSHOT_PATH", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_anchor_snapshot_reachability.c:57")
 Z23_FLAG("ZCL_ANCHOR_SNAPSHOT_SRC", "env_build", "/tmp/anchor-ram.snapshot", "-",
