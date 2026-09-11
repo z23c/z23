@@ -190,8 +190,8 @@ uint64_t getheaders_serve_refusals_no_header_bytes(void);
 
 /* getheaders_serve_page() — the reply page size this node uses for a peer
  * advertising `services`: GETHEADERS_SERVE_PAGE_FAST_SYNC for a ZCL23 peer,
- * GETHEADERS_SERVE_PAGE_LEGACY otherwise. Implemented in msg_headers.c next
- * to the reply loop that uses the same choice. */
+ * GETHEADERS_SERVE_PAGE_LEGACY otherwise. Implemented in msg_getheaders_defer.c
+ * next to the allowance the reply loop is bounded by. */
 int getheaders_serve_page(uint64_t services);
 
 /* getheaders_serve_request_allowance() — the per-peer serve-window REQUEST
@@ -199,7 +199,7 @@ int getheaders_serve_page(uint64_t services);
  * (GETHEADERS_SERVE_HEADERS_PER_WINDOW) and that peer's page size: 30 for a
  * ZCL23 peer taking 2000-header pages, 375 for a legacy peer taking
  * 160-header pages. Same header-serving cost to this node either way.
- * Implemented in msg_headers.c next to the serve-window gate that uses it. */
+ * Implemented in msg_getheaders_defer.c next to the page size it divides. */
 uint32_t getheaders_serve_request_allowance(uint64_t services);
 
 /* getheaders requests DEFERRED by that per-peer serve window, process-wide
@@ -238,6 +238,16 @@ bool getheaders_replay_deferred(struct msg_processor *mp,
  * and, per peer, by one per window. Exposed for the offline serve
  * regression tests and operator diagnostics; nothing branches on it. */
 uint64_t getheaders_replayed_deferred(void);
+
+/* getheaders_park_deferred() — hold the request the serve window just deferred
+ * in that peer's one parking slot so the send tick can replay it once the
+ * window rolls. `s` must still be positioned at the START of the unread
+ * payload (process_getheaders defers before it parses the locator). Implemented
+ * in msg_getheaders_defer.c next to the replay that consumes the slot; the full
+ * rationale is with it there. Single message-handler thread only. */
+void getheaders_park_deferred(struct p2p_node *node,
+                              const struct byte_stream *s,
+                              int64_t now_unix);
 
 /* Serve-path verification receipts — the bound on how often a peer can make
  * this node REDO an Equihash verification it has already done.
