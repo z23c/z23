@@ -755,6 +755,7 @@ start_fixture_daemon quiet
 start_fixture_daemon frozen
 start_fixture_daemon stamped '' identified
 start_fixture_daemon unstamp '' identified
+start_fixture_daemon pinned
 # The far side's service names a MainPID that no longer exists.
 printf '999999\n' > "$SANDBOX/mainpid.gone"
 # The far side is between incarnations: no MainPID at all, and its manager
@@ -822,8 +823,14 @@ spawn_remote_await stamped QUALIFIED  0  up        30     20      3     5   "$FI
     "$SELFTEST_SOURCE_ID" "$SELFTEST_COMMIT"
 spawn_remote_await unstamp UNVERIFIED 3  up         4    600      3     5   "$FIXTURE_SHA" 1 \
     "$SELFTEST_SOURCE_ID" "a-commit-the-fixture-never-saw"
+# The shadowed-drop-in shape, over the wire: a perfectly healthy box that is
+# running bytes OTHER than the ones this ship installed. No amount of waiting
+# fixes it, and the observer cannot tell it apart from a slow box on its own —
+# every poll simply reports sha != want until the window closes. Section 6c
+# turns this scenario's own last observation into the words the report says.
+spawn_remote_await pinned  UNVERIFIED 3  up         4    600      3     5   "$WANT_SHA" 1
 wait_await_pids
-for tag in healthy down empty slow quiet frozen gone restarting failed stamped unstamp; do
+for tag in healthy down empty slow quiet frozen gone restarting failed stamped unstamp pinned; do
     judge_remote_await "$tag"
 done
 
@@ -919,6 +926,74 @@ for site in "$ROOT/tools/ship.sh" "$ROOT/Makefile"; do
         fail "${site##*/} restarts without checking the effective ExecStart"
     fi
 done
+
+# ── 6c. naming an unverified candidate ──────────────────────────────────────
+# rc 3 means the window closed with NO fault proven. The rollout used to
+# flatten that into 1, whose only caller-side word is "remote activation
+# failed" — so a box that had the candidate installed and running ended the
+# run with a sentence that was wrong about the deploy AND about the box. The
+# input here is not hand-written: it is the `pinned` scenario's own last
+# observation, produced by the real observer over the real seam.
+printf '\nship-selftest: 6c. naming an unverified candidate\n'
+
+pinned_line="$(sed -n 's/^fixture-host: last observation: //p' \
+    "$SANDBOX/r.pinned.out" | tail -1)"
+if [ -n "$pinned_line" ]; then
+    pass "the pinned scenario produced a real observation line"
+else
+    fail "no observation line to name: $(cat "$SANDBOX/r.pinned.out" 2>/dev/null)"
+fi
+pinned_reason="$(ship_unverified_reason "$pinned_line" "$WANT_SHA")"
+if [ "$pinned_reason" = "last observation sha $(printf '%.8s' "$FIXTURE_SHA"), wanted aaaaaaaa" ]; then
+    pass "the reason names the bytes actually running: $pinned_reason"
+else
+    fail "the reason drifted: [$pinned_reason]"
+fi
+pinned_note="$(ship_unverified_binary_note "$pinned_line" "$WANT_SHA")"
+if [ "$pinned_note" = "the unit restarted on a different binary ($(printf '%.8s' "$FIXTURE_SHA") != aaaaaaaa) — check the unit drop-ins" ]; then
+    pass "a different binary is said in as many words"
+else
+    fail "the different-binary note drifted: [$pinned_note]"
+fi
+# The healthy leg qualified, so the same helper must stay silent about it: a
+# note that fired on every unverified ending would be noise, not evidence.
+healthy_line="$(sed -n 's/^fixture-host: last observation: //p' \
+    "$SANDBOX/r.healthy.out" | tail -1)"
+if [ -z "$(ship_unverified_binary_note "$healthy_line" "$FIXTURE_SHA")" ]; then
+    pass "no different-binary note when the running bytes are the wanted bytes"
+else
+    fail "the different-binary note fired on matching bytes"
+fi
+# The other three reasons, each the one fact qualification was still missing.
+check_reason() {
+    local want="$1" line="$2" got
+    got="$(ship_unverified_reason "$line" "$WANT_SHA")"
+    if [ "$got" = "$want" ]; then
+        pass "reason [$want]"
+    else
+        fail "reason wanted [$want] got [$got]"
+    fi
+}
+check_reason 'no evidence: the host produced no observation' \
+    "$(ship_no_evidence_line)"
+check_reason 'last observation ident=no: the running process does not carry this deploy identity' \
+    "observed=1 exists=1 sha=$WANT_SHA ident=no rpc=ok"
+check_reason 'last observation rpc=timeout: the process has not answered status yet' \
+    "observed=1 exists=1 sha=$WANT_SHA ident=yes rpc=timeout"
+
+# The two words that prove NO fault must reach the report as themselves.
+if grep -qF 'UNVERIFIED: $SHIP_ROLLOUT_HOST is running the candidate' "$ROOT/tools/ship.sh"; then
+    pass "the fleet report names an installed-but-unqualified candidate as UNVERIFIED"
+else
+    fail "the fleet report still has no word for an installed-but-unqualified candidate"
+fi
+rollout_arm="$(grep -A4 'case "$rollout_rc" in' "$ROOT/tools/ship.sh" |
+    grep '3|4)' || true)"
+if [ -n "$rollout_arm" ]; then
+    pass "rc 3 and rc 4 have their own arm in the rollout report"
+else
+    fail "rc 3 and rc 4 still fall through to the failure arm"
+fi
 
 # ── 7. the shipped script text ──────────────────────────────────────────────
 # ship.sh's two remote scripts are extracted the same way

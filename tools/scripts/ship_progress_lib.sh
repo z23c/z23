@@ -879,6 +879,55 @@ ship_exec_guard_check() {
     return 1
 }
 
+# ── naming an unverified candidate ──────────────────────────────────────────
+# rc 3 means the window closed with NO fault proven: the candidate is
+# installed and running and simply did not finish qualifying. Reporting that
+# as "remote activation failed" is false twice over — activation worked, and
+# nothing failed — and it is what a reader saw on 2026-09-11 after two ships
+# that had in fact been shadowed onto an old binary. These two turn the last
+# observation into the words that report says instead.
+
+# ship_unverified_reason <observation-line> <want-sha> — the ONE fact the
+# qualification was still missing, asked in the order qualification asks it:
+# evidence, then exact bytes, then deploy identity, then a live RPC.
+ship_unverified_reason() {
+    _ship_u_line="$1"; _ship_u_want="$2"
+    if [ "$(ship_field_num "$_ship_u_line" observed)" -ne 1 ] ||
+       [ "$(ship_field_num "$_ship_u_line" exists)" -ne 1 ]; then
+        printf 'no evidence: the host produced no observation\n'
+        return 0
+    fi
+    _ship_u_sha="$(ship_field "$_ship_u_line" sha)"
+    if [ "$_ship_u_sha" != "$_ship_u_want" ]; then
+        printf 'last observation sha %.8s, wanted %.8s\n' \
+            "${_ship_u_sha:-00000000}" "$_ship_u_want"
+        return 0
+    fi
+    if [ "$(ship_field "$_ship_u_line" ident)" != yes ]; then
+        printf 'last observation ident=no: the running process does not carry this deploy identity\n'
+        return 0
+    fi
+    if [ "$(ship_field "$_ship_u_line" rpc)" != ok ]; then
+        printf 'last observation rpc=%s: the process has not answered status yet\n' \
+            "$(ship_field "$_ship_u_line" rpc)"
+        return 0
+    fi
+    printf 'last observation qualified only after the window had closed\n'
+}
+
+# ship_unverified_binary_note <observation-line> <want-sha> — prints a line
+# ONLY when the host is running bytes other than the ones just installed.
+# That is not slowness and no amount of waiting fixes it: something outranks
+# the ship's drop-in, which is the exact failure the effective-ExecStart guard
+# above now refuses up front.
+ship_unverified_binary_note() {
+    _ship_n_sha="$(ship_field "$1" sha)"
+    [ -n "$_ship_n_sha" ] || return 0
+    [ "$_ship_n_sha" != "$2" ] || return 0
+    printf 'the unit restarted on a different binary (%.8s != %.8s) — check the unit drop-ins\n' \
+        "$_ship_n_sha" "$2"
+}
+
 # ── the loop ────────────────────────────────────────────────────────────────
 # ship_await <label> <observer-command> <want_sha>
 #

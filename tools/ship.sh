@@ -233,12 +233,33 @@ ship_stage_all() {
     [ "$failed" -eq 0 ]
 }
 
+# Which host ended the rollout, and (for a non-fault ending) the words that
+# describe it. Set by deploy_remote at each of its return points, read by the
+# fleet-level report below, so the final line can say what actually happened
+# to a named box instead of flattening every ending into one refusal.
+SHIP_ROLLOUT_HOST=""
+SHIP_ROLLOUT_WINDOW=""
+SHIP_ROLLOUT_REASON=""
+SHIP_ROLLOUT_BINARY_NOTE=""
+
 ship_remote_rollout() {
-    local stage_fn="$1" activate_fn="$2" host
+    local stage_fn="$1" activate_fn="$2" host rollout_activate_rc
     shift 2
     ship_stage_all "$stage_fn" "$@" || return 20
     for host in "$@"; do
-        "$activate_fn" "$host" || return 1
+        rollout_activate_rc=0
+        "$activate_fn" "$host" || rollout_activate_rc=$?
+        case "$rollout_activate_rc" in
+            0) ;;
+            # 3 and 4 are the two words that PROVE NO FAULT: the candidate is
+            # installed and running, and only its qualification is missing.
+            # Collapsing them into a flat 1 here is what made a ship that had
+            # installed the candidate end on "REFUSE: remote activation
+            # failed" — a sentence that is wrong about the deploy and about
+            # the box. Carry them up intact; only a real fault becomes 1.
+            3|4) return "$rollout_activate_rc" ;;
+            *) return 1 ;;
+        esac
     done
 }
 
@@ -737,6 +758,49 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
         printf 'ship: selftest FAILED — ship_stage_all accepted ZCL_SHIP_STAGE_JOBS=0\n' >&2
         exit 1
     fi
+    # The rollout must carry the two NO-FAULT words up unchanged. It used to
+    # turn every non-zero activation into 1, and the caller's only remaining
+    # word for 1 is "remote activation failed" — so a box that had the
+    # candidate installed and was merely still coming up ended the run with a
+    # sentence claiming the opposite. It also stops at that host either way:
+    # an unqualified box is not a green light for the next one.
+    : > "$test_tmp/order"
+    selftest_activate_rc() {
+        printf 'activate %s\n' "$1" >> "$test_tmp/order"
+        case "$1" in slow) return 3 ;; dark) return 4 ;; broken) return 1 ;; esac
+    }
+    rollout_rc=0
+    ZCL_SHIP_STAGE_JOBS=2 ship_remote_rollout \
+        selftest_stage selftest_activate_rc node1 slow node3 || rollout_rc=$?
+    [ "$rollout_rc" -eq 3 ]
+    refute grep -qx 'activate node3' "$test_tmp/order"
+    : > "$test_tmp/order"
+    rollout_rc=0
+    ZCL_SHIP_STAGE_JOBS=2 ship_remote_rollout \
+        selftest_stage selftest_activate_rc dark node3 || rollout_rc=$?
+    [ "$rollout_rc" -eq 4 ]
+    refute grep -qx 'activate node3' "$test_tmp/order"
+    : > "$test_tmp/order"
+    rollout_rc=0
+    ZCL_SHIP_STAGE_JOBS=2 ship_remote_rollout \
+        selftest_stage selftest_activate_rc broken node3 || rollout_rc=$?
+    [ "$rollout_rc" -eq 1 ]
+    refute grep -qx 'activate node3' "$test_tmp/order"
+    # The unverified ending must not be spelled as a failure, and a host
+    # running bytes nobody installed must be called that in as many words.
+    WANT_SHA_SELFTEST="$(printf 'a%.0s' {1..64})"
+    selftest_unverified_line="observed=1 exists=1 pid=1 start=2 sha=$(printf 'd%.0s' {1..64}) ident=yes rpc=ok cpu=0 blkio=0 io=1 state=active sub=running nrestarts=0"
+    case "$(ship_unverified_reason "$selftest_unverified_line" "$WANT_SHA_SELFTEST")" in
+        "last observation sha dddddddd, wanted aaaaaaaa") ;;
+        *) printf 'ship: selftest FAILED — unverified reason text drifted\n' >&2; exit 1 ;;
+    esac
+    case "$(ship_unverified_binary_note "$selftest_unverified_line" "$WANT_SHA_SELFTEST")" in
+        "the unit restarted on a different binary (dddddddd != aaaaaaaa)"*"check the unit drop-ins") ;;
+        *) printf 'ship: selftest FAILED — different-binary note text drifted\n' >&2; exit 1 ;;
+    esac
+    [ -z "$(ship_unverified_binary_note \
+        "observed=1 exists=1 sha=$WANT_SHA_SELFTEST ident=yes rpc=ok" "$WANT_SHA_SELFTEST")" ]
+    grep -q 'UNVERIFIED: \$SHIP_ROLLOUT_HOST is running the candidate but did not qualify' "$0"
     ship_selftest_dev_guard "$test_tmp/dev-guard"
 
     # ── prepare steps: build what preflight/the gate need, never silently
@@ -1605,6 +1669,27 @@ REMOTE_STAGE_DISCARD
     say "$host: release staged and SHA-256 verified"
 }
 
+# Record the words the fleet report will use for a host that ends the rollout
+# without a proven fault. <line> is the last observation; when it is empty the
+# remote leg reached its own verdict over ssh and this side takes one more
+# observation rather than guessing, because the difference between "still
+# coming up" and "running the wrong binary" is the whole point of the line.
+ship_note_rollout_unverified() {
+    local note_host="$1" note_window="$2" note_line="${3:-}"
+    SHIP_ROLLOUT_HOST="$note_host"
+    SHIP_ROLLOUT_WINDOW="$note_window"
+    if [ -z "$note_line" ]; then
+        SHIP_OBS_UNIT=zclassic23
+        SHIP_OBS_SHA="$ARTIFACT_SHA"
+        SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
+        SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
+        SHIP_REMOTE_HOST="$note_host"
+        note_line="$(ship_remote_observe "$ARTIFACT_SHA" 2>/dev/null || true)"
+    fi
+    SHIP_ROLLOUT_REASON="$(ship_unverified_reason "$note_line" "$ARTIFACT_SHA")"
+    SHIP_ROLLOUT_BINARY_NOTE="$(ship_unverified_binary_note "$note_line" "$ARTIFACT_SHA")"
+}
+
 deploy_remote() {
     local host="$1" svc_bin prev_sha prior_commit run_id release_root node_incoming release_state
     step "Deploy → $host"
@@ -1744,6 +1829,8 @@ REMOTE_RELEASE_CHECK
                     ;;
                 3|4)
                     say "$host current candidate remains $SHIP_AWAIT_LAST_VERDICT — no restart"
+                    ship_note_rollout_unverified "$host" "$SHIP_REMOTE_WINDOW" \
+                        "$SHIP_AWAIT_LAST_LINE"
                     return "$current_rc"
                     ;;
                 *)
@@ -2016,11 +2103,13 @@ REMOTE_SCRIPT
             say "$host is STILL PROGRESSING — the candidate is installed and working,"
             say "  but had not finished coming up when the remote window closed."
             say "  NOTHING was rolled back. Re-run ship to re-check."
+            ship_note_rollout_unverified "$host" "$SHIP_REMOTE_WINDOW"
             return 3
             ;;
         4)
             say "$host is UNKNOWN — the candidate is installed but the host could not"
             say "  produce evidence. NOTHING was rolled back; a human decides."
+            ship_note_rollout_unverified "$host" "$SHIP_REMOTE_WINDOW"
             return 4
             ;;
         *)
@@ -2059,6 +2148,8 @@ REMOTE_SCRIPT
             say "$host is STILL PROGRESSING — $SHIP_AWAIT_LAST_ADVANCES observed advances,"
             say "  last change ${SHIP_AWAIT_LAST_SILENT}s ago. The candidate stays installed"
             say "  and NOTHING was rolled back: a slow disk is not a failed deploy."
+            ship_note_rollout_unverified "$host" "$SHIP_REMOTE_WINDOW" \
+                "$SHIP_AWAIT_LAST_LINE"
             return 3
             ;;
         4)
@@ -2066,6 +2157,8 @@ REMOTE_SCRIPT
             say "  $SHIP_UNKNOWN_SAMPLES consecutive attempts (host unreachable, or /proc"
             say "  unreadable). An unreachable host is not a failed deploy. NOTHING was"
             say "  rolled back; a human decides."
+            ship_note_rollout_unverified "$host" "$SHIP_REMOTE_WINDOW" \
+                "$SHIP_AWAIT_LAST_LINE"
             return 4
             ;;
     esac
@@ -2205,6 +2298,18 @@ for target in $TARGETS; do
             case "$rollout_rc" in
                 0) ;;
                 20) die "remote staging failed; zero remote services were restarted" ;;
+                3|4)
+                    # NOT a failed activation. The candidate is installed and
+                    # running on that box; only its qualification is missing,
+                    # and saying "failed" here sent a reader looking for a
+                    # broken deploy that did not exist.
+                    say "UNVERIFIED: $SHIP_ROLLOUT_HOST is running the candidate but did not qualify within ${SHIP_ROLLOUT_WINDOW}s ($SHIP_ROLLOUT_REASON)"
+                    [ -z "$SHIP_ROLLOUT_BINARY_NOTE" ] ||
+                        say "  $SHIP_ROLLOUT_BINARY_NOTE"
+                    say "  NOTHING was rolled back and the candidate stays installed."
+                    say "  Re-run ship to re-check that host."
+                    exit "$rollout_rc"
+                    ;;
                 *) die "remote activation failed" ;;
             esac
             ;;

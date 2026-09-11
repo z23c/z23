@@ -830,7 +830,9 @@ its own file, unless that effective executable is the release it just
 installed; it restores the prior drop-in and never deletes or renames anybody
 else's. Each activation then qualifies the running `/proc/<pid>/exe` bytes and
 status before the next host is touched. A failure restores that host's prior
-daemon, identity, and workers and stops the rollout.
+daemon, identity, and workers and stops the rollout; a host that ends with the
+candidate installed but not yet qualified is reported as `UNVERIFIED`, which
+is not a failed activation and rolls nothing back.
 
 A candidate that changes persistent-schema code (`engine/models/src/database*`,
 `engine/models/include/models/database*`, `schema_migration.*`) is refused by
