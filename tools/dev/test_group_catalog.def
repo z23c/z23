@@ -905,7 +905,9 @@ ZCL_TEST_GROUP(dev_lane)
  * worktree generations (one with a live process cwd'd inside, one locked,
  * one back-dated orphan) must classify as in_use / locked / reapable, a
  * dry run must move nothing, an apply must reclaim only the orphan, and a
- * canonical datadir must be refused by name. */
+ * canonical datadir must be refused by name. It must also never ABANDON
+ * space: a generation git unregisters but leaves on disk is finished off,
+ * and one nothing can remove is named in refusals[]. */
 ZCL_TEST_GROUP(host_gc)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)

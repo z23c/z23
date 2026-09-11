@@ -879,8 +879,9 @@ ZCL_COMMAND_READY_COMMAND(
     "partition of it into reapable / too_young / in_use / locked / "
     "need_review, plus bytes_reclaimable and bytes_reclaimed. Counts are "
     "measured at call time from git's own worktree listing and a single "
-    "/proc pass, never cached. Dry run unless apply=true, and even then the "
-    "only deletion path is git's worktree removal; every protected path is "
+    "/proc pass, never cached. Dry run unless apply=true, and even then git's "
+    "own worktree removal goes first; a directory git unregistered but left "
+    "behind is finished off, and never left unnamed. Every protected path is "
     "named in refusals[] rather than silently skipped.", 65536,
     "host,gc,garbage,worktree,generation,disk,reclaim,janitor",
     "zcl.host_gc.input.v1", "zcl.host_gc.v1",

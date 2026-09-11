@@ -5,9 +5,10 @@
  *          never touch?" is answered by one small file a reviewer can read
  *          end to end.
  *
- * NO DELETION SYSCALL APPEARS IN THIS FILE, and none appears in its sibling
- * either: the engine's only removal path is `git worktree remove` through
- * the spawn seam. Everything here reads.
+ * NO DELETION SYSCALL APPEARS IN THIS FILE. It reads, and it restores the
+ * owner write bit on a directory the sibling is about to remove
+ * (hg_grant_write); the removal itself is the sibling's, and that file
+ * documents the two-step deletion path it owns.
  */
 
 /* realpath() is declared by glibc only through the fortify inline unless a
@@ -109,6 +110,48 @@ uint64_t hg_dir_bytes(const char *path)
 {
     long budget = HG_DU_MAX_ENTRIES;
     return hg_walk(path, 0, &budget);
+}
+
+/* lstat() first, then chmod() the same name: a symlink is never a directory
+ * to lstat(), so the chmod() below can only ever land on a real directory
+ * of the generation being reclaimed. Failures are ignored on purpose — a
+ * directory that stays read-only simply makes the removal fail, and the
+ * removal names it in refusals[] with the errno text. */
+static void hg_chmod_walk(const char *path, int depth, long *budget)
+{
+#if defined(_WIN32)
+    (void)path;
+    (void)depth;
+    (void)budget;
+#else
+    DIR *d;
+    struct dirent *e;
+    struct stat st;
+
+    if (*budget <= 0 || depth >= HG_DU_MAX_DEPTH)
+        return;
+    if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+        return;
+    (*budget)--;
+    (void)chmod(path, (st.st_mode & 07777) | S_IRWXU);
+    d = opendir(path);
+    if (!d)
+        return;
+    while ((e = readdir(d)) != NULL && *budget > 0) {
+        char child[HOST_GC_PATH_CAP * 2];
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (hg_join(child, sizeof(child), path, e->d_name))
+            hg_chmod_walk(child, depth + 1, budget);
+    }
+    (void)closedir(d);
+#endif
+}
+
+void hg_grant_write(const char *path)
+{
+    long budget = HG_DU_MAX_ENTRIES;
+    hg_chmod_walk(path, 0, &budget);
 }
 
 /* ----------------------------------------------------------- protection */

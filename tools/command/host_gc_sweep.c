@@ -7,13 +7,17 @@
  *          path plumbing live in host_gc_paths.c.
  *
  * PROCESS RULE. git runs only through zcl_spawn_capture() (util/spawn.h).
- * No popen(), no system(), no shell command string, and no unlink(),
- * rmdir(), or recursive delete anywhere in this translation unit.
+ * No popen(), no system(), and no shell command string anywhere in this
+ * translation unit. The one recursive delete it can reach is the tree
+ * walker every other caller in this project uses, util/file_tree_ops.h's
+ * zcl_tree_remove(), and it is reachable only from hg_finish_removal() —
+ * read that function's comment for why git alone is not enough.
  */
 
 #include "command/host_gc_priv.h"
 
 #include "platform/time_compat.h"
+#include "util/file_tree_ops.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
 
@@ -384,8 +388,8 @@ static void hg_count(struct host_gc_class *cls, enum hg_verdict v)
     }
 }
 
-/* THE ONLY DELETION PATH IN THE ENGINE. git is asked to remove a worktree
- * of the pool's OWN repository, and refuses anything that is not one. */
+/* STEP ONE OF THE DELETION PATH. git is asked to remove a worktree of the
+ * pool's OWN repository, and refuses anything that is not one. */
 static bool hg_reap(const char *repo, const char *wt)
 {
     const char *args[] = { "worktree", "remove", "--force", "--", wt, NULL };
@@ -393,19 +397,97 @@ static bool hg_reap(const char *repo, const char *wt)
     return hg_git(repo, args, out, sizeof(out)) == 0;
 }
 
+static bool hg_exists(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) == 0;
+}
+
+/* Drop the administrative record of a worktree whose directory is gone.
+ * Only needed after this engine finished a removal git did not. */
+static void hg_prune(const char *repo)
+{
+    static const char *const args[] = { "worktree", "prune", NULL };
+    char out[HG_STATUS_CAP];
+    (void)hg_git(repo, args, out, sizeof(out));
+}
+
+/* The operating system's own words for a failure. Every failure message
+ * util/file_tree_ops.c builds ends with ": <strerror text>", and a refusal
+ * already carries the path in a field of its own, so the tail is the only
+ * part worth a reason's 48 bytes. */
+static const char *hg_why(const struct zcl_result *r)
+{
+    const char *colon = strrchr(r->message, ':');
+    if (!colon || !colon[1])
+        return r->message;
+    return colon[1] == ' ' ? colon + 2 : colon + 1;
+}
+
+/* STEP TWO, AND WHY IT HAS TO EXIST. `git worktree remove` deletes the
+ * directory first and unregisters the worktree afterwards — unconditionally,
+ * even when the delete failed. One read-only directory of test scratch
+ * inside a dead generation is enough to make the delete fail, and the
+ * generation is then unregistered AND still on disk: `git worktree list`
+ * no longer names it, so no later sweep can ever classify it again. On the
+ * tmpfs pool that is a permanent RAM leak — four 2-3 GB generations
+ * survived an apply that had already reported them reclaimed.
+ *
+ * This is the only place the engine deletes on its own, so it re-proves
+ * what it was relying on git for: the path is still strictly under THIS
+ * pool's root, and it is still not a protected path. Read-only directories
+ * are made writable first, because that is the obstacle that produced the
+ * leak. Anything still standing afterwards is named in refusals[] with the
+ * errno text — never dropped in silence, because an unregistered directory
+ * nobody names is exactly the leak this function exists to close. */
+static bool hg_finish_removal(const struct host_gc_request *req,
+                              struct host_gc_report *report,
+                              const struct host_gc_class *cls,
+                              const char *path)
+{
+    char reason[HOST_GC_REASON_CAP];
+    struct zcl_result rm;
+
+    if (!hg_under(cls->path, path) || strcmp(path, cls->path) == 0) {
+        hg_refuse(report, path, "outside_pool_root");
+        return false;
+    }
+    if (host_gc_path_protected(req, cls->repo, path, reason,
+                               sizeof(reason))) {
+        hg_refuse(report, path, reason);
+        return false;
+    }
+    hg_grant_write(path);
+    rm = zcl_tree_remove(path);
+    if (!hg_exists(path)) {
+        hg_prune(cls->repo);
+        return true;
+    }
+    (void)snprintf(reason, sizeof(reason), "remove_failed:%s",
+                   rm.ok ? "still_present" : hg_why(&rm));
+    hg_refuse(report, path, reason);
+    return false;
+}
+
 static void hg_act(const struct host_gc_request *req,
-                   struct host_gc_class *cls, const struct hg_cand *c)
+                   struct host_gc_report *report, struct host_gc_class *cls,
+                   const struct hg_cand *c)
 {
     uint64_t bytes = hg_dir_bytes(c->path);
+    bool gone;
     cls->bytes_reclaimable += bytes;
     if (!req->apply)
         return;
-    if (hg_reap(cls->repo, c->path)) {
+    gone = hg_reap(cls->repo, c->path) && !hg_exists(c->path);
+    if (!gone)
+        gone = hg_finish_removal(req, report, cls, c->path);
+    if (gone) {
         cls->bytes_reclaimed += bytes;
         return;
     }
-    /* git declined. The worktree stands; report it as needing a human
-     * rather than counting a reclaim that never happened. */
+    /* Nothing moved, and the refusal above says why. The generation stands;
+     * report it as needing a human rather than counting a reclaim that
+     * never happened. */
     cls->reapable--;
     cls->need_review++;
 }
@@ -458,7 +540,7 @@ static void hg_settle(const struct host_gc_request *req,
         v = hg_classify(req, c, now);
         hg_count(cls, v);
         if (v == HG_REAPABLE)
-            hg_act(req, cls, c);
+            hg_act(req, report, cls, c);
     }
 }
 

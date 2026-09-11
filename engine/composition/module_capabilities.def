@@ -1118,7 +1118,7 @@ ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_sqlite_key_cryp
 ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_sqlite_keypool.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/entry/main.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "the node's own entry point: sets process environment variables before boot and is the one place startup env is legitimately mutated")
 ZCL_MODULE_CAPABILITY("engine/entry/main_cli_modes.c", CAP_FS_READ|CAP_NETWORK|CAP_FS_WRITE|CAP_CLOCK, "offline CLI modes split from main: several dial the local RPC port or a peer directly to answer a one-shot operator query")
-ZCL_MODULE_CAPABILITY("tools/command/host_gc_paths.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("tools/command/host_gc_paths.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/host_gc_sweep.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/cli_render.c", CAP_PRIVILEGE, "the native command registry's human presentation layer: calls ioctl() to read the terminal's window size for column-aware rendering")
 ZCL_MODULE_CAPABILITY("tools/command/native_build_command.c", CAP_FS_READ, "")

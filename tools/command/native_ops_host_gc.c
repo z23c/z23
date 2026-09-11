@@ -15,8 +15,9 @@
  *
  * DRY RUN IS THE DEFAULT and is TRAIT_IDEMPOTENT: without `apply` the leaf
  * classifies, measures, and removes nothing. `apply` is the only way a byte
- * moves, and even then the engine's only deletion path is git's own
- * worktree removal (see command/host_gc_sweep.h).
+ * moves, and even then git's own worktree removal goes first and the engine
+ * only finishes a directory git unregistered but could not delete (see
+ * command/host_gc_sweep.h for the two re-checks that removal re-proves).
  */
 
 #include "command/native_command.h"

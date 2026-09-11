@@ -23,6 +23,16 @@
  * by this test — including the two live datadir names, which this test
  * reaches only through the table, never as a literal), and a directory is
  * separately refused by its contents (holding blk*.dat).
+ *
+ * AND THE OTHER HALF OF "never deletes work": it never abandons space
+ * either. `git worktree remove` unregisters a worktree whether or not it
+ * managed to delete the directory, so one read-only scratch directory
+ * inside a dead generation leaves a tree git no longer lists — invisible
+ * to every later sweep, and on the tmpfs pool a permanent RAM leak. Two
+ * more generations cover that: one git leaves behind and the sweep must
+ * finish off (reported reclaimed, refusals empty), and one nothing can
+ * remove because its PARENT is read-only, which must appear in refusals[]
+ * by name rather than vanish from the accounting.
  */
 
 #include "test/test_core.h"
@@ -69,9 +79,26 @@ static bool hgt_exists(const char *path)
     return stat(path, &st) == 0;
 }
 
+static bool hgt_write(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    if (fputs(text, f) == EOF) {
+        (void)fclose(f);
+        return false;
+    }
+    return fclose(f) == 0;
+}
+
 /* A repository with exactly one commit. Identity and signing are pinned on
  * the command line so a maintainer's global gitconfig (commit.gpgsign is
- * on for this project) cannot decide whether the fixture builds. */
+ * on for this project) cannot decide whether the fixture builds.
+ *
+ * The committed .gitignore is what lets a fixture generation below carry
+ * the two things a REAL dev-proof generation carries — build output and a
+ * vendored dependency — and still be what git calls clean, which is the
+ * precondition for the sweep to consider it at all. */
 static bool hgt_make_repo(const char *repo)
 {
     static const char *const init[] = { "init", "-q", "-b", "main", NULL };
@@ -81,14 +108,13 @@ static bool hgt_make_repo(const char *repo)
         "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty",
         "-m", "fixture", NULL };
     char seed[HGT_PATH];
-    FILE *f;
+    char ignore[HGT_PATH];
     if (mkdir(repo, 0700) != 0 || !hgt_git(repo, init))
         return false;
     (void)snprintf(seed, sizeof(seed), "%s/seed.txt", repo);
-    f = fopen(seed, "wb");
-    if (!f || fputs("fixture\n", f) == EOF)
-        return false;
-    if (fclose(f) != 0)
+    (void)snprintf(ignore, sizeof(ignore), "%s/.gitignore", repo);
+    if (!hgt_write(seed, "fixture\n") ||
+        !hgt_write(ignore, "out/\nvendor/\n"))
         return false;
     return hgt_git(repo, add) && hgt_git(repo, commit);
 }
@@ -172,6 +198,9 @@ int test_host_gc(void)
     char tmp[HGT_PATH] = "", repo[HGT_PATH] = "", pool[HGT_PATH] = "";
     char fake[HGT_PATH] = "", blk[HGT_PATH] = "";
     char inuse[HGT_PATH] = "", locked[HGT_PATH] = "", orphan[HGT_PATH] = "";
+    char left_pool[HGT_PATH] = "", left_gen[HGT_PATH] = "";
+    char left_out[HGT_PATH] = "";
+    char stuck_pool[HGT_PATH] = "", stuck_gen[HGT_PATH] = "";
     pid_t occupant = -1;
 
     TEST("host gc: the fixture repository and its three generations build") {
@@ -293,6 +322,84 @@ int test_host_gc(void)
         PASS();
     }
 
+    TEST("host gc: a generation git leaves behind is finished, not abandoned") {
+        struct host_gc_request req;
+        struct host_gc_report report;
+        const struct host_gc_class *cls;
+        char frozen[HGT_PATH];
+        char vendor[HGT_PATH], vendor_git[HGT_PATH], vendor_head[HGT_PATH];
+        /* A generation shaped like a real one. `out/` is read-only build
+         * scratch: git's own removal stops there, reports failure, and
+         * unregisters the worktree anyway — leaving a tree `git worktree
+         * list` will never name again. `vendor/.git` is a DIRECTORY, the
+         * shape a vendored submodule checkout has and the shape a
+         * nested-repo-preserving remover would refuse to cross. Both are
+         * covered by the fixture repo's committed .gitignore, so git still
+         * calls the generation clean and the sweep still classifies it. */
+        (void)snprintf(left_pool, sizeof(left_pool), "%s/pool-left", tmp);
+        ASSERT(mkdir(left_pool, 0700) == 0);
+        ASSERT(hgt_add_gen(repo, left_pool, "gen-left", left_gen,
+                           sizeof(left_gen)));
+        (void)snprintf(vendor, sizeof(vendor), "%s/vendor", left_gen);
+        (void)snprintf(vendor_git, sizeof(vendor_git), "%s/.git", vendor);
+        (void)snprintf(vendor_head, sizeof(vendor_head), "%s/HEAD",
+                       vendor_git);
+        (void)snprintf(left_out, sizeof(left_out), "%s/out", left_gen);
+        (void)snprintf(frozen, sizeof(frozen), "%s/frozen.txt", left_out);
+        ASSERT(mkdir(vendor, 0700) == 0);
+        ASSERT(mkdir(vendor_git, 0700) == 0);
+        ASSERT(hgt_write(vendor_head, "ref: refs/heads/main\n"));
+        ASSERT(mkdir(left_out, 0700) == 0);
+        ASSERT(hgt_write(frozen, "build output\n"));
+        ASSERT(chmod(left_out, 0500) == 0);
+        ASSERT(hgt_backdate(left_gen, 48));
+        hgt_seed_request(&req, left_pool);
+        req.apply = true;
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL);
+        ASSERT_EQ(cls->registered, 1);
+        ASSERT_EQ(cls->reapable, 1);
+        ASSERT_EQ(cls->need_review, 0);
+        ASSERT(cls->bytes_reclaimed > 0);
+        ASSERT_EQ(report.nrefusals, (size_t)0);
+        ASSERT(!hgt_exists(left_gen));
+        PASS();
+    }
+
+    TEST("host gc: a generation nothing can remove is refused by name") {
+        struct host_gc_request req;
+        struct host_gc_report report;
+        const struct host_gc_class *cls;
+        const char *reason;
+        /* The pool directory itself is read-only, so the final rmdir of
+         * the generation is impossible for git and for the sweep alike.
+         * The one outcome this must never produce is silence: a generation
+         * git has already unregistered and nobody can delete has to be
+         * named, or it is exactly the leak that started this. */
+        (void)snprintf(stuck_pool, sizeof(stuck_pool), "%s/pool-stuck", tmp);
+        ASSERT(mkdir(stuck_pool, 0700) == 0);
+        ASSERT(hgt_add_gen(repo, stuck_pool, "gen-stuck", stuck_gen,
+                           sizeof(stuck_gen)));
+        ASSERT(hgt_backdate(stuck_gen, 48));
+        ASSERT(chmod(stuck_pool, 0500) == 0);
+        hgt_seed_request(&req, stuck_pool);
+        req.apply = true;
+        ASSERT(host_gc_run(&req, &report));
+        ASSERT(chmod(stuck_pool, 0700) == 0);
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL);
+        ASSERT_EQ(cls->registered, 1);
+        ASSERT_EQ(cls->reapable, 0);
+        ASSERT_EQ(cls->need_review, 1);
+        ASSERT_EQ(cls->bytes_reclaimed, (uint64_t)0);
+        reason = hgt_refusal(&report, stuck_gen);
+        ASSERT(reason != NULL);
+        ASSERT_EQ(strncmp(reason, "remove_failed:", 14), 0);
+        ASSERT(hgt_exists(stuck_gen));
+        PASS();
+    }
+
     TEST("host gc: every protected leaf is refused by name, never swept") {
         struct host_gc_request req;
         char reason[HOST_GC_REASON_CAP];
@@ -347,6 +454,13 @@ int test_host_gc(void)
     }
 
 _test_next:;
+    /* Restore both read-only fixture directories whatever happened above,
+     * or the recursive cleanup below cannot take its own scratch tree
+     * down. Both are this test's own, under its own tmpdir. */
+    if (stuck_pool[0])
+        (void)chmod(stuck_pool, 0700);
+    if (left_out[0])
+        (void)chmod(left_out, 0700);
     if (occupant > 0) {
         (void)kill(occupant, SIGKILL);
         (void)waitpid(occupant, NULL, 0);

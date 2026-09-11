@@ -10,12 +10,23 @@
  * platform_ram_scratch_root()/z23p). Nothing else is a pool, and nothing
  * outside a pool is ever a removal candidate.
  *
- * THE ONLY DELETION PATH is `git worktree remove --force` executed by git
- * itself through the spawn seam (util/spawn.h). This engine contains no
- * unlink(), no rmdir(), and no recursive delete of any kind: git refuses a
- * path that is not a registered worktree of the repo it is asked about, so
- * a classifier bug cannot reach an arbitrary directory. Read that as the
- * load-bearing safety property of the whole file.
+ * THE DELETION PATH IS TWO STEPS, and the first is `git worktree remove
+ * --force` executed by git itself through the spawn seam (util/spawn.h):
+ * git refuses a path that is not a registered worktree of the repo it is
+ * asked about, so a classifier bug cannot reach an arbitrary directory.
+ *
+ * Git alone is not enough. It unregisters the worktree whether or not it
+ * managed to delete the directory, and one read-only directory inside a
+ * dead generation is enough to stop the delete. What is left is a tree
+ * git no longer lists — invisible to every later sweep, and on the tmpfs
+ * pool a permanent RAM leak. So when the directory is still there after
+ * git returns, the engine finishes the removal itself through the one
+ * shared tree walker (util/file_tree_ops.h), and only after re-proving
+ * BOTH of the things git was relied on for: the path is still strictly
+ * under this pool's own root, and it is still not a protected path. Read
+ * those two re-checks as the load-bearing safety property of the file.
+ * A directory that still cannot be removed is named in refusals[] with the
+ * errno text; an unregistered directory is never left unnamed.
  *
  * A CANDIDATE IS KEPT, never removed, when ANY of these holds — the reason
  * is reported per class so an operator can see WHY nothing moved:
