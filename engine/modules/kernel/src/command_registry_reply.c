@@ -91,6 +91,25 @@ bool command_registry_push_error(struct json_value *root,
     return ok;
 }
 
+static bool push_next_item_valid(const struct zcl_command_next *next,
+                                 const struct zcl_command_registry *registry,
+                                 const struct zcl_command_spec *current_spec,
+                                 struct json_value *input)
+{
+    if (!json_read(input, next->input_json, strlen(next->input_json)) ||
+        input->type != JSON_OBJ)
+        return false;
+    const struct zcl_command_spec *next_spec =
+        zcl_command_registry_find(registry, next->command, NULL);
+    char why[160] = {0};
+    if (!next_spec || command_registry_is_branch(next_spec))
+        return false;
+    if (current_spec && strcmp(next_spec->path, current_spec->path) == 0)
+        return false;
+    return zcl_command_registry_input_validate(next_spec, input, why,
+                                               sizeof(why));
+}
+
 static bool push_next_item(struct json_value *array,
                            const struct zcl_command_next *next,
                            const struct zcl_command_registry *registry,
@@ -100,19 +119,7 @@ static bool push_next_item(struct json_value *array,
     json_init(&item);
     json_init(&input);
     json_set_object(&item);
-    if (!json_read(&input, next->input_json, strlen(next->input_json)) ||
-        input.type != JSON_OBJ) {
-        json_free(&input);
-        json_free(&item);
-        return false;
-    }
-    const struct zcl_command_spec *next_spec =
-        zcl_command_registry_find(registry, next->command, NULL);
-    char why[160] = {0};
-    if (!next_spec || command_registry_is_branch(next_spec) ||
-        (current_spec && strcmp(next_spec->path, current_spec->path) == 0) ||
-        !zcl_command_registry_input_validate(next_spec, &input, why,
-                                             sizeof(why))) {
+    if (!push_next_item_valid(next, registry, current_spec, &input)) {
         json_free(&input);
         json_free(&item);
         return false;

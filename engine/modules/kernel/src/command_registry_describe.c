@@ -228,19 +228,23 @@ static bool describe_push_policy_bounds(struct json_value *root,
            json_push_kv_str(root, "example", spec->example);
 }
 
-size_t zcl_command_registry_describe_json(
-    const struct zcl_command_registry *registry, const char *path, char *out,
-    size_t out_size)
+static bool describe_push_extras(struct json_value *root,
+                                 const struct zcl_command_spec *spec,
+                                 bool alias)
 {
-    bool alias = false;
-    const struct zcl_command_spec *spec =
-        zcl_command_registry_find(registry, path, &alias);
-    if (!spec)
-        return 0;
-    if (command_registry_is_branch(spec))
-        return zcl_command_registry_menu_json(registry, spec->path, out,
-                                              out_size);
+    bool ok = true;
+    if (spec->aliases && spec->aliases[0])
+        ok = command_registry_push_string_array_csv(root, "aliases",
+                                                    spec->aliases);
+    if (alias)
+        ok = ok && json_push_kv_str(root, "canonical_path", spec->path);
+    return ok;
+}
 
+static size_t describe_leaf(const struct zcl_command_registry *registry,
+                            const struct zcl_command_spec *spec, bool alias,
+                            char *out, size_t out_size)
+{
     char digest[72];
     zcl_command_registry_digest(registry, digest);
     struct json_value root, input, policy;
@@ -258,12 +262,8 @@ size_t zcl_command_registry_describe_json(
               describe_push_input(&root, &input, spec) &&
               describe_push_policy_names(&policy, spec) &&
               describe_push_policy_bounds(&root, &policy, spec,
-                                          observed_p99_us, observed_samples);
-    if (spec->aliases && spec->aliases[0])
-        ok = ok && command_registry_push_string_array_csv(&root, "aliases",
-                                                          spec->aliases);
-    if (alias)
-        ok = ok && json_push_kv_str(&root, "canonical_path", spec->path);
+                                          observed_p99_us, observed_samples) &&
+              describe_push_extras(&root, spec, alias);
     size_t result =
         ok ? command_registry_write_bounded_json(&root, out, out_size,
                                                  ZCL_COMMAND_SPEC_BUDGET)
@@ -272,4 +272,19 @@ size_t zcl_command_registry_describe_json(
     json_free(&input);
     json_free(&root);
     return result;
+}
+
+size_t zcl_command_registry_describe_json(
+    const struct zcl_command_registry *registry, const char *path, char *out,
+    size_t out_size)
+{
+    bool alias = false;
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(registry, path, &alias);
+    if (!spec)
+        return 0;
+    if (command_registry_is_branch(spec))
+        return zcl_command_registry_menu_json(registry, spec->path, out,
+                                              out_size);
+    return describe_leaf(registry, spec, alias, out, out_size);
 }

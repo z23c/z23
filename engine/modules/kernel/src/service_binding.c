@@ -201,14 +201,9 @@ static enum zcl_service_binding_result validate_gate(
     return ZCL_SERVICE_BINDING_TOKEN_GATE;
 }
 
-enum zcl_service_binding_result zcl_service_binding_validate_v1(
+static enum zcl_service_binding_result binding_identity(
     const struct zcl_service_binding_v1 *binding)
 {
-    if (!binding)
-        return ZCL_SERVICE_BINDING_NULL;
-    if (binding->struct_size != sizeof(*binding) ||
-        binding->schema_version != ZCL_SERVICE_BINDING_V1)
-        return ZCL_SERVICE_BINDING_SCHEMA;
     if (binding->binding_id == 0 ||
         !canonical_ident(binding->name, sizeof(binding->name), false) ||
         !canonical_version(binding->version, sizeof(binding->version)))
@@ -220,37 +215,56 @@ enum zcl_service_binding_result zcl_service_binding_validate_v1(
     }
     size_t display_len = 0;
     if (!text_bounded(binding->display_name, sizeof(binding->display_name),
-                      &display_len) || display_len == 0)
+                      &display_len) ||
+        display_len == 0)
         return ZCL_SERVICE_BINDING_IDENTITY;
+    return ZCL_SERVICE_BINDING_OK;
+}
+
+enum zcl_service_binding_result zcl_service_binding_validate_v1(
+    const struct zcl_service_binding_v1 *binding)
+{
+    if (!binding)
+        return ZCL_SERVICE_BINDING_NULL;
+    if (binding->struct_size != sizeof(*binding) ||
+        binding->schema_version != ZCL_SERVICE_BINDING_V1)
+        return ZCL_SERVICE_BINDING_SCHEMA;
+    enum zcl_service_binding_result result = binding_identity(binding);
+    if (result != ZCL_SERVICE_BINDING_OK)
+        return result;
     if (binding->host_service_id == 0)
         return ZCL_SERVICE_BINDING_HOST;
-
-    enum zcl_service_binding_result result = validate_command_prefix(binding);
+    result = validate_command_prefix(binding);
     if (result != ZCL_SERVICE_BINDING_OK)
         return result;
     result = validate_state_prefix(binding);
     if (result != ZCL_SERVICE_BINDING_OK)
         return result;
-
     if (!canonical_ident(binding->state_schema, sizeof(binding->state_schema),
-                         true) || binding->state_schema_version == 0)
+                         true) ||
+        binding->state_schema_version == 0)
         return ZCL_SERVICE_BINDING_STATE_SCHEMA;
-
     result = validate_gate(&binding->gate);
     if (result != ZCL_SERVICE_BINDING_OK)
         return result;
-
-    /* The whole boundary, exactly. No subset (a dropped bit is a claimed
-     * privilege) and no superset (an unknown bit is an undeclared one). */
     if (binding->isolation != ZCL_SERVICE_ISOLATION_REQUIRED_V1)
         return ZCL_SERVICE_BINDING_ISOLATION;
-
     if (binding->restart_policy > ZCL_SERVICE_RESTART_PERMANENT)
         return ZCL_SERVICE_BINDING_RESTART;
     if (binding->health_deadline_ms == 0 ||
         binding->health_deadline_ms > UINT64_C(600000))
         return ZCL_SERVICE_BINDING_HEALTH;
     return ZCL_SERVICE_BINDING_OK;
+}
+
+static bool binding_catalog_collides(
+    const struct zcl_service_binding_v1 *bindings, size_t i, size_t j)
+{
+    return strcmp(bindings[i].name, bindings[j].name) == 0 ||
+           strcmp(bindings[i].command_prefix,
+                  bindings[j].command_prefix) == 0 ||
+           prefix_overlaps(bindings[i].state_table_prefix,
+                           bindings[j].state_table_prefix);
 }
 
 enum zcl_service_binding_result zcl_service_binding_catalog_validate_v1(
@@ -276,13 +290,7 @@ enum zcl_service_binding_result zcl_service_binding_catalog_validate_v1(
             return ZCL_SERVICE_BINDING_CATALOG_ORDER;
         }
         for (size_t j = 0; j < i; j++) {
-            bool collides =
-                strcmp(bindings[i].name, bindings[j].name) == 0 ||
-                strcmp(bindings[i].command_prefix,
-                       bindings[j].command_prefix) == 0 ||
-                prefix_overlaps(bindings[i].state_table_prefix,
-                                bindings[j].state_table_prefix);
-            if (collides) {
+            if (binding_catalog_collides(bindings, i, j)) {
                 if (bad_index)
                     *bad_index = i;
                 return ZCL_SERVICE_BINDING_CATALOG_COLLISION;
@@ -462,65 +470,67 @@ bool zcl_service_binding_owns_command_v1(
 
 /* ── lifecycle ───────────────────────────────────────────────────────── */
 
+static bool life_step(uint32_t state, uint32_t expect, uint32_t next,
+                      uint32_t *out_state)
+{
+    if (state != expect)
+        return false;
+    *out_state = next;
+    return true;
+}
+
+static bool life_fault(uint32_t state, uint32_t *out_state)
+{
+    if (state != ZCL_SERVICE_LIFECYCLE_STARTING &&
+        state != ZCL_SERVICE_LIFECYCLE_READY &&
+        state != ZCL_SERVICE_LIFECYCLE_DEGRADED)
+        return false;
+    *out_state = ZCL_SERVICE_LIFECYCLE_BLOCKED;
+    return true;
+}
+
+static bool life_stop(uint32_t state, uint32_t *out_state)
+{
+    if (state != ZCL_SERVICE_LIFECYCLE_STARTING &&
+        state != ZCL_SERVICE_LIFECYCLE_READY &&
+        state != ZCL_SERVICE_LIFECYCLE_DEGRADED &&
+        state != ZCL_SERVICE_LIFECYCLE_BLOCKED)
+        return false;
+    *out_state = ZCL_SERVICE_LIFECYCLE_STOPPING;
+    return true;
+}
+
 bool zcl_service_lifecycle_next_v1(uint32_t state, uint32_t event,
                                    uint32_t *out_state)
 {
     if (!out_state)
         return false;
-    uint32_t next = 0;
     switch (event) {
     case ZCL_SERVICE_EVENT_REGISTER:
-        if (state != ZCL_SERVICE_LIFECYCLE_DECLARED)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_STARTING;
-        break;
+        return life_step(state, ZCL_SERVICE_LIFECYCLE_DECLARED,
+                         ZCL_SERVICE_LIFECYCLE_STARTING, out_state);
     case ZCL_SERVICE_EVENT_START:
-        if (state != ZCL_SERVICE_LIFECYCLE_STARTING)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_READY;
-        break;
+        return life_step(state, ZCL_SERVICE_LIFECYCLE_STARTING,
+                         ZCL_SERVICE_LIFECYCLE_READY, out_state);
     case ZCL_SERVICE_EVENT_DEGRADE:
-        if (state != ZCL_SERVICE_LIFECYCLE_READY)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_DEGRADED;
-        break;
+        return life_step(state, ZCL_SERVICE_LIFECYCLE_READY,
+                         ZCL_SERVICE_LIFECYCLE_DEGRADED, out_state);
     case ZCL_SERVICE_EVENT_RECOVER:
-        if (state != ZCL_SERVICE_LIFECYCLE_DEGRADED)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_READY;
-        break;
+        return life_step(state, ZCL_SERVICE_LIFECYCLE_DEGRADED,
+                         ZCL_SERVICE_LIFECYCLE_READY, out_state);
     case ZCL_SERVICE_EVENT_FAULT:
-        /* A fault is reachable from every live state and from nowhere else.
-         * BLOCKED is sticky on purpose: the only way out is a named stop. */
-        if (state != ZCL_SERVICE_LIFECYCLE_STARTING &&
-            state != ZCL_SERVICE_LIFECYCLE_READY &&
-            state != ZCL_SERVICE_LIFECYCLE_DEGRADED)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_BLOCKED;
-        break;
+        return life_fault(state, out_state);
     case ZCL_SERVICE_EVENT_STOP:
-        if (state != ZCL_SERVICE_LIFECYCLE_STARTING &&
-            state != ZCL_SERVICE_LIFECYCLE_READY &&
-            state != ZCL_SERVICE_LIFECYCLE_DEGRADED &&
-            state != ZCL_SERVICE_LIFECYCLE_BLOCKED)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_STOPPING;
-        break;
+        return life_stop(state, out_state);
     case ZCL_SERVICE_EVENT_EXIT:
-        if (state != ZCL_SERVICE_LIFECYCLE_STOPPING)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_EXITED;
-        break;
+        return life_step(state, ZCL_SERVICE_LIFECYCLE_STOPPING,
+                         ZCL_SERVICE_LIFECYCLE_EXITED, out_state);
     case ZCL_SERVICE_EVENT_REMOVE:
-        if (state != ZCL_SERVICE_LIFECYCLE_EXITED)
-            return false;
-        next = ZCL_SERVICE_LIFECYCLE_DECLARED;
-        break;
+        return life_step(state, ZCL_SERVICE_LIFECYCLE_EXITED,
+                         ZCL_SERVICE_LIFECYCLE_DECLARED, out_state);
     default:
         return false;
     }
-    *out_state = next;
-    return true;
 }
 
 const char *zcl_service_lifecycle_name_v1(uint32_t state)

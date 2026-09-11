@@ -49,49 +49,61 @@ static bool valid_role_trust(uint32_t role, uint32_t trust)
            role <= ZCL_SERVICE_ROLE_BUILDD && expected[role] == trust;
 }
 
-static bool descriptor_allowed(uint32_t role, uint32_t descriptor_class,
-                               uint32_t rights)
+static bool descriptor_rights_ok(uint32_t descriptor_class, uint32_t rights)
 {
     const uint32_t all_rights = ZCL_SERVICE_DESCRIPTOR_READ |
                                 ZCL_SERVICE_DESCRIPTOR_WRITE |
                                 ZCL_SERVICE_DESCRIPTOR_ACCEPT;
-    if (descriptor_class <= ZCL_SERVICE_DESCRIPTOR_INVALID ||
-        descriptor_class > ZCL_SERVICE_DESCRIPTOR_BUILD_OUTPUT ||
-        rights == 0 || (rights & ~all_rights) != 0)
+    return descriptor_class > ZCL_SERVICE_DESCRIPTOR_INVALID &&
+           descriptor_class <= ZCL_SERVICE_DESCRIPTOR_BUILD_OUTPUT &&
+           rights != 0 && (rights & ~all_rights) == 0;
+}
+
+static bool descriptor_row(uint32_t role, uint32_t descriptor_class,
+                           uint32_t rights)
+{
+    static const struct {
+        uint32_t class;
+        uint32_t role;
+        uint32_t rights;
+        int any_role;
+    } rows[] = {
+        {ZCL_SERVICE_DESCRIPTOR_CONSENSUS_STATE, ZCL_SERVICE_ROLE_CORE,
+         ZCL_SERVICE_DESCRIPTOR_READ | ZCL_SERVICE_DESCRIPTOR_WRITE, 0},
+        {ZCL_SERVICE_DESCRIPTOR_PUBLIC_LISTENER, ZCL_SERVICE_ROLE_EDGE,
+         ZCL_SERVICE_DESCRIPTOR_ACCEPT, 0},
+        {ZCL_SERVICE_DESCRIPTOR_CHAIN_LISTENER, ZCL_SERVICE_ROLE_CORE,
+         ZCL_SERVICE_DESCRIPTOR_ACCEPT, 0},
+        {ZCL_SERVICE_DESCRIPTOR_WALLET_SECRETS, ZCL_SERVICE_ROLE_WALLET,
+         ZCL_SERVICE_DESCRIPTOR_READ | ZCL_SERVICE_DESCRIPTOR_WRITE, 0},
+        {ZCL_SERVICE_DESCRIPTOR_APP_STATE, ZCL_SERVICE_ROLE_APPD,
+         ZCL_SERVICE_DESCRIPTOR_READ | ZCL_SERVICE_DESCRIPTOR_WRITE, 0},
+        {ZCL_SERVICE_DESCRIPTOR_BUILD_INPUT, ZCL_SERVICE_ROLE_BUILDD,
+         ZCL_SERVICE_DESCRIPTOR_READ, 0},
+        {ZCL_SERVICE_DESCRIPTOR_BUILD_OUTPUT, ZCL_SERVICE_ROLE_BUILDD,
+         ZCL_SERVICE_DESCRIPTOR_WRITE, 0},
+        {ZCL_SERVICE_DESCRIPTOR_PRIVATE_CAS, ZCL_SERVICE_ROLE_APPD,
+         ZCL_SERVICE_DESCRIPTOR_READ | ZCL_SERVICE_DESCRIPTOR_WRITE, 0},
+        {ZCL_SERVICE_DESCRIPTOR_CONTROL, 0,
+         ZCL_SERVICE_DESCRIPTOR_READ | ZCL_SERVICE_DESCRIPTOR_WRITE, 1},
+        {ZCL_SERVICE_DESCRIPTOR_LOG, 0, ZCL_SERVICE_DESCRIPTOR_WRITE, 1},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        if (rows[i].class != descriptor_class)
+            continue;
+        if (!rows[i].any_role && rows[i].role != role)
+            return false;
+        return rights == rows[i].rights;
+    }
+    return false;
+}
+
+static bool descriptor_allowed(uint32_t role, uint32_t descriptor_class,
+                               uint32_t rights)
+{
+    if (!descriptor_rights_ok(descriptor_class, rights))
         return false;
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_CONSENSUS_STATE)
-        return role == ZCL_SERVICE_ROLE_CORE &&
-               rights == (ZCL_SERVICE_DESCRIPTOR_READ |
-                          ZCL_SERVICE_DESCRIPTOR_WRITE);
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_PUBLIC_LISTENER)
-        return role == ZCL_SERVICE_ROLE_EDGE &&
-               rights == ZCL_SERVICE_DESCRIPTOR_ACCEPT;
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_CHAIN_LISTENER)
-        return role == ZCL_SERVICE_ROLE_CORE &&
-               rights == ZCL_SERVICE_DESCRIPTOR_ACCEPT;
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_WALLET_SECRETS)
-        return role == ZCL_SERVICE_ROLE_WALLET &&
-               rights == (ZCL_SERVICE_DESCRIPTOR_READ |
-                          ZCL_SERVICE_DESCRIPTOR_WRITE);
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_APP_STATE)
-        return role == ZCL_SERVICE_ROLE_APPD &&
-               rights == (ZCL_SERVICE_DESCRIPTOR_READ |
-                          ZCL_SERVICE_DESCRIPTOR_WRITE);
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_BUILD_INPUT)
-        return role == ZCL_SERVICE_ROLE_BUILDD &&
-               rights == ZCL_SERVICE_DESCRIPTOR_READ;
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_BUILD_OUTPUT)
-        return role == ZCL_SERVICE_ROLE_BUILDD &&
-               rights == ZCL_SERVICE_DESCRIPTOR_WRITE;
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_PRIVATE_CAS)
-        return role == ZCL_SERVICE_ROLE_APPD &&
-               rights == (ZCL_SERVICE_DESCRIPTOR_READ |
-                          ZCL_SERVICE_DESCRIPTOR_WRITE);
-    if (descriptor_class == ZCL_SERVICE_DESCRIPTOR_CONTROL)
-        return rights == (ZCL_SERVICE_DESCRIPTOR_READ |
-                          ZCL_SERVICE_DESCRIPTOR_WRITE);
-    return descriptor_class == ZCL_SERVICE_DESCRIPTOR_LOG &&
-           rights == ZCL_SERVICE_DESCRIPTOR_WRITE;
+    return descriptor_row(role, descriptor_class, rights);
 }
 
 static bool strictly_sorted_u32(const uint32_t *values, uint32_t count)
@@ -134,14 +146,9 @@ static bool descriptors_sorted(
     return true;
 }
 
-enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
+static enum zcl_service_manifest_result manifest_identity(
     const struct zcl_service_manifest_v1 *manifest)
 {
-    if (!manifest)
-        return ZCL_SERVICE_MANIFEST_NULL;
-    if (manifest->struct_size != sizeof(*manifest) ||
-        manifest->schema_version != ZCL_SERVICE_MANIFEST_V1)
-        return ZCL_SERVICE_MANIFEST_SCHEMA;
     if (manifest->service_id == 0 ||
         !canonical_name(manifest->name, sizeof(manifest->name), false))
         return ZCL_SERVICE_MANIFEST_IDENTITY;
@@ -150,6 +157,12 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
     if (manifest->enforcement != ZCL_SERVICE_ENFORCEMENT_SHADOW &&
         manifest->enforcement != ZCL_SERVICE_ENFORCEMENT_ACTIVE)
         return ZCL_SERVICE_MANIFEST_ENFORCEMENT;
+    return ZCL_SERVICE_MANIFEST_OK;
+}
+
+static enum zcl_service_manifest_result manifest_deps(
+    const struct zcl_service_manifest_v1 *manifest)
+{
     if (manifest->dependency_count > ZCL_SERVICE_DEPENDENCY_MAX ||
         !strictly_sorted_u32(manifest->dependencies,
                              manifest->dependency_count))
@@ -160,7 +173,12 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
     for (uint32_t i = 0; i < manifest->dependency_count; i++)
         if (manifest->dependencies[i] == manifest->service_id)
             return ZCL_SERVICE_MANIFEST_DEPENDENCY;
+    return ZCL_SERVICE_MANIFEST_OK;
+}
 
+static enum zcl_service_manifest_result manifest_readiness(
+    const struct zcl_service_manifest_v1 *manifest)
+{
     const struct zcl_service_readiness_witness_v1 *ready =
         &manifest->readiness;
     if (ready->kind < ZCL_SERVICE_READINESS_SELF_TEST ||
@@ -175,9 +193,14 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
     if (ready->kind == ZCL_SERVICE_READINESS_SERVICE_READY &&
         ready->source_service_id == manifest->service_id)
         return ZCL_SERVICE_MANIFEST_READINESS;
+    return ZCL_SERVICE_MANIFEST_OK;
+}
+
+static enum zcl_service_manifest_result manifest_ipc_desc(
+    const struct zcl_service_manifest_v1 *manifest)
+{
     if (manifest->ipc_grant_count > ZCL_SERVICE_IPC_GRANT_MAX ||
-        !ipc_grants_sorted(manifest->ipc_grants,
-                           manifest->ipc_grant_count))
+        !ipc_grants_sorted(manifest->ipc_grants, manifest->ipc_grant_count))
         return ZCL_SERVICE_MANIFEST_IPC_GRANT;
     for (uint32_t i = 0; i < manifest->ipc_grant_count; i++)
         if (manifest->ipc_grants[i].peer_service_id == manifest->service_id)
@@ -185,7 +208,12 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
     if (manifest->descriptor_count > ZCL_SERVICE_DESCRIPTOR_MAX ||
         !descriptors_sorted(manifest))
         return ZCL_SERVICE_MANIFEST_DESCRIPTOR;
+    return ZCL_SERVICE_MANIFEST_OK;
+}
 
+static enum zcl_service_manifest_result manifest_resources(
+    const struct zcl_service_manifest_v1 *manifest)
+{
     const struct zcl_service_resource_budget_v1 *resource =
         &manifest->resources;
     if (resource->cpu_quota_us == 0 || resource->cpu_period_us == 0 ||
@@ -194,7 +222,12 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
         resource->open_file_limit == 0 ||
         resource->open_file_limit > (1u << 20))
         return ZCL_SERVICE_MANIFEST_RESOURCE_BUDGET;
+    return ZCL_SERVICE_MANIFEST_OK;
+}
 
+static enum zcl_service_manifest_result manifest_restart(
+    const struct zcl_service_manifest_v1 *manifest)
+{
     const struct zcl_service_restart_budget_v1 *restart = &manifest->restart;
     if (restart->policy > ZCL_SERVICE_RESTART_PERMANENT)
         return ZCL_SERVICE_MANIFEST_RESTART_BUDGET;
@@ -205,7 +238,12 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
                restart->window_ms == 0 || restart->window_ms > 86400000u) {
         return ZCL_SERVICE_MANIFEST_RESTART_BUDGET;
     }
+    return ZCL_SERVICE_MANIFEST_OK;
+}
 
+static enum zcl_service_manifest_result manifest_tail(
+    const struct zcl_service_manifest_v1 *manifest)
+{
     if (!canonical_name(manifest->state_schema,
                         sizeof(manifest->state_schema), true))
         return ZCL_SERVICE_MANIFEST_STATE_SCHEMA;
@@ -215,10 +253,40 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
         return ZCL_SERVICE_MANIFEST_GENERATION;
     if (manifest->health_deadline_ms == 0 ||
         manifest->health_deadline_ms > 86400000u ||
-        ready->max_age_ms > manifest->health_deadline_ms ||
+        manifest->readiness.max_age_ms > manifest->health_deadline_ms ||
         manifest->durable_progress_schema_id == 0)
         return ZCL_SERVICE_MANIFEST_HEALTH;
     return ZCL_SERVICE_MANIFEST_OK;
+}
+
+enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
+    const struct zcl_service_manifest_v1 *manifest)
+{
+    enum zcl_service_manifest_result result;
+    if (!manifest)
+        return ZCL_SERVICE_MANIFEST_NULL;
+    if (manifest->struct_size != sizeof(*manifest) ||
+        manifest->schema_version != ZCL_SERVICE_MANIFEST_V1)
+        return ZCL_SERVICE_MANIFEST_SCHEMA;
+    result = manifest_identity(manifest);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
+    result = manifest_deps(manifest);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
+    result = manifest_readiness(manifest);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
+    result = manifest_ipc_desc(manifest);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
+    result = manifest_resources(manifest);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
+    result = manifest_restart(manifest);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
+    return manifest_tail(manifest);
 }
 
 static size_t find_service(const struct zcl_service_manifest_v1 *manifests,
@@ -256,6 +324,74 @@ static bool visit_service(const struct zcl_service_manifest_v1 *manifests,
     return true;
 }
 
+static enum zcl_service_manifest_result catalog_fail(
+    size_t *bad_index, size_t i, enum zcl_service_manifest_result result)
+{
+    if (bad_index)
+        *bad_index = i;
+    return result;
+}
+
+static enum zcl_service_manifest_result catalog_order(
+    const struct zcl_service_manifest_v1 *manifests, size_t count,
+    size_t *bad_index)
+{
+    for (size_t i = 0; i < count; i++) {
+        enum zcl_service_manifest_result result =
+            zcl_service_manifest_validate_v1(&manifests[i]);
+        if (result != ZCL_SERVICE_MANIFEST_OK)
+            return catalog_fail(bad_index, i, result);
+        if (i > 0 && manifests[i - 1].service_id >= manifests[i].service_id)
+            return catalog_fail(bad_index, i,
+                                ZCL_SERVICE_MANIFEST_CATALOG_ORDER);
+        for (size_t j = 0; j < i; j++) {
+            if (strcmp(manifests[j].name, manifests[i].name) == 0)
+                return catalog_fail(bad_index, i,
+                                    ZCL_SERVICE_MANIFEST_CATALOG_ORDER);
+        }
+    }
+    return ZCL_SERVICE_MANIFEST_OK;
+}
+
+static bool catalog_ready_dep(const struct zcl_service_manifest_v1 *manifest)
+{
+    if (manifest->readiness.kind != ZCL_SERVICE_READINESS_SERVICE_READY)
+        return true;
+    for (uint32_t j = 0; j < manifest->dependency_count; j++)
+        if (manifest->dependencies[j] == manifest->readiness.source_service_id)
+            return true;
+    return false;
+}
+
+static enum zcl_service_manifest_result catalog_refs(
+    const struct zcl_service_manifest_v1 *manifests, size_t count,
+    size_t *bad_index)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (find_service(manifests, count,
+                         manifests[i].readiness.source_service_id) == SIZE_MAX)
+            return catalog_fail(bad_index, i,
+                                ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE);
+        if (!catalog_ready_dep(&manifests[i]))
+            return catalog_fail(bad_index, i,
+                                ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE);
+        for (uint32_t j = 0; j < manifests[i].dependency_count; j++) {
+            if (find_service(manifests, count,
+                             manifests[i].dependencies[j]) == SIZE_MAX)
+                return catalog_fail(bad_index, i,
+                                    ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE);
+        }
+        for (uint32_t j = 0; j < manifests[i].ipc_grant_count; j++) {
+            if (find_service(manifests, count,
+                             manifests[i].ipc_grants[j].peer_service_id) ==
+                SIZE_MAX)
+                return catalog_fail(bad_index, i,
+                                    ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE);
+        }
+    }
+    return ZCL_SERVICE_MANIFEST_OK;
+}
+
 enum zcl_service_manifest_result zcl_service_manifest_catalog_validate_v1(
     const struct zcl_service_manifest_v1 *manifests,
     size_t count,
@@ -265,73 +401,18 @@ enum zcl_service_manifest_result zcl_service_manifest_catalog_validate_v1(
         *bad_index = SIZE_MAX;
     if (!manifests || count == 0 || count > ZCL_SERVICE_CATALOG_MAX)
         return ZCL_SERVICE_MANIFEST_NULL;
-    for (size_t i = 0; i < count; i++) {
-        enum zcl_service_manifest_result result =
-            zcl_service_manifest_validate_v1(&manifests[i]);
-        if (result != ZCL_SERVICE_MANIFEST_OK) {
-            if (bad_index)
-                *bad_index = i;
-            return result;
-        }
-        if (i > 0 && manifests[i - 1].service_id >= manifests[i].service_id) {
-            if (bad_index)
-                *bad_index = i;
-            return ZCL_SERVICE_MANIFEST_CATALOG_ORDER;
-        }
-        for (size_t j = 0; j < i; j++) {
-            if (strcmp(manifests[j].name, manifests[i].name) == 0) {
-                if (bad_index)
-                    *bad_index = i;
-                return ZCL_SERVICE_MANIFEST_CATALOG_ORDER;
-            }
-        }
-    }
-    for (size_t i = 0; i < count; i++) {
-        if (find_service(manifests, count,
-                         manifests[i].readiness.source_service_id) ==
-            SIZE_MAX) {
-            if (bad_index)
-                *bad_index = i;
-            return ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE;
-        }
-        if (manifests[i].readiness.kind ==
-            ZCL_SERVICE_READINESS_SERVICE_READY) {
-            bool direct_dependency = false;
-            for (uint32_t j = 0; j < manifests[i].dependency_count; j++)
-                if (manifests[i].dependencies[j] ==
-                    manifests[i].readiness.source_service_id)
-                    direct_dependency = true;
-            if (!direct_dependency) {
-                if (bad_index)
-                    *bad_index = i;
-                return ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE;
-            }
-        }
-        for (uint32_t j = 0; j < manifests[i].dependency_count; j++) {
-            if (find_service(manifests, count,
-                             manifests[i].dependencies[j]) == SIZE_MAX) {
-                if (bad_index)
-                    *bad_index = i;
-                return ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE;
-            }
-        }
-        for (uint32_t j = 0; j < manifests[i].ipc_grant_count; j++) {
-            if (find_service(manifests, count,
-                             manifests[i].ipc_grants[j].peer_service_id) ==
-                SIZE_MAX) {
-                if (bad_index)
-                    *bad_index = i;
-                return ZCL_SERVICE_MANIFEST_CATALOG_REFERENCE;
-            }
-        }
-    }
+    enum zcl_service_manifest_result result =
+        catalog_order(manifests, count, bad_index);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
+    result = catalog_refs(manifests, count, bad_index);
+    if (result != ZCL_SERVICE_MANIFEST_OK)
+        return result;
     uint8_t marks[ZCL_SERVICE_CATALOG_MAX] = {0};
     for (size_t i = 0; i < count; i++) {
-        if (!visit_service(manifests, count, i, marks)) {
-            if (bad_index)
-                *bad_index = i;
-            return ZCL_SERVICE_MANIFEST_CATALOG_CYCLE;
-        }
+        if (!visit_service(manifests, count, i, marks))
+            return catalog_fail(bad_index, i,
+                                ZCL_SERVICE_MANIFEST_CATALOG_CYCLE);
     }
     return ZCL_SERVICE_MANIFEST_OK;
 }

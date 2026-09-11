@@ -217,6 +217,25 @@ static bool search_push_next(struct json_value *root,
     return ok;
 }
 
+static bool search_emit(struct json_value *root, struct json_value *matches,
+                        const char *normalized, const char *digest,
+                        const struct search_hit *hits, size_t hit_count,
+                        size_t total)
+{
+    bool ok = json_push_kv_str(root, "schema", "zcl.command_search.v1") &&
+              json_push_kv_str(root, "query", normalized) &&
+              json_push_kv_str(root, "registry_digest", digest);
+    for (size_t i = 0; ok && i < hit_count; i++)
+        ok = search_push_match(matches, &hits[i]);
+    ok = ok && json_push_kv(root, "matches", matches) &&
+         json_push_kv_int(root, "count", (int64_t)hit_count) &&
+         json_push_kv_int(root, "total_matches", (int64_t)total) &&
+         json_push_kv_bool(root, "truncated", total > hit_count);
+    if (hit_count > 0)
+        ok = ok && search_push_next(root, &hits[0]);
+    return ok;
+}
+
 size_t zcl_command_registry_search_json(
     const struct zcl_command_registry *registry, const char *query, char *out,
     size_t out_size)
@@ -235,17 +254,8 @@ size_t zcl_command_registry_search_json(
     json_init(&matches);
     json_set_object(&root);
     json_set_array(&matches);
-    bool ok = json_push_kv_str(&root, "schema", "zcl.command_search.v1") &&
-              json_push_kv_str(&root, "query", normalized) &&
-              json_push_kv_str(&root, "registry_digest", digest);
-    for (size_t i = 0; ok && i < hit_count; i++)
-        ok = search_push_match(&matches, &hits[i]);
-    ok = ok && json_push_kv(&root, "matches", &matches) &&
-         json_push_kv_int(&root, "count", (int64_t)hit_count) &&
-         json_push_kv_int(&root, "total_matches", (int64_t)total) &&
-         json_push_kv_bool(&root, "truncated", total > hit_count);
-    if (hit_count > 0)
-        ok = ok && search_push_next(&root, &hits[0]);
+    bool ok = search_emit(&root, &matches, normalized, digest, hits, hit_count,
+                          total);
     size_t result =
         ok ? command_registry_write_bounded_json(&root, out, out_size,
                                                  ZCL_COMMAND_LIST_BUDGET)
