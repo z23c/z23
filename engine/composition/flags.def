@@ -369,7 +369,7 @@ Z23_FLAG("ZCL_COMMAND_INPUT_KEYS_RESOLVED_FLOOR", "env_build", "100", "-",
 Z23_FLAG("ZCL_COMMAND_INPUT_KEYS_VERBOSE", "env_build", "0", "-",
           "undocumented; first use tools/lint/check_command_input_keys.sh:106")
 Z23_FLAG("ZCL_COMMONS_DEMO_RECORD", "env_build", "0", "-",
-          "first use tools/dev/commons_journey_acceptance.sh:2872; documented at docs/DEVELOPING.md:682: writes — ZCL_COMMONS_DEMO_RECORD=1 make commons-demo refreshes")
+          "first use tools/dev/commons_journey_acceptance.sh:2879; documented at docs/DEVELOPING.md:682: writes — ZCL_COMMONS_DEMO_RECORD=1 make commons-demo refreshes")
 Z23_FLAG("ZCL_COMMONS_MULTIHOST", "env_build", "0", "-",
           "undocumented; first use tools/dev/commons_journey_acceptance.sh:84")
 Z23_FLAG("ZCL_CONDITION_COOLDOWN_SCAN_DIR", "env_build", "engine/conditions/src", "-",

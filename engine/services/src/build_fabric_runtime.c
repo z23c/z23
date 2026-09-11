@@ -15,6 +15,7 @@
 #include "platform/time_compat.h"
 #include "crypto/random_secret.h"
 #include "supervisors/domains.h"
+#include "support/log_throttle.h"
 #include "util/log_macros.h"
 #include "util/supervisor.h"
 #include "util/thread_qos.h"
@@ -55,6 +56,11 @@ static char g_worker_workspace[4096];
 static char g_worker_datadir[4096];
 static pthread_t g_worker_thread;
 static _Atomic bool g_worker_started;
+/* An admission refusal is a silent 250ms spin: without this the worker can
+ * decline every action for a whole run and leave no trace but a QUEUED row.
+ * Keyed by refusal so a changed reason prints at once and a stuck one
+ * re-prints on keepalive with the count it suppressed. */
+static struct log_throttle g_worker_admission_throttle = LOG_THROTTLE_INIT;
 
 extern volatile sig_atomic_t g_shutdown_requested;
 
@@ -175,6 +181,20 @@ static void bf_worker_tick(struct liveness_contract *contract)
     supervisor_tick(id);
 }
 
+static void bf_worker_log_admission(enum subordinate_work_refusal admission)
+{
+    uint64_t suppressed = 0;
+    if (!log_throttle_should_emit(&g_worker_admission_throttle,
+                                  (uint64_t)admission,
+                                  platform_time_wall_unix(), 60, &suppressed))
+        return;
+    LOG_WARN("build_fabric",
+             "build worker declines every action: admission=%s "
+             "(%llu suppressed repeats)",
+             subordinate_work_refusal_token(admission),
+             (unsigned long long)suppressed);
+}
+
 static void *bf_worker_loop(void *arg)
 {
     (void)arg;
@@ -208,6 +228,7 @@ static void *bf_worker_loop(void *arg)
         atomic_store(&g_worker_admission_reason, admission);
         if (admission != SUBORDINATE_WORK_ADMIT) {
             atomic_fetch_add(&g_worker_resource_deferrals, 1);
+            bf_worker_log_admission(admission);
             supervisor_progress_idle(id);
             supervisor_tick(id);
             platform_sleep_ms(250);

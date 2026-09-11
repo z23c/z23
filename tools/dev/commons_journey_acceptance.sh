@@ -1411,6 +1411,13 @@ cj_overlay() {
     dht_spawn DHT_PGID_B "$DHT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" \
         "$B_HTTPS" "127.0.0.1:$DEAD_SINK"
     cj_wait_rpc_or_die "$DHT_DD_B" "$B_RPC" "$DHT_PGID_B" "node B (build worker)"
+    # B's build worker only admits work AT_TIP, and the sync FSM only leaves
+    # finding_peers behind a peer it can sync FROM (outbound). Check it here:
+    # otherwise a B that cannot sync declines every action in silence and the
+    # journey reports it 300s later as a work-state timeout.
+    dht_wait_sync_live "$DHT_DD_B" "$B_RPC" ||
+        cj_die "node B sync never left finding_peers; its build" \
+               "worker will decline every action"
     DHT_BUILDWORKERS=0
     dht_spawn DHT_PGID_A "$DHT_DD_A" "$A_PORT" "$A_RPC" "$A_FS" \
         "$A_HTTPS" "127.0.0.1:$DEAD_SINK"

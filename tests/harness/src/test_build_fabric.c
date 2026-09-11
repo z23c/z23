@@ -1834,6 +1834,16 @@ static int test_bf_runtime_dump(void)
         ASSERT_EQ(json_get_int(json_get(&state, "max_actions_per_job")), 256);
         ASSERT_EQ(json_get_int(json_get(&state, "worker_cpu_limit")), 1);
         ASSERT(!json_get_bool(json_get(&state, "worker_network_allowed")));
+        /* A worker that declines every action must say why here: this field
+         * is the only standing surface for a refusal the loop handles
+         * silently. */
+        const char *admission = json_get_str(json_get(&state,
+                                                      "worker_admission"));
+        ASSERT(admission && admission[0]);
+        ASSERT(strcmp(admission, "invalid_facts") != 0);
+        ASSERT_STR_EQ(admission,
+                      subordinate_work_refusal_token(
+                          SUBORDINATE_WORK_NOT_OBSERVED));
         const struct json_value *health = json_get(&state, "_health");
         ASSERT(health && health->type == JSON_OBJ);
         json_free(&state);
