@@ -1194,7 +1194,7 @@ static int test_source_epoch_authority_types(void)
  *   - -mint-anchor's app_init exits before app_init_services (the offline
  *     driver never starts P2P/frontend services).
  *   - main.c's -mint-anchor branch calls the OFFLINE shutdown (never the
- *     full app_shutdown) before its `minted ? 0 : 1` return.
+ *     full app_shutdown) before it sets its `minted ? 0 : 1` exit code.
  *   - app_shutdown_offline's offline-worker-drain deadline stays armed
  *     UNCONDITIONALLY (boot_offline_arm_worker_drain_stage, boot_services_
  *     shutdown.c) -- a genuinely wedged worker must still be bounded, never
@@ -1207,8 +1207,8 @@ static int test_source_epoch_authority_types(void)
  *   - the offline shutdown flushes + closes the wallet sqlite handle before
  *     freeing the in-memory wallet. */
 /* main.c's -mint-anchor branch: app_init exits before services start, and
- * calls the OFFLINE shutdown (never the full app_shutdown) before its
- * `minted ? 0 : 1` return. */
+ * calls the OFFLINE shutdown (never the full app_shutdown) before it sets
+ * its `minted ? 0 : 1` exit code. */
 static int msc_check_mint_anchor_shutdown_ordering(const char *boot_src,
                                                    const char *main_src)
 {
@@ -1228,14 +1228,21 @@ static int msc_check_mint_anchor_shutdown_ordering(const char *boot_src,
     MSC_CHECK("mint-anchor app_init exits before app_init_services",
               offline_marker && services_start && offline_marker < services_start);
 
+    /* Follow the branch, not the function that used to hold it. The
+     * complexity-15 split of main() moved the -mint-anchor one-shot out of
+     * main() into main_app_init_and_one_shots(), where the context is a
+     * pointer (`ctx->mint_anchor`) and the exit code leaves through an
+     * out-param instead of a direct return. Same branch, same ordering;
+     * pinning the old spelling made the window NULL, which fails the
+     * assertion instead of reporting that the contract broke. */
     const char *mint_branch = main_src
-        ? strstr(main_src, "if (ctx.mint_anchor) {")
+        ? strstr(main_src, "if (ctx->mint_anchor) {")
         : NULL;
     const char *offline_shutdown = mint_branch
         ? strstr(mint_branch, "app_shutdown_offline(minted);")
         : NULL;
     const char *mint_return = mint_branch
-        ? strstr(mint_branch, "return minted ? 0 : 1;")
+        ? strstr(mint_branch, "*rc = minted ? 0 : 1;")
         : NULL;
     const char *full_shutdown = mint_branch
         ? strstr(mint_branch, "app_shutdown();")
