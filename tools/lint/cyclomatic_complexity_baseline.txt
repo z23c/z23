@@ -1354,7 +1354,6 @@ core/modules/net/src/https_server_install.c:public_install_filepath_under_root:1
 core/modules/net/src/https_server_redirect.c:acme_challenge_filepath_under_root:16
 core/modules/net/src/https_server_redirect.c:https_server_handle_http_client_fd:22
 core/modules/net/src/msg_blocks.c:process_block_msg:65
-core/modules/net/src/msg_blocks.c:process_getblocks:7
 core/modules/net/src/msg_blocks.c:process_getdata:22
 core/modules/net/src/msg_blocks.c:self_suspicion_record:17
 core/modules/net/src/msg_compact.c:compact_submit_block:18
@@ -1525,7 +1524,6 @@ docs/examples/07_cluster_reorg.c:main:19
 docs/examples/09_seed_replay.c:main:27
 docs/examples/10_wire_adversaries.c:main:26
 docs/examples/11_collectible_market.c:main:36
-engine/composition/src/args.c:args_parse_node_options:125
 engine/composition/src/boot.c:boot_step_init_crypto_and_state:17
 engine/composition/src/boot.c:sandbox_build_fs_rules:18
 engine/composition/src/boot_anchor_snapshot_reachability.c:anchor_snapshot_verified_reachable_ex:19
@@ -1899,8 +1897,6 @@ engine/controllers/src/snapshot_controller_import.c:import_block_index_thread:55
 engine/controllers/src/snapshot_controller_txindex.c:build_tx_index_thread:58
 engine/controllers/src/snapshot_controller_txindex.c:snapshot_tx_index_build_from_block_files:18
 engine/controllers/src/sovereignty_controller.c:sovereignty_dump_state_json:37
-engine/controllers/src/status_brief_native_handler.c:status_brief_compose_body:18
-engine/controllers/src/status_brief_native_handler.c:zcl_native_status_brief_body:103
 engine/controllers/src/status_journey_native_handler.c:zcl_native_status_journey_body:132
 engine/controllers/src/status_native_handlers.c:zcl_native_postmortem_list_body:16
 engine/controllers/src/status_native_handlers.c:zcl_native_status_body_full:52
@@ -1932,7 +1928,6 @@ engine/controllers/src/transaction_type_catalog.c:zcl_transaction_wire_catalog_j
 engine/controllers/src/zid_intent_controller.c:rpc_zid_intent:25
 engine/controllers/src/zid_intent_controller.c:ziic_build_script:17
 engine/controllers/src/zid_intent_controller.c:ziic_prepare:26
-engine/entry/main.c:main:101
 engine/entry/main_cli_modes.c:bench_crypto_verify:22
 engine/entry/main_cli_modes.c:bench_crypto_vs_rust:55
 engine/entry/main_cli_modes.c:bench_find_live_pid:22
@@ -2074,9 +2069,6 @@ engine/modules/engine/src/engine_patch.c:engine_patch_path_ok:31
 engine/modules/engine/src/engine_patch.c:strip_markdown_fence:17
 engine/modules/engine/src/engine_prompt.c:engine_prompt_audit_text:17
 engine/modules/engine/src/engine_prompt.c:engine_prompt_kind_from_header:21
-engine/modules/engine/src/engine_receipt.c:build_line:99
-engine/modules/engine/src/engine_receipt.c:engine_receipt_append:25
-engine/modules/engine/src/engine_receipt.c:engine_receipt_verify_chain:31
 engine/modules/engine/src/engine_rule_mine.c:zcl_rule_mine_candidate:39
 engine/modules/engine/src/engine_rule_mine.c:zcl_rule_mine_pairs:18
 engine/modules/engine/src/engine_rule_score.c:receipt_from_json:40
@@ -2364,7 +2356,6 @@ engine/services/src/binary_staleness_service.c:binary_staleness_check_now:26
 engine/services/src/block_index_blocks_hydrate.c:load_block_index_from_blocks_table:64
 engine/services/src/block_index_flat_anchor.c:block_index_flat_anchor_apply:22
 engine/services/src/block_index_flat_anchor.c:block_index_flat_anchor_encode:19
-engine/services/src/block_index_flat_header.c:block_index_flat_header_at:7
 engine/services/src/block_index_integrity.c:bii_repair_post_activation_anchor:22
 engine/services/src/block_index_integrity.c:block_index_repair_heights_range:43
 engine/services/src/block_index_integrity.c:block_index_repair_pprev:45
@@ -3415,7 +3406,6 @@ tests/harness/src/test_rom_dump.c:test_rom_dump:31
 tests/harness/src/test_rom_fetch.c:rf_lat_conn_thread:19
 tests/harness/src/test_rom_fetch_onion.c:test_rom_fetch_onion:49
 tests/harness/src/test_rpc_error_envelope.c:test_rpc_error_envelope:121
-tests/harness/src/test_rpc_frontdoor_slots.c:test_rpc_frontdoor_slots:11
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:392
 tests/harness/src/test_rpc_service_restart.c:test_rpc_service_restart:34
 tests/harness/src/test_running_image_positioned.c:running_image_positioned_probe:16
@@ -3809,17 +3799,6 @@ tests/harness/src/test_zcode_swarm_net.c:zwn_t_package_lifecycle:27
 tests/harness/src/test_zcode_swarm_net.c:zwn_t_redundant_publish_disappear:30
 tests/harness/src/test_zcode_swarm_net.c:zwn_t_sovereign_source_build:29
 tests/harness/src/test_zcode_swarm_net.c:zwn_test_golden:42
-tests/harness/src/test_zcode_verify.c:t_attest_import:2
-tests/harness/src/test_zcode_verify.c:t_attest_offer:8
-tests/harness/src/test_zcode_verify.c:t_attest_publish_gate:7
-tests/harness/src/test_zcode_verify.c:t_attest_pull:4
-tests/harness/src/test_zcode_verify.c:t_codec:3
-tests/harness/src/test_zcode_verify.c:t_command:2
-tests/harness/src/test_zcode_verify.c:t_quorum:6
-tests/harness/src/test_zcode_verify.c:t_reproduce:3
-tests/harness/src/test_zcode_verify.c:t_verifier_e2e:4
-tests/harness/src/test_zcode_verify.c:t_verifier_programs:5
-tests/harness/src/test_zcode_verify.c:zv_publish_fixture_ex:4
 tests/harness/src/test_zdesc.c:zd_case_publish_fetch:26
 tests/harness/src/test_zdir.c:zdir_codec_rejections:30
 tests/harness/src/test_zdir.c:zdir_codec_roundtrip:28

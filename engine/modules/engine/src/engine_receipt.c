@@ -63,6 +63,24 @@ static const char *or_empty(const char *s)
     return s ? s : "";
 }
 
+/* A string field the record must actually carry: non-NULL and non-empty. */
+static bool str_present(const char *s)
+{
+    return s && s[0];
+}
+
+static bool receipt_effort_ok(const char *effort)
+{
+    return str_present(effort) && engine_reasoning_effort_valid(effort);
+}
+
+/* The only invocation-list shape that is refused is a non-empty list with a
+ * NULL pointer, so anything else is accepted here. */
+static bool receipt_invocations_ok(const struct engine_receipt *r)
+{
+    return r->invocations_count == 0 || r->invocations != NULL;
+}
+
 static bool push_nullable_string(struct json_value *doc, const char *key,
                                  const char *value)
 {
@@ -302,6 +320,230 @@ static void unit_id_of(const char *task_sha3, const char *engine, int64_t ts,
     out[64] = '\0';
 }
 
+/* Running totals over the invocation array. A `known` flag goes false the
+ * moment a value is negative or the sum would overflow, and that field is
+ * then written as ENGINE_RECEIPT_UNREPORTED instead of a wrong number. */
+struct build_line_totals {
+    int64_t prompt;
+    int64_t completion;
+    int64_t cache_read;
+    int64_t cache_creation;
+    int64_t reasoning;
+    int64_t reported;
+    int64_t invocation_elapsed;
+    bool    known[6];
+    bool    invocation_elapsed_known;
+};
+
+/* `known ? value : ENGINE_RECEIPT_UNREPORTED`, spelled once. Both arms are
+ * plain reads, so evaluating them eagerly cannot change what is written. */
+static int64_t token_or_unreported(bool known, int64_t value)
+{
+    return known ? value : ENGINE_RECEIPT_UNREPORTED;
+}
+
+static bool build_rules_array(const struct engine_receipt *r,
+                              struct json_value *rules)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < r->rules_count; i++) {
+        struct json_value s;
+        json_init(&s);
+        json_set_str(&s, or_empty(r->rules_shown ? r->rules_shown[i] : NULL));
+        ok = json_push_back(rules, &s);
+        json_free(&s);
+    }
+    return ok;
+}
+
+static bool build_outcome_object(const struct engine_receipt *r,
+                                 struct json_value *outcome)
+{
+    return json_push_kv_bool(outcome, "applied", r->outcome.applied)
+        && json_push_kv_int(outcome, "groups_ran", r->outcome.groups_ran)
+        && json_push_kv_int(outcome, "groups_failed",
+                            r->outcome.groups_failed)
+        && json_push_kv_bool(outcome, "gate_pass", r->outcome.gate_pass)
+        && json_push_kv_int(outcome, "retries", r->outcome.retries)
+        && json_push_kv_int(outcome, "lines_changed",
+                            r->outcome.lines_changed)
+        && json_push_kv_int(outcome, "lint_rc", r->outcome.lint_rc);
+}
+
+static bool build_invocation_fields(const struct engine_receipt_invocation *in,
+                                    struct json_value *item)
+{
+    return json_push_kv_int(item, "ordinal", in->ordinal)
+        && json_push_kv_str(item, "phase", or_empty(in->phase))
+        && json_push_kv_str(item, "result", or_empty(in->result))
+        && json_push_kv_int(item, "elapsed_ms", in->elapsed_ms)
+        && json_push_kv_int(item, "http_status", in->http_status)
+        && push_nullable_string(item, "resolved_model", in->resolved_model)
+        && json_push_kv_int(item, "prompt_tokens", in->prompt_tokens)
+        && json_push_kv_int(item, "completion_tokens", in->completion_tokens)
+        && json_push_kv_int(item, "cache_read_input_tokens",
+                            in->cache_read_input_tokens)
+        && json_push_kv_int(item, "cache_creation_input_tokens",
+                            in->cache_creation_input_tokens)
+        && json_push_kv_int(item, "reasoning_tokens", in->reasoning_tokens)
+        && json_push_kv_int(item, "total_tokens", in->total_tokens);
+}
+
+static bool build_invocation_item(const struct engine_receipt_invocation *in,
+                                  struct json_value *invocations)
+{
+    struct json_value item;
+    json_init(&item);
+    json_set_object(&item);
+    const bool ok = build_invocation_fields(in, &item)
+        && json_push_back(invocations, &item);
+    json_free(&item);
+    return ok;
+}
+
+/* The caller has already initialised *t (all fields known, sums zero), the
+ * way the totals used to be initialised right before this loop. */
+static bool build_invocations_and_totals(const struct engine_receipt *r,
+                                         struct json_value *invocations,
+                                         struct build_line_totals *t)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < r->invocations_count; i++) {
+        const struct engine_receipt_invocation *in = &r->invocations[i];
+        ok = build_invocation_item(in, invocations);
+
+#define ADD_TOTAL(index, field, total) do {                                \
+    const int64_t value = in->field;                                       \
+    if (value < 0 || total > INT64_MAX - value)                            \
+        t->known[index] = false;                                           \
+    else if (t->known[index])                                              \
+        total += value;                                                     \
+} while (0)
+        ADD_TOTAL(0, prompt_tokens, t->prompt);
+        ADD_TOTAL(1, completion_tokens, t->completion);
+        ADD_TOTAL(2, cache_read_input_tokens, t->cache_read);
+        ADD_TOTAL(3, cache_creation_input_tokens, t->cache_creation);
+        ADD_TOTAL(4, reasoning_tokens, t->reasoning);
+        ADD_TOTAL(5, total_tokens, t->reported);
+#undef ADD_TOTAL
+        if (in->elapsed_ms < 0 ||
+            t->invocation_elapsed > INT64_MAX - in->elapsed_ms)
+            t->invocation_elapsed_known = false;
+        else if (t->invocation_elapsed_known)
+            t->invocation_elapsed += in->elapsed_ms;
+    }
+    if (r->invocations_count == 0 || r->invocation_totals_ambiguous) {
+        for (size_t i = 0; i < 6; i++)
+            t->known[i] = false;
+    }
+    if (r->invocations_count == 0)
+        t->invocation_elapsed_known = false;
+    return ok;
+}
+
+static bool build_doc_identity_fields(struct json_value *doc,
+                                      const struct engine_receipt *r,
+                                      const char *prev_sha3,
+                                      const char *unit_id,
+                                      struct json_value *rules)
+{
+    return json_push_kv_str(doc, "schema", ENGINE_RECEIPT_SCHEMA)
+        && json_push_kv_str(doc, "prev_sha3", prev_sha3)
+        && json_push_kv_str(doc, "unit_id", unit_id)
+        && json_push_kv_int(doc, "ts", r->ts)
+        && json_push_kv_str(doc, "engine", or_empty(r->engine))
+        /* Retain the v1 reader's grouping key while making requested and
+         * provider-reported identities independently observable. */
+        && json_push_kv_str(doc, "model", or_empty(r->requested_model))
+        && json_push_kv_str(doc, "requested_model",
+                            or_empty(r->requested_model))
+        && push_nullable_string(doc, "resolved_model", r->resolved_model)
+        && json_push_kv_str(doc, "reasoning_effort",
+                            or_empty(r->reasoning_effort))
+        && json_push_kv_str(doc, "kind", or_empty(r->kind))
+        && json_push_kv_str(doc, "template_sha3", or_empty(r->template_sha3))
+        && json_push_kv(doc, "rules_shown", rules);
+}
+
+static bool build_doc_scope_and_token_fields(struct json_value *doc,
+                                             const struct engine_receipt *r)
+{
+    const bool known = !r->invocation_totals_ambiguous;
+    return json_push_kv_str(doc, "task_sha3", or_empty(r->task_sha3))
+        && json_push_kv_str(doc, "group", or_empty(r->group))
+        && json_push_kv_str(doc, "accounting_scope", "terminal_dispatch")
+        && json_push_kv_str(doc, "usage_scope",
+                            known ? "terminal_dispatch"
+                                  : "non_additive_observation")
+        && json_push_kv_int(doc, "prompt_tokens",
+                            token_or_unreported(known, r->prompt_tokens))
+        && json_push_kv_int(doc, "completion_tokens",
+                            token_or_unreported(known, r->completion_tokens))
+        && json_push_kv_int(doc, "cache_read_input_tokens",
+                            token_or_unreported(known,
+                                                r->cache_read_input_tokens))
+        && json_push_kv_int(doc, "cache_creation_input_tokens",
+                            token_or_unreported(
+                                known, r->cache_creation_input_tokens))
+        && json_push_kv_int(doc, "reasoning_tokens",
+                            token_or_unreported(known, r->reasoning_tokens))
+        && json_push_kv_int(doc, "total_tokens",
+                            token_or_unreported(known, r->total_tokens));
+}
+
+static bool build_doc_totals(struct json_value *doc,
+                             const struct engine_receipt *r,
+                             struct json_value *invocations,
+                             const struct build_line_totals *t)
+{
+    return json_push_kv_int(doc, "turns", r->turns)
+        && json_push_kv(doc, "invocations", invocations)
+        && json_push_kv_int(doc, "total_prompt_tokens",
+                            token_or_unreported(t->known[0], t->prompt))
+        && json_push_kv_int(doc, "total_completion_tokens",
+                            token_or_unreported(t->known[1], t->completion))
+        && json_push_kv_int(doc, "total_cache_read_input_tokens",
+                            token_or_unreported(t->known[2], t->cache_read))
+        && json_push_kv_int(doc, "total_cache_creation_input_tokens",
+                            token_or_unreported(t->known[3],
+                                                t->cache_creation))
+        && json_push_kv_int(doc, "total_reasoning_tokens",
+                            token_or_unreported(t->known[4], t->reasoning))
+        && json_push_kv_int(doc, "total_reported_tokens",
+                            token_or_unreported(t->known[5], t->reported))
+        && json_push_kv_int(doc, "total_invocation_elapsed_ms",
+                            token_or_unreported(t->invocation_elapsed_known,
+                                                t->invocation_elapsed));
+}
+
+static bool build_doc_timing_and_outcome(struct json_value *doc,
+                                         const struct engine_receipt *r,
+                                         struct json_value *outcome)
+{
+    return json_push_kv_int(doc, "cumulative_proof_ms",
+                            r->cumulative_proof_ms)
+        && json_push_kv_int(doc, "unit_elapsed_ms", r->unit_elapsed_ms)
+        && json_push_kv_int(doc, "dispatch_ms", r->dispatch_ms)
+        && json_push_kv_int(doc, "proof_ms", r->proof_ms)
+        && json_push_kv_int(doc, "wall_ms", r->wall_ms)
+        && json_push_kv_int(doc, "http_status", r->http_status)
+        && json_push_kv(doc, "outcome", outcome)
+        && json_push_kv_str(doc, "worktree_head", or_empty(r->worktree_head));
+}
+
+static bool build_doc(struct json_value *doc, const struct engine_receipt *r,
+                      const char *prev_sha3, const char *unit_id,
+                      struct json_value *rules,
+                      struct json_value *invocations,
+                      struct json_value *outcome,
+                      const struct build_line_totals *t)
+{
+    return build_doc_identity_fields(doc, r, prev_sha3, unit_id, rules)
+        && build_doc_scope_and_token_fields(doc, r)
+        && build_doc_totals(doc, r, invocations, t)
+        && build_doc_timing_and_outcome(doc, r, outcome);
+}
+
 static bool build_line(const struct engine_receipt *r, const char *prev_sha3,
                        char *out, size_t cap, size_t *out_len)
 {
@@ -311,163 +553,28 @@ static bool build_line(const struct engine_receipt *r, const char *prev_sha3,
     struct json_value rules;
     json_init(&rules);
     json_set_array(&rules);
-    bool ok = true;
-    for (size_t i = 0; ok && i < r->rules_count; i++) {
-        struct json_value s;
-        json_init(&s);
-        json_set_str(&s, or_empty(r->rules_shown ? r->rules_shown[i] : NULL));
-        ok = json_push_back(&rules, &s);
-        json_free(&s);
-    }
-
     struct json_value outcome;
     json_init(&outcome);
     json_set_object(&outcome);
-    ok = ok
-        && json_push_kv_bool(&outcome, "applied", r->outcome.applied)
-        && json_push_kv_int(&outcome, "groups_ran", r->outcome.groups_ran)
-        && json_push_kv_int(&outcome, "groups_failed", r->outcome.groups_failed)
-        && json_push_kv_bool(&outcome, "gate_pass", r->outcome.gate_pass)
-        && json_push_kv_int(&outcome, "retries", r->outcome.retries)
-        && json_push_kv_int(&outcome, "lines_changed", r->outcome.lines_changed)
-        && json_push_kv_int(&outcome, "lint_rc", r->outcome.lint_rc);
-
     struct json_value invocations;
     json_init(&invocations);
     json_set_array(&invocations);
-    int64_t total_prompt = 0;
-    int64_t total_completion = 0;
-    int64_t total_cache_read = 0;
-    int64_t total_cache_creation = 0;
-    int64_t total_reasoning = 0;
-    int64_t total_reported = 0;
-    int64_t total_invocation_elapsed = 0;
-    bool invocation_elapsed_known = true;
-    bool totals_known[6] = { true, true, true, true, true, true };
-    for (size_t i = 0; ok && i < r->invocations_count; i++) {
-        const struct engine_receipt_invocation *in = &r->invocations[i];
-        struct json_value item;
-        json_init(&item);
-        json_set_object(&item);
-        ok = json_push_kv_int(&item, "ordinal", in->ordinal)
-            && json_push_kv_str(&item, "phase", or_empty(in->phase))
-            && json_push_kv_str(&item, "result", or_empty(in->result))
-            && json_push_kv_int(&item, "elapsed_ms", in->elapsed_ms)
-            && json_push_kv_int(&item, "http_status", in->http_status)
-            && push_nullable_string(&item, "resolved_model",
-                                    in->resolved_model)
-            && json_push_kv_int(&item, "prompt_tokens", in->prompt_tokens)
-            && json_push_kv_int(&item, "completion_tokens",
-                                in->completion_tokens)
-            && json_push_kv_int(&item, "cache_read_input_tokens",
-                                in->cache_read_input_tokens)
-            && json_push_kv_int(&item, "cache_creation_input_tokens",
-                                in->cache_creation_input_tokens)
-            && json_push_kv_int(&item, "reasoning_tokens",
-                                in->reasoning_tokens)
-            && json_push_kv_int(&item, "total_tokens", in->total_tokens)
-            && json_push_back(&invocations, &item);
-        json_free(&item);
-
-#define ADD_TOTAL(index, field, total) do {                                \
-    const int64_t value = in->field;                                       \
-    if (value < 0 || total > INT64_MAX - value)                            \
-        totals_known[index] = false;                                       \
-    else if (totals_known[index])                                          \
-        total += value;                                                     \
-} while (0)
-        ADD_TOTAL(0, prompt_tokens, total_prompt);
-        ADD_TOTAL(1, completion_tokens, total_completion);
-        ADD_TOTAL(2, cache_read_input_tokens, total_cache_read);
-        ADD_TOTAL(3, cache_creation_input_tokens, total_cache_creation);
-        ADD_TOTAL(4, reasoning_tokens, total_reasoning);
-        ADD_TOTAL(5, total_tokens, total_reported);
-#undef ADD_TOTAL
-        if (in->elapsed_ms < 0 ||
-            total_invocation_elapsed > INT64_MAX - in->elapsed_ms)
-            invocation_elapsed_known = false;
-        else if (invocation_elapsed_known)
-            total_invocation_elapsed += in->elapsed_ms;
-    }
-    if (r->invocations_count == 0 || r->invocation_totals_ambiguous) {
-        for (size_t i = 0; i < 6; i++)
-            totals_known[i] = false;
-    }
-    if (r->invocations_count == 0)
-        invocation_elapsed_known = false;
-
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
-    ok = ok
-        && json_push_kv_str(&doc, "schema", ENGINE_RECEIPT_SCHEMA)
-        && json_push_kv_str(&doc, "prev_sha3", prev_sha3)
-        && json_push_kv_str(&doc, "unit_id", unit_id)
-        && json_push_kv_int(&doc, "ts", r->ts)
-        && json_push_kv_str(&doc, "engine", or_empty(r->engine))
-        /* Retain the v1 reader's grouping key while making requested and
-         * provider-reported identities independently observable. */
-        && json_push_kv_str(&doc, "model", or_empty(r->requested_model))
-        && json_push_kv_str(&doc, "requested_model",
-                            or_empty(r->requested_model))
-        && push_nullable_string(&doc, "resolved_model", r->resolved_model)
-        && json_push_kv_str(&doc, "reasoning_effort",
-                            or_empty(r->reasoning_effort))
-        && json_push_kv_str(&doc, "kind", or_empty(r->kind))
-        && json_push_kv_str(&doc, "template_sha3", or_empty(r->template_sha3))
-        && json_push_kv(&doc, "rules_shown", &rules)
-        && json_push_kv_str(&doc, "task_sha3", or_empty(r->task_sha3))
-        && json_push_kv_str(&doc, "group", or_empty(r->group))
-        && json_push_kv_str(&doc, "accounting_scope", "terminal_dispatch")
-        && json_push_kv_str(&doc, "usage_scope", r->invocation_totals_ambiguous
-                            ? "non_additive_observation" : "terminal_dispatch")
-        && json_push_kv_int(&doc, "prompt_tokens", r->invocation_totals_ambiguous
-                            ? ENGINE_RECEIPT_UNREPORTED : r->prompt_tokens)
-        && json_push_kv_int(&doc, "completion_tokens", r->invocation_totals_ambiguous
-                            ? ENGINE_RECEIPT_UNREPORTED : r->completion_tokens)
-        && json_push_kv_int(&doc, "cache_read_input_tokens",
-                            r->invocation_totals_ambiguous ? ENGINE_RECEIPT_UNREPORTED
-                                                          : r->cache_read_input_tokens)
-        && json_push_kv_int(&doc, "cache_creation_input_tokens",
-                            r->invocation_totals_ambiguous ? ENGINE_RECEIPT_UNREPORTED
-                                                          : r->cache_creation_input_tokens)
-        && json_push_kv_int(&doc, "reasoning_tokens", r->invocation_totals_ambiguous
-                            ? ENGINE_RECEIPT_UNREPORTED : r->reasoning_tokens)
-        && json_push_kv_int(&doc, "total_tokens", r->invocation_totals_ambiguous
-                            ? ENGINE_RECEIPT_UNREPORTED : r->total_tokens)
-        && json_push_kv_int(&doc, "turns", r->turns)
-        && json_push_kv(&doc, "invocations", &invocations)
-        && json_push_kv_int(&doc, "total_prompt_tokens",
-                            totals_known[0] ? total_prompt
-                                            : ENGINE_RECEIPT_UNREPORTED)
-        && json_push_kv_int(&doc, "total_completion_tokens",
-                            totals_known[1] ? total_completion
-                                            : ENGINE_RECEIPT_UNREPORTED)
-        && json_push_kv_int(&doc, "total_cache_read_input_tokens",
-                            totals_known[2] ? total_cache_read
-                                            : ENGINE_RECEIPT_UNREPORTED)
-        && json_push_kv_int(&doc, "total_cache_creation_input_tokens",
-                            totals_known[3] ? total_cache_creation
-                                            : ENGINE_RECEIPT_UNREPORTED)
-        && json_push_kv_int(&doc, "total_reasoning_tokens",
-                            totals_known[4] ? total_reasoning
-                                            : ENGINE_RECEIPT_UNREPORTED)
-        && json_push_kv_int(&doc, "total_reported_tokens",
-                            totals_known[5] ? total_reported
-                                            : ENGINE_RECEIPT_UNREPORTED)
-        && json_push_kv_int(&doc, "total_invocation_elapsed_ms",
-                            invocation_elapsed_known
-                                ? total_invocation_elapsed
-                                : ENGINE_RECEIPT_UNREPORTED)
-        && json_push_kv_int(&doc, "cumulative_proof_ms",
-                            r->cumulative_proof_ms)
-        && json_push_kv_int(&doc, "unit_elapsed_ms", r->unit_elapsed_ms)
-        && json_push_kv_int(&doc, "dispatch_ms", r->dispatch_ms)
-        && json_push_kv_int(&doc, "proof_ms", r->proof_ms)
-        && json_push_kv_int(&doc, "wall_ms", r->wall_ms)
-        && json_push_kv_int(&doc, "http_status", r->http_status)
-        && json_push_kv(&doc, "outcome", &outcome)
-        && json_push_kv_str(&doc, "worktree_head", or_empty(r->worktree_head));
+    struct build_line_totals totals = {
+        .known = { true, true, true, true, true, true },
+        .invocation_elapsed_known = true,
+    };
+
+    /* One left-to-right && chain, which is what the single `ok` used to do
+     * as it threaded through these phases: a phase that fails skips every
+     * phase after it, including the invocations loop. */
+    const bool ok = build_rules_array(r, &rules)
+        && build_outcome_object(r, &outcome)
+        && build_invocations_and_totals(r, &invocations, &totals)
+        && build_doc(&doc, r, prev_sha3, unit_id, &rules, &invocations,
+                     &outcome, &totals);
     json_free(&rules);
     json_free(&outcome);
     json_free(&invocations);
@@ -502,45 +609,14 @@ bool engine_receipt_fits(const struct engine_receipt *r)
     return build_line(r, zero, line, ENGINE_RECEIPT_LINE_MAX, &len);
 }
 
-bool engine_receipt_append(const char *path, const struct engine_receipt *r,
-                           char *out_line_sha3)
+/* Everything engine_receipt_append does once it holds the exclusive lock on
+ * `fd`: read the tail, hash it, build the line, write it, pin the head. It
+ * owns the close of the locked fd on every path, exactly as the inline code
+ * it replaces did. */
+static bool receipt_append_locked(int fd, const char *path,
+                                  const struct engine_receipt *r,
+                                  char *out_line_sha3)
 {
-    if (out_line_sha3)
-        out_line_sha3[0] = '\0';
-    if (!path || !path[0] || !r)
-        LOG_FAIL("engine_receipt", "refusing an append with no path or record");
-    if (!r->engine || !r->engine[0])
-        LOG_FAIL("engine_receipt",
-                 "refusing a receipt with no engine id: a cost nobody can "
-                 "attribute is not a measurement");
-    if (!r->requested_model || !r->requested_model[0])
-        LOG_FAIL("engine_receipt", "refusing a receipt with no requested model");
-    if (r->rules_count > ENGINE_RECEIPT_RULES_MAX)
-        LOG_FAIL("engine_receipt",
-                 "refusing %zu rule ids: over the cap of %u", r->rules_count,
-                 (unsigned)ENGINE_RECEIPT_RULES_MAX);
-    if (r->invocations_count > ENGINE_RECEIPT_INVOCATIONS_MAX)
-        LOG_FAIL("engine_receipt",
-                 "refusing %zu invocations: over the complete-record cap of %u",
-                 r->invocations_count,
-                 (unsigned)ENGINE_RECEIPT_INVOCATIONS_MAX);
-    if (r->invocations_count > 0 && !r->invocations)
-        LOG_FAIL("engine_receipt", "refusing a non-empty NULL invocation list");
-    if (!r->reasoning_effort || !r->reasoning_effort[0] ||
-        !engine_reasoning_effort_valid(r->reasoning_effort))
-        LOG_FAIL("engine_receipt", "refusing an invalid reasoning effort");
-
-    /* O_RDWR because this same fd must read the tail; O_APPEND so the one
-     * write(2) cannot overwrite earlier records even if the lock is lost.
-     * The lock then makes the tail-read and that write one critical section. */
-    const int fd = receipt_open(path, O_RDWR | O_CREAT | O_APPEND, 0644);
-    if (fd < 0)
-        LOG_FAIL("engine_receipt", "cannot open %s for append", path);
-    if (ledger_lock(fd, true) != 0) {
-        (void)close(fd);
-        LOG_FAIL("engine_receipt", "cannot lock %s for append", path);
-    }
-
     char last[ENGINE_RECEIPT_LINE_MAX + 2u];
     const int have = read_last_line_fd(fd, path, last,
                                        ENGINE_RECEIPT_LINE_MAX + 1u);
@@ -586,6 +662,146 @@ bool engine_receipt_append(const char *path, const struct engine_receipt *r,
     return true;
 }
 
+bool engine_receipt_append(const char *path, const struct engine_receipt *r,
+                           char *out_line_sha3)
+{
+    if (out_line_sha3)
+        out_line_sha3[0] = '\0';
+    if (!str_present(path) || !r)
+        LOG_FAIL("engine_receipt", "refusing an append with no path or record");
+    if (!str_present(r->engine))
+        LOG_FAIL("engine_receipt",
+                 "refusing a receipt with no engine id: a cost nobody can "
+                 "attribute is not a measurement");
+    if (!str_present(r->requested_model))
+        LOG_FAIL("engine_receipt", "refusing a receipt with no requested model");
+    if (r->rules_count > ENGINE_RECEIPT_RULES_MAX)
+        LOG_FAIL("engine_receipt",
+                 "refusing %zu rule ids: over the cap of %u", r->rules_count,
+                 (unsigned)ENGINE_RECEIPT_RULES_MAX);
+    if (r->invocations_count > ENGINE_RECEIPT_INVOCATIONS_MAX)
+        LOG_FAIL("engine_receipt",
+                 "refusing %zu invocations: over the complete-record cap of %u",
+                 r->invocations_count,
+                 (unsigned)ENGINE_RECEIPT_INVOCATIONS_MAX);
+    if (!receipt_invocations_ok(r))
+        LOG_FAIL("engine_receipt", "refusing a non-empty NULL invocation list");
+    if (!receipt_effort_ok(r->reasoning_effort))
+        LOG_FAIL("engine_receipt", "refusing an invalid reasoning effort");
+
+    /* O_RDWR because this same fd must read the tail; O_APPEND so the one
+     * write(2) cannot overwrite earlier records even if the lock is lost.
+     * The lock then makes the tail-read and that write one critical section. */
+    const int fd = receipt_open(path, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (fd < 0)
+        LOG_FAIL("engine_receipt", "cannot open %s for append", path);
+    if (ledger_lock(fd, true) != 0) {
+        (void)close(fd);
+        LOG_FAIL("engine_receipt", "cannot lock %s for append", path);
+    }
+
+    return receipt_append_locked(fd, path, r, out_line_sha3);
+}
+
+/* No chainlog. A leftover head pin means the records were deleted. */
+static bool verify_orphan_head_pin(const char *path,
+                                   struct engine_receipt_chain_report *report)
+{
+    char pinned[65];
+    const int have_pin = read_head_pin(path, pinned);
+    if (have_pin != 0) {
+        report->first_bad_line = 1;
+        (void)snprintf(report->why, sizeof(report->why),
+                       have_pin < 0
+                           ? "the head pin for a missing chainlog is unreadable"
+                           : "the chainlog is gone but its head pin remains");
+        return false;
+    }
+    return true;              /* no file is an empty chain, not a broken one */
+}
+
+/* One chainlog line: newline-terminated, a JSON object, and carrying the
+ * prev_sha3 the previous line hashed to. Returns false with the report's
+ * first_bad_line/why filled the first time a line does not hold, and
+ * otherwise advances `expect` and the record count. */
+static bool verify_chain_line(char *line, uint64_t lineno, char *expect,
+                              struct engine_receipt_chain_report *report)
+{
+    size_t n = strlen(line);
+    if (n == 0 || line[n - 1] != '\n') {
+        report->first_bad_line = lineno;
+        (void)snprintf(report->why, sizeof(report->why),
+                       "line %llu has no newline: an append did not finish",
+                       (unsigned long long)lineno);
+        return false;
+    }
+    line[--n] = '\0';
+
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, line, n) || doc.type != JSON_OBJ) {
+        json_free(&doc);
+        report->first_bad_line = lineno;
+        (void)snprintf(report->why, sizeof(report->why),
+                       "line %llu is not a JSON object",
+                       (unsigned long long)lineno);
+        return false;
+    }
+    const struct json_value *pv = json_get(&doc, "prev_sha3");
+    const char *ps = (pv && pv->type == JSON_STR) ? json_get_str(pv) : NULL;
+    const bool linked = ps && strcmp(ps, expect) == 0;
+    json_free(&doc);
+    if (!linked) {
+        report->first_bad_line = lineno;
+        (void)snprintf(report->why, sizeof(report->why),
+                       "line %llu carries the wrong prev_sha3: an earlier "
+                       "line was edited, removed, or reordered",
+                       (unsigned long long)lineno);
+        return false;
+    }
+    sha3_hex(line, n, expect);
+    (void)snprintf(report->head_sha3, sizeof(report->head_sha3), "%s", expect);
+    report->records++;
+    return true;
+}
+
+/* The pinned head must agree with the last line actually read. Runs only
+ * after every line verified, exactly where the inline block used to. */
+static bool verify_pinned_head(const char *path,
+                               struct engine_receipt_chain_report *report)
+{
+    bool ok = true;
+    char pinned[65];
+    const int have_pin = read_head_pin(path, pinned);
+    if (have_pin < 0) {
+        report->first_bad_line = report->records ? report->records : 1;
+        (void)snprintf(report->why, sizeof(report->why),
+                       "the head pin for %s is unreadable", path);
+        ok = false;
+    } else if (report->records == 0) {
+        if (have_pin == 1) {
+            report->first_bad_line = 1;
+            (void)snprintf(report->why, sizeof(report->why),
+                           "an empty chain still has a head pin: the "
+                           "records were removed");
+            ok = false;
+        }
+    } else if (have_pin == 0) {
+        report->first_bad_line = report->records;
+        (void)snprintf(report->why, sizeof(report->why),
+                       "the chain has no pinned head, so a rewritten last "
+                       "line would not be visible");
+        ok = false;
+    } else if (strcmp(pinned, report->head_sha3) != 0) {
+        report->first_bad_line = report->records;
+        (void)snprintf(report->why, sizeof(report->why),
+                       "the last line does not match the pinned head: "
+                       "the tail was rewritten");
+        ok = false;
+    }
+    return ok;
+}
+
 bool engine_receipt_verify_chain(const char *path,
                                  struct engine_receipt_chain_report *report)
 {
@@ -594,25 +810,14 @@ bool engine_receipt_verify_chain(const char *path,
     memset(report, 0, sizeof(*report));
     memset(report->head_sha3, '0', 64);
     report->head_sha3[64] = '\0';
-    if (!path || !path[0])
+    if (!str_present(path))
         LOG_FAIL("engine_receipt", "verify needs a path");
 
     const int fd = receipt_open(path, O_RDONLY, 0);
     if (fd < 0) {
         if (errno != ENOENT)
             LOG_FAIL("engine_receipt", "cannot open %s to verify", path);
-        /* No chainlog. A leftover head pin means the records were deleted. */
-        char pinned[65];
-        const int have_pin = read_head_pin(path, pinned);
-        if (have_pin != 0) {
-            report->first_bad_line = 1;
-            (void)snprintf(report->why, sizeof(report->why),
-                           have_pin < 0
-                               ? "the head pin for a missing chainlog is unreadable"
-                               : "the chainlog is gone but its head pin remains");
-            return false;
-        }
-        return true;          /* no file is an empty chain, not a broken one */
+        return verify_orphan_head_pin(path, report);
     }
     if (ledger_lock(fd, false) != 0) {
         (void)close(fd);
@@ -633,45 +838,7 @@ bool engine_receipt_verify_chain(const char *path,
     bool ok = true;
     while (ok && fgets(line, (int)sizeof(line), f)) {
         lineno++;
-        size_t n = strlen(line);
-        if (n == 0 || line[n - 1] != '\n') {
-            report->first_bad_line = lineno;
-            (void)snprintf(report->why, sizeof(report->why),
-                           "line %llu has no newline: an append did not finish",
-                           (unsigned long long)lineno);
-            ok = false;
-            break;
-        }
-        line[--n] = '\0';
-
-        struct json_value doc;
-        json_init(&doc);
-        if (!json_read(&doc, line, n) || doc.type != JSON_OBJ) {
-            json_free(&doc);
-            report->first_bad_line = lineno;
-            (void)snprintf(report->why, sizeof(report->why),
-                           "line %llu is not a JSON object",
-                           (unsigned long long)lineno);
-            ok = false;
-            break;
-        }
-        const struct json_value *pv = json_get(&doc, "prev_sha3");
-        const char *ps = (pv && pv->type == JSON_STR) ? json_get_str(pv) : NULL;
-        const bool linked = ps && strcmp(ps, expect) == 0;
-        json_free(&doc);
-        if (!linked) {
-            report->first_bad_line = lineno;
-            (void)snprintf(report->why, sizeof(report->why),
-                           "line %llu carries the wrong prev_sha3: an earlier "
-                           "line was edited, removed, or reordered",
-                           (unsigned long long)lineno);
-            ok = false;
-            break;
-        }
-        sha3_hex(line, n, expect);
-        (void)snprintf(report->head_sha3, sizeof(report->head_sha3), "%s",
-                       expect);
-        report->records++;
+        ok = verify_chain_line(line, lineno, expect, report);
     }
     if (ok && ferror(f)) {
         report->first_bad_line = lineno + 1u;
@@ -681,36 +848,8 @@ bool engine_receipt_verify_chain(const char *path,
         ok = false;
     }
 
-    if (ok) {
-        char pinned[65];
-        const int have_pin = read_head_pin(path, pinned);
-        if (have_pin < 0) {
-            report->first_bad_line = report->records ? report->records : 1;
-            (void)snprintf(report->why, sizeof(report->why),
-                           "the head pin for %s is unreadable", path);
-            ok = false;
-        } else if (report->records == 0) {
-            if (have_pin == 1) {
-                report->first_bad_line = 1;
-                (void)snprintf(report->why, sizeof(report->why),
-                               "an empty chain still has a head pin: the "
-                               "records were removed");
-                ok = false;
-            }
-        } else if (have_pin == 0) {
-            report->first_bad_line = report->records;
-            (void)snprintf(report->why, sizeof(report->why),
-                           "the chain has no pinned head, so a rewritten last "
-                           "line would not be visible");
-            ok = false;
-        } else if (strcmp(pinned, report->head_sha3) != 0) {
-            report->first_bad_line = report->records;
-            (void)snprintf(report->why, sizeof(report->why),
-                           "the last line does not match the pinned head: "
-                           "the tail was rewritten");
-            ok = false;
-        }
-    }
+    if (ok)
+        ok = verify_pinned_head(path, report);
 
     if (ledger_unlock(fd) != 0)
         LOG_WARN("engine_receipt", "cannot unlock %s after verify: %s", path,
