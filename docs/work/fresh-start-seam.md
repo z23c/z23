@@ -58,6 +58,9 @@ naming/ownership) and [`../CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DO
 > serve the tail at ~420/s while also doing live-node work; the dedicated
 > fixture can. Sealed-core serving changes are therefore optional
 > hardening, owner-gated — not a C3 blocker.
+>
+> **[WITHDRAWN]** — see the withdrawal notice above (line 17): none of this
+> resolution block is evidence for anything.
 
 There are **two independent seams**, not one. Fixing either alone does not
 produce a working fresh machine.
