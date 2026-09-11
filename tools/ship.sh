@@ -1792,13 +1792,21 @@ cleanup_backups() {
     rm -f "$rollback_dropin" "$dropin_absent"
 }
 
-restore_prior() {
+# The file half of the restore. Split out so the pre-restart drop-in guard
+# below can undo the ONE mutation it made by exactly the same code the
+# rollback path uses, without restarting a process that was never touched.
+restore_dropin_file() {
     if [ -f "$rollback_dropin" ]; then
         install -m 644 "$rollback_dropin" "$dropin" || return 1
     elif [ -f "$dropin_absent" ]; then
         rm -f "$dropin" || return 1
     fi
     systemctl --user daemon-reload || return 1
+    return 0
+}
+
+restore_prior() {
+    restore_dropin_file || return 1
     # Do not wait for Type=notify startup here: ship_await below is the
     # progress-aware authority. A synchronous restart can block for tens of
     # minutes on a spinning-disk datadir before that observer even starts.
@@ -1924,6 +1932,27 @@ dropin_tmp="$(mktemp "${dropin}.tmp.XXXXXX")"
 install -m 644 "$dropin_tmp" "$dropin"
 rm -f "$dropin_tmp"; dropin_tmp=""
 systemctl --user daemon-reload
+
+# The drop-in above is INTENT. Ask systemd what the unit will actually run
+# before anything is restarted: a drop-in whose name sorts after ours resets
+# ExecStart= and wins, and the only downstream symptom is an observer
+# reporting sha != want for the whole window — which reads as a slow box, not
+# as a pinned one. Refuse here instead, naming the file that wins.
+guard_exec="$(ship_exec_path_from_show_text \
+    "$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null || true)")"
+guard_dropins="$(systemctl --user show zclassic23 -p DropInPaths --value 2>/dev/null || true)"
+if ! guard_text="$(ship_exec_guard_check "$release_root/z23" "$guard_exec" \
+        "$dropin" "$guard_dropins")"; then
+    printf 'remote: %s\n' "$guard_text" >&2
+    # Nothing has been restarted, so there is nothing to roll back: undo the
+    # one mutation this script made, by the rollback path's own code, and
+    # leave the running process exactly where it was.
+    rollback_armed=0
+    restore_dropin_file ||
+        echo "remote: CRITICAL — could not restore the prior drop-in" >&2
+    exit 1
+fi
+
 # Queue the restart and immediately enter the progress-aware observer below.
 # Waiting synchronously defeats the slow-box verdict because Type=notify does
 # not return until the whole cold datadir startup has completed.

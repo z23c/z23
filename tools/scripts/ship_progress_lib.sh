@@ -799,6 +799,86 @@ ship_deploy_local_verdict_rc() {
     printf '3\n'
 }
 
+# ── the effective-ExecStart guard ───────────────────────────────────────────
+# Writing a drop-in that says ExecStart="<new release>/z23" is INTENT. What
+# the unit will actually run is systemd's merge of the unit file and EVERY
+# drop-in, applied in file-NAME order across all drop-in directories, last
+# one wins. A file whose name sorts after the ship's own therefore silently
+# outranks it.
+#
+# That is not hypothetical. On 2026-09-11 a fleet box carried
+# zzzzzz-node-first.conf beside the ship's zzzzz-z23-ship-release.conf; it
+# reset ExecStart= and pinned an OLD release directory. Two consecutive ships
+# staged the new release, wrote their drop-in, restarted the unit — and the
+# unit came back on the old binary every time. The only signal was the
+# observer reporting sha != want for the whole window, which reads as "slow
+# box", the one verdict that must never destroy anything. The ship spent
+# 900s twice and then said "remote activation failed", which was not what
+# happened: activation worked, the unit was pinned elsewhere.
+#
+# So the intent is checked against the merge BEFORE the restart. The three
+# functions below are pure text in / text out so a fixture proves them with
+# no systemd; the caller does the two `systemctl show` reads.
+
+# ship_exec_path_from_show_text <show-text> — the executable path systemd
+# will run, out of `systemctl show <unit> -p ExecStart --value`. Each
+# surviving ExecStart= is printed as one "{ path=/x/y ; argv[]=… }" record; a
+# drop-in that resets ExecStart= leaves exactly one, and where several remain
+# the LAST is the one this ship's drop-in wanted to be. Prints nothing when
+# the unit names no executable at all.
+ship_exec_path_from_show_text() {
+    printf '%s\n' "$1" |
+        sed -n 's/^.*path=\([^ ;]*\).*$/\1/p' |
+        sed -n '$p'
+}
+
+# ship_dropins_after_from_text <ship-dropin-path> <dropin-paths-text>
+# Every drop-in in `systemctl show -p DropInPaths --value` whose FILE NAME
+# sorts after the ship's own file, one per line, in the order systemd applies
+# them. Name order, not directory order, is what systemd uses, so the
+# comparison is on the basename; the ship's own file is never "after" itself.
+ship_dropins_after_from_text() {
+    _ship_guard_self="${1##*/}"
+    for _ship_guard_p in $2; do
+        _ship_guard_b="${_ship_guard_p##*/}"
+        [ "$_ship_guard_b" != "$_ship_guard_self" ] || continue
+        [ "$(printf '%s\n%s\n' "$_ship_guard_self" "$_ship_guard_b" |
+            LC_ALL=C sort | sed -n '$p')" = "$_ship_guard_b" ] || continue
+        printf '%s\n' "$_ship_guard_p"
+    done
+}
+
+# ship_exec_guard_check <want-exec> <effective-exec> <ship-dropin> <dropin-paths>
+#
+# Returns 0, silently, when the unit will run exactly the executable this ship
+# just wrote. Otherwise prints the refusal on stdout and returns 1. It NEVER
+# deletes or renames another drop-in: naming the file that wins is the fix a
+# human can check, and a tool that quietly removed a pin somebody else put
+# there would be a worse incident than the one it prevents.
+ship_exec_guard_check() {
+    [ "$2" != "$1" ] || return 0
+    printf 'REFUSE: the unit will not run the release this ship installed.\n'
+    printf '  installed  %s\n' "$1"
+    printf '  wrote it into  %s\n' "$3"
+    if [ -n "$2" ]; then
+        printf '  effective ExecStart  %s\n' "$2"
+    else
+        printf '  effective ExecStart  (the unit names no executable)\n'
+    fi
+    _ship_guard_after="$(ship_dropins_after_from_text "$3" "$4")"
+    if [ -n "$_ship_guard_after" ]; then
+        printf '  these drop-ins sort AFTER %s and override it:\n' "${3##*/}"
+        printf '%s\n' "$_ship_guard_after" | sed 's/^/    /'
+    else
+        printf '  no drop-in sorts after %s, so the unit file itself (or a\n' "${3##*/}"
+        printf '  drop-in systemd did not list) selects that executable.\n'
+    fi
+    printf '  Nothing was restarted. Read the file(s) above and remove or rename\n'
+    printf '  the one that pins an old executable, then re-run the ship. This\n'
+    printf '  tool will not touch another drop-in for you.\n'
+    return 1
+}
+
 # ── the loop ────────────────────────────────────────────────────────────────
 # ship_await <label> <observer-command> <want_sha>
 #

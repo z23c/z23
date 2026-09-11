@@ -9835,6 +9835,18 @@ $(DEV_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_
 #     before the ExecStart resolution, because systemd applies drop-ins
 #     last-wins: an old ship selector would otherwise win ExecStart and the
 #     expected-source-id environment over 90-build-identity.conf.
+#   - Removing the two names this family owns is not the same as proving the
+#     merge. ANY file whose name sorts after 90-build-identity.conf can reset
+#     ExecStart= and win, and a fleet box carried exactly such a file on
+#     2026-09-11. So right after 90-build-identity.conf is written and
+#     daemon-reloaded, and BEFORE the candidate is installed or anything is
+#     restarted, the recipe reads the EFFECTIVE ExecStart back out of systemd
+#     and refuses unless it is still the executable this deploy resolved,
+#     naming every drop-in in DropInPaths that sorts after ours. The prior
+#     drop-in is restored exactly as the rollback path restores it, and no
+#     other drop-in is ever deleted or renamed automatically:
+#     ship_exec_guard_check(), tools/scripts/ship_progress_lib.sh, shared
+#     verbatim with tools/ship.sh's remote activation.
 #   - The rollback image is staged under $(BIN_DIR) (this deploy's own
 #     writable, executable scratch), never in dirname(SERVICE_BIN) — a
 #     release dir a fleet ship froze to 555 would break the arm mid-deploy.
@@ -10078,6 +10090,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# a cold 7200rpm boot).
 	@set -eu; \
 	. tools/scripts/source_identity_lib.sh; \
+	. tools/scripts/ship_progress_lib.sh; \
 	command -v timeout >/dev/null 2>&1 || { \
 	    echo "deploy: timeout is required for candidate preflight" >&2; exit 1; }; \
 	candidate="$$(mktemp "$(dir $(ZCLASSIC23_BIN)).zclassic23.deploy.XXXXXX")"; \
@@ -10249,6 +10262,22 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	install -m 644 "$$dropin_tmp" "$$dropin"; \
 	rm -f "$$dropin_tmp"; dropin_tmp=""; \
 	systemctl --user daemon-reload; \
+	guard_exec="$$(ship_exec_path_from_show_text \
+	    "$$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null || true)")"; \
+	guard_dropins="$$(systemctl --user show zclassic23 -p DropInPaths --value 2>/dev/null || true)"; \
+	if ! guard_text="$$(ship_exec_guard_check "$$service_path" "$$guard_exec" \
+	        "$$dropin" "$$guard_dropins")"; then \
+	    printf 'deploy: %s\n' "$$guard_text" >&2; \
+	    rollback_armed=0; one_way_armed=0; \
+	    if [ "$$rollback_dropin_present" -eq 1 ]; then \
+	        install -m 644 "$$rollback_dropin" "$$dropin"; \
+	    else \
+	        rm -f "$$dropin"; \
+	    fi; \
+	    systemctl --user daemon-reload || \
+	        echo "deploy: CRITICAL — could not restore the prior drop-in" >&2; \
+	    exit 1; \
+	fi; \
 	install -m 755 "$$candidate" "$$SERVICE_BIN"; \
 	installed_sha256="$$(sha256sum < "$$SERVICE_BIN" | awk '{print $$1}')"; \
 	[ "$$installed_sha256" = "$$artifact_sha256" ] || { \

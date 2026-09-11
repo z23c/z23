@@ -827,6 +827,99 @@ for tag in healthy down empty slow quiet frozen gone restarting failed stamped u
     judge_remote_await "$tag"
 done
 
+# ── 6b. the effective-ExecStart guard ───────────────────────────────────────
+# A drop-in says what the ship WANTS the unit to run. systemd merges the unit
+# file with every drop-in in file-NAME order, last one wins, so a file named
+# after the ship's own silently outranks it — which is what happened to a
+# fleet box on 2026-09-11 (zzzzzz-node-first.conf beside
+# zzzzz-z23-ship-release.conf, pinning an old release). The functions below
+# are pure text in / text out precisely so this proves them with no systemd.
+printf '\nship-selftest: 6b. the effective-ExecStart guard\n'
+
+SHIP_DROPIN=/h/systemd/user/zclassic23.service.d/zzzzz-z23-ship-release.conf
+SHADOW_DROPIN=/h/systemd/user/zclassic23.service.d/zzzzzz-node-first.conf
+EARLIER_DROPIN=/h/systemd/user/zclassic23.service.d/90-build-identity.conf
+
+check_exec_path() {
+    local want="$1" text="$2" got
+    got="$(ship_exec_path_from_show_text "$text")"
+    if [ "$got" = "$want" ]; then
+        pass "effective ExecStart path [$want]"
+    else
+        fail "effective ExecStart wanted [$want] got [$got] <- $text"
+    fi
+}
+# One surviving record: the ordinary case, and the one a reset leaves.
+check_exec_path /rel/new/z23 \
+    '{ path=/rel/new/z23 ; argv[]=/rel/new/z23 -datadir=/d ; ignore_errors=no }'
+# Two records survive when nothing reset ExecStart=; systemd runs them in
+# order, so the LAST is the one this ship's drop-in meant to be.
+check_exec_path /rel/new/z23 \
+    '{ path=/rel/old/z23 ; argv[]=/rel/old/z23 ; ignore_errors=no }
+{ path=/rel/new/z23 ; argv[]=/rel/new/z23 ; ignore_errors=no }'
+# No executable at all is not "match by accident".
+check_exec_path '' ''
+
+# Ordering is by file NAME across every drop-in directory.
+after="$(ship_dropins_after_from_text "$SHIP_DROPIN" \
+    "$EARLIER_DROPIN $SHIP_DROPIN $SHADOW_DROPIN")"
+if [ "$after" = "$SHADOW_DROPIN" ]; then
+    pass "only the later-sorting drop-in is named as a shadow"
+else
+    fail "shadow list wanted [$SHADOW_DROPIN] got [$after]"
+fi
+if [ -z "$(ship_dropins_after_from_text "$SHIP_DROPIN" "$EARLIER_DROPIN $SHIP_DROPIN")" ]; then
+    pass "a drop-in that sorts before the ship's own is not a shadow"
+else
+    fail "an earlier-sorting drop-in was reported as a shadow"
+fi
+
+# The guard itself: silent on agreement, refusing and NAMING on disagreement.
+if guard_ok="$(ship_exec_guard_check /rel/new/z23 /rel/new/z23 "$SHIP_DROPIN" \
+        "$EARLIER_DROPIN $SHIP_DROPIN")" && [ -z "$guard_ok" ]; then
+    pass "the guard passes silently when the unit will run the release just written"
+else
+    fail "the guard refused a unit that will run the release just written: $guard_ok"
+fi
+guard_out="$(ship_exec_guard_check /rel/new/z23 /rel/old/z23 "$SHIP_DROPIN" \
+    "$EARLIER_DROPIN $SHIP_DROPIN $SHADOW_DROPIN")" && guard_rc=0 || guard_rc=$?
+if [ "$guard_rc" -ne 0 ]; then
+    pass "a shadowed ExecStart is a refusal, not a slow box"
+else
+    fail "a shadowed ExecStart was accepted"
+fi
+for want in 'REFUSE: the unit will not run the release this ship installed' \
+            /rel/new/z23 /rel/old/z23 "$SHADOW_DROPIN" 'Nothing was restarted'; do
+    if str_contains "$guard_out" "$want"; then
+        pass "the refusal names $want"
+    else
+        fail "the refusal does not name $want: $guard_out"
+    fi
+done
+if str_contains "$guard_out" "$EARLIER_DROPIN"; then
+    fail "the refusal blames a drop-in that cannot override the ship's own"
+else
+    pass "the refusal blames only the drop-ins that sort after the ship's own"
+fi
+# Naming is the whole fix: a tool that deleted somebody else's pin would be a
+# worse incident than the one it prevents.
+if str_contains "$SHIP_LIB_TEXT" 'rm -f "$_ship_guard' ||
+   str_contains "$SHIP_LIB_TEXT" 'mv "$_ship_guard'; then
+    fail "the guard removes or renames another drop-in"
+else
+    pass "the guard never removes or renames another drop-in"
+fi
+
+# Both activation paths must actually ask. The remote leg is the heredoc in
+# ship.sh; the local leg is the Makefile deploy recipe.
+for site in "$ROOT/tools/ship.sh" "$ROOT/Makefile"; do
+    if grep -q 'ship_exec_guard_check' "$site"; then
+        pass "${site##*/} checks the effective ExecStart before restarting"
+    else
+        fail "${site##*/} restarts without checking the effective ExecStart"
+    fi
+done
+
 # ── 7. the shipped script text ──────────────────────────────────────────────
 # ship.sh's two remote scripts are extracted the same way
 # tools/lint/check_ship_remote_transaction.sh extracts them, and must still

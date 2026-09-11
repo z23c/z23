@@ -822,10 +822,15 @@ with `ZCL_SHIP_PROOF_SERVER`. That host is skipped by default; an intentional
 promotion additionally requires `ZCL_SHIP_ALLOW_PROOF_SERVER=1`. Preflight
 requires the complete x86-64-v3 CPU feature set. After the candidate is built,
 its maximum required GLIBC symbol version must be no newer than every target's
-installed glibc; target versions need not equal the build host. Each activation
-qualifies the running `/proc/<pid>/exe` bytes and status before the next host is
-touched. A failure restores that host's prior daemon, identity, and workers and
-stops the rollout.
+installed glibc; target versions need not equal the build host. Immediately
+after writing its release drop-in and reloading systemd — and BEFORE any
+restart — each activation reads the unit's effective `ExecStart` back out of
+systemd and refuses, naming every drop-in in `DropInPaths` that sorts after
+its own file, unless that effective executable is the release it just
+installed; it restores the prior drop-in and never deletes or renames anybody
+else's. Each activation then qualifies the running `/proc/<pid>/exe` bytes and
+status before the next host is touched. A failure restores that host's prior
+daemon, identity, and workers and stops the rollout.
 
 A candidate that changes persistent-schema code (`engine/models/src/database*`,
 `engine/models/include/models/database*`, `schema_migration.*`) is refused by

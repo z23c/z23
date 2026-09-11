@@ -65,11 +65,33 @@ show)
     # The observer asks for the unit's ActiveState/SubState/NRestarts as well
     # as its MainPID; this unit is plainly running throughout the transaction,
     # so the state query is answered as such and the pid query keeps reading
-    # the file the fixture controls.
+    # the file the fixture controls. The drop-in guard additionally asks for
+    # the EFFECTIVE ExecStart and the drop-in list, both answered by the same
+    # lexical merge the restart branch below models.
     for arg in "$@"; do
-        [ "$arg" = ActiveState ] || continue
-        printf 'ActiveState=active\nSubState=running\nNRestarts=0\n'
-        exit 0
+        case "$arg" in
+        ActiveState)
+            printf 'ActiveState=active\nSubState=running\nNRestarts=0\n'
+            exit 0 ;;
+        ExecStart)
+            selected_exec="$ZCL_SHIP_TEST_OLD"
+            for conf in "$HOME/.config/systemd/user/zclassic23.service.d/"*.conf; do
+                [ -f "$conf" ] || continue
+                pinned="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$conf" | tail -1)"
+                [ -z "$pinned" ] || selected_exec="$pinned"
+            done
+            printf '{ path=%s ; argv[]=%s -fixture-node ; ignore_errors=no }\n' \
+                "$selected_exec" "$selected_exec"
+            exit 0 ;;
+        DropInPaths)
+            paths=""
+            for conf in "$HOME/.config/systemd/user/zclassic23.service.d/"*.conf; do
+                [ -f "$conf" ] || continue
+                paths="${paths:+$paths }$conf"
+            done
+            printf '%s\n' "$paths"
+            exit 0 ;;
+        esac
     done
     cat "$ZCL_SHIP_TEST_PIDFILE"
     ;;
@@ -212,6 +234,35 @@ for fault in reload restart; do
     assert_old_selected
 done
 
+# A drop-in whose NAME sorts after the ship's own resets ExecStart= and wins
+# the merge, so the unit would come back on whatever that file pins. This is
+# the 2026-09-11 fleet incident: two ships in a row staged the new release,
+# wrote their drop-in, restarted — and the unit ran the OLD binary each time,
+# visible only as sha != want for the whole observer window. The activation
+# must now refuse BEFORE the restart, name the shadowing file, restore the
+# prior drop-in, and leave the running process untouched.
+shadow="$(dirname "$dropin")/zzzzzz-node-first.conf"
+reset_fixture
+printf '[Service]\nExecStart=\nExecStart="%s"\n' "$tmp/old" > "$shadow"
+before_pid="$(cat "$pidfile")"
+guard_out="$tmp/guard.out"
+if invoke_activate >"$guard_out" 2>&1; then
+    echo "check_ship_remote_transaction: shadowed ExecStart passed activation" >&2
+    exit 1
+fi
+grep -q 'REFUSE: the unit will not run the release this ship installed' "$guard_out" || {
+    echo "check_ship_remote_transaction: shadow refusal message is missing" >&2
+    sed -n '1,40p' "$guard_out" >&2; exit 1; }
+grep -q 'zzzzzz-node-first.conf' "$guard_out" || {
+    echo "check_ship_remote_transaction: refusal did not name the shadowing drop-in" >&2
+    exit 1; }
+# The ONE mutation is undone, and nothing was restarted: same pid, same bytes.
+assert_old_selected
+[ "$(cat "$pidfile")" = "$before_pid" ] || {
+    echo "check_ship_remote_transaction: shadow refusal restarted the service" >&2
+    exit 1; }
+rm -f "$shadow"
+
 # Ship's selector must beat the previously deployed zzzz selector.
 reset_fixture
 invoke_activate >/dev/null
@@ -251,4 +302,4 @@ tor_line="$(grep -n 'ship_candidate_has_real_tor "$CANDIDATE"' "$ROOT/tools/ship
 deploy_line="$(grep -n '^deploy_remote()' "$ROOT/tools/ship.sh" | cut -d: -f1)"
 [ "$tor_line" -lt "$deploy_line" ]
 
-echo "check_ship_remote_transaction: PASS (Tor gate precedes transfer; immutable mismatch, lock, partial stage, reload/restart, precedence, and rollback paths proved)"
+echo "check_ship_remote_transaction: PASS (Tor gate precedes transfer; immutable mismatch, lock, partial stage, reload/restart, precedence, shadowed-ExecStart refusal, and rollback paths proved)"
