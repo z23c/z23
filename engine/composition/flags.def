@@ -1575,7 +1575,7 @@ Z23_FLAG("ZCL_NO_UTXOS_MIRROR_READ_BASELINE", "env_build", "-", "-",
 Z23_FLAG("ZCL_NO_UTXOS_MIRROR_READ_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_utxos_mirror_read.c:230")
 Z23_FLAG("ZCL_NULLIFIER_BACKFILL", "env_runtime", "-", "-",
-          "undocumented; first use engine/entry/main.c:442")
+          "undocumented; first use engine/entry/main.c:498")
 Z23_FLAG("ZCL_OBS_SCAN_ALL", "env_runtime", "-", "-",
           "undocumented; first use tools/check_observability_pairing.c:198")
 Z23_FLAG("ZCL_OFFLINE_REPAIR", "env_runtime", "-", "-",
@@ -1583,7 +1583,7 @@ Z23_FLAG("ZCL_OFFLINE_REPAIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_OPERATOR_ACK_FILE", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:110")
 Z23_FLAG("ZCL_OPERATOR_LANE", "env_runtime", "-", "-",
-          "first use engine/entry/main.c:420; documented at docs/AGENT_API.md:837: ZCL_OPERATOR_LANE) and reports the lane name, runtime profile, datadir, ports,")
+          "first use engine/entry/main.c:476; documented at docs/AGENT_API.md:837: ZCL_OPERATOR_LANE) and reports the lane name, runtime profile, datadir, ports,")
 Z23_FLAG("ZCL_OPERATOR_PATHS_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_no_operator_paths.sh:208")
 Z23_FLAG("ZCL_OPERATOR_PATHS_TEST_IDENTITIES", "env_build", "-", "-",

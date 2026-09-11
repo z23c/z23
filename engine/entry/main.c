@@ -307,10 +307,14 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
      * fallback) is the exact same code path `z23 status --next`
      * already uses — no duplicated logic. */
     if (argc == 1) {
-        char *synthetic[] = {
-            argv[0], (char *)"status", (char *)"--next",
-            NULL,
-        };
+        /* Static storage, not a helper-frame local: this array must outlive
+         * the call it is passed into for the whole of the process, not just
+         * this stack frame, so it cannot be a local. */
+        static char *synthetic[4];
+        synthetic[0] = argv[0];
+        synthetic[1] = (char *)"status";
+        synthetic[2] = (char *)"--next";
+        synthetic[3] = NULL;
         *rc = cli_main(3, synthetic);
         return true;
     }
