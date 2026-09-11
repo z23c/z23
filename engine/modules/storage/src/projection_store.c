@@ -852,6 +852,52 @@ void projection_store_tx_unlock(void)
     pthread_mutex_unlock(&g_tx_lock);
 }
 
+#ifdef ZCL_TESTING
+static _Atomic bool g_force_checkpoint_busy;
+
+void projection_store_force_checkpoint_busy_for_test(void)
+{
+    atomic_store_explicit(&g_force_checkpoint_busy, true,
+                          memory_order_release);
+}
+#endif
+
+/* Drain the WAL back into the main file at close.
+ *
+ * TRUNCATE is what a close wants: it copies every frame back AND zeroes the
+ * WAL, which is what lets the NEXT open see an absent WAL and take the fast
+ * receipt path instead of a full quick_check. But TRUNCATE needs the
+ * exclusive lock, so any live reader makes it SQLITE_BUSY — and this store
+ * now has one more reader than it used to, the background integrity scan's
+ * read-only handle.
+ *
+ * A reader-blocked TRUNCATE says "somebody is reading". It says nothing
+ * about the bytes, and treating it as a dirty close cost the next boot a
+ * full multi-GB scan for no reason at all. So fall back to PASSIVE, which
+ * copies the frames back without the exclusive lock, and let the two things
+ * that DO speak about the bytes decide: sqlite3_close() (which checkpoints
+ * and removes the WAL when it is the last connection) and the receipt
+ * writer's own WAL-absent + full-content-digest checks. A receipt is still
+ * never written after a failed close. */
+static int projection_checkpoint_for_close(sqlite3 *db, int *log_frames,
+                                           int *checkpointed_frames)
+{
+    int rc = sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE,
+                                       log_frames, checkpointed_frames);
+#ifdef ZCL_TESTING
+    if (atomic_exchange_explicit(&g_force_checkpoint_busy, false,
+                                 memory_order_acq_rel))
+        rc = SQLITE_BUSY;
+#endif
+    if (rc != SQLITE_BUSY)
+        return rc;
+    fprintf(stderr,  // obs-ok:projection-store-lifecycle
+            "[projection_store] TRUNCATE checkpoint is reader-blocked; "
+            "draining the WAL with PASSIVE instead\n");
+    return sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE,
+                                     log_frames, checkpointed_frames);
+}
+
 void projection_store_close(void)
 {
     pthread_mutex_lock(&g_lock);
@@ -866,9 +912,8 @@ void projection_store_close(void)
 
     int log_frames = 0;
     int checkpointed_frames = 0;
-    int checkpoint_rc = sqlite3_wal_checkpoint_v2(
-        db, NULL, SQLITE_CHECKPOINT_TRUNCATE,
-        &log_frames, &checkpointed_frames);
+    int checkpoint_rc = projection_checkpoint_for_close(
+        db, &log_frames, &checkpointed_frames);
     int rc = sqlite3_close(db);
     if (rc != SQLITE_OK) {
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
@@ -887,7 +932,7 @@ void projection_store_close(void)
     bool integrity_clean =
         atomic_load_explicit(&g_integrity_verified, memory_order_acquire) &&
         !atomic_load_explicit(&g_integrity_failed, memory_order_acquire);
-    if (checkpoint_rc == SQLITE_OK && rc == SQLITE_OK && integrity_clean) {
+    if (rc == SQLITE_OK && integrity_clean) {
 #ifdef _WIN32
         /* No pathname receipt on Windows; see the open-side authority note. */
 #else

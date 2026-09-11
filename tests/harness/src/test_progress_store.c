@@ -304,6 +304,44 @@ static bool ps_corrupt_projection_page(const char *fpath)
     return ok;
 }
 
+
+/* A TRUNCATE checkpoint that a live reader blocked is not a dirty close.
+ * The store now has one more reader than it used to — the background
+ * integrity scan's read-only handle — and treating that BUSY as "dirty"
+ * threw the receipt away and cost the next boot a full multi-GB scan for
+ * nothing. What must NEVER happen is the opposite error: a receipt that
+ * does not match the bytes on disk. Both halves are pinned here. */
+static int ps_test_projection_receipt_reader_blocked(void)
+{
+    int failures = 0;
+    char dir[256];
+    char fpath[512];
+    char receipt[544];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_busy_ckpt");
+    snprintf(fpath, sizeof(fpath), "%s/progress.kv", dir);
+    snprintf(receipt, sizeof(receipt), "%s.clean", fpath);
+
+    PS_CHECK("proj busy ckpt: seed a store with WAL frames to drain",
+             ps_seed_projection_without_receipt(dir, fpath) &&
+             projection_store_open(dir));
+    projection_store_force_checkpoint_busy_for_test();
+    projection_store_close();
+
+    PS_CHECK("proj busy ckpt: a reader-blocked TRUNCATE still earns the "
+             "fast-open receipt", access(receipt, F_OK) == 0);
+    PS_CHECK("proj busy ckpt: and that receipt matches the bytes on disk",
+             ps_receipt_digest_matches(fpath, receipt));
+    PS_CHECK("proj busy ckpt: the next open takes the fast path",
+             projection_store_open(dir));
+    PS_CHECK("proj busy ckpt: the receipt is still single-use",
+             access(receipt, F_OK) != 0);
+    PS_CHECK("proj busy ckpt: the PASSIVE drain kept every row",
+             ps_projection_marker_present());
+    projection_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* A healthy store with no receipt: the open returns with the store LIVE and
  * the scan owed, not run. Consumers work while it is owed, and the verdict
  * is what re-enables the fast-open receipt. */
@@ -1447,6 +1485,7 @@ int test_progress_store(void)
     failures += ps_test_projection_scan_deferred();
     failures += ps_test_projection_scan_unfinished();
     failures += ps_test_projection_scan_quarantine();
+    failures += ps_test_projection_receipt_reader_blocked();
 
     printf("progress_store: %d failures\n", failures);
 

@@ -61,9 +61,11 @@
  * non-"ok" verdict
  * quarantines the file trio aside (timestamped/pid-unique rename) and
  * reopens a FRESH, empty file — safe because every table here re-derives from
- * the kernel on the next fold. A successful WAL checkpoint + close of a
- * store proven intact this run writes a single-use receipt bound to file
- * identity and a full-content SHA3 digest.
+ * the kernel on the next fold. A successful close of a store proven intact
+ * this run writes a single-use receipt bound to file identity and a
+ * full-content SHA3 digest — a TRUNCATE checkpoint blocked by a live reader
+ * is NOT a dirty close (the WAL is drained with PASSIVE instead, and the
+ * receipt writer's own WAL-absent + digest checks decide).
  * A WAL-free reopen scans O(file-size) bytes to verify that digest and can
  * then skip SQLite's structural check. Any mismatch, old receipt version,
  * WAL, crash, or malformed receipt takes the full integrity gate.
@@ -138,6 +140,13 @@ void projection_store_tx_unlock(void);
  * Safe to call repeatedly and from shutdown paths. The kernel store has a
  * separate file, handle, and WAL lifecycle. */
 void projection_store_close(void);
+
+#ifdef ZCL_TESTING
+/* Force the next close's TRUNCATE checkpoint to report SQLITE_BUSY, so the
+ * reader-blocked path (PASSIVE drain, then the close and the receipt
+ * writer's own checks) can be driven without racing a real reader. */
+void projection_store_force_checkpoint_busy_for_test(void);
+#endif
 
 /* For `z23 dumpstate projection_store` (dump-state convention). `out` is
  * json_set_object'd by the caller; this also calls json_set_object(out)
