@@ -7,6 +7,7 @@
 #include "util/boot_status.h"
 #include "util/boot_progress.h"
 #include "util/sd_notify.h"
+#include "util/thread_work_probe.h"
 #include "health/heartbeat.h"
 #include "util/sync.h"
 
@@ -143,6 +144,31 @@ uint64_t boot_evidence_probe_process_io(void *ctx)
     if (!os_proc_io_bytes(&bytes))
         return 0;
     return bytes / (uint64_t)BOOT_EVIDENCE_IO_QUANTUM_BYTES;
+}
+
+/* The thread whose I/O is this step's evidence, captured when the probe is
+ * installed. Atomic because the sweeper reads it while the boot thread
+ * writes it, and 0 (never sampled) is the inert value. */
+static _Atomic long g_evidence_tid;
+
+uint64_t boot_evidence_probe_thread_io(void *ctx)
+{
+    (void)ctx;
+    long tid = atomic_load_explicit(&g_evidence_tid, memory_order_acquire);
+    struct thread_work_sample sample;
+    if (tid <= 0 || !thread_work_probe_sample(tid, &sample) ||
+        !sample.observed)
+        return 0;  /* unobservable is not evidence — see boot_phase.h */
+    return sample.io_bytes / (uint64_t)BOOT_EVIDENCE_IO_QUANTUM_BYTES;
+}
+
+void boot_step_set_thread_io_evidence_probe(void)
+{
+    /* Bind the CALLER's tid: the probe runs on the sweeper, so "current
+     * thread" at call time is the only moment this thread can be named. */
+    atomic_store_explicit(&g_evidence_tid, thread_work_probe_self_tid(),
+                          memory_order_release);
+    boot_step_set_evidence_probe(boot_evidence_probe_thread_io, NULL);
 }
 
 static uint64_t boot_step_evidence_probe_value(void)

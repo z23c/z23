@@ -448,7 +448,7 @@ static int bp_node_db_gate_refuses(void)
     bp_park_fixture_end(dir);
     return failures;
 }
-
+static int bp_test_thread_io_evidence(void);  /* end of file */
 int test_boot_phase(void)
 {
 #if defined(_WIN32)
@@ -1015,7 +1015,93 @@ int test_boot_phase(void)
         boot_step_done();
     }
 
+    /* Evidence scoped to one thread — its own function, so this one stays
+     * inside the complexity cap. */
+    failures += bp_test_thread_io_evidence();
+
     /* Restore for any subsequent tests in this process. */
     boot_stage_reset_for_testing();
     return failures;
 }
+
+/* ── evidence scoped to ONE thread ────────────────────────────────────
+ *
+ * The process-wide probe is honest only for a step that is the process's
+ * only source of I/O. svc.init_wallet is not: it runs beside the Tor
+ * monitor, connman and the reducer, so the process probe would grade it
+ * SLOW in every window and buy an hour of start budget every 30 s while a
+ * real wedge sat inside it — the module's own warning, made real. These
+ * fixtures pin the difference between the two probes on the SAME I/O.
+ *
+ * WHY THIS SITS AFTER test_boot_phase() instead of beside the other
+ * fixtures: engine/composition/flags.def pins ZCL_TEST_FORK_ROLE's
+ * first-use pointer at this file's line 459, and check-flag-registry
+ * proves that pointer still reads the flag. Anything inserted ABOVE that
+ * line moves it. Hence the one-line forward declaration in the blank line
+ * just before test_boot_phase(), and the definitions down here. */
+struct bp_io_burner {
+    size_t bytes;
+    bool   ok;
+};
+
+static void *bp_io_burner_entry(void *arg)
+{
+    struct bp_io_burner *b = (struct bp_io_burner *)arg;
+    b->ok = bp_burn_block_io(b->bytes);
+    return NULL;
+}
+
+static int bp_test_thread_io_evidence(void)
+{
+    int failures = 0;
+#if defined(__linux__)
+    boot_step_enter("test.thread_io");
+    boot_step_set_thread_io_evidence_probe();
+
+    /* (1) The probe is live and it observes THIS thread. On Linux this MUST
+     * work: a silently blind probe would degrade the step back to marker-only
+     * evidence — the exact defect being fixed — with no failing test. */
+    uint64_t self_before = boot_evidence_probe_thread_io(NULL);
+    BP_CHECK("thread-io: this thread's own fsynced I/O IS evidence",
+        bp_burn_block_io(4 * BOOT_EVIDENCE_IO_QUANTUM_BYTES) &&
+        boot_evidence_probe_thread_io(NULL) > self_before);
+
+    /* (2) Another thread's I/O is NOT this step's evidence — while the
+     * process-wide probe counts exactly that I/O, which is the whole reason
+     * svc.init_wallet cannot use the process-wide one. */
+    uint64_t t0 = boot_evidence_probe_thread_io(NULL);
+    uint64_t p0 = boot_evidence_probe_process_io(NULL);
+    struct bp_io_burner burner = {
+        .bytes = 8 * BOOT_EVIDENCE_IO_QUANTUM_BYTES, .ok = false };
+    pthread_t th;
+    int rc = pthread_create(&th, NULL, bp_io_burner_entry, &burner);
+    BP_CHECK("thread-io: burner thread spawned", rc == 0);
+    if (rc == 0)
+        pthread_join(th, NULL);
+    BP_CHECK("thread-io: the burner thread really wrote to a disk",
+        burner.ok);
+    uint64_t t1 = boot_evidence_probe_thread_io(NULL);
+    uint64_t p1 = boot_evidence_probe_process_io(NULL);
+    BP_CHECK("thread-io: 8 MiB written by ANOTHER thread is not this "
+             "step's progress",
+        t1 - t0 < 4);
+    BP_CHECK("thread-io: the process-wide probe DOES count it — why a "
+             "multi-threaded step must not use that probe",
+        p1 - p0 >= 4);
+
+    /* (3) The grade that follows: a step over budget whose own thread is
+     * working is SLOW (keeps its start budget), never STUCK. */
+    BP_CHECK("thread-io: own-thread work grades SLOW, not STUCK",
+        boot_step_classify(BOOT_STEP_BUDGET_MS * 2, BOOT_STEP_BUDGET_MS, 1)
+            == BOOT_STEP_SLOW &&
+        boot_step_classify(BOOT_STEP_BUDGET_MS * 2, BOOT_STEP_BUDGET_MS, 0)
+            == BOOT_STEP_STUCK);
+    boot_step_done();
+#else
+    printf("boot_phase: SKIP (no per-thread kernel counters on this "
+           "platform): thread-scoped I/O evidence probe is inert by "
+           "design\n");
+#endif
+    return failures;
+}
+

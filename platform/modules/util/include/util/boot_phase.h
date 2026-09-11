@@ -292,8 +292,43 @@ void boot_step_set_evidence_probe(boot_evidence_probe_fn fn, void *ctx);
  * I/O. That holds for the node.db open ceremony (it runs after the
  * verification-key load has finished and before embedded Tor, the
  * connman threads and the services start), and it is why this is an
- * opt-in probe rather than a global evidence source. `ctx` is unused. */
+ * opt-in probe rather than a global evidence source. `ctx` is unused.
+ *
+ * WHY THAT SCOPE WARNING IS A HARD RULE, not a caveat. A step that runs
+ * while other threads are alive — svc.init_wallet is the first one, with
+ * the Tor monitor, connman and the reducer all doing I/O beside it —
+ * would make this probe move in EVERY report window no matter what the
+ * step itself is doing. The step would then grade SLOW forever, and
+ * boot_step_emit() buys an hour of start budget on every SLOW record
+ * (see the STUCK/SLOW note in boot_phase.c), so a genuine wedge in that
+ * step would be masked for as long as the node stays up. The process
+ * probe belongs ONLY to a step that is single-threaded with respect to
+ * I/O. Anything else uses the per-thread probe below. */
 uint64_t boot_evidence_probe_process_io(void *ctx);
+
+/* Ready-made probe #2: the block I/O of ONE THREAD — the thread that
+ * installed it — read from that thread's own kernel counters
+ * (util/thread_work_probe.h → platform/os_proc.h, which on Linux reads
+ * /proc/self/task/<tid>/io read_bytes+write_bytes). Quantised by
+ * BOOT_EVIDENCE_IO_QUANTUM_BYTES, exactly like the process probe.
+ *
+ * The tid is captured at INSTALL time, on the boot thread, because the
+ * probe itself runs on the heartbeat sweeper: a probe that read "the
+ * current thread" would measure the sweeper and answer nothing.
+ *
+ * Only I/O counts, never CPU time: a thread spinning in a livelock burns
+ * CPU and must not be able to buy start budget with it.
+ *
+ * On a platform with no per-thread counters, and under a sandbox that
+ * denies /proc, every sample is unobservable and this returns 0 — inert,
+ * never falsely positive. A step then grades exactly as it did before
+ * the probe existed. `ctx` is unused. */
+uint64_t boot_evidence_probe_thread_io(void *ctx);
+
+/* Install boot_evidence_probe_thread_io bound to the CALLING thread, as
+ * the current step's evidence probe. Call immediately after
+ * boot_step_enter(), from the thread that is about to do the work. */
+void boot_step_set_thread_io_evidence_probe(void);
 
 /* Close the current step with `done`. Safe when no step is open. */
 void boot_step_done(void);

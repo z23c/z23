@@ -577,6 +577,8 @@ bool app_init_services(struct app_context *ctx,
      * that never returns still reports; a node once wedged here four hours
      * and the log named only the step BEFORE it. */
     boot_step_enter("svc.init_wallet");
+    /* Evidence scoped to THIS thread; the process probe would mask a wedge. */
+    boot_step_set_thread_io_evidence_probe();
 
     node_db_sync_catchup_job_init(&svc->catchup_job);
     snapshot_tx_index_job_init(&svc->tx_index_job);
