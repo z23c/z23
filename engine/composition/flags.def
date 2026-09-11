@@ -556,7 +556,7 @@ Z23_FLAG("ZCL_DEV_ALLOW_REINDEX_DROPIN", "env_build", "0", "-",
 Z23_FLAG("ZCL_DEV_ALLOW_REJECTED_GENERATION", "env_build", "0", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:573")
 Z23_FLAG("ZCL_DEV_ARTIFACT_CACHE", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:2439")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:2468")
 Z23_FLAG("ZCL_DEV_BENCH_ACTIVATE", "env_build", "0", "-",
           "first use tools/dev/dev-loop-bench.sh:20; documented at docs/AGENT_API.md:1224: and separate hot-swap/reload SLO verdicts. With ZCL_DEV_BENCH_ACTIVATE=1")
 Z23_FLAG("ZCL_DEV_BENCH_CMD_CONTROLLER", "env_build", "-", "-",
@@ -618,9 +618,9 @@ Z23_FLAG("ZCL_DEV_LINKER_RUNS", "env_build", "3", "-",
 Z23_FLAG("ZCL_DEV_LOOP_TEST_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/native-dev-loop-wait-selftest.sh:8")
 Z23_FLAG("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_dev_platform.c:2442")
+          "undocumented; first use tests/harness/src/test_dev_platform.c:2471")
 Z23_FLAG("ZCL_DEVLOOP_TEST_PROCESS", "env_test", "-", "-",
-          "first use tests/harness/src/test_dev_platform.c:2440; documented at docs/work/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
+          "first use tests/harness/src/test_dev_platform.c:2469; documented at docs/work/HOTSWAP.md:311: ZCL_DEVLOOP_TEST_PROCESS=1 fixture opt-in; release builds retain the literal")
 Z23_FLAG("ZCL_DEV_NATIVE_ACTIVATION", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_dev_platform.c:1548")
 Z23_FLAG("ZCL_DEV_PID_COMMAND", "env_build", "-", "-",

@@ -967,7 +967,11 @@ static bool hs_publish_artifact_path(const char *root, const char *safe,
     if (snprintf(out, 4096, "%s/build/hotswap/%s-%s.so", root, safe,
                  artifact_sha256) >= 4096)
         return false;
-    return hs_link_or_copy_publish(source_so, out, artifact_sha256);
+    /* The worktree copy is always a fresh single-link file: build/hotswap/
+     * is one of the trees check-no-hardlink-seeding refuses to find a
+     * multiply-linked file in, and a hardlink from the host-wide artifact
+     * cache is exactly that. Only the cache itself shares links. */
+    return hs_copy_publish(source_so, out, artifact_sha256);
 }
 
 static bool hs_cache_lookup(const char *root, const char *safe,

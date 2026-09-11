@@ -2390,6 +2390,35 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
            dp_mk_write(root, "build/hotswap-fast/flags.env", flags);
 }
 
+/* A second checkout discovers its closure once, then reuses the exact
+ * artifact immediately without requiring a second save -- and on the same
+ * device as the cache, with no forced copy, it still gets a fresh
+ * single-link file, never a hardlink into the shared cache: build/hotswap/
+ * is a tree check-no-hardlink-seeding refuses to find a multiply-linked
+ * file in. */
+static bool dp_second_checkout_hit_is_single_link(
+    const char *root_b, const char *owner,
+    const struct zcl_devloop_hotswap_build_receipt *built,
+    const struct stat *cache_st,
+    struct zcl_devloop_hotswap_build_receipt *cross,
+    struct zcl_devloop_process_result *process, char *why, size_t why_cap)
+{
+    if (!zcl_devloop_hotswap_build(root_b, owner, cross, process, why,
+                                   why_cap) ||
+        !cross->artifact_cache_hit || cross->compiler_processes != 1 ||
+        cross->linker_processes != 0 ||
+        strcmp(cross->artifact_cache_key, built->artifact_cache_key) != 0 ||
+        strcmp(cross->artifact_sha256, built->artifact_sha256) != 0 ||
+        strcmp(cross->candidate_object_sha256,
+               built->candidate_object_sha256) != 0)
+        return false;
+    struct stat cross_st = {0};
+    return stat(cross->artifact_path, &cross_st) == 0 &&
+           cross_st.st_nlink == 1 &&
+           (cross_st.st_dev != cache_st->st_dev ||
+            cross_st.st_ino != cache_st->st_ino);
+}
+
 static bool run_hotswap_artifact_cache_fixture(void)
 {
     static const char root_a[] = "test-tmp/dev_hotswap_cache_a";
@@ -2544,16 +2573,10 @@ static bool run_hotswap_artifact_cache_fixture(void)
         strcmp(reverted.artifact_cache_key, built.artifact_cache_key) != 0)
         goto out;
 
-    /* A second checkout discovers its closure once, then reuses the exact
-     * artifact immediately without requiring a second save. */
-    if (!zcl_devloop_hotswap_build(root_b, owner, &cross, &process,
-                                   why, sizeof(why)) ||
-        !cross.artifact_cache_hit || cross.compiler_processes != 1 ||
-        cross.linker_processes != 0 ||
-        strcmp(cross.artifact_cache_key, built.artifact_cache_key) != 0 ||
-        strcmp(cross.artifact_sha256, built.artifact_sha256) != 0 ||
-        strcmp(cross.candidate_object_sha256,
-               built.candidate_object_sha256) != 0)
+    stage = "cross-checkout-hit";
+    if (!dp_second_checkout_hit_is_single_link(root_b, owner, &built, &cache_st,
+                                               &cross, &process, why,
+                                               sizeof(why)))
         goto out;
 
     /* A dependency appearing between the discovery and verification compile
