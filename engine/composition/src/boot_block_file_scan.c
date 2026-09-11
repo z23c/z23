@@ -88,6 +88,109 @@ static bool scan_file_append_meta(struct boot_scan_file_result *r,
     r->blocks[r->count++] = *meta;
     return true;
 }
+/* True when a block file's identity and timestamps are unchanged across the
+ * scan: the same nine snapshot fields the single inline comparison checked. */
+static bool scan_snapshot_stable(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return before->size == after->size &&
+           before->modified_seconds == after->modified_seconds &&
+           before->modified_nanoseconds == after->modified_nanoseconds &&
+           before->changed_seconds == after->changed_seconds &&
+           before->changed_nanoseconds == after->changed_nanoseconds &&
+           before->volume == after->volume &&
+           before->file_low == after->file_low &&
+           before->file_high == after->file_high;
+}
+/* Deserialize one block header at `pos` and fill `meta`. Returns false only
+ * when the header itself fails to deserialize (the caller's corrupt-block
+ * path); a missing or absurd tx count is clamped here exactly as before. */
+static bool scan_decode_block_meta(const struct boot_scan_file_result *r,
+                                   const uint8_t *data, long pos,
+                                   uint32_t blk_size,
+                                   struct boot_scan_block_meta *meta)
+{
+    size_t read_sz = (blk_size < BLOCK_HEADER_READ_SIZE)
+                         ? blk_size
+                         : BLOCK_HEADER_READ_SIZE;
+    struct block_header bhdr;
+    block_header_init(&bhdr);
+    struct byte_stream bs;
+    stream_init_from_data(&bs, data + pos + 8, read_sz);
+    if (!block_header_deserialize(&bhdr, &bs))
+        return false;
+    uint64_t num_tx = 0;
+    if (!stream_read_compact_size(&bs, &num_tx) || num_tx == 0)
+        num_tx = 1;
+    if (num_tx > 100000) {
+        fprintf(stderr, "scan: suspicious num_tx=%llu at file %d pos %ld, "
+                "clamping to 1\n", (unsigned long long)num_tx,
+                r->file_idx, pos);
+        num_tx = 1;
+    }
+    memset(meta, 0, sizeof(*meta));
+    block_header_get_hash(&bhdr, &meta->hash);
+    meta->hashPrevBlock = bhdr.hashPrevBlock;
+    meta->hashMerkleRoot = bhdr.hashMerkleRoot;
+    meta->hashFinalSaplingRoot = bhdr.hashFinalSaplingRoot;
+    meta->nNonce = bhdr.nNonce;
+    meta->nVersion = bhdr.nVersion;
+    meta->nTime = bhdr.nTime;
+    meta->nBits = bhdr.nBits;
+    meta->nTx = (unsigned int)num_tx;
+    meta->nDataPos = (unsigned int)(pos + 8);
+    return true;
+}
+/* Walk the mapped block file front-to-back, appending one metadata record
+ * per well-formed block. Returns false only when an append allocation
+ * failed (an incomplete parse), matching the old `complete` flag. */
+static bool scan_walk_file_blocks(struct boot_scan_file_result *r,
+                                  const uint8_t *data)
+{
+    bool complete = true;
+    int consec_errors = 0;
+    long pos = 0;
+    while (pos + 8 + 140 <= r->file_size) {
+        uint32_t magic = scan_read_u32_le(data + pos);
+        uint32_t blk_size = scan_read_u32_le(data + pos + 4);
+        if (magic != ZCL_BLOCK_MAGIC) {
+            long next = scan_find_next_magic(data, pos + 1, r->file_size);
+            if (next < 0)
+                break;
+            pos = next;
+            r->skipped++;
+            continue;
+        }
+        if (blk_size < 140 || blk_size > 2000000 ||
+            pos + 8 + (long)blk_size > r->file_size) {
+            pos += 8;
+            continue;
+        }
+        struct boot_scan_block_meta meta;
+        if (!scan_decode_block_meta(r, data, pos, blk_size, &meta)) {
+            consec_errors++;
+            r->corrupt++;
+            if (consec_errors > 20) {
+                fprintf(stderr, "scan: %d consecutive corrupt blocks in "
+                        "blk%05d.dat at pos %ld — aborting file\n",
+                        consec_errors, r->file_idx, pos);
+                break;
+            }
+            pos += 8 + (long)blk_size;
+            continue;
+        }
+        consec_errors = 0;
+        if (!scan_file_append_meta(r, &meta)) {
+            fprintf(stderr, "scan: out of memory while parsing %s at pos %ld\n",
+                    r->path, pos);
+            complete = false;
+            break;
+        }
+        pos += 8 + (long)blk_size;
+    }
+    return complete;
+}
 static void scan_parse_one_file(struct boot_scan_file_result *r)
 {
     r->ok = false;
@@ -127,84 +230,9 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
         return;
     }
     platform_read_mapping_advise_sequential(&mapping);
-    const uint8_t *data = mapping.data;
-    bool complete = true;
-    int consec_errors = 0;
-    long pos = 0;
-    while (pos + 8 + 140 <= r->file_size) {
-        uint32_t magic = scan_read_u32_le(data + pos);
-        uint32_t blk_size = scan_read_u32_le(data + pos + 4);
-        if (magic != ZCL_BLOCK_MAGIC) {
-            long next = scan_find_next_magic(data, pos + 1, r->file_size);
-            if (next < 0)
-                break;
-            pos = next;
-            r->skipped++;
-            continue;
-        }
-        if (blk_size < 140 || blk_size > 2000000 ||
-            pos + 8 + (long)blk_size > r->file_size) {
-            pos += 8;
-            continue;
-        }
-        size_t read_sz = (blk_size < BLOCK_HEADER_READ_SIZE)
-                             ? blk_size
-                             : BLOCK_HEADER_READ_SIZE;
-        struct block_header bhdr;
-        block_header_init(&bhdr);
-        struct byte_stream bs;
-        stream_init_from_data(&bs, data + pos + 8, read_sz);
-        if (!block_header_deserialize(&bhdr, &bs)) {
-            consec_errors++;
-            r->corrupt++;
-            if (consec_errors > 20) {
-                fprintf(stderr, "scan: %d consecutive corrupt blocks in "
-                        "blk%05d.dat at pos %ld — aborting file\n",
-                        consec_errors, r->file_idx, pos);
-                break;
-            }
-            pos += 8 + (long)blk_size;
-            continue;
-        }
-        consec_errors = 0;
-        uint64_t num_tx = 0;
-        if (!stream_read_compact_size(&bs, &num_tx) || num_tx == 0)
-            num_tx = 1;
-        if (num_tx > 100000) {
-            fprintf(stderr, "scan: suspicious num_tx=%llu at file %d pos %ld, "
-                    "clamping to 1\n", (unsigned long long)num_tx,
-                    r->file_idx, pos);
-            num_tx = 1;
-        }
-        struct boot_scan_block_meta meta;
-        memset(&meta, 0, sizeof(meta));
-        block_header_get_hash(&bhdr, &meta.hash);
-        meta.hashPrevBlock = bhdr.hashPrevBlock;
-        meta.hashMerkleRoot = bhdr.hashMerkleRoot;
-        meta.hashFinalSaplingRoot = bhdr.hashFinalSaplingRoot;
-        meta.nNonce = bhdr.nNonce;
-        meta.nVersion = bhdr.nVersion;
-        meta.nTime = bhdr.nTime;
-        meta.nBits = bhdr.nBits;
-        meta.nTx = (unsigned int)num_tx;
-        meta.nDataPos = (unsigned int)(pos + 8);
-        if (!scan_file_append_meta(r, &meta)) {
-            fprintf(stderr, "scan: out of memory while parsing %s at pos %ld\n",
-                    r->path, pos);
-            complete = false;
-            break;
-        }
-        pos += 8 + (long)blk_size;
-    }
+    bool complete = scan_walk_file_blocks(r, mapping.data);
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  before.size == after.size &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.modified_nanoseconds == after.modified_nanoseconds &&
-                  before.changed_seconds == after.changed_seconds &&
-                  before.changed_nanoseconds == after.changed_nanoseconds &&
-                  before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high;
+                  scan_snapshot_stable(&before, &after);
     platform_read_mapping_close(&mapping);
     platform_positioned_file_close(&file);
     if (!stable)
@@ -334,31 +362,15 @@ int scan_compute_contiguous_data_height(struct block_index *best_header,
     if (!walk) return 0; /* genesis has data and walk fell off the chain */
     return -1;
 }
-/* Scan block files on disk, parse proper ZClassic headers (with
- * equihash solution), create block_index entries if missing, set
- * nTx, mark BLOCK_HAVE_DATA, and propagate nChainTx so
- * find_most_work_chain can find the best tip.
- *
- * This is the critical bridge between file_service (downloads block files)
- * and reducer activation (needs BLOCK_HAVE_DATA + nChainTx > 0 to connect
- * blocks). Without this, downloaded blocks sit unused on disk while P2P
- * re-downloads them. */
-int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
-                                const struct chain_params *params)
+/* Pass 0: enumerate the block files on disk into `files` and return how
+ * many were found. blk00000.dat may legitimately be empty while later
+ * files hold data, so this does not stop at the first gap — it stops after
+ * 3 consecutive misses. blk_sync.dat is appended last when present. */
+static int scan_enumerate_block_files(const char *datadir,
+                                      struct boot_scan_file_result *files)
 {
-    if (!ms || !datadir) {
-        fprintf(stderr, "scan_block_files_mark_data: NULL argument\n");
-        return 0;
-    }
-    int marked = 0, created = 0;
     char path[576];
-    int64_t t0 = (int64_t)platform_time_wall_time_t();
-    struct boot_scan_file_result files[257];
     int nfiles = 0;
-    memset(files, 0, sizeof(files));
-    /* Pass 1: parse all block files in parallel.
-     * Don't break on first gap — blk00000.dat may be empty (0 bytes)
-     * while blk00001.dat+ have data. Stop after 3 consecutive misses. */
     int consecutive_misses = 0;
     for (int file_idx = 0; file_idx < 256; file_idx++) {
         snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
@@ -391,10 +403,16 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
         snprintf(r->path, sizeof(r->path), "%s", path);
         r->file_idx = 255;
     }
-    int64_t parse_t0 = (int64_t)platform_time_wall_time_t();
-    int scan_workers = scan_parse_files_parallel(files, nfiles);
-    int64_t parse_elapsed = (int64_t)platform_time_wall_time_t() - parse_t0;
-    int64_t apply_t0 = (int64_t)platform_time_wall_time_t();
+    return nfiles;
+}
+/* Pass 1: apply every successfully parsed file's metadata once, printing a
+ * per-file line whenever that file changed the index. */
+static void scan_apply_first_pass(struct main_state *ms,
+                                  struct boot_scan_file_result *files,
+                                  int nfiles,
+                                  const struct chain_params *params,
+                                  int *marked, int *created)
+{
     for (int i = 0; i < nfiles; i++) {
         struct boot_scan_file_result *r = &files[i];
         if (!r->ok) {
@@ -404,8 +422,8 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
         }
         struct boot_scan_apply_counts c =
             scan_apply_one_file(ms, r, params);
-        marked += c.marked + c.header_fixed;
-        created += c.created;
+        *marked += c.marked + c.header_fixed;
+        *created += c.created;
         if (c.marked > 0 || c.created > 0 || c.header_fixed > 0) {
             printf("  %s: %d marked, %d created, %d headers fixed, "
                    "%d skipped (%ld MB)\n",
@@ -414,206 +432,285 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                    r->file_size / (1024 * 1024));
         }
     }
-    /* Pass 2: retry for out-of-order blocks (prevblock now in map).
-     * Block files from zclassicd are 99%+ in order, so pass 1 catches
-     * nearly everything. Pass 2 picks up stragglers without re-reading
-     * disk: the parsed metadata is deterministic and immutable. */
-    if (created > 0 && params) {
-        for (int retry = 0; retry < 3; retry++) {
-            int prev_marked = marked;
-            for (int i = 0; i < nfiles; i++) {
-                if (!files[i].ok)
-                    continue;
-                struct boot_scan_apply_counts c =
-                    scan_apply_one_file(ms, &files[i], params);
-                marked += c.marked + c.header_fixed;
-                created += c.created;
-            }
-            int delta = marked - prev_marked;
-            if (delta == 0) break;
-            printf("  Retry pass %d: %d additional blocks\n", retry + 1, delta);
+}
+/* Pass 2: retry for out-of-order blocks (prevblock now in map).
+ * Block files from zclassicd are 99%+ in order, so pass 1 catches
+ * nearly everything. Pass 2 picks up stragglers without re-reading
+ * disk: the parsed metadata is deterministic and immutable. */
+static void scan_apply_retry_passes(struct main_state *ms,
+                                    struct boot_scan_file_result *files,
+                                    int nfiles,
+                                    const struct chain_params *params,
+                                    int *marked, int *created)
+{
+    if (*created <= 0 || !params)
+        return;
+    for (int retry = 0; retry < 3; retry++) {
+        int prev_marked = *marked;
+        for (int i = 0; i < nfiles; i++) {
+            if (!files[i].ok)
+                continue;
+            struct boot_scan_apply_counts c =
+                scan_apply_one_file(ms, &files[i], params);
+            *marked += c.marked + c.header_fixed;
+            *created += c.created;
         }
+        int delta = *marked - prev_marked;
+        if (delta == 0) break;
+        printf("  Retry pass %d: %d additional blocks\n", retry + 1, delta);
     }
-    int64_t apply_elapsed = (int64_t)platform_time_wall_time_t() - apply_t0;
-    /* Resolve orphan pprev links by reading hashPrevBlock from disk.
-     * All blocks are now in the map — pprev lookup will succeed for
-     * any block whose parent exists on disk. This fixes the case where
-     * create_block_index_fast couldn't link pprev at insertion time
-     * because the parent hadn't been scanned yet. */
-    if (created > 0 && params) {
-        size_t orphan_before = 0;
-        { size_t ci = 0; struct block_index *cb;
-          while (block_map_next(&ms->map_block_index, &ci, NULL, &cb))
-              if (cb && !cb->pprev && cb->nHeight == 0 && cb->nFile >= 0)
-                  orphan_before++;
-        }
-        printf("  orphan check: %zu entries with pprev==NULL, nHeight==0, nFile>=0\n",
+}
+/* Resolve orphan pprev links by reading hashPrevBlock from disk.
+ * All blocks are now in the map — pprev lookup will succeed for
+ * any block whose parent exists on disk. This fixes the case where
+ * create_block_index_fast couldn't link pprev at insertion time
+ * because the parent hadn't been scanned yet. */
+static void scan_resolve_orphans_if_needed(struct main_state *ms,
+                                           const char *datadir,
+                                           const struct chain_params *params,
+                                           int created)
+{
+    if (created <= 0 || !params)
+        return;
+    size_t orphan_before = 0;
+    { size_t ci = 0; struct block_index *cb;
+      while (block_map_next(&ms->map_block_index, &ci, NULL, &cb))
+          if (cb && !cb->pprev && cb->nHeight == 0 && cb->nFile >= 0)
+              orphan_before++;
+    }
+    printf("  orphan check: %zu entries with pprev==NULL, nHeight==0, "
+           "nFile>=0\n", orphan_before);
+    if (orphan_before > 0) {
+        printf("  %zu orphan blocks — resolving pprev from disk...\n",
                orphan_before);
-        if (orphan_before > 0) {
-            printf("  %zu orphan blocks — resolving pprev from disk...\n",
-                   orphan_before);
-            fflush(stdout);
-            int resolved = resolve_orphan_pprev_from_disk(ms, datadir, params);
-            printf("  pprev resolved for %d blocks from disk\n", resolved);
-            fflush(stdout);
+        fflush(stdout);
+        int resolved = resolve_orphan_pprev_from_disk(ms, datadir, params);
+        printf("  pprev resolved for %d blocks from disk\n", resolved);
+        fflush(stdout);
+    }
+}
+/* Collect every block that can carry chain metadata — anything with a
+ * pprev link or on-disk data, header-only blocks included, since those
+ * still bridge nChainTx across gaps where block files are missing. */
+static size_t scan_collect_sorted_candidates(struct main_state *ms,
+                                             struct block_index **sorted)
+{
+    size_t n = 0, iter = 0;
+    struct block_index *bi;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
+        if (bi && (bi->pprev || (bi->nStatus & BLOCK_HAVE_DATA)))
+            sorted[n++] = bi;
+    }
+    return n;
+}
+/* Seed a height-0 block's own chain metadata. Returns how many fields it
+ * filled, counted exactly as the original inline pass counted them. */
+static int scan_propagate_genesis_block(struct block_index *b)
+{
+    int propagated = 0;
+    if (b->nChainTx == 0) {
+        b->nChainTx = b->nTx > 0 ? b->nTx : 1;
+        propagated++;
+    }
+    /* Also set chain_work for h=0 blocks (genesis) */
+    if (arith_uint256_is_zero(&b->nChainWork)) {
+        b->nChainWork = GetBlockProof(b);
+        propagated++;
+    }
+    return propagated;
+}
+/* pprev hasn't been reached yet — force-propagate through it, seeding the
+ * parent's own nChainTx (and chain work) before deriving this block's. */
+static int scan_propagate_forced(struct block_index *b)
+{
+    unsigned int ntx = b->pprev->nTx > 0 ? b->pprev->nTx : 1;
+    b->pprev->nChainTx = b->pprev->nHeight > 0 ?
+        (unsigned)(b->pprev->nHeight) : ntx;
+    unsigned int btx = b->nTx > 0 ? b->nTx : 1;
+    b->nChainTx = b->pprev->nChainTx + btx;
+    /* Also force chain_work if pprev has none */
+    if (arith_uint256_is_zero(&b->pprev->nChainWork)) {
+        b->pprev->nChainWork = GetBlockProof(b->pprev);
+        if (b->pprev->pprev &&
+            !arith_uint256_is_zero(&b->pprev->pprev->nChainWork))
+            arith_uint256_add(&b->pprev->nChainWork,
+                &b->pprev->pprev->nChainWork,
+                &b->pprev->nChainWork);
+    }
+    return 2;
+}
+/* One block's turn in a propagation pass: the same three-way height/pprev
+ * decision as before, then the shared nChainWork carry-forward. */
+static int scan_propagate_one_block(struct block_index *b)
+{
+    int propagated = 0;
+    if (b->nHeight == 0) {
+        propagated += scan_propagate_genesis_block(b);
+    } else if (b->pprev && b->pprev->nChainTx > 0) {
+        unsigned int ntx = b->nTx > 0 ? b->nTx : 1;
+        unsigned int expected = b->pprev->nChainTx + ntx;
+        if (b->nChainTx != expected) {
+            b->nChainTx = expected;
+            propagated++;
+        }
+    } else if (b->pprev && b->pprev->nChainTx == 0) {
+        propagated += scan_propagate_forced(b);
+    }
+    /* Also propagate nChainWork alongside nChainTx */
+    if (b->pprev && !arith_uint256_is_zero(&b->pprev->nChainWork) &&
+        arith_uint256_is_zero(&b->nChainWork)) {
+        struct arith_uint256 proof = GetBlockProof(b);
+        arith_uint256_add(&b->nChainWork,
+                          &b->pprev->nChainWork, &proof);
+        propagated++;
+    }
+    return propagated;
+}
+/* Run propagation passes over the height-sorted candidates until a pass
+ * changes nothing, up to 50. Returns the total fields propagated. */
+static int scan_run_propagation_passes(struct block_index **sorted, size_t n)
+{
+    int total_propagated = 0;
+    for (int pass = 0; pass < 50; pass++) {
+        int propagated = 0;
+        for (size_t i = 0; i < n; i++)
+            propagated += scan_propagate_one_block(sorted[i]);
+        total_propagated += propagated;
+        if (propagated == 0) break;
+        if (pass == 49)
+            fprintf(stderr, "WARNING: nChainTx did not converge in "
+                    "50 passes (%d blocks still pending) — possible "
+                    "gap in block chain\n", propagated);
+        if (pass < 3 || pass % 10 == 0)
+            printf("  nChainTx pass %d: +%d blocks\n",
+                   pass + 1, propagated);
+    }
+    return total_propagated;
+}
+/* The genesis entry that already carries nChainTx, or NULL. */
+static struct block_index *scan_find_chaintx_genesis(struct main_state *ms)
+{
+    size_t gi = 0;
+    struct block_index *gb;
+    while (block_map_next(&ms->map_block_index, &gi, NULL, &gb))
+        if (gb && gb->nHeight == 0 && gb->nChainTx > 0)
+            return gb;
+    return NULL;
+}
+/* The child of `walk` sitting at height `h`, or NULL. */
+static struct block_index *scan_find_child_at_height(struct main_state *ms,
+                                                     struct block_index *walk,
+                                                     int h)
+{
+    size_t fi = 0;
+    struct block_index *fb;
+    while (block_map_next(&ms->map_block_index, &fi, NULL, &fb))
+        if (fb && fb->pprev == walk && fb->nHeight == h)
+            return fb;
+    return NULL;
+}
+/* Any entry at height `h`, or NULL. */
+static struct block_index *scan_find_any_at_height(struct main_state *ms,
+                                                   int h)
+{
+    size_t fi = 0;
+    struct block_index *fb;
+    while (block_map_next(&ms->map_block_index, &fi, NULL, &fb))
+        if (fb && fb->nHeight == h)
+            return fb;
+    return NULL;
+}
+/* Walk the active chain forward from genesis and report the first height
+ * with no child link. Returns that height, or -1 when contiguous. */
+static int scan_walk_chain_for_gap(struct main_state *ms,
+                                   struct block_index *genesis_bi)
+{
+    int gap_h = -1;
+    struct block_index *walk = genesis_bi;
+    for (int h = 1; h < 1000 && gap_h < 0; h++) {
+        struct block_index *next = scan_find_child_at_height(ms, walk, h);
+        bool found_next = next != NULL;
+        if (found_next) {
+            walk = next;
+            continue;
+        }
+        /* Try finding ANY block at height h */
+        struct block_index *alt = scan_find_any_at_height(ms, h);
+        printf("  Chain gap at h=%d: pprev_child=%s "
+               "alt_at_h=%s have_data=%d nTx=%u\n",
+               h,
+               found_next ? "yes" : "no",
+               alt ? "yes" : "no",
+               alt ? !!(alt->nStatus & BLOCK_HAVE_DATA) : 0,
+               alt ? alt->nTx : 0);
+        gap_h = h;
+    }
+    return gap_h;
+}
+/* Find first gap in chain — diagnostic for pprev breaks */
+static void scan_report_first_chain_gap(struct main_state *ms)
+{
+    struct block_index *genesis_bi = scan_find_chaintx_genesis(ms);
+    if (!genesis_bi)
+        return;
+    /* Walk forward from genesis via the active chain */
+    if (scan_walk_chain_for_gap(ms, genesis_bi) < 0)
+        printf("  Chain contiguous from genesis to h=999+\n");
+}
+/* Count blocks with HAVE_DATA but no nChainTx — these are
+ * unreachable from genesis (orphans or broken pprev links) */
+static void scan_count_and_report_orphans(struct block_index **sorted,
+                                          size_t n, int total_propagated)
+{
+    int orphans = 0;
+    int no_pprev = 0, pprev_no_data = 0, pprev_no_tx = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (sorted[i]->nChainTx == 0 && sorted[i]->nHeight > 0) {
+            orphans++;
+            if (!sorted[i]->pprev) no_pprev++;
+            else if (!(sorted[i]->pprev->nStatus & BLOCK_HAVE_DATA))
+                pprev_no_data++;
+            else if (sorted[i]->pprev->nTx == 0)
+                pprev_no_tx++;
         }
     }
-    scan_free_file_results(files, nfiles);
-    if (marked > 0 && params)
-        recompute_index_from_genesis(ms, params);
-    /* Propagate nChainTx along the chain. This is REQUIRED for
-     * find_most_work_chain to consider these blocks as candidates.
-     * Collect all blocks with BLOCK_HAVE_DATA, sort by height,
-     * compute nChainTx = pprev->nChainTx + nTx.
-     * Multiple passes handle gaps (e.g., retry-created blocks
-     * whose pprev was missing in earlier passes). */
-    if (marked > 0) {
-        size_t total = ms->map_block_index.size;
-        struct block_index **sorted = zcl_malloc(total * sizeof(struct block_index *), "boot.index.sorted");
-        if (sorted) {
-            size_t n = 0, iter = 0;
-            struct block_index *bi;
-            while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
-                /* Include ALL blocks with pprev or data — header-only blocks
-                 * (no BLOCK_HAVE_DATA) can still propagate nChainTx through
-                 * the chain, bridging gaps where block files are missing. */
-                if (bi && (bi->pprev || (bi->nStatus & BLOCK_HAVE_DATA)))
-                    sorted[n++] = bi;
-            }
-            qsort(sorted, n, sizeof(struct block_index *), block_index_cmp_height);
-            int total_propagated = 0;
-            for (int pass = 0; pass < 50; pass++) {
-                int propagated = 0;
-                for (size_t i = 0; i < n; i++) {
-                    struct block_index *b = sorted[i];
-                    if (b->nHeight == 0) {
-                        if (b->nChainTx == 0) {
-                            b->nChainTx = b->nTx > 0 ? b->nTx : 1;
-                            propagated++;
-                        }
-                        /* Also set chain_work for h=0 blocks (genesis) */
-                        if (arith_uint256_is_zero(&b->nChainWork)) {
-                            b->nChainWork = GetBlockProof(b);
-                            propagated++;
-                        }
-                    } else if (b->pprev && b->pprev->nChainTx > 0) {
-                        unsigned int ntx = b->nTx > 0 ? b->nTx : 1;
-                        unsigned int expected = b->pprev->nChainTx + ntx;
-                        if (b->nChainTx != expected) {
-                            b->nChainTx = expected;
-                            propagated++;
-                        }
-                    } else if (b->pprev && b->pprev->nChainTx == 0) {
-                        /* pprev hasn't been reached yet — force-propagate */
-                        unsigned int ntx = b->pprev->nTx > 0 ? b->pprev->nTx : 1;
-                        b->pprev->nChainTx = b->pprev->nHeight > 0 ?
-                            (unsigned)(b->pprev->nHeight) : ntx;
-                        unsigned int btx = b->nTx > 0 ? b->nTx : 1;
-                        b->nChainTx = b->pprev->nChainTx + btx;
-                        /* Also force chain_work if pprev has none */
-                        if (arith_uint256_is_zero(&b->pprev->nChainWork)) {
-                            b->pprev->nChainWork = GetBlockProof(b->pprev);
-                            if (b->pprev->pprev &&
-                                !arith_uint256_is_zero(&b->pprev->pprev->nChainWork))
-                                arith_uint256_add(&b->pprev->nChainWork,
-                                    &b->pprev->pprev->nChainWork,
-                                    &b->pprev->nChainWork);
-                        }
-                        propagated += 2;
-                    }
-                    /* Also propagate nChainWork alongside nChainTx */
-                    if (b->pprev && !arith_uint256_is_zero(&b->pprev->nChainWork) &&
-                        arith_uint256_is_zero(&b->nChainWork)) {
-                        struct arith_uint256 proof = GetBlockProof(b);
-                        arith_uint256_add(&b->nChainWork,
-                                          &b->pprev->nChainWork, &proof);
-                        propagated++;
-                    }
-                }
-                total_propagated += propagated;
-                if (propagated == 0) break;
-                if (pass == 49)
-                    fprintf(stderr, "WARNING: nChainTx did not converge in "
-                            "50 passes (%d blocks still pending) — possible "
-                            "gap in block chain\n", propagated);
-                if (pass < 3 || pass % 10 == 0)
-                    printf("  nChainTx pass %d: +%d blocks\n",
-                           pass + 1, propagated);
-            }
-            /* Find first gap in chain — diagnostic for pprev breaks */
-            {
-                struct block_index *genesis_bi = NULL;
-                size_t gi = 0;
-                struct block_index *gb;
-                while (block_map_next(&ms->map_block_index, &gi, NULL, &gb))
-                    if (gb && gb->nHeight == 0 && gb->nChainTx > 0) {
-                        genesis_bi = gb; break;
-                    }
-                if (genesis_bi) {
-                    /* Walk forward from genesis via the active chain */
-                    int gap_h = -1;
-                    struct block_index *walk = genesis_bi;
-                    for (int h = 1; h < 1000 && gap_h < 0; h++) {
-                        bool found_next = false;
-                        size_t fi = 0;
-                        struct block_index *fb;
-                        while (block_map_next(&ms->map_block_index, &fi, NULL, &fb)) {
-                            if (fb && fb->pprev == walk && fb->nHeight == h) {
-                                walk = fb;
-                                found_next = true;
-                                break;
-                            }
-                        }
-                        if (!found_next) {
-                            /* Try finding ANY block at height h */
-                            fi = 0;
-                            struct block_index *alt = NULL;
-                            while (block_map_next(&ms->map_block_index, &fi, NULL, &fb)) {
-                                if (fb && fb->nHeight == h) { alt = fb; break; }
-                            }
-                            printf("  Chain gap at h=%d: pprev_child=%s "
-                                   "alt_at_h=%s have_data=%d nTx=%u\n",
-                                   h,
-                                   found_next ? "yes" : "no",
-                                   alt ? "yes" : "no",
-                                   alt ? !!(alt->nStatus & BLOCK_HAVE_DATA) : 0,
-                                   alt ? alt->nTx : 0);
-                            gap_h = h;
-                        }
-                    }
-                    if (gap_h < 0)
-                        printf("  Chain contiguous from genesis to h=999+\n");
-                }
-            }
-            /* Count blocks with HAVE_DATA but no nChainTx — these are
-             * unreachable from genesis (orphans or broken pprev links) */
-            int orphans = 0;
-            int no_pprev = 0, pprev_no_data = 0, pprev_no_tx = 0;
-            for (size_t i = 0; i < n; i++) {
-                if (sorted[i]->nChainTx == 0 && sorted[i]->nHeight > 0) {
-                    orphans++;
-                    if (!sorted[i]->pprev) no_pprev++;
-                    else if (!(sorted[i]->pprev->nStatus & BLOCK_HAVE_DATA))
-                        pprev_no_data++;
-                    else if (sorted[i]->pprev->nTx == 0)
-                        pprev_no_tx++;
-                }
-            }
-            /* Note: chain_work is NOT re-propagated here to avoid
-             * overwriting correct values from P2P-synced blocks. */
-            free(sorted);
-            if (total_propagated > 0)
-                printf("  nChainTx propagated for %d blocks",
-                       total_propagated);
-            if (orphans > 0)
-                printf(" (%d orphan: %d no_pprev, %d pprev_no_data, %d pprev_no_tx)",
-                       orphans, no_pprev, pprev_no_data, pprev_no_tx);
-            if (total_propagated > 0 || orphans > 0)
-                printf("\n");
-        }
-    }
-    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
-    /* Summary stats: how many index entries have BLOCK_HAVE_DATA vs total */
+    if (total_propagated > 0)
+        printf("  nChainTx propagated for %d blocks",
+               total_propagated);
+    if (orphans > 0)
+        printf(" (%d orphan: %d no_pprev, %d pprev_no_data, "
+               "%d pprev_no_tx)",
+               orphans, no_pprev, pprev_no_data, pprev_no_tx);
+    if (total_propagated > 0 || orphans > 0)
+        printf("\n");
+}
+/* Propagate nChainTx along the chain. This is REQUIRED for
+ * find_most_work_chain to consider these blocks as candidates.
+ * Collect all blocks with BLOCK_HAVE_DATA, sort by height,
+ * compute nChainTx = pprev->nChainTx + nTx.
+ * Multiple passes handle gaps (e.g., retry-created blocks
+ * whose pprev was missing in earlier passes). */
+static void scan_propagate_chain_metadata(struct main_state *ms)
+{
+    size_t total = ms->map_block_index.size;
+    struct block_index **sorted = zcl_malloc(
+        total * sizeof(struct block_index *), "boot.index.sorted");
+    if (!sorted)
+        return;
+    size_t n = scan_collect_sorted_candidates(ms, sorted);
+    qsort(sorted, n, sizeof(struct block_index *), block_index_cmp_height);
+    int total_propagated = scan_run_propagation_passes(sorted, n);
+    scan_report_first_chain_gap(ms);
+    scan_count_and_report_orphans(sorted, n, total_propagated);
+    /* Note: chain_work is NOT re-propagated here to avoid
+     * overwriting correct values from P2P-synced blocks. */
+    free(sorted);
+}
+/* Summary stats: how many index entries have BLOCK_HAVE_DATA vs total */
+static void scan_print_summary(struct main_state *ms, int marked, int created,
+                               int64_t elapsed, int64_t parse_elapsed,
+                               int64_t apply_elapsed, int scan_workers)
+{
     size_t total_entries = 0, have_data_entries = 0;
     {
         size_t si = 0;
@@ -632,5 +729,44 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
            (long long)parse_elapsed, (long long)apply_elapsed,
            scan_workers,
            total_entries, have_data_entries);
+}
+/* Scan block files on disk, parse proper ZClassic headers (with
+ * equihash solution), create block_index entries if missing, set
+ * nTx, mark BLOCK_HAVE_DATA, and propagate nChainTx so
+ * find_most_work_chain can find the best tip.
+ *
+ * This is the critical bridge between file_service (downloads block files)
+ * and reducer activation (needs BLOCK_HAVE_DATA + nChainTx > 0 to connect
+ * blocks). Without this, downloaded blocks sit unused on disk while P2P
+ * re-downloads them. */
+int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
+                                const struct chain_params *params)
+{
+    if (!ms || !datadir) {
+        fprintf(stderr, "scan_block_files_mark_data: NULL argument\n");
+        return 0;
+    }
+    int marked = 0, created = 0;
+    int64_t t0 = (int64_t)platform_time_wall_time_t();
+    struct boot_scan_file_result files[257];
+    memset(files, 0, sizeof(files));
+    /* Pass 1: parse all block files in parallel. */
+    int nfiles = scan_enumerate_block_files(datadir, files);
+    int64_t parse_t0 = (int64_t)platform_time_wall_time_t();
+    int scan_workers = scan_parse_files_parallel(files, nfiles);
+    int64_t parse_elapsed = (int64_t)platform_time_wall_time_t() - parse_t0;
+    int64_t apply_t0 = (int64_t)platform_time_wall_time_t();
+    scan_apply_first_pass(ms, files, nfiles, params, &marked, &created);
+    scan_apply_retry_passes(ms, files, nfiles, params, &marked, &created);
+    int64_t apply_elapsed = (int64_t)platform_time_wall_time_t() - apply_t0;
+    scan_resolve_orphans_if_needed(ms, datadir, params, created);
+    scan_free_file_results(files, nfiles);
+    if (marked > 0 && params)
+        recompute_index_from_genesis(ms, params);
+    if (marked > 0)
+        scan_propagate_chain_metadata(ms);
+    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
+    scan_print_summary(ms, marked, created, elapsed, parse_elapsed,
+                       apply_elapsed, scan_workers);
     return marked;
 }
