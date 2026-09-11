@@ -39,11 +39,17 @@ elif [[ "$OWNER_KIND" == shop-want ]]; then
     MUTANT_OLD='w->expires_unix <= now_unix'
     MUTANT_NEW='w->expires_unix < now_unix'
 elif [[ "$OWNER_KIND" == command-input ]]; then
-    SOURCE="$ROOT/engine/modules/kernel/src/command_registry.c"
+    # The per-key integer bounds moved out of command_registry.c into the
+    # sibling TU command_registry_input_types.c, where the max_cpu_seconds
+    # rule is now the table row below. The capsule names that sibling in its
+    # TU set (engine/composition/hotfork_capsules.def), so editing it selects
+    # the same story and the mutation is observed inside the capsule rather
+    # than resolved from the resident binary.
+    SOURCE="$ROOT/engine/modules/kernel/src/command_registry_input_types.c"
     OUTPUT="${ZCL_REFLEX_COMMAND_INPUT_CORE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-command-input-core-acceptance.json}"
     STORY='command-registry-input-validation-core.v1'
-    MUTANT_OLD='json_get_int(value) <= 600;'
-    MUTANT_NEW='json_get_int(value) < 600;'
+    MUTANT_OLD='{ "max_cpu_seconds", 1, 600 },'
+    MUTANT_NEW='{ "max_cpu_seconds", 1, 599 },'
 elif [[ "$OWNER_KIND" == native-dev ]]; then
     SOURCE="$ROOT/tools/command/native_dev_command.c"
     OUTPUT="${ZCL_REFLEX_NATIVE_DEV_CORE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-native-dev-core-acceptance.json}"

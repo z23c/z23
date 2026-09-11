@@ -119,10 +119,25 @@ struct hs_dep {
 static pthread_mutex_t g_plan_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct hs_action_plan g_plan;
 
+/* `source_tu` is the OWNER translation unit — the capsule's identity in every
+ * receipt — and `sibling_tus` is the rest of its TU SET: a '|'-separated list
+ * of repo-relative .c paths, "" when the owner stands alone. The set exists
+ * because the capsule links without --no-undefined and is dlopen'ed
+ * RTLD_LAZY: a rule the story exercises that lives in a TU outside the set
+ * resolves from the RESIDENT binary, so a mutation in that TU cannot change
+ * the story's answer and the capsule reports STORY_GREEN for a mutation it
+ * claims to catch. Every TU in the set is #included into the capsule, and an
+ * edit to any of them selects this capsule. */
+enum {
+    HS_HOTFORK_TU_MAX = 256,       /* longest TU path a set may name */
+    HS_HOTFORK_SIBLING_MAX = 16,   /* most siblings one capsule may name */
+};
+
 struct hs_hotfork_def {
     const char *owner_id;
     const char *feedback_class;
     const char *source_tu;
+    const char *sibling_tus;
     const char *story_id;
     const char *fixture_id;
     const char *adapter_id;
@@ -131,11 +146,12 @@ struct hs_hotfork_def {
     const char *exercised_surface;
 };
 
-#define HOTFORK_CAPSULE(owner_id_, feedback_class_, source_tu_, story_id_, \
-                        fixture_id_, adapter_id_, max_time_ms_, \
+#define HOTFORK_CAPSULE(owner_id_, feedback_class_, source_tu_, sibling_tus_, \
+                        story_id_, fixture_id_, adapter_id_, max_time_ms_, \
                         forbidden_effect_mask_, surface_) \
-    { owner_id_, feedback_class_, source_tu_, story_id_, fixture_id_, \
-      adapter_id_, max_time_ms_, forbidden_effect_mask_, surface_ },
+    { owner_id_, feedback_class_, source_tu_, sibling_tus_, story_id_, \
+      fixture_id_, adapter_id_, max_time_ms_, forbidden_effect_mask_, \
+      surface_ },
 static const struct hs_hotfork_def k_hotfork_defs[] = {
 #include "../../engine/composition/hotfork_capsules.def"
 };
@@ -1722,6 +1738,84 @@ fail:
     return false;
 }
 
+/* Number of '|'-separated entries in a TU list; 0 for "" and for NULL. */
+static size_t hs_tu_list_count(const char *list)
+{
+    if (!list || !list[0]) return 0;
+    size_t count = 1;
+    for (const char *sep = strchr(list, '|'); sep; sep = strchr(sep + 1, '|'))
+        count++;
+    return count;
+}
+
+/* Copies entry `index` of a '|'-separated TU list into `buf`. False when the
+ * list has no such entry, the entry is empty, or it does not fit — every
+ * caller treats that as "this capsule does not resolve", never as "no more
+ * entries", so an over-long path fails closed instead of silently shortening
+ * the set. */
+static bool hs_tu_list_at(const char *list, size_t index, char *buf,
+                          size_t buf_size)
+{
+    const char *cursor = list ? list : "";
+    for (size_t i = 0; i < index; i++) {
+        const char *sep = strchr(cursor, '|');
+        if (!sep) return false;
+        cursor = sep + 1;
+    }
+    const char *sep = strchr(cursor, '|');
+    size_t len = sep ? (size_t)(sep - cursor) : strlen(cursor);
+    if (len == 0 || len >= buf_size) return false;
+    memcpy(buf, cursor, len);
+    buf[len] = 0;
+    return true;
+}
+
+/* True when `path` is the owner TU or any sibling of this capsule. */
+static bool hs_hotfork_def_owns_path(const struct hs_hotfork_def *def,
+                                     const char *path)
+{
+    if (!def || !path || !path[0]) return false;
+    if (strcmp(def->source_tu, path) == 0) return true;
+    char tu[HS_HOTFORK_TU_MAX];
+    size_t count = hs_tu_list_count(def->sibling_tus);
+    for (size_t i = 0; i < count; i++)
+        if (hs_tu_list_at(def->sibling_tus, i, tu, sizeof(tu)) &&
+            strcmp(tu, path) == 0)
+            return true;
+    return false;
+}
+
+/* A sibling list is valid when it is present, bounded, and every entry is a
+ * confined repo-relative path that is not the owner restated. */
+static bool hs_hotfork_siblings_valid(const struct hs_hotfork_def *def)
+{
+    if (!def->sibling_tus) return false;
+    size_t count = hs_tu_list_count(def->sibling_tus);
+    if (count > HS_HOTFORK_SIBLING_MAX) return false;
+    char tu[HS_HOTFORK_TU_MAX];
+    for (size_t i = 0; i < count; i++)
+        if (!hs_tu_list_at(def->sibling_tus, i, tu, sizeof(tu)) ||
+            tu[0] == '/' || strstr(tu, "..") ||
+            strcmp(tu, def->source_tu) == 0)
+            return false;
+    return true;
+}
+
+/* True when the two capsules claim any TU in common. One path belongs to at
+ * most one capsule, because hs_hotfork_for_path() returns the first match. */
+static bool hs_hotfork_defs_share_tu(const struct hs_hotfork_def *a,
+                                     const struct hs_hotfork_def *b)
+{
+    if (hs_hotfork_def_owns_path(b, a->source_tu)) return true;
+    char tu[HS_HOTFORK_TU_MAX];
+    size_t count = hs_tu_list_count(a->sibling_tus);
+    for (size_t i = 0; i < count; i++)
+        if (hs_tu_list_at(a->sibling_tus, i, tu, sizeof(tu)) &&
+            hs_hotfork_def_owns_path(b, tu))
+            return true;
+    return false;
+}
+
 static bool hs_hotfork_def_fields_present(const struct hs_hotfork_def *def)
 {
     return def && def->owner_id && def->owner_id[0] &&
@@ -1737,6 +1831,7 @@ static bool hs_hotfork_def_valid(const struct hs_hotfork_def *def)
     static const char required_forbidden_effects[] =
         "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite";
     return hs_hotfork_def_fields_present(def) &&
+        hs_hotfork_siblings_valid(def) &&
         strcmp(def->feedback_class, "HOT_FORK") == 0 &&
         strcmp(def->adapter_id, def->story_id) == 0 &&
         def->max_time_ms > 0 && def->max_time_ms <= 1000 &&
@@ -1751,8 +1846,8 @@ bool zcl_devloop_hotfork_registry_validate(void)
         for (size_t j = i + 1; j < count; j++)
             if (strcmp(k_hotfork_defs[i].owner_id,
                        k_hotfork_defs[j].owner_id) == 0 ||
-                strcmp(k_hotfork_defs[i].source_tu,
-                       k_hotfork_defs[j].source_tu) == 0 ||
+                hs_hotfork_defs_share_tu(&k_hotfork_defs[i],
+                                         &k_hotfork_defs[j]) ||
                 strcmp(k_hotfork_defs[i].story_id,
                        k_hotfork_defs[j].story_id) == 0)
                 return false;
@@ -1765,7 +1860,7 @@ static const struct hs_hotfork_def *hs_hotfork_for_path(const char *path)
     if (!path) return NULL;
     for (size_t i = 0; i < sizeof(k_hotfork_defs) / sizeof(k_hotfork_defs[0]);
          i++)
-        if (strcmp(k_hotfork_defs[i].source_tu, path) == 0) {
+        if (hs_hotfork_def_owns_path(&k_hotfork_defs[i], path)) {
             const struct hs_hotfork_def *def = &k_hotfork_defs[i];
             return hs_hotfork_def_valid(def) ? def : NULL;
         }
@@ -2014,6 +2109,62 @@ static void hs_hotfork_story_roots(const struct hs_hotfork_def *def,
     hs_sha3_root(fixture, fixture_root);
 }
 
+/* Appends one `#include "<repo root><tu>"` line, or -1 once anything has not
+ * fit. `used` carries the running length so the caller stays branch-free. */
+static int hs_hotfork_append_include(char *out, size_t out_size, int used,
+                                     const char *root, size_t root_len,
+                                     const char *tu, size_t tu_len)
+{
+    if (used < 0 || (size_t)used >= out_size) return -1;
+    int written = snprintf(out + used, out_size - (size_t)used,
+                           "#include \"%.*s%.*s\"\n", (int)root_len, root,
+                           (int)tu_len, tu);
+    if (written <= 0 || (size_t)used + (size_t)written >= out_size) return -1;
+    return used + written;
+}
+
+/* Renders the capsule's whole TU set as #include lines — the owner first,
+ * then each sibling in declaration order — as absolute paths, reusing the
+ * repo root already present as the prefix of `source_path`. A set that does
+ * not resolve renders `#error` rather than a short include list: a capsule
+ * that silently dropped a TU would resolve that TU's rules from the resident
+ * binary and report STORY_GREEN for a mutation it claims to catch. Always
+ * returns `out`, so the caller can pass it straight to snprintf(). */
+static const char *hs_hotfork_includes(const struct hs_hotfork_def *def,
+                                       const char *source_path,
+                                       char *out, size_t out_size)
+{
+    size_t source_len = strlen(source_path);
+    size_t owner_len = strlen(def->source_tu);
+    size_t root_len = source_len - owner_len;
+    int used = source_len >= owner_len &&
+        strcmp(source_path + root_len, def->source_tu) == 0
+        ? hs_hotfork_append_include(out, out_size, 0, source_path, root_len,
+                                    def->source_tu, owner_len)
+        : -1;
+    char tu[HS_HOTFORK_TU_MAX];
+    size_t count = hs_tu_list_count(def->sibling_tus);
+    for (size_t i = 0; used > 0 && i < count; i++)
+        used = hs_tu_list_at(def->sibling_tus, i, tu, sizeof(tu))
+            ? hs_hotfork_append_include(out, out_size, used, source_path,
+                                        root_len, tu, strlen(tu))
+            : -1;
+    if (used <= 0)
+        (void)snprintf(out, out_size,
+                       "#error HOT_FORK capsule TU set did not resolve\n");
+    return out;
+}
+
+/* Renders one capsule's whole unity translation unit: the capsule header,
+ * the owner (and sibling) TUs as #include lines, and the story body that
+ * observes them. The generated text is compiled with the resident action
+ * plan's DEV_CFLAGS, which carry -Wall -Werror, so it has to satisfy every
+ * warning the repository's own sources do. In particular each guard clause
+ * here is BRACED (`if (!out) { return false; }`): the body and the next
+ * statement share one generated line, and an unbraced guard makes GCC's
+ * -Wmisleading-indentation fire, which -Werror turns into a COMPILE_RED for
+ * every capsule built from that template rather than for anything the
+ * candidate edit did. Keep new templates braced for the same reason. */
 static int hs_hotfork_unity_source(
     const struct hs_hotfork_def *def, const char *source_path,
     char *out, size_t out_size)
@@ -2149,11 +2300,16 @@ static int hs_hotfork_unity_source(
     }
     if (strcmp(def->story_id,
                "command-registry-input-validation-core.v1") == 0) {
+        /* The validation chain spans several kernel TUs — the dispatcher,
+         * the per-key type table, the length/budget rules, and the dev.agent
+         * arms. Every one of them is in this capsule's TU set, so a mutation
+         * in any of them changes the story's answer. */
+        char includes[2048];
         return snprintf(out, out_size,
             "#define _GNU_SOURCE\n"
             "#define ZCL_HOTFORK_COMMAND_INPUT_CORE 1\n"
             "#include \"hotswap/hotfork_capsule.h\"\n"
-            "#include \"%s\"\n"
+            "%s"
             "static bool hf_valid(const char *path,const char *keys,const char *body) {\n"
             " struct json_value input; json_init(&input);"
             " bool parsed=json_read(&input,body,strlen(body));"
@@ -2162,7 +2318,7 @@ static int hs_hotfork_unity_source(
             " json_free(&input); return ok; }\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2204,7 +2360,8 @@ static int hs_hotfork_unity_source(
             "\"checks=%%u/%%u;failed_mask=0x%%x\","
             "out->checks_passed,out->checks_run,failed);"
             " return out->checks_run==6 && out->checks_passed==6; }\n",
-            source_path, def->exercised_surface);
+            hs_hotfork_includes(def, source_path, includes, sizeof(includes)),
+            def->exercised_surface);
     }
     if (strcmp(def->story_id,
                "shop-want-command-input-core.v1") == 0) {
@@ -2219,7 +2376,7 @@ static int hs_hotfork_unity_source(
             "#undef zcl_hotswap_service_acquire\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2267,7 +2424,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2316,7 +2473,7 @@ static int hs_hotfork_unity_source(
             "#undef zcl_hotswap_service_acquire\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2365,7 +2522,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2415,7 +2572,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2453,7 +2610,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
@@ -2525,7 +2682,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2587,7 +2744,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2632,7 +2789,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2693,7 +2850,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2727,7 +2884,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC; unsigned failed=0;\n"
             " #define HF_CHECK(x) do { unsigned n=out->checks_run++;"
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
@@ -2779,7 +2936,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " struct json_value doc,upper,rendered; json_init(&doc); json_set_object(&doc);"
@@ -2837,7 +2994,7 @@ static int hs_hotfork_unity_source(
             " return hf_reply?strdup(hf_reply):NULL; }\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " struct zcl_native_body_err err={0}; char *body=NULL; struct json_value args,doc;"
@@ -2903,7 +3060,7 @@ static int hs_hotfork_unity_source(
             " return path && strcmp(path,\"/tmp/zcl-hotfork-scratch\")==0; }\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " struct json_value doc; const char *workspace=NULL; uint64_t height=0; int64_t mtp=0;"
@@ -2949,7 +3106,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " struct json_value doc,rendered; json_init(&doc); json_set_object(&doc);"
@@ -3001,7 +3158,7 @@ static int hs_hotfork_unity_source(
             " return path && strcmp(path,\"/tmp/zcl-hotfork-scratch\")==0; }\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " static const char *const allowed[]={\"workspace\",\"epoch\",\"previous_proposal_root\"};"
@@ -3072,7 +3229,7 @@ static int hs_hotfork_unity_source(
             " zcl_command_reply_free(&reply); json_free(&doc); return ok; }\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " HF_CHECK(passport_key_allowed(\"stable_api_root\",false));"
@@ -3125,7 +3282,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " char lower[65],upper[65]; memset(lower,'a',64); lower[64]=0;"
@@ -3161,7 +3318,7 @@ static int hs_hotfork_unity_source(
             "#include \"%s\"\n"
             "__attribute__((visibility(\"hidden\")))\n"
             "bool zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out) {\n"
-            " if (!out) return false; memset(out,0,sizeof(*out));"
+            " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
             " size_t marker_len=0; const uint8_t *marker="

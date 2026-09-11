@@ -3534,6 +3534,8 @@ static void dev_test_run_emit(
     (void)json_push_kv_int(&phases, "identity_cas_sha3",
                            source->cas_elapsed_us);
     (void)json_push_kv_int(&phases, "graph_load", graph_load_us);
+    /* This command deliberately consumes an immutable prebuilt runner.  Zero
+     * means no compile/link action ran, not an unmeasured duration. */
     (void)json_push_kv_int(&phases, "compile", 0);
     (void)json_push_kv_int(&phases, "link", 0);
     (void)json_push_kv_int(&phases, "test_startup", test_startup_ms * 1000);
@@ -4140,7 +4142,7 @@ static void dev_scan_generation_markers(const char *root, const char *subdir,
             PLATFORM_DIRECTORY_OK &&
         platform_directory_transaction_list_regular(&directory, &names);
     if (ok) {
-        for (size_t i = 0; i < names.count; i++)
+        for (size_t i = 0; i < names.count && *count < capacity; i++)
             (void)dev_generation_marker_take(names.items[i], disposition,
                                              entries, capacity, count);
     }
@@ -4161,7 +4163,7 @@ static void dev_scan_generation_markers(const char *root, const char *subdir,
     if (!dir)
         return;
     struct dirent *item;
-    while ((item = readdir(dir)) != NULL)
+    while (*count < capacity && (item = readdir(dir)) != NULL)
         (void)dev_generation_marker_take(item->d_name, disposition, entries,
                                          capacity, count);
     closedir(dir);
@@ -4529,6 +4531,10 @@ static void dev_vcs_revert_finish(struct zcl_command_reply *reply, int rc,
                                   const uint8_t new_commit[32],
                                   bool relink_generation)
 {
+    /* Only VCS_OK / VCS_EPARTIAL actually write out_new_commit (vcs_revert
+     * forwards VCS_REFUSED / VCS_ERR before the forward commit lands), so
+     * the hex form is computed lazily per-branch below, never over an
+     * unwritten buffer. */
     char new_hex[65];
     if (rc == VCS_OK) {
         zcl_hex_encode(new_commit, 32, new_hex);
@@ -4725,6 +4731,8 @@ static bool dev_vcs_seal_hash(struct vcs_repo *r, struct vcs_index *idx,
                               const char *root, uint8_t new_sealset[32],
                               struct zcl_command_reply *reply)
 {
+    /* Compute the sealset the worktree would produce right now — the exact
+     * same computation vcs_snapshot() performs before its own seal check. */
     struct vcs_manifest m;
     if (!vcs_manifest_build(root, idx, &m)) {
         vcs_close(r);

@@ -3865,6 +3865,40 @@ static int test_hotfork_descriptor_boundary(void)
             "4f2383f01fb601897bcfc2f375060129b319e293cb907cf577532efa6000854d";
         ASSERT(zcl_devloop_hotfork_descriptor_validate(
             capsule.source_tu, object_root, &capsule));
+
+        /* A capsule may own a SET of translation units: an owner TU plus the
+         * `sibling_tus` named beside it in engine/composition/hotfork_capsules.def,
+         * all of which the builder #includes into the capsule. The kernel
+         * command-input capsule is the case that needs it — the validation
+         * chain's per-key type table, length/budget rules and dev.agent arms
+         * each live in their own TU now. An edit to ANY TU in the set must
+         * select this capsule: a sibling the capsule does not claim is never
+         * compiled into it, so its rules resolve from the RESIDENT binary
+         * through RTLD_LAZY and a mutation there cannot turn the story red.
+         * Descriptor identity stays the OWNER TU however the set was
+         * entered, so one capsule keeps one name in every receipt. */
+        capsule.owner_id = "kernel.command-input-validation-core.v1";
+        capsule.source_tu = "engine/modules/kernel/src/command_registry.c";
+        capsule.story_id = "command-registry-input-validation-core.v1";
+        capsule.story_root =
+            "05ff99d086eac22118ae3ea7627c077becbeb3c17fda049c21bf81b78a8ce237";
+        capsule.story_fixture_root =
+            "dcc2e025037440812fed20b2b0834a0e48b48c30f1df38fa0ac4d941d92c4b2b";
+        ASSERT(zcl_devloop_hotfork_descriptor_validate(
+            capsule.source_tu, object_root, &capsule));
+        ASSERT(zcl_devloop_hotfork_descriptor_validate(
+            "engine/modules/kernel/src/command_registry_input_types.c",
+            object_root, &capsule));
+        ASSERT(zcl_devloop_hotfork_descriptor_validate(
+            "engine/modules/kernel/src/command_registry_input_budget.c",
+            object_root, &capsule));
+        ASSERT(zcl_devloop_hotfork_descriptor_validate(
+            "engine/modules/kernel/src/command_registry_devagent_input.c",
+            object_root, &capsule));
+        /* A kernel TU outside the set is claimed by no capsule at all. */
+        ASSERT(!zcl_devloop_hotfork_descriptor_validate(
+            "engine/modules/kernel/src/command_registry_search.c",
+            object_root, &capsule));
         PASS();
     } _test_next:;
     return failures;

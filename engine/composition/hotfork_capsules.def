@@ -1,15 +1,28 @@
 /* Development-only HOT_FORK stories. Consumer defines:
- * HOTFORK_CAPSULE(owner_id, feedback_class, source_tu, story_id,
+ * HOTFORK_CAPSULE(owner_id, feedback_class, source_tu, sibling_tus, story_id,
  *                 fixture_id, adapter_id, max_time_ms,
  *                 forbidden_effect_mask, exercised_surface)
  *
  * The manifest names frozen story authority only. The candidate descriptor
- * is generated after compilation so it can bind the exact object root. */
+ * is generated after compilation so it can bind the exact object root.
+ *
+ * source_tu is the capsule's OWNER translation unit: it names the capsule in
+ * every receipt and is the identity the story root is sealed over.
+ *
+ * sibling_tus is the rest of the capsule's TU SET — a '|'-separated list of
+ * repo-relative .c paths, "" when the owner stands alone. The builder
+ * #includes the owner and then each sibling in declaration order, and an
+ * edit to ANY TU in the set selects this capsule. A rule the story claims to
+ * exercise that lives in a TU OUTSIDE the set is not observed at all: the
+ * capsule links without --no-undefined and is dlopen'ed RTLD_LAZY, so the
+ * call resolves from the RESIDENT binary and a mutation in that TU reports
+ * STORY_GREEN. When a rule moves to a sibling file, add the file here. */
 
 HOTFORK_CAPSULE(
     "vcs.source-package-checkout.v1",
     "HOT_FORK",
     "contexts/commons/modules/vcs/src/source_package_checkout.c",
+    "",
     "source-package-checkout-result-and-shard-shape.v1",
     "source-package-checkout-result-and-shard-shape.v1",
     "source-package-checkout-result-and-shard-shape.v1",
@@ -21,6 +34,7 @@ HOTFORK_CAPSULE(
     "dev.native-command-input-policy.v1",
     "HOT_FORK",
     "tools/command/native_dev_command.c",
+    "",
     "native-dev-input-and-interrupt-policy.v1",
     "native-dev-input-and-interrupt-policy.v1",
     "native-dev-input-and-interrupt-policy.v1",
@@ -32,6 +46,7 @@ HOTFORK_CAPSULE(
     "dev.native-hotswap-receipt-policy.v1",
     "HOT_FORK",
     "tools/command/native_dev_hotswap.c",
+    "",
     "native-dev-hotswap-receipt-policy.v1",
     "native-dev-hotswap-receipt-policy.v1",
     "native-dev-hotswap-receipt-policy.v1",
@@ -43,6 +58,7 @@ HOTFORK_CAPSULE(
     "dev.watcher-classification-core.v1",
     "HOT_FORK",
     "tools/dev/devloop_watch.c",
+    "",
     "devloop-watch-classification-core.v1",
     "devloop-watch-classification-core.v1",
     "devloop-watch-classification-core.v1",
@@ -54,6 +70,7 @@ HOTFORK_CAPSULE(
     "dev.cycle-diagnostic-policy.v1",
     "HOT_FORK",
     "tools/dev/devloop_cycle.c",
+    "",
     "devloop-cycle-diagnostic-policy.v1",
     "devloop-cycle-diagnostic-policy.v1",
     "devloop-cycle-diagnostic-policy.v1",
@@ -65,6 +82,7 @@ HOTFORK_CAPSULE(
     "dev.impact-plan-classification.v1",
     "HOT_FORK",
     "tools/dev/devloop_plan.c",
+    "",
     "devloop-plan-classification.v1",
     "devloop-plan-classification.v1",
     "devloop-plan-classification.v1",
@@ -76,6 +94,7 @@ HOTFORK_CAPSULE(
     "vcs.devloop-proof-envelope.v1",
     "HOT_FORK",
     "contexts/commons/modules/vcs/src/vcs_devloop.c",
+    "",
     "vcs-devloop-publication-envelope.v1",
     "vcs-devloop-publication-envelope.v1",
     "vcs-devloop-publication-envelope.v1",
@@ -87,6 +106,7 @@ HOTFORK_CAPSULE(
     "app.native-read-rpc-composition.v1",
     "HOT_FORK",
     "engine/controllers/src/app_native_handlers.c",
+    "",
     "app-native-read-rpc-composition.v1",
     "app-native-read-rpc-composition.v1",
     "app-native-read-rpc-composition.v1",
@@ -98,6 +118,7 @@ HOTFORK_CAPSULE(
     "zcode.moderation-input-policy.v1",
     "HOT_FORK",
     "tools/command/native_zcode_moderation_command.c",
+    "",
     "zcode-moderation-input-policy.v1",
     "zcode-moderation-input-policy.v1",
     "zcode-moderation-input-policy.v1",
@@ -109,6 +130,7 @@ HOTFORK_CAPSULE(
     "zcode.dev-input-policy.v1",
     "HOT_FORK",
     "tools/command/native_zcode_dev_command.c",
+    "",
     "zcode-dev-input-policy.v1",
     "zcode-dev-input-policy.v1",
     "zcode-dev-input-policy.v1",
@@ -120,6 +142,7 @@ HOTFORK_CAPSULE(
     "zcode.epoch-propose-input-policy.v1",
     "HOT_FORK",
     "tools/command/native_zcode_epoch_propose_command.c",
+    "",
     "zcode-epoch-propose-input-policy.v1",
     "zcode-epoch-propose-input-policy.v1",
     "zcode-epoch-propose-input-policy.v1",
@@ -131,6 +154,7 @@ HOTFORK_CAPSULE(
     "zcode.passport-input-policy.v1",
     "HOT_FORK",
     "tools/command/native_zcode_passport_command.c",
+    "",
     "zcode-passport-input-policy.v1",
     "zcode-passport-input-policy.v1",
     "zcode-passport-input-policy.v1",
@@ -142,6 +166,7 @@ HOTFORK_CAPSULE(
     "zcode.workspace-input-policy.v1",
     "HOT_FORK",
     "tools/command/native_zcode_workspace_command.c",
+    "",
     "zcode-workspace-input-policy.v1",
     "zcode-workspace-input-policy.v1",
     "zcode-workspace-input-policy.v1",
@@ -153,6 +178,7 @@ HOTFORK_CAPSULE(
     "vcs.source-package-transport-shape.v1",
     "HOT_FORK",
     "contexts/commons/modules/vcs/src/source_package_transport.c",
+    "",
     "source-package-transport-shape.v1",
     "source-package-transport-shape.v1",
     "source-package-transport-shape.v1",
@@ -164,6 +190,7 @@ HOTFORK_CAPSULE(
     "zcode.source-bundle-input-policy.v1",
     "HOT_FORK",
     "tools/command/native_zcode_source_bundle_command.c",
+    "",
     "zcode-source-bundle-input-policy.v1",
     "zcode-source-bundle-input-policy.v1",
     "zcode-source-bundle-input-policy.v1",
@@ -175,6 +202,7 @@ HOTFORK_CAPSULE(
     "dev.test-group-catalog-policy.v1",
     "HOT_FORK",
     "tools/dev/test_group_catalog.c",
+    "",
     "test-group-catalog-selection-policy.v1",
     "test-group-catalog-selection-policy.v1",
     "test-group-catalog-selection-policy.v1",
@@ -186,6 +214,7 @@ HOTFORK_CAPSULE(
     "shop.want-view-contract.v1",
     "HOT_FORK",
     "contexts/market/controllers/src/shop_native_want_view_contract.c",
+    "",
     "shop-want-view-contract.v1",
     "shop-want-view-contract.v1",
     "shop-want-view-contract.v1",
@@ -197,6 +226,7 @@ HOTFORK_CAPSULE(
     "shop.want-command-input-core.v1",
     "HOT_FORK",
     "contexts/market/controllers/src/shop_native_want.c",
+    "",
     "shop-want-command-input-core.v1",
     "shop-want-command-input-core.v1",
     "shop-want-command-input-core.v1",
@@ -208,6 +238,9 @@ HOTFORK_CAPSULE(
     "kernel.command-input-validation-core.v1",
     "HOT_FORK",
     "engine/modules/kernel/src/command_registry.c",
+    "engine/modules/kernel/src/command_registry_input_types.c|"
+    "engine/modules/kernel/src/command_registry_input_budget.c|"
+    "engine/modules/kernel/src/command_registry_devagent_input.c",
     "command-registry-input-validation-core.v1",
     "command-registry-input-validation-core.v1",
     "command-registry-input-validation-core.v1",
@@ -219,6 +252,7 @@ HOTFORK_CAPSULE(
     "crypto.curve25519-calculation.v1",
     "HOT_FORK",
     "core/modules/crypto/src/curve25519.c",
+    "",
     "curve25519-rfc7748-calculation.v1",
     "curve25519-rfc7748-calculation.v1",
     "curve25519-rfc7748-calculation.v1",
@@ -230,6 +264,7 @@ HOTFORK_CAPSULE(
     "vcs.package-policy-calculation.v1",
     "HOT_FORK",
     "contexts/commons/modules/vcs/src/package_policy.c",
+    "",
     "package-policy-boundary-calculation.v1",
     "package-policy-boundary-calculation.v1",
     "package-policy-boundary-calculation.v1",
@@ -241,6 +276,7 @@ HOTFORK_CAPSULE(
     "zcode.package-view-contract.v1",
     "HOT_FORK",
     "tools/command/native_zcode_package_view_command.c",
+    "",
     "zcode-package-view-contract.v1",
     "zcode-package-view-contract.v1",
     "zcode-package-view-contract.v1",
@@ -252,6 +288,7 @@ HOTFORK_CAPSULE(
     "shop.status-view-contract.v1",
     "HOT_FORK",
     "contexts/market/controllers/src/shop_native_handler.c",
+    "",
     "shop-status-view-contract.v1",
     "shop-status-view-contract.v1",
     "shop-status-view-contract.v1",
@@ -263,6 +300,7 @@ HOTFORK_CAPSULE(
     "shop.reputation-view-contract.v1",
     "HOT_FORK",
     "contexts/market/controllers/src/shop_native_reputation.c",
+    "",
     "shop-reputation-view-contract.v1",
     "shop-reputation-view-contract.v1",
     "shop-reputation-view-contract.v1",
@@ -274,6 +312,7 @@ HOTFORK_CAPSULE(
     "zcode.work-input-core.v1",
     "HOT_FORK",
     "tools/command/native_zcode_work_command.c",
+    "",
     "zcode-work-input-core.v1",
     "zcode-work-input-core.v1",
     "zcode-work-input-core.v1",
@@ -285,6 +324,7 @@ HOTFORK_CAPSULE(
     "zcode.corpus-command-core.v1",
     "HOT_FORK",
     "tools/command/native_zcode_corpus_command.c",
+    "",
     "zcode-corpus-command-core.v1",
     "zcode-corpus-command-core.v1",
     "zcode-corpus-command-core.v1",
