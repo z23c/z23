@@ -21,7 +21,11 @@
 # Fixture preference (product-aligned, never live datadir surgery):
 #   1. consensus-state-bundle-<H>.sqlite  (complete-state; zero-flag autodetect
 #      after platform/deploy/zclassic23-bundle-bootstrap.sh stages it into
-#      <datadir>/bundles/)
+#      <datadir>/bundles/). THIS-boot install also needs a header-chain seed
+#      (block_index.bin) at <datadir>/bundles/block_index.bin so
+#      boot_header_seed_import_maybe can seat the checkpoint header before
+#      autodetect; without it, CHECKPOINT_ROM binds the sqlite and then
+#      defers until P2P/fileservice headers reach the checkpoint height.
 #   2. utxo-seed-*.snapshot + block_index.bin  (legacy assisted starter pack,
 #      -load-snapshot-at-own-height)
 #   3. consensus_snapshot.db  (legacy checkpoint snapshot)
@@ -52,6 +56,16 @@ CONSENSUS_BUNDLE_CANDIDATES=(
     "$HOME"/.zclassic-c23-test/bundles/consensus-state-bundle-*.sqlite
     "$HOME"/.zclassic-c23/bundles/consensus-state-bundle-*.sqlite
     "$HOME"/.zclassic-c23/consensus-state-bundle-*.sqlite
+)
+# Header-chain seed for THIS-boot checkpoint bind. First existing >10MiB
+# wins so the test-lane fixture beats a copy of the operator artifact.
+# ZCL_C3_BLOCK_INDEX, if set, is tried first. Copied into the isolated
+# datadir only — never mutates the operator tree.
+HEADER_SEED_CANDIDATES=(
+    "$HOME"/.zclassic-c23-test/bundles/block_index.bin
+    "$HOME"/.zclassic-c23-test/block_index.bin
+    "$HOME"/.zclassic-c23/bundles/block_index.bin
+    "$HOME"/.zclassic-c23/block_index.bin
 )
 PEER="${ZCL_C3_PEER:-127.0.0.1:8033}"        # zclassic23 P2P — DIAL this for sync
 # File-service seed for instant-on header-chain / ROM fetch. -connect=HOST:P2P
@@ -258,6 +272,23 @@ select_newest_consensus_bundle() {
     printf '%s' "$newest_path"
 }
 
+select_first_header_seed() {
+    local extra=()
+    local cand size
+    [ -n "${ZCL_C3_BLOCK_INDEX:-}" ] && extra=("$ZCL_C3_BLOCK_INDEX")
+    for cand in "${extra[@]}" "${HEADER_SEED_CANDIDATES[@]}"; do
+        [ -n "$cand" ] && [ -f "$cand" ] || continue
+        # wc -c, not stat: this file's host-assumption pin for `stat` is
+        # shrink-only. Size is still the same 10MiB floor the other
+        # selectors use.
+        size=$(wc -c < "$cand" 2>/dev/null || echo 0)
+        [ "$size" -gt $((10*1024*1024)) ] || continue
+        printf '%s' "$cand"
+        return 0
+    done
+    printf '%s' ""
+}
+
 # Same host as a P2P HOST:PORT, on the dedicated file-service port.
 derive_file_peer() {
     local p2p="$1"
@@ -342,6 +373,30 @@ run_selftest() {
         *) got_ok=0 ;;
     esac
     st_check "utxo-seed fallback selector still works" "1" "$got_ok"
+
+    HEADER_SEED_CANDIDATES=("$st_dir"/seed/block_index.bin)
+    unset ZCL_C3_BLOCK_INDEX
+    got="$(select_first_header_seed)"
+    st_check "absent header-chain seed selects nothing" "" "$got"
+    echo tiny >"$st_dir/seed/block_index.bin"
+    got="$(select_first_header_seed)"
+    st_check "sub-10MiB header-chain seed is ignored" "" "$got"
+    truncate -s 11M "$st_dir/seed/block_index.bin"
+    got="$(select_first_header_seed)"
+    case "$got" in
+        */seed/block_index.bin) got_ok=1 ;;
+        *) got_ok=0 ;;
+    esac
+    st_check "header-chain seed selector picks the first >10MiB block_index.bin" "1" "$got_ok"
+    ZCL_C3_BLOCK_INDEX="$st_dir/seed/override.bin"
+    truncate -s 11M "$ZCL_C3_BLOCK_INDEX"
+    got="$(select_first_header_seed)"
+    case "$got" in
+        */seed/override.bin) got_ok=1 ;;
+        *) got_ok=0 ;;
+    esac
+    st_check "ZCL_C3_BLOCK_INDEX wins over HEADER_SEED_CANDIDATES" "1" "$got_ok"
+    unset ZCL_C3_BLOCK_INDEX
 
     st_check "derive_file_peer rewrites P2P host onto FS_PORT" \
         "127.0.0.1:18034" "$(derive_file_peer "127.0.0.1:8033")"
@@ -441,6 +496,19 @@ if [ -n "$CONSENSUS_BUNDLE" ] && [ -f "$CONSENSUS_BUNDLE" ] &&
     staged="$(ls "$DATADIR"/bundles/consensus-state-bundle-*.sqlite 2>/dev/null | head -1)"
     [ -n "$staged" ] && [ -f "$staged" ] \
         || die "courier staged no consensus-state-bundle-*.sqlite under $DATADIR/bundles"
+    # Seat the checkpoint header THIS boot. Autodetect defers until
+    # pindex_best_header owns the baked checkpoint hash; boot_header_seed_
+    # import_maybe consumes <datadir>/bundles/block_index.bin. Fileservice
+    # handshake against a live seeder can fail (peer ROM root != zero_root)
+    # so a local public header-chain fixture is the assisted weld.
+    header_seed="$(select_first_header_seed)"
+    if [ -n "$header_seed" ]; then
+        copy_fixture "$header_seed" "$DATADIR/bundles/block_index.bin" \
+            || die "header-chain seed copy failed"
+        echo "c3-probe: staged header-chain seed $header_seed -> bundles/block_index.bin ($(du -h "$DATADIR/bundles/block_index.bin" | cut -f1))"
+    else
+        echo "c3-probe: no local header-chain seed (block_index.bin); checkpoint-bundle install waits on P2P/fileservice headers"
+    fi
 elif [ -n "$BUNDLE_SNAP" ] &&
    [ -f "$BUNDLE_SNAP" ] &&
    [ -f "$BUNDLE_INDEX" ] &&

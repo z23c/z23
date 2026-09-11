@@ -266,33 +266,33 @@ Z23_FLAG("ZCL_BYTE_ORDER_SCAN_ROOTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_C23_MAX_GLIBC", "env_build", "GLIBC_2.38", "-",
           "undocumented; first use tools/scripts/check_c23_node_binary.sh:139")
 Z23_FLAG("ZCL_C3_ARTIFACT_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:73")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:87")
 Z23_FLAG("ZCL_C3_BLOCK_INDEX", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_test.sh:84")
 Z23_FLAG("ZCL_C3_BUDGET_SECS", "env_build", "600", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:65")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:79")
 Z23_FLAG("ZCL_C3_BUNDLE_SNAPSHOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_test.sh:83")
 Z23_FLAG("ZCL_C3_CONSENSUS_BUNDLE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:412")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:467")
 Z23_FLAG("ZCL_C3_FILE_PEER", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:381")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:436")
 Z23_FLAG("ZCL_C3_HISTORY_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/c3_stopwatch_run_and_record.sh:142")
 Z23_FLAG("ZCL_C3_MAX_BOOTS", "env_build", "12", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:72")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:86")
 Z23_FLAG("ZCL_C3_PEER", "env_build", "127.0.0.1:8033", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:56")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:70")
 Z23_FLAG("ZCL_C3_PEER_RPC", "env_build", "18232", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:64")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:78")
 Z23_FLAG("ZCL_C3_RUN_ID", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:74")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:88")
 Z23_FLAG("ZCL_C3_SNAPSHOT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:46")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:50")
 Z23_FLAG("ZCL_C3_STOPWATCH_HISTORY", "make_var", "-", "-",
           "undocumented; first use Makefile:8405")
 Z23_FLAG("ZCL_C3_TIP_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:63")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:77")
 Z23_FLAG("ZCL_CANARY_NO_EXACT", "env_build", "0", "-",
           "undocumented; first use tools/scripts/replay_canary.sh:582")
 Z23_FLAG("ZCL_CANARY_SELFTEST_BLOCK_FIFO", "env_build", "-", "-",
