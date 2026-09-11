@@ -259,7 +259,7 @@ static const struct agent_contract_work_surface g_agent_work_surfaces[] = {
       "promote peer lifecycle incidents, downloader failover, and bootstrapstatus into one operator proof",
       "download + peer_lifecycle + syncdiag_rpc + bootstrap harness" },
     { "agentops.top_next_work", 3, "promote_mvp_operator_proofs",
-      "MRS is 4/8; cold-start sync, live store flow, 168h soak, and exact parity still need full run-pass evidence.",
+      "MRS is 5/8; live store flow, 168h soak, and exact parity still need full run-pass evidence.",
       "wire the remaining full proofs into milestone and background quality verdicts",
       "mvp-verify + soak-evidence + parity service" },
     { "agentops.top_next_work", 4, "extend_semantic_timeline_durability",

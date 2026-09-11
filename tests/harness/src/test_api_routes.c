@@ -46,10 +46,10 @@ int api_route_table_focused_tests(void)
         ok = ok && strcmp(json_get_str(json_get(&root, "milestone")),
                           "v1 MVP") == 0;
         ok = ok && json_get_int(json_get(&root,
-                          "mvp_readiness_score")) == 4;
+                          "mvp_readiness_score")) == 5;
         ok = ok && json_get_int(json_get(&root, "target_score")) == 8;
         ok = ok && ascii && strstr(json_get_str(json_get(ascii, "goals")),
-                                   "goals [#####-----] 4/8") != NULL;
+                                   "goals [######----] 5/8") != NULL;
         ok = ok && bars && strcmp(json_get_str(json_get(json_get(bars,
                           "subgoals"), "bar")), "[########--]") == 0;
         ok = ok && criteria && json_size(criteria) == 8;
@@ -57,16 +57,16 @@ int api_route_table_focused_tests(void)
             strcmp(json_get_str(json_get(operator_proofs, "schema")),
                    "zcl.mvp_operator_proofs.v1") == 0;
         ok = ok && json_get_int(json_get(operator_proofs,
-                                         "accepted_count")) == 4;
+                                         "accepted_count")) == 5;
         ok = ok && json_get_int(json_get(operator_proofs,
-                                         "pending_count")) == 4;
+                                         "pending_count")) == 3;
         ok = ok && proof_items && json_size(proof_items) == 8;
         ok = ok && cold_start &&
             strcmp(json_get_str(json_get(cold_start, "key")),
                    "cold_start_sync") == 0;
         ok = ok && cold_start &&
             strcmp(json_get_str(json_get(cold_start, "proof_command")),
-                   "make mvp-coldstart-to-tip-local") == 0;
+                   "make mvp-coldstart-to-tip-stopwatch") == 0;
         ok = ok && soak &&
             strcmp(json_get_str(json_get(soak, "key")),
                    "seven_day_soak") == 0;

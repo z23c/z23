@@ -393,8 +393,8 @@ static bool rpc_milestone_status(const struct json_value *params, bool help,
         "version milestone.\n"
         "\nResult:\n"
         "  { \"schema\":\"zcl.milestone_status.v2\", "
-        "\"milestone\":\"v1 MVP\", \"mvp_readiness_score\":4, "
-        "\"ascii\":{\"goals\":\"goals [#####-----] 4/8 ...\"} }\n");
+        "\"milestone\":\"v1 MVP\", \"mvp_readiness_score\":5, "
+        "\"ascii\":{\"goals\":\"goals [######----] 5/8 ...\"} }\n");
 
     api_milestone_status_json(result);
     return true;
@@ -548,7 +548,7 @@ bool rpc_agent_proof_bundle(const struct json_value *params, bool help,
                  "when anchor_status.summary becomes anchor_snapshot_present, run the copy-prove refold cutover gates");
     json_push_back(&next, &item);
     json_set_str(&item,
-                 "use milestone.operator_proofs.items for remaining MRS 4/8 -> 8/8 evidence");
+                 "use milestone.operator_proofs.items for remaining MRS 5/8 -> 8/8 evidence");
     json_push_back(&next, &item);
     json_set_str(&item,
                  "deploy fresh development builds to the dev lane before canonical");

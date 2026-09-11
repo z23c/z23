@@ -60,9 +60,9 @@ int syncdiag_cases_operator(void)
         ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
                           "zcl.milestone_status.v2") == 0;
         ok = ok && json_get_int(json_get(&result,
-                          "mvp_readiness_score")) == 4;
+                          "mvp_readiness_score")) == 5;
         ok = ok && ascii && strstr(json_get_str(json_get(ascii, "goals")),
-                                   "goals [#####-----] 4/8") != NULL;
+                                   "goals [######----] 5/8") != NULL;
         ok = ok && bars && strcmp(json_get_str(json_get(json_get(bars,
                           "subgoals"), "bar")), "[########--]") == 0;
         ok = ok && criteria && json_size(criteria) == 8;
@@ -70,9 +70,9 @@ int syncdiag_cases_operator(void)
             strcmp(json_get_str(json_get(operator_proofs, "schema")),
                    "zcl.mvp_operator_proofs.v1") == 0;
         ok = ok && json_get_int(json_get(operator_proofs,
-                                         "accepted_count")) == 4;
+                                         "accepted_count")) == 5;
         ok = ok && json_get_int(json_get(operator_proofs,
-                                         "pending_count")) == 4;
+                                         "pending_count")) == 3;
         ok = ok && json_get_int(json_get(operator_proofs,
                                          "target_count")) == 8;
         ok = ok && strcmp(json_get_str(json_get(operator_proofs,
@@ -81,11 +81,10 @@ int syncdiag_cases_operator(void)
         ok = ok && proof_items && json_size(proof_items) == 8;
         ok = ok && cold_start &&
             strcmp(json_get_str(json_get(cold_start, "proof_command")),
-                   "make mvp-coldstart-to-tip-local") == 0;
+                   "make mvp-coldstart-to-tip-stopwatch") == 0;
         ok = ok && cold_start &&
             strcmp(json_get_str(json_get(cold_start, "primary_blocker")),
-                   "full_zclassic23_to_zclassic23_sync_to_tip_not_run_passed")
-                == 0;
+                   "none") == 0;
         ok = ok && soak &&
             strcmp(json_get_str(json_get(soak, "proof_scope")),
                    "live_window") == 0;
