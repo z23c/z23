@@ -588,6 +588,60 @@ bool command_registry_input_required_discovery(
     const struct zcl_command_spec *spec, const struct json_value *input,
     char *why, size_t why_size);
 
+/* Internal splits of command_registry.c — not part of the public surface.
+ * Declared here so sibling translation units can share them without growing
+ * command_registry.c past its recorded file-size ceiling. */
+struct agent_spend_policy_decision;
+
+bool command_registry_copy_string(char *out, size_t out_size, const char *value);
+bool command_registry_path_valid(const char *path);
+bool command_registry_csv_token_equal(const char *csv, const char *value);
+bool command_registry_csv_valid_paths(const char *csv);
+bool command_registry_is_branch(const struct zcl_command_spec *spec);
+bool command_registry_enum_values_valid(const struct zcl_command_spec *spec);
+bool command_registry_resolve_word_ok(const char *word);
+void command_registry_resolve_accept(
+    const struct zcl_command_spec *found, bool alias, size_t count,
+    const struct zcl_command_spec **best, size_t *best_count, bool *best_alias,
+    char *invoked, size_t invoked_size, const char *candidate);
+bool command_registry_resolve_append(char *candidate, size_t *pos,
+                                     const char *word);
+bool command_registry_latency_ring_p99(
+    const struct zcl_command_registry *registry,
+    const struct zcl_command_spec *spec, int64_t *p99_us, uint32_t *count);
+size_t command_registry_write_bounded_json(struct json_value *root, char *out,
+                                           size_t out_size,
+                                           size_t contract_budget);
+bool command_registry_push_string_array_csv(struct json_value *object,
+                                            const char *key, const char *csv);
+bool command_registry_reply_add_describe_next(
+    struct zcl_command_reply *reply, const struct zcl_command_spec *spec,
+    const char *reason);
+bool command_registry_push_error(struct json_value *root,
+                                 const struct zcl_command_error *error);
+bool command_registry_push_next_array(
+    struct json_value *root, const struct zcl_command_reply *reply,
+    const struct zcl_command_registry *registry,
+    const struct zcl_command_spec *current_spec);
+size_t command_registry_serialize_reply(
+    const struct zcl_command_registry *registry,
+    const struct zcl_command_spec *spec, struct zcl_command_reply *reply,
+    bool invoked_by_alias, uint64_t request_sequence, int64_t elapsed_us,
+    size_t budget_bytes, bool agent_session_presented,
+    const struct agent_spend_policy_decision *policy, char *out,
+    size_t out_size);
+bool command_registry_replace_validate(
+    const struct zcl_command_registry *registry,
+    const struct zcl_command_handler_override *overrides, size_t count,
+    char *why, size_t why_sz);
+void command_registry_execute_run(
+    const struct zcl_command_spec *spec,
+    const struct zcl_command_context *context, const struct json_value *input,
+    zcl_command_handler_fn handler, bool invoked_by_alias,
+    const char *invoked_name, const char *view, size_t budget_bytes,
+    size_t max_items, const char *cursor, struct zcl_command_reply *reply,
+    struct agent_spend_policy_decision *policy);
+
 #ifdef __cplusplus
 }
 #endif
