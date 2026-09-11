@@ -1057,7 +1057,12 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "docs/GETTING_STARTED.md") != NULL);
         ASSERT(strstr(buf, "Public start here") != NULL);
         ASSERT(strstr(buf, "make dev-bin") != NULL);
-        ASSERT(strstr(buf, "returned registered parallel group") != NULL);
+        /* Same contract, phrased as the README phrases it: how a
+         * contributor finds a valid `ONLY=` group. The old pin
+         * ("returned registered parallel group") was test jargon the
+         * README rewrite dropped rather than a fact a reader wants. */
+        ASSERT(strstr(buf, "`make t-list` lists every registered group")
+               != NULL);
         ASSERT(strstr(buf, "build/bin/z23 core sync diagnose")
                != NULL);
         ASSERT(strstr(buf, "| jq") == NULL);

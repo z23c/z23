@@ -22,7 +22,7 @@ registry, or a hosted service.
 
 ![A user-owned Z23 node containing a full node and C23 Commons, with replaceable AI workers outside its authority boundary](docs/assets/z23-hero.svg)
 
-## Start here
+## Public start here
 
 ```bash
 git clone https://github.com/z23c/z23.git
@@ -52,9 +52,10 @@ build/bin/z23
 The node starts on `~/.zclassic-c23` with P2P on `8033` and RPC on `18232`. A
 fresh datadir starts honestly empty — `getblockcount` returns `0` until real
 state lands, never a phantom tip. `build/bin/z23 status` reports readiness and
-the one next action worth taking; when sync stops, `core sync diagnose` says why
-and `ops logs --pattern='<regex>'` returns bounded diagnostics. To survive
-logout and reboot, use the shipped `systemd --user` unit:
+the one next action worth taking; when sync stops,
+`build/bin/z23 core sync diagnose` says why and `ops logs --pattern='<regex>'`
+returns bounded diagnostics. To survive logout and reboot, use the shipped
+`systemd --user` unit:
 
 ```bash
 sudo bash platform/deploy/setup.sh
@@ -139,9 +140,9 @@ and evidence can still be checked and reproduced here. Start at
 
 ## Working on Z23 itself
 
-The command registry is generated from the running program, so no document can
-drift away from it. Descend with `discover help <path>`, search with
-`discover search <query>`, and read a leaf's exact input keys with
+The native command registry is generated from the running program, so no
+document can drift away from it. Descend with `discover help <path>`, search
+with `discover search <query>`, and read a leaf's exact input keys with
 `discover schema <leaf>`. The source tree answers the same way — ask it instead
 of grepping it, and ask it which tests own the file you touched:
 
@@ -153,8 +154,9 @@ make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>
 ```
 
 `make t-list` lists every registered group, `ONLY=` is mandatory for `t-fast`,
-and `make test-parallel` runs the whole set. `make lint-fast` gives feedback
-while editing; publishing needs the full `make lint` gate set plus the impacted
+and `make test-parallel` runs the whole set. While editing, `make dev-bin`
+relinks the fast non-LTO `build/bin/z23-dev` and `make lint-fast` gives
+feedback; publishing needs the full `make lint` gate set plus the impacted
 groups, run in one isolated worktree against the exact commit pair and ending
 in a signed receipt the pre-push hook requires, so a green push means the
 evidence exists rather than that nobody looked.
