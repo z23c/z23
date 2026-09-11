@@ -38,7 +38,7 @@ Each category is independently selectable with `--only <name>`:
 |------------|----------------|
 | `ccache`   | trims the C compiler cache to its configured cap |
 | `zcc`      | trims the zcc compile cache to its configured cap; if no evictor binary can be found (checked at `ZCL_HOST_GC_ZCC_BIN`, on `PATH`, and at the installed copy) it names every path it tried instead of silently skipping |
-| `z23p`     | reaps dead dev-proof generations. A generation whose own lock/pid marker names a process that is still alive is kept regardless of age; one whose marker names a dead pid is reaped regardless of age; anything else follows the age floor |
+| `z23p`     | reaps dead dev-proof generations on the disk pool **and on its tmpfs twin** (`/dev/shm/z23p`, or `ZCL_HOST_GC_RAM_ROOT`), the twin through `z23 ops host gc` when a binary is available and through the same classifier when none is. A generation whose own lock/pid marker names a process that is still alive is kept regardless of age; one whose marker names a dead pid is reaped regardless of age; anything else follows the age floor |
 | `tmp`      | registered worktrees found under `/tmp` via `git worktree list` |
 | `tmplitter`| unregistered `/tmp` entries with no worktree behind them at all — throwaway test fixtures `tmp`'s worktree-list walk never sees |
 | `journal`  | vacuums the user journal; prints (never runs) the root-owned system journal command |

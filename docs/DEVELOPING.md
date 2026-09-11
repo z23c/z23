@@ -852,7 +852,10 @@ that are still in flight, and it also sweeps any generation left over from a
 prior run at the next submit or step so a resident leaf never accumulates
 finished generations across restarts. What a generation keeps past its own
 lifetime is warm-start's own donor set of immutable build outputs, reaped
-under the same existing newest-donor policy, not proof state.
+under the same existing newest-donor policy, not proof state. Whatever
+outlives a killed leaf is the hourly host sweep's job: the `z23p` category of
+`tools/scripts/host_gc.sh` reaps dead generations from the disk pool and from
+the tmpfs twin alike.
 
 Vendored dependencies a generation needs are materialized into it as private
 copies, never as hard links to the submitting checkout, so no generation can

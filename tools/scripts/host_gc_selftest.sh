@@ -35,9 +35,29 @@ TRAINS_FX="$HOME_FX/.z23/trains"
 SCRATCH_FX="$HOME_FX/.local/state/zclassic23/scratch"
 ZCCDIR_FX="$HOME_FX/.cache/zcc"
 Z23P_FX="$HOME_FX/github/.z23p"
+# The tmpfs twin of the proof pool, and the node binary the z23p sweep
+# prefers for it. BOTH are pinned to the fixture here on purpose: left at
+# their production defaults this selftest would point a real `z23 ops host
+# gc --apply` at the real /dev/shm/z23p of whatever box it runs on.
+RAM_FX="$WORK/shm/z23p"
+Z23_STUB="$WORK/z23-stub"
+Z23_STUB_CALLS="$WORK/z23-stub-calls.log"
 
 mkdir -p -- "$TMP_FX" "$PROC_FX" "$STATE_FX" "$UNITS_FX" "$LANES_FX" \
-    "$TRAINS_FX" "$SCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX"
+    "$TRAINS_FX" "$SCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX" "$RAM_FX"
+
+cat > "$Z23_STUB" <<'STUBEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${Z23_STUB_CALL_LOG:?}"
+printf '%s\n' "$*" >> "$Z23_STUB_CALL_LOG"
+printf '{"schema":"zcl.host_gc.v1","status":"passed","data":{"apply":true,'
+printf '"classes":[{"class":"z23p","bytes_reclaimed":7},'
+printf '{"class":"z23p-ram","bytes_reclaimed":40953}],'
+printf '"totals":{"registered":2,"bytes_reclaimed":40960},"refusals":[]}}\n'
+STUBEOF
+chmod +x -- "$Z23_STUB"
+: > "$Z23_STUB_CALLS"
 
 # A real git repo stands in for GC_REPO so `git cherry`, `worktree add` and
 # `worktree remove` behave exactly as they do on the live host.
@@ -68,6 +88,9 @@ run_hostgc() {
         ZCL_HOST_GC_SCRATCH_DIR="$SCRATCH_FX" \
         ZCL_HOST_GC_ZCC_DIR="$ZCCDIR_FX" \
         ZCL_HOST_GC_Z23P="$Z23P_FX" \
+        ZCL_HOST_GC_RAM_ROOT="$RAM_FX" \
+        ZCL_HOST_GC_Z23_BIN="${ZCL_HOST_GC_Z23_BIN:-$Z23_STUB}" \
+        Z23_STUB_CALL_LOG="$Z23_STUB_CALLS" \
         ZCL_HOST_GC_UNITS_MIN_AGE_H=0 \
         ZCL_HOST_GC_SCRATCH_MIN_AGE_D=0 \
         ZCL_HOST_GC_Z23P_MIN_AGE_H=0 \
@@ -133,6 +156,41 @@ out="$(run_hostgc z23p apply)"
 [ -e "$Z23P_FX/gen-dead" ] && fail "z23p apply left a dead-creator generation behind" \
     || pass "z23p apply removed the dead-creator generation"
 [ -e "$Z23P_FX/gen-alive" ] || fail "z23p apply removed a live-creator generation"
+
+# ------------------------------------------------------------- z23p (tmpfs)
+# The tmpfs twin of the pool is the half nobody swept: it grew to 34 GB of
+# RAM in one unattended day while this category reported the disk pool
+# clean. The sweep must reach it every run, hand the native verb the apply
+# flag and the age floor THIS run is using, and log one row carrying the
+# byte total the report itself gave — not a number this script invented.
+log_lines_before="$(wc -l < "$STATE_FX/host_gc.log" 2>/dev/null || echo 0)"
+: > "$Z23_STUB_CALLS"
+out="$(run_hostgc z23p dry-run)"
+assert_contains "$(cat -- "$Z23_STUB_CALLS")" "ops host gc --apply=false --floor_hours=0" \
+    "z23p dry-run asks the native sweep for a dry run at this run's age floor"
+: > "$Z23_STUB_CALLS"
+out="$(run_hostgc z23p apply)"
+new_log="$(tail -n "+$(( log_lines_before + 1 ))" -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
+assert_contains "$(cat -- "$Z23_STUB_CALLS")" "ops host gc --apply=true --floor_hours=0" \
+    "z23p apply asks the native sweep to apply"
+assert_contains "$out" "$RAM_FX" "z23p apply names the tmpfs pool it swept"
+assert_contains "$new_log" "z23p-ram" "z23p apply logs one z23p-ram row"
+assert_contains "$new_log" "40960" \
+    "the z23p-ram row carries bytes_reclaimed straight from the report's totals"
+calls="$(wc -l < "$Z23_STUB_CALLS")"
+[ "$calls" = 1 ] || fail "z23p apply invoked the native sweep $calls time(s), expected exactly 1"
+
+# No binary anywhere: the sweep must still LOOK at the tmpfs pool, using
+# this script's own classifier, rather than skip the half of the pool it
+# cannot reach the preferred way.
+git -C "$REPO_FX" worktree add -q --detach "$RAM_FX/gen-ram-dead" main >/dev/null
+touch_old "$RAM_FX/gen-ram-dead"
+printf '999999999\n' > "$RAM_FX/gen-ram-dead/creator.pid"
+out="$(ZCL_HOST_GC_Z23_BIN="$WORK/no-such-z23" PATH="/usr/bin:/bin" \
+    run_hostgc z23p apply)"
+assert_contains "$out" "no z23 binary" "z23p says why it fell back to its own classifier"
+[ -e "$RAM_FX/gen-ram-dead" ] && fail "the fallback classifier left a dead tmpfs generation behind" \
+    || pass "the fallback classifier reaps a dead tmpfs generation"
 
 # --------------------------------------------------------------------- zcc
 out="$(ZCL_HOST_GC_ZCC_BIN="$WORK/no-such-zcc" PATH="/usr/bin:/bin" \

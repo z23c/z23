@@ -49,7 +49,9 @@
 # CATEGORIES (-a..-i map to the sweep order below):
 #   ccache   cap ccache to 20 GB and collect
 #   zcc      trim the zcc compile cache to 15 GB with its own evictor
-#   z23p     reap dead dev-proof generations (the 158 GB leak)
+#   z23p     reap dead dev-proof generations (the 158 GB leak) on the disk
+#            pool AND on its tmpfs twin, which grew to 34 GB of RAM in one
+#            unattended day while nothing here was looking at it
 #   tmp      registered worktrees under /tmp
 #   tmplitter unregistered /tmp test fixtures (no worktree behind them)
 #   journal  vacuum the user journal to 512 MB
@@ -98,6 +100,18 @@ SYSTEM_JOURNAL_CAP="${ZCL_HOST_GC_SYSTEM_JOURNAL_CAP:-1G}"
 # accumulation before the first look was pure waste on a box that mints a
 # ~2 GB generation every few minutes.
 Z23P_MIN_AGE_H="${ZCL_HOST_GC_Z23P_MIN_AGE_H:-6}"
+# The tmpfs TWIN of that pool. dev_proof.c builds a generation in RAM when
+# RAM scratch is reserved and on disk otherwise, so a sweep that only walks
+# the disk pool watches half the leak: the RAM pool reached 34 GB in one
+# unattended day while this script reported the z23p category clean.
+Z23P_RAM="${ZCL_HOST_GC_RAM_ROOT:-/dev/shm/z23p}"
+# The node binary. `z23 ops host gc` is preferred for the twin because it
+# finds the repository behind each generation from the generation itself,
+# so it reaches pools this script's single GC_REPO worktree listing cannot.
+# The timer runs from ~/.local/lib/z23/tools, so the installed binary is
+# that directory's sibling; anything else falls back to PATH, and a box
+# with neither falls back to this script's own classifier.
+Z23_BIN="${ZCL_HOST_GC_Z23_BIN:-$SCRIPT_DIR/../z23}"
 TMP_MIN_AGE_D="${ZCL_HOST_GC_TMP_MIN_AGE_D:-2}"
 # tmplitter: unregistered /tmp entries (no worktree of any kind, not one of
 # the standing exemptions below). Separate knob from TMP_MIN_AGE_D because
@@ -572,6 +586,13 @@ sweep_zcc() {
 # on the host had the authority to reclaim it: `git worktree prune` finds
 # nothing because every generation is still correctly registered.
 #
+# THE POOL COMES IN TWO HALVES. dev_proof.c builds a generation in RAM when
+# RAM scratch is reserved and on disk otherwise, so both are swept here: the
+# disk pool by the classifier below, the tmpfs twin by `z23 ops host gc`
+# when a binary is available (it finds the repository behind a generation
+# from the generation itself, so it sees twins this script's single GC_REPO
+# listing cannot) and by the same classifier when none is.
+#
 # A generation is reapable when ALL of these hold:
 #   older than Z23P_MIN_AGE_H     (a proof in flight is minutes old)
 #   no process has it as cwd      (a proof in flight is chdir'd into it)
@@ -601,12 +622,15 @@ z23p_creator_status() {
     printf 'unknown'
 }
 
-sweep_z23p() {
-    want z23p || return 0
-    hdr "dev-proof generations (.z23p, older than ${Z23P_MIN_AGE_H}h)"
-    local pool="${ZCL_HOST_GC_Z23P:-$GC_HOME/github/.z23p}"
-    [ -d "$pool" ] || { say "z23p: no pool — skipped"; return 0; }
-    build_cwd_set
+# Classify, and with --apply reap, every generation of ONE pool. Split out
+# of sweep_z23p so the disk pool and its tmpfs twin run byte-identical
+# rules. Only generations `git worktree list` reports for GC_REPO are
+# visible here: that is the whole registry for the disk pool, but a RAM
+# generation minted by a different checkout is not in it, which is why the
+# twin prefers the native sweep below.
+z23p_sweep_pool() {
+    local pool="$1"
+    [ -d "$pool" ] || { say "z23p: no pool at $pool — skipped"; return 0; }
     local min_age=$(( Z23P_MIN_AGE_H * 3600 ))
     local total=0 removed=0 kept=0 dirty=0 busy=0 young=0 bytes
     local wt creator
@@ -658,8 +682,66 @@ sweep_z23p() {
             log_line "z23p-remove" "$wt" "$bytes" "detached+clean"
         fi
     done < <(worktree_paths "$GC_REPO")
-    say "z23p: $total registered — $removed reapable, $young too young, $busy in use, $kept locked, $dirty need review"
+    say "z23p: $pool — $total registered, $removed reapable, $young too young, $busy in use, $kept locked, $dirty need review"
     [ "$APPLY" = 1 ] && git -C "$GC_REPO" worktree prune >/dev/null 2>&1 || true
+    return 0
+}
+
+# The node binary: $Z23_BIN (the installed sibling unless the flag says
+# otherwise), then PATH. Prints the path and returns 0, or prints nothing
+# and returns 1 so the caller can fall back to classifying the pool itself.
+z23p_native_bin() {
+    local c="$Z23_BIN"
+    if [ ! -x "$c" ]; then c="$(command -v z23 2>/dev/null || true)"; fi
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s' "$c"; return 0; fi
+    return 1
+}
+
+# bytes_reclaimed out of a zcl.host_gc.v1 report. `totals` is emitted after
+# the per-class rows, so the LAST occurrence is the whole-run figure. An
+# unparsable report reads as 0 rather than aborting the sweep.
+z23p_native_bytes() {
+    local n=""
+    n="$(printf '%s' "$1" \
+        | grep -o '"bytes_reclaimed"[[:space:]]*:[[:space:]]*[0-9][0-9]*' \
+        | tail -1 | grep -o '[0-9][0-9]*$')" || true
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+# The tmpfs twin, swept by the native verb when one is available and by this
+# script's own classification when it is not. HOME and the RAM scratch root
+# are handed to the binary explicitly so the pools it anchors are exactly
+# the pools this run is configured for — that is what keeps the fixture in
+# tools/scripts/host_gc_selftest.sh off the real host. ONE log line per run,
+# carrying the byte total the report itself gave.
+z23p_sweep_ram() {
+    local bin out bytes floor apply_arg
+    [ -d "$Z23P_RAM" ] || { say "z23p: no tmpfs pool at $Z23P_RAM — skipped"; return 0; }
+    if ! bin="$(z23p_native_bin)"; then
+        say "z23p: no z23 binary (checked $Z23_BIN and PATH) — classifying $Z23P_RAM from this script instead"
+        z23p_sweep_pool "$Z23P_RAM"
+        return 0
+    fi
+    floor="$Z23P_MIN_AGE_H"
+    if [ "$LOW_DISK" = 1 ]; then floor=0; fi
+    apply_arg=false
+    if [ "$APPLY" = 1 ]; then apply_arg=true; fi
+    out="$(env HOME="$GC_HOME" ZCL_RAM_SCRATCH_ROOT="$(dirname -- "$Z23P_RAM")" \
+        "$bin" ops host gc "--apply=$apply_arg" "--floor_hours=$floor" 2>&1)" || true
+    bytes="$(z23p_native_bytes "$out")"
+    say "z23p: tmpfs pool $Z23P_RAM — $(human "$bytes") reclaimed via $bin"
+    add_result z23p "$bytes" 1
+    log_line "z23p-ram" "$Z23P_RAM" "$bytes" "native ops.host.gc floor=${floor}h"
+    return 0
+}
+
+sweep_z23p() {
+    want z23p || return 0
+    hdr "dev-proof generations (.z23p, older than ${Z23P_MIN_AGE_H}h)"
+    build_cwd_set
+    z23p_sweep_pool "${ZCL_HOST_GC_Z23P:-$GC_HOME/github/.z23p}"
+    z23p_sweep_ram
     return 0
 }
 
