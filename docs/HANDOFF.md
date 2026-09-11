@@ -45,33 +45,54 @@ Do not reason about live behaviour from this checkout. The node can look
 exactly like a node with a real bug when the fix is already in `main` and
 merely never shipped.
 
-## Train pipeline handoff (2026-09-07)
+## Landing and lane handoff (2026-09-11)
 
-The landing and train state lives in ledgers, not on this page. Re-check them
-before trusting any sentence below:
+Landing state lives in ledgers, not on this page. Re-check them before
+trusting any sentence below:
 
 ```bash
-tail -3 ~/.local/state/z23/dev/land/outcomes.jsonl            # last landings, one row per train
-cat ~/.local/state/zclassic23/scratch/train51/late_picks.txt   # the next train's pick queue
-cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-07.md  # the orchestrator's handoff notes
+tail -3 ~/.local/state/z23/dev/land/outcomes.jsonl        # last landings, one row per lane
+z23-dev dev land status | jq -r .data.screen              # queue, in-flight entry, recent outcomes
+cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the maintainer host's handoff notes
 ```
 
-- Trains are assembled in `~/.z23/trains/train<N>` from verified review refs
-  (`refs/review/<lane>` in the maintainer checkout), landed through `dev land`
-  on the landing box, then rolled out from the ship-source box with the
-  `ship_*.sh --skip-gate` helpers, slowest disk first.
-- Every lane keeps its brief at `~/.local/state/zclassic23/scratch/<lane>/BRIEF.md`
-  and its worktree under `~/.z23/lanes/<lane>`. A lane whose agent dies with
-  its session resumes from that worktree and brief; it is never restarted from
-  scratch.
-- The shell-to-C23 lint gate port ledger is
-  `~/.local/state/zclassic23/scratch/northstar/unported_classified.md`; each
-  port replaces one script with an exec shim and one new family file under
-  `tools/lint/lintc/`.
-- Open items carried into the next train: move the selftest fixture that
-  `tools/ship.sh` keeps under `/tmp` into the state scratch directory, and
-  give the hex-codec and byte-order coverage oracles a filesystem walk for
-  trees that have no `.git`.
+- A lane is one worktree under `~/.z23/lanes/<name>` with signed commits on
+  top of `origin/main`. It reaches `main` only through the native lander:
+  `z23-dev dev land submit --tip=<sha> --worktree=<lane>` followed by
+  `dev land step` beats (the maintainer host runs a stepper unit that lingers
+  on an empty queue). The lander rebases the entry, regenerates the
+  generated documents, runs the full lint umbrella and the impact-selected
+  test groups, and pushes. Nothing else pushes: the pre-push hook refuses
+  every remote ref except `main`, so unlanded work stays in its lane.
+- A landing that ends in `child_proof_failed_exit_2` names no gate in the
+  land log. Run `dev proof status` in the lander's worktree; its `log_dir`
+  holds the lint log (search for `FAIL log:`) and the test log (search for
+  `SUITE VERDICT`).
+- Full-lint gates that catch fresh lanes: a new command leaf needs a
+  `REMOTE_COMMAND_CLASS` row; a new `bool`-returning export in a file with no
+  entry in the service-result convergence baseline is refused (return
+  `struct zcl_result`); a Makefile insertion shifts the `first use Makefile:N`
+  anchors in the flag registry; a fresh worktree needs `make install-hooks`
+  before the lint-gate hygiene groups pass.
+- Before submitting: every commit in `origin/main..HEAD` shows `G` under
+  `%G?`; `git diff --name-only origin/main...HEAD` equals the lane's owned
+  file list; the cyclomatic baseline gains no pin; `git merge-tree
+  --write-tree --name-only origin/main HEAD` prints only a tree hash.
+- Rollout is one ship per node from the ship-source box, slowest disk first,
+  never two ships at once, never a restart outside the ship. The 2026-09-11
+  landings move a spinning-disk node's post-crash integrity scan of the
+  projection store off the boot thread; witness it on the next ship as
+  `bg_quick_check scanning target=progress.kv` in the node log with RPC
+  answering within seconds of start.
+- The legacy beta6 daemon syncs from this network over plain P2P. Serving it
+  an anchor snapshot needs a serve tree of only `blocks/` and `chainstate/`
+  with the `.anchor` sidecar beside it; `z23 dev beta6 verify --source_dir=`
+  runs the real arming preflight without touching a running node. The
+  maintainer host is minting that tree; arming, quota, and posture policy are
+  owner decisions recorded in the host handoff notes.
+- Open items carried forward: land the hot-fork single-link publish and the
+  dev depfile fix (both in lanes on the maintainer host), ship, then arm the
+  beta6 serve tree and hand the fresh-datadir anchor test to a Windows box.
 
 ## How to read the ledgers
 
