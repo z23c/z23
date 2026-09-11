@@ -274,9 +274,9 @@ Z23_FLAG("ZCL_C3_BUDGET_SECS", "env_build", "600", "-",
 Z23_FLAG("ZCL_C3_BUNDLE_SNAPSHOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_test.sh:83")
 Z23_FLAG("ZCL_C3_CONSENSUS_BUNDLE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:467")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:484")
 Z23_FLAG("ZCL_C3_FILE_PEER", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:436")
+          "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:453")
 Z23_FLAG("ZCL_C3_HISTORY_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/c3_stopwatch_run_and_record.sh:142")
 Z23_FLAG("ZCL_C3_MAX_BOOTS", "env_build", "12", "-",

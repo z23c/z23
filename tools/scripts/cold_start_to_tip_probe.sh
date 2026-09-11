@@ -297,6 +297,16 @@ derive_file_peer() {
     printf '%s:%s' "$host" "$FS_PORT"
 }
 
+# A TCP-open fileservice is not a handshake. Mixed-version seeders (legacy
+# nonce KDF) fail key confirmation; passing -fileservice then only delays
+# THIS-boot install. Once a local header-chain seed is staged, drop FILE_PEER.
+drop_file_peer_for_staged_header_seed() {
+    if [ -n "${FILE_PEER:-}" ]; then
+        echo "c3-probe: dropping -fileservice=$FILE_PEER — header-chain seed is already staged"
+        FILE_PEER=""
+    fi
+}
+
 # True iff the boot-exit-reason.v1 `reason` is a supervised self-respawn
 # request (self_respawn_tip_watchdog / self_respawn_supervisor_backstop /
 # self_respawn_both). Matches tools/scripts/cold_start_to_tip_stopwatch.sh.
@@ -403,6 +413,13 @@ run_selftest() {
     st_check "derive_file_peer rejects a host with no port" \
         "" "$(derive_file_peer "127.0.0.1" || true)"
 
+    FILE_PEER="127.0.0.1:18034"
+    drop_file_peer_for_staged_header_seed >/dev/null
+    st_check "staged header seed drops FILE_PEER" "" "$FILE_PEER"
+    FILE_PEER=""
+    drop_file_peer_for_staged_header_seed >/dev/null
+    st_check "empty FILE_PEER stays empty" "" "$FILE_PEER"
+
     rm -rf "$st_dir"
     if [ "$st_fail" != 0 ]; then
         echo "c3-probe: --selftest FAIL" >&2
@@ -506,6 +523,7 @@ if [ -n "$CONSENSUS_BUNDLE" ] && [ -f "$CONSENSUS_BUNDLE" ] &&
         copy_fixture "$header_seed" "$DATADIR/bundles/block_index.bin" \
             || die "header-chain seed copy failed"
         echo "c3-probe: staged header-chain seed $header_seed -> bundles/block_index.bin ($(du -h "$DATADIR/bundles/block_index.bin" | cut -f1))"
+        drop_file_peer_for_staged_header_seed
     else
         echo "c3-probe: no local header-chain seed (block_index.bin); checkpoint-bundle install waits on P2P/fileservice headers"
     fi
