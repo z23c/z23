@@ -56,6 +56,15 @@ bool bg_validation_validate_block_proofs(const struct block *block,
                                          int64_t *proofs_out,
                                          int64_t *skips_out);
 
+/* Tally one verified block's undo-missing script skips and report whether
+ * this block is the RISING EDGE of a suppression streak (the one block that
+ * may LOG_WARN). `verified_with_undo` is true when the block actually
+ * re-checked transparent scripts; only such a block clears the streak.
+ * On the edge, blocks_out and txs_out receive the post-increment totals also
+ * published by bg_validation_get_undo_skip_stats(). */
+bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,
+                                   uint64_t *blocks_out, uint64_t *txs_out);
+
 /* ── Parallel script verification (bg_validation_scripts.c) ───────── */
 
 struct script_check_item {

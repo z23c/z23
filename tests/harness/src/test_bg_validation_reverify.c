@@ -43,6 +43,13 @@ bool bg_validation_verify_shielded_proofs(const struct transaction *tx,
                                           uint32_t branch_id,
                                           int64_t *proofs_out);
 
+/* Sibling-private undo-skip tally + rising-edge seam (same TU as the block
+ * verifier). The verifier calls it once per block and LOG_WARNs only when it
+ * returns true, so driving it directly is driving the exact suppression
+ * decision the log depends on. */
+bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,
+                                   uint64_t *blocks_out, uint64_t *txs_out);
+
 static _Atomic int g_body_read_calls;
 static pthread_mutex_t g_body_read_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_body_read_cv = PTHREAD_COND_INITIALIZER;
@@ -765,9 +772,70 @@ static int test_bg_validation_authority_requires_complete_coverage(void)
     return failures;
 }
 
+/* N consecutive undo-missing blocks must produce exactly ONE warn-worthy
+ * rising edge — the defect this replaces printed one WARN per block (11,868
+ * lines in 30 minutes on a header-only-imported index). The tallies must
+ * still count every block and every skipped tx, and a block that really did
+ * re-verify transparent scripts must clear the streak so a later recurrence
+ * announces itself again. */
+static int test_bg_validation_undo_skip_warns_once_per_streak(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: undo-missing skips warn on the rising edge only") {
+        bg_validation_reset_undo_skip_stats();
+
+        const int kBlocks = 500;
+        int edges = 0;
+        for (int i = 0; i < kBlocks; i++) {
+            uint64_t blocks = 0, txs = 0;
+            if (bg_validation_note_undo_skips(3, false, &blocks, &txs))
+                edges++;
+        }
+        ASSERT(edges == 1);
+
+        struct bg_validation_undo_skip_stats st =
+            bg_validation_get_undo_skip_stats();
+        ASSERT(st.blocks == (uint64_t)kBlocks);
+        ASSERT(st.txs == (uint64_t)kBlocks * 3);
+        ASSERT(st.streak_active);
+
+        /* A coinbase-only / undo-less block does NOT clear the streak. */
+        uint64_t b = 0, t = 0;
+        ASSERT(!bg_validation_note_undo_skips(0, false, &b, &t));
+        st = bg_validation_get_undo_skip_stats();
+        ASSERT(st.streak_active);
+
+        /* A block that genuinely script-verified against undo does. */
+        ASSERT(!bg_validation_note_undo_skips(0, true, &b, &t));
+        st = bg_validation_get_undo_skip_stats();
+        ASSERT(!st.streak_active);
+
+        /* A later recurrence re-announces, and the tallies keep running. */
+        ASSERT(bg_validation_note_undo_skips(2, false, &b, &t));
+        ASSERT(b == (uint64_t)kBlocks + 1);
+        ASSERT(t == (uint64_t)kBlocks * 3 + 2);
+        ASSERT(!bg_validation_note_undo_skips(2, false, &b, &t));
+
+        st = bg_validation_get_undo_skip_stats();
+        ASSERT(st.blocks == (uint64_t)kBlocks + 2);
+        ASSERT(st.txs == (uint64_t)kBlocks * 3 + 4);
+
+        /* Reset zeroes the tallies and re-arms the announcement. */
+        bg_validation_reset_undo_skip_stats();
+        st = bg_validation_get_undo_skip_stats();
+        ASSERT(st.blocks == 0 && st.txs == 0 && !st.streak_active);
+        ASSERT(bg_validation_note_undo_skips(1, false, &b, &t));
+        bg_validation_reset_undo_skip_stats();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_bg_validation_reverify(void)
 {
     int failures = 0;
+    failures += test_bg_validation_undo_skip_warns_once_per_streak();
     failures += test_bg_validation_owns_datadir();
     failures += test_bg_validation_phgr13_verdict_is_terminal();
     failures += test_bg_validation_reverify_healthy_advances();

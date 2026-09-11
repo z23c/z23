@@ -134,6 +134,31 @@ struct bg_validation_progress bg_validation_get_progress(
 /* Get human-readable state name. */
 const char *bg_validation_state_name(enum bg_validation_state state);
 
+/* ── Undo-missing script-skip tallies (bg_validation_verify_block.c) ──
+ *
+ * Process-wide (not per-service) because the block verifier is a free
+ * function with no service handle. `blocks` counts blocks that advanced
+ * verified_height with at least one non-coinbase tx left unverified for
+ * want of undo data; `txs` counts those txs (the same quantity the
+ * per-service script_verif_skipped_no_undo accumulates). `streak_active`
+ * is true while the suppression streak is running — the per-block warning
+ * is emitted only on that streak's RISING EDGE, so these tallies, not the
+ * log, are how the skip volume is read. */
+struct bg_validation_undo_skip_stats {
+    uint64_t blocks;
+    uint64_t txs;
+    bool     streak_active;
+};
+
+/* Snapshot the tallies (lock-free atomic reads), like
+ * bg_validation_get_progress. */
+struct bg_validation_undo_skip_stats bg_validation_get_undo_skip_stats(void);
+
+/* Zero the tallies and clear the streak, so the next undo-missing block
+ * re-announces. Called by bg_validation_reset() alongside the persisted
+ * skip counter; also the seam the bg-valid test group drives. */
+void bg_validation_reset_undo_skip_stats(void);
+
 /* Record the outcome of ONE sampled re-verify of an already-verified height.
  * On success bumps reverify_passes and returns true (keep sampling). On failure
  * bumps reverify_fails, flips state to BG_VALIDATION_FAILED, raises the PERMANENT

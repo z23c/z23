@@ -720,6 +720,9 @@ void bg_validation_reset(struct bg_validation_service *svc)
     atomic_store(&svc->progress.sigs_verified, 0);
     atomic_store(&svc->progress.proofs_verified, 0);
     atomic_store(&svc->progress.script_verif_skipped_no_undo, 0);
+    /* Process-wide undo-skip tallies + suppression streak travel with the
+     * persisted skip counter, so a reset walk re-announces its first gap. */
+    bg_validation_reset_undo_skip_stats();
     atomic_store(&svc->progress.blocks_per_sec, 0);
     atomic_store(&svc->progress.reverify_active, false);
     atomic_store(&svc->progress.reverify_passes, 0);

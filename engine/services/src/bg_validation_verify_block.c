@@ -112,6 +112,67 @@ static bool read_block_undo(struct block_undo *undo, const struct block_index *p
     return ok;
 }
 
+/* ── Undo-missing script-skip suppression ─────────────────────
+ *
+ * A block whose rev (undo) file is absent cannot have its transparent
+ * scripts re-checked, so the verifier advances the height with those txs
+ * counted as skips. After a header-only snapshot import that is the WHOLE
+ * index, and a per-block LOG_WARN then printed thousands of lines in
+ * minutes — drowning the log it was meant to inform (node2, 11,868 lines
+ * in 30 minutes). Follow this tree's suppression convention
+ * (getheaders_suppress_rising_edge, core/modules/net/src/msg_headers.c):
+ * announce ONCE on the RISING EDGE of a streak, keep cumulative tallies,
+ * and surface them through the health object next to
+ * script_verif_skipped_no_undo. The streak clears the first time a block
+ * that HAS undo verifies its non-coinbase txs, so a later recurrence
+ * re-announces instead of the gap going quiet forever. */
+static _Atomic uint64_t g_undo_missing_blocks = 0;
+static _Atomic uint64_t g_undo_missing_txs    = 0;
+static _Atomic bool     g_undo_missing_streak = false;
+
+/* Rising edge of a suppression streak: true the first call after the
+ * streak was cleared, false while it persists. */
+static bool undo_skip_rising_edge(void)
+{
+    return !atomic_exchange(&g_undo_missing_streak, true);
+}
+
+struct bg_validation_undo_skip_stats bg_validation_get_undo_skip_stats(void)
+{
+    struct bg_validation_undo_skip_stats out;
+    out.blocks        = atomic_load(&g_undo_missing_blocks);
+    out.txs           = atomic_load(&g_undo_missing_txs);
+    out.streak_active = atomic_load(&g_undo_missing_streak);
+    return out;
+}
+
+void bg_validation_reset_undo_skip_stats(void)
+{
+    atomic_store(&g_undo_missing_blocks, 0);
+    atomic_store(&g_undo_missing_txs, 0);
+    atomic_store(&g_undo_missing_streak, false);
+}
+
+/* Tally one verified block's undo-missing skips and decide whether this
+ * block is the one that announces the streak. `verified_with_undo` is true
+ * when the block actually re-checked transparent scripts (undo present and
+ * at least one non-coinbase tx) — only such a block clears the streak, so
+ * the coinbase-only blocks of the early chain do not make the warning
+ * oscillate. Returns true exactly on the rising edge. */
+bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,
+                                   uint64_t *blocks_out, uint64_t *txs_out)
+{
+    if (skips <= 0) {
+        if (verified_with_undo)
+            atomic_store(&g_undo_missing_streak, false);
+        return false; // raw-return-ok:nothing-skipped-is-not-an-event
+    }
+    *blocks_out = atomic_fetch_add(&g_undo_missing_blocks, 1) + 1;
+    *txs_out = atomic_fetch_add(&g_undo_missing_txs, (uint64_t)skips) +
+               (uint64_t)skips;
+    return undo_skip_rising_edge();
+}
+
 /* ── Single block full validation (read-only) ────────────────── */
 
 /* Validates all cryptographic proofs in a block WITHOUT modifying UTXO set.
@@ -243,10 +304,20 @@ bool bg_validation_validate_block_proofs(const struct block *block,
         goto out;
     }
 
-    if (skips > 0)
+    uint64_t skip_blocks = 0, skip_txs = 0;
+    /* `have_undo` is only ever set for a block with a non-coinbase tx (it
+     * is read under `block->num_vtx > 1` above), so it alone is the
+     * "this block really did script-verify against undo" signal. */
+    if (bg_validation_note_undo_skips(skips, have_undo,
+                                      &skip_blocks, &skip_txs))
         LOG_WARN("bg-valid", "[bg-valid] h=%d: %lld non-coinbase tx(s) NOT "
                 "script-verified (undo missing) — block advances, not fully "
-                "verified", pindex->nHeight, (long long)skips);
+                "verified; SUPPRESSING the per-block line for this streak, "
+                "undo_missing_blocks=%llu undo_missing_txs=%llu (health "
+                "bg_validation / validationstatus carry the running totals)",
+                pindex->nHeight, (long long)skips,
+                (unsigned long long)skip_blocks,
+                (unsigned long long)skip_txs);
 
     *sigs_out += sigs;
     *proofs_out += proofs;

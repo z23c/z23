@@ -259,6 +259,16 @@ static bool rpc_getsyncdetail(const struct json_value *params, bool help,
             p.script_verif_skipped_no_undo);
         json_push_kv_bool(&bgv, "verification_incomplete",
             p.script_verif_skipped_no_undo > 0);
+        /* Blocks that advanced WITHOUT full script verification, and the
+         * suppression streak behind the single rising-edge bg-valid WARN.
+         * The log names the gap once; these fields are how its size is
+         * read (see bg_validation_verify_block.c). */
+        struct bg_validation_undo_skip_stats us =
+            bg_validation_get_undo_skip_stats();
+        json_push_kv_int(&bgv, "undo_missing_blocks", (int64_t)us.blocks);
+        json_push_kv_int(&bgv, "undo_missing_txs", (int64_t)us.txs);
+        json_push_kv_bool(&bgv, "undo_missing_streak_active",
+            us.streak_active);
 
         if (p.chain_height > 0 && p.verified_height >= 0) {
             double pct = 100.0 * (double)(p.verified_height + 1) /
