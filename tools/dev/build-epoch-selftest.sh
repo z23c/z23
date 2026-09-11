@@ -1225,6 +1225,9 @@ phase compiler-id-degraded-probe-refused
 #   A5 only a FAILED derivation may be forgiven: a first derivation that
 #      succeeds and reports a different toolchain is refused even when the
 #      re-derivation matches the key again.
+#   A6 a compile wrapper's config file is bound only when that wrapper is
+#      argv[0] of CC: rewriting ccache.conf must not move the identity of a
+#      compiler that never reads it, and must still move a ccache-wrapped one.
 # The fixture driver answers every compiler-id probe itself: no real compile,
 # no /usr inventory, everything it reports under $WORK, well under a second of
 # wall -- and, through the PATH mirror built below, no host linker reaches the
@@ -1499,5 +1502,54 @@ if grep -Fq 'degraded probe, not a toolchain change' "$SHIM_ALTERNATING_LOG"; th
     fail 'a successful first derivation was logged as a degraded probe'
 fi
 
-printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true late_marker_refusal=true make_recovery=true warm_no_rewrite=true degraded_probe_refused=true flake_retried=true compiler_id=%s\n' \
+# A6 (wrapper-config-scoped-to-wrapper): a compile wrapper's configuration
+# file belongs to the compiler identity only when that wrapper is argv[0] of
+# CC. Six landing proofs once died with "compiler/toolchain changed during
+# build" because build-epoch-key.sh hashed $HOME/.ccache/ccache.conf for
+# EVERY compiler while the host's hourly disk-GC timer rewrote it
+# (`ccache -M 20G` against another writer's 5G) mid-build -- and CC there was
+# `build/bin/zcc cc`, this repo's in-tree compile cache, which never consults
+# ccache. Both halves are asserted: an unrelated file must not move the
+# identity, and a file the wrapper really does read still must.
+SHIM_HOME="$SHIM_DIR/home"
+mkdir -p "$SHIM_HOME/.ccache"
+SHIM_CCACHE_CONF="$SHIM_HOME/.ccache/ccache.conf"
+SHIM_CCACHE_WRAPPER="$SHIM_DIR/bin/ccache"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$SHIM_CC" > "$SHIM_CCACHE_WRAPPER"
+chmod +x "$SHIM_CCACHE_WRAPPER"
+
+# A private HOME, and none of the host's CCACHE_*/SCCACHE_* pointers: the two
+# derivations of each pair must differ in the config file's bytes and in
+# nothing else.
+shim_home_compiler_id()
+{
+    env -u CCACHE_CONFIGPATH -u CCACHE_DIR -u SCCACHE_CONF \
+        PATH="$SHIM_PATH" HOME="$SHIM_HOME" \
+        "$KEY_TOOL" compiler-id "$1" "$1"
+}
+
+# (a) A driver that is not a wrapper must not observe the file at all.
+printf 'max_size = 20G\n' > "$SHIM_CCACHE_CONF"
+SHIM_ID_CONF_BIG="$(shim_home_compiler_id "$SHIM_CC")" ||
+    fail 'fixture driver did not produce a compiler fingerprint under a private HOME'
+printf 'max_size = 5G\n' > "$SHIM_CCACHE_CONF"
+SHIM_ID_CONF_SMALL="$(shim_home_compiler_id "$SHIM_CC")" ||
+    fail 'fixture driver did not produce a compiler fingerprint after the config rewrite'
+[ "$SHIM_ID_CONF_BIG" = "$SHIM_ID_CONF_SMALL" ] ||
+    fail 'rewriting ccache.conf moved the identity of a compiler that never reads it'
+
+# (b) ... and the same rewrite must still move the identity of a driver
+# invoked THROUGH ccache, or (a) would be passing by simply having stopped
+# hashing the file anywhere.
+printf 'max_size = 20G\n' > "$SHIM_CCACHE_CONF"
+SHIM_ID_WRAP_BIG="$(shim_home_compiler_id "$SHIM_CCACHE_WRAPPER")" ||
+    fail 'ccache-named fixture wrapper did not produce a compiler fingerprint'
+printf 'max_size = 5G\n' > "$SHIM_CCACHE_CONF"
+SHIM_ID_WRAP_SMALL="$(shim_home_compiler_id "$SHIM_CCACHE_WRAPPER")" ||
+    fail 'ccache-named fixture wrapper did not produce a fingerprint after the config rewrite'
+[ "$SHIM_ID_WRAP_BIG" != "$SHIM_ID_WRAP_SMALL" ] ||
+    fail 'rewriting ccache.conf left the identity of a ccache-wrapped compiler unchanged'
+
+
+printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true late_marker_refusal=true make_recovery=true warm_no_rewrite=true degraded_probe_refused=true flake_retried=true wrapper_config_scoped=true compiler_id=%s\n' \
     "$COMPILER_ID"

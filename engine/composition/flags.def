@@ -248,7 +248,7 @@ Z23_FLAG("ZCL_BUILD_BENCH_GROUP", "env_build", "netbase_split_host_port", "-",
 Z23_FLAG("ZCL_BUILD_EPOCH_CACHE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/build-epoch-integrity-cached.sh:32")
 Z23_FLAG("ZCL_BUILD_EPOCH_DIAG_DIR", "env_build", "-", "-",
-          "directory build-epoch-key.sh copies each compiler-identity preimage into, named by its own digest, so two disagreeing fingerprints can be diffed input by input; off by default because the copy is multi-megabyte; first use tools/dev/build-epoch-key.sh:519")
+          "directory build-epoch-key.sh copies each compiler-identity preimage into, named by its own digest, so two disagreeing fingerprints can be diffed input by input; off by default because the copy is multi-megabyte; first use tools/dev/build-epoch-key.sh:542")
 Z23_FLAG("ZCL_BUILD_EPOCH_LOCK_TIMEOUT", "env_build", "120", "-",
           "undocumented; first use tools/dev/build-epoch-lock-wait.sh:55")
 Z23_FLAG("ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT", "env_build", "120", "-",

@@ -87,10 +87,15 @@ compiler-id)
         fail 'could not create compiler fingerprint workspace'
     PREIMAGE="$WORK/compiler.preimage"
     : > "$PREIMAGE"
-    # v3 removes only the incidental current directory in Clang's verbose
-    # preprocessing diagnostics. Older identities and memo entries must not
-    # be admitted under that rule, including copied Tor provenance manifests.
-    printf 'zcl.build_compiler_identity.v3\0cc_command\0%s\0cxx_command\0%s\0' \
+    # v4 scopes a compile wrapper's configuration file to the wrapper that is
+    # argv[0] of CC (see the wrapper section below); v3 removed only the
+    # incidental current directory in Clang's verbose preprocessing
+    # diagnostics. Each bump retires every identity and memo entry recorded
+    # under the older rule, including copied Tor provenance manifests: the
+    # preimage's record SET changed, not just a value inside it, so every
+    # developer's epochs recompile once. That is the correct price for an
+    # identity that no longer moves when an unrelated file does.
+    printf 'zcl.build_compiler_identity.v4\0cc_command\0%s\0cxx_command\0%s\0' \
         "$CC_COMMAND" "$CXX_COMMAND" \
         >> "$PREIMAGE"
 
@@ -299,6 +304,26 @@ compiler-id)
     probe c-include-search -E -x c -v -
     probe c-builtins -dM -E -x c -
 
+    # A compile wrapper's configuration can reach the emitted object bytes
+    # only when that wrapper is the command actually being run. Binding every
+    # known wrapper's config file unconditionally made an unrelated file a
+    # member of this host's compiler identity: CC here is `build/bin/zcc cc`
+    # (this repo's in-tree compile cache, which never consults ccache), yet
+    # the hourly host disk-GC timer's `ccache -M 20G` rewrote
+    # $HOME/.ccache/ccache.conf mid-build and six landing proofs died with
+    # "compiler/toolchain changed during build". Bind a wrapper's config only
+    # when that wrapper is argv[0] of CC.
+    bind_wrapper_config_files()
+    {
+        local wrapper_config_path
+        for wrapper_config_path in "$@"; do
+            [ -n "$wrapper_config_path" ] || continue
+            [ -f "$wrapper_config_path" ] &&
+                fingerprint_tool wrapper-config-file "$wrapper_config_path"
+        done
+        return 0
+    }
+
     wrapper_base="$(basename -- "${CC_ARGV[0]}")"
     case "$wrapper_base" in
         ccache)
@@ -308,24 +333,22 @@ compiler-id)
             set -e
             printf 'wrapper-config\0ccache\0%d\0%s\0' "$rc" "$wrapper_config" \
                 >> "$PREIMAGE"
+            bind_wrapper_config_files \
+                "${CCACHE_CONFIGPATH:-}" \
+                "${HOME:-}/.config/ccache/ccache.conf" \
+                "${HOME:-}/.ccache/ccache.conf"
             ;;
         sccache)
             # sccache has no stable show-config command; its admitted SCCACHE_*
             # environment is bound above and its conventional config file is
-            # hashed below. Never bind live cache statistics/counters.
-            printf 'wrapper-config\0sccache\0environment-plus-file\0' >> "$PREIMAGE"
+            # hashed here. Never bind live cache statistics/counters.
+            printf 'wrapper-config\0sccache\0environment-plus-file\0' \
+                >> "$PREIMAGE"
+            bind_wrapper_config_files \
+                "${SCCACHE_CONF:-}" \
+                "${HOME:-}/.config/sccache/config"
             ;;
     esac
-    for wrapper_config_path in \
-            "${CCACHE_CONFIGPATH:-}" \
-            "${HOME:-}/.config/ccache/ccache.conf" \
-            "${HOME:-}/.ccache/ccache.conf" \
-            "${SCCACHE_CONF:-}" \
-            "${HOME:-}/.config/sccache/config"; do
-        [ -n "$wrapper_config_path" ] || continue
-        [ -f "$wrapper_config_path" ] &&
-            fingerprint_tool wrapper-config-file "$wrapper_config_path"
-    done
 
     probe_cxx()
     {
