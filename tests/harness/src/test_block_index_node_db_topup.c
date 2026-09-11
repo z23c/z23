@@ -138,6 +138,97 @@ static bool ndt_set_coins_best(sqlite3 *db, int coins_best)
     return ok;
 }
 
+/* An entry in the header-only-snapshot-import shape: HAVE_DATA with a real
+ * position, and `undo_pos` (0 meaning no HAVE_UNDO at all). */
+static struct block_index *ndt_undo_entry(struct main_state *ms, int h,
+                                          unsigned int undo_pos)
+{
+    struct block_index *bi = ndt_insert_entry(ms, h);
+    if (!bi)
+        return NULL;
+    bi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    bi->nFile = 1;
+    bi->nDataPos = (unsigned int)(1000 + h);
+    bi->nTx = 2;
+    if (undo_pos) {
+        bi->nUndoPos = undo_pos;
+        bi->nStatus |= BLOCK_HAVE_UNDO;
+    }
+    return bi;
+}
+
+struct ndt_undo_fixture {
+    struct node_db ndb;
+    sqlite3 *progress;
+    struct main_state ms;
+    struct block_index *u103;
+    struct block_index *u104;
+    bool opened;
+    bool built;
+};
+
+/* Same seed-anchor/window shape as the main fixture, but with 103 and 104
+ * ALREADY in the map carrying HAVE_DATA — 103 without an undo position,
+ * 104 with its own. */
+static void ndt_undo_fixture_build(struct ndt_undo_fixture *f,
+                                   const char *dir)
+{
+    memset(f, 0, sizeof(*f));
+    char ndb_path[320], prog_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node5.db", dir);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress5.db", dir);
+    if (!node_db_open(&f->ndb, ndb_path))
+        return;
+    f->opened = true;
+    if (sqlite3_open(prog_path, &f->progress) != SQLITE_OK)
+        return;
+    for (int h = 100; h <= 105; h++)
+        (void)ndt_write_block(&f->ndb, h);
+    struct uint256 seed_hash;
+    ndt_hash_for(102, &seed_hash);
+    (void)node_db_state_set_int(&f->ndb, "cold_import_seed_anchor_height",
+                                102);
+    (void)node_db_state_set(&f->ndb, "cold_import_seed_anchor_hash",
+                            seed_hash.data, 32);
+    (void)ndt_set_coins_best(f->progress, 105);
+    main_state_init(&f->ms);
+    (void)ndt_insert_entry(&f->ms, 102);
+    f->u103 = ndt_undo_entry(&f->ms, 103, 0);
+    f->u104 = ndt_undo_entry(&f->ms, 104, 555);
+    f->built = f->u103 && f->u104;
+}
+
+/* The undo top-up the node.db fold used to be unable to perform: an entry
+ * that already carries HAVE_DATA but no HAVE_UNDO, whose `blocks` row still
+ * names an undo position. Without it the background validator skips every
+ * transparent script in the block for want of recoverable spent outputs. */
+static int ndt_undo_topup_cases(const char *dir)
+{
+    int failures = 0;
+    struct ndt_undo_fixture f;
+    ndt_undo_fixture_build(&f, dir);
+    NDT_CHECK("undo-topup: fixture built", f.built);
+    if (f.built) {
+        NDT_CHECK("undo-topup: returns ok",
+                  block_index_node_db_topup_with(&f.ms, &f.ndb, f.progress,
+                                                 dir));
+        NDT_CHECK("undo-topup: HAVE_DATA entry gained HAVE_UNDO",
+                  (f.u103->nStatus & BLOCK_HAVE_UNDO) &&
+                  f.u103->nUndoPos == 2103u);
+        NDT_CHECK("undo-topup: data position untouched",
+                  f.u103->nFile == 1 && f.u103->nDataPos == 1103u);
+        NDT_CHECK("undo-topup: existing HAVE_UNDO not overwritten",
+                  (f.u104->nStatus & BLOCK_HAVE_UNDO) &&
+                  f.u104->nUndoPos == 555u);
+        main_state_free(&f.ms);
+    }
+    if (f.progress)
+        sqlite3_close(f.progress);
+    if (f.opened)
+        node_db_close(&f.ndb);
+    return failures;
+}
+
 int test_block_index_node_db_topup(void)
 {
     int failures = 0;
@@ -326,5 +417,5 @@ int test_block_index_node_db_topup(void)
 
     if (progress) sqlite3_close(progress);
     node_db_close(&ndb);
-    return failures;
+    return failures + ndt_undo_topup_cases(dir);
 }

@@ -97,6 +97,37 @@ static bool topup_emit_row(event_log_t *log, const struct uint256 *hash,
            != UINT64_MAX;
 }
 
+/* Same row, but carrying undo metadata — the field the top-up used to be
+ * able to apply only while it was also applying HAVE_DATA. */
+static bool topup_emit_row_undo(event_log_t *log, const struct uint256 *hash,
+                                const struct uint256 *prev, int height,
+                                uint32_t status, int file, uint32_t data_pos,
+                                uint32_t undo_pos, uint32_t ntx)
+{
+    struct ev_block_header ev;
+    memset(&ev, 0, sizeof(ev));
+    memcpy(ev.hash, hash->data, 32);
+    if (prev)
+        memcpy(ev.hashPrev, prev->data, 32);
+    ev.height = height;
+    ev.nStatus = status;
+    ev.nFile = file;
+    ev.nDataPos = data_pos;
+    ev.nUndoPos = undo_pos;
+    ev.nTime = 1700000000u + (uint32_t)height;
+    ev.nBits = 0x2000ffffu;
+    ev.nVersion = 4;
+    ev.nTx = ntx;
+    ev.nSolutionSize = 0;
+
+    uint8_t buf[512];
+    size_t written = 0;
+    if (!ev_block_header_serialize(&ev, NULL, buf, sizeof(buf), &written))
+        return false;
+    return event_log_append(log, EV_BLOCK_HEADER, buf, written)
+           != UINT64_MAX;
+}
+
 static bool topup_emit_status(event_log_t *log, const struct uint256 *hash,
                               uint32_t status, int file, uint32_t data_pos,
                               uint32_t ntx)
@@ -131,6 +162,84 @@ static struct block_index *topup_insert_entry(struct main_state *ms,
     bi->nFile = -1;
     bi->nDataPos = 0;
     return bi;
+}
+
+/* An entry in the header-only-snapshot-import shape: HAVE_DATA with real
+ * positions, and `undo_pos` (0 meaning no HAVE_UNDO at all). */
+static struct block_index *topup_undo_entry(struct main_state *ms,
+                                            const struct uint256 *hash,
+                                            int height,
+                                            unsigned int data_pos,
+                                            unsigned int undo_pos)
+{
+    struct block_index *bi = topup_insert_entry(ms, hash, height);
+    if (!bi)
+        return NULL;
+    bi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    bi->nTx = 4;
+    bi->nFile = 3;
+    bi->nDataPos = data_pos;
+    if (undo_pos) {
+        bi->nUndoPos = undo_pos;
+        bi->nStatus |= BLOCK_HAVE_UNDO;
+    }
+    return bi;
+}
+
+static int topup_undo_assert(const struct block_index *e106,
+                             const struct block_index *e107)
+{
+    int failures = 0;
+    TOPUP_CHECK("undo: HAVE_DATA entry gained HAVE_UNDO",
+                e106 && (e106->nStatus & BLOCK_HAVE_UNDO) &&
+                e106->nUndoPos == 777);
+    TOPUP_CHECK("undo: data position untouched",
+                e106 && e106->nFile == 3 && e106->nDataPos == 600);
+    TOPUP_CHECK("undo: existing HAVE_UNDO not overwritten",
+                e107 && (e107->nStatus & BLOCK_HAVE_UNDO) &&
+                e107->nUndoPos == 111);
+    return failures;
+}
+
+/* The undo top-up the projection fold used to be unable to perform: an
+ * entry that already carries HAVE_DATA but no HAVE_UNDO, whose row still
+ * names an undo position. Without it the background validator skips every
+ * transparent script in the block for want of recoverable spent outputs. */
+static int run_undo_topup_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topup", "undo");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 h106, h107;
+    topup_hash_for(106, &h106);
+    topup_hash_for(107, &h107);
+    /* e106 lacks undo entirely; e107 already has its own position. */
+    struct block_index *e106 = topup_undo_entry(&ms, &h106, 106, 600, 0);
+    struct block_index *e107 = topup_undo_entry(&ms, &h107, 107, 700, 111);
+    const uint32_t row_status = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                                BLOCK_HAVE_UNDO;
+    bool ready = log && bip && e106 && e107 &&
+        topup_emit_row_undo(log, &h106, NULL, 106, row_status,
+                            3, 600, 777, 4) &&
+        topup_emit_row_undo(log, &h107, &h106, 107, row_status,
+                            3, 700, 999, 4);
+    TOPUP_CHECK("undo: fixture ready", ready);
+    TOPUP_CHECK("undo: topup returns ok",
+                ready && block_index_projection_topup_with(bip, &ms, dir));
+    failures += topup_undo_assert(e106, e107);
+    if (bip) block_index_projection_close(bip);
+    if (log) event_log_close(log);
+    main_state_free(&ms);
+    test_cleanup_tmpdir(dir);
+    return failures;
 }
 
 static int run_bound_topup_integration(void)
@@ -474,5 +583,5 @@ int test_block_index_topup(void)
     block_index_projection_close(bip);
     event_log_close(log);
     main_state_free(&ms);
-    return failures + run_bound_topup_integration();
+    return failures + run_bound_topup_integration() + run_undo_topup_cases();
 }

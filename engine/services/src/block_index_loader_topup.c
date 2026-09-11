@@ -67,6 +67,7 @@ struct topup_ctx {
     size_t rows;
     size_t inserted;
     size_t data_applied;
+    size_t undo_applied;
     size_t ntx_applied;
     size_t valid_raised;
     size_t height_conflicts;
@@ -77,6 +78,35 @@ struct topup_ctx {
     size_t new_cap;
     bool failed;
 };
+
+/* Apply a durable row's undo metadata to an entry that lacks it, shared by
+ * both top-ups. This used to live inside each site's `!(HAVE_DATA)` branch,
+ * so an entry that already had HAVE_DATA but no HAVE_UNDO could never be
+ * repaired however good its row was — exactly the shape a header-only
+ * snapshot import leaves behind (real nFile/nDataPos restored, nUndoPos 0),
+ * which then costs the background validator every transparent script in the
+ * block for want of recoverable spent outputs.
+ *
+ * Raise-only and fail-closed: an entry that already claims HAVE_UNDO keeps
+ * its own position, and the row's position is adopted only when the row
+ * names a nonzero undo offset in the SAME block file — (nFile, nUndoPos) is
+ * one address, and half of it from each source points into the wrong rev
+ * file. Returns true when the entry was topped up. */
+static bool topup_apply_undo(struct block_index *bi, bool row_has_undo,
+                             int row_file, unsigned int row_undo_pos)
+{
+    if (bi->nStatus & BLOCK_HAVE_UNDO)
+        return false;
+    if (row_undo_pos == 0)
+        return false;
+    if (!row_has_undo)
+        return false;
+    if (bi->nFile != row_file)
+        return false;
+    bi->nUndoPos = row_undo_pos;
+    bi->nStatus |= BLOCK_HAVE_UNDO;
+    return true;
+}
 
 static bool topup_track_inserted(struct topup_ctx *c,
                                  struct block_index *bi)
@@ -212,12 +242,14 @@ static bool topup_row_cb(const uint8_t hash[32],
         bi->nFile = dbi->nFile;
         bi->nDataPos = dbi->nDataPos;
         bi->nStatus |= BLOCK_HAVE_DATA;
-        if (dbi->nStatus & BLOCK_HAVE_UNDO) {
-            bi->nUndoPos = dbi->nUndoPos;
-            bi->nStatus |= BLOCK_HAVE_UNDO;
-        }
         c->data_applied++;
     }
+
+    /* Undo availability, INDEPENDENT of the HAVE_DATA branch above — see
+     * topup_apply_undo() for why that independence is the whole fix. */
+    if (topup_apply_undo(bi, (dbi->nStatus & BLOCK_HAVE_UNDO) != 0,
+                         dbi->nFile, dbi->nUndoPos))
+        c->undo_applied++;
 
     /* nTx: raise from zero only. */
     if (bi->nTx == 0 && dbi->nTx > 0) {
@@ -451,15 +483,20 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
         topup_recover_ntx_from_disk(ms, datadir, &ntx_recovered,
                                     &ntx_unreadable, &ntx_capped);
 
-    if (ctx.inserted || ctx.data_applied || ctx.ntx_applied ||
+    /* One "position metadata was applied" term: either kind of application
+     * is worth the summary line. */
+    size_t pos_applied = ctx.data_applied + ctx.undo_applied;
+    if (ctx.inserted || pos_applied || ctx.ntx_applied ||
         ctx.valid_raised || ctx.height_conflicts || ctx.stubs_hydrated ||
         ntx_recovered || ntx_unreadable || ntx_capped) {
         printf("[boot] block index projection top-up: rows=%zu "
-               "inserted=%zu data_applied=%zu ntx_applied=%zu "
+               "inserted=%zu data_applied=%zu undo_applied=%zu "
+               "ntx_applied=%zu "
                "valid_raised=%zu ntx_recovered_from_disk=%zu "
                "ntx_unreadable=%zu height_conflicts=%zu "
                "stubs_hydrated=%zu\n",
-               ctx.rows, ctx.inserted, ctx.data_applied, ctx.ntx_applied,
+               ctx.rows, ctx.inserted, ctx.data_applied, ctx.undo_applied,
+               ctx.ntx_applied,
                ctx.valid_raised, ntx_recovered, ntx_unreadable,
                ctx.height_conflicts, ctx.stubs_hydrated);
         if (ntx_capped > 0)
@@ -642,6 +679,7 @@ bool block_index_node_db_topup_with(struct main_state *ms,
      *     status>=3 so a row is body-backed/connected; a missing/non-connected
      *     height is skipped (the window simply has a hole there). */
     size_t inserted = 0, data_applied = 0, ntx_applied = 0, valid_raised = 0;
+    size_t undo_applied = 0;
     size_t height_conflicts = 0, missing_rows = 0;
 
     /* Inserted entries, height-ASC by construction (we iterate ascending),
@@ -703,12 +741,13 @@ bool block_index_node_db_topup_with(struct main_state *ms,
             bi->nFile = blk.file_num;
             bi->nDataPos = (unsigned int)blk.data_pos;
             bi->nStatus |= BLOCK_HAVE_DATA;
-            if (blk.undo_pos > 0) {
-                bi->nUndoPos = (unsigned int)blk.undo_pos;
-                bi->nStatus |= BLOCK_HAVE_UNDO;
-            }
             data_applied++;
         }
+        /* Undo availability, independent of HAVE_DATA — same defect and
+         * same fail-closed rules as the projection top-up above. */
+        if (topup_apply_undo(bi, blk.file_num >= 0, blk.file_num,
+                             (unsigned int)blk.undo_pos))
+            undo_applied++;
         /* nTx: raise from zero only. */
         if (bi->nTx == 0 && blk.num_tx > 0) {
             bi->nTx = (unsigned int)blk.num_tx;
@@ -759,12 +798,17 @@ bool block_index_node_db_topup_with(struct main_state *ms,
     }
     free(new_entries);
 
-    if (inserted || data_applied || ntx_applied || valid_raised ||
-        height_conflicts) {
+    /* One "position metadata was applied" term — see the projection
+     * top-up's summary above. */
+    size_t pos_applied = data_applied + undo_applied;
+    if (inserted || pos_applied || ntx_applied ||
+        valid_raised || height_conflicts) {
         printf("[boot] block index node.db top-up: window=%d..%d "
-               "inserted=%zu linked=%zu data_applied=%zu ntx_applied=%zu "
+               "inserted=%zu linked=%zu data_applied=%zu undo_applied=%zu "
+               "ntx_applied=%zu "
                "valid_raised=%zu height_conflicts=%zu missing_rows=%zu\n",
-               lo, coins_best, inserted, linked, data_applied, ntx_applied,
+               lo, coins_best, inserted, linked, data_applied, undo_applied,
+               ntx_applied,
                valid_raised, height_conflicts, missing_rows);
     }
     (void)datadir;  /* reserved for a future on-disk re-verify pass */
