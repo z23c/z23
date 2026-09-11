@@ -245,21 +245,64 @@ const char *storage_pacing_source(void)
 static pthread_mutex_t g_maint_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int64_t g_maint_last_end_ms = 0;
 
+/* How much of the class's idle gap is still owed since the last maintenance
+ * writer finished. Zero when nobody has finished one yet (the first writer of
+ * the process waits for nothing) or when the gap has already elapsed. */
+static int64_t maintenance_residual_gap_ms(const struct storage_pacing *p)
+{
+    int64_t last = atomic_load(&g_maint_last_end_ms);
+    if (last <= 0)
+        return 0;
+    int64_t wait = p->maintenance_gap_ms - (platform_time_monotonic_ms() - last);
+    if (wait <= 0)
+        return 0;
+    if (wait > p->maintenance_gap_ms)
+        wait = p->maintenance_gap_ms; /* clock went backwards */
+    return wait;
+}
+
+/* Sleep `ms`, never more than `cap_ms` when a cap is given (cap_ms <= 0 means
+ * no cap). Returns what it actually slept. */
+static int64_t maintenance_nap_ms(int64_t ms, int64_t cap_ms)
+{
+    if (cap_ms > 0 && ms > cap_ms)
+        ms = cap_ms;
+    if (ms > 0)
+        platform_sleep_ms((int)ms);
+    return ms;
+}
+
 bool storage_pacing_maintenance_begin(void)
 {
     const struct storage_pacing *p = storage_pacing();
     if (!p->serialize_maintenance)
         return true;
     pthread_mutex_lock(&g_maint_lock);
-    int64_t last = atomic_load(&g_maint_last_end_ms);
-    int64_t now = platform_time_monotonic_ms();
-    int64_t wait = p->maintenance_gap_ms - (now - last);
-    if (last > 0 && wait > 0) {
-        if (wait > p->maintenance_gap_ms)
-            wait = p->maintenance_gap_ms; /* clock went backwards */
-        platform_sleep_ms((int)wait);
-    }
+    maintenance_nap_ms(maintenance_residual_gap_ms(p), 0);
     return true;
+}
+
+bool storage_pacing_maintenance_try_begin(int64_t max_wait_ms)
+{
+    const struct storage_pacing *p = storage_pacing();
+    if (!p->serialize_maintenance)
+        return true;
+
+    /* Wait out the idle gap BEFORE taking anything: begin() holds the token
+     * across its sleep, which is right for a writer about to do one bounded
+     * piece of work but would hand a long scan the token for gap+work on
+     * every acquisition. */
+    int64_t owed = maintenance_residual_gap_ms(p);
+    if (owed > 0 && maintenance_nap_ms(owed, max_wait_ms) < owed)
+        return false; /* gap not finished yet; the caller comes back */
+
+    if (pthread_mutex_trylock(&g_maint_lock) == 0)
+        return true;
+
+    /* Another writer owns the head. Never queue — back off for one idle
+     * interval so the caller shares the disk instead of racing it. */
+    maintenance_nap_ms(p->maintenance_gap_ms, max_wait_ms);
+    return false;
 }
 
 void storage_pacing_maintenance_end(void)

@@ -101,6 +101,17 @@ const char *storage_pacing_source(void);
 bool storage_pacing_maintenance_begin(void);
 void storage_pacing_maintenance_end(void);
 
+/* The same token for a caller that must never block. Waits out the idle gap
+ * BEFORE taking the token (begin() holds it across that sleep), sleeps at most
+ * `max_wait_ms` in one call (<= 0 means "no cap"), and answers false rather
+ * than queueing when another writer holds the token — so no call lasts longer
+ * than `max_wait_ms` no matter how long that writer runs. A true answer MUST
+ * be paired with storage_pacing_maintenance_end(); a false answer means the
+ * caller holds nothing and should try again later. Written for the boot
+ * integrity scan, which asks from inside a SQLite progress callback that also
+ * has to answer a shutdown request promptly. */
+bool storage_pacing_maintenance_try_begin(int64_t max_wait_ms);
+
 /* Test seams. force() pins the class without touching a disk; reset() drops
  * the cached decision so the next init() re-resolves. */
 void storage_pacing_force_class_for_testing(enum platform_storage_class klass);

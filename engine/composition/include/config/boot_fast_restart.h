@@ -10,6 +10,8 @@
 #ifndef ZCL_CONFIG_BOOT_FAST_RESTART_H
 #define ZCL_CONFIG_BOOT_FAST_RESTART_H
 
+#include "platform/storage_probe.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -74,10 +76,92 @@ void boot_fast_restart_arm_quick_check_skip_probe(void);
  * `datadir` locates node.db. */
 void boot_fast_restart_start_bg_quick_check(const char *datadir);
 
+/* ── pacing the background quick_check on rotational storage ──────────
+ *
+ * The scan streams a multi-GB node.db front to back on a read-only handle.
+ * On a spinning disk that is the whole device queue, and it runs head-to-head
+ * with the reducer's per-batch fsync: node3 held the supervisor's tick runner
+ * in uninterruptible sleep for 14 s and then 109 s while this scan was
+ * reading. The scan is NOT skipped, shortened or sampled — it is cut into
+ * bounded slices that share the spindle through the maintenance token the
+ * other rotational writers already queue on.
+ */
+
+/* Whether `klass` paces the scan at all, expressed as the class's compiled-in
+ * idle gap in milliseconds: 0 when that class does not serialise maintenance
+ * (solid state and unknown, where the scan runs exactly as it always did).
+ * PURE — no clock, no disk — so the decision is unit-testable by forcing each
+ * class. The running scan takes the gap it actually sleeps from the resolved
+ * policy (storage_pacing()->maintenance_gap_ms), which is this number unless
+ * an operator overrode it. */
+int64_t boot_bg_quick_check_pace_gap_ms(enum platform_storage_class klass);
+
+/* The scan's slice state, carried through sqlite3_progress_handler's void*
+ * so pacing adds no process-wide state. `calls` counts progress callbacks,
+ * which is the only honest measure of how much VM work the scan did. */
+struct boot_bg_quick_check_pace {
+    int64_t  gap_ms;            /* idle left between slices; 0 = unpaced   */
+    int64_t  slice_ms;          /* work held per token acquisition         */
+    int64_t  slice_started_ms;  /* monotonic stamp of the current slice    */
+    bool     token_held;        /* maintenance token currently ours        */
+    uint64_t calls;             /* progress callbacks so far               */
+};
+
+/* Fill `pace` for `klass`, taking the gap from the resolved policy so the
+ * work and the idle always come from the same number. slice_ms is twice
+ * gap_ms: full-speed scanning for slice_ms while the token is held, then a
+ * throttled trickle for gap_ms while the token is free — not idle. Each
+ * progress callback during the trickle naps at most 50 ms inside
+ * storage_pacing_maintenance_try_begin(), returns 0, and SQLite runs
+ * another 100 VM ops before the next callback tries again, so a 250 ms gap
+ * is paid as roughly five 50 ms naps with reads interleaved between them.
+ * The resulting wall time is bounded at 1.5x the unpaced scan as an upper
+ * bound, plus the same waits every other maintenance writer already
+ * accepts.
+ *
+ * What the scan does to the shared token, precisely: it holds it for one
+ * slice per acquisition and NEVER across the gap (the token is free for the
+ * whole trickle, not held), it never queues for a token another writer
+ * owns, and it does not try to retake the token until its own gap has
+ * elapsed — so a maintenance writer blocked in
+ * storage_pacing_maintenance_begin() gets the token at the next slice
+ * boundary, at most slice_ms away. */
+void boot_bg_quick_check_pace_init(struct boot_bg_quick_check_pace *pace,
+                                   enum platform_storage_class klass);
+
+/* Three-way result of one quick_check scan. Only FAILED is an integrity
+ * finding (the row came back and said something other than "ok"); OK and
+ * INCOMPLETE are both "no finding" but must not print the same word — OK
+ * means the row said ok, INCOMPLETE means no row ever came back (shutdown
+ * interrupted the VM, or prepare/step failed outright). */
+enum boot_bg_quick_check_outcome {
+    BOOT_BG_QUICK_CHECK_OK = 0,
+    BOOT_BG_QUICK_CHECK_FAILED,
+    BOOT_BG_QUICK_CHECK_INCOMPLETE,
+};
+
 #ifdef ZCL_TESTING
 /* Execute a real SQLite VM under the production cancellation hook. The caller
  * requests registry shutdown first; true proves SQLite returned INTERRUPT. */
 bool boot_fast_restart_bg_quick_check_cancel_for_test(void);
+
+/* The PRODUCTION progress handler, so the pacing tests drive the same code
+ * SQLite calls. `arg` is a struct boot_bg_quick_check_pace * (NULL is the
+ * unpaced cancellation-only behaviour). Returns 1 to abort the VM. */
+int boot_bg_quick_check_progress_for_test(void *arg);
+
+/* Run the real "PRAGMA quick_check(1)" against `path` on a read-only handle
+ * under the production progress handler, paced for the currently resolved
+ * storage class. Returns whether SQLite answered "ok"; `pace` reports the
+ * slice state the scan finished with. */
+bool boot_fast_restart_bg_quick_check_scan_for_test(
+    const char *path, struct boot_bg_quick_check_pace *pace);
+
+/* The exact word the completion line in boot_bg_quick_check_entry() prints
+ * for `outcome` — "ok" / "FAILED" / "did not complete" — so tests can pin
+ * the three-way mapping without re-deriving it. */
+const char *boot_bg_quick_check_outcome_str_for_test(
+    enum boot_bg_quick_check_outcome outcome);
 #endif
 
 #ifdef __cplusplus

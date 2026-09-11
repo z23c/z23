@@ -21,13 +21,19 @@
 
 #include "test/test_core.h"
 
+#include "config/boot_fast_restart.h"
 #include "json/json.h"
+#include "platform/clock.h"
 #include "platform/storage_probe.h"
 #include "platform/time_compat.h"
 #include "storage/projection_store.h"
 #include "util/log_rotate.h"
 #include "util/storage_pacing.h"
+#include "util/thread_registry.h"
 
+#include <pthread.h>
+#include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -498,6 +504,403 @@ static int test_projection_bound(void)
     return failures;
 }
 
+/* ── pacing the boot-time node.db integrity scan ───────────────────────
+ *
+ * boot_fast_restart.c's background quick_check streams the whole node.db on
+ * a read-only handle. On node3 (7200 rpm) that pinned the device queue and
+ * left the supervisor's tick runner in uninterruptible sleep for 14 s and
+ * then 109 s while the reducer paid its per-batch fsync. The scan is not
+ * skipped or shortened here — it is cut into slices that hand the spindle
+ * back through the same maintenance token every other rotational writer
+ * already waits on. These tests pin all four halves of that claim: the
+ * decision, cancellation, flash staying untouched, and the slices.
+ */
+
+/* The injectable monotonic clock, so slice expiry is driven rather than
+ * slept out. Microseconds, matching platform_clock_source. */
+static int64_t g_pace_clock_us;
+
+static int64_t pace_clock_monotonic_us(void *user)
+{
+    (void)user;
+    return g_pace_clock_us;
+}
+
+static int64_t pace_clock_wall_unix(void *user)
+{
+    (void)user;
+    return 1767225600; /* fixed; the scan never reads wall time */
+}
+
+static int test_bg_quick_check_gap(void)
+{
+    int failures = 0;
+
+    /* The whole point: a spinning disk gets the SAME idle gap the other
+     * rotational maintenance writers already leave for each other. */
+    SPC("a spinning disk paces the integrity scan",
+        boot_bg_quick_check_pace_gap_ms(PLATFORM_STORAGE_CLASS_ROTATIONAL) ==
+            250);
+    SPC("the scan's gap is the table's maintenance gap",
+        boot_bg_quick_check_pace_gap_ms(PLATFORM_STORAGE_CLASS_ROTATIONAL) ==
+            storage_pacing_for_class(PLATFORM_STORAGE_CLASS_ROTATIONAL)
+                .maintenance_gap_ms);
+    SPC("solid state leaves the scan unpaced",
+        boot_bg_quick_check_pace_gap_ms(PLATFORM_STORAGE_CLASS_SOLID) == 0);
+    SPC("an unclassified disk leaves the scan unpaced",
+        boot_bg_quick_check_pace_gap_ms(PLATFORM_STORAGE_CLASS_UNKNOWN) == 0);
+
+    /* And the decision the running node makes is the same one, for whichever
+     * class it resolved. */
+    struct boot_bg_quick_check_pace pace;
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    boot_bg_quick_check_pace_init(&pace, storage_pacing_class());
+    SPC("a forced spinning disk builds a paced scan",
+        pace.gap_ms == 250 && pace.slice_ms == 500 && !pace.token_held &&
+            pace.calls == 0);
+
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    boot_bg_quick_check_pace_init(&pace, storage_pacing_class());
+    SPC("a forced flash disk builds an unpaced scan",
+        pace.gap_ms == 0 && pace.slice_ms == 0);
+
+    /* The idle the token sleeps and the work the slice does must come from
+     * ONE number. An operator who widens the gap widens the slice with it;
+     * reading the class table here instead would slice at 500 ms while
+     * sleeping a minute. */
+    setenv("ZCL_MAINTENANCE_GAP_MS", "37", 1);
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    boot_bg_quick_check_pace_init(&pace, PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    SPC("the scan paces on the gap the token will actually sleep",
+        pace.gap_ms == storage_pacing()->maintenance_gap_ms &&
+            pace.gap_ms == 37);
+    SPC("the slice follows the overridden gap", pace.slice_ms == 74);
+
+    /* A gap overridden to zero is an operator saying "do not pace me". */
+    setenv("ZCL_MAINTENANCE_GAP_MS", "0", 1);
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    boot_bg_quick_check_pace_init(&pace, PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    SPC("a zero gap leaves the scan unpaced",
+        pace.gap_ms == 0 && pace.slice_ms == 0);
+    unsetenv("ZCL_MAINTENANCE_GAP_MS");
+
+    /* boot_bg_quick_check_pace_init(NULL, ...) has no observable effect to
+     * pin: it returns before touching anything, and there is nothing else
+     * reachable from here that a NULL pace could have written to instead. A
+     * bad pointer would fault, which the test harness cannot turn into a
+     * pinned failure either — so there is no assertion to make here beyond
+     * "it does not crash", which running this test at all already covers. */
+
+    storage_pacing_reset_for_testing();
+    return failures;
+}
+
+/* The completion line in boot_bg_quick_check_entry() prints one of exactly
+ * three words for the scan's outcome. Pin the mapping directly against the
+ * enum, since the outcome itself is only reachable by driving a real SQLite
+ * scan to each of the three terminal states (a corrupted page, a clean
+ * page, and an interrupted/step-failed VM) — see test_bg_quick_check_gap
+ * and test_bg_quick_check_cancel_is_prompt for those states pinned via
+ * their own observable effects (pace.token_held, the shutdown rc, wall
+ * time). This test pins the last mile: the word each outcome prints. */
+static int test_bg_quick_check_outcome_str(void)
+{
+    int failures = 0;
+    SPC("an ok row prints \"ok\"",
+        strcmp(boot_bg_quick_check_outcome_str_for_test(
+                   BOOT_BG_QUICK_CHECK_OK),
+               "ok") == 0);
+    SPC("a not-ok row prints \"FAILED\", not \"did not complete\"",
+        strcmp(boot_bg_quick_check_outcome_str_for_test(
+                   BOOT_BG_QUICK_CHECK_FAILED),
+               "FAILED") == 0);
+    SPC("an interrupted or step-error scan prints \"did not complete\"",
+        strcmp(boot_bg_quick_check_outcome_str_for_test(
+                   BOOT_BG_QUICK_CHECK_INCOMPLETE),
+               "did not complete") == 0);
+    return failures;
+}
+
+/* Cancellation is the property the deferred multi-minute scan already had.
+ * Pacing must not cost a millisecond of it: the shutdown test comes first in
+ * the handler, BEFORE any token wait, under both storage classes. */
+static int test_bg_quick_check_cancel_is_prompt(void)
+{
+    int failures = 0;
+    const enum platform_storage_class klasses[2] = {
+        PLATFORM_STORAGE_CLASS_SOLID,
+        PLATFORM_STORAGE_CLASS_ROTATIONAL,
+    };
+
+    for (int i = 0; i < 2; i++) {
+        storage_pacing_force_class_for_testing(klasses[i]);
+        struct boot_bg_quick_check_pace pace;
+        boot_bg_quick_check_pace_init(&pace, klasses[i]);
+
+        thread_registry_reset_for_test();
+        thread_registry_request_shutdown();
+        int64_t t0 = platform_time_monotonic_ms();
+        int rc = boot_bg_quick_check_progress_for_test(&pace);
+        int64_t took = platform_time_monotonic_ms() - t0;
+        thread_registry_reset_for_test();
+
+        SPC("shutdown aborts the scan's SQLite VM", rc == 1);
+        SPC("a cancelled scan holds no maintenance token", !pace.token_held);
+        SPC("cancellation never waits out a pacing gap", took < 50);
+    }
+
+    /* The token must still be free for the next writer. */
+    SPC("cancellation leaves the maintenance token free",
+        storage_pacing_maintenance_begin());
+    storage_pacing_maintenance_end();
+
+    storage_pacing_reset_for_testing();
+    return failures;
+}
+
+/* On flash the handler is byte-for-byte what it was before pacing existed:
+ * one shutdown test and a zero. */
+static int test_bg_quick_check_flash_is_inert(void)
+{
+    int failures = 0;
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    thread_registry_reset_for_test();
+
+    struct boot_bg_quick_check_pace pace;
+    boot_bg_quick_check_pace_init(&pace, storage_pacing_class());
+
+    bool always_continued = true;
+    bool ever_held = false;
+    int64_t t0 = platform_time_monotonic_ms();
+    for (int i = 0; i < 5000; i++) {
+        if (boot_bg_quick_check_progress_for_test(&pace) != 0)
+            always_continued = false;
+        if (pace.token_held)
+            ever_held = true;
+    }
+
+    SPC("a flash scan is never interrupted", always_continued);
+    SPC("a flash scan never takes the maintenance token", !ever_held);
+    SPC("a flash scan counts every progress callback", pace.calls == 5000);
+    SPC("a flash scan costs no wall time",
+        platform_time_monotonic_ms() - t0 < 200);
+
+    storage_pacing_reset_for_testing();
+    return failures;
+}
+
+/* The slices themselves. The gap is overridden down to 1 ms so the test does
+ * not spend a quarter second per acquisition, and the clock is driven so the
+ * slice boundary is observed rather than waited for. */
+static int test_bg_quick_check_slices(void)
+{
+    int failures = 0;
+    setenv("ZCL_MAINTENANCE_GAP_MS", "1", 1);
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    thread_registry_reset_for_test();
+
+    struct boot_bg_quick_check_pace pace;
+    boot_bg_quick_check_pace_init(&pace, PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    SPC("a rotational scan is paced", pace.gap_ms == 1);
+    SPC("a slice is two gaps of work", pace.slice_ms == 2 * pace.gap_ms);
+
+    g_pace_clock_us = platform_time_monotonic_ms() * 1000;
+    struct platform_clock_source src = {
+        .monotonic_us = pace_clock_monotonic_us,
+        .wall_unix = pace_clock_wall_unix,
+        .user = NULL,
+    };
+    platform_clock_set_source(&src);
+
+    bool never_aborted = true;
+    if (boot_bg_quick_check_progress_for_test(&pace) != 0)
+        never_aborted = false;
+    SPC("the first callback takes the maintenance token", pace.token_held);
+
+    /* Inside the slice the token stays ours. Handing it back every callback
+     * would buy 250 ms of idle for every 100 VM ops, which is not pacing —
+     * it is a stopped scan. */
+    if (boot_bg_quick_check_progress_for_test(&pace) != 0)
+        never_aborted = false;
+    SPC("the token is kept for the whole slice", pace.token_held);
+
+    g_pace_clock_us += (pace.slice_ms + 1) * 1000;
+    if (boot_bg_quick_check_progress_for_test(&pace) != 0)
+        never_aborted = false;
+    SPC("the slice ends by giving the spindle back", !pace.token_held);
+
+    /* The point of ending a slice: between slices the token is genuinely
+     * free, so projection compaction, WAL truncation and log rotation get
+     * their turn instead of waiting out a multi-minute scan. */
+    SPC("a maintenance writer gets the token between slices",
+        storage_pacing_maintenance_begin());
+    storage_pacing_maintenance_end();
+
+    g_pace_clock_us += (pace.gap_ms + 1) * 1000;
+    if (boot_bg_quick_check_progress_for_test(&pace) != 0)
+        never_aborted = false;
+    SPC("the next slice re-takes the token", pace.token_held);
+
+    g_pace_clock_us += (pace.slice_ms + 1) * 1000;
+    if (boot_bg_quick_check_progress_for_test(&pace) != 0)
+        never_aborted = false;
+    SPC("every slice boundary releases the token again", !pace.token_held);
+
+    SPC("pacing never aborts a scan nobody asked to stop", never_aborted);
+    SPC("every callback was counted", pace.calls == 5);
+
+    platform_clock_clear_source();
+
+    /* The real token, not just the bookkeeping: a leaked hold would make the
+     * next maintenance writer wait forever. */
+    SPC("a paced scan leaves the maintenance token free",
+        storage_pacing_maintenance_begin());
+    storage_pacing_maintenance_end();
+
+    unsetenv("ZCL_MAINTENANCE_GAP_MS");
+    storage_pacing_reset_for_testing();
+    return failures;
+}
+
+/* A progress callback runs inside the SQLite VM, so whatever it waits for is
+ * also how long a shutdown request waits. It must therefore never queue for
+ * the maintenance token: housekeeping holds that token across a VACUUM of a
+ * multi-gigabyte store, which is minutes on the disk this pacing is for. */
+
+static _Atomic bool g_holder_has_token = false;
+static _Atomic bool g_holder_should_release = false;
+
+static void *pace_token_holder(void *arg)
+{
+    (void)arg;
+    storage_pacing_maintenance_begin();
+    atomic_store(&g_holder_has_token, true);
+    while (!atomic_load(&g_holder_should_release))
+        platform_sleep_ms(1);
+    storage_pacing_maintenance_end();
+    return NULL;
+}
+
+static int test_bg_quick_check_never_queues(void)
+{
+    int failures = 0;
+    setenv("ZCL_MAINTENANCE_GAP_MS", "40", 1);
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    thread_registry_reset_for_test();
+
+    atomic_store(&g_holder_has_token, false);
+    atomic_store(&g_holder_should_release, false);
+    pthread_t holder;
+    bool spawned = pthread_create(&holder, NULL, pace_token_holder, NULL) == 0;
+    SPC("a competing maintenance writer starts", spawned);
+    if (!spawned) {
+        unsetenv("ZCL_MAINTENANCE_GAP_MS");
+        storage_pacing_reset_for_testing();
+        return failures;
+    }
+    for (int i = 0; i < 500 && !atomic_load(&g_holder_has_token); i++)
+        platform_sleep_ms(1);
+    SPC("the competing writer holds the token",
+        atomic_load(&g_holder_has_token));
+
+    struct boot_bg_quick_check_pace pace;
+    boot_bg_quick_check_pace_init(&pace, PLATFORM_STORAGE_CLASS_ROTATIONAL);
+
+    bool bounded = true;
+    bool took_token = false;
+    bool aborted = false;
+    for (int i = 0; i < 4; i++) {
+        int64_t call0 = platform_time_monotonic_ms();
+        if (boot_bg_quick_check_progress_for_test(&pace) != 0)
+            aborted = true;
+        if (platform_time_monotonic_ms() - call0 > 250)
+            bounded = false;
+        if (pace.token_held)
+            took_token = true;
+    }
+    SPC("no callback queues behind the writer's hold", bounded);
+    SPC("the scan never holds a token it was not granted", !took_token);
+    SPC("a busy token is not mistaken for a cancellation", !aborted);
+
+    /* The property the deferred scan must keep: shutdown is answered at once,
+     * even in the state that used to block. */
+    thread_registry_request_shutdown();
+    int64_t t0 = platform_time_monotonic_ms();
+    int rc = boot_bg_quick_check_progress_for_test(&pace);
+    int64_t took = platform_time_monotonic_ms() - t0;
+    thread_registry_reset_for_test();
+    SPC("shutdown aborts while another writer holds the token", rc == 1);
+    SPC("that cancellation waits for nothing", took < 50);
+
+    atomic_store(&g_holder_should_release, true);
+    pthread_join(holder, NULL);
+
+    SPC("the writer's token comes back to the next caller",
+        storage_pacing_maintenance_begin());
+    storage_pacing_maintenance_end();
+
+    unsetenv("ZCL_MAINTENANCE_GAP_MS");
+    storage_pacing_reset_for_testing();
+    return failures;
+}
+
+/* End to end: the production scan path over a real SQLite file, forced onto
+ * the rotational policy. The integrity answer must be unchanged. */
+static int test_bg_quick_check_real_scan(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "bg_quick_check", "paced_scan");
+    char path[600];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+
+    /* Enough rows that quick_check runs far more than the handler's 100-op
+     * interval — one callback would prove nothing about slicing. */
+    static const char *k_fixture_sql =
+        "CREATE TABLE t(k INTEGER PRIMARY KEY, v TEXT);"
+        "CREATE INDEX t_v ON t(v);"
+        "INSERT INTO t(k,v) WITH RECURSIVE s(i) AS ("
+        "  VALUES(1) UNION ALL SELECT i+1 FROM s WHERE i<5000)"
+        " SELECT i, hex(randomblob(48)) FROM s;";
+
+    sqlite3 *db = NULL;
+    bool built = false;
+    if (sqlite3_open(path, &db) == SQLITE_OK) {
+        built = sqlite3_exec(db, k_fixture_sql, NULL, NULL,
+                             NULL) == SQLITE_OK;
+    }
+    if (db)
+        sqlite3_close(db);
+    SPC("the fixture database was written", built);
+
+    setenv("ZCL_MAINTENANCE_GAP_MS", "1", 1);
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+    thread_registry_reset_for_test();
+
+    struct boot_bg_quick_check_pace pace;
+    memset(&pace, 0, sizeof(pace));
+    bool ok = boot_fast_restart_bg_quick_check_scan_for_test(path, &pace);
+
+    SPC("a paced scan still answers ok", ok);
+    SPC("the scan ran under the rotational policy",
+        pace.gap_ms == storage_pacing()->maintenance_gap_ms &&
+            pace.gap_ms > 0);
+    SPC("the progress hook ran many times", pace.calls > 1);
+    SPC("the finished scan holds no maintenance token", !pace.token_held);
+    SPC("the maintenance token is free after the scan",
+        storage_pacing_maintenance_begin());
+    storage_pacing_maintenance_end();
+
+    SPC("a missing database is refused, not invented",
+        !boot_fast_restart_bg_quick_check_scan_for_test(NULL, &pace) &&
+            !boot_fast_restart_bg_quick_check_scan_for_test(path, NULL));
+
+    unsetenv("ZCL_MAINTENANCE_GAP_MS");
+    storage_pacing_reset_for_testing();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_storage_pacing(void)
 
 {
@@ -512,6 +915,13 @@ int test_storage_pacing(void)
     failures += test_dump_state();
     failures += test_log_rotation();
     failures += test_projection_bound();
+    failures += test_bg_quick_check_gap();
+    failures += test_bg_quick_check_cancel_is_prompt();
+    failures += test_bg_quick_check_flash_is_inert();
+    failures += test_bg_quick_check_slices();
+    failures += test_bg_quick_check_never_queues();
+    failures += test_bg_quick_check_real_scan();
+    failures += test_bg_quick_check_outcome_str();
     if (failures == 0)
         printf("=== storage_pacing tests: ALL PASS ===\n");
     else

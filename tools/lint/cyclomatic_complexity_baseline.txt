@@ -1561,7 +1561,6 @@ engine/composition/src/boot_endpoint_records.c:ber_read_record_file:23
 engine/composition/src/boot_endpoint_records.c:boot_endpoint_records_load:21
 engine/composition/src/boot_error.c:boot_error_report:20
 engine/composition/src/boot_export_consensus_bundle.c:boot_export_consensus_bundle:22
-engine/composition/src/boot_fast_restart.c:boot_bg_quick_check_entry:17
 engine/composition/src/boot_fleet_board_rpc.c:fb_compose:21
 engine/composition/src/boot_flight_recorder.c:boot_flight_recorder_dump_state_json:17
 engine/composition/src/boot_frontend_services.c:boot_https_explorer_start:27
