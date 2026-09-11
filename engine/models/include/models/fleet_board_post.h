@@ -36,19 +36,34 @@ enum {
 
     /* PUBLIC-scope quota: a stranger key needs no grant to post to a public
      * room, so this is the only thing standing between one key and a flood.
-     * Two independent ceilings, both per signing key: a rolling-window rate
-     * (bursts) and a lifetime stored count (a slow trickle that never
-     * bursts but never stops). Either one being spent refuses the post;
-     * neither one touches FLEET-scope rows or the global store cap above. */
+     * Two independent ceilings, both per signing key, asking two different
+     * questions:
+     *   WINDOW    is this key bursting? Counts every arrival in the window,
+     *             expired or not, because a burst is a burst even when
+     *             every post in it expires a minute later.
+     *   RESIDENT  how much of this node's finite, forever-carried store is
+     *             this key holding? Counts every row this node is STORING
+     *             for the key, live or expired: an expired row still on
+     *             disk is still bytes this node carries, until
+     *             db_fleet_board_reclaim_expired takes it back. That
+     *             reclaim is what hands the slot back — the ceiling itself
+     *             never depends on the reclaim having run, because a node
+     *             can opt out of boot maintenance
+     *             (ZCL_DISABLE_BOOT_DB_MAINT) and a ceiling counted over
+     *             live rows alone would then let one key grow into the
+     *             whole shared store cap above and wedge the board for
+     *             every key.
+     * Either one being spent refuses the post; neither one touches
+     * FLEET-scope rows or the global store cap above. */
     FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS = 600,   /* 10 minutes */
     FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX = 60,        /* posts / key / window */
-    FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX = 1000,      /* posts / key, ever */
+    FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX = 1000,      /* stored posts / key */
 };
 
 struct db_fleet_board_post {
     struct fleet_board_post post;
     int64_t seq;            /* local arrival order, 1-based */
-    int64_t expires_at;     /* created_at + ttl, materialized for the reaper */
+    int64_t expires_at;     /* created_at + ttl, the reclaim's own predicate */
     /* Canonical encoded size. Stored so the ledger can report and cap its
      * own footprint with one SQL aggregate instead of re-encoding every
      * row; validated on write against the encoding itself. */
@@ -110,6 +125,40 @@ bool db_fleet_board_post_validate(const struct db_fleet_board_post *record,
 enum fleet_board_result db_fleet_board_post_ingest(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
     bool *stored_out);
+
+/* What one reclaim pass did. DEFERRED is not a failure: the pass owns the
+ * whole transaction it needs, so finding somebody else's already open means
+ * "not this tick" — an ordinary race with the node's own writers, and the
+ * next tick finds the work still there. A caller that counts DEFERRED as a
+ * failure reports a node as permanently unhealthy for doing the right
+ * thing. */
+enum fleet_board_reclaim {
+    FLEET_BOARD_RECLAIM_DONE = 0,      /* ran; `removed_out` says how many */
+    FLEET_BOARD_RECLAIM_DEFERRED = 1,  /* a transaction was open; try later */
+    FLEET_BOARD_RECLAIM_FAILED = 2,    /* a leg failed; nothing changed */
+};
+
+/* Maintenance reclaim: physically remove every reclaimable row and
+ * re-seq/re-chain the survivors, in ONE transaction under the board write
+ * lock. `removed_out` (optional) receives the number of rows taken back.
+ * A row is reclaimable when its TTL has run out, it is not durable wiki
+ * history, and it arrived longer ago than
+ * FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS — the window leg counts arrivals
+ * regardless of TTL, so taking a row back while its own window is still
+ * open would hand the key that slot twice and lift the burst ceiling.
+ * Nothing changes unless the pass returns DONE.
+ *
+ * This is the separately bounded maintenance path the store reserves, and
+ * it is the physical half of the per-key quota above: the resident ceiling
+ * counts STORED rows, and this is what hands a key its slots back once the
+ * posts holding them are dead. Peer ingress never reaches it — a peer must
+ * not be able to make this node delete a row or rewrite a chain field — so
+ * the only caller is the local db_maintenance scheduler, as the op
+ * "board-reclaim". Survivors keep their arrival order: seq becomes 1..n in
+ * that order and the chain is rebuilt from genesis over them, which is
+ * exactly what db_fleet_board_chain_verify walks, unchanged. */
+enum fleet_board_reclaim db_fleet_board_reclaim_expired(
+    struct node_db *ndb, int64_t now, int64_t *removed_out);
 
 /* Exact-id lookup. Returns false when the id is unknown. */
 bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],

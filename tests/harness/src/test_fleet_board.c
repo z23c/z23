@@ -2061,8 +2061,359 @@ static int test_fleet_board_public_quota(void)
     return failures;
 }
 
-/* Run the three PUBLIC-scope-with-the-real-gate tests together, with the
- * real gate — nothing installed — bracketing all three, then hand the
+
+/* T1 + T2: the two halves of the resident leg, proven on one store.
+ *
+ * FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX rows are admitted 11 s apart — far
+ * enough apart that the rolling window never bites — with the maximum TTL.
+ * The next post is refused: the resident ceiling bites exactly where it
+ * always did (T2). Then the clock moves past their TTL and the same key is
+ * STILL refused (T1): the rows are dead but this node is still carrying
+ * them, so they still count. Only the reclaim, which actually removes the
+ * bytes, hands the slots back — and the ceiling holds whether or not that
+ * reclaim ever runs, which is what a node with boot maintenance opted out
+ * depends on. */
+static int test_fleet_board_public_quota_counts_stored(void)
+{
+    int failures = 0;
+    TEST("fleet board: the per-key resident ceiling counts STORED rows — "
+        "expiry alone does not hand a slot back, the reclaim does") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(12, seed, pk);
+        const int64_t base = 1000000;
+        /* 11 s apart keeps any 600 s window at ~55 arrivals, under the 60
+         * the window leg allows, so this test exercises the resident leg
+         * and only the resident leg. */
+        const int64_t step = 11;
+        const uint32_t ttl = FLEET_BOARD_TTL_MAX;
+        int64_t last = base;
+
+        for (int i = 0; i < FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX; i++) {
+            struct fleet_board_post p;
+            char text[64];
+            (void)snprintf(text, sizeof(text), "resident post %d", i);
+            last = base + (int64_t)i * step;
+            fb_test_compose(&p, FLEET_BOARD_KIND_NOTE, "steady", text,
+                            (uint64_t)last, ttl);
+            fb_test_scope(&p, FLEET_BOARD_SCOPE_PUBLIC, "general");
+            ASSERT_EQ(fleet_board_post_sign(&p, seed, pk), FLEET_BOARD_OK);
+            bool stored = false;
+            ASSERT_EQ(db_fleet_board_post_ingest(&db, &p, last, &stored),
+                      FLEET_BOARD_OK);
+            ASSERT(stored);
+        }
+
+        /* T2: all of them are live, so the ceiling refuses the next one. */
+        struct fleet_board_post one_too_many;
+        fb_test_compose(&one_too_many, FLEET_BOARD_KIND_NOTE, "steady",
+                        "one post past the resident ceiling",
+                        (uint64_t)last + 1, ttl);
+        fb_test_scope(&one_too_many, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        ASSERT_EQ(fleet_board_post_sign(&one_too_many, seed, pk),
+                  FLEET_BOARD_OK);
+        bool stored = true;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &one_too_many, last + 1,
+                                             &stored),
+                  FLEET_BOARD_ERR_QUOTA);
+        ASSERT(!stored);
+
+        /* T1: their signed TTL has run out, but the rows are still on this
+         * node's disk, so the key is still holding the store and is still
+         * refused. A ceiling that let go here would be a ceiling only on
+         * nodes that run the reclaim. */
+        int64_t later = last + (int64_t)ttl + 1;
+        struct fleet_board_post after_expiry;
+        fb_test_compose(&after_expiry, FLEET_BOARD_KIND_NOTE, "steady",
+                        "the first post after the whole batch expired",
+                        (uint64_t)later, 3600);
+        fb_test_scope(&after_expiry, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        ASSERT_EQ(fleet_board_post_sign(&after_expiry, seed, pk),
+                  FLEET_BOARD_OK);
+        stored = true;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &after_expiry, later,
+                                             &stored),
+                  FLEET_BOARD_ERR_QUOTA);
+        ASSERT(!stored);
+
+        /* The reclaim is what makes the bytes go, and only then does the
+         * slot come back. */
+        int64_t removed = 0;
+        ASSERT_EQ(db_fleet_board_reclaim_expired(&db, later, &removed),
+                  FLEET_BOARD_RECLAIM_DONE);
+        ASSERT_EQ(removed, FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX);
+        stored = false;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &after_expiry, later,
+                                             &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* T5: the reclaim cannot lift the burst ceiling. A key spends its whole
+ * window on one-second notes, the reclaim runs while that window is still
+ * open, and the key tries again inside the same window. The arrivals the
+ * window leg counts are arrivals, not rows — so the rows that are still
+ * inside their window survive the pass, and the 61st post in 600 seconds
+ * is refused whether or not maintenance ran in between. Without the
+ * arrival floor in board_where_reclaimable this is 2x the stated bound,
+ * every time the reclaim fires. */
+static int test_fleet_board_reclaim_keeps_burst_bound(void)
+{
+    int failures = 0;
+    TEST("fleet board: a reclaim inside an open burst window does not hand "
+        "the key its window back") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(15, seed, pk);
+        const int64_t now = 1500000;
+        const uint32_t ttl = 1;
+
+        for (int i = 0; i < FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX; i++) {
+            struct fleet_board_post p;
+            char text[64];
+            (void)snprintf(text, sizeof(text), "one-second note %d", i);
+            fb_test_compose(&p, FLEET_BOARD_KIND_NOTE, "burster", text,
+                            (uint64_t)now, ttl);
+            fb_test_scope(&p, FLEET_BOARD_SCOPE_PUBLIC, "general");
+            ASSERT_EQ(fleet_board_post_sign(&p, seed, pk), FLEET_BOARD_OK);
+            bool stored = false;
+            ASSERT_EQ(db_fleet_board_post_ingest(&db, &p, now, &stored),
+                      FLEET_BOARD_OK);
+            ASSERT(stored);
+        }
+
+        /* Every one of them is expired a minute later; the window they
+         * arrived in has 540 s left to run. The pass takes nothing. */
+        int64_t inside = now + 60;
+        int64_t removed = 99;
+        ASSERT_EQ(db_fleet_board_reclaim_expired(&db, inside, &removed),
+                  FLEET_BOARD_RECLAIM_DONE);
+        ASSERT_EQ(removed, 0);
+
+        struct fleet_board_post next;
+        fb_test_compose(&next, FLEET_BOARD_KIND_NOTE, "burster",
+                        "the 61st arrival in the same window",
+                        (uint64_t)inside, 3600);
+        fb_test_scope(&next, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        ASSERT_EQ(fleet_board_post_sign(&next, seed, pk), FLEET_BOARD_OK);
+        bool stored = true;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &next, inside, &stored),
+                  FLEET_BOARD_ERR_QUOTA);
+        ASSERT(!stored);
+
+        /* Once the window they arrived in has closed, the same pass takes
+         * every one of them back and the key may post again — the floor
+         * delays the reclaim by one window, it does not disable it. */
+        int64_t outside =
+            now + FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS + 1;
+        ASSERT_EQ(db_fleet_board_reclaim_expired(&db, outside, &removed),
+                  FLEET_BOARD_RECLAIM_DONE);
+        ASSERT_EQ(removed, FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX);
+        stored = false;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &next, outside, &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* T3: the window leg is NOT live-aware, and must not become so. A burst of
+ * short-TTL posts is still a burst after every post in it has expired: the
+ * next one inside the same window is refused. This is the half of the quota
+ * that answers "is this key bursting?", and the answer cannot depend on how
+ * short a TTL the burst chose. */
+static int test_fleet_board_public_quota_window_counts_expired(void)
+{
+    int failures = 0;
+    TEST("fleet board: the rolling window counts every arrival, including "
+        "posts whose TTL has already run out") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(13, seed, pk);
+        const int64_t now = 700000;
+        const uint32_t ttl = 60;
+
+        for (int i = 0; i < FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX; i++) {
+            struct fleet_board_post p;
+            char text[64];
+            (void)snprintf(text, sizeof(text), "burst post %d", i);
+            fb_test_compose(&p, FLEET_BOARD_KIND_NOTE, "burster", text,
+                            (uint64_t)now, ttl);
+            fb_test_scope(&p, FLEET_BOARD_SCOPE_PUBLIC, "general");
+            ASSERT_EQ(fleet_board_post_sign(&p, seed, pk), FLEET_BOARD_OK);
+            bool stored = false;
+            ASSERT_EQ(db_fleet_board_post_ingest(&db, &p, now, &stored),
+                      FLEET_BOARD_OK);
+            ASSERT(stored);
+        }
+
+        /* Past every one of those TTLs, still inside the same 600 s window
+         * of arrivals this node recorded. */
+        int64_t later = now + (int64_t)ttl * 2;
+        struct fleet_board_filter filter;
+        memset(&filter, 0, sizeof(filter));
+        filter.host_set = true;
+        memcpy(filter.host_pubkey, pk, 32);
+        struct db_fleet_board_post rows[4];
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, later, rows, 4), 0);
+
+        struct fleet_board_post next;
+        fb_test_compose(&next, FLEET_BOARD_KIND_NOTE, "burster",
+                        "one more inside the same window", (uint64_t)later,
+                        3600);
+        fb_test_scope(&next, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        ASSERT_EQ(fleet_board_post_sign(&next, seed, pk), FLEET_BOARD_OK);
+        bool stored = true;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &next, later, &stored),
+                  FLEET_BOARD_ERR_QUOTA);
+        ASSERT(!stored);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* T4: the physical half. The reclaim deletes expired discussion rows, keeps
+ * durable wiki revisions, and leaves a table the UNCHANGED chain verifier
+ * still walks from genesis — survivors re-seq'd 1..n in arrival order. It
+ * also refuses to run inside somebody else's transaction, because it owns
+ * the whole one it needs. */
+static int test_fleet_board_reclaim_expired(void)
+{
+    int failures = 0;
+    TEST("fleet board: the maintenance reclaim takes back expired posts, "
+        "keeps the wiki, and leaves a chain that still verifies") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        fb_test_identity(14, seed, pk);
+        const int64_t now = 900000;
+
+        /* Three short-lived discussion posts, interleaved with two that
+         * outlive the reclaim, so the survivors are NOT a suffix of the
+         * chain and the relink has to be a real relink. */
+        uint8_t doomed[3][32];
+        uint8_t kept[2][32];
+        int n_doomed = 0;
+        int n_kept = 0;
+        for (int i = 0; i < 5; i++) {
+            struct fleet_board_post p;
+            char text[64];
+            bool durable = (i == 1 || i == 3);
+            (void)snprintf(text, sizeof(text), "%s post %d",
+                           durable ? "long-lived" : "short-lived", i);
+            fb_test_compose(&p, FLEET_BOARD_KIND_NOTE, "mixed", text,
+                            (uint64_t)now + (uint64_t)i,
+                            durable ? FLEET_BOARD_TTL_MAX : 100);
+            fb_test_scope(&p, FLEET_BOARD_SCOPE_PUBLIC, "general");
+            ASSERT_EQ(fleet_board_post_sign(&p, seed, pk), FLEET_BOARD_OK);
+            ASSERT_EQ(db_fleet_board_post_ingest(&db, &p, now + i, NULL),
+                      FLEET_BOARD_OK);
+            if (durable)
+                memcpy(kept[n_kept++], p.id, 32);
+            else
+                memcpy(doomed[n_doomed++], p.id, 32);
+        }
+
+        /* One wiki revision with a TTL that runs out: durable history is
+         * not discussion, and the reclaim must not take it. */
+        struct fleet_board_post page;
+        fb_test_compose(&page, FLEET_BOARD_KIND_WIKI, "mixed",
+                        "A wiki revision outlives its own ttl.",
+                        (uint64_t)now + 5, 100);
+        (void)snprintf(page.slug, sizeof(page.slug), "%s", "durable");
+        (void)snprintf(page.title, sizeof(page.title), "%s", "Durable page");
+        ASSERT_EQ(fleet_board_post_sign(&page, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &page, now + 5, NULL),
+                  FLEET_BOARD_OK);
+
+        int64_t checked = 0;
+        ASSERT(db_fleet_board_chain_verify(&db, &checked));
+        ASSERT_EQ(checked, 6);
+
+        /* An open transaction is somebody else's; the reclaim steps aside
+         * rather than joining it, changes nothing, and says DEFERRED — the
+         * scheduler must be able to tell that apart from a broken pass. */
+        int64_t after_ttl = now + 1000;
+        int64_t removed = 99;
+        ASSERT(node_db_begin(&db));
+        ASSERT_EQ(db_fleet_board_reclaim_expired(&db, after_ttl, &removed),
+                  FLEET_BOARD_RECLAIM_DEFERRED);
+        ASSERT_EQ(removed, 0);
+        ASSERT(node_db_rollback(&db));
+        ASSERT(db_fleet_board_have(&db, doomed[0]));
+
+        ASSERT_EQ(db_fleet_board_reclaim_expired(&db, after_ttl, &removed),
+                  FLEET_BOARD_RECLAIM_DONE);
+        ASSERT_EQ(removed, 3);
+        for (int i = 0; i < 3; i++)
+            ASSERT(!db_fleet_board_have(&db, doomed[i]));
+        for (int i = 0; i < 2; i++)
+            ASSERT(db_fleet_board_have(&db, kept[i]));
+        ASSERT(db_fleet_board_have(&db, page.id));
+
+        /* The chain the verifier walks is unchanged in kind: genesis, then
+         * every stored row, re-seq'd 1..n in the order they arrived. */
+        checked = 0;
+        ASSERT(db_fleet_board_chain_verify(&db, &checked));
+        ASSERT_EQ(checked, 3);
+        struct db_fleet_board_post row;
+        ASSERT(db_fleet_board_post_find(&db, kept[0], &row));
+        ASSERT_EQ(row.seq, 1);
+        ASSERT(db_fleet_board_post_find(&db, kept[1], &row));
+        ASSERT_EQ(row.seq, 2);
+        ASSERT(db_fleet_board_post_find(&db, page.id, &row));
+        ASSERT_EQ(row.seq, 3);
+
+        struct fleet_board_status status;
+        ASSERT(db_fleet_board_status(&db, after_ttl, &status));
+        ASSERT_EQ(status.posts, 3);
+
+        /* A second pass with nothing expired is a no-op that says so. */
+        removed = 99;
+        ASSERT_EQ(db_fleet_board_reclaim_expired(&db, after_ttl, &removed),
+                  FLEET_BOARD_RECLAIM_DONE);
+        ASSERT_EQ(removed, 0);
+
+        /* And the board keeps appending: the next post chains onto the
+         * rebuilt head, not onto the one the deleted rows left behind. */
+        struct fleet_board_post fresh;
+        fb_test_compose(&fresh, FLEET_BOARD_KIND_NOTE, "mixed",
+                        "the first post after a reclaim", (uint64_t)after_ttl,
+                        3600);
+        fb_test_scope(&fresh, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        ASSERT_EQ(fleet_board_post_sign(&fresh, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &fresh, after_ttl, NULL),
+                  FLEET_BOARD_OK);
+        checked = 0;
+        ASSERT(db_fleet_board_chain_verify(&db, &checked));
+        ASSERT_EQ(checked, 4);
+        ASSERT(db_fleet_board_post_find(&db, fresh.id, &row));
+        ASSERT_EQ(row.seq, 4);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+/* Run the PUBLIC-scope-with-the-real-gate tests together, with the
+ * real gate — nothing installed — bracketing all of them, then hand the
  * permissive stub back so the rest of this file's tests keep the isolation
  * they were written for. */
 static int test_fleet_board_public_no_grant_needed(void)
@@ -2072,6 +2423,9 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_board_public_grant_free();
     failures += test_fleet_board_public_unknown_scope();
     failures += test_fleet_board_public_quota();
+    failures += test_fleet_board_public_quota_counts_stored();
+    failures += test_fleet_board_public_quota_window_counts_expired();
+    failures += test_fleet_board_reclaim_keeps_burst_bound();
     zcl_fleet_role_checker_install_permissive_for_testing();
     return failures;
 }
@@ -2114,6 +2468,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_peer_inventory_cursor();
     failures += test_fleet_board_scope_codec();
     failures += test_fleet_board_scope_store();
+    failures += test_fleet_board_reclaim_expired();
     failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same
      * binary must not inherit an open gate. */

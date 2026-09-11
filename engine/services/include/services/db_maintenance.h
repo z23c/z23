@@ -80,6 +80,20 @@
  *   vacuum   EXEMPT. Rewrites the whole database into a new file and holds
  *            the lock for the duration; it needs an at-tip-and-idle gate,
  *            and the boot path installs none.
+ *   board-   ARMED, hourly. Deletes the fleet board's expired non-wiki rows
+ *   reclaim  and re-chains the survivors. Bounded by the board's own
+ *            10000-row ceiling, so it is cheap and its cost does not grow
+ *            with the chain. It is armed rather than left on demand because
+ *            it is the PHYSICAL half of the board's per-key bound: the
+ *            resident quota counts every row this node is STORING for a
+ *            key, expired or not, so the ceiling holds with or without
+ *            this pass — what this pass supplies is the other half, the
+ *            slot actually coming back once the post holding it is dead.
+ *            Leave it unarmed and the quota still bounds the node, but a
+ *            steady publisher spends its 1000 stored rows once and never
+ *            posts again. It runs on the serialized DB-service writer, so
+ *            its transaction and the reducer's are the same thread's,
+ *            never two.
  *
  * Declaring the two off legs exempt is the point. The alternative on offer
  * was leaving all three off and calling the whole thing deferred.
@@ -99,6 +113,22 @@
 #define DB_MAINT_DEFAULT_WAL_MINUTES    15
 #define DB_MAINT_DEFAULT_ANALYZE_HOURS  24
 #define DB_MAINT_DEFAULT_VACUUM_DAYS    7
+
+/* Fleet-board reclaim interval. The board's per-key resident ceiling counts
+ * every row this node is STORING for a key, live or expired
+ * (models/fleet_board_post.h), so this pass is not what makes the ceiling
+ * true — it is what gives a key its slots back: it deletes expired
+ * non-wiki rows and re-chains the survivors.
+ *
+ * The interval therefore sets how much of that ceiling dead rows are
+ * allowed to occupy. A key can only ever add WINDOW_MAX rows per
+ * WINDOW_SECONDS, so between two passes it can leave at most
+ * interval/WINDOW_SECONDS * WINDOW_MAX dead rows behind: 360 of the 1000
+ * stored slots at an hour, leaving ~640 for posts that are actually still
+ * readable. Past ~10000 s the dead allowance reaches 1000 and a publisher
+ * could spend the whole ceiling on rows nobody can read. */
+
+#define DB_MAINT_DEFAULT_BOARD_RECLAIM_MINUTES 60
 
 /* WAL size cap: force a checkpoint if the WAL file exceeds this many
  * bytes, regardless of the normal interval.  Overridable via env
@@ -137,14 +167,16 @@ struct db_maintenance_schedule {
     int wal_checkpoint_minutes;   /* 0 = use default, <0 = exempt */
     int analyze_hours;            /* 0 = use default, <0 = exempt */
     int vacuum_days;              /* 0 = use default, <0 = exempt */
+    int board_reclaim_minutes;    /* 0 = use default, <0 = exempt */
     int tick_seconds;             /* 0 = 60 s (poll)  */
     int64_t wal_max_bytes;        /* 0 = use default (100MB) */
 };
 
 void db_maintenance_schedule_defaults(struct db_maintenance_schedule *s);
 
-/* The boot schedule: only the WAL byte cap is armed here; periodic WAL work is
- * owned by the serialized DB-service writer. ANALYZE and VACUUM are exempt. */
+/* The boot schedule: the WAL byte cap and the fleet-board reclaim are armed
+ * here; periodic WAL work is owned by the serialized DB-service writer.
+ * ANALYZE and VACUUM are exempt. */
 void db_maintenance_schedule_wal_cap_only(
     struct db_maintenance_schedule *s);
 
@@ -158,6 +190,9 @@ struct db_maintenance_status {
     int64_t analyze_last_duration_ms;
     int64_t vacuum_last_unix;
     int64_t vacuum_last_duration_ms;
+    int64_t board_reclaim_last_unix;
+    int64_t board_reclaim_last_duration_ms;
+    int64_t board_reclaim_last_removed;
     int64_t total_runs;
     int64_t total_failures;
     char    last_error[256];
@@ -184,6 +219,16 @@ void db_maintenance_stop(void);
  *   "wal"     — PRAGMA wal_checkpoint(TRUNCATE)
  *   "analyze" — ANALYZE
  *   "vacuum"  — VACUUM  (caller is responsible for idle check)
+ *   "board-reclaim" — db_fleet_board_reclaim_expired(): delete the fleet
+ *                     board's expired non-wiki rows and re-chain the
+ *                     survivors, in one transaction under the board write
+ *                     lock. Bounded by the board's own 10000-row ceiling.
+ *                     Runs ON the serialized DB-service writer, not on the
+ *                     maintenance thread: node.db admits one transaction,
+ *                     and that writer is also where the reducer's
+ *                     block-connect jobs run, so the two cannot open one
+ *                     each. Peer ingress never reaches this — a peer must
+ *                     not be able to make this node delete a row.
  *
  * Returns ZCL_OK on SQLite success. `db` must be opened. Emits the
  * _START / _DONE / _FAILED events on success and failure paths.
@@ -193,7 +238,16 @@ void db_maintenance_stop(void);
  * "deferred, catchup active", emits no events, counts no failure, and
  * leaves the op's last-run stamp untouched so the next call still finds
  * the op due. At most DB_MAINT_MAX_CATCHUP_DEFERRALS calls in a row
- * yield; the one after that runs. */
+ * yield; the one after that runs.
+ *
+ * "board-reclaim" yields the same way, and unboundedly, when the serialized
+ * writer is busy or already has a node_db transaction open: that op owns the
+ * whole transaction it needs, so it cannot join one or queue behind the
+ * blocks that hold one, and a node whose own writers are working is working,
+ * not broken. The result message is "deferred, transaction open", no failure
+ * is counted, and the stamp is untouched. Only a yield the writer reports
+ * after the tick has started leaves a _START event with no outcome — the
+ * pass did not run, so it has none to report. */
 struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op);
 
 /* Checkpoint+truncate the node.db WAL NOW using the db registered by

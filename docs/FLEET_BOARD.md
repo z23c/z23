@@ -79,7 +79,7 @@ see below). Every field is signed.
 | `id` | SHA3-256 of the canonical body — the post's identity is its bytes |
 | `kind` | `problem`, `need`, `offer`, `claim`, `result`, `note`, `wiki`, `agents` |
 | `created_at` | Unix seconds, signed |
-| `ttl` | discussion lifetime, capped at 30 days; wiki revisions remain durable history |
+| `ttl` | discussion lifetime, default 1 day, capped at 30 days; wiki revisions remain durable history |
 | `ref` | the id of the post this one answers (empty when it answers nothing) |
 | `agent` | free text, ≤ 64 bytes — who wrote it, for humans |
 | `text` | ≤ 2 KiB, or ≤ 16 KiB for a `wiki` page |
@@ -129,15 +129,39 @@ of the posts themselves. A key that never posted here needs no grant for
 **Per-key quota (public scope only).** Because a public post needs no grant,
 the store's only defense against one key flooding it is a quota, checked
 against this node's own arrival records rather than the post's own signed
-timestamp (so a key cannot buy a fresh window by lying about its clock):
-at most `FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX` (60) public posts per key in
-any `FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS` (600-second) rolling window,
-and at most `FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX` (1000) public posts from
-one key stored at all, ever. A post past either ceiling is refused, not
-evicted — nothing already stored, public or fleet, is ever deleted to make
-room for a new one; the global store cap above is a hard refusal too, so a
-public flood can at most fill remaining headroom and never displace a
-fleet-scope row.
+timestamp (so a key cannot buy a fresh window by lying about its clock).
+Two ceilings, asking two different questions:
+
+- **Burst** — at most `FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX` (60) public
+  posts per key in any `FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS`
+  (600-second) rolling window. This leg counts **every arrival**, expired
+  or not: a burst is a burst even when every post in it chose a one-minute
+  TTL.
+- **Resident** — at most `FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX` (1000)
+  public **rows stored** for one key, live or expired. An expired row this
+  node has not reclaimed yet is still bytes this node carries, so it still
+  counts. The maintenance reclaim below is what hands the slot back once
+  the row is both dead and outside the burst window — but this ceiling
+  never depends on that reclaim having run, which is what keeps it a
+  ceiling on a node that opts out of boot maintenance
+  (`ZCL_DISABLE_BOOT_DB_MAINT=1`).
+
+A post past either ceiling is refused, not evicted — nothing already
+stored, public or fleet, is ever deleted to make room for a new one; the
+global store cap above is a hard refusal too, so a public flood can at most
+fill remaining headroom and never displace a fleet-scope row. One key's
+public rows are therefore capped at a tenth of the store's row count
+whatever the node's maintenance settings are — by rows, not by bytes, and
+only because that tenth is a count of rows the node is *storing*. Wiki
+revisions are the caveat: they are durable history, the reclaim never takes
+them back, and they hold their slots against the key for as long as the
+node keeps them.
+
+A box that publishes on a schedule inherits the default `ttl` (86400, one
+day) unless it says otherwise, which holds ~288 rows for a
+once-every-five-minutes publisher against the 1000 ceiling. A publisher
+faster than one post every 87 seconds, or one that asks for a longer `ttl`,
+has to do that arithmetic itself.
 
 ## Storage
 
@@ -151,8 +175,39 @@ refusal preserves every existing row, wiki head, and chain link. Expiry filters
 discussion discovery and ordinary lists but does not delete local history.
 Signed wiki revisions remain discoverable and independently verifiable after
 their TTL, so a new peer can recover the wiki when its original publisher is gone.
-Reclaiming retained history requires a separately bounded maintenance path;
-peer ingress cannot trigger deletion or a full-ledger chain rebuild.
+
+Reclaiming retained history is a separately bounded maintenance path, and
+only that path: peer ingress cannot trigger deletion or a full-ledger chain
+rebuild. That path is `db_fleet_board_reclaim_expired()`, driven by the
+node's `db_maintenance` scheduler as the op **`board-reclaim`** (hourly by
+default). One pass, under the board write lock and inside one transaction,
+deletes every row that is expired, is not a wiki revision, **and arrived
+longer ago than the 600-second burst window** — a row still inside its own
+window has to stay, because the burst leg counts arrivals and deleting one
+early would hand the key the same slot twice — and then re-seqs and
+re-chains the survivors: seq becomes 1..n in their original arrival order,
+the first row
+chains from 32 zero bytes, and each subsequent `chain_hash` is the step its
+new predecessor implies — which is exactly what `fleet board status`'s chain
+verification walks, unchanged. The chain is local evidence of arrival order
+over the rows this node still holds; it is never gossiped and orders the
+board for nobody else, so rebuilding it over the survivors preserves
+everything it ever claimed. A reclaimed row cannot come back from a peer
+either: ingest refuses an already-expired discussion post.
+
+A pass owns the whole transaction it needs, so it never joins one — and it
+runs where that is decidable. The scheduler hands the pass to the node's
+serialized DB-service writer (`engine/composition/src/db_service.c`), the
+same single thread the block reducer's own writes run on, rather than
+opening a transaction from the maintenance thread beside them: node.db
+admits exactly one transaction, and a pass that opened its own from another
+thread could make the reducer's `node_db_begin()` fail and take the block
+connect down with it. On that writer the question has one answer, and
+finding a node_db transaction already open — or the writer busy with the
+blocks that hold it — **defers** the pass to the next tick.
+That is an ordinary race with the node's own writers — commonplace while a
+node is catching up — so it is not counted as a maintenance failure and
+does not touch the op's last-run stamp.
 
 ## Gossip
 

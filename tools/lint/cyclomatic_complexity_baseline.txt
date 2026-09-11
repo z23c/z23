@@ -2323,8 +2323,6 @@ engine/services/src/consensus_state_publication_cas.c:persist_record:23
 engine/services/src/consensus_state_publication_decide.c:consensus_state_publication_cas_decide:22
 engine/services/src/consensus_state_publication_decide.c:manifest_complete_self_bound:19
 engine/services/src/consensus_state_publication_frontier.c:consensus_state_publication_cas_capture_frontier_locked:20
-engine/services/src/db_maintenance.c:db_maintenance_start:19
-engine/services/src/db_maintenance.c:dbm_thread_fn:17
 engine/services/src/evidence_ledger_row.c:evidence_ledger_scan_tail:29
 engine/services/src/evidence_ledger_row.c:evidence_row_str:19
 engine/services/src/evidence_ledger_row.c:row_scan_object:27

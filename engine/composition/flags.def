@@ -742,7 +742,7 @@ Z23_FLAG("ZCL_DEV_WATCH_STAGE_COMMAND", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_WATCH_STATE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-dev-status.sh:27")
 Z23_FLAG("ZCL_DISABLE_BOOT_DB_MAINT", "env_runtime", "-", "-",
-          "first use engine/services/src/db_maintenance.c:313; documented at docs/CAPABILITY_INVENTORY.jsonl:1200: {'record':'capability','header':'engine/services/include/services/db_maintenance.h','in...")
+          "first use engine/services/src/db_maintenance.c:337; documented at docs/CAPABILITY_INVENTORY.jsonl:1200: {'record':'capability','header':'engine/services/include/services/db_maintenance.h','in...")
 Z23_FLAG("ZCL_DISABLE_SHA3_WINDOW_TRIPWIRE", "env_runtime", "-", "-",
           "undocumented; first use engine/jobs/src/tip_finalize_post_step.c:119")
 Z23_FLAG("ZCL_DISABLE_UTXO_LADDER_TRIPWIRE", "env_runtime", "-", "-",
@@ -2479,7 +2479,7 @@ Z23_FLAG("ZCL_WALLET_RAW_PREPARE_SCAN_DIRS_FOR_TEST", "env_build", "contexts/wal
           "which directories the wallet raw-prepare log gate scans; a test rail so "
           "the selftest can point it at a planted fixture")
 Z23_FLAG("ZCL_WAL_MAX_BYTES", "env_runtime", "-", "-",
-          "first use engine/services/src/db_maintenance.c:655; documented at docs/RUNBOOK.md:155: Prevention:** Set ZCL_WAL_MAX_BYTES=104857600 (100MB cap, auto-checkpoint). Monitor zcl...")
+          "first use engine/services/src/db_maintenance.c:884; documented at docs/RUNBOOK.md:155: Prevention:** Set ZCL_WAL_MAX_BYTES=104857600 (100MB cap, auto-checkpoint). Monitor zcl...")
 Z23_FLAG("ZCL_WATCH_TEST_LOG", "env_build", "-", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:1035")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",

@@ -101,6 +101,18 @@ static bool dbm_fixture_init(struct dbm_fixture *f, const char *tag)
             "DELETE FROM kv WHERE k=2;",
             NULL, NULL, NULL) != SQLITE_OK)
         return false;
+    /* The board-reclaim op reads the fleet board table, so the shell
+     * fixture carries exactly the columns that op names. The board's own
+     * behaviour is proven in the fleet_board group against the real
+     * schema; what this fixture proves is the scheduler wiring. */
+    if (sqlite3_exec(f->raw,
+            "CREATE TABLE fleet_board_posts("
+            "id BLOB PRIMARY KEY, seq INTEGER NOT NULL,"
+            "kind INTEGER NOT NULL, expires_at INTEGER NOT NULL,"
+            "received_at INTEGER NOT NULL,"
+            "chain_prev BLOB NOT NULL, chain_hash BLOB NOT NULL);",
+            NULL, NULL, NULL) != SQLITE_OK)
+        return false;
 
     f->ndb.db   = f->raw;
     f->ndb.open = true;
@@ -141,6 +153,13 @@ int test_db_maintenance(void)
                   sched.analyze_hours < 0 && sched.vacuum_days < 0);
         DBM_CHECK("dbm: boot schedule keeps the WAL byte cap armed",
                   sched.wal_max_bytes == 0);
+        /* Armed, and armed at an interval short enough that the dead rows
+         * one key can accumulate between passes stay under the live
+         * ceiling the board admits it against. */
+        DBM_CHECK("dbm: boot schedule arms the fleet board reclaim",
+                  sched.board_reclaim_minutes ==
+                      DB_MAINT_DEFAULT_BOARD_RECLAIM_MINUTES &&
+                  sched.board_reclaim_minutes * 60 <= 10000);
     }
 
     /* ── 1. Each op succeeds via run_now ──────────────────── */
@@ -153,20 +172,62 @@ int test_db_maintenance(void)
         bool wal_ok     = db_maintenance_run_now(&f.ndb, "wal").ok;
         bool analyze_ok = db_maintenance_run_now(&f.ndb, "analyze").ok;
         bool vacuum_ok  = db_maintenance_run_now(&f.ndb, "vacuum").ok;
+        /* The fourth op is not SQL behind the port: it is the fleet board's
+         * own bounded reclaim. The board's per-key resident quota counts
+         * STORED rows, so this leg is what hands a key its slots back once
+         * the posts holding them are dead. */
+        bool board_ok   = db_maintenance_run_now(&f.ndb,
+                                                 "board-reclaim").ok;
 
         DBM_CHECK("dbm: run_now(wal) succeeds",     wal_ok);
         DBM_CHECK("dbm: run_now(analyze) succeeds", analyze_ok);
         DBM_CHECK("dbm: run_now(vacuum) succeeds",  vacuum_ok);
+        DBM_CHECK("dbm: run_now(board-reclaim) succeeds", board_ok);
+
+        struct db_maintenance_status bst;
+        db_maintenance_status_snapshot(&bst);
+        DBM_CHECK("dbm: board-reclaim stamps its own last-run time",
+                  bst.board_reclaim_last_unix > 0);
+        DBM_CHECK("dbm: an empty board reclaims nothing",
+                  bst.board_reclaim_last_removed == 0);
 
         int starts = atomic_load(&g_ev_start);
         int dones  = atomic_load(&g_ev_done);
         int fails  = atomic_load(&g_ev_failed);
-        DBM_CHECK("dbm: three EV_DB_MAINTENANCE_START events fired",
-                  starts == 3);
-        DBM_CHECK("dbm: three EV_DB_MAINTENANCE_DONE events fired",
-                  dones == 3);
+        DBM_CHECK("dbm: four EV_DB_MAINTENANCE_START events fired",
+                  starts == 4);
+        DBM_CHECK("dbm: four EV_DB_MAINTENANCE_DONE events fired",
+                  dones == 4);
         DBM_CHECK("dbm: no EV_DB_MAINTENANCE_FAILED events",
                   fails == 0);
+
+        /* An open node_db transaction is the node's own writers at work,
+         * which is most of what a syncing node is doing. The reclaim owns
+         * the whole transaction it needs, so it yields the tick — and a
+         * yield must not touch the failure counter the health rollup reads
+         * (`total_failures == 0`), or the first reclaim that lands during
+         * catchup would report the node unhealthy for the life of the
+         * process. */
+        struct db_maintenance_status before;
+        db_maintenance_status_snapshot(&before);
+        f.ndb.tx_open = true;
+        bool yielded = db_maintenance_run_now(&f.ndb, "board-reclaim").ok;
+        f.ndb.tx_open = false;
+        struct db_maintenance_status after;
+        db_maintenance_status_snapshot(&after);
+        DBM_CHECK("dbm: board-reclaim yields to an open transaction",
+                  !yielded);
+        DBM_CHECK("dbm: a yielded board reclaim counts no failure",
+                  after.total_failures == before.total_failures);
+        DBM_CHECK("dbm: a yielded board reclaim counts no run",
+                  after.total_runs == before.total_runs);
+        DBM_CHECK("dbm: a yielded board reclaim leaves the op still due",
+                  after.board_reclaim_last_unix ==
+                      before.board_reclaim_last_unix);
+        DBM_CHECK("dbm: a yielded board reclaim emits no event",
+                  atomic_load(&g_ev_start) == starts &&
+                  atomic_load(&g_ev_done) == dones &&
+                  atomic_load(&g_ev_failed) == fails);
 
         dbm_fixture_destroy(&f);
     }

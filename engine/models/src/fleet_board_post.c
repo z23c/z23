@@ -17,6 +17,7 @@
 /* model_fields.h defines the ZCL_MODEL_* constructors the field list is
  * written in, so it must precede the list it decodes. */
 #include "models/model_fields.h"
+#include "models/db_txn.h"
 #include "models/def/fleet_board_post_fields.def"
 #include "models/query_builder.h"
 #include "platform/time_compat.h"
@@ -496,11 +497,27 @@ static bool board_role_allows(const struct fleet_board_post *post)
     return false;
 }
 
-/* One capped count: how many PUBLIC-scope rows this key already has, with an
- * optional "and received after `since`" narrowing for the rolling window.
- * `since < 0` means "no time floor" — the lifetime count. Caller holds board
- * lock; a query error refuses rather than reporting an empty count, same as
- * every other aggregate in this file. */
+/* What "still discoverable" means, in one place. A row is live while its
+ * own signed TTL has not run out; a wiki revision is durable history and
+ * never stops being live. The list and the inventory ask exactly this
+ * question, so neither can drift into a different idea of what the board
+ * still shows. board_where_reclaimable below is its complement, plus an
+ * arrival floor the quota needs. */
+static void board_where_discoverable(struct qb *q, int64_t now)
+{
+    qb_group_begin(q, QB_OR);
+    qb_where_int(q, QB_C_fleet_board_posts_expires_at, QB_GT, now);
+    qb_where_int(q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
+    qb_group_end(q);
+}
+
+/* One capped count of this key's PUBLIC rows. `since < 0` drops the time
+ * floor. Neither leg filters on TTL: the window leg counts every arrival
+ * because a burst is a burst even if every post in it expires in a minute,
+ * and the resident leg counts every stored row because an expired row this
+ * node has not reclaimed yet is still bytes this node is carrying for the
+ * key. Caller holds the board lock; a query error refuses rather than
+ * reporting an empty count. */
 static bool board_public_count(struct node_db *ndb,
                                const uint8_t host_pubkey[32], int64_t since,
                                int64_t *out)
@@ -519,19 +536,28 @@ static bool board_public_count(struct node_db *ndb,
 
 /* The only anti-flood check a PUBLIC-scope post gets, since it carries no
  * role grant at all: two independent per-key ceilings, a rolling-window
- * rate and a lifetime stored count. `received_at` drives the window, not
- * the post's own signed `created_at` — the signer chooses the latter, this
- * node chooses the former, so a flood cannot buy a fresh window by lying
- * about its clock. */
+ * rate and a resident stored-row count. `received_at` drives the window,
+ * not the post's own signed `created_at` — the signer chooses the latter,
+ * this node chooses the former, so a flood cannot buy a fresh window by
+ * lying about its clock.
+ *
+ * The two legs ask different questions on purpose. The window leg asks "is
+ * this key bursting?" and counts every arrival inside the window. The
+ * resident leg asks "how much of this node's finite, forever-carried store
+ * is this key holding?" — which is every row still on disk for that key,
+ * expired or not, because an unreclaimed row costs this node exactly what
+ * a live one costs it. db_fleet_board_reclaim_expired is what hands those
+ * slots back; this ceiling does not depend on it having run, so a node
+ * that opts out of boot maintenance is still bounded. */
 static bool board_public_quota_ok(struct node_db *ndb,
                                   const uint8_t host_pubkey[32], int64_t now)
 {
-    int64_t total = 0;
-    if (!board_public_count(ndb, host_pubkey, -1, &total)) {
-        LOG_WARN("fleet.board", "public quota lifetime aggregate failed");
+    int64_t resident = 0;
+    if (!board_public_count(ndb, host_pubkey, -1, &resident)) {
+        LOG_WARN("fleet.board", "public quota resident aggregate failed");
         return false;
     }
-    if (total >= FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX)
+    if (resident >= FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX)
         return false;
 
     int64_t windowed = 0;
@@ -651,6 +677,229 @@ enum fleet_board_result db_fleet_board_post_ingest(
     return FLEET_BOARD_OK;
 }
 
+/* What a reclaim pass is allowed to take back, written once so the count
+ * and the delete can never key on different rows.
+ *
+ * Three conditions, all necessary. The TTL has run out and the row is not
+ * durable wiki history — that is board_where_discoverable read the other
+ * way round. And the row arrived longer ago than the public quota's
+ * rolling window: that leg counts EVERY arrival in the window regardless
+ * of TTL, so a pass that deleted a row while its own window was still open
+ * would hand the key the same slot twice. Without this floor a key posts
+ * WINDOW_MAX one-second notes, waits for a reclaim, and posts WINDOW_MAX
+ * more inside the same window — twice the arrivals the burst ceiling
+ * states, sustained for as often as the reclaim runs. Holding a window's
+ * worth of dead rows costs at most WINDOW_MAX rows per key and makes the
+ * burst ceiling an invariant no maintenance pass can lift. */
+static void board_where_reclaimable(struct qb *q, int64_t now)
+{
+    qb_where_int(q, QB_C_fleet_board_posts_expires_at, QB_LE, now);
+    qb_where_int(q, QB_C_fleet_board_posts_kind, QB_NE,
+                 FLEET_BOARD_KIND_WIKI);
+    qb_where_int(q, QB_C_fleet_board_posts_received_at, QB_LE,
+                 now - (int64_t)FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS);
+}
+
+/* How many rows the reclaim below is about to take back. Asked as its own
+ * checked aggregate so the count the caller reports is the store's own
+ * answer, and so an unreadable table refuses the whole pass instead of
+ * reporting "removed 0" over a table it could not read. Caller holds the
+ * board write lock. */
+static bool board_expired_count(struct node_db *ndb, int64_t now,
+                                int64_t *out)
+{
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_count_star(&q);
+    board_where_reclaimable(&q, now);
+    return board_aggregate_checked(ndb, &q, out);
+}
+
+/* How many rows the table holds right now — the relink's expected length,
+ * counted rather than discovered, so a short scan is detectable. Caller
+ * holds the board write lock. */
+static bool board_stored_count(struct node_db *ndb, int64_t *out)
+{
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_count_star(&q);
+    return board_aggregate_checked(ndb, &q, out);
+}
+
+/* The delete leg, over exactly the rows board_where_reclaimable names — the
+ * same predicate the count above asked, so the number the pass reports is
+ * the number of rows it removed. Caller holds the board write lock and an
+ * open transaction. */
+static bool board_delete_expired(struct node_db *ndb, int64_t now)
+{
+    struct qb q;
+    qb_delete(&q, QB_T_fleet_board_posts);
+    board_where_reclaimable(&q, now);
+    QB_EXEC_BOOL(ndb, &q, s);
+}
+
+/* One row's worth of the relink, kept separate so the loop below stays flat.
+ * Assigning seq i to the i-th surviving row in ascending seq order never
+ * collides with the UNIQUE seq index: every row not yet rewritten still
+ * holds a seq strictly greater than i. */
+static bool board_set_chain(struct node_db *ndb, const uint8_t id[32],
+                            int64_t seq, const uint8_t prev[32],
+                            const uint8_t hash[32])
+{
+    struct qb q;
+    qb_update(&q, QB_T_fleet_board_posts);
+    qb_set_int(&q, QB_C_fleet_board_posts_seq, seq);
+    qb_set_blob(&q, QB_C_fleet_board_posts_chain_prev, prev, 32);
+    qb_set_blob(&q, QB_C_fleet_board_posts_chain_hash, hash, 32);
+    qb_where_blob(&q, QB_C_fleet_board_posts_id, QB_EQ, id, 32);
+    QB_EXEC_CHANGED_BOOL(ndb, &q, s);
+}
+
+/* Relink the whole stored table after a reclaim. The chain is LOCAL evidence
+ * of arrival order over the rows this node still holds (docs/FLEET_BOARD.md,
+ * Storage): it is never gossiped and orders the board for nobody else, so
+ * rebuilding it over the survivors preserves exactly what it ever claimed —
+ * and leaves the table in a state db_fleet_board_chain_verify accepts with
+ * no change to that verifier at all. Reads ids in one pass into a bounded
+ * buffer (FLEET_BOARD_STORE_MAX_POSTS caps the table, so the walk is bounded
+ * by construction, and a table somehow past that cap refuses the pass rather
+ * than relinking a prefix). Caller holds the board write lock and an open
+ * transaction. */
+static bool board_rechain_survivors(struct node_db *ndb, int64_t expected)
+{
+    if (expected < 0 || expected > FLEET_BOARD_STORE_MAX_POSTS) {
+        LOG_WARN("fleet.board",
+                 "reclaim rechain refused: %lld survivors is outside the "
+                 "store's own ceiling", (long long)expected);
+        return false;
+    }
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_columns(&q, k_board_chain_cols, BOARD_CHAIN_NCOLS);
+    qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_ASC);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board", "reclaim rechain scan failed: %s",
+                 qb_error(&q));
+        return false;
+    }
+    /* Static, not stack: 320 KiB of ids has no business on a thread stack,
+     * and the board write lock the caller holds is what makes one shared
+     * buffer safe. */
+    static uint8_t ids[FLEET_BOARD_STORE_MAX_POSTS][32];
+    int n = 0;
+    while (n < (int)expected && AR_STEP_ROW(s)) {
+        struct fleet_board_chain_ref row;
+        board_read_chain_ref(&row, s);
+        memcpy(ids[n++], row.id, 32);
+    }
+    sqlite3_finalize(s);
+    /* A short read is a read that went wrong. Relinking a PREFIX would
+     * leave the rows past it holding chain fields nothing points at, so a
+     * scan that did not deliver every counted survivor refuses the whole
+     * pass and the transaction rolls back. */
+    if ((int64_t)n != expected) {
+        LOG_WARN("fleet.board",
+                 "reclaim rechain read %d of %lld survivors", n,
+                 (long long)expected);
+        return false;
+    }
+    uint8_t prev[32] = {0};
+    for (int i = 0; i < n; i++) {
+        uint8_t hash[32];
+        fleet_board_chain_step(prev, ids[i], hash);
+        if (!board_set_chain(ndb, ids[i], (int64_t)i + 1, prev, hash)) {
+            LOG_WARN("fleet.board", "reclaim rechain write failed at %d/%d",
+                     i, n);
+            return false;
+        }
+        memcpy(prev, hash, 32);
+    }
+    return true;
+}
+
+/* Delete then relink, all inside one transaction, so the ledger is never
+ * observable with the rows gone and the chain still describing them.
+ * Caller holds the board write lock. */
+static bool board_reclaim_locked(struct node_db *ndb, int64_t now,
+                                 int64_t *removed_out)
+{
+    int64_t expired = 0;
+    if (!board_expired_count(ndb, now, &expired)) {
+        LOG_WARN("fleet.board", "reclaim expired-count aggregate failed");
+        return false;
+    }
+    if (expired == 0)
+        return true;
+    DB_TXN_SCOPE(txn, ndb, "fleet_board.reclaim_expired");
+    if (!txn)
+        return false;
+    if (!board_delete_expired(ndb, now)) {
+        LOG_WARN("fleet.board", "reclaim delete failed");
+        return false;
+    }
+    int64_t survivors = 0;
+    if (!board_stored_count(ndb, &survivors)) {
+        LOG_WARN("fleet.board", "reclaim survivor count failed");
+        return false;
+    }
+    if (!board_rechain_survivors(ndb, survivors))
+        return false; // raw-return-ok:board_rechain_survivors already logged its own reason
+    if (!db_txn_commit(txn)) {
+        LOG_WARN("fleet.board", "reclaim transaction commit failed");
+        return false;
+    }
+    *removed_out = expired;
+    return true;
+}
+
+/* The separately bounded maintenance path docs/FLEET_BOARD.md reserves:
+ * expired discussion rows are physically removed and the survivors are
+ * re-seq'd and re-chained, so the store the lifetime quota counts and the
+ * bytes the node actually carries say the same thing.
+ *
+ * NEVER reachable from ingress: a peer must not be able to make this node
+ * delete a row or rewrite its chain, so the only caller is the local
+ * db_maintenance scheduler's "board-reclaim" op (and the tests that drive
+ * it directly). Gossip cannot undo a pass either — ingest refuses an
+ * already-expired discussion post, so a row taken back here cannot be
+ * re-ingested from a peer. */
+enum fleet_board_reclaim db_fleet_board_reclaim_expired(
+    struct node_db *ndb, int64_t now, int64_t *removed_out)
+{
+    if (removed_out)
+        *removed_out = 0;
+    if (!ndb || !ndb->open)
+        return FLEET_BOARD_RECLAIM_FAILED;
+    /* Same rule ingest uses: this path owns its whole transaction, so it
+     * refuses to run inside somebody else's rather than joining it. That
+     * refusal is DEFERRED, not FAILED — the node's own writers hold a
+     * transaction open all the time, and housekeeping that steps aside for
+     * them has not gone wrong. */
+    struct node_db_status st;
+    node_db_get_status(ndb, &st);
+    if (st.tx_open)
+        return FLEET_BOARD_RECLAIM_DEFERRED;
+    board_write_lock();
+    node_db_get_status(ndb, &st);
+    if (st.tx_open) {
+        zcl_mutex_unlock(&s_board_write_lock);
+        return FLEET_BOARD_RECLAIM_DEFERRED;
+    }
+    int64_t removed = 0;
+    bool ok = board_reclaim_locked(ndb, now, &removed);
+    zcl_mutex_unlock(&s_board_write_lock);
+    if (!ok)
+        return FLEET_BOARD_RECLAIM_FAILED;
+    if (removed > 0)
+        LOG_INFO("fleet.board",
+                 "reclaimed %lld expired post(s); survivors re-chained",
+                 (long long)removed);
+    if (removed_out)
+        *removed_out = removed;
+    return FLEET_BOARD_RECLAIM_DONE;
+}
+
 bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],
                               struct db_fleet_board_post *out)
 {
@@ -683,14 +932,6 @@ static void board_answered_subquery(struct qb *sub)
     qb_select_column(sub, QB_C_fleet_board_posts_ref);
     qb_where_in_int(sub, QB_C_fleet_board_posts_kind, k_answer_kinds,
                     sizeof(k_answer_kinds) / sizeof(k_answer_kinds[0]));
-}
-
-static void board_where_discoverable(struct qb *q, int64_t now)
-{
-    qb_group_begin(q, QB_OR);
-    qb_where_int(q, QB_C_fleet_board_posts_expires_at, QB_GT, now);
-    qb_where_int(q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
-    qb_group_end(q);
 }
 
 static void board_apply_filter(struct qb *q,

@@ -53,7 +53,14 @@ enum {
     /* Maximum declared TTL. Wiki history remains discoverable after expiry;
      * ordinary discussion posts expire according to their signed TTL. */
     FLEET_BOARD_TTL_MAX = 2592000,      /* 30 days */
-    FLEET_BOARD_TTL_DEFAULT = 604800,   /* 7 days */
+    /* What a poster who did not say gets. One day, because the caller that
+     * does not choose a TTL is the one publishing on a timer, and the
+     * per-key resident ceiling (FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX, 1000
+     * rows) is what a publisher walls into: at this default a box may
+     * publish as often as every 87 seconds forever and never reach it,
+     * where a week-long default walled a five-minute publisher in three and
+     * a half days. A post worth keeping longer says so. */
+    FLEET_BOARD_TTL_DEFAULT = 86400,    /* 1 day */
     /* Clock skew a peer is allowed: a post dated further ahead is refused. */
     FLEET_BOARD_FUTURE_SKEW_MAX = 300,
 };

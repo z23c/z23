@@ -779,7 +779,20 @@ AGENT_IMPACT_RULE("engine/modules/storage/src/mempool_projection.c|engine/module
  * close + projection_meta plumbing) that znam_projection.c and
  * peers_projection.c are rebased onto. */
 AGENT_IMPACT_RULE("engine/modules/storage/src/projection_consumer.c|engine/modules/storage/include/storage/projection_consumer.h|engine/modules/storage/include/storage/znam_projection.h|engine/modules/storage/include/storage/peers_projection.h|engine/modules/storage/include/storage/projection_util.h|tests/harness/src/test_projection_consumer.c|tests/harness/src/test_znam_projection.c|tests/harness/src/test_peers_projection.c", "projection_consumer small_projections znam_projection peers_projection make_lint_gates")
-AGENT_IMPACT_RULE("engine/services/src/db_maintenance.c|engine/services/include/services/db_maintenance.h|engine/services/src/disk_monitor.c", "db_maintenance health_rollup make_lint_gates")
+/* The scheduler drives the fleet board's reclaim op, so a change here can
+ * only be judged by the board group too — that is where the reclaim's own
+ * behaviour is proven against the real schema. */
+AGENT_IMPACT_RULE("engine/services/src/db_maintenance.c|engine/services/include/services/db_maintenance.h|engine/services/src/disk_monitor.c", "db_maintenance fleet_board health_rollup make_lint_gates")
+/* The board store and the scheduler leg that reclaims it are one subject:
+ * the per-key resident quota counts STORED rows, and the reclaim is what
+ * hands a key its slots back once the rows holding them are dead and
+ * outside the burst window. */
+AGENT_IMPACT_RULE("engine/models/src/fleet_board_post.c|engine/models/include/models/fleet_board_post.h|tests/harness/src/test_fleet_board.c", "fleet_board fleet_board_bridge db_maintenance models make_lint_gates")
+/* The board's wire format, and the home of the default post TTL: change
+ * what a post's lifetime defaults to and every stored row's expiry moves,
+ * which is exactly what the resident quota counts and the reclaim keys on.
+ * Judged by the same groups as the store itself. */
+AGENT_IMPACT_RULE("cognition/modules/session/src/fleet_board_proto.c|cognition/modules/session/include/session/fleet_board_proto.h", "fleet_board fleet_board_bridge board_site db_maintenance models make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/storage_housekeeping.c|engine/services/include/services/storage_housekeeping.h|tests/harness/src/test_storage_housekeeping.c", "storage_housekeeping storage_pacing topology_store progress_store make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/disk_monitor.c|engine/services/include/services/disk_monitor.h|engine/services/src/ibd_throttle.c|engine/services/include/services/ibd_throttle.h|tests/harness/src/test_disk_monitor.c|tests/harness/src/test_ibd_throttle.c", "disk_monitor ibd_throttle sticky_conditions storage_reclaim make_lint_gates")
 /* Network monitoring station: per-peer chain-intelligence model, the supervised
