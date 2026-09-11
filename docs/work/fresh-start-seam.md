@@ -14,8 +14,22 @@ naming/ownership) and [`../CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DO
 
 ## 0. The two defects, stated once
 
-> **2026-09-09 update — seams A and B no longer decide C3.** With a
-> `-fileservice=` peer named, the weld runs: three genuine wipe-to-tip
+> **WITHDRAWN 2026-09-11 — nothing outside this prose records either
+> 2026-09-09 block below.** The collector ledger
+> (`~/.local/state/zclassic23-c3-stopwatch/history.jsonl`) holds no row of
+> any verdict for 2026-09-09 — its newest row is 2026-09-08 20:08 UTC,
+> `verdict=fail` — and no `build/c3-stopwatch/20260909T*` artifact directory
+> exists on disk. Neither the three SEAM runs nor the 336 s / 371 s PASS pair
+> is evidence for anything, so whether seams A and B still decide C3 is not
+> settled by them either way. The newest recorded C3 pass remains the
+> 2026-08-21 ledger row: `wall_clock_seconds=515`, `final_hstar=3224132`
+> against `final_network_tip=3224124`. The current C3 status and its
+> remaining condition live in [`../MVP.md`](../MVP.md) criterion 3. Both
+> blocks are kept verbatim below, marked, rather than deleted, so the
+> withdrawal itself stays visible.
+>
+> **[WITHDRAWN] 2026-09-09 update — seams A and B no longer decide C3.**
+> With a `-fileservice=` peer named, the weld runs: three genuine wipe-to-tip
 > stopwatch runs on the maintainer host (artifact dirs under
 > `build/c3-stopwatch/20260909T*`, ledger
 > `~/.local/state/zclassic23-c3-stopwatch/history.jsonl`) all show `H*`
@@ -29,8 +43,8 @@ naming/ownership) and [`../CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DO
 > `refold_no_anchor_artifact` blockers in those runs are the same
 > recovery-artifact absences §5 names — downstream noise, not the cause.
 >
-> **2026-09-09 resolution — the tail crawl is serving capacity, not a code
-> defect.** The identical harness against the repo's intended dedicated
+> **[WITHDRAWN] 2026-09-09 resolution — the tail crawl is serving capacity,
+> not a code defect.** The identical harness against the repo's intended dedicated
 > fixture peer (`platform/deploy/examples/zcl-stopwatch-peer.service`,
 > provisioned as a plain process on ports 39070–39073, itself synced
 > wiped-to-tip in ~8 min) **PASSED**: `H*` reached `network_tip=3244952`

@@ -430,9 +430,12 @@ failure, never on a legitimate non-PASS run verdict. See
 ### Provisioning the fixture peer by hand (no systemd)
 
 When the systemd unit is not installed, the same peer runs as a plain
-process. Measured 2026-09-09: the peer itself syncs wiped-to-tip in
-~8 min via `-addnode=127.0.0.1:8033` peer widening, then serves two
-consecutive C3 PASSes (336 s and 371 s):
+process, widening its peers with `-addnode` against a serving node. A
+2026-09-09 note here recorded that peer syncing wiped-to-tip in ~8 min and
+then serving two consecutive C3 PASSes of 336 s and 371 s; **withdrawn
+2026-09-11** — the collector ledger holds no row of any verdict for
+2026-09-09 and the artifact directories those runs named do not exist, so
+this recipe carries no recorded timing:
 
 ```bash
 PEER_DIR=~/.local/state/zclassic23-stopwatch-peer
