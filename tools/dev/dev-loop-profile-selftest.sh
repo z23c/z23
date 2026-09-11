@@ -189,6 +189,12 @@ awk '$0 == "else ifeq ($(strip $(MAKECMDGOALS)),)" {
      }
      END { exit found ? 0 : 1 }' "$ROOT/Makefile" ||
     fail 'default z23 build imports unrelated dependency graphs'
+git -C "$ROOT" grep -q '^-include \$(DEV_OBJS:\.o=\.d) \$(DEV_PACKAGE_VERIFY_OBJ:\.o=\.d)$' -- \
+    Makefile ||
+    fail 'dev depfile profile omits the package verifier main (a header change leaves tools/package_verify.o stale and the relinked verifier aborts)'
+git -C "$ROOT" grep -q '^else ifneq (\$(filter fast-compile dev-build-only dev-package-verifier,\$(ZCL_DEPFILE_SINGLE_GOAL)),)$' -- \
+    Makefile ||
+    fail 'the dev-package-verifier sub-make does not select the dev depfile profile by name'
 
 # Isolate these diagnostic Makes from the parent jobserver. Invoked under
 # `make pre-push-ci`, an inherited MAKEFLAGS/MAKELEVEL recursive make prints

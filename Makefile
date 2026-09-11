@@ -1809,7 +1809,7 @@ ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 zclassic23-package-verify,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := node-c23
-else ifneq ($(filter fast-compile dev-build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter fast-compile dev-build-only dev-package-verifier,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
@@ -1846,7 +1846,7 @@ ifneq ($(filter node-c23,$(ZCL_DEPFILE_PROFILES)),)
 -include $(NODE_C23_OBJS:.o=.d) $(NODE_C23_PACKAGE_VERIFY_OBJ:.o=.d)
 endif
 ifneq ($(filter dev,$(ZCL_DEPFILE_PROFILES)),)
--include $(DEV_OBJS:.o=.d)
+-include $(DEV_OBJS:.o=.d) $(DEV_PACKAGE_VERIFY_OBJ:.o=.d)
 endif
 ifneq ($(filter dev-asan,$(ZCL_DEPFILE_PROFILES)),)
 -include $(DEV_ASAN_OBJS:.o=.d)
