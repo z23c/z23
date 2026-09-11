@@ -168,7 +168,294 @@ static int supporters_at(const struct mesh_obs_slot *slots, size_t n,
     return count;
 }
 
-/* ── the fold ───────────────────────────────────────────────────────── */
+/* ── the fold, one static per numbered step ─────────────────────────── */
+
+/* Step 1 — coverage. Every slot lands in exactly one bucket. */
+static void mesh_compose_step1_coverage(const struct mesh_obs_slot *slots,
+                                        size_t n,
+                                        const struct mesh_compose_budget *b,
+                                        int64_t now_unix,
+                                        struct mesh_conclusion *out)
+{
+    for (size_t i = 0; i < n; i++) {
+        const struct mesh_obs_slot *s = &slots[i];
+        if (s->fetch == MESH_OBS_NOT_PROBED) {
+            out->records_not_probed++;      /* I did not look. Not a failure. */
+            continue;
+        }
+        if (!s->parsed) {
+            /* A named refusal is a malformed document; anything else that
+             * came back unusable — including a spent budget — is SILENCE,
+             * and silence is never counter-evidence. */
+            if (s->refusal[0])
+                out->records_malformed++;
+            else
+                out->records_silent++;
+            continue;
+        }
+        out->records_parsed++;
+        if (slot_is_fresh(s, b->freshness_secs, now_unix))
+            out->records_fresh++;
+        else
+            out->records_stale++;
+    }
+}
+
+/* Step 2 — independence, BY IDENTITY, not by address group.
+ *
+ * net_addr_get_group() returns the identical key for every torv3 address, so
+ * a ">= 2 distinct groups" bar is unreachable on an onion-only fleet — the
+ * exact shape of unreachable gate this surface exists to stop rebuilding.
+ * Identity here is the published onion (the torv3 address IS an ed25519
+ * public key), falling back to the build source_id. */
+static void mesh_compose_step2_independence(
+    const struct mesh_obs_slot *slots, size_t n,
+    const struct mesh_compose_budget *b, int64_t now_unix,
+    struct mesh_conclusion *out)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!slot_is_fresh(&slots[i], b->freshness_secs, now_unix))
+            continue;
+        const char *id = record_identity(&slots[i].rec);
+        if (!id[0])
+            continue;
+        bool seen_before = false;
+        for (size_t j = 0; j < i && !seen_before; j++) {
+            if (!slot_is_fresh(&slots[j], b->freshness_secs, now_unix))
+                continue;
+            const char *jd = record_identity(&slots[j].rec);
+            if (jd[0] && strcmp(jd, id) == 0)
+                seen_before = true;
+        }
+        if (!seen_before)
+            out->distinct_identities++;
+    }
+}
+
+/* Step 3, one rung — the SMALLEST qualifying height at anchor index `r`, or
+ * -1 when that rung has none. The reader's own hash at the winning height is
+ * copied into best_hash_out. The caller has already proved `reader->hash_at`
+ * is callable. */
+static int64_t mesh_compose_step3_rung_best(
+    const struct mesh_obs_slot *slots, size_t n,
+    const struct mesh_reader_chain *reader,
+    const struct mesh_compose_budget *b, int64_t now_unix,
+    const struct mesh_conclusion *out, int r,
+    char best_hash_out[MESH_OBS_HEXHASH])
+{
+    int64_t best = -1;
+    best_hash_out[0] = '\0';
+    for (size_t i = 0; i < n; i++) {
+        if (!slot_is_fresh(&slots[i], b->freshness_secs, now_unix))
+            continue;
+        const struct mesh_obs_anchor *a = &slots[i].rec.self.anchors[r];
+        if (!a->present || a->height < 0 || !hex64_ok(a->hash_hex))
+            continue;
+        if (best >= 0 && a->height >= best)
+            continue;   /* prune: we want the smallest qualifying height */
+        if (supporters_at(slots, n, b->freshness_secs, now_unix,
+                          a->height) < out->min_independent_required)
+            continue;
+        char probe[MESH_OBS_HEXHASH];
+        probe[0] = '\0';
+        if (!reader->hash_at(reader->ctx, a->height, probe))
+            continue;
+        if (!hex64_ok(probe))
+            continue;   /* the reader's own answer must be well-formed */
+        best = a->height;
+        memcpy(best_hash_out, probe, MESH_OBS_HEXHASH);
+    }
+    return best;
+}
+
+/* Step 3 — pick the checkable height, or -1.
+ *
+ * Deepest rung first (back=144 -> back=0): a deep rung is the one most
+ * likely to be common across records and the least likely to be churning
+ * under a reorg. Within one rung the SMALLEST qualifying height wins, which
+ * makes the choice a minimum over a set and therefore independent of slot
+ * order. */
+static int64_t mesh_compose_step3_pick_height(
+    const struct mesh_obs_slot *slots, size_t n,
+    const struct mesh_reader_chain *reader,
+    const struct mesh_compose_budget *b, int64_t now_unix,
+    const struct mesh_conclusion *out,
+    char reader_hash_out[MESH_OBS_HEXHASH])
+{
+    int64_t chosen = -1;
+    bool reader_usable = reader && reader->hash_at;
+    reader_hash_out[0] = '\0';
+
+    for (int r = MESH_OBS_ANCHORS - 1; r >= 0 && chosen < 0; r--) {
+        char best_hash[MESH_OBS_HEXHASH];
+        if (!reader_usable)
+            break;
+        int64_t best = mesh_compose_step3_rung_best(slots, n, reader, b,
+                                                    now_unix, out, r,
+                                                    best_hash);
+        if (best >= 0) {
+            chosen = best;
+            memcpy(reader_hash_out, best_hash, MESH_OBS_HEXHASH);
+        }
+    }
+    return chosen;
+}
+
+/* Step 4 — RECOMPUTE.
+ *
+ * The READER's own hash is the comparison basis. No record's hash is ever
+ * compared to another record's hash — that is what makes this a
+ * recomputation rather than a poll. */
+static void mesh_compose_step4_recompute(
+    const struct mesh_obs_slot *slots, size_t n,
+    const struct mesh_compose_budget *b, int64_t now_unix, int64_t chosen,
+    const char reader_hash[MESH_OBS_HEXHASH], struct mesh_conclusion *out)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!slot_is_fresh(&slots[i], b->freshness_secs, now_unix))
+            continue;
+        const char *theirs = NULL;
+        if (!record_hash_at(&slots[i].rec, chosen, &theirs)) {
+            out->no_common_height++;
+            continue;
+        }
+        if (hex64_cmp(theirs, reader_hash) == 0)
+            out->agree_at_anchor++;
+        else
+            out->disagree_at_anchor++;
+    }
+}
+
+/* The fresh record that published `peer_onion` as its own onion, or NULL.
+ * Slot `self` is never its own counterparty. */
+static const struct mesh_observation *mesh_compose_counterparty(
+    const struct mesh_obs_slot *slots, size_t n,
+    const struct mesh_compose_budget *b, int64_t now_unix, size_t self,
+    const char *peer_onion)
+{
+    const struct mesh_observation *rc = NULL;
+    if (!peer_onion[0])
+        return NULL;
+    for (size_t j = 0; j < n && !rc; j++) {
+        if (j == self)
+            continue;
+        if (!slot_is_fresh(&slots[j], b->freshness_secs, now_unix))
+            continue;
+        if (slots[j].rec.self.onion[0] &&
+            strcmp(slots[j].rec.self.onion, peer_onion) == 0)
+            rc = &slots[j].rec;
+    }
+    return rc;
+}
+
+/* Does the counterparty assert an edge back to `my_id`? A missing
+ * counterparty or an unpublished own onion is never reciprocation. */
+static bool mesh_compose_edge_reciprocated(const struct mesh_observation *rc,
+                                           const char *my_id)
+{
+    if (!rc || !my_id[0])
+        return false;
+    int cec = rc->edge_count;
+    if (cec < 0)
+        cec = 0;
+    if (cec > MESH_OBS_EDGES_MAX)
+        cec = MESH_OBS_EDGES_MAX;
+    for (int k = 0; k < cec; k++) {
+        if (rc->edges[k].peer_onion[0] &&
+            strcmp(rc->edges[k].peer_onion, my_id) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* One asserted edge: count it, then cross-check the third-party claim
+ * against that third party's OWN record. A mismatch is an observation the
+ * READER derived — about this publisher's honesty or its staleness — not one
+ * the publisher supplied. */
+static void mesh_compose_count_edge(const struct mesh_obs_slot *slots,
+                                    size_t n,
+                                    const struct mesh_compose_budget *b,
+                                    int64_t now_unix, size_t self,
+                                    const char *my_id,
+                                    const struct mesh_obs_edge *ed,
+                                    struct mesh_conclusion *out)
+{
+    out->edges_asserted++;
+
+    /* Find the named counterparty among the fresh records. */
+    const struct mesh_observation *rc =
+        mesh_compose_counterparty(slots, n, b, now_unix, self,
+                                  ed->peer_onion);
+
+    if (mesh_compose_edge_reciprocated(rc, my_id))
+        out->edges_reciprocated++;
+    else
+        out->edges_one_sided++;
+
+    if (rc && ed->claimed_height >= 0 &&
+        hex64_ok(ed->claimed_tip_hash_hex)) {
+        const char *own = NULL;
+        if (record_hash_at(rc, ed->claimed_height, &own) &&
+            hex64_cmp(own, ed->claimed_tip_hash_hex) != 0)
+            out->edges_contradicted++;
+    }
+}
+
+/* Step 5 — adjacency. Reported, never a state input.
+ *
+ * A's edge to B and B's edge to A are both claims. An edge both sides assert
+ * is reciprocated; an edge only one side asserts is a claim about a third
+ * party that the third party did not confirm, and it counts toward nothing.
+ * The matrix exists only here, in a reader's composition of N rows — nobody
+ * publishes it. */
+static void mesh_compose_step5_adjacency(const struct mesh_obs_slot *slots,
+                                         size_t n,
+                                         const struct mesh_compose_budget *b,
+                                         int64_t now_unix,
+                                         struct mesh_conclusion *out)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!slot_is_fresh(&slots[i], b->freshness_secs, now_unix))
+            continue;
+        const struct mesh_observation *ri = &slots[i].rec;
+        const char *my_id = ri->self.onion;
+        int ec = ri->edge_count;
+        if (ec < 0)
+            ec = 0;
+        if (ec > MESH_OBS_EDGES_MAX)
+            ec = MESH_OBS_EDGES_MAX;
+
+        for (int e = 0; e < ec; e++)
+            mesh_compose_count_edge(slots, n, b, now_unix, i, my_id,
+                                    &ri->edges[e], out);
+    }
+}
+
+/* Heaviest claimed work, and whether the reader already holds at least that
+ * much. Nothing here acts on a claimed chainwork; it is reported so a reader
+ * can go fetch and VALIDATE the headers itself, which is the only way it
+ * would ever act on the claim. */
+static void mesh_compose_chainwork(const struct mesh_obs_slot *slots, size_t n,
+                                   const struct mesh_compose_budget *b,
+                                   int64_t now_unix,
+                                   const struct mesh_reader_chain *reader,
+                                   struct mesh_conclusion *out)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!slot_is_fresh(&slots[i], b->freshness_secs, now_unix))
+            continue;
+        const char *w = slots[i].rec.self.tip_chainwork_hex;
+        if (!hex64_ok(w))
+            continue;
+        if (!out->max_chainwork_hex[0] ||
+            hex64_cmp(w, out->max_chainwork_hex) > 0)
+            memcpy(out->max_chainwork_hex, w, sizeof(out->max_chainwork_hex));
+    }
+    if (out->max_chainwork_hex[0] && reader &&
+        hex64_ok(reader->tip_chainwork_hex))
+        out->reader_holds_max_chainwork =
+            hex64_cmp(reader->tip_chainwork_hex, out->max_chainwork_hex) >= 0;
+}
 
 void mesh_observation_compose(const struct mesh_obs_slot *slots, size_t n,
                               const struct mesh_reader_chain *reader,
@@ -200,29 +487,7 @@ void mesh_observation_compose(const struct mesh_obs_slot *slots, size_t n,
         n = 0;
     out->records_offered = (int32_t)n;
 
-    /* ── Step 1 — coverage. Every slot lands in exactly one bucket. ──── */
-    for (size_t i = 0; i < n; i++) {
-        const struct mesh_obs_slot *s = &slots[i];
-        if (s->fetch == MESH_OBS_NOT_PROBED) {
-            out->records_not_probed++;      /* I did not look. Not a failure. */
-            continue;
-        }
-        if (!s->parsed) {
-            /* A named refusal is a malformed document; anything else that
-             * came back unusable — including a spent budget — is SILENCE,
-             * and silence is never counter-evidence. */
-            if (s->refusal[0])
-                out->records_malformed++;
-            else
-                out->records_silent++;
-            continue;
-        }
-        out->records_parsed++;
-        if (slot_is_fresh(s, b.freshness_secs, now_unix))
-            out->records_fresh++;
-        else
-            out->records_stale++;
-    }
+    mesh_compose_step1_coverage(slots, n, &b, now_unix, out);
 
     if (out->records_fresh == 0) {
         /* R4: a conclusion over zero items is UNVERIFIED, never healthy. */
@@ -230,31 +495,7 @@ void mesh_observation_compose(const struct mesh_obs_slot *slots, size_t n,
         return;
     }
 
-    /* ── Step 2 — independence, BY IDENTITY, not by address group. ─────
-     *
-     * net_addr_get_group() returns the identical key for every torv3
-     * address, so a ">= 2 distinct groups" bar is unreachable on an
-     * onion-only fleet — the exact shape of unreachable gate this surface
-     * exists to stop rebuilding. Identity here is the published onion (the
-     * torv3 address IS an ed25519 public key), falling back to the build
-     * source_id. */
-    for (size_t i = 0; i < n; i++) {
-        if (!slot_is_fresh(&slots[i], b.freshness_secs, now_unix))
-            continue;
-        const char *id = record_identity(&slots[i].rec);
-        if (!id[0])
-            continue;
-        bool seen_before = false;
-        for (size_t j = 0; j < i && !seen_before; j++) {
-            if (!slot_is_fresh(&slots[j], b.freshness_secs, now_unix))
-                continue;
-            const char *jd = record_identity(&slots[j].rec);
-            if (jd[0] && strcmp(jd, id) == 0)
-                seen_before = true;
-        }
-        if (!seen_before)
-            out->distinct_identities++;
-    }
+    mesh_compose_step2_independence(slots, n, &b, now_unix, out);
 
     if (out->distinct_identities < out->min_independent_required) {
         /* A node alone is not a failure and not an error. It keeps
@@ -267,49 +508,10 @@ void mesh_observation_compose(const struct mesh_obs_slot *slots, size_t n,
         return;
     }
 
-    /* ── Step 3 — pick the checkable height. ───────────────────────────
-     *
-     * Deepest rung first (back=144 -> back=0): a deep rung is the one most
-     * likely to be common across records and the least likely to be
-     * churning under a reorg. Within one rung the SMALLEST qualifying
-     * height wins, which makes the choice a minimum over a set and
-     * therefore independent of slot order. */
-    int64_t chosen = -1;
-    bool reader_usable = reader && reader->hash_at;
     char reader_hash[MESH_OBS_HEXHASH];
-    reader_hash[0] = '\0';
-
-    for (int r = MESH_OBS_ANCHORS - 1; r >= 0 && chosen < 0; r--) {
-        int64_t best = -1;
-        char best_hash[MESH_OBS_HEXHASH];
-        best_hash[0] = '\0';
-        if (!reader_usable)
-            break;
-        for (size_t i = 0; i < n; i++) {
-            if (!slot_is_fresh(&slots[i], b.freshness_secs, now_unix))
-                continue;
-            const struct mesh_obs_anchor *a = &slots[i].rec.self.anchors[r];
-            if (!a->present || a->height < 0 || !hex64_ok(a->hash_hex))
-                continue;
-            if (best >= 0 && a->height >= best)
-                continue;   /* prune: we want the smallest qualifying height */
-            if (supporters_at(slots, n, b.freshness_secs, now_unix,
-                              a->height) < out->min_independent_required)
-                continue;
-            char probe[MESH_OBS_HEXHASH];
-            probe[0] = '\0';
-            if (!reader->hash_at(reader->ctx, a->height, probe))
-                continue;
-            if (!hex64_ok(probe))
-                continue;   /* the reader's own answer must be well-formed */
-            best = a->height;
-            memcpy(best_hash, probe, sizeof(best_hash));
-        }
-        if (best >= 0) {
-            chosen = best;
-            memcpy(reader_hash, best_hash, sizeof(reader_hash));
-        }
-    }
+    int64_t chosen = mesh_compose_step3_pick_height(slots, n, reader, &b,
+                                                    now_unix, out,
+                                                    reader_hash);
 
     if (chosen < 0) {
         /* The honest case for a reader that is far behind, or that holds no
@@ -321,115 +523,14 @@ void mesh_observation_compose(const struct mesh_obs_slot *slots, size_t n,
         return;
     }
 
-    /* ── Step 4 — RECOMPUTE. ───────────────────────────────────────────
-     *
-     * The READER's own hash is the comparison basis. No record's hash is
-     * ever compared to another record's hash — that is what makes this a
-     * recomputation rather than a poll. */
     out->checked_height = chosen;
     memcpy(out->reader_hash_at_checked, reader_hash,
            sizeof(out->reader_hash_at_checked));
 
-    for (size_t i = 0; i < n; i++) {
-        if (!slot_is_fresh(&slots[i], b.freshness_secs, now_unix))
-            continue;
-        const char *theirs = NULL;
-        if (!record_hash_at(&slots[i].rec, chosen, &theirs)) {
-            out->no_common_height++;
-            continue;
-        }
-        if (hex64_cmp(theirs, reader_hash) == 0)
-            out->agree_at_anchor++;
-        else
-            out->disagree_at_anchor++;
-    }
-
-    /* ── Step 5 — adjacency. Reported, never a state input. ────────────
-     *
-     * A's edge to B and B's edge to A are both claims. An edge both sides
-     * assert is reciprocated; an edge only one side asserts is a claim
-     * about a third party that the third party did not confirm, and it
-     * counts toward nothing. The matrix exists only here, in a reader's
-     * composition of N rows — nobody publishes it. */
-    for (size_t i = 0; i < n; i++) {
-        if (!slot_is_fresh(&slots[i], b.freshness_secs, now_unix))
-            continue;
-        const struct mesh_observation *ri = &slots[i].rec;
-        const char *my_id = ri->self.onion;
-        int ec = ri->edge_count;
-        if (ec < 0)
-            ec = 0;
-        if (ec > MESH_OBS_EDGES_MAX)
-            ec = MESH_OBS_EDGES_MAX;
-
-        for (int e = 0; e < ec; e++) {
-            const struct mesh_obs_edge *ed = &ri->edges[e];
-            out->edges_asserted++;
-
-            /* Find the named counterparty among the fresh records. */
-            const struct mesh_observation *rc = NULL;
-            if (ed->peer_onion[0]) {
-                for (size_t j = 0; j < n && !rc; j++) {
-                    if (j == i)
-                        continue;
-                    if (!slot_is_fresh(&slots[j], b.freshness_secs, now_unix))
-                        continue;
-                    if (slots[j].rec.self.onion[0] &&
-                        strcmp(slots[j].rec.self.onion, ed->peer_onion) == 0)
-                        rc = &slots[j].rec;
-                }
-            }
-
-            bool reciprocated = false;
-            if (rc && my_id[0]) {
-                int cec = rc->edge_count;
-                if (cec < 0)
-                    cec = 0;
-                if (cec > MESH_OBS_EDGES_MAX)
-                    cec = MESH_OBS_EDGES_MAX;
-                for (int k = 0; k < cec && !reciprocated; k++) {
-                    if (rc->edges[k].peer_onion[0] &&
-                        strcmp(rc->edges[k].peer_onion, my_id) == 0)
-                        reciprocated = true;
-                }
-            }
-            if (reciprocated)
-                out->edges_reciprocated++;
-            else
-                out->edges_one_sided++;
-
-            /* A third-party claim, cross-checked against that third party's
-             * OWN record. A mismatch is an observation the READER derived —
-             * about this publisher's honesty or its staleness — not one the
-             * publisher supplied. */
-            if (rc && ed->claimed_height >= 0 &&
-                hex64_ok(ed->claimed_tip_hash_hex)) {
-                const char *own = NULL;
-                if (record_hash_at(rc, ed->claimed_height, &own) &&
-                    hex64_cmp(own, ed->claimed_tip_hash_hex) != 0)
-                    out->edges_contradicted++;
-            }
-        }
-    }
-
-    /* Heaviest claimed work, and whether the reader already holds at least
-     * that much. Nothing here acts on a claimed chainwork; it is reported so
-     * a reader can go fetch and VALIDATE the headers itself, which is the
-     * only way it would ever act on the claim. */
-    for (size_t i = 0; i < n; i++) {
-        if (!slot_is_fresh(&slots[i], b.freshness_secs, now_unix))
-            continue;
-        const char *w = slots[i].rec.self.tip_chainwork_hex;
-        if (!hex64_ok(w))
-            continue;
-        if (!out->max_chainwork_hex[0] ||
-            hex64_cmp(w, out->max_chainwork_hex) > 0)
-            memcpy(out->max_chainwork_hex, w, sizeof(out->max_chainwork_hex));
-    }
-    if (out->max_chainwork_hex[0] && reader &&
-        hex64_ok(reader->tip_chainwork_hex))
-        out->reader_holds_max_chainwork =
-            hex64_cmp(reader->tip_chainwork_hex, out->max_chainwork_hex) >= 0;
+    mesh_compose_step4_recompute(slots, n, &b, now_unix, chosen, reader_hash,
+                                 out);
+    mesh_compose_step5_adjacency(slots, n, &b, now_unix, out);
+    mesh_compose_chainwork(slots, n, &b, now_unix, reader, out);
 
     /* ── Step 6 — the state, from step 4 ONLY. ─────────────────────────
      *
