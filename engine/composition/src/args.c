@@ -456,417 +456,628 @@ static void args_report_tor_refusal(const struct app_context *ctx,
                       NULL, 0, "operator_lane=%s tor_build=%s", lane, build);
 }
 
+/* ── The argv ladder, one themed arm per contiguous flag group ─────────
+ *
+ * args_parse_node_options() used to carry this whole mutually-exclusive
+ * else-if chain inline. The arms below are pure code motion out of that
+ * chain, in the SAME source order, dispatched by k_args_arms[] from the top
+ * with first-match-wins — exactly what the else-if chain did. Every flag
+ * pattern lives in EXACTLY ONE arm and no two arms can match the same argv
+ * string, which is what makes the dispatch equivalent to the flat chain.
+ *
+ * Return contract:
+ *   ARGS_ARM_NOMATCH — this arm does not know the flag; try the next arm.
+ *   ARGS_ARM_TAKEN   — matched and handled; move on to the next argv word.
+ *   0 or 1           — matched, and args_parse_node_options() must return
+ *                      that exit code IMMEDIATELY (help/version/refusals),
+ *                      skipping every later argv word AND the post-loop
+ *                      onion-persist default + Tor admission, as before.
+ */
+#define ARGS_ARM_NOMATCH (-2)
+#define ARGS_ARM_TAKEN   (-1)
+
+struct args_arm_state {
+    struct app_context *ctx;
+    bool *show_metrics;
+    char **argv;              /* argv[0] only, for print_usage() */
+};
+
+static int args_arm_core_identity(const char *arg,
+                                  struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strncmp(arg, "-datadir=", 9) == 0) ctx->datadir = arg + 9;
+    else if (strncmp(arg, "-paramsdir=", 11) == 0) ctx->params_dir = arg + 11;
+    else if (strcmp(arg, "-testnet") == 0) ctx->testnet = true;
+    else if (strcmp(arg, "-regtest") == 0) ctx->regtest = true;
+    else if (strcmp(arg, "-regtestshielded") == 0) ctx->regtest_shielded = true;
+    else if (strcmp(arg, "-txindex") == 0) ctx->tx_index = true;
+    else if (strcmp(arg, "-gen") == 0) ctx->gen = true;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_ports(const char *arg,
+                          struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strncmp(arg, "-port=", 6) == 0) { ctx->p2p_port = atoi(arg+6); ctx->listen = true; }
+    else if (strncmp(arg, "-rpcport=", 9) == 0) ctx->rpc_port = atoi(arg+9);
+    else if (strncmp(arg, "-httpsport=", 11) == 0) ctx->https_port = atoi(arg+11);
+    else if (strncmp(arg, "-fsport=", 8) == 0) ctx->fs_port = atoi(arg+8);
+    else if (strncmp(arg, "-rpcuser=", 9) == 0) ctx->rpc_user = arg+9;
+    else if (strncmp(arg, "-rpcpassword=", 13) == 0) ctx->rpc_password = arg+13;
+    else if (strcmp(arg, "-listen") == 0) ctx->listen = true;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_peer_wiring(const char *arg,
+                                struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strncmp(arg, "-addnode=", 9) == 0) {
+        /* P2P wiring happens after init. Preserve bounded argv-owned
+         * values here so the instant-on weld can reuse operator-named
+         * peers without changing normal discovery. */
+        if (ctx->n_addnode_peers < APP_CONNECT_PEERS_MAX)
+            ctx->addnode_peers[ctx->n_addnode_peers++] = arg + 9;
+    }
+    else if (strncmp(arg, "-connect=", 9) == 0) {
+        ctx->connect_only = true; /* peer wiring happens after init */
+        /* Record the peer host so the instant-on weld can use the ONLY
+         * peers a connect-only node is permitted to reach as its
+         * file-service seed set (see app_context.connect_peers). Excess
+         * peers past the cap are still wired for P2P below — only the
+         * bootstrap seed list is bounded. */
+        if (ctx->n_connect_peers < APP_CONNECT_PEERS_MAX)
+            ctx->connect_peers[ctx->n_connect_peers++] = arg + 9;
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_mining_build(const char *arg,
+                                 struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strncmp(arg, "-mineraddress=", 14) == 0) ctx->miner_address = arg+14;
+    else if (strncmp(arg, "-genproclimit=", 14) == 0) ctx->gen_threads = atoi(arg+14);
+    else if (strncmp(arg, "-par=", 5) == 0) ctx->par_workers = atoi(arg+5);
+    else if (strncmp(arg, "-snapshot=", 10) == 0) ctx->snapshot_dir = arg+10;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_chain_repair(const char *arg,
+                                 struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-saplingscan") == 0) ctx->sapling_scan = true;
+    else if (strcmp(arg, "-reindex-chainstate") == 0) ctx->reindex_chainstate = true;
+    else if (strcmp(arg, "-refold-staged") == 0) ctx->refold_staged = true;
+    else if (strcmp(arg, "-refold-from-anchor") == 0) ctx->refold_from_anchor = true;
+    else if (strcmp(arg, "-load-verify-boot") == 0) ctx->load_verify_boot = true;
+    else if (strncmp(arg, "-load-snapshot-at-own-height=",
+                     sizeof("-load-snapshot-at-own-height=") - 1) == 0)
+        ctx->load_snapshot_at_own_height =
+            arg + sizeof("-load-snapshot-at-own-height=") - 1;
+    else if (strcmp(arg, "-coldstart-seed-oneshot") == 0) {
+        /* Internal cold-start driver handshake (boot_cold_start.c): apply
+         * the -load-snapshot-at-own-height seed, then exit cleanly BEFORE
+         * services so the next cold-start stage (bundle/serve) runs on a
+         * clean-stopped datadir. Never set on an operator-driven boot. The
+         * seed reset + finalize run inline in app_init; no_services makes it
+         * return right after finalize (before P2P/RPC), and the
+         * cold_start_seed_oneshot branch below shuts down offline + exits. */
+        ctx->cold_start_seed_oneshot = true;
+        ctx->no_services = true;
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_consensus_bundle(const char *arg,
+                                     struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strncmp(arg, "-install-consensus-bundle=",
+                sizeof("-install-consensus-bundle=") - 1) == 0)
+        ctx->install_consensus_bundle =
+            arg + sizeof("-install-consensus-bundle=") - 1;
+    else if (strncmp(arg, "-verify-consensus-bundle=",
+                     sizeof("-verify-consensus-bundle=") - 1) == 0)
+        ctx->verify_consensus_bundle =
+            arg + sizeof("-verify-consensus-bundle=") - 1;
+    else if (strcmp(arg, "-ratify-mint-anchor") == 0)
+        ctx->ratify_mint_anchor = true;
+    else if (strcmp(arg, "-verify-rom") == 0)
+        ctx->verify_rom = true;
+    else if (strcmp(arg, "-export-consensus-bundle") == 0)
+        ctx->export_consensus_bundle = true;
+    else if (strncmp(arg, "-promote-shielded-history=",
+                     sizeof("-promote-shielded-history=") - 1) == 0)
+        ctx->promote_shielded_history =
+            arg + sizeof("-promote-shielded-history=") - 1;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_fold(const char *arg,
+                         struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-fold-inram") == 0) {
+        /* Bulk-fold in-RAM UTXO hot store (storage/coins_ram.h). The
+         * storage layer reads ZCL_FOLD_INRAM as the single source of truth
+         * (decided once, cached), so the flag just sets the env before any
+         * coins_ram_* call. STRICTLY for the bulk fold (from-genesis mint /
+         * -refold-from-anchor catch-up): the at-tip steady state (1 block /
+         * 2.5 min) does NOT benefit and should run plain SQLite coins_kv. */
+        platform_environment_set("ZCL_FOLD_INRAM", "1", 1);
+    }
+    else if (strcmp(arg, "-mint-anchor") == 0) ctx->mint_anchor = true;
+    else if (strcmp(arg, "-mint-anchor-fast") == 0) ctx->mint_anchor_fast = true;
+    else if (strcmp(arg, "-full-fold") == 0) {
+        /* GENESIS-FOLD-TO-TIP: reuse the whole -mint-anchor offline driver
+         * (genesis reset OR resume, reducer_kick_unbudgeted self-drive, no
+         * P2P) but target the local header TIP instead of the compiled SHA3
+         * checkpoint, and skip the terminal checkpoint ceremony. full_fold
+         * IMPLIES mint_anchor so every existing mint_anchor gate fires; the
+         * target override + ceremony skip live behind ctx->full_fold. */
+        ctx->full_fold = true;
+        ctx->mint_anchor = true;
+        /* Defect A: skip ONLY the legacy LevelDB UTXO seed import (the fold
+         * builds the set from genesis), while KEEPING the ~/.zclassic body
+         * link so a fresh datadir gets its bodies. Narrower than
+         * -nolegacyimport, which would also drop the body link. */
+        ctx->no_legacy_utxo_import = true;
+    }
+    else if (strncmp(arg, "-full-fold-target=", 18) == 0) {
+        /* Pin the -full-fold ceiling at H instead of the local header
+         * tip (config/boot.h's ctx->full_fold_target doc). Validated the
+         * same way other numeric flags in this ladder reject garbage:
+         * a non-numeric value, trailing junk, or H <= 0 is refused here
+         * rather than silently coerced by atoi() to 0. Whether H exceeds
+         * the local header tip is not knowable yet (no datadir is open
+         * during argv parsing), so that check — and the "-full-fold-
+         * target requires -full-fold" cross-flag check — happen later,
+         * once the header tip is readable (boot_full_fold.c). */
+        const char *v = arg + 18;
+        char *end = NULL;
+        long h = strtol(v, &end, 10);
+        if (end == v || *end != '\0' || h <= 0 || h > INT32_MAX) {
+            fprintf(stderr,
+                    "invalid -full-fold-target=%s (must be a positive "
+                    "height, e.g. -full-fold-target=1234)\n", v);
+            return 1;
+        }
+        ctx->full_fold_target = (int32_t)h;
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_reindex_backfill(const char *arg,
+                                     struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-reindex-explorer") == 0) ctx->reindex_explorer = true;
+    else if (strcmp(arg, "-backfill-zslp") == 0) ctx->backfill_zslp = true;
+    else if (strcmp(arg, "-backfill-nullifiers") == 0) ctx->backfill_nullifiers = true;
+    else if (strcmp(arg, "-reimport-utxos") == 0) ctx->reimport_utxos = true;
+    else if (strcmp(arg, "-allow-degraded") == 0) ctx->allow_degraded = true;
+    else if (strncmp(arg, "-showmetrics=", 13) == 0) *st->show_metrics = atoi(arg+13) != 0;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_tor(const char *arg,
+                        struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-tor") == 0) ctx->tor = true;
+    else if (strcmp(arg, "-no-tor") == 0) ctx->no_tor = true;
+    else if (strcmp(arg, "-allow-tor-stub-dev") == 0)
+        ctx->allow_tor_stub_dev = true;
+    else if (strcmp(arg, "-onion-persist") == 0 ||
+             strcmp(arg, "-onion-persist=1") == 0)
+        ctx->onion_persist = true;
+    else if (strcmp(arg, "-onion-persist=0") == 0) {
+        ctx->onion_persist = false;
+        ctx->onion_persist_forced_off = true;
+    }
+    else if (strcmp(arg, "-onion-rotate") == 0) ctx->onion_rotate = true;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_enum_env_modes(const char *arg,
+                                   struct args_arm_state *st)
+{
+    (void)st;
+    if (strncmp(arg, "-utxomirror=", 12) == 0) {
+        const char *mode = arg + 12;
+        if (strcmp(mode, "auto") != 0 && strcmp(mode, "off") != 0) {
+            fprintf(stderr, "invalid -utxomirror=%s (accepted: auto, off)\n",
+                    mode);
+            return 1;
+        }
+        platform_environment_set("ZCL_UTXO_MIRROR_MODE", mode, 1);
+    }
+    else if (strncmp(arg, "-bodyhistorybackfill=", 21) == 0) {
+        const char *mode = arg + 21;
+        if (strcmp(mode, "throttled") != 0 && strcmp(mode, "off") != 0 &&
+            strcmp(mode, "normal") != 0) {
+            fprintf(stderr, "invalid -bodyhistorybackfill=%s "
+                    "(accepted: throttled, off, normal)\n", mode);
+            return 1;
+        }
+        platform_environment_set("ZCL_BODY_HISTORY_BACKFILL_MODE", mode,
+                                 1);
+    }
+    else if (strncmp(arg, "-legacyoracle=", 14) == 0) {
+        const char *mode = arg + 14;
+        if (strcmp(mode, "off") != 0 && strcmp(mode, "auto") != 0) {
+            fprintf(stderr, "invalid -legacyoracle=%s (accepted: off, auto)\n",
+                    mode);
+            return 1;
+        }
+        platform_environment_set("ZCL_LEGACY_ORACLE_MODE", mode, 1);
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_profile_lane(const char *arg,
+                                 struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strncmp(arg, "-profile=", 9) == 0) {
+        if (!app_runtime_profile_parse(arg + 9,
+                                       &ctx->runtime_profile)) {
+            /* The typed registry answers an unknown subsystem by printing
+             * the whole valid set (diagnostics_registry.c). Match that
+             * here: "Unknown runtime profile: X" alone made the reader go
+             * read app_runtime_profile_parse to find out what IS valid. */
+            boot_error_report(BOOT_ERROR_FATAL,
+                              "BOOT_UNKNOWN_RUNTIME_PROFILE", "argv",
+                              "-profile= names a runtime profile this "
+                              "binary does not have",
+                              NULL, 0, "given=%s accepted=%s",
+                              arg + 9,
+                              app_runtime_profile_accepted_csv());
+            return 1;
+        }
+    }
+    else if (strncmp(arg, "-operator-lane=", 15) == 0) {
+        if (!app_operator_lane_parse(arg + 15,
+                                     &ctx->operator_lane)) {
+            boot_error_report(BOOT_ERROR_FATAL,
+                              "BOOT_UNKNOWN_OPERATOR_LANE", "argv",
+                              "-operator-lane= names a lane this binary "
+                              "does not have",
+                              NULL, 0, "given=%s accepted=%s",
+                              arg + 15,
+                              app_operator_lane_accepted_csv());
+            return 1;
+        }
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_validation_filesync(const char *arg,
+                                        struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strncmp(arg, "-assumevalid", 12) == 0) {
+        fprintf(stderr,
+                "-assumevalid has been removed; use "
+                "-deferproofvalidationbelow=<blockhash|0>\n");
+        return 1;
+    }
+    else if (strncmp(arg, "-deferproofvalidationbelow=",
+                     sizeof("-deferproofvalidationbelow=") - 1) == 0) {
+        ctx->defer_proof_validation_below =
+            arg + sizeof("-deferproofvalidationbelow=") - 1;
+    }
+    else if (strncmp(arg, "-filesync=", 10) == 0) { /* handled above */ }
+    else if (strncmp(arg, "-fileservice=", 13) == 0) ctx->file_service_peer = arg+13;
+    else if (strcmp(arg, "-nofilesync") == 0) ctx->no_file_sync = true;
+    else if (strcmp(arg, "-allow-clearnet-snapshot-fetch") == 0) ctx->allow_clearnet_snapshot_fetch = true;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_consensus_tightening(const char *arg,
+                                         struct args_arm_state *st)
+{
+    (void)st;
+    if (strcmp(arg, "-enforce-sapling-root") == 0) {
+        /* DEFAULT-OFF Sapling-root parity reject (project_sapling_root
+         * _parity_hole). Default behavior rejects ONLY an all-zeros
+         * hashFinalSaplingRoot; this flag additionally rejects ANY
+         * mismatch vs the locally-recomputed Sapling tree root, matching
+         * zclassicd. ⚠ Do NOT pass on the live node until a full-history
+         * replay confirms ZERO false-rejects (h=478544 lesson — see
+         * validation/connect_block.h). */
+        extern _Atomic _Bool g_enforce_sapling_root;
+        atomic_store(&g_enforce_sapling_root, true);
+    }
+    else if (strcmp(arg, "-enforce-coinbase-maturity") == 0) {
+        /* DEFAULT-OFF coinbase-maturity parity reject on the live reducer
+         * fold. Default behavior does NOT reject a spend of a coinbase
+         * output younger than COINBASE_MATURITY (100) on that path; this
+         * flag adds the reject, matching zclassicd CheckTxInputs
+         * (zclassic-cpp/src/main.cpp:2056-2060). ⚠ This is a tightening
+         * predicate — do NOT pass on the live node until a full-history
+         * replay confirms ZERO false-rejects (h=478544 lesson — see
+         * jobs/utxo_apply_delta.h). */
+        extern _Atomic _Bool g_enforce_coinbase_maturity;
+        atomic_store(&g_enforce_coinbase_maturity, true);
+    }
+    else if (strcmp(arg, "-enforce-checkdatasig-sigops") == 0) {
+        /* DEFAULT-OFF CHECKDATASIG_SIGOPS parity. Default connect_block
+         * flags are P2SH | CHECKLOCKTIMEVERIFY; this flag also ORs in
+         * SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, matching zclassicd
+         * ConnectBlock (zclassic-cpp/src/main.cpp:2567), which counts
+         * OP_CHECKDATASIG[VERIFY] toward the per-block sigop ceiling.
+         * ⚠ Tightening predicate — do NOT pass on the live node until a
+         * full-history replay confirms ZERO false-rejects (h=478544
+         * lesson — see validation/connect_block.h). */
+        extern _Atomic _Bool g_enforce_checkdatasig_sigops;
+        atomic_store(&g_enforce_checkdatasig_sigops, true);
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_perf_levers(const char *arg,
+                                struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-nobgvalidation") == 0) ctx->no_bg_validation = true;
+    else if (strcmp(arg, "-buildworker") == 0 ||
+             strcmp(arg, "-buildworker=1") == 0)
+        ctx->build_worker = true;
+    else if (strcmp(arg, "-buildworker=0") == 0)
+        ctx->build_worker = false;
+    /* K3 throughput levers, default OFF (see boot.h / hw_profile.h). The
+     * derive gate is set here (pre-boot) so the reducer activation fold sees
+     * the derived cadence. */
+    else if (strcmp(arg, "-prefetch-blocks") == 0) ctx->prefetch_blocks = true;
+    else if (strcmp(arg, "-pv-lookahead") == 0 ||
+             strcmp(arg, "-pv-lookahead=1") == 0) ctx->pv_lookahead = true;
+    else if (strcmp(arg, "-pv-lookahead=0") == 0) ctx->pv_lookahead = false;
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_sandbox_confine(const char *arg,
+                                    struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-derive-drain-batch") == 0) hw_profile_set_derive_drain_batch(true);
+    else if (strcmp(arg, "-sandbox=steady") == 0) ctx->sandbox_steady = true;
+    else if (strcmp(arg, "-sandbox=off") == 0) ctx->sandbox_steady = false;
+    else if (strcmp(arg, "-confine") == 0) ctx->confine = true;
+    else if (strcmp(arg, "-confine=serving") == 0) {
+        /* Same strict Landlock + seccomp ALLOW-list boundary as -confine,
+         * but the allow-set also covers the socket family a SERVING node
+         * needs (see os_sandbox_node_confine_serving_profile). Sets
+         * ctx->confine too so the -sandbox=steady mutual-exclusion check
+         * below and the sr_confine_enter() dispatch both see it. */
+        ctx->confine = true;
+        ctx->confine_serving = true;
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_hotswap_wallet(const char *arg,
+                                   struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-hotswap-activate") == 0) {
+        /* Arm Tier-1 live hot-swap ACTIVATION for this resident node. This
+         * is only ONE of the two required gates: a live swap also needs
+         * ZCL_HOTSWAP_ACTIVATE=1 in the environment AND the exact dev
+         * datadir (~/.zclassic-c23-dev). The canonical datadir is refused
+         * unconditionally. Without this flag every hot-swap is verify-only.
+         * See hotswap_activation_authorized() (engine/modules/hotswap). */
+        hotswap_set_activate_flag(true);
+    }
+    else if (strcmp(arg, "-nolegacyimport") == 0) ctx->no_legacy_auto_import = true;
+    else if (strcmp(arg, "-nolegacyutxoimport") == 0) ctx->no_legacy_utxo_import = true;
+    else if (strcmp(arg, "-allow-plaintext-wallet") == 0) {
+        /* Explicit, loud opt-in to a plaintext wallet at rest. Read
+         * by the wallet at-rest creation policy at boot (see
+         * contexts/wallet/modules/wallet/src/wallet_keystore.c). Without this flag AND
+         * without ZCL_WALLET_PASSPHRASE, first-run wallet creation
+         * refuses rather than silently minting unencrypted keys. */
+        platform_environment_set("ZCL_ALLOW_PLAINTEXT_WALLET", "1",
+                                 1);
+    }
+    /* "-wallet-no-phrase-backup": "I accept a wallet with no written
+     * backup." A new wallet's twelve recovery words are shown once, on
+     * stdout, and under a systemd unit stdout is node.log — so when
+     * stdout is not a terminal the node refuses to create a spendable
+     * wallet at all. This flag is the operator saying that is fine
+     * here: the wallet is created, NO phrase is drawn, and every boot
+     * that creates one says so loudly. Read by
+     * boot_wallet_phrase_backup_waived() (config/boot_wallet_phrase.h).
+     *
+     * "-db-backup-before-migrate": opt-in pre-migration safety net.
+     * node.db is routinely too large to casually copy before every
+     * upgrade "just in case" — that size is exactly why a newer binary
+     * opening an older database now has a read-compatible path instead
+     * of a hard refusal (see database_migrate.c). This flag is the
+     * opposite choice for the one upgrade an operator judges worth the
+     * wait and the disk: before this boot applies any BREAKING schema
+     * step, it copies node.db to node.db.schema<N>.bak beside it via
+     * SQLite's online backup API, and refuses to proceed with that step
+     * at all if free space is short. Read by
+     * node_db_backup_before_breaking_migration()
+     * (engine/models/src/database_backup.c). Default OFF.
+     *
+     * Both are bare booleans whose entire effect is one setenv, so both
+     * route through k_cli_bare_bool_flags/args_try_bare_bool_flag above
+     * instead of their own else-if arm. */
+    else if (args_try_bare_bool_flag(arg)) {
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_misc_network(const char *arg,
+                                 struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    if (strcmp(arg, "-rebuildfromlog") == 0) ctx->boot_from_log = true;
+    else if (strcmp(arg, "-leveldb-no-verify-checksums") == 0) {
+        /* Turns off LevelDB checksum verification for both point
+         * reads and iteration.  Use only when chasing a suspected
+         * corruption issue — silent truncation returns. */
+        platform_environment_set("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "1",
+                                 1);
+    }
+    else if (strncmp(arg, "-externalip=", 12) == 0) ctx->external_ip = arg + 12;
+    else if (strncmp(arg, "-httpsdomain=", 13) == 0) ctx->https_domain = arg + 13;
+    else if (strncmp(arg, "-httpsaltdomain=", 16) == 0) {
+        /* An additional name on the SAME listener, served its own
+         * certificate by TLS SNI (see app_context.https_alt_domains).
+         * Repeatable. Past the cap the flag is refused loudly rather
+         * than silently dropped — a name nobody serves is a name whose
+         * clients get a certificate mismatch, which is invisible from
+         * the server side. */
+        if (ctx->n_https_alt_domains < APP_HTTPS_ALT_DOMAINS_MAX)
+            ctx->https_alt_domains[ctx->n_https_alt_domains++] = arg + 16;
+        else
+            fprintf(stderr,
+                    "Warning: at most %d -httpsaltdomain= names are "
+                    "served; '%s' was ignored\n",
+                    APP_HTTPS_ALT_DOMAINS_MAX, arg + 16);
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+static int args_arm_gui_help_version(const char *arg,
+                                     struct args_arm_state *st)
+{
+    if (strcmp(arg, "-gui") == 0 || strcmp(arg, "--gui") == 0) {
+        /* Opt-in to the WebKit wallet GUI. Consumed earlier (the GUI
+         * launch returns before node mode); recognized here so it is
+         * an intentional flag, not silently dropped node-mode noise. */
+    }
+    else if (strcmp(arg, "-help") == 0 || strcmp(arg, "--help") == 0 ||
+             strcmp(arg, "-h") == 0 || strcmp(arg, "-?") == 0) {
+        print_usage(st->argv[0]); return 0;
+    }
+    else if (strcmp(arg, "--version") == 0 || strcmp(arg, "-version") == 0 ||
+             strcmp(arg, "-v") == 0 || strcmp(arg, "-V") == 0) {
+        /* Print version + exit. Without this, `z23 --version` (a
+         * judge's reflex) falls through as an unknown flag and silently
+         * boots a full node against the default datadir. */
+        printf("z23 v%d.%d.%d (source %.12s)\n",
+               CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR,
+               CLIENT_VERSION_REVISION,
+               zcl_build_source_id_sha256());
+        /* Which Tor this binary linked, on its own greppable line. The
+         * two spellings are exactly "tor: full" and "tor: stub" so a
+         * deploy script can decide with one grep instead of running the
+         * node and reading its boot log. */
+        printf("tor: %s\n",
+               app_tor_real_build_linked() ? "full" : "stub");
+        return 0;
+    }
+    else return ARGS_ARM_NOMATCH;
+    return ARGS_ARM_TAKEN;
+}
+
+/* Loud unknown-flag WARNING, LAST in the ladder: reached only when no arm
+ * above claimed this word. The guard is the negation of the original
+ * `argv[i][0] == '-' && !main_flag_is_known_extra(argv[i])` arm condition,
+ * evaluated in the same order, so a non-flag word still never reaches
+ * main_flag_is_known_extra(). */
+static void args_warn_unknown_flag(const char *arg)
+{
+    if (arg[0] != '-' || main_flag_is_known_extra(arg))
+        return;
+    /* Loud unknown-flag WARNING: this loop must never accept ANY
+     * unrecognized "-flag" silently (a documented footgun — see
+     * docs/SYNC.md and CLAUDE.md "Skipping step 1 is a footgun"). A
+     * typo'd or removed flag (e.g. the old -cold-import/-fastimport) must not
+     * silently no-op; it must say so, every boot, at WARN. This is
+     * advisory only — it does not FATAL, since some recognized
+     * flags are intentionally consumed by an earlier or later pass
+     * in this loop (e.g. -gui/--self-test above,
+     * -addnode=/-connect=/-filesync= below) or read independently
+     * via GetArg()/GetBoolArg() (main_flag_is_known_extra() above)
+     * rather than this loop's own strncmp branches.
+     *
+     * Daemon mode stays tolerant (CLAUDE.md)
+     * — it does not FATAL here even for a double-dash
+     * typo of one of the seven operator-target flags (that hard
+     * refusal is CLI-client-only, engine/entry/main_cli_modes.c). But when
+     * cli_flag_classify() recognizes the shape, name the exact
+     * single-dash correction instead of a generic "check spelling"
+     * — the same suggestion the CLI-client path would give for the
+     * identical typo. */
+    char suggest[24] = {0};
+    if (cli_flag_classify(arg, suggest, sizeof(suggest)) !=
+        CLI_FLAG_OK) {
+        fprintf(stderr,
+                "Warning: unrecognized flag '%s' (ignored) — "
+                "zclassic23 flags use a single dash with '=' "
+                "joining the value; did you mean %s?\n",
+                arg, suggest);
+    } else {
+        fprintf(stderr,
+                "Warning: unrecognized flag '%s' (ignored) — check "
+                "spelling or docs/RUNBOOK.md; this is not a supported "
+                "zclassic23 flag.\n", arg);
+    }
+}
+
+typedef int (*args_arm_fn)(const char *arg, struct args_arm_state *st);
+
+/* Arm order is the original else-if order, top to bottom. */
+static const args_arm_fn k_args_arms[] = {
+    args_arm_core_identity,
+    args_arm_ports,
+    args_arm_peer_wiring,
+    args_arm_mining_build,
+    args_arm_chain_repair,
+    args_arm_consensus_bundle,
+    args_arm_fold,
+    args_arm_reindex_backfill,
+    args_arm_tor,
+    args_arm_enum_env_modes,
+    args_arm_profile_lane,
+    args_arm_validation_filesync,
+    args_arm_consensus_tightening,
+    args_arm_perf_levers,
+    args_arm_sandbox_confine,
+    args_arm_hotswap_wallet,
+    args_arm_misc_network,
+    args_arm_gui_help_version,
+};
+#define ARGS_ARM_COUNT (sizeof(k_args_arms) / sizeof(k_args_arms[0]))
+
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
+    struct args_arm_state st = { ctx, show_metrics, argv };
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "-datadir=", 9) == 0) ctx->datadir = argv[i] + 9;
-        else if (strncmp(argv[i], "-paramsdir=", 11) == 0) ctx->params_dir = argv[i] + 11;
-        else if (strcmp(argv[i], "-testnet") == 0) ctx->testnet = true;
-        else if (strcmp(argv[i], "-regtest") == 0) ctx->regtest = true;
-        else if (strcmp(argv[i], "-regtestshielded") == 0) ctx->regtest_shielded = true;
-        else if (strcmp(argv[i], "-txindex") == 0) ctx->tx_index = true;
-        else if (strcmp(argv[i], "-gen") == 0) ctx->gen = true;
-        else if (strncmp(argv[i], "-port=", 6) == 0) { ctx->p2p_port = atoi(argv[i]+6); ctx->listen = true; }
-        else if (strncmp(argv[i], "-rpcport=", 9) == 0) ctx->rpc_port = atoi(argv[i]+9);
-        else if (strncmp(argv[i], "-httpsport=", 11) == 0) ctx->https_port = atoi(argv[i]+11);
-        else if (strncmp(argv[i], "-fsport=", 8) == 0) ctx->fs_port = atoi(argv[i]+8);
-        else if (strncmp(argv[i], "-rpcuser=", 9) == 0) ctx->rpc_user = argv[i]+9;
-        else if (strncmp(argv[i], "-rpcpassword=", 13) == 0) ctx->rpc_password = argv[i]+13;
-        else if (strcmp(argv[i], "-listen") == 0) ctx->listen = true;
-        else if (strncmp(argv[i], "-addnode=", 9) == 0) {
-            /* P2P wiring happens after init. Preserve bounded argv-owned
-             * values here so the instant-on weld can reuse operator-named
-             * peers without changing normal discovery. */
-            if (ctx->n_addnode_peers < APP_CONNECT_PEERS_MAX)
-                ctx->addnode_peers[ctx->n_addnode_peers++] = argv[i] + 9;
-        }
-        else if (strncmp(argv[i], "-connect=", 9) == 0) {
-            ctx->connect_only = true; /* peer wiring happens after init */
-            /* Record the peer host so the instant-on weld can use the ONLY
-             * peers a connect-only node is permitted to reach as its
-             * file-service seed set (see app_context.connect_peers). Excess
-             * peers past the cap are still wired for P2P below — only the
-             * bootstrap seed list is bounded. */
-            if (ctx->n_connect_peers < APP_CONNECT_PEERS_MAX)
-                ctx->connect_peers[ctx->n_connect_peers++] = argv[i] + 9;
-        }
-        else if (strncmp(argv[i], "-mineraddress=", 14) == 0) ctx->miner_address = argv[i]+14;
-        else if (strncmp(argv[i], "-genproclimit=", 14) == 0) ctx->gen_threads = atoi(argv[i]+14);
-        else if (strncmp(argv[i], "-par=", 5) == 0) ctx->par_workers = atoi(argv[i]+5);
-        else if (strncmp(argv[i], "-snapshot=", 10) == 0) ctx->snapshot_dir = argv[i]+10;
-        else if (strcmp(argv[i], "-saplingscan") == 0) ctx->sapling_scan = true;
-        else if (strcmp(argv[i], "-reindex-chainstate") == 0) ctx->reindex_chainstate = true;
-        else if (strcmp(argv[i], "-refold-staged") == 0) ctx->refold_staged = true;
-        else if (strcmp(argv[i], "-refold-from-anchor") == 0) ctx->refold_from_anchor = true;
-        else if (strcmp(argv[i], "-load-verify-boot") == 0) ctx->load_verify_boot = true;
-        else if (strncmp(argv[i], "-load-snapshot-at-own-height=",
-                         sizeof("-load-snapshot-at-own-height=") - 1) == 0)
-            ctx->load_snapshot_at_own_height =
-                argv[i] + sizeof("-load-snapshot-at-own-height=") - 1;
-        else if (strcmp(argv[i], "-coldstart-seed-oneshot") == 0) {
-            /* Internal cold-start driver handshake (boot_cold_start.c): apply
-             * the -load-snapshot-at-own-height seed, then exit cleanly BEFORE
-             * services so the next cold-start stage (bundle/serve) runs on a
-             * clean-stopped datadir. Never set on an operator-driven boot. The
-             * seed reset + finalize run inline in app_init; no_services makes it
-             * return right after finalize (before P2P/RPC), and the
-             * cold_start_seed_oneshot branch below shuts down offline + exits. */
-            ctx->cold_start_seed_oneshot = true;
-            ctx->no_services = true;
-        }
-        else if (strncmp(argv[i], "-install-consensus-bundle=",
-                         sizeof("-install-consensus-bundle=") - 1) == 0)
-            ctx->install_consensus_bundle =
-                argv[i] + sizeof("-install-consensus-bundle=") - 1;
-        else if (strncmp(argv[i], "-verify-consensus-bundle=",
-                         sizeof("-verify-consensus-bundle=") - 1) == 0)
-            ctx->verify_consensus_bundle =
-                argv[i] + sizeof("-verify-consensus-bundle=") - 1;
-        else if (strcmp(argv[i], "-ratify-mint-anchor") == 0)
-            ctx->ratify_mint_anchor = true;
-        else if (strcmp(argv[i], "-verify-rom") == 0)
-            ctx->verify_rom = true;
-        else if (strcmp(argv[i], "-export-consensus-bundle") == 0)
-            ctx->export_consensus_bundle = true;
-        else if (strncmp(argv[i], "-promote-shielded-history=",
-                         sizeof("-promote-shielded-history=") - 1) == 0)
-            ctx->promote_shielded_history =
-                argv[i] + sizeof("-promote-shielded-history=") - 1;
-        else if (strcmp(argv[i], "-fold-inram") == 0) {
-            /* Bulk-fold in-RAM UTXO hot store (storage/coins_ram.h). The
-             * storage layer reads ZCL_FOLD_INRAM as the single source of truth
-             * (decided once, cached), so the flag just sets the env before any
-             * coins_ram_* call. STRICTLY for the bulk fold (from-genesis mint /
-             * -refold-from-anchor catch-up): the at-tip steady state (1 block /
-             * 2.5 min) does NOT benefit and should run plain SQLite coins_kv. */
-            platform_environment_set("ZCL_FOLD_INRAM", "1", 1);
-        }
-        else if (strcmp(argv[i], "-mint-anchor") == 0) ctx->mint_anchor = true;
-        else if (strcmp(argv[i], "-mint-anchor-fast") == 0) ctx->mint_anchor_fast = true;
-        else if (strcmp(argv[i], "-full-fold") == 0) {
-            /* GENESIS-FOLD-TO-TIP: reuse the whole -mint-anchor offline driver
-             * (genesis reset OR resume, reducer_kick_unbudgeted self-drive, no
-             * P2P) but target the local header TIP instead of the compiled SHA3
-             * checkpoint, and skip the terminal checkpoint ceremony. full_fold
-             * IMPLIES mint_anchor so every existing mint_anchor gate fires; the
-             * target override + ceremony skip live behind ctx->full_fold. */
-            ctx->full_fold = true;
-            ctx->mint_anchor = true;
-            /* Defect A: skip ONLY the legacy LevelDB UTXO seed import (the fold
-             * builds the set from genesis), while KEEPING the ~/.zclassic body
-             * link so a fresh datadir gets its bodies. Narrower than
-             * -nolegacyimport, which would also drop the body link. */
-            ctx->no_legacy_utxo_import = true;
-        }
-        else if (strncmp(argv[i], "-full-fold-target=", 18) == 0) {
-            /* Pin the -full-fold ceiling at H instead of the local header
-             * tip (config/boot.h's ctx->full_fold_target doc). Validated the
-             * same way other numeric flags in this ladder reject garbage:
-             * a non-numeric value, trailing junk, or H <= 0 is refused here
-             * rather than silently coerced by atoi() to 0. Whether H exceeds
-             * the local header tip is not knowable yet (no datadir is open
-             * during argv parsing), so that check — and the "-full-fold-
-             * target requires -full-fold" cross-flag check — happen later,
-             * once the header tip is readable (boot_full_fold.c). */
-            const char *v = argv[i] + 18;
-            char *end = NULL;
-            long h = strtol(v, &end, 10);
-            if (end == v || *end != '\0' || h <= 0 || h > INT32_MAX) {
-                fprintf(stderr,
-                        "invalid -full-fold-target=%s (must be a positive "
-                        "height, e.g. -full-fold-target=1234)\n", v);
-                return 1;
-            }
-            ctx->full_fold_target = (int32_t)h;
-        }
-        else if (strcmp(argv[i], "-reindex-explorer") == 0) ctx->reindex_explorer = true;
-        else if (strcmp(argv[i], "-backfill-zslp") == 0) ctx->backfill_zslp = true;
-        else if (strcmp(argv[i], "-backfill-nullifiers") == 0) ctx->backfill_nullifiers = true;
-        else if (strcmp(argv[i], "-reimport-utxos") == 0) ctx->reimport_utxos = true;
-        else if (strcmp(argv[i], "-allow-degraded") == 0) ctx->allow_degraded = true;
-        else if (strncmp(argv[i], "-showmetrics=", 13) == 0) *show_metrics = atoi(argv[i]+13) != 0;
-        else if (strcmp(argv[i], "-tor") == 0) ctx->tor = true;
-        else if (strcmp(argv[i], "-no-tor") == 0) ctx->no_tor = true;
-        else if (strcmp(argv[i], "-allow-tor-stub-dev") == 0)
-            ctx->allow_tor_stub_dev = true;
-        else if (strcmp(argv[i], "-onion-persist") == 0 ||
-                 strcmp(argv[i], "-onion-persist=1") == 0)
-            ctx->onion_persist = true;
-        else if (strcmp(argv[i], "-onion-persist=0") == 0) {
-            ctx->onion_persist = false;
-            ctx->onion_persist_forced_off = true;
-        }
-        else if (strcmp(argv[i], "-onion-rotate") == 0) ctx->onion_rotate = true;
-        else if (strncmp(argv[i], "-utxomirror=", 12) == 0) {
-            const char *mode = argv[i] + 12;
-            if (strcmp(mode, "auto") != 0 && strcmp(mode, "off") != 0) {
-                fprintf(stderr, "invalid -utxomirror=%s (accepted: auto, off)\n",
-                        mode);
-                return 1;
-            }
-            platform_environment_set("ZCL_UTXO_MIRROR_MODE", mode, 1);
-        }
-        else if (strncmp(argv[i], "-bodyhistorybackfill=", 21) == 0) {
-            const char *mode = argv[i] + 21;
-            if (strcmp(mode, "throttled") != 0 && strcmp(mode, "off") != 0 &&
-                strcmp(mode, "normal") != 0) {
-                fprintf(stderr, "invalid -bodyhistorybackfill=%s "
-                        "(accepted: throttled, off, normal)\n", mode);
-                return 1;
-            }
-            platform_environment_set("ZCL_BODY_HISTORY_BACKFILL_MODE", mode,
-                                     1);
-        }
-        else if (strncmp(argv[i], "-legacyoracle=", 14) == 0) {
-            const char *mode = argv[i] + 14;
-            if (strcmp(mode, "off") != 0 && strcmp(mode, "auto") != 0) {
-                fprintf(stderr, "invalid -legacyoracle=%s (accepted: off, auto)\n",
-                        mode);
-                return 1;
-            }
-            platform_environment_set("ZCL_LEGACY_ORACLE_MODE", mode, 1);
-        }
-        else if (strncmp(argv[i], "-profile=", 9) == 0) {
-            if (!app_runtime_profile_parse(argv[i] + 9,
-                                           &ctx->runtime_profile)) {
-                /* The typed registry answers an unknown subsystem by printing
-                 * the whole valid set (diagnostics_registry.c). Match that
-                 * here: "Unknown runtime profile: X" alone made the reader go
-                 * read app_runtime_profile_parse to find out what IS valid. */
-                boot_error_report(BOOT_ERROR_FATAL,
-                                  "BOOT_UNKNOWN_RUNTIME_PROFILE", "argv",
-                                  "-profile= names a runtime profile this "
-                                  "binary does not have",
-                                  NULL, 0, "given=%s accepted=%s",
-                                  argv[i] + 9,
-                                  app_runtime_profile_accepted_csv());
-                return 1;
-            }
-        }
-        else if (strncmp(argv[i], "-operator-lane=", 15) == 0) {
-            if (!app_operator_lane_parse(argv[i] + 15,
-                                         &ctx->operator_lane)) {
-                boot_error_report(BOOT_ERROR_FATAL,
-                                  "BOOT_UNKNOWN_OPERATOR_LANE", "argv",
-                                  "-operator-lane= names a lane this binary "
-                                  "does not have",
-                                  NULL, 0, "given=%s accepted=%s",
-                                  argv[i] + 15,
-                                  app_operator_lane_accepted_csv());
-                return 1;
-            }
-        }
-        else if (strncmp(argv[i], "-assumevalid", 12) == 0) {
-            fprintf(stderr,
-                    "-assumevalid has been removed; use "
-                    "-deferproofvalidationbelow=<blockhash|0>\n");
-            return 1;
-        }
-        else if (strncmp(argv[i], "-deferproofvalidationbelow=",
-                         sizeof("-deferproofvalidationbelow=") - 1) == 0) {
-            ctx->defer_proof_validation_below =
-                argv[i] + sizeof("-deferproofvalidationbelow=") - 1;
-        }
-        else if (strncmp(argv[i], "-filesync=", 10) == 0) { /* handled above */ }
-        else if (strncmp(argv[i], "-fileservice=", 13) == 0) ctx->file_service_peer = argv[i]+13;
-        else if (strcmp(argv[i], "-nofilesync") == 0) ctx->no_file_sync = true;
-        else if (strcmp(argv[i], "-allow-clearnet-snapshot-fetch") == 0) ctx->allow_clearnet_snapshot_fetch = true;
-        else if (strcmp(argv[i], "-enforce-sapling-root") == 0) {
-            /* DEFAULT-OFF Sapling-root parity reject (project_sapling_root
-             * _parity_hole). Default behavior rejects ONLY an all-zeros
-             * hashFinalSaplingRoot; this flag additionally rejects ANY
-             * mismatch vs the locally-recomputed Sapling tree root, matching
-             * zclassicd. ⚠ Do NOT pass on the live node until a full-history
-             * replay confirms ZERO false-rejects (h=478544 lesson — see
-             * validation/connect_block.h). */
-            extern _Atomic _Bool g_enforce_sapling_root;
-            atomic_store(&g_enforce_sapling_root, true);
-        }
-        else if (strcmp(argv[i], "-enforce-coinbase-maturity") == 0) {
-            /* DEFAULT-OFF coinbase-maturity parity reject on the live reducer
-             * fold. Default behavior does NOT reject a spend of a coinbase
-             * output younger than COINBASE_MATURITY (100) on that path; this
-             * flag adds the reject, matching zclassicd CheckTxInputs
-             * (zclassic-cpp/src/main.cpp:2056-2060). ⚠ This is a tightening
-             * predicate — do NOT pass on the live node until a full-history
-             * replay confirms ZERO false-rejects (h=478544 lesson — see
-             * jobs/utxo_apply_delta.h). */
-            extern _Atomic _Bool g_enforce_coinbase_maturity;
-            atomic_store(&g_enforce_coinbase_maturity, true);
-        }
-        else if (strcmp(argv[i], "-enforce-checkdatasig-sigops") == 0) {
-            /* DEFAULT-OFF CHECKDATASIG_SIGOPS parity. Default connect_block
-             * flags are P2SH | CHECKLOCKTIMEVERIFY; this flag also ORs in
-             * SCRIPT_VERIFY_CHECKDATASIG_SIGOPS, matching zclassicd
-             * ConnectBlock (zclassic-cpp/src/main.cpp:2567), which counts
-             * OP_CHECKDATASIG[VERIFY] toward the per-block sigop ceiling.
-             * ⚠ Tightening predicate — do NOT pass on the live node until a
-             * full-history replay confirms ZERO false-rejects (h=478544
-             * lesson — see validation/connect_block.h). */
-            extern _Atomic _Bool g_enforce_checkdatasig_sigops;
-            atomic_store(&g_enforce_checkdatasig_sigops, true);
-        }
-        else if (strcmp(argv[i], "-nobgvalidation") == 0) ctx->no_bg_validation = true;
-        else if (strcmp(argv[i], "-buildworker") == 0 ||
-                 strcmp(argv[i], "-buildworker=1") == 0)
-            ctx->build_worker = true;
-        else if (strcmp(argv[i], "-buildworker=0") == 0)
-            ctx->build_worker = false;
-        /* K3 throughput levers, default OFF (see boot.h / hw_profile.h). The
-         * derive gate is set here (pre-boot) so the reducer activation fold sees
-         * the derived cadence. */
-        else if (strcmp(argv[i], "-prefetch-blocks") == 0) ctx->prefetch_blocks = true;
-        else if (strcmp(argv[i], "-pv-lookahead") == 0 ||
-                 strcmp(argv[i], "-pv-lookahead=1") == 0) ctx->pv_lookahead = true;
-        else if (strcmp(argv[i], "-pv-lookahead=0") == 0) ctx->pv_lookahead = false;
-        else if (strcmp(argv[i], "-derive-drain-batch") == 0) hw_profile_set_derive_drain_batch(true);
-        else if (strcmp(argv[i], "-sandbox=steady") == 0) ctx->sandbox_steady = true;
-        else if (strcmp(argv[i], "-sandbox=off") == 0) ctx->sandbox_steady = false;
-        else if (strcmp(argv[i], "-confine") == 0) ctx->confine = true;
-        else if (strcmp(argv[i], "-confine=serving") == 0) {
-            /* Same strict Landlock + seccomp ALLOW-list boundary as -confine,
-             * but the allow-set also covers the socket family a SERVING node
-             * needs (see os_sandbox_node_confine_serving_profile). Sets
-             * ctx->confine too so the -sandbox=steady mutual-exclusion check
-             * below and the sr_confine_enter() dispatch both see it. */
-            ctx->confine = true;
-            ctx->confine_serving = true;
-        }
-        else if (strcmp(argv[i], "-hotswap-activate") == 0) {
-            /* Arm Tier-1 live hot-swap ACTIVATION for this resident node. This
-             * is only ONE of the two required gates: a live swap also needs
-             * ZCL_HOTSWAP_ACTIVATE=1 in the environment AND the exact dev
-             * datadir (~/.zclassic-c23-dev). The canonical datadir is refused
-             * unconditionally. Without this flag every hot-swap is verify-only.
-             * See hotswap_activation_authorized() (engine/modules/hotswap). */
-            hotswap_set_activate_flag(true);
-        }
-        else if (strcmp(argv[i], "-nolegacyimport") == 0) ctx->no_legacy_auto_import = true;
-        else if (strcmp(argv[i], "-nolegacyutxoimport") == 0) ctx->no_legacy_utxo_import = true;
-        else if (strcmp(argv[i], "-allow-plaintext-wallet") == 0) {
-            /* Explicit, loud opt-in to a plaintext wallet at rest. Read
-             * by the wallet at-rest creation policy at boot (see
-             * contexts/wallet/modules/wallet/src/wallet_keystore.c). Without this flag AND
-             * without ZCL_WALLET_PASSPHRASE, first-run wallet creation
-             * refuses rather than silently minting unencrypted keys. */
-            platform_environment_set("ZCL_ALLOW_PLAINTEXT_WALLET", "1",
-                                     1);
-        }
-        /* "-wallet-no-phrase-backup": "I accept a wallet with no written
-         * backup." A new wallet's twelve recovery words are shown once, on
-         * stdout, and under a systemd unit stdout is node.log — so when
-         * stdout is not a terminal the node refuses to create a spendable
-         * wallet at all. This flag is the operator saying that is fine
-         * here: the wallet is created, NO phrase is drawn, and every boot
-         * that creates one says so loudly. Read by
-         * boot_wallet_phrase_backup_waived() (config/boot_wallet_phrase.h).
-         *
-         * "-db-backup-before-migrate": opt-in pre-migration safety net.
-         * node.db is routinely too large to casually copy before every
-         * upgrade "just in case" — that size is exactly why a newer binary
-         * opening an older database now has a read-compatible path instead
-         * of a hard refusal (see database_migrate.c). This flag is the
-         * opposite choice for the one upgrade an operator judges worth the
-         * wait and the disk: before this boot applies any BREAKING schema
-         * step, it copies node.db to node.db.schema<N>.bak beside it via
-         * SQLite's online backup API, and refuses to proceed with that step
-         * at all if free space is short. Read by
-         * node_db_backup_before_breaking_migration()
-         * (engine/models/src/database_backup.c). Default OFF.
-         *
-         * Both are bare booleans whose entire effect is one setenv, so both
-         * route through k_cli_bare_bool_flags/args_try_bare_bool_flag above
-         * instead of their own else-if arm. */
-        else if (args_try_bare_bool_flag(argv[i])) {
-        }
-        else if (strcmp(argv[i], "-rebuildfromlog") == 0) ctx->boot_from_log = true;
-        else if (strcmp(argv[i], "-leveldb-no-verify-checksums") == 0) {
-            /* Turns off LevelDB checksum verification for both point
-             * reads and iteration.  Use only when chasing a suspected
-             * corruption issue — silent truncation returns. */
-            platform_environment_set("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "1",
-                                     1);
-        }
-        else if (strncmp(argv[i], "-externalip=", 12) == 0) ctx->external_ip = argv[i] + 12;
-        else if (strncmp(argv[i], "-httpsdomain=", 13) == 0) ctx->https_domain = argv[i] + 13;
-        else if (strncmp(argv[i], "-httpsaltdomain=", 16) == 0) {
-            /* An additional name on the SAME listener, served its own
-             * certificate by TLS SNI (see app_context.https_alt_domains).
-             * Repeatable. Past the cap the flag is refused loudly rather
-             * than silently dropped — a name nobody serves is a name whose
-             * clients get a certificate mismatch, which is invisible from
-             * the server side. */
-            if (ctx->n_https_alt_domains < APP_HTTPS_ALT_DOMAINS_MAX)
-                ctx->https_alt_domains[ctx->n_https_alt_domains++] = argv[i] + 16;
-            else
-                fprintf(stderr,
-                        "Warning: at most %d -httpsaltdomain= names are "
-                        "served; '%s' was ignored\n",
-                        APP_HTTPS_ALT_DOMAINS_MAX, argv[i] + 16);
-        }
-        else if (strcmp(argv[i], "-gui") == 0 || strcmp(argv[i], "--gui") == 0) {
-            /* Opt-in to the WebKit wallet GUI. Consumed earlier (the GUI
-             * launch returns before node mode); recognized here so it is
-             * an intentional flag, not silently dropped node-mode noise. */
-        }
-        else if (strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "--help") == 0 ||
-                 strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-?") == 0) {
-            print_usage(argv[0]); return 0;
-        }
-        else if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-version") == 0 ||
-                 strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "-V") == 0) {
-            /* Print version + exit. Without this, `z23 --version` (a
-             * judge's reflex) falls through as an unknown flag and silently
-             * boots a full node against the default datadir. */
-            printf("z23 v%d.%d.%d (source %.12s)\n",
-                   CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR,
-                   CLIENT_VERSION_REVISION,
-                   zcl_build_source_id_sha256());
-            /* Which Tor this binary linked, on its own greppable line. The
-             * two spellings are exactly "tor: full" and "tor: stub" so a
-             * deploy script can decide with one grep instead of running the
-             * node and reading its boot log. */
-            printf("tor: %s\n",
-                   app_tor_real_build_linked() ? "full" : "stub");
-            return 0;
-        }
-        else if (argv[i][0] == '-' && !main_flag_is_known_extra(argv[i])) {
-            /* Loud unknown-flag WARNING: this loop must never accept ANY
-             * unrecognized "-flag" silently (a documented footgun — see
-             * docs/SYNC.md and CLAUDE.md "Skipping step 1 is a footgun"). A
-             * typo'd or removed flag (e.g. the old -cold-import/-fastimport) must not
-             * silently no-op; it must say so, every boot, at WARN. This is
-             * advisory only — it does not FATAL, since some recognized
-             * flags are intentionally consumed by an earlier or later pass
-             * in this loop (e.g. -gui/--self-test above,
-             * -addnode=/-connect=/-filesync= below) or read independently
-             * via GetArg()/GetBoolArg() (main_flag_is_known_extra() above)
-             * rather than this loop's own strncmp branches.
-             *
-             * Daemon mode stays tolerant (CLAUDE.md)
-             * — it does not FATAL here even for a double-dash
-             * typo of one of the seven operator-target flags (that hard
-             * refusal is CLI-client-only, engine/entry/main_cli_modes.c). But when
-             * cli_flag_classify() recognizes the shape, name the exact
-             * single-dash correction instead of a generic "check spelling"
-             * — the same suggestion the CLI-client path would give for the
-             * identical typo. */
-            char suggest[24] = {0};
-            if (cli_flag_classify(argv[i], suggest, sizeof(suggest)) !=
-                CLI_FLAG_OK) {
-                fprintf(stderr,
-                        "Warning: unrecognized flag '%s' (ignored) — "
-                        "zclassic23 flags use a single dash with '=' "
-                        "joining the value; did you mean %s?\n",
-                        argv[i], suggest);
-            } else {
-                fprintf(stderr,
-                        "Warning: unrecognized flag '%s' (ignored) — check "
-                        "spelling or docs/RUNBOOK.md; this is not a supported "
-                        "zclassic23 flag.\n", argv[i]);
-            }
-        }
+        int rc = ARGS_ARM_NOMATCH;
+        for (size_t a = 0; a < ARGS_ARM_COUNT && rc == ARGS_ARM_NOMATCH; a++)
+            rc = k_args_arms[a](argv[i], &st);
+        if (rc >= 0)
+            return rc; /* help / version / a refused flag: exit now */
+        if (rc == ARGS_ARM_NOMATCH)
+            args_warn_unknown_flag(argv[i]);
     }
     /* The -v2transport spelling is a deprecated alias for
      * -noisetransport (kept so existing Noise operators keep booting;
