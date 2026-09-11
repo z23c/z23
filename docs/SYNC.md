@@ -42,11 +42,14 @@ then catches up the tail via standard P2P. Activation is automatic — any peer
 advertising service bit `NODE_ZCL23` (`core/modules/net/include/net/fast_sync.h`)
 becomes a snapshot candidate. Caught-up z23 peers also advertise SHA3
 block-piece manifests for IBD assist without the UTXO-export lock cost.
-The machinery below is built and code-tested;
-a full fresh z23-to-z23 sync-to-tip run has not yet been proven
-end-to-end on a live network (see `docs/HANDOFF.md` C3 status) — today's
-proven cold-start is Method 3 below. Overlay hashes and the file-service
-KDF are SHA3-256; see [`OVERLAY.md`](OVERLAY.md).
+The machinery below is built and code-tested, but Method 1 as coded still
+cannot publish: `SNAPSYNC_VERIFYING → SNAPSYNC_COMPLETE` is a false transition
+under Phase-0 containment (`core/modules/sync/src/sync_state.c:238-241`).
+Whether a fresh z23-to-z23 sync-to-tip has been proven end-to-end on a live
+network is acceptance criterion C3, tracked in [`MVP.md`](MVP.md) with the run
+dates and artifact paths for each attempt — read the status there, not here.
+Today's proven cold-start is Method 3 below. Overlay hashes and the
+file-service KDF are SHA3-256; see [`OVERLAY.md`](OVERLAY.md).
 
 ```bash
 build/bin/z23 -addnode=<z23_peer>
@@ -152,7 +155,7 @@ and file-service serving.
 
 ---
 
-## Method 2 (native): Full P2P Sync (~7 h)
+## Method 2 (native): Full P2P Sync (hours)
 
 Trustless sync from genesis over the standard P2P protocol. No snapshot.
 
@@ -244,9 +247,9 @@ state, never this doc. The snapshot's `anchor_block_hash` must byte-equal
 this node's in-binary PoW header at the seed height or boot FATALs — a
 wrong-chain or missing anchor fails closed (`engine/composition/src/boot_refold_staged.c`,
 the load-snapshot-at-own-height path; the anchor-hash cross-check is at ~line
-585). When the seed height is above the coins-best active-chain window, the
+1064). When the seed height is above the coins-best active-chain window, the
 loader extends that window forward to the PoW-proven header tip
-(`active_chain_extend_window`, line 568) instead of FATAL-ing "Run
+(`active_chain_extend_window`, line 1017) instead of FATAL-ing "Run
 --importblockindex". The artifact is **release-assisted borrowed state**:
 its payload digest authenticates bytes and the header match verifies chain
 location, but neither proves the UTXO/Sapling/Sprout/nullifier contents because
@@ -280,10 +283,12 @@ eight reducer-stage cursors (`header_admit`, `validate_headers`,
 `utxo_apply`, `tip_finalize`) to the checkpoint height instead of genesis, so
 the fold resumes at the checkpoint and climbs only the tail —
 `current header tip − checkpoint height` blocks — over on-disk bodies,
-instead of the full from-genesis span. The nightly anchor→tip replay canary
-(`tools/scripts/replay_canary.sh`) measures this tail fold at roughly 45
-minutes on the present chain length, versus hours for Method 2's full
-genesis fold.
+instead of the full from-genesis span. The anchor→tip replay canary
+(`tools/scripts/replay_canary.sh`) is built around a ~45-minute tail fold on
+the present chain length: that is the band its pass/fail bounds are centred on
+(300 s floor, 7200 s ceiling — `tools/scripts/replay_canary.sh:106,116-117`),
+not a figure any run has reported here. Method 2's full genesis fold takes
+hours longer.
 
 `-refold-from-anchor` is an explicit opt-in flag; `-load-verify-boot` reaches
 the same reset automatically on a normal boot when a matching verified
@@ -310,9 +315,9 @@ Rules:
 - Force reimport after a first run:
   `build/bin/z23 -reimport-utxos -datadir=~/.zclassic-c23`
 
-The live/default legacy reference is the `zclassicd` systemd user service (see
-CLAUDE.md "Services"). `zclassicd-peer.service` is only the operator-specific
-example unit committed under `deploy/examples/`.
+The live/default legacy reference is the `zclassicd` systemd user service.
+`zclassicd-peer.service` is only the operator-specific example unit committed
+under `platform/deploy/examples/`.
 
 ### Legacy chain oracle boundary
 
@@ -336,19 +341,21 @@ Sync methods can reach different trust states. Background services must promote
 assisted state only after full-history verification reaches the serving tip and
 complete state commitments match. Current checks include:
 
-| Service | What it verifies | Speed |
-|---------|------------------|-------|
-| `bg_hash_verify` | SHA256d of every block header | 83K blk/s |
-| `bg_validation`  | Equihash, ECDSA, Groth16, merkle roots | 400–500 blk/s |
-| Boot checks      | UTXO count + XOR commitment vs checkpoint | ~2 s |
-| Post-import      | SHA3-256 full UTXO set vs hardcoded commitment | ~5 s |
+| Service | What it verifies |
+|---------|------------------|
+| `bg_hash_verify` | SHA256d of every block header |
+| `bg_validation`  | Equihash, ECDSA, Groth16, merkle roots |
+| Boot checks      | UTXO count + XOR commitment vs checkpoint |
+| Post-import      | SHA3-256 full UTXO set vs hardcoded commitment |
 
-See [`validation/VALIDATION_MATRIX.md`](validation/VALIDATION_MATRIX.md) for the full matrix.
+See [`validation/VALIDATION_MATRIX.md`](validation/VALIDATION_MATRIX.md) for the
+full per-stage matrix. Neither that matrix nor this table carries throughput
+figures; measured numbers live in [`BENCHMARKS_LOG.md`](BENCHMARKS_LOG.md).
 
 Self-healing recovery mechanisms (missing UTXO, reorg unwind, wrong block on
 disk, stale `coins_best_block`, download stall) are documented in
-[`validation/VALIDATION_MATRIX.md`](validation/VALIDATION_MATRIX.md) → "Self-Healing
-Mechanisms".
+[`validation/VALIDATION_MATRIX.md`](validation/VALIDATION_MATRIX.md) → "Sync &
+Self-Healing Source Map".
 
 Background validation also repairs a block index that claims `HAVE_DATA` when
 the indexed body cannot be hash-verified from disk. The validator pauses at
@@ -439,9 +446,9 @@ Method 1 or 2 from its configured peers.
 ┌──────────────────────┬──────────────────┐  ┌────────────────────┐
 │  Method 1: fastsync  │ Method 2: full   │  │ Method 3: from     │
 │  z23 peer     │ P2P from genesis │  │ zclassicd          │
-│  ~60 s design target │ ~7 h             │  │ chainstate → SQLite│
-│  (unproven — see     │                  │  │ ~20 s, dev-only    │
-│  HANDOFF.md C3)      │                  │  │                    │
+│  ~60 s design target │ hours            │  │ chainstate → SQLite│
+│  (unproven — status  │                  │  │ ~60-74 s headers   │
+│  in MVP.md C3)       │                  │  │ then a slow tail   │
 │  NODE_ZCL23 + chunks │ headers + blocks │  │                    │
 └──────────┬───────────┴────────┬─────────┘  └─────────┬──────────┘
            │                    │                      │
