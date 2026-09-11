@@ -106,7 +106,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # no baseline row, so it may carry ZERO.
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"
 
-NODE_BIN="${ZCL_CS_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
+NODE_BIN="${ZCL_CS_NODE_BIN:-$REPO_ROOT/build/bin/z23}"
 # NO DEFAULT PEER, ON PURPOSE. This used to default to 127.0.0.1:8033 — the
 # canonical/live node's P2P port on an operator host — so a bare
 # `make mvp-coldstart-to-tip-stopwatch` silently pulled a full chain-data sync

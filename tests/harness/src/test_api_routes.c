@@ -5,6 +5,26 @@
 
 #include "test/api_test_fixtures.h"
 
+/* The milestone score is reported history. Current qualification is named,
+ * not claimed, so a successful response cannot read as acceptance. */
+static void milestone_requires_history_basis(bool *ok,
+                                             const struct json_value *root,
+                                             const struct json_value *cold_start)
+{
+    const char *basis = json_get_str(json_get(root, "score_basis"));
+    const char *cmd = json_get_str(json_get(
+        json_get(root, "current_qualification"), "command"));
+    const char *evidence = cold_start
+        ? json_get_str(json_get(cold_start, "evidence")) : NULL;
+    const char *goals = json_get_str(json_get(json_get(root, "ascii"),
+                                              "goals"));
+    *ok = *ok && basis &&
+        strcmp(basis, "historical_reported_demonstrations") == 0 &&
+        cmd && strcmp(cmd, "make mvp") == 0 &&
+        evidence && strcmp(evidence, "historical_report") == 0 &&
+        goals && strstr(goals, "not qualified") != NULL;
+}
+
 int api_route_table_focused_tests(void)
 {
     int failures = 0;
@@ -48,6 +68,7 @@ int api_route_table_focused_tests(void)
         ok = ok && json_get_int(json_get(&root,
                           "mvp_readiness_score")) == 5;
         ok = ok && json_get_int(json_get(&root, "target_score")) == 8;
+        milestone_requires_history_basis(&ok, &root, cold_start);
         ok = ok && ascii && strstr(json_get_str(json_get(ascii, "goals")),
                                    "goals [######----] 5/8") != NULL;
         ok = ok && bars && strcmp(json_get_str(json_get(json_get(bars,

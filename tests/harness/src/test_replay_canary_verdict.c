@@ -1184,12 +1184,35 @@ static int test_source_guard_mvp_binds_canary_to_running_binary(void)
     return failures;
 }
 
+static int test_source_guard_mvp_binds_c3_stopwatch_to_running_binary(void)
+{
+    int failures = 0;
+    TEST("mvp gate: C3 PASS requires a stopwatch receipt bound to running bytes") {
+        const char *root = repo_root();
+        if (!root) { printf("SKIP (repo root not found)\n"); break; }
+
+        static char body[65536];
+        ASSERT(read_script_source(root, "tools/mvp_gate.sh", body,
+                                  sizeof(body)));
+        ASSERT(strstr(body,
+                      "--expect-artifact-sha256=\"$LIVE_ARTIFACT\"") != NULL);
+        ASSERT(strstr(body, "set_v 3 \"PASS\"") != NULL);
+        ASSERT(strstr(body, "node at-tip status is not this claim") != NULL);
+        /* A live at-tip reading must never stand in for the stopwatch claim. */
+        ASSERT(strstr(body, "elif [[ \"$AT_TIP\" == 1 ]]; then\n    set_v 3")
+               == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Registration ───────────────────────────────────────────────── */
 
 static int test_replay_canary_verdict_platform_arm(void)
 {
     int failures = 0;
     failures += test_pass_writes_pass_sentinel();
+    failures += test_source_guard_mvp_binds_c3_stopwatch_to_running_binary();
     failures += test_fail_rejects_fires();
     failures += test_fail_sha3_fires();
     failures += test_missing_sha3_fires();

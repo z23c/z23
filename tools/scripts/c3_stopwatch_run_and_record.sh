@@ -70,7 +70,7 @@
 # exemption is a streak made entirely of benign (threshold-0) skips.
 #
 # Env:
-#   ZCL_BIN               node binary to time (default $REPO_ROOT/build/bin/zclassic23)
+#   ZCL_BIN               node binary to time (default $REPO_ROOT/build/bin/z23)
 #   ZCL_PEER              peer H:P to dial (default 127.0.0.1:39070 — the
 #                          dedicated zcl-stopwatch-peer.service fixture)
 #   ZCL_CS_FILE_PEER      ROM file-service H:P (defaults to the dedicated
@@ -128,7 +128,7 @@ else
     echo "c3-stopwatch-run: WARN skip classifier $SKIP_CLASS_LIB unreadable — the ledger line will carry no skip_class and no skip-streak alarm will fire" >&2
 fi
 
-ZCL_BIN="${ZCL_BIN:-$REPO_ROOT/build/bin/zclassic23}"
+ZCL_BIN="${ZCL_BIN:-$REPO_ROOT/build/bin/z23}"
 ZCL_PEER="${ZCL_PEER:-127.0.0.1:39070}"
 if [ -z "${ZCL_CS_FILE_PEER+x}" ]; then
     if [ -n "${ZCL_CS_HEADER_SOURCE:-}" ] || [ -n "${ZCL_CS_BUNDLE_PATH:-}" ]; then
@@ -175,6 +175,45 @@ proof_str() {
         head -n1 | sed -E "s/.*:[[:space:]]*\"([^\"]*)\"/\1/"
 }
 
+# file_sha256 <path> — the bytes under measurement. Echoes nothing when the
+# file is unreadable, so the row records an empty digest rather than a guess.
+file_sha256() {
+    local d=""
+    [ -r "$1" ] && read -r d _ < <(sha256sum -- "$1" 2>/dev/null)
+    printf '%s' "$d"
+}
+
+# c3_result_class <verdict> <proof.json> <bound-digest> <final_network_tip> <reason>
+#   ENVIRONMENT_BLOCKED  the harness could not measure the candidate: a skip,
+#                        a named missing prerequisite, or no peer ever
+#                        completing a handshake (final_network_tip < 0). The
+#                        fixture, not the candidate, is unmeasured; repair it
+#                        before spending another run.
+#   INCOMPLETE           no proof.json, an unrecognised verdict, an unrecorded
+#                        frontier, or executable bytes that were unreadable or
+#                        changed during the run.
+#   PASS                 a pass whose artifact and executable digest are on record.
+#   PRODUCT_FAILURE      measured against a handshaking peer and did not
+#                        reach its tip inside the budget.
+c3_result_class() {
+    local v="$1" proof="$2" digest="$3" tip="$4" reason="$5"
+    case "$reason" in
+        *"mktemp datadir failed"*|*"node binary absent"*|*"peer not reachable"*)
+            printf 'ENVIRONMENT_BLOCKED'; return 0 ;;
+    esac
+    [ "$v" = "skip" ] && { printf 'ENVIRONMENT_BLOCKED'; return 0; }
+    if [ -z "$proof" ] || [ ! -f "$proof" ] || [ -z "$digest" ] ||
+       [ "$v" = "error" ]; then
+        printf 'INCOMPLETE'; return 0
+    fi
+    [ "$v" = "pass" ] && { printf 'PASS'; return 0; }
+    case "$tip" in
+        '') printf 'INCOMPLETE' ;;
+        -*) printf 'ENVIRONMENT_BLOCKED' ;;
+        *)  printf 'PRODUCT_FAILURE' ;;
+    esac
+}
+
 # count_peer_rows <table> — best-effort read-only COUNT(*) of one hot table in
 # the serving fixture peer's datadir, via the RUNNING peer's own SELECT-only
 # `core storage query` primitive (semicolon-rejected, auto-LIMIT, its own 2s
@@ -211,7 +250,8 @@ count_peer_rows() {
 build_commit="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 [ -z "$build_commit" ] && build_commit="unknown"
 
-echo "c3-stopwatch-run: bin=$ZCL_BIN peer=$ZCL_PEER file_peer=$ZCL_CS_FILE_PEER budget=${ZCL_CS_BUDGET_SECS}s build_commit=$build_commit"
+bin_sha_before="$(file_sha256 "$ZCL_BIN")"
+echo "c3-stopwatch-run: bin=$ZCL_BIN sha256=${bin_sha_before:-unreadable} peer=$ZCL_PEER file_peer=$ZCL_CS_FILE_PEER budget=${ZCL_CS_BUDGET_SECS}s build_commit=$build_commit"
 
 set +e
 out="$(bash "$STOPWATCH" --bin="$ZCL_BIN" --peer="$ZCL_PEER" 2>&1)"
@@ -251,6 +291,17 @@ proof_json=""
 [ -n "${artifact_dir:-}" ] && proof_json="$artifact_dir/proof.json"
 final_network_tip="$(proof_num "$proof_json" final_network_tip)"
 final_hstar="$(proof_num "$proof_json" final_hstar)"
+
+# Bind the verdict to the bytes measured: the digest counts only if it was
+# readable and identical before and after the run.
+bin_sha_after="$(file_sha256 "$ZCL_BIN")"
+node_bin_sha256=""
+if [ -n "$bin_sha_before" ] && [ "$bin_sha_before" = "$bin_sha_after" ]; then
+    node_bin_sha256="$bin_sha_before"
+fi
+node_bin_source_id_sha256="$(proof_str "$proof_json" node_bin_source_id_sha256)"
+result_class="$(c3_result_class "$verdict" "$proof_json" "$node_bin_sha256" \
+    "$final_network_tip" "$(proof_str "$proof_json" reason)")"
 
 # Fixture shape: row volumes of the serving peer's hot tables at collect time.
 # Best-effort, read-only, null when not cheaply countable (see count_peer_rows).
@@ -304,12 +355,14 @@ fi
 set -e
 
 ts="$(date +%s)"
-line="$(printf '{"ts":%s,"verdict":%s,"exit_code":%s,"wall_clock_seconds":%s,"boots":%s,"budget_seconds":%s,"peer":%s,"file_peer":%s,"node_bin":%s,"build_commit":%s,"artifact_dir":%s,"final_network_tip":%s,"final_hstar":%s,"peer_datadir":%s,"peer_block_index_rows":%s,"peer_tip_finalize_rows":%s,"peer_utxo_rows":%s,"skip_reason":%s,"peer_precheck":%s,"skip_class":%s,"skip_streak":%s,"no_pass_streak":%s}' \
+line="$(printf '{"ts":%s,"verdict":%s,"exit_code":%s,"wall_clock_seconds":%s,"boots":%s,"budget_seconds":%s,"peer":%s,"file_peer":%s,"node_bin":%s,"build_commit":%s,"node_bin_sha256":%s,"node_bin_source_id_sha256":%s,"result_class":%s,"artifact_dir":%s,"final_network_tip":%s,"final_hstar":%s,"peer_datadir":%s,"peer_block_index_rows":%s,"peer_tip_finalize_rows":%s,"peer_utxo_rows":%s,"skip_reason":%s,"peer_precheck":%s,"skip_class":%s,"skip_streak":%s,"no_pass_streak":%s}' \
     "$ts" "$(json_string "$verdict")" "$rc" "$(json_num_or_null "$wall_clock")" \
     "$(json_num_or_null "$boots")" \
     "$(json_num_or_null "$ZCL_CS_BUDGET_SECS")" "$(json_string "$ZCL_PEER")" \
     "$(json_string "$ZCL_CS_FILE_PEER")" "$(json_string "$ZCL_BIN")" \
-    "$(json_string "$build_commit")" "$(json_string "${artifact_dir:-}")" \
+    "$(json_string "$build_commit")" "$(json_string "$node_bin_sha256")" \
+    "$(json_string "$node_bin_source_id_sha256")" "$(json_string "$result_class")" \
+    "$(json_string "${artifact_dir:-}")" \
     "$(json_num_or_null "$final_network_tip")" "$(json_num_or_null "$final_hstar")" \
     "$(json_string "$PEER_DATADIR")" \
     "$(json_num_or_null "$peer_block_index_rows")" \

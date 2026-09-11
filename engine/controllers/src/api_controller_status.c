@@ -60,7 +60,8 @@ static const struct milestone_criterion k_mvp_criteria[] = {
       "none", true, true },
     { 3, "cold_start_sync",
       "Cold-start sync to tip in <10 min",
-      "pass", true, 2, "keep wipe-to-tip stopwatch green",
+      "pass", true, 2,
+      "record a fresh wipe-to-tip stopwatch pass bound to the candidate executable",
       "full_operator", "make mvp-coldstart-to-tip-stopwatch",
       "make ci-mvp-gates", "none", true, true },
     { 4, "shielded_receive",
@@ -222,6 +223,15 @@ static void api_milestone_require_field(bool *complete, bool present)
         *complete = false;
 }
 
+/* The criteria table records what was reported, not what the running
+ * candidate has earned: a "pass" row is a historically demonstrated full
+ * operator run. Current qualification needs fresh receipts bound to the
+ * exact running executable, which only `make mvp` evaluates. */
+static const char *api_mvp_evidence(const struct milestone_criterion *c)
+{
+    return c->strict_pass ? "historical_report" : "slice_or_pending";
+}
+
 static void api_push_mvp_proof_item(struct json_value *arr,
                                     const struct milestone_criterion *c)
 {
@@ -237,6 +247,7 @@ static void api_push_mvp_proof_item(struct json_value *arr,
     json_push_kv_bool(&item, "strict_pass", c->strict_pass);
     json_push_kv_str(&item, "proof_state",
                      c->strict_pass ? "accepted" : "pending");
+    json_push_kv_str(&item, "evidence", api_mvp_evidence(c));
     json_push_kv_str(&item, "proof_scope", c->proof_scope);
     json_push_kv_str(&item, "proof_command", c->proof_command);
     json_push_kv_str(&item, "ci_gate", c->ci_gate);
@@ -290,6 +301,7 @@ static void api_push_mvp_operator_proofs(
     json_push_kv_str(&proofs, "native_command", "z23 milestone");
     json_push_kv_str(&proofs, "alias_command", "z23 mvpstatus");
     json_push_kv_int(&proofs, "accepted_count", strict_pass);
+    json_push_kv_str(&proofs, "qualification_command", "make mvp");
     json_push_kv_int(&proofs, "target_count", (int64_t)criteria_count);
     json_push_kv_int(&proofs, "pending_count", pending);
     json_push_kv_int(&proofs, "live_window_count", live_window);
@@ -469,6 +481,18 @@ void api_milestone_status_json(struct json_value *result)
     json_push_kv_bool(result, "complete",
                       strict_pass == (int)criteria_count);
     json_push_kv_int(result, "mvp_readiness_score", strict_pass);
+    json_push_kv_str(result, "score_basis",
+                     "historical_reported_demonstrations");
+
+    struct json_value qualification;
+    json_init(&qualification);
+    json_set_object(&qualification);
+    json_push_kv_str(&qualification, "status", "not_evaluated_here");
+    json_push_kv_str(&qualification, "command", "make mvp");
+    json_push_kv_str(&qualification, "rule",
+                     "needs a fresh receipt bound to the running executable; this response is not acceptance");
+    json_push_kv(result, "current_qualification", &qualification);
+    json_free(&qualification);
     json_push_kv_int(result, "target_score", (int64_t)criteria_count);
     json_push_kv_int(result, "partial_progress_units", partial_units);
     json_push_kv_int(result, "partial_progress_units_total", max_units);
@@ -520,7 +544,7 @@ void api_milestone_status_json(struct json_value *result)
     api_push_progress_bar(&bars, &ascii, "systems", systems_done,
                           systems_total, "live node runtime checks");
     api_push_progress_bar(&bars, &ascii, "goals", strict_pass,
-                          (int)criteria_count, "strict MVP MRS");
+                          (int)criteria_count, "reported runs, not qualified");
     api_push_progress_bar(&bars, &ascii, "subgoals", partial_units,
                           max_units, "full plus partial proof units");
     json_push_kv(result, "bars", &bars);

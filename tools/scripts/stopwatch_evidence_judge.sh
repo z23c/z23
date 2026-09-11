@@ -231,6 +231,41 @@ if [ "${1:-}" = "--selftest" ]; then
     run_case "legacy PASS (no final_network_tip) tolerated" "$legacy_pass" PASS 0 \
         "ZCL_STOPWATCH_SLO_LEDGER=$st_tmp/does-not-exist.jsonl"
 
+    # 1c. Qualification mode (--expect-artifact-sha256): only a fresh row that
+    #     names the exact executable it measured, and whose artifact still
+    #     holds a proof.json saying pass, qualifies that executable.
+    q_sha="$(printf 'a%.0s' $(seq 64))"
+    q_other="$(printf 'b%.0s' $(seq 64))"
+    q_nosl="ZCL_STOPWATCH_SLO_LEDGER=$st_tmp/does-not-exist.jsonl"
+    q_art="$st_tmp/q_art"; mkdir -p "$q_art"
+    printf '{"verdict": "pass"}\n' >"$q_art/proof.json"
+    q_bound="$st_tmp/q_bound.jsonl"
+    printf '{"ts":%s,"verdict":"pass","exit_code":0,"final_network_tip":%s,"node_bin_sha256":"%s","artifact_dir":"%s"}\n' \
+        "$NOW" "$GOOD_TIP" "$q_sha" "$q_art" >"$q_bound"
+    run_case "bound PASS, matching executable and artifact" "$q_bound" PASS 0 \
+        "$q_nosl" --expect-artifact-sha256 "$q_sha"
+    run_case "bound PASS measured different executable" "$q_bound" WRONG_ARTIFACT 1 \
+        "$q_nosl" --expect-artifact-sha256 "$q_other"
+    run_case "PASS row names no executable digest" "$legacy_pass" UNBOUND 1 \
+        "$q_nosl" --expect-artifact-sha256 "$q_sha"
+    q_gone="$st_tmp/q_gone.jsonl"
+    printf '{"ts":%s,"verdict":"pass","exit_code":0,"final_network_tip":%s,"node_bin_sha256":"%s","artifact_dir":"%s/missing"}\n' \
+        "$NOW" "$GOOD_TIP" "$q_sha" "$st_tmp" >"$q_gone"
+    run_case "bound PASS whose artifact is gone" "$q_gone" INCOMPLETE 1 \
+        "$q_nosl" --expect-artifact-sha256 "$q_sha"
+    q_exit0_art="$st_tmp/q_exit0"; mkdir -p "$q_exit0_art"
+    printf '{"verdict": "stalled-named"}\n' >"$q_exit0_art/proof.json"
+    q_exit0="$st_tmp/q_exit0.jsonl"
+    printf '{"ts":%s,"verdict":"pass","exit_code":0,"final_network_tip":%s,"node_bin_sha256":"%s","artifact_dir":"%s"}\n' \
+        "$NOW" "$GOOD_TIP" "$q_sha" "$q_exit0_art" >"$q_exit0"
+    run_case "exit-0 row whose own proof.json is not a pass" "$q_exit0" INCOMPLETE 1 \
+        "$q_nosl" --expect-artifact-sha256 "$q_sha"
+    q_old="$st_tmp/q_old.jsonl"
+    printf '{"ts":%s,"verdict":"pass","exit_code":0,"final_network_tip":%s,"node_bin_sha256":"%s","artifact_dir":"%s"}\n' \
+        "$((NOW - 2000000))" "$GOOD_TIP" "$q_sha" "$q_art" >"$q_old"
+    run_case "stale bound PASS" "$q_old" STALE 2 \
+        "$q_nosl" --expect-artifact-sha256 "$q_sha"
+
     # 2. Below-checkpoint tip -> THIN_FIXTURE, exit 1.
     thin_pass="$st_tmp/thin_pass.jsonl"
     printf '{"ts":%s,"verdict":"pass","exit_code":0,"wall_clock_seconds":3,"final_network_tip":%s,"final_hstar":%s,"artifact_dir":"/a/thin"}\n' \
@@ -420,17 +455,20 @@ fi
 
 HISTORY_FILE="${1:-}"
 if [ -z "$HISTORY_FILE" ]; then
-    echo "usage: stopwatch_evidence_judge.sh <history.jsonl> [--max-age-secs N]" >&2
+    echo "usage: stopwatch_evidence_judge.sh <history.jsonl> [--max-age-secs N] [--expect-artifact-sha256 HEX]" >&2
     echo "       stopwatch_evidence_judge.sh --selftest" >&2
     exit 2
 fi
 shift || true
 
 MAX_AGE_SECS=86400
+EXPECT_ARTIFACT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --max-age-secs)   shift; MAX_AGE_SECS="${1:?--max-age-secs needs a value}" ;;
         --max-age-secs=*) MAX_AGE_SECS="${1#*=}" ;;
+        --expect-artifact-sha256)   shift; EXPECT_ARTIFACT="${1:?--expect-artifact-sha256 needs a value}" ;;
+        --expect-artifact-sha256=*) EXPECT_ARTIFACT="${1#*=}" ;;
         *) echo "stopwatch-judge: unknown arg '$1'" >&2; exit 2 ;;
     esac
     shift
@@ -438,6 +476,15 @@ done
 case "$MAX_AGE_SECS" in
     ''|*[!0-9]*) echo "stopwatch-judge: --max-age-secs must be a positive integer" >&2; exit 2 ;;
 esac
+if [ -n "$EXPECT_ARTIFACT" ]; then
+    case "$EXPECT_ARTIFACT" in
+        *[!0-9a-f]*) echo "stopwatch-judge: --expect-artifact-sha256 must be 64 lowercase hex digits" >&2; exit 2 ;;
+    esac
+    if [ "${#EXPECT_ARTIFACT}" -ne 64 ]; then
+        echo "stopwatch-judge: --expect-artifact-sha256 must be 64 lowercase hex digits" >&2
+        exit 2
+    fi
+fi
 
 now="${ZCL_STOPWATCH_JUDGE_NOW:-$(date +%s)}"
 case "$now" in
@@ -567,9 +614,35 @@ if [ "$verdict" = "pass" ]; then
         fi
     fi
 
-    echo "stopwatch-judge: VERDICT=PASS reason=last_run_verdict_pass_age_${age}s ledger_available=${ledger_available} artifact=$artifact"
+    # Rule 3 — qualification binds a PASS to exact bytes. With
+    # --expect-artifact-sha256 the row must name the executable it measured
+    # (node_bin_sha256, recorded by the c3 collector), that digest must be the
+    # one being qualified, and the row's artifact must still hold a proof.json
+    # that itself says pass. A row that cannot show all three is history, not
+    # qualification: an exit-0 run or a bare verdict string is not enough.
+    if [ -n "$EXPECT_ARTIFACT" ]; then
+        row_artifact_sha="$(fld_str "$last_line" node_bin_sha256)"
+        if [ -z "$row_artifact_sha" ]; then
+            echo "stopwatch-judge: VERDICT=UNBOUND reason=row_names_no_executable_digest artifact=$artifact"
+            exit 1
+        fi
+        if [ "$row_artifact_sha" != "$EXPECT_ARTIFACT" ]; then
+            echo "stopwatch-judge: VERDICT=WRONG_ARTIFACT reason=measured_${row_artifact_sha}_not_${EXPECT_ARTIFACT} artifact=$artifact"
+            exit 1
+        fi
+        if [ ! -f "$artifact/proof.json" ] ||
+           ! grep -Eq '"verdict"[[:space:]]*:[[:space:]]*"pass"' "$artifact/proof.json"; then
+            echo "stopwatch-judge: VERDICT=INCOMPLETE reason=artifact_proof_json_missing_or_not_pass artifact=$artifact"
+            exit 1
+        fi
+        echo "stopwatch-judge: VERDICT=PASS reason=last_run_verdict_pass_age_${age}s qualification=bound executable=$EXPECT_ARTIFACT ledger_available=${ledger_available} artifact=$artifact"
+        exit 0
+    fi
+
+    echo "stopwatch-judge: VERDICT=PASS reason=last_run_verdict_pass_age_${age}s qualification=unbound ledger_available=${ledger_available} artifact=$artifact"
     exit 0
 fi
 
-echo "stopwatch-judge: VERDICT=FAIL reason=last_run_verdict_${verdict}_age_${age}s artifact=$artifact"
+row_class="$(fld_str "$last_line" result_class)"
+echo "stopwatch-judge: VERDICT=FAIL reason=last_run_verdict_${verdict}_age_${age}s class=${row_class:-unrecorded} artifact=$artifact"
 exit 1

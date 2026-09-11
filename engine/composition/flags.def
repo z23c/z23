@@ -2252,7 +2252,7 @@ Z23_FLAG("ZCL_STOPWATCH_CHECKPOINT_HEIGHT", "env_build", "3056758", "-",
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_ARGS", "make_var", "-", "-",
           "undocumented; first use Makefile:8427")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_NOW", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:442")
+          "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:489")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_LAG_BUDGET", "env_build", "2000", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:136")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_MAX_AGE_SECS", "env_build", "3600", "-",

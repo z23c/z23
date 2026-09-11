@@ -209,20 +209,8 @@ else
     set_v 2 "FAIL" "native onion status not ready (tor_ready=${TOR_READY:-missing}, onion_service_ready=${ONION_READY:-missing}, address=${ONION_ADDRESS:-missing})" 0
 fi
 
-# ────────────────────────────────────────────────────────────────────
-# C3 — cold-start sync to tip <10min. The MEASURABLE live fact is "is the
-# node at tip now?". Reaching tip in <10min from a FRESH datadir is a
-# distinct claim no live probe can make (this node reached tip via the
-# two-step --importblockindex crutch). So: at-tip => report it, but the
-# FULL <10min-fresh claim stays BLOCKED.
-# ────────────────────────────────────────────────────────────────────
-if [[ "$NODE_UP" != 1 ]]; then
-    set_v 3 "FAIL" "node unreachable" 0
-elif [[ "$AT_TIP" == 1 ]]; then
-    set_v 3 "BLOCKED" "node IS at tip (h=$HEIGHT gap=$GAP<=$TIP_GAP_OK) but fresh <10min cold-boot to at_tip is unproven (two-step import crutch); see make ci-coldstart" 0
-else
-    set_v 3 "FAIL" "node NOT at tip (h=$HEIGHT reftip=$REFTIP gap=$GAP>$TIP_GAP_OK) — forward sync behind" 0
-fi
+# C3 is judged below, after the running executable's identity is captured:
+# its receipt must be bound to those exact bytes.
 
 # ────────────────────────────────────────────────────────────────────
 # C4 — receive shielded payment e2e. Measurable read-only live surface:
@@ -389,6 +377,35 @@ G_ID_MATCH=0
 if [[ -n "$LIVE_SOURCE_ID" && "$G_SRC" == "$LIVE_SOURCE_ID" &&
       "$G_ARTIFACT" == "$LIVE_ARTIFACT" ]]; then
     G_ID_MATCH=1
+fi
+
+# ────────────────────────────────────────────────────────────────────
+# C3 — cold-start sync to tip <10min. "At tip now" is a live fact about a
+# node that may have arrived by any route; it is not this claim. The claim is
+# a fresh wiped datadir reaching its peer's captured tip inside the budget,
+# recorded by tools/scripts/c3_stopwatch_run_and_record.sh. It qualifies the
+# running node only through the stopwatch judge's bound mode: a fresh PASS
+# row that names these exact running bytes and whose artifact still says
+# pass. Any other PASS is history, never qualification.
+# ────────────────────────────────────────────────────────────────────
+C3_HISTORY="${ZCL_C3_STOPWATCH_HISTORY:-$HOME/.local/state/zclassic23-c3-stopwatch/history.jsonl}"
+C3_JUDGE_LINE=""; C3_TOKEN=""
+if [[ -n "$LIVE_ARTIFACT" ]]; then
+    c3_out="$(bash "$MVP_REPO_ROOT/tools/scripts/stopwatch_evidence_judge.sh" "$C3_HISTORY" \
+        --max-age-secs="$CANARY_MAX_AGE_S" --expect-artifact-sha256="$LIVE_ARTIFACT" 2>/dev/null)" || true
+    while IFS= read -r c3_l; do
+        [[ "$c3_l" == "stopwatch-judge: VERDICT="* ]] && C3_JUDGE_LINE="$c3_l"
+    done <<< "$c3_out"
+    [[ "$C3_JUDGE_LINE" =~ VERDICT=([A-Z_]+) ]] && C3_TOKEN="${BASH_REMATCH[1]}"
+fi
+if [[ -z "$LIVE_ARTIFACT" ]]; then
+    set_v 3 "BLOCKED" "running executable bytes unavailable ($LIVE_ID_DETAIL); no stopwatch PASS can be bound to them" 0
+elif [[ "$C3_TOKEN" == "PASS" ]]; then
+    set_v 3 "PASS" "fresh wipe-to-tip stopwatch PASS bound to the running executable; ${C3_JUDGE_LINE#stopwatch-judge: }" 1
+elif [[ "$C3_TOKEN" == "FAIL" && "$C3_JUDGE_LINE" == *"class=PRODUCT_FAILURE"* ]]; then
+    set_v 3 "FAIL" "newest wipe-to-tip stopwatch run measured a sync failure; ${C3_JUDGE_LINE#stopwatch-judge: }" 0
+else
+    set_v 3 "BLOCKED" "no fresh wipe-to-tip stopwatch PASS bound to the running executable (${C3_JUDGE_LINE:-judge printed no verdict}); node at-tip status is not this claim" 0
 fi
 
 CANARY_LEDGER="canary[genesis=$G_VERDICT age=${G_AGE}s anchor=$A_VERDICT age=${A_AGE}s max_age=${CANARY_MAX_AGE_S}s]"

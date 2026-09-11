@@ -5,6 +5,23 @@
 
 #include "test/syncdiag_rpc_fixture.h"
 
+/* The RPC score is reported history; it names current qualification as
+ * unevaluated rather than claiming it. */
+static void milestone_names_unevaluated_qualification(
+    bool *ok, const struct json_value *result,
+    const struct json_value *cold_start)
+{
+    const char *basis = json_get_str(json_get(result, "score_basis"));
+    const char *status = json_get_str(json_get(
+        json_get(result, "current_qualification"), "status"));
+    const char *evidence = cold_start
+        ? json_get_str(json_get(cold_start, "evidence")) : NULL;
+    *ok = *ok && basis &&
+        strcmp(basis, "historical_reported_demonstrations") == 0 &&
+        status && strcmp(status, "not_evaluated_here") == 0 &&
+        evidence && strcmp(evidence, "historical_report") == 0;
+}
+
 int syncdiag_cases_operator(void)
 {
     int failures = 0;
@@ -63,6 +80,7 @@ int syncdiag_cases_operator(void)
                           "mvp_readiness_score")) == 5;
         ok = ok && ascii && strstr(json_get_str(json_get(ascii, "goals")),
                                    "goals [######----] 5/8") != NULL;
+        milestone_names_unevaluated_qualification(&ok, &result, cold_start);
         ok = ok && bars && strcmp(json_get_str(json_get(json_get(bars,
                           "subgoals"), "bar")), "[########--]") == 0;
         ok = ok && criteria && json_size(criteria) == 8;
