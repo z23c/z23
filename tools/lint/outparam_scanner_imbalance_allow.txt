@@ -1,0 +1,25 @@
+# Copyright 2026 Rhett Creighton - Apache License 2.0
+# outparam_scanner_imbalance_allow.txt — the CLOSED exception list for
+# tools/lint/check_outparam_init_before_return.sh's brace-balance diagnostic.
+#
+# The scanner tracks `{`/`}` as TEXT. A file that opens two braces for one
+# close — the `#if defined(_WIN32) if (...) { #else if (...) { #endif ... }`
+# shape, where each preprocessor branch contributes an opener but the tree
+# has a single closer — never returns to depth 0. Until 2026-09-11 that also
+# swallowed every LATER file in the same awk batch. The depth is reset at each
+# file boundary now, so an imbalanced file can no longer hide its successors;
+# it still hides its OWN remaining functions, so it is a gate FAILURE.
+#
+# Format: <tracked path> <expected final depth> — one per line. The depth is
+# pinned, so a DIFFERENT imbalance appearing in the same file still fails.
+#
+# THE FIX IS ALWAYS IN THE SOURCE, NOT HERE: give each `#if` branch its own
+# matched braces (duplicate the two lines; each branch then reads as a whole
+# statement). This list exists only for a file another in-flight lane already
+# owns, where a second writer would collide.
+#
+# tools/command/native_dev_command.c is being brace-balanced by the lane
+# landing "Give #if branches matched braces so the complexity scanner sees ten
+# hidden functions"; that lane is the sole writer of the file, so this lane
+# cannot touch it. Delete this entry with that lane's landing.
+tools/command/native_dev_command.c 1

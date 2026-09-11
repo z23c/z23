@@ -198,15 +198,20 @@ static bool zdc_record_dir(const char *datadir, char *out, size_t out_size,
         snprintf(err, err_size, "path too long under datadir");
         return false;
     }
+    /* Each branch closes its own braces: an `#if` arm that opens a brace
+     * the other arm closes reads as two openers for one closer to every
+     * line-order scanner in tools/lint, which then stops seeing this file. */
 #if defined(_WIN32)
     if (!platform_private_directory_ensure(dir)) {
         snprintf(err, err_size, "private directory refused: %s", dir);
+        return false;
+    }
 #else
     if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
         snprintf(err, err_size, "mkdir %s: %s", dir, strerror(errno));
-#endif
         return false;
     }
+#endif
     n = snprintf(out, out_size, "%s/zcode/descriptors", datadir);
     if (n <= 0 || (size_t)n >= out_size) {
         snprintf(err, err_size, "path too long under datadir");
@@ -215,12 +220,14 @@ static bool zdc_record_dir(const char *datadir, char *out, size_t out_size,
 #if defined(_WIN32)
     if (!platform_private_directory_ensure(out)) {
         snprintf(err, err_size, "private directory refused: %s", out);
+        return false;
+    }
 #else
     if (mkdir(out, 0700) != 0 && errno != EEXIST) {
         snprintf(err, err_size, "mkdir %s: %s", out, strerror(errno));
-#endif
         return false;
     }
+#endif
     return true;
 }
 

@@ -52,6 +52,19 @@
 # It is therefore a RATCHET, not a prover: the baseline below is closed, every
 # entry carries a reviewed verdict, and anything NOT in it fails the gate.
 #
+# BRACE BALANCE IS PART OF THE CONTRACT. The analyzer is a line-order scanner
+# that tracks `{`/`}` as text, and the gate feeds the whole scan set into ONE
+# awk process. A file that opens two braces for one close — the
+# `#if defined(_WIN32) if (..) { #else if (..) { #endif ... }` shape — never
+# returns to depth 0. Until 2026-09-11 the depth was never reset at a file
+# boundary, so that one file also swallowed every LATER file in its batch:
+# the gate printed "29 in-scope out-param(s), all reviewed" while four real
+# in-scope findings sat behind it, unscanned. The depth is reset per file now,
+# the analyzer EMITS an `IMBALANCE <file> <depth>` line, and the driver fails
+# the gate on it. The fix is always in the source — give each `#if` branch its
+# own matched braces. outparam_scanner_imbalance_allow.txt is a closed,
+# depth-pinned exception list for a file another in-flight lane already owns.
+#
 # Mode: WARN | FAIL (controlled by ZCL_LINT_MODE; default FAIL).
 # Self-test: `bash tools/lint/check_outparam_init_before_return.sh --selftest`
 # plants one clean function and one violating function in a scratch tree and
@@ -62,6 +75,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MODE="${ZCL_LINT_MODE:-FAIL}"
 BASELINE="$SCRIPT_DIR/outparam_init_baseline.txt"
+IMBALANCE_ALLOW="$SCRIPT_DIR/outparam_scanner_imbalance_allow.txt"
 ANALYZER="$SCRIPT_DIR/outparam_init_scan.awk"
 
 # ── the analyzer, emitted here so --selftest and the real run share one text ──
@@ -140,6 +154,20 @@ function emit(   i, p, np, parts, nm, ptype, firstinit, firstexit, j, line, tag,
                     m++
                     continue
                 }
+                # A declaration with NO initializer is not a test: it computes
+                # nothing and cannot exit. Its pointer declarators are pure
+                # syntax, so a `const struct row *catalog;` above the guard must
+                # not leave a `*` behind and read as arithmetic. Its ARRAY
+                # BOUNDS are kept, so `uint8_t buf[32];` still contributes the
+                # literal it always did — this narrows the DATA verdict, it
+                # does not widen the clean one.
+                if (line !~ /=/ && line !~ /[<>(]/ && line ~ /;[ \t]*$/) {
+                    dl = line
+                    gsub(/\*/, "", dl)
+                    region = region " " dl
+                    m++
+                    continue
+                }
                 region = region " " line
                 m++
             }
@@ -149,6 +177,11 @@ function emit(   i, p, np, parts, nm, ptype, firstinit, firstexit, j, line, tag,
             gsub(/[ \t]+/, "", r)
             gsub(/\[0\]/, "", r)
             gsub(/[A-Za-z_][A-Za-z0-9_.]*/, "", r)
+            # An EMPTY subscript pair is what a variable index or an array
+            # declarator leaves behind once identifiers are gone; like the
+            # `[0]` above it carries no comparison. A literal index — `[1]` —
+            # still survives as a literal and still reads as DATA.
+            gsub(/\[\]/, "", r)
             gsub(/\|\||&&|==|!=|[()!{};,]/, "", r)
             if (r != "") { firstexit = j; kind = "DATA"; break }
             j = k
@@ -158,16 +191,41 @@ function emit(   i, p, np, parts, nm, ptype, firstinit, firstexit, j, line, tag,
             FILENAME, fnname, ptype, nm, kind, bodyline[firstexit], bodyline[firstinit], inittag
     }
 }
-BEGIN { depth = 0; sig = ""; nbody = 0; nfuncs = 0; nparams = 0 }
+# Per-file state reset. One awk process reads the WHOLE scan set (xargs hands
+# it hundreds of files), so every variable below is shared across files. Before
+# 2026-09-11 `depth` was never reset at a file boundary: one file whose braces
+# did not balance as TEXT — an `#if / #else` pair that opens two `{` for one
+# `}` — left depth at 1, and from there NO later file in the same batch could
+# ever reach depth 0, so emit() never fired again and every finding behind it
+# was silently dropped. That hid four in-scope findings while the gate printed
+# "all reviewed". Reset here, and REPORT the imbalance so the next one cannot
+# hide: the driver turns every IMBALANCE line into a gate failure.
+function filereset() {
+    if (depth != 0 && curfile != "")
+        printf "IMBALANCE\t%s\t%d\n", curfile, depth
+    depth = 0; sig = ""; nbody = 0; incomment = 0; fnname = ""
+    curfile = FILENAME
+}
+BEGIN { depth = 0; sig = ""; nbody = 0; nfuncs = 0; nparams = 0; incomment = 0; curfile = "" }
+FNR == 1 { filereset() }
 {
     line = $0
     gsub(/"([^"\\]|\\.)*"/, "\"\"", line)
     gsub(/'([^'\\]|\\.)*'/, "CH", line)
-    sub(/\/\/.*$/, "", line)
     if (incomment) { if (line ~ /\*\//) { sub(/^.*\*\//, "", line); incomment = 0 } else next }
-    while (match(line, /\/\*/)) {
-        pre = substr(line, 1, RSTART - 1)
-        rest = substr(line, RSTART)
+    # Consume whichever comment opener comes FIRST. Stripping `//` to end of
+    # line before looking for `/*` ate the `*/` out of a one-line block comment
+    # that happens to contain a slash-slash — `/* end of the // run */` — so the
+    # scanner entered a comment that never closed and swallowed the next
+    # closing brace. That is how tools/lint/lintc/gate_file_purpose.c came out
+    # of the scan one brace deep.
+    while (1) {
+        ls = index(line, "//")
+        lb = index(line, "/*")
+        if (ls > 0 && (lb == 0 || ls < lb)) { line = substr(line, 1, ls - 1); break }
+        if (lb == 0) break
+        pre = substr(line, 1, lb - 1)
+        rest = substr(line, lb)
         if (match(rest, /\*\//)) { line = pre substr(rest, RSTART + 2) }
         else { line = pre; incomment = 1; break }
     }
@@ -194,7 +252,7 @@ BEGIN { depth = 0; sig = ""; nbody = 0; nfuncs = 0; nparams = 0 }
     if (depth > 0) next
     emit(); sig = ""; nbody = 0; depth = 0
 }
-END { printf "STATS\t%s\t%d\t%d\n", FILENAME, nfuncs, nparams }
+END { filereset(); printf "STATS\t%s\t%d\t%d\n", FILENAME, nfuncs, nparams }
 AWK_EOF
 }
 
@@ -453,6 +511,122 @@ C_EOF
         printf '%s\n' "$out" >&2
         rc=1
     fi
+
+    # ── leg 1b: a BATCH, where the first file's braces do not balance ─────
+    # The gate feeds the whole scan set into ONE awk process. Until
+    # 2026-09-11 `depth` was never reset at a file boundary, so an
+    # unbalanced file left the parser one brace deep and NO later file in the
+    # batch could reach depth 0 again — emit() never fired, and the gate
+    # reported "all reviewed" over the findings it had swallowed. On these two
+    # fixtures the old analyzer sees 0 functions and 0 findings in the entire
+    # batch. Every assertion below is a lock on that regression.
+    cat > "$tmp/imb.c" <<'C_EOF'
+#include <string.h>
+
+/* Two openers, one closer: the shape that used to swallow every later file. */
+bool imb_ensure(struct wire *w)
+{
+#if defined(_WIN32)
+    if (w->a) {
+#else
+    if (w->b) {
+#endif
+        return false;
+    }
+    return true;
+}
+C_EOF
+    cat > "$tmp/late.c" <<'C_EOF'
+#include <string.h>
+
+/* VIOLATING, and it sits BEHIND an unbalanced file in the same awk batch. */
+bool late_reconstruct(const struct wire *w, struct block *out_block)
+{
+    size_t total = w->a + w->b;
+    if (total == 0 || total > 100)
+        LOG_FAIL("t", "bad count %zu", total);
+    block_init(out_block);
+    return true;
+}
+
+/* CLEAN: the only exit above the init is a pure null guard. The pointer
+ * declarator and the macro-sized array are syntax, not data. */
+bool decl_guard_only(const struct wire *w, struct block *out_block)
+{
+    const struct wire *catalog;
+    char text[WIRE_TEXT_MAX];
+    if (!w || !out_block)
+        return false;
+    block_init(out_block);
+    catalog = w;
+    text[0] = 0;
+    return catalog != NULL;
+}
+
+/* STILL VIOLATING: an array bound is a LITERAL and still reads as DATA, so
+ * narrowing the declaration strip did not widen the clean verdict. */
+bool bound_guard_only(const struct wire *w, struct block *out_block)
+{
+    uint8_t pad[32];
+    if (!w || !out_block)
+        return false;
+    block_init(out_block);
+    memset(pad, 0, sizeof(pad));
+    return true;
+}
+
+static int slash_inside_block_comment(void)
+{
+    int n = 1; /* end of the // run */
+    return n;
+}
+
+/* Parsed only if the brace above survived the one-line block comment. */
+bool after_comment(const struct wire *w, struct block *out_block)
+{
+    size_t total = w->a + w->b;
+    if (total > 7)
+        LOG_FAIL("t", "bad %zu", total);
+    block_init(out_block);
+    return true;
+}
+C_EOF
+    bout="$(awk -f "$tmp/scan.awk" "$tmp/imb.c" "$tmp/late.c")"
+    if str_contains "$bout" "IMBALANCE${tab}${tmp}/imb.c${tab}1"; then
+        echo "  selftest: unbalanced file REPORTED, not swallowed — ok"
+    else
+        echo "  selftest: FAIL — the brace imbalance was not reported" >&2
+        printf '%s\n' "$bout" >&2
+        rc=1
+    fi
+    if str_contains "$bout" "FINDING${tab}${tmp}/late.c${tab}late_reconstruct${tab}block${tab}out_block${tab}DATA"; then
+        echo "  selftest: finding BEHIND an unbalanced file still detected — ok"
+    else
+        echo "  selftest: FAIL — a finding behind an unbalanced file was swallowed" >&2
+        printf '%s\n' "$bout" >&2
+        rc=1
+    fi
+    if str_contains "$bout" "decl_guard_only"; then
+        echo "  selftest: FAIL — a pointer declarator above a null guard read as DATA" >&2
+        printf '%s\n' "$bout" >&2
+        rc=1
+    else
+        echo "  selftest: declaration syntax above a null guard is NOT data — ok"
+    fi
+    if str_contains "$bout" "FINDING${tab}${tmp}/late.c${tab}bound_guard_only${tab}block${tab}out_block${tab}DATA"; then
+        echo "  selftest: a literal array bound still reads as DATA — ok"
+    else
+        echo "  selftest: FAIL — narrowing the declaration strip widened the clean verdict" >&2
+        printf '%s\n' "$bout" >&2
+        rc=1
+    fi
+    if str_contains "$bout" "FINDING${tab}${tmp}/late.c${tab}after_comment${tab}block${tab}out_block${tab}DATA"; then
+        echo "  selftest: a '//' inside a one-line block comment eats nothing — ok"
+    else
+        echo "  selftest: FAIL — a block comment containing '//' swallowed a brace" >&2
+        printf '%s\n' "$bout" >&2
+        rc=1
+    fi
     # ── leg 2: published global freed without unpublishing ────────────────
     write_publisher_finder "$tmp/pub.awk"
     write_pubfree_analyzer "$tmp/pubfree.awk"
@@ -556,6 +730,56 @@ scanned_funcs=$(awk -F'\t' '$1=="STATS"{n+=$3} END{print n+0}' "$WORK/raw.txt")
 gate_require_scanned "$scanned_funcs" 10000 check-outparam-init-before-return \
     "the analyzer walked almost no function bodies — its C parser is broken"
 
+# ── the scanner must stay brace-honest ───────────────────────────────────
+# An IMBALANCE line means the analyzer left a file at a nonzero brace depth.
+# Its own remaining functions went unscanned, so the gate is BLIND there and
+# must say so. Before the per-file reset landed it was far worse: the next
+# file in the same awk batch inherited the depth and every file after it was
+# swallowed in silence — the gate printed "all reviewed" over four hidden
+# in-scope findings. Exceptions are pinned by depth in
+# $IMBALANCE_ALLOW and are for files an in-flight lane already owns.
+declare -A IMBALANCE_OK
+gate_load_list_file "$IMBALANCE_ALLOW" IMBALANCE_OK imbalance_allow_count
+imbalance_bad=()
+imbalance_seen=()
+while IFS=$'\t' read -r _ imb_file imb_depth; do
+    [ -n "${imb_file:-}" ] || continue
+    imbalance_seen+=("$imb_file $imb_depth")
+    [ -n "${IMBALANCE_OK["$imb_file $imb_depth"]:-}" ] \
+        || imbalance_bad+=("scanner lost brace balance in $imb_file: $imb_depth")
+done < <(grep '^IMBALANCE' "$WORK/raw.txt" || true)
+
+if [ "${#imbalance_bad[@]}" -gt 0 ]; then
+    {
+        echo "check-outparam-init-before-return: ${#imbalance_bad[@]} file(s) the"
+        echo "  scanner could not brace-balance, so their remaining functions were"
+        echo "  NOT scanned:"
+        for m in "${imbalance_bad[@]}"; do echo "    $m"; done
+        echo
+        echo "  This is almost always an '#if defined(X) if (..) { #else if (..) {"
+        echo "  #endif ... }' shape: two openers, one closer. Give each branch its"
+        echo "  own matched braces — duplicate the closing lines into both arms."
+        echo "  Only a file another in-flight lane owns belongs in"
+        echo "  $IMBALANCE_ALLOW, with its depth pinned and the removing lane named."
+    } >&2
+    imbalance_failed=1
+else
+    imbalance_failed=0
+fi
+
+# A pinned exception whose file now balances is not a failure — the tree got
+# STRICTER, and with the per-file reset in place a stale entry cannot hide a
+# finding (every file is scanned either way). It is still dead weight in a
+# closed list, so name it for deletion.
+for key in "${!IMBALANCE_OK[@]}"; do
+    hit=0
+    for seen in ${imbalance_seen[@]+"${imbalance_seen[@]}"}; do
+        [ "$seen" = "$key" ] && hit=1 && break
+    done
+    [ "$hit" -eq 1 ] || echo "check-outparam-init-before-return: note — '$key' in" \
+        "$IMBALANCE_ALLOW now balances; delete the entry." >&2
+done
+
 # ── leg 2: published global freed without unpublishing ───────────────────
 # Zero-tolerance, no allowlist: the tree has none today, so the first one to
 # land fails here. Scoped to PRODUCTION sources. Test harnesses legitimately
@@ -648,7 +872,7 @@ stale=()
 for key in "${!ALLOWED[@]}"; do
     grep -qxF "$key" "$WORK/keys.txt" || stale+=("$key")
 done
-failed="$pubfree_failed"
+failed=$(( pubfree_failed || imbalance_failed ))
 
 # NEW findings are reported FIRST and unconditionally: a stale-baseline
 # complaint must never pre-empt the report of an actual new violation.
