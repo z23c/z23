@@ -5,6 +5,8 @@
 
 #include "kernel/command_registry.h"
 
+#include "command_registry_internal.h"
+
 #include <ctype.h>
 #include <string.h>
 

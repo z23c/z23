@@ -8,6 +8,8 @@
 
 #include "kernel/command_registry.h"
 
+#include "command_registry_internal.h"
+
 #include "json/json.h"
 
 #include <ctype.h>

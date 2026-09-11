@@ -5,6 +5,8 @@
 
 #include "kernel/command_registry.h"
 
+#include "command_registry_internal.h"
+
 #include <string.h>
 
 bool command_registry_push_string_array_csv(struct json_value *object,

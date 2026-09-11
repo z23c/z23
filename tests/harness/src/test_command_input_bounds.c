@@ -767,6 +767,194 @@ static int t_fleet_usage_days(void)
     return failures;
 }
 
+/* ── 10. The rules that moved into command_registry_input_types.c ──────
+ *
+ * The dual-shape keys, the chunk and line integer bounds, and the
+ * discovery required-key rule left command_registry.c in the complexity
+ * split. A moved rule with no owning case is a rule that can be deleted
+ * without a red test, so each one is pinned here at BOTH of its edges: an
+ * accept at the bound and a reject one step outside it, on each side. A
+ * pair of assertions that both sit at the same edge would leave the other
+ * edge free to move, which is how a shared rule quietly loses the half of
+ * itself that differs between its keys. */
+
+/* Validate `{key: <value>}` as an integer against `path`, keeping the
+ * refusal text so the exact `why` can be asserted. */
+static bool cib_accepts_int_why(const char *path, const char *key,
+                                int64_t value, char *why, size_t why_size)
+{
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+    if (!spec)
+        return false;
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool built = json_push_kv_int(&input, key, value);
+    if (why && why_size)
+        why[0] = 0;
+    bool ok = built && zcl_command_registry_input_validate(spec, &input, why,
+                                                           why_size);
+    json_free(&input);
+    return ok;
+}
+
+/* The refusal every one of these bounds produces: the value is the wrong
+ * type or out of range, named by key. */
+static bool cib_type_refusal(const char *why, const char *key)
+{
+    char expect[192];
+    (void)snprintf(expect, sizeof(expect),
+                   "invalid type or range for input key '%s'", key);
+    return strcmp(why, expect) == 0;
+}
+
+/* cr_match_dual: `since` is a non-negative integer OR a non-empty string,
+ * and nothing else. Both shapes are live wire shapes for code.recent
+ * (`--since=5` and `--since=HEAD~5`), so dropping either half breaks a
+ * documented call. */
+static int t_moved_dual_shape_since(void)
+{
+    int failures = 0;
+    char why[192];
+
+    CIB_CHECK("code.recent admits `since` as a non-negative integer",
+              cib_accepts_int("code.recent", "since", 0));
+    CIB_CHECK("code.recent admits `since` as a non-empty string",
+              cib_accepts("code.recent", "since", 7, why, sizeof(why)));
+    CIB_CHECK("code.recent refuses a negative `since`",
+              !cib_accepts_int_why("code.recent", "since", -1, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "since"));
+    CIB_CHECK("code.recent refuses an empty `since` string",
+              !cib_accepts("code.recent", "since", 0, why, sizeof(why)) &&
+              cib_type_refusal(why, "since"));
+    return failures;
+}
+
+/* cr_match_chunks_and_lines, first key: a PAID chunk count starts at one —
+ * zero paid chunks is not a purchase — and stops at the 32-bit chunk index
+ * space. Both edges, both sides. */
+static int t_moved_chunks_paid_bounds(void)
+{
+    int failures = 0;
+    char why[192];
+    const char *path = "app.market.purchase.plan";
+
+    CIB_CHECK("purchase plan admits one paid chunk (low edge)",
+              cib_accepts_int(path, "chunks_paid", 1));
+    CIB_CHECK("purchase plan refuses zero paid chunks (below the low edge)",
+              !cib_accepts_int_why(path, "chunks_paid", 0, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "chunks_paid"));
+    CIB_CHECK("purchase plan admits the last 32-bit chunk count (high edge)",
+              cib_accepts_int(path, "chunks_paid", 4294967295LL));
+    CIB_CHECK("purchase plan refuses one chunk past 32 bits",
+              !cib_accepts_int_why(path, "chunks_paid", 4294967296LL, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "chunks_paid"));
+    return failures;
+}
+
+/* cr_match_chunks_and_lines, second key: the two keys share one rule but
+ * carry DIFFERENT low bounds — a chunk OFFSET starts at zero. Pinning only
+ * the shared high edge would let the two low bounds collapse into one. */
+static int t_moved_chunk_start_bounds(void)
+{
+    int failures = 0;
+    char why[192];
+    const char *path = "app.market.purchase.plan";
+
+    CIB_CHECK("purchase plan admits chunk zero as a start offset (low edge)",
+              cib_accepts_int(path, "chunk_start", 0));
+    CIB_CHECK("purchase plan refuses a negative chunk start",
+              !cib_accepts_int_why(path, "chunk_start", -1, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "chunk_start"));
+    CIB_CHECK("purchase plan admits the last 32-bit chunk offset (high edge)",
+              cib_accepts_int(path, "chunk_start", 4294967295LL));
+    CIB_CHECK("purchase plan refuses one offset past 32 bits",
+              !cib_accepts_int_why(path, "chunk_start", 4294967296LL, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "chunk_start"));
+    return failures;
+}
+
+/* cr_match_chunks_and_lines, third key: `line` is a source line number —
+ * one-based, reaching a million. */
+static int t_moved_line_bounds(void)
+{
+    int failures = 0;
+    char why[192];
+
+    CIB_CHECK("agent mutate admits the first source line (low edge)",
+              cib_accepts_int("dev.agent.mutate", "line", 1));
+    CIB_CHECK("agent mutate refuses line zero",
+              !cib_accepts_int_why("dev.agent.mutate", "line", 0, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "line"));
+    CIB_CHECK("agent mutate admits the millionth source line (high edge)",
+              cib_accepts_int("dev.agent.mutate", "line", 1000000));
+    CIB_CHECK("agent mutate refuses one line past its ceiling",
+              !cib_accepts_int_why("dev.agent.mutate", "line", 1000001, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "line"));
+    return failures;
+}
+
+/* cr_match_chunks_and_lines, fourth key: `max_lines` is a tail size — it
+ * shares `line`'s low bound but stops a thousand times earlier, so its own
+ * high edge has to be held down separately. */
+static int t_moved_max_lines_bounds(void)
+{
+    int failures = 0;
+    char why[192];
+
+    CIB_CHECK("ops logs admits a one-line tail (low edge)",
+              cib_accepts_int("ops.logs", "max_lines", 1));
+    CIB_CHECK("ops logs refuses a zero-line tail",
+              !cib_accepts_int_why("ops.logs", "max_lines", 0, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "max_lines"));
+    CIB_CHECK("ops logs admits a thousand lines (high edge)",
+              cib_accepts_int("ops.logs", "max_lines", 1000));
+    CIB_CHECK("ops logs refuses one line past its own ceiling",
+              !cib_accepts_int_why("ops.logs", "max_lines", 1001, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "max_lines"));
+    return failures;
+}
+
+/* command_registry_input_required_discovery: discover.search without a
+ * query is refused by NAME, not by type — the only rule in the moved set
+ * that reads the whole document rather than one value. */
+static int t_moved_required_discovery(void)
+{
+    int failures = 0;
+    char why[192];
+
+    CIB_CHECK("discover search admits a query",
+              cib_accepts("discover.search", "query", 5, why, sizeof(why)));
+
+    const struct zcl_command_spec *search =
+        zcl_command_registry_find(zcl_command_catalog(), "discover.search",
+                                  NULL);
+    CIB_CHECK("discover.search resolves", search != NULL);
+    if (!search)
+        return failures;
+
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    why[0] = 0;
+    CIB_CHECK("discover search refuses a request with no query",
+              !zcl_command_registry_input_validate(search, &input, why,
+                                                   sizeof(why)) &&
+              strcmp(why, "missing required input key 'query'") == 0);
+    json_free(&input);
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
@@ -780,6 +968,12 @@ int test_command_input_bounds(void)
     failures += t_package_prepare_sequence();
     failures += t_package_fetch_maximum_bytes();
     failures += t_fleet_usage_days();
+    failures += t_moved_dual_shape_since();
+    failures += t_moved_chunks_paid_bounds();
+    failures += t_moved_chunk_start_bounds();
+    failures += t_moved_line_bounds();
+    failures += t_moved_max_lines_bounds();
+    failures += t_moved_required_discovery();
     printf("=== command_input_bounds complete: %d failure(s) ===\n", failures);
     return failures;
 }

@@ -247,6 +247,8 @@ enum zcl_service_binding_result zcl_service_binding_validate_v1(
     result = validate_gate(&binding->gate);
     if (result != ZCL_SERVICE_BINDING_OK)
         return result;
+    /* The whole boundary, exactly. No subset (a dropped bit is a claimed
+     * privilege) and no superset (an unknown bit is an undeclared one). */
     if (binding->isolation != ZCL_SERVICE_ISOLATION_REQUIRED_V1)
         return ZCL_SERVICE_BINDING_ISOLATION;
     if (binding->restart_policy > ZCL_SERVICE_RESTART_PERMANENT)
@@ -479,6 +481,9 @@ static bool life_step(uint32_t state, uint32_t expect, uint32_t next,
     return true;
 }
 
+/* A fault is reachable from every live state and from nowhere else.
+ * BLOCKED is sticky on purpose: the only way out is a named stop
+ * (life_stop below, which is the one transition that accepts BLOCKED). */
 static bool life_fault(uint32_t state, uint32_t *out_state)
 {
     if (state != ZCL_SERVICE_LIFECYCLE_STARTING &&

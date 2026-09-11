@@ -49,7 +49,8 @@ static bool valid_role_trust(uint32_t role, uint32_t trust)
            role <= ZCL_SERVICE_ROLE_BUILDD && expected[role] == trust;
 }
 
-static bool descriptor_rights_ok(uint32_t descriptor_class, uint32_t rights)
+static bool descriptor_grant_shape_ok(uint32_t descriptor_class,
+                                      uint32_t rights)
 {
     const uint32_t all_rights = ZCL_SERVICE_DESCRIPTOR_READ |
                                 ZCL_SERVICE_DESCRIPTOR_WRITE |
@@ -63,7 +64,7 @@ static bool descriptor_row(uint32_t role, uint32_t descriptor_class,
                            uint32_t rights)
 {
     static const struct {
-        uint32_t class;
+        uint32_t descriptor_class;
         uint32_t role;
         uint32_t rights;
         int any_role;
@@ -89,7 +90,7 @@ static bool descriptor_row(uint32_t role, uint32_t descriptor_class,
         {ZCL_SERVICE_DESCRIPTOR_LOG, 0, ZCL_SERVICE_DESCRIPTOR_WRITE, 1},
     };
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
-        if (rows[i].class != descriptor_class)
+        if (rows[i].descriptor_class != descriptor_class)
             continue;
         if (!rows[i].any_role && rows[i].role != role)
             return false;
@@ -101,7 +102,7 @@ static bool descriptor_row(uint32_t role, uint32_t descriptor_class,
 static bool descriptor_allowed(uint32_t role, uint32_t descriptor_class,
                                uint32_t rights)
 {
-    if (!descriptor_rights_ok(descriptor_class, rights))
+    if (!descriptor_grant_shape_ok(descriptor_class, rights))
         return false;
     return descriptor_row(role, descriptor_class, rights);
 }
@@ -241,7 +242,7 @@ static enum zcl_service_manifest_result manifest_restart(
     return ZCL_SERVICE_MANIFEST_OK;
 }
 
-static enum zcl_service_manifest_result manifest_tail(
+static enum zcl_service_manifest_result manifest_schema_generation_health(
     const struct zcl_service_manifest_v1 *manifest)
 {
     if (!canonical_name(manifest->state_schema,
@@ -286,7 +287,7 @@ enum zcl_service_manifest_result zcl_service_manifest_validate_v1(
     result = manifest_restart(manifest);
     if (result != ZCL_SERVICE_MANIFEST_OK)
         return result;
-    return manifest_tail(manifest);
+    return manifest_schema_generation_health(manifest);
 }
 
 static size_t find_service(const struct zcl_service_manifest_v1 *manifests,

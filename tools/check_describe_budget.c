@@ -66,8 +66,12 @@
 /* engine/modules/kernel/src/command_registry.c calls the agent spend policy from
  * zcl_command_registry_invoke() — the dispatch path — and nowhere else. This
  * gate only renders describe documents, so neither of these can be reached.
- * Defining them here keeps the gate a seven-file link instead of dragging
- * app/services and its RPC client in behind it; both abort rather than
+ * Defining them here keeps the gate's link to the command_registry*.c family
+ * plus a handful of leaf dependencies — the driver
+ * (tools/lint/lintc/gate_describe_budget.c) derives that family from
+ * engine/modules/kernel/src rather than listing it, so the count moves with
+ * the splits — instead of dragging app/services and its RPC client in behind
+ * it; both abort rather than
  * returning a made-up decision, so if a future refactor ever does route
  * describe through the policy, this gate dies loudly instead of measuring the
  * wrong document. */

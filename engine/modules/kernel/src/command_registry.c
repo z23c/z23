@@ -2,6 +2,8 @@
 
 #include "kernel/command_registry.h"
 
+#include "command_registry_internal.h"
+
 #include "crypto/sha256.h"
 #include "platform/time_compat.h"
 #include "services/agent_spend_policy.h"  // lib-layer-ok:agent-spend-policy-gate
@@ -280,16 +282,40 @@ static bool replace_preamble(const struct zcl_command_handler_override *override
                                              why_sz);
 }
 
+/* Why a step taken under the write lock refused. handler_write_lock() is a
+ * non-reentrant spinlock, and every LOG_* macro reaches zcl_log_emit_at(),
+ * which takes the stdio stream lock to emit its line atomically — so no
+ * step below it logs. The failing step records its reason here and
+ * replace_report() emits the line, same text and same false, AFTER the
+ * unlock. */
+enum replace_fail {
+    REPLACE_FAIL_NONE = 0,
+    REPLACE_FAIL_ALLOC,
+    REPLACE_FAIL_CAPACITY
+};
+
+static bool replace_report(enum replace_fail fail)
+{
+    if (fail == REPLACE_FAIL_ALLOC)
+        LOG_FAIL("kernel.command", "override snapshot allocation failed");
+    if (fail == REPLACE_FAIL_CAPACITY)
+        LOG_FAIL("kernel.command", "override capacity exceeded (max %u)",
+                 (unsigned)ZCL_COMMAND_HANDLER_OVERRIDE_MAX);
+    return false;
+}
+
 static struct zcl_command_handler_snapshot *replace_clone(
     const struct zcl_command_handler_snapshot *old, uint32_t next_generation,
-    char *why, size_t why_sz)
+    char *why, size_t why_sz, enum replace_fail *fail)
 {
+    *fail = REPLACE_FAIL_NONE;
     struct zcl_command_handler_snapshot *next =
         zcl_malloc(sizeof(*next), "command handler override snapshot");
     if (!next) {
         if (why && why_sz)
             snprintf(why, why_sz, "snapshot allocation failed");
-        LOG_NULL("kernel.command", "override snapshot allocation failed");
+        *fail = REPLACE_FAIL_ALLOC;
+        return NULL;
     }
     if (old)
         memcpy(next, old, sizeof(*next));
@@ -303,8 +329,10 @@ static struct zcl_command_handler_snapshot *replace_clone(
 
 static bool replace_merge(struct zcl_command_handler_snapshot *next,
                           const struct zcl_command_handler_override *overrides,
-                          size_t count, char *why, size_t why_sz)
+                          size_t count, char *why, size_t why_sz,
+                          enum replace_fail *fail)
 {
+    *fail = REPLACE_FAIL_NONE;
     for (size_t i = 0; i < count; i++) {
         const struct zcl_command_handler_override *ovr = &overrides[i];
         size_t idx = next->count;
@@ -319,8 +347,8 @@ static bool replace_merge(struct zcl_command_handler_snapshot *next,
             if (next->count >= ZCL_COMMAND_HANDLER_OVERRIDE_MAX) {
                 if (why && why_sz)
                     snprintf(why, why_sz, "override capacity exceeded");
-                LOG_FAIL("kernel.command", "override capacity exceeded (max %u)",
-                         (unsigned)ZCL_COMMAND_HANDLER_OVERRIDE_MAX);
+                *fail = REPLACE_FAIL_CAPACITY;
+                return false;
             }
             next->count++;
         }
@@ -354,16 +382,17 @@ bool zcl_command_registry_replace_batch(
                  next_generation, old_gen);
     }
 
+    enum replace_fail fail = REPLACE_FAIL_NONE;
     struct zcl_command_handler_snapshot *next =
-        replace_clone(old, next_generation, why, why_sz);
+        replace_clone(old, next_generation, why, why_sz, &fail);
     if (!next) {
         handler_write_unlock();
-        return false;
+        return replace_report(fail);
     }
-    if (!replace_merge(next, overrides, count, why, why_sz)) {
+    if (!replace_merge(next, overrides, count, why, why_sz, &fail)) {
         handler_write_unlock();
         free(next);
-        return false;
+        return replace_report(fail);
     }
 
     next->published_prev =
@@ -569,7 +598,8 @@ const struct zcl_command_spec *zcl_command_registry_resolve_words(
         const char *word = words[i];
         if (!command_registry_resolve_word_ok(word))
             break;
-        if (!command_registry_resolve_append(candidate, &pos, word))
+        if (!command_registry_resolve_append(candidate, sizeof(candidate), &pos,
+                                            word))
             break;
         bool alias = false;
         const struct zcl_command_spec *found =

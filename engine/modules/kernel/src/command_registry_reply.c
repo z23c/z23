@@ -6,6 +6,8 @@
 
 #include "kernel/command_registry.h"
 
+#include "command_registry_internal.h"
+
 #include "services/agent_spend_policy.h"  // lib-layer-ok:agent-spend-policy-gate
 
 #include <stdio.h>

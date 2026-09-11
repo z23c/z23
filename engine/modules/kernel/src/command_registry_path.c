@@ -6,6 +6,8 @@
 
 #include "kernel/command_registry.h"
 
+#include "command_registry_internal.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -121,12 +123,12 @@ void command_registry_resolve_accept(
         (void)command_registry_copy_string(invoked, invoked_size, candidate);
 }
 
-bool command_registry_resolve_append(char *candidate, size_t *pos,
-                                     const char *word)
+bool command_registry_resolve_append(char *candidate, size_t candidate_size,
+                                     size_t *pos, const char *word)
 {
-    int n = snprintf(candidate + *pos, ZCL_COMMAND_MAX_PATH - *pos, "%s%s",
+    int n = snprintf(candidate + *pos, candidate_size - *pos, "%s%s",
                      *pos ? "." : "", word);
-    if (n <= 0 || (size_t)n >= ZCL_COMMAND_MAX_PATH - *pos)
+    if (n <= 0 || (size_t)n >= candidate_size - *pos)
         return false;
     *pos += (size_t)n;
     return true;

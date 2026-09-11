@@ -24,10 +24,22 @@
  * units. There is NO built-binary dependency: the helper is compiled from
  * source at gate-run time, as in the shell.
  *
+ * DIVERGENCE FROM THE SHELL (deliberate): the shell's LINK_SRCS was a
+ * written-down list. The command registry has since split into a family of
+ * engine/modules/kernel/src/command_registry*.c translation units that
+ * keeps growing under the complexity and file-size ceilings, and every
+ * written-down copy of that family has gone stale — the gate then dies on
+ * undefined references instead of measuring anything. db_derive_srcs()
+ * enumerates the family from the directory (scandir + alphasort + regular
+ * file, the same filter db_count_defs() uses) and only the dependencies
+ * outside it stay spelled out in k_db_extra_srcs. DB_REG_FLOOR then
+ * refuses a scan that found none, the way DEF_FLOOR refuses an empty
+ * catalog.
+ *
  * Semantic mapping:
  * - The up-front `for required in ...` regular-file check over TOOL_SRC,
- *   BASELINE, and the eight LINK_SRCS (FATAL, exit 2) is db_prereq. Include
- *   dirs were never checked; they still are not.
+ *   BASELINE, and the LINK_SRCS (FATAL, exit 2) is db_prereq, now over the
+ *   derived list. Include dirs were never checked; they still are not.
  * - The `"$DEF_DIR"` *.def glob count with DEF_FLOOR=8 is db_count_defs
  *   (scandir; a missing directory yields 0 exactly like the unexpanded
  *   glob) feeding the shared gate_require_scanned, which already prints the
@@ -45,7 +57,10 @@
  *   \([0-9]\{1,\}\) leaves render.STAR/\1/p' | head -1` (first match, empty
  *   → 0) with LEAF_FLOOR=200 is db_extract_leaves + gate_require_scanned.
  * - --selftest is db_selftest_body: build the clean helper and prove the
- *   gate passes an unmodified tree (db_st_clean); copy the .def catalogs,
+ *   gate passes an unmodified tree (db_st_clean); drop one sibling
+ *   command_registry*.c from the derived link and prove the helper then
+ *   FAILS to build, so a sibling the walk stops matching cannot go
+ *   unnoticed (db_st_missing); copy the .def catalogs,
  *   require the padding anchor to be exactly once in core.def (grep -Fxc →
  *   db_count_anchor), pad it 2000 bytes as an adjacent string literal
  *   (the awk sub → db_pad_core), rebuild against the padded copy, and prove
@@ -99,13 +114,23 @@ static const char k_db_def_dir[] = "engine/composition/commands";
 static const char k_db_anchor[] =
     "    \"Can this wallet be rebuilt from its words\",";
 
-/* The renderer and its transitive dependencies, kept explicit so a missing
- * object is a compile error rather than a silently skipped gate (same list
- * and order as the shell's LINK_SRCS). */
-static const char *const k_db_link_srcs[] = {
-    "engine/modules/kernel/src/command_registry.c",
-    "engine/modules/kernel/src/command_registry_devagent_input.c",
-    "engine/modules/kernel/src/command_registry_input_budget.c",
+/* The renderer's link list, kept honest so a missing object is a compile
+ * error rather than a silently skipped gate.
+ *
+ * The registry half is DERIVED, not written down: the complexity and
+ * file-size ceilings keep splitting command_registry.c into more sibling
+ * TUs (describe, reply, search, validate, execute, path, replace,
+ * input_types, devagent_input, input_budget ...), and every hardcoded list
+ * of them has gone stale within days — the gate then dies on undefined
+ * references, or worse, links an older definition. db_derive_srcs() walks
+ * engine/modules/kernel/src for `command_registry*.c` with the same
+ * scandir+alphasort+regular-file filter db_count_defs() uses on the .def
+ * catalog, so a new sibling joins the link the moment it exists and a
+ * deleted one leaves it. Only the dependencies OUTSIDE that family stay
+ * spelled out. */
+static const char k_db_reg_dir[] = "engine/modules/kernel/src";
+static const char k_db_reg_prefix[] = "command_registry";
+static const char *const k_db_extra_srcs[] = {
     "platform/modules/json/src/json.c",
     "core/modules/crypto/src/sha256.c",
     "platform/modules/base/src/safe_alloc.c",
@@ -125,11 +150,23 @@ static const char *const k_db_incs[] = {
     "-Icognition/services/include",
 };
 
-/* Floors: refuse to report clean off a catalog that moved or emptied out. */
-enum { DB_DEF_FLOOR = 8, DB_LEAF_FLOOR = 200 };
-enum { DB_CMD = 16384, DB_SINK = 65536, DB_N_REQ = 10 };
+/* Floors: refuse to report clean off a catalog that moved or emptied out.
+ * DB_REG_FLOOR is the same idea for the derived half: an empty or moved
+ * engine/modules/kernel/src would otherwise produce a short link list and
+ * a compile error read as a gate verdict. */
+enum { DB_DEF_FLOOR = 8, DB_LEAF_FLOOR = 200, DB_REG_FLOOR = 2 };
+enum { DB_CMD = 16384, DB_SINK = 65536 };
+enum { DB_MAX_SRCS = 64, DB_SRC_PATH = 512 };
 #define DB_N_INCS (sizeof k_db_incs / sizeof k_db_incs[0])
-#define DB_N_LINK (sizeof k_db_link_srcs / sizeof k_db_link_srcs[0])
+#define DB_N_EXTRA (sizeof k_db_extra_srcs / sizeof k_db_extra_srcs[0])
+
+/* The link list for one compile: every derived command_registry*.c first
+ * (alphasort order), then k_db_extra_srcs. */
+struct db_srcs {
+    char path[DB_MAX_SRCS][DB_SRC_PATH];
+    size_t n;
+    size_t derived;   /* how many of `n` came from the registry directory */
+};
 
 /* ── command-string assembly (CC raw, every path shell-quoted) ─────────── */
 
@@ -210,18 +247,69 @@ static int db_count_defs(void)
     return count;
 }
 
+/* ── the derived link list ─────────────────────────────────────────────── */
+
+/* `command_registry*.c`, same shape as the .def glob above: no leading dot,
+ * the family prefix, the .c suffix. */
+static int db_is_reg_src(const char *nm)
+{
+    size_t nl = strlen(nm);
+    size_t pl = sizeof k_db_reg_prefix - 1;
+    return nm[0] != '.' && nl > 2 && nl >= pl
+        && memcmp(nm, k_db_reg_prefix, pl) == 0
+        && memcmp(nm + nl - 2, ".c", 2) == 0;
+}
+
+/* Appends "<dir>/<name>" when it is a regular file. A full table, an
+ * overlong path, or a non-regular entry is skipped, exactly as the glob
+ * plus `[ -f ]` in db_count_defs() skips one. */
+static void db_push_src(struct db_srcs *out, const char *dir, const char *nm)
+{
+    if (out->n >= DB_MAX_SRCS)
+        return;
+    char *slot = out->path[out->n];
+    int k = snprintf(slot, DB_SRC_PATH, "%s/%s", dir, nm);
+    struct stat st;
+    if (k > 0 && (size_t)k < DB_SRC_PATH && stat(slot, &st) == 0
+        && S_ISREG(st.st_mode))
+        out->n++;
+}
+
+/* Derives the whole link list: every engine/modules/kernel/src/
+ * command_registry*.c in alphasort order, then the fixed dependencies.
+ * A missing directory yields zero derived entries, which DB_REG_FLOOR
+ * then refuses. */
+static void db_derive_srcs(struct db_srcs *out)
+{
+    struct dirent **names = NULL;
+    out->n = 0;
+    out->derived = 0;
+    int n = scandir(k_db_reg_dir, &names, NULL, alphasort);
+    for (int i = 0; i < n; i++) {
+        if (db_is_reg_src(names[i]->d_name))
+            db_push_src(out, k_db_reg_dir, names[i]->d_name);
+        free(names[i]);
+    }
+    free(names);
+    out->derived = out->n;
+    for (size_t i = 0; i < DB_N_EXTRA && out->n < DB_MAX_SRCS; i++) {
+        (void)snprintf(out->path[out->n], DB_SRC_PATH, "%s",
+                       k_db_extra_srcs[i]);
+        out->n++;
+    }
+}
+
 /* ── the driver steps ──────────────────────────────────────────────────── */
 
-static int db_prereq(void)
+static int db_prereq(const struct db_srcs *srcs)
 {
-    const char *req[DB_N_REQ];
-    req[0] = k_db_tool_src;
-    req[1] = k_db_baseline;
-    memcpy(req + 2, k_db_link_srcs, sizeof k_db_link_srcs);
-    for (size_t i = 0; i < DB_N_REQ; i++) {
+    for (size_t i = 0; i < srcs->n + 2; i++) {
+        const char *req = i == 0 ? k_db_tool_src
+                        : i == 1 ? k_db_baseline
+                                 : srcs->path[i - 2];
         struct stat st;
-        if (stat(req[i], &st) != 0 || !S_ISREG(st.st_mode)) {
-            fprintf(stderr, "%s: FATAL — missing %s\n", k_db_name, req[i]);
+        if (stat(req, &st) != 0 || !S_ISREG(st.st_mode)) {
+            fprintf(stderr, "%s: FATAL — missing %s\n", k_db_name, req);
             return 2;
         }
     }
@@ -231,8 +319,8 @@ static int db_prereq(void)
 /* build_tool(): compile the helper. $1 = output path, $2 = directory
  * holding `commands/`, $3 = the compile log. Returns 0 built, 1 compile
  * failed (diagnostics in the log), 2 internal error. */
-static int db_compile(const char *out, const char *def_parent,
-                      const char *log)
+static int db_compile(const struct db_srcs *srcs, const char *out,
+                      const char *def_parent, const char *log)
 {
     char cmd[DB_CMD], sink[DB_SINK], inc[4096];
     size_t n = 0;
@@ -253,9 +341,9 @@ static int db_compile(const char *out, const char *def_parent,
     rc |= db_catq(cmd, sizeof cmd, &n, out);
     rc |= db_cat(cmd, sizeof cmd, &n, " ");
     rc |= db_catq(cmd, sizeof cmd, &n, k_db_tool_src);
-    for (size_t i = 0; i < DB_N_LINK; i++) {
+    for (size_t i = 0; i < srcs->n; i++) {
         rc |= db_cat(cmd, sizeof cmd, &n, " ");
-        rc |= db_catq(cmd, sizeof cmd, &n, k_db_link_srcs[i]);
+        rc |= db_catq(cmd, sizeof cmd, &n, srcs->path[i]);
     }
     rc |= db_cat(cmd, sizeof cmd, &n, " 2> ");
     rc |= db_catq(cmd, sizeof cmd, &n, log);
@@ -330,7 +418,7 @@ static int db_main_fail(const char *log)
     return rc ? rc : 1;
 }
 
-static int db_main_body(const char *tmp)
+static int db_main_body(const struct db_srcs *srcs, const char *tmp)
 {
     char gate[4096], cc_log[4096], out_log[4096];
     int rc = ovf(snprintf(gate, sizeof gate, "%s/gate", tmp), sizeof gate);
@@ -339,7 +427,7 @@ static int db_main_body(const char *tmp)
     rc |= ovf(snprintf(out_log, sizeof out_log, "%s/out.log", tmp),
               sizeof out_log);
     if (rc == 0)
-        rc = db_compile(gate, "engine/composition", cc_log);
+        rc = db_compile(srcs, gate, "engine/composition", cc_log);
     if (rc == 1) {
         fprintf(stderr, "%s: FATAL — %s does not compile:\n", k_db_name,
                 k_db_tool_src);
@@ -367,11 +455,18 @@ int check_describe_budget_run(int argc, char **argv)
     (void)argc;
     (void)argv;
     char root[4096], tmp[4096];
+    struct db_srcs srcs;
     int rc = cic_repo_root(root, sizeof root);
     if (rc == 0 && chdir(root) != 0)
         rc = 2;
+    if (rc == 0) {
+        db_derive_srcs(&srcs);
+        rc = gate_require_scanned((int)srcs.derived, DB_REG_FLOOR, k_db_name,
+            "no command_registry*.c under engine/modules/kernel/src — the "
+            "command registry moved?");
+    }
     if (rc == 0)
-        rc = db_prereq();
+        rc = db_prereq(&srcs);
     if (rc == 0)
         rc = gate_require_scanned(db_count_defs(), DB_DEF_FLOOR, k_db_name,
             "no .def catalogs under engine/composition/commands — the "
@@ -379,7 +474,7 @@ int check_describe_budget_run(int argc, char **argv)
     if (rc == 0)
         rc = db_mkdtemp(tmp, sizeof tmp, "zcl-describe-budget");
     if (rc == 0) {
-        rc = db_main_body(tmp);
+        rc = db_main_body(&srcs, tmp);
         (void)rap_rm_rf(tmp);
     }
     return rc;
@@ -390,6 +485,7 @@ int check_describe_budget_run(int argc, char **argv)
 struct db_st {
     char gate[4096], cc[4096], clean[4096], defs[4096], defparent[4096];
     char gate2[4096], cc2[4096], padded[4096];
+    char gate3[4096], cc3[4096];
 };
 
 static int db_st_paths(struct db_st *p, const char *tmp)
@@ -409,6 +505,10 @@ static int db_st_paths(struct db_st *p, const char *tmp)
               sizeof p->cc2);
     rc |= ovf(snprintf(p->padded, sizeof p->padded, "%s/padded.log", tmp),
               sizeof p->padded);
+    rc |= ovf(snprintf(p->gate3, sizeof p->gate3, "%s/gate_cut", tmp),
+              sizeof p->gate3);
+    rc |= ovf(snprintf(p->cc3, sizeof p->cc3, "%s/cc3.log", tmp),
+              sizeof p->cc3);
     return rc ? 2 : 0;
 }
 
@@ -424,9 +524,9 @@ static int db_st_fail(const char *l1, const char *l2, const char *log)
 }
 
 /* Step 1: the unmodified tree must compile and pass. */
-static int db_st_clean(const struct db_st *p)
+static int db_st_clean(const struct db_srcs *srcs, const struct db_st *p)
 {
-    int rc = db_compile(p->gate, "engine/composition", p->cc);
+    int rc = db_compile(srcs, p->gate, "engine/composition", p->cc);
     if (rc == 1)
         return db_st_fail("check_describe_budget selftest: FAIL — "
             "tools/check_describe_budget.c does not compile:\n", NULL, p->cc);
@@ -611,7 +711,7 @@ static int db_log_contains(const char *path, const char *needle)
 
 /* Step 2: pad one leaf past the budget in a COPY of the catalog and prove
  * the gate goes red on it, naming the padded leaf. */
-static int db_st_padded(const struct db_st *p)
+static int db_st_padded(const struct db_srcs *srcs, const struct db_st *p)
 {
     int rc = db_copy_defs(p->defs);
     char core[4096];
@@ -636,7 +736,7 @@ static int db_st_padded(const struct db_st *p)
     }
     rc = db_pad_core(p->defs);
     if (rc == 0)
-        rc = db_compile(p->gate2, p->defparent, p->cc2);
+        rc = db_compile(srcs, p->gate2, p->defparent, p->cc2);
     if (rc == 1)
         return db_st_fail("check_describe_budget selftest: FAIL — the "
             "padded catalog does\n  not compile, so the fixture proves "
@@ -658,31 +758,92 @@ static int db_st_padded(const struct db_st *p)
     return 0;
 }
 
-static int db_selftest_body(const char *tmp)
+/* The sibling TU step 3 drops. It defines
+ * zcl_command_registry_describe_json(), which tools/check_describe_budget.c
+ * calls directly, so a link without it cannot resolve. */
+static const char k_db_drop_src[] =
+    "engine/modules/kernel/src/command_registry_describe.c";
+
+/* Copies `in` into `out` with `drop` removed. Returns 1 when `drop` was
+ * there to remove, 0 when it was not. */
+static int db_srcs_without(const struct db_srcs *in, const char *drop,
+                           struct db_srcs *out)
+{
+    int found = 0;
+    out->n = 0;
+    out->derived = 0;
+    for (size_t i = 0; i < in->n; i++) {
+        if (strcmp(in->path[i], drop) == 0) {
+            found = 1;
+            continue;
+        }
+        (void)snprintf(out->path[out->n], DB_SRC_PATH, "%s", in->path[i]);
+        out->n++;
+        if (i < in->derived)
+            out->derived++;
+    }
+    return found;
+}
+
+/* Step 3: the derived link list must be load-bearing. Drop ONE sibling
+ * command_registry*.c and require the helper to fail to build. Without
+ * this, a sibling the scandir walk stopped matching — renamed out of the
+ * family, moved to another directory — would silently leave the gate
+ * measuring a document rendered by whatever definitions still linked. */
+static int db_st_missing(const struct db_srcs *srcs, const struct db_st *p)
+{
+    struct db_srcs cut;
+    if (!db_srcs_without(srcs, k_db_drop_src, &cut)) {
+        fprintf(stderr, "check_describe_budget selftest: FAIL — %s is no "
+            "longer in\n  the derived link list. Point the selftest at "
+            "another command_registry*.c\n  the helper needs.\n",
+            k_db_drop_src);
+        return 1;
+    }
+    int rc = db_compile(&cut, p->gate3, "engine/composition", p->cc3);
+    if (rc == 0)
+        return db_st_fail("check_describe_budget selftest: FAIL — the helper "
+            "still builds with\n  a sibling command_registry*.c dropped from "
+            "the link, so the derived list\n  proves nothing:\n", NULL,
+            p->cc3);
+    return rc == 1 ? 0 : rc;
+}
+
+static int db_selftest_body(const struct db_srcs *srcs, const char *tmp)
 {
     struct db_st p;
     int rc = db_st_paths(&p, tmp);
     if (rc == 0)
-        rc = db_st_clean(&p);
+        rc = db_st_clean(srcs, &p);
     if (rc == 0)
-        rc = db_st_padded(&p);
+        rc = db_st_padded(srcs, &p);
+    if (rc == 0)
+        rc = db_st_missing(srcs, &p);
     if (rc == 0)
         fputs("check_describe_budget selftest: PASS — clean tree passes; "
               "a leaf padded past ZCL_COMMAND_SPEC_BUDGET fails and is "
-              "named\n", stdout);
+              "named; a dropped sibling command_registry*.c breaks the "
+              "link\n", stdout);
     return rc;
 }
 
 int check_describe_budget_selftest(void)
 {
     char root[4096], tmp[4096];
+    struct db_srcs srcs;
     int rc = cic_repo_root(root, sizeof root);
     if (rc == 0 && chdir(root) != 0)
         rc = 2;
+    if (rc == 0) {
+        db_derive_srcs(&srcs);
+        rc = gate_require_scanned((int)srcs.derived, DB_REG_FLOOR, k_db_name,
+            "no command_registry*.c under engine/modules/kernel/src — the "
+            "command registry moved?");
+    }
     if (rc == 0)
         rc = db_mkdtemp(tmp, sizeof tmp, "zcl-describe-budget-selftest");
     if (rc == 0) {
-        rc = db_selftest_body(tmp);
+        rc = db_selftest_body(&srcs, tmp);
         (void)rap_rm_rf(tmp);
     }
     return rc;
