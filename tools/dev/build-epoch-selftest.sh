@@ -1221,93 +1221,159 @@ phase compiler-id-degraded-probe-refused
 #   A2 a genuinely different driver still moves the digest and is still refused
 #      (the gate is not weakened);
 #   A3 a ONE-SHOT flake is re-derived once and tolerated (the noise is gone);
-#   A4 back-to-back derivations are byte-identical (catches the next `|| true`).
+#   A4 back-to-back derivations are byte-identical (catches the next `|| true`);
+#   A5 only a FAILED derivation may be forgiven: a first derivation that
+#      succeeds and reports a different toolchain is refused even when the
+#      re-derivation matches the key again.
 # The fixture driver answers every compiler-id probe itself: no real compile,
-# no /usr inventory, everything under $WORK, well under a second of wall.
+# no /usr inventory, everything it reports under $WORK, well under a second of
+# wall -- and, through the PATH mirror built below, no host linker reaches the
+# fingerprint either.
 SHIM_DIR="$WORK/degraded-probe"
 SHIM_ROOT="$SHIM_DIR/root"
 SHIM_CC="$SHIM_DIR/bin/cc"
 SHIM_TMP="$SHIM_DIR/tmp"
 mkdir -p "$SHIM_DIR/bin" "$SHIM_TMP" \
     "$SHIM_ROOT/include" "$SHIM_ROOT/programs" "$SHIM_ROOT/libraries"
-printf '#define ZCL_SHIM_HEADER 1\n' > "$SHIM_ROOT/include/shim.h"
+printf '#define SHIMCC_HEADER 1\n' > "$SHIM_ROOT/include/shim.h"
 printf 'fixture linker\n' > "$SHIM_ROOT/programs/ld"
 chmod +x "$SHIM_ROOT/programs/ld"
 cat > "$SHIM_CC" <<'SHIM_EOF'
 #!/bin/sh
-# Hermetic compiler-driver fixture for the degraded-probe regression.
-#   ZCL_SHIM_ROOT         directory this driver reports as its search space
-#   ZCL_SHIM_VERSION_TAG  --version payload (a real toolchain change)
-#   ZCL_SHIM_FLAKE_ALWAYS every verbose preprocessing probe fails
-#   ZCL_SHIM_FLAKE_ONCE   sentinel path: the first verbose probe fails, once
-#   ZCL_SHIM_NO_SEARCH    verbose probe succeeds but reports no search roots
+# Hermetic compiler-driver fixture for the degraded-probe regression. Its
+# knobs stay OUT of the ZCL_ namespace on purpose: they are a private protocol
+# between this fixture and the assertions below, not project flags, and
+# engine/composition/flags.def is the closed catalog of ZCL_ names.
+#   SHIMCC_ROOT         directory this driver reports as its search space
+#   SHIMCC_VERSION_TAG  --version payload (a real toolchain change)
+#   SHIMCC_FLAKE_ALWAYS every verbose preprocessing probe fails
+#   SHIMCC_FLAKE_ONCE   sentinel path: the first verbose probe fails, once
+#   SHIMCC_NO_SEARCH    verbose probe succeeds but reports no search roots
+#   SHIMCC_VERSION_TALLY     path one line is appended to per --version probe
+#   SHIMCC_VERSION_COUNTDOWN path holding N: the next N --version probes
+#                            answer as toolchain 2, every later one as 1
 set -u
 verbose=0
 preprocess=0
 for arg in "$@"; do
     case "$arg" in
         --version)
-            if [ -n "${ZCL_SHIM_VERSION_COUNTER:-}" ]; then
-                count=$(cat "$ZCL_SHIM_VERSION_COUNTER" 2>/dev/null || echo 0)
+            if [ -n "${SHIMCC_VERSION_TALLY:-}" ]; then
+                printf 'version\n' >> "$SHIMCC_VERSION_TALLY"
+            fi
+            if [ -n "${SHIMCC_VERSION_COUNTDOWN:-}" ]; then
+                left=$(cat "$SHIMCC_VERSION_COUNTDOWN" 2>/dev/null || echo 0)
+                if [ "$left" -gt 0 ]; then
+                    printf '%s\n' "$((left - 1))" > "$SHIMCC_VERSION_COUNTDOWN"
+                    printf 'zcl-shim-cc 2\n'
+                    exit 0
+                fi
+                printf 'zcl-shim-cc 1\n'
+                exit 0
+            fi
+            if [ -n "${SHIMCC_VERSION_COUNTER:-}" ]; then
+                count=$(cat "$SHIMCC_VERSION_COUNTER" 2>/dev/null || echo 0)
                 count=$((count + 1))
-                printf '%s\n' "$count" > "$ZCL_SHIM_VERSION_COUNTER"
+                printf '%s\n' "$count" > "$SHIMCC_VERSION_COUNTER"
                 printf 'zcl-shim-cc unstable-%s\n' "$count"
                 exit 0
             fi
-            printf 'zcl-shim-cc %s\n' "${ZCL_SHIM_VERSION_TAG:-1}"
+            printf 'zcl-shim-cc %s\n' "${SHIMCC_VERSION_TAG:-1}"
             exit 0 ;;
         -dumpmachine) printf 'x86_64-zcl-shim-linux\n'; exit 0 ;;
         -dumpversion|-dumpfullversion) printf '23.0.0\n'; exit 0 ;;
         -print-search-dirs)
-            printf 'install: %s/\n' "$ZCL_SHIM_ROOT"
-            printf 'programs: =%s/programs\n' "$ZCL_SHIM_ROOT"
-            printf 'libraries: =%s/libraries\n' "$ZCL_SHIM_ROOT"
+            printf 'install: %s/\n' "$SHIMCC_ROOT"
+            printf 'programs: =%s/programs\n' "$SHIMCC_ROOT"
+            printf 'libraries: =%s/libraries\n' "$SHIMCC_ROOT"
             exit 0 ;;
         -print-prog-name=*)
-            printf '%s/programs/%s\n' "$ZCL_SHIM_ROOT" "${arg#-print-prog-name=}"
+            printf '%s/programs/%s\n' "$SHIMCC_ROOT" "${arg#-print-prog-name=}"
             exit 0 ;;
         -print-file-name=*)
-            printf '%s/libraries/%s\n' "$ZCL_SHIM_ROOT" "${arg#-print-file-name=}"
+            printf '%s/libraries/%s\n' "$SHIMCC_ROOT" "${arg#-print-file-name=}"
             exit 0 ;;
         -v) verbose=1 ;;
         -E) preprocess=1 ;;
     esac
 done
 if [ "$verbose" = 1 ] && [ "$preprocess" = 1 ]; then
-    if [ -n "${ZCL_SHIM_FLAKE_ONCE:-}" ] && [ -e "$ZCL_SHIM_FLAKE_ONCE" ]; then
-        rm -f -- "$ZCL_SHIM_FLAKE_ONCE"
+    if [ -n "${SHIMCC_FLAKE_ONCE:-}" ] && [ -e "$SHIMCC_FLAKE_ONCE" ]; then
+        rm -f -- "$SHIMCC_FLAKE_ONCE"
         printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
         exit 1
     fi
-    if [ -n "${ZCL_SHIM_FLAKE_ALWAYS:-}" ]; then
+    if [ -n "${SHIMCC_FLAKE_ALWAYS:-}" ]; then
         printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
         exit 1
     fi
     printf 'Using built-in specs.\n' >&2
-    if [ -z "${ZCL_SHIM_NO_SEARCH:-}" ]; then
+    if [ -z "${SHIMCC_NO_SEARCH:-}" ]; then
         printf '#include <...> search starts here:\n' >&2
-        printf ' %s/include\n' "$ZCL_SHIM_ROOT" >&2
+        printf ' %s/include\n' "$SHIMCC_ROOT" >&2
         printf 'End of search list.\n' >&2
     fi
     exit 0
 fi
-printf '#define ZCL_SHIM_CC 1\n'
+printf '#define SHIMCC_CC 1\n'
 exit 0
 SHIM_EOF
 chmod +x "$SHIM_CC"
-export ZCL_SHIM_ROOT="$SHIM_ROOT"
+export SHIMCC_ROOT="$SHIM_ROOT"
+
+# build-epoch-key.sh binds ld/ld.lld/mold through the caller's $PATH and
+# sweeps every ld*-named file on it into the fingerprint, so the host's real
+# linkers would otherwise enter this fixture's identity and the phase would
+# not be the host-independent guard its comment claims. Derive every
+# fingerprint below through a PATH holding the fixture's own programs plus a
+# mirror of the host utilities the epoch scripts run, with every
+# linker-shaped (ld*) name left out: the only linker reachable from here is
+# then the fixture's own, on any machine.
+SHIM_PATH_DIR="$SHIM_DIR/path"
+mkdir -p "$SHIM_PATH_DIR"
+# Mirror EXACTLY the utilities the epoch scripts run, each resolved by name
+# through the caller's $PATH. The earlier sweep -- `find` over every $PATH
+# entry, piped into xargs -- ran under `set -euo pipefail`: one unreadable or
+# vanished directory on $PATH made the pipeline exit non-zero and killed the
+# whole selftest with no message at all, and a sweep also admits whatever else
+# happens to sit on this host's $PATH. A bounded list cannot do either, and it
+# subsumes the `ld*` exclusion the sweep needed: the only linker reachable
+# from this PATH is the fixture's own, on any machine.
+#
+# A utility missing from the mirror would surface as an unexplained fixture
+# refusal several assertions later; name it here instead.
+for shim_tool in \
+        bash sh env \
+        awk sed grep sort uniq tr cut head tail wc cat cmp comm diff od \
+        find xargs readlink dirname basename stat \
+        mktemp mkdir rmdir rm mv cp ln chmod touch \
+        sha256sum date sleep flock uname; do
+    shim_tool_path="$(command -v -- "$shim_tool" 2>/dev/null || printf '')"
+    [ -n "$shim_tool_path" ] ||
+        fail "fixture PATH mirror is missing $shim_tool: not on \$PATH"
+    ln -sf -- "$shim_tool_path" "$SHIM_PATH_DIR/$shim_tool"
+    [ -x "$SHIM_PATH_DIR/$shim_tool" ] ||
+        fail "fixture PATH mirror is missing $shim_tool"
+done
+SHIM_PATH="$SHIM_ROOT/programs:$SHIM_PATH_DIR"
+
+# Every compiler-identity derivation in this phase, through that PATH.
+shim_compiler_id()
+{
+    env PATH="$SHIM_PATH" "$@" "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC"
+}
 
 # A4: the whole contract in two lines -- a fingerprint that cannot observe all
 # of its inputs must never hash a short preimage, so two derivations of one
 # unchanged toolchain are byte-identical.
-SHIM_ID="$("$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC")" ||
+SHIM_ID="$(shim_compiler_id)" ||
     fail 'fixture driver did not produce a compiler fingerprint'
 [[ "$SHIM_ID" =~ ^[0-9a-f]{64}$ ]] || fail 'fixture compiler fingerprint is malformed'
-[ "$SHIM_ID" = "$("$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC")" ] ||
+[ "$SHIM_ID" = "$(shim_compiler_id)" ] ||
     fail 'back-to-back compiler fingerprints of one unchanged driver disagreed'
 
 # A1: one failing probe must refuse, naming the probe -- never a digest.
-if ZCL_SHIM_FLAKE_ALWAYS=1 "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" \
+if shim_compiler_id SHIMCC_FLAKE_ALWAYS=1 \
         > "$SHIM_DIR/flake.out" 2> "$SHIM_DIR/flake.err"; then
     fail 'compiler-id returned a digest while a compiler probe was failing'
 fi
@@ -1318,7 +1384,7 @@ grep -Fq 'include-search' "$SHIM_DIR/flake.err" ||
 
 # A driver that answers but reports no search roots is degraded too: its
 # header authority would be empty.
-if ZCL_SHIM_NO_SEARCH=1 "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" \
+if shim_compiler_id SHIMCC_NO_SEARCH=1 \
         >/dev/null 2> "$SHIM_DIR/stub.err"; then
     fail 'compiler-id accepted a driver that reported no include search roots'
 fi
@@ -1326,7 +1392,7 @@ grep -Fq 'no include search roots' "$SHIM_DIR/stub.err" ||
     fail 'empty include-search refusal did not name the missing search roots'
 
 # A2 (first half): a REAL toolchain change still moves the identity.
-SHIM_ID_CHANGED="$(ZCL_SHIM_VERSION_TAG=2 "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC")" ||
+SHIM_ID_CHANGED="$(shim_compiler_id SHIMCC_VERSION_TAG=2)" ||
     fail 'changed fixture driver did not produce a compiler fingerprint'
 [ "$SHIM_ID_CHANGED" != "$SHIM_ID" ] ||
     fail 'a changed compiler version line disappeared from the fingerprint'
@@ -1340,7 +1406,7 @@ shim_acquire()
     local session="$root/epochs/$SHIM_EPOCH/.build-session"
     local lease="$root/epochs/$SHIM_EPOCH/.leases/selftest-$$"
     set_state "$SOURCE_A" "$MUTATION_A1"
-    env "$@" TMPDIR="$SHIM_TMP" STATE_FILE="$STATE" \
+    env PATH="$SHIM_PATH" "$@" TMPDIR="$SHIM_TMP" STATE_FILE="$STATE" \
         "$SESSION_TOOL" acquire "$session" "$lease" \
         "$root" "$WORK/shim-candidates" 5 "$SOURCE_A" 1 "$MUTATION_A1" \
         "$SHIM_ID" "$SHIM_EPOCH" "$PROFILE" "$COMPILE_FLAGS" \
@@ -1351,7 +1417,7 @@ shim_acquire()
 # A2 (second half): the session still refuses that changed toolchain, and the
 # refusal now names all three digests plus the record that moved.
 SHIM_CHANGED_LOG="$SHIM_DIR/session-changed.log"
-if shim_acquire "$SHIM_CHANGED_LOG" ZCL_SHIM_VERSION_TAG=2; then
+if shim_acquire "$SHIM_CHANGED_LOG" SHIMCC_VERSION_TAG=2; then
     fail 'session accepted a toolchain whose identity really had changed'
 fi
 grep -Fq 'compiler/toolchain changed during build' "$SHIM_CHANGED_LOG" ||
@@ -1371,7 +1437,7 @@ SHIM_PREIMAGES="$(find "$SHIM_TMP" -name '*.preimage' -type f 2>/dev/null | wc -
 SHIM_SENTINEL="$SHIM_DIR/flake-once"
 SHIM_FLAKE_LOG="$SHIM_DIR/session-flake.log"
 : > "$SHIM_SENTINEL"
-shim_acquire "$SHIM_FLAKE_LOG" ZCL_SHIM_FLAKE_ONCE="$SHIM_SENTINEL" ||
+shim_acquire "$SHIM_FLAKE_LOG" SHIMCC_FLAKE_ONCE="$SHIM_SENTINEL" ||
     fail 'a one-shot compiler probe flake refused an unchanged toolchain'
 if grep -Fq 'compiler/toolchain changed during build' "$SHIM_FLAKE_LOG"; then
     fail 'one-shot compiler probe flake printed the toolchain-change refusal'
@@ -1388,13 +1454,50 @@ grep -Fq 'unavailable(rc=' "$SHIM_FLAKE_LOG" ||
 SHIM_UNSTABLE_LOG="$SHIM_DIR/session-unstable.log"
 : > "$SHIM_DIR/version-counter"
 if shim_acquire "$SHIM_UNSTABLE_LOG" \
-        ZCL_SHIM_VERSION_COUNTER="$SHIM_DIR/version-counter"; then
+        SHIMCC_VERSION_COUNTER="$SHIM_DIR/version-counter"; then
     fail 'session accepted a compiler identity that never reproduced'
 fi
 grep -Fq 'compiler/toolchain changed during build' "$SHIM_UNSTABLE_LOG" ||
     fail 'never-reproducing compiler identity was not refused explicitly'
 grep -Fq 'first differing compiler-identity record' "$SHIM_UNSTABLE_LOG" ||
     fail 'refusal did not name the compiler-identity record that moved'
+
+# A5: the retry exists for a derivation that FAILED, and for nothing else. A
+# first derivation that SUCCEEDS and reports a complete, well-formed identity
+# that is not the keyed one has observed a second toolchain inside one build;
+# a re-derivation that lands back on the key must not forgive it. Calibrate
+# how many --version probes one derivation runs, then hand the session a
+# driver that answers as toolchain 2 for exactly that many probes and as
+# toolchain 1 from then on: derivation one is complete and different,
+# derivation two matches the key.
+SHIM_TALLY="$SHIM_DIR/version-tally"
+: > "$SHIM_TALLY"
+shim_compiler_id SHIMCC_VERSION_TALLY="$SHIM_TALLY" >/dev/null ||
+    fail 'fixture driver did not produce a compiler fingerprint while calibrating'
+SHIM_VERSION_PROBES="$(wc -l < "$SHIM_TALLY")"
+[ "$SHIM_VERSION_PROBES" -ge 1 ] ||
+    fail 'calibration observed no --version probe; A5 would prove nothing'
+SHIM_COUNTDOWN="$SHIM_DIR/version-countdown"
+printf '%s\n' "$SHIM_VERSION_PROBES" > "$SHIM_COUNTDOWN"
+# Prove the fixture really alternates before asserting on the session: the
+# first derivation must be the changed identity and the next the keyed one.
+[ "$(shim_compiler_id SHIMCC_VERSION_COUNTDOWN="$SHIM_COUNTDOWN")" = "$SHIM_ID_CHANGED" ] ||
+    fail 'alternating fixture did not report the changed toolchain first'
+[ "$(shim_compiler_id SHIMCC_VERSION_COUNTDOWN="$SHIM_COUNTDOWN")" = "$SHIM_ID" ] ||
+    fail 'alternating fixture did not fall back to the keyed toolchain'
+SHIM_ALTERNATING_LOG="$SHIM_DIR/session-alternating.log"
+printf '%s\n' "$SHIM_VERSION_PROBES" > "$SHIM_COUNTDOWN"
+if shim_acquire "$SHIM_ALTERNATING_LOG" \
+        SHIMCC_VERSION_COUNTDOWN="$SHIM_COUNTDOWN"; then
+    fail 'session forgave a successful first derivation that reported a different toolchain'
+fi
+grep -Fq 'compiler/toolchain changed during build' "$SHIM_ALTERNATING_LOG" ||
+    fail 'alternating toolchain was not refused with the toolchain-change message'
+grep -Fq "actual=$SHIM_ID_CHANGED" "$SHIM_ALTERNATING_LOG" ||
+    fail 'alternating refusal did not name the toolchain the first derivation saw'
+if grep -Fq 'degraded probe, not a toolchain change' "$SHIM_ALTERNATING_LOG"; then
+    fail 'a successful first derivation was logged as a degraded probe'
+fi
 
 printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true late_marker_refusal=true make_recovery=true warm_no_rewrite=true degraded_probe_refused=true flake_retried=true compiler_id=%s\n' \
     "$COMPILER_ID"

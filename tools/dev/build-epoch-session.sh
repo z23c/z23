@@ -238,9 +238,12 @@ verify_authority()
     derive_rc=$?
     set -e
     if [ "$derive_rc" -ne 0 ] || [ "$actual_compiler" != "$COMPILER_ID" ]; then
-        # A real toolchain change is PERSISTENT; a degraded probe (a child the
-        # host could not fork under saturation) is not. Re-derive exactly once
-        # and refuse only on a disagreement that reproduces. The retry costs
+        # Only a derivation that FAILED (derive_rc != 0) is a candidate for
+        # forgiveness: that is a child the host could not run, not a fact
+        # about the toolchain. A derivation that SUCCEEDED and returned a
+        # complete, well-formed identity is a fact about the toolchain, and a
+        # different one is refused below even if a second derivation happens
+        # to match the key again. Re-derive exactly once. The retry costs
         # one derivation and only ever on this path -- never on the happy one.
         # Both derivations from here on keep their preimage, so the refusal can
         # name the record that moved instead of only two opaque digests.
@@ -251,8 +254,26 @@ verify_authority()
         recheck="$(ZCL_BUILD_EPOCH_DIAG_DIR="$diag" \
             "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")" || {
             discard_diag "$diag"
+            # Only a FIRST derivation that itself failed makes this a host
+            # that could not run the probe twice. When the first derivation
+            # succeeded and merely reported a different toolchain, saying
+            # "twice" misreports what was observed, and misdirects whoever
+            # reads the refusal towards fork exhaustion.
+            [ "$derive_rc" -eq 0 ] &&
+                fail "compiler fingerprint re-derivation failed after a first derivation that succeeded and reported a different toolchain (first attempt: $actual_compiler)"
             fail "compiler fingerprint revalidation failed twice (first attempt: $actual_compiler)"
         }
+        if [ "$derive_rc" -eq 0 ] && [ "$recheck" = "$COMPILER_ID" ]; then
+            # The first derivation succeeded and reported a complete identity
+            # that is not the keyed one. A second derivation agreeing with the
+            # key does not un-observe that: one build saw two different
+            # toolchains, which is exactly the substitution this gate exists
+            # to refuse. Keeping the preimage of only the second derivation
+            # would diff nothing useful here, so discard it and name all three
+            # digests instead.
+            discard_diag "$diag"
+            fail "compiler/toolchain changed during build expected=$COMPILER_ID actual=$actual_compiler recheck=$recheck (the first derivation succeeded and reported a different toolchain)"
+        fi
         if [ "$recheck" != "$COMPILER_ID" ]; then
             # Reproducible disagreement: refuse, exactly as before this fix.
             # Derive once more with the preimage kept so the two field lists
@@ -271,9 +292,9 @@ verify_authority()
             fi
             fail "compiler/toolchain changed during build expected=$COMPILER_ID actual=$actual_compiler recheck=$recheck"
         fi
-        # The disagreement did not reproduce: this box degraded one probe, the
-        # toolchain did not move. Say so loudly enough to be greppable, and
-        # keep building.
+        # Reached only when the first derivation FAILED and the re-derivation
+        # matches the key: this box could not run one probe, the toolchain did
+        # not move. Say so loudly enough to be greppable, and keep building.
         printf 'build-epoch-session: compiler fingerprint disagreed once (%s) and re-derived as expected (%s); treating it as a degraded probe, not a toolchain change\n' \
             "$actual_compiler" "$recheck" >&2
         discard_diag "$diag"
