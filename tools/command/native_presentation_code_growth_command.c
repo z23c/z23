@@ -371,14 +371,20 @@ static void npg_draw_controls(
              npg_font(16u, text_scale), secondary);
 }
 
+/* Post-condition, not a description: on EVERY return, including the refusals
+ * below, `visual` has been zeroed. npg_visuals_free() runs over the whole
+ * array the moment any element refuses, so a refused element must be free-able
+ * rather than whatever the caller's stack was holding. */
 static bool npg_visual_build(
     const struct science_code_growth_history *history,
     struct npg_visual *visual, uint32_t text_scale)
 {
-    if (!history || !visual || history->day_count == 0 ||
-        text_scale >= NPG_TEXT_SCALES)
+    if (!visual)
         return false;
     memset(visual, 0, sizeof(*visual));
+    if (!history || history->day_count == 0 ||
+        text_scale >= NPG_TEXT_SCALES)
+        return false;
     size_t pixel_bytes = (size_t)NPG_WIDTH * NPG_HEIGHT * 3u;
     visual->pixels = zcl_malloc(pixel_bytes, "code_growth.pixels");
     visual->hover_items = zcl_calloc(

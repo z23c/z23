@@ -57,10 +57,14 @@ static bool zwork_reuse_release_load(const char *zcode_dir,
            strcmp(package_hex, entry->package_root_hex) == 0;
 }
 
+/* Post-condition: `manifest` is initialized on EVERY return, so a caller that
+ * frees it after a refusal frees an empty manifest rather than its own stack.
+ * vcs_package_manifest_init() is NULL-safe and allocates nothing. */
 static bool zwork_reuse_manifest_load(const char *zcode_dir,
                                       const char *package_hex,
                                       struct vcs_package_manifest *manifest)
 {
+    vcs_package_manifest_init(manifest);
     char path[ZWORK_PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir,
                      package_hex);
@@ -69,7 +73,6 @@ static bool zwork_reuse_manifest_load(const char *zcode_dir,
     if (!zwork_read_bounded_regular(path,
                                     VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
                                     &wire, &wire_len)) return false;
-    vcs_package_manifest_init(manifest);
     bool ok = vcs_package_manifest_parse(wire, wire_len, manifest);
     free(wire);
     return ok;

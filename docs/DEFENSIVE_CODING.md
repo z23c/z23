@@ -1543,7 +1543,12 @@ invisible. It does not prove the *caller* frees — that leg is the reviewer's,
 recorded per baseline entry. It only recognizes `T_init(out)`/`memset(out, …)`
 as initialization, so a field-by-field init over-reports and an init done by a
 helper it cannot see is a miss. Multi-declarator declarations and
-`struct T **out` owner-outs are out of scope. On the published-global leg it
+`struct T **out` owner-outs are out of scope. It tracks `{`/`}` as text, so a
+file whose braces do not balance — an `#if`/`#else` pair that opens two for one
+close — stops being scanned partway through; that is now an `IMBALANCE` line
+that FAILS the gate rather than a silent hole, and until 2026-09-11 it also
+swallowed every later file in the same awk batch, hiding four in-scope
+findings behind one such file. On the published-global leg it
 sees only the first `free(` on a line, and it is scoped to production sources:
 test harnesses legitimately hand a stage module a `&main_state` and free it at
 case teardown, which is the same text about 870 times over and would bury the
@@ -1551,7 +1556,12 @@ one shape that actually shipped a use-after-free.
 
 `--selftest` plants a clean function and a violating one for each leg and
 asserts the verdict on each, including that a `set_*` which only writes through
-its pointer is *not* read as a publisher. Both legs refuse to report clean off a
+its pointer is *not* read as a publisher. It also runs a two-file BATCH — an
+unbalanced `#if`/`#else` fixture followed by one carrying a real late init — and
+asserts that the imbalance is reported, that the finding behind it is still
+found, that a pointer declarator above a null guard is not read as data while a
+literal array bound still is, and that a `//` inside a one-line block comment
+does not swallow the next brace. Both legs refuse to report clean off a
 scan that found nothing (`gate_require_scanned` floors on the file set, the
 derived `*_free` set, the publisher set, and the number of function bodies
 actually walked).

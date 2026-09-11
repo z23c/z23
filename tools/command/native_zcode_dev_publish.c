@@ -651,6 +651,11 @@ static bool zpub_commit_run_inner(
     size_t release_wire_len, struct zcl_command_reply *reply,
     struct zcl_command_reply *commit_reply)
 {
+    /* Post-condition: `commit_reply` is initialized on EVERY return. The init
+     * carries no allocation, so hoisting it above the two refusals below
+     * costs nothing and leaves the caller a reply it can read or free
+     * whatever this function decides. */
+    zcl_command_reply_init(commit_reply, "zcl.zcode_publish_commit.v1");
     char staging[ZPUB_PATH_MAX] = {0};
     if (!zpub_commit_stage(bundle, staging, release_wire, reply)) {
         free(release_wire);
@@ -664,7 +669,6 @@ static bool zpub_commit_run_inner(
         return false;
     }
     struct zcl_command_request commit_request = { .input = &commit_input };
-    zcl_command_reply_init(commit_reply, "zcl.zcode_publish_commit.v1");
     zcl_native_handle_zcode_package_publish_commit(
         &commit_request, commit_reply);
     zpub_stage_cleanup(staging, &bundle->transport);
