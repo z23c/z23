@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 879 |
+| Registry entries (branches + leaves) | 881 |
 | Top-level roots | 14 |
-| Branches | 197 |
-| Leaves (dispatchable command paths) | 682 |
-| … `ready` (live handler in this build) | 605 |
+| Branches | 198 |
+| Leaves (dispatchable command paths) | 683 |
+| … `ready` (live handler in this build) | 606 |
 | … `compat` (metadata only, names a fallback) | 47 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 46 |
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 59 | 11 | 48 |
-| `engine/composition/commands/dev.def` | 107 | 21 | 86 |
+| `engine/composition/commands/dev.def` | 109 | 22 | 87 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -847,6 +847,12 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev lane new` | compat 🔧 → `z23-dev dev lane new --path=<abs> --base=<ref>` | mutate / dev-mutation / operator · fast/moderate | `path`, `base` | `zcl.lane_new.v1` | `z23-dev dev lane new --path=$HOME/.z23/lanes/example --base=HEAD` | Create an agent worktree and clone proof dependencies onto new inodes — *agent worktree construction requires the dev binary* |
+
+#### `dev.beta6` — Preflight a beta6 bootstrap serve tree
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev beta6 verify` | ready | read / read / operator · maintenance/high | **`source_dir`**, `network` | `zcl.dev_beta6_verify.v1` | `z23 dev beta6 verify /srv/beta6-serve --network=main` | Verify a beta6 serve tree without arming a running node |
 
 #### `dev.fleet.mind` — The node's resident index owner, and what to ask it
 

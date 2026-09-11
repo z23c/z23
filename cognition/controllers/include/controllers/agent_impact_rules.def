@@ -3221,3 +3221,6 @@ AGENT_IMPACT_RULE("tools/command/native_zcode_work_map.c|tools/command/native_zc
  * the leaf's group and the lint gates, because a row that stops being true
  * is exactly what this is here to catch. */
 AGENT_IMPACT_RULE("engine/composition/facts/*|tools/command/native_dev_orient.c|tools/lint/check_orient_facts.sh|tests/harness/src/test_dev_orient.c", "dev_orient make_lint_gates")
+/* dev.beta6.verify: the standalone-process preflight leaf calling the real
+ * beta6_bs_arm(). */
+AGENT_IMPACT_RULE("tools/command/native_dev_beta6_verify.c|tests/harness/src/test_dev_beta6_verify.c", "dev_beta6_verify make_lint_gates")

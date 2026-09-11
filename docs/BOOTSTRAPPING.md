@@ -238,6 +238,12 @@ service keeps advertising `NODE_BOOTSTRAP`. Re-bake into a new, differently
 named directory (see below) and re-point `-beta6-bootstrap-source` instead of
 updating one in place.
 
+Before arming a real node, `z23 dev beta6 verify <absolute-source-dir>
+[--network=main]` runs this exact preflight — the stray-entry refusal above,
+then the same `.anchor`/`.meta` resolution — in a standalone process and
+prints the resolved manifest, so a bad tree is caught without ever touching a
+running node's own armed state.
+
 ### Producing the snapshot
 
 z23 does not mint a beta6-compatible snapshot itself; the source tree comes

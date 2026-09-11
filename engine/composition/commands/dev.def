@@ -1970,3 +1970,33 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_agent_mail,
     "agent mail is a development-lane coordination surface",
     "z23-dev dev agent mail")
+
+/* ── dev.beta6 ─────────────────────────────────────────────────────────────
+ * Preflight for the optional beta6 bootstrap-snapshot server
+ * (engine/services/src/beta6_bootstrap_serve.c, docs/BOOTSTRAPPING.md). */
+ZCL_COMMAND_BRANCH("dev.beta6", "dev",
+                   "Preflight a beta6 bootstrap serve tree",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_READY_READ(
+    "dev.beta6.verify", "dev.beta6", "",
+    "Verify a beta6 serve tree without arming a running node",
+    "The exact beta6_bs_arm() preflight boot runs, called from this "
+    "standalone process only: refuses a top level holding anything besides "
+    "blocks/ and chainstate/ before touching the anchor or hashing a byte, "
+    "then arms, reports the resolved manifest (version, height, "
+    "block_tip_height, file_count, snapshot_bytes, which sidecar resolved "
+    "it, and its encoded size against the one-P2P-message cap), and "
+    "disarms. A running node's own armed state is a separate process's "
+    "memory and is never read or written.", 0,
+    "beta6,bootstrap,verify,serve,anchor,snapshot,fastsync",
+    "zcl.dev_beta6_verify_input.v1", "zcl.dev_beta6_verify.v1",
+    "source_dir,network", "source_dir",
+    "z23 dev beta6 verify /srv/beta6-serve --network=main",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_MAINTENANCE,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT |
+        ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_beta6_verify)

@@ -2921,6 +2921,15 @@ void zcl_native_fleet_enrol_dispatch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ── beta6 bootstrap serve-tree verifier
+ * (tools/command/native_dev_beta6_verify.c). Runs the real beta6_bs_arm()
+ * preflight against a candidate serve directory in this process only, then
+ * disarms; never touches a running node's own armed state. Bound by
+ * engine/composition/commands/dev.def. */
+void zcl_native_handle_dev_beta6_verify(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 #ifdef __cplusplus
 }
 #endif
