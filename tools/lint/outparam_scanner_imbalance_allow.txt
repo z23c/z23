@@ -17,9 +17,3 @@
 # matched braces (duplicate the two lines; each branch then reads as a whole
 # statement). This list exists only for a file another in-flight lane already
 # owns, where a second writer would collide.
-#
-# tools/command/native_dev_command.c is being brace-balanced by the lane
-# landing "Give #if branches matched braces so the complexity scanner sees ten
-# hidden functions"; that lane is the sole writer of the file, so this lane
-# cannot touch it. Delete this entry with that lane's landing.
-tools/command/native_dev_command.c 1
