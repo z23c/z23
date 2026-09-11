@@ -14,6 +14,25 @@
  * preceded by an identifier other than if/for/while/switch; prototypes end
  * in ; and never open a body. Preprocessor lines are lexed for comments
  * and literals but contribute neither decision points nor braces.
+ * Operators: && and || each add one decision point, and only when the two
+ * operator characters are ADJACENT in the source. The pairing is never
+ * carried across any other character, so `f(&x); if (a & b)` and
+ * `g(&p, &q)` add nothing; a lone & or | (address-of, bitwise), &= and |=,
+ * and &&= / ||= add nothing either. Literals and comments are skipped
+ * before operator scanning, so && inside a string or a comment is invisible.
+ * Preprocessor conditionals: EVERY branch of a #if / #ifdef / #ifndef
+ * region is read and every decision point in it is counted, so no branch of
+ * real code is ever invisible to the cap. Only the STRUCTURE — brace and
+ * paren depth, and the declarator head being assembled — is taken from the
+ * FIRST branch: each later branch restarts from the depth the region opened
+ * at, and the #endif resumes at the depth the first branch reached. Without
+ * that, branches that open or close different numbers of braces would
+ * desynchronise the depth and glue the whole rest of the file onto one
+ * function. Conditions are never evaluated. A region whose branches do not
+ * all end at the same brace and paren depth has no single structure to
+ * resume from; rather than silently mis-attribute the code after the
+ * #endif, the gate fails on that file and names the #if line. Nesting is a
+ * stack, so an inner region resolves before its outer one.
  * Baseline semantics (only-gets-simpler ratchet): an over-cap function not
  * pinned fails; a pin whose function grew fails; a pin whose function
  * shrank fails and asks for the ratchet-down; a pin for a function that no
@@ -44,8 +63,35 @@ static const char k_cyc_ls[] = "git ls-files -z -- '*.c'";
  * or an `if` inside a comment counts nothing. Brace depth finds function
  * bodies; the declarator head is tracked only at file scope. */
 
+/* The structural half of the lexer state: what a preprocessor branch may
+ * not leak into the branch after it. The decision count m is deliberately
+ * NOT here — decisions accumulate across every branch, so no real branching
+ * is hidden from the cap. */
+struct cyc_sp {
+    int brace, paren;
+    int in_func, func_line;
+    char func_name[CYC_NAME];
+    int head_ok, head_line;
+    char head_name[CYC_NAME];
+    char cand[CYC_NAME];
+    int cand_ok, cand_line;
+    int last_sig;
+    char last_tok[CYC_NAME];
+};
+
+/* One open #if/#ifdef/#ifndef region. */
+enum { CYC_PP_MAX = 64 };
+struct cyc_reg {
+    struct cyc_sp entry;   /* structure where the region opened */
+    struct cyc_sp first;   /* structure where its first branch ended */
+    int first_done;
+    int line;              /* the #if line, for the failure message */
+};
+
 struct cyc_lx {
     int state, esc, pp, sol;
+    int ppc_depth;         /* #if/#ifdef/#ifndef nesting depth */
+    struct cyc_reg reg[CYC_PP_MAX];
     int brace, paren;
     int in_func, m, func_line;
     char func_name[CYC_NAME];
@@ -57,13 +103,166 @@ struct cyc_lx {
     char head_name[CYC_NAME];
     char cand[CYC_NAME];
     int cand_ok, cand_line;
-    int amp, bar;
 };
 
 static int cyc_is_ident(int c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
         || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Characters the lexer must not count: a preprocessor directive line
+ * contributes neither braces, parens, nor decision points. */
+static int cyc_off(const struct cyc_lx *lx)
+{
+    return lx->pp;
+}
+
+/* ── preprocessor conditionals ───────────────────────────────────────────
+ * Decisions come from every branch; structure comes from the first one.
+ * #if/#ifdef/#ifndef pushes a region and snapshots the structure; #else and
+ * #elif end the running branch and restore the snapshot; #endif ends the
+ * last branch and resumes at the structure the first branch reached.
+ * Conditions are never evaluated. */
+enum { PPC_NONE = 0, PPC_OPEN, PPC_ELSE, PPC_END };
+
+/* Copy the directive word of a `# word ...` line into out. Returns 0 when
+ * the line is not a directive. */
+static int cyc_pp_word(const char *line, ssize_t n, char *out, size_t cap)
+{
+    ssize_t i = 0;
+    while (i < n && (line[i] == ' ' || line[i] == '\t'))
+        i++;
+    if (i >= n || line[i] != '#')
+        return 0;
+    i++;
+    while (i < n && (line[i] == ' ' || line[i] == '\t'))
+        i++;
+    size_t k = 0;
+    while (i < n && cyc_is_ident((unsigned char)line[i]) && k + 1 < cap)
+        out[k++] = line[i++];
+    out[k] = '\0';
+    return 1;
+}
+
+static int cyc_pp_kind(const char *w)
+{
+    static const char *const k_open[] = { "if", "ifdef", "ifndef", NULL };
+    static const char *const k_else[] = { "else", "elif", "elifdef",
+                                          "elifndef", NULL };
+    for (int i = 0; k_open[i]; i++)
+        if (strcmp(w, k_open[i]) == 0)
+            return PPC_OPEN;
+    for (int i = 0; k_else[i]; i++)
+        if (strcmp(w, k_else[i]) == 0)
+            return PPC_ELSE;
+    return strcmp(w, "endif") == 0 ? PPC_END : PPC_NONE;
+}
+
+static void cyc_sp_save(const struct cyc_lx *lx, struct cyc_sp *s)
+{
+    s->brace = lx->brace;
+    s->paren = lx->paren;
+    s->in_func = lx->in_func;
+    s->func_line = lx->func_line;
+    memcpy(s->func_name, lx->func_name, sizeof s->func_name);
+    s->head_ok = lx->head_ok;
+    s->head_line = lx->head_line;
+    memcpy(s->head_name, lx->head_name, sizeof s->head_name);
+    memcpy(s->cand, lx->cand, sizeof s->cand);
+    s->cand_ok = lx->cand_ok;
+    s->cand_line = lx->cand_line;
+    s->last_sig = lx->last_sig;
+    memcpy(s->last_tok, lx->last_tok, sizeof s->last_tok);
+}
+
+static void cyc_sp_load(struct cyc_lx *lx, const struct cyc_sp *s)
+{
+    lx->brace = s->brace;
+    lx->paren = s->paren;
+    lx->in_func = s->in_func;
+    lx->func_line = s->func_line;
+    memcpy(lx->func_name, s->func_name, sizeof lx->func_name);
+    lx->head_ok = s->head_ok;
+    lx->head_line = s->head_line;
+    memcpy(lx->head_name, s->head_name, sizeof lx->head_name);
+    memcpy(lx->cand, s->cand, sizeof lx->cand);
+    lx->cand_ok = s->cand_ok;
+    lx->cand_line = s->cand_line;
+    lx->last_sig = s->last_sig;
+    memcpy(lx->last_tok, s->last_tok, sizeof lx->last_tok);
+}
+
+static int cyc_pp_fail(const char *path, int line, const char *what)
+{
+    char msg[1024];
+    if (ovf(snprintf(msg, sizeof msg, "%s:%d: %s", path, line, what),
+            sizeof msg))
+        return 2;
+    return die("z23-lint: %s\n", msg);
+}
+
+static int cyc_pp_open(struct cyc_lx *lx, const char *path, int lineno)
+{
+    if (lx->ppc_depth >= CYC_PP_MAX)
+        return cyc_pp_fail(path, lineno,
+                           "preprocessor conditionals nest too deeply for "
+                           "the complexity gate");
+    struct cyc_reg *r = &lx->reg[lx->ppc_depth++];
+    memset(r, 0, sizeof *r);
+    cyc_sp_save(lx, &r->entry);
+    r->line = lineno;
+    return 0;
+}
+
+/* End the branch that is running in the innermost region. The first branch
+ * defines the structure the region resumes at; a later branch that ends at
+ * a different brace or paren depth leaves the gate no defensible way to
+ * attribute what follows the #endif, so it fails the file. */
+static int cyc_pp_branch_end(struct cyc_lx *lx, const char *path)
+{
+    struct cyc_reg *r = &lx->reg[lx->ppc_depth - 1];
+    if (!r->first_done) {
+        cyc_sp_save(lx, &r->first);
+        r->first_done = 1;
+        return 0;
+    }
+    if (lx->brace != r->first.brace || lx->paren != r->first.paren)
+        return cyc_pp_fail(path, r->line,
+                           "preprocessor branches end at different brace or "
+                           "paren depths; balance the branches so the "
+                           "complexity gate can attribute the code after "
+                           "the #endif");
+    return 0;
+}
+
+/* Called once per physical line, before the characters are fed, so the
+ * directive is classified before the code-state scanner marks it pp. A
+ * directive inside a comment or spliced onto a previous line is not one. */
+static int cyc_pp_cond(struct cyc_lx *lx, const char *path, const char *line,
+                       ssize_t n, int lineno)
+{
+    char w[16];
+    if (lx->state != LX_CODE || lx->pp)
+        return 0;
+    if (!cyc_pp_word(line, n, w, sizeof w))
+        return 0;
+    int kind = cyc_pp_kind(w);
+    if (kind == PPC_OPEN)
+        return cyc_pp_open(lx, path, lineno);
+    if (kind == PPC_NONE || lx->ppc_depth == 0)
+        return 0;          /* a stray #else/#endif pairs with nothing */
+    int rc = cyc_pp_branch_end(lx, path);
+    if (rc)
+        return rc;
+    struct cyc_reg *r = &lx->reg[lx->ppc_depth - 1];
+    if (kind == PPC_ELSE) {
+        cyc_sp_load(lx, &r->entry);
+        return 0;
+    }
+    cyc_sp_load(lx, &r->first);
+    lx->ppc_depth--;
+    return 0;
 }
 
 static int cyc_is_kw(const char *t, const char *kw)
@@ -77,7 +276,7 @@ static void cyc_tok_end(struct cyc_lx *lx)
         return;
     if (!lx->tok_ovf) {
         lx->tok[lx->toklen] = '\0';
-        if (lx->in_func && !lx->pp
+        if (lx->in_func && !cyc_off(lx)
             && (cyc_is_kw(lx->tok, "if") || cyc_is_kw(lx->tok, "for")
                 || cyc_is_kw(lx->tok, "while") || cyc_is_kw(lx->tok, "case")))
             lx->m++;
@@ -103,10 +302,13 @@ static int cyc_close_func(struct cyc_lx *lx, const struct cyc_emit *em)
     return rc;
 }
 
-/* The same name may be defined more than once in one file (platform #ifdef
- * variants — the lexer parses every branch on every host, so occurrence
- * order is stable). Repeat definitions are keyed name#2, name#3, ... so a
- * baseline pin stays an exact path:function:M match. The name table is
+/* The same name may be defined more than once in one file — an #ifdef/#else
+ * variant pair is the common case, and every branch is read (see the
+ * header), so both variants are reported and each is measured on its own.
+ * A repeat is keyed name#2, name#3, ... in scan order, which is stable on
+ * every host because no condition is ever evaluated and no branch is ever
+ * skipped, so a baseline pin stays an exact path:function:M match. The name
+ * table is
  * static storage reset per file (the runtime is single-threaded); it must
  * hold every distinct function name in the largest translation unit. */
 enum { CYC_OCC_MAX = 8192 };
@@ -165,7 +367,7 @@ static void cyc_ident_char(struct cyc_lx *lx, char c)
 
 static void cyc_c_lparen(struct cyc_lx *lx, int lineno)
 {
-    if (!lx->pp && lx->brace == 0 && lx->paren == 0) {
+    if (!cyc_off(lx) && lx->brace == 0 && lx->paren == 0) {
         lx->cand_ok = lx->last_sig == 'i'
             && !cyc_is_kw(lx->last_tok, "if")
             && !cyc_is_kw(lx->last_tok, "for")
@@ -174,13 +376,13 @@ static void cyc_c_lparen(struct cyc_lx *lx, int lineno)
         memcpy(lx->cand, lx->last_tok, sizeof lx->cand);
         lx->cand_line = lineno;
     }
-    if (!lx->pp)
+    if (!cyc_off(lx))
         lx->paren++;
 }
 
 static void cyc_c_rparen(struct cyc_lx *lx)
 {
-    if (!lx->pp && lx->paren > 0) {
+    if (!cyc_off(lx) && lx->paren > 0) {
         lx->paren--;
         if (lx->brace == 0 && lx->paren == 0) {
             lx->head_ok = lx->cand_ok;
@@ -192,7 +394,7 @@ static void cyc_c_rparen(struct cyc_lx *lx)
 
 static void cyc_c_lbrace(struct cyc_lx *lx)
 {
-    if (!lx->pp && lx->brace == 0) {
+    if (!cyc_off(lx) && lx->brace == 0) {
         if (lx->head_ok && lx->last_sig == ')') {
             lx->in_func = 1;
             lx->m = 1;
@@ -201,13 +403,13 @@ static void cyc_c_lbrace(struct cyc_lx *lx)
         }
         lx->head_ok = 0;
     }
-    if (!lx->pp)
+    if (!cyc_off(lx))
         lx->brace++;
 }
 
 static int cyc_c_rbrace(struct cyc_lx *lx, const struct cyc_emit *em)
 {
-    if (lx->pp)
+    if (cyc_off(lx))
         return 0;
     lx->brace--;
     if (lx->in_func && lx->brace == 0)
@@ -217,47 +419,52 @@ static int cyc_c_rbrace(struct cyc_lx *lx, const struct cyc_emit *em)
 
 static void cyc_c_semi(struct cyc_lx *lx)
 {
-    if (!lx->pp && lx->brace == 0 && lx->paren == 0)
+    if (!cyc_off(lx) && lx->brace == 0 && lx->paren == 0)
         lx->head_ok = 0;
 }
 
-static void cyc_c_amp(struct cyc_lx *lx)
+/* `&&` / `||`: one decision point, and only for two ADJACENT operator
+ * characters. A lone `&` or `|` (address-of, bitwise) counts nothing, and
+ * nothing is ever paired across an intervening character, so `f(&x); if (a
+ * & b)` and `g(&p, &q)` count nothing. `&=` and `|=` are not doubled
+ * operators at all; `&&=` / `||=` are rejected by the trailing `=` test.
+ * The second operator character is consumed here so `&&&` counts once. */
+static void cyc_c_logic(struct cyc_lx *lx, const char *line, ssize_t n,
+                        ssize_t *i, char c)
 {
-    if (lx->amp && lx->in_func && !lx->pp)
+    if (*i + 1 >= n || line[*i + 1] != c)
+        return;
+    (*i)++;
+    if (*i + 1 < n && line[*i + 1] == '=')
+        return;
+    if (lx->in_func && !cyc_off(lx))
         lx->m++;
-    lx->amp = !lx->amp;
-    lx->bar = 0;
-}
-
-static void cyc_c_bar(struct cyc_lx *lx)
-{
-    if (lx->bar && lx->in_func && !lx->pp)
-        lx->m++;
-    lx->bar = !lx->bar;
-    lx->amp = 0;
 }
 
 static void cyc_c_quest(struct cyc_lx *lx)
 {
-    if (lx->in_func && !lx->pp)
+    if (lx->in_func && !cyc_off(lx))
         lx->m++;
-    lx->amp = 0;
-    lx->bar = 0;
 }
 
 static void cyc_c_other(struct cyc_lx *lx)
 {
-    lx->amp = 0;
-    lx->bar = 0;
-    if (!lx->pp && lx->brace == 0 && lx->paren == 0)
+    if (!cyc_off(lx) && lx->brace == 0 && lx->paren == 0)
         lx->head_ok = 0;
 }
 
+struct cyc_span {
+    const char *line;
+    ssize_t n;
+    ssize_t *i;          /* cursor; an operator handler may consume ahead */
+    int lineno;
+};
+
 static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
-                     char c, int lineno)
+                     const struct cyc_span *s, char c)
 {
     switch (c) {
-    case '(': cyc_c_lparen(lx, lineno); break;
+    case '(': cyc_c_lparen(lx, s->lineno); break;
     case ')': cyc_c_rparen(lx); break;
     case '{': cyc_c_lbrace(lx); break;
     case '}': {
@@ -267,8 +474,8 @@ static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
         break;
     }
     case ';': cyc_c_semi(lx); break;
-    case '&': cyc_c_amp(lx); break;
-    case '|': cyc_c_bar(lx); break;
+    case '&':
+    case '|': cyc_c_logic(lx, s->line, s->n, s->i, c); break;
     case '?': cyc_c_quest(lx); break;
     default: cyc_c_other(lx); break;
     }
@@ -278,7 +485,7 @@ static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
 
 /* Feed one code-state character. Returns 0 or the callback/die rc. */
 static int cyc_code_char(struct cyc_lx *lx, const struct cyc_emit *em,
-                         char c, int lineno)
+                         const struct cyc_span *s, char c)
 {
     if (lx->sol && c == '#')
         lx->pp = 1;
@@ -290,7 +497,7 @@ static int cyc_code_char(struct cyc_lx *lx, const struct cyc_emit *em,
     if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
         return 0;
     lx->sol = 0;
-    return cyc_punct(lx, em, c, lineno);
+    return cyc_punct(lx, em, s, c);
 }
 
 /* End-of-line: a trailing backslash splices line comments, literals, and
@@ -367,7 +574,11 @@ static int cyc_open_nc(struct cyc_lx *lx, const char *line, ssize_t n,
 static int cyc_feed_line(struct cyc_lx *lx, const struct cyc_emit *em,
                          const char *line, ssize_t n, int lineno)
 {
+    int pprc = cyc_pp_cond(lx, em->path, line, n, lineno);
+    if (pprc)
+        return pprc;
     for (ssize_t i = 0; i < n; i++) {
+        struct cyc_span s = { line, n, &i, lineno };
         char c = line[i];
         if (c == '\0')
             continue;
@@ -383,7 +594,7 @@ static int cyc_feed_line(struct cyc_lx *lx, const struct cyc_emit *em,
             continue;
         if (cyc_open_nc(lx, line, n, &i, c))
             continue;
-        int rc = cyc_code_char(lx, em, c, lineno);
+        int rc = cyc_code_char(lx, em, &s, c);
         if (rc)
             return rc;
     }
@@ -818,6 +1029,24 @@ static int cyc_st_one(const char *text, const char *name, int m)
     return 0;
 }
 
+/* Scan text; want exactly two functions, in order, with those metrics. */
+static int cyc_st_two(const char *text, const char *n1, int m1,
+                      const char *n2, int m2)
+{
+    struct cyc_st_acc a;
+    memset(&a, 0, sizeof a);
+    if (cyc_scan_text(text, "st.c", cyc_st_collect, &a))
+        return 1;
+    if (a.n != 2 || strcmp(a.name[0], n1) != 0 || a.m[0] != m1
+        || strcmp(a.name[1], n2) != 0 || a.m[1] != m2) {
+        fprintf(stderr, "check_cyclomatic_complexity selftest: want %s M=%d "
+                "then %s M=%d, got n=%d (first %s M=%d)\n", n1, m1, n2, m2,
+                a.n, a.n ? a.name[0] : "-", a.n ? a.m[0] : 0);
+        return 1;
+    }
+    return 0;
+}
+
 static int cyc_st_none(const char *text)
 {
     struct cyc_st_acc a;
@@ -832,9 +1061,169 @@ static int cyc_st_none(const char *text)
     return 0;
 }
 
-static int cyc_st_metric(void)
+/* && and || count once, and only when the two characters are adjacent. */
+static int cyc_st_logic_ops(void)
 {
     int bad = 0;
+    /* address-of and bitwise & never pair: one decision here, the if */
+    bad |= cyc_st_one("int amp_addr(int a, int b)\n{\n"
+                      "    f(&a);\n"
+                      "    g(&a, &b);\n"
+                      "    if (a & b) {\n        return 1;\n    }\n"
+                      "    return 0;\n}\n", "amp_addr", 2);
+    /* a real && is one decision on top of the if */
+    bad |= cyc_st_one("int amp_and(int a, int b)\n{\n"
+                      "    if (a && b)\n        return 1;\n"
+                      "    return 0;\n}\n", "amp_and", 3);
+    /* bitwise | never pairs with a later ||; the || is one decision */
+    bad |= cyc_st_one("int bar_or(int p, int q, int c, int d)\n{\n"
+                      "    int x = p | q;\n"
+                      "    if (c || d)\n        return x;\n"
+                      "    return 0;\n}\n", "bar_or", 3);
+    /* &=, |=, &&= and ||= are not decisions */
+    bad |= cyc_st_one("int assign_ops(int a, int b)\n{\n"
+                      "    a &= b;\n    a |= b;\n"
+                      "    return a;\n}\n", "assign_ops", 1);
+    return bad;
+}
+
+/* Every branch of a preprocessor conditional is counted; only the brace and
+ * paren structure comes from the first branch. */
+static int cyc_st_pp_cond(void)
+{
+    int bad = 0;
+    /* branches that each open a brace would desynchronise the depth and
+     * swallow every later function; the decisions in both branches count,
+     * and the if after the #endif belongs to the function it is written in */
+    bad |= cyc_st_two("int split_brace(int x)\n{\n"
+                      "#if ZCL_ALT\n"
+                      "    if (x > 0) {\n"
+                      "#else\n"
+                      "    if (x < 0) {\n"
+                      "#endif\n"
+                      "        x++;\n"
+                      "    }\n"
+                      "    if (x > 5)\n        x = 5;\n"
+                      "    return x;\n}\n"
+                      "int after_region(int y)\n{\n"
+                      "    if (y)\n        return 1;\n"
+                      "    return 0;\n}\n",
+                      "split_brace", 4, "after_region", 2);
+    /* #if inside #if, in both the first and a later branch: the region
+     * stack pairs each #endif with its own opener */
+    bad |= cyc_st_two("int nest(int x)\n{\n"
+                      "#if A\n"
+                      "#if B\n"
+                      "    if (x) x++;\n"
+                      "#endif\n"
+                      "    if (x) x--;\n"
+                      "#else\n"
+                      "#if C\n"
+                      "    if (x) x += 2;\n"
+                      "#endif\n"
+                      "    if (x) x += 3;\n"
+                      "#endif\n"
+                      "    return x;\n}\n"
+                      "int tail(int y) { if (y) return 1; return 0; }\n",
+                      "nest", 5, "tail", 2);
+    /* an #elif chain: every arm is measured, the last arm restores the
+     * first arm's structure, and the next function is still found */
+    bad |= cyc_st_two("int elifs(int x)\n{\n"
+                      "#if A\n"
+                      "    if (x) x += 1;\n"
+                      "#elif B\n"
+                      "    if (x) x += 2;\n"
+                      "#elifdef C\n"
+                      "    if (x) x += 3;\n"
+                      "#else\n"
+                      "    if (x) x += 4;\n"
+                      "#endif\n"
+                      "    return x;\n}\n"
+                      "int elif_tail(int y) { if (y) return 1; return 0; }\n",
+                      "elifs", 5, "elif_tail", 2);
+    /* #ifndef with no #else at all: the single branch is the structure */
+    bad |= cyc_st_two("int noelse(int x)\n{\n"
+                      "#ifndef ZCL_ALT\n"
+                      "    if (x) x++;\n"
+                      "#endif\n"
+                      "    if (x) x--;\n"
+                      "    return x;\n}\n"
+                      "int noelse_tail(int y) { if (y) return 1; "
+                      "return 0; }\n",
+                      "noelse", 3, "noelse_tail", 2);
+    /* the #else definition of a name is a second definition, keyed name#2 */
+    bad |= cyc_st_two("#ifdef ZCL_ALT\n"
+                      "int dup_fn(int x) { return x ? 1 : 0; }\n"
+                      "#else\n"
+                      "int dup_fn(int x) { if (x) return x ? 1 : 0; "
+                      "return 0; }\n"
+                      "#endif\n", "dup_fn", 2, "dup_fn#2", 3);
+    /* a name defined twice outside any conditional still keys as name#2 */
+    bad |= cyc_st_two("int twice(int x) { return x ? 1 : 0; }\n"
+                      "int twice(int x) { if (x) return 1; return 0; }\n",
+                      "twice", 2, "twice#2", 2);
+    return bad;
+}
+
+/* A `#endif` inside a block comment, a line comment, or a continued string
+ * literal is not a directive: honouring one would close the region early,
+ * leave the later braces unpaired, and swallow the next function. */
+static int cyc_st_pp_hidden(void)
+{
+    return cyc_st_two("int cmt_pp(int x)\n{\n"
+                      "#if ZCL_ALT\n"
+                      "    /* #endif */\n"
+                      "    /*\n"
+                      "#endif\n"
+                      "     */\n"
+                      "    // #endif\n"
+                      "    const char *s = \"\\\n"
+                      "#endif\\\n"
+                      "\";\n"
+                      "    if (x) {\n"
+                      "#else\n"
+                      "    if (x) {\n"
+                      "#endif\n"
+                      "        x++;\n"
+                      "    }\n"
+                      "    return (int)s[x];\n}\n"
+                      "int cmt_tail(int y)\n{\n"
+                      "    if (y)\n        return 1;\n"
+                      "    return 0;\n}\n",
+                      "cmt_pp", 3, "cmt_tail", 2);
+}
+
+/* Branches that do not end at the same depth have no single structure to
+ * resume from. The gate refuses the file instead of silently attributing
+ * every later function to this one. */
+static int cyc_st_pp_desync(void)
+{
+    struct cyc_st_acc a;
+    memset(&a, 0, sizeof a);
+    fputs("check_cyclomatic_complexity selftest: the next z23-lint line is "
+          "expected\n", stderr);
+    if (cyc_scan_text("int lopsided(int x)\n{\n"
+                      "#if ZCL_WIN\n"
+                      "    if (x) {\n"
+                      "    return 1;\n"
+                      "#else\n"
+                      "    if (x) { return 2; }\n"
+                      "#endif\n"
+                      "    return 0;\n}\n"
+                      "int swallowed(int y)\n{\n"
+                      "    if (y)\n        return 1;\n"
+                      "    return 0;\n}\n",
+                      "st.c", cyc_st_collect, &a))
+        return 0;
+    fputs("check_cyclomatic_complexity selftest: unbalanced preprocessor "
+          "branches were not refused\n", stderr);
+    return 1;
+}
+
+static int cyc_st_metric(void)
+{
+    int bad = cyc_st_logic_ops() | cyc_st_pp_cond() | cyc_st_pp_hidden()
+        | cyc_st_pp_desync();
     /* exactly at the cap passes the cap: 14 decision points -> M=15 */
     bad |= cyc_st_one("int cap15(int x)\n{\n"
                       "    int r = 0;\n"
@@ -901,24 +1290,6 @@ static int cyc_st_metric(void)
                        "enum { RED, GREEN };\n"
                        "int arr[3] = { 1, 2, 3 };\n");
     bad |= cyc_st_none("typedef int (*cmp_fn)(const void *, const void *);\n");
-    /* a repeated definition in one file keys as name#2 in scan order */
-    {
-        struct cyc_st_acc a;
-        memset(&a, 0, sizeof a);
-        if (cyc_scan_text("#ifdef ZCL_ALT\n"
-                          "int dup_fn(int x) { return x ? 1 : 0; }\n"
-                          "#else\n"
-                          "int dup_fn(int x) { if (x) return x ? 1 : 0; "
-                          "return 0; }\n"
-                          "#endif\n", "st.c", cyc_st_collect, &a))
-            bad |= 1;
-        else if (a.n != 2 || strcmp(a.name[0], "dup_fn") != 0 || a.m[0] != 2
-                 || strcmp(a.name[1], "dup_fn#2") != 0 || a.m[1] != 3) {
-            fprintf(stderr, "check_cyclomatic_complexity selftest: repeat "
-                    "definition keying wrong (n=%d)\n", a.n);
-            bad |= 1;
-        }
-    }
     return bad;
 }
 
