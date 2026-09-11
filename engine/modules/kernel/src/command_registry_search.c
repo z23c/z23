@@ -28,6 +28,10 @@ static bool contains_folded(const char *haystack, const char *needle)
 
 static bool normalize_query(const char *query, char out[129])
 {
+    /* Out-param honesty: zero before the first fallible check so a caller
+     * that reads out after a false return sees zeros, never uninitialized
+     * stack — same discipline as dev_vcs_seal_hash(). */
+    memset(out, 0, 129);
     if (!query)
         return false;
     size_t pos = 0;
@@ -242,7 +246,7 @@ size_t zcl_command_registry_search_json(
     const struct zcl_command_registry *registry, const char *query, char *out,
     size_t out_size)
 {
-    char normalized[129];
+    char normalized[129] = {0};
     if (!registry || !normalize_query(query, normalized))
         return 0;
     struct search_hit hits[ZCL_COMMAND_SEARCH_LIMIT] = {0};

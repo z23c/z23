@@ -4731,6 +4731,10 @@ static bool dev_vcs_seal_hash(struct vcs_repo *r, struct vcs_index *idx,
                               const char *root, uint8_t new_sealset[32],
                               struct zcl_command_reply *reply)
 {
+    /* Out-param honesty: zero before the first fallible check so a caller
+     * that reads new_sealset after a false return (or after a static
+     * analyzer decides it might) sees zeros, never uninitialized stack. */
+    memset(new_sealset, 0, 32);
     /* Compute the sealset the worktree would produce right now — the exact
      * same computation vcs_snapshot() performs before its own seal check. */
     struct vcs_manifest m;
@@ -4772,7 +4776,7 @@ static void dev_vcs_seal_grant_apply(struct vcs_repo *r, struct vcs_index *idx,
                                      const char *root, const char *reason,
                                      struct zcl_command_reply *reply)
 {
-    uint8_t new_sealset[32];
+    uint8_t new_sealset[32] = {0};
     if (!dev_vcs_seal_hash(r, idx, root, new_sealset, reply))
         return;
     uint8_t old_pin[32] = {0};
