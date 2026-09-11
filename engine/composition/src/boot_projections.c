@@ -15,6 +15,8 @@
  */
 
 #include "config/boot_internal.h"
+#include "config/boot_fast_restart.h"
+#include "platform/file_metadata.h"
 #include "storage/coins_kv.h"
 #include "storage/event_log.h"
 #include "storage/event_log_singleton.h"
@@ -30,6 +32,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 static event_log_t               *g_phase4_event_log = NULL;
 static mempool_projection_t      *g_phase4_mempool_projection = NULL;
@@ -122,10 +125,65 @@ block_index_projection_t *boot_ensure_block_index_projection(const char *datadir
     return g_phase4_block_index_projection;
 }
 
+/* Should THIS boot defer progress.kv's integrity scan to the background?
+ *
+ * The same answer node.db gives (boot_shutdown_marker_quick_check_probe in
+ * boot_shutdown_marker.c:379-411), for the same reason: an EXISTING store
+ * with no verified-clean binding is the case where quick_check costs hours
+ * of uninterruptible I/O and holds listen/READY hostage, and a fresh or
+ * absent file is the case where it costs nothing and the cheap blocking
+ * check plus quarantine-rebuild is strictly better. Storage class is NOT
+ * part of this decision — exactly as for node.db. The class decides how the
+ * background scan is PACED (config/boot_fast_restart.h), not whether the
+ * boot thread runs it: a 2.36 GB quick_check on flash still cost 60+ s of
+ * unreachable RPC, and no disk is fast enough to justify holding READY. */
+static bool boot_projection_defer_quick_check(const char *path)
+{
+    struct platform_file_metadata metadata;
+    return path &&
+           platform_file_metadata_read(path, &metadata) ==
+               PLATFORM_FILE_METADATA_OK &&
+           metadata.size > 0;
+}
+
+static void boot_projection_scan_result(bool ok, void *ctx)
+{
+    (void)ctx;
+    projection_store_integrity_scan_result(ok);
+}
+
+void boot_start_projection_bg_quick_check(void)
+{
+    char path[PROJECTION_STORE_PATH_MAX];
+    if (!projection_store_integrity_pending(path, sizeof(path)))
+        return;
+
+    struct boot_bg_quick_check_target target;
+    memset(&target, 0, sizeof(target));
+    int n = snprintf(target.path, sizeof(target.path), "%s", path);
+    snprintf(target.label, sizeof(target.label), "progress.kv");
+    snprintf(target.kind, sizeof(target.kind),
+             "deferred projection scan (no clean-close receipt)");
+    target.on_result = boot_projection_scan_result;
+    /* A spawn that fails reports NOTHING: the store stays unverified, writes
+     * no receipt at close, and the next boot scans again. Claiming either
+     * verdict here would be inventing evidence. */
+    if (n < 0 || (size_t)n >= sizeof(target.path) ||
+        !boot_bg_quick_check_start(&target))
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] projection integrity scan NOT started for %s; it "
+                "runs again on the next start\n", path);
+}
+
 void boot_start_projection_storage(const char *datadir)
 {
     if (!datadir || !datadir[0])
         return;
+
+    /* Boot ceremony only: a plain projection_store_open (tests, tools) keeps
+     * the synchronous integrity gate it has always had. */
+    projection_store_set_quick_check_defer_probe(
+        boot_projection_defer_quick_check);
 
     /* Wave A2 (D4) split: open the SECOND handle to the already-open
      * progress.kv (progress_store opened it back in app_init), giving the

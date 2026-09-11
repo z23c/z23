@@ -15,6 +15,7 @@
 #include "crypto/sha3.h"
 #include "base/hex.h"
 
+#include "config/boot_fast_restart.h"
 #include "json/json.h"
 #include "storage/consensus_db.h"
 #include "storage/progress_store.h"
@@ -229,6 +230,234 @@ static int ps_count_corrupt_projection(const char *dir)
     }
     closedir(d);
     return n;
+}
+/* ── the projection integrity scan, off the boot thread ───────────────
+ *
+ * A 2.36 GB progress.kv with no clean-close receipt parked the boot thread
+ * inside one unpaced PRAGMA quick_check for 62 minutes, with RPC, P2P and
+ * sd_notify READY all downstream of it. These fixtures pin the fix and, just
+ * as importantly, pin what the fix must NOT do: skip the scan, shorten it,
+ * or let an unfinished scan be recorded as a clean close. */
+
+/* The boot ceremony's answer, stubbed: this file exists, so defer. */
+static bool ps_defer_probe_yes(const char *path)
+{
+    return path != NULL;
+}
+
+/* Seed a healthy projection store carrying one recognisable row, close it
+ * cleanly, then delete the receipt the close wrote — which is exactly the
+ * on-disk state a kill or a restart before projection_store_close leaves,
+ * and the state that arms the full scan. */
+static bool ps_seed_projection_without_receipt(const char *dir,
+                                               const char *fpath)
+{
+    char receipt[544];
+    snprintf(receipt, sizeof(receipt), "%s.clean", fpath);
+    if (!projection_store_open(dir))
+        return false;
+    sqlite3 *pdb = projection_store_db();
+    bool ok = pdb &&
+        sqlite3_exec(pdb, "CREATE TABLE IF NOT EXISTS proj_marker"
+                          "(k INTEGER PRIMARY KEY, v TEXT NOT NULL)",
+                     NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_exec(pdb, "INSERT OR REPLACE INTO proj_marker(k,v) "
+                          "VALUES (1,'MARKER-DEFERRED')",
+                     NULL, NULL, NULL) == SQLITE_OK;
+    projection_store_close();
+    (void)unlink(receipt);
+    return ok && access(fpath, F_OK) == 0;
+}
+
+/* Is the seeded marker row readable through the live handle? */
+static bool ps_projection_marker_present(void)
+{
+    sqlite3 *pdb = projection_store_db();
+    if (!pdb)
+        return false;
+    sqlite3_stmt *q = NULL;
+    if (sqlite3_prepare_v2(pdb, "SELECT v FROM proj_marker WHERE k=1", -1,
+                           &q, NULL) != SQLITE_OK)
+        return false;
+    bool found = sqlite3_step(q) == SQLITE_ROW;
+    sqlite3_finalize(q);
+    return found;
+}
+
+/* Garble one interior page of a SQLite file, leaving the header intact so
+ * quick_check walks far enough to find the damage. */
+static bool ps_corrupt_projection_page(const char *fpath)
+{
+    struct stat st;
+    if (stat(fpath, &st) != 0 || st.st_size <= 4096)
+        return false;
+    FILE *f = fopen(fpath, "r+b");
+    if (!f)
+        return false;
+    uint8_t garbage[4096];
+    memset(garbage, 0xEE, sizeof(garbage));
+    long span = (long)st.st_size - 4096;
+    size_t want = span > 4096 ? sizeof(garbage) : (size_t)span;
+    bool ok = fseek(f, 4096, SEEK_SET) == 0 &&
+              fwrite(garbage, 1, want, f) == want;
+    fclose(f);
+    return ok;
+}
+
+/* A healthy store with no receipt: the open returns with the store LIVE and
+ * the scan owed, not run. Consumers work while it is owed, and the verdict
+ * is what re-enables the fast-open receipt. */
+static int ps_test_projection_scan_deferred(void)
+{
+    int failures = 0;
+    char dir[256];
+    char fpath[512];
+    char pending[1024];
+    char receipt[544];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_defer");
+    snprintf(fpath, sizeof(fpath), "%s/progress.kv", dir);
+    snprintf(receipt, sizeof(receipt), "%s.clean", fpath);
+
+    PS_CHECK("proj defer: seed store without a receipt",
+             ps_seed_projection_without_receipt(dir, fpath));
+
+    projection_store_set_quick_check_defer_probe(ps_defer_probe_yes);
+    PS_CHECK("proj defer: open returns (boot thread not held by the scan)",
+             projection_store_open(dir));
+    PS_CHECK("proj defer: handle is live while the scan is owed",
+             projection_store_db() != NULL);
+    PS_CHECK("proj defer: scan is armed, not skipped",
+             projection_store_integrity_pending(pending, sizeof(pending)));
+    PS_CHECK("proj defer: scanner is pointed at progress.kv",
+             strstr(pending, "progress.kv") != NULL);
+    PS_CHECK("proj defer: projections still read while the scan is owed",
+             ps_projection_marker_present());
+    PS_CHECK("proj defer: nothing was quarantined on the boot thread",
+             ps_count_corrupt_projection(dir) == 0);
+
+    /* The real paced scanner, on the real file, through the production
+     * progress handler — the same call the post-READY thread makes. */
+    struct boot_bg_quick_check_pace pace;
+    memset(&pace, 0, sizeof(pace));
+    bool scan_ok = boot_fast_restart_bg_quick_check_scan_for_test(pending,
+                                                                  &pace);
+    PS_CHECK("proj defer: background scan answers ok on a healthy file",
+             scan_ok);
+    projection_store_integrity_scan_result(scan_ok);
+    PS_CHECK("proj defer: a reported verdict closes the pending scan",
+             !projection_store_integrity_pending(pending, sizeof(pending)));
+
+    projection_store_close();
+    PS_CHECK("proj defer: a completed clean scan earns the fast-open receipt",
+             access(receipt, F_OK) == 0);
+
+    projection_store_set_quick_check_defer_probe(NULL);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* An unfinished scan must never be cashed in as a clean close — otherwise
+ * deferring the scan would DELETE it on the next boot instead of moving it. */
+static int ps_test_projection_scan_unfinished(void)
+{
+    int failures = 0;
+    char dir[256];
+    char fpath[512];
+    char receipt[544];
+    char pending[1024];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_unfinished");
+    snprintf(fpath, sizeof(fpath), "%s/progress.kv", dir);
+    snprintf(receipt, sizeof(receipt), "%s.clean", fpath);
+
+    PS_CHECK("proj unfinished: seed store without a receipt",
+             ps_seed_projection_without_receipt(dir, fpath));
+    projection_store_set_quick_check_defer_probe(ps_defer_probe_yes);
+    PS_CHECK("proj unfinished: open defers the scan",
+             projection_store_open(dir) &&
+             projection_store_integrity_pending(pending, sizeof(pending)));
+
+    /* Shut down before the scanner ever reports (a kill, or a shutdown that
+     * cancelled the scan cooperatively). */
+    projection_store_close();
+    PS_CHECK("proj unfinished: no receipt is written for a scan that never "
+             "answered", access(receipt, F_OK) != 0);
+    PS_CHECK("proj unfinished: the next open re-arms the same scan",
+             projection_store_open(dir) &&
+             projection_store_integrity_pending(pending, sizeof(pending)));
+    projection_store_close();
+
+    projection_store_set_quick_check_defer_probe(NULL);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* The restart after a background finding: the armed verdict is honoured
+ * where nothing holds the file, and the node comes back on a fresh store. */
+static int ps_test_projection_scan_rebuild(const char *dir, const char *armed)
+{
+    int failures = 0;
+    PS_CHECK("proj bg quarantine: next open honours the armed verdict",
+             projection_store_open(dir));
+    PS_CHECK("proj bg quarantine: the corrupt file was renamed aside",
+             ps_count_corrupt_projection(dir) >= 1);
+    PS_CHECK("proj bg quarantine: the armed sidecar is consumed",
+             access(armed, F_OK) != 0);
+    PS_CHECK("proj bg quarantine: the store accepts writes again",
+             projection_store_db() != NULL);
+    PS_CHECK("proj bg quarantine: the fresh store re-derives (row is gone)",
+             !ps_projection_marker_present());
+    int before = ps_count_corrupt_projection(dir);
+    projection_store_close();
+    PS_CHECK("proj bg quarantine: a further open does not quarantine again",
+             projection_store_open(dir) &&
+             ps_count_corrupt_projection(dir) == before);
+    projection_store_close();
+    return failures;
+}
+
+/* A corrupt store found by the BACKGROUND scan must reach the same end state
+ * as the synchronous gate: writes refused at once, the file renamed aside,
+ * a fresh empty store in its place, projections re-derived. */
+static int ps_test_projection_scan_quarantine(void)
+{
+    int failures = 0;
+    char dir[256];
+    char fpath[512];
+    char armed[544];
+    char pending[1024];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_bg_quar");
+    snprintf(fpath, sizeof(fpath), "%s/progress.kv", dir);
+    snprintf(armed, sizeof(armed), "%s.quarantine", fpath);
+
+    PS_CHECK("proj bg quarantine: seed store without a receipt",
+             ps_seed_projection_without_receipt(dir, fpath));
+    PS_CHECK("proj bg quarantine: corrupt an interior page",
+             ps_corrupt_projection_page(fpath));
+
+    projection_store_set_quick_check_defer_probe(ps_defer_probe_yes);
+    PS_CHECK("proj bg quarantine: corrupt file still opens (scan deferred)",
+             projection_store_open(dir) &&
+             projection_store_integrity_pending(pending, sizeof(pending)));
+    PS_CHECK("proj bg quarantine: boot thread quarantined nothing",
+             ps_count_corrupt_projection(dir) == 0);
+
+    struct boot_bg_quick_check_pace pace;
+    memset(&pace, 0, sizeof(pace));
+    bool scan_ok = boot_fast_restart_bg_quick_check_scan_for_test(pending,
+                                                                  &pace);
+    PS_CHECK("proj bg quarantine: background scan DETECTS the corruption",
+             !scan_ok);
+    projection_store_integrity_scan_result(scan_ok);
+    PS_CHECK("proj bg quarantine: writes are refused the moment it is found",
+             projection_store_db() == NULL);
+    PS_CHECK("proj bg quarantine: the verdict is armed on disk for the next "
+             "start", access(armed, F_OK) == 0);
+    projection_store_close();
+
+    failures += ps_test_projection_scan_rebuild(dir, armed);
+    projection_store_set_quick_check_defer_probe(NULL);
+    test_cleanup_tmpdir(dir);
+    return failures;
 }
 
 int test_progress_store(void)
@@ -1212,6 +1441,12 @@ int test_progress_store(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+
+    /* The integrity scan, off the boot thread — each fixture is its own
+     * function so this one stays inside the complexity cap. */
+    failures += ps_test_projection_scan_deferred();
+    failures += ps_test_projection_scan_unfinished();
+    failures += ps_test_projection_scan_quarantine();
 
     printf("progress_store: %d failures\n", failures);
 

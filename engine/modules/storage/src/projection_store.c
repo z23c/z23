@@ -48,6 +48,12 @@
 
 #define PROJECTION_STORE_FILENAME "progress.kv"
 #define PROJECTION_CLEAN_RECEIPT_SUFFIX ".clean"
+/* Sidecar that carries a corruption verdict ACROSS a restart. Written when a
+ * deferred scan fails, when the live handle is already published and cannot
+ * be swapped; honoured (and consumed) by the next open, where nothing holds
+ * the file and the rename is safe. A SIGKILL between the two loses nothing:
+ * without a receipt the next boot scans again and reaches the same verdict. */
+#define PROJECTION_QUARANTINE_ARM_SUFFIX ".quarantine"
 #define PROJECTION_CLEAN_RECEIPT_MAGIC "ZCLPROJCLEAN"
 #define PROJECTION_CLEAN_RECEIPT_VERSION 2
 
@@ -64,6 +70,29 @@ static char g_vfs_name[SQLITE_VFS_DIR_NAME_MAX];
 static int g_dir_fd = -1;
 #endif
 static int64_t g_opened_at;
+
+/* ── integrity state for this open ────────────────────────────────────
+ * Three atomics, because the heartbeat/scanner threads read them while the
+ * boot thread publishes them and neither may block the other.
+ *   pending  — a scan was deferred and has not answered.
+ *   verified — THIS file has been proven intact this run (receipt matched,
+ *              synchronous gate passed, or the deferred scan said ok). It is
+ *              the only thing that entitles close() to publish a receipt: a
+ *              scan that never finished must never be cashed in as clean,
+ *              or the deferral would silently delete the check.
+ *   failed   — a scan came back with a finding; the handle is withheld. */
+static _Atomic bool g_integrity_pending;
+static _Atomic bool g_integrity_verified;
+static _Atomic bool g_integrity_failed;
+static int64_t g_integrity_started_ms;   /* under g_lock */
+static projection_quick_check_defer_probe_fn g_defer_probe;
+
+/* What this open will do about integrity, decided once. */
+enum projection_integrity_plan {
+    PROJECTION_INTEGRITY_SKIP = 0,  /* content-bound clean-close receipt   */
+    PROJECTION_INTEGRITY_SCAN_NOW,  /* blocking quick_check, as it always was */
+    PROJECTION_INTEGRITY_DEFER,     /* paced background scan after READY   */
+};
 
 static void projection_store_tx_lock_init(void)
 {
@@ -289,6 +318,219 @@ static bool projection_clean_receipt_write(const char *path)
 }
 #endif
 
+/* <path><suffix>, or false when that does not fit. One helper for both
+ * sidecars (the clean-close receipt and the armed quarantine). */
+static bool projection_sidecar_path(char *out, size_t out_n, const char *path,
+                                    const char *suffix)
+{
+    int n = snprintf(out, out_n, "%s%s", path, suffix);
+    return n > 0 && (size_t)n < out_n;
+}
+
+void projection_store_set_quick_check_defer_probe(
+    projection_quick_check_defer_probe_fn fn)
+{
+    /* Taken under the open/close mutex so the probe cannot change while an
+     * open is deciding; the READER runs inside projection_store_open with
+     * that same mutex already held, and must not re-take it. */
+    pthread_mutex_lock(&g_lock);
+    g_defer_probe = fn;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Decide, once per open, what to do about integrity. Call with g_lock held.
+ * Consumes the clean-close receipt (single-use, on every outcome) exactly as
+ * before; only the no-receipt branch is new. */
+static enum projection_integrity_plan projection_integrity_plan_for(
+    const char *path)
+{
+#ifdef _WIN32
+    /* The clean receipt implementation is pathname-based, and so is the
+     * armed quarantine. The projection is small enough that a full
+     * quick_check is preferable to letting an observational path regain
+     * authority on native Windows. */
+    (void)path;
+    return PROJECTION_INTEGRITY_SCAN_NOW;
+#else
+    if (projection_clean_receipt_consume(path))
+        return PROJECTION_INTEGRITY_SKIP;
+    projection_quick_check_defer_probe_fn probe = g_defer_probe;
+    if (!probe || !probe(path))
+        return PROJECTION_INTEGRITY_SCAN_NOW;
+    return PROJECTION_INTEGRITY_DEFER;
+#endif
+}
+
+/* Say what this open decided. This is the operator's only warning that a
+ * boot is either about to spend an hour inside quick_check or has handed
+ * that hour to the paced scanner. */
+static void projection_integrity_announce(enum projection_integrity_plan plan,
+                                          const char *display_path)
+{
+    if (plan == PROJECTION_INTEGRITY_DEFER) {
+        fprintf(stderr,  // obs-ok:projection-store-lifecycle
+                "[projection_store] quick_check deferred to the paced "
+                "background scan (no clean-close receipt) path=%s "
+                "bytes=%lld\n",
+                display_path, projection_file_size_or_neg1(display_path));
+        return;
+    }
+    fprintf(stderr,  // obs-ok:projection-store-lifecycle
+            "[projection_store] quick_check start path=%s bytes=%lld\n",
+            display_path, projection_file_size_or_neg1(display_path));
+}
+
+/* Publish this open's integrity state. Call with g_lock held, once the
+ * handle is live. `verified` is false ONLY for a deferred scan: a scan that
+ * has not answered can never be cashed in as a clean close. */
+static void projection_integrity_publish(enum projection_integrity_plan plan,
+                                         int64_t started_ms)
+{
+    g_integrity_started_ms = started_ms;
+    atomic_store_explicit(&g_integrity_failed, false, memory_order_relaxed);
+    atomic_store_explicit(&g_integrity_verified,
+                          plan != PROJECTION_INTEGRITY_DEFER,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_integrity_pending,
+                          plan == PROJECTION_INTEGRITY_DEFER,
+                          memory_order_release);
+}
+
+/* Honour a quarantine a previous run's background scan armed. Runs before
+ * anything is opened, which is the whole reason the verdict was written to
+ * disk instead of acted on live: here the rename is safe. */
+static void projection_quarantine_if_armed(const char *path)
+{
+#ifdef _WIN32
+    (void)path;
+#else
+    char armed[PROJECTION_STORE_PATH_MAX + 24];
+    if (!projection_sidecar_path(armed, sizeof(armed), path,
+                                 PROJECTION_QUARANTINE_ARM_SUFFIX) ||
+        access(armed, F_OK) != 0)
+        return;
+    fprintf(stderr,  // obs-ok:projection-store-lifecycle
+            "[projection_store] armed quarantine found for %s — a background "
+            "scan condemned this file; renaming it aside + re-deriving\n",
+            path);
+    sqlite_integrity_quarantine_corrupt(path, "projection_store",
+                                        "projection_store_quarantine");
+    (void)unlink(armed);
+#endif
+}
+
+/* Write the quarantine sidecar durably: the verdict has to survive a SIGKILL
+ * between the finding and the next open, or a corrupt file would be reopened
+ * as if nothing had been found. */
+static bool projection_quarantine_arm_write(const char *armed)
+{
+#ifdef _WIN32
+    (void)armed;
+    return false;
+#else
+    static const char body[] = "projection_store quarantine armed\n";
+    (void)platform_private_file_unlink_missing_ok(armed);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    if (!platform_private_file_create(armed, &staged))
+        return false;
+    bool ok = platform_private_file_write_at(&staged, body, sizeof(body) - 1,
+                                             0) &&
+              platform_private_file_truncate(&staged, sizeof(body) - 1) &&
+              platform_private_file_flush(&staged);
+    platform_private_file_close(&staged);
+    char resolved[PROJECTION_STORE_PATH_MAX + 24];
+    char parent[PROJECTION_STORE_PATH_MAX + 24];
+    if (ok && (!platform_private_path_resolve(armed, resolved,
+                                              sizeof(resolved), parent,
+                                              sizeof(parent)) ||
+               !platform_private_parent_flush(parent)))
+        ok = false;
+    return ok;
+#endif
+}
+
+/* The deferred scan found corruption. Reach the SAME end state as the
+ * synchronous gate — the corrupt file renamed aside, a fresh one in its
+ * place, projections re-derived from the kernel — with the one ordering
+ * difference the live handle forces. */
+static void projection_integrity_condemn(void)
+{
+    /* Withhold the handle FIRST. The handle itself is NOT closed here: every
+     * co-writer reads projection_store_db() BEFORE taking the tx lock
+     * (engine/services/src/txindex_projection_service.c:207 and :232,
+     * engine/services/src/address_index_service.c:192 and :314), so closing
+     * it under them would be a use-after-free. A NULL handle is a state they
+     * all already handle — the fold idles its tick. */
+    atomic_store_explicit(&g_integrity_failed, true, memory_order_release);
+
+    char armed[PROJECTION_STORE_PATH_MAX + 24];
+    char display[PROJECTION_STORE_PATH_MAX];
+    pthread_mutex_lock(&g_lock);
+    bool armed_ok = projection_sidecar_path(
+                        armed, sizeof(armed), g_path,
+                        PROJECTION_QUARANTINE_ARM_SUFFIX) &&
+                    projection_quarantine_arm_write(armed);
+    snprintf(display, sizeof(display), "%s", g_display_path);
+    pthread_mutex_unlock(&g_lock);
+
+    fprintf(stderr,  // obs-ok:projection-store-open-failure
+            "[projection_store] %s FAILED the background integrity scan; "
+            "projection writes refused now, quarantine %s for the next "
+            "start\n",
+            display, armed_ok ? "armed" : "NOT armed (sidecar unwritable)");
+    event_emitf(EV_RECOVERY_ACTION, 0,
+                "action=projection_store_quarantine_armed "
+                "reason=bg_quick_check_failed path=%s armed=%d",
+                display, armed_ok ? 1 : 0);
+    event_emitf(EV_DB_ERROR, 0,
+                "projection_store bg quick_check failed path=%s", display);
+    event_emitf(EV_OPERATOR_NEEDED, 0,
+                "condition=projection_store_corrupt "
+                "detail=progress_kv_integrity");
+}
+
+bool projection_store_integrity_pending(char *out_path, size_t out_n)
+{
+    if (out_path && out_n > 0)
+        out_path[0] = '\0';
+    if (!atomic_load_explicit(&g_integrity_pending, memory_order_acquire))
+        return false;
+    pthread_mutex_lock(&g_lock);
+    int n = (out_path && out_n > 0)
+        ? snprintf(out_path, out_n, "%s", g_path) : -1;
+    pthread_mutex_unlock(&g_lock);
+    return n > 0 && (size_t)n < out_n;
+}
+
+void projection_store_integrity_scan_result(bool ok)
+{
+    /* Single-use: a second report (or one for a store that never deferred)
+     * must not re-open a closed verdict. */
+    if (!atomic_exchange_explicit(&g_integrity_pending, false,
+                                  memory_order_acq_rel))
+        return;
+
+    char display[PROJECTION_STORE_PATH_MAX];
+    pthread_mutex_lock(&g_lock);
+    int64_t started = g_integrity_started_ms;
+    snprintf(display, sizeof(display), "%s", g_display_path);
+    pthread_mutex_unlock(&g_lock);
+
+    fprintf(stderr,  // obs-ok:projection-store-lifecycle
+            "[projection_store] quick_check done path=%s elapsed_ms=%lld "
+            "result=%s (paced background scan)\n",
+            display, (long long)(platform_time_monotonic_ms() - started),
+            ok ? "ok" : "FAILED");
+
+    if (ok) {
+        atomic_store_explicit(&g_integrity_verified, true,
+                              memory_order_release);
+        return;
+    }
+    projection_integrity_condemn();
+}
+
 /* The projection handle is a SECONDARY connection: it shares the WAL the
  * kernel connection scaled, so it takes modest fixed page-cache / mmap
  * windows rather than doubling the kernel's RAM budget. WAL/synchronous/
@@ -382,6 +624,11 @@ bool projection_store_open(const char *datadir)
         return true;
     }
 
+    /* A verdict a previous run's background scan reached, acted on here
+     * because here nothing holds the file open. No-op when nothing is
+     * armed. */
+    projection_quarantine_if_armed(path);
+
     /* CREATE: after the Wave A3 consensus.db flip the kernel handle
      * (progress_store) opens consensus.db, NOT progress.kv — so progress_store
      * no longer creates progress.kv. projection_store now OWNS progress.kv as
@@ -446,14 +693,7 @@ bool projection_store_open(const char *datadir)
     }
 #endif
 
-#ifdef _WIN32
-    /* The clean receipt implementation is pathname-based.  The projection is
-     * small enough that a full quick_check is preferable to letting an
-     * observational path regain authority on native Windows. */
-    bool verified_clean = false;
-#else
-    bool verified_clean = projection_clean_receipt_consume(path);
-#endif
+    enum projection_integrity_plan plan = projection_integrity_plan_for(path);
 
     /* Integrity gate. progress.kv's projection tables (address_index / txindex
      * and their state rows) are fully rebuildable, but a corrupt file
@@ -464,18 +704,23 @@ bool projection_store_open(const char *datadir)
      * IF NOT EXISTS) and re-derives its rows from the kernel, same as a
      * brand-new node. AUTO-TERMINATING + idempotent: a fresh, just-created
      * store that ALSO fails quick_check is a disk/fs fault, not corrupt
-     * derived state — fail the open instead of quarantine-looping. */
+     * derived state — fail the open instead of quarantine-looping.
+     *
+     * WHERE THAT SCAN RUNS is the other half. On a boot that installed the
+     * deferral probe, an existing progress.kv with no receipt does NOT hold
+     * the boot thread here for the length of a multi-GB quick_check — it is
+     * handed to the paced background scanner after READY (see
+     * storage/projection_store.h and config/boot_fast_restart.h). The scan
+     * is never skipped or shortened; only its thread changes. */
     int64_t quick_check_started = platform_time_monotonic_ms();
-    if (verified_clean) {
+    if (plan == PROJECTION_INTEGRITY_SKIP) {
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
                 "[projection_store] quick_check skipped "
                 "(content-bound clean-close receipt) path=%s\n", display_path);
     } else {
-        fprintf(stderr,  // obs-ok:projection-store-lifecycle
-                "[projection_store] quick_check start path=%s bytes=%lld\n",
-                display_path, projection_file_size_or_neg1(display_path));
+        projection_integrity_announce(plan, display_path);
     }
-    if (!verified_clean &&
+    if (plan == PROJECTION_INTEGRITY_SCAN_NOW &&
         !sqlite_integrity_quick_check_ok(db, "projection_store")) {
 #ifdef _WIN32
         fprintf(stderr,  // obs-ok:projection-store-open-failure
@@ -540,7 +785,7 @@ bool projection_store_open(const char *datadir)
                 "(projections re-derive on next fold)\n", path);
 #endif
     }
-    if (!verified_clean) {
+    if (plan == PROJECTION_INTEGRITY_SCAN_NOW) {
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
                 "[projection_store] quick_check done path=%s elapsed_ms=%lld\n",
                 display_path,
@@ -568,6 +813,7 @@ bool projection_store_open(const char *datadir)
     g_dir_fd = opened_dir_fd;
 #endif
     g_opened_at = wall_now_s();
+    projection_integrity_publish(plan, quick_check_started);
     atomic_store_explicit(&g_db, db, memory_order_release);
 
     pthread_mutex_unlock(&g_lock);
@@ -580,6 +826,12 @@ bool projection_store_open(const char *datadir)
 
 sqlite3 *projection_store_db(void)
 {
+    /* A condemned store hands out nothing. Refusing the handle is what makes
+     * the deferred scan's finding as strong as the synchronous gate's: no
+     * further row is written into a file the node has already decided to
+     * quarantine, and every co-writer already idles on a NULL handle. */
+    if (atomic_load_explicit(&g_integrity_failed, memory_order_acquire))
+        return NULL;
     return atomic_load_explicit(&g_db, memory_order_acquire);
 }
 
@@ -627,7 +879,15 @@ void projection_store_close(void)
                 "[projection_store] closed %s\n", g_display_path);
     }
 
-    if (checkpoint_rc == SQLITE_OK && rc == SQLITE_OK) {
+    /* A receipt is a claim that THIS file was proven intact this run. A
+     * deferred scan that never answered, and one that answered with a
+     * finding, both refuse it — otherwise moving the scan off the boot
+     * thread would quietly delete the check on the next boot instead of
+     * rescheduling it. */
+    bool integrity_clean =
+        atomic_load_explicit(&g_integrity_verified, memory_order_acquire) &&
+        !atomic_load_explicit(&g_integrity_failed, memory_order_acquire);
+    if (checkpoint_rc == SQLITE_OK && rc == SQLITE_OK && integrity_clean) {
 #ifdef _WIN32
         /* No pathname receipt on Windows; see the open-side authority note. */
 #else
@@ -647,8 +907,10 @@ void projection_store_close(void)
 #endif
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
                 "[projection_store] dirty close checkpoint_rc=%d close_rc=%d "
-                "log_frames=%d checkpointed_frames=%d; no receipt\n",
-                checkpoint_rc, rc, log_frames, checkpointed_frames);
+                "log_frames=%d checkpointed_frames=%d integrity_clean=%d; "
+                "no receipt\n",
+                checkpoint_rc, rc, log_frames, checkpointed_frames,
+                integrity_clean ? 1 : 0);
     }
 
 #ifdef _WIN32
@@ -667,6 +929,10 @@ void projection_store_close(void)
     g_path[0] = '\0';
     g_display_path[0] = '\0';
     g_opened_at = 0;
+    g_integrity_started_ms = 0;
+    atomic_store_explicit(&g_integrity_pending, false, memory_order_relaxed);
+    atomic_store_explicit(&g_integrity_verified, false, memory_order_relaxed);
+    atomic_store_explicit(&g_integrity_failed, false, memory_order_release);
     projection_store_tx_unlock();
     pthread_mutex_unlock(&g_lock);
 }

@@ -724,6 +724,30 @@ journalctl --user -u z23 --since "5 min ago" --no-pager
 
 ---
 
+## Boot on a slow disk: integrity is checked, but never on the boot thread
+
+A node that was killed (or restarted) before it closed its stores cleanly has
+no clean-close receipt for them, so their SQLite integrity check is owed. Both
+owed checks — `node.db` and the `progress.kv` projection — are handed to one
+paced background scan that starts **after** the node reaches READY and binds
+RPC and P2P, instead of running on the boot thread: a 2.36 GB `progress.kv`
+once held a 7200 rpm box in `systemctl status` → `activating (start)` for 62
+minutes with nothing reachable, because a single unpaced `PRAGMA quick_check`
+sat in front of READY. Nothing is skipped or shortened. On rotational storage
+the scan runs in slices under the same maintenance token WAL truncation and
+projection compaction queue on, so it cannot monopolise the spindle; expect
+`[projection_store] quick_check deferred …` at boot, `[boot] bg_quick_check
+scanning target=…` every few seconds while it works, and
+`[projection_store] quick_check done … result=ok` at the end. A scan that
+finds corruption refuses further projection writes immediately, raises
+`EV_OPERATOR_NEEDED`, and arms the quarantine, so the next start renames the
+bad file aside and re-derives the projections — the same end state the
+blocking check has always produced. A scan that never finishes (shutdown, or
+a failed start) simply leaves the check owed and runs again next start; it is
+never recorded as clean.
+
+---
+
 ## Quick Reference: Environment Variables
 
 | Variable | Default | Description |

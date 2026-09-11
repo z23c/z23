@@ -599,6 +599,11 @@ void boot_register_process_block_hooks(struct boot_svc_ctx *svc);
  * projections — defined in boot_projections.c. Called once from
  * app_init_services / app_shutdown_svc. */
 void boot_start_projection_storage(const char *datadir);
+
+/* Post-READY: if this boot deferred progress.kv's integrity scan, hand it to
+ * the paced background scanner now. No-op when nothing was deferred. Call
+ * AFTER the node is serving — that is the whole point of the deferral. */
+void boot_start_projection_bg_quick_check(void);
 void boot_stop_projection_storage(void);
 
 /* Idempotent open of the append-only event_log. Called early from app_init so

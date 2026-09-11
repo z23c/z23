@@ -61,8 +61,9 @@
  * non-"ok" verdict
  * quarantines the file trio aside (timestamped/pid-unique rename) and
  * reopens a FRESH, empty file — safe because every table here re-derives from
- * the kernel on the next fold. A successful WAL checkpoint + close writes a
- * single-use receipt bound to file identity and a full-content SHA3 digest.
+ * the kernel on the next fold. A successful WAL checkpoint + close of a
+ * store proven intact this run writes a single-use receipt bound to file
+ * identity and a full-content SHA3 digest.
  * A WAL-free reopen scans O(file-size) bytes to verify that digest and can
  * then skip SQLite's structural check. Any mismatch, old receipt version,
  * WAL, crash, or malformed receipt takes the full integrity gate.
@@ -71,7 +72,56 @@
  * process, one projection store). */
 bool projection_store_open(const char *datadir);
 
-/* Singleton handle. NULL if not yet opened or already closed. */
+/* ── running that integrity scan OFF the boot thread ──────────────────
+ *
+ * THE INCIDENT. A 2.36 GB progress.kv with no clean-close receipt put the
+ * boot thread inside ONE synchronous, unpaced sqlite3_step("PRAGMA
+ * quick_check(1)") for 62 minutes on a 7200 rpm fleet box. RPC, P2P and the
+ * sd_notify READY the unit waits for were all downstream of that step, so
+ * `systemctl status` said `activating (start)` for an hour while the disk
+ * worked perfectly. A restart before projection_store_close re-arms the same
+ * scan, so the box could not boot its way out of it either.
+ *
+ * THE FIX IS NOT TO SKIP THE SCAN. It is to stop running it on the thread
+ * that owes the operator a listening node. node.db solved the identical
+ * problem first (see config/boot_fast_restart.h): an existing store with no
+ * verified-clean binding defers its quick_check to one paced background scan
+ * that runs after READY, in slices under the storage-pacing maintenance
+ * token, and fail-closes through EV_OPERATOR_NEEDED. This is the same
+ * contract for progress.kv, wired the same way — through a probe the boot
+ * layer installs, so a plain projection_store_open() (tests, tools, any
+ * non-boot caller) keeps the synchronous gate it has always had.
+ *
+ * The probe is asked ONLY when there is no clean-close receipt, and answers
+ * "is deferring this file's scan the right call for this boot". Returning
+ * false keeps the blocking scan; that is what a fresh or absent file wants,
+ * because quick_check on it costs nothing. NULL clears (the default). */
+typedef bool (*projection_quick_check_defer_probe_fn)(const char *path);
+void projection_store_set_quick_check_defer_probe(
+    projection_quick_check_defer_probe_fn fn);
+
+/* True when this open deferred its integrity scan and no verdict has come
+ * back yet; `out_path` then holds the capability path the scanner must open.
+ * `out_path` is cleared before anything can fail, so a false return never
+ * leaves a caller reading a stale buffer. */
+bool projection_store_integrity_pending(char *out_path, size_t out_n);
+
+/* The deferred scan's verdict, reported from the background scanner thread.
+ * `ok` true closes the scan out (and is what lets the next clean close
+ * publish a receipt at all). `ok` false is an integrity FINDING and is
+ * handled exactly as strongly as the synchronous gate's quarantine, with the
+ * one difference that the live handle cannot be swapped out from under the
+ * projection folds mid-run: writes are refused immediately
+ * (projection_store_db() returns NULL, which every co-writer already treats
+ * as "idle this tick"), the quarantine is ARMED on disk so the next open
+ * renames the corrupt file family aside and mints a fresh one, and
+ * EV_OPERATOR_NEEDED latches the health surface. Call at most once per
+ * pending scan; a call with nothing pending is a no-op. */
+void projection_store_integrity_scan_result(bool ok);
+
+/* Singleton handle. NULL if not yet opened or already closed — and NULL once
+ * a deferred scan reported corruption, so no co-writer can write another row
+ * into a file the node has already condemned. */
 sqlite3 *projection_store_db(void);
 
 /* Serialize operations on the singleton projection handle. Recursive so a

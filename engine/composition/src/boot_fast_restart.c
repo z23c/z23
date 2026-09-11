@@ -251,6 +251,33 @@ static void boot_bg_quick_check_pace_release(
     storage_pacing_maintenance_end();
 }
 
+/* One operator line per finished slice, throttled to this interval.
+ * Unthrottled it would be two lines a second for the whole scan (a 250 ms
+ * class gap makes a 500 ms slice), which on the multi-hour scan this pacing
+ * exists for is tens of thousands of lines. Throttled, a scan that is
+ * working still says so often enough to tell from one that has stopped. */
+#define BG_QUICK_CHECK_SLICE_LOG_MS 5000
+
+/* Narrate one finished slice. Called from the progress callback, so it does
+ * nothing that can block on the device the scan is reading. */
+static void boot_bg_quick_check_pace_note_slice(
+    struct boot_bg_quick_check_pace *pace)
+{
+    if (!pace)
+        return;
+    pace->slices++;
+    int64_t now = platform_time_monotonic_ms();
+    if (now < pace->next_log_ms)
+        return;
+    pace->next_log_ms = now + BG_QUICK_CHECK_SLICE_LOG_MS;
+    printf("[boot] bg_quick_check scanning target=%s slices=%llu calls=%llu "
+           "gap_ms=%lld\n",
+           pace->label ? pace->label : "(unnamed)",
+           (unsigned long long)pace->slices,
+           (unsigned long long)pace->calls, (long long)pace->gap_ms);
+    fflush(stdout);
+}
+
 /* Longest one progress callback may sleep. A callback is the only place the
  * scan can observe a shutdown request, so no wait inside it may outlast the
  * shutdown budget — 50 ms holds whatever an operator does to
@@ -294,8 +321,10 @@ static int boot_bg_quick_check_progress(void *arg)
 
     if (pace->token_held) {
         if (platform_time_monotonic_ms() - pace->slice_started_ms >=
-            pace->slice_ms)
+            pace->slice_ms) {
             boot_bg_quick_check_pace_release(pace);
+            boot_bg_quick_check_pace_note_slice(pace);
+        }
         return 0;  /* SQLite continue code: still inside the slice */
     }
 
@@ -312,24 +341,24 @@ static int boot_bg_quick_check_progress(void *arg)
 /* Read one quick_check result row. True only for the literal "ok"; anything
  * else is raised LOUDLY via EV_DB_ERROR + EV_OPERATOR_NEEDED (the latter
  * latches DEGRADED in the health surface until an operator acts). */
-static bool boot_bg_quick_check_row_ok(sqlite3_stmt *st)
+static bool boot_bg_quick_check_row_ok(
+    sqlite3_stmt *st, const struct boot_bg_quick_check_target *t)
 {
     const unsigned char *txt = sqlite3_column_text(st, 0);
     if (txt && strcmp((const char *)txt, "ok") == 0)
         return true;
 
-    const char *kind = boot_shutdown_marker_quick_check_was_skipped()
-        ? "verified-clean quick_check skip"
-        : "unclean/unverified deferral";
+    const char *label = (t && t->label[0]) ? t->label : "node.db";
+    const char *kind = (t && t->kind[0]) ? t->kind : "deferred recheck";
     fprintf(stderr,  // obs-ok:operator-surface-is-the-alert
-            "[ALERT] bg_quick_check: node.db integrity FAILED after a "
+            "[ALERT] bg_quick_check: %s integrity FAILED after a "
             "%s: %s\n",
-            kind, txt ? (const char *)txt : "(no detail)");
+            label, kind, txt ? (const char *)txt : "(no detail)");
     event_emitf(EV_DB_ERROR, 0,
-                "bg_quick_check failed result=%s",
-                txt ? (const char *)txt : "unknown");
+                "bg_quick_check failed target=%s result=%s",
+                label, txt ? (const char *)txt : "unknown");
     event_emitf(EV_OPERATOR_NEEDED, 0,
-                "condition=bg_quick_check_failed detail=node_db_integrity");
+                "condition=bg_quick_check_failed detail=%s_integrity", label);
     return false;
 }
 
@@ -337,7 +366,8 @@ static bool boot_bg_quick_check_row_ok(sqlite3_stmt *st)
  * progress hook. An intentionally cancelled background recheck is not an
  * integrity failure. */
 static enum boot_bg_quick_check_outcome boot_bg_quick_check_scan(
-    sqlite3 *db, struct boot_bg_quick_check_pace *pace)
+    sqlite3 *db, struct boot_bg_quick_check_pace *pace,
+    const struct boot_bg_quick_check_target *t)
 {
     sqlite3_progress_handler(db, 100, boot_bg_quick_check_progress, pace);
     sqlite3_stmt *st = NULL;
@@ -357,7 +387,7 @@ static enum boot_bg_quick_check_outcome boot_bg_quick_check_scan(
     boot_bg_quick_check_pace_release(pace);
 
     if (step_rc == SQLITE_ROW) {
-        outcome = boot_bg_quick_check_row_ok(st)
+        outcome = boot_bg_quick_check_row_ok(st, t)
             ? BOOT_BG_QUICK_CHECK_OK : BOOT_BG_QUICK_CHECK_FAILED;
     } else if (step_rc == SQLITE_INTERRUPT &&
                thread_registry_shutdown_requested()) {
@@ -389,25 +419,42 @@ static const char *boot_bg_quick_check_outcome_str(
     return "did not complete";
 }
 
+/* Hand the verdict back to whoever asked for the scan. ONLY a scan that
+ * reached a row reports: an interrupted or never-answered scan must leave the
+ * store's own "still unverified" state exactly as it found it. */
+static void boot_bg_quick_check_report(
+    const struct boot_bg_quick_check_target *t,
+    enum boot_bg_quick_check_outcome outcome)
+{
+    if (!t || !t->on_result)
+        return;
+    if (outcome == BOOT_BG_QUICK_CHECK_OK)
+        t->on_result(true, t->ctx);
+    else if (outcome == BOOT_BG_QUICK_CHECK_FAILED)
+        t->on_result(false, t->ctx);
+}
+
 /* Runs one quick_check on a fresh read-only connection (no contention with the
  * live write handle), paced for the datadir's storage class. */
 static void *boot_bg_quick_check_entry(void *arg)
 {
-    char *path = (char *)arg;
-    if (!path)
+    struct boot_bg_quick_check_target *t =
+        (struct boot_bg_quick_check_target *)arg;
+    if (!t)
         return NULL;
 
     sqlite3 *db = NULL;
-    int rc = sqlite3_open_v2(path, &db,
+    int rc = sqlite3_open_v2(t->path, &db,
                              SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL);
     if (rc != SQLITE_OK) {
         if (db)
             sqlite3_close(db);
         /* Could not even open read-only — surface it, but do not escalate to
-         * OPERATOR_NEEDED (the live write handle owns the authoritative view). */
+         * OPERATOR_NEEDED (the live write handle owns the authoritative view)
+         * and do NOT report a verdict: an unopenable file is not a finding. */
         event_emitf(EV_DB_ERROR, 0,
-                    "bg_quick_check open failed rc=%d path=%s", rc, path);
-        free(path);
+                    "bg_quick_check open failed rc=%d path=%s", rc, t->path);
+        free(t);
         return NULL;
     }
 
@@ -417,23 +464,44 @@ static void *boot_bg_quick_check_entry(void *arg)
      * hook runs every 100 VM ops. */
     struct boot_bg_quick_check_pace pace;
     boot_bg_quick_check_pace_init(&pace, storage_pacing_class());
+    pace.label = t->label;
 
     enum boot_bg_quick_check_outcome outcome =
-        boot_bg_quick_check_scan(db, &pace);
+        boot_bg_quick_check_scan(db, &pace, t);
     sqlite3_close(db);
 
     /* Unconditional: the pacing evidence is most wanted on the runs that did
      * NOT answer ok — a cancelled or failed scan is exactly what an operator
      * comes here to read. */
-    printf("[boot] bg_quick_check %s (%s) paced=%s gap_ms=%lld calls=%llu\n",
-           boot_bg_quick_check_outcome_str(outcome),
-           boot_shutdown_marker_quick_check_was_skipped()
-               ? "verified-clean skip confirmed"
-               : "deferred unclean recheck",
+    printf("[boot] bg_quick_check %s target=%s (%s) paced=%s gap_ms=%lld "
+           "slices=%llu calls=%llu\n",
+           boot_bg_quick_check_outcome_str(outcome), t->label, t->kind,
            pace.gap_ms > 0 ? "yes" : "no", (long long)pace.gap_ms,
+           (unsigned long long)pace.slices,
            (unsigned long long)pace.calls);
-    free(path);
+    boot_bg_quick_check_report(t, outcome);
+    free(t);
     return NULL;
+}
+
+bool boot_bg_quick_check_start(const struct boot_bg_quick_check_target *target)
+{
+    if (!target || !target->path[0])
+        return false;
+    struct boot_bg_quick_check_target *copy =
+        zcl_malloc(sizeof(*copy), "bg_quick_check_target");
+    if (!copy)
+        return false;
+    *copy = *target;
+    if (thread_registry_spawn("bg_quick_check",
+                              boot_bg_quick_check_entry, copy, NULL) != 0) {
+        fprintf(stderr,
+                "WARNING: failed to spawn background quick_check thread "
+                "for %s\n", copy->label);
+        free(copy);
+        return false;
+    }
+    return true;
 }
 
 void boot_fast_restart_start_bg_quick_check(const char *datadir)
@@ -444,20 +512,17 @@ void boot_fast_restart_start_bg_quick_check(const char *datadir)
         !boot_shutdown_marker_quick_check_was_deferred())
         return;
 
-    char *path = zcl_malloc(1088, "bg_quick_check_path");
-    if (!path)
+    struct boot_bg_quick_check_target t;
+    memset(&t, 0, sizeof(t));
+    int n = snprintf(t.path, sizeof(t.path), "%s/node.db", datadir);
+    if (n < 0 || (size_t)n >= sizeof(t.path))
         return;
-    int n = snprintf(path, 1088, "%s/node.db", datadir);
-    if (n < 0 || n >= 1088) {
-        free(path);
-        return;
-    }
-    if (thread_registry_spawn("bg_quick_check",
-                              boot_bg_quick_check_entry, path, NULL) != 0) {
-        fprintf(stderr,
-                "WARNING: failed to spawn background quick_check thread\n");
-        free(path);
-    }
+    snprintf(t.label, sizeof(t.label), "node.db");
+    snprintf(t.kind, sizeof(t.kind), "%s",
+             boot_shutdown_marker_quick_check_was_skipped()
+                 ? "verified-clean skip confirmed"
+                 : "deferred unclean recheck");
+    (void)boot_bg_quick_check_start(&t);
 }
 
 #ifdef ZCL_TESTING
@@ -497,7 +562,8 @@ bool boot_fast_restart_bg_quick_check_scan_for_test(
         return false;
     }
     boot_bg_quick_check_pace_init(pace, storage_pacing_class());
-    bool ok = boot_bg_quick_check_scan(db, pace) == BOOT_BG_QUICK_CHECK_OK;
+    bool ok = boot_bg_quick_check_scan(db, pace, NULL) ==
+              BOOT_BG_QUICK_CHECK_OK;
     sqlite3_close(db);
     return ok;
 }

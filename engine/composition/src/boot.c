@@ -3621,9 +3621,9 @@ static bool boot_seq_start_services(struct app_context *ctx, struct boot_seq *s)
             sysinit_run_stage(BOOT_STAGE_SERVICES_RUNNING, ctx);
         if (!sr.ok) return false;
         boot_stage_advance_to(BOOT_STAGE_READY);
-        /* If this boot skipped or deferred quick_check, run one in the
-         * background now (failure raises OPERATOR_NEEDED — never silent). */
+        /* Deferred quick_checks run now, in the background, fail-closed. */
         boot_fast_restart_start_bg_quick_check(g_datadir);
+        boot_start_projection_bg_quick_check();
     }
     return svc_ok;
 }

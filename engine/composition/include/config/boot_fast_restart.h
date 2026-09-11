@@ -76,6 +76,38 @@ void boot_fast_restart_arm_quick_check_skip_probe(void);
  * `datadir` locates node.db. */
 void boot_fast_restart_start_bg_quick_check(const char *datadir);
 
+/* ── the scanner, told which file to scan ─────────────────────────────
+ *
+ * node.db was the first store to need its quick_check off the boot thread;
+ * progress.kv was the second (a 2.36 GB projection file with no clean-close
+ * receipt held a fleet box in `activating (start)` for 62 minutes). Both
+ * want the same machine — a fresh read-only handle, one paced scan, a
+ * three-way outcome, fail-closed on a finding — so the machine takes a
+ * TARGET rather than owning node.db's pathname. */
+
+/* Longest scan target path, including the datadir prefix. */
+#define BOOT_BG_QUICK_CHECK_PATH_MAX 1088
+
+/* Reported on the scanner thread, once, and ONLY for a scan that actually
+ * reached a verdict: `ok` true means the row said "ok", false means it said
+ * something else. A cancelled or never-started scan reports NOTHING, so a
+ * store that deferred its scan stays deferred and rescans next boot rather
+ * than being recorded as either clean or corrupt. */
+typedef void (*boot_bg_quick_check_result_fn)(bool ok, void *ctx);
+
+struct boot_bg_quick_check_target {
+    char  path[BOOT_BG_QUICK_CHECK_PATH_MAX];
+    char  label[24];    /* "node.db" / "progress.kv" — names every line   */
+    char  kind[64];     /* why this scan is running, for the alert line   */
+    boot_bg_quick_check_result_fn on_result;   /* NULL = alert only       */
+    void *ctx;
+};
+
+/* Spawn one paced background quick_check over `target`. Copies the target,
+ * so the caller's struct may be a local. False means no thread was spawned
+ * (and no result will ever be reported). */
+bool boot_bg_quick_check_start(const struct boot_bg_quick_check_target *target);
+
 /* ── pacing the background quick_check on rotational storage ──────────
  *
  * The scan streams a multi-GB node.db front to back on a read-only handle.
@@ -105,6 +137,9 @@ struct boot_bg_quick_check_pace {
     int64_t  slice_started_ms;  /* monotonic stamp of the current slice    */
     bool     token_held;        /* maintenance token currently ours        */
     uint64_t calls;             /* progress callbacks so far               */
+    uint64_t slices;            /* slices finished (token given back)      */
+    int64_t  next_log_ms;       /* throttle for the per-slice progress line */
+    const char *label;          /* which store this scan is reading        */
 };
 
 /* Fill `pace` for `klass`, taking the gap from the resolved policy so the
