@@ -5362,14 +5362,27 @@ t-hotswap:
 syntax-check: $(VIEW_GEN_HEADERS)
 	@$(CC) $(CFLAGS) -Wno-deprecated-declarations -fsyntax-only $(ALL_SRCS) $(NODE_ENTRY_SRCS) && echo "syntax-check: OK"
 
-# The highest-signal lint gates for the inner loop — a measured ~15-gate set
+# The highest-signal lint gates for the inner loop — a measured 32-gate set
 # (per-gate timings live in .cache/lint-timing/last-run.json after any driver
 # run) covering the most common push-breaking classes: stray sources, raw
 # sqlite/malloc, the AR lifecycle laws, thread-registry discipline, framework
-# shape, supervisor adoption, vendor drift. All but two gates measure <1 s;
-# the stray-source guard (~5 s) dominates, so the set stays ~6-8 s wall under
-# the parallel driver. Same ZCL_LINT_SERIAL=1 fallback as lint.
-# Run full `make lint` at sub-wave boundaries / before commit.
+# shape, supervisor adoption, vendor drift, the file-size ceiling, the
+# describe-document byte budget, and the closed flags.def catalog. Most
+# gates measure well under a second; the long tail (stray lab history, the
+# Windows seam, raw sqlite) dominates, so the set stays ~9-12 s wall under
+# the parallel driver. Same ZCL_LINT_SERIAL=1
+# fallback as lint. Run full `make lint` at sub-wave boundaries / before commit.
+#
+# check-file-size-ceiling and check-describe-budget joined this set on
+# 2026-09-11. Both are RATCHET gates whose baselines may only shrink.
+# Measured: file-size-ceiling 68-151 ms; describe-budget 3.7-5.1 s (it
+# compiles+links a helper from the command_registry sources via cc). Free
+# in wall terms only because it hides behind the ~10 s parallel-driver
+# tail; additive on the ZCL_LINT_SERIAL=1 path. Both broke landings that
+# had already passed lint-fast: the ceiling when a net/ source grew past
+# its shrink-only baseline row, the describe budget when a lintc source
+# split moved the link sources gate_describe_budget.c names. A lane must
+# see them in seconds instead of at the proof.
 EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
 LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
@@ -5520,6 +5533,9 @@ LINT_FAST_GATES := \
     check-raw-sqlite \
     check-malloc \
     check-cyclomatic-complexity \
+    check-file-size-ceiling \
+    check-describe-budget \
+    check-flag-registry \
     check-raw-malloc \
     check-json-value-init \
     check-no-raw-sqlite-in-controllers \
@@ -5547,7 +5563,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) tor-provenance-ready $(TOR_PROVENANCE_BIN)
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif

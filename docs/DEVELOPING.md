@@ -415,8 +415,9 @@ make lint-fast
 ```
 
 `t-fast` resolves the substring against registered groups and refuses a missing
-or unknown selector. `lint-fast` is the inner lint (~7s). Never run `test_zcl`
-directly. Do not run full `make lint` on an ordinary slice.
+or unknown selector. `lint-fast` is the inner lint (32 gates, ~10 s warm).
+Never run `test_zcl` directly. Do not run full `make lint` on an ordinary
+slice.
 
 ### Module mode — run a test group without relinking
 

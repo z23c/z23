@@ -74,7 +74,7 @@ symptom as a body gap, and shipping a chain-reset fix that deletes
 | `make agent-clear-stale-dev-reindex` | archive a proven-stale dev-lane `auto_reindex_request` after RPC height is at/above the marker anchor; no restart, no canonical/soak mutation |
 | `make agent-stage-dev` | contained compatibility entry point; refuses before build or staging mutation |
 | `make syntax-check` | full no-link syntax check across every TU |
-| `make lint-fast` | measured ~15 high-signal lint gates via the timed parallel driver (per-gate ms in `.cache/lint-timing/`; full `make lint` before commit) |
+| `make lint-fast` | measured 32 high-signal lint gates via the timed parallel driver (per-gate ms in `.cache/lint-timing/`; full `make lint` before commit) |
 | `make agent-plan` | no-build JSON decision packet: changed-path/test classification hints, source-wide compile plan, fast-cache hit/miss, dev-lane stage/deploy commands, and native command shortcuts |
 | `make agent-loop` | one-command verification loop: fast-ci checks by default; `ZCL_AGENT_LOOP_BIN=1` also links the dev binary; deployment selectors refuse |
 | `make fast-ci` | cache-aware agent loop: `lint-fast` + exact source-wide compile/test proofs + native linger-service probe; identical green inputs skip repeated proven scope |

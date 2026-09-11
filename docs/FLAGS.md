@@ -59,8 +59,9 @@ you know why the flag exists.
 
 ## The gate
 
-`make check-flag-registry` (part of the full `make lint` umbrella, not
-`lint-fast`) parses the catalog and scans every git-tracked `*.c`, `*.h`,
+`make check-flag-registry` (in `lint-fast` since 2026-09-11, ~1.7 s, so a
+lane sees a moved or stale first-use pointer in seconds instead of at the
+landing proof) parses the catalog and scans every git-tracked `*.c`, `*.h`,
 `*.sh`, and `Makefile` for reads. It fails closed on a hollow scan (zero
 files, or zero reads) rather than reporting a false "clean". For every row
 whose `why_` names a `first use <path>:<line>` site, the gate also opens
