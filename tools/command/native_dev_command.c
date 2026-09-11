@@ -3373,6 +3373,36 @@ void zcl_native_handle_dev_loop_events(
     json_free(&cycle);
 }
 
+#if defined(_WIN32)
+static bool dev_loop_stop_signal(const struct dev_watcher_info *active)
+{
+    struct platform_process watcher;
+    platform_process_init(&watcher);
+    uint64_t start = 0;
+    bool authorized = os_proc_pid_start_token(active->pid, &start) &&
+        start == active->start_token &&
+        platform_process_open_existing(&watcher, active->pid, active->image);
+    bool signaled = authorized &&
+        platform_watcher_lease_signal_stop(active->nonce);
+    uint32_t exit_code = 0;
+    enum platform_process_wait_result waited = signaled
+        ? platform_process_wait(&watcher, 5000, &exit_code)
+        : PLATFORM_PROCESS_WAIT_FAILED;
+    bool stopped = waited == PLATFORM_PROCESS_WAIT_EXITED;
+    if (!stopped && authorized)
+        stopped = platform_process_terminate(&watcher, 1) &&
+                  platform_process_wait(&watcher, 5000, &exit_code) ==
+                      PLATFORM_PROCESS_WAIT_EXITED;
+    platform_process_close(&watcher);
+    return stopped;
+}
+#else
+static bool dev_loop_stop_signal(const struct dev_watcher_info *active)
+{
+    return kill((pid_t)active->pid, SIGTERM) == 0;
+}
+#endif
+
 void zcl_native_handle_dev_loop_stop(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -3403,28 +3433,7 @@ void zcl_native_handle_dev_loop_stop(
                                "refusing to signal a different process", "watcher_id");
         return;
     }
-#if defined(_WIN32)
-    struct platform_process watcher;
-    platform_process_init(&watcher);
-    uint64_t start = 0;
-    bool authorized = os_proc_pid_start_token(active.pid, &start) &&
-        start == active.start_token &&
-        platform_process_open_existing(&watcher, active.pid, active.image);
-    bool signaled = authorized && platform_watcher_lease_signal_stop(active.nonce);
-    uint32_t exit_code = 0;
-    enum platform_process_wait_result waited = signaled
-        ? platform_process_wait(&watcher, 5000, &exit_code)
-        : PLATFORM_PROCESS_WAIT_FAILED;
-    bool stopped = waited == PLATFORM_PROCESS_WAIT_EXITED;
-    if (!stopped && authorized)
-        stopped = platform_process_terminate(&watcher, 1) &&
-                  platform_process_wait(&watcher, 5000, &exit_code) ==
-                      PLATFORM_PROCESS_WAIT_EXITED;
-    platform_process_close(&watcher);
-    if (!stopped) {
-#else
-    if (kill((pid_t)active.pid, SIGTERM) != 0) {
-#endif
+    if (!dev_loop_stop_signal(&active)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "WATCHER_STOP_FAILED",
                                "stop", true, false,
@@ -3466,6 +3475,167 @@ static bool dev_test_phase_receipt_parse(
     *startup_ms = startup;
     *test_body_ms = body;
     return true;
+}
+#endif
+
+#if !defined(_WIN32)
+static void dev_test_run_cas(struct zcl_command_reply *reply,
+                             const struct dev_source_record *source)
+{
+    if (!source->cas_present)
+        return;
+    (void)json_push_kv_str(&reply->data, "source_cas_sha3",
+                           source->cas_root_sha3);
+    (void)json_push_kv_str(&reply->data, "source_cas_scope",
+                           "public_c23_source_roots.v1");
+    (void)json_push_kv_str(&reply->data, "source_cas_authority", "shadow");
+    struct json_value cas_work;
+    json_init(&cas_work);
+    json_set_object(&cas_work);
+    (void)json_push_kv_int(&cas_work, "files_total", source->cas_files_total);
+    (void)json_push_kv_int(&cas_work, "files_read", source->cas_files_read);
+    (void)json_push_kv_int(&cas_work, "nodes_hashed", source->cas_nodes_hashed);
+    (void)json_push_kv_int(&cas_work, "elapsed_us", source->cas_elapsed_us);
+    (void)json_push_kv(&reply->data, "source_cas_work", &cas_work);
+    json_free(&cas_work);
+}
+
+static void dev_test_run_emit(
+    struct zcl_command_reply *reply,
+    const struct zcl_devloop_process_result *result,
+    const struct dev_source_record *source, const char *full_group,
+    int64_t identity_us, int64_t graph_load_us, int64_t handler_started_us,
+    enum zcl_dev_source_admission source_admission,
+    bool runner_phase_receipt, int64_t test_startup_ms, int64_t test_body_ms,
+    bool ok)
+{
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.dev_focused_test.v1");
+    (void)json_push_kv_str(&reply->data, "group", full_group);
+    (void)json_push_kv_str(&reply->data, "selector", "exact");
+    (void)json_push_kv_str(&reply->data, "source_id_sha256", source->source_id);
+    (void)json_push_kv_str(&reply->data, "source_mutation_sha256",
+                           source->mutation_id);
+    dev_test_run_cas(reply, source);
+    (void)json_push_kv_str(&reply->data, "source_admission",
+                           zcl_dev_source_admission_name(source_admission));
+    (void)json_push_kv_bool(&reply->data, "passed", ok);
+    (void)json_push_kv_int(&reply->data, "elapsed_ms", result->elapsed_ms);
+    (void)json_push_kv_int(&reply->data, "exit_code", result->exit_code);
+    (void)json_push_kv_bool(&reply->data, "timed_out", result->timed_out);
+    struct json_value phases;
+    json_init(&phases);
+    json_set_object(&phases);
+    (void)json_push_kv_int(&phases, "identity", identity_us);
+    int64_t oracle_identity_us = identity_us - source->cas_elapsed_us;
+    if (oracle_identity_us < 0)
+        oracle_identity_us = 0;
+    (void)json_push_kv_int(&phases, "identity_sha256_oracle",
+                           oracle_identity_us);
+    (void)json_push_kv_int(&phases, "identity_cas_sha3",
+                           source->cas_elapsed_us);
+    (void)json_push_kv_int(&phases, "graph_load", graph_load_us);
+    (void)json_push_kv_int(&phases, "compile", 0);
+    (void)json_push_kv_int(&phases, "link", 0);
+    (void)json_push_kv_int(&phases, "test_startup", test_startup_ms * 1000);
+    (void)json_push_kv_int(&phases, "test_body", test_body_ms * 1000);
+    (void)json_push_kv_int(&phases, "total",
+                           platform_time_monotonic_us() - handler_started_us);
+    (void)json_push_kv(&reply->data, "phases_us", &phases);
+    json_free(&phases);
+    (void)json_push_kv_bool(&reply->data, "runner_phase_receipt",
+                            runner_phase_receipt);
+    (void)json_push_kv_str(&reply->data, "compile_outcome", "PREBUILT_REUSE");
+    (void)json_push_kv_str(&reply->data, "link_outcome", "PREBUILT_REUSE");
+    if (!ok) {
+        const char *tail = result->output;
+        if (result->output_len > 2048)
+            tail += result->output_len - 2048;
+        (void)json_push_kv_str(&reply->data, "output_tail", tail);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED, "FOCUSED_TEST_FAILED",
+                               "prove", true, false,
+                               "focused test group failed", full_group);
+    }
+}
+
+static void dev_test_run_posix(const char *root, const char *bin,
+                               const char *selector, const char *full_group,
+                               int64_t graph_load_us,
+                               int64_t handler_started_us,
+                               struct zcl_command_reply *reply)
+{
+    int runner_fd = open(bin, O_RDONLY);
+    struct stat runner_stat;
+    if (runner_fd < 0 || fstat(runner_fd, &runner_stat) != 0 ||
+        !S_ISREG(runner_stat.st_mode) ||
+        !(runner_stat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        if (runner_fd >= 0)
+            close(runner_fd);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "TEST_RUNNER_MISSING",
+                               "precondition", true, false,
+                               "prebuilt focused test runner is unavailable",
+                               "run make test_parallel_fast");
+        return;
+    }
+    struct dev_source_record source = {0};
+    char identity_why[192] = {0};
+    int64_t identity_started_us = platform_time_monotonic_us();
+    enum zcl_dev_source_admission source_admission =
+        zcl_dev_executable_source_admit(root, runner_fd, bin, &source,
+                                        identity_why, sizeof(identity_why));
+    int64_t identity_us = platform_time_monotonic_us() - identity_started_us;
+    if (source_admission == ZCL_DEV_SOURCE_ADMISSION_ERROR) {
+        close(runner_fd);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "SOURCE_IDENTITY_UNAVAILABLE", "precondition",
+                               true, false,
+                               "current source identity could not be captured",
+                               identity_why);
+        return;
+    }
+    if (source_admission == ZCL_DEV_SOURCE_ADMISSION_STALE) {
+        close(runner_fd);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "TEST_RUNNER_STALE",
+                               "precondition", true, false,
+                               "focused runner was built from a different source epoch",
+                               identity_why[0] ? identity_why
+                                               : "run make test_parallel_fast");
+        return;
+    }
+    const char *argv[] = {bin, selector, NULL};
+    struct zcl_devloop_process_result result;
+    if (!zcl_devloop_process_run_fd(root, runner_fd, argv, 300000, &result)) {
+        close(runner_fd);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "TEST_EXEC_FAILED",
+                               "execute", true, false,
+                               "could not execute focused test runner",
+                               full_group);
+        return;
+    }
+    close(runner_fd);
+    if (!zcl_dev_source_mutation_verify(root, &source, identity_why,
+                                        sizeof(identity_why))) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED,
+                               "SOURCE_EPOCH_SUPERSEDED", "prove", true,
+                               false,
+                               "source changed while the focused proof ran",
+                               identity_why);
+        return;
+    }
+    bool ok = result.exit_code == 0 && result.term_signal == 0 &&
+              !result.timed_out;
+    int64_t test_startup_ms = 0, test_body_ms = result.elapsed_ms;
+    bool runner_phase_receipt = dev_test_phase_receipt_parse(
+        &result, &test_startup_ms, &test_body_ms);
+    dev_test_run_emit(reply, &result, &source, full_group, identity_us,
+                      graph_load_us, handler_started_us, source_admission,
+                      runner_phase_receipt, test_startup_ms, test_body_ms,
+                      ok);
 }
 #endif
 
@@ -3530,145 +3700,8 @@ void zcl_native_handle_dev_test_run(
                            "use the Linux or macOS native lane until Windows execution is ported");
     return;
 #else
-    int runner_fd = open(bin, O_RDONLY);
-    struct stat runner_stat;
-    if (runner_fd < 0 || fstat(runner_fd, &runner_stat) != 0 ||
-        !S_ISREG(runner_stat.st_mode) ||
-        !(runner_stat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-        if (runner_fd >= 0)
-            close(runner_fd);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                               ZCL_COMMAND_EXIT_BLOCKED, "TEST_RUNNER_MISSING",
-                               "precondition", true, false,
-                               "prebuilt focused test runner is unavailable",
-                               "run make test_parallel_fast");
-        return;
-    }
-    struct dev_source_record source = {0};
-    char identity_why[192] = {0};
-    int64_t identity_started_us = platform_time_monotonic_us();
-    enum zcl_dev_source_admission source_admission =
-        zcl_dev_executable_source_admit(root, runner_fd, bin, &source,
-                                        identity_why,
-                                        sizeof(identity_why));
-    int64_t identity_us = platform_time_monotonic_us() - identity_started_us;
-    if (source_admission == ZCL_DEV_SOURCE_ADMISSION_ERROR) {
-        close(runner_fd);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL,
-                               "SOURCE_IDENTITY_UNAVAILABLE", "precondition",
-                               true, false,
-                               "current source identity could not be captured",
-                               identity_why);
-        return;
-    }
-    if (source_admission == ZCL_DEV_SOURCE_ADMISSION_STALE) {
-        close(runner_fd);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                               ZCL_COMMAND_EXIT_BLOCKED, "TEST_RUNNER_STALE",
-                               "precondition", true, false,
-                               "focused runner was built from a different source epoch",
-                               identity_why[0] ? identity_why
-                                               : "run make test_parallel_fast");
-        return;
-    }
-    const char *argv[] = {bin, selector, NULL};
-    struct zcl_devloop_process_result result;
-    if (!zcl_devloop_process_run_fd(root, runner_fd, argv, 300000, &result)) {
-        close(runner_fd);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "TEST_EXEC_FAILED",
-                               "execute", true, false,
-                               "could not execute focused test runner", full_group);
-        return;
-    }
-    close(runner_fd);
-    if (!zcl_dev_source_mutation_verify(root, &source, identity_why,
-                                        sizeof(identity_why))) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED,
-                               "SOURCE_EPOCH_SUPERSEDED", "prove", true,
-                               false,
-                               "source changed while the focused proof ran",
-                               identity_why);
-        return;
-    }
-    bool ok = result.exit_code == 0 && result.term_signal == 0 &&
-              !result.timed_out;
-    int64_t test_startup_ms = 0, test_body_ms = result.elapsed_ms;
-    bool runner_phase_receipt = dev_test_phase_receipt_parse(
-        &result, &test_startup_ms, &test_body_ms);
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.dev_focused_test.v1");
-    (void)json_push_kv_str(&reply->data, "group", full_group);
-    (void)json_push_kv_str(&reply->data, "selector", "exact");
-    (void)json_push_kv_str(&reply->data, "source_id_sha256",
-                           source.source_id);
-    (void)json_push_kv_str(&reply->data, "source_mutation_sha256",
-                           source.mutation_id);
-    if (source.cas_present) {
-        (void)json_push_kv_str(&reply->data, "source_cas_sha3",
-                               source.cas_root_sha3);
-        (void)json_push_kv_str(&reply->data, "source_cas_scope",
-                               "public_c23_source_roots.v1");
-        (void)json_push_kv_str(&reply->data, "source_cas_authority",
-                               "shadow");
-        struct json_value cas_work;
-        json_init(&cas_work);
-        json_set_object(&cas_work);
-        (void)json_push_kv_int(&cas_work, "files_total",
-                               source.cas_files_total);
-        (void)json_push_kv_int(&cas_work, "files_read",
-                               source.cas_files_read);
-        (void)json_push_kv_int(&cas_work, "nodes_hashed",
-                               source.cas_nodes_hashed);
-        (void)json_push_kv_int(&cas_work, "elapsed_us",
-                               source.cas_elapsed_us);
-        (void)json_push_kv(&reply->data, "source_cas_work", &cas_work);
-        json_free(&cas_work);
-    }
-    (void)json_push_kv_str(&reply->data, "source_admission",
-                           zcl_dev_source_admission_name(source_admission));
-    (void)json_push_kv_bool(&reply->data, "passed", ok);
-    (void)json_push_kv_int(&reply->data, "elapsed_ms", result.elapsed_ms);
-    (void)json_push_kv_int(&reply->data, "exit_code", result.exit_code);
-    (void)json_push_kv_bool(&reply->data, "timed_out", result.timed_out);
-    struct json_value phases;
-    json_init(&phases);
-    json_set_object(&phases);
-    (void)json_push_kv_int(&phases, "identity", identity_us);
-    int64_t oracle_identity_us = identity_us - source.cas_elapsed_us;
-    if (oracle_identity_us < 0)
-        oracle_identity_us = 0;
-    (void)json_push_kv_int(&phases, "identity_sha256_oracle",
-                           oracle_identity_us);
-    (void)json_push_kv_int(&phases, "identity_cas_sha3",
-                           source.cas_elapsed_us);
-    (void)json_push_kv_int(&phases, "graph_load", graph_load_us);
-    /* This command deliberately consumes an immutable prebuilt runner.  Zero
-     * means no compile/link action ran, not an unmeasured duration. */
-    (void)json_push_kv_int(&phases, "compile", 0);
-    (void)json_push_kv_int(&phases, "link", 0);
-    (void)json_push_kv_int(&phases, "test_startup",
-                           test_startup_ms * 1000);
-    (void)json_push_kv_int(&phases, "test_body", test_body_ms * 1000);
-    (void)json_push_kv_int(&phases, "total",
-                           platform_time_monotonic_us() - handler_started_us);
-    (void)json_push_kv(&reply->data, "phases_us", &phases);
-    json_free(&phases);
-    (void)json_push_kv_bool(&reply->data, "runner_phase_receipt",
-                            runner_phase_receipt);
-    (void)json_push_kv_str(&reply->data, "compile_outcome", "PREBUILT_REUSE");
-    (void)json_push_kv_str(&reply->data, "link_outcome", "PREBUILT_REUSE");
-    if (!ok) {
-        const char *tail = result.output;
-        if (result.output_len > 2048)
-            tail += result.output_len - 2048;
-        (void)json_push_kv_str(&reply->data, "output_tail", tail);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "FOCUSED_TEST_FAILED",
-                               "prove", true, false,
-                               "focused test group failed", full_group);
-    }
+    dev_test_run_posix(root, bin, selector, full_group, graph_load_us,
+                       handler_started_us, reply);
 #endif
 }
 
@@ -3751,70 +3784,87 @@ static const struct dev_vault_story_case k_dev_vault_story_cases[] = {
     },
 };
 
+static bool dev_vault_story_why(char *why, size_t why_size, const char *text)
+{
+    if (why && why_size)
+        (void)snprintf(why, why_size, "%s", text);
+    return false;
+}
+
+static bool dev_vault_story_push(
+    const struct dev_vault_story_case *test, const char *code,
+    const struct vault_intent_plan_decision *decision,
+    struct json_value *case_rows, struct sha3_256_ctx *sha,
+    char *why, size_t why_size)
+{
+    char row[256];
+    int n = snprintf(row, sizeof(row), "%s|%s|%lld|%lld\n",
+                     test->name, code,
+                     (long long)decision->reservation_zat,
+                     (long long)decision->spendable_after_reservations_zat);
+    if (n <= 0 || (size_t)n >= sizeof(row))
+        return dev_vault_story_why(why, why_size, "story row overflow");
+    sha3_256_write(sha, (const uint8_t *)row, (size_t)n);
+    if (!case_rows)
+        return true;
+    struct json_value item;
+    json_init(&item);
+    json_set_object(&item);
+    bool pushed = json_push_kv_str(&item, "case", test->name) &&
+                  json_push_kv_str(&item, "decision", code) &&
+                  json_push_kv_int(&item, "reservation_zat",
+                                   decision->reservation_zat) &&
+                  json_push_kv_int(&item, "spendable_zat",
+                      decision->spendable_after_reservations_zat) &&
+                  json_push_back(case_rows, &item);
+    json_free(&item);
+    if (!pushed)
+        return dev_vault_story_why(why, why_size,
+                                   "story result exceeded JSON bound");
+    return true;
+}
+
+static bool dev_vault_story_one(
+    const struct vault_intent_decision_service_v1 *service,
+    const struct dev_vault_story_case *test, struct json_value *case_rows,
+    struct sha3_256_ctx *sha, char *why, size_t why_size)
+{
+    struct vault_intent_plan_decision decision;
+    if (!service->decide(&test->snapshot, &decision)) {
+        if (why && why_size)
+            (void)snprintf(why, why_size, "%s: decision refused input",
+                           test->name);
+        return false;
+    }
+    const char *code = service->code_name(decision.code);
+    if (decision.code != test->expected_code ||
+        decision.reservation_zat != test->expected_reservation ||
+        decision.spendable_after_reservations_zat != test->expected_spendable) {
+        if (why && why_size)
+            (void)snprintf(why, why_size,
+                           "%s: expected decision vector changed", test->name);
+        return false;
+    }
+    return dev_vault_story_push(test, code, &decision, case_rows, sha, why,
+                                why_size);
+}
+
 static bool dev_vault_story_run(
     const struct vault_intent_decision_service_v1 *service,
     struct json_value *case_rows, char digest_hex[65],
     char *why, size_t why_size)
 {
-    if (!service || !service->decide || !service->code_name || !digest_hex) {
-        if (why && why_size)
-            (void)snprintf(why, why_size, "%s", "decision vtable incomplete");
-        return false;
-    }
+    if (!service || !service->decide || !service->code_name || !digest_hex)
+        return dev_vault_story_why(why, why_size, "decision vtable incomplete");
     struct sha3_256_ctx sha;
     uint8_t digest[32];
     sha3_256_init(&sha);
     for (size_t i = 0;
          i < sizeof(k_dev_vault_story_cases) /
                  sizeof(k_dev_vault_story_cases[0]); i++) {
-        const struct dev_vault_story_case *test = &k_dev_vault_story_cases[i];
-        struct vault_intent_plan_decision decision;
-        if (!service->decide(&test->snapshot, &decision)) {
-            if (why && why_size)
-                (void)snprintf(why, why_size, "%s: decision refused input",
-                               test->name);
+        if (!dev_vault_story_one(service, &k_dev_vault_story_cases[i],
+                                 case_rows, &sha, why, why_size))
             return false;
-        }
-        const char *code = service->code_name(decision.code);
-        if (decision.code != test->expected_code ||
-            decision.reservation_zat != test->expected_reservation ||
-            decision.spendable_after_reservations_zat !=
-                test->expected_spendable) {
-            if (why && why_size)
-                (void)snprintf(why, why_size,
-                               "%s: expected decision vector changed",
-                               test->name);
-            return false;
-        }
-        char row[256];
-        int n = snprintf(row, sizeof(row), "%s|%s|%lld|%lld\n",
-                         test->name, code,
-                         (long long)decision.reservation_zat,
-                         (long long)decision.spendable_after_reservations_zat);
-        if (n <= 0 || (size_t)n >= sizeof(row)) {
-            if (why && why_size)
-                (void)snprintf(why, why_size, "%s", "story row overflow");
-            return false;
-        }
-        sha3_256_write(&sha, (const uint8_t *)row, (size_t)n);
-        if (case_rows) {
-            struct json_value item;
-            json_init(&item); json_set_object(&item);
-            bool pushed = json_push_kv_str(&item, "case", test->name) &&
-                json_push_kv_str(&item, "decision", code) &&
-                json_push_kv_int(&item, "reservation_zat",
-                                 decision.reservation_zat) &&
-                json_push_kv_int(&item, "spendable_zat",
-                    decision.spendable_after_reservations_zat) &&
-                json_push_back(case_rows, &item);
-            json_free(&item);
-            if (!pushed) {
-                if (why && why_size)
-                    (void)snprintf(why, why_size, "%s",
-                                   "story result exceeded JSON bound");
-                return false;
-            }
-        }
     }
     sha3_256_finalize(&sha, digest);
     zcl_hex_encode(digest, sizeof(digest), digest_hex);
@@ -3852,16 +3902,23 @@ zcl_native_vault_intent_decision_service_contract(void)
     return &k_vault_story_contract;
 }
 
+static bool dev_story_owner_ok(const struct zcl_command_request *request,
+                               const char **owner)
+{
+    if (!request || !request->input || request->input->type != JSON_OBJ ||
+        request->input->num_children != 1)
+        return false;
+    const struct json_value *owner_v = json_get(request->input, "owner");
+    *owner = owner_v && owner_v->type == JSON_STR ? json_get_str(owner_v)
+                                                  : NULL;
+    return *owner && strcmp(*owner, "transaction_intent") == 0;
+}
+
 void zcl_native_handle_dev_test_story(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const struct json_value *owner_v = request && request->input
-        ? json_get(request->input, "owner") : NULL;
-    const char *owner = owner_v && owner_v->type == JSON_STR
-        ? json_get_str(owner_v) : NULL;
-    if (!request || !request->input || request->input->type != JSON_OBJ ||
-        request->input->num_children != 1 || !owner ||
-        strcmp(owner, "transaction_intent") != 0) {
+    const char *owner = NULL;
+    if (!dev_story_owner_ok(request, &owner)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "STORY_OWNER_INVALID", "validate", false, false,
@@ -3922,20 +3979,25 @@ void zcl_native_handle_dev_test_sim(
                            "hot-swap simulation failed");
 }
 
+#if defined(_WIN32)
 static bool dev_generation_root(char out[PATH_MAX])
 {
     const char *override = getenv("ZCL_DEV_GENERATION_ROOT");
-#if defined(_WIN32)
     if (override && override[0]) {
         int n = snprintf(out, PATH_MAX, "%s", override);
         return n > 2 && n < PATH_MAX && out[1] == ':' &&
                (out[2] == '/' || out[2] == '\\') && !strstr(out, "..");
     }
     char state[PATH_MAX];
-    if (!platform_state_root(state, sizeof(state))) return false;
+    if (!platform_state_root(state, sizeof(state)))
+        return false;
     int n = snprintf(out, PATH_MAX, "%s/generations", state);
     return n > 0 && n < PATH_MAX;
+}
 #else
+static bool dev_generation_root(char out[PATH_MAX])
+{
+    const char *override = getenv("ZCL_DEV_GENERATION_ROOT");
     const char *home = getenv("HOME");
     int n = override && override[0]
         ? snprintf(out, PATH_MAX, "%s", override)
@@ -3943,13 +4005,13 @@ static bool dev_generation_root(char out[PATH_MAX])
             ? snprintf(out, PATH_MAX, "%s/.local/lib/zclassic23-dev", home)
             : -1;
     return n > 0 && n < PATH_MAX && out[0] == '/' && !strstr(out, "..");
-#endif
 }
+#endif
 
-static bool dev_read_generation_link(const char *root, const char *link_name,
-                                     char out[96])
-{
 #if defined(_WIN32)
+static bool dev_read_generation_link_blob(const char *root,
+                                          const char *link_name, char out[96])
+{
     struct platform_directory_transaction directory;
     struct platform_directory_child selection;
     platform_directory_transaction_init(&directory);
@@ -3969,18 +4031,29 @@ static bool dev_read_generation_link(const char *root, const char *link_name,
     }
     platform_directory_child_close(&selection);
     platform_directory_transaction_close(&directory);
-    if (!ok) return false;
+    return ok;
+}
+
+static bool dev_read_generation_link(const char *root, const char *link_name,
+                                     char out[96])
+{
+    if (!dev_read_generation_link_blob(root, link_name, out))
+        return false;
     char binary[PATH_MAX];
     int n = snprintf(binary, sizeof(binary), "%s/%s/zclassic23-dev.exe",
                      root, out);
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    ok = n > 0 && n < (int)sizeof(binary) &&
-         platform_positioned_file_open(&file, binary) &&
-         platform_positioned_file_is_executable(&file);
+    bool ok = n > 0 && n < (int)sizeof(binary) &&
+              platform_positioned_file_open(&file, binary) &&
+              platform_positioned_file_is_executable(&file);
     platform_positioned_file_close(&file);
     return ok;
+}
 #else
+static bool dev_read_generation_link(const char *root, const char *link_name,
+                                     char out[96])
+{
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", root, link_name);
     if (n <= 0 || (size_t)n >= sizeof(path))
@@ -3990,8 +4063,8 @@ static bool dev_read_generation_link(const char *root, const char *link_name,
         return false;
     out[got] = 0;
     return dev_generation_name_valid(out);
-#endif
 }
+#endif
 
 void zcl_native_handle_dev_generation_current(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
@@ -4031,12 +4104,32 @@ static int dev_generation_entry_cmp(const void *a, const void *b)
     return by_name ? by_name : strcmp(ea->disposition, eb->disposition);
 }
 
+static bool dev_generation_marker_take(const char *name,
+                                       const char *disposition,
+                                       struct dev_generation_entry *entries,
+                                       size_t capacity, size_t *count)
+{
+    size_t len = strlen(name);
+    if (*count >= capacity || len <= 5 ||
+        strcmp(name + len - 5, ".json") != 0 ||
+        len - 5 >= sizeof(entries[*count].name))
+        return false;
+    memcpy(entries[*count].name, name, len - 5);
+    entries[*count].name[len - 5] = 0;
+    if (!dev_generation_name_valid(entries[*count].name))
+        return false;
+    (void)snprintf(entries[*count].disposition,
+                   sizeof(entries[*count].disposition), "%s", disposition);
+    (*count)++;
+    return true;
+}
+
+#if defined(_WIN32)
 static void dev_scan_generation_markers(const char *root, const char *subdir,
                                         const char *disposition,
                                         struct dev_generation_entry *entries,
                                         size_t capacity, size_t *count)
 {
-#if defined(_WIN32)
     struct platform_directory_transaction parent, directory;
     struct platform_directory_names names = {0};
     platform_directory_transaction_init(&parent);
@@ -4046,21 +4139,21 @@ static void dev_scan_generation_markers(const char *root, const char *subdir,
                                                    &directory) ==
             PLATFORM_DIRECTORY_OK &&
         platform_directory_transaction_list_regular(&directory, &names);
-    if (ok) for (size_t i = 0; i < names.count && *count < capacity; i++) {
-        size_t len = strlen(names.items[i]);
-        if (len <= 5 || strcmp(names.items[i] + len - 5, ".json") != 0 ||
-            len - 5 >= sizeof(entries[*count].name)) continue;
-        memcpy(entries[*count].name, names.items[i], len - 5);
-        entries[*count].name[len - 5] = 0;
-        if (!dev_generation_name_valid(entries[*count].name)) continue;
-        (void)snprintf(entries[*count].disposition,
-                       sizeof(entries[*count].disposition), "%s", disposition);
-        (*count)++;
+    if (ok) {
+        for (size_t i = 0; i < names.count; i++)
+            (void)dev_generation_marker_take(names.items[i], disposition,
+                                             entries, capacity, count);
     }
     platform_directory_names_free(&names);
     platform_directory_transaction_close(&directory);
     platform_directory_transaction_close(&parent);
+}
 #else
+static void dev_scan_generation_markers(const char *root, const char *subdir,
+                                        const char *disposition,
+                                        struct dev_generation_entry *entries,
+                                        size_t capacity, size_t *count)
+{
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s", root, subdir) <= 0)
         return;
@@ -4068,21 +4161,22 @@ static void dev_scan_generation_markers(const char *root, const char *subdir,
     if (!dir)
         return;
     struct dirent *item;
-    while (*count < capacity && (item = readdir(dir)) != NULL) {
-        size_t len = strlen(item->d_name);
-        if (len <= 5 || strcmp(item->d_name + len - 5, ".json") != 0 ||
-            len - 5 >= sizeof(entries[*count].name))
-            continue;
-        memcpy(entries[*count].name, item->d_name, len - 5);
-        entries[*count].name[len - 5] = 0;
-        if (!dev_generation_name_valid(entries[*count].name))
-            continue;
-        (void)snprintf(entries[*count].disposition,
-                       sizeof(entries[*count].disposition), "%s", disposition);
-        (*count)++;
-    }
+    while ((item = readdir(dir)) != NULL)
+        (void)dev_generation_marker_take(item->d_name, disposition, entries,
+                                         capacity, count);
     closedir(dir);
+}
 #endif
+
+static bool dev_generation_history_cursor(const char *cursor, size_t count,
+                                          size_t *offset)
+{
+    char *end = NULL;
+    unsigned long long parsed = strtoull(cursor, &end, 10);
+    if (!end || *end || parsed > count)
+        return false;
+    *offset = (size_t)parsed;
+    return true;
 }
 
 void zcl_native_handle_dev_generation_history(
@@ -4104,18 +4198,14 @@ void zcl_native_handle_dev_generation_history(
                                 512, &count);
     qsort(entries, count, sizeof(entries[0]), dev_generation_entry_cmp);
     size_t offset = 0;
-    if (request->cursor && request->cursor[0]) {
-        char *end = NULL;
-        unsigned long long parsed = strtoull(request->cursor, &end, 10);
-        if (!end || *end || parsed > count) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "INVALID_CURSOR",
-                                   "normalize", false, false,
-                                   "cursor must be a valid numeric history offset",
-                                   request->cursor);
-            return;
-        }
-        offset = (size_t)parsed;
+    if (request->cursor && request->cursor[0] &&
+        !dev_generation_history_cursor(request->cursor, count, &offset)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "INVALID_CURSOR",
+                               "normalize", false, false,
+                               "cursor must be a valid numeric history offset",
+                               request->cursor);
+        return;
     }
     size_t limit = request->max_items ? request->max_items : 50;
     if (limit > 100)
@@ -4192,16 +4282,22 @@ void zcl_native_handle_dev_diagnose_latest(
         "inspect the most recently recorded deterministic compiler failure");
 }
 
+static const char *dev_diagnose_failure_id(
+    const struct zcl_command_request *request)
+{
+    const struct json_value *id_value =
+        request && request->input ? json_get(request->input, "failure_id")
+                                  : NULL;
+    return id_value && id_value->type == JSON_STR ? json_get_str(id_value)
+                                                  : NULL;
+}
+
 void zcl_native_handle_dev_diagnose_show(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!reply)
         return;
-    const struct json_value *id_value =
-        request && request->input ? json_get(request->input, "failure_id")
-                                  : NULL;
-    const char *failure_id =
-        id_value && id_value->type == JSON_STR ? json_get_str(id_value) : NULL;
+    const char *failure_id = dev_diagnose_failure_id(request);
     if (!dev_failure_id_valid(failure_id)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_FAILURE_ID",
@@ -4427,6 +4523,53 @@ dev_vcs_revert_relink_ops(void)
 }
 #endif /* ZCL_DEV_BUILD */
 
+#ifdef ZCL_DEV_BUILD
+static void dev_vcs_revert_finish(struct zcl_command_reply *reply, int rc,
+                                  const char *to_hex,
+                                  const uint8_t new_commit[32],
+                                  bool relink_generation)
+{
+    char new_hex[65];
+    if (rc == VCS_OK) {
+        zcl_hex_encode(new_commit, 32, new_hex);
+        (void)json_push_kv_str(&reply->data, "to", to_hex);
+        (void)json_push_kv_str(&reply->data, "forward_commit", new_hex);
+        (void)json_push_kv_bool(&reply->data, "relink_generation",
+                                relink_generation);
+        (void)json_push_kv_str(&reply->data, "status", "reverted");
+        return;
+    }
+    if (rc == VCS_EPARTIAL) {
+        zcl_hex_encode(new_commit, 32, new_hex);
+        (void)json_push_kv_str(&reply->data, "to", to_hex);
+        (void)json_push_kv_str(&reply->data, "forward_commit", new_hex);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "RELINK_ACTIVATION_FAILED", "execute", true, true,
+            "source revert + forward commit landed (append-only, never "
+            "undone), but binary-generation activation failed",
+            new_hex);
+        return;
+    }
+    if (rc == VCS_REFUSED) {
+        (void)json_push_kv_str(&reply->data, "to", to_hex);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "SEALED_PATH_REFUSED", "execute", false, true,
+            "revert would change a sealed path; run the owner-gated "
+            "unseal ritual first",
+            to_hex);
+        return;
+    }
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, "REVERT_FAILED",
+                           "execute", false, false,
+                           "vcs_revert failed (bad commit id or a "
+                           "worktree I/O error)",
+                           to_hex);
+}
+#endif /* ZCL_DEV_BUILD */
+
 void zcl_native_handle_dev_vcs_revert(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -4490,51 +4633,7 @@ void zcl_native_handle_dev_vcs_revert(
     uint8_t new_commit[32] = {0};
     int rc = vcs_revert(r, target, NULL, new_commit);
     vcs_close(r);
-
-    /* Only VCS_OK / VCS_EPARTIAL actually write out_new_commit (vcs_revert
-     * forwards VCS_REFUSED / VCS_ERR before the forward commit lands), so
-     * the hex form is computed lazily per-branch below, never over an
-     * unwritten buffer. */
-    char new_hex[65];
-
-    switch (rc) {
-    case VCS_OK:
-        zcl_hex_encode(new_commit, 32, new_hex);
-        (void)json_push_kv_str(&reply->data, "to", to_hex);
-        (void)json_push_kv_str(&reply->data, "forward_commit", new_hex);
-        (void)json_push_kv_bool(&reply->data, "relink_generation",
-                                relink_generation);
-        (void)json_push_kv_str(&reply->data, "status", "reverted");
-        return;
-    case VCS_EPARTIAL:
-        zcl_hex_encode(new_commit, 32, new_hex);
-        (void)json_push_kv_str(&reply->data, "to", to_hex);
-        (void)json_push_kv_str(&reply->data, "forward_commit", new_hex);
-        zcl_command_reply_fail(
-            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-            "RELINK_ACTIVATION_FAILED", "execute", true, true,
-            "source revert + forward commit landed (append-only, never "
-            "undone), but binary-generation activation failed",
-            new_hex);
-        return;
-    case VCS_REFUSED:
-        (void)json_push_kv_str(&reply->data, "to", to_hex);
-        zcl_command_reply_fail(
-            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-            "SEALED_PATH_REFUSED", "execute", false, true,
-            "revert would change a sealed path; run the owner-gated "
-            "unseal ritual first",
-            to_hex);
-        return;
-    default:
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "REVERT_FAILED",
-                               "execute", false, false,
-                               "vcs_revert failed (bad commit id or a "
-                               "worktree I/O error)",
-                               to_hex);
-        return;
-    }
+    dev_vcs_revert_finish(reply, rc, to_hex, new_commit, relink_generation);
 #endif
 }
 
@@ -4621,6 +4720,98 @@ static bool dev_vcs_seal_grant_log(struct vcs_index *idx, const char *reason,
 }
 #endif /* ZCL_DEV_BUILD */
 
+#ifdef ZCL_DEV_BUILD
+static bool dev_vcs_seal_hash(struct vcs_repo *r, struct vcs_index *idx,
+                              const char *root, uint8_t new_sealset[32],
+                              struct zcl_command_reply *reply)
+{
+    struct vcs_manifest m;
+    if (!vcs_manifest_build(root, idx, &m)) {
+        vcs_close(r);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "MANIFEST_BUILD_FAILED", "execute", false,
+                               false,
+                               "could not build the current worktree manifest",
+                               "");
+        return false;
+    }
+    char **globs = NULL;
+    size_t nglobs = 0;
+    if (!vcs_seal_load_globs(root, &globs, &nglobs)) {
+        vcs_manifest_free(&m);
+        vcs_close(r);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "SEAL_GLOBS_FAILED",
+                               "execute", false, false,
+                               "could not load the sealed-path glob set", "");
+        return false;
+    }
+    bool sh = vcs_sealset_hash(&m, globs, nglobs, new_sealset);
+    vcs_seal_free_globs(globs, nglobs);
+    vcs_manifest_free(&m);
+    if (sh)
+        return true;
+    vcs_close(r);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INTERNAL, "SEALSET_HASH_FAILED",
+                           "execute", false, false,
+                           "could not compute the current sealset hash", "");
+    return false;
+}
+
+static void dev_vcs_seal_grant_apply(struct vcs_repo *r, struct vcs_index *idx,
+                                     const char *root, const char *reason,
+                                     struct zcl_command_reply *reply)
+{
+    uint8_t new_sealset[32];
+    if (!dev_vcs_seal_hash(r, idx, root, new_sealset, reply))
+        return;
+    uint8_t old_pin[32] = {0};
+    bool have_old = false;
+    (void)vcs_index_seal_pin_get(idx, old_pin, &have_old);
+    if (!vcs_seal_grant_unseal(idx, new_sealset)) {
+        vcs_close(r);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "GRANT_FAILED",
+                               "execute", false, false,
+                               "vcs_seal_grant_unseal failed", "");
+        return;
+    }
+    char new_hex[65];
+    HexStr(new_sealset, sizeof(new_sealset), false, new_hex, sizeof(new_hex));
+    char old_hex[65];
+    if (have_old)
+        HexStr(old_pin, sizeof(old_pin), false, old_hex, sizeof(old_hex));
+    else
+        snprintf(old_hex, sizeof(old_hex), "none");
+    char ts[32];
+    dev_vcs_seal_iso_utc_now(ts);
+    char log_key[64];
+    bool logged = dev_vcs_seal_grant_log(idx, reason, old_hex, new_hex, ts,
+                                         log_key, sizeof(log_key));
+    vcs_close(r);
+    (void)json_push_kv_str(&reply->data, "reason", reason);
+    (void)json_push_kv_str(&reply->data, "old_sealset", old_hex);
+    (void)json_push_kv_str(&reply->data, "granted_sealset", new_hex);
+    (void)json_push_kv_str(&reply->data, "granted_at", ts);
+    (void)json_push_kv_str(&reply->data, "log_key", logged ? log_key : "");
+    (void)json_push_kv_str(&reply->data, "status", "granted");
+    (void)json_push_kv_str(
+        &reply->data, "note",
+        "one-shot: the next green-cycle anchor (vcs_snapshot, e.g. via the "
+        "dev change/apply cycle) consumes this token and re-pins the "
+        "sealset; a FURTHER sealed-path change after that requires a new "
+        "grant");
+    if (!logged)
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "LOG_WRITE_FAILED", "execute", true, true,
+            "token was granted but the audit-log record failed to write",
+            new_hex);
+}
+#endif /* ZCL_DEV_BUILD */
+
 void zcl_native_handle_dev_vcs_seal_grant(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -4680,93 +4871,7 @@ void zcl_native_handle_dev_vcs_seal_grant(
     }
     struct vcs_index *idx = vcs_repo_index(r);
 
-    /* Compute the sealset the worktree would produce right now — the exact
-     * same computation vcs_snapshot() performs before its own seal check. */
-    struct vcs_manifest m;
-    if (!vcs_manifest_build(root, idx, &m)) {
-        vcs_close(r);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL,
-                               "MANIFEST_BUILD_FAILED", "execute", false,
-                               false,
-                               "could not build the current worktree manifest",
-                               "");
-        return;
-    }
-    char **globs = NULL;
-    size_t nglobs = 0;
-    if (!vcs_seal_load_globs(root, &globs, &nglobs)) {
-        vcs_manifest_free(&m);
-        vcs_close(r);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL,
-                               "SEAL_GLOBS_FAILED", "execute", false, false,
-                               "could not load the sealed-path glob set", "");
-        return;
-    }
-    uint8_t new_sealset[32];
-    bool sh = vcs_sealset_hash(&m, globs, nglobs, new_sealset);
-    vcs_seal_free_globs(globs, nglobs);
-    vcs_manifest_free(&m);
-    if (!sh) {
-        vcs_close(r);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL,
-                               "SEALSET_HASH_FAILED", "execute", false, false,
-                               "could not compute the current sealset hash",
-                               "");
-        return;
-    }
-
-    uint8_t old_pin[32] = {0};
-    bool have_old = false;
-    (void)vcs_index_seal_pin_get(idx, old_pin, &have_old);
-
-    if (!vcs_seal_grant_unseal(idx, new_sealset)) {
-        vcs_close(r);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "GRANT_FAILED",
-                               "execute", false, false,
-                               "vcs_seal_grant_unseal failed", "");
-        return;
-    }
-
-    char new_hex[65];
-    HexStr(new_sealset, sizeof(new_sealset), false, new_hex, sizeof(new_hex));
-    char old_hex[65];
-    if (have_old)
-        HexStr(old_pin, sizeof(old_pin), false, old_hex, sizeof(old_hex));
-    else
-        snprintf(old_hex, sizeof(old_hex), "none");
-
-    char ts[32];
-    dev_vcs_seal_iso_utc_now(ts);
-
-    char log_key[64];
-    bool logged = dev_vcs_seal_grant_log(idx, reason, old_hex, new_hex, ts,
-                                         log_key, sizeof(log_key));
-    vcs_close(r);
-
-    (void)json_push_kv_str(&reply->data, "reason", reason);
-    (void)json_push_kv_str(&reply->data, "old_sealset", old_hex);
-    (void)json_push_kv_str(&reply->data, "granted_sealset", new_hex);
-    (void)json_push_kv_str(&reply->data, "granted_at", ts);
-    (void)json_push_kv_str(&reply->data, "log_key", logged ? log_key : "");
-    (void)json_push_kv_str(&reply->data, "status", "granted");
-    (void)json_push_kv_str(
-        &reply->data, "note",
-        "one-shot: the next green-cycle anchor (vcs_snapshot, e.g. via the "
-        "dev change/apply cycle) consumes this token and re-pins the "
-        "sealset; a FURTHER sealed-path change after that requires a new "
-        "grant");
-
-    if (!logged) {
-        zcl_command_reply_fail(
-            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-            "LOG_WRITE_FAILED", "execute", true, true,
-            "token was granted but the audit-log record failed to write",
-            new_hex);
-    }
+    dev_vcs_seal_grant_apply(r, idx, root, reason, reply);
 #endif
 }
 
