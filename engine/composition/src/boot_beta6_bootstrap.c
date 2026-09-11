@@ -126,6 +126,14 @@ static void install_inband_seam(struct boot_svc_ctx *svc)
                  armed.message);
         return;
     }
+    /* Chain-snapshot serving proceeds with no -paramsdir; a stock beta6
+     * client's zk-SNARK parameter fetch is the only casualty, and only this
+     * one log line says so — every getbspman on this node answers `reject`
+     * from here on (beta6_bs_param_manifest("")). */
+    if (!svc->app_ctx->params_dir || !svc->app_ctx->params_dir[0])
+        LOG_WARN("beta6boot",
+                 "beta6 bootstrap: no -paramsdir, so getbspman is answered "
+                 "with a reject; clients need their own zk parameters");
     msg_processor_set_beta6_bootstrap(svc->msg_processor, beta6_inband_armed_hook,
                                       beta6_inband_message_hook);
     LOG_INFO("beta6boot",

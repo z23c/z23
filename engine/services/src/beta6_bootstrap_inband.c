@@ -260,6 +260,18 @@ struct zcl_result beta6_bs_inband_status(void)
     return beta6_bs_status();
 }
 
+struct zcl_result beta6_bs_inband_params_status(void)
+{
+    if (!s_ready)
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "beta6 in-band seam is not armed");
+    if (s_params_dir[0] == '\0')
+        return ZCL_ERR(BETA6_BS_ERR_REFUSED,
+                       "armed without -paramsdir: getbspman is answered "
+                       "with a reject");
+    return ZCL_OK;
+}
+
 struct zcl_result beta6_bs_inband_arm(const char *network, const char *params_dir)
 {
     struct zcl_result armed = beta6_bs_status();

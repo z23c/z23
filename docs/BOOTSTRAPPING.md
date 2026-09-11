@@ -293,9 +293,13 @@ Query `bootstrapstatus` (native RPC) or `GET /api/v1/bootstrap` (REST; `GET
 /api/v1/bootstrapstatus` is a compatibility alias). The response's
 `beta6_snapshot_bootstrap` object carries `source_dir`, `in_band`,
 `listen_port`, `manifest_version`, `manifest_height`, `manifest_files`,
-`manifest_bytes`, `advertised`, `serving`, and `current_blocker`; the
-top-level `p2p` object separately carries `node_bootstrap` — the bit as sent
-in this node's own `version` message.
+`manifest_bytes`, `advertised`, `serving`, `params_served`, and
+`current_blocker`; the top-level `p2p` object separately carries
+`node_bootstrap` — the bit as sent in this node's own `version` message.
+`params_served` is `false` whenever this node has no `-paramsdir` configured
+— the chain snapshot still arms and serves normally, but every `getbspman`
+gets a beta6 reject — and the same condition adds
+`beta6_params_dir_not_configured` to the top-level `blockers[]`.
 
 `advertised` and `serving` answer different questions and can disagree. The
 `version` message sets `NODE_BOOTSTRAP`, and the in-band path answers

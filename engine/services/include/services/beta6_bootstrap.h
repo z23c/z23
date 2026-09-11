@@ -264,6 +264,11 @@ void beta6_bs_inband_disarm(void);
 /* ok when this node will both advertise NODE_BOOTSTRAP and answer the eight
  * messages on an ordinary peer connection. */
 struct zcl_result beta6_bs_inband_status(void);
+/* ok when the in-band seam is armed AND was armed with a non-empty
+ * params_dir, i.e. a stock beta6 client's getbspman gets real zk-SNARK
+ * parameter chunks rather than an unconditional reject. Refuses by name
+ * both while disarmed and while armed with no -paramsdir. */
+struct zcl_result beta6_bs_inband_params_status(void);
 /* Answer one beta6 message from `node`. Refusals are by name through a beta6
  * `reject`; the four reply commands are dropped. Never blocks: this runs on
  * the shared message thread. A non-ok result means the REPLY could not be

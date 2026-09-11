@@ -33,6 +33,7 @@ bool sd_getnetworkinfo_external_endpoint_scenario(void);
  * reachability separation. */
 bool sd_bootstrapstatus_ready_scenario(void);
 bool sd_bootstrapstatus_snapshot_authority_scenario(void);
+bool sd_bootstrapstatus_beta6_params_scenario(void);
 bool sd_getnetworkinfo_reachability_scenario(void);
 
 #endif

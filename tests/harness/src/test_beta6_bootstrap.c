@@ -648,6 +648,36 @@ int test_beta6_bootstrap(void)
         PASS();
     }
 
+    /* ── params_dir visibility ──────────────────────────────────────────
+     * bootstrapstatus needs to tell "chain snapshot armed, zk params NOT
+     * configured" from "both armed": beta6_bs_inband_params_status() is
+     * that one bit, and it must track params_dir exactly, not just whether
+     * the seam is armed at all. */
+    TEST("beta6_bs_inband_params_status tracks params_dir, not just arming") {
+        char dir[256];
+        ASSERT(!beta6_bs_inband_params_status().ok);
+
+        test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "params_empty");
+        ASSERT(fixture_build(dir));
+        ASSERT(beta6_bs_arm(dir, "main").ok);
+        ASSERT(beta6_bs_inband_arm("main", "").ok);
+        ASSERT(!beta6_bs_inband_params_status().ok);
+        beta6_bs_inband_disarm();
+        beta6_bs_disarm();
+        test_rm_rf(dir);
+
+        test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "params_set");
+        ASSERT(fixture_build(dir));
+        ASSERT(beta6_bs_arm(dir, "main").ok);
+        ASSERT(beta6_bs_inband_arm("main", "/some/params/dir").ok);
+        ASSERT(beta6_bs_inband_params_status().ok);
+        beta6_bs_inband_disarm();
+        ASSERT(!beta6_bs_inband_params_status().ok);
+        beta6_bs_disarm();
+        test_rm_rf(dir);
+        PASS();
+    }
+
     /* ──────────────────────── per-address quota ─────────────────────── */
 
     TEST("quota buckets collapse to the IPv4 /24 and the IPv6 /64") {

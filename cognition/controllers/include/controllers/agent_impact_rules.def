@@ -3224,3 +3224,7 @@ AGENT_IMPACT_RULE("engine/composition/facts/*|tools/command/native_dev_orient.c|
 /* dev.beta6.verify: the standalone-process preflight leaf calling the real
  * beta6_bs_arm(). */
 AGENT_IMPACT_RULE("tools/command/native_dev_beta6_verify.c|tests/harness/src/test_dev_beta6_verify.c", "dev_beta6_verify make_lint_gates")
+/* The two halves of params_dir visibility: the boot-log warning when no
+ * -paramsdir is configured, and the in-band accessor bootstrapstatus reads
+ * to report params_served/its blocker. */
+AGENT_IMPACT_RULE("engine/composition/src/boot_beta6_bootstrap.c|engine/services/src/beta6_bootstrap_inband.c|engine/services/include/services/beta6_bootstrap.h|tests/harness/src/test_beta6_bootstrap.c", "beta6_bootstrap syncdiag_rpc make_lint_gates")

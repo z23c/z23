@@ -198,7 +198,7 @@ Z23_FLAG("ZCL_BENCH_SOURCE_DATADIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_BETA6_BOOTSTRAP_LISTEN", "env_runtime", "-", "-",
           "<ip>:<port> the zclassicd v2.1.2-beta6 bootstrap snapshot server answers on; environment fallback for -beta6-bootstrap-listen, unset = not served; first use engine/composition/src/boot_beta6_bootstrap.c:97; documented at docs/BOOTSTRAPPING.md: Serving beta6 clients")
 Z23_FLAG("ZCL_BETA6_BOOTSTRAP_SOURCE", "env_runtime", "-", "-",
-          "absolute directory holding the beta6 snapshot (blocks/, blocks/index/, chainstate/) this node serves; environment fallback for -beta6-bootstrap-source, unset = the beta6 bootstrap service stays dormant; first use engine/composition/src/boot_beta6_bootstrap.c:143; documented at docs/BOOTSTRAPPING.md: Serving beta6 clients")
+          "absolute directory holding the beta6 snapshot (blocks/, blocks/index/, chainstate/) this node serves; environment fallback for -beta6-bootstrap-source, unset = the beta6 bootstrap service stays dormant; first use engine/composition/src/boot_beta6_bootstrap.c:151; documented at docs/BOOTSTRAPPING.md: Serving beta6 clients")
 Z23_FLAG("ZCL_BIN", "env_build", "-", "-",
           "first use tools/scripts/c3_stopwatch_run_and_record.sh:131; documented at docs/MVP.md:25: | 3 | **Cold-start sync to tip in <10 min** | Fresh datadir → z23 core sync status repo...")
 Z23_FLAG("ZCL_BINARY_FALLBACK_THRESHOLD", "env_runtime", "-", "-",

@@ -1752,7 +1752,7 @@ engine/controllers/src/name_controller.c:rpc_name_update:19
 engine/controllers/src/name_gateway_controller.c:name_gateway_host_from_target:24
 engine/controllers/src/name_resolver.c:znam_type_from_name:16
 engine/controllers/src/network_bootstrap_peers_contract.c:network_push_verified_zclassic23_bootstrap_peers:22
-engine/controllers/src/network_controller.c:rpc_bootstrapstatus:31
+engine/controllers/src/network_controller.c:rpc_bootstrapstatus:22
 engine/controllers/src/network_onion_controller.c:network_onion_first_incomplete_stage:18
 engine/controllers/src/network_onion_controller.c:network_onion_status_rpc:21
 engine/controllers/src/network_snapshot_loader_contract.c:network_push_snapshot_loader_status:31

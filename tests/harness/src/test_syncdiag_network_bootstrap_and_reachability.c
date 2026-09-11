@@ -13,6 +13,8 @@
 #include "test/syncdiag_rpc_fixture.h"
 #include "test/test_syncdiag_network_priv.h"
 
+#include "services/beta6_bootstrap.h"
+
 /* A fixed 12-hex stand-in for some other node's source-identity prefix. It is
  * deliberately NOT this binary's own: the point of the field is that a
  * stranger's node can name a build it is not itself running. */
@@ -753,6 +755,155 @@ bool sd_bootstrapstatus_snapshot_authority_scenario(void)
     ok = sd_snapshot_authority_rpc1(&ctx, ok);
     ok = sd_snapshot_authority_rpc2(&ctx, ok);
     return sd_snapshot_authority_teardown(&ctx, ok);
+}
+
+/* case: bootstrapstatus's beta6_snapshot_bootstrap.params_served bit, and
+ * the top-level blockers row it drives, are keyed on params_dir alone --
+ * not on whether the chain-snapshot side is armed at all. See
+ * beta6_bs_inband_params_status() in beta6_bootstrap_inband.c and the
+ * params_served/blockers wiring in rpc_bootstrapstatus(). */
+static bool sd_beta6_params_write(const char *dir, const char *relative,
+                                  size_t bytes)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", dir, relative);
+    char *slash = strrchr(path, '/');
+    if (slash) {
+        *slash = '\0';
+        for (char *p = path + 1; *p; p++) {
+            if (*p != '/')
+                continue;
+            *p = '\0';
+            (void)mkdir(path, 0700);
+            *p = '/';
+        }
+        (void)mkdir(path, 0700);
+        *slash = '/';
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    for (size_t i = 0; i < bytes; i++)
+        fputc(0xAB, f);
+    return fclose(f) == 0;
+}
+
+static bool sd_beta6_params_anchor(const char *dir)
+{
+    char sidecar[300];
+    snprintf(sidecar, sizeof(sidecar), "%s.anchor", dir);
+    FILE *f = fopen(sidecar, "w");
+    if (!f)
+        return false;
+    fprintf(f, "3126937 00000663e40f1fe0bc32a7e7282fac25de5fe8ec"
+               "efd9c627e2fd948d388f7053\n");
+    return fclose(f) == 0;
+}
+
+static bool sd_beta6_params_build_tree(const char *dir)
+{
+    return sd_beta6_params_write(dir, "blocks/blk00000.dat", 40) &&
+           sd_beta6_params_write(dir, "blocks/index/000005.ldb", 10) &&
+           sd_beta6_params_write(dir, "chainstate/000007.ldb", 20) &&
+           sd_beta6_params_anchor(dir);
+}
+
+static bool sd_json_array_has_str(const struct json_value *arr, const char *want)
+{
+    if (!arr || arr->type != JSON_ARR)
+        return false;
+    for (size_t i = 0; i < json_size(arr); i++) {
+        const struct json_value *item = json_at(arr, i);
+        if (item && item->type == JSON_STR && json_get_str(item) &&
+            strcmp(json_get_str(item), want) == 0)
+            return true;
+    }
+    return false;
+}
+
+struct sd_beta6_params_ctx {
+    char dir[256];
+    struct rpc_table tbl;
+    struct json_value params;
+    struct json_value result;
+};
+
+static bool sd_beta6_params_setup(struct sd_beta6_params_ctx *ctx)
+{
+    test_reset_shared_globals();
+    progress_store_close();
+    chain_params_select(CHAIN_MAIN);
+    test_make_tmpdir(ctx->dir, sizeof(ctx->dir), "syncdiag", "beta6_params");
+    bool ok = sd_beta6_params_build_tree(ctx->dir);
+
+    rpc_table_init(&ctx->tbl);
+    register_net_rpc_commands(&ctx->tbl);
+    rpc_net_set_connman(NULL);
+    rpc_net_set_boot_context(ctx->dir, NULL);
+    json_init(&ctx->params);
+    json_set_array(&ctx->params);
+    json_init(&ctx->result);
+    return ok;
+}
+
+static bool sd_beta6_params_call(struct sd_beta6_params_ctx *ctx, bool ok,
+                                 const char *params_dir)
+{
+    json_free(&ctx->result);
+    json_init(&ctx->result);
+    ok = ok && beta6_bs_arm(ctx->dir, "main").ok;
+    ok = ok && beta6_bs_inband_arm("main", params_dir).ok;
+    ok = ok && rpc_table_execute(&ctx->tbl, "bootstrapstatus", &ctx->params,
+                                 &ctx->result);
+    return ok;
+}
+
+static bool sd_beta6_params_rpc_unconfigured(struct sd_beta6_params_ctx *ctx,
+                                             bool ok)
+{
+    ok = sd_beta6_params_call(ctx, ok, "");
+    const struct json_value *beta6 =
+        json_get(&ctx->result, "beta6_snapshot_bootstrap");
+    ok = ok && beta6 && !json_get_bool(json_get(beta6, "params_served"));
+    ok = ok && sd_json_array_has_str(json_get(&ctx->result, "blockers"),
+                                     "beta6_params_dir_not_configured");
+    return ok;
+}
+
+static bool sd_beta6_params_rpc_configured(struct sd_beta6_params_ctx *ctx,
+                                           bool ok)
+{
+    beta6_bs_inband_disarm();
+    beta6_bs_disarm();
+    ok = sd_beta6_params_call(ctx, ok, "/some/params/dir");
+    const struct json_value *beta6 =
+        json_get(&ctx->result, "beta6_snapshot_bootstrap");
+    ok = ok && beta6 && json_get_bool(json_get(beta6, "params_served"));
+    ok = ok && !sd_json_array_has_str(json_get(&ctx->result, "blockers"),
+                                      "beta6_params_dir_not_configured");
+    return ok;
+}
+
+static bool sd_beta6_params_teardown(struct sd_beta6_params_ctx *ctx, bool ok)
+{
+    beta6_bs_inband_disarm();
+    beta6_bs_disarm();
+    json_free(&ctx->params);
+    json_free(&ctx->result);
+    rpc_net_set_connman(NULL);
+    rpc_net_set_boot_context(NULL, NULL);
+    test_rm_rf(ctx->dir);
+    test_reset_shared_globals();
+    return ok;
+}
+
+bool sd_bootstrapstatus_beta6_params_scenario(void)
+{
+    struct sd_beta6_params_ctx ctx;
+    bool ok = sd_beta6_params_setup(&ctx);
+    ok = sd_beta6_params_rpc_unconfigured(&ctx, ok);
+    ok = sd_beta6_params_rpc_configured(&ctx, ok);
+    return sd_beta6_params_teardown(&ctx, ok);
 }
 
 /* Fixture + phase helpers for the reachability-vs-handshake scenario:

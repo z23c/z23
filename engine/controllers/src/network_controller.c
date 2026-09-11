@@ -435,6 +435,43 @@ static void network_push_beta6_source(struct json_value *beta6)
                      manifest ? (int64_t)manifest->snapshot_bytes : 0);
 }
 
+/* The top-level readiness `blockers[]` array: every named fact currently
+ * keeping this node from full P2P/beta6 readiness, in the order an operator
+ * has to fix them. Split out of rpc_bootstrapstatus() so that function's own
+ * branch count stays under its complexity pin as this list grows. */
+static void network_push_bootstrap_blockers(struct json_value *result,
+                                             bool has_connman, bool listening,
+                                             bool node_network, bool protocol_ok,
+                                             bool has_tip, bool security_posture_ok,
+                                             const char *security_posture_status,
+                                             bool node_bootstrap,
+                                             bool beta6_params_served)
+{
+    struct json_value blockers = {0};
+    json_set_array(&blockers);
+    if (!has_connman)
+        json_push_string_item(&blockers, "p2p_not_initialized");
+    if (has_connman && !listening)
+        json_push_string_item(&blockers, "not_listening");
+    if (!node_network)
+        json_push_string_item(&blockers, "NODE_NETWORK_not_advertised");
+    if (!protocol_ok)
+        json_push_string_item(&blockers, "protocol_below_min_peer_version");
+    if (!has_tip)
+        json_push_string_item(&blockers, "provable_tip_not_published");
+    if (!security_posture_ok)
+        json_push_string_item(&blockers,
+                              security_posture_status && security_posture_status[0]
+                                  ? security_posture_status
+                                  : "security_posture_review_required");
+    if (!node_bootstrap)
+        json_push_string_item(&blockers, "beta6_NODE_BOOTSTRAP_not_advertised");
+    if (!beta6_params_served)
+        json_push_string_item(&blockers, "beta6_params_dir_not_configured");
+    json_push_kv(result, "blockers", &blockers);
+    json_free(&blockers);
+}
+
 static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -629,6 +666,8 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     json_push_kv_bool(&beta6, "advertised", node_bootstrap);
     json_push_kv_bool(&beta6, "serving", beta6_fast);
     json_push_kv_int(&beta6, "chunk_size_bytes", BETA6_BS_CHUNK_SIZE);
+    bool beta6_params_served = beta6_bs_inband_params_status().ok;
+    json_push_kv_bool(&beta6, "params_served", beta6_params_served);
     network_push_beta6_source(&beta6);
     json_push_kv_str(&beta6, "current_blocker",
                      beta6_current_blocker(beta6_fast,
@@ -640,28 +679,10 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     json_push_kv(result, "beta6_snapshot_bootstrap", &beta6);
     json_free(&beta6);
 
-    struct json_value blockers = {0};
-    json_set_array(&blockers);
-    if (!has_connman)
-        json_push_string_item(&blockers, "p2p_not_initialized");
-    if (has_connman && !listening)
-        json_push_string_item(&blockers, "not_listening");
-    if (!node_network)
-        json_push_string_item(&blockers, "NODE_NETWORK_not_advertised");
-    if (!protocol_ok)
-        json_push_string_item(&blockers, "protocol_below_min_peer_version");
-    if (!has_tip)
-        json_push_string_item(&blockers, "provable_tip_not_published");
-    if (!security_posture_ok)
-        json_push_string_item(&blockers,
-                              security_posture.status[0]
-                                  ? security_posture.status
-                                  : "security_posture_review_required");
-    if (!node_bootstrap)
-        json_push_string_item(&blockers,
-                              "beta6_NODE_BOOTSTRAP_not_advertised");
-    json_push_kv(result, "blockers", &blockers);
-    json_free(&blockers);
+    network_push_bootstrap_blockers(result, has_connman, listening, node_network,
+                                    protocol_ok, has_tip, security_posture_ok,
+                                    security_posture.status, node_bootstrap,
+                                    beta6_params_served);
 
     struct json_value warnings = {0};
     json_set_array(&warnings);

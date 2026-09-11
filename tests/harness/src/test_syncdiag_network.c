@@ -57,6 +57,9 @@ int syncdiag_cases_network(void)
     sd_report("bootstrapstatus: exposes snapshot authority posture "
               "(RED)... ",
               sd_bootstrapstatus_snapshot_authority_scenario(), &failures);
+    sd_report("bootstrapstatus: params_served and its blocker track "
+              "-paramsdir, not just arming (RED)... ",
+              sd_bootstrapstatus_beta6_params_scenario(), &failures);
     sd_report("getnetworkinfo: separates inbound reachability from "
               "outbound handshakes (RED)... ",
               sd_getnetworkinfo_reachability_scenario(), &failures);
