@@ -1442,8 +1442,6 @@ engine/composition/src/boot_auto_install_bundle.c:boot_select_state_source#2:19
 engine/composition/src/boot_background_workers.c:hodl_history_worker_thread:17
 engine/composition/src/boot_background_workers.c:projection_backfill_service_thread:56
 engine/composition/src/boot_blkidx_ladder.c:rung_taint_load:20
-engine/composition/src/boot_block_file_scan.c:scan_block_files_mark_data:95
-engine/composition/src/boot_block_file_scan.c:scan_parse_one_file:30
 engine/composition/src/boot_block_index_ancestry.c:recompute_index_from_genesis:34
 engine/composition/src/boot_block_index_ancestry.c:resolve_orphan_pprev_from_disk:32
 engine/composition/src/boot_block_index_apply.c:scan_apply_one_file:22
@@ -1766,9 +1764,6 @@ engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_connect:27
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_resolve_range:21
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_run:20
-engine/controllers/src/repair_controller_utxo.c:fetch_utxo_gettxout:22
-engine/controllers/src/repair_controller_utxo.c:fetch_utxo_rawtx:30
-engine/controllers/src/repair_controller_utxo.c:rpc_repairutxos:78
 engine/controllers/src/rom_fetch_controller.c:zcl_native_handle_rom_fetch_bundle:43
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:52
 engine/controllers/src/snapshot_controller_import.c:import_block_index_thread:38
@@ -2022,7 +2017,6 @@ engine/modules/receipt/src/receipt.c:zcl_receipt_build:29
 engine/modules/rpc/src/client.c:rpc_call_local:20
 engine/modules/rpc/src/client.c:rpc_cli_print_json_result:17
 engine/modules/rpc/src/httpserver.c:rpc_http_start:40
-engine/modules/rpc/src/httpserver_request.c:rpc_http_request_handle:75
 engine/modules/rpc/src/legacy_chain_oracle.c:legacy_chain_rpc_get_mmb_leaf:22
 engine/modules/rpc/src/legacy_header_client.c:legacy_header_rpc_fetch_batch:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_call_with_timeout:29
@@ -2262,8 +2256,6 @@ engine/services/src/build_fabric_evidence.c:bf_proof_evaluate:149
 engine/services/src/build_fabric_evidence.c:build_fabric_receipt_observe_remote:42
 engine/services/src/build_fabric_evidence_parse.c:build_fabric_fuzz_evidence_parse:25
 engine/services/src/build_fabric_evidence_parse.c:build_fabric_test_evidence_parse:19
-engine/services/src/build_fabric_release.c:bfr_regression_intent_valid:26
-engine/services/src/build_fabric_release.c:build_fabric_release_qualify:79
 engine/services/src/build_fabric_runtime.c:build_fabric_runtime_register:20
 engine/services/src/build_fabric_service.c:bf_capability_has:16
 engine/services/src/build_fabric_service.c:bf_leased_transition:22
@@ -2345,7 +2337,6 @@ engine/services/src/legacy_mirror_sync_service.c:lms_parse_int_result:21
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
 engine/services/src/legacy_mirror_sync_state.c:lms_state_name:19
-engine/services/src/mesh_observation_compose.c:mesh_observation_compose:81
 engine/services/src/mesh_observation_json.c:mesh_observation_parse_json:17
 engine/services/src/mesh_observation_json.c:mo_parse_anchors:16
 engine/services/src/mesh_observation_json.c:mo_parse_edges:26
