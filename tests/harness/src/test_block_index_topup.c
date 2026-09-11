@@ -186,6 +186,26 @@ static struct block_index *topup_undo_entry(struct main_state *ms,
     return bi;
 }
 
+/* An entry that has NOT got its body address yet (no HAVE_DATA, so the
+ * top-up's data branch will adopt the row's nFile) but DOES already claim
+ * HAVE_UNDO at `undo_pos` against block file 3. (nFile, nUndoPos) is one
+ * address, so once the data branch replaces nFile the recorded position no
+ * longer belongs to the entry. */
+static struct block_index *topup_stale_undo_entry(struct main_state *ms,
+                                                  const struct uint256 *hash,
+                                                  int height,
+                                                  unsigned int undo_pos)
+{
+    struct block_index *bi = topup_insert_entry(ms, hash, height);
+    if (!bi)
+        return NULL;
+    bi->nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_UNDO;
+    bi->nTx = 4;
+    bi->nFile = 3;
+    bi->nUndoPos = undo_pos;
+    return bi;
+}
+
 static int topup_undo_assert(const struct block_index *e106,
                              const struct block_index *e107)
 {
@@ -235,6 +255,131 @@ static int run_undo_topup_cases(void)
     TOPUP_CHECK("undo: topup returns ok",
                 ready && block_index_projection_topup_with(bip, &ms, dir));
     failures += topup_undo_assert(e106, e107);
+    if (bip) block_index_projection_close(bip);
+    if (log) event_log_close(log);
+    main_state_free(&ms);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int topup_changed_file_assert(const struct block_index *e108,
+                                     const struct block_index *e109)
+{
+    int failures = 0;
+    TOPUP_CHECK("undo: adopted row file brings the row's undo position",
+                e108 && e108->nFile == 5 &&
+                (e108->nStatus & BLOCK_HAVE_UNDO) && e108->nUndoPos == 888);
+    TOPUP_CHECK("undo: adopted row file without row undo drops the stale pos",
+                e109 && e109->nFile == 5 &&
+                !(e109->nStatus & BLOCK_HAVE_UNDO) && e109->nUndoPos == 0);
+    return failures;
+}
+
+/* (nFile, nUndoPos) is ONE address — block_index_undo_pos_snapshot() pairs
+ * the entry's nFile with the entry's nUndoPos. When the data branch adopts
+ * the row's nFile, an undo position the entry recorded against its old file
+ * becomes a (row file, entry pos) address pointing into the wrong rev file.
+ * Both entries here lack HAVE_DATA (so the row's nFile IS adopted) and
+ * already claim HAVE_UNDO against file 3, while the rows live in file 5:
+ *   108 — the row carries a coherent undo pair, so it is adopted whole.
+ *   109 — the row claims no undo, so HAVE_UNDO and the stale position are
+ *         dropped rather than published against the new file. */
+static int run_undo_changed_file_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topup", "undofile");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 h108, h109;
+    topup_hash_for(108, &h108);
+    topup_hash_for(109, &h109);
+    struct block_index *e108 = topup_stale_undo_entry(&ms, &h108, 108, 111);
+    struct block_index *e109 = topup_stale_undo_entry(&ms, &h109, 109, 222);
+    bool ready = log && bip && e108 && e109 &&
+        topup_emit_row_undo(log, &h108, NULL, 108,
+                            BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                            BLOCK_HAVE_UNDO, 5, 800, 888, 4) &&
+        topup_emit_row_undo(log, &h109, &h108, 109,
+                            BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA,
+                            5, 900, 0, 4);
+    TOPUP_CHECK("undo: changed-file fixture ready", ready);
+    TOPUP_CHECK("undo: changed-file topup returns ok",
+                ready && block_index_projection_topup_with(bip, &ms, dir));
+    failures += topup_changed_file_assert(e108, e109);
+    if (bip) block_index_projection_close(bip);
+    if (log) event_log_close(log);
+    main_state_free(&ms);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int topup_insert_seal_assert(const struct block_index *e110,
+                                    const struct block_index *e111)
+{
+    int failures = 0;
+    TOPUP_CHECK("undo: fresh insert refuses HAVE_UNDO at position 0",
+                e110 && e110->nHeight == 110 &&
+                (e110->nStatus & BLOCK_HAVE_DATA) &&
+                !(e110->nStatus & BLOCK_HAVE_UNDO) && e110->nUndoPos == 0);
+    TOPUP_CHECK("undo: stub hydration refuses HAVE_UNDO at position 0",
+                e111 && e111->nHeight == 111 &&
+                (e111->nStatus & BLOCK_HAVE_DATA) &&
+                !(e111->nStatus & BLOCK_HAVE_UNDO) && e111->nUndoPos == 0);
+    return failures;
+}
+
+/* Both projection branches that copy a row's nStatus onto an entry VERBATIM
+ * — the fresh insert (the loaders never saw the block) and the contentless-
+ * stub hydration — must seal the undo bit the same way the node.db fill
+ * does. A row claiming HAVE_UNDO with n_undo_pos 0 otherwise publishes
+ * (nFile, 0) as a rev address, and block_index_undo_pos_snapshot() hands
+ * that pair to the undo reader as if it were real.
+ *   110 — no in-memory entry at all, so the row is inserted whole.
+ *   111 — a contentless stub (height 0, nBits 0) the row hydrates whole. */
+static int run_undo_insert_seal_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topup", "undoseal");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 h110, h111;
+    topup_hash_for(110, &h110);
+    topup_hash_for(111, &h111);
+
+    /* No entry for 110 at all. 111 is the corrupt-flat-load stub shape. */
+    struct block_index *stub = topup_insert_entry(&ms, &h111, 0);
+    if (stub) {
+        stub->nBits = 0;
+        stub->nStatus = 0;
+        stub->nTx = 0;
+    }
+    const uint32_t row_status = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                                BLOCK_HAVE_UNDO;
+    bool ready = log && bip && stub &&
+        topup_emit_row_undo(log, &h110, NULL, 110, row_status,
+                            5, 1000, 0, 4) &&
+        topup_emit_row_undo(log, &h111, &h110, 111, row_status,
+                            5, 1100, 0, 4);
+    TOPUP_CHECK("undo: insert-seal fixture ready", ready);
+    TOPUP_CHECK("undo: insert-seal topup returns ok",
+                ready && block_index_projection_topup_with(bip, &ms, dir));
+    failures += topup_insert_seal_assert(
+        block_map_find(&ms.map_block_index, &h110),
+        block_map_find(&ms.map_block_index, &h111));
     if (bip) block_index_projection_close(bip);
     if (log) event_log_close(log);
     main_state_free(&ms);
@@ -583,5 +728,7 @@ int test_block_index_topup(void)
     block_index_projection_close(bip);
     event_log_close(log);
     main_state_free(&ms);
-    return failures + run_bound_topup_integration() + run_undo_topup_cases();
+    return failures + run_bound_topup_integration() + run_undo_topup_cases()
+                    + run_undo_changed_file_cases()
+                    + run_undo_insert_seal_cases();
 }

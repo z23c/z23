@@ -10,11 +10,13 @@
  * branch the loop depends on without needing an on-disk historical chain. */
 
 #include "test/test_core.h"
+#include "bloom/merkle.h"
 #include "chain/chainparams.h"
 #include "consensus/upgrades.h"
 #include "core/arith_uint256.h"
 #include "core/serialize.h"
 #include "jobs/reducer_frontier.h"
+#include "mining/miner.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -49,6 +51,19 @@ bool bg_validation_verify_shielded_proofs(const struct transaction *tx,
  * decision the log depends on. */
 bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,
                                    uint64_t *blocks_out, uint64_t *txs_out);
+
+/* The production entry point that tally hangs off — the ONE place
+ * bg_validation_note_undo_skips is called from. Driving the seam alone
+ * cannot see the call being deleted or its have_undo argument flipped. */
+bool bg_validation_validate_block_proofs(const struct block *block,
+                                         struct block_index *pindex,
+                                         const char *datadir,
+                                         const struct chain_params *params,
+                                         int num_workers,
+                                         size_t max_script_batch,
+                                         int64_t *sigs_out,
+                                         int64_t *proofs_out,
+                                         int64_t *skips_out);
 
 static _Atomic int g_body_read_calls;
 static pthread_mutex_t g_body_read_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -775,9 +790,10 @@ static int test_bg_validation_authority_requires_complete_coverage(void)
 /* N consecutive undo-missing blocks must produce exactly ONE warn-worthy
  * rising edge — the defect this replaces printed one WARN per block (11,868
  * lines in 30 minutes on a header-only-imported index). The tallies must
- * still count every block and every skipped tx, and a block that really did
- * re-verify transparent scripts must clear the streak so a later recurrence
- * announces itself again. */
+ * still count every block and every skipped tx, and an unbroken RUN of
+ * blocks that really did re-verify against undo must clear the streak so a
+ * later recurrence announces itself again — while an interleaved gap, one
+ * present block per missing one, must NOT clear it. */
 static int test_bg_validation_undo_skip_warns_once_per_streak(void)
 {
     int failures = 0;
@@ -806,8 +822,18 @@ static int test_bg_validation_undo_skip_warns_once_per_streak(void)
         st = bg_validation_get_undo_skip_stats();
         ASSERT(st.streak_active);
 
-        /* A block that genuinely script-verified against undo does. */
+        /* Neither does ONE block that genuinely verified against undo: the
+         * missing and present blocks of a real gap interleave, so clearing
+         * on a single present block would re-arm the rising edge on the very
+         * next missing one. */
         ASSERT(!bg_validation_note_undo_skips(0, true, &b, &t));
+        st = bg_validation_get_undo_skip_stats();
+        ASSERT(st.streak_active);
+
+        /* An UNBROKEN RUN of them does (threshold
+         * UNDO_SKIP_STREAK_CLEAR_RUN in bg_validation_verify_block.c). */
+        for (int i = 0; i < 128; i++)
+            ASSERT(!bg_validation_note_undo_skips(0, true, &b, &t));
         st = bg_validation_get_undo_skip_stats();
         ASSERT(!st.streak_active);
 
@@ -821,6 +847,25 @@ static int test_bg_validation_undo_skip_warns_once_per_streak(void)
         ASSERT(st.blocks == (uint64_t)kBlocks + 2);
         ASSERT(st.txs == (uint64_t)kBlocks * 3 + 4);
 
+        /* The flood shape this suppression exists for: an INTERLEAVED gap,
+         * which is what the always-on sub-floor sampler (random heights) and
+         * scattered TOPUP_UNDO_CLEARED rows produce. One present block per
+         * missing block must still yield exactly ONE rising edge — a
+         * clear-on-first-present rule would announce ~500 times here. */
+        bg_validation_reset_undo_skip_stats();
+        edges = 0;
+        for (int i = 0; i < 1000; i++) {
+            uint64_t ib = 0, it = 0;
+            bool present = (i % 2) != 0;
+            if (bg_validation_note_undo_skips(present ? 0 : 3, present,
+                                              &ib, &it))
+                edges++;
+        }
+        ASSERT(edges == 1);
+        st = bg_validation_get_undo_skip_stats();
+        ASSERT(st.streak_active);
+        ASSERT(st.blocks == (uint64_t)500);
+
         /* Reset zeroes the tallies and re-arms the announcement. */
         bg_validation_reset_undo_skip_stats();
         st = bg_validation_get_undo_skip_stats();
@@ -832,10 +877,109 @@ static int test_bg_validation_undo_skip_warns_once_per_streak(void)
     return failures;
 }
 
+/* Build a MINED regtest block: a coinbase plus one ordinary transparent
+ * spend — the tx whose input scripts cannot be re-checked without the
+ * block's undo (rev) record. write_repair_block() above cannot serve here:
+ * it is coinbase-only and carries no Equihash solution, and the production
+ * verifier runs check_block_header(pow=true) before it ever reaches the
+ * undo. Regtest is (48,5), which the reference solver clears immediately.
+ * check_block() is called with check_size_limits=false, so only the header
+ * PoW and the merkle root have to be genuine; both are. */
+static bool undoless_block_build(struct block *blk, int height,
+                                 const struct chain_params *cp)
+{
+    block_init(blk);
+    blk->vtx = calloc(2, sizeof(*blk->vtx)); // raw-alloc-ok:test-fixture
+    if (!blk->vtx)
+        return false;
+    blk->num_vtx = 2;
+    for (size_t i = 0; i < 2; i++) {
+        transaction_init(&blk->vtx[i]);
+        if (!transaction_alloc(&blk->vtx[i], 1, 1))
+            return false;
+        blk->vtx[i].vin[0].sequence = UINT32_MAX;
+        blk->vtx[i].vout[0].value = 1000;
+    }
+    /* vtx[0] is the coinbase (null prevout); vtx[1] names a real outpoint,
+     * so the verifier must reach for undo to recover what it spent. */
+    outpoint_set_null(&blk->vtx[0].vin[0].prevout);
+    memset(blk->vtx[1].vin[0].prevout.hash.data, 0x5a, 32);
+    blk->vtx[1].vin[0].prevout.n = 0;
+    transaction_compute_hash(&blk->vtx[0]);
+    transaction_compute_hash(&blk->vtx[1]);
+
+    struct uint256 txids[2] = { blk->vtx[0].hash, blk->vtx[1].hash };
+    blk->header.nVersion = 4;
+    blk->header.hashMerkleRoot = compute_merkle_root(txids, 2);
+    uint256_set_null(&blk->header.hashPrevBlock);
+    uint256_set_null(&blk->header.hashFinalSaplingRoot);
+    blk->header.nTime = 1600000000u + (uint32_t)height;
+    struct arith_uint256 pow_limit;
+    uint256_to_arith(&pow_limit, &cp->consensus.powLimit);
+    blk->header.nBits = arith_uint256_get_compact(&pow_limit, false);
+    return mine_block_pow(blk, height, cp, 0);
+}
+
+/* Pin the CALL SITE, not just the seam. The streak suppression is only
+ * worth anything if bg_validation_validate_block_proofs actually reports
+ * its skips: delete that call, or pass it `true` for have_undo, and every
+ * direct-seam assertion above still passes. This one does not. */
+static int test_bg_validation_undo_skip_tally_is_wired(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: a real undo-less block moves the process tally") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "bg_validation", "undoless");
+        chain_params_select(CHAIN_REGTEST);
+        const struct chain_params *cp = chain_params_get();
+        ASSERT(cp != NULL);
+
+        struct main_state ms;
+        main_state_init(&ms);
+        struct block blk;
+        ASSERT(undoless_block_build(&blk, 1, cp));
+
+        struct uint256 hash;
+        block_get_hash(&blk, &hash);
+        struct block_index *index =
+            chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+        ASSERT(index != NULL);
+        index->nHeight = 1;
+        /* HAVE_DATA with NO HAVE_UNDO — the header-only-import shape, and
+         * the datadir holds no rev file either way. */
+        index->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        index->nFile = 0;
+        index->nDataPos = 8;
+
+        bg_validation_reset_undo_skip_stats();
+        int64_t sigs = 0, proofs = 0, skips = 0;
+        ASSERT(bg_validation_validate_block_proofs(&blk, index, dir, cp, 1, 0,
+                                                   &sigs, &proofs, &skips));
+        /* The block advanced, and it advanced with one tx unverified. */
+        ASSERT(skips == 1);
+        ASSERT(sigs == 0);
+
+        struct bg_validation_undo_skip_stats st =
+            bg_validation_get_undo_skip_stats();
+        ASSERT(st.blocks == 1);
+        ASSERT(st.txs == 1);
+        ASSERT(st.streak_active);
+
+        bg_validation_reset_undo_skip_stats();
+        block_free(&blk);
+        main_state_free(&ms);
+        chain_params_select(CHAIN_MAIN);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_bg_validation_reverify(void)
 {
     int failures = 0;
     failures += test_bg_validation_undo_skip_warns_once_per_streak();
+    failures += test_bg_validation_undo_skip_tally_is_wired();
     failures += test_bg_validation_owns_datadir();
     failures += test_bg_validation_phgr13_verdict_is_terminal();
     failures += test_bg_validation_reverify_healthy_advances();

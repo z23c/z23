@@ -2221,9 +2221,9 @@ engine/services/src/block_index_loader.c:load_block_index_flat:38
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:33
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_tip_from_finalized:33
 engine/services/src/block_index_loader_rebuild.c:load_block_index_from_projection:18
-engine/services/src/block_index_loader_topup.c:block_index_node_db_topup_with:42
+engine/services/src/block_index_loader_topup.c:block_index_node_db_topup_with:40
 engine/services/src/block_index_loader_topup.c:block_index_projection_topup_with:33
-engine/services/src/block_index_loader_topup.c:topup_row_cb:23
+engine/services/src/block_index_loader_topup.c:topup_row_cb:22
 engine/services/src/block_index_loader_torn_gate.c:block_index_loader_torn_import_detect:20
 engine/services/src/block_index_post_load.c:promote_best_header_after_load:23
 engine/services/src/block_index_sidecar_integrity.c:bii_verify:37

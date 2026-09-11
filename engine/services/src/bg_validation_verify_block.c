@@ -123,18 +123,54 @@ static bool read_block_undo(struct block_undo *undo, const struct block_index *p
  * (getheaders_suppress_rising_edge, core/modules/net/src/msg_headers.c):
  * announce ONCE on the RISING EDGE of a streak, keep cumulative tallies,
  * and surface them through the health object next to
- * script_verif_skipped_no_undo. The streak clears the first time a block
- * that HAS undo verifies its non-coinbase txs, so a later recurrence
- * re-announces instead of the gap going quiet forever. */
+ * script_verif_skipped_no_undo. The streak clears only after an UNBROKEN
+ * RUN of blocks that verified against a present undo record, so a later
+ * recurrence re-announces instead of the gap going quiet forever.
+ *
+ * A RUN, not a single block, is what makes the suppression hold. The
+ * undo-missing and undo-present blocks of a real gap INTERLEAVE: the
+ * always-on sub-floor re-verify sampler draws random heights, and a
+ * block-index top-up that drops a stale undo position (TOPUP_UNDO_CLEARED)
+ * leaves the cleared rows scattered through the index. Clearing on one
+ * undo-present block would re-arm the rising edge on the very next missing
+ * one and reproduce the per-block flood this exists to stop (node2, 11,868
+ * lines in 30 minutes).
+ *
+ * What the run costs is regime-dependent, and only the forward walk is
+ * cheap. A FORWARD walk that has left the gap behind streams consecutive
+ * undo-present blocks at walk speed, so it crosses the threshold in the
+ * same second. In the SAMPLER-ONLY regime (the always-on sub-floor
+ * re-verify after BG_VALIDATION_COMPLETE) there is no stream: the run
+ * advances at most one block per draw, so the re-announce cadence is
+ * bounded below by the sampler interval — 64 consecutive present draws at
+ * ~30 s per draw is >= 32 minutes, and far longer on a heavily gapped
+ * chain, where a missing block drawn anywhere in the run resets it to
+ * zero. That is the intended trade: the tallies and the health fields,
+ * not the log, carry the volume, and a recurrence is re-announced late
+ * rather than per block. */
+#define UNDO_SKIP_STREAK_CLEAR_RUN 64u
+
 static _Atomic uint64_t g_undo_missing_blocks = 0;
 static _Atomic uint64_t g_undo_missing_txs    = 0;
 static _Atomic bool     g_undo_missing_streak = false;
+/* Unbroken undo-present blocks since the last undo-missing one. */
+static _Atomic uint64_t g_undo_present_run    = 0;
 
 /* Rising edge of a suppression streak: true the first call after the
  * streak was cleared, false while it persists. */
 static bool undo_skip_rising_edge(void)
 {
     return !atomic_exchange(&g_undo_missing_streak, true);
+}
+
+/* One block whose undo (rev) record was present and parsed. It ends the
+ * streak only once the unbroken run reaches UNDO_SKIP_STREAK_CLEAR_RUN —
+ * see the interleaving argument above. */
+static void undo_skip_note_present(void)
+{
+    uint64_t run = atomic_fetch_add(&g_undo_present_run, 1) + 1;
+    if (run >= UNDO_SKIP_STREAK_CLEAR_RUN)
+        atomic_store(&g_undo_missing_streak, false);
 }
 
 struct bg_validation_undo_skip_stats bg_validation_get_undo_skip_stats(void)
@@ -151,22 +187,28 @@ void bg_validation_reset_undo_skip_stats(void)
     atomic_store(&g_undo_missing_blocks, 0);
     atomic_store(&g_undo_missing_txs, 0);
     atomic_store(&g_undo_missing_streak, false);
+    atomic_store(&g_undo_present_run, 0);
 }
 
 /* Tally one verified block's undo-missing skips and decide whether this
  * block is the one that announces the streak. `verified_with_undo` is true
- * when the block actually re-checked transparent scripts (undo present and
- * at least one non-coinbase tx) — only such a block clears the streak, so
- * the coinbase-only blocks of the early chain do not make the warning
- * oscillate. Returns true exactly on the rising edge. */
+ * when the block's undo (rev) record was present and parsed — only such a
+ * block counts toward the run that clears the streak, so the coinbase-only
+ * blocks of the early chain (which never read undo at all) do not make the
+ * warning oscillate. It does not assert that any script was actually
+ * checked: a block whose only non-coinbase txs are fully shielded has no
+ * inputs to check and still counts, because the rev file it would have
+ * needed was there. Any block that DID skip breaks the run, whether or not
+ * its own undo parsed. Returns true exactly on the rising edge. */
 bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,
                                    uint64_t *blocks_out, uint64_t *txs_out)
 {
     if (skips <= 0) {
         if (verified_with_undo)
-            atomic_store(&g_undo_missing_streak, false);
+            undo_skip_note_present();
         return false; // raw-return-ok:nothing-skipped-is-not-an-event
     }
+    atomic_store(&g_undo_present_run, 0);
     *blocks_out = atomic_fetch_add(&g_undo_missing_blocks, 1) + 1;
     *txs_out = atomic_fetch_add(&g_undo_missing_txs, (uint64_t)skips) +
                (uint64_t)skips;
@@ -305,9 +347,16 @@ bool bg_validation_validate_block_proofs(const struct block *block,
     }
 
     uint64_t skip_blocks = 0, skip_txs = 0;
-    /* `have_undo` is only ever set for a block with a non-coinbase tx (it
-     * is read under `block->num_vtx > 1` above), so it alone is the
-     * "this block really did script-verify against undo" signal. */
+    /* The streak is about undo being MISSING, so `have_undo` — the block's
+     * rev record parsed — is deliberately what feeds the run that ends it.
+     * Note what that does NOT assert: `have_undo` is read under
+     * `block->num_vtx > 1`, but a block whose only non-coinbase txs are
+     * fully shielded has num_vin == 0, matches a zero-prevout undo entry,
+     * and queues zero script checks. Such a block counts toward the run
+     * having verified no scripts at all. That is the
+     * intended reading: the rev file for this height was present and
+     * parseable, which is exactly the condition whose ABSENCE the streak
+     * reports, and the tallies (not the log) carry the volume either way. */
     if (bg_validation_note_undo_skips(skips, have_undo,
                                       &skip_blocks, &skip_txs))
         LOG_WARN("bg-valid", "[bg-valid] h=%d: %lld non-coinbase tx(s) NOT "

@@ -101,18 +101,117 @@ static int syncdiag_case_validationstatus_coverage(void)
     ok = ok && vs_undo_gap_is_incomplete(&tbl);
 
     /* A short walk with zero skips is incomplete for the other reason —
-     * the predicate's height term, not the undo term. */
+     * the predicate's height term, not the undo term. Clear the process
+     * tally first, so the undo term cannot be what is carrying the verdict. */
     atomic_store(&svc.progress.script_verif_skipped_no_undo, 0);
     atomic_store(&svc.progress.verified_height, 99);
+    bg_validation_reset_undo_skip_stats();
     bool called = false;
     ok = ok && vs_reports_incomplete(&tbl, &called) && called;
 
-    /* Full walk, no skips, COMPLETE: nothing this status can see is
-     * missing. */
+    /* And the undo term ALONE: a full walk reading COMPLETE with the
+     * per-service skip counter at 0 — which is what a restart or a
+     * bg_validation_reset() leaves — is still incomplete when this process
+     * has watched a block advance with unverified scripts. */
     atomic_store(&svc.progress.verified_height, 100);
+    uint64_t sb = 0, st = 0;
+    bg_validation_note_undo_skips(1, false, &sb, &st);
+    ok = ok && vs_reports_incomplete(&tbl, &called) && called;
+
+    /* Full walk, no skips, COMPLETE, AND no undo-missing block tallied by
+     * this process: only then is nothing this status can see missing. */
+    bg_validation_reset_undo_skip_stats();
     ok = ok && !vs_reports_incomplete(&tbl, &called) && called;
 
     g_bg_validation = saved;
+    bg_validation_reset_undo_skip_stats();
+    if (ok) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* The invariant EVERY getsyncdetail reply must satisfy, whatever progress is
+ * installed: a nonzero undo-missing tally and verification_incomplete=false
+ * can never appear in the same object. Checked on every reply this case
+ * reads, not only on the ones whose verdict is under test. */
+static bool gsd_object_is_consistent(const struct json_value *bgv)
+{
+    if (json_get_int(json_get(bgv, "undo_missing_blocks")) > 0)
+        return json_get_bool(json_get(bgv, "verification_incomplete"));
+    return true;
+}
+
+/* getsyncdetail's bg_validation.verification_incomplete verdict for whatever
+ * progress is installed. `called` reports that the RPC succeeded, that both
+ * fields under test are present, and that the reply satisfies the invariant
+ * above — so a false verdict is read off a real, self-consistent reply and
+ * never off a missing section. */
+static bool gsd_reports_incomplete(bool *called)
+{
+    struct json_value r;
+    json_init(&r);
+    bool ok = api_getsyncdetail(&r);
+    const struct json_value *bgv = json_get(&r, "bg_validation");
+    *called = ok && bgv != NULL &&
+        json_get(bgv, "undo_missing_blocks") != NULL &&
+        json_get(bgv, "verification_incomplete") != NULL &&
+        gsd_object_is_consistent(bgv);
+    bool incomplete = json_get_bool(json_get(bgv, "verification_incomplete"));
+    json_free(&r);
+    return incomplete;
+}
+
+/* `getsyncdetail` publishes undo_missing_blocks and verification_incomplete
+ * into the SAME object. The two must never disagree: a reply naming a
+ * nonzero undo-missing tally while calling verification complete says the
+ * scripts were checked when this process watched them go unchecked. Same
+ * fail-closed rule validationstatus carries, pinned on the sibling RPC. */
+static int syncdiag_case_getsyncdetail_coverage(void)
+{
+    int failures = 0;
+    static struct bg_validation_service svc;
+
+    printf("getsyncdetail: undo gap alone fails coverage closed... ");
+    memset(&svc, 0, sizeof(svc));
+    atomic_store(&svc.progress.verified_height, 100);
+    atomic_store(&svc.progress.chain_height, 100);
+    atomic_store(&svc.progress.script_verif_skipped_no_undo, 0);
+    atomic_store(&svc.progress.state, BG_VALIDATION_COMPLETE);
+    rpc_health_set_state(NULL, &svc, NULL, NULL);
+    bg_validation_reset_undo_skip_stats();
+
+    /* The undo term ALONE: the per-service skip counter reads 0 — what a
+     * restart or bg_validation_reset() leaves — while this process has
+     * already watched a block advance without undo. */
+    bool called = false;
+    uint64_t b = 0, t = 0;
+    bg_validation_note_undo_skips(3, false, &b, &t);
+    bool ok = gsd_reports_incomplete(&called) && called;
+
+    /* And the per-service counter alone, with the process tally clear. */
+    bg_validation_reset_undo_skip_stats();
+    atomic_store(&svc.progress.script_verif_skipped_no_undo, 7);
+    ok = ok && gsd_reports_incomplete(&called) && called;
+
+    /* A RUNNING walk mid-chain with neither term set: zero script skips,
+     * zero undo-missing blocks, verified_height short of chain_height. It
+     * is still incomplete — the heights term carries the verdict, because a
+     * walk that has not reached the tip has verified nothing about the
+     * blocks it has not reached. This is the case the old
+     * `script_verif_skipped_no_undo > 0` verdict got wrong, and the reason
+     * this RPC now shares validationstatus's predicate. */
+    atomic_store(&svc.progress.script_verif_skipped_no_undo, 0);
+    atomic_store(&svc.progress.verified_height, 42);
+    atomic_store(&svc.progress.state, BG_VALIDATION_RUNNING);
+    ok = ok && gsd_reports_incomplete(&called) && called;
+
+    /* Neither term, walk at tip, state COMPLETE: only then may the reply
+     * call coverage complete. */
+    atomic_store(&svc.progress.verified_height, 100);
+    atomic_store(&svc.progress.state, BG_VALIDATION_COMPLETE);
+    ok = ok && !gsd_reports_incomplete(&called) && called;
+
+    rpc_health_set_state(NULL, NULL, NULL, NULL);
     bg_validation_reset_undo_skip_stats();
     if (ok) printf("OK\n");
     else    { printf("FAIL\n"); failures++; }
@@ -651,6 +750,7 @@ int syncdiag_cases_health(void)
     }
 
     failures += syncdiag_case_validationstatus_coverage();
+    failures += syncdiag_case_getsyncdetail_coverage();
 
     return failures;
 }

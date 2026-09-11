@@ -58,8 +58,13 @@ bool bg_validation_validate_block_proofs(const struct block *block,
 
 /* Tally one verified block's undo-missing script skips and report whether
  * this block is the RISING EDGE of a suppression streak (the one block that
- * may LOG_WARN). `verified_with_undo` is true when the block actually
- * re-checked transparent scripts; only such a block clears the streak.
+ * may LOG_WARN). `verified_with_undo` is true when the block's undo (rev)
+ * record was present and parsed; only an UNBROKEN RUN of such blocks clears
+ * the streak, so an interleaved gap cannot re-arm the warning per sample.
+ * The forward walk streams that run at walk speed; under the sampler-only
+ * regime it advances one block per draw, so re-announce is bounded below by
+ * the sampler interval and can be tens of minutes or more (see
+ * UNDO_SKIP_STREAK_CLEAR_RUN, bg_validation_verify_block.c).
  * On the edge, blocks_out and txs_out receive the post-increment totals also
  * published by bg_validation_get_undo_skip_stats(). */
 bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,

@@ -68,9 +68,13 @@ static void ndt_hash_for(int h, struct uint256 *out)
     out->data[31] = 0xA5;
 }
 
-/* Write a connected (status>=3), body-backed block row at height h into the
- * node.db `blocks` table, prev_hash = hash(h-1). */
-static bool ndt_write_block(struct node_db *ndb, int h)
+/* Write a connected (status>=3) block row at height h into the node.db
+ * `blocks` table, prev_hash = hash(h-1), with an explicit stored status,
+ * undo column and file number. The STATUS bits are what the top-up reads as
+ * "this row claims data" / "this row claims undo": a row that merely names a
+ * file_num claims nothing, on either half. */
+static bool ndt_write_block_full(struct node_db *ndb, int h, int status,
+                                 int undo_pos, int file_num)
 {
     static uint8_t dummy_solution[1] = {0};
     struct db_block b;
@@ -89,14 +93,28 @@ static bool ndt_write_block(struct node_db *ndb, int h)
     b.solution = dummy_solution;
     b.solution_len = sizeof(dummy_solution);
     memset(b.chain_work, 0, 32);
-    b.status = 3;                 /* connected — db_block_find_by_height filter */
-    b.file_num = 1;
+    b.status = status;            /* connected — db_block_find_by_height filter */
+    b.file_num = file_num;
     b.data_pos = 1000 + h;
-    b.undo_pos = 2000 + h;
+    b.undo_pos = undo_pos;
     b.num_tx = 2;
     memset(b.sapling_root, 0, 32);
     memset(b.sprout_root, 0, 32);
     return db_block_save(ndb, &b);
+}
+
+/* The common shape: the row names block file 1. */
+static bool ndt_write_block_row(struct node_db *ndb, int h, int status,
+                                int undo_pos)
+{
+    return ndt_write_block_full(ndb, h, status, undo_pos, 1);
+}
+
+/* The plain window row the fold fixtures use: connected, body-backed, and
+ * making NO undo claim (status has no BLOCK_HAVE_UNDO bit). */
+static bool ndt_write_block(struct node_db *ndb, int h)
+{
+    return ndt_write_block_row(ndb, h, 3, 2000 + h);
 }
 
 /* Insert a header-only in-memory entry at height h (the stale-flat shape). */
@@ -157,19 +175,46 @@ static struct block_index *ndt_undo_entry(struct main_state *ms, int h,
     return bi;
 }
 
+/* A body-less entry carrying an undo position of its OWN
+ * against a different block file — the shape the destructive clear needs:
+ * adopting the row's file number invalidates this position, and
+ * topup_apply_undo() then zeroes it. */
+static struct block_index *ndt_no_data_undo_entry(struct main_state *ms,
+                                                  int h)
+{
+    struct block_index *bi = ndt_insert_entry(ms, h);
+    if (!bi)
+        return NULL;
+    bi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_UNDO;
+    bi->nFile = 2;
+    bi->nUndoPos = 777;
+    bi->nTx = 2;
+    return bi;
+}
+
 struct ndt_undo_fixture {
     struct node_db ndb;
     sqlite3 *progress;
     struct main_state ms;
     struct block_index *u103;
     struct block_index *u104;
+    struct block_index *u105;
+    struct block_index *u106;
+    struct block_index *u107;
     bool opened;
     bool built;
 };
 
-/* Same seed-anchor/window shape as the main fixture, but with 103 and 104
- * ALREADY in the map carrying HAVE_DATA — 103 without an undo position,
- * 104 with its own. */
+/* Same seed-anchor/window shape as the main fixture, but with 103, 104 and
+ * 105 ALREADY in the map carrying HAVE_DATA — 103 and 105 without an undo
+ * position, 104 with its own. The rows differ in what they CLAIM: 103 and
+ * 104 carry BLOCK_HAVE_UNDO, 105 deliberately does not.
+ *
+ * 106 and 107 are the DATA half of the same rule: body-less entries whose
+ * rows are the header-only snapshot-import shape written by
+ * snapshot_controller_import.c — HAVE_DATA and HAVE_UNDO stripped, file_num
+ * pinned to 0, positions 0. That file_num is not an address; the import
+ * comment states the node gates every block-file read on the status bits. */
 static void ndt_undo_fixture_build(struct ndt_undo_fixture *f,
                                    const char *dir)
 {
@@ -182,26 +227,49 @@ static void ndt_undo_fixture_build(struct ndt_undo_fixture *f,
     f->opened = true;
     if (sqlite3_open(prog_path, &f->progress) != SQLITE_OK)
         return;
-    for (int h = 100; h <= 105; h++)
+    for (int h = 100; h <= 102; h++)
         (void)ndt_write_block(&f->ndb, h);
+    /* Rows that claim undo (status bit set) vs a row that does not. */
+    (void)ndt_write_block_row(&f->ndb, 103, 3 | BLOCK_HAVE_UNDO, 2103);
+    (void)ndt_write_block_row(&f->ndb, 104, 3 | BLOCK_HAVE_UNDO, 2104);
+    (void)ndt_write_block_row(&f->ndb, 105, 3, 2105);
+    /* Header-only import rows: no HAVE_DATA, no HAVE_UNDO, file_num 0. */
+    (void)ndt_write_block_full(&f->ndb, 106, 3, 0, 0);
+    (void)ndt_write_block_full(&f->ndb, 107, 3, 0, 0);
     struct uint256 seed_hash;
     ndt_hash_for(102, &seed_hash);
     (void)node_db_state_set_int(&f->ndb, "cold_import_seed_anchor_height",
                                 102);
     (void)node_db_state_set(&f->ndb, "cold_import_seed_anchor_hash",
                             seed_hash.data, 32);
-    (void)ndt_set_coins_best(f->progress, 105);
+    (void)ndt_set_coins_best(f->progress, 107);
     main_state_init(&f->ms);
     (void)ndt_insert_entry(&f->ms, 102);
     f->u103 = ndt_undo_entry(&f->ms, 103, 0);
     f->u104 = ndt_undo_entry(&f->ms, 104, 555);
-    f->built = f->u103 && f->u104;
+    f->u105 = ndt_undo_entry(&f->ms, 105, 0);
+    /* 106: pure header-only entry (nFile -1, no position bits at all). */
+    f->u106 = ndt_insert_entry(&f->ms, 106);
+    f->u107 = ndt_no_data_undo_entry(&f->ms, 107);
+    f->built = f->u103 && f->u104 && f->u105 && f->u106 && f->u107;
 }
 
 /* The undo top-up the node.db fold used to be unable to perform: an entry
  * that already carries HAVE_DATA but no HAVE_UNDO, whose `blocks` row still
  * names an undo position. Without it the background validator skips every
- * transparent script in the block for want of recoverable spent outputs. */
+ * transparent script in the block for want of recoverable spent outputs.
+ *
+ * And the fail-closed half, on BOTH position bits: a row whose stored
+ * status does not claim BLOCK_HAVE_UNDO (105) or BLOCK_HAVE_DATA (106, 107)
+ * grants nothing, however plausible its columns look. A header-only
+ * snapshot import leaves exactly that shape — status stripped of both bits,
+ * file_num 0 — and nothing in this tree writes block or rev files for it.
+ * An entry that gained HAVE_UNDO from such a row would send the validator
+ * to a rev offset that does not exist; one that gained HAVE_DATA would
+ * publish (file 0, data_pos) as a body address that does not exist. Worse,
+ * adopting the row's file number counts as a file change, which sends
+ * topup_apply_undo() down its TOPUP_UNDO_CLEARED path and destroys an undo
+ * position the entry legitimately held (107). */
 static int ndt_undo_topup_cases(const char *dir)
 {
     int failures = 0;
@@ -220,6 +288,15 @@ static int ndt_undo_topup_cases(const char *dir)
         NDT_CHECK("undo-topup: existing HAVE_UNDO not overwritten",
                   (f.u104->nStatus & BLOCK_HAVE_UNDO) &&
                   f.u104->nUndoPos == 555u);
+        NDT_CHECK("undo-topup: row without HAVE_UNDO grants nothing",
+                  !(f.u105->nStatus & BLOCK_HAVE_UNDO) &&
+                  f.u105->nUndoPos == 0u);
+        NDT_CHECK("data-topup: row without HAVE_DATA grants nothing",
+                  !(f.u106->nStatus & BLOCK_HAVE_DATA) &&
+                  f.u106->nFile == -1 && f.u106->nDataPos == 0u);
+        NDT_CHECK("data-topup: row without HAVE_DATA keeps the entry's undo",
+                  (f.u107->nStatus & BLOCK_HAVE_UNDO) &&
+                  f.u107->nUndoPos == 777u && f.u107->nFile == 2);
         main_state_free(&f.ms);
     }
     if (f.progress)

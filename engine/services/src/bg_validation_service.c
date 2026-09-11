@@ -300,6 +300,19 @@ static void bg_validation_sampled_reverify_loop(
         block_init(&blk);
         if (bg_validation_read_body_resilient(
                 svc, h, datadir, BG_VALIDATION_COMPLETE, &blk, &pindex)) {
+                    /* `k` (undo-missing script skips) is DELIBERATELY not
+                     * folded into progress.script_verif_skipped_no_undo.
+                     * That counter is the forward walk's per-height census:
+                     * it is persisted, restored on restart, and is a term in
+                     * bg_validation_authority_claim_is_complete. This loop
+                     * draws a RANDOM height forever, so adding k here would
+                     * re-count heights the walk already counted and grow the
+                     * persisted total without bound on an idle chain —
+                     * turning a census into a rate. The skips are not lost:
+                     * bg_validation_note_undo_skips() inside
+                     * validate_block_proofs already tallies every draw in
+                     * the process-global undo_missing_* counters, which is
+                     * where a sampled gap is meant to be read. */
                     int64_t s = 0, p = 0, k = 0;
                     enum bg_validation_block_outcome outcome =
                         bg_validation_validate_canonical_block(

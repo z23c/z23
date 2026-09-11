@@ -5,6 +5,7 @@
 #include "controllers/health_controller.h"
 #include "controllers/strong_params.h"
 #include "framework/condition.h"
+#include "services/bg_validation_authority.h"
 #include "services/block_source_policy.h"
 #include "services/sync_monitor.h"
 #include "services/legacy_mirror_sync_service.h"
@@ -185,6 +186,70 @@ void rpc_health_set_state(struct main_state *ms,
 
 /* ── RPC: getsyncdetail ──────────────────────────────────────── */
 
+/* The bg_validation section of the sync detail. Extracted so the coverage
+ * verdict and the two undo-gap counters it answers to are read together in
+ * one place — they are published into the SAME object and must never
+ * disagree. No-op when no service is installed. */
+static void push_bg_validation_fields(struct json_value *result,
+                                      struct bg_validation_service *svc)
+{
+    if (!svc)
+        return;
+
+    struct json_value bgv = {0};
+    json_set_object(&bgv);
+
+    struct bg_validation_progress p = bg_validation_get_progress(svc);
+    json_push_kv_str(&bgv, "state", bg_validation_state_name(p.state));
+    json_push_kv_int(&bgv, "verified_height", p.verified_height);
+    json_push_kv_int(&bgv, "chain_height", p.chain_height);
+    json_push_kv_int(&bgv, "sigs_verified", p.sigs_verified);
+    json_push_kv_int(&bgv, "proofs_verified", p.proofs_verified);
+    json_push_kv_int(&bgv, "blocks_per_sec", p.blocks_per_sec);
+    /* Non-coinbase txs that advanced verified_height WITHOUT full script
+     * verification (undo missing/mismatched — expected post-snapshot).
+     * Makes the "verified" claim honest: >0 means incomplete coverage. */
+    json_push_kv_int(&bgv, "script_verif_skipped_no_undo",
+        p.script_verif_skipped_no_undo);
+    /* Blocks that advanced WITHOUT full script verification, and the
+     * suppression streak behind the single rising-edge bg-valid WARN.
+     * The log names the gap once; these fields are how its size is
+     * read (see bg_validation_verify_block.c). */
+    struct bg_validation_undo_skip_stats us =
+        bg_validation_get_undo_skip_stats();
+    /* The SAME verdict the sibling RPC validationstatus publishes
+     * (event_controller.c rpc_validationstatus): same helper, same
+     * arguments, so the two RPCs can never disagree about whether this
+     * chain's scripts were fully checked. A walk that has not reached the
+     * tip is incomplete even with zero skips — an unfinished walk has
+     * verified nothing about the blocks it has not reached yet.
+     *
+     * us.blocks is an INDEPENDENT term, not a restatement of the
+     * per-service counter: script_verif_skipped_no_undo is restored at walk
+     * start and zeroed by bg_validation_reset(), so a reset service reads 0
+     * while this process has already watched blocks advance with unverified
+     * scripts. Fail closed: a gap this process saw must never be reported
+     * in the same object as verification_incomplete=false. */
+    bool incomplete = !bg_validation_authority_walk_is_complete(
+                          p.verified_height, p.chain_height,
+                          p.script_verif_skipped_no_undo,
+                          p.state == BG_VALIDATION_COMPLETE) ||
+                      us.blocks != 0;
+    json_push_kv_bool(&bgv, "verification_incomplete", incomplete);
+    json_push_kv_int(&bgv, "undo_missing_blocks", (int64_t)us.blocks);
+    json_push_kv_int(&bgv, "undo_missing_txs", (int64_t)us.txs);
+    json_push_kv_bool(&bgv, "undo_missing_streak_active", us.streak_active);
+
+    if (p.chain_height > 0 && p.verified_height >= 0) {
+        double pct = 100.0 * (double)(p.verified_height + 1) /
+                     (double)(p.chain_height + 1);
+        json_push_kv_real(&bgv, "percent_complete", pct);
+    }
+
+    json_push_kv(result, "bg_validation", &bgv);
+    json_free(&bgv);
+}
+
 static bool rpc_getsyncdetail(const struct json_value *params, bool help,
                               struct json_value *result)
 {
@@ -239,46 +304,7 @@ static bool rpc_getsyncdetail(const struct json_value *params, bool help,
     }
 
     /* bg_validation progress */
-    if (ctx->bg_valid) {
-        struct json_value bgv = {0};
-        json_set_object(&bgv);
-
-        struct bg_validation_progress p =
-            bg_validation_get_progress(ctx->bg_valid);
-        json_push_kv_str(&bgv, "state",
-            bg_validation_state_name(p.state));
-        json_push_kv_int(&bgv, "verified_height", p.verified_height);
-        json_push_kv_int(&bgv, "chain_height", p.chain_height);
-        json_push_kv_int(&bgv, "sigs_verified", p.sigs_verified);
-        json_push_kv_int(&bgv, "proofs_verified", p.proofs_verified);
-        json_push_kv_int(&bgv, "blocks_per_sec", p.blocks_per_sec);
-        /* Non-coinbase txs that advanced verified_height WITHOUT full script
-         * verification (undo missing/mismatched — expected post-snapshot).
-         * Makes the "verified" claim honest: >0 means incomplete coverage. */
-        json_push_kv_int(&bgv, "script_verif_skipped_no_undo",
-            p.script_verif_skipped_no_undo);
-        json_push_kv_bool(&bgv, "verification_incomplete",
-            p.script_verif_skipped_no_undo > 0);
-        /* Blocks that advanced WITHOUT full script verification, and the
-         * suppression streak behind the single rising-edge bg-valid WARN.
-         * The log names the gap once; these fields are how its size is
-         * read (see bg_validation_verify_block.c). */
-        struct bg_validation_undo_skip_stats us =
-            bg_validation_get_undo_skip_stats();
-        json_push_kv_int(&bgv, "undo_missing_blocks", (int64_t)us.blocks);
-        json_push_kv_int(&bgv, "undo_missing_txs", (int64_t)us.txs);
-        json_push_kv_bool(&bgv, "undo_missing_streak_active",
-            us.streak_active);
-
-        if (p.chain_height > 0 && p.verified_height >= 0) {
-            double pct = 100.0 * (double)(p.verified_height + 1) /
-                         (double)(p.chain_height + 1);
-            json_push_kv_real(&bgv, "percent_complete", pct);
-        }
-
-        json_push_kv(result, "bg_validation", &bgv);
-        json_free(&bgv);
-    }
+    push_bg_validation_fields(result, ctx->bg_valid);
 
     /* bg_hash_verify progress */
     if (ctx->bg_hash) {

@@ -575,7 +575,7 @@ static bool rpc_validationstatus(const struct json_value *params, bool help,
         "in a background thread using parallel script verification.\n"
         "\nResult:\n"
         "  { \"state\": \"...\", \"verified_height\": N, \"chain_height\": N,\n"
-        "    \"percent\": N.N, \"sigs_verified\": N, \"proofs_verified\": N,\n"
+        "    \"percent_x10\": N, \"sigs_verified\": N, \"proofs_verified\": N,\n"
         "    \"blocks_per_sec\": N,\n"
         "    \"script_verif_skipped_no_undo\": N,\n"
         "    \"undo_missing_blocks\": N,\n"
@@ -587,7 +587,8 @@ static bool rpc_validationstatus(const struct json_value *params, bool help,
         "block. script_verif_skipped_no_undo counts those txs and\n"
         "undo_missing_blocks the blocks they sat in.\n"
         "verification_incomplete is true whenever this status can see the\n"
-        "walk is short or has such a gap; it is fail-closed, and only\n"
+        "walk is short, the walk counted a skip, or this process has\n"
+        "tallied an undo-missing block at all; it is fail-closed, and only\n"
         "bg_validation authority publication (which also proves the coins\n"
         "frontier) may call a chain fully validated.\n");
 
@@ -629,11 +630,19 @@ static bool rpc_validationstatus(const struct json_value *params, bool help,
     struct bg_validation_undo_skip_stats us =
         bg_validation_get_undo_skip_stats();
     json_push_kv_int(result, "undo_missing_blocks", (int64_t)us.blocks);
-    json_push_kv_bool(result, "verification_incomplete",
-                      !bg_validation_authority_walk_is_complete(
+    /* us.blocks is an INDEPENDENT term, not a restatement of the predicate.
+     * script_verif_skipped_no_undo is the per-service walk counter: it is
+     * restored from the progress store at walk start and zeroed by
+     * bg_validation_reset(), so a fresh or reset service can read 0 while
+     * this process has already watched blocks advance with unverified
+     * scripts. The process-global tally is what THIS process actually saw,
+     * and a gap it saw must not vanish from the reading. */
+    bool incomplete = !bg_validation_authority_walk_is_complete(
                           p.verified_height, p.chain_height,
                           p.script_verif_skipped_no_undo,
-                          p.state == BG_VALIDATION_COMPLETE));
+                          p.state == BG_VALIDATION_COMPLETE) ||
+                      us.blocks != 0;
+    json_push_kv_bool(result, "verification_incomplete", incomplete);
 
     return true;
 }

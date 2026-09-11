@@ -137,13 +137,38 @@ const char *bg_validation_state_name(enum bg_validation_state state);
 /* ── Undo-missing script-skip tallies (bg_validation_verify_block.c) ──
  *
  * Process-wide (not per-service) because the block verifier is a free
- * function with no service handle. `blocks` counts blocks that advanced
- * verified_height with at least one non-coinbase tx left unverified for
- * want of undo data; `txs` counts those txs (the same quantity the
- * per-service script_verif_skipped_no_undo accumulates). `streak_active`
- * is true while the suppression streak is running — the per-block warning
- * is emitted only on that streak's RISING EDGE, so these tallies, not the
- * log, are how the skip volume is read. */
+ * function with no service handle.
+ *
+ * What they actually count: ONE bg_validation_validate_block_proofs()
+ * INVOCATION that left at least one non-coinbase tx unverified for want of
+ * undo data bumps `blocks` by 1 and `txs` by that invocation's skip count.
+ * Invocations, not distinct heights — the forward walk retries the same
+ * height after a BG_VALIDATION_BLOCK_ORPHAN outcome, and the always-on
+ * sampled re-verify loop draws a random already-verified height every
+ * ~30 s forever. So on a chain with an undo gap these tallies keep RISING
+ * while nothing new is being verified, and they are a monotone
+ * "this process has seen undo-missing blocks" volume signal, not a census
+ * of the chain.
+ *
+ * That also makes them a DIFFERENT quantity from the per-service
+ * progress.script_verif_skipped_no_undo, which is the forward walk's
+ * census: restored from the progress store at walk start, re-saved as the
+ * walk advances, zeroed by bg_validation_reset(), and a term in
+ * bg_validation_authority_claim_is_complete(). Neither is derivable from
+ * the other; validationstatus reports both and treats either as a gap.
+ *
+ * `streak_active` is true while the suppression streak is running — the
+ * per-block warning is emitted only on that streak's RISING EDGE, so these
+ * tallies, not the log, are how the skip volume is read. The streak clears
+ * only after an unbroken run of blocks whose undo record was present and
+ * parsed (see bg_validation_note_undo_skips), so a gap whose missing and
+ * present blocks interleave stays suppressed instead of re-announcing on
+ * every sample. Once the forward walk is done that run advances only at the
+ * sampler's pace, so a recurrence can be re-announced tens of minutes late
+ * or later — read the volume off these counters, never off the log's
+ * cadence. The counters are never cleared by
+ * ordinary operation: only bg_validation_reset() / the explicit reset seam
+ * below zero them. */
 struct bg_validation_undo_skip_stats {
     uint64_t blocks;
     uint64_t txs;
