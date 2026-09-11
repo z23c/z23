@@ -12,6 +12,13 @@
  *   - registered sinks fire at HIGH and CRITICAL, NOT at NOMINAL/ELEVATED
  *   - shrink_calls / last_shrink_unix bookkeeping increments correctly
  *   - dump_state_json reports the current level + sink stats
+ *   - on a cgroup basis the numerator excludes the droppable page cache
+ *     (memory.stat `file` less `shmem`, `unevictable`, `file_dirty` and
+ *     `file_writeback`), so a cache pinned by a bulk flush still reads as
+ *     pressure, and falls back to the raw memory.current when any one row is
+ *     unreadable or the read is torn
+ *   - that fallback publishes evictable_bytes as -1 (unknown), which an
+ *     operator can tell from a readable 0 (no droppable cache at all)
  *
  * Drives mem_pressure_poll_tick() directly (not via the health ring) so the
  * test is synchronous and deterministic, per the os_proc test override
@@ -56,6 +63,59 @@ static void set_override(int64_t rss, int64_t cgroup_current,
         .sys_avail_bytes = sys_avail,
     };
     os_proc_mem_set_override(&forced);
+}
+
+/* Sibling of set_override() for the cgroup memory.stat tier: set_override()
+ * has 20+ call sites, so the droppable-cache cases get their own seam
+ * instead of widening it. */
+static void set_cgroup_override(int64_t cgroup_current, int64_t cgroup_high,
+                                struct os_proc_cgroup_mem_stat stat)
+{
+    struct os_proc_mem forced = {
+        .rss_bytes = 3951034368,
+        .vsize_bytes = 3951034368,
+        .cgroup_current = cgroup_current,
+        .cgroup_high = cgroup_high,
+        .cgroup_max = -1,
+        .cgroup_stat = stat,
+        .sys_total_bytes = -1,
+        .sys_avail_bytes = -1,
+    };
+    os_proc_mem_set_override(&forced);
+}
+
+/* memory.stat rows for a cgroup with nothing dirty and nothing under
+ * writeback — the page-cache-only shapes. The dirty/writeback cases below
+ * spell their rows out instead. */
+static struct os_proc_cgroup_mem_stat clean_stat(int64_t file, int64_t shmem,
+                                                 int64_t unevictable)
+{
+    return (struct os_proc_cgroup_mem_stat){
+        .file = file,
+        .shmem = shmem,
+        .unevictable = unevictable,
+        .file_dirty = 0,
+        .file_writeback = 0,
+    };
+}
+
+/* One field of the organ's published ops-state document, or -2 when the
+ * document has no such field. This is the surface an operator reads, and
+ * the only place the "unknown" (-1) and "readable, none droppable" (0)
+ * states of the droppable tier are distinguishable. */
+static int64_t dumped_state_int(const char *key)
+{
+    struct json_value doc;
+    json_init(&doc);
+    json_set_object(&doc);
+    int64_t value = -2;
+    if (mem_pressure_dump_state_json(&doc, NULL)) {
+        const struct json_value *field = json_get(&doc, key);
+        if (field)
+            value = json_get_int(field);
+    }
+    json_free(&doc);
+    return value;
 }
 
 int test_mem_pressure(void);
@@ -135,6 +195,168 @@ int test_mem_pressure(void)
         mem_pressure_poll_tick();
         MP_CHECK("cgroup_max used when cgroup_high unset",
                  mem_pressure_current() == MEM_CRITICAL);
+    }
+
+    /* ── page cache is not pressure (node3 2026-09-10 shape) ────────── */
+    {
+        /* Denominator is 12884901888 (12 GiB memory.high) throughout;
+         * default thresholds 50/75/90. */
+
+        /* A sequential scan walked 7 GiB of droppable page cache into the
+         * charge. Numerator 3416776704 = 26% -> NOMINAL. Before this fix
+         * the raw charge read 84% -> HIGH and fired every shrink sink. */
+        set_cgroup_override(10932969472, 12884901888,
+                            clean_stat(7516192768, 0, 0));
+        mem_pressure_poll_tick();
+        MP_CHECK("scan-warmed page cache is not pressure",
+                 mem_pressure_current() == MEM_NOMINAL);
+
+        /* Anon-dominated charge: 11945377792 = 92% -> CRITICAL, the same
+         * level the raw charge (93%) produced. */
+        set_cgroup_override(12079595520, 12884901888,
+                            clean_stat(134217728, 0, 0));
+        mem_pressure_poll_tick();
+        MP_CHECK("anon-dominated charge still reads CRITICAL",
+                 mem_pressure_current() == MEM_CRITICAL);
+
+        /* No memory.stat at all: every row -1, so the organ falls back to
+         * the raw charge -> 84% -> HIGH, exactly the shipped behaviour. */
+        set_cgroup_override(10932969472, 12884901888,
+                            (struct os_proc_cgroup_mem_stat){
+                                .file = -1, .shmem = -1, .unevictable = -1,
+                                .file_dirty = -1, .file_writeback = -1 });
+        mem_pressure_poll_tick();
+        MP_CHECK("unreadable memory.stat keeps the raw memory.current",
+                 mem_pressure_current() == MEM_HIGH);
+        MP_CHECK("unreadable memory.stat publishes unknown, not zero",
+                 dumped_state_int("evictable_bytes") == -1);
+
+        /* One row unreadable is still an unreadable memory.stat: `file` is
+         * present but `shmem` is -1, so the share of the cache that needs
+         * swap is unknown and nothing may be subtracted -> raw charge,
+         * 84% -> HIGH. Subtracting the whole `file` row here would read
+         * 26% -> NOMINAL and silence every sink. */
+        set_cgroup_override(10932969472, 12884901888,
+                            clean_stat(7516192768, -1, 0));
+        mem_pressure_poll_tick();
+        MP_CHECK("an unreadable shmem row keeps the raw memory.current",
+                 mem_pressure_current() == MEM_HIGH);
+
+        /* Same rule for an unreadable `unevictable`: charge 11811160064 =
+         * 91% -> CRITICAL. Subtracting the 4 GiB `file` row would read
+         * 58% -> ELEVATED. */
+        set_cgroup_override(11811160064, 12884901888,
+                            clean_stat(4294967296, 0, -1));
+        mem_pressure_poll_tick();
+        MP_CHECK("an unreadable unevictable row keeps the raw memory.current",
+                 mem_pressure_current() == MEM_CRITICAL);
+
+        /* And for an unreadable `file_writeback`, the row a kernel too old
+         * to report it simply omits. */
+        set_cgroup_override(10932969472, 12884901888,
+                            (struct os_proc_cgroup_mem_stat){
+                                .file = 7516192768, .shmem = 0,
+                                .unevictable = 0, .file_dirty = 0,
+                                .file_writeback = -1 });
+        mem_pressure_poll_tick();
+        MP_CHECK("an unreadable file_writeback row keeps the raw charge",
+                 mem_pressure_current() == MEM_HIGH);
+        MP_CHECK("one unreadable row makes the whole tier unknown",
+                 dumped_state_int("evictable_bytes") == -1);
+
+        /* All of `file` is shmem: tmpfs/shm needs swap, not a drop, so the
+         * evictable tier is empty and the charge stands -> HIGH. Here the
+         * tier is a READABLE zero, which the operator surface must spell
+         * differently from the unknown above. */
+        set_cgroup_override(10932969472, 12884901888,
+                            clean_stat(7516192768, 7516192768, 0));
+        mem_pressure_poll_tick();
+        MP_CHECK("an all-shmem page cache is still pressure",
+                 mem_pressure_current() == MEM_HIGH);
+        MP_CHECK("no droppable cache publishes zero, not unknown",
+                 dumped_state_int("evictable_bytes") == 0);
+
+        /* shmem + unevictable both come out of the droppable tier:
+         * numerator 5027389440 = 39% -> NOMINAL. */
+        set_cgroup_override(10932969472, 12884901888,
+                            clean_stat(7516192768, 1073741824, 536870912));
+        mem_pressure_poll_tick();
+        MP_CHECK("shmem and unevictable leave the droppable tier",
+                 mem_pressure_current() == MEM_NOMINAL);
+
+        /* HDD box mid bulk block/WAL flush: the whole 7 GiB `file` tier is
+         * dirty or under writeback, so none of it can be dropped and the
+         * cgroup is throttled against it. 84% -> HIGH. Counting dirty and
+         * writeback pages as droppable read 0% -> NOMINAL here, which is
+         * the hole this case closes. */
+        set_cgroup_override(10932969472, 12884901888,
+                            (struct os_proc_cgroup_mem_stat){
+                                .file = 7516192768, .shmem = 0,
+                                .unevictable = 0, .file_dirty = 5368709120,
+                                .file_writeback = 2147483648 });
+        mem_pressure_poll_tick();
+        MP_CHECK("a dirty/writeback-pinned page cache is still pressure",
+                 mem_pressure_current() == MEM_HIGH);
+        MP_CHECK("a fully pinned cache publishes zero droppable bytes",
+                 dumped_state_int("evictable_bytes") == 0);
+
+        /* Partly pinned: 7516192768 - 1073741824 dirty - 536870912
+         * writeback = 5905580032 droppable, numerator 5027389440 = 39%
+         * -> NOMINAL. The flush pages stay charged, the clean ones do not. */
+        set_cgroup_override(10932969472, 12884901888,
+                            (struct os_proc_cgroup_mem_stat){
+                                .file = 7516192768, .shmem = 0,
+                                .unevictable = 0, .file_dirty = 1073741824,
+                                .file_writeback = 536870912 });
+        mem_pressure_poll_tick();
+        MP_CHECK("only the clean part of the cache leaves the numerator",
+                 mem_pressure_current() == MEM_NOMINAL);
+        MP_CHECK("the published droppable tier is the clean part",
+                 dumped_state_int("evictable_bytes") == 5905580032);
+
+        /* Torn read: cache exceeds the charge. Falls back to the raw charge
+         * rather than producing a negative numerator, and says so. */
+        set_cgroup_override(10932969472, 12884901888,
+                            clean_stat(10932969473, 0, 0));
+        mem_pressure_poll_tick();
+        MP_CHECK("a cache larger than the charge falls back to the charge",
+                 mem_pressure_current() == MEM_HIGH);
+        MP_CHECK("a torn read publishes unknown, not zero",
+                 dumped_state_int("evictable_bytes") == -1);
+
+        /* node3 2026-09-10 exact shape: a DERIVED-only guard (comparing
+         * file-minus-exclusions against the charge) misses this one --
+         * shmem=3 GiB, file=12 GiB, current=10.18 GiB derives evictable =
+         * 12 GiB - 3 GiB = 9 GiB, which reads as UNDER the 10.18 GiB charge
+         * and never trips. The raw `file` row alone (12 GiB) already
+         * exceeds `current` (10.18 GiB), which is what a RAW-row check must
+         * catch: UNKNOWN, raw charge classified -> 84% -> HIGH. */
+        set_cgroup_override(10932969472, 12884901888,
+                            clean_stat(12884901888, 3221225472, 0));
+        mem_pressure_poll_tick();
+        MP_CHECK("shmem>0 with file>current still catches the torn read",
+                 mem_pressure_current() == MEM_HIGH);
+        MP_CHECK("shmem>0 with file>current publishes unknown",
+                 dumped_state_int("evictable_bytes") == -1);
+
+        /* Every individual row here is <= the charge, so a per-row-vs-
+         * current check alone would pass every row -- but shmem+unevictable
+         * (1610612736) exceeds `file` (1073741824), which is impossible for
+         * a consistent read: the exclusions cannot legitimately be more of
+         * the tier than the tier itself. UNKNOWN, raw charge -> 84% -> HIGH. */
+        set_cgroup_override(10932969472, 12884901888,
+                            clean_stat(1073741824, 805306368, 805306368));
+        mem_pressure_poll_tick();
+        MP_CHECK("shmem+unevictable exceeding file is still a torn read",
+                 mem_pressure_current() == MEM_HIGH);
+        MP_CHECK("shmem+unevictable exceeding file publishes unknown",
+                 dumped_state_int("evictable_bytes") == -1);
+
+        /* The operator surface carries the split that produced the level.
+         * charged_bytes is the raw cgroup_current every fixture above used,
+         * whether or not the read was torn. */
+        MP_CHECK("dump carries the raw cgroup charge",
+                 dumped_state_int("charged_bytes") == 10932969472);
     }
 
     /* ── sink firing: only at HIGH/CRITICAL ──────────────────────────── */

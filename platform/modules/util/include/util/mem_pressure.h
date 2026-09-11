@@ -23,12 +23,21 @@
  *   3. observed host available memory against system total RAM (Darwin and
  *      Linux bare-metal/non-systemd)
  *   4. process RSS against system total RAM when host availability is unknown
- * current usage is cgroup memory.current when a cgroup denominator was
- * selected (matches what the kernel enforces against). With an observed host
- * availability value it is total minus available, so Commons/background work
- * yields to unified-memory contention created by the rest of the Mac too;
- * otherwise it is this process's RSS. Thresholds are env-tunable percentages
- * of that denominator (ZCL_MEM_PRESSURE_ELEVATED_PCT / _HIGH_PCT / _CRITICAL_PCT,
+ * current usage on a cgroup denominator is memory.current MINUS the droppable
+ * page cache (memory.stat `file`, less `shmem`, `unevictable`, `file_dirty`
+ * and `file_writeback`): a sequential scan of the block files walks the charge
+ * to the ceiling without the node's working set growing at all, and shrinking
+ * caches for it gives back memory the kernel would have released for free.
+ * Dirty and writeback pages are NOT droppable — they must reach the disk
+ * first — so they still count as charged, and a cgroup throttled by a bulk
+ * flush still reads as pressure. An unreadable or torn memory.stat leaves the
+ * droppable tier UNKNOWN: the raw memory.current is classified and the
+ * published evictable_bytes is -1, never the 0 that would mean "readable, and
+ * no droppable cache". With an observed host availability value it
+ * is total minus available, so Commons/background work yields to unified-memory
+ * contention created by the rest of the Mac too; otherwise it is this
+ * process's RSS. Thresholds are env-tunable percentages of that denominator
+ * (ZCL_MEM_PRESSURE_ELEVATED_PCT / _HIGH_PCT / _CRITICAL_PCT,
  * defaults 50/75/90 — see mem_pressure_thresholds_from_env()).
  *
  * SINKS: any subsystem with a cheap, safe, reversible way to shed RAM can

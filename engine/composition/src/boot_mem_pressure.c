@@ -19,7 +19,8 @@ static bool boot_mem_pressure_start(void *ctx)
     if (!mem_pressure_start())
         return false; // raw-return-ok:mem-pressure-start-already-logged
 
-    printf("[mem-pressure] armed: %ds health-ring poll\n",
+    printf("[mem-pressure] armed: %ds health-ring poll, numerator excludes "
+           "droppable page cache (dirty/writeback still charged)\n",
            MEM_PRESSURE_POLL_SECS);
     return true;
 }

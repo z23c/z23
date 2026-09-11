@@ -92,6 +92,23 @@
 extern "C" {
 #endif
 
+/* The cgroup v2 memory.stat rows the memory organ needs, in bytes; a row is
+ * -1 when it, or the whole file, is unavailable. `file` is the entire
+ * page-cache tier (v2 charges tmpfs/shm to it too). The other four name the
+ * parts of that tier the kernel cannot simply drop and reuse: `shmem` needs
+ * swap, `unevictable` is mlocked, and `file_dirty`/`file_writeback` must
+ * reach the disk before their pages are reclaimable at all — on a spinning
+ * disk a bulk block/WAL flush pins hundreds of MiB there for whole seconds.
+ * Read together (see os_proc_cgroup_mem_stat_read) because they are only
+ * meaningful subtracted from one another. */
+struct os_proc_cgroup_mem_stat {
+    int64_t file;
+    int64_t shmem;
+    int64_t unevictable;
+    int64_t file_dirty;
+    int64_t file_writeback;
+};
+
 /* Fields are -1 when unreadable or unavailable on the host. */
 struct os_proc_mem {
     int64_t rss_bytes;         /* VmRSS */
@@ -101,6 +118,9 @@ struct os_proc_mem {
     int64_t cgroup_max;        /* cgroup v2 memory.max, -1 if unset/unavailable */
     int64_t sys_total_bytes;   /* platform host-memory total */
     int64_t sys_avail_bytes;   /* platform reclaimable/available memory */
+    /* memory.stat rows for the same cgroup the three fields above came
+     * from, all -1 off a cgroup v2 host. */
+    struct os_proc_cgroup_mem_stat cgroup_stat;
 };
 
 enum os_proc_environment {
@@ -193,6 +213,20 @@ bool os_proc_cmdline_has_token(const char *token);
  * anon/file/kernel/slab breakdown) than the three aggregate fields in
  * struct os_proc_mem carry. */
 bool os_proc_cgroup_dir(char *out, size_t out_len);
+
+/* Fill `out` from this cgroup's memory.stat in ONE pass over ONE open of the
+ * file. Reading the rows through separate opens let them tear against each
+ * other under tmpfs churn — a `file` from before a burst against a `shmem`
+ * from after it is a subtraction of two different instants — so there is
+ * deliberately no single-row accessor. Every row starts at -1 and is taken
+ * only on a WHOLE-key match: "file" never reads "file_mapped", "file_dirty"
+ * or any other row that merely starts with it, because the key must be
+ * followed by the separating space. Returns false, every row left at -1,
+ * when the file cannot be opened at all. `dir` is an os_proc_cgroup_dir()
+ * result — or, in a test, a fixture directory holding a memory.stat-shaped
+ * file, which is the only way to drive this parser without a real cgroup. */
+bool os_proc_cgroup_mem_stat_read(const char *dir,
+                                  struct os_proc_cgroup_mem_stat *out);
 
 /* Test seam: force every subsequent os_proc_mem_read() call to return a
  * copy of `forced` instead of reading /proc. NULL clears the override.

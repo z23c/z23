@@ -204,11 +204,14 @@ TL_LEAF(resources, mem_level, TLC_TEXT, TFU_ENUM, TLV_SUMMARY,
 TL_LEAF(resources, mem_current_bytes, TLC_I64, TFU_BYTES, TLV_SUMMARY,
     TFR_MAX_RATIO_OF, TL_REF(resources, mem_denominator_bytes), 900,
     TFS_CRITICAL,
-    "usage the pressure ladder is computed from — cgroup memory.current when a "
-    "cgroup ceiling was selected, else this process's RSS. The bar is 900 per "
-    "mille of the ceiling, which is the shipped default critical percentage; "
-    "an operator who set ZCL_MEM_PRESSURE_CRITICAL_PCT should read mem_level "
-    "instead",
+    "usage the pressure ladder is computed from — cgroup memory.current minus "
+    "the droppable page cache (memory.stat file, less shmem, unevictable, "
+    "file_dirty and file_writeback, which are not droppable) when a cgroup "
+    "ceiling was selected, else this process's RSS. An unreadable or torn "
+    "memory.stat classifies the raw memory.current instead. The bar is "
+    "900 per mille of the ceiling, which is the shipped default critical "
+    "percentage; an operator who set ZCL_MEM_PRESSURE_CRITICAL_PCT should read "
+    "mem_level instead",
     "the process is at or past the level where the memory organ fires every "
     "registered shrink sink, and the next step above it is an OOM kill",
     "z23 ops state --subsystem=mem_pressure")

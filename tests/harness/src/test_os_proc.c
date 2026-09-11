@@ -11,6 +11,10 @@
  *   - os_proc_mem_set_override() forces every subsequent read; NULL clears
  *   - os_proc_cgroup_dir() either resolves a real path or reports
  *     unavailable — never garbage
+ *   - os_proc_cgroup_mem_stat_read() parses a memory.stat fixture in one
+ *     pass, whole-key ("file" never reads the file_mapped/file_dirty/
+ *     file_writeback rows listed before it), and reports -1 — never 0 — for
+ *     a row, a file or a cgroup that is not there
  */
 
 #include "test/test_core.h"
@@ -27,11 +31,112 @@
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
+/* Write `body` as the memory.stat of a fixture cgroup directory. */
+static bool write_cgroup_memory_stat(const char *dir, const char *body)
+{
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/memory.stat", dir);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    fputs(body, f);
+    fclose(f);
+    return true;
+}
+
+/* The whole-key guarantee os_proc.h documents. Its own function so each
+ * fixture shape stays well under the complexity cap. */
+static int cgroup_stat_whole_key_checks(const char *dir)
+{
+    int failures = 0;
+    /* node3 2026-09-10 shape: 12 GiB ceiling, ~10.2 GiB charged, ~7 GiB of
+     * it page cache walked up by the boot integrity scan, RSS 3.68 GiB.
+     *
+     * file_mapped, file_dirty and file_writeback are listed BEFORE `file`
+     * on purpose. With `file` first, a prefix-only matcher takes the right
+     * row anyway and the separator guarantee is never exercised; ordered
+     * this way, a matcher that does not require the separating space reads
+     * 134217728 for `file` and the test fails. */
+    if (!write_cgroup_memory_stat(dir, "anon 3951034368\n"
+                                       "file_mapped 134217728\n"
+                                       "file_dirty 268435456\n"
+                                       "file_writeback 134217728\n"
+                                       "file 7516192768\n"
+                                       "kernel 268435456\n"
+                                       "shmem 1073741824\n"
+                                       "unevictable 536870912\n"
+                                       "slab 201326592\n")) {
+        printf("os_proc: cgroup memory.stat fixture write... FAIL\n");
+        return 1;
+    }
+
+    struct os_proc_cgroup_mem_stat stat;
+    OSPROC_CHECK("memory.stat fixture reads in one pass",
+                 os_proc_cgroup_mem_stat_read(dir, &stat));
+    OSPROC_CHECK("file reads whole-key, not the file_* rows listed first",
+                 stat.file == 7516192768);
+    OSPROC_CHECK("memory.stat shmem row", stat.shmem == 1073741824);
+    OSPROC_CHECK("memory.stat unevictable row", stat.unevictable == 536870912);
+    OSPROC_CHECK("memory.stat file_dirty row", stat.file_dirty == 268435456);
+    OSPROC_CHECK("memory.stat file_writeback row",
+                 stat.file_writeback == 134217728);
+    return failures;
+}
+
+/* What the parser reports when a row, the file, or the cgroup is missing:
+ * always -1 for that row, never a plausible-looking zero. */
+static int cgroup_stat_degrade_checks(const char *dir)
+{
+    int failures = 0;
+    if (!write_cgroup_memory_stat(dir, "file 7516192768\n"
+                                       "shmem 0\n"
+                                       "unevictable 0\n"
+                                       "file_dirty 0\n")) {
+        printf("os_proc: partial memory.stat fixture write... FAIL\n");
+        return 1;
+    }
+
+    struct os_proc_cgroup_mem_stat stat;
+    OSPROC_CHECK("a memory.stat missing a row still reads",
+                 os_proc_cgroup_mem_stat_read(dir, &stat));
+    OSPROC_CHECK("the missing row alone reads unavailable",
+                 stat.file_writeback == -1 && stat.file == 7516192768);
+    OSPROC_CHECK("a NULL dir reads nothing and says so",
+                 !os_proc_cgroup_mem_stat_read(NULL, &stat));
+    OSPROC_CHECK("a NULL dir leaves every row unavailable",
+                 stat.file == -1 && stat.shmem == -1 &&
+                 stat.unevictable == -1 && stat.file_dirty == -1 &&
+                 stat.file_writeback == -1);
+
+    char missing[PATH_MAX + 16];
+    snprintf(missing, sizeof(missing), "%s/gone", dir);
+    OSPROC_CHECK("a cgroup dir with no memory.stat says so",
+                 !os_proc_cgroup_mem_stat_read(missing, &stat));
+    return failures;
+}
+
+/* memory.stat parser fixture. Its own function so test_os_proc gains a
+ * single zero-branch call and keeps its exact complexity pin. */
+static int os_proc_cgroup_stat_fixture_checks(void)
+{
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "os_proc_cgroup")) {
+        printf("os_proc: cgroup memory.stat fixture mkdtemp... FAIL\n");
+        return 1;
+    }
+    int failures = cgroup_stat_whole_key_checks(dir);
+    failures += cgroup_stat_degrade_checks(dir);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_os_proc(void);
 int test_os_proc(void)
 {
     printf("\n=== platform os_proc tests ===\n");
     int failures = 0;
+
+    failures += os_proc_cgroup_stat_fixture_checks();
 
     OSPROC_CHECK("native Linux release classification",
                  os_proc_environment_classify_kernel_release(

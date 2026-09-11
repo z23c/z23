@@ -13,10 +13,11 @@
  * direction. os_proc.c keeps process identity, liveness, uptime, image paths,
  * argv, fd counts and thread work; it does not reference anything below.
  *
- * The three public entry points here — os_proc_mem_read(),
- * os_proc_cgroup_dir() and os_proc_mem_set_override() — stay declared in
- * platform/os_proc.h, which is the only header any caller needs; there is no
- * private cross-TU header for this split because nothing private is shared.
+ * The four public entry points here — os_proc_mem_read(),
+ * os_proc_cgroup_dir(), os_proc_cgroup_mem_stat_read() and
+ * os_proc_mem_set_override() — stay declared in platform/os_proc.h, which is
+ * the only header any caller needs; there is no private cross-TU header for
+ * this split because nothing private is shared.
  *
  * Each arm keeps the platform it had in the combined file: Windows reads the
  * process working set and the global memory status, Darwin reads
@@ -239,6 +240,81 @@ static void os_proc_meminfo(int64_t *total_bytes, int64_t *avail_bytes)
 }
 #endif
 
+#if !defined(_WIN32)
+/* "<key> <bytes>\n" -> bytes, or -1 when this row is not `key`. The key must
+ * be followed by the separating space, so "file" never reads "file_mapped",
+ * "file_dirty" or "file_writeback". */
+static int64_t cgroup_stat_row_bytes(const char *line, const char *key)
+{
+    size_t key_len = strlen(key);
+    if (strncmp(line, key, key_len) != 0 || line[key_len] != ' ')
+        return -1; // raw-return-ok:row-is-a-different-key
+    long long value = -1;
+    if (sscanf(line + key_len, " %lld", &value) != 1 || value < 0)
+        return -1; // raw-return-ok:optional-cgroup-unavailable
+    return (int64_t)value;
+}
+
+/* Store one memory.stat line into whichever field of `out` it names, if any.
+ * Table-driven so the single pass stays one loop over one open however many
+ * rows the memory organ later needs. */
+static void cgroup_stat_absorb_row(struct os_proc_cgroup_mem_stat *out,
+                                   const char *line)
+{
+    const struct {
+        const char *key;
+        int64_t *slot;
+    } rows[] = {
+        { "file", &out->file },
+        { "shmem", &out->shmem },
+        { "unevictable", &out->unevictable },
+        { "file_dirty", &out->file_dirty },
+        { "file_writeback", &out->file_writeback },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        int64_t value = cgroup_stat_row_bytes(line, rows[i].key);
+        if (value < 0)
+            continue;
+        *rows[i].slot = value;
+        return;
+    }
+}
+#endif
+
+bool os_proc_cgroup_mem_stat_read(const char *dir,
+                                  struct os_proc_cgroup_mem_stat *out)
+{
+    if (!out)
+        return false; // raw-return-ok:optional-cgroup-unavailable
+    out->file = -1;
+    out->shmem = -1;
+    out->unevictable = -1;
+    out->file_dirty = -1;
+    out->file_writeback = -1;
+#if defined(_WIN32)
+    (void)dir;
+    return false; // raw-return-ok:platform-has-no-cgroups
+#else
+    if (!dir)
+        return false; // raw-return-ok:optional-cgroup-unavailable
+
+    char path[768];
+    int n = snprintf(path, sizeof(path), "%s/memory.stat", dir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false; // raw-return-ok:optional-cgroup-unavailable
+
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false; // raw-return-ok:optional-cgroup-unavailable
+
+    char line[128];
+    while (fgets(line, sizeof(line), f))
+        cgroup_stat_absorb_row(out, line);
+    fclose(f);
+    return true;
+#endif
+}
+
 /* ── Public API ───────────────────────────────────────────────────── */
 
 bool os_proc_mem_read(struct os_proc_mem *out)
@@ -263,6 +339,7 @@ bool os_proc_mem_read(struct os_proc_mem *out)
     out->cgroup_current = -1;
     out->cgroup_high = -1;
     out->cgroup_max = -1;
+    os_proc_cgroup_mem_stat_read(NULL, &out->cgroup_stat);
     MEMORYSTATUSEX memory;
     memset(&memory, 0, sizeof(memory));
     memory.dwLength = sizeof(memory);
@@ -289,6 +366,7 @@ bool os_proc_mem_read(struct os_proc_mem *out)
     out->cgroup_current = -1;
     out->cgroup_high = -1;
     out->cgroup_max = -1;
+    os_proc_cgroup_mem_stat_read(NULL, &out->cgroup_stat);
     uint64_t total = 0;
     size_t total_size = sizeof(total);
     out->sys_total_bytes = sysctlbyname("hw.memsize", &total, &total_size,
@@ -305,10 +383,12 @@ bool os_proc_mem_read(struct os_proc_mem *out)
         out->cgroup_current = os_proc_cgroup_limit_bytes(dir, "memory.current");
         out->cgroup_high = os_proc_cgroup_limit_bytes(dir, "memory.high");
         out->cgroup_max = os_proc_cgroup_limit_bytes(dir, "memory.max");
+        os_proc_cgroup_mem_stat_read(dir, &out->cgroup_stat);
     } else {
         out->cgroup_current = -1;
         out->cgroup_high = -1;
         out->cgroup_max = -1;
+        os_proc_cgroup_mem_stat_read(NULL, &out->cgroup_stat);
     }
 
     os_proc_meminfo(&out->sys_total_bytes, &out->sys_avail_bytes);
