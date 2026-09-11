@@ -318,11 +318,18 @@ static bool projection_clean_receipt_write(const char *path)
 }
 #endif
 
-/* <path><suffix>, or false when that does not fit. One helper for both
- * sidecars (the clean-close receipt and the armed quarantine). */
+/* <path><suffix>, or false when that does not fit or path is empty. One
+ * helper for both sidecars (the clean-close receipt and the armed
+ * quarantine). The empty-path refusal matters for the quarantine sidecar:
+ * a verdict that arrives after projection_store_close() has cleared g_path
+ * must not fall back to a bare "<suffix>" in the process CWD. */
 static bool projection_sidecar_path(char *out, size_t out_n, const char *path,
                                     const char *suffix)
 {
+    if (out && out_n > 0)
+        out[0] = '\0';
+    if (out_n == 0 || !path || path[0] == '\0')
+        return false;
     int n = snprintf(out, out_n, "%s%s", path, suffix);
     return n > 0 && (size_t)n < out_n;
 }
@@ -453,8 +460,15 @@ static bool projection_quarantine_arm_write(const char *armed)
 /* The deferred scan found corruption. Reach the SAME end state as the
  * synchronous gate — the corrupt file renamed aside, a fresh one in its
  * place, projections re-derived from the kernel — with the one ordering
- * difference the live handle forces. */
-static void projection_integrity_condemn(void)
+ * difference the live handle forces.
+ *
+ * `path` and `display` are a snapshot the caller took under g_lock at the
+ * same time it consumed the pending flag — NOT a fresh read of g_path here.
+ * Re-reading g_path in this function would reopen the exact race this
+ * split is meant to close: projection_store_close() can run, and clear
+ * g_path, in the gap between the caller releasing g_lock and this call. */
+static void projection_integrity_condemn(const char *path,
+                                         const char *display)
 {
     /* Withhold the handle FIRST. The handle itself is NOT closed here: every
      * co-writer reads projection_store_db() BEFORE taking the tx lock
@@ -464,15 +478,25 @@ static void projection_integrity_condemn(void)
      * all already handle — the fold idles its tick. */
     atomic_store_explicit(&g_integrity_failed, true, memory_order_release);
 
+    if (path[0] == '\0') {
+        /* The store closed between the scan winning its exchange and this
+         * call. There is no live path to quarantine beside, so refuse by
+         * name instead of letting projection_sidecar_path fall back to a
+         * bare suffix in the process CWD. Nothing is written. */
+        fprintf(stderr,  // obs-ok:projection-store-open-failure
+                "[projection_store] background integrity scan FAILED after "
+                "close; verdict dropped, no quarantine written\n");
+        event_emitf(EV_DB_ERROR, 0,
+                    "projection_store bg quick_check failed after close "
+                    "verdict_dropped=1");
+        return;
+    }
+
     char armed[PROJECTION_STORE_PATH_MAX + 24];
-    char display[PROJECTION_STORE_PATH_MAX];
-    pthread_mutex_lock(&g_lock);
     bool armed_ok = projection_sidecar_path(
-                        armed, sizeof(armed), g_path,
+                        armed, sizeof(armed), path,
                         PROJECTION_QUARANTINE_ARM_SUFFIX) &&
                     projection_quarantine_arm_write(armed);
-    snprintf(display, sizeof(display), "%s", g_display_path);
-    pthread_mutex_unlock(&g_lock);
 
     fprintf(stderr,  // obs-ok:projection-store-open-failure
             "[projection_store] %s FAILED the background integrity scan; "
@@ -505,16 +529,28 @@ bool projection_store_integrity_pending(char *out_path, size_t out_n)
 
 void projection_store_integrity_scan_result(bool ok)
 {
-    /* Single-use: a second report (or one for a store that never deferred)
-     * must not re-open a closed verdict. */
-    if (!atomic_exchange_explicit(&g_integrity_pending, false,
-                                  memory_order_acq_rel))
-        return;
-
     char display[PROJECTION_STORE_PATH_MAX];
+    char path[PROJECTION_STORE_PATH_MAX];
+    display[0] = '\0';
+    path[0] = '\0';
+
+    /* Single-use: a second report (or one for a store that never deferred)
+     * must not re-open a closed verdict. Consuming the flag and snapshotting
+     * the path this verdict is ABOUT happen under the SAME g_lock that
+     * projection_store_close() clears both under — that is what makes the
+     * verdict and the close mutually exclusive. Consuming the flag first and
+     * only then taking the lock (the old order) let close() run in between:
+     * it would clear g_path while this function still held a stale one, and
+     * the eventual quarantine write would land beside an empty path. */
     pthread_mutex_lock(&g_lock);
+    if (!atomic_exchange_explicit(&g_integrity_pending, false,
+                                  memory_order_acq_rel)) {
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
     int64_t started = g_integrity_started_ms;
     snprintf(display, sizeof(display), "%s", g_display_path);
+    snprintf(path, sizeof(path), "%s", g_path);
     pthread_mutex_unlock(&g_lock);
 
     fprintf(stderr,  // obs-ok:projection-store-lifecycle
@@ -528,7 +564,7 @@ void projection_store_integrity_scan_result(bool ok)
                               memory_order_release);
         return;
     }
-    projection_integrity_condemn();
+    projection_integrity_condemn(path, display);
 }
 
 /* The projection handle is a SECONDARY connection: it shares the WAL the

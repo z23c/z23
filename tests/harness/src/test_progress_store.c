@@ -429,6 +429,61 @@ static int ps_test_projection_scan_unfinished(void)
     return failures;
 }
 
+/* A verdict that arrives from the background scanner AFTER the store has
+ * already closed must write nothing — close() and the scanner's report both
+ * race for the single-use pending flag. Before the fix, the scanner could
+ * win that exchange, then get descheduled while close() ran to completion
+ * and blanked g_path; the condemn path would then snapshot an EMPTY path
+ * and arm the quarantine at "" + ".quarantine" — a stray file in the
+ * process CWD that the next open, which looks beside progress.kv, would
+ * never see. */
+static int ps_test_projection_scan_after_close(void)
+{
+    int failures = 0;
+    char dir[256];
+    char fpath[512];
+    char armed[544];
+    char pending[1024];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_after_close");
+    snprintf(fpath, sizeof(fpath), "%s/progress.kv", dir);
+    snprintf(armed, sizeof(armed), "%s.quarantine", fpath);
+    (void)unlink(".quarantine");
+
+    PS_CHECK("proj after close: seed store without a receipt",
+             ps_seed_projection_without_receipt(dir, fpath));
+
+    projection_store_set_quick_check_defer_probe(ps_defer_probe_yes);
+    PS_CHECK("proj after close: open defers the scan",
+             projection_store_open(dir) &&
+             projection_store_integrity_pending(pending, sizeof(pending)));
+
+    /* Close before the scanner ever reports — the store, and g_path with
+     * it, are gone by the time the verdict below shows up. */
+    projection_store_close();
+    projection_store_integrity_scan_result(false);
+
+    PS_CHECK("proj after close: a FAILED verdict delivered post-close arms "
+             "no quarantine beside the path",
+             access(armed, F_OK) != 0);
+    PS_CHECK("proj after close: nor a stray quarantine in the process CWD",
+             access(".quarantine", F_OK) != 0);
+
+    /* The store itself was never corrupted (only the report arrived late),
+     * so a plain reopen through the normal synchronous gate must succeed
+     * with nothing owed. */
+    projection_store_set_quick_check_defer_probe(NULL);
+    PS_CHECK("proj after close: the store reopens through the normal "
+             "blocking gate",
+             projection_store_open(dir));
+    PS_CHECK("proj after close: reopen owes no deferred scan",
+             !projection_store_integrity_pending(pending, sizeof(pending)));
+    projection_store_close();
+
+    (void)unlink(".quarantine");
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* The restart after a background finding: the armed verdict is honoured
  * where nothing holds the file, and the node comes back on a fresh store. */
 static int ps_test_projection_scan_rebuild(const char *dir, const char *armed)
@@ -1484,6 +1539,7 @@ int test_progress_store(void)
      * function so this one stays inside the complexity cap. */
     failures += ps_test_projection_scan_deferred();
     failures += ps_test_projection_scan_unfinished();
+    failures += ps_test_projection_scan_after_close();
     failures += ps_test_projection_scan_quarantine();
     failures += ps_test_projection_receipt_reader_blocked();
 
