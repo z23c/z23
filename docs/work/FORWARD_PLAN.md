@@ -8,6 +8,14 @@ acceptance lives in [`../MVP.md`](../MVP.md). Maintainer-host live state belongs
 only in [`../HANDOFF.md`](../HANDOFF.md), consulted for an explicit host
 assignment. Do not copy live heights, process state, or benchmark anecdotes here.
 
+This file owns the active scope and the ordered queue. Passing all of MVP.md's
+C1–C8 is necessary for platform v1 but not sufficient: platform v1 is the
+release demonstration under *Acceptance and performance* below, together with
+the existing acceptance targets. Open (◐) MVP criteria are P1 work under
+`AGENTS.md`. When an authorized loop for one of them is ready, it outranks the
+P3 development machinery in this queue. Each ◐ cell names its own remaining
+condition or owner decision; recheck it against its ledger before starting.
+
 ## Current mission: fast C23 development with fleet Insight + Control
 
 Make Z23 the durable P2P platform through which interchangeable agents

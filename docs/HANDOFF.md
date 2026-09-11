@@ -90,9 +90,11 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
   runs the real arming preflight without touching a running node. The
   maintainer host is minting that tree; arming, quota, and posture policy are
   owner decisions recorded in the host handoff notes.
-- Open items carried forward: land the hot-fork single-link publish and the
-  dev depfile fix (both in lanes on the maintainer host), ship, then arm the
-  beta6 serve tree and hand the fresh-datadir anchor test to a Windows box.
+- Host follow-ups (ship, arming the beta6 serve tree, the fresh-datadir
+  anchor test) live in the host handoff notes above. Product ordering lives
+  only in [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md). The hot-fork
+  single-link publish (`4e228f02c0`) and the dev depfile fix (`e4fcaa01cc`)
+  have landed.
 
 ## How to read the ledgers
 

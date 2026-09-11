@@ -112,7 +112,10 @@ only when that directly advances public-node or C23 Commons acceptance.
    parity is inviolable. Private keys and production state remain
    operator-controlled.
 2. **P1 — public-node V1 acceptance and reliability.** The acceptance contract
-   is [`docs/MVP.md`](./docs/MVP.md).
+   is [`docs/MVP.md`](./docs/MVP.md): criteria C1–C8 for the public node only.
+   MVP 8/8 is necessary for platform v1 but does not complete it; the full
+   journey and its release demonstration are defined in
+   [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md).
 3. **P2 — decentralized C23 Commons product acceptance.** Packages and
    evidence remain content-addressed, independently verifiable, bounded, and
    locally accepted.
@@ -234,6 +237,14 @@ A fresh agent chooses work from one route: this contract, then the first open
 item in [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md). No other
 plan, scorecard, runbook, handoff, vendor skill, or old session note may
 reorder that mission.
+
+Each entry document owns one thing. This file owns durable principles, the
+priority order and authority boundaries. `FORWARD_PLAN.md` owns the active
+scope and the ordered queue. `MVP.md` owns public-node acceptance (C1–C8).
+`HANDOFF.md` points to maintainer-host evidence and never sets priorities.
+A command named in a plan is a target interface until the built binary's
+`discover` catalog lists it. An unchecked or unlisted item is not evidence
+that the code is absent; check the tree before rebuilding it.
 
 Load detail only when the task needs it:
 
