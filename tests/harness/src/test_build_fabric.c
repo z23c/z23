@@ -37,6 +37,7 @@
 #include "crypto/sha3.h"
 #include "sha3/sha3.h"
 #include "util/safe_alloc.h"
+#include "sync/sync_state.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -3685,6 +3686,122 @@ static int test_bf_subordinate_work_admission(void)
     return failures;
 }
 
+struct bf_reported_admission {
+    char admission[64];
+    int64_t deferrals;
+    int64_t dispatches;
+};
+
+/* Read the standing worker status the way an operator does: through the
+ * diagnostics dump, not by reaching into the runtime's statics. */
+static bool bf_report(struct bf_reported_admission *out)
+{
+    struct json_value state;
+    json_init(&state);
+    memset(out, 0, sizeof(*out));
+    bool ok = build_fabric_dump_state_json(&state, NULL);
+    if (ok) {
+        const char *token = json_get_str(json_get(&state, "worker_admission"));
+        ok = token && token[0] &&
+             (size_t)snprintf(out->admission, sizeof(out->admission), "%s",
+                              token) < sizeof(out->admission);
+        out->deferrals =
+            json_get_int(json_get(&state, "worker_resource_deferrals"));
+        out->dispatches =
+            json_get_int(json_get(&state, "worker_dispatches"));
+    }
+    json_free(&state);
+    return ok;
+}
+
+/* The worker's refusal and recovery path, driven through the same admission
+ * function the loop runs. Distinct from the pure decide() contract above:
+ * this one asserts what a running worker PUBLISHES, not what the predicate
+ * returns.
+ *
+ * Deliberately NOT qualified here: that queued work advances without
+ * duplicate execution once every condition becomes admissible. That needs the
+ * real claim/lease/execute machinery and a running loop; it is left unproven
+ * rather than simulated by a helper. */
+static int test_bf_worker_admission_step(void)
+{
+    int failures = 0;
+    TEST("build_fabric: a declining worker reports why, tracks the condition, and refuses again") {
+        char dir[512], path[640];
+        struct node_db ndb;
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path), "admit"));
+        struct bf_reported_admission before, after;
+        enum subordinate_work_refusal got;
+
+        /* (A) A worker denied by sync reports sync_not_at_tip and executes
+         * nothing. The process default is SYNC_IDLE, which is not AT_TIP, and
+         * decide() tests sync second — so this is genuinely the sync refusal
+         * and not a disk, memory or persistence one. */
+        ASSERT(sync_get_state() != SYNC_AT_TIP);
+        ASSERT(bf_report(&before));
+        got = build_fabric_worker_admission_step_for_test(true, true, &ndb);
+        ASSERT(bf_report(&after));
+        ASSERT_STR_EQ(after.admission, subordinate_work_refusal_token(
+                          SUBORDINATE_WORK_SYNC_NOT_AT_TIP));
+        ASSERT(got == SUBORDINATE_WORK_SYNC_NOT_AT_TIP);
+        ASSERT_EQ(after.deferrals, before.deferrals + 1);
+        ASSERT_EQ(after.dispatches, before.dispatches);
+
+        /* (C) A refusal repeated many times keeps counting and never blanks
+         * the standing field. The emission CADENCE belongs to log_throttle and
+         * is proven in test_log_throttle.c; what is proven here is that
+         * throttling the log line does not cost the reported status. */
+        for (int i = 0; i < 8; i++)
+            ASSERT(build_fabric_worker_admission_step_for_test(
+                       true, true, &ndb) == SUBORDINATE_WORK_SYNC_NOT_AT_TIP);
+        ASSERT(bf_report(&after));
+        ASSERT_STR_EQ(after.admission, subordinate_work_refusal_token(
+                          SUBORDINATE_WORK_SYNC_NOT_AT_TIP));
+        ASSERT_EQ(after.deferrals, before.deferrals + 9);
+        ASSERT_EQ(after.dispatches, before.dispatches);
+
+        /* (B) The reported reason follows the real condition. Walk the sync
+         * FSM along its legal edges to AT_TIP; with a real open database and
+         * its durable writer ready, the same call now admits. */
+        ASSERT(sync_set_state(SYNC_HEADERS_DOWNLOAD, "bf admission test"));
+        ASSERT(sync_set_state(SYNC_AT_TIP, "bf admission test"));
+        got = build_fabric_worker_admission_step_for_test(true, true, &ndb);
+        ASSERT(bf_report(&after));
+        ASSERT_STR_EQ(after.admission,
+                      subordinate_work_refusal_token(SUBORDINATE_WORK_ADMIT));
+        ASSERT(got == SUBORDINATE_WORK_ADMIT);
+
+        /* (B, a different condition) A refusal names the fact that actually
+         * failed instead of reusing the previous reason. */
+        got = build_fabric_worker_admission_step_for_test(true, false, &ndb);
+        ASSERT(bf_report(&after));
+        ASSERT_STR_EQ(after.admission, subordinate_work_refusal_token(
+                          SUBORDINATE_WORK_PERSISTENCE_UNAVAILABLE));
+        ASSERT(got == SUBORDINATE_WORK_PERSISTENCE_UNAVAILABLE);
+
+        /* (E) After an admitting period, a later refusal is visible again —
+         * the status is live, not a one-shot latch. */
+        ASSERT(build_fabric_worker_admission_step_for_test(true, true, &ndb) ==
+               SUBORDINATE_WORK_ADMIT);
+        ASSERT(sync_set_state(SYNC_HEADERS_DOWNLOAD, "bf admission test"));
+        got = build_fabric_worker_admission_step_for_test(true, true, &ndb);
+        ASSERT(bf_report(&after));
+        ASSERT_STR_EQ(after.admission, subordinate_work_refusal_token(
+                          SUBORDINATE_WORK_SYNC_NOT_AT_TIP));
+        ASSERT(got == SUBORDINATE_WORK_SYNC_NOT_AT_TIP);
+
+        /* A stopping worker refuses ahead of every other fact. */
+        ASSERT(build_fabric_worker_admission_step_for_test(false, true, &ndb) ==
+               SUBORDINATE_WORK_STOPPING);
+
+        (void)sync_set_state(SYNC_IDLE, "bf admission test cleanup");
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int bf_candidate_query_deny(void *context, int operation,
                                     const char *first, const char *second,
                                     const char *database, const char *trigger)
@@ -3876,6 +3993,7 @@ int test_build_fabric(void)
     failures += test_bf_content_contracts();
     failures += test_bf_proof_materialization();
     failures += test_bf_subordinate_work_admission();
+    failures += test_bf_worker_admission_step();
     printf("=== build_fabric: %d failures ===\n", failures);
     return failures;
 }

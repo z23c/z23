@@ -195,6 +195,35 @@ static void bf_worker_log_admission(enum subordinate_work_refusal admission)
              (unsigned long long)suppressed);
 }
 
+/* The loop's entire admission step: observe the live facts, run the one
+ * production decision, publish the standing reason the diagnostics dump
+ * reports, and count and log a refusal. Extracted so the refusal path has a
+ * single implementation rather than one here and a copy in a test. */
+static enum subordinate_work_refusal bf_worker_admission_step(
+    bool running, bool persistence_ready, struct node_db *ndb)
+{
+    struct subordinate_work_facts facts;
+    struct zcl_result observation = subordinate_work_admission_observe(
+        running, persistence_ready, ndb, &facts);
+    enum subordinate_work_refusal admission = observation.ok
+        ? subordinate_work_admission_decide(&facts)
+        : SUBORDINATE_WORK_PERSISTENCE_UNAVAILABLE;
+    atomic_store(&g_worker_admission_reason, admission);
+    if (admission != SUBORDINATE_WORK_ADMIT) {
+        atomic_fetch_add(&g_worker_resource_deferrals, 1);
+        bf_worker_log_admission(admission);
+    }
+    return admission;
+}
+
+#ifdef ZCL_TESTING
+enum subordinate_work_refusal build_fabric_worker_admission_step_for_test(
+    bool running, bool persistence_ready, struct node_db *ndb)
+{
+    return bf_worker_admission_step(running, persistence_ready, ndb);
+}
+#endif
+
 static void *bf_worker_loop(void *arg)
 {
     (void)arg;
@@ -218,17 +247,9 @@ static void *bf_worker_loop(void *arg)
     uint64_t completed = 0;
     while (!g_shutdown_requested) {
         supervisor_child_id id = atomic_load(&g_worker_id);
-        struct subordinate_work_facts facts;
-        struct zcl_result observation = subordinate_work_admission_observe(
-            !g_shutdown_requested, app_runtime_node_db_handle_open(ndb), ndb,
-            &facts);
-        enum subordinate_work_refusal admission = observation.ok
-            ? subordinate_work_admission_decide(&facts)
-            : SUBORDINATE_WORK_PERSISTENCE_UNAVAILABLE;
-        atomic_store(&g_worker_admission_reason, admission);
+        enum subordinate_work_refusal admission = bf_worker_admission_step(
+            !g_shutdown_requested, app_runtime_node_db_handle_open(ndb), ndb);
         if (admission != SUBORDINATE_WORK_ADMIT) {
-            atomic_fetch_add(&g_worker_resource_deferrals, 1);
-            bf_worker_log_admission(admission);
             supervisor_progress_idle(id);
             supervisor_tick(id);
             platform_sleep_ms(250);

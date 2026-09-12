@@ -1352,6 +1352,55 @@ cj_wait_dht_enabled() {
 # Capability learning tears down the first plaintext P2P connection and
 # replaces it with Noise, and a lookup admitted in that interval belongs to
 # the retired transport. Observe both ends and re-arm one fresh lookup once.
+# The build worker's own admission decision, as the node reports it. The
+# worker requires sync_at_tip AND clear disk, memory, persistence and
+# database conditions, so "sync has started" is a strictly weaker claim.
+# Read the production decision instead of restating its predicates here.
+cj_worker_admission() {
+    dht_native "$1" "$2" dumpstate build_fabric 2>/dev/null |
+        dht_jget state.worker_admission 2>/dev/null || true
+}
+
+# Bounded, fail-closed wait for that decision. Every peer this node needs
+# must already be running and its connections attempted before this is
+# called: the admission reason is peer-dependent, so asking earlier is
+# waiting on work the harness itself has not done yet.
+cj_wait_worker_admits() {
+    local dd="$1" rpc="$2" budget="${3:-$DHT_WAIT}" deadline
+    CJ_LAST_ADMISSION=""
+    deadline=$(( $(date +%s) + budget ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        CJ_LAST_ADMISSION="$(cj_worker_admission "$dd" "$rpc")"
+        [ "$CJ_LAST_ADMISSION" = "admit" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# What the journey could see when a peer-dependent wait expired. Bounded,
+# and it reports the node's own refusal rather than assuming finding_peers.
+cj_stall_facts() {
+    local label="$1" dd="$2" rpc="$3" sync conns auth adm
+    sync="$(dht_rpc "$dd" "$rpc" downloadstats 2>/dev/null |
+        dht_jget result.sync_state 2>/dev/null || true)"
+    conns="$(dht_rpc "$dd" "$rpc" getconnectioncount 2>/dev/null |
+        dht_result 2>/dev/null || true)"
+    auth="$(cj_field data.connected_authenticated \
+        "$(dht_status "$dd" "$rpc")" 0)"
+    adm="$(cj_worker_admission "$dd" "$rpc")"
+    cj_note "$label sync_state=${sync:-unknown}" \
+        "connections=${conns:-unknown}" \
+        "authenticated=${auth:-0}" \
+        "worker_admission=${adm:-unreported}"
+    # Bounded, and filtered to the lines that explain a peer-dependent
+    # stall. Never a raw tail: these logs carry host configuration that does
+    # not belong in an acceptance summary.
+    dht_node_exec "$rpc" grep -aE \
+        "declines every action|sync state|peer_disconnected|cannot sync" \
+        "$dd/node.log" 2>/dev/null | tail -n 8 |
+        while IFS= read -r line; do cj_note "$label log: $line"; done || true
+}
+
 cj_connect_authenticated() {
     local deadline find lookup owner rearmed=0 auth_a auth_b started
     # Both directions. Software travels the same links the chain does, and a
@@ -1411,18 +1460,23 @@ cj_overlay() {
     dht_spawn DHT_PGID_B "$DHT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" \
         "$B_HTTPS" "127.0.0.1:$DEAD_SINK"
     cj_wait_rpc_or_die "$DHT_DD_B" "$B_RPC" "$DHT_PGID_B" "node B (build worker)"
-    # B's build worker only admits work AT_TIP, and the sync FSM only leaves
-    # finding_peers behind a peer it can sync FROM (outbound). Check it here:
-    # otherwise a B that cannot sync declines every action in silence and the
-    # journey reports it 300s later as a work-state timeout.
-    dht_wait_sync_live "$DHT_DD_B" "$B_RPC" ||
-        cj_die "node B sync never left finding_peers; its build" \
-               "worker will decline every action"
     DHT_BUILDWORKERS=0
     dht_spawn DHT_PGID_A "$DHT_DD_A" "$A_PORT" "$A_RPC" "$A_FS" \
         "$A_HTTPS" "127.0.0.1:$DEAD_SINK"
     cj_wait_rpc_or_die "$DHT_DD_A" "$A_RPC" "$DHT_PGID_A" "node A (requester)"
     cj_connect_authenticated
+    # Only here is the question answerable. B's build worker admits work
+    # only at tip, and the sync FSM leaves finding_peers only behind a peer
+    # it can sync FROM — so both nodes must be running and their connections
+    # attempted first. Asking before A exists waits on a peer the harness has
+    # not started yet, which is a harness defect, not a product refusal.
+    # A refusal here is real, and it names itself.
+    cj_wait_worker_admits "$DHT_DD_B" "$B_RPC" || {
+        cj_stall_facts "node B" "$DHT_DD_B" "$B_RPC"
+        cj_stall_facts "node A" "$DHT_DD_A" "$A_RPC"
+        cj_die "node B's build worker never admitted work (last admission:" \
+               "${CJ_LAST_ADMISSION:-unreported}); it will decline every action"
+    }
 }
 
 # ── 8/12  the person decides, and the exact bytes travel ──────────────────

@@ -1209,6 +1209,7 @@ add/remove a gate.
 - `check-before-save-hooks`
 - `check-build-epoch-integrity`
 - `check-checkout-lock`
+- `check-commons-journey-ordering`
 - `check-coins-lookup-nullcheck`
 - `check-condition-cooldown`
 - `check-consensus-parity`
