@@ -240,6 +240,7 @@ int test_crypto_perf_selftest(void)
                  (home && *home) ? home : ".");
         if (!sapling_init_params(params_dir)) {
             printf("  ~/.zcash-params absent -> SKIPPING Groth16 leg\n");
+            printf("  SKIP (Groth16 params) zcash-params absent; opted-in Groth16 leg not run\n");
         } else if (!zclassic_sapling_prover_is_ready()) {
             printf("  SKIP (Groth16 proving leg) — %s (status=%s)\n",
                    zclassic_sapling_prover_backend(),
