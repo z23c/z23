@@ -400,6 +400,12 @@ compiler-id)
     # GCC accepts arbitrary -fuse-ld=<name> values and searches for ld.<name>
     # in its program path. Fingerprint every available linker-shaped executable
     # in the admitted driver/PATH search, not only today's bfd/lld/mold names.
+    # Linker-shaped means exactly `ld` or `ld.<name>`: the one spelling the
+    # driver can select. A bare ld* glob also swept ldd, ldconfig and
+    # ldattach, which no driver ever runs, so the identity moved with whether
+    # PATH held /usr/sbin: a resident worker unit (minimal PATH) and a login
+    # shell on one host keyed different epochs of the same toolchain, and
+    # every worker gate rebuild started from an empty object tree.
     set +e
     search_dirs_output="$("${CC_ARGV[@]}" -print-search-dirs 2>"$driver_error")"
     rc=$?
@@ -419,7 +425,8 @@ compiler-id)
         while IFS= read -r -d '' resolved; do
             [ -x "$resolved" ] && fingerprint_tool arbitrary-linker "$resolved"
         done < <(find "$linker_dir" -maxdepth 1 \( -type f -o -type l \) \
-            -name 'ld*' -print0 2>/dev/null | LC_ALL=C sort -z)
+            \( -name 'ld' -o -name 'ld.*' \) -print0 2>/dev/null |
+            LC_ALL=C sort -z)
     done
     for asset in libgcc.a libgcc_s.so libgcc_s.so.1 libstdc++.a libstdc++.so \
             libc.so libm.so libpthread.so libdl.so Scrt1.o crt1.o crti.o \

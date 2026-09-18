@@ -1447,6 +1447,22 @@ SHIM_ID="$(shim_compiler_id)" ||
 [ "$SHIM_ID" = "$(shim_compiler_id)" ] ||
     fail 'back-to-back compiler fingerprints of one unchanged driver disagreed'
 
+# A5: only `ld` and `ld.<name>` are linkers a driver can select. Tools that
+# merely start with "ld" (ldd, ldconfig, ldattach live in /usr/sbin and
+# /usr/bin) must not move the identity, or a minimal-PATH service and a
+# login shell key different epochs of one toolchain. A real ld.<name> must.
+mkdir -p "$SHIM_DIR/ldnoise" "$SHIM_DIR/ldreal"
+for noise in ldconfig ldd ldattach; do
+    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/ldnoise/$noise"
+    chmod +x "$SHIM_DIR/ldnoise/$noise"
+done
+printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/ldreal/ld.fixture"
+chmod +x "$SHIM_DIR/ldreal/ld.fixture"
+[ "$(shim_compiler_id PATH="$SHIM_PATH:$SHIM_DIR/ldnoise")" = "$SHIM_ID" ] ||
+    fail 'non-linker ld* tools on PATH moved the compiler identity'
+[ "$(shim_compiler_id PATH="$SHIM_PATH:$SHIM_DIR/ldreal")" != "$SHIM_ID" ] ||
+    fail 'a selectable ld.<name> linker on PATH did not move the identity'
+
 # A1: one failing probe must refuse, naming the probe -- never a digest.
 if shim_compiler_id SHIMCC_FLAKE_ALWAYS=1 \
         > "$SHIM_DIR/flake.out" 2> "$SHIM_DIR/flake.err"; then
