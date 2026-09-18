@@ -3650,7 +3650,6 @@ tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
 tools/command/native_devagent.c:dva_code_mask:17
 tools/command/native_devagent.c:zcl_devagent_mutate_line:29
 tools/command/native_devagent_ceiling.c:zcl_native_handle_dev_agent_ceiling:53
-tools/command/native_devagent_claim.c:zcl_native_handle_dev_agent_claim:66
 tools/command/native_devagent_command.c:zcl_native_handle_dev_agent_ready:25
 tools/command/native_devagent_command.c:zcl_native_handle_dev_agent_test:25
 tools/command/native_devagent_done.c:zcl_native_handle_dev_agent_done:44

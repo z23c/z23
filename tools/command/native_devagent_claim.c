@@ -14,7 +14,13 @@
  *   cwd      optional string. Directory to run Git in. Default: the process
  *            working directory.
  *   story    string, non-empty. What the claim is FOR.
- *   files    array of path strings, non-empty unless release is true.
+ *   files    array of path strings, non-empty unless release is true. Each
+ *            path is relative to the worktree root and is normalized
+ *            lexically (empty and "." segments collapse, ".." resolves)
+ *            before any compare or record, so `a/../x`, `./x` and `x/` all
+ *            name `x`. A path that is empty, absolute, not a string, or
+ *            climbs above the root is refused: ok=false, status
+ *            "CLAIM_PATH_REFUSED", with a message naming the path.
  *   release  optional bool, default false.
  *
  * LEDGER. <git_common_dir>/z23-agent-claims.jsonl — resolve the directory
@@ -40,7 +46,10 @@
  *     released (count). `files` may be empty and `story` is not required to
  *     match anything.
  *   - The rewrite must be whole-file: read every line, drop the ones being
- *     replaced or released, append the new line, write the file back.
+ *     replaced or released, append the new line, write the file back. A
+ *     ledger that cannot be read whole is ok=false "CLAIM_LEDGER_UNREADABLE"
+ *     and one past DVC_LEDGER_MAX_ROWS rows is "CLAIM_LEDGER_TOO_LARGE";
+ *     neither is ever rewritten from a partial read.
  *
  * OUTPUT (zcl.agent_claim.v1) on ok=true
  *   leaf     "dev.agent.claim"
@@ -63,10 +72,12 @@
  */
 
 #include "command/native_command.h"
+#include "base/safe_alloc.h"
 #include "base/utc_tm.h"
 
 #include "json/json.h"
 #include "platform/clock.h"
+#include "util/file_io.h"
 #include "util/spawn.h"
 
 #include <limits.h>
@@ -78,6 +89,9 @@
 #define DVC_LEAF "dev.agent.claim"
 #define DVC_LEDGER_NAME "z23-agent-claims.jsonl"
 #define DVC_LINE_CAP 8192
+#define DVC_PATH_CAP 1024
+#define DVC_LEDGER_MAX_ROWS 4096
+#define DVC_LEDGER_MAX_BYTES ((size_t)DVC_LEDGER_MAX_ROWS * DVC_LINE_CAP)
 
 /* ── git via the only allowed rail ──────────────────────────────────────── */
 
@@ -168,7 +182,66 @@ static bool dvc_line_str(const char *line, const char *key,
     return true;
 }
 
-/* Does the files array on this ledger line contain `path`? */
+/* ── path normalization ─────────────────────────────────────────────────── */
+
+/* Drop the last segment of the `used`-byte normalized prefix in `out`. */
+static size_t dvc_path_pop(const char *out, size_t used)
+{
+    while (used > 0 && out[used - 1] != '/')
+        used--;
+    return used > 0 ? used - 1 : 0;
+}
+
+/* Fold one segment of `len` bytes into the normalized prefix: skip empty
+ * and ".", pop on "..", append anything else. NULL, or why it failed. */
+static const char *dvc_path_step(char *out, size_t *used, size_t cap,
+                                 const char *seg, size_t len)
+{
+    bool dot = len == 1 && seg[0] == '.';
+    bool dotdot = len == 2 && seg[0] == '.' && seg[1] == '.';
+    if (len == 0 || dot)
+        return NULL;
+    if (dotdot && *used == 0)
+        return "escapes the worktree root";
+    if (dotdot) {
+        *used = dvc_path_pop(out, *used);
+        return NULL;
+    }
+    if (*used + len + 2 > cap)
+        return "is too long";
+    if (*used > 0)
+        out[(*used)++] = '/';
+    memcpy(out + *used, seg, len);
+    *used += len;
+    return NULL;
+}
+
+/* Lexically normalize one claim path into `out`: collapse empty and "."
+ * segments and resolve ".." against the worktree root, so every spelling of
+ * one file compares equal. Returns NULL on success, or why the path names no
+ * file inside this worktree (empty, absolute, escaping the root, too long). */
+static const char *dvc_path_normalize(const char *in, char *out, size_t cap)
+{
+    if (!in || !in[0])
+        return "is empty";
+    if (in[0] == '/')
+        return "is absolute";
+    size_t used = 0;
+    for (const char *p = in; *p;) {
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+        const char *why = dvc_path_step(out, &used, cap, p, len);
+        if (why)
+            return why;
+        p += slash ? len + 1 : len;
+    }
+    out[used] = '\0';
+    return used > 0 ? NULL : "names no file";
+}
+
+/* Does the files array on this ledger line contain `path`? Recorded paths
+ * are normalized before the compare, so a row written before normalization
+ * existed still matches every spelling of its file. */
 static bool dvc_line_has_file(const char *line, const char *path)
 {
     const char *p = strstr(line, "\"files\":[");
@@ -181,23 +254,22 @@ static bool dvc_line_has_file(const char *line, const char *path)
             continue;
         }
         p++;
-        char item[DVC_LINE_CAP / 4];
+        char item[DVC_PATH_CAP];
         size_t used = 0;
         while (*p && *p != '"') {
-            if (used + 2 < sizeof(item)) {
-                if (*p == '\\' && p[1]) {
-                    item[used++] = p[1];
-                    p += 2;
-                    continue;
-                }
+            if (*p == '\\' && p[1])
+                p++;
+            if (used + 1 < sizeof(item))
                 item[used++] = *p;
-            }
             p++;
         }
         item[used] = '\0';
         if (*p == '"')
             p++;
-        if (strcmp(item, path) == 0)
+        char norm[DVC_PATH_CAP];
+        const char *cmp =
+            dvc_path_normalize(item, norm, sizeof(norm)) ? item : norm;
+        if (strcmp(cmp, path) == 0)
             return true;
     }
     return false;
@@ -225,322 +297,431 @@ static bool dvc_escape_claim(const char *story, const char *worktree,
            dvc_json_escape(branch, escaped_branch, 512);
 }
 
+static void dvc_fail(struct zcl_command_reply *reply, const char *code,
+                     const char *phase, const char *message,
+                     const char *evidence)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, code, phase, false, false,
+                           message, evidence);
+}
+
+/* Normalize every requested path into `norm`, refusing the first one that
+ * names no file inside the worktree. Runs before any compare or record. */
+static bool dvc_normalize_files(const struct json_value *filesv,
+                                struct json_value *norm,
+                                struct zcl_command_reply *reply)
+{
+    for (size_t j = 0; j < filesv->num_children; j++) {
+        const struct json_value *fv = &filesv->children[j];
+        const char *path = fv->type == JSON_STR ? json_get_str(fv) : NULL;
+        char out[DVC_PATH_CAP];
+        const char *why = path ? dvc_path_normalize(path, out, sizeof(out))
+                               : "is not a string";
+        if (why) {
+            char msg[192];
+            (void)snprintf(msg, sizeof(msg), "claim path \"%s\" %s",
+                           path ? path : "", why);
+            dvc_fail(reply, "CLAIM_PATH_REFUSED", "validate", msg,
+                     "claim paths are relative to the worktree root");
+            return false;
+        }
+        struct json_value item;
+        json_init(&item);
+        json_set_str(&item, out);
+        bool pushed = json_push_back(norm, &item);
+        json_free(&item);
+        if (!pushed) {
+            dvc_fail(reply, "BAD_INPUT", "validate",
+                     "cannot hold the normalized claim paths",
+                     "input.files");
+            return false;
+        }
+    }
+    return true;
+}
+
+/* ── git facts ──────────────────────────────────────────────────────────── */
+
+struct dvc_facts {
+    char toplevel[PATH_MAX];
+    char branch[256];
+    char ledger[PATH_MAX + 64];
+};
+
+static bool dvc_git_step(const char *cwd, const char *const args[],
+                         char *out, size_t cap, const char *message,
+                         struct zcl_command_reply *reply)
+{
+    char why[512];
+    why[0] = '\0';
+    if (dvc_git(cwd, args, out, cap, why, sizeof(why)))
+        return true;
+    dvc_fail(reply, "GIT_FAILED", "git", message, why);
+    return false;
+}
+
+static bool dvc_git_facts(const char *cwd, struct dvc_facts *facts,
+                          struct zcl_command_reply *reply)
+{
+    static const char *const common_args[] = {"rev-parse",
+                                              "--git-common-dir", NULL};
+    static const char *const top_args[] = {"rev-parse", "--show-toplevel",
+                                           NULL};
+    static const char *const branch_args[] = {"rev-parse", "--abbrev-ref",
+                                              "HEAD", NULL};
+    char common[PATH_MAX];
+    if (!dvc_git_step(cwd, common_args, common, sizeof(common),
+                      "git rev-parse --git-common-dir failed", reply) ||
+        !dvc_git_step(cwd, top_args, facts->toplevel,
+                      sizeof(facts->toplevel),
+                      "git rev-parse --show-toplevel failed", reply) ||
+        !dvc_git_step(cwd, branch_args, facts->branch,
+                      sizeof(facts->branch),
+                      "git rev-parse --abbrev-ref HEAD failed", reply))
+        return false;
+    if (strcmp(facts->branch, "HEAD") == 0)
+        facts->branch[0] = '\0';
+    if (common[0] == '/')
+        (void)snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s", common,
+                       DVC_LEDGER_NAME);
+    else
+        (void)snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s/%s", cwd,
+                       common, DVC_LEDGER_NAME);
+    return true;
+}
+
+/* ── the ledger: read whole or refuse, never a partial rewrite ─────────── */
+
+struct dvc_ledger {
+    char *text;   /* the whole file, split in place at newlines */
+    char **lines; /* non-empty lines, pointing into text */
+    size_t n;
+};
+
+static void dvc_ledger_free(struct dvc_ledger *lg)
+{
+    free(lg->lines);
+    free(lg->text);
+    memset(lg, 0, sizeof(*lg));
+}
+
+/* Split the loaded text into non-empty lines, trimming each "\r\n". */
+static bool dvc_ledger_split(struct dvc_ledger *lg, size_t len)
+{
+    size_t rows = 1;
+    for (size_t i = 0; i < len; i++)
+        rows += lg->text[i] == '\n';
+    lg->lines = zcl_calloc(rows, sizeof(*lg->lines), "dvc_ledger_lines");
+    if (!lg->lines)
+        return false;
+    for (char *p = lg->text; p && *p;) {
+        char *nl = strchr(p, '\n');
+        if (nl)
+            *nl = '\0';
+        size_t l = strlen(p);
+        while (l > 0 && p[l - 1] == '\r')
+            p[--l] = '\0';
+        if (l > 0)
+            lg->lines[lg->n++] = p;
+        p = nl ? nl + 1 : NULL;
+    }
+    return true;
+}
+
+/* Load every ledger line. A missing ledger is an empty one. A ledger that
+ * cannot be read whole, or holds more rows than the cap, is refused by name
+ * so no claim or release can rewrite a truncated copy of it. */
+static bool dvc_ledger_load(const char *path, struct dvc_ledger *lg,
+                            struct zcl_command_reply *reply)
+{
+    memset(lg, 0, sizeof(*lg));
+    FILE *probe = fopen(path, "rb");
+    if (!probe)
+        return true;
+    (void)fclose(probe);
+    size_t len = 0;
+    if (!zcl_read_whole_file_text(path, DVC_LEDGER_MAX_BYTES, &lg->text, &len,
+                                  DVC_LEAF) ||
+        !dvc_ledger_split(lg, len)) {
+        dvc_ledger_free(lg);
+        dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "ledger",
+                 "the claim ledger could not be read whole", path);
+        return false;
+    }
+    if (lg->n > DVC_LEDGER_MAX_ROWS) {
+        dvc_ledger_free(lg);
+        dvc_fail(reply, "CLAIM_LEDGER_TOO_LARGE", "ledger",
+                 "the claim ledger holds more rows than it may rewrite; "
+                 "release stale claims by hand",
+                 path);
+        return false;
+    }
+    return true;
+}
+
+static bool dvc_line_is_ours(const char *line, const char *toplevel)
+{
+    char wt[PATH_MAX];
+    return dvc_line_str(line, "worktree", wt, sizeof(wt)) &&
+           strcmp(wt, toplevel) == 0;
+}
+
+/* Whole-file rewrite: every line not owned by this worktree, then
+ * `newline` when one is given. */
+static bool dvc_ledger_write(const char *path, const struct dvc_ledger *lg,
+                             const char *toplevel, const char *newline,
+                             size_t *kept, size_t *released,
+                             struct zcl_command_reply *reply)
+{
+    *kept = 0;
+    *released = 0;
+    FILE *f = fopen(path, "wb");
+    bool ok = f != NULL;
+    for (size_t i = 0; ok && i < lg->n; i++) {
+        if (dvc_line_is_ours(lg->lines[i], toplevel)) {
+            (*released)++;
+            continue;
+        }
+        ok = fprintf(f, "%s\n", lg->lines[i]) >= 0;
+        (*kept)++;
+    }
+    if (ok && newline)
+        ok = fprintf(f, "%s\n", newline) >= 0;
+    if (f && fclose(f) != 0)
+        ok = false;
+    if (!ok) {
+        char why[PATH_MAX + 32];
+        (void)snprintf(why, sizeof(why), "cannot write %s", path);
+        dvc_fail(reply, "GIT_FAILED", "ledger",
+                 "failed to rewrite the claim ledger", why);
+    }
+    return ok;
+}
+
+/* ── release ────────────────────────────────────────────────────────────── */
+
+static void dvc_release(const struct dvc_facts *facts,
+                        const struct dvc_ledger *lg,
+                        struct zcl_command_reply *reply)
+{
+    size_t kept = 0, released = 0;
+    if (!dvc_ledger_write(facts->ledger, lg, facts->toplevel, NULL, &kept,
+                          &released, reply))
+        return;
+    (void)json_push_kv_str(&reply->data, "leaf", DVC_LEAF);
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+    (void)json_push_kv(&reply->data, "claimed", &arr);
+    json_free(&arr);
+    (void)json_push_kv_str(&reply->data, "ledger", facts->ledger);
+    (void)json_push_kv_int(&reply->data, "live", (long long)kept);
+    (void)json_push_kv_int(&reply->data, "released", (long long)released);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
+/* ── claim ──────────────────────────────────────────────────────────────── */
+
+/* Append one conflict entry per requested file that this foreign line
+ * already holds. */
+static size_t dvc_line_conflicts(const char *line, const char *wt,
+                                 const struct json_value *norm,
+                                 struct json_value *conflicts)
+{
+    char lstory[512];
+    lstory[0] = '\0';
+    (void)dvc_line_str(line, "story", lstory, sizeof(lstory));
+    size_t n = 0;
+    for (size_t j = 0; j < norm->num_children; j++) {
+        const char *path = json_get_str(&norm->children[j]);
+        if (!path || !dvc_line_has_file(line, path))
+            continue;
+        struct json_value entry;
+        json_init(&entry);
+        json_set_object(&entry);
+        (void)json_push_kv_str(&entry, "file", path);
+        (void)json_push_kv_str(&entry, "worktree", wt);
+        (void)json_push_kv_str(&entry, "story", lstory);
+        (void)json_push_back(conflicts, &entry);
+        json_free(&entry);
+        n++;
+    }
+    return n;
+}
+
+/* Refuse when any requested file is live in another worktree's line. */
+static bool dvc_check_overlap(const struct dvc_facts *facts,
+                              const struct dvc_ledger *lg,
+                              const struct json_value *norm,
+                              struct zcl_command_reply *reply)
+{
+    struct json_value conflicts;
+    json_init(&conflicts);
+    json_set_array(&conflicts);
+    size_t nconf = 0;
+    for (size_t i = 0; i < lg->n; i++) {
+        char wt[PATH_MAX];
+        if (!dvc_line_str(lg->lines[i], "worktree", wt, sizeof(wt)) ||
+            strcmp(wt, facts->toplevel) == 0)
+            continue; /* unreadable or our own line: never conflicts */
+        nconf += dvc_line_conflicts(lg->lines[i], wt, norm, &conflicts);
+    }
+    if (nconf > 0) {
+        (void)json_push_kv(&reply->data, "conflicts", &conflicts);
+        dvc_fail(reply, "CLAIM_OVERLAP", "claim",
+                 "files already claimed by another worktree",
+                 "see conflicts in the reply data");
+    }
+    json_free(&conflicts);
+    return nconf == 0;
+}
+
+static bool dvc_now_iso(char *ts, size_t cap)
+{
+    time_t now = (time_t)(clock_now_wall_ms() / 1000);
+    struct tm tm_utc;
+    return zcl_utc_tm(now, &tm_utc) &&
+           strftime(ts, cap, "%Y-%m-%dT%H:%M:%SZ", &tm_utc) != 0;
+}
+
+/* Render this worktree's ledger line; false when it does not fit. */
+static bool dvc_build_line(const char *ts, const char *story,
+                           const struct dvc_facts *facts,
+                           const struct json_value *norm, char *line,
+                           size_t cap)
+{
+    char esc_story[1024], esc_wt[PATH_MAX + 8], esc_br[512];
+    if (!dvc_escape_claim(story, facts->toplevel, facts->branch, esc_story,
+                          esc_wt, esc_br))
+        return false;
+    int w = snprintf(line, cap,
+                     "{\"ts\":\"%s\",\"worktree\":\"%s\",\"branch\":\"%s\","
+                     "\"story\":\"%s\",\"files\":[",
+                     ts, esc_wt, esc_br, esc_story);
+    if (w < 0 || (size_t)w >= cap)
+        return false;
+    size_t used = (size_t)w;
+    for (size_t j = 0; j < norm->num_children; j++) {
+        char esc_path[DVC_PATH_CAP * 2];
+        if (!dvc_json_escape(json_get_str(&norm->children[j]), esc_path,
+                             sizeof(esc_path)))
+            return false;
+        w = snprintf(line + used, cap - used, "%s\"%s\"", j ? "," : "",
+                     esc_path);
+        if (w < 0 || (size_t)w >= cap - used)
+            return false;
+        used += (size_t)w;
+    }
+    w = snprintf(line + used, cap - used, "]}");
+    return w >= 0 && (size_t)w < cap - used;
+}
+
+static void dvc_claim(const struct dvc_facts *facts,
+                      const struct dvc_ledger *lg, const char *story,
+                      const struct json_value *norm,
+                      struct zcl_command_reply *reply)
+{
+    if (!dvc_check_overlap(facts, lg, norm, reply))
+        return; /* nothing is written on refusal */
+    char ts[40];
+    if (!dvc_now_iso(ts, sizeof(ts))) {
+        dvc_fail(reply, "CLOCK_UNAVAILABLE", "claim",
+                 "cannot format the current UTC timestamp",
+                 "retry after the local clock is available");
+        return;
+    }
+    char newline[DVC_LINE_CAP];
+    if (!dvc_build_line(ts, story, facts, norm, newline, sizeof(newline))) {
+        dvc_fail(reply, "BAD_INPUT", "escape",
+                 "claim line too large for the ledger format",
+                 "input exceeded the ledger line budget");
+        return;
+    }
+    size_t kept = 0, replaced = 0;
+    if (!dvc_ledger_write(facts->ledger, lg, facts->toplevel, newline, &kept,
+                          &replaced, reply))
+        return;
+    (void)json_push_kv_str(&reply->data, "leaf", DVC_LEAF);
+    (void)json_push_kv(&reply->data, "claimed", norm);
+    (void)json_push_kv_str(&reply->data, "ledger", facts->ledger);
+    (void)json_push_kv_int(&reply->data, "live", (long long)kept + 1);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
+static void dvc_run(const char *cwd, const char *story, bool release,
+                    const struct json_value *norm,
+                    struct zcl_command_reply *reply)
+{
+    struct dvc_facts facts;
+    struct dvc_ledger lg;
+    if (!dvc_git_facts(cwd, &facts, reply) ||
+        !dvc_ledger_load(facts.ledger, &lg, reply))
+        return;
+    if (release)
+        dvc_release(&facts, &lg, reply);
+    else
+        dvc_claim(&facts, &lg, story, norm, reply);
+    dvc_ledger_free(&lg);
+}
+
+/* The story is required; files must be an array, non-empty unless this is
+ * a release. Returns the files array, or NULL after refusing by name. */
+static const struct json_value *
+dvc_validate(const struct json_value *input, bool release, const char **story,
+             struct zcl_command_reply *reply)
+{
+    const struct json_value *storyv = json_get(input, "story");
+    *story = storyv && storyv->type == JSON_STR ? json_get_str(storyv) : NULL;
+    if (!*story || !(*story)[0]) {
+        dvc_fail(reply, "BAD_INPUT", "validate",
+                 "story is required and must be non-empty",
+                 "input.story missing or empty");
+        return NULL;
+    }
+    const struct json_value *filesv = json_get(input, "files");
+    if (!filesv || filesv->type != JSON_ARR) {
+        dvc_fail(reply, "BAD_INPUT", "validate",
+                 "files is required and must be an array",
+                 "input.files missing or wrong type");
+        return NULL;
+    }
+    if (!release && filesv->num_children == 0) {
+        dvc_fail(reply, "BAD_INPUT", "validate",
+                 "files must be non-empty unless release is true",
+                 "input.files was empty");
+        return NULL;
+    }
+    return filesv;
+}
+
 void zcl_native_handle_dev_agent_claim(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!reply)
         return;
     if (!request || !request->input) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT",
-                               "validate", false, false,
-                               "dev.agent.claim requires an input document",
-                               "request.input was missing");
+        dvc_fail(reply, "BAD_INPUT", "validate",
+                 "dev.agent.claim requires an input document",
+                 "request.input was missing");
         return;
     }
-
-    const bool release = json_get(request->input, "release") &&
-                         json_get(request->input, "release")->type == JSON_BOOL &&
-                         json_get_bool(json_get(request->input, "release"));
-
-    /* story: required, non-empty. */
-    const struct json_value *storyv = json_get(request->input, "story");
-    const char *story = storyv && storyv->type == JSON_STR
-                            ? json_get_str(storyv)
-                            : NULL;
-    if (!story || !story[0]) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT",
-                               "validate", false, false,
-                               "story is required and must be non-empty",
-                               "input.story missing or empty");
+    const struct json_value *releasev = json_get(request->input, "release");
+    const bool release = releasev && releasev->type == JSON_BOOL &&
+                         json_get_bool(releasev);
+    const char *story = NULL;
+    const struct json_value *filesv =
+        dvc_validate(request->input, release, &story, reply);
+    if (!filesv)
         return;
-    }
 
-    /* files: required, non-empty unless release. */
-    const struct json_value *filesv = json_get(request->input, "files");
-    if (!filesv || filesv->type != JSON_ARR) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT",
-                               "validate", false, false,
-                               "files is required and must be an array",
-                               "input.files missing or wrong type");
-        return;
-    }
-    if (!release && filesv->num_children == 0) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT",
-                               "validate", false, false,
-                               "files must be non-empty unless release is true",
-                               "input.files was empty");
-        return;
-    }
-
-    const char *cwd = dvc_cwd(request);
-    char why[512];
-
-    /* git facts. */
-    char common_dir[PATH_MAX];
-    {
-        const char *args[] = {"rev-parse", "--git-common-dir", NULL};
-        char out[PATH_MAX];
-        if (!dvc_git(cwd, args, out, sizeof(out), why, sizeof(why))) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED",
-                                   "git", false, false,
-                                   "git rev-parse --git-common-dir failed",
-                                   why);
-            return;
-        }
-        if (out[0] == '/')
-            (void)snprintf(common_dir, sizeof(common_dir), "%s", out);
-        else
-            (void)snprintf(common_dir, sizeof(common_dir), "%s/%s", cwd, out);
-    }
-
-    char toplevel[PATH_MAX];
-    {
-        const char *args[] = {"rev-parse", "--show-toplevel", NULL};
-        if (!dvc_git(cwd, args, toplevel, sizeof(toplevel), why,
-                     sizeof(why))) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED",
-                                   "git", false, false,
-                                   "git rev-parse --show-toplevel failed",
-                                   why);
-            return;
-        }
-    }
-
-    char branch[256];
-    {
-        const char *args[] = {"rev-parse", "--abbrev-ref", "HEAD", NULL};
-        if (!dvc_git(cwd, args, branch, sizeof(branch), why, sizeof(why))) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED",
-                                   "git", false, false,
-                                   "git rev-parse --abbrev-ref HEAD failed",
-                                   why);
-            return;
-        }
-        if (strcmp(branch, "HEAD") == 0)
-            branch[0] = '\0';
-    }
-
-    char ledger[PATH_MAX + 64];
-    (void)snprintf(ledger, sizeof(ledger), "%s/%s", common_dir,
-                   DVC_LEDGER_NAME);
-
-    /* Read every existing line. */
-    static char lines[256][DVC_LINE_CAP];
-    size_t nlines = 0;
-    {
-        FILE *f = fopen(ledger, "r");
-        if (f) {
-            while (nlines < 256 &&
-                   fgets(lines[nlines], DVC_LINE_CAP, f)) {
-                size_t len = strlen(lines[nlines]);
-                while (len > 0 && (lines[nlines][len - 1] == '\n' ||
-                                   lines[nlines][len - 1] == '\r'))
-                    lines[nlines][--len] = '\0';
-                if (len > 0)
-                    nlines++;
-            }
-            (void)fclose(f);
-        }
-    }
-
-    if (release) {
-        /* Drop every line whose worktree is this one. */
-        size_t kept = 0, released = 0;
-        for (size_t i = 0; i < nlines; i++) {
-            char wt[PATH_MAX];
-            if (dvc_line_str(lines[i], "worktree", wt, sizeof(wt)) &&
-                strcmp(wt, toplevel) == 0) {
-                released++;
-                continue;
-            }
-            if (kept != i)
-                memcpy(lines[kept], lines[i], DVC_LINE_CAP);
-            kept++;
-        }
-        FILE *f = fopen(ledger, "wb");
-        if (!f) {
-            (void)snprintf(why, sizeof(why), "cannot write %s", ledger);
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED",
-                                   "ledger", false, false,
-                                   "failed to rewrite the claim ledger", why);
-            return;
-        }
-        for (size_t i = 0; i < kept; i++)
-            (void)fprintf(f, "%s\n", lines[i]);
-        (void)fclose(f);
-
-        (void)json_push_kv_str(&reply->data, "leaf", DVC_LEAF);
-        {
-            struct json_value arr;
-            json_init(&arr);
-            json_set_array(&arr);
-            (void)json_push_kv(&reply->data, "claimed", &arr);
-            json_free(&arr);
-        }
-        (void)json_push_kv_str(&reply->data, "ledger", ledger);
-        (void)json_push_kv_int(&reply->data, "live", (long long)kept);
-        (void)json_push_kv_int(&reply->data, "released", (long long)released);
-        reply->status = ZCL_COMMAND_STATUS_PASSED;
-        reply->exit_code = 0;
-        return;
-    }
-
-    /* Claim path: check overlap against every OTHER worktree's live line. */
-    struct json_value conflicts;
-    json_init(&conflicts);
-    json_set_array(&conflicts);
-    size_t nconf = 0;
-    for (size_t i = 0; i < nlines; i++) {
-        char wt[PATH_MAX], lstory[512];
-        if (!dvc_line_str(lines[i], "worktree", wt, sizeof(wt)))
-            continue;
-        if (strcmp(wt, toplevel) == 0)
-            continue; /* our own line: replaced, never conflicts */
-        (void)dvc_line_str(lines[i], "story", lstory, sizeof(lstory));
-        for (size_t j = 0; j < filesv->num_children; j++) {
-            const struct json_value *fv = &filesv->children[j];
-            const char *path = fv && fv->type == JSON_STR ? json_get_str(fv)
-                                                          : NULL;
-            if (!path)
-                continue;
-            if (!dvc_line_has_file(lines[i], path))
-                continue;
-            struct json_value entry;
-            json_init(&entry);
-            json_set_object(&entry);
-            (void)json_push_kv_str(&entry, "file", path);
-            (void)json_push_kv_str(&entry, "worktree", wt);
-            (void)json_push_kv_str(&entry, "story", lstory);
-            (void)json_push_back(&conflicts, &entry);
-            json_free(&entry);
-            nconf++;
-        }
-    }
-    if (nconf > 0) {
-        (void)json_push_kv(&reply->data, "conflicts", &conflicts);
-        json_free(&conflicts);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "CLAIM_OVERLAP",
-                               "claim", false, false,
-                               "files already claimed by another worktree",
-                               "see conflicts in the reply data");
-        return;
-    }
-    json_free(&conflicts);
-
-    /* Whole-file rewrite: keep lines from other worktrees, drop our own
-     * (replaced), append the new line. */
-    char esc_story[1024], esc_wt[PATH_MAX + 8], esc_br[512];
-    if (!dvc_escape_claim(story, toplevel, branch, esc_story, esc_wt, esc_br)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT",
-                               "escape", false, false,
-                               "story or paths too large to record",
-                               "input exceeded the ledger line budget");
-        return;
-    }
-
-    size_t kept = 0;
-    for (size_t i = 0; i < nlines; i++) {
-        char wt[PATH_MAX];
-        if (dvc_line_str(lines[i], "worktree", wt, sizeof(wt)) &&
-            strcmp(wt, toplevel) == 0)
-            continue; /* replaced by this claim */
-        if (kept != i)
-            memcpy(lines[kept], lines[i], DVC_LINE_CAP);
-        kept++;
-    }
-
-    char ts[40];
-    {
-        time_t now = (time_t)(clock_now_wall_ms() / 1000);
-        struct tm tm_utc;
-        if (!zcl_utc_tm(now, &tm_utc) ||
-            strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc) == 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_FAILED, "CLOCK_UNAVAILABLE",
-                                   "claim", false, false,
-                                   "cannot format the current UTC timestamp",
-                                   "retry after the local clock is available");
-            return;
-        }
-    }
-
-    char newline[DVC_LINE_CAP];
-    size_t used = (size_t)snprintf(newline, sizeof(newline),
-                                   "{\"ts\":\"%s\",\"worktree\":\"%s\","
-                                   "\"branch\":\"%s\",\"story\":\"%s\","
-                                   "\"files\":[",
-                                   ts, esc_wt, esc_br, esc_story);
-    bool overflow = used >= sizeof(newline);
-    for (size_t j = 0; j < filesv->num_children && !overflow; j++) {
-        const struct json_value *fv = &filesv->children[j];
-        const char *path = fv && fv->type == JSON_STR ? json_get_str(fv) : "";
-        char esc_path[1024];
-        if (!dvc_json_escape(path ? path : "", esc_path, sizeof(esc_path))) {
-            overflow = true;
-            break;
-        }
-        int w = snprintf(newline + used, sizeof(newline) - used, "%s\"%s\"",
-                         j ? "," : "", esc_path);
-        if (w < 0 || (size_t)w >= sizeof(newline) - used)
-            overflow = true;
-        else
-            used += (size_t)w;
-    }
-    if (overflow ||
-        (size_t)snprintf(newline + used, sizeof(newline) - used, "]}") >=
-            sizeof(newline) - used) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT",
-                               "escape", false, false,
-                               "claim line too large for the ledger format",
-                               "input exceeded the ledger line budget");
-        return;
-    }
-
-    FILE *f = fopen(ledger, "wb");
-    if (!f) {
-        (void)snprintf(why, sizeof(why), "cannot write %s", ledger);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED",
-                               "ledger", false, false,
-                               "failed to rewrite the claim ledger", why);
-        return;
-    }
-    for (size_t i = 0; i < kept; i++)
-        (void)fprintf(f, "%s\n", lines[i]);
-    (void)fprintf(f, "%s\n", newline);
-    (void)fclose(f);
-
-    (void)json_push_kv_str(&reply->data, "leaf", DVC_LEAF);
-    {
-        struct json_value arr;
-        json_init(&arr);
-        json_set_array(&arr);
-        for (size_t j = 0; j < filesv->num_children; j++) {
-            const struct json_value *fv = &filesv->children[j];
-            if (fv && fv->type == JSON_STR && json_get_str(fv)) {
-                struct json_value item;
-                json_init(&item);
-                json_set_str(&item, json_get_str(fv));
-                (void)json_push_back(&arr, &item);
-                json_free(&item);
-            }
-        }
-        (void)json_push_kv(&reply->data, "claimed", &arr);
-        json_free(&arr);
-    }
-    (void)json_push_kv_str(&reply->data, "ledger", ledger);
-    (void)json_push_kv_int(&reply->data, "live", (long long)kept + 1);
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = 0;
+    /* Normalize before any compare or record; a release ignores files. */
+    struct json_value norm;
+    json_init(&norm);
+    json_set_array(&norm);
+    if (release || dvc_normalize_files(filesv, &norm, reply))
+        dvc_run(dvc_cwd(request), story, release, &norm, reply);
+    json_free(&norm);
 }

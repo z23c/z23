@@ -158,6 +158,52 @@ static void dvx_claim(struct dvx_call *c, const char *dir, const char *story,
         (void)json_push_kv_bool(&c->input, "release", true);
 }
 
+/* Append `count` synthetic claim rows from foreign worktrees to the ledger. */
+static bool dvx_ledger_append_rows(const char *ledger, int first, int count)
+{
+    FILE *f = fopen(ledger, "ab");
+    if (!f)
+        return false;
+    bool ok = true;
+    for (int i = first; i < first + count && ok; i++)
+        ok = fprintf(f,
+                     "{\"ts\":\"2026-09-18T00:00:00Z\",\"worktree\":"
+                     "\"/fake/wt-%d\",\"branch\":\"\",\"story\":\"s%d\","
+                     "\"files\":[\"fake/%d.c\"]}\n",
+                     i, i, i) > 0;
+    return fclose(f) == 0 && ok;
+}
+
+/* Count the synthetic foreign rows still present in the ledger. */
+static int dvx_ledger_foreign_rows(const char *ledger)
+{
+    FILE *f = fopen(ledger, "rb");
+    if (!f)
+        return -1;
+    static char line[16384];
+    int rows = 0;
+    while (fgets(line, sizeof(line), f))
+        if (strstr(line, "\"worktree\":\"/fake/wt-") != NULL)
+            rows++;
+    (void)fclose(f);
+    return rows;
+}
+
+/* One claim of a single path from `dir`; returns the refusal code or "".
+ * When the registry already rejects the input (an empty string, say), the
+ * handler is still run on it directly: it must refuse on its own too. */
+static void dvx_claim_one(const char *dir, const char *path, char *code,
+                          size_t cap)
+{
+    const char *const files[] = {path, NULL};
+    struct dvx_call c;
+    dvx_claim(&c, dir, "alias-probe", files, false);
+    if (!dvx_run(&c))
+        zcl_native_handle_dev_agent_claim(&c.request, &c.reply);
+    (void)snprintf(code, cap, "%s", dvx_ok(&c) ? "" : c.reply.error.code);
+    dvx_end(&c);
+}
+
 static bool dvx_fixture(const char *dir)
 {
     const char *init[] = {"-c", "init.defaultBranch=main", "init", "-q", NULL};
@@ -276,6 +322,91 @@ int test_devagent_claim(void)
         ASSERT(dvx_run(&after));
         ASSERT(dvx_ok(&after));
         dvx_end(&after);
+        PASS();
+    }
+
+    TEST("claim: a dotted or slashed alias of a held file is an overlap") {
+        /* `two` holds engine/a.c. Every spelling below names the same file,
+         * so each must be refused rather than granted a second exclusive
+         * claim on it. */
+        static const char *const aliases[] = {
+            "engine/x/../a.c", "./engine/a.c", "engine/a.c/",
+            "engine//a.c",     "engine/./a.c", NULL};
+        for (size_t i = 0; aliases[i]; i++) {
+            char code[64];
+            dvx_claim_one(one, aliases[i], code, sizeof(code));
+            if (strcmp(code, "CLAIM_OVERLAP") != 0)
+                printf("[alias %s -> '%s'] ", aliases[i], code);
+            ASSERT_STR_EQ(code, "CLAIM_OVERLAP");
+        }
+        PASS();
+    }
+
+    TEST("claim: absolute, empty and root-escaping paths are refused by name") {
+        static const char *const bad[] = {"/etc/passwd", "",   "../escape",
+                                          "a/../../escape", ".", "a/..",
+                                          NULL};
+        for (size_t i = 0; bad[i]; i++) {
+            char code[64];
+            dvx_claim_one(one, bad[i], code, sizeof(code));
+            if (strcmp(code, "CLAIM_PATH_REFUSED") != 0)
+                printf("[path '%s' -> '%s'] ", bad[i], code);
+            ASSERT_STR_EQ(code, "CLAIM_PATH_REFUSED");
+        }
+        PASS();
+    }
+
+    TEST("claim: a ledger past 256 rows keeps every row over claim and release") {
+        struct dvx_call c;
+        static const char *const files_c[] = {"engine/c.c", NULL};
+        char ledger[1024];
+        dvx_claim(&c, one, "ledger-rows", files_c, false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        (void)snprintf(ledger, sizeof(ledger), "%s", dvx_str(&c, "ledger"));
+        dvx_end(&c);
+        ASSERT(dvx_ledger_append_rows(ledger, 0, 300));
+
+        dvx_claim(&c, one, "ledger-rows-again", files_c, false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        ASSERT_EQ(dvx_ledger_foreign_rows(ledger), 300);
+
+        dvx_claim(&c, one, "ledger-rows", files_none, true);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 1);
+        dvx_end(&c);
+        ASSERT_EQ(dvx_ledger_foreign_rows(ledger), 300);
+
+        /* A foreign row past the old 256-line read window still conflicts. */
+        static const char *const files_late[] = {"fake/299.c", NULL};
+        dvx_claim(&c, one, "late-row", files_late, false);
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("claim: a ledger over its row cap is refused whole, never truncated") {
+        struct dvx_call c;
+        static const char *const files_c[] = {"engine/c.c", NULL};
+        char ledger[1024];
+        dvx_claim(&c, one, "cap-probe", files_c, false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        (void)snprintf(ledger, sizeof(ledger), "%s", dvx_str(&c, "ledger"));
+        dvx_end(&c);
+        ASSERT(dvx_ledger_append_rows(ledger, 300, 4096));
+
+        dvx_claim(&c, one, "cap-probe-again", files_c, false);
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "CLAIM_LEDGER_TOO_LARGE");
+        dvx_end(&c);
+        ASSERT_EQ(dvx_ledger_foreign_rows(ledger), 4396);
         PASS();
     }
 
