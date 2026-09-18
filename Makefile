@@ -3048,7 +3048,7 @@ ifeq ($(ZCL_HOST_OS),Linux)
 TEST_REL_CFLAGS += -Wno-stringop-truncation -Wno-stringop-overread \
 	-Wno-restrict
 endif
-TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS))
+TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
 INTEGRATION_CFLAGS := $(TEST_REL_CFLAGS)
 INTEGRATION_LDFLAGS := $(TEST_REL_LDFLAGS)
 TEST_REL_EPOCH_COMPILE_FLAGS := $(strip $(TEST_REL_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
