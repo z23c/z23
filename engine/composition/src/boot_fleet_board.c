@@ -380,7 +380,11 @@ static bool fleet_board_ingest_refused_locally(enum fleet_board_result result)
             * that relayed the post did nothing wrong and often is not even
             * the author, so scoring it for our own policy would ban the
             * relays a fleet depends on. */
-           result == FLEET_BOARD_ERR_ROLE;
+           result == FLEET_BOARD_ERR_ROLE ||
+           /* The public quota counts the AUTHOR's key against THIS store.
+            * A relay forwarding a busy author's posts is not that author;
+            * scoring it banned whole fleet hosts for 24 h. */
+           result == FLEET_BOARD_ERR_QUOTA;
 }
 
 uint64_t boot_fleet_board_grandfather_truncated_count(void)
@@ -522,8 +526,8 @@ static void fleet_board_handle_post(struct msg_processor *mp,
         atomic_fetch_add_explicit(&s_role_refused, 1, memory_order_relaxed);
     if (r != FLEET_BOARD_OK) {
         /* An expired post is stale, not forged: peers legitimately relay
-         * one whose ttl ran out in flight. Capacity, storage and role
-         * refusal are local receiver state. All other errors remain
+         * one whose ttl ran out in flight. Capacity, storage, role and
+         * quota refusal are local receiver state. All other errors remain
          * sender-owned payload failures and keep their scoring
          * consequence. */
         if (fleet_board_ingest_refused_locally(r))

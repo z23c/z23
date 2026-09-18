@@ -2139,6 +2139,79 @@ static int test_fleet_board_public_quota(void)
     return failures;
 }
 
+/* node2, 2026-09-18 22:54Z: the canonical node banned node1 for 24 h with
+ * "fleet board: this key has spent its public-post quota". The quota counts
+ * one AUTHOR key on THIS node's store; the peer that relayed the post is
+ * usually not that author, so scoring it banned the fleet's own relays and
+ * left a fresh node dialling seeds that hung up on it. */
+static int test_fleet_board_quota_does_not_score_relay(void)
+{
+    int failures = 0;
+    bool db_open = false;
+    struct node_db db;
+    memset(&db, 0, sizeof(db));
+    TEST("fleet board: a relayed post past the author's quota is dropped "
+        "without scoring the relay") {
+        const int64_t now = (int64_t)platform_time_wall_time_t();
+        uint8_t seed[32], pk[32];
+        struct fleet_board_post post;
+        uint8_t frame[FLEET_BOARD_FRAME_MAGIC_BYTES + 1 +
+                      FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
+        size_t frame_len = 0;
+        struct net_manager nm;
+        struct msg_processor mp;
+        struct p2p_node node;
+        struct boot_svc_ctx svc;
+
+        peer_scoring_init();
+        memset(&nm, 0, sizeof(nm));
+        memset(&mp, 0, sizeof(mp));
+        memset(&svc, 0, sizeof(svc));
+        mp.net_mgr = &nm;
+        svc.node_db = &db;
+        svc.msg_processor = &mp;
+        memset(&node, 0, sizeof(node));
+        node.id = 42;
+        (void)snprintf(node.addr_name, sizeof(node.addr_name), "%s",
+                       "board-relay");
+        node.addr.svc.addr.ip[10] = 0xff;
+        node.addr.svc.addr.ip[11] = 0xff;
+        node.addr.svc.addr.ip[12] = 198;
+        node.addr.svc.addr.ip[13] = 51;
+        node.addr.svc.addr.ip[14] = 100;
+        node.addr.svc.addr.ip[15] = 8;
+
+        ASSERT(node_db_open(&db, ":memory:"));
+        db_open = true;
+        boot_fleet_board_wire(&svc);
+
+        fb_test_identity(12, seed, pk);
+        for (int i = 0; i <= FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX; i++) {
+            char text[64];
+            (void)snprintf(text, sizeof(text), "relayed post %d", i);
+            fb_test_compose(&post, FLEET_BOARD_KIND_NOTE, "author", text,
+                            (uint64_t)now, 3600);
+            fb_test_scope(&post, FLEET_BOARD_SCOPE_PUBLIC, "general");
+            ASSERT_EQ(fleet_board_post_sign(&post, seed, pk), FLEET_BOARD_OK);
+            if (i < FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX)
+                ASSERT_EQ(db_fleet_board_post_ingest(&db, &post, now, NULL),
+                          FLEET_BOARD_OK);
+        }
+        ASSERT_EQ(fleet_board_frame_encode_post(&post, frame, sizeof(frame),
+                                                &frame_len), FLEET_BOARD_OK);
+        int score_before = atomic_load(&node.misbehavior);
+        ASSERT(boot_fleet_board_frame(&mp, &node, frame, frame_len, NULL));
+        ASSERT_EQ(atomic_load(&node.misbehavior), score_before);
+        ASSERT(!db_fleet_board_have(&db, post.id));
+        ASSERT(!node.disconnect);
+        PASS();
+    } _test_next:;
+    boot_fleet_board_shutdown();
+    if (db_open)
+        node_db_close(&db);
+    return failures;
+}
+
 
 /* T1 + T2: the two halves of the resident leg, proven on one store.
  *
@@ -3030,6 +3103,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_board_public_grant_free();
     failures += test_fleet_board_public_unknown_scope();
     failures += test_fleet_board_public_quota();
+    failures += test_fleet_board_quota_does_not_score_relay();
     failures += test_fleet_board_public_quota_counts_stored();
     failures += test_fleet_board_public_quota_window_counts_expired();
     failures += test_fleet_board_reclaim_keeps_burst_bound();
