@@ -145,6 +145,28 @@ static bool mr_git3(const char *dir, const char *a1, const char *a2,
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+/* The recipe the lane's committed Makefile runs for the gate build. The
+ * executor rebuilds the gate target from the candidate tree before it runs
+ * the group; the default recipe builds nothing and succeeds, and the
+ * build-refusal case swaps in one that fails once the turn's file exists,
+ * exactly as a candidate that does not compile would. No compiler runs. */
+static const char *const mr_make_ok = "\t@:\n";
+static const char *s_mr_make_recipe = NULL;
+
+static bool mr_makefile(const struct mr_dirs *d)
+{
+    char path[8192], text[1024];
+    if (snprintf(path, sizeof(path), "%s/Makefile", d->wt) >=
+        (int)sizeof(path))
+        return false;
+    if (snprintf(text, sizeof(text), ".PHONY: test_parallel\n"
+            "test_parallel:\n%s",
+            s_mr_make_recipe ? s_mr_make_recipe : mr_make_ok) >=
+        (int)sizeof(text))
+        return false;
+    return mr_write(path, text, 0);
+}
+
 /* One isolated lane: run dir plus a git worktree whose build output is
  * ignored and committed, mirroring prod primed worktrees. No queue dir:
  * the executor never reads A's claim state. */
@@ -169,7 +191,7 @@ static bool mr_lane(struct mr_dirs *d)
         if (snprintf(ignore, sizeof(ignore), "%s/.gitignore", d->wt) >=
             (int)sizeof(ignore))
             return false;
-        return mr_write(ignore, "build/\n", 0) &&
+        return mr_write(ignore, "build/\n", 0) && mr_makefile(d) &&
             mr_git3(d->wt, "config", "user.email", "t@t.t") &&
             mr_git3(d->wt, "config", "user.name", "t") &&
             mr_git3(d->wt, "add", "-A", ".") &&
@@ -1467,6 +1489,41 @@ static int mr_exec_gate_exit_nonzero(void)
     return failures;
 }
 
+/* (m2) The candidate DOES NOT BUILD while the prebuilt runner would still
+ * print a passing verdict. Proven live: a model change that did not
+ * compile passed a gate that ran the runner built before the turn. The
+ * gate target is now rebuilt from the candidate first; a failed build
+ * refuses by name and the stale runner is never consulted. */
+static int mr_exec_gate_build_fails(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char err[MUSE_RUN_ERROR_MAX] = {0};
+    char *evidence = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    s_mr_make_recipe = "\t@test ! -e src/sum.c || "
+        "{ echo 'src/sum.c:1: error: expected declaration' >&2; exit 2; }\n";
+    MR_CHECK("build-fail run", mr_execute(FAKE_JOURNEY, &d,
+        mr_verdict_pass, mr_head_pass, NULL, &mr_edit_in_scope, NULL,
+        NULL, NULL, false, &r, err, &rc, &evidence) == 0);
+    s_mr_make_recipe = NULL;
+    MR_CHECK("build-fail not pass", rc == 1 && r.rc == 1 &&
+        strcmp(r.verdict, "pass") != 0);
+    MR_CHECK("build-fail refused", strcmp(r.verdict, "refused") == 0);
+    MR_CHECK("build-fail reason names the build",
+        strstr(r.reason, "gate build failed: test_parallel exit=2") != NULL);
+    MR_CHECK("build-fail spawn named",
+        strcmp(r.gate_spawn, "build exit=2") == 0 && r.gate_exit == 2);
+    /* The stale runner printed a passing line and was never asked. */
+    MR_CHECK("build-fail runner unconsulted", r.gate_normal == false &&
+        r.gate_present == false && r.gate_ran == -1 &&
+        r.gate_failed == -1);
+    free(evidence);
+    return failures;
+}
+
 /* (n) The gate runner OVERRUNS ITS DEADLINE with passing-looking output
  * already in the pipe. A killed process proves nothing about the suite it
  * was still running, so the deadline is a refusal in its own right and is
@@ -2186,6 +2243,7 @@ static int mr_failures_execute(void)
     failures += mr_exec_rows_escaping_paths();
     /* The gate's own process, not only the log it left behind. */
     failures += mr_exec_gate_exit_nonzero();
+    failures += mr_exec_gate_build_fails();
     failures += mr_exec_gate_timeout();
     /* The workspace goes back to its base once the change is durable. */
     failures += mr_failures_restore();

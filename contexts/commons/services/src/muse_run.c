@@ -457,6 +457,34 @@ static bool mr_run_gate(const char *workspace, const char *group,
     return engine_gate_read(log, strlen(log), reading);
 }
 
+/* --- the gate's build ------------------------------------------------------
+ * A GATE THAT DOES NOT COMPILE THE CANDIDATE DOES NOT JUDGE IT. The runner
+ * in the workspace was built before the turn, so running it as it stands
+ * judges the base, not the model's change: a candidate that did not even
+ * compile once passed this gate. So the gate target is rebuilt from the
+ * candidate tree first, through the workspace's own make target with an
+ * argv (no shell), inside the gate's deadline. Anything but a normal,
+ * observed exit 0 refuses, and names the build as the reason. */
+#define MR_GATE_BUILD_TARGET "test_parallel"
+#define MR_GATE_BUILD_LOG (64u * 1024u)
+
+static bool mr_build_gate(const char *workspace, int timeout_ms,
+    struct mr_spawn_outcome *o)
+{
+    const char *argv[] = {
+        "make", "-s", "-C", workspace, MR_GATE_BUILD_TARGET, NULL
+    };
+    char *log;
+    memset(o, 0, sizeof(*o));
+    o->exit_code = -1;
+    if (!workspace || timeout_ms <= 0) return false;
+    log = zcl_malloc(MR_GATE_BUILD_LOG, "muse_run.gate_build");
+    if (!log) return false;
+    mr_gate_capture(argv, log, MR_GATE_BUILD_LOG, timeout_ms, o);
+    free(log);
+    return mr_spawn_normal(o);
+}
+
 /* Last SUITE VERDICT line, verbatim: same keep-last rule as the reader. */
 static void mr_last_verdict_line(const char *log, char *out, size_t cap)
 {
@@ -876,6 +904,37 @@ static bool mr_measured_before_gate(struct mr_core *c)
     return mr_head_pinned(c);
 }
 
+/* Builds the gate target from the candidate tree and hands back what is
+ * left of the gate deadline for the run. A build that does not finish
+ * normally, or that leaves no time to run the group, refuses by name. */
+static bool mr_judge_build(struct mr_core *c, int *run_ms)
+{
+    struct muse_run_result *r = c->res;
+    struct mr_spawn_outcome spawn;
+    char name[48];
+    int64_t t0 = mr_monotonic_ms();
+    int64_t spent;
+    if (!mr_build_gate(c->task->workspace, c->gate_timeout_ms, &spawn)) {
+        mr_spawn_outcome_name(&spawn, name, sizeof(name));
+        (void)snprintf(r->gate_spawn, sizeof(r->gate_spawn), "build %s",
+            name);
+        r->gate_exit = spawn.exit_code;
+        (void)snprintf(r->reason, sizeof(r->reason),
+            "gate build failed: %s %s", MR_GATE_BUILD_TARGET, name);
+        return false;
+    }
+    spent = mr_monotonic_ms() - t0;
+    if (spent >= (int64_t)c->gate_timeout_ms) {
+        (void)snprintf(r->gate_spawn, sizeof(r->gate_spawn), "timeout");
+        (void)snprintf(r->reason, sizeof(r->reason),
+            "gate build spent the gate budget (timeout): %lld ms of %d",
+            (long long)spent, c->gate_timeout_ms);
+        return false;
+    }
+    *run_ms = c->gate_timeout_ms - (int)spent;
+    return true;
+}
+
 /* THE GATE DECIDES. The turn text is evidence, never a verdict input.
  * Returns the rc the run reports and names the engine verdict. */
 static int mr_judge(struct mr_core *c, char *gate_log, size_t logcap,
@@ -886,8 +945,12 @@ static int mr_judge(struct mr_core *c, char *gate_log, size_t logcap,
     struct engine_gate_reading gate;
     struct mr_spawn_outcome spawn;
     enum engine_verdict v;
+    int run_ms = 0;
     if (!mr_measured_before_gate(c)) return 1;
-    if (!mr_run_gate(t->workspace, t->gate, c->gate_timeout_ms, gate_log,
+    /* Built AFTER the scope audit, so what was audited is the model's own
+     * output and never the build's side effects (build/ is ignored). */
+    if (!mr_judge_build(c, &run_ms)) return 1;
+    if (!mr_run_gate(t->workspace, t->gate, run_ms, gate_log,
             logcap, &r->gate_ms, &gate, &spawn)) {
         /* The log may well hold a passing verdict line. It is not read,
          * because the process that wrote it did not finish normally. */
