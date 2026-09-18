@@ -1542,6 +1542,53 @@ static int t_delegation_attenuates(void)
     return failures;
 }
 
+/* Counterparty lists attenuate: an empty child list under a listing parent
+ * would be the widest grant of all. */
+static int t_delegation_attenuates_counterparties(void)
+{
+    int failures = 0;
+    TEST("a child may not drop or widen its parent's counterparty list") {
+        struct metaverse_property_id prop = make_id(METAVERSE_KIND_CONTENT, 73);
+        fixture_reset(&prop);
+        struct metaverse_grant parent =
+            grant_over_id(&prop, ACT(HOST) | ACT(DELEGATE), 5000);
+        parent.delegation_allowed = true;
+        parent.max_delegation_depth = 2;
+        parent.counterparty_count = 1;
+        snprintf(parent.counterparties[0], sizeof(parent.counterparties[0]),
+                 "%s", "alice");
+        ASSERT_EQ((int)property_grant_service_mint(&parent),
+                  (int)PROPERTY_GRANT_OK);
+
+        /* An empty list means ANY counterparty: the widest child. */
+        struct metaverse_grant anyone = grant_over_id(&prop, ACT(HOST), 10);
+        ASSERT_EQ((int)property_grant_service_delegate(parent.grant_id,
+                                                       &anyone),
+                  (int)PROPERTY_GRANT_COUNTERPARTY_NOT_ALLOWED);
+
+        struct metaverse_grant other = grant_over_id(&prop, ACT(HOST), 10);
+        other.counterparty_count = 2;
+        snprintf(other.counterparties[0], sizeof(other.counterparties[0]),
+                 "%s", "alice");
+        snprintf(other.counterparties[1], sizeof(other.counterparties[1]),
+                 "%s", "mallory");
+        ASSERT_EQ((int)property_grant_service_delegate(parent.grant_id,
+                                                       &other),
+                  (int)PROPERTY_GRANT_COUNTERPARTY_NOT_ALLOWED);
+
+        /* The same list, or a narrower one, still delegates. */
+        struct metaverse_grant same = grant_over_id(&prop, ACT(HOST), 10);
+        same.counterparty_count = 1;
+        snprintf(same.counterparties[0], sizeof(same.counterparties[0]),
+                 "%s", "alice");
+        ASSERT_EQ((int)property_grant_service_delegate(parent.grant_id,
+                                                       &same),
+                  (int)PROPERTY_GRANT_OK);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── 8. Budget and rate window ──────────────────────────────────────────── */
 
 static int t_budget_is_cumulative(void)
@@ -2287,6 +2334,7 @@ int test_metaverse_grant(void)
     failures += t_delegation_depth();
     failures += t_delegation_requires_right();
     failures += t_delegation_attenuates();
+    failures += t_delegation_attenuates_counterparties();
 
     failures += t_budget_is_cumulative();
     failures += t_parent_budget_bounds_its_children();

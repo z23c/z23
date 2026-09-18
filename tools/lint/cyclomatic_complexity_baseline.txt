@@ -317,7 +317,7 @@ contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_par
 contexts/commons/modules/metaverse/src/manifest_read.c:mv_manifest_names:21
 contexts/commons/modules/metaverse/src/manifest_read.c:mv_manifest_verify_possession_impl:30
 contexts/commons/modules/metaverse/src/property_grant.c:metaverse_grant_check:26
-contexts/commons/modules/metaverse/src/property_grant.c:metaverse_grant_check_delegation:31
+contexts/commons/modules/metaverse/src/property_grant.c:metaverse_grant_check_delegation:27
 contexts/commons/modules/metaverse/src/property_grant.c:metaverse_grant_query_check:18
 contexts/commons/modules/metaverse/src/property_grant.c:metaverse_grant_well_formed:28
 contexts/commons/modules/vcs/src/blob_store.c:blob_shape_of:16

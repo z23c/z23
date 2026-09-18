@@ -264,6 +264,34 @@ enum metaverse_grant_verdict metaverse_grant_query_check(
 
 /* ── Delegation ─────────────────────────────────────────────────────────── */
 
+/* A counterparty allowlist attenuates like every other bound. An empty list
+ * means ANY counterparty, so under a parent that names some, an empty child
+ * list is the widest possible child, never the narrowest: it is refused,
+ * and every name a child lists must already be one its parent lists. */
+/* A child may not outlive its parent. */
+static enum metaverse_grant_verdict expiry_attenuates(
+    const struct metaverse_grant *g, const struct metaverse_grant *child)
+{
+    if (g->expires_unix > 0 &&
+        (child->expires_unix == 0 || child->expires_unix > g->expires_unix))
+        return METAVERSE_GRANT_EXPIRED_TIME;
+    if (g->expires_height > 0 &&
+        (child->expires_height == 0 || child->expires_height > g->expires_height))
+        return METAVERSE_GRANT_EXPIRED_HEIGHT;
+    return METAVERSE_GRANT_OK;
+}
+
+static bool counterparties_attenuate(const struct metaverse_grant *g,
+                                     const struct metaverse_grant *child)
+{
+    if (g->counterparty_count == 0) return true;
+    if (child->counterparty_count == 0) return false;
+    for (size_t i = 0; i < child->counterparty_count; i++) {
+        if (!counterparty_allowed(g, child->counterparties[i])) return false;
+    }
+    return true;
+}
+
 enum metaverse_grant_verdict metaverse_grant_check_delegation(
     const struct metaverse_grant *g,
     const struct metaverse_grant *const *ancestors, size_t ancestor_count,
@@ -321,13 +349,11 @@ enum metaverse_grant_verdict metaverse_grant_check_delegation(
         }
     }
 
-    /* A child may not outlive its parent. */
-    if (g->expires_unix > 0 &&
-        (child->expires_unix == 0 || child->expires_unix > g->expires_unix))
-        return METAVERSE_GRANT_EXPIRED_TIME;
-    if (g->expires_height > 0 &&
-        (child->expires_height == 0 || child->expires_height > g->expires_height))
-        return METAVERSE_GRANT_EXPIRED_HEIGHT;
+    if (!counterparties_attenuate(g, child))
+        return METAVERSE_GRANT_COUNTERPARTY_NOT_ALLOWED;
+
+    enum metaverse_grant_verdict ev = expiry_attenuates(g, child);
+    if (ev != METAVERSE_GRANT_OK) return ev;
 
     if (!metaverse_grant_well_formed(child)) return METAVERSE_GRANT_MALFORMED;
     return METAVERSE_GRANT_OK;
