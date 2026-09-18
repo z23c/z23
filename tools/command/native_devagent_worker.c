@@ -49,6 +49,10 @@
  * shutdown business (SIGTERM finishes nothing new: no new claims, the
  * in-flight job is crash-recorded).
  *
+ * WHOLE BRIEFS. A claimed row's brief reaches the executor whole or not
+ * at all: one that does not fit the task is refused by name
+ * (brief-too-large) before any submission, never cut to its head.
+ *
  * EXECUTOR SEAM. wkr_executor_fn is the whole production seam. The leaf
  * wires zcl_devagent_worker_no_executor (always refuses) until operator
  * relay supplies C's muse_session; the drive, gate, limits, receipts,
@@ -97,6 +101,11 @@
 #define WKR_LOCK_FILE "worker.lock"
 #define WKR_FILE_CAP (64u * 1024u)
 #define WKR_TASK_BRIEF_CAP (32u * 1024u)
+/* Named refusals for a claimed row that must never reach the executor.
+ * The rc is the one reap records; it never collides with 99-101 below. */
+#define WKR_REFUSE_BRIEF_SIZE "brief-too-large"
+#define WKR_REFUSE_BRIEF_READ "brief-unreadable"
+#define WKR_RC_REFUSED 102
 #define WKR_SLICE_NS (25u * 1000u * 1000u)
 
 /* SIGTERM asks for shutdown between jobs; the wait slices also honor it
@@ -254,44 +263,71 @@ static void wkr_fill_job_from_claim(const struct wkr_sub *sub,
     job->time_cap_s = opts->time_cap_s;
 }
 
-/* Executor-ready text: identity lines plus the brief file head for
- * doc/file kinds. A missing brief degrades to identity lines only —
- * the executor decides whether that suffices, the gate still judges. */
-static void wkr_compose_task(const struct wkr_sub *sub, struct wkr_job *job)
+/* The brief a claimed row names, whole, into head. NULL when it loaded;
+ * "" when there is no brief file (the degrade case); otherwise the named
+ * refusal. A brief is never cut: its head alone is a different job. */
+static const char *wkr_brief_load(const char *brief, char *head, size_t cap)
+{
+    struct stat st;
+    if (stat(brief, &st) != 0)
+        return "";
+    if (st.st_size < 0 || (unsigned long long)st.st_size >= cap)
+        return WKR_REFUSE_BRIEF_SIZE;
+    if (!zcl_devagent_worker_read_file(brief, head, cap))
+        return WKR_REFUSE_BRIEF_READ;
+    return NULL;
+}
+
+/* Executor-ready text: identity lines plus the WHOLE brief file for
+ * doc/file kinds. A missing brief degrades to identity lines only — the
+ * executor decides whether that suffices, the gate still judges. A brief
+ * that exists but does not fit the task whole empties the task and
+ * returns the named refusal: running its head would execute a different
+ * job than the one posted, and the gate and receipt would bless it. */
+static const char *wkr_compose_task(const struct wkr_sub *sub,
+                                    struct wkr_job *job)
 {
     const char *brief = wkr_sub_str(sub, "brief");
+    const char *why;
     char head[WKR_TASK_BRIEF_CAP];
+    size_t used, n;
     int w = snprintf(job->task, sizeof(job->task),
                      "name=%s\nkind=%s\nattempt=%lld\nmodel=%s\n",
                      job->name, job->kind, job->attempt, job->model);
     if (w <= 0 || (size_t)w >= sizeof(job->task)) {
         job->task[0] = '\0';
-        return;
+        return NULL;
     }
     if (!brief[0])
-        return;
-    if (!zcl_devagent_worker_read_file(brief, head, sizeof(head)))
-        return;
-    {
-        size_t used = strlen(job->task);
-        size_t room = sizeof(job->task) - used - 1;
-        size_t n = strlen(head);
-        if (n > room)
-            n = room;
-        memcpy(job->task + used, head, n);
-        job->task[used + n] = '\0';
+        return NULL;
+    why = wkr_brief_load(brief, head, sizeof(head));
+    if (why && !why[0])
+        return NULL;
+    used = strlen(job->task);
+    n = why ? 0 : strlen(head);
+    if (!why && n >= sizeof(job->task) - used)
+        why = WKR_REFUSE_BRIEF_SIZE;
+    if (why) {
+        job->task[0] = '\0';
+        return why;
     }
+    memcpy(job->task + used, head, n + 1);
+    return NULL;
 }
 
+/* Returns 1 with job filled (and *refusal set when the claimed row must
+ * be refused rather than run), 0 when the queue is empty, -1 on refusal
+ * of the claim itself. */
 static int wkr_claim_job(const struct wkr_drive_opts *opts,
-                         struct wkr_job *job)
+                         struct wkr_job *job, const char **refusal)
 {
     struct wkr_sub sub;
     char input[512];
     const char *state;
     int rc = -1;
-    if (!opts || !job)
+    if (!opts || !job || !refusal)
         return -1;
+    *refusal = NULL;
     if (snprintf(input, sizeof(input),
                  "{\"action\":\"claim\",\"worker\":\"%.48s\","
                  "\"session\":\"%.48s\",\"model\":\"%.128s\"}",
@@ -318,7 +354,7 @@ static int wkr_claim_job(const struct wkr_drive_opts *opts,
         rc = 0;
     else if (strcmp(state, "running") == 0) {
         wkr_fill_job_from_claim(&sub, opts, job);
-        wkr_compose_task(&sub, job);
+        *refusal = wkr_compose_task(&sub, job);
         rc = (job->rundir[0] && job->name[0]) ? 1 : -1;
     }
     wkr_sub_end(&sub);
@@ -917,6 +953,18 @@ static long long wkr_run_job(const struct wkr_drive_opts *opts,
     return wkr_run_fresh(opts, job, exec);
 }
 
+/* A claimed row that must never reach the executor: the refusal is named
+ * in run.out, where reap records it as an incomplete outcome, and in the
+ * result row the client reads. Nothing was submitted. */
+static long long wkr_refuse_job(const struct wkr_drive_opts *opts,
+                                const struct wkr_job *job, const char *why)
+{
+    wkr_write_runout(job, WKR_RC_REFUSED, why);
+    wkr_mail_result(opts, job, why, "", "no-receipt", WKR_RC_REFUSED, 0, 0,
+                    why);
+    return 1;
+}
+
 bool zcl_devagent_worker_no_executor(const struct wkr_job *job,
                                      struct wkr_result *res)
 {
@@ -1077,6 +1125,7 @@ static long long wkr_drive_step(const struct wkr_drive_opts *opts,
                                 wkr_executor_fn exec)
 {
     struct wkr_job job;
+    const char *refusal = NULL;
     int submitted = 0;
     int got;
     if (!opts || !exec)
@@ -1086,9 +1135,11 @@ static long long wkr_drive_step(const struct wkr_drive_opts *opts,
         got = 0;
     if (got == 1)
         return wkr_run_job(opts, &job, exec, true, submitted);
-    if (wkr_claim_job(opts, &job) == 1)
-        return wkr_run_job(opts, &job, exec, false, 0);
-    return 0;
+    if (wkr_claim_job(opts, &job, &refusal) != 1)
+        return 0;
+    if (refusal)
+        return wkr_refuse_job(opts, &job, refusal);
+    return wkr_run_job(opts, &job, exec, false, 0);
 }
 
 /* ── drive ─────────────────────────────────────────────────────────────── */

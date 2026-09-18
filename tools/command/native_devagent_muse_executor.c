@@ -8,8 +8,9 @@
  * this function through the wkr_executor_fn seam (never the reverse).
  *
  * TASK CARRIER. The worker hands executor-ready text: identity lines
- * plus the brief head. Muse direction rides a machine header at the
- * TOP of the brief file (inside the worker's 32 KiB head cap):
+ * plus the whole brief (a brief that does not fit the task buffer is
+ * refused by the worker, never cut). Muse direction rides a machine
+ * header at the TOP of the brief file:
  *
  *   muse-workspace: /abs/path/to/worktree
  *   muse-scope: src/

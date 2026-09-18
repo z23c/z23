@@ -46,6 +46,7 @@ static char g_wtx_state[1024];
 static char g_wtx_saved_xdg[4096];
 static bool g_wtx_had_xdg;
 static char g_fx_count[1024];
+static char g_fx_task[1024];
 
 static void wtx_isolate(const char *tag)
 {
@@ -53,7 +54,9 @@ static void wtx_isolate(const char *tag)
     test_make_tmpdir(base, sizeof(base), "devagent_worker", tag);
     (void)snprintf(g_wtx_state, sizeof(g_wtx_state), "%s/state", base);
     (void)snprintf(g_fx_count, sizeof(g_fx_count), "%s/fx.count", base);
+    (void)snprintf(g_fx_task, sizeof(g_fx_task), "%s/fx.task", base);
     (void)remove(g_fx_count);
+    (void)remove(g_fx_task);
     g_wtx_had_xdg = getenv("XDG_STATE_HOME") != NULL;
     if (g_wtx_had_xdg)
         (void)snprintf(g_wtx_saved_xdg, sizeof(g_wtx_saved_xdg), "%s",
@@ -265,6 +268,65 @@ static bool wtx_runout_has(const char *name, long long attempt,
     return strstr(text, needle) != NULL;
 }
 
+#if !defined(_WIN32)
+/* True when the run left a receipt.json behind. */
+static bool wtx_receipt_exists(const char *name, long long attempt)
+{
+    char path[4096];
+    struct stat st;
+    (void)snprintf(path, sizeof(path),
+                   "%s/z23/dev/engine/%s/a%lld/receipt.json", g_wtx_state,
+                   name, attempt);
+    return stat(path, &st) == 0;
+}
+
+/* Post one doc unit whose brief is `bytes` of filler ending in `tail`,
+ * written under the state root where post admits briefs. */
+static bool wtx_post_brief(const char *name, size_t bytes, const char *tail)
+{
+    struct wtx_call c;
+    char path[4096];
+    FILE *f;
+    size_t k;
+    bool ok;
+    if (!wtx_queue_verb("status", NULL, NULL))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/%s.brief", g_wtx_state,
+                   name);
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    for (k = 0; k < bytes; k++)
+        (void)fputc((k % 64) == 63 ? '\n' : 'b', f);
+    (void)fputs(tail, f);
+    (void)fclose(f);
+    wtx_begin(&c, "dev.agent.queue", "zcl.agent_queue.v1");
+    (void)json_push_kv_str(&c.input, "action", "post");
+    (void)json_push_kv_str(&c.input, "kind", "doc");
+    (void)json_push_kv_str(&c.input, "name", name);
+    (void)json_push_kv_str(&c.input, "path", "docs/brief-target.md");
+    (void)json_push_kv_str(&c.input, "brief", path);
+    zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
+    ok = wtx_ok(&c);
+    wtx_end(&c);
+    return ok;
+}
+
+/* True when the task the fixture saw carries needle. */
+static bool wtx_task_has(const char *needle)
+{
+    char text[16384];
+    FILE *f = fopen(g_fx_task, "rb");
+    size_t n;
+    if (!f)
+        return false;
+    n = fread(text, 1, sizeof(text) - 1, f);
+    (void)fclose(f);
+    text[n] = '\0';
+    return strstr(text, needle) != NULL;
+}
+#endif
+
 /* ── TEST executor fixtures ──────────────────────────────────────────────
  * Modes: 0 guided outcome, 1 abort in child (crash), 2 sleep past the
  * wall cap (timeout), 3 hand-written receipt carrying g_fx_cand_raw as
@@ -307,9 +369,23 @@ static long long wtx_count_read(void)
     return n;
 }
 
+/* The task the executor was handed, byte for byte, for the brief cases. */
+static void wtx_task_record(const struct wkr_job *job)
+{
+    FILE *f;
+    if (!g_fx_task[0])
+        return;
+    f = fopen(g_fx_task, "wb");
+    if (f) {
+        (void)fwrite(job->task, 1, strlen(job->task), f);
+        (void)fclose(f);
+    }
+}
+
 static bool wtx_fixture(const struct wkr_job *job, struct wkr_result *res)
 {
     wtx_count_bump();
+    wtx_task_record(job);
     if (g_fx_mode == 1) {
         struct rlimit core;
         /* A real crash: die by signal like a segfaulting adapter would.
@@ -1310,6 +1386,73 @@ int test_devagent_worker(void)
         /* The outcome row keeps its rc and its evidence. */
         ASSERT(wtx_runout_has("wtx-refused", 1, "rc=1\n"));
         ASSERT(wtx_runout_has("wtx-refused", 1, "fixture receipt"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("a brief that fits reaches the executor whole")
+    {
+        struct wkr_drive_opts o;
+        wtx_isolate("briefok");
+        ASSERT(wtx_post_brief("wtx-brief-ok", 2000, "BRIEF-TAIL-OK\n"));
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-briefok");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT_EQ(wtx_count_read(), 1);
+        ASSERT(wtx_task_has("name=wtx-brief-ok\n"));
+        ASSERT(wtx_task_has("BRIEF-TAIL-OK\n"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("a brief that does not fit refuses by name, never runs truncated")
+    {
+        struct wkr_drive_opts o;
+        char verdict[64];
+        long long rc = -1;
+        wtx_isolate("briefbig");
+        /* Inside the 32 KiB read cap, over the 8 KiB task: before the fix
+         * the executor ran the head and the tail was silently dropped. */
+        ASSERT(wtx_post_brief("wtx-brief-big", 12000, "BRIEF-TAIL-BIG\n"));
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-briefbig");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT_EQ(wtx_count_read(), 0);
+        ASSERT(wtx_runout_has("wtx-brief-big", 1, "brief-too-large"));
+        ASSERT(!wtx_receipt_exists("wtx-brief-big", 1));
+        ASSERT(wtx_mail_has("wtx-brief-big", "terminal=brief-too-large"));
+        ASSERT(!wtx_mail_has("wtx-brief-big", "gate=pass"));
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_outcome("wtx-brief-big", verdict, sizeof(verdict), &rc));
+        ASSERT_STR_EQ(verdict, "no-receipt");
+        ASSERT(!zcl_devagent_closed_pass(verdict, rc));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("a brief over the read cap refuses by name too")
+    {
+        struct wkr_drive_opts o;
+        wtx_isolate("briefhuge");
+        ASSERT(wtx_post_brief("wtx-brief-huge", 40000, "BRIEF-TAIL-HUGE\n"));
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-briefhuge");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT_EQ(wtx_count_read(), 0);
+        ASSERT(wtx_runout_has("wtx-brief-huge", 1, "brief-too-large"));
+        ASSERT(!wtx_mail_has("wtx-brief-huge", "gate=pass"));
         wtx_restore();
         PASS();
     }
