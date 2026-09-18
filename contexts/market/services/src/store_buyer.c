@@ -704,6 +704,14 @@ static struct zcl_result sb_remote_post_order(const char *seller,
                         "the store at %s refused product %lld (HTTP %d): %s",
                         seller, (long long)product_id, status, head);
     }
+    if (!store_buyer_remote_addr_matches(payment_addr, transparent)) {
+        free(res.body);
+        return SB_FAILF(STORE_BUYER_ERR_ORDER_CREATE_FAILED,
+                        "store_buyer: the store at %s answered a %s order "
+                        "with a %s payment address; refusing to pay",
+                        seller, transparent ? "transparent" : "shielded",
+                        transparent ? "non-transparent" : "non-shielded");
+    }
     free(res.body);
     return ZCL_OK;
 }

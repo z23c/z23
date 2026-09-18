@@ -14,6 +14,8 @@
 #include "controllers/store_controller.h" // shape-layer-ok:buyer-is-a-store-client
 #include "controllers/sovereignty_controller.h" // shape-layer-ok:buyer-asks-the-spend-guard
 #include "controllers/wallet_shielded_controller.h" // shape-layer-ok:buyer-classifies-an-address
+#include "controllers/wallet_helpers.h" // shape-layer-ok:buyer-classifies-an-address
+#include "script/standard.h"
 #include "chain/chainparams.h"
 #include "config/runtime.h"
 #include "crypto/sha3.h"
@@ -79,6 +81,19 @@ static bool sb_purchase_addr_is_sapling(const char *addr)
     uint8_t diversifier[11], pk_d[32];
     return wallet_addr_is_sapling(addr) ||
            sapling_decode_payment_address(addr, diversifier, pk_d);
+}
+
+bool store_buyer_remote_addr_matches(const char *addr, bool transparent)
+{
+    struct tx_destination dest;
+    if (!addr || !addr[0])
+        return false; // raw-return-ok:an empty seller address is refused by the caller by name
+    if (!transparent)
+        return wallet_addr_is_sapling(addr);
+    if (wallet_addr_is_sapling(addr))
+        return false; // raw-return-ok:a shielded address for a transparent order is a mismatch the caller names
+    return wallet_decode_address(addr, &dest) &&
+           tx_destination_is_valid(&dest);
 }
 
 /* ── pay ────────────────────────────────────────────────────────────── */

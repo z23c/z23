@@ -231,6 +231,22 @@ static int tsb_report(const char *what, bool ok)
     return ok ? 0 : 1;
 }
 
+/* A remote seller's payment address must match the kind ordered. */
+static bool tsb_remote_addr_kind(void)
+{
+    bool ok;
+    chain_params_select(CHAIN_MAIN);
+    ok = store_buyer_remote_addr_matches("zs1abcdefghijklmnop", false) &&
+         !store_buyer_remote_addr_matches("zs1abcdefghijklmnop", true) &&
+         store_buyer_remote_addr_matches(TSB_CUSTOMER, true) &&
+         !store_buyer_remote_addr_matches(TSB_CUSTOMER, false) &&
+         !store_buyer_remote_addr_matches("", false) &&
+         !store_buyer_remote_addr_matches("", true) &&
+         !store_buyer_remote_addr_matches("garbage", true) &&
+         !store_buyer_remote_addr_matches("zregtestsapling1abcdef", false);
+    return ok;
+}
+
 /* A seller that claims a file must prove it with a hash, and quote a
  * price in money range, before the buyer pays. */
 static bool tsb_parse_product_cases(void)
@@ -739,6 +755,8 @@ int test_store_buyer(void)
                            tsb_remote_reuse_guarded());
     failures += tsb_report("seller product JSON must prove a file it claims",
                            tsb_parse_product_cases());
+    failures += tsb_report("a shielded order refuses a transparent address",
+                           tsb_remote_addr_kind());
 
     tsb_unwire_merchant();
     chain_params_select(CHAIN_MAIN);

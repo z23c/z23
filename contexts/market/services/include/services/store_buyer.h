@@ -175,6 +175,11 @@ bool store_buyer_parse_product_json(const char *text, int64_t want_id,
     char *name, size_t name_max, char *token_id, size_t token_max,
     int64_t *price_zatoshi, bool *has_content_hash,
     uint8_t content_hash[32]);
+/* The payment address a remote seller returned must be of the kind the
+ * buyer asked for, on the active chain: a Sapling address for a shielded
+ * order, a valid transparent address for a transparent one. A seller that
+ * answers a private order with a public address is refused, never paid. */
+bool store_buyer_remote_addr_matches(const char *addr, bool transparent);
 
 /* ── pay ────────────────────────────────────────────────────────────── */
 
