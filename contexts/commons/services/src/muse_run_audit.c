@@ -7,6 +7,7 @@
 #endif
 
 #include "services/muse_run_audit.h"
+#include "services/muse_run.h"
 #include "base/safe_alloc.h"
 #include "util/spawn.h"
 
@@ -198,17 +199,73 @@ bool muse_dequote(char *path)
  * A scope naming a directory admits its contents and never a sibling whose
  * name merely starts the same way ("docs/" never admits "docsevil/x"), and
  * any path carrying ".." or a leading '/' is outside by definition. */
-bool muse_scope_admits(const char *path, const char *scope)
+static bool mr_prefix_admits(const char *path, const char *scope, size_t n)
 {
-    size_t n;
-    if (!path || !path[0] || !scope || !scope[0]) return false;
-    if (path[0] == '/' || strstr(path, "..") != NULL) return false;
-    n = strlen(scope);
     while (n > 0 && scope[n - 1] == '/') n--;
     if (n == 0) return false;
     if (strncmp(path, scope, n) != 0) return false;
     if (path[n] == '\0') return true;
     return path[n] == '/';
+}
+
+/* Any one prefix of the scope admits the path. */
+bool muse_scope_admits(const char *path, const char *scope)
+{
+    const char *at;
+    if (!path || !path[0] || !scope || !scope[0]) return false;
+    if (path[0] == '/' || strstr(path, "..") != NULL) return false;
+    for (at = scope;;) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (mr_prefix_admits(path, at, n)) return true;
+        if (!end) return false;
+        at = end + 1;
+    }
+}
+
+/* One element: non-empty, relative, and no ".." segment. */
+static bool mr_prefix_valid(const char *p, size_t n)
+{
+    if (n == 0 || p[0] == '/' || p[0] == '\\') return false;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (p[i] == '.' && p[i + 1] == '.' &&
+            (i == 0 || p[i - 1] == '/') &&
+            (i + 2 == n || p[i + 2] == '/'))
+            return false;
+    }
+    return true;
+}
+
+bool muse_scope_valid(const char *scope)
+{
+    size_t count = 0;
+    const char *at;
+    if (!scope || !scope[0] || strlen(scope) >= MUSE_RUN_SCOPE_MAX)
+        return false;
+    for (at = scope;;) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (++count > MUSE_SCOPE_MAX_PREFIXES || !mr_prefix_valid(at, n))
+            return false;
+        if (!end) return true;
+        at = end + 1;
+    }
+}
+
+size_t muse_scope_prefixes(const char *scope, char *buf, size_t cap,
+    const char *out[MUSE_SCOPE_MAX_PREFIXES])
+{
+    size_t count = 0;
+    char *at;
+    if (!muse_scope_valid(scope) || !buf || strlen(scope) >= cap) return 0;
+    memcpy(buf, scope, strlen(scope) + 1);
+    for (at = buf; at && count < MUSE_SCOPE_MAX_PREFIXES;) {
+        char *end = strchr(at, ',');
+        if (end) *end = '\0';
+        out[count++] = at;
+        at = end ? end + 1 : NULL;
+    }
+    return count;
 }
 
 /* Appends one escaped element to a bounded JSON array body. False once the

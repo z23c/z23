@@ -684,6 +684,30 @@ static bool dvq_under(const char *path, const char *dir)
     return path[n] == '/' || path[n] == '\\' || path[n] == '\0';
 }
 
+/* A file unit's path is its write scope: one to four repo-relative
+ * prefixes joined by ',', each held to dvq_path_ok. */
+static bool dvq_scope_path_ok(const char *s)
+{
+    char one[260];
+    size_t count = 0;
+    const char *at = s;
+    if (!s || !s[0] || strlen(s) >= 512)
+        return false;
+    for (;;) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (++count > 4 || n == 0 || n >= sizeof(one))
+            return false;
+        memcpy(one, at, n);
+        one[n] = '\0';
+        if (!dvq_path_ok(one))
+            return false;
+        if (!end)
+            return true;
+        at = end + 1;
+    }
+}
+
 /* Resolve a post-time brief file to its absolute path, refusing anything
  * outside the checkout and the state root. */
 static bool dvq_resolve_brief(const struct zcl_command_request *req,
@@ -837,7 +861,7 @@ static void dvq_post(const struct zcl_command_request *req,
         return;
     }
     if (strcmp(kind, "doc") == 0 || strcmp(kind, "file") == 0) {
-        if (!path || !dvq_path_ok(path)) {
+        if (!path || !dvq_scope_path_ok(path)) {
             dvq_fail(reply, "BAD_INPUT", "post",
                      "a doc/file unit needs a repo-relative path",
                      "input.path missing, absolute, or escaping");

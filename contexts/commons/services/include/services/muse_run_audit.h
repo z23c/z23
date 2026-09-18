@@ -66,6 +66,20 @@ bool muse_dequote(char *path);
  * by definition. */
 bool muse_scope_admits(const char *path, const char *scope);
 
+/* A SCOPE is one to MUSE_SCOPE_MAX_PREFIXES repo-relative prefixes joined by
+ * ',': a real fix and the test that proves it live under different roots,
+ * and a one-prefix scope could only ever admit one of them. Valid means
+ * every element is non-empty, relative (no leading '/' or '\\'), carries no
+ * ".." segment, and the whole fits MUSE_RUN_SCOPE_MAX. */
+#define MUSE_SCOPE_MAX_PREFIXES 4
+bool muse_scope_valid(const char *scope);
+
+/* Splits a valid scope into its prefixes: copies it into buf (cap bytes),
+ * terminates each element in place and points out[] at them. Returns the
+ * count, or 0 when the scope is not valid or does not fit. */
+size_t muse_scope_prefixes(const char *scope, char *buf, size_t cap,
+    const char *out[MUSE_SCOPE_MAX_PREFIXES]);
+
 /* One measurement pass. scope NULL records the paths without judging
  * them: that is the pre-state pass, where any path at all is already a
  * refusal. The lists are bounded JSON array bodies (already escaped) and

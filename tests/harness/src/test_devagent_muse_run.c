@@ -290,6 +290,12 @@ static const struct mr_edit mr_edit_in_scope = { NULL, "src/sum.c", NULL };
 static const struct mr_edit mr_edit_outside = { NULL, "evil.txt", NULL };
 /* The prefix trick: scope "docs/" must not admit the sibling "docsevil/". */
 static const struct mr_edit mr_edit_prefix = { "docs/", "docsevil/x", NULL };
+/* A two-prefix scope: the fix and its test live under different roots. */
+static const struct mr_edit mr_edit_multi_in = { "docs/,src/", "src/sum.c",
+    NULL };
+/* Neither prefix of a two-prefix scope admits the turn's path. */
+static const struct mr_edit mr_edit_multi_out = { "docs/,lib/", "src/sum.c",
+    NULL };
 /* Baseline dirt: the workspace is already changed before the turn. */
 static const struct mr_edit mr_edit_baseline = { NULL, NULL, "edit.txt" };
 
@@ -896,6 +902,49 @@ static int mr_exec_scope_prefix(void)
             strstr(ftext, "\"changed\":[\"docsevil/x\"]"));
         free(ftext);
     }
+    free(evidence);
+    return failures;
+}
+
+/* (d2) A SCOPE of several prefixes: a real fix and its test live under
+ * different roots, so the scope names both. Any one prefix admits a path;
+ * a path none admits is outside. The grammar refuses an empty element, an
+ * absolute or ".." element, and a fifth prefix. */
+static int mr_exec_scope_multi(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char err[MUSE_RUN_ERROR_MAX] = {0};
+    char *evidence = NULL;
+    int rc = -1;
+    const char *one[MUSE_SCOPE_MAX_PREFIXES];
+    char buf[MUSE_RUN_SCOPE_MAX];
+    MR_CHECK("multi grammar", muse_scope_valid("a/,tests/x.c") &&
+        !muse_scope_valid("a/,") && !muse_scope_valid(",a/") &&
+        !muse_scope_valid("a/,/etc") && !muse_scope_valid("a/,x/../y") &&
+        !muse_scope_valid("a,b,c,d,e") && muse_scope_valid("a,b,c,d"));
+    MR_CHECK("multi split", muse_scope_prefixes("a/,tests/x.c", buf,
+        sizeof(buf), one) == 2 && strcmp(one[0], "a/") == 0 &&
+        strcmp(one[1], "tests/x.c") == 0);
+    MR_CHECK("multi admits", muse_scope_admits("tests/x.c", "a/,tests/x.c") &&
+        muse_scope_admits("a/b.c", "a/,tests/x.c") &&
+        !muse_scope_admits("tests/x.cc", "a/,tests/x.c") &&
+        !muse_scope_admits("ab/c", "a/,tests/x.c"));
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("multi in run", mr_execute(FAKE_JOURNEY, &d, mr_verdict_pass,
+        mr_head_pass, NULL, &mr_edit_multi_in, NULL, NULL, NULL, false,
+        &r, err, &rc, &evidence) == 0);
+    MR_CHECK("multi in passes", rc == 0 && strcmp(r.verdict, "pass") == 0);
+    free(evidence);
+    evidence = NULL;
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("multi out run", mr_execute(FAKE_JOURNEY, &d, mr_verdict_pass,
+        mr_head_pass, NULL, &mr_edit_multi_out, NULL, NULL, NULL, false,
+        &r, err, &rc, &evidence) == 0);
+    MR_CHECK("multi out failed", rc == 1 &&
+        strcmp(r.verdict, "failed") == 0 &&
+        strstr(r.reason, "outside scope docs/,lib/") != NULL);
     free(evidence);
     return failures;
 }
@@ -2321,6 +2370,7 @@ static int mr_failures_execute(void)
     failures += mr_exec_baseline_dirt();
     failures += mr_exec_outside_scope();
     failures += mr_exec_scope_prefix();
+    failures += mr_exec_scope_multi();
     failures += mr_exec_unmeasurable();
     failures += mr_exec_unmeasurable_bound();
     /* The pinned pre-turn commit: a clean audit of a tree a commit has

@@ -87,7 +87,7 @@
  * body, then a blank line, then the prompt:
  *
  *   muse-workspace: receiver | . | /abs/path  (a selector, or a local path)
- *   muse-scope: src/                          (repo-relative, no "..")
+ *   muse-scope: src/[,tests/x.c]              (1-4 prefixes, no "..")
  *   muse-gate: group_name                     (a test group name)
  *   muse-model: model-id                      (optional)
  *   muse-kind: file|doc                       (optional, default file)
@@ -231,6 +231,7 @@
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
+#include "services/muse_run_audit.h"
 #include "util/log_macros.h"
 
 #include <ctype.h>
@@ -363,21 +364,12 @@ static bool rcv_group_ok(const char *s)
 }
 
 /* A repo-relative scope: never absolute, never carrying a ".." segment. */
+/* muse-scope is the executor's own scope grammar: one to four relative
+ * prefixes joined by ','. One validator, so intake cannot drift from the
+ * run that audits the change set against it. */
 static bool rcv_scope_ok(const char *s)
 {
-    size_t i, n;
-    if (!s || !s[0])
-        return false;
-    n = strlen(s);
-    if (n >= 512 || s[0] == '/' || s[0] == '\\')
-        return false;
-    for (i = 0; i + 1 < n; i++) {
-        if (s[i] != '.' || s[i + 1] != '.')
-            continue;
-        if (i == 0 || s[i - 1] == '/')
-            return false;
-    }
-    return true;
+    return muse_scope_valid(s);
 }
 
 /* ── one pulled directive row ──────────────────────────────────────────── */

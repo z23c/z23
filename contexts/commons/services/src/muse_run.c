@@ -191,9 +191,7 @@ static int mr_validate_workspace(const struct muse_run_task *t,
                 "workspace is not a directory");
         return -1;
     }
-    if (!t->scope[0] || t->scope[0] == '/' ||
-        strstr(t->scope, "..") != NULL ||
-        strlen(t->scope) >= sizeof(t->scope)) {
+    if (!muse_scope_valid(t->scope)) {
         if (err)
             (void)snprintf(err, MUSE_RUN_ERROR_MAX,
                 "scope escapes the workspace");
@@ -1092,7 +1090,8 @@ static int mr_finish(struct mr_core *c, struct muse_session *s,
     struct muse_turn_outcome out;
     char gate_log_stack[MR_GATE_LOG_MAX];
     char *gate_log = gate_log_stack;
-    const char *allow[1];
+    const char *allow[MUSE_SCOPE_MAX_PREFIXES];
+    char scope_buf[MUSE_RUN_SCOPE_MAX];
     const char *engine_name = "UNKNOWN";
     char engine_buf[64];
     int rc = 1;
@@ -1143,11 +1142,11 @@ static int mr_finish(struct mr_core *c, struct muse_session *s,
             "HEAD unreadable before the turn: base %s", r->base);
         goto write;
     }
-    allow[0] = t->scope;
     policy.approval_mode = "denyUnmatched";
     policy.model = t->model[0] ? t->model : NULL;
     policy.allow_paths = allow;
-    policy.allow_path_count = 1;
+    policy.allow_path_count = muse_scope_prefixes(t->scope, scope_buf,
+        sizeof(scope_buf), allow);
     if (!mr_submit(c, s, &policy)) goto write;
     mr_record_admission(t, r);
     memset(&out, 0, sizeof(out));

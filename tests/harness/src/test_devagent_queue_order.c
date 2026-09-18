@@ -264,6 +264,57 @@ _test_next:;
     return failures;
 }
 
+/* Post one file unit with a write scope; the reply's error code or "". */
+static bool dqo_post_file(const char *name, const char *path,
+                          const char *brief, char *code, size_t cap)
+{
+    struct dqo_call c;
+    bool ran;
+    dqo_begin(&c, "post");
+    (void)json_push_kv_str(&c.input, "kind", "file");
+    (void)json_push_kv_str(&c.input, "name", name);
+    (void)json_push_kv_str(&c.input, "group", "hex_codec");
+    (void)json_push_kv_str(&c.input, "path", path);
+    (void)json_push_kv_str(&c.input, "brief", brief);
+    ran = dqo_run(&c);
+    (void)snprintf(code, cap, "%s",
+                   c.reply.status == ZCL_COMMAND_STATUS_PASSED
+                       ? "" : c.reply.error.code);
+    dqo_end(&c);
+    return ran;
+}
+
+static int dqo_case_scope_list(void)
+{
+    int failures = 0;
+    TEST("queue order: a file unit's scope may name a fix and its test") {
+        char brief[1300], code[64];
+        FILE *f;
+        dqo_isolate("scope");
+        ASSERT(dqo_post_ok("seed", 3, NULL));
+        (void)snprintf(brief, sizeof(brief), "%s/z23/dev/queue/brief.txt",
+                       g_dqo_state);
+        f = fopen(brief, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("fix and test\n", f) >= 0);
+        ASSERT(fclose(f) == 0);
+        ASSERT(dqo_post_file("two-roots", "src/a.c,tests/t_a.c", brief, code,
+                             sizeof(code)));
+        ASSERT_STR_EQ(code, "");
+        ASSERT(dqo_post_file("five", "a,b,c,d,e", brief, code, sizeof(code)));
+        ASSERT_STR_EQ(code, "BAD_INPUT");
+        ASSERT(dqo_post_file("escape", "src/,../x", brief, code,
+                             sizeof(code)));
+        ASSERT_STR_EQ(code, "BAD_INPUT");
+        ASSERT(dqo_post_file("empty", "src/,", brief, code, sizeof(code)));
+        ASSERT_STR_EQ(code, "BAD_INPUT");
+        PASS();
+    }
+_test_next:;
+    dqo_restore();
+    return failures;
+}
+
 int test_devagent_queue_order(void);
 int test_devagent_queue_order(void)
 {
@@ -278,5 +329,6 @@ int test_devagent_queue_order(void)
     failures += dqo_case_after();
     failures += dqo_case_legacy_and_refusals();
     failures += dqo_case_backpressure();
+    failures += dqo_case_scope_list();
     return failures;
 }
