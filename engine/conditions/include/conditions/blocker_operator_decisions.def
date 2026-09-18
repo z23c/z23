@@ -62,6 +62,20 @@
 /* ── Optional shielded proving capability (engine/composition/src/boot_params_gate.c).
  * Consensus validation remains armed from embedded verifying keys; only
  * transaction creation requiring the large proving parameters is absent. */
+ZCL_BLOCKER_DECISION(utxo_apply.value_overflow_owner_gate,
+    "utxo_apply holds at a value_overflow hole because the only repair "
+    "rewinds the coin frontier to re-apply that block, and that rewind "
+    "mutates consensus state. "
+    "OPTION A - copy the datadir, set ZCL_REDUCER_VALUE_OVERFLOW_REPAIR_ACK=1 "
+    "for the node running on the COPY, restart it, and let the repair run "
+    "there; it refuses a genuinely invalid block and never rewinds past a "
+    "moved cursor. Promote the copy only after it passes the same tip and "
+    "commitment checks. Cost: disk for the copy and a supervised restart. "
+    "OPTION B - leave the node held. Nothing is rewritten, but utxo_apply "
+    "does not advance past the hole, so everything downstream of it stays "
+    "behind until A is done or the datadir is rebuilt from a verified "
+    "snapshot. There is deliberately no automatic path: the ack exists so "
+    "that no consensus rewind runs without a person choosing it.")
 ZCL_BLOCKER_DECISION(shielded_spend_unavailable,
     "A person must choose whether this node needs to create shielded "
     "transactions. OPTION A - install the four pinned proving-parameter files "

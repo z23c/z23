@@ -14,6 +14,7 @@
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "storage/repair_marker.h"
+#include "util/blocker.h"
 #include "util/log_macros.h"
 #include <limits.h>
 #include <sqlite3.h>
@@ -481,16 +482,29 @@ bool utxo_apply_repair_value_overflow_hole(
 
     local.attempted = true;
 
+    /* A node held here is a named DEPENDENCY, not a log line: without the
+     * blocker, "core sync blockers", dumpstate and the stall detector all
+     * see a healthy node that simply never advances. Cleared the moment an
+     * acknowledged call gets past the gate. */
     if (!owner_ack_value_overflow_repair()) {
+        char why[BLOCKER_REASON_MAX];
         local.owner_refused = true;
         LOG_WARN("utxo_apply",
                  "[utxo_apply] value_overflow repair owner-gated h=%d: "
                  "set %s=1 only on an operator-approved datadir copy",
                  height, VALUE_OVERFLOW_REPAIR_ACK_ENV);
+        snprintf(why, sizeof(why),
+                 "utxo_apply value_overflow hole h=%d held by the owner "
+                 "gate; escape: export %s=1 on an operator-approved datadir "
+                 "copy, restart", height, VALUE_OVERFLOW_REPAIR_ACK_ENV);
+        /* blocker-id: utxo_apply.value_overflow_owner_gate */
+        blocker_name_dependency("utxo_apply.value_overflow_owner_gate",
+                                "utxo_apply", why);
         if (out)
             *out = local;
         return true;
     }
+    blocker_clear("utxo_apply.value_overflow_owner_gate");
 
     progress_store_tx_lock();
 

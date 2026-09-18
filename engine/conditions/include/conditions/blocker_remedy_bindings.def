@@ -292,6 +292,7 @@ ZCL_BLOCKER_REMEDY(snapshot_sync.activation_unified_installer_required, OWNER)
 ZCL_BLOCKER_REMEDY(snapshot_sync.utxo_sha3_mismatch,            OWNER) /* core/modules/net/src/msgprocessor_snapshot.c: the applied swarm chunk range is untrusted; re-fetch vs. discard is a person's call */
 ZCL_BLOCKER_REMEDY(utxo.parity_bh_drift,                        OWNER) /* engine/conditions/src/utxo_drift_detected.c: the remedy is a DELIBERATE no-op — a destructive wipe/reimport is never auto-run */
 ZCL_BLOCKER_REMEDY(coin_backfill.owner_gate,                    OWNER)
+ZCL_BLOCKER_REMEDY(utxo_apply.value_overflow_owner_gate,         OWNER) /* engine/jobs/src/utxo_apply_delta_repair.c: the rewind repair runs only on an operator-approved datadir copy */
 ZCL_BLOCKER_REMEDY(sticky_escalator.resnapshot_no_base,         OWNER)
 ZCL_BLOCKER_REMEDY(sticky_escalator.resnapshot_no_consumer,     OWNER)
 ZCL_BLOCKER_REMEDY(sticky_escalator.refold_no_anchor_artifact,  OWNER)

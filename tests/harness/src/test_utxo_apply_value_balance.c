@@ -45,6 +45,7 @@
 #include "script/script.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
 #include "validation/main_state.h"
@@ -506,6 +507,7 @@ int test_utxo_apply_value_balance(void)
             UAVB_CHECK("(e) author guard rows seeded", seeded);
 
             unsetenv("ZCL_REDUCER_VALUE_OVERFLOW_REPAIR_ACK");
+            blocker_reset_for_testing();
             struct utxo_apply_value_overflow_repair_result rr;
             memset(&rr, 0, sizeof(rr));
             bool ok = utxo_apply_repair_value_overflow_hole(
@@ -514,6 +516,10 @@ int test_utxo_apply_value_balance(void)
                        ok && rr.owner_refused && !rr.repaired &&
                        stage_cursor_persisted(db, "utxo_apply", "uavb") == 3 &&
                        uavb_row_exists(db, "utxo_apply_log", 1));
+            UAVB_CHECK("(e) owner-gated hold is a named dependency blocker",
+                       blocker_class_for(
+                           "utxo_apply.value_overflow_owner_gate") ==
+                       BLOCKER_DEPENDENCY);
         }
         block_free(&b);
 
@@ -531,6 +537,8 @@ int test_utxo_apply_value_balance(void)
                        ok && rr.genuinely_invalid && !rr.repaired &&
                        stage_cursor_persisted(db, "utxo_apply", "uavb") == 3 &&
                        uavb_row_exists(db, "utxo_apply_log", 1));
+            UAVB_CHECK("(e) acknowledged call clears the owner-gate blocker",
+                       !blocker_exists("utxo_apply.value_overflow_owner_gate"));
             unsetenv("ZCL_REDUCER_VALUE_OVERFLOW_REPAIR_ACK");
         }
         block_free(&bad);
