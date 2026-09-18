@@ -107,6 +107,7 @@ int test_verify_bench_selftest(void)
         if (!sapling_init_params(params_dir)) {
             printf("  ~/.zcash-params absent -> SKIPPING Groth16 leg "
                    "(VK/proving keys not vendored)\n");
+            printf("  SKIP (Groth16 params) zcash-params absent; leg not run\n");
         } else if (!zclassic_sapling_prover_is_ready()) {
             printf("  SKIP (Groth16 proving leg) — %s (status=%s)\n",
                    zclassic_sapling_prover_backend(),
