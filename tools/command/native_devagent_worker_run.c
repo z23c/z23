@@ -194,7 +194,8 @@ int zcl_devagent_worker_child_record(const struct wkr_job *job,
                                      wkr_executor_fn exec)
 {
     struct wkr_result res;
-    char path[4096 + 64], e_term[96], e_cand[512], e_ev[8192], line[12288];
+    char path[4096 + 64], e_term[96], e_ev[8192], line[12288];
+    char e_cand[sizeof(res.candidate) * WKR_JSON_ESCAPE_WORST];
     int w;
     if (!job || !exec)
         return 125;

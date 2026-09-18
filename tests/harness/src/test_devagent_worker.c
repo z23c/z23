@@ -338,6 +338,7 @@ static char g_fx_terminal[32];
 static long long g_fx_rc;
 static bool g_fx_candidate;
 static char g_fx_cand_raw[512];
+static bool g_fx_block_receipt;
 
 /* The executor runs in a forked child, so the run count crosses the
  * fork through an append-only file, never through process memory. */
@@ -382,10 +383,54 @@ static void wtx_task_record(const struct wkr_job *job)
     }
 }
 
+/* Mode 4: a legal candidate the gate passes whose JSON escape is ~6x its
+ * length. The candidate file exists under the run dir, and the result
+ * file carries the raw control bytes the way a broken executor would. */
+static void wtx_fixture_wide_cand(const struct wkr_job *job)
+{
+    char path[4096 + 256], line[2048];
+    FILE *f;
+    int w;
+    if (snprintf(path, sizeof(path), "%s/%s", job->rundir, g_fx_cand_raw) >=
+        (int)sizeof(path))
+        _exit(126);
+    f = fopen(path, "wb");
+    if (!f)
+        _exit(126);
+    (void)fputs("diff --wide\n", f);
+    (void)fclose(f);
+    w = snprintf(line, sizeof(line),
+                 "{\"terminal\":\"pass\",\"rc\":0,\"candidate\":\"%s\","
+                 "\"evidence\":\"wide candidate\",\"tokens_used\":42,"
+                 "\"wall_ms\":7}\n",
+                 g_fx_cand_raw);
+    if (w <= 0 || (size_t)w >= sizeof(line) ||
+        snprintf(path, sizeof(path), "%s/executor_result.json",
+                 job->rundir) >= (int)sizeof(path))
+        _exit(126);
+    f = fopen(path, "wb");
+    if (!f)
+        _exit(126);
+    (void)fwrite(line, 1, strlen(line), f);
+    (void)fclose(f);
+    (void)fflush(NULL);
+    _exit(0);
+}
+
 static bool wtx_fixture(const struct wkr_job *job, struct wkr_result *res)
 {
     wtx_count_bump();
     wtx_task_record(job);
+    if (g_fx_mode == 4)
+        wtx_fixture_wide_cand(job);
+    if (g_fx_block_receipt) {
+        /* The receipt's temp name is taken by a directory: the worker's
+         * atomic receipt write cannot open it. */
+        char path[4096 + 32];
+        if (snprintf(path, sizeof(path), "%s/receipt.json.tmp",
+                     job->rundir) < (int)sizeof(path))
+            (void)mkdir(path, 0700);
+    }
     if (g_fx_mode == 1) {
         struct rlimit core;
         /* A real crash: die by signal like a segfaulting adapter would.
@@ -1453,6 +1498,61 @@ int test_devagent_worker(void)
         ASSERT_EQ(wtx_count_read(), 0);
         ASSERT(wtx_runout_has("wtx-brief-huge", 1, "brief-too-large"));
         ASSERT(!wtx_mail_has("wtx-brief-huge", "gate=pass"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("a wide control-byte candidate still gets its receipt")
+    {
+        struct wkr_drive_opts o;
+        char verdict[64];
+        long long rc = -1;
+        size_t k;
+        wtx_isolate("widecand");
+        wtx_queue_post("wtx-wide");
+        (void)remove(g_fx_count);
+        /* 191 bytes, every one escaping to six: a legal file name whose
+         * JSON form is 1146 bytes. */
+        for (k = 0; k < 191; k++)
+            g_fx_cand_raw[k] = (char)0x01;
+        g_fx_cand_raw[191] = '\0';
+        g_fx_mode = 4;
+        wtx_opts(&o, "wtx", "s-wide");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT(wtx_receipt_exists("wtx-wide", 1));
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_outcome("wtx-wide", verdict, sizeof(verdict), &rc));
+        ASSERT_STR_EQ(verdict, "pass");
+        ASSERT_EQ(rc, 0);
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("an unwritable receipt fails the run and sends no pass mail")
+    {
+        struct wkr_drive_opts o;
+        char verdict[64];
+        long long rc = -1;
+        wtx_isolate("noreceipt");
+        wtx_queue_post("wtx-noreceipt");
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        g_fx_block_receipt = true;
+        wtx_opts(&o, "wtx", "s-noreceipt");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        g_fx_block_receipt = false;
+        ASSERT(!wtx_receipt_exists("wtx-noreceipt", 1));
+        ASSERT(wtx_runout_has("wtx-noreceipt", 1, "receipt-unwritable"));
+        ASSERT(!wtx_runout_has("wtx-noreceipt", 1, "rc=0\n"));
+        ASSERT(!wtx_mail_has("wtx-noreceipt", "gate=pass"));
+        ASSERT(wtx_mail_has("wtx-noreceipt", "terminal=receipt-unwritable"));
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_outcome("wtx-noreceipt", verdict, sizeof(verdict), &rc));
+        ASSERT_STR_EQ(verdict, "no-receipt");
+        ASSERT(!zcl_devagent_closed_pass(verdict, rc));
         wtx_restore();
         PASS();
     }

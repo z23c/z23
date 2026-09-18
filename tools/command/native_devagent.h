@@ -111,6 +111,10 @@ struct wkr_job {
     long long time_cap_s;
 };
 
+/* Worst-case JSON growth of one byte: a control byte escapes to \u00XX.
+ * A buffer holding the escaped form of an N-byte field is N * this. */
+#define WKR_JSON_ESCAPE_WORST 6u
+
 /* Executor outcome. terminal is the executor's own word ("completed" is
  * NOT success); candidate names the produced diff/artifact for the gate. */
 struct wkr_result {

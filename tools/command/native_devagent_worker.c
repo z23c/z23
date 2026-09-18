@@ -47,7 +47,8 @@
  * requeue is invented here. Queued cancel prevents claim (the row is
  * gone); a running row refuses cancel and stays the worker's own
  * shutdown business (SIGTERM finishes nothing new: no new claims, the
- * in-flight job is crash-recorded).
+ * in-flight job is crash-recorded). A gated run whose receipt cannot be
+ * written fails as receipt-unwritable and never mails a pass.
  *
  * WHOLE BRIEFS. A claimed row's brief reaches the executor whole or not
  * at all: one that does not fit the task is refused by name
@@ -106,6 +107,9 @@
 #define WKR_REFUSE_BRIEF_SIZE "brief-too-large"
 #define WKR_REFUSE_BRIEF_READ "brief-unreadable"
 #define WKR_RC_REFUSED 102
+/* A gated run whose receipt could not be written fails with this rc. */
+#define WKR_RECEIPT_UNWRITABLE "receipt-unwritable"
+#define WKR_RC_NO_RECEIPT 103
 #define WKR_SLICE_NS (25u * 1000u * 1000u)
 
 /* SIGTERM asks for shutdown between jobs; the wait slices also honor it
@@ -670,20 +674,23 @@ static void wkr_write_runout(const struct wkr_job *job, long long rc,
     (void)zcl_devagent_worker_write_atomic(path, text, (size_t)w);
 }
 
-static void wkr_write_receipt(const struct wkr_drive_opts *opts,
+/* The receipt reap judges. False when it could not be composed or
+ * written: the caller then fails the run, because a pass that left no
+ * receipt must never be reported as one. */
+static bool wkr_write_receipt(const struct wkr_drive_opts *opts,
                               const struct wkr_job *job, const char *verdict,
                               const struct wkr_result *res)
 {
     char path[4096 + 32], text[4096];
-    char e_cand[512];
+    char e_cand[sizeof(res->candidate) * WKR_JSON_ESCAPE_WORST];
     int w;
     if (!opts || !job || !verdict || !res)
-        return;
+        return false;
     if (snprintf(path, sizeof(path), "%s/%s", job->rundir,
                  WKR_RECEIPT_FILE) >= (int)sizeof(path))
-        return;
+        return false;
     if (!zcl_devagent_worker_json_escape(res->candidate, e_cand, sizeof(e_cand)))
-        return;
+        return false;
     w = snprintf(text, sizeof(text),
                  "{\"verdict\":\"%s\",\"worker\":\"%.48s\","
                  "\"session\":\"%.48s\",\"model\":\"%.128s\","
@@ -693,8 +700,8 @@ static void wkr_write_receipt(const struct wkr_drive_opts *opts,
                  res->tokens_used, res->wall_ms,
                  (long long)platform_time_wall_unix());
     if (w <= 0 || (size_t)w >= sizeof(text))
-        return;
-    (void)zcl_devagent_worker_write_atomic(path, text, (size_t)w);
+        return false;
+    return zcl_devagent_worker_write_atomic(path, text, (size_t)w);
 }
 
 /* ── result mail: the row the originating client sees ────────────────────
@@ -922,7 +929,15 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
     res.wall_ms = out.wall_ms;
     rc = zcl_devagent_worker_gate(job, &res, verdict, sizeof(verdict));
     wkr_write_runout(job, rc, res.evidence);
-    wkr_write_receipt(opts, job, verdict, &res);
+    if (!wkr_write_receipt(opts, job, verdict, &res)) {
+        /* No receipt means no verdict: the run fails, and the client is
+         * told so instead of reading a pass reap can never confirm. */
+        wkr_write_runout(job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE);
+        wkr_mail_result(opts, job, WKR_RECEIPT_UNWRITABLE, res.candidate,
+                        "no-receipt", WKR_RC_NO_RECEIPT, res.tokens_used,
+                        res.wall_ms, WKR_RECEIPT_UNWRITABLE);
+        return 1;
+    }
     wkr_mail_result(opts, job, res.terminal, res.candidate, verdict, rc,
                     res.tokens_used, res.wall_ms, res.evidence);
     return 1;
