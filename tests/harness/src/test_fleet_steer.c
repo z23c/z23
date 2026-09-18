@@ -1437,6 +1437,31 @@ static int fmx_t_sender_binding(void)
         PASS();
     }
 
+    /* Proven live on 2026-09-18: a host store holding 82 older grant ids
+     * made the receiver answer STEER_GRANT_UNKNOWN for a grant minted a
+     * minute earlier, because admission kept only the FIRST 64 ids of the
+     * whole file. Other labels must not spend a sender's bound, and within
+     * one label the newest ids are the ones kept. */
+    TEST("steer: a live grant after 70 others still admits its own row") {
+        struct fmx_claim_out o;
+        char gid[64], bind[80], label[32];
+        int i;
+        fmx_isolate("sender_late_grant");
+        for (i = 0; i < 70; i++) {
+            (void)snprintf(label, sizeof(label), "filler-%d", i);
+            ASSERT(fmx_mint_as("send", label, gid, sizeof(gid)));
+        }
+        for (i = 0; i < 70; i++)
+            ASSERT(fmx_mint_as("send", "steer-late", gid, sizeof(gid)));
+        fmx_claim(gid, "steer-late", "late-a", "k-late-a", &o);
+        ASSERT_STR_EQ(o.code, "");
+        fmx_row_binding("late-a", bind, sizeof(bind));
+        ASSERT(zcl_fleet_steer_grant_binding_live("steer-late", bind,
+                                                  "send") == NULL);
+        fmx_restore();
+        PASS();
+    }
+
     TEST("steer: a grant claiming another sender is refused, not rewritten") {
         struct fmx_claim_out o;
         char victim[64], actor[64];

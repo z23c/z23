@@ -589,7 +589,11 @@ struct fmc_grant_set {
 };
 
 /* Keep the LAST row per id (later rows supersede, as fmc_grant_find does),
- * bounded by FMC_LABEL_IDS distinct ids. */
+ * bounded by FMC_LABEL_IDS distinct ids of ONE label. The store is
+ * append-only, so the newest ids are the ones still able to be live: when
+ * the bound is full the OLDEST id is evicted, never the newcomer. Keeping
+ * the first ids instead once let a store of 64 dead test grants hide every
+ * later grant, so a live sender read as STEER_GRANT_UNKNOWN. */
 static void fmc_grant_set_put(struct fmc_grant_set *s,
                               const struct fmc_grant *g)
 {
@@ -600,11 +604,17 @@ static void fmc_grant_set_put(struct fmc_grant_set *s,
             return;
         }
     }
-    if (s->n < FMC_LABEL_IDS)
-        s->g[s->n++] = *g;
+    if (s->n == FMC_LABEL_IDS) {
+        memmove(&s->g[0], &s->g[1], (FMC_LABEL_IDS - 1) * sizeof(s->g[0]));
+        s->n--;
+    }
+    s->g[s->n++] = *g;
 }
 
-static bool fmc_grant_set_load(const char *path, struct fmc_grant_set *s)
+/* Load only the rows about `label`: the admission question is about one
+ * sender, so another label's grants must not spend its bound. */
+static bool fmc_grant_set_load(const char *path, const char *label,
+                               struct fmc_grant_set *s)
 {
     FILE *f;
     char line[FMC_LINE_CAP];
@@ -614,7 +624,7 @@ static bool fmc_grant_set_load(const char *path, struct fmc_grant_set *s)
     if (!f)
         return false;
     while (fgets(line, sizeof(line), f)) {
-        if (fmc_grant_parse(line, &g))
+        if (fmc_grant_parse(line, &g) && strcmp(g.label, label) == 0)
             fmc_grant_set_put(s, &g);
     }
     (void)fclose(f);
@@ -679,7 +689,8 @@ static bool fmc_binding_is(const struct fmc_grant *g, const char *label,
  * Deliberately NOT fmc_dirs(): a caller answering a status question must
  * not create the steer directory as a side effect. Returns the refusal
  * that stopped it, or NULL with *set loaded. */
-static const char *fmc_grant_set_read(struct fmc_grant_set *set)
+static const char *fmc_grant_set_read(const char *label,
+                                      struct fmc_grant_set *set)
 {
     char root[4096], path[4096 + 32];
     int n;
@@ -688,7 +699,7 @@ static const char *fmc_grant_set_read(struct fmc_grant_set *set)
     n = snprintf(path, sizeof(path), "%s/steer/grants.jsonl", root);
     if (n <= 0 || (size_t)n >= sizeof(path))
         return "STEER_GRANT_STORE";
-    if (!fmc_grant_set_load(path, set))
+    if (!fmc_grant_set_load(path, label, set))
         return "STEER_GRANT_UNKNOWN";
     return NULL;
 }
@@ -733,7 +744,7 @@ const char *zcl_fleet_steer_grant_binding_live(const char *label,
      * there is nothing here to check the claimed name against. */
     if (!binding || strlen(binding) != ZCL_FLEET_STEER_BINDING_HEX)
         return "STEER_GRANT_BINDING";
-    store = fmc_grant_set_read(&set);
+    store = fmc_grant_set_read(label, &set);
     if (store)
         return store;
     return fmc_grant_binding_scan(&set, label, binding, scope,
