@@ -2581,6 +2581,43 @@ static int fmx_t_reply_correlation(void)
         PASS();
     }
 
+    TEST("steer: a result under the prescribed -result ref answers") {
+        struct fmx_call b;
+        const struct json_value *r;
+        char gid[64], now[32];
+        fmx_isolate("reply_result_ref");
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        ASSERT(fmx_send_one(gid, "oauth", "A", "go-A-20260918-v1",
+                            "key-go-1") >= 1);
+        fmx_now_ts(now, sizeof(now));
+        /* Near misses are not answers: a longer token, another stem. */
+        fmx_seed_inbox("near", now, 740, "box-user", "oauth", "result",
+                       "near miss", "go-A-results-20260918-v1");
+        fmx_seed_inbox("other", now, 741, "box-user", "oauth", "result",
+                       "other stem", "go-B-result-20260918-v1");
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "go-A-20260918-v1");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "queued");
+        fmx_end(&b);
+        fmx_seed_inbox("box-a", now, 742, "box-user", "oauth", "result",
+                       "ack", "go-A-result-20260918-v1");
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "go-A-20260918-v1");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "answered");
+        ASSERT(fmx_wint(r, "answer_seq") == 742);
+        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "reply_to_origin");
+        ASSERT(!json_get_bool(json_get(r, "acked")));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
     TEST("steer: an ack with no result reads acked, not answered") {
         struct fmx_call b;
         const struct json_value *r;

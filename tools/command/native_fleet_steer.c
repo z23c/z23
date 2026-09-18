@@ -2452,7 +2452,10 @@ static void fmc_stale_summary(struct json_value *blockers, int stale)
  *
  * A directive change row carries `reply`, three facts kept apart:
  *   acked     the receiver's own ack cursor covers the row (never a reply);
- *   answered  a later `result` row under the same ref from the other side:
+ *   answered  a later `result` row under the same ref from the other side
+ *             (or under that ref with one `-result` token inserted, the
+ *             form a directive prescribes for its reply, e.g.
+ *             `go-A-20260918-v1` answered by `go-A-result-20260918-v1`):
  *             written by the addressee (answer_match "addressee"), or
  *             addressed back to the origin by anyone but the origin itself
  *             (answer_match "reply_to_origin" — every box posts as its Unix
@@ -2477,12 +2480,31 @@ static bool fmc_attempt_agrees(const char *a, const char *b)
     return x < 0 || y < 0 || x == y;
 }
 
+/* True when reply ref rref answers directive ref dref: equal, or dref
+ * with one `-result` token inserted at a `-` boundary or at its end. */
+static bool fmc_ref_answers(const char *dref, const char *rref)
+{
+    static const char tag[] = "-result";
+    const size_t tl = sizeof(tag) - 1u;
+    const char *p;
+    if (strcmp(rref, dref) == 0)
+        return true;
+    for (p = strstr(rref, tag); p; p = strstr(p + 1, tag)) {
+        size_t pre = (size_t)(p - rref);
+        if (p[tl] != '\0' && p[tl] != '-')
+            continue;
+        if (strncmp(rref, dref, pre) == 0 && strcmp(p + tl, dref + pre) == 0)
+            return true;
+    }
+    return false;
+}
+
 /* How r answers directive d, or NULL when it does not. */
 static const char *fmc_answer_match(const struct fmc_row *d,
                                     const struct fmc_row *r)
 {
     long long dt = fmc_ts_unix(d->ts), rt = fmc_ts_unix(r->ts);
-    if (strcmp(r->kind, "result") != 0 || strcmp(r->ref, d->ref) != 0 ||
+    if (strcmp(r->kind, "result") != 0 || !fmc_ref_answers(d->ref, r->ref) ||
         strcmp(r->from, d->from) == 0)
         return NULL;
     if ((dt >= 0 && rt >= 0 && rt < dt) ||
