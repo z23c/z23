@@ -40,8 +40,14 @@
  *   cwd      optional string: checkout root override for path checks.
  *
  * READY ORDER. claim and next take the READY queued row with the lowest
- * (priority, seq): its depends_on dependency completed, and (claim only) the
- * row's own name not already completed. Nothing else reorders work.
+ * (priority, seq): its depends_on dependency completed, no other row with
+ * its name already running, and (claim only) the row's own name not
+ * already completed. Nothing else reorders work.
+ *
+ * ONE LIVE ROW PER NAME. A name is one run directory, so post refuses
+ * NAME_IN_FLIGHT while a row with that name is queued or running, and the
+ * existing row keeps its seq and attempt. Cancel or a terminal outcome
+ * frees the name; resume re-posts it then.
  *
  * BACKPRESSURE. post refuses QUEUE_FULL while DVQ_QUEUED_MAX rows are
  * already queued, so an intake burst can never grow the ledger unbounded.
@@ -829,6 +835,48 @@ static size_t dvq_count_queued(const struct dvq_row *rows, size_t n)
     return queued;
 }
 
+/* The live row (queued or running) carrying name, or -1. A name is one
+ * run directory, so at most one live row may carry it. */
+static long dvq_live_row(const struct dvq_row *rows, size_t n,
+                         const char *name, const char *state)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(rows[i].name, name) != 0)
+            continue;
+        if (state ? strcmp(rows[i].state, state) == 0
+                  : (strcmp(rows[i].state, "queued") == 0 ||
+                     strcmp(rows[i].state, "running") == 0))
+            return (long)i;
+    }
+    return -1;
+}
+
+/* post admission under the lock: one live row per name, then the queued
+ * bound. On refusal code/msg/evidence name why; the ledger is untouched,
+ * so the live row keeps its seq and attempt. */
+static bool dvq_post_admit(const struct dvq_row *rows, size_t n,
+                           const char *name, const char **code,
+                           const char **msg, char *evidence, size_t cap)
+{
+    long at = dvq_live_row(rows, n, name, NULL);
+    if (at >= 0) {
+        *code = "NAME_IN_FLIGHT";
+        *msg = "that name is already queued or running; cancel it or wait "
+               "for its outcome before posting it again";
+        (void)snprintf(evidence, cap, "seq %lld is %s", rows[at].seq,
+                       rows[at].state);
+        return false;
+    }
+    if (dvq_count_queued(rows, n) >= DVQ_QUEUED_MAX) {
+        *code = "QUEUE_FULL";
+        *msg = "the queue already holds its bound of queued rows; retry "
+               "after the worker drains it";
+        (void)snprintf(evidence, cap, "%d queued", DVQ_QUEUED_MAX);
+        return false;
+    }
+    return true;
+}
+
 static void dvq_post(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
@@ -950,13 +998,16 @@ static void dvq_post(const struct zcl_command_request *req,
                 seq = rows[i].seq + 1;
         }
     }
-    if (dvq_count_queued(rows, nrows) >= DVQ_QUEUED_MAX) {
-        free(rows);
-        dvq_unlock(lock);
-        dvq_fail(reply, "QUEUE_FULL", "post",
-                 "the queue already holds its bound of queued rows; retry "
-                 "after the worker drains it", qpath);
-        return;
+    {
+        const char *code = NULL, *msg = NULL;
+        char evidence[128];
+        if (!dvq_post_admit(rows, nrows, name, &code, &msg, evidence,
+                            sizeof(evidence))) {
+            free(rows);
+            dvq_unlock(lock);
+            dvq_fail(reply, code, "post", msg, evidence);
+            return;
+        }
     }
     free(rows);
     rows = NULL;
@@ -1519,6 +1570,10 @@ static long dvq_pick_ready(const struct dvq_row *rows, size_t n,
             continue;
         }
         if (r->depends_on[0] && !dvq_name_completed(opath, r->depends_on))
+            continue;
+        /* A name already running is never handed out twice, even when an
+         * older ledger still carries a second queued row for it. */
+        if (dvq_live_row(rows, n, r->name, "running") >= 0)
             continue;
         best = (long)i;
     }
