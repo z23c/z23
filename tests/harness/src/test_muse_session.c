@@ -432,6 +432,13 @@ static int ms_failures_boundary(void)
     failures += ms_failures_boundary_once(9, 5, 14, 15, false, false);
     failures += ms_failures_boundary_once(10, 5, 15, 15, false, true);
     failures += ms_failures_boundary_once(10, 6, 16, 15, true, true);
+    /* Cache reads are not charged: 45 raw with 35 served from the prompt
+     * cache bills 10, so the first turn completes under a cap of 15 and
+     * the second (billed 10 + 10) trips. Charging raw totals tripped a
+     * real worker at its cap on context re-reads alone. */
+    s_use_cached = 35;
+    failures += ms_failures_boundary_once(40, 5, 45, 15, false, false);
+    s_use_cached = 0;
     return failures;
 }
 

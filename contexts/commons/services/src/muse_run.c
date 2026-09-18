@@ -608,7 +608,8 @@ static void mr_write_facts(const struct muse_run_task *t,
         "\"ms\":%lld,\"spawn\":\"%s\",\"exit\":%d,\"normal\":%s,"
         "\"build\":{\"target\":\"%s\",\"spawn\":\"%s\",\"ms\":%lld,"
         "\"runner_sha3\":\"%s\"}},"
-        "\"tokens\":{\"input\":%llu,\"output\":%llu,\"total\":%llu},"
+        "\"tokens\":{\"input\":%llu,\"output\":%llu,\"total\":%llu,"
+        "\"cached\":%llu,\"billed\":%llu},"
         "\"duration_ms\":%lld,\"wall_ms\":%lld,\"files_changed\":%lld,"
         "\"scope_audit\":{\"pre_measured\":%s,\"pre_clean\":%s,"
         "\"pre_count\":%lld,\"pre\":[%s],\"changed_measured\":%s,"
@@ -632,6 +633,7 @@ static void mr_write_facts(const struct muse_run_task *t,
         esc_spawn, r->gate_exit, r->gate_normal ? "true" : "false",
         MR_GATE_BUILD_TARGET, r->build_spawn, r->build_ms, r->gate_runner,
         r->input_tokens, r->output_tokens, r->total_tokens,
+        r->cached_input_tokens, r->billed_tokens,
         r->duration_ms, r->wall_ms, r->files_changed,
         r->scope_pre_measured ? "true" : "false",
         r->scope_pre_clean ? "true" : "false",
@@ -1156,6 +1158,8 @@ static int mr_finish(struct mr_core *c, struct muse_session *s,
     r->input_tokens = out.input_tokens;
     r->output_tokens = out.output_tokens;
     r->total_tokens = out.total_tokens;
+    r->cached_input_tokens = out.cached_input_tokens;
+    r->billed_tokens = out.billed_tokens;
     if (wait_rc != 0) {
         muse_turn_outcome_free(&out);
         mr_wait_failed(c, s);

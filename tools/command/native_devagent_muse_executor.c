@@ -382,7 +382,8 @@ bool zcl_devagent_worker_muse_executor(const struct wkr_job *job,
     if (mres.candidate_file[0])
         (void)snprintf(res->candidate, sizeof(res->candidate), "%s",
             mres.candidate_file);
-    res->tokens_used = (long long)mres.total_tokens;
+    /* The cap the session enforced: total less cache reads. */
+    res->tokens_used = (long long)mres.billed_tokens;
     res->wall_ms = mres.wall_ms;
     mx_evidence(res, &mres, err);
     return true;

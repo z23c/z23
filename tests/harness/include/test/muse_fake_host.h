@@ -45,6 +45,7 @@ static int s_evidence_fd = -1;
 static long s_use_in = 10;
 static long s_use_out = 5;
 static long s_use_total = 15;
+static long s_use_cached = 0; /* >0 adds usage cacheReadTokens */
 
 static void fake_note(const char *fmt, const char *a, const char *b)
 {
@@ -259,9 +260,10 @@ static void fake_journey_turn(FILE *in, FILE *out, const char *session,
             "{\"jsonrpc\":\"2.0\",\"method\":\"session/tokenUsage\","
             "\"params\":{\"sessionId\":\"%s\",\"turnId\":\"%s\","
             "\"viewCursor\":\"v:9\","
-            "\"usage\":{\"inputTokens\":%ld,\"outputTokens\":%ld},"
+            "\"usage\":{\"inputTokens\":%ld,\"outputTokens\":%ld,"
+            "\"cacheReadTokens\":%ld},"
             "\"totalTokens\":%ld}}",
-            session, tid, s_use_in, s_use_out, s_use_total);
+            session, tid, s_use_in, s_use_out, s_use_cached, s_use_total);
         fake_send(out, frame);
     }
     if (!tail) {

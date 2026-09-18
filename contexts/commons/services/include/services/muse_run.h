@@ -208,6 +208,8 @@ struct muse_run_result {
     unsigned long long input_tokens;
     unsigned long long output_tokens;
     unsigned long long total_tokens;
+    unsigned long long cached_input_tokens; /* see muse_turn_outcome */
+    unsigned long long billed_tokens;       /* what the cap was charged */
     long long duration_ms;
     long long wall_ms;
     long long files_changed;
