@@ -3518,6 +3518,36 @@ static int test_sapling_zip32_xfvk_derive(void)
     return failures;
 }
 
+/* A params file that is not installed is a skip the suite must count; a
+ * file that IS installed but will not parse, or parses to the wrong shape,
+ * is a real failure. Printing FAIL without counting it made a corrupt
+ * params file read as a green group. */
+static bool sapling_params_file_present(const char *dir, const char *name)
+{
+    char fpath[768];
+    FILE *f;
+    snprintf(fpath, sizeof(fpath), "%s/%s", dir, name);
+    f = fopen(fpath, "rb");
+    if (!f)
+        return false;
+    fclose(f);
+    return true;
+}
+
+static int sapling_params_verdict(bool present, bool ok)
+{
+    if (ok) {
+        printf("OK\n");
+        return 0;
+    }
+    if (!present) {
+        printf("SKIP (params file absent)\n");
+        return 0;
+    }
+    printf("FAIL (params present but unreadable or wrong shape)\n");
+    return 1;
+}
+
 static int test_sapling_groth16_vk_read_sapling_spend(void)
 {
     int failures = 0;
@@ -3529,6 +3559,7 @@ static int test_sapling_groth16_vk_read_sapling_spend(void)
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sapling-spend.params", path ? path : ".");
         FILE *f = fopen(fpath, "rb");
+        const bool f_present = f != NULL;
         bool ok = false;
         if (f) {
             fseek(f, 0, SEEK_END);
@@ -3552,8 +3583,7 @@ static int test_sapling_groth16_vk_read_sapling_spend(void)
             free(buf);
             fclose(f);
         }
-        if (ok) printf("OK\n");
-        else { printf("FAIL (file not found or parse error)\n"); /* Don't count as failure */ }
+        failures += sapling_params_verdict(f_present, ok);
     }
 
     return failures;
@@ -3570,6 +3600,7 @@ static int test_sapling_groth16_vk_read_sapling_output(void)
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sapling-output.params", path ? path : ".");
         FILE *f = fopen(fpath, "rb");
         bool ok = false;
+        const bool f_present = f != NULL;
         if (f) {
             fseek(f, 0, SEEK_END);
             long sz = ftell(f);
@@ -3590,8 +3621,7 @@ static int test_sapling_groth16_vk_read_sapling_output(void)
             free(buf);
             fclose(f);
         }
-        if (ok) printf("OK\n");
-        else { printf("FAIL (file not found or parse error)\n"); }
+        failures += sapling_params_verdict(f_present, ok);
     }
 
     return failures;
@@ -3680,6 +3710,7 @@ static int test_sapling_groth16_vk_read_sprout_groth16(void)
         char fpath[512];
         snprintf(fpath, sizeof(fpath), "%s/.zcash-params/sprout-groth16.params", path ? path : ".");
         FILE *f = fopen(fpath, "rb");
+        const bool f_present = f != NULL;
         bool ok = false;
         if (f) {
             fseek(f, 0, SEEK_END);
@@ -3701,8 +3732,7 @@ static int test_sapling_groth16_vk_read_sprout_groth16(void)
             free(buf);
             fclose(f);
         }
-        if (ok) printf("OK\n");
-        else { printf("FAIL (file not found or parse error)\n"); }
+        failures += sapling_params_verdict(f_present, ok);
     }
 
     return failures;
@@ -3718,8 +3748,9 @@ static int test_sapling_sapling_init_params(void)
         char params_dir[512];
         snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params", home ? home : ".");
         bool ok = sapling_init_params(params_dir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (params not found)\n"); }
+        const bool present =
+            sapling_params_file_present(params_dir, "sapling-spend.params");
+        failures += sapling_params_verdict(present, ok);
     }
 
     return failures;
