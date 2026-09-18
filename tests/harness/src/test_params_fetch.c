@@ -576,6 +576,7 @@ static int test_resume(void)
     if (!body) {
         printf("    (real sapling-output.params absent — resume test skipped; "
                "see the lane report)\n");
+        printf("  SKIP (real sapling-output params) zcash-params absent; leg not run\n");
         return failures;
     }
 
@@ -673,6 +674,7 @@ static int test_resume_rejects_corrupt_part(void)
     uint8_t *body = load_real_param(1, &len);
     if (!body) {
         printf("    (real sapling-output.params absent — skipped)\n");
+        printf("  SKIP (real sapling-output params) zcash-params absent; leg not run\n");
         return failures;
     }
     uint32_t n = 0;
