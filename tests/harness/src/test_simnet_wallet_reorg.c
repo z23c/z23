@@ -321,6 +321,7 @@ static int wr_shielded(void)
     if (!sapling_init_params(params_dir)) {
         printf("  ~/.zcash-params absent — SKIPPING shielded reorg leg "
                "(transparent leg above ran)\n");
+        printf("  SKIP (shielded reorg params) zcash-params absent; leg not run\n");
         return 0; /* clean skip */
     }
     printf("  ~/.zcash-params present — running shielded z-balance restatement\n");
