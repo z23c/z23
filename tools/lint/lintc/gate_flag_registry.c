@@ -631,7 +631,8 @@ static int fr_st_first_use_cases(FILE *out, char *ob, size_t obcap)
             obcap, &rc);
     bad |= rc != 1
         || strstr(ob, "flag_registry: ZCL_FU_BAD_LINE first use "
-                      "./fu_bad.c:2 does not read it (name absent)") == NULL;
+                      "./fu_bad.c:2 does not read it (name absent; nearest "
+                      "read now at ./fu_bad.c:1)") == NULL;
 
     bad |= fr_st_case(
             "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
@@ -644,7 +645,8 @@ static int fr_st_first_use_cases(FILE *out, char *ob, size_t obcap)
             obcap, &rc);
     bad |= rc != 1
         || strstr(ob, "flag_registry: ZCL_FOO first use ./fu_bound.c:1 does"
-                      " not read it (name absent)") == NULL;
+                      " not read it (name absent; nearest read now at "
+                      "./fu_bound.c:2)") == NULL;
 
     bad |= fr_st_case(
             "Z23_FLAG(\"ZCL_FU_FILLER\", \"env_runtime\", \"-\", \"-\", \"why\")\n"
@@ -667,7 +669,8 @@ static int fr_st_first_use_cases(FILE *out, char *ob, size_t obcap)
             obcap, &rc);
     bad |= rc != 1
         || strstr(ob, "flag_registry: ZCL_FU_PAST first use ./fu_short.c:5"
-                      " does not read it (line past end (1 lines))") == NULL;
+                      " does not read it (line past end; nearest read now "
+                      "at ./fu_short.c:1)") == NULL;
 
     if (csr_write("./fu_secret.c",
                 "int f(void){ return getenv(\"ZCL_FU_UNREADABLE\") != 0; }\n"))

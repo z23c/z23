@@ -111,31 +111,38 @@ static int fru_open_check(const char *path, int line, const char *name,
     char *l = NULL;
     size_t cap = 0;
     ssize_t nread;
-    int lineno = 0, hit = 0, found = 0;
+    int lineno = 0, hit = 0, found = 0, near = 0;
+    /* The whole file is read: when the cited line is stale, the line
+     * NEAREST it that does read the name is named in the reason, so a
+     * pointer that only drifted (an insertion above it) is a copy-paste
+     * fix. The gate itself stays exact: a drifted pointer still fails. */
     while ((nread = getline(&l, &cap, f)) >= 0) {
         lineno++;
+        int on = fru_name_on_line(l, name);
+        if (on && (!near || abs(lineno - line) < abs(near - line)))
+            near = lineno;
         if (lineno == line) {
             hit = 1;
-            found = fru_name_on_line(l, name);
-            break;
+            found = on;
         }
     }
     free(l);
     fclose(f);
-    if (!hit) {
+    if (hit && found)
+        return 0;
+    if (near)
+        snprintf(reason, rcap, "%s; nearest read now at %s:%d",
+                 hit ? "name absent" : "line past end", path, near);
+    else if (!hit)
         snprintf(reason, rcap, "line past end (%d lines)", lineno);
-        return 1;
-    }
-    if (!found) {
+    else
         snprintf(reason, rcap, "name absent");
-        return 1;
-    }
-    return 0;
+    return 1;
 }
 
 static int fru_check_one(const struct fr_row *row, FILE *out)
 {
-    char reason[64];
+    char reason[400];
     int rc = fru_open_check(row->fu_path, row->fu_line, row->name, reason,
                             sizeof reason);
     if (rc < 0)
