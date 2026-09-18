@@ -796,7 +796,7 @@ Z23_FLAG("ZCL_ENABLE_BIP37", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ENGINE_NO_THINKING", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/engine/src/engine_wire_request.c:90")
 Z23_FLAG("ZCL_ENGINE_UNIT_BIN", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_devagent_queue.c:845")
+          "undocumented; first use tools/command/native_devagent_queue.c:936")
 Z23_FLAG("ZCL_EVENT_LOG_BENCH", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_event_log.c:617")
 Z23_FLAG("ZCL_EVENT_LOG_BENCH_PROOF", "env_test", "-", "-",
@@ -2505,6 +2505,6 @@ Z23_FLAG("ZCL_WRS_GO", "env_test", "-", "-",
 Z23_FLAG("ZCL_XMR_KEEP", "env_build", "0", "-",
           "undocumented; first use tools/dev/cross-machine-reproduce.sh:63")
 Z23_FLAG("ZCL_Z23_BIN", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_devagent_queue.c:1218")
+          "undocumented; first use tools/command/native_devagent_queue.c:1309")
 Z23_FLAG("ZCL_ZD_RPC_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:178")
