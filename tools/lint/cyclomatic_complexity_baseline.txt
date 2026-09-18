@@ -2172,7 +2172,7 @@ engine/reducer/services/src/reducer_ingest_service.c:reducer_ingest_block:39
 engine/reducer/services/src/reducer_ingest_service.c:reducer_persist_ingested_body_locked:19
 engine/reducer/services/src/reducer_ingest_service.c:reducer_read_back_verdict:16
 engine/reducer/services/src/reducer_ingest_service.c:reducer_stage_p2p_block_for_catchup:17
-engine/services/src/address_index_service.c:ai_do_batch:29
+engine/services/src/address_index_service.c:ai_do_batch:28
 engine/services/src/agents_telemetry_fill.c:at_scan:23
 engine/services/src/anchor_selfmint.c:anchor_selfmint_snapshot_status:20
 engine/services/src/auth_login_service.c:auth_login_verify:27
@@ -2400,7 +2400,7 @@ engine/services/src/sync_monitor.c:find_active_frontier_child:19
 engine/services/src/sync_monitor.c:queue_body_target:17
 engine/services/src/sync_monitor.c:sync_monitor_local_header_refill:24
 engine/services/src/sync_trust_policy.c:sync_capabilities_from_evidence:18
-engine/services/src/txindex_projection_service.c:tx_do_batch:29
+engine/services/src/txindex_projection_service.c:tx_do_batch:28
 engine/services/src/utxo_mirror_delta.c:utxo_mirror_delta_apply:54
 engine/services/src/utxo_mirror_sync_service.c:mirror_rebuild_from_coins_kv:28
 engine/services/src/utxo_mirror_sync_service.c:utxo_mirror_sync_run_once:19

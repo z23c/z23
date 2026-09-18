@@ -13,6 +13,7 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
+#include "chain/chain.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "services/address_index_service.h"
@@ -130,6 +131,33 @@ static int ai_genesis_base_is_no_seed(sqlite3 *db)
              !blocker_exists("address_index.below_snapshot_seed"));
     AI_CHECK("genesis trusted base is no seed floor",
              !index_fold_snapshot_seed_floor(&floor) && floor == -1);
+    return failures;
+}
+
+/* The loader marks genesis BLOCK_HAVE_DATA but never writes its body. A fold
+ * must pass genesis with zero rows instead of wedging at h=0; any other
+ * unreadable height is still refused so the fold names it. */
+static int ai_genesis_body_folds_empty(const char *dir)
+{
+    int failures = 0;
+    struct uint256 hash;
+    struct block_index bi;
+    struct block blk;
+    memset(&hash, 0x5a, sizeof(hash));
+    block_index_init(&bi);
+    bi.phashBlock = &hash;
+    bi.nStatus |= BLOCK_HAVE_DATA;
+    block_init(&blk);
+    AI_CHECK("unreadable genesis folds as an empty body",
+             index_fold_read_body(&blk, &bi, 0, dir) && blk.num_vtx == 0);
+    block_free(&blk);
+    block_init(&blk);
+    bi.nHeight = 1;
+    AI_CHECK("unreadable non-genesis body is refused",
+             !index_fold_read_body(&blk, &bi, 1, dir));
+    block_free(&blk);
+    AI_CHECK("no index at all is refused",
+             !index_fold_read_body(&blk, NULL, 0, dir));
     return failures;
 }
 
@@ -499,6 +527,7 @@ int test_address_index(void)
                  !blocker_exists("address_index.below_snapshot_seed"));
 
         failures += ai_genesis_base_is_no_seed(db);
+        failures += ai_genesis_body_folds_empty(dir);
 
         /* Install a snapshot-seed floor at height 1000. */
         {

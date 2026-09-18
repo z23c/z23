@@ -17,6 +17,8 @@
 
 #include "jobs/reducer_frontier.h"          /* REDUCER_TRUSTED_BASE_HEIGHT_KEY */
 #include "services/disk_monitor.h"
+#include "primitives/block.h"
+#include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
@@ -264,6 +266,17 @@ void index_fold_note_absent_body(const char *index_id, const char *subsys,
                  index_id, (long long)absent_height, (long long)seed_floor,
                  (unsigned long long)reps);
     }
+}
+
+bool index_fold_read_body(struct block *blk, const struct block_index *bi,
+                          int64_t h, const char *datadir)
+{
+    block_init(blk);                  /* callers pass an empty block */
+    if (bi && read_block_from_disk_index_pread(blk, bi, datadir))
+        return true;
+    block_free(blk);
+    block_init(blk);                  /* genesis folds zero rows */
+    return bi && h == 0;
 }
 
 bool index_fold_snapshot_seed_floor(int64_t *floor_out)

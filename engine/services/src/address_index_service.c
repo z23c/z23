@@ -129,7 +129,7 @@ static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
         struct block_index *bi = active_chain_at(&ms->chain_active, (int)h);
         struct block blk;
         block_init(&blk);
-        if (!bi || !read_block_from_disk_index_pread(&blk, bi, datadir)) {
+        if (!index_fold_read_body(&blk, bi, h, datadir)) {
             block_free(&blk);
             blocked = true;
             blocked_h = h;

@@ -20,6 +20,8 @@
 #include <stdint.h>
 
 typedef struct sqlite3 sqlite3;
+struct block;
+struct block_index;
 
 /* Conservative free-space floor a first-run/continuing index backfill requires
  * before it writes new rows. A full historical fold can add several GiB; a
@@ -51,6 +53,16 @@ bool index_fold_disk_ok(const char *index_id, const char *subsys,
  * A DB read error leaves any existing seed blocker untouched (fail-soft). */
 void index_fold_note_absent_body(const char *index_id, const char *subsys,
                                      sqlite3 *db, int64_t absent_height);
+
+/* Read the body a projection fold needs at height `h`. Genesis is the one
+ * height no node stores: the loader marks it BLOCK_HAVE_DATA without writing
+ * it, so a from-genesis fold wedged on h=0 forever. Its coinbase is
+ * unspendable and indexed by no reference client, so an unreadable genesis
+ * returns true with an EMPTY block and folds zero rows (the op_return_index
+ * fold already does this). Any other unreadable height returns false.
+ * *blk is initialized on every return; the caller frees it. */
+bool index_fold_read_body(struct block *blk, const struct block_index *bi,
+                          int64_t h, const char *datadir);
 
 /* Clear the "<index_id>.below_snapshot_seed" blocker (the fold advanced or
  * caught up to H*). No-op if not set. */

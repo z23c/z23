@@ -142,7 +142,7 @@ static int tx_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
         struct block_index *bi = active_chain_at(&ms->chain_active, (int)h);
         struct block blk;
         block_init(&blk);
-        if (!bi || !read_block_from_disk_index_pread(&blk, bi, datadir)) {
+        if (!index_fold_read_body(&blk, bi, h, datadir)) {
             block_free(&blk);
             blocked = true;
             blocked_h = h;
@@ -151,8 +151,9 @@ static int tx_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
             index_fold_note_absent_body("txindex", "txindex", db, h);
             break;                          /* body absent — coverage floor */
         }
-        struct uint256 bh;
-        block_get_hash(&blk, &bh);
+        /* The indexed hash, not the body header: genesis folds an empty
+         * body (index_fold_read_body) whose header is blank. */
+        struct uint256 bh = *bi->phashBlock;
         int added = 0;
         bool put_ok = txindex_projection_put_block(db, &blk, (int)h, bh.data,
                                                    digest, &added);
