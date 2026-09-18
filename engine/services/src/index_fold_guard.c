@@ -185,6 +185,12 @@ static bool read_seed_floor(sqlite3 *db, int64_t *floor_out, bool *found)
     uint64_t v = 0;
     for (int i = 7; i >= 0; i--)
         v = (v << 8) | blob[i];              /* little-endian */
+    /* A floor at genesis is the from-genesis anchor tip_finalize declares on a
+     * fresh datadir, not a snapshot seed: nothing lies below it. Reading it as
+     * a seed told every fresh install that it "was seeded from a UTXO
+     * snapshot" and parked two indexes on an operator decision at h=0. */
+    if (v == 0)
+        return true;
     *floor_out = (int64_t)v;
     *found = true;
     return true;

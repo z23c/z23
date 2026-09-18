@@ -113,6 +113,26 @@ static void *ai_seed_lock_holder(void *arg)
     return NULL;
 }
 
+/* A fresh from-genesis datadir declares trusted base 0. That is not a
+ * snapshot seed: a missing genesis body is an IBD gap, never a pre-seed hole
+ * needing an operator decision. */
+static int ai_genesis_base_is_no_seed(sqlite3 *db)
+{
+    int failures = 0;
+    uint8_t zero[8] = {0};
+    int64_t floor = 7;
+    AI_CHECK("write trusted_base_height=0",
+             progress_meta_set(progress_store_db(),
+                               REDUCER_TRUSTED_BASE_HEIGHT_KEY,
+                               zero, sizeof(zero)));
+    index_fold_note_absent_body("address_index", "address_index", db, 0);
+    AI_CHECK("genesis trusted base raises no seed blocker",
+             !blocker_exists("address_index.below_snapshot_seed"));
+    AI_CHECK("genesis trusted base is no seed floor",
+             !index_fold_snapshot_seed_floor(&floor) && floor == -1);
+    return failures;
+}
+
 int test_address_index(void);
 int test_address_index(void)
 {
@@ -477,6 +497,8 @@ int test_address_index(void)
         index_fold_note_absent_body("address_index", "address_index", db, 0);
         AI_CHECK("no seed blocker without a snapshot seed",
                  !blocker_exists("address_index.below_snapshot_seed"));
+
+        failures += ai_genesis_base_is_no_seed(db);
 
         /* Install a snapshot-seed floor at height 1000. */
         {
