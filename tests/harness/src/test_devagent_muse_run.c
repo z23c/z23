@@ -767,7 +767,11 @@ static int mr_pass_facts(const struct mr_dirs *d)
     MR_CHECK("pass evidence", ftext &&
         strstr(ftext, "\"verdict\":\"pass\"") &&
         strstr(ftext, "\"candidate\":\"") &&
-        strstr(ftext, "\"verdict\":\"SUITE VERDICT"));
+        strstr(ftext, "\"verdict\":\"SUITE VERDICT") &&
+        strstr(ftext, "\"build\":{\"target\":\"test_parallel\","
+            "\"spawn\":\"exit=0\"") &&
+        strstr(ftext, "\"runner_sha3\":\"") &&
+        !strstr(ftext, "\"runner_sha3\":\"none\""));
     /* (a) The changed paths ARE the proof that the scope was respected:
      * a measured clean pre-state, and the turn's own in-scope path named
      * in the evidence with nothing outside. */
@@ -1524,6 +1528,81 @@ static int mr_exec_gate_build_fails(void)
     return failures;
 }
 
+/* One build-outcome case: the lane's gate build runs `recipe`, and the
+ * prebuilt runner would still print a passing verdict. Whatever the build
+ * did, the run is refused by name, the runner is never consulted and no
+ * runner identity is published. */
+static int mr_exec_build_refused(const char *label, const char *recipe,
+    int gate_ms, const char *named)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    struct muse_run_budgets b;
+    char err[MUSE_RUN_ERROR_MAX] = {0};
+    char *evidence = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    memset(&b, 0, sizeof(b));
+    b.turn_timeout_ms = 30000;
+    b.gate_timeout_ms = gate_ms;
+    s_mr_make_recipe = recipe;
+    MR_CHECK(label, mr_execute(FAKE_JOURNEY, &d, mr_verdict_pass,
+        mr_head_pass, NULL, &mr_edit_in_scope, NULL, NULL, &b, false, &r,
+        err, &rc, &evidence) == 0);
+    s_mr_make_recipe = NULL;
+    MR_CHECK(label, rc == 1 && r.rc == 1 &&
+        strcmp(r.verdict, "refused") == 0);
+    MR_CHECK(label, strstr(r.reason, "gate build failed: test_parallel") &&
+        strstr(r.reason, named) && strstr(r.build_spawn, named));
+    MR_CHECK(label, r.gate_normal == false && r.gate_present == false &&
+        r.gate_ran == -1 && strcmp(r.gate_runner, "none") == 0);
+    free(evidence);
+    return failures;
+}
+
+/* (m3) A build that OVERRUNS the gate deadline, and (m4) a build whose
+ * make is killed by a signal (the shape an OOM kill takes), are named
+ * non-passes exactly like a compile error. */
+static int mr_exec_gate_build_outcomes(void)
+{
+    int failures = 0;
+    failures += mr_exec_build_refused("build-timeout", "\t@sleep 30\n",
+        400, "timeout");
+    failures += mr_exec_build_refused("build-killed",
+        "\t@kill -9 $$PPID; sleep 5\n", 60000, "exit=137");
+    return failures;
+}
+
+/* (m5) The build REPLACES the runner. The prebuilt runner says pass; the
+ * one rebuilt from the candidate says the group failed. The gate judges
+ * the rebuilt bytes, never the stale ones, and the evidence names them. */
+static int mr_exec_gate_rebuilt_runner(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char err[MUSE_RUN_ERROR_MAX] = {0};
+    char *evidence = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    s_mr_make_recipe = "\t@printf '#!/bin/sh\\necho \"%s\"\\n' "
+        "'SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+        "groups_cached=0 groups_gated=1 groups_failed=1 self_skips=0 "
+        "env_unobserved=0 toolkey=abc123' > build/bin/test_parallel\n";
+    MR_CHECK("rebuilt run", mr_execute(FAKE_JOURNEY, &d, mr_verdict_pass,
+        mr_head_pass, NULL, &mr_edit_in_scope, NULL, NULL, NULL, false,
+        &r, err, &rc, &evidence) == 0);
+    s_mr_make_recipe = NULL;
+    MR_CHECK("rebuilt runner judged", rc == 1 && r.rc == 1 &&
+        strcmp(r.verdict, "failed") == 0 && r.gate_normal &&
+        r.gate_failed == 1);
+    MR_CHECK("rebuilt build named", strcmp(r.build_spawn, "exit=0") == 0 &&
+        r.build_ms >= 0 && strlen(r.gate_runner) == 64);
+    free(evidence);
+    return failures;
+}
+
 /* (n) The gate runner OVERRUNS ITS DEADLINE with passing-looking output
  * already in the pipe. A killed process proves nothing about the suite it
  * was still running, so the deadline is a refusal in its own right and is
@@ -1562,6 +1641,16 @@ static int mr_exec_gate_timeout(void)
     return failures;
 }
 
+/* The pass binds the rebuilt runner's bytes beside the candidate. */
+static int mr_pass_build(const struct muse_run_result *r)
+{
+    int failures = 0;
+    MR_CHECK("pass build bound", strcmp(r->build_spawn, "exit=0") == 0 &&
+        r->build_ms >= 0 && strlen(r->gate_runner) == 64 &&
+        strspn(r->gate_runner, "0123456789abcdef") == 64);
+    return failures;
+}
+
 /* Passing gate plus a real diff: pass, rc 0, full contract. */
 static int mr_exec_pass(void)
 {
@@ -1591,6 +1680,7 @@ static int mr_exec_pass(void)
         strcmp(r.base, r.head_observed) == 0);
     MR_CHECK("pass gate exited normally", r.gate_normal &&
         r.gate_exit == 0 && strcmp(r.gate_spawn, "exit=0") == 0);
+    failures += mr_pass_build(&r);
     failures += mr_pass_candidate(&d, &r);
     MR_CHECK("pass tokens", r.total_tokens == 15 &&
         r.input_tokens == 10 && r.output_tokens == 5);
@@ -2244,6 +2334,8 @@ static int mr_failures_execute(void)
     /* The gate's own process, not only the log it left behind. */
     failures += mr_exec_gate_exit_nonzero();
     failures += mr_exec_gate_build_fails();
+    failures += mr_exec_gate_build_outcomes();
+    failures += mr_exec_gate_rebuilt_runner();
     failures += mr_exec_gate_timeout();
     /* The workspace goes back to its base once the change is durable. */
     failures += mr_failures_restore();

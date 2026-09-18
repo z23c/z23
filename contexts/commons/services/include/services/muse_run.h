@@ -194,6 +194,17 @@ struct muse_run_result {
     bool gate_normal;
     int gate_exit;
     char gate_spawn[64];
+    /* The gate BUILD, kept apart from the gate run. The runner is rebuilt
+     * from the candidate tree before the group runs, so the verdict binds
+     * three identities: the candidate (source), gate_runner (SHA3-256 hex
+     * of the exact runner bytes the build left and the gate then ran) and
+     * the gate reading. build_spawn names what the build process did
+     * ("none" until attempted), build_ms is its wall time (-1 until
+     * measured), and gate_runner stays "none" unless the build finished
+     * normally and the runner was read in full. */
+    char build_spawn[64];
+    long long build_ms;
+    char gate_runner[65];
     unsigned long long input_tokens;
     unsigned long long output_tokens;
     unsigned long long total_tokens;

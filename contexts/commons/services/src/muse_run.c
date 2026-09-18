@@ -8,10 +8,12 @@
 #include "services/muse_run_audit.h"
 #include "services/muse_run_restore.h"
 #include "services/muse_session.h"
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "engine/engine_verdict.h"
 #include "json/json.h"
 #include "platform/clock.h"
+#include "sha3/sha3.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
@@ -485,6 +487,32 @@ static bool mr_build_gate(const char *workspace, int timeout_ms,
     return mr_spawn_normal(o);
 }
 
+/* SHA3-256 hex of the runner the build left: the binary identity the
+ * verdict binds. False (and "none") when it cannot be read in full. */
+static bool mr_runner_identity(const char *workspace, char out[65])
+{
+    char path[8192];
+    unsigned char bytes[65536], digest[32];
+    struct sha3_256_ctx hash;
+    size_t got;
+    bool ok;
+    FILE *f;
+    (void)snprintf(out, 65, "none");
+    if (snprintf(path, sizeof(path), "%s/build/bin/test_parallel",
+            workspace) >= (int)sizeof(path))
+        return false;
+    f = fopen(path, "rb");
+    if (!f) return false;
+    sha3_256_init(&hash);
+    while ((got = fread(bytes, 1, sizeof(bytes), f)) > 0)
+        sha3_256_write(&hash, bytes, got);
+    ok = !ferror(f);
+    fclose(f);
+    sha3_256_finalize(&hash, digest);
+    if (ok) zcl_hex_encode(digest, sizeof(digest), out);
+    return ok;
+}
+
 /* Last SUITE VERDICT line, verbatim: same keep-last rule as the reader. */
 static void mr_last_verdict_line(const char *log, char *out, size_t cap)
 {
@@ -579,7 +607,9 @@ static void mr_write_facts(const struct muse_run_task *t,
         "\"measured\":%s},"
         "\"gate\":{\"name\":\"%s\",\"evidence\":\"%s\","
         "\"verdict\":\"%s\",\"present\":%s,\"ran\":%lld,\"failed\":%lld,"
-        "\"ms\":%lld,\"spawn\":\"%s\",\"exit\":%d,\"normal\":%s},"
+        "\"ms\":%lld,\"spawn\":\"%s\",\"exit\":%d,\"normal\":%s,"
+        "\"build\":{\"target\":\"%s\",\"spawn\":\"%s\",\"ms\":%lld,"
+        "\"runner_sha3\":\"%s\"}},"
         "\"tokens\":{\"input\":%llu,\"output\":%llu,\"total\":%llu},"
         "\"duration_ms\":%lld,\"wall_ms\":%lld,\"files_changed\":%lld,"
         "\"scope_audit\":{\"pre_measured\":%s,\"pre_clean\":%s,"
@@ -602,6 +632,7 @@ static void mr_write_facts(const struct muse_run_task *t,
         esc_verdict, r->gate_present ? "true" : "false",
         r->gate_ran, r->gate_failed, r->gate_ms,
         esc_spawn, r->gate_exit, r->gate_normal ? "true" : "false",
+        MR_GATE_BUILD_TARGET, r->build_spawn, r->build_ms, r->gate_runner,
         r->input_tokens, r->output_tokens, r->total_tokens,
         r->duration_ms, r->wall_ms, r->files_changed,
         r->scope_pre_measured ? "true" : "false",
@@ -914,8 +945,13 @@ static bool mr_judge_build(struct mr_core *c, int *run_ms)
     char name[48];
     int64_t t0 = mr_monotonic_ms();
     int64_t spent;
-    if (!mr_build_gate(c->task->workspace, c->gate_timeout_ms, &spawn)) {
-        mr_spawn_outcome_name(&spawn, name, sizeof(name));
+    bool built = mr_build_gate(c->task->workspace, c->gate_timeout_ms,
+        &spawn);
+    spent = mr_monotonic_ms() - t0;
+    r->build_ms = (long long)spent;
+    mr_spawn_outcome_name(&spawn, name, sizeof(name));
+    (void)snprintf(r->build_spawn, sizeof(r->build_spawn), "%s", name);
+    if (!built) {
         (void)snprintf(r->gate_spawn, sizeof(r->gate_spawn), "build %s",
             name);
         r->gate_exit = spawn.exit_code;
@@ -923,7 +959,12 @@ static bool mr_judge_build(struct mr_core *c, int *run_ms)
             "gate build failed: %s %s", MR_GATE_BUILD_TARGET, name);
         return false;
     }
-    spent = mr_monotonic_ms() - t0;
+    if (!mr_runner_identity(c->task->workspace, r->gate_runner)) {
+        (void)snprintf(r->reason, sizeof(r->reason),
+            "gate build left no readable runner: %s",
+            MR_GATE_BUILD_TARGET);
+        return false;
+    }
     if (spent >= (int64_t)c->gate_timeout_ms) {
         (void)snprintf(r->gate_spawn, sizeof(r->gate_spawn), "timeout");
         (void)snprintf(r->reason, sizeof(r->reason),
@@ -1068,6 +1109,9 @@ static int mr_finish(struct mr_core *c, struct muse_session *s,
     /* No trustworthy gate status yet, and -1 is not a measured 0. */
     r->gate_exit = -1;
     (void)snprintf(r->gate_spawn, sizeof(r->gate_spawn), "none");
+    r->build_ms = -1;
+    (void)snprintf(r->build_spawn, sizeof(r->build_spawn), "none");
+    (void)snprintf(r->gate_runner, sizeof(r->gate_runner), "none");
     (void)snprintf(r->head_observed, sizeof(r->head_observed), "none");
     (void)snprintf(r->verdict, sizeof(r->verdict), "%s",
         mr_verdict_refused);
