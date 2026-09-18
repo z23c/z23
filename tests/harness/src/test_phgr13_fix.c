@@ -121,6 +121,7 @@ int test_phgr13_fix(void)
 
     if (!data) {
         printf("phgr13: sprout-verifying.key not found — SKIPPING\n");
+        printf("  SKIP (phgr13 real key) sprout-verifying.key absent; real-key checks not run\n");
         return 0;
     }
 
