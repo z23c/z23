@@ -2176,6 +2176,295 @@ _test_next:;
     return failures;
 }
 
+/* ── sessions[]: one row per coding-agent session ───────────────────────
+ *
+ * A session announces itself with a `note` row under ref presence-<ROLE>
+ * whose body is the strict presence.v1 line. Every mail row on a box says
+ * from=<unix user>, so the ROLE comes from the ref, never from `from`. */
+
+#define FMX_SHA256 \
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+/* A stamp `ago` seconds before now, shaped as the mail leaf stamps it. */
+static void fmx_ts_ago(long long ago, char *out, size_t cap)
+{
+    struct tm tm_utc;
+    time_t t = platform_time_wall_time_t() - (time_t)ago;
+    if (!platform_time_utc_tm(t, &tm_utc) ||
+        strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tm_utc) == 0)
+        fmx_fixture_fail("cannot format a past time");
+}
+
+/* One presence.v1 row for role on host, stamped `ago` seconds back. */
+static void fmx_seed_presence(const char *role, const char *host,
+                              long long ago, long long seq)
+{
+    char ts[32], body[768], ref[64];
+    fmx_ts_ago(ago, ts, sizeof(ts));
+    (void)snprintf(body, sizeof(body),
+                   "presence.v1; host=%s; session=sess-%s-1; pid=4242; "
+                   "started=2026-09-18T01:00:00Z; role=%s; observed=%s; "
+                   "task=fleet.steer sessions; phase=build; "
+                   "source=main@720a41afcf; binary_sha256=" FMX_SHA256
+                   "; workers=muse-%s; spend=1200",
+                   host, role, role, ts, role);
+    (void)snprintf(ref, sizeof(ref), "presence-%s", role);
+    fmx_seed_inbox("peer", ts, seq, "box-user", "*", "note", body, ref);
+}
+
+/* The sessions[] entry for role, or NULL. */
+static const struct json_value *fmx_session(const struct fmx_call *c,
+                                            const char *role)
+{
+    const struct json_value *arr = fmx_arr(c, "sessions");
+    size_t n = arr ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        const struct json_value *s = json_at(arr, i);
+        if (strcmp(fmx_wstr(s, "role"), role) == 0)
+            return s;
+    }
+    return NULL;
+}
+
+/* True when the whole serialized reply data contains needle. */
+static bool fmx_reply_has(const struct fmx_call *c, const char *needle)
+{
+    size_t len = json_write(&c->reply.data, NULL, 0);
+    char *buf = (char *)calloc(len + 1, 1);
+    bool hit;
+    if (!buf)
+        fmx_fixture_fail("cannot allocate the reply text");
+    (void)json_write(&c->reply.data, buf, len + 1);
+    hit = strstr(buf, needle) != NULL;
+    free(buf);
+    return hit;
+}
+
+/* True when the string array arr holds s. */
+static bool fmx_arr_has(const struct json_value *arr, const char *s)
+{
+    size_t n = arr && arr->type == JSON_ARR ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        const struct json_value *v = json_at(arr, i);
+        if (v && v->type == JSON_STR && strcmp(json_get_str(v), s) == 0)
+            return true;
+    }
+    return false;
+}
+
+static int fmx_t_sessions(void)
+{
+    int failures = 0;
+
+    TEST("steer: a fresh presence row is a live session with its fields") {
+        struct fmx_call b;
+        const struct json_value *s;
+        fmx_isolate("session_live");
+        fmx_prime_mail();
+        fmx_seed_presence("A", "box-a.lan", 30, 1);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        s = fmx_session(&b, "A");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fmx_wstr(s, "state"), "live");
+        ASSERT_STR_EQ(fmx_wstr(s, "format"), "presence.v1");
+        ASSERT_STR_EQ(fmx_wstr(s, "host"), "box-a.lan");
+        ASSERT_STR_EQ(fmx_wstr(s, "session"), "sess-A-1");
+        ASSERT(fmx_wint(s, "pid") == 4242);
+        ASSERT_STR_EQ(fmx_wstr(s, "started"), "2026-09-18T01:00:00Z");
+        ASSERT_STR_EQ(fmx_wstr(s, "task"), "fleet.steer sessions");
+        ASSERT_STR_EQ(fmx_wstr(s, "phase"), "build");
+        ASSERT_STR_EQ(fmx_wstr(s, "source"), "main@720a41afcf");
+        ASSERT_STR_EQ(fmx_wstr(s, "binary_sha256"), FMX_SHA256);
+        ASSERT(fmx_wint(s, "spend_tokens") == 1200);
+        ASSERT(fmx_wint(s, "age_s") >= 30 && fmx_wint(s, "age_s") < 900);
+        ASSERT(strlen(fmx_wstr(s, "last_observed_ts")) == 20);
+        ASSERT_STR_EQ(fmx_wstr(s, "observed_via"), "dev.agent.mail pull");
+        ASSERT(fmx_wint(s, "mail_seq") == 1);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a two-hour-old presence row is stale with its age") {
+        struct fmx_call b;
+        const struct json_value *s;
+        fmx_isolate("session_stale");
+        fmx_prime_mail();
+        fmx_seed_presence("B", "box-b.lan", 7200, 2);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        s = fmx_session(&b, "B");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fmx_wstr(s, "state"), "stale");
+        ASSERT(fmx_wint(s, "age_s") >= 7200);
+        ASSERT(strstr(fmx_wstr(s, "reason"), "older than") != NULL);
+        ASSERT_STR_EQ(fmx_wstr(s, "host"), "box-b.lan");
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: an expected role with no presence row reads UNKNOWN") {
+        struct fmx_call b;
+        const struct json_value *s;
+        fmx_isolate("session_absent");
+        fmx_prime_mail();
+        fmx_seed_presence("A", "box-a.lan", 30, 1);
+        fmx_seed_presence("E2", "box-e.lan", 30, 2);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_session(&b, "B") != NULL);
+        ASSERT(fmx_session(&b, "C") != NULL);
+        ASSERT(fmx_session(&b, "E2") != NULL);
+        s = fmx_session(&b, "D");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fmx_wstr(s, "state"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "format"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "host"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "pid"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "age_s"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "last_observed_ts"), "UNKNOWN");
+        ASSERT(fmx_int(&b, "sessions_total") == 5);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a malformed presence body leaves every field UNKNOWN") {
+        struct fmx_call b;
+        const struct json_value *s;
+        char ts[32];
+        fmx_isolate("session_malformed");
+        fmx_prime_mail();
+        fmx_ts_ago(10, ts, sizeof(ts));
+        fmx_seed_inbox("peer", ts, 3, "box-user", "*", "note",
+                       "PRESENCE C on box-c pid=12; host=box-c; ;;==;",
+                       "presence-C");
+        fmx_seed_inbox("peer", ts, 4, "box-user", "*", "note",
+                       "presence.v1;;; =x; host=; pid=12ab; started=yday; "
+                       "binary_sha256=XYZ; host",
+                       "presence-D");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        s = fmx_session(&b, "C");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fmx_wstr(s, "format"), "unparsed");
+        ASSERT_STR_EQ(fmx_wstr(s, "host"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "pid"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "session"), "UNKNOWN");
+        s = fmx_session(&b, "D");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fmx_wstr(s, "format"), "presence.v1");
+        ASSERT_STR_EQ(fmx_wstr(s, "host"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "pid"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "started"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "binary_sha256"), "UNKNOWN");
+        ASSERT(fmx_arr_has(json_get(s, "refused_fields"), "pid"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a credential-shaped presence value is never echoed") {
+        struct fmx_call b;
+        const struct json_value *s;
+        char ts[32];
+        fmx_isolate("session_secret");
+        fmx_prime_mail();
+        fmx_ts_ago(10, ts, sizeof(ts));
+        fmx_seed_inbox("peer", ts, 5, "box-user", "*", "note",
+                       "presence.v1; host=box-a.lan; "
+                       "session=Bearer ZZtopsecretZZ; "
+                       "task=sk-ant-api03-QQleakQQ; phase=hunter2password; "
+                       "source=0123456789abcdef0123456789abcdef; pid=77",
+                       "presence-A");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        s = fmx_session(&b, "A");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fmx_wstr(s, "host"), "box-a.lan");
+        ASSERT(fmx_wint(s, "pid") == 77);
+        ASSERT_STR_EQ(fmx_wstr(s, "session"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "task"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "phase"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "source"), "UNKNOWN");
+        ASSERT(fmx_arr_has(json_get(s, "refused_fields"), "session"));
+        /* Not in sessions[], and not in any change lead either. */
+        ASSERT(!fmx_reply_has(&b, "ZZtopsecretZZ"));
+        ASSERT(!fmx_reply_has(&b, "QQleakQQ"));
+        ASSERT(!fmx_reply_has(&b, "hunter2"));
+        ASSERT(!fmx_reply_has(&b, "0123456789abcdef0123456789abcdef"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a session links the Muse workers reporting its host") {
+        struct fmx_call b;
+        const struct json_value *s, *sp;
+        char now[32], old[32];
+        fmx_isolate("session_workers");
+        fmx_prime_mail();
+        fmx_seed_presence("A", "box-a.lan", 30, 1);
+        fmx_now_ts(now, sizeof(now));
+        fmx_ts_ago(60, old, sizeof(old));
+        /* muse-a stated its host in an older claim; its newest row is a
+         * result that names none, and the host still links it. */
+        fmx_seed_inbox("box-a", old, 7, "box-a", FMX_SENDER, "claim",
+                       "receiver=muse-a\\nstate=accepted\\nstage=running\\n"
+                       "host=box-a.lan\\n",
+                       "job-a");
+        fmx_seed_inbox("box-a", now, 8, "box-a", "*", "result",
+                       "ref=job-a\\nworker=muse-a\\ngate=pass\\nrc=0\\n"
+                       "tokens=1500\\n",
+                       "job-a");
+        fmx_seed_inbox("box-a", now, 9, "box-a", FMX_SENDER, "claim",
+                       "receiver=muse-a2\\nstate=accepted\\n"
+                       "host=box-a.lan\\nload1_centi=250\\n"
+                       "mem_avail_kib=4096\\n",
+                       "job-a2");
+        fmx_seed_inbox("box-f", now, 10, "box-f", FMX_SENDER, "claim",
+                       "receiver=muse-f\\nstate=accepted\\nhost=box-f.lan\\n",
+                       "job-f");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        s = fmx_session(&b, "A");
+        ASSERT(s != NULL);
+        ASSERT(fmx_arr_has(json_get(s, "workers"), "muse-a"));
+        ASSERT(fmx_arr_has(json_get(s, "workers"), "muse-a2"));
+        ASSERT(!fmx_arr_has(json_get(s, "workers"), "muse-f"));
+        ASSERT(fmx_wint(s, "load1_centi") == 250);
+        ASSERT(fmx_wint(s, "mem_avail_kib") == 4096);
+        ASSERT_STR_EQ(fmx_wstr(s, "disk_free_kib"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(s, "resources_from"), "muse-a2");
+        ASSERT_STR_EQ(fmx_wstr(fmx_worker(&b, "muse-a"), "host"),
+                      "box-a.lan");
+        /* B has no host: nothing links, resources unknown. */
+        s = fmx_session(&b, "B");
+        ASSERT(s != NULL);
+        ASSERT(json_size(json_get(s, "workers")) == 0);
+        ASSERT_STR_EQ(fmx_wstr(s, "load1_centi"), "UNKNOWN");
+        sp = json_get(&b.reply.data, "muse_spend");
+        ASSERT(sp != NULL);
+        ASSERT(fmx_wint(sp, "tokens_total") == 1500);
+        ASSERT_STR_EQ(fmx_wstr(sp, "reservations"), "UNKNOWN");
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 int test_fleet_steer(void);
 int test_fleet_steer(void)
 {
@@ -2202,6 +2491,7 @@ int test_fleet_steer(void)
     failures += fmx_t_receipt_tokens();
     failures += fmx_t_process_not_work();
     failures += fmx_t_large_history();
+    failures += fmx_t_sessions();
 
     /* No ASSERT lives in this function, so no goto needs the label: the
      * hook is always cleared on the single fall-through path. */

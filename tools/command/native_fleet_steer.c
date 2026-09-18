@@ -115,6 +115,18 @@
  * token usage comes from run receipts (queue outcomes locally, result
  * rows remotely) or stays null.
  *
+ * SESSIONS. `sessions` lists each coding-agent session (roles A, B, C, D
+ * always, plus any other presence-<ROLE> seen), apart from the resident
+ * Muse `workers`. Mail `from` is the box's Unix user, so a session is
+ * known only from its own `note` row under ref presence-<ROLE> carrying
+ * the strict presence.v1 line documented at the sessions section below.
+ * state is live within FMC_ALIVE_WINDOW_S of that row's ts, stale past it
+ * (with age_s), and UNKNOWN when no row exists; a missing or refused
+ * field is the string "UNKNOWN". Linked workers are named, never copied;
+ * `muse_spend` sums the workers' receipt tokens, and reservations stay
+ * UNKNOWN because no existing source records them. No body text reaches
+ * the brief except through the parsed, credential-screened whitelist.
+ *
  * STATE. <platform_state_root()>/steer (0700): grants.jsonl, sent.jsonl.
  * Single O_APPEND writes; revoke appends a superseding revoked row like
  * the mail ack cursor. Nothing here blocks on a peer or a model.
@@ -128,7 +140,8 @@
  * readable under a fresh grant.
  *
  * BOUNDS. brief changes[] default 25, max 100; agents/work/candidates 32;
- * blockers 16; workers 16 emitted of 64 tracked; the whole reply data is
+ * blockers 16; workers 16 emitted of 64 tracked; sessions 12 emitted of
+ * 16 tracked; the whole reply data is
  * trimmed (changes first) under FMC_REPLY_SOFT_BUDGET and budget_truncated
  * names every array that was cut; body leads 160 chars; send at most 8
  * items, body at most 2048 bytes each (under mail's own 4096 ceiling and
@@ -212,6 +225,10 @@
 #define FMC_ALIVE_WINDOW_S 900LL
 #define FMC_QUEUED_STALE_S 120LL
 #define FMC_REPLY_SOFT_BUDGET 49152u
+/* Sessions: A, B, C, D always, plus other presence-<label> roles, at most
+ * FMC_SESSION_TRACK tracked and FMC_SESSION_CAP emitted. */
+#define FMC_SESSION_TRACK 16u
+#define FMC_SESSION_CAP 12u
 
 /* ── failure (every error return logs context) ─────────────────────────── */
 
@@ -1327,6 +1344,7 @@ struct fmc_worker {
     char stage[24];
     char reason[96];
     char ws_ts[40];
+    char host_ts[40];
     char ws_selector[FMC_NAME_MAX + 1];
     char ws_head[72];
     char tok_ts[40];
@@ -1345,7 +1363,13 @@ struct fmc_roster {
     size_t untracked;
     char (*done)[FMC_REF_MAX + 1];
     size_t ndone;
+    struct fmc_session *ss;
+    size_t nss;
+    size_t ss_untracked;
 };
+
+static void fmc_sessions_seed(struct fmc_roster *ro);
+static size_t fmc_session_size(void);
 
 static bool fmc_roster_init(struct fmc_roster *ro)
 {
@@ -1354,13 +1378,17 @@ static bool fmc_roster_init(struct fmc_roster *ro)
                                             "fleet_steer.workers");
     ro->done = (char (*)[FMC_REF_MAX + 1])zcl_calloc(
         FMC_DONE_TRACK, FMC_REF_MAX + 1, "fleet_steer.done_refs");
-    return ro->w && ro->done;
+    ro->ss = (struct fmc_session *)zcl_calloc(
+        FMC_SESSION_TRACK, fmc_session_size(), "fleet_steer.sessions");
+    fmc_sessions_seed(ro);
+    return ro->w && ro->done && ro->ss;
 }
 
 static void fmc_roster_free(struct fmc_roster *ro)
 {
     free(ro->w);
     free(ro->done);
+    free(ro->ss);
     memset(ro, 0, sizeof(*ro));
 }
 
@@ -1427,6 +1455,20 @@ static void fmc_worker_ws(struct fmc_worker *e, const struct fmc_row *v)
     (void)snprintf(e->ws_ts, sizeof(e->ws_ts), "%.39s", v->ts);
 }
 
+/* Host from the newest row that states it. A result row names no host, so
+ * the identity keeps the host its newest answer stated; sessions[] links
+ * workers to a session by it. */
+static void fmc_worker_host(struct fmc_worker *e, const struct fmc_row *v)
+{
+    char host[FMC_NAME_MAX + 1];
+    if (!fmc_body_kv(v->body, "host", host, sizeof(host)))
+        return;
+    if (e->host_ts[0] && strcmp(v->ts, e->host_ts) <= 0)
+        return;
+    (void)snprintf(e->host, sizeof(e->host), "%s", host);
+    (void)snprintf(e->host_ts, sizeof(e->host_ts), "%.39s", v->ts);
+}
+
 /* Token usage from one result row. A "no-receipt" row states tokens=0 as
  * a placeholder (the run never produced a receipt), so it is not a known
  * cost and is skipped rather than summed as zero. */
@@ -1458,8 +1500,6 @@ static void fmc_worker_newest(struct fmc_worker *e, const struct fmc_row *v)
         e->stage[0] = '\0';
     if (!fmc_body_kv(v->body, "reason", e->reason, sizeof(e->reason)))
         e->reason[0] = '\0';
-    if (!fmc_body_kv(v->body, "host", e->host, sizeof(e->host)))
-        e->host[0] = '\0';
     e->load1 = fmc_body_int(v->body, "load1_centi");
     e->mem_kib = fmc_body_int(v->body, "mem_avail_kib");
     e->disk_kib = fmc_body_int(v->body, "disk_free_kib");
@@ -1482,6 +1522,7 @@ static void fmc_roster_note(struct fmc_roster *ro, const struct fmc_row *v)
     if (!e)
         return;
     fmc_worker_ws(e, v);
+    fmc_worker_host(e, v);
     fmc_worker_tokens(e, v);
     if (e->ts[0] && strcmp(v->ts, e->ts) <= 0)
         return;
@@ -1891,6 +1932,460 @@ static void fmc_workers_emit(struct json_value *data, struct fmc_roster *ro,
     json_free(&arr);
 }
 
+/* ── brief: agent sessions ───────────────────────────────────────────────
+ *
+ * workers[] is the resident Muse executors; sessions[] is the coding-agent
+ * SESSIONS (roles A, B, C, D, plus any other label seen) that steer them.
+ * Every box posts mail as its Unix user, so `from` names no role: a session
+ * is known ONLY from its own presence row, a `note` under ref
+ * presence-<ROLE> whose body is the strict presence.v1 line
+ *
+ *   presence.v1; host=H; session=S; pid=N; started=TS; role=R; observed=TS;
+ *   task=T; phase=P; source=SRC; binary_sha256=HEX64; workers=W1,W2;
+ *   spend=N
+ *
+ * Only that line is parsed; free text, unknown keys and values that fail
+ * their key's shape are ignored, and a value that looks like a credential
+ * (a bearer, an API-key prefix, a password or secret word, or any unbroken
+ * alphanumeric run of FMC_SECRET_RUN or more) is dropped and named in
+ * refused_fields, never echoed. The change lead of a presence row is
+ * replaced for the same reason: the body leaves this leaf only through
+ * the parsed whitelist. The newest row per role decides; state is live
+ * within FMC_ALIVE_WINDOW_S of that row's own ts, stale past it (with the
+ * age), and UNKNOWN with no row at all. Every missing field is the string
+ * "UNKNOWN", never empty and never 0. Linked workers are the workers[]
+ * names whose self-reported host equals the session's host, referenced by
+ * name only, and a session's resource headroom is the first such worker's
+ * reported load/memory/disk. */
+
+#define FMC_PRESENCE_REF "presence-"
+#define FMC_PRESENCE_TAG "presence.v1"
+#define FMC_ROLE_MAX 32u
+#define FMC_SESSION_VAL 97u
+#define FMC_SECRET_RUN 24u
+#define FMC_SESSION_LINKS 8u
+
+enum fmc_pv { FMC_PV_WORD, FMC_PV_TEXT, FMC_PV_INT, FMC_PV_TS,
+              FMC_PV_SHA256, FMC_PV_LIST };
+
+struct fmc_pkey {
+    const char *key;
+    const char *out;
+    enum fmc_pv kind;
+    size_t max;
+};
+
+static const struct fmc_pkey fmc_pkeys[] = {
+    {"host", "host", FMC_PV_WORD, 64},
+    {"session", "session", FMC_PV_WORD, 64},
+    {"pid", "pid", FMC_PV_INT, 10},
+    {"started", "started", FMC_PV_TS, 20},
+    {"role", "role_reported", FMC_PV_WORD, FMC_ROLE_MAX},
+    {"observed", "observed", FMC_PV_TS, 20},
+    {"task", "task", FMC_PV_TEXT, 96},
+    {"phase", "phase", FMC_PV_WORD, 32},
+    {"source", "source", FMC_PV_TEXT, 96},
+    {"binary_sha256", "binary_sha256", FMC_PV_SHA256, 64},
+    {"workers", "workers_reported", FMC_PV_LIST, 96},
+    {"spend", "spend_tokens", FMC_PV_INT, 18},
+};
+#define FMC_PKEYS (sizeof(fmc_pkeys) / sizeof(fmc_pkeys[0]))
+#define FMC_PKEY_HOST 0u
+
+struct fmc_session {
+    char role[FMC_ROLE_MAX + 1];
+    char ts[40];
+    char val[FMC_PKEYS][FMC_SESSION_VAL];
+    bool refused[FMC_PKEYS];
+    long long seq;
+    bool seen;
+    bool parsed;
+};
+
+static const char *const fmc_expected_roles[] = {"A", "B", "C", "D"};
+
+/* A presence row's role, or NULL when the row is not one. */
+static const char *fmc_presence_role(const struct fmc_row *v)
+{
+    size_t plen = sizeof(FMC_PRESENCE_REF) - 1;
+    if (strcmp(v->kind, "note") != 0 ||
+        strncmp(v->ref, FMC_PRESENCE_REF, plen) != 0)
+        return NULL;
+    return fmc_is_token(v->ref + plen, FMC_ROLE_MAX, false) ? v->ref + plen
+                                                            : NULL;
+}
+
+/* The session entry for role, created when absent (NULL once the table
+ * is full; the overflow is counted so sessions_total stays honest). */
+static struct fmc_session *fmc_session_entry(struct fmc_roster *ro,
+                                             const char *role)
+{
+    size_t i;
+    for (i = 0; ro->ss && i < ro->nss; i++) {
+        if (strcmp(ro->ss[i].role, role) == 0)
+            return &ro->ss[i];
+    }
+    if (!ro->ss || ro->nss >= FMC_SESSION_TRACK) {
+        ro->ss_untracked++;
+        return NULL;
+    }
+    memset(&ro->ss[ro->nss], 0, sizeof(ro->ss[0]));
+    (void)snprintf(ro->ss[ro->nss].role, FMC_ROLE_MAX + 1, "%s", role);
+    ro->ss[ro->nss].seq = -1;
+    return &ro->ss[ro->nss++];
+}
+
+static size_t fmc_session_size(void)
+{
+    return sizeof(struct fmc_session);
+}
+
+static void fmc_sessions_seed(struct fmc_roster *ro)
+{
+    size_t i;
+    for (i = 0; i < sizeof(fmc_expected_roles) / sizeof(fmc_expected_roles[0]);
+         i++)
+        (void)fmc_session_entry(ro, fmc_expected_roles[i]);
+}
+
+static bool fmc_pv_char_ok(char ch, enum fmc_pv kind)
+{
+    if (isalnum((unsigned char)ch) || strchr("._:@+-", ch))
+        return true;
+    if (kind == FMC_PV_LIST && ch == ',')
+        return true;
+    return kind == FMC_PV_TEXT && strchr(" /,#", ch) != NULL;
+}
+
+static bool fmc_all_hex(const char *s, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (!isxdigit((unsigned char)s[i]) || isupper((unsigned char)s[i]))
+            return false;
+    }
+    return true;
+}
+
+/* True when some unbroken alphanumeric run is long enough to be a key or
+ * a bearer. A 40-hex git commit id is the one exemption, and only where
+ * hex40_ok says the field names a source revision. */
+static bool fmc_has_secret_run(const char *s, bool hex40_ok)
+{
+    size_t i = 0, run;
+    while (s[i]) {
+        for (run = 0; isalnum((unsigned char)s[i + run]); run++)
+            ;
+        if (run >= FMC_SECRET_RUN &&
+            !(hex40_ok && run == 40 && fmc_all_hex(s + i, run)))
+            return true;
+        i += run ? run : 1;
+    }
+    return false;
+}
+
+/* True when s names a credential: a secret word anywhere, or a vendor
+ * key prefix at the start of a word. Case-insensitive. */
+static bool fmc_has_secret_word(const char *s)
+{
+    static const char *const words[] = {
+        "bearer", "password", "passwd", "secret", "apikey", "api_key",
+        "api-key", "authorization", "private_key", "privkey",
+    };
+    static const char *const prefixes[] = {
+        "sk-", "xai-", "gsk_", "ghp_", "gho_", "ghs_", "github_pat_",
+        "glpat-", "akia",
+    };
+    char low[FMC_SESSION_VAL];
+    size_t i, j;
+    for (i = 0; s[i] && i + 1 < sizeof(low); i++)
+        low[i] = (char)tolower((unsigned char)s[i]);
+    low[i] = '\0';
+    for (j = 0; j < sizeof(words) / sizeof(words[0]); j++) {
+        if (strstr(low, words[j]))
+            return true;
+    }
+    for (i = 0; low[i]; i++) {
+        if (i > 0 && isalnum((unsigned char)low[i - 1]))
+            continue;
+        for (j = 0; j < sizeof(prefixes) / sizeof(prefixes[0]); j++) {
+            if (strncmp(low + i, prefixes[j], strlen(prefixes[j])) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+/* One value against its key's shape. */
+static bool fmc_pv_ok(const struct fmc_pkey *k, const char *val, size_t n)
+{
+    size_t i;
+    if (n == 0 || n > k->max)
+        return false;
+    if (k->kind == FMC_PV_INT)
+        return fmc_digits(val, n);
+    if (k->kind == FMC_PV_TS)
+        return fmc_ts_shape_ok(val);
+    if (k->kind == FMC_PV_SHA256)
+        return n == 64 && fmc_all_hex(val, n);
+    for (i = 0; i < n; i++) {
+        if (!fmc_pv_char_ok(val[i], k->kind))
+            return false;
+    }
+    return !fmc_has_secret_word(val) &&
+           !fmc_has_secret_run(val, strcmp(k->key, "source") == 0);
+}
+
+/* One `key=value` segment. Unknown keys are ignored; the first stated
+ * value of a key wins; a value failing its shape is refused by name. */
+static void fmc_presence_pair(struct fmc_session *s, const char *seg,
+                              size_t len)
+{
+    char val[FMC_SESSION_VAL + 1];
+    const char *eq = memchr(seg, '=', len);
+    size_t klen, vlen, i;
+    if (!eq)
+        return;
+    klen = (size_t)(eq - seg);
+    vlen = len - klen - 1;
+    while (vlen > 0 && eq[vlen] == ' ')
+        vlen--;
+    for (i = 0; i < FMC_PKEYS; i++) {
+        if (strlen(fmc_pkeys[i].key) == klen &&
+            strncmp(seg, fmc_pkeys[i].key, klen) == 0)
+            break;
+    }
+    if (i == FMC_PKEYS || s->val[i][0] || s->refused[i])
+        return;
+    if (vlen >= sizeof(val)) {
+        s->refused[i] = true;
+        return;
+    }
+    memcpy(val, eq + 1, vlen);
+    val[vlen] = '\0';
+    if (fmc_pv_ok(&fmc_pkeys[i], val, vlen))
+        (void)snprintf(s->val[i], FMC_SESSION_VAL, "%s", val);
+    else
+        s->refused[i] = true;
+}
+
+/* Parse one body as presence.v1: the tag, then `; key=value` segments to
+ * the end of the first line. Anything else leaves every field UNKNOWN. */
+static void fmc_presence_parse(struct fmc_session *s, const char *body)
+{
+    size_t tlen = sizeof(FMC_PRESENCE_TAG) - 1;
+    const char *p = body + tlen;
+    memset(s->val, 0, sizeof(s->val));
+    memset(s->refused, 0, sizeof(s->refused));
+    s->parsed = strncmp(body, FMC_PRESENCE_TAG, tlen) == 0 &&
+                (body[tlen] == '\0' || body[tlen] == ';');
+    if (!s->parsed)
+        return;
+    while (*p == ';') {
+        size_t n;
+        p++;
+        while (*p == ' ')
+            p++;
+        n = strcspn(p, ";\r\n");
+        fmc_presence_pair(s, p, n);
+        p += n;
+    }
+}
+
+/* Fold one pulled row into the session table: the newest presence row
+ * per role decides (ties keep the first seen). */
+static void fmc_sessions_note(struct fmc_roster *ro, const struct fmc_row *v)
+{
+    const char *role = fmc_presence_role(v);
+    struct fmc_session *s;
+    if (!role)
+        return;
+    s = fmc_session_entry(ro, role);
+    if (!s || (s->seen && strcmp(v->ts, s->ts) <= 0))
+        return;
+    s->seen = true;
+    s->seq = v->seq;
+    (void)snprintf(s->ts, sizeof(s->ts), "%.39s", v->ts);
+    fmc_presence_parse(s, v->body);
+}
+
+/* A string, or "UNKNOWN" when empty. */
+static void fmc_put_known(struct json_value *o, const char *key,
+                          const char *s)
+{
+    (void)json_push_kv_str(o, key, s && s[0] ? s : "UNKNOWN");
+}
+
+/* A number, or "UNKNOWN" when negative (unknown). */
+static void fmc_put_known_int(struct json_value *o, const char *key,
+                              long long v)
+{
+    if (v >= 0)
+        (void)json_push_kv_int(o, key, v);
+    else
+        (void)json_push_kv_str(o, key, "UNKNOWN");
+}
+
+static const char *fmc_session_state(const struct fmc_session *s,
+                                     long long age, char *why, size_t cap)
+{
+    const char *state = "UNKNOWN";
+    if (!s->seen)
+        (void)snprintf(why, cap, "no note row under ref presence-%s in the "
+                       "mail this host pulls", s->role);
+    else if (age < 0)
+        (void)snprintf(why, cap, "%s",
+                       "presence row carries no parseable ts");
+    else if (age <= FMC_ALIVE_WINDOW_S)
+        (void)snprintf(why, cap, "presence row %llds old, within the "
+                       "%llds window", age, FMC_ALIVE_WINDOW_S);
+    else
+        (void)snprintf(why, cap, "presence row %llds old, older than the "
+                       "%llds window", age, FMC_ALIVE_WINDOW_S);
+    if (s->seen && age >= 0)
+        state = age <= FMC_ALIVE_WINDOW_S ? "live" : "stale";
+    if (s->seen && !s->parsed) {
+        size_t used = strlen(why);
+        (void)snprintf(why + used, cap - used, "%s",
+                       "; body is not a presence.v1 line, fields UNKNOWN");
+    }
+    return state;
+}
+
+/* The parsed whitelist, each field its value or "UNKNOWN". */
+static void fmc_session_fields(struct json_value *o,
+                               const struct fmc_session *s)
+{
+    struct json_value refused;
+    size_t i;
+    json_init(&refused);
+    json_set_array(&refused);
+    for (i = 0; i < FMC_PKEYS; i++) {
+        if (fmc_pkeys[i].kind == FMC_PV_INT)
+            fmc_put_known_int(o, fmc_pkeys[i].out,
+                              s->val[i][0] ? fmc_num(s->val[i],
+                                                     strlen(s->val[i]))
+                                           : -1);
+        else
+            fmc_put_known(o, fmc_pkeys[i].out, s->val[i]);
+        if (s->refused[i])
+            (void)fmc_push_distinct(&refused, fmc_pkeys[i].key, FMC_PKEYS);
+    }
+    (void)json_push_kv(o, "refused_fields", &refused);
+    json_free(&refused);
+}
+
+/* Workers on the session's host, by name only, and the first one's
+ * reported resource headroom; UNKNOWN when none reports it. */
+static void fmc_session_links(struct json_value *o,
+                              const struct fmc_session *s,
+                              const struct fmc_roster *ro)
+{
+    const char *host = s->val[FMC_PKEY_HOST];
+    const struct fmc_worker *res = NULL;
+    struct json_value names;
+    size_t i;
+    json_init(&names);
+    json_set_array(&names);
+    for (i = 0; host[0] && ro->w && i < ro->n; i++) {
+        const struct fmc_worker *e = &ro->w[i];
+        if (strcmp(e->host, host) != 0)
+            continue;
+        (void)fmc_push_distinct(&names, e->name, FMC_SESSION_LINKS);
+        if (!res && (e->load1 >= 0 || e->mem_kib >= 0 || e->disk_kib >= 0))
+            res = e;
+    }
+    (void)json_push_kv(o, "workers", &names);
+    json_free(&names);
+    fmc_put_known_int(o, "load1_centi", res ? res->load1 : -1);
+    fmc_put_known_int(o, "mem_avail_kib", res ? res->mem_kib : -1);
+    fmc_put_known_int(o, "disk_free_kib", res ? res->disk_kib : -1);
+    fmc_put_known(o, "resources_from", res ? res->name : "");
+}
+
+static void fmc_session_emit(struct json_value *arr,
+                             const struct fmc_session *s,
+                             const struct fmc_roster *ro, long long now)
+{
+    struct json_value o;
+    char why[160];
+    long long age = s->seen ? fmc_age_s(now, s->ts) : -1;
+    const char *state = fmc_session_state(s, age, why, sizeof(why));
+    json_init(&o);
+    json_set_object(&o);
+    (void)json_push_kv_str(&o, "role", s->role);
+    (void)json_push_kv_str(&o, "state", state);
+    (void)json_push_kv_str(&o, "reason", why);
+    fmc_put_known(&o, "format", s->seen ? (s->parsed ? FMC_PRESENCE_TAG
+                                                     : "unparsed")
+                                        : "");
+    fmc_session_fields(&o, s);
+    fmc_put_known(&o, "last_observed_ts", age >= 0 ? s->ts : "");
+    fmc_put_known_int(&o, "age_s", age);
+    fmc_put_known(&o, "observed_via", s->seen ? "dev.agent.mail pull" : "");
+    /* The pull merges the outbox and every inbox.<peer>.jsonl without
+     * naming a row's stream, so the file a row came from is not known
+     * here; the seq is the exact handle for fleet.steer.evidence. */
+    (void)json_push_kv_str(&o, "observed_stream", "UNKNOWN");
+    fmc_put_known_int(&o, "mail_seq", s->seq);
+    fmc_session_links(&o, s, ro);
+    (void)json_push_back(arr, &o);
+    json_free(&o);
+}
+
+/* Fleet Muse spend: the tokens the workers already report from their run
+ * receipts. No existing source records reservations, so they are
+ * UNKNOWN rather than a guessed zero. */
+static void fmc_spend_emit(struct json_value *data,
+                           const struct fmc_roster *ro)
+{
+    struct json_value o;
+    long long sum = 0, counted = 0, unknown = 0;
+    size_t i;
+    for (i = 0; ro->w && i < ro->n; i++) {
+        if (ro->w[i].tok_total < 0) {
+            unknown++;
+            continue;
+        }
+        sum += ro->w[i].tok_total;
+        counted++;
+    }
+    json_init(&o);
+    json_set_object(&o);
+    fmc_put_known_int(&o, "tokens_total", counted > 0 ? sum : -1);
+    (void)json_push_kv_bool(&o, "tokens_total_exact",
+                            unknown == 0 && ro->untracked == 0);
+    (void)json_push_kv_int(&o, "workers_counted", counted);
+    (void)json_push_kv_int(&o, "workers_without_receipt", unknown);
+    (void)json_push_kv_str(&o, "reservations", "UNKNOWN");
+    (void)json_push_kv_str(&o, "reason",
+                           "sum of workers[] tokens_total from run receipts; "
+                           "no existing source records Muse reservations");
+    (void)json_push_kv(data, "muse_spend", &o);
+    json_free(&o);
+}
+
+/* sessions[] plus its bound, after workers[] so the local worker's
+ * receipt tokens are filled before they are summed. */
+static void fmc_sessions_emit(struct json_value *data,
+                              const struct fmc_roster *ro, long long now)
+{
+    struct json_value arr;
+    size_t i;
+    json_init(&arr);
+    json_set_array(&arr);
+    for (i = 0; ro->ss && i < ro->nss && i < FMC_SESSION_CAP; i++)
+        fmc_session_emit(&arr, &ro->ss[i], ro, now);
+    (void)json_push_kv(data, "sessions", &arr);
+    (void)json_push_kv_int(data, "sessions_total",
+                           (long long)(ro->nss + ro->ss_untracked));
+    (void)json_push_kv_bool(data, "sessions_truncated",
+                            ro->nss + ro->ss_untracked > json_size(&arr));
+    (void)json_push_kv_str(data, "presence_format", FMC_PRESENCE_TAG);
+    json_free(&arr);
+    fmc_spend_emit(data, ro);
+}
+
 /* Push one bounded blocker string. */
 static void fmc_push_blocker(struct json_value *blockers, const char *b)
 {
@@ -1955,7 +2450,13 @@ static void fmc_row_change(struct json_value *changes, const struct fmc_row *v,
     bool queued = strcmp(state, "queued") == 0;
     json_init(&item);
     json_set_object(&item);
-    fmc_lead(v->body, lead, sizeof(lead));
+    /* A presence body leaves the brief only through sessions[]' parsed
+     * whitelist, so its raw lead is never echoed here. */
+    if (fmc_presence_role(v))
+        (void)snprintf(lead, sizeof(lead), "%s",
+                       "presence row; parsed fields in sessions[]");
+    else
+        fmc_lead(v->body, lead, sizeof(lead));
     if (json_push_kv_int(&item, "seq", v->seq) &&
         json_push_kv_str(&item, "from", v->from) &&
         json_push_kv_str(&item, "to", v->to) &&
@@ -2056,6 +2557,7 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
 {
     fmc_row_tally(c->agents, c->work, v);
     fmc_roster_note(c->ro, v);
+    fmc_sessions_note(c->ro, v);
     if (strcmp(v->kind, "directive") == 0 &&
         c->scanned < FMC_DIRECTIVE_SCAN) {
         c->scanned++;
@@ -2607,7 +3109,8 @@ static long long fmc_trim_member(struct json_value *data, const char *key)
 static void fmc_fit_budget(struct json_value *data)
 {
     static const char *const order[] = {
-        "changes", "workers", "candidates", "work", "agents", "blockers",
+        "changes", "workers", "candidates", "work", "agents", "sessions",
+        "blockers",
     };
     struct json_value trunc;
     size_t i;
@@ -2681,6 +3184,7 @@ static void fmc_brief_reply(struct zcl_command_reply *reply,
     (void)json_push_kv_str(&reply->data, "leaf", FMC_LEAF);
     (void)json_push_kv(&reply->data, "agents", &l->agents);
     fmc_workers_emit(&reply->data, ro, ec);
+    fmc_sessions_emit(&reply->data, ro, ec->now);
     (void)json_push_kv(&reply->data, "work", &l->work);
     (void)json_push_kv(&reply->data, "blockers", &l->blockers);
     (void)json_push_kv(&reply->data, "capacity", &l->capacity);
