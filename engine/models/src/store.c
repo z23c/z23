@@ -394,22 +394,30 @@ int db_store_order_list_recent(struct node_db *ndb,
 int db_store_order_list_pending_payments(struct node_db *ndb,
                                          struct db_store_pending_payment *out,
                                          size_t max,
-                                         int64_t min_created_at)
+                                         int64_t min_created_at,
+                                         int64_t after_id)
 {
     sqlite3_stmt *s = NULL;
     int count = 0;
 
     if (!ndb || !ndb->open || !out || max == 0)
         return 0;
+    /* A keyset page in id order. With no cursor and no ORDER BY the caller
+     * saw one arbitrary page (in practice the newest, through the
+     * (status, created_at DESC) index), so a paid order behind a page of
+     * newer unpaid ones was never scanned. */
     AR_PREPARE_RET(ndb, s,
             "SELECT o.id,o.payment_addr,o.amount_zatoshi,o.customer_addr,"
             "p.token_id,p.tokens_per_purchase "
             "FROM orders o JOIN products p ON o.product_id = p.id "
-            "WHERE o.status = ? AND o.created_at > ?",
+            "WHERE o.status = ? AND o.created_at > ? AND o.id > ? "
+            "ORDER BY o.id ASC LIMIT ?",
             0);
 
     AR_BIND_INT(s, 1, STORE_ORDER_PENDING);
     AR_BIND_INT(s, 2, min_created_at);
+    AR_BIND_INT(s, 3, after_id);
+    AR_BIND_INT(s, 4, (int64_t)max);
     AR_LIST_ROWS(s, out, max,
         out[count].id = AR_COL_INT(s, 0);
         AR_READ_STR(s, 1, out[count].payment_addr, sizeof(out[count].payment_addr));

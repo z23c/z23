@@ -430,7 +430,7 @@ int test_model_app(void)
                 fprintf(stderr, "store: order recent count mismatch\n");
                 ok = false;
             }
-            if (ok && db_store_order_list_pending_payments(&ndb, pending, 4, 0) != 0) {
+            if (ok && db_store_order_list_pending_payments(&ndb, pending, 4, 0, 0) != 0) {
                 fprintf(stderr, "store: pending payment count mismatch\n");
                 ok = false;
             }

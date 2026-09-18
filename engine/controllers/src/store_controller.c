@@ -609,6 +609,58 @@ int64_t store_confirmed_payment(struct node_db *ndb, const char *pay_addr,
                                            max_height);
 }
 
+/* Credit one pending order if its bound, confirmed payment covers it. */
+static void store_reconcile_pending_order(
+    struct node_db *ndb, const char *datadir,
+    const struct db_store_pending_payment *order, int64_t min_height)
+{
+    int64_t order_id = order->id;
+    const char *pay_addr = order->payment_addr;
+    const char *cust_addr = order->customer_addr;
+    const char *token_id = order->token_id;
+
+    if (!pay_addr[0] || !cust_addr[0] || !token_id[0])
+        return;
+
+    /* Credit only payments BOUND to THIS order — by the recovered Sapling
+     * memo ("ZCL23ORDER:<order_id>") for a shielded order, or by the
+     * one-time address itself for a transparent one. Either way an
+     * unrelated same-amount payment cannot satisfy this order, which the
+     * legacy address-only finder over a REUSED address would. */
+    int64_t received = store_confirmed_payment(ndb, pay_addr, order_id,
+                                               min_height);
+    if (received < order->amount_zatoshi)
+        return;
+
+    /* Payment confirmed — mint tokens FIRST, then update status.
+     * This ensures we never show "Tokens Sent" if mint failed.
+     * A mint failure is NOT terminal: the common cause is
+     * projection lag (the ZSLP ledger backfill has not folded the
+     * token's block yet, so the baton is not VALID — self-heals
+     * once the tip settles and the catchup projection advances),
+     * and a CONFIRMED payment must never strand an order as FAILED
+     * for a transient cause. Leave the order in the pending scan so
+     * the next cycle retries; the 1 h pending-scan window bounds
+     * retries for genuinely unmintable orders. */
+    if (!zslp_mint(datadir, token_id, cust_addr,
+                   (uint64_t)order->tokens_per_purchase)) {
+        printf("Store: order #%lld paid but mint not yet possible "
+               "(projection lag?) — retrying next scan for %s\n",
+               (long long)order_id, cust_addr);
+        fflush(stdout);
+        return;
+    }
+    if (!db_store_order_mark_paid(ndb, order_id, STORE_ORDER_SENT)) {
+        printf("Store: order #%lld payment processed but status "
+               "persist failed\n", (long long)order_id);
+        fflush(stdout);
+    }
+    printf("Store: order #%lld paid, minted %lld %s -> %s\n",
+           (long long)order_id, (long long)order->tokens_per_purchase,
+           token_id, cust_addr);
+    fflush(stdout);
+}
+
 /* Background payment processor — called periodically from boot.c.
  * Checks pending orders for payments, mints tokens when paid. */
 void store_process_payments_with_db(struct node_db *ndb,
@@ -616,65 +668,27 @@ void store_process_payments_with_db(struct node_db *ndb,
 {
     if (!ndb || !ndb->open || !datadir) return;
 
-    struct db_store_pending_payment pending_orders[64];
-    int pending_count = db_store_order_list_pending_payments(ndb,
-        pending_orders, sizeof(pending_orders) / sizeof(pending_orders[0]),
-        (int64_t)platform_time_wall_time_t() - 3600);
+    /* Require minimum 3 confirmations to prevent reorg-based double-spend
+     * (payment reversed but tokens already minted). */
+    int64_t min_height = db_store_chain_tip_height(ndb) - 3;
+    int64_t window_start = (int64_t)platform_time_wall_time_t() - 3600;
 
-    for (int i = 0; i < pending_count; ++i) {
-        int64_t order_id = pending_orders[i].id;
-        const char *pay_addr = pending_orders[i].payment_addr;
-        int64_t expected = pending_orders[i].amount_zatoshi;
-        const char *cust_addr = pending_orders[i].customer_addr;
-        const char *token_id = pending_orders[i].token_id;
-        int64_t tokens = pending_orders[i].tokens_per_purchase;
-
-        if (!pay_addr[0] || !cust_addr[0] || !token_id[0])
-            continue;
-
-        /* Credit only payments BOUND to THIS order — by the recovered Sapling
-         * memo ("ZCL23ORDER:<order_id>") for a shielded order, or by the
-         * one-time address itself for a transparent one. Either way an
-         * unrelated same-amount payment cannot satisfy this order, which the
-         * legacy address-only finder over a REUSED address would.
-         * Require minimum 3 confirmations to prevent reorg-based double-spend
-         * (payment reversed but tokens already minted). */
-        int64_t tip_height = db_store_chain_tip_height(ndb);
-        int64_t min_height = tip_height - 3; /* 3 confirmations */
-
-        int64_t received = store_confirmed_payment(ndb, pay_addr, order_id,
-                                                   min_height);
-
-        if (received >= expected) {
-            /* Payment confirmed — mint tokens FIRST, then update status.
-             * This ensures we never show "Tokens Sent" if mint failed.
-             * A mint failure is NOT terminal: the common cause is
-             * projection lag (the ZSLP ledger backfill has not folded the
-             * token's block yet, so the baton is not VALID — self-heals
-             * once the tip settles and the catchup projection advances),
-             * and a CONFIRMED payment must never strand an order as FAILED
-             * for a transient cause. Leave the order in the pending scan so
-             * the next cycle retries; the 1 h pending-scan window bounds
-             * retries for genuinely unmintable orders. */
-            bool mint_ok = zslp_mint(datadir, token_id, cust_addr,
-                                      (uint64_t)tokens);
-            if (!mint_ok) {
-                printf("Store: order #%lld paid but mint not yet possible "
-                       "(projection lag?) — retrying next scan for %s\n",
-                       (long long)order_id, cust_addr);
-                fflush(stdout);
-                continue;
-            }
-            if (!db_store_order_mark_paid(ndb, order_id, STORE_ORDER_SENT)) {
-                printf("Store: order #%lld payment processed but status "
-                       "persist failed\n", (long long)order_id);
-                fflush(stdout);
-            }
-            printf("Store: order #%lld paid, minted %lld %s -> %s\n",
-                   (long long)order_id, (long long)tokens,
-                   token_id, cust_addr);
-            fflush(stdout);
-        }
+    /* Visit EVERY pending order in the window, a page at a time. The pool
+     * admits STORE_ORDER_MAX_PENDING_GLOBAL rows; reading one fixed page
+     * stranded any paid order that sat behind a page of newer unpaid ones.
+     * The cursor strictly increases, so the walk ends. */
+    struct db_store_pending_payment page[64];
+    const size_t page_max = sizeof(page) / sizeof(page[0]);
+    int64_t after_id = 0;
+    for (;;) {
+        int n = db_store_order_list_pending_payments(ndb, page, page_max,
+                                                     window_start, after_id);
+        for (int i = 0; i < n; ++i)
+            store_reconcile_pending_order(ndb, datadir, &page[i],
+                                          min_height);
+        if (n <= 0 || (size_t)n < page_max)
+            break;
+        after_id = page[n - 1].id;
     }
 
     /* Bounded background sweep: reclaim unpaid orders old enough that

@@ -49,7 +49,11 @@
 #include "models/store_blob.h"
 #include "models/store_purchase.h"
 #include "models/wallet_tx.h"
+#include "platform/time_compat.h"
+#include "primitives/transaction.h"
+#include "controllers/sync_controller.h"
 #include "sapling/constants.h"
+#include "sapling/sapling.h"
 #include "sapling/sapling_prover.h"
 #include "services/store_buyer.h"
 #include "util/log_macros.h"
@@ -331,6 +335,182 @@ static bool tsb_remote_reuse_guarded(void)
         return false; /* a different purchase under the same id */
     row.stage = STORE_PURCHASE_PAID;
     return !store_buyer_remote_reuse_ok(&row, 7, 50000, true, hash);
+}
+
+/* Re-read a purchase and report whether the merchant has credited it. */
+static bool tsb_credited(const char *datadir, int64_t purchase_id,
+                         int64_t want_zatoshi)
+{
+    struct store_buyer_state state;
+    store_process_payments(datadir);
+    if (!store_buyer_refresh(datadir, purchase_id, &state).ok)
+        return false;
+    printf("[confirmed=%lld stage=%d] ", (long long)state.confirmed_zatoshi,
+           (int)state.purchase.stage);
+    return state.confirmed_zatoshi >= want_zatoshi &&
+           state.purchase.stage == STORE_PURCHASE_PAID &&
+           state.ready_to_collect;
+}
+
+/* The witnessed failure: a buyer pays P-1, then 1 zat, both to the order's
+ * one-time address and both carrying the order's memo. The matcher sums
+ * memo-bound notes, so the order must stay uncredited after the first note
+ * and be credited after the second. Anything else strands the buyer's money
+ * with no goods and no refusal. */
+static bool tsb_split_payment_credited(const char *datadir,
+                                       int64_t product_id)
+{
+    struct store_buyer_order split;
+    struct node_db ndb;
+    char split_out[640];
+    (void)snprintf(split_out, sizeof(split_out), "%s/split.bin", datadir);
+    if (!store_buyer_order(datadir, product_id, TSB_CUSTOMER, split_out,
+                           false, &split).ok || split.amount_zatoshi < 2)
+        return false;
+
+    bool ok = tsb_open(datadir, &ndb);
+    ok = ok && tsb_seed_note(&ndb, split.payment_addr, split.memo, 0x00,
+                             split.amount_zatoshi - 1, 97, 0x75);
+    if (ndb.open)
+        node_db_close(&ndb);
+    if (!ok || tsb_credited(datadir, split.purchase_id, 1)) {
+        printf("(underpaid P-1 was credited) ");
+        return false;
+    }
+
+    ok = tsb_open(datadir, &ndb);
+    ok = ok && tsb_seed_note(&ndb, split.payment_addr, split.memo, 0x00,
+                             1, 97, 0x76);
+    if (ndb.open)
+        node_db_close(&ndb);
+    return ok && tsb_credited(datadir, split.purchase_id,
+                              split.amount_zatoshi);
+}
+
+/* Pay `value` to `addr` with the order memo as a REAL Sapling output (the
+ * production payer builder), then let the merchant wallet trial-decrypt it
+ * and persist the recovered note through the live sync writer — the same
+ * calls the tip-finalize block scan makes. No hand-filled note fields. */
+static bool tsb_pay_real_note(const char *datadir, const char *addr,
+                              const char *memo_text, uint64_t value,
+                              uint8_t tag)
+{
+    uint8_t d[ZC_DIVERSIFIER_SIZE], pk_d[32], ovk[32], memo[ZC_MEMO_SIZE];
+    uint8_t cv[32], cm[32], epk[32], proof[GROTH_PROOF_SIZE];
+    uint8_t enc[ZC_SAPLING_ENCCIPHERTEXT_SIZE];
+    uint8_t out[ZC_SAPLING_OUTCIPHERTEXT_SIZE];
+    struct transaction tx;
+    struct uint256 txid;
+    struct node_db ndb;
+    size_t before = tsb_merchant->num_sapling_notes;
+
+    memset(ovk, 0x5a, sizeof(ovk));
+    memset(memo, 0x00, sizeof(memo));
+    memcpy(memo, memo_text, strlen(memo_text));
+    memset(proof, 0, sizeof(proof));
+    if (!sapling_decode_payment_address(addr, d, pk_d) ||
+        !sapling_build_output_description(ovk, d, pk_d, value, memo, cv, cm,
+                                          epk, enc, out, proof, NULL))
+        return false;
+    transaction_init(&tx);
+    tx.version = 4;
+    tx.overwintered = true;
+    tx.value_balance = -(int64_t)value;
+    tx.v_shielded_output = zcl_calloc(1, sizeof(struct output_description),
+                                      "tsb_output_desc");
+    if (!tx.v_shielded_output)
+        return false;
+    tx.num_shielded_output = 1;
+    memcpy(tx.v_shielded_output[0].cv.data, cv, 32);
+    memcpy(tx.v_shielded_output[0].cm.data, cm, 32);
+    memcpy(tx.v_shielded_output[0].ephemeral_key.data, epk, 32);
+    memcpy(tx.v_shielded_output[0].enc_ciphertext, enc, sizeof(enc));
+    memcpy(tx.v_shielded_output[0].out_ciphertext, out, sizeof(out));
+    memset(&txid, tag, sizeof(txid));
+
+    bool ok = wallet_try_sapling_decrypt(tsb_merchant, &tx, &txid) == 1 &&
+              tsb_merchant->num_sapling_notes == before + 1 &&
+              tsb_open(datadir, &ndb);
+    if (ok) {
+        const struct sapling_received_note *rn =
+            &tsb_merchant->sapling_notes[before];
+        ok = node_db_sync_sapling_note(&ndb, txid.data, rn->output_index,
+                                       (int64_t)rn->value, rn->rcm, rn->memo,
+                                       ZC_MEMO_SIZE, rn->ivk, rn->diversifier,
+                                       rn->pk_d, rn->cm, rn->nf, 97);
+        node_db_close(&ndb);
+    }
+    transaction_free(&tx);
+    return ok;
+}
+
+/* The same split payment as tsb_split_payment_credited, but every note comes
+ * out of real note encryption and the merchant wallet's trial decrypt, so a
+ * 1-zat note, the memo decode and the address derivation are all the
+ * production ones. */
+static bool tsb_split_real_notes_credited(const char *datadir,
+                                          int64_t product_id)
+{
+    struct store_buyer_order split;
+    char split_out[640];
+    (void)snprintf(split_out, sizeof(split_out), "%s/split_real.bin",
+                   datadir);
+    if (!store_buyer_order(datadir, product_id, TSB_CUSTOMER, split_out,
+                           false, &split).ok || split.amount_zatoshi < 2)
+        return false;
+    if (!tsb_pay_real_note(datadir, split.payment_addr, split.memo,
+                           (uint64_t)split.amount_zatoshi - 1, 0x77) ||
+        tsb_credited(datadir, split.purchase_id, 1)) {
+        printf("(P-1 note not ingested, or credited while underpaid) ");
+        return false;
+    }
+    if (!tsb_pay_real_note(datadir, split.payment_addr, split.memo, 1,
+                           0x78)) {
+        printf("(1-zat note not ingested) ");
+        return false;
+    }
+    return tsb_credited(datadir, split.purchase_id, split.amount_zatoshi);
+}
+
+/* A fully paid order must be credited however many NEWER unpaid orders sit
+ * in the pending pool. The pool admits STORE_ORDER_MAX_PENDING_GLOBAL rows,
+ * so a reconcile that only looks at a fixed page of them strands every paid
+ * order outside that page: confirmed money, no goods, no refusal. */
+static bool tsb_paid_order_behind_full_page(const char *datadir,
+                                            int64_t product_id)
+{
+    struct store_buyer_order target;
+    struct node_db ndb;
+    char target_out[640];
+    (void)snprintf(target_out, sizeof(target_out), "%s/crowded.bin",
+                   datadir);
+    if (!store_buyer_order(datadir, product_id, TSB_CUSTOMER, target_out,
+                           false, &target).ok)
+        return false;
+
+    bool ok = tsb_open(datadir, &ndb);
+    ok = ok && tsb_seed_note(&ndb, target.payment_addr, target.memo, 0x00,
+                             target.amount_zatoshi, 97, 0x79);
+    /* 64 newer unpaid orders for the same product, still inside the scan
+     * window (the order-create gate would admit up to 200 per product). */
+    int64_t newer = (int64_t)platform_time_wall_time_t() + 1;
+    for (int i = 0; ok && i < 64; i++) {
+        struct db_store_order filler;
+        memset(&filler, 0, sizeof(filler));
+        filler.product_id = product_id;
+        (void)snprintf(filler.customer_addr, sizeof(filler.customer_addr),
+                       "%s", TSB_CUSTOMER);
+        (void)snprintf(filler.payment_addr, sizeof(filler.payment_addr),
+                       "%s", target.payment_addr);
+        filler.amount_zatoshi = target.amount_zatoshi;
+        filler.status = STORE_ORDER_PENDING;
+        filler.created_at = newer;
+        ok = db_store_order_save(&ndb, &filler);
+    }
+    if (ndb.open)
+        node_db_close(&ndb);
+    return ok && tsb_credited(datadir, target.purchase_id,
+                              target.amount_zatoshi);
 }
 
 int test_store_buyer(void)
@@ -722,6 +902,16 @@ int test_store_buyer(void)
             failures++;
         }
     }
+
+    /* ── 7b. A payment split across two memo-bound notes is credited ─── */
+    failures += tsb_report("a payment split P-1 + 1 is credited once whole",
+                           tsb_split_payment_credited(datadir, product_id));
+    failures += tsb_report("real decrypted notes P-1 + 1 are credited whole",
+                           tsb_split_real_notes_credited(datadir,
+                                                         product_id));
+    failures += tsb_report("a paid order behind 64 newer unpaid is credited",
+                           tsb_paid_order_behind_full_page(datadir,
+                                                           product_id));
 
     /* ── 8. Unknown ids are refused distinguishably ──────────────────── */
     printf("store_buyer: unknown product and purchase ids are named... ");

@@ -131,10 +131,14 @@ bool db_store_order_find_view(struct node_db *ndb, int64_t id,
                               struct db_store_order_view *out);
 int db_store_order_list_recent(struct node_db *ndb,
                                struct db_store_order_summary *out, size_t max);
+/* One page of pending orders created after `min_created_at`, in ascending
+ * id order, starting after `after_id` (0 for the first page). Pass the last
+ * returned id back to read the next page; a short page is the last one. */
 int db_store_order_list_pending_payments(struct node_db *ndb,
                                          struct db_store_pending_payment *out,
                                          size_t max,
-                                         int64_t min_created_at);
+                                         int64_t min_created_at,
+                                         int64_t after_id);
 bool db_store_order_mark_paid(struct node_db *ndb, int64_t id, int status);
 
 /* Total STORE_ORDER_PENDING rows currently in the table. Used by the
