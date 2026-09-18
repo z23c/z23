@@ -58,6 +58,7 @@
 #include "wallet/wallet.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -221,6 +222,69 @@ static long tsb_read_file(const char *path, uint8_t *buf, size_t cap)
     size_t n = fread(buf, 1, cap, f);
     fclose(f);
     return (long)n;
+}
+
+/* One pure case: prints its verdict, returns the failure count. */
+static int tsb_report(const char *what, bool ok)
+{
+    printf("store_buyer: %s... %s\n", what, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+/* A seller-supplied challenge is bounded and parsed strictly before the
+ * buyer spends any work on it. */
+static bool tsb_pow_params_bounded(void)
+{
+    static const struct { const char *ts, *bits; bool ok; } cases[] = {
+        { "1700000000", "26", true },  { "1700000000", "1", true },
+        { "1700000000", "27", false }, { "1700000000", "64", false },
+        { "1700000000", "0", false },  { "1700000000", "-1", false },
+        { "1700000000", "", false },   { "1700000000", "12x", false },
+        { "abc", "12", false },        { "", "12", false },
+        { "99999999999999999999", "12", false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int64_t ts = 0;
+        int bits = 0;
+        bool got = store_buyer_pow_params(cases[i].ts, cases[i].bits, &ts,
+                                          &bits);
+        if (got != cases[i].ok) {
+            printf("FAIL (ts=\"%s\" bits=\"%s\")\n", cases[i].ts,
+                   cases[i].bits);
+            return false;
+        }
+        if (got && (ts != 1700000000 || bits != atoi(cases[i].bits))) {
+            printf("FAIL (parsed %lld/%d)\n", (long long)ts, bits);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Only a true retry of an unpaid order may refresh a row whose remote order
+ * id comes back again. */
+static bool tsb_remote_reuse_guarded(void)
+{
+    struct db_store_purchase row;
+    uint8_t hash[32], other[32];
+    memset(&row, 0, sizeof(row));
+    memset(hash, 0x5a, sizeof(hash));
+    memset(other, 0xa5, sizeof(other));
+    row.id = 3;
+    row.product_id = 7;
+    row.amount_zatoshi = 50000;
+    row.has_content_hash = true;
+    memcpy(row.content_hash, hash, sizeof(hash));
+    row.stage = STORE_PURCHASE_CREATED;
+    if (!store_buyer_remote_reuse_ok(&row, 7, 50000, true, hash))
+        return false; /* same unpaid order retried */
+    if (store_buyer_remote_reuse_ok(&row, 8, 50000, true, hash) ||
+        store_buyer_remote_reuse_ok(&row, 7, 50001, true, hash) ||
+        store_buyer_remote_reuse_ok(&row, 7, 50000, true, other) ||
+        store_buyer_remote_reuse_ok(&row, 7, 50000, false, NULL))
+        return false; /* a different purchase under the same id */
+    row.stage = STORE_PURCHASE_PAID;
+    return !store_buyer_remote_reuse_ok(&row, 7, 50000, true, hash);
 }
 
 int test_store_buyer(void)
@@ -635,6 +699,14 @@ int test_store_buyer(void)
             failures++;
         }
     }
+
+    /* ── 9. A seller's proof-of-work ask is bounded before solving ───── */
+    failures += tsb_report("seller pow bits are bounded and strict",
+                           tsb_pow_params_bounded());
+
+    /* ── 10. A reused remote order id cannot rewrite a purchase ──────── */
+    failures += tsb_report("reused remote order id only refreshes a retry",
+                           tsb_remote_reuse_guarded());
 
     tsb_unwire_merchant();
     chain_params_select(CHAIN_MAIN);

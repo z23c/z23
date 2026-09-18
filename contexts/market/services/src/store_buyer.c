@@ -22,6 +22,7 @@
 #include "net/tor_integration.h" // shape-layer-ok:remote-buyer-rides-the-onion-fetch
 #include "util/safe_alloc.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -218,6 +219,41 @@ static bool sb_scrape_attr(const char *page, const char *attr,
     return true;
 }
 
+/* Parse and bound the seller-supplied proof-of-work parameters.
+ *
+ * Pure (no I/O, no solving) so tests can drive it directly. Both fields
+ * must be strict base-10 integers: empty, trailing junk, and out-of-range
+ * are refused. bits is additionally bounded by what the server can ever
+ * issue (1..PUZZLE_MAX_BITS); anything larger would send
+ * puzzle_solve_random into an effectively unbounded search on a hostile or
+ * broken seller's say-so. */
+static bool sb_strict_ll(const char *s, long long lo, long long hi,
+                         long long *out)
+{
+    char *end = NULL;
+    long long v;
+    if (!s || !s[0])
+        return false; // raw-return-ok:empty field is the refused-challenge outcome, named by the caller
+    errno = 0;
+    v = strtoll(s, &end, 10);
+    if (errno == ERANGE || end == s || *end != '\0' || v < lo || v > hi)
+        return false; // raw-return-ok:junk or out-of-range field is the refused-challenge outcome, named by the caller
+    *out = v;
+    return true;
+}
+
+bool store_buyer_pow_params(const char *ts_str, const char *bits_str,
+                            int64_t *ts, int *bits)
+{
+    long long ts_v, bits_v;
+    if (!ts || !bits || !sb_strict_ll(ts_str, INT64_MIN, INT64_MAX, &ts_v) ||
+        !sb_strict_ll(bits_str, 1, PUZZLE_MAX_BITS, &bits_v))
+        return false; // raw-return-ok:a seller challenge outside the bound refuses the order form; remotebuy names it
+    *ts = (int64_t)ts_v;
+    *bits = (int)bits_v;
+    return true;
+}
+
 /* Take from an already-fetched product page BOTH things the order form
  * carries: the CSRF token and the live proof-of-work challenge. One page,
  * because each render issues a fresh challenge — reading the two from
@@ -260,10 +296,8 @@ static bool sb_solve_order_form_page(const char *page,
         ParseHex(token_hex, token, sizeof(token)) != sizeof(token))
         return false;
 
-    ts = strtoll(ts_str, NULL, 10);
-    bits = (int)strtol(bits_str, NULL, 10);
-    if (bits <= 0)
-        return false;
+    if (!store_buyer_pow_params(ts_str, bits_str, &ts, &bits))
+        return false; // raw-return-ok:an unbounded or malformed seller challenge is refused like an unreadable form; remotebuy names the order-form failure
     if (!puzzle_solve_random(seed, token, ts, bits, &nonce))
         return false; // raw-return-ok:bounded PoW solve failure propagates to the command error body
 
@@ -671,10 +705,27 @@ static struct zcl_result sb_remote_post_order(const char *seller,
     return ZCL_OK;
 }
 
+bool store_buyer_remote_reuse_ok(const struct db_store_purchase *existing,
+                                 int64_t product_id, int64_t price_zatoshi,
+                                 bool has_content_hash,
+                                 const uint8_t *content_hash)
+{
+    if (!existing || existing->stage != STORE_PURCHASE_CREATED)
+        return false;
+    if (existing->product_id != product_id ||
+        existing->amount_zatoshi != price_zatoshi ||
+        existing->has_content_hash != has_content_hash)
+        return false;
+    return !has_content_hash ||
+           (content_hash && memcmp(existing->content_hash, content_hash,
+                                   sizeof(existing->content_hash)) == 0);
+}
+
 /* Step 4: record the buyer's side, scoped to THIS seller: merchant order ids
  * are per-merchant, so (seller_onion, order_id) is the idempotence key — a
- * second order for the same merchant order id updates the existing row
- * rather than minting a second obligation. */
+ * retry of the same unpaid order refreshes the existing row rather than
+ * minting a second obligation. Anything else reusing the id is refused
+ * before the row is touched (store_buyer_remote_reuse_ok). */
 static struct zcl_result sb_remote_record_purchase(const char *datadir,
                                                    const char *seller,
                                                    int64_t product_id,
@@ -697,6 +748,14 @@ static struct zcl_result sb_remote_record_purchase(const char *datadir,
     if (!db_store_purchase_find_by_order_seller(&ndb, seller, order_id,
                                                 purchase))
         memset(purchase, 0, sizeof(*purchase));
+    else if (!store_buyer_remote_reuse_ok(purchase, product_id, price_zatoshi,
+                                          has_content_hash, content_hash)) {
+        node_db_close(&ndb);
+        return SB_FAILF(STORE_BUYER_ERR_ORDER_CREATE_FAILED,
+                        "store_buyer: seller reused order id %lld for a "
+                        "different purchase (existing row %lld kept)",
+                        (long long)order_id, (long long)purchase->id);
+    }
 
     purchase->order_id = order_id;
     purchase->product_id = product_id;

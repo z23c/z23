@@ -149,6 +149,25 @@ struct zcl_result store_buyer_remote_order(const char *datadir,
                                            bool transparent,
                                            struct store_buyer_order *out);
 
+/* The seller's order form names its own proof-of-work challenge
+ * (data-pow-ts, data-pow-bits), so the buyer must bound it before solving:
+ * both are strict base-10 integers (no empty, trailing junk or overflow) and
+ * bits lies in 1..PUZZLE_MAX_BITS, the most a store ever issues. A seller
+ * asking for more would otherwise hold the buyer in an unbounded solve. */
+bool store_buyer_pow_params(const char *ts_str, const char *bits_str,
+                            int64_t *ts, int *bits);
+
+/* A remote seller's order id is its own counter, so a reset or hostile
+ * seller can hand back an id this buyer already holds. The existing row may
+ * be refreshed only by a true retry: still CREATED (nothing paid), same
+ * product, same price, same content hash. Anything else would rewrite a PAID
+ * or DELIVERED record into a description of some other purchase, so the
+ * remote order refuses by name and leaves the row as it was. */
+bool store_buyer_remote_reuse_ok(const struct db_store_purchase *existing,
+                                 int64_t product_id, int64_t price_zatoshi,
+                                 bool has_content_hash,
+                                 const uint8_t *content_hash);
+
 /* ── pay ────────────────────────────────────────────────────────────── */
 
 struct store_buyer_payment {
