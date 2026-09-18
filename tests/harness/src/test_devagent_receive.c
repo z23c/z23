@@ -885,6 +885,72 @@ _test_next:;
     rtx_restore();
     return failures;
 }
+
+/* The queued row's integer/string field for `ref`, read back through the
+ * queue's own status. -1 / "" when absent. */
+static long long rtx_queued_prio(const char *ref, char *dep, size_t cap)
+{
+    struct rtx_call c;
+    const struct json_value *arr;
+    long long prio = -1;
+    dep[0] = '\0';
+    rtx_begin(&c, "dev.agent.queue", "zcl.agent_queue.v1");
+    (void)json_push_kv_str(&c.input, "action", "status");
+    (void)json_push_kv_bool(&c.input, "json", true);
+    zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
+    arr = rtx_ok(&c) ? json_get(&c.reply.data, "queued") : NULL;
+    for (size_t i = 0; arr && arr->type == JSON_ARR && i < json_size(arr);
+         i++) {
+        const struct json_value *r = json_at(arr, i);
+        const char *n = r ? json_get_str(json_get(r, "name")) : NULL;
+        if (!n || strcmp(n, ref) != 0)
+            continue;
+        prio = json_get_int(json_get(r, "priority"));
+        (void)snprintf(dep, cap, "%s",
+                       json_get_str(json_get(r, "depends_on"))
+                           ? json_get_str(json_get(r, "depends_on")) : "");
+    }
+    rtx_end(&c);
+    return prio;
+}
+
+/* muse-priority and muse-depends-on reach the queue row the worker claims
+ * by (priority, seq) and dependency; a malformed one refuses by name. */
+static int test_receive_queue_order(void)
+{
+    int failures = 0;
+
+    TEST("muse-priority and muse-depends-on ride into the queue row")
+    {
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        char dep[96], ws[1200];
+        rtx_isolate("order");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "6666666666666666666666666666666666666666"));
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-ordered",
+            "muse-workspace: receiver\nmuse-scope: src/x.c\n"
+            "muse-gate: hex_codec\nmuse-priority: 1\n"
+            "muse-depends-on: job-parent\n\nOrdered.\n", 1));
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-badprio",
+            "muse-workspace: receiver\nmuse-scope: src/x.c\n"
+            "muse-gate: hex_codec\nmuse-priority: 7\n\nBad.\n", 2));
+        rtx_opts_ws(&o, ws);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(st.refused, 1);
+        ASSERT_EQ(rtx_queued_prio("job-ordered", dep, sizeof(dep)), 1);
+        ASSERT_STR_EQ(dep, "job-parent");
+        ASSERT_EQ(rtx_answers("job-badprio", "muse-priority"), 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-badprio"), 0);
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
 #endif /* !defined(_WIN32) */
 
 int test_devagent_receive(void);
@@ -894,6 +960,7 @@ int test_devagent_receive(void)
 
 #if !defined(_WIN32)
     failures += test_receive_intake_paging();
+    failures += test_receive_queue_order();
 
     TEST("a granted directive becomes one queue row and one accept")
     {

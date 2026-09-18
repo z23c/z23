@@ -29,10 +29,22 @@
  *   model    post only, optional model id, default picks flash until
  *            attempt 3, then the stronger model.
  *   attempt  post only, optional integer >= 1, default 1.
+ *   priority post only, optional integer 0..3 (P0 correctness/custody,
+ *            P1 node, P2 apps, P3 infrastructure), default 3.
+ *   depends_on post only, optional name: this row is READY only once an
+ *            outcome row completes that name under the closed predicate.
+ *            An unknown or unfinished dependency never unlocks it.
  *   json     status only, optional bool: with true the reply carries the
  *            structured shape only; otherwise screen carries the human
  *            rendering too.
  *   cwd      optional string: checkout root override for path checks.
+ *
+ * READY ORDER. claim and next take the READY queued row with the lowest
+ * (priority, seq): its depends_on dependency completed, and (claim only) the
+ * row's own name not already completed. Nothing else reorders work.
+ *
+ * BACKPRESSURE. post refuses QUEUE_FULL while DVQ_QUEUED_MAX rows are
+ * already queued, so an intake burst can never grow the ledger unbounded.
  *
  * STATE. <platform_state_root>/queue (0700): queue.jsonl (one JSON object
  * per line, O_APPEND single write, 0600), queue.lock (the short scheduler
@@ -121,6 +133,8 @@
 #define DVQ_TASK_CAP (128u * 1024u)
 #define DVQ_SNIPPET_CAP (32u * 1024u)
 #define DVQ_HARNESS_NAME "zclassic23-engine-unit"
+#define DVQ_QUEUED_MAX 64
+#define DVQ_PRIORITY_DEFAULT 3
 
 /* ── failure ───────────────────────────────────────────────────────────── */
 
@@ -480,7 +494,20 @@ struct dvq_row {
     char worktree[4096];
     char pid_or_unit[128];
     long long started;
+    long long priority; /* 0..3, P0 first */
+    char depends_on[80]; /* dependency name, "" for none */
 };
+
+/* The READY-order fields. Rows written before they existed carry neither:
+ * they read as P3 with no dependency, exactly the order they had. */
+static void dvq_parse_order(const char *line, struct dvq_row *r)
+{
+    if (!dvq_line_int(line, "priority", &r->priority) || r->priority < 0 ||
+        r->priority > 3)
+        r->priority = DVQ_PRIORITY_DEFAULT;
+    (void)dvq_line_str(line, "depends_on", r->depends_on,
+                       sizeof(r->depends_on));
+}
 
 static bool dvq_parse_row(const char *line, struct dvq_row *r)
 {
@@ -508,6 +535,7 @@ static bool dvq_parse_row(const char *line, struct dvq_row *r)
     (void)dvq_line_str(line, "pid_or_unit", r->pid_or_unit,
                        sizeof(r->pid_or_unit));
     (void)dvq_line_int(line, "started", &r->started);
+    dvq_parse_order(line, r);
     return true;
 }
 
@@ -516,7 +544,7 @@ static bool dvq_encode_row(const struct dvq_row *r, char *out, size_t cap,
 {
     char esc_kind[32], esc_name[160], esc_group[160], esc_path[1024];
     char esc_brief[8192], esc_model[320], esc_ts[128], esc_state[32];
-    char esc_wt[8192], esc_unit[256];
+    char esc_wt[8192], esc_unit[256], esc_dep[512];
     int w;
     if (!r || !out || cap == 0)
         return false;
@@ -531,15 +559,17 @@ static bool dvq_encode_row(const struct dvq_row *r, char *out, size_t cap,
         !dvq_escape(r->worktree, esc_wt, sizeof(esc_wt)) ||
         !dvq_escape(r->pid_or_unit, esc_unit, sizeof(esc_unit)))
         return false;
+    /* At most 79 bytes, 6x worst-case escaping: always fits esc_dep. */
+    (void)dvq_escape(r->depends_on, esc_dep, sizeof(esc_dep));
     w = snprintf(out, cap,
                  "{\"seq\":%lld,\"ts\":\"%s\",\"kind\":\"%s\",\"name\":\"%s\","
                  "\"group\":\"%s\",\"path\":\"%s\",\"brief\":\"%s\","
                  "\"model\":\"%s\",\"attempt\":%lld,\"state\":\"%s\","
                  "\"worktree\":\"%s\",\"pid_or_unit\":\"%s\","
-                 "\"started\":%lld}\n",
+                 "\"started\":%lld,\"priority\":%lld,\"depends_on\":\"%s\"}\n",
                  r->seq, esc_ts, esc_kind, esc_name, esc_group, esc_path,
                  esc_brief, esc_model, r->attempt, esc_state, esc_wt,
-                 esc_unit, r->started);
+                 esc_unit, r->started, r->priority, esc_dep);
     if (w <= 0 || (size_t)w >= cap)
         return false;
     if (len_out)
@@ -682,6 +712,64 @@ static bool dvq_resolve_brief(const struct zcl_command_request *req,
 
 /* ── post ──────────────────────────────────────────────────────────────── */
 
+/* The optional READY-order inputs. Absent keeps the P3/no-dependency
+ * default; a present value of the wrong shape is refused, never coerced. */
+static bool dvq_post_order(const struct zcl_command_request *req,
+                           const char *name, struct dvq_row *r,
+                           const char **why)
+{
+    const struct json_value *v = json_get(req->input, "priority");
+    const char *dep = dvq_str(req, "depends_on");
+    r->priority = DVQ_PRIORITY_DEFAULT;
+    if (v) {
+        if (v->type != JSON_INT || json_get_int(v) < 0 ||
+            json_get_int(v) > 3) {
+            *why = "input.priority is not an integer 0..3";
+            return false;
+        }
+        r->priority = json_get_int(v);
+    }
+    if (dep && dep[0]) {
+        if (!dvq_name_ok(dep) || strcmp(dep, name) == 0) {
+            *why = "input.depends_on is not another queue name";
+            return false;
+        }
+        (void)snprintf(r->depends_on, sizeof(r->depends_on), "%s", dep);
+    }
+    return true;
+}
+
+/* attempt, model and the READY-order inputs: each wrong shape refuses with
+ * its own message, and nothing is stored. */
+static bool dvq_post_scalars(const struct zcl_command_request *req,
+                             const char *name, const char *model,
+                             long long *attempt, struct dvq_row *r,
+                             const char **msg, const char **why)
+{
+    if (json_get(req->input, "attempt") && !dvq_attempt(req, attempt)) {
+        *msg = "attempt is an integer attempt number, 1 or more";
+        *why = "input.attempt has the wrong shape";
+        return false;
+    }
+    if (model && !dvq_model_ok(model)) {
+        *msg = "model is at most 128 model-id characters";
+        *why = "input.model misspelled";
+        return false;
+    }
+    *msg = "priority is 0..3 and depends_on names another queue row";
+    return dvq_post_order(req, name, r, why);
+}
+
+static size_t dvq_count_queued(const struct dvq_row *rows, size_t n)
+{
+    size_t queued = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(rows[i].state, "queued") == 0)
+            queued++;
+    }
+    return queued;
+}
+
 static void dvq_post(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
@@ -728,17 +816,13 @@ static void dvq_post(const struct zcl_command_request *req,
     path = dvq_str(req, "path");
     brief = dvq_str(req, "brief");
     model = dvq_str(req, "model");
-    if (json_get(req->input, "attempt") && !dvq_attempt(req, &attempt)) {
-        dvq_fail(reply, "BAD_INPUT", "post",
-                 "attempt is an integer attempt number, 1 or more",
-                 "input.attempt has the wrong shape");
-        return;
-    }
-    if (model && !dvq_model_ok(model)) {
-        dvq_fail(reply, "BAD_INPUT", "post",
-                 "model is at most 128 model-id characters",
-                 "input.model misspelled");
-        return;
+    memset(&r, 0, sizeof(r));
+    {
+        const char *msg = NULL, *why = NULL;
+        if (!dvq_post_scalars(req, name, model, &attempt, &r, &msg, &why)) {
+            dvq_fail(reply, "BAD_INPUT", "post", msg, why);
+            return;
+        }
     }
     if (strcmp(kind, "file") == 0 && (!group || !dvq_group_ok(group))) {
         dvq_fail(reply, "BAD_INPUT", "post",
@@ -752,7 +836,6 @@ static void dvq_post(const struct zcl_command_request *req,
                  "input.group misspelled");
         return;
     }
-    memset(&r, 0, sizeof(r));
     if (strcmp(kind, "doc") == 0 || strcmp(kind, "file") == 0) {
         if (!path || !dvq_path_ok(path)) {
             dvq_fail(reply, "BAD_INPUT", "post",
@@ -807,6 +890,14 @@ static void dvq_post(const struct zcl_command_request *req,
             if (rows[i].seq >= seq)
                 seq = rows[i].seq + 1;
         }
+    }
+    if (dvq_count_queued(rows, nrows) >= DVQ_QUEUED_MAX) {
+        free(rows);
+        dvq_unlock(lock);
+        dvq_fail(reply, "QUEUE_FULL", "post",
+                 "the queue already holds its bound of queued rows; retry "
+                 "after the worker drains it", qpath);
+        return;
     }
     free(rows);
     rows = NULL;
@@ -1346,6 +1437,34 @@ static bool dvq_name_completed(const char *opath, const char *name)
     return done;
 }
 
+/* THE READY PICK, shared by claim and next: the queued row with the
+ * lowest (priority, seq) whose depends_on dependency is completed. With
+ * skip_done, a row whose own name already completed is passed over and
+ * named in done_name. Returns the row index, or -1 when nothing is READY. */
+static long dvq_pick_ready(const struct dvq_row *rows, size_t n,
+                           const char *opath, bool skip_done,
+                           char *done_name)
+{
+    long best = -1;
+    for (size_t i = 0; i < n; i++) {
+        const struct dvq_row *r = &rows[i];
+        if (strcmp(r->state, "queued") != 0)
+            continue;
+        if (best >= 0 && (r->priority > rows[best].priority ||
+                          (r->priority == rows[best].priority &&
+                           r->seq > rows[best].seq)))
+            continue;
+        if (skip_done && dvq_name_completed(opath, r->name)) {
+            (void)snprintf(done_name, 80, "%s", r->name);
+            continue;
+        }
+        if (r->depends_on[0] && !dvq_name_completed(opath, r->depends_on))
+            continue;
+        best = (long)i;
+    }
+    return best;
+}
+
 /* rundir ends "/<name>/a<attempt>": create the name dir, then the run. */
 static bool dvq_claim_mkdir(const char *rundir)
 {
@@ -1487,15 +1606,12 @@ static int dvq_claim_take(const struct dvq_dirs *d, const char *qpath,
                  "cannot read the queue file", qpath);
         return -1;
     }
-    for (size_t i = 0; i < nrows && !have_pick; i++) {
-        if (strcmp(rows[i].state, "queued") != 0)
-            continue;
-        if (dvq_name_completed(opath, rows[i].name)) {
-            (void)snprintf(done_name, 80, "%s", rows[i].name);
-            continue;
+    {
+        long at = dvq_pick_ready(rows, nrows, opath, true, done_name);
+        if (at >= 0) {
+            *pick = rows[at];
+            have_pick = true;
         }
-        *pick = rows[i];
-        have_pick = true;
     }
     if (!have_pick) {
         free(rows);
@@ -1777,9 +1893,14 @@ static void dvq_next(const struct zcl_command_request *req,
                  "cannot read the queue file", qpath);
         return;
     }
-    for (size_t i = 0; i < nrows && !have_pick; i++) {
-        if (strcmp(rows[i].state, "queued") == 0) {
-            pick = rows[i];
+    {
+        char opath[4096 + 32], unused[80] = {0};
+        long at = -1;
+        if (snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", d.queue) <
+            (int)sizeof(opath))
+            at = dvq_pick_ready(rows, nrows, opath, false, unused);
+        if (at >= 0) {
+            pick = rows[at];
             have_pick = true;
         }
     }
@@ -1792,7 +1913,7 @@ static void dvq_next(const struct zcl_command_request *req,
         reply->exit_code = 0;
         return;
     }
-    /* Oldest queued row held under the lock; now find it a free warm
+    /* READY row held under the lock; now find it a free warm
      * worktree. Every probe below is a non-blocking local file op. */
     wt[0] = '\0';
     {
@@ -2454,6 +2575,8 @@ static bool dvq_push_queued(struct json_value *arr, const struct dvq_row *r)
          json_push_kv_str(&item, "kind", r->kind) &&
          json_push_kv_int(&item, "attempt", r->attempt) &&
          json_push_kv_str(&item, "ts", r->ts) &&
+         json_push_kv_int(&item, "priority", r->priority) &&
+         json_push_kv_str(&item, "depends_on", r->depends_on) &&
          json_push_back(arr, &item);
     json_free(&item);
     return ok;

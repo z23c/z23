@@ -62,6 +62,21 @@ static bool devagent_ledger_add_int(const char *path, const char *key,
     return true;
 }
 
+/* dev.agent.queue's post priority: `--priority=1` types as an integer. The
+ * handler owns the 0..3 range and refuses the rest by name; the transport
+ * admits only a small non-negative integer, scoped to this one leaf. */
+static bool devagent_queue_priority(const char *path, const char *key,
+                                    const struct json_value *value,
+                                    bool *type_ok)
+{
+    if (!path || strcmp(path, "dev.agent.queue") != 0 ||
+        strcmp(key, "priority") != 0)
+        return false;
+    *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
+              json_get_int(value) <= 1000;
+    return true;
+}
+
 /* dev.agent.queue's post attempt number: `--attempt=2` types as an integer,
  * so the default string branch would make the leaf uninvokable from a
  * shell while raw JSON worked. The handler owns the default (1) and the
@@ -304,6 +319,8 @@ bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
     if (devagent_receive_ints(path, key, value, type_ok))
         return true;
     if (devagent_ledger_add_int(path, key, value, type_ok))
+        return true;
+    if (devagent_queue_priority(path, key, value, type_ok))
         return true;
     if (devagent_bounded_positive_int(key, value, type_ok))
         return true;

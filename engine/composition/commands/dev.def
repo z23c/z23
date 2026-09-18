@@ -1917,8 +1917,10 @@ ZCL_COMMAND_DEV_COMMAND(
     "Post, dispatch, reap, and inspect async flash-unit runs without blocking",
     "One durable unit queue over the owner-private state root: post appends "
     "a row {seq, kind, name, group, path, brief, model, attempt} to "
-    "queue/queue.jsonl with a single O_APPEND write; next takes the oldest "
-    "queued row under a short flock, finds a warm worktree in queue/pool.txt "
+    "queue/queue.jsonl with a single O_APPEND write (refused QUEUE_FULL at "
+    "64 queued rows); next and claim take the READY queued row with the "
+    "lowest (priority 0..3, seq) whose depends_on row completed, under a "
+    "short flock; next finds a warm worktree in queue/pool.txt "
     "that is free, and launches the unit harness detached with the same "
     "argv the interim shell used; reap collects receipts newer than the "
     "reap stamp into queue/outcomes.jsonl and requeues a rate-limit refusal "
@@ -1928,7 +1930,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "It touches no network and never waits for a run.", 65536,
     "agent,queue,post,dispatch,reap,status,async,worktree,flash",
     "zcl.agent_queue_input.v1", "zcl.agent_queue.v1",
-    "action,kind,name,group,path,brief,model,attempt,json,cwd,worker,session",
+    "action,kind,name,group,path,brief,model,attempt,priority,depends_on,json,cwd,worker,session",
     "action",
     "z23 dev agent queue post --kind=leaf --name=situation",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,

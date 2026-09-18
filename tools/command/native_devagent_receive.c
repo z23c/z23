@@ -92,6 +92,8 @@
  *   muse-model: model-id                      (optional)
  *   muse-kind: file|doc                       (optional, default file)
  *   muse-sha: <7..40 hex>                      (optional HEAD pin)
+ *   muse-priority: 0|1|2|3                     (optional, default 3)
+ *   muse-depends-on: <ref>                     (optional dependency)
  *
  *   <prompt>
  *
@@ -1075,6 +1077,8 @@ struct rcv_direction {
     char model[160];
     char kind[8];
     char sha[65];         /* optional muse-sha pin, 7..40 lowercase hex */
+    char priority[4];     /* optional queue priority digit, "" = 3 */
+    char depends_on[80];  /* optional ref this work waits for */
     bool selector;        /* the workspace value is a logical selector */
     const char *prompt;   /* borrows the pulled row's body */
     char why[64];         /* refusal detail: a bare token, never a path */
@@ -1131,6 +1135,8 @@ static bool rcv_dir_header(const char *line, size_t len,
             {"model", d->model, sizeof(d->model)},
             {"kind", d->kind, sizeof(d->kind)},
             {"sha", d->sha, sizeof(d->sha)},
+            {"priority", d->priority, sizeof(d->priority)},
+            {"depends-on", d->depends_on, sizeof(d->depends_on)},
         };
         size_t i;
         for (i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
@@ -1169,7 +1175,23 @@ static bool rcv_dir_workspace_ok(struct rcv_direction *d)
     return false;
 }
 
-/* The three required fields plus the three optional ones. */
+/* The optional queue order: one priority digit 0..3 and a dependency ref
+ * in the queue's own name grammar. The queue re-checks both. */
+static bool rcv_dir_order_ok(struct rcv_direction *d)
+{
+    if (d->priority[0] && !(d->priority[1] == '\0' &&
+                            d->priority[0] >= '0' && d->priority[0] <= '3')) {
+        (void)snprintf(d->why, sizeof(d->why), "muse-priority");
+        return false;
+    }
+    if (d->depends_on[0] && !zcl_devagent_name_ok(d->depends_on)) {
+        (void)snprintf(d->why, sizeof(d->why), "muse-depends-on");
+        return false;
+    }
+    return true;
+}
+
+/* The three required fields plus the optional ones. */
 static bool rcv_dir_fields_ok(struct rcv_direction *d)
 {
     if (!d->workspace[0]) {
@@ -1195,6 +1217,8 @@ static bool rcv_dir_fields_ok(struct rcv_direction *d)
         (void)snprintf(d->why, sizeof(d->why), "muse-model");
         return false;
     }
+    if (!rcv_dir_order_ok(d))
+        return false;
     if (!d->kind[0])
         (void)snprintf(d->kind, sizeof(d->kind), "file");
     if (strcmp(d->kind, "file") != 0 && strcmp(d->kind, "doc") != 0) {
@@ -1475,9 +1499,11 @@ static long long rcv_queue_post(const char *ref, const struct rcv_direction *d,
     if (snprintf(input, sizeof(input),
                  "{\"action\":\"post\",\"kind\":\"%s\",\"name\":\"%s\","
                  "\"group\":\"%s\",\"path\":\"%s\",\"brief\":\"%s\","
-                 "\"model\":\"%s\"}",
+                 "\"model\":\"%s\",\"priority\":%c,\"depends_on\":\"%s\"}",
                  d->kind, ref, d->gate, d->scope, ebrief,
-                 d->model[0] ? d->model : "") >= (int)sizeof(input))
+                 d->model[0] ? d->model : "",
+                 d->priority[0] ? d->priority[0] : '3', d->depends_on) >=
+        (int)sizeof(input))
         return -1;
     rcv_sub_begin(&sub, "zcl.agent_queue.v1", "dev.agent.queue");
     if (sub.valid && rcv_sub_input(&sub, input)) {
