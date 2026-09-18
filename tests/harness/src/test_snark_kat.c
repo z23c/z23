@@ -156,6 +156,7 @@ int test_snark_kat(void)
             printf("  (the params blob is not vendored into the repo; the\n");
             printf("   real-VK pairing pin is unavailable on this host)\n");
             printf("Golden SNARK KAT: SKIPPED (params absent)\n");
+            printf("  SKIP (golden SNARK KAT) sapling-output.params absent; real-VK pairing pin not checked\n");
             return 0;
         }
 
