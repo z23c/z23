@@ -536,6 +536,121 @@ _test_next:;
     return failures;
 }
 
+/* One conversation is one page, and a reader keeps its place across
+ * restarts: ref/to filters, an acked next_since token resumed by `agent`,
+ * late arrivals, re-reads before ack, and per-source completeness. */
+static bool dvx_post_ref(const char *from, const char *to, const char *ref,
+                         const char *body)
+{
+    struct dvx_call c;
+    bool ok;
+    dvx_post(&c, from, to, "note", body);
+    (void)json_push_kv_str(&c.input, "ref", ref);
+    ok = dvx_run(&c) && dvx_ok(&c);
+    dvx_end(&c);
+    return ok;
+}
+
+static void dvx_pull_agent(struct dvx_call *c, const char *agent,
+                           const char *ref)
+{
+    dvx_begin(c);
+    (void)json_push_kv_str(&c->input, "action", "pull");
+    (void)json_push_kv_str(&c->input, "agent", agent);
+    if (ref)
+        (void)json_push_kv_str(&c->input, "ref", ref);
+}
+
+static bool dvx_ack_token(const char *agent, const char *token)
+{
+    struct dvx_call c;
+    bool ok;
+    dvx_begin(&c);
+    (void)json_push_kv_str(&c.input, "action", "ack");
+    (void)json_push_kv_str(&c.input, "agent", agent);
+    (void)json_push_kv_str(&c.input, "cursor", token);
+    ok = dvx_run(&c) && dvx_ok(&c);
+    dvx_end(&c);
+    return ok;
+}
+
+static bool dvx_sources_complete(const struct dvx_call *c, size_t want)
+{
+    const struct json_value *src = dvx_arr(c, "sources");
+    if (!src || src->num_children != want)
+        return false;
+    for (size_t i = 0; i < src->num_children; i++)
+        if (!json_get_bool(json_get(&src->children[i], "complete")))
+            return false;
+    return true;
+}
+
+static int test_mail_ref_filter_and_agent_resume(void)
+{
+    int failures = 0;
+    TEST("mail: ref/to filters page one thread; agent resumes an acked token") {
+        char token[4096];
+        char maildir[1024], path[1200];
+        struct dvx_call p;
+        dvx_isolate("ref_resume");
+        ASSERT(dvx_post_ref("B", "oauth", "thread-1", "one"));
+        ASSERT(dvx_post_ref("A", "B", "thread-2", "other"));
+        ASSERT(dvx_post_ref("B", "A", "thread-1", "two"));
+        dvx_import_stream("inbox.peer",
+            "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\","
+            "\"to\":\"oauth\",\"kind\":\"note\",\"body\":\"three\","
+            "\"ref\":\"thread-1\"}\n");
+        /* ref: only the thread, across both streams; to: only that peer. */
+        dvx_pull_agent(&p, "reader", "thread-1");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 3);
+        ASSERT_STR_EQ(dvx_str(&p, "resumed_from"), "start");
+        ASSERT(dvx_sources_complete(&p, 2));
+        (void)snprintf(token, sizeof(token), "%s", dvx_str(&p, "next_since"));
+        dvx_end(&p);
+        dvx_pull(&p, 0, NULL, NULL);
+        (void)json_push_kv_str(&p.input, "to", "oauth");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 2);
+        dvx_end(&p);
+        /* Ack the token; a fresh process (same agent, no since) sees nothing
+         * new, then exactly the late row, and re-sees it until it acks. */
+        ASSERT(dvx_ack_token("reader", token));
+        dvx_pull_agent(&p, "reader", "thread-1");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 0);
+        ASSERT_STR_EQ(dvx_str(&p, "resumed_from"), "agent");
+        dvx_end(&p);
+        dvx_import_append("inbox.peer",
+            "{\"seq\":2,\"ts\":\"2019-01-01T00:00:00Z\",\"from\":\"C\","
+            "\"to\":\"oauth\",\"kind\":\"note\",\"body\":\"late\","
+            "\"ref\":\"thread-1\"}\n");
+        for (int pass = 0; pass < 2; pass++) {
+            dvx_pull_agent(&p, "reader", "thread-1");
+            ASSERT(dvx_run(&p) && dvx_ok(&p));
+            ASSERT_EQ(dvx_int(&p, "count"), 1);
+            dvx_end(&p);
+        }
+        /* A stored cursor that is not one is refused by name, never
+         * silently read as "from the start". A path in a token is bad. */
+        dvx_maildir(maildir, sizeof(maildir));
+        (void)snprintf(path, sizeof(path), "%s/cursor.reader", maildir);
+        {
+            FILE *f = fopen(path, "w");
+            ASSERT(f && fputs("garbage\n", f) >= 0 && fclose(f) == 0);
+        }
+        dvx_pull_agent(&p, "reader", NULL);
+        ASSERT(dvx_run(&p) && !dvx_ok(&p));
+        ASSERT_STR_EQ(p.reply.error.code, "MAIL_CURSOR_STALE");
+        dvx_end(&p);
+        ASSERT(!dvx_ack_token("reader", "0|../outbox:1"));
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int test_mail_independent_cursor(void)
 {
     int failures = 0;
@@ -683,6 +798,7 @@ int test_devagent_mail(void)
 
     failures += test_mail_independent_cursor();
     failures += test_mail_paging();
+    failures += test_mail_ref_filter_and_agent_resume();
 #if !defined(_WIN32)
     failures += test_mail_cwd_invariance();
 #endif

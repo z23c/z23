@@ -37,12 +37,20 @@
  *           returned, which resumes exactly where that page stopped.
  *   from    post: optional sender name (default $BOARD_AGENT, then $USER,
  *           then "local"). pull: optional exact-match sender filter.
- *   cursor  ack only: required non-negative integer; also accepted as the
- *           second positional (`dev agent mail ack 42`). Accepts a numeric
- *           string for transports that type positionals loosely.
- *   agent   ack only: optional name owning the cursor file (default: the same
- *           identity post uses). Sanitized to [A-Za-z0-9._-] for the file.
- *   ref     post only, optional string linking a row (default "").
+ *   cursor  ack only: required. A non-negative integer (also as the second
+ *           positional, `dev agent mail ack 42`, or a numeric string for
+ *           transports that type positionals loosely), or a next_since
+ *           token, which is the only cursor that resumes a multi-stream
+ *           mail dir.
+ *   agent   ack: optional name owning the cursor file (default: the same
+ *           identity post uses). pull: when given WITHOUT since, the page
+ *           resumes from that agent's acked cursor (from the start when it
+ *           never acked), so a reader keeps one position across restarts
+ *           instead of re-walking the whole history. [A-Za-z0-9._-] only.
+ *   to      pull: optional exact-match recipient filter.
+ *   ref     post: optional string linking a row (default ""). pull:
+ *           optional exact-match filter, so one conversation is one page
+ *           rather than a walk over every row in the dir.
  *   sender_binding
  *           post only, optional: 32 lowercase hex stamping WHICH credential
  *           sent this row, written beside `from`. This leaf does not mint,
@@ -131,8 +139,11 @@
  *
  * OUTPUT (zcl.agent_mail.v1). Every reply names its own `leaf`. Post returns
  * the row fields plus `cursor` (the row's seq) and `outbox`. Pull returns
- * `rows` (array), `cursor`, `count`, `truncated`, `next_since`, `skipped`.
- * Ack returns `agent`, `cursor`.
+ * `rows` (array), `cursor`, `count`, `truncated`, `next_since`, `skipped`,
+ * `resumed_from` (since|agent|start) and `sources`: per stream,
+ * {stream, consumed, size, complete}. `cursor` is only the largest seq seen
+ * in ANY stream; it is not a fleet position, so completeness is per source.
+ * Ack returns `agent`, `cursor` (the integer or the token it stored).
  *
  * FAILURE. BAD_INPUT (missing/empty action, to, kind, body; unknown kind or
  * action; bad cursor/agent spelling), MAIL_BODY_TOO_LARGE, MAIL_REFUSED_*,
@@ -1071,7 +1082,10 @@ struct dvm_pull_filter {
     long long since;      /* seq floor: rows at or below it are not returned */
     const char *from;
     const char *kind;
+    const char *to;       /* exact recipient, or NULL */
+    const char *ref;      /* exact ref, or NULL */
     const char *token;    /* resume entries after "<floor>|", or NULL */
+    const char *resumed;  /* "since" | "agent" | "start": where paging began */
 };
 
 /* One *.jsonl stream under the mail dir, read from a byte offset. `off` is
@@ -1129,9 +1143,12 @@ static bool dvm_pull_parse_filter(const struct zcl_command_request *req,
 {
     const struct json_value *v;
     memset(filter, 0, sizeof(*filter));
+    filter->resumed = "start";
     if (!req || !req->input)
         return true;
     v = json_get(req->input, "since");
+    if (v)
+        filter->resumed = "since";
     if (v && !dvm_int(req, "since", &filter->since) &&
         !(v->type == JSON_STR && dvm_since_token(json_get_str(v), filter))) {
         dvm_fail(reply, "BAD_INPUT",
@@ -1141,6 +1158,8 @@ static bool dvm_pull_parse_filter(const struct zcl_command_request *req,
     }
     filter->from = dvm_str(req, "from");
     filter->kind = dvm_str(req, "kind");
+    filter->to = dvm_str(req, "to");
+    filter->ref = dvm_str(req, "ref");
     if (filter->kind && !dvm_is_kind(filter->kind)) {
         dvm_fail(reply, "BAD_INPUT",
                  "kind filter is one of need|claim|result|problem|note|"
@@ -1392,6 +1411,10 @@ static bool dvm_row_wanted(char *buf, const struct dvm_pull_filter *filter,
         return false;
     if (filter->from && strcmp(r->from, filter->from) != 0)
         return false;
+    if (filter->to && strcmp(r->to, filter->to) != 0)
+        return false;
+    if (filter->ref && strcmp(r->ref, filter->ref) != 0)
+        return false;
     return !filter->kind || strcmp(r->kind, filter->kind) == 0;
 }
 
@@ -1536,10 +1559,39 @@ static bool dvm_token_build(const struct dvm_pull_state *ps, long long floor,
     return true;
 }
 
+/* Per-source completeness: `cursor` is the largest seq seen in ANY stream,
+ * which says nothing about whether each peer's file was read to its end.
+ * Each source reports the bytes this page consumed against the file's size
+ * now; complete=false means rows (or a line still being written) remain. */
+static void dvm_pull_sources(struct zcl_command_reply *reply,
+                             const struct dvm_pull_state *ps)
+{
+    struct json_value arr, item;
+    json_init(&arr);
+    json_set_array(&arr);
+    for (size_t i = 0; i < ps->nstreams; i++) {
+        const struct dvm_stream *st = &ps->streams[i];
+        struct stat sb;
+        long long size = stat(st->path, &sb) == 0 ? (long long)sb.st_size
+                                                  : -1;
+        json_init(&item);
+        json_set_object(&item);
+        (void)json_push_kv_str(&item, "stream", st->name);
+        (void)json_push_kv_int(&item, "consumed", st->off);
+        (void)json_push_kv_int(&item, "size", size);
+        (void)json_push_kv_bool(&item, "complete",
+                                size >= 0 && st->off == size);
+        (void)json_push_back(&arr, &item);
+        json_free(&item);
+    }
+    (void)json_push_kv(&reply->data, "sources", &arr);
+    json_free(&arr);
+}
+
 static void dvm_pull_build_reply(struct zcl_command_reply *reply,
                                  const struct dvm_page *pg,
                                  const struct dvm_pull_state *ps,
-                                 const char *token)
+                                 const char *token, const char *resumed)
 {
     struct json_value arr, item;
     json_init(&arr);
@@ -1567,6 +1619,8 @@ static void dvm_pull_build_reply(struct zcl_command_reply *reply,
     (void)json_push_kv_bool(&reply->data, "truncated", pg->truncated);
     (void)json_push_kv_str(&reply->data, "next_since", token);
     (void)json_push_kv_int(&reply->data, "skipped", ps->skipped);
+    (void)json_push_kv_str(&reply->data, "resumed_from", resumed);
+    dvm_pull_sources(reply, ps);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
@@ -1601,6 +1655,69 @@ static bool dvm_streams_start(struct zcl_command_reply *reply,
     return true;
 }
 
+/* A cursor an agent may store: a scalar, or a next_since token. Tokens are
+ * "<digits>|<name>:<offset>,..." in the stream-name alphabet only, so a
+ * stored cursor can never smuggle a path or a newline into the file. */
+static bool dvm_cursor_text_ok(const char *s)
+{
+    struct dvm_pull_filter probe;
+    if (!s || !s[0] || strlen(s) >= DVM_TOKEN_CAP)
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (!isalnum((unsigned char)*p) && !strchr("._-:,|", *p))
+            return false;
+    }
+    if (!strchr(s, '|')) {
+        for (const char *p = s; *p; p++)
+            if (!isdigit((unsigned char)*p))
+                return false;
+        return true;
+    }
+    return dvm_since_token(s, &probe);
+}
+
+/* Pull with `agent` and no `since` resumes from that agent's acked cursor:
+ * the file ack wrote. Absent file = from the start. Returns false with a
+ * fail reply written when the stored text is not a cursor. `buf` owns the
+ * token the filter then points into. */
+static bool dvm_pull_resume_agent(const struct zcl_command_request *req,
+                                  struct zcl_command_reply *reply,
+                                  const char *maildir,
+                                  struct dvm_pull_filter *filter, char *buf,
+                                  size_t cap)
+{
+    const char *agent = dvm_str(req, "agent");
+    char path[DVM_PATH_CAP];
+    FILE *f;
+    size_t n;
+    if (!agent || json_get(req->input, "since"))
+        return true;
+    if (!dvm_cursor_name_ok(agent)) {
+        dvm_fail(reply, "BAD_INPUT", "agent names the cursor owner",
+                 "input.agent has an illegal spelling");
+        return false;
+    }
+    n = (size_t)snprintf(path, sizeof(path), "%s/cursor.%s", maildir, agent);
+    if (n == 0 || n >= sizeof(path) || !(f = fopen(path, "rb")))
+        return true; /* never acked: page from the start */
+    n = fread(buf, 1, cap - 1, f);
+    (void)fclose(f);
+    buf[n] = '\0';
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+        buf[--n] = '\0';
+    filter->resumed = "agent";
+    if (dvm_cursor_text_ok(buf) && !strchr(buf, '|')) {
+        filter->since = strtoll(buf, NULL, 10);
+        return true;
+    }
+    if (dvm_cursor_text_ok(buf) && dvm_since_token(buf, filter))
+        return true;
+    dvm_fail(reply, "MAIL_CURSOR_STALE",
+             "the agent's stored cursor is not a cursor; ack a fresh one",
+             agent);
+    return false;
+}
+
 static void dvm_pull(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply, const char *maildir)
 {
@@ -1608,7 +1725,10 @@ static void dvm_pull(const struct zcl_command_request *req,
     struct dvm_pull_state *ps;
     struct dvm_page pg;
     char token[DVM_TOKEN_CAP];
-    if (!dvm_pull_parse_filter(req, reply, &filter))
+    char stored[DVM_TOKEN_CAP];
+    if (!dvm_pull_parse_filter(req, reply, &filter) ||
+        !dvm_pull_resume_agent(req, reply, maildir, &filter, stored,
+                               sizeof(stored)))
         return;
     ps = (struct dvm_pull_state *)zcl_calloc(1, sizeof(*ps),
                                              "devagent_mail.pull");
@@ -1629,7 +1749,7 @@ static void dvm_pull(const struct zcl_command_request *req,
         if (pg.n > 1)
             qsort(pg.rows, pg.n, sizeof(*pg.rows), dvm_row_cmp);
         if (dvm_token_build(ps, filter.since, token, sizeof(token)))
-            dvm_pull_build_reply(reply, &pg, ps, token);
+            dvm_pull_build_reply(reply, &pg, ps, token, filter.resumed);
         else
             dvm_fail(reply, "MAIL_READ_FAILED",
                      "the resume token exceeds its bound", maildir);
@@ -1697,21 +1817,38 @@ static struct dvm_ack_write_result dvm_ack_write_cursor(
 }
 #endif
 
+/* The cursor to store: a scalar (*token = NULL) or a next_since token.
+ * False with a fail reply already written. */
+static bool dvm_ack_cursor(const struct zcl_command_request *req,
+                           struct zcl_command_reply *reply, long long *cursor,
+                           const char **token)
+{
+    *token = dvm_str(req, "cursor");
+    if (dvm_int(req, "cursor", cursor)) {
+        *token = NULL; /* a number, or a numeric string */
+        return true;
+    }
+    if (*token && strchr(*token, '|') && dvm_cursor_text_ok(*token))
+        return true;
+    dvm_fail(reply, "BAD_INPUT",
+             "ack needs a non-negative cursor or a next_since token",
+             "input.cursor missing or wrong shape");
+    return false;
+}
+
 static void dvm_ack(const struct zcl_command_request *req,
                     struct zcl_command_reply *reply, const char *maildir)
 {
-    long long cursor;
+    long long cursor = 0;
     char path[DVM_PATH_CAP];
     char tmp[DVM_PATH_CAP];
-    char text[64];
+    char text[DVM_TOKEN_CAP + 2];
     const char *agent;
     size_t len;
 
-    if (!dvm_int(req, "cursor", &cursor)) {
-        dvm_fail(reply, "BAD_INPUT", "ack needs a non-negative cursor",
-                 "input.cursor missing or wrong shape");
+    const char *token = NULL;
+    if (!dvm_ack_cursor(req, reply, &cursor, &token))
         return;
-    }
     agent = dvm_str(req, "agent");
     if (!agent)
         agent = dvm_identity(req, "from");
@@ -1728,7 +1865,8 @@ static void dvm_ack(const struct zcl_command_request *req,
         dvm_fail(reply, "MAIL_WRITE_FAILED", "cursor path exceeds its bound", maildir);
         return;
     }
-    len = (size_t)snprintf(text, sizeof(text), "%lld\n", cursor);
+    len = token ? (size_t)snprintf(text, sizeof(text), "%s\n", token)
+                : (size_t)snprintf(text, sizeof(text), "%lld\n", cursor);
     if (len == 0 || len >= sizeof(text)) {
         dvm_fail(reply, "BAD_INPUT", "cursor too large to record",
                  "format budget exceeded");
@@ -1746,7 +1884,10 @@ static void dvm_ack(const struct zcl_command_request *req,
     }
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
     (void)json_push_kv_str(&reply->data, "agent", agent);
-    (void)json_push_kv_int(&reply->data, "cursor", cursor);
+    if (token)
+        (void)json_push_kv_str(&reply->data, "cursor", token);
+    else
+        (void)json_push_kv_int(&reply->data, "cursor", cursor);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
