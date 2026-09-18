@@ -2646,6 +2646,116 @@ _test_next:;
     return failures;
 }
 
+/* 2026-09-18: fifteen directives to D sat in the gateway outbox and none
+ * reached the Windows box, because no transport leg reaches it. The only
+ * path D can reach is this surface over 443. These cases walk it with a
+ * D-labelled grant and nothing else: read the directive by ref, answer it
+ * under the SAME ref, and the origin must see the answer. */
+#define FMX_D_REF "d-probe-20260918-v1"
+
+struct fmx_d_reply {
+    char state[16];
+    char error[32];
+    bool duplicate;
+};
+
+/* One reply item from grant `gid` speaking as `from`; the item's outcome. */
+static struct fmx_d_reply fmx_d_send(const char *gid, const char *from,
+                                     const char *to,
+                                     const char *kind, const char *key)
+{
+    struct fmx_d_reply out = {"", "", false};
+    struct fmx_call s;
+    struct json_value items, item;
+    const struct json_value *row, *v;
+    json_init(&items);
+    json_set_array(&items);
+    fmx_item(&item, to, "challenge answered", FMX_D_REF, key);
+    (void)json_push_kv_str(&item, "kind", kind);
+    (void)json_push_back(&items, &item);
+    json_free(&item);
+    if (fmx_send_from(&s, gid, from, &items) && fmx_ok(&s)) {
+        row = json_at(fmx_arr(&s, "items"), 0);
+        (void)snprintf(out.state, sizeof(out.state), "%s",
+                       fmx_wstr(row, "state"));
+        (void)snprintf(out.error, sizeof(out.error), "%s",
+                       fmx_wstr(row, "error"));
+        v = row ? json_get(row, "duplicate") : NULL;
+        out.duplicate = v && v->type == JSON_BOOL && json_get_bool(v);
+    }
+    json_free(&items);
+    fmx_end(&s);
+    return out;
+}
+
+/* The origin's reading of the probe directive: its reply state. */
+static bool fmx_d_state_is(const char *ogid, const char *want,
+                           const char *by)
+{
+    struct fmx_call b;
+    const struct json_value *r;
+    bool ok;
+    fmx_brief(&b, ogid, 0);
+    ok = fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b);
+    r = ok ? fmx_reply(&b, "oauth", FMX_D_REF) : NULL;
+    ok = r && strcmp(fmx_wstr(r, "state"), want) == 0 &&
+         (!by || strcmp(fmx_wstr(r, "answered_by"), by) == 0);
+    fmx_end(&b);
+    return ok;
+}
+
+static int fmx_t_remote_round_trip(void)
+{
+    int failures = 0;
+
+    TEST("steer: a remote agent reads its directive and answers it through "
+        "the surface alone, once, and only to its origin") {
+        struct fmx_call e;
+        struct fmx_d_reply r;
+        char ogid[64], dgid[64], cgid[64];
+        long long rows;
+        fmx_isolate("remote_round_trip");
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", ogid,
+                           sizeof(ogid)));
+        ASSERT(fmx_mint_as("brief,send,evidence", "D", dgid, sizeof(dgid)));
+        ASSERT(fmx_mint_as("send", "C", cgid, sizeof(cgid)));
+        ASSERT(fmx_send_one(ogid, "oauth", "D", FMX_D_REF, "key-d-1") >= 1);
+        fmx_evidence(&e, dgid, "mail", FMX_D_REF);
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
+        ASSERT(fmx_ok(&e));
+        fmx_end(&e);
+        /* Wrong recipient: a result that is neither to the origin nor from
+         * the name the origin addressed does not answer. Neither does a
+         * kind outside the closed set. */
+        r = fmx_d_send(cgid, "C", "A", "result", "key-c-wrong");
+        ASSERT_STR_EQ(r.state, "queued");
+        r = fmx_d_send(dgid, "D", "oauth", "ack", "key-d-badkind");
+        ASSERT_STR_EQ(r.state, "refused");
+        ASSERT(fmx_d_state_is(ogid, "queued", NULL));
+        r = fmx_d_send(dgid, "D", "oauth", "result", "key-d-reply");
+        ASSERT_STR_EQ(r.state, "queued");
+        ASSERT(!r.duplicate);
+        ASSERT(fmx_d_state_is(ogid, "answered", "D"));
+        /* A retry reconciles and appends nothing; the same key under the
+         * other kind names a different delivery and is refused. */
+        rows = fmx_mail_count();
+        r = fmx_d_send(dgid, "D", "oauth", "result", "key-d-reply");
+        ASSERT(r.duplicate);
+        r = fmx_d_send(dgid, "D", "oauth", "directive", "key-d-reply");
+        ASSERT_STR_EQ(r.error, "IDEMPOTENCY_CONFLICT");
+        ASSERT_EQ(fmx_mail_count(), rows);
+        /* Every reading comes from the stores, so a fresh brief with no
+         * in-process state still sees the answer. */
+        ASSERT(fmx_d_state_is(ogid, "answered", "D"));
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* The worktree pool is measured only where pool.txt exists; an absent
  * file is an unmeasured pool, never an empty one. */
 static int fmx_t_pool_unmeasured(void)
@@ -2714,6 +2824,7 @@ int test_fleet_steer(void)
     failures += fmx_t_large_history();
     failures += fmx_t_sessions();
     failures += fmx_t_reply_correlation();
+    failures += fmx_t_remote_round_trip();
     failures += fmx_t_pool_unmeasured();
 
     /* No ASSERT lives in this function, so no goto needs the label: the

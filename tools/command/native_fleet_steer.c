@@ -780,7 +780,8 @@ const char *zcl_fleet_steer_grant_binding_live(const char *label,
 
 /* ── idempotency store ─────────────────────────────────────────────────── */
 
-/* Payload digest: FNV-1a/64 over to, body, ref, from with NUL separators.
+/* Payload digest: FNV-1a/64 over to, body, ref, from (and kind, for a
+ * result only) with NUL separators.
  * An equality check for reconcile and nothing more; fixed-size hex keeps
  * sent.jsonl lines flat and greppable. It is NOT what keeps one sender out
  * of another's rows — the digest is reached only after the sender has been
@@ -790,16 +791,20 @@ const char *zcl_fleet_steer_grant_binding_live(const char *label,
  * were, and the reconcile handed the second one the first one's row. */
 static void fmc_payload_sum(const char *to, const char *body,
                             const char *ref, const char *from,
-                            char out[17])
+                            const char *kind, char out[17])
 {
     uint64_t h = 1469598103934665603ULL;
-    const char *parts[4];
-    size_t i;
+    const char *parts[5];
+    size_t i, nparts = 4;
     parts[0] = to ? to : "";
     parts[1] = body ? body : "";
     parts[2] = ref ? ref : "";
     parts[3] = from ? from : "";
-    for (i = 0; i < 4; i++) {
+    /* A result folds its kind in; a directive digests exactly as it did
+     * before kinds existed, so recorded receipts still reconcile. */
+    if (kind && strcmp(kind, "directive") != 0)
+        parts[nparts++] = kind;
+    for (i = 0; i < nparts; i++) {
         const unsigned char *p = (const unsigned char *)parts[i];
         while (*p) {
             h ^= (uint64_t)*p++;
@@ -3509,13 +3514,13 @@ static const char *fmc_sender_resolve(const struct zcl_command_request *req,
  * receiver can check who actually sent it. False when any budget runs
  * out. */
 static bool fmc_post_input(char *input, size_t cap, const char *to,
-                           const char *body, const char *ref,
-                           const struct fmc_sender *s)
+                           const char *kind, const char *body,
+                           const char *ref, const struct fmc_sender *s)
 {
     char eto[128], ebody[4096], eref[256], efrom[128];
     const char *from = fmc_sender_name(s);
     int n;
-    if (!input || cap == 0 || !to || !body)
+    if (!input || cap == 0 || !to || !kind || !body)
         return false;
     if (!fmc_escape(to, eto, sizeof(eto)))
         return false;
@@ -3527,15 +3532,15 @@ static bool fmc_post_input(char *input, size_t cap, const char *to,
         if (!fmc_escape(from, efrom, sizeof(efrom)))
             return false;
         n = snprintf(input, cap,
-                     "{\"action\":\"post\",\"to\":\"%s\",\"kind\":\"directive\","
+                     "{\"action\":\"post\",\"to\":\"%s\",\"kind\":\"%s\","
                      "\"body\":\"%s\",\"ref\":\"%s\",\"from\":\"%s\","
                      "\"sender_binding\":\"%s\"}",
-                     eto, ebody, eref, efrom, s->binding);
+                     eto, kind, ebody, eref, efrom, s->binding);
     } else {
         n = snprintf(input, cap,
-                     "{\"action\":\"post\",\"to\":\"%s\",\"kind\":\"directive\","
+                     "{\"action\":\"post\",\"to\":\"%s\",\"kind\":\"%s\","
                      "\"body\":\"%s\",\"ref\":\"%s\"}",
-                     eto, ebody, eref);
+                     eto, kind, ebody, eref);
     }
     return n > 0 && (size_t)n < cap;
 }
@@ -3544,7 +3549,8 @@ static bool fmc_post_input(char *input, size_t cap, const char *to,
  * or -1 with `why` (caller buffer) naming the sibling's refusal. The code
  * is copied out before the sub reply is freed: it never points at it. */
 static long long fmc_post_directive(const struct zcl_command_request *req,
-                                    const char *to, const char *body,
+                                    const char *to, const char *kind,
+                                    const char *body,
                                     const char *ref,
                                     const struct fmc_sender *s,
                                     char *why, size_t why_cap)
@@ -3554,7 +3560,7 @@ static long long fmc_post_directive(const struct zcl_command_request *req,
     long long seq;
     if (why && why_cap > 0)
         (void)snprintf(why, why_cap, "sibling_refused");
-    if (!fmc_post_input(input, sizeof(input), to, body, ref, s))
+    if (!fmc_post_input(input, sizeof(input), to, kind, body, ref, s))
         return -1;
     fmc_sub_begin(&sub, "zcl.agent_mail.v1", req, "dev.agent.mail");
     if (!sub.valid) {
@@ -3590,6 +3596,7 @@ struct fmc_item_fields {
     const char *body;
     const char *ref;
     const char *key;
+    const char *kind;           /* "directive" or "result" */
 };
 
 static const char *fmc_item_str(const struct json_value *it, const char *k)
@@ -3648,6 +3655,13 @@ static bool fmc_send_item_fields(const struct json_value *it,
      * nothing. */
     ref = fmc_item_str(it, "ref");
     f->ref = ref ? ref : "";
+    /* A remote agent answers its directive with a `result` under the same
+     * ref; this surface is the only path some agents have. Closed set. */
+    f->kind = fmc_item_str(it, "kind");
+    if (!f->kind)
+        f->kind = "directive";
+    if (strcmp(f->kind, "directive") != 0 && strcmp(f->kind, "result") != 0)
+        return false;
     return fmc_item_shape_ok(f, from, error);
 }
 
@@ -3684,7 +3698,7 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
     json_set_object(&item);
     (void)json_push_kv_int(&item, "index", (long long)index);
     (void)json_push_kv_str(&item, "to", f->to);
-    fmc_payload_sum(f->to, f->body, f->ref, from, sum);
+    fmc_payload_sum(f->to, f->body, f->ref, from, f->kind, sum);
     if (!fmc_escape(f->ref ? f->ref : "", eref, sizeof(eref)))
         eref[0] = '\0';
     n = snprintf(sent_line, sizeof(sent_line),
@@ -3746,7 +3760,7 @@ static bool fmc_send_item(const struct zcl_command_request *req,
     {
         char recorded[17], presented[17];
         if (fmc_sent_find(sent_path, f.key, &seq, recorded)) {
-            fmc_payload_sum(f.to, f.body, f.ref, from, presented);
+            fmc_payload_sum(f.to, f.body, f.ref, from, f.kind, presented);
             if (recorded[0] && strcmp(recorded, presented) == 0) {
                 fmc_send_item_accept(items, index, &f, seq, true, sent_path,
                                      from, grant);
@@ -3761,7 +3775,8 @@ static bool fmc_send_item(const struct zcl_command_request *req,
         }
     }
     why[0] = '\0';
-    seq = fmc_post_directive(req, f.to, f.body, f.ref, s, why, sizeof(why));
+    seq = fmc_post_directive(req, f.to, f.kind, f.body, f.ref, s, why,
+                             sizeof(why));
     if (seq < 0) {
         fmc_send_item_refused(items, index, f.to,
                               why[0] ? why : "POST_FAILED");
