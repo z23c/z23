@@ -231,6 +231,36 @@ static int tsb_report(const char *what, bool ok)
     return ok ? 0 : 1;
 }
 
+/* A seller that claims a file must prove it with a hash, and quote a
+ * price in money range, before the buyer pays. */
+static bool tsb_parse_product_cases(void)
+{
+    static const struct { const char *json; bool ok; bool has; } c[] = {
+        { "{\"id\":7,\"price_zatoshi\":5,\"has_content\":true,\"content_hash\":\"0000000000000000000000000000000000000000000000000000000000000001\"}", true, true },
+        { "{\"id\":7,\"price_zatoshi\":5,\"has_content\":false}", true, false },
+        { "{\"id\":7,\"price_zatoshi\":5,\"has_content\":true}", false, false },
+        { "{\"id\":7,\"price_zatoshi\":5,\"has_content\":true,\"content_hash\":\"00\"}", false, false },
+        { "{\"id\":7,\"price_zatoshi\":5,\"has_content\":true,\"content_hash\":\"zz00000000000000000000000000000000000000000000000000000000000001\"}", false, false },
+        { "{\"id\":7,\"price_zatoshi\":0,\"has_content\":false}", false, false },
+        { "{\"id\":7,\"price_zatoshi\":-5,\"has_content\":false}", false, false },
+        { "{\"id\":7,\"price_zatoshi\":2100000000000001,\"has_content\":false}", false, false },
+        { "{\"id\":8,\"price_zatoshi\":5,\"has_content\":false}", false, false },
+    };
+    for (size_t i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
+        char name[64], tok[64];
+        int64_t price = 0;
+        bool has = false;
+        uint8_t hash[32];
+        bool got = store_buyer_parse_product_json(c[i].json, 7, name,
+            sizeof(name), tok, sizeof(tok), &price, &has, hash);
+        if (got != c[i].ok || (got && has != c[i].has)) {
+            printf("case %zu: got=%d has=%d\n", i, got, has);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* A seller-supplied challenge is bounded and parsed strictly before the
  * buyer spends any work on it. */
 static bool tsb_pow_params_bounded(void)
@@ -707,6 +737,8 @@ int test_store_buyer(void)
     /* ── 10. A reused remote order id cannot rewrite a purchase ──────── */
     failures += tsb_report("reused remote order id only refreshes a retry",
                            tsb_remote_reuse_guarded());
+    failures += tsb_report("seller product JSON must prove a file it claims",
+                           tsb_parse_product_cases());
 
     tsb_unwire_merchant();
     chain_params_select(CHAIN_MAIN);

@@ -168,6 +168,14 @@ bool store_buyer_remote_reuse_ok(const struct db_store_purchase *existing,
                                  bool has_content_hash,
                                  const uint8_t *content_hash);
 
+/* Parse a remote seller's product JSON twin. Refuses a wrong id, a price
+ * outside 1..MAX_MONEY, and has_content without a 64-hex content hash:
+ * a buyer must never pay for a file it cannot verify. */
+bool store_buyer_parse_product_json(const char *text, int64_t want_id,
+    char *name, size_t name_max, char *token_id, size_t token_max,
+    int64_t *price_zatoshi, bool *has_content_hash,
+    uint8_t content_hash[32]);
+
 /* ── pay ────────────────────────────────────────────────────────────── */
 
 struct store_buyer_payment {

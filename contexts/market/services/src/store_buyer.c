@@ -15,6 +15,7 @@
 
 #include "controllers/store_controller.h" // shape-layer-ok:buyer-is-a-store-client
 #include "chain/chainparams.h"
+#include "core/amount.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "models/store.h"
@@ -561,8 +562,8 @@ static bool sb_scrape_addr_after(const char *page, const char *marker,
  * remote buyer's price, access token and content hash — everything the
  * local buyer reads from the products table. Refuses a document whose id
  * is not the product that was asked for. */
-static bool sb_parse_product_json(const char *text, int64_t want_id,
-                                  char *name, size_t name_max,
+bool store_buyer_parse_product_json(const char *text, int64_t want_id,
+                                    char *name, size_t name_max,
                                   char *token_id, size_t token_max,
                                   int64_t *price_zatoshi,
                                   bool *has_content_hash,
@@ -585,12 +586,14 @@ static bool sb_parse_product_json(const char *text, int64_t want_id,
     *price_zatoshi = json_get_int(json_get(&doc, "price_zatoshi"));
     *has_content_hash = false;
     hash_hex = json_get_str(json_get(&doc, "content_hash"));
-    if (json_get_bool(json_get(&doc, "has_content")) && hash_hex &&
-        strlen(hash_hex) == 64 &&
-        ParseHex(hash_hex, content_hash, 32) == 32)
-        *has_content_hash = true;
+    bool claims = json_get_bool(json_get(&doc, "has_content"));
+    bool hash_ok = hash_hex && strlen(hash_hex) == 64 &&
+        ParseHex(hash_hex, content_hash, 32) == 32;
     json_free(&doc);
-    return *price_zatoshi > 0;
+    if (claims && !hash_ok)
+        return false; // raw-return-ok:a seller claiming a file without a verifiable hash is refused before payment; the caller names it
+    *has_content_hash = claims;
+    return *price_zatoshi > 0 && MoneyRange(*price_zatoshi);
 }
 
 /* Step 1 of a remote order: the product detail JSON twin — price, token and
@@ -621,8 +624,8 @@ static struct zcl_result sb_remote_product_info(const char *seller,
                         "product %lld is not on sale at %s (HTTP %d)",
                         (long long)product_id, seller, status);
     }
-    bool parsed = sb_parse_product_json((const char *)res.body, product_id,
-                                        name, name_size, token_id,
+    bool parsed = store_buyer_parse_product_json((const char *)res.body,
+                                        product_id, name, name_size, token_id,
                                         token_id_size, price_zatoshi,
                                         has_content_hash, content_hash);
     free(res.body);
