@@ -93,6 +93,14 @@
  * newest FMC_STALE_BLOCKER_CAP (8) are spelled out and one more line
  * counts the rest, so they never crowd every other blocker out.
  *
+ * REPLIES. Each directive change row also carries `reply`, correlating
+ * the rows already pulled by ref (+ attempt when both state one):
+ * answered (a later `result` under the ref, from the addressee or
+ * addressed back to the origin by anyone but the origin), else acked (the
+ * receiver's ack cursor only; a reply is never an ack), else queued; with
+ * the directive's own sent_ts/sent_age_s apart from answer_ts/answer_age_s.
+ * An answered directive is never a "no receiver evidence" blocker.
+ *
  * WORKERS. `agents` is only the names seen in mail and on the board. The
  * `workers` array is evidence: an identity appears only after it answered
  * as a receiver (a body carrying receiver=) or a worker (worker=), or as
@@ -111,7 +119,9 @@
  *   unknown  everything else,
  * always with a reason. A lock held or a name seen is liveness at most,
  * never work. Unknown numbers are JSON null, never 0: capacity reports
- * known:false and all-null numbers when the queue did not answer, and
+ * known:false and all-null numbers when the queue did not answer, the
+ * worktree pool reads pool_known:false and "UNKNOWN" sizes when this host
+ * has no queue/pool.txt (only a measured empty pool reads 0), and
  * token usage comes from run receipts (queue outcomes locally, result
  * rows remotely) or stays null.
  *
@@ -1538,6 +1548,8 @@ struct fmc_queue_view {
     long long running;
     long long pool_total;
     long long pool_free;
+    bool pool_known;
+    char pool_reason[160];
     char run_ref[FMC_REF_MAX + 1];
     char run_worker[FMC_NAME_MAX + 1];
     long long tok_last;
@@ -2436,6 +2448,99 @@ static void fmc_stale_summary(struct json_value *blockers, int stale)
     fmc_push_blocker(blockers, b);
 }
 
+/* ── brief: request/result correlation ───────────────────────────────────
+ *
+ * A directive change row carries `reply`, three facts kept apart:
+ *   acked     the receiver's own ack cursor covers the row (never a reply);
+ *   answered  a later `result` row under the same ref from the other side:
+ *             written by the addressee (answer_match "addressee"), or
+ *             addressed back to the origin by anyone but the origin itself
+ *             (answer_match "reply_to_origin" — every box posts as its Unix
+ *             user, so the reply's author need not carry the role name);
+ *             an attempt= stated on both sides must agree;
+ *   state     answered, else acked, else queued.
+ * sent_ts/sent_age_s are the directive's own time; answer_ts/answer_age_s
+ * the reply's. The lifecycle `state` beside it keeps its closed
+ * vocabulary; a reply never becomes an ack there either unless it came
+ * from the addressee by name, as before. */
+
+struct fmc_answer {
+    const struct fmc_row *row;
+    struct fmc_row keep;
+    const char *match;
+};
+
+static bool fmc_attempt_agrees(const char *a, const char *b)
+{
+    long long x = fmc_body_int(a, "attempt");
+    long long y = fmc_body_int(b, "attempt");
+    return x < 0 || y < 0 || x == y;
+}
+
+/* How r answers directive d, or NULL when it does not. */
+static const char *fmc_answer_match(const struct fmc_row *d,
+                                    const struct fmc_row *r)
+{
+    long long dt = fmc_ts_unix(d->ts), rt = fmc_ts_unix(r->ts);
+    if (strcmp(r->kind, "result") != 0 || strcmp(r->ref, d->ref) != 0 ||
+        strcmp(r->from, d->from) == 0)
+        return NULL;
+    if ((dt >= 0 && rt >= 0 && rt < dt) ||
+        !fmc_attempt_agrees(d->body, r->body))
+        return NULL;
+    if (strcmp(r->from, d->to) == 0)
+        return "addressee";
+    return strcmp(r->to, d->from) == 0 ? "reply_to_origin" : NULL;
+}
+
+/* The newest answer to d among the pulled rows. */
+static bool fmc_answer_find(const struct json_value *rows,
+                            const struct fmc_row *d, struct fmc_answer *a)
+{
+    size_t n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u, i;
+    a->row = NULL;
+    a->match = NULL;
+    for (i = 0; d->ref[0] && i < n; i++) {
+        struct fmc_row r;
+        const char *m;
+        if (!fmc_row_parse(json_at(rows, i), &r))
+            continue;
+        m = fmc_answer_match(d, &r);
+        if (!m || (a->row && strcmp(r.ts, a->keep.ts) <= 0))
+            continue;
+        a->keep = r;
+        a->row = &a->keep;
+        a->match = m;
+    }
+    return a->row != NULL;
+}
+
+/* The reply object for one directive change row. */
+static void fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
+                           const struct json_value *rows, long long now)
+{
+    struct json_value o;
+    struct fmc_answer a;
+    long long ack = fmc_ack_cursor(v->to);
+    bool acked = ack >= 0 && v->seq <= ack;
+    bool answered = fmc_answer_find(rows, v, &a);
+    json_init(&o);
+    json_set_object(&o);
+    (void)json_push_kv_str(&o, "state", answered ? "answered"
+                                         : acked ? "acked" : "queued");
+    (void)json_push_kv_bool(&o, "acked", acked);
+    fmc_put_known(&o, "sent_ts", fmc_ts_unix(v->ts) >= 0 ? v->ts : "");
+    fmc_put_known_int(&o, "sent_age_s", fmc_age_s(now, v->ts));
+    fmc_put_known_int(&o, "answer_seq", answered ? a.row->seq : -1);
+    fmc_put_known(&o, "answer_ts", answered ? a.row->ts : "");
+    fmc_put_known_int(&o, "answer_age_s",
+                      answered ? fmc_age_s(now, a.row->ts) : -1);
+    fmc_put_known(&o, "answered_by", answered ? a.row->from : "");
+    fmc_put_known(&o, "answer_match", answered ? a.match : "");
+    (void)json_push_kv(item, "reply", &o);
+    json_free(&o);
+}
+
 /* One bounded change row, carrying the state fmc_row_state resolves from
  * receiver evidence; completed is resolved later against queue outcomes
  * and board results. queued_age_s is how long a row has sat "queued"
@@ -2466,6 +2571,8 @@ static void fmc_row_change(struct json_value *changes, const struct fmc_row *v,
         json_push_kv_str(&item, "state", state)) {
         fmc_put_int(&item, "queued_age_s",
                     queued ? fmc_age_s(now, v->ts) : -1);
+        if (strcmp(v->kind, "directive") == 0)
+            fmc_reply_emit(&item, v, rows, now);
         (void)json_push_back(changes, &item);
     }
     json_free(&item);
@@ -2555,6 +2662,7 @@ struct fmc_mail_ctx {
 static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
                          const struct json_value *rows)
 {
+    struct fmc_answer a;
     fmc_row_tally(c->agents, c->work, v);
     fmc_roster_note(c->ro, v);
     fmc_sessions_note(c->ro, v);
@@ -2562,6 +2670,7 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
         c->scanned < FMC_DIRECTIVE_SCAN) {
         c->scanned++;
         if (strcmp(fmc_row_state(v, rows, c->sent_path), "queued") == 0 &&
+            !fmc_answer_find(rows, v, &a) &&
             fmc_stale_blocker(c->blockers, v, fmc_age_s(c->now, v->ts),
                               c->stale < FMC_STALE_BLOCKER_CAP))
             c->stale++;
@@ -2703,21 +2812,49 @@ static void fmc_queue_outcomes(struct fmc_sub *sub,
     }
 }
 
-/* Pool numbers become capacity. */
+/* True when <state>/queue/pool.txt exists as a regular file. The queue
+ * status reports total 0 both for an empty pool file and for none at all,
+ * so only this probe tells a measured empty pool from an unmeasured one. */
+static bool fmc_pool_file_present(void)
+{
+    char root[4096], path[4096 + 32];
+    struct stat st;
+    if (!platform_state_root(root, sizeof(root)) ||
+        snprintf(path, sizeof(path), "%s/queue/pool.txt", root) >=
+            (int)sizeof(path))
+        return false;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* Pool numbers become capacity, but only when the pool is measured: a
+ * host with no pool.txt has an unmeasured pool, never an empty one. */
 static void fmc_queue_pool(struct fmc_sub *sub, struct fmc_queue_view *view)
 {
-    const struct json_value *pool, *v;
+    const struct json_value *pool, *t, *f;
     if (!sub || !view)
         return;
     pool = json_get(&sub->reply.data, "pool");
-    if (!pool || pool->type != JSON_OBJ)
+    t = pool && pool->type == JSON_OBJ ? json_get(pool, "total") : NULL;
+    f = pool && pool->type == JSON_OBJ ? json_get(pool, "free") : NULL;
+    if (!t || t->type != JSON_INT || !f || f->type != JSON_INT) {
+        (void)snprintf(view->pool_reason, sizeof(view->pool_reason), "%s",
+                       "dev.agent.queue status carried no pool numbers");
         return;
-    v = json_get(pool, "total");
-    if (v && v->type == JSON_INT)
-        view->pool_total = (long long)json_get_int(v);
-    v = json_get(pool, "free");
-    if (v && v->type == JSON_INT)
-        view->pool_free = (long long)json_get_int(v);
+    }
+    if (!fmc_pool_file_present()) {
+        (void)snprintf(view->pool_reason, sizeof(view->pool_reason), "%s",
+                       "no queue/pool.txt on this host: the worktree pool "
+                       "is not measured here, so its size is unknown");
+        return;
+    }
+    view->pool_known = true;
+    view->pool_total = (long long)json_get_int(t);
+    view->pool_free = (long long)json_get_int(f);
+    if (view->running > view->pool_total)
+        (void)snprintf(view->pool_reason, sizeof(view->pool_reason),
+                       "%lld running row(s) exceed the %lld-entry worktree "
+                       "pool: running work does not draw from pool.txt",
+                       view->running, view->pool_total);
 }
 
 /* Running/queued names become work + candidates; the first running row
@@ -2770,6 +2907,7 @@ static void fmc_brief_queue(const struct zcl_command_request *req,
     int64_t t0, t1;
     memset(view, 0, sizeof(*view));
     view->tok_last = view->tok_total = -1;
+    view->pool_total = view->pool_free = -1;
     (void)snprintf(view->reason, sizeof(view->reason), "%s",
                    "unknown_sibling");
     fmc_sub_begin(&sub, "zcl.agent_queue.v1", req, "dev.agent.queue");
@@ -3074,8 +3212,15 @@ static void fmc_capacity_emit(struct json_value *cap,
 {
     char why[96];
     (void)json_push_kv_bool(cap, "known", qv->known);
-    fmc_put_int(cap, "pool_total", qv->known ? qv->pool_total : -1);
-    fmc_put_int(cap, "pool_free", qv->known ? qv->pool_free : -1);
+    if (qv->known && !qv->pool_known) {
+        (void)json_push_kv_str(cap, "pool_total", "UNKNOWN");
+        (void)json_push_kv_str(cap, "pool_free", "UNKNOWN");
+    } else {
+        fmc_put_int(cap, "pool_total", qv->known ? qv->pool_total : -1);
+        fmc_put_int(cap, "pool_free", qv->known ? qv->pool_free : -1);
+    }
+    (void)json_push_kv_bool(cap, "pool_known", qv->known && qv->pool_known);
+    fmc_put_str(cap, "pool_reason", qv->known ? qv->pool_reason : "");
     fmc_put_int(cap, "queued", qv->known ? qv->queued : -1);
     fmc_put_int(cap, "running", qv->known ? qv->running : -1);
     why[0] = '\0';

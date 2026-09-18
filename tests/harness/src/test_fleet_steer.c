@@ -2465,6 +2465,190 @@ _test_next:;
     return failures;
 }
 
+/* The directive change row `from` wrote under `ref`, or NULL. */
+static const struct json_value *fmx_change_row(const struct fmx_call *c,
+                                               const char *from,
+                                               const char *ref)
+{
+    const struct json_value *arr = fmx_arr(c, "changes");
+    size_t n = arr ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        const struct json_value *ch = json_at(arr, i);
+        if (strcmp(fmx_wstr(ch, "from"), from) == 0 &&
+            strcmp(fmx_wstr(ch, "kind"), "directive") == 0 &&
+            strcmp(fmx_wstr(ch, "ref"), ref) == 0)
+            return ch;
+    }
+    return NULL;
+}
+
+/* One field of a directive change row's reply correlation. */
+static const struct json_value *fmx_reply(const struct fmx_call *c,
+                                          const char *from, const char *ref)
+{
+    const struct json_value *ch = fmx_change_row(c, from, ref);
+    return ch ? json_get(ch, "reply") : NULL;
+}
+
+/* One directive from `from` to `to` through the real send leaf; its seq,
+ * or -1. */
+static long long fmx_send_one(const char *gid, const char *from,
+                              const char *to, const char *ref,
+                              const char *key)
+{
+    struct fmx_call s;
+    struct json_value items, item;
+    const struct json_value *out, *row, *v;
+    long long seq = -1;
+    json_init(&items);
+    json_set_array(&items);
+    fmx_item(&item, to, "link the fd table", ref, key);
+    (void)json_push_back(&items, &item);
+    json_free(&item);
+    if (fmx_send_from(&s, gid, from, &items) && fmx_ok(&s)) {
+        out = fmx_arr(&s, "items");
+        row = out ? json_at(out, 0) : NULL;
+        v = row ? json_get(row, "seq") : NULL;
+        seq = v && v->type == JSON_INT ? json_get_int(v) : -1;
+    }
+    json_free(&items);
+    fmx_end(&s);
+    return seq;
+}
+
+/* Request/result correlation: a directive is answered by a later result
+ * on its ref from the other side, acked only by the receiver's own ack
+ * cursor, and queued with neither. A reply is never read as an ack. */
+static int fmx_t_reply_correlation(void)
+{
+    int failures = 0;
+
+    TEST("steer: a result on the ref answers a directive without acking it") {
+        struct fmx_call b;
+        const struct json_value *r;
+        char gid[64], now[32];
+        long long seq;
+        fmx_isolate("reply_answered");
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        seq = fmx_send_one(gid, "oauth", "A", "fd-link-a", "key-fd-1");
+        ASSERT(seq >= 1);
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "fd-link-a");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "queued");
+        ASSERT(!json_get_bool(json_get(r, "acked")));
+        ASSERT_STR_EQ(fmx_wstr(r, "answer_seq"), "UNKNOWN");
+        ASSERT(strlen(fmx_wstr(r, "sent_ts")) == 20);
+        fmx_end(&b);
+        /* The origin's own result under the ref is not an answer. */
+        fmx_now_ts(now, sizeof(now));
+        fmx_seed_inbox("self", now, 700, "oauth", "A", "result",
+                       "self note", "fd-link-a");
+        /* Every box posts as its Unix user: the answer arrives from
+         * "box-user", addressed back to the origin under the same ref. */
+        fmx_seed_inbox("box-a", now, 727, "box-user", "oauth", "result",
+                       "ref=fd-link-a\\nterminal=pass\\n", "fd-link-a");
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "fd-link-a");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "answered");
+        ASSERT(fmx_wint(r, "answer_seq") == 727);
+        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "box-user");
+        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "reply_to_origin");
+        ASSERT(fmx_wint(r, "answer_age_s") >= 0);
+        ASSERT(fmx_wint(r, "sent_age_s") >= 0);
+        /* Never an ack synthesized from the reply. */
+        ASSERT(!json_get_bool(json_get(r, "acked")));
+        ASSERT_STR_EQ(fmx_wstr(fmx_change_row(&b, "oauth", "fd-link-a"),
+                               "state"),
+                      "queued");
+        fmx_end(&b);
+        /* The receiver's own ack cursor is the only ack. */
+        ASSERT(fmx_ack("A", seq));
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "fd-link-a");
+        ASSERT(r != NULL);
+        ASSERT(json_get_bool(json_get(r, "acked")));
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "answered");
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: an ack with no result reads acked, not answered") {
+        struct fmx_call b;
+        const struct json_value *r;
+        char gid[64];
+        long long seq;
+        fmx_isolate("reply_acked");
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        seq = fmx_send_one(gid, "oauth", "B", "fd-link-b", "key-fd-2");
+        ASSERT(seq >= 1);
+        ASSERT(fmx_ack("B", seq));
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "fd-link-b");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "acked");
+        ASSERT(json_get_bool(json_get(r, "acked")));
+        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "UNKNOWN");
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* The worktree pool is measured only where pool.txt exists; an absent
+ * file is an unmeasured pool, never an empty one. */
+static int fmx_t_pool_unmeasured(void)
+{
+    int failures = 0;
+
+    TEST("steer: an unmeasured worktree pool is UNKNOWN, never zero") {
+        struct fmx_call b;
+        const struct json_value *cap;
+        fmx_isolate("pool_unmeasured");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        cap = fmx_get(&b, "capacity");
+        ASSERT(cap && json_get_bool(json_get(cap, "known")));
+        ASSERT(json_get(cap, "pool_known") &&
+               !json_get_bool(json_get(cap, "pool_known")));
+        ASSERT_STR_EQ(fmx_wstr(cap, "pool_total"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(cap, "pool_free"), "UNKNOWN");
+        ASSERT(strstr(fmx_wstr(cap, "pool_reason"), "pool.txt") != NULL);
+        fmx_end(&b);
+        /* A measured empty pool may read 0. */
+        fmx_state_file("queue", "pool.txt", "", false);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        cap = fmx_get(&b, "capacity");
+        ASSERT(json_get_bool(json_get(cap, "pool_known")));
+        ASSERT(fmx_wint(cap, "pool_total") == 0);
+        ASSERT(fmx_wint(cap, "pool_free") == 0);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 int test_fleet_steer(void);
 int test_fleet_steer(void)
 {
@@ -2492,6 +2676,8 @@ int test_fleet_steer(void)
     failures += fmx_t_process_not_work();
     failures += fmx_t_large_history();
     failures += fmx_t_sessions();
+    failures += fmx_t_reply_correlation();
+    failures += fmx_t_pool_unmeasured();
 
     /* No ASSERT lives in this function, so no goto needs the label: the
      * hook is always cleared on the single fall-through path. */
