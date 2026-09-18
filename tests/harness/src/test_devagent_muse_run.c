@@ -1836,6 +1836,8 @@ static int mr_exec_token_cap(void)
         strcmp(r.verdict, "refused") == 0);
     MR_CHECK("cap cancels first", evidence &&
         evidence_has(evidence, "cancel:"));
+    /* The usage that tripped the cap is spend, recorded, never 0. */
+    MR_CHECK("cap spend recorded", r.total_tokens > 10);
     free(evidence);
     return failures;
 }

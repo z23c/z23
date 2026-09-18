@@ -1096,6 +1096,7 @@ static int mr_finish(struct mr_core *c, struct muse_session *s,
     const char *engine_name = "UNKNOWN";
     char engine_buf[64];
     int rc = 1;
+    int wait_rc;
     memset(&policy, 0, sizeof(policy));
     r->duration_ms = -1;
     r->files_changed = -1;
@@ -1150,14 +1151,18 @@ static int mr_finish(struct mr_core *c, struct muse_session *s,
     if (!mr_submit(c, s, &policy)) goto write;
     mr_record_admission(t, r);
     memset(&out, 0, sizeof(out));
-    if (muse_session_wait(s, r->session, r->turn, &policy, &out) != 0) {
+    wait_rc = muse_session_wait(s, r->session, r->turn, &policy, &out);
+    /* Usage folded before a failed wait is still spend: a turn cut off by
+     * its token cap consumed past the cap, and must never read as 0. */
+    r->input_tokens = out.input_tokens;
+    r->output_tokens = out.output_tokens;
+    r->total_tokens = out.total_tokens;
+    if (wait_rc != 0) {
+        muse_turn_outcome_free(&out);
         mr_wait_failed(c, s);
         goto write;
     }
     (void)snprintf(r->terminal, sizeof(r->terminal), "%s", out.terminal);
-    r->input_tokens = out.input_tokens;
-    r->output_tokens = out.output_tokens;
-    r->total_tokens = out.total_tokens;
     r->duration_ms = out.duration_ms;
     muse_turn_outcome_free(&out);
     if (strcmp(r->terminal, "completed") != 0) {
