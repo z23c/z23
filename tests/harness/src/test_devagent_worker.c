@@ -280,6 +280,30 @@ static bool wtx_receipt_exists(const char *name, long long attempt)
     return stat(path, &st) == 0;
 }
 
+/* True when the queue status lists name under key ("queued"/"running"). */
+static bool wtx_status_lists(const char *key, const char *name)
+{
+    struct wtx_call c;
+    const struct json_value *arr;
+    size_t n, i;
+    bool found = false;
+    wtx_begin(&c, "dev.agent.queue", "zcl.agent_queue.v1");
+    (void)json_push_kv_str(&c.input, "action", "status");
+    (void)json_push_kv_bool(&c.input, "json", true);
+    zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
+    arr = wtx_ok(&c) ? json_get(&c.reply.data, key) : NULL;
+    n = (arr && arr->type == JSON_ARR) ? json_size(arr) : 0;
+    for (i = 0; i < n && !found; i++) {
+        const struct json_value *r = json_at(arr, i);
+        const struct json_value *v =
+            (r && r->type == JSON_OBJ) ? json_get(r, "name") : NULL;
+        found = v && v->type == JSON_STR && json_get_str(v) &&
+                strcmp(json_get_str(v), name) == 0;
+    }
+    wtx_end(&c);
+    return found;
+}
+
 /* Post one doc unit whose brief is `bytes` of filler ending in `tail`,
  * written under the state root where post admits briefs. */
 static bool wtx_post_brief(const char *name, size_t bytes, const char *tail)
@@ -324,6 +348,70 @@ static bool wtx_task_has(const char *needle)
     (void)fclose(f);
     text[n] = '\0';
     return strstr(text, needle) != NULL;
+}
+
+/* Claim name's row from a child process that then exits, so the row's
+ * claimant is provably dead, and delete the claim identity: the crash
+ * landed between "mark running" and the first run artifact. */
+static bool wtx_claim_then_die(const char *name)
+{
+    char path[4096];
+    int st = 0;
+    pid_t pid = fork();
+    if (pid < 0)
+        return false;
+    if (pid == 0)
+        _exit(wtx_queue_verb("claim", NULL, NULL) ? 0 : 1);
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) ||
+        WEXITSTATUS(st) != 0)
+        return false;
+    (void)snprintf(path, sizeof(path),
+                   "%s/z23/dev/engine/%s/a1/claim.json", g_wtx_state, name);
+    return remove(path) == 0;
+}
+
+/* Rewrite every stored claimant start token in the ledger to `token`:
+ * the claimant pid is alive, but it is no longer the process that
+ * claimed (pid reuse). False when the ledger stores no token at all. */
+static bool wtx_forge_owner_start(const char *token)
+{
+    char path[4096], text[16384], out[16384];
+    const char *key = "\"owner_start\":";
+    const char *p, *hit;
+    size_t used = 0;
+    FILE *f;
+    size_t n;
+    bool any = false;
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/queue/queue.jsonl",
+                   g_wtx_state);
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    n = fread(text, 1, sizeof(text) - 1, f);
+    (void)fclose(f);
+    text[n] = '\0';
+    for (p = text; (hit = strstr(p, key)) != NULL;) {
+        size_t pre = (size_t)(hit - p) + strlen(key);
+        if (used + pre + strlen(token) >= sizeof(out))
+            return false;
+        memcpy(out + used, p, pre);
+        used += pre;
+        memcpy(out + used, token, strlen(token));
+        used += strlen(token);
+        p = hit + strlen(key);
+        while (*p >= '0' && *p <= '9')
+            p++;
+        any = true;
+    }
+    if (!any || used + strlen(p) >= sizeof(out))
+        return false;
+    memcpy(out + used, p, strlen(p) + 1);
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    (void)fwrite(out, 1, strlen(out), f);
+    (void)fclose(f);
+    return true;
 }
 #endif
 
@@ -1553,6 +1641,89 @@ int test_devagent_worker(void)
         ASSERT(wtx_outcome("wtx-noreceipt", verdict, sizeof(verdict), &rc));
         ASSERT_STR_EQ(verdict, "no-receipt");
         ASSERT(!zcl_devagent_closed_pass(verdict, rc));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("reap requeues an artifact-free row whose claimant died")
+    {
+        wtx_isolate("reapdead");
+        wtx_queue_post("wtx-deadclaim");
+        ASSERT(wtx_claim_then_die("wtx-deadclaim"));
+        ASSERT(wtx_status_lists("running", "wtx-deadclaim"));
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(!wtx_status_lists("running", "wtx-deadclaim"));
+        ASSERT(wtx_status_lists("queued", "wtx-deadclaim"));
+        /* Queued again, so cancel is no longer refused. */
+        ASSERT(wtx_queue_verb("cancel", "name", "wtx-deadclaim"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("reap never touches an artifact-free row whose claimant lives")
+    {
+        char path[4096];
+        wtx_isolate("reapalive");
+        wtx_queue_post("wtx-liveclaim");
+        /* Claimed by this very process, which is alive. */
+        ASSERT(wtx_queue_verb("claim", NULL, NULL));
+        (void)snprintf(path, sizeof(path),
+                       "%s/z23/dev/engine/wtx-liveclaim/a1/claim.json",
+                       g_wtx_state);
+        ASSERT(remove(path) == 0);
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_status_lists("running", "wtx-liveclaim"));
+        ASSERT(!wtx_status_lists("queued", "wtx-liveclaim"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("reap treats a reused claimant pid as dead")
+    {
+        char path[4096];
+        wtx_isolate("reapreuse");
+        wtx_queue_post("wtx-reuse");
+        ASSERT(wtx_queue_verb("claim", NULL, NULL));
+        (void)snprintf(path, sizeof(path),
+                       "%s/z23/dev/engine/wtx-reuse/a1/claim.json",
+                       g_wtx_state);
+        ASSERT(remove(path) == 0);
+        /* Same pid, different birth: not the process that claimed. */
+        ASSERT(wtx_forge_owner_start("1"));
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_status_lists("queued", "wtx-reuse"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("reap leaves a dead claimant's row alone once an artifact exists")
+    {
+        struct wkr_drive_opts o;
+        wtx_isolate("reapartifact");
+        wtx_queue_post("wtx-artifact");
+        ASSERT(wtx_claim_then_die("wtx-artifact"));
+        {
+            /* Put the claim identity back: adoption, not requeue, owns a
+             * row that got as far as its first artifact. */
+            char path[4096];
+            FILE *f;
+            (void)snprintf(path, sizeof(path),
+                           "%s/z23/dev/engine/wtx-artifact/a1/claim.json",
+                           g_wtx_state);
+            f = fopen(path, "wb");
+            ASSERT(f != NULL);
+            (void)fputs("{\"name\":\"wtx-artifact\",\"attempt\":1,"
+                        "\"submitted\":true}\n", f);
+            (void)fclose(f);
+        }
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_status_lists("running", "wtx-artifact"));
+        /* The submitted claim crash-records; it is never rerun. */
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        wtx_opts(&o, "wtx", "s-artifact");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT_EQ(wtx_count_read(), 0);
         wtx_restore();
         PASS();
     }

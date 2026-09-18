@@ -69,10 +69,12 @@
  * worktree, pid_or_unit, state:"running"} or {state:"no_free_worktree"} or
  * {state:"empty"}; claim {seq, name, attempt, rundir, worker, session,
  * state:"running"} or {state:"empty"}; reap {state:"reaped",
- * outcomes:[...], requeued}; status {queued, running, outcomes, pool} plus
- * screen unless json=true; cancel {state:"cancelled", name, cancelled:N}
- * or CANCEL_RUNNING/CANCEL_NOT_FOUND. claim refuses CLAIM_COMPLETED when
- * the closed predicate already finished the name.
+ * outcomes:[...], requeued, reclaimed}; status {queued, running, outcomes,
+ * pool} plus screen unless json=true; cancel {state:"cancelled", name,
+ * cancelled:N} or CANCEL_RUNNING/CANCEL_NOT_FOUND. claim refuses
+ * CLAIM_COMPLETED when the closed predicate already finished the name.
+ * reap's reclaimed counts running rows returned to queued because their
+ * claimant died before the run's first artifact (see orphan reclaim).
  *
  * PROCESS RULE. Spawn only through zcl_spawn_detached() from util/spawn.h.
  * popen(), system() and a shell command string are forbidden and gated.
@@ -95,6 +97,7 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/os_proc.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
@@ -496,6 +499,8 @@ struct dvq_row {
     long long started;
     long long priority; /* 0..3, P0 first */
     char depends_on[80]; /* dependency name, "" for none */
+    long long owner_pid;   /* process that marked the row running, 0 unknown */
+    long long owner_start; /* its kernel start token, 0 unknown */
 };
 
 /* The READY-order fields. Rows written before they existed carry neither:
@@ -507,6 +512,33 @@ static void dvq_parse_order(const char *line, struct dvq_row *r)
         r->priority = DVQ_PRIORITY_DEFAULT;
     (void)dvq_line_str(line, "depends_on", r->depends_on,
                        sizeof(r->depends_on));
+}
+
+/* The running row's claimant. Rows written before it existed carry
+ * neither field and read as unknown, which reap never reclaims. */
+static void dvq_parse_owner(const char *line, struct dvq_row *r)
+{
+    (void)dvq_line_int(line, "owner_pid", &r->owner_pid);
+    (void)dvq_line_int(line, "owner_start", &r->owner_start);
+}
+
+/* Stamp the process marking the row running, so reap can tell a live
+ * claimant from one that died before the run's first artifact. */
+static void dvq_stamp_owner(struct dvq_row *r)
+{
+    uint64_t token = 0;
+    uint64_t pid = os_proc_current_pid();
+    r->owner_pid = pid <= (uint64_t)LLONG_MAX ? (long long)pid : 0;
+    r->owner_start = os_proc_pid_start_token(pid, &token) &&
+                             token <= (uint64_t)LLONG_MAX
+                         ? (long long)token
+                         : 0;
+}
+
+static void dvq_clear_owner(struct dvq_row *r)
+{
+    r->owner_pid = 0;
+    r->owner_start = 0;
 }
 
 static bool dvq_parse_row(const char *line, struct dvq_row *r)
@@ -536,6 +568,7 @@ static bool dvq_parse_row(const char *line, struct dvq_row *r)
                        sizeof(r->pid_or_unit));
     (void)dvq_line_int(line, "started", &r->started);
     dvq_parse_order(line, r);
+    dvq_parse_owner(line, r);
     return true;
 }
 
@@ -566,10 +599,12 @@ static bool dvq_encode_row(const struct dvq_row *r, char *out, size_t cap,
                  "\"group\":\"%s\",\"path\":\"%s\",\"brief\":\"%s\","
                  "\"model\":\"%s\",\"attempt\":%lld,\"state\":\"%s\","
                  "\"worktree\":\"%s\",\"pid_or_unit\":\"%s\","
-                 "\"started\":%lld,\"priority\":%lld,\"depends_on\":\"%s\"}\n",
+                 "\"started\":%lld,\"priority\":%lld,\"depends_on\":\"%s\","
+                 "\"owner_pid\":%lld,\"owner_start\":%lld}\n",
                  r->seq, esc_ts, esc_kind, esc_name, esc_group, esc_path,
                  esc_brief, esc_model, r->attempt, esc_state, esc_wt,
-                 esc_unit, r->started, r->priority, esc_dep);
+                 esc_unit, r->started, r->priority, esc_dep, r->owner_pid,
+                 r->owner_start);
     if (w <= 0 || (size_t)w >= cap)
         return false;
     if (len_out)
@@ -1395,6 +1430,7 @@ static void dvq_unmark(const char *queuedir, const char *qpath, long long seq)
                 rows[i].worktree[0] = '\0';
                 rows[i].pid_or_unit[0] = '\0';
                 rows[i].started = 0;
+                dvq_clear_owner(&rows[i]);
             }
         }
         (void)dvq_rewrite_rows(queuedir, qpath, rows, n);
@@ -1656,6 +1692,7 @@ static int dvq_claim_take(const struct dvq_dirs *d, const char *qpath,
     (void)snprintf(pick->pid_or_unit, sizeof(pick->pid_or_unit),
                    "worker:%s/%s", worker, session);
     pick->started = (long long)platform_time_wall_unix();
+    dvq_stamp_owner(pick);
     (void)snprintf(pick->state, sizeof(pick->state), "running");
     for (size_t i = 0; i < nrows; i++) {
         if (rows[i].seq == pick->seq) {
@@ -1997,6 +2034,7 @@ static void dvq_next(const struct zcl_command_request *req,
     }
     (void)snprintf(pick.worktree, sizeof(pick.worktree), "%s", wt);
     pick.started = (long long)platform_time_wall_unix();
+    dvq_stamp_owner(&pick);
     if (dvq_have_systemd()) {
         char frag[96];
         dvq_unit_frag(pick.name, frag, sizeof(frag));
@@ -2342,6 +2380,73 @@ static bool dvq_push_outcome(struct json_value *arr, const char *name,
     return ok;
 }
 
+/* ── orphan reclaim ──────────────────────────────────────────────────────
+ * A claimant that dies between "mark running" and the run's first
+ * artifact leaves a running row reap would skip forever (no receipt, no
+ * rc line) and cancel refuses. Reap returns such a row to queued, and
+ * only when BOTH hold: the run dir carries no artifact at all (so nothing
+ * was ever submitted or launched), and the stamped claimant is provably
+ * gone — the pid is dead, or a live pid carries a different kernel start
+ * token (the pid was reused). An unknown claimant (a row from before the
+ * stamp) and an undecidable liveness both count as alive. */
+
+static const char *const dvq_run_artifacts[] = {
+    "claim.json", "task.txt", "run.out", "receipt.json",
+};
+
+static bool dvq_run_artifact_free(const char *engine, const struct dvq_row *r)
+{
+    char path[4096 + 160];
+    struct stat st;
+    size_t i;
+    for (i = 0; i < sizeof(dvq_run_artifacts) / sizeof(dvq_run_artifacts[0]);
+         i++) {
+        if (snprintf(path, sizeof(path), "%s/%s/a%lld/%s", engine, r->name,
+                     r->attempt, dvq_run_artifacts[i]) >= (int)sizeof(path))
+            return false;
+        if (stat(path, &st) == 0 || errno != ENOENT)
+            return false;
+    }
+    return true;
+}
+
+static bool dvq_owner_gone(const struct dvq_row *r)
+{
+    uint64_t token = 0;
+    enum os_proc_liveness live;
+    if (r->owner_pid <= 0)
+        return false;
+    live = os_proc_pid_liveness((uint64_t)r->owner_pid);
+    if (live == OS_PROC_LIVENESS_DEAD)
+        return true;
+    if (live != OS_PROC_LIVENESS_RUNNING || r->owner_start <= 0)
+        return false;
+    if (!os_proc_pid_start_token((uint64_t)r->owner_pid, &token))
+        return false;
+    return token != (uint64_t)r->owner_start;
+}
+
+/* Requeue every orphan in rows (under the caller's queue lock). */
+static long long dvq_reclaim_orphans(const char *engine, struct dvq_row *rows,
+                                     size_t nrows)
+{
+    long long reclaimed = 0;
+    size_t i;
+    for (i = 0; i < nrows; i++) {
+        struct dvq_row *r = &rows[i];
+        if (strcmp(r->state, "running") != 0 || !dvq_owner_gone(r) ||
+            !dvq_run_artifact_free(engine, r))
+            continue;
+        (void)snprintf(r->state, sizeof(r->state), "queued");
+        r->worktree[0] = '\0';
+        r->pid_or_unit[0] = '\0';
+        r->started = 0;
+        dvq_clear_owner(r);
+        reclaimed++;
+    }
+    return reclaimed;
+}
+
 static void dvq_reap(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
@@ -2352,6 +2457,7 @@ static void dvq_reap(const struct zcl_command_request *req,
     char line[DVQ_LINE_CAP];
     struct json_value outcomes;
     long long requeued = 0;
+    long long reclaimed = 0;
     long long maxseq = 0;
     time_t stamp = 0;
     struct stat st;
@@ -2390,6 +2496,7 @@ static void dvq_reap(const struct zcl_command_request *req,
         return;
     }
     caprows = nrows;
+    reclaimed = dvq_reclaim_orphans(d.engine, rows, nrows);
     for (size_t i = 0; i < nrows; i++) {
         if (rows[i].seq > maxseq)
             maxseq = rows[i].seq;
@@ -2526,6 +2633,7 @@ static void dvq_reap(const struct zcl_command_request *req,
             back.worktree[0] = '\0';
             back.pid_or_unit[0] = '\0';
             back.started = 0;
+            dvq_clear_owner(&back);
             (void)snprintf(back.ts, sizeof(back.ts), "%s", nts);
             if (dvq_encode_row(&back, line, sizeof(line), &len)) {
                 rows[nrows++] = back;
@@ -2582,6 +2690,7 @@ static void dvq_reap(const struct zcl_command_request *req,
     (void)json_push_kv(&reply->data, "outcomes", &outcomes);
     json_free(&outcomes);
     (void)json_push_kv_int(&reply->data, "requeued", requeued);
+    (void)json_push_kv_int(&reply->data, "reclaimed", reclaimed);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
