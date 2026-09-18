@@ -31,18 +31,22 @@
  *   attempt  post only, optional integer >= 1, default 1.
  *   priority post only, optional integer 0..3 (P0 correctness/custody,
  *            P1 node, P2 apps, P3 infrastructure), default 3.
- *   depends_on post only, optional name: this row is READY only once an
- *            outcome row completes that name under the closed predicate.
- *            An unknown or unfinished dependency never unlocks it.
+ *   depends_on post only, optional name: this row is READY only once
+ *            the CURRENT attempt of that name (the newest one any live row
+ *            or outcome carries) ends in a closed pass. An unknown,
+ *            unfinished, retrying or failed dependency never unlocks it,
+ *            and a late PASS for an older attempt never does either.
  *   json     status only, optional bool: with true the reply carries the
  *            structured shape only; otherwise screen carries the human
  *            rendering too.
  *   cwd      optional string: checkout root override for path checks.
  *
  * READY ORDER. claim and next take the READY queued row with the lowest
- * (priority, seq): its depends_on dependency completed, no other row with
- * its name already running, and (claim only) the row's own name not
- * already completed. Nothing else reorders work.
+ * (priority, seq): its depends_on dependency passed on its current attempt,
+ * no other row with its name already running, and (claim only) the row's
+ * own name not already completed. status reports the same gates per queued
+ * row (ready, blocker) and never runs or cancels a held row. Nothing else
+ * reorders work.
  *
  * ONE LIVE ROW PER NAME. A name is one run directory, so post refuses
  * NAME_IN_FLIGHT while a row with that name is queued or running, and the
@@ -75,7 +79,9 @@
  * worktree, pid_or_unit, state:"running"} or {state:"no_free_worktree"} or
  * {state:"empty"}; claim {seq, name, attempt, rundir, worker, session,
  * state:"running"} or {state:"empty"}; reap {state:"reaped",
- * outcomes:[...], requeued, reclaimed}; status {queued, running, outcomes,
+ * outcomes:[...], requeued, reclaimed}; status {queued (each with ready
+ * and blocker: null, or {ref, state, attempt, verdict} naming what holds
+ * it), queued_total, queued_ready, running, outcomes,
  * pool} plus screen unless json=true; cancel {state:"cancelled", name,
  * cancelled:N} or CANCEL_RUNNING/CANCEL_NOT_FOUND. claim refuses
  * CLAIM_COMPLETED when the closed predicate already finished the name.
@@ -1548,8 +1554,120 @@ static bool dvq_name_completed(const char *opath, const char *name)
     return done;
 }
 
+/* ── the current dependency attempt ──────────────────────────────────────
+ * A prerequisite may own several attempts: a failed run, a retry queued
+ * behind it, a late result for an older attempt. Only the CURRENT attempt
+ * decides, derived from the ledger and outcomes alone: the highest attempt
+ * any live row or outcome row carries, where a live row at or above the
+ * newest outcome means that attempt is still pending. The dependency is
+ * met only when the newest outcome is a closed pass and no newer attempt
+ * is live, so an older or out-of-order PASS never unlocks a dependent. */
+struct dvq_dep {
+    const char *state; /* passed | terminal | queued | running | absent */
+    long long attempt; /* 0 when absent */
+    char verdict[128]; /* the current attempt's verdict, "" when none */
+};
+
+/* The newest outcome for name: its highest attempt, and the last line at
+ * that attempt. attempt stays 0 when no outcome names it. */
+static void dvq_dep_outcome(const char *opath, const char *name,
+                            long long *attempt, char *verdict, size_t cap,
+                            long long *rc)
+{
+    char *text = (char *)zcl_malloc(DVQ_FILE_CAP, "devagent.queue.dep");
+    char *save = NULL, *line;
+    if (!text)
+        return;
+    if (!dvq_read_file(opath, text, DVQ_FILE_CAP, NULL))
+        text[0] = '\0';
+    for (line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char lname[80];
+        long long at = 0, lrc = -1;
+        if (!dvq_line_str(line, "name", lname, sizeof(lname)) ||
+            strcmp(lname, name) != 0 ||
+            !dvq_line_int(line, "attempt", &at) || at < *attempt)
+            continue;
+        *attempt = at;
+        verdict[0] = '\0';
+        (void)dvq_line_str(line, "verdict", verdict, cap);
+        *rc = dvq_line_int(line, "rc", &lrc) ? lrc : -1;
+    }
+    free(text);
+}
+
+/* The live row (queued or running) with the highest attempt for name. */
+static long dvq_live_newest(const struct dvq_row *rows, size_t n,
+                            const char *name)
+{
+    long best = -1;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(rows[i].name, name) != 0 ||
+            (strcmp(rows[i].state, "queued") != 0 &&
+             strcmp(rows[i].state, "running") != 0))
+            continue;
+        if (best < 0 || rows[i].attempt > rows[best].attempt)
+            best = (long)i;
+    }
+    return best;
+}
+
+static void dvq_dep_eval(const struct dvq_row *rows, size_t n,
+                         const char *opath, const char *dep,
+                         struct dvq_dep *out)
+{
+    long long rc = -1;
+    long live = dvq_live_newest(rows, n, dep);
+    out->attempt = 0;
+    out->verdict[0] = '\0';
+    dvq_dep_outcome(opath, dep, &out->attempt, out->verdict,
+                    sizeof(out->verdict), &rc);
+    if (live >= 0 && rows[live].attempt >= out->attempt) {
+        out->state = strcmp(rows[live].state, "running") == 0 ? "running"
+                                                              : "queued";
+        out->attempt = rows[live].attempt;
+        out->verdict[0] = '\0';
+        return;
+    }
+    if (out->attempt == 0) {
+        out->state = "absent";
+        return;
+    }
+    out->state = zcl_devagent_closed_pass(out->verdict, rc) ? "passed"
+                                                            : "terminal";
+}
+
+/* The gates a queued row must clear to be READY, shared by the picker and
+ * status so the two can never disagree: its dependency's current attempt
+ * passed, and no row with its own name is already running (a ledger
+ * written before post refused duplicates can still carry one). On false,
+ * *ref names what holds it and dep says in what state. */
+static bool dvq_row_gate(const struct dvq_row *rows, size_t n, size_t i,
+                         const char *opath, struct dvq_dep *dep,
+                         const char **ref)
+{
+    const struct dvq_row *r = &rows[i];
+    long run;
+    *ref = NULL;
+    if (r->depends_on[0]) {
+        dvq_dep_eval(rows, n, opath, r->depends_on, dep);
+        if (strcmp(dep->state, "passed") != 0) {
+            *ref = r->depends_on;
+            return false;
+        }
+    }
+    run = dvq_live_row(rows, n, r->name, "running");
+    if (run < 0)
+        return true;
+    dep->state = "running";
+    dep->attempt = rows[run].attempt;
+    dep->verdict[0] = '\0';
+    *ref = r->name;
+    return false;
+}
+
 /* THE READY PICK, shared by claim and next: the queued row with the
- * lowest (priority, seq) whose depends_on dependency is completed. With
+ * lowest (priority, seq) that clears dvq_row_gate. With
  * skip_done, a row whose own name already completed is passed over and
  * named in done_name. Returns the row index, or -1 when nothing is READY. */
 static long dvq_pick_ready(const struct dvq_row *rows, size_t n,
@@ -1557,6 +1675,8 @@ static long dvq_pick_ready(const struct dvq_row *rows, size_t n,
                            char *done_name)
 {
     long best = -1;
+    struct dvq_dep dep;
+    const char *ref;
     for (size_t i = 0; i < n; i++) {
         const struct dvq_row *r = &rows[i];
         if (strcmp(r->state, "queued") != 0)
@@ -1569,11 +1689,9 @@ static long dvq_pick_ready(const struct dvq_row *rows, size_t n,
             (void)snprintf(done_name, 80, "%s", r->name);
             continue;
         }
-        if (r->depends_on[0] && !dvq_name_completed(opath, r->depends_on))
-            continue;
-        /* A name already running is never handed out twice, even when an
-         * older ledger still carries a second queued row for it. */
-        if (dvq_live_row(rows, n, r->name, "running") >= 0)
+        /* Dependency met on its current attempt, and a name already
+         * running is never handed out twice. */
+        if (!dvq_row_gate(rows, n, i, opath, &dep, &ref))
             continue;
         best = (long)i;
     }
@@ -2752,10 +2870,57 @@ static void dvq_reap(const struct zcl_command_request *req,
 
 /* ── status ────────────────────────────────────────────────────────────── */
 
-static bool dvq_push_queued(struct json_value *arr, const struct dvq_row *r)
+/* A string, or JSON null when empty: an absent value is never "". */
+static void dvq_str_or_null(struct json_value *v, const char *s)
 {
-    struct json_value item;
+    json_init(v);
+    if (s && s[0])
+        json_set_str(v, s);
+    else
+        json_set_null(v);
+}
+
+/* What holds a queued row back, or JSON null when it is READY: the ref,
+ * that ref's state (terminal, queued, running, absent), its current
+ * attempt, and the verdict that attempt ended with (null while pending). */
+static void dvq_blocker_json(struct json_value *out, const char *ref,
+                             const struct dvq_dep *dep)
+{
+    struct json_value verdict, attempt;
+    json_init(out);
+    if (!ref) {
+        json_set_null(out);
+        return;
+    }
+    json_set_object(out);
+    dvq_str_or_null(&verdict, dep->verdict);
+    json_init(&attempt);
+    if (dep->attempt > 0)
+        json_set_int(&attempt, dep->attempt);
+    else
+        json_set_null(&attempt);
+    (void)(json_push_kv_str(out, "ref", ref) &&
+           json_push_kv_str(out, "state", dep->state) &&
+           json_push_kv(out, "attempt", &attempt) &&
+           json_push_kv(out, "verdict", &verdict));
+    json_free(&verdict);
+    json_free(&attempt);
+}
+
+/* One queued row with its READY verdict from the picker's own gates; a
+ * READY row counts into *nready. */
+static bool dvq_push_queued(struct json_value *arr, const struct dvq_row *rows,
+                            size_t n, size_t i, const char *opath,
+                            long long *nready)
+{
+    const struct dvq_row *r = &rows[i];
+    struct json_value item, blocker;
+    struct dvq_dep dep;
+    const char *ref = NULL;
+    bool ready = dvq_row_gate(rows, n, i, opath, &dep, &ref);
     bool ok;
+    *nready += ready ? 1 : 0;
+    dvq_blocker_json(&blocker, ref, &dep);
     json_init(&item);
     json_set_object(&item);
     ok = json_push_kv_int(&item, "seq", r->seq) &&
@@ -2765,9 +2930,36 @@ static bool dvq_push_queued(struct json_value *arr, const struct dvq_row *r)
          json_push_kv_str(&item, "ts", r->ts) &&
          json_push_kv_int(&item, "priority", r->priority) &&
          json_push_kv_str(&item, "depends_on", r->depends_on) &&
+         json_push_kv_bool(&item, "ready", ready) &&
+         json_push_kv(&item, "blocker", &blocker) &&
          json_push_back(arr, &item);
     json_free(&item);
+    json_free(&blocker);
     return ok;
+}
+
+/* The human line for one queued row: READY rows plain, held rows say
+ * which ref holds them — blocked by a terminal or absent ref, waiting on
+ * a pending one. Returns snprintf's count. */
+static int dvq_screen_queued(char *out, size_t cap, const struct dvq_row *rows,
+                             size_t n, size_t i, const char *opath)
+{
+    const struct dvq_row *r = &rows[i];
+    struct dvq_dep dep;
+    const char *ref = NULL;
+    bool pending;
+    if (dvq_row_gate(rows, n, i, opath, &dep, &ref))
+        return snprintf(out, cap, "  #%lld queued  %-12s a%-3lld\n", r->seq,
+                        r->name, r->attempt);
+    if (dep.attempt <= 0)
+        return snprintf(out, cap,
+                        "  #%lld queued  %-12s a%-3lld blocked by %s "
+                        "(absent)\n", r->seq, r->name, r->attempt, ref);
+    pending = strcmp(dep.state, "terminal") != 0;
+    return snprintf(out, cap, "  #%lld queued  %-12s a%-3lld %s %s a%lld %s\n",
+                    r->seq, r->name, r->attempt,
+                    pending ? "waiting on" : "blocked by", ref, dep.attempt,
+                    pending ? dep.state : dep.verdict);
 }
 
 /* The claimant a resident worker persisted in the run's claim.json, so a
@@ -2883,7 +3075,7 @@ static void dvq_status(const struct zcl_command_request *req,
     size_t nrows = 0;
     char qpath[4096 + 32], opath[4096 + 32], poolpath[4096 + 32];
     struct json_value queued, running, outcomes, pool;
-    long long total = 0, warm = 0, freew = 0;
+    long long total = 0, warm = 0, freew = 0, queued_ready = 0;
     long long now = (long long)platform_time_wall_unix();
     bool want_json = false;
     const struct json_value *jv;
@@ -2926,7 +3118,8 @@ static void dvq_status(const struct zcl_command_request *req,
     json_set_object(&pool);
     for (size_t i = 0; i < nrows; i++) {
         if (strcmp(rows[i].state, "queued") == 0) {
-            if (!dvq_push_queued(&queued, &rows[i]))
+            if (!dvq_push_queued(&queued, rows, nrows, i, opath,
+                                 &queued_ready))
                 goto fail;
         } else if (strcmp(rows[i].state, "running") == 0) {
             if (!dvq_push_running(&running, &rows[i], now, d.engine))
@@ -2993,9 +3186,9 @@ static void dvq_status(const struct zcl_command_request *req,
         goto fail;
     if (!want_json) {
         w = snprintf(screen, sizeof(screen),
-                     "queue: %llu queued, %llu running "
+                     "queue: %llu queued (%lld ready), %llu running "
                      "(pool %lld free / %lld warm / %lld total)\n",
-                     (unsigned long long)queued.num_children,
+                     (unsigned long long)queued.num_children, queued_ready,
                      (unsigned long long)running.num_children, freew, warm,
                      total);
         if (w <= 0 || (size_t)w >= sizeof(screen))
@@ -3026,9 +3219,8 @@ static void dvq_status(const struct zcl_command_request *req,
                              rows[i].seq, tag, rows[i].name,
                              rows[i].attempt, rows[i].worktree, age);
             } else {
-                w = snprintf(screen + used, sizeof(screen) - used,
-                             "  #%lld %-7s %-12s a%-3lld\n", rows[i].seq,
-                             tag, rows[i].name, rows[i].attempt);
+                w = dvq_screen_queued(screen + used, sizeof(screen) - used,
+                                      rows, nrows, i, opath);
             }
             if (w <= 0 || (size_t)w >= sizeof(screen) - used)
                 break;
@@ -3038,6 +3230,9 @@ static void dvq_status(const struct zcl_command_request *req,
     free(rows);
     (void)json_push_kv_str(&reply->data, "leaf", DVQ_LEAF);
     (void)json_push_kv(&reply->data, "queued", &queued);
+    (void)json_push_kv_int(&reply->data, "queued_total",
+                           (long long)queued.num_children);
+    (void)json_push_kv_int(&reply->data, "queued_ready", queued_ready);
     (void)json_push_kv(&reply->data, "running", &running);
     (void)json_push_kv(&reply->data, "outcomes", &outcomes);
     (void)json_push_kv(&reply->data, "pool", &pool);

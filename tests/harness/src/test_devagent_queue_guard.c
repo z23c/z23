@@ -11,7 +11,13 @@
  *   - a restarted worker claiming again gets nothing new, and a reap that
  *     sees the same result twice records it once and claims nothing;
  *   - explicit cancel still drops the queued row, and a name whose run is
- *     terminal can be posted again (resume re-posts the same name).
+ *     terminal can be posted again (resume re-posts the same name);
+ *   - status tells a dependent that cannot run from ready work: it names
+ *     the prerequisite ref, its state and its latest verdict, and counts
+ *     queued_total apart from queued_ready;
+ *   - only the latest prerequisite attempt decides: a pending retry keeps
+ *     the dependent waiting and a late PASS for an older attempt never
+ *     unlocks it. Nothing auto-runs or auto-cancels a dependent.
  * Isolated XDG_STATE_HOME; the handler is called in-process after the real
  * registry validates the input keys. No model, network or spawn.
  */
@@ -337,6 +343,245 @@ _test_next:;
     return failures;
 }
 
+/* ── dependency status ────────────────────────────────────────────────── */
+
+/* Finish attempt of name the way a run does: its receipt plus the
+ * harness's rc line, then one reap records the outcome. */
+static bool dqg_finish(const char *name, long long attempt,
+                       const char *verdict, int rc)
+{
+    char path[1400];
+    FILE *f;
+    bool ok;
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/engine/%s/a%lld/run.out",
+                   g_dqg_state, name, attempt);
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    ok = fprintf(f, "rc=%d\n", rc) > 0;
+    if (fclose(f) != 0 || !ok)
+        return false;
+    (void)snprintf(path, sizeof(path),
+                   "%s/z23/dev/engine/%s/a%lld/receipt.json", g_dqg_state,
+                   name, attempt);
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    ok = fprintf(f, "{\"verdict\":\"%s\"}\n", verdict) > 0;
+    return fclose(f) == 0 && ok && dqg_reap() == 1;
+}
+
+static bool dqg_post_attempt(const char *name, long long attempt)
+{
+    struct dqg_call c;
+    char code[64];
+    bool ran;
+    dqg_begin(&c, "post");
+    (void)json_push_kv_str(&c.input, "kind", "leaf");
+    (void)json_push_kv_str(&c.input, "name", name);
+    (void)json_push_kv_int(&c.input, "attempt", attempt);
+    ran = dqg_run(&c);
+    dqg_code(&c, code, sizeof(code));
+    dqg_end(&c);
+    return ran && !code[0];
+}
+
+/* What status says about one queued row's dependency. */
+struct dqg_view {
+    long long queued_total, queued_ready;
+    int ready; /* 1, 0, or -1 when the field is absent */
+    char ref[96], state[32], verdict[64];
+    long long attempt;
+    char screen[4096];
+};
+
+static void dqg_view_blocker(const struct json_value *b, struct dqg_view *v)
+{
+    const struct json_value *f;
+    if (!b || b->type != JSON_OBJ)
+        return;
+    f = json_get(b, "ref");
+    if (f && f->type == JSON_STR)
+        (void)snprintf(v->ref, sizeof(v->ref), "%s", json_get_str(f));
+    f = json_get(b, "state");
+    if (f && f->type == JSON_STR)
+        (void)snprintf(v->state, sizeof(v->state), "%s", json_get_str(f));
+    f = json_get(b, "verdict");
+    (void)snprintf(v->verdict, sizeof(v->verdict), "%s",
+                   f && f->type == JSON_STR ? json_get_str(f) : "(null)");
+    f = json_get(b, "attempt");
+    v->attempt = f && f->type == JSON_INT ? json_get_int(f) : -1;
+}
+
+static void dqg_view_row(const struct json_value *arr, const char *name,
+                         struct dqg_view *v)
+{
+    for (size_t i = 0; arr && i < json_size(arr); i++) {
+        const struct json_value *row = json_at(arr, i);
+        const struct json_value *nm = json_get(row, "name");
+        const struct json_value *rd = json_get(row, "ready");
+        if (!nm || nm->type != JSON_STR || strcmp(json_get_str(nm), name))
+            continue;
+        if (rd && rd->type == JSON_BOOL)
+            v->ready = json_get_bool(rd) ? 1 : 0;
+        dqg_view_blocker(json_get(row, "blocker"), v);
+    }
+}
+
+static long long dqg_int(const struct json_value *o, const char *key)
+{
+    const struct json_value *f = json_get(o, key);
+    return f && f->type == JSON_INT ? json_get_int(f) : -1;
+}
+
+static void dqg_status_view(const char *name, struct dqg_view *v)
+{
+    struct dqg_call c;
+    const struct json_value *s;
+    memset(v, 0, sizeof(*v));
+    v->queued_total = v->queued_ready = -1;
+    v->ready = -1;
+    v->attempt = -1;
+    dqg_begin(&c, "status");
+    if (dqg_run(&c) && c.reply.status == ZCL_COMMAND_STATUS_PASSED) {
+        v->queued_total = dqg_int(&c.reply.data, "queued_total");
+        v->queued_ready = dqg_int(&c.reply.data, "queued_ready");
+        dqg_view_row(json_get(&c.reply.data, "queued"), name, v);
+        s = json_get(&c.reply.data, "screen");
+        if (s && s->type == JSON_STR)
+            (void)snprintf(v->screen, sizeof(v->screen), "%s",
+                           json_get_str(s));
+    }
+    dqg_end(&c);
+}
+
+/* A refused prerequisite: the picker withholds the dependent, and status
+ * says so with the prerequisite ref and its terminal verdict instead of
+ * listing it as ordinary queued work. Nothing runs or cancels it. */
+static int dqg_case_dep_refused(void)
+{
+    int failures = 0;
+    TEST("queue guard: a refused prerequisite shows its dependent blocked") {
+        struct dqg_view v;
+        dqg_isolate("depref");
+        ASSERT(dqg_post_ok("prereq", NULL));
+        ASSERT(dqg_post_ok("succ", "prereq"));
+        ASSERT(dqg_claim_is("prereq"));
+        ASSERT(dqg_finish("prereq", 1, "refused", 1));
+        dqg_status_view("succ", &v);
+        ASSERT_EQ(v.queued_total, 1);
+        ASSERT_EQ(v.queued_ready, 0);
+        ASSERT_EQ(v.ready, 0);
+        ASSERT_STR_EQ(v.ref, "prereq");
+        ASSERT_STR_EQ(v.state, "terminal");
+        ASSERT_STR_EQ(v.verdict, "refused");
+        ASSERT_EQ(v.attempt, 1);
+        ASSERT(strstr(v.screen, "0 ready") != NULL);
+        ASSERT(strstr(v.screen, "blocked by prereq a1 refused") != NULL);
+        ASSERT(dqg_claim_is(""));
+        ASSERT_EQ(dqg_count("queued", "succ"), 1);
+        /* A cancelled prerequisite leaves no row and no outcome: the
+         * dependent stays blocked on an absent ref, still visible. */
+        ASSERT(dqg_post_ok("gone", NULL));
+        ASSERT(dqg_post_ok("orphan", "gone"));
+        {
+            struct dqg_call c;
+            dqg_begin(&c, "cancel");
+            (void)json_push_kv_str(&c.input, "name", "gone");
+            ASSERT(dqg_run(&c));
+            dqg_end(&c);
+        }
+        dqg_status_view("orphan", &v);
+        ASSERT_EQ(v.ready, 0);
+        ASSERT_STR_EQ(v.ref, "gone");
+        ASSERT_STR_EQ(v.state, "absent");
+        ASSERT_STR_EQ(v.verdict, "(null)");
+        ASSERT_EQ(v.queued_ready, 0);
+        PASS();
+    }
+_test_next:;
+    dqg_restore();
+    return failures;
+}
+
+/* The current dependency attempt decides: a pending retry keeps the
+ * dependent waiting, a late PASS for an older attempt cannot unlock it,
+ * and only the latest attempt's PASS makes it eligible, exactly once. */
+static int dqg_case_dep_retry(void)
+{
+    int failures = 0;
+    TEST("queue guard: only the latest prerequisite attempt's PASS unlocks") {
+        struct dqg_view v;
+        dqg_isolate("depretry");
+        ASSERT(dqg_post_ok("base", NULL));
+        ASSERT(dqg_claim_is("base"));
+        ASSERT(dqg_finish("base", 1, "fail", 1));
+        ASSERT(dqg_post_ok("top", "base"));
+        dqg_status_view("top", &v);
+        ASSERT_EQ(v.ready, 0);
+        ASSERT_STR_EQ(v.verdict, "fail");
+        /* The retry is posted: pending, then running. */
+        ASSERT(dqg_post_attempt("base", 2));
+        dqg_status_view("top", &v);
+        ASSERT_EQ(v.ready, 0);
+        ASSERT_STR_EQ(v.state, "queued");
+        ASSERT_EQ(v.attempt, 2);
+        ASSERT_EQ(v.queued_total, 2);
+        ASSERT_EQ(v.queued_ready, 1);
+        ASSERT(dqg_claim_is("base"));
+        dqg_status_view("top", &v);
+        ASSERT_STR_EQ(v.state, "running");
+        /* The retry itself fails: blocked again on the newer verdict. */
+        ASSERT(dqg_finish("base", 2, "fail", 1));
+        ASSERT(dqg_claim_is(""));
+        dqg_status_view("top", &v);
+        ASSERT_EQ(v.ready, 0);
+        ASSERT_STR_EQ(v.state, "terminal");
+        ASSERT_STR_EQ(v.verdict, "fail");
+        ASSERT_EQ(v.attempt, 2);
+        /* The next retry passes: eligible, and claimed exactly once. */
+        ASSERT(dqg_post_attempt("base", 3));
+        ASSERT(dqg_claim_is("base"));
+        ASSERT(dqg_finish("base", 3, "pass", 0));
+        dqg_status_view("top", &v);
+        ASSERT_EQ(v.ready, 1);
+        ASSERT_EQ(v.queued_ready, 1);
+        ASSERT_STR_EQ(v.ref, "");
+        ASSERT(dqg_claim_is("top"));
+        ASSERT(dqg_claim_is(""));
+        PASS();
+    }
+_test_next:;
+    dqg_restore();
+    return failures;
+}
+
+/* The picker alone, no status: a late PASS for an older attempt of the
+ * prerequisite never unlocks a dependent while a newer attempt is live. */
+static int dqg_case_dep_late_pass(void)
+{
+    int failures = 0;
+    TEST("queue guard: an older attempt's late PASS never unlocks work") {
+        dqg_isolate("deplate");
+        ASSERT(dqg_post_attempt("low", 2));
+        ASSERT(dqg_post_ok("high", "low"));
+        ASSERT(dqg_claim_is("low"));
+        /* A late PASS for attempt 1 lands while attempt 2 runs. */
+        ASSERT(dqg_append("outcomes.jsonl",
+            "{\"ts\":\"2026-09-18T00:00:00Z\",\"name\":\"low\","
+            "\"attempt\":1,\"verdict\":\"pass\",\"rc\":0}\n"));
+        ASSERT(dqg_claim_is(""));
+        /* Attempt 2 fails: the older PASS still does not unlock high. */
+        ASSERT(dqg_finish("low", 2, "fail", 1));
+        ASSERT(dqg_claim_is(""));
+        ASSERT_EQ(dqg_count("queued", "high"), 1);
+        PASS();
+    }
+_test_next:;
+    dqg_restore();
+    return failures;
+}
+
 int test_devagent_queue_guard(void);
 int test_devagent_queue_guard(void)
 {
@@ -351,5 +596,8 @@ int test_devagent_queue_guard(void)
     failures += dqg_case_post_running();
     failures += dqg_case_legacy_duplicate();
     failures += dqg_case_cancel_and_terminal();
+    failures += dqg_case_dep_late_pass();
+    failures += dqg_case_dep_refused();
+    failures += dqg_case_dep_retry();
     return failures;
 }
