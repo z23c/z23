@@ -17,8 +17,16 @@
  * port, refuses non-loopback peers with 403, serves plain HTTP. TLS
  * termination and OAuth live in front of it (host front path) and behind
  * it the node enforces every grant scope, expiry and revocation itself.
+ * Every accepted socket carries a read AND a write deadline
+ * (FLEET_GW_IO_TIMEOUT_MS, 10 s), and the listener refuses past a hard
+ * concurrent-child count (FLEET_GW_MAX_CHILDREN, 64): a half-open
+ * connection costs one timeout, never a child held open indefinitely.
+ * Request heads are read in buffered refills, not one syscall per byte.
  * A bearer passed as a tool argument is carried (header or tool argument), never minted here, and
- * never logged. No credentials in chat, no private data made public.
+ * never logged. It never reaches an argv string either: the node input
+ * rides the child's STDIN (`--input=-`), because /proc/<pid>/cmdline is
+ * world-readable and an argv credential is a broadcast one.
+ * No credentials in chat, no private data made public.
  * Every tools/call needs exactly one credential (header or "grant"
  * argument); a call with none, or two that differ, is refused with a
  * typed error before the node is forked. A call with none is also a
@@ -38,6 +46,18 @@
  * frozen /steer; discovery issuer defaults to loopback unless
  * FLEET_GW_ISSUER names the front.
  *
+ * APPROVAL IS THE ONE PLACE A GRANT IS BORN, so four things guard it. The
+ * authorize GET mints a single-use HMAC nonce bound to that exact request
+ * and the POST is refused without it; the POST is refused unless Origin or
+ * Referer names FLEET_GW_ISSUER; owner-key failures spend a persistent,
+ * fail-closed window; and a registered redirect must be loopback or sit
+ * under FLEET_GW_REDIRECT_ALLOW, the operator's allowlist — "any https"
+ * let anyone who could reach the front bind a client to a callback they
+ * owned. Registration is anonymous by RFC 7591 and therefore bounded: a
+ * rate window, a row count and a file size. Every value this binary
+ * appends to its own JSONL stores goes through the JSON string writer, so
+ * a stored value can never end its row and forge the next one.
+ *
  * TOOL SURFACE (frozen with the verbs). initialize / notifications /
  * tools.list / tools.call for steer_brief, steer_send, steer_evidence.
  * Stateless: no session ids. One JSON-RPC request per POST; parse,
@@ -45,12 +65,12 @@
  * GET /healthz answers readiness. Everything else is 404; GET on /steer
  * is 405 (writes are never disguised as reads).
  *
- * PROCESS RULE. One fork per connection, one fork/exec per tool call into
- * the configured node binary (default build/bin/z23). No threads, no
- * shell (argv exec only), no popen()/system(). Bounded buffers: 64 KiB
- * request headers, 1 MiB bodies, 4 MiB node replies. POSIX only: on
- * Windows main refuses (the node itself stays portable; the gateway
- * does not claim it).
+ * PROCESS RULE. One fork per connection up to the child cap, one fork/exec
+ * per tool call into the configured node binary (default build/bin/z23).
+ * No threads, no shell (argv exec only), no popen()/system(). Bounded
+ * buffers: 64 KiB request headers, 1 MiB bodies, 4 MiB node replies.
+ * POSIX only: on Windows main refuses (the node itself stays portable;
+ * the gateway does not claim it).
  */
 
 #if defined(_WIN32)
@@ -64,6 +84,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -74,35 +95,68 @@
 #include "platform/clock.h"
 #include "platform/os_proc.h"
 
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define GW_CAP_HEADERS (64u * 1024u)
 #define GW_CAP_BODY (1024u * 1024u)
-/* A node call is one execv, and the tool input rides in ONE argv string.
+/* A node call is one execv, and the tool input rides on the child's STDIN
+ * (`--input=-`), never in an argv string. See gw_node_exec for why.
  *
- * This bound is LINUX-SPECIFIC, not a POSIX guarantee: Linux caps a single
+ * The number came from the argv era and is kept exactly: Linux caps a single
  * argument at MAX_ARG_STRLEN = 32 pages = 131072 bytes including its
- * terminator, measured on the deployment host (131071 bytes exec, 131072 is
- * E2BIG). POSIX only promises ARG_MAX for the whole argument block and says
- * nothing about a per-argument cap, so other kernels draw this line
- * elsewhere. The gateway is deployed on Linux; a port must re-measure rather
- * than inherit this number.
- *
- * The argument is "--input=" plus the JSON. Anything larger
- * used to pass the 1 MiB body check, reach execv, fail with E2BIG in the
- * child and surface as the opaque "node did not answer" — the gateway
- * advertising a capacity it could not deliver. The HTTP body cap stays at
- * 1 MiB for OAuth form posts; node-dispatched tool input is bounded here and
- * refused before the fork, with the real number in the message. */
+ * terminator, and "--input=" spent 8 of those. Input that large used to pass
+ * the 1 MiB body check, reach execv, fail with E2BIG in the child and
+ * surface as the opaque "node did not answer". stdin has no such kernel
+ * bound, so this is now the GATEWAY'S OWN declared capacity rather than a
+ * kernel one: a stable, published number that a caller can plan against, and
+ * one the node's per-leaf input budget still narrows further. The HTTP body
+ * cap stays at 1 MiB for OAuth form posts; node-dispatched tool input is
+ * bounded here and refused before the fork, with the real number in the
+ * message. */
 #define GW_ARG_PREFIX "--input="
 #define GW_CAP_NODE_INPUT (131071u - (unsigned)(sizeof(GW_ARG_PREFIX) - 1u))
 #define GW_CAP_REPLY (4u * 1024u * 1024u)
 #define GW_CAP_RESP (5u * 1024u * 1024u)
 #define GW_BACKLOG 16
+
+/* ── connection bounds (a half-open socket must cost nothing) ───────────
+ *
+ * Every accepted socket carries a receive AND a send timeout, and the
+ * listener refuses over a hard concurrent-child count. Without both, thirty
+ * connections that send half a request line held thirty children for as
+ * long as they cared to: no cap, no clock, one fork each. Overridable so a
+ * test can prove the refusal in milliseconds rather than seconds. */
+#define GW_IO_TIMEOUT_MS_DEFAULT 10000
+#define GW_IO_TIMEOUT_MS_MAX 120000
+#define GW_MAX_CHILDREN_DEFAULT 64
+#define GW_MAX_CHILDREN_MAX 512
+/* Header bytes arrive one refill at a time, never one syscall per byte: a
+ * 64 KiB head used to cost 65536 read(2) calls. Bytes past the end of the
+ * headers stay in the reader and become the first bytes of the body. */
+#define GW_READ_CHUNK 4096u
+
+/* ── OAuth write bounds and anti-abuse counters ─────────────────────────
+ *
+ * The register endpoint is anonymous by design (RFC 7591 with no initial
+ * access token), so it is bounded instead: a rate window, a row count and
+ * a file size, all fail-closed. The authorize approval is bounded by the
+ * owner-key failure window. */
+#define GW_CSRF_TTL 600
+#define GW_CLIENTS_CAP_BYTES (256u * 1024u)
+#define GW_CLIENTS_CAP_ROWS 2048u
+#define GW_OWNER_FAIL_MAX 5
+#define GW_OWNER_FAIL_WINDOW 900
+#define GW_REGISTER_MAX 20
+#define GW_REGISTER_WINDOW 3600
+/* The owner key is compared over a fixed padded buffer so neither the
+ * length nor the position of the first wrong byte is observable. */
+#define GW_OWNER_KEY_CAP 128
 
 static const char *gw_proto_versions[] = {"2025-06-18", "2025-11-25"};
 static const char *gw_server_name = "z23-fleet-gateway";
@@ -217,7 +271,18 @@ struct gw_config {
     char port[16];
     char node[4096];
     char issuer[256];
-    char owner_key[128];
+    char owner_key[GW_OWNER_KEY_CAP];
+    /* Operator-configured redirect allowlist (space/comma separated
+     * origins or origin+path prefixes). Empty admits loopback only. */
+    char redirect_allow[1024];
+    long io_timeout_ms;
+    long max_children;
+    /* Per-process CSRF key, drawn once before the first fork so every
+     * connection child verifies the nonces its siblings minted. Never
+     * logged, never written to disk, and gone on restart — which only
+     * costs an owner one reload of the approval page. */
+    uint8_t csrf_key[32];
+    bool csrf_ready;
 };
 
 /* Bound port for default-issuer rendering (loopback only). */
@@ -238,6 +303,38 @@ struct gw_authz {
  * so the gateway works no matter which cwd the caller runs it from.
  * The path comes from the platform seam (os_proc_exe_path), never from
  * a raw /proc read in this leaf. */
+/* CSPRNG bytes for ids, codes and the CSRF key. False when the kernel
+ * pool could not be read, which fails every caller closed. */
+static bool gw_rand_bytes(uint8_t *out, size_t n)
+{
+    FILE *f = fopen("/dev/urandom", "rb");
+    size_t got = 0;
+    if (!f)
+        return false;
+    while (got < n) {
+        size_t r = fread(out + got, 1, n - got, f);
+        if (r == 0)
+            break;
+        got += r;
+    }
+    (void)fclose(f);
+    return got == n;
+}
+
+/* One bounded non-negative number from the environment, else dflt. */
+static long gw_env_long(const char *name, long dflt, long lo, long hi)
+{
+    const char *v = getenv(name);
+    char *end = NULL;
+    long n;
+    if (!v || !v[0])
+        return dflt;
+    n = strtol(v, &end, 10);
+    if (end == v || *end != '\0' || n < lo || n > hi)
+        return dflt;
+    return n;
+}
+
 static bool gw_exe_dir(char *buf, size_t cap) {
     char *slash;
     if (!os_proc_exe_path(buf, cap)) return false;
@@ -249,36 +346,67 @@ static bool gw_exe_dir(char *buf, size_t cap) {
     return true;
 }
 
+/* One environment string into a bounded field, or the default. */
+static void gw_env_str(char *out, size_t cap, const char *name,
+                       const char *dflt)
+{
+    const char *v = getenv(name);
+    snprintf(out, cap, "%s", v && v[0] ? v : dflt);
+}
+
+/* The node binary: named outright, else the sibling z23 beside this
+ * executable, so the gateway works from any cwd. */
+static void gw_config_node(struct gw_config *c)
+{
+    const char *v = getenv("FLEET_GW_NODE");
+    char dir[4096];
+    size_t dn = 0;
+    if (v && v[0]) {
+        snprintf(c->node, sizeof(c->node), "%s", v);
+        return;
+    }
+    if (gw_exe_dir(dir, sizeof dir))
+        dn = strlen(dir);
+    if (dn > 0 && dn + 5 < sizeof(c->node)) {
+        memcpy(c->node, dir, dn);
+        memcpy(c->node + dn, "/z23", 5);
+    } else {
+        snprintf(c->node, sizeof(c->node), "%s", "build/bin/z23");
+    }
+}
+
+/* The connection bounds and the per-process approval-nonce key. */
+static void gw_config_bounds(struct gw_config *c)
+{
+    c->io_timeout_ms = gw_env_long("FLEET_GW_IO_TIMEOUT_MS",
+                                   GW_IO_TIMEOUT_MS_DEFAULT, 10,
+                                   GW_IO_TIMEOUT_MS_MAX);
+    c->max_children = gw_env_long("FLEET_GW_MAX_CHILDREN",
+                                  GW_MAX_CHILDREN_DEFAULT, 1,
+                                  GW_MAX_CHILDREN_MAX);
+    c->csrf_ready = gw_rand_bytes(c->csrf_key, sizeof(c->csrf_key));
+}
+
 static void gw_config(struct gw_config *c)
 {
     const char *v;
     memset(c, 0, sizeof(*c));
-    v = getenv("FLEET_GW_BIND");
-    snprintf(c->bind, sizeof(c->bind), "%s",
-             v && v[0] ? v : "127.0.0.1");
-    v = getenv("FLEET_GW_PORT");
-    snprintf(c->port, sizeof(c->port), "%s", v && v[0] ? v : "0");
-    v = getenv("FLEET_GW_ISSUER");
-    snprintf(c->issuer, sizeof(c->issuer), "%s", v && v[0] ? v : "");
+    gw_env_str(c->bind, sizeof(c->bind), "FLEET_GW_BIND", "127.0.0.1");
+    gw_env_str(c->port, sizeof(c->port), "FLEET_GW_PORT", "0");
+    gw_env_str(c->issuer, sizeof(c->issuer), "FLEET_GW_ISSUER", "");
+    /* Redirect allowlist: which https origins a registered client may be
+     * sent back to. Empty means loopback only — an operator who wants a
+     * hosted client names its callback origin here, and nothing else can
+     * ever be registered. */
+    gw_env_str(c->redirect_allow, sizeof(c->redirect_allow),
+               "FLEET_GW_REDIRECT_ALLOW", "");
     /* Owner key for the authorize approval step. Empty disables OAuth
      * approval (discovery still served); the key is never logged. */
     v = getenv("FLEET_GW_OWNER_KEY");
     if (v && v[0] && strlen(v) < sizeof(c->owner_key))
         memcpy(c->owner_key, v, strlen(v) + 1);
-    v = getenv("FLEET_GW_NODE");
-    if (v && v[0]) {
-        snprintf(c->node, sizeof(c->node), "%s", v);
-    } else {
-        char dir[4096];
-        size_t dn = 0;
-        if (gw_exe_dir(dir, sizeof dir)) dn = strlen(dir);
-        if (dn > 0 && dn + 5 < sizeof(c->node)) {
-            memcpy(c->node, dir, dn);
-            memcpy(c->node + dn, "/z23", 5);
-        } else {
-            snprintf(c->node, sizeof(c->node), "%s", "build/bin/z23");
-        }
-    }
+    gw_config_bounds(c);
+    gw_config_node(c);
 }
 
 /* ── HTTP/1.1 request (headers + optional body, bounded) ──────────────── */
@@ -309,6 +437,11 @@ struct gw_http {
     char auth[96 + 1];
     bool auth_present;
     bool auth_bad;
+    /* Where the browser says this request came from. A state-changing
+     * OAuth POST is refused unless one of these names the issuer, so a
+     * page on another origin cannot drive the owner's approval form. */
+    char origin[256];
+    char referer[512];
 };
 
 /* Bearer [REDACTED] alphabet: grant ids are 32-hex today; OAuth bearer
@@ -428,6 +561,26 @@ static void gw_parse_authorization(struct gw_http *h, const char *line)
 
 /* One header line: Content-Length sizes the body; Authorization carries
  * the tool-call credential. Every other header is ignored. */
+/* Copy one header's value (trimmed) into a bounded field. A value that
+ * does not fit is stored empty, which reads as absent and fails closed. */
+static void gw_header_value(const char *line, const char *name, char *out,
+                            size_t cap)
+{
+    const char *v = line + strlen(name) + 1;
+    size_t n;
+    if (out[0])
+        return;
+    while (gw_is_space(*v))
+        v++;
+    n = strlen(v);
+    while (n > 0 && gw_is_space(v[n - 1]))
+        n--;
+    if (n == 0 || n >= cap)
+        return;
+    memcpy(out, v, n);
+    out[n] = '\0';
+}
+
 static void gw_parse_header(struct gw_http *h, const char *line)
 {
     static const char *const cl = "content-length:";
@@ -436,6 +589,14 @@ static void gw_parse_header(struct gw_http *h, const char *line)
     unsigned long n = 0;
     if (gw_header_is(line, "authorization")) {
         gw_parse_authorization(h, line);
+        return;
+    }
+    if (gw_header_is(line, "origin")) {
+        gw_header_value(line, "origin", h->origin, sizeof(h->origin));
+        return;
+    }
+    if (gw_header_is(line, "referer")) {
+        gw_header_value(line, "referer", h->referer, sizeof(h->referer));
         return;
     }
     for (i = 0; i < k; i++) {
@@ -462,28 +623,67 @@ static void gw_parse_header(struct gw_http *h, const char *line)
 
 /* Authorization value: Bearer scheme only; the token rides h->auth. */
 
+/* ── buffered request reader ────────────────────────────────────────────
+ *
+ * One read(2) per refill, not per byte. Whatever arrives past the end of
+ * the headers is the first of the body and stays here rather than being
+ * lost or re-read, so the header scan and the body read share one stream. */
+struct gw_reader {
+    int fd;
+    size_t len;
+    size_t pos;
+    char buf[GW_READ_CHUNK];
+};
+
+static void gw_reader_init(struct gw_reader *r, int fd)
+{
+    r->fd = fd;
+    r->len = 0;
+    r->pos = 0;
+}
+
+/* True when at least one byte is held. False at EOF, on error, or when the
+ * socket's receive timeout expired: the connection is finished either way. */
+static bool gw_reader_fill(struct gw_reader *r)
+{
+    ssize_t got;
+    if (r->pos < r->len)
+        return true;
+    r->pos = 0;
+    r->len = 0;
+    got = read(r->fd, r->buf, sizeof(r->buf));
+    if (got <= 0)
+        return false;
+    r->len = (size_t)got;
+    return true;
+}
+
 /* Read until end-of-headers. Returns header byte count, or 0 when the
- * cap or EOF hits first. */
-static size_t gw_read_headers(int fd, char *buf, size_t cap)
+ * cap, EOF or the socket timeout hits first. */
+static size_t gw_read_headers(struct gw_reader *r, char *buf, size_t cap)
 {
     size_t n = 0;
-    ssize_t r;
     while (n + 1 < cap) {
-        r = read(fd, buf + n, 1);
-        if (r <= 0)
+        size_t take, i;
+        if (!gw_reader_fill(r))
             break;
-        n += (size_t)r;
-        buf[n] = '\0';
-        if (n >= 4 && memcmp(buf + n - 4, "\r\n\r\n", 4) == 0)
-            return n;
+        take = r->len - r->pos;
+        if (take > cap - 1 - n)
+            take = cap - 1 - n;
+        for (i = 0; i < take; i++) {
+            buf[n++] = r->buf[r->pos++];
+            buf[n] = '\0';
+            if (n >= 4 && memcmp(buf + n - 4, "\r\n\r\n", 4) == 0)
+                return n;
+        }
     }
     return 0;
 }
 
-static bool gw_read_body(int fd, struct gw_http *h)
+static bool gw_read_body(struct gw_reader *r, struct gw_http *h)
 {
     size_t left;
-    ssize_t r;
+    ssize_t got;
     if (h->content_length == 0)
         return true;
     if (h->content_length > GW_CAP_BODY)
@@ -496,24 +696,34 @@ static bool gw_read_body(int fd, struct gw_http *h)
     left = h->content_length;
     h->body_len = 0;
     while (left > 0) {
-        r = read(fd, h->body + h->body_len, left);
-        if (r <= 0) {
+        if (r->pos < r->len) {
+            size_t take = r->len - r->pos;
+            if (take > left)
+                take = left;
+            memcpy(h->body + h->body_len, r->buf + r->pos, take);
+            r->pos += take;
+            h->body_len += take;
+            left -= take;
+            continue;
+        }
+        got = read(r->fd, h->body + h->body_len, left);
+        if (got <= 0) {
             free(h->body);
             h->body = NULL;
             return false;
         }
-        h->body_len += (size_t)r;
-        left -= (size_t)r;
+        h->body_len += (size_t)got;
+        left -= (size_t)got;
     }
     h->body[h->body_len] = '\0';
     return true;
 }
 
-static bool gw_http_read(int fd, struct gw_http *h, char *hbuf)
+static bool gw_http_read(struct gw_reader *r, struct gw_http *h, char *hbuf)
 {
     char *eol, *line;
     memset(h, 0, sizeof(*h));
-    if (gw_read_headers(fd, hbuf, GW_CAP_HEADERS) == 0) {
+    if (gw_read_headers(r, hbuf, GW_CAP_HEADERS) == 0) {
         h->bad = true;
         return false;
     }
@@ -536,7 +746,7 @@ static bool gw_http_read(int fd, struct gw_http *h, char *hbuf)
         gw_parse_header(h, line);
         line = nl + 2;
     }
-    return gw_read_body(fd, h);
+    return gw_read_body(r, h);
 }
 
 /* ── node invocation (fork/exec argv, never a shell) ───────────────────── */
@@ -599,16 +809,42 @@ static int gw_node_wait(pid_t pid)
     return WEXITSTATUS(st);
 }
 
-/* Run: <node> fleet steer <verb> <arg>, where arg is the whole
- * "--input=<json>" argv string, already built and already within
- * GW_CAP_NODE_INPUT. Stdout (the node's own result envelope) is captured
- * up to GW_CAP_REPLY, grown as it arrives rather than reserved up front. */
+/* Feed the node's stdin and close it, so the child sees EOF and runs.
+ * SIGPIPE is ignored process-wide, so a child that died before reading
+ * surfaces as a write error here and then as its own exit status. */
+static void gw_node_feed(int fd, const char *json, size_t n)
+{
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, json + off, n - off);
+        if (w <= 0)
+            break;
+        off += (size_t)w;
+    }
+    close(fd);
+}
+
+/* Run: <node> fleet steer <verb> --input=-, with the JSON input written to
+ * the child's STDIN.
+ *
+ * WHY NOT argv. The input carries the caller's bearer grant, and an argv
+ * string is world-readable for the life of the process: /proc/<pid>/cmdline
+ * is mode 0444 and this host mounts /proc without hidepid, so every local
+ * account could read a live credential out of any steer call — while this
+ * file's contract promises the bearer is never logged. stdin is visible to
+ * nobody but the two processes. The node has accepted `--input=-` for its
+ * whole JSON object since the JSONL transport landed; nothing else changes.
+ *
+ * Stdout (the node's own result envelope) is captured up to GW_CAP_REPLY,
+ * grown as it arrives rather than reserved up front. The child consumes its
+ * whole stdin before it writes an answer, so feeding then reading cannot
+ * deadlock on a full pipe. */
 static struct gw_node_out gw_node_exec(const char *node, const char *verb,
-                                       const char *arg)
+                                       const char *input_json)
 {
     struct gw_node_out out;
     struct gw_buf reply;
-    int fds[2];
+    int fds[2], in[2];
     pid_t pid;
     memset(&out, 0, sizeof(out));
     memset(&reply, 0, sizeof(reply));
@@ -616,25 +852,38 @@ static struct gw_node_out gw_node_exec(const char *node, const char *verb,
         out.nomem = true;
         return out;
     }
+    if (pipe(in) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        out.nomem = true;
+        return out;
+    }
     pid = fork();
     if (pid < 0) {
         close(fds[0]);
         close(fds[1]);
+        close(in[0]);
+        close(in[1]);
         out.nomem = true;
         return out;
     }
     if (pid == 0) {
         char *const argv[] = {
             (char *)node, (char *)"fleet", (char *)"steer", (char *)verb,
-            (char *)arg, NULL
+            (char *)GW_ARG_PREFIX "-", NULL
         };
         dup2(fds[1], STDOUT_FILENO);
+        dup2(in[0], STDIN_FILENO);
         close(fds[0]);
         close(fds[1]);
+        close(in[0]);
+        close(in[1]);
         execv(node, argv);
         _exit(127);
     }
     close(fds[1]);
+    close(in[0]);
+    gw_node_feed(in[1], input_json, input_json ? strlen(input_json) : 0);
     out.nomem = !gw_node_read(fds[0], &reply);
     close(fds[0]);
     out.exit_code = gw_node_wait(pid);
@@ -654,19 +903,11 @@ static struct gw_node_out gw_node_call(const char *node, const char *verb,
                                        const char *input_json)
 {
     struct gw_node_out out;
-    struct gw_buf arg;
+    const char *json = input_json ? input_json : "{}";
     memset(&out, 0, sizeof(out));
-    memset(&arg, 0, sizeof(arg));
-    gw_buf_str(&arg, GW_ARG_PREFIX);
-    gw_buf_str(&arg, input_json ? input_json : "{}");
-    if (arg.oom || !arg.p || arg.len - (sizeof(GW_ARG_PREFIX) - 1u) >
-                                  GW_CAP_NODE_INPUT) {
-        out.nomem = arg.oom || !arg.p;
-        gw_buf_free(&arg);
+    if (strlen(json) > GW_CAP_NODE_INPUT)
         return out;
-    }
-    out = gw_node_exec(node, verb, arg.p);
-    gw_buf_free(&arg);
+    out = gw_node_exec(node, verb, json);
     if (out.ok && out.exit_code != 0) {
         free(out.text);
         out.text = NULL;
@@ -1146,7 +1387,7 @@ static bool gw_credential(struct gw_buf *b, const struct json_value *id,
 
 /* Fork the node for one credentialed call and format its own envelope as
  * the tool result content (a node refusal is content with isError:true,
- * never a transport error). arg is the whole "--input=" argv string. */
+ * never a transport error). arg is the input JSON, fed over stdin. */
 static void gw_forward_call(struct gw_buf *b, const struct json_value *id,
                             const struct gw_tool *t, const char *node,
                             const char *arg)
@@ -1243,8 +1484,7 @@ static void gw_reply_tool_call(struct gw_buf *b, const struct json_value *id,
         return;
     }
     memset(&arg, 0, sizeof(arg));
-    gw_buf_reserve(&arg, sizeof(GW_ARG_PREFIX) + n);
-    gw_buf_str(&arg, GW_ARG_PREFIX);
+    gw_buf_reserve(&arg, n + 1u);
     gw_input_write(&arg, pl, carry);
     if (arg.oom || !arg.p) {
         gw_buf_free(&arg);
@@ -1668,6 +1908,286 @@ static bool gw_scope_comma(const char *scope, char *out, size_t cap)
     return true;
 }
 
+/* ── fail-closed rate windows ───────────────────────────────────────────
+ *
+ * Two endpoints take work from anyone who can reach the front: the
+ * anonymous registration and the owner-key approval. Each is bounded by a
+ * fixed-window counter in one small owner-private file, taken under an
+ * exclusive flock so concurrent connection children cannot each read the
+ * same count and write it back once. Every failure to read, lock or write
+ * the counter REFUSES the request: a counter that cannot be kept is not a
+ * reason to stop counting.
+ *
+ * The counters carry no caller identity, which is deliberate. There is one
+ * owner key and one loopback front; per-source buckets would only invite a
+ * spoofed source header to reset them. */
+static bool gw_rate_path(const char *dir, const char *name, char *out,
+                         size_t cap)
+{
+    int n = snprintf(out, cap, "%s/%s", dir, name);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* Open the window file locked, read <start> <count>, roll the window over
+ * when it has elapsed. Returns the fd (still locked) or -1. */
+static int gw_rate_open(const char *dir, const char *name, long long window,
+                        long long *start, long long *count)
+{
+    char path[4096 + 64];
+    char buf[64];
+    ssize_t r;
+    long long now = clock_now_wall_ms() / 1000LL;
+    int fd;
+    *start = now;
+    *count = 0;
+    if (!gw_rate_path(dir, name, path, sizeof(path)))
+        return -1;
+    fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0)
+        return -1;
+    if (flock(fd, LOCK_EX) != 0) {
+        close(fd);
+        return -1;
+    }
+    r = read(fd, buf, sizeof(buf) - 1);
+    if (r > 0) {
+        buf[r] = '\0';
+        if (sscanf(buf, "%lld %lld", start, count) != 2 || *count < 0 ||
+            now - *start >= window || now < *start) {
+            *start = now;
+            *count = 0;
+        }
+    }
+    return fd;
+}
+
+static void gw_rate_close(int fd)
+{
+    if (fd >= 0) {
+        (void)flock(fd, LOCK_UN);
+        close(fd);
+    }
+}
+
+/* Store the window back. False when it could not be written whole. */
+static bool gw_rate_store(int fd, long long start, long long count)
+{
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "%lld %lld\n", start, count);
+    if (n <= 0 || (size_t)n >= sizeof(buf))
+        return false;
+    if (lseek(fd, 0, SEEK_SET) != 0 || ftruncate(fd, 0) != 0)
+        return false;
+    return write(fd, buf, (size_t)n) == (ssize_t)n;
+}
+
+/* Spend one unit of the window. True only when it was both under the cap
+ * and durably recorded. */
+static bool gw_rate_take(const char *dir, const char *name, long long max,
+                         long long window)
+{
+    long long start = 0, count = 0;
+    int fd = gw_rate_open(dir, name, window, &start, &count);
+    bool ok;
+    if (fd < 0)
+        return false;
+    ok = count < max && gw_rate_store(fd, start, count + 1);
+    gw_rate_close(fd);
+    return ok;
+}
+
+/* Record one unit whatever the count already is: the failure path, where
+ * the refusal has already been decided and only the tally is left. */
+static void gw_rate_bump(const char *dir, const char *name, long long window)
+{
+    long long start = 0, count = 0;
+    int fd = gw_rate_open(dir, name, window, &start, &count);
+    if (fd < 0)
+        return;
+    (void)gw_rate_store(fd, start, count + 1);
+    gw_rate_close(fd);
+}
+
+/* True while the window still has room, WITHOUT spending any: used where
+ * only a failure costs a unit (the owner key). */
+static bool gw_rate_room(const char *dir, const char *name, long long max,
+                         long long window)
+{
+    long long start = 0, count = 0;
+    int fd = gw_rate_open(dir, name, window, &start, &count);
+    bool ok;
+    if (fd < 0)
+        return false;
+    ok = count < max;
+    gw_rate_close(fd);
+    return ok;
+}
+
+/* ── CSRF nonce for the owner approval form ─────────────────────────────
+ *
+ * The approval POST is the one request that turns the owner's key into a
+ * live grant, and until now any page anywhere could make the owner's
+ * browser send it: a form POST needs no preflight, so CORS never applied.
+ * The GET that renders the form mints a nonce bound to the exact request it
+ * approves; the POST is refused without it. The tag is HMAC-SHA256 over the
+ * per-process key, truncated to 128 bits, and the nonce is spent on first
+ * use so a leaked form cannot be replayed. */
+#define GW_CSRF_TAG_HEX 32
+#define GW_CSRF_CAP 96
+
+static void gw_hmac_sha256(const uint8_t *key, size_t keylen,
+                           const char *msg, uint8_t out[SHA256_OUTPUT_SIZE])
+{
+    uint8_t pad[64];
+    uint8_t inner[SHA256_OUTPUT_SIZE];
+    struct sha256_ctx ctx;
+    size_t i;
+    memset(pad, 0, sizeof(pad));
+    if (keylen > sizeof(pad))
+        keylen = sizeof(pad);
+    memcpy(pad, key, keylen);
+    for (i = 0; i < sizeof(pad); i++)
+        pad[i] ^= 0x36;
+    sha256_init(&ctx);
+    sha256_write(&ctx, pad, sizeof(pad));
+    sha256_write(&ctx, (const unsigned char *)msg, strlen(msg));
+    sha256_finalize(&ctx, inner);
+    for (i = 0; i < sizeof(pad); i++)
+        pad[i] ^= (uint8_t)(0x36 ^ 0x5c);
+    sha256_init(&ctx);
+    sha256_write(&ctx, pad, sizeof(pad));
+    sha256_write(&ctx, inner, sizeof(inner));
+    sha256_finalize(&ctx, out);
+    memset(pad, 0, sizeof(pad));
+}
+
+/* The exact request a nonce approves: change any of it and the tag dies. */
+static bool gw_csrf_msg(const char *nonce, long long exp, const char *client,
+                        const char *redirect, const char *comma, char *out,
+                        size_t cap)
+{
+    int n = snprintf(out, cap, "%s|%lld|%s|%s|%s", nonce, exp, client,
+                     redirect, comma);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* nonce.exp.tag — one form field, no server-side table to grow. */
+static bool gw_csrf_mint(const struct gw_config *cfg, const char *client,
+                         const char *redirect, const char *comma, char *out,
+                         size_t cap)
+{
+    uint8_t raw[16], mac[SHA256_OUTPUT_SIZE];
+    char nonce[GW_OAUTH_ID_HEX + 1], msg[1024], tag[SHA256_OUTPUT_SIZE * 2 + 1];
+    long long exp = clock_now_wall_ms() / 1000LL + GW_CSRF_TTL;
+    int n;
+    if (!cfg->csrf_ready || !gw_rand_bytes(raw, sizeof(raw)))
+        return false;
+    zcl_hex_encode(raw, sizeof(raw), nonce);
+    if (!gw_csrf_msg(nonce, exp, client, redirect, comma, msg, sizeof(msg)))
+        return false;
+    gw_hmac_sha256(cfg->csrf_key, sizeof(cfg->csrf_key), msg, mac);
+    zcl_hex_encode(mac, sizeof(mac), tag);
+    tag[GW_CSRF_TAG_HEX] = '\0';
+    n = snprintf(out, cap, "%s.%lld.%s", nonce, exp, tag);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* Split nonce.exp.tag. False on any other shape. */
+static bool gw_csrf_split(const char *tok, char *nonce, size_t noncecap,
+                          long long *exp, char *tag, size_t tagcap)
+{
+    const char *d1, *d2;
+    char *end = NULL;
+    size_t n1, n2;
+    if (!tok || !tok[0])
+        return false;
+    d1 = strchr(tok, '.');
+    if (!d1)
+        return false;
+    d2 = strchr(d1 + 1, '.');
+    if (!d2)
+        return false;
+    n1 = (size_t)(d1 - tok);
+    n2 = strlen(d2 + 1);
+    if (n1 + 1 > noncecap || n2 + 1 > tagcap || n2 != GW_CSRF_TAG_HEX)
+        return false;
+    memcpy(nonce, tok, n1);
+    nonce[n1] = '\0';
+    memcpy(tag, d2 + 1, n2);
+    tag[n2] = '\0';
+    *exp = strtoll(d1 + 1, &end, 10);
+    return end == d2;
+}
+
+/* True when this nonce has never been spent, and marks it spent. The
+ * spend file is bounded: a window older than the nonce TTL is dropped
+ * whole, so it can never grow past the nonces one TTL can mint. */
+static bool gw_csrf_spend(const char *dir, const char *nonce)
+{
+    char path[4096 + 64];
+    char line[128];
+    long long now = clock_now_wall_ms() / 1000LL;
+    FILE *f;
+    bool seen = false;
+    if (!gw_rate_path(dir, "oauth_csrf.jsonl", path, sizeof(path)))
+        return false;
+    f = fopen(path, "rb");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            char got[GW_OAUTH_ID_HEX + 1];
+            long long exp = 0;
+            if (!gw_row_str(line, "nonce", got, sizeof(got)) ||
+                !gw_row_int(line, "expires", &exp))
+                continue;
+            if (exp > now && strcmp(got, nonce) == 0) {
+                seen = true;
+                break;
+            }
+        }
+        (void)fclose(f);
+    }
+    if (seen)
+        return false;
+    f = fopen(path, "ab");
+    if (!f)
+        return false;
+    if (fprintf(f, "{\"nonce\":\"%s\",\"expires\":%lld}\n", nonce,
+                now + GW_CSRF_TTL) < 0) {
+        (void)fclose(f);
+        return false;
+    }
+    return fclose(f) == 0;
+}
+
+/* Verify the form's nonce against the form's own fields. */
+static bool gw_csrf_ok(const struct gw_config *cfg, const char *dir,
+                       const char *tok, const char *client,
+                       const char *redirect, const char *comma)
+{
+    char nonce[GW_OAUTH_ID_HEX + 1], tag[SHA256_OUTPUT_SIZE * 2 + 1];
+    char msg[1024], want[SHA256_OUTPUT_SIZE * 2 + 1];
+    uint8_t mac[SHA256_OUTPUT_SIZE];
+    long long exp = 0;
+    if (!cfg->csrf_ready)
+        return false;
+    if (!gw_csrf_split(tok, nonce, sizeof(nonce), &exp, tag, sizeof(tag)))
+        return false;
+    if (exp <= clock_now_wall_ms() / 1000LL)
+        return false;
+    if (!gw_csrf_msg(nonce, exp, client, redirect, comma, msg, sizeof(msg)))
+        return false;
+    gw_hmac_sha256(cfg->csrf_key, sizeof(cfg->csrf_key), msg, mac);
+    zcl_hex_encode(mac, sizeof(mac), want);
+    want[GW_CSRF_TAG_HEX] = '\0';
+    if (!gw_consteq(tag, want, GW_CSRF_TAG_HEX))
+        return false;
+    return gw_csrf_spend(dir, nonce);
+}
+
+/* The one answer to a bounded endpoint that has run out of window: no
+ * detail, so a caller cannot measure the counter by reading the refusal. */
+static const char gw_busy_body[] = "{\"error\":\"temporarily_unavailable\"}";
+
 /* Forward declarations (defined in HTTP replies below). */
 static void gw_write_all(int fd, const char *p, size_t n);
 static void gw_reply(int fd, int status, const char *ctype, const char *body,
@@ -1758,23 +2278,86 @@ static void gw_oauth_wellknown(int fd, const struct gw_config *cfg,
     gw_buf_free(&b);
 }
 
-/* Redirect URIs: https anywhere, or http on loopback hosts. */
-static bool gw_redirect_ok(const char *uri)
+/* Every byte a redirect URI may carry: the RFC 3986 set and nothing else.
+ * A quote, a backslash, a newline or any control byte is not a URI
+ * character, and one of them inside a stored value is what turned an
+ * append into a forged row. Refusing them at the door is the first of the
+ * two defences; the JSON writer at the store is the second. */
+static bool gw_uri_char(char c)
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9'))
+        return true;
+    return strchr("-._~:/?#[]@!$&'()*+,;=%", c) != NULL;
+}
+
+static bool gw_uri_clean(const char *uri)
+{
+    size_t i;
+    for (i = 0; uri[i]; i++) {
+        if (!gw_uri_char(uri[i]))
+            return false;
+    }
+    return true;
+}
+
+/* True when uri sits under one allowlist entry: the same string, or that
+ * string followed by a path or query boundary. "https://a.test/cb" never
+ * admits "https://a.test.evil/cb", because the byte after the entry has
+ * to end the origin. */
+static bool gw_allow_entry_match(const char *entry, size_t n, const char *uri)
+{
+    char next;
+    if (n == 0 || strncmp(uri, entry, n) != 0)
+        return false;
+    next = uri[n];
+    return next == '\0' || next == '/' || next == '?' || next == '#';
+}
+
+/* FLEET_GW_REDIRECT_ALLOW: space- or comma-separated https origins (or
+ * origin+path prefixes) the operator is willing to have a registered
+ * client sent back to. */
+static bool gw_redirect_allowed(const struct gw_config *cfg, const char *uri)
+{
+    const char *p = cfg->redirect_allow;
+    while (*p) {
+        const char *w;
+        while (*p == ' ' || *p == ',' || *p == '\t')
+            p++;
+        w = p;
+        while (*p && *p != ' ' && *p != ',' && *p != '\t')
+            p++;
+        if (gw_allow_entry_match(w, (size_t)(p - w), uri))
+            return true;
+    }
+    return false;
+}
+
+/* Redirect URIs: http on a loopback host, or an https URI the operator
+ * named in the allowlist.
+ *
+ * "any https" used to be enough. It is not: registration is anonymous, so
+ * anyone who could reach the front could bind a client id to a callback
+ * they controlled, and the owner's approval would then hand the code
+ * straight to them. With no allowlist configured, only loopback clients
+ * can register — the fail-closed default, and the one an operator who has
+ * not thought about this yet should get. */
+static bool gw_redirect_ok(const struct gw_config *cfg, const char *uri)
 {
     static const char *const loop[2] = {"http://127.0.0.1",
                                         "http://localhost"};
     size_t i;
-    if (!uri || !uri[0] || strlen(uri) > 512)
+    if (!uri || !uri[0] || strlen(uri) > 512 || !gw_uri_clean(uri))
         return false;
-    if (strncmp(uri, "https://", 8) == 0 && uri[8])
-        return true;
     for (i = 0; i < 2; i++) {
         size_t n = strlen(loop[i]);
         if (strncmp(uri, loop[i], n) == 0 &&
             (uri[n] == ':' || uri[n] == '/' || uri[n] == '\0'))
             return true;
     }
-    return false;
+    if (strncmp(uri, "https://", 8) != 0 || !uri[8])
+        return false;
+    return gw_redirect_allowed(cfg, uri);
 }
 
 static bool gw_client_id_ok(const char *id)
@@ -1791,8 +2374,9 @@ static bool gw_client_id_ok(const char *id)
     return true;
 }
 
-/* Validated redirect_uris out of a register body (1..8, loopback/https). */
-static bool gw_register_uris(const struct gw_http *h, char redirs[8][512],
+/* Validated redirect_uris out of a register body (1..8, loopback/allowed). */
+static bool gw_register_uris(const struct gw_http *h,
+                             const struct gw_config *cfg, char redirs[8][512],
                              size_t *count)
 {
     struct json_value body;
@@ -1812,7 +2396,7 @@ static bool gw_register_uris(const struct gw_http *h, char redirs[8][512],
     for (i = 0; i < n; i++) {
         const struct json_value *u = json_at(uris, i);
         const char *s = (u && u->type == JSON_STR) ? json_get_str(u) : NULL;
-        if (!s || !gw_redirect_ok(s) || strlen(s) >= sizeof(redirs[i])) {
+        if (!s || !gw_redirect_ok(cfg, s) || strlen(s) >= sizeof(redirs[i])) {
             json_free(&body);
             return false;
         }
@@ -1823,18 +2407,103 @@ static bool gw_register_uris(const struct gw_http *h, char redirs[8][512],
     return true;
 }
 
+/* The client store's own bounds. Anonymous callers may append to it, so
+ * it is never allowed to grow without limit on a fleet host: past either
+ * bound registration is closed until the operator prunes the file. */
+static bool gw_clients_have_room(const char *path, size_t adding)
+{
+    struct stat st;
+    FILE *f;
+    char line[4096];
+    size_t rows = 0;
+    if (stat(path, &st) != 0)
+        return errno == ENOENT;
+    if (!S_ISREG(st.st_mode) || (unsigned long long)st.st_size >=
+                                    (unsigned long long)GW_CLIENTS_CAP_BYTES)
+        return false;
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    while (rows < GW_CLIENTS_CAP_ROWS && fgets(line, sizeof(line), f))
+        rows++;
+    (void)fclose(f);
+    return rows + adding <= GW_CLIENTS_CAP_ROWS;
+}
+
+/* One registration row, every value written through the JSON string
+ * writer. Written raw, a redirect carrying \n and \" appended a SECOND,
+ * fully attacker-chosen row (json_read decodes both), binding any client
+ * id to any callback. The writer makes that impossible to express. */
+static void gw_client_row(struct gw_buf *b, const char *cid,
+                          const char *redir)
+{
+    gw_buf_str(b, "{\"id\":");
+    gw_buf_json_str(b, cid);
+    gw_buf_str(b, ",\"redirect\":");
+    gw_buf_json_str(b, redir);
+    gw_buf_str(b, "}\n");
+}
+
+/* One authorization-code row, every value written through the JSON string
+ * writer for the same reason the client row is: a stored value must never
+ * be able to end its own row. False when the row could not be built or the
+ * append did not complete. */
+static bool gw_code_append(const char *path, const char *code,
+                           const char *grant, const char *client,
+                           const char *redirect, const char *challenge,
+                           const char *scopes, long long expires,
+                           long long grant_expires, const char *used)
+{
+    struct gw_buf b;
+    char nums[96];
+    FILE *f;
+    bool ok;
+    memset(&b, 0, sizeof(b));
+    if (snprintf(nums, sizeof(nums), ",\"expires\":%lld,\"grant_expires\":%lld,",
+                 expires, grant_expires) < 0)
+        return false;
+    gw_buf_str(&b, "{\"code\":");
+    gw_buf_json_str(&b, code);
+    gw_buf_str(&b, ",\"grant\":");
+    gw_buf_json_str(&b, grant);
+    gw_buf_str(&b, ",\"client\":");
+    gw_buf_json_str(&b, client);
+    gw_buf_str(&b, ",\"redirect\":");
+    gw_buf_json_str(&b, redirect);
+    gw_buf_str(&b, ",\"challenge\":");
+    gw_buf_json_str(&b, challenge);
+    gw_buf_str(&b, ",\"scopes\":");
+    gw_buf_json_str(&b, scopes);
+    gw_buf_str(&b, nums);
+    gw_buf_str(&b, "\"used\":");
+    gw_buf_json_str(&b, used);
+    gw_buf_str(&b, "}\n");
+    if (b.oom || !b.p) {
+        gw_buf_free(&b);
+        return false;
+    }
+    f = fopen(path, "ab");
+    if (!f) {
+        gw_buf_free(&b);
+        return false;
+    }
+    ok = fwrite(b.p, 1, b.len, f) == b.len;
+    gw_buf_free(&b);
+    return fclose(f) == 0 && ok;
+}
+
 /* POST /oauth/register {"redirect_uris":[...]} -> client_id. */
 static void gw_oauth_register(int fd, const struct gw_http *h,
                               const struct gw_config *cfg)
 {
-    struct gw_buf b;
+    struct gw_buf b, rows;
     char dir[4096], path[4096 + 64], cid[GW_OAUTH_ID_HEX + 1];
     char redirs[8][512];
     size_t i, n = 0;
     FILE *f;
-    (void)cfg;
     memset(&b, 0, sizeof(b));
-    if (!gw_register_uris(h, redirs, &n)) {
+    memset(&rows, 0, sizeof(rows));
+    if (!gw_register_uris(h, cfg, redirs, &n)) {
         gw_oauth_error(fd, "invalid_redirect_uri");
         return;
     }
@@ -1846,13 +2515,35 @@ static void gw_oauth_register(int fd, const struct gw_http *h,
         gw_oauth_error(fd, "server_error");
         return;
     }
-    f = fopen(path, "ab");
-    if (!f) {
-        gw_oauth_error(fd, "server_error");
+    /* Anonymous by RFC 7591, bounded here: a rate window and a store cap,
+     * both fail-closed, so an unauthenticated caller can neither flood the
+     * endpoint nor fill this host's disk one row at a time. */
+    if (!gw_rate_take(dir, "oauth_register.rate", GW_REGISTER_MAX,
+                      GW_REGISTER_WINDOW)) {
+        gw_reply(fd, 429, "application/json",
+                 gw_busy_body, sizeof(gw_busy_body) - 1);
+        return;
+    }
+    if (!gw_clients_have_room(path, n)) {
+        gw_reply(fd, 429, "application/json",
+                 gw_busy_body, sizeof(gw_busy_body) - 1);
         return;
     }
     for (i = 0; i < n; i++)
-        fprintf(f, "{\"id\":\"%s\",\"redirect\":\"%s\"}\n", cid, redirs[i]);
+        gw_client_row(&rows, cid, redirs[i]);
+    if (rows.oom || !rows.p) {
+        gw_buf_free(&rows);
+        gw_oauth_error(fd, "server_error");
+        return;
+    }
+    f = fopen(path, "ab");
+    if (!f) {
+        gw_buf_free(&rows);
+        gw_oauth_error(fd, "server_error");
+        return;
+    }
+    (void)fwrite(rows.p, 1, rows.len, f);
+    gw_buf_free(&rows);
     (void)fclose(f);
     gw_buf_str(&b, "{\"client_id\":\"");
     gw_buf_str(&b, cid);
@@ -1873,7 +2564,8 @@ static void gw_oauth_register(int fd, const struct gw_http *h,
 
 /* Authorize request validation shared by GET (form) and POST (approve). */
 static bool gw_authz_parse(const char *src, const char *dir,
-                           struct gw_authz *out, char *comma, size_t commacap)
+                           const struct gw_config *cfg, struct gw_authz *out,
+                           char *comma, size_t commacap)
 {
     char method[16];
     memset(out, 0, sizeof(*out));
@@ -1885,7 +2577,7 @@ static bool gw_authz_parse(const char *src, const char *dir,
         return false;
     if (!gw_form_get(src, "redirect_uri", out->redirect,
                      sizeof(out->redirect)) ||
-        !gw_redirect_ok(out->redirect))
+        !gw_redirect_ok(cfg, out->redirect))
         return false;
     if (!gw_client_find(dir, out->client, out->redirect))
         return false;
@@ -1911,13 +2603,20 @@ static void gw_oauth_authorize_get(int fd, const struct gw_http *h,
                                    const struct gw_config *cfg)
 {
     struct gw_authz az;
-    char comma[64], dir[4096];
+    char comma[64], dir[4096], csrf[GW_CSRF_CAP];
     struct gw_buf b;
-    (void)cfg;
     memset(&b, 0, sizeof(b));
     if (!gw_steer_dir(dir, sizeof(dir)) ||
-        !gw_authz_parse(h->query, dir, &az, comma, sizeof(comma))) {
+        !gw_authz_parse(h->query, dir, cfg, &az, comma, sizeof(comma))) {
         gw_oauth_error(fd, "invalid_request");
+        return;
+    }
+    /* The nonce is bound to THIS request's client, callback and scopes, so
+     * a form minted for one approval cannot approve another. */
+    if (!gw_csrf_mint(cfg, az.client, az.redirect, comma, csrf,
+                      sizeof(csrf))) {
+        gw_reply(fd, 500, "application/json", "{\"error\":\"server_error\"}",
+                 24);
         return;
     }
     gw_buf_str(&b, "<!doctype html><html><head><meta name=\"viewport\" "
@@ -1941,6 +2640,9 @@ static void gw_oauth_authorize_get(int fd, const struct gw_http *h,
     gw_html_escape(&b, az.challenge);
     gw_buf_str(&b, "\"><input type=\"hidden\" name=\"code_challenge_method\" "
                    "value=\"S256\">"
+                   "<input type=\"hidden\" name=\"csrf\" value=\"");
+    gw_html_escape(&b, csrf);
+    gw_buf_str(&b, "\">"
                    "<label>Owner key <input type=\"password\" name=\"owner_key\">"
                    "</label><button type=\"submit\" name=\"approve\" value=\"1\">"
                    "Approve</button></form></body></html>");
@@ -1999,28 +2701,107 @@ static bool gw_oauth_mint(const char *node, const char *comma, char *gid,
     return ok;
 }
 
-/* POST /oauth/authorize (approval form) -> 302 with code, or 403. */
+/* True when a URL begins with the issuer origin and stops there or at a
+ * path boundary. "https://front.test" never matches "https://front.test.evil". */
+static bool gw_same_origin(const char *issuer, const char *url)
+{
+    size_t n;
+    char next;
+    if (!issuer[0] || !url || !url[0])
+        return false;
+    n = strlen(issuer);
+    if (strncmp(url, issuer, n) != 0)
+        return false;
+    next = url[n];
+    return next == '\0' || next == '/' || next == '?' || next == '#';
+}
+
+/* The request must say it came from the approval page this gateway served.
+ *
+ * Browsers attach Origin to every cross-origin form POST and to same-origin
+ * ones as well; Referer can be stripped by a referrer policy, so either
+ * suffices. NEITHER present is refused, not allowed: a request that will
+ * not say where it came from is exactly the request this check exists to
+ * stop, and a page that wants the owner's grant cannot opt out of being
+ * asked. */
+static bool gw_origin_ok(const struct gw_http *h, const struct gw_config *cfg)
+{
+    char issuer[300];
+    gw_oauth_issuer(cfg, issuer, sizeof(issuer));
+    if (h->origin[0])
+        return gw_same_origin(issuer, h->origin);
+    if (h->referer[0])
+        return gw_same_origin(issuer, h->referer);
+    return false;
+}
+
+/* Constant-time owner-key check over a FIXED buffer.
+ *
+ * Comparing lengths first told a caller the key's length before a single
+ * byte was compared, and comparing only strlen(key) bytes made the work
+ * depend on the guess. Both sides are padded into the same fixed buffer and
+ * the whole buffer is compared every time, so neither the length nor the
+ * position of the first wrong byte changes what an attacker can observe. */
+static bool gw_owner_key_ok(const struct gw_config *cfg, const char *key)
+{
+    char want[GW_OWNER_KEY_CAP], got[GW_OWNER_KEY_CAP];
+    bool ok;
+    if (!cfg->owner_key[0] || !key)
+        return false;
+    memset(want, 0, sizeof(want));
+    memset(got, 0, sizeof(got));
+    if (strlen(key) >= sizeof(got))
+        return false;
+    memcpy(want, cfg->owner_key, strlen(cfg->owner_key));
+    memcpy(got, key, strlen(key));
+    ok = gw_consteq(got, want, sizeof(want));
+    memset(got, 0, sizeof(got));
+    memset(want, 0, sizeof(want));
+    return ok;
+}
+
+/* POST /oauth/authorize (approval form) -> 302 with code, or 403.
+ *
+ * Three gates stand before the owner key, and all three are new. Without
+ * them any page the owner happened to have open could POST this form
+ * cross-origin — a form POST needs no preflight, so CORS never applied —
+ * and walk off with a full-scope grant, while guessing the key cost
+ * nothing but requests. */
 static void gw_oauth_authorize_post(int fd, const struct gw_http *h,
                                     const struct gw_config *cfg)
 {
     struct gw_authz az;
     char comma[64], dir[4096];
-    char key[128], loc[1100];
+    char key[GW_OWNER_KEY_CAP], loc[1100], csrf[GW_CSRF_CAP];
     char approve[8];
     const char *body = h->body ? h->body : "";
     if (!gw_steer_dir(dir, sizeof(dir)) ||
-        !gw_authz_parse(body, dir, &az, comma, sizeof(comma)) ||
+        !gw_authz_parse(body, dir, cfg, &az, comma, sizeof(comma)) ||
         !gw_form_get(body, "approve", approve, sizeof(approve)) ||
         strcmp(approve, "1") != 0) {
         gw_oauth_error(fd, "invalid_request");
         return;
     }
+    if (!gw_origin_ok(h, cfg) ||
+        !gw_form_get(body, "csrf", csrf, sizeof(csrf)) ||
+        !gw_csrf_ok(cfg, dir, csrf, az.client, az.redirect, comma)) {
+        gw_reply(fd, 403, "application/json",
+                 "{\"error\":\"access_denied\"}", 25);
+        return;
+    }
+    /* Owner-key guesses are bounded by a persistent window; when the
+     * counter cannot be read the approval is refused, never let through. */
+    if (!gw_rate_room(dir, "oauth_owner.rate", GW_OWNER_FAIL_MAX,
+                      GW_OWNER_FAIL_WINDOW)) {
+        gw_reply(fd, 429, "application/json", gw_busy_body,
+                 sizeof(gw_busy_body) - 1);
+        return;
+    }
     /* Owner approval: the key is compared constant-time and never logged. */
-    if (!cfg->owner_key[0] ||
-        !gw_form_get(body, "owner_key", key, sizeof(key)) ||
-        strlen(key) != strlen(cfg->owner_key) ||
-        !gw_consteq(key, cfg->owner_key, strlen(cfg->owner_key))) {
+    if (!gw_form_get(body, "owner_key", key, sizeof(key)) ||
+        !gw_owner_key_ok(cfg, key)) {
         memset(key, 0, sizeof(key));
+        gw_rate_bump(dir, "oauth_owner.rate", GW_OWNER_FAIL_WINDOW);
         gw_reply(fd, 403, "application/json",
                  "{\"error\":\"access_denied\"}", 25);
         return;
@@ -2041,7 +2822,6 @@ static bool gw_authorize_issue(int fd, const struct gw_config *cfg,
     char gid[64], path[4096 + 64];
     char esc[512];
     long long now, gexp;
-    FILE *f;
     if (!gw_oauth_mint(cfg->node, comma, gid, sizeof(gid), &gexp) ||
         !gw_rand_hex(code)) {
         gw_reply(fd, 500, "application/json",
@@ -2054,19 +2834,13 @@ static bool gw_authorize_issue(int fd, const struct gw_config *cfg,
                  "{\"error\":\"server_error\"}", 24);
         return false;
     }
-    f = fopen(path, "ab");
-    if (!f) {
+    if (!gw_code_append(path, code, gid, az->client, az->redirect,
+                        az->challenge, comma, now + GW_OAUTH_CODE_TTL, gexp,
+                        "0")) {
         gw_reply(fd, 500, "application/json",
                  "{\"error\":\"server_error\"}", 24);
         return false;
     }
-    fprintf(f,
-            "{\"code\":\"%s\",\"grant\":\"%s\",\"client\":\"%s\","
-            "\"redirect\":\"%s\",\"challenge\":\"%s\",\"scopes\":\"%s\","
-            "\"expires\":%lld,\"grant_expires\":%lld,\"used\":\"0\"}\n",
-            code, gid, az->client, az->redirect, az->challenge, comma,
-            now + GW_OAUTH_CODE_TTL, gexp);
-    (void)fclose(f);
     gw_state_escape(az->state, esc, sizeof(esc));
     if (az->state[0])
         snprintf(loc, loccap, "%s?code=%s&state=%s", az->redirect, code, esc);
@@ -2103,7 +2877,6 @@ static bool gw_token_redeem(int fd, const char *body, const char *dir,
     char path[4096 + 64];
     long long expires, now;
     bool used;
-    FILE *f;
     if (!gw_form_get(body, "code", code, sizeof(code)) ||
         !gw_form_get(body, "redirect_uri", redir, sizeof(redir)) ||
         !gw_form_get(body, "client_id", client, sizeof(client)) ||
@@ -2124,18 +2897,12 @@ static bool gw_token_redeem(int fd, const char *body, const char *dir,
         gw_oauth_error(fd, "server_error");
         return false;
     }
-    f = fopen(path, "ab");
-    if (!f) {
+    /* Full-row use mark: last-wins keeps single-use exact. */
+    if (!gw_code_append(path, code, grant, cclient, credir, challenge,
+                        cscopes, expires, *gexp, "1")) {
         gw_oauth_error(fd, "server_error");
         return false;
     }
-    /* Full-row use mark: last-wins keeps single-use exact. */
-    fprintf(f,
-            "{\"code\":\"%s\",\"grant\":\"%s\",\"client\":\"%s\","
-            "\"redirect\":\"%s\",\"challenge\":\"%s\",\"scopes\":\"%s\","
-            "\"expires\":%lld,\"grant_expires\":%lld,\"used\":\"1\"}\n",
-            code, grant, cclient, credir, challenge, cscopes, expires, *gexp);
-    (void)fclose(f);
     if (strlen(cscopes) >= scopescap) {
         gw_oauth_error(fd, "server_error");
         return false;
@@ -2338,13 +3105,15 @@ static bool gw_peer_is_loopback(int fd)
 static bool gw_serve_read(int fd, struct gw_http *h)
 {
     char *hbuf = zcl_malloc(GW_CAP_HEADERS, "fleet-gateway/headers");
+    struct gw_reader r;
     bool ok;
     if (!hbuf) {
         gw_reply(fd, 500, "application/json", "{\"error\":\"no memory\"}",
                  20);
         return false;
     }
-    ok = gw_http_read(fd, h, hbuf);
+    gw_reader_init(&r, fd);
+    ok = gw_http_read(&r, h, hbuf);
     free(hbuf);
     if (ok)
         return true;
@@ -2444,6 +3213,35 @@ static int gw_listen(const struct gw_config *cfg)
     return fd;
 }
 
+/* Both directions of an accepted socket get a deadline. Without one, a
+ * peer that opened a connection and sent half a request line held its
+ * child for as long as it liked: thirty of them held thirty children,
+ * proven live. A timed-out read ends the child, not the listener. */
+static void gw_set_timeouts(int fd, long ms)
+{
+    struct timeval tv;
+    tv.tv_sec = (time_t)(ms / 1000);
+    tv.tv_usec = (suseconds_t)((ms % 1000) * 1000);
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+/* Reap every finished connection child, returning how many were collected.
+ * The listener keeps SIGCHLD at its default disposition so the count of
+ * live children is a fact it owns rather than a guess: with SIGCHLD
+ * ignored the kernel reaps silently and nothing can be counted. */
+static long gw_reap_children(void)
+{
+    long n = 0;
+    for (;;) {
+        pid_t w = waitpid(-1, NULL, WNOHANG);
+        if (w <= 0)
+            break;
+        n++;
+    }
+    return n;
+}
+
 static int gw_bound_port(int fd)
 {
     struct sockaddr_in v4;
@@ -2467,11 +3265,20 @@ int main(int argc, char **argv)
 #else
     struct gw_config cfg;
     int fd, port;
+    long live = 0;
     (void)argc;
     (void)argv;
-    signal(SIGCHLD, SIG_IGN);
+    /* SIGCHLD stays at its default so the listener can reap explicitly and
+     * hold an exact count of live children; the old SIG_IGN let the kernel
+     * reap silently, which is precisely what made a cap impossible. */
+    signal(SIGCHLD, SIG_DFL);
     signal(SIGPIPE, SIG_IGN);
     gw_config(&cfg);
+    if (!cfg.csrf_ready) {
+        fputs("z23-fleet-gateway: no CSPRNG for the approval nonce key\n",
+              stderr);
+        return 1;
+    }
     fd = gw_listen(&cfg);
     if (fd < 0) {
         fputs("z23-fleet-gateway: cannot bind loopback\n", stderr);
@@ -2482,13 +3289,26 @@ int main(int argc, char **argv)
     printf("ready port=%d node=%s\n", port, cfg.node);
     fflush(stdout);
     for (;;) {
-        int cfd = accept(fd, NULL, NULL);
+        int cfd;
         pid_t pid;
+        cfd = accept(fd, NULL, NULL);
         if (cfd < 0) {
             if (errno == EINTR)
                 continue;
             break;
         }
+        /* Reaped here, after the block, so the count the cap is read
+         * against is the count at the moment of the decision. */
+        live -= gw_reap_children();
+        if (live < 0)
+            live = 0;
+        /* Over the cap the connection is closed at once rather than
+         * forked for: capacity a host cannot serve is not capacity. */
+        if (live >= cfg.max_children) {
+            close(cfd);
+            continue;
+        }
+        gw_set_timeouts(cfd, cfg.io_timeout_ms);
         pid = fork();
         if (pid < 0) {
             close(cfd);
@@ -2496,15 +3316,11 @@ int main(int argc, char **argv)
         }
         if (pid == 0) {
             close(fd);
-            /* The listener ignores SIGCHLD so connection children reap
-             * themselves. A connection child must not inherit that: with it
-             * ignored, waitpid on the node child fails with ECHILD and the
-             * node's exit status is lost. */
-            signal(SIGCHLD, SIG_DFL);
             gw_serve(cfd, &cfg);
             close(cfd);
             _exit(0);
         }
+        live++;
         close(cfd);
     }
     close(fd);

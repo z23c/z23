@@ -560,7 +560,12 @@ ZCL_COMMAND_READY_COMMAND(
     "mint draws 128 CSPRNG bits for one bearer id scoped to a subset of "
     "brief,send,evidence with a bounded lifetime (ttl_seconds 0..2592000, "
     "0 means no expiry) and appends it to the owner-private grant store; "
-    "the id is returned exactly once and never echoed elsewhere. revoke "
+    "the id is returned exactly once and never echoed elsewhere. list "
+    "inventories the store so the owner can see what there is to revoke: "
+    "one row per grant with its label, scopes, created, expires, revoked "
+    "and state, newest 128 kept, and the id cut to an 8-character prefix "
+    "so the listing is never itself a credential file (revoke still needs "
+    "the whole 32). revoke "
     "appends a superseding revoked row (revoking twice re-affirms); "
     "unknown ids are refused, never silently accepted. A revoked or "
     "expired grant "
@@ -571,7 +576,7 @@ ZCL_COMMAND_READY_COMMAND(
     "that enrolled box under that label, and is refused as a bearer "
     "(STEER_GRANT_PEER_ONLY). This governs only fleet.steer verbs: it is not "
     "wallet authority and not a fleet key role. It contacts no peer.", 0,
-    "fleet,steer,grant,revoke,bearer,scope,expiry,chatgpt",
+    "fleet,steer,grant,list,revoke,bearer,scope,expiry,chatgpt",
     "zcl.fleet_steer_grant.input.v1", "zcl.fleet_steer_grant.v1",
     "action,scopes,ttl_seconds,label,id,peer", "action",
     "z23 fleet steer grant --action=mint --scopes=brief,send",

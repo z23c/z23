@@ -1152,6 +1152,99 @@ _test_next:;
     return failures;
 }
 
+/* The grant store is inventoriable, and the inventory is not a credential.
+ *
+ * Before action=list there was no way to ask what credentials existed: mint
+ * handed an id back once and revoke took one away, and everything in
+ * between was a JSONL file read by hand. That is how eight forgotten
+ * full-scope grants stayed live. The listing has to name every row and
+ * admit nobody, so it prints an 8-character prefix and never a whole id. */
+static int fmx_t_grant_list(void)
+{
+    int failures = 0;
+
+    TEST("steer: grant list inventories the store without printing an id") {
+        struct fmx_call c;
+        char live[64], dead[64];
+        const struct json_value *arr;
+        size_t i, seen_live = 0, seen_revoked = 0;
+        fmx_isolate("grant_list");
+        /* An empty store lists nothing and refuses nothing. */
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "list");
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        ASSERT_EQ((int)fmx_int(&c, "shown"), 0);
+        ASSERT_EQ((int)fmx_int(&c, "live"), 0);
+        fmx_end(&c);
+        ASSERT(fmx_mint("brief,send,evidence", live, sizeof(live)));
+        ASSERT(fmx_mint("send", dead, sizeof(dead)));
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "revoke");
+        (void)json_push_kv_str(&c.input, "id", dead);
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        fmx_end(&c);
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "list");
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        /* Two distinct grants, one live: the revoke row supersedes rather
+         * than adding a third entry. */
+        ASSERT_EQ((int)fmx_int(&c, "shown"), 2);
+        ASSERT_EQ((int)fmx_int(&c, "live"), 1);
+        arr = fmx_get(&c, "grants");
+        ASSERT(arr != NULL && arr->type == JSON_ARR);
+        ASSERT_EQ((int)json_size(arr), 2);
+        for (i = 0; i < json_size(arr); i++) {
+            const struct json_value *row = json_at(arr, i);
+            const struct json_value *p = json_get(row, "id_prefix");
+            const struct json_value *s = json_get(row, "state");
+            const char *prefix, *state;
+            ASSERT(p != NULL && p->type == JSON_STR);
+            ASSERT(s != NULL && s->type == JSON_STR);
+            prefix = json_get_str(p);
+            state = json_get_str(s);
+            /* A prefix names a row for a human; it never admits anyone. */
+            ASSERT_EQ((int)strlen(prefix), 8);
+            ASSERT(strncmp(live, prefix, 8) == 0 ||
+                   strncmp(dead, prefix, 8) == 0);
+            /* No whole id anywhere in the row, under any key. */
+            ASSERT(json_get(row, "id") == NULL);
+            if (strcmp(state, "live") == 0)
+                seen_live++;
+            if (strcmp(state, "revoked") == 0)
+                seen_revoked++;
+            /* Scopes and label travel so the owner can judge the grant. */
+            ASSERT(json_get(row, "scopes") != NULL);
+            ASSERT(json_get(row, "label") != NULL);
+            ASSERT(json_get(row, "created") != NULL);
+            ASSERT(json_get(row, "expires") != NULL);
+        }
+        ASSERT_EQ((int)seen_live, 1);
+        ASSERT_EQ((int)seen_revoked, 1);
+        fmx_end(&c);
+        /* The listing is a read: the live grant still works after it. */
+        fmx_brief(&c, live, 0);
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&c));
+        fmx_end(&c);
+        /* An unknown action still names every verb it could have been. */
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "inventory");
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(!fmx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+        fmx_end(&c);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* Mint one peer grant through the real leaf; `id_out` may be NULL. Returns
  * the reply's error code ("" on success) through `code`. */
 static bool fmx_mint_peer(const char *scopes, const char *label,
@@ -2909,6 +3002,7 @@ int test_fleet_steer(void)
     failures += fmx_t_sent_needs_receiver();
     failures += fmx_t_sent_local_ack();
     failures += fmx_t_grants();
+    failures += fmx_t_grant_list();
     failures += fmx_t_peer_grants();
     failures += fmx_t_revoke_cancels_queued();
     failures += fmx_t_ref_grammar();

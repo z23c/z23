@@ -532,6 +532,29 @@ static bool fmc_grant_parse(const char *line, struct fmc_grant *g)
     return true;
 }
 
+/* Constant-time equality over a grant id's exact 32 hex bytes.
+ *
+ * The presented bearer IS the credential, so strcmp against every stored id
+ * leaked how many leading characters a guess shared with a real grant: the
+ * comparison stopped at the first difference, and the store is walked for
+ * every call. Both sides are known to be 32 bytes here (fmc_grant_parse
+ * refuses any other length, and the caller checks the presented one), so a
+ * fixed-length compare is exact as well as constant-time. */
+#define FMC_GRANT_ID_LEN 32u
+
+static bool fmc_grant_id_eq(const char *a, const char *b)
+{
+    unsigned diff = 0;
+    size_t i;
+    if (!a || !b)
+        return false;
+    if (strlen(a) != FMC_GRANT_ID_LEN || strlen(b) != FMC_GRANT_ID_LEN)
+        return false;
+    for (i = 0; i < FMC_GRANT_ID_LEN; i++)
+        diff |= (unsigned)((unsigned char)a[i] ^ (unsigned char)b[i]);
+    return diff == 0;
+}
+
 /* Find the LAST row naming id (later rows supersede). False when absent. */
 static bool fmc_grant_find(const char *path, const char *id,
                            struct fmc_grant *out)
@@ -548,7 +571,7 @@ static bool fmc_grant_find(const char *path, const char *id,
     while (fgets(line, sizeof(line), f)) {
         if (!fmc_grant_parse(line, &g))
             continue;
-        if (strcmp(g.id, id) == 0) {
+        if (fmc_grant_id_eq(g.id, id)) {
             *out = g;
             found = true;
         }
@@ -4397,6 +4420,156 @@ static void fmc_grant_mint(const struct zcl_command_request *req,
     reply->exit_code = 0;
 }
 
+/* ── grant inventory (action=list) ───────────────────────────────────────
+ *
+ * Until this existed there was NO way to ask what credentials were live:
+ * mint returned an id once and revoke took one away, and anything in
+ * between meant reading the JSONL by hand. Eight forgotten full-scope
+ * grants is what that costs, and an owner rule that says "revocation is
+ * how access ends" only holds if the owner can see what there is to
+ * revoke.
+ *
+ * WHAT IT DOES NOT PRINT: the grant id. A listing that carried whole ids
+ * would BE a credential file — anything that could read it could use every
+ * grant in it. It prints the first 8 hex characters, which name a row for
+ * a human without admitting anyone: every check demands the full 32. */
+#define FMC_GRANT_LIST_CAP 128u
+#define FMC_GRANT_PREFIX 8u
+
+/* Keep the LAST row per id (later rows supersede), bounded, oldest id
+ * evicted first so a long store still shows its newest grants. */
+static void fmc_list_put(struct fmc_grant *set, size_t *n,
+                         const struct fmc_grant *g)
+{
+    size_t i;
+    for (i = 0; i < *n; i++) {
+        if (fmc_grant_id_eq(set[i].id, g->id)) {
+            set[i] = *g;
+            return;
+        }
+    }
+    if (*n < FMC_GRANT_LIST_CAP) {
+        set[(*n)++] = *g;
+        return;
+    }
+    memmove(set, set + 1, (FMC_GRANT_LIST_CAP - 1) * sizeof(set[0]));
+    set[FMC_GRANT_LIST_CAP - 1] = *g;
+}
+
+/* The one word that answers "can this credential be used right now". */
+static const char *fmc_grant_state(const struct fmc_grant *g, long long now)
+{
+    if (g->revoked)
+        return "revoked";
+    if (g->peer[0])
+        return "peer";
+    if (g->expires != 0 && now >= g->expires)
+        return "expired";
+    return "live";
+}
+
+static void fmc_list_emit(struct json_value *arr, const struct fmc_grant *g,
+                          long long now)
+{
+    struct json_value row;
+    char prefix[FMC_GRANT_PREFIX + 1];
+    json_init(&row);
+    json_set_object(&row);
+    memcpy(prefix, g->id, FMC_GRANT_PREFIX);
+    prefix[FMC_GRANT_PREFIX] = '\0';
+    (void)json_push_kv_str(&row, "id_prefix", prefix);
+    (void)json_push_kv_str(&row, "label", g->label);
+    (void)json_push_kv_str(&row, "scopes", g->scopes);
+    if (g->peer[0])
+        (void)json_push_kv_str(&row, "peer", g->peer);
+    (void)json_push_kv_int(&row, "created", g->created);
+    (void)json_push_kv_int(&row, "expires", g->expires);
+    (void)json_push_kv_bool(&row, "revoked", g->revoked != 0);
+    (void)json_push_kv_str(&row, "state", fmc_grant_state(g, now));
+    (void)json_push_back(arr, &row);
+    json_free(&row);
+}
+
+/* Collapse the append-only store to its current rows. Returns the number
+ * of distinct ids kept; *total counts every distinct id seen. */
+static size_t fmc_list_collect(const char *path, struct fmc_grant *set,
+                               size_t *total)
+{
+    FILE *f;
+    char line[FMC_LINE_CAP];
+    struct fmc_grant g;
+    size_t n = 0;
+    *total = 0;
+    f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f)) {
+        size_t before = n;
+        if (!fmc_grant_parse(line, &g))
+            continue;
+        fmc_list_put(set, &n, &g);
+        if (n != before || n == FMC_GRANT_LIST_CAP)
+            (*total)++;
+    }
+    (void)fclose(f);
+    return n;
+}
+
+static void fmc_grant_list(const struct zcl_command_request *req,
+                           struct zcl_command_reply *reply)
+{
+    char steerdir[4096], path[4096 + 32];
+    struct fmc_grant *set;
+    struct json_value arr;
+    size_t n, i, total = 0, live = 0;
+    long long now;
+    int r;
+    (void)req;
+    if (!fmc_dirs(steerdir, sizeof(steerdir))) {
+        fmc_fail(reply, "STATE_DIR_FAILED",
+                 "cannot resolve the owner-private state root",
+                 "platform_state_root");
+        return;
+    }
+    r = snprintf(path, sizeof(path), "%s/grants.jsonl", steerdir);
+    if (r <= 0 || (size_t)r >= sizeof(path)) {
+        fmc_fail(reply, "STATE_DIR_FAILED", "grant path exceeds its bound",
+                 steerdir);
+        return;
+    }
+    set = (struct fmc_grant *)zcl_calloc(FMC_GRANT_LIST_CAP, sizeof(*set),
+                                         "fleet.steer.grant");
+    if (!set) {
+        fmc_fail(reply, "GRANT_LIST_FAILED",
+                 "cannot hold the grant inventory", "row budget");
+        return;
+    }
+    now = (long long)platform_time_wall_time_t();
+    n = fmc_list_collect(path, set, &total);
+    json_init(&arr);
+    json_set_array(&arr);
+    for (i = 0; i < n; i++) {
+        fmc_list_emit(&arr, &set[i], now);
+        if (strcmp(fmc_grant_state(&set[i], now), "live") == 0)
+            live++;
+    }
+    free(set);
+    (void)json_push_kv_str(&reply->data, "leaf", FMC_GRANT_LEAF);
+    (void)json_push_kv(&reply->data, "grants", &arr);
+    (void)json_push_kv_int(&reply->data, "shown", (long long)n);
+    (void)json_push_kv_int(&reply->data, "total", (long long)total);
+    (void)json_push_kv_int(&reply->data, "live", (long long)live);
+    (void)json_push_kv_bool(&reply->data, "truncated", total > n);
+    /* Say it in the reply, not only in the docs: the ids are cut short on
+     * purpose, and revoke still needs the whole one. */
+    (void)json_push_kv_str(&reply->data, "id_note",
+                           "id_prefix is the first 8 characters; revoke "
+                           "needs the full 32-character id from mint");
+    json_free(&arr);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
 /* True when ref already sits in the collected set. */
 static bool fmc_ref_seen(char refs[][FMC_REF_MAX + 1], size_t nrefs,
                          const char *ref)
@@ -4637,15 +4810,17 @@ void zcl_native_handle_fleet_steer_grant(
     action = fmc_str(request, "action");
     if (!action) {
         fmc_fail(reply, "BAD_INPUT",
-                 "fleet.steer.grant needs action mint|revoke",
+                 "fleet.steer.grant needs action mint|list|revoke",
                  "missing action");
         return;
     }
-    if (strcmp(action, "mint") == 0)
+    if (strcmp(action, "list") == 0)
+        fmc_grant_list(request, reply);
+    else if (strcmp(action, "mint") == 0)
         fmc_grant_mint(request, reply);
     else if (strcmp(action, "revoke") == 0)
         fmc_grant_revoke(request, reply);
     else
-        fmc_fail(reply, "BAD_INPUT", "unknown action (mint|revoke)",
+        fmc_fail(reply, "BAD_INPUT", "unknown action (mint|list|revoke)",
                  "action");
 }

@@ -104,6 +104,14 @@ static bool gw_spawn_as(const char *bin, const char *node, const char *state,
         setenv("FLEET_GW_PORT", "0", 1);
         setenv("FLEET_GW_NODE", node, 1);
         setenv("FLEET_GW_OWNER_KEY", "gw-test-owner-key", 1);
+        /* Registration is allowlisted now: without an operator entry only
+         * loopback callbacks can register at all. This rig's clients live
+         * on client.test, so that is what the operator admits. */
+        setenv("FLEET_GW_REDIRECT_ALLOW", "https://client.test", 1);
+        /* Short socket deadline and a small child cap so the half-open
+         * connection case proves itself in a second rather than ten. */
+        setenv("FLEET_GW_IO_TIMEOUT_MS", "1000", 1);
+        setenv("FLEET_GW_MAX_CHILDREN", "8", 1);
         setenv("XDG_STATE_HOME", state, 1);
         execv(bin, argv);
         _exit(127);
@@ -390,29 +398,127 @@ static char *gw_location_of(char *resp)
     return out;
 }
 
-/* POST form-encoded; returns the Location header value, or NULL. */
-static char *gw_post_location(const char *path, const char *form)
+/* One form-encoded POST, optionally carrying an Origin header. The whole
+ * raw response comes back so a case can read either its status or its
+ * Location. NULL when the connection carried nothing at all. */
+static char *gw_post_form_raw(const char *path, const char *form,
+                              const char *origin)
 {
     char req[GW_TEST_CAP];
-    int n = snprintf(req, sizeof(req),
-                     "POST %s HTTP/1.1\r\nHost: x\r\nContent-Type: "
-                     "application/x-www-form-urlencoded\r\n"
-                     "Content-Length: %zu\r\n"
-                     "Connection: close\r\n\r\n%s",
-                     path, strlen(form), form);
-    int fd;
-    char *resp, *loc;
+    char oh[400];
+    int n, fd;
+    oh[0] = '\0';
+    if (origin && snprintf(oh, sizeof(oh), "Origin: %s\r\n", origin) < 0)
+        return NULL;
+    n = snprintf(req, sizeof(req),
+                 "POST %s HTTP/1.1\r\nHost: x\r\nContent-Type: "
+                 "application/x-www-form-urlencoded\r\n%s"
+                 "Content-Length: %zu\r\n"
+                 "Connection: close\r\n\r\n%s",
+                 path, oh, strlen(form), form);
     if (n <= 0 || (size_t)n >= sizeof(req))
         return NULL;
     fd = gw_sock_open();
     if (fd < 0)
         return NULL;
-    resp = gw_sock_roundtrip(fd, req);
+    return gw_sock_roundtrip(fd, req);
+}
+
+/* Status code of a form POST, or 0 when nothing came back. */
+static int gw_post_form_status(const char *path, const char *form,
+                               const char *origin)
+{
+    char *resp = gw_post_form_raw(path, form, origin);
+    int st = 0;
+    if (!resp)
+        return 0;
+    if (sscanf(resp, "HTTP/1.1 %d", &st) != 1)
+        st = 0;
+    free(resp);
+    return st;
+}
+
+/* POST form-encoded from the gateway's own origin; returns the Location
+ * header value, or NULL. */
+static char *gw_post_location(const char *path, const char *form,
+                              const char *origin)
+{
+    char *resp = gw_post_form_raw(path, form, origin);
+    char *loc;
     if (!resp)
         return NULL;
     loc = gw_location_of(resp);
     free(resp);
     return loc;
+}
+
+/* The gateway's own issuer, which is what its approval page's Origin must
+ * be: with FLEET_GW_ISSUER unset the issuer is loopback plus the bound
+ * port, exactly as gw_oauth_issuer renders it. */
+static const char *gw_self_origin(void)
+{
+    static char origin[64];
+    if (snprintf(origin, sizeof(origin), "http://127.0.0.1:%d", g_gw_port) < 0)
+        origin[0] = '\0';
+    return origin;
+}
+
+/* The single-use approval nonce out of a rendered sign-in page. */
+static bool gw_csrf_of(const char *html, char *out, size_t cap)
+{
+    static const char pat[] = "name=\"csrf\" value=\"";
+    const char *p = html ? strstr(html, pat) : NULL;
+    const char *q;
+    size_t n;
+    if (!p)
+        return false;
+    p += sizeof(pat) - 1;
+    q = strchr(p, '"');
+    if (!q)
+        return false;
+    n = (size_t)(q - p);
+    if (n == 0 || n + 1 > cap)
+        return false;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return true;
+}
+
+/* Count the rows of one JSONL file under the isolated state root. */
+static size_t gw_state_rows(const char *state, const char *name)
+{
+    char path[1024], line[8192];
+    size_t rows = 0;
+    FILE *f;
+    if (snprintf(path, sizeof(path), "%s/z23/dev/steer/%s", state, name) >=
+        (int)sizeof(path))
+        return 0;
+    f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f))
+        rows++;
+    (void)fclose(f);
+    return rows;
+}
+
+/* True when any row of one JSONL file under the state root holds needle. */
+static bool gw_state_has(const char *state, const char *name,
+                         const char *needle)
+{
+    char path[1024], line[8192];
+    bool hit = false;
+    FILE *f;
+    if (snprintf(path, sizeof(path), "%s/z23/dev/steer/%s", state, name) >=
+        (int)sizeof(path))
+        return false;
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    while (!hit && fgets(line, sizeof(line), f))
+        hit = strstr(line, needle) != NULL;
+    (void)fclose(f);
+    return hit;
 }
 
 /* 32-hex value by JSON key out of a body. False when absent/misshapen. */
@@ -1011,30 +1117,51 @@ static int gw_t_oauth(void)
         ASSERT(b != NULL);
         ASSERT(gw_body_has(b, "invalid_request"));
         free(b);
-        /* Approval needs the owner key; the wrong key is denied. */
-        sn = snprintf(form, sizeof(form),
-                      "response_type=code&client_id=%s"
-                      "&redirect_uri=https://client.test/cb"
-                      "&scope=brief%%20send&state=xyz&code_challenge=%s"
-                      "&code_challenge_method=S256"
-                      "&owner_key=wrong&approve=1",
-                      cid, GW_OAUTH_CHALLENGE);
-        ASSERT(sn > 0 && (size_t)sn < sizeof(form));
-        b = gw_post("/oauth/authorize", form, &st);
-        ASSERT(b != NULL);
-        ASSERT_EQ(st, 403);
-        ASSERT(gw_body_has(b, "access_denied"));
-        free(b);
+        /* Approval needs the owner key; the wrong key is denied. Every
+         * approval POST from here on also carries the page's own nonce and
+         * says where it came from — see gw_t_csrf for the refusals. */
+        {
+            char page[128];
+            sn = snprintf(args, sizeof(args),
+                          "/oauth/authorize?response_type=code&client_id=%s"
+                          "&redirect_uri=https://client.test/cb"
+                          "&scope=brief%%20send&state=xyz&code_challenge=%s"
+                          "&code_challenge_method=S256",
+                          cid, GW_OAUTH_CHALLENGE);
+            ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+            b = gw_get(args, &st);
+            ASSERT(b != NULL);
+            ASSERT(gw_csrf_of(b, page, sizeof(page)));
+            free(b);
+            sn = snprintf(form, sizeof(form),
+                          "response_type=code&client_id=%s"
+                          "&redirect_uri=https://client.test/cb"
+                          "&scope=brief%%20send&state=xyz&code_challenge=%s"
+                          "&code_challenge_method=S256&csrf=%s"
+                          "&owner_key=wrong&approve=1",
+                          cid, GW_OAUTH_CHALLENGE, page);
+            ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+            st = gw_post_form_status("/oauth/authorize", form,
+                                     gw_self_origin());
+            ASSERT_EQ(st, 403);
+        }
         /* Correct approval redirects with a single-use code. */
-        sn = snprintf(form, sizeof(form),
-                      "response_type=code&client_id=%s"
-                      "&redirect_uri=https://client.test/cb"
-                      "&scope=brief%%20send&state=xyz&code_challenge=%s"
-                      "&code_challenge_method=S256"
-                      "&owner_key=gw-test-owner-key&approve=1",
-                      cid, GW_OAUTH_CHALLENGE);
-        ASSERT(sn > 0 && (size_t)sn < sizeof(form));
-        loc = gw_post_location("/oauth/authorize", form);
+        {
+            char page[128];
+            b = gw_get(args, &st);
+            ASSERT(b != NULL);
+            ASSERT(gw_csrf_of(b, page, sizeof(page)));
+            free(b);
+            sn = snprintf(form, sizeof(form),
+                          "response_type=code&client_id=%s"
+                          "&redirect_uri=https://client.test/cb"
+                          "&scope=brief%%20send&state=xyz&code_challenge=%s"
+                          "&code_challenge_method=S256&csrf=%s"
+                          "&owner_key=gw-test-owner-key&approve=1",
+                          cid, GW_OAUTH_CHALLENGE, page);
+            ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+        }
+        loc = gw_post_location("/oauth/authorize", form, gw_self_origin());
         ASSERT(loc != NULL);
         cp = strstr(loc, "code=");
         ASSERT(cp != NULL);
@@ -1167,6 +1294,281 @@ static int gw_t_oauth(void)
         ASSERT(gw_body_has(b, "\"code\":-32001"));
         ASSERT(gw_body_has(b, "grant required"));
         free(b);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* ── F1: cross-origin approval and owner-key guessing ────────────────────
+ *
+ * The approval POST is the one request that turns the owner's key into a
+ * live grant. A form POST needs no preflight, so CORS never protected it:
+ * any page the owner had open could submit this form cross-origin. These
+ * cases hold the four gates that now stand in front of it. */
+static int gw_t_csrf(void)
+{
+    int failures = 0;
+    TEST("gateway: approval refuses cross-origin, nonce-less and replayed POSTs") {
+        char cid[33], page[128], other[128];
+        char args[1024], form[2048];
+        char *b;
+        int st = 0, sn, i;
+        b = gw_post("/oauth/register",
+                    "{\"redirect_uris\":[\"https://client.test/csrf\"]}", &st);
+        ASSERT(b != NULL);
+        ASSERT_EQ(st, 201);
+        ASSERT(gw_body_hex(b, "client_id", cid));
+        free(b);
+        sn = snprintf(args, sizeof(args),
+                      "/oauth/authorize?response_type=code&client_id=%s"
+                      "&redirect_uri=https://client.test/csrf"
+                      "&scope=brief&code_challenge=%s"
+                      "&code_challenge_method=S256",
+                      cid, GW_OAUTH_CHALLENGE);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_get(args, &st);
+        ASSERT(b != NULL);
+        ASSERT_EQ(st, 200);
+        /* The form carries a nonce at all. */
+        ASSERT(gw_csrf_of(b, page, sizeof(page)));
+        free(b);
+        /* The exact request the old code accepted: right key, right
+         * fields, no nonce and no Origin. It is now refused. */
+        sn = snprintf(form, sizeof(form),
+                      "response_type=code&client_id=%s"
+                      "&redirect_uri=https://client.test/csrf"
+                      "&scope=brief&code_challenge=%s"
+                      "&code_challenge_method=S256"
+                      "&owner_key=gw-test-owner-key&approve=1",
+                      cid, GW_OAUTH_CHALLENGE);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+        ASSERT_EQ(gw_post_form_status("/oauth/authorize", form, NULL), 403);
+        /* A stolen nonce from another origin is still refused. */
+        sn = snprintf(form, sizeof(form),
+                      "response_type=code&client_id=%s"
+                      "&redirect_uri=https://client.test/csrf"
+                      "&scope=brief&code_challenge=%s"
+                      "&code_challenge_method=S256&csrf=%s"
+                      "&owner_key=gw-test-owner-key&approve=1",
+                      cid, GW_OAUTH_CHALLENGE, page);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+        ASSERT_EQ(gw_post_form_status("/oauth/authorize", form,
+                                      "https://attacker.test"),
+                  403);
+        /* A nonce minted for a DIFFERENT approval cannot approve this one:
+         * the tag is bound to the client, callback and scopes. */
+        {
+            char args2[1024];
+            sn = snprintf(args2, sizeof(args2),
+                          "/oauth/authorize?response_type=code&client_id=%s"
+                          "&redirect_uri=https://client.test/csrf"
+                          "&scope=brief%%20send&code_challenge=%s"
+                          "&code_challenge_method=S256",
+                          cid, GW_OAUTH_CHALLENGE);
+            ASSERT(sn > 0 && (size_t)sn < sizeof(args2));
+            b = gw_get(args2, &st);
+            ASSERT(b != NULL);
+            ASSERT(gw_csrf_of(b, other, sizeof(other)));
+            free(b);
+        }
+        sn = snprintf(form, sizeof(form),
+                      "response_type=code&client_id=%s"
+                      "&redirect_uri=https://client.test/csrf"
+                      "&scope=brief&code_challenge=%s"
+                      "&code_challenge_method=S256&csrf=%s"
+                      "&owner_key=gw-test-owner-key&approve=1",
+                      cid, GW_OAUTH_CHALLENGE, other);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+        ASSERT_EQ(gw_post_form_status("/oauth/authorize", form,
+                                      gw_self_origin()),
+                  403);
+        /* The page's own nonce, from the gateway's own origin, approves. */
+        sn = snprintf(form, sizeof(form),
+                      "response_type=code&client_id=%s"
+                      "&redirect_uri=https://client.test/csrf"
+                      "&scope=brief&code_challenge=%s"
+                      "&code_challenge_method=S256&csrf=%s"
+                      "&owner_key=gw-test-owner-key&approve=1",
+                      cid, GW_OAUTH_CHALLENGE, page);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+        ASSERT_EQ(gw_post_form_status("/oauth/authorize", form,
+                                      gw_self_origin()),
+                  302);
+        /* And exactly once: a replayed nonce is spent. */
+        ASSERT_EQ(gw_post_form_status("/oauth/authorize", form,
+                                      gw_self_origin()),
+                  403);
+        /* Owner-key guesses are bounded. Each attempt gets its own valid
+         * nonce, so what runs out is the key window and nothing else. The
+         * window is persistent and shared with every earlier approval in
+         * this run, so the case asserts the SHAPE rather than a count:
+         * wrong keys are denied, the window closes within its bound, and
+         * once closed it never re-opens. */
+        {
+            bool closed = false;
+            for (i = 0; i < 8; i++) {
+                char nonce[128];
+                int got;
+                b = gw_get(args, &st);
+                ASSERT(b != NULL);
+                ASSERT(gw_csrf_of(b, nonce, sizeof(nonce)));
+                free(b);
+                sn = snprintf(form, sizeof(form),
+                              "response_type=code&client_id=%s"
+                              "&redirect_uri=https://client.test/csrf"
+                              "&scope=brief&code_challenge=%s"
+                              "&code_challenge_method=S256&csrf=%s"
+                              "&owner_key=wrong-%d&approve=1",
+                              cid, GW_OAUTH_CHALLENGE, nonce, i);
+                ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+                got = gw_post_form_status("/oauth/authorize", form,
+                                          gw_self_origin());
+                /* Never approved, whatever the count says. */
+                ASSERT(got == 403 || got == 429);
+                if (got == 429)
+                    closed = true;
+                else
+                    ASSERT(!closed);
+            }
+            ASSERT(closed);
+        }
+        /* Fail-closed: with the window spent, even the RIGHT key is
+         * refused until it rolls over. */
+        {
+            char nonce[128];
+            b = gw_get(args, &st);
+            ASSERT(b != NULL);
+            ASSERT(gw_csrf_of(b, nonce, sizeof(nonce)));
+            free(b);
+            sn = snprintf(form, sizeof(form),
+                          "response_type=code&client_id=%s"
+                          "&redirect_uri=https://client.test/csrf"
+                          "&scope=brief&code_challenge=%s"
+                          "&code_challenge_method=S256&csrf=%s"
+                          "&owner_key=gw-test-owner-key&approve=1",
+                          cid, GW_OAUTH_CHALLENGE, nonce);
+            ASSERT(sn > 0 && (size_t)sn < sizeof(form));
+            ASSERT_EQ(gw_post_form_status("/oauth/authorize", form,
+                                          gw_self_origin()),
+                      429);
+        }
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* ── F3: JSONL row injection and the redirect allowlist ──────────────────
+ *
+ * A redirect_uri was written into oauth_clients.jsonl unescaped, and
+ * json_read decodes \n and \" — so a crafted value appended a second,
+ * fully attacker-chosen row binding any client id to any callback. The
+ * endpoint is anonymous, so the value is refused at the door AND the
+ * writer cannot express the forged row. */
+static int gw_t_register_bounds(void)
+{
+    int failures = 0;
+    TEST("gateway: registration escapes rows and honours the allowlist") {
+        size_t before, after;
+        char *b;
+        int st = 0;
+        before = gw_state_rows(g_gw_state, "oauth_clients.jsonl");
+        /* The injection: a newline and quotes that would close the row and
+         * start another one naming a callback the operator never allowed. */
+        b = gw_post("/oauth/register",
+                    "{\"redirect_uris\":[\"https://client.test/ok\\\",\\\"x"
+                    "\\\":\\\"y\\n{\\\"id\\\":\\\"ffffffffffffffffffffffff"
+                    "ffffffff\\\",\\\"redirect\\\":\\\"https://evil.test/cb"
+                    "\\\"}\"]}",
+                    &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "invalid_redirect_uri"));
+        free(b);
+        after = gw_state_rows(g_gw_state, "oauth_clients.jsonl");
+        ASSERT_EQ((int)after, (int)before);
+        ASSERT(!gw_state_has(g_gw_state, "oauth_clients.jsonl",
+                             "evil.test"));
+        /* A bare newline inside the value cannot start a row either. */
+        b = gw_post("/oauth/register",
+                    "{\"redirect_uris\":[\"https://client.test/a\\nb\"]}",
+                    &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "invalid_redirect_uri"));
+        free(b);
+        ASSERT_EQ((int)gw_state_rows(g_gw_state, "oauth_clients.jsonl"),
+                  (int)before);
+        /* "any https" is gone: a callback the operator did not name is
+         * refused however well-formed it is. */
+        b = gw_post("/oauth/register",
+                    "{\"redirect_uris\":[\"https://not-allowed.test/cb\"]}",
+                    &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "invalid_redirect_uri"));
+        free(b);
+        /* The boundary is the origin's end, so a lookalike host that only
+         * starts with an allowed entry is not allowed. */
+        b = gw_post("/oauth/register",
+                    "{\"redirect_uris\":[\"https://client.test.evil/cb\"]}",
+                    &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "invalid_redirect_uri"));
+        free(b);
+        /* What the operator did name still registers. */
+        b = gw_post("/oauth/register",
+                    "{\"redirect_uris\":[\"https://client.test/allowed\"]}",
+                    &st);
+        ASSERT(b != NULL);
+        ASSERT_EQ(st, 201);
+        free(b);
+        ASSERT(gw_state_rows(g_gw_state, "oauth_clients.jsonl") ==
+               before + 1);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* ── F4: half-open connections cost a timeout, not a child ───────────────
+ *
+ * Thirty connections that sent half a request line held thirty children
+ * indefinitely: no deadline on the socket, no cap on the fork. This holds
+ * both. The rig runs the gateway with FLEET_GW_MAX_CHILDREN=8 and
+ * FLEET_GW_IO_TIMEOUT_MS=1000. */
+#define GW_HALF_OPEN 12
+
+static int gw_t_conn_bounds(void)
+{
+    int failures = 0;
+    TEST("gateway: half-open connections are capped and timed out") {
+        int fds[GW_HALF_OPEN];
+        struct timespec ts;
+        char *b;
+        int st = 0, i;
+        for (i = 0; i < GW_HALF_OPEN; i++) {
+            static const char partial[] = "GET /healthz HTTP/1.1\r\nHost: x\r\n";
+            fds[i] = gw_sock_open();
+            if (fds[i] < 0)
+                break;
+            /* Headers that never end: the request the old reader waited on
+             * one byte at a time, forever. */
+            (void)write(fds[i], partial, sizeof(partial) - 1);
+        }
+        ASSERT_EQ(i, GW_HALF_OPEN);
+        /* Eight children are held; the cap refuses the rest at once, so
+         * an ordinary request gets nothing back rather than a child. */
+        b = gw_get("/healthz", &st);
+        ASSERT(b == NULL);
+        /* The deadline releases them without anyone closing a socket. */
+        ts.tv_sec = 1;
+        ts.tv_nsec = 600000000L;
+        (void)nanosleep(&ts, NULL);
+        b = gw_get("/healthz", &st);
+        GW_ASSERT_BODY(b, "\"ok\":true");
+        ASSERT_EQ(st, 200);
+        free(b);
+        for (i = 0; i < GW_HALF_OPEN; i++)
+            close(fds[i]);
         PASS();
     }
 _test_next:;
@@ -2588,6 +2990,11 @@ int test_fleet_gateway(void)
     failures += gw_t_child_status();
     failures += gw_t_auth();
     failures += gw_t_oauth();
+    failures += gw_t_register_bounds();
+    failures += gw_t_conn_bounds();
+    /* Last: it spends the owner-key window, which is persistent by
+     * design and does not roll over inside one run. */
+    failures += gw_t_csrf();
     failures += gw_t_life_send_ack();
     failures += gw_t_life_complete();
     failures += gw_t_life_restart();

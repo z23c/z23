@@ -68,9 +68,9 @@ Requirements (Claude Help Center, custom connectors): a plan that allows
 custom connectors (on Pro/Max the user adds their own; on Team/Enterprise
 only an Owner can); the server reachable from the public internet from
 Anthropic's egress range `160.79.104.0/21`; OAuth with DCR and PKCE S256;
-the hosted-surface redirect URI Claude documents on claude.ai (accepted:
-any `https://` redirect registered through DCR); discovery, registration and
-token answers inside 10 s.
+the hosted-surface redirect URI Claude documents on claude.ai, which must be
+named in `FLEET_GW_REDIRECT_ALLOW` before the connector can register;
+discovery, registration and token answers inside 10 s.
 
 1. In Claude on the web: **Customize → Connectors → Add custom connector**.
    Name it, set the URL to `<base>/steer`, leave the advanced OAuth fields
@@ -85,8 +85,25 @@ token answers inside 10 s.
    `steer_send` / `steer_evidence` for the round-trip in
    [EXTERNAL_ACCEPTANCE.md](./EXTERNAL_ACCEPTANCE.md).
 
-An issued token is a 24 h scoped steer grant with no refresh token. After
-it expires or is revoked, calls return the node's typed refusal as tool
+An issued token is a scoped steer grant with no refresh token and **no
+expiry**: owner rule of 2026-09-19, an approved connector keeps working
+until it is revoked (`tools/fleet_gateway.c`, `gw_oauth_mint`, mints with
+`ttl_seconds:0`). This page used to say "a 24 h scoped steer grant", which
+no code had ever done; the rule is the contract, so the sentence is
+corrected rather than the mint. Revocation is therefore the whole lifecycle,
+which is why it has to be inspectable:
+
+```bash
+z23 fleet steer grant --action=list            # what exists, and its state
+z23 fleet steer grant --action=revoke --id=<32-hex>
+```
+
+`list` prints one row per grant — an 8-character id prefix, label, scopes,
+created, expires, revoked, state — and never a whole id, so the listing is
+not itself a credential file. `revoke` still needs the full 32-character id
+that `mint` returned.
+
+After a grant is revoked, calls return the node's typed refusal as tool
 content; reconnect the connector to sign in again.
 
 ## Owner deploy (owner-authorized; agents never run this unasked)
@@ -114,6 +131,16 @@ cat > ~/.config/z23-fleet-gateway/<gw-port>.env <<ENV
 FLEET_GW_ISSUER=https://<public-host>:<front-port>
 FLEET_GW_OWNER_KEY=<owner approval secret>
 FLEET_GW_NODE=<checkout>/build/bin/z23
+# Which https callbacks a registered client may be sent back to. REQUIRED
+# for any hosted client: registration is anonymous, so without this only
+# loopback redirects can be registered at all. Space- or comma-separated
+# origins (or origin+path prefixes); a match must end at the origin or a
+# path boundary, so "https://a.test" never admits "https://a.test.evil".
+FLEET_GW_REDIRECT_ALLOW=https://claude.ai https://<other hosted callback>
+# Optional bounds (defaults shown): per-socket read/write deadline, and the
+# hard concurrent-connection-child cap.
+# FLEET_GW_IO_TIMEOUT_MS=10000
+# FLEET_GW_MAX_CHILDREN=64
 ENV
 cat > ~/.config/z23-fleet-gateway/front-<front-port>.env <<ENV
 # '*' listens on every address; the unit default binds loopback only,
@@ -187,8 +214,21 @@ HEAD and image hashes.
 - 120 s idle budget per front connection; handshakes covered by 120 s socket
   timeouts; stale half-close signals exit instead of spinning.
 - 64 KiB streaming relay buffers: front memory never grows with body size.
-- Gateway caps unchanged: 64 KiB headers, 1 MiB bodies, 4 MiB replies;
-  oversize bodies are refused before the node is forked.
+- Gateway caps: 64 KiB headers, 1 MiB bodies, 4 MiB replies; oversize
+  bodies are refused before the node is forked. Every accepted socket
+  carries a 10 s read AND write deadline (`FLEET_GW_IO_TIMEOUT_MS`) and the
+  listener refuses past 64 concurrent connection children
+  (`FLEET_GW_MAX_CHILDREN`, hard maximum 512): a half-open connection costs
+  one timeout, not a child held for as long as the peer likes. Request
+  heads are read in 4 KiB refills rather than one `read(2)` per byte.
+- The owner approval POST needs a single-use nonce minted by the approval
+  GET and bound to that exact request, and an `Origin` or `Referer` naming
+  `FLEET_GW_ISSUER`; owner-key failures spend a persistent, fail-closed
+  window (5 per 15 min). Registration is bounded the same way (20 per hour)
+  and the client store is capped at 2048 rows / 256 KiB.
+- A tool call's input reaches the node on **stdin** (`--input=-`), never in
+  an argv string: `/proc/<pid>/cmdline` is world-readable, so a bearer on
+  argv would be readable by every local account for the life of the call.
 - Missing credential → `-32001 grant required`; two differing credentials →
   `-32002 conflicting grants`; unknown → `STEER_GRANT_UNKNOWN`; wrong scope →
   `STEER_GRANT_SCOPE`; revoked → `STEER_GRANT_REVOKED` — all before or by the
