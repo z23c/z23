@@ -389,6 +389,11 @@ void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
 /* True when `to` is a verified roster box other than this one. */
 bool zcl_devagent_boardmail_remote(const char *to);
 
+/* The longest mail row line (without its newline) the board carries: the
+ * signed text ceiling of one fleet note (FLEET_BOARD_TEXT_MAX). A row bound
+ * for another box that would not fit is refused where it is sent. */
+#define ZCL_BOARDMAIL_TEXT_MAX 2048u
+
 /* One pulled row carrying board fields, borrowed for one call. */
 struct zcl_boardmail_row {
     long long seq;

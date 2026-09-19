@@ -1862,7 +1862,7 @@ represented by its children's sections.
 | `fleet steer brief` | ready | read / read / operator · fast/low | `grant`, `since`, `limit` | `zcl.fleet_steer_brief.v1` | `z23 fleet steer brief` | One-call fleet brief: workers, work, blockers, capacity, candidates |
 | `fleet steer send` | ready | mutate / dev-mutation / operator · fast/low | `grant`, **`items`**, `from` | `zcl.fleet_steer_send.v1` | `z23 fleet steer send --items=[...]` | One bounded batch of directives to named fleet agents |
 | `fleet steer evidence` | ready | read / read / operator · fast/low | `grant`, **`type`**, **`ref`** | `zcl.fleet_steer_evidence.v1` | `z23 fleet steer evidence --type=mail --ref=<ref>` | One bounded evidence object by exact reference |
-| `fleet steer grant` | ready | mutate / dev-mutation / **owner** · fast/low | **`action`**, `scopes`, `ttl_seconds`, `label`, `id` | `zcl.fleet_steer_grant.v1` | `z23 fleet steer grant --action=mint --scopes=brief,send` | Mint and revoke the adapter's scoped bearer grants |
+| `fleet steer grant` | ready | mutate / dev-mutation / **owner** · fast/low | **`action`**, `scopes`, `ttl_seconds`, `label`, `id`, `peer` | `zcl.fleet_steer_grant.v1` | `z23 fleet steer grant --action=mint --scopes=brief,send` | Mint and revoke the adapter's scoped bearer grants |
 
 
 ## Aliases

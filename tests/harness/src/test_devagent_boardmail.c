@@ -23,7 +23,8 @@
  * restart; a forged inbox line is refused MISMATCH; a wrong signer is
  * refused UNENROLLED or UNGRANTED; partial board fields are refused
  * UNSIGNED; an expired post is never delivered late; a node that does not
- * answer defers without a marker and the row is decided later.
+ * answer defers without a marker and the row is decided later; a directive
+ * for another box too large for one board note is refused at send.
  */
 
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
@@ -1079,6 +1080,41 @@ _test_next:;
     return failures;
 }
 
+static int bmx_t_oversize(void)
+{
+    int failures = 0;
+    TEST("boardmail: a directive for another box too large for one board "
+         "note is refused at send, and nothing is written") {
+        char grant[64], error[64], body[2100];
+        size_t i;
+        ASSERT(bmx_setup("oversize"));
+        bmx_use(BMX_A);
+        ASSERT(bmx_grant("chatgpt", NULL, grant, sizeof(grant)));
+        (void)snprintf(body, sizeof(body), "%s", g_bmx_body);
+        for (i = strlen(body); i < 1990; i++)
+            body[i] = (i % 16 == 15) ? ' ' : 'a';
+        body[i] = '\0';
+        /* Within the steer body ceiling, so only the carriage refuses. */
+        ASSERT(strlen(body) <= 2048);
+        ASSERT(!bmx_send(grant, "node-b", "job-9", body, error,
+                         sizeof(error)));
+        ASSERT_STR_EQ(error, "STEER_REMOTE_BODY_TOO_LARGE");
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/outbox.jsonl", "\"job-9\"", NULL),
+                  0);
+        /* The same body to a local agent needs no board note. */
+        ASSERT(bmx_send(grant, "helper", "job-9l", body, error,
+                        sizeof(error)));
+        /* And a body that fits still goes to the other box. */
+        ASSERT(bmx_send(grant, "node-b", "job-9s", g_bmx_body, error,
+                        sizeof(error)));
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
 int test_devagent_boardmail(void)
@@ -1093,6 +1129,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_unsigned();
     failures += bmx_t_expired();
     failures += bmx_t_deferred();
+    failures += bmx_t_oversize();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");

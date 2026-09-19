@@ -122,7 +122,7 @@
 /* Owner decision: a carried row lives a week on the board. */
 #define BM_TTL_S (7LL * 24 * 60 * 60)
 /* The board's own signed text ceiling for a note (FLEET_BOARD_TEXT_MAX). */
-#define BM_TEXT_MAX 2048u
+#define BM_TEXT_MAX ZCL_BOARDMAIL_TEXT_MAX
 #define BM_AGENT_MAX 64u
 #define BM_EXPORT_ROWS 64u
 #define BM_IMPORT_PAGES 4u
@@ -186,20 +186,27 @@ static bool bm_digits(const char *s, size_t n, long long *out)
 }
 
 /* The mail leaf's ts, exactly "YYYY-MM-DDTHH:MM:SSZ", as Unix seconds; -1
- * when it is not that shape. */
+ * when it is not that shape. Each field is an offset, a width and a range. */
 static long long bm_ts_unix(const char *ts)
 {
-    long long y, mo, d, h, mi, s;
-    if (!ts || strlen(ts) != 20 || ts[4] != '-' || ts[7] != '-' ||
-        ts[10] != 'T' || ts[13] != ':' || ts[16] != ':' || ts[19] != 'Z')
+    static const struct {
+        unsigned char at, width;
+        short lo, hi;
+    } f[6] = {{0, 4, 0, 9999}, {5, 2, 1, 12}, {8, 2, 1, 31},
+              {11, 2, 0, 23}, {14, 2, 0, 59}, {17, 2, 0, 59}};
+    static const char sep[] = "--T::Z";
+    static const unsigned char sep_at[] = {4, 7, 10, 13, 16, 19};
+    long long v[6];
+    if (!ts || strlen(ts) != 20)
         return -1;
-    if (!bm_digits(ts, 4, &y) || !bm_digits(ts + 5, 2, &mo) ||
-        !bm_digits(ts + 8, 2, &d) || !bm_digits(ts + 11, 2, &h) ||
-        !bm_digits(ts + 14, 2, &mi) || !bm_digits(ts + 17, 2, &s))
-        return -1;
-    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59)
-        return -1;
-    return bm_days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s;
+    for (size_t i = 0; i < 6; i++) {
+        if (ts[sep_at[i]] != sep[i] ||
+            !bm_digits(ts + f[i].at, f[i].width, &v[i]) || v[i] < f[i].lo ||
+            v[i] > f[i].hi)
+            return -1;
+    }
+    return bm_days_from_civil(v[0], v[1], v[2]) * 86400 + v[3] * 3600 +
+           v[4] * 60 + v[5];
 }
 
 /* ── one mail row, read from JSON (a board post's text or a pulled row) ── */

@@ -3787,6 +3787,45 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
     json_free(&item);
 }
 
+/* Bytes `s` takes once the mail sibling escapes it (dvm_escape's rules:
+ * two-character escapes for quote, backslash, \n \r \t \b \f; a six-byte
+ * u-escape for any other control byte). */
+static size_t fmc_mail_escaped_len(const char *s)
+{
+    size_t n = 0;
+    for (; s && *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t' ||
+            c == 0x08 || c == 0x0c)
+            n += 2;
+        else
+            n += c < 0x20 ? 6u : 1u;
+    }
+    return n;
+}
+
+/* True when the mail row this item becomes could not ride one board note:
+ * the row line the mail sibling writes, with the widest seq (19 digits),
+ * its fixed-width ts, and — when the sender name is the sibling's own
+ * default — the widest agent name it accepts. Bounded from above, so a row
+ * is never accepted here and then stranded by export. */
+static bool fmc_remote_row_too_large(const struct fmc_item_fields *f,
+                                     const struct fmc_sender *s)
+{
+    static const char shell[] =
+        "{\"seq\":,\"ts\":\"\",\"from\":\"\",\"to\":\"\",\"kind\":\"directive\","
+        "\"body\":\"\",\"ref\":\"\"}";
+    static const char bind_shell[] = ",\"sender_binding\":\"\"";
+    const char *from = fmc_sender_name(s);
+    size_t n = sizeof(shell) - 1u + 19u + 20u;
+    n += from ? fmc_mail_escaped_len(from) : 128u;
+    n += fmc_mail_escaped_len(f->to) + fmc_mail_escaped_len(f->body) +
+         fmc_mail_escaped_len(f->ref);
+    if (from)
+        n += sizeof(bind_shell) - 1u + strlen(s->binding);
+    return n > ZCL_BOARDMAIL_TEXT_MAX;
+}
+
 /* One send item: validate, reconcile idempotency, post, record. Emits its
  * result object onto items[]. Returns true iff the item's state is an
  * accept (fresh or duplicate), false for every refused state — the
@@ -3805,6 +3844,14 @@ static bool fmc_send_item(const struct zcl_command_request *req,
         const char *to =
             (it && it->type == JSON_OBJ) ? fmc_item_str(it, "to") : NULL;
         fmc_send_item_refused(items, index, to, shape_error);
+        return false;
+    }
+    /* A directive for another enrolled box travels as one signed board
+     * note; one that cannot fit is refused now, before any mail exists. */
+    if (zcl_devagent_boardmail_remote(f.to) &&
+        fmc_remote_row_too_large(&f, s)) {
+        fmc_send_item_refused(items, index, f.to,
+                              "STEER_REMOTE_BODY_TOO_LARGE");
         return false;
     }
     /* Reconcile: same key AND same payload returns the recorded accept

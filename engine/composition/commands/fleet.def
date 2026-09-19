@@ -515,7 +515,11 @@ ZCL_COMMAND_READY_COMMAND(
     "recorded accept with "
     "duplicate:true and posts nothing, so retries reconcile the same "
     "request instead of duplicating work. Per-item states are queued or "
-    "refused with the sibling's typed reason; the batch fails outright "
+    "refused with the sibling's typed reason. An item addressed to another "
+    "enrolled box travels as one signed fleet board note, so one whose "
+    "mail row could exceed that note's 2048 bytes is refused "
+    "STEER_REMOTE_BODY_TOO_LARGE before any mail is written. The batch "
+    "fails outright "
     "only on bad batch input or a bad grant. Delivery, acknowledgement "
     "and completion are observed later through brief and evidence, never "
     "claimed here. It contacts no peer and never waits.", 65536,
