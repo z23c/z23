@@ -3788,8 +3788,9 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
 }
 
 /* Bytes `s` takes once the mail sibling escapes it (dvm_escape's rules:
- * two-character escapes for quote, backslash, \n \r \t \b \f; a six-byte
- * u-escape for any other control byte). */
+ * two-character escapes for quote, backslash, newline, carriage return,
+ * tab, backspace and form-feed; a six-byte u-escape for any other control
+ * byte). */
 static size_t fmc_mail_escaped_len(const char *s)
 {
     size_t n = 0;

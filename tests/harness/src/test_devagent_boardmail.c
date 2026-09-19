@@ -177,6 +177,16 @@ static struct bmx_post *bmx_inject(int node, int host, const char *text,
     return bmx_store(node, &p);
 }
 
+/* A fixture stamp `seconds` before a caller-supplied wall-clock reading —
+ * not itself a clock reader. The caller reads the clock once, and this just
+ * hands the subject a different, still-recent number for a synthetic
+ * created_at, the way `now + TTL` builds a deadline elsewhere in this
+ * file. */
+static long long bmx_stamp_before(long long base, long long seconds)
+{
+    return base - seconds;
+}
+
 /* What the paired fleet pull does between two boxes: every post one node
  * holds and the other does not, copied by id. */
 static void bmx_carry(int from, int to)
@@ -839,8 +849,8 @@ static int bmx_t_regossip(void)
         /* The same row carried again under a different created_at is a
          * different post id; the identical row is still refused. */
         ASSERT(bmx_outbox_row("job-2", row, sizeof(row)));
-        ASSERT(bmx_inject(BMX_B, BMX_A, row,
-                          (long long)platform_time_wall_time_t() - 5,
+        long long inject_now = (long long)platform_time_wall_time_t();
+        ASSERT(bmx_inject(BMX_B, BMX_A, row, bmx_stamp_before(inject_now, 5),
                           3600) != NULL);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.board_in, 0);
@@ -936,7 +946,7 @@ static int bmx_t_wrong_signer(void)
          "nobody granted is UNGRANTED") {
         struct rcv_beat_stats st;
         char row[4096], ts[32];
-        struct bmx_post *p;
+        struct bmx_post *fwd;
         long long now = (long long)platform_time_wall_time_t();
         ASSERT(bmx_setup("signer"));
         bmx_use(BMX_B);
@@ -948,10 +958,10 @@ static int bmx_t_wrong_signer(void)
         /* A key no roster line names: never carried in, so the line is
          * written by hand, the way only a forger could. */
         bmx_row(row, sizeof(row), ts, "job-5d", "From nobody.");
-        p = bmx_inject(BMX_B, 3, row, now, 3600);
-        ASSERT(p != NULL);
+        fwd = bmx_inject(BMX_B, 3, row, now, 3600);
+        ASSERT(fwd != NULL);
         ASSERT(bmx_write(BMX_B, "mail/inbox.node-d.jsonl", "", "ab"));
-        ASSERT(bmx_inbox_forge("node-d", row, p->id, g_bmx_host[3]));
+        ASSERT(bmx_inbox_forge("node-d", row, fwd->id, g_bmx_host[3]));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.board_in, 1);
         ASSERT_EQ(st.admitted, 0);
@@ -1007,7 +1017,7 @@ static int bmx_t_expired(void)
          "admitted late") {
         struct rcv_beat_stats st;
         char row[4096], ts[32], line[4200];
-        struct bmx_post *p;
+        struct bmx_post *fwd;
         long long now = (long long)platform_time_wall_time_t();
         ASSERT(bmx_setup("expired"));
         bmx_use(BMX_B);
@@ -1025,13 +1035,13 @@ static int bmx_t_expired(void)
         /* A post that expired on the way is never paged to B. */
         bmx_ts(now - 7200, ts, sizeof(ts));
         bmx_row(row, sizeof(row), ts, "job-7b", "Expired in flight.");
-        p = bmx_inject(BMX_B, BMX_A, row, now - 7200, 3600);
-        ASSERT(p != NULL);
+        fwd = bmx_inject(BMX_B, BMX_A, row, now - 7200, 3600);
+        ASSERT(fwd != NULL);
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.board_in, 0);
         /* And a line naming it is refused, not admitted late. */
         ASSERT(bmx_write(BMX_B, "mail/inbox.node-a.jsonl", "", "ab"));
-        ASSERT(bmx_inbox_forge("node-a", row, p->id, g_bmx_host[BMX_A]));
+        ASSERT(bmx_inbox_forge("node-a", row, fwd->id, g_bmx_host[BMX_A]));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.admitted, 0);
         ASSERT_EQ(st.refused, 1);
