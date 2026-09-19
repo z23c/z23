@@ -866,6 +866,28 @@ static const char *const GW_OAUTH_VERIFIER =
 static const char *const GW_OAUTH_CHALLENGE =
     "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
+/* The isolated XDG_STATE_HOME every gateway and node child of this group
+ * runs under; set once by the group entry. */
+static char g_gw_state[512];
+
+/* True when the steer grant row for `id` carries `needle`. */
+static bool gw_grant_row_has(const char *id, const char *needle)
+{
+    char path[1024], line[1024];
+    bool hit = false;
+    FILE *f;
+    if (snprintf(path, sizeof(path), "%s/z23/dev/steer/grants.jsonl",
+                 g_gw_state) >= (int)sizeof(path))
+        return false;
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    while (!hit && fgets(line, sizeof(line), f))
+        hit = strstr(line, id) && strstr(line, needle);
+    (void)fclose(f);
+    return hit;
+}
+
 static int gw_t_oauth(void)
 {
     int failures = 0;
@@ -1038,7 +1060,11 @@ static int gw_t_oauth(void)
         ASSERT_EQ(st, 200);
         ASSERT(gw_body_hex(b, "access_token", token));
         ASSERT(gw_body_has(b, "\"scope\":\"brief send\""));
+        /* Owner rule 2026-09-19: an approved connector never expires. The
+         * token carries no lifetime; revoke is how access ends. */
+        ASSERT(!gw_body_has(b, "expires_in"));
         free(b);
+        ASSERT(gw_grant_row_has(token, "\"expires\":0,"));
         /* The code is single-use. */
         b = gw_post("/oauth/token", form, &st);
         ASSERT(b != NULL);
@@ -1085,6 +1111,28 @@ static int gw_t_oauth(void)
                          gid2, &st);
         ASSERT(b != NULL);
         ASSERT(gw_body_has(b, "STEER_GRANT_SCOPE"));
+        free(b);
+        /* The OAuth token keeps its own scopes: brief and send only. */
+        b = gw_post_auth("/steer",
+                         "{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":"
+                         "\"tools/call\",\"params\":{\"name\":"
+                         "\"steer_evidence\",\"arguments\":{\"type\":"
+                         "\"mail\",\"ref\":\"r-oa\"}}}",
+                         token, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "STEER_GRANT_SCOPE"));
+        free(b);
+        /* A never-expiring token survives a gateway restart. */
+        gw_stop();
+        ASSERT(gw_spawn(gw_bin("Z23_TEST_GATEWAY_BIN", GW_TEST_BIN_DEFAULT),
+                        node, g_gw_state));
+        b = gw_post_auth("/steer",
+                         "{\"jsonrpc\":\"2.0\",\"id\":27,\"method\":"
+                         "\"tools/call\",\"params\":{\"name\":\"steer_brief\","
+                         "\"arguments\":{}}}",
+                         token, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
         free(b);
         /* Revoked through the bearer: the node refuses. */
         {
@@ -1133,7 +1181,6 @@ _test_next:;
 #define GW_LIFE_TO "gw-worker"
 #define GW_LIFE_FROM GW_SENDER
 
-static char g_gw_state[512];
 static char g_life_gid[64];
 static long long g_life_seq = -1;
 

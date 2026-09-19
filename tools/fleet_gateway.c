@@ -1338,7 +1338,6 @@ static void gw_dispatch_rpc(struct gw_buf *b, const char *body,
 /* ── OAuth (G2) ────────────────────────────────────────────────────────── */
 
 #define GW_OAUTH_CODE_TTL (10LL * 60)
-#define GW_OAUTH_GRANT_TTL (24LL * 60 * 60)
 #define GW_OAUTH_ID_HEX 32
 
 /* Authorize request fields (validated). */
@@ -1975,7 +1974,9 @@ static bool gw_oauth_mint(const char *node, const char *comma, char *gid,
     memset(&input, 0, sizeof(input));
     gw_buf_str(&input, "{\"action\":\"mint\",\"scopes\":\"");
     gw_buf_str(&input, comma);
-    gw_buf_str(&input, "\",\"ttl_seconds\":86400,\"label\":\"oauth\"}");
+    /* Owner rule 2026-09-19: an approved connector never expires
+     * (ttl 0 = expires 0). Revocation is how its access ends. */
+    gw_buf_str(&input, "\",\"ttl_seconds\":0,\"label\":\"oauth\"}");
     if (input.oom || !input.p) {
         gw_buf_free(&input);
         return false;
