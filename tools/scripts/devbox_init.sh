@@ -347,11 +347,11 @@ command -v ip >/dev/null 2>&1 || db_fail preflight ip_not_found
 command -v realpath >/dev/null 2>&1 || db_fail preflight realpath_not_found
 command -v setsid >/dev/null 2>&1 || db_fail preflight setsid_not_found
 command -v ss >/dev/null 2>&1 || db_fail preflight ss_not_found
-[ -x "$Z23_BIN" ] || db_fail preflight 'build/bin/z23 missing; run make -j$(nproc)'
+[ -x "$Z23_BIN" ] || db_fail preflight 'build/bin/z23 missing; run make -j2'
 [ -x "$REPO_ROOT/build/bin/zclassic23" ] \
-    || db_fail preflight 'build/bin/zclassic23 missing; run make -j$(nproc)'
+    || db_fail preflight 'build/bin/zclassic23 missing; run make -j2'
 [ -x "$REPO_ROOT/build/bin/zcl-rpc" ] \
-    || db_fail preflight 'build/bin/zcl-rpc missing; run make -j$(nproc)'
+    || db_fail preflight 'build/bin/zcl-rpc missing; run make -j2'
 db_pass binaries_present
 
 uid=$(id -u) || db_fail control id_failed
