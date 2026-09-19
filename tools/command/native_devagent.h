@@ -98,11 +98,14 @@ struct wkr_drive_opts {
 };
 
 /* One claimed unit of work. task is executor-ready text; rundir owns
- * claim.json, receipt.json, run.out and the executor result file. */
+ * claim.json, receipt.json, run.out and the executor result file. group
+ * names the test group that judges file kinds (empty for leaf/doc and
+ * for adoptions, whose status rows carry no group). */
 struct wkr_job {
     char rundir[4096];
     char name[80];
     char kind[16];
+    char group[80];
     long long attempt;
     long long seq;
     char task[8192];
@@ -116,7 +119,13 @@ struct wkr_job {
 #define WKR_JSON_ESCAPE_WORST 6u
 
 /* Executor outcome. terminal is the executor's own word ("completed" is
- * NOT success); candidate names the produced diff/artifact for the gate. */
+ * NOT success); candidate names the produced diff/artifact for the gate.
+ * Provenance the result record must carry: provider (e.g. muse-msp),
+ * turns taken, the command that ran, the repo-relative source touched,
+ * and the diff identity under the run dir. The receipt keeps these bytes
+ * exactly; the mail copy carries only what the shared name grammar admits
+ * and announces anything else as elided, so a path-shaped value never
+ * costs the client its result row. */
 struct wkr_result {
     char terminal[32];
     long long rc;
@@ -124,6 +133,11 @@ struct wkr_result {
     char evidence[2048];
     long long tokens_used;
     long long wall_ms;
+    char provider[64];
+    long long turns;
+    char command[256];
+    char source[192];
+    char diff[192];
 };
 
 /* Model execution seam. True when the executor ran and filled res (even
@@ -228,12 +242,17 @@ struct wkr_spawn_out {
 
 /* The receipt-facing mapping, shared by both backends. When gate is true
  * the caller parses the result file and gates it; otherwise rc, terminal
- * and note are the outcome and no receipt is written. */
+ * and note are the outcome. cancelled separates an operator shutdown from
+ * a crash: a cancelled run WRITES an explicit non-PASS receipt so reap
+ * records intent, while a crash or a timeout still writes none and stays
+ * incomplete. An operator cancel outranks the child's own death signal:
+ * the worker asked for the shutdown, so it owns the word. */
 struct wkr_outcome {
     long long rc;
     const char *terminal;
     const char *note;
     bool gate;
+    bool cancelled;
 };
 
 void zcl_devagent_worker_outcome(const struct wkr_spawn_out *out,
@@ -249,11 +268,40 @@ int zcl_devagent_worker_child_record(const struct wkr_job *job,
 bool zcl_devagent_worker_parse_result(const char *rundir,
                                       struct wkr_result *res);
 
+/* The provenance half of a result, JSON-escaped in one place so the child's
+ * record and the parent's receipt cannot drift apart. False when any field
+ * will not encode; the caller then writes nothing, because a record missing
+ * provenance is not the record this seam promises. */
+struct wkr_prov_esc {
+    char provider[sizeof(((struct wkr_result *)0)->provider) *
+                  WKR_JSON_ESCAPE_WORST];
+    char command[sizeof(((struct wkr_result *)0)->command) *
+                 WKR_JSON_ESCAPE_WORST];
+    char source[sizeof(((struct wkr_result *)0)->source) *
+                WKR_JSON_ESCAPE_WORST];
+    char diff[sizeof(((struct wkr_result *)0)->diff) * WKR_JSON_ESCAPE_WORST];
+};
+
+bool zcl_devagent_worker_prov_escape(const struct wkr_result *res,
+                                     struct wkr_prov_esc *e);
+
+/* The EXTERNAL judgment a file kind must pass: run the job's own test group
+ * right now and report whether it really passed, describing what was seen in
+ * note. It is a seam because running a group needs the command registry,
+ * which the confinement acceptance program deliberately does not link; the
+ * worker leaf wires the real judge. A NULL judge REFUSES every file kind
+ * rather than passing one on its artifact alone. */
+typedef bool (*wkr_group_gate_fn)(const struct wkr_job *job, char *note,
+                                  size_t notecap);
+
 /* The required gate. Writes the verdict and returns the receipt rc (0 only
- * on pass). */
+ * on pass). gateline (may be NULL) receives the one-line description of the
+ * judgment for the run's outcome row: for a file kind that is the external
+ * test-group observation, for every other kind the artifact check. */
 long long zcl_devagent_worker_gate(const struct wkr_job *job,
                                    const struct wkr_result *res,
-                                   char *verdict, size_t cap);
+                                   char *verdict, size_t cap, char *gateline,
+                                   size_t gcap, wkr_group_gate_fn judge);
 
 /* Bounded small-file helpers the worker and its child share. */
 bool zcl_devagent_worker_read_file(const char *path, char *out, size_t cap);

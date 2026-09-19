@@ -40,15 +40,25 @@
  * COMPLETION. A model terminal of "completed" is not PASS. The leaf
  * writes receipt verdict "pass" only when the executor's own word is
  * pass/PASS with rc 0 AND the candidate artifact exists AND evidence is
- * present AND tokens fit the cap; everything else keeps its own word
- * (failed, gate-refused, timeout, crashed, no-receipt, limit-exceeded)
- * and stays incomplete under the shared closed predicate. crash and no
- * receipt follow the existing policy: reap records them incomplete, no
- * requeue is invented here. Queued cancel prevents claim (the row is
- * gone); a running row refuses cancel and stays the worker's own
- * shutdown business (SIGTERM finishes nothing new: no new claims, the
- * in-flight job is crash-recorded). A gated run whose receipt cannot be
+ * present AND tokens fit the cap AND — for file kinds — the row's own
+ * test group passes right now through the shared run seam; everything
+ * else keeps its own word (failed, gate-refused, timeout, crashed,
+ * cancelled, no-receipt, limit-exceeded) and stays incomplete under the
+ * shared closed predicate. Crash and no receipt follow the existing
+ * policy: reap records them incomplete, no requeue is invented here.
+ * Queued cancel prevents claim (the row is gone); a running row refuses
+ * cancel and stays the worker's own shutdown business (SIGTERM finishes
+ * nothing new: no new claims, and the in-flight job gets an explicit
+ * cancelled receipt — a named non-PASS rather than an ambiguity, while a
+ * genuine crash still leaves none). A gated run whose receipt cannot be
  * written fails as receipt-unwritable and never mails a pass.
+ *
+ * PROVENANCE. Every result record carries the executor's provider, the
+ * turns it took, the command it ran, the source it touched and the diff
+ * it produced, from the child's record through receipt.json to the flat
+ * result mail row. receipt.json keeps those bytes exactly; the mail copy
+ * is bound by the shared name grammar and announces anything it cannot
+ * carry as elided, so a path-shaped value never costs the client its row.
  *
  * WHOLE BRIEFS. A claimed row's brief reaches the executor whole or not
  * at all: one that does not fit the task is refused by name
@@ -100,6 +110,10 @@
 #define WKR_RUNOUT_FILE "run.out"
 #define WKR_LOCK_FILE "worker.lock"
 #define WKR_FILE_CAP (64u * 1024u)
+/* External group run: the job's own wall cap when it has one, else ten
+ * minutes, and never more than an hour whatever the row asked for. */
+#define WKR_GROUP_MS_DFLT 600000LL
+#define WKR_GROUP_MS_MAX 3600000LL
 #define WKR_TASK_BRIEF_CAP (32u * 1024u)
 /* Named refusals for a claimed row that must never reach the executor.
  * The rc is the one reap records; it never collides with 99-101 below. */
@@ -256,6 +270,8 @@ static void wkr_fill_job_from_claim(const struct wkr_sub *sub,
     (void)snprintf(job->name, sizeof(job->name), "%s", s);
     s = wkr_sub_str(sub, "kind");
     (void)snprintf(job->kind, sizeof(job->kind), "%s", s);
+    s = wkr_sub_str(sub, "group");
+    (void)snprintf(job->group, sizeof(job->group), "%s", s);
     job->attempt = wkr_sub_int(sub, "attempt", 1);
     job->seq = wkr_sub_int(sub, "seq", 0);
     s = wkr_sub_str(sub, "model");
@@ -595,8 +611,13 @@ static struct wkr_spawn_out wkr_wait_child(pid_t pid, long long cap_s,
         struct timespec slice;
         long long now_s = platform_time_wall_unix();
         if (g_wkr_term) {
+            /* The child ran and was reaped here, so this is status 1 (a
+             * wait that was observed), not the -1 of a wait that never
+             * happened. Leaving it -1 reported an operator shutdown as a
+             * launch failure and hid the cancel from the outcome mapping. */
             (void)kill(pid, SIGKILL);
             (void)waitpid(pid, &st, 0);
+            out.status = 1;
             out.signaled = true;
             break;
         }
@@ -672,23 +693,29 @@ static bool wkr_write_receipt(const struct wkr_drive_opts *opts,
                               const struct wkr_job *job, const char *verdict,
                               const struct wkr_result *res)
 {
-    char path[4096 + 32], text[4096];
+    char path[4096 + 32], text[8192];
     char e_cand[sizeof(res->candidate) * WKR_JSON_ESCAPE_WORST];
+    struct wkr_prov_esc e;
     int w;
     if (!opts || !job || !verdict || !res)
         return false;
     if (snprintf(path, sizeof(path), "%s/%s", job->rundir,
                  WKR_RECEIPT_FILE) >= (int)sizeof(path))
         return false;
-    if (!zcl_devagent_worker_json_escape(res->candidate, e_cand, sizeof(e_cand)))
+    /* The receipt keeps the provenance bytes exactly as the executor gave
+     * them; only the mail copy is bound by the name grammar. */
+    if (!zcl_devagent_worker_json_escape(res->candidate, e_cand, sizeof(e_cand)) ||
+        !zcl_devagent_worker_prov_escape(res, &e))
         return false;
     w = snprintf(text, sizeof(text),
                  "{\"verdict\":\"%s\",\"worker\":\"%.48s\","
                  "\"session\":\"%.48s\",\"model\":\"%.128s\","
                  "\"candidate\":\"%s\",\"tokens\":%lld,\"wall_ms\":%lld,"
-                 "\"ts\":%lld}\n",
+                 "\"provider\":\"%s\",\"turns\":%lld,\"command\":\"%s\","
+                 "\"source\":\"%s\",\"diff\":\"%s\",\"ts\":%lld}\n",
                  verdict, opts->worker, opts->session, job->model, e_cand,
-                 res->tokens_used, res->wall_ms,
+                 res->tokens_used, res->wall_ms, e.provider, res->turns,
+                 e.command, e.source, e.diff,
                  (long long)platform_time_wall_unix());
     if (w <= 0 || (size_t)w >= sizeof(text))
         return false;
@@ -747,7 +774,11 @@ static const char *wkr_field_carry(const char *v, bool *elided)
     return WKR_MAIL_ELIDED;
 }
 
-/* The safe, bounded pieces of one result row. */
+/* The safe, bounded pieces of one result row. The provenance fields ride
+ * the SAME grammar as everything else: a repo-relative source or command
+ * is path-shaped, so it usually arrives as the elided marker here while
+ * receipt.json keeps its exact bytes. That is deliberate — the client's
+ * row must never be the thing a path cancels. */
 struct wkr_mail_row {
     const char *ref;
     const char *worker;
@@ -756,13 +787,29 @@ struct wkr_mail_row {
     const char *terminal;
     const char *candidate;
     const char *gate;
+    const char *provider;
+    const char *command;
+    const char *source;
+    const char *diff;
+    long long turns;
     bool elided;
 };
+
+static void wkr_row_prov(struct wkr_mail_row *row,
+                         const struct wkr_result *res)
+{
+    row->provider = wkr_field_carry(res ? res->provider : "", &row->elided);
+    row->command = wkr_field_carry(res ? res->command : "", &row->elided);
+    row->source = wkr_field_carry(res ? res->source : "", &row->elided);
+    row->diff = wkr_field_carry(res ? res->diff : "", &row->elided);
+    row->turns = res ? res->turns : 0;
+}
 
 static void wkr_row_safe(struct wkr_mail_row *row,
                          const struct wkr_drive_opts *opts,
                          const struct wkr_job *job, const char *terminal,
-                         const char *candidate, const char *verdict)
+                         const char *candidate, const char *verdict,
+                         const struct wkr_result *res)
 {
     memset(row, 0, sizeof(*row));
     row->ref = wkr_field_carry(job->name, &row->elided);
@@ -772,6 +819,7 @@ static void wkr_row_safe(struct wkr_mail_row *row,
     row->terminal = wkr_field_carry(terminal, &row->elided);
     row->candidate = wkr_field_carry(candidate, &row->elided);
     row->gate = wkr_field_carry(verdict, &row->elided);
+    wkr_row_prov(row, res);
 }
 
 /* Post one composed body under ref. True when the mail leaf ACCEPTED it;
@@ -853,7 +901,7 @@ static void wkr_mail_result(const struct wkr_drive_opts *opts,
                             const struct wkr_job *job, const char *terminal,
                             const char *candidate, const char *verdict,
                             long long rc, long long tokens, long long wall_ms,
-                            const char *note)
+                            const char *note, const struct wkr_result *res)
 {
     struct wkr_mail_row row;
     char body[2048], code[80];
@@ -864,12 +912,14 @@ static void wkr_mail_result(const struct wkr_drive_opts *opts,
     if (!candidate)
         candidate = "";
     (void)snprintf(code, sizeof(code), "%s", "mail-refused");
-    wkr_row_safe(&row, opts, job, terminal, candidate, verdict);
+    wkr_row_safe(&row, opts, job, terminal, candidate, verdict, res);
     w = snprintf(body, sizeof(body),
                  "ref=%.64s\nworker=%.64s\nsession=%.64s\nmodel=%.64s\n"
-                 "attempt=%lld\nterminal=%.64s\ncandidate=%.64s\n"
+                 "attempt=%lld\nprovider=%.64s\nturns=%lld\ncommand=%.64s\n"
+                 "source=%.64s\ndiff=%.64s\nterminal=%.64s\ncandidate=%.64s\n"
                  "gate=%.64s\nrc=%lld\ntokens=%lld\nwall_ms=%lld\n%s",
                  row.ref, row.worker, row.session, row.model, job->attempt,
+                 row.provider, row.turns, row.command, row.source, row.diff,
                  row.terminal, row.candidate, row.gate, rc, tokens, wall_ms,
                  row.elided ? WKR_MAIL_ELIDED_LINE : "");
     if (w <= 0 || (size_t)w >= sizeof(body))
@@ -887,6 +937,88 @@ static void wkr_mail_result(const struct wkr_drive_opts *opts,
  * with submitted!=false: crash-record without ever submitting. Returns
  * 1 processed, 0 when there was no executor to run. */
 
+/* The ungated end of a run. A cancelled outcome is the one that still
+ * earns a receipt: the operator asked for the stop, so reap reads an
+ * explicit non-PASS word instead of guessing at a missing file. Crash,
+ * timeout and no-result keep writing none. */
+static void wkr_finish_ungated(const struct wkr_drive_opts *opts,
+                               const struct wkr_job *job,
+                               const struct wkr_outcome *oc,
+                               long long wall_ms)
+{
+    struct wkr_result res;
+    memset(&res, 0, sizeof(res));
+    wkr_write_runout(job, oc->rc, oc->note);
+    if (!oc->cancelled) {
+        wkr_mail_result(opts, job, oc->terminal, "", "no-receipt", oc->rc, 0,
+                        wall_ms, oc->note, NULL);
+        return;
+    }
+    (void)snprintf(res.terminal, sizeof(res.terminal), "%s", oc->terminal);
+    res.rc = oc->rc;
+    res.wall_ms = wall_ms;
+    (void)snprintf(res.provider, sizeof(res.provider), "%s", "worker");
+    if (!wkr_write_receipt(opts, job, oc->terminal, &res)) {
+        wkr_write_runout(job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE);
+        wkr_mail_result(opts, job, WKR_RECEIPT_UNWRITABLE, "", "no-receipt",
+                        WKR_RC_NO_RECEIPT, 0, wall_ms,
+                        WKR_RECEIPT_UNWRITABLE, NULL);
+        return;
+    }
+    wkr_mail_result(opts, job, oc->terminal, "", oc->terminal, oc->rc, 0,
+                    wall_ms, oc->note, &res);
+}
+
+/* The wired external judge: run the job's own test group right now through
+ * the shared runner. A real pass is the runner exiting clean, a whole
+ * transcript, at least one group actually RUN, and none failed — a gated
+ * or cached zero is not a pass. The note records what was observed either
+ * way, so a refusal is readable in the outcome row. */
+static bool wkr_group_ran_clean(const struct zcl_devagent_verdict *v, int rc,
+                                bool truncated)
+{
+    return rc == 0 && v->present && !truncated && v->groups_ran > 0 &&
+           v->groups_failed == 0;
+}
+
+static bool wkr_group_gate(const struct wkr_job *job, char *note,
+                           size_t notecap)
+{
+    char root[4096], selector[160];
+    struct zcl_devagent_verdict v;
+    bool truncated = false;
+    long long ms;
+    int rc;
+    memset(&v, 0, sizeof(v));
+    if (!zcl_devagent_checkout_root(NULL, root, sizeof(root)) ||
+        snprintf(selector, sizeof(selector), "--exact=%s", job->group) >=
+            (int)sizeof(selector))
+        return false;
+    ms = job->time_cap_s > 0 ? job->time_cap_s * 1000LL : WKR_GROUP_MS_DFLT;
+    if (ms > WKR_GROUP_MS_MAX)
+        ms = WKR_GROUP_MS_MAX;
+    rc = zcl_devagent_run_group(root, selector, (int)ms, &v, &truncated);
+    if (note && notecap > 0)
+        (void)snprintf(note, notecap,
+                       "gate group=%s ran=%lld failed=%lld exit=%d",
+                       job->group, v.groups_ran, v.groups_failed, rc);
+    return wkr_group_ran_clean(&v, rc, truncated);
+}
+
+/* The run's own outcome row: the executor's evidence, then the gate's
+ * one-line observation, so a group refusal is readable beside the rc. */
+static void wkr_run_note(const struct wkr_result *res, const char *gateline,
+                         char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    if (!gateline || !gateline[0]) {
+        (void)snprintf(out, cap, "%s", res ? res->evidence : "");
+        return;
+    }
+    (void)snprintf(out, cap, "%.3000s %s", res ? res->evidence : "", gateline);
+}
+
 static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
                                const struct wkr_job *job,
                                wkr_executor_fn exec)
@@ -894,13 +1026,13 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
     struct wkr_spawn_out out;
     struct wkr_outcome oc;
     struct wkr_result res;
-    char verdict[32];
+    char verdict[32], gateline[256], note[3400];
     long long rc;
     if (!wkr_set_submitted(job->rundir)) {
         wkr_write_runout(job, 101, "claim-identity-unwritable");
         wkr_mail_result(opts, job, "claim-identity-unwritable", "",
                         "no-receipt", 101, 0, 0,
-                        "claim-identity-unwritable");
+                        "claim-identity-unwritable", NULL);
         return 1;
     }
     out = wkr_spawn(opts, job, exec);
@@ -912,25 +1044,26 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
         oc.note = "executor-no-result";
     }
     if (!oc.gate) {
-        wkr_write_runout(job, oc.rc, oc.note);
-        wkr_mail_result(opts, job, oc.terminal, "", "no-receipt", oc.rc, 0,
-                        out.wall_ms, oc.note);
+        wkr_finish_ungated(opts, job, &oc, out.wall_ms);
         return 1;
     }
     res.wall_ms = out.wall_ms;
-    rc = zcl_devagent_worker_gate(job, &res, verdict, sizeof(verdict));
-    wkr_write_runout(job, rc, res.evidence);
+    rc = zcl_devagent_worker_gate(job, &res, verdict, sizeof(verdict),
+                                  gateline, sizeof(gateline),
+                                  wkr_group_gate);
+    wkr_run_note(&res, gateline, note, sizeof(note));
+    wkr_write_runout(job, rc, note);
     if (!wkr_write_receipt(opts, job, verdict, &res)) {
         /* No receipt means no verdict: the run fails, and the client is
          * told so instead of reading a pass reap can never confirm. */
         wkr_write_runout(job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE);
         wkr_mail_result(opts, job, WKR_RECEIPT_UNWRITABLE, res.candidate,
                         "no-receipt", WKR_RC_NO_RECEIPT, res.tokens_used,
-                        res.wall_ms, WKR_RECEIPT_UNWRITABLE);
+                        res.wall_ms, WKR_RECEIPT_UNWRITABLE, &res);
         return 1;
     }
     wkr_mail_result(opts, job, res.terminal, res.candidate, verdict, rc,
-                    res.tokens_used, res.wall_ms, res.evidence);
+                    res.tokens_used, res.wall_ms, note, &res);
     return 1;
 }
 
@@ -948,7 +1081,7 @@ static long long wkr_run_job(const struct wkr_drive_opts *opts,
         wkr_write_runout(job, 99, "worker-lost-after-submit");
         wkr_mail_result(opts, job, "worker-lost-after-submit", "",
                         "no-receipt", 99, 0, 0,
-                        "worker-lost-after-submit");
+                        "worker-lost-after-submit", NULL);
         return 1;
     }
     /* Fresh claims arrive submitted:false; adoptions with submitted==0
@@ -967,7 +1100,7 @@ static long long wkr_refuse_job(const struct wkr_drive_opts *opts,
 {
     wkr_write_runout(job, WKR_RC_REFUSED, why);
     wkr_mail_result(opts, job, why, "", "no-receipt", WKR_RC_REFUSED, 0, 0,
-                    why);
+                    why, NULL);
     return 1;
 }
 
@@ -1209,6 +1342,11 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
     if (!wkr_lock_take(&lock, lockpath))
         return -1;
     old_term = signal(SIGTERM, wkr_on_term);
+    /* A previous drive in this process may have observed a termination
+     * request; each drive starts unrequested. A SIGTERM that arrived
+     * before the install above kept the old disposition, so clearing
+     * here cannot swallow one this handler recorded. */
+    g_wkr_term = 0;
     wkr_idle_open(&idle, queuedir, opts->timed_idle_only);
     t0_s = platform_time_wall_unix();
     wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;

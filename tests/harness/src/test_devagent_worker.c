@@ -280,6 +280,27 @@ static bool wtx_receipt_exists(const char *name, long long attempt)
     return stat(path, &st) == 0;
 }
 
+/* True when receipt.json for name/attempt contains needle verbatim. The
+ * receipt is where provenance keeps its EXACT bytes, so a path-shaped
+ * value is asserted here and never in the mail row. */
+static bool wtx_receipt_has(const char *name, long long attempt,
+                            const char *needle)
+{
+    char path[4096], text[8192];
+    FILE *f;
+    size_t n;
+    (void)snprintf(path, sizeof(path),
+                   "%s/z23/dev/engine/%s/a%lld/receipt.json", g_wtx_state,
+                   name, attempt);
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    n = fread(text, 1, sizeof(text) - 1, f);
+    (void)fclose(f);
+    text[n] = '\0';
+    return strstr(text, needle) != NULL;
+}
+
 /* True when the queue status lists name under key ("queued"/"running"). */
 static bool wtx_status_lists(const char *key, const char *name)
 {
@@ -585,6 +606,15 @@ static bool wtx_fixture(const struct wkr_job *job, struct wkr_result *res)
                    "fixture saw the task");
     res->tokens_used = 42;
     res->wall_ms = 7;
+    /* Provenance, mixed on purpose: provider/command/diff fit the shared
+     * name grammar and reach the mail row verbatim, while source is the
+     * repo-relative path a real executor reports and can only reach the
+     * receipt. */
+    (void)snprintf(res->provider, sizeof(res->provider), "%s", "fixture");
+    res->turns = 3;
+    (void)snprintf(res->command, sizeof(res->command), "%s", "fixture-run");
+    (void)snprintf(res->source, sizeof(res->source), "%s", "fixture/src.c");
+    (void)snprintf(res->diff, sizeof(res->diff), "%s", "cand.diff");
     return true;
 }
 
@@ -778,6 +808,28 @@ static bool wtx_outcome_is(int status, bool signaled, bool term, long long rc,
     return !o.gate && o.rc == rc && strcmp(o.terminal, terminal) == 0;
 }
 
+/* Only a termination REQUEST sets the cancelled flag that earns a receipt;
+ * a crash, a timeout and a launch failure must all leave it clear. */
+static bool wtx_cancelled_only_on_request(void)
+{
+    struct wkr_spawn_out out;
+    struct wkr_outcome o;
+    memset(&out, 0, sizeof(out));
+    out.status = 1;
+    out.signaled = true;
+    zcl_devagent_worker_outcome(&out, false, &o);
+    if (o.cancelled)
+        return false;
+    out.status = 0;
+    out.signaled = false;
+    zcl_devagent_worker_outcome(&out, false, &o);
+    if (o.cancelled)
+        return false;
+    out.status = 1;
+    zcl_devagent_worker_outcome(&out, true, &o);
+    return o.cancelled && !o.gate;
+}
+
 #if !defined(_WIN32)
 /* Applies the caps to a forked child and reports, through its exit code,
  * which of the three expectations it broke. */
@@ -882,8 +934,12 @@ static int wtx_confine_cases(void)
         ASSERT(wtx_outcome_is(-1, true, true, 127, "launch-failed"));
         ASSERT(wtx_outcome_is(0, false, false, 124, "timeout"));
         ASSERT(wtx_outcome_is(1, true, false, 130, "crashed"));
-        ASSERT(wtx_outcome_is(1, false, true, 130, "crashed"));
+        /* An operator cancel outranks the child's own death signal: the
+         * shutdown was asked for, so it earns the explicit word. */
+        ASSERT(wtx_outcome_is(1, false, true, 130, "cancelled"));
+        ASSERT(wtx_outcome_is(1, true, true, 130, "cancelled"));
         ASSERT(wtx_outcome_is(1, false, false, 0, NULL));
+        ASSERT(wtx_cancelled_only_on_request());
         /* An exception or fast-fail exit is the Windows death by signal;
          * an ordinary nonzero exit (the executor's rc) is not. */
         ASSERT(platform_confined_exit_is_crash(0xC0000005u));
@@ -919,7 +975,7 @@ static int wtx_confine_cases(void)
         ASSERT_STR_EQ(res.terminal, "failed");
         ASSERT_EQ(res.rc, 3);
         ASSERT_EQ(zcl_devagent_worker_gate(job, &res, verdict,
-                                           sizeof(verdict)), 1);
+                                           sizeof(verdict), NULL, 0, NULL), 1);
         ASSERT_STR_EQ(verdict, "failed");
         ASSERT_EQ(zcl_devagent_worker_child_record(job, NULL), 125);
         free(job);
@@ -1080,6 +1136,9 @@ static int wtx_confine_cases(void)
 _test_next:;
     return failures;
 }
+
+/* Defined after the suite entry; declared here so the entry can call it. */
+static int wtx_cancel_and_group_cases(void);
 #endif
 
 int test_devagent_worker(void);
@@ -1125,6 +1184,22 @@ int test_devagent_worker(void)
         ASSERT(wtx_mail_has("wtx-life", "gate=pass"));
         ASSERT(wtx_mail_has("wtx-life", "candidate=cand.diff"));
         ASSERT(wtx_mail_has("wtx-life", "tokens=42"));
+        /* Provenance reaches the client's row whenever the shared name
+         * grammar admits it. */
+        ASSERT(wtx_mail_has("wtx-life", "provider=fixture"));
+        ASSERT(wtx_mail_has("wtx-life", "turns=3"));
+        ASSERT(wtx_mail_has("wtx-life", "command=fixture-run"));
+        ASSERT(wtx_mail_has("wtx-life", "diff=cand.diff"));
+        /* A repo-relative source is path-shaped, so the row carries the
+         * marker and says so rather than losing the row to a refusal. */
+        ASSERT(wtx_mail_has("wtx-life", "source=" WTX_ELIDED));
+        ASSERT(wtx_mail_has("wtx-life", "elided=" WTX_ELIDED));
+        /* The receipt is the record that keeps the exact bytes. */
+        ASSERT(wtx_receipt_has("wtx-life", 1, "\"provider\":\"fixture\""));
+        ASSERT(wtx_receipt_has("wtx-life", 1, "\"turns\":3"));
+        ASSERT(wtx_receipt_has("wtx-life", 1, "\"command\":\"fixture-run\""));
+        ASSERT(wtx_receipt_has("wtx-life", 1, "\"source\":\"fixture/src.c\""));
+        ASSERT(wtx_receipt_has("wtx-life", 1, "\"diff\":\"cand.diff\""));
         wtx_restore();
         PASS();
     }
@@ -1549,7 +1624,9 @@ int test_devagent_worker(void)
         char body[4096];
         const char *expect =
             "ref=wtx-exact\nworker=wtx\nsession=s-exact\nmodel=\n"
-            "attempt=1\nterminal=pass\ncandidate=cand.diff\ngate=pass\n"
+            "attempt=1\nprovider=fixture\nturns=3\ncommand=fixture-run\n"
+            "source=" WTX_ELIDED "\ndiff=cand.diff\n"
+            "terminal=pass\ncandidate=cand.diff\ngate=pass\n"
             "rc=0\ntokens=42\nwall_ms=";
         const char *tail;
         size_t k = 0;
@@ -1564,13 +1641,15 @@ int test_devagent_worker(void)
         ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
         ASSERT(wtx_mail_body("wtx-exact", body, sizeof(body)));
         /* Other code parses these lines: the safe path adds nothing and
-         * moves nothing. Only wall_ms is a measured number. */
+         * moves nothing. Only wall_ms is a measured number, and the
+         * elided line closes the row because the fixture's source is the
+         * path-shaped value the grammar cannot carry. */
         ASSERT(strncmp(body, expect, strlen(expect)) == 0);
         tail = body + strlen(expect);
         while (tail[k] >= '0' && tail[k] <= '9')
             k++;
         ASSERT(k > 0);
-        ASSERT_STR_EQ(tail + k, "\n");
+        ASSERT_STR_EQ(tail + k, "\nelided=" WTX_ELIDED "\n");
         wtx_restore();
         PASS();
     }
@@ -1797,6 +1876,7 @@ int test_devagent_worker(void)
         PASS();
     }
 
+    failures += wtx_cancel_and_group_cases();
     failures += wtx_confine_cases();
 #endif /* !defined(_WIN32) */
 
@@ -1808,3 +1888,121 @@ _test_next:;
         printf("test_devagent_worker: %d FAILED\n", failures);
     return failures;
 }
+
+#if !defined(_WIN32)
+/* The cancel and external-group cases, in their own function so the suite
+ * entry stays under the complexity cap. Returns the failure count. */
+static int wtx_cancel_and_group_cases(void)
+{
+    int failures = 0;
+    TEST("executor cooperative cancel stays an explicit non-PASS")
+    {
+        struct wkr_drive_opts o;
+        char verdict[64];
+        long long rc = -1;
+        wtx_isolate("coopcancel");
+        wtx_queue_post("wtx-coop");
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s",
+                       "cancelled");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-coop");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_outcome("wtx-coop", verdict, sizeof(verdict), &rc));
+        ASSERT_STR_EQ(verdict, "cancelled");
+        ASSERT(!zcl_devagent_closed_pass(verdict, rc));
+        ASSERT(wtx_mail_has("wtx-coop", "terminal=cancelled"));
+        ASSERT(wtx_mail_has("wtx-coop", "gate=cancelled"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("operator SIGTERM maps a running job to explicit cancelled")
+    {
+        struct wkr_drive_opts o;
+        char verdict[64];
+        long long rc = -1;
+        pid_t killer;
+        int st = 0;
+        wtx_isolate("sigterm");
+        wtx_queue_post("wtx-term");
+        (void)fflush(NULL);
+        killer = fork();
+        ASSERT(killer >= 0);
+        if (killer == 0) {
+            (void)sleep(2);
+            (void)kill(getppid(), SIGTERM);
+            _exit(0);
+        }
+        (void)remove(g_fx_count);
+        g_fx_mode = 2;
+        wtx_opts(&o, "wtx", "s-term");
+        o.time_cap_s = 60;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        (void)waitpid(killer, &st, 0);
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_outcome("wtx-term", verdict, sizeof(verdict), &rc));
+        /* The operator asked for the stop, so the run has a receipt and a
+         * named word instead of the ambiguity of a missing file. */
+        ASSERT(wtx_receipt_exists("wtx-term", 1));
+        ASSERT_STR_EQ(verdict, "cancelled");
+        ASSERT_EQ(rc, 130);
+        ASSERT(!zcl_devagent_closed_pass(verdict, rc));
+        ASSERT(wtx_mail_has("wtx-term", "terminal=cancelled"));
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("a file kind cannot pass without its own test group passing")
+    {
+        struct wkr_drive_opts o;
+        struct wtx_call c;
+        char verdict[64], brief[1024];
+        FILE *f;
+        long long rc = -1;
+        wtx_isolate("extgate");
+        (void)snprintf(brief, sizeof(brief), "%s/brief.txt", g_wtx_state);
+        (void)mkdir(g_wtx_state, 0700);
+        f = fopen(brief, "wb");
+        ASSERT(f != NULL);
+        if (f) {
+            (void)fwrite("fix the bogus group\n", 1, 20, f);
+            (void)fclose(f);
+        }
+        wtx_begin(&c, "dev.agent.queue", "zcl.agent_queue.v1");
+        (void)json_push_kv_str(&c.input, "action", "post");
+        (void)json_push_kv_str(&c.input, "kind", "file");
+        (void)json_push_kv_str(&c.input, "name", "wtx-extgate");
+        (void)json_push_kv_str(&c.input, "group", "wtx-bogus-group");
+        (void)json_push_kv_str(&c.input, "path", "docs/README.md");
+        (void)json_push_kv_str(&c.input, "brief", brief);
+        zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        wtx_end(&c);
+        (void)remove(g_fx_count);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-extgate");
+        o.time_cap_s = 120;
+        /* The executor's own PASS word and a real artifact are not enough:
+         * the named group has to pass right now, and this one does not
+         * exist, so the gate refuses. */
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT_EQ(wtx_count_read(), 1);
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_outcome("wtx-extgate", verdict, sizeof(verdict), &rc));
+        ASSERT_STR_EQ(verdict, "gate-refused");
+        ASSERT(!zcl_devagent_closed_pass(verdict, rc));
+        ASSERT(wtx_runout_has("wtx-extgate", 1, "gate group=wtx-bogus-group"));
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif /* !defined(_WIN32) */

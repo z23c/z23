@@ -205,7 +205,16 @@ void zcl_devagent_worker_outcome(const struct wkr_spawn_out *out,
         o->rc = 124;
         o->terminal = "timeout";
         o->note = "executor-time-cap";
-    } else if (out->signaled || terminating) {
+    } else if (terminating) {
+        /* The operator asked this worker to stop, so the run's end is
+         * intended, not ambiguous: it earns an explicit cancelled
+         * receipt. Checked before signaled because a shutdown normally
+         * kills the child too, and the request is the better word. */
+        o->rc = 130;
+        o->terminal = "cancelled";
+        o->note = "operator-cancelled";
+        o->cancelled = true;
+    } else if (out->signaled) {
         o->rc = 130;
         o->terminal = "crashed";
         o->note = "executor-signaled";
@@ -216,11 +225,27 @@ void zcl_devagent_worker_outcome(const struct wkr_spawn_out *out,
 
 /* ── child record: run, write the result file, pick the exit code ─────── */
 
+bool zcl_devagent_worker_prov_escape(const struct wkr_result *res,
+                                     struct wkr_prov_esc *e)
+{
+    if (!res || !e)
+        return false;
+    return zcl_devagent_worker_json_escape(res->provider, e->provider,
+                                           sizeof(e->provider)) &&
+           zcl_devagent_worker_json_escape(res->command, e->command,
+                                           sizeof(e->command)) &&
+           zcl_devagent_worker_json_escape(res->source, e->source,
+                                           sizeof(e->source)) &&
+           zcl_devagent_worker_json_escape(res->diff, e->diff,
+                                           sizeof(e->diff));
+}
+
 int zcl_devagent_worker_child_record(const struct wkr_job *job,
                                      wkr_executor_fn exec)
 {
     struct wkr_result res;
-    char path[4096 + 64], e_term[96], e_ev[8192], line[12288];
+    struct wkr_prov_esc e;
+    char path[4096 + 64], e_term[96], e_ev[8192], line[24576];
     char e_cand[sizeof(res.candidate) * WKR_JSON_ESCAPE_WORST];
     int w;
     if (!job || !exec)
@@ -231,12 +256,16 @@ int zcl_devagent_worker_child_record(const struct wkr_job *job,
     if (!zcl_devagent_worker_json_escape(res.terminal, e_term, sizeof(e_term)) ||
         !zcl_devagent_worker_json_escape(res.candidate, e_cand,
                                          sizeof(e_cand)) ||
-        !zcl_devagent_worker_json_escape(res.evidence, e_ev, sizeof(e_ev)))
+        !zcl_devagent_worker_json_escape(res.evidence, e_ev, sizeof(e_ev)) ||
+        !zcl_devagent_worker_prov_escape(&res, &e))
         return 126;
     w = snprintf(line, sizeof(line),
                  "{\"terminal\":\"%s\",\"rc\":%lld,\"candidate\":\"%s\","
-                 "\"evidence\":\"%s\",\"tokens_used\":%lld,\"wall_ms\":%lld}\n",
-                 e_term, res.rc, e_cand, e_ev, res.tokens_used, res.wall_ms);
+                 "\"evidence\":\"%s\",\"tokens_used\":%lld,\"wall_ms\":%lld,"
+                 "\"provider\":\"%s\",\"turns\":%lld,\"command\":\"%s\","
+                 "\"source\":\"%s\",\"diff\":\"%s\"}\n",
+                 e_term, res.rc, e_cand, e_ev, res.tokens_used, res.wall_ms,
+                 e.provider, res.turns, e.command, e.source, e.diff);
     if (w <= 0 || (size_t)w >= sizeof(line))
         return 126;
     if (snprintf(path, sizeof(path), "%s/%s", job->rundir, WKR_RESULT_FILE) >=
@@ -326,7 +355,10 @@ static long long wkr_result_int(const char *text, const char *key,
 bool zcl_devagent_worker_parse_result(const char *rundir,
                                       struct wkr_result *res)
 {
-    char path[4096 + 64], text[12288];
+    /* Matches the child's record buffer exactly: a record the child could
+     * write must be a record this can read, or a legitimate run would be
+     * reported as having produced no result at all. */
+    char path[4096 + 64], text[24576];
     char word[32];
     if (!rundir || !res)
         return false;
@@ -346,18 +378,41 @@ bool zcl_devagent_worker_parse_result(const char *rundir,
     res->rc = wkr_result_int(text, "rc", -1);
     res->tokens_used = wkr_result_int(text, "tokens_used", 0);
     res->wall_ms = wkr_result_int(text, "wall_ms", 0);
+    wkr_result_field(text, "provider", res->provider, sizeof(res->provider));
+    res->turns = wkr_result_int(text, "turns", 0);
+    wkr_result_field(text, "command", res->command, sizeof(res->command));
+    wkr_result_field(text, "source", res->source, sizeof(res->source));
+    wkr_result_field(text, "diff", res->diff, sizeof(res->diff));
     return true;
 }
 
 /* ── gate: the required Z23 judgment ─────────────────────────────────────
  * "pass" is written only when every condition holds: the executor's own
  * word is already pass/PASS, rc is 0, a candidate is named AND present
- * under the run dir, evidence is present, and tokens fit the cap. A
- * model "completed" with rc 0 and a candidate still gates to
- * "gate-refused": only the gate plus the closed predicate reap success. */
+ * under the run dir, evidence is present, tokens fit the cap, and — for a
+ * file kind — the row's own test group passes right now. A model
+ * "completed" with rc 0 and a candidate still gates to "gate-refused":
+ * only the gate plus the closed predicate reap success. */
+
+/* A file kind's artifact is never enough on its own: it must also survive
+ * the wired external judge. No judge, or no group to name, means refuse —
+ * an adoption carries no group, and passing it on the artifact alone would
+ * skip the judgment the kind exists for. */
+static bool wkr_group_verdict(const struct wkr_job *job,
+                              wkr_group_gate_fn judge, char *note,
+                              size_t notecap)
+{
+    if (note && notecap > 0)
+        (void)snprintf(note, notecap, "gate group=%s unjudged",
+                       job->group[0] ? job->group : "none");
+    if (!judge || !job->group[0])
+        return false;
+    return judge(job, note, notecap);
+}
 
 static bool wkr_gate_ready(const struct wkr_job *job,
-                           const struct wkr_result *res)
+                           const struct wkr_result *res, char *gateline,
+                           size_t gcap, wkr_group_gate_fn judge)
 {
     char candpath[4096 + 256];
     bool word, clean, named, evidenced, budgeted;
@@ -372,17 +427,26 @@ static bool wkr_gate_ready(const struct wkr_job *job,
     if (snprintf(candpath, sizeof(candpath), "%s/%s", job->rundir,
                  res->candidate) >= (int)sizeof(candpath))
         return false;
-    return zcl_devagent_worker_file_exists(candpath);
+    if (!zcl_devagent_worker_file_exists(candpath))
+        return false;
+    if (strcmp(job->kind, "file") == 0)
+        return wkr_group_verdict(job, judge, gateline, gcap);
+    if (gateline && gcap > 0)
+        (void)snprintf(gateline, gcap, "%s", "gate artifact");
+    return true;
 }
 
 long long zcl_devagent_worker_gate(const struct wkr_job *job,
                                    const struct wkr_result *res,
-                                   char *verdict, size_t cap)
+                                   char *verdict, size_t cap, char *gateline,
+                                   size_t gcap, wkr_group_gate_fn judge)
 {
     bool word;
+    if (gateline && gcap > 0)
+        gateline[0] = '\0';
     if (!job || !res || !verdict || cap == 0)
         return 1;
-    if (wkr_gate_ready(job, res)) {
+    if (wkr_gate_ready(job, res, gateline, gcap, judge)) {
         (void)snprintf(verdict, cap, "%s", res->terminal);
         return 0;
     }

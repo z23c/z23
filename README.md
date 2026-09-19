@@ -191,6 +191,28 @@ make zhello-selftest
 make zdemo ZDEMO_ARGS=--frames=2
 ```
 
+## Connect coding agents
+
+A coding agent joins the fleet through the same typed queue a developer
+uses — no shell scraping, no special build. Post a unit, run the
+resident worker, reap the outcome:
+
+```bash
+build/bin/z23-dev dev agent queue --input='{"action":"post","kind":"file","name":"fix-foo","group":"test_foo","path":"src/foo.c","brief":"docs/foo-brief.md"}'
+build/bin/z23-dev dev agent worker --input='{"action":"run","worker":"resident-a","max_jobs":1}'
+build/bin/z23-dev dev agent queue --input='{"action":"reap"}'
+```
+
+The worker claims ONE job (the claim identity persists before any model
+submission), runs the wired executor bounded, judges the result through
+the required gate — a file unit passes only when its test group passes
+right now — records the receipt, and posts a result row under the SAME
+ref. Only `pass`/`PASS` with rc 0 completes; `completed`, `failed`,
+`cancelled`, and crashes stay incomplete. `dev agent queue cancel`
+stops queued work; a running row belongs to its worker. Mail carries the
+same lifecycle for remote drivers: `fleet steer send` posts a directive,
+`fleet steer evidence` returns the latest terminal row per ref.
+
 ## Go deeper
 
 - **Run it:** [Getting Started](docs/GETTING_STARTED.md) · [Sync](docs/SYNC.md) · [MVP acceptance](docs/MVP.md) · [Windows](docs/WINDOWS.md)

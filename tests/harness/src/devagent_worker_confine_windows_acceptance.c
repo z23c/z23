@@ -428,7 +428,8 @@ static bool acc_case_fail(void)
     oc = acc_run(job, 60, 30, &out);
     ok = oc.gate && zcl_devagent_worker_parse_result(job->rundir, &res) &&
          res.rc == 3 &&
-         zcl_devagent_worker_gate(job, &res, verdict, sizeof(verdict)) == 1 &&
+         zcl_devagent_worker_gate(job, &res, verdict, sizeof(verdict), NULL,
+                                  0, NULL) == 1 &&
          strcmp(verdict, "failed") == 0;
     if (!ok)
         acc_fail("fail", "a failing executor did not gate to failed");
