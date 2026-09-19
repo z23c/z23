@@ -103,6 +103,7 @@
 #include "json/json.h"
 #include "platform/file_clone.h"
 #include "platform/file_metadata.h"
+#include "platform/logical_cpu.h"
 #include "platform/ram_scratch.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
@@ -2279,7 +2280,15 @@ static bool dl_regen_stub_write(const char *wt, const char *rel)
 static int dl_regen_make(const struct dl_dirs *d, struct dl_row *row,
                          const char *target, char *line, size_t line_cap)
 {
-    const char *argv[] = { "make", "-j8", "-C", d->wt, target, NULL };
+    /* Was a bare "-j8". These are the same make targets the proof just ran,
+     * in the same grant, so the two disagreeing about the job count meant one
+     * of them was wrong about the same machine. N now comes from the one
+     * repository-wide derivation (platform/logical_cpu.h) -- 28 inside this
+     * host's build grant, where the old literal spent 8. `jobs` must outlive
+     * argv. */
+    char jobs[16];
+    if (!platform_build_jobs_arg(jobs)) return -1;
+    const char *argv[] = { "make", jobs, "-C", d->wt, target, NULL };
     char *buf;
     int rc;
     if (line && line_cap)

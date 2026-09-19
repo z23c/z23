@@ -104,6 +104,75 @@ static int cpt_available_cpu_count_checks(void)
     return failures;
 }
 
+/* The build-job derivation. Graded through the PURE function rather than the
+ * formatted argument, so the assertions do not need a host with a particular
+ * CPU count or memory grant -- which is the whole reason
+ * platform_build_job_count() takes both as parameters. */
+static int cpt_build_job_count_checks(void)
+{
+    int failures = 0;
+    const int64_t mib = INT64_C(1024) * 1024;
+
+    /* No budget named: the CPU count stands alone. This is the case the old
+     * compiled-in 16 and the bare -j8 both got wrong. */
+    CPT_CHECK("no budget: 28 processors buy 28 jobs",
+              platform_build_job_count(28, 0) == 28);
+    CPT_CHECK("an unreadable budget is not a ceiling",
+              platform_build_job_count(28, -1) == 28);
+    /* 96 processors is above every literal this tree used to carry; the point
+     * is that nothing clamps it any more. */
+    CPT_CHECK("no ceiling below the mask survives",
+              platform_build_job_count(96, 0) == 96);
+    CPT_CHECK("one processor buys one job",
+              platform_build_job_count(1, 0) == 1);
+
+    /* A zero CPU count can only come from a broken host answer. One job still
+     * builds; zero would spawn a make that never finishes. */
+    CPT_CHECK("zero processors still build, one file at a time",
+              platform_build_job_count(0, 0) == 1);
+
+    /* This project's own build grant: 24 GiB against 28 processors. Memory is
+     * nowhere near binding, which is why no ceiling below the mask survives
+     * anywhere in this tree. */
+    CPT_CHECK("24 GiB against 28 processors is bound by the processors",
+              platform_build_job_count(28, INT64_C(24) * 1024 * mib) == 28);
+
+    /* A small-memory host is where the budget arm earns its place: at 64 MiB
+     * per job, 512 MiB buys 8 jobs even on a 28-processor mask. */
+    CPT_CHECK("512 MiB against 28 processors is bound by the memory",
+              platform_build_job_count(28, 512 * mib) == 8);
+    CPT_CHECK("the memory arm never raises the count above the mask",
+              platform_build_job_count(4, 512 * mib) == 4);
+    /* A budget smaller than one job still yields one, never zero. */
+    CPT_CHECK("a budget below one job still builds",
+              platform_build_job_count(28, 1) == 1);
+
+    /* The formatted argument is exactly what the derivation says, so the
+     * spawn sites and the arithmetic can never drift apart silently. */
+    {
+        char arg[16];
+        char expect[16];
+        CPT_CHECK("build_jobs_arg formats", platform_build_jobs_arg(arg));
+        (void)snprintf(expect, sizeof expect, "-j%u",
+                       platform_build_job_count(
+                           platform_available_cpu_count(),
+                           platform_build_memory_budget_bytes()));
+        CPT_CHECK("build_jobs_arg is the derivation, formatted",
+                  strcmp(arg, expect) == 0);
+        /* And it is a real job count, never "-j0". */
+        CPT_CHECK("build_jobs_arg is never -j0", strcmp(arg, "-j0") != 0);
+    }
+
+    /* The host's own budget is either a real number or an honest -1; a zero
+     * would divide the job count to one on every machine. */
+    {
+        int64_t budget = platform_build_memory_budget_bytes();
+        CPT_CHECK("the host budget is a real ceiling or an honest -1",
+                  budget > 0 || budget == -1);
+    }
+    return failures;
+}
+
 int test_cpu_topology(void)
 {
     int failures = 0;
@@ -112,6 +181,7 @@ int test_cpu_topology(void)
      * thread bound to domain 0, and these assertions own the mask while they
      * run and hand back exactly what they found. */
     failures += cpt_available_cpu_count_checks();
+    failures += cpt_build_job_count_checks();
 
     /* ── real /sys scan (or whatever this box/container actually has) ── */
     cpu_topology_reset_for_testing();

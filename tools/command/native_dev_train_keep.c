@@ -38,6 +38,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
+#include "platform/logical_cpu.h"
 #include "platform/path_replace.h"
 #include "platform/process_lock.h"
 #include "platform/time_compat.h"
@@ -526,9 +527,27 @@ static bool dtk_make(const struct dtk_paths *p, const char *const argv[],
  * is a train a human re-pins. */
 static bool dtk_gates(const struct dtk_paths *p, char *why, size_t cap)
 {
-    static const char *const dev_bin[] = {"make", "-s", "-j8",
-                                          "--no-print-directory", "dev-bin",
-                                          NULL};
+    /* Was a bare "-j8" -- while the very next steps in this same function run
+     * `make lint`, which sizes its own workers from the host. So the 8 was
+     * not a deliberate politeness budget for a resident keeper; it was a
+     * literal nobody revisited, and it disagreed with the process it hands
+     * the tree to. N now comes from the one repository-wide derivation, see
+     * platform/logical_cpu.h.
+     *
+     * Throttling THIS step in particular bought nothing: MEASURED on this
+     * host, step.compile is 30-44 s against step.lint 213-239 s and step.test
+     * 137-318 s. Compile is not where a train's time goes, so the only thing
+     * the low count changed was how long the cheap step took.
+     *
+     * `dev_bin_jobs` is not static because it is derived at run time, and it
+     * must outlive `steps` below. */
+    char dev_bin_jobs[16];
+    if (!platform_build_jobs_arg(dev_bin_jobs)) {
+        (void)snprintf(why, cap, "could not size the dev-bin build");
+        return false;
+    }
+    const char *const dev_bin[] = {"make", "-s", dev_bin_jobs,
+                                   "--no-print-directory", "dev-bin", NULL};
     static const char *const complexity[] = {
         "make", "-s", "--no-print-directory", "check-cyclomatic-complexity",
         NULL};

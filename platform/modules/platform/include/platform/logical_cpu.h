@@ -3,6 +3,7 @@
 #ifndef ZCL_PLATFORM_LOGICAL_CPU_H
 #define ZCL_PLATFORM_LOGICAL_CPU_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Count online logical processors.
@@ -38,4 +39,50 @@ uint32_t platform_logical_cpu_count(void);
  * deterministically falls back to platform_logical_cpu_count(). */
 uint32_t platform_available_cpu_count(void);
 
+
+/* ── The one build-parallelism answer this repository uses ────────────────
+ *
+ * WHY THIS IS SHARED. Before it existed, twenty-eight hard-coded `-jN`
+ * literals across eight different values decided how wide this tree built,
+ * and almost none of them said why. They did not merely disagree; one of
+ * them took the whole judged-unit pipeline down. A gate whose build budget
+ * was 90 s ran `make test_parallel` with no `-j` at all -- 137 s measured,
+ * 18 s at -j28 -- so no file unit could be judged at all, while the proof
+ * clamped itself to a compiled-in 16 and the landing leaf spawned a bare
+ * -j8, on a host that grants 28 processors. Every caller that spawns make
+ * asks here and gets ONE answer. A constant that survives elsewhere must
+ * carry the measurement that chose it; an unexplained number is the defect,
+ * whether or not the number happens to be right. */
+
+/* The smaller of two limits, as a job count in [1, available_cpus].
+ *
+ * `available_cpus` is what platform_available_cpu_count() reports -- the
+ * affinity mask, not the box. `memory_budget_bytes` is what the grant will
+ * actually let this process tree hold, or <= 0 when the host will not say,
+ * in which case the CPU limit stands alone. Inventing a ceiling out of
+ * silence is precisely how the compiled-in 16 this replaces came to exist.
+ *
+ * Pure: no syscalls, no environment, same inputs give the same answer on
+ * every host. Exposed rather than folded into platform_build_jobs_arg()
+ * because a number this load-bearing deserves a test that does not need a
+ * host with a particular CPU count or memory ceiling. */
+uint32_t platform_build_job_count(uint32_t available_cpus,
+                                  int64_t memory_budget_bytes);
+
+/* The memory this process tree may actually hold, in bytes, or -1 when the
+ * host publishes no limit worth dividing by. Prefers the cgroup v2 ceiling
+ * the build actually runs under over the size of the machine, because on a
+ * scheduled build host those are different numbers and only the first one
+ * will be enforced. */
+int64_t platform_build_memory_budget_bytes(void);
+
+/* Write the `-jN` argument a spawned make should carry into `out` (at most
+ * 15 characters plus the terminator). Returns false only when the number
+ * would not fit, which no count a real host reports can cause.
+ *
+ * This is platform_build_job_count() over platform_available_cpu_count() and
+ * platform_build_memory_budget_bytes(). Callers take the formatted argument
+ * rather than the number so that three spawn sites cannot drift over how
+ * they spell it. */
+bool platform_build_jobs_arg(char out[16]);
 #endif

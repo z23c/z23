@@ -51,7 +51,6 @@
 #define PATH_MAX 4096
 #endif
 
-#define PROOF_MAX_JOBS 16u
 /* v2 of these three roots: v1 was three domain tags over one file that baked
  * the absolute checkout path, so no two boxes ever agreed. A v1 root can
  * never collide with a v2 root, and a receipt carrying v1 roots is refused
@@ -5303,12 +5302,12 @@ bool zcl_dev_proof_test_prepare_environment(void)
 }
 #endif
 
+/* The proof spawns make through the one repository-wide derivation; see
+ * platform/logical_cpu.h. It used to clamp to a compiled-in 16 that carried
+ * no reason, on a host granting 28. */
 static bool proof_make_jobs_arg(char out[16])
 {
-    uint32_t jobs = platform_logical_cpu_count();
-    if (jobs > PROOF_MAX_JOBS) jobs = PROOF_MAX_JOBS;
-    int written = snprintf(out, 16, "-j%u", jobs);
-    return written > 0 && written < 16;
+    return platform_build_jobs_arg(out);
 }
 
 static bool executable_reuse(const struct proof_paths *paths,
