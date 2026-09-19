@@ -826,6 +826,10 @@ static bool mr_preserved(struct mr_core *c)
     struct muse_run_result *r = c->res;
     mr_fold_once(c);
     if (mr_candidate_named(r)) return true;
+    /* Refused, not failed: nothing was judged. The turn's output is still
+     * in the workspace, unmeasurable rather than rejected. */
+    (void)snprintf(r->verdict, sizeof(r->verdict), "%s",
+        mr_verdict_refused);
     (void)snprintf(r->reason, sizeof(r->reason),
         "change set could not be preserved: %.180s",
         r->candidate_note[0] ? r->candidate_note
