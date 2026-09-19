@@ -2480,6 +2480,14 @@ void zcl_native_handle_dev_land(
 void zcl_native_handle_dev_lane_new(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* dev.ci — the one read-only screen over this host's CI and landing state
+ * (tools/command/native_dev_ci_command.c). Composition only: every fact is
+ * read from dev.land, dev.agent.queue and dev.proof.status called
+ * in-process. It writes nothing and cancels nothing; the cancel and retry
+ * views name the exact sibling command to run. */
+void zcl_native_handle_dev_ci(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* dev.fleet.know, aliased `dev know` — the fleet fact table, asked by
  * subject. It reads engine/composition/fleet_facts.def as an X-macro paste

@@ -1836,6 +1836,45 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_ticketkey)
 
+/* ── dev.ci ────────────────────────────────────────────────────────────────
+ * One read-only screen over this host's CI and landing state. It lives under
+ * `dev` because every source it reads already does: dev.land owns the landing
+ * queue, dev.agent.queue owns unit dispatch, dev.proof owns receipts. This
+ * leaf adds no state of its own — it calls those siblings in-process and
+ * renders their answers, and the two mutating views name the exact sibling
+ * command instead of running a second mutation path. */
+ZCL_COMMAND_DEV_READ(
+    "dev.ci", "dev", "",
+    "Answer every CI and landing question from one screen",
+    "Composition only: every fact is read in-process from dev.land "
+    "(action=status), dev.agent.queue (action=status) and dev.proof.status, "
+    "and `sources` names each sibling with whether it answered and how long "
+    "it took. --topic selects one of nine views -- status, queue, jobs, "
+    "last_pass, last_fail, worker, receipt, cancel, retry -- into `data` plus "
+    "one human `screen` unless json=true. This leaf creates no file, "
+    "directory, lock or ledger and runs nothing: cancel and retry NAME the "
+    "exact existing command (`dev land cancel --seq=`, `dev agent queue "
+    "cancel --name=`, `dev proof retry --local_commit= --remote_base=`). "
+    "Absent evidence is never a pass and never a zero. Worker health is "
+    "derived only from claim rows a worker itself wrote; no claim, an "
+    "unnamed claim or one older than an hour reads unknown or stale, never "
+    "healthy. receipt resolves the remote base a commit was proved against "
+    "from the proof cache's own receipt names and the landing row, then asks "
+    "dev.proof.status for each pair's validated verdict; a commit with no "
+    "receipt reports unknown, and a failing landing row whose base cannot be "
+    "resolved emits no retry command rather than guessing one.", 65536,
+    "ci,status,queue,jobs,receipt,worker,cancel,retry,land,proof",
+    "zcl.dev_ci_input.v1", "zcl.dev_ci.v1",
+    "topic,sha,root,json", "topic",
+    "z23-dev dev ci receipt --sha=9afd46726",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_ci,
+    "the landing and unit queues are development-lane state",
+    "z23-dev dev ci")
+
 /* ── dev.land ──────────────────────────────────────────────────────────────
  * The landing service: an agent submits a tip and returns in milliseconds,
  * a resident loop steps the queue, and the agent learns the outcome by

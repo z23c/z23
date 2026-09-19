@@ -2522,6 +2522,7 @@ AGENT_IMPACT_RULE("tests/harness/src/dev_fleet_capture_windows_acceptance.c", "m
 AGENT_IMPACT_RULE("tests/harness/src/dev_agent_mail_windows_acceptance.c", "make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_devagent_mail.c|tests/harness/src/test_devagent_mail.c", "devagent_mail make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_devagent_boardmail.c|tests/harness/src/test_devagent_boardmail.c", "devagent_boardmail devagent_receive devagent_mail make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_dev_ci_command.c|tests/harness/src/test_dev_ci.c", "dev_ci command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_queue.c|tools/command/native_devagent_receive.c|tests/harness/src/test_devagent_queue_order.c|tests/harness/src/test_devagent_queue_guard.c", "devagent_queue devagent_queue_order devagent_queue_guard devagent_receive command_registry_catalog native_api_contract command_input_bounds make_lint_gates")
 
 /* Two probe programs that arrived under platform/modules/platform/tests with NO reader at

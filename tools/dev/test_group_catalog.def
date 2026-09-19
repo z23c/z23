@@ -912,6 +912,14 @@ ZCL_TEST_GROUP(land_queue)
  * a log path, and that a base which moved mid-proof re-rebases instead of
  * landing evidence about a base nobody is on. */
 ZCL_TEST_GROUP(dev_land)
+/* dev.ci: the one read-only screen over this host's CI and landing state.
+ * The group exists for one property -- absent evidence never reads as a
+ * pass or as an idle zero. It proves all nine views render from the
+ * siblings' own answers, that an unmeasured worker reads unknown rather
+ * than healthy, that a stale claim reads stale, that a commit with no
+ * receipt reports no receipt instead of a verdict, and that the cancel and
+ * retry views NAME the sibling command without running it. */
+ZCL_TEST_GROUP(dev_ci)
 /* Agent worktree construction: detached git worktree plus the proof's
  * vendored dependencies cloned onto independent inodes (never hardlinked). */
 ZCL_TEST_GROUP(dev_lane)

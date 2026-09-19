@@ -74,14 +74,14 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 892 |
+| Registry entries (branches + leaves) | 893 |
 | Top-level roots | 14 |
 | Branches | 199 |
-| Leaves (dispatchable command paths) | 693 |
+| Leaves (dispatchable command paths) | 694 |
 | … `ready` (live handler in this build) | 614 |
-| … `compat` (metadata only, names a fallback) | 49 |
+| … `compat` (metadata only, names a fallback) | 50 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 48 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 49 |
 | Leaves with `effect=mutate` | 254 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 131 |
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
 | `engine/composition/commands/ops.def` | 59 | 11 | 48 |
-| `engine/composition/commands/dev.def` | 111 | 22 | 89 |
+| `engine/composition/commands/dev.def` | 112 | 22 | 90 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -668,6 +668,7 @@ represented by its children's sections.
 | `dev drive` | compat 🔧 → `z23-dev dev drive` | read / read / operator · persistent/low | `after_epoch`, `timeout_ms`, `wait_for_edit` | `zcl.dev_drive.v1` | `z23-dev dev drive` | Wait for feedback, return the next action — *bounded warm-service driving requires the dev binary* |
 | `dev ff` | ready | read / read / operator · instant/low | none | `zcl.dev_ff.v1` | `z23 dev ff` | Fail-fast: compile, test, lint |
 | `dev verify-change` | compat 🔧 → `make dev-bin, then z23-dev dev verify-change` | read / read / **owner** · background/high | none | `zcl.dev_verify_change.v1` | `z23-dev dev verify-change` | Compile changed code and run its focused proofs — *changed-scope verification requires the dev-only process executor* |
+| `dev ci` | compat 🔧 → `z23-dev dev ci` | read / read / operator · fast/low | **`topic`**, `sha`, `root`, `json` | `zcl.dev_ci.v1` | `z23-dev dev ci receipt --sha=9afd46726` | Answer every CI and landing question from one screen — *the landing and unit queues are development-lane state* |
 | `dev land` | compat 🔧 → `z23-dev dev land` | mutate / dev-mutation / operator · fast/low | **`action`**, `tip`, `worktree`, `note`, `seq`, `json` | `zcl.land.v1` | `z23-dev dev land submit --tip=9afd46726` | Queue a tip; prove and push without waiting — *the landing queue is a development-lane coordination surface* |
 
 #### `dev.retrieval` — Retrieval quality for a source generation
