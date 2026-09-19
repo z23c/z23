@@ -11109,11 +11109,12 @@ install-hooks: $(GIT_HOOK_BIN)
 check-git-hooks-installed: $(GIT_HOOK_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: local pre-push hook installed ══"
 	@./tools/scripts/check_git_hooks_installed.sh --self-test
+	@./tools/scripts/install_git_hooks_selftest.sh
 	@./tools/scripts/check_git_hooks_installed.sh
 
-# Read-only: whether this checkout's Git hooks are armed and what the armed
-# pre-push hook actually runs. Never installs — that writes this checkout's
-# shared Git config, so it stays an explicit `make install-hooks` decision.
+# Read-only: whether THIS worktree's Git hooks are armed, which config file
+# says so, and what the armed pre-push hook actually runs. Never installs —
+# that writes Git config, so it stays an explicit `make install-hooks` decision.
 .PHONY: hooks-status
 hooks-status:
 	@tools/scripts/hooks_status.sh
@@ -14363,10 +14364,10 @@ setup:
 	else \
 	    echo "══ setup: arming this clone ══"; \
 	    $(MAKE) --no-print-directory install-hooks; \
-	    echo "  armed  git hooks             core.hooksPath set for this worktree"; \
-	    echo "         ask 'make hooks-status' for the path actually in effect;"; \
-	    echo "         read docs/DEVELOPING.md section 0 before running"; \
-	    echo "         install-hooks from a second worktree of this repository"; \
+	    echo "  armed  git hooks             core.hooksPath, this worktree's own"; \
+	    echo "         config scope only — no other worktree of this repository"; \
+	    echo "         changed. Run it again in every worktree you add."; \
+	    echo "         'make hooks-status' names the path and the file it came from"; \
 	fi
 	@$(MAKE) --no-print-directory compdb
 	@echo "  wrote  compile_commands.json  (clangd/LSP; regenerate with make compdb)"

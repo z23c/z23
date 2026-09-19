@@ -222,11 +222,17 @@ esac
 # --------------------------------------------------------------------------
 echo
 echo "Repository setup:"
-# core.hooksPath lives in the SHARED config, so a linked worktree legitimately
-# sees an absolute spelling pointing at another checkout's hooks. The
-# substance is "setup's armed hooks are the armed hooks", not the spelling.
+# core.hooksPath is written per worktree and is normally the relative spelling
+# `build/githooks`, which Git resolves against the worktree running the hook.
+# An older checkout may still carry an absolute spelling, from the shared
+# config or from a worktree config `git worktree add` copied. Both are armed;
+# the substance is "setup's armed hooks are the armed hooks", not the spelling.
 hooks="$(git -C "$ROOT" config --get core.hooksPath 2>/dev/null || true)"
-hooks_abs="$(realpath -m -- "${hooks:-/nonexistent}" 2>/dev/null || echo /nonexistent)"
+case "$hooks" in
+    ""|/*) hooks_target="${hooks:-/nonexistent}" ;;
+    *)     hooks_target="$ROOT/$hooks" ;;
+esac
+hooks_abs="$(realpath -m -- "$hooks_target" 2>/dev/null || echo /nonexistent)"
 hooks_shape="$(doctor_hooks_shape "$hooks_abs")"
 if [ "$hooks_shape" = ok ] && [ -x "$hooks_abs/pre-push" ]; then
     echo "  ok       git hooks       core.hooksPath -> $hooks"

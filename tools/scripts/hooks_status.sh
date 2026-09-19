@@ -7,17 +7,15 @@
 # WHY THIS EXISTS. `core.hooksPath` is unset by default in a freshly cloned
 # or freshly `git worktree add`-ed checkout, which means NO hook fires and a
 # red commit reaches origin/main unnoticed — nothing about a plain `git push`
-# says so. `make install-hooks` is a repo-shared write (it touches this
-# checkout's Git config, which every worktree on the same checkout reads via
-# `extensions.worktreeConfig`), so it belongs to the operator/orchestrator,
-# never to a lane script. This is the read-only half: report the fact,
-# install nothing.
+# says so. `make install-hooks` writes THIS worktree's own Git config scope
+# and nothing else's, so it is safe to run in every worktree; this is the
+# read-only half — report the fact, install nothing.
 #
-# core.hooksPath can be set at either config scope install_git_hooks.sh uses
-# (checkout-local `--worktree`, once `extensions.worktreeConfig=true`, or the
-# plain repo config on an older checkout); `git config --get core.hooksPath`
-# resolves whichever is effective for THIS worktree without this script
-# needing to know which scope won.
+# core.hooksPath is written per worktree (`git config --worktree`, which needs
+# extensions.worktreeConfig), and an older checkout may still carry a value in
+# the shared repo config. `git config --get` resolves whichever wins for THIS
+# worktree; `--show-origin` names the file it came from, which is the half an
+# operator actually needs when two worktrees disagree about which hooks fire.
 #
 # Read-only: writes nothing, installs nothing, never fails a build.
 set -uo pipefail
@@ -29,16 +27,36 @@ ROOT="${ZCL_HOOKS_STATUS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pw
 cd "$ROOT"
 
 hooks_path="$(git config --get core.hooksPath 2>/dev/null || true)"
+origin_pair="$(git config --show-origin --get core.hooksPath 2>/dev/null || true)"
+origin_file="${origin_pair%%$'\t'*}"
+origin_file="${origin_file#file:}"
 
 if [ -z "$hooks_path" ]; then
     echo "core.hooksPath: UNSET — no hook fires. \`git push\` runs no local CI at all."
-    echo "arm it:         make install-hooks   (writes this checkout's Git config)"
+    echo "arm it:         make install-hooks   (writes THIS worktree's Git config)"
     exit 0
 fi
 
 echo "core.hooksPath: $hooks_path"
+case "$hooks_path" in
+    /*) resolved="$hooks_path" ;;
+    *)  resolved="$ROOT/$hooks_path"
+        echo "                relative — Git resolves it against the top of the"
+        echo "                worktree running the hook, so each worktree gets"
+        echo "                its own: here, $resolved" ;;
+esac
+case "$origin_file" in
+    "")                 echo "set in:         (origin unknown to this git)" ;;
+    *config.worktree)   echo "set in:         $origin_file"
+                        echo "                (this worktree's own scope — other worktrees unaffected)" ;;
+    *)                  echo "set in:         $origin_file"
+                        echo "                (shared repo scope — every worktree without its own"
+                        echo "                config.worktree inherits this; run make install-hooks"
+                        echo "                here to give this worktree its own)" ;;
+esac
+echo "checkout:       $ROOT"
 
-pre_push="$hooks_path/pre-push"
+pre_push="$resolved/pre-push"
 if [ ! -e "$pre_push" ] && [ -e "$pre_push.exe" ]; then
     pre_push="$pre_push.exe"
 fi

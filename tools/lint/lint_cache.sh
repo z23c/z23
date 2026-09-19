@@ -181,7 +181,7 @@ lint_cache_never_reason() {
         check-core-seal)
             echo "runs the built core_seal binary and reads the untracked .core-unseal-token; core/ is byte-sealed" ;;
         check-git-hooks-installed)
-            echo "reads and WRITES git config core.hooksPath — per-clone metadata, not tracked content" ;;
+            echo "reads this worktree's git config core.hooksPath, and exercises the installer against a throwaway fixture repository — per-clone metadata, not tracked content" ;;
         check-checkout-lock)
             echo "selftest of OS process/signal and lock behavior, not of tracked content" ;;
         check-systemd-memory-budget)
