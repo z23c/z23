@@ -762,7 +762,7 @@ static const char *fmc_grant_set_read(const char *label,
 {
     char root[4096], path[4096 + 32];
     int n;
-    if (!platform_state_root(root, sizeof(root)))
+    if (!platform_state_root_existing(root, sizeof(root)))
         return "STEER_GRANT_STORE";
     n = snprintf(path, sizeof(path), "%s/steer/grants.jsonl", root);
     if (n <= 0 || (size_t)n >= sizeof(path))
@@ -954,7 +954,7 @@ static bool fmc_sent_path_read(char *out, size_t cap)
     int n;
     if (!out || cap == 0)
         return false;
-    if (!platform_state_root(root, sizeof(root)))
+    if (!platform_state_root_existing(root, sizeof(root)))
         return false;
     n = snprintf(out, cap, "%s/steer/sent.jsonl", root);
     return n > 0 && (size_t)n < cap;
@@ -1140,7 +1140,7 @@ static long long fmc_ack_cursor(const char *agent)
     int n;
     if (!fmc_clean_agent(agent, clean, sizeof(clean)))
         return -1;
-    if (!platform_state_root(root, sizeof(root)))
+    if (!platform_state_root_existing(root, sizeof(root)))
         return -1;
     n = snprintf(path, sizeof(path), "%s/mail/cursor.%s", root, clean);
     if (n <= 0 || (size_t)n >= sizeof(path))
@@ -1654,15 +1654,16 @@ static const char *fmc_lock_state(const char *sub, const char *file)
     char root[4096], path[4096 + 64];
     const char *state = "unavailable";
     int fd;
-    if (!platform_state_root(root, sizeof(root)) ||
+    if (!platform_state_root_existing(root, sizeof(root)) ||
         snprintf(path, sizeof(path), "%s/%s/%s", root, sub, file) >=
             (int)sizeof(path))
         return "unknown";
     fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
-        return "never-run";
+        return errno == ENOENT ? "never-run" : "unknown";
 #if !defined(_WIN32)
-    state = flock(fd, LOCK_EX | LOCK_NB) == 0 ? "free" : "held";
+    state = flock(fd, LOCK_EX | LOCK_NB) == 0 ? "free" :
+            (errno == EAGAIN || errno == EWOULDBLOCK) ? "held" : "unknown";
     if (strcmp(state, "free") == 0)
         (void)flock(fd, LOCK_UN);
 #endif
@@ -1690,7 +1691,7 @@ static void fmc_intake_read(struct fmc_local *lo)
     size_t n;
     lo->intake_failures = -1;
     lo->intake_error[0] = '\0';
-    if (!platform_state_root(root, sizeof(root)) ||
+    if (!platform_state_root_existing(root, sizeof(root)) ||
         snprintf(path, sizeof(path), "%s/receive/intake.state", root) >=
             (int)sizeof(path))
         return;
@@ -1863,7 +1864,7 @@ static void fmc_local_resources(struct fmc_worker *e, char *why, size_t cap)
     e->mem_kib = -1;
     if (os_proc_mem_read(&mem) && mem.sys_avail_bytes >= 0)
         e->mem_kib = mem.sys_avail_bytes / 1024;
-    if (platform_state_root(root, sizeof(root)))
+    if (platform_state_root_existing(root, sizeof(root)))
         disk = disk_monitor_free_bytes(root);
     e->disk_kib = disk >= 0 ? disk / 1024 : -1;
     (void)snprintf(why, cap, "%s",
@@ -2759,6 +2760,7 @@ struct fmc_mail_ctx {
     struct json_value *changes;
     struct json_value *blockers;
     struct fmc_roster *ro;
+    struct zcl_fmc_cand_reg *cand;
     long long since;
     long long changes_cap;
     long long now;
@@ -2767,6 +2769,69 @@ struct fmc_mail_ctx {
     int stale;
     char sent_path[4096 + 32];
 };
+
+/* ── candidates from each source ─────────────────────────────────────────
+ *
+ * Three small bridges so the walkers stay under the complexity gate and so
+ * the identity rule lives in one place: the ref IS the identity, and the
+ * same ref from mail, board and queue is one candidate with three sources.
+ *
+ * An unparsable timestamp is passed through as age_known=false rather than
+ * as 0. That distinction is the whole point: 0 reads as "seen just now". */
+
+/* A handover may report landing explicitly with true or a full source SHA. */
+static void fmc_cand_from_mail(struct fmc_mail_ctx *c, const struct fmc_row *v)
+{
+    long long age;
+    char landed[80];
+    if (!c || !c->cand || !v || !v->ref[0])
+        return;
+    if (strcmp(v->kind, "result") != 0 && strcmp(v->kind, "claim") != 0)
+        return;
+    age = fmc_age_s(c->now, v->ts);
+    zcl_fmc_cand_note(c->cand, v->ref, ZCL_FMC_CAND_SRC_MAIL, v->from, age,
+                      age >= 0);
+    if (fmc_body_kv(v->body, "landed", landed, sizeof(landed)) &&
+        (strcmp(landed, "true") == 0 ||
+         (strlen(landed) == 40 && fmc_all_hex(landed, 40))))
+        zcl_fmc_cand_note_landed(c->cand, v->ref, v->from, age, age >= 0);
+}
+
+/* A queue row knows a name; that is a sighting, not a handover, so it adds
+ * the queue source without on its own reaching `delivered`. */
+static void fmc_cand_from_queue(struct zcl_fmc_cand_reg *cand,
+                                const struct json_value *r)
+{
+    const struct json_value *v;
+    const char *name;
+    if (!cand || !r || r->type != JSON_OBJ)
+        return;
+    v = json_get(r, "name");
+    if (!v || v->type != JSON_STR)
+        return;
+    name = json_get_str(v);
+    if (name && name[0])
+        zcl_fmc_cand_note(cand, name, ZCL_FMC_CAND_SRC_QUEUE, NULL, 0,
+                          false);
+}
+
+static bool fmc_outcome_row_matches(const struct json_value *r, const char *ref);
+
+/* Queue outcomes report tests; they do not establish remote verification. */
+static void fmc_cand_from_outcomes(struct zcl_fmc_cand_reg *cand,
+                                   const struct json_value *outcomes)
+{
+    size_t n, i;
+    if (!cand || !outcomes || outcomes->type != JSON_ARR)
+        return;
+    n = json_size(outcomes);
+    for (i = 0; i < n; i++) {
+        const struct json_value *row = json_at(outcomes, i);
+        const char *name = fmc_row_field(row, "name");
+        if (fmc_outcome_row_matches(row, name))
+            zcl_fmc_cand_note_proven(cand, name, 0, false);
+    }
+}
 
 /* One pulled row: roster, tallies, the stale-directive check (bounded to
  * the newest FMC_DIRECTIVE_SCAN directives), and — above `since`, under
@@ -2778,6 +2843,7 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
     fmc_row_tally(c->agents, c->work, v);
     fmc_roster_note(c->ro, v);
     fmc_sessions_note(c->ro, v);
+    fmc_cand_from_mail(c, v);
     if (strcmp(v->kind, "directive") == 0 &&
         c->scanned < FMC_DIRECTIVE_SCAN) {
         c->scanned++;
@@ -2819,6 +2885,7 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
         return -1;
     }
     view->ok = true;
+    zcl_fmc_cand_source_ok(c->cand, ZCL_FMC_CAND_SRC_MAIL);
     n = json_size(&rows);
     view->count = (long long)n;
     /* Newest-first walk from the tail: changes[] carries the latest rows
@@ -2924,39 +2991,52 @@ static void fmc_queue_outcomes(struct fmc_sub *sub,
     }
 }
 
-/* True when <state>/queue/pool.txt exists as a regular file. The queue
- * status reports total 0 both for an empty pool file and for none at all,
- * so only this probe tells a measured empty pool from an unmeasured one. */
-static bool fmc_pool_file_present(void)
+/* Pool numbers become capacity, but only when the pool is measured: a
+ * host with no pool.txt has an unmeasured pool, never an empty one.
+ *
+ * WHO DECIDES THAT. dev.agent.queue does, and it says so in the reply:
+ * pool.known plus pool.reason, with total/warm/free null when unmeasured.
+ * This function used to stat() pool.txt itself, because that leaf reported
+ * total 0 for an absent pool file and for a measured empty one alike and its
+ * zero could not be trusted. Two files deciding one thing is one file too
+ * many, and the queue's own state is the queue leaf's business, so the probe
+ * is gone and the reason is carried through verbatim. */
+/* True when the leaf said it measured nothing, in which case view carries
+ * the leaf's OWN reason verbatim. Split out so fmc_queue_pool stays under
+ * the complexity gate; an unmeasured pool and an empty one are different
+ * answers and only this branch can tell them apart. */
+static bool fmc_pool_unmeasured(const struct json_value *pool,
+                                struct fmc_queue_view *view)
 {
-    char root[4096], path[4096 + 32];
-    struct stat st;
-    if (!platform_state_root(root, sizeof(root)) ||
-        snprintf(path, sizeof(path), "%s/queue/pool.txt", root) >=
-            (int)sizeof(path))
+    const struct json_value *known = json_get(pool, "known");
+    const struct json_value *why = json_get(pool, "reason");
+    if (!known || known->type != JSON_BOOL || json_get_bool(known))
         return false;
-    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+    (void)snprintf(view->pool_reason, sizeof(view->pool_reason), "%s",
+                   why && why->type == JSON_STR && json_get_str(why)[0]
+                       ? json_get_str(why)
+                       : "dev.agent.queue reported the pool unmeasured");
+    return true;
 }
 
-/* Pool numbers become capacity, but only when the pool is measured: a
- * host with no pool.txt has an unmeasured pool, never an empty one. */
 static void fmc_queue_pool(struct fmc_sub *sub, struct fmc_queue_view *view)
 {
     const struct json_value *pool, *t, *f;
     if (!sub || !view)
         return;
     pool = json_get(&sub->reply.data, "pool");
-    t = pool && pool->type == JSON_OBJ ? json_get(pool, "total") : NULL;
-    f = pool && pool->type == JSON_OBJ ? json_get(pool, "free") : NULL;
+    if (!pool || pool->type != JSON_OBJ) {
+        (void)snprintf(view->pool_reason, sizeof(view->pool_reason), "%s",
+                       "dev.agent.queue status carried no pool object");
+        return;
+    }
+    if (fmc_pool_unmeasured(pool, view))
+        return;
+    t = json_get(pool, "total");
+    f = json_get(pool, "free");
     if (!t || t->type != JSON_INT || !f || f->type != JSON_INT) {
         (void)snprintf(view->pool_reason, sizeof(view->pool_reason), "%s",
                        "dev.agent.queue status carried no pool numbers");
-        return;
-    }
-    if (!fmc_pool_file_present()) {
-        (void)snprintf(view->pool_reason, sizeof(view->pool_reason), "%s",
-                       "no queue/pool.txt on this host: the worktree pool "
-                       "is not measured here, so its size is unknown");
         return;
     }
     view->pool_known = true;
@@ -2973,7 +3053,7 @@ static void fmc_queue_pool(struct fmc_sub *sub, struct fmc_queue_view *view)
  * names the local claim (its ref and, when claim.json recorded one, its
  * claimant). */
 static void fmc_queue_rows(struct fmc_sub *sub, struct json_value *work,
-                           struct json_value *candidates,
+                           struct zcl_fmc_cand_reg *cand,
                            struct fmc_queue_view *view)
 {
     const struct json_value *q = json_get(&sub->reply.data, "queued");
@@ -2984,11 +3064,11 @@ static void fmc_queue_rows(struct fmc_sub *sub, struct json_value *work,
     view->queued = (long long)nq;
     view->running = (long long)nr;
     for (i = 0; i < nq; i++) {
-        fmc_queue_row_name(json_at(q, i), candidates);
+        fmc_cand_from_queue(cand, json_at(q, i));
         fmc_queue_row_name(json_at(q, i), work);
     }
     for (i = 0; i < nr; i++) {
-        fmc_queue_row_name(json_at(r, i), candidates);
+        fmc_cand_from_queue(cand, json_at(r, i));
         fmc_queue_row_name(json_at(r, i), work);
     }
     if (nr == 0)
@@ -3009,7 +3089,7 @@ static void fmc_queue_rows(struct fmc_sub *sub, struct json_value *work,
 
 static void fmc_brief_queue(const struct zcl_command_request *req,
                             struct json_value *work,
-                            struct json_value *candidates,
+                            struct zcl_fmc_cand_reg *cand,
                             struct json_value *blockers,
                             struct json_value *missing,
                             struct fmc_queue_view *view,
@@ -3049,8 +3129,10 @@ static void fmc_brief_queue(const struct zcl_command_request *req,
     }
     view->known = true;
     view->reason[0] = '\0';
-    fmc_queue_rows(&sub, work, candidates, view);
+    zcl_fmc_cand_source_ok(cand, ZCL_FMC_CAND_SRC_QUEUE);
+    fmc_queue_rows(&sub, work, cand, view);
     fmc_queue_outcomes(&sub, blockers, outcomes_keep, view);
+    fmc_cand_from_outcomes(cand, outcomes_keep);
     fmc_queue_pool(&sub, view);
     fmc_sub_end(&sub);
 }
@@ -3122,7 +3204,7 @@ static void fmc_board_blocker(struct json_value *blockers, const char *kind,
 static void fmc_board_post_lists(const struct json_value *post,
                                  struct json_value *agents,
                                  struct json_value *blockers,
-                                 struct json_value *candidates)
+                                 struct zcl_fmc_cand_reg *cand)
 {
     const char *agent, *kind, *ref;
     if (!post || post->type != JSON_OBJ)
@@ -3139,7 +3221,8 @@ static void fmc_board_post_lists(const struct json_value *post,
                           ref);
     else if (strcmp(kind, "claim") == 0 || strcmp(kind, "result") == 0) {
         if (ref[0])
-            (void)fmc_push_distinct(candidates, ref, FMC_LIST_CAP);
+            zcl_fmc_cand_note(cand, ref, ZCL_FMC_CAND_SRC_BOARD, agent,
+                              0, false);
     }
 }
 
@@ -3164,7 +3247,7 @@ static const char *fmc_board_refusal(const struct fmc_sub *sub)
 static void fmc_board_posts_walk(const struct json_value *posts,
                                  struct json_value *agents,
                                  struct json_value *blockers,
-                                 struct json_value *candidates,
+                                 struct zcl_fmc_cand_reg *cand,
                                  struct json_value *post_ids)
 {
     size_t n, i;
@@ -3175,7 +3258,7 @@ static void fmc_board_posts_walk(const struct json_value *posts,
         const struct json_value *post = json_at(posts, i);
         const struct json_value *v;
         const char *id;
-        fmc_board_post_lists(post, agents, blockers, candidates);
+        fmc_board_post_lists(post, agents, blockers, cand);
         if (!post || post->type != JSON_OBJ)
             continue;
         v = json_get(post, "id");
@@ -3194,7 +3277,7 @@ static void fmc_board_posts_walk(const struct json_value *posts,
 static void fmc_brief_board(const struct zcl_command_request *req,
                             struct json_value *agents,
                             struct json_value *blockers,
-                            struct json_value *candidates,
+                            struct zcl_fmc_cand_reg *cand,
                             struct json_value *missing,
                             struct json_value *post_ids)
 {
@@ -3223,7 +3306,8 @@ static void fmc_brief_board(const struct zcl_command_request *req,
         return;
     }
     posts = json_get(&sub.reply.data, "posts");
-    fmc_board_posts_walk(posts, agents, blockers, candidates, post_ids);
+    zcl_fmc_cand_source_ok(cand, ZCL_FMC_CAND_SRC_BOARD);
+    fmc_board_posts_walk(posts, agents, blockers, cand, post_ids);
     fmc_sub_end(&sub);
 }
 
@@ -3385,6 +3469,9 @@ static void fmc_fit_budget(struct json_value *data)
 struct fmc_brief_lists {
     struct json_value agents, work, blockers, candidates, changes, missing;
     struct json_value capacity, evidence, post_ids, outcomes;
+    /* candidates[] is emitted FROM this registry; the array above stays
+     * only as the buffer zcl_fmc_cand_emit fills. */
+    struct zcl_fmc_cand_reg cand;
 };
 
 static void fmc_lists_init(struct fmc_brief_lists *l)
@@ -3401,6 +3488,7 @@ static void fmc_lists_init(struct fmc_brief_lists *l)
     json_set_object(&l->capacity);
     json_init(&l->evidence);
     json_set_object(&l->evidence);
+    zcl_fmc_cand_init(&l->cand);
 }
 
 static void fmc_lists_free(struct fmc_brief_lists *l)
@@ -3445,6 +3533,7 @@ static void fmc_brief_reply(struct zcl_command_reply *reply,
     (void)json_push_kv(&reply->data, "work", &l->work);
     (void)json_push_kv(&reply->data, "blockers", &l->blockers);
     (void)json_push_kv(&reply->data, "capacity", &l->capacity);
+    zcl_fmc_cand_emit(&l->cand, &l->candidates, &reply->data, &l->missing);
     (void)json_push_kv(&reply->data, "candidates", &l->candidates);
     (void)json_push_kv(&reply->data, "evidence", &l->evidence);
     (void)json_push_kv(&reply->data, "changes", &l->changes);
@@ -3479,6 +3568,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     mc.changes = &l.changes;
     mc.blockers = &l.blockers;
     mc.ro = &ro;
+    mc.cand = &l.cand;
     mc.changes_cap = FMC_CHANGES_DEFAULT;
     mc.now = (long long)platform_time_wall_unix();
     if (fmc_int(req, "since", &tmp) && tmp >= 0)
@@ -3486,9 +3576,9 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     if (fmc_int(req, "limit", &tmp) && tmp > 0)
         mc.changes_cap = tmp > FMC_CHANGES_MAX ? FMC_CHANGES_MAX : tmp;
     mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv);
-    fmc_brief_queue(req, &l.work, &l.candidates, &l.blockers, &l.missing,
+    fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
                     &qv, &l.outcomes);
-    fmc_brief_board(req, &l.agents, &l.blockers, &l.candidates, &l.missing,
+    fmc_brief_board(req, &l.agents, &l.blockers, &l.cand, &l.missing,
                     &l.post_ids);
     fmc_brief_ledger(req, &l.missing, &boxes, &rows);
     fmc_apply_completed(&l.changes, &l.outcomes);

@@ -2014,12 +2014,23 @@ ZCL_COMMAND_DEV_COMMAND(
     "grant revoke cancels queued rows and blocks later stages, while a "
     "running row still needs its worker's explicit authority. It touches "
     "no network and never polls a "
-    "model: only local queue files are waited on.", 16384,
+    "model: only local queue files are waited on.\n\n"
+    "action=status answers READ-ONLY and creates nothing: resident is "
+    "held|free|unknown from a non-blocking flock probe of the EXISTING "
+    "worker.lock, opened without O_CREAT so a probe never creates it; queued "
+    "and running are counted from the ledger WITHOUT queue.lock, since a row "
+    "is one O_APPEND line and status must not delay the drive it describes; "
+    "job is set only when a running row and its claim.json prove one. A held "
+    "lock is liveness, not work. Degraded cases carry one closed token: "
+    "state-root-unavailable, worker-lock-absent, worker-lock-unreadable, "
+    "queue-ledger-absent, queue-ledger-unreadable, claim-unreadable. It "
+    "claims, reaps, mails, sleeps and runs nothing.",
+    16384,
     "agent,worker,resident,claim,gate,result",
     "zcl.agent_worker_input.v1", "zcl.agent_worker.v1",
     "action,worker,session,model,deadline_s,idle_start_s,idle_limit_s,max_jobs,time_cap_s,cpu_s,mem_mb,token_cap",
     "action",
-    "z23 dev agent worker run --worker=resident-a --max_jobs=1",
+    "z23 dev agent worker status --worker=resident-a",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,

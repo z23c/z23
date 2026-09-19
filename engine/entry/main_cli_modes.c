@@ -1291,35 +1291,34 @@ static bool cli_cookie_exists(const char *datadir)
     return access(path, R_OK) == 0;
 }
 
-static bool cli_service_exec_arg(const char *key, char *out, size_t out_size)
+struct cli_service_snapshot {
+    bool observed;
+    char exec_start[8192];
+};
+
+static bool cli_service_exec_arg(struct cli_service_snapshot *snapshot,
+                                 const char *key, char *out, size_t out_size)
 {
     if (!key || !*key || !out || out_size == 0)
         return false;
     out[0] = '\0';
 
-    /* Test-only escape hatch: this queries the REAL `--user` systemd
-     * session tied to the calling UID (not scoped by the child's HOME
-     * env), so a hermetic test that wants to prove "no default instance"
-     * cannot simply point HOME at a fixture — on a host with a real
-     * zclassic23.service running (e.g. this project's own dev boxes) it
-     * would otherwise silently resolve to and read the LIVE production
-     * datadir/cookie, violating "never touch a live datadir" from a
-     * test. Sets nothing on a real invocation. */
+    /* Tests must disable UID-bound systemd discovery: changing HOME alone
+     * does not prevent resolution of a live service's datadir and cookie. */
     if (getenv("ZCL_CLI_TEST_NO_SERVICE_LOOKUP"))
         return false;
 
-    /* `systemctl --user show zclassic23 -p ExecStart --value` — capture its
-     * stdout via the no-shell spawn primitive. stderr is discarded by
-     * zcl_spawn_capture; the exit code is not needed. */
+    /* Capture one service observation through the no-shell spawn primitive. */
     const char *const argv[] = {
         "systemctl", "--user", "show", ZCL_CLI_DEFAULT_UNIT,
         "-p", "ExecStart", "--value", NULL
     };
-    char buf[8192];
-    zcl_spawn_capture(argv, buf, sizeof(buf), 5000);
-    size_t n = strlen(buf);
-    if (n == 0)
-        return false;
+    if (!snapshot->observed) {
+        snapshot->observed = true;
+        zcl_spawn_capture(argv, snapshot->exec_start,
+                          sizeof(snapshot->exec_start), 5000);
+    }
+    const char *buf = snapshot->exec_start;
 
     char needle[64];
     int written = snprintf(needle, sizeof(needle), "-%s=", key);
@@ -2353,6 +2352,7 @@ int cli_main(int argc, char **argv)
     bool p2pport_set = false;
     bool httpsport_set = false;
     bool fsport_set = false;
+    struct cli_service_snapshot service = {0};
     bool testnet_set = false, regtest_set = false;
     enum zcl_operator_lane operator_lane = ZCL_OPERATOR_LANE_UNKNOWN;
     enum zcl_runtime_profile runtime_profile = ZCL_RUNTIME_FULL;
@@ -2489,7 +2489,7 @@ int cli_main(int argc, char **argv)
 
     if (!datadir_set && !cli_cookie_exists(datadir)) {
         char service_datadir[512];
-        if (cli_service_exec_arg("datadir", service_datadir,
+        if (cli_service_exec_arg(&service, "datadir", service_datadir,
                                  sizeof(service_datadir)) &&
             cli_cookie_exists(service_datadir)) {
             snprintf(datadir, sizeof(datadir), "%s", service_datadir);
@@ -2497,7 +2497,7 @@ int cli_main(int argc, char **argv)
     }
     if (!rpcport_set) {
         char service_rpcport[32];
-        if (cli_service_exec_arg("rpcport", service_rpcport,
+        if (cli_service_exec_arg(&service, "rpcport", service_rpcport,
                                  sizeof(service_rpcport))) {
             int port = atoi(service_rpcport);
             if (port > 0 && port < 65536)
@@ -2506,7 +2506,7 @@ int cli_main(int argc, char **argv)
     }
     if (!p2pport_set) {
         char service_p2pport[32];
-        if (cli_service_exec_arg("port", service_p2pport,
+        if (cli_service_exec_arg(&service, "port", service_p2pport,
                                  sizeof(service_p2pport))) {
             int port = atoi(service_p2pport);
             if (port > 0 && port < 65536)
@@ -2515,7 +2515,7 @@ int cli_main(int argc, char **argv)
     }
     if (!httpsport_set) {
         char service_httpsport[32];
-        if (cli_service_exec_arg("httpsport", service_httpsport,
+        if (cli_service_exec_arg(&service, "httpsport", service_httpsport,
                                  sizeof(service_httpsport))) {
             int port = atoi(service_httpsport);
             if (port > 0 && port < 65536)
@@ -2524,7 +2524,7 @@ int cli_main(int argc, char **argv)
     }
     if (!fsport_set) {
         char service_fsport[32];
-        if (cli_service_exec_arg("fsport", service_fsport,
+        if (cli_service_exec_arg(&service, "fsport", service_fsport,
                                  sizeof(service_fsport))) {
             int port = atoi(service_fsport);
             if (port > 0 && port < 65536)

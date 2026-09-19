@@ -32,7 +32,11 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -79,6 +83,86 @@ struct wtx_call {
     struct zcl_command_request request;
     struct zcl_command_reply reply;
 };
+
+/* Remove a directory tree. Test-local, used only to put the state root back
+ * into the "never existed" shape a status probe must not repair. */
+static bool wtx_rm_rf(const char *path)
+{
+    DIR *d = opendir(path);
+    struct dirent *e;
+    if (!d)
+        return remove(path) == 0 || errno == ENOENT;
+    while ((e = readdir(d)) != NULL) {
+        char child[2048];
+        struct stat st;
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if ((size_t)snprintf(child, sizeof(child), "%s/%s", path, e->d_name) >=
+            sizeof(child))
+            continue;
+        if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode))
+            (void)wtx_rm_rf(child);
+        else
+            (void)remove(child);
+    }
+    (void)closedir(d);
+    return rmdir(path) == 0 || errno == ENOENT;
+}
+
+/* A fingerprint of every file under the isolated state root: relative path,
+ * size, mtime nanoseconds and inode, folded into one hex digest. mtime and
+ * inode are in it so a rewrite that preserved the byte count, or a
+ * replace-by-rename, still moves the digest. */
+static void wtx_fp_fold(unsigned long long *h, const char *s)
+{
+    for (; *s; s++)
+        *h = (*h ^ (unsigned char)*s) * 1099511628211ULL;
+}
+
+static bool wtx_fp_walk(const char *path, const char *rel,
+                        unsigned long long *h, int depth)
+{
+    DIR *d;
+    struct dirent *e;
+    if (depth > 12)
+        return false;
+    d = opendir(path);
+    if (!d)
+        return false;
+    while ((e = readdir(d)) != NULL) {
+        char child[2048], crel[2048], num[96];
+        struct stat st;
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if ((size_t)snprintf(child, sizeof(child), "%s/%s", path,
+                             e->d_name) >= sizeof(child) ||
+            (size_t)snprintf(crel, sizeof(crel), "%s/%s", rel, e->d_name) >=
+                sizeof(crel))
+            continue;
+        if (lstat(child, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            (void)wtx_fp_walk(child, crel, h, depth + 1);
+            continue;
+        }
+        wtx_fp_fold(h, crel);
+        (void)snprintf(num, sizeof(num), "|%lld|%lld|%lld|",
+                       (long long)st.st_size, (long long)st.st_mtime,
+                       (long long)st.st_ino);
+        wtx_fp_fold(h, num);
+    }
+    (void)closedir(d);
+    return true;
+}
+
+static bool wtx_state_fingerprint(char *out, size_t cap)
+{
+    unsigned long long h = 14695981039346656037ULL;
+    if (!out || cap < 17)
+        return false;
+    (void)wtx_fp_walk(g_wtx_state, "", &h, 0);
+    return (size_t)snprintf(out, cap, "%016llx", h) < cap;
+}
 
 static void wtx_begin(struct wtx_call *c, const char *path,
                       const char *schema)
@@ -334,7 +418,7 @@ static bool wtx_post_brief(const char *name, size_t bytes, const char *tail)
     FILE *f;
     size_t k;
     bool ok;
-    if (!wtx_queue_verb("status", NULL, NULL))
+    if (!wtx_queue_verb("reap", NULL, NULL))
         return false;
     (void)snprintf(path, sizeof(path), "%s/z23/dev/%s.brief", g_wtx_state,
                    name);
@@ -661,8 +745,8 @@ static long long wtx_drive_late_post(struct wkr_drive_opts *o,
     long long t0, jobs;
     int st = 0;
     pid_t pid;
-    /* The worker lock lives in the queue dir: let the queue create it. */
-    if (!wtx_queue_verb("status", NULL, NULL))
+    /* Initialize the empty queue through a mutating verb, never a read. */
+    if (!wtx_queue_verb("reap", NULL, NULL))
         return -1;
     t0 = (long long)platform_time_monotonic_ms();
     pid = wtx_post_later(name, delay_ms);
@@ -1139,6 +1223,235 @@ _test_next:;
 
 /* Defined after the suite entry; declared here so the entry can call it. */
 static int wtx_cancel_and_group_cases(void);
+
+/* The action=status cases, in their own function so the suite entry stays
+ * under the complexity cap. Returns the failure count. */
+static int wtx_status_unreadable_lock(void)
+{
+    int failures = 0;
+    TEST("status: a lock lookup failure is unknown, never absent") {
+        struct wtx_call c;
+        char path[1200];
+        struct stat before, after;
+        wtx_isolate("statuslockloop");
+        wtx_queue_post("wtx-status-lock-loop");
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/queue/worker.lock",
+                       g_wtx_state);
+        ASSERT(symlink("worker.lock", path) == 0);
+        ASSERT(lstat(path, &before) == 0);
+        wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "resident")),
+                      "unknown");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "reason")),
+                      "worker-lock-unreadable");
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "queued")), 1);
+        wtx_end(&c);
+        ASSERT(lstat(path, &after) == 0);
+        ASSERT(before.st_ino == after.st_ino && before.st_size == after.st_size);
+        ASSERT(unlink(path) == 0);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int wtx_status_invalid_claims(void)
+{
+    int failures = 0;
+    TEST("status: malformed or mismatched claims cannot prove identity") {
+        const char *claims[] = {
+            "not-json", "{}",
+            "{\"name\":\"another-job\",\"attempt\":1,\"worker\":\"wtx\",\"session\":\"s\",\"submitted\":false}",
+            "{\"name\":\"wtx-invalid-claim\",\"attempt\":2,\"worker\":\"wtx\",\"session\":\"s\",\"submitted\":false}",
+            "{\"name\":\"wtx-invalid-claim\",\"attempt\":1,\"worker\":\"wtx\",\"session\":\"s\",\"submitted\":\"true\"}",
+            "{\"name\":\"wtx-invalid-claim\",\"attempt\":1,\"worker\":\"wtx\",\"session\":\"s\",\"submitted\":false}junk"
+        };
+        char path[1200];
+        wtx_isolate("statusinvalidclaim");
+        wtx_queue_post("wtx-invalid-claim");
+        ASSERT(wtx_queue_verb("claim", NULL, NULL));
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/engine/wtx-invalid-claim/a1/claim.json", g_wtx_state);
+        for (size_t i = 0; i < sizeof(claims) / sizeof(claims[0]); i++) {
+            FILE *f = fopen(path, "wb");
+            ASSERT(f != NULL);
+            size_t n = strlen(claims[i]);
+            ASSERT(fwrite(claims[i], 1, n, f) == n);
+            ASSERT(fclose(f) == 0);
+            struct wtx_call c;
+            wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+            (void)json_push_kv_str(&c.input, "action", "status");
+            zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+            ASSERT(wtx_ok(&c));
+            const struct json_value *job = json_get(&c.reply.data, "job");
+            ASSERT(job && job->type == JSON_OBJ);
+            ASSERT(!json_get_bool(json_get(job, "claim_read")));
+            ASSERT_STR_EQ(json_get_str(json_get(job, "worker")), "");
+            ASSERT_STR_EQ(json_get_str(json_get(job, "session")), "");
+            wtx_end(&c);
+        }
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int wtx_status_cases(void)
+{
+    int failures = wtx_status_unreadable_lock() + wtx_status_invalid_claims();
+    /* ── action=status: read-only, and that is the assertion ───────────────
+     *
+     * The leaf accepted only `run`, so nothing could ask the resident
+     * anything. These tests pin the two properties that make a status action
+     * safe to poll: it answers from evidence that already exists, and it
+     * writes nothing — including not creating the very lock file it probes,
+     * which an O_CREAT open would do on a box that has never run a worker. */
+    TEST("status: answers with no resident, no state root, and creates nothing")
+    {
+        struct wtx_call c;
+        char root[1024];
+        struct stat st;
+        wtx_isolate("statusbare");
+        /* A state root that does not exist yet: status must not make one. */
+        (void)snprintf(root, sizeof(root), "%s/z23", g_wtx_state);
+        (void)wtx_rm_rf(root);
+        ASSERT(stat(root, &st) != 0);
+        wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "worker", "wtx");
+        zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "action")),
+                      "status");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "worker")), "wtx");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "resident")),
+                      "unknown");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "reason")),
+                      "state-root-unavailable");
+        /* Counts are null, never 0, when nothing could be read. */
+        ASSERT(json_is_null(json_get(&c.reply.data, "queued")));
+        ASSERT(json_is_null(json_get(&c.reply.data, "running")));
+        ASSERT(json_is_null(json_get(&c.reply.data, "job")));
+        ASSERT(json_get_bool(json_get(&c.reply.data, "read_only")) == true);
+        wtx_end(&c);
+        /* THE POINT: the root still does not exist. */
+        ASSERT(stat(root, &st) != 0);
+        wtx_restore();
+        PASS();
+    }
+
+    TEST("status: a held worker.lock reads held, a free one reads free")
+    {
+        struct wtx_call c;
+        char lockp[1200];
+        struct stat st;
+        int held;
+        wtx_isolate("statuslock");
+        /* One queue post makes the state root and the queue dir exist the
+         * way a real box does, through the queue's own leaf. */
+        wtx_queue_post("wtx-status-lock");
+        (void)snprintf(lockp, sizeof(lockp), "%s/z23/dev/queue/worker.lock",
+                       g_wtx_state);
+        /* No lock file yet: free, and status must not create one. */
+        ASSERT(stat(lockp, &st) != 0);
+        wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "resident")),
+                      "free");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "reason")),
+                      "worker-lock-absent");
+        /* The queued row IS visible: the ledger is read, lockless. */
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "queued")), 1);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "running")), 0);
+        wtx_end(&c);
+        ASSERT(stat(lockp, &st) != 0);
+
+        /* Now hold it the way a live drive does. */
+        held = open(lockp, O_RDWR | O_CREAT, 0600);
+        ASSERT(held >= 0);
+        ASSERT(flock(held, LOCK_EX) == 0);
+        wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "resident")),
+                      "held");
+        wtx_end(&c);
+        (void)flock(held, LOCK_UN);
+        (void)close(held);
+        /* Released: free again, so resident tracks the live holder and is
+         * not a sticky flag. */
+        wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "resident")),
+                      "free");
+        wtx_end(&c);
+        wtx_restore();
+        PASS();
+    }
+
+    /* A claimed job is reported ONLY from evidence that already exists: the
+     * running row plus that run's own claim.json. With the claim unreadable
+     * the job stays unproven (claim_read false, fields empty) rather than
+     * being guessed from the row alone. */
+    TEST("status: an active job comes from the claim, or stays unproven")
+    {
+        struct wtx_call c;
+        const struct json_value *job;
+        wtx_isolate("statusjob");
+        wtx_queue_post("wtx-status-job");
+        ASSERT(wtx_queue_verb("claim", NULL, NULL));
+        wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "running")), 1);
+        job = json_get(&c.reply.data, "job");
+        ASSERT(job != NULL);
+        ASSERT(job->type == JSON_OBJ);
+        ASSERT_STR_EQ(json_get_str(json_get(job, "name")), "wtx-status-job");
+        /* claim.json exists because claim wrote it, so the identity is
+         * proven and carries the claimant the queue recorded. */
+        ASSERT(json_get_bool(json_get(job, "claim_read")) == true);
+        ASSERT_STR_EQ(json_get_str(json_get(job, "worker")), "wtx");
+        wtx_end(&c);
+        wtx_restore();
+        PASS();
+    }
+
+    /* Repeated status calls change not one byte. The fingerprint is size +
+     * mtime + inode over the whole state root, so a rewrite that preserved
+     * length would still be caught. */
+    TEST("status: repeated calls mutate zero bytes of the state root")
+    {
+        struct wtx_call c;
+        char before[65], after[65];
+        wtx_isolate("statusnomutate");
+        wtx_queue_post("wtx-status-quiet");
+        ASSERT(wtx_state_fingerprint(before, sizeof(before)));
+        for (int i = 0; i < 12; i++) {
+            wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+            (void)json_push_kv_str(&c.input, "action", "status");
+            zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+            ASSERT(wtx_ok(&c));
+            wtx_end(&c);
+        }
+        ASSERT(wtx_state_fingerprint(after, sizeof(after)));
+        ASSERT_STR_EQ(after, before);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
 #endif
 
 int test_devagent_worker(void);
@@ -1147,6 +1460,8 @@ int test_devagent_worker(void)
     int failures = 0;
 
 #if !defined(_WIN32)
+    failures += wtx_status_cases();
+
     TEST("lifecycle: post claim fixture gate receipt reap completed")
     {
         struct wkr_drive_opts o;

@@ -387,9 +387,9 @@ static void mr_spawn_outcome_name(const struct mr_spawn_outcome *o,
  * bounded — the fact that turns an exit code into a diagnosis.
  *
  * Which line depends on who wrote it, and both ends are deliberate. A
- * BUILD is read from the FRONT: the compiler's first error is the cause
- * and make's own "*** Error N" summary, which comes last, only repeats
- * the status already reported. A RUNNER is read from the BACK: it
+ * BUILD prefers the first compiler error, falling back to its first line.
+ * Leading make warnings must not hide the diagnostic; its final "*** Error"
+ * summary only repeats the status. A RUNNER is read from the BACK: it
  * refuses an unregistered group in its last (often only) line, and a
  * suite that ran ends on the line that counts the failures, while its
  * first line is a banner. Empty when the child said nothing readable. */
@@ -411,6 +411,13 @@ static void mr_log_line(const char *log, char *out, size_t cap, bool last)
     if (!out || cap < 2) return;
     out[0] = '\0';
     if (!log) return;
+    if (!last) {
+        const char *error = strstr(log, "error:");
+        if (error) {
+            while (error > log && error[-1] != '\n') error--;
+            log = error;
+        }
+    }
     for (cur = log;;) {
         const char *nl = strchr(cur, '\n');
         size_t n = nl ? (size_t)(nl - cur) : strlen(cur);

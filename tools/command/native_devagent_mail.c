@@ -511,15 +511,17 @@ static bool dvm_mkdir_one(const char *path)
 #endif
 }
 
-static bool dvm_mail_dir(char *out, size_t cap)
+static bool dvm_mail_dir(char *out, size_t cap, bool create)
 {
     char state[4096];
     int n;
-    if (!platform_state_root(state, sizeof(state)))
+    if (!(create ? platform_state_root(state, sizeof(state))
+                 : platform_state_root_existing(state, sizeof(state))))
         return false;
     n = snprintf(out, cap, "%s/mail", state);
     if (n <= 0 || (size_t)n >= cap)
         return false;
+    if (!create) return true;
     /* mkdir -p the state root (platform helper owns its mode), then our
      * own mail dir at exactly 0700. */
     if (!dvm_mkdir_one(state))
@@ -1273,10 +1275,20 @@ static bool dvm_streams_list(const char *maildir,
     DIR *d = opendir(maildir);
     struct dirent *ent;
     if (!d) {
+        if (errno == ENOENT) return true;
         dvm_fail(reply, "MAIL_READ_FAILED", "cannot read the mail dir",
                  maildir);
         return false;
     }
+#if defined(_WIN32)
+    uintptr_t retained = 0;
+    if (!platform_private_directory_open_validated_traverse(maildir, &retained)) {
+        (void)closedir(d);
+        dvm_fail(reply, "MAIL_READ_FAILED", "mail directory is not owner-private", maildir);
+        return false;
+    }
+    platform_private_directory_close(retained);
+#endif
     ps->streams = (struct dvm_stream *)zcl_calloc(
         DVM_STREAMS_MAX, sizeof(*ps->streams), "devagent_mail.streams");
     if (!ps->streams) {
@@ -1939,9 +1951,9 @@ void zcl_native_handle_dev_agent_mail(
                  "input.action missing or empty");
         return;
     }
-    if (!dvm_mail_dir(maildir, sizeof(maildir))) {
+    if (!dvm_mail_dir(maildir, sizeof(maildir), strcmp(action, "pull") != 0)) {
         dvm_fail(reply, "STATE_DIR_FAILED",
-                 "cannot create the mail dir under the state root",
+                 "cannot resolve the mail dir under the state root",
                  "platform_state_root/mail");
         return;
     }

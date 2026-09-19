@@ -305,10 +305,11 @@ static bool dvq_mkdir_one(const char *path)
     return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR;
 }
 
-static bool dvq_dirs_make(struct dvq_dirs *d)
+static bool dvq_dirs_resolve(struct dvq_dirs *d, bool create)
 {
     int n;
-    if (!d || !platform_state_root(d->root, sizeof(d->root)))
+    if (!d || !(create ? platform_state_root(d->root, sizeof(d->root))
+                       : platform_state_root_existing(d->root, sizeof(d->root))))
         return false;
     n = snprintf(d->queue, sizeof(d->queue), "%s/queue", d->root);
     if (n <= 0 || (size_t)n >= sizeof(d->queue))
@@ -316,7 +317,7 @@ static bool dvq_dirs_make(struct dvq_dirs *d)
     n = snprintf(d->engine, sizeof(d->engine), "%s/engine", d->root);
     if (n <= 0 || (size_t)n >= sizeof(d->engine))
         return false;
-    return dvq_mkdir_one(d->queue) && dvq_mkdir_one(d->engine);
+    return !create || (dvq_mkdir_one(d->queue) && dvq_mkdir_one(d->engine));
 }
 
 /* ── time ──────────────────────────────────────────────────────────────── */
@@ -919,7 +920,7 @@ static void dvq_post(const struct zcl_command_request *req,
                  "input.name missing, misspelled, or escaping");
         return;
     }
-    if (!dvq_dirs_make(&d)) {
+    if (!dvq_dirs_resolve(&d, true)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "post",
                  "cannot resolve the owner-private state root",
                  "platform_state_root");
@@ -1378,42 +1379,180 @@ static bool dvq_task_prev(char *task, size_t cap, size_t *used,
 
 /* Pool census for the no_free_worktree detail: entries listed, entries
  * warm. All local stats, never a launch. */
-static void dvq_pool_stats(const char *poolpath, long long *total,
-                           long long *warm)
+/* One count that may not exist. `why` non-NULL means the measurement was
+ * never taken, and the key is pushed as null rather than as the zero the
+ * out-param still holds. */
+static bool dvq_push_count(struct json_value *obj, const char *key,
+                           long long value, const char *why)
+{
+    struct json_value nv;
+    bool ok;
+    if (!why)
+        return json_push_kv_int(obj, key, value);
+    json_init(&nv);
+    json_set_null(&nv);
+    ok = json_push_kv(obj, key, &nv);
+    json_free(&nv);
+    return ok;
+}
+
+/* ── the pool is measured, or it is UNMEASURED: never a zero ──────────────
+ *
+ * pool.txt is the operator's list of warm worktree directories. A host that
+ * has never been given one has an UNMEASURED pool, which is a different fact
+ * from a pool measured to be empty, and reporting 0 for it is how a caller
+ * concludes "no capacity" about a number nobody ever took.
+ *
+ * These reasons say which it is. NULL means the file was read and the counts
+ * below it are real. fleet.steer.brief used to re-derive this by stat()ing
+ * pool.txt itself, because this leaf's zero could not be trusted; it now
+ * reads the answer from here, so the decision lives once, in the leaf that
+ * owns the queue's state. */
+#define DVQ_POOL_ABSENT \
+    "no pool.txt on this host: the worktree pool is not listed here, so its " \
+    "size is unknown, which is not the same as empty"
+#define DVQ_POOL_UNREADABLE \
+    "pool.txt exists but could not be read within its 64 KiB bound"
+#define DVQ_POOL_NOMEM "the pool buffer could not be allocated"
+
+/* NULL when `poolpath` was read into `text` (caller frees it), else the
+ * reason it could not be, with `text` already freed and set to NULL. */
+static const char *dvq_pool_text(const char *poolpath, char **text)
+{
+    struct stat st;
+    *text = (char *)zcl_malloc(DVQ_POOL_CAP, "devagent.queue.pool");
+    if (!*text)
+        return DVQ_POOL_NOMEM;
+    if (!poolpath || stat(poolpath, &st) != 0 || !S_ISREG(st.st_mode)) {
+        free(*text);
+        *text = NULL;
+        return DVQ_POOL_ABSENT;
+    }
+    if (!dvq_read_file(poolpath, *text, DVQ_POOL_CAP, NULL)) {
+        free(*text);
+        *text = NULL;
+        return DVQ_POOL_UNREADABLE;
+    }
+    return NULL;
+}
+
+/* ── the five states a worktree pool can be in ─────────────────────────────
+ *
+ * "no free worktree" is not one fact, it is five, and an operator who cannot
+ * tell them apart cannot act on any of them:
+ *
+ *   inventory missing      nobody listed a pool here            UNMEASURED
+ *   inventory empty        the list was read and holds nothing  measured 0
+ *   entry missing          listed, but the directory is gone    stale list
+ *   entry not warm         directory present, no .eu-warm       not prepared
+ *   entry claimed          warm, but its lock is held now       in use
+ *
+ * Every count below is reported, and `blocked` names the ONE reason dispatch
+ * is impossible, from a closed vocabulary, so "idle" can never stand in for
+ * "cannot dispatch". warm == free + claimed always holds, which is what lets
+ * a caller check the census against itself. */
+struct dvq_pool_census {
+    long long total;    /* non-blank lines in pool.txt */
+    long long warm;     /* of those, carrying .eu-warm */
+    long long free;     /* of the warm, lock acquirable right now */
+    long long claimed;  /* of the warm, unavailable right now */
+    long long missing;  /* listed, but no such directory */
+    long long not_warm; /* directory present, no .eu-warm marker */
+    const char *reason;  /* why unmeasured; NULL when the counts are real */
+    const char *blocked; /* why dispatch is impossible; "" when it is not */
+};
+
+/* Dispatch is impossible for exactly one reason at a time; this is it. */
+#define DVQ_BLOCK_UNMEASURED "pool-unmeasured"
+#define DVQ_BLOCK_EMPTY "pool-empty"
+#define DVQ_BLOCK_NO_WARM "pool-no-warm-entry"
+#define DVQ_BLOCK_ALL_CLAIMED "pool-all-claimed"
+
+/* Classify ONE listed entry into the census. Split out so the loop stays
+ * flat and each state is decided in one place. */
+static void dvq_pool_entry(const char *dir, struct dvq_pool_census *c)
+{
+    char probe[4096 + 16], lockp[4096 + 16];
+    struct stat st;
+    FILE *f;
+    int fd;
+    c->total++;
+    if (snprintf(probe, sizeof(probe), "%s/.eu-warm", dir) >=
+            (int)sizeof(probe) ||
+        snprintf(lockp, sizeof(lockp), "%s/.eu-lock", dir) >=
+            (int)sizeof(lockp)) {
+        c->missing++; /* a path this box cannot even name is not usable */
+        return;
+    }
+    /* A listed directory that is gone is a STALE LIST, not an unprepared
+     * worktree: the operator's inventory names something that no longer
+     * exists, and saying "not warm" about it would hide that. */
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        c->missing++;
+        return;
+    }
+    f = fopen(probe, "rb");
+    if (!f) {
+        c->not_warm++;
+        return;
+    }
+    (void)fclose(f);
+    c->warm++;
+    fd = open(lockp, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        c->reason = "pool-lock-unreadable";
+        return;
+    }
+#if !defined(_WIN32)
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        (void)flock(fd, LOCK_UN);
+        c->free++;
+    } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        c->claimed++;
+    } else {
+        c->reason = "pool-lock-unreadable";
+    }
+#else
+    c->free++;
+#endif
+    (void)close(fd);
+}
+
+/* The one blocked reason, decided after the counts are in. */
+static const char *dvq_pool_blocked(const struct dvq_pool_census *c)
+{
+    if (c->reason)
+        return DVQ_BLOCK_UNMEASURED;
+    if (c->total == 0)
+        return DVQ_BLOCK_EMPTY;
+    if (c->warm == 0)
+        return DVQ_BLOCK_NO_WARM;
+    if (c->free == 0)
+        return DVQ_BLOCK_ALL_CLAIMED;
+    return "";
+}
+
+/* Read pool.txt once and classify every entry. Never fabricates a zero: an
+ * unreadable inventory sets reason and leaves every count at 0 with
+ * known:false carrying that distinction to the caller. */
+static void dvq_pool_take(const char *poolpath, struct dvq_pool_census *c)
 {
     char *text;
     char *save = NULL, *line;
-    if (total)
-        *total = 0;
-    if (warm)
-        *warm = 0;
-    text = (char *)zcl_malloc(DVQ_POOL_CAP, "devagent.queue.pool");
-    if (!text)
-        return;
-    if (!poolpath || !dvq_read_file(poolpath, text, DVQ_POOL_CAP, NULL)) {
-        free(text);
+    memset(c, 0, sizeof(*c));
+    c->reason = dvq_pool_text(poolpath, &text);
+    if (c->reason) {
+        c->blocked = dvq_pool_blocked(c);
         return;
     }
     for (line = strtok_r(text, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
-        char probe[4096 + 16];
-        FILE *f;
         dvq_trim(line);
-        if (!line[0])
-            continue;
-        if (total)
-            (*total)++;
-        if (snprintf(probe, sizeof(probe), "%s/.eu-warm", line) >=
-            (int)sizeof(probe))
-            continue;
-        f = fopen(probe, "rb");
-        if (!f)
-            continue;
-        (void)fclose(f);
-        if (warm)
-            (*warm)++;
+        if (line[0])
+            dvq_pool_entry(line, c);
     }
     free(text);
+    c->blocked = dvq_pool_blocked(c);
 }
 
 /* Resolve the dev binary the harness gates through, the way the interim
@@ -1897,7 +2036,7 @@ static void dvq_claim(const struct zcl_command_request *req,
     done_name[0] = '\0';
     if (!dvq_claim_args(req, reply, &worker, &session, &model))
         return;
-    if (!dvq_dirs_make(&d)) {
+    if (!dvq_dirs_resolve(&d, true)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "claim",
                  "cannot resolve the owner-private state root",
                  "platform_state_root");
@@ -2000,7 +2139,7 @@ static void dvq_cancel(const struct zcl_command_request *req,
                  "input.name missing, misspelled, or escaping");
         return;
     }
-    if (!dvq_dirs_make(&d)) {
+    if (!dvq_dirs_resolve(&d, true)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "cancel",
                  "cannot resolve the owner-private state root",
                  "platform_state_root");
@@ -2068,6 +2207,73 @@ static void dvq_cancel(const struct zcl_command_request *req,
              "no queued row carries that name", "nothing to stop");
 }
 
+/* The `pool` object of a status reply. Every count is null — never 0 — when
+ * the pool was not measured, so a consumer reading only the numbers cannot
+ * mistake "nobody listed a pool here" for "the pool is empty". `blocked`
+ * names the ONE reason dispatch is impossible, so no caller infers it from a
+ * set of zeroes and "idle" can never stand in for "cannot dispatch". Split
+ * out of dvq_status for the complexity gate; it owns the shape alone. */
+static bool dvq_status_pool(struct json_value *pool,
+                            const struct dvq_pool_census *c)
+{
+    const char *why = c->reason;
+    return json_push_kv_bool(pool, "known", why == NULL) &&
+           dvq_push_count(pool, "total", c->total, why) &&
+           dvq_push_count(pool, "warm", c->warm, why) &&
+           dvq_push_count(pool, "free", c->free, why) &&
+           dvq_push_count(pool, "claimed", c->claimed, why) &&
+           dvq_push_count(pool, "missing", c->missing, why) &&
+           dvq_push_count(pool, "not_warm", c->not_warm, why) &&
+           json_push_kv_str(pool, "reason", why ? why : "") &&
+           json_push_kv_str(pool, "blocked", c->blocked);
+}
+
+/* The same census as one human line. An unmeasured pool says so instead of
+ * printing zeroes that would read as an empty one. */
+static void dvq_pool_line(char *out, size_t cap,
+                          const struct dvq_pool_census *c)
+{
+    if (c->reason) {
+        (void)snprintf(out, cap, "pool UNMEASURED: %s", c->blocked);
+        return;
+    }
+    (void)snprintf(out, cap,
+                   "pool %lld free / %lld claimed / %lld warm / %lld total "
+                   "(%lld missing, %lld not warm)%s%s",
+                   c->free, c->claimed, c->warm, c->total, c->missing,
+                   c->not_warm, c->blocked[0] ? " BLOCKED: " : "",
+                   c->blocked);
+}
+
+/* The whole `no_free_worktree` answer, including WHICH of the five census
+ * states blocked it. Split out of dvq_next so that walker stays under the
+ * complexity gate: this is pure emission and owns every pool field, so the
+ * shape can never drift between here and `status`. */
+static void dvq_emit_no_worktree(struct zcl_command_reply *reply,
+                                 const char *poolpath)
+{
+    struct dvq_pool_census census;
+    const char *why;
+    dvq_pool_take(poolpath, &census);
+    why = census.reason;
+    (void)json_push_kv_str(&reply->data, "leaf", DVQ_LEAF);
+    (void)json_push_kv_str(&reply->data, "state", "no_free_worktree");
+    /* The five states the census separates all used to arrive here as one
+     * word; `pool_blocked` names the one that applies, and the counts say
+     * how the inventory got that way. */
+    (void)json_push_kv_bool(&reply->data, "pool_known", why == NULL);
+    (void)dvq_push_count(&reply->data, "pool_total", census.total, why);
+    (void)dvq_push_count(&reply->data, "pool_warm", census.warm, why);
+    (void)dvq_push_count(&reply->data, "pool_free", census.free, why);
+    (void)dvq_push_count(&reply->data, "pool_claimed", census.claimed, why);
+    (void)dvq_push_count(&reply->data, "pool_missing", census.missing, why);
+    (void)dvq_push_count(&reply->data, "pool_not_warm", census.not_warm, why);
+    (void)json_push_kv_str(&reply->data, "pool_reason", why ? why : "");
+    (void)json_push_kv_str(&reply->data, "pool_blocked", census.blocked);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
 static void dvq_next(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
@@ -2090,7 +2296,6 @@ static void dvq_next(const struct zcl_command_request *req,
     const char *sargv[56];
     bool have_zbin;
     int lock = -1, wtfd = -1;
-    long long total = 0, warm = 0;
     struct zcl_result zr;
     bool doc;
     (void)req;
@@ -2100,7 +2305,7 @@ static void dvq_next(const struct zcl_command_request *req,
              "run next on a POSIX host");
     return;
 #endif
-    if (!dvq_dirs_make(&d)) {
+    if (!dvq_dirs_resolve(&d, true)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "select",
                  "cannot resolve the owner-private state root",
                  "platform_state_root");
@@ -2181,13 +2386,7 @@ static void dvq_next(const struct zcl_command_request *req,
     if (!wt[0]) {
         free(rows);
         dvq_unlock(lock);
-        dvq_pool_stats(poolpath, &total, &warm);
-        (void)json_push_kv_str(&reply->data, "leaf", DVQ_LEAF);
-        (void)json_push_kv_str(&reply->data, "state", "no_free_worktree");
-        (void)json_push_kv_int(&reply->data, "pool_total", total);
-        (void)json_push_kv_int(&reply->data, "pool_warm", warm);
-        reply->status = ZCL_COMMAND_STATUS_PASSED;
-        reply->exit_code = 0;
+        dvq_emit_no_worktree(reply, poolpath);
         return;
     }
     /* Mark running before releasing the lock; the worktree fd stays open
@@ -2637,7 +2836,7 @@ static void dvq_reap(const struct zcl_command_request *req,
     int lock = -1;
     size_t len = 0;
     (void)req;
-    if (!dvq_dirs_make(&d)) {
+    if (!dvq_dirs_resolve(&d, true)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "reap",
                  "cannot resolve the owner-private state root",
                  "platform_state_root");
@@ -3013,60 +3212,6 @@ static bool dvq_push_running(struct json_value *arr, const struct dvq_row *r,
 
 /* A warm entry whose NB lock holds right now counts as free. The probe
  * never holds the lock past this call. */
-static void dvq_pool_full(const char *poolpath, long long *total,
-                          long long *warm, long long *freew)
-{
-    char *text;
-    char *save = NULL, *line;
-    if (total)
-        *total = 0;
-    if (warm)
-        *warm = 0;
-    if (freew)
-        *freew = 0;
-    text = (char *)zcl_malloc(DVQ_POOL_CAP, "devagent.queue.pool");
-    if (!text)
-        return;
-    if (!poolpath || !dvq_read_file(poolpath, text, DVQ_POOL_CAP, NULL)) {
-        free(text);
-        return;
-    }
-    for (line = strtok_r(text, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        char probe[4096 + 16], lockp[4096 + 16];
-        FILE *f;
-        int fd;
-        dvq_trim(line);
-        if (!line[0])
-            continue;
-        if (total)
-            (*total)++;
-        if (snprintf(probe, sizeof(probe), "%s/.eu-warm", line) >=
-                (int)sizeof(probe) ||
-            snprintf(lockp, sizeof(lockp), "%s/.eu-lock", line) >=
-                (int)sizeof(lockp))
-            continue;
-        f = fopen(probe, "rb");
-        if (!f)
-            continue;
-        (void)fclose(f);
-        if (warm)
-            (*warm)++;
-        fd = open(lockp, O_RDWR | O_CREAT, 0600);
-        if (fd < 0)
-            continue;
-#if !defined(_WIN32)
-        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
-            (void)flock(fd, LOCK_UN);
-            if (freew)
-                (*freew)++;
-        }
-#endif
-        (void)close(fd);
-    }
-    free(text);
-}
-
 static void dvq_status(const struct zcl_command_request *req,
                        struct zcl_command_reply *reply)
 {
@@ -3075,7 +3220,8 @@ static void dvq_status(const struct zcl_command_request *req,
     size_t nrows = 0;
     char qpath[4096 + 32], opath[4096 + 32], poolpath[4096 + 32];
     struct json_value queued, running, outcomes, pool;
-    long long total = 0, warm = 0, freew = 0, queued_ready = 0;
+    long long queued_ready = 0;
+    struct dvq_pool_census census;
     long long now = (long long)platform_time_wall_unix();
     bool want_json = false;
     const struct json_value *jv;
@@ -3086,7 +3232,7 @@ static void dvq_status(const struct zcl_command_request *req,
         jv = json_get(req->input, "json");
         want_json = jv && json_get_bool(jv);
     }
-    if (!dvq_dirs_make(&d)) {
+    if (!dvq_dirs_resolve(&d, false)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "status",
                  "cannot resolve the owner-private state root",
                  "platform_state_root");
@@ -3179,18 +3325,21 @@ static void dvq_status(const struct zcl_command_request *req,
         }
         free(text);
     }
-    dvq_pool_full(poolpath, &total, &warm, &freew);
-    if (!json_push_kv_int(&pool, "total", total) ||
-        !json_push_kv_int(&pool, "warm", warm) ||
-        !json_push_kv_int(&pool, "free", freew))
+    dvq_pool_take(poolpath, &census);
+    /* known FIRST, then every count, which are null — never 0 — when the pool
+     * was not measured, so a consumer reading only the numbers cannot mistake
+     * "nobody listed a pool here" for "the pool is empty". `blocked` names the
+     * ONE reason dispatch is impossible, so no caller has to infer it from a
+     * set of zeroes, and "idle" can never stand in for "cannot dispatch". */
+    if (!dvq_status_pool(&pool, &census))
         goto fail;
     if (!want_json) {
+        char poolline[220];
+        dvq_pool_line(poolline, sizeof(poolline), &census);
         w = snprintf(screen, sizeof(screen),
-                     "queue: %llu queued (%lld ready), %llu running "
-                     "(pool %lld free / %lld warm / %lld total)\n",
+                     "queue: %llu queued (%lld ready), %llu running (%s)\n",
                      (unsigned long long)queued.num_children, queued_ready,
-                     (unsigned long long)running.num_children, freew, warm,
-                     total);
+                     (unsigned long long)running.num_children, poolline);
         if (w <= 0 || (size_t)w >= sizeof(screen))
             goto fail;
         used = (size_t)w;

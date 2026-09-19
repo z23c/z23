@@ -345,9 +345,11 @@ int t_native_agent_api_contract(void)
                       "target_runtime_version_skew_or_contract_not_deployed")
                != NULL);
         ASSERT(strstr(main_buf, "cli_service_exec_arg") != NULL);
-        ASSERT(strstr(main_buf, "systemctl --user show zclassic23") != NULL);
+        ASSERT(strstr(main_buf, "\"systemctl\", \"--user\", \"show\", ZCL_CLI_DEFAULT_UNIT") != NULL);
+        ASSERT(strstr(main_buf, "if (!snapshot->observed)") != NULL);
+        ASSERT(strstr(main_buf, "zcl_spawn_capture(argv, snapshot->exec_start") != NULL);
         ASSERT(strstr(main_buf, "cli_p2p_port") != NULL);
-        ASSERT(strstr(main_buf, "cli_service_exec_arg(\"port\"") != NULL);
+        ASSERT(strstr(main_buf, "cli_service_exec_arg(&service, \"port\"") != NULL);
         ASSERT(strstr(main_buf,
                       "datadir, cli_port, cli_p2p_port") != NULL);
         ASSERT(strstr(main_buf, "cli_cookie_exists") != NULL);

@@ -11,6 +11,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct zcl_command_request;
+struct zcl_command_reply;
+
 /* ── SUITE VERDICT ────────────────────────────────────────────────────────
  * test_parallel prints exactly one machine-greppable verdict line:
  *
@@ -152,6 +155,16 @@ typedef bool (*wkr_executor_fn)(const struct wkr_job *job,
  * refuses. Single worker per queue: a second concurrent drive refuses. */
 long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
                                     wkr_executor_fn exec);
+
+/* dev.agent.worker action=status — a STRICTLY READ-ONLY answer about the
+ * resident: whether some drive holds worker.lock, what the existing queue
+ * ledger says, and the active job only when claim.json already proves one.
+ * It creates nothing (no O_CREAT anywhere), takes no queue lock, never
+ * sleeps, and cannot wake or delay a drive. Defined in
+ * tools/command/native_devagent_worker_status.c. */
+void zcl_native_devagent_worker_status(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* Production executor stub: wired until C's muse_session arrives. Always
  * returns false so a job is never executed without a real executor. */

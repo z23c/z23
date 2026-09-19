@@ -25,6 +25,7 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/state_root.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,6 +197,17 @@ static void dvx_verb(struct dvx_call *c, const char *action, bool json)
         (void)json_push_kv_bool(&c->input, "json", true);
 }
 
+/* Run `status --json` and hand back its pool object, or NULL when the call
+ * failed. The caller owns `c` and ends it, so several states can be probed in
+ * one TEST without repeating the four lines each probe needs. */
+static const struct json_value *dvx_pool_obj(struct dvx_call *c)
+{
+    dvx_verb(c, "status", true);
+    if (!dvx_run(c) || !dvx_ok(c))
+        return NULL;
+    return json_get(&c->reply.data, "pool");
+}
+
 /* ── fixture files (runtime-only, under the isolated state root) ───────── */
 
 static bool dvx_write(const char *path, const char *text)
@@ -334,6 +346,8 @@ static bool dvx_pool(const char *tag, char *wt, size_t cap)
     (void)snprintf(warm, sizeof(warm), "%s/.eu-warm", wt);
     if (!dvx_write(warm, "warm\n"))
         return false;
+    (void)snprintf(warm, sizeof(warm), "%s/.eu-lock", wt);
+    if (!dvx_write(warm, "")) return false;
     dvx_queuedir(qd, sizeof(qd));
     /* mkdir -p the queue dir: no post has run yet in this state root. */
     {
@@ -376,6 +390,266 @@ static bool dvx_poll(const char *path, int tries)
     return access(path, R_OK) == 0;
 }
 #endif /* !defined(_WIN32) */
+
+/* The pool-census cases, in their own function so the suite entry stays
+ * under the complexity gate. Returns the failure count. */
+static int dvx_pool_cases(void)
+{
+    int failures = 0;
+    /* ── the five states a pool can be in, and one reason each ────────────
+     *
+     * "no free worktree" used to be one word for five different facts, and
+     * status reported a fabricated 0 for the one where nothing was measured
+     * at all. Each state is asserted here WITH its machine-readable blocked
+     * reason, because the counts alone do not discriminate: an unmeasured
+     * pool and an empty one both have zero warm entries, and only `known`
+     * plus `blocked` tell them apart.
+     *
+     * The states are asserted as a SET in one test on purpose. A test that
+     * checked the absent case alone would still pass if the leaf answered
+     * "unmeasured" for a pool it had really measured, which is the opposite
+     * defect and just as wrong. */
+    TEST("queue: the five pool states each carry their own blocked reason") {
+        struct dvx_call c;
+        const struct json_value *pool;
+        char qd[1100], pl[1200], wt[600], warm[700], lockp[700], line[1400];
+        int held;
+        dvx_isolate("poolfivestates");
+        dvx_queuedir(qd, sizeof(qd));
+        ASSERT((size_t)snprintf(pl, sizeof(pl), "%s/pool.txt", qd) <
+               sizeof(pl));
+        dvx_post(&c, "leaf", "u1", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+
+        /* (1) INVENTORY MISSING — unmeasured, every count null, not zero. */
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT(json_get_bool(json_get(pool, "known")) == false);
+        ASSERT(json_is_null(json_get(pool, "total")));
+        ASSERT(json_is_null(json_get(pool, "warm")));
+        ASSERT(json_is_null(json_get(pool, "free")));
+        ASSERT(json_is_null(json_get(pool, "claimed")));
+        ASSERT(json_is_null(json_get(pool, "missing")));
+        ASSERT(json_is_null(json_get(pool, "not_warm")));
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "blocked")),
+                      "pool-unmeasured");
+        ASSERT(json_get_str(json_get(pool, "reason"))[0] != '\0');
+        dvx_end(&c);
+
+        /* (2) VALID INVENTORY, ZERO ENTRIES — measured, and really zero. */
+        ASSERT(dvx_write(pl, ""));
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT(json_get_bool(json_get(pool, "known")) == true);
+        ASSERT_EQ(json_get_int(json_get(pool, "total")), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "blocked")), "pool-empty");
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "reason")), "");
+        dvx_end(&c);
+
+        /* (3) WARM ENTRY AVAILABLE — dispatch is possible, so no reason. */
+        ASSERT(dvx_pool("poolfivewt", wt, sizeof(wt)));
+        (void)snprintf(lockp, sizeof(lockp), "%s/.eu-lock", wt);
+        ASSERT(unlink(lockp) == 0);
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT(!json_get_bool(json_get(pool, "known")));
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "reason")), "pool-lock-unreadable");
+        ASSERT(access(lockp, F_OK) != 0 && errno == ENOENT);
+        dvx_end(&c);
+        ASSERT(dvx_write(lockp, ""));
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT_EQ(json_get_int(json_get(pool, "total")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "warm")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "free")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "claimed")), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "blocked")), "");
+        dvx_end(&c);
+
+        /* (4a) A LISTED ENTRY THAT IS GONE is a stale inventory, counted
+         * apart from an unprepared one: the operator's list is wrong, which
+         * "not warm" would hide. */
+        ASSERT((size_t)snprintf(line, sizeof(line), "%s\n%s/definitely-gone\n",
+                                wt, qd) < sizeof(line));
+        ASSERT(dvx_write(pl, line));
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT_EQ(json_get_int(json_get(pool, "total")), 2);
+        ASSERT_EQ(json_get_int(json_get(pool, "missing")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "not_warm")), 0);
+        ASSERT_EQ(json_get_int(json_get(pool, "warm")), 1);
+        dvx_end(&c);
+
+        /* (4b) A LISTED ENTRY PRESENT BUT NOT WARM — prepared-ness, not a
+         * missing directory. Dispatch is impossible with only these. */
+        ASSERT((size_t)snprintf(line, sizeof(line), "%s/cold\n", qd) <
+               sizeof(line));
+        {
+            char cold[1200];
+            ASSERT((size_t)snprintf(cold, sizeof(cold), "%s/cold", qd) <
+                   sizeof(cold));
+            ASSERT(mkdir(cold, 0700) == 0);
+        }
+        ASSERT(dvx_write(pl, line));
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT_EQ(json_get_int(json_get(pool, "total")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "not_warm")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "missing")), 0);
+        ASSERT_EQ(json_get_int(json_get(pool, "warm")), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "blocked")),
+                      "pool-no-warm-entry");
+        dvx_end(&c);
+
+        /* (5) THE LAST WARM ENTRY IS CLAIMED — warm, but taken right now.
+         * This is the state that must never read as idle. */
+        ASSERT((size_t)snprintf(line, sizeof(line), "%s\n", wt) <
+               sizeof(line));
+        ASSERT(dvx_write(pl, line));
+        ASSERT((size_t)snprintf(lockp, sizeof(lockp), "%s/.eu-lock", wt) <
+               sizeof(lockp));
+        held = open(lockp, O_RDWR | O_CREAT, 0600);
+        ASSERT(held >= 0);
+        ASSERT(flock(held, LOCK_EX) == 0);
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT_EQ(json_get_int(json_get(pool, "warm")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "free")), 0);
+        ASSERT_EQ(json_get_int(json_get(pool, "claimed")), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "blocked")),
+                      "pool-all-claimed");
+        /* warm == free + claimed lets a reader check the census against
+         * itself rather than trusting three independent numbers. */
+        ASSERT_EQ(json_get_int(json_get(pool, "warm")),
+                  json_get_int(json_get(pool, "free")) +
+                      json_get_int(json_get(pool, "claimed")));
+        dvx_end(&c);
+        (void)flock(held, LOCK_UN);
+        (void)close(held);
+
+        /* Releasing the lock returns it to free, so `claimed` tracks the
+         * live holder and is not a sticky flag. */
+        pool = dvx_pool_obj(&c);
+        ASSERT(pool != NULL);
+        ASSERT_EQ(json_get_int(json_get(pool, "free")), 1);
+        ASSERT_EQ(json_get_int(json_get(pool, "claimed")), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(pool, "blocked")), "");
+        dvx_end(&c);
+        (void)warm;
+        dvx_restore();
+        PASS();
+    }
+
+    /* next's no_free_worktree branch names WHICH of the five it hit, so an
+     * operator is never told "no free worktree" about a pool nobody listed. */
+    TEST("queue: no_free_worktree names the pool state that blocked it") {
+        struct dvx_call c;
+        dvx_isolate("poolnextblocked");
+        dvx_post(&c, "leaf", "u2", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "state"), "no_free_worktree");
+        ASSERT(json_get_bool(json_get(&c.reply.data, "pool_known")) == false);
+        ASSERT(json_is_null(json_get(&c.reply.data, "pool_total")));
+        ASSERT(json_is_null(json_get(&c.reply.data, "pool_warm")));
+        ASSERT(json_is_null(json_get(&c.reply.data, "pool_free")));
+        ASSERT(json_is_null(json_get(&c.reply.data, "pool_claimed")));
+        ASSERT_STR_EQ(dvx_str(&c, "pool_blocked"), "pool-unmeasured");
+        ASSERT(dvx_str(&c, "pool_reason")[0] != '\0');
+        dvx_end(&c);
+        /* The queued row is untouched by a blocked dispatch. */
+        ASSERT_EQ(dvx_queued_count("u2"), 1);
+        dvx_restore();
+        PASS();
+    }
+
+    /* TWO SIMULTANEOUS DISPATCH ATTEMPTS, ONE WARM ENTRY. Exactly one may
+     * take it. Both children run `next` concurrently against one pool of
+     * one; the worktree flock is what decides, so the assertion is on the
+     * OUTCOME PAIR — one running, one no_free_worktree — and on the queue
+     * holding exactly one row per name afterwards. Two winners would be
+     * duplicate ownership of one worktree; two losers would be a lost
+     * dispatch. */
+    TEST("queue: two concurrent next calls consume one warm entry once") {
+        struct dvx_call c;
+        char bindir[512], wt[600];
+        char path[9000];
+        int fds[2];
+        pid_t a, b;
+        int sa = 0, sb = 0;
+        char verdicts[2] = {0, 0};
+        dvx_isolate("poolracenext");
+        ASSERT(dvx_fake_on_path("poolracebin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("poolracewt", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir, g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        dvx_post(&c, "leaf", "race-a", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_post(&c, "leaf", "race-b", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        ASSERT(pipe(fds) == 0);
+        /* 'r' = this child took the worktree, 'n' = it was refused. */
+        a = fork();
+        ASSERT(a >= 0);
+        if (a == 0) {
+            struct dvx_call k;
+            char v;
+            (void)close(fds[0]);
+            dvx_verb(&k, "next", false);
+            (void)dvx_run(&k);
+            v = dvx_ok(&k) && strcmp(dvx_str(&k, "state"), "running") == 0
+                    ? 'r'
+                    : 'n';
+            (void)write(fds[1], &v, 1);
+            _exit(dvx_ok(&k) ? 0 : 1);
+        }
+        b = fork();
+        ASSERT(b >= 0);
+        if (b == 0) {
+            struct dvx_call k;
+            char v;
+            (void)close(fds[0]);
+            dvx_verb(&k, "next", false);
+            (void)dvx_run(&k);
+            v = dvx_ok(&k) && strcmp(dvx_str(&k, "state"), "running") == 0
+                    ? 'r'
+                    : 'n';
+            (void)write(fds[1], &v, 1);
+            _exit(dvx_ok(&k) ? 0 : 1);
+        }
+        (void)close(fds[1]);
+        while (waitpid(a, &sa, 0) < 0)
+            ;
+        while (waitpid(b, &sb, 0) < 0)
+            ;
+        ASSERT(read(fds[0], &verdicts[0], 1) == 1);
+        ASSERT(read(fds[0], &verdicts[1], 1) == 1);
+        (void)close(fds[0]);
+        /* Both calls must SUCCEED as commands; refusal is a state, not an
+         * error, so a crash cannot be mistaken for losing the race. */
+        ASSERT(WIFEXITED(sa) && WEXITSTATUS(sa) == 0);
+        ASSERT(WIFEXITED(sb) && WEXITSTATUS(sb) == 0);
+        /* EXACTLY ONE winner. */
+        ASSERT_EQ((long long)((verdicts[0] == 'r') + (verdicts[1] == 'r')), 1);
+        ASSERT_EQ((long long)((verdicts[0] == 'n') + (verdicts[1] == 'n')), 1);
+        /* And no name was doubled: one row each, never two runs of one. */
+        ASSERT(dvx_queued_count("race-a") + dvx_queued_count("race-b") <= 2);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
 
 int test_devagent_queue(void);
 int test_devagent_queue(void)
@@ -472,14 +746,24 @@ int test_devagent_queue(void)
         (void)snprintf(qf, sizeof(qf), "%s/queue.jsonl", qd);
         ASSERT(dvx_file_absent(qf));
         ASSERT(dvx_file_absent(engine));
+        dvx_verb(&c, "status", true);
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "STATE_DIR_FAILED");
+        dvx_end(&c);
+        ASSERT(dvx_file_absent(engine));
+        ASSERT(platform_state_root(qf, sizeof(qf)));
         ASSERT_EQ(dvx_queued_count(".."), 0);
+        ASSERT(dvx_file_absent(engine));
         dvx_restore();
         PASS();
     }
 
     TEST("queue: a name of \".\" is refused") {
         struct dvx_call c;
+        char root[4096];
         dvx_isolate("dotname");
+        ASSERT(platform_state_root(root, sizeof(root)));
         dvx_post(&c, "leaf", ".", NULL, NULL, NULL, NULL, -1);
         ASSERT(dvx_run(&c));
         ASSERT(!dvx_ok(&c));
@@ -539,6 +823,8 @@ int test_devagent_queue(void)
         dvx_restore();
         PASS();
     }
+
+    failures += dvx_pool_cases();
 
     TEST("queue: next with no pool returns no_free_worktree, row stays") {
         struct dvx_call c, p;

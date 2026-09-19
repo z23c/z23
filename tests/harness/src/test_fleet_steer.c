@@ -370,7 +370,7 @@ static bool fmx_ack(const char *agent, long long cursor)
 
 /* Seed one queue outcome row so completed-by-ref has evidence to match.
  * The queue status leaf parses this exact reap format. */
-static void fmx_seed_outcome(const char *name)
+static void fmx_seed_outcome(const char *name, int rc)
 {
     char dir[1024], path[1200];
     int n = snprintf(dir, sizeof(dir), "%s/z23/dev/queue", g_fmx_state);
@@ -388,8 +388,8 @@ static void fmx_seed_outcome(const char *name)
      * verdict+rc decide pass-like. */
     if (fprintf(f,
                 "{\"ts\":\"2026-09-15T00:00:00Z\",\"name\":\"%s\","
-                "\"attempt\":1,\"verdict\":\"pass\",\"rc\":0}\n",
-                name) < 0)
+                "\"attempt\":1,\"verdict\":\"pass\",\"rc\":%d}\n",
+                name, rc) < 0)
         fmx_fixture_fail("cannot write outcome row");
     if (fclose(f) != 0)
         fmx_fixture_fail("cannot finish outcome row");
@@ -562,6 +562,12 @@ static int fmx_t_brief_empty(void)
     TEST("steer: brief on an empty root reports shape and honest absence") {
         struct fmx_call b;
         fmx_isolate("brief_empty");
+#if !defined(_WIN32)
+        char untouched[600];
+        struct stat st;
+        (void)snprintf(untouched, sizeof(untouched), "%s/z23", g_fmx_state);
+        ASSERT(lstat(untouched, &st) != 0 && errno == ENOENT);
+#endif
         fmx_brief(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
@@ -575,6 +581,9 @@ static int fmx_t_brief_empty(void)
         ASSERT(json_get(&b.reply.data, "evidence") != NULL);
         /* No node here: the board must be reported missing, never empty. */
         ASSERT(fmx_missing_has(&b, "fleet.board"));
+#if !defined(_WIN32)
+        ASSERT(lstat(untouched, &st) != 0 && errno == ENOENT);
+#endif
         fmx_end(&b);
         fmx_restore();
         PASS();
@@ -935,7 +944,7 @@ static int fmx_t_lifecycle(void)
         }
         fmx_end(&b);
         /* A pass-like queue outcome on the ref completes it. */
-        fmx_seed_outcome("crater-rim");
+        fmx_seed_outcome("crater-rim", 0);
         fmx_brief(&b, gid, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
@@ -1269,6 +1278,9 @@ static bool fmx_mint_peer(const char *scopes, const char *label,
     return ok;
 }
 
+static void fmx_state_file(const char *dirrel, const char *file,
+                           const char *text, bool append);
+
 static int fmx_t_peer_grants(void)
 {
     int failures = 0;
@@ -1288,7 +1300,12 @@ static int fmx_t_peer_grants(void)
         ASSERT(!fmx_mint_peer("brief", "chatgpt", "node-a", NULL, 0, code,
                               sizeof(code)));
         ASSERT_STR_EQ(code, "BAD_INPUT");
-        /* Nothing minted yet: every question is UNKNOWN. */
+        /* A missing store refuses without creating it. An initialized
+         * store with nothing minted has no matching grant. */
+        ASSERT_STR_EQ(zcl_fleet_steer_grant_peer_live("chatgpt", "node-a",
+                                                      "send"),
+                      "STEER_GRANT_STORE");
+        fmx_state_file("steer", "grants.jsonl", "", false);
         ASSERT_STR_EQ(zcl_fleet_steer_grant_peer_live("chatgpt", "node-a",
                                                       "send"),
                       "STEER_GRANT_UNKNOWN");
@@ -2956,6 +2973,7 @@ static int fmx_t_pool_unmeasured(void)
         struct fmx_call b;
         const struct json_value *cap;
         fmx_isolate("pool_unmeasured");
+        fmx_state_file("queue", "queue.jsonl", "", false);
         fmx_brief(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
@@ -2981,6 +2999,358 @@ static int fmx_t_pool_unmeasured(void)
         PASS();
     }
 
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* ── candidates: identity, state ladder, and unknown-is-not-zero ─────────
+ *
+ * The registry is a pure API, so these run with no fixture and no clock.
+ * They pin the three properties an operator reading the brief depends on:
+ * one ref is one candidate however many sources saw it; a state may only
+ * be raised by evidence; and anything unmeasured emits null, never 0. */
+
+/* Post one mail row naming a ref, so the brief has a real handover to
+ * find. Mirrors fmx_mail_count's shape: drive the leaf, never the file. */
+static bool fmx_mail_result(const char *ref, const char *from)
+{
+    struct fmx_call p;
+    bool ok;
+    json_init(&p.input);
+    json_set_object(&p.input);
+    memset(&p.request, 0, sizeof(p.request));
+    p.request.input = &p.input;
+    p.request.spec =
+        zcl_command_registry_find(zcl_command_catalog(), "dev.agent.mail",
+                                  NULL);
+    zcl_command_reply_init(&p.reply, "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&p.input, "action", "post");
+    (void)json_push_kv_str(&p.input, "to", "node1-a");
+    (void)json_push_kv_str(&p.input, "from", from);
+    (void)json_push_kv_str(&p.input, "kind", "result");
+    (void)json_push_kv_str(&p.input, "ref", ref);
+    (void)json_push_kv_str(&p.input, "body", "candidate handover");
+    zcl_native_handle_dev_agent_mail(&p.request, &p.reply);
+    ok = p.reply.status == ZCL_COMMAND_STATUS_PASSED;
+    zcl_command_reply_free(&p.reply);
+    json_free(&p.input);
+    return ok;
+}
+
+/* The row for `id`, or NULL. */
+static const struct json_value *fmx_cand(const struct json_value *arr,
+                                         const char *id)
+{
+    size_t n = arr ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        const struct json_value *r = json_at(arr, i);
+        const struct json_value *v = r ? json_get(r, "id") : NULL;
+        const char *s = (v && v->type == JSON_STR) ? json_get_str(v) : NULL;
+        if (s && strcmp(s, id) == 0)
+            return r;
+    }
+    return NULL;
+}
+
+static const char *fmx_cstr(const struct json_value *o, const char *k)
+{
+    const struct json_value *v = o ? json_get(o, k) : NULL;
+    return (v && v->type == JSON_STR) ? json_get_str(v) : "";
+}
+
+static int fmx_t_candidate_identity(void)
+{
+    int failures = 0;
+
+    TEST("candidates: one ref seen by three sources is ONE candidate") {
+        struct zcl_fmc_cand_reg reg;
+        struct json_value out, sum, miss;
+        const struct json_value *row;
+        zcl_fmc_cand_init(&reg);
+        zcl_fmc_cand_source_ok(&reg, ZCL_FMC_CAND_SRC_MAIL |
+                               ZCL_FMC_CAND_SRC_BOARD |
+                               ZCL_FMC_CAND_SRC_QUEUE);
+        zcl_fmc_cand_note(&reg, "cand-x", ZCL_FMC_CAND_SRC_MAIL, "node2-b",
+                          10, true);
+        zcl_fmc_cand_note(&reg, "cand-x", ZCL_FMC_CAND_SRC_BOARD, "node2-b",
+                          40, true);
+        zcl_fmc_cand_note(&reg, "cand-x", ZCL_FMC_CAND_SRC_QUEUE, NULL, 0,
+                          false);
+        json_init(&out); json_set_array(&out);
+        json_init(&sum); json_set_object(&sum);
+        json_init(&miss); json_set_array(&miss);
+        zcl_fmc_cand_emit(&reg, &out, &sum, &miss);
+        ASSERT_EQ(json_size(&out), 1u);
+        row = fmx_cand(&out, "cand-x");
+        ASSERT(row != NULL);
+        /* all three sources on the one row */
+        ASSERT_EQ(json_size(json_get(row, "sources")), 3u);
+        /* the FRESHEST evidence wins the age, not the last one seen */
+        ASSERT_EQ(json_get_int(json_get(row, "evidence_age_s")), 10);
+        /* every source read, so the total is a number and complete */
+        ASSERT_EQ(json_get_int(json_get(&sum, "candidates_total")), 1);
+        ASSERT(json_get_bool(json_get(&sum, "candidates_complete")));
+        ASSERT_EQ(json_size(&miss), 0u);
+        json_free(&out); json_free(&sum); json_free(&miss);
+        PASS();
+    }
+
+    TEST("candidates: evidence only raises a state, never lowers it") {
+        struct zcl_fmc_cand_reg reg;
+        struct json_value out, sum, miss;
+        const struct json_value *row;
+        zcl_fmc_cand_init(&reg);
+        zcl_fmc_cand_source_ok(&reg, ZCL_FMC_CAND_SRC_MAIL |
+                               ZCL_FMC_CAND_SRC_BOARD |
+                               ZCL_FMC_CAND_SRC_QUEUE);
+        json_init(&out); json_set_array(&out);
+        json_init(&sum); json_set_object(&sum);
+        json_init(&miss); json_set_array(&miss);
+        /* one attester: delivered */
+        zcl_fmc_cand_note(&reg, "c1", ZCL_FMC_CAND_SRC_MAIL, "node2-b", 5,
+                          true);
+        /* a gate receipt: proven */
+        zcl_fmc_cand_note_proven(&reg, "c1", 5, true);
+        /* Another sender is still only a report, not remote verification. */
+        zcl_fmc_cand_note(&reg, "c1", ZCL_FMC_CAND_SRC_BOARD, "node1-a", 5,
+                          true);
+        /* a weaker sighting arriving last must not undo any of it */
+        zcl_fmc_cand_note(&reg, "c1", ZCL_FMC_CAND_SRC_QUEUE, NULL, 9, true);
+        zcl_fmc_cand_emit(&reg, &out, &sum, &miss);
+        row = fmx_cand(&out, "c1");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_cstr(row, "state"), "reported_proven");
+        ASSERT(json_is_null(json_get(row, "proven")));
+        ASSERT_STR_EQ(fmx_cstr(row, "test_state"), "reported_pass");
+        ASSERT_STR_EQ(fmx_cstr(row, "publication_state"), "unknown");
+        ASSERT_STR_EQ(fmx_cstr(row, "remote_verification_state"), "unknown");
+        ASSERT_EQ(json_get_int(json_get(row, "attester_count")), 2);
+        json_free(&out); json_free(&sum); json_free(&miss);
+        PASS();
+    }
+
+    TEST("candidates: landed needs an attestation, and is null without one") {
+        struct zcl_fmc_cand_reg reg;
+        struct json_value out, sum, miss;
+        const struct json_value *a, *b;
+        zcl_fmc_cand_init(&reg);
+        zcl_fmc_cand_source_ok(&reg, ZCL_FMC_CAND_SRC_MAIL |
+                               ZCL_FMC_CAND_SRC_BOARD |
+                               ZCL_FMC_CAND_SRC_QUEUE);
+        json_init(&out); json_set_array(&out);
+        json_init(&sum); json_set_object(&sum);
+        json_init(&miss); json_set_array(&miss);
+        zcl_fmc_cand_note(&reg, "unlanded", ZCL_FMC_CAND_SRC_MAIL, "node2-b",
+                          1, true);
+        zcl_fmc_cand_note(&reg, "islanded", ZCL_FMC_CAND_SRC_MAIL, "node2-b",
+                          1, true);
+        zcl_fmc_cand_note_landed(&reg, "islanded", "node1-a", 1, true);
+        zcl_fmc_cand_emit(&reg, &out, &sum, &miss);
+        a = fmx_cand(&out, "unlanded");
+        b = fmx_cand(&out, "islanded");
+        ASSERT(a != NULL && b != NULL);
+        /* THE POINT: nobody said it landed is not the same as it did not.
+         * null, never false, and the reason names the gap. */
+        ASSERT(json_is_null(json_get(a, "landed")));
+        ASSERT_STR_EQ(fmx_cstr(a, "reason"), "landing-unattested");
+        ASSERT(json_is_null(json_get(b, "landed")));
+        ASSERT_STR_EQ(fmx_cstr(b, "state"), "reported_landed");
+        ASSERT_STR_EQ(fmx_cstr(b, "publication_state"), "reported_landed");
+        ASSERT_STR_EQ(fmx_cstr(b, "remote_verification_state"), "unknown");
+        json_free(&out); json_free(&sum); json_free(&miss);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int fmx_t_candidate_bounds(void)
+{
+    int failures = 0;
+    TEST("candidates: exact maximum ref deduplicates and sender overflow is unknown") {
+        struct zcl_fmc_cand_reg reg;
+        struct json_value out, sum, miss;
+        char id[129], who[32];
+        memset(id, 'x', sizeof(id) - 1);
+        id[sizeof(id) - 1] = '\0';
+        zcl_fmc_cand_init(&reg);
+        for (unsigned i = 0; i < 8; i++) {
+            (void)snprintf(who, sizeof(who), "peer%u", i);
+            zcl_fmc_cand_note(&reg, id, ZCL_FMC_CAND_SRC_MAIL, who, 1, true);
+        }
+        zcl_fmc_cand_note(&reg, id, ZCL_FMC_CAND_SRC_MAIL, "peer7", 1, true);
+        ASSERT_EQ(reg.count, 1);
+        ASSERT_STR_EQ(reg.row[0].id, id);
+        ASSERT_EQ(reg.row[0].attesters, ZCL_FMC_CAND_ATTESTERS);
+        json_init(&out); json_set_array(&out);
+        json_init(&sum); json_set_object(&sum);
+        json_init(&miss); json_set_array(&miss);
+        zcl_fmc_cand_emit(&reg, &out, &sum, &miss);
+        const struct json_value *row = json_at(&out, 0);
+        ASSERT(json_is_null(json_get(row, "attester_count")));
+        ASSERT(!json_get_bool(json_get(row, "attesters_complete")));
+        ASSERT_STR_EQ(fmx_cstr(row, "state"), "delivered");
+        ASSERT_STR_EQ(fmx_cstr(row, "remote_verification_state"), "unknown");
+        json_free(&out); json_free(&sum); json_free(&miss);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fmx_t_candidate_unknown(void)
+{
+    int failures = fmx_t_candidate_bounds();
+
+    TEST("candidates: an unread source makes the total null, never zero") {
+        struct zcl_fmc_cand_reg reg;
+        struct json_value out, sum, miss;
+        zcl_fmc_cand_init(&reg);
+        /* mail read, board and queue never reached */
+        zcl_fmc_cand_source_ok(&reg, ZCL_FMC_CAND_SRC_MAIL);
+        zcl_fmc_cand_note(&reg, "only-one", ZCL_FMC_CAND_SRC_MAIL, "node2-b",
+                          3, true);
+        json_init(&out); json_set_array(&out);
+        json_init(&sum); json_set_object(&sum);
+        json_init(&miss); json_set_array(&miss);
+        zcl_fmc_cand_emit(&reg, &out, &sum, &miss);
+        /* shown is a fact; total is NOT, because two sources are unread */
+        ASSERT_EQ(json_get_int(json_get(&sum, "candidates_shown")), 1);
+        ASSERT(json_is_null(json_get(&sum, "candidates_total")));
+        ASSERT(!json_get_bool(json_get(&sum, "candidates_complete")));
+        /* and the gap is NAMED, not merely implied by a smaller number */
+        ASSERT_EQ(json_size(&miss), 2u);
+        json_free(&out); json_free(&sum); json_free(&miss);
+        PASS();
+    }
+
+    TEST("candidates: an unparsable timestamp is null age, not age zero") {
+        struct zcl_fmc_cand_reg reg;
+        struct json_value out, sum, miss;
+        const struct json_value *row;
+        zcl_fmc_cand_init(&reg);
+        zcl_fmc_cand_source_ok(&reg, ZCL_FMC_CAND_SRC_MAIL |
+                               ZCL_FMC_CAND_SRC_BOARD |
+                               ZCL_FMC_CAND_SRC_QUEUE);
+        zcl_fmc_cand_note(&reg, "no-ts", ZCL_FMC_CAND_SRC_MAIL, "node2-b", 0,
+                          false);
+        json_init(&out); json_set_array(&out);
+        json_init(&sum); json_set_object(&sum);
+        json_init(&miss); json_set_array(&miss);
+        zcl_fmc_cand_emit(&reg, &out, &sum, &miss);
+        row = fmx_cand(&out, "no-ts");
+        ASSERT(row != NULL);
+        /* 0 would read as "seen just now" — the exact lie being fixed */
+        ASSERT(json_is_null(json_get(row, "evidence_age_s")));
+        ASSERT_STR_EQ(fmx_cstr(row, "reason"), "evidence-age-unparsable");
+        json_free(&out); json_free(&sum); json_free(&miss);
+        PASS();
+    }
+
+    TEST("candidates: past the cap the overflow is counted, not hidden") {
+        struct zcl_fmc_cand_reg reg;
+        struct json_value out, sum, miss;
+        char id[32];
+        unsigned i;
+        zcl_fmc_cand_init(&reg);
+        zcl_fmc_cand_source_ok(&reg, ZCL_FMC_CAND_SRC_MAIL |
+                               ZCL_FMC_CAND_SRC_BOARD |
+                               ZCL_FMC_CAND_SRC_QUEUE);
+        for (i = 0; i < ZCL_FMC_CAND_CAP + 7u; i++) {
+            (void)snprintf(id, sizeof(id), "c%u", i);
+            zcl_fmc_cand_note(&reg, id, ZCL_FMC_CAND_SRC_MAIL, "node2-b", 1,
+                              true);
+        }
+        json_init(&out); json_set_array(&out);
+        json_init(&sum); json_set_object(&sum);
+        json_init(&miss); json_set_array(&miss);
+        zcl_fmc_cand_emit(&reg, &out, &sum, &miss);
+        ASSERT_EQ(json_size(&out), (size_t)ZCL_FMC_CAND_CAP);
+        ASSERT_EQ(json_get_int(json_get(&sum, "candidates_shown")),
+                  (long long)ZCL_FMC_CAND_CAP);
+        ASSERT_EQ(json_get_int(json_get(&sum, "candidates_dropped")), 7);
+        /* Dropped sightings cannot establish a distinct candidate total. */
+        ASSERT(json_is_null(json_get(&sum, "candidates_total")));
+        ASSERT(!json_get_bool(json_get(&sum, "candidates_complete")));
+        json_free(&out); json_free(&sum); json_free(&miss);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int fmx_t_candidate_from_mail(void)
+{
+    int failures = 0;
+
+    TEST("candidates: a mail handover reaches the brief, once, with source") {
+        struct fmx_call b;
+        struct fmx_accept a;
+        const struct json_value *arr, *row;
+        fmx_isolate("cand_mail");
+        a = fmx_probe();
+        ASSERT(a.ok);
+        /* the same ref twice: a duplicate handover is ONE candidate */
+        ASSERT(fmx_mail_result("cand-brief-1", "node2-b"));
+        ASSERT(fmx_mail_result("cand-brief-1", "node2-b"));
+        fmx_brief(&b, a.gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        arr = fmx_arr(&b, "candidates");
+        row = fmx_cand(arr, "cand-brief-1");
+        /* THE REGRESSION: before the registry this was always absent,
+         * because mail was not a candidate source at all. */
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_cstr(row, "state"), "delivered");
+        ASSERT_EQ(json_size(json_get(row, "sources")), 1u);
+        ASSERT_EQ(json_get_int(json_get(row, "attester_count")), 1);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static int fmx_t_candidate_reports(void)
+{
+    int failures = 0;
+    TEST("candidates: explicit reports require positive landing and clean exit") {
+        const char *bodies[] = {"landed=false", "landed=unknown", "landed=true",
+            "landed=0123456789abcdef0123456789abcdef01234567"};
+        struct fmx_call b;
+        char ref[32];
+        fmx_isolate("candidate_reports");
+        struct fmx_accept a = fmx_probe();
+        ASSERT(a.ok);
+        for (unsigned i = 0; i < 4; i++) {
+            (void)snprintf(ref, sizeof(ref), "report-%u", i);
+            fmx_seed_inbox("peer", "2026-09-19T00:00:00Z", i + 1,
+                           "peer", "node1-a", "result", bodies[i], ref);
+            fmx_seed_outcome(ref, (int)(i % 2));
+        }
+        fmx_brief(&b, a.gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        for (unsigned i = 0; i < 4; i++) {
+            (void)snprintf(ref, sizeof(ref), "report-%u", i);
+            const struct json_value *row = fmx_cand(fmx_arr(&b, "candidates"), ref);
+            ASSERT(row != NULL);
+            ASSERT_STR_EQ(fmx_cstr(row, "publication_state"),
+                          i < 2 ? "unknown" : "reported_landed");
+            ASSERT_STR_EQ(fmx_cstr(row, "test_state"),
+                          i % 2 ? "unknown" : "reported_pass");
+            ASSERT_STR_EQ(fmx_cstr(row, "remote_verification_state"), "unknown");
+            ASSERT(json_is_null(json_get(row, "landed")));
+        }
+        fmx_end(&b);
+        PASS();
+    }
 _test_next:;
     fmx_restore();
     return failures;
@@ -3018,6 +3388,10 @@ int test_fleet_steer(void)
     failures += fmx_t_reply_correlation();
     failures += fmx_t_remote_round_trip();
     failures += fmx_t_pool_unmeasured();
+    failures += fmx_t_candidate_identity();
+    failures += fmx_t_candidate_unknown();
+    failures += fmx_t_candidate_from_mail();
+    failures += fmx_t_candidate_reports();
 
     /* No ASSERT lives in this function, so no goto needs the label: the
      * hook is always cleared on the single fall-through path. */

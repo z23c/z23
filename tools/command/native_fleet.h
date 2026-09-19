@@ -10,6 +10,7 @@
 
 struct zcl_command_request;
 struct zcl_command_reply;
+struct json_value;
 
 void zcl_native_handle_fleet_ledger_add(
     const struct zcl_command_request *request,
@@ -113,5 +114,84 @@ const char *zcl_fleet_steer_grant_binding_live(const char *label,
 const char *zcl_fleet_steer_grant_peer_live(const char *label,
                                             const char *peer,
                                             const char *scope);
+
+
+/* ── fleet.steer.brief candidate registry ────────────────────────────────
+ *
+ * One row per candidate keyed by its ref, which is the stable identity: the
+ * same ref seen in mail AND on the board AND in the queue is ONE candidate
+ * with three sources. Each row carries the strongest state its evidence
+ * supports, so an operator can tell a handover from a proof from a landing
+ * instead of reading four different facts as one bare string.
+ *
+ * Unknown is never zero here. `evidence_age_s` and `candidates_total` emit
+ * null when they could not be measured, and `landed` stays null until
+ * something attests it. Implemented in
+ * tools/command/native_fleet_steer_candidates.c; it opens no file, takes no
+ * lock and spawns nothing, so assembling a brief cannot mutate work. */
+
+#define ZCL_FMC_CAND_CAP 32u
+#define ZCL_FMC_CAND_ID_CAP 129u
+#define ZCL_FMC_CAND_AGENT_CAP 65u
+#define ZCL_FMC_CAND_ATTESTERS 4u
+
+#define ZCL_FMC_CAND_SRC_MAIL 0x1u
+#define ZCL_FMC_CAND_SRC_BOARD 0x2u
+#define ZCL_FMC_CAND_SRC_QUEUE 0x4u
+
+struct zcl_fmc_cand {
+    char id[ZCL_FMC_CAND_ID_CAP];
+    char attester[ZCL_FMC_CAND_ATTESTERS][ZCL_FMC_CAND_AGENT_CAP];
+    long long age_s;
+    unsigned sources;
+    unsigned attesters; /* Stored distinct names, bounded by the array. */
+    bool attesters_incomplete;
+    unsigned state;
+    bool age_known;
+    bool age_unparsable;
+    bool landed_attested;
+    bool proven;
+};
+
+struct zcl_fmc_cand_reg {
+    struct zcl_fmc_cand row[ZCL_FMC_CAND_CAP];
+    size_t count;
+    size_t dropped; /* Omitted sightings; their distinct total is unknown. */
+    bool mail_ok;
+    bool board_ok;
+    bool queue_ok;
+};
+
+/* Zero the registry. Every source starts UNREAD, not empty: a caller that
+ * never reports a source leaves the total unknown rather than asserting
+ * one it did not measure. */
+void zcl_fmc_cand_init(struct zcl_fmc_cand_reg *reg);
+
+/* Declare that `source` (a ZCL_FMC_CAND_SRC_* bit, or several) was read to
+ * completion. Only this call can make candidates_total a number. */
+void zcl_fmc_cand_source_ok(struct zcl_fmc_cand_reg *reg, unsigned source);
+
+/* One sighting of `id` from `source`, vouched for by `attester`. A sighting
+ * from anything but the queue is a handover, so it reaches `delivered`.
+ * Sender names never establish remote verification. age_known false records the
+ * age as unparsable instead of pinning it to 0. */
+void zcl_fmc_cand_note(struct zcl_fmc_cand_reg *reg, const char *id,
+                       unsigned source, const char *attester,
+                       long long age_s, bool age_known);
+
+/* A passing outcome report for `id`, without receipt verification. */
+void zcl_fmc_cand_note_proven(struct zcl_fmc_cand_reg *reg, const char *id,
+                              long long age_s, bool age_known);
+
+/* An explicit landing report, without publication verification. */
+void zcl_fmc_cand_note_landed(struct zcl_fmc_cand_reg *reg, const char *id,
+                              const char *attester, long long age_s,
+                              bool age_known);
+
+/* Append one object per candidate to `out`, the counts to `summary`, and a
+ * {source, reason, age_ms} row to `missing` for each source never read. */
+void zcl_fmc_cand_emit(const struct zcl_fmc_cand_reg *reg,
+                       struct json_value *out, struct json_value *summary,
+                       struct json_value *missing);
 
 #endif /* ZCL_NATIVE_FLEET_H */

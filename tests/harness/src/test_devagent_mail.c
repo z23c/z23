@@ -23,8 +23,11 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/private_directory.h"
+#include "platform/state_root.h"
 
 #include <limits.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -249,10 +252,30 @@ static bool dvx_outbox_empty(void)
     return empty;
 }
 
+static bool dvx_fresh_pull_unchanged(const char *maildir)
+{
+    struct dvx_call c;
+    struct stat info;
+    char root[4096];
+    dvx_pull(&c, 0, NULL, NULL);
+    bool refused = dvx_run(&c) && !dvx_ok(&c) &&
+                   strcmp(c.reply.error.code, "STATE_DIR_FAILED") == 0;
+    dvx_end(&c);
+    if (!refused || !platform_state_root(root, sizeof(root))) return false;
+    dvx_pull(&c, 0, NULL, NULL);
+    bool empty = dvx_run(&c) && dvx_ok(&c) && dvx_int(&c, "count") == 0;
+    dvx_end(&c);
+    return empty && stat(maildir, &info) != 0 && errno == ENOENT;
+}
+
 static void dvx_import_stream(const char *name, const char *row)
 {
     char maildir[1024], path[1200];
+    if (!platform_state_root(path, sizeof(path)))
+        dvx_fixture_fail("cannot initialize imported stream root");
     dvx_maildir(maildir, sizeof(maildir));
+    if (!platform_private_directory_ensure(maildir))
+        dvx_fixture_fail("cannot initialize imported stream directory");
     int n = snprintf(path, sizeof(path), "%s/%s.jsonl", maildir, name);
     if (n <= 0 || (size_t)n >= sizeof(path))
         dvx_fixture_fail("import path exceeds bound");
@@ -657,10 +680,6 @@ static int test_mail_independent_cursor(void)
     TEST("mail: scalar resume refuses a later independently sequenced stream") {
         struct dvx_call p;
         dvx_isolate("independent_cursor");
-        /* Initialize the directory through the real handler. */
-        dvx_pull(&p, 0, NULL, NULL);
-        ASSERT(dvx_run(&p) && dvx_ok(&p));
-        dvx_end(&p);
         dvx_import_stream("inbox-a",
             "{\"seq\":20,\"ts\":\"2026-09-09T00:00:00Z\",\"from\":\"alice\","
             "\"to\":\"bob\",\"kind\":\"note\",\"body\":\"first\",\"ref\":\"\"}\n");
@@ -807,10 +826,6 @@ static int test_mail_board_fields(void)
         struct dvx_call p;
         const struct json_value *rows;
         dvx_isolate("board_fields");
-        /* The mail dir exists once the real handler has run. */
-        dvx_pull(&p, 0, NULL, NULL);
-        ASSERT(dvx_run(&p) && dvx_ok(&p));
-        dvx_end(&p);
         (void)snprintf(line, sizeof(line),
             "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"chatgpt\","
             "\"to\":\"node-b\",\"kind\":\"directive\",\"body\":\"go\","
@@ -892,6 +907,7 @@ int test_devagent_mail(void)
         dvx_isolate("fresh");
         dvx_maildir(maildir, sizeof(maildir));
         (void)test_rm_rf_recursive(maildir);
+        ASSERT(dvx_fresh_pull_unchanged(maildir));
         dvx_post(&c, "alice", "*", "note", "first hello");
         ASSERT(dvx_run(&c));
         ASSERT(dvx_ok(&c));

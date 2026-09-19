@@ -1483,6 +1483,14 @@ void zcl_native_handle_dev_agent_worker(
     long long jobs;
     if (!reply)
         return;
+    /* status is read-only and answers before any run validation, so asking
+     * about a resident never needs a worker identity, a model, or a cap.
+     * `run` below is reached only for action=run and is unchanged. */
+    if (request && request->input &&
+        strcmp(wkr_leaf_str(request, "action"), "status") == 0) {
+        zcl_native_devagent_worker_status(request, reply);
+        return;
+    }
     refusal = wkr_leaf_opts(request, &opts, &evidence);
     if (refusal) {
         wkr_fail(reply, "BAD_INPUT", "run", refusal, evidence);

@@ -326,7 +326,7 @@ Z23_FLAG("ZCL_CLANG_PORTABILITY_MAKEFILE", "env_build", "Makefile", "-",
 Z23_FLAG("ZCL_CLI", "env_build", "build/bin/zclassic-cli", "-",
           "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:56")
 Z23_FLAG("ZCL_CLI_RPC_TIMEOUT_SEC", "env_runtime", "-", "-",
-          "undocumented; first use engine/entry/main_cli_modes.c:1771")
+          "undocumented; first use engine/entry/main_cli_modes.c:1770")
 Z23_FLAG("ZCL_CLI_TEST_NO_SERVICE_LOOKUP", "env_runtime", "-", "-",
           "undocumented; first use engine/entry/main_cli_modes.c:1308")
 Z23_FLAG("ZCL_CLOCK_SKEW_TOLERANCE_SECS", "env_runtime", "-", "-",
@@ -796,7 +796,7 @@ Z23_FLAG("ZCL_ENABLE_BIP37", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ENGINE_NO_THINKING", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/engine/src/engine_wire_request.c:90")
 Z23_FLAG("ZCL_ENGINE_UNIT_BIN", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_devagent_queue.c:1052")
+          "undocumented; first use tools/command/native_devagent_queue.c:1053")
 Z23_FLAG("ZCL_EVENT_LOG_BENCH", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_event_log.c:617")
 Z23_FLAG("ZCL_EVENT_LOG_BENCH_PROOF", "env_test", "-", "-",
@@ -1784,7 +1784,7 @@ Z23_FLAG("ZCL_QUALITY_LOG_MAX_BYTES", "env_build", "1073741824", "-",
 Z23_FLAG("ZCL_QUALITY_STATE_DIR", "env_runtime", "-", "-",
           "first use cognition/controllers/src/agent_background_quality.c:41; documented at docs/RUNBOOK.md:46: (or $ZCL_QUALITY_STATE_DIR/status/simnet_nightly.json if overridden).")
 Z23_FLAG("ZCL_QUEUE_DIRECT", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_devagent_queue.c:69")
+          "undocumented; first use tests/harness/src/test_devagent_queue.c:70")
 Z23_FLAG("ZCL_R1CS_REF", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_groth16_r1cs_oracle.c:670")
 Z23_FLAG("ZCL_RAM_SCRATCH_ROOT", "env_runtime", "-", "-",
@@ -2509,6 +2509,6 @@ Z23_FLAG("ZCL_WRS_GO", "env_test", "-", "-",
 Z23_FLAG("ZCL_XMR_KEEP", "env_build", "0", "-",
           "undocumented; first use tools/dev/cross-machine-reproduce.sh:63")
 Z23_FLAG("ZCL_Z23_BIN", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_devagent_queue.c:1425")
+          "undocumented; first use tools/command/native_devagent_queue.c:1559")
 Z23_FLAG("ZCL_ZD_RPC_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:180")
