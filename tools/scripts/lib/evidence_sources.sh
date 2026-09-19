@@ -136,6 +136,22 @@ evidence_rss_kb() {
         head -n1
 }
 
+# evidence_exe_sha256 <pid>: sha256 of the RUNNING image —
+# /proc/<pid>/exe, the kernel's own name for the execed bytes, never the
+# pin path (a swapped pin the kernel has not execed yet still shows the
+# old image, which is the truth the C6 window is judged on). "" for pid
+# 0/empty/gone/unreadable.
+evidence_exe_sha256() {
+    local pid="${1:-}"
+    case "$pid" in '' | 0 | *[!0-9]*) printf ''; return 0 ;; esac
+    local digest
+    # Open the kernel handle itself: resolving it to a pathname loses the
+    # running inode when an installer replaces or unlinks that pathname.
+    digest="$(timeout "$ZCL_EVIDENCE_TIMEOUT_SEC" sha256sum -- "/proc/$pid/exe" 2>/dev/null)" \
+        || { printf ''; return 0; }
+    printf '%s\n' "${digest%% *}"
+}
+
 # ── disk ───────────────────────────────────────────────────────────────
 
 # evidence_dir_bytes <dir>: apparent-inclusive `du -sb` byte total, bounded.

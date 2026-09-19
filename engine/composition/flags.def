@@ -2176,21 +2176,23 @@ Z23_FLAG("ZCL_SLO_STATE_TIMEOUT_SEC", "env_build", "5", "-",
 Z23_FLAG("ZCL_SLO_WINDOW_HOURS", "env_build", "72", "-",
           "undocumented; first use tools/scripts/slo_hold_judge.sh:496")
 Z23_FLAG("ZCL_SOAK_EVIDENCE_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/soak_evidence.sh:128")
+          "undocumented; first use tools/scripts/soak_evidence.sh:130")
+Z23_FLAG("ZCL_SOAK_EXE_SHA_CMD", "env_build", "-", "-",
+          "Collector test seam for running-image digest; first use tools/scripts/soak_evidence.sh:233")
 Z23_FLAG("ZCL_SOAK_JUDGE_ARGS", "make_var", "-", "-",
           "undocumented; first use Makefile:8577")
 Z23_FLAG("ZCL_SOAK_LAG_WARN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/lane_health.sh:46")
 Z23_FLAG("ZCL_SOAK_NOW", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/soak_evidence.sh:285")
+          "undocumented; first use tools/scripts/soak_evidence.sh:304")
 Z23_FLAG("ZCL_SOAK_RPC_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/soak_evidence.sh:177")
-Z23_FLAG("ZCL_SOAK_RSS_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/soak_evidence.sh:218")
-Z23_FLAG("ZCL_SOAK_SECURITY_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:179")
+Z23_FLAG("ZCL_SOAK_RSS_CMD", "env_build", "-", "-",
+          "undocumented; first use tools/scripts/soak_evidence.sh:220")
+Z23_FLAG("ZCL_SOAK_SECURITY_CMD", "env_build", "-", "-",
+          "undocumented; first use tools/scripts/soak_evidence.sh:181")
 Z23_FLAG("ZCL_SOAK_SHOW_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/soak_evidence.sh:180")
+          "undocumented; first use tools/scripts/soak_evidence.sh:182")
 Z23_FLAG("ZCL_SOAK_UNIT", "env_build", "zclassic23", "-",
           "first use tools/mvp_gate.sh:58; documented at docs/work/mvp-live-gate.md:39: live -datadir / -rpcport defaults (default: ZCL_SOAK_UNIT)")
 Z23_FLAG("ZCL_SOURCE_AUTHORITIES", "env_build", "-", "-",
@@ -2509,4 +2511,4 @@ Z23_FLAG("ZCL_XMR_KEEP", "env_build", "0", "-",
 Z23_FLAG("ZCL_Z23_BIN", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_devagent_queue.c:1425")
 Z23_FLAG("ZCL_ZD_RPC_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/soak_evidence.sh:178")
+          "undocumented; first use tools/scripts/soak_evidence.sh:180")

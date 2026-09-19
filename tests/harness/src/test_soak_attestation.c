@@ -242,6 +242,100 @@ static int test_rotation(void)
     return failures;
 }
 
+static bool rotation_counters_are(int64_t rotations, int64_t failures,
+                                  int64_t lines)
+{
+    struct json_value state = {0};
+    soak_dump_state_json(&state, NULL);
+    bool match = json_get_int(json_get(&state, "rotations")) == rotations &&
+        json_get_int(json_get(&state, "write_failures")) == failures &&
+        json_get_int(json_get(&state, "lines_written")) == lines;
+    json_free(&state);
+    return match;
+}
+
+static const char rotation_prefix[] = "{\"retained\":true}\n";
+
+static bool rotation_prefix_preserved(const char *path)
+{
+    char bytes[sizeof(rotation_prefix) - 1];
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    size_t count = fread(bytes, 1, sizeof(bytes), file);
+    fclose(file);
+    return count == sizeof(bytes) &&
+        memcmp(bytes, rotation_prefix, sizeof(bytes)) == 0;
+}
+
+static bool rotation_recovered(const char *rotated)
+{
+    struct stat st;
+    char line[1024];
+    struct json_value record = {0};
+    bool recovered = stat(rotated, &st) == 0 &&
+        st.st_size == SOAK_ATTESTATION_ROTATE_BYTES &&
+        rotation_prefix_preserved(rotated) &&
+        read_primary(line, sizeof(line)) &&
+        json_read(&record, line, strlen(line)) &&
+        rotation_counters_are(1, 2, 1);
+    json_free(&record);
+    return recovered;
+}
+
+static int test_rotation_refusal(void)
+{
+    int failures = 0;
+    char primary[320], rotated[320];
+    soak_attestation_reset_for_test();
+    make_tmpdir();
+    snprintf(primary, sizeof(primary), "%s/soak_attestation.jsonl", g_tmpdir);
+    snprintf(rotated, sizeof(rotated), "%s/soak_attestation.jsonl.1", g_tmpdir);
+    TEST("soak_attestation: refused rotation preserves bounded evidence and recovers") {
+        int fd = open(primary, O_CREAT | O_WRONLY, 0600);
+        bool prepared = fd >= 0 &&
+            write(fd, rotation_prefix, sizeof(rotation_prefix) - 1) ==
+                (ssize_t)(sizeof(rotation_prefix) - 1) &&
+            ftruncate(fd, (off_t)SOAK_ATTESTATION_ROTATE_BYTES) == 0;
+        if (fd >= 0) close(fd);
+        prepared = prepared && mkdir(rotated, 0700) == 0;
+        if (!prepared) {
+            printf("FAIL: rotation-refusal fixture: %s\n", strerror(errno));
+            failures++;
+            goto done_rotation_refusal;
+        }
+        soak_attestation_init(g_tmpdir);
+        soak_attestation_tick();
+        soak_attestation_tick();
+        struct stat st;
+        bool bounded = stat(primary, &st) == 0 &&
+            st.st_size == SOAK_ATTESTATION_ROTATE_BYTES &&
+            rotation_prefix_preserved(primary);
+        bool refused = rotation_counters_are(0, 2, 0);
+        if (!bounded || !refused) {
+            printf("FAIL: blocked rotation bounded=%d refusal_counters=%d\n",
+                   (int)bounded, (int)refused);
+            failures++;
+            goto done_rotation_refusal;
+        }
+        if (rmdir(rotated) != 0) {
+            printf("FAIL: removing isolated rotation obstacle: %s\n", strerror(errno));
+            failures++;
+            goto done_rotation_refusal;
+        }
+        soak_attestation_tick();
+        if (rotation_recovered(rotated)) PASS();
+        else {
+            printf("FAIL: evidence did not recover after rotation obstacle removal\n");
+            failures++;
+        }
+    }
+done_rotation_refusal:
+    soak_attestation_reset_for_test();
+    (void)rmdir(rotated);
+    cleanup_tmpdir();
+    return failures;
+}
+
 static int test_state_dump(void)
 {
     int failures = 0;
@@ -714,6 +808,7 @@ int test_soak_attestation(void)
     failures += test_line_format();
     failures += test_security_posture_breaks_window();
     failures += test_rotation();
+    failures += test_rotation_refusal();
     failures += test_state_dump();
     failures += test_write_failure_counter();
     failures += test_reset();

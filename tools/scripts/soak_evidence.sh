@@ -106,6 +106,8 @@
 #   ZCL_ZD_RPC_CMD         command printing the zclassicd getblockcount JSON
 #   ZCL_SOAK_SHOW_CMD      command printing `systemctl show` key=value lines
 #   ZCL_SOAK_RSS_CMD       command printing a "VmRSS: <n> kB" line
+#   ZCL_SOAK_EXE_SHA_CMD   command printing the running image's sha256
+#                         (test seam; default reads /proc/<MainPID>/exe)
 #   ZCL_SOAK_SECURITY_CMD  command printing operatorsnapshot JSON
 #   ZCL_SOAK_NOW           epoch override for "now" in the judge staleness
 #                          math (test seam — keeps the selftest hermetic)
@@ -222,11 +224,31 @@ cmd_collect() {
         rss_kb="$(evidence_rss_kb "$mainpid")"
     fi
 
+    # Binary identity: sha256 of the RUNNING image (/proc/<pid>/exe),
+    # not the pin path — a mid-window pin swap that the kernel hasn't
+    # execed yet must show as the old bytes until the process actually
+    # recycles. This is the per-sample form of c6_pin_gate.sh: the judge
+    # below refuses a window whose samples name more than one binary.
+    local exe_sha=""
+    if [ -n "${ZCL_SOAK_EXE_SHA_CMD:-}" ]; then
+        exe_sha="$(bash -c "$ZCL_SOAK_EXE_SHA_CMD" 2>/dev/null || true)"
+    else
+        exe_sha="$(evidence_exe_sha256 "$mainpid")"
+    fi
+    case "$exe_sha" in
+        ''|*[!0-9a-f]*) exe_sha="" ;;
+    esac
+    if [ "${#exe_sha}" -eq 64 ]; then
+        exe_sha="\"$exe_sha\""
+    else
+        exe_sha="null"
+    fi
+
     local line
-    line="$(printf '{"ts":%s,"soak_height":%s,"zd_height":%s,"gap":%s,"nrestarts":%s,"active_enter_ts":%s,"rss_kb":%s,"mainpid":%s,"security_review_required":%s,"security_posture_ok":%s,"window_eligible":%s,"ok":%s}' \
+    line="$(printf '{"ts":%s,"soak_height":%s,"zd_height":%s,"gap":%s,"nrestarts":%s,"active_enter_ts":%s,"rss_kb":%s,"mainpid":%s,"binary_sha256":%s,"security_review_required":%s,"security_posture_ok":%s,"window_eligible":%s,"ok":%s}' \
         "$ts" "$(jnum "$soak_height")" "$(jnum "$zd_height")" "$(jnum "$gap")" \
         "$(jnum "$nrestarts")" "$(jnum "$aet_epoch")" "$(jnum "$rss_kb")" \
-        "$(jnum "$mainpid")" "${security_review_required:-null}" \
+        "$(jnum "$mainpid")" "$exe_sha" "${security_review_required:-null}" \
         "$security_posture_ok" "$window_eligible" "$ok")"
 
     # flock-serialized append: timer run + ad-hoc operator run can never
@@ -306,6 +328,16 @@ cmd_judge() {
             sub(/^"[^"]*":/, "", s)
             return s
         }
+        # fldhex(line,key) -> "" (missing) | "null" | 64-hex value; for
+        # string identity fields (binary_sha256) that fld cannot parse.
+        function fldhex(line, key,    re, s) {
+            re = "\"" key "\":(\"[0-9a-f]{64}\"|null)"
+            if (match(line, re) == 0) return ""
+            s = substr(line, RSTART, RLENGTH)
+            sub(/^"[^"]*":/, "", s)
+            gsub(/"/, "", s)
+            return s
+        }
         function isnum(s) { return (s != "" && s != "null") }
         {
             t = fld($0, "ts")
@@ -322,6 +354,7 @@ cmd_judge() {
             nrv[n]  = fld($0, "nrestarts")
             aetv[n] = fld($0, "active_enter_ts")
             rssv[n] = fld($0, "rss_kb")
+            binv[n] = fldhex($0, "binary_sha256")
         }
         END {
             if (n == 0) {
@@ -344,6 +377,7 @@ cmd_judge() {
             eligible_cnt = 0
             max_gap = ""; nr_first = ""; nr_last = ""
             rss_first = ""; rss_last = ""
+            bin_id1 = ""; bin_ids = 0; bin_known = 0
             prev_t = ""; prev_nr = ""; prev_aet = ""
             for (i = i0; i <= n; i++) {
                 if (prev_t != "") { d = ts[i] - prev_t; if (d > hole_max) hole_max = d }
@@ -393,6 +427,15 @@ cmd_judge() {
                     if (rss_first == "") rss_first = rssv[i] + 0
                     rss_last = rssv[i] + 0
                 }
+                # Binary identity continuity: every sample that names a
+                # binary must name the SAME binary. A second distinct
+                # identity is a mid-window swap — the window judged on
+                # mixed executables is exactly what C6 must refuse.
+                if (binv[i] != "" && binv[i] != "null") {
+                    bin_known++
+                    if (bin_id1 == "") bin_id1 = binv[i]
+                    else if (binv[i] != bin_id1) bin_ids++
+                }
             }
             restarts = (nr_first == "") ? "null" : sprintf("%d", nr_last - nr_first)
             gap0_pct = (ok_cnt > 0) ? (100.0 * gap0 / ok_cnt) : 0.0
@@ -404,6 +447,7 @@ cmd_judge() {
             printf "soak-evidence: ok_samples=%d/%d soak_null_samples=%d zd_null_samples=%d samples_with_gap_gt0=%d max_gap=%s gap0_pct=%.2f\n", ok_cnt, cnt, soak_null, zd_null, gapgt0, (max_gap == "" ? "null" : max_gap ""), gap0_pct
             printf "soak-evidence: window_eligible_samples=%d/%d security_review_required_samples=%d security_posture_unknown_samples=%d security_posture_gap_samples=%d\n", eligible_cnt, cnt, security_review, security_unknown, security_gap
             printf "soak-evidence: rss_first_kb=%s rss_last_kb=%s\n", (rss_first == "" ? "null" : rss_first ""), (rss_last == "" ? "null" : rss_last "")
+            printf "soak-evidence: binary_identity_samples=%d/%d distinct_beyond_first=%d identity=%s\n", bin_known, cnt, bin_ids, (bin_id1 == "" ? "null" : bin_id1)
 
             # Verdict ladder — deterministic priority, parsed data only.
             # soak_unreachable gets the SAME 1% budget as the gap rate
@@ -414,6 +458,13 @@ cmd_judge() {
                 v = "INSUFFICIENT"; reason = "too_few_samples"
             } else if (covered_sec + slack < wh * 3600) {
                 v = "INSUFFICIENT"; reason = sprintf("window_short_%ds_lt_%ds_slack%ds", covered_sec, wh * 3600, slack)
+            } else if (bin_ids > 0) {
+                # Before every liveness criterion: a window whose samples
+                # name more than one running binary is judged on mixed
+                # executables — no height/gap evidence can rehabilitate
+                # it. (Samples with no identity field — legacy rows —
+                # are counted as unknown coverage, never as matches.)
+                v = "NOT_MET"; reason = sprintf("binary_identity_changed_in_%d_of_%d_identity_samples", bin_ids, bin_known)
             } else if (op > 0) {
                 v = "NOT_MET"; reason = sprintf("operator_intervention_detected_x%d", op)
             } else if (security_review > 0) {
@@ -432,6 +483,8 @@ cmd_judge() {
                 v = "INSUFFICIENT"; reason = sprintf("security_posture_unknown_in_%d_of_%d_samples", security_unknown, cnt)
             } else if (security_gap > 0) {
                 v = "NOT_MET"; reason = sprintf("security_posture_gap_in_%d_of_%d_samples", security_gap, cnt)
+            } else if (bin_known != cnt) {
+                v = "INSUFFICIENT"; reason = sprintf("binary_identity_unknown_in_%d_of_%d_samples", cnt - bin_known, cnt)
             } else {
                 v = "MET"; reason = sprintf("covered_%.1fh_hole_max_%ds_gap0_%.2fpct", covered, hole_max, gap0_pct)
             }
@@ -484,9 +537,86 @@ st_judge() {
 
 # st_line <file> <ts> <gap> <nr> <aet> <rss>  (ok:true, heights derived)
 st_line() {
-    printf '{"ts":%d,"soak_height":%d,"zd_height":%d,"gap":%d,"nrestarts":%d,"active_enter_ts":%d,"rss_kb":%d,"security_review_required":false,"security_posture_ok":true,"window_eligible":true,"ok":true}\n' \
+    printf '{"ts":%d,"soak_height":%d,"zd_height":%d,"gap":%d,"nrestarts":%d,"active_enter_ts":%d,"rss_kb":%d,"binary_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","security_review_required":false,"security_posture_ok":true,"window_eligible":true,"ok":true}\n' \
         "$2" $((3000000 + ($2 % 100000))) $((3000000 + ($2 % 100000) + $3)) "$3" "$4" "$5" "$6" >> "$1"
 }
+
+st_collect_identity() {
+    ZCL_SOAK_EVIDENCE_DIR="$1" \
+    ZCL_SOAK_RPC_CMD="echo '{\"result\":3000000}'" \
+    ZCL_ZD_RPC_CMD="echo '{\"result\":3000000}'" \
+    ZCL_SOAK_SECURITY_CMD="echo '{\"security_review_required\":false}'" \
+    ZCL_SOAK_SHOW_CMD="printf 'MainPID=4242\nNRestarts=0\nActiveEnterTimestamp=Tue 2023-11-14 22:05:00 UTC\n'" \
+    ZCL_SOAK_RSS_CMD="echo 'VmRSS: 1500000 kB'" \
+    ZCL_SOAK_EXE_SHA_CMD="printf '%s\n' '$2'" \
+        bash "$SELF" collect >/dev/null
+}
+
+# Use collector output as judge input, so the two halves cannot silently
+# disagree on string encoding while their separate fixtures both pass.
+st_identity_roundtrip() {
+    local tmp="$1" base="$2" fresh="$3" dir hash_a hash_b bad
+    hash_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    hash_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    dir="$tmp/identity-roundtrip"
+    mkdir -p "$dir/first" "$dir/second" "$dir/same" "$dir/mixed"
+    st_collect_identity "$dir/first" "$hash_a"
+    st_collect_identity "$dir/second" "$hash_b"
+    awk -v base="$base" '{ for(i=0;i<=168;i++) { s=$0; sub(/"ts":[0-9]+/, "\"ts\":" base+i*3600, s); print s } }' \
+        "$dir/first/evidence.jsonl" > "$dir/same/evidence.jsonl"
+    st_judge "$dir/same" 168 "$fresh" MET "" 0 identity-collector-roundtrip
+    awk -v base="$base" 'NR==1 {a=$0} NR==2 {b=$0} END { for(i=0;i<=168;i++) { s=(i==100?b:a); sub(/"ts":[0-9]+/, "\"ts\":" base+i*3600, s); print s } }' \
+        "$dir/first/evidence.jsonl" "$dir/second/evidence.jsonl" > "$dir/mixed/evidence.jsonl"
+    st_judge "$dir/mixed" 168 "$fresh" NOT_MET "binary_identity_changed" 1 identity-collected-swap
+    for bad in null '"abc"' "\"${hash_a}a\"" "$hash_a"; do
+        mkdir -p "$dir/unknown"
+        sed "s/\"binary_sha256\":\"$hash_a\"/\"binary_sha256\":$bad/" \
+            "$dir/same/evidence.jsonl" > "$dir/unknown/evidence.jsonl"
+        st_judge "$dir/unknown" 168 "$fresh" INSUFFICIENT "binary_identity_unknown_in_169_of_169_samples" 2 identity-invalid-field
+    done
+    # A single unknown sample cannot be bridged by valid neighbors.
+    sed '81s/"binary_sha256":"[a-f0-9]*"/"binary_sha256":null/' \
+        "$dir/same/evidence.jsonl" > "$dir/unknown/evidence.jsonl"
+    st_judge "$dir/unknown" 168 "$fresh" INSUFFICIENT "binary_identity_unknown_in_1_of_169_samples" 2 identity-single-hole
+    for bad in '' abc "${hash_a}a" INVALID; do
+        mkdir -p "$dir/invalid-collect"
+        : > "$dir/invalid-collect/evidence.jsonl"
+        st_collect_identity "$dir/invalid-collect" "$bad"
+        grep -q '"binary_sha256":null,' "$dir/invalid-collect/evidence.jsonl" \
+            || st_fail "case=identity-invalid-collect expected null"
+    done
+    echo "selftest: ok case=identity-invalid-collect"
+}
+
+st_running_identity() (
+    local tmp="$1" image="$1/running image" pid="" expected actual attempt
+    trap 'if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi' EXIT
+    if [ ! -r "/proc/$$/exe" ]; then
+        echo "selftest: SKIP case=running-image requires Linux procfs"
+        return
+    fi
+    cp "$(command -v sleep)" "$image"
+    expected="$(sha256sum -- "$image")"; expected="${expected%% *}"
+    "$image" 60 & pid=$!
+    for attempt in $(seq 1 50); do
+        actual="$(evidence_exe_sha256 "$pid")"
+        [ "$actual" = "$expected" ] && break
+        sleep 0.01
+    done
+    [ "$actual" = "$expected" ] || st_fail "case=running-image initial identity"
+    cp "$(type -P true)" "$tmp/replacement"
+    mv "$tmp/replacement" "$image"
+    [ "$(evidence_exe_sha256 "$pid")" = "$expected" ] \
+        || st_fail "case=running-image replacement changed observed image"
+    rm "$image"
+    [ "$(evidence_exe_sha256 "$pid")" = "$expected" ] \
+        || st_fail "case=running-image unlink lost observed image"
+    kill "$pid"; wait "$pid" 2>/dev/null || true
+    [ -z "$(evidence_exe_sha256 "$pid")" ] \
+        || st_fail "case=running-image dead process retained identity"
+    pid=""
+    echo "selftest: ok case=running-image-replaced-unlinked-dead"
+)
 
 cmd_selftest() {
     # NOT local: the EXIT trap fires after the function scope is gone.
@@ -708,12 +838,13 @@ cmd_selftest() {
         export ZCL_SOAK_SECURITY_CMD="echo '{\"result\":{\"security_review_required\":false}}'"
         export ZCL_SOAK_SHOW_CMD="printf 'MainPID=4242\nNRestarts=3\nActiveEnterTimestamp=Fri 2026-06-12 23:25:11 UTC\n'"
         export ZCL_SOAK_RSS_CMD="echo 'VmRSS:    123456 kB'"
+        export ZCL_SOAK_EXE_SHA_CMD="echo a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e"
         bash "$SELF" collect > /dev/null
     ) || st_fail "case=collect-up collect exited non-zero"
     grep -q '"soak_height":105,"zd_height":107,"gap":2,"nrestarts":3,' "$f/evidence.jsonl" \
         || { cat "$f/evidence.jsonl" >&2; st_fail "case=collect-up wrong fields"; }
-    grep -q '"rss_kb":123456,"mainpid":4242,"security_review_required":false,"security_posture_ok":true,"window_eligible":true,"ok":true}' "$f/evidence.jsonl" \
-        || { cat "$f/evidence.jsonl" >&2; st_fail "case=collect-up wrong rss/mainpid/ok"; }
+    grep -q '"rss_kb":123456,"mainpid":4242,"binary_sha256":"a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e","security_review_required":false,"security_posture_ok":true,"window_eligible":true,"ok":true}' "$f/evidence.jsonl" \
+        || { cat "$f/evidence.jsonl" >&2; st_fail "case=collect-up wrong rss/mainpid/exe/ok"; }
     echo "selftest: ok case=collect-up"
 
     # H) collect with BOTH nodes down (commands fail): still appends an
@@ -728,7 +859,7 @@ cmd_selftest() {
         export ZCL_SOAK_RSS_CMD="false"
         bash "$SELF" collect > /dev/null 2>&1
     ) || st_fail "case=collect-down collect must exit 0 on unreachable nodes"
-    grep -q '"soak_height":null,"zd_height":null,"gap":null,"nrestarts":null,"active_enter_ts":null,"rss_kb":null,"mainpid":null,"security_review_required":null,"security_posture_ok":false,"window_eligible":false,"ok":false}' \
+    grep -q '"soak_height":null,"zd_height":null,"gap":null,"nrestarts":null,"active_enter_ts":null,"rss_kb":null,"mainpid":null,"binary_sha256":null,"security_review_required":null,"security_posture_ok":false,"window_eligible":false,"ok":false}' \
         "$f/evidence.jsonl" \
         || { cat "$f/evidence.jsonl" >&2; st_fail "case=collect-down wrong null line"; }
     echo "selftest: ok case=collect-down"
@@ -749,6 +880,33 @@ cmd_selftest() {
         "$f/evidence.jsonl" \
         || { cat "$f/evidence.jsonl" >&2; st_fail "case=collect-review accrued"; }
     echo "selftest: ok case=collect-review"
+
+    # K) binary identity continuity: the same green window, but one
+    # mid-window sample names a DIFFERENT running binary — the judge
+    # must refuse the window outright (NOT_MET, named reason), because
+    # height/gap evidence gathered over mixed executables proves no one
+    # candidate. Legacy rows without the field are coverage gaps, never
+    # matches, so an all-legacy window cannot earn MET.
+    f="$tmp/identity-swap"; mkdir -p "$f"
+    for i in $(seq 0 168); do
+        ts=$((base + i * 3600))
+        printf '{"ts":%d,"soak_height":3000000,"zd_height":3000000,"gap":0,"nrestarts":0,"active_enter_ts":%d,"rss_kb":1500000,"mainpid":4242,"binary_sha256":"%s","security_review_required":false,"security_posture_ok":true,"window_eligible":true,"ok":true}\n' \
+            "$ts" "$aet" \
+            "$([ "$i" = 100 ] && printf a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e || printf f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e)" >> "$f/evidence.jsonl"
+    done
+    last_ts=$((base + 168 * 3600))
+    st_judge "$f" 168 $((last_ts + 60)) NOT_MET "binary_identity_changed" 1 identity-swap
+    # Same otherwise-green window, all-legacy rows: identity is unknown.
+    f="$tmp/identity-legacy"; mkdir -p "$f"
+    for i in $(seq 0 168); do
+        ts=$((base + i * 3600))
+        printf '{"ts":%d,"soak_height":3000000,"zd_height":3000000,"gap":0,"nrestarts":0,"active_enter_ts":%d,"rss_kb":1500000,"mainpid":4242,"security_review_required":false,"security_posture_ok":true,"window_eligible":true,"ok":true}\n' \
+            "$ts" "$aet" >> "$f/evidence.jsonl"
+    done
+    st_judge "$f" 168 $((last_ts + 60)) INSUFFICIENT "binary_identity_unknown_in_169_of_169_samples" 2 identity-legacy
+
+    st_identity_roundtrip "$tmp" "$base" "$fresh"
+    st_running_identity "$tmp"
 
     echo "selftest: PASS"
 }

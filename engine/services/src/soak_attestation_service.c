@@ -112,7 +112,7 @@ static bool soak_open_file(const char *datadir)
 
 /* Rotate: rename primary to .1 (overwrites any stale .1), close old fd,
  * open a fresh primary.  Called with g_soak.lock held. */
-static void soak_rotate(void)
+static bool soak_rotate(void)
 {
     const char *dd = g_soak.datadir;
     char primary[560], rotated[560];
@@ -123,24 +123,38 @@ static void soak_rotate(void)
     if (g_soak.file_open) {
         /* The periodic log is best-effort, but a published rotation must be
          * handle-flushed, atomically replaced, and directory-durable. */
-        (void)platform_private_file_flush(&g_soak.file);
         replaced = platform_private_file_replace(
             &g_soak.file, primary, rotated);
         g_soak.file_open = false;
         if (!replaced) {
             platform_private_file_close(&g_soak.file);
-            LOG_WARN("soak_attest", "rotate replace %s -> %s failed",
-                     primary, rotated);
         }
     }
-    if (replaced && !platform_private_parent_flush(dd)) {
+    if (!replaced) {
+        LOG_WARN("soak_attest", "rotate replace %s -> %s failed; retaining primary evidence",
+                 primary, rotated);
+        return false;
+    }
+    if (!platform_private_parent_flush(dd)) {
         LOG_WARN("soak_attest", "rotation directory flush failed: %s", dd);
+        return false;
     }
     atomic_fetch_add(&g_soak.rotations, 1);
 
     /* Open a fresh primary for subsequent writes. */
-    (void)soak_open_file(dd);
     g_soak.lines_since_fsync = 0;
+    return soak_open_file(dd);
+}
+
+/* Called under g_soak.lock. A refusal never reopens an oversized primary
+ * for append during the same tick. The next tick may retry the rotation. */
+static bool soak_prepare_file(void)
+{
+    if (!g_soak.file_open && !soak_open_file(g_soak.datadir))
+        return false; /* soak_open_file logged the failing path. */
+    if (g_soak.file_bytes < SOAK_ATTESTATION_ROTATE_BYTES)
+        return true;
+    return soak_rotate();
 }
 
 /* ── Tick body ──────────────────────────────────────────────────── */
@@ -152,16 +166,15 @@ void soak_attestation_tick(void)
         pthread_mutex_unlock(&g_soak.lock);
         return;
     }
-    const char *dd = g_soak.datadir;
-
-    /* Lazy open: first tick after init opens the file. */
-    if (!g_soak.file_open)
-        (void)soak_open_file(dd);
-
-    /* Rotation check: rotate BEFORE writing the new line so we don't
-     * overshoot by a full line. */
-    if (g_soak.file_bytes >= SOAK_ATTESTATION_ROTATE_BYTES)
-        soak_rotate();
+    if (!soak_prepare_file()) {
+        /* Failed rotation must leave a gap, not grow the old evidence file
+         * beyond its bound or report a successful rotation. Retry on the
+         * next supervised tick without blocking chain advancement. */
+        atomic_fetch_add(&g_soak.write_failures, 1);
+        g_soak.failure_streak++;
+        pthread_mutex_unlock(&g_soak.lock);
+        return;
+    }
 
     pthread_mutex_unlock(&g_soak.lock);
 

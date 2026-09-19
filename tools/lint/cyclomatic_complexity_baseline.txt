@@ -2385,7 +2385,7 @@ engine/services/src/snapshot_verify.c:snapsync_finalize:16
 engine/services/src/snapshot_verify.c:snapsync_finalize_write:22
 engine/services/src/snapshot_verify.c:snapsync_parse_fc_response:24
 engine/services/src/snapshot_verify.c:snapsync_verify_flyclient:16
-engine/services/src/soak_attestation_service.c:soak_attestation_tick:28
+engine/services/src/soak_attestation_service.c:soak_attestation_tick:27
 engine/services/src/source_bundle_fetch.c:source_bundle_fetch:30
 engine/services/src/source_bundle_publish.c:source_bundle_publish:38
 engine/services/src/state_auditor.c:coins_check_window:25
