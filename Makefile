@@ -2882,8 +2882,46 @@ ifneq ($(ZCL_HOST_WINDOWS),)
 # unconstrained agent adapter merely to make the native node build green.
 ZCL_ADAPTER_RUNNER_TARGET =
 endif
+# ── What a product build does NOT rebuild ──────────────────────────────────
+#
+# build/bin/z23-dev is NOT a prerequisite of `all`, and bare `make` is
+# `.DEFAULT_GOAL := z23`, which is narrower still. The omission is deliberate
+# and it is also a trap that has cost real time more than once: someone runs
+# `make`, watches it succeed, and then runs a build/bin/z23-dev left over from
+# an older tree — a binary that is not merely old but built from source that
+# no longer exists here.
+#
+# WHY THE FIX IS NOT "ADD IT TO all". Two reasons, the first decisive.
+#
+#   1. It would not close the trap. The trap is bare `make`, which resolves to
+#      `z23` and not to `all` at all. Adding a prerequisite to `all` leaves the
+#      reported failure exactly where it was, while charging everyone who does
+#      type `make all` for an artifact they did not ask for.
+#
+#   2. z23-dev is a different BUILD FLAVOUR, not another artifact of this one.
+#      It compiles under ZCL_DEV_BUILD with its own flags and its own object
+#      epoch, and this Makefile goes to deliberate trouble to keep its real
+#      name unshippable ($(Z23_DEV_UNSHIPPABLE_BIN) is `z23.dev`). Putting a
+#      dev-instrumented node into the shippable bundle is a category error, and
+#      it would be one whichever way the trap went.
+#
+# So the omission is made LOUD instead, on both goals, and only in the one
+# situation where it can actually mislead anyone: when a build/bin/z23-dev
+# already exists. A file that is not there cannot be mistaken for a fresh one,
+# and a first-time builder gets no noise. The notice goes to stderr because it
+# is a note about the build, not build output, and tooling that captures a
+# make target's stdout should not have to learn about it. Cost is one
+# `test -e` per goal.
+define ZCL_DEV_BIN_OMITTED_NOTICE
+@test ! -e "$(ZCLASSIC23_DEV_BIN)" || { \
+  echo "note: this goal does not rebuild $(ZCLASSIC23_DEV_BIN); it is a separate dev-flavour build." >&2; \
+  echo "      the one on disk is from whenever 'make dev-bin' last ran. Run 'make dev-bin' before trusting it." >&2; \
+}
+endef
+
 all: test_zcl zclassic23 zcl-rpc zclassic23-package-verify \
 	$(ZCL_POSIX_ONLY_BINS) $(ZCL_ADAPTER_RUNNER_TARGET)
+	$(ZCL_DEV_BIN_OMITTED_NOTICE)
 
 # ── Hot-swap ROLLBACK fixture images ──────────────────────────────────────
 # tests/harness/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
@@ -6289,6 +6327,7 @@ spec: spec_zcl
 .PHONY: z23 zclassic23 portable c23-portable-toolchain c23-portable-release \
 	c23-portable-install release-deploy
 z23: $(ZCLASSIC23_BIN) $(ZCLASSIC23_BIN_ALIAS)
+	$(ZCL_DEV_BIN_OMITTED_NOTICE)
 
 # Temporary migration alias: `make zclassic23` and build/bin/zclassic23 keep
 # working while bots/scripts move to z23.
@@ -13701,13 +13740,46 @@ check-lint-gate-wiring: $(LINTC_TOOL)
 # duration into this comment — durations are per host and per commit, and the
 # ones that used to live here had gone stale. Ask the host instead:
 #   make timings   (says NOT MEASURED rather than quoting another machine)
+# ── The one processor count this Makefile and its gates size work from ──────
+#
+# ZCL_HOST_JOBS is the number of processors this build may ACTUALLY run on,
+# and every job count below derives from it. It exists because twenty-eight
+# hard-coded `-jN` literals across eight different values used to decide how
+# wide this tree built, each one a guess about a machine it had never seen.
+#
+# `nproc` is the right source and it is worth saying why, because the obvious
+# objection is wrong: coreutils nproc reports the CALLER'S AFFINITY MASK, not
+# the box. Under this project's build scheduler it answers 28 while the host
+# has 32, and under `taskset -c 0,1` it answers 2. (`nproc --all` is the one
+# that reports the box; do not reach for it here.) So this number already
+# follows a taskset, a systemd scope's AllowedCPUs, or a container CPU set —
+# the same question platform_available_cpu_count() answers for the C side, by
+# the same kernel interface. The `|| echo 8` arm is for a host without
+# coreutils, where a wrong-but-parallel default beats a serial build.
+#
+# A job count derived from this may still be clamped, but a clamp must carry
+# the MEASUREMENT that chose it. An unexplained number is the defect.
+ZCL_HOST_JOBS := $(shell nproc 2>/dev/null || echo 8)
+# Exported so a gate script sizes itself from the same answer instead of
+# re-deriving one (tools/lint/check_standalone_tools_link.sh reads it).
+export ZCL_HOST_JOBS
+
 # Workers for the parallel lint driver. Measured on a 32-core host: the
 # umbrella burns ~4.5 min of CPU inside ~39 s of wall at 8 workers, so the
-# driver is CPU-starved, not gate-bound. Derive the default from the host and
-# keep headroom, because check-standalone-tools-link forks its own `make -j4`
-# underneath one of these workers. Override with ZCL_LINT_JOBS=<n>.
-ZCL_LINT_NPROC := $(shell nproc 2>/dev/null || echo 8)
-ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_LINT_NPROC) * 3 / 4 )); \
+# driver is CPU-starved, not gate-bound — raising this is what made lint fast.
+#
+# THE 3/4 AND THE CEILING ARE MEASURED, not taste. Lint is where this
+# repository's time actually goes (step.lint 213-239 s against step.compile
+# 30-44 s), so it is the one job count worth an experiment rather than an
+# argument, and it got one: `make lint` was timed at this derivation's 21
+# workers against the full mask of 28, alternating runs under the build
+# scheduler's 28-processor grant with the lint cache warm. See
+# docs/BENCHMARKS_LOG.md for the raw numbers. The headroom is real work, not
+# politeness: check-standalone-tools-link forks its OWN make underneath one of
+# these workers (ZCL_TOOLS_LINK_JOBS, half the host), so the peak process
+# count is this number plus that one, and the last quarter of the mask is what
+# absorbs it. Override with ZCL_LINT_JOBS=<n>.
+ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_HOST_JOBS) * 3 / 4 )); \
                    if [ "$$j" -lt 8 ]; then j=8; fi; \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \

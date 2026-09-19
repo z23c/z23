@@ -280,6 +280,8 @@ ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_SOURCES := \
 	platform/modules/platform/src/state_root.c \
 	platform/modules/platform/src/private_directory.c \
 	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/logical_cpu.c \
+	platform/modules/platform/src/os_proc_mem.c \
 	platform/modules/platform/src/clock.c \
 	platform/modules/base/src/result.c \
 	platform/modules/base/src/safe_alloc.c \
@@ -287,7 +289,7 @@ ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_SOURCES := \
 ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_FLAGS := \
 	-DZCL_TESTING -Itools -Itools/dev -ffunction-sections -fdata-sections
 ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_LIBS := \
-	-Wl,--gc-sections -ladvapi32 -lshell32 -lole32 -luuid \
+	-Wl,--gc-sections -ladvapi32 -lpsapi -lshell32 -lole32 -luuid \
 	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
@@ -375,7 +377,9 @@ ZCL_WINDOWS_ACCEPTANCE_hotswap_elf_probe_refusal_SOURCES := \
 	engine/modules/hotswap/src/hotswap_elf_probe_windows.c
 ZCL_WINDOWS_ACCEPTANCE_logical_cpu_SOURCES := \
 	platform/modules/platform/tests/logical_cpu_windows_acceptance.c \
-	platform/modules/platform/src/logical_cpu.c
+	platform/modules/platform/src/logical_cpu.c \
+	platform/modules/platform/src/os_proc_mem.c
+ZCL_WINDOWS_ACCEPTANCE_logical_cpu_LIBS := -lpsapi
 ZCL_WINDOWS_ACCEPTANCE_logical_cpu_FLAGS := \
 	-U_WIN32_WINNT -D_WIN32_WINNT=0x0601
 ZCL_WINDOWS_ACCEPTANCE_log_level_SOURCES := \

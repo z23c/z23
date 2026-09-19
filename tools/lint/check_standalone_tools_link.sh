@@ -347,7 +347,13 @@ fi
 # The targets are independent single-TU links, so the work scales with -j. Half
 # the host, capped, leaves room for the lint driver's own workers running
 # alongside. Override with ZCL_TOOLS_LINK_JOBS=<n>.
-tl_nproc="$(nproc 2>/dev/null || echo 4)"
+#
+# ZCL_HOST_JOBS is exported by the Makefile and is the processors this build
+# may ACTUALLY run on -- the affinity mask, 28 inside this project's build
+# grant on a 32-processor host. The `nproc` arm is the same question asked
+# directly, for a run of this gate outside make; it is a fallback, not a
+# second source of truth.
+tl_nproc="${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 tl_jobs="${ZCL_TOOLS_LINK_JOBS:-$(( tl_nproc / 2 ))}"
 if [ "$tl_jobs" -lt 4 ];  then tl_jobs=4;  fi
 if [ "$tl_jobs" -gt 16 ]; then tl_jobs=16; fi
