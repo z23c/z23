@@ -1,0 +1,67 @@
+[Unit]
+Description=Z23 Landing Stepper (dev land step, one beat)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/zclassic23
+# One beat of the native landing service (tools/command/native_dev_land.c,
+# leaf at engine/composition/commands/dev.def:1836): rebase the queued tip
+# onto origin/main in a private worktree, run lint-fast, request the exact
+# `dev.proof` receipt, and return. A LATER beat reads that receipt's answer
+# and fast-forwards origin/main. This unit does not read, gate, or publish
+# anything itself; it only asks the leaf to take its next beat.
+#
+# PUBLISH BOUNDARY: `dev land submit` is the deliberate act that queues a
+# tip. This timer only executes beats for candidates a person or agent
+# already submitted, and the leaf publishes only a tip whose exact sealed
+# proof receipt was admitted. That is the same reasoning that carries
+# tools/command/native_dev_land.c in the closed allowlist of
+# tools/lint/lintc/gate_no_unattended_publish.c:59-62: this unit contains no
+# `git push` of its own, ships no shell script in the path, and is not and
+# must never become an allowlist entry.
+#
+# NOT THE SAME SERVICE as platform/deploy/zclassic23-lander.service: that
+# older unit runs tools/dev/land_lander.sh, stops at a local land/ready ref,
+# and never publishes. This unit drives the newer native `dev land step`
+# leaf all the way to a fast-forward of origin/main when a receipt is
+# admitted. Do not merge or confuse the two.
+ExecStart=%h/github/zclassic23/build/bin/z23-dev dev land step
+
+# A beat is a bounded poll-and-return by contract, not a background wait.
+# Measured on this host 2026-09-19: pid 1945635, a `dev land step` started
+# 2026-09-13 17:57:22, was still alive six days later in State=S inside
+# do_poll — zero CPU and zero I/O progress across a 3-second sample, holding
+# an fd on ~/.local/state/z23/dev/land/wt/.cache/zcl-dev-watch.lock and an
+# inotify fd, waiting on a proof watcher that never arrived. It held no
+# flock (per /proc/locks), so nothing else was blocked on it, but it proves
+# a beat CAN hang indefinitely. That is fatal under OnUnitInactiveSec=: a
+# oneshot the timer still considers "activating" never gets a fresh edge, so
+# one hung beat silently stops landing for good. TimeoutStartSec bounds it;
+# the leaf's own contract is to return without waiting on a proof or a push,
+# so 15 minutes is already far outside normal.
+TimeoutStartSec=900
+TimeoutStopSec=30
+
+# KillMode defaults to control-group: a timeout SIGTERMs the whole cgroup,
+# not just the ExecStart pid. Read against tools/command/native_dev_land.c,
+# `dev land step` runs its subprocesses (rebase, lint-fast) synchronously
+# through zcl_spawn_capture() and waits on them inline; there is no
+# double-fork/daemonize path visible that would place a child outside this
+# unit's cgroup, so the default KillMode is expected to reach every child a
+# hung beat is holding. Left at the systemd default rather than overridden,
+# since nothing here needs a narrower kill target.
+
+# The test harness a proof run drives needs an unlimited stack; the retired
+# shell wrapper did `ulimit -s unlimited` for the same reason.
+LimitSTACK=infinity
+
+# Yield to the node and to interactive work, same posture as the other
+# background lanes in this directory (zclassic23-worktree-gc.service,
+# zclassic23-test-suite.service).
+Nice=10
+CPUWeight=20
+IOWeight=20
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal

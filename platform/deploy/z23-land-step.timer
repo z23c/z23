@@ -1,0 +1,19 @@
+[Unit]
+Description=Z23 Landing Stepper Timer
+
+[Timer]
+# A beat every ~20s replaces the 60s poll loop that used to live in the
+# out-of-tree scratch shell driver (land_stepper.sh, launched by
+# handoff_driver.sh through a transient systemd-run --user unit). That
+# driver had no supervision of its own: if it died or the box rebooted,
+# landing stopped silently and nothing noticed. This timer is the repo-
+# shipped replacement — it needs no long-running process to stay alive, and
+# systemd restarts it on its own after a crash or reboot.
+OnBootSec=2min
+OnUnitInactiveSec=20s
+AccuracySec=1s
+Persistent=false
+Unit=z23-land-step.service
+
+[Install]
+WantedBy=timers.target
