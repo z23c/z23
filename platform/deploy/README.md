@@ -63,7 +63,7 @@ list, so the next person comparing `ls ~/.config/systemd/user/` against
 | `zclassic23-host-gc.service` / `.timer` | **already shipped, as an installer** | Not a gap. `tools/scripts/install_host_gc.sh` writes both, pointed at the copy it installs beside them; the behavior is `tools/scripts/host_gc.sh` and the page is `docs/HOST_GC.md`. The installed copy of the script has drifted from the tracked one — reinstall rather than edit the copy. |
 | `z23-agent-worker.service` | **delete** | Untracked, non-instanced duplicate of the tracked `zcl-agent-worker@.service`. The instanced unit is the one actually running (`zcl-agent-worker@node1-a`); this one is loaded and inactive. It also hardcodes one lane's checkout as its `ExecStart`, which is exactly the "qualified image" mistake the tracked unit's header exists to prevent. |
 | `z23-agent-receive.service` | **delete** | Same, against `zcl-agent-receive@.service`. `zcl-agent-receive@node1-a` is the running one. |
-| `zcl-e2e-proof.service` | **delete** | `ExecStart=/home/rhett/zcl-e2e-proof/run-node.sh`; that directory does not exist. Dead unit pointing at a removed file. |
+| `zcl-e2e-proof.service` | **delete** | its `ExecStart` names `$HOME/zcl-e2e-proof/run-node.sh`; that directory does not exist. Dead unit pointing at a removed file. |
 | `zcl-e2e-watch.service` | **delete** | Same directory, same state. |
 | `z23-mint-follow.service` | **delete** | A beta6 mint experiment driven from a scratch shell script; loaded, never active, superseded by `z23-beta6mint.service`. |
 | `z23-handoff-driver.service` | host-local | Runs `~/.local/state/zclassic23/scratch/northstar/driver/handoff_driver.sh` and pins one lane as its working directory. Out-of-tree shell, see below. |
