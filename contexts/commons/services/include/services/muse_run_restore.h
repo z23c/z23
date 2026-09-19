@@ -71,15 +71,17 @@ struct muse_restore_in {
 /* Returns true only when the workspace is measurably clean at base
  * afterwards. reason always says what happened, either way.
  *
- * REFUSED IS NOT BLOCKED. `blocked` (always written when non-NULL) is
- * true only when the undo had already TOUCHED the workspace and then
- * could not settle it at base: the tree is half-undone and unusable
- * until an operator clears it. It stays false for every refusal made
- * before the first byte is changed — those leave the change exactly
- * where the turn left it, which is safe and is the next run's pre-state
- * refusal doing its job. One boolean for both would tell the operator
- * that a healthy workspace and a wrecked one are the same thing. */
+ * REFUSED IS NOT HALF-UNDONE. `half_undone` (always written when
+ * non-NULL) is true only when the undo had already TOUCHED the workspace
+ * and then could not settle it at base: the tree holds neither the
+ * change nor the base, and no artifact anywhere describes what it does
+ * hold. It stays false for every refusal made before the first byte is
+ * changed — those leave the change exactly where the turn left it, which
+ * is recoverable, because the change is still the change. Both states
+ * block the next claimed task; only one of them has lost information.
+ * One boolean for both would tell the operator that a workspace it can
+ * inspect and a workspace it cannot are the same thing. */
 bool muse_restore_workspace(const struct muse_restore_in *in, char *reason,
-    size_t reason_cap, bool *blocked);
+    size_t reason_cap, bool *half_undone);
 
 #endif /* ZCL_SERVICES_MUSE_RUN_RESTORE_H */

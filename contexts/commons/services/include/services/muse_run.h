@@ -247,15 +247,24 @@ struct muse_run_result {
      * the change in place, and the next run's pre-state refusal stays
      * the fail-closed backstop. The reason says which, either way. */
     bool workspace_restored;
-    /* True only when the restore TOUCHED the workspace and then could
-     * not settle it at base: the tree is half-undone and UNUSABLE until
-     * an operator clears it, and <rundir>/workspace.blocked names the
-     * blocker. This is never the same answer as a restore that refused
-     * before touching a single byte, which leaves the change intact and
-     * the workspace exactly as the turn left it. A reader that cannot
-     * tell those two apart cannot tell a safe workspace from a wrecked
-     * one, so they are two fields, never one. */
+    /* True when this run leaves the workspace OFF its pinned base and
+     * could not put it back: the next claimed task on it will be refused
+     * for this run's dirt, and <rundir>/workspace.blocked names what to
+     * clear. It covers both ways that happens — a restore that refused
+     * outright after the turn dirtied a measurably clean workspace, and
+     * a restore that had already begun undoing and could not settle.
+     * It stays false when the run never measured its own change set: an
+     * unmeasured tree is not a claim about the tree. */
     bool workspace_blocked;
+    /* The dangerous half of workspace_blocked, kept separate because it
+     * is the one state nothing can describe: the undo had TOUCHED the
+     * workspace and then stopped, so the tree holds neither the change
+     * nor the base and no artifact says what it does hold. A refusal
+     * made before the first byte changed leaves the change intact and is
+     * recoverable by reading it; this is not. A reader that cannot tell
+     * those apart cannot tell an inspectable workspace from a wrecked
+     * one, so they are two fields, never one. */
+    bool half_undone;
     char workspace_restore[MUSE_RUN_REASON_MAX];
 };
 

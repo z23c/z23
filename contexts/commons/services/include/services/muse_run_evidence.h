@@ -8,9 +8,10 @@
  * THREE FILES, THREE READERS. receipt.json is what A's reap judges and is
  * deliberately small. muse.json is the whole measured record, for an
  * operator and for the next attempt's brief. workspace.blocked exists only
- * when a restore had already touched the workspace and could not settle
- * it: it is the one artifact an operator needs to clear a half-undone
- * tree, and its absence is itself a fact.
+ * when the run left the workspace off its pinned base and could not put it
+ * back: it is the one artifact an operator needs to clear that tree, its
+ * half_undone line says whether the change is still readable in place, and
+ * its absence is itself a fact.
  *
  * ATOMIC OR ABSENT. Every write goes through a tempfile in the same
  * directory plus rename, so a kill can never leave a partial evidence file
@@ -43,8 +44,8 @@ void muse_run_write_receipt(const struct muse_run_task *t,
 void muse_run_write_facts(const struct muse_run_task *t,
     const struct muse_run_result *r);
 
-/* <rundir>/workspace.blocked — written ONLY for a restore that touched
- * the workspace and could not settle it at base. */
+/* <rundir>/workspace.blocked — written ONLY when the run leaves the
+ * workspace off its pinned base and cannot put it back. */
 void muse_run_write_blocked(const struct muse_run_task *t,
     const struct muse_run_result *r);
 

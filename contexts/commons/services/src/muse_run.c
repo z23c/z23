@@ -967,7 +967,23 @@ static void mr_restore(const struct muse_run_task *t,
     in.pre_clean = r->scope_pre_measured && r->scope_pre_clean;
     r->workspace_restored = muse_restore_workspace(&in,
         r->workspace_restore, sizeof(r->workspace_restore),
-        &r->workspace_blocked);
+        &r->half_undone);
+    /* BLOCKED IS THE WHOLE TRUTH ABOUT THE WORKSPACE, NOT JUST THE UGLY
+     * HALF. muse_restore_workspace reports the state only IT can know:
+     * it had begun undoing and could not finish. The other way a run
+     * leaves a workspace off its base is just as blocking for the next
+     * claimed task — this run measured the workspace clean, the turn
+     * dirtied it, and the restore then refused outright, most often
+     * because the change could not be preserved and an unpreserved
+     * change is never discarded. Both leave a tree the next task must
+     * not be handed, so both get the marker file, and its blocker line
+     * says which one an operator is looking at. Unmeasured is not
+     * blocked: a run that never got as far as auditing its own change
+     * set claims nothing about the tree. */
+    if (!r->workspace_restored && in.pre_clean && r->scope_changed_count > 0)
+        r->workspace_blocked = true;
+    else
+        r->workspace_blocked = r->half_undone;
     if (r->workspace_blocked) muse_run_write_blocked(t, r);
 }
 
@@ -982,6 +998,7 @@ static void mr_report(struct mr_core *c, struct muse_session *s,
     r->rc = rc;
     r->workspace_restored = false;
     r->workspace_blocked = false;
+    r->half_undone = false;
     (void)snprintf(r->workspace_restore, sizeof(r->workspace_restore),
         "not attempted yet: evidence first");
     /* A no-op for every run that reached the gate: that fold already

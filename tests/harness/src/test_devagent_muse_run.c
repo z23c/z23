@@ -2255,9 +2255,9 @@ static bool mr_still_dirty(const struct mr_dirs *d)
         mr_file_is(d->wt, "src/b.c", "made\n");
 }
 
-static bool mr_restore_call_blocked(const struct mr_dirs *d,
+static bool mr_restore_call_undone(const struct mr_dirs *d,
     const char *base, const char *hex, const char *file, bool pre_clean,
-    char *why, size_t cap, bool *blocked)
+    char *why, size_t cap, bool *half_undone)
 {
     struct muse_restore_in in;
     memset(&in, 0, sizeof(in));
@@ -2267,23 +2267,23 @@ static bool mr_restore_call_blocked(const struct mr_dirs *d,
     in.candidate = hex;
     in.candidate_file = file;
     in.pre_clean = pre_clean;
-    return muse_restore_workspace(&in, why, cap, blocked);
+    return muse_restore_workspace(&in, why, cap, half_undone);
 }
 
 /* Every refusal the cases below provoke is made BEFORE a byte is
  * touched, so none of them may ever report a half-undone workspace: a
- * blocked flag here would itself be the failure. */
+ * half_undone flag here would itself be the failure. */
 static bool mr_restore_call(const struct mr_dirs *d, const char *base,
     const char *hex, const char *file, bool pre_clean, char *why,
     size_t cap)
 {
-    bool blocked = true;
-    bool ok = mr_restore_call_blocked(d, base, hex, file, pre_clean, why,
-        cap, &blocked);
-    if (blocked)
+    bool half_undone = true;
+    bool ok = mr_restore_call_undone(d, base, hex, file, pre_clean, why,
+        cap, &half_undone);
+    if (half_undone)
         (void)snprintf(why, cap, "%s",
-            "BLOCKED: a refusal reported a touched workspace");
-    return ok && !blocked;
+            "HALF-UNDONE: a refusal reported a touched workspace");
+    return ok && !half_undone;
 }
 
 /* A candidate that is missing, damaged, or no longer the workspace's
@@ -2378,31 +2378,45 @@ static bool mr_break_tracked_diff(const struct mr_dirs *d)
 }
 
 /* What a run that could not preserve its change must leave behind: the
- * change itself, untouched, and one line naming the blocker in each
- * place a reader looks. */
+ * change itself, untouched; the workspace named as blocked, because the
+ * next claimed task cannot use it; and one line naming the blocker in
+ * each place a reader looks. */
 static int mr_unfoldable_evidence(const struct mr_dirs *d,
     const struct muse_run_result *r)
 {
     int failures = 0;
     char path[8192];
     char *text;
-    /* Nothing was preserved, so nothing may be undone. */
+    /* Nothing was preserved, so nothing may be undone — but the tree is
+     * off its base and this run could not put it back, which is exactly
+     * what blocked means. Not half-undone: the change is all still
+     * there, readable, which is what makes it recoverable by hand. */
     MR_CHECK("unfoldable change untouched",
-        !r->workspace_restored && !r->workspace_blocked);
+        !r->workspace_restored && r->workspace_blocked &&
+        !r->half_undone);
     MR_CHECK("unfoldable edit still there",
         mr_file_is(d->wt, "src/sum.c", "edited\n") &&
         mr_exists(d->wt, "src/turn.c"));
+    (void)snprintf(path, sizeof(path), "%s/workspace.blocked", d->run);
+    text = mr_read(path);
+    MR_CHECK("unfoldable marker written", text &&
+        strstr(text, "candidate=none") &&
+        strstr(text, "half_undone=false") &&
+        strstr(text, "blocker=not attempted: the change set was never "
+                     "named"));
+    free(text);
     text = mr_read_facts(d, path, sizeof(path));
     MR_CHECK("unfoldable evidence", text &&
         strstr(text, "\"candidate\":\"none\"") &&
         strstr(text, "\"candidate_note\":\"the tracked diff") &&
+        strstr(text, "\"half_undone\":false") &&
         strstr(text, "\"verdict\":\"refused\""));
     free(text);
     (void)snprintf(path, sizeof(path), "%s/receipt.json", d->run);
     text = mr_read(path);
     MR_CHECK("unfoldable receipt", text &&
         strstr(text, "\"verdict\":\"refused\"") &&
-        strstr(text, "\"workspace_blocked\":false"));
+        strstr(text, "\"workspace_blocked\":true"));
     free(text);
     return failures;
 }
@@ -2617,7 +2631,8 @@ static int mr_exec_restore_blocked(void)
         r.candidate_file[0]);
     failures += mr_pass_candidate(&d, &r);
     MR_CHECK("blocked not restored", !r.workspace_restored);
-    MR_CHECK("blocked says blocked", r.workspace_blocked);
+    MR_CHECK("blocked says blocked",
+        r.workspace_blocked && r.half_undone);
     MR_CHECK("blocked names the blocker",
         strstr(r.workspace_restore, "incomplete:") != NULL);
     MR_CHECK("blocked workspace not clean", !mr_at_base(&d, r.base) &&
@@ -2627,6 +2642,7 @@ static int mr_exec_restore_blocked(void)
     btext = mr_read(blocked);
     MR_CHECK("blocked file written", btext &&
         strstr(btext, "workspace=") && strstr(btext, d.wt) &&
+        strstr(btext, "half_undone=true") &&
         strstr(btext, "blocker=incomplete:") &&
         strstr(btext, r.candidate_file));
     free(btext);

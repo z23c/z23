@@ -113,7 +113,7 @@ void muse_run_write_facts(const struct muse_run_task *t,
         "\"outside_count\":%lld,\"outside\":[%s]},"
         "\"prior_unresolved\":%s,"
         "\"workspace\":{\"restored\":%s,\"blocked\":%s,"
-        "\"reason\":\"%s\"}}",
+        "\"half_undone\":%s,\"reason\":\"%s\"}}",
         t->ref.seq, t->ref.name, t->ref.attempt,
         t->worker, esc_gate, t->scope,
         t->model, esc_model,
@@ -141,18 +141,20 @@ void muse_run_write_facts(const struct muse_run_task *t,
         r->scope_outside_count, r->scope_outside,
         r->prior_unresolved ? "true" : "false",
         r->workspace_restored ? "true" : "false",
-        r->workspace_blocked ? "true" : "false", esc_restore);
+        r->workspace_blocked ? "true" : "false",
+        r->half_undone ? "true" : "false", esc_restore);
     (void)muse_run_write_atomic(path, body);
     free(body);
 }
 
-/* THE LOUD HALF OF A BLOCKED RESTORE. A half-undone workspace is not a
- * detail of one run's evidence file: it is a workspace the NEXT claimed
- * task must not be handed. The run cannot un-hand it — the receiver's
- * clean-pre-state refusal is what does that, and it is correct — but it
- * can leave the one artifact an operator needs to clear it: what was
- * touched, which base it was going back to, which artifact holds the
- * change, and what stopped. One file, named, beside the evidence. */
+/* THE LOUD PART OF A RESTORE THAT DID NOT FINISH. A workspace left off
+ * its base is not a detail of one run's evidence file: it is a workspace
+ * the NEXT claimed task must not be handed. The run cannot un-hand it —
+ * the receiver's clean-pre-state refusal is what does that, and it is
+ * correct — but it can leave the one artifact an operator needs to clear
+ * it: which workspace, which base it was going back to, which artifact
+ * holds the change (or that none does), whether the tree was already
+ * half-undone, and what stopped. One file, named, beside the evidence. */
 void muse_run_write_blocked(const struct muse_run_task *t,
     const struct muse_run_result *r)
 {
@@ -162,9 +164,10 @@ void muse_run_write_blocked(const struct muse_run_task *t,
         return;
     (void)snprintf(body, sizeof(body),
         "workspace=%s\nbase=%s\ncandidate=%s\nref=%lld/%s/%lld\n"
-        "blocker=%s\n",
+        "half_undone=%s\nblocker=%s\n",
         t->workspace, r->base,
         r->candidate_file[0] ? r->candidate_file : "none",
-        t->ref.seq, t->ref.name, t->ref.attempt, r->workspace_restore);
+        t->ref.seq, t->ref.name, t->ref.attempt,
+        r->half_undone ? "true" : "false", r->workspace_restore);
     (void)muse_run_write_atomic(path, body);
 }

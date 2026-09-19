@@ -598,18 +598,18 @@ static const char *mrr_verify(struct mrr_state *st, char *patch, size_t cap)
  * Any failure from here on leaves a half-undone tree, which is the one
  * state the caller must be able to tell apart from an untouched one. */
 static const char *mrr_apply(struct mrr_state *st, const char *patch,
-    bool *blocked)
+    bool *half_undone)
 {
     const char *why;
-    if (blocked) *blocked = true;
+    if (half_undone) *half_undone = true;
     why = mrr_undo(st, patch);
     if (!why) why = mrr_settled(st);
-    if (!why && blocked) *blocked = false;
+    if (!why && half_undone) *half_undone = false;
     return why;
 }
 
 bool muse_restore_workspace(const struct muse_restore_in *in, char *reason,
-    size_t reason_cap, bool *blocked)
+    size_t reason_cap, bool *half_undone)
 {
     struct mrr_state st;
     char patch[MRR_PATH_MAX];
@@ -617,13 +617,13 @@ bool muse_restore_workspace(const struct muse_restore_in *in, char *reason,
     memset(&st, 0, sizeof(st));
     st.in = in;
     patch[0] = '\0';
-    if (blocked) *blocked = false;
+    if (half_undone) *half_undone = false;
     why = mrr_verify(&st, patch, sizeof(patch));
     if (!why && st.audit_total == 0) {
         (void)snprintf(reason, reason_cap,
             "already clean at base %.12s", in->base);
     } else if (!why) {
-        why = mrr_apply(&st, patch, blocked);
+        why = mrr_apply(&st, patch, half_undone);
         if (!why)
             (void)snprintf(reason, reason_cap,
                 "restored to base %.12s from verified %s (%zu untracked "
