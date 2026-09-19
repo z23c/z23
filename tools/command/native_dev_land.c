@@ -1252,6 +1252,12 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
     memcpy(copy, text, len);
     for (line = strtok_r(copy, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
+        /* Gate names can contain "fail" (check-pipefail-status-pipe).
+         * A passing result is not the failure that stopped the candidate. */
+        const char *result = line + strspn(line, " \t\r");
+        if (strncmp(result, "PASS", 4) == 0 &&
+            (result[4] == '\0' || strchr(" \t\r", result[4])))
+            continue;
         for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
             if (strstr(line, needles[i])) {
                 dl_sanitize_copy(line, out, cap);

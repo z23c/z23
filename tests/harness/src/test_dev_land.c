@@ -1108,7 +1108,8 @@ static int test_dev_land_regen_failure_fails_row(void)
         dlx_isolate("regendocs_c");
         ASSERT(dlx_rig_make_docregen(
             &rig, "regendocs_c_rig",
-            "@echo 'FAIL: synthetic regen failure' >&2; exit 1", "@:",
+            "@echo 'PASS check-pipefail-status-pipe 5977 ms'; "
+            "echo 'FAIL: synthetic regen failure' >&2; exit 1", "@:",
             "@:"));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -2724,12 +2725,25 @@ int test_dev_land(void)
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        const struct json_value *inflight = json_get(&c.reply.data, "in_flight");
+        ASSERT(inflight != NULL);
+        /* The published outcome must not mistake a passing gate's name
+         * for the proof failure, even when it precedes the failure log. */
+        char landdir[1200];
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(logpath, sizeof(logpath), "%s/logs/land-1-a1.log", landdir);
+        ASSERT(dlx_write(logpath, "  PASS check-pipefail-status-pipe 5977 ms\n"));
+        dlx_end(&c);
         setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
         ASSERT(strcmp(dlx_str(&c, "dimension"), "lint") == 0);
+        ASSERT_STR_EQ(dlx_str(&c, "detail"), "proof stub: fail");
         (void)snprintf(logpath, sizeof(logpath), "%s", dlx_str(&c,
                                                                "log_path"));
         ASSERT(logpath[0] != '\0');

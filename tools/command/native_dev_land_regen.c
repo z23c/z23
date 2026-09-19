@@ -185,6 +185,11 @@ static void dlrg_first_actionable(const char *text, char *out, size_t cap)
     memcpy(copy, text, len);
     for (line = strtok_r(copy, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
+        /* A passing gate may itself have "fail" in its name. */
+        const char *result = line + strspn(line, " \t\r");
+        if (strncmp(result, "PASS", 4) == 0 &&
+            (result[4] == '\0' || strchr(" \t\r", result[4])))
+            continue;
         for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
             if (strstr(line, needles[i])) {
                 (void)snprintf(out, cap, "%s", line);

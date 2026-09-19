@@ -1235,7 +1235,7 @@ Z23_FLAG("ZCL_K9_SRC", "env_test", "-", "-",
 Z23_FLAG("ZCL_K9_START", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_kill9_recovery.c:1229")
 Z23_FLAG("ZCL_LAND_ALLOW_UNSIGNED", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:1537")
+          "undocumented; first use tools/command/native_dev_land.c:1543")
 Z23_FLAG("ZCL_LAND_BASE", "env_build", "main", "-",
           "undocumented; first use tools/dev/land_lander.sh:104")
 Z23_FLAG("ZCL_LAND_BATCH_MAX", "env_build", "16", "-",
@@ -1243,7 +1243,7 @@ Z23_FLAG("ZCL_LAND_BATCH_MAX", "env_build", "16", "-",
 Z23_FLAG("ZCL_LAND_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:102")
 Z23_FLAG("ZCL_LAND_DEPS_TEST_FORCE", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:3353")
+          "undocumented; first use tools/command/native_dev_land.c:3359")
 Z23_FLAG("ZCL_LAND_GATE_CMD", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:123")
 Z23_FLAG("ZCL_LAND_GATE_TIMEOUT_S", "env_build", "2700", "-",
@@ -1260,12 +1260,12 @@ Z23_FLAG("ZCL_LAND_INTERVAL_S", "env_build", "30", "-",
 Z23_FLAG("ZCL_LAND_MAX_ATTEMPTS", "env_build", "2", "-",
           "undocumented; first use tools/dev/land_lander.sh:108")
 Z23_FLAG("ZCL_LAND_PROOF_STUB", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:1281")
+          "undocumented; first use tools/command/native_dev_land.c:1287")
 Z23_FLAG("ZCL_LAND_PROOF_IDLE_SEC", "env_runtime", "900", "-",
           "how long a queued, never-claimed proof request may read as an "
           "ordinary pending state before the land row names its true idle "
           "age; tests lower it to exercise the boundary; first use "
-          "tools/command/native_dev_land.c:1410")
+          "tools/command/native_dev_land.c:1416")
 Z23_FLAG("ZCL_LAND_QUEUE", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:100")
 Z23_FLAG("ZCL_LAND_RACE_PATH", "env_test", "-", "-",
@@ -1275,15 +1275,15 @@ Z23_FLAG("ZCL_LAND_RACE_PREFIX", "env_test", "-", "-",
 Z23_FLAG("ZCL_LAND_READY_REF", "env_build", "land/ready", "-",
           "undocumented; first use tools/dev/land_lander.sh:105")
 Z23_FLAG("ZCL_LAND_REGEN_GATE_STUB_FAIL", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:2179")
+          "undocumented; first use tools/command/native_dev_land.c:2185")
 Z23_FLAG("ZCL_LAND_REGEN_MAKE_STUB", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:2163")
+          "undocumented; first use tools/command/native_dev_land.c:2169")
 Z23_FLAG("ZCL_LAND_STATE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_bench.sh:68")
 Z23_FLAG("ZCL_LAND_SUBMITTER", "env_build", "-", "-",
           "undocumented; first use tools/dev/land.sh:159")
 Z23_FLAG("ZCL_LAND_TEST_PICK_DELAY_MS", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:4351")
+          "undocumented; first use tools/command/native_dev_land.c:4357")
 Z23_FLAG("ZCL_LAND_TIMING", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:101")
 Z23_FLAG("ZCL_LAND_WORKTREE", "env_build", "-", "-",
