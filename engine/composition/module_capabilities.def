@@ -406,6 +406,7 @@ ZCL_MODULE_CAPABILITY("contexts/commons/services/src/metaverse_space_scout_servi
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/metaverse_space_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/muse_run.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/muse_run_audit.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/commons/services/src/muse_run_evidence.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/muse_run_restore.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/muse_session.c", CAP_PROCESS|CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "owns exactly one `muse serve` host child: forks it, execvp()s it with no shell, wires its stdin/stdout to two private pipes, and reaps it, sending SIGKILL only after a bounded close grace. The FS classes are that pipe traffic plus one read of /dev/urandom for the idempotency handle; CAP_CLOCK is the nanosleep backoff inside that close grace, since the monotonic and wall reads go through the platform clock seam (clock_now_monotonic_ns/clock_now_wall_ms, unclassified). It never touches peer, wallet, consensus, or deploy state.")
 ZCL_MODULE_CAPABILITY("engine/services/src/mirror_divergence_locator.c", CAP_FS_READ|CAP_FS_WRITE, "")

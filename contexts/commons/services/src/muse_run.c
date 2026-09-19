@@ -6,6 +6,7 @@
 
 #include "services/muse_run.h"
 #include "services/muse_run_audit.h"
+#include "services/muse_run_evidence.h"
 #include "services/muse_run_restore.h"
 #include "services/muse_session.h"
 #include "base/hex.h"
@@ -81,36 +82,6 @@ static char *mr_read_file(const char *path, size_t cap)
     buf[n] = '\0';
     fclose(f);
     return buf;
-}
-
-/* Atomic write: temp file in the same directory plus rename, so a
- * kill can never leave a partial evidence file for a gate to read. */
-static bool mr_write_atomic(const char *path, const char *text)
-{
-    char tmp[8192];
-    FILE *f;
-    size_t n;
-    if (!path || !text) return false;
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp-%d", path,
-            (int)getpid()) >= (int)sizeof(tmp))
-        return false;
-    f = fopen(tmp, "wb");
-    if (!f) return false;
-    n = strlen(text);
-    if (n > 0 && fwrite(text, 1, n, f) != n) {
-        fclose(f);
-        (void)unlink(tmp);
-        return false;
-    }
-    if (fclose(f) != 0) {
-        (void)unlink(tmp);
-        return false;
-    }
-    if (rename(tmp, path) != 0) {
-        (void)unlink(tmp);
-        return false;
-    }
-    return true;
 }
 
 static bool mr_append_line(const char *path, const char *line)
@@ -313,12 +284,12 @@ static void mr_report_short(const struct muse_run_task *t,
 
 /* SHA-1 over the post-run change set (services/muse_run_restore.h): the
  * tracked diff plus one content hash per untracked path, hashed once more
- * so the token is fixed-width. Empty diffs hash deterministically; "none"
- * only when git itself fails. On success the fold is also published as
- * <rundir>/candidate-<hex>.diff (atomic): the named artifact a gate checks
- * for existence, and the durable copy the workspace restore verifies
- * before it undoes anything. file_out takes that filename ("" when
- * nothing is named). */
+ * so the token is fixed-width. Empty diffs hash deterministically. On
+ * success the fold is also published as <rundir>/candidate-<hex>.diff
+ * (atomic): the named artifact a gate checks for existence, and the
+ * durable copy the workspace restore verifies before it undoes anything.
+ * Every failure leaves candidate "none" and names itself in
+ * candidate_note. */
 static void mr_candidate(const char *workspace, const char *rundir,
     struct muse_run_result *r)
 {
@@ -334,13 +305,13 @@ static void mr_candidate(const char *workspace, const char *rundir,
         snprintf(art, sizeof(art), "%s/%s", rundir,
             fname) < (int)sizeof(art) &&
         strlen(fname) < sizeof(r->candidate_file) &&
-        mr_write_atomic(art, fold)) {
+        muse_run_write_atomic(art, fold)) {
         (void)snprintf(r->candidate_file, sizeof(r->candidate_file), "%s",
             fname);
     } else {
-        /* The identity was measured but the bytes did not land: that is
-         * a fold without an artifact, which no restore may ever verify
-         * against and no pass may rest on. Name it. */
+        /* An identity with no artifact is a name for bytes nobody can
+         * read back: no restore may verify against it, no pass may rest
+         * on it. Name that too. */
         (void)snprintf(r->candidate_note, sizeof(r->candidate_note),
             "the candidate artifact could not be published under the run "
             "dir");
@@ -348,9 +319,8 @@ static void mr_candidate(const char *workspace, const char *rundir,
     free(fold);
 }
 
-/* True when the change set was named AND its bytes are on disk under the
- * run dir. Nothing else counts as a preserved change: an identity with
- * no artifact is a name for something nobody can read back. */
+/* Named AND on disk under the run dir: the only shape that counts as a
+ * preserved change. */
 static bool mr_candidate_named(const struct muse_run_result *r)
 {
     return muse_hex40(r->candidate) && r->candidate_file[0] != '\0';
@@ -483,14 +453,13 @@ static bool mr_run_gate(const char *workspace, const char *group,
  * candidate tree first, through the workspace's own make target with an
  * argv (no shell), inside the gate's deadline. Anything but a normal,
  * observed exit 0 refuses, and names the build as the reason. */
-#define MR_GATE_BUILD_TARGET "test_parallel"
 #define MR_GATE_BUILD_LOG (64u * 1024u)
 
 static bool mr_build_gate(const char *workspace, int timeout_ms,
     struct mr_spawn_outcome *o)
 {
     const char *argv[] = {
-        "make", "-s", "-C", workspace, MR_GATE_BUILD_TARGET, NULL
+        "make", "-s", "-C", workspace, MUSE_RUN_GATE_BUILD_TARGET, NULL
     };
     char *log;
     memset(o, 0, sizeof(*o));
@@ -564,111 +533,6 @@ static const char *mr_engine_short(const char *name, char *buf, size_t cap)
         }
     }
     return name;
-}
-
-/* --- writers --------------------------------------------------------------- */
-
-static void mr_write_receipt(const struct muse_run_task *t,
-    const struct muse_run_result *r)
-{
-    char path[8192], body[4096], esc_reason[1024], esc_engine[128];
-    muse_json_escape(r->reason, esc_reason, sizeof(esc_reason));
-    muse_json_escape(r->engine, esc_engine, sizeof(esc_engine));
-    if (snprintf(path, sizeof(path), "%s/receipt.json",
-            t->rundir) >= (int)sizeof(path))
-        return;
-    (void)snprintf(body, sizeof(body),
-        "{\"verdict\":\"%s\",\"seq\":%lld,\"name\":\"%s\",\"attempt\":%lld,"
-        "\"group\":\"%s\",\"turn\":\"%s\",\"reason\":\"%s\","
-        "\"engine\":\"%s\",\"tokens\":%llu,\"files_changed\":%lld,"
-        "\"workspace_restored\":%s,\"workspace_blocked\":%s}",
-        r->verdict, t->ref.seq, t->ref.name, t->ref.attempt, t->gate,
-        r->terminal, esc_reason, esc_engine,
-        r->total_tokens, r->files_changed,
-        r->workspace_restored ? "true" : "false",
-        r->workspace_blocked ? "true" : "false");
-    (void)mr_write_atomic(path, body);
-}
-
-static void mr_write_facts(const struct muse_run_task *t,
-    const struct muse_run_result *r)
-{
-    char path[8192];
-    char *body = zcl_malloc(65536, "muse_run.facts");
-    char esc_reason[1024], esc_engine[128], esc_verdict[2048];
-    char esc_model[512], esc_gate[512], esc_spawn[192];
-    char esc_restore[512], esc_cnote[512];
-    if (!body) return;
-    muse_json_escape(r->candidate_note, esc_cnote, sizeof(esc_cnote));
-    muse_json_escape(r->gate_spawn, esc_spawn, sizeof(esc_spawn));
-    muse_json_escape(r->workspace_restore, esc_restore, sizeof(esc_restore));
-    muse_json_escape(r->reason, esc_reason, sizeof(esc_reason));
-    muse_json_escape(r->engine, esc_engine, sizeof(esc_engine));
-    muse_json_escape(r->gate_verdict, esc_verdict, sizeof(esc_verdict));
-    muse_json_escape(r->model_resolved, esc_model, sizeof(esc_model));
-    muse_json_escape(t->gate, esc_gate, sizeof(esc_gate));
-    if (snprintf(path, sizeof(path), "%s/muse.json",
-            t->rundir) >= (int)sizeof(path)) {
-        free(body);
-        return;
-    }
-    (void)snprintf(body, 65536,
-        "{\"ref\":{\"seq\":%lld,\"name\":\"%s\",\"attempt\":%lld},"
-        "\"worker\":\"%s\",\"group\":\"%s\",\"scope\":\"%s\","
-        "\"model_requested\":\"%s\",\"model_resolved\":\"%s\","
-        "\"provider\":\"%s\",\"session\":\"%s\",\"turn\":\"%s\","
-        "\"commands\":{\"start\":\"%s\",\"turn\":\"%s\"},"
-        "\"terminal\":\"%s\",\"verdict\":\"%s\",\"rc\":%d,"
-        "\"reason\":\"%s\",\"engine\":\"%s\","
-        "\"base\":\"%s\",\"candidate\":\"%s\","
-        "\"candidate_file\":\"%s\",\"candidate_note\":\"%s\","
-        "\"head\":{\"pinned\":\"%s\",\"observed\":\"%s\","
-        "\"measured\":%s},"
-        "\"gate\":{\"name\":\"%s\",\"evidence\":\"%s\","
-        "\"verdict\":\"%s\",\"present\":%s,\"ran\":%lld,\"failed\":%lld,"
-        "\"ms\":%lld,\"spawn\":\"%s\",\"exit\":%d,\"normal\":%s,"
-        "\"build\":{\"target\":\"%s\",\"spawn\":\"%s\",\"ms\":%lld,"
-        "\"runner_sha3\":\"%s\"}},"
-        "\"tokens\":{\"input\":%llu,\"output\":%llu,\"total\":%llu,"
-        "\"cached\":%llu,\"billed\":%llu},"
-        "\"duration_ms\":%lld,\"wall_ms\":%lld,\"files_changed\":%lld,"
-        "\"scope_audit\":{\"pre_measured\":%s,\"pre_clean\":%s,"
-        "\"pre_count\":%lld,\"pre\":[%s],\"changed_measured\":%s,"
-        "\"changed_count\":%lld,\"changed\":[%s],"
-        "\"outside_count\":%lld,\"outside\":[%s]},"
-        "\"prior_unresolved\":%s,"
-        "\"workspace\":{\"restored\":%s,\"blocked\":%s,"
-        "\"reason\":\"%s\"}}",
-        t->ref.seq, t->ref.name, t->ref.attempt,
-        t->worker, esc_gate, t->scope,
-        t->model, esc_model,
-        r->provider, r->session, r->turn,
-        r->start_command, r->turn_command,
-        r->terminal, r->verdict, r->rc,
-        esc_reason, esc_engine,
-        r->base, r->candidate,
-        r->candidate_file, esc_cnote,
-        r->base, r->head_observed,
-        r->head_measured ? "true" : "false",
-        esc_gate, r->gate_evidence,
-        esc_verdict, r->gate_present ? "true" : "false",
-        r->gate_ran, r->gate_failed, r->gate_ms,
-        esc_spawn, r->gate_exit, r->gate_normal ? "true" : "false",
-        MR_GATE_BUILD_TARGET, r->build_spawn, r->build_ms, r->gate_runner,
-        r->input_tokens, r->output_tokens, r->total_tokens,
-        r->cached_input_tokens, r->billed_tokens,
-        r->duration_ms, r->wall_ms, r->files_changed,
-        r->scope_pre_measured ? "true" : "false",
-        r->scope_pre_clean ? "true" : "false",
-        r->scope_pre_count, r->scope_pre,
-        r->scope_changed_measured ? "true" : "false",
-        r->scope_changed_count, r->scope_changed,
-        r->scope_outside_count, r->scope_outside,
-        r->prior_unresolved ? "true" : "false",
-        r->workspace_restored ? "true" : "false",
-        r->workspace_blocked ? "true" : "false", esc_restore);
-    (void)mr_write_atomic(path, body);
-    free(body);
 }
 
 /* --- the run --------------------------------------------------------------- */
@@ -952,6 +816,23 @@ static void mr_fold_once(struct mr_core *c)
     mr_candidate(c->task->workspace, c->task->rundir, c->res);
 }
 
+/* PRESERVED BEFORE IT IS JUDGED. A change that cannot be folded into a
+ * durable artifact can never pass (mr_pass_closed) and can never be
+ * verified by a restore, so refusing here SAVES the gate build that was
+ * about to run and names the blocker in one line. The change itself is
+ * untouched either way. */
+static bool mr_preserved(struct mr_core *c)
+{
+    struct muse_run_result *r = c->res;
+    mr_fold_once(c);
+    if (mr_candidate_named(r)) return true;
+    (void)snprintf(r->reason, sizeof(r->reason),
+        "change set could not be preserved: %.180s",
+        r->candidate_note[0] ? r->candidate_note
+                             : "the fold named no reason");
+    return false;
+}
+
 /* Everything measured before the gate is allowed to run: the diff count,
  * the change set against the declared scope, and the pinned HEAD. Each one
  * writes its own verdict and reason on refusal. */
@@ -967,23 +848,7 @@ static bool mr_measured_before_gate(struct mr_core *c)
     /* Measured before the gate runs: the change set judged here is the
      * model's output, never the gate's own side effects. */
     if (!mr_scope_clean(c)) return false;
-    if (!mr_head_pinned(c)) return false;
-    /* AND PRESERVED before the gate runs. A change that cannot be folded
-     * into a durable artifact can never be passed (mr_pass_closed), can
-     * never be verified by a restore, and is exactly what a gate-passing
-     * turn was thrown away for in production. Refusing it HERE SAVES the
-     * gate build that was about to run and names the blocker in one
-     * line; learning the same thing after the gate spends that build for
-     * nothing. The change itself is untouched either way. */
-    mr_fold_once(c);
-    if (!mr_candidate_named(c->res)) {
-        (void)snprintf(r->reason, sizeof(r->reason),
-            "change set could not be preserved: %.180s",
-            r->candidate_note[0] ? r->candidate_note
-                                 : "the fold named no reason");
-        return false;
-    }
-    return true;
+    return mr_head_pinned(c) && mr_preserved(c);
 }
 
 /* Builds the gate target from the candidate tree and hands back what is
@@ -1007,13 +872,13 @@ static bool mr_judge_build(struct mr_core *c, int *run_ms)
             name);
         r->gate_exit = spawn.exit_code;
         (void)snprintf(r->reason, sizeof(r->reason),
-            "gate build failed: %s %s", MR_GATE_BUILD_TARGET, name);
+            "gate build failed: %s %s", MUSE_RUN_GATE_BUILD_TARGET, name);
         return false;
     }
     if (!mr_runner_identity(c->task->workspace, r->gate_runner)) {
         (void)snprintf(r->reason, sizeof(r->reason),
             "gate build left no readable runner: %s",
-            MR_GATE_BUILD_TARGET);
+            MUSE_RUN_GATE_BUILD_TARGET);
         return false;
     }
     if (spent >= (int64_t)c->gate_timeout_ms) {
@@ -1078,28 +943,6 @@ static int mr_judge(struct mr_core *c, char *gate_log, size_t logcap,
     return 1;
 }
 
-/* THE LOUD HALF OF A BLOCKED RESTORE. A half-undone workspace is not a
- * detail of one run's evidence file: it is a workspace the NEXT claimed
- * task must not be handed. The run cannot un-hand it — the receiver's
- * clean-pre-state refusal is what does that, and it is correct — but it
- * can leave the one artifact an operator needs to clear it: what was
- * touched, which base it was going back to, which artifact holds the
- * change, and what stopped. One file, named, beside the evidence. */
-static void mr_write_blocked(const struct muse_run_task *t,
-    const struct muse_run_result *r)
-{
-    char path[8192], body[2048];
-    if (snprintf(path, sizeof(path), "%s/workspace.blocked",
-            t->rundir) >= (int)sizeof(path))
-        return;
-    (void)snprintf(body, sizeof(body),
-        "workspace=%s\nbase=%s\ncandidate=%s\nref=%lld/%s/%lld\n"
-        "blocker=%s\n",
-        t->workspace, r->base,
-        r->candidate_file[0] ? r->candidate_file : "none",
-        t->ref.seq, t->ref.name, t->ref.attempt, r->workspace_restore);
-    (void)mr_write_atomic(path, body);
-}
 
 /* AFTER the verdict and evidence are durable: return the workspace to the
  * pinned base so the next claimed task on it is not refused for this
@@ -1121,7 +964,7 @@ static void mr_restore(const struct muse_run_task *t,
     r->workspace_restored = muse_restore_workspace(&in,
         r->workspace_restore, sizeof(r->workspace_restore),
         &r->workspace_blocked);
-    if (r->workspace_blocked) mr_write_blocked(t, r);
+    if (r->workspace_blocked) muse_run_write_blocked(t, r);
 }
 
 /* The receipt, evidence and report every exit path shares. */
@@ -1149,13 +992,13 @@ static void mr_report(struct mr_core *c, struct muse_session *s,
      * durable whatever the restore does, and once after, with its
      * outcome. */
     if (!t->caller_holds_claim)
-        mr_write_receipt(t, r);
-    mr_write_facts(t, r);
+        muse_run_write_receipt(t, r);
+    muse_run_write_facts(t, r);
     if (s) muse_session_close(s);
     mr_restore(t, r);
     if (!t->caller_holds_claim)
-        mr_write_receipt(t, r);
-    mr_write_facts(t, r);
+        muse_run_write_receipt(t, r);
+    muse_run_write_facts(t, r);
     printf("ref=%lld/%s/%lld verdict=%s tokens=%llu files=%lld wall_ms=%lld\n",
         t->ref.seq, t->ref.name, t->ref.attempt, r->verdict,
         (unsigned long long)r->total_tokens, r->files_changed,
