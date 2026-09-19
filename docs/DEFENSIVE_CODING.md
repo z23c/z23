@@ -1109,7 +1109,11 @@ oracle turns green and `check-doc-claims` turns RED, naming the plan file and
 the stale line. Every `check-no-*` ratchet already in `LINT_GATES` is usable as
 an oracle, so items they watch get freshness checking for free. Gates are
 resolved through the same `gate_command()` table `tools/lint/run_lint.sh` uses,
-run at most once per invocation, and a gate may not name itself.
+run at most once per invocation, and a gate may not name itself. A name that
+table cannot resolve is reported as malformed straight away — nothing waits on
+a verdict for a gate that does not exist. Under `make lint` the verdict for a
+gate that does exist is the driver's own, so this gate never runs a second
+copy of it beside the driver's.
 
 **Out-of-repo documents are NOT covered by `make lint`.** The motivating
 failure happened in `~/.claude/plans/*.md`, which sits outside the git
