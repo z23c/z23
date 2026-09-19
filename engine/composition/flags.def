@@ -1011,7 +1011,7 @@ Z23_FLAG("ZCL_HEX_CODEC_FILE_FLOOR", "env_build", "800", "-",
 Z23_FLAG("ZCL_HEX_CODEC_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:578")
 Z23_FLAG("ZCL_HOOKS_STATUS_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/hooks_status.sh:28")
+          "undocumented; first use tools/scripts/hooks_status.sh:26")
 Z23_FLAG("ZCL_HOST_GC_BINBAK_MIN_AGE_D", "env_build", "60", "-",
           "days a ~/bin/*.bak-* quarantine backup survives; first use tools/scripts/host_gc.sh:136")
 Z23_FLAG("ZCL_HOST_GC_CACHE_FREEZE_GB", "env_build", "100", "-",
