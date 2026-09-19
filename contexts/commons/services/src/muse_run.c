@@ -947,7 +947,6 @@ static int mr_judge(struct mr_core *c, char *gate_log, size_t logcap,
     return 1;
 }
 
-
 /* AFTER the verdict and evidence are durable: return the workspace to the
  * pinned base so the next claimed task on it is not refused for this
  * run's own dirt. muse_restore_workspace touches nothing unless the
