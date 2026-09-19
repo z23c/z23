@@ -62,6 +62,8 @@
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "net/net.h"
+#include "net/peer_scoring.h"
+#include "net/protocol.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -71,6 +73,7 @@
 #include "validation/main_state.h"
 #include "validation/txmempool.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -1205,6 +1208,215 @@ static int test_block_swarm_manifest_republish(void)
     return failures;
 }
 
+/* ══════════════ Past-manifest requests: three boundaries apart ═══════════
+ *
+ * node2, 2026-09-18: the canonical node logged "zblkreq 50850 out of range
+ * (50850)" through 50857 from one fresh node and banned it for 24 h. This
+ * fixture reproduces that shape deterministically and keeps the three
+ * boundaries apart, so a fix cannot hide in the wrong one:
+ *   CLIENT  which piece indices the fetcher's real scheduler puts on the wire
+ *           to a peer whose own manifest is shorter than the swarm's;
+ *   SERVER  which of those requests the seeder answers with zblkdata;
+ *   SCORE   what the seeder's peer scoring charges the fetcher.
+ * Two controls: every in-range piece still arrives, and a hand-built request
+ * past the seeder's manifest is still an offence (the server bound is not
+ * relaxed). The swarm then finishes over the full-range peer. */
+#define BS_PM_PIECES      8
+#define BS_PM_SHORT       5
+
+struct bs_fetcher {
+    struct main_state ms;
+    struct tx_mempool mempool;
+    struct coins_view null_view;
+    struct coins_view_cache coins;
+    struct net_manager nm;
+    struct msg_processor mp;
+    struct bs_sink sink;
+};
+
+static bool bs_fetcher_init(struct bs_fetcher *f, int32_t best_header)
+{
+    memset(f, 0, sizeof(*f));
+    main_state_init(&f->ms);
+    tx_mempool_init(&f->mempool, 0);
+    coins_view_cache_init(&f->coins, &f->null_view);
+    net_manager_init(&f->nm);
+    f->mp.main_state = &f->ms;
+    f->mp.mempool = &f->mempool;
+    f->mp.coins_tip = &f->coins;
+    f->mp.params = chain_params_get();
+    f->mp.datadir = ".";
+    f->mp.net_mgr = &f->nm;
+    msg_processor_set_block_submit(&f->mp, bs_block_submit, &f->sink);
+    msg_processor_set_catchup_drain(&f->mp, bs_catchup_drain, &f->sink);
+    msg_processor_set_catchup_batch_scope(&f->mp, bs_scope_begin,
+                                          bs_scope_end, &f->sink);
+    struct uint256 h;
+    memset(&h, 0, sizeof(h));
+    h.data[0] = 0xB0; h.data[1] = 0x0C;
+    struct block_index *bi =
+        chainstate_insert_block_index((struct chainstate *)&f->ms, &h);
+    if (!bi)
+        return false;
+    bi->nHeight = best_header;
+    bi->nStatus = BLOCK_VALID_TREE;
+    f->ms.pindex_best_header = bi;
+    return true;
+}
+
+static void bs_fetcher_free(struct bs_fetcher *f)
+{
+    net_manager_free(&f->nm);
+    coins_view_cache_free(&f->coins);
+    tx_mempool_free(&f->mempool);
+    main_state_free(&f->ms);
+}
+
+/* The seeder publishes the manifest of its chain through `end`. */
+static bool bs_publish_through(struct bs_seeder *s, int32_t end)
+{
+    struct block_piece_manifest m;
+    return block_piece_manifest_build_active_chain(
+               &s->ms.chain_active, BS_START_HEIGHT, end, &m) &&
+           msg_processor_publish_block_manifest(&m, end);
+}
+
+/* Piece indices of the zblkreq messages in kept[0..n): how many, and how
+ * many at or past `limit`. A segment carries one whole wire message. */
+static void bs_count_blkreq(const struct bs_kept *kept, size_t n,
+                            uint32_t limit, int *total, int *past)
+{
+    const size_t hdr = MESSAGE_START_SIZE + COMMAND_SIZE + 4 + 4;
+    *total = 0;
+    *past = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (kept[i].size < hdr + 4 ||
+            strncmp((const char *)kept[i].data + MESSAGE_START_SIZE,
+                    MSG_BLOCK_REQ, COMMAND_SIZE) != 0)
+            continue;
+        const unsigned char *p = kept[i].data + hdr;
+        uint32_t idx = (uint32_t)p[0] | (uint32_t)p[1] << 8 |
+                       (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+        (*total)++;
+        if (idx >= limit)
+            (*past)++;
+    }
+}
+
+/* Hand one crafted zblkreq for `index` from `from` to the seeder. */
+static bool bs_send_raw_blkreq(struct p2p_node *from,
+                               struct send_segment *sentinel,
+                               struct msg_processor *to_mp,
+                               struct p2p_node *to, uint32_t index)
+{
+    const struct chain_params *params = chain_params_get();
+    unsigned char le[4] = { (unsigned char)index, (unsigned char)(index >> 8),
+                            (unsigned char)(index >> 16),
+                            (unsigned char)(index >> 24) };
+    bool ok = true;
+    p2p_node_begin_message(from, MSG_BLOCK_REQ, params->pchMessageStart);
+    p2p_node_write_message_data(from, le, sizeof(le));
+    p2p_node_end_message(from);
+    bs_pump(from, sentinel, to_mp, to, params->pchMessageStart, &ok);
+    return ok;
+}
+
+static int test_block_swarm_past_peer_manifest(void)
+{
+    int failures = 0;
+
+    TEST("block swarm loopback: a peer with a shorter manifest is never "
+         "asked past it, is not scored, and the swarm still completes") {
+        const struct chain_params *params = chain_params_get();
+        const unsigned char *ms = params->pchMessageStart;
+        const int32_t end = BS_PM_PIECES * (int32_t)BLOCKS_PER_PIECE;
+        const int32_t short_end = BS_PM_SHORT * (int32_t)BLOCKS_PER_PIECE;
+        struct bs_seeder seed;
+        struct bs_fetcher fb;
+        struct bs_kept kept[BS_PM_PIECES + 4];
+        bool ok = true;
+
+        ASSERT(!mp_block_swarm_is_active());
+        ASSERT(bs_seeder_build(&seed, end, 7u, "pastman"));
+        ASSERT(bs_fetcher_init(&fb, end));
+        struct p2p_node *ax = bs_make_peer(&seed.nm, 11); /* seeder's view */
+        struct p2p_node *bx = bs_make_peer(&fb.nm, 12);   /* full-range peer */
+        struct p2p_node *ay = bs_make_peer(&seed.nm, 13);
+        struct p2p_node *by = bs_make_peer(&fb.nm, 14);   /* short peer */
+        ASSERT(ax && bx && ay && by);
+        struct send_segment *sax = bs_install_sentinel(ax);
+        struct send_segment *sbx = bs_install_sentinel(bx);
+        struct send_segment *say = bs_install_sentinel(ay);
+        struct send_segment *sby = bs_install_sentinel(by);
+
+        /* X advertises all 8 pieces: that manifest becomes the swarm. */
+        push_block_manifest(&seed.mp, ax);
+        bs_pump(ax, sax, &fb.mp, bx, ms, &ok);
+        ASSERT(ok && mp_block_swarm_is_active());
+        /* Y advertises only 5. */
+        ASSERT(bs_publish_through(&seed, short_end));
+        push_block_manifest(&seed.mp, ay);
+        bs_pump(ay, say, &fb.mp, by, ms, &ok);
+        ASSERT(ok && by->blk_manifest_received);
+        ASSERT_EQ(by->blk_peer_height, short_end);
+
+        /* CLIENT: what the real scheduler asks Y for. */
+        mp_snapshot_send_tick(&fb.mp, by);
+        size_t n = bs_steal_queue(by, sby, kept, BS_PM_PIECES + 4);
+        int asked = 0, past = 0;
+        bs_count_blkreq(kept, n, BS_PM_SHORT, &asked, &past);
+
+        /* SERVER + SCORE: every request Y received, then what it answered
+         * and what it charged. Measured before any verdict, so a failure
+         * names all three boundaries at once. */
+        int score = atomic_load(&ay->misbehavior);
+        bool delivered = true;
+        for (size_t i = 0; i < n; i++) {
+            delivered = bs_deliver(&seed.mp, ay, &kept[i], ms) && delivered;
+            free(kept[i].data);
+        }
+        int charged = atomic_load(&ay->misbehavior) - score;
+        bs_pump(ay, say, &fb.mp, by, ms, &ok);
+        printf("(client asked=%d past=%d; server bodies=%llu; charged=%d) ",
+               asked, past, (unsigned long long)fb.sink.blocks, charged);
+        ASSERT(delivered && ok);
+        ASSERT_EQ(past, 0);
+        ASSERT_EQ(asked, BS_PM_SHORT);
+        ASSERT_EQ(charged, 0);
+        ASSERT_EQ(fb.sink.blocks, (uint64_t)short_end);
+
+        /* Control: a request past the seeder's manifest is still scored. */
+        ASSERT(bs_send_raw_blkreq(by, sby, &seed.mp, ay, BS_PM_SHORT + 2));
+        ASSERT_EQ(atomic_load(&ay->misbehavior),
+                  score + peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE));
+
+        /* The rest arrives over the full-range peer once it serves them. */
+        ASSERT(bs_publish_through(&seed, end));
+        for (int r = 0; r < 4 && mp_block_swarm_is_active(); r++) {
+            mp_snapshot_send_tick(&fb.mp, bx);
+            if (bs_pump(bx, sbx, &seed.mp, ax, ms, &ok) == 0)
+                break;
+            bs_pump(ax, sax, &fb.mp, bx, ms, &ok);
+        }
+        ASSERT(ok && !mp_block_swarm_is_active());
+        ASSERT_EQ(fb.sink.blocks, (uint64_t)end);
+        ASSERT_EQ(atomic_load(&ax->misbehavior), 0);
+
+        struct send_segment *sents[] = { sax, sbx, say, sby };
+        struct p2p_node *nodes[] = { ax, bx, ay, by };
+        for (int i = 0; i < 4; i++) {
+            send_segment_free(sents[i]);
+            nodes[i]->send_head = nodes[i]->send_tail = NULL;
+            p2p_node_free(nodes[i]);
+        }
+        bs_fetcher_free(&fb);
+        bs_seeder_free(&seed);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_block_swarm_loopback(void)
 {
     int failures = 0;
@@ -1226,6 +1438,7 @@ int test_block_swarm_loopback(void)
     failures += test_block_swarm_manifest_anchor();
     failures += test_block_swarm_sovereignty_gate();
     failures += test_block_swarm_manifest_republish();
+    failures += test_block_swarm_past_peer_manifest();
     boot_snapshot_offer_test_set_trust_override(-1);
     return failures;
 }

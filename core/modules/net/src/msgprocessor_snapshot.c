@@ -109,6 +109,13 @@ static void block_pipeline_clear_piece(struct p2p_node *node,
     }
 }
 
+/* The end height of the manifest this peer advertised and we anchored, or
+ * -1 when none arrived: the reach its piece requests must stay within. */
+static int32_t block_swarm_peer_manifest_end(const struct p2p_node *node)
+{
+    return node->blk_manifest_received ? node->blk_peer_height : -1;
+}
+
 static int32_t block_swarm_local_header_cap(const struct msg_processor *mp)
 {
     int32_t cap = 0;
@@ -1761,9 +1768,10 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
             int32_t header_cap = block_swarm_local_header_cap(mp);
             int32_t assignment_cap =
                 block_swarm_contiguous_window_cap(&g_block_swarm, header_cap);
-            int32_t pidx = block_swarm_assign_piece_through_height(
+            int32_t pidx = block_swarm_assign_piece_for_peer(
                 &g_block_swarm, node->id, node->blk_bitmap,
-                node->blk_bitmap_len, assignment_cap);
+                node->blk_bitmap_len, assignment_cap,
+                block_swarm_peer_manifest_end(node));
             if (pidx < 0)
                 break; /* no more pieces to assign */
 

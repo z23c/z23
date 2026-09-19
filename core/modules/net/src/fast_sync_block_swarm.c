@@ -205,6 +205,18 @@ int32_t block_swarm_assign_piece_through_height(struct block_swarm *bs,
         bs, peer_id, peer_bitmap, peer_bitmap_bytes, max_piece);
 }
 
+int32_t block_swarm_assign_piece_for_peer(struct block_swarm *bs, int peer_id,
+                                          const uint8_t *peer_bitmap,
+                                          size_t peer_bitmap_bytes,
+                                          int32_t max_height,
+                                          int32_t peer_end_height)
+{
+    if (peer_end_height >= 0 && peer_end_height < max_height)
+        max_height = peer_end_height;
+    return block_swarm_assign_piece_through_height(
+        bs, peer_id, peer_bitmap, peer_bitmap_bytes, max_height);
+}
+
 bool block_swarm_receive_piece(struct block_swarm *bs,
                                 uint32_t piece_index, int peer_id)
 {

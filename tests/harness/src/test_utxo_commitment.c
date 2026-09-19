@@ -10,6 +10,43 @@
 #include <time.h>
 #include "util/safe_alloc.h"
 
+/* node2, 2026-09-18: a fresh node asked the canonical node for pieces
+ * 50850..50857 of a 50850-piece manifest, 10 points each, and was banned
+ * for 24 h. No node sends a piece bitmap, so assignment must be bounded by
+ * the manifest the peer itself advertised. */
+static int test_block_swarm_peer_manifest_cap(void)
+{
+    int failures = 0;
+    printf("block_swarm never assigns a peer a piece past its own manifest... ");
+    const int32_t end = 1 + 8 * BLOCKS_PER_PIECE - 1;
+    const int32_t peer_end = 1 + 5 * BLOCKS_PER_PIECE - 1;
+    char dir[512];
+    struct block_piece_manifest m = {
+        .start_height = 1, .end_height = end, .num_pieces = 8,
+        .piece_hashes = zcl_calloc(8, 32, "test_piece_hashes")
+    };
+    struct block_swarm bs = {0};
+    bool ok = test_mkdtemp(dir, sizeof(dir), "blkswarm_cap") != NULL &&
+              block_swarm_init(&bs, &m, dir);
+    for (uint32_t i = 0; ok && i < 5; i++)
+        ok = block_swarm_receive_piece(&bs, i, 1);
+
+    int32_t pi_short = ok ? block_swarm_assign_piece_for_peer(
+        &bs, 2, NULL, 0, end, peer_end) : -2;
+    int32_t pi_long = ok ? block_swarm_assign_piece_for_peer(
+        &bs, 3, NULL, 0, end, end) : -2;
+    /* No manifest from the peer keeps the old reach. */
+    int32_t pi_unknown = ok ? block_swarm_assign_piece_for_peer(
+        &bs, 4, NULL, 0, end, -1) : -2;
+    ok = ok && pi_short == -1 && pi_long >= 5 && pi_unknown >= 5;
+
+    block_swarm_free(&bs);
+    free(m.piece_hashes);
+    if (ok) printf("OK\n");
+    else { printf("FAIL (short=%d long=%d unknown=%d)\n", pi_short, pi_long, pi_unknown); failures++; }
+    return failures;
+}
+
 int test_utxo_commitment(void)
 {
     int failures = 0;
@@ -482,5 +519,6 @@ int test_utxo_commitment(void)
         else { printf("FAIL (none=%d thru=%d all=%d)\n", pi_none, pi_thru, pi_all); failures++; }
     }
 
+    failures += test_block_swarm_peer_manifest_cap();
     return failures;
 }

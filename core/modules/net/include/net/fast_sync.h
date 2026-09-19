@@ -462,6 +462,17 @@ int32_t block_swarm_assign_piece_through_height(struct block_swarm *bs,
                                                  size_t peer_bitmap_bytes,
                                                  int32_t max_height);
 
+/* Same selection for one peer that advertised its own manifest ending at
+ * peer_end_height (-1 = none received): no piece ending past it is ever
+ * assigned. No node sends a piece bitmap, so without this every peer was
+ * asked for every piece of OUR manifest, and a peer whose manifest ends
+ * earlier scored each request past its end as an offence and banned us. */
+int32_t block_swarm_assign_piece_for_peer(struct block_swarm *bs, int peer_id,
+                                          const uint8_t *peer_bitmap,
+                                          size_t peer_bitmap_bytes,
+                                          int32_t max_height,
+                                          int32_t peer_end_height);
+
 /* Mark a piece as received. Caller must verify hash before calling.
  * Returns true on success. */
 bool block_swarm_receive_piece(struct block_swarm *bs,
