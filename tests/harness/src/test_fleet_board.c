@@ -1789,6 +1789,88 @@ static int test_fleet_board_rpc_created_at(void)
     return failures;
 }
 
+static bool fb_rpc_fleet_page(struct fb_rpc_fixture *f, int64_t after,
+                              struct json_value *result)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "op", "fleet_page") &&
+              json_push_kv_int(&input, "after", after) &&
+              fb_rpc_call(f, &input, result);
+    json_free(&input);
+    return ok;
+}
+
+static int test_fleet_board_rpc_fleet_page(void)
+{
+    int failures = 0;
+    TEST("fleet board: fleet_page pages fleet posts by arrival, not by "
+         "signed time, under one process epoch") {
+        struct fb_rpc_fixture f;
+        ASSERT(fb_rpc_fixture_open(&f, "rpc-fleet-page"));
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        struct json_value out, page;
+        json_init(&out);
+        ASSERT(fb_rpc_post_at(&f, "arrives first", now - 100, 3600, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        json_free(&out);
+        /* Signed EARLIER but arriving later: a created_at cursor would
+         * pass it over; the arrival page must not. */
+        json_init(&out);
+        ASSERT(fb_rpc_post_at(&f, "arrives second", now - 500, 3600, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        json_free(&out);
+        json_init(&out);
+        ASSERT(fb_rpc_post(&f, "note", "public, never paged", NULL, NULL,
+                           &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        json_free(&out);
+
+        json_init(&page);
+        ASSERT(fb_rpc_fleet_page(&f, 0, &page));
+        ASSERT(json_get_bool(json_get(&page, "ok")));
+        ASSERT_EQ(json_get_int(json_get(&page, "returned")), 2);
+        const struct json_value *posts = json_get(&page, "posts");
+        ASSERT(posts && json_size(posts) == 2);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(posts, 0), "text")),
+                      "arrives first");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(posts, 1), "text")),
+                      "arrives second");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(posts, 1), "scope")),
+                      "fleet");
+        int64_t scanned = json_get_int(json_get(&page, "scanned"));
+        ASSERT_EQ(scanned,
+                  json_get_int(json_get(json_at(posts, 1), "arrival")));
+        char epoch[64];
+        (void)snprintf(epoch, sizeof(epoch), "%s",
+                       json_get_str(json_get(&page, "epoch")));
+        ASSERT(strlen(epoch) == 32);
+        json_free(&page);
+
+        /* Resuming at the returned number hands back nothing new, under
+         * the same epoch. */
+        json_init(&page);
+        ASSERT(fb_rpc_fleet_page(&f, scanned, &page));
+        ASSERT(json_get_bool(json_get(&page, "ok")));
+        ASSERT_EQ(json_get_int(json_get(&page, "returned")), 0);
+        ASSERT_EQ(json_get_int(json_get(&page, "scanned")), scanned);
+        ASSERT_STR_EQ(json_get_str(json_get(&page, "epoch")), epoch);
+        json_free(&page);
+
+        json_init(&page);
+        ASSERT(fb_rpc_fleet_page(&f, -1, &page));
+        ASSERT(!json_get_bool(json_get(&page, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&page, "code")), "BAD_AFTER");
+        json_free(&page);
+
+        fb_rpc_fixture_close(&f);
+        ASSERT(test_rm_rf_recursive(f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static void fb_test_scope(struct fleet_board_post *post, uint8_t scope,
                           const char *room)
 {
@@ -3144,6 +3226,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_concurrency();
     failures += test_fleet_board_rpc_scope_default();
     failures += test_fleet_board_rpc_created_at();
+    failures += test_fleet_board_rpc_fleet_page();
     failures += test_fleet_board_native_busy();
     failures += test_fleet_board_durable_wiki();
     failures += test_fleet_board_local_capacity_does_not_score_peer();

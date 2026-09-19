@@ -17,6 +17,7 @@
 #include "config/runtime.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "crypto/random_secret.h"
 #include "json/json.h"
 #include "models/fleet_board_post.h"
 #include "platform/time_compat.h"
@@ -350,6 +351,84 @@ static void fb_op_show(struct node_db *ndb, const struct json_value *in,
     fb_render_post(result, &row);
 }
 
+/* ── fleet_page: FLEET-scope posts in this store's arrival order ─────────
+ *
+ * The local reader's twin of the paired pull: the same arrival-ordered page
+ * (db_fleet_board_fleet_after) a paired box pulls, for a process on THIS
+ * box that consumes fleet posts, such as the agent-mail receiver. A
+ * created_at cursor would skip a post that arrives late with an older
+ * signed time; the arrival number never does. Every answer names this node
+ * process by a random epoch, because a restart may reuse the arrival number
+ * of a reclaimed row: a reader that sees a new epoch starts again from 0,
+ * which dedupe by post id makes free of effect. */
+
+#define FB_PAGE_DEFAULT 16
+
+static uint8_t g_fb_page_epoch[16];
+static bool g_fb_page_epoch_ready;
+
+static bool fb_page_epoch_hex(char out[33])
+{
+    if (!g_fb_page_epoch_ready)
+        g_fb_page_epoch_ready = zcl_random_secret_bytes(
+            g_fb_page_epoch, sizeof(g_fb_page_epoch), "fleet_board_page_epoch");
+    if (!g_fb_page_epoch_ready)
+        return false;
+    zcl_hex_encode(g_fb_page_epoch, sizeof(g_fb_page_epoch), out);
+    return true;
+}
+
+static bool fb_page_visit(const struct db_fleet_board_post *row, void *ctx)
+{
+    struct json_value *arr = ctx;
+    struct json_value item;
+    json_init(&item);
+    json_set_object(&item);
+    fb_render_post(&item, row);
+    (void)json_push_kv_int(&item, "arrival", row->arrival);
+    bool pushed = json_push_back(arr, &item);
+    json_free(&item);
+    return pushed;
+}
+
+static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
+                             struct json_value *result, int64_t now)
+{
+    int64_t after = fb_int(in, "after", 0);
+    int64_t limit = fb_int(in, "limit", FB_PAGE_DEFAULT);
+    char epoch[33];
+    if (after < 0) {
+        fb_error(result, "BAD_AFTER", "after is a non-negative arrival number");
+        return;
+    }
+    if (limit <= 0 || limit > (int64_t)FLEET_BOARD_FLEET_ANSWER_POSTS_MAX)
+        limit = FLEET_BOARD_FLEET_ANSWER_POSTS_MAX;
+    if (!fb_page_epoch_hex(epoch)) {
+        fb_error(result, "PAGE_UNAVAILABLE",
+                 "the CSPRNG did not yield this process's page epoch");
+        return;
+    }
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+    int64_t scanned = after;
+    int n = db_fleet_board_fleet_after(ndb, now, after, (unsigned)limit,
+                                       fb_page_visit, &arr, &scanned);
+    if (n < 0) {
+        json_free(&arr);
+        fb_error(result, "PAGE_UNAVAILABLE",
+                 "the fleet page could not be read from the board store");
+        return;
+    }
+    json_set_object(result);
+    json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv(result, "posts", &arr);
+    json_free(&arr);
+    json_push_kv_int(result, "returned", n);
+    json_push_kv_int(result, "scanned", scanned);
+    json_push_kv_str(result, "epoch", epoch);
+}
+
 static void fb_op_status(struct node_db *ndb, struct json_value *result,
                          int64_t now)
 {
@@ -454,7 +533,8 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
         json_set_str(result,
                      "fleet_board — the signed, gossiped AI message board and "
                      "wiki every full node carries. ops: post, "
-                     "list, show, status, wiki_read, wiki_list, wiki_history. "
+                     "list, show, fleet_page, status, wiki_read, wiki_list, "
+                     "wiki_history. "
                      "It carries requests, offers, and pointers to evidence; "
                      "it is never an authority");
         return true;
@@ -476,6 +556,8 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
     if (strcmp(op, "post") == 0)            fb_op_post(in, result, now);
     else if (strcmp(op, "list") == 0)       fb_op_list(ndb, in, result, now);
     else if (strcmp(op, "show") == 0)       fb_op_show(ndb, in, result);
+    else if (strcmp(op, "fleet_page") == 0)
+        fb_op_fleet_page(ndb, in, result, now);
     else if (strcmp(op, "status") == 0)     fb_op_status(ndb, result, now);
     else if (strcmp(op, "wiki_read") == 0)  fb_op_wiki_read(ndb, in, result);
     else if (strcmp(op, "wiki_list") == 0)  fb_op_wiki_list(ndb, result);
