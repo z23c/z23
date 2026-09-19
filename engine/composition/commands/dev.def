@@ -1737,11 +1737,14 @@ ZCL_COMMAND_READY_READ(
     "completion tokens, and the failure-class histogram per model, plus one "
     "routing recommendation per model with enough attempts and a constant "
     "closing line stating verdicts come from receipts. A malformed ledger "
-    "line is counted and skipped, never fatal. It reads only the named "
-    "file and writes nothing.", 32768,
+    "line is counted and skipped, never fatal. With usage_log (a JSONL "
+    "file or directory) it also folds per-event model token usage from Muse "
+    "host session logs and Claude Code transcripts, deduplicated by event "
+    "id, keeping unreported counters explicit. It reads only the named "
+    "paths and writes nothing.", 32768,
     "agent,outcomes,ledger,model,route,executor,receipt",
     "zcl.agent_outcomes_input.v1", "zcl.agent_outcomes.v1",
-    "ledger,model,since", "ledger",
+    "ledger,model,since,usage_log", "ledger",
     "z23 dev agent outcomes --ledger=build/scratch/outcomes.jsonl",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

@@ -1180,6 +1180,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_devagent_claim.c", CAP_FS_READ|CAP_F
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_hot.c", CAP_FS_READ, "probes the hot-swap object with access(R_OK) before handing it on; no writer here")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_outcomes.c", CAP_FS_READ|CAP_FS_WRITE, "reads the lane outcome ledger and appends one outcome row per call")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_pace.c", CAP_FS_READ, "reads the lane pace file to report the current rate; no writer here")
+ZCL_MODULE_CAPABILITY("tools/command/native_devagent_usage.c", CAP_FS_READ, "reads model-host usage logs named by dev.agent.outcomes usage_log")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_agents_ledger.c", CAP_FS_READ|CAP_FS_WRITE, "reads the append-only delegation ledger to grade executors, and writes only the caller-named report file")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_agents_scan.c", CAP_FS_READ|CAP_FS_WRITE, "walks the lane, unit and train workspace roots and the /proc entries that say which of them a process is sitting in, and writes only the caller-named scan output")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_start.c", CAP_FS_READ, "stats the lane worktree to confirm it exists before reporting the lane started")

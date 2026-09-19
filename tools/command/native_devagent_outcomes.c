@@ -16,6 +16,9 @@
  *   since   optional string. ISO-8601 UTC "YYYY-MM-DDTHH:MM:SSZ". Rows whose
  *           ts compares below it are ignored. A present-but-misshapen since
  *           is BAD_INPUT, never a silent unfiltered read.
+ *   usage_log optional string. A JSONL file or directory of model-host
+ *           usage logs; adds a "usage" object. Contract and formats live in
+ *           native_devagent_usage.c.
  *
  * LEDGER ROW (one JSON object per line; unknown keys ignored)
  *   {"ts":"2026-09-04T02:25:37Z","unit":"situation/a1","model":"glm-5.3-flash",
@@ -56,6 +59,7 @@
  */
 
 #include "command/native_command.h"
+#include "command/native_devagent_usage_internal.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -454,4 +458,5 @@ void zcl_native_handle_dev_agent_outcomes(
     (void)json_push_kv(&reply->data, "recommendation", &recommendation);
     json_free(&recommendation);
     dvo_table_free(&table);
+    dvu_push_usage(input, filter, since, reply);
 }

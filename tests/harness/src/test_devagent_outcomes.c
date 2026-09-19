@@ -21,9 +21,14 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define DVX_PATH "dev.agent.outcomes"
 #define DVX_CLOSING \
@@ -169,6 +174,212 @@ static void dvx_call_on(struct dvx_call *c, const char *ledger,
         (void)json_push_kv_str(&c->input, "model", model);
     if (since)
         (void)json_push_kv_str(&c->input, "since", since);
+}
+
+/* ── usage_log: per-event model usage (native_devagent_usage.c) ─────────── */
+
+static bool dvx_mkdir(const char *path)
+{
+#if defined(_WIN32)
+    return mkdir(path) == 0;
+#else
+    return mkdir(path, 0700) == 0;
+#endif
+}
+
+static const struct json_value *dvx_usage(const struct dvx_call *c)
+{
+    const struct json_value *u = json_get(&c->reply.data, "usage");
+    return u && u->type == JSON_OBJ ? u : NULL;
+}
+
+/* The usage by_model row for (format, model), or NULL. */
+static const struct json_value *dvx_usage_model(const struct dvx_call *c,
+                                                const char *format,
+                                                const char *model)
+{
+    const struct json_value *u = dvx_usage(c);
+    const struct json_value *arr = u ? json_get(u, "by_model") : NULL;
+    for (size_t i = 0; arr && arr->type == JSON_ARR && i < arr->num_children;
+         i++) {
+        const struct json_value *e = &arr->children[i];
+        if (strcmp(json_get_str(json_get(e, "format")), format) == 0 &&
+            strcmp(json_get_str(json_get(e, "model")), model) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+static int64_t dvx_unreported(const struct json_value *row, const char *field)
+{
+    return dvx_entry_int(json_get(row, "unreported"), field);
+}
+
+static void dvx_usage_call(struct dvx_call *c, const char *ledger,
+                           const char *usage_log, const char *model)
+{
+    dvx_call_on(c, ledger, model, NULL);
+    (void)json_push_kv_str(&c->input, "usage_log", usage_log);
+}
+
+/* Muse host log: event ev-a twice (one event), ev-b without a cache_read
+ * counter, one model_completed with no id, one malformed usage line. The
+ * Claude transcript repeats msg_1 with a larger output count: the latest
+ * line replaces, never adds. A symlink back to the Muse file is not
+ * followed, so nothing is counted twice. */
+static bool dvx_usage_fixture(const char *dir)
+{
+    char sub[1024];
+    (void)snprintf(sub, sizeof(sub), "%s/muse", dir);
+    if (!dvx_mkdir(sub))
+        return false;
+    bool ok = dvx_write(dir, "muse/session.jsonl",
+        "{\"id\":\"ev-a\",\"recorded_at\":1789762861658881,\"payload\":{\"run_id\":\"r1\","
+        "\"event\":{\"kind\":\"model_completed\",\"model\":\"m1\",\"usage\":"
+        "{\"input_tokens\":1000,\"output_tokens\":50,\"cache_read_tokens\":800,"
+        "\"cache_write_tokens\":0,\"reasoning_tokens\":10}}}}\n"
+        "{\"id\":\"ev-a\",\"recorded_at\":1789762861658881,\"payload\":{\"run_id\":\"r1\","
+        "\"event\":{\"kind\":\"model_completed\",\"model\":\"m1\",\"usage\":"
+        "{\"input_tokens\":1000,\"output_tokens\":50,\"cache_read_tokens\":800,"
+        "\"cache_write_tokens\":0,\"reasoning_tokens\":10}}}}\n"
+        "{\"id\":\"ev-b\",\"recorded_at\":1789762900000000,\"payload\":{\"run_id\":\"r1\","
+        "\"event\":{\"kind\":\"model_completed\",\"model\":\"m1\",\"usage\":"
+        "{\"input_tokens\":500,\"output_tokens\":20,\"cache_write_tokens\":0}}}}\n"
+        "{\"recorded_at\":1789762900000000,\"payload\":{\"event\":{\"kind\":"
+        "\"model_completed\",\"model\":\"m1\",\"usage\":{\"input_tokens\":7}}}}\n"
+        "{\"id\":\"ev-c\",\"payload\":{\"event\":{\"kind\":\"model_started\"}}}\n"
+        "{\"usage\": broken\n");
+    ok = ok && dvx_write(dir, "claude.jsonl",
+        "{\"type\":\"user\",\"message\":{\"content\":\"usage\"}}\n"
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-09-19T01:02:03.000Z\","
+        "\"message\":{\"id\":\"msg_1\",\"model\":\"claude-x\",\"usage\":"
+        "{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":1000,"
+        "\"cache_creation_input_tokens\":200}}}\n"
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-09-19T01:02:04.000Z\","
+        "\"message\":{\"id\":\"msg_1\",\"model\":\"claude-x\",\"usage\":"
+        "{\"input_tokens\":10,\"output_tokens\":7,\"cache_read_input_tokens\":1000,"
+        "\"cache_creation_input_tokens\":200}}}\n");
+    ok = ok && dvx_write(dir, "notes.txt", "{\"id\":\"x\",\"usage\":{}}\n");
+#if !defined(_WIN32)
+    char link[1024];
+    (void)snprintf(link, sizeof(link), "%s/muse/again.jsonl", dir);
+    char target[1024];
+    (void)snprintf(target, sizeof(target), "%s/muse/session.jsonl", dir);
+    ok = ok && symlink(target, link) == 0;
+#endif
+    return ok;
+}
+
+static int dvx_usage_checks(const char *root, const char *ledger)
+{
+    int failures = 0;
+    char dir[1024];
+    char absent[1024];
+    (void)snprintf(dir, sizeof(dir), "%s/usage", root);
+    (void)snprintf(absent, sizeof(absent), "%s/no-such-usage", root);
+
+    TEST("usage: fixture builds") {
+        ASSERT(dvx_mkdir(dir));
+        ASSERT(dvx_usage_fixture(dir));
+        PASS();
+    }
+
+    TEST("usage: events dedup by id, the latest line wins, unknowns stay "
+         "unreported") {
+        struct dvx_call c;
+        dvx_usage_call(&c, ledger, dir, NULL);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        const struct json_value *u = dvx_usage(&c);
+        ASSERT(u != NULL);
+        ASSERT_EQ(dvx_entry_int(u, "files"), 2);
+        ASSERT_EQ(dvx_entry_int(u, "events"), 3);
+        ASSERT_EQ(dvx_entry_int(u, "duplicate_lines"), 2);
+        ASSERT_EQ(dvx_entry_int(u, "unkeyed"), 1);
+        ASSERT_EQ(dvx_entry_int(u, "malformed"), 1);
+        const struct json_value *m = dvx_usage_model(&c, "muse", "m1");
+        ASSERT(m != NULL);
+        ASSERT(json_get_bool(json_get(m, "input_includes_cache_read")));
+        ASSERT_EQ(dvx_entry_int(m, "events"), 2);
+        ASSERT_EQ(dvx_entry_int(m, "input_tokens"), 1500);
+        ASSERT_EQ(dvx_entry_int(m, "output_tokens"), 70);
+        ASSERT_EQ(dvx_entry_int(m, "cache_read_tokens"), 800);
+        ASSERT_EQ(dvx_unreported(m, "cache_read_tokens"), 1);
+        /* Muse input already contains its cache reads: uncached is
+         * 1000 - 800 for ev-a, and unknown (not 500) for ev-b. */
+        ASSERT_EQ(dvx_entry_int(m, "uncached_input_tokens"), 200);
+        ASSERT_EQ(dvx_unreported(m, "uncached_input_tokens"), 1);
+        const struct json_value *k = dvx_usage_model(&c, "claude", "claude-x");
+        ASSERT(k != NULL);
+        ASSERT(!json_get_bool(json_get(k, "input_includes_cache_read")));
+        ASSERT_EQ(dvx_entry_int(k, "events"), 1);
+        ASSERT_EQ(dvx_entry_int(k, "output_tokens"), 7);
+        ASSERT_EQ(dvx_entry_int(k, "cache_read_tokens"), 1000);
+        ASSERT_EQ(dvx_entry_int(k, "cache_write_tokens"), 200);
+        ASSERT_EQ(dvx_entry_int(k, "uncached_input_tokens"), 10);
+        ASSERT_EQ(dvx_unreported(k, "reasoning_tokens"), 1);
+        const struct json_value *hours = json_get(u, "by_hour");
+        ASSERT(hours && hours->type == JSON_ARR && hours->num_children == 2);
+        ASSERT_STR_EQ(json_get_str(json_get(&hours->children[0], "hour")),
+                      "2026-09-19T01");
+        ASSERT_STR_EQ(json_get_str(json_get(&hours->children[1], "hour")),
+                      "2026-09-18T20");
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("usage: the same input read twice gives the same fold") {
+        struct dvx_call a;
+        struct dvx_call b;
+        dvx_usage_call(&a, ledger, dir, NULL);
+        dvx_usage_call(&b, ledger, dir, NULL);
+        ASSERT(dvx_run(&a) && dvx_run(&b));
+        ASSERT(dvx_ok(&a) && dvx_ok(&b));
+        const struct json_value *ma = dvx_usage_model(&a, "muse", "m1");
+        const struct json_value *mb = dvx_usage_model(&b, "muse", "m1");
+        ASSERT(ma && mb);
+        ASSERT_EQ(dvx_entry_int(ma, "input_tokens"),
+                  dvx_entry_int(mb, "input_tokens"));
+        ASSERT_EQ(dvx_entry_int(dvx_usage(&a), "events"),
+                  dvx_entry_int(dvx_usage(&b), "events"));
+        dvx_end(&a);
+        dvx_end(&b);
+        PASS();
+    }
+
+    TEST("usage: the model filter narrows usage too") {
+        struct dvx_call c;
+        dvx_usage_call(&c, ledger, dir, "claude-x");
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_EQ(dvx_entry_int(dvx_usage(&c), "events"), 1);
+        ASSERT(dvx_usage_model(&c, "muse", "m1") == NULL);
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("usage: a usage_log that is not there is refused by name") {
+        struct dvx_call c;
+        dvx_usage_call(&c, ledger, absent, NULL);
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "USAGE_LOG_NOT_FOUND");
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("usage: without usage_log the reply carries no usage object") {
+        struct dvx_call c;
+        dvx_call_on(&c, ledger, NULL, NULL);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT(dvx_usage(&c) == NULL);
+        dvx_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
 }
 
 int test_devagent_outcomes(void);
@@ -357,6 +568,8 @@ int test_devagent_outcomes(void)
         dvx_end(&c);
         PASS();
     }
+
+    failures += dvx_usage_checks(root, ledger);
 
 _test_next:;
     (void)test_rm_rf_recursive(root);
