@@ -14,11 +14,11 @@
  * through platform_confined_start: restricted token (privileges stripped,
  * Administrators and other privileged groups deny-only) at LOW integrity,
  * a kill-on-close job carrying the same memory and CPU caps POSIX puts in
- * RLIMIT_AS/RLIMIT_CPU plus an active-process cap, low-writable labels on
- * exactly the run dir and the brief's named worktree, NUL as the only
- * inherited handle, and an explicit allowlisted environment. (The POSIX
- * memory ceiling is RLIMIT_DATA; see zcl_devagent_worker_confine in
- * command/native_devagent.h for why it is not RLIMIT_AS.) The parent
+ * RLIMIT_DATA/RLIMIT_CPU plus an active-process cap, low-writable labels
+ * on exactly the run dir and the brief's named worktree, NUL as the only
+ * inherited handle, and an explicit allowlisted environment. (See
+ * zcl_devagent_worker_confine in command/native_devagent.h for why the
+ * POSIX memory ceiling is RLIMIT_DATA and never RLIMIT_AS.) The parent
  * keeps the wall clock and kills the whole job (grandchildren included) on
  * timeout or shutdown. The child refuses to run anything unless it can
  * observe that confinement on itself. If the backend cannot arm, nothing
