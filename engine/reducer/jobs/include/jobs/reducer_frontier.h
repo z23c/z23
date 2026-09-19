@@ -396,9 +396,10 @@ bool reducer_frontier_derive_coins_best_now(
  * tip is unavailable". Writes one short machine-readable token: the first unmet
  * coins_kv proven-authority rung (storage/coins_kv.h
  * coins_kv_proven_authority_reason) or, when every rung holds,
- * "coins_tip_hash_witness_unavailable". Always NUL-terminates. SELECT-only;
- * this is an explanation, never a permission — it must not be used to relax any
- * gate. */
+ * "coins_tip_hash_witness_unavailable". With out non-NULL and cap > 0 it ALWAYS
+ * writes a non-empty NUL-terminated token, so callers can format it directly.
+ * SELECT-only; this is an explanation, never a permission — it must not be used
+ * to relax any gate. */
 void reducer_frontier_coins_best_blocker(char *out, size_t cap);
 
 /* ── Body torn-read repair note (lane E3) ────────────────────────────────

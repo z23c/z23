@@ -377,6 +377,187 @@ static bool frontier_eq_cursor(sqlite3 *db)
     return (uint64_t)frontier == cursor;
 }
 
+/* ── PART G: the self-derived provenance markers are co-committed by the fold
+ * that proves them, and a BORROWED store is never upgraded. ─────────────────
+ *
+ * WHY THIS EXISTS. coins_kv_boot_rebuild_if_needed is the only writer of
+ * COINS_KV_MIGRATION_COMPLETE_KEY / COINS_KV_SELF_FOLDED_KEY for an ordinary
+ * forward fold, and it runs once per boot BEFORE the process folds anything.
+ * On the session that first populates coins_kv from genesis it therefore saw an
+ * empty set and stamped nothing, so coins_kv_is_proven_authority stayed false
+ * for that WHOLE session and every money-gated command refused with
+ * "authoritative wallet coins tip is unavailable" on a node that had just
+ * derived the coin set itself. The stamp arrived only on the NEXT boot — which
+ * is why a witness reached for hand-written database markers, and why
+ * tools/dev/mesh_terminal_acceptance.sh restarts a node "so the forward-folded
+ * coins set stamps its authority".
+ *
+ * Both directions are pinned: a node that HOLDS the state boots ready inside
+ * the same session, and a node that does not (or holds a borrow) is still
+ * refused, naming what is missing. Split into helpers so each stays under the
+ * complexity cap. */
+
+/* Everything an empty, unstamped store must NOT yet claim — including the
+ * fail-closed refusal naming its unmet rung. */
+static int caf_g_before_fold(sqlite3 *pdb)
+{
+    int failures = 0;
+    CAF_CHECK("selfderived: coins_kv starts EMPTY", coins_kv_count(pdb) == 0);
+    CAF_CHECK("selfderived: migration marker absent before the fold",
+              !caf_meta_is_one(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
+    CAF_CHECK("selfderived: self-folded marker absent before the fold",
+              !caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
+    char why[96] = "unset";
+    CAF_CHECK("selfderived: NOT proven authority before the fold",
+              !coins_kv_proven_authority_reason(pdb, NULL, why, sizeof(why)));
+    CAF_CHECK("selfderived: refusal names the unmet rung "
+              "(coins_applied_height_absent)",
+              strcmp(why, "coins_applied_height_absent") == 0);
+    return failures;
+}
+
+/* THE REGRESSION. Before the in-fold stamp every marker assertion here is
+ * absent until the next boot. */
+static int caf_g_after_fold(sqlite3 *pdb, int tip_plus1)
+{
+    int failures = 0;
+    CAF_CHECK("selfderived: the fold populated coins_kv",
+              coins_kv_count(pdb) > 0);
+    CAF_CHECK("selfderived: fold stamped migration-complete IN THIS SESSION",
+              caf_meta_is_one(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
+    CAF_CHECK("selfderived: fold stamped self-folded IN THIS SESSION",
+              caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
+    CAF_CHECK("selfderived: self-folded reader agrees",
+              coins_kv_contains_refold_marker(pdb));
+    int32_t applied = -1;
+    char ok_why[96] = "unset";
+    CAF_CHECK("selfderived: proven authority after the fold",
+              coins_kv_proven_authority_reason(pdb, &applied, ok_why,
+                                               sizeof(ok_why)));
+    CAF_CHECK("selfderived: no blocker left to name", ok_why[0] == '\0');
+    CAF_CHECK("selfderived: applied frontier == fold tip+1",
+              applied == tip_plus1);
+    CAF_CHECK("selfderived: frontier invariant still holds",
+              frontier_eq_cursor(pdb));
+    return failures;
+}
+
+/* Bind the stage to `br`, seed the upstream verdicts and drain the branch. */
+static int caf_g_fold_branch(sqlite3 *pdb, struct caf_branch *br,
+                             struct main_state *ms, struct caf_ctx *ctx)
+{
+    int failures = 0;
+    CAF_CHECK("partG: stage init", utxo_apply_stage_init(ms));
+    utxo_apply_stage_set_reader(caf_reader, ctx);
+    utxo_apply_stage_set_lookup(caf_lookup, ctx);
+    CAF_CHECK("partG: seed proof_validate (all ok)",
+              seed_proof_validate(pdb, br, br->n - 1, -1));
+    CAF_CHECK("partG: fold drains from genesis",
+              utxo_apply_stage_drain(100) == br->n);
+    return failures;
+}
+
+/* (1) HOLDS THE STATE: an empty, unstamped store that folds from genesis ends
+ * the SAME session proven-authority, with both markers durable. */
+static int caf_g_self_derived(struct caf_branch *br,
+                              const struct caf_ext_coin *ext)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "selfderived");
+    char log_path[512];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+    CAF_CHECK("selfderived: progress_store opens", progress_store_open(dir));
+    event_log_t *lg = event_log_open(log_path);
+    CAF_CHECK("selfderived: event log opens", lg != NULL);
+    if (lg) {
+        sqlite3 *pdb = progress_store_db();
+        (void)coins_kv_ensure_schema(pdb);
+        (void)progress_meta_table_ensure(pdb);
+        failures += caf_g_before_fold(pdb);
+
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        active_chain_init(&ms.chain_active);
+        active_chain_move_window_tip(&ms.chain_active, &br->blocks[br->n - 1]);
+        struct caf_ctx ctx = { .active = br, .ext = ext, .n_ext = 0 };
+        failures += caf_g_fold_branch(pdb, br, &ms, &ctx);
+        failures += caf_g_after_fold(pdb, br->n);
+
+        utxo_apply_stage_shutdown();
+        active_chain_free(&ms.chain_active);
+        event_log_close(lg);
+    }
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* (2) BORROWED-AND-STAMPED: migration marker present, self-folded deliberately
+ * absent (what coins_kv_seed_from_node_db and the live borrowed-snapshot path
+ * leave behind). Folding further blocks must NOT add the self-folded marker —
+ * that would flip the sovereignty gate from borrowed to sovereign on a borrow. */
+static int caf_g_borrowed(struct caf_branch *br,
+                          const struct caf_ext_coin *ext)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "borrowed");
+    char log_path[512];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+    CAF_CHECK("borrowed: progress_store opens", progress_store_open(dir));
+    event_log_t *lg = event_log_open(log_path);
+    CAF_CHECK("borrowed: event log opens", lg != NULL);
+    if (lg) {
+        sqlite3 *pdb = progress_store_db();
+        (void)coins_kv_ensure_schema(pdb);
+        CAF_CHECK("borrowed: stamp migration-complete only (the borrow)",
+                  coins_kv_mark_migration_complete(pdb));
+        CAF_CHECK("borrowed: clear any self-folded claim",
+                  coins_kv_clear_self_folded(pdb));
+        CAF_CHECK("borrowed: self-folded absent before the fold",
+                  !caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
+
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        active_chain_init(&ms.chain_active);
+        active_chain_move_window_tip(&ms.chain_active, &br->blocks[br->n - 1]);
+        struct caf_ctx ctx = { .active = br, .ext = ext, .n_ext = 0 };
+        failures += caf_g_fold_branch(pdb, br, &ms, &ctx);
+
+        CAF_CHECK("borrowed: the fold populated coins_kv",
+                  coins_kv_count(pdb) > 0);
+        CAF_CHECK("borrowed: migration marker untouched",
+                  caf_meta_is_one(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
+        CAF_CHECK("borrowed: self-folded STILL absent in progress_meta",
+                  !caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
+        CAF_CHECK("borrowed: reader agrees — a borrow is never upgraded to "
+                  "sovereign by folding",
+                  !coins_kv_contains_refold_marker(pdb));
+
+        utxo_apply_stage_shutdown();
+        active_chain_free(&ms.chain_active);
+        event_log_close(lg);
+    }
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int caf_part_g(const struct caf_ext_coin *ext)
+{
+    int failures = 0;
+    struct caf_branch G;
+    bool gbuilt = branch_build(&G, 0x44, 4, -1, NULL);  /* coinbase-only */
+    CAF_CHECK("selfderived: branch builds", gbuilt);
+    if (gbuilt) {
+        failures += caf_g_self_derived(&G, ext);
+        failures += caf_g_borrowed(&G, ext);
+    }
+    branch_free(&G);
+    return failures;
+}
+
 int test_coins_applied_frontier(void);
 int test_coins_applied_frontier(void)
 {
@@ -960,162 +1141,8 @@ int test_coins_applied_frontier(void)
         test_cleanup_tmpdir(dir);
     }
 
-    /* ── PART G: the self-derived provenance markers are co-committed by the
-     * fold that proves them, and a BORROWED store is never upgraded. ───────
-     *
-     * WHY THIS EXISTS. coins_kv_boot_rebuild_if_needed is the only writer of
-     * COINS_KV_MIGRATION_COMPLETE_KEY / COINS_KV_SELF_FOLDED_KEY for an ordinary
-     * forward fold, and it runs once per boot BEFORE the process folds anything.
-     * On the session that first populates coins_kv from genesis it therefore saw
-     * an empty set and stamped nothing, so coins_kv_is_proven_authority stayed
-     * false for that WHOLE session and every money-gated command refused with
-     * "authoritative wallet coins tip is unavailable" on a node that had just
-     * derived the coin set itself. The stamp arrived only on the NEXT boot —
-     * which is why a witness reached for hand-written database markers.
-     *
-     * Both directions are pinned here:
-     *   (1) HOLDS THE STATE: an empty, unstamped store that folds from genesis
-     *       ends the SAME session with both markers set and proven-authority
-     *       true. Without the in-fold stamp this half fails.
-     *   (2) DOES NOT HOLD IT / BORROWED: before the fold, proven-authority is
-     *       false and NAMES the unmet rung; and a borrowed-and-stamped store
-     *       (migration marker present, self-folded deliberately cleared) is
-     *       still NOT self-folded after folding more blocks — the stamp must
-     *       never manufacture sovereignty over a borrow. */
-    struct caf_branch G;
-    bool gbuilt = branch_build(&G, 0x44, 4, -1, NULL);  /* coinbase-only */
-    CAF_CHECK("selfderived: branch builds", gbuilt);
+    failures += caf_part_g(ext);
 
-    if (gbuilt) {
-        /* (1) from-genesis fold into an EMPTY, UNSTAMPED store. */
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "selfderived");
-        char log_path[512];
-        snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
-        CAF_CHECK("selfderived: progress_store opens", progress_store_open(dir));
-        event_log_t *lg = event_log_open(log_path);
-        CAF_CHECK("selfderived: event log opens", lg != NULL);
-
-        if (lg) {
-            sqlite3 *pdb = progress_store_db();
-            (void)coins_kv_ensure_schema(pdb);
-            (void)progress_meta_table_ensure(pdb);
-
-            CAF_CHECK("selfderived: coins_kv starts EMPTY",
-                      coins_kv_count(pdb) == 0);
-            CAF_CHECK("selfderived: migration marker absent before the fold",
-                      !caf_meta_is_one(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
-            CAF_CHECK("selfderived: self-folded marker absent before the fold",
-                      !caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
-
-            /* FAIL-CLOSED, and it says what is missing. */
-            char why[96] = "unset";
-            CAF_CHECK("selfderived: NOT proven authority before the fold",
-                      !coins_kv_proven_authority_reason(pdb, NULL, why,
-                                                        sizeof(why)));
-            CAF_CHECK("selfderived: refusal names the unmet rung "
-                      "(coins_applied_height_absent)",
-                      strcmp(why, "coins_applied_height_absent") == 0);
-
-            struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            active_chain_init(&ms.chain_active);
-            active_chain_move_window_tip(&ms.chain_active, &G.blocks[G.n - 1]);
-            struct caf_ctx ctx = { .active = &G, .ext = ext, .n_ext = 0 };
-            CAF_CHECK("selfderived: stage init", utxo_apply_stage_init(&ms));
-            utxo_apply_stage_set_reader(caf_reader, &ctx);
-            utxo_apply_stage_set_lookup(caf_lookup, &ctx);
-            CAF_CHECK("selfderived: seed proof_validate (all ok)",
-                      seed_proof_validate(pdb, &G, G.n - 1, -1));
-            CAF_CHECK("selfderived: fold drains from genesis",
-                      utxo_apply_stage_drain(100) == G.n);
-            CAF_CHECK("selfderived: the fold populated coins_kv",
-                      coins_kv_count(pdb) > 0);
-
-            /* THE REGRESSION. Before the in-fold stamp both of these are absent
-             * until the next boot. */
-            CAF_CHECK("selfderived: fold stamped migration-complete IN THIS "
-                      "SESSION",
-                      caf_meta_is_one(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
-            CAF_CHECK("selfderived: fold stamped self-folded IN THIS SESSION",
-                      caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
-            CAF_CHECK("selfderived: self-folded reader agrees",
-                      coins_kv_contains_refold_marker(pdb));
-            {
-                int32_t applied = -1;
-                char ok_why[96] = "unset";
-                CAF_CHECK("selfderived: proven authority after the fold",
-                          coins_kv_proven_authority_reason(pdb, &applied, ok_why,
-                                                           sizeof(ok_why)));
-                CAF_CHECK("selfderived: no blocker left to name",
-                          ok_why[0] == '\0');
-                CAF_CHECK("selfderived: applied frontier == fold tip+1",
-                          applied == G.n);
-            }
-            CAF_CHECK("selfderived: frontier invariant still holds",
-                      frontier_eq_cursor(pdb));
-
-            utxo_apply_stage_shutdown();
-            active_chain_free(&ms.chain_active);
-        }
-        if (lg) event_log_close(lg);
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-
-    if (gbuilt) {
-        /* (2) BORROWED-AND-STAMPED store: migration marker already set, the
-         * self-folded marker deliberately absent (what coins_kv_seed_from_node_db
-         * and the live borrowed-snapshot path leave behind). Folding further
-         * blocks must NOT add the self-folded marker — that would flip the
-         * sovereignty gate from borrowed to sovereign on a borrow. */
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "borrowed");
-        char log_path[512];
-        snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
-        CAF_CHECK("borrowed: progress_store opens", progress_store_open(dir));
-        event_log_t *lg = event_log_open(log_path);
-        CAF_CHECK("borrowed: event log opens", lg != NULL);
-
-        if (lg) {
-            sqlite3 *pdb = progress_store_db();
-            (void)coins_kv_ensure_schema(pdb);
-            CAF_CHECK("borrowed: stamp migration-complete only (the borrow)",
-                      coins_kv_mark_migration_complete(pdb));
-            CAF_CHECK("borrowed: clear any self-folded claim",
-                      coins_kv_clear_self_folded(pdb));
-            CAF_CHECK("borrowed: self-folded absent before the fold",
-                      !caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
-
-            struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            active_chain_init(&ms.chain_active);
-            active_chain_move_window_tip(&ms.chain_active, &G.blocks[G.n - 1]);
-            struct caf_ctx ctx = { .active = &G, .ext = ext, .n_ext = 0 };
-            CAF_CHECK("borrowed: stage init", utxo_apply_stage_init(&ms));
-            utxo_apply_stage_set_reader(caf_reader, &ctx);
-            utxo_apply_stage_set_lookup(caf_lookup, &ctx);
-            CAF_CHECK("borrowed: seed proof_validate (all ok)",
-                      seed_proof_validate(pdb, &G, G.n - 1, -1));
-            CAF_CHECK("borrowed: fold drains", utxo_apply_stage_drain(100) == G.n);
-            CAF_CHECK("borrowed: the fold populated coins_kv",
-                      coins_kv_count(pdb) > 0);
-            CAF_CHECK("borrowed: migration marker untouched",
-                      caf_meta_is_one(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
-            CAF_CHECK("borrowed: self-folded STILL absent — a borrow is never "
-                      "upgraded to sovereign by folding",
-                      !caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY) &&
-                      !coins_kv_contains_refold_marker(pdb));
-
-            utxo_apply_stage_shutdown();
-            active_chain_free(&ms.chain_active);
-        }
-        if (lg) event_log_close(lg);
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-
-    branch_free(&G);
     branch_free(&L);
     branch_free(&W);
     branch_free(&F);

@@ -255,11 +255,11 @@ struct zcl_result wallet_money_snapshot_build(
          * its own sent an operator hand-writing database markers to get past
          * it, so the blocker says which rung of the coins_kv proven-authority
          * predicate is unmet. */
-        char blocker[WALLET_MONEY_REASON_MAX + 1] = { 0 };
+        char blocker[WALLET_MONEY_REASON_MAX + 1];
         reducer_frontier_coins_best_blocker(blocker, sizeof(blocker));
         (void)snprintf(out->reason, sizeof(out->reason),
                        "authoritative wallet coins tip is unavailable: %s",
-                       blocker[0] ? blocker : "coins_tip_unresolved");
+                       blocker);
         money_root(out);
         return ZCL_OK;
     }
