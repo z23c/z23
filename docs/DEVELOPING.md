@@ -57,6 +57,14 @@ Measured on a cold checkout, 28 CPUs: `setup` 3m07, `z23` 1m46, `z23-dev`
 re-measures the whole sequence from a fresh clone and `make timings` reads the
 result back, so these numbers are refreshable rather than folklore.
 
+Those are the numbers with the host to yourself. Walked again on 2026-09-19
+from an empty directory on the same 28-CPU slot while three other lanes were
+building on the same machine: clone 12s, `doctor` 14s, `doctor-env` 5s,
+`setup` 3m15, `z23` 5m42, `z23-dev` 3m54 — **13m23 to a working dev loop**,
+and 17m30 including the first green test group and a full `make lint` (212
+gates, 3m23). The compile steps are what stretches; `setup` and the doctors do
+not. Budget for that before concluding a build has hung.
+
 **`--recurse-submodules` is not optional, and leaving it off does not fail
 where you would expect.** `vendor/tor` is a submodule. A plain `git clone`
 leaves it empty, `make setup` and `make z23` both still succeed — they link
@@ -87,10 +95,12 @@ what you ended up with, which is read-only and never writes config:
 make hooks-status
 ```
 
-It prints the effective `core.hooksPath`, the `pre-push` hook it resolves to,
-and what that hook actually runs. On a single checkout that is the end of it.
-If you later add worktrees, read the second trap below before running
-`install-hooks` again.
+It prints the effective `core.hooksPath`, the config file that set it, the
+`pre-push` hook it resolves to, and what that hook actually runs. On a single
+checkout that is the end of it. If you later add worktrees, run
+`make install-hooks` again in each one — it writes that worktree's own config
+scope and nobody else's. The second trap below says why the new worktree needs
+it at all.
 
 Now you can take a turn. The inner loop is three commands:
 
@@ -144,37 +154,40 @@ current behavior of this tree, not a defect waiting to be fixed.
 **Plain `make` does not build `build/bin/z23-dev`.** Covered above. `make
 z23-dev`, `make dev-bin` and `make zclassic23-dev` are the same target.
 
-**`make install-hooks` from a linked worktree can disarm every other
-checkout, and `make setup` performs that install.** Three lines of
-`tools/scripts/install_git_hooks.sh` do it. Line 82 turns on
-`extensions.worktreeConfig`, which is a repository-wide setting. Line 83 then
-runs `git -C "$ROOT" config --unset-all core.hooksPath` — unscoped, so it
-clears the value in the SHARED `.git/config`, the one every worktree reads.
-Line 88 writes the replacement with `--worktree`, into a file only the
-invoking worktree sees, and as an ABSOLUTE path.
-
-So a lane that runs it removes the shared setting and installs a private one.
-Any worktree that had been relying on the shared value is now unarmed,
-silently, and a push that should have been refused goes through. And because
-line 88's path is absolute, a worktree that inherits someone else's entry runs
-that other checkout's hook binary against its own commits.
-
-Measured in this repository on 2026-09-19: the shared `.git/config` holds no
-`core.hooksPath` at all, the main checkout's value survives only in the common
-directory's `config.worktree`, each worktree that ran `setup` carries its own
-absolute entry in `.git/worktrees/<name>/config.worktree`, and a worktree that
-ran neither resolves to the main checkout's absolute path.
-
-Run `install-hooks` **from the main checkout**. If you must invoke it from
-elsewhere, name the main checkout explicitly, which makes every write land
-there:
+**A worktree you just added is not armed, and nothing says so.**
+`core.hooksPath` is per-worktree configuration. `git worktree add` copies the
+spawning checkout's `config.worktree` into the new worktree, so the new one
+starts out naming `build/githooks` — a relative path Git resolves against
+whichever worktree runs the hook, which is the new one, whose `build/` does
+not exist yet. Git treats a missing hook file as "no hook" rather than an
+error, so a push from there is silently equivalent to `--no-verify` until you
+arm it:
 
 ```bash
-ZCL_GIT_HOOK_ROOT=/path/to/the/main/checkout make install-hooks
+cd ../my-new-worktree
+make install-hooks                     # or make setup
+make hooks-status                      # the path, and the config file that set it
 ```
 
-`make hooks-status` is the read-only question and never writes config; prefer
-it for "am I armed" and keep `install-hooks` a deliberate act.
+Running it there is safe: every write and unset the installer makes is
+`--worktree` scoped, so no other checkout moves. Measured on 2026-09-19 in a
+three-worktree repository, installing in each of the three in turn: all three
+stayed armed on their own `build/githooks`, `check-git-hooks-installed` was
+clean in all three after every step, and the shared `.git/config` was never
+written. Hiding one worktree's `build/githooks` stopped that worktree's hooks
+and no other's, which is what "relative, per worktree" means in practice.
+
+This was not always true. Until 2026-09-19 the installer ran an unscoped
+`git config --unset-all core.hooksPath`, which git resolves to the shared
+`.git/config`, and wrote an absolute replacement into the invoking worktree
+alone — so `make setup` in a second worktree disarmed the others, and any
+worktree that inherited the absolute entry ran another checkout's hook binary
+against its own commits. If you are reading an older instruction to run
+`install-hooks` only from the main checkout, or to set `ZCL_GIT_HOOK_ROOT`
+first, that instruction was working around this bug. `ZCL_GIT_HOOK_ROOT` still
+works and still names the checkout to arm; it is no longer a precaution.
+
+`make hooks-status` is the read-only question and never writes config.
 
 **An empty test log from `fleet_gateway` means a missing binary, not a
 failing test.** `tests/harness/src/test_fleet_gateway.c` opens with
@@ -856,10 +869,9 @@ exists is refused by the pre-push hook. Two operational rules, both learned
 from real failures: do not run other `make` builds in the same checkout
 while a proof is in flight (a superseded source build invalidates the
 attempt), and if the attempt fails on `check-git-hooks-installed` after a
-hook rebuild, refresh the armed copy with `make install-hooks` run from the
-main checkout — or `ZCL_GIT_HOOK_ROOT=<main checkout> make install-hooks`
-from anywhere else, never bare from a lane, for the reason in section 0 —
-then `dev proof retry` and `dev proof step` again.
+hook rebuild, refresh the armed copy with `make install-hooks` in the lane
+itself — it writes that worktree's own config scope only — then `dev proof
+retry` and `dev proof step` again.
 
 `dev.proof.ensure` is idempotent and normally runs from `post-commit`,
 `post-merge`, or `post-checkout` -- but only to re-arm a resident proof

@@ -74,9 +74,9 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
   `struct zcl_result`); a Makefile insertion shifts the `first use Makefile:N`
   anchors in the flag registry; a fresh worktree needs the hooks armed before
   the lint-gate hygiene groups pass — check with `make hooks-status`, and arm
-  by running `make install-hooks` **from the main checkout** (or
-  `ZCL_GIT_HOOK_ROOT=<main checkout> make install-hooks`), never bare from the
-  lane, which disarms the other checkouts. See `docs/DEVELOPING.md` section 0.
+  by running `make install-hooks` **in that lane**, which writes only that
+  worktree's own config scope and leaves every other checkout armed. See
+  `docs/DEVELOPING.md` section 0.
 - Before submitting: every commit in `origin/main..HEAD` shows `G` under
   `%G?`; `git diff --name-only origin/main...HEAD` equals the lane's owned
   file list; the cyclomatic baseline gains no pin; `git merge-tree
