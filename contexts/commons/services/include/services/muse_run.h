@@ -170,6 +170,12 @@ struct muse_run_result {
      * Written atomically: a kill can never leave a partial file for a
      * gate to accept. */
     char candidate_file[192];
+    /* Why the change set could NOT be folded into a named candidate, or
+     * "" when it was. "none" in `candidate` says only that no identity
+     * was produced; it never says which of the fold's steps broke, and a
+     * refusal nobody can diagnose is one that gets retried instead of
+     * repaired. This is that one line. */
+    char candidate_note[MUSE_RUN_REASON_MAX];
     /* The worker-run session from the caller's claim identity (""
      * when the caller supplies none): provenance beside the MSP ids. */
     char worker_session[MUSE_RUN_ID_MAX];
@@ -241,8 +247,31 @@ struct muse_run_result {
      * the change in place, and the next run's pre-state refusal stays
      * the fail-closed backstop. The reason says which, either way. */
     bool workspace_restored;
+    /* True only when the restore TOUCHED the workspace and then could
+     * not settle it at base: the tree is half-undone and UNUSABLE until
+     * an operator clears it, and <rundir>/workspace.blocked names the
+     * blocker. This is never the same answer as a restore that refused
+     * before touching a single byte, which leaves the change intact and
+     * the workspace exactly as the turn left it. A reader that cannot
+     * tell those two apart cannot tell a safe workspace from a wrecked
+     * one, so they are two fields, never one. */
+    bool workspace_blocked;
     char workspace_restore[MUSE_RUN_REASON_MAX];
 };
+
+/* THE CHANGE SET IS NAMED BEFORE IT IS JUDGED, OR THE RUN REFUSES. The
+ * candidate fold (services/muse_run_restore.h) is the only thing that
+ * turns a measured change into a DURABLE artifact, and it is spawned git
+ * like every other measurement: it can fail. It failed in production on
+ * 2026-09-19, silently, and the run published verdict "pass" with
+ * candidate "none" — which the worker's own completion predicate then
+ * refused, throwing a 106k-token turn away with nothing anywhere saying
+ * why. So the fold now runs BEFORE the gate build, a fold that cannot be
+ * produced is a NAMED refusal (candidate_note) rather than a "none" that
+ * reads like an absence, and a named candidate is part of the closed
+ * pass predicate: muse_run and the worker can no longer disagree about
+ * whether a pass exists.
+ */
 
 /* Runs one task to a terminal verdict: restart pre-check, one bounded
  * Muse turn in the workspace, the named gate over the measured diff,

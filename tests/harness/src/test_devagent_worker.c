@@ -807,6 +807,57 @@ static int wtx_confine_cases(void)
         PASS();
     }
 
+    /* THE MEMORY CEILING IS ON THE HEAP, NOT ON ADDRESS SPACE, and this
+     * is the case that pins it. The executor child spawns git for every
+     * measurement one Muse run makes, and git maps its packfiles: under
+     * RLIMIT_AS a 195 MB pack cannot be mapped inside a 1 GiB ceiling,
+     * so `git diff HEAD` exits 128 while `git status --porcelain` — index
+     * only — exits 0. That is the split that silently cost a whole
+     * gate-passing turn on 2026-09-19. RLIMIT_DATA bounds the heap at the
+     * SAME number and leaves read-only file mappings alone; the unit's
+     * cgroup MemoryMax is the outer bound over the whole chain either
+     * way. Checked in a forked child, because the limits are hard
+     * (rlim_max is lowered too) and this process must keep its own. */
+    TEST("confine: the memory ceiling is RLIMIT_DATA and never RLIMIT_AS")
+    {
+        struct wkr_drive_opts o;
+        struct wkr_caps caps;
+        pid_t pid;
+        int status = 0;
+        wtx_opts(&o, "wtx", "s-rlimit");
+        ASSERT(zcl_devagent_worker_caps(&o, &caps));
+        pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            struct rlimit before, data, as, cpu;
+            int bad = 0;
+            if (getrlimit(RLIMIT_AS, &before) != 0)
+                _exit(90);
+            zcl_devagent_worker_confine(&caps);
+            if (getrlimit(RLIMIT_DATA, &data) != 0 ||
+                getrlimit(RLIMIT_AS, &as) != 0 ||
+                getrlimit(RLIMIT_CPU, &cpu) != 0)
+                _exit(91);
+            /* The heap is capped at the approved number, hard. */
+            if (data.rlim_cur != (rlim_t)caps.memory_bytes ||
+                data.rlim_max != (rlim_t)caps.memory_bytes)
+                bad |= 1;
+            /* Address space is left exactly as it was found, so a child
+             * git can still map an object store it must read. */
+            if (as.rlim_cur != before.rlim_cur ||
+                as.rlim_max != before.rlim_max)
+                bad |= 2;
+            /* The CPU ceiling is unchanged in kind and still applied. */
+            if (cpu.rlim_cur != (rlim_t)caps.cpu_s)
+                bad |= 4;
+            _exit(bad);
+        }
+        ASSERT(waitpid(pid, &status, 0) == pid);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        PASS();
+    }
+
     TEST("confine: one outcome mapping for both backends")
     {
         ASSERT(wtx_outcome_is(-1, false, false, 127, "launch-failed"));

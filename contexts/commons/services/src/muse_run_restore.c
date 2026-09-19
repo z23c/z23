@@ -113,24 +113,51 @@ static bool mrr_hash_file(const char *path, char *out, size_t cap)
     return true;
 }
 
+/* One named failure out of the fold. Always leaves hex_out "none" and
+ * *fold_out NULL, so no caller can read a broken fold as an empty one. */
+static bool mrr_fold_failed(char *hex_out, size_t hex_cap, char **fold_out,
+    char *acc, char *why, size_t why_cap, const char *what)
+{
+    (void)snprintf(hex_out, hex_cap, "none");
+    *fold_out = NULL;
+    free(acc);
+    if (why && why_cap > 0) (void)snprintf(why, why_cap, "%s", what);
+    return false;
+}
+
 /* The fold text and its hash; see the header. */
 bool muse_candidate_fold(const char *workspace, const char *rundir,
-    char *hex_out, size_t hex_cap, char **fold_out)
+    char *hex_out, size_t hex_cap, char **fold_out, char *why,
+    size_t why_cap)
 {
     const char *diff_argv[] = { "git", "-C", workspace, "diff", "HEAD",
                                 "--", NULL };
     char *acc = zcl_malloc(MUSE_FOLD_MAX, "muse_run.candidate");
     char tmp[MRR_PATH_MAX];
     size_t used;
-    bool ok;
+    int rc;
     (void)snprintf(hex_out, hex_cap, "none");
     *fold_out = NULL;
-    if (!acc) return false;
+    if (why && why_cap > 0) why[0] = '\0';
+    if (!acc)
+        return mrr_fold_failed(hex_out, hex_cap, fold_out, NULL, why,
+            why_cap, "the fold buffer could not be allocated");
     acc[0] = '\0';
-    if (zcl_spawn_capture(diff_argv, acc, MUSE_FOLD_MAX,
-            MR_GIT_TIMEOUT_MS) != 0) {
-        free(acc);
-        return false;
+    rc = zcl_spawn_capture(diff_argv, acc, MUSE_FOLD_MAX,
+        MR_GIT_TIMEOUT_MS);
+    if (rc != 0) {
+        char note[MUSE_FOLD_NOTE_MAX];
+        /* Name the EXIT STATUS. The one production failure of this call
+         * was git exiting 128 because it could not mmap a packfile under
+         * the executor child's address-space limit; a bare "git failed"
+         * would have hidden which git and which failure. */
+        (void)snprintf(note, sizeof(note),
+            "the tracked diff could not be captured: `git -C <workspace> "
+            "diff HEAD --` exited %d (stderr is not captured; a 128 here "
+            "is usually git unable to map its object store under the "
+            "caller's memory limit)", rc);
+        return mrr_fold_failed(hex_out, hex_cap, fold_out, acc, why,
+            why_cap, note);
     }
     used = strlen(acc);
     if (used + 2 < MUSE_FOLD_MAX) {
@@ -139,17 +166,15 @@ bool muse_candidate_fold(const char *workspace, const char *rundir,
     }
     mrr_fold_others(workspace, acc, MUSE_FOLD_MAX, &used);
     if (used < MUSE_FOLD_MAX) acc[used] = '\0';
-    if (!mrr_fold_tempfile(rundir, tmp, sizeof(tmp), acc, used)) {
-        free(acc);
-        return false;
+    if (!mrr_fold_tempfile(rundir, tmp, sizeof(tmp), acc, used))
+        return mrr_fold_failed(hex_out, hex_cap, fold_out, acc, why,
+            why_cap, "the fold could not be written under the run dir");
+    if (!mrr_hash_file(tmp, hex_out, hex_cap)) {
+        (void)unlink(tmp);
+        return mrr_fold_failed(hex_out, hex_cap, fold_out, acc, why,
+            why_cap, "the fold could not be hashed by `git hash-object`");
     }
-    ok = mrr_hash_file(tmp, hex_out, hex_cap);
     (void)unlink(tmp);
-    if (!ok) {
-        (void)snprintf(hex_out, hex_cap, "none");
-        free(acc);
-        return false;
-    }
     *fold_out = acc;
     return true;
 }
@@ -324,7 +349,7 @@ static const char *mrr_verify_reproduces(struct mrr_state *st)
     char *fold = NULL;
     bool same;
     if (!muse_candidate_fold(st->in->workspace, st->in->rundir, hex,
-            sizeof(hex), &fold))
+            sizeof(hex), &fold, NULL, 0))
         return "refused: the workspace change set could not be re-derived";
     same = strcmp(hex, st->in->candidate) == 0 && strcmp(fold, st->text) == 0;
     free(fold);
@@ -569,8 +594,22 @@ static const char *mrr_verify(struct mrr_state *st, char *patch, size_t cap)
     return why;
 }
 
+/* The undo and its settlement: everything that TOUCHES the workspace.
+ * Any failure from here on leaves a half-undone tree, which is the one
+ * state the caller must be able to tell apart from an untouched one. */
+static const char *mrr_apply(struct mrr_state *st, const char *patch,
+    bool *blocked)
+{
+    const char *why;
+    if (blocked) *blocked = true;
+    why = mrr_undo(st, patch);
+    if (!why) why = mrr_settled(st);
+    if (!why && blocked) *blocked = false;
+    return why;
+}
+
 bool muse_restore_workspace(const struct muse_restore_in *in, char *reason,
-    size_t reason_cap)
+    size_t reason_cap, bool *blocked)
 {
     struct mrr_state st;
     char patch[MRR_PATH_MAX];
@@ -578,13 +617,13 @@ bool muse_restore_workspace(const struct muse_restore_in *in, char *reason,
     memset(&st, 0, sizeof(st));
     st.in = in;
     patch[0] = '\0';
+    if (blocked) *blocked = false;
     why = mrr_verify(&st, patch, sizeof(patch));
     if (!why && st.audit_total == 0) {
         (void)snprintf(reason, reason_cap,
             "already clean at base %.12s", in->base);
     } else if (!why) {
-        why = mrr_undo(&st, patch);
-        if (!why) why = mrr_settled(&st);
+        why = mrr_apply(&st, patch, blocked);
         if (!why)
             (void)snprintf(reason, reason_cap,
                 "restored to base %.12s from verified %s (%zu untracked "

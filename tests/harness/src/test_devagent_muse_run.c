@@ -2106,7 +2106,7 @@ static bool mr_reapply(const struct mr_dirs *d,
         }
         free(text);
     }
-    if (!muse_candidate_fold(d->wt, d->run, hex, sizeof(hex), &fold))
+    if (!muse_candidate_fold(d->wt, d->run, hex, sizeof(hex), &fold, NULL, 0))
         return false;
     same = strcmp(hex, r->candidate) == 0;
     free(fold);
@@ -2241,7 +2241,8 @@ static bool mr_dirty_candidate(struct mr_dirs *d, char *hex, size_t cap,
         !mr_path_in(d->wt, "src/b.c", p, sizeof(p)) ||
         !mr_write(p, "made\n", 0))
         return false;
-    if (!muse_candidate_fold(d->wt, d->run, hex, cap, &fold)) return false;
+    if (!muse_candidate_fold(d->wt, d->run, hex, cap, &fold, NULL, 0))
+        return false;
     ok = snprintf(file, fcap, "candidate-%s.diff", hex) < (int)fcap &&
         mr_path_in(d->run, file, p, sizeof(p)) && mr_write(p, fold, 0);
     free(fold);
@@ -2254,9 +2255,9 @@ static bool mr_still_dirty(const struct mr_dirs *d)
         mr_file_is(d->wt, "src/b.c", "made\n");
 }
 
-static bool mr_restore_call(const struct mr_dirs *d, const char *base,
-    const char *hex, const char *file, bool pre_clean, char *why,
-    size_t cap)
+static bool mr_restore_call_blocked(const struct mr_dirs *d,
+    const char *base, const char *hex, const char *file, bool pre_clean,
+    char *why, size_t cap, bool *blocked)
 {
     struct muse_restore_in in;
     memset(&in, 0, sizeof(in));
@@ -2266,7 +2267,23 @@ static bool mr_restore_call(const struct mr_dirs *d, const char *base,
     in.candidate = hex;
     in.candidate_file = file;
     in.pre_clean = pre_clean;
-    return muse_restore_workspace(&in, why, cap);
+    return muse_restore_workspace(&in, why, cap, blocked);
+}
+
+/* Every refusal the cases below provoke is made BEFORE a byte is
+ * touched, so none of them may ever report a half-undone workspace: a
+ * blocked flag here would itself be the failure. */
+static bool mr_restore_call(const struct mr_dirs *d, const char *base,
+    const char *hex, const char *file, bool pre_clean, char *why,
+    size_t cap)
+{
+    bool blocked = true;
+    bool ok = mr_restore_call_blocked(d, base, hex, file, pre_clean, why,
+        cap, &blocked);
+    if (blocked)
+        (void)snprintf(why, cap, "%s",
+            "BLOCKED: a refusal reported a touched workspace");
+    return ok && !blocked;
 }
 
 /* A candidate that is missing, damaged, or no longer the workspace's
@@ -2339,6 +2356,281 @@ static int mr_exec_restore_twice(void)
     return failures;
 }
 
+/* --- the change set must be NAMED, or the run refuses by name -----------
+ * On 2026-09-19 a real turn on node1 edited one tracked file, the gate
+ * passed (test_tor:1/0), and the run published verdict "pass" with
+ * candidate "none": `git -C <workspace> diff HEAD --` had exited 128,
+ * unable to map a 195 MB packfile under the executor child's RLIMIT_AS,
+ * while every index-only measurement in the same run succeeded. Nothing
+ * said so. The worker's own completion predicate then refused the pass
+ * for the missing artifact, 106k tokens were thrown away, and the
+ * workspace was left dirty, which refused every later job.
+ *
+ * `diff.external` pointed at a path that does not exist reproduces that
+ * exact shape without a 195 MB pack: `git diff HEAD --` exits 128 with
+ * an empty capture and a stderr this code never reads, while `git status
+ * --porcelain`, `git rev-parse`, `git hash-object` and `git ls-files`
+ * all still exit 0. Same split, same silence. */
+static bool mr_break_tracked_diff(const struct mr_dirs *d)
+{
+    return mr_git3(d->wt, "config", "diff.external",
+        "/nonexistent/zcl-no-such-external-diff");
+}
+
+/* A gate-passing turn whose change set cannot be folded is NOT a pass:
+ * it is a named refusal, made before the gate build is spent, with the
+ * change left exactly where the turn put it. */
+static int mr_exec_candidate_unfoldable(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char *evidence = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("unfoldable lane", mr_lane(&d));
+    MR_CHECK("unfoldable seed", mr_seed_committed(&d, "src/sum.c",
+        "orig\n"));
+    MR_CHECK("unfoldable gate", mr_gate_script(&d, mr_verdict_pass,
+        mr_head_pass, NULL));
+    MR_CHECK("unfoldable tracked edit", mr_fsmonitor(&d, "src/turn.c",
+        "printf 'edited\\n' > \"$W/src/sum.c\""));
+    MR_CHECK("unfoldable break diff", mr_break_tracked_diff(&d));
+    rc = mr_run_prepared(&d, NULL, "src/turn.c", NULL, &r, &evidence);
+    /* The turn ran and the change is measured: this is not a run that
+     * failed early, it is the exact run that used to publish a pass. */
+    MR_CHECK("unfoldable turn ran", evidence &&
+        evidence_has(evidence, "turn-cmd:") && r.files_changed == 2 &&
+        r.scope_changed_measured && r.head_measured);
+    MR_CHECK("unfoldable not pass",
+        rc == 1 && r.rc == 1 && strcmp(r.verdict, "pass") != 0);
+    MR_CHECK("unfoldable candidate unnamed",
+        r.candidate_file[0] == '\0' && strcmp(r.candidate, "none") == 0);
+    MR_CHECK("unfoldable blocker named", r.candidate_note[0] &&
+        strstr(r.candidate_note, "tracked diff could not be captured") &&
+        strstr(r.candidate_note, "exited 128"));
+    MR_CHECK("unfoldable reason carries it",
+        strstr(r.reason, "change set could not be preserved") != NULL);
+    /* Refused BEFORE the gate build: a doomed run does not spend one. */
+    MR_CHECK("unfoldable gate not built",
+        strcmp(r.build_spawn, "none") == 0 && r.gate_normal == false);
+    /* Nothing was preserved, so nothing may be undone. */
+    MR_CHECK("unfoldable change untouched",
+        !r.workspace_restored && !r.workspace_blocked &&
+        mr_file_is(d.wt, "src/sum.c", "edited\n") &&
+        mr_exists(d.wt, "src/turn.c"));
+    {
+        char facts[8192];
+        char *ftext = mr_read_facts(&d, facts, sizeof(facts));
+        MR_CHECK("unfoldable evidence", ftext &&
+            strstr(ftext, "\"candidate\":\"none\"") &&
+            strstr(ftext, "\"candidate_note\":\"the tracked diff") &&
+            strstr(ftext, "\"verdict\":\"refused\""));
+        free(ftext);
+    }
+    {
+        char receipt[8192];
+        char *rtext;
+        (void)snprintf(receipt, sizeof(receipt), "%s/receipt.json", d.run);
+        rtext = mr_read(receipt);
+        MR_CHECK("unfoldable receipt", rtext &&
+            strstr(rtext, "\"verdict\":\"refused\"") &&
+            strstr(rtext, "\"workspace_blocked\":false"));
+        free(rtext);
+    }
+    free(evidence);
+    return failures;
+}
+
+/* The same turn with git healthy: one tracked file edited, the gate
+ * passes, and the change IS named and published. The production shape,
+ * end to end. */
+static int mr_exec_candidate_tracked(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char *evidence = NULL;
+    char art[8192];
+    char *atext = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("tracked lane", mr_lane(&d));
+    MR_CHECK("tracked seed", mr_seed_committed(&d, "src/sum.c", "orig\n"));
+    MR_CHECK("tracked gate", mr_gate_script(&d, mr_verdict_pass,
+        mr_head_pass, NULL));
+    MR_CHECK("tracked edit hook", mr_fsmonitor(&d, "src/turn.c",
+        "printf 'edited\\n' > \"$W/src/sum.c\""));
+    rc = mr_run_prepared(&d, NULL, "src/turn.c", NULL, &r, &evidence);
+    MR_CHECK("tracked pass", rc == 0 && strcmp(r.verdict, "pass") == 0);
+    MR_CHECK("tracked candidate named",
+        mr_hex40(r.candidate) && r.candidate_file[0] &&
+        r.candidate_note[0] == '\0');
+    failures += mr_pass_candidate(&d, &r);
+    (void)snprintf(art, sizeof(art), "%s/%s", d.run, r.candidate_file);
+    atext = mr_read(art);
+    MR_CHECK("tracked artifact holds the patch", atext &&
+        strstr(atext, "diff --git a/src/sum.c b/src/sum.c") &&
+        strstr(atext, "+edited") && strstr(atext, "?? src/turn.c "));
+    free(atext);
+    free(evidence);
+    return failures;
+}
+
+/* A gate that FAILS still preserves the change and still puts the
+ * workspace back: the next job is not charged for this one's dirt. */
+static int mr_exec_restore_failed_gate(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char *evidence = NULL;
+    char art[8192];
+    char *atext = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("failgate lane", mr_lane(&d));
+    MR_CHECK("failgate seed", mr_seed_committed(&d, "src/sum.c",
+        "orig\n"));
+    MR_CHECK("failgate gate", mr_gate_script(&d, mr_verdict_fail,
+        mr_head_fail, NULL));
+    MR_CHECK("failgate edit hook", mr_fsmonitor(&d, "src/turn.c",
+        "printf 'edited\\n' > \"$W/src/sum.c\""));
+    rc = mr_run_prepared(&d, NULL, "src/turn.c", NULL, &r, &evidence);
+    MR_CHECK("failgate failed", rc == 1 &&
+        strcmp(r.verdict, "failed") == 0);
+    /* Preserved FIRST: the artifact carries the whole change. */
+    MR_CHECK("failgate candidate named",
+        mr_hex40(r.candidate) && r.candidate_file[0]);
+    (void)snprintf(art, sizeof(art), "%s/%s", d.run, r.candidate_file);
+    atext = mr_read(art);
+    MR_CHECK("failgate diff preserved", atext &&
+        strstr(atext, "diff --git a/src/sum.c b/src/sum.c") &&
+        strstr(atext, "+edited") && strstr(atext, "?? src/turn.c "));
+    free(atext);
+    /* Only THEN restored. */
+    MR_CHECK("failgate clean at base", r.workspace_restored &&
+        !r.workspace_blocked && mr_at_base(&d, r.base) &&
+        mr_file_is(d.wt, "src/sum.c", "orig\n") &&
+        !mr_exists(d.wt, "src/turn.c"));
+    free(evidence);
+    return failures;
+}
+
+/* THE ACCEPTANCE SEQUENCE: a run whose gate fails, then the very next
+ * claimed task on the SAME workspace, which must reach its turn and
+ * pass. One workspace, two run dirs, no hand cleaning in between. */
+static int mr_exec_recover_then_pass(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char *evidence = NULL;
+    char first[64] = "";
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("recover lane", mr_lane(&d));
+    MR_CHECK("recover seed", mr_seed_committed(&d, "src/sum.c", "orig\n"));
+    MR_CHECK("recover failing gate", mr_gate_script(&d, mr_verdict_fail,
+        mr_head_fail, NULL));
+    MR_CHECK("recover edit hook", mr_fsmonitor(&d, "src/turn.c",
+        "printf 'edited\\n' > \"$W/src/sum.c\""));
+    rc = mr_run_prepared(&d, NULL, "src/turn.c", NULL, &r, &evidence);
+    MR_CHECK("recover first failed", rc == 1 &&
+        strcmp(r.verdict, "failed") == 0);
+    MR_CHECK("recover first preserved", mr_hex40(r.candidate) &&
+        r.candidate_file[0]);
+    MR_CHECK("recover first restored", r.workspace_restored &&
+        !r.workspace_blocked && mr_at_base(&d, r.base));
+    (void)snprintf(first, sizeof(first), "%s", r.candidate);
+    free(evidence);
+    evidence = NULL;
+    /* The next claimed task: its own run dir, the same workspace, a gate
+     * that now passes. */
+    MR_CHECK("recover second rundir",
+        snprintf(d.run, sizeof(d.run), "%s/run2", d.root) <
+        (int)sizeof(d.run) && mr_mkdir_p(d.run));
+    MR_CHECK("recover passing gate", mr_gate_script(&d, mr_verdict_pass,
+        mr_head_pass, NULL));
+    memset(&r, 0, sizeof(r));
+    rc = mr_run_prepared(&d, NULL, "src/two.c", NULL, &r, &evidence);
+    MR_CHECK("recover second reached the turn", evidence &&
+        evidence_has(evidence, "turn-cmd:") && r.scope_pre_measured &&
+        r.scope_pre_clean && r.scope_pre_count == 0);
+    MR_CHECK("recover second pass", rc == 0 &&
+        strcmp(r.verdict, "pass") == 0 && mr_hex40(r.candidate) &&
+        strcmp(r.candidate, first) != 0);
+    MR_CHECK("recover second restored", r.workspace_restored &&
+        !r.workspace_blocked && mr_at_base(&d, r.base));
+    free(evidence);
+    return failures;
+}
+
+/* A restore that CANNOT complete: the undo has already started when it
+ * finds it cannot finish. It must say so as a blocker, leave the
+ * blocker file an operator reads, and never report a clean workspace. */
+static int mr_exec_restore_blocked(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char *evidence = NULL;
+    char dir[8192], blocked[8192];
+    char *btext = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("blocked lane", mr_lane(&d));
+    MR_CHECK("blocked gate", mr_gate_script(&d, mr_verdict_pass,
+        mr_head_pass, NULL));
+    /* The turn's own file lands under src/, and src/ goes read-only the
+     * moment it exists: the copy under the run dir still succeeds (the
+     * file is readable), so the change IS preserved — and then the undo
+     * cannot remove it. Preserve first, restore second, exactly the
+     * order that makes a blocked restore safe. */
+    MR_CHECK("blocked hook", mr_fsmonitor(&d, "src/turn.c",
+        "chmod 500 \"$W/src\""));
+    rc = mr_run_prepared(&d, NULL, "src/turn.c", NULL, &r, &evidence);
+    (void)snprintf(dir, sizeof(dir), "%s/src", d.wt);
+    (void)chmod(dir, 0700);
+    MR_CHECK("blocked preserved first", mr_hex40(r.candidate) &&
+        r.candidate_file[0]);
+    failures += mr_pass_candidate(&d, &r);
+    MR_CHECK("blocked not restored", !r.workspace_restored);
+    MR_CHECK("blocked says blocked", r.workspace_blocked);
+    MR_CHECK("blocked names the blocker",
+        strstr(r.workspace_restore, "incomplete:") != NULL);
+    MR_CHECK("blocked workspace not clean", !mr_at_base(&d, r.base) &&
+        mr_exists(d.wt, "src/turn.c"));
+    (void)snprintf(blocked, sizeof(blocked), "%s/workspace.blocked",
+        d.run);
+    btext = mr_read(blocked);
+    MR_CHECK("blocked file written", btext &&
+        strstr(btext, "workspace=") && strstr(btext, d.wt) &&
+        strstr(btext, "blocker=incomplete:") &&
+        strstr(btext, r.candidate_file));
+    free(btext);
+    {
+        char facts[8192];
+        char *ftext = mr_read_facts(&d, facts, sizeof(facts));
+        MR_CHECK("blocked evidence", ftext &&
+            strstr(ftext, "\"blocked\":true"));
+        free(ftext);
+    }
+    {
+        char receipt[8192];
+        char *rtext;
+        (void)snprintf(receipt, sizeof(receipt), "%s/receipt.json", d.run);
+        rtext = mr_read(receipt);
+        MR_CHECK("blocked receipt", rtext &&
+            strstr(rtext, "\"workspace_blocked\":true") &&
+            strstr(rtext, "\"workspace_restored\":false"));
+        free(rtext);
+    }
+    (void)rc;
+    free(evidence);
+    return failures;
+}
+
 static int mr_failures_restore(void)
 {
     int failures = 0;
@@ -2347,6 +2639,13 @@ static int mr_failures_restore(void)
     failures += mr_exec_restore_not_baseline();
     failures += mr_exec_restore_unverified();
     failures += mr_exec_restore_twice();
+    /* The change set is named before it is judged, or the run refuses. */
+    failures += mr_exec_candidate_tracked();
+    failures += mr_exec_candidate_unfoldable();
+    /* Recovery: preserve, restore, and say so when it cannot finish. */
+    failures += mr_exec_restore_failed_gate();
+    failures += mr_exec_recover_then_pass();
+    failures += mr_exec_restore_blocked();
     return failures;
 }
 

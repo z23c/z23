@@ -328,7 +328,9 @@ static void mx_evidence(struct wkr_result *res,
         "ref=%lld/%s/%lld\nworker=%s\nverdict=%s\nterminal=%s\n"
         "tokens=%llu\nfiles=%lld\nbase=%.12s\ncandidate=%s\ngate=%s\n"
         "gate_evidence=%s\nmodel=%s\nsession=%s\nturn=%s\nwall_ms=%lld\n"
-        "workspace_restored=%s\nworkspace_restore=%.160s\n"
+        "candidate_note=%.200s\n"
+        "workspace_restored=%s\nworkspace_blocked=%s\n"
+        "workspace_restore=%.160s\n"
         "reason=%s\n",
         mres->ref.seq, mres->ref.name, mres->ref.attempt,
         mx_or(mres->worker, "-"),
@@ -343,7 +345,9 @@ static void mx_evidence(struct wkr_result *res,
         mx_or(mres->session, "-"),
         mx_or(mres->turn, "-"),
         mres->wall_ms,
+        mx_or(mres->candidate_note, "-"),
         mres->workspace_restored ? "true" : "false",
+        mres->workspace_blocked ? "true" : "false",
         mx_or(mres->workspace_restore, "-"),
         mx_or(mres->reason, mx_or(err, "-")));
     if (w > 0)

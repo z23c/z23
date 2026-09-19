@@ -177,7 +177,7 @@ bool zcl_devagent_worker_muse_executor(const struct wkr_job *job,
  * zero field means "not capped" (POSIX keeps that meaning); Windows
  * refuses to launch unless every field is nonzero. */
 struct wkr_caps {
-    unsigned long long memory_bytes; /* mem_mb MiB: RLIMIT_AS / job memory */
+    unsigned long long memory_bytes; /* mem_mb MiB: RLIMIT_DATA / job memory */
     long long cpu_s;                 /* RLIMIT_CPU / job user time */
     long long wall_s;                /* parent wall clock, both hosts */
     unsigned active_processes;       /* Windows job only */
@@ -187,6 +187,30 @@ struct wkr_caps {
  * precondition for a Windows launch. */
 bool zcl_devagent_worker_caps(const struct wkr_drive_opts *opts,
                               struct wkr_caps *caps);
+
+/* POSIX: apply the job's ceilings to THIS process, which the caller has
+ * already forked. Called in the executor child between fork and the
+ * executor call, so every process the job goes on to spawn — the model
+ * host, git, the gate build and the gate run — inherits them.
+ *
+ * THE MEMORY CEILING IS RLIMIT_DATA, NOT RLIMIT_AS, AND THAT IS A
+ * MEASURED CORRECTION. RLIMIT_AS bounds ADDRESS SPACE, which counts
+ * read-only file mappings that consume no memory at all. The executor
+ * spawns git for every measurement it makes, and git maps its packfiles:
+ * on this repository one pack is 195 MB, and under a 1 GiB RLIMIT_AS
+ * `git diff HEAD` exits 128 with "packfile ... cannot be mapped, check
+ * sys.vm.max_map_count and/or RLIMIT_DATA" while `git status
+ * --porcelain`, which only reads the index, exits 0. That is exactly the
+ * split seen in production on 2026-09-19: every index-only measurement
+ * in the run succeeded, the one call that had to read a blob out of the
+ * object store failed, the change set was never folded, and a
+ * gate-passing 106k-token turn was discarded. RLIMIT_DATA bounds the
+ * heap — the allocation that actually consumes memory — at the SAME
+ * number, and the unit's cgroup MemoryMax stays the outer bound that
+ * covers the whole chain. Nothing here raises a ceiling; it moves an
+ * owner-approved number onto the resource it was always meant to
+ * measure. Windows has its own confinement and ignores this. */
+void zcl_devagent_worker_confine(const struct wkr_caps *caps);
 
 /* What the parent observed. status: 1 ran, 0 wall timeout (killed), -1
  * launch/wait failure. signaled: the child died by signal (POSIX), by an

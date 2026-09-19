@@ -23,7 +23,7 @@
  * ONE ACTIVE JOB PER WORKER. worker.lock (flock on POSIX, the platform's
  * owner-private lock file on Windows; non-blocking, held for the whole
  * drive) refuses a second concurrent drive on the same queue. On POSIX the
- * executor runs in a forked child under RLIMIT_CPU/RLIMIT_AS; on Windows
+ * executor runs in a forked child under RLIMIT_CPU/RLIMIT_DATA; on Windows
  * it runs in a restricted low-integrity child inside a kill-on-close Job
  * Object carrying the same caps (native_devagent_worker_run.c). Either
  * way a wall-clock watchdog kills it; the parent never blocks past the
@@ -91,7 +91,6 @@
 #include <unistd.h>
 #if !defined(_WIN32)
 #include <sys/file.h>
-#include <sys/resource.h>
 #include <sys/wait.h>
 #endif
 
@@ -549,7 +548,7 @@ static int wkr_adopt_job(const struct wkr_drive_opts *opts,
 }
 
 /* ── spawn: run the executor bounded ─────────────────────────────────────
- * POSIX: the child takes RLIMIT_CPU/RLIMIT_AS from the shared caps, runs
+ * POSIX: the child takes RLIMIT_CPU/RLIMIT_DATA from the shared caps, runs
  * the wired executor, writes executor_result.json, and exits; the parent
  * watches the wall clock in slices and kills past the cap. Windows: the
  * confined backend in native_devagent_worker_run.c does the same under a
@@ -577,16 +576,8 @@ static void wkr_child_run(const struct wkr_drive_opts *opts,
                           const struct wkr_job *job, wkr_executor_fn exec)
 {
     struct wkr_caps caps;
-    struct rlimit rl;
     (void)zcl_devagent_worker_caps(opts, &caps);
-    if (caps.cpu_s > 0) {
-        rl.rlim_cur = rl.rlim_max = (rlim_t)caps.cpu_s;
-        (void)setrlimit(RLIMIT_CPU, &rl);
-    }
-    if (caps.memory_bytes > 0) {
-        rl.rlim_cur = rl.rlim_max = (rlim_t)caps.memory_bytes;
-        (void)setrlimit(RLIMIT_AS, &rl);
-    }
+    zcl_devagent_worker_confine(&caps);
     _exit(zcl_devagent_worker_child_record(job, exec));
 }
 

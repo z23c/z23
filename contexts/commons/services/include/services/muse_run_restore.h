@@ -38,13 +38,25 @@
  * reaches the bound may be truncated and is never restored from. */
 #define MUSE_FOLD_MAX (256u * 1024u)
 
+/* Bound on one named fold failure. */
+#define MUSE_FOLD_NOTE_MAX 256
+
 /* The post-run change set as one text: `git diff HEAD` plus one
  * "?? <path> <content-hash>" line per untracked path, and its 40-hex
  * git hash in hex_out. *fold_out is heap text the caller frees, or NULL
  * when git failed (hex_out then reads "none"). The rundir hosts one
  * transient tempfile. */
+ * EVERY FAILURE NAMES ITSELF. `why` (bounded by why_cap, always
+ * terminated, "" on success) says WHICH step broke: the tracked-diff
+ * capture, the tempfile, or the hash. That distinction is not cosmetic.
+ * On 2026-09-19 this call failed in production for one specific reason —
+ * `git diff HEAD` could not mmap a 195 MB packfile under the executor
+ * child's RLIMIT_AS, while every index-only measurement in the same run
+ * succeeded — and the run reported only "none", which cost a whole turn
+ * and left nobody a line to read. `why` may be NULL. */
 bool muse_candidate_fold(const char *workspace, const char *rundir,
-    char *hex_out, size_t hex_cap, char **fold_out);
+    char *hex_out, size_t hex_cap, char **fold_out, char *why,
+    size_t why_cap);
 
 struct muse_restore_in {
     const char *workspace;
@@ -56,8 +68,17 @@ struct muse_restore_in {
 };
 
 /* Returns true only when the workspace is measurably clean at base
- * afterwards. reason always says what happened, either way. */
+ * afterwards. reason always says what happened, either way.
+ *
+ * REFUSED IS NOT BLOCKED. `blocked` (always written when non-NULL) is
+ * true only when the undo had already TOUCHED the workspace and then
+ * could not settle it at base: the tree is half-undone and unusable
+ * until an operator clears it. It stays false for every refusal made
+ * before the first byte is changed — those leave the change exactly
+ * where the turn left it, which is safe and is the next run's pre-state
+ * refusal doing its job. One boolean for both would tell the operator
+ * that a healthy workspace and a wrecked one are the same thing. */
 bool muse_restore_workspace(const struct muse_restore_in *in, char *reason,
-    size_t reason_cap);
+    size_t reason_cap, bool *blocked);
 
 #endif /* ZCL_SERVICES_MUSE_RUN_RESTORE_H */

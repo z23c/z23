@@ -137,9 +137,21 @@ OOMScoreAdjust=500
 # are what actually keep a run bounded; the token cap is not a useful bound
 # on its own.
 #
-# --mem_mb=1024 is RLIMIT_AS on the forked executor child. The cgroup's
+# --mem_mb=1024 is RLIMIT_DATA on the forked executor child. The cgroup's
 # MemoryMax below is the outer bound that actually holds, because it covers
 # the whole chain — worker, executor, model host and gate run together.
+#
+# IT USED TO BE RLIMIT_AS, AND THAT COST A WHOLE TURN. RLIMIT_AS bounds
+# ADDRESS SPACE, which counts read-only file mappings that consume no memory.
+# The executor spawns git for every measurement it makes and git maps its
+# packfiles: on this repository one pack is 195 MB, and inside a 1 GiB
+# RLIMIT_AS `git diff HEAD` exits 128 ("packfile ... cannot be mapped, check
+# sys.vm.max_map_count and/or RLIMIT_DATA") while `git status --porcelain`,
+# which reads only the index, exits 0. On 2026-09-19 that split let a run
+# measure its change set, pass its gate, and then fail to fold the change
+# into a candidate artifact — so a 106k-token gate-passing turn was
+# discarded and the workspace was left dirty, which refused every later job.
+# The number below did not change; the resource it bounds did.
 #
 # --deadline_s=3600 is the MAXIMUM the leaf admits (bounded 1..3600), and
 # the drive loop exits cleanly once that wall passes. There is NO value that

@@ -16,7 +16,9 @@
  * a kill-on-close job carrying the same memory and CPU caps POSIX puts in
  * RLIMIT_AS/RLIMIT_CPU plus an active-process cap, low-writable labels on
  * exactly the run dir and the brief's named worktree, NUL as the only
- * inherited handle, and an explicit allowlisted environment. The parent
+ * inherited handle, and an explicit allowlisted environment. (The POSIX
+ * memory ceiling is RLIMIT_DATA; see zcl_devagent_worker_confine in
+ * command/native_devagent.h for why it is not RLIMIT_AS.) The parent
  * keeps the wall clock and kills the whole job (grandchildren included) on
  * timeout or shutdown. The child refuses to run anything unless it can
  * observe that confinement on itself. If the backend cannot arm, nothing
@@ -42,6 +44,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 #include <unistd.h>
 
 #define WKR_RESULT_FILE "executor_result.json"
@@ -161,6 +166,27 @@ bool zcl_devagent_worker_caps(const struct wkr_drive_opts *opts,
     caps->wall_s = opts->time_cap_s > 0 ? opts->time_cap_s : 0;
     caps->active_processes = WKR_ACTIVE_PROCESS_CAP;
     return caps->memory_bytes > 0 && caps->cpu_s > 0 && caps->wall_s > 0;
+}
+
+/* The POSIX child-side confinement, in the child only. See the header
+ * for why the memory ceiling is RLIMIT_DATA and never RLIMIT_AS. */
+void zcl_devagent_worker_confine(const struct wkr_caps *caps)
+{
+#if defined(_WIN32)
+    (void)caps;
+#else
+    struct rlimit rl;
+    if (!caps)
+        return;
+    if (caps->cpu_s > 0) {
+        rl.rlim_cur = rl.rlim_max = (rlim_t)caps->cpu_s;
+        (void)setrlimit(RLIMIT_CPU, &rl);
+    }
+    if (caps->memory_bytes > 0) {
+        rl.rlim_cur = rl.rlim_max = (rlim_t)caps->memory_bytes;
+        (void)setrlimit(RLIMIT_DATA, &rl);
+    }
+#endif
 }
 
 /* ── outcome: the one receipt-facing mapping ───────────────────────────── */
