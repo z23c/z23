@@ -46,8 +46,11 @@ ZCL_COMMAND_READY_COMMAND(
     "endpoint and this box's operator public key, all signed by this box's "
     "fleet key (created on first use). Nothing private is in it — a leaked "
     "token can enrol one box under that name, once, before it expires, and "
-    "the machine row it produces still has to be admitted here. Refuses by "
-    "name: invite_name_invalid, invite_ttl_invalid, invite_relay_invalid, "
+    "the machine row it produces still has to be admitted here. The nonce "
+    "is drawn from this host's CSPRNG on every mint, so two invites never "
+    "share one and admitting the second machine is never a replay. Refuses "
+    "by name: invite_name_invalid, invite_ttl_invalid, "
+    "invite_relay_invalid, invite_nonce_unavailable, "
     "box_key_unwritable.", 0,
     "fleet,invite,enrol,join,token,machine,paste",
     "zcl.fleet_invite_input.v1", "zcl.fleet.invite.v1",

@@ -902,6 +902,53 @@ static int t_moved_line_bounds(void)
     return failures;
 }
 
+/* THE BUG THIS PINS (proved on two hosts, 2026-09-19): this table types
+ * every input key by NAME, and `line` is two unrelated inputs sharing one
+ * name — dev.agent.mutate's source line NUMBER above, and fleet.import's
+ * whole base64url ROSTER LINE. The integer rule won for both, so
+ *
+ *   $ z23 fleet import <roster-line>
+ *   -> invalid type or range for input key 'line'
+ *
+ * for every input the command was ever given, positional or --input=-, and
+ * a box that is not the manager could not learn its fleet's roster at all.
+ *
+ * Both meanings are held here, in both directions, because the fix is a
+ * per-leaf exception to a name-keyed table: the day a third leaf declares
+ * `line`, one of these four cases is what says which rule it inherited. */
+static int t_line_key_is_per_leaf(void)
+{
+    int failures = 0;
+    char why[192];
+
+    /* The roster line an owner pastes is about 320 characters; the wire
+     * ceiling is FLEET_ENROL_MACHINE_TEXT_MAX (2333). Both are inside the
+     * 4096-character default string bound, and the bound's own edges are
+     * held so a later "line is special, drop its length rule" is caught. */
+    CIB_CHECK("fleet import accepts a pasted roster line",
+              cib_accepts("fleet.import", "line", 320, why, sizeof(why)));
+    CIB_CHECK("fleet import accepts a roster line at the wire ceiling",
+              cib_accepts("fleet.import", "line", 2333, why, sizeof(why)));
+    CIB_CHECK("fleet import accepts a roster line at the string bound",
+              cib_accepts("fleet.import", "line", 4096, why, sizeof(why)));
+    CIB_CHECK("fleet import refuses one character past the string bound",
+              !cib_accepts("fleet.import", "line", 4097, why, sizeof(why)) &&
+              cib_type_refusal(why, "line"));
+    CIB_CHECK("fleet import refuses an empty roster line",
+              !cib_accepts("fleet.import", "line", 0, why, sizeof(why)) &&
+              cib_type_refusal(why, "line"));
+    /* A number is not a roster line, and a string is not a source line.
+     * Neither leaf inherits the other's meaning in either direction. */
+    CIB_CHECK("fleet import refuses a NUMBER for its roster line",
+              !cib_accepts_int_why("fleet.import", "line", 42, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "line"));
+    CIB_CHECK("agent mutate still refuses a STRING for its source line",
+              !cib_accepts("dev.agent.mutate", "line", 3, why, sizeof(why)) &&
+              cib_type_refusal(why, "line"));
+    return failures;
+}
+
 /* cr_match_chunks_and_lines, fourth key: `max_lines` is a tail size — it
  * shares `line`'s low bound but stops a thousand times earlier, so its own
  * high edge has to be held down separately. */
@@ -1045,6 +1092,7 @@ int test_command_input_bounds(void)
     failures += t_moved_chunks_paid_bounds();
     failures += t_moved_chunk_start_bounds();
     failures += t_moved_line_bounds();
+    failures += t_line_key_is_per_leaf();
     failures += t_moved_max_lines_bounds();
     failures += t_moved_required_discovery();
     failures += t_resident_execution_grant();

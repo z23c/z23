@@ -20,6 +20,7 @@
 
 #include "crypto/ed25519.h"
 #include "net/acme_b64url.h"
+#include "platform/rng.h"
 
 #include <string.h>
 
@@ -292,6 +293,12 @@ bool fleet_invite_mint(const char *name, int64_t ttl_hours, const char *relay,
     uint8_t wire[FLEET_ENROL_INVITE_WIRE_MAX];
     struct fe_put p = { body, sizeof(body), 0, true };
     size_t wire_len = 0;
+    /* The record is assembled in a ZEROED local and copied to `*out` only
+     * once it is signed. Two things follow, and both are the point: no
+     * field can reach the signed body carrying whatever the caller's stack
+     * happened to hold, and a refusal leaves `*out` exactly as it was, which
+     * is what this function's contract has always promised. */
+    struct fleet_invite minted = {0};
     fe_why(why, NULL);
     if (!fleet_enrol_name_valid(name)) {
         fe_why(why, FLEET_ENROL_WHY_NAME_INVALID);
@@ -306,13 +313,19 @@ bool fleet_invite_mint(const char *name, int64_t ttl_hours, const char *relay,
         fe_why(why, FLEET_ENROL_WHY_RELAY_INVALID);
         return false;
     }
-    memset(out->name, 0, sizeof(out->name));
-    memcpy(out->name, name, strlen(name));
-    out->expires_unix = now_unix + ttl_hours * 3600;
-    memset(out->relay, 0, sizeof(out->relay));
-    if (relay) memcpy(out->relay, relay, strlen(relay));
-    memcpy(out->operator_pubkey, pubkey, FLEET_ENROL_PUBKEY_BYTES);
-    fe_invite_body(&p, out);
+    /* The one-time nonce, from the host CSPRNG and nowhere else. An invite
+     * is single-use because THIS value has never been seen before; a nonce
+     * that repeats makes the second admission on any box a replay, which is
+     * how a fleet ends up able to admit exactly one machine. */
+    if (!rng_fill(minted.nonce, FLEET_ENROL_NONCE_BYTES)) {
+        fe_why(why, FLEET_ENROL_WHY_NONCE_UNAVAILABLE);
+        return false;
+    }
+    memcpy(minted.name, name, strlen(name));
+    minted.expires_unix = now_unix + ttl_hours * 3600;
+    if (relay) memcpy(minted.relay, relay, strlen(relay));
+    memcpy(minted.operator_pubkey, pubkey, FLEET_ENROL_PUBKEY_BYTES);
+    fe_invite_body(&p, &minted);
     if (!p.ok) {
         fe_why(why, FLEET_ENROL_WHY_ARGUMENTS);
         return false;
@@ -320,7 +333,8 @@ bool fleet_invite_mint(const char *name, int64_t ttl_hours, const char *relay,
     if (!fe_seal(FE_DOMAIN_INVITE, body, p.len, seed, pubkey, wire,
                  sizeof(wire), &wire_len, text, text_cap, why))
         return false;
-    memcpy(out->signature, wire + p.len, FLEET_ENROL_SIG_BYTES);
+    memcpy(minted.signature, wire + p.len, FLEET_ENROL_SIG_BYTES);
+    *out = minted;
     return true;
 }
 

@@ -68,7 +68,15 @@ static void fe_invite(const struct zcl_command_request *request,
     char token[FLEET_ENROL_MACHINE_TEXT_MAX];
     char line[FE_LINE_MAX];
     char hex[FLEET_ENROL_PUBKEY_HEX];
-    struct fleet_invite invite;
+    /* Every fleet record this file declares is zero-initialised, without
+     * exception and whether or not the callee is known to fill it. The
+     * exception is what cost us: this struct was raw stack, the mint left
+     * `nonce` untouched, the stack happened to be zeros, and every invite
+     * this manager ever minted carried the same all-zero nonce — so the
+     * second `fleet admit` was a replay and the fleet could hold exactly
+     * one machine. A blanket rule is cheaper to keep true than a
+     * per-callee argument about who initialises what. */
+    struct fleet_invite invite = {0};
     const struct json_value *in = request ? request->input : NULL;
     const char *name = json_get_str(json_get(in, "name"));
     const char *relay = json_get_str(json_get(in, "relay"));
@@ -159,8 +167,8 @@ static void fe_join(const struct zcl_command_request *request,
     char line[FE_LINE_MAX];
     char hex[FLEET_ENROL_PUBKEY_HEX];
     char ssh[FLEET_ENROL_SSH_MAX + 1];
-    struct fleet_invite invite;
-    struct fleet_box_facts facts;
+    struct fleet_invite invite = {0};
+    struct fleet_box_facts facts = {0};
     struct fleet_signing_key signing;
     const struct fleet_signing_key *signer = NULL;
     size_t invite_len = 0;
@@ -421,7 +429,7 @@ static void fe_admit(const struct zcl_command_request *request,
     uint8_t receipt_wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
     char sealed[FLEET_ENROL_MACHINE_TEXT_MAX];
     char hex[FLEET_ENROL_PUBKEY_HEX];
-    struct fleet_receipt receipt;
+    struct fleet_receipt receipt = {0};
     struct fleet_roster_scan scan = {0};
     const struct json_value *in = request ? request->input : NULL;
     const char *text = json_get_str(json_get(in, "receipt"));
@@ -516,7 +524,7 @@ static void fe_import(const struct zcl_command_request *request,
 {
     uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES];
     char hex[FLEET_ENROL_PUBKEY_HEX];
-    struct fleet_machine machine;
+    struct fleet_machine machine = {0};
     const struct json_value *in = request ? request->input : NULL;
     const char *line = json_get_str(json_get(in, "line"));
     const char *why = NULL;

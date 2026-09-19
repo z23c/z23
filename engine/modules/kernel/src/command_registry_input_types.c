@@ -342,13 +342,33 @@ static bool cr_match_path_special(const struct zcl_command_spec *spec,
     return false;
 }
 
-static bool cr_match_chunks_and_lines(const char *key,
+/* `line` is TWO unrelated inputs that happen to share a name, and this table
+ * types by NAME rather than by leaf:
+ *
+ *   dev.agent.mutate `line`  a source line NUMBER, 1..1000000
+ *   fleet.import     `line`  one whole base64url roster line, a STRING
+ *
+ * The integer rule below used to win for both, so `fleet import` refused
+ * every roster line it was ever handed — "invalid type or range for input
+ * key 'line'" — and a box that is not the manager could not learn the
+ * roster at all. Naming the leaf is the narrow fix. The standing flaw is
+ * the name-keyed table itself: two leaves may legitimately declare the same
+ * key with different meanings, and only the leaf path can tell them apart.
+ * Any future `line` stays an integer, so this widens nothing. */
+static bool cr_match_chunks_and_lines(const struct zcl_command_spec *spec,
+                                      const char *key,
                                       const struct json_value *value,
                                       bool *type_ok)
 {
+    const char *path = spec && spec->path ? spec->path : "";
     if (strcmp(key, "chunk_start") == 0 || strcmp(key, "chunks_paid") == 0) {
         int64_t lo = strcmp(key, "chunks_paid") == 0 ? 1 : 0;
         *type_ok = cr_int_range(value, lo, 4294967295LL);
+        return true;
+    }
+    if (strcmp(key, "line") == 0 && strcmp(path, "fleet.import") == 0) {
+        *type_ok = cr_nonempty_str(value,
+                                   zcl_command_registry_input_str_max(key));
         return true;
     }
     if (strcmp(key, "max_lines") == 0 || strcmp(key, "line") == 0) {
@@ -478,7 +498,7 @@ bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
         return true;
     if (cr_match_path_special(spec, key, value, type_ok))
         return true;
-    if (cr_match_chunks_and_lines(key, value, type_ok))
+    if (cr_match_chunks_and_lines(spec, key, value, type_ok))
         return true;
     if (zcl_command_registry_devagent_input_ok(spec ? spec->path : NULL, key,
                                                value, type_ok))

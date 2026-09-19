@@ -506,6 +506,138 @@ static int test_fe_replay(void)
     return failures;
 }
 
+/* THE BUG THIS PINS (proved on two hosts, 2026-09-19): fleet_invite_mint()
+ * never assigned out->nonce, and `fleet invite` handed it an uninitialised
+ * `struct fleet_invite` on the stack. That stack was zeros, so every invite
+ * the manager ever minted carried the nonce
+ * 00000000000000000000000000000000, the spent-invite ledger burned it on
+ * the first admission, and the second `fleet admit` — a different machine,
+ * a different receipt — refused FLEET_INVITE_REPLAYED. One manager could
+ * admit exactly one computer, ever.
+ *
+ * Every case below pre-fills the caller's struct with a FIXED pattern, so
+ * a mint that does not write the nonce produces identical nonces and fails
+ * here deterministically rather than depending on what the stack held. */
+static int test_fe_invite_nonce_fresh(void)
+{
+    int failures = 0;
+    TEST("fleet enrol: every invite carries its own random nonce, drawn by "
+         "the mint and never inherited from the caller's memory") {
+        enum { FE_MINTS = 8 };
+        uint8_t op_seed[32], op_pub[32];
+        uint8_t zero[FLEET_ENROL_NONCE_BYTES];
+        uint8_t stale[FLEET_ENROL_NONCE_BYTES];
+        static char token[FE_MINTS][FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct fleet_invite invite[FE_MINTS];
+        struct fleet_invite parsed;
+        const char *why = NULL;
+        size_t i = 0, j = 0;
+        fe_key(0xb1, op_seed, op_pub);
+        memset(zero, 0, sizeof(zero));
+        memset(stale, 0xee, sizeof(stale));
+        for (i = 0; i < FE_MINTS; i++) {
+            /* Half the mints are handed a zeroed struct (what the live
+             * manager's stack held) and half a poisoned one, so neither a
+             * "leave it as it came" nor a "zero it and stop" mint passes. */
+            memset(&invite[i], (i % 2u) ? 0xee : 0x00, sizeof(invite[i]));
+            ASSERT(fleet_invite_mint("studio", FE_TTL, "", op_seed, op_pub,
+                                     FE_NOW, token[i], sizeof(token[i]),
+                                     &invite[i], &why));
+            /* The mint OVERWROTE whatever the caller handed it. */
+            ASSERT(memcmp(invite[i].nonce, zero, sizeof(zero)) != 0);
+            ASSERT(memcmp(invite[i].nonce, stale, sizeof(stale)) != 0);
+        }
+        /* Pairwise distinct. Eight draws of 128 bits collide at a rate no
+         * suite will ever observe, so a repeat here is a constant, a reset
+         * counter, or no draw at all — the three ways this defect returns. */
+        for (i = 0; i < FE_MINTS; i++)
+            for (j = i + 1; j < FE_MINTS; j++)
+                ASSERT(memcmp(invite[i].nonce, invite[j].nonce,
+                              FLEET_ENROL_NONCE_BYTES) != 0);
+        /* The nonce is inside the signed body, so two invites for the same
+         * name from the same key are two different pasteable lines. */
+        ASSERT(strcmp(token[0], token[1]) != 0);
+        /* And it survives the wire: what the manager recorded is what the
+         * box being admitted presents back. */
+        ASSERT(fleet_invite_parse(token[1], &parsed, NULL, 0, NULL, &why));
+        ASSERT(memcmp(parsed.nonce, invite[1].nonce,
+                      FLEET_ENROL_NONCE_BYTES) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The defect as the owner met it: admit one machine, then admit a second.
+ * This case runs the whole ceremony twice against ONE manager key and asks
+ * the spent-invite ledger exactly what `fleet admit` asks it, in the same
+ * order, so a nonce that repeats refuses the second box here too. */
+static int test_fe_admit_two_machines(void)
+{
+    int failures = 0;
+    TEST("fleet enrol: one manager admits a second machine — two invites, "
+         "two unspent nonces, two rows on the roster") {
+        static const char *const names[2] = { "studio", "annex" };
+        static const uint8_t box_bytes[2] = { 0xc2, 0xc3 };
+        uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32];
+        uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+        uint8_t receipt_wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
+        uint8_t nonce[2][FLEET_ENROL_NONCE_BYTES];
+        static char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+        static char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+        static char row[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct fleet_invite invite;
+        struct fleet_receipt parsed;
+        struct fleet_box_facts facts = fe_facts();
+        struct fleet_roster_scan scan = {0};
+        size_t invite_len = 0, receipt_len = 0, i = 0;
+        bool seen = true;
+        const char *why = NULL;
+        fe_isolate("admit-two");
+        fe_key(0xc1, op_seed, op_pub);
+        for (i = 0; i < 2u; i++) {
+            fe_key(box_bytes[i], box_seed, box_pub);
+            /* The manager mints. The caller's struct is zeroed first, which
+             * is precisely the live condition that produced the all-zero
+             * nonce, so a mint that does not draw one fails the second lap. */
+            memset(&invite, 0, sizeof(invite));
+            ASSERT(fleet_invite_mint(names[i], FE_TTL, "", op_seed, op_pub,
+                                     FE_NOW, token, sizeof(token), &invite,
+                                     &why));
+            /* The box joins. */
+            ASSERT(fleet_invite_parse(token, &invite, invite_wire,
+                                      sizeof(invite_wire), &invite_len, &why));
+            memcpy(nonce[i], invite.nonce, FLEET_ENROL_NONCE_BYTES);
+            ASSERT(fleet_receipt_mint(invite_wire, invite_len, FE_ONION,
+                                      &facts, "", box_seed, box_pub, NULL,
+                                      receipt, sizeof(receipt), &why));
+            ASSERT(fleet_receipt_parse(receipt, &parsed, receipt_wire,
+                                       sizeof(receipt_wire), &receipt_len,
+                                       &why));
+            /* The manager admits: the replay question first, exactly as
+             * fe_admit asks it, and only then the seal and the row. */
+            ASSERT(fleet_nonce_seen(parsed.invite.nonce, &seen, &why));
+            ASSERT(!seen);
+            ASSERT(fleet_machine_mint(receipt_wire, receipt_len, FE_NOW,
+                                      (uint16_t)(FLEET_ENROL_PORT_FIRST + i),
+                                      op_seed, op_pub, row, sizeof(row),
+                                      &why));
+            ASSERT(fleet_roster_append(row, &why));
+            ASSERT(fleet_nonce_spend(parsed.invite.nonce, &why));
+        }
+        /* Two machines, two nonces, and neither invite reusable. */
+        ASSERT(memcmp(nonce[0], nonce[1], FLEET_ENROL_NONCE_BYTES) != 0);
+        ASSERT(fleet_nonce_seen(nonce[0], &seen, &why));
+        ASSERT(seen);
+        ASSERT(fleet_nonce_seen(nonce[1], &seen, &why));
+        ASSERT(seen);
+        ASSERT(fleet_roster_scan(op_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 2u);
+        ASSERT_EQ(scan.unverifiable, 0u);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── the ssh bridge ─────────────────────────────────────────────────────── */
 
 static int test_fe_bridge(void)
@@ -717,6 +849,8 @@ int test_fleet_enrol(void)
     failures += test_fe_roster_admission();
     failures += test_fe_roster_import();
     failures += test_fe_replay();
+    failures += test_fe_invite_nonce_fresh();
+    failures += test_fe_admit_two_machines();
     failures += test_fe_bridge();
     failures += test_fe_onion_grammar();
     failures += test_fe_onion_refused_at_mint();

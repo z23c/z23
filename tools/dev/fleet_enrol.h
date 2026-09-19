@@ -139,6 +139,10 @@ enum {
 #define FLEET_ENROL_WHY_NAME_INVALID "invite_name_invalid"
 #define FLEET_ENROL_WHY_TTL_INVALID "invite_ttl_invalid"
 #define FLEET_ENROL_WHY_RELAY_INVALID "invite_relay_invalid"
+/* The host CSPRNG refused the one-time nonce. A minted invite whose nonce
+ * is not random is a replayable invite, so this box declines to invent one
+ * rather than hand the owner a token that admits exactly one machine. */
+#define FLEET_ENROL_WHY_NONCE_UNAVAILABLE "invite_nonce_unavailable"
 #define FLEET_ENROL_WHY_INVITE_MALFORMED "invite_malformed"
 #define FLEET_ENROL_WHY_INVITE_SIGNATURE "invite_signature_invalid"
 #define FLEET_ENROL_WHY_INVITE_EXPIRED "invite_expired"
@@ -248,7 +252,14 @@ bool fleet_enrol_name_valid(const char *name);
 bool fleet_enrol_onion_valid(const char *onion);
 
 /* Mint a signed invite. `seed`/`pubkey` are this box's key. `text` receives
- * the unpadded base64url token. Refuses by name; writes nothing on refusal. */
+ * the unpadded base64url token. Refuses by name; writes nothing on refusal.
+ *
+ * The one-time nonce is drawn HERE, from the host CSPRNG, and overwrites
+ * whatever `out` held: no caller supplies it, no caller can forget to, and
+ * an uninitialised `struct fleet_invite` can never leak its stack bytes
+ * into a signed token. A CSPRNG that refuses is
+ * FLEET_ENROL_WHY_NONCE_UNAVAILABLE and mints nothing — an invite whose
+ * nonce is predictable is an invite that admits one machine forever. */
 bool fleet_invite_mint(const char *name, int64_t ttl_hours, const char *relay,
                        const uint8_t seed[FLEET_ENROL_SEED_BYTES],
                        const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES],
