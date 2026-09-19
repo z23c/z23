@@ -124,6 +124,15 @@ gate_rc() {
         check-core-seal)   printf 'X'; return 0 ;;   # driver special-case, not a script
     esac
 
+    # Resolve the gate in the table FIRST. A name with no table entry can
+    # never get a driver verdict, so waiting for one only burns the full
+    # timeout: measured 2026-09-19, the self-check's unknown-gate fixture
+    # below sat 180 s on every `make lint`, which was all of this gate's
+    # 184 s and the whole lint wall. A verdict file for an unlisted name is
+    # never honored either — only a gate the table can name has a verdict.
+    cmd="$(gate_cmd_for "$g")"
+    if [ -z "$cmd" ]; then printf 'X'; return 0; fi
+
     # Reuse the DRIVER's own verdict for this gate instead of running a
     # second, independent copy of it from inside this gate's process.
     # run_lint.sh's parallel path exports ZCL_LINT_GATES_DIR_X to every gate
@@ -163,8 +172,6 @@ gate_rc() {
         done
     fi
 
-    cmd="$(gate_cmd_for "$g")"
-    if [ -z "$cmd" ]; then printf 'X'; return 0; fi
     timeout "$GATE_TIMEOUT_SEC" bash -c "cd '$ROOT' && ZCL_LINT_PRODUCTION_SCAN=1 $cmd" \
         >/dev/null 2>&1
     rc=$?
@@ -181,6 +188,25 @@ symbol_hit() {
     [ "$rc" -ge 2 ] && return 2
     [ -n "$out" ] && return 0
     return 1
+}
+
+# gate_prime <body> — resolve a gate-passes/gate-fails oracle in THIS shell
+# before eval_claim runs it in a command substitution. eval_claim's own
+# gate_rc call happens in that subshell, so its memo entry died with it and
+# every claim naming the same gate ran that gate again (check-package-anatomy
+# twice, check-no-utxo-projection five times, per standalone run). Priming
+# here stores the verdict once per invocation; the subshell then reads it.
+# Only a well-formed name is primed; eval_claim still reports the rest.
+gate_prime() {
+    local body="${1%%#*}"
+    set -f
+    # shellcheck disable=SC2206
+    local -a tok=( $body )
+    set +f
+    case "${tok[0]:-}" in gate-passes|gate-fails) ;; *) return 0 ;; esac
+    [ "${#tok[@]}" -eq 2 ] || return 0
+    [[ "${tok[1]}" =~ ^check-[a-z0-9]+(-[a-z0-9]+)*$ ]] || return 0
+    gate_rc "${tok[1]}" >/dev/null
 }
 
 # eval_claim <body> — evaluate one annotation body.
@@ -283,6 +309,7 @@ scan_file() {
         body="${line#*claim:}"
         body="${body%%-->*}"
         claims_parsed=$((claims_parsed + 1))
+        gate_prime "$body"
         reason="$(eval_claim "$body")"; rc=$?
         [ "$rc" -eq 0 ] && continue
         local ctx="${prev#"${prev%%[![:space:]]*}"}"
@@ -337,6 +364,7 @@ selfcheck() {
     # Derive the oracle's real direction rather than assuming it, so this
     # gate does not break the day check-no-utxo-projection legitimately goes
     # red for its own reasons.
+    gate_rc check-no-utxo-projection >/dev/null   # memoize in THIS shell
     orc="$(gate_rc check-no-utxo-projection)"
     if [ "$orc" = X ]; then
         echo "FAIL: self-check could not resolve the oracle gate check-no-utxo-projection" >&2
@@ -490,6 +518,41 @@ selfcheck() {
         st_fail=2
     fi
 
+    # (c) UNLISTED NAME: a verdict file for a name the gate table cannot
+    #     resolve is never honored, and is never waited for. Seed a passing
+    #     verdict for such a name; gate_rc must still answer X. Resolving the
+    #     table before the verdict dir is what keeps an unknown-gate claim
+    #     from polling the full timeout for a verdict that cannot exist.
+    printf '%s\n' 0 > "$vr_dir/check-zzz-doc-claims-unlisted.rc"
+    unset 'GATE_RC[check-zzz-doc-claims-unlisted]'
+    got="$(gate_rc check-zzz-doc-claims-unlisted)"
+    if [ "$got" != X ]; then
+        echo "FAIL: check_doc_claims verdict-reuse self-check broken — a" >&2
+        echo "      verdict file for a gate with no table entry was honored" >&2
+        echo "      (got '$got', wanted X)." >&2
+        st_fail=2
+    fi
+
+    # (d) ONE RUN PER GATE PER INVOCATION: two claims naming the same oracle
+    #     gate run it once. The scratch command appends a line per run.
+    unset ZCL_LINT_GATES_DIR_X
+    printf '        check-zzz-doc-claims-memo) echo '"'"'echo run >> %s/memo.count'"'"' ;;\n' \
+        "$vr_dir" > "$vr_table"
+    printf '%s\n' "First reliance." "<!-- claim: gate-passes check-zzz-doc-claims-memo -->" \
+        "Second reliance." "<!-- claim: gate-passes check-zzz-doc-claims-memo -->" \
+        > "$vr_dir/memo.md"
+    unset 'GATE_RC[check-zzz-doc-claims-memo]'
+    violations=(); claims_parsed=0
+    scan_file "$vr_dir/memo.md" "memo.md"
+    got="$(wc -l < "$vr_dir/memo.count" 2>/dev/null || echo 0)"
+    if [ "${got// /}" != 1 ] || [ "${#violations[@]}" -ne 0 ] || [ "$claims_parsed" -ne 2 ]; then
+        echo "FAIL: check_doc_claims memo self-check broken — two claims on one" >&2
+        echo "      oracle gate must run it exactly once and both hold; got" >&2
+        echo "      runs=${got// /} violations=${#violations[@]} claims=$claims_parsed" >&2
+        st_fail=2
+    fi
+    violations=(); claims_parsed=0
+    unset 'GATE_RC[check-zzz-doc-claims-unlisted]' 'GATE_RC[check-zzz-doc-claims-memo]'
     GATE_TABLE="$vr_old_table"
     if [ -n "$vr_old_vdir" ]; then export ZCL_LINT_GATES_DIR_X="$vr_old_vdir"
     else unset ZCL_LINT_GATES_DIR_X; fi
