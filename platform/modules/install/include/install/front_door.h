@@ -75,6 +75,22 @@ bool fd_pin_parse(const char *text, struct fd_pin *out);
  * than the misleading "malformed". */
 bool fd_pin_is_sentinel(const char *text);
 
+/* ── The stamped shim, judged by its own bytes ─────────────────────────────
+ * A node that publishes an install origin serves the front-door shim itself,
+ * and those bytes carry the bootstrap digest the script checks a download
+ * against. While nothing is published every such digest is the all-zero
+ * sentinel and the script refuses before it opens a socket, so an origin
+ * stamped with that copy answers the documented
+ * `curl -fsSL https://<site>/install.sh | sh` with a program that installs
+ * nothing — and hides the node's own source-build installer behind it.
+ *
+ * True when the text names at least one digest a machine could act on: a
+ * maximal run of exactly FD_HEX_LEN lowercase hex characters that is not all
+ * zeros. Counting runs rather than assignments holds for both the POSIX and
+ * the PowerShell shim and for however either spells the variable. NULL, empty
+ * text, and text whose only digest is the sentinel are all false. */
+bool fd_shim_names_a_bootstrap(const char *text);
+
 /* Scan a NUL-terminated blob line by line and yield the first line that is a
  * pin. This is how the repository channel (a fetched RELEASE_PIN file) and a
  * multi-string TXT answer are read: an HTML error page or an unset sentinel

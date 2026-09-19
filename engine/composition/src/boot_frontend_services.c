@@ -46,13 +46,20 @@
 #include "script/standard.h"
 #include "vcs/package_store.h"
 #include "config/boot_zcode_swarm.h"
+#include "install/front_door.h"
+#include "util/file_io.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 extern _Atomic int g_deferred_proof_validation_below_height;
+
+/* The stamped front-door shim is ~5 KB of POSIX sh. A file larger than this
+ * is not read, and leaves the install tree armed as before. */
+#define PUBLIC_INSTALL_SHIM_MAX (64u * 1024u)
 
 /* Tor → controller bridge: hands an onion HTTP request straight to the same
  * controller surface the clearnet endpoints use (no SOCKS, no port). */
@@ -284,6 +291,41 @@ static void boot_api_cache_stop(void *ctx)
  * different path, its subject says what it is in words, and the front door
  * announces at start (and on every swap) whether what it serves names itself
  * as its own issuer — see net/acme_selfsigned.h. */
+/* Name <datadir>/public-install to the HTTPS front door, which then owns
+ * GET / and GET /install.sh as well as the bootstrap and release bytes under
+ * it — unless the shim stamped there names no bootstrap anyone could install.
+ * That shim is the all-zero-digest copy from this repository: it refuses
+ * before it opens a socket, so serving it answers the documented
+ * `curl -fsSL https://<site>/install.sh | sh` with a program that installs
+ * nothing, while hiding this node's own source-build installer
+ * (contexts/commons/views/src/install_sh_view.c) behind it. Nothing a
+ * stranger could have had is withheld by declining: no binary is fetched
+ * either way, and the built-in route builds from source.
+ *
+ * An absent or unreadable shim leaves the tree armed exactly as before — a
+ * stamped origin may hold only bootstrap or release bytes. */
+static void boot_https_arm_public_install(const char *datadir)
+{
+    char install_root[1024];
+    char shim_path[1088];
+    char *shim_text = NULL;
+    size_t shim_len = 0;
+
+    snprintf(install_root, sizeof(install_root), "%s/public-install", datadir);
+    snprintf(shim_path, sizeof(shim_path), "%s/install.sh", install_root);
+    if (zcl_read_whole_file_text(shim_path, PUBLIC_INSTALL_SHIM_MAX,
+                                 &shim_text, &shim_len, "https") &&
+        !fd_shim_names_a_bootstrap(shim_text)) {
+        printf("HTTPS: %s names no published bootstrap - serving the "
+               "built-in source-build installer at /install.sh instead\n",
+               shim_path);
+        free(shim_text);
+        return;
+    }
+    free(shim_text);
+    https_server_set_public_install_root(install_root);
+}
+
 static bool boot_https_explorer_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
@@ -303,12 +345,7 @@ static bool boot_https_explorer_start(void *ctx)
              "%s/ssl/self-signed-placeholder-key.pem", svc->datadir);
     snprintf(handoff_path, sizeof(handoff_path), "%s/ssl/%s", svc->datadir,
              ACME_HANDOFF_FILENAME);
-    {
-        char install_root[1024];
-        snprintf(install_root, sizeof(install_root), "%s/public-install",
-                 svc->datadir);
-        https_server_set_public_install_root(install_root);
-    }
+    boot_https_arm_public_install(svc->datadir);
     if (platform_directory_create(ssl_dir, 0700) != 0 && errno != EEXIST) {
         printf("HTTPS: cannot create %s - block explorer not on clearnet\n",
                ssl_dir);

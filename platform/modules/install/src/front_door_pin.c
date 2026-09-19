@@ -49,15 +49,30 @@ static bool trim_into(const char *text, char *out, size_t out_len)
     return true;
 }
 
+static bool is_sha256_hex_char(char c)
+{
+    const bool digit = c >= '0' && c <= '9';
+    const bool lower = c >= 'a' && c <= 'f';
+    return digit || lower;
+}
+
 static bool is_sha256_hex(const char *s, size_t n)
 {
     if (n != FD_HEX_LEN)
         return false;
     for (size_t i = 0; i < n; i++) {
-        const char c = s[i];
-        const bool digit = c >= '0' && c <= '9';
-        const bool lower = c >= 'a' && c <= 'f';
-        if (!digit && !lower)
+        if (!is_sha256_hex_char(s[i]))
+            return false;
+    }
+    return true;
+}
+
+/* The all-zero digest is the sentinel wherever it appears: it names no bytes
+ * any machine could fetch. */
+static bool is_all_zero(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] != '0')
             return false;
     }
     return true;
@@ -69,6 +84,31 @@ bool fd_pin_is_sentinel(const char *text)
     if (!trim_into(text, trimmed, sizeof trimmed))
         return false;
     return strcmp(trimmed, FD_PIN_SENTINEL) == 0;
+}
+
+/* Length of the maximal lowercase-hex run starting at `p`. Uppercase is not
+ * hex here for the same reason fd_pin_parse refuses it: one spelling, so two
+ * channels cannot disagree over case. */
+static size_t hex_run_len(const char *p)
+{
+    size_t n = 0;
+    while (is_sha256_hex_char(p[n]))
+        n++;
+    return n;
+}
+
+bool fd_shim_names_a_bootstrap(const char *text)
+{
+    if (!text)
+        return false;
+    for (const char *p = text; *p != '\0';) {
+        const size_t run = hex_run_len(p);
+
+        if (run == FD_HEX_LEN && !is_all_zero(p, run))
+            return true;
+        p += run > 0 ? run : 1;
+    }
+    return false;
 }
 
 bool fd_pin_parse(const char *text, struct fd_pin *out)

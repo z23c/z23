@@ -487,6 +487,62 @@ static int case_dns_parse(void)
     return failures;
 }
 
+/* ── 8. The stamped shim an install origin serves ───────────────────────────
+ *
+ * A node stamped as an install origin owns GET / and GET /install.sh. While
+ * platform/packaging/install/install.sh still carries the all-zero sentinel,
+ * every one of those two answers is a script that refuses before it opens a
+ * socket, and it hides the node's own source-build installer behind it. So
+ * the boot wiring asks these bytes whether they name anything installable
+ * before it arms that tree (boot_https_arm_public_install in
+ * engine/composition/src/boot_frontend_services.c). */
+static int case_shim_pin(void)
+{
+    static const char sentinel_shim[] =
+        "#!/bin/sh\n"
+        "PUBLISHED_PLATFORMS=\" linux-x86_64 \"\n"
+        "BOOT_ZERO="
+        "0000000000000000000000000000000000000000000000000000000000000000\n"
+        "BOOT_LINUX_X86_64=\"$BOOT_ZERO\"\n"
+        "curl --max-filesize 33554432 -fsSL \"$ORIGIN/bootstrap/$PLATFORM\"\n"
+        "[ \"$WANT\" != \"$BOOT_ZERO\" ] || die \"no Z23 bootstrap is pinned"
+        " into this script yet\"\n";
+    static const char released_shim[] =
+        "#!/bin/sh\n"
+        "BOOT_ZERO="
+        "0000000000000000000000000000000000000000000000000000000000000000\n"
+        "BOOT_LINUX_X86_64=\""
+        "9f2c4e6a8b0d1f3574695a8c7e2d4b6f8091a3c5e7d9fb02143658a7c9e0d2f4"
+        "\"\n";
+    int failures = 0;
+
+    FD_CHECK("the checked-in sentinel shim names no bootstrap",
+             !fd_shim_names_a_bootstrap(sentinel_shim));
+    FD_CHECK("a release-cut shim names one",
+             fd_shim_names_a_bootstrap(released_shim));
+    FD_CHECK("the sentinel digest alone is not a name",
+             !fd_shim_names_a_bootstrap(
+                 "0000000000000000000000000000000000000000"
+                 "000000000000000000000000"));
+    FD_CHECK("a shim carrying no digest at all names nothing",
+             !fd_shim_names_a_bootstrap("#!/bin/sh\necho z23-install\n"));
+    FD_CHECK("a 63-character hex run is not a digest",
+             !fd_shim_names_a_bootstrap(
+                 "BOOT=9f2c4e6a8b0d1f3574695a8c7e2d4b6f"
+                 "8091a3c5e7d9fb02143658a7c9e0d2f\n"));
+    FD_CHECK("a 65-character hex run is not a digest either",
+             !fd_shim_names_a_bootstrap(
+                 "BOOT=9f2c4e6a8b0d1f3574695a8c7e2d4b6f"
+                 "8091a3c5e7d9fb02143658a7c9e0d2f4a\n"));
+    FD_CHECK("uppercase hex is not a digest — one spelling, as with a pin",
+             !fd_shim_names_a_bootstrap(
+                 "BOOT=\"9F2C4E6A8B0D1F3574695A8C7E2D4B6F"
+                 "8091A3C5E7D9FB02143658A7C9E0D2F4\"\n"));
+    FD_CHECK("empty text names nothing", !fd_shim_names_a_bootstrap(""));
+    FD_CHECK("NULL text names nothing", !fd_shim_names_a_bootstrap(NULL));
+    return failures;
+}
+
 int test_z23_front_door(void)
 {
     int failures = 0;
@@ -497,6 +553,7 @@ int test_z23_front_door(void)
     failures += case_platform();
     failures += case_dns_query();
     failures += case_dns_parse();
+    failures += case_shim_pin();
     printf("z23_front_door: %d failure(s)\n", failures);
     return failures;
 }
