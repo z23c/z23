@@ -98,6 +98,9 @@ has under 24 GiB available, and runs what you gave it inside a
 pinning that deliberately leaves the first two physical cores of every socket
 free for the node. Its exact contract, and a byte-identical reference copy of
 the program, are in [`../platform/deploy/devbuild`](../platform/deploy/devbuild).
+[`../platform/deploy/README.md`](../platform/deploy/README.md) is the door to
+the rest of that directory: which units a host runs, which of them a clone
+gets, and why the remainder stay host-local.
 
 Read that file before working on a shared host, because three things in this
 tree call `devbuild` by name and fail without it:
