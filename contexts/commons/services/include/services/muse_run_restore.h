@@ -45,7 +45,8 @@
  * "?? <path> <content-hash>" line per untracked path, and its 40-hex
  * git hash in hex_out. *fold_out is heap text the caller frees, or NULL
  * when git failed (hex_out then reads "none"). The rundir hosts one
- * transient tempfile. */
+ * transient tempfile.
+ *
  * EVERY FAILURE NAMES ITSELF. `why` (bounded by why_cap, always
  * terminated, "" on success) says WHICH step broke: the tracked-diff
  * capture, the tempfile, or the hash. That distinction is not cosmetic.

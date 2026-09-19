@@ -779,11 +779,81 @@ static bool wtx_outcome_is(int status, bool signaled, bool term, long long rc,
 }
 
 #if !defined(_WIN32)
+/* Applies the caps to a forked child and reports, through its exit code,
+ * which of the three expectations it broke. */
+static void wtx_rlimit_child(const struct wkr_caps *caps)
+{
+    struct rlimit before, data, as, cpu;
+    int bad = 0;
+    if (getrlimit(RLIMIT_AS, &before) != 0)
+        _exit(90);
+    zcl_devagent_worker_confine(caps);
+    if (getrlimit(RLIMIT_DATA, &data) != 0)
+        _exit(91);
+    if (getrlimit(RLIMIT_AS, &as) != 0)
+        _exit(92);
+    if (getrlimit(RLIMIT_CPU, &cpu) != 0)
+        _exit(93);
+    /* The heap is capped at the approved number, hard. */
+    if (data.rlim_cur != (rlim_t)caps->memory_bytes)
+        bad |= 1;
+    if (data.rlim_max != (rlim_t)caps->memory_bytes)
+        bad |= 2;
+    /* Address space is left exactly as it was found, so a child git can
+     * still map an object store it has to read. */
+    if (as.rlim_cur != before.rlim_cur)
+        bad |= 4;
+    if (as.rlim_max != before.rlim_max)
+        bad |= 8;
+    /* The CPU ceiling is unchanged in kind and still applied. */
+    if (cpu.rlim_cur != (rlim_t)caps->cpu_s)
+        bad |= 16;
+    _exit(bad);
+}
+
+/* THE MEMORY CEILING IS ON THE HEAP, NOT ON ADDRESS SPACE, and this is
+ * the case that pins it. The executor child spawns git for every
+ * measurement one Muse run makes, and git maps its packfiles: under
+ * RLIMIT_AS a 195 MB pack cannot be mapped inside a 1 GiB ceiling, so
+ * `git diff HEAD` exits 128 while `git status --porcelain` — index only —
+ * exits 0. That silent split cost a whole gate-passing turn on
+ * 2026-09-19: the change set was measured, the gate passed, and the
+ * change could not be folded into an artifact, so the pass was refused
+ * downstream for a missing candidate and the workspace was left dirty.
+ * RLIMIT_DATA bounds the heap at the SAME number and leaves read-only
+ * file mappings alone; the unit's cgroup MemoryMax is the outer bound
+ * over the whole chain either way. Checked in a forked child, because
+ * the limits are hard — rlim_max is lowered too — and this test process
+ * must keep its own. */
+static int wtx_rlimit_case(void)
+{
+    int failures = 0;
+    TEST("confine: the memory ceiling is RLIMIT_DATA and never RLIMIT_AS")
+    {
+        struct wkr_drive_opts o;
+        struct wkr_caps caps;
+        pid_t pid;
+        int status = 0;
+        wtx_opts(&o, "wtx", "s-rlimit");
+        ASSERT(zcl_devagent_worker_caps(&o, &caps));
+        pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0)
+            wtx_rlimit_child(&caps);
+        ASSERT(waitpid(pid, &status, 0) == pid);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 /* The confinement cases, in their own function so the suite entry stays
  * under the complexity cap. Returns the failure count. */
 static int wtx_confine_cases(void)
 {
-    int failures = 0;
+    int failures = wtx_rlimit_case();
     TEST("confine: caps derive the POSIX rlimits and the Windows job caps")
     {
         struct wkr_drive_opts o;
@@ -804,57 +874,6 @@ static int wtx_confine_cases(void)
         o.cpu_s = 0;
         ASSERT(!zcl_devagent_worker_caps(&o, &caps));
         ASSERT(!zcl_devagent_worker_caps(NULL, &caps));
-        PASS();
-    }
-
-    /* THE MEMORY CEILING IS ON THE HEAP, NOT ON ADDRESS SPACE, and this
-     * is the case that pins it. The executor child spawns git for every
-     * measurement one Muse run makes, and git maps its packfiles: under
-     * RLIMIT_AS a 195 MB pack cannot be mapped inside a 1 GiB ceiling,
-     * so `git diff HEAD` exits 128 while `git status --porcelain` — index
-     * only — exits 0. That is the split that silently cost a whole
-     * gate-passing turn on 2026-09-19. RLIMIT_DATA bounds the heap at the
-     * SAME number and leaves read-only file mappings alone; the unit's
-     * cgroup MemoryMax is the outer bound over the whole chain either
-     * way. Checked in a forked child, because the limits are hard
-     * (rlim_max is lowered too) and this process must keep its own. */
-    TEST("confine: the memory ceiling is RLIMIT_DATA and never RLIMIT_AS")
-    {
-        struct wkr_drive_opts o;
-        struct wkr_caps caps;
-        pid_t pid;
-        int status = 0;
-        wtx_opts(&o, "wtx", "s-rlimit");
-        ASSERT(zcl_devagent_worker_caps(&o, &caps));
-        pid = fork();
-        ASSERT(pid >= 0);
-        if (pid == 0) {
-            struct rlimit before, data, as, cpu;
-            int bad = 0;
-            if (getrlimit(RLIMIT_AS, &before) != 0)
-                _exit(90);
-            zcl_devagent_worker_confine(&caps);
-            if (getrlimit(RLIMIT_DATA, &data) != 0 ||
-                getrlimit(RLIMIT_AS, &as) != 0 ||
-                getrlimit(RLIMIT_CPU, &cpu) != 0)
-                _exit(91);
-            /* The heap is capped at the approved number, hard. */
-            if (data.rlim_cur != (rlim_t)caps.memory_bytes ||
-                data.rlim_max != (rlim_t)caps.memory_bytes)
-                bad |= 1;
-            /* Address space is left exactly as it was found, so a child
-             * git can still map an object store it must read. */
-            if (as.rlim_cur != before.rlim_cur ||
-                as.rlim_max != before.rlim_max)
-                bad |= 2;
-            /* The CPU ceiling is unchanged in kind and still applied. */
-            if (cpu.rlim_cur != (rlim_t)caps.cpu_s)
-                bad |= 4;
-            _exit(bad);
-        }
-        ASSERT(waitpid(pid, &status, 0) == pid);
-        ASSERT(WIFEXITED(status));
-        ASSERT_EQ(WEXITSTATUS(status), 0);
         PASS();
     }
 

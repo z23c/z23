@@ -2377,6 +2377,36 @@ static bool mr_break_tracked_diff(const struct mr_dirs *d)
         "/nonexistent/zcl-no-such-external-diff");
 }
 
+/* What a run that could not preserve its change must leave behind: the
+ * change itself, untouched, and one line naming the blocker in each
+ * place a reader looks. */
+static int mr_unfoldable_evidence(const struct mr_dirs *d,
+    const struct muse_run_result *r)
+{
+    int failures = 0;
+    char path[8192];
+    char *text;
+    /* Nothing was preserved, so nothing may be undone. */
+    MR_CHECK("unfoldable change untouched",
+        !r->workspace_restored && !r->workspace_blocked);
+    MR_CHECK("unfoldable edit still there",
+        mr_file_is(d->wt, "src/sum.c", "edited\n") &&
+        mr_exists(d->wt, "src/turn.c"));
+    text = mr_read_facts(d, path, sizeof(path));
+    MR_CHECK("unfoldable evidence", text &&
+        strstr(text, "\"candidate\":\"none\"") &&
+        strstr(text, "\"candidate_note\":\"the tracked diff") &&
+        strstr(text, "\"verdict\":\"refused\""));
+    free(text);
+    (void)snprintf(path, sizeof(path), "%s/receipt.json", d->run);
+    text = mr_read(path);
+    MR_CHECK("unfoldable receipt", text &&
+        strstr(text, "\"verdict\":\"refused\"") &&
+        strstr(text, "\"workspace_blocked\":false"));
+    free(text);
+    return failures;
+}
+
 /* A gate-passing turn whose change set cannot be folded is NOT a pass:
  * it is a named refusal, made before the gate build is spent, with the
  * change left exactly where the turn put it. */
@@ -2414,30 +2444,7 @@ static int mr_exec_candidate_unfoldable(void)
     /* Refused BEFORE the gate build: a doomed run does not spend one. */
     MR_CHECK("unfoldable gate not built",
         strcmp(r.build_spawn, "none") == 0 && r.gate_normal == false);
-    /* Nothing was preserved, so nothing may be undone. */
-    MR_CHECK("unfoldable change untouched",
-        !r.workspace_restored && !r.workspace_blocked &&
-        mr_file_is(d.wt, "src/sum.c", "edited\n") &&
-        mr_exists(d.wt, "src/turn.c"));
-    {
-        char facts[8192];
-        char *ftext = mr_read_facts(&d, facts, sizeof(facts));
-        MR_CHECK("unfoldable evidence", ftext &&
-            strstr(ftext, "\"candidate\":\"none\"") &&
-            strstr(ftext, "\"candidate_note\":\"the tracked diff") &&
-            strstr(ftext, "\"verdict\":\"refused\""));
-        free(ftext);
-    }
-    {
-        char receipt[8192];
-        char *rtext;
-        (void)snprintf(receipt, sizeof(receipt), "%s/receipt.json", d.run);
-        rtext = mr_read(receipt);
-        MR_CHECK("unfoldable receipt", rtext &&
-            strstr(rtext, "\"verdict\":\"refused\"") &&
-            strstr(rtext, "\"workspace_blocked\":false"));
-        free(rtext);
-    }
+    failures += mr_unfoldable_evidence(&d, &r);
     free(evidence);
     return failures;
 }
@@ -2517,6 +2524,27 @@ static int mr_exec_restore_failed_gate(void)
     return failures;
 }
 
+/* The second half of the acceptance sequence: the next claimed task on
+ * the recovered workspace measured a clean pre-state, reached its turn,
+ * and passed with a change set of its own. */
+static int mr_recover_second(const struct mr_dirs *d,
+    const struct muse_run_result *r, const char *evidence, int rc,
+    const char *first)
+{
+    int failures = 0;
+    MR_CHECK("recover second pre-state clean", r->scope_pre_measured &&
+        r->scope_pre_clean && r->scope_pre_count == 0);
+    MR_CHECK("recover second reached the turn", evidence &&
+        evidence_has(evidence, "turn-cmd:"));
+    MR_CHECK("recover second pass", rc == 0 &&
+        strcmp(r->verdict, "pass") == 0);
+    MR_CHECK("recover second has its own change set",
+        mr_hex40(r->candidate) && strcmp(r->candidate, first) != 0);
+    MR_CHECK("recover second restored", r->workspace_restored &&
+        !r->workspace_blocked && mr_at_base(d, r->base));
+    return failures;
+}
+
 /* THE ACCEPTANCE SEQUENCE: a run whose gate fails, then the very next
  * claimed task on the SAME workspace, which must reach its turn and
  * pass. One workspace, two run dirs, no hand cleaning in between. */
@@ -2554,14 +2582,7 @@ static int mr_exec_recover_then_pass(void)
         mr_head_pass, NULL));
     memset(&r, 0, sizeof(r));
     rc = mr_run_prepared(&d, NULL, "src/two.c", NULL, &r, &evidence);
-    MR_CHECK("recover second reached the turn", evidence &&
-        evidence_has(evidence, "turn-cmd:") && r.scope_pre_measured &&
-        r.scope_pre_clean && r.scope_pre_count == 0);
-    MR_CHECK("recover second pass", rc == 0 &&
-        strcmp(r.verdict, "pass") == 0 && mr_hex40(r.candidate) &&
-        strcmp(r.candidate, first) != 0);
-    MR_CHECK("recover second restored", r.workspace_restored &&
-        !r.workspace_blocked && mr_at_base(&d, r.base));
+    failures += mr_recover_second(&d, &r, evidence, rc, first);
     free(evidence);
     return failures;
 }
