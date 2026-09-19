@@ -36,6 +36,8 @@ static bool agent_impact_match_one_pattern(const char *path,
         return false;
     memcpy(buf, pattern, len);
     buf[len] = 0;
+    if (!strpbrk(buf, "*?[\\"))
+        return strcmp(buf, path) == 0;
     return platform_glob_match(buf, path, false);
 }
 

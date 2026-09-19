@@ -677,9 +677,13 @@ static int test_code_impact_rule_predicate(void)
              {"zcode_policy"}},
             {"engine/modules/chainlog/src/chainlog.c", 2, 4,
              {"chainlog", "dev_platform", "make_lint_gates", "land_queue"}},
+            {"engine/modules/chainlog/src/nested/fixture.c", 2, 4,
+             {"chainlog", "dev_platform", "make_lint_gates", "land_queue"}},
             {"tests/harness/src/test_muse_session.c", 1, 4,
              {"devagent_muse_run", "muse_session", "devagent_worker", "make_lint_gates"}},
             {"zz_no_impact_rule_fixture.c", 0, 0, {NULL}},
+            {"tests/harness/src/test_zcode_policy.c.extra", 0, 0, {NULL}},
+            {"tests/harness/src/test_ZCODE_policy.c", 0, 0, {NULL}},
             {"", 0, 0, {NULL}},
             {NULL, 0, 0, {NULL}},
         };
