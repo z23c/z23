@@ -8,7 +8,9 @@
 # exact running-image identity, OAuth discovery / DCR / PKCE / token exchange,
 # initialize / tools.list / tools.call, steer_brief / steer_send /
 # steer_evidence, missing / conflicting / unknown / wrong-scope / revoked
-# credential refusals, revoke-cancel of queued work plus evidence readability
+# credential refusals, ACME TLS-ALPN-01 passthrough to a site backend (raw
+# splice for acme-tls/1, termination otherwise, clean refusal of malformed
+# and truncated ClientHellos), revoke-cancel of queued work plus evidence readability
 # under a fresh grant, restart persistence, bounded buffers and processes,
 # and a clean credential-log scan.
 #
@@ -207,6 +209,8 @@ chmod 600 "$KEY"
 
 cleanup() {
     [ -n "$FRONT_PID" ] && kill "$FRONT_PID" 2>/dev/null
+    [ -n "${ACME_FRONT_PID:-}" ] && kill "$ACME_FRONT_PID" 2>/dev/null
+    [ -n "${ACME_SITE_PID:-}" ] && kill "$ACME_SITE_PID" 2>/dev/null
     [ -n "$GW_PID" ] && kill "$GW_PID" 2>/dev/null
     wait 2>/dev/null
 }
@@ -385,6 +389,84 @@ else
     skip "OAuth mint legs UNOBSERVED (no node build)"
     skip "grant brief/send/evidence UNOBSERVED (no node build)"
     skip "scope/revoke refusals UNOBSERVED (no node build)"
+fi
+
+# ── 5b. ACME TLS-ALPN-01 passthrough (apex role: front with a site) ──────
+# The node renews its certificate by answering acme-tls/1 itself, so a
+# front placed before it must hand that handshake over untouched. The site
+# here is a throwaway TLS server with its OWN name that negotiates
+# acme-tls/1: seeing that name and that protocol can only mean the raw
+# stream reached the backend; the front's name means it was terminated.
+free_port() {
+    for p in "$@"; do
+        nc -z 127.0.0.1 "$p" 2>/dev/null || { printf '%s' "$p"; return 0; }
+    done
+    return 1
+}
+ACME_SITE_PORT="$(free_port 18461 18462 18463 18464 18465 || true)"
+ACME_FRONT_PORT="$(free_port 18466 18467 18468 18469 18470 || true)"
+ACME_SITE_PID=""
+ACME_FRONT_PID=""
+if [ -z "$ACME_SITE_PORT" ] || [ -z "$ACME_FRONT_PORT" ]; then
+    bad "acme passthrough: no free probe ports"
+else
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/site-key.pem" \
+        -out "$T/site-cert.pem" -days 1 -subj "/CN=acme-backend.test" 2>/dev/null \
+        || bad "acme passthrough: site cert"
+    chmod 600 "$T/site-key.pem"
+    openssl s_server -quiet -accept "127.0.0.1:$ACME_SITE_PORT" \
+        -cert "$T/site-cert.pem" -key "$T/site-key.pem" -alpn acme-tls/1 -www \
+        >"$T/site.log" 2>&1 &
+    ACME_SITE_PID=$!
+    "$FRONT_BIN" 127.0.0.1 "$ACME_FRONT_PORT" 127.0.0.1 "$GW_PORT" "$CERT" "$KEY" \
+        "127.0.0.1:$ACME_SITE_PORT" 2>"$T/front-acme.err" &
+    ACME_FRONT_PID=$!
+    sleep 1
+    hello() { # hello <extra s_client args...>: handshake summary lines
+        timeout 15 openssl s_client -connect "127.0.0.1:$ACME_FRONT_PORT" \
+            -servername qual.test "$@" </dev/null 2>&1 | grep -E '^subject=|ALPN' || true
+    }
+    OUT="$(hello -alpn acme-tls/1)"
+    case "$OUT" in
+    *acme-backend.test*"ALPN protocol: acme-tls/1"*) ok "acme-tls/1 reaches the site untouched" ;;
+    *) bad "acme-tls/1 passthrough (got [$(printf '%s' "$OUT" | tr '\n' ';')])" ;;
+    esac
+    grep -q 'acme-tls/1 passthrough to site' "$T/front-acme.err" 2>/dev/null \
+        && ok "front logged the passthrough" || bad "front passthrough log line missing"
+    OUT="$(hello -alpn h2,http/1.1)"
+    case "$OUT" in
+    *"CN = 127.0.0.1"*) ok "ordinary ClientHello terminated by the front" ;;
+    *) bad "ordinary termination (got [$(printf '%s' "$OUT" | tr '\n' ';')])" ;;
+    esac
+    have "terminated request still routes to the gateway" '"scopes_supported"' \
+        "https://127.0.0.1:$ACME_FRONT_PORT/.well-known/oauth-protected-resource"
+    # Hostile first records. probe_close prints "<bytes-back> <seconds-to-close>"
+    # for one raw connection that sends the bytes and never closes its half.
+    probe_close() {
+        timeout 14 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"; printf "$2" >&3; s=$(date +%s); n=$(cat <&3 2>/dev/null | wc -c); echo "$n $(($(date +%s) - s))"' _ "$ACME_FRONT_PORT" "$1" || echo "timeout 14"
+    }
+    # Malformed: a record too short to hold the ClientHello it announces.
+    # Refused at once, with no reply.
+    set -- $(probe_close '\026\003\001\000\010\001\000\000\004\003\003\377\377')
+    if [ "$1" = 0 ] && [ "$2" -lt 3 ]; then
+        ok "malformed ClientHello refused cleanly (${2}s, 0 bytes)"
+    else
+        bad "malformed ClientHello (bytes=$1, ${2}s)"
+    fi
+    # Truncated: a valid header promising more than ever arrives. Refused at
+    # the hello deadline, not held for the 120 s idle bound.
+    set -- $(probe_close '\026\003\001\002\000\001\000')
+    if [ "$1" = 0 ] && [ "$2" -lt 10 ]; then
+        ok "truncated ClientHello refused at the deadline (${2}s, 0 bytes)"
+    else
+        bad "truncated ClientHello (bytes=$1, ${2}s)"
+    fi
+    kill -0 "$ACME_FRONT_PID" 2>/dev/null && ok "front survives hostile hellos" \
+        || bad "front died on a hostile hello"
+    kill "$ACME_FRONT_PID" "$ACME_SITE_PID" 2>/dev/null
+    wait "$ACME_FRONT_PID" "$ACME_SITE_PID" 2>/dev/null
+    ACME_FRONT_PID=""
+    ACME_SITE_PID=""
 fi
 
 # ── 6. Restart persistence: same images, new pid, still serving ──────────

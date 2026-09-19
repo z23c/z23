@@ -43,6 +43,8 @@ int test_fleet_gateway(void)
 #include <unistd.h>
 #include <errno.h>
 
+#include "../../../tools/zcl_fleet_front_hello.h"
+
 #define GW_TEST_BIN_DEFAULT "build/bin/z23-fleet-gateway"
 /* The CLI alias every node-exec group uses: a symlink to z23 in a checkout,
  * the admitted node inside a proof generation (which has no build/bin/z23). */
@@ -2947,6 +2949,187 @@ _test_next:;
     return failures;
 }
 
+
+/* ── Front: ACME TLS-ALPN-01 passthrough classifier ─────────────────────
+ *
+ * tools/zcl_fleet_front.c peeks at each client's first TLS record and
+ * splices an acme-tls/1 validation to the node untouched, so the node's
+ * certificate renewal keeps working behind the front. The classifier runs
+ * on hostile bytes; these cases pin its verdicts on real-shaped
+ * ClientHellos, every truncation of one, and malformed framings. The
+ * socket-level behaviour (raw bytes reaching the backend, normal
+ * termination, clean refusal) is proved end to end by
+ * tools/scripts/qualify_fleet_gateway_front.sh. */
+
+struct ffh_w {
+    uint8_t *p;
+    size_t n;
+    size_t cap;
+};
+
+static void ffh_put(struct ffh_w *w, const void *src, size_t len)
+{
+    if (w->n + len <= w->cap)
+        memcpy(w->p + w->n, src, len);
+    w->n += len;
+}
+
+static void ffh_u8(struct ffh_w *w, unsigned v)
+{
+    uint8_t b = (uint8_t)v;
+    ffh_put(w, &b, 1);
+}
+
+static void ffh_u16(struct ffh_w *w, size_t v)
+{
+    ffh_u8(w, (unsigned)(v >> 8) & 0xffu);
+    ffh_u8(w, (unsigned)v & 0xffu);
+}
+
+/* Patch a big-endian length of width bytes at off. */
+static void ffh_patch(struct ffh_w *w, size_t off, size_t width, size_t v)
+{
+    size_t i;
+    for (i = 0; i < width && off + i < w->cap; i++)
+        w->p[off + i] = (uint8_t)(v >> (8 * (width - 1 - i)));
+}
+
+/* One ClientHello record: an SNI extension, then an ALPN extension naming
+ * alpn[0..n) when alpn != NULL (no ALPN extension at all when NULL). */
+static size_t ffh_hello(uint8_t *out, size_t cap, const char *const *alpn,
+                        size_t n)
+{
+    static const uint8_t random32[32] = {0};
+    static const char sni[] = "zclnet.net";
+    struct ffh_w w = {out, 0, cap};
+    size_t rec, hs, ext, alpn_ext, list;
+    size_t i;
+    ffh_u8(&w, 22); ffh_u8(&w, 3); ffh_u8(&w, 1);
+    rec = w.n; ffh_u16(&w, 0);
+    ffh_u8(&w, 1);
+    hs = w.n; ffh_u8(&w, 0); ffh_u16(&w, 0);
+    ffh_u8(&w, 3); ffh_u8(&w, 3);
+    ffh_put(&w, random32, sizeof(random32));
+    ffh_u8(&w, 0);                                  /* session id */
+    ffh_u16(&w, 2); ffh_u8(&w, 0x13); ffh_u8(&w, 0x01);
+    ffh_u8(&w, 1); ffh_u8(&w, 0);                   /* compression */
+    ext = w.n; ffh_u16(&w, 0);
+    ffh_u16(&w, 0);                                 /* server_name */
+    ffh_u16(&w, 5 + strlen(sni));
+    ffh_u16(&w, 3 + strlen(sni)); ffh_u8(&w, 0); ffh_u16(&w, strlen(sni));
+    ffh_put(&w, sni, strlen(sni));
+    if (alpn != NULL) {
+        ffh_u16(&w, 16);
+        alpn_ext = w.n; ffh_u16(&w, 0);
+        list = w.n; ffh_u16(&w, 0);
+        for (i = 0; i < n; i++) {
+            ffh_u8(&w, (unsigned)strlen(alpn[i]));
+            ffh_put(&w, alpn[i], strlen(alpn[i]));
+        }
+        ffh_patch(&w, alpn_ext, 2, w.n - alpn_ext - 2);
+        ffh_patch(&w, list, 2, w.n - list - 2);
+    }
+    ffh_patch(&w, ext, 2, w.n - ext - 2);
+    ffh_patch(&w, hs, 3, w.n - hs - 3);
+    ffh_patch(&w, rec, 2, w.n - rec - 2);
+    return w.n <= cap ? w.n : 0;
+}
+
+static int gw_t_front_hello_verdicts(void)
+{
+    int failures = 0;
+    TEST("front: acme-tls/1 ClientHello passes through, others terminate") {
+        static const char *const acme[] = {"acme-tls/1"};
+        static const char *const mixed[] = {"h2", "acme-tls/1"};
+        static const char *const web[] = {"h2", "http/1.1"};
+        static const char *const near[] = {"acme-tls/10", "acme-tls/"};
+        uint8_t b[512];
+        size_t n = ffh_hello(b, sizeof(b), acme, 1);
+        ASSERT(n > 0);
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_ACME);
+        /* Bytes after the first record belong to later records. */
+        b[n] = 23; b[n + 1] = 3; b[n + 2] = 3;
+        ASSERT_EQ(ff_hello_classify(b, n + 3), FF_HELLO_ACME);
+        n = ffh_hello(b, sizeof(b), mixed, 2);
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_ACME);
+        n = ffh_hello(b, sizeof(b), web, 2);
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_TLS);
+        n = ffh_hello(b, sizeof(b), near, 2);
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_TLS);
+        n = ffh_hello(b, sizeof(b), NULL, 0);
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_TLS);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int gw_t_front_hello_truncated(void)
+{
+    int failures = 0;
+    TEST("front: every truncated ClientHello waits, never classifies") {
+        static const char *const acme[] = {"acme-tls/1"};
+        uint8_t b[512];
+        size_t n = ffh_hello(b, sizeof(b), acme, 1);
+        size_t cut;
+        ASSERT(n > 0);
+        for (cut = 0; cut < n; cut++)
+            ASSERT_EQ(ff_hello_classify(b, cut), FF_HELLO_NEED_MORE);
+        /* A record that claims more than one handshake message carries is
+         * a ClientHello split across records: not a validator, terminate. */
+        ffh_patch(&(struct ffh_w){b, n, sizeof(b)}, 6, 3, n);
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_TLS);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int gw_t_front_hello_malformed(void)
+{
+    int failures = 0;
+    TEST("front: malformed first records are refused") {
+        static const char *const acme[] = {"acme-tls/1"};
+        static const uint8_t http[] = "GET / HTTP/1.1\r\n";
+        static const uint8_t appdata[] = {23, 3, 3, 0, 4, 1, 0, 0, 0};
+        static const uint8_t big[] = {22, 3, 1, 0x40, 0x01};
+        static const uint8_t tiny[] = {22, 3, 1, 0, 3, 1, 0, 0};
+        static const uint8_t not_hello[] = {22, 3, 1, 0, 4, 2, 0, 0, 0};
+        static const uint8_t v2[] = {22, 2};
+        uint8_t b[512];
+        size_t n;
+        size_t alpn_list;
+        ASSERT_EQ(ff_hello_classify(http, sizeof(http) - 1), FF_HELLO_REFUSE);
+        ASSERT_EQ(ff_hello_classify(appdata, sizeof(appdata)), FF_HELLO_REFUSE);
+        ASSERT_EQ(ff_hello_classify(big, sizeof(big)), FF_HELLO_REFUSE);
+        ASSERT_EQ(ff_hello_classify(tiny, sizeof(tiny)), FF_HELLO_REFUSE);
+        ASSERT_EQ(ff_hello_classify(not_hello, sizeof(not_hello)),
+                  FF_HELLO_REFUSE);
+        ASSERT_EQ(ff_hello_classify(v2, sizeof(v2)), FF_HELLO_REFUSE);
+        /* An ALPN name length that runs past its list. The name length is
+         * the byte right after the list length, 12 bytes from the end. */
+        n = ffh_hello(b, sizeof(b), acme, 1);
+        ASSERT(n > 12);
+        alpn_list = n - 13;
+        b[alpn_list + 2] = 0xff;
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_REFUSE);
+        /* An extensions block longer than the message. */
+        n = ffh_hello(b, sizeof(b), acme, 1);
+        ffh_patch(&(struct ffh_w){b, n, sizeof(b)}, 5 + 4 + 2 + 32 + 1 + 4 + 2,
+                  2, 400);
+        ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_REFUSE);
+        /* A zero-length ALPN name. */
+        {
+            static const char *const empty[] = {""};
+            n = ffh_hello(b, sizeof(b), empty, 1);
+            ASSERT_EQ(ff_hello_classify(b, n), FF_HELLO_REFUSE);
+        }
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_fleet_gateway(void);
 int test_fleet_gateway(void)
 {
@@ -3005,6 +3188,9 @@ int test_fleet_gateway(void)
     failures += gw_t_compat_rc();
     failures += gw_t_compat_result();
     failures += gw_t_compat_cancelq();
+    failures += gw_t_front_hello_verdicts();
+    failures += gw_t_front_hello_truncated();
+    failures += gw_t_front_hello_malformed();
     /* No ASSERT lives here; the stop always runs on fall-through. */
     gw_stop();
     if (had_xdg)

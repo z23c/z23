@@ -48,6 +48,20 @@
  * request's Host header so a multi-name node front picks the same name the
  * public client asked for.
  *
+ * WHY IT PEEKS FIRST
+ * ------------------
+ * The node renews its own certificate by TLS-ALPN-01 (RFC 8737): the CA
+ * connects to :443 offering ALPN "acme-tls/1" and expects the NODE's
+ * challenge certificate. Behind this front that handshake lands here, and
+ * terminating it would present the ordinary certificate and let the
+ * renewal fail. So before any TLS work the first record is PEEKED (never
+ * consumed; zcl_fleet_front_hello.h classifies it): acme-tls/1 is spliced
+ * to the site backend as raw TCP, byte for byte; a malformed or stalled
+ * first record (5 s bound) is closed with no reply; everything else is
+ * terminated as before. And because the certificate this front serves is
+ * the one the node renews in place, the accept loop re-stats the cert and
+ * key files and swaps its TLS context when they change — no restart.
+ *
  * DESIGN
  * ------
  * One accept loop, fork per connection (SIGCHLD ignored: no zombies), at
@@ -87,12 +101,16 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
+
+#include "zcl_fleet_front_hello.h"
 
 /* Concurrency cap. 16 is right for a gateway-only front: one hosted AI
  * client, a handful of connections. It is NOT right for the apex front,
@@ -111,6 +129,11 @@
 #define FF_HEAD_SZ (8u * 1024u)
 #define FF_IDLE_MS (120 * 1000)
 #define FF_SOCK_TIMEOUT_S 120
+/* The first TLS record must arrive within this long, or the connection is
+ * refused before any TLS work: a real client sends its ClientHello in its
+ * first flight. The nap bounds the peek loop to a few hundred wakeups. */
+#define FF_HELLO_DEADLINE_MS 5000
+#define FF_HELLO_NAP_NS (20L * 1000L * 1000L)
 
 /* Live children, maintained by the SIGCHLD handler (async-signal-safe:
  * waitpid is, and the counter is sig_atomic_t). The cap only ever
@@ -286,6 +309,75 @@ static SSL_CTX *ff_tls_ctx(const struct ff_config *cfg)
         return NULL;
     }
     return ctx;
+}
+
+/* ---- certificate reload ------------------------------------------------- */
+
+/* The served certificate is the NODE's: the node renews it in place (see
+ * https_server_watch_certificate) and never restarts this process. So the
+ * front watches the same two files and swaps its context when they change,
+ * or it would keep presenting the old certificate until it expired. Identity
+ * is the stat tuple; a pair that changed but does not load (a renewal caught
+ * mid-write, a key that no longer matches) keeps the previous context and is
+ * retried when the files change again. */
+struct ff_file_ident {
+    dev_t dev;
+    ino_t ino;
+    off_t size;
+    time_t mtime_s;
+    long mtime_ns;
+};
+
+struct ff_tls_state {
+    SSL_CTX *ctx;
+    struct ff_file_ident cert;
+    struct ff_file_ident key;
+};
+
+static bool ff_file_ident_read(const char *path, struct ff_file_ident *out)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return false;
+    memset(out, 0, sizeof(*out));
+    out->dev = st.st_dev;
+    out->ino = st.st_ino;
+    out->size = st.st_size;
+    out->mtime_s = st.st_mtim.tv_sec;
+    out->mtime_ns = st.st_mtim.tv_nsec;
+    return true;
+}
+
+static bool ff_file_ident_same(const struct ff_file_ident *a,
+                               const struct ff_file_ident *b)
+{
+    return a->dev == b->dev && a->ino == b->ino && a->size == b->size &&
+           a->mtime_s == b->mtime_s && a->mtime_ns == b->mtime_ns;
+}
+
+/* Called by the accept loop before each fork: two stat calls when nothing
+ * changed, one context rebuild when something did. */
+static void ff_tls_refresh(struct ff_tls_state *tls, const struct ff_config *cfg)
+{
+    struct ff_file_ident cert;
+    struct ff_file_ident key;
+    SSL_CTX *fresh;
+    if (!ff_file_ident_read(cfg->cert, &cert) ||
+        !ff_file_ident_read(cfg->key, &key))
+        return;
+    if (ff_file_ident_same(&cert, &tls->cert) &&
+        ff_file_ident_same(&key, &tls->key))
+        return;
+    tls->cert = cert;
+    tls->key = key;
+    fresh = ff_tls_ctx(cfg);
+    if (fresh == NULL) {
+        ff_log("certificate files changed but did not load; still serving the previous pair");
+        return;
+    }
+    SSL_CTX_free(tls->ctx);
+    tls->ctx = fresh;
+    ff_log("certificate files changed; now serving the new pair");
 }
 
 /* Client context for the site leg. No peer verification by design: this leg
@@ -668,6 +760,77 @@ static bool ff_backend_open(struct ff_relay *relay, const struct ff_config *cfg,
     return ff_site_open(&relay->back, cfg, site_ctx, host);
 }
 
+/* ---- ACME passthrough --------------------------------------------------- */
+
+/* Milliseconds left until an absolute CLOCK_MONOTONIC deadline, 0 when past. */
+static int ff_ms_left(const struct timespec *deadline)
+{
+    struct timespec now;
+    long long ms;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    ms = (long long)(deadline->tv_sec - now.tv_sec) * 1000 +
+         (deadline->tv_nsec - now.tv_nsec) / 1000000;
+    return ms <= 0 ? 0 : (ms > FF_HELLO_DEADLINE_MS ? FF_HELLO_DEADLINE_MS : (int)ms);
+}
+
+/* Look at the client's first TLS record WITHOUT consuming it (MSG_PEEK), so
+ * whichever path follows — our own TLS termination, or the raw splice to the
+ * node — still sees every byte from the first. Bounded three ways: one
+ * record-sized stack buffer, FF_HELLO_DEADLINE_MS of wall time, and a short
+ * sleep between peeks that saw nothing new (a peek of unread data returns at
+ * once, so without it an incomplete record would spin). A client that stalls
+ * or closes before completing its first record is refused at the deadline. */
+static enum ff_hello_verdict ff_hello_wait(int fd)
+{
+    uint8_t buf[FF_HELLO_PEEK_MAX];
+    struct timespec deadline;
+    size_t seen = 0;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        return FF_HELLO_REFUSE;
+    deadline.tv_sec += FF_HELLO_DEADLINE_MS / 1000;
+    for (;;) {
+        struct pollfd pfd = {fd, POLLIN, 0};
+        int left = ff_ms_left(&deadline);
+        ssize_t got;
+        enum ff_hello_verdict verdict;
+        if (left == 0 || poll(&pfd, 1, left) <= 0)
+            return FF_HELLO_REFUSE;
+        got = recv(fd, buf, sizeof(buf), MSG_PEEK);
+        if (got <= 0)
+            return FF_HELLO_REFUSE;
+        verdict = ff_hello_classify(buf, (size_t)got);
+        if (verdict != FF_HELLO_NEED_MORE)
+            return verdict;
+        if ((size_t)got == seen) {
+            struct timespec nap = {0, FF_HELLO_NAP_NS};
+            (void)nanosleep(&nap, NULL);
+        }
+        seen = (size_t)got;
+    }
+}
+
+/* Splice an ACME validation to the node's TLS listener as raw TCP. Nothing
+ * here reads, terminates, or rewrites a byte: the ClientHello is still
+ * unread in the client socket and the plain relay carries it, and every byte
+ * after it, to the node, whose ALPN responder presents the challenge
+ * certificate. */
+static void ff_acme_splice(struct ff_relay *relay, const struct ff_config *cfg)
+{
+    relay->back.fd = ff_backend_connect(cfg->site_host, cfg->site_port);
+    if (relay->back.fd < 0) {
+        ff_log("acme-tls/1 passthrough: site connect failed");
+        return;
+    }
+    ff_sock_timeouts(relay->back.fd);
+    ff_log("acme-tls/1 passthrough to site");
+    relay->client.open = true;
+    relay->back.open = true;
+    ff_relay_run(relay);
+    close(relay->back.fd);
+    relay->back.fd = -1;
+}
+
 /* The only bytes this process ever authors: a bounded refusal when the
  * chosen backend is not answering. It carries no detail about which one. */
 static void ff_reply_502(struct ff_end *client)
@@ -701,47 +864,66 @@ static void ff_serve_routed(struct ff_relay *relay, const struct ff_config *cfg,
     ff_relay_run(relay);
 }
 
-/* One connection: TLS handshake, then a bidirectional relay until either
- * side ends or 120 s pass with no movement. Bodies of any size stream
+/* The terminated path: TLS handshake, then a bidirectional relay until the
+ * backend ends or 120 s pass with no movement. Bodies of any size stream
  * through the two fixed buffers; memory never grows with the body. */
-static void ff_handle(int client_fd, const struct ff_config *cfg, SSL_CTX *ctx,
-                      SSL_CTX *site_ctx)
+static void ff_serve_tls(struct ff_relay *relay, const struct ff_config *cfg,
+                         SSL_CTX *ctx, SSL_CTX *site_ctx)
 {
-    struct ff_relay relay;
-    memset(&relay, 0, sizeof(relay));
-    relay.client.fd = client_fd;
-    relay.back.fd = -1;
-    ff_sock_timeouts(client_fd);
-    relay.client.ssl = SSL_new(ctx);
-    if (relay.client.ssl == NULL)
+    relay->client.ssl = SSL_new(ctx);
+    if (relay->client.ssl == NULL)
         return;
-    SSL_set_fd(relay.client.ssl, client_fd);
-    if (SSL_accept(relay.client.ssl) != 1) {
-        SSL_free(relay.client.ssl);
+    SSL_set_fd(relay->client.ssl, relay->client.fd);
+    if (SSL_accept(relay->client.ssl) != 1) {
+        SSL_free(relay->client.ssl);
         return;
     }
-    relay.client.open = true;
+    relay->client.open = true;
     if (cfg->site_host[0] != '\0') {
-        ff_serve_routed(&relay, cfg, site_ctx);
+        ff_serve_routed(relay, cfg, site_ctx);
     } else {
         /* No site backend: the original contract, one gateway, no parsing. */
-        relay.back.fd = ff_backend_connect(cfg->gw_host, cfg->gw_port);
-        if (relay.back.fd >= 0) {
-            ff_sock_timeouts(relay.back.fd);
-            relay.back.open = true;
-            ff_relay_run(&relay);
+        relay->back.fd = ff_backend_connect(cfg->gw_host, cfg->gw_port);
+        if (relay->back.fd >= 0) {
+            ff_sock_timeouts(relay->back.fd);
+            relay->back.open = true;
+            ff_relay_run(relay);
         } else {
             ff_log("gateway connect failed; closing client");
         }
     }
-    if (relay.back.ssl != NULL) {
-        SSL_shutdown(relay.back.ssl);
-        SSL_free(relay.back.ssl);
+    if (relay->back.ssl != NULL) {
+        SSL_shutdown(relay->back.ssl);
+        SSL_free(relay->back.ssl);
     }
-    if (relay.back.fd >= 0)
-        close(relay.back.fd);
-    SSL_shutdown(relay.client.ssl);
-    SSL_free(relay.client.ssl);
+    if (relay->back.fd >= 0)
+        close(relay->back.fd);
+    SSL_shutdown(relay->client.ssl);
+    SSL_free(relay->client.ssl);
+}
+
+/* One connection. The first TLS record is classified before anything else
+ * happens to it: malformed is closed with no reply, an ACME TLS-ALPN-01
+ * validation is spliced raw to the node (only when a site backend exists —
+ * a gateway-only front has no node behind it to answer), and everything
+ * else is terminated here exactly as before. */
+static void ff_handle(int client_fd, const struct ff_config *cfg, SSL_CTX *ctx,
+                      SSL_CTX *site_ctx)
+{
+    struct ff_relay relay;
+    enum ff_hello_verdict verdict;
+    memset(&relay, 0, sizeof(relay));
+    relay.client.fd = client_fd;
+    relay.back.fd = -1;
+    ff_sock_timeouts(client_fd);
+    verdict = ff_hello_wait(client_fd);
+    if (verdict == FF_HELLO_REFUSE)
+        return;
+    if (verdict == FF_HELLO_ACME && cfg->site_host[0] != '\0') {
+        ff_acme_splice(&relay, cfg);
+        return;
+    }
+    ff_serve_tls(&relay, cfg, ctx, site_ctx);
 }
 
 static int ff_usage(const char *prog)
@@ -907,6 +1089,7 @@ static void ff_log_listening(const struct ff_config *cfg, int listen_count)
 int main(int argc, char **argv)
 {
     struct ff_config cfg;
+    struct ff_tls_state tls;
     SSL_CTX *ctx = NULL;
     SSL_CTX *site_ctx = NULL;
     int listen_fds[2] = {-1, -1};
@@ -914,6 +1097,11 @@ int main(int argc, char **argv)
     int rc = ff_parse_args(argc, argv, &cfg);
     if (rc != 0)
         return rc;
+    /* Identity first, then load: a pair replaced while it loads differs
+     * from what was recorded and is picked up on the next accept. */
+    memset(&tls, 0, sizeof(tls));
+    (void)ff_file_ident_read(cfg.cert, &tls.cert);
+    (void)ff_file_ident_read(cfg.key, &tls.key);
     ctx = ff_tls_ctx(&cfg);
     if (ctx == NULL) {
         ff_log("TLS context failed (cert/key unreadable or mismatched?)");
@@ -936,14 +1124,17 @@ int main(int argc, char **argv)
         return 1;
     }
     ff_log_listening(&cfg, listen_count);
+    tls.ctx = ctx;
     for (;;) {
         int client = ff_accept_next(listen_fds, listen_count);
         if (client == -2)
             break;
-        if (client >= 0)
-            ff_spawn(client, listen_fds, listen_count, &cfg, ctx, site_ctx);
+        if (client < 0)
+            continue;
+        ff_tls_refresh(&tls, &cfg);
+        ff_spawn(client, listen_fds, listen_count, &cfg, tls.ctx, site_ctx);
     }
-    SSL_CTX_free(ctx);
+    SSL_CTX_free(tls.ctx);
     if (site_ctx != NULL)
         SSL_CTX_free(site_ctx);
     return 1;

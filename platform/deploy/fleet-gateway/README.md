@@ -127,6 +127,9 @@ sha256sum build/bin/z23 build/bin/z23-fleet-gateway build/bin/zcl-fleet-front   
 
 # 2. Owner-private config (outside the repo; never committed, never logged).
 mkdir -p ~/.config/z23-fleet-gateway
+# Issuer = the URL clients actually reach. On the apex deploy (step 4) that
+# is plain https://<public-host> — 443 is implied and the front port is
+# never public; a front published on its own port uses :<front-port>.
 cat > ~/.config/z23-fleet-gateway/<gw-port>.env <<ENV
 FLEET_GW_ISSUER=https://<public-host>:<front-port>
 FLEET_GW_OWNER_KEY=<owner approval secret>
@@ -168,6 +171,12 @@ systemctl --user enable --now 'z23-fleet-gateway-front@<front-port>'
 # 4. Apex only: point the capability-holding forwarder at the front instead
 #    of straight at the node, so public 443 lands on the path router. The
 #    node site is unchanged; it is now reached through the front.
+#    Certificate renewal keeps working: the front splices an ACME
+#    TLS-ALPN-01 handshake (ALPN acme-tls/1) to FRONT_SITE untouched, and
+#    re-reads FRONT_CERT/FRONT_KEY when the node renews them in place.
+#    Check first that nothing ELSE owns 443 (an iptables REDIRECT rule
+#    bypasses the forwarder entirely): hold a connection to :443 and look
+#    at who the node's :8443 socket is peered with.
 mkdir -p ~/.config/systemd/user/zcl-portfwd.service.d
 cat > ~/.config/systemd/user/zcl-portfwd.service.d/10-front.conf <<CONF
 [Service]
