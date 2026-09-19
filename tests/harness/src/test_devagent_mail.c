@@ -790,6 +790,69 @@ _test_next:;
 }
 #endif /* !defined(_WIN32) */
 
+/* A board-carrying transport appends board_post and board_signer to the
+ * row it imported. Pull hands both back verbatim for the receiver to
+ * verify; a row without them reads "", and a value too long to be a post
+ * id or a host key reads "" too, never a truncated prefix. Post has no
+ * input for either: only a transport writes them. */
+static int test_mail_board_fields(void)
+{
+    int failures = 0;
+    TEST("mail: pull returns board_post and board_signer a transport appended") {
+        static const char id[] =
+            "1111111111111111111111111111111111111111111111111111111111111111";
+        static const char host[] =
+            "2222222222222222222222222222222222222222222222222222222222222222";
+        char line[1024];
+        struct dvx_call p;
+        const struct json_value *rows;
+        dvx_isolate("board_fields");
+        /* The mail dir exists once the real handler has run. */
+        dvx_pull(&p, 0, NULL, NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        dvx_end(&p);
+        (void)snprintf(line, sizeof(line),
+            "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"chatgpt\","
+            "\"to\":\"node-b\",\"kind\":\"directive\",\"body\":\"go\","
+            "\"ref\":\"job-1\",\"board_post\":\"%s\",\"board_signer\":\"%s\"}\n"
+            "{\"seq\":2,\"ts\":\"2020-01-01T00:00:01Z\",\"from\":\"chatgpt\","
+            "\"to\":\"node-b\",\"kind\":\"directive\",\"body\":\"go\","
+            "\"ref\":\"job-2\",\"board_post\":\"%s0\"}\n"
+            "{\"seq\":3,\"ts\":\"2020-01-01T00:00:02Z\",\"from\":\"chatgpt\","
+            "\"to\":\"node-b\",\"kind\":\"directive\",\"body\":\"go\","
+            "\"ref\":\"job-3\"}\n",
+            id, host, id);
+        dvx_import_stream("inbox.node-a", line);
+        dvx_pull(&p, 0, NULL, NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 3);
+        rows = dvx_arr(&p, "rows");
+        ASSERT(rows != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 0), "board_post")), id);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 0), "board_signer")),
+                      host);
+        /* 65 hex digits is not a post id: empty, never the first 64. */
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 1), "board_post")), "");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 2), "board_post")), "");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 2), "board_signer")),
+                      "");
+        dvx_end(&p);
+        /* Post takes no board field: the registry refuses the key. */
+        dvx_begin(&p);
+        (void)json_push_kv_str(&p.input, "action", "post");
+        (void)json_push_kv_str(&p.input, "to", "node-b");
+        (void)json_push_kv_str(&p.input, "kind", "directive");
+        (void)json_push_kv_str(&p.input, "body", "forge");
+        (void)json_push_kv_str(&p.input, "board_post", id);
+        ASSERT(!dvx_run(&p));
+        dvx_end(&p);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_devagent_mail(void);
 int test_devagent_mail(void)
 {
@@ -799,6 +862,7 @@ int test_devagent_mail(void)
     failures += test_mail_independent_cursor();
     failures += test_mail_paging();
     failures += test_mail_ref_filter_and_agent_resume();
+    failures += test_mail_board_fields();
 #if !defined(_WIN32)
     failures += test_mail_cwd_invariance();
 #endif

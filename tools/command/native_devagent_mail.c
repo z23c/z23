@@ -71,6 +71,12 @@
  * ROW. {"seq":N,"ts":"<ISO-8601 UTC>","from":"<agent>","to":"<agent|*>",
  *        "kind":"<kind>","body":"<text>","ref":"<ref>"} plus
  *        "sender_binding":"<32 hex>" when the poster stamped one.
+ * A transport that carried the row over the signed fleet board appends
+ * "board_post":"<64 hex post id>","board_signer":"<64 hex host key>" after
+ * the original fields. This leaf never writes those two (post has no input
+ * for them) and never judges them: pull returns both, "" when absent or
+ * longer than 64 bytes, and dev.agent.receive admits such a row only after
+ * the local node's board confirms that exact post, text and signer.
  * seq is one plus the largest seq already in the outbox (1 when empty).
  * A body round-trips byte for byte, newlines included: the row writes the
  * two-character JSON escapes for newline, carriage return, tab, backspace
@@ -200,6 +206,10 @@
  * carries the field without depending on the store that means anything by
  * it: mail transports rows, it does not judge senders. */
 #define DVM_BINDING_HEX 32u
+/* Width of a board post id and of a board host key, both 32 bytes as hex:
+ * the two fields a board-carrying transport appends to a row it imported.
+ * Carried verbatim for the receiver, which is the one that verifies them. */
+#define DVM_BOARD_HEX 64u
 
 static const char *dvm_kinds[] = {
     "need", "claim", "result", "problem", "note", "offer", "directive",
@@ -719,6 +729,10 @@ struct dvm_row {
     char ref[256];
     /* "" when the poster stamped none; carried, never interpreted here. */
     char sender_binding[DVM_BINDING_HEX + 1];
+    /* "" unless a board transport imported the row; carried, never
+     * interpreted here. */
+    char board_post[DVM_BOARD_HEX + 1];
+    char board_signer[DVM_BOARD_HEX + 1];
 };
 
 static bool dvm_parse_row(const char *line, struct dvm_row *r)
@@ -744,6 +758,15 @@ static bool dvm_parse_row(const char *line, struct dvm_row *r)
      * refuses on the empty value; nothing here guesses one. */
     (void)dvm_line_str(line, "sender_binding", r->sender_binding,
                        sizeof(r->sender_binding));
+    /* A value too long to be a post id or a host key reads back empty,
+     * which leaves the pair partial: the receiver refuses a partial pair
+     * as unsigned rather than guessing which half was meant. */
+    if (!dvm_line_str(line, "board_post", r->board_post,
+                      sizeof(r->board_post)))
+        r->board_post[0] = '\0';
+    if (!dvm_line_str(line, "board_signer", r->board_signer,
+                      sizeof(r->board_signer)))
+        r->board_signer[0] = '\0';
     return true;
 }
 
@@ -1494,7 +1517,8 @@ static size_t dvm_row_cost(const struct dvm_row *r)
     return 160u + dvm_json_len(r->ts) + dvm_json_len(r->from) +
            dvm_json_len(r->to) + dvm_json_len(r->kind) +
            dvm_json_len(r->body) + dvm_json_len(r->ref) +
-           dvm_json_len(r->sender_binding);
+           dvm_json_len(r->sender_binding) + dvm_json_len(r->board_post) +
+           dvm_json_len(r->board_signer);
 }
 
 /* The stream whose head sorts first by (ts, from, seq); a tie goes to the
@@ -1608,6 +1632,8 @@ static void dvm_pull_build_reply(struct zcl_command_reply *reply,
         (void)json_push_kv_str(&item, "body", r->body);
         (void)json_push_kv_str(&item, "ref", r->ref);
         (void)json_push_kv_str(&item, "sender_binding", r->sender_binding);
+        (void)json_push_kv_str(&item, "board_post", r->board_post);
+        (void)json_push_kv_str(&item, "board_signer", r->board_signer);
         (void)json_push_back(&arr, &item);
         json_free(&item);
     }
