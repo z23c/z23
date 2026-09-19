@@ -17,6 +17,11 @@
  * turn can never block intake, status, or delivery.
  *
  * ONE BEAT.
+ *   0. CARRY IN. Rows a paired box posted to the signed FLEET board for
+ *      this receiver (or answering a row this box sent) are appended to
+ *      inbox.<box>.jsonl with board_post and board_signer, before intake
+ *      (native_devagent_boardmail.c). After step 5, CARRY OUT posts this
+ *      box's remote-bound rows and its answers to carried directives.
  *   1. INTAKE. dev.agent.mail is called in-process (the same shape
  *      fleet.steer uses) with action=pull, kind=directive, and `since` set
  *      to the durable INTAKE CURSOR: the mail leaf's own next_since token,
@@ -40,7 +45,15 @@
  *          ref is invalid for coordinated work: one ref names one exact
  *          piece of work, and nothing can be reconciled or answered under
  *          a name that does not exist;
- *        - the row carries a sender binding, and that binding is the stamp
+ *        - a row carrying board_post/board_signer is admitted on its board
+          instead: this box's node must show that exact unexpired post,
+          signed by that signer, whose text is this row; the signer must be
+          an enrolled box other than this one; and a live peer grant must
+          carry `from` for that box (RECEIVE_PEER_UNSIGNED, _POST_GONE,
+          _POST_MISMATCH, _UNENROLLED, _UNGRANTED). A node that does not
+          answer (RECEIVE_PEER_POST_MISSING) leaves the row undecided: no
+          marker, and the intake cursor stays before it until it is decided;
+        - any other row carries a sender binding, and that binding is the stamp
  *          of a LIVE grant in <state>/steer/grants.jsonl that carries the
  *          claimed `from` label with the "send" scope, read through the one
  *          shared helper zcl_fleet_steer_grant_binding_live() so this file
@@ -190,21 +203,18 @@
  * the queue row is the queue's own single append.
  *
  * WHAT THIS AUTHORITY DOES NOT PROVE — read this before trusting it.
- * An inbox.<peer>.jsonl row's provenance is its FILENAME plus whatever
- * transport wrote the file. Nothing in this tree signs or verifies a peer's
- * mail row today: roles.def's signed-peer ingress covers only
- * fleet.ledger.replicate and fleet.board.post, and
- * engine/composition/remote_command_classes.def is a classification that no
- * transport reads. So admission here means exactly "an owner-minted grant
- * names this sender", and NOT "this peer was cryptographically
- * authenticated". Anyone who can write a file into this box's mail
- * directory can claim any `from`. The narrowing that makes that bounded is
- * the grant store — the owner has to have minted a grant under that label
- * with the send scope — plus the queue's own path, name and brief
- * containment rules, plus the worker's gate. The future path is the signed
- * board ingress in roles.def: when a mail row carries a verified peer
- * signature, admission can bind the grant to a key fingerprint instead of a
- * name. Until then, do not describe this as authenticated delivery.
+ * An UNSIGNED row's provenance is its FILENAME plus whatever wrote the
+ * file, so its admission means exactly "an owner-minted grant names this
+ * sender", and NOT "this peer was cryptographically authenticated".
+ * Anyone who can write a file into this box's mail directory can claim
+ * any `from`. The narrowing that makes that bounded is the grant store —
+ * the owner has to have minted a grant under that label with the send
+ * scope — plus the queue's own path, name and brief containment rules,
+ * plus the worker's gate. A BOARD-CARRIED row is different: its admission
+ * binds the grant to the node key that signed the post carrying it, as
+ * verified by this box's own node, and to the enrolled box that key
+ * belongs to. That authenticates the sending BOX, not the person or agent
+ * behind the label there, which is that box's own steer grant check.
  *
  * PROCESS RULE. No spawn, no shell, no popen()/system(), no sleep, no busy
  * poll, no network. Only in-process sibling calls, local filesystem
@@ -387,6 +397,10 @@ struct rcv_row {
     /* The stamp of the credential that sent the row, "" when unstamped.
      * `from` is only a claim — this is what the claim is checked against. */
     const char *sender_binding;
+    /* The board post that carried the row and its signer, "" unless a
+     * board carrier imported it (native_devagent_boardmail.c). */
+    const char *board_post;
+    const char *board_signer;
 };
 
 /* ── digests ───────────────────────────────────────────────────────────── */
@@ -421,6 +435,14 @@ static void rcv_row_digest(const struct rcv_row *v, char out[17])
             h *= 1099511628211ULL;
         }
         h ^= 0ULL;
+        h *= 1099511628211ULL;
+    }
+    /* A board-carried row is a different row from any unsigned twin: a
+     * refused forgery written first must not mark the genuine post as
+     * already answered. Rows without the field keep their old identity. */
+    for (const unsigned char *p = (const unsigned char *)v->board_post;
+         p && *p; p++) {
+        h ^= (uint64_t)*p;
         h *= 1099511628211ULL;
     }
     (void)snprintf(out, 17, "%016llx", (unsigned long long)h);
@@ -1291,6 +1313,8 @@ static bool rcv_row_parse(const struct json_value *r, struct rcv_row *v)
     v->body = rcv_field(r, "body");
     v->ref = rcv_field(r, "ref");
     v->sender_binding = rcv_field(r, "sender_binding");
+    v->board_post = rcv_field(r, "board_post");
+    v->board_signer = rcv_field(r, "board_signer");
     return true;
 }
 
@@ -1364,6 +1388,9 @@ struct rcv_ctx {
     bool dry; /* status: decide and count, write and post nothing */
     struct rcv_beat_stats *st;
     struct rcv_intake intake;
+    /* A board row this beat could not decide (its node did not answer):
+     * the intake cursor must not move past it. */
+    bool deferred;
 };
 
 /* Ask the queue whether it already holds this ref, then the run dirs, then
@@ -1813,26 +1840,51 @@ static void rcv_to_work(struct rcv_ctx *c, const struct rcv_row *v,
     rcv_install(c, v, src, d, &w, &f);
 }
 
-/* The four admission tests, in the order that refuses earliest — and all
- * of them before any queue row exists, so nothing this refuses was ever
- * dispatched. */
-static void rcv_admit(struct rcv_ctx *c, const struct rcv_row *v,
-                      const char *src)
+/* The sender gate for a row that crossed hosts on the signed fleet board:
+ * this box's node must vouch for the exact post and signer, and the owner
+ * must have granted the sender's label to that enrolled box. Returns false
+ * only when the node did not answer, so the row is left unmarked and is
+ * decided on a later beat instead of being refused for an outage. */
+static bool rcv_admit_board(struct rcv_ctx *c, const struct rcv_row *v,
+                            const char *src, bool *admitted)
 {
-    struct rcv_direction d;
-    const char *why;
-    if (!rcv_ref_ok(v->ref)) {
-        rcv_answer_refuse(c, v, src, "RECEIVE_REF_INVALID",
-                          "ref-must-match-64-name-alphabet");
-        return;
+    struct zcl_boardmail_row row = {
+        .seq = v->seq, .ts = v->ts, .from = v->from, .to = v->to,
+        .kind = v->kind, .body = v->body, .ref = v->ref,
+        .sender_binding = v->sender_binding, .board_post = v->board_post,
+        .board_signer = v->board_signer,
+    };
+    struct zcl_boardmail_decision d;
+    *admitted = false;
+    zcl_devagent_boardmail_admit(&row, c->receiver, &d);
+    if (d.verdict == ZCL_BOARDMAIL_DEFER) {
+        c->st->board_deferred++;
+        c->deferred = true;
+        LOG_WARN(RCV_LOG, "board row src=%s waits: %s (%s)", src, d.code,
+                 d.detail);
+        return false;
     }
+    if (d.verdict == ZCL_BOARDMAIL_REFUSE) {
+        rcv_answer_refuse(c, v, src, d.code, d.detail);
+        return true;
+    }
+    *admitted = true;
+    return true;
+}
+
+/* The sender gate for a row written on this box: the stamp of a live local
+ * grant carrying the claimed name. */
+static bool rcv_admit_local(struct rcv_ctx *c, const struct rcv_row *v,
+                            const char *src)
+{
+    const char *why;
     /* A row that stamps no credential cannot be attributed to anyone, and
      * work is dispatched on the strength of who asked. Refused, not
      * admitted: this is the fail-closed direction. */
     if (!v->sender_binding || !v->sender_binding[0]) {
         rcv_answer_refuse(c, v, src, "RECEIVE_SENDER_UNBOUND",
                           "row-carries-no-sender-binding");
-        return;
+        return false;
     }
     /* Ask the store whether the grant that stamped this row is the one
      * carrying the name it claims. Asking only whether SOME live grant
@@ -1841,13 +1893,39 @@ static void rcv_admit(struct rcv_ctx *c, const struct rcv_row *v,
                                              RCV_SCOPE);
     if (why) {
         rcv_answer_refuse(c, v, src, "RECEIVE_SENDER_UNGRANTED", why);
-        return;
+        return false;
     }
+    return true;
+}
+
+/* The admission tests, in the order that refuses earliest — and all of
+ * them before any queue row exists, so nothing this refuses was ever
+ * dispatched. Returns false only when the row must stay undecided (its
+ * board post could not be checked yet); every other outcome, admitted or
+ * refused, is final for this exact row. */
+static bool rcv_admit(struct rcv_ctx *c, const struct rcv_row *v,
+                      const char *src)
+{
+    struct rcv_direction d;
+    bool board = v->board_post[0] || v->board_signer[0];
+    bool sender_ok = false;
+    if (!rcv_ref_ok(v->ref)) {
+        rcv_answer_refuse(c, v, src, "RECEIVE_REF_INVALID",
+                          "ref-must-match-64-name-alphabet");
+        return true;
+    }
+    if (board && !rcv_admit_board(c, v, src, &sender_ok))
+        return false;
+    if (!board)
+        sender_ok = rcv_admit_local(c, v, src);
+    if (!sender_ok)
+        return true;
     if (!rcv_direction_parse(v->body, &d)) {
         rcv_answer_refuse(c, v, src, d.code, d.why);
-        return;
+        return true;
     }
     rcv_to_work(c, v, src, &d);
+    return true;
 }
 
 /* Has this receiver already answered this exact row? */
@@ -1874,10 +1952,10 @@ static void rcv_row_handle(struct rcv_ctx *c, const struct json_value *r)
         c->st->already++;
         return;
     }
-    rcv_admit(c, &v, src);
     /* The marker is written AFTER the answer: a crash in between costs one
-     * duplicate answer on the next beat, never a duplicate queue row. */
-    if (!c->dry)
+     * duplicate answer on the next beat, never a duplicate queue row. An
+     * undecided board row gets no marker, so a later beat decides it. */
+    if (rcv_admit(c, &v, src) && !c->dry)
         (void)rcv_write_atomic(marker, "", 0);
 }
 
@@ -2022,33 +2100,57 @@ static bool rcv_intake_page(struct rcv_ctx *c, const char *since, char *next,
     return true;
 }
 
-/* One beat: drain up to RCV_PAGES_PER_BEAT pages from the intake cursor,
- * persisting the cursor after each handled page, then decide each row from
- * files alone. A survey walks from the beginning instead and persists
- * nothing. */
-static void rcv_beat(struct rcv_ctx *c)
+/* The carriage view of this receiver's own paths. */
+static struct zcl_boardmail_ctx rcv_board_ctx(const struct rcv_ctx *c)
 {
-    char since[RCV_POS_MAX], next[RCV_POS_MAX], code[64];
+    struct zcl_boardmail_ctx b = {
+        .receiver = c->receiver, .recvdir = c->p.dir,
+        .maildir = c->p.maildir, .dry = c->dry,
+    };
+    return b;
+}
+
+/* Drain up to `cap` intake pages from `since`. The durable cursor follows
+ * the pages only until a board row is left undecided: from then on this
+ * beat keeps deciding later rows, but the cursor stays where the next beat
+ * must replay from, and the answer markers make that replay idempotent. */
+static void rcv_intake_drain(struct rcv_ctx *c, char *since, unsigned cap)
+{
+    char next[RCV_POS_MAX], code[64];
     unsigned pages = 0;
-    unsigned cap = c->dry ? RCV_SURVEY_PAGES : RCV_PAGES_PER_BEAT;
     bool more = true;
-    c->st->beats++;
-    if (c->dry && !rcv_is_dir(c->p.maildir))
-        return;
-    (void)snprintf(since, sizeof(since), "%s", c->dry ? "" : c->intake.pos);
     while (more && pages++ < cap) {
-        if (!rcv_intake_page(c, since, next, sizeof(next), &more, code,
+        if (!rcv_intake_page(c, since, next, RCV_POS_MAX, &more, code,
                              sizeof(code))) {
             rcv_intake_failed(c, code, since);
             return;
         }
-        (void)snprintf(since, sizeof(since), "%s", next);
-        if (!c->dry && strcmp(since, c->intake.pos) != 0) {
+        (void)snprintf(since, RCV_POS_MAX, "%s", next);
+        if (!c->dry && !c->deferred && strcmp(since, c->intake.pos) != 0) {
             (void)snprintf(c->intake.pos, sizeof(c->intake.pos), "%s",
                            since);
             rcv_intake_save(c);
         }
     }
+}
+
+/* One beat: carry rows in from the fleet board, drain up to
+ * RCV_PAGES_PER_BEAT pages from the intake cursor, persisting the cursor
+ * after each handled page, deciding each row from files alone, then carry
+ * this box's answers and remote-bound rows out. A survey walks from the
+ * beginning instead, carries nothing and persists nothing. */
+static void rcv_beat(struct rcv_ctx *c)
+{
+    char since[RCV_POS_MAX];
+    struct zcl_boardmail_ctx board = rcv_board_ctx(c);
+    c->st->beats++;
+    c->deferred = false;
+    if (c->dry && !rcv_is_dir(c->p.maildir))
+        return;
+    zcl_devagent_boardmail_import(&board, c->st);
+    (void)snprintf(since, sizeof(since), "%s", c->dry ? "" : c->intake.pos);
+    rcv_intake_drain(c, since, c->dry ? RCV_SURVEY_PAGES : RCV_PAGES_PER_BEAT);
+    zcl_devagent_boardmail_export(&board, c->st);
 }
 
 /* ── the resident drive ────────────────────────────────────────────────── */
@@ -2293,6 +2395,9 @@ static void rcv_push_stats(struct zcl_command_reply *reply,
     (void)json_push_kv_int(&reply->data, "refused", st->refused);
     (void)json_push_kv_int(&reply->data, "already_answered", st->already);
     (void)json_push_kv_int(&reply->data, "intake_failed", st->intake_failed);
+    (void)json_push_kv_int(&reply->data, "board_in", st->board_in);
+    (void)json_push_kv_int(&reply->data, "board_out", st->board_out);
+    (void)json_push_kv_int(&reply->data, "board_deferred", st->board_deferred);
 }
 
 /* The resident's durable intake record, read-only: where its cursor

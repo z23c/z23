@@ -283,8 +283,10 @@ int zcl_devagent_worker_child_main(const char *rundir, wkr_executor_fn exec);
  * (zcl_fleet_steer_grant_binding_live): the sender's name in a row is a
  * claim, and what is checked is that the grant carrying that name is the
  * one that stamped this row. A row with no stamp is unattributable and
- * refused. This binds a row to a credential, not to a peer key: nothing in
- * this tree signs a peer's mail row today. */
+ * refused. That binds a row to a credential, not to a peer key. A row that
+ * crossed hosts on the signed fleet board is admitted instead on the board
+ * signer its own node verified plus a peer grant for that enrolled box
+ * (zcl_devagent_boardmail_admit below). */
 
 /* Bounded drive options. `receiver` is this box's mail identity, and
  * `workspace` is the ONE workspace this receiver was started against — the
@@ -357,7 +359,63 @@ struct rcv_beat_stats {
     long long refused;        /* typed refusals, conflicts included */
     long long already;        /* rows this receiver had already answered */
     long long intake_failed;  /* beats whose mail pull did not answer */
+    long long board_in;       /* rows carried in from the fleet board */
+    long long board_out;      /* rows posted to the fleet board */
+    long long board_deferred; /* carriage or admission waiting on the node */
 };
+
+/* ── board-carried mail (native_devagent_boardmail.c) ─────────────────────
+ * The receiver's carriage between enrolled boxes over the signed FLEET
+ * board, through this box's own node RPC. Both steps are no-ops on a box
+ * with no enrolled peer, and in a dry (status) beat. */
+struct zcl_boardmail_ctx {
+    const char *receiver; /* this box's receiver name == its roster name */
+    const char *recvdir;  /* <state>/receive: the carriage cursors */
+    const char *maildir;  /* <state>/mail: outbox in, inbox.<box> out */
+    bool dry;
+};
+
+/* Before intake: page this node's fleet posts and append each carried row
+ * addressed here (or answering a row this box sent) to inbox.<box>.jsonl
+ * with "board_post" and "board_signer". */
+void zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
+                                   struct rcv_beat_stats *st);
+
+/* After the answers: post outbox rows bound for another enrolled box, and
+ * rows answering a directive that came from one, as FLEET notes. */
+void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
+                                   struct rcv_beat_stats *st);
+
+/* True when `to` is a verified roster box other than this one. */
+bool zcl_devagent_boardmail_remote(const char *to);
+
+/* One pulled row carrying board fields, borrowed for one call. */
+struct zcl_boardmail_row {
+    long long seq;
+    const char *ts, *from, *to, *kind, *body, *ref, *sender_binding;
+    const char *board_post, *board_signer;
+};
+
+enum zcl_boardmail_verdict {
+    ZCL_BOARDMAIL_ADMIT,
+    ZCL_BOARDMAIL_REFUSE, /* final: answer and mark the row */
+    ZCL_BOARDMAIL_DEFER,  /* the node did not answer: no marker, retry */
+};
+
+struct zcl_boardmail_decision {
+    enum zcl_boardmail_verdict verdict;
+    const char *code;  /* RECEIVE_PEER_*, NULL on admit */
+    char detail[64];   /* the reason, or the admitting box on admit */
+};
+
+/* Admit a board-carried row: both fields 64 hex (UNSIGNED), this node shows
+ * the unexpired post (POST_MISSING defers, POST_GONE refuses) carrying
+ * exactly this row signed by board_signer (POST_MISMATCH), that signer is
+ * an enrolled box other than `receiver` (UNENROLLED), and a live peer grant
+ * carries row->from for that box (UNGRANTED). */
+void zcl_devagent_boardmail_admit(const struct zcl_boardmail_row *row,
+                                  const char *receiver,
+                                  struct zcl_boardmail_decision *d);
 
 /* Drive the resident loop until SIGTERM, the deadline, or the beat cap.
  * Returns beats completed (>= 0), or -1 when the singleton lock or the
