@@ -54,8 +54,16 @@ static hodl_history_projection_t *g_phase4_hodl_history_projection = NULL;
  * split-brain. Returns true once the event log is open and published. */
 bool boot_ensure_event_log(const char *datadir)
 {
-    if (g_phase4_event_log)
+    if (g_phase4_event_log) {
+        /* The retry the stamp comment below promises. It must run ABOVE the
+         * already-open early return: this helper is called twice (boot.c's
+         * coins-read-view bind, then the projection fan-out) and the second
+         * call is the one that reaches a later-opened progress.kv. Leaving it
+         * under the return made "retried on the later fan-out call" a comment
+         * the code never executed. */
+        (void)coins_kv_boot_rebuild_if_needed(progress_store_db());
         return true;
+    }
     if (!datadir || !datadir[0])
         return false;
 

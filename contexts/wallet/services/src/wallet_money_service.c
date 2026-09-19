@@ -250,8 +250,16 @@ struct zcl_result wallet_money_snapshot_build(
     if (!reducer_frontier_derive_coins_best_now(
             &money_tip, money_tip_hash, &money_tip_hash_found) ||
         !money_tip_hash_found) {
+        /* Name WHAT is missing. The refusal itself is unchanged — a node that
+         * cannot prove the coin state is still refused — but "unavailable" on
+         * its own sent an operator hand-writing database markers to get past
+         * it, so the blocker says which rung of the coins_kv proven-authority
+         * predicate is unmet. */
+        char blocker[WALLET_MONEY_REASON_MAX + 1] = { 0 };
+        reducer_frontier_coins_best_blocker(blocker, sizeof(blocker));
         (void)snprintf(out->reason, sizeof(out->reason),
-                       "authoritative wallet coins tip is unavailable");
+                       "authoritative wallet coins tip is unavailable: %s",
+                       blocker[0] ? blocker : "coins_tip_unresolved");
         money_root(out);
         return ZCL_OK;
     }

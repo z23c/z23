@@ -304,6 +304,38 @@ bool coins_kv_boundary_root_get(struct sqlite3 *db, int32_t height,
  * before progress_store is open (returns true, no-op). */
 bool coins_kv_boot_rebuild_if_needed(struct sqlite3 *progress_db);
 
+/* Verdict of the in-fold provenance stamp below. */
+enum coins_kv_self_derived_stamp {
+    COINS_KV_SELF_DERIVED_ALREADY,      /* migration marker already set */
+    COINS_KV_SELF_DERIVED_STAMPED,      /* both markers written by this call */
+    COINS_KV_SELF_DERIVED_NOT_YET,      /* set still empty — nothing proven */
+    COINS_KV_SELF_DERIVED_STORE_ERROR,  /* read/write failed — retry later */
+};
+
+/* Record the self-derived provenance markers at the moment they become TRUE:
+ * inside the reducer's own kernel transaction, on the commit that makes
+ * coins_kv non-empty by this node's own verified fold.
+ *
+ * WHY THIS EXISTS. coins_kv_boot_rebuild_if_needed runs once per boot, BEFORE
+ * the process folds anything. On the session that first populates coins_kv from
+ * genesis it therefore sees an empty set and stamps nothing, so
+ * coins_kv_is_proven_authority stays false for that WHOLE session and every
+ * money-gated command refuses on a node that demonstrably holds — and just
+ * derived — the coin set. The boot stamp only lands on the NEXT boot.
+ *
+ * WHAT IT MAY CLAIM. Exactly the boot rule, no new trust: it writes only when
+ * COINS_KV_MIGRATION_COMPLETE_KEY is ABSENT, and every borrowed-state path
+ * (node.db import seed, consensus-state bundle install, anchor refold) stamps
+ * that key in the same transaction that populates the set. Absent marker plus a
+ * non-empty set is therefore self-derived by construction. A borrowed-and-
+ * stamped store is never upgraded to self-folded here.
+ *
+ * Caller must already hold an open kernel transaction and must NOT fail that
+ * transaction on a non-STAMPED verdict: NOT_YET and STORE_ERROR are retried on
+ * the next applied block, so a node that cannot prove the set stays refused. */
+enum coins_kv_self_derived_stamp
+coins_kv_stamp_self_derived_in_tx(struct sqlite3 *db);
+
 /* Seed coins_kv from node.db's `utxos` table right after a cold
  * LevelDB import (the projection-based boot rebuild sees an empty
  * projection on that boot and copies nothing). Idempotent via the
@@ -410,6 +442,16 @@ bool coins_kv_mark_migration_complete(struct sqlite3 *db);
  * errors return false — degrading to the STRICTER legacy gates, never the
  * permissive derived path. SELECT-only. */
 bool coins_kv_is_proven_authority(struct sqlite3 *db, int32_t *out_applied);
+
+/* The SAME three rungs, with the first unmet one NAMED — the sole
+ * implementation, so the predicate above and its explanation cannot drift.
+ * On false, *reason (when non-NULL, cap > 0) receives one short
+ * machine-readable token: coins_store_closed, coins_applied_height_read_error,
+ * coins_applied_height_absent, coins_kv_migration_marker_read_error,
+ * coins_kv_migration_marker_absent, or coins_kv_empty. On true *reason is "".
+ * SELECT-only. */
+bool coins_kv_proven_authority_reason(struct sqlite3 *db, int32_t *out_applied,
+                                      char *reason, size_t reason_cap);
 
 /* ── Self-folded provenance marker (the sovereign-cure G-SOV part 3) ──────────
  *

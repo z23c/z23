@@ -65,6 +65,12 @@ static utxo_apply_reader_fn g_reader = NULL;
 static void *g_reader_user = NULL;
 static utxo_apply_lookup_fn g_lookup = NULL;
 static void *g_lookup_user = NULL;
+/* Settled == coins_kv already carries the migration marker, so the in-fold
+ * provenance stamp below has nothing left to do. Scoped to ONE stage lifecycle
+ * (cleared by init and shutdown) rather than the process, so a reseed that
+ * clears the markers, and a test that opens a second datadir, both get a fresh
+ * verdict instead of inheriting the previous store's. */
+static bool g_self_derived_settled = false;
 
 bool coins_kv_set_applied_height_in_tx(sqlite3 *db, int32_t height)
 {
@@ -73,6 +79,20 @@ bool coins_kv_set_applied_height_in_tx(sqlite3 *db, int32_t height)
     uint8_t blob[8];
     for (int i = 0; i < 8; i++) blob[i] = (uint8_t)(value >> (8 * i));
     return progress_meta_set_in_tx(db, COINS_APPLIED_HEIGHT_KEY, blob, 8);
+}
+
+/* One cheap gated call into the storage-owned provenance rule. Once the store
+ * is settled (marker present, by this stamp or by any seeding path) the hot
+ * fold path does no further work at all. */
+static void utxo_apply_self_derived_stamp_in_tx(sqlite3 *db)
+{
+    if (g_self_derived_settled)
+        return;
+    enum coins_kv_self_derived_stamp v = coins_kv_stamp_self_derived_in_tx(db);
+    if (v == COINS_KV_SELF_DERIVED_ALREADY || v == COINS_KV_SELF_DERIVED_STAMPED)
+        g_self_derived_settled = true;
+    /* NOT_YET (set still empty) and STORE_ERROR stay unsettled: the node keeps
+     * failing closed and the next applied block tries again. */
 }
 /* Module state shared with utxo_apply_stage_dump.c (the dump-state TU)
  * via utxo_apply_stage_internal.h — written here, atomic_load-only there. */
@@ -581,6 +601,15 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * crash between the kernel COMMIT and the prune leaves extra
      * created_outputs rows below the retention floor: harmless (the bounded
      * resolver height-ignores them; the next drain re-prunes). */
+    /* Record the self-derived provenance markers on the commit that first makes
+     * coins_kv non-empty by THIS node's own verified fold (storage/coins_kv.h,
+     * coins_kv_stamp_self_derived_in_tx). Boot's one-shot stamp runs before this
+     * process folds anything, so without this a from-genesis node spends its
+     * whole first session with coins_kv_is_proven_authority false and every
+     * money-gated command refused. Rides this txn and never fails it: a
+     * not-yet / store-error verdict simply leaves the node refused and retries
+     * on the next applied block. */
+    utxo_apply_self_derived_stamp_in_tx(db);
     seal_candidate_hook_in_tx(db, g_ms, (int32_t)next_cursor);
     /* SELF-MINT the SHA3-verified anchor snapshot once, at the compiled
      * checkpoint height (observe-only, best-effort — see
@@ -666,6 +695,7 @@ bool utxo_apply_stage_init(struct main_state *ms)
     if (!db) LOG_FAIL("utxo_apply", "init: progress_store not open");
 
     pthread_mutex_lock(&g_lock);
+    g_self_derived_settled = false;  /* this datadir answers for itself */
     if (g_stage != NULL) {
         bool same = (g_ms == ms);
         pthread_mutex_unlock(&g_lock);
@@ -849,6 +879,7 @@ void utxo_apply_stage_shutdown(void)
     coins_ram_shutdown();
 
     pthread_mutex_lock(&g_lock);
+    g_self_derived_settled = false;  /* the next datadir answers for itself */
     /* Registry hygiene: init re-registers the gap blocker from the durable marker, so clearing here loses nothing. */
     blocker_clear(UTXO_APPLY_NF_GAP_BLOCKER_ID);
     utxo_apply_evidence_clear();

@@ -139,6 +139,41 @@ bool coins_kv_boot_rebuild_if_needed(sqlite3 *progress_db)
     return true;
 }
 
+/* See storage/coins_kv.h for the contract. Same rule as the boot rebuild above
+ * — absent migration marker + non-empty set == self-derived by construction —
+ * evaluated at the moment the reducer's own fold makes it true instead of once
+ * per boot, before this process has folded anything.
+ *
+ * SELF-FOLDED IS WRITTEN FIRST, DELIBERATELY. A torn write that landed
+ * migration-complete without the refold marker would flip the sovereignty gate
+ * to release_assisted ("borrowed_seed_no_refold_marker") and strand a
+ * from-genesis node. In this order the only reachable partial state is
+ * self-folded-without-migration, which leaves coins_kv_is_proven_authority
+ * false — refused, exactly as before — and the next applied block completes it. */
+enum coins_kv_self_derived_stamp
+coins_kv_stamp_self_derived_in_tx(sqlite3 *db)
+{
+    if (!db || !progress_meta_table_ensure(db))
+        return COINS_KV_SELF_DERIVED_STORE_ERROR;
+    if (migration_done(db))
+        return COINS_KV_SELF_DERIVED_ALREADY;
+    if (coins_kv_count(db) <= 0)
+        return COINS_KV_SELF_DERIVED_NOT_YET;
+
+    const uint8_t one = 0x01;
+    if (!progress_meta_set_in_tx(db, COINS_KV_SELF_FOLDED_KEY, &one, 1) ||
+        !progress_meta_set_in_tx(db, COINS_KV_MIGRATION_KEY, &one, 1)) {
+        LOG_WARN("coins_kv",
+                 "[coins_kv] self-derived provenance stamp failed in-tx; "
+                 "coins_kv stays unproven and the next applied block retries");
+        return COINS_KV_SELF_DERIVED_STORE_ERROR;
+    }
+    LOG_INFO("coins_kv",
+             "[coins_kv] stamped self-derived provenance (migration-complete + "
+             "self-folded) on the fold commit that populated coins_kv");
+    return COINS_KV_SELF_DERIVED_STAMPED;
+}
+
 /* Seed coins_kv directly from node.db's `utxos` table after a cold
  * LevelDB import. The generic boot rebuild above copies from the utxo
  * PROJECTION, which is still EMPTY on the import boot (it catches up

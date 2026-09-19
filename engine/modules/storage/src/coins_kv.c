@@ -986,17 +986,33 @@ bool coins_kv_get_applied_height(sqlite3 *db, int32_t *out, bool *found)
     return true;
 }
 
-bool coins_kv_is_proven_authority(sqlite3 *db, int32_t *out_applied)
+/* Name the unmet rung and refuse. Keeps coins_kv_proven_authority_reason's
+ * branches one statement each so the predicate stays readable. */
+static bool ckv_authority_unmet(char *reason, size_t reason_cap,
+                                const char *token)
+{
+    if (reason && reason_cap)
+        (void)snprintf(reason, reason_cap, "%s", token);
+    return false;
+}
+
+bool coins_kv_proven_authority_reason(sqlite3 *db, int32_t *out_applied,
+                                      char *reason, size_t reason_cap)
 {
     if (out_applied) *out_applied = -1;
+    if (reason && reason_cap) reason[0] = '\0';
     if (!db)
-        return false;
+        return ckv_authority_unmet(reason, reason_cap, "coins_store_closed");
 
     /* (1) durable applied frontier present. */
     int32_t applied = 0;
     bool found = false;
-    if (!coins_kv_get_applied_height(db, &applied, &found) || !found)
-        return false;
+    if (!coins_kv_get_applied_height(db, &applied, &found))
+        return ckv_authority_unmet(reason, reason_cap,
+                                   "coins_applied_height_read_error");
+    if (!found)
+        return ckv_authority_unmet(reason, reason_cap,
+                                   "coins_applied_height_absent");
 
     /* (2) migration stamp: the store provably holds the live set. A
      * cursor-backfilled frontier on a pre-migration datadir is NOT proof —
@@ -1007,16 +1023,24 @@ bool coins_kv_is_proven_authority(sqlite3 *db, int32_t *out_applied)
     bool mfound = false;
     if (!progress_meta_get(db, COINS_KV_MIGRATION_COMPLETE_KEY,
                            &mig, sizeof(mig), &mlen, &mfound))
-        return false;  /* read error → the stricter legacy gates */
+        /* read error → the stricter legacy gates */
+        return ckv_authority_unmet(reason, reason_cap,
+                                   "coins_kv_migration_marker_read_error");
     if (!mfound || mlen != 1 || mig != 1)
-        return false;
+        return ckv_authority_unmet(reason, reason_cap,
+                                   "coins_kv_migration_marker_absent");
 
     /* (3) the set is non-empty. */
     if (coins_kv_count(db) <= 0)
-        return false;
+        return ckv_authority_unmet(reason, reason_cap, "coins_kv_empty");
 
     if (out_applied) *out_applied = applied;
     return true;
+}
+
+bool coins_kv_is_proven_authority(sqlite3 *db, int32_t *out_applied)
+{
+    return coins_kv_proven_authority_reason(db, out_applied, NULL, 0);
 }
 
 /* ── Migration-complete stamp (coins_kv.h COINS_KV_MIGRATION_COMPLETE_KEY) ──── */

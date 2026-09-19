@@ -143,6 +143,22 @@ bool reducer_frontier_derive_coins_best_now(int32_t *out_height,
     return true;
 }
 
+void reducer_frontier_coins_best_blocker(char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    out[0] = '\0';
+
+    sqlite3 *pdb = progress_store_db();
+    if (!coins_kv_proven_authority_reason(pdb, NULL, out, cap))
+        return;  /* out now names the unmet proven-authority rung */
+
+    /* Every authority rung holds, so the caller's failure was the hash: both
+     * durable witnesses were absent, or they disagreed at the same height and
+     * derive_coins_best withheld the hash rather than install a guess. */
+    (void)snprintf(out, cap, "coins_tip_hash_witness_unavailable");
+}
+
 bool reducer_frontier_log_coverage_floor(sqlite3 *progress_db,
                                          const char *log_table,
                                          int32_t *out_lo, bool *found)

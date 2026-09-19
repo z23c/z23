@@ -28,6 +28,7 @@
 #define ZCL_JOBS_REDUCER_FRONTIER_H
 
 #include <sqlite3.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -389,6 +390,16 @@ bool reducer_frontier_derive_coins_best_now(
     int32_t *out_height,      /* OUT: coins_applied_height - 1 */
     uint8_t  out_hash[32],    /* OUT (nullable): hash when *out_hash_found */
     bool    *out_hash_found); /* OUT (nullable): hash from a durable log */
+
+/* Name the missing evidence behind a false reducer_frontier_derive_coins_best_now
+ * so a money gate can refuse with WHAT is missing instead of a bare "the coins
+ * tip is unavailable". Writes one short machine-readable token: the first unmet
+ * coins_kv proven-authority rung (storage/coins_kv.h
+ * coins_kv_proven_authority_reason) or, when every rung holds,
+ * "coins_tip_hash_witness_unavailable". Always NUL-terminates. SELECT-only;
+ * this is an explanation, never a permission — it must not be used to relax any
+ * gate. */
+void reducer_frontier_coins_best_blocker(char *out, size_t cap);
 
 /* ── Body torn-read repair note (lane E3) ────────────────────────────────
  *
