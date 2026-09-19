@@ -1035,6 +1035,11 @@ ZCL_CAPABILITY_SYMBOL("qsort", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("raise", CAP_HARMLESS,
     "Signals this process only.")
 ZCL_CAPABILITY_SYMBOL("realloc", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("sched_getaffinity", CAP_HARMLESS,
+    "Reads which processors this may run on. Static system description in "
+    "the same sense as sysconf, and the writing half, "
+    "pthread_setaffinity_np, is already harmless because affinity is "
+    "placement rather than authority.")
 ZCL_CAPABILITY_SYMBOL("sched_yield", CAP_HARMLESS,
     "A scheduling hint that reads no clock, so it is not CAP_CLOCK.")
 ZCL_CAPABILITY_SYMBOL("secp256k1_context_create", CAP_HARMLESS,
@@ -1266,6 +1271,9 @@ ZCL_CAPABILITY_SYMBOL("__memset_chk", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__printf_chk", CAP_HARMLESS,
     "printf can only reach stdout. The stream taking and descriptor "
     "taking variants are CAP_FS_WRITE.")
+ZCL_CAPABILITY_SYMBOL("__sched_cpucount", CAP_HARMLESS,
+    "The out of line half of the CPU_COUNT macro: it counts set bits in a "
+    "caller supplied mask and reaches nothing at all.")
 ZCL_CAPABILITY_SYMBOL("__snprintf_chk", CAP_HARMLESS,
     "Formats into a caller supplied buffer and touches no descriptor.")
 ZCL_CAPABILITY_SYMBOL("__sprintf_chk", CAP_HARMLESS,

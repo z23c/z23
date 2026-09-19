@@ -14,16 +14,29 @@
  *   - pin_thread: succeeds for a valid domain on the real box, fails
  *     (advisory, no crash) for an invalid domain
  *   - Darwin performance levels: host-published counts are sane and exact
- *   - dump_state_json: keys present, domains and performance arrays formed */
+ *   - dump_state_json: keys present, domains and performance arrays formed
+ *   - platform_available_cpu_count: tracks the live affinity mask, not the
+ *     online-processor count (the seam cpu_topology's own fallback and every
+ *     build-job sizer reads; see platform/logical_cpu.h) */
+
+/* sched_getaffinity/CPU_COUNT are glibc extensions, and this file takes the
+ * affinity oracle at the same feature set the seam under test compiles at. */
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 
 #include "test/test_core.h"
 #include "util/cpu_topology.h"
 #include "json/json.h"
+#include "platform/logical_cpu.h"
 
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 #define CPT_CHECK(name, expr) do { \
     printf("cpu_topology: %s... ", (name)); \
@@ -31,9 +44,74 @@
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
+/* platform_available_cpu_count: the affinity-aware seam beside
+ * platform_logical_cpu_count, which cpu_topology's own fallback and every
+ * build-job sizer read. Its own function rather than a block inside
+ * test_cpu_topology so the branch-heavy mask manipulation below does not
+ * push that function past its complexity pin. */
+static int cpt_available_cpu_count_checks(void)
+{
+    int failures = 0;
+    uint32_t online = platform_logical_cpu_count();
+    uint32_t available = platform_available_cpu_count();
+    CPT_CHECK("available_cpu_count >= 1", available >= 1);
+#if defined(__linux__)
+    cpu_set_t saved;
+    CPU_ZERO(&saved);
+    if (sched_getaffinity(0, sizeof saved, &saved) != 0) {
+        printf("cpu_topology: sched_getaffinity oracle unavailable... FAIL\n");
+        return failures + 1;
+    }
+    /* Exact equality against the oracle read the same way, not a bound: a
+     * seam that quietly went back to reporting the host count is only caught
+     * under a restricting mask, and this box may or may not carry one. */
+    CPT_CHECK("available_cpu_count equals the live affinity mask",
+              available == (uint32_t)CPU_COUNT(&saved));
+
+    /* Narrow the mask to one processor and confirm the seam moves with it.
+     * This is the property the whole function exists for: under taskset or a
+     * systemd scope's AllowedCPUs the online count is unchanged and only the
+     * mask tells the truth. */
+    int first = -1;
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, &saved)) { first = c; break; }
+    CPT_CHECK("the live mask names at least one processor", first >= 0);
+    if (first < 0) return failures;
+
+    cpu_set_t one;
+    CPU_ZERO(&one);
+    CPU_SET(first, &one);
+    /* sched_setaffinity can be denied outright (seccomp, a restricted
+     * container). That is not a defect in the seam under test, so the
+     * narrowing checks are skipped rather than failed; the equality check
+     * above still ran. */
+    if (sched_setaffinity(0, sizeof one, &one) != 0) return failures;
+
+    CPT_CHECK("available_cpu_count follows a narrowed mask",
+              platform_available_cpu_count() == UINT32_C(1));
+    CPT_CHECK("logical_cpu_count ignores the narrowed mask",
+              platform_logical_cpu_count() == online);
+    CPT_CHECK("the saved mask restores",
+              sched_setaffinity(0, sizeof saved, &saved) == 0);
+    CPT_CHECK("available_cpu_count is back to the wide mask",
+              platform_available_cpu_count() == (uint32_t)CPU_COUNT(&saved));
+#else
+    /* Everywhere without sched_getaffinity the header promises the two seams
+     * agree exactly, so assert that rather than a bound. */
+    CPT_CHECK("available_cpu_count delegates to the online count",
+              available == online);
+#endif
+    return failures;
+}
+
 int test_cpu_topology(void)
 {
     int failures = 0;
+
+    /* The affinity seam first: the pin_thread checks further down leave this
+     * thread bound to domain 0, and these assertions own the mask while they
+     * run and hand back exactly what they found. */
+    failures += cpt_available_cpu_count_checks();
 
     /* ── real /sys scan (or whatever this box/container actually has) ── */
     cpu_topology_reset_for_testing();
