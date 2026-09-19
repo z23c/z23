@@ -307,3 +307,28 @@ The shell SHA-256 inventory remains authoritative. These rows establish the
 native engine's shadow-mode latency and incrementality; they do not claim that
 the narrower public-C23 Merkle inventory is already a replacement for the
 shell oracle's full build-input policy.
+
+## 2026-09-19 — `make lint` worker count: 21 (derived) vs 28 (full mask)
+
+Question: does raising `ZCL_LINT_JOBS` from its derived 21 (3/4 of the
+28-processor grant) to the full mask of 28 make lint faster? Lint is where
+this tree's time goes (step.lint 213-239 s vs step.compile 30-44 s), so it got
+a measurement instead of an argument.
+
+Conditions: tree at the lane commit that introduced `ZCL_HOST_JOBS` (parent
+`2fc4ad8556`), every run through `devbuild --wait`
+(28 processors, 24 GiB), lint cache warm after one discarded warm-up, runs
+alternating 21/28. Wall is `run_lint.sh`'s own `lint timing` line, which
+excludes scheduler queue time; the outer wall of two runs included up to
+242 s of waiting behind another lane and was discarded for that reason.
+All six runs passed all 212 gates.
+
+| workers | run 1 | run 2 | run 3 | mean |
+|---|---|---|---|---|
+| 21 | 196.7 s | 190.9 s | 197.1 s | 194.9 s |
+| 28 | 190.0 s | 190.3 s | 190.2 s | 190.2 s |
+
+Verdict: under 5 s (2.4%), and the 21-worker range overlaps the 28-worker
+one. The wall is floored by ONE gate: `check-doc-claims` runs ~185 s by
+itself at either count, so lint is critical-path bound, not worker bound. The
+default stays at 21. Speeding up `check-doc-claims` is the lever.

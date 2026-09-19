@@ -86,7 +86,7 @@
 # rebuild) with:
 #
 #     tools/dev/checkout-lock.sh foreground build/.checkout.lock -- \
-#       make -j16 build/bin/z23-dev build/bin/zclassic23-package-verify-dev
+#       make -j"$(nproc)" build/bin/z23-dev build/bin/zclassic23-package-verify-dev
 #
 # A cold build/dev-obj/ prints UNPROVEN and exits 2 rather than reporting a
 # false clean — see HOLLOWNESS above. A newer-but-partial epoch (present but
@@ -671,9 +671,9 @@ check_root() {
         echo "  Build a COMPLETE epoch and re-run:"
         echo "    tools/dev/checkout-lock.sh foreground build/.checkout.lock -- \\"
         if [ "$CAP_CLOSURE_HOST_WINDOWS" = true ]; then
-            echo "      make -j16 z23-dev"
+            echo "      make -j\"\$(nproc)\" z23-dev"
         else
-            echo "      make -j16 build/bin/z23-dev build/bin/zclassic23-package-verify-dev"
+            echo "      make -j\"\$(nproc)\" build/bin/z23-dev build/bin/zclassic23-package-verify-dev"
         fi
         return 2
     fi

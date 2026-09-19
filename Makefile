@@ -13768,17 +13768,20 @@ export ZCL_HOST_JOBS
 # umbrella burns ~4.5 min of CPU inside ~39 s of wall at 8 workers, so the
 # driver is CPU-starved, not gate-bound — raising this is what made lint fast.
 #
-# THE 3/4 AND THE CEILING ARE MEASURED, not taste. Lint is where this
-# repository's time actually goes (step.lint 213-239 s against step.compile
-# 30-44 s), so it is the one job count worth an experiment rather than an
-# argument, and it got one: `make lint` was timed at this derivation's 21
-# workers against the full mask of 28, alternating runs under the build
-# scheduler's 28-processor grant with the lint cache warm. See
-# docs/BENCHMARKS_LOG.md for the raw numbers. The headroom is real work, not
-# politeness: check-standalone-tools-link forks its OWN make underneath one of
-# these workers (ZCL_TOOLS_LINK_JOBS, half the host), so the peak process
-# count is this number plus that one, and the last quarter of the mask is what
-# absorbs it. Override with ZCL_LINT_JOBS=<n>.
+# RAISING THIS DOES NOT HELP, MEASURED 2026-09-19 and recorded in
+# docs/BENCHMARKS_LOG.md. `make lint` under the build scheduler's 28-processor
+# grant, same tree, lint cache warm, three alternating runs each, wall taken
+# from run_lint.sh's own timing line so scheduler queue time is excluded:
+# 21 workers (this derivation) 196.7 / 190.9 / 197.1 s, 28 workers (the full
+# mask) 190.0 / 190.3 / 190.2 s. The whole difference is under 5 s because the
+# wall is floored by ONE gate -- check-doc-claims runs ~185 s by itself at
+# either count -- so lint is critical-path bound, not worker bound. Make that
+# gate faster before touching this number. The 3/4 keeps headroom for real
+# work: check-standalone-tools-link forks its OWN make underneath one of these
+# workers (ZCL_TOOLS_LINK_JOBS, half the host), so the peak process count is
+# this number plus that one. The [8, 24] clamp predates this measurement and
+# is not binding inside a 28-processor grant (it yields 21). Override with
+# ZCL_LINT_JOBS=<n>.
 ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_HOST_JOBS) * 3 / 4 )); \
                    if [ "$$j" -lt 8 ]; then j=8; fi; \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")

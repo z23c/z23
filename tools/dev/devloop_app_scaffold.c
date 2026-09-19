@@ -315,7 +315,7 @@ static size_t scaffold_render(const struct zcl_devloop_app_slice *s,
     n = snprintf(out + len, out_sz - len, "],\"agent_next_action\":\"%s\"}",
                  p->refusal[0]
                      ? "resolve the named file, then run the scaffold again"
-                     : "make -s -j8 dev-bin, then make t-fast ONLY=<test_group>");
+                     : "make -s -j$(nproc) dev-bin, then make t-fast ONLY=<test_group>");
     if (n <= 0 || (size_t)n >= out_sz - len)
         return 0;
     return len + (size_t)n;
