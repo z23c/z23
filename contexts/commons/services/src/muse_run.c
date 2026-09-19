@@ -382,6 +382,47 @@ static void mr_spawn_outcome_name(const struct mr_spawn_outcome *o,
  * and the completeness of the read separately; the plain capture folds all
  * three into one int where a timeout and a clean exit 0 can look alike.
  * It does not terminate the buffer, so that is done here. */
+/* ONE line of what the child actually said, printable bytes only,
+ * bounded — the fact that turns an exit code into a diagnosis.
+ *
+ * Which line depends on who wrote it, and both ends are deliberate. A
+ * BUILD is read from the FRONT: the compiler's first error is the cause
+ * and make's own "*** Error N" summary, which comes last, only repeats
+ * the status already reported. A RUNNER is read from the BACK: it
+ * refuses an unregistered group in its last (often only) line, and a
+ * suite that ran ends on the line that counts the failures, while its
+ * first line is a banner. Empty when the child said nothing readable. */
+static size_t mr_printable(const char *line, size_t n, char *out,
+    size_t cap)
+{
+    size_t i, kept = 0;
+    while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == ' ')) n--;
+    for (i = 0; i < n && kept + 1 < cap; i++) {
+        unsigned char ch = (unsigned char)line[i];
+        if (ch >= 0x20 && ch < 0x7f) out[kept++] = (char)ch;
+    }
+    return kept;
+}
+
+static void mr_log_line(const char *log, char *out, size_t cap, bool last)
+{
+    const char *cur;
+    if (!out || cap < 2) return;
+    out[0] = '\0';
+    if (!log) return;
+    for (cur = log;;) {
+        const char *nl = strchr(cur, '\n');
+        size_t n = nl ? (size_t)(nl - cur) : strlen(cur);
+        size_t kept = mr_printable(cur, n, out, cap);
+        if (kept > 0) {
+            out[kept] = '\0';
+            if (!last) return;
+        }
+        if (!nl) return;
+        cur = nl + 1;
+    }
+}
+
 static void mr_gate_capture(const char *const argv[], char *log,
     size_t logcap, int timeout_ms, struct mr_spawn_outcome *o)
 {
@@ -395,8 +436,13 @@ static void mr_gate_capture(const char *const argv[], char *log,
     /* The rolled-up result says only that SOMETHING was wrong; the
      * observation beside it says which thing, and that is the fact the
      * refusal has to name. */
+    /* Merged, not stdout-only: a runner that refuses an unregistered
+     * group, and a make that stops on an error, both say so on stderr.
+     * Dropping it leaves a run that already cost a whole model turn with
+     * nothing to report but an exit code. */
     ZCL_IGNORE_RESULT(
-        zcl_spawn_capture_binary(argv, log, logcap - 1, timeout_ms, &obs),
+        zcl_spawn_capture_binary_merged(argv, log, logcap - 1, timeout_ms,
+            &obs),
         "the observation below carries every outcome this refuses on");
     log[obs.output_len < logcap ? obs.output_len : logcap - 1] = '\0';
     o->timed_out = obs.timed_out;
@@ -456,7 +502,7 @@ static bool mr_run_gate(const char *workspace, const char *group,
 #define MR_GATE_BUILD_LOG (64u * 1024u)
 
 static bool mr_build_gate(const char *workspace, int timeout_ms,
-    struct mr_spawn_outcome *o)
+    struct mr_spawn_outcome *o, char *note, size_t notecap)
 {
     const char *argv[] = {
         "make", "-s", "-C", workspace, MUSE_RUN_GATE_BUILD_TARGET, NULL
@@ -464,10 +510,12 @@ static bool mr_build_gate(const char *workspace, int timeout_ms,
     char *log;
     memset(o, 0, sizeof(*o));
     o->exit_code = -1;
+    if (note && notecap > 0) note[0] = '\0';
     if (!workspace || timeout_ms <= 0) return false;
     log = zcl_malloc(MR_GATE_BUILD_LOG, "muse_run.gate_build");
     if (!log) return false;
     mr_gate_capture(argv, log, MR_GATE_BUILD_LOG, timeout_ms, o);
+    if (note && notecap > 0) mr_log_line(log, note, notecap, false);
     free(log);
     return mr_spawn_normal(o);
 }
@@ -862,11 +910,11 @@ static bool mr_judge_build(struct mr_core *c, int *run_ms)
 {
     struct muse_run_result *r = c->res;
     struct mr_spawn_outcome spawn;
-    char name[48];
+    char name[48], note[160];
     int64_t t0 = mr_monotonic_ms();
     int64_t spent;
     bool built = mr_build_gate(c->task->workspace, c->gate_timeout_ms,
-        &spawn);
+        &spawn, note, sizeof(note));
     spent = mr_monotonic_ms() - t0;
     r->build_ms = (long long)spent;
     mr_spawn_outcome_name(&spawn, name, sizeof(name));
@@ -875,8 +923,14 @@ static bool mr_judge_build(struct mr_core *c, int *run_ms)
         (void)snprintf(r->gate_spawn, sizeof(r->gate_spawn), "build %s",
             name);
         r->gate_exit = spawn.exit_code;
-        (void)snprintf(r->reason, sizeof(r->reason),
-            "gate build failed: %s %s", MUSE_RUN_GATE_BUILD_TARGET, name);
+        if (note[0])
+            (void)snprintf(r->reason, sizeof(r->reason),
+                "gate build failed: %s %s: %s",
+                MUSE_RUN_GATE_BUILD_TARGET, name, note);
+        else
+            (void)snprintf(r->reason, sizeof(r->reason),
+                "gate build failed: %s %s",
+                MUSE_RUN_GATE_BUILD_TARGET, name);
         return false;
     }
     if (!mr_runner_identity(c->task->workspace, r->gate_runner)) {
@@ -914,11 +968,22 @@ static int mr_judge(struct mr_core *c, char *gate_log, size_t logcap,
     if (!mr_run_gate(t->workspace, t->gate, run_ms, gate_log,
             logcap, &r->gate_ms, &gate, &spawn)) {
         /* The log may well hold a passing verdict line. It is not read,
-         * because the process that wrote it did not finish normally. */
+         * because the process that wrote it did not finish normally. Its
+         * LAST line is still quoted: that is where the runner names an
+         * unregistered group or any other refusal of its own, and without
+         * it a run that already cost a whole model turn reports only a
+         * number. Quoting is not reading a verdict — the refusal stands. */
+        char note[160];
         mr_spawn_outcome_name(&spawn, r->gate_spawn, sizeof(r->gate_spawn));
         r->gate_exit = spawn.exit_code;
-        (void)snprintf(r->reason, sizeof(r->reason),
-            "gate did not pass a readable verdict: %s", r->gate_spawn);
+        mr_log_line(gate_log, note, sizeof(note), true);
+        if (note[0])
+            (void)snprintf(r->reason, sizeof(r->reason),
+                "gate did not pass a readable verdict: %s: %s",
+                r->gate_spawn, note);
+        else
+            (void)snprintf(r->reason, sizeof(r->reason),
+                "gate did not pass a readable verdict: %s", r->gate_spawn);
         return 1;
     }
     mr_spawn_outcome_name(&spawn, r->gate_spawn, sizeof(r->gate_spawn));

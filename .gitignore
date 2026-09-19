@@ -125,3 +125,12 @@ deploy/devfleet/*.jsonl
 # It is the CLI's state, not this project's, and a committed copy would pin
 # every operator to whatever model the last dispatch happened to use.
 .zai/
+
+# A worktree listed in the dev-agent queue's pool carries its warm marker and
+# its non-blocking occupancy lock at its own root (queue/pool.txt reads
+# <worktree>/.eu-warm, and the dispatcher flocks <worktree>/.eu-lock). The same
+# worktree is also a model workspace, and a model workspace must read CLEAN
+# before a turn or the run is refused for its own scaffolding. Untracked here
+# so being in the pool can never look like a change.
+.eu-warm
+.eu-lock

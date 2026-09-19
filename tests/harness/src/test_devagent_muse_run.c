@@ -1567,6 +1567,12 @@ static int mr_exec_gate_build_fails(void)
     MR_CHECK("build-fail refused", strcmp(r.verdict, "refused") == 0);
     MR_CHECK("build-fail reason names the build",
         strstr(r.reason, "gate build failed: test_parallel exit=2") != NULL);
+    /* The compiler wrote its one useful line to STDERR. A capture that
+     * drops stderr leaves a refusal that can say only "exit=2" after the
+     * whole turn has already been paid for, so the reason must quote the
+     * line the build actually printed. */
+    MR_CHECK("build-fail reason quotes the build's own stderr",
+        strstr(r.reason, "error: expected declaration") != NULL);
     MR_CHECK("build-fail spawn named",
         strcmp(r.gate_spawn, "build exit=2") == 0 && r.gate_exit == 2);
     /* The stale runner printed a passing line and was never asked. */

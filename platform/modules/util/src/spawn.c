@@ -616,9 +616,12 @@ int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
 
 #endif
 
-struct zcl_result zcl_spawn_capture_binary(
+/* One exact capture for both stderr dispositions: the success predicate
+ * and every observation field are the same, so only the child's stderr
+ * changes hands. */
+static struct zcl_result spawn_capture_binary_impl(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
-    struct zcl_spawn_binary_observation *out)
+    bool merge_stderr, struct zcl_spawn_binary_observation *out)
 {
     if (out) {
         memset(out, 0, sizeof(*out));
@@ -627,10 +630,11 @@ struct zcl_result zcl_spawn_capture_binary(
     if (!out || !argv || !argv[0] || !buf || cap == 0 || timeout_ms <= 0)
         return ZCL_ERR(-1, "spawn: exact binary capture requires bounded inputs");
 #ifdef _WIN32
+    (void)merge_stderr;
     return ZCL_ERR(-1, "spawn: Windows binary capture is unavailable");
 #else
     int rc = spawn_capture_impl(argv, buf, cap, timeout_ms, NULL, NULL,
-                                NULL, NULL, false, out);
+                                NULL, NULL, merge_stderr, out);
     if (rc != 0 || out->exit_code != 0 || !out->eof || out->overflow || out->timed_out ||
         !out->exit_observed)
         return ZCL_ERR(-1, "spawn: incomplete binary capture (exit=%d eof=%d overflow=%d timeout=%d observed=%d)",
@@ -638,6 +642,20 @@ struct zcl_result zcl_spawn_capture_binary(
                        out->exit_observed);
     return ZCL_OK;
 #endif
+}
+
+struct zcl_result zcl_spawn_capture_binary(
+    const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    struct zcl_spawn_binary_observation *out)
+{
+    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, false, out);
+}
+
+struct zcl_result zcl_spawn_capture_binary_merged(
+    const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    struct zcl_spawn_binary_observation *out)
+{
+    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, true, out);
 }
 
 int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,

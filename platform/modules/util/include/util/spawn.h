@@ -131,6 +131,18 @@ struct zcl_result zcl_spawn_capture_binary(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
     struct zcl_spawn_binary_observation *out);
 
+/* The same exact capture and the same observation, except the child's
+ * stderr is interleaved into the SAME pipe as stdout instead of being
+ * discarded. A gate, a build, or any other child whose refusal is only
+ * explained on stderr must be captured this way: with stderr dropped, a
+ * caller that already paid for the whole run can report nothing but an
+ * exit code, and the one line that names the cause is gone. Every other
+ * guarantee — bounded payload, EOF, observed status, overflow and
+ * deadline reporting — is identical to zcl_spawn_capture_binary(). */
+struct zcl_result zcl_spawn_capture_binary_merged(
+    const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    struct zcl_spawn_binary_observation *out);
+
 /* The same bounded capture with the deadline outcome preserved separately
  * from the child's status. `timed_out` is always initialized when non-NULL
  * and is true only when this function killed the process group because the
