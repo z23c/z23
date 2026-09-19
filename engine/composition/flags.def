@@ -1365,7 +1365,7 @@ Z23_FLAG("ZCL_LINT_CACHE_TREE_KEY_X", "env_build", "-", "-",
 Z23_FLAG("ZCL_LINT_GATES_DIR_X", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:78")
 Z23_FLAG("ZCL_LINT_GATE_TIMING", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_make_lint_gates.c:490")
+          "undocumented; first use tests/harness/src/test_make_lint_gates.c:491")
 Z23_FLAG("ZCL_LINT_JOBS", "env_build", "8", "-",
           "undocumented; first use tools/lint/run_lint.sh:79")
 Z23_FLAG("ZCL_LINT_MODE", "env_runtime", "FAIL", "-",

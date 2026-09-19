@@ -14040,8 +14040,12 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: $(LINTC_TOOL)
-	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
+# Explicit gate goals are owned by Make, including their failure status.
+# Dispatching them again through the script creates independent writers
+# (notably two Windows linkers in `make lint check-windows-acceptance`).
+LINT_PARALLEL_GATES = $(filter-out $(MAKECMDGOALS),$(LINT_GATES))
+lint: $(LINTC_TOOL) $(filter $(LINT_GATES),$(MAKECMDGOALS))
+	@$(if $(LINT_PARALLEL_GATES),tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PARALLEL_GATES),:)
 	@echo "══ LINT: all checks passed ══"
 endif
 

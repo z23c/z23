@@ -497,6 +497,7 @@ int t_blocker_escape_registered_gate(void);
 int t_lint_gates_fail_loud_on_empty_scan(void);
 int t_lint_gate_wiring_gate(void);
 int t_lint_umbrellas_share_built_prereqs(void);
+int t_lint_explicit_gates_run_once(void);
 int t_dev_proof_helpers_include_lint_tool(void);
 int t_dev_proof_prefork_runs_before_the_dimensions(void);
 void unlink_lint_fixtures(void);

@@ -1171,6 +1171,16 @@ static bool lint_built_prereqs_contract(const char *makefile)
     return range_contains(targets, targets_end, "$(LINT_BUILT_PREREQS)");
 }
 
+int t_lint_explicit_gates_run_once(void)
+{
+    int failures = 0;
+    TEST("[lint-gate] explicit Make goals execute once and failures propagate") {
+        ASSERT(run_gate_script("tools/scripts/test_lint_explicit_gates.sh", NULL) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int t_lint_umbrellas_share_built_prereqs(void)
 {
     int failures = 0;

@@ -345,6 +345,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
      * run_lint.sh, never writing into the worktree. */
     N_(t_lint_gate_wiring_gate),
     N_(t_lint_umbrellas_share_built_prereqs),
+    N_(t_lint_explicit_gates_run_once),
     N_(t_dev_proof_helpers_include_lint_tool),
     N_(t_dev_proof_prefork_runs_before_the_dimensions),
     S_(t_no_dev_history_in_contracts),
