@@ -614,6 +614,11 @@ static int gw_t_handshake(void)
         ASSERT(gw_body_has(b, "\"name\":\"steer_brief\""));
         ASSERT(gw_body_has(b, "\"name\":\"steer_send\""));
         ASSERT(gw_body_has(b, "\"name\":\"steer_evidence\""));
+        /* A schema-driven client only sends what the schema names: a
+         * remote agent answering its directive needs `kind` advertised,
+         * as the same closed set the steer leaf enforces. */
+        ASSERT(gw_body_has(b, "\"kind\":{\"type\":\"string\",\"enum\":"
+                              "[\"directive\",\"result\"]}"));
         free(b);
         b = gw_post("/steer",
                     "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"nope\"}",
