@@ -2,23 +2,33 @@
 
 # Z23
 
-**One C23 binary: a ZClassic full node you own, and a software commons that
-answers to you.**
+**Your own ZClassic full node and a C23 software commons, in one program you
+build from source and run on your own machine.**
 
-Z23 compiles to a single self-contained executable holding two sovereign
-systems. The first is a ZClassic full node — P2P, transparent and shielded
-wallet state, RPC, and its own block explorer. The second is an optional
-commons for creating, verifying, reproducing, and preserving C23 software.
-Both answer to the person running the node, not to an AI vendor, a package
-registry, or a hosted service.
+Z23 is one self-contained executable written in C23, the 2023 edition of the C
+language. It is a full node for ZClassic, a Zcash-derived cryptocurrency with
+private ("shielded") payments: it downloads the blockchain from peers and
+checks every block itself — proof-of-work, scripts, and the zero-knowledge
+proofs behind shielded payments — instead of relying on a server to have done
+so. It keeps transparent and shielded wallet state, answers RPC, and serves its
+own block explorer.
 
-> **Status: pre-v1.** This is software to build, run, and inspect — not a
-> finished product. The public-node acceptance contract is eight binary
-> criteria — install, onion bootstrap, cold-start sync, shielded receive,
-> store sale, seven-day soak, `kill -9` recovery, consensus parity — and it is
-> not yet complete. Each one is tracked with its evidence, passing and
-> failing, in [`docs/MVP.md`](docs/MVP.md). Rather than take a readiness number
-> from this page, ask a running node for its own: `build/bin/z23 milestone`.
+The same program carries an optional commons for C23 software. Source is
+identified by the hash of its exact bytes, fetched from other nodes, rebuilt
+and re-tested on your machine, and kept only when you accept that exact
+version. Both parts answer to the person running the node, not to an AI
+vendor, a package registry, or a hosted service.
+
+> **Status: pre-v1.** Z23 is ready to build, run, and inspect; it is not a
+> finished product. Version 1 of the public node is defined by eight pass/fail
+> acceptance criteria: install, onion bootstrap in under a minute, cold-start
+> sync in under ten minutes, receiving a shielded payment, selling a file
+> through the built-in store, seven days of running with no operator
+> intervention, recovery from `kill -9`, and consensus parity with `zclassicd`,
+> the original C++ ZClassic client. They are not all met yet.
+> [`docs/MVP.md`](docs/MVP.md) records each one with its evidence, failed runs
+> included. For the current count, ask a running node rather than this page:
+> `build/bin/z23 milestone`.
 
 ![A user-owned Z23 node containing a full node and C23 Commons, with replaceable AI workers outside its authority boundary](docs/assets/z23-hero.svg)
 
