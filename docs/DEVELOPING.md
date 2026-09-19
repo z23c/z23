@@ -419,6 +419,14 @@ or unknown selector. `lint-fast` is the inner lint (32 gates, ~10 s warm).
 Never run `test_zcl` directly. Do not run full `make lint` on an ordinary
 slice.
 
+A change under `tools/command/*.c`, `engine/composition/**/*.def`,
+`contexts/**/*.def`, or a new `.c` file routinely passes `lint-fast` and then
+fails only in the full `make lint`, because the gates that catch that class of
+change (capability closure, generated-doc drift, the wallclock and POSIX-ERE
+ratchets) are not in `lint-fast`'s subset. Run `make lint-preflight` on that
+kind of change before submitting — it runs exactly those full-lint-only gates
+and finishes in well under the ~212-gate umbrella's time.
+
 ### Module mode — run a test group without relinking
 
 Changing one file and running one group still recompiles that translation unit

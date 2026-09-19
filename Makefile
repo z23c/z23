@@ -484,12 +484,13 @@ else ifneq ($(filter dev-proof-bundle,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter lint lint-cached lint-cold-audit,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint lint-cached lint-cold-audit lint-preflight,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # The lint umbrellas name the dev node and confined package verifier as cold
 # prerequisites below.  Their compile epoch must therefore be selected at
 # parse time just as it is for dev-package-verifier; a zero epoch would acquire
 # a lease before the real compiler fingerprint exists and correctly fail the
-# post-link toolchain-integrity check.
+# post-link toolchain-integrity check. lint-preflight shares this because
+# check-capability-closure (one of its gates) reads the same dev-obj epoch.
 ZCL_EPOCH_PROFILES := dev
 else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-fast
@@ -1833,7 +1834,7 @@ else ifneq ($(filter coverage coverage-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := coverage
 else ifneq ($(filter fuzz fuzz-ci fuzz-ci-leaks fuzz-replay fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_mesh_status_proto,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := fuzz
-else ifneq ($(filter lint lint-fast watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id ff t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter lint lint-fast lint-preflight watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id ff t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES :=
 endif
 endif
@@ -3658,7 +3659,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # the default `all`), so running build/bin/test_parallel directly after editing a test
 # can false-green an old binary or report "matched no groups" for a new test.
 # `make t ONLY=<group>` always rebuilds the harness first, closing that trap.
-.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
+.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-preflight fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
 
 # ── ONLY= is validated BEFORE anything compiles ──────────────────────────
 # Every focused target below carried its ONLY= check in the RECIPE. Make builds
@@ -5624,6 +5625,32 @@ else
 lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
+endif
+
+# lint-preflight — the full-lint-only gates most likely to trip on a change
+# to tools/command/*.c, engine/composition/**/*.def, contexts/**/*.def, or a
+# new .c file, none of which lint-fast runs. These are members of LINT_GATES
+# (not LINT_FAST_GATES), already wired in run_lint.sh's gate_command() table
+# and named in docs/DEFENSIVE_CODING.md's LINT-GATES block, so this target
+# adds no new gate and needs no new wiring — it is a second, narrower
+# aggregate over gates that already exist, the same relationship lint-fast
+# has to lint. Run it before submitting a lane touching those file classes,
+# to catch what lint-fast structurally cannot see without paying for the
+# full ~212-gate umbrella.
+LINT_PREFLIGHT_GATES := \
+    check-capability-closure \
+    check-api-reference-generated \
+    check-capability-inventory-generated \
+    check-no-wallclock-assertion \
+    check-posix-ere-only
+
+ifeq ($(ZCL_LINT_SERIAL),1)
+lint-preflight: $(LINT_PREFLIGHT_GATES)
+	@echo "lint-preflight: OK (serial)"
+else
+lint-preflight: $(ZCLASSIC23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(LINTC_TOOL)
+	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PREFLIGHT_GATES)
+	@echo "lint-preflight: OK"
 endif
 
 # Cache-aware agent/operator loop:
