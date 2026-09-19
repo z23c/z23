@@ -593,6 +593,16 @@ static job_result_t step_apply(struct stage_step_ctx *c)
                                    "coins_applied_height co-commit store failure");
         return JOB_FATAL;
     }
+    /* Record the self-derived provenance markers on the commit that first makes
+     * coins_kv non-empty by THIS node's own verified fold (storage/coins_kv.h,
+     * coins_kv_stamp_self_derived_in_tx) — beside the frontier co-commit above
+     * because it is the same fact about the same transaction. Boot's one-shot
+     * stamp runs before this process folds anything, so without this a
+     * from-genesis node spends its whole first session with
+     * coins_kv_is_proven_authority false and every money-gated command refused.
+     * Rides this txn and never fails it: a not-yet / store-error verdict simply
+     * leaves the node refused and retries on the next applied block. */
+    utxo_apply_self_derived_stamp_in_tx(db);
     /* created_outputs prune is DECOUPLED from this kernel co-commit tx
      * (lane A1): it now runs post-commit in its OWN transaction from
      * utxo_apply_stage_drain(), computed from the final committed cursor. The
@@ -601,15 +611,6 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * crash between the kernel COMMIT and the prune leaves extra
      * created_outputs rows below the retention floor: harmless (the bounded
      * resolver height-ignores them; the next drain re-prunes). */
-    /* Record the self-derived provenance markers on the commit that first makes
-     * coins_kv non-empty by THIS node's own verified fold (storage/coins_kv.h,
-     * coins_kv_stamp_self_derived_in_tx). Boot's one-shot stamp runs before this
-     * process folds anything, so without this a from-genesis node spends its
-     * whole first session with coins_kv_is_proven_authority false and every
-     * money-gated command refused. Rides this txn and never fails it: a
-     * not-yet / store-error verdict simply leaves the node refused and retries
-     * on the next applied block. */
-    utxo_apply_self_derived_stamp_in_tx(db);
     seal_candidate_hook_in_tx(db, g_ms, (int32_t)next_cursor);
     /* SELF-MINT the SHA3-verified anchor snapshot once, at the compiled
      * checkpoint height (observe-only, best-effort — see
