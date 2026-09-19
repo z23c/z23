@@ -561,11 +561,15 @@ ZCL_COMMAND_READY_COMMAND(
     "unknown ids are refused, never silently accepted. A revoked or "
     "expired grant "
     "fails every fleet.steer verb with STEER_GRANT_REVOKED or "
-    "STEER_GRANT_EXPIRED. This governs only fleet.steer verbs: it is not "
+    "STEER_GRANT_EXPIRED. peer=<roster name> (with a label and the send "
+    "scope) mints an admission record instead of a bearer: it lets the "
+    "receiver admit a directive that came over the signed fleet board from "
+    "that enrolled box under that label, and is refused as a bearer "
+    "(STEER_GRANT_PEER_ONLY). This governs only fleet.steer verbs: it is not "
     "wallet authority and not a fleet key role. It contacts no peer.", 0,
     "fleet,steer,grant,revoke,bearer,scope,expiry,chatgpt",
     "zcl.fleet_steer_grant.input.v1", "zcl.fleet_steer_grant.v1",
-    "action,scopes,ttl_seconds,label,id", "action",
+    "action,scopes,ttl_seconds,label,id,peer", "action",
     "z23 fleet steer grant --action=mint --scopes=brief,send",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,

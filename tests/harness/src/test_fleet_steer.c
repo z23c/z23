@@ -1152,6 +1152,103 @@ _test_next:;
     return failures;
 }
 
+/* Mint one peer grant through the real leaf; `id_out` may be NULL. Returns
+ * the reply's error code ("" on success) through `code`. */
+static bool fmx_mint_peer(const char *scopes, const char *label,
+                          const char *peer, char *id_out, size_t id_cap,
+                          char *code, size_t code_cap)
+{
+    struct fmx_call g;
+    bool ok;
+    fmx_begin(&g, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+    (void)json_push_kv_str(&g.input, "action", "mint");
+    (void)json_push_kv_str(&g.input, "scopes", scopes);
+    if (label)
+        (void)json_push_kv_str(&g.input, "label", label);
+    (void)json_push_kv_str(&g.input, "peer", peer);
+    ok = fmx_run(&g, zcl_native_handle_fleet_steer_grant) && fmx_ok(&g);
+    (void)snprintf(code, code_cap, "%s", g.reply.error.code);
+    if (ok && strcmp(fmx_str(&g, "peer"), peer) != 0)
+        ok = false;
+    if (ok && id_out)
+        (void)snprintf(id_out, id_cap, "%s", fmx_str(&g, "id"));
+    fmx_end(&g);
+    return ok;
+}
+
+static int fmx_t_peer_grants(void)
+{
+    int failures = 0;
+
+    TEST("steer: a peer grant admits one label from one enrolled box, and "
+         "is never a bearer or a binding") {
+        struct fmx_call c;
+        char pid[64], lid[64], code[64], binding[64];
+        fmx_isolate("peer_grants");
+        /* Shape: a roster name, a label, and the send scope. */
+        ASSERT(!fmx_mint_peer("send", "chatgpt", "Node_A", NULL, 0, code,
+                              sizeof(code)));
+        ASSERT_STR_EQ(code, "BAD_INPUT");
+        ASSERT(!fmx_mint_peer("send", NULL, "node-a", NULL, 0, code,
+                              sizeof(code)));
+        ASSERT_STR_EQ(code, "BAD_INPUT");
+        ASSERT(!fmx_mint_peer("brief", "chatgpt", "node-a", NULL, 0, code,
+                              sizeof(code)));
+        ASSERT_STR_EQ(code, "BAD_INPUT");
+        /* Nothing minted yet: every question is UNKNOWN. */
+        ASSERT_STR_EQ(zcl_fleet_steer_grant_peer_live("chatgpt", "node-a",
+                                                      "send"),
+                      "STEER_GRANT_UNKNOWN");
+        ASSERT(fmx_mint_peer("send", "chatgpt", "node-a", pid, sizeof(pid),
+                             code, sizeof(code)));
+        ASSERT(zcl_fleet_steer_grant_peer_live("chatgpt", "node-a", "send") ==
+               NULL);
+        /* The same label from a different box is not granted. */
+        ASSERT_STR_EQ(zcl_fleet_steer_grant_peer_live("chatgpt", "node-b",
+                                                      "send"),
+                      "STEER_GRANT_PEER");
+        ASSERT_STR_EQ(zcl_fleet_steer_grant_peer_live("chatgpt", "node-a",
+                                                      "brief"),
+                      "STEER_GRANT_SCOPE");
+        /* A peer grant never admits an unsigned row by its binding. */
+        ASSERT(zcl_fleet_steer_sender_binding(pid, "chatgpt", binding,
+                                              sizeof(binding)));
+        ASSERT(zcl_fleet_steer_grant_binding_live("chatgpt", binding,
+                                                  "send") != NULL);
+        /* A local grant never admits a board row. */
+        ASSERT(fmx_mint_as("send", "other", lid, sizeof(lid)));
+        ASSERT(zcl_fleet_steer_sender_binding(lid, "other", binding,
+                                              sizeof(binding)));
+        ASSERT(zcl_fleet_steer_grant_binding_live("other", binding, "send") ==
+               NULL);
+        ASSERT_STR_EQ(zcl_fleet_steer_grant_peer_live("other", "node-a",
+                                                      "send"),
+                      "STEER_GRANT_PEER");
+        /* Presented as a bearer, a peer grant is refused by name. */
+        fmx_brief(&c, pid, 0);
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief));
+        ASSERT(!fmx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "STEER_GRANT_PEER_ONLY");
+        fmx_end(&c);
+        /* Revoked, it reads as that peer's revoked grant. */
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "revoke");
+        (void)json_push_kv_str(&c.input, "id", pid);
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        fmx_end(&c);
+        ASSERT_STR_EQ(zcl_fleet_steer_grant_peer_live("chatgpt", "node-a",
+                                                      "send"),
+                      "STEER_GRANT_REVOKED");
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 static int fmx_t_revoke_cancels_queued(void)
 {
     int failures = 0;
@@ -2812,6 +2909,7 @@ int test_fleet_steer(void)
     failures += fmx_t_sent_needs_receiver();
     failures += fmx_t_sent_local_ack();
     failures += fmx_t_grants();
+    failures += fmx_t_peer_grants();
     failures += fmx_t_revoke_cancels_queued();
     failures += fmx_t_ref_grammar();
     failures += fmx_t_sender_binding();

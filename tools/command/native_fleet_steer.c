@@ -138,6 +138,13 @@
  * the brief except through the parsed, credential-screened whitelist.
  *
  * STATE. <platform_state_root()>/steer (0700): grants.jsonl, sent.jsonl.
+ * PEER GRANTS. A grant minted with peer=<roster name> is an ADMISSION
+ * record, not a bearer: it lets dev.agent.receive admit a directive that
+ * came over the signed fleet board from that enrolled box under that label
+ * (zcl_fleet_steer_grant_peer_live), and nothing else. It is never
+ * accepted as a `grant` on any steer verb (STEER_GRANT_PEER_ONLY), and it
+ * never admits a row by sender binding: an unsigned row cannot borrow a
+ * peer grant, and a board row cannot borrow a local one.
  * Single O_APPEND writes; revoke appends a superseding revoked row like
  * the mail ack cursor. Nothing here blocks on a peer or a model.
  *
@@ -170,6 +177,7 @@
 #include "command/native_fleet.h"
 #include "config/command_catalog.h"
 #include "crypto/random_secret.h"
+#include "fleet_enrol.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/clock.h"
@@ -211,6 +219,8 @@
 #define FMC_KEY_MAX 128u
 #define FMC_NAME_MAX 64u
 #define FMC_REF_MAX 128u
+/* A fleet roster name: 2..24 of [a-z0-9-] (tools/dev/fleet_enrol.h). */
+#define FMC_PEER_MAX 24u
 #define FMC_LEAD_MAX 160u
 #define FMC_LIST_CAP 32u
 #define FMC_BLOCKER_CAP 16u
@@ -409,6 +419,8 @@ struct fmc_grant {
     char id[33];
     char scopes[64];
     char label[FMC_NAME_MAX + 1];
+    /* "" for a local bearer grant; a roster box name for a peer grant. */
+    char peer[FMC_PEER_MAX + 1];
     long long created;
     long long expires;
     int revoked;
@@ -513,6 +525,8 @@ static bool fmc_grant_parse(const char *line, struct fmc_grant *g)
     /* Optional: a row minted without a label keeps the empty name, which
      * no label lookup can ever match. */
     (void)fmc_grant_line_str(line, "label", g->label, sizeof(g->label));
+    /* Optional: absent on every local grant. */
+    (void)fmc_grant_line_str(line, "peer", g->peer, sizeof(g->peer));
     if (strlen(g->id) != 32)
         return false;
     return true;
@@ -570,6 +584,10 @@ static const char *fmc_grant_check_row(const char *grant, const char *scope,
         return "STEER_GRANT_UNKNOWN";
     if (g.revoked)
         return "STEER_GRANT_REVOKED";
+    /* A peer grant admits board-carried rows only; presenting its id as a
+     * bearer would turn an admission record into a local credential. */
+    if (g.peer[0])
+        return "STEER_GRANT_PEER_ONLY";
     now = platform_time_wall_time_t();
     if (g.expires != 0 && (long long)now >= g.expires)
         return "STEER_GRANT_EXPIRED";
@@ -744,7 +762,9 @@ static const char *fmc_grant_binding_scan(const struct fmc_grant_set *set,
     size_t i;
     for (i = 0; i < set->n; i++) {
         const char *row;
-        if (strcmp(set->g[i].label, label) != 0)
+        /* A peer grant never admits a row by binding: it names a board
+         * signer, and a row that came any other way has none. */
+        if (strcmp(set->g[i].label, label) != 0 || set->g[i].peer[0])
             continue;
         /* The label matched, so this row is at least ABOUT the claimed
          * sender: report its liveness reason rather than a bare unknown,
@@ -776,6 +796,48 @@ const char *zcl_fleet_steer_grant_binding_live(const char *label,
         return store;
     return fmc_grant_binding_scan(&set, label, binding, scope,
                                   (long long)platform_time_wall_time_t());
+}
+
+/* The verdict the loaded store gives one (label, peer, scope) triple: NULL
+ * when a live peer grant of that label names exactly that peer and carries
+ * the scope, otherwise the most specific reason a row about that label
+ * gave. A label held only by local grants reads STEER_GRANT_PEER: somebody
+ * may send under that name from THIS box, but no enrolled box may. */
+static const char *fmc_grant_peer_scan(const struct fmc_grant_set *set,
+                                       const char *peer, const char *scope,
+                                       long long now)
+{
+    const char *why = "STEER_GRANT_UNKNOWN";
+    size_t i;
+    for (i = 0; i < set->n; i++) {
+        const char *row;
+        if (strcmp(set->g[i].peer, peer) != 0) {
+            why = "STEER_GRANT_PEER";
+            continue;
+        }
+        row = fmc_grant_row_verdict(&set->g[i], scope, now);
+        if (!row)
+            return NULL;
+        why = row;
+    }
+    return why;
+}
+
+const char *zcl_fleet_steer_grant_peer_live(const char *label,
+                                            const char *peer,
+                                            const char *scope)
+{
+    struct fmc_grant_set set;
+    const char *store;
+    if (!label || !label[0] || !scope || !scope[0])
+        return "STEER_GRANT_SCOPE";
+    if (!peer || !peer[0] || strlen(peer) > FMC_PEER_MAX)
+        return "STEER_GRANT_PEER";
+    store = fmc_grant_set_read(label, &set);
+    if (store)
+        return store;
+    return fmc_grant_peer_scan(&set, peer, scope,
+                               (long long)platform_time_wall_time_t());
 }
 
 /* ── idempotency store ─────────────────────────────────────────────────── */
@@ -4154,8 +4216,36 @@ static bool fmc_scopes_valid(const char *scopes)
 struct fmc_mint_in {
     const char *scopes;
     const char *label;
+    const char *peer; /* "" for a local bearer grant */
     long long ttl;
 };
+
+/* A peer grant names one roster box by the roster's own name grammar, and
+ * it only means something as "this label may send from that box", so it
+ * needs the label and the send scope. False with the reply failed. */
+static bool fmc_grant_peer_input(const struct zcl_command_request *req,
+                                 struct zcl_command_reply *reply,
+                                 struct fmc_mint_in *in)
+{
+    in->peer = fmc_str(req, "peer");
+    if (!in->peer || !in->peer[0]) {
+        in->peer = "";
+        return true;
+    }
+    if (!fleet_enrol_name_valid(in->peer) || strlen(in->peer) > FMC_PEER_MAX) {
+        fmc_fail(reply, "BAD_INPUT",
+                 "peer is a fleet roster name: 2..24 of [a-z0-9-]",
+                 "input.peer has an illegal spelling");
+        return false;
+    }
+    if (!in->label || !in->label[0] || !fmc_scope_has(in->scopes, "send")) {
+        fmc_fail(reply, "BAD_INPUT",
+                 "a peer grant needs a label and the send scope",
+                 "input.peer without label or send");
+        return false;
+    }
+    return true;
+}
 
 static bool fmc_grant_inputs(const struct zcl_command_request *req,
                              struct zcl_command_reply *reply,
@@ -4185,13 +4275,24 @@ static bool fmc_grant_inputs(const struct zcl_command_request *req,
                  "label bound");
         return false;
     }
-    return true;
+    return fmc_grant_peer_input(req, reply, in);
+}
+
+/* The optional peer member of a grant row, written only when the grant
+ * names one, so every local grant row keeps its exact old shape. Its
+ * alphabet was checked at mint, so it needs no escaping. */
+static void fmc_grant_peer_part(const char *peer, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (peer && peer[0])
+        (void)snprintf(out, cap, ",\"peer\":\"%s\"", peer);
 }
 
 static void fmc_grant_mint(const struct zcl_command_request *req,
                            struct zcl_command_reply *reply)
 {
     struct fmc_mint_in in;
+    char peer_part[FMC_PEER_MAX + 16];
     time_t now;
     long long expires;
     uint8_t raw[16];
@@ -4222,11 +4323,12 @@ static void fmc_grant_mint(const struct zcl_command_request *req,
     }
     now = platform_time_wall_time_t();
     expires = in.ttl == 0 ? 0 : (long long)now + in.ttl;
+    fmc_grant_peer_part(in.peer, peer_part, sizeof(peer_part));
     n = snprintf(line, sizeof(line),
                  "{\"id\":\"%s\",\"scopes\":\"%s\",\"created\":%lld,"
-                 "\"expires\":%lld,\"revoked\":\"0\",\"label\":\"%s\"}\n",
+                 "\"expires\":%lld,\"revoked\":\"0\",\"label\":\"%s\"%s}\n",
                  id, in.scopes, (long long)now, expires,
-                 in.label ? in.label : "");
+                 in.label ? in.label : "", peer_part);
     if (n <= 0 || (size_t)n >= sizeof(line)) {
         fmc_fail(reply, "GRANT_MINT_FAILED", "grant row exceeds its bound",
                  "row budget");
@@ -4240,6 +4342,8 @@ static void fmc_grant_mint(const struct zcl_command_request *req,
     (void)json_push_kv_str(&reply->data, "leaf", FMC_GRANT_LEAF);
     (void)json_push_kv_str(&reply->data, "id", id);
     (void)json_push_kv_str(&reply->data, "scopes", in.scopes);
+    if (in.peer[0])
+        (void)json_push_kv_str(&reply->data, "peer", in.peer);
     (void)json_push_kv_int(&reply->data, "expires", expires);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
@@ -4355,6 +4459,7 @@ static void fmc_grant_revoke(const struct zcl_command_request *req,
     char line[512];
     time_t now;
     int n, m;
+    char peer_part[FMC_PEER_MAX + 16];
     id = fmc_str(req, "id");
     if (!id || strlen(id) != 32) {
         fmc_fail(reply, "BAD_INPUT", "revoke needs the 32-hex grant id",
@@ -4385,10 +4490,13 @@ static void fmc_grant_revoke(const struct zcl_command_request *req,
      * revoked grant unfindable by name, so a label lookup reported the
      * credential as unknown instead of revoked — fail-closed either way,
      * but the caller could not tell "never granted" from "taken away". */
+    /* ...and the ORIGINAL peer, so a revoked peer grant still reads as
+     * that peer's revoked grant rather than as a local one. */
+    fmc_grant_peer_part(g.peer, peer_part, sizeof(peer_part));
     m = snprintf(line, sizeof(line),
                  "{\"id\":\"%s\",\"scopes\":\"%s\",\"created\":%lld,"
-                 "\"expires\":%lld,\"revoked\":\"1\",\"label\":\"%s\"}\n",
-                 id, g.scopes, (long long)now, g.expires, g.label);
+                 "\"expires\":%lld,\"revoked\":\"1\",\"label\":\"%s\"%s}\n",
+                 id, g.scopes, (long long)now, g.expires, g.label, peer_part);
     if (m <= 0 || (size_t)m >= sizeof(line)) {
         fmc_fail(reply, "GRANT_MINT_FAILED", "grant row exceeds its bound",
                  "row budget");

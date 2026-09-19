@@ -101,4 +101,17 @@ const char *zcl_fleet_steer_grant_binding_live(const char *label,
                                                const char *binding,
                                                const char *scope);
 
+/* The admission reader for a row that came over the signed fleet board
+ * from the enrolled box `peer` (a roster name). Returns NULL when a live
+ * grant minted with peer=<peer> carries `label` with `scope`, otherwise the
+ * fail-closed STEER_GRANT_* reason ("STEER_GRANT_PEER" when the label is
+ * granted, but not to that box). A local grant never answers here and a
+ * peer grant never answers zcl_fleet_steer_grant_binding_live: a board row
+ * is admitted on its verified signer, an unsigned row on its binding, and
+ * neither can borrow the other's grant. Re-reads the store on every call
+ * and never creates the steer directory. */
+const char *zcl_fleet_steer_grant_peer_live(const char *label,
+                                            const char *peer,
+                                            const char *scope);
+
 #endif /* ZCL_NATIVE_FLEET_H */
