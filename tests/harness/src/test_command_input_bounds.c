@@ -931,9 +931,14 @@ static int t_line_key_is_per_leaf(void)
               cib_accepts("fleet.import", "line", 2333, why, sizeof(why)));
     CIB_CHECK("fleet import accepts a roster line at the string bound",
               cib_accepts("fleet.import", "line", 4096, why, sizeof(why)));
+    /* An over-long line is perfectly well-typed, so the refusal names the
+     * LENGTH rule — the same contract t_key_edges holds for every other
+     * default-bounded key, which the type rule above must not shadow. */
     CIB_CHECK("fleet import refuses one character past the string bound",
               !cib_accepts("fleet.import", "line", 4097, why, sizeof(why)) &&
-              cib_type_refusal(why, "line"));
+              strstr(why, "line") != NULL &&
+              strstr(why, "characters") != NULL &&
+              strstr(why, "limit") != NULL);
     CIB_CHECK("fleet import refuses an empty roster line",
               !cib_accepts("fleet.import", "line", 0, why, sizeof(why)) &&
               cib_type_refusal(why, "line"));
