@@ -34,6 +34,159 @@ A push is a checkpoint, not completion. Remote proof must not block the
 developer's ability to continue editing. Acceptance remains a local policy
 decision over exact canonical task, candidate, action, and receipt objects.
 
+## 0. First hour on a clean machine
+
+Everything below is the whole path from `git clone` to an edit-build-test
+turn. It is the path a new developer walks, in order, and nothing later in
+this document works until it has been walked once.
+
+```bash
+git clone https://github.com/z23c/z23.git
+cd z23
+make doctor-env                        # toolchain: is this host capable at all
+make doctor                            # packages: vendor/scripts/vendor_prereqs.tsv
+make setup                             # arm the clone (vendored archives, caches)
+make -j"$(nproc)" z23                  # the node binary      -> build/bin/z23
+make -j"$(nproc)" z23-dev              # the developer binary -> build/bin/z23-dev
+```
+
+**`make z23-dev` is a separate line on purpose.** `all` — what plain `make`
+builds — is `test_zcl zclassic23 zcl-rpc zclassic23-package-verify` plus the
+POSIX-only binaries and the adapter runner. `z23-dev` is not in it and never
+has been. Every development command in this document is spelled
+`build/bin/z23-dev ...`, so a developer who ran plain `make` and then reached
+section 5 gets "No such file or directory" from a tree that built perfectly.
+Build it explicitly, once, here.
+
+Then arm this clone's Git hooks, which is what refuses an unproven push:
+
+```bash
+make install-hooks                     # ONLY from the main checkout
+make hooks-status                      # read-only: what is actually armed
+```
+
+Now you can take a turn. The inner loop is three commands:
+
+```bash
+make -j"$(nproc)" dev                  # compiler-speed rebuild -> build/bin/z23.dev
+make t-fast ONLY=<group>               # one test group
+make lint-fast                         # the fast gate subset
+```
+
+`make -s print-CFLAGS` and `print-DEV-CFLAGS` show the two flag sets if you
+want to know what those two builds differ by.
+
+### On a shared build host: `devbuild`
+
+If you are the only user of your machine, skip this; `make -j"$(nproc)"` is
+complete and correct on its own.
+
+On a host where several lanes, another project, and a live node share the
+CPUs, every heavy build, proof, benchmark and test matrix goes through a host
+scheduler named `devbuild`, and the form is:
+
+```bash
+devbuild --wait make -j"$(nproc)" lint
+devbuild --plan                        # what a slot would grant; runs nothing
+```
+
+`devbuild` is **not part of this repository and is not installed by any
+target here.** It is a host program, shared with a second unrelated project,
+that holds one exclusive `flock(2)` per project, refuses a job when the host
+has under 24 GiB available, and runs what you gave it inside a
+`systemd-run --user --scope` with a CPU quota, a memory ceiling and a CPU
+pinning that deliberately leaves the first two physical cores of every socket
+free for the node. Its exact contract, and a byte-identical reference copy of
+the program, are in [`../platform/deploy/devbuild`](../platform/deploy/devbuild).
+
+Read that file before working on a shared host, because three things in this
+tree call `devbuild` by name and fail without it:
+`tools/dev/node_lifecycle.sh`, `tools/dev/commons_journey_acceptance.sh`, and
+`tools/scripts/qualify_fleet_gateway_front.sh`. Inside a `devbuild` scope
+`nproc` already reports the granted CPUs, so `-j"$(nproc)"` is the right job
+count there and not an over-subscription.
+
+### Five things that will look like bugs and are not
+
+These are the traps a newcomer hits in the first day. Each one is a real,
+current behavior of this tree, not a defect waiting to be fixed.
+
+**Plain `make` does not build `build/bin/z23-dev`.** Covered above. `make
+z23-dev`, `make dev-bin` and `make zclassic23-dev` are the same target.
+
+**`make install-hooks` from a linked worktree can disarm every other
+checkout.** `tools/scripts/install_git_hooks.sh` sets
+`extensions.worktreeConfig` and then runs
+`git -C "$ROOT" config --unset-all core.hooksPath` — an unscoped write, which
+means the SHARED `.git/config` — before writing the new path into the
+per-worktree config. Run from a lane, that clears the hook path the main
+checkout was relying on and installs one only the lane can see. Every other
+worktree in the repository is then unarmed, silently, and a push that should
+have been refused goes through. Install hooks **from the main checkout**, or,
+if you must invoke it from elsewhere, name the main checkout explicitly:
+
+```bash
+ZCL_GIT_HOOK_ROOT=/path/to/the/main/checkout make install-hooks
+```
+
+`make hooks-status` is the read-only question and never writes config; prefer
+it for "am I armed" and keep `install-hooks` a deliberate act.
+
+**An empty test log from `fleet_gateway` means a missing binary, not a
+failing test.** `tests/harness/src/test_fleet_gateway.c` opens with
+`gw_spawn(bin, node, state)` and, when that spawn fails, returns 1 without
+printing anything at all. The group therefore reports one failure in roughly
+40 ms with a zero-length log. That is the gateway binary or the node binary
+being absent, not an assertion. Build both and run it again:
+
+```bash
+make -j"$(nproc)" z23 fleet-gateway
+```
+
+**An installed `z23-dev` on PATH is a content-addressed link, not your
+build.** `~/.local/bin/z23-dev` is a symlink into
+`~/.local/lib/z23/<sha256>/`, so its name stays put while its target names
+the exact bytes that produced it. Its modification time tells you when the
+link was repointed and nothing about which source it came from. To learn what
+source it actually is, ask both sides for the same identity and compare:
+
+```bash
+tools/dev/source-identity.sh capture-record
+z23-dev agentbuild        # compare its source_id_sha256 to the captured one
+```
+
+Never conclude "it is current" from `ls -l`.
+
+**Commits on `main` must be signed.** The push path refuses an unsigned
+commit, and the check is not a warning:
+
+```bash
+git log --format='%G?' origin/main..HEAD   # every line must read G
+```
+
+`N` means unsigned. Configure signing before your first commit rather than
+discovering it at push time.
+
+### The names: `z23`, `zclassic23`, and `~/.local/state/zclassic23`
+
+The product and every binary are **`z23`**. You will still see `zclassic23`
+in three places, and all three are aliases or history, not a second thing:
+
+- the `zclassic23` make target is a one-line alias for `z23`
+  (`Makefile:6295`), and `ZCLASSIC23_BIN` already points at `build/bin/z23`;
+- `build/bin/zclassic23` and `build/bin/zclassic23-dev` are migration
+  symlinks to `build/bin/z23` and `build/bin/z23-dev`;
+- the maintainer's host keeps state under `~/.local/state/zclassic23/` and
+  the canonical checkout under a `zclassic23` path, both predating the rename.
+
+Nothing is broken by this and nothing needs renaming to work. A full rename
+is deliberately not attempted piecemeal: it would touch the make targets and
+their aliases, the `ZCLASSIC23_*` variables, every tracked unit filename
+under `platform/deploy/`, the state and datadir paths those units name, the
+installed units on every host already running them, and the `docs/` pages
+that cite those paths — so it is one coordinated change or it is a broken
+fleet, never a lane's side errand.
+
 ## 1. Orient
 
 On a new Linux, macOS, or Windows machine, run this first — it compiles with
@@ -652,8 +805,10 @@ exists is refused by the pre-push hook. Two operational rules, both learned
 from real failures: do not run other `make` builds in the same checkout
 while a proof is in flight (a superseded source build invalidates the
 attempt), and if the attempt fails on `check-git-hooks-installed` after a
-hook rebuild, run `make install-hooks` to refresh the armed copy, then
-`dev proof retry` and `dev proof step` again.
+hook rebuild, refresh the armed copy with `make install-hooks` run from the
+main checkout — or `ZCL_GIT_HOOK_ROOT=<main checkout> make install-hooks`
+from anywhere else, never bare from a lane, for the reason in section 0 —
+then `dev proof retry` and `dev proof step` again.
 
 `dev.proof.ensure` is idempotent and normally runs from `post-commit`,
 `post-merge`, or `post-checkout` -- but only to re-arm a resident proof

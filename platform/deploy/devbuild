@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton
+# SPDX-License-Identifier: Apache-2.0
+#
+# REFERENCE MIRROR — NOT the file that runs. NOT installed by any make target.
+#
+# `devbuild` is the shared HOST BUILD SCHEDULER. Every heavy build, proof,
+# benchmark and test matrix on a shared build host goes through it. It is
+# referenced by name from tools/dev/node_lifecycle.sh, from
+# tools/dev/commons_journey_acceptance.sh, from
+# tools/scripts/qualify_fleet_gateway_front.sh and from several docs under
+# docs/work/ — and until this file existed, nothing in this repository said
+# what it was, what it enforces, or where to get it. A fresh clone inherited
+# call sites for a program it had never heard of.
+#
+# WHY THIS IS A MIRROR AND NOT THE AUTHORITY. The installed copy at
+# ~/.local/bin/devbuild is SHARED with a second, unrelated project (`qedc`):
+# both projects' heavy jobs serialize against each other through the locks
+# below, and that only works because there is exactly ONE scheduler binary
+# arbitrating both. Vendoring this file as z23's own authority would fork the
+# arbiter — two copies, each believing it holds the slot — and shipping an
+# installer that wrote ~/.local/bin/devbuild would have z23 overwrite a file
+# the other project also depends on. Neither is z23's call to make
+# unilaterally. So this file is documentation with exact bytes: read it,
+# diff it against the installed copy, reimplement it if your host needs one.
+#
+#   diff -u platform/deploy/devbuild ~/.local/bin/devbuild
+#
+# IT IS NOT REQUIRED TO BUILD Z23. On a machine you do not share, plain
+# `make -j"$(nproc)" z23` is complete and correct, and you never need this.
+# devbuild exists so that concurrent heavy jobs on a SHARED host do not
+# oversubscribe it. Treat it as host policy, not as a build dependency.
+#
+# WHAT IT ENFORCES, precisely, as the body below shows:
+#   * ONE heavy job per project at a time. An exclusive flock(2) on
+#     $HOME/.local/state/development/<project>.lock, where <project> is z23
+#     or qedc, auto-detected from the checkout's git common dir.
+#   * A shared/exclusive reader-writer lock across BOTH projects at
+#     $HOME/.local/state/development/heavy.lock: normal project jobs take it
+#     shared, `--exclusive` takes it exclusively and locks the whole host.
+#   * Without --wait a busy slot is an immediate refusal with exit 75, never
+#     a queue. With --wait it blocks until the slot is free.
+#   * A hard floor of 24 GiB MemAvailable, checked after the locks are held;
+#     below it the job is refused (exit 75) rather than started into swap.
+#   * The job runs inside `systemd-run --user --scope --slice=development.slice`
+#     with CPUQuota set to 100% per worker core, MemoryMax=24G (48G for
+#     --exclusive), MemorySwapMax=0, CPUWeight=20 and IOWeight=20.
+#   * taskset pins the job to worker CPUs only: the first two physical cores
+#     of every socket are LEFT OUT so the live node and interactive work keep
+#     dedicated silicon. On this host that is 28 of 32 CPUs, hence the
+#     working agreement's `-j"$(nproc)"` inside a devbuild scope granting 28.
+#   * nice 10 and ionice class 2 priority 7 below that, so a heavy job always
+#     loses to the node.
+#   * Nesting does not stack: a devbuild invoked from inside a devbuild scope
+#     reuses the enclosing budget rather than taking a second slot, and
+#     refuses outright (exit 75) if it would switch or widen the project.
+#   * `--plan` prints the decision and exits without running anything; it is
+#     the safe way to ask what a slot would grant.
+#
+# Exit codes: 64 usage, 75 slot busy / host too loaded / cannot nest.
+#
+set -euo pipefail
+wait_for_slot=0
+project=${DEVBUILD_PROJECT:-auto}
+plan=0
+while (( $# )); do
+    case $1 in
+        --wait) wait_for_slot=1; shift ;;
+        --project) project=${2:?Project required}; shift 2 ;;
+        --exclusive) project=exclusive; shift ;;
+        --plan) plan=1; shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+if [[ $project == auto ]] && grep -Fq '/development.slice/' /proc/self/cgroup; then
+    project=${DEVBUILD_ACTIVE:-exclusive}
+fi
+if [[ $project == auto ]]; then
+    common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    case $common in
+        */qedc/*|*/qedc.git) project=qedc ;;
+        */zclassic23/*|*/z23/*|*/z23.git) project=z23 ;;
+        *) project=exclusive ;;
+    esac
+fi
+case $project in qedc|z23|exclusive) ;; *) printf 'Unknown project: %s\n' "$project" >&2; exit 64 ;; esac
+if (( ! plan )) && grep -Fq '/development.slice/' /proc/self/cgroup; then
+    (( $# > 0 )) || { printf 'devbuild: command required\n' >&2; exit 64; }
+    enclosing=${DEVBUILD_ACTIVE:-exclusive}
+    if [[ $enclosing != exclusive && $project != "$enclosing" ]]; then
+        printf 'devbuild: cannot expand or switch an enclosing %s budget\n' "$enclosing" >&2
+        exit 75
+    fi
+    printf 'devbuild: reusing enclosing %s budget\n' "$enclosing" >&2
+    exec "$@" 8>&- 9>&-
+fi
+cores=$(getconf _NPROCESSORS_ONLN)
+[[ $cores =~ ^[0-9]+$ ]] && (( cores >= 8 )) || { printf 'devbuild requires at least eight online CPUs\n' >&2; exit 75; }
+cpu_plan=$(lscpu -b -p=CPU,CORE,SOCKET | awk -F, '
+    /^#/ { next }
+    { key=$2 SUBSEP $3
+      if (!(key in physical)) physical[key]=++count
+      if (physical[key] > 2) { list=list sep $1; sep=","; workers++ }
+    }
+    END { if (workers < 4) exit 1; print list; print workers }
+')
+cpu_list=${cpu_plan%$'\n'*}
+worker_cores=${cpu_plan##*$'\n'}
+[[ $worker_cores =~ ^[0-9]+$ ]] || exit 75
+quota=$((worker_cores * 100))%
+memory=24G
+[[ $project != exclusive ]] || memory=48G
+if (( plan )); then
+    printf 'project=%s cpus=%s cpu_quota=%s memory_max=%s reserve=24GiB\n' "$project" "$cpu_list" "$quota" "$memory"
+    exit 0
+fi
+(( $# > 0 )) || { printf 'Usage: devbuild [--wait] [--project qedc|z23|--exclusive] COMMAND [ARGS...]\n' >&2; exit 64; }
+command_umask=$(umask)
+umask 077
+mkdir -p "$HOME/.local/state/development"
+lock_args=()
+(( wait_for_slot )) || lock_args=(-n)
+if [[ $project != exclusive ]]; then
+    exec 8>"$HOME/.local/state/development/$project.lock"
+    /usr/bin/flock "${lock_args[@]}" 8 || { printf 'devbuild: %s build slot busy; use --wait\n' "$project" >&2; exit 75; }
+fi
+exec 9>"$HOME/.local/state/development/heavy.lock"
+if [[ $project == exclusive ]]; then
+    /usr/bin/flock "${lock_args[@]}" 9 || { printf 'devbuild: build slots busy; use --wait\n' >&2; exit 75; }
+else
+    /usr/bin/flock -s "${lock_args[@]}" 9 || { printf 'devbuild: exclusive build running; use --wait\n' >&2; exit 75; }
+fi
+available=$(awk '$1 == "MemAvailable:" {print $2}' /proc/meminfo)
+[[ $available =~ ^[0-9]+$ ]] && (( available >= 24 * 1024 * 1024 )) || {
+    printf 'devbuild: fewer than 24 GiB available; deferred\n' >&2; exit 75;
+}
+printf 'devbuild: %s, CPUs %s, memory %s\n' "$project" "$cpu_list" "$memory" >&2
+systemd-run --user --scope --quiet --slice=development.slice \
+    --property="CPUQuota=$quota" --property="MemoryMax=$memory" \
+    --property=MemorySwapMax=0 --property=CPUWeight=20 --property=IOWeight=20 -- \
+    /usr/bin/env "DEVBUILD_ACTIVE=$project" "ZCC_MAX_MB=${ZCC_MAX_MB:-8192}" \
+    /usr/bin/nice -n 10 /usr/bin/ionice -c 2 -n 7 \
+    /usr/bin/taskset --cpu-list "$cpu_list" \
+    /bin/bash -c 'umask "$1"; shift; exec "$@"' devbuild-command \
+    "$command_umask" "$@" 8>&- 9>&-

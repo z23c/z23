@@ -212,7 +212,13 @@ these harden the bridge.
   `check-git-hooks-installed`, which fails if the clone is unarmed or the
   tracked hook no longer invokes `make ci`. A raw first push from an unarmed
   clone cannot be intercepted (the hook isn't installed yet) — run
-  `make install-hooks` in each worktree.
+  `make install-hooks` **from the main checkout**, which arms every worktree
+  of that repository. Do not run it once per worktree: the installer's
+  unscoped `git config --unset-all core.hooksPath` clears the shared value
+  first, so a per-worktree install disarms the checkouts that were relying on
+  it. From anywhere else, name the main checkout:
+  `ZCL_GIT_HOOK_ROOT=<main checkout> make install-hooks`. See
+  [`../DEVELOPING.md`](../DEVELOPING.md) section 0.
 - **(4.2) systemd --user timer for the heavy gate + soak accrual.** Nightly `make ci`
   against HEAD, dated verdict = local CI. Pair with the dev lane staying up to accrue
   soak time toward MVP-C (7-day soak).
