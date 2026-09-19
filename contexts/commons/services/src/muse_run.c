@@ -14,6 +14,7 @@
 #include "engine/engine_verdict.h"
 #include "json/json.h"
 #include "platform/clock.h"
+#include "platform/logical_cpu.h"
 #include "sha3/sha3.h"
 #include "util/spawn.h"
 
@@ -501,17 +502,35 @@ static bool mr_run_gate(const char *workspace, const char *group,
  * observed exit 0 refuses, and names the build as the reason. */
 #define MR_GATE_BUILD_LOG (64u * 1024u)
 
+/* THE GATE BUILD IS PARALLEL OR IT DOES NOT FIT. Every turn that changes
+ * a file makes the gate target stale, so this build relinks the test
+ * runner on EVERY judged run — it is the gate's fixed cost, not an
+ * occasional one. Serial, that link was MEASURED on this host at 137 s
+ * against a gate budget of 90 s (15% of a 600 s wall cap), so a file unit
+ * could never be judged at all: the model did its work, the change set
+ * was preserved, and the run still refused on the build's deadline. The
+ * same build with -j finished in 18 s. The job count is bounded rather
+ * than the whole machine because this runs inside a resident background
+ * worker that shares the host with the lanes it is judging for. */
+#define MR_GATE_BUILD_JOBS_MAX 16u
+
 static bool mr_build_gate(const char *workspace, int timeout_ms,
     struct mr_spawn_outcome *o, char *note, size_t notecap)
 {
+    char jobs[16];
     const char *argv[] = {
-        "make", "-s", "-C", workspace, MUSE_RUN_GATE_BUILD_TARGET, NULL
+        "make", "-s", jobs, "-C", workspace, MUSE_RUN_GATE_BUILD_TARGET,
+        NULL
     };
+    uint32_t n = platform_logical_cpu_count();
     char *log;
     memset(o, 0, sizeof(*o));
     o->exit_code = -1;
     if (note && notecap > 0) note[0] = '\0';
     if (!workspace || timeout_ms <= 0) return false;
+    if (n > MR_GATE_BUILD_JOBS_MAX) n = MR_GATE_BUILD_JOBS_MAX;
+    if (n < 1u) n = 1u;
+    (void)snprintf(jobs, sizeof(jobs), "-j%u", n);
     log = zcl_malloc(MR_GATE_BUILD_LOG, "muse_run.gate_build");
     if (!log) return false;
     mr_gate_capture(argv, log, MR_GATE_BUILD_LOG, timeout_ms, o);
