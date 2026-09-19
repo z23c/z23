@@ -103,6 +103,8 @@ bool agent_impact_apply_shared_rules(const char *path,
 #define AGENT_IMPACT_RULE(patterns, groups) \
     do { \
         if (agent_impact_match_any_pattern(path, (patterns))) { \
+            if (!acc) \
+                return true; \
             agent_impact_add_group_list((acc), (groups)); \
             if (acc) \
                 acc->shared_rule_hits++; \

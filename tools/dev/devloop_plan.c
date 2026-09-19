@@ -692,9 +692,7 @@ static bool plan_reached_proof_owner(const char *path, void *user)
     (void)user;
     if (zcl_test_group_source_is_semantic_leaf(path))
         return true;
-    struct agent_impact_acc impact = {0};
-    (void)agent_impact_apply_shared_rules(path, &impact);
-    return impact.shared_rule_hits > 0;
+    return agent_impact_apply_shared_rules(path, NULL);
 }
 
 static bool plan_add_closure(const char *repo_root,

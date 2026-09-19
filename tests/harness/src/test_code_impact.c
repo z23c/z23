@@ -37,6 +37,7 @@
 
 #include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
+#include "controllers/agent_impact_rules.h"
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
@@ -662,9 +663,45 @@ static int test_code_guide(void)
     return failures;
 }
 
+static int test_code_impact_rule_predicate(void)
+{
+    int failures = 0;
+    TEST("code_impact: owner predicate preserves all accumulated proof groups") {
+        static const struct {
+            const char *path;
+            size_t hits;
+            size_t group_count;
+            const char *groups[4];
+        } cases[] = {
+            {"tests/harness/src/test_zcode_policy.c", 1, 1,
+             {"zcode_policy"}},
+            {"engine/modules/chainlog/src/chainlog.c", 2, 4,
+             {"chainlog", "dev_platform", "make_lint_gates", "land_queue"}},
+            {"tests/harness/src/test_muse_session.c", 1, 4,
+             {"devagent_muse_run", "muse_session", "devagent_worker", "make_lint_gates"}},
+            {"zz_no_impact_rule_fixture.c", 0, 0, {NULL}},
+            {"", 0, 0, {NULL}},
+            {NULL, 0, 0, {NULL}},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            struct agent_impact_acc acc = {0};
+            bool matched = agent_impact_apply_shared_rules(cases[i].path, &acc);
+            ASSERT(matched == (cases[i].hits > 0));
+            ASSERT(agent_impact_apply_shared_rules(cases[i].path, NULL) == matched);
+            ASSERT_EQ(acc.shared_rule_hits, cases[i].hits);
+            ASSERT_EQ(acc.groups_len, cases[i].group_count);
+            for (size_t g = 0; g < acc.groups_len; g++)
+                ASSERT_STR_EQ(acc.groups[g], cases[i].groups[g]);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
+    failures += test_code_impact_rule_predicate();
     failures += test_code_impact_hub();
     failures += test_code_impact_leaf();
     failures += test_code_impact_missing_path();
