@@ -1340,15 +1340,6 @@ static void gw_dispatch_rpc(struct gw_buf *b, const char *body,
 #define GW_OAUTH_CODE_TTL (10LL * 60)
 #define GW_OAUTH_ID_HEX 32
 
-/* Authorize request fields (validated). */
-struct gw_authz {
-    char client[80];
-    char redirect[512];
-    char scope[128];
-    char state[256];
-    char challenge[64];
-};
-
 /* (Forward declarations live before first use, below the config.) */
 
 /* Percent-decode one form/query pair source. Lowercase hex only on output
