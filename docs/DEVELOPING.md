@@ -38,16 +38,37 @@ decision over exact canonical task, candidate, action, and receipt objects.
 
 Everything below is the whole path from `git clone` to an edit-build-test
 turn. It is the path a new developer walks, in order, and nothing later in
-this document works until it has been walked once.
+this document works until it has been walked once. Every command here was run
+against a cold checkout before it was written down; the wall times are from
+that run, on a 28-CPU build slot.
 
 ```bash
-git clone https://github.com/z23c/z23.git
+git clone --recurse-submodules https://github.com/z23c/z23.git
 cd z23
+make doctor                            # packages: tools/scripts/vendor_prereqs.tsv
 make doctor-env                        # toolchain: is this host capable at all
-make doctor                            # packages: vendor/scripts/vendor_prereqs.tsv
-make setup                             # arm the clone (vendored archives, caches)
+make setup                             # arm the clone: hooks, archives, compile db
 make -j"$(nproc)" z23                  # the node binary      -> build/bin/z23
 make -j"$(nproc)" z23-dev              # the developer binary -> build/bin/z23-dev
+```
+
+Measured on a cold checkout, 28 CPUs: `setup` 3m07, `z23` 1m46, `z23-dev`
+1m38. `make doctor` and `make doctor-env` are seconds. `make first-build-timing`
+re-measures the whole sequence from a fresh clone and `make timings` reads the
+result back, so these numbers are refreshable rather than folklore.
+
+**`--recurse-submodules` is not optional, and leaving it off does not fail
+where you would expect.** `vendor/tor` is a submodule. A plain `git clone`
+leaves it empty, `make setup` and `make z23` both still succeed — they link
+the offline Tor stub and stamp the binary `tor=stub` — and the step that
+stops is `make doctor-env`, which fails with
+`MISSING vendor/tor  empty (not initialized; the node would link stub Tor)`.
+`make doctor` passes in that same tree, so the two doctors disagreeing is the
+symptom. If you already cloned without it:
+
+```bash
+git submodule update --init vendor/tor
+make tor-full                          # or `make tor-ready` beside a sibling checkout
 ```
 
 **`make z23-dev` is a separate line on purpose.** `all` — what plain `make`
@@ -58,12 +79,18 @@ has been. Every development command in this document is spelled
 section 5 gets "No such file or directory" from a tree that built perfectly.
 Build it explicitly, once, here.
 
-Then arm this clone's Git hooks, which is what refuses an unproven push:
+`make setup` already armed this clone's Git hooks — it calls `install-hooks`
+itself (`Makefile:14290`), and the hooks are what refuse an unproven push. Ask
+what you ended up with, which is read-only and never writes config:
 
 ```bash
-make install-hooks                     # ONLY from the main checkout
-make hooks-status                      # read-only: what is actually armed
+make hooks-status
 ```
+
+It prints the effective `core.hooksPath`, the `pre-push` hook it resolves to,
+and what that hook actually runs. On a single checkout that is the end of it.
+If you later add worktrees, read the second trap below before running
+`install-hooks` again.
 
 Now you can take a turn. The inner loop is three commands:
 
@@ -118,15 +145,29 @@ current behavior of this tree, not a defect waiting to be fixed.
 z23-dev`, `make dev-bin` and `make zclassic23-dev` are the same target.
 
 **`make install-hooks` from a linked worktree can disarm every other
-checkout.** `tools/scripts/install_git_hooks.sh` sets
-`extensions.worktreeConfig` and then runs
-`git -C "$ROOT" config --unset-all core.hooksPath` — an unscoped write, which
-means the SHARED `.git/config` — before writing the new path into the
-per-worktree config. Run from a lane, that clears the hook path the main
-checkout was relying on and installs one only the lane can see. Every other
-worktree in the repository is then unarmed, silently, and a push that should
-have been refused goes through. Install hooks **from the main checkout**, or,
-if you must invoke it from elsewhere, name the main checkout explicitly:
+checkout, and `make setup` performs that install.** Three lines of
+`tools/scripts/install_git_hooks.sh` do it. Line 82 turns on
+`extensions.worktreeConfig`, which is a repository-wide setting. Line 83 then
+runs `git -C "$ROOT" config --unset-all core.hooksPath` — unscoped, so it
+clears the value in the SHARED `.git/config`, the one every worktree reads.
+Line 88 writes the replacement with `--worktree`, into a file only the
+invoking worktree sees, and as an ABSOLUTE path.
+
+So a lane that runs it removes the shared setting and installs a private one.
+Any worktree that had been relying on the shared value is now unarmed,
+silently, and a push that should have been refused goes through. And because
+line 88's path is absolute, a worktree that inherits someone else's entry runs
+that other checkout's hook binary against its own commits.
+
+Measured in this repository on 2026-09-19: the shared `.git/config` holds no
+`core.hooksPath` at all, the main checkout's value survives only in the common
+directory's `config.worktree`, each worktree that ran `setup` carries its own
+absolute entry in `.git/worktrees/<name>/config.worktree`, and a worktree that
+ran neither resolves to the main checkout's absolute path.
+
+Run `install-hooks` **from the main checkout**. If you must invoke it from
+elsewhere, name the main checkout explicitly, which makes every write land
+there:
 
 ```bash
 ZCL_GIT_HOOK_ROOT=/path/to/the/main/checkout make install-hooks
@@ -138,13 +179,20 @@ it for "am I armed" and keep `install-hooks` a deliberate act.
 **An empty test log from `fleet_gateway` means a missing binary, not a
 failing test.** `tests/harness/src/test_fleet_gateway.c` opens with
 `gw_spawn(bin, node, state)` and, when that spawn fails, returns 1 without
-printing anything at all. The group therefore reports one failure in roughly
-40 ms with a zero-length log. That is the gateway binary or the node binary
-being absent, not an assertion. Build both and run it again:
+printing anything at all. That is the gateway binary or the node binary being
+absent, not an assertion. Measured on a cold checkout on 2026-09-19, with
+`build/bin/z23-fleet-gateway` not yet built:
+`test_body_ms=41`, exit code 1, and `test-tmp/test_parallel_22959_252.log` a
+file of exactly **0 bytes**. Build the prerequisite and the identical command
+passes in 25.9 s:
 
 ```bash
 make -j"$(nproc)" z23 fleet-gateway
+make t-fast ONLY=fleet_gateway
 ```
+
+A zero-length group log and a body time in the tens of milliseconds is the
+signature. Read it as "this group never started", not "this group failed".
 
 **An installed `z23-dev` on PATH is a content-addressed link, not your
 build.** `~/.local/bin/z23-dev` is a symlink into

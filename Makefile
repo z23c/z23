@@ -14288,7 +14288,10 @@ setup:
 	else \
 	    echo "══ setup: arming this clone ══"; \
 	    $(MAKE) --no-print-directory install-hooks; \
-	    echo "  wrote  .git/config          core.hooksPath = build/githooks"; \
+	    echo "  armed  git hooks             core.hooksPath set for this worktree"; \
+	    echo "         ask 'make hooks-status' for the path actually in effect;"; \
+	    echo "         read docs/DEVELOPING.md section 0 before running"; \
+	    echo "         install-hooks from a second worktree of this repository"; \
 	fi
 	@$(MAKE) --no-print-directory compdb
 	@echo "  wrote  compile_commands.json  (clangd/LSP; regenerate with make compdb)"
