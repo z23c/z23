@@ -90,7 +90,7 @@ struct wkr_drive_opts {
     long long max_jobs;   /* stop after this many jobs (0 = deadline only) */
     long long time_cap_s; /* wall clock per executor run */
     long long cpu_s;      /* RLIMIT_CPU per executor run */
-    long long mem_mb;     /* RLIMIT_AS per executor run */
+    long long mem_mb;     /* RLIMIT_DATA per executor run */
     long long token_cap;  /* token budget handed to the executor */
     bool timed_idle_only; /* skip the queue watch and sleep the backoff;
                            * the leaf never sets it, tests prove the
@@ -159,7 +159,7 @@ bool zcl_devagent_worker_muse_executor(const struct wkr_job *job,
  * outcome mapping — a timeout, a crash, an ENOMEM or a failing executor
  * therefore reaches the receipt through the same fields on every host.
  *
- * POSIX: fork, RLIMIT_CPU = cpu_s, RLIMIT_AS = memory_bytes, wall SIGKILL.
+ * POSIX: fork, RLIMIT_CPU = cpu_s, RLIMIT_DATA = memory_bytes, wall SIGKILL.
  * Windows: the same image re-entered as a restricted low-integrity child
  * in a kill-on-close job carrying memory_bytes (job-wide commit), cpu_s
  * (job-wide user time) and WKR_ACTIVE_PROCESS_CAP; the parent keeps the
@@ -193,23 +193,28 @@ bool zcl_devagent_worker_caps(const struct wkr_drive_opts *opts,
  * executor call, so every process the job goes on to spawn — the model
  * host, git, the gate build and the gate run — inherits them.
  *
- * THE MEMORY CEILING IS RLIMIT_DATA, NOT RLIMIT_AS, AND THAT IS A
- * MEASURED CORRECTION. RLIMIT_AS bounds ADDRESS SPACE, which counts
- * read-only file mappings that consume no memory at all. The executor
- * spawns git for every measurement it makes, and git maps its packfiles:
- * on this repository one pack is 195 MB, and under a 1 GiB RLIMIT_AS
- * `git diff HEAD` exits 128 with "packfile ... cannot be mapped, check
- * sys.vm.max_map_count and/or RLIMIT_DATA" while `git status
- * --porcelain`, which only reads the index, exits 0. That is exactly the
- * split seen in production on 2026-09-19: every index-only measurement
- * in the run succeeded, the one call that had to read a blob out of the
- * object store failed, the change set was never folded, and a
- * gate-passing 106k-token turn was discarded. RLIMIT_DATA bounds the
- * heap — the allocation that actually consumes memory — at the SAME
- * number, and the unit's cgroup MemoryMax stays the outer bound that
- * covers the whole chain. Nothing here raises a ceiling; it moves an
- * owner-approved number onto the resource it was always meant to
- * measure. Windows has its own confinement and ignores this. */
+ * THE MEMORY CEILING IS RLIMIT_DATA, NOT RLIMIT_AS. RLIMIT_AS bounds
+ * ADDRESS SPACE: read-only file mappings and thread stacks count against
+ * it although they are not this process's memory. The executor spawns
+ * git for every measurement it makes, and git maps its packfiles and
+ * starts threads, so under RLIMIT_AS the approved number stops being a
+ * memory budget and becomes a mapping budget that moves with the repo
+ * and the load. Measured in this checkout on 2026-09-19, with a tracked
+ * edit present and one 195 MB pack in the object store: `git diff HEAD
+ * --` exits 128 under a 512 MiB RLIMIT_AS and 0 under a 512 MiB
+ * RLIMIT_DATA, and the same RLIMIT_AS number passed on one attempt and
+ * failed on the next. A ceiling whose outcome is not reproducible cannot
+ * be reasoned about by the code that hits it.
+ *
+ * This is NOT offered as the proven cause of the 2026-09-19 production
+ * run that folded no candidate — that run's fold failure was never
+ * captured, which is the defect muse_run.h describes and this change
+ * does not fix. It is a separate correctness claim about the ceiling
+ * itself. Nothing is loosened: the bound that actually holds is the
+ * unit's cgroup MemoryMax, which covers the whole chain including
+ * file-backed pages and is unchanged; RLIMIT_DATA bounds the heap at the
+ * SAME owner-approved number. Windows has its own confinement and
+ * ignores this. */
 void zcl_devagent_worker_confine(const struct wkr_caps *caps);
 
 /* What the parent observed. status: 1 ran, 0 wall timeout (killed), -1

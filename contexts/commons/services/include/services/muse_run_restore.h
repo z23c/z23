@@ -50,11 +50,13 @@
  * EVERY FAILURE NAMES ITSELF. `why` (bounded by why_cap, always
  * terminated, "" on success) says WHICH step broke: the tracked-diff
  * capture, the tempfile, or the hash. That distinction is not cosmetic.
- * On 2026-09-19 this call failed in production for one specific reason —
- * `git diff HEAD` could not mmap a 195 MB packfile under the executor
- * child's RLIMIT_AS, while every index-only measurement in the same run
- * succeeded — and the run reported only "none", which cost a whole turn
- * and left nobody a line to read. `why` may be NULL. */
+ * On 2026-09-19 this call failed in production and the run reported only
+ * candidate "none". Which step broke, and why, is STILL not known, and
+ * cannot be recovered: nothing captured it. That is the whole argument
+ * for this parameter — a refusal nobody can diagnose is one that gets
+ * retried at full price instead of repaired. The three notes each name
+ * the call and its exit status, so the next occurrence is readable from
+ * the evidence alone. `why` may be NULL. */
 bool muse_candidate_fold(const char *workspace, const char *rundir,
     char *hex_out, size_t hex_cap, char **fold_out, char *why,
     size_t why_cap);

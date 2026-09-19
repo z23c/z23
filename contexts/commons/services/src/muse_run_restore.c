@@ -147,15 +147,14 @@ bool muse_candidate_fold(const char *workspace, const char *rundir,
         MR_GIT_TIMEOUT_MS);
     if (rc != 0) {
         char note[MUSE_FOLD_NOTE_MAX];
-        /* Name the EXIT STATUS. The one production failure of this call
-         * was git exiting 128 because it could not mmap a packfile under
-         * the executor child's address-space limit; a bare "git failed"
-         * would have hidden which git and which failure. */
+        /* Name the CALL and its EXIT STATUS. A bare "git failed" is what
+         * the 2026-09-19 production run effectively reported, and it is
+         * why that failure can no longer be diagnosed at all. */
         (void)snprintf(note, sizeof(note),
             "the tracked diff could not be captured: `git -C <workspace> "
-            "diff HEAD --` exited %d (stderr is not captured; a 128 here "
-            "is usually git unable to map its object store under the "
-            "caller's memory limit)", rc);
+            "diff HEAD --` exited %d (stderr is not captured; 128 is "
+            "git's own fatal error, and git reports a resource ceiling "
+            "it hit that way)", rc);
         return mrr_fold_failed(hex_out, hex_cap, fold_out, acc, why,
             why_cap, note);
     }

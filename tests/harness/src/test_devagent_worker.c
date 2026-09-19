@@ -813,18 +813,17 @@ static void wtx_rlimit_child(const struct wkr_caps *caps)
 
 /* THE MEMORY CEILING IS ON THE HEAP, NOT ON ADDRESS SPACE, and this is
  * the case that pins it. The executor child spawns git for every
- * measurement one Muse run makes, and git maps its packfiles: under
- * RLIMIT_AS a 195 MB pack cannot be mapped inside a 1 GiB ceiling, so
- * `git diff HEAD` exits 128 while `git status --porcelain` — index only —
- * exits 0. That silent split cost a whole gate-passing turn on
- * 2026-09-19: the change set was measured, the gate passed, and the
- * change could not be folded into an artifact, so the pass was refused
- * downstream for a missing candidate and the workspace was left dirty.
- * RLIMIT_DATA bounds the heap at the SAME number and leaves read-only
- * file mappings alone; the unit's cgroup MemoryMax is the outer bound
- * over the whole chain either way. Checked in a forked child, because
- * the limits are hard — rlim_max is lowered too — and this test process
- * must keep its own. */
+ * measurement one Muse run makes, and git maps its packfiles and starts
+ * threads — both count against RLIMIT_AS and neither is this process's
+ * memory. Measured in this checkout on 2026-09-19: `git diff HEAD --`
+ * exits 128 under a 512 MiB RLIMIT_AS and 0 under a 512 MiB RLIMIT_DATA,
+ * and the same RLIMIT_AS number passed on one attempt and failed on the
+ * next, so what that ceiling admits is not reproducible. RLIMIT_DATA
+ * bounds the heap at the SAME number and leaves read-only file mappings
+ * alone; the unit's cgroup MemoryMax is the outer bound over the whole
+ * chain either way, so nothing here is loosened. Checked in a forked
+ * child, because the limits are hard — rlim_max is lowered too — and
+ * this test process must keep its own. */
 static int wtx_rlimit_case(void)
 {
     int failures = 0;

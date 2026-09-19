@@ -2359,18 +2359,20 @@ static int mr_exec_restore_twice(void)
 /* --- the change set must be NAMED, or the run refuses by name -----------
  * On 2026-09-19 a real turn on node1 edited one tracked file, the gate
  * passed (test_tor:1/0), and the run published verdict "pass" with
- * candidate "none": `git -C <workspace> diff HEAD --` had exited 128,
- * unable to map a 195 MB packfile under the executor child's RLIMIT_AS,
- * while every index-only measurement in the same run succeeded. Nothing
- * said so. The worker's own completion predicate then refused the pass
- * for the missing artifact, 106k tokens were thrown away, and the
- * workspace was left dirty, which refused every later job.
+ * candidate "none", files_changed=1. The fold had failed. WHICH step
+ * failed, and why, is not knowable from anything that run left behind —
+ * that is the defect. The worker's own completion predicate then refused
+ * the pass for the missing artifact, 106k tokens were thrown away, and
+ * the workspace was left dirty, which refused every later job.
  *
- * `diff.external` pointed at a path that does not exist reproduces that
- * exact shape without a 195 MB pack: `git diff HEAD --` exits 128 with
- * an empty capture and a stderr this code never reads, while `git status
- * --porcelain`, `git rev-parse`, `git hash-object` and `git ls-files`
- * all still exit 0. Same split, same silence. */
+ * This case reproduces the SHAPE that produced it, not a guess at the
+ * cause: `diff.external` pointed at a path that does not exist makes
+ * `git diff HEAD --` exit 128 with an empty capture and a stderr this
+ * code never reads, while `git status --porcelain`, `git rev-parse`,
+ * `git hash-object` and `git ls-files` all still exit 0. A tracked diff
+ * that alone cannot be captured, and silence about it: the exact
+ * condition under which the old code published a pass with no artifact,
+ * whatever made git exit 128 on the day. */
 static bool mr_break_tracked_diff(const struct mr_dirs *d)
 {
     return mr_git3(d->wt, "config", "diff.external",

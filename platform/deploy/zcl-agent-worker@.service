@@ -141,17 +141,19 @@ OOMScoreAdjust=500
 # MemoryMax below is the outer bound that actually holds, because it covers
 # the whole chain — worker, executor, model host and gate run together.
 #
-# IT USED TO BE RLIMIT_AS, AND THAT COST A WHOLE TURN. RLIMIT_AS bounds
-# ADDRESS SPACE, which counts read-only file mappings that consume no memory.
-# The executor spawns git for every measurement it makes and git maps its
-# packfiles: on this repository one pack is 195 MB, and inside a 1 GiB
-# RLIMIT_AS `git diff HEAD` exits 128 ("packfile ... cannot be mapped, check
-# sys.vm.max_map_count and/or RLIMIT_DATA") while `git status --porcelain`,
-# which reads only the index, exits 0. On 2026-09-19 that split let a run
-# measure its change set, pass its gate, and then fail to fold the change
-# into a candidate artifact — so a 106k-token gate-passing turn was
-# discarded and the workspace was left dirty, which refused every later job.
-# The number below did not change; the resource it bounds did.
+# IT USED TO BE RLIMIT_AS, AND THAT IS NOT WHAT THIS NUMBER MEANS.
+# RLIMIT_AS bounds ADDRESS SPACE: read-only file mappings and thread stacks
+# count against it although they are not this process's memory. The
+# executor spawns git for every measurement it makes, and git maps its
+# packfiles and starts threads. Measured in this checkout on 2026-09-19,
+# with a tracked edit present: `git diff HEAD --` exits 128 under a 512 MiB
+# RLIMIT_AS and 0 under a 512 MiB RLIMIT_DATA, and the SAME RLIMIT_AS
+# number passed on one attempt and failed on the next, because what it
+# bounds moves with load. A ceiling whose outcome is not reproducible is
+# not a ceiling. Nothing here is loosened: MemoryMax below is the bound
+# that actually holds, it covers the whole chain including file-backed
+# pages, and it is unchanged. The number did not change either; the
+# resource it names did.
 #
 # --deadline_s=3600 is the MAXIMUM the leaf admits (bounded 1..3600), and
 # the drive loop exits cleanly once that wall passes. There is NO value that
