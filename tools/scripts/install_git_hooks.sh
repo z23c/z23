@@ -152,6 +152,9 @@ else
     printf '%s\n' "  pre-push -> admits one immutable exact commit/base receipt"
     printf '%s\n' "  post-commit/post-merge/post-checkout -> schedule proof and return"
 fi
+printf '%s\n' "  pre-commit -> refuses non-main-branch commits in the MAIN checkout"
+printf '%s\n' "                (lane work goes in a worktree; ZCL_LANE_COMMIT_OK=1 overrides)"
+printf '%s\n' "  full-suite/fuzz/coverage -> make install-quality-linger"
 printf '%s\n' "  core.hooksPath  $effective"
 printf '%s\n' "  scope           $origin_file"
 printf '%s\n' "                  (this worktree only; no other worktree changed)"
@@ -164,6 +167,3 @@ if [[ -n "$shared_value" ]]; then
         "                  \`make install-hooks\`; clear it deliberately with" \
         "                  git -C $ROOT config --local --unset-all core.hooksPath"
 fi
-printf '%s\n' "  pre-commit -> refuses non-main-branch commits in the MAIN checkout"
-printf '%s\n' "                (lane work goes in a worktree; ZCL_LANE_COMMIT_OK=1 overrides)"
-printf '%s\n' "  full-suite/fuzz/coverage -> make install-quality-linger"
