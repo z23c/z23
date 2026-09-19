@@ -767,7 +767,7 @@ static int ff_ms_left(const struct timespec *deadline)
 {
     struct timespec now;
     long long ms;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) // platform-ok: standalone cc-built front, no platform lib
         return 0;
     ms = (long long)(deadline->tv_sec - now.tv_sec) * 1000 +
          (deadline->tv_nsec - now.tv_nsec) / 1000000;
@@ -786,7 +786,7 @@ static enum ff_hello_verdict ff_hello_wait(int fd)
     uint8_t buf[FF_HELLO_PEEK_MAX];
     struct timespec deadline;
     size_t seen = 0;
-    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) // platform-ok: standalone cc-built front, no platform lib
         return FF_HELLO_REFUSE;
     deadline.tv_sec += FF_HELLO_DEADLINE_MS / 1000;
     for (;;) {
