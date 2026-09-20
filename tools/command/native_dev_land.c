@@ -528,15 +528,11 @@ static void dl_pool_sweep_and_log(const struct dl_dirs *d)
  * own doc comment says the queue "survives a foreign write" — queue.jsonl
  * is exactly the kind of file a crafted row can appear in without ever
  * going through dl_submit's own checkout-root resolution — so the row
- * parser, not the caller, is the trust boundary. Refuse anything that
- * isn't a real, existing directory named by an absolute path with no "-"
- * segment, sitting somewhere a landing worktree could legitimately live:
- * under the user's home, or beside the checkout doing the landing. */
-static bool dl_worktree_ok(const char *wt)
+ * parser rejects non-path shapes without consulting mutable filesystem
+ * state. Before use, the locator must also be an existing directory under
+ * the user's home or beside the checkout doing the landing. */
+static bool dl_worktree_shape_ok(const char *wt)
 {
-    struct stat st;
-    const char *home;
-    char checkout[4096], *slash;
     if (!wt || !wt[0])
         return true; /* absent: dl_rebase falls back to origin only */
     if (wt[0] != '/')
@@ -545,6 +541,20 @@ static bool dl_worktree_ok(const char *wt)
         if (*p == '/' && p[1] == '-')
             return false;
     }
+    return true;
+}
+
+/* Availability and local path authority are execution preconditions, not
+ * reasons to forget an admitted request when another checkout reads it. */
+static bool dl_worktree_ok(const char *wt)
+{
+    struct stat st;
+    const char *home;
+    char checkout[4096], *slash;
+    if (!dl_worktree_shape_ok(wt))
+        return false;
+    if (!wt || !wt[0])
+        return true;
     if (stat(wt, &st) != 0 || !S_ISDIR(st.st_mode))
         return false;
     home = getenv("HOME");
@@ -562,6 +572,28 @@ static bool dl_worktree_ok(const char *wt)
             return true;
     }
     return false;
+}
+
+static bool dl_worktree_present(const char *wt)
+{
+    return wt && wt[0] && dl_worktree_ok(wt);
+}
+
+static bool dl_worktree_file(const char *wt, const char *relative,
+                             char *out, size_t cap)
+{
+    if (!dl_worktree_present(wt))
+        return false;
+    int n = snprintf(out, cap, "%s/%s", wt, relative);
+    return n >= 0 && (size_t)n < cap;
+}
+
+static bool dl_tor_source_config(const char *wt, char *out, size_t cap)
+{
+    if (!dl_worktree_present(wt))
+        return false;
+    int n = snprintf(out, cap, "submodule.vendor/tor.url=%s/vendor/tor", wt);
+    return n >= 0 && (size_t)n < cap;
 }
 
 /* state:   queued | inflight | landed | failed | conflict | cancelled
@@ -607,7 +639,7 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
         return false;
     (void)dl_line_str(line, "ts", r->ts, sizeof(r->ts));
     (void)dl_line_str(line, "worktree", r->worktree, sizeof(r->worktree));
-    if (!dl_worktree_ok(r->worktree))
+    if (!dl_worktree_shape_ok(r->worktree))
         return false;
     (void)dl_line_str(line, "note", r->note, sizeof(r->note));
     (void)dl_line_str(line, "phase", r->phase, sizeof(r->phase));
@@ -1168,9 +1200,9 @@ static bool dl_wt_ensure(const struct dl_dirs *d, const struct dl_row *r,
         return false;
     if (dl_wt_ready(d->wt))
         return dl_wt_hooks_ensure(d->wt, why, why_cap);
-    if (!r->worktree[0]) {
+    if (!r->worktree[0] || !dl_worktree_ok(r->worktree)) {
         (void)snprintf(why, why_cap, "%s",
-                       "the request carries no source checkout");
+                       "source checkout unavailable or outside receiver policy; admission retained in outcomes");
         return false;
     }
     if (dl_git(r->worktree, base_args, NULL, 0, DL_GIT_TIMEOUT_MS) == 0 &&
@@ -2643,9 +2675,14 @@ static bool dl_tip_checkout(const struct dl_dirs *d, struct dl_row *row,
     const char *checkout_args[] = { "checkout", "--quiet", "--force",
                                     "--detach", row->tip, NULL };
     if (!dl_rev_parse(d->wt, row->tip, row->local)) {
+        if (!dl_worktree_ok(row->worktree)) {
+            (void)snprintf(why, why_cap, "%s",
+                           "source checkout unavailable or outside receiver policy");
+            return false;
+        }
         /* The tip lives in another checkout: fetch that ONE object rather
-         * than every ref the other checkout happens to hold. dl_parse_row
-         * already refused a worktree it could not validate, but "--" still
+         * than every ref the other checkout happens to hold. The locator
+         * passed its current receiver policy above, but "--" still
          * goes in front of it: a positional git argument is git's own to
          * parse, and nothing downstream of this call should have to keep
          * proving that guarantee held all the way here. */
@@ -2751,9 +2788,7 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
             "submodule", "update", "--init", "--no-fetch", "--",
             "vendor/tor", NULL
         };
-        if (snprintf(cfg, sizeof(cfg),
-                     "submodule.vendor/tor.url=%s/vendor/tor",
-                     row->worktree) >= (int)sizeof(cfg) ||
+        if (!dl_tor_source_config(row->worktree, cfg, sizeof(cfg)) ||
             dl_git(d->wt, gl, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0) {
             (void)snprintf(why, why_cap, "%s",
                            "landing_worktree_gitlink_failed");
@@ -3187,7 +3222,7 @@ static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
                 return true;
         }
     }
-    if (!r->worktree[0] ||
+    if (!dl_worktree_present(r->worktree) ||
         snprintf(src_dir, sizeof(src_dir), "%s/vendor/tor", r->worktree) >=
             (int)sizeof(src_dir)) {
         (void)snprintf(why, why_cap, "%s",
@@ -3277,7 +3312,7 @@ static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
         }
         if (lstat(target, &st) == 0)
             continue; /* already materialized in this worktree */
-        if (!r->worktree[0] || lstat(source, &st) != 0) {
+        if (!r->worktree[0] || !dl_worktree_ok(r->worktree) || lstat(source, &st) != 0) {
             (void)snprintf(why, why_cap,
                            "proof_generation_dependency_unavailable:%s "
                            "(make vendor)",
@@ -3327,7 +3362,7 @@ static bool dl_wt_hotswap_ensure(const struct dl_dirs *d,
         }
         if (stat(target, &st) == 0)
             continue;
-        if (!r->worktree[0] || stat(source, &st) != 0) {
+        if (!r->worktree[0] || !dl_worktree_ok(r->worktree) || stat(source, &st) != 0) {
             (void)snprintf(why, why_cap,
                            "proof_generation_dependency_unavailable:%s "
                            "(make test_parallel)",
@@ -3484,8 +3519,7 @@ static bool dl_dependency_repair_one(const char *relative, uint64_t links,
     if (links < 2 ||
         snprintf(target, sizeof(target), "%s/%s", repair->dirs->wt,
                  relative) >= (int)sizeof(target) ||
-        snprintf(donor, sizeof(donor), "%s/%s", repair->row->worktree,
-                 relative) >= (int)sizeof(donor) ||
+        !dl_worktree_file(repair->row->worktree, relative, donor, sizeof(donor)) ||
         !realpath(target, target_real) ||
         lstat(target, &before) != 0 || !S_ISREG(before.st_mode) ||
         before.st_nlink != links) {
@@ -3719,7 +3753,7 @@ static bool dl_wt_hooks_refresh(const struct dl_dirs *d,
          * deterministic bytes the proof generation will build, so it is
          * an honest source for the installed copy — never a silent pass:
          * if neither tree holds a binary, the named refusal below stands. */
-        if (!row->worktree[0] ||
+        if (!row->worktree[0] || !dl_worktree_ok(row->worktree) ||
             snprintf(submitter, sizeof(submitter),
                      "%s/build/bin/z23-git-hook", row->worktree) >=
                 (int)sizeof(submitter) ||
@@ -3843,7 +3877,7 @@ static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row,
     if (row->local[0] && dl_sha_ok(row->local)) {
         (void)snprintf(commit, sizeof(commit), "%s", row->local);
     } else if (!dl_rev_parse(d->wt, row->tip, commit)) {
-        if (!row->worktree[0])
+        if (!row->worktree[0] || !dl_worktree_ok(row->worktree))
             return false;
         {
             /* Same "--" before the row-supplied path as dl_rebase(): see

@@ -637,13 +637,64 @@ static bool dlx_queue_has_one(void)
     return ok;
 }
 
+static bool dlx_failed_admission_visible(const char *expected_tip)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "status");
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *outcomes = dlx_arr(&c, "outcomes");
+    ok = ok && outcomes && outcomes->num_children == 2;
+    if (ok) {
+        const struct json_value *failed = &outcomes->children[1];
+        const char *tip = json_get_str(json_get(failed, "tip"));
+        const char *state = json_get_str(json_get(failed, "state"));
+        ok = tip && state && strcmp(tip, expected_tip) == 0 &&
+            strcmp(state, "failed") == 0;
+    }
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_missing_submitter(const struct dlx_rig *rig)
+{
+    struct dlx_call c;
+    char moved[4096];
+    /* An independent receiver must preserve the admission even when the
+     * submitting checkout disappears. Cancelling another row rewrites the
+     * queue and must not erase the unavailable request. */
+    dlx_submit(&c, rig, rig->tip);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    long long second = dlx_int(&c, "seq");
+    dlx_end(&c);
+    if (!ok || second != 2 ||
+        snprintf(moved, sizeof(moved), "%s-moved", rig->clone) >= (int)sizeof(moved) ||
+        rename(rig->clone, moved) != 0)
+        return false;
+    dlx_begin(&c, "cancel");
+    (void)json_push_kv_int(&c.input, "seq", second);
+    ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    if (!ok || !dlx_queue_has_one())
+        return false;
+    dlx_begin(&c, "step");
+    ok = dlx_run(&c) && dlx_ok(&c) &&
+        strcmp(dlx_str(&c, "state"), "failed") == 0;
+    dlx_end(&c);
+    return ok && dlx_failed_admission_visible(rig->tip) && rename(moved, rig->clone) == 0;
+}
+
 /* Run only in a child: cwd and fixture environment cannot leak to other cases. */
+static bool dlx_receiver_continuity(const struct dlx_rig *rig, const char *receiver)
+{
+    return chdir(receiver) == 0 && dlx_queue_has_one() && dlx_missing_submitter(rig);
+}
+
 static bool dlx_queue_outside_home(const char *root)
 {
     struct dlx_rig rig;
     struct dlx_call c;
-    bool ok;
-    if (chdir(root) != 0 ||
+    char receiver[4096];
+    if (!getcwd(receiver, sizeof(receiver)) || chdir(root) != 0 ||
         !dlx_write_dep(root, "Makefile", "# fixture\n") ||
         !dlx_write_dep(root, "engine/composition/commands/root.def", "// fixture\n") ||
         !dlx_write_dep(root, "tools/dev/test_group_catalog.def", "// fixture\n"))
@@ -654,11 +705,10 @@ static bool dlx_queue_outside_home(const char *root)
     setenv("ZCL_LAND_PROOF_STUB", "running", 1);
     setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
     dlx_submit(&c, &rig, rig.tip);
-    ok = dlx_run(&c) && dlx_ok(&c);
+    bool ok = dlx_run(&c) && dlx_ok(&c);
     dlx_end(&c);
-    if (!ok)
-        return false;
-    return dlx_queue_has_one() && chdir("engine") == 0 && dlx_queue_has_one();
+    return ok && dlx_queue_has_one() && chdir("engine") == 0 && dlx_queue_has_one() &&
+        dlx_receiver_continuity(&rig, receiver);
 }
 
 static bool dlx_outside_home(const char *path)

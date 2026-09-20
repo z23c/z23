@@ -3629,7 +3629,7 @@ tools/command/native_dev_land.c:dl_step:17
 tools/command/native_dev_land.c:dl_step_resume:21
 tools/command/native_dev_land.c:dl_step_start:24
 tools/command/native_dev_land.c:dl_submit:23
-tools/command/native_dev_land.c:dl_worktree_ok:20
+tools/command/native_dev_land.c:dl_worktree_ok:17
 tools/command/native_dev_land.c:dl_wt_vendor_tor_pin_matches:17
 tools/command/native_dev_lane.c:dln_clone_file:23
 tools/command/native_dev_lane.c:dln_materialize:19
