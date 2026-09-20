@@ -297,6 +297,12 @@ Z23_FLAG("ZCL_C3_STOPWATCH_HISTORY", "make_var", "-", "-",
           "undocumented; first use Makefile:8629")
 Z23_FLAG("ZCL_C3_TIP_DATADIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:77")
+Z23_FLAG("ZCL_C6_EXE_SHA_CMD", "env_build", "-", "-",
+          "Pin-gate test seam for the running-image digest; first use tools/scripts/c6_pin_gate.sh:118")
+Z23_FLAG("ZCL_C6_SHOW_CMD", "env_build", "-", "-",
+          "Pin-gate test seam for systemd properties; first use tools/scripts/c6_pin_gate.sh:108")
+Z23_FLAG("ZCL_C6_SHOW_FIXTURE", "env_build", "-", "-",
+          "Pin-gate selftest unit fixture; first use tools/scripts/c6_pin_gate.sh:257")
 Z23_FLAG("ZCL_CANARY_NO_EXACT", "env_build", "0", "-",
           "undocumented; first use tools/scripts/replay_canary.sh:594")
 Z23_FLAG("ZCL_CANARY_SELFTEST_BLOCK_FIFO", "env_build", "-", "-",

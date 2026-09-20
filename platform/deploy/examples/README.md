@@ -18,6 +18,16 @@ operator-specific peers. Copy and adapt before installing:
   `~/.zclassic-c23-soak`, RPC 18242; installed on-box as
   `zclassic23-soak.service`). `make deploy` never touches its binary;
   re-pinning it is a conscious soak-clock re-baseline (see unit comments).
+  `tools/scripts/c6_pin_gate.sh` is what makes that re-baseline checkable
+  instead of remembered: run it before and after the swap. With no
+  argument it REPORTS the pin (which bytes the unit would exec, which
+  bytes it is execing now, the merged unit's own hash, the datadir);
+  with `--expect-binary-sha256=` / `--expect-source-prefix=` it BINDS the
+  window to one candidate and fails closed on wrong bytes, a wrong source
+  identity, a running image that is not the pinned bytes, an unobservable
+  running image, or a pin that lives inside a checkout where an ordinary
+  build would replace it. It is offline: no RPC, no node start, no write.
+  `tools/scripts/c6_pin_gate.sh --selftest` proves those rungs hermetically.
 - `zclassic23-soak-evidence.{service,timer}` — hourly MVP-C6 evidence
   collector: `tools/scripts/soak_evidence.sh collect` appends one READ-ONLY
   JSON sample (soak/zclassicd heights, gap, NRestarts, ActiveEnterTimestamp,
