@@ -705,20 +705,44 @@ static void dvc_claim(const struct dvc_facts *facts,
     reply->exit_code = 0;
 }
 
+static bool dvc_lock(const char *ledger, struct platform_private_file *lock,
+                      struct zcl_command_reply *reply)
+{
+    char path[PATH_MAX + 16];
+    int n = snprintf(path, sizeof(path), "%s.lock", ledger);
+    if (n > 0 && (size_t)n < sizeof(path) &&
+        platform_private_file_open_locked_create(path, lock))
+        return true;
+    dvc_fail(reply, "CLAIM_LOCK_UNAVAILABLE", "ledger",
+             "cannot acquire the claim ledger lock", ledger);
+    (void)snprintf(reply->error.next_action,
+                   sizeof(reply->error.next_action),
+                   "Retry the whole claim or release after the current writer "
+                   "finishes; if this persists, inspect lock-file access. "
+                   "Do not remove a live lock file.");
+    return false;
+}
+
 static void dvc_run(const char *cwd, const char *story, bool release,
                     const struct json_value *norm,
                     struct zcl_command_reply *reply)
 {
     struct dvc_facts facts;
     struct dvc_ledger lg;
-    if (!dvc_git_facts(cwd, &facts, reply) ||
-        !dvc_ledger_load(facts.ledger, &lg, reply))
+    if (!dvc_git_facts(cwd, &facts, reply))
         return;
-    if (release)
-        dvc_release(&facts, &lg, reply);
-    else
-        dvc_claim(&facts, &lg, story, norm, reply);
-    dvc_ledger_free(&lg);
+    struct platform_private_file lock;
+    platform_private_file_init(&lock);
+    if (dvc_lock(facts.ledger, &lock, reply) &&
+        dvc_ledger_load(facts.ledger, &lg, reply)) {
+        if (release)
+            dvc_release(&facts, &lg, reply);
+        else
+            dvc_claim(&facts, &lg, story, norm, reply);
+        dvc_ledger_free(&lg);
+    }
+    /* Persistent sidecar: unlinking it would split the lock identity. */
+    platform_private_file_close(&lock);
 }
 
 /* The story is required; files must be an array, non-empty unless this is
