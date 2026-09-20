@@ -20,6 +20,7 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_regen.h"
+#include "platform/logical_cpu.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -868,7 +869,7 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
                                   const char *routing_recipe,
                                   const char *counts_recipe)
 {
-    char base[512], makefile_body[1024];
+    char base[512], makefile_body[1024], jobs[16];
     const char *init_bare[] = { "init", "--quiet", "--bare",
                                 "--initial-branch=main", rig->bare, NULL };
     const char *clone[] = { "clone", "--quiet", rig->bare, rig->clone,
@@ -876,6 +877,8 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
     const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
     const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
     char seed[64];
+    if (!platform_build_jobs_arg(jobs))
+        return false;
     test_make_tmpdir(base, sizeof(base), "dev_land", tag);
     (void)snprintf(rig->bare, sizeof(rig->bare), "%s/origin.git", base);
     (void)snprintf(rig->clone, sizeof(rig->clone), "%s/clone", base);
@@ -894,10 +897,13 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
                          "docs-executor-routing:\n\t%s\n"
                          "fix-doc-counts:\n\t%s\n"
                          "build/dev-loop/restart.env:\n"
+                         "\t@test '$(filter %s,$(MAKEFLAGS))' = '%s' || "
+                         "{ echo 'FAIL restart plan build job count'; exit 1; }\n"
                          "\t@mkdir -p build/dev-loop\n"
                          "\t@printf 'plan\\n' >> build/dev-loop/"
                          "restart.env\n",
-                         cap_recipe, routing_recipe, counts_recipe) >=
+                         cap_recipe, routing_recipe, counts_recipe,
+                         jobs, jobs) >=
             sizeof(makefile_body))
         return false;
     if (!dlx_write_dep(rig->clone, "Makefile", makefile_body))

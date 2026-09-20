@@ -48,6 +48,7 @@
 #include "command/native_dev_land_regen.h"
 
 #include "base/safe_alloc.h"
+#include "platform/logical_cpu.h"
 #include "util/spawn.h"
 
 #include <ctype.h>
@@ -209,7 +210,12 @@ static int dlrg_make(const char *wt, const char *target, char *transcript,
                      size_t transcript_cap, size_t *used, char *why,
                      size_t why_cap)
 {
-    const char *argv[] = { "make", "-s", "-C", wt, target, NULL };
+    char jobs[16];
+    if (!platform_build_jobs_arg(jobs)) {
+        (void)snprintf(why, why_cap, "landing build job count unavailable");
+        return -1;
+    }
+    const char *argv[] = { "make", jobs, "-s", "-C", wt, target, NULL };
     char *buf;
     int rc;
     bool timed_out = false;
