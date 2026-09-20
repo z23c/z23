@@ -1641,10 +1641,12 @@ _test_next:;
     return failures;
 }
 
-static int test_dev_land_postpush_observation_missing(void)
+static int test_dev_land_postpush_observation_missing(bool lost_ack)
 {
     int failures = 0;
-    TEST("land: successful push awaits independent observation and reconciles once") {
+    TEST(lost_ack
+        ? "land: final-attempt lost acknowledgement reconciles without duplicate push"
+        : "land: successful push awaits independent observation and reconciles once") {
         struct dlx_rig rig;
         struct dlx_call c;
         char before[64], after[64], upload_pack[700], hook[700], marker[700];
@@ -1665,6 +1667,18 @@ static int test_dev_land_postpush_observation_missing(void)
         ASSERT(dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
         dlx_end(&c);
+        if (lost_ack) {
+            char land[1200], path[1400], wire[8192];
+            size_t length;
+            dlx_landdir(land, sizeof(land));
+            (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+            ASSERT(dlx_slurp(path, wire, sizeof(wire), &length));
+            wire[length] = '\0';
+            char *attempt = strstr(wire, "\"attempt\":1");
+            ASSERT(attempt != NULL);
+            attempt[10] = '3';
+            ASSERT(dlx_write(path, wire));
+        }
         (void)snprintf(hook, sizeof(hook), "%s/hooks/post-receive", rig.bare);
         (void)snprintf(marker, sizeof(marker), "%s/hooks/received", rig.bare);
         ASSERT(dlx_write(hook,
@@ -1679,7 +1693,11 @@ static int test_dev_land_postpush_observation_missing(void)
         ASSERT(chmod(upload_pack, 0700) == 0);
         (void)snprintf(receive_pack, sizeof(receive_pack), "%s.receive-pack", rig.bare);
         (void)snprintf(invocations, sizeof(invocations), "%s/hooks/receive-invocations", rig.bare);
-        ASSERT(dlx_write(receive_pack,
+        ASSERT(dlx_write(receive_pack, lost_ack ?
+            "#!/bin/sh\n"
+            "printf 'invoked\\n' >> \"$1/hooks/receive-invocations\" || exit 73\n"
+            "git-receive-pack \"$@\" || exit $?\n"
+            "exit 75\n" :
             "#!/bin/sh\n"
             "printf 'invoked\\n' >> \"$1/hooks/receive-invocations\" || exit 73\n"
             "exec git-receive-pack \"$@\"\n"));
@@ -1719,14 +1737,14 @@ static int test_dev_land_postpush_observation_missing(void)
         ASSERT_STR_EQ(json_get_str(json_get(row, "phase")), "prove");
         ASSERT_STR_EQ(json_get_str(json_get(row, "tip")), rig.tip);
         ASSERT_STR_EQ(json_get_str(json_get(row, "base")), before);
-        ASSERT_EQ(json_get_int(json_get(row, "attempt")), 1);
+        ASSERT_EQ(json_get_int(json_get(row, "attempt")), lost_ack ? 3 : 1);
         dlx_end(&c);
         ASSERT(dlx_git(rig.clone, restore) == 0);
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
-        ASSERT_EQ(dlx_int(&c, "attempt"), 1);
+        ASSERT_EQ(dlx_int(&c, "attempt"), lost_ack ? 3 : 1);
         dlx_end(&c);
         ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
         ASSERT_EQ(received_len, 9);
@@ -3395,7 +3413,8 @@ int test_dev_land(void)
         PASS();
     }
 
-    failures += test_dev_land_postpush_observation_missing();
+    failures += test_dev_land_postpush_observation_missing(false);
+    failures += test_dev_land_postpush_observation_missing(true);
     failures += test_dev_land_postpush_result_unconfirmed();
     failures += test_dev_land_expected_base_race();
     failures += test_dev_land_nonfastforward_client_guard();

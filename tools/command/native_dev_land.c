@@ -4221,13 +4221,18 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
          * .cache/zcl-dev-proof/receipts/<local>-<base>.receipt, so the hook
          * admits in seconds instead of re-running the proof. */
         if (!dl_push_proven_pair(d, row, buf, sizeof(buf))) {
+            /* A failed client acknowledgement does not prove rejection.
+             * Reconcile before consuming the final attempt or discarding
+             * the durable request. An unavailable remote leaves it intact. */
+            dl_log(row, buf);
+            dl_log(row, "\n");
+            if (dl_reconcile_landing(d, row, observed_main, true, reply))
+                return;
             row->attempt++;
             (void)snprintf(row->phase, sizeof(row->phase), "rebase");
             (void)snprintf(row->detail, sizeof(row->detail), "%s",
                            "the fast-forward push was refused; rebasing");
             dl_log_path(d, row);
-            dl_log(row, buf);
-            dl_log(row, "\n");
             dl_log(row, row->detail);
             dl_log(row, "\n");
             if (row->attempt > DL_ATTEMPT_MAX) {
