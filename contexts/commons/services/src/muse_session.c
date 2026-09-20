@@ -656,12 +656,16 @@ static bool ms_start_set_model(struct muse_session *s,
         ms_fail(s, "internal", false, "command id unavailable");
         return false;
     }
-    struct json_value mp = {0};
+    struct json_value mp = {0}, selection = {0};
     json_init(&mp);
+    json_init(&selection);
     json_set_object(&mp);
-    bool ok = json_push_kv_str(&mp, "sessionId", session_id) &&
-        json_push_kv_str(&mp, "modelId", model) &&
+    json_set_object(&selection);
+    bool ok = json_push_kv_str(&selection, "modelId", model) &&
+        json_push_kv_str(&mp, "sessionId", session_id) &&
+        json_push_kv(&mp, "model", &selection) &&
         json_push_kv_str(&mp, "commandId", mc);
+    json_free(&selection);
     char *mtext = ms_render_params(s, &mp, ok);
     if (!mtext) return false;
     int mid = s->next_id++;

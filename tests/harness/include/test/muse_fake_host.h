@@ -9,6 +9,7 @@
 #define ZCL_TEST_MUSE_FAKE_HOST_H
 
 #include "services/muse_session.h"
+#include "json/json.h"
 #if !defined(_WIN32)
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -151,6 +152,34 @@ static void fake_error(FILE *out, long id, int code, const char *kind,
         "\"message\":\"%s\",\"data\":{\"kind\":\"%s\",\"retryable\":%s}}}",
         id, code, message, kind, retryable ? "true" : "false");
     fake_send(out, frame);
+}
+
+/* Muse 1.3 exports a required model object, not a top-level modelId. */
+static void fake_set_model(FILE *out, const char *line)
+{
+    struct json_value doc = {0};
+    bool parsed = json_read(&doc, line, strlen(line));
+    const struct json_value *params = parsed ? json_get(&doc, "params") : NULL;
+    const struct json_value *model = json_get(params, "model");
+    const struct json_value *id = json_get(model, "modelId");
+    bool valid = model && model->type == JSON_OBJ && id &&
+                 id->type == JSON_STR && json_get_str(id)[0];
+    if (!valid) {
+        fake_note("model-shape-invalid%s", "", "");
+        fake_error(out, fake_id(line), -32602, "invalidParams", false,
+                    "missing model object with modelId");
+    } else {
+        const char *selected = json_get_str(id);
+        fake_note("model:%s", selected, "");
+        if (json_get(model, "providerId") || json_get(model, "profileId"))
+            fake_note("model-route-override%s", "", "");
+        if (strcmp(selected, "m-rejected") == 0)
+            fake_error(out, fake_id(line), -32602, "invalidParams", false,
+                        "model selection refused");
+        else
+            fake_result(out, fake_id(line), "{\"status\":\"accepted\"}");
+    }
+    json_free(&doc);
 }
 
 /* Reads lines until `method` arrives; answers nothing meanwhile. */
@@ -520,11 +549,7 @@ static void fake_main(enum fake_mode mode)
             fake_result(out, fake_id(line),
                 "{\"status\":\"admitted\"}");
         } else if (strstr(line, "\"method\":\"session/setModel\"")) {
-            char mid[128] = {0};
-            fake_str(line, "modelId", mid, sizeof(mid));
-            fake_note("model:%s", mid, "");
-            fake_result(out, fake_id(line),
-                "{\"status\":\"selected\"}");
+            fake_set_model(out, line);
         } else if (strstr(line, "\"method\":\"usage/read\"")) {
             fake_result(out, fake_id(line), "{}");
         }

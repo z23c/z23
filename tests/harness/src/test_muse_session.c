@@ -107,6 +107,43 @@ static int ms_failures_journey(void)
     return failures;
 }
 
+static int ms_failures_model_selection(bool reject)
+{
+    int failures = 0;
+    int ev[2];
+    if (pipe(ev) != 0) return 1;
+    s_evidence_fd = ev[1];
+    struct muse_session_limits limits = {.open_timeout_ms = 10000};
+    struct fake_host host = {0};
+    if (!spawn_fake(FAKE_JOURNEY, ev[0], &limits, &host)) {
+        close(ev[0]); close(ev[1]); s_evidence_fd = -1;
+        return 1;
+    }
+    struct muse_session_policy policy = {
+        .model = reject ? "m-rejected" : "m-selected",
+    };
+    char command[MUSE_COMMAND_ID_MAX], sid[MUSE_SESSION_ID_MAX];
+    char provider[64], model[128];
+    bool id_ok = muse_session_command_id(command);
+    int rc = id_ok ? muse_session_start(host.session, command,
+        "/z23-muse-test/ws", &policy, sid, provider, model) : -1;
+    MS_CHECK("explicit model uses installed selection schema",
+        id_ok && (reject ? rc != 0 : rc == 0));
+    close_fake(&host);
+    close(ev[1]); s_evidence_fd = -1;
+    char *evidence = read_evidence(ev[0]);
+    close(ev[0]);
+    MS_CHECK("model selection sent exactly once with requested identity",
+        evidence_count(evidence, "model:") == 1 &&
+        evidence_has(evidence, reject ? "model:m-rejected" : "model:m-selected"));
+    MS_CHECK("selection never substitutes a provider or profile",
+        !evidence_has(evidence, "model-route-override"));
+    MS_CHECK("selection test starts no turn or fallback",
+        !evidence_has(evidence, "turn-cmd:"));
+    free(evidence);
+    return failures;
+}
+
 static int ms_failures_retry(void)
 {
     int failures = 0;
@@ -510,6 +547,8 @@ int test_muse_session(void)
 {
     int failures = 0;
     failures += ms_failures_journey();
+    failures += ms_failures_model_selection(false);
+    failures += ms_failures_model_selection(true);
     failures += ms_failures_retry();
     failures += ms_failures_refusals();
     failures += ms_failures_not_loaded();
