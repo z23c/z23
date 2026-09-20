@@ -221,6 +221,7 @@ spawn_gateway() {
     # The issuer is the front, exactly as a public deploy configures it, so
     # discovery and the 401 challenge name the URL a client actually used.
     FLEET_GW_ISSUER="https://127.0.0.1:$FRONT_PORT" \
+    FLEET_GW_REDIRECT_ALLOW="https://client.test/cb https://client.example/api/oauth/auth_callback" \
     FLEET_GW_BIND=127.0.0.1 FLEET_GW_PORT="${1:-0}" FLEET_GW_NODE="$NODE_BIN" \
         FLEET_GW_OWNER_KEY="$OWNER_KEY" XDG_STATE_HOME="$ST" \
         "$GW_BIN" >"$GW_READY" 2>"$GW_ERR" &
@@ -328,13 +329,21 @@ CREG="$(curl -sk -m 20 -X POST "$F/oauth/register" -H 'Content-Type: application
 CCID="$(printf '%s' "$CREG" | grep -o '"client_id":"[0-9a-f]*"' | head -n 1 | cut -d'"' -f4)"
 have "authorize form (hosted-client callback)" 'auth_callback' \
     "$F/oauth/authorize?response_type=code&client_id=$CCID&redirect_uri=https%3A%2F%2Fclient.example%2Fapi%2Foauth%2Fauth_callback&scope=brief+send+evidence&state=AbC-123_x&code_challenge=$CHALLENGE&code_challenge_method=S256&resource=$(printf '%s' "$F/steer" | sed 's|:|%3A|g; s|/|%2F|g')"
+AUTH_FORM="response_type=code&client_id=$CID&redirect_uri=https://client.test/cb&scope=brief%20send&state=xyz&code_challenge=$CHALLENGE&code_challenge_method=S256"
+fresh_csrf() {
+    curl -sk -m 20 "$F/oauth/authorize?$AUTH_FORM" |
+        sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p'
+}
+CSRF="$(fresh_csrf)"
+[ -n "$CSRF" ] || bad "approval form supplies a CSRF nonce"
 code_is "authorize wrong owner key is 403" 403 -X POST "$F/oauth/authorize" \
-    --data "response_type=code&client_id=$CID&redirect_uri=https://client.test/cb&scope=brief%20send&state=xyz&code_challenge=$CHALLENGE&code_challenge_method=S256&owner_key=wrong&approve=1"
+    -H "Origin: $F" --data "$AUTH_FORM&csrf=$CSRF&owner_key=wrong&approve=1"
 
 if [ "$SKIP_NODE" -eq 0 ]; then
     # Full OAuth: approve (owner key) -> code -> token (RFC 7636 vector).
+    CSRF="$(fresh_csrf)"
     LOC="$(curl -sk -m 20 -o /dev/null -D - -X POST "$F/oauth/authorize" \
-        --data "response_type=code&client_id=$CID&redirect_uri=https://client.test/cb&scope=brief%20send&state=xyz&code_challenge=$CHALLENGE&code_challenge_method=S256&owner_key=$OWNER_KEY&approve=1" |
+        -H "Origin: $F" --data "$AUTH_FORM&csrf=$CSRF&owner_key=$OWNER_KEY&approve=1" |
         grep -i '^location:' | tr -d '\r' || true)"
     CODE="$(printf '%s' "$LOC" | grep -o 'code=[0-9a-f]*' | cut -d= -f2)"
     [ "${#CODE}" -ge 16 ] || bad "authorize code (got [$LOC])"
@@ -344,6 +353,11 @@ if [ "$SKIP_NODE" -eq 0 ]; then
         --data "grant_type=authorization_code&code=$CODE&redirect_uri=https://client.test/cb&client_id=$CID&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" || true)"
     TOKEN="$(printf '%s' "$TOK" | grep -o '"access_token":"[0-9a-f]*"' | head -n 1 | cut -d'"' -f4)"
     if [ "${#TOKEN}" -ge 16 ]; then ok "token exchange (PKCE S256)"; else bad "token exchange (got [$TOK])"; fi
+    if [ "${#TOKEN}" -ge 16 ] && ! printf '%s' "$TOK" | grep -q '"expires_in"'; then
+        ok "OAuth token has no expiry"
+    else
+        bad "OAuth token has no expiry"
+    fi
     have "token single-use" 'invalid_grant' -X POST "$F/oauth/token" \
         --data "grant_type=authorization_code&code=$CODE&redirect_uri=https://client.test/cb&client_id=$CID&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
     have "Bearer token is a scoped grant" '"isError":false' -H "Authorization: Bearer $TOKEN" \
