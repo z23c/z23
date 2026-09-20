@@ -82,6 +82,7 @@
 #include "util/file_io.h"
 #include "util/spawn.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -439,8 +440,13 @@ static bool dvc_ledger_load(const char *path, struct dvc_ledger *lg,
 {
     memset(lg, 0, sizeof(*lg));
     FILE *probe = fopen(path, "rb");
-    if (!probe)
-        return true;
+    if (!probe) {
+        if (errno == ENOENT)
+            return true;
+        dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "ledger",
+                 "the claim ledger could not be opened for reading", path);
+        return false;
+    }
     (void)fclose(probe);
     size_t len = 0;
     if (!zcl_read_whole_file_text(path, DVC_LEDGER_MAX_BYTES, &lg->text, &len,

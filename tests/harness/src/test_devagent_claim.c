@@ -25,6 +25,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define DVX_PATH "dev.agent.claim"
 
@@ -262,10 +265,44 @@ _test_next:;
     return failures;
 }
 
+static int dvx_unreadable_tests(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("claim: a ledger open error refuses claim and release without rewriting") {
+        char repo[512], ledger[1024];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "unreadable");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof(ledger),
+                       "%s/.git/z23-agent-claims.jsonl", repo);
+        /* ELOOP is deterministic even under root; EACCES needs a normal uid. */
+        const char *target = "z23-agent-claims.jsonl";
+        ASSERT_EQ(symlink(target, ledger), 0);
+        static const char *const files[] = {"engine/a.c", NULL};
+        for (int release = 0; release < 2; release++) {
+            struct dvx_call c;
+            dvx_claim(&c, repo, "unreadable-probe", files, release != 0);
+            ASSERT(dvx_run(&c));
+            ASSERT(!dvx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "CLAIM_LEDGER_UNREADABLE");
+            dvx_end(&c);
+            char after[64];
+            ssize_t n = readlink(ledger, after, sizeof(after));
+            ASSERT_EQ(n, (ssize_t)strlen(target));
+            ASSERT(memcmp(after, target, strlen(target)) == 0);
+        }
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+#endif
+    return failures;
+}
+
 int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
-    int failures = dvx_metadata_tests();
+    int failures = dvx_metadata_tests() + dvx_unreadable_tests();
     char one[512], two[600];
     test_make_tmpdir(one, sizeof(one), "devagent_claim", "repo");
     (void)snprintf(two, sizeof(two), "%s-lane", one);
