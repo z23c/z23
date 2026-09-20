@@ -79,6 +79,8 @@
 
 #include "json/json.h"
 #include "platform/clock.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
 #include "util/file_io.h"
 #include "util/spawn.h"
 
@@ -475,8 +477,31 @@ static bool dvc_line_is_ours(const char *line, const char *toplevel)
            strcmp(wt, toplevel) == 0;
 }
 
-/* Whole-file rewrite: every line not owned by this worktree, then
- * `newline` when one is given. */
+static bool dvc_stage_open(const char *path, char *tmp, size_t cap,
+                           struct platform_private_file *file)
+{
+    uint64_t nonce = 0;
+    if (!rng_fill((uint8_t *)&nonce, sizeof(nonce)))
+        return false;
+    int n = snprintf(tmp, cap, "%s.claim-%016llx", path,
+                      (unsigned long long)nonce);
+    return n > 0 && (size_t)n < cap &&
+           platform_private_file_create(tmp, file);
+}
+
+static bool dvc_stage_line(struct platform_private_file *file,
+                           const char *line, uint64_t *offset)
+{
+    size_t len = strlen(line);
+    if (!platform_private_file_write_at(file, line, len, *offset) ||
+        !platform_private_file_write_at(file, "\n", 1, *offset + len))
+        return false;
+    *offset += len + 1;
+    return true;
+}
+
+/* Stage the whole replacement beside the ledger. Failed writes never
+ * truncate the previous claims; only the complete staged file replaces it. */
 static bool dvc_ledger_write(const char *path, const struct dvc_ledger *lg,
                              const char *toplevel, const char *newline,
                              size_t *kept, size_t *released,
@@ -484,20 +509,27 @@ static bool dvc_ledger_write(const char *path, const struct dvc_ledger *lg,
 {
     *kept = 0;
     *released = 0;
-    FILE *f = fopen(path, "wb");
-    bool ok = f != NULL;
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    char tmp[PATH_MAX + 64];
+    bool created = dvc_stage_open(path, tmp, sizeof(tmp), &file);
+    bool ok = created;
+    uint64_t offset = 0;
     for (size_t i = 0; ok && i < lg->n; i++) {
         if (dvc_line_is_ours(lg->lines[i], toplevel)) {
             (*released)++;
             continue;
         }
-        ok = fprintf(f, "%s\n", lg->lines[i]) >= 0;
+        ok = dvc_stage_line(&file, lg->lines[i], &offset);
         (*kept)++;
     }
     if (ok && newline)
-        ok = fprintf(f, "%s\n", newline) >= 0;
-    if (f && fclose(f) != 0)
-        ok = false;
+        ok = dvc_stage_line(&file, newline, &offset);
+    if (ok)
+        ok = platform_private_file_replace(&file, tmp, path);
+    if (!ok && created)
+        (void)platform_private_file_retire(&file, tmp);
+    platform_private_file_close(&file);
     if (!ok) {
         char why[PATH_MAX + 32];
         (void)snprintf(why, sizeof(why), "cannot write %s", path);

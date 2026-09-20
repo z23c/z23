@@ -26,6 +26,9 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -265,6 +268,51 @@ _test_next:;
     return failures;
 }
 
+static int dvx_write_failure_tests(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("claim: a failed write preserves the previous ledger bytes") {
+        char repo[512], ledger[1024];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "write-failure");
+        ASSERT(dvx_fixture(repo));
+        const char *row = "{\"worktree\":\"foreign\",\"story\":\"keep\","
+                          "\"files\":[\"engine/a.c\"]}\n";
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        (void)snprintf(ledger, sizeof(ledger),
+                       "%s/.git/z23-agent-claims.jsonl", repo);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            struct rlimit limit = {0, 0};
+            if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR ||
+                setrlimit(RLIMIT_FSIZE, &limit) != 0)
+                _exit(2);
+            static const char *const files[] = {"engine/b.c", NULL};
+            struct dvx_call c;
+            dvx_claim(&c, repo, "failed-write", files, false);
+            bool refused = dvx_run(&c) && !dvx_ok(&c);
+            dvx_end(&c);
+            _exit(refused ? 0 : 3);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(child, &status, 0), child);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        char *after = NULL;
+        size_t len = 0;
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &after, &len,
+                                        "claim_write_failure"));
+        ASSERT_EQ(len, strlen(row));
+        ASSERT_STR_EQ(after, row);
+        free(after);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+#endif
+    return failures;
+}
+
 static int dvx_unreadable_tests(void)
 {
     int failures = 0;
@@ -302,7 +350,8 @@ _test_next:;
 int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
-    int failures = dvx_metadata_tests() + dvx_unreadable_tests();
+    int failures = dvx_metadata_tests() + dvx_unreadable_tests() +
+                   dvx_write_failure_tests();
     char one[512], two[600];
     test_make_tmpdir(one, sizeof(one), "devagent_claim", "repo");
     (void)snprintf(two, sizeof(two), "%s-lane", one);
