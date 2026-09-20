@@ -2,13 +2,11 @@
  *
  * ACCEPTANCE BAR for dev.land (tools/command/native_dev_land.c).
  *
- * THE PROPERTY THIS GROUP EXISTS FOR: nothing waits. Every case below runs
- * against an isolated XDG_STATE_HOME and a real git rig — a bare "origin"
- * plus a clone — so it proves the queue's behavior rather than the state of
- * this machine. The exact proof is the ONE thing replaced, by
- * ZCL_LAND_PROOF_STUB: a case that ran a real 15-minute proof would be a
- * test of the proof, not of the queue. Every rebase, push, row, and lock
- * exercised here is the production path.
+ * Queue cases use isolated state and real git rigs, with the exact proof
+ * replaced by ZCL_LAND_PROOF_STUB. Rebase, push, rows and locks use the
+ * production paths. Watcher-admission cases separately use inert scheduler
+ * fixtures to exercise structured arguments, refusal and a bounded timeout;
+ * they cannot establish real watcher or proof readiness.
  *
  * The handler is called DIRECTLY, which is exactly what the CLI does after
  * input validation — and the input is additionally validated through the
@@ -36,6 +34,10 @@
 bool zcl_native_dev_land_test_idle_note(int64_t age_s, char *detail,
                                         size_t cap);
 int64_t zcl_native_dev_land_test_idle_bound(void);
+#if defined(__linux__)
+void zcl_native_dev_land_test_watcher_launch(const char *wt,
+    const char *scheduler, char *detail, size_t cap);
+#endif
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
 
@@ -46,6 +48,7 @@ int64_t zcl_native_dev_land_test_idle_bound(void);
 #if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -2388,9 +2391,78 @@ static int test_dev_land_source_binding(void)
     return failures;
 }
 
+static int test_dev_land_watcher_admission(void)
+{
+    int failures = 0;
+#if defined(__linux__)
+    TEST("land: scheduler refusal and successful exit never invent watcher readiness") {
+        char root[512], scheduler[600], detail[256];
+        test_make_tmpdir(root, sizeof(root), "dev_land", "watcher_admission");
+        (void)snprintf(scheduler, sizeof(scheduler), "%s/scheduler", root);
+        ASSERT(dlx_write(scheduler,
+            "#!/bin/sh\n"
+            "test \"$1\" = --wait || exit 64\n"
+            "test \"$2\" = --project || exit 64\n"
+            "test \"$3\" = z23 || exit 64\n"
+            "test \"$5\" = dev || exit 64\n"
+            "test \"$6\" = loop || exit 64\n"
+            "test \"$7\" = ensure || exit 64\n"
+            "printf '%s' \"$8\" > \"$0.input\"\n"
+            "exit 75\n"));
+        ASSERT(chmod(scheduler, 0700) == 0);
+        zcl_native_dev_land_test_watcher_launch(root, scheduler, detail,
+                                                sizeof(detail));
+        ASSERT(strstr(detail, "exit=75") != NULL);
+        ASSERT(strstr(detail, "readiness_unconfirmed") != NULL);
+        char input_path[640], input_text[1200] = {0};
+        size_t input_len = 0;
+        (void)snprintf(input_path, sizeof(input_path), "%s.input", scheduler);
+        ASSERT(dlx_slurp(input_path, input_text, sizeof(input_text) - 1,
+                         &input_len));
+        ASSERT(input_len > 8 && memcmp(input_text, "--input=", 8) == 0);
+        struct json_value routed;
+        json_init(&routed);
+        ASSERT(json_read(&routed, input_text + 8, input_len - 8));
+        const char *routed_root = json_get_str(json_get(&routed, "root"));
+        const char *routed_mode = json_get_str(json_get(&routed, "mode"));
+        bool routed_ok = routed.num_children == 2 && routed_root && routed_mode &&
+            strcmp(routed_root, root) == 0 && strcmp(routed_mode, "verify") == 0;
+        json_free(&routed);
+        ASSERT(routed_ok);
+        ASSERT(dlx_write(scheduler, "#!/bin/sh\nexit 0\n"));
+        zcl_native_dev_land_test_watcher_launch(root, scheduler, detail,
+                                                sizeof(detail));
+        ASSERT(strstr(detail, "exit=0") != NULL);
+        ASSERT(strstr(detail, "readiness_unconfirmed") != NULL);
+        ASSERT(dlx_write(scheduler,
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec sleep 30\n"));
+        int64_t started = platform_time_monotonic_ms();
+        zcl_native_dev_land_test_watcher_launch(root, scheduler, detail,
+                                                sizeof(detail));
+        int64_t elapsed = platform_time_monotonic_ms() - started;
+        ASSERT(elapsed >= 9000 && elapsed < 20000);
+        ASSERT(strstr(detail, "readiness_unconfirmed") != NULL);
+        char pid_path[640], pid_text[32] = {0};
+        size_t pid_len = 0;
+        (void)snprintf(pid_path, sizeof(pid_path), "%s.pid", scheduler);
+        ASSERT(dlx_slurp(pid_path, pid_text, sizeof(pid_text) - 1, &pid_len));
+        char *end = NULL;
+        long child = strtol(pid_text, &end, 10);
+        ASSERT(pid_len > 0 && child > 1 && end && (*end == '\n' || *end == '\0'));
+        errno = 0;
+        ASSERT(kill((pid_t)child, 0) == -1 && errno == ESRCH);
+        printf("watcher admission: timeout_ms=%lld child_reaped=yes\n",
+               (long long)elapsed);
+        PASS();
+    } _test_next:;
+#endif
+    return failures;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
+    failures += test_dev_land_watcher_admission();
     failures += test_dev_land_exact_tree();
     failures += test_dev_land_source_binding();
 #if !defined(_WIN32)

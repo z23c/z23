@@ -68,8 +68,9 @@
  * (the tip is already an ancestor of origin/main) and records it as landed
  * without re-proving, rather than pushing it a second time.
  *
- * PROCESS RULE. `git` and `make` (lint-fast, install-hooks) are the only
- * programs this leaf runs, always through util/spawn.h's
+ * PROCESS RULE. `git`, `make` (lint-fast, install-hooks), and the existing
+ * Linux `devbuild` admission wrapper for watcher creation run through
+ * util/spawn.h's
  * zcl_spawn_capture(); popen(), system(), and a shell command string are
  * forbidden and gated. The exact proof is requested through the existing
  * dev.proof machinery (tools/dev/dev_proof.c), never re-implemented. The
@@ -104,13 +105,14 @@
 #include "platform/file_clone.h"
 #include "platform/file_metadata.h"
 #include "platform/logical_cpu.h"
+#include "platform/os_proc.h"
 #include "platform/ram_scratch.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
 
-#ifdef ZCL_DEV_BUILD
 #include "command/native_dev_loop_command.h"
+#ifdef ZCL_DEV_BUILD
 #include "dev_proof.h"
 #endif
 
@@ -1325,12 +1327,79 @@ static const char *dl_stub(void)
 #endif
 }
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* A one-shot service owns its cgroup only until the step returns. Launch
+ * the existing watcher through host admission so its verification lifetime
+ * belongs to the development scope, not that completed service beat.
+ * Preparation stays in its original containment. A bounded admission wait
+ * or unknown readiness leaves the same exact proof request pending. */
+#if defined(__linux__)
+static void dl_watcher_launch_scheduled(const char *wt, const char *scheduler,
+    bool (*is_ready)(const char *), char *detail, size_t cap)
+{
+    char image[PATH_MAX], input[PATH_MAX * 2 + 128];
+    char output[4096];
+    if (!os_proc_exe_path(image, sizeof(image))) {
+        (void)snprintf(detail, cap, "proof_watcher_admission_unavailable: paths");
+        return;
+    }
+    struct json_value request;
+    json_init(&request); json_set_object(&request);
+    bool ok = json_push_kv_str(&request, "root", wt) &&
+        json_push_kv_str(&request, "mode", "verify");
+    size_t len = ok ? json_write(&request, NULL, 0) : 0;
+    ok = ok && len > 0 && len < sizeof(input) - 8;
+    if (ok) {
+        memcpy(input, "--input=", 8);
+        ok = json_write(&request, input + 8, sizeof(input) - 8) == len;
+    }
+    json_free(&request);
+    if (!ok) {
+        (void)snprintf(detail, cap, "proof_watcher_admission_unavailable: input");
+        return;
+    }
+    const char *argv[] = { scheduler, "--wait", "--project", "z23", image,
+        "dev", "loop", "ensure", input, NULL };
+    int rc = zcl_spawn_capture(argv, output, sizeof(output), 10000);
+    /* Exit success alone is not evidence that the singleton is ready.
+     * Conversely, an observer timeout does not prove that launch failed. */
+    if (is_ready && is_ready(wt))
+        (void)snprintf(detail, cap, "resident_proof_watcher_ready");
+    else
+        (void)snprintf(detail, cap,
+            "proof_watcher_admission_deferred: exit=%d; readiness_unconfirmed", rc);
+}
+#if defined(ZCL_TESTING)
+void zcl_native_dev_land_test_watcher_launch(const char *wt,
+    const char *scheduler, char *detail, size_t cap)
+{
+    dl_watcher_launch_scheduled(wt, scheduler, NULL, detail, cap);
+}
+#endif
+#if defined(ZCL_DEV_BUILD)
+static void dl_watcher_kick_scheduled(const char *wt, char *detail, size_t cap)
+{
+    char scheduler[PATH_MAX];
+    const char *home = getenv("HOME");
+    int n = home ? snprintf(scheduler, sizeof(scheduler), "%s/bin/devbuild",
+                            home) : -1;
+    if (n <= 0 || (size_t)n >= sizeof(scheduler)) {
+        (void)snprintf(detail, cap, "proof_watcher_admission_unavailable: paths");
+        return;
+    }
+    dl_watcher_launch_scheduled(wt, scheduler,
+        zcl_native_dev_loop_proof_queue_ready, detail, cap);
+}
+#endif
+#endif
+#endif
+
 #ifdef ZCL_DEV_BUILD
 /* WHY. A proof request is only a file; the resident watcher consumes it.
  * Landing starts that watcher in verify mode, or names why it is absent,
  * rather than sitting in proving with nobody draining the queue.
  *
- * This reaches dev.loop's internal async-start entry point THROUGH a local
+ * The non-Linux path reaches dev.loop's internal async-start entry point THROUGH a local
  * function-pointer variable, never by calling it by name, for the same
  * reason native_vault_command.c's vault_dispatch() calls target->handler(...)
  * instead of naming the routed leaf's handler directly: a literal
@@ -1351,6 +1420,13 @@ static const char *dl_stub(void)
  * isn't one — it is an internal, unregistered wrapper around the real
  * dev.loop.ensure handler, used only by in-process callers that want the
  * non-blocking, wait_ready=false variant). */
+#if defined(__linux__)
+static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
+{
+    if (wt && wt[0] && !zcl_native_dev_loop_proof_queue_ready(wt))
+        dl_watcher_kick_scheduled(wt, detail, cap);
+}
+#else
 static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
 {
     struct json_value kick_input;
@@ -1394,6 +1470,7 @@ static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
     zcl_command_reply_free(&reply);
     json_free(&kick_input);
 }
+#endif
 #endif
 
 static enum dl_proof dl_proof_request(const char *wt, const char *local,
@@ -2312,8 +2389,8 @@ static bool dl_regen_stub_write(const char *wt, const char *rel)
 
 /* One make target in the landing worktree — a generator or a gate. Same
  * spawn seam, same transcript handling and same actionable-line triage as
- * dl_lint_fast() below: `make` and `git` are the only two programs this
- * file ever launches, and this adds no third. `line` receives the first
+ * dl_lint_fast() below: generation uses the same `make` execution path.
+ * `line` receives the first
  * line a person can act on when the target failed. */
 static int dl_regen_make(const struct dl_dirs *d, struct dl_row *row,
                          const char *target, char *line, size_t line_cap)
