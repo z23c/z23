@@ -3347,6 +3347,48 @@ int test_dev_land(void)
         PASS();
     }
 
+    TEST("land: a lint timing-table row never becomes a proof failure detail") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[64], after[64], logpath[4200];
+        dlx_isolate("timingrow");
+        ASSERT(dlx_rig_make(&rig, "timingrow_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        /* Plant the lint slowest-gates summary row in the attempt log: it
+         * names gates with no PASS prefix, so a gate with "fail" in its
+         * name matches the triage needles. The recorded outcome must
+         * still name the proof's own typed failure, never that timing
+         * row. */
+        char landdir[1200];
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(logpath, sizeof(logpath), "%s/logs/land-1-a1.log", landdir);
+        ASSERT(dlx_write(logpath,
+                         "  slowest gates:\n    5977 ms  check-pipefail-status-pipe\n"));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "lint") == 0);
+        ASSERT_STR_EQ(dlx_str(&c, "detail"), "proof stub: fail");
+        dlx_end(&c);
+        /* A red proof pushes nothing. */
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT(strcmp(after, before) == 0);
+        dlx_restore();
+        PASS();
+    }
+
     TEST("land: a base that moved while proving re-rebases, never lands") {
         struct dlx_rig rig;
         struct dlx_call c;

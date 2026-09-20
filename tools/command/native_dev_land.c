@@ -4332,15 +4332,11 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension), "%s",
                        dimension[0] ? dimension : "proof");
-        {
-            char *log = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.logread");
-            if (log) {
-                if (dl_read_file(row->log_path, log, DL_LOG_CAP, NULL))
-                    dl_first_actionable(log, row->detail,
-                                        sizeof(row->detail));
-                free(log);
-            }
-        }
+        /* The proof's own typed failure names the first failing phase; a
+         * log-text scan of this attempt's transcript can only replace it
+         * with an unrelated row — for example a lint timing-table entry
+         * for a passing gate whose name contains "fail". The transcript
+         * stays reachable through log_path for the human dive. */
         if (!row->detail[0])
             (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
         if (dl_commit_or_report(d, row, true, reply, "failed"))
