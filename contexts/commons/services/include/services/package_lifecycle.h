@@ -156,6 +156,24 @@ struct package_lifecycle_programs {
                [VCS_PACKAGE_BUILD_PATH_MAX + 1u];
 };
 
+/* Where a package keeps the USER's own data: <datadir>/zcode/data/<publisher>/
+ * <package>, the one path keyed on the package's identity rather than on any
+ * root. Install trees are content addressed, so an update lands a NEW tree
+ * and a rollback points back at an OLD one; data written inside either is
+ * stranded by the update or reverted by the rollback, and it would break the
+ * install tree's own re-hash against its build receipt besides. This
+ * directory is created by every activation and is removed by none of them,
+ * so it is the same directory across every version a person ever runs.
+ *
+ * Resolving a path is not permission to read or write it: this reports where
+ * the data lives, and grants nothing. The directory exists once the package
+ * has been activated at least once; the path is reported either way. */
+#define PACKAGE_LIFECYCLE_DATA_DIR_MAX PACKAGE_LIFECYCLE_INSTALL_DIR_MAX
+
+struct zcl_result package_lifecycle_data_dir(const char *datadir,
+                                             const char *name, char *out,
+                                             size_t cap);
+
 /* Read-only projection of ONE installed root's receipt: the bin/ outputs it
  * committed, in the receipt's own canonical order. Nothing is built,
  * installed, activated or executed, and no package byte is loaded into this

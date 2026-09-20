@@ -774,6 +774,22 @@ struct zcl_result package_lifecycle_rollback(
     return ZCL_OK;
 }
 
+struct zcl_result package_lifecycle_data_dir(const char *datadir,
+                                             const char *name, char *out,
+                                             size_t cap)
+{
+    if (!name || !out || cap == 0)
+        return ZCL_ERR(-1, "null argument reading a package data directory");
+    out[0] = '\0';
+    struct pkgl_ctx ctx;
+    ZCL_CHECK(pkgl_ctx_open(&ctx, datadir));
+    struct zcl_result r = pkgl_data_dir(&ctx, name, out, cap);
+    pkgl_ctx_close(&ctx);
+    if (!r.ok)
+        out[0] = '\0';
+    return r;
+}
+
 struct zcl_result package_lifecycle_active(
     const char *datadir, const char *name, uint8_t out_root[32],
     size_t *generation_count_out, bool *present_out)

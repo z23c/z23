@@ -134,3 +134,12 @@ deploy/devfleet/*.jsonl
 # so being in the pool can never look like a change.
 .eu-warm
 .eu-lock
+
+# Whole additional lane checkouts parked at the root by parallel workers
+# (same class as .claude/worktrees/ above). Git reports an untracked nested
+# checkout as one bare `name/` entry, which the build's source-identity
+# capture cannot hash as a file and refuses. Ignoring them routes them
+# through the scanner's designed ignored-directory prune; their contents are
+# never compiler inputs.
+w-ed/
+w-gui/

@@ -635,6 +635,22 @@ static struct zcl_result pkgl_active_path(const struct pkgl_ctx *ctx,
     return pkgl_join(ctx, rel, out, cap);
 }
 
+struct zcl_result pkgl_data_dir(const struct pkgl_ctx *ctx, const char *name,
+                                char *out, size_t cap)
+{
+    if (!ctx || !name || !out)
+        return ZCL_ERR(-1, "null argument resolving a package data directory");
+    char publisher[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
+    char package[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
+    if (!vcs_package_name_split(name, publisher, package))
+        return ZCL_ERR(-1, "'%s' is not a publisher/package name", name);
+    char rel[2u * (VCS_PACKAGE_RELEASE_NAME_MAX + 1u) + 32u];
+    int n = snprintf(rel, sizeof(rel), "data/%s/%s", publisher, package);
+    if (n <= 0 || (size_t)n >= sizeof(rel))
+        return ZCL_ERR(-1, "data path too long for %s", name);
+    return pkgl_join(ctx, rel, out, cap);
+}
+
 struct zcl_result pkgl_generations_load(const struct pkgl_ctx *ctx,
                                         const char *name,
                                         struct vcs_package_generations *out)
@@ -732,6 +748,18 @@ struct zcl_result pkgl_activate(const struct pkgl_ctx *ctx, const char *name,
         *had_previous_out =
             vcs_package_generations_previous(&gens, prev_root_out);
     }
+
+    /* The package's persistent data directory is created before the swap
+     * and is never removed by an install, an update, or a rollback — those
+     * only ever move the active pointer between content-addressed trees.
+     * Creating it here rather than at first install means every path that
+     * makes a version current also guarantees the place the user's own data
+     * lives, including a rollback onto a generation installed before this
+     * directory existed. mkdir_p is idempotent, so re-activation is a
+     * no-op and an existing directory is left exactly as the user left it. */
+    char data_dir[PKGL_PATH_MAX];
+    ZCL_CHECK(pkgl_data_dir(ctx, name, data_dir, sizeof(data_dir)));
+    ZCL_CHECK(pkgl_mkdir_p(data_dir));
 
     /* The pointer is swapped first: if the log write then fails the operator
      * sees a log that lags reality, which the next activation repairs. The

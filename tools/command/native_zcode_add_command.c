@@ -375,6 +375,34 @@ void zcl_native_handle_zcode_package_add_plan(
         "every one is pinned by its immutable package root");
 }
 
+/* Name where this package keeps the USER's data. The same directory across
+ * every version a person ever runs, which is exactly why both an install
+ * and a rollback report it. Resolving a path grants no authority over it;
+ * a name that cannot key a path is simply not reported. */
+static void za_push_data_dir(struct zcl_command_reply *reply,
+                             const char *datadir, const char *name)
+{
+    if (!name || !name[0])
+        return;
+    char data_dir[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    struct zcl_result r =
+        package_lifecycle_data_dir(datadir, name, data_dir, sizeof(data_dir));
+    if (r.ok)
+        (void)json_push_kv_str(&reply->data, "data_dir", data_dir);
+}
+
+/* The installed target is the LAST locked step: the lock is in build order,
+ * so dependencies come first and the thing that was asked for comes last. */
+static void za_push_commit_data_dir(
+    struct zcl_command_reply *reply, const char *datadir,
+    const struct package_lifecycle_commit_report *report)
+{
+    if (report->step_count == 0)
+        return;
+    za_push_data_dir(reply, datadir,
+                     report->steps[report->step_count - 1u].name);
+}
+
 /* ── zcode package add commit ───────────────────────────────────────── */
 
 void zcl_native_handle_zcode_package_add_commit(
@@ -451,6 +479,7 @@ void zcl_native_handle_zcode_package_add_commit(
         za_push_hex(&reply->data, "previous_root", report.previous_root);
     (void)json_push_kv_int(&reply->data, "step_count",
                            (int64_t)report.step_count);
+    za_push_commit_data_dir(reply, datadir, &report);
     bool windowed = za_push_steps_window(request, &steps, reply, command);
     json_free(&steps);
     if (!windowed)
@@ -546,6 +575,11 @@ void zcl_native_handle_zcode_package_rollback(
     za_push_hex(&reply->data, "to_root", report.to_root);
     (void)json_push_kv_int(&reply->data, "generation_count",
                            (int64_t)report.generation_count);
+    /* Going back changes the CODE, never the user's data: the same
+     * directory is still there with whatever the newer version wrote in
+     * it. Naming it here answers the question a person actually has after
+     * a rollback. */
+    za_push_data_dir(reply, datadir, report.name);
     (void)json_push_kv_str(
         &reply->data, "note",
         "rollback appends a new generation naming the older root — history "

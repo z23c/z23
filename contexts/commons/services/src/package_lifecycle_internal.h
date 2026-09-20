@@ -128,6 +128,17 @@ struct zcl_result pkgl_installed_dir(const struct pkgl_ctx *ctx,
                                      const uint8_t root[32], char *out,
                                      size_t cap);
 
+/* <zcode_dir>/data/<publisher>/<package> — the ONE directory keyed on a
+ * package's identity instead of on a root. Every install tree is content
+ * addressed, so a new version lands beside the old one and a rollback
+ * points back at the old one; anything the USER made has to sit outside
+ * both or an update strands it and a rollback resurrects a stale copy.
+ * Writing it into an install tree is not an option either: that tree's
+ * bytes are re-hashed against the build receipt, so a user's file there
+ * would fail the package's own identity check. */
+struct zcl_result pkgl_data_dir(const struct pkgl_ctx *ctx, const char *name,
+                                char *out, size_t cap);
+
 /* The fixed package verifier, resolved from /proc/self/exe (never PATH),
  * with the build tree's own build/bin as the one fallback. Shared by the
  * install and reproduce spawns. */

@@ -562,6 +562,103 @@ static int t_generations(void)
     return failures;
 }
 
+/* ── the user's own data, which no version owns ──────────────────────
+ *
+ * An install tree is content addressed: every update lands in a NEW
+ * installed/<root>/ and a rollback points back at an OLD one. So the place
+ * for what the USER made can live in neither tree — an update would leave
+ * it behind with the version it replaced, and a rollback would resurrect
+ * whatever stale copy the older tree happened to carry. The package gets
+ * ONE directory keyed on its identity rather than on any root, and install,
+ * update and rollback all leave it alone.
+ *
+ * The claim is three moments of one journey, so it is three functions over
+ * one struct rather than three stretches of the transcript: the directory
+ * exists at install, the update does not disturb it, and neither does going
+ * back. */
+struct za_user_data {
+    char dir[4600];
+    char file[4700];
+    uint8_t sha_a[32]; /* what version A wrote */
+    uint8_t sha_b[32]; /* what version B wrote over it */
+    bool wrote_a;
+    bool wrote_b;
+};
+
+static int za_user_data_after_install(const char *base, const char *zcode,
+                                      struct za_user_data *u)
+{
+    int failures = 0;
+    memset(u, 0, sizeof(*u));
+    snprintf(u->dir, sizeof(u->dir), "%s/data/alice/ringbuffer", zcode);
+    ZA_CHECK("installing a package creates its persistent data directory",
+             za_exists(u->dir));
+    /* A person has to be able to FIND it, so the service names it rather
+     * than leaving the layout to be guessed at. */
+    char reported[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    struct zcl_result ddr =
+        package_lifecycle_data_dir(base, "alice/ringbuffer", reported,
+                                   sizeof(reported));
+    ZA_CHECK("the service names the data directory a person should look in",
+             ddr.ok && strcmp(reported, u->dir) == 0);
+    /* The name is what keys the path, so a malformed name must be refused
+     * before it becomes one. */
+    char bad[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    struct zcl_result bad_ddr =
+        package_lifecycle_data_dir(base, "notapublisherpackage", bad,
+                                   sizeof(bad));
+    ZA_CHECK("a name that is not publisher/package never becomes a data path",
+             !bad_ddr.ok && bad[0] == '\0');
+
+    snprintf(u->file, sizeof(u->file), "%s/notes.txt", u->dir);
+    const char note_a[] = "note written while running version A\n";
+    u->wrote_a = za_exists(u->dir) &&
+                 za_write_file(u->file, note_a, sizeof(note_a) - 1u, 0600) &&
+                 za_file_sha3(u->file, u->sha_a);
+    ZA_CHECK("the running version can persist data the user made",
+             u->wrote_a);
+    return failures;
+}
+
+static int za_user_data_after_update(struct za_user_data *u)
+{
+    int failures = 0;
+    /* An UPDATE must not carry the user's data off with the version it
+     * replaced: these are the SAME bytes in the same place, not a copy
+     * migrated into the new tree. */
+    uint8_t updated[32];
+    bool readable = za_exists(u->file) && za_file_sha3(u->file, updated);
+    ZA_CHECK("the update leaves the user's data byte-identical",
+             u->wrote_a && readable &&
+                 memcmp(updated, u->sha_a, 32) == 0);
+
+    /* The user keeps working under the NEW version, so what has to survive
+     * going back is the data version B wrote — not a snapshot taken before
+     * the update, which would make the claim trivial. */
+    const char note_b[] = "note rewritten while running version B\n";
+    u->wrote_b = za_write_file(u->file, note_b, sizeof(note_b) - 1u, 0600) &&
+                 za_file_sha3(u->file, u->sha_b);
+    ZA_CHECK("the user mutates persistent data under the new version",
+             u->wrote_b && memcmp(u->sha_b, u->sha_a, 32) != 0);
+    return failures;
+}
+
+static int za_user_data_after_rollback(const struct za_user_data *u)
+{
+    int failures = 0;
+    /* THE WHOLE CLAIM OF GOING BACK: the code is byte-exactly version A
+     * again AND the user's CURRENT data — everything version B wrote — is
+     * still there, untouched. A rollback that restores old code by
+     * reverting the user's own work has not gone back, it has lost data. */
+    uint8_t after[32];
+    bool survived = za_exists(u->file) && za_file_sha3(u->file, after);
+    ZA_CHECK("the persistent data directory is untouched by the rollback",
+             za_exists(u->dir) && survived);
+    ZA_CHECK("the user's CURRENT data survives going back to version A",
+             u->wrote_b && survived && memcmp(after, u->sha_b, 32) == 0);
+    return failures;
+}
+
 /* ── 3. end-to-end over a fixture datadir ───────────────────────────── */
 
 struct za_file {
@@ -766,6 +863,27 @@ static bool za_publish(const char *zcode, const char *name,
 
 /* Overwrite one CAS object with different bytes of the same length: the
  * store now holds content that does not match the manifest's commitment. */
+/* Remove one CAS object: the bytes this node NEVER RECEIVED. Deliberately
+ * beside za_tamper_chunk below, because the two model different failures
+ * that must not collapse into one rule — bytes that never arrived (the
+ * publisher is unreachable) versus bytes that arrived corrupted (the
+ * publisher, or something between, is lying). Only content unique to one
+ * package may be passed here: a chunk is keyed by its own hash, so two
+ * packages shipping an identical file share one object. */
+static bool za_remove_chunk(const char *zcode, const char *content)
+{
+    uint8_t hash[32];
+    struct sha3_256_ctx c;
+    sha3_256_init(&c);
+    sha3_256_write(&c, (const uint8_t *)content, strlen(content));
+    sha3_256_finalize(&c, hash);
+    char hex[65];
+    za_hex(hash, 32, hex);
+    char path[4500];
+    snprintf(path, sizeof(path), "%s/cas/sha3/%.2s/%s", zcode, hex, hex);
+    return unlink(path) == 0;
+}
+
 static bool za_tamper_chunk(const char *zcode, const char *content)
 {
     uint8_t hash[32];
@@ -914,6 +1032,11 @@ static int t_e2e(void)
                            za_file_sha3(header, a_header_sha);
     ZA_CHECK("version A's installed artifacts are fingerprinted",
              a_fingerprinted);
+
+    /* The user-data thread lives in its own three functions below, so the
+     * transcript gains the claims without gaining their branches. */
+    struct za_user_data user_data;
+    failures += za_user_data_after_install(base, zcode, &user_data);
     ZA_CHECK("the step reached PINNED (seedable) or names why not",
              commit.step_count == 1 &&
                  (commit.steps[0].state == VCS_PACKAGE_LIFECYCLE_PINNED ||
@@ -1498,6 +1621,8 @@ static int t_e2e(void)
     ZA_CHECK("BOTH generations are on disk after the upgrade",
              za_exists(installed_dir) && za_exists(installed2));
 
+    failures += za_user_data_after_update(&user_data);
+
     /* --- NOW BREAK B, then go back ---------------------------------------
      * Reverting a version that still works proves almost nothing. The whole
      * reason to keep the old version is that the new one failed, so the
@@ -1571,6 +1696,8 @@ static int t_e2e(void)
     ZA_CHECK("and the root it went back to is A's exact identity",
              memcmp(rb.to_root, ring_root, 32) == 0 &&
                  memcmp(active, ring_root, 32) == 0);
+
+    failures += za_user_data_after_rollback(&user_data);
 
     /* --- a dependent package, locked to its dependency's root ----------- */
     char deps_json[256];
@@ -1758,6 +1885,101 @@ static bool za_use_commit(const char *datadir, const char *target,
     "  int v = 0; if(!ring_pop(&r, &v)) return 1;\n" \
     "  printf(\"ringcli total=%d\\n\", v); return 0; }\n"
 
+/* Content unique to the package whose bytes never arrive, so removing its
+ * CAS objects cannot take a byte from anything already accepted. */
+#define ZA_GHOST_H \
+    "#pragma once\n" \
+    "int ghost_value(void);\n"
+
+#define ZA_GHOST_C \
+    "#include \"ghost.h\"\n" \
+    "int ghost_value(void){ return 41 + 1; }\n"
+
+#define ZA_GHOST_TEST \
+    "#include \"ghost.h\"\n" \
+    "int main(void){ return ghost_value() == 42 ? 0 : 1; }\n"
+
+/* ── the publisher is gone ───────────────────────────────────────────
+ *
+ * "Offline" for a content-addressed store is not a network error to handle;
+ * it is the plain fact that a node can only ever use what it already holds.
+ * Two claims have to hold AT ONCE, and collapsing them is how a store
+ * either waits forever or quietly accepts something it never received:
+ *
+ *   1. everything already accepted stays usable with nothing left to
+ *      contact, even while an unreachable package sits in the store beside
+ *      it;
+ *   2. the one thing that genuinely needs the publisher -- bytes this node
+ *      does not hold -- is REFUSED BY NAME rather than waited on.
+ *
+ * Claim 1 alone describes a store that pretends; claim 2 alone describes
+ * one that is merely broken. */
+static int za_publisher_gone(const char *base, const char *zcode,
+                             const char *program_path, bool program_exec,
+                             int64_t t0)
+{
+    int failures = 0;
+    struct za_file ghost_files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/ghost.h", ZA_GHOST_H },
+        { "src/ghost.c", ZA_GHOST_C },
+        { "test/test_ghost.c", ZA_GHOST_TEST },
+    };
+    uint8_t ghost_root[32];
+    bool published =
+        za_publish(zcode, "alice/ghost", "1.0.0", 3, ghost_files, 4,
+                   "src/ghost.h", "src/ghost.c", "test/test_ghost.c", "src",
+                   ghost_root);
+    /* The release is known and its bytes are absent: exactly the state a
+     * node is left in when the publisher goes away between discovery and
+     * fetch. Only chunks unique to this package are removed, so nothing
+     * already accepted loses a byte. */
+    bool emptied = published && za_remove_chunk(zcode, ZA_GHOST_C) &&
+                   za_remove_chunk(zcode, ZA_GHOST_H) &&
+                   za_remove_chunk(zcode, ZA_GHOST_TEST);
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result planned =
+        package_lifecycle_plan(base, "alice/ghost", t0 + 20, &plan);
+    ZA_CHECK("bytes this node never received are named, never waited on",
+             emptied && planned.ok && !plan.ready &&
+                 strcmp(plan.rule, "package-incomplete") == 0);
+    ZA_CHECK("the unreachable step reports FETCHING, not a false VERIFIED",
+             planned.ok && plan.plan.step_count == 1 &&
+                 plan.plan.steps[0].state == VCS_PACKAGE_LIFECYCLE_FETCHING &&
+                 !plan.plan.steps[0].complete);
+    struct package_lifecycle_commit_report commit;
+    struct zcl_result committed =
+        package_lifecycle_commit(base, plan.plan_id, t0 + 21, &commit);
+    char installed[4400];
+    char hex[65];
+    za_hex(ghost_root, 32, hex);
+    snprintf(installed, sizeof(installed), "%s/installed/%s", zcode, hex);
+    ZA_CHECK("a package whose bytes never arrived installs nothing",
+             !committed.ok && !za_exists(installed));
+
+    /* Claim 1: the accepted application is untouched by its neighbour's
+     * unavailability. Same program, run again with an unreachable package
+     * now resident in the same store. */
+    char ran[512];
+    ran[0] = '\0';
+    const char *argv[] = { program_path, NULL };
+    int rc = (program_path && program_exec)
+        ? zcl_spawn_capture(argv, ran, sizeof(ran), 30000)
+        : -1;
+    ZA_CHECK("the accepted program still runs with the publisher gone",
+             rc == 0 && strstr(ran, "ringcli total=7") != NULL);
+    /* And the place the user's data lives is still there and still named,
+     * which is what makes the accepted version usable rather than merely
+     * present. */
+    char data_dir[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    struct zcl_result ddr =
+        package_lifecycle_data_dir(base, "alice/ringcli", data_dir,
+                                   sizeof(data_dir));
+    ZA_CHECK("the accepted app's data directory survives the publisher",
+             ddr.ok && za_exists(data_dir));
+    return failures;
+}
+
 static int t_programs(void)
 {
     int failures = 0;
@@ -1886,6 +2108,9 @@ static int t_programs(void)
              prc == 0 && strstr(ran, "ringcli total=7") != NULL);
     if (prc != 0)
         printf("  zcode_add: program run rc=%d out=%s\n", prc, ran);
+
+    failures += za_publisher_gone(base, zcode, first_path, installed_exec,
+                                  t0);
     zcl_command_reply_free(&cli_reply);
 
     /* macOS has no qualified full-isolation package worker, so the
