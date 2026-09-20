@@ -4965,12 +4965,50 @@ static bool pv_fast_identifier_asm(FILE *f, int c)
     }
 }
 
-/* Preserve unquoted GNU attributes (e.g. stddef's alignment declarations).
- * Quoted arguments and directive/attribute syntax remain ineligible. */
-static bool pv_fast_attribute_cacheable(FILE *f, int c)
+static int pv_fast_nonspace(FILE *f)
 {
+    int c;
+    do { c = fgetc(f); } while (c != EOF && isspace((unsigned char)c));
+    return c;
+}
+
+/* Only whole diagnostic attributes qualify. No mixed attribute lists,
+ * escaped strings, or extended string prefixes are accepted. */
+static bool pv_fast_diagnostic_name(FILE *f)
+{
+    if (pv_fast_nonspace(f) != '(') return false;
+    char name[16];
+    size_t n = 0;
+    int c = pv_fast_nonspace(f);
+    while (c != EOF && (isalpha((unsigned char)c) || c == '_')) {
+        if (n + 1 >= sizeof(name)) return false;
+        name[n++] = (char)c;
+        c = fgetc(f);
+    }
+    name[n] = '\0';
+    if (strcmp(name, "__warning__") && strcmp(name, "__error__")) return false;
     while (c != EOF && isspace((unsigned char)c)) c = fgetc(f);
-    if (c != '(') return false;
+    return c == '(';
+}
+
+static bool pv_fast_diagnostic_attribute(FILE *f)
+{
+    if (!pv_fast_diagnostic_name(f) || pv_fast_nonspace(f) != '"') return false;
+    int c;
+    do {
+        while ((c = fgetc(f)) != '"')
+            if (c < 0x20 || c > 0x7e || c == '\\') return false;
+        c = pv_fast_nonspace(f);
+    } while (c == '"');
+    return c == ')' && pv_fast_nonspace(f) == ')' &&
+           pv_fast_nonspace(f) == ')';
+}
+
+/* Preserve unquoted GNU attributes and standalone warning/error messages.
+ * Other quoted arguments and directive/attribute syntax stay ineligible. */
+static bool pv_fast_unquoted_attribute(FILE *f)
+{
+    int c;
     unsigned depth = 1;
     while ((c = fgetc(f)) != EOF) {
         if (c == '"' || c == '\'' || c == '\\' || c == '#' ||
@@ -4979,6 +5017,27 @@ static bool pv_fast_attribute_cacheable(FILE *f, int c)
         if (c == ')' && --depth == 0) return true;
     }
     return false;
+}
+
+static bool pv_fast_attribute_cacheable(FILE *f, int c)
+{
+    while (c != EOF && isspace((unsigned char)c)) c = fgetc(f);
+    if (c != '(') return false;
+    long start = ftell(f);
+    if (start < 0) return false;
+    if (pv_fast_diagnostic_attribute(f)) return true;
+    return fseek(f, start, SEEK_SET) == 0 && pv_fast_unquoted_attribute(f);
+}
+
+/* These exact retained glibc diagnostics do not read additional inputs.
+ * Every other retained directive still bypasses the cache. */
+static bool pv_fast_diagnostic_pragma(FILE *f)
+{
+    char line[128];
+    if (!fgets(line, sizeof(line), f)) return false;
+    return strcmp(line, "pragma GCC diagnostic push\n") == 0 ||
+           strcmp(line, "pragma GCC diagnostic pop\n") == 0 ||
+           strcmp(line, "pragma GCC diagnostic ignored \"-Wcast-qual\"\n") == 0;
 }
 
 static bool pv_fast_attribute_token(const char *token, size_t len)
@@ -5035,6 +5094,11 @@ static bool pv_fast_preproc_cacheable(const char *path, bool *eligible)
     int previous = 0, last_nonspace = 0;
     *eligible = true;
     while ((c = fgetc(f)) != EOF) {
+        if (c == '#' && pv_fast_diagnostic_pragma(f)) {
+            previous = '\n';
+            len = 0;
+            continue;
+        }
         if (c == '[' && last_nonspace == '[' && pv_fast_nodiscard(f)) {
             previous = last_nonspace = ']';
             len = 0;
@@ -5213,13 +5277,16 @@ static int pv_compile_one_source_set(
                                 emit_deps, emit_dep_count, src_file,
                                 obj_file);
                 /* Per-TU object cache: only the plain gcc variant of a
-                 * recipe source is eligible (the plan's preprocess probes
+                 * recipe or test source is eligible (the plan's preprocess probes
                  * use exactly that argv; clang and sanitizer objects are
                  * always rebuilt). Compare the attestation id, not the
                  * executable path — the secure lane invokes the compiler
                  * by its absolute path (VCS_BUILD_COMPILER_V1). */
                 bool fast_eligible = fast_cache_dir &&
-                    strcmp(cc_id, "gcc") == 0 && !sanitize &&
+                    strcmp(cc_id, "gcc") == 0 && !sanitize;
+                /* Plans cover library sources only. Test sources must
+                 * discover their own closure, even when a plan exists. */
+                bool source_plan = plan_preproc_valid &&
                     si < recipe->sources.count;
                 bool from_cache = false;
                 uint8_t fast_preproc[32] = { 0 };
@@ -5228,7 +5295,7 @@ static int pv_compile_one_source_set(
                     int frc = pv_fast_cache_check_hit(
                         pctx, &args, si, src_file, fast_cache_dir,
                         standard_profile, fast_capsule, fast_capsule_root,
-                        plan_preproc_valid, plan_preproc, obj_file,
+                        source_plan, plan_preproc, obj_file,
                         fast_preproc, fast_key, &from_cache, &fast_eligible);
                     if (frc != PV_CONTINUE) return frc;
                 }

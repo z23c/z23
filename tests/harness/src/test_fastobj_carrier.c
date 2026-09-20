@@ -243,6 +243,8 @@ struct fcw_build_result {
     bool cache_complete;
     bool source_bytes_unknown;
     bool saw_refusal;
+    bool saw_test_23;
+    bool saw_test_24;
     char first_line[256];
     char last_line[256];
 };
@@ -285,9 +287,10 @@ static int fcw_check_perf(const struct fcw_build_result *cold,
              cold->perf_complete && warm->perf_complete &&
              cold->test_processes > 0 &&
              cold->test_processes == warm->test_processes);
-    /* The warm plan adds one macro probe per TU and saves one compile. */
-    FC_CHECK("plan macro probes exactly offset reused object compiles",
-             cold->compiler_processes == warm->compiler_processes);
+    /* The one library TU adds a plan macro probe; both the library and
+     * test TU save a compile. Test preprocessing is required on both runs. */
+    FC_CHECK("plan warm run saves two compiles and adds one macro probe",
+             cold->compiler_processes == warm->compiler_processes + 1u);
     FC_CHECK("process role counts partition all launched children",
              cold->processes == cold->compiler_processes +
                  cold->test_processes + cold->other_processes &&
@@ -441,6 +444,8 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
                  (int)(end - tail), tail);
         out->saw_refusal =
             strstr(text, "zbuild-package-standard-refused=1") != NULL;
+        out->saw_test_23 = strstr(text, "exit 23, expected 0") != NULL;
+        out->saw_test_24 = strstr(text, "exit 24, expected 0") != NULL;
         fcw_parse_perf(text, out);
         char *line = strstr(text, "zbuild-package-fast-cache=v1");
         if (line)
@@ -594,6 +599,20 @@ static bool fcw_asm_same_output(const char *left, const char *right,
     return ok;
 }
 
+static bool fcw_cache_entry_is_test(const char *cache)
+{
+    char key[65], path[4400];
+    if (!fcw_first_entry(cache, key) ||
+        snprintf(path, sizeof(path), "%s/objects/%.2s/%s.json", cache,
+                 key, key + 2) >= (int)sizeof(path)) return false;
+    size_t len = 0;
+    uint8_t *data = fcw_read_file(path, 65536, &len);
+    bool ok = data && fcw_find(data, len,
+        "\"source\":\"tests/test_tiny_lines.c\"") != NULL;
+    free(data);
+    return ok;
+}
+
 static int fcw_asm_bypass(const char *base, const char *worker,
                           const struct pubkey *pk, bool attribute)
 {
@@ -611,12 +630,12 @@ static int fcw_asm_bypass(const char *base, const char *worker,
             fcw_asm_build(&f, worker, pk, i, &runs[i], roots[i]);
         FC_CHECK("incbin build runs normal compilation and tests", built);
         if (!built) return failures;
-        FC_CHECK("asm bypasses both cache lookup and publication",
-                 runs[i].cache_complete && runs[i].hits == 0 && runs[i].misses == 0);
+        FC_CHECK("only safe test source participates in asm fixture cache",
+                 runs[i].cache_complete && runs[i].hits == (i == 1 ? 1u : 0u) &&
+                 runs[i].misses == (i == 1 ? 0u : 1u));
     }
-    char key[65];
-    FC_CHECK("both asm caches contain no published object",
-             !fcw_first_entry(f.cache, key) && !fcw_first_entry(f.fresh, key));
+    FC_CHECK("the sole object in each asm cache belongs to the safe test",
+             fcw_cache_entry_is_test(f.cache) && fcw_cache_entry_is_test(f.fresh));
     FC_CHECK("data mutation changes package root; control has identical inputs",
              memcmp(roots[0], roots[1], 32) != 0 &&
              memcmp(roots[1], roots[2], 32) == 0);
@@ -648,7 +667,7 @@ static bool fcw_attribute_spelling(const char *base, const char *worker,
     uint8_t root[32];
     ok = ok && fcw_asm_build(&f, worker, pk, 0, &result, root);
     return ok && result.cache_complete && result.hits == 0 &&
-           result.misses == (reusable ? 1u : 0u);
+           result.misses == (reusable ? 2u : 1u);
 }
 
 static int fcw_attribute_spellings(const char *base, const char *worker,
@@ -671,6 +690,18 @@ static int fcw_attribute_spellings(const char *base, const char *worker,
         "\n[[nodiscard(\"reason\")]] int fcw_nodiscard(void);\n",
         "\n[[nodiscard]] int fcw_nodiscard(void);\n"
         "const int fcw_attr __attribute__((section(\"guard_data\"))) = 1;\n",
+        "\nextern int fcw_diag(void) __attribute__((__warning__(\"one \" \"two\")));\n",
+        "\nextern int fcw_diag(void) __attribute__((__error__(\"unused\")));\n",
+        "\nextern int fcw_diag(void) __attribute__((__warning__(\"escaped\\n\")));\n",
+        "\nextern int fcw_diag(void) __attribute__((__warning__(\"ok\"), section(\"guard_text\")));\n",
+        "\nextern int fcw_diag(void) __attribute__((__warning__(\"ok\")));\n"
+        "__asm__(\".text\");\n",
+        "\nextern int fcw_diag(void) __attribute__((__warning__(\"# [] < : asm\")));\n",
+        "\n_Pragma(\"GCC diagnostic warning \\\"-Wunused-function\\\"\")\n",
+        "\n_Pragma(\"GCC diagnostic push\")\n"
+        "_Pragma(\"GCC diagnostic ignored \\\"-Wcast-qual\\\"\")\n"
+        "_Pragma(\"GCC diagnostic pop\")\n",
+        "\n_Pragma(\"GCC diagnostic push\")\n__asm__(\".text\");\n",
     };
     int failures = 0;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -678,7 +709,8 @@ static int fcw_attribute_spellings(const char *base, const char *worker,
         (void)snprintf(name, sizeof(name), "attribute-spelling-%zu", i);
         bool ok = fcw_asm_path(path, base, name) &&
             fcw_attribute_spelling(path, worker, pk, cases[i],
-                                   i == 5 || i == 6 || i == 10);
+                                   i == 4 || i == 5 || i == 6 || i == 10 ||
+                                   i == 13 || i == 14 || i == 18 || i == 20);
         FC_CHECK(name, ok);
     }
     return failures;
@@ -694,6 +726,59 @@ static int fcw_attribute_bypass(const char *base, const char *worker,
     FC_CHECK("attribute fixture directory prepared", ready);
     if (ready) failures += fcw_asm_bypass(attribute_base, worker, pk, true);
     failures += fcw_attribute_spellings(base, worker, pk);
+    return failures;
+}
+
+static bool fcw_test_cache_fixture(struct fcw_asm_fixture *f, const char *base)
+{
+    bool ready = fcw_asm_path(f->pkg, base, "test-cache-pkg") &&
+        fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", f->pkg) &&
+        fcw_asm_path(f->source, f->pkg, "tests/test_tiny_lines.c") &&
+        fcw_asm_path(f->data, f->pkg, "tests/fcw_test_gate.h") &&
+        fcw_asm_path(f->recipe, base, "test-cache-recipe.wire") &&
+        fcw_asm_path(f->cache, base, "test-cache-negative");
+    const char *source = "#include \"fcw_test_gate.h\"\nint main(void) {\n"
+        "#if defined(__GNUC__) && !defined(__clang__)\nreturn FCW_EXIT;\n"
+        "#else\nreturn 0;\n#endif\n}\n";
+    return ready && fcw_write_file(f->source, source, strlen(source));
+}
+
+static bool fcw_expected_test_refusal(const struct fcw_build_result *result,
+                                      size_t run)
+{
+    return result->exit_code == 6 && result->saw_refusal &&
+           (run == 3 ? result->saw_test_24 : result->saw_test_23);
+}
+
+static int fcw_test_cache_failure(const char *base, const char *worker,
+                                   const struct pubkey *pk)
+{
+    int failures = 0;
+    struct fcw_asm_fixture f = {0};
+    bool ready = fcw_test_cache_fixture(&f, base);
+    const char *changed = "int main(void) {\n"
+        "#if defined(__GNUC__) && !defined(__clang__)\nreturn 24;\n"
+        "#else\nreturn 0;\n#endif\n}\n";
+    FC_CHECK("test-only header cache fixture prepared", ready);
+    if (!ready) return failures;
+    for (size_t i = 0; i < 4; i++) {
+        char name[48];
+        snprintf(name, sizeof(name), "test-cache-negative-%zu", i);
+        const char *header = i == 0 ? "#define FCW_EXIT 0\n" : "#define FCW_EXIT 23\n";
+        bool inputs = fcw_asm_path(f.emit[1], base, name) &&
+            fcw_write_file(f.data, header, strlen(header));
+        if (i == 3) inputs = inputs && fcw_write_file(f.source, changed, strlen(changed));
+        struct fcw_build_result result = {0};
+        uint8_t root[32];
+        bool passed = inputs && fcw_asm_build(&f, worker, pk, 1, &result, root);
+        if (i == 0) {
+            FC_CHECK("test-only header baseline caches both objects",
+                     passed && result.misses == 2 && result.hits == 0);
+        } else {
+            FC_CHECK("changed or cached failing GCC test still refuses acceptance",
+                     inputs && !passed && fcw_expected_test_refusal(&result, i));
+        }
+    }
     return failures;
 }
 #endif
@@ -819,8 +904,8 @@ static int test_fastobj_carrier_platform_arm(void)
                run1.first_line);
         printf("    build #1 final: %.240s\n", run1.last_line);
     }
-    FC_CHECK("build #1 really compiled (misses >= 1, hits == 0)",
-             run1.ok && run1.misses >= 1u && run1.hits == 0u);
+    FC_CHECK("build #1 compiled both library and test objects",
+             run1.ok && run1.misses == 2u && run1.hits == 0u);
     printf("    build #1: hits=%llu misses=%llu\n", run1.hits, run1.misses);
     if (!run1.ok)
         goto done;
@@ -954,6 +1039,7 @@ static int test_fastobj_carrier_platform_arm(void)
 #if defined(__linux__)
     failures += fcw_asm_bypass(base, worker, &pk, false);
     failures += fcw_attribute_bypass(base, worker, &pk);
+    failures += fcw_test_cache_failure(base, worker, &pk);
 #endif
 
     /* 11. the testless standard-profile refusal, both sides. A TESTLESS
