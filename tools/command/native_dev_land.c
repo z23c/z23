@@ -3160,7 +3160,10 @@ static bool dl_mkdir_parents(const char *path)
 static const char *const DL_VENDOR_DEPS[] = {
     "vendor/lib",
     "vendor/include",
+    "vendor/sqlite3.c",
     "vendor/tor/libtor.a",
+    "vendor/tor/.provenance",
+    "vendor/tor/Makefile",
     "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
     "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
     "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",

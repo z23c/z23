@@ -1945,6 +1945,305 @@ _test_next:;
 
 #endif /* !defined(_WIN32) */
 
+#if !defined(_WIN32)
+static int test_dev_land_vendor_dependencies(void)
+{
+    int failures = 0;
+    TEST("land: the landing worktree gets the proof's vendored "
+        "dependencies from the submitting checkout") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char wt[1200], check[1400], source[1400], exclude[1400];
+        char alias_dir[512], alias[700];
+        char aaa_source[1400], aaa_target[1400], aaa_bytes[2][8] = {{0}};
+        char second[64], third[64], bytes[3][8] = {{0}};
+        struct stat st, source_st, landed_st, alias_st;
+        FILE *file;
+        dlx_isolate("depsok");
+        ASSERT(dlx_rig_make(&rig, "depsok_rig"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        (void)snprintf(source, sizeof(source), "%s/vendor/lib/libfoo.a",
+                       rig.clone);
+        const struct timespec pinned[2] = {
+            { .tv_sec = 1700000000, .tv_nsec = 123456789 },
+            { .tv_sec = 1700000000, .tv_nsec = 123456789 },
+        };
+        ASSERT(chmod(source, 0640) == 0);
+        ASSERT(utimensat(AT_FDCWD, source, pinned, 0) == 0);
+        ASSERT(stat(source, &source_st) == 0 && S_ISREG(source_st.st_mode));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_a.so",
+                             "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_b.so",
+                             "fake\n"));
+        /* Forces dl_wt_vendor_ensure()/dl_wt_hotswap_ensure() to run for
+         * real even though ZCL_LAND_PROOF_STUB replaces the proof itself —
+         * see dl_deps_test_force()'s comment in native_dev_land.c. The
+         * hooks refresh shares the forced prerequisite set, so the
+         * submitting checkout also carries a hook binary to install from. */
+        ASSERT(dlx_plant_hook_bin(rig.clone));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        /* Every dependency the proof's own dependencies[] array names (the
+         * vendor group, plus the Linux hotswap fixtures) is now present in
+         * the landing worktree, materialized from the submitting checkout
+         * rather than left for the proof to discover missing. */
+        dlx_landdir(wt, sizeof(wt));
+        const char *const required_inputs[] = {
+            "vendor/sqlite3.c", "vendor/tor/.provenance", "vendor/tor/Makefile",
+        };
+        const char *const required_bytes[] = { "sqlite\n", "stamp\n", "CC=gcc\n" };
+        for (size_t i = 0; i < 3; ++i) {
+            char copied[16] = {0};
+            (void)snprintf(source, sizeof(source), "%s/%s", rig.clone,
+                           required_inputs[i]);
+            (void)snprintf(check, sizeof(check), "%s/wt/%s", wt,
+                           required_inputs[i]);
+            ASSERT(stat(source, &source_st) == 0);
+            ASSERT(stat(check, &landed_st) == 0);
+            ASSERT(source_st.st_dev != landed_st.st_dev ||
+                   source_st.st_ino != landed_st.st_ino);
+            file = fopen(check, "rb");
+            ASSERT(file != NULL);
+            ASSERT(fread(copied, 1, sizeof(copied), file) ==
+                   strlen(required_bytes[i]));
+            ASSERT(fclose(file) == 0);
+            ASSERT(strcmp(copied, required_bytes[i]) == 0);
+        }
+        (void)snprintf(source, sizeof(source), "%s/vendor/lib/libfoo.a",
+                       rig.clone);
+        ASSERT(stat(source, &source_st) == 0);
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a",
+                       wt);
+        ASSERT(stat(check, &st) == 0 && S_ISREG(st.st_mode));
+        /* A landing generation must own its dependency inode. A hard link
+         * lets later donor metadata or byte changes mutate sealed evidence. */
+        ASSERT(st.st_dev != source_st.st_dev || st.st_ino != source_st.st_ino);
+        ASSERT((st.st_mode & 07777) == (source_st.st_mode & 07777));
+#if defined(__APPLE__)
+        ASSERT(st.st_mtimespec.tv_sec == source_st.st_mtimespec.tv_sec);
+        ASSERT(st.st_mtimespec.tv_nsec == source_st.st_mtimespec.tv_nsec);
+#else
+        ASSERT(st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+#endif
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/include/foo.h",
+                       wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/tor/libtor.a",
+                       wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(
+            check, sizeof(check),
+            "%s/wt/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(
+            check, sizeof(check),
+            "%s/wt/build/hotswap/zcl_rollback_fixture_a.so", wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(
+            check, sizeof(check),
+            "%s/wt/build/hotswap/zcl_rollback_fixture_b.so", wt);
+        ASSERT(stat(check, &st) == 0);
+
+        /* An old generation may explain exactly two links: the submitting
+         * dependency and the landing copy. Repair that known old shape. */
+        (void)snprintf(exclude, sizeof(exclude), "%s/.git/info/exclude",
+                       rig.clone);
+        ASSERT(dlx_write(exclude, "vendor/\nbuild/\n"));
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a", wt);
+        ASSERT(unlink(check) == 0);
+        ASSERT(link(source, check) == 0);
+        ASSERT(stat(source, &st) == 0 && st.st_nlink == 2);
+        ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
+        const char *const ignored[] = {
+            "check-ignore", "-q", "vendor/lib/libfoo.a", NULL,
+        };
+        const char *const tracked[] = {
+            "ls-files", "--error-unmatch", "vendor/lib/libfoo.a", NULL,
+        };
+        ASSERT(dlx_git(rig.clone, ignored) == 0);
+        ASSERT(dlx_git(rig.clone, tracked) != 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, second);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        ASSERT(stat(source, &st) == 0 && st.st_nlink == 1);
+        ASSERT(stat(check, &landed_st) == 0 && landed_st.st_nlink == 1);
+        ASSERT(st.st_dev != landed_st.st_dev || st.st_ino != landed_st.st_ino);
+        ASSERT((landed_st.st_mode & 07777) == (source_st.st_mode & 07777));
+#if defined(__APPLE__)
+        ASSERT(landed_st.st_mtimespec.tv_sec == source_st.st_mtimespec.tv_sec);
+        ASSERT(landed_st.st_mtimespec.tv_nsec ==
+               source_st.st_mtimespec.tv_nsec);
+#else
+        ASSERT(landed_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(landed_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+#endif
+        file = fopen(check, "rb");
+        ASSERT(file != NULL);
+        ASSERT(fread(bytes[0], 1, sizeof(bytes[0]), file) == 5);
+        ASSERT(fclose(file) == 0);
+        ASSERT(memcmp(bytes[0], "fake\n", 5) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+
+        /* A third spelling has no unique explanation. Refuse atomically,
+         * leaving every link and byte untouched for operator inspection. */
+        test_make_tmpdir(alias_dir, sizeof(alias_dir), "dev_land",
+                         "dependency_extra_alias");
+        (void)snprintf(alias, sizeof(alias), "%s/libfoo.alias", alias_dir);
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libaaa.a", "aaa\n"));
+        (void)snprintf(aaa_source, sizeof(aaa_source),
+                       "%s/vendor/lib/libaaa.a", rig.clone);
+        (void)snprintf(aaa_target, sizeof(aaa_target),
+                       "%s/wt/vendor/lib/libaaa.a", wt);
+        ASSERT(link(aaa_source, aaa_target) == 0);
+        ASSERT(stat(aaa_source, &st) == 0 && st.st_nlink == 2);
+        ASSERT(unlink(check) == 0);
+        ASSERT(link(source, check) == 0);
+        ASSERT(link(source, alias) == 0);
+        ASSERT(stat(source, &st) == 0 && st.st_nlink == 3);
+        ASSERT(dlx_commit(rig.clone, "third.txt", "three\n", third));
+        const char *const ignored_aaa[] = {
+            "check-ignore", "-q", "vendor/lib/libaaa.a", NULL,
+        };
+        const char *const tracked_aaa[] = {
+            "ls-files", "--error-unmatch", "vendor/lib/libaaa.a", NULL,
+        };
+        ASSERT(dlx_git(rig.clone, ignored_aaa) == 0);
+        ASSERT(dlx_git(rig.clone, tracked_aaa) != 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, third);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "proof_generation_dependency_unexplained_links:"
+                      "vendor/lib/libfoo.a") != NULL);
+        dlx_end(&c);
+        const char *const aaa_paths[] = {aaa_source, aaa_target};
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT(stat(aaa_paths[i], &alias_st) == 0);
+            ASSERT(alias_st.st_nlink == 2);
+            file = fopen(aaa_paths[i], "rb");
+            ASSERT(file != NULL);
+            ASSERT(fread(aaa_bytes[i], 1, sizeof(aaa_bytes[i]), file) == 4);
+            ASSERT(fclose(file) == 0);
+            ASSERT(memcmp(aaa_bytes[i], "aaa\n", 4) == 0);
+        }
+        const char *const linked_paths[] = {source, check, alias};
+        for (size_t i = 0; i < 3; i++) {
+            ASSERT(stat(linked_paths[i], &alias_st) == 0);
+            ASSERT(alias_st.st_nlink == 3);
+            file = fopen(linked_paths[i], "rb");
+            ASSERT(file != NULL);
+            ASSERT(fread(bytes[i], 1, sizeof(bytes[i]), file) == 5);
+            ASSERT(fclose(file) == 0);
+            ASSERT(memcmp(bytes[i], "fake\n", 5) == 0);
+        }
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
+#if !defined(_WIN32)
+static int test_dev_land_missing_tor_makefile(void)
+{
+    int failures = 0;
+    TEST("land: missing Tor Makefile refuses before requesting proof") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        const char *const available[] = {
+            "vendor/lib/libfoo.a", "vendor/include/foo.h",
+            "vendor/sqlite3.c", "vendor/tor/libtor.a",
+            "vendor/tor/.provenance",
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "build/hotswap/zcl_rollback_fixture_a.so",
+            "build/hotswap/zcl_rollback_fixture_b.so",
+        };
+        dlx_isolate("tormakemissing");
+        ASSERT(dlx_rig_make(&rig, "tormakemissing_rig"));
+        for (size_t i = 0; i < sizeof(available) / sizeof(available[0]); ++i)
+            ASSERT(dlx_write_dep(rig.clone, available[i], "fixture\n"));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "proof_generation_dependency_unavailable:"
+                      "vendor/tor/Makefile ") != NULL);
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_dev_land(void);
 #if !defined(_WIN32)
 static bool dlx_tree_bytes(const char *path, const void *bytes, size_t len)
@@ -3418,224 +3717,7 @@ int test_dev_land(void)
         PASS();
     }
 
-    TEST("land: the landing worktree gets the proof's vendored "
-        "dependencies from the submitting checkout") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char wt[1200], check[1400], source[1400], exclude[1400];
-        char alias_dir[512], alias[700];
-        char aaa_source[1400], aaa_target[1400], aaa_bytes[2][8] = {{0}};
-        char second[64], third[64], bytes[3][8] = {{0}};
-        struct stat st, source_st, landed_st, alias_st;
-        FILE *file;
-        dlx_isolate("depsok");
-        ASSERT(dlx_rig_make(&rig, "depsok_rig"));
-        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
-        (void)snprintf(source, sizeof(source), "%s/vendor/lib/libfoo.a",
-                       rig.clone);
-        const struct timespec pinned[2] = {
-            { .tv_sec = 1700000000, .tv_nsec = 123456789 },
-            { .tv_sec = 1700000000, .tv_nsec = 123456789 },
-        };
-        ASSERT(chmod(source, 0640) == 0);
-        ASSERT(utimensat(AT_FDCWD, source, pinned, 0) == 0);
-        ASSERT(stat(source, &source_st) == 0 && S_ISREG(source_st.st_mode));
-        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
-        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
-        ASSERT(dlx_write_dep(
-            rig.clone,
-            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
-            "fake\n"));
-        ASSERT(dlx_write_dep(
-            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
-            "fake\n"));
-        ASSERT(dlx_write_dep(
-            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
-            "fake\n"));
-        ASSERT(dlx_write_dep(rig.clone,
-                             "build/hotswap/zcl_rollback_fixture_a.so",
-                             "fake\n"));
-        ASSERT(dlx_write_dep(rig.clone,
-                             "build/hotswap/zcl_rollback_fixture_b.so",
-                             "fake\n"));
-        /* Forces dl_wt_vendor_ensure()/dl_wt_hotswap_ensure() to run for
-         * real even though ZCL_LAND_PROOF_STUB replaces the proof itself —
-         * see dl_deps_test_force()'s comment in native_dev_land.c. The
-         * hooks refresh shares the forced prerequisite set, so the
-         * submitting checkout also carries a hook binary to install from. */
-        ASSERT(dlx_plant_hook_bin(rig.clone));
-        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        dlx_end(&c);
-        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
-        dlx_end(&c);
-        /* Every dependency the proof's own dependencies[] array names (the
-         * vendor group, plus the Linux hotswap fixtures) is now present in
-         * the landing worktree, materialized from the submitting checkout
-         * rather than left for the proof to discover missing. */
-        dlx_landdir(wt, sizeof(wt));
-        (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a",
-                       wt);
-        ASSERT(stat(check, &st) == 0 && S_ISREG(st.st_mode));
-        /* A landing generation must own its dependency inode. A hard link
-         * lets later donor metadata or byte changes mutate sealed evidence. */
-        ASSERT(st.st_dev != source_st.st_dev || st.st_ino != source_st.st_ino);
-        ASSERT((st.st_mode & 07777) == (source_st.st_mode & 07777));
-#if defined(__APPLE__)
-        ASSERT(st.st_mtimespec.tv_sec == source_st.st_mtimespec.tv_sec);
-        ASSERT(st.st_mtimespec.tv_nsec == source_st.st_mtimespec.tv_nsec);
-#else
-        ASSERT(st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
-        ASSERT(st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
-#endif
-        (void)snprintf(check, sizeof(check), "%s/wt/vendor/include/foo.h",
-                       wt);
-        ASSERT(stat(check, &st) == 0);
-        (void)snprintf(check, sizeof(check), "%s/wt/vendor/tor/libtor.a",
-                       wt);
-        ASSERT(stat(check, &st) == 0);
-        (void)snprintf(
-            check, sizeof(check),
-            "%s/wt/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
-            wt);
-        ASSERT(stat(check, &st) == 0);
-        (void)snprintf(
-            check, sizeof(check),
-            "%s/wt/build/hotswap/zcl_rollback_fixture_a.so", wt);
-        ASSERT(stat(check, &st) == 0);
-        (void)snprintf(
-            check, sizeof(check),
-            "%s/wt/build/hotswap/zcl_rollback_fixture_b.so", wt);
-        ASSERT(stat(check, &st) == 0);
-
-        /* An old generation may explain exactly two links: the submitting
-         * dependency and the landing copy. Repair that known old shape. */
-        (void)snprintf(exclude, sizeof(exclude), "%s/.git/info/exclude",
-                       rig.clone);
-        ASSERT(dlx_write(exclude, "vendor/\nbuild/\n"));
-        (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a", wt);
-        ASSERT(unlink(check) == 0);
-        ASSERT(link(source, check) == 0);
-        ASSERT(stat(source, &st) == 0 && st.st_nlink == 2);
-        ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
-        const char *const ignored[] = {
-            "check-ignore", "-q", "vendor/lib/libfoo.a", NULL,
-        };
-        const char *const tracked[] = {
-            "ls-files", "--error-unmatch", "vendor/lib/libfoo.a", NULL,
-        };
-        ASSERT(dlx_git(rig.clone, ignored) == 0);
-        ASSERT(dlx_git(rig.clone, tracked) != 0);
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        dlx_submit(&c, &rig, second);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        dlx_end(&c);
-        ASSERT(stat(source, &st) == 0 && st.st_nlink == 1);
-        ASSERT(stat(check, &landed_st) == 0 && landed_st.st_nlink == 1);
-        ASSERT(st.st_dev != landed_st.st_dev || st.st_ino != landed_st.st_ino);
-        ASSERT((landed_st.st_mode & 07777) == (source_st.st_mode & 07777));
-#if defined(__APPLE__)
-        ASSERT(landed_st.st_mtimespec.tv_sec == source_st.st_mtimespec.tv_sec);
-        ASSERT(landed_st.st_mtimespec.tv_nsec ==
-               source_st.st_mtimespec.tv_nsec);
-#else
-        ASSERT(landed_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
-        ASSERT(landed_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
-#endif
-        file = fopen(check, "rb");
-        ASSERT(file != NULL);
-        ASSERT(fread(bytes[0], 1, sizeof(bytes[0]), file) == 5);
-        ASSERT(fclose(file) == 0);
-        ASSERT(memcmp(bytes[0], "fake\n", 5) == 0);
-        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
-        dlx_end(&c);
-
-        /* A third spelling has no unique explanation. Refuse atomically,
-         * leaving every link and byte untouched for operator inspection. */
-        test_make_tmpdir(alias_dir, sizeof(alias_dir), "dev_land",
-                         "dependency_extra_alias");
-        (void)snprintf(alias, sizeof(alias), "%s/libfoo.alias", alias_dir);
-        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libaaa.a", "aaa\n"));
-        (void)snprintf(aaa_source, sizeof(aaa_source),
-                       "%s/vendor/lib/libaaa.a", rig.clone);
-        (void)snprintf(aaa_target, sizeof(aaa_target),
-                       "%s/wt/vendor/lib/libaaa.a", wt);
-        ASSERT(link(aaa_source, aaa_target) == 0);
-        ASSERT(stat(aaa_source, &st) == 0 && st.st_nlink == 2);
-        ASSERT(unlink(check) == 0);
-        ASSERT(link(source, check) == 0);
-        ASSERT(link(source, alias) == 0);
-        ASSERT(stat(source, &st) == 0 && st.st_nlink == 3);
-        ASSERT(dlx_commit(rig.clone, "third.txt", "three\n", third));
-        const char *const ignored_aaa[] = {
-            "check-ignore", "-q", "vendor/lib/libaaa.a", NULL,
-        };
-        const char *const tracked_aaa[] = {
-            "ls-files", "--error-unmatch", "vendor/lib/libaaa.a", NULL,
-        };
-        ASSERT(dlx_git(rig.clone, ignored_aaa) == 0);
-        ASSERT(dlx_git(rig.clone, tracked_aaa) != 0);
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        dlx_submit(&c, &rig, third);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
-        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
-        ASSERT(strstr(dlx_str(&c, "detail"),
-                      "proof_generation_dependency_unexplained_links:"
-                      "vendor/lib/libfoo.a") != NULL);
-        dlx_end(&c);
-        const char *const aaa_paths[] = {aaa_source, aaa_target};
-        for (size_t i = 0; i < 2; i++) {
-            ASSERT(stat(aaa_paths[i], &alias_st) == 0);
-            ASSERT(alias_st.st_nlink == 2);
-            file = fopen(aaa_paths[i], "rb");
-            ASSERT(file != NULL);
-            ASSERT(fread(aaa_bytes[i], 1, sizeof(aaa_bytes[i]), file) == 4);
-            ASSERT(fclose(file) == 0);
-            ASSERT(memcmp(aaa_bytes[i], "aaa\n", 4) == 0);
-        }
-        const char *const linked_paths[] = {source, check, alias};
-        for (size_t i = 0; i < 3; i++) {
-            ASSERT(stat(linked_paths[i], &alias_st) == 0);
-            ASSERT(alias_st.st_nlink == 3);
-            file = fopen(linked_paths[i], "rb");
-            ASSERT(file != NULL);
-            ASSERT(fread(bytes[i], 1, sizeof(bytes[i]), file) == 5);
-            ASSERT(fclose(file) == 0);
-            ASSERT(memcmp(bytes[i], "fake\n", 5) == 0);
-        }
-        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
-        dlx_restore();
-        PASS();
-    }
+    failures += test_dev_land_vendor_dependencies();
 
     TEST("land: a dependency link whose only extra name sits in the "
         "leaf's own generation pool is repaired, not refused") {
@@ -3648,6 +3730,9 @@ int test_dev_land(void)
         ASSERT(dlx_rig_make(&rig, "gendeplink_rig"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
         ASSERT(dlx_write_dep(
             rig.clone,
@@ -3771,6 +3856,8 @@ int test_dev_land(void)
         PASS();
     }
 
+    failures += test_dev_land_missing_tor_makefile();
+
     TEST("land: vendor/tor as a real submodule gitlink is initialised "
         "before any archive is materialized, and a failed init refuses by "
         "name without ever copying one") {
@@ -3793,6 +3880,9 @@ int test_dev_land(void)
                                   rig.tip));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
         ASSERT(dlx_write_dep(
             rig.clone,
@@ -3852,6 +3942,9 @@ int test_dev_land(void)
                                  rig.tip));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
         ASSERT(dlx_write_dep(
             rig.clone,
@@ -3957,6 +4050,9 @@ int test_dev_land(void)
          * unrepaired hook drift. */
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
         ASSERT(dlx_write_dep(
             rig.clone,
@@ -4144,6 +4240,9 @@ int test_dev_land(void)
                                  rig.tip));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
         ASSERT(dlx_write_dep(
             rig.clone,
@@ -4201,6 +4300,9 @@ int test_dev_land(void)
                                  rig.tip));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
         ASSERT(dlx_write_dep(
             rig.clone,
