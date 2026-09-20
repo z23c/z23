@@ -762,6 +762,23 @@ static int test_mail_cwd_invariance(void)
         PASS();
     }
 
+    TEST("mail: public web references are admitted from every directory") {
+        static const char *const references[] = {
+            "reference https://example.org/reference",
+            "reference http://example.org/reference",
+            "reference HTTPS://example.org/reference",
+            "reference hTtP://example.org/reference",
+        };
+        char verdict[128];
+        dvx_isolate("cwd_web_reference");
+        for (size_t i = 0; i < sizeof(references) / sizeof(references[0]); i++) {
+            ASSERT(dvx_one_verdict(references[i], verdict, sizeof(verdict)));
+            ASSERT_STR_EQ(verdict, "");
+        }
+        dvx_restore();
+        PASS();
+    }
+
     TEST("mail: a foreign path is refused from every directory") {
         static const char *const hostile[] = {
             /* B's four fail-closed vectors. */
@@ -792,6 +809,9 @@ static int test_mail_cwd_invariance(void)
              * costs a cycle to find. Windows/Temp trips nothing. */
             "copied to C:\\Windows\\Temp\\notes.txt",
             "fetched C:/Windows/Temp/notes.txt",
+            "reference https://example.org/C:/Windows/Temp/notes.txt",
+            "reference https://example.org/../../secrets/x",
+            "reference https://example.org then C:/Windows/Temp/notes.txt",
         };
         char verdict[128];
         size_t i;

@@ -330,6 +330,21 @@ static bool dvm_has_api_key(const char *s)
 static bool dvm_has_drive_path(const char *s)
 {
     for (const char *p = s; *p; p++) {
+        /* A web scheme is not a one-letter Windows drive. Skip only the
+         * scheme itself: drive paths later in the URL remain refusals. */
+        static const char *const web[] = { "http://", "https://" };
+        size_t scheme_len = 0;
+        for (size_t i = 0; i < sizeof(web) / sizeof(web[0]); i++) {
+            size_t j = 0;
+            while (web[i][j] && p[j] &&
+                   tolower((unsigned char)p[j]) == web[i][j])
+                j++;
+            if (!web[i][j]) scheme_len = j;
+        }
+        if (scheme_len) {
+            p += scheme_len - 1;
+            continue;
+        }
         if (isalpha((unsigned char)*p) && p[1] == ':' &&
             (p[2] == '\\' || p[2] == '/'))
             return true;
