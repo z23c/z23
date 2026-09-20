@@ -4336,6 +4336,18 @@ static int ze_reproduce(const char *base, const char *root_hex,
     if (e3 != 6)
         printf("  zcode_verify: e2e reproduce-mismatch rc=%d out=%s\n",
                e3, out);
+    /* An output-path alias must not replace the reference before comparing. */
+    char aliased[4400];
+    snprintf(aliased, sizeof(aliased), "%s/build-report", emit3);
+    size_t alias_len = 0;
+    bool alias_ready = zv_read_file(tampered, rwire, sizeof(rwire),
+                                    &alias_len) &&
+                       zv_write_file(aliased, rwire, alias_len, 0600);
+    ZV_CHECK("e2e: aliased tampered reference prepared", alias_ready);
+    int e4 = zv_run_emit(root_hex, store, emit3, lock_hex, aliased,
+                         work, out, sizeof(out));
+    ZV_CHECK("e2e: output alias cannot manufacture reproduction MATCH",
+             e4 == 6 && strstr(out, "reproduction=MATCH") == NULL);
     return failures;
 }
 

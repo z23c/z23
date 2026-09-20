@@ -6370,8 +6370,9 @@ static int pv_emit_write_report(struct vcs_package_build_receipt *rec,
  * MATCH is printed on stdout; a divergence is a loud stderr MISMATCH naming
  * the first diverging rule, and the exit code says so (6) — reproduction
  * failure is a verdict, not an internal error. */
-static int pv_emit_check_reproduce(const char *reproduce_path,
-                                   struct vcs_package_build_receipt *rec,
+static int pv_emit_load_reference(const char *reproduce_path,
+                                   struct vcs_package_build_receipt *ref,
+                                   const char *work,
                                    struct vcs_package_recipe *recipe,
                                    struct vcs_package_manifest *manifest)
 {
@@ -6383,25 +6384,36 @@ static int pv_emit_check_reproduce(const char *reproduce_path,
         fprintf(stderr,
                 "%s: REPRODUCTION UNREADABLE: cannot read the reference "
                 "build receipt %s\n", PV_LOG, reproduce_path);
+        pv_rm_rf(work);
         vcs_package_recipe_free(recipe);
         vcs_package_manifest_free(manifest);
         return 3;
     }
-    struct vcs_package_build_receipt ref;
     enum vcs_package_build_error rerr =
-        vcs_package_build_parse(ref_wire, ref_len, &ref);
+        vcs_package_build_parse(ref_wire, ref_len, ref);
     free(ref_wire);
     if (rerr != VCS_PACKAGE_BUILD_OK) {
         fprintf(stderr,
                 "%s: REPRODUCTION UNREADABLE: %s is not a canonical build "
                 "receipt (%s)\n", PV_LOG, reproduce_path,
                 vcs_package_build_error_string(rerr));
+        pv_rm_rf(work);
         vcs_package_recipe_free(recipe);
         vcs_package_manifest_free(manifest);
         return 3;
     }
+    return PV_CONTINUE;
+}
+
+static int pv_emit_check_reproduce(const char *reproduce_path,
+                                   const struct vcs_package_build_receipt *ref,
+                                   struct vcs_package_build_receipt *rec,
+                                   struct vcs_package_recipe *recipe,
+                                   struct vcs_package_manifest *manifest)
+{
+    if (!reproduce_path) return PV_CONTINUE;
     struct vcs_reproduce_verdict verdict;
-    vcs_package_reproduce_compare(&ref, rec, &verdict);
+    vcs_package_reproduce_compare(ref, rec, &verdict);
     if (!verdict.reproduced) {
         fprintf(stderr,
                 "%s: REPRODUCTION MISMATCH (%s): %s — this build does NOT "
@@ -6490,7 +6502,12 @@ static int pv_emit_receipt_mode(
 {
     struct vcs_package_build_receipt rec;
     vcs_package_build_receipt_init(&rec);
-    int rc = pv_emit_add_deps(&rec, package_root, recipe_root, emit_lock_root,
+    /* Snapshot before staging: the reference may alias any output path. */
+    struct vcs_package_build_receipt reference;
+    int rc = pv_emit_load_reference(reproduce_path, &reference, work,
+                                    recipe, manifest);
+    if (rc != PV_CONTINUE) return rc;
+    rc = pv_emit_add_deps(&rec, package_root, recipe_root, emit_lock_root,
                               emit_deps, emit_dep_count, work, recipe,
                               manifest);
     if (rc != PV_CONTINUE) return rc;
@@ -6511,7 +6528,8 @@ static int pv_emit_receipt_mode(
     rc = pv_emit_write_report(&rec, emit_dir, work, recipe, manifest);
     if (rc != PV_CONTINUE) return rc;
 
-    rc = pv_emit_check_reproduce(reproduce_path, &rec, recipe, manifest);
+    rc = pv_emit_check_reproduce(reproduce_path, &reference, &rec, recipe,
+                                 manifest);
     if (rc != PV_CONTINUE) return rc;
 
     pv_emit_print_summary(&rec, emit_dir, build_ok, test_ok, build_fail_detail,
