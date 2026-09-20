@@ -20,6 +20,7 @@
 #include "zhello/zhello.h"
 #include "util/png_writer.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,6 +108,7 @@ struct zhello_options {
 	unsigned frames;   /* 0 = run the window until told to stop */
 	double seconds;	   /* windowed auto-exit; 0 = none */
 	const char *screenshot_path; /* final headless frame, as RGBA PNG */
+	const char *state_path;	     /* resume from and save back to this file */
 	int print_every_frame;
 	int show_help;
 };
@@ -123,6 +125,9 @@ static void zhello_parse_options(int argc, char **argv,
 		} else if (strncmp(arg, "--screenshot=", 13) == 0 &&
 			   arg[13] != '\0') {
 			opts->screenshot_path = arg + 13;
+		} else if (strncmp(arg, "--state=", 8) == 0 &&
+			   arg[8] != '\0') {
+			opts->state_path = arg + 8;
 		} else if (strncmp(arg, "--seconds=", 10) == 0) {
 			opts->seconds = strtod(arg + 10, NULL);
 		} else if (strcmp(arg, "--quiet") == 0) {
@@ -139,20 +144,59 @@ static void zhello_parse_options(int argc, char **argv,
 	}
 }
 
+/* Resume where the last run stopped. A missing file is a FIRST RUN and
+ * leaves the deterministic initial world alone; a file that is there but
+ * unreadable is a refusal, because quietly starting over on top of it is
+ * how someone's state disappears without anyone being told. */
+static bool zhello_resume(const struct zhello_options *opts,
+			  struct zhello_world *world)
+{
+	bool missing = false;
+	if (!opts->state_path)
+		return true;
+	if (zhello_world_load(world, opts->state_path, &missing)) {
+		(void)printf("zhello: resumed from %s at frame %llu\n",
+			     opts->state_path,
+			     (unsigned long long)world->frames);
+		return true;
+	}
+	if (missing)
+		return true;
+	(void)fprintf(stderr,
+		      "zhello: %s exists but is not a zhello state file; "
+		      "refusing to start over on top of it\n",
+		      opts->state_path);
+	return false;
+}
+
+/* Save on the way out, so closing and reopening carries on. A save that
+ * could not land is reported: a silent failure here is the whole bug. */
+static bool zhello_persist(const struct zhello_options *opts,
+			   const struct zhello_world *world)
+{
+	if (!opts->state_path)
+		return true;
+	if (zhello_world_save(world, opts->state_path))
+		return true;
+	(void)fprintf(stderr, "zhello: could not save state to %s\n",
+		      opts->state_path);
+	return false;
+}
+
 /* ── headless self-test ──────────────────────────────────────────────
  * Same painter, same cadence, no window. A frame only counts as presented
  * once its pixels are folded into a digest, so an optimizer (or a refactor)
  * cannot silently skip the work and still print present times.
  */
-static int zhello_selftest(const struct zhello_options *opts)
+static int zhello_selftest_frames(const struct zhello_options *opts,
+				  struct zhello_world *worldp)
 {
 	struct zhello_canvas canvas = {
 		.pixels = zhello_pixels,
 		.width = ZHELLO_WIDTH,
 		.height = ZHELLO_HEIGHT,
 	};
-	struct zhello_world world;
-	zhello_world_init(&world, canvas.width, canvas.height);
+	struct zhello_world world = *worldp;
 
 	const unsigned frames = opts->frames ? opts->frames : 120u;
 	const unsigned mid = frames > 1u ? frames / 2u : 0u;
@@ -225,7 +269,22 @@ static int zhello_selftest(const struct zhello_options *opts)
 		(void)printf("zhello screenshot: %s frame=%u size=%ux%u\n",
 		             opts->screenshot_path, frames, canvas.width,
 		             canvas.height);
+	*worldp = world;
 	return 0;
+}
+
+/* The self-test around its own state: resume, render, save. Kept apart from
+ * the frame loop so the loop stays one readable thing. */
+static int zhello_selftest(const struct zhello_options *opts)
+{
+	struct zhello_world world;
+	zhello_world_init(&world, ZHELLO_WIDTH, ZHELLO_HEIGHT);
+	if (!zhello_resume(opts, &world))
+		return 1;
+	const int rc = zhello_selftest_frames(opts, &world);
+	if (rc != 0)
+		return rc;
+	return zhello_persist(opts, &world) ? 0 : 1;
 }
 
 /* ── the real thing: a window on the desktop ───────────────────────── */
@@ -331,12 +390,16 @@ static void zhello_print_usage(void)
 {
 	(void)printf("zhello — the prompt-to-pixel demo\n"
 		     "usage: zhello [--frames=N] [--screenshot=FILE.png] "
-		     "[--seconds=S] [--quiet]\n"
+		     "[--seconds=S] [--state=FILE] [--quiet]\n"
 		     "  --frames=N   headless self-test: render N logical "
 		     "frames, no window, exit 0\n"
 		     "  --screenshot=FILE.png  save the final headless frame; "
 		     "requires --frames=N\n"
 		     "  --seconds=S  windowed run that exits by itself\n"
+		     "  --state=FILE resume from FILE and save back to it, so "
+		     "closing and reopening carries on;\n"
+		     "               put it in the package's data directory, "
+		     "which updates and rollbacks leave alone\n"
 		     "  --quiet      self-test: skip the per-frame lines\n");
 }
 

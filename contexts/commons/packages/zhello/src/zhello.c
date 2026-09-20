@@ -1,9 +1,13 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: zhello's frame painter. No windowing API appears in this file, so
- * the headless self-test exercises exactly what a windowed run draws. */
+ * Purpose: zhello's frame painter, and the saved world that lets a reopened
+ * window carry on where the last one stopped. No windowing API appears in
+ * this file, so the headless self-test exercises exactly what a windowed run
+ * draws and exactly what it would have saved. */
 
 #include "zhello/zhello.h"
 
+#include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Two palette stops the background gradient travels between, in the same
@@ -157,4 +161,108 @@ uint64_t zhello_canvas_digest(const struct zhello_canvas *canvas)
 		hash *= 1099511628211ULL;
 	}
 	return hash;
+}
+
+/* ── remembering where it was ────────────────────────────────────────────
+ *
+ * The wire is described in zhello.h. Nothing here reads or writes a struct
+ * directly: every field goes through the little-endian helpers below, so
+ * the file one machine writes is the file another machine reads.
+ */
+
+static void zhello_put_u64(uint8_t *out, uint64_t v)
+{
+	for (unsigned i = 0; i < 8u; i++)
+		out[i] = (uint8_t)(v >> (8u * i));
+}
+
+static uint64_t zhello_get_u64(const uint8_t *in)
+{
+	uint64_t v = 0;
+	for (unsigned i = 0; i < 8u; i++)
+		v |= (uint64_t)in[i] << (8u * i);
+	return v;
+}
+
+/* A double travels as its own bit pattern. memcpy, not a cast through a
+ * pointer: the cast is the aliasing violation this repository's -Werror
+ * build is right to reject. */
+static void zhello_put_f64(uint8_t *out, double v)
+{
+	uint64_t bits;
+	memcpy(&bits, &v, sizeof bits);
+	zhello_put_u64(out, bits);
+}
+
+static double zhello_get_f64(const uint8_t *in)
+{
+	const uint64_t bits = zhello_get_u64(in);
+	double v;
+	memcpy(&v, &bits, sizeof v);
+	return v;
+}
+
+bool zhello_world_save(const struct zhello_world *world, const char *path)
+{
+	if (!world || !path)
+		return false;
+
+	uint8_t wire[ZHELLO_STATE_WIRE_BYTES];
+	memcpy(wire, ZHELLO_STATE_MAGIC, ZHELLO_STATE_MAGIC_BYTES);
+	wire[8] = (uint8_t)ZHELLO_STATE_VERSION;
+	wire[9] = (uint8_t)(ZHELLO_STATE_VERSION >> 8);
+	zhello_put_f64(wire + 10, world->x);
+	zhello_put_f64(wire + 18, world->y);
+	zhello_put_f64(wire + 26, world->vx);
+	zhello_put_f64(wire + 34, world->vy);
+	zhello_put_u64(wire + 42, world->frames);
+
+	FILE *f = fopen(path, "wb");
+	if (!f)
+		return false;
+	const bool wrote = fwrite(wire, 1, sizeof wire, f) == sizeof wire;
+	/* fclose can fail where fwrite did not: a buffered write only reaches
+	 * the file system here. Reporting success before this returns is how a
+	 * save that never landed looks like one that did. */
+	return fclose(f) == 0 && wrote;
+}
+
+bool zhello_world_load(struct zhello_world *world, const char *path,
+		       bool *missing)
+{
+	if (missing)
+		*missing = false;
+	if (!world || !path)
+		return false;
+
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		/* No file is a FIRST RUN, not a failure. Any other open error
+		 * is a real one and is reported as such. */
+		if (missing && errno == ENOENT)
+			*missing = true;
+		return false;
+	}
+
+	uint8_t wire[ZHELLO_STATE_WIRE_BYTES];
+	const size_t got = fread(wire, 1, sizeof wire, f);
+	/* One byte past the wire means this is not the file we think it is, so
+	 * the read asks for one more than it wants and requires that to be the
+	 * end. */
+	const bool at_end = fgetc(f) == EOF;
+	(void)fclose(f);
+	if (got != sizeof wire || !at_end)
+		return false;
+	if (memcmp(wire, ZHELLO_STATE_MAGIC, ZHELLO_STATE_MAGIC_BYTES) != 0)
+		return false;
+	const uint16_t version = (uint16_t)(wire[8] | (wire[9] << 8));
+	if (version != ZHELLO_STATE_VERSION)
+		return false;
+
+	world->x = zhello_get_f64(wire + 10);
+	world->y = zhello_get_f64(wire + 18);
+	world->vx = zhello_get_f64(wire + 26);
+	world->vy = zhello_get_f64(wire + 34);
+	world->frames = zhello_get_u64(wire + 42);
+	return true;
 }
