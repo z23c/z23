@@ -4914,40 +4914,82 @@ static int pv_setup_dep_plan_and_fast_cache(
     return PV_CONTINUE;
 }
 
-static bool pv_fast_asm_token(char token[8], size_t len)
+static bool pv_fast_unsafe_token(char token[16], size_t len)
 {
-    if (len >= 8)
+    if (len >= 16)
         return false;
     token[len] = '\0';
     return strcmp(token, "asm") == 0 || strcmp(token, "__asm") == 0 ||
            strcmp(token, "__asm__") == 0;
 }
 
-/* Assembler directives can read files absent from the preprocessor closure.
- * Until those inputs are captured, even assembler labels are ineligible.
- * Matching tokens inside strings is conservative: it can only lose reuse. */
+/* Preserve unquoted GNU attributes (e.g. stddef's alignment declarations).
+ * Quoted arguments and directive/attribute syntax remain ineligible. */
+static bool pv_fast_attribute_cacheable(FILE *f, int c)
+{
+    while (c != EOF && isspace((unsigned char)c)) c = fgetc(f);
+    if (c != '(') return false;
+    unsigned depth = 1;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == '"' || c == '\'' || c == '\\' || c == '#' ||
+            c == '[' || c == '<') return false;
+        if (c == '(' && ++depth > 64) return false;
+        if (c == ')' && --depth == 0) return true;
+    }
+    return false;
+}
+
+static bool pv_fast_attribute_token(const char *token, size_t len)
+{
+    return (len == 11 && memcmp(token, "__attribute", 11) == 0) ||
+           (len == 13 && memcmp(token, "__attribute__", 13) == 0);
+}
+
+static bool pv_fast_unsafe_punct(int c, int previous, int last_nonspace)
+{
+    return c == '#' || (c == '[' && last_nonspace == '[') ||
+           (c == ':' && previous == '<');
+}
+
+/* Assembly, attributes and retained directives can name inputs absent from
+ * preprocessing dependencies. Bypass quoted GNU attributes and all C23
+ * attributes, including bracket digraphs, until their closure is captured.
+ * Matching these
+ * tokens inside strings is conservative: it can only lose reuse. */
 static bool pv_fast_preproc_cacheable(const char *path, bool *eligible)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
         return false;
-    char token[8];
+    char token[16];
     size_t len = 0;
     int c;
+    int previous = 0, last_nonspace = 0;
     *eligible = true;
     while ((c = fgetc(f)) != EOF) {
+        if (pv_fast_unsafe_punct(c, previous, last_nonspace)) {
+            *eligible = false;
+            break;
+        }
+        previous = c;
+        if (!isspace((unsigned char)c)) last_nonspace = c;
         if (isalnum((unsigned char)c) || c == '_' || c == '$' || c >= 128) {
             if (len < sizeof(token))
                 token[len++] = (char)c;
         } else {
-            if (pv_fast_asm_token(token, len)) {
+            if (pv_fast_attribute_token(token, len) &&
+                !pv_fast_attribute_cacheable(f, c)) {
+                *eligible = false;
+                break;
+            }
+            if (pv_fast_unsafe_token(token, len)) {
                 *eligible = false;
                 break;
             }
             len = 0;
         }
     }
-    if (pv_fast_asm_token(token, len))
+    if (pv_fast_unsafe_token(token, len) || pv_fast_attribute_token(token, len))
         *eligible = false;
     bool ok = ferror(f) == 0;
     fclose(f);

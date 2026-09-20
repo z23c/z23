@@ -503,9 +503,10 @@ static bool fcw_asm_path(char out[4096], const char *base, const char *name)
     return n > 0 && n < 4096;
 }
 
-static bool fcw_asm_fixture_init(struct fcw_asm_fixture *f, const char *base)
+static bool fcw_asm_fixture_init(struct fcw_asm_fixture *f, const char *base,
+                                  bool attribute)
 {
-    if (!fcw_asm_path(f->pkg, base, "asm-pkg") ||
+    if (!fcw_asm_path(f->pkg, base, attribute ? "attribute-pkg" : "asm-pkg") ||
         !fcw_asm_path(f->data, f->pkg, "README.md") ||
         !fcw_asm_path(f->source, f->pkg, "src/tiny_lines.c") ||
         !fcw_asm_path(f->recipe, base, "asm-recipe.wire") ||
@@ -520,10 +521,12 @@ static bool fcw_asm_fixture_init(struct fcw_asm_fixture *f, const char *base)
     }
     FILE *source = fopen(f->source, "ab");
     if (!source) return false;
-    int written = fprintf(source,
-        "\n#define FCW_ASM __asm__\n"
-        "FCW_ASM(\".pushsection .rodata\\n.incbin \\\"%s\\\"\\n.popsection\\n\");\n",
-        f->data);
+    const char *format = attribute
+        ? "\nconst unsigned char fcw_section_data __attribute__((section("
+          "\".rodata\\n.incbin \\\"%s\\\"\\n#\"))) = 7;\n"
+        : "\n#define FCW_ASM __asm__\n"
+          "FCW_ASM(\".pushsection .rodata\\n.incbin \\\"%s\\\"\\n.popsection\\n\");\n";
+    int written = fprintf(source, format, f->data);
     bool ok = written > 0;
     if (fclose(source) != 0) ok = false;
     return ok;
@@ -574,12 +577,13 @@ static bool fcw_asm_same_output(const char *left, const char *right,
 }
 
 static int fcw_asm_bypass(const char *base, const char *worker,
-                          const struct pubkey *pk)
+                          const struct pubkey *pk, bool attribute)
 {
     int failures = 0;
     struct fcw_asm_fixture f;
-    bool ready = fcw_asm_fixture_init(&f, base);
-    FC_CHECK("macro-expanded incbin fixture prepared separately", ready);
+    bool ready = fcw_asm_fixture_init(&f, base, attribute);
+    FC_CHECK(attribute ? "section-attribute incbin fixture prepared separately"
+                       : "macro-expanded incbin fixture prepared separately", ready);
     if (!ready) return failures;
     uint8_t roots[3][32];
     struct fcw_build_result runs[3] = {0};
@@ -604,6 +608,63 @@ static int fcw_asm_bypass(const char *base, const char *worker,
              fcw_asm_same_output(f.emit[1], f.emit[2], "build-report", true));
     FC_CHECK("plan shared-cache library equals no-plan empty-cache control",
              fcw_asm_same_output(f.emit[1], f.emit[2], "lib/libtiny-lines.a", true));
+    return failures;
+}
+static bool fcw_attribute_spelling(const char *base, const char *worker,
+                                   const struct pubkey *pk, const char *suffix,
+                                   bool reusable)
+{
+    struct fcw_asm_fixture f;
+    if (!fcw_mkdir_p(base) || !fcw_asm_fixture_init(&f, base, true)) return false;
+    size_t len = 0;
+    uint8_t *source = fcw_read_file(
+        "tests/harness/fixtures/zcode/tiny-lines/src/tiny_lines.c", 65536, &len);
+    if (!source) return false;
+    bool ok = fcw_write_file(f.source, source, len);
+    free(source);
+    FILE *out = ok ? fopen(f.source, "ab") : NULL;
+    if (!out) return false;
+    ok = fputs(suffix, out) >= 0;
+    if (fclose(out) != 0) ok = false;
+    struct fcw_build_result result = {0};
+    uint8_t root[32];
+    ok = ok && fcw_asm_build(&f, worker, pk, 0, &result, root);
+    return ok && result.cache_complete && result.hits == 0 &&
+           result.misses == (reusable ? 1u : 0u);
+}
+
+static int fcw_attribute_spellings(const char *base, const char *worker,
+                                  const struct pubkey *pk)
+{
+    static const char *const cases[] = {
+        "\nconst int fcw_attr __attribute__((section(\"guard_data\"))) = 1;\n",
+        "\nconst int fcw_attr __attribute((section(\"guard_data\"))) = 1;\n",
+        "\n[ [gnu::used] ] const int fcw_attr = 1;\n",
+        "\n<: <:gnu::used:> :> const int fcw_attr = 1;\n",
+        "\n_Pragma(\"GCC diagnostic push\")\nconst int fcw_attr = 1;\n",
+        "\nconst int __attribute__suffix __attribute__((aligned(8))) = 1;\n",
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char path[4096], name[48];
+        (void)snprintf(name, sizeof(name), "attribute-spelling-%zu", i);
+        bool ok = fcw_asm_path(path, base, name) &&
+            fcw_attribute_spelling(path, worker, pk, cases[i], i == 5);
+        FC_CHECK(name, ok);
+    }
+    return failures;
+}
+
+static int fcw_attribute_bypass(const char *base, const char *worker,
+                                const struct pubkey *pk)
+{
+    int failures = 0;
+    char attribute_base[4096];
+    bool ready = fcw_asm_path(attribute_base, base, "attribute") &&
+                 fcw_mkdir_p(attribute_base);
+    FC_CHECK("attribute fixture directory prepared", ready);
+    if (ready) failures += fcw_asm_bypass(attribute_base, worker, pk, true);
+    failures += fcw_attribute_spellings(base, worker, pk);
     return failures;
 }
 #endif
@@ -862,7 +923,8 @@ static int test_fastobj_carrier_platform_arm(void)
              ids_ok && strstr(rec1.flags, "asan,ubsan=clean") != NULL);
 
 #if defined(__linux__)
-    failures += fcw_asm_bypass(base, worker, &pk);
+    failures += fcw_asm_bypass(base, worker, &pk, false);
+    failures += fcw_attribute_bypass(base, worker, &pk);
 #endif
 
     /* 11. the testless standard-profile refusal, both sides. A TESTLESS
