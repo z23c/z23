@@ -2431,6 +2431,65 @@ static bool gw_mail_post(const char *to, const char *kind, const char *body,
     return ok;
 }
 
+/* One transport-delivered row: a peer's independently-numbered row lands
+ * in this host's inbox file, the way a lower-seq stream arrives after a
+ * high global water mark. The gateway children share this group's state
+ * root, so the next tools/call brief reads it. */
+static bool gw_seed_inbox(const char *peer, const char *ts, long long seq,
+                          const char *from, const char *to, const char *kind,
+                          const char *body, const char *ref)
+{
+    char path[1200];
+    FILE *f;
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/mail/inbox.%s.jsonl",
+                     g_gw_state, peer);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    f = fopen(path, "a");
+    if (!f)
+        return false;
+    n = fprintf(f,
+                "{\"seq\":%lld,\"ts\":\"%s\",\"from\":\"%s\",\"to\":\"%s\","
+                "\"kind\":\"%s\",\"body\":\"%s\",\"ref\":\"%s\"}\n",
+                seq, ts, from, to, kind, body, ref);
+    if (n <= 0 || fclose(f) != 0)
+        return false;
+    return true;
+}
+
+/* cursor_token out of a tools/call brief body (the gateway escapes quotes
+ * in content, so the value ends at the next quote byte). False when the
+ * reply carries no usable watermark. */
+static bool gw_body_token(const char *body, char *out, size_t cap)
+{
+    const char *p;
+    size_t n = 0;
+    if (!body || !out || cap == 0)
+        return false;
+    p = strstr(body, "cursor_token");
+    if (!p)
+        return false;
+    p = strchr(p, ':');
+    if (!p)
+        return false;
+    p++;
+    if (*p == '\\')
+        p++;
+    if (*p != '"')
+        return false;
+    p++;
+    /* The reply body is escaped JSON content, so the value's closing
+     * quote arrives as \" — stop before the backslash instead of
+     * copying it into the token (a trailing backslash would escape
+     * the quote of the next request and break parsing). */
+    while (*p && *p != '"' && *p != '\\' && n + 1 < cap)
+        out[n++] = *p++;
+    out[n] = '\0';
+    if (n == 0)
+        return false;
+    return *p == '"' || (*p == '\\' && *(p + 1) == '"');
+}
+
 /* One in-process queue cancel. True when the leaf passes; state holds the
  * reply state and ecode the refusal code (empty on success). */
 static bool gw_qcancel(const char *name, char *state, size_t cap,
@@ -2562,6 +2621,128 @@ static bool gw_qreap_scan(const char *name, char *verdict, size_t vcap,
     }
     gw_qend(&c);
     return ok;
+}
+
+/* The caller contract: a schema-driven director only sends what the
+ * served schema names. brief's integer cursor never covered an
+ * independently-numbered stream, so the schema must admit the reply's
+ * cursor_token as `since` — otherwise the real caller can never resume
+ * per-stream and fresh lower-seq rows stay invisible to it. */
+static int gw_t_brief_token(void)
+{
+    int failures = 0;
+
+    TEST("gateway: steer_brief schema admits a resume token for since") {
+        int st = 0;
+        char *b = gw_post("/steer",
+                          "{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":"
+                          "\"tools/list\"}",
+                          &st);
+        ASSERT(b != NULL);
+        ASSERT_EQ(st, 200);
+        ASSERT(gw_body_has(b, "\"name\":\"steer_brief\""));
+        ASSERT(gw_body_has(b, "\"since\":{\"type\":[\"integer\",\"string\"]}"));
+        ASSERT(gw_body_has(b, "cursor_token"));
+        free(b);
+        PASS();
+    }
+
+    TEST("gateway: a token since carries a lower-seq row exactly once") {
+        const char *node = gw_bin("Z23_TEST_NODE_BIN", GW_TEST_NODE_DEFAULT);
+        char gid[64], args[2048], token[1024], token2[1024];
+        char *b;
+        int st = 0, sn;
+        ASSERT(gw_mint(node, "brief,send,evidence", gid));
+        /* A real send first so the mail tree exists; the outbox row is
+         * the low water everything else numbers under. */
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"from\":\"" GW_SENDER "\","
+                      "\"items\":[{\"to\":\"gw-worker\","
+                      "\"body\":\"token probe\","
+                      "\"ref\":\"gw-token-probe\","
+                      "\"idempotency_key\":\"gw-token-key-1\"}]}",
+                      gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_send", args, 51, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        free(b);
+        /* Stream X reaches a high seq; poll zero shows it and returns
+         * the composite watermark. */
+        ASSERT(gw_seed_inbox("stream-x", "2026-09-20T00:00:00Z", 1192, "x",
+                             "mgr", "note", "x-high", "ref-gw-x"));
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":0}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 52, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "\"ref\\\":\\\"ref-gw-x\\\""));
+        ASSERT(gw_body_token(b, token, sizeof(token)));
+        free(b);
+        /* Stream Y emits a LOWER seq with a NEWER timestamp: the token
+         * resume must show it, where the integer cursor never could. */
+        ASSERT(gw_seed_inbox("stream-y", "2026-09-20T00:00:01Z", 980, "y",
+                             "mgr", "note", "y-fresh", "ref-gw-y"));
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":\"%s\"}", gid, token);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 53, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "\"ref\\\":\\\"ref-gw-y\\\""));
+        ASSERT(gw_body_token(b, token2, sizeof(token2)));
+        free(b);
+        /* The advanced watermark shows it exactly once. */
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":\"%s\"}", gid, token2);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 54, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(!gw_body_has(b, "ref-gw-y"));
+        free(b);
+        PASS();
+    }
+
+    TEST("gateway: a stale token refuses typed and replays from the start") {
+        const char *node = gw_bin("Z23_TEST_NODE_BIN", GW_TEST_NODE_DEFAULT);
+        char gid[64], args[2048], token[1024];
+        char *b;
+        int st = 0, sn;
+        ASSERT(gw_mint(node, "brief,send,evidence", gid));
+        /* A live stream the forged token names past its end: the leaf
+         * refuses MAIL_CURSOR_STALE instead of guessing, and the row
+         * stays hidden — never silently replayed or skipped. */
+        ASSERT(gw_seed_inbox("stream-s", "2026-09-20T00:00:02Z", 977, "s",
+                             "mgr", "note", "s-anchored", "ref-gw-stale"));
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":"
+                      "\"0|inbox.stream-s.jsonl:99999999\"}",
+                      gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 55, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "dev.agent.mail"));
+        ASSERT(gw_body_has(b, "MAIL_CURSOR_STALE"));
+        ASSERT(!gw_body_has(b, "ref-gw-stale"));
+        free(b);
+        /* The supported recovery replays from the start: the row shows
+         * with a usable watermark. */
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":0}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 56, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "\"ref\\\":\\\"ref-gw-stale\\\""));
+        ASSERT(gw_body_token(b, token, sizeof(token)));
+        free(b);
+        PASS();
+    }
+_test_next:;
+    return failures;
 }
 
 static int gw_t_compat_pass(void)
@@ -3212,6 +3393,9 @@ int test_fleet_gateway(void)
     failures += gw_t_front_hello_verdicts();
     failures += gw_t_front_hello_truncated();
     failures += gw_t_front_hello_malformed();
+    /* Last: seeds inbox streams into the shared group state, so it runs
+     * after every brief-content assertion. */
+    failures += gw_t_brief_token();
     /* No ASSERT lives here; the stop always runs on fall-through. */
     gw_stop();
     if (had_xdg)

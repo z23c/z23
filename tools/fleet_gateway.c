@@ -928,8 +928,11 @@ struct gw_tool {
 
 static const struct gw_tool gw_tools[] = {
     {"steer_brief", "brief",
-     "Fleet situation: agents, work, blockers, capacity, candidates, evidence refs, changes since a cursor.",
-     "{\"type\":\"object\",\"properties\":{\"grant\":{\"type\":\"string\"},\"since\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}"},
+     "Fleet situation: agents, work, blockers, capacity, candidates, evidence refs, changes since a cursor. "
+     "Preferred: pass the reply's cursor_token string as since to resume every stream exactly once. "
+     "An integer is a legacy global floor that hides independently-numbered streams. "
+     "A refused token names dev.agent.mail in missing[]; replay from the start.",
+     "{\"type\":\"object\",\"properties\":{\"grant\":{\"type\":\"string\"},\"since\":{\"type\":[\"integer\",\"string\"]},\"limit\":{\"type\":\"integer\"}}}"},
     {"steer_send", "send",
      "One bounded batch of directives to named agents; retries with the same idempotency keys never duplicate. Every item carries a ref naming the work: 1-64 of [A-Za-z0-9_.-], never a path. An agent answers a directive with kind result under the same ref.",
      "{\"type\":\"object\",\"required\":[\"items\"],\"properties\":{\"grant\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"maxItems\":8,\"items\":{\"type\":\"object\",\"required\":[\"to\",\"body\",\"ref\",\"idempotency_key\"],\"properties\":{\"to\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"},\"ref\":{\"type\":\"string\",\"pattern\":\"^[A-Za-z0-9_.-]{1,64}$\"},\"idempotency_key\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\",\"enum\":[\"directive\",\"result\"]}}}},\"from\":{\"type\":\"string\"}}}"},
