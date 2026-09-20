@@ -5,6 +5,7 @@
 set -euo pipefail
 fail() { printf 'c23-cache-adversarial: %s\n' "$*" >&2; exit 1; }
 [[ $# == 2 ]] || fail 'usage: c23-cache-adversarial.sh BIN_DIR NEW_OUTPUT_DIR'
+[[ $(uname -s) == Linux ]] || fail 'compiler identity fixture currently requires Linux GCC'
 root=$(cd "$(dirname "$0")/../.." && pwd -P)
 cd "$root"
 binaries=$(realpath "$1")
@@ -128,6 +129,32 @@ for kind in corrupt missing-object missing-sidecar; do
         fail "$kind failed for an unrelated reason"
 done
 
+# Compiler identity changes must invalidate actual verifier cache lookups.
+# COMPILER_PATH affects capsule discovery; confined compiler children scrub
+# it. This tests capture/cache binding, not alternate-backend execution.
+backend_dir="$output/compiler-backend"
+mkdir "$backend_dir"
+cp "$(/usr/bin/cc -print-prog-name=cc1)" "$backend_dir/cc1"
+printf '\nZ23 identity fixture A\n' >> "$backend_dir/cc1"
+COMPILER_PATH="$backend_dir" "$node" zcode work toolchain > "$output/compiler-before.json"
+COMPILER_PATH="$backend_dir" run compiler-cold "$output/compiler-cache"
+passed compiler-cold
+counters compiler-cold 0 3
+COMPILER_PATH="$backend_dir" run compiler-warm "$output/compiler-cache"
+passed compiler-warm
+counters compiler-warm 3 0
+cp -p "$backend_dir/cc1" "$output/compiler.original"
+backend_bytes=$(wc -c < "$backend_dir/cc1")
+printf B | dd of="$backend_dir/cc1" bs=1 seek="$((backend_bytes - 2))" conv=notrunc status=none
+touch -r "$output/compiler.original" "$backend_dir/cc1"
+COMPILER_PATH="$backend_dir" "$node" zcode work toolchain > "$output/compiler-after.json"
+[[ $(field "$output/compiler-before.json" data.capsule_root) != \
+   "$(field "$output/compiler-after.json" data.capsule_root)" ]] || fail 'compiler bytes did not change capsule'
+COMPILER_PATH="$backend_dir" run compiler-change "$output/compiler-cache"
+passed compiler-change
+counters compiler-change 0 3
+COMPILER_PATH="$backend_dir" control compiler-change
+
 # Compiler identity binding at the carrier boundary: changing the capsule
 # under an existing key must prevent export. This is not a live compiler
 # replacement test; the host toolchain remains untouched.
@@ -149,5 +176,5 @@ fi
 grep -q 'sidecar key_components hash to' "$output/compiler-binding.log" ||
     fail 'compiler binding failed for unrelated reason'
 sha256sum -c "$output/executables.sha256"
-printf 'PASS: header, profile flags, generated C, corrupt object, interrupted pair; compiler capsule carrier binding\n'
-printf 'NOT COVERED: replacement of an actual compiler executable\n'
+printf 'PASS: header, profile flags, generated C, corrupt object, interrupted pair; compiler-byte capture/cache and capsule carrier binding\n'
+printf 'NOT COVERED: alternate-backend execution inside the confined compiler\n'
