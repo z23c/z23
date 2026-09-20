@@ -2496,13 +2496,27 @@ $(BUILD_DIR)/$(1)/main.o: contexts/commons/packages/$(1)/app/main.c \
 	@mkdir -p $$(dir $$@)
 	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include -c $$< -o $$@
 
+# The package's OWN test — the one the package worker runs when this app is
+# installed as a zcode package. Built and run here too, because a test that
+# only the package path ever runs is a test nobody runs while developing it,
+# and it rots silently. It links the package's library TU and nothing else:
+# no window layer, no main.o, so it needs no display to pass.
+$(BUILD_DIR)/$(1)/test_$(1).o: contexts/commons/packages/$(1)/tests/test_$(1).c \
+		contexts/commons/packages/$(1)/include/$(1)/$(1).h
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include -c $$< -o $$@
+
+$(BIN_DIR)/$(1)-test: $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/test_$(1).o
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) $$^ -o $$@
+
 $(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o \
 		$(GUI_APP_COMMON_OBJS)
 	@mkdir -p $$(dir $$@)
 	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include $$^ \
 		$(GUI_APP_HOST_LIBS) -o $$@
 
-.PHONY: $(1) $(1)-selftest $(1)-clean $(1)-app
+.PHONY: $(1) $(1)-selftest $(1)-test $(1)-clean $(1)-app
 # Run the window. `make $(1) $(1)_ARGS=--seconds=2` returns on its own;
 # otherwise Esc or the window close button ends it. The lookup key is the
 # lowercase package name (the template has no case-conversion), and every app
@@ -2514,10 +2528,14 @@ $(1): $(BIN_DIR)/$(1)
 	$(BIN_DIR)/$(1) $($(1)_ARGS)
 # The headless gate: presents N logical frames, prints per-frame present
 # times, exits 0. No window is ever created.
-$(1)-selftest: $(BIN_DIR)/$(1)
+# The headless gate runs BOTH halves: the package's own test, then the app
+# presenting frames. Either one failing fails the gate.
+$(1)-selftest: $(BIN_DIR)/$(1) $(1)-test
 	$(BIN_DIR)/$(1) --frames=120 --quiet
+$(1)-test: $(BIN_DIR)/$(1)-test
+	$(BIN_DIR)/$(1)-test
 $(1)-clean:
-	rm -f $(BIN_DIR)/$(1) $(BUILD_DIR)/$(1)/*.o
+	rm -f $(BIN_DIR)/$(1) $(BIN_DIR)/$(1)-test $(BUILD_DIR)/$(1)/*.o
 # Ship it: the minimal launchable, byte-reproducible .app over the binary we
 # just built (same bundler `make app-bundle` drives; same output dir).
 $(1)-app: $(BIN_DIR)/$(1)
