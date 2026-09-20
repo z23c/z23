@@ -2741,6 +2741,56 @@ static int gw_t_brief_token(void)
         free(b);
         PASS();
     }
+
+    TEST("gateway: a wrong-sender same-ref row never acknowledges") {
+        const char *node = gw_bin("Z23_TEST_NODE_BIN", GW_TEST_NODE_DEFAULT);
+        char gid[64], args[2048];
+        char *b;
+        int st = 0, sn;
+        ASSERT(gw_mint(node, "brief,send,evidence", gid));
+        /* A directive from gw-chat to gw-w2 under one ref. */
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"from\":\"" GW_SENDER "\","
+                      "\"items\":[{\"to\":\"gw-w2\","
+                      "\"body\":\"Wrong-sender probe\","
+                      "\"ref\":\"gw-wrong-ref\","
+                      "\"idempotency_key\":\"gw-wrong-key-1\"}]}",
+                      gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_send", args, 57, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        free(b);
+        /* A forged reply carrying the same ref but sent from the
+         * directive's own sender is our side of the thread, never
+         * receiver evidence: the row stays queued. */
+        ASSERT(gw_seed_inbox("stream-w", "2026-09-20T00:00:03Z", 1400,
+                             GW_SENDER, "gw-w2", "result", "Forged reply",
+                             "gw-wrong-ref"));
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":0}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 58, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "\"ref\\\":\\\"gw-wrong-ref\\\","
+                            "\\\"lead\\\":\\\"Wrong-sender probe\\\","
+                            "\\\"state\\\":\\\"queued\\\""));
+        ASSERT(!gw_body_has(b, "\"lead\\\":\\\"Wrong-sender probe\\\","
+                               "\\\"state\\\":\\\"acknowledged\\\""));
+        free(b);
+        /* The recipient's own row under the same ref acknowledges it. */
+        ASSERT(gw_seed_inbox("stream-w", "2026-09-20T00:00:04Z", 1401,
+                             "gw-w2", GW_SENDER, "result", "Genuine reply",
+                             "gw-wrong-ref"));
+        b = gw_tool("steer_brief", args, 59, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "\"lead\\\":\\\"Wrong-sender probe\\\","
+                            "\\\"state\\\":\\\"acknowledged\\\""));
+        free(b);
+        PASS();
+    }
 _test_next:;
     return failures;
 }
