@@ -1,10 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: zcsv test suite.  Exits nonzero on the first failure. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "zcsv/zcsv.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 static int failures = 0;
 
@@ -239,6 +245,30 @@ static void test_writer_row_and_roundtrip(void) {
 #include "../app/main.c"
 #undef main
 
+static void test_output_errors(void) {
+#if !defined(_WIN32)
+  /* /dev/null is already permitted by the package verifier. Closing the
+   * stream's descriptor makes libc report a real write error without
+   * needing a device or filesystem grant outside the package sandbox. */
+  for (unsigned mode = 0; mode < 3; mode++) {
+    FILE *out = fopen("/dev/null", "w");
+    CHECK(out != NULL);
+    if (!out) continue;
+    char buffer[BUFSIZ];
+    CHECK(setvbuf(out, buffer, _IOFBF, sizeof(buffer)) == 0);
+    CHECK(fputc('x', out) == 'x');
+    CHECK(ferror(out) == 0);
+    if (mode != 0) CHECK(close(fileno(out)) == 0);
+    if (mode == 2) {
+      CHECK(fflush(out) == EOF);
+      CHECK(ferror(out) != 0);
+    }
+    CHECK(finish_output(out) == (mode == 0 ? 0 : 2));
+    (void)fclose(out);
+  }
+#endif
+}
+
 static void test_table_layout(void) {
   const struct { const char *input; const char *display; } cases[] = {
     {"", ""}, {"ordinary,\"text\"", "ordinary,\"text\""},
@@ -287,6 +317,7 @@ int main(void) {
   test_writer_quoting();
   test_writer_row_and_roundtrip();
   test_table_layout();
+  test_output_errors();
   if (failures) {
     fprintf(stderr, "zcsv: %d failure(s)\n", failures);
     return 1;

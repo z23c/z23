@@ -25,6 +25,14 @@ typedef struct {
   size_t widths_cap;
 } stats;
 
+static int finish_output(FILE *out) {
+  if (fflush(out) == EOF || ferror(out)) {
+    fprintf(stderr, "csvtab: write error\n");
+    return 2;
+  }
+  return 0;
+}
+
 /* Lay out one bounded cell; never split a visible CR/LF marker. */
 static size_t layout_field(const zcsv_field *field, char out[COL_WIDTH_MAX]) {
   size_t used = 0, last = 0;
@@ -155,7 +163,7 @@ int main(int argc, char **argv) {
     printf("rows: %zu\nfields(max): %zu\nbytes: %zu\n", s.rows, s.max_fields,
            len);
     free(s.widths);
-    return 0;
+    return finish_output(stdout);
   }
 
   /* Pass 2: render. */
@@ -171,5 +179,5 @@ int main(int argc, char **argv) {
     return 1;
   }
   free(s.widths);
-  return 0;
+  return finish_output(stdout);
 }
