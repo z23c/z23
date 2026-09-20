@@ -267,8 +267,10 @@ static int fcw_check_perf(const struct fcw_build_result *cold,
     FC_CHECK("cold and warm builds count tests independently of compiler names",
              cold->perf_complete && warm->perf_complete &&
              cold->test_processes > 0 &&
-             cold->test_processes == warm->test_processes &&
-             cold->compiler_processes > warm->compiler_processes);
+             cold->test_processes == warm->test_processes);
+    /* The warm plan adds one macro probe per TU and saves one compile. */
+    FC_CHECK("plan macro probes exactly offset reused object compiles",
+             cold->compiler_processes == warm->compiler_processes);
     FC_CHECK("process role counts partition all launched children",
              cold->processes == cold->compiler_processes +
                  cold->test_processes + cold->other_processes &&
@@ -284,6 +286,17 @@ static bool fcw_testless_perf(const struct fcw_build_result *run)
     return run->perf_complete && run->test_processes == 0;
 }
 
+static void fcw_candidate_options(const char **argv, bool allow_testless,
+                                   bool with_plan, const char *plan_arg)
+{
+    size_t n = 0;
+    if (allow_testless)
+        argv[n++] = "--allow-testless-standard";
+    if (with_plan)
+        argv[n++] = plan_arg;
+    argv[n] = NULL;
+}
+
 /* Spawn the verifier in candidate proof mode with a fast cache, capture
  * merged stdout/stderr, and parse the fast-cache counters line. When
  * allow_testless is true the run passes --allow-testless-standard (the
@@ -292,12 +305,14 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
                                 const char *pkg_abs, const char *recipe_abs,
                                 const char *emit_dir, const char *lock_hex,
                                 const char *cache_dir, bool allow_testless,
+                                bool with_plan,
                                 struct fcw_build_result *out)
 {
     memset(out, 0, sizeof(*out));
     out->exit_code = -1;
     char source_arg[4200], recipe_arg[4200], emit_arg[4096],
-         lock_arg[128], fast_arg[4096], name_arg[128], cpu_arg[64];
+         lock_arg[128], fast_arg[4096], name_arg[128], cpu_arg[64],
+         plan_arg[4200];
     if (snprintf(source_arg, sizeof(source_arg),
                  "--zbuild-package-source=%s", pkg_abs) >=
             (int)sizeof(source_arg) ||
@@ -313,6 +328,8 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
         snprintf(name_arg, sizeof(name_arg),
                  "--zbuild-package-name=fixture/tiny-lines") >=
             (int)sizeof(name_arg) ||
+        snprintf(plan_arg, sizeof(plan_arg), "--plan=%s.plan", emit_dir) >=
+            (int)sizeof(plan_arg) ||
         snprintf(cpu_arg, sizeof(cpu_arg),
                  "--zbuild-package-max-cpu-seconds=120") >=
             (int)sizeof(cpu_arg))
@@ -321,11 +338,9 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
                           recipe_arg,   name_arg,
                           "--zbuild-package-profile=standard",
                           cpu_arg,      emit_arg,     lock_arg,
-                          fast_arg,
-                          allow_testless ? "--allow-testless-standard"
-                                         : "--require-full-isolation",
-                          allow_testless ? "--require-full-isolation" : NULL,
-                          NULL};
+                          fast_arg, "--require-full-isolation",
+                          NULL, NULL, NULL};
+    fcw_candidate_options(argv + 11, allow_testless, with_plan, plan_arg);
     int fds[2];
     if (pipe(fds) != 0)
         return;
@@ -588,7 +603,7 @@ static int test_fastobj_carrier_platform_arm(void)
     memset(&run1, 0, sizeof(run1));
     memset(&run2, 0, sizeof(run2));
     fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit1, lock_hex,
-                        cacheA, false, &run1);
+                        cacheA, false, false, &run1);
     FC_CHECK("candidate build #1 (cold cacheA) succeeded", run1.ok);
     if (!run1.ok) {
         printf("    build #1 exit %d: %.200s\n", run1.exit_code,
@@ -678,9 +693,9 @@ static int test_fastobj_carrier_platform_arm(void)
     FC_CHECK("round-trip root identical (cacheB bytes == cacheA bytes)",
              expD && memcmp(rootA, rootD, 32) == 0);
 
-    /* 9. candidate build #2 on cacheB: no eligible object misses. */
+    /* 9. Adding dependency-plan evidence must reuse the same object digest. */
     fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit2, lock_hex,
-                        cacheB, false, &run2);
+                        cacheB, false, true, &run2);
     FC_CHECK("candidate build #2 (warm cacheB) succeeded", run2.ok);
     if (!run2.ok)
         printf("    build #2 exit %d: %.200s\n", run2.exit_code,
@@ -779,7 +794,7 @@ static int test_fastobj_carrier_platform_arm(void)
         memset(&tref, 0, sizeof(tref));
         memset(&tok, 0, sizeof(tok));
         fcw_candidate_build(worker, rootT_hex, pkgT, recipeT_path, emitT1,
-                            lockT_hex, cacheT, false, &tref);
+                            lockT_hex, cacheT, false, false, &tref);
         FC_CHECK("evidence-shape standard run of a testless package "
                  "refuses (exit 6 + refusal line)",
                  tref.exit_code == 6 && tref.saw_refusal);
@@ -787,7 +802,7 @@ static int test_fastobj_carrier_platform_arm(void)
             printf("    testless refuse: exit %d: %.200s\n",
                    tref.exit_code, tref.first_line);
         fcw_candidate_build(worker, rootT_hex, pkgT, recipeT_path, emitT2,
-                            lockT_hex, cacheT, true, &tok);
+                            lockT_hex, cacheT, true, false, &tok);
         FC_CHECK("reproduce-shape standard run of a testless package "
                  "builds", tok.ok);
         FC_CHECK("testless build reports no test processes",
@@ -901,7 +916,7 @@ static int test_fastobj_carrier_platform_arm(void)
         struct fcw_build_result frun;
         memset(&frun, 0, sizeof(frun));
         fcw_candidate_build(worker, rootF_hex, pkgF, recipeF_path, emitF,
-                            lockF_hex, cacheF, true, &frun);
+                            lockF_hex, cacheF, true, false, &frun);
         FC_CHECK("reproduce-shape standard run with an ASan finding still "
                  "emits (evidence, not a gate)", frun.ok);
         if (!frun.ok)

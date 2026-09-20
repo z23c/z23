@@ -2862,7 +2862,7 @@ tests/harness/src/test_fact_writers.c:fw_case_command_evidence_ceiling:21
 tests/harness/src/test_fast_sync_coins_artifact.c:fsca_artifact_roundtrip:30
 tests/harness/src/test_fast_sync_coins_artifact.c:fsca_failure_preserves_destination:17
 tests/harness/src/test_fast_sync_coins_export.c:fsce_run_corpus:26
-tests/harness/src/test_fastobj_carrier.c:fcw_candidate_build:37
+tests/harness/src/test_fastobj_carrier.c:fcw_candidate_build:36
 tests/harness/src/test_fastobj_carrier.c:test_fastobj_carrier_platform_arm:166
 tests/harness/src/test_fee_estimation.c:test_fee_estimation:29
 tests/harness/src/test_file_controller.c:test_file_export_snapshot_success:22

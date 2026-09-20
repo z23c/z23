@@ -1818,7 +1818,7 @@ static void pv_header_install_path(const struct vcs_package_recipe *recipe,
  *
  * --plan=<path> (emit modes only). BEFORE any real compile, every recipe
  * source TU is preprocessed under the SAME confinement with the EXACT argv
- * the compile would use, plus -E -MD -MF <tmp.d> -o <tmp.i>. The plan
+ * the compile would use, plus -E -P -MD -MF <tmp.d> -o <tmp.i>. The plan
  * records only what the toolchain itself proves:
  *   - the depfile closure: every file the preprocessor actually read, with
  *     SHA3-256 + byte count, classified by the -I root it falls under;
@@ -2067,7 +2067,10 @@ static int pv_plan_input_cmp(const void *a, const void *b)
 }
 
 /* The preprocess probe argv: the exact compile flag vector with the
- * "-c src -o obj" tail replaced by "-E [-dM | -MD -MF <d>] src -o out". */
+ * "-c src -o obj" tail replaced by "-E [-dM | -P -MD -MF <d>] src -o out".
+ * Both plan and fast-cache digests omit line markers: gcc does not rewrite
+ * their absolute paths with -ffile-prefix-map. __FILE__/__LINE__ expansions
+ * remain in the output, and the plan separately hashes exact input files. */
 static bool pv_plan_probe_argv(const char *out[], size_t cap,
                                const struct pv_compile_args *base,
                                bool macros, const char *mf_path,
@@ -2075,7 +2078,7 @@ static bool pv_plan_probe_argv(const char *out[], size_t cap,
 {
     size_t n = 0, i = 0;
     while (base->argv[i] && strcmp(base->argv[i], "-c") != 0) {
-        if (n + 8u >= cap)
+        if (n + 9u >= cap)
             return false;
         out[n++] = base->argv[i++];
     }
@@ -2085,6 +2088,7 @@ static bool pv_plan_probe_argv(const char *out[], size_t cap,
     if (macros) {
         out[n++] = "-dM";
     } else {
+        out[n++] = "-P";
         out[n++] = "-MD";
         out[n++] = "-MF";
         out[n++] = mf_path;
@@ -2266,7 +2270,7 @@ static bool pv_plan_tu_paths(struct pv_plan_ctx *ctx, size_t si,
     return true;
 }
 
-/* Run the -E -MD preprocess probe for one TU, parse its depfile into
+/* Run the -E -P -MD preprocess probe for one TU, parse its depfile into
  * `inputs` (*count_out entries), and hash the preprocessed unit. */
 static bool pv_plan_tu_preprocess(struct pv_plan_ctx *ctx,
                                   const struct pv_compile_args *store,
@@ -2637,7 +2641,7 @@ static uint64_t g_pv_fast_hits;
 static uint64_t g_pv_fast_misses;
 static uint64_t g_pv_fast_reused_bytes;
 
-/* Run the preprocess probe (-E -MD) for one TU with the exact compile flag
+/* Run the preprocess probe (-E -P -MD) for one TU with the exact compile flag
  * vector in `store` and hash the preprocessed unit. False with err set. */
 static bool pv_fast_preproc_sha3(struct pv_plan_ctx *ctx,
                                  const struct pv_compile_args *store,
@@ -2653,29 +2657,11 @@ static bool pv_fast_preproc_sha3(struct pv_plan_ctx *ctx,
         return false;
     }
     const char *pargv[224];
-    if (!pv_plan_probe_argv(pargv, sizeof(pargv) / sizeof(pargv[0]) - 1u,
+    if (!pv_plan_probe_argv(pargv, sizeof(pargv) / sizeof(pargv[0]),
                             store, false, dpath, src_file, ipath)) {
         (void)snprintf(err, err_cap, "fast-cache probe argv failed");
         return false;
     }
-    /* Digest the unit WITHOUT line markers (-P): gcc does not rewrite the
-     * marker paths for -ffile-prefix-map, so with markers the digest would
-     * depend on the absolute source path, and on pure line shifts from
-     * comment edits — neither of which the object (built without -g) can
-     * record. __FILE__/__LINE__ EXPANSIONS remain in the -P output, so a
-     * semantic change still misses. */
-    size_t pn = 0, pe = 0;
-    while (pargv[pn])
-        pn++;
-    while (pe < pn && strcmp(pargv[pe], "-E") != 0)
-        pe++;
-    if (pe == pn) {
-        (void)snprintf(err, err_cap, "fast-cache probe argv has no -E");
-        return false;
-    }
-    for (size_t k = pn; k > pe; k--)
-        pargv[k + 1] = pargv[k];
-    pargv[pe + 1] = "-P";
     struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER, pargv, ctx->build_root, ctx->limits,
                                     ctx->confined, ctx->rules, ctx->n_rules,
                                     ctx->env, PV_COMPILE_TIMEOUT_MS);
