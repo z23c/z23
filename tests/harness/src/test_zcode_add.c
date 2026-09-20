@@ -1899,6 +1899,196 @@ static bool za_use_commit(const char *datadir, const char *target,
     "#include \"ghost.h\"\n" \
     "int main(void){ return ghost_value() == 42 ? 0 : 1; }\n"
 
+/* A program that keeps state in a file it is handed: it prints whatever it
+ * finds there, then records its own version over it. Two versions of that
+ * program are what turn "the directory survived" into "the user's WORK
+ * survived" — the bytes are written and read back by the installed program
+ * itself, not by this harness standing in for it. */
+#define ZA_STATE_H \
+    "#pragma once\n" \
+    "int state_run(const char *path);\n"
+
+/* %s is the version tag this build records. */
+#define ZA_STATE_C_FMT \
+    "#include \"state.h\"\n#include <stdio.h>\n" \
+    "int state_run(const char *path){\n" \
+    "  char prev[64]; size_t n = 0;\n" \
+    "  FILE *r = fopen(path, \"rb\");\n" \
+    "  if (r) { n = fread(prev, 1, sizeof(prev) - 1u, r); fclose(r); }\n" \
+    "  prev[n] = '\\0';\n" \
+    "  printf(\"seen=%%s\\n\", prev);\n" \
+    "  FILE *w = fopen(path, \"wb\");\n" \
+    "  if (!w) return 1;\n" \
+    "  int ok = fputs(\"%s\", w) >= 0;\n" \
+    "  return (fclose(w) == 0 && ok) ? 0 : 1; }\n"
+
+#define ZA_STATE_TEST \
+    "#include \"state.h\"\n" \
+    "int main(void){ return 0; }\n"
+
+#define ZA_STATE_MAIN \
+    "#include \"state.h\"\n#include <stdio.h>\n" \
+    "int main(int argc, char **argv){\n" \
+    "  if (argc < 2) { printf(\"usage: statecli PATH\\n\"); return 2; }\n" \
+    "  return state_run(argv[1]); }\n"
+
+/* ── the user's work, written by the program itself ──────────────────
+ *
+ * Everything above proves the DIRECTORY is left alone. This proves the
+ * thing a person actually cares about: install a program, let it record
+ * something, update to a version built from different source, and the
+ * older version's record is still there to be read; then go back, and what
+ * the NEWER version wrote is still there too.
+ *
+ * The bytes never pass through this harness — each version's own installed
+ * binary writes and reads them. That is the only way the claim is about the
+ * product rather than about the test. Three phases, three functions, one
+ * struct, so the transcript does not carry their branches. */
+struct za_state_app {
+    char data_dir[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    char state_file[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 32u];
+    char alpha_path[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    char beta_path[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    uint8_t alpha_root[32];
+    uint8_t beta_root[32];
+};
+
+/* Install one version of the state-keeping program and report where its
+ * binary landed. `semver`/`sequence` pick the version; `body` is its
+ * src/state.c, which differs per version so the roots differ. */
+static bool za_state_publish_install(const char *base, const char *zcode,
+                                     const char *semver, uint64_t sequence,
+                                     const char *body, int64_t now,
+                                     uint8_t out_root[32], char *out_path,
+                                     size_t path_cap, char *out_data_dir,
+                                     size_t data_cap)
+{
+    struct za_file files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/state.h", ZA_STATE_H },
+        { "src/state.c", body },
+        { "test/test_state.c", ZA_STATE_TEST },
+        { "app/main.c", ZA_STATE_MAIN },
+    };
+    if (!za_publish_ex(zcode, "alice/statecli", semver, sequence, files, 5,
+                       "src/state.h", "src/state.c", "test/test_state.c",
+                       "src", "app/main.c", out_root))
+        return false;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_add_commit.v1");
+    bool ok = za_use_commit(base, "alice/statecli", now, &reply);
+    if (ok) {
+        const struct json_value *programs = json_get(&reply.data, "programs");
+        const struct json_value *first =
+            programs ? json_at(programs, 0) : NULL;
+        const char *path = first ? json_get_str(json_get(first, "path"))
+                                 : NULL;
+        const char *dir = json_get_str(json_get(&reply.data, "data_dir"));
+        ok = path && path[0] == '/';
+        if (ok)
+            (void)snprintf(out_path, path_cap, "%s", path);
+        if (ok && out_data_dir)
+            (void)snprintf(out_data_dir, data_cap, "%s", dir ? dir : "");
+    }
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+/* Run one installed version against the state file and capture what it
+ * printed. */
+static int za_state_run(const char *program, const char *state_file,
+                        char *out, size_t cap)
+{
+    out[0] = '\0';
+    const char *argv[] = { program, state_file, NULL };
+    return zcl_spawn_capture(argv, out, cap, 30000);
+}
+
+static int za_state_first_run(const char *base, const char *zcode,
+                              int64_t t0, struct za_state_app *a)
+{
+    int failures = 0;
+    char body[1024];
+    snprintf(body, sizeof(body), ZA_STATE_C_FMT, "alpha");
+    memset(a, 0, sizeof(*a));
+    bool installed = za_state_publish_install(
+        base, zcode, "1.0.0", 4, body, t0 + 30, a->alpha_root, a->alpha_path,
+        sizeof(a->alpha_path), a->data_dir, sizeof(a->data_dir));
+    ZA_CHECK("a program that keeps state installs and is named", installed);
+
+    /* The reply hands the operator the directory, so a person running the
+     * program is told where to point it rather than guessing. */
+    char resolved[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 1u];
+    struct zcl_result ddr =
+        package_lifecycle_data_dir(base, "alice/statecli", resolved,
+                                   sizeof(resolved));
+    ZA_CHECK("the install reply hands the operator the data directory",
+             installed && ddr.ok && strcmp(a->data_dir, resolved) == 0);
+    snprintf(a->state_file, sizeof(a->state_file), "%s/state", resolved);
+
+    char out[512];
+    int rc = installed ? za_state_run(a->alpha_path, a->state_file, out,
+                                      sizeof(out))
+                       : -1;
+    ZA_CHECK("the first run finds nothing recorded and records itself",
+             rc == 0 && strstr(out, "seen=\n") != NULL);
+    return failures;
+}
+
+static int za_state_after_update(const char *base, const char *zcode,
+                                 int64_t t0, struct za_state_app *a)
+{
+    int failures = 0;
+    char body[1024];
+    snprintf(body, sizeof(body), ZA_STATE_C_FMT, "beta");
+    /* Built from DIFFERENT source, so this is a genuinely different root
+     * and not a re-activation of the one already installed. */
+    bool installed = za_state_publish_install(
+        base, zcode, "1.0.1", 5, body, t0 + 31, a->beta_root, a->beta_path,
+        sizeof(a->beta_path), NULL, 0);
+    ZA_CHECK("the update installs a different root of the same program",
+             installed && memcmp(a->beta_root, a->alpha_root, 32) != 0 &&
+                 strcmp(a->beta_path, a->alpha_path) != 0);
+
+    char out[512];
+    int rc = installed ? za_state_run(a->beta_path, a->state_file, out,
+                                      sizeof(out))
+                       : -1;
+    ZA_CHECK("the updated program reads what the old version recorded",
+             rc == 0 && strstr(out, "seen=alpha") != NULL);
+    return failures;
+}
+
+static int za_state_after_rollback(const char *base, int64_t t0,
+                                   const struct za_state_app *a)
+{
+    int failures = 0;
+    struct package_lifecycle_rollback_report rb;
+    struct zcl_result rbr =
+        package_lifecycle_rollback(base, "alice/statecli", t0 + 32, &rb);
+    ZA_CHECK("the program rolls back to its previous exact root",
+             rbr.ok && memcmp(rb.to_root, a->alpha_root, 32) == 0);
+
+    /* THE WHOLE POINT: the running version is alpha again, and what BETA
+     * wrote is still there. Going back changed the code and left the user's
+     * work alone. */
+    char out[512];
+    int rc = za_state_run(a->alpha_path, a->state_file, out, sizeof(out));
+    ZA_CHECK("after going back, the CURRENT user data is still there",
+             rc == 0 && strstr(out, "seen=beta") != NULL);
+    return failures;
+}
+
+static int za_program_data_survives(const char *base, const char *zcode,
+                                    int64_t t0)
+{
+    struct za_state_app app;
+    int failures = za_state_first_run(base, zcode, t0, &app);
+    failures += za_state_after_update(base, zcode, t0, &app);
+    failures += za_state_after_rollback(base, t0, &app);
+    return failures;
+}
+
 /* ── the publisher is gone ───────────────────────────────────────────
  *
  * "Offline" for a content-addressed store is not a network error to handle;
@@ -2111,6 +2301,7 @@ static int t_programs(void)
 
     failures += za_publisher_gone(base, zcode, first_path, installed_exec,
                                   t0);
+    failures += za_program_data_survives(base, zcode, t0);
     zcl_command_reply_free(&cli_reply);
 
     /* macOS has no qualified full-isolation package worker, so the
