@@ -3,8 +3,8 @@
  * test_fastobj_carrier — the WIRE lane slice-2 offline proof
  * (docs/work/WIRE_COMPILE_CACHE.md): a builder's cached objects plus
  * sidecars travel as an ORDINARY content.v2 package to a second cache
- * directory, and the second node builds with ZERO compiler spawns and
- * byte-identical receipt bytes.
+ * directory, and the second candidate build reuses eligible objects with
+ * byte-identical receipt bytes. This is not independent reproduction.
  *
  * The journey, all offline (no daemon, no network):
  *   1. prepare the tiny-lines fixture package (contexts/commons/modules/vcs only — the
@@ -25,8 +25,8 @@
  *   8. re-export cacheB into a FOURTH store: same root again — cacheB
  *      is byte-identical to cacheA through the whole round trip,
  *   9. confined candidate build #2 with --fast-cache=cacheB: every
- *      eligible TU is a HIT (misses == 0 — zero gcc compile spawns; the
- *      -E identity probe still runs by design, it IS the key input),
+ *      eligible TU is a HIT (misses == 0; preprocessing, uncached variants,
+ *      test compilation, linking and test execution still run),
  *  10. build-report #2 is byte-identical to build-report #1 (memcmp of
  *      the ZCLBLD receipt wires) and both receipts hash to the same id.
  *  10. the tested standard receipt really ran the fixture's tests, and its
@@ -234,10 +234,55 @@ struct fcw_build_result {
     int exit_code;
     unsigned long long hits;
     unsigned long long misses;
+    unsigned long long processes;
+    unsigned long long compiler_processes;
+    unsigned long long test_processes;
+    unsigned long long other_processes;
+    bool perf_complete;
+    bool source_bytes_unknown;
     bool saw_refusal;
     char first_line[256];
     char last_line[256];
 };
+
+static void fcw_parse_perf(const char *text, struct fcw_build_result *out)
+{
+    const char *perf = strstr(text, "zbuild-package-perf=v1 ");
+    if (!perf)
+        return;
+    out->perf_complete = sscanf(perf,
+        "zbuild-package-perf=v1 processes=%llu "
+        "compiler_processes=%llu test_processes=%llu "
+        "other_processes=%llu", &out->processes,
+        &out->compiler_processes, &out->test_processes,
+        &out->other_processes) == 4;
+    out->source_bytes_unknown =
+        strstr(perf, "source_bytes=unknown ") != NULL;
+}
+
+static int fcw_check_perf(const struct fcw_build_result *cold,
+                          const struct fcw_build_result *warm)
+{
+    int failures = 0;
+    FC_CHECK("cold and warm builds count tests independently of compiler names",
+             cold->perf_complete && warm->perf_complete &&
+             cold->test_processes > 0 &&
+             cold->test_processes == warm->test_processes &&
+             cold->compiler_processes > warm->compiler_processes);
+    FC_CHECK("process role counts partition all launched children",
+             cold->processes == cold->compiler_processes +
+                 cold->test_processes + cold->other_processes &&
+             warm->processes == warm->compiler_processes +
+                 warm->test_processes + warm->other_processes);
+    FC_CHECK("candidate source byte coverage is explicitly unknown",
+             cold->source_bytes_unknown && warm->source_bytes_unknown);
+    return failures;
+}
+
+static bool fcw_testless_perf(const struct fcw_build_result *run)
+{
+    return run->perf_complete && run->test_processes == 0;
+}
 
 /* Spawn the verifier in candidate proof mode with a fast cache, capture
  * merged stdout/stderr, and parse the fast-cache counters line. When
@@ -362,6 +407,7 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
                  (int)(end - tail), tail);
         out->saw_refusal =
             strstr(text, "zbuild-package-standard-refused=1") != NULL;
+        fcw_parse_perf(text, out);
         char *line = strstr(text, "zbuild-package-fast-cache=v1");
         if (line)
             (void)sscanf(line,
@@ -632,7 +678,7 @@ static int test_fastobj_carrier_platform_arm(void)
     FC_CHECK("round-trip root identical (cacheB bytes == cacheA bytes)",
              expD && memcmp(rootA, rootD, 32) == 0);
 
-    /* 9. candidate build #2 on cacheB: ZERO compiler spawns. */
+    /* 9. candidate build #2 on cacheB: no eligible object misses. */
     fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit2, lock_hex,
                         cacheB, false, &run2);
     FC_CHECK("candidate build #2 (warm cacheB) succeeded", run2.ok);
@@ -640,10 +686,11 @@ static int test_fastobj_carrier_platform_arm(void)
         printf("    build #2 exit %d: %.200s\n", run2.exit_code,
                run2.first_line);
     printf("    build #2: hits=%llu misses=%llu\n", run2.hits, run2.misses);
-    FC_CHECK("build #2 spawned ZERO compilers (misses == 0)",
+    FC_CHECK("build #2 has no eligible object misses",
              run2.ok && run2.misses == 0u);
     FC_CHECK("build #2 hit every entry build #1 missed",
              run2.ok && run2.hits == run1.misses);
+    failures += fcw_check_perf(&run1, &run2);
 
     /* 10. the ZCLBLD receipts are byte-identical. */
     char report1[4096], report2[4096];
@@ -743,6 +790,8 @@ static int test_fastobj_carrier_platform_arm(void)
                             lockT_hex, cacheT, true, &tok);
         FC_CHECK("reproduce-shape standard run of a testless package "
                  "builds", tok.ok);
+        FC_CHECK("testless build reports no test processes",
+                 fcw_testless_perf(&tok));
         if (!tok.ok)
             printf("    testless allow: exit %d: %.200s\n", tok.exit_code,
                    tok.first_line);

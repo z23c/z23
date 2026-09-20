@@ -713,17 +713,20 @@ static uint64_t pv_rusage_cpu_us(const struct rusage *usage)
         : 0;
 }
 
-static void pv_perf_record(const char *program, uint64_t elapsed_us)
+enum pv_process_role {
+    PV_PROCESS_COMPILER,
+    PV_PROCESS_TEST,
+    PV_PROCESS_OTHER,
+};
+
+static void pv_perf_record(enum pv_process_role role, uint64_t elapsed_us)
 {
-    const char *base = program ? strrchr(program, '/') : NULL;
-    base = base ? base + 1 : program;
     g_pv_perf.processes++;
     g_pv_perf.child_wall_us += elapsed_us;
-    if (base && (strstr(base, "gcc") || strstr(base, "clang") ||
-                 strcmp(base, "cc") == 0)) {
+    if (role == PV_PROCESS_COMPILER) {
         g_pv_perf.compiler_processes++;
         g_pv_perf.compiler_wall_us += elapsed_us;
-    } else if (base && (strstr(base, "test") || strstr(base, "fuzz"))) {
+    } else if (role == PV_PROCESS_TEST) {
         g_pv_perf.test_processes++;
         g_pv_perf.test_wall_us += elapsed_us;
     } else {
@@ -1091,7 +1094,8 @@ static void pv_preview_parent_gate(pid_t pid, int descriptors[2])
     close(descriptors[1]);
 }
 
-static struct pv_run pv_run_child(const char *const argv[],
+static struct pv_run pv_run_child(enum pv_process_role role,
+                                  const char *const argv[],
                                   const char *cwd,
                                   const struct os_sandbox_rlimits *limits,
                                   bool confined,
@@ -1184,7 +1188,7 @@ static struct pv_run pv_run_child(const char *const argv[],
     if (!r.timed_out)
         pv_run_child_classify_status(status, &r);
     int64_t perf_elapsed_ns = clock_now_monotonic_ns() - perf_started_ns;
-    pv_perf_record(argv ? argv[0] : NULL,
+    pv_perf_record(role,
                    perf_elapsed_ns > 0 ? (uint64_t)perf_elapsed_ns / 1000u : 0);
     return r;
 }
@@ -2278,7 +2282,7 @@ static bool pv_plan_tu_preprocess(struct pv_plan_ctx *ctx,
         (void)pv_plan_error(ctx, "preprocess argv construction failed");
         return false;
     }
-    struct pv_run pr = pv_run_child(pargv, ctx->build_root, ctx->limits,
+    struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER, pargv, ctx->build_root, ctx->limits,
                                     ctx->confined, ctx->rules, ctx->n_rules,
                                     ctx->env, PV_COMPILE_TIMEOUT_MS);
     if (!pr.launched || pr.sandbox_fail) {
@@ -2331,7 +2335,7 @@ static void pv_plan_tu_macro_probe(struct pv_plan_ctx *ctx,
     const char *margv[224];
     if (pv_plan_probe_argv(margv, sizeof(margv) / sizeof(margv[0]), store,
                            true, NULL, src_file, mpath)) {
-        struct pv_run mr = pv_run_child(margv, ctx->build_root, ctx->limits,
+        struct pv_run mr = pv_run_child(PV_PROCESS_COMPILER, margv, ctx->build_root, ctx->limits,
                                         ctx->confined, ctx->rules,
                                         ctx->n_rules, ctx->env,
                                         PV_COMPILE_TIMEOUT_MS);
@@ -2672,7 +2676,7 @@ static bool pv_fast_preproc_sha3(struct pv_plan_ctx *ctx,
     for (size_t k = pn; k > pe; k--)
         pargv[k + 1] = pargv[k];
     pargv[pe + 1] = "-P";
-    struct pv_run pr = pv_run_child(pargv, ctx->build_root, ctx->limits,
+    struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER, pargv, ctx->build_root, ctx->limits,
                                     ctx->confined, ctx->rules, ctx->n_rules,
                                     ctx->env, PV_COMPILE_TIMEOUT_MS);
     if (!pr.launched || pr.sandbox_fail || pr.timed_out || !pr.exited ||
@@ -3240,7 +3244,7 @@ static int pv_zbuild_compile_run(const char *const cc_argv[],
                                  size_t n_rules, const char *const env[],
                                  const char *output)
 {
-    struct pv_run run = pv_run_child(cc_argv, build_dir, limits, true,
+    struct pv_run run = pv_run_child(PV_PROCESS_COMPILER, cc_argv, build_dir, limits, true,
                                      rules, n_rules, env,
                                      PV_COMPILE_TIMEOUT_MS);
     int wedged = pv_report_process_failure(&run, "zbuild-error", true);
@@ -3593,7 +3597,7 @@ static int pv_zbuild_test_mode(int argc, char **argv)
     (void)snprintf(env_tmpdir, sizeof(env_tmpdir), "TMPDIR=%s", build_dir);
     const char *const env[] = { env_tmpdir, NULL };
     const char *const test_argv[] = { input, NULL };
-    struct pv_run run = pv_run_child(
+    struct pv_run run = pv_run_child(PV_PROCESS_TEST,
         test_argv, build_dir, &limits, true, rules, n_rules, env,
         PV_ZBUILD_TEST_TIMEOUT_MS);
     /* Untrusted child: never sniff its stderr for a wedge (trusted_child
@@ -3817,7 +3821,7 @@ static int pv_zbuild_fuzz_run_one_seed(
     (void)snprintf(env_tmpdir, sizeof(env_tmpdir), "TMPDIR=%s", build_dir);
     const char *const env[] = { env_tmpdir, seed_env, NULL };
     const char *const fuzz_argv[] = { input, seed_argv, NULL };
-    struct pv_run run = pv_run_child(fuzz_argv, build_dir, limits, true,
+    struct pv_run run = pv_run_child(PV_PROCESS_TEST, fuzz_argv, build_dir, limits, true,
                                      rules, n_rules, env, per_seed_timeout);
     /* See the test-mode note: a host refusal is not fuzz evidence. */
     if (run.headroom_exhausted)
@@ -4042,7 +4046,7 @@ static int pv_app_preview_mode(int argc, char **argv)
     g_pv_preview_control = preview.directory;
     g_pv_preview_owner = getppid();
     (void)zcl_thread_qos_background();
-    struct pv_run run = pv_run_child(child, preview.directory, &limits, true,
+    struct pv_run run = pv_run_child(PV_PROCESS_OTHER, child, preview.directory, &limits, true,
                                     rules, count, NULL, 4100);
     if (!pv_app_preview_ready(&run, preview.nonce)) {
         fprintf(stderr, "task-preview: refused exit=%d signal=%d timeout=%d: %s\n",
@@ -4775,9 +4779,9 @@ static void pv_probe_one_compiler(struct pv_compiler *compiler,
         compiler->path, "-std=c23", "-fsyntax-only", "-x", "c",
         "/dev/null", NULL,
     };
-    struct pv_run pr = pv_run_child(vargv, NULL, NULL, full_isolation,
+    struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER, vargv, NULL, NULL, full_isolation,
                                     rules, n_rules, NULL, 10000);
-    struct pv_run capability = pv_run_child(
+    struct pv_run capability = pv_run_child(PV_PROCESS_COMPILER,
         cargv, NULL, NULL, false, NULL, 0, NULL, 10000);
     if (pr.launched && pr.exited && pr.exit_code == 0 &&
         pr.stdout_buf[0] && capability.launched && capability.exited &&
@@ -4979,7 +4983,7 @@ static int pv_run_and_finish_compile(
         pr.exited = true;
         pr.exit_code = 0;
     } else {
-        pr = pv_run_child(args->argv, build_root, compile_limits,
+        pr = pv_run_child(PV_PROCESS_COMPILER, args->argv, build_root, compile_limits,
                           full_isolation, rules, n_rules, compile_env,
                           PV_COMPILE_TIMEOUT_MS);
     }
@@ -5128,7 +5132,7 @@ static int pv_build_one_program(
     pv_compile_argv(&pargs, cc, false, standard_profile,
                     recipe, src_root, emit_deps, emit_dep_count,
                     src_file, obj_file);
-    struct pv_run pr = pv_run_child(
+    struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER,
         pargs.argv, build_root, compile_limits, full_isolation,
         rules, n_rules, compile_env, PV_COMPILE_TIMEOUT_MS);
     if (!pr.launched || pr.sandbox_fail) {
@@ -5180,7 +5184,7 @@ static int pv_build_one_program(
     pv_append_dep_archives_and_libs(largv, &ln, sizeof(largv) / sizeof(largv[0]),
                                     dep_archives, recipe);
     largv[ln] = NULL;
-    pr = pv_run_child(largv, build_root, compile_limits,
+    pr = pv_run_child(PV_PROCESS_COMPILER, largv, build_root, compile_limits,
                       full_isolation, rules, n_rules, compile_env,
                       PV_LINK_TIMEOUT_MS);
     if (!pr.launched || pr.sandbox_fail) {
@@ -5238,7 +5242,7 @@ static int pv_link_test_binary(
     pv_append_dep_archives_and_libs(largv, &ln, sizeof(largv) / sizeof(largv[0]),
                                     dep_archives, recipe);
     largv[ln] = NULL;
-    struct pv_run pr = pv_run_child(
+    struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER,
         largv, build_root, compile_limits, full_isolation, rules,
         n_rules, compile_env, PV_LINK_TIMEOUT_MS);
     if (!pr.launched || pr.sandbox_fail) {
@@ -5416,7 +5420,7 @@ static int pv_run_plain_test(
             char bin_file[4200];
             snprintf(bin_file, sizeof(bin_file), "%s/%s_0_test", build_root,
                      cc);
-            struct pv_run pr = pv_run_child(
+            struct pv_run pr = pv_run_child(PV_PROCESS_TEST,
                 (const char *const[]){ bin_file, NULL }, build_root,
                 test_limits, full_isolation, rules, n_rules, compile_env,
                 (int)recipe->maximum_test_seconds * 1000 + 5000);
@@ -5566,7 +5570,7 @@ static int pv_run_sanitizer_test(
                 "setarch", "x86_64", "-R", san_bin, NULL,
             };
 #endif
-            struct pv_run sr = pv_run_child(
+            struct pv_run sr = pv_run_child(PV_PROCESS_TEST,
                 sanitizer_argv, build_root,
                 san_test_limits, full_isolation, rules, n_rules, san_env,
                 (int)recipe->maximum_test_seconds * 1000 + 5000);
@@ -5954,7 +5958,7 @@ static bool pv_emit_build_archive(
                 "archiving\n", PV_LOG);
         emitted = false;
     }
-    struct pv_run ar = pv_run_child(aargv, build_root, compile_limits,
+    struct pv_run ar = pv_run_child(PV_PROCESS_OTHER, aargv, build_root, compile_limits,
                                     full_isolation, rules, n_rules,
                                     compile_env, PV_LINK_TIMEOUT_MS);
     if (!ar.launched || ar.sandbox_fail || ar.timed_out || !ar.exited ||
@@ -6191,7 +6195,7 @@ static void pv_emit_print_summary(
     struct vcs_package_build_receipt *rec, const char *emit_dir,
     bool build_ok, bool test_ok, const char *build_fail_detail,
     const char *test_fail_detail, bool candidate_mode,
-    struct vcs_package_manifest *manifest, const char *fast_cache_dir)
+    const char *fast_cache_dir)
 {
     printf("emit=%s result=%s outputs=%zu isolation=%s\n", emit_dir,
            vcs_package_build_result_string(
@@ -6206,16 +6210,14 @@ static void pv_emit_print_summary(
         printf("test-failure-detail=%s\n",
                test_fail_detail[0] ? test_fail_detail : "unclassified");
     if (candidate_mode) {
-        uint64_t source_bytes = 0, output_bytes = 0;
-        for (size_t i = 0; i < manifest->count; i++)
-            source_bytes += manifest->files[i].size;
+        uint64_t output_bytes = 0;
         for (size_t i = 0; i < rec->output_count; i++)
             output_bytes += rec->outputs[i].bytes;
         printf("zbuild-package-perf=v1 processes=%llu "
                "compiler_processes=%llu test_processes=%llu "
                "other_processes=%llu child_wall_us=%llu child_cpu_us=%llu "
                "compiler_wall_us=%llu test_wall_us=%llu "
-               "source_bytes=%llu output_bytes=%llu\n",
+               "source_bytes=unknown output_bytes=%llu\n",
                (unsigned long long)g_pv_perf.processes,
                (unsigned long long)g_pv_perf.compiler_processes,
                (unsigned long long)g_pv_perf.test_processes,
@@ -6224,7 +6226,6 @@ static void pv_emit_print_summary(
                (unsigned long long)g_pv_perf.child_cpu_us,
                (unsigned long long)g_pv_perf.compiler_wall_us,
                (unsigned long long)g_pv_perf.test_wall_us,
-               (unsigned long long)source_bytes,
                (unsigned long long)output_bytes);
         printf("zbuild-package-ok=1 source=cas recipe=canonical network=0\n");
         if (fast_cache_dir)
@@ -6280,7 +6281,7 @@ static int pv_emit_receipt_mode(
     if (rc != PV_CONTINUE) return rc;
 
     pv_emit_print_summary(&rec, emit_dir, build_ok, test_ok, build_fail_detail,
-                          test_fail_detail, candidate_mode, manifest,
+                          test_fail_detail, candidate_mode,
                           fast_cache_dir);
     vcs_package_recipe_free(recipe);
     vcs_package_manifest_free(manifest);
