@@ -206,20 +206,110 @@ static bool zac_reread_matches(
     return matches;
 }
 
-struct zcl_result zcode_agent_context_capture(
+static struct zcl_result zac_capture_inputs(
     const char *workspace, const struct vcs_zcode_task_v1 *task,
     const uint8_t task_root[32], const char *query,
-    struct zcode_agent_context_status *out)
+    struct zcode_agent_context_status *out, uint8_t source_root_before[32])
 {
     if (!workspace || !task || !task_root || !query || !query[0] || !out ||
         strlen(query) > VCS_ZCODE_AGENT_CONTEXT_QUERY_MAX)
         return ZCL_ERR(-1, "agent context requires workspace, task, and bounded symbol");
     memset(out, 0, sizeof(*out));
-    uint8_t source_root_before[32];
     if (!zac_source_root(workspace, source_root_before))
         return ZCL_ERR(-1, "source snapshot could not be captured");
     if (memcmp(source_root_before, task->source_root, 32) != 0)
         return ZCL_ERR(-1, "task source root is not the current source snapshot");
+    return ZCL_OK;
+}
+
+static struct zcl_result zac_capture_files(const char *workspace,
+    const struct vcs_zcode_task_v1 *task, const char *query,
+    struct zac_path *paths, size_t path_count,
+    struct vcs_zcode_agent_context_v1 *context, bool *truncated)
+{
+    size_t overhead = VCS_ZCODE_AGENT_CONTEXT_FIXED_BYTES + strlen(query) +
+        path_count * (VCS_ZCODE_AGENT_CONTEXT_ENTRY_FIXED_BYTES +
+                      VCS_ZCODE_AGENT_CONTEXT_PATH_MAX);
+    size_t budget = task->max_context_bytes > overhead
+        ? (size_t)task->max_context_bytes - overhead : 0;
+    for (size_t i = 0; i < path_count; i++) {
+        size_t left = path_count - i;
+        size_t share = left > 0 ? budget / left : 0;
+        if (!zac_capture_file(workspace, &paths[i], &context->files[i], share,
+                              truncated))
+            return ZCL_ERR(-1, "selected source file changed or could not be read");
+        budget -= context->files[i].content_len;
+        context->file_count++;
+    }
+    return ZCL_OK;
+}
+
+static bool zac_capture_stable(const char *workspace,
+    const struct ci_merkle_node *before_root, const struct zac_path *paths,
+    const struct vcs_zcode_agent_context_v1 *context)
+{
+    struct ci_merkle *after = ci_merkle_build_cold(workspace, NULL);
+    struct ci_merkle_node after_root;
+    bool stable = after && ci_merkle_root(after, &after_root) &&
+        memcmp(before_root->digest.bytes, after_root.digest.bytes, 32) == 0;
+    for (size_t i = 0; stable && i < context->file_count; i++)
+        stable = zac_reread_matches(workspace, &paths[i], &context->files[i]);
+    ci_merkle_free(after);
+    return stable;
+}
+
+static struct zcl_result zac_capture_store(const char *workspace,
+    const struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_agent_context_v1 *context,
+    bool require_complete, bool truncated,
+    struct zcode_agent_context_status *out)
+{
+    if (require_complete && truncated)
+        return ZCL_ERR(-1, "complete context exceeds task budget; no context stored");
+    if (truncated) context->flags |= VCS_ZCODE_AGENT_CONTEXT_TRUNCATED;
+    uint8_t *wire = NULL; size_t wire_len = 0; uint8_t root[32];
+    enum vcs_zcode_agent_context_result encoded =
+        vcs_zcode_agent_context_serialize(
+            context, (size_t)task->max_context_bytes, &wire, &wire_len);
+    if (encoded == VCS_ZCODE_AGENT_CONTEXT_OK)
+        encoded = vcs_zcode_agent_context_root(
+            context, (size_t)task->max_context_bytes, root);
+    if (encoded != VCS_ZCODE_AGENT_CONTEXT_OK ||
+        !vcs_object_store_init(workspace) ||
+        !vcs_object_put_addressed(workspace, root, wire, wire_len)) {
+        free(wire);
+        return ZCL_ERR(-1, "canonical agent context could not enter CAS");
+    }
+    uint8_t *checked_wire = NULL; size_t checked_len = 0;
+    struct vcs_zcode_agent_context_v1 checked;
+    bool verified = vcs_object_load_raw(
+            workspace, root, &checked_wire, &checked_len) == 0 &&
+        checked_len == wire_len && memcmp(checked_wire, wire, wire_len) == 0 &&
+        vcs_zcode_agent_context_parse(
+            checked_wire, checked_len, (size_t)task->max_context_bytes,
+            &checked) == VCS_ZCODE_AGENT_CONTEXT_OK;
+    if (verified) vcs_zcode_agent_context_free(&checked);
+    free(checked_wire); free(wire);
+    if (!verified)
+        return ZCL_ERR(-1, "agent context CAS readback verification failed");
+    zcl_hex_encode(root, 32, out->context_root_sha3);
+    zcl_hex_encode(context->source_tree_root, 32, out->source_tree_root_sha3);
+    out->file_count = context->file_count;
+    out->wire_bytes = wire_len;
+    for (size_t i = 0; i < context->file_count; i++)
+        out->excerpt_bytes += context->files[i].content_len;
+    return ZCL_OK;
+}
+
+static struct zcl_result zac_capture(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const uint8_t task_root[32], const char *query,
+    bool require_complete, struct zcode_agent_context_status *out)
+{
+    uint8_t source_root_before[32];
+    struct zcl_result result = zac_capture_inputs(workspace, task, task_root,
+        query, out, source_root_before);
+    if (!result.ok) return result;
     struct codeindex *ci = codeindex_open(workspace);
     if (!ci) return ZCL_ERR(-1, "code index could not open for agent context");
     struct ci_symbol sym = {0}; bool found = false;
@@ -251,30 +341,15 @@ struct zcl_result zcode_agent_context_capture(
     memcpy(context.goal_root, task->goal_root, 32);
     memcpy(context.source_tree_root, before_root.digest.bytes, 32);
     (void)snprintf(context.query, sizeof(context.query), "%s", query);
-    size_t overhead = VCS_ZCODE_AGENT_CONTEXT_FIXED_BYTES + strlen(query) +
-        path_count * (VCS_ZCODE_AGENT_CONTEXT_ENTRY_FIXED_BYTES +
-                      VCS_ZCODE_AGENT_CONTEXT_PATH_MAX);
-    size_t budget = task->max_context_bytes > overhead
-        ? (size_t)task->max_context_bytes - overhead : 0;
-    for (size_t i = 0; i < path_count; i++) {
-        size_t left = path_count - i;
-        size_t share = left > 0 ? budget / left : 0;
-        if (!zac_capture_file(workspace, &paths[i], &context.files[i], share,
-                              &truncated)) {
-            vcs_zcode_agent_context_free(&context);
-            ci_merkle_free(before); codeindex_close(ci);
-            return ZCL_ERR(-1, "selected source file changed or could not be read");
-        }
-        budget -= context.files[i].content_len;
-        context.file_count++;
+    result = zac_capture_files(workspace, task, query, paths, path_count,
+        &context, &truncated);
+    if (!result.ok) {
+        vcs_zcode_agent_context_free(&context);
+        ci_merkle_free(before); codeindex_close(ci);
+        return result;
     }
-    struct ci_merkle *after = ci_merkle_build_cold(workspace, NULL);
-    struct ci_merkle_node after_root;
-    bool stable = after && ci_merkle_root(after, &after_root) &&
-        memcmp(before_root.digest.bytes, after_root.digest.bytes, 32) == 0;
-    for (size_t i = 0; stable && i < context.file_count; i++)
-        stable = zac_reread_matches(workspace, &paths[i], &context.files[i]);
-    ci_merkle_free(after); ci_merkle_free(before);
+    bool stable = zac_capture_stable(workspace, &before_root, paths, &context);
+    ci_merkle_free(before);
     codeindex_close(ci);
     uint8_t source_root_after[32];
     stable = stable && zac_source_root(workspace, source_root_after) &&
@@ -283,43 +358,29 @@ struct zcl_result zcode_agent_context_capture(
         vcs_zcode_agent_context_free(&context);
         return ZCL_ERR(-1, "source changed during agent context capture");
     }
-    if (truncated) context.flags |= VCS_ZCODE_AGENT_CONTEXT_TRUNCATED;
-    uint8_t *wire = NULL; size_t wire_len = 0; uint8_t root[32];
-    enum vcs_zcode_agent_context_result encoded =
-        vcs_zcode_agent_context_serialize(
-            &context, (size_t)task->max_context_bytes, &wire, &wire_len);
-    if (encoded == VCS_ZCODE_AGENT_CONTEXT_OK)
-        encoded = vcs_zcode_agent_context_root(
-            &context, (size_t)task->max_context_bytes, root);
-    if (encoded != VCS_ZCODE_AGENT_CONTEXT_OK ||
-        !vcs_object_store_init(workspace) ||
-        !vcs_object_put_addressed(workspace, root, wire, wire_len)) {
-        free(wire); vcs_zcode_agent_context_free(&context);
-        return ZCL_ERR(-1, "canonical agent context could not enter CAS");
+    result = zac_capture_store(workspace, task, &context,
+        require_complete, truncated, out);
+    if (result.ok) {
+        (void)snprintf(out->resolved_symbol, sizeof(out->resolved_symbol), "%s",
+                       sym.name);
+        out->truncated = truncated;
     }
-    uint8_t *checked_wire = NULL; size_t checked_len = 0;
-    struct vcs_zcode_agent_context_v1 checked;
-    bool verified = vcs_object_load_raw(
-            workspace, root, &checked_wire, &checked_len) == 0 &&
-        checked_len == wire_len && memcmp(checked_wire, wire, wire_len) == 0 &&
-        vcs_zcode_agent_context_parse(
-            checked_wire, checked_len, (size_t)task->max_context_bytes,
-            &checked) == VCS_ZCODE_AGENT_CONTEXT_OK;
-    if (verified) vcs_zcode_agent_context_free(&checked);
-    free(checked_wire); free(wire);
-    if (!verified) {
-        vcs_zcode_agent_context_free(&context);
-        return ZCL_ERR(-1, "agent context CAS readback verification failed");
-    }
-    zcl_hex_encode(root, 32, out->context_root_sha3);
-    zcl_hex_encode(context.source_tree_root, 32, out->source_tree_root_sha3);
-    (void)snprintf(out->resolved_symbol, sizeof(out->resolved_symbol), "%s",
-                   sym.name);
-    out->file_count = context.file_count;
-    out->wire_bytes = wire_len;
-    out->truncated = truncated;
-    for (size_t i = 0; i < context.file_count; i++)
-        out->excerpt_bytes += context.files[i].content_len;
     vcs_zcode_agent_context_free(&context);
-    return ZCL_OK;
+    return result;
+}
+
+struct zcl_result zcode_agent_context_capture(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const uint8_t task_root[32], const char *query,
+    struct zcode_agent_context_status *out)
+{
+    return zac_capture(workspace, task, task_root, query, false, out);
+}
+
+struct zcl_result zcode_agent_context_capture_complete(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const uint8_t task_root[32], const char *query,
+    struct zcode_agent_context_status *out)
+{
+    return zac_capture(workspace, task, task_root, query, true, out);
 }

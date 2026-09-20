@@ -950,6 +950,29 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_task_offer)
 
 ZCL_COMMAND_READY_COMMAND(
+    "zcode.task.adopt", "zcode.task", "",
+    "Restore an original task into an explicitly selected workspace",
+    "Verify held task and metadata carriers against the original task root, "
+    "require the exact materialized source, preserve scope conflicts, and "
+    "capture a receiver context before storing the original task. Repeating "
+    "the same adoption reuses its context. This grants no build, execution, "
+    "installation or publication authority; required execution and proof "
+    "gates remain separate.",
+    0, "zcode,task,adopt,receiver,recovery",
+    "zcl.zcode_task_adopt.input.v1", "zcl.zcode_task_adopt.v1",
+    "workspace,datadir,task_root,context_root,inputs_root,context_symbol",
+    "workspace,task_root,context_root,inputs_root,context_symbol",
+    "z23 zcode task adopt --input='{\"workspace\":\"/tmp/app\",\"task_root\":\"<64hex>\",\"context_root\":\"<64hex>\",\"inputs_root\":\"<64hex>\",\"context_symbol\":\"main\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_task_adopt)
+
+ZCL_COMMAND_READY_COMMAND(
     "zcode.task.pull", "zcode.task", "",
     "Fetch and verify posted contexts for one task root",
     "Resolves every zclassic23.task POINTER record at "

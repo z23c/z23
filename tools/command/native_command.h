@@ -1376,6 +1376,9 @@ void zcl_native_handle_zcode_work_pull(
 void zcl_native_handle_zcode_task_offer(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_task_adopt(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_task_pull(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

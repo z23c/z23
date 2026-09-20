@@ -27,6 +27,7 @@
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker.h"
 #include "services/zcode_lane_service.h"
+#include "services/zcode_agent_context_service.h"
 #include "rpc/server.h"
 #include "storage/event_log.h"
 #include "dev/devloop.h"
@@ -45,7 +46,12 @@
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_task_context.h"
+#include "vcs/zcode_agent_context.h"
 #include "vcs/package_store.h"
+#include "vcs/package_content.h"
+#include "vcs/zcode_task_authority_bundle.h"
+#include "vcs/zcode_write_scope.h"
+#include "vcs/zcode_task_index.h"
 
 #include <secp256k1.h>
 #include <stdio.h>
@@ -526,7 +532,8 @@ static bool zpd_fixture(const char *root, bool unknown_key)
 }
 
 static bool zpd_offer_context(const char *workspace, const char *datadir,
-                              const char *task_root, uint8_t context_root[32])
+                              const char *task_root, uint8_t context_root[32],
+                              uint8_t inputs_digest[32])
 {
     struct json_value input;
     json_init(&input); json_set_object(&input);
@@ -539,8 +546,13 @@ static bool zpd_offer_context(const char *workspace, const char *datadir,
     if (ok)
         zcl_native_handle_zcode_task_offer(&request, &reply);
     const char *root = json_get_str(json_get(&reply.data, "context_root"));
+    const char *inputs_root = json_get_str(
+        json_get(&reply.data, "adoption_inputs_root"));
     ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED && root &&
         zcl_hex_decode_lower(root, context_root, 32) &&
+        inputs_root && zcl_hex_decode_lower(inputs_root, inputs_digest, 32) &&
+        json_get_bool(json_get(&reply.data, "adoption_inputs_available")) &&
+        json_get(&reply.data, "adoption_inputs_provider_publish_input") &&
         json_get(&reply.data, "provider_publish_input") &&
         json_get(&reply.data, "pointer_publish_input");
     zcl_command_reply_free(&reply);
@@ -568,6 +580,94 @@ static bool zpd_offer_admit(const char *datadir, const char *task_hex,
     return ok;
 }
 
+static bool zpd_offer_scope_matches(const uint8_t *wire, size_t len,
+    const struct vcs_zcode_task_v1 *task)
+{
+    struct vcs_zcode_write_scope_v1 scope;
+    uint8_t check[32];
+    return vcs_zcode_write_scope_parse(wire, len, &scope) ==
+        VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_root(&scope, check) == VCS_ZCODE_WRITE_SCOPE_OK &&
+        memcmp(check, task->write_scope_root, 32) == 0;
+}
+
+static bool zpd_offer_authority_matches(const char *datadir,
+    const struct vcs_zcode_task_v1 *task, const uint8_t *wire, size_t len,
+    const uint8_t *expected, size_t expected_len)
+{
+    bool ok = len == expected_len && memcmp(wire, expected, len) == 0 &&
+        vcs_zcode_task_authority_bundle_import(datadir, task, wire, len) ==
+            VCS_ZCODE_TASK_AUTHORITY_OK;
+    if (ok) {
+        struct vcs_zcode_task_v1 wrong_task = *task;
+        wrong_task.dependency_lock_root[0] ^= 1;
+        ok = vcs_zcode_task_authority_bundle_import(datadir, &wrong_task,
+            wire, len) != VCS_ZCODE_TASK_AUTHORITY_OK;
+    }
+    return ok;
+}
+
+static bool zpd_offer_members(struct vcs_package_store *store,
+    const uint8_t inputs_root[32], const struct vcs_package_manifest *manifest,
+    const char *datadir, const struct vcs_zcode_task_v1 *task,
+    const uint8_t *expected, size_t expected_len)
+{
+    bool ok = true, saw_scope = false, saw_authority = false;
+    for (uint32_t i = 0; ok && i < manifest->count; ++i) {
+        uint8_t *wire = NULL;
+        size_t len = 0;
+        ok = vcs_package_content_get_file_at(store, inputs_root, manifest,
+            i, &wire, &len) == VCS_PACKAGE_STORE_OK;
+        if (ok && strcmp(manifest->files[i].path, "zcode-write-scope.v1") == 0) {
+            ok = !saw_scope && zpd_offer_scope_matches(wire, len, task);
+            saw_scope = true;
+        } else if (ok && strcmp(manifest->files[i].path,
+                VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH) == 0) {
+            ok = !saw_authority && zpd_offer_authority_matches(datadir, task,
+                wire, len, expected, expected_len);
+            saw_authority = true;
+        } else {
+            ok = false;
+        }
+        free(wire);
+    }
+    return ok && saw_scope && saw_authority;
+}
+
+static bool zpd_offer_inputs_readback(const char *workspace, const char *datadir,
+    const char *task_hex, const uint8_t inputs_root[32])
+{
+    uint8_t task_root[32], check[32];
+    uint8_t *task_wire = NULL, *manifest_wire = NULL, *expected = NULL;
+    size_t task_len = 0, manifest_len = 0, expected_len = 0;
+    struct vcs_zcode_task_v1 task;
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    struct vcs_package_store *store = vcs_package_store_open(
+        datadir, vcs_package_store_quota_bytes());
+    bool ok = store && zcl_hex_decode_lower(task_hex, task_root, 32) &&
+        vcs_object_load_raw_bounded(workspace, task_root,
+            VCS_ZCODE_TASK_WIRE_BYTES, &task_wire, &task_len) == 0 &&
+        vcs_zcode_task_parse(task_wire, task_len, &task) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_task_root(&task, check) == VCS_ZCODE_DEV_OK &&
+        memcmp(check, task_root, 32) == 0 &&
+        vcs_package_store_get_manifest_wire(store, inputs_root,
+            &manifest_wire, &manifest_len) == VCS_PACKAGE_STORE_OK &&
+        vcs_package_manifest_parse(manifest_wire, manifest_len, &manifest) &&
+        vcs_package_manifest_root(&manifest, check) &&
+        memcmp(check, inputs_root, 32) == 0 && manifest.count == 2 &&
+        vcs_zcode_task_authority_bundle_export(workspace, &task,
+            &expected, &expected_len) == VCS_ZCODE_TASK_AUTHORITY_OK;
+    ok = ok && zpd_offer_members(store, inputs_root, &manifest, datadir,
+        &task, expected, expected_len);
+    free(task_wire);
+    free(manifest_wire);
+    free(expected);
+    vcs_package_manifest_free(&manifest);
+    vcs_package_store_close(store);
+    return ok;
+}
+
 static bool zpd_offer_invalid_workspace(const char *datadir, const char *task_root)
 {
     struct json_value input;
@@ -587,20 +687,256 @@ static bool zpd_offer_invalid_workspace(const char *datadir, const char *task_ro
     return ok;
 }
 
+static bool zpd_adoption_result(const char *rendered, size_t len,
+    enum zcl_command_exit exit_code, const char *task_root,
+    uint8_t adopted_context[32], bool *refusal_mutated)
+{
+    struct json_value envelope;
+    json_init(&envelope);
+    if (len && exit_code != ZCL_COMMAND_EXIT_OK)
+        printf("receiver adoption refusal: %.*s\n", (int)len, rendered);
+    bool ok = len && json_read(&envelope, rendered, len);
+    if (refusal_mutated)
+        *refusal_mutated = ok && json_get_bool(json_get(
+            json_get(&envelope, "error"), "mutated"));
+    const struct json_value *data = json_get(&envelope, "data");
+    const char *returned_task = json_get_str(json_get(data, "task_root"));
+    const char *returned_context = json_get_str(json_get(data, "context_root"));
+    ok = ok && exit_code == ZCL_COMMAND_EXIT_OK && returned_task &&
+        strcmp(returned_task, task_root) == 0 && returned_context &&
+        zcl_hex_decode_lower(returned_context, adopted_context, 32);
+    json_free(&envelope);
+    return ok;
+}
+
+static bool zpd_receiver_adopt_once(const char *workspace, const char *datadir,
+    const char *task_root, const uint8_t carrier[32], const uint8_t inputs[32],
+    const char *query, uint8_t adopted_context[32], bool *refusal_mutated)
+{
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        registry, "zcode.task.adopt", NULL);
+    if (!spec) {
+        fprintf(stderr, "receiver adoption: zcode.task.adopt is unavailable\n");
+        return false;
+    }
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    char carrier_hex[65], inputs_hex[65], rendered[16384];
+    zcl_hex_encode(carrier, 32, carrier_hex);
+    zcl_hex_encode(inputs, 32, inputs_hex);
+    bool ok = json_push_kv_str(&input, "workspace", workspace) &&
+        json_push_kv_str(&input, "datadir", datadir) &&
+        json_push_kv_str(&input, "task_root", task_root) &&
+        json_push_kv_str(&input, "context_root", carrier_hex) &&
+        json_push_kv_str(&input, "inputs_root", inputs_hex) &&
+        json_push_kv_str(&input, "context_symbol", query);
+    struct zcl_command_context context = { .registry = registry,
+        .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER };
+    enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_OK;
+    size_t len = ok ? zcl_command_registry_execute_json(registry, spec,
+        &context, &input, false, spec->path, "normal", 0, 0, NULL,
+        rendered, sizeof(rendered), &exit_code) : 0;
+    ok = ok && zpd_adoption_result(rendered, len, exit_code, task_root,
+        adopted_context, refusal_mutated);
+    json_free(&input);
+    return ok;
+}
+
+static bool zpd_enlarge_context_source(const char *workspace,
+    struct vcs_zcode_task_v1 *task)
+{
+    char path[600], padding[8192];
+    static const char prefix[] =
+        "static int fixture_parse_options(void) { return 0; }\n/*";
+    memset(padding, ' ', sizeof(padding));
+    memcpy(padding, prefix, sizeof(prefix) - 1);
+    memcpy(padding + sizeof(padding) - 4, "*/\n", 4);
+    /* Enlarge the selected symbol's file, not an unrelated source file. */
+    int n = snprintf(path, sizeof(path), "%s/app/main.c", workspace);
+    return n > 0 && (size_t)n < sizeof(path) && zpd_write(path, padding) &&
+        vcs_tree_capture_path(workspace, task->source_root) == VCS_OK;
+}
+
+static bool zpd_capture_truncation_refuses(const char *workspace,
+    const char *task_workspace, const char *task_hex)
+{
+    uint8_t root[32], *wire = NULL;
+    size_t len = 0;
+    struct vcs_zcode_task_v1 task;
+    bool ok = zcl_hex_decode_lower(task_hex, root, 32) &&
+        vcs_object_load_raw_bounded(task_workspace, root,
+            VCS_ZCODE_TASK_WIRE_BYTES, &wire, &len) == 0 &&
+        vcs_zcode_task_parse(wire, len, &task) == VCS_ZCODE_DEV_OK;
+    free(wire);
+    ok = ok && zpd_enlarge_context_source(workspace, &task);
+    task.max_context_bytes = 4096;
+    ok = ok && vcs_zcode_task_root(&task, root) == VCS_ZCODE_DEV_OK;
+    struct zcode_agent_context_status captured;
+    if (ok) {
+        struct zcl_result strict = zcode_agent_context_capture_complete(
+            workspace, &task, root, "fixture_parse_options", &captured);
+        ok = !strict.ok && strstr(strict.message, "no context stored") != NULL;
+        if (!ok) printf("strict context refusal: ok=%d detail=%s\n",
+                         strict.ok, strict.message);
+    }
+    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(workspace,
+        (int64_t)platform_time_wall_unix());
+    char root_hex[65]; zcl_hex_encode(root, 32, root_hex);
+    bool ambiguous = false;
+    ok = ok && index && vcs_zcode_task_index_complete(index) &&
+        !vcs_zcode_task_index_context_for_task(index, root_hex, &ambiguous) &&
+        !ambiguous;
+    vcs_zcode_task_index_free(index);
+    if (ok) {
+        struct zcl_result legacy = zcode_agent_context_capture(workspace,
+            &task, root, "fixture_parse_options", &captured);
+        ok = legacy.ok && captured.truncated;
+        if (!ok) printf("legacy context truncation: ok=%d truncated=%d detail=%s\n",
+                         legacy.ok, captured.truncated, legacy.message);
+    }
+    return ok;
+}
+
+static bool zpd_plant_unverified_context(const char *sender,
+    const char *receiver, const char *task_hex)
+{
+    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(sender,
+        (int64_t)platform_time_wall_unix());
+    bool ambiguous = false;
+    const struct vcs_zcode_task_context_entry *entry =
+        vcs_zcode_task_index_context_for_task(index, task_hex, &ambiguous);
+    uint8_t root[32], *wire = NULL; size_t len = 0;
+    bool ok = index && entry && !ambiguous &&
+        zcl_hex_decode_lower(entry->context_root_hex, root, 32) &&
+        vcs_object_load_raw_bounded(sender, root, 1048576, &wire, &len) == 0;
+    vcs_zcode_task_index_free(index);
+    struct vcs_zcode_agent_context_v1 context;
+    vcs_zcode_agent_context_init(&context);
+    ok = ok && vcs_zcode_agent_context_parse(wire, len, len, &context) ==
+        VCS_ZCODE_AGENT_CONTEXT_OK;
+    free(wire); wire = NULL;
+    if (ok) {
+        (void)snprintf(context.query, sizeof(context.query), "%s",
+                       "fixture_parse_options");
+        printf("preexisting context witness: flags=%u query=%s\n",
+               (unsigned)context.flags, context.query);
+        context.source_tree_root[0] ^= 1;
+        size_t mutated_len = 0;
+        ok = vcs_zcode_agent_context_serialize(&context, len, &wire,
+                &mutated_len) == VCS_ZCODE_AGENT_CONTEXT_OK &&
+            vcs_zcode_agent_context_root(&context, len, root) ==
+                VCS_ZCODE_AGENT_CONTEXT_OK &&
+            vcs_object_store_init(receiver) &&
+            vcs_object_put_addressed(receiver, root, wire, mutated_len);
+    }
+    free(wire); vcs_zcode_agent_context_free(&context);
+    return ok;
+}
+
+static bool zpd_receiver_empty(const char *receiver)
+{
+    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(receiver,
+        (int64_t)platform_time_wall_unix());
+    bool ok = index && vcs_zcode_task_index_complete(index) &&
+        vcs_zcode_task_index_task_count(index) == 0;
+    vcs_zcode_task_index_free(index);
+    return ok;
+}
+
+static bool zpd_receiver_accepted(const char *receiver, const char *task_root)
+{
+    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(receiver,
+        (int64_t)platform_time_wall_unix());
+    bool ambiguous = false;
+    const struct vcs_zcode_task_context_entry *context =
+        vcs_zcode_task_index_context_for_task(index, task_root, &ambiguous);
+    bool ok = index && vcs_zcode_task_index_complete(index) &&
+        vcs_zcode_task_index_task_count(index) == 1 &&
+        vcs_zcode_task_index_candidate_count(index) == 0 &&
+        vcs_zcode_task_index_lane_count(index) == 0 && context && !ambiguous;
+    vcs_zcode_task_index_free(index);
+    return ok;
+}
+
+static bool zpd_receiver_unverified_refuses(const char *workspace,
+    const char *receiver, const char *datadir, const char *task_root,
+    const uint8_t carrier[32], const uint8_t inputs[32])
+{
+    bool ok = zpd_fixture(receiver, false) &&
+        zpd_plant_unverified_context(workspace, receiver, task_root);
+    if (ok) {
+        uint8_t context[32];
+        bool refusal_mutated = false;
+        bool accepted = zpd_receiver_adopt_once(receiver, datadir, task_root,
+            carrier, inputs, "fixture_parse_options", context, &refusal_mutated);
+        if (accepted) printf("adoption accepted an unverified source-tree context\n");
+        if (!refusal_mutated) printf("adoption refusal hid retained inert writes\n");
+        ok = !accepted && refusal_mutated && zpd_receiver_empty(receiver);
+    }
+    return ok;
+}
+
+static bool zpd_receiver_retry(const char *receiver, const char *datadir,
+    const char *task_root, const uint8_t carrier[32], const uint8_t inputs[32])
+{
+    uint8_t first_context[32], repeated_context[32];
+    return zpd_fixture(receiver, false) &&
+        !zpd_receiver_adopt_once(receiver, datadir, task_root, carrier, inputs,
+            "missing_receiver_symbol", first_context, NULL) &&
+        zpd_receiver_empty(receiver) &&
+        zpd_receiver_adopt_once(receiver, datadir, task_root, carrier, inputs,
+            "fixture_parse_options", first_context, NULL) &&
+        zpd_receiver_adopt_once(receiver, datadir, task_root, carrier, inputs,
+            "fixture_parse_options", repeated_context, NULL) &&
+        memcmp(first_context, repeated_context, 32) == 0 &&
+        zpd_receiver_accepted(receiver, task_root);
+}
+
+static bool zpd_offer_repeat(const char *workspace, const char *datadir,
+    const char *task_root, uint8_t first[32], uint8_t first_inputs[32])
+{
+    uint8_t repeated[32], repeated_inputs[32];
+    return zpd_offer_context(workspace, datadir, task_root, first,
+                               first_inputs) &&
+        zpd_offer_inputs_readback(workspace, datadir, task_root, first_inputs) &&
+        zpd_offer_admit(datadir, task_root, first) &&
+        zpd_offer_context(workspace, datadir, task_root, repeated,
+                          repeated_inputs) &&
+        memcmp(first, repeated, 32) == 0 &&
+        memcmp(first_inputs, repeated_inputs, 32) == 0 &&
+        !zpd_offer_context(datadir, datadir, task_root, repeated,
+                           repeated_inputs) &&
+        zpd_offer_invalid_workspace(datadir, task_root);
+}
+
 static bool zpd_workspace_task_offer(const char *workspace, const char *task_root)
 {
     char datadir[4600];
-    uint8_t first[32], repeated[32];
+    uint8_t first[32], first_inputs[32];
     int n = snprintf(datadir, sizeof(datadir), "%s-offer-store", workspace);
     if (n < 0 || (size_t)n >= sizeof(datadir) ||
         !platform_directory_ensure(datadir, 0700))
         return false;
-    bool ok = zpd_offer_context(workspace, datadir, task_root, first) &&
-        zpd_offer_admit(datadir, task_root, first) &&
-        zpd_offer_context(workspace, datadir, task_root, repeated) &&
-        memcmp(first, repeated, 32) == 0 &&
-        !zpd_offer_context(datadir, datadir, task_root, repeated) &&
-        zpd_offer_invalid_workspace(datadir, task_root);
+    bool ok = zpd_offer_repeat(workspace, datadir, task_root, first, first_inputs);
+    char receiver[512];
+    n = snprintf(receiver, sizeof(receiver), "%s-receiver", workspace);
+    if (ok && n > 0 && (size_t)n < sizeof(receiver)) {
+        ok = zpd_fixture(receiver, false) &&
+            zpd_capture_truncation_refuses(receiver, workspace, task_root);
+        /* Capture created real index/CAS directories. Retire this isolated
+         * truncation fixture before constructing the fresh adoption receiver. */
+        test_rm_rf(receiver);
+        ok = ok && zpd_receiver_unverified_refuses(workspace, receiver, datadir,
+            task_root, first, first_inputs);
+        test_rm_rf(receiver);
+        ok = ok && zpd_receiver_retry(receiver, datadir, task_root, first,
+            first_inputs);
+        zpd_fixture_cleanup(receiver);
+    } else {
+        ok = false;
+    }
     test_rm_rf(datadir);
     return ok;
 }

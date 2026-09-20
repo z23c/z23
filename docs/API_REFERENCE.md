@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 893 |
+| Registry entries (branches + leaves) | 894 |
 | Top-level roots | 14 |
 | Branches | 199 |
-| Leaves (dispatchable command paths) | 694 |
-| … `ready` (live handler in this build) | 614 |
+| Leaves (dispatchable command paths) | 695 |
+| … `ready` (live handler in this build) | 615 |
 | … `compat` (metadata only, names a fallback) | 50 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 30 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 49 |
-| Leaves with `effect=mutate` | 254 |
+| Leaves with `effect=mutate` | 255 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 131 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
-| `engine/composition/commands/zcode.def` | 250 | 59 | 191 |
+| `engine/composition/commands/zcode.def` | 251 | 59 | 192 |
 | `engine/composition/commands/zcode_science.def` | 25 | 7 | 18 |
 | `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1204,6 +1204,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `zcode task offer` | ready | mutate / app-write / operator · foreground/low | **`task_root`**, `datadir`, `workspace` | `zcl.zcode_task_offer.v1` | `z23 zcode task offer --input='{"task_root":"<64hex>"}'` | Bind one task's wires into the transport carrier |
+| `zcode task adopt` | ready | mutate / app-write / operator · foreground/low | **`workspace`**, `datadir`, **`task_root`**, **`context_root`**, **`inputs_root`**, **`context_symbol`** | `zcl.zcode_task_adopt.v1` | `z23 zcode task adopt --input='{"workspace":"/tmp/app","task_root":"<64hex>","context_root":"<64hex>","inputs_root":"<64hex>","context_symbol":"main"}'` | Restore an original task into an explicitly selected workspace |
 | `zcode task pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_task_pull.v1` | `z23 zcode task pull --input='{"task_root":"<64hex>"}'` | Fetch and verify posted contexts for one task root |
 | `zcode task board` | ready | read / read / operator · foreground/low | `datadir` | `zcl.zcode_task_board.v1` | `z23 zcode task board` | List task postings this node has seen |
 

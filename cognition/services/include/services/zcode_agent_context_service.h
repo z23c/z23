@@ -29,4 +29,12 @@ struct zcl_result zcode_agent_context_capture(
     const uint8_t task_root[32], const char *query,
     struct zcode_agent_context_status *out);
 
+/* Same capture, but refuse truncation before writing a context object. This
+ * allows a failed receiver adoption to retry without an unusable context
+ * becoming its durable selection. */
+struct zcl_result zcode_agent_context_capture_complete(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const uint8_t task_root[32], const char *query,
+    struct zcode_agent_context_status *out);
+
 #endif /* ZCL_SERVICES_ZCODE_AGENT_CONTEXT_SERVICE_H */

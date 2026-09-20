@@ -280,7 +280,7 @@ cognition/services/src/metaverse_agent_service.c:metaverse_agent_service_money:2
 cognition/services/src/metaverse_agent_service.c:money_load_bindings:29
 cognition/services/src/metaverse_agent_service.c:money_query:22
 cognition/services/src/zcode_agent_context_service.c:zac_capture_file:22
-cognition/services/src/zcode_agent_context_service.c:zcode_agent_context_capture:38
+cognition/services/src/zcode_agent_context_service.c:zcode_agent_context_capture:1
 cognition/services/src/zcode_goal_context_calc_service.c:tokenize:16
 cognition/services/src/zcode_goal_context_service.c:zgoal_calc_frozen_kat:24
 cognition/services/src/zcode_goal_context_service.c:zgoal_literal_candidates:16

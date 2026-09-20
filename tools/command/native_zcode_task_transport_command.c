@@ -69,10 +69,17 @@
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 #include "vcs/package_store.h"
+#include "vcs/package_content.h"
 #include "vcs/source_package_checkout.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_dht_record.h"
 #include "vcs/zcode_task_context.h"
+#include "vcs/zcode_task_authority_bundle.h"
+#include "vcs/zcode_write_scope.h"
+#include "vcs/zcode_task_index.h"
+#include "vcs/zcode_agent_context.h"
+#include "vcs/vcs.h"
+#include "services/zcode_agent_context_service.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -204,6 +211,307 @@ static bool ztt_offer_workspace(const struct zcl_command_request *request,
     return false;
 }
 
+/* Additional task inputs use ordinary content.v2 members. The existing
+ * three-member task context retains its identity and validation contract.
+ * This carrier contains metadata, not the source/dependency closure or an
+ * execution grant. Receivers must independently verify all task bindings. */
+static bool ztt_offer_adoption_inputs(const char *workspace,
+    const struct vcs_zcode_task_v1 *task, struct vcs_package_store *store,
+    uint8_t root[32], const char **reason)
+{
+    static const char scope_path[] = "zcode-write-scope.v1";
+    uint8_t *scope_wire = NULL, *authority_wire = NULL, *manifest_wire = NULL;
+    size_t scope_len = 0, authority_len = 0, manifest_len = 0;
+    struct vcs_zcode_write_scope_v1 scope;
+    uint8_t scope_root[32], stored_root[32];
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    *reason = "scope_unavailable_or_invalid";
+    bool ok = vcs_object_load_raw_bounded(workspace, task->write_scope_root,
+        VCS_ZCODE_WRITE_SCOPE_WIRE_MAX, &scope_wire, &scope_len) == 0 &&
+        vcs_zcode_write_scope_parse(scope_wire, scope_len, &scope) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_root(&scope, scope_root) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        memcmp(scope_root, task->write_scope_root, 32) == 0;
+    if (ok) {
+        *reason = "authority_unavailable_or_invalid";
+        ok = vcs_zcode_task_authority_validate(workspace, task) ==
+            VCS_ZCODE_TASK_AUTHORITY_OK &&
+        vcs_zcode_task_authority_bundle_export(workspace, task,
+            &authority_wire, &authority_len) == VCS_ZCODE_TASK_AUTHORITY_OK;
+    }
+    if (ok) {
+        *reason = "carrier_encoding_failed";
+        ok = vcs_package_content_add_file(&manifest, scope_path,
+                VCS_PACKAGE_MODE_FILE, scope_wire, scope_len) &&
+            vcs_package_content_add_file(&manifest,
+                VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH, VCS_PACKAGE_MODE_FILE,
+                authority_wire, authority_len) &&
+            vcs_package_manifest_serialize(&manifest, &manifest_wire,
+                &manifest_len) && vcs_package_manifest_root(&manifest, root);
+    }
+    if (ok) {
+        *reason = "carrier_storage_failed";
+        ok = vcs_package_store_put_manifest(store, manifest_wire,
+                manifest_len, stored_root) == VCS_PACKAGE_STORE_OK &&
+            memcmp(root, stored_root, 32) == 0 &&
+            vcs_package_content_put_file(store, root, scope_path,
+                scope_wire, scope_len) == VCS_PACKAGE_STORE_OK &&
+            vcs_package_content_put_file(store, root,
+                VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH, authority_wire,
+                authority_len) == VCS_PACKAGE_STORE_OK;
+    }
+    free(scope_wire);
+    free(authority_wire);
+    free(manifest_wire);
+    vcs_package_manifest_free(&manifest);
+    if (!ok)
+        LOG_FAIL("zcode.task.offer", "adoption metadata unavailable: %s",
+                 *reason);
+    *reason = "available";
+    return ok;
+}
+
+struct ztt_adoption_wires {
+    uint8_t *scope;
+    size_t scope_len;
+    uint8_t *authority;
+    size_t authority_len;
+};
+
+static bool ztt_adopt_input_file(struct vcs_package_store *store,
+    const uint8_t root[32], const struct vcs_package_manifest *manifest,
+    uint32_t i, struct ztt_adoption_wires *wires)
+{
+    if (strcmp(manifest->files[i].path, "zcode-write-scope.v1") == 0 &&
+        !wires->scope && manifest->files[i].size <= VCS_ZCODE_WRITE_SCOPE_WIRE_MAX)
+        return vcs_package_content_get_file_at(store, root, manifest, i,
+            &wires->scope, &wires->scope_len) == VCS_PACKAGE_STORE_OK;
+    if (strcmp(manifest->files[i].path, VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH) == 0 &&
+        !wires->authority && manifest->files[i].size <= UINT64_C(1048576))
+        return vcs_package_content_get_file_at(store, root, manifest, i,
+            &wires->authority, &wires->authority_len) == VCS_PACKAGE_STORE_OK;
+    LOG_FAIL("zcode.task.adopt", "unexpected, duplicate or oversized metadata file");
+}
+
+static bool ztt_adopt_input_bindings(const char *workspace,
+    const struct vcs_zcode_task_v1 *task, const struct ztt_adoption_wires *wires)
+{
+    uint8_t check[32];
+    struct vcs_zcode_write_scope_v1 scope;
+    bool ok = wires->scope && wires->authority &&
+        vcs_zcode_write_scope_parse(wires->scope, wires->scope_len, &scope) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_root(&scope, check) == VCS_ZCODE_WRITE_SCOPE_OK &&
+        memcmp(check, task->write_scope_root, 32) == 0 &&
+        vcs_zcode_task_authority_bundle_import(workspace, task,
+            wires->authority, wires->authority_len) == VCS_ZCODE_TASK_AUTHORITY_OK &&
+        vcs_zcode_task_authority_validate(workspace, task) ==
+            VCS_ZCODE_TASK_AUTHORITY_OK &&
+        vcs_object_put_addressed(workspace, task->write_scope_root,
+            wires->scope, wires->scope_len);
+    if (!ok) LOG_FAIL("zcode.task.adopt", "metadata authority binding failed");
+    return true;
+}
+
+static bool ztt_adopt_inputs(struct vcs_package_store *store,
+    const uint8_t root[32], const char *workspace,
+    const struct vcs_zcode_task_v1 *task)
+{
+    uint8_t *manifest_wire = NULL;
+    size_t manifest_len = 0;
+    struct ztt_adoption_wires wires = {0};
+    uint8_t check[32];
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    bool ok = vcs_package_store_get_manifest_wire(store, root,
+        &manifest_wire, &manifest_len) == VCS_PACKAGE_STORE_OK &&
+        vcs_package_manifest_parse(manifest_wire, manifest_len, &manifest) &&
+        manifest.count == 2 && vcs_package_manifest_root(&manifest, check) &&
+        memcmp(check, root, 32) == 0;
+    for (uint32_t i = 0; ok && i < manifest.count; ++i)
+        ok = ztt_adopt_input_file(store, root, &manifest, i, &wires);
+    ok = ok && ztt_adopt_input_bindings(workspace, task, &wires);
+    free(manifest_wire); free(wires.scope); free(wires.authority);
+    vcs_package_manifest_free(&manifest);
+    if (!ok)
+        LOG_FAIL("zcode.task.adopt", "task metadata is missing or mismatched");
+    return true;
+}
+
+static bool ztt_adopt_context_valid(const char *workspace,
+    const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
+    const char *context_hex)
+{
+    uint8_t root[32], *wire = NULL;
+    size_t len = 0;
+    struct vcs_zcode_agent_context_v1 context;
+    vcs_zcode_agent_context_init(&context);
+    bool ok = zcl_hex_decode_lower(context_hex, root, 32) &&
+        vcs_object_load_raw_bounded(workspace, root, task->max_context_bytes,
+            &wire, &len) == 0 &&
+        vcs_zcode_agent_context_parse(wire, len, task->max_context_bytes,
+            &context) == VCS_ZCODE_AGENT_CONTEXT_OK &&
+        vcs_zcode_agent_context_validate_for_task(&context, task, task_root,
+            root, true) == VCS_ZCODE_AGENT_CONTEXT_OK;
+    free(wire);
+    vcs_zcode_agent_context_free(&context);
+    if (!ok) LOG_FAIL("zcode.task.adopt", "receiver context failed task binding");
+    return true;
+}
+
+static bool ztt_adopt_reproduce(const char *workspace,
+    const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
+    const char *task_hex, const char *query, char adopted_context[65])
+{
+    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(workspace,
+        (int64_t)platform_time_wall_unix());
+    struct vcs_zcode_task_conflict conflict;
+    bool ambiguous = false;
+    const struct vcs_zcode_task_context_entry *existing =
+        vcs_zcode_task_index_context_for_task(index, task_hex, &ambiguous);
+    bool ok = index && vcs_zcode_task_index_complete(index) && !ambiguous &&
+        vcs_zcode_task_index_conflict(index, workspace, task, &conflict) ==
+            VCS_ZCODE_TASK_CONFLICT_CLEAR;
+    if (ok && existing) {
+        ok = strcmp(existing->query, query) == 0;
+        if (ok) (void)snprintf(adopted_context, 65, "%s",
+                              existing->context_root_hex);
+    }
+    vcs_zcode_task_index_free(index);
+    if (!ok) LOG_FAIL("zcode.task.adopt", "existing context or task conflicts");
+    /* Reproduce even on retry: an indexed object's self-consistency does not
+     * prove that its excerpts came from this receiver's current source. */
+    struct zcode_agent_context_status captured;
+    struct zcl_result result = zcode_agent_context_capture_complete(workspace,
+        task, task_root, query, &captured);
+    ok = result.ok && (!adopted_context[0] ||
+        strcmp(adopted_context, captured.context_root_sha3) == 0);
+    if (!ok) LOG_FAIL("zcode.task.adopt", "local context reproduction refused");
+    (void)snprintf(adopted_context, 65, "%s", captured.context_root_sha3);
+    return true;
+}
+
+static bool ztt_adopt_source_current(const char *workspace,
+    const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
+    const char *adopted_context, int64_t now)
+{
+    uint8_t source[32];
+    bool ok = vcs_zcode_task_validate_at(task, now) == VCS_ZCODE_DEV_OK &&
+        vcs_tree_capture_path(workspace, source) == VCS_OK &&
+        memcmp(source, task->source_root, 32) == 0 &&
+        ztt_adopt_context_valid(workspace, task, task_root, adopted_context);
+    if (!ok) LOG_FAIL("zcode.task.adopt", "task or source changed before storage");
+    return true;
+}
+
+static bool ztt_adopt_store(const char *workspace,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_proof_policy_v1 *policy, const uint8_t task_root[32],
+    const char *task_hex, const char *adopted_context,
+    const uint8_t *goal, size_t goal_len)
+{
+    int64_t now = (int64_t)platform_time_wall_unix();
+    if (!ztt_adopt_source_current(workspace, task, task_root, adopted_context, now))
+        LOG_FAIL("zcode.task.adopt", "final source validation refused");
+    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(workspace, now);
+    bool ambiguous = false;
+    struct vcs_zcode_task_conflict conflict;
+    const struct vcs_zcode_task_context_entry *existing =
+        vcs_zcode_task_index_context_for_task(index, task_hex, &ambiguous);
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    /* Keep fresh conflict checks adjacent to task-last persistence. */
+    bool ok = index && vcs_zcode_task_index_complete(index) &&
+        existing && !ambiguous &&
+        strcmp(existing->context_root_hex, adopted_context) == 0 &&
+        vcs_zcode_task_index_conflict(index, workspace, task, &conflict) ==
+            VCS_ZCODE_TASK_CONFLICT_CLEAR &&
+        vcs_zcode_task_serialize(task, task_wire) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_policy_serialize(policy, policy_wire) == VCS_ZCODE_DEV_OK &&
+        vcs_object_put_addressed(workspace, task->proof_policy_root,
+            policy_wire, sizeof(policy_wire)) &&
+        vcs_object_put_addressed(workspace, task->goal_root, goal, goal_len) &&
+        vcs_object_put_addressed(workspace, task_root, task_wire, sizeof(task_wire));
+    vcs_zcode_task_index_free(index);
+    if (!ok) LOG_FAIL("zcode.task.adopt", "final conflict check or storage refused");
+    return true;
+}
+
+static bool ztt_adopt_workspace(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *query, char workspace[4400])
+{
+    const char *workspace_input = ztl_input_str(request->input, "workspace");
+    if (!workspace_input || !query || !query[0] ||
+        !platform_directory_canonical_real(workspace_input, workspace, 4400)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INVALID, "BAD_ADOPTION_INPUT", "validate", false,
+            false, "adoption requires an existing workspace and context symbol",
+            "workspace,context_symbol");
+        return false;
+    }
+    return true;
+}
+
+void zcl_native_handle_zcode_task_adopt(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    const char *query = ztl_input_str(request->input, "context_symbol");
+    char workspace[4400];
+    if (!ztt_adopt_workspace(request, reply, query, workspace)) return;
+    uint8_t task_root[32], context_root[32], inputs_root[32];
+    if (!ztl_hex32(request, reply, "zcode.task.adopt", "task_root",
+            "BAD_TASK_ROOT", "original task", task_root) ||
+        !ztl_hex32(request, reply, "zcode.task.adopt", "context_root",
+            "BAD_CONTEXT_ROOT", "task carrier", context_root) ||
+        !ztl_hex32(request, reply, "zcode.task.adopt", "inputs_root",
+            "BAD_INPUTS_ROOT", "task metadata carrier", inputs_root)) return;
+    bool own_store = false;
+    struct vcs_package_store *store = ztl_open_store(request, &own_store,
+                                                     "zcode.task.adopt");
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_proof_policy_v1 policy;
+    uint8_t goal[VCS_ZCODE_TASK_CONTEXT_GOAL_MAX], derived[32], source[32];
+    size_t goal_len = 0;
+    int64_t now = (int64_t)platform_time_wall_unix();
+    bool ok = store && vcs_zcode_task_context_admit(store, context_root,
+        task_root, now, &task, &policy, goal, sizeof(goal), &goal_len,
+        derived) == VCS_ZCODE_TASK_CONTEXT_OK;
+    /* Snapshot capture and metadata import can retain inert objects even
+     * when a later binding check refuses. This is a conservative mutation
+     * indicator, not a count of newly stored objects on an idempotent retry. */
+    bool writes_possible = ok;
+    ok = ok && vcs_tree_capture_path(workspace, source) == VCS_OK &&
+        memcmp(source, task.source_root, 32) == 0 &&
+        ztt_adopt_inputs(store, inputs_root, workspace, &task);
+    ztl_close_store(store, own_store);
+    if (!ok) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INVALID, "ADOPTION_INPUTS_REFUSED", "validate",
+            false, writes_possible, "task, source or metadata bindings are unavailable",
+            "inert snapshot or metadata objects may remain; task storage was not reached");
+        return;
+    }
+    char task_hex[65], adopted_context[65] = {0};
+    zcl_hex_encode(task_root, 32, task_hex);
+    ok = ztt_adopt_reproduce(workspace, &task, task_root, task_hex, query,
+        adopted_context) && ztt_adopt_store(workspace, &task, &policy,
+        task_root, task_hex, adopted_context, goal, goal_len);
+    if (!ok) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INVALID, "ADOPTION_CONTEXT_REFUSED", "execute",
+            false, true, "context, conflict check or task storage failed",
+            "inert objects may remain; conflicting context roots require resolution before retry");
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "task_root", task_hex);
+    (void)json_push_kv_str(&reply->data, "context_root", adopted_context);
+    (void)json_push_kv_bool(&reply->data, "executed", false);
+    (void)json_push_kv_str(&reply->data, "adoption_status", "adopted");
+}
+
 void zcl_native_handle_zcode_task_offer(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -259,6 +567,11 @@ void zcl_native_handle_zcode_task_offer(
     enum vcs_zcode_task_context_error exported = vcs_zcode_task_context_export(
         task_wire, task_len, goal, goal_len, policy_wire, policy_len, store,
         (int64_t)platform_time_wall_unix(), context_root);
+    uint8_t inputs_root[32];
+    const char *inputs_reason = "task_context_refused";
+    bool inputs_available = exported == VCS_ZCODE_TASK_CONTEXT_OK &&
+        ztt_offer_adoption_inputs(zcode_dir, &task, store, inputs_root,
+                                 &inputs_reason);
     ztl_close_store(store, own_store);
     free(task_wire);
     free(goal);
@@ -280,6 +593,22 @@ void zcl_native_handle_zcode_task_offer(
 
     (void)json_push_kv_str(&reply->data, "task_root", task_hex);
     (void)json_push_kv_str(&reply->data, "context_root", context_hex);
+    (void)json_push_kv_bool(&reply->data, "adoption_inputs_available",
+                           inputs_available);
+    (void)json_push_kv_str(&reply->data, "adoption_inputs_status", inputs_reason);
+    if (inputs_available) {
+        char inputs_hex[65];
+        zcl_hex_encode(inputs_root, 32, inputs_hex);
+        (void)json_push_kv_str(&reply->data, "adoption_inputs_root", inputs_hex);
+        struct json_value inputs_provider;
+        json_init(&inputs_provider);
+        ztl_publish_input(&inputs_provider, "provider",
+            VCS_ZCODE_TASK_DHT_NAMESPACE, NULL, inputs_hex,
+            (uint64_t)platform_time_wall_unix(), ZTT_PROVIDER_WINDOW_S);
+        (void)json_push_kv(&reply->data, "adoption_inputs_provider_publish_input",
+                           &inputs_provider);
+        json_free(&inputs_provider);
+    }
     (void)json_push_kv_str(&reply->data, "namespace",
                            VCS_ZCODE_TASK_DHT_NAMESPACE);
     (void)json_push_kv_int(&reply->data, "expires_unix",
