@@ -791,6 +791,9 @@ check_root() {
                     continue
                 fi
                 local co_macros
+                # Populate the cache in this shell; command substitution
+                # would discard it and rerun make for every capability.
+                [ "$CAP_CLOSURE_DEFINED_MACRO_LOADED" -eq 1 ] || cap_closure_load_defined_macros "$root"
                 if co_macros="$(cap_closure_compiled_out_macros "$path" "$root")"; then
                     echo "check_capability_closure: UNOBSERVED (compiled out: $co_macros) —"
                     echo "  $path declares $tok but its primary implementation never"
@@ -1386,8 +1389,31 @@ EOF
                   "still_overdeclared_user.c declares CAP_NETWORK" "$d" || rc=1
     unset CAP_CLOSURE_CFLAGS_OVERRIDE
 
+    # O. Multiple capabilities share one flags observation per check, but a
+    # later check must observe changed flags rather than inherit that cache.
+    fixture_module_rows "$d" \
+        'ZCL_MODULE_CAPABILITY("fixture_src/still_overdeclared_user.c", CAP_NETWORK|CAP_CLOCK, "test: shared flags observation")'
+    printf 'print-CFLAGS:\n\t@echo load >> flags-loads\n' > "$d/Makefile"
+    check_root "$d" > "$d/cache-check.log" 2>&1; nrc=$?
+    trap - RETURN
+    if [ "$nrc" -ne 0 ] || [ ! -f "$d/flags-loads" ] || [ "$(wc -l < "$d/flags-loads")" -ne 1 ]; then
+        echo "SELFTEST FAIL: O: multiple capabilities must load flags once per check"
+        rc=1
+    else
+        CAP_CLOSURE_CFLAGS_OVERRIDE="-DFIXTURE_N_PRESENT_MACRO -UFIXTURE_N_PRESENT_MACRO -DFIXTURE_N_PRESENT_MACRO"
+        check_root "$d" > "$d/cache-check.log" 2>&1; nrc=$?
+        trap - RETURN
+        unset CAP_CLOSURE_CFLAGS_OVERRIDE
+        if [ "$nrc" -ne 1 ] || ! grep -q 'declares CAP_NETWORK' "$d/cache-check.log"; then
+            echo "SELFTEST FAIL: O: a later check must discard cached flags and reject overdeclaration"
+            rc=1
+        else
+            echo "  selftest ok: O: flags load once per check and changed flags still reject overdeclaration"
+        fi
+    fi
+
     if [ "$rc" -eq 0 ]; then
-        echo "== selftest: PASS (15/15) =="
+        echo "== selftest: PASS (16/16) =="
     else
         echo "== selftest: FAIL =="
     fi
