@@ -33,6 +33,22 @@ static int finish_output(FILE *out) {
   return 0;
 }
 
+static int read_input(FILE *in, char *input, size_t cap, size_t *len) {
+  *len = fread(input, 1, cap, in);
+  /* A full buffer does not set EOF. Probe one byte to distinguish the
+   * inclusive bound from overflow, then also check errors from the probe. */
+  int extra = *len == cap ? fgetc(in) : EOF;
+  if (ferror(in)) {
+    fprintf(stderr, "csvtab: read error\n");
+    return 2;
+  }
+  if (extra != EOF) {
+    fprintf(stderr, "csvtab: input exceeds 16 MiB bound\n");
+    return 2;
+  }
+  return 0;
+}
+
 /* Lay out one bounded cell; never split a visible CR/LF marker. */
 static size_t layout_field(const zcsv_field *field, char out[COL_WIDTH_MAX]) {
   size_t used = 0, last = 0;
@@ -132,15 +148,9 @@ int main(int argc, char **argv) {
   }
 
   static char input[MAX_INPUT];
-  size_t len = fread(input, 1, sizeof(input), stdin);
-  if (ferror(stdin)) {
-    fprintf(stderr, "csvtab: read error\n");
+  size_t len = 0;
+  if (read_input(stdin, input, sizeof(input), &len) != 0)
     return 2;
-  }
-  if (!feof(stdin)) {
-    fprintf(stderr, "csvtab: input exceeds 16 MiB bound\n");
-    return 2;
-  }
 
   static char row_data[ROW_DATA_CAP];
   static zcsv_field row_fields[ROW_FIELD_CAP];

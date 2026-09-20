@@ -245,6 +245,33 @@ static void test_writer_row_and_roundtrip(void) {
 #include "../app/main.c"
 #undef main
 
+static void test_input_bound(void) {
+#if !defined(_WIN32)
+  char data[] = "a\nb\nx";
+  for (size_t bytes = 0; bytes <= 5; bytes++) {
+    FILE *in = fmemopen(data, bytes, "r");
+    CHECK(in != NULL);
+    if (!in) continue;
+    char input[6];
+    memset(input, '?', sizeof(input));
+    size_t len = 0;
+    CHECK(read_input(in, input + 1, 4, &len) == (bytes <= 4 ? 0 : 2));
+    CHECK(len == (bytes <= 4 ? bytes : 4));
+    CHECK(memcmp(input + 1, data, len) == 0);
+    CHECK(input[0] == '?' && input[5] == '?');
+    CHECK(fclose(in) == 0);
+  }
+  FILE *in = fopen("/dev/null", "w");
+  CHECK(in != NULL);
+  if (in) {
+    char input[4];
+    size_t len = 0;
+    CHECK(read_input(in, input, sizeof(input), &len) == 2);
+    CHECK(fclose(in) == 0);
+  }
+#endif
+}
+
 static void test_output_errors(void) {
 #if !defined(_WIN32)
   /* /dev/null is already permitted by the package verifier. Closing the
@@ -318,6 +345,7 @@ int main(void) {
   test_writer_row_and_roundtrip();
   test_table_layout();
   test_output_errors();
+  test_input_bound();
   if (failures) {
     fprintf(stderr, "zcsv: %d failure(s)\n", failures);
     return 1;
