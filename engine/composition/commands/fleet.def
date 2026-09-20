@@ -461,9 +461,11 @@ ZCL_COMMAND_READY_READ(
     "fleet.steer.brief", "fleet.steer", "",
     "One-call fleet brief: workers, work, blockers, capacity, candidates",
     "Composes workers, current work, blockers, capacity, candidate "
-    "identities, evidence references and changes since `since` (a mail "
-    "cursor; the reply carries the new `cursor`) from the existing fleet "
-    "leaves, with per-source observation age and a `missing[]` list "
+        "identities, evidence references and changes since `since` (an integer "
+    "mail floor, or the reply's `cursor_token` watermark resuming every "
+    "stream; the reply also carries `changes_truncated`, `changes_dropped`) "
+    "from the fleet leaves, with per-source observation age and a "
+    "`missing[]` list "
     "naming every source that did not answer. `agents` is only the names "
     "seen in mail and on the board. `workers` (at most 16, newest first, "
     "with workers_total, workers_total_exact and workers_truncated) lists "
@@ -489,9 +491,8 @@ ZCL_COMMAND_READY_READ(
     "queued_stale_after_s (120) with no receiver evidence it is a "
     "blocker (newest 8 named, the rest counted). "
     "`reply`: answered|acked|queued. "
-    "Arrays are trimmed to fit the response budget and budget_truncated "
-    "names what was cut. Read-only over fleet state. It contacts no "
-    "peer and never waits.", 65536,
+    "Arrays are trimmed to the response budget; budget_truncated names "
+    "cuts. Read-only: contacts no peer, never waits.", 65536,
     "fleet,steer,brief,steering,chatgpt,cursor,agents,blockers,capacity",
     "zcl.fleet_steer_brief.input.v1", "zcl.fleet_steer_brief.v1",
     "grant,since,limit", "",

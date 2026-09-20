@@ -308,6 +308,126 @@ static void fmx_brief(struct fmx_call *c, const char *grant, long long since)
     (void)json_push_kv_int(&c->input, "since", since);
 }
 
+/* Brief resuming from a composite watermark: the cursor_token string a
+ * previous brief returned. */
+static void fmx_brief_since(struct fmx_call *c, const char *grant,
+                            const char *token)
+{
+    fmx_begin(c, FMX_BRIEF_PATH, "zcl.fleet_steer_brief.v1");
+    if (grant)
+        (void)json_push_kv_str(&c->input, "grant", grant);
+    (void)json_push_kv_str(&c->input, "since", token ? token : "");
+}
+
+/* Boolean reply field, false when absent/wrong-typed. */
+static bool fmx_bool(const struct fmx_call *c, const char *key)
+{
+    const struct json_value *v = fmx_get(c, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
+/* Number of rows in the reply's changes[] array. */
+static long long fmx_changes_n(const struct fmx_call *c)
+{
+    const struct json_value *ch = fmx_arr(c, "changes");
+    return ch ? (long long)json_size(ch) : -1;
+}
+
+/* Brief with an explicit token (NULL = legacy integer 0) and row cap. */
+static void fmx_brief_opt(struct fmx_call *c, const char *grant,
+                          const char *token, long long limit)
+{
+    fmx_begin(c, FMX_BRIEF_PATH, "zcl.fleet_steer_brief.v1");
+    if (grant)
+        (void)json_push_kv_str(&c->input, "grant", grant);
+    if (token)
+        (void)json_push_kv_str(&c->input, "since", token);
+    else
+        (void)json_push_kv_int(&c->input, "since", 0);
+    if (limit > 0)
+        (void)json_push_kv_int(&c->input, "limit", limit);
+}
+
+/* Missing reason for a source, or "" when the source is not missing. */
+static const char *fmx_missing_reason(const struct fmx_call *c,
+                                      const char *source)
+{
+    const struct json_value *missing = fmx_arr(c, "missing");
+    size_t n, i;
+    if (!missing)
+        return "";
+    n = json_size(missing);
+    for (i = 0; i < n; i++) {
+        const struct json_value *e = json_at(missing, i);
+        const struct json_value *v;
+        const char *s;
+        if (!e || e->type != JSON_OBJ)
+            continue;
+        v = json_get(e, "source");
+        s = (v && v->type == JSON_STR) ? json_get_str(v) : NULL;
+        if (!s || strcmp(s, source) != 0)
+            continue;
+        v = json_get(e, "reason");
+        return (v && v->type == JSON_STR && json_get_str(v))
+                   ? json_get_str(v)
+                   : "";
+    }
+    return "";
+}
+
+/* Rewrite one inbox file with exact content (a shorter file makes a
+ * previously handed-out offset stale: replaced-or-truncated). */
+static void fmx_rewrite_inbox(const char *peer, const char *content)
+{
+    char dir[1024], path[1200];
+    FILE *f;
+    int n = snprintf(dir, sizeof(dir), "%s/z23/dev/mail", g_fmx_state);
+    if (n <= 0 || (size_t)n >= sizeof(dir))
+        fmx_fixture_fail("mail dir exceeds bound");
+    if (!platform_private_directory_ensure(dir))
+        fmx_fixture_fail("cannot create isolated mail dir");
+    n = snprintf(path, sizeof(path), "%s/inbox.%s.jsonl", dir, peer);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        fmx_fixture_fail("inbox path exceeds bound");
+    f = fopen(path, "w");
+    if (!f)
+        fmx_fixture_fail("cannot rewrite an inbox file");
+    if (content && fputs(content, f) == EOF) {
+        (void)fclose(f);
+        fmx_fixture_fail("cannot write an inbox file");
+    }
+    if (fclose(f) != 0)
+        fmx_fixture_fail("cannot finish an inbox file");
+}
+
+/* Delete one inbox file outright (a stream the watermark names but the
+ * dir no longer holds). */
+static void fmx_drop_inbox(const char *peer)
+{
+    char path[1200];
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/mail/inbox.%s.jsonl",
+                     g_fmx_state, peer);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        fmx_fixture_fail("inbox path exceeds bound");
+    if (remove(path) != 0)
+        fmx_fixture_fail("cannot drop an inbox file");
+}
+
+/* from of one changes[] row, or "" when out of range. */
+static const char *fmx_changes_from(const struct fmx_call *c, size_t idx)
+{
+    const struct json_value *ch = fmx_arr(c, "changes");
+    const struct json_value *row, *v;
+    if (!ch || idx >= json_size(ch))
+        return "";
+    row = json_at(ch, idx);
+    if (!row || row->type != JSON_OBJ)
+        return "";
+    v = json_get(row, "from");
+    return (v && v->type == JSON_STR && json_get_str(v)) ? json_get_str(v)
+                                                        : "";
+}
+
 static void fmx_evidence(struct fmx_call *c, const char *grant,
                          const char *type, const char *ref)
 {
@@ -724,6 +844,75 @@ static int fmx_t_brief_changes(void)
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         ASSERT(fmx_check_queued(fmx_arr(&b, "changes")));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static int fmx_t_brief_newer_low_seq(void)
+{
+    int failures = 0;
+
+    TEST("steer: a newer lower-seq row from another stream stays in changes") {
+        struct fmx_call b;
+        struct fmx_accept throwaway;
+        char token[4096], token2[4096];
+        fmx_isolate("brief_low_seq");
+        /* A real send first so the state tree exists (seeding writes the
+         * leaf dir only); its outbox row numbers from 1, far below the
+         * fixture seqs, and its ref never collides with them. */
+        throwaway = fmx_probe();
+        ASSERT(throwaway.ok);
+        /* Stream X reaches a high seq; the brief reports it as cursor. */
+        fmx_seed_inbox("stream-x", "2026-09-20T00:00:00Z", 1192, "x", "bob",
+                       "note", "x-high", "ref-x");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_EQ(fmx_int(&b, "cursor"), 1192);
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "x", "ref-x"),
+                      "") != 0);
+        ASSERT(fmx_str(&b, "cursor_token")[0] != '\0');
+        (void)snprintf(token, sizeof(token), "%s",
+                       fmx_str(&b, "cursor_token"));
+        fmx_end(&b);
+        /* Stream Y emits a LOWER seq with a NEWER timestamp. */
+        fmx_seed_inbox("stream-y", "2026-09-20T00:00:01Z", 980, "y", "bob",
+                       "note", "y-fresh", "ref-y");
+        /* The integer cursor is the legacy global floor: it never covered
+         * Y's independent sequence space, so Y stays hidden there. That
+         * adapter behavior is intentional — cross-stream resume needs the
+         * composite watermark, asserted next. */
+        fmx_brief(&b, NULL, 1192);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "y", "ref-y"),
+                      "") == 0);
+        fmx_end(&b);
+        /* Resuming from the watermark replays every stream past what was
+         * consumed: Y is newer than the watermark and must show. */
+        fmx_brief_since(&b, NULL, token);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "y", "ref-y"),
+                      "") != 0);
+        ASSERT(!fmx_bool(&b, "changes_truncated"));
+        ASSERT_EQ(fmx_int(&b, "changes_dropped"), 0);
+        ASSERT(fmx_str(&b, "cursor_token")[0] != '\0');
+        (void)snprintf(token2, sizeof(token2), "%s",
+                       fmx_str(&b, "cursor_token"));
+        fmx_end(&b);
+        /* Replaying the advanced watermark shows nothing twice: the feed
+         * is exactly-once across resumes. */
+        fmx_brief_since(&b, NULL, token2);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_EQ(fmx_changes_n(&b), 0);
         fmx_end(&b);
         fmx_restore();
         PASS();
@@ -2723,6 +2912,318 @@ static long long fmx_send_one(const char *gid, const char *from,
     return seq;
 }
 
+/* Composite-watermark acceptance: the cursor_token a brief returns resumes
+ * every contributing stream, not one global max seq. */
+static int fmx_t_brief_watermark(void)
+{
+    int failures = 0;
+
+    TEST("steer: equal timestamps order deterministically across polls") {
+        struct fmx_call b;
+        struct fmx_accept throwaway;
+        char first0[64], first1[64], second0[64], second1[64];
+        fmx_isolate("brief_equal_ts");
+        throwaway = fmx_probe();
+        ASSERT(throwaway.ok);
+        fmx_seed_inbox("stream-x", "2026-09-20T00:00:00Z", 5, "x", "bob",
+                       "note", "x-five", "ref-eq-x");
+        fmx_seed_inbox("stream-y", "2026-09-20T00:00:00Z", 3, "y", "bob",
+                       "note", "y-three", "ref-eq-y");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_EQ(fmx_changes_n(&b), 3);
+        (void)snprintf(first0, sizeof(first0), "%s",
+                       fmx_changes_from(&b, 0));
+        (void)snprintf(first1, sizeof(first1), "%s",
+                       fmx_changes_from(&b, 1));
+        fmx_end(&b);
+        /* Same input polls again (the legacy floor 0 re-displays): the
+         * (ts, from, seq) merge must come back identical. */
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        (void)snprintf(second0, sizeof(second0), "%s",
+                       fmx_changes_from(&b, 0));
+        (void)snprintf(second1, sizeof(second1), "%s",
+                       fmx_changes_from(&b, 1));
+        fmx_end(&b);
+        ASSERT(strcmp(first0, second0) == 0 && first0[0] != '\0');
+        ASSERT(strcmp(first1, second1) == 0 && first1[0] != '\0');
+        ASSERT(strcmp(first0, first1) != 0);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: an old-timestamp row past the watermark shows its true age") {
+        struct fmx_call b;
+        struct fmx_accept throwaway;
+        const struct json_value *r;
+        char token[4096];
+        fmx_isolate("brief_stale_row");
+        throwaway = fmx_probe();
+        ASSERT(throwaway.ok);
+        fmx_seed_inbox("stream-x", "2026-09-20T00:00:00Z", 40, "x", "bob",
+                       "note", "x-forty", "ref-st-x");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        (void)snprintf(token, sizeof(token), "%s",
+                       fmx_str(&b, "cursor_token"));
+        ASSERT(token[0] != '\0');
+        fmx_end(&b);
+        /* A backfilled row: older than everything, but new to the feed.
+         * Prefix consumption must never skip it — and it must read as
+         * six years old, never as fresh. */
+        fmx_seed_inbox("stream-y", "2020-01-01T00:00:00Z", 7, "y", "bob",
+                       "directive", "stale directive", "ref-stale-1");
+        fmx_brief_since(&b, NULL, token);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "y",
+                                       "ref-stale-1"),
+                      "") != 0);
+        r = fmx_reply(&b, "y", "ref-stale-1");
+        ASSERT(r != NULL);
+        ASSERT(fmx_wint(r, "sent_age_s") > 100000000);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a same-ref result from a third party answers nothing") {
+        struct fmx_call b;
+        const struct json_value *r;
+        char gid[64], now[32];
+        fmx_isolate("brief_wrong_sender");
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        ASSERT(fmx_send_one(gid, "oauth", "A", "ws-third-party",
+                            "key-ws-1") >= 1);
+        fmx_now_ts(now, sizeof(now));
+        /* Same ref, but neither from the addressee (A) nor to the origin
+         * (oauth): overheard chatter, not an answer and not an ack. */
+        fmx_seed_inbox("mallory", now, 731, "mallory", "mallory", "result",
+                       "mallory note", "ws-third-party");
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "ws-third-party");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "queued");
+        ASSERT(!json_get_bool(json_get(r, "acked")));
+        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(fmx_change_row(&b, "oauth",
+                                              "ws-third-party"),
+                               "state"),
+                      "queued");
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a truncated stream refuses the watermark instead of "
+         "going silent") {
+        struct fmx_call b;
+        struct fmx_accept throwaway;
+        char token[4096];
+        fmx_isolate("brief_restart");
+        throwaway = fmx_probe();
+        ASSERT(throwaway.ok);
+        fmx_seed_inbox("stream-x", "2026-09-20T00:00:00Z", 50, "x", "bob",
+                       "note", "x-fifty-bytes-of-body-padding-here-0123456789",
+                       "ref-rs-x");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        (void)snprintf(token, sizeof(token), "%s",
+                       fmx_str(&b, "cursor_token"));
+        ASSERT(token[0] != '\0');
+        fmx_end(&b);
+        /* Replace the stream with a shorter file: the handed-out offset
+         * is past its end, so resume must refuse, name the refusal, show
+         * nothing, and hand back no advanced token. */
+        fmx_rewrite_inbox("stream-x",
+                          "{\"seq\":1,\"ts\":\"2026-09-20T00:00:00Z\","
+                          "\"from\":\"x\",\"to\":\"bob\",\"kind\":\"note\","
+                          "\"body\":\"tiny\",\"ref\":\"ref-rs-new\"}\n");
+        fmx_brief_since(&b, NULL, token);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_missing_has(&b, "dev.agent.mail"));
+        ASSERT(strstr(fmx_missing_reason(&b, "dev.agent.mail"),
+                      "MAIL_CURSOR_STALE") != NULL);
+        ASSERT_EQ(fmx_changes_n(&b), 0);
+        ASSERT(fmx_str(&b, "cursor_token")[0] == '\0');
+        fmx_end(&b);
+        /* And the documented recovery — replay from the start — sees the
+         * replacement stream's row. */
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "x",
+                                       "ref-rs-new"),
+                      "") != 0);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a stream the watermark names but the dir lost still "
+         "resumes") {
+        struct fmx_call b;
+        struct fmx_accept throwaway;
+        char token[4096];
+        fmx_isolate("brief_missing_stream");
+        throwaway = fmx_probe();
+        ASSERT(throwaway.ok);
+        fmx_seed_inbox("stream-x", "2026-09-20T00:00:00Z", 61, "x", "bob",
+                       "note", "x-gone", "ref-ms-x");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        (void)snprintf(token, sizeof(token), "%s",
+                       fmx_str(&b, "cursor_token"));
+        ASSERT(strstr(token, "stream-x") != NULL);
+        fmx_end(&b);
+        fmx_drop_inbox("stream-x");
+        /* Fresh work lands elsewhere meanwhile. */
+        fmx_seed_inbox("stream-y", "2026-09-20T00:00:01Z", 62, "y", "bob",
+                       "note", "y-stays", "ref-ms-y");
+        fmx_brief_since(&b, NULL, token);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(!fmx_missing_has(&b, "dev.agent.mail"));
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "y",
+                                       "ref-ms-y"),
+                      "") != 0);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: overflow past the cap is counted and recoverable") {
+        struct fmx_call b;
+        struct fmx_accept throwaway;
+        char token[4096];
+        char ref[16], body[32];
+        long long i;
+        fmx_isolate("brief_overflow");
+        throwaway = fmx_probe();
+        ASSERT(throwaway.ok);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        (void)snprintf(token, sizeof(token), "%s",
+                       fmx_str(&b, "cursor_token"));
+        ASSERT(token[0] != '\0');
+        fmx_end(&b);
+        for (i = 0; i < 30; i++) {
+            (void)snprintf(ref, sizeof(ref), "ref-ov-%02lld", i);
+            (void)snprintf(body, sizeof(body), "overflow body %lld", i);
+            fmx_seed_inbox("stream-x", "2026-09-20T00:00:00Z", 100 + i, "m",
+                           "bob", "note", body, ref);
+        }
+        /* Cap 10 over 30 new rows: the newest 10 show, 20 count dropped,
+         * and the token still advances past the drain. */
+        fmx_brief_opt(&b, NULL, token, 10);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_EQ(fmx_changes_n(&b), 10);
+        ASSERT(fmx_bool(&b, "changes_truncated"));
+        ASSERT_EQ(fmx_int(&b, "changes_dropped"), 20);
+        fmx_end(&b);
+        /* Recovery: replay the previous token unbounded and dedupe — all
+         * 30 rows come back exactly once across the two views. */
+        {
+            char seen[30][16];
+            int nseen = 0, k, dup;
+            struct fmx_call r;
+            const struct json_value *ch, *row, *v;
+            const char *s;
+            size_t n, j;
+            fmx_brief_opt(&r, NULL, token, 100);
+            ASSERT(fmx_run(&r, zcl_native_handle_fleet_steer_brief));
+            ASSERT(fmx_ok(&r));
+            ASSERT_EQ(fmx_changes_n(&r), 30);
+            ch = fmx_arr(&r, "changes");
+            n = ch ? json_size(ch) : 0u;
+            for (j = 0; j < n && nseen < 30; j++) {
+                row = json_at(ch, j);
+                v = row ? json_get(row, "ref") : NULL;
+                s = (v && v->type == JSON_STR) ? json_get_str(v) : "";
+                dup = 0;
+                for (k = 0; k < nseen; k++) {
+                    if (strcmp(seen[k], s) == 0)
+                        dup = 1;
+                }
+                if (!dup && s[0]) {
+                    (void)snprintf(seen[nseen], sizeof(seen[nseen]),
+                                   "%s", s);
+                    nseen++;
+                }
+            }
+            fmx_end(&r);
+            ASSERT_EQ(nseen, 30);
+        }
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a real send with a receiver result is visible past the "
+         "watermark") {
+        struct fmx_call b;
+        const struct json_value *r;
+        char gid[64], now[32], token[4096];
+        fmx_isolate("brief_send_result");
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        ASSERT(fmx_send_one(gid, "oauth", "worker-b", "vis-e2e",
+                            "key-vis-1") >= 1);
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        r = fmx_reply(&b, "oauth", "vis-e2e");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "queued");
+        (void)snprintf(token, sizeof(token), "%s",
+                       fmx_str(&b, "cursor_token"));
+        ASSERT(token[0] != '\0');
+        fmx_end(&b);
+        /* The receiver's result lands in its own stream, newer but under
+         * its own numbering. The watermarked poll carries the result row
+         * itself (the directive already showed as queued one poll
+         * earlier); a full poll joins both and flips the directive to
+         * acknowledged with the answer attached. */
+        fmx_now_ts(now, sizeof(now));
+        fmx_seed_inbox("box-b", now, 733, "worker-b", "oauth", "result",
+                       "ref=vis-e2e\\nterminal=pass\\n", "vis-e2e");
+        fmx_brief_since(&b, gid, token);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "worker-b",
+                                       "vis-e2e"),
+                      "delivered") == 0);
+        ASSERT(fmx_reply(&b, "oauth", "vis-e2e") == NULL);
+        fmx_end(&b);
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "oauth",
+                                       "vis-e2e"),
+                      "acknowledged") == 0);
+        r = fmx_reply(&b, "oauth", "vis-e2e");
+        ASSERT(r != NULL);
+        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "addressee");
+        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "worker-b");
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* Request/result correlation: a directive is answered by a later result
  * on its ref from the other side, acked only by the receiver's own ack
  * cursor, and queued with neither. A reply is never read as an ack. */
@@ -3366,6 +3867,8 @@ int test_fleet_steer(void)
     failures += fmx_t_brief_empty();
     failures += fmx_t_send_flow();
     failures += fmx_t_brief_changes();
+    failures += fmx_t_brief_newer_low_seq();
+    failures += fmx_t_brief_watermark();
     failures += fmx_t_evidence();
     failures += fmx_t_duplicate();
     failures += fmx_t_lifecycle();

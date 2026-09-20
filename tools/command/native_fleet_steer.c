@@ -1179,10 +1179,23 @@ static bool fmc_verdict_pass(const char *verdict, long long rc)
  * per-row lifecycle states. Returns the pull cursor, or -1 with a missing[]
  * note when the sibling failed. */
 
+/* Resume-token bound: the leaf's token caps at DVM_TOKEN_CAP (under 3 KiB
+ * for 16 streams), so 4 KiB carries any watermark with room to spare. */
+#define FMC_MAIL_SINCE_CAP 4096
+
 struct fmc_mail_view {
     long long cursor;
     long long count;
     bool ok;
+    /* Composite per-stream watermark: the next_since token at the end of
+     * the drain the caller passes back as `since` to resume exactly where
+     * this brief stopped. "" when mail did not answer. */
+    char cursor_token[FMC_MAIL_SINCE_CAP];
+    /* The changes cap cut the feed: truncated rows were seen but not shown
+     * (dropped counts them). Re-poll with the PREVIOUS token and dedupe to
+     * recover them; the advanced token moves past. */
+    bool truncated;
+    long long dropped;
 };
 
 /* One parsed mail row. String pointers borrow the sibling reply and are
@@ -2698,13 +2711,31 @@ static void fmc_row_change(struct json_value *changes, const struct fmc_row *v,
  * failure, never a silently partial view. NULL on success with *cursor set
  * to the mail leaf's cursor, else the missing[] reason. */
 #define FMC_MAIL_PAGES_MAX 4096
-#define FMC_MAIL_SINCE_CAP 4096
 
-/* One page after `since` ("" = from the start) onto *rows. NULL on success,
- * with *more saying whether another page follows and `since` advanced. */
+/* Refusal reason for a failed page: the leaf's own error code when it
+ * named one (so a stale token reads as MAIL_CURSOR_STALE instead of a
+ * generic sibling failure), else "sibling_refused". */
+static const char *fmc_mail_page_why(const struct fmc_sub *sub,
+                                     char *why_buf, size_t why_cap)
+{
+    if (why_buf && why_cap > 0) {
+        if (!fmc_sub_ok(sub) && sub->reply.error.code[0])
+            (void)snprintf(why_buf, why_cap, "%s",
+                           sub->reply.error.code);
+        else
+            (void)snprintf(why_buf, why_cap, "sibling_refused");
+        return why_buf;
+    }
+    return "sibling_refused";
+}
+
+/* One page after `since` ("" = from the start, else a next_since token)
+ * onto *rows. NULL on success, with *more saying whether another page
+ * follows and `since` advanced. */
 static const char *fmc_mail_page(const struct zcl_command_request *req,
                                  struct json_value *rows, long long *cursor,
-                                 char *since, bool *more)
+                                 char *since, bool *more,
+                                 char *why_buf, size_t why_cap)
 {
     struct fmc_sub sub;
     const struct json_value *arr, *tok, *tr;
@@ -2725,8 +2756,9 @@ static const char *fmc_mail_page(const struct zcl_command_request *req,
     tok = json_get(&sub.reply.data, "next_since");
     next = (tok && tok->type == JSON_STR) ? json_get_str(tok) : NULL;
     if (!fmc_sub_ok(&sub) || !next || strlen(next) >= FMC_MAIL_SINCE_CAP) {
+        const char *why = fmc_mail_page_why(&sub, why_buf, why_cap);
         fmc_sub_end(&sub);
-        return "sibling_refused";
+        return why;
     }
     *cursor = fmc_sub_int(&sub, "cursor", -1);
     arr = json_get(&sub.reply.data, "rows");
@@ -2740,17 +2772,37 @@ static const char *fmc_mail_page(const struct zcl_command_request *req,
     return NULL;
 }
 
-static const char *fmc_mail_drain(const struct zcl_command_request *req,
-                                  struct json_value *rows, long long *cursor)
+/* Drain from `since_init` ("" = from the start, else a next_since token
+ * the leaf resumes past) until a page says it was last. On success the end
+ * position lands in end_token (when asked): a composite per-stream watermark
+ * the caller passes back as `since` to see exactly what arrived after it. */
+static const char *fmc_mail_drain_from(const struct zcl_command_request *req,
+                                       struct json_value *rows,
+                                       long long *cursor,
+                                       const char *since_init,
+                                       char *end_token, size_t end_cap,
+                                       char *why_buf, size_t why_cap)
 {
     char since[FMC_MAIL_SINCE_CAP] = "";
     bool more = true;
+    if (since_init && since_init[0])
+        (void)snprintf(since, sizeof(since), "%s", since_init);
     for (int page = 0; page < FMC_MAIL_PAGES_MAX && more; page++) {
-        const char *why = fmc_mail_page(req, rows, cursor, since, &more);
+        const char *why =
+            fmc_mail_page(req, rows, cursor, since, &more, why_buf,
+                          why_cap);
         if (why)
             return why;
     }
+    if (end_token && end_cap > 0)
+        (void)snprintf(end_token, end_cap, "%s", since);
     return more ? "page_limit" : NULL;
+}
+
+static const char *fmc_mail_drain(const struct zcl_command_request *req,
+                                  struct json_value *rows, long long *cursor)
+{
+    return fmc_mail_drain_from(req, rows, cursor, "", NULL, 0, NULL, 0);
 }
 
 /* Everything the mail walk writes into, so each row is one call. */
@@ -2859,35 +2911,143 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
     c->shown++;
 }
 
+/* `since` as a resume token: the composite per-stream watermark a previous
+ * brief returned as cursor_token. 1 with the token copied; 0 when since is
+ * absent, empty, or an integer (the legacy global floor); -1 when since is
+ * a string too long to be a leaf token — malformed input, never silently
+ * a full redisplay. Shape is the leaf's call: it refuses what it did not
+ * hand out. */
+static int fmc_brief_resume(const struct zcl_command_request *req,
+                            char *token, size_t cap)
+{
+    const struct json_value *v;
+    const char *s;
+    if (!req || !req->input || !token || cap == 0)
+        return 0;
+    v = json_get(req->input, "since");
+    if (!v || v->type != JSON_STR)
+        return 0;
+    s = json_get_str(v);
+    if (!s || !s[0])
+        return 0;
+    if (strlen(s) >= cap)
+        return -1;
+    (void)snprintf(token, cap, "%s", s);
+    return 1;
+}
+
+/* Token-resume changes walk over rows_new: every drained row arrived after
+ * the caller's watermark (the leaf resumed past consumed offsets), so all
+ * of them are changes. Newest-first like the legacy walk; the cap only
+ * bounds display and the cut rows count as dropped. Lifecycle states read
+ * against rows_full, which holds the whole history. */
+static void fmc_brief_token_changes(struct fmc_mail_ctx *c,
+                                    const struct json_value *rows_new,
+                                    const struct json_value *rows_full,
+                                    struct fmc_mail_view *view)
+{
+    size_t n =
+        rows_new && rows_new->type == JSON_ARR ? json_size(rows_new) : 0u;
+    size_t i;
+    for (i = n; i > 0; i--) {
+        struct fmc_row v;
+        if (!fmc_row_parse(json_at(rows_new, i - 1), &v))
+            continue;
+        if (c->shown >= c->changes_cap) {
+            view->dropped++;
+            continue;
+        }
+        fmc_row_change(c->changes, &v, rows_full, c->sent_path, c->now);
+        c->shown++;
+    }
+    view->truncated = view->dropped > 0;
+}
+
+/* Second drain for a token resume: rows that arrived after the caller's
+ * watermark become changes (bounded, counted); tallies already ran over
+ * the full drain, so this walk is display-only. False when the resume
+ * position failed: missing[] names it, nothing is shown, and the token
+ * does not advance — the caller replays an older token or the start. */
+static bool fmc_brief_resume_changes(const struct zcl_command_request *req,
+                                     struct fmc_mail_ctx *c,
+                                     struct json_value *missing,
+                                     struct fmc_mail_view *view,
+                                     const struct json_value *rows_full,
+                                     const char *resume)
+{
+    struct json_value fresh;
+    long long fresh_cursor = -1;
+    const char *fail;
+    char why[128];
+    int64_t t0, t1;
+    json_init(&fresh);
+    json_set_array(&fresh);
+    t0 = clock_now_wall_ms();
+    fail = fmc_mail_drain_from(req, &fresh, &fresh_cursor, resume,
+                               view->cursor_token,
+                               sizeof(view->cursor_token), why,
+                               sizeof(why));
+    t1 = clock_now_wall_ms();
+    if (fail) {
+        fmc_note_missing(missing, "dev.agent.mail", fail, t1 - t0);
+        json_free(&fresh);
+        view->cursor_token[0] = '\0';
+        return false;
+    }
+    fmc_brief_token_changes(c, &fresh, rows_full, view);
+    json_free(&fresh);
+    return true;
+}
+
 static long long fmc_brief_mail(const struct zcl_command_request *req,
                                 struct fmc_mail_ctx *c,
                                 struct json_value *missing,
                                 struct fmc_mail_view *view)
 {
     struct json_value rows;
-    const char *why;
+    char resume[FMC_MAIL_SINCE_CAP];
+    char why[128];
+    const char *fail;
+    long long saved_cap;
     size_t n, i;
     int64_t t0, t1;
+    int resume_state;
     view->cursor = -1;
     view->count = 0;
     view->ok = false;
+    view->cursor_token[0] = '\0';
+    view->truncated = false;
+    view->dropped = 0;
     if (!fmc_sent_path_read(c->sent_path, sizeof(c->sent_path)))
         c->sent_path[0] = '\0';
+    resume_state = fmc_brief_resume(req, resume, sizeof(resume));
     json_init(&rows);
     json_set_array(&rows);
     t0 = clock_now_wall_ms();
-    why = fmc_mail_drain(req, &rows, &view->cursor);
+    fail = fmc_mail_drain_from(req, &rows, &view->cursor, "",
+                               view->cursor_token,
+                               sizeof(view->cursor_token), why,
+                               sizeof(why));
     t1 = clock_now_wall_ms();
-    if (why) {
-        fmc_note_missing(missing, "dev.agent.mail", why, t1 - t0);
+    if (fail) {
+        fmc_note_missing(missing, "dev.agent.mail", fail, t1 - t0);
         json_free(&rows);
         view->cursor = -1;
+        view->cursor_token[0] = '\0';
         return -1;
     }
     view->ok = true;
     zcl_fmc_cand_source_ok(c->cand, ZCL_FMC_CAND_SRC_MAIL);
     n = json_size(&rows);
     view->count = (long long)n;
+    /* The full drain feeds roster, tallies, candidates and the
+     * stale-directive scan on every path. The changes feed differs: the
+     * legacy integer path filters it by the global floor here, while the
+     * token path fills it from the resume drain below (and a malformed
+     * token fills nothing — replaying everything would duplicate). */
+    saved_cap = c->changes_cap;
+    if (resume_state != 0)
+        c->changes_cap = 0;
     /* Newest-first walk from the tail: changes[] carries the latest rows
      * above `since`, each with its lifecycle state. */
     for (i = n; i > 0; i--) {
@@ -2895,6 +3055,12 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
         if (fmc_row_parse(json_at(&rows, i - 1), &v))
             fmc_mail_row(c, &v, &rows);
     }
+    c->changes_cap = saved_cap;
+    if (resume_state < 0)
+        fmc_note_missing(missing, "dev.agent.mail",
+                         "brief_since_token_too_long", 0);
+    else if (resume_state > 0)
+        fmc_brief_resume_changes(req, c, missing, view, &rows, resume);
     fmc_stale_summary(c->blockers, c->stale);
     json_free(&rows);
     return view->cursor;
@@ -3524,6 +3690,7 @@ static void fmc_brief_reply(struct zcl_command_reply *reply,
                             struct fmc_brief_lists *l,
                             struct fmc_roster *ro,
                             const struct fmc_emit_ctx *ec,
+                            const struct fmc_mail_view *mv,
                             long long mail_cursor)
 {
     (void)json_push_kv_str(&reply->data, "leaf", FMC_LEAF);
@@ -3539,6 +3706,16 @@ static void fmc_brief_reply(struct zcl_command_reply *reply,
     (void)json_push_kv(&reply->data, "changes", &l->changes);
     (void)json_push_kv(&reply->data, "missing", &l->missing);
     (void)json_push_kv_int(&reply->data, "cursor", mail_cursor);
+    /* The composite watermark: pass cursor_token back as `since` to resume
+     * past every contributing stream. The integer cursor stays for the
+     * legacy floor adapter. changes_truncated + changes_dropped say the
+     * cap cut the feed (re-poll the previous token and dedupe to recover). */
+    (void)json_push_kv_str(&reply->data, "cursor_token",
+                           mv && mv->ok ? mv->cursor_token : "");
+    (void)json_push_kv_bool(&reply->data, "changes_truncated",
+                            mv && mv->truncated);
+    (void)json_push_kv_int(&reply->data, "changes_dropped",
+                           mv ? mv->dropped : 0);
     fmc_fit_budget(&reply->data);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
@@ -3594,7 +3771,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     ec.outcomes = &l.outcomes;
     ec.qv = &qv;
     ec.lo = &lo;
-    fmc_brief_reply(reply, &l, &ro, &ec, mail_cursor);
+    fmc_brief_reply(reply, &l, &ro, &ec, &mv, mail_cursor);
     fmc_lists_free(&l);
     fmc_roster_free(&ro);
 }
