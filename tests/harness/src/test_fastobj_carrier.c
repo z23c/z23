@@ -239,12 +239,27 @@ struct fcw_build_result {
     unsigned long long test_processes;
     unsigned long long other_processes;
     bool perf_complete;
+    bool phases_complete;
     bool cache_complete;
     bool source_bytes_unknown;
     bool saw_refusal;
     char first_line[256];
     char last_line[256];
 };
+
+static bool fcw_phase_partition(const char *text)
+{
+    const char *total = strstr(text, "compiler_wall_us=");
+    const char *phases = strstr(text, "zbuild-package-phases=v1 ");
+    unsigned long long compiler, preprocess, compile, link, probe;
+    if (!total || !phases) return false;
+    if (sscanf(total, "compiler_wall_us=%llu", &compiler) != 1) return false;
+    if (sscanf(phases, "zbuild-package-phases=v1 preprocess_dependency_wall_us=%llu "
+               "compile_wall_us=%llu link_wall_us=%llu probe_wall_us=%llu",
+               &preprocess, &compile, &link, &probe) != 4) return false;
+    return preprocess > 0 && compile > 0 && link > 0 && probe > 0 &&
+           compiler == preprocess + compile + link + probe;
+}
 
 static void fcw_parse_perf(const char *text, struct fcw_build_result *out)
 {
@@ -259,6 +274,7 @@ static void fcw_parse_perf(const char *text, struct fcw_build_result *out)
         &out->other_processes) == 4;
     out->source_bytes_unknown =
         strstr(perf, "source_bytes=unknown ") != NULL;
+    out->phases_complete = fcw_phase_partition(text);
 }
 
 static int fcw_check_perf(const struct fcw_build_result *cold,
@@ -279,6 +295,8 @@ static int fcw_check_perf(const struct fcw_build_result *cold,
                  warm->test_processes + warm->other_processes);
     FC_CHECK("candidate source byte coverage is explicitly unknown",
              cold->source_bytes_unknown && warm->source_bytes_unknown);
+    FC_CHECK("compiler phases partition measured child time",
+             cold->phases_complete && warm->phases_complete);
     return failures;
 }
 
@@ -643,13 +661,24 @@ static int fcw_attribute_spellings(const char *base, const char *worker,
         "\n<: <:gnu::used:> :> const int fcw_attr = 1;\n",
         "\n_Pragma(\"GCC diagnostic push\")\nconst int fcw_attr = 1;\n",
         "\nconst int __attribute__suffix __attribute__((aligned(8))) = 1;\n",
+        "\nextern int fcw_alias(void) __asm__(\"\" \"fcw_symbol\");\n",
+        "\nextern int fcw_alias(void) __asm__(\"fcw\\x5fsymbol\");\n",
+        "\nextern int fcw_alias(void) __asm__(\"fcw_symbol\");\n"
+        "const int fcw_attr __attribute__((section(\"guard_data\"))) = 1;\n",
+        "\nextern int fcw_alias(void) __asm__(\"fcw_symbol\");\n"
+        "__asm__(\".text\");\n",
+        "\n[[nodiscard]] int fcw_nodiscard(void);\n",
+        "\n[[nodiscard(\"reason\")]] int fcw_nodiscard(void);\n",
+        "\n[[nodiscard]] int fcw_nodiscard(void);\n"
+        "const int fcw_attr __attribute__((section(\"guard_data\"))) = 1;\n",
     };
     int failures = 0;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         char path[4096], name[48];
         (void)snprintf(name, sizeof(name), "attribute-spelling-%zu", i);
         bool ok = fcw_asm_path(path, base, name) &&
-            fcw_attribute_spelling(path, worker, pk, cases[i], i == 5);
+            fcw_attribute_spelling(path, worker, pk, cases[i],
+                                   i == 5 || i == 6 || i == 10);
         FC_CHECK(name, ok);
     }
     return failures;

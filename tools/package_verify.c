@@ -693,6 +693,10 @@ struct pv_perf_metrics {
     uint64_t child_cpu_us;
     uint64_t compiler_wall_us;
     uint64_t test_wall_us;
+    uint64_t preprocess_wall_us;
+    uint64_t compile_wall_us;
+    uint64_t link_wall_us;
+    uint64_t probe_wall_us;
 };
 
 static struct pv_perf_metrics g_pv_perf;
@@ -721,13 +725,26 @@ enum pv_process_role {
     PV_PROCESS_OTHER,
 };
 
-static void pv_perf_record(enum pv_process_role role, uint64_t elapsed_us)
+static uint64_t *pv_perf_compiler_phase(const char *const argv[])
+{
+    for (size_t i = 1; argv[i]; i++) {
+        if (strcmp(argv[i], "-E") == 0) return &g_pv_perf.preprocess_wall_us;
+        if (strcmp(argv[i], "-c") == 0) return &g_pv_perf.compile_wall_us;
+        if (strcmp(argv[i], "--version") == 0 ||
+            strcmp(argv[i], "-fsyntax-only") == 0) return &g_pv_perf.probe_wall_us;
+    }
+    return &g_pv_perf.link_wall_us;
+}
+
+static void pv_perf_record(enum pv_process_role role, const char *const argv[],
+                           uint64_t elapsed_us)
 {
     g_pv_perf.processes++;
     g_pv_perf.child_wall_us += elapsed_us;
     if (role == PV_PROCESS_COMPILER) {
         g_pv_perf.compiler_processes++;
         g_pv_perf.compiler_wall_us += elapsed_us;
+        *pv_perf_compiler_phase(argv) += elapsed_us;
     } else if (role == PV_PROCESS_TEST) {
         g_pv_perf.test_processes++;
         g_pv_perf.test_wall_us += elapsed_us;
@@ -1190,7 +1207,7 @@ static struct pv_run pv_run_child(enum pv_process_role role,
     if (!r.timed_out)
         pv_run_child_classify_status(status, &r);
     int64_t perf_elapsed_ns = clock_now_monotonic_ns() - perf_started_ns;
-    pv_perf_record(role,
+    pv_perf_record(role, argv,
                    perf_elapsed_ns > 0 ? (uint64_t)perf_elapsed_ns / 1000u : 0);
     return r;
 }
@@ -4923,6 +4940,31 @@ static bool pv_fast_unsafe_token(char token[16], size_t len)
            strcmp(token, "__asm__") == 0;
 }
 
+/* Identifier-only assembler text cannot express a file-read directive with
+ * an operand under our fixed flags. This includes libc symbol aliases.
+ * All other assembly remains ineligible, including escaped identifiers. */
+static bool pv_fast_ascii_identifier(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool pv_fast_identifier_asm(FILE *f, int c)
+{
+    while (c != EOF && isspace((unsigned char)c)) c = fgetc(f);
+    if (c != '(') return false;
+    bool nonempty = false;
+    for (;;) {
+        do { c = fgetc(f); } while (c != EOF && isspace((unsigned char)c));
+        if (c == ')') return nonempty;
+        if (c != '"') return false;
+        while ((c = fgetc(f)) != '"') {
+            if (!pv_fast_ascii_identifier(c)) return false;
+            nonempty = true;
+        }
+    }
+}
+
 /* Preserve unquoted GNU attributes (e.g. stddef's alignment declarations).
  * Quoted arguments and directive/attribute syntax remain ineligible. */
 static bool pv_fast_attribute_cacheable(FILE *f, int c)
@@ -4951,9 +4993,35 @@ static bool pv_fast_unsafe_punct(int c, int previous, int last_nonspace)
            (c == ':' && previous == '<');
 }
 
+/* This standard, argument-free attribute has no assembler input semantics.
+ * Everything else, including vendor attributes and reason strings, bypasses. */
+static bool pv_fast_nodiscard(FILE *f)
+{
+    const char *expected = "nodiscard]]";
+    for (size_t i = 0; expected[i]; i++) {
+        int c = fgetc(f);
+        if (i == 0 || i >= 9)
+            while (c != EOF && isspace((unsigned char)c)) c = fgetc(f);
+        if (c != expected[i]) return false;
+    }
+    return true;
+}
+
+static bool pv_fast_token_cacheable(FILE *f, int c, char token[16], size_t len)
+{
+    if (pv_fast_attribute_token(token, len)) return pv_fast_attribute_cacheable(f, c);
+    if (pv_fast_unsafe_token(token, len)) return pv_fast_identifier_asm(f, c);
+    return true;
+}
+
+static bool pv_fast_token_byte(int c)
+{
+    return isalnum((unsigned char)c) || c == '_' || c == '$' || c >= 128;
+}
+
 /* Assembly, attributes and retained directives can name inputs absent from
- * preprocessing dependencies. Bypass quoted GNU attributes and all C23
- * attributes, including bracket digraphs, until their closure is captured.
+ * preprocessing dependencies. Bypass quoted GNU attributes and C23
+ * attributes other than plain nodiscard, including bracket digraphs.
  * Matching these
  * tokens inside strings is conservative: it can only lose reuse. */
 static bool pv_fast_preproc_cacheable(const char *path, bool *eligible)
@@ -4967,22 +5035,22 @@ static bool pv_fast_preproc_cacheable(const char *path, bool *eligible)
     int previous = 0, last_nonspace = 0;
     *eligible = true;
     while ((c = fgetc(f)) != EOF) {
+        if (c == '[' && last_nonspace == '[' && pv_fast_nodiscard(f)) {
+            previous = last_nonspace = ']';
+            len = 0;
+            continue;
+        }
         if (pv_fast_unsafe_punct(c, previous, last_nonspace)) {
             *eligible = false;
             break;
         }
         previous = c;
         if (!isspace((unsigned char)c)) last_nonspace = c;
-        if (isalnum((unsigned char)c) || c == '_' || c == '$' || c >= 128) {
+        if (pv_fast_token_byte(c)) {
             if (len < sizeof(token))
                 token[len++] = (char)c;
         } else {
-            if (pv_fast_attribute_token(token, len) &&
-                !pv_fast_attribute_cacheable(f, c)) {
-                *eligible = false;
-                break;
-            }
-            if (pv_fast_unsafe_token(token, len)) {
+            if (!pv_fast_token_cacheable(f, c, token, len)) {
                 *eligible = false;
                 break;
             }
@@ -6318,6 +6386,12 @@ static void pv_emit_print_summary(
                (unsigned long long)g_pv_perf.compiler_wall_us,
                (unsigned long long)g_pv_perf.test_wall_us,
                (unsigned long long)output_bytes);
+        printf("zbuild-package-phases=v1 preprocess_dependency_wall_us=%llu "
+               "compile_wall_us=%llu link_wall_us=%llu probe_wall_us=%llu\n",
+               (unsigned long long)g_pv_perf.preprocess_wall_us,
+               (unsigned long long)g_pv_perf.compile_wall_us,
+               (unsigned long long)g_pv_perf.link_wall_us,
+               (unsigned long long)g_pv_perf.probe_wall_us);
         printf("zbuild-package-ok=1 source=cas recipe=canonical network=0\n");
         if (fast_cache_dir)
             printf("zbuild-package-fast-cache=v1 hits=%llu misses=%llu "
