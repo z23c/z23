@@ -63,6 +63,7 @@
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "command/native_zcode_transport_leaves.h"
+#include "platform/directory_compat.h"
 
 #include "json/json.h"
 #include "platform/time_compat.h"
@@ -177,6 +178,32 @@ static bool ztt_load_context_wires(const char *zcode_dir,
 
 /* ── zcode task offer ───────────────────────────────────────────────── */
 
+static bool ztt_offer_workspace(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply,
+                                char out[4400])
+{
+    const struct json_value *value = json_get(request->input, "workspace");
+    if (value && value->type != JSON_STR) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_WORKSPACE",
+                               "normalize", false, false,
+                               "workspace must be a directory path string",
+                               "input.workspace");
+        return false;
+    }
+    const char *workspace = ztl_input_str(request->input, "workspace");
+    if (!workspace)
+        return ztl_zcode_dir(request, reply, "zcode.task.offer", out);
+    if (workspace[0] && platform_directory_canonical_real(workspace, out, 4400))
+        return true;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INVALID, "WORKSPACE_UNAVAILABLE",
+                           "normalize", false, false,
+                           "workspace must name an existing readable directory",
+                           workspace);
+    return false;
+}
+
 void zcl_native_handle_zcode_task_offer(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -184,7 +211,7 @@ void zcl_native_handle_zcode_task_offer(
     if (!request || !reply)
         return;
     char zcode_dir[4400];
-    if (!ztl_zcode_dir(request, reply, "zcode.task.offer", zcode_dir))
+    if (!ztt_offer_workspace(request, reply, zcode_dir))
         return;
     uint8_t task_root[32];
     if (!ztl_hex32(request, reply, "zcode.task.offer", "task_root",

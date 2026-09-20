@@ -44,6 +44,8 @@
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_dev.h"
+#include "vcs/zcode_task_context.h"
+#include "vcs/package_store.h"
 
 #include <secp256k1.h>
 #include <stdio.h>
@@ -521,6 +523,86 @@ static bool zpd_fixture(const char *root, bool unknown_key)
     return zpd_write(path, unknown_key
         ? "{\"schema\":1,\"name\":\"zclassic23/fixture\",\"semver\":\"0.1.0-dev.1\",\"language\":\"c23\",\"license\":\"MIT\",\"include_dir\":\"include\",\"source_dir\":\"src\",\"dependencies\":[],\"smuggled\":true}\n"
         : "{\"schema\":1,\"name\":\"zclassic23/fixture\",\"semver\":\"0.1.0-dev.1\",\"language\":\"c23\",\"license\":\"MIT\",\"include_dir\":\"include\",\"source_dir\":\"src\",\"dependencies\":[]}\n");
+}
+
+static bool zpd_offer_context(const char *workspace, const char *datadir,
+                              const char *task_root, uint8_t context_root[32])
+{
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "workspace", workspace) &&
+        json_push_kv_str(&input, "datadir", datadir) &&
+        json_push_kv_str(&input, "task_root", task_root);
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_task_offer.v1");
+    if (ok)
+        zcl_native_handle_zcode_task_offer(&request, &reply);
+    const char *root = json_get_str(json_get(&reply.data, "context_root"));
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED && root &&
+        zcl_hex_decode_lower(root, context_root, 32) &&
+        json_get(&reply.data, "provider_publish_input") &&
+        json_get(&reply.data, "pointer_publish_input");
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool zpd_offer_admit(const char *datadir, const char *task_hex,
+                            const uint8_t context_root[32])
+{
+    uint8_t expected[32], derived[32], goal[16];
+    size_t goal_len = 0;
+    if (!zcl_hex_decode_lower(task_hex, expected, 32))
+        return false;
+    struct vcs_package_store *store =
+        vcs_package_store_open(datadir, vcs_package_store_quota_bytes());
+    if (!store)
+        return false;
+    bool ok = vcs_zcode_task_context_admit(store, context_root, expected,
+        (int64_t)platform_time_wall_unix(), NULL, NULL, goal, sizeof(goal),
+        &goal_len, derived) == VCS_ZCODE_TASK_CONTEXT_OK &&
+        memcmp(expected, derived, 32) == 0 && goal_len == 5 &&
+        memcmp(goal, "Fix x", 5) == 0;
+    vcs_package_store_close(store);
+    return ok;
+}
+
+static bool zpd_offer_invalid_workspace(const char *datadir, const char *task_root)
+{
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_int(&input, "workspace", 42) &&
+        json_push_kv_str(&input, "datadir", datadir) &&
+        json_push_kv_str(&input, "task_root", task_root);
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_task_offer.v1");
+    if (ok)
+        zcl_native_handle_zcode_task_offer(&request, &reply);
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        strcmp(reply.error.code, "BAD_WORKSPACE") == 0;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool zpd_workspace_task_offer(const char *workspace, const char *task_root)
+{
+    char datadir[4600];
+    uint8_t first[32], repeated[32];
+    int n = snprintf(datadir, sizeof(datadir), "%s-offer-store", workspace);
+    if (n < 0 || (size_t)n >= sizeof(datadir) ||
+        !platform_directory_ensure(datadir, 0700))
+        return false;
+    bool ok = zpd_offer_context(workspace, datadir, task_root, first) &&
+        zpd_offer_admit(datadir, task_root, first) &&
+        zpd_offer_context(workspace, datadir, task_root, repeated) &&
+        memcmp(first, repeated, 32) == 0 &&
+        !zpd_offer_context(datadir, datadir, task_root, repeated) &&
+        zpd_offer_invalid_workspace(datadir, task_root);
+    test_rm_rf(datadir);
+    return ok;
 }
 
 /* Rewrite the fixture's zcode-package.json with an optional "programs"
@@ -3436,6 +3518,7 @@ static __attribute__((unused)) int zpd_test_work_start(void)
                        detailed_source_root);
         (void)snprintf(saved_scope_root, sizeof(saved_scope_root), "%s",
                        detailed_scope_root);
+        ASSERT(zpd_workspace_task_offer(absolute_root, saved_task_root));
         ASSERT(json_get_bool(json_get(&reply.data, "details_available")));
         ASSERT(reply.next_count == 1);
         ASSERT(strcmp(reply.next[0].command, "zcode.work.run") == 0);

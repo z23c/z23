@@ -917,10 +917,12 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "zcode.task.offer", "zcode.task", "",
     "Bind one task's wires into the transport carrier",
-    "Loads one task's three wires from the workspace object store (task "
+    "Loads one task's three wires from the explicit workspace object store "
+    "(default: datadir/zcode). The destination is the resident package store "
+    "when present, otherwise the datadir package store. Loads task "
     "wire at task_root, goal preimage at task.goal_root, proof policy at "
     "task.proof_policy_root — raw CAS loads do not verify, so EACH is "
-    "re-hashed against its own address before use), binds them into the "
+    "re-hashed against its own address before use; binds them into the "
     "fixed-layout zcl-task-context.v1 carrier (exactly three members, "
     "deterministic root), admits it to the package store, and returns "
     "task_root, context_root, expires_unix and TWO ready-to-run zcode "
@@ -936,7 +938,7 @@ ZCL_COMMAND_READY_COMMAND(
     "zcode,task,offer,post,carrier,context,dht,provider,pointer",
     "zcl.zcode_task_offer.input.v1",
     "zcl.zcode_task_offer.v1",
-    "task_root,datadir", "task_root",
+    "task_root,datadir,workspace", "task_root",
     "z23 zcode task offer --input='{\"task_root\":\"<64hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,

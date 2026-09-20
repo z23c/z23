@@ -1203,7 +1203,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `zcode task offer` | ready | mutate / app-write / operator · foreground/low | **`task_root`**, `datadir` | `zcl.zcode_task_offer.v1` | `z23 zcode task offer --input='{"task_root":"<64hex>"}'` | Bind one task's wires into the transport carrier |
+| `zcode task offer` | ready | mutate / app-write / operator · foreground/low | **`task_root`**, `datadir`, `workspace` | `zcl.zcode_task_offer.v1` | `z23 zcode task offer --input='{"task_root":"<64hex>"}'` | Bind one task's wires into the transport carrier |
 | `zcode task pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_task_pull.v1` | `z23 zcode task pull --input='{"task_root":"<64hex>"}'` | Fetch and verify posted contexts for one task root |
 | `zcode task board` | ready | read / read / operator · foreground/low | `datadir` | `zcl.zcode_task_board.v1` | `z23 zcode task board` | List task postings this node has seen |
 
