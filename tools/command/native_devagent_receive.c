@@ -2196,9 +2196,15 @@ static bool rcv_loop_live(const struct rcv_drive_opts *opts,
     return platform_time_wall_unix() - t0 < opts->deadline_s;
 }
 
-/* Wait for new mail. Returns false when the wait says stop. A watcher that
- * was never opened, or that errors, still returns true: the caller beats
- * again on the bounded ceiling rather than stalling. */
+#ifdef ZCL_TESTING
+static bool g_rcv_test_watch_loss;
+void zcl_devagent_receive_test_watch_loss(bool enabled);
+void zcl_devagent_receive_test_watch_loss(bool enabled)
+{
+    g_rcv_test_watch_loss = enabled;
+}
+#endif
+
 /* The one place this loop blocks. It parks in the directory-watcher wait for
  * at most wait_ms; a delivered inbox file wakes it early, a quiet window
  * times out and beats anyway. There is no fallback that returns without
@@ -2207,6 +2213,13 @@ static bool rcv_wait(struct platform_directory_watcher *w,
                      uint32_t wait_ms, bool *watch_lost)
 {
     enum platform_directory_watch_result r;
+#ifdef ZCL_TESTING
+    /* Exercise error propagation without changing the platform watcher or
+     * touching a live receiver. This seam is absent from shipped binaries. */
+    if (g_rcv_test_watch_loss)
+        r = PLATFORM_DIRECTORY_WATCH_ERROR;
+    else
+#endif
     r = platform_directory_watcher_wait(w, wait_ms, rcv_stop, NULL);
     if (r == PLATFORM_DIRECTORY_WATCH_STOPPED)
         return false;
@@ -2263,7 +2276,7 @@ static long long rcv_drive_posix(const struct rcv_drive_opts *opts,
             /* Losing the watch removes the only bounded wait this loop has,
              * so the drive ends here with every ref's record intact; the
              * service unit's Restart=on-failure brings it back. */
-            LOG_WARN(RCV_LOG, "mail watch lost; ending this drive cleanly");
+            LOG_WARN(RCV_LOG, "mail watch lost; failing this drive for recovery");
             break;
         }
         if (!rcv_loop_live(opts, st, t0))
@@ -2274,7 +2287,7 @@ static long long rcv_drive_posix(const struct rcv_drive_opts *opts,
     (void)signal(SIGTERM, old_term);
     (void)flock(lockfd, LOCK_UN);
     (void)close(lockfd);
-    return st->beats;
+    return watch_lost ? -3 : st->beats;
 }
 
 /* Lock state without creating anything: O_RDONLY and no O_CREAT, so the
@@ -2465,6 +2478,13 @@ static void rcv_run(const struct zcl_command_request *request,
     opts.wait_ms = rcv_in_int(request, "wait_ms", 1000, 50, 60000);
     opts.max_beats = rcv_in_int(request, "max_beats", 0, 0, 1000000);
     beats = zcl_devagent_receive_drive(&opts, &st);
+    if (beats == -3) {
+        rcv_fail(reply, "RECEIVE_WATCH_LOST", "run",
+                 "mail watch failed; restart the receiver to resume its "
+                 "durable intake cursor",
+                 "platform_directory_watcher_wait lost the mail watch");
+        return;
+    }
     if (beats == -2) {
         rcv_fail(reply, "RECEIVE_WATCH_UNAVAILABLE", "run",
                  "this box cannot watch its mail directory, and this loop "

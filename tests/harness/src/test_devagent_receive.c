@@ -51,6 +51,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+void zcl_devagent_receive_test_watch_loss(bool enabled);
 #endif
 
 /* ── isolated state root (this group owns its own rig) ─────────────────── */
@@ -1385,6 +1386,41 @@ int test_devagent_receive(void)
         ASSERT(zcl_devagent_receive_drive(&o, &st) >= 1);
         ASSERT(st.beats >= 1);
         ASSERT(st.beats <= 60);
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("watch failure refuses and releases the receiver for recovery")
+    {
+        struct rtx_call c;
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        char body[4096];
+        rtx_isolate("watch-loss");
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction(body, sizeof(body), "hex_codec", "Survive watch loss.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-watch-loss", body, 1));
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "run");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        (void)json_push_kv_int(&c.input, "max_beats", 2);
+        zcl_devagent_receive_test_watch_loss(true);
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        zcl_devagent_receive_test_watch_loss(false);
+        ASSERT(!rtx_ok(&c));
+        ASSERT(c.reply.exit_code != 0);
+        ASSERT_STR_EQ(c.reply.error.code, "RECEIVE_WATCH_LOST");
+        rtx_end(&c);
+        ASSERT_EQ(rtx_queue_count("queued", "job-watch-loss"), 1);
+        ASSERT_EQ(rtx_answers("job-watch-loss", "state=accepted"), 1);
+        /* An ordinary next receiver can acquire the released lock. */
+        rtx_opts(&o, 1);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(st.beats, 1);
+        ASSERT_EQ(st.admitted, 0);
+        ASSERT_EQ(rtx_queue_count("queued", "job-watch-loss"), 1);
+        ASSERT_EQ(rtx_answers("job-watch-loss", "state=accepted"), 1);
         rtx_restore();
         PASS();
     }
