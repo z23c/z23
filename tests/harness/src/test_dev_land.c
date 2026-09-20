@@ -1641,6 +1641,136 @@ _test_next:;
     return failures;
 }
 
+static pid_t dlx_wait_child(pid_t child, int *status)
+{
+    pid_t waited;
+    do { waited = waitpid(child, status, 0); } while (waited < 0 && errno == EINTR);
+    return waited;
+}
+
+static bool dlx_resume_after_death(void)
+{
+    struct dlx_call c;
+    (void)alarm(30);
+    for (unsigned retry = 0; retry < 100; ++retry) {
+        dlx_begin(&c, "step");
+        bool ran = dlx_run(&c);
+        bool ok = ran && dlx_ok(&c) &&
+            strcmp(dlx_str(&c, "state"), "landed") == 0;
+        bool busy = ran && strcmp(dlx_err_code(&c), "STEP_BUSY") == 0;
+        dlx_end(&c);
+        if (!busy) return ok;
+        struct timespec pause = { 0, 10 * 1000 * 1000L };
+        (void)nanosleep(&pause, NULL); /* real-clock: STEP_BUSY is another process's flock; no fake-clock seam reaches its release. */
+    }
+    return false;
+}
+
+static int test_dev_land_publisher_death(void)
+{
+    int failures = 0;
+    TEST("land: publisher death after remote mutation resumes without another push") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[64], after[64], hook[700], wrapper[700], marker[700];
+        char received[32];
+        size_t received_len;
+        int status;
+        dlx_isolate("publisher_death");
+        ASSERT(dlx_rig_make(&rig, "publisher_death_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        (void)snprintf(hook, sizeof(hook), "%s/hooks/post-receive", rig.bare);
+        (void)snprintf(wrapper, sizeof(wrapper), "%s.receive-pack", rig.bare);
+        (void)snprintf(marker, sizeof(marker), "%s/hooks/receive-invocations", rig.bare);
+        ASSERT(dlx_write(wrapper, "#!/bin/sh\n"
+            "printf 'invoked\\n' >> \"$1/hooks/receive-invocations\" || exit 73\n"
+            "exec git-receive-pack \"$@\"\n"));
+        ASSERT(chmod(wrapper, 0700) == 0);
+        const char *intercept[] = { "config", "remote.origin.receivepack", wrapper, NULL };
+        ASSERT(dlx_git(rig.clone, intercept) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        pid_t publisher = fork();
+        ASSERT(publisher >= 0);
+        if (publisher == 0) {
+            char script[256];
+            /* post-receive runs only after the remote ref transaction.
+             * Kill this publisher, not the test runner or Git descendants.
+             * The hook exits immediately: no FIFO or sleeping orphan. */
+            (void)alarm(30);
+            (void)snprintf(script, sizeof(script),
+                "#!/bin/sh\nkill -KILL %ld\n", (long)getpid());
+            if (!dlx_write(hook, script) || chmod(hook, 0700) != 0)
+                _exit(2);
+            dlx_begin(&c, "step");
+            (void)dlx_run(&c);
+            _exit(3);
+        }
+        pid_t waited = dlx_wait_child(publisher, &status);
+        ASSERT_EQ(waited, publisher);
+        ASSERT(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, rig.tip);
+        ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 8);
+        ASSERT(memcmp(received, "invoked\n", 8) == 0);
+        /* Remove the injector before a new process takes the existing locks. */
+        ASSERT(unlink(hook) == 0);
+        dlx_begin(&c, "status");
+        (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *row = json_get(&c.reply.data, "in_flight");
+        ASSERT(row && row->type == JSON_OBJ);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "tip")), rig.tip);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "base")), before);
+        dlx_end(&c);
+        char land[1200], queue_path[1400], wire[8192];
+        size_t wire_len;
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(queue_path, sizeof(queue_path), "%s/queue.jsonl", land);
+        ASSERT(dlx_slurp(queue_path, wire, sizeof(wire), &wire_len));
+        struct json_value retained;
+        json_init(&retained);
+        ASSERT(json_read(&retained, wire, wire_len));
+        ASSERT_STR_EQ(json_get_str(json_get(&retained, "local")), rig.tip);
+        json_free(&retained);
+        pid_t receiver = fork();
+        ASSERT(receiver >= 0);
+        if (receiver == 0)
+            _exit(dlx_resume_after_death() ? 0 : 4);
+        waited = dlx_wait_child(receiver, &status);
+        ASSERT_EQ(waited, receiver);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        ASSERT(dlx_slurp(marker, received, sizeof(received), &received_len));
+        ASSERT_EQ(received_len, 8);
+        ASSERT(memcmp(received, "invoked\n", 8) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "empty");
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *outcomes = dlx_arr(&c, "outcomes");
+        ASSERT(outcomes && outcomes->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&outcomes->children[0], "state")), "landed");
+        ASSERT_STR_EQ(json_get_str(json_get(&outcomes->children[0], "tip")), rig.tip);
+        ASSERT_STR_EQ(json_get_str(json_get(&outcomes->children[0], "tip_pushed")), rig.tip);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_postpush_observation_missing(bool lost_ack)
 {
     int failures = 0;
@@ -1789,6 +1919,7 @@ static int test_dev_land_nonfastforward_client_guard(void)
         struct dlx_rig rig;
         struct dlx_call c;
         char ancestor[64], base[64], after[64], wrapper[700], marker[700];
+        char first_log[1400];
         dlx_isolate("nonfastforward_client");
         ASSERT(dlx_rig_make(&rig, "nonfastforward_client_rig"));
         ASSERT(dlx_origin_main(&rig, ancestor));
@@ -1804,6 +1935,7 @@ static int test_dev_land_nonfastforward_client_guard(void)
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        (void)snprintf(first_log, sizeof(first_log), "%s", dlx_str(&c, "log_path"));
         dlx_end(&c);
         ASSERT(dlx_replace_prepared_candidate(ancestor));
         (void)snprintf(wrapper, sizeof(wrapper), "%s.receive-pack", rig.bare);
@@ -1824,7 +1956,7 @@ static int test_dev_land_nonfastforward_client_guard(void)
         ASSERT_EQ(json_get_int(json_get(&c.reply.data, "attempt")), 2);
         char log[8192];
         size_t log_length;
-        ASSERT(dlx_slurp(dlx_str(&c, "log_path"), log, sizeof(log), &log_length));
+        ASSERT(dlx_slurp(first_log, log, sizeof(log), &log_length));
         log[log_length] = '\0';
         ASSERT(strstr(log, "proven base is not an ancestor of candidate") != NULL);
         dlx_end(&c);
@@ -3413,6 +3545,7 @@ int test_dev_land(void)
         PASS();
     }
 
+    failures += test_dev_land_publisher_death();
     failures += test_dev_land_postpush_observation_missing(false);
     failures += test_dev_land_postpush_observation_missing(true);
     failures += test_dev_land_postpush_result_unconfirmed();
