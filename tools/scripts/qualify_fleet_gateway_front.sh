@@ -353,7 +353,7 @@ if [ "$SKIP_NODE" -eq 0 ]; then
         --data "grant_type=authorization_code&code=$CODE&redirect_uri=https://client.test/cb&client_id=$CID&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" || true)"
     TOKEN="$(printf '%s' "$TOK" | grep -o '"access_token":"[0-9a-f]*"' | head -n 1 | cut -d'"' -f4)"
     if [ "${#TOKEN}" -ge 16 ]; then ok "token exchange (PKCE S256)"; else bad "token exchange (got [$TOK])"; fi
-    if [ "${#TOKEN}" -ge 16 ] && ! printf '%s' "$TOK" | grep -q '"expires_in"'; then
+    if [ "${#TOKEN}" -ge 16 ] && ! grep -q '"expires_in"' <<<"$TOK"; then
         ok "OAuth token has no expiry"
     else
         bad "OAuth token has no expiry"
