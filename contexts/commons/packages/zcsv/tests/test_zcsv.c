@@ -235,6 +235,42 @@ static void test_writer_row_and_roundtrip(void) {
   }
 }
 
+#define main csvtab_fixture_main
+#include "../app/main.c"
+#undef main
+
+static void test_table_layout(void) {
+  const struct { const char *input; const char *display; } cases[] = {
+    {"", ""}, {"ordinary,\"text\"", "ordinary,\"text\""},
+    {"first\nsecond", "first\\nsecond"}, {"a\r\nb", "a\\r\\nb"},
+    {"tab\tand\\n", "tab\tand\\n"},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    zcsv_field field = {cases[i].input, strlen(cases[i].input)};
+    char cell[COL_WIDTH_MAX];
+    size_t len = layout_field(&field, cell);
+    CHECK(len == strlen(cases[i].display));
+    CHECK(memcmp(cell, cases[i].display, len) == 0);
+  }
+  char input[42], guarded[COL_WIDTH_MAX + 2];
+  memset(input, 'a', sizeof(input));
+  memset(guarded, '?', sizeof(guarded));
+  zcsv_field field = {input, 40};
+  CHECK(layout_field(&field, guarded + 1) == 40);
+  CHECK(memcmp(guarded + 1, input, 40) == 0);
+  field.len = 41;
+  CHECK(layout_field(&field, guarded + 1) == 40);
+  CHECK(guarded[40] == '+');
+  input[38] = '\n';
+  field.len = 39;
+  CHECK(layout_field(&field, guarded + 1) == 40);
+  CHECK(guarded[39] == '\\' && guarded[40] == 'n');
+  field.len = 40;
+  CHECK(layout_field(&field, guarded + 1) == 39);
+  CHECK(guarded[39] == '+');
+  CHECK(guarded[0] == '?' && guarded[COL_WIDTH_MAX + 1] == '?');
+}
+
 int main(void) {
   test_basic_rows();
   test_no_trailing_newline();
@@ -250,6 +286,7 @@ int main(void) {
   test_header_index();
   test_writer_quoting();
   test_writer_row_and_roundtrip();
+  test_table_layout();
   if (failures) {
     fprintf(stderr, "zcsv: %d failure(s)\n", failures);
     return 1;

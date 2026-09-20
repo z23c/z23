@@ -25,6 +25,29 @@ typedef struct {
   size_t widths_cap;
 } stats;
 
+/* Lay out one bounded cell; never split a visible CR/LF marker. */
+static size_t layout_field(const zcsv_field *field, char out[COL_WIDTH_MAX]) {
+  size_t used = 0, last = 0;
+  for (size_t i = 0; i < field->len; i++) {
+    char c = field->ptr[i];
+    size_t width = (c == '\r' || c == '\n') ? 2u : 1u;
+    if (width > COL_WIDTH_MAX - used) {
+      if (used == COL_WIDTH_MAX)
+        used = last;
+      out[used++] = '+';
+      break;
+    }
+    last = used;
+    if (width == 2u) {
+      out[used++] = '\\';
+      out[used++] = c == '\r' ? 'r' : 'n';
+    } else {
+      out[used++] = c;
+    }
+  }
+  return used;
+}
+
 static void observe(void *vctx, const zcsv_field *fields, size_t n) {
   stats *s = vctx;
   if (n > s->widths_cap) {
@@ -42,9 +65,8 @@ static void observe(void *vctx, const zcsv_field *fields, size_t n) {
     s->widths_cap = cap;
   }
   for (size_t i = 0; i < n; i++) {
-    size_t len = fields[i].len;
-    if (len > COL_WIDTH_MAX)
-      len = COL_WIDTH_MAX;
+    char cell[COL_WIDTH_MAX];
+    size_t len = layout_field(&fields[i], cell);
     if (len > s->widths[i])
       s->widths[i] = len;
   }
@@ -58,15 +80,11 @@ static void print_row(const zcsv_field *fields, size_t n, const stats *s) {
     putchar(i == 0 ? '|' : ' ');
     putchar(' ');
     if (i < n) {
-      size_t len = fields[i].len;
-      bool trunc = len > COL_WIDTH_MAX;
-      if (trunc)
-        len = COL_WIDTH_MAX;
-      fwrite(fields[i].ptr, 1, len, stdout);
+      char cell[COL_WIDTH_MAX];
+      size_t len = layout_field(&fields[i], cell);
+      fwrite(cell, 1, len, stdout);
       for (size_t pad = len; pad < s->widths[i]; pad++)
         putchar(' ');
-      if (trunc)
-        putchar('+');
     } else {
       for (size_t pad = 0; pad < s->widths[i]; pad++)
         putchar(' ');
