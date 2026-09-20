@@ -20,6 +20,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/spawn.h"
+#include "util/file_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -217,10 +218,54 @@ static bool dvx_fixture(const char *dir)
            dvx_git(dir, add) && dvx_git(dir, commit);
 }
 
+static int dvx_metadata_tests(void)
+{
+    int failures = 0;
+    static const char *const files_a[] = {"engine/a.c", NULL};
+    TEST("claim: unavailable owner metadata remains empty without admitting overlap") {
+        char repo[512];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "metadata");
+        ASSERT(dvx_fixture(repo));
+        char long_text[400];
+        memset(long_text, 'x', sizeof(long_text) - 1);
+        long_text[sizeof(long_text) - 1] = '\0';
+        for (int variant = 0; variant < 2; variant++) {
+            char row[2048];
+            if (variant == 0)
+                (void)snprintf(row, sizeof(row),
+                    "{\"worktree\":\"/foreign\",\"story\":\"owner\","
+                    "\"files\":[\"engine/a.c\"]}\n");
+            else
+                (void)snprintf(row, sizeof(row),
+                    "{\"worktree\":\"/foreign\",\"story\":\"owner\","
+                    "\"ts\":\"%s\",\"branch\":\"%s\","
+                    "\"files\":[\"engine/a.c\"]}\n", long_text, long_text);
+            ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+            struct dvx_call c;
+            dvx_claim(&c, repo, "metadata-probe", files_a, false);
+            ASSERT(dvx_run(&c));
+            ASSERT(!dvx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+            const struct json_value *conflicts = dvx_arr(&c, "conflicts");
+            ASSERT(conflicts && conflicts->num_children == 1);
+            ASSERT_STR_EQ(json_get_str(json_get(&conflicts->children[0],
+                                                "claimed_at")), "");
+            ASSERT_STR_EQ(json_get_str(json_get(&conflicts->children[0],
+                                                "branch")), "");
+            dvx_end(&c);
+        }
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
 int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
-    int failures = 0;
+    int failures = dvx_metadata_tests();
     char one[512], two[600];
     test_make_tmpdir(one, sizeof(one), "devagent_claim", "repo");
     (void)snprintf(two, sizeof(two), "%s-lane", one);
@@ -275,6 +320,13 @@ int test_devagent_claim(void)
     }
 
     TEST("claim: another worktree wanting the same file is refused by name") {
+        char ledger_path[1024];
+        (void)snprintf(ledger_path, sizeof(ledger_path),
+                       "%s/.git/z23-agent-claims.jsonl", one);
+        char *before = NULL;
+        size_t before_len = 0;
+        ASSERT(zcl_read_whole_file_text(ledger_path, 8192, &before,
+                                        &before_len, "claim_refusal_before"));
         struct dvx_call c;
         dvx_claim(&c, two, "other-story", files_a, false);
         ASSERT(dvx_run(&c));
@@ -294,6 +346,25 @@ int test_devagent_claim(void)
         ASSERT(wt && wt->type == JSON_STR && json_get_str(wt)[0] != '\0');
         ASSERT(story && story->type == JSON_STR);
         ASSERT_STR_EQ(json_get_str(story), "hex-codec");
+        const char *claimed_at = json_get_str(
+            json_get(&conflicts->children[0], "claimed_at"));
+        ASSERT(claimed_at != NULL);
+        ASSERT_EQ(strlen(claimed_at), 20);
+        ASSERT_STR_EQ(json_get_str(json_get(&conflicts->children[0], "branch")),
+                      "main");
+        const char *ledger = json_get_str(json_get(&c.reply.data, "ledger"));
+        ASSERT(ledger != NULL);
+        ASSERT(strstr(ledger, "z23-agent-claims.jsonl") != NULL);
+        ASSERT(strstr(c.reply.error.next_action, "dev.agent.mail") != NULL);
+        ASSERT(strstr(c.reply.error.next_action, "authorized release") != NULL);
+        char *after = NULL;
+        size_t after_len = 0;
+        ASSERT(zcl_read_whole_file_text(ledger_path, 8192, &after,
+                                        &after_len, "claim_refusal_after"));
+        ASSERT_EQ(before_len, after_len);
+        ASSERT(memcmp(before, after, before_len) == 0);
+        free(before);
+        free(after);
         dvx_end(&c);
         PASS();
     }

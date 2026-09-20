@@ -38,7 +38,9 @@
  * SEMANTICS. A claim is LIVE while its line exists in the ledger.
  *   - A claim whose files intersect a live claim from a DIFFERENT worktree is
  *     refused: ok=false, status "CLAIM_OVERLAP", plus
- *     conflicts:[{file, worktree, story}], one entry per offending file.
+ *     conflicts:[{file, worktree, story, claimed_at, branch}], one entry per
+ *     offending file, plus ledger location. Missing historical metadata is
+ *     empty; claim age never grants permission to reclaim another lane.
  *     Nothing is written on refusal.
  *   - A claim from the SAME worktree REPLACES that worktree's own line, so
  *     re-claiming is idempotent and never overlaps itself.
@@ -531,8 +533,14 @@ static size_t dvc_line_conflicts(const char *line, const char *wt,
                                  struct json_value *conflicts)
 {
     char lstory[512];
+    char claimed_at[40] = "";
+    char branch[256] = "";
     lstory[0] = '\0';
     (void)dvc_line_str(line, "story", lstory, sizeof(lstory));
+    if (!dvc_line_str(line, "ts", claimed_at, sizeof(claimed_at)))
+        claimed_at[0] = '\0';
+    if (!dvc_line_str(line, "branch", branch, sizeof(branch)))
+        branch[0] = '\0';
     size_t n = 0;
     for (size_t j = 0; j < norm->num_children; j++) {
         const char *path = json_get_str(&norm->children[j]);
@@ -544,6 +552,8 @@ static size_t dvc_line_conflicts(const char *line, const char *wt,
         (void)json_push_kv_str(&entry, "file", path);
         (void)json_push_kv_str(&entry, "worktree", wt);
         (void)json_push_kv_str(&entry, "story", lstory);
+        (void)json_push_kv_str(&entry, "claimed_at", claimed_at);
+        (void)json_push_kv_str(&entry, "branch", branch);
         (void)json_push_back(conflicts, &entry);
         json_free(&entry);
         n++;
@@ -570,9 +580,15 @@ static bool dvc_check_overlap(const struct dvc_facts *facts,
     }
     if (nconf > 0) {
         (void)json_push_kv(&reply->data, "conflicts", &conflicts);
+        (void)json_push_kv_str(&reply->data, "ledger", facts->ledger);
         dvc_fail(reply, "CLAIM_OVERLAP", "claim",
                  "files already claimed by another worktree",
                  "see conflicts in the reply data");
+        (void)snprintf(reply->error.next_action,
+                       sizeof(reply->error.next_action),
+                       "Coordinate with the named claim owner through dev.agent.mail; "
+                       "retry this claim after an authorized release. "
+                       "Claim age does not authorize takeover.");
     }
     json_free(&conflicts);
     return nconf == 0;
