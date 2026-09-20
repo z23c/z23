@@ -173,15 +173,21 @@ read_symlink_target()
 # `git diff` deliberately does not reveal content hidden by assume-unchanged
 # or skip-worktree.  Refuse the entire publication epoch if either bit exists;
 # silently trusting those flags would let a sealed edit evade the dirty set.
+# The helper's refusal message and exit status 3 are this file's fail()
+# verdict byte-for-byte; the loop remains the no-helper fallback.
 git ls-files -v -z > "$WORK/index-tags" ||
     fail "could not inspect Git index flags"
-while IFS= read -r -d '' record; do
-    tag="${record:0:1}"
-    path="${record:2}"
-    case "$tag" in
-        S|[a-z]) fail "hidden Git index bit on path: $path (clear skip-worktree/assume-unchanged before publication)" ;;
-    esac
-done < "$WORK/index-tags"
+if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+    "$SOURCE_IDENTITY_BATCH" check-tags < "$WORK/index-tags"
+else
+    while IFS= read -r -d '' record; do
+        tag="${record:0:1}"
+        path="${record:2}"
+        case "$tag" in
+            S|[a-z]) fail "hidden Git index bit on path: $path (clear skip-worktree/assume-unchanged before publication)" ;;
+        esac
+    done < "$WORK/index-tags"
+fi
 
 git ls-files --others --exclude-standard -z -- > "$WORK/untracked" ||
     fail "untracked dirty-set discovery failed"
@@ -212,6 +218,10 @@ fi
 append_prefixed_nul()
 {
     local input="$1" prefix="$2" output="$3" relative
+    if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+        "$SOURCE_IDENTITY_BATCH" prefix "$prefix" < "$input" >> "$output"
+        return
+    fi
     while IFS= read -r -d '' relative; do
         printf '%s/%s\0' "$prefix" "$relative" >> "$output"
     done < "$input"
@@ -220,7 +230,7 @@ append_prefixed_nul()
 collect_gitlink()
 {
     local prefix="$1" top physical record meta relative mode stage tag path
-    local gitlink_index
+    local gitlink_index nested
     local seq=$GITLINK_SEQ
     GITLINK_SEQ=$((GITLINK_SEQ + 1))
     printf '%s\0' "$prefix" >> "$WORK/tracked-source"
@@ -281,13 +291,18 @@ collect_gitlink()
 
     git -C "$prefix" ls-files -v -z > "$WORK/gitlink-tags-$seq" ||
         fail "could not inspect gitlink index flags: $prefix"
-    while IFS= read -r -d '' record; do
-        tag="${record:0:1}"
-        path="${record:2}"
-        case "$tag" in
-            S|[a-z]) fail "hidden Git index bit in gitlink path: $prefix/$path" ;;
-        esac
-    done < "$WORK/gitlink-tags-$seq"
+    if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+        "$SOURCE_IDENTITY_BATCH" check-tags "$prefix" \
+            < "$WORK/gitlink-tags-$seq"
+    else
+        while IFS= read -r -d '' record; do
+            tag="${record:0:1}"
+            path="${record:2}"
+            case "$tag" in
+                S|[a-z]) fail "hidden Git index bit in gitlink path: $prefix/$path" ;;
+            esac
+        done < "$WORK/gitlink-tags-$seq"
+    fi
 
     git -C "$prefix" ls-files --others --exclude-standard -z -- \
         > "$WORK/gitlink-untracked-$seq" ||
@@ -307,39 +322,62 @@ collect_gitlink()
     git -C "$prefix" ls-files --stage -z -- \
         > "$WORK/gitlink-index-$seq" ||
         fail "gitlink tracked-source discovery failed: $prefix"
-    while IFS= read -r -d '' record; do
-        meta="${record%%$'\t'*}"
-        relative="${record#*$'\t'}"
-        mode="${meta%% *}"
-        stage="${meta##* }"
-        [ "$stage" = 0 ] ||
-            fail "unmerged gitlink index stage $stage for path: $prefix/$relative"
-        case "$mode" in
-            100644|100755|120000)
-                printf '%s/%s\0' "$prefix" "$relative" \
-                    >> "$WORK/tracked-source"
-                ;;
-            160000) collect_gitlink "$prefix/$relative" ;;
-            *) fail "unsupported gitlink index mode $mode for path: $prefix/$relative" ;;
-        esac
-    done < "$WORK/gitlink-index-$seq"
+    if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+        # Native split: regular/symlink records land on tracked-source, nested
+        # gitlinks on the queue file this loop then recurses over. The legacy
+        # loop interleaves recursion with the parse; the final tracked-source
+        # sort makes the orders equivalent.
+        "$SOURCE_IDENTITY_BATCH" split-index "$WORK/gitlink-nested-$seq" \
+            "$prefix" < "$WORK/gitlink-index-$seq" >> "$WORK/tracked-source"
+        while IFS= read -r -d '' nested; do
+            collect_gitlink "$nested"
+        done < "$WORK/gitlink-nested-$seq"
+    else
+        while IFS= read -r -d '' record; do
+            meta="${record%%$'\t'*}"
+            relative="${record#*$'\t'}"
+            mode="${meta%% *}"
+            stage="${meta##* }"
+            [ "$stage" = 0 ] ||
+                fail "unmerged gitlink index stage $stage for path: $prefix/$relative"
+            case "$mode" in
+                100644|100755|120000)
+                    printf '%s/%s\0' "$prefix" "$relative" \
+                        >> "$WORK/tracked-source"
+                    ;;
+                160000) collect_gitlink "$prefix/$relative" ;;
+                *) fail "unsupported gitlink index mode $mode for path: $prefix/$relative" ;;
+            esac
+        done < "$WORK/gitlink-index-$seq"
+    fi
 }
 
 git ls-files --stage -z -- > "$WORK/tracked-index" ||
     fail "tracked source discovery failed"
-while IFS= read -r -d '' record; do
-    meta="${record%%$'\t'*}"
-    path="${record#*$'\t'}"
-    mode="${meta%% *}"
-    stage="${meta##* }"
-    [ "$stage" = 0 ] ||
-        fail "unmerged index stage $stage for path: $path"
-    case "$mode" in
-        100644|100755|120000) printf '%s\0' "$path" >> "$WORK/tracked-source" ;;
-        160000) collect_gitlink "$path" ;;
-        *) fail "unsupported tracked index mode $mode for path: $path" ;;
-    esac
-done < "$WORK/tracked-index"
+if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+    # Native split: regular/symlink records land on tracked-source, top-level
+    # gitlinks on the queue file this loop then recurses over (see
+    # collect_gitlink for why the deferred order is equivalent).
+    "$SOURCE_IDENTITY_BATCH" split-index "$WORK/gitlink-queue" \
+        < "$WORK/tracked-index" >> "$WORK/tracked-source"
+    while IFS= read -r -d '' nested; do
+        collect_gitlink "$nested"
+    done < "$WORK/gitlink-queue"
+else
+    while IFS= read -r -d '' record; do
+        meta="${record%%$'\t'*}"
+        path="${record#*$'\t'}"
+        mode="${meta%% *}"
+        stage="${meta##* }"
+        [ "$stage" = 0 ] ||
+            fail "unmerged index stage $stage for path: $path"
+        case "$mode" in
+            100644|100755|120000) printf '%s\0' "$path" >> "$WORK/tracked-source" ;;
+            160000) collect_gitlink "$path" ;;
+            *) fail "unsupported tracked index mode $mode for path: $path" ;;
+        esac
+    done < "$WORK/tracked-index"
+fi
 
 # Git ignore policy is not build policy. GNU Make selects C sources with
 # wildcards and the compiler recursively opens headers/templates beneath these
@@ -628,6 +666,26 @@ capture_batched()
     local batch_size=128
     local -a paths=() types=() existing_paths=() existing_modes=()
     local -a regular_paths=() regular_digests=() batch=()
+    local native_tokens=0 shadow=0
+    if [ -n "$SOURCE_IDENTITY_BATCH" ] &&
+        [ "${ZCL_SOURCE_IDENTITY_FORCE_PORTABLE:-0}" != 1 ]; then
+        native_tokens=1
+    fi
+    [ "${ZCL_SOURCE_IDENTITY_BATCH_SHADOW:-0}" = 1 ] && shadow=1
+
+    # One-pass native capture: the helper classifies, hashes, and emits the
+    # identity preimage for the whole path set in a single process, under the
+    # same per-file snapshot race checks the two-step pipeline applied.  Every
+    # shell loop below then feeds only the portable fallback and the shadow
+    # oracle, neither of which runs on the authoritative path.
+    if [ "$native_tokens" -eq 1 ] && [ "$shadow" -eq 0 ]; then
+        write_gitlink_sidecar
+        "$SOURCE_IDENTITY_BATCH" token capture-identity \
+            "$WORK/native-identity-preimage" "$WORK/gitlink-sidecar" \
+            < "$WORK/source-paths" ||
+            fail_racy "source changed while capturing native identity preimage"
+        return 0
+    fi
 
     while IFS= read -r -d '' path; do
         paths+=("$path")
@@ -647,6 +705,12 @@ capture_batched()
         fi
     done < "$WORK/source-paths"
 
+    # The native `token identity` pass re-derives each file's canonical mode
+    # from its own lstat and resolves digests through its strict table parser,
+    # so the mode batch and the per-record digest validation below feed only
+    # the legacy preimage loop and the shadow oracle.  When neither consumer
+    # runs, both blocks are dead work: one shell loop over every source path.
+    if [ "$native_tokens" -eq 0 ] || [ "$shadow" -eq 1 ]; then
     if [ "${#existing_paths[@]}" -gt 0 ]; then
         : > "$WORK/modes"
         if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
@@ -680,6 +744,7 @@ capture_batched()
         [ "${#existing_modes[@]}" -eq "${#existing_paths[@]}" ] ||
             fail_racy "file-mode batch was incomplete"
     fi
+    fi
 
     if [ "${#regular_paths[@]}" -gt 0 ]; then
         : > "$WORK/hashes"
@@ -709,6 +774,7 @@ capture_batched()
                     fail_racy "dirty source changed while hashing regular files"
             done
         fi
+        if [ "$native_tokens" -eq 0 ] || [ "$shadow" -eq 1 ]; then
         while IFS= read -r -d '' record; do
             [ "$hash_i" -lt "${#regular_paths[@]}" ] ||
                 fail_racy "regular-file hash batch returned extra rows"
@@ -724,16 +790,16 @@ capture_batched()
         done < "$WORK/hashes"
         [ "$hash_i" -eq "${#regular_paths[@]}" ] ||
             fail_racy "regular-file hash batch was incomplete"
+        fi
     fi
 
-    if [ -n "$SOURCE_IDENTITY_BATCH" ] &&
-        [ "${ZCL_SOURCE_IDENTITY_FORCE_PORTABLE:-0}" != 1 ]; then
+    if [ "$native_tokens" -eq 1 ]; then
         write_gitlink_sidecar
-        native="$("$SOURCE_IDENTITY_BATCH" token identity \
+        native="$("$SOURCE_IDENTITY_BATCH" token capture-identity \
             "$WORK/native-identity-preimage" "$WORK/gitlink-sidecar" \
-            "$WORK/hashes" < "$WORK/source-paths")" ||
-            fail_racy "source changed while assembling native identity preimage"
-        if [ "${ZCL_SOURCE_IDENTITY_BATCH_SHADOW:-0}" = 1 ]; then
+            < "$WORK/source-paths")" ||
+            fail_racy "source changed while capturing native identity preimage"
+        if [ "$shadow" -eq 1 ]; then
             legacy="$(identity_preimage_loop)" ||
                 fail "legacy identity preimage failed under shadow"
             [ "$native" = "$legacy" ] ||

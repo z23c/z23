@@ -1417,12 +1417,23 @@ mkdir -p "$SHIM_PATH_DIR"
 #
 # A utility missing from the mirror would surface as an unexplained fixture
 # refusal several assertions later; name it here instead.
-for shim_tool in \
-        bash sh env \
-        awk sed grep sort uniq tr cut head tail wc cat cmp comm diff od \
-        find xargs readlink dirname basename stat \
-        mktemp mkdir rmdir rm mv cp ln chmod touch \
-        sha256sum date sleep flock uname; do
+shim_tools=(
+    bash sh env
+    awk sed grep sort uniq tr cut head tail wc cat cmp comm diff od
+    find xargs readlink dirname basename stat
+    mktemp mkdir rmdir rm mv cp ln chmod touch
+    sha256sum date sleep flock uname
+)
+# Darwin's epoch scripts identify the live Make owner through ps(1) ancestry
+# and hash the process start record through shasum(1); Linux and MSYS read
+# procfs for both and never exec either tool. Mirror the pair only where the
+# scripts reach for them, or every Darwin acquire below fails closed with
+# "could not identify live Make owner process; ancestry=unavailable" -- the
+# unexplained fixture refusal the mirror list exists to prevent.
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    shim_tools+=(ps shasum)
+fi
+for shim_tool in "${shim_tools[@]}"; do
     shim_tool_path="$(command -v -- "$shim_tool" 2>/dev/null || printf '')"
     [ -n "$shim_tool_path" ] ||
         fail "fixture PATH mirror is missing $shim_tool: not on \$PATH"

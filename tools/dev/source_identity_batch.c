@@ -11,11 +11,22 @@
  *   zcl.dev_source_mutation.v1\0   P\0<path>\0  (G\0<state>\0 |
  *      E\0<dev>:<ino>:<size>:<mode-%x>:<mtime-%y>:<ctime-%z>\0 | D\0)
  *
+ * `token identity` assembles the v2 identity preimage from a precomputed
+ * digest table; `token capture-identity` emits the identical preimage while
+ * hashing each regular file at classification time, removing the table and
+ * the shell's per-record validation pass from the authoritative capture.
  * The metadata line matches GNU stat --printf='%d:%i:%s:%f:%y:%z' exactly,
  * including the local-timezone human timestamps with untrimmed nanoseconds
  * and the lstat view (a symlink entry describes the link itself). Gitlink
  * states arrive as `path\0state\0` pairs in the sidecar file; membership in
  * that file is the same test as the shell's GITLINK_STATE associative array.
+ *
+ * The enumeration submodes replace the shell's per-record index parsing:
+ * `check-tags` applies the hidden-index-bit refusal to `ls-files -v -z`
+ * output, `split-index` splits `ls-files --stage -z` into regular paths
+ * (stdout) and nested gitlinks (a sidecar the shell recurses over), and
+ * `prefix` joins a path stream onto a gitlink prefix. Their refusal messages
+ * and exit status 3 are the shell's own fail() verdicts, byte-for-byte.
  */
 
 #include "base/hex.h"
@@ -44,6 +55,10 @@ typedef enum {
     BATCH_TOKEN_INVENTORY,
     BATCH_TOKEN_MUTATION,
     BATCH_TOKEN_IDENTITY,
+    BATCH_CAPTURE_IDENTITY,
+    BATCH_CHECK_TAGS,
+    BATCH_SPLIT_INDEX,
+    BATCH_PREFIX,
 } batch_mode;
 
 static int report_path_error(const char *action, const char *path)
@@ -166,7 +181,8 @@ static int emit_hash(const char *path,
     return 0;
 }
 
-static int hash_path(const char *path)
+static int hash_file(const char *path,
+                     uint8_t digest[ZSHA256_DIGEST_LEN])
 {
     struct stat before;
     if (lstat(path, &before) != 0)
@@ -192,7 +208,6 @@ static int hash_path(const char *path)
         return 1;
     }
 
-    uint8_t digest[ZSHA256_DIGEST_LEN];
     int status = digest_fd(fd, path, digest);
     struct stat after;
     if (status == 0 &&
@@ -213,6 +228,13 @@ static int hash_path(const char *path)
                 path);
         status = 1;
     }
+    return status;
+}
+
+static int hash_path(const char *path)
+{
+    uint8_t digest[ZSHA256_DIGEST_LEN];
+    int status = hash_file(path, digest);
     return status == 0 ? emit_hash(path, digest) : status;
 }
 
@@ -736,6 +758,47 @@ static int token_mutation_path(struct token_run *run, const char *path,
     return 1;
 }
 
+/* capture-identity: the identity pass without the intermediate digest
+ * table.  Each regular file is hashed at classification time, under the
+ * same before/after snapshot race checks the `hash` mode applies, and the
+ * digest enters the preimage directly.  Emitted bytes are identical to the
+ * two-step `hash` + `token identity` pipeline over the same path set. */
+static int capture_identity_path(struct token_run *run, const char *path,
+                                 const struct gitlink_state *gitlink)
+{
+    if (emit_field(run, "P") != 0 || emit_field(run, path) != 0)
+        return -1;
+    if (gitlink != nullptr) {
+        if (emit_field(run, "G") != 0 || emit_field(run, gitlink->state) != 0)
+            return -1;
+        return 0;
+    }
+
+    struct stat link_view;
+    if (lstat(path, &link_view) != 0)
+        return emit_field(run, "D") != 0 ? -1 : 0;
+    if (S_ISLNK(link_view.st_mode))
+        return token_identity_symlink(run, path, &link_view);
+    if (S_ISREG(link_view.st_mode)) {
+        char mode[8];
+        if (canonical_mode(mode, &link_view, 'F', path) != 0)
+            return 1;
+        uint8_t digest[ZSHA256_DIGEST_LEN];
+        if (hash_file(path, digest) != 0)
+            return 1;
+        char hex[2 * ZSHA256_DIGEST_LEN + 1u];
+        zcl_hex_encode(digest, ZSHA256_DIGEST_LEN, hex);
+        if (emit_field(run, "F") != 0 || emit_field(run, mode) != 0 ||
+            emit_field(run, hex) != 0)
+            return -1;
+        return 0;
+    }
+    fprintf(stderr,
+            "source-identity-batch: unsupported dirty source type: %s\n",
+            path);
+    return 1;
+}
+
 static int token_path(struct token_run *run, const char *path)
 {
     const struct gitlink_state *gitlink = find_gitlink(run, path);
@@ -743,6 +806,8 @@ static int token_path(struct token_run *run, const char *path)
         return token_inventory_path(run, path, gitlink);
     if (run->mode == BATCH_TOKEN_IDENTITY)
         return token_identity_path(run, path, gitlink);
+    if (run->mode == BATCH_CAPTURE_IDENTITY)
+        return capture_identity_path(run, path, gitlink);
     return token_mutation_path(run, path, gitlink);
 }
 
@@ -761,6 +826,10 @@ static batch_mode parse_token_mode(const char *mode_text, bool *wants_record)
         *wants_record = false;
         return BATCH_TOKEN_IDENTITY;
     }
+    if (strcmp(mode_text, "capture-identity") == 0) {
+        *wants_record = false;
+        return BATCH_CAPTURE_IDENTITY;
+    }
     return BATCH_HASH;
 }
 
@@ -771,6 +840,13 @@ static const char *token_header(batch_mode mode)
     if (mode == BATCH_TOKEN_MUTATION)
         return "zcl.dev_source_mutation.v1";
     return "zcl.dev_source_identity.v2";
+}
+
+/* capture-identity produces the identity preimage without consuming a
+ * digest table; the two-step `identity` mode still requires one. */
+static bool token_mode_wants_digests(batch_mode mode)
+{
+    return mode == BATCH_TOKEN_IDENTITY;
 }
 
 /* Open the mutation `path\0type\0meta\0` companion beside the preimage. */
@@ -872,7 +948,7 @@ static int load_token_inputs(batch_mode mode, const char *sidecar_path,
     *digest_count = 0;
     if (load_gitlink_sidecar(sidecar_path, gitlinks, gitlink_count) != 0)
         return 1;
-    if (mode == BATCH_TOKEN_IDENTITY &&
+    if (token_mode_wants_digests(mode) &&
         load_digest_table(digests_path, digests, digest_count) != 0) {
         free_token_inputs(*gitlinks, *gitlink_count, nullptr, 0);
         *gitlinks = nullptr;
@@ -925,10 +1001,13 @@ static int run_tokens(const char *mode_text, const char *preimage_path,
     bool wants_record = false;
     batch_mode mode = parse_token_mode(mode_text, &wants_record);
     if ((mode == BATCH_HASH) ||
-        (mode == BATCH_TOKEN_IDENTITY && digests_path == nullptr)) {
+        (token_mode_wants_digests(mode) && digests_path == nullptr) ||
+        (mode == BATCH_CAPTURE_IDENTITY && digests_path != nullptr)) {
         fprintf(stderr,
                 "usage: source-identity-batch token inventory|mutation|identity "
-                "<preimage> <gitlink-sidecar> [digest-table]\n");
+                "<preimage> <gitlink-sidecar> [digest-table]\n"
+                "       source-identity-batch token capture-identity "
+                "<preimage> <gitlink-sidecar>\n");
         return 2;
     }
 
@@ -1006,6 +1085,256 @@ static int batch_path_main(batch_mode mode)
     return status;
 }
 
+/* ── enumeration submodes ───────────────────────────────────────────────
+ * One native pass over git's NUL-delimited index reports replaces the
+ * shell's per-record parsing loops. The consumed byte formats are git's own
+ * (`ls-files -v -z` and `ls-files --stage -z`); the refusal messages and the
+ * exit status 3 reproduce source-identity.sh's fail() verdicts exactly, so a
+ * native enumeration and the legacy loop are interchangeable under set -e. */
+static int enumeration_usage(void)
+{
+    fprintf(stderr,
+            "usage: source-identity-batch check-tags [gitlink-prefix]\n"
+            "       source-identity-batch split-index <gitlink-out> "
+            "[gitlink-prefix]\n"
+            "       source-identity-batch prefix <prefix>\n");
+    return 2;
+}
+
+/* check-tags: a skip-worktree ('S') or assume-unchanged (any lowercase tag)
+ * bit hides content from `git diff`, so the shell refuses the whole capture
+ * on the first such record. */
+static int check_tags_main(const char *prefix)
+{
+    size_t capacity = 256;
+    char *record = zcl_malloc(capacity, "index tag record");
+    if (record == nullptr) {
+        fprintf(stderr, "source-identity-batch: record allocation failed\n");
+        return 1;
+    }
+    int status = 0;
+    for (;;) {
+        bool at_eof;
+        if (read_path(&record, &capacity, &at_eof) != 0) {
+            status = 1;
+            break;
+        }
+        if (at_eof)
+            break;
+        char tag = record[0];
+        size_t length = strlen(record);
+        const char *path = record + (length >= 2 ? 2 : length);
+        if (tag == 'S' || (tag >= 'a' && tag <= 'z')) {
+            if (prefix != nullptr)
+                fprintf(stderr,
+                        "source-identity: hidden Git index bit in gitlink "
+                        "path: %s/%s\n", prefix, path);
+            else
+                fprintf(stderr,
+                        "source-identity: hidden Git index bit on path: %s "
+                        "(clear skip-worktree/assume-unchanged before "
+                        "publication)\n", path);
+            status = 3;
+            break;
+        }
+    }
+    free(record);
+    return status;
+}
+
+/* split-index: one `<mode> SP <oid> SP <stage> TAB <path>` NUL record each.
+ * Stage records are the shell's exact verdicts; regular/symlink modes append
+ * `[prefix/]path\0` to stdout, gitlinks to the sidecar file the shell then
+ * recurses over. The refusal wording differs between the plain and gitlink
+ * forms beyond the prefix itself, so each verdict has its own helper. */
+static int split_index_refuse_stage(const char *prefix, const char *stage,
+                                    const char *path)
+{
+    if (prefix != nullptr)
+        fprintf(stderr,
+                "source-identity: unmerged gitlink index stage %s "
+                "for path: %s/%s\n", stage, prefix, path);
+    else
+        fprintf(stderr,
+                "source-identity: unmerged index stage %s for path: %s\n",
+                stage, path);
+    return 3;
+}
+
+static int split_index_refuse_mode(const char *prefix, const char *mode,
+                                   const char *path)
+{
+    if (prefix != nullptr)
+        fprintf(stderr,
+                "source-identity: unsupported gitlink index mode %s "
+                "for path: %s/%s\n", mode, prefix, path);
+    else
+        fprintf(stderr,
+                "source-identity: unsupported tracked index mode %s "
+                "for path: %s\n", mode, path);
+    return 3;
+}
+
+/* Write `[prefix/]path\0`. Returns false only on a stream error. */
+static bool split_index_emit(FILE *out, const char *prefix, const char *path)
+{
+    if (prefix != nullptr &&
+        (fwrite(prefix, 1, strlen(prefix), out) != strlen(prefix) ||
+         fputc('/', out) == EOF))
+        return false;
+    return fwrite(path, 1, strlen(path), out) == strlen(path) &&
+           fputc(0, out) != EOF;
+}
+
+/* Handle one stage record. Returns 0 on emit, 1 on a malformed record or a
+ * stream error, 3 on a refused verdict (message already printed). */
+static int split_index_record(char *record, const char *prefix, FILE *gitlinks)
+{
+    size_t length = strlen(record);
+    char *tab = memchr(record, '\t', length);
+    char *space = memchr(record, ' ', length);
+    char *stage = nullptr;
+    if (tab != nullptr && space != nullptr && space < tab) {
+        for (char *cursor = tab; cursor > record;) {
+            cursor--;
+            if (*cursor == ' ') {
+                stage = cursor + 1;
+                break;
+            }
+        }
+    }
+    if (stage == nullptr || stage == tab) {
+        fprintf(stderr, "source-identity-batch: index record is malformed\n");
+        return 1;
+    }
+    *space = '\0';
+    *tab = '\0';
+    const char *mode = record;
+    const char *path = tab + 1;
+    if (strcmp(stage, "0") != 0)
+        return split_index_refuse_stage(prefix, stage, path);
+    FILE *out = stdout;
+    if (strcmp(mode, "100644") != 0 && strcmp(mode, "100755") != 0 &&
+        strcmp(mode, "120000") != 0) {
+        if (strcmp(mode, "160000") == 0)
+            out = gitlinks;
+        else
+            return split_index_refuse_mode(prefix, mode, path);
+    }
+    if (!split_index_emit(out, prefix, path)) {
+        fprintf(stderr, "source-identity-batch: output write failed\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int split_index_main(const char *gitlink_out_path, const char *prefix)
+{
+    FILE *gitlinks = fopen(gitlink_out_path, "wb");
+    if (gitlinks == nullptr) {
+        fprintf(stderr,
+                "source-identity-batch: could not open gitlink output %s: %s\n",
+                gitlink_out_path, strerror(errno));
+        return 1;
+    }
+    if (setvbuf(stdout, nullptr, _IOFBF, 64 * 1024) != 0) {
+        fprintf(stderr, "source-identity-batch: output buffering failed\n");
+        fclose(gitlinks);
+        return 1;
+    }
+    size_t capacity = 256;
+    char *record = zcl_malloc(capacity, "index stage record");
+    if (record == nullptr) {
+        fprintf(stderr, "source-identity-batch: record allocation failed\n");
+        fclose(gitlinks);
+        return 1;
+    }
+    int status = 0;
+    for (;;) {
+        bool at_eof;
+        if (read_path(&record, &capacity, &at_eof) != 0) {
+            status = 1;
+            break;
+        }
+        if (at_eof)
+            break;
+        status = split_index_record(record, prefix, gitlinks);
+        if (status != 0)
+            break;
+    }
+    free(record);
+    if (fclose(gitlinks) != 0 && status == 0) {
+        fprintf(stderr,
+                "source-identity-batch: gitlink output flush failed\n");
+        status = 1;
+    }
+    if (status == 0 && fflush(stdout) != 0) {
+        fprintf(stderr, "source-identity-batch: output flush failed\n");
+        status = 1;
+    }
+    return status;
+}
+
+/* prefix: map a NUL path stream to `prefix/path\0`, the shell's
+ * append_prefixed_nul(). */
+static int prefix_main(const char *prefix)
+{
+    if (setvbuf(stdout, nullptr, _IOFBF, 64 * 1024) != 0) {
+        fprintf(stderr, "source-identity-batch: output buffering failed\n");
+        return 1;
+    }
+    size_t capacity = 256;
+    char *path = zcl_malloc(capacity, "source identity path");
+    if (path == nullptr) {
+        fprintf(stderr, "source-identity-batch: path allocation failed\n");
+        return 1;
+    }
+    size_t prefix_length = strlen(prefix);
+    int status = 0;
+    for (;;) {
+        bool at_eof;
+        if (read_path(&path, &capacity, &at_eof) != 0) {
+            status = 1;
+            break;
+        }
+        if (at_eof)
+            break;
+        size_t path_length = strlen(path);
+        if (fwrite(prefix, 1, prefix_length, stdout) != prefix_length ||
+            fputc('/', stdout) == EOF ||
+            fwrite(path, 1, path_length, stdout) != path_length ||
+            fputc(0, stdout) == EOF) {
+            fprintf(stderr, "source-identity-batch: output write failed\n");
+            status = 1;
+            break;
+        }
+    }
+    free(path);
+    if (status == 0 && fflush(stdout) != 0) {
+        fprintf(stderr, "source-identity-batch: output flush failed\n");
+        status = 1;
+    }
+    return status;
+}
+
+static int enumeration_main(int argc, char **argv)
+{
+    if (strcmp(argv[1], "check-tags") == 0) {
+        if (argc == 2)
+            return check_tags_main(nullptr);
+        if (argc == 3)
+            return check_tags_main(argv[2]);
+    } else if (strcmp(argv[1], "split-index") == 0) {
+        if (argc == 3)
+            return split_index_main(argv[2], nullptr);
+        if (argc == 4)
+            return split_index_main(argv[2], argv[3]);
+    } else if (argc == 3 && strcmp(argv[1], "prefix") == 0) {
+        return prefix_main(argv[2]);
+    }
+    return enumeration_usage();
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "identity") == 0) {
@@ -1027,7 +1356,10 @@ int main(int argc, char **argv)
         return batch_path_main(BATCH_HASH);
     if (argc == 2 && strcmp(argv[1], "mode") == 0)
         return batch_path_main(BATCH_MODE);
+    if (argc >= 2)
+        return enumeration_main(argc, argv);
     fprintf(stderr,
-            "usage: source-identity-batch hash|mode|identity|token ...\n");
+            "usage: source-identity-batch hash|mode|identity|token|"
+            "check-tags|split-index|prefix ...\n");
     return 2;
 }

@@ -315,6 +315,12 @@ case "${1:-ready}" in
         # archives, and a fake empty worktree, then assert the copy landed
         # with link count 1 and an inode that differs from the source's.
         fixture="$(mktemp -d "${TMPDIR:-/tmp}/zcl-tor-copy.XXXXXX")"
+        # Canonicalize the fixture root: the priming-recipe check below
+        # compares "$fake_primary" against a donor path the recipe itself
+        # canonicalized with pwd -P, and on macOS mktemp's $TMPDIR reaches
+        # its target through the /var -> /private/var symlink (plus a doubled
+        # slash), so the two spellings differ byte-for-byte for one directory.
+        fixture="$(cd "$fixture" && pwd -P)"
         cleanup_fixture() { rm -rf -- "$fixture"; }
         trap cleanup_fixture EXIT
         fake_primary="$fixture/primary"

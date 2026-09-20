@@ -959,7 +959,8 @@ static const char *watch_fg_dirty_phase(struct watch_context *ctx)
  * phase installs the real watch_cancel_poll through the real seam with the
  * verdict already set and runs one bounded child: a poll that probes hangs
  * here instead of answering, and the group's timeout reports it. ctx->fd is
- * -1 so collect_events() observes no source events without touching a real
+ * -1 and the Darwin directory watcher stays at its closed sentinel, so
+ * collect_events() observes no source events without touching a real
  * descriptor. */
 static const char *watch_fg_seam_phase(struct watch_context *ctx)
 {
@@ -992,6 +993,12 @@ bool zcl_devloop_watch_foreground_yield_selftest(const char *repo_root)
      * expiring. Nothing this selftest asserts is time dependent. */
     struct watch_context ctx = {0};
     char head[65] = {0};
+#if defined(__APPLE__)
+    /* The zeroed watcher is not the closed sentinel; collect_events() reads
+     * it through the real seam phase below. Give the context the same init
+     * the production watch entry point performs. */
+    platform_directory_watcher_init(&ctx.directory_watcher);
+#endif
     const char *failed = NULL;
 
     if (!repo_root || !realpath(repo_root, ctx.root))
@@ -1091,6 +1098,11 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
 bool zcl_dev_proof_test_edit_busy(const char *root)
 {
     struct watch_context ctx = {0};
+#if defined(__APPLE__)
+    /* The forked proof child closes the inherited watcher; a zeroed native
+     * handle is not the closed sentinel and crashes that close. */
+    platform_directory_watcher_init(&ctx.directory_watcher);
+#endif
     if (!root || snprintf(ctx.root, sizeof(ctx.root), "%s", root) >=
                      (int)sizeof(ctx.root)) return false;
     ctx.proof_pending_count = 1;
@@ -1119,6 +1131,9 @@ static bool watch_test_edit_observe(const char *root, pid_t child,
 bool zcl_dev_proof_test_edit_lifetime(const char *root)
 {
     struct watch_context ctx = {.fd = -1};
+#if defined(__APPLE__)
+    platform_directory_watcher_init(&ctx.directory_watcher);
+#endif
     if (!root || snprintf(ctx.root, sizeof(ctx.root), "%s", root) >=
                      (int)sizeof(ctx.root)) return false;
     int ready[2], release[2];
@@ -1943,13 +1958,25 @@ static bool watch_macos_record_result(
 }
 #endif
 
+#if defined(__APPLE__)
+/* A watcher still at its closed sentinel is the fd=-1 case the Linux half
+ * below already has: no open backend, so no events and no failure. The
+ * foreground-yield seam phase runs the real cancel poll on exactly such a
+ * context. */
+static bool collect_events_macos(struct watch_context *ctx)
+{
+    if (ctx->directory_watcher.native == UINTPTR_MAX)
+        return false;
+    return watch_macos_record_result(
+        ctx, platform_directory_watcher_wait(&ctx->directory_watcher, 0,
+                                             NULL, NULL));
+}
+#endif
+
 static bool collect_events(struct watch_context *ctx)
 {
 #if defined(__APPLE__)
-    enum platform_directory_watch_result result =
-        platform_directory_watcher_wait(&ctx->directory_watcher, 0, NULL,
-                                        NULL);
-    return watch_macos_record_result(ctx, result);
+    return collect_events_macos(ctx);
 #else
     char buffer[64 * 1024];
     bool saw = false;
