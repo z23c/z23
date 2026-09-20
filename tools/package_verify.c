@@ -5341,6 +5341,10 @@ static int pv_build_one_program(
     struct vcs_package_recipe *recipe, const char *src_root,
     const char *build_root, bool standard_profile,
     const struct pv_emit_dep *emit_deps, size_t emit_dep_count,
+    const char *fast_cache_dir, struct pv_plan_ctx *pctx,
+    struct vcs_toolchain_capsule_v1 *fast_capsule,
+    const uint8_t fast_capsule_root[32], const uint8_t package_root[32],
+    const uint8_t recipe_root[32], const uint8_t emit_lock_root[32],
     struct pv_dep_archives *dep_archives,
     const struct os_sandbox_rlimits *compile_limits, bool full_isolation,
     const struct os_sandbox_path_rule *rules, size_t n_rules,
@@ -5358,31 +5362,27 @@ static int pv_build_one_program(
     pv_compile_argv(&pargs, cc, false, standard_profile,
                     recipe, src_root, emit_deps, emit_dep_count,
                     src_file, obj_file);
-    struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER,
-        pargs.argv, build_root, compile_limits, full_isolation,
-        rules, n_rules, compile_env, PV_COMPILE_TIMEOUT_MS);
-    if (!pr.launched || pr.sandbox_fail) {
-        fprintf(stderr,
-                "%s: internal: program compile child failed to "
-                "launch or arm its sandbox (%s)\n", PV_LOG,
-                pr.stderr_buf);
-        return 5;
+    bool fast_eligible = fast_cache_dir && strcmp(cc_id, "gcc") == 0 &&
+                         variant == 0;
+    bool from_cache = false;
+    uint8_t fast_preproc[32] = {0}, fast_key[32] = {0};
+    if (fast_eligible) {
+        /* Programs are outside library plans. Discover their closure on
+         * every run, using scratch indices disjoint from sources/tests. */
+        size_t si = recipe->sources.count + recipe->test_sources.count + pi;
+        int rc = pv_fast_cache_check_hit(
+            pctx, &pargs, si, src_file, fast_cache_dir, standard_profile,
+            fast_capsule, fast_capsule_root, false, NULL, obj_file,
+            fast_preproc, fast_key, &from_cache, &fast_eligible);
+        if (rc != PV_CONTINUE) return rc;
     }
-    if (pr.timed_out) {
-        *cc_ok = false;
-        *build_fail_code = VCS_PACKAGE_ATTEST_DETAIL_COMPILE_TIMEOUT;
-        snprintf(build_fail_detail, (VCS_PACKAGE_ATTEST_DETAIL_MAX + 1u),
-                 "%s: program compile timed out: %s", fail_prefix, prel);
-        return PV_CONTINUE;
-    }
-    if (!pr.exited || pr.exit_code != 0) {
-        *cc_ok = false;
-        *build_fail_code = VCS_PACKAGE_ATTEST_DETAIL_COMPILE_ERROR;
-        pv_detail_from_stderr(fail_prefix, pr.stderr_buf,
-                              build_fail_detail,
-                              (VCS_PACKAGE_ATTEST_DETAIL_MAX + 1u));
-        return PV_CONTINUE;
-    }
+    int rc = pv_run_and_finish_compile(
+        from_cache, &pargs, build_root, compile_limits, full_isolation,
+        rules, n_rules, compile_env, fail_prefix, prel, fast_eligible, pctx,
+        fast_cache_dir, standard_profile, fast_capsule, fast_capsule_root,
+        fast_preproc, fast_key, package_root, recipe_root, emit_lock_root,
+        obj_file, cc_ok, build_fail_code, build_fail_detail);
+    if (rc != PV_CONTINUE || !*cc_ok) return rc;
     /* cwd is build_root, so every object and the executable are
      * named by BASENAME: an absolute work-root path on the link
      * line can otherwise reach the produced bytes and two
@@ -5410,7 +5410,7 @@ static int pv_build_one_program(
     pv_append_dep_archives_and_libs(largv, &ln, sizeof(largv) / sizeof(largv[0]),
                                     dep_archives, recipe);
     largv[ln] = NULL;
-    pr = pv_run_child(PV_PROCESS_COMPILER, largv, build_root, compile_limits,
+    struct pv_run pr = pv_run_child(PV_PROCESS_COMPILER, largv, build_root, compile_limits,
                       full_isolation, rules, n_rules, compile_env,
                       PV_LINK_TIMEOUT_MS);
     if (!pr.launched || pr.sandbox_fail) {
@@ -5560,6 +5560,8 @@ static int pv_build_one_variant(
         rc = pv_build_one_program(
             pi, cc, cc_id, variant, recipe, src_root, build_root,
             standard_profile, emit_deps, emit_dep_count,
+            fast_cache_dir, pctx, fast_capsule, fast_capsule_root,
+            package_root, recipe_root, emit_lock_root,
             dep_archives, compile_limits, full_isolation, rules,
             n_rules, compile_env, fail_prefix, cc_ok,
             build_fail_code, build_fail_detail);

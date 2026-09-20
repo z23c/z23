@@ -245,6 +245,7 @@ struct fcw_build_result {
     bool saw_refusal;
     bool saw_test_23;
     bool saw_test_24;
+    bool saw_program_link_error;
     char first_line[256];
     char last_line[256];
 };
@@ -446,6 +447,8 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
             strstr(text, "zbuild-package-standard-refused=1") != NULL;
         out->saw_test_23 = strstr(text, "exit 23, expected 0") != NULL;
         out->saw_test_24 = strstr(text, "exit 24, expected 0") != NULL;
+        out->saw_program_link_error =
+            strstr(text, "detail=gcc: collect2: error: ld returned") != NULL;
         fcw_parse_perf(text, out);
         char *line = strstr(text, "zbuild-package-fast-cache=v1");
         if (line)
@@ -460,7 +463,24 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
 
 /* Find any one complete cache entry key (the first <62 hex>.o member the
  * directory walk meets). */
-static bool fcw_first_entry(const char *cache_dir, char key_out[65])
+static const char *fcw_find(const uint8_t *hay, size_t len, const char *needle);
+
+static bool fcw_object_contains(const char *shard, const char *name,
+                                 const char *needle)
+{
+    if (!needle) return true;
+    char path[4400];
+    if (snprintf(path, sizeof(path), "%s/%s", shard, name) >= (int)sizeof(path))
+        return false;
+    size_t len = 0;
+    uint8_t *bytes = fcw_read_file(path, 1024u * 1024u, &len);
+    bool found = bytes && fcw_find(bytes, len, needle) != NULL;
+    free(bytes);
+    return found;
+}
+
+static bool fcw_matching_entry(const char *cache_dir, char key_out[65],
+                                const char *needle)
 {
     char objects[4096];
     if (snprintf(objects, sizeof(objects), "%s/objects", cache_dir) >=
@@ -484,7 +504,8 @@ static bool fcw_first_entry(const char *cache_dir, char key_out[65])
         struct dirent *e;
         while ((e = readdir(d)) != NULL) {
             if (strlen(e->d_name) == 64 &&
-                strcmp(e->d_name + 62, ".o") == 0) {
+                strcmp(e->d_name + 62, ".o") == 0 &&
+                fcw_object_contains(shard, e->d_name, needle)) {
                 key_out[0] = sh->d_name[0];
                 key_out[1] = sh->d_name[1];
                 memcpy(key_out + 2, e->d_name, 62);
@@ -497,6 +518,11 @@ static bool fcw_first_entry(const char *cache_dir, char key_out[65])
     }
     closedir(shards);
     return found;
+}
+
+static bool fcw_first_entry(const char *cache_dir, char key_out[65])
+{
+    return fcw_matching_entry(cache_dir, key_out, NULL);
 }
 
 /* Bytes-forward substring search over a non-NUL-terminated buffer. */
@@ -741,6 +767,91 @@ static bool fcw_test_cache_fixture(struct fcw_asm_fixture *f, const char *base)
         "#if defined(__GNUC__) && !defined(__clang__)\nreturn FCW_EXIT;\n"
         "#else\nreturn 0;\n#endif\n}\n";
     return ready && fcw_write_file(f->source, source, strlen(source));
+}
+
+static bool fcw_program_cache_fixture(struct fcw_asm_fixture *f, const char *base)
+{
+    char manifest[4096], app[4096];
+    const char *json = "{\"schema\":1,\"name\":\"fixture/tiny-lines\","
+        "\"semver\":\"0.1.0\",\"language\":\"c23\",\"license\":\"MIT\","
+        "\"include_dir\":\"include\",\"source_dir\":\"src\","
+        "\"programs\":[\"app/main.c\"],\"dependencies\":[]}\n";
+    const char *source = "#include \"gate.h\"\nint main(void) { return FCW_EXIT; }\n";
+    return fcw_asm_path(f->pkg, base, "program-cache-pkg") &&
+        fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", f->pkg) &&
+        fcw_asm_path(manifest, f->pkg, "zcode-package.json") &&
+        fcw_write_file(manifest, json, strlen(json)) &&
+        fcw_asm_path(app, f->pkg, "app") && fcw_mkdir_p(app) &&
+        fcw_asm_path(f->source, app, "main.c") &&
+        fcw_write_file(f->source, source, strlen(source)) &&
+        fcw_asm_path(f->data, app, "gate.h") &&
+        fcw_asm_path(f->recipe, base, "program-cache-recipe.wire") &&
+        fcw_asm_path(f->cache, base, "program-cache");
+}
+
+static const char *fcw_program_cache_header(size_t run)
+{
+    if (run < 2) return "#define FCW_EXIT 0\n";
+    if (run == 2) return "#define FCW_EXIT 23\n";
+    if (run == 3) return
+        "#if defined(__GNUC__) && !defined(__clang__)\n"
+        "#define FCW_EXIT fcw_missing_program_header_symbol\n"
+        "#else\n#define FCW_EXIT 0\n#endif\n";
+    return "#if defined(__GNUC__) && !defined(__clang__)\n"
+        "extern int fcw_missing_link(void);\n#define FCW_EXIT fcw_missing_link()\n"
+        "#else\n#define FCW_EXIT 0\n#endif\n";
+}
+
+static bool fcw_program_cache_positive(const struct fcw_asm_fixture *f,
+                                       const char *base, size_t run,
+                                       const struct fcw_build_result *result,
+                                       bool passed)
+{
+    static const unsigned hits[] = {0, 3, 2}, misses[] = {3, 0, 1};
+    if (!passed || result->hits != hits[run] || result->misses != misses[run])
+        return false;
+    if (run != 2) return true;
+    char warm[4096];
+    return fcw_asm_path(warm, base, "program-cache-1") &&
+        fcw_asm_same_output(warm, f->emit[1], "bin/tiny-lines", false);
+}
+
+static bool fcw_program_cache_expected(const struct fcw_asm_fixture *f,
+                                       const char *base, size_t run,
+                                       const struct fcw_build_result *result,
+                                       bool passed)
+{
+    if (run < 3) return fcw_program_cache_positive(f, base, run, result, passed);
+    if (passed || result->exit_code != 6 || !result->saw_refusal) return false;
+    if (run == 3) return true;
+    char key[65];
+    /* Refusals emit no success counters. Observe the stored program
+     * object before repeating its failing link with the same cache. */
+    return result->saw_program_link_error &&
+        fcw_matching_entry(f->cache, key, "fcw_missing_link");
+}
+
+static int fcw_program_cache_probe(const char *base, const char *worker,
+                                   const struct pubkey *pk)
+{
+    int failures = 0;
+    struct fcw_asm_fixture f = {0};
+    bool ready = fcw_program_cache_fixture(&f, base);
+    FC_CHECK("program object cache fixture prepared", ready);
+    if (!ready) return failures;
+    for (size_t i = 0; i < 6; i++) {
+        char name[48];
+        snprintf(name, sizeof(name), "program-cache-%zu", i);
+        const char *header = fcw_program_cache_header(i);
+        bool inputs = fcw_asm_path(f.emit[1], base, name) &&
+            fcw_write_file(f.data, header, strlen(header));
+        struct fcw_build_result result = {0};
+        uint8_t root[32];
+        bool passed = inputs && fcw_asm_build(&f, worker, pk, 1, &result, root);
+        FC_CHECK(name, inputs && fcw_program_cache_expected(&f, base, i,
+                                                             &result, passed));
+    }
+    return failures;
 }
 
 static bool fcw_expected_test_refusal(const struct fcw_build_result *result,
@@ -1040,6 +1151,7 @@ static int test_fastobj_carrier_platform_arm(void)
     failures += fcw_asm_bypass(base, worker, &pk, false);
     failures += fcw_attribute_bypass(base, worker, &pk);
     failures += fcw_test_cache_failure(base, worker, &pk);
+    failures += fcw_program_cache_probe(base, worker, &pk);
 #endif
 
     /* 11. the testless standard-profile refusal, both sides. A TESTLESS
