@@ -1928,6 +1928,8 @@ static bool gw_rate_path(const char *dir, const char *name, char *out,
     return n > 0 && (size_t)n < cap;
 }
 
+static void gw_rate_close(int fd);
+
 /* Open the window file locked, read <start> <count>, roll the window over
  * when it has elapsed. Returns the fd (still locked) or -1. */
 static int gw_rate_open(const char *dir, const char *name, long long window,
@@ -1950,10 +1952,18 @@ static int gw_rate_open(const char *dir, const char *name, long long window,
         return -1;
     }
     r = read(fd, buf, sizeof(buf) - 1);
+    if (r < 0) {
+        gw_rate_close(fd);
+        return -1;
+    }
     if (r > 0) {
         buf[r] = '\0';
         if (sscanf(buf, "%lld %lld", start, count) != 2 || *count < 0 ||
-            now - *start >= window || now < *start) {
+            now < *start) {
+            gw_rate_close(fd);
+            return -1;
+        }
+        if (now - *start >= window) {
             *start = now;
             *count = 0;
         }
@@ -2128,29 +2138,38 @@ static bool gw_csrf_spend(const char *dir, const char *nonce)
     char line[128];
     long long now = clock_now_wall_ms() / 1000LL;
     FILE *f;
+    int raw;
     bool seen = false;
     if (!gw_rate_path(dir, "oauth_csrf.jsonl", path, sizeof(path)))
         return false;
-    f = fopen(path, "rb");
-    if (f) {
-        while (fgets(line, sizeof(line), f)) {
-            char got[GW_OAUTH_ID_HEX + 1];
-            long long exp = 0;
-            if (!gw_row_str(line, "nonce", got, sizeof(got)) ||
-                !gw_row_int(line, "expires", &exp))
-                continue;
-            if (exp > now && strcmp(got, nonce) == 0) {
-                seen = true;
-                break;
-            }
-        }
-        (void)fclose(f);
+    raw = open(path, O_RDWR | O_CREAT, 0600);
+    if (raw < 0)
+        return false;
+    if (flock(raw, LOCK_EX) != 0) {
+        close(raw);
+        return false;
     }
-    if (seen)
+    f = fdopen(raw, "r+");
+    if (!f) {
+        close(raw);
         return false;
-    f = fopen(path, "ab");
-    if (!f)
+    }
+    while (fgets(line, sizeof(line), f)) {
+        char got[GW_OAUTH_ID_HEX + 1];
+        long long exp = 0;
+        if (!strchr(line, '\n') ||
+            !gw_row_str(line, "nonce", got, sizeof(got)) ||
+            !gw_row_int(line, "expires", &exp)) {
+            (void)fclose(f);
+            return false;
+        }
+        if (exp > now && strcmp(got, nonce) == 0)
+            seen = true;
+    }
+    if (ferror(f) || seen || fseek(f, 0, SEEK_END) != 0) {
+        (void)fclose(f);
         return false;
+    }
     if (fprintf(f, "{\"nonce\":\"%s\",\"expires\":%lld}\n", nonce,
                 now + GW_CSRF_TTL) < 0) {
         (void)fclose(f);
@@ -2492,6 +2511,16 @@ static bool gw_code_append(const char *path, const char *code,
     return fclose(f) == 0 && ok;
 }
 
+static bool gw_client_rows_store(const char *path, const struct gw_buf *rows)
+{
+    FILE *f = fopen(path, "ab");
+    bool stored;
+    if (!f)
+        return false;
+    stored = fwrite(rows->p, 1, rows->len, f) == rows->len;
+    return fclose(f) == 0 && stored;
+}
+
 /* POST /oauth/register {"redirect_uris":[...]} -> client_id. */
 static void gw_oauth_register(int fd, const struct gw_http *h,
                               const struct gw_config *cfg)
@@ -2500,7 +2529,6 @@ static void gw_oauth_register(int fd, const struct gw_http *h,
     char dir[4096], path[4096 + 64], cid[GW_OAUTH_ID_HEX + 1];
     char redirs[8][512];
     size_t i, n = 0;
-    FILE *f;
     memset(&b, 0, sizeof(b));
     memset(&rows, 0, sizeof(rows));
     if (!gw_register_uris(h, cfg, redirs, &n)) {
@@ -2536,15 +2564,12 @@ static void gw_oauth_register(int fd, const struct gw_http *h,
         gw_oauth_error(fd, "server_error");
         return;
     }
-    f = fopen(path, "ab");
-    if (!f) {
-        gw_buf_free(&rows);
+    bool stored = gw_client_rows_store(path, &rows);
+    gw_buf_free(&rows);
+    if (!stored) {
         gw_oauth_error(fd, "server_error");
         return;
     }
-    (void)fwrite(rows.p, 1, rows.len, f);
-    gw_buf_free(&rows);
-    (void)fclose(f);
     gw_buf_str(&b, "{\"client_id\":\"");
     gw_buf_str(&b, cid);
     gw_buf_str(&b, "\",\"redirect_uris\":[");

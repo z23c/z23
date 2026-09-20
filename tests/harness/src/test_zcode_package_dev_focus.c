@@ -685,6 +685,160 @@ static pid_t zpf_spawn_exec_agent(
 }
 #endif
 
+#if !defined(_WIN32)
+static bool zpf_resume_packet_matches(
+    const char *workspace, const uint8_t task_root[32],
+    const struct json_value *data)
+{
+    struct zpf_metrics metrics = {0};
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_write_scope_v1 scope;
+    uint8_t *goal = NULL;
+    size_t goal_len = 0;
+    if (!zpf_load_task(workspace, task_root, &task, &metrics) ||
+        !zpf_load_scope(workspace, task.write_scope_root, &scope, &metrics) ||
+        !zpf_load(workspace, task.goal_root, 4096, &goal, &goal_len, &metrics))
+        return false;
+    const char *text = json_get_str(json_get(data, "goal"));
+    const struct json_value *paths = json_get(data, "allowed_write_scopes");
+    bool ok = text && strlen(text) == goal_len &&
+        memcmp(text, goal, goal_len) == 0 && paths &&
+        paths->type == JSON_ARR && json_size(paths) == scope.count &&
+        json_get_int(json_get(data, "max_changed_files")) ==
+            task.max_changed_files &&
+        json_get_int(json_get(data, "max_patch_bytes")) ==
+            (int64_t)task.max_patch_bytes;
+    for (size_t i = 0; ok && i < scope.count; i++) {
+        const char *path = json_get_str(json_at(paths, i));
+        ok = path && strcmp(path, scope.paths[i]) == 0;
+    }
+    free(goal);
+    return ok;
+}
+
+static bool zpf_resume_root_matches(const struct json_value *data,
+                                    const char *key, const char *environment)
+{
+    const char *actual = json_get_str(json_get(data, key));
+    const char *expected = getenv(environment);
+    return actual && expected && strcmp(actual, expected) == 0;
+}
+
+static bool zpf_resume_complete(const struct zcl_command_request *request)
+{
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_work_accept.v1");
+    zcl_native_handle_zcode_work_accept(request, &reply);
+    const char *state = json_get_str(json_get(&reply.data, "state"));
+    bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && state &&
+        strcmp(state, "PROVEN") == 0 &&
+        !json_get_bool(json_get(&reply.data, "idempotent"));
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static bool zpf_resume_user_session(const char *workspace,
+                                    const char *task_hex)
+{
+    uint8_t task_root[32];
+    if (!workspace || !task_hex ||
+        !zcl_hex_decode_lower(task_hex, task_root, 32)) return false;
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "workspace", workspace) &&
+        json_push_kv_str(&input, "work", task_hex);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.story_focus.v1");
+    if (ok) zcl_native_handle_story_focus(&request, &reply);
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        zpf_resume_root_matches(&reply.data, "candidate_root", ZPF_ENV_HANDOFF_ROOT) &&
+        zpf_resume_root_matches(&reply.data, "candidate_source_root", ZPF_ENV_ADMISSION_A_ROOT) &&
+        zpf_resume_root_matches(&reply.data, "write_scope_root", ZPF_ENV_ADMISSION_B_ROOT) &&
+        zpf_resume_packet_matches(workspace, task_root, &reply.data) &&
+        zpf_resume_complete(&request);
+    zcl_command_reply_free(&reply); json_free(&input);
+    return ok;
+}
+
+#endif
+
+static bool zpf_scope_refused(const char *workspace, const char *task_hex)
+{
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "workspace", workspace) &&
+        json_push_kv_str(&input, "work", task_hex);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.story_focus.v1");
+    if (ok) zcl_native_handle_story_focus(&request, &reply);
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        strcmp(reply.error.code, "STORY_SCOPE_UNAVAILABLE") == 0 &&
+        json_get(&reply.data, "allowed_write_scopes") == NULL;
+    zcl_command_reply_free(&reply); json_free(&input);
+    return ok;
+}
+
+static bool zpf_scope_corruption_refused(const char *workspace,
+    const char *task, const uint8_t root[32], uint8_t *wire, size_t len)
+{
+    if (len <= VCS_ZCODE_WRITE_SCOPE_HEADER_BYTES) return false;
+    wire[len - 1] ^= 1;
+    bool repaired = false;
+    bool ok = vcs_object_put_addressed_repair(workspace, root, wire, len,
+                                              &repaired) && repaired &&
+        zpf_scope_refused(workspace, task);
+    wire[len - 1] ^= 1;
+    bool restored = vcs_object_put_addressed_repair(
+        workspace, root, wire, len, &repaired);
+    return ok && restored;
+}
+
+bool zpd_user_session_scope_refusals(const char *workspace,
+                                     const struct json_value *data)
+{
+    uint8_t root[32], *wire = NULL;
+    size_t len = 0;
+    const char *task = json_get_str(json_get(data, "task_root"));
+    const char *scope = json_get_str(json_get(data, "write_scope_root"));
+    if (!task || !scope || !zpf_json_root(data, "write_scope_root", root) ||
+        vcs_object_load_raw_bounded(workspace, root,
+            VCS_ZCODE_WRITE_SCOPE_WIRE_MAX, &wire, &len) != 0)
+        return false;
+    char path[4600], backup[4620];
+    int pn = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s",
+                       workspace, scope, scope + 2);
+    int bn = snprintf(backup, sizeof(backup), "%s.resume-fixture", path);
+    bool moved = pn > 0 && (size_t)pn < sizeof(path) && bn > 0 &&
+        (size_t)bn < sizeof(backup) && rename(path, backup) == 0;
+    bool ok = moved && zpf_scope_refused(workspace, task);
+    if (moved && rename(backup, path) != 0) ok = false;
+    if (ok) ok = zpf_scope_corruption_refused(workspace, task, root, wire, len);
+    free(wire);
+    return ok;
+}
+
+bool zpd_user_session_resume(const char *workspace,
+                             const struct json_value *data)
+{
+#if defined(_WIN32)
+    (void)workspace; (void)data;
+    return false;
+#else
+    uint8_t task[32], candidate[32], source[32], scope[32];
+    if (!zpf_json_root(data, "task_root", task) ||
+        !zpf_json_root(data, "candidate_root", candidate) ||
+        !zpf_json_root(data, "candidate_source_root", source) ||
+        !zpf_json_root(data, "write_scope_root", scope)) return false;
+    pid_t child = zpf_spawn_exec_agent("user-session-resume", workspace,
+                                      task, candidate, source, scope, 0);
+    int status = -1;
+    return child > 0 && zpf_wait_child(child, &status) &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
+}
+
 int zpd_focus_worker_role(const char *role)
 {
 #if defined(_WIN32)
@@ -693,6 +847,8 @@ int zpd_focus_worker_role(const char *role)
 #else
     const char *workspace = getenv(ZPF_ENV_WORKSPACE);
     const char *focus_text = getenv(ZPF_ENV_FOCUS_ROOT);
+    if (role && strcmp(role, "user-session-resume") == 0)
+        return !zpf_resume_user_session(workspace, focus_text);
     bool successor = role && strcmp(role, "shared-focus-successor") == 0;
     bool source = role && strcmp(role, "shared-focus-source") == 0;
     uint8_t focus_root[32], handoff_root[32];
@@ -701,8 +857,8 @@ int zpd_focus_worker_role(const char *role)
         !focus_text || !zcl_hex_decode_lower(focus_text, focus_root, 32))
         return 1;
     if (source)
-        return zpf_process_reload_focus(
-            workspace, focus_root, NULL, NULL, NULL, 0) ? 0 : 1;
+        return !zpf_process_reload_focus(
+            workspace, focus_root, NULL, NULL, NULL, 0);
 
     const char *handoff_text = getenv(ZPF_ENV_HANDOFF_ROOT);
     const char *admission_a_text = getenv(ZPF_ENV_ADMISSION_A_ROOT);
@@ -718,9 +874,9 @@ int zpd_focus_worker_role(const char *role)
         !zcl_hex_decode_lower(admission_a_text, admission_a_root, 32) ||
         !zcl_hex_decode_lower(admission_b_text, admission_b_root, 32))
         return 1;
-    return zpf_process_reload_focus(
+    return !zpf_process_reload_focus(
         workspace, focus_root, handoff_root, admission_a_root,
-        admission_b_root, resume_unix) ? 0 : 1;
+        admission_b_root, resume_unix);
 #endif
 }
 

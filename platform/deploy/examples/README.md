@@ -88,13 +88,16 @@ operator-specific peers. Copy and adapt before installing:
 
 ## Replay-canary operational notes
 
-- **Disk**: each canary run mints one scratch datadir on /tmp holding the
-  chainstate + a copy of the LevelDB block index — budget ~50-80 GB
-  transient. The harness runs a `df /tmp` preflight and REFUSES loudly if
-  /tmp has < 80 GiB free. If /tmp is a small tmpfs, point the harness at a
-  real-disk scratch root by sourcing it with a /tmp that has headroom, or
-  provision tmpfs/disk accordingly. The cleanup trap removes the datadir on
-  exit (including on SIGKILL of the group).
+- **Disk**: each canary run mints one scratch datadir under
+  `ZCL_ISO_SCRATCH_ROOT` (default `/tmp`) holding the chainstate + a copy
+  of the LevelDB block index — budget ~50-80 GB transient. The harness
+  runs a `df` preflight on that filesystem and REFUSES loudly if it has
+  < 80 GiB free. If `/tmp` is a small tmpfs, set `ZCL_ISO_SCRATCH_ROOT`
+  to a writable disk directory (`make replay-canary-anchor` /
+  `make replay-canary-genesis` / `make install-replay-canary` default it
+  to `~/.local/state/zclassic23-canary/scratch`). The cleanup trap
+  removes the datadir on exit (including on SIGKILL of the group), and
+  still refuses to `rm` anything that is not `$ZCL_ISO_SCRATCH_ROOT/zcl23-*`.
 - **Port reservation**: the nightly uses 39050 base, the weekly 39060. The
   future nightly crash-soak (tenacity-roadmap item 7) should run at a
   DISJOINT calendar slot (~04:30) and on the RESERVED 39070 base. Distinct

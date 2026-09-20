@@ -525,14 +525,8 @@ static bool mr_build_gate(const char *workspace, int timeout_ms,
     struct mr_spawn_outcome *o, char *note, size_t notecap)
 {
     char jobs[16];
-    const char *argv[] = {
-        "make", "-s", jobs, "-C", workspace, MUSE_RUN_GATE_BUILD_TARGET,
-        NULL
-    };
-    /* The shared derivation first (platform/logical_cpu.h): the affinity mask,
-     * not the box. It used to read platform_logical_cpu_count(), which on a
-     * 64-processor host with an 8-processor grant would have handed this
-     * build 16 jobs for 8 processors. The cap below still applies on top. */
+    const char *argv[] = {"make", "-s", jobs, "-C", workspace,
+                          MUSE_RUN_GATE_BUILD_TARGET, NULL};
     uint32_t n = platform_build_job_count(platform_available_cpu_count(),
                                           platform_build_memory_budget_bytes());
     char *log;

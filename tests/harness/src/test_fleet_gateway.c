@@ -1525,6 +1525,27 @@ static int gw_t_register_bounds(void)
         free(b);
         ASSERT(gw_state_rows(g_gw_state, "oauth_clients.jsonl") ==
                before + 1);
+        {
+            char path[1024];
+            FILE *rate;
+            ASSERT(snprintf(path, sizeof(path),
+                            "%s/z23/dev/steer/oauth_register.rate",
+                            g_gw_state) < (int)sizeof(path));
+            rate = fopen(path, "wb");
+            ASSERT(rate != NULL);
+            ASSERT(fputs("invalid counter\n", rate) >= 0);
+            ASSERT_EQ(fclose(rate), 0);
+            b = gw_post("/oauth/register",
+                        "{\"redirect_uris\":[\"https://client.test/allowed\"]}",
+                        &st);
+            ASSERT(b != NULL);
+            ASSERT_EQ(st, 429);
+            free(b);
+            rate = fopen(path, "wb");
+            ASSERT(rate != NULL);
+            ASSERT(fputs("0 0\n", rate) >= 0);
+            ASSERT_EQ(fclose(rate), 0);
+        }
         PASS();
     }
 _test_next:;

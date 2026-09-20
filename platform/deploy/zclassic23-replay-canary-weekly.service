@@ -1,10 +1,11 @@
 [Unit]
 Description=Z23 Replay Canary — weekly from-genesis
-# Same independence as the nightly: own isolated /tmp node, reads zclassicd
-# (RPC 8232) for the cross-node assert. The weekly run additionally dials
-# the co-located zclassicd P2P (127.0.0.1:8034) via -addnode to fetch bodies
-# for the genesis->tip replay — the ONE place a real peer is dialed, and it
-# is the read-only co-located zclassicd, never a public peer.
+# Same independence as the nightly: own isolated node under
+# ZCL_ISO_SCRATCH_ROOT, reads zclassicd (RPC 8232) for the cross-node
+# assert. The weekly run additionally dials the co-located zclassicd P2P
+# (127.0.0.1:8034) via -addnode to fetch bodies for the genesis->tip
+# replay — the ONE place a real peer is dialed, and it is the read-only
+# co-located zclassicd, never a public peer.
 After=zclassicd-peer.service
 # OnFailure (a [Unit] key): page on a non-zero harness exit; the sentinel
 # FILE remains the authoritative verdict.
@@ -20,6 +21,7 @@ Type=oneshot
 # directly) — same mint-fold skip guard as the nightly (see that
 # .service's comment): SKIPS with a logged reason + exit 0 if any
 # zclassic23-mint-* / *mint* transient unit is actively folding.
+Environment=ZCL_ISO_SCRATCH_ROOT=%h/.local/state/zclassic23-canary/scratch
 ExecStart=%h/github/zclassic23/tools/scripts/replay_canary_guard.sh --from=genesis
 # > the 8-h (28800 s) hard budget the harness enforces internally.
 TimeoutStartSec=30000

@@ -110,7 +110,7 @@ static bool wtx_rm_rf(const char *path)
 }
 
 /* A fingerprint of every file under the isolated state root: relative path,
- * size, mtime nanoseconds and inode, folded into one hex digest. mtime and
+ * size, mtime seconds and inode, folded into one hex digest. mtime and
  * inode are in it so a rewrite that preserved the byte count, or a
  * replace-by-rename, still moves the digest. */
 static void wtx_fp_fold(unsigned long long *h, const char *s)
@@ -1300,9 +1300,66 @@ _test_next:;
     return failures;
 }
 
+static bool wtx_status_queue_unknown(void)
+{
+    struct wtx_call c;
+    wtx_begin(&c, "dev.agent.worker", "zcl.agent_worker.v1");
+    (void)json_push_kv_str(&c.input, "action", "status");
+    zcl_native_handle_dev_agent_worker(&c.request, &c.reply);
+    bool ok = wtx_ok(&c) &&
+        json_is_null(json_get(&c.reply.data, "queued")) &&
+        json_is_null(json_get(&c.reply.data, "running")) &&
+        json_is_null(json_get(&c.reply.data, "job")) &&
+        strcmp(json_get_str(json_get(&c.reply.data, "reason")),
+               "queue-ledger-unreadable") == 0;
+    wtx_end(&c);
+    return ok;
+}
+
+static int wtx_status_queue_errors(void)
+{
+    int failures = 0;
+    TEST("status: inaccessible, non-file and incomplete ledgers stay unknown") {
+        char path[1200], lock[1200];
+        const char *rows[] = {
+            "not-json\n",
+            "{\"state\":\"queued\",\"name\":\"q\",\"attempt\":1}",
+            "{\"state\":\"running\",\"name\":\"../outside\",\"attempt\":1}\n",
+            "{\"state\":\"queued\",\"name\":\"q\",\"attempt\":1}\n{\"state\":",
+            "{\"state\":\"running\",\"name\":\"q\",\"attempt\":\"1\"}\n"
+        };
+        wtx_isolate("statusqueueerrors");
+        wtx_queue_post("wtx-status-queue-errors");
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/queue/queue.jsonl", g_wtx_state);
+        (void)snprintf(lock, sizeof(lock), "%s/z23/dev/queue/worker.lock", g_wtx_state);
+        int fd = open(lock, O_RDWR | O_CREAT, 0600);
+        ASSERT(fd >= 0);
+        ASSERT(close(fd) == 0);
+        ASSERT(unlink(path) == 0);
+        ASSERT(symlink("queue.jsonl", path) == 0);
+        ASSERT(wtx_status_queue_unknown());
+        ASSERT(unlink(path) == 0);
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(wtx_status_queue_unknown());
+        ASSERT(rmdir(path) == 0);
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            FILE *f = fopen(path, "wb");
+            ASSERT(f != NULL);
+            ASSERT(fputs(rows[i], f) >= 0);
+            ASSERT(fclose(f) == 0);
+            ASSERT(wtx_status_queue_unknown());
+        }
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int wtx_status_cases(void)
 {
-    int failures = wtx_status_unreadable_lock() + wtx_status_invalid_claims();
+    int failures = wtx_status_unreadable_lock() + wtx_status_invalid_claims() +
+                   wtx_status_queue_errors();
     /* ── action=status: read-only, and that is the assertion ───────────────
      *
      * The leaf accepted only `run`, so nothing could ask the resident

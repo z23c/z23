@@ -8,6 +8,8 @@
 #include "services/muse_run_restore.h"
 #include "services/muse_run_audit.h"
 #include "base/safe_alloc.h"
+#include "platform/file_metadata.h"
+#include "platform/file_sync.h"
 #include "util/file_tree_ops.h"
 #include "util/spawn.h"
 
@@ -19,11 +21,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* The Windows CRT exposes neither flag. Its descriptors wrap non-inheritable
- * handles unless inheritance is requested, so a zero O_CLOEXEC keeps the
- * boundary; and the only file this opens without following is one lstat()
- * has already proven regular, so a zero O_NOFOLLOW there loses no check.
- * (Same zero fallback as engine/modules/engine/src/engine_secret.c.) */
+/* Windows lacks these flags. Path metadata is checked before copying;
+ * that observation does not bind the subsequent copy to the same handle. */
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
 #endif
@@ -185,7 +184,7 @@ static bool mrr_fsync_path(const char *path)
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     bool ok;
     if (fd < 0) return false;
-    ok = fsync(fd) == 0;
+    ok = platform_file_sync(fd) == 0;
     close(fd);
     return ok;
 }
@@ -224,7 +223,7 @@ static bool mrr_copy_file(const char *src, const char *dst)
         if (n < 0 && errno == EINTR) continue;
         ok = n > 0 && mrr_write_all(out, buf, (size_t)n);
     }
-    ok = ok && fsync(out) == 0;
+    ok = ok && platform_file_sync(out) == 0;
     close(in);
     if (close(out) != 0) ok = false;
     if (ok && rename(tmp, dst) == 0) return true;
@@ -242,7 +241,7 @@ static bool mrr_write_durable(const char *path, const char *text, size_t n)
         return false;
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) return false;
-    ok = mrr_write_all(fd, text, n) && fsync(fd) == 0;
+    ok = mrr_write_all(fd, text, n) && platform_file_sync(fd) == 0;
     if (close(fd) != 0) ok = false;
     if (ok && rename(tmp, path) == 0) return true;
     (void)unlink(tmp);
@@ -445,7 +444,7 @@ static const char *mrr_keep_one(struct mrr_state *st, const char *dir,
     const struct mrr_untracked *u)
 {
     char src[MRR_PATH_MAX], dst[MRR_PATH_MAX], opt[1200], h[64];
-    struct stat sb;
+    struct platform_file_metadata metadata;
     if (!mrr_path_safe(u->path) || !mrr_audit_names(st->audit_list, u->path))
         return "refused: an untracked path is not one the scope audit named";
     if (snprintf(src, sizeof(src), "%s/%s", st->in->workspace, u->path) >=
@@ -454,7 +453,8 @@ static const char *mrr_keep_one(struct mrr_state *st, const char *dir,
             (int)sizeof(dst) ||
         snprintf(opt, sizeof(opt), "--path=%s", u->path) >= (int)sizeof(opt))
         return "refused: an untracked path does not fit";
-    if (lstat(src, &sb) != 0 || !S_ISREG(sb.st_mode))
+    if (platform_file_metadata_read(src, &metadata) !=
+            PLATFORM_FILE_METADATA_OK)
         return "refused: an untracked path is not a regular file";
     if (!mrr_copy_file(src, dst))
         return "refused: an untracked file could not be copied";

@@ -161,6 +161,7 @@ static bool acc_mode_cpu(const struct wkr_job *job, struct wkr_result *res)
     (void)job;
     while (GetTickCount64() < until)
         spin++;
+    (void)spin;
     acc_result(res, "spun", 0, "cpu cap never fired");
     return true;
 }

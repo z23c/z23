@@ -8475,7 +8475,9 @@ soak-ci: soak_runner zclassic23 zcl-rpc
 replay-canary-anchor: zclassic23 zcl-rpc
 	@bash -c 'set -uo pipefail; \
 	 vd="$${ZCL_CANARY_VERDICT_DIR:-$$HOME/.local/state/zclassic23-canary}"; \
-	 mkdir -p "$$vd"; \
+	 scratch="$$HOME/.local/state/zclassic23-canary/scratch"; \
+	 mkdir -p "$$vd" "$$scratch"; \
+	 export ZCL_ISO_SCRATCH_ROOT="$${ZCL_ISO_SCRATCH_ROOT:-$$scratch}"; \
 	 marker="$$vd/.guard_started_anchor"; rm -f "$$marker"; : > "$$marker"; \
 	 set +e; bash tools/scripts/replay_canary.sh --from=anchor; rc=$$?; set -e; \
 	 f="$$vd/replay_canary_anchor.json"; \
@@ -8491,7 +8493,9 @@ replay-canary-anchor: zclassic23 zcl-rpc
 replay-canary-genesis: zclassic23 zcl-rpc
 	@bash -c 'set -uo pipefail; \
 	 vd="$${ZCL_CANARY_VERDICT_DIR:-$$HOME/.local/state/zclassic23-canary}"; \
-	 mkdir -p "$$vd"; \
+	 scratch="$$HOME/.local/state/zclassic23-canary/scratch"; \
+	 mkdir -p "$$vd" "$$scratch"; \
+	 export ZCL_ISO_SCRATCH_ROOT="$${ZCL_ISO_SCRATCH_ROOT:-$$scratch}"; \
 	 marker="$$vd/.guard_started_genesis"; rm -f "$$marker"; : > "$$marker"; \
 	 set +e; bash tools/scripts/replay_canary.sh --from=genesis; rc=$$?; set -e; \
 	 f="$$vd/replay_canary_genesis.json"; \
@@ -11046,6 +11050,7 @@ bundle-export-selftest:
 .PHONY: install-replay-canary replay-canary-linger-status
 install-replay-canary:
 	@install -d "$(HOME)/.config/systemd/user"
+	@install -d "$(HOME)/.local/state/zclassic23-canary/scratch"
 	@install -m 644 platform/deploy/zclassic23-replay-canary-nightly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.service"
 	@install -m 644 platform/deploy/zclassic23-replay-canary-nightly.timer "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.timer"
 	@install -m 644 platform/deploy/zclassic23-replay-canary-weekly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-weekly.service"

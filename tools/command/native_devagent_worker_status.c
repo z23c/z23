@@ -27,7 +27,7 @@
  *     proof, not by reading the call.
  *   - the queue ledger is read WITHOUT taking queue.lock. That is safe because
  *     a row is one O_APPEND write of one line (see native_devagent_queue.c),
- *     so a reader sees whole lines; and it is necessary because taking the
+ *     and incomplete lines are refused. Taking the
  *     lock would both create the lock file and briefly contend with a live
  *     drive. A status call must never delay the worker it is describing.
  *   - it does not sleep, back off, or wait, so it cannot wake an idle drive:
@@ -148,55 +148,58 @@ static void wks_resident(const char *queuedir, struct wks_view *v)
 
 /* ── queue: count rows from the existing ledger, lockless ───────────────── */
 
-/* The value of one flat "key":"value" or "key":N field in a ledger line.
- * Bounded, and it copies nothing when the key is absent. */
-static bool wks_field(const char *line, const char *key, char *out, size_t cap)
+static bool wks_name_valid(const struct json_value *name, size_t cap)
 {
-    char pat[64];
-    const char *at, *p;
-    size_t n = 0;
-
-    if (snprintf(pat, sizeof(pat), "\"%s\":", key) >= (int)sizeof(pat))
-        return false;
-    at = strstr(line, pat);
-    if (!at)
-        return false;
-    p = at + strlen(pat);
-    if (*p == '"')
-        p++;
-    while (*p && *p != '"' && *p != ',' && *p != '}' && n + 1 < cap)
-        out[n++] = *p++;
-    out[n] = '\0';
-    return n > 0;
+    if (!name || name->type != JSON_STR) return false;
+    const char *s = json_get_str(name);
+    const char *alphabet =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-";
+    return s[0] && strlen(s) < cap && strspn(s, alphabet) == strlen(s) &&
+           strcmp(s, ".") != 0 && strcmp(s, "..") != 0;
 }
 
-/* Count queued and running rows, and remember the newest running row's name
- * and attempt. Last row for a name wins, matching the ledger's own rule. */
-static void wks_scan_line(const char *line, struct wks_view *v)
+/* Count complete rows and retain the last running row for claim inspection. */
+static bool wks_scan_line(const char *line, struct wks_view *v)
 {
-    char state[32], name[128], attempt[24];
-
-    if (!wks_field(line, "state", state, sizeof(state)))
-        return;
+    struct json_value row;
+    json_init(&row);
+    bool ok = json_read(&row, line, strlen(line)) && row.type == JSON_OBJ;
+    const struct json_value *field = json_get(&row, "state");
+    const char *state = field && field->type == JSON_STR
+                           ? json_get_str(field) : "";
+    const struct json_value *name = json_get(&row, "name");
+    const struct json_value *attempt = json_get(&row, "attempt");
+    ok = ok && wks_name_valid(name, sizeof(v->job_name)) &&
+         attempt && attempt->type == JSON_INT && json_get_int(attempt) > 0 &&
+         (strcmp(state, "queued") == 0 || strcmp(state, "running") == 0);
+    if (!ok) {
+        json_free(&row);
+        return false;
+    }
     if (strcmp(state, "queued") == 0) {
         v->queued++;
-        return;
+    } else {
+        v->running++;
+        (void)snprintf(v->job_name, sizeof(v->job_name), "%s", json_get_str(name));
+        v->job_attempt = (long long)json_get_int(attempt);
     }
-    if (strcmp(state, "running") != 0)
-        return;
-    v->running++;
-    if (!wks_field(line, "name", name, sizeof(name)))
-        return;
-    (void)snprintf(v->job_name, sizeof(v->job_name), "%s", name);
-    v->job_attempt = wks_field(line, "attempt", attempt, sizeof(attempt))
-                         ? (long long)strtoll(attempt, NULL, 10)
-                         : 1;
+    json_free(&row);
+    return true;
+}
+
+static bool wks_read_rows(FILE *f, struct wks_view *v)
+{
+    char line[WKS_LINE_CAP];
+    while (fgets(line, sizeof(line), f)) {
+        if (!strchr(line, '\n') || !wks_scan_line(line, v))
+            return false;
+    }
+    return !ferror(f);
 }
 
 static void wks_queue(const char *queuedir, struct wks_view *v)
 {
     char path[4096 + 32];
-    char line[WKS_LINE_CAP];
     FILE *f;
     struct stat st;
 
@@ -209,9 +212,13 @@ static void wks_queue(const char *queuedir, struct wks_view *v)
     if (stat(path, &st) != 0) {
         /* No ledger is a measured emptiness on a box that has queued
          * nothing, distinct from one that cannot be read. */
-        v->queue_known = true;
+        v->queue_known = errno == ENOENT;
         if (!v->reason[0])
-            v->reason = WKS_QUEUE_ABSENT;
+            v->reason = v->queue_known ? WKS_QUEUE_ABSENT : WKS_QUEUE_UNREADABLE;
+        return;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        if (!v->reason[0]) v->reason = WKS_QUEUE_UNREADABLE;
         return;
     }
     f = fopen(path, "rb");
@@ -220,10 +227,14 @@ static void wks_queue(const char *queuedir, struct wks_view *v)
             v->reason = WKS_QUEUE_UNREADABLE;
         return;
     }
-    while (fgets(line, sizeof(line), f))
-        wks_scan_line(line, v);
+    bool complete = wks_read_rows(f, v);
     (void)fclose(f);
-    v->queue_known = true;
+    v->queue_known = complete;
+    if (!complete) {
+        v->queued = v->running = 0;
+        v->job_name[0] = '\0';
+        if (!v->reason[0]) v->reason = WKS_QUEUE_UNREADABLE;
+    }
 }
 
 /* ── the active job, only from evidence that already exists ─────────────── */
@@ -351,7 +362,7 @@ void zcl_native_devagent_worker_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct wks_view v;
-    char queuedir[4096];
+    char queuedir[4096] = {0};
     const char *worker;
     int64_t t0 = platform_time_monotonic_us();
 
@@ -361,9 +372,11 @@ void zcl_native_devagent_worker_status(
     v.job_attempt = 1;
     worker = wks_worker_name(request);
 
-    if (!platform_state_root_existing(queuedir, sizeof(queuedir)) ||
-        snprintf(queuedir + strlen(queuedir),
-                 sizeof(queuedir) - strlen(queuedir), "/queue") < 0) {
+    bool resolved = platform_state_root_existing(queuedir, sizeof(queuedir));
+    size_t used = strlen(queuedir);
+    int appended = resolved
+        ? snprintf(queuedir + used, sizeof(queuedir) - used, "/queue") : -1;
+    if (appended < 0 || (size_t)appended >= sizeof(queuedir) - used) {
         v.reason = WKS_NO_STATE_ROOT;
     } else {
         wks_resident(queuedir, &v);

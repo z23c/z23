@@ -7,6 +7,7 @@
 #include "ontology/story_graph.h"
 #include "vcs/zcode_agent_context.h"
 #include "vcs/zcode_dev.h"
+#include "vcs/zcode_write_scope.h"
 
 #include <stdbool.h>
 
@@ -26,6 +27,8 @@ struct story_loaded_work {
     char source_root[65];
     char goal_root[65];
     char agent_context_root[65];
+    char candidate_root[65];
+    char candidate_source_root[65];
     bool agent_context_ambiguous;
 };
 
@@ -68,5 +71,10 @@ enum story_context_status story_load_agent_context(
     struct vcs_zcode_agent_context_v1 *context);
 
 bool story_workspace_source_root(const char *workspace, uint8_t out[32]);
+
+bool story_load_write_scope(const char *workspace,
+                            const struct story_loaded_work *loaded,
+                            struct vcs_zcode_write_scope_v1 *scope,
+                            uint8_t root[32]);
 
 #endif /* ZCL_COMMAND_NATIVE_STORY_INTERNAL_H */

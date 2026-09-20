@@ -294,7 +294,7 @@ Z23_FLAG("ZCL_C3_RUN_ID", "env_build", "-", "-",
 Z23_FLAG("ZCL_C3_SNAPSHOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:50")
 Z23_FLAG("ZCL_C3_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8629")
+          "undocumented; first use Makefile:8633")
 Z23_FLAG("ZCL_C3_TIP_DATADIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_probe.sh:77")
 Z23_FLAG("ZCL_C6_EXE_SHA_CMD", "env_build", "-", "-",
@@ -504,7 +504,7 @@ Z23_FLAG("ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEPLOY_EXPECT_SOURCE_ID", "env_build", "-", "-",
           "undocumented; first use tools/deploy_verify.sh:576")
 Z23_FLAG("ZCL_DEPLOY_FROZEN_CANDIDATE", "make_var", "-", "-",
-          "undocumented; first use Makefile:10270")
+          "undocumented; first use Makefile:10274")
 Z23_FLAG("ZCL_DEPLOY_GUARD_NATIVE_JSON", "env_build", "-", "-",
           "undocumented; first use tools/deploy_guard.sh:124")
 Z23_FLAG("ZCL_DEPLOY_GUARD_RPC_TIMEOUT", "env_build", "5", "-",
@@ -802,7 +802,7 @@ Z23_FLAG("ZCL_ENABLE_BIP37", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ENGINE_NO_THINKING", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/engine/src/engine_wire_request.c:90")
 Z23_FLAG("ZCL_ENGINE_UNIT_BIN", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_devagent_queue.c:1053")
+          "undocumented; first use tools/command/native_devagent_queue.c:1071")
 Z23_FLAG("ZCL_EVENT_LOG_BENCH", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_event_log.c:617")
 Z23_FLAG("ZCL_EVENT_LOG_BENCH_PROOF", "env_test", "-", "-",
@@ -1224,6 +1224,8 @@ Z23_FLAG("ZCL_INTERVENE_UNITS", "env_build", "zclassic23.service", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:115")
 Z23_FLAG("ZCL_INTERVENE_WINDOW_SEC", "env_build", "900", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:109")
+Z23_FLAG("ZCL_ISO_SCRATCH_ROOT", "env_build", "/tmp", "-",
+          "parent directory of throwaway replay-canary datadirs so C8 can run when /tmp is a small tmpfs; first use tools/scripts/isolated_mainnet_env.sh:78")
 Z23_FLAG("ZCL_JOBS_DIR", "env_build", "engine/jobs/src", "-",
           "undocumented; first use tools/lint/lintc/gate_progress_honesty_fences.c:44")
 Z23_FLAG("ZCL_JOIN_LAST", "env_build", "0", "-",
@@ -1555,7 +1557,7 @@ Z23_FLAG("ZCL_NETCRAWL_ONION_PER_ROUND", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_NETCRAWL_ONION_TIMEOUT_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_crawler.c:198")
 Z23_FLAG("ZCL_NETDISRUPT_STOPWATCH_HISTORY", "make_var", "-", "-",
-          "undocumented; first use Makefile:8730")
+          "undocumented; first use Makefile:8734")
 Z23_FLAG("ZCL_NETMON_INTERVAL_SECS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/network_monitor.c:127")
 Z23_FLAG("ZCL_NETMON_RETAIN_ROWS", "env_runtime", "-", "-",
@@ -2186,7 +2188,7 @@ Z23_FLAG("ZCL_SOAK_EVIDENCE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_SOAK_EXE_SHA_CMD", "env_build", "-", "-",
           "Collector test seam for running-image digest; first use tools/scripts/soak_evidence.sh:233")
 Z23_FLAG("ZCL_SOAK_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8595")
+          "undocumented; first use Makefile:8599")
 Z23_FLAG("ZCL_SOAK_LAG_WARN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/lane_health.sh:46")
 Z23_FLAG("ZCL_SOAK_NOW", "env_build", "-", "-",
@@ -2264,7 +2266,7 @@ Z23_FLAG("ZCL_STICKY_VERDICT_DIR", "make_var", "-", "-",
 Z23_FLAG("ZCL_STOPWATCH_CHECKPOINT_HEIGHT", "env_build", "3056758", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:135")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_ARGS", "make_var", "-", "-",
-          "undocumented; first use Makefile:8630")
+          "undocumented; first use Makefile:8634")
 Z23_FLAG("ZCL_STOPWATCH_JUDGE_NOW", "env_build", "-", "-",
           "undocumented; first use tools/scripts/stopwatch_evidence_judge.sh:489")
 Z23_FLAG("ZCL_STOPWATCH_ORACLE_LAG_BUDGET", "env_build", "2000", "-",
@@ -2515,6 +2517,6 @@ Z23_FLAG("ZCL_WRS_GO", "env_test", "-", "-",
 Z23_FLAG("ZCL_XMR_KEEP", "env_build", "0", "-",
           "undocumented; first use tools/dev/cross-machine-reproduce.sh:63")
 Z23_FLAG("ZCL_Z23_BIN", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_devagent_queue.c:1559")
+          "undocumented; first use tools/command/native_devagent_queue.c:1582")
 Z23_FLAG("ZCL_ZD_RPC_CMD", "env_build", "-", "-",
           "undocumented; first use tools/scripts/soak_evidence.sh:180")

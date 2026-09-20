@@ -242,7 +242,10 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/directory_compat.h"
 #include "platform/directory_watcher.h"
+#include "platform/file_metadata.h"
+#include "platform/path_compat.h"
 #include "platform/private_directory.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
@@ -923,13 +926,25 @@ static bool rcv_idx_row(const unsigned char *p, size_t avail, uint32_t ver,
 static bool rcv_entry_clean(const char *ws, const struct rcv_idx_row *row)
 {
     char path[RCV_PATH_MAX + sizeof(row->name) + 2u];
-    struct stat st;
     uint32_t kind = row->mode & 0170000u;
     if (row->stage != 0)
         return false; /* an unmerged path is never a clean pre-state */
     if (kind == 0160000u)
         return true; /* a gitlink has no worktree file of its own here */
-    if (!rcv_join(path, sizeof(path), ws, row->name) || lstat(path, &st) != 0)
+    if (!rcv_join(path, sizeof(path), ws, row->name))
+        return false;
+#if defined(_WIN32)
+    struct platform_file_metadata metadata;
+    /* NTFS has no POSIX executable mode. Reparse points remain unverified;
+     * a regular file is compared using handle-observed size and time. */
+    return kind == 0100000u &&
+           platform_file_metadata_read(path, &metadata) ==
+               PLATFORM_FILE_METADATA_OK &&
+           metadata.size == row->size &&
+           metadata.modified_seconds == row->mtime;
+#else
+    struct stat st;
+    if (lstat(path, &st) != 0)
         return false;
     if (kind == 0120000u)
         return S_ISLNK(st.st_mode) && (uint32_t)st.st_size == row->size;
@@ -938,6 +953,7 @@ static bool rcv_entry_clean(const char *ws, const struct rcv_idx_row *row)
     if (((st.st_mode & 0111u) != 0u) != ((row->mode & 0111u) != 0u))
         return false;
     return (uint32_t)st.st_mtime == (uint32_t)row->mtime;
+#endif
 }
 
 /* Fold one entry into the staged tree id: mode, path and object id only, so
@@ -1054,8 +1070,12 @@ bool zcl_devagent_workspace_observe(const char *dir, bool scan_tracked,
         return false;
     memset(out, 0, sizeof(*out));
     out->dirty = -1;
-    if (!dir || dir[0] != '/' || strlen(dir) >= sizeof(out->root))
+    if (!platform_path_is_absolute(dir) || strlen(dir) >= sizeof(out->root))
         return false;
+#if defined(_WIN32)
+    out->resolved = platform_directory_canonical_real(dir, real, sizeof(real));
+    out->directory = out->resolved;
+#else
     out->directory = rcv_is_dir(dir);
     /* Canonicalize the ROOT ITSELF and then use the canonical path for
      * everything after this line. Demanding realpath(dir) == dir instead
@@ -1067,6 +1087,7 @@ bool zcl_devagent_workspace_observe(const char *dir, bool scan_tracked,
      * written into the brief is the one real directory, and a path that
      * would climb out has already become wherever it actually points. */
     out->resolved = out->directory && realpath(dir, real) != NULL;
+#endif
     if (!rcv_copy(out->root, sizeof(out->root),
                   out->resolved ? real : dir))
         return false;

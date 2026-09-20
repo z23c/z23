@@ -734,9 +734,13 @@ run_live() {
 
     # Disk preflight follows the tiny immutable executable capture so every
     # verdict, including this refusal, remains bound to exact executed bytes.
-    local avail_kb; avail_kb="$(df -Pk /tmp | awk 'NR==2{print $4}')"
+    # df the scratch parent iso_init already minted (ZCL_ISO_SCRATCH_ROOT,
+    # default /tmp), not a hardcoded /tmp: a small tmpfs host can still
+    # run C8 on a disk-backed throwaway datadir.
+    local scratch="${ZCL_ISO_SCRATCH_ROOT:-/tmp}"
+    local avail_kb; avail_kb="$(df -Pk "$scratch" | awk 'NR==2{print $4}')"
     if [ "${avail_kb:-0}" -lt 83886080 ]; then   # < 80 GiB
-        echo "replay-canary: REFUSE — /tmp has $((avail_kb/1024/1024)) GiB free, need >= 80 GiB" >&2
+        echo "replay-canary: REFUSE — scratch $scratch has $((avail_kb/1024/1024)) GiB free, need >= 80 GiB" >&2
         ELAPSED=0; blocked "insufficient_disk"
     fi
 

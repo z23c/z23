@@ -1,7 +1,9 @@
 [Unit]
 Description=Z23 Replay Canary — nightly from-anchor
-# Independent of the live node: the canary spawns its OWN isolated /tmp
-# mainnet node and only READS the co-located zclassicd (RPC 8232) for the
+# Independent of the live node: the canary spawns its OWN isolated
+# mainnet node (throwaway datadir under ZCL_ISO_SCRATCH_ROOT, default
+# /tmp; this unit points that at a disk path so a small tmpfs is not a
+# C8 blocker) and only READS the co-located zclassicd (RPC 8232) for the
 # cross-node coarse-stats assert. NO Requires=zclassic23.service.
 # zclassicd must be up for that read, hence After= it.
 After=zclassicd-peer.service
@@ -26,6 +28,7 @@ Type=oneshot
 # OnFailure page, no sentinel touched) if any zclassic23-mint-* / *mint*
 # transient unit is actively folding, so the evidence lane never contends
 # with a live sovereign-state cure mint for CPU/IO.
+Environment=ZCL_ISO_SCRATCH_ROOT=%h/.local/state/zclassic23-canary/scratch
 ExecStart=%h/github/zclassic23/tools/scripts/replay_canary_guard.sh --from=anchor
 # > the 90-min (5400 s) hard budget the harness enforces internally.
 TimeoutStartSec=6000

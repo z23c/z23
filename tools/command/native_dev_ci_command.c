@@ -36,13 +36,11 @@
  * FAIL-CLOSED. Missing evidence is never a pass and never a zero.
  *   - A sibling that did not answer is recorded in sources[] with its reason
  *     and its measured age; the views it fed report "unknown", never empty.
- *   - Worker health is derived only from what a worker itself wrote: the
- *     claim rows dev.agent.queue reports, each carrying the claimant the
- *     worker persisted in claim.json and the claim's age. No claim at all,
- *     a claim with no claimant name, or a claim older than the staleness
- *     threshold all read "unknown" or "stale" — never "healthy". A measured
- *     count of zero claims is still reported as a number, because it WAS
- *     measured; the health verdict over it stays unknown.
+ *   - Worker state uses the queue owner's PID and kernel birth token as
+ *     well as claim age and claimant name. A dead owner with an unreaped
+ *     claim is blocked; missing owner evidence is unknown; an old claim
+ *     is stale. A fresh claim is executing only while its exact owner is
+ *     running. Zero claims remain unknown, never assumed idle.
  *   - A commit with no receipt reports verdict "unknown" with reason
  *     "no_receipt_for_commit". It never reports a pass.
  *   - A failing landing outcome whose remote base cannot be resolved from
@@ -372,6 +370,9 @@ struct dci_worker {
     long long claims;
     long long named;
     long long stale;
+    long long live;
+    long long dead;
+    long long unverified;
     long long oldest_s;
     char state[16];
     char reason[48];
@@ -384,6 +385,7 @@ static void dci_worker_tally(const struct json_value *running,
     for (size_t i = 0; i < n; i++) {
         const struct json_value *row = json_at(running, i);
         const struct json_value *who = row ? json_get(row, "worker") : NULL;
+        const char *owner = dci_str(row, "owner_liveness");
         long long age = dci_int(row, "age_s", -1);
         w->claims++;
         if (who && who->type == JSON_STR && json_get_str(who)[0])
@@ -392,6 +394,12 @@ static void dci_worker_tally(const struct json_value *running,
             w->oldest_s = age;
         if (age < 0 || age > DCI_WORKER_STALE_S)
             w->stale++;
+        if (strcmp(owner, "running") == 0)
+            w->live++;
+        else if (strcmp(owner, "dead") == 0)
+            w->dead++;
+        else
+            w->unverified++;
     }
 }
 
@@ -407,12 +415,20 @@ static void dci_worker_verdict(struct dci_worker *w)
         (void)snprintf(w->state, sizeof(w->state), "%s", "stale");
         (void)snprintf(w->reason, sizeof(w->reason),
                        "claim_older_than_%ds", DCI_WORKER_STALE_S);
-    } else if (w->named == 0) {
+    } else if (w->named != w->claims) {
         (void)snprintf(w->state, sizeof(w->state), "%s", "unknown");
         (void)snprintf(w->reason, sizeof(w->reason), "%s",
                        "claim_names_no_worker");
+    } else if (w->dead > 0) {
+        (void)snprintf(w->state, sizeof(w->state), "%s", "blocked");
+        (void)snprintf(w->reason, sizeof(w->reason), "%s",
+                       "owner_exited_before_reap");
+    } else if (w->unverified > 0) {
+        (void)snprintf(w->state, sizeof(w->state), "%s", "unknown");
+        (void)snprintf(w->reason, sizeof(w->reason), "%s",
+                       "owner_liveness_unverified");
     } else {
-        (void)snprintf(w->state, sizeof(w->state), "%s", "active");
+        (void)snprintf(w->state, sizeof(w->state), "%s", "executing");
         w->reason[0] = '\0';
     }
 }
@@ -448,6 +464,9 @@ static void dci_worker_emit(struct json_value *out, const struct dci_worker *w)
         (void)json_push_kv_int(&obj, "claims", w->claims);
         (void)json_push_kv_int(&obj, "named_claims", w->named);
         (void)json_push_kv_int(&obj, "stale_claims", w->stale);
+        (void)json_push_kv_int(&obj, "live_claims", w->live);
+        (void)json_push_kv_int(&obj, "dead_claims", w->dead);
+        (void)json_push_kv_int(&obj, "unverified_claims", w->unverified);
         (void)json_push_kv_int(&obj, "oldest_claim_s", w->oldest_s);
     }
     (void)json_push_kv(out, "worker", &obj);
@@ -885,10 +904,11 @@ static void dci_view_worker(const struct dci_state *st,
         dci_say(scr, "  no worker evidence was measurable on this host\n");
         return;
     }
-    dci_say(scr, "  claims %lld (named %lld, stale %lld), oldest %llds, "
-                 "stale over %ds\n",
-            w.claims, w.named, w.stale, w.oldest_s, DCI_WORKER_STALE_S);
-    dci_say(scr, "  derived from dev.agent.queue claim rows; "
+    dci_say(scr, "  claims %lld (named %lld, live %lld, dead %lld, "
+                 "unverified %lld, stale %lld), oldest %llds, stale over %ds\n",
+            w.claims, w.named, w.live, w.dead, w.unverified, w.stale,
+            w.oldest_s, DCI_WORKER_STALE_S);
+    dci_say(scr, "  derived from dev.agent.queue owner identity and claims; "
                  "dev.agent.worker exposes no status action\n");
 }
 

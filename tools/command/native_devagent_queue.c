@@ -81,7 +81,8 @@
  * state:"running"} or {state:"empty"}; reap {state:"reaped",
  * outcomes:[...], requeued, reclaimed}; status {queued (each with ready
  * and blocker: null, or {ref, state, attempt, verdict} naming what holds
- * it), queued_total, queued_ready, running, outcomes,
+ * it), queued_total, queued_ready, running (each with owner_liveness
+ * running|dead|unknown bound to PID and kernel birth), outcomes,
  * pool} plus screen unless json=true; cancel {state:"cancelled", name,
  * cancelled:N} or CANCEL_RUNNING/CANCEL_NOT_FOUND. claim refuses
  * CLAIM_COMPLETED when the closed predicate already finished the name.
@@ -552,6 +553,23 @@ static void dvq_clear_owner(struct dvq_row *r)
 {
     r->owner_pid = 0;
     r->owner_start = 0;
+}
+
+/* A running row is not proof that its claimant still exists. Bind the PID
+ * to the kernel birth token so reuse cannot turn an orphan into a live job. */
+static const char *dvq_owner_liveness(const struct dvq_row *r)
+{
+    uint64_t token = 0;
+    enum os_proc_liveness live;
+    if (r->owner_pid <= 0 || r->owner_start <= 0)
+        return "unknown";
+    live = os_proc_pid_liveness((uint64_t)r->owner_pid);
+    if (live == OS_PROC_LIVENESS_DEAD)
+        return "dead";
+    if (live != OS_PROC_LIVENESS_RUNNING ||
+        !os_proc_pid_start_token((uint64_t)r->owner_pid, &token))
+        return "unknown";
+    return token == (uint64_t)r->owner_start ? "running" : "dead";
 }
 
 static bool dvq_parse_row(const char *line, struct dvq_row *r)
@@ -3203,6 +3221,7 @@ static bool dvq_push_running(struct json_value *arr, const struct dvq_row *r,
          json_push_kv_str(&item, "worktree", r->worktree) &&
          json_push_kv_str(&item, "pid_or_unit", r->pid_or_unit) &&
          json_push_kv_int(&item, "age_s", age) &&
+         json_push_kv_str(&item, "owner_liveness", dvq_owner_liveness(r)) &&
          json_push_kv(&item, "worker", &nv) &&
          json_push_back(arr, &item);
     json_free(&item);

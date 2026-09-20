@@ -27,9 +27,11 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/private_directory.h"
+#include "platform/os_proc.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -248,29 +250,35 @@ static void dcx_seed_land(void)
 /* One dev.agent.queue row in exactly the schema dvq_parse_row accepts. */
 static void dcx_unit_row(char *out, size_t cap, long long seq,
                          const char *name, const char *state,
-                         long long started)
+                         long long started, long long owner_pid,
+                         long long owner_start)
 {
     int n = snprintf(out, cap,
         "{\"seq\":%lld,\"ts\":\"2026-09-19T00:00:00Z\",\"kind\":\"leaf\","
         "\"name\":\"%s\",\"group\":\"\",\"path\":\"\",\"brief\":\"b\","
         "\"model\":\"\",\"attempt\":1,\"state\":\"%s\",\"worktree\":\"\","
-        "\"pid_or_unit\":\"\",\"started\":%lld}\n",
-        seq, name, state, started);
+        "\"pid_or_unit\":\"\",\"started\":%lld,"
+        "\"owner_pid\":%lld,\"owner_start\":%lld}\n",
+        seq, name, state, started, owner_pid, owner_start);
     if (n < 0 || (size_t)n >= cap)
         dcx_fail("unit row does not fit");
 }
 
 /* with_claim=false writes no claim.json, which is the "a claim that names no
  * worker" case the leaf must report as unknown rather than healthy. */
-static void dcx_seed_units(long long running_age_s, bool with_claim)
+static void dcx_seed_units_owner(long long running_age_s, bool with_claim,
+                                 long long owner_start)
 {
     char dir[DCX_BUF], engine[DCX_BUF], path[DCX_BUF];
     char one[DCX_BUF], two[DCX_BUF], both[DCX_BUF * 2];
     dcx_dir(g_dcx_root, "queue", dir, sizeof(dir));
     dcx_dir(g_dcx_root, "engine", engine, sizeof(engine));
-    dcx_unit_row(one, sizeof(one), 1, "unit-alpha", "queued", 0);
+    uint64_t pid = os_proc_current_pid();
+    if (pid > (uint64_t)LLONG_MAX)
+        dcx_fail("owner PID does not fit");
+    dcx_unit_row(one, sizeof(one), 1, "unit-alpha", "queued", 0, 0, 0);
     dcx_unit_row(two, sizeof(two), 2, "unit-bravo", "running",
-                 dcx_now() - running_age_s);
+                 dcx_now() - running_age_s, (long long)pid, owner_start);
     if ((size_t)snprintf(both, sizeof(both), "%s%s", one, two) >= sizeof(both))
         dcx_fail("unit queue does not fit");
     dcx_join(path, sizeof(path), dir, "queue.jsonl");
@@ -287,6 +295,15 @@ static void dcx_seed_units(long long running_age_s, bool with_claim)
     dcx_dir(one, "a1", two, sizeof(two));
     dcx_join(path, sizeof(path), two, "claim.json");
     dcx_write(path, "{\"worker\":\"worker-1\",\"submitted\":true}\n");
+}
+
+static void dcx_seed_units(long long running_age_s, bool with_claim)
+{
+    uint64_t token = 0;
+    if (!os_proc_pid_start_token(os_proc_current_pid(), &token) ||
+        token > (uint64_t)LLONG_MAX)
+        dcx_fail("owner start token unavailable");
+    dcx_seed_units_owner(running_age_s, with_claim, (long long)token);
 }
 
 /* The proof cache's own receipt directory. The bytes never matter here: this
@@ -588,7 +605,7 @@ static int dcx_t_worker_active(void)
 {
     int failures = 0;
 
-    TEST("ci: a fresh named claim is the only thing that reads active") {
+    TEST("ci: a fresh named claim is the only thing that reads executing") {
         struct dcx_call c;
         const struct json_value *w;
         dcx_isolate("worker_active");
@@ -599,11 +616,70 @@ static int dcx_t_worker_active(void)
         ASSERT(dcx_ok(&c));
         w = dcx_obj(&c, "worker");
         ASSERT(w != NULL);
-        ASSERT(strcmp(dcx_str(w, "state"), "active") == 0);
+        ASSERT(strcmp(dcx_str(w, "state"), "executing") == 0);
         ASSERT(dcx_bool(w, "measured"));
         ASSERT(dcx_int(w, "claims") == 1);
         ASSERT(dcx_int(w, "named_claims") == 1);
+        ASSERT(dcx_int(w, "live_claims") == 1);
+        ASSERT(dcx_int(w, "dead_claims") == 0);
         ASSERT(dcx_int(w, "stale_claims") == 0);
+        dcx_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dcx_restore();
+    return failures;
+}
+
+static int dcx_t_worker_owner_reused(void)
+{
+    int failures = 0;
+
+    TEST("ci: a reused owner PID leaves the fresh claim blocked") {
+        struct dcx_call c;
+        const struct json_value *w;
+        uint64_t token = 0;
+        dcx_isolate("worker_owner_reused");
+        dcx_seed_land();
+        ASSERT(os_proc_pid_start_token(os_proc_current_pid(), &token));
+        ASSERT(token < (uint64_t)LLONG_MAX);
+        dcx_seed_units_owner(30, true, (long long)(token + 1));
+        dcx_begin(&c, "{\"topic\":\"worker\"}");
+        ASSERT(dcx_run(&c));
+        ASSERT(dcx_ok(&c));
+        w = dcx_obj(&c, "worker");
+        ASSERT(strcmp(dcx_str(w, "state"), "blocked") == 0);
+        ASSERT(strcmp(dcx_str(w, "reason"),
+                      "owner_exited_before_reap") == 0);
+        ASSERT(dcx_int(w, "dead_claims") == 1);
+        dcx_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dcx_restore();
+    return failures;
+}
+
+static int dcx_t_worker_owner_unverified(void)
+{
+    int failures = 0;
+
+    TEST("ci: a named claim without a birth token is unknown") {
+        struct dcx_call c;
+        const struct json_value *w;
+        dcx_isolate("worker_owner_unverified");
+        dcx_seed_land();
+        dcx_seed_units_owner(30, true, 0);
+        dcx_begin(&c, "{\"topic\":\"worker\"}");
+        ASSERT(dcx_run(&c));
+        ASSERT(dcx_ok(&c));
+        w = dcx_obj(&c, "worker");
+        ASSERT(strcmp(dcx_str(w, "state"), "unknown") == 0);
+        ASSERT(strcmp(dcx_str(w, "reason"),
+                      "owner_liveness_unverified") == 0);
+        ASSERT(dcx_int(w, "unverified_claims") == 1);
         dcx_end(&c);
         PASS();
     }
@@ -993,6 +1069,8 @@ int test_dev_ci(void)
     failures += dcx_t_last_pass();
     failures += dcx_t_last_fail();
     failures += dcx_t_worker_active();
+    failures += dcx_t_worker_owner_reused();
+    failures += dcx_t_worker_owner_unverified();
     failures += dcx_t_worker_stale();
     failures += dcx_t_worker_unnamed();
     failures += dcx_t_worker_no_claim();

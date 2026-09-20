@@ -724,7 +724,7 @@ AGENT_IMPACT_RULE("core/modules/chain/src/utxo_root_ladder.c|core/modules/chain/
 /* SHA3 UTXO trust-root checkpoint (compiled constants + the self-folded
  * anchor and replay-canary regressions that pin its hash/count/supply). */
 AGENT_IMPACT_RULE("tests/harness/src/test_self_folded_anchor.c", "self_folded_anchor make_lint_gates")
-AGENT_IMPACT_RULE("tests/harness/src/test_replay_canary_verdict.c|tools/scripts/replay_canary.sh", "replay_canary_verdict make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/test_replay_canary_verdict.c|tools/scripts/replay_canary.sh|tools/scripts/isolated_mainnet_env.sh", "replay_canary_verdict make_lint_gates")
 
 /* Misc unmapped singles. */
 AGENT_IMPACT_RULE("core/modules/net/src/msg_tx.c", "msg_handlers mempool accept_to_mempool net_msg_dos")

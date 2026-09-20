@@ -17,6 +17,7 @@
 #include "command/host_gc_priv.h"
 
 #include "platform/time_compat.h"
+#include "platform/file_metadata.h"
 #include "util/file_tree_ops.h"
 #include "util/safe_alloc.h"
 #include "util/spawn.h"
@@ -399,8 +400,7 @@ static bool hg_reap(const char *repo, const char *wt)
 
 static bool hg_exists(const char *path)
 {
-    struct stat st;
-    return lstat(path, &st) == 0;
+    return platform_file_shape_read(path) != PLATFORM_FILE_SHAPE_MISSING;
 }
 
 /* Drop the administrative record of a worktree whose directory is gone.

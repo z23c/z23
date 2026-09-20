@@ -3731,7 +3731,7 @@ tools/command/native_qr_command.c:zcl_native_present_model:28
 tools/command/native_story_command.c:story_push_journey:29
 tools/command/native_story_command.c:story_render_show:25
 tools/command/native_story_command.c:zcl_native_handle_story_diff:16
-tools/command/native_story_command.c:zcl_native_handle_story_focus:57
+tools/command/native_story_command.c:zcl_native_handle_story_focus:56
 tools/command/native_story_command.c:zcl_native_handle_story_why:22
 tools/command/native_story_load.c:story_load_work:22
 tools/command/native_story_projection.c:zcl_story_graph_from_work_facts:48

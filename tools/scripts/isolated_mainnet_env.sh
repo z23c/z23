@@ -11,18 +11,22 @@
 #
 # It does ALL of the following, in this order, before any node is spawned:
 #
-#   1. Mint a throwaway datadir under /tmp (mktemp -d). REFUSE if the
-#      resolved path is the live datadir ($HOME/.zclassic-c23*) OR the
-#      zclassicd datadir ($HOME/.zclassic*) — this harness reads the
-#      zclassicd datadir read-only, so the scratch dd must never collide.
+#   1. Mint a throwaway datadir under ZCL_ISO_SCRATCH_ROOT (default /tmp)
+#      via mktemp -d. REFUSE if the resolved path is the live datadir
+#      ($HOME/.zclassic-c23*) OR the zclassicd datadir ($HOME/.zclassic*)
+#      — this harness reads the zclassicd datadir read-only, so the
+#      scratch dd must never collide. A small tmpfs /tmp is not a C8
+#      blocker: point ZCL_ISO_SCRATCH_ROOT at a writable disk directory
+#      with >= 80 GiB free (replay_canary.sh dfs that filesystem).
 #   2. Derive an isolated 39xxx port quad (port/rpcport/fsport/httpsport)
 #      plus a dead -connect sink (39999). REFUSE if any chosen port is in
 #      the hardcoded live set.
 #   3. ss(8) LISTEN preflight: REFUSE if ANY chosen port is already
 #      bound. This ss LISTEN check is the AUTHORITATIVE collision guard.
 #   4. Install an EXIT/INT/TERM cleanup trap that kills the spawned
-#      node's whole PROCESS GROUP and rm -rf's the /tmp datadir (only
-#      after re-asserting the datadir is under /tmp and non-empty).
+#      node's whole PROCESS GROUP and rm -rf's the scratch datadir (only
+#      after re-asserting the datadir is under the scratch root, named
+#      zcl23-*, and non-empty).
 #
 # It then exposes the functions the harness uses:
 #   iso_import_blockindex "<src-datadir>"  — one-shot header import from a
@@ -70,6 +74,8 @@ ISO_LIVE_PORTS="8023 8033 8034 8035 8043 8044 8045 8046 8232 8443 \
 
 # ── State (populated by iso_init / iso_spawn_mainnet_node) ─────────
 ISO_KIND="${ISO_KIND:-replay}"
+# ZCL_ISO_SCRATCH_ROOT is the parent of throwaway canary datadirs (default /tmp).
+ISO_SCRATCH_ROOT="${ZCL_ISO_SCRATCH_ROOT:-/tmp}"
 ISO_DD=""
 ISO_PORT=0
 ISO_RPCPORT=0
@@ -122,6 +128,33 @@ iso_assert_port_free() {
     return 0
 }
 
+# Abort if the throwaway-datadir parent is missing, relative, a live
+# ~/.zclassic* tree, or a filesystem root too broad to rm from.
+iso_assert_scratch_root() {
+    local root="$1"
+    case "$root" in
+        "") iso_die "scratch root is empty" ;;
+        /*) : ;;
+        *) iso_die "scratch root must be absolute, got '$root'" ;;
+    esac
+    case "$root" in
+        *..*) iso_die "scratch root must not contain .., got '$root'" ;;
+    esac
+    case "$root" in
+        /|/home|/usr|/var|/etc|/root)
+            iso_die "scratch root '$root' is too broad — refusing" ;;
+    esac
+    [ -d "$root" ] || iso_die "scratch root '$root' is not a directory"
+    [ -w "$root" ] || iso_die "scratch root '$root' is not writable"
+    if [ -n "${HOME:-}" ]; then
+        case "$root" in
+            "$HOME"/.zclassic*)
+                iso_die "scratch root is under live ~/.zclassic* — refusing" ;;
+        esac
+    fi
+    return 0
+}
+
 # ── Cleanup: kill the process group + remove the /tmp datadir ───────
 iso_cleanup() {
     [ "$ISO_CLEANED" = "1" ] && return 0
@@ -145,8 +178,8 @@ iso_cleanup() {
 
     if [ -n "$ISO_DD" ] && [ -d "$ISO_DD" ]; then
         case "$ISO_DD" in
-            /tmp/zcl23-*) rm -rf "$ISO_DD" 2>/dev/null || true ;;
-            *) echo "isolated_mainnet_env: WARN: refusing to rm non-/tmp datadir '$ISO_DD'" >&2 ;;
+            "${ISO_SCRATCH_ROOT}"/zcl23-*) rm -rf "$ISO_DD" 2>/dev/null || true ;;
+            *) echo "isolated_mainnet_env: WARN: refusing to rm datadir '$ISO_DD' outside scratch root '$ISO_SCRATCH_ROOT'" >&2 ;;
         esac
     fi
 }
@@ -157,7 +190,7 @@ iso_cleanup() {
 #   tooling checks → port DERIVE+VALIDATE → mint datadir → ARM TRAP →
 #   port LISTEN refusal. The trap is armed BEFORE any abortable LISTEN
 #   check that runs after the datadir is minted, so a refusal can never
-#   leak a /tmp datadir.
+#   leak a scratch datadir.
 iso_init() {
     command -v ss     >/dev/null 2>&1 || iso_die "ss(8) not found (need iproute2 for the port preflight)"
     command -v mktemp >/dev/null 2>&1 || iso_die "mktemp not found"
@@ -181,11 +214,14 @@ iso_init() {
         iso_assert_not_live_port "$p"
     done
 
-    # 2) Throwaway datadir under /tmp.
-    ISO_DD="$(mktemp -d "/tmp/zcl23-${ISO_KIND}-XXXXXX")" \
+    # 2) Throwaway datadir under the scratch root (default /tmp).
+    ISO_SCRATCH_ROOT="${ISO_SCRATCH_ROOT%/}"
+    [ -n "$ISO_SCRATCH_ROOT" ] || ISO_SCRATCH_ROOT="/"
+    iso_assert_scratch_root "$ISO_SCRATCH_ROOT"
+    ISO_DD="$(mktemp -d "${ISO_SCRATCH_ROOT}/zcl23-${ISO_KIND}-XXXXXX")" \
         || iso_die "mktemp -d failed"
     case "$ISO_DD" in
-        /tmp/zcl23-*) : ;;
+        "${ISO_SCRATCH_ROOT}"/zcl23-*) : ;;
         *) iso_die "mktemp produced an unexpected path: $ISO_DD" ;;
     esac
     # Structural refusal: never the live datadir, nor the zclassicd

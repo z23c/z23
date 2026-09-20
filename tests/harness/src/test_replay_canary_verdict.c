@@ -1137,6 +1137,36 @@ static int test_source_guard_iso_die_routes_through_blocked(void)
     return failures;
 }
 
+static int test_source_guard_iso_scratch_root_stays_isolated(void)
+{
+    int failures = 0;
+    TEST("replay-canary: scratch root is ZCL_ISO_SCRATCH_ROOT, cleanup still refuses live datadirs") {
+        const char *root = repo_root();
+        if (!root) { printf("SKIP (repo root not found)\n"); break; }
+
+        static char env_body[65536];
+        static char canary_body[65536];
+        ASSERT(read_script_source(root,
+            "tools/scripts/isolated_mainnet_env.sh", env_body,
+            sizeof(env_body)));
+        ASSERT(read_script_source(root, CANARY_REL, canary_body,
+                                  sizeof(canary_body)));
+        ASSERT(strstr(env_body,
+                      "ISO_SCRATCH_ROOT=\"${ZCL_ISO_SCRATCH_ROOT:-/tmp}\"")
+               != NULL);
+        ASSERT(strstr(env_body, "iso_assert_scratch_root") != NULL);
+        ASSERT(strstr(env_body,
+                      "\"$HOME\"/.zclassic*") != NULL);
+        ASSERT(strstr(env_body,
+                      "\"${ISO_SCRATCH_ROOT}\"/zcl23-*") != NULL);
+        ASSERT(strstr(canary_body,
+                      "scratch=\"${ZCL_ISO_SCRATCH_ROOT:-/tmp}\"") != NULL);
+        ASSERT(strstr(canary_body, "df -Pk \"$scratch\"") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_source_guard_replay_uses_empty_paramsdir(void)
 {
     int failures = 0;
@@ -1234,6 +1264,7 @@ static int test_replay_canary_verdict_platform_arm(void)
     failures += test_source_guard_missing_prereqs_route_through_blocked();
     failures += test_source_guard_genesis_uses_connect_not_addnode();
     failures += test_source_guard_iso_die_routes_through_blocked();
+    failures += test_source_guard_iso_scratch_root_stays_isolated();
     failures += test_source_guard_replay_uses_empty_paramsdir();
     failures += test_source_guard_mvp_binds_canary_to_running_binary();
     return failures;

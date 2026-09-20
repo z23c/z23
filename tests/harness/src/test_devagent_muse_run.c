@@ -1558,7 +1558,8 @@ static int mr_exec_gate_build_fails(void)
     memset(&r, 0, sizeof(r));
     s_mr_make_recipe = "\t@echo 'make: warning: resetting jobserver mode' >&2\n"
         "\t@test ! -e src/sum.c || "
-        "{ echo 'src/sum.c:1: error: expected declaration' >&2; exit 2; }\n";
+        "{ echo 'make: fixture preparation' >&2; "
+        "echo 'src/sum.c:1: error: expected declaration' >&2; exit 2; }\n";
     MR_CHECK("build-fail run", mr_execute(FAKE_JOURNEY, &d,
         mr_verdict_pass, mr_head_pass, NULL, &mr_edit_in_scope, NULL,
         NULL, NULL, false, &r, err, &rc, &evidence) == 0);

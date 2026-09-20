@@ -136,7 +136,12 @@ static bool story_work_summary_copy(
                    facts->goal_root) &&
         story_copy(loaded->agent_context_root,
                    sizeof(loaded->agent_context_root),
-                   facts->agent_context_root);
+                   facts->agent_context_root) &&
+        story_copy(loaded->candidate_root, sizeof(loaded->candidate_root),
+                   facts->candidate_root) &&
+        story_copy(loaded->candidate_source_root,
+                   sizeof(loaded->candidate_source_root),
+                   facts->candidate_source_root);
     loaded->agent_context_ambiguous = facts->agent_context_ambiguous;
     return ok;
 }
@@ -226,6 +231,28 @@ bool story_load_task(const char *workspace,
         memcmp(source, task->source_root, 32) == 0 &&
         memcmp(goal, task->goal_root, 32) == 0;
     free(wire);
+    return ok;
+}
+
+bool story_load_write_scope(const char *workspace,
+                            const struct story_loaded_work *loaded,
+                            struct vcs_zcode_write_scope_v1 *scope,
+                            uint8_t root[32])
+{
+    struct vcs_zcode_task_v1 task;
+    uint8_t *wire = NULL, check[32];
+    size_t len = 0;
+    bool ok = story_load_task(workspace, loaded, &task) &&
+        vcs_object_load_raw_bounded(workspace, task.write_scope_root,
+                                    VCS_ZCODE_WRITE_SCOPE_WIRE_MAX,
+                                    &wire, &len) == 0 &&
+        vcs_zcode_write_scope_parse(wire, len, scope) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_root(scope, check) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        memcmp(check, task.write_scope_root, 32) == 0;
+    free(wire);
+    if (ok) memcpy(root, task.write_scope_root, 32);
     return ok;
 }
 

@@ -460,6 +460,47 @@ static bool story_push_focus_identity(
                          (int64_t)focus->max_output_bytes);
 }
 
+static bool story_push_resume_constraints(
+    struct json_value *object, const struct vcs_zcode_write_scope_v1 *scope,
+    const uint8_t root[32], const struct story_loaded_work *loaded)
+{
+    struct json_value paths;
+    json_init(&paths); json_set_array(&paths);
+    bool ok = true;
+    for (size_t i = 0; ok && i < scope->count; i++) {
+        struct json_value path;
+        json_init(&path);
+        json_set_str(&path, scope->paths[i]);
+        ok = path.type == JSON_STR && json_get_str(&path) &&
+             json_push_back(&paths, &path);
+        json_free(&path);
+    }
+    if (ok) ok = json_push_kv(object, "allowed_write_scopes", &paths) &&
+        story_push_root(object, "write_scope_root", root) &&
+        json_push_kv_str(object, "candidate_root", loaded->candidate_root) &&
+        json_push_kv_str(object, "candidate_source_root",
+                         loaded->candidate_source_root);
+    json_free(&paths);
+    return ok;
+}
+
+static const char *story_resume_next_action(
+    enum story_context_status status, const struct story_loaded_work *loaded)
+{
+    switch (status) {
+    case STORY_CONTEXT_UNKNOWN:
+        return "Capture one canonical agent context for this task.";
+    case STORY_CONTEXT_AMBIGUOUS:
+        return "Resolve the task to one canonical agent context before resuming.";
+    case STORY_CONTEXT_UNAVAILABLE:
+        return "Restore or recapture the exact agent context; its CAS bytes could not be reverified.";
+    case STORY_CONTEXT_PROVED:
+        return loaded->next_action;
+    default:
+        return "Reverify the canonical task context before resuming.";
+    }
+}
+
 void zcl_native_handle_story_focus(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -472,6 +513,13 @@ void zcl_native_handle_story_focus(const struct zcl_command_request *request,
                          story_input_string(request->input, "datadir"),
                          &loaded, reply))
         return;
+    struct vcs_zcode_write_scope_v1 scope;
+    uint8_t scope_root[32];
+    if (!story_load_write_scope(workspace, &loaded, &scope, scope_root)) {
+        story_fail(reply, "STORY_SCOPE_UNAVAILABLE", "verify",
+                   "task write constraints could not be reverified from exact CAS bytes");
+        return;
+    }
     struct vcs_zcode_agent_context_v1 context;
     vcs_zcode_agent_context_init(&context);
     enum story_context_status context_status = story_load_agent_context(
@@ -500,19 +548,15 @@ void zcl_native_handle_story_focus(const struct zcl_command_request *request,
     size_t excerpt_bytes = 0;
     bool context_ok = story_push_context_sources(
         &reply->data, &context, &excerpt_bytes);
-    const char *next_action = context_status == STORY_CONTEXT_UNKNOWN
-        ? "Capture one canonical agent context for this task."
-        : context_status == STORY_CONTEXT_AMBIGUOUS
-        ? "Resolve the task to one canonical agent context before resuming."
-        : context_status == STORY_CONTEXT_UNAVAILABLE
-        ? "Restore or recapture the exact agent context; its CAS bytes could not be reverified."
-        : loaded.next_action;
+    const char *next_action = story_resume_next_action(context_status, &loaded);
     const char *next_command = context_status == STORY_CONTEXT_PROVED
         ? loaded.next_safe_command : "zcode work start";
     const char *focus_status = context_status == STORY_CONTEXT_PROVED
         ? story_status_name(loaded.show.status)
         : story_context_status_name(context_status);
-    bool ok = context_ok && (!focus_ready || story_push_focus_identity(
+    bool ok = context_ok && story_push_resume_constraints(
+        &reply->data, &scope, scope_root, &loaded) &&
+        (!focus_ready || story_push_focus_identity(
         &reply->data, &focus, focus_root, situation_root)) &&
         json_push_kv_str(&reply->data, "status",
                          focus_status) &&

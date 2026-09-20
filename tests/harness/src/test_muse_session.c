@@ -54,7 +54,7 @@ static int ms_failures_journey(void)
     const char *paths[] = { "notes/" };
     const struct muse_session_policy policy = {
         .approval_mode = "denyUnmatched", .allow_paths = paths,
-        .allow_path_count = 1,
+        .allow_path_count = 1, .model = "m-test",
     };
     char sid[MUSE_SESSION_ID_MAX] = {0};
     char prov[64] = {0}, model[128] = {0};
@@ -102,6 +102,8 @@ static int ms_failures_journey(void)
         evidence_count(evidence, "decide:") == 2);
     MS_CHECK("evidence: turn command seen", evidence_has(evidence,
         "turn-cmd:"));
+    MS_CHECK("evidence: model selection seen", evidence_has(evidence,
+        "model:m-test"));
     MS_CHECK("evidence: cancel seen", evidence_has(evidence, "cancel:"));
     free(evidence);
     return failures;

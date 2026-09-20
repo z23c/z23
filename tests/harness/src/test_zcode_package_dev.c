@@ -79,6 +79,10 @@ bool zpd_real_focus_handoff_acceptance(
     const uint8_t preedit_focus_root[32], int64_t preedit_observed_us,
     int64_t edit_started_us);
 int zpd_focus_worker_role(const char *role);
+bool zpd_user_session_resume(const char *workspace,
+                             const struct json_value *data);
+bool zpd_user_session_scope_refusals(const char *workspace,
+                                     const struct json_value *data);
 
 static bool zpd_symlink_create(const char *target, const char *link,
                                bool directory)
@@ -1480,6 +1484,10 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                 ASSERT(strcmp(json_get_str(json_get(
                                   &focus_reply.data, "orientation_status")),
                               "PROVED") == 0);
+                ASSERT(strcmp(json_get_str(json_get(
+                                  &focus_reply.data, "candidate_root")), "") == 0);
+                ASSERT(json_size(json_get(&focus_reply.data,
+                                          "allowed_write_scopes")) > 0);
                 ASSERT(zpd_real_focus_preedit_acceptance(
                     roots[cases[i].project], work_id, &focus_reply.data,
                     &duplicate_reply.data, preedit_focus_root,
@@ -1565,6 +1573,21 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     free(saved_process_env);
                     ASSERT(app_evidence);
                     zcl_command_reply_free(&reply); json_free(&input);
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace",
+                                            roots[cases[i].project]));
+                    ASSERT(json_push_kv_str(&input, "work", work_id));
+                    request.input = &input;
+                    zcl_command_reply_init(&reply, "zcl.story_focus.v1");
+                    zcl_native_handle_story_focus(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    ASSERT(zpd_user_session_scope_refusals(
+                        roots[cases[i].project], &reply.data));
+#if !defined(_WIN32)
+                    ASSERT(zpd_user_session_resume(roots[cases[i].project],
+                                                   &reply.data));
+#endif
+                    zcl_command_reply_free(&reply); json_free(&input);
                 }
                 json_init(&input); json_set_object(&input);
                 ASSERT(json_push_kv_str(&input, "workspace",
@@ -1615,6 +1638,16 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
                     ASSERT(strcmp(json_get_str(json_get(&reply.data, "goal")),
                                   cases[i].goal) == 0);
+                    const struct json_value *resume_scope = json_get(
+                        &reply.data, "allowed_write_scopes");
+                    ASSERT(resume_scope);
+                    ASSERT(resume_scope->type == JSON_ARR);
+                    ASSERT(json_size(resume_scope) > 0);
+                    const struct json_value *resume_candidate = json_get(
+                        &reply.data, "candidate_root");
+                    ASSERT(resume_candidate);
+                    ASSERT(resume_candidate->type == JSON_STR);
+                    ASSERT(strlen(json_get_str(resume_candidate)) == 64);
                     ASSERT(strcmp(json_get_str(json_get(
                                       &reply.data, "context_status")),
                                   "PROVED") == 0);
