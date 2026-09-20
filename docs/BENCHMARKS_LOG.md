@@ -332,3 +332,48 @@ Verdict: under 5 s (2.4%), and the 21-worker range overlaps the 28-worker
 one. The wall is floored by ONE gate: `check-doc-claims` runs ~185 s by
 itself at either count, so lint is critical-path bound, not worker bound. The
 default stays at 21. Speeding up `check-doc-claims` is the lever.
+
+## 2026-09-20 — factory dependency plan without a fifth build
+
+Base: `e390e57d51a7aaf042c1b916fe1c54093c2e30b0`. Workload:
+`contexts/commons/packages/zsha256`, the real factory's complete two-store
+journey, including quick and standard reproduction in each store. The change
+emits the dependency plan during store A's existing standard reproduction,
+then binds it to that receipt before atomic publication. It removes the extra
+quick build formerly used only to emit the plan. The plan now explicitly names
+profile `standard`; all four required builds and tests remain.
+
+Measured with `tools/dev/c23-ingest-bench.sh` through `devbuild --wait` on Linux,
+three cold/warm pairs per implementation. Each run has fresh isolated stores;
+each pair has a fresh object cache, shared only with its warm run. Executables
+are copied and hashed before measurement and checked afterward. The same
+verifier and node binaries are used before and after. Cold means object-cache
+cold, not cold filesystem or compiler pages. Times exclude scheduler admission.
+
+| version | cold wall ms (three runs) | warm wall ms (three runs) | mean cold CPU ms | mean warm CPU ms |
+|---|---|---|---:|---:|
+| before | 5900, 5990, 6070 | 6110, 5840, 6580 | 4773 | 4643 |
+| after | 5420, 6000, 5500 | 5200, 5310, 5630 | 3880 | 3810 |
+
+Mean cold wall: 5987 → 5640 ms (5.8% reduction). Mean warm wall:
+6177 → 5380 ms (12.9%). CPU is summed child user/system time; the gap to
+wall includes I/O, waiting and serial process overhead, not a measured idle
+fleet capacity. Sequential batches on a shared host leave scheduling noise;
+these measurements do not establish sustained 100k accepted LOC/day.
+
+Exact saved work: one complete confined quick build, its dependency-resolution
+request and temporary-work cleanup. Cold cache counters change from 2 hits /
+4 misses to 2 hits / 2 misses. Warm changes from 6 hits / 0 misses to 4 hits /
+0 misses: remaining eligible lookups still hit 100%; two lookups are eliminated.
+Both implementations emit byte-identical quick and standard receipts across
+all runs and both stores. Their respective receipt roots are
+`df5ca673dba12553f31ecc6e92f90d1a7d86261d55344d5efdbf09cdfde8af70`
+and `c16ec4979db87af7e14889e211730de661d9cd319b152281802f48c1d816bb3d`.
+
+Focused validation: factory selftest (cold/warm reproduction and census),
+package/recipe/lock/toolchain plan-binding refusal checks, partial/missing plan
+publication preserving the old destination, and lint-fast passed. These checks
+do not substitute for the separate object-cache header/flags/compiler/generated
+input/corruption/interruption matrix or exact commit proof. Local raw evidence:
+`build/ingest-factory-repeat-{before,after}/` and
+`build/ingest-throughput-baseline/factory-{selftest,lint}-2.log`.
