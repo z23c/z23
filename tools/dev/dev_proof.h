@@ -323,6 +323,13 @@ bool zcl_dev_proof_test_generation_hooks_configure(const char *generation,
 bool zcl_dev_proof_test_generation_dependencies(const char *root,
                                                 const char *generation,
                                                 char *why, size_t why_len);
+/* Seam for the generated-docs freshness precheck: the exact read-only
+ * verification generation_prepare() runs inside the sealed generation
+ * before any expensive dimension starts, so a test can prove a stale
+ * generated file refuses fast with its typed name without driving a
+ * full proof cycle. */
+bool zcl_dev_proof_test_generation_docs_fresh(const char *generation,
+                                              char *why, size_t why_len);
 /* Canonical submitting-checkout preparation, without a proof lease or receipt. */
 bool zcl_dev_proof_test_original_plan_prepare(const char *root,
                                               const char *local,

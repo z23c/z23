@@ -5681,6 +5681,63 @@ static bool ic_landing_request_unchanged(const struct ic_landing_proof_fixture *
            ic_landing_state_empty(f->root, "receipts");
 }
 
+static int test_ic_generation_docs_fresh_refuses_stale(void)
+{
+    int failures = 0;
+    TEST("proof generation: stale generated docs refuse fast with a typed name") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        static const char *const stubs[] = {
+            "tools/lint/check_capability_inventory_generated.sh",
+            "tools/lint/check_fleet_facts.sh",
+            "tools/lint/check_fleet_observations.sh",
+            "tools/scripts/check_doc_counts.sh",
+        };
+        char generation[4096], bare[4096], script[4352], cmd[8704];
+        test_make_tmpdir(generation, sizeof(generation),
+                         "impact_composition", "docs-fresh");
+        test_make_tmpdir(bare, sizeof(bare),
+                         "impact_composition", "docs-fresh-bare");
+        for (size_t i = 0; i < sizeof(stubs) / sizeof(stubs[0]); i++) {
+            ASSERT(ic_write(generation, stubs[i], "#!/bin/sh\nexit 0\n"));
+            ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
+                            stubs[i]) < (int)sizeof(script));
+            ASSERT(chmod(script, 0755) == 0);
+        }
+        /* All fresh: the seam passes and names nothing. */
+        char why[256] = {0};
+        ASSERT(zcl_dev_proof_test_generation_docs_fresh(generation, why,
+                                                        sizeof(why)));
+        ASSERT(why[0] == '\0');
+        /* Stale inventory plus a second stale checker: the FIRST failure
+         * is named (deterministic order), with its regen command. */
+        ASSERT(ic_write(generation, stubs[0],
+                        "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
+        ASSERT(ic_write(generation, stubs[2],
+                        "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
+        memset(why, 0, sizeof(why));
+        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
+                                                         sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generated_docs_stale:"
+                      "docs/CAPABILITY_INVENTORY.jsonl "
+                      "(make docs-capability-inventory)");
+        /* A generation without the checkers is a distinct refusal,
+         * never a pass. */
+        memset(why, 0, sizeof(why));
+        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(bare, why,
+                                                         sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generated_docs_checker_missing:"
+                      "tools/lint/check_capability_inventory_generated.sh");
+        ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s' '%s'",
+                                generation, bare) < sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+        PASS();
+#endif
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_landing_proof_defers_preparation(void)
 {
     int failures = 0;
@@ -6722,6 +6779,7 @@ int test_impact_composition(void)
     failures += test_ic_proof_prefork_builds_the_shared_targets();
     failures += test_ic_generation_hooks_configure_points_at_its_own_copy();
 #if !defined(_WIN32)
+    failures += test_ic_generation_docs_fresh_refuses_stale();
     failures += test_ic_generation_dependencies_survive_vendor_cleanup();
     failures += test_pw_original_plan_refreshes_before_sealing();
 #endif

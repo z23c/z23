@@ -24,6 +24,7 @@
 #include "platform/private_directory.h"
 #include "platform/ram_scratch.h"
 #include "platform/time_compat.h"
+#include "util/spawn.h"
 #include "base/safe_alloc.h"
 #include "sha3/sha3.h"
 #include "vcs/build_action.h"
@@ -4565,6 +4566,95 @@ bool zcl_dev_proof_test_generation_dependencies(const char *root,
 }
 #endif
 
+/* Freshness of the closed generated-doc set, verified read-only inside the
+ * sealed generation before any expensive dimension runs. A stale generated
+ * file fails the proof's own lint dimension minutes later; refusing here
+ * names the exact file and its regen command in seconds, without touching
+ * a byte of the candidate. The tracked paths mirror DLRG_ARTIFACTS (the
+ * land queue regenerates them pre-proof); the worker only ever VERIFIES,
+ * so a refusal can never be caused by something this proof wrote. */
+struct dp_docs_fresh_artifact {
+    const char *rel;
+    const char *check;
+    const char *regen;
+};
+
+static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
+    { "docs/CAPABILITY_INVENTORY.jsonl",
+      "tools/lint/check_capability_inventory_generated.sh",
+      "make docs-capability-inventory" },
+    { "docs/agent/EXECUTOR_HEURISTICS.md",
+      "tools/lint/check_fleet_facts.sh",
+      "make docs-executor-routing" },
+    { "docs/agent/EXECUTOR_HEURISTICS.md",
+      "tools/lint/check_fleet_observations.sh",
+      "make docs-executor-routing" },
+    { "docs/CODEBASE_MAP.md",
+      "tools/scripts/check_doc_counts.sh",
+      "make fix-doc-counts" },
+};
+#define DP_DOCS_FRESH_N (sizeof(DP_DOCS_FRESH) / sizeof(DP_DOCS_FRESH[0]))
+
+/* Measured 11 s for the inventory check on a loaded host; ten times that
+ * still fails two orders of magnitude faster than the proof it guards. */
+#define DP_DOCS_FRESH_TIMEOUT_MS 120000
+
+static bool dp_generation_docs_fresh(const char *generation,
+                                     char *why, size_t why_len)
+{
+    for (size_t i = 0; i < DP_DOCS_FRESH_N; i++) {
+        char script[PATH_MAX];
+        if (!generation || !generation[0] ||
+            snprintf(script, sizeof(script), "%s/%s", generation,
+                     DP_DOCS_FRESH[i].check) >= (int)sizeof(script)) {
+            proof_why(why, why_len, "proof_generated_docs_path_invalid");
+            return false;
+        }
+        /* The generation's own copy: the check script resolves its tree
+         * from its own location, so this binds the verdict to the sealed
+         * bytes rather than the submitting checkout. */
+        struct stat st;
+        if (stat(script, &st) != 0 || !S_ISREG(st.st_mode)) {
+            proof_whyf(why, why_len,
+                       "proof_generated_docs_checker_missing:%s",
+                       DP_DOCS_FRESH[i].check);
+            return false;
+        }
+        const char *argv[] = { script, NULL };
+        char out[4096];
+        bool timed_out = false;
+        int rc = zcl_spawn_capture_merged_observed(argv, out, sizeof(out),
+                                                   DP_DOCS_FRESH_TIMEOUT_MS,
+                                                   &timed_out);
+        if (timed_out) {
+            proof_whyf(why, why_len,
+                       "proof_generated_docs_check_timeout:%s",
+                       DP_DOCS_FRESH[i].rel);
+            return false;
+        }
+        if (rc < 0) {
+            proof_whyf(why, why_len,
+                       "proof_generated_docs_checker_missing:%s",
+                       DP_DOCS_FRESH[i].check);
+            return false;
+        }
+        if (rc != 0) {
+            proof_whyf(why, why_len, "proof_generated_docs_stale:%s (%s)",
+                       DP_DOCS_FRESH[i].rel, DP_DOCS_FRESH[i].regen);
+            return false;
+        }
+    }
+    return true;
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+bool zcl_dev_proof_test_generation_docs_fresh(const char *generation,
+                                              char *why, size_t why_len)
+{
+    return dp_generation_docs_fresh(generation, why, why_len);
+}
+#endif
+
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local,
                                struct platform_ram_scratch_lease *ram_lease,
@@ -4603,6 +4693,12 @@ static bool generation_prepare(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_generation_not_exact");
         return false;
     }
+    /* The sealed bytes are exactly what the dimensions would prove. Refuse
+     * stale generated docs here — seconds, read-only, with the file and
+     * its regen command named — rather than after the minutes-long proof
+     * the lint dimension would fail for the same staleness. */
+    if (!dp_generation_docs_fresh(generation, why, why_len))
+        return false;
     /* Close the lazy-bootstrap race before any dimension's `make` process
      * exists for this generation (see generation_zcc_bootstrap). */
     generation_zcc_bootstrap(generation);
