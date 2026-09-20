@@ -31,6 +31,46 @@ typedef int fastobj_carrier_fetch_win32_no_op_placeholder;
 #include <stdlib.h>
 #include <string.h>
 
+/* A CAS index entry is only a hint; the verified read also quarantines
+ * missing or corrupt bytes so ordinary admission can repair them. */
+static bool fc_fetch_chunk(struct vcs_package_store *dst,
+                           struct vcs_package_store *src,
+                           const uint8_t root[32], uint32_t file_index,
+                           const char *path, uint32_t chunk_index,
+                           char *err, size_t err_cap)
+{
+    uint8_t *chunk = NULL;
+    size_t chunk_len = 0;
+    enum vcs_package_store_result r = vcs_package_store_get_chunk_at(
+        dst, root, file_index, chunk_index, &chunk, &chunk_len);
+    free(chunk);
+    if (r == VCS_PACKAGE_STORE_OK)
+        return true;
+    if (r != VCS_PACKAGE_STORE_ERR_CHUNK_MISSING &&
+        r != VCS_PACKAGE_STORE_ERR_CHUNK_HASH) {
+        (void)snprintf(err, err_cap, "destination chunk read %s[%u]: %s",
+                       path, chunk_index, fc_store_err(r));
+        return false;
+    }
+    chunk = NULL;
+    r = vcs_package_store_get_chunk_at(src, root, file_index, chunk_index,
+                                      &chunk, &chunk_len);
+    if (r != VCS_PACKAGE_STORE_OK) {
+        (void)snprintf(err, err_cap, "chunk read %s[%u]: %s",
+                       path, chunk_index, fc_store_err(r));
+        return false;
+    }
+    r = vcs_package_store_put_chunk(dst, root, path, chunk_index,
+                                    chunk, chunk_len);
+    free(chunk);
+    if (r != VCS_PACKAGE_STORE_OK) {
+        (void)snprintf(err, err_cap, "chunk store %s[%u]: %s",
+                       path, chunk_index, fc_store_err(r));
+        return false;
+    }
+    return true;
+}
+
 bool vcs_fastobj_carrier_fetch(struct vcs_package_store *dst,
                                struct vcs_package_store *src,
                                const uint8_t root[32],
@@ -74,30 +114,9 @@ bool vcs_fastobj_carrier_fetch(struct vcs_package_store *dst,
     }
     for (size_t i = 0; ok && i < manifest.count; i++) {
         const struct vcs_package_file *f = &manifest.files[i];
-        for (uint32_t c = 0; c < f->chunk_count; c++) {
-            if (vcs_package_store_chunk_present(dst, root, (uint32_t)i, c))
-                continue;
-            uint8_t *chunk = NULL;
-            size_t chunk_len = 0;
-            enum vcs_package_store_result gr =
-                vcs_package_store_get_chunk_at(src, root, (uint32_t)i, c,
-                                               &chunk, &chunk_len);
-            if (gr != VCS_PACKAGE_STORE_OK) {
-                (void)snprintf(err, err_cap, "chunk read %s[%u]: %s",
-                               f->path, c, fc_store_err(gr));
-                ok = false;
-                break;
-            }
-            enum vcs_package_store_result wr = vcs_package_store_put_chunk(
-                dst, root, f->path, c, chunk, chunk_len);
-            free(chunk);
-            if (wr != VCS_PACKAGE_STORE_OK) {
-                (void)snprintf(err, err_cap, "chunk store %s[%u]: %s",
-                               f->path, c, fc_store_err(wr));
-                ok = false;
-                break;
-            }
-        }
+        for (uint32_t c = 0; ok && c < f->chunk_count; c++)
+            ok = fc_fetch_chunk(dst, src, root, (uint32_t)i, f->path, c,
+                                err, err_cap);
     }
     if (ok) {
         struct vcs_package_store_status status;

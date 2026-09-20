@@ -894,6 +894,113 @@ static int fcw_test_cache_failure(const char *base, const char *worker,
 }
 #endif
 
+static int fcw_fetch_damage(struct vcs_package_store *dst,
+                            struct vcs_package_store *src,
+                            const uint8_t root[32], const char *path,
+                            unsigned damage)
+{
+    int failures = 0;
+    char err[512];
+    uint8_t *original = NULL;
+    size_t original_len = 0;
+    bool saved = vcs_package_store_get_chunk_at(
+        src, root, 0, 0, &original, &original_len) == VCS_PACKAGE_STORE_OK;
+    FC_CHECK("resume fixture source bytes", saved && original_len > 0);
+    if (!saved || original_len == 0) {
+        free(original);
+        return failures;
+    }
+    original[0] ^= 1;
+    bool damaged = damage == 0 ? unlink(path) == 0 :
+        fcw_write_file(path, original, original_len);
+    free(original);
+    FC_CHECK("damage indexed destination chunk", damaged);
+    bool resumed = vcs_fastobj_carrier_fetch(dst, src, root, NULL, err, sizeof(err));
+    uint8_t *chunk = NULL;
+    size_t chunk_len = 0;
+    bool readable = vcs_package_store_get_chunk_at(
+        dst, root, 0, 0, &chunk, &chunk_len) == VCS_PACKAGE_STORE_OK;
+    FC_CHECK(damage == 0 ? "resume repairs missing destination bytes" :
+             "resume repairs corrupt destination bytes", resumed && readable);
+    free(chunk);
+    FC_CHECK("restore fixture between independent damage cases",
+             vcs_fastobj_carrier_fetch(dst, src, root, NULL, err, sizeof(err)));
+    return failures;
+}
+
+static int fcw_fetch_io_refusal(struct vcs_package_store *dst,
+                               struct vcs_package_store *src,
+                               const uint8_t root[32], const char *path)
+{
+    int failures = 0;
+    char saved[4096], err[512] = "";
+    bool moved = snprintf(saved, sizeof(saved), "%s.saved", path) < (int)sizeof(saved) &&
+        rename(path, saved) == 0;
+    FC_CHECK("save destination chunk for IO refusal", moved);
+    if (!moved) return failures;
+    bool directory = mkdir(path, 0700) == 0;
+    FC_CHECK("replace chunk with an unreadable object type", directory);
+    if (directory) {
+        FC_CHECK("destination IO error refuses fetch with context",
+                 !vcs_fastobj_carrier_fetch(dst, src, root, NULL, err, sizeof(err)) &&
+                 strstr(err, "destination chunk read") != NULL);
+        FC_CHECK("IO refusal preserves the unexpected directory", rmdir(path) == 0);
+    }
+    FC_CHECK("restore destination chunk after IO refusal", rename(saved, path) == 0);
+    return failures;
+}
+
+static int fcw_fetch_reuse(struct vcs_package_store *dst,
+                           struct vcs_package_store *src,
+                           const uint8_t root[32], const char *source_dir)
+{
+    int failures = 0;
+    char cas[4096], saved[4096], err[512];
+    bool paths = snprintf(cas, sizeof(cas), "%s/zcode/cas", source_dir) < (int)sizeof(cas) &&
+        snprintf(saved, sizeof(saved), "%s/zcode/cas.saved", source_dir) < (int)sizeof(saved);
+    bool hidden = paths && rename(cas, saved) == 0;
+    FC_CHECK("hide source chunks for destination reuse", hidden);
+    if (!hidden) return failures;
+    FC_CHECK("verified destination reuse does not need source chunks",
+             vcs_fastobj_carrier_fetch(dst, src, root, NULL, err, sizeof(err)));
+    FC_CHECK("restore source chunk directory", rename(saved, cas) == 0);
+    return failures;
+}
+
+static int fcw_fetch_resume(struct vcs_package_store *dst,
+                            struct vcs_package_store *src,
+                            const uint8_t root[32], const char *dest_dir,
+                            const char *source_dir, bool fetched)
+{
+    if (!fetched) return 0; /* The caller already records the initial failure. */
+    int failures = 0;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    struct vcs_package_manifest manifest = {0};
+    bool parsed = vcs_package_store_get_manifest_wire(
+        src, root, &wire, &wire_len) == VCS_PACKAGE_STORE_OK &&
+        vcs_package_manifest_parse(wire, wire_len, &manifest);
+    free(wire);
+    FC_CHECK("resume fixture manifest", parsed && manifest.count > 0);
+    if (!parsed) return failures;
+    if (manifest.count > 0 && manifest.files[0].chunk_count > 0) {
+        char hash[65], path[4096];
+        zcl_hex_encode(manifest.files[0].chunk_hashes, 32, hash);
+        int n = snprintf(path, sizeof(path), "%s/zcode/cas/sha3/%.2s/%s",
+                         dest_dir, hash, hash);
+        bool bounded = n > 0 && n < (int)sizeof(path);
+        FC_CHECK("resume fixture path bounded", bounded);
+        if (bounded) {
+            failures += fcw_fetch_damage(dst, src, root, path, 0);
+            failures += fcw_fetch_damage(dst, src, root, path, 1);
+            failures += fcw_fetch_io_refusal(dst, src, root, path);
+            failures += fcw_fetch_reuse(dst, src, root, source_dir);
+        }
+    }
+    vcs_package_manifest_free(&manifest);
+    return failures;
+}
+
 static int test_fastobj_carrier_platform_arm(void)
 {
     int failures = 0;
@@ -1076,6 +1183,8 @@ static int test_fastobj_carrier_platform_arm(void)
         printf("    fetch: %s\n", err);
     FC_CHECK("fetched carrier carries the same entries",
              fetched && stF.entries == stA.entries);
+
+    failures += fcw_fetch_resume(nodeB, nodeA, rootA, dirB, dirA, fetched);
 
     /* 7. admit nodeB's carrier into a FRESH cacheB. */
     bool admitted = fetched && vcs_fastobj_carrier_admit(
