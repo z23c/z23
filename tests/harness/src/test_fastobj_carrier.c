@@ -239,6 +239,7 @@ struct fcw_build_result {
     unsigned long long test_processes;
     unsigned long long other_processes;
     bool perf_complete;
+    bool cache_complete;
     bool source_bytes_unknown;
     bool saw_refusal;
     char first_line[256];
@@ -425,9 +426,9 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
         fcw_parse_perf(text, out);
         char *line = strstr(text, "zbuild-package-fast-cache=v1");
         if (line)
-            (void)sscanf(line,
+            out->cache_complete = sscanf(line,
                          "zbuild-package-fast-cache=v1 hits=%llu "
-                         "misses=%llu", &out->hits, &out->misses);
+                         "misses=%llu", &out->hits, &out->misses) == 2;
         free(text);
     }
 }
@@ -488,6 +489,124 @@ static const char *fcw_find(const uint8_t *hay, size_t len,
     }
     return NULL;
 }
+
+#if defined(__linux__)
+/* GNU assembler witness: bytes read by .incbin are absent from -E output. */
+struct fcw_asm_fixture {
+    char pkg[4096], data[4096], source[4096], recipe[4096];
+    char cache[4096], fresh[4096], emit[3][4096];
+};
+
+static bool fcw_asm_path(char out[4096], const char *base, const char *name)
+{
+    int n = snprintf(out, 4096, "%s/%s", base, name);
+    return n > 0 && n < 4096;
+}
+
+static bool fcw_asm_fixture_init(struct fcw_asm_fixture *f, const char *base)
+{
+    if (!fcw_asm_path(f->pkg, base, "asm-pkg") ||
+        !fcw_asm_path(f->data, f->pkg, "README.md") ||
+        !fcw_asm_path(f->source, f->pkg, "src/tiny_lines.c") ||
+        !fcw_asm_path(f->recipe, base, "asm-recipe.wire") ||
+        !fcw_asm_path(f->cache, base, "asm-cache") ||
+        !fcw_asm_path(f->fresh, base, "asm-fresh") ||
+        !fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", f->pkg))
+        return false;
+    for (size_t i = 0; i < 3; i++) {
+        char name[32];
+        (void)snprintf(name, sizeof(name), "asm-emit-%zu", i);
+        if (!fcw_asm_path(f->emit[i], base, name)) return false;
+    }
+    FILE *source = fopen(f->source, "ab");
+    if (!source) return false;
+    int written = fprintf(source,
+        "\n#define FCW_ASM __asm__\n"
+        "FCW_ASM(\".pushsection .rodata\\n.incbin \\\"%s\\\"\\n.popsection\\n\");\n",
+        f->data);
+    bool ok = written > 0;
+    if (fclose(source) != 0) ok = false;
+    return ok;
+}
+
+static bool fcw_asm_build(const struct fcw_asm_fixture *f, const char *worker,
+                          const struct pubkey *pk, size_t run,
+                          struct fcw_build_result *result, uint8_t root[32])
+{
+    struct vcs_package_prepared prep;
+    vcs_package_prepared_init(&prep);
+    struct vcs_package_prepare_options opts = {0};
+    opts.dir = f->pkg;
+    opts.publisher_sequence = 1;
+    memcpy(opts.publisher_pubkey, pk->vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    char detail[512], root_hex[65], lock_hex[65];
+    bool ok = vcs_package_prepare(&opts, &prep, detail, sizeof(detail)) ==
+                  VCS_PACKAGE_PREPARE_OK;
+    if (ok) {
+        memcpy(root, prep.package_root, 32);
+        zcl_hex_encode(root, 32, root_hex);
+        zcl_hex_encode(prep.lock_root, 32, lock_hex);
+        ok = fcw_write_file(f->recipe, prep.recipe_wire, prep.recipe_wire_len);
+    }
+    if (ok) {
+        fcw_candidate_build(worker, root_hex, f->pkg, f->recipe, f->emit[run],
+                            lock_hex, run == 2 ? f->fresh : f->cache,
+                            false, run == 1, result);
+        ok = result->ok;
+    }
+    vcs_package_prepared_free(&prep);
+    return ok;
+}
+
+static bool fcw_asm_same_output(const char *left, const char *right,
+                                const char *name, bool equal)
+{
+    char a[4096], b[4096];
+    if (!fcw_asm_path(a, left, name) || !fcw_asm_path(b, right, name))
+        return false;
+    size_t an = 0, bn = 0;
+    uint8_t *av = fcw_read_file(a, 1024u * 1024u, &an);
+    uint8_t *bv = fcw_read_file(b, 1024u * 1024u, &bn);
+    bool same = av && bv && an == bn && memcmp(av, bv, an) == 0;
+    bool ok = av && bv && same == equal;
+    free(av); free(bv);
+    return ok;
+}
+
+static int fcw_asm_bypass(const char *base, const char *worker,
+                          const struct pubkey *pk)
+{
+    int failures = 0;
+    struct fcw_asm_fixture f;
+    bool ready = fcw_asm_fixture_init(&f, base);
+    FC_CHECK("macro-expanded incbin fixture prepared separately", ready);
+    if (!ready) return failures;
+    uint8_t roots[3][32];
+    struct fcw_build_result runs[3] = {0};
+    for (size_t i = 0; i < 3; i++) {
+        const char *data = i == 0 ? "OLD-incbin-payload\n" : "NEW-incbin-payload\n";
+        bool built = fcw_write_file(f.data, data, strlen(data)) &&
+            fcw_asm_build(&f, worker, pk, i, &runs[i], roots[i]);
+        FC_CHECK("incbin build runs normal compilation and tests", built);
+        if (!built) return failures;
+        FC_CHECK("asm bypasses both cache lookup and publication",
+                 runs[i].cache_complete && runs[i].hits == 0 && runs[i].misses == 0);
+    }
+    char key[65];
+    FC_CHECK("both asm caches contain no published object",
+             !fcw_first_entry(f.cache, key) && !fcw_first_entry(f.fresh, key));
+    FC_CHECK("data mutation changes package root; control has identical inputs",
+             memcmp(roots[0], roots[1], 32) != 0 &&
+             memcmp(roots[1], roots[2], 32) == 0);
+    FC_CHECK("incbin data mutation changes actual emitted library bytes",
+             fcw_asm_same_output(f.emit[0], f.emit[1], "lib/libtiny-lines.a", false));
+    FC_CHECK("plan shared-cache report equals no-plan empty-cache control",
+             fcw_asm_same_output(f.emit[1], f.emit[2], "build-report", true));
+    FC_CHECK("plan shared-cache library equals no-plan empty-cache control",
+             fcw_asm_same_output(f.emit[1], f.emit[2], "lib/libtiny-lines.a", true));
+    return failures;
+}
+#endif
 
 static int test_fastobj_carrier_platform_arm(void)
 {
@@ -741,6 +860,10 @@ static int test_fastobj_carrier_platform_arm(void)
                  rec1.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS);
     FC_CHECK("tested standard receipt flags still claim asan,ubsan=clean",
              ids_ok && strstr(rec1.flags, "asan,ubsan=clean") != NULL);
+
+#if defined(__linux__)
+    failures += fcw_asm_bypass(base, worker, &pk);
+#endif
 
     /* 11. the testless standard-profile refusal, both sides. A TESTLESS
      * copy of the fixture (tests/ dropped, nothing else changed) under

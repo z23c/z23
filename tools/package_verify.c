@@ -120,6 +120,8 @@ static int pv_main_windows(void)
 
 #else
 
+#include <ctype.h>
+
 #include "vcs/package_attest.h"
 #include "vcs/build_action.h"
 #include "vcs/build_artifact_manifest.h"
@@ -4912,13 +4914,70 @@ static int pv_setup_dep_plan_and_fast_cache(
     return PV_CONTINUE;
 }
 
+static bool pv_fast_asm_token(char token[8], size_t len)
+{
+    if (len >= 8)
+        return false;
+    token[len] = '\0';
+    return strcmp(token, "asm") == 0 || strcmp(token, "__asm") == 0 ||
+           strcmp(token, "__asm__") == 0;
+}
+
+/* Assembler directives can read files absent from the preprocessor closure.
+ * Until those inputs are captured, even assembler labels are ineligible.
+ * Matching tokens inside strings is conservative: it can only lose reuse. */
+static bool pv_fast_preproc_cacheable(const char *path, bool *eligible)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    char token[8];
+    size_t len = 0;
+    int c;
+    *eligible = true;
+    while ((c = fgetc(f)) != EOF) {
+        if (isalnum((unsigned char)c) || c == '_' || c == '$' || c >= 128) {
+            if (len < sizeof(token))
+                token[len++] = (char)c;
+        } else {
+            if (pv_fast_asm_token(token, len)) {
+                *eligible = false;
+                break;
+            }
+            len = 0;
+        }
+    }
+    if (pv_fast_asm_token(token, len))
+        *eligible = false;
+    bool ok = ferror(f) == 0;
+    fclose(f);
+    return ok;
+}
+
+static bool pv_fast_cache_closure(struct pv_plan_ctx *ctx, size_t si,
+                                   bool with_plan, bool *eligible)
+{
+    char path[4400];
+    if (snprintf(path, sizeof(path), "%s/%s_%zu.i", ctx->build_root,
+                 with_plan ? "plan" : "fast", si) >= (int)sizeof(path) ||
+        !pv_fast_preproc_cacheable(path, eligible)) {
+        fprintf(stderr, "%s: cannot qualify fast-cache input closure\n", PV_LOG);
+        return false;
+    }
+    if (!*eligible)
+        fprintf(stderr, "%s: fast-cache bypass: assembler input closure "
+                "unavailable for source %zu\n", PV_LOG, si);
+    return true;
+}
+
 static int pv_fast_cache_check_hit(
     struct pv_plan_ctx *pctx, const struct pv_compile_args *args, size_t si,
     const char *src_file, const char *fast_cache_dir, bool standard_profile,
     struct vcs_toolchain_capsule_v1 *fast_capsule,
     const uint8_t fast_capsule_root[32], bool plan_preproc_valid,
     uint8_t plan_preproc[][32], const char *obj_file,
-    uint8_t fast_preproc[32], uint8_t fast_key[32], bool *from_cache)
+    uint8_t fast_preproc[32], uint8_t fast_key[32], bool *from_cache,
+    bool *eligible)
 {
     char ferr[240];
     if (plan_preproc_valid)
@@ -4929,6 +4988,10 @@ static int pv_fast_cache_check_hit(
                 PV_LOG, ferr);
         return 5;
     }
+    if (!pv_fast_cache_closure(pctx, si, plan_preproc_valid, eligible))
+        return 5;
+    if (!*eligible)
+        return PV_CONTINUE;
     if (!pv_fastobj_key(pctx, standard_profile ? "standard" : "quick",
                         fast_capsule->target, fast_capsule_root, args,
                         fast_preproc, fast_key)) {
@@ -5045,7 +5108,7 @@ static int pv_compile_one_source_set(
                  * always rebuilt). Compare the attestation id, not the
                  * executable path — the secure lane invokes the compiler
                  * by its absolute path (VCS_BUILD_COMPILER_V1). */
-                const bool fast_eligible = fast_cache_dir &&
+                bool fast_eligible = fast_cache_dir &&
                     strcmp(cc_id, "gcc") == 0 && !sanitize &&
                     si < recipe->sources.count;
                 bool from_cache = false;
@@ -5056,7 +5119,7 @@ static int pv_compile_one_source_set(
                         pctx, &args, si, src_file, fast_cache_dir,
                         standard_profile, fast_capsule, fast_capsule_root,
                         plan_preproc_valid, plan_preproc, obj_file,
-                        fast_preproc, fast_key, &from_cache);
+                        fast_preproc, fast_key, &from_cache, &fast_eligible);
                     if (frc != PV_CONTINUE) return frc;
                 }
                 int frc2 = pv_run_and_finish_compile(
