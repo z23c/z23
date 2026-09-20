@@ -32,6 +32,9 @@ enum fake_mode {
     FAKE_UNKNOWN,   /* journey plus an unknown-method notification mid-turn */
     FAKE_GARBAGE,   /* journey then a malformed line instead of terminal */
     FAKE_EXIT,      /* host exits right after the turn is accepted */
+    FAKE_USAGE_MATCH,
+    FAKE_USAGE_MISMATCH,
+    FAKE_USAGE_TERMINAL,
     FAKE_HANG       /* turn accepted, then silence until the client leaves */
 };
 
@@ -46,6 +49,8 @@ static long s_use_in = 10;
 static long s_use_out = 5;
 static long s_use_total = 15;
 static long s_use_cached = 0; /* >0 adds usage cacheReadTokens */
+static bool s_use_cumulative = false;
+static long s_cumulative_turns = 0;
 
 static void fake_note(const char *fmt, const char *a, const char *b)
 {
@@ -255,6 +260,16 @@ static void fake_journey_turn(FILE *in, FILE *out, const char *session,
     fake_send(out, frame);
     /* The same reading is delivered twice under one cursor: the adapter
      * must fold it exactly once. */
+    char cumulative[256] = "";
+    if (s_use_cumulative) {
+        s_cumulative_turns++;
+        (void)snprintf(cumulative, sizeof(cumulative),
+            ",\"cumulative\":{\"promptTokens\":%ld,"
+            "\"outputTokens\":%ld,\"totalTokens\":%ld}",
+            s_use_in * s_cumulative_turns,
+            s_use_out * s_cumulative_turns,
+            s_use_total * s_cumulative_turns);
+    }
     for (int dup = 0; dup < 2; dup++) {
         (void)snprintf(frame, sizeof(frame),
             "{\"jsonrpc\":\"2.0\",\"method\":\"session/tokenUsage\","
@@ -262,8 +277,9 @@ static void fake_journey_turn(FILE *in, FILE *out, const char *session,
             "\"viewCursor\":\"v:9\","
             "\"usage\":{\"inputTokens\":%ld,\"outputTokens\":%ld,"
             "\"cacheReadTokens\":%ld},"
-            "\"totalTokens\":%ld}}",
-            session, tid, s_use_in, s_use_out, s_use_cached, s_use_total);
+            "\"promptTokens\":%ld,\"totalTokens\":%ld%s}}",
+            session, tid, s_use_in, s_use_out, s_use_cached, s_use_in,
+            s_use_total, cumulative);
         fake_send(out, frame);
     }
     if (!tail) {
@@ -354,6 +370,43 @@ static void fake_prefix_turn(FILE *in, FILE *out, const char *session,
     fake_send(out, frame);
 }
 
+static void fake_usage_turn(FILE *out, const char *sid, const char *tid,
+    enum fake_mode mode)
+{
+    char frame[2048];
+    if (mode != FAKE_USAGE_TERMINAL) {
+        /* Two unique completions; the second delivery repeats cursor 2. */
+        for (int delivery = 0; delivery < 3; delivery++) {
+            int n = delivery == 0 ? 1 : 2;
+            (void)snprintf(frame, sizeof(frame),
+                "{\"jsonrpc\":\"2.0\",\"method\":\"session/tokenUsage\","
+                "\"params\":{\"sessionId\":\"%s\",\"turnId\":\"%s\","
+                "\"viewCursor\":\"v:usage-%d\",\"promptTokens\":40,"
+                "\"sourceRange\":{\"stream\":{\"kind\":\"run\","
+                "\"id\":\"usage-run\"},\"first\":{\"id\":\"event-%d\","
+                "\"sequence\":%d},\"last\":{\"id\":\"event-%d\","
+                "\"sequence\":%d}},"
+                "\"totalTokens\":45,\"usage\":{\"inputTokens\":5,"
+                "\"outputTokens\":5,\"cachedTokens\":35,"
+                "\"cacheReadTokens\":35,\"reasoningTokens\":0},"
+                "\"cumulative\":{\"promptTokens\":%d,"
+                "\"outputTokens\":%d,\"totalTokens\":%d}}}",
+                sid, tid, n, n, n, n, n, 40 * n, 5 * n, 45 * n);
+            fake_send(out, frame);
+        }
+    }
+    int raw_input = mode == FAKE_USAGE_MISMATCH ? 11 : 10;
+    int cached = mode == FAKE_USAGE_TERMINAL ? 0 : 70;
+    (void)snprintf(frame, sizeof(frame),
+        "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\","
+        "\"params\":{\"sessionId\":\"%s\",\"turnId\":\"%s\","
+        "\"terminal\":\"completed\",\"usage\":{\"inputTokens\":%d,"
+        "\"outputTokens\":10,\"cachedTokens\":%d,"
+        "\"cacheReadTokens\":%d,\"reasoningTokens\":0}}}",
+        sid, tid, raw_input, cached, cached);
+    fake_send(out, frame);
+}
+
 static void fake_main(enum fake_mode mode)
 {
     /* A failed test closes the transport mid-script; later frames must die
@@ -409,6 +462,9 @@ static void fake_main(enum fake_mode mode)
             fake_turn_write();
             if (mode == FAKE_JOURNEY)
                 fake_journey_turn(in, out, sid, cmd, 0);
+            else if (mode == FAKE_USAGE_MATCH ||
+                mode == FAKE_USAGE_MISMATCH || mode == FAKE_USAGE_TERMINAL)
+                fake_usage_turn(out, sid, cmd, mode);
             else if (mode == FAKE_UNKNOWN) {
                 char unk[512];
                 (void)snprintf(unk, sizeof(unk),

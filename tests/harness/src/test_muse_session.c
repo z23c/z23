@@ -380,6 +380,8 @@ static int ms_failures_boundary_once(long in, long out, long total,
         MS_CHECK("at-cap wait completes", ok_wait);
         MS_CHECK("at-cap total",
             (long long)outcome.total_tokens == (long long)total);
+        MS_CHECK("cached usage retained once",
+            outcome.cached_input_tokens == (uint64_t)s_use_cached);
     }
     muse_turn_outcome_free(&outcome);
     char tc2[MUSE_COMMAND_ID_MAX] = {0};
@@ -406,6 +408,9 @@ static int ms_failures_boundary_once(long in, long out, long total,
             MS_CHECK("second trip kind",
                 strcmp(muse_session_last_kind(host.session),
                     "tokenBudget") == 0);
+            MS_CHECK("second outcome is turn-local",
+                o2.total_tokens == (uint64_t)total &&
+                o2.cached_input_tokens == (uint64_t)s_use_cached);
             muse_turn_outcome_free(&o2);
         }
     }
@@ -432,13 +437,72 @@ static int ms_failures_boundary(void)
     failures += ms_failures_boundary_once(9, 5, 14, 15, false, false);
     failures += ms_failures_boundary_once(10, 5, 15, 15, false, true);
     failures += ms_failures_boundary_once(10, 6, 16, 15, true, true);
-    /* Cache reads are not charged: 45 raw with 35 served from the prompt
-     * cache bills 10, so the first turn completes under a cap of 15 and
-     * the second (billed 10 + 10) trips. Charging raw totals tripped a
-     * real worker at its cap on context re-reads alone. */
+    /* The local token cap excludes cache reads: 45 total less 35 cached
+     * consumes 10. The first turn fits 15; the second exceeds it. */
     s_use_cached = 35;
     failures += ms_failures_boundary_once(40, 5, 45, 15, false, false);
+    s_use_cumulative = true;
+    failures += ms_failures_boundary_once(40, 5, 45, 15, false, false);
+    s_use_cumulative = false;
     s_use_cached = 0;
+    return failures;
+}
+
+static int ms_failures_usage_settlement(enum fake_mode mode)
+{
+    int failures = 0, ev[2];
+    if (pipe(ev) != 0) return 1;
+    s_evidence_fd = ev[1];
+    struct muse_session_limits limits = {
+        .open_timeout_ms = 10000, .turn_timeout_ms = 15000,
+        .max_total_tokens = mode == FAKE_USAGE_TERMINAL ? 15 : 30,
+    };
+    struct fake_host host = {0};
+    MS_CHECK("usage settlement attach", spawn_fake(mode, ev[0], &limits,
+        &host));
+    if (!host.session) {
+        close(ev[0]); close(ev[1]);
+        s_evidence_fd = -1;
+        return failures;
+    }
+    struct muse_session_policy policy = {0};
+    char sid[MUSE_SESSION_ID_MAX] = {0}, tid[MUSE_TURN_ID_MAX] = {0};
+    char command[MUSE_COMMAND_ID_MAX] = {0};
+    (void)muse_session_command_id(command);
+    MS_CHECK("usage settlement start", muse_session_start(host.session,
+        command, "/z23-muse-test/ws", &policy, sid, NULL, NULL) == 0);
+    (void)muse_session_command_id(command);
+    MS_CHECK("usage settlement turn", muse_session_turn(host.session,
+        command, sid, "usage", tid) == 0);
+    struct muse_turn_outcome out = {0};
+    int rc = muse_session_wait(host.session, sid, tid, &policy, &out);
+    if (mode == FAKE_USAGE_MATCH) {
+        MS_CHECK("normalized terminal reconciles", rc == 0);
+        MS_CHECK("unique cache-exclusive events retain normalized totals",
+            out.input_tokens == 80 && out.output_tokens == 10 &&
+            out.cached_input_tokens == 70 && out.total_tokens == 90 &&
+            out.billed_tokens == 20);
+    } else {
+        const char *kind = mode == FAKE_USAGE_MISMATCH ?
+            "usageMismatch" : "tokenBudget";
+        MS_CHECK("usage settlement refuses", rc != 0 &&
+            strcmp(muse_session_last_kind(host.session), kind) == 0);
+        (void)muse_session_command_id(command);
+        MS_CHECK("unsettled or spent usage refuses another turn",
+            muse_session_turn(host.session, command, sid, "more", tid) != 0);
+    }
+    muse_turn_outcome_free(&out);
+    close_fake(&host);
+    close(ev[1]);
+    s_evidence_fd = -1;
+    char *evidence = read_evidence(ev[0]);
+    close(ev[0]);
+    MS_CHECK("usage settlement sends exactly one turn",
+        evidence && evidence_count(evidence, "turn-cmd:") == 1);
+    if (mode != FAKE_USAGE_MATCH)
+        MS_CHECK("refused usage turn remains unsent",
+            evidence && !evidence_has(evidence, command));
+    free(evidence);
     return failures;
 }
 
@@ -451,6 +515,9 @@ int test_muse_session(void)
     failures += ms_failures_not_loaded();
     failures += ms_failures_prefix();
     failures += ms_failures_boundary();
+    failures += ms_failures_usage_settlement(FAKE_USAGE_MATCH);
+    failures += ms_failures_usage_settlement(FAKE_USAGE_MISMATCH);
+    failures += ms_failures_usage_settlement(FAKE_USAGE_TERMINAL);
     if (failures == 0) printf("muse_session: all groups green\n");
     return failures;
 }

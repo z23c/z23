@@ -50,6 +50,7 @@ struct muse_session {
     int64_t turn_timeout_ms;
     uint64_t max_total_tokens;
     uint64_t tokens_used;
+    bool usage_unresolved;
     size_t max_text_bytes;
     char workspace[MUSE_WS_MAX];
     char err[MUSE_ERROR_MAX];
@@ -729,6 +730,11 @@ int muse_session_turn(struct muse_session *s, const char *command_id,
     char turn_id[MUSE_TURN_ID_MAX])
 {
     if (!s || !command_id || !session_id || !prompt || !turn_id) return -1;
+    if (s->usage_unresolved) {
+        ms_fail(s, "usageMismatch", false,
+            "session usage is unresolved; further turns are refused");
+        return -1;
+    }
     if (s->max_total_tokens > 0 && s->tokens_used >= s->max_total_tokens) {
         ms_fail(s, "tokenBudget", false,
             "token budget spent: %llu of %llu",
@@ -753,10 +759,8 @@ int muse_session_turn(struct muse_session *s, const char *command_id,
 
 /* --- wait-time folding ------------------------------------------------ */
 
-/* Usage accounting rule (one source of truth): per-event deltas accumulate
- * into the outcome, except that a host-supplied cumulative or terminal usage
- * record is authoritative and replaces the running counters, and a repeated
- * delivery of the same view cursor folds exactly once. */
+/* Turn outcomes fold per-completion usage, not session-wide cumulative totals.
+ * Repeated cursors in the bounded delivery window fold once. */
 #define MS_CURSOR_RING 16
 #define MS_CURSOR_MAX 128
 
@@ -770,6 +774,9 @@ struct ms_wait_state {
     char cursors[MS_CURSOR_RING][MS_CURSOR_MAX];
     unsigned cursor_at;
     bool done;
+    bool counted_usage;
+    bool usage_mismatch;
+    uint64_t raw_input_tokens;
 };
 
 /* Returns true when this cursor already folded (duplicate delivery). New
@@ -1104,6 +1111,18 @@ static uint64_t ms_u64(const struct json_value *v)
     return 0;
 }
 
+static uint64_t ms_usage_add(uint64_t a, uint64_t b)
+{
+    return b > UINT64_MAX - a ? UINT64_MAX : a + b;
+}
+
+static bool ms_budget_exceeded(const struct muse_session *s, uint64_t used)
+{
+    return s->max_total_tokens > 0 &&
+        (s->tokens_used > s->max_total_tokens ||
+         used > s->max_total_tokens - s->tokens_used);
+}
+
 /* A response to our own decide/cancel: surface only hard errors. */
 static bool ms_fold_response(struct muse_session *s,
     const struct json_value *doc)
@@ -1133,16 +1152,30 @@ static void ms_usage_bill(struct muse_turn_outcome *o)
         o->cached_input_tokens = o->input_tokens;
     o->billed_tokens = o->total_tokens > o->cached_input_tokens
         ? o->total_tokens - o->cached_input_tokens : 0;
+    if (o->total_tokens == UINT64_MAX)
+        o->billed_tokens = UINT64_MAX;
 }
 
-/* The terminal usage record is authoritative: it replaces the running
- * counters instead of adding a second total. An empty usage object carries
- * no reading and keeps the accumulated counters. */
+/* Reconcile raw terminal usage with counted-once events. Legacy streams
+ * without normalized counters use the terminal reading as their total. */
 static void ms_fold_usage_terminal(struct ms_wait_state *w,
     const struct json_value *params)
 {
     const struct json_value *usage = json_get(params, "usage");
     if (!(usage && usage->type == JSON_OBJ && json_size(usage) > 0)) return;
+    if (w->counted_usage) {
+        /* Terminal counters are raw provider totals. They must reconcile
+         * with the observed events, not replace counted-once prompt totals. */
+        if (w->raw_input_tokens != ms_u64(json_get(usage, "inputTokens")) ||
+            w->out->output_tokens != ms_u64(json_get(usage, "outputTokens")) ||
+            w->out->cached_input_tokens != ms_usage_cached(usage)) {
+            ms_fail(w->s, "usageMismatch", false,
+                "terminal usage does not reconcile with observed turn usage");
+            w->usage_mismatch = true;
+            w->s->usage_unresolved = true;
+        }
+        return;
+    }
     w->out->input_tokens = ms_u64(json_get(usage, "inputTokens"));
     w->out->output_tokens = ms_u64(json_get(usage, "outputTokens"));
     w->out->cached_input_tokens = ms_usage_cached(usage);
@@ -1226,31 +1259,29 @@ static void ms_fold_item(struct ms_wait_state *w,
         ms_text_replace(w, text ? text : "");
 }
 
-/* A host cumulative record is authoritative and replaces the counters;
- * otherwise the per-event deltas accumulate. */
+/* The host derives per-completion counted-once prompt/total counters.
+ * Raw provider counters can use different cache conventions. */
 static void ms_fold_usage_apply(struct ms_wait_state *w,
     const struct json_value *params)
 {
     const struct json_value *usage = json_get(params, "usage");
-    const struct json_value *cum = json_get(params, "cumulative");
-    const struct json_value *ct = cum ? json_get(cum, "totalTokens") : NULL;
-    if (cum && ct && ct->type == JSON_INT) {
-        /* Host running total: authoritative reading. */
-        w->out->input_tokens = ms_u64(json_get(cum, "promptTokens"));
-        w->out->output_tokens = ms_u64(json_get(cum, "outputTokens"));
-        w->out->cached_input_tokens = ms_usage_cached(cum);
-        w->out->total_tokens = ms_u64(ct);
-        ms_usage_bill(w->out);
-        return;
+    const struct json_value *prompt = json_get(params, "promptTokens");
+    uint64_t raw = ms_u64(json_get(usage, "inputTokens"));
+    uint64_t input = raw;
+    if (prompt && prompt->type == JSON_INT) {
+        input = ms_u64(prompt);
+        w->counted_usage = true;
     }
-    w->out->input_tokens += ms_u64(json_get(usage, "inputTokens"));
-    w->out->output_tokens += ms_u64(json_get(usage, "outputTokens"));
-    w->out->cached_input_tokens += ms_usage_cached(usage);
+    w->raw_input_tokens = ms_usage_add(w->raw_input_tokens, raw);
+    w->out->input_tokens = ms_usage_add(w->out->input_tokens, input);
+    w->out->output_tokens = ms_usage_add(w->out->output_tokens,
+        ms_u64(json_get(usage, "outputTokens")));
+    w->out->cached_input_tokens = ms_usage_add(w->out->cached_input_tokens,
+        ms_usage_cached(usage));
     uint64_t total = ms_u64(json_get(params, "totalTokens"));
     if (total == 0)
-        total = ms_u64(json_get(usage, "inputTokens")) +
-            ms_u64(json_get(usage, "outputTokens"));
-    w->out->total_tokens += total;
+        total = ms_usage_add(input, ms_u64(json_get(usage, "outputTokens")));
+    w->out->total_tokens = ms_usage_add(w->out->total_tokens, total);
     ms_usage_bill(w->out);
 }
 
@@ -1270,8 +1301,7 @@ static bool ms_fold_usage(struct ms_wait_state *w,
     /* The cap means "may consume at most N": only consumption beyond N
      * trips mid-turn; reaching exactly N completes and the next turn is
      * refused. */
-    if (s->max_total_tokens > 0 &&
-        s->tokens_used + w->out->billed_tokens > s->max_total_tokens) {
+    if (ms_budget_exceeded(s, w->out->billed_tokens)) {
         ms_fail(s, "tokenBudget", false, "token budget spent mid-turn");
         return false;
     }
@@ -1374,13 +1404,18 @@ int muse_session_wait(struct muse_session *s, const char *session_id,
     };
     int64_t deadline = ms_monotonic_ms() + s->turn_timeout_ms;
     int rc = ms_drain(&w, line, deadline);
+    if (w.usage_mismatch) rc = -1;
+    if (rc == 0 && ms_budget_exceeded(s, out->billed_tokens)) {
+        ms_fail(s, "tokenBudget", false, "token budget spent at settlement");
+        rc = -1;
+    }
     if (rc == 0 && out->terminal[0] == '\0') {
         /* Drain ended on grace without the terminal frame: report what the
          * host settled, not a fabricated completion. */
         ms_fail(s, "incomplete", true, "no terminal turn record folded");
         rc = -1;
     }
-    if (rc == 0) s->tokens_used += out->billed_tokens;
+    s->tokens_used = ms_usage_add(s->tokens_used, out->billed_tokens);
     free(line);
     if (rc != 0) {
         free(out->text);

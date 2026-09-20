@@ -62,12 +62,11 @@ struct muse_turn_outcome {
     uint64_t input_tokens;
     uint64_t output_tokens;
     uint64_t total_tokens;
-    /* The part of input_tokens the host served from its prompt cache
-     * (usage cacheReadTokens, else cachedTokens; 0 when not reported), and
-     * total_tokens less that: what the session cap is charged. An agent
-     * re-reads its whole context every step, so a real turn's input is
-     * ~90% cache reads; charging those at full weight made the cap trip
-     * on context, not work. total_tokens stays the raw host figure. */
+    /* Observed cache reads (cacheReadTokens, else cachedTokens; zero when
+     * absent) and the local budget debit: total_tokens less cache reads.
+     * This is a token-budget policy, not provider pricing. Normalized
+     * prompt/total counters come from the host's per-completion readings;
+     * session-wide cumulative totals never become turn outcomes. */
     uint64_t cached_input_tokens;
     uint64_t billed_tokens;
     int64_t duration_ms; /* -1 when the host did not measure one */
