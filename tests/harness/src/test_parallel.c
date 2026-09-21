@@ -391,7 +391,8 @@ static bool capsule_try_consume(struct capsule_state *st,
     }
     for (s = 0; s < n_sel; s++) {
         struct testcache_probe mapped;
-        testcache_capsule_apply(slots, info.n_slots, &want[s], 1, &mapped);
+        testcache_capsule_apply(slots, info.n_slots, &want[s], 1, &mapped,
+                                NULL);
         probes[back[s]] = mapped;
     }
     st->depfiles = (size_t)info.dep_count;

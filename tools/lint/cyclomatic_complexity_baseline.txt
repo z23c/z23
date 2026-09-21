@@ -3521,7 +3521,7 @@ tests/harness/src/test_zslp_ledger.c:test_backfill_ledger:20
 tests/harness/src/test_zslp_ledger.c:test_strict_validity_rejections:20
 tests/harness/src/test_zslp_ledger.c:test_wallet_wide_sweep:20
 tests/harness/src/testcache.c:testcache_open_mode:27
-tests/harness/src/testcache.c:testcache_probe_group_internal:33
+tests/harness/src/testcache.c:testcache_probe_group_internal:27
 tests/harness/src/transaction_lab_simnet.c:transaction_lab_simnet_mine_owned_op_return_at:21
 tests/harness/src/ui_host_transport_windows_acceptance.c:main:16
 tests/harness/src/wallet_recovery_directory_windows_acceptance.c:main:22

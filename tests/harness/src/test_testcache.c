@@ -1323,7 +1323,7 @@ static int tc_capsule_apply(void)
         tc_qname(1, w1);
         want[0] = w0;
         want[1] = w1;
-        testcache_capsule_apply(slots, 3, want, 2, out);
+        testcache_capsule_apply(slots, 3, want, 2, out, TC_FIX);
         TC_CHECK("slots match by name regardless of order",
                  tc_capslot_equal(&slots[2].probe, &out[0]) &&
                  tc_capslot_equal(&slots[0].probe, &out[1]));
@@ -1333,7 +1333,7 @@ static int tc_capsule_apply(void)
         static struct testcache_probe out[2];
         want[0] = names[0];
         want[1] = names[1];
-        testcache_capsule_apply(slots, 3, want, 2, out);
+        testcache_capsule_apply(slots, 3, want, 2, out, TC_FIX);
         TC_CHECK("extra slots ignored",
                  tc_capslot_equal(&slots[0].probe, &out[0]) &&
                  tc_capslot_equal(&slots[1].probe, &out[1]));
@@ -1343,12 +1343,96 @@ static int tc_capsule_apply(void)
         static struct testcache_probe out[2];
         want[0] = names[0];
         want[1] = "test_demo_q09";
-        testcache_capsule_apply(slots, 3, want, 2, out);
+        testcache_capsule_apply(slots, 3, want, 2, out, TC_FIX);
         TC_CHECK("absent group runs instead of trusting",
                  tc_capslot_equal(&slots[0].probe, &out[0]) &&
                  !out[1].cacheable && !out[1].key_valid &&
                  out[1].code == TESTCACHE_R_NO_HANDLE);
     }
+    return failures;
+}
+
+/* Phase RV: capsule revalidation. A consumed HIT authorizes a skip only
+ * while its backing PASS record still verifies (magic/PASS/key-echo, the
+ * same check a fresh probe performs). A capsule consumed after its store
+ * vanished is structurally valid but must demote every HIT to MISS. */
+static int tc_reverify_seed(const char **ptrs, struct testcache_probe *batch)
+{
+    int failures = 0;
+    TC_CHECK("reverify fixture writes", write_batch_fixture());
+    TC_CHECK("reverify store starts empty",
+             system("rm -rf " TC_STORE) == 0 &&
+             mkdir(TC_STORE, 0755) == 0 &&
+             setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool ok = tc != NULL;
+        if (tc) {
+            int i = 0;
+            ok = testcache_probe_groups(tc, ptrs, NULL, 2, batch);
+            for (i = 0; ok && i < 2; i++)
+                if (batch[i].cacheable) testcache_store_pass(tc, batch[i].key);
+            ok = ok && testcache_probe_groups(tc, ptrs, NULL, 2, batch);
+            testcache_close(tc);
+        }
+        TC_CHECK("reverify batch hits its stored PASSes",
+                 ok && batch[0].hit && batch[1].hit);
+    }
+    return failures;
+}
+
+static int tc_reverify_backed(const struct testcache_capsule_slot *slots,
+                              const char **want)
+{
+    int failures = 0;
+    static struct testcache_probe out[2];
+    testcache_capsule_apply(slots, 2, want, 2, out, TC_STORE);
+    TC_CHECK("backed HITs still hit",
+             out[0].hit && out[1].hit &&
+             tc_capslot_equal(&slots[0].probe, &out[0]));
+    return failures;
+}
+
+static int tc_reverify_unbacked(const struct testcache_capsule_slot *slots,
+                                const struct testcache_probe *batch,
+                                const char **want)
+{
+    int failures = 0;
+    static struct testcache_probe out[2];
+    TC_CHECK("backing store removed",
+             system("rm -rf " TC_STORE) == 0);
+    testcache_capsule_apply(slots, 2, want, 2, out, TC_STORE);
+    TC_CHECK("unbacked HITs demote, flags cleared",
+             !out[0].hit && !out[1].hit &&
+             !out[0].hit_flaky && !out[1].hit_flaky);
+    TC_CHECK("demoted slots keep identity, still runnable",
+             out[0].cacheable && out[1].cacheable &&
+             out[0].key_valid && out[1].key_valid &&
+             memcmp(out[0].key, batch[0].key, 32) == 0 &&
+             memcmp(out[1].key, batch[1].key, 32) == 0);
+    return failures;
+}
+
+static int tc_capsule_reverify(void)
+{
+    int failures = 0;
+    static char names[2][64];
+    static const char *ptrs[2];
+    static struct testcache_probe batch[2];
+    static struct testcache_capsule_slot slots[2];
+    static const char *want[2];
+    for (int i = 0; i < 2; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+        want[i] = names[i];
+        snprintf(slots[i].name, sizeof(slots[i].name), "%s", ptrs[i]);
+    }
+    failures += tc_reverify_seed(ptrs, batch);
+    for (int i = 0; i < 2; i++)
+        slots[i].probe = batch[i];
+    failures += tc_reverify_backed(slots, want);
+    failures += tc_reverify_unbacked(slots, batch, want);
+    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
     return failures;
 }
 
@@ -2188,6 +2272,7 @@ int test_testcache(void)
     failures += tc_capsule_tamper();
     failures += tc_capsule_bindings();
     failures += tc_capsule_apply();
+    failures += tc_capsule_reverify();
     failures += tc_batch_parity();
     failures += tc_batch_stats();
     failures += tc_batch_invalidation();

@@ -258,6 +258,16 @@ topology (`codeindex_is_stale`), and no stale topology is used to save it.
 The per-cycle win stands one level up instead — the probe capsule removes
 the *second* warm open, so a proof cycle pays graph/index setup once.
 
+Consume-time revalidation: a capsule's structural checks (SHA3, toolenv,
+sealed bindings) never re-read the verdict store, so a capsule consumed
+after its backing PASS records vanished still ACCEPTs with stale HIT bits.
+`testcache_capsule_apply` therefore re-verifies every consumed HIT against
+the store (magic/PASS/key-echo, the same check a fresh probe performs) and
+demotes an unbacked HIT to MISS — the group runs instead of skipping on
+dead evidence. Demonstrated by the `tc_capsule_reverify` phase and the
+backing-removed lifecycle (sealed → capsule → wipe store → consume →
+dimension runs, no skip).
+
 ## Files
 
 - `cognition/modules/codeindex/src/codeindex_impact.c` — `codeindex_forward_closure()`.

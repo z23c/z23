@@ -755,6 +755,49 @@ const char *testcache_toolkey(void)
     return ZCL_TESTCACHE_TOOLKEY;
 }
 
+/* The one backing-record check every HIT interpretation shares: the
+ * addressed record must exist, load, and carry magic/PASS/key-echo. The
+ * fresh probe uses it at lookup time; capsule apply reuses it at consume
+ * time, so a vanished record can never authorize a skip. */
+static bool trc_record_verifies(const char *store_root, const uint8_t key[32],
+                                bool *flaky_out)
+{
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    bool ok = false;
+    if (!store_root || !store_root[0] || !key)
+        return false;
+    if (!vcs_object_has(store_root, key))
+        return false;
+    if (vcs_object_load_raw(store_root, key, &buf, &len) != 0 || !buf)
+        return false;
+    if (len >= sizeof(struct trc_record)) {
+        const struct trc_record *r = (const struct trc_record *)buf;
+        if (memcmp(r->magic, TRC_MAGIC, 8) == 0 &&
+            r->status == TRC_STATUS_PASS &&
+            memcmp(r->key_echo, key, 32) == 0) {
+            ok = true;
+            if (flaky_out)
+                *flaky_out = (r->rsvd[0] & TRC_FLAKY_BIT) != 0;
+        }
+    }
+    free(buf);
+    return ok;
+}
+
+/* Resolve the verdict store exactly as testcache_open_mode does, so a
+ * NULL/empty root checks the store a fresh probe in this process would. */
+static const char *trc_effective_store_root(const char *store_root)
+{
+    if (store_root && store_root[0])
+        return store_root;
+    store_root = getenv("ZCL_TESTCACHE_STORE_ROOT");
+    if (store_root && store_root[0])
+        return store_root;
+    store_root = getenv("ZCL_DEV_SOURCE_ROOT");
+    return (store_root && store_root[0]) ? store_root : ".";
+}
+
 /* Populate *out for group_name. Fail-safe: any failure => uncacheable. */
 static void testcache_probe_group_internal(
     struct testcache *tc, const char *group_name,
@@ -882,22 +925,12 @@ static void testcache_probe_group_internal(
      * access() — a MISS is the common, non-error case) before the verifying
      * load, so a cold cache never spams the log with "object not found". */
     tc->stats.verdict_lookups++;
-    if (vcs_object_has(tc->store_root, out->key)) {
-        uint8_t *buf = NULL;
-        size_t len = 0;
-        if (vcs_object_load_raw(tc->store_root, out->key, &buf, &len) == 0 &&
-            buf) {
-            if (len >= sizeof(struct trc_record)) {
-                const struct trc_record *r = (const struct trc_record *)buf;
-                if (memcmp(r->magic, TRC_MAGIC, 8) == 0 &&
-                    r->status == TRC_STATUS_PASS &&
-                    memcmp(r->key_echo, out->key, 32) == 0) {
-                    out->hit = true;
-                    out->hit_flaky = (r->rsvd[0] & TRC_FLAKY_BIT) != 0;
-                    tc->stats.verdict_hits++;
-                }
-            }
-            free(buf);
+    {
+        bool flaky = false;
+        if (trc_record_verifies(tc->store_root, out->key, &flaky)) {
+            out->hit = true;
+            out->hit_flaky = flaky;
+            tc->stats.verdict_hits++;
         }
     }
 }
@@ -1598,9 +1631,11 @@ bool testcache_capsule_consume(const char *path,
 void testcache_capsule_apply(const struct testcache_capsule_slot *slots,
                              size_t n_slots,
                              const char *const *want_names, size_t n_want,
-                             struct testcache_probe *out)
+                             struct testcache_probe *out,
+                             const char *store_root)
 {
     size_t i, s;
+    const char *root = trc_effective_store_root(store_root);
     if (!out) return;
     for (i = 0; i < n_want; i++) {
         memset(&out[i], 0, sizeof(out[i]));
@@ -1612,6 +1647,15 @@ void testcache_capsule_apply(const struct testcache_capsule_slot *slots,
             if (strcmp(slots[s].name, want_names[i]) != 0) continue;
             out[i] = slots[s].probe;
             break;
+        }
+        /* Fail-closed: a stored HIT authorizes a skip only while its
+         * backing PASS record still verifies. A vanished record demotes
+         * to MISS — the group runs instead of skipping on dead evidence. */
+        if (out[i].hit && !trc_record_verifies(root, out[i].key, NULL)) {
+            out[i].hit = false;
+            out[i].hit_flaky = false;
+            snprintf(out[i].reason, sizeof(out[i].reason),
+                     "capsule hit unbacked (runs)");
         }
     }
 }

@@ -199,13 +199,20 @@ bool testcache_capsule_consume(const char *path,
                                struct testcache_capsule_slot *out, size_t cap,
                                struct testcache_capsule_info *info,
                                char *why, size_t why_len);
-/* Map consumed slots onto a selected set by exact name: hits copy through,
- * a selected group with no slot reports NO_HANDLE uncacheable (it runs),
- * extra slots are ignored, order never matters. Pure: no I/O, no handle. */
+/* Map consumed slots onto a selected set by exact name: a selected group
+ * with no slot reports NO_HANDLE uncacheable (it runs), extra slots are
+ * ignored, order never matters. Fail-closed revalidation: a slot's HIT
+ * copies through only while its backing PASS record still verifies
+ * (magic/PASS/key-echo, the same check a fresh probe performs) under
+ * store_root; a HIT with no verifying record demotes to MISS (it runs).
+ * store_root NULL/empty resolves exactly as testcache_open(NULL) does, so
+ * the runner passes NULL and checks against the store its own fresh probe
+ * would use. */
 void testcache_capsule_apply(const struct testcache_capsule_slot *slots,
                              size_t n_slots,
                              const char *const *want_names, size_t n_want,
-                             struct testcache_probe *out);
+                             struct testcache_probe *out,
+                             const char *store_root);
 
 /* Batch probe: N canonical group names in, N independent per-group results
  * out, through this ONE handle (one verified dep graph, one shared
