@@ -346,6 +346,13 @@ bool zcl_dev_proof_test_lint_targets_are_full(const char *targets);
  * `argv_cap` is too small. */
 bool zcl_dev_proof_test_prefork_argv(const char *jobs, bool lint_full,
                                      const char **argv, size_t argv_cap);
+/* Seam for the docs-tools build step: the exact make argv generation_prepare()
+ * runs inside the sealed generation before the docs-fresh verification, so a
+ * test can prove the freshness gate's checker binaries are provisioned
+ * without driving a full proof cycle. Writes a NULL-terminated argv and
+ * returns false when `argv_cap` is too small. */
+bool zcl_dev_proof_test_docs_tools_argv(const char *jobs, const char **argv,
+                                        size_t argv_cap);
 #endif
 
 /* Warm-start survey types. Inert data, declared unconditionally so every

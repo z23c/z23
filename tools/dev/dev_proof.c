@@ -4655,6 +4655,50 @@ bool zcl_dev_proof_test_generation_docs_fresh(const char *generation,
 }
 #endif
 
+/* Cap for the docs-tools build argv below: make, --no-print-directory,
+ * jobs, two checker binaries, NULL. */
+#define DP_DOCS_TOOLS_ARGV_CAP 8
+
+/* The exact checker binaries the docs-fresh gate execs out of the sealed
+ * generation. check_capability_inventory_generated.sh compiles its own
+ * checker with cc and check_doc_counts.sh is pure shell, so only these
+ * two need provisioning; both are direct-cc tools with no generated
+ * inputs, so they build in a bare generation. `jobs` is stored by pointer
+ * and must outlive argv. */
+static bool dp_docs_tools_argv(const char *jobs, const char **argv,
+                               size_t argv_cap)
+{
+    static const char *const tools[] = {
+        "build/bin/z23-lint",
+        "build/bin/z23-fleet-observe",
+    };
+    size_t n = 0;
+    if (!jobs || !*jobs || !argv || argv_cap < DP_DOCS_TOOLS_ARGV_CAP)
+        return false;
+    argv[n++] = "make";
+    argv[n++] = "--no-print-directory";
+    argv[n++] = jobs;
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
+        argv[n++] = tools[i];
+    argv[n] = NULL;
+    return true;
+}
+
+#if defined(ZCL_TESTING)
+/* Seam for the docs-tools build argv, so a test can prove the freshness
+ * gate's checker binaries are provisioned -- and exactly which ones --
+ * without driving a proof cycle. */
+bool zcl_dev_proof_test_docs_tools_argv(const char *jobs, const char **argv,
+                                        size_t argv_cap)
+{
+    return dp_docs_tools_argv(jobs, argv, argv_cap);
+}
+#endif
+
+static bool dp_generation_docs_tools(const struct proof_paths *paths,
+                                     const char *generation,
+                                     char *why, size_t why_len);
+
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local,
                                struct platform_ram_scratch_lease *ram_lease,
@@ -4694,9 +4738,15 @@ static bool generation_prepare(const struct proof_paths *paths,
         return false;
     }
     /* The sealed bytes are exactly what the dimensions would prove. Refuse
-     * stale generated docs here — seconds, read-only, with the file and
-     * its regen command named — rather than after the minutes-long proof
-     * the lint dimension would fail for the same staleness. */
+     * stale generated docs here — read-only, with the file and its regen
+     * command named — rather than after the minutes-long proof the lint
+     * dimension would fail for the same staleness. The gate scripts exec
+     * checker binaries no fresh generation carries (binaries are never
+     * warm-seeded), so provision exactly those two tools first; without
+     * them every script exec-fails and every proof refuses as stale docs.
+     * Only untracked build outputs are written, never the sealed bytes. */
+    if (!dp_generation_docs_tools(paths, generation, why, why_len))
+        return false;
     if (!dp_generation_docs_fresh(generation, why, why_len))
         return false;
     /* Close the lazy-bootstrap race before any dimension's `make` process
@@ -5404,6 +5454,51 @@ bool zcl_dev_proof_test_prepare_environment(void)
 static bool proof_make_jobs_arg(char out[16])
 {
     return platform_build_jobs_arg(out);
+}
+
+/* Build the two checker binaries the docs-fresh gate execs, inside the
+ * sealed generation and before the read-only verification runs. A bare
+ * generation carries neither (binaries are never warm-seeded), and the
+ * gate scripts have no fallback: without this step every script
+ * exec-fails and the proof refuses as stale docs even when every file
+ * is fresh. The tools build from the sealed sources, so the verdict
+ * still binds to the sealed bytes; only untracked build outputs change.
+ * A build failure is its own typed refusal, never a pass. */
+static bool dp_generation_docs_tools(const struct proof_paths *paths,
+                                     const char *generation,
+                                     char *why, size_t why_len)
+{
+    char jobs[16];
+    const char *argv[DP_DOCS_TOOLS_ARGV_CAP];
+    char log_path[PATH_MAX];
+    struct zcl_dev_proof_budget budget;
+    struct zcl_dev_proof_step_report report = {0};
+    if (!proof_make_jobs_arg(jobs)) {
+        proof_why(why, why_len, "proof_docs_tools_job_count_unavailable");
+        return false;
+    }
+    if (!dp_docs_tools_argv(jobs, argv, DP_DOCS_TOOLS_ARGV_CAP)) {
+        proof_why(why, why_len, "proof_docs_tools_argv_invalid");
+        return false;
+    }
+    if (!paths ||
+        snprintf(log_path, sizeof(log_path), "%s/generation-docs-tools.log",
+                 paths->logs) >= (int)sizeof(log_path)) {
+        proof_why(why, why_len, "proof_docs_tools_log_path_invalid");
+        return false;
+    }
+    budget = proof_step_budget(paths, "generation-docs-tools",
+                               PROOF_GENERATED_DEFAULT_MS);
+    if (run_step(paths, generation, log_path, argv, "generation-docs-tools",
+                 &budget, &report) != 0) {
+        if (report.cause == ZCL_DEV_PROOF_KILL_NONE)
+            proof_whyf(why, why_len, "proof_docs_tools_build_exit_%d",
+                       report.rc);
+        else
+            run_step_why(why, why_len, "generation-docs-tools", &report);
+        return false;
+    }
+    return true;
 }
 
 static bool executable_reuse(const struct proof_paths *paths,

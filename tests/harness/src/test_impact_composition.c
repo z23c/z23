@@ -5738,6 +5738,42 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
     return failures;
 }
 
+static int test_ic_generation_docs_tools_builds_the_checker_binaries(void)
+{
+    int failures = 0;
+    TEST("proof generation: docs-fresh checker binaries are provisioned "
+         "before the read-only verification") {
+        /* The exact binaries the four docs-fresh gate scripts exec. The
+         * inventory checker compiles its own with cc and the doc-counts
+         * gate is pure shell, so only these two are built. */
+        static const char *const tools[] = {
+            "build/bin/z23-lint",
+            "build/bin/z23-fleet-observe",
+        };
+        const size_t tool_count = sizeof(tools) / sizeof(tools[0]);
+        const char *argv[8];
+        char jobs[] = "-j4";
+
+        ASSERT(zcl_dev_proof_test_docs_tools_argv(jobs, argv, 8));
+        ASSERT(strcmp(argv[0], "make") == 0);
+        ASSERT(strcmp(argv[1], "--no-print-directory") == 0);
+        ASSERT(strcmp(argv[2], jobs) == 0);
+        size_t argc = 0;
+        while (argv[argc]) argc++;
+        ASSERT(argc == 3 + tool_count);
+        for (size_t i = 0; i < tool_count; i++)
+            ASSERT(ic_argv_has(argv, tools[i]));
+
+        /* Refused, never truncated, when the caller has no room. */
+        ASSERT(!zcl_dev_proof_test_docs_tools_argv(jobs, argv, 7));
+        ASSERT(!zcl_dev_proof_test_docs_tools_argv(NULL, argv, 8));
+        ASSERT(!zcl_dev_proof_test_docs_tools_argv("", argv, 8));
+        ASSERT(!zcl_dev_proof_test_docs_tools_argv(jobs, NULL, 8));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_landing_proof_defers_preparation(void)
 {
     int failures = 0;
@@ -6777,6 +6813,7 @@ int test_impact_composition(void)
 #endif
     failures += test_ic_proof_lint_and_test_share_admitted_executables();
     failures += test_ic_proof_prefork_builds_the_shared_targets();
+    failures += test_ic_generation_docs_tools_builds_the_checker_binaries();
     failures += test_ic_generation_hooks_configure_points_at_its_own_copy();
 #if !defined(_WIN32)
     failures += test_ic_generation_docs_fresh_refuses_stale();
