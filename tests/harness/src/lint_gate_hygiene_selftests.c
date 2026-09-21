@@ -1274,10 +1274,19 @@ int t_dev_proof_helpers_include_lint_tool(void)
     int hash_ok = read_ok && dev_proof_helper_root_hashes_lint(source);
 
     char *missing_prereq = read_ok ? strdup(source) : NULL;
-    char *prereq_hit = missing_prereq
-        ? strstr(missing_prereq, "\"build/bin/z23-lint\"") : NULL;
-    if (prereq_hit) prereq_hit[0] = '!';
-    int prereq_mutation_trips = prereq_hit != NULL &&
+    /* "build/bin/z23-lint" names the pre-fork build target AND the
+     * docs-fresh prebuild further down: blank every occurrence in the
+     * block, not only the first, or the surviving copy alone still
+     * satisfies the scan. Same blank-every-occurrence shape as the hash
+     * loop below. */
+    int prereq_hit_count = 0;
+    char *cursor = missing_prereq;
+    while (cursor && (cursor = strstr(cursor, "\"build/bin/z23-lint\""))) {
+        cursor[0] = '!';
+        prereq_hit_count++;
+        cursor++;
+    }
+    int prereq_mutation_trips = prereq_hit_count > 0 &&
         !dev_proof_prerequisite_argv_has_lint(missing_prereq);
 
     char *missing_hash = read_ok ? strdup(source) : NULL;
