@@ -545,19 +545,114 @@ static bool gtx_flip_submitted(const char *ref)
     return fclose(f) == 0;
 }
 
-#endif /* !defined(_WIN32) */
+/* One proof-gap clause per case function: the cyclomatic-complexity gate
+ * caps every function at M<=15, so the eleven clauses below each own one
+ * TEST block and the entry only sums their failures. */
 
-int test_devagent_worker_guards(void);
+/* Stage the live authority for a directly posted row, the shape the
+ * receiver would have installed: the grant's own binding and the expiry
+ * the worker must re-read. Starts with a reap so the queue is clean. */
+static bool gtx_stage_evidence(const char *ref, const char *sender,
+                               const char *gid)
+{
+    char binding[ZCL_FLEET_STEER_BINDING_HEX + 1];
+    char dir[1200], path[1400], text[256];
+    long long expiry = 0;
+    FILE *f;
+    int w;
+    char *p;
+    (void)gtx_queue_verb("reap");
+    if (!zcl_fleet_steer_grant_expiry(sender, "send", &expiry))
+        return false;
+    if (!zcl_fleet_steer_sender_binding(gid, sender, binding,
+                                        sizeof(binding)))
+        return false;
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/receive/brief",
+                   g_gtx_state);
+    p = dir;
+    if (*p == '/')
+        p++;
+    for (; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            (void)mkdir(dir, 0700);
+            *p = '/';
+        }
+    }
+    (void)mkdir(dir, 0700);
+    if (snprintf(path, sizeof(path), "%s/%s.evidence", dir, ref) >=
+        (int)sizeof(path))
+        return false;
+    w = snprintf(text, sizeof(text),
+                 "sender=%s\nsender_binding=%s\ngrant_expiry=%lld\n",
+                 sender, binding, expiry);
+    if (w <= 0 || (size_t)w >= sizeof(text))
+        return false;
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    (void)fwrite(text, 1, (size_t)w, f);
+    (void)fclose(f);
+    return true;
+}
 
-int test_devagent_worker_guards(void)
+/* True when a queue-status outcome row is the named ref's row. */
+static bool gtx_row_is_named(const struct json_value *r, const char *name)
+{
+    const struct json_value *nm;
+    const char *s;
+    if (r == NULL)
+        return false;
+    nm = json_get(r, "name");
+    if (nm == NULL || nm->type != JSON_STR)
+        return false;
+    s = json_get_str(nm);
+    if (s == NULL)
+        return false;
+    return strcmp(s, name) == 0;
+}
+
+/* Find the named row in the queue status outcomes and report its verdict
+ * and rc. */
+static bool gtx_find_outcome(struct gtx_call *c, const char *name,
+                             char *verdict, size_t verdict_cap,
+                             long long *rc)
+{
+    const struct json_value *arr;
+    size_t n, i;
+    if (!gtx_ok(c))
+        return false;
+    arr = json_get(&c->reply.data, "outcomes");
+    if (arr == NULL || arr->type != JSON_ARR)
+        return false;
+    n = json_size(arr);
+    for (i = 0; i < n; i++) {
+        const struct json_value *r = json_at(arr, i);
+        const struct json_value *vv;
+        const struct json_value *vr;
+        if (!gtx_row_is_named(r, name))
+            continue;
+        vv = json_get(r, "verdict");
+        vr = json_get(r, "rc");
+        if (vv == NULL || vv->type != JSON_STR || json_get_str(vv) == NULL)
+            return false;
+        (void)snprintf(verdict, verdict_cap, "%s", json_get_str(vv));
+        if (vr != NULL && vr->type == JSON_INT)
+            *rc = (long long)json_get_int(vr);
+        else
+            *rc = -1;
+        return true;
+    }
+    return false;
+}
+
+/* (a) An admitted row sits unclaimed while no worker drives: queued
+ * once, running never, and the evidence record carries the sender
+ * lines the worker will spend on. */
+static int gtx_case_a(void)
 {
     int failures = 0;
 
-#if !defined(_WIN32)
-
-    /* (a) An admitted row sits unclaimed while no worker drives: queued
-     * once, running never, and the evidence record carries the sender
-     * lines the worker will spend on. */
     TEST("(a) an admitted row sits unclaimed with no worker")
     {
         struct rcv_drive_opts o;
@@ -584,10 +679,18 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (b) A resident drive auto-claims the admitted row with zero executor
-     * invocations: the refusing production seam is wired, so a processed
-     * job would mean a refusal was recorded — instead nothing is
-     * processed, the row is claimed, and no spend artifact exists. */
+_test_next:;
+    return failures;
+}
+
+/* (b) A resident drive auto-claims the admitted row with zero executor
+ * invocations: the refusing production seam is wired, so a processed
+ * job would mean a refusal was recorded - instead nothing is
+ * processed, the row is claimed, and no spend artifact exists. */
+static int gtx_case_b(void)
+{
+    int failures = 0;
+
     TEST("(b) a resident drive auto-claims with zero executor invocations")
     {
         struct rcv_drive_opts ro;
@@ -612,9 +715,17 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (c) An empty-queue drive launches nothing: zero jobs, zero executor
-     * calls, on a bounded idle wait. The wall spent here is the honest
-     * idle cost of an empty queue (about idle_start + idle_limit). */
+_test_next:;
+    return failures;
+}
+
+/* (c) An empty-queue drive launches nothing: zero jobs, zero executor
+ * calls, on a bounded idle wait. The wall spent here is the honest
+ * idle cost of an empty queue (about idle_start + idle_limit). */
+static int gtx_case_c(void)
+{
+    int failures = 0;
+
     TEST("(c) an empty-queue drive launches nothing on a bounded wait")
     {
         struct wkr_drive_opts o;
@@ -635,9 +746,17 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (d) A second concurrent drive refuses on worker.lock: the first
-     * drive holds the whole-drive lock while idling, so the second
-     * returns -1 without touching the queue. */
+_test_next:;
+    return failures;
+}
+
+/* (d) A second concurrent drive refuses on worker.lock: the first
+ * drive holds the whole-drive lock while idling, so the second
+ * returns -1 without touching the queue. */
+static int gtx_case_d(void)
+{
+    int failures = 0;
+
     TEST("(d) a second concurrent drive refuses on worker.lock")
     {
         struct wkr_drive_opts o;
@@ -672,9 +791,17 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (e1) Kill after claim with submitted:false restarts to exactly-once:
-     * the orphan is adopted, the submitted flag flips once, the executor
-     * runs once, and the outcome completes. */
+_test_next:;
+    return failures;
+}
+
+/* (e1) Kill after claim with submitted:false restarts to exactly-once:
+ * the orphan is adopted, the submitted flag flips once, the executor
+ * runs once, and the outcome completes. */
+static int gtx_case_e1(void)
+{
+    int failures = 0;
+
     TEST("(e) submitted:false restarts to exactly-once")
     {
         struct wkr_drive_opts o;
@@ -682,51 +809,11 @@ int test_devagent_worker_guards(void)
         char gid[64];
         long long rc = -1;
         struct gtx_call c;
-        const struct json_value *arr;
         bool found = false;
-        size_t n, i;
         gtx_isolate("guard-e1");
         ASSERT(gtx_mint("op", "send", 3600, gid, sizeof(gid)));
         ASSERT(gtx_queue_post_leaf("guard-e1"));
-        /* Stage the live authority for this direct post, the shape the
-         * receiver would have installed: this grant's own binding and
-         * the expiry the worker must re-read. */
-        {
-            char binding[ZCL_FLEET_STEER_BINDING_HEX + 1];
-            char dir[1200], path[1400], text[256];
-            long long expiry = 0;
-            FILE *f;
-            int w;
-            char *p;
-            (void)gtx_queue_verb("reap");
-            ASSERT(zcl_fleet_steer_grant_expiry("op", "send", &expiry));
-            ASSERT(zcl_fleet_steer_sender_binding(gid, "op", binding,
-                                                  sizeof(binding)));
-            (void)snprintf(dir, sizeof(dir), "%s/z23/dev/receive/brief",
-                           g_gtx_state);
-            p = dir;
-            if (*p == '/')
-                p++;
-            for (; *p; p++) {
-                if (*p == '/') {
-                    *p = '\0';
-                    (void)mkdir(dir, 0700);
-                    *p = '/';
-                }
-            }
-            (void)mkdir(dir, 0700);
-            (void)snprintf(path, sizeof(path), "%s/guard-e1.evidence", dir);
-            w = snprintf(text, sizeof(text),
-                         "sender=op\nsender_binding=%s\ngrant_expiry=%lld\n",
-                         binding, expiry);
-            ASSERT(w > 0 && (size_t)w < sizeof(text));
-            f = fopen(path, "wb");
-            ASSERT(f != NULL);
-            if (f) {
-                (void)fwrite(text, 1, (size_t)w, f);
-                (void)fclose(f);
-            }
-        }
+        ASSERT(gtx_stage_evidence("guard-e1", "op", gid));
         ASSERT(gtx_queue_verb("claim"));
         ASSERT(gtx_has("engine/guard-e1/a1/claim.json", "\"submitted\":false"));
         (void)remove(g_gtx_count);
@@ -739,27 +826,8 @@ int test_devagent_worker_guards(void)
         (void)json_push_kv_str(&c.input, "action", "status");
         (void)json_push_kv_bool(&c.input, "json", true);
         zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
-        if (gtx_ok(&c)) {
-            arr = json_get(&c.reply.data, "outcomes");
-            n = (arr && arr->type == JSON_ARR) ? json_size(arr) : 0;
-            for (i = 0; i < n && !found; i++) {
-                const struct json_value *r = json_at(arr, i);
-                const struct json_value *v = r ? json_get(r, "name") : NULL;
-                if (v && v->type == JSON_STR && json_get_str(v) &&
-                    strcmp(json_get_str(v), "guard-e1") == 0) {
-                    const struct json_value *vv = json_get(r, "verdict");
-                    const struct json_value *vr = json_get(r, "rc");
-                    if (vv && vv->type == JSON_STR && json_get_str(vv)) {
-                        (void)snprintf(verdict, sizeof(verdict), "%s",
-                                       json_get_str(vv));
-                        rc = (vr && vr->type == JSON_INT)
-                                 ? (long long)json_get_int(vr)
-                                 : -1;
-                        found = true;
-                    }
-                }
-            }
-        }
+        found = gtx_find_outcome(&c, "guard-e1", verdict, sizeof(verdict),
+                                 &rc);
         gtx_end(&c);
         ASSERT(found);
         ASSERT(zcl_devagent_closed_pass(verdict, rc));
@@ -767,9 +835,17 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (e2) Kill after submit with submitted:true restarts to crash-record
-     * with no resubmission: zero executor calls, the named word in
-     * run.out, and a no-receipt outcome. */
+_test_next:;
+    return failures;
+}
+
+/* (e2) Kill after submit with submitted:true restarts to crash-record
+ * with no resubmission: zero executor calls, the named word in
+ * run.out, and a no-receipt outcome. */
+static int gtx_case_e2(void)
+{
+    int failures = 0;
+
     TEST("(e) submitted:true restarts to crash-record, never resubmits")
     {
         struct wkr_drive_opts o;
@@ -792,8 +868,16 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (f) Missing evidence fails closed: a directly posted row with no
-     * per-ref record refuses before the fork. */
+_test_next:;
+    return failures;
+}
+
+/* (f) Missing evidence fails closed: a directly posted row with no
+ * per-ref record refuses before the fork. */
+static int gtx_case_f0(void)
+{
+    int failures = 0;
+
     TEST("(f) missing evidence fails closed before the fork")
     {
         struct wkr_drive_opts o;
@@ -812,8 +896,16 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (f) A grant revoked between admission and execution refuses before
-     * the fork: submitted never flips, the executor never runs. */
+_test_next:;
+    return failures;
+}
+
+/* (f) A grant revoked between admission and execution refuses before
+ * the fork: submitted never flips, the executor never runs. */
+static int gtx_case_f1(void)
+{
+    int failures = 0;
+
     TEST("(f) a revoked grant refuses before the fork")
     {
         struct rcv_drive_opts ro;
@@ -849,9 +941,17 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (f) A grant expired between admission and execution refuses before
-     * the fork. The ttl floor is a second in the future, so the test
-     * spends two honest wall seconds proving expiry is re-read live. */
+_test_next:;
+    return failures;
+}
+
+/* (f) A grant expired between admission and execution refuses before
+ * the fork. The ttl floor is a second in the future, so the test
+ * spends two honest wall seconds proving expiry is re-read live. */
+static int gtx_case_f2(void)
+{
+    int failures = 0;
+
     TEST("(f) an expired grant refuses before the fork")
     {
         struct rcv_drive_opts ro;
@@ -886,9 +986,17 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (f) A HEAD moved between admission and execution refuses before the
-     * fork: the evidence recorded one commit, the checkout resolves
-     * another. */
+_test_next:;
+    return failures;
+}
+
+/* (f) A HEAD moved between admission and execution refuses before the
+ * fork: the evidence recorded one commit, the checkout resolves
+ * another. */
+static int gtx_case_f3(void)
+{
+    int failures = 0;
+
     TEST("(f) a moved workspace HEAD refuses before the fork")
     {
         struct rcv_drive_opts ro;
@@ -912,9 +1020,17 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
-    /* (f) A workspace dirtied between admission and execution refuses
-     * before the fork: the tracked file no longer matches the index the
-     * evidence was recorded against. */
+_test_next:;
+    return failures;
+}
+
+/* (f) A workspace dirtied between admission and execution refuses
+ * before the fork: the tracked file no longer matches the index the
+ * evidence was recorded against. */
+static int gtx_case_f4(void)
+{
+    int failures = 0;
+
     TEST("(f) a dirty workspace refuses before the fork")
     {
         struct rcv_drive_opts ro;
@@ -940,9 +1056,38 @@ int test_devagent_worker_guards(void)
         PASS();
     }
 
+_test_next:;
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
-_test_next:;
+int test_devagent_worker_guards(void);
+
+/* One proof-gap clause per function: the cyclomatic-complexity gate caps
+ * every function at M<=15, so the eleven cases live in helpers above and
+ * this entry only sums their failures. A clause that fails still runs the
+ * later clauses, unlike the old single-body goto chain. */
+int test_devagent_worker_guards(void)
+{
+    int failures = 0;
+
+#if !defined(_WIN32)
+
+    failures += gtx_case_a();
+    failures += gtx_case_b();
+    failures += gtx_case_c();
+    failures += gtx_case_d();
+    failures += gtx_case_e1();
+    failures += gtx_case_e2();
+    failures += gtx_case_f0();
+    failures += gtx_case_f1();
+    failures += gtx_case_f2();
+    failures += gtx_case_f3();
+    failures += gtx_case_f4();
+
+#endif /* !defined(_WIN32) */
+
     return failures;
 }
 
