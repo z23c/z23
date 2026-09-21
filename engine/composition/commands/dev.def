@@ -2051,29 +2051,33 @@ ZCL_COMMAND_DEV_COMMAND(
  * resident loop runs the job and posts the result — so a long model turn
  * can never block intake, status, or delivery. Admission means the owner
  * has NAMED a sender: nothing in this tree signs or verifies a peer's mail
- * row today, so this is not authenticated delivery. */
+ * row today, so this is not authenticated delivery.
+ * The preflight action decides ONE directive's admission (ref, from,
+ * sender_binding, body; to defaults to the receiver) through the same
+ * pipeline and reports PREPARED, decided, or the refused code, writing
+ * nothing: no mail, no queue row, no brief, no answer. The executor stays
+ * operator-determined, never preflight-verified. */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.agent.receive", "dev.agent", "",
     "Turn directives arriving in this box's agent mail into queued work",
-    "Each beat, dev.agent.mail directive "
+    "Each beat, directive "
     "pages are pulled in-process from a durable cursor (receive/intake."
     "state), four a beat, advanced after each handled page; status shows "
     "intake_failures and intake_last_error. "
     "A row is admitted only when it is addressed to this receiver, carries "
-    "a ref matching [A-Za-z0-9_.-]{1,64}, names a sender a live unrevoked "
+    "a ref matching [A-Za-z0-9_.-]{1,64}, names a sender a live "
     "grant in steer/grants.jsonl labels with the send scope, and carries a "
     "well-formed muse-workspace/muse-scope/muse-gate direction. THE WIRE "
     "CARRIES A SELECTOR AND THIS BOX RESOLVES IT: muse-workspace is either "
     "the selector `receiver` (or `.`), resolved to the ONE workspace "
     "`workspace` names, or an absolute path, unchanged for the same-box "
-    "case. Anything else refuses SELECTOR_UNKNOWN, so no sender can name a "
-    "local path; a selector with nothing configured refuses UNCONFIGURED "
-    "and never guesses; a workspace absent, not its own realpath (\"..\" or "
+    "case. Anything else refuses SELECTOR_UNKNOWN; "
+    "with nothing configured a selector refuses UNCONFIGURED; "
+    "a workspace absent, not its own realpath (\"..\" or "
     "a symlink escape), or not a git checkout with a resolvable HEAD "
     "refuses MISSING, ESCAPE or NOT_A_CHECKOUT; an optional muse-sha must "
     "name that HEAD or refuses SHA_MISMATCH; tracked paths diverging from "
-    "its index refuse DIRTY early. The RESOLVED path goes into the brief, "
-    "so worker and executor are unchanged. "
+    "its index refuse DIRTY early. The RESOLVED path goes into the brief. "
     "Resolution reads files, never spawns. Received bytes, brief "
     "and record are stored "
     "apart: a known ref reconciles when the RECEIVED body is "
@@ -2083,10 +2087,12 @@ ZCL_COMMAND_DEV_COMMAND(
     "took the row, carrying its seq, the brief digest and the workspace "
     "record (selector, path digest, HEAD, tree id — never the path). run "
     "holds one flock singleton, wakes on the mail watcher, stops on "
-    "SIGTERM; status surveys from the start and writes nothing.", 16384,
+    "SIGTERM; status surveys from the start and writes nothing; preflight "
+    "reports one directive's admission, writing nothing.", 16384,
     "agent,receive,resident,mail,directive,admission,queue,ref,workspace",
     "zcl.agent_receive_input.v1", "zcl.agent_receive.v1",
-    "action,receiver,workspace,deadline_s,wait_ms,max_beats",
+    "action,receiver,workspace,deadline_s,wait_ms,max_beats,ref,from,"
+    "sender_binding,body,to",
     "action",
     "z23 dev agent receive status --receiver=box-a",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,

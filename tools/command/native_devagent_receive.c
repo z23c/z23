@@ -245,6 +245,7 @@
 #include "platform/directory_compat.h"
 #include "platform/directory_watcher.h"
 #include "platform/file_metadata.h"
+#include "platform/os_proc.h"
 #include "platform/path_compat.h"
 #include "platform/private_directory.h"
 #include "platform/state_root.h"
@@ -2509,6 +2510,338 @@ long long zcl_devagent_receive_survey(const char *receiver,
     return st->beats;
 }
 
+/* ── preflight: one directive's admission, decided, never written ──────
+ *
+ * The run beat's admission pipeline (ref, addressing, sender, direction,
+ * known-ref, workspace, queue) with every writing step removed: no mail,
+ * no queue row, no brief/received/evidence file, no answer, no marker, no
+ * cursor, and rcv_queue_post is never reached, so nothing can be spawned
+ * for it. Every check reuses the live path's own predicate, in the live
+ * order, so a PREPARED verdict means the next beat would admit this exact
+ * row — subject to the one honest gap, stated in the receipt: the executor
+ * is wired at worker-run time by the operator, so executor is reported as
+ * operator-determined, never as preflight-verified. queue_shape_ok means
+ * every queue shape gate this leaf parses (name, kind, group, scope,
+ * model, order) passed; it is not a live post verdict, because posting
+ * would write. claim_path_clear means the ref is unknown and the queue is
+ * not full.
+ *
+ * The receipt is one typed object in reply->data, PASSED in every case:
+ * state PREPARED (admission would succeed), decided (the ref is already
+ * known and the bytes match: known, stage, seq), or refused (code and
+ * detail name the SAME typed refusal the live beat would have answered
+ * with). Refusals are logged like every other error return. */
+
+/* The rung os_proc_open_self_exe() reaches on this build, as a bare
+ * token. Never widened here: the label travels from the one ladder in
+ * platform/os_proc.h, so it cannot drift from the mechanism. */
+static const char *rcv_image_identity_label(void)
+{
+    switch (os_proc_self_exe_identity()) {
+    case OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE:
+        return "running-image";
+    case OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH:
+        return "resolved-path";
+    case OS_PROC_IMAGE_IDENTITY_UNAVAILABLE:
+        break;
+    }
+    return "unavailable";
+}
+
+/* SHA3-256 over the running executable image, streamed straight from
+ * os_proc_open_self_exe() the way rcv_brief_digest streams the directive
+ * bytes. "" when the platform offers no running-image read: no evidence,
+ * never a match. */
+static void rcv_image_digest(char out[65])
+{
+    FILE *f = os_proc_open_self_exe();
+    struct sha3_256_ctx ctx;
+    unsigned char sum[SHA3_256_OUTPUT_SIZE], buf[8192];
+    size_t n;
+    out[0] = '\0';
+    if (!f)
+        return;
+    sha3_256_init(&ctx);
+    for (;;) {
+        n = fread(buf, 1, sizeof(buf), f);
+        if (n > 0)
+            sha3_256_write(&ctx, buf, n);
+        if (n < sizeof(buf))
+            break;
+    }
+    if (ferror(f)) {
+        (void)fclose(f);
+        out[0] = '\0';
+        return;
+    }
+    (void)fclose(f);
+    sha3_256_finalize(&ctx, sum);
+    zcl_hex_encode(sum, sizeof(sum), out);
+}
+
+/* The queue's own numbers without writing: next_seq is one past the
+ * highest seq still held (queued or running), depth counts the queued
+ * rows, full is the QUEUE_FULL refusal waiting to happen. */
+struct rcv_queue_view {
+    bool ok;
+    long long next_seq;
+    long long depth;
+    bool full;
+};
+
+static void rcv_queue_view_seq(const struct json_value *arr, long long *max)
+{
+    size_t i, n;
+    if (!arr || arr->type != JSON_ARR)
+        return;
+    n = json_size(arr);
+    for (i = 0; i < n; i++) {
+        const struct json_value *r = json_at(arr, i);
+        const struct json_value *v = r ? json_get(r, "seq") : NULL;
+        if (v && v->type == JSON_INT && (long long)json_get_int(v) > *max)
+            *max = (long long)json_get_int(v);
+    }
+}
+
+static void rcv_queue_view(struct rcv_queue_view *q)
+{
+    struct rcv_sub sub;
+    const struct json_value *arr;
+    long long max = 0;
+    memset(q, 0, sizeof(*q));
+    q->next_seq = 1;
+    rcv_sub_begin(&sub, "zcl.agent_queue.v1", "dev.agent.queue");
+    if (sub.valid && rcv_sub_input(&sub, "{\"action\":\"status\","
+                                         "\"json\":true}")) {
+        zcl_native_handle_dev_agent_queue(&sub.request, &sub.reply);
+        sub.ran = true;
+    }
+    if (!rcv_sub_ok(&sub)) {
+        rcv_sub_end(&sub);
+        return;
+    }
+    arr = json_get(&sub.reply.data, "queued");
+    q->depth = (arr && arr->type == JSON_ARR) ? (long long)json_size(arr) : 0;
+    rcv_queue_view_seq(arr, &max);
+    rcv_queue_view_seq(json_get(&sub.reply.data, "running"), &max);
+    rcv_sub_end(&sub);
+    q->next_seq = max + 1;
+    q->full = q->depth >= (long long)zcl_devagent_queue_queued_max();
+    q->ok = true;
+}
+
+/* A refused preflight is still a successful call: the receipt carries the
+ * SAME typed code the live beat would have answered with, and the log
+ * carries the context every error return owes. */
+static void rcv_preflight_refuse(struct zcl_command_reply *reply,
+                                 const char *receiver, const char *ref,
+                                 const char *code, const char *detail)
+{
+    LOG_WARN(RCV_LOG, "preflight refused ref %s: %s (%s)",
+             rcv_ref_ok(ref) ? ref : "(invalid)", code,
+             detail ? detail : "");
+    (void)json_push_kv_str(&reply->data, "leaf", RCV_LEAF);
+    (void)json_push_kv_str(&reply->data, "state", "refused");
+    (void)json_push_kv_str(&reply->data, "receiver", receiver);
+    (void)json_push_kv_str(&reply->data, "ref",
+                           rcv_ref_ok(ref) ? ref : "");
+    (void)json_push_kv_str(&reply->data, "code", code);
+    (void)json_push_kv_str(&reply->data, "detail", detail ? detail : "");
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
+static void rcv_preflight_decided(struct zcl_command_reply *reply,
+                                  const char *receiver, const char *ref,
+                                  const char *root,
+                                  const struct rcv_known *k)
+{
+    (void)json_push_kv_str(&reply->data, "leaf", RCV_LEAF);
+    (void)json_push_kv_str(&reply->data, "state", "decided");
+    (void)json_push_kv_str(&reply->data, "receiver", receiver);
+    (void)json_push_kv_str(&reply->data, "ref", ref);
+    (void)json_push_kv_str(&reply->data, "directive_root", root);
+    (void)json_push_kv_bool(&reply->data, "known", true);
+    (void)json_push_kv_str(&reply->data, "stage", k->stage);
+    (void)json_push_kv_int(&reply->data, "seq", k->seq);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
+/* One refusal, copied into the caller's struct: codes and details are
+ * short static or member strings, so the copy outlives every stage. */
+struct rcv_pre_refusal {
+    const char *code;
+    char detail[64];
+};
+
+/* The live beat's first half — ref, addressing, sender, direction — with
+ * no write in it. False with *r naming the SAME typed refusal the beat
+ * would have answered with. */
+static bool rcv_pre_admit(const struct zcl_command_request *request,
+                          const char *receiver, const char *ref,
+                          struct rcv_direction *d, long long *expiry,
+                          struct rcv_pre_refusal *r)
+{
+    const char *from = rcv_in_str(request, "from");
+    const char *binding = rcv_in_str(request, "sender_binding");
+    const char *body = rcv_in_str(request, "body");
+    const struct json_value *to_v =
+        request && request->input ? json_get(request->input, "to") : NULL;
+    const char *to = (to_v && to_v->type == JSON_STR && json_get_str(to_v))
+                         ? json_get_str(to_v)
+                         : "";
+    const char *why;
+    r->code = "RECEIVE_REF_INVALID";
+    (void)snprintf(r->detail, sizeof(r->detail),
+                   "ref-must-match-64-name-alphabet");
+    if (!rcv_ref_ok(ref))
+        return false;
+    /* `to` is implicitly this receiver: naming anyone else is not this
+     * box's work. */
+    r->code = "RECEIVE_NOT_ADDRESSED";
+    (void)snprintf(r->detail, sizeof(r->detail),
+                   "to-is-not-this-receiver");
+    if (to[0] != '\0' && strcmp(to, receiver) != 0)
+        return false;
+    r->code = "RECEIVE_SENDER_UNBOUND";
+    (void)snprintf(r->detail, sizeof(r->detail),
+                   "row-carries-no-sender-binding");
+    if (!binding[0])
+        return false;
+    why = zcl_fleet_steer_grant_binding_live(from, binding, RCV_SCOPE);
+    r->code = "RECEIVE_SENDER_UNGRANTED";
+    (void)snprintf(r->detail, sizeof(r->detail), "%s",
+                   why ? why : "grant-expiry-unreadable");
+    if (why || !zcl_fleet_steer_grant_expiry(from, RCV_SCOPE, expiry))
+        return false;
+    if (!rcv_direction_parse(body, d)) {
+        r->code = d->code;
+        (void)snprintf(r->detail, sizeof(r->detail), "%s", d->why);
+        return false;
+    }
+    return true;
+}
+
+/* The live beat's at-most-once order — known-ref first, resolution
+ * second — with no write in it. The stored RECEIVED bytes decide, exactly
+ * as rcv_reconcile reads them. */
+enum rcv_pre_known_out {
+    RCV_PRE_NEW,
+    RCV_PRE_DECIDED,
+    RCV_PRE_REFUSED,
+};
+
+static enum rcv_pre_known_out rcv_pre_known(struct rcv_ctx *c,
+                                            const char *ref, const char *body,
+                                            char root[65],
+                                            struct rcv_known *k,
+                                            struct rcv_pre_refusal *r)
+{
+    struct rcv_ref_files f;
+    char stored[RCV_BRIEF_MAX];
+    const char *path;
+    rcv_ref_known(c, ref, k);
+    if (!k->known)
+        return RCV_PRE_NEW;
+    rcv_brief_digest(body, root);
+    r->code = "RECEIVE_STATE_UNWRITABLE";
+    (void)snprintf(r->detail, sizeof(r->detail), "brief-path-too-long");
+    if (!rcv_ref_files_of(c, ref, &f))
+        return RCV_PRE_REFUSED;
+    path = rcv_exists(f.received) ? f.received : f.brief;
+    r->code = "RECEIVE_REF_CONFLICT";
+    (void)snprintf(r->detail, sizeof(r->detail),
+                   "ref-claimed-without-a-brief-from-this-receiver");
+    if (!rcv_read_file(path, stored, sizeof(stored)))
+        return RCV_PRE_REFUSED;
+    (void)snprintf(r->detail, sizeof(r->detail), "received-body-differs");
+    if (strcmp(stored, body) != 0)
+        return RCV_PRE_REFUSED;
+    return RCV_PRE_DECIDED;
+}
+
+static void rcv_preflight(const struct zcl_command_request *request,
+                          const char *receiver, const char *workspace,
+                          struct zcl_command_reply *reply)
+{
+    const char *ref = rcv_in_str(request, "ref");
+    const char *from = rcv_in_str(request, "from");
+    const char *binding = rcv_in_str(request, "sender_binding");
+    struct rcv_direction d;
+    struct rcv_ctx c;
+    struct rcv_workspace w;
+    struct rcv_known k;
+    struct rcv_queue_view q;
+    struct rcv_pre_refusal r;
+    char root[65], img[65], imgid[32], detail[64];
+    const char *why;
+    long long expiry = 0;
+    memset(&d, 0, sizeof(d));
+    memset(&r, 0, sizeof(r));
+    if (!rcv_pre_admit(request, receiver, ref, &d, &expiry, &r)) {
+        rcv_preflight_refuse(reply, receiver, ref, r.code, r.detail);
+        return;
+    }
+    memset(&c, 0, sizeof(c));
+    if (!rcv_paths_resolve(&c.p)) {
+        rcv_preflight_refuse(reply, receiver, ref, "RECEIVE_STATE_UNWRITABLE",
+                             "state-root-unresolvable");
+        return;
+    }
+    (void)snprintf(c.workspace, sizeof(c.workspace), "%s", workspace);
+    switch (rcv_pre_known(&c, ref, rcv_in_str(request, "body"), root, &k,
+                          &r)) {
+    case RCV_PRE_DECIDED:
+        rcv_preflight_decided(reply, receiver, ref, root, &k);
+        return;
+    case RCV_PRE_REFUSED:
+        rcv_preflight_refuse(reply, receiver, ref, r.code, r.detail);
+        return;
+    case RCV_PRE_NEW:
+        break;
+    }
+    memset(&w, 0, sizeof(w));
+    detail[0] = '\0';
+    why = rcv_ws_resolve(&c, &d, &w, detail, sizeof(detail));
+    if (why) {
+        rcv_preflight_refuse(reply, receiver, ref, why, detail);
+        return;
+    }
+    rcv_queue_view(&q);
+    if (!q.ok) {
+        rcv_preflight_refuse(reply, receiver, ref, "RECEIVE_QUEUE_REFUSED",
+                             "queue-status-unreadable");
+        return;
+    }
+    rcv_brief_digest(rcv_in_str(request, "body"), root);
+    rcv_image_digest(img);
+    (void)snprintf(imgid, sizeof(imgid), "%s", rcv_image_identity_label());
+    (void)json_push_kv_str(&reply->data, "leaf", RCV_LEAF);
+    (void)json_push_kv_str(&reply->data, "state", "PREPARED");
+    (void)json_push_kv_str(&reply->data, "receiver", receiver);
+    (void)json_push_kv_str(&reply->data, "ref", ref);
+    (void)json_push_kv_str(&reply->data, "directive_root", root);
+    (void)json_push_kv_str(&reply->data, "sender", from);
+    (void)json_push_kv_str(&reply->data, "binding", binding);
+    (void)json_push_kv_int(&reply->data, "grant_expiry", expiry);
+    (void)json_push_kv_str(&reply->data, "workspace_realpath", w.root);
+    (void)json_push_kv_str(&reply->data, "workspace_head", w.head);
+    (void)json_push_kv_bool(&reply->data, "workspace_clean", w.dirty == 0);
+    (void)json_push_kv_str(&reply->data, "gate", d.gate);
+    (void)json_push_kv_str(&reply->data, "kind", d.kind);
+    (void)json_push_kv_int(&reply->data, "queue_next_seq", q.next_seq);
+    (void)json_push_kv_int(&reply->data, "queue_depth", q.depth);
+    (void)json_push_kv_bool(&reply->data, "queue_full", q.full);
+    (void)json_push_kv_bool(&reply->data, "queue_shape_ok", true);
+    (void)json_push_kv_bool(&reply->data, "claim_path_clear", !q.full);
+    (void)json_push_kv_str(&reply->data, "executor", "operator-determined");
+    (void)json_push_kv_str(&reply->data, "image_sha3", img);
+    (void)json_push_kv_str(&reply->data, "image_identity", imgid);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
 /* ── leaf ──────────────────────────────────────────────────────────────── */
 
 static void rcv_push_stats(struct zcl_command_reply *reply,
@@ -2654,8 +2987,13 @@ void zcl_native_handle_dev_agent_receive(
         rcv_status(receiver, workspace, reply);
         return;
     }
+    if (strcmp(action, "preflight") == 0) {
+        rcv_preflight(request, receiver, workspace, reply);
+        return;
+    }
     if (strcmp(action, "run") != 0) {
-        rcv_fail(reply, "BAD_INPUT", "run", "action is one of run|status",
+        rcv_fail(reply, "BAD_INPUT", "run",
+                 "action is one of run|status|preflight",
                  "input.action missing or unknown");
         return;
     }

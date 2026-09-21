@@ -102,6 +102,16 @@ const char *zcl_fleet_steer_grant_binding_live(const char *label,
                                                const char *binding,
                                                const char *scope);
 
+/* The expiry timestamp of the authority carrying `label` with `scope`,
+ * read from the SAME grants.jsonl store under the SAME liveness rule as
+ * the binding admission above: 0 when a live grant never expires,
+ * otherwise the longest live expiry. No new format, no new scope.
+ * Returns false when no live grant carries the label with the scope (or
+ * on a bad argument), so the caller fails closed. Implemented in
+ * tools/command/native_fleet_steer.c beside the store it reads. */
+bool zcl_fleet_steer_grant_expiry(const char *label, const char *scope,
+                                  long long *out);
+
 /* The admission reader for a row that came over the signed fleet board
  * from the enrolled box `peer` (a roster name). Returns NULL when a live
  * grant minted with peer=<peer> carries `label` with `scope`, otherwise the

@@ -863,6 +863,50 @@ const char *zcl_fleet_steer_grant_peer_live(const char *label,
                                (long long)platform_time_wall_time_t());
 }
 
+/* The expiry timestamp behind a preflight's grant_expiry field: the SAME
+ * grants.jsonl store, the SAME label set, the SAME liveness rule
+ * (fmc_grant_row_verdict) as the binding admission above — no new format,
+ * no new scope, no second permission system. One label may hold several
+ * live ids (an older grant still unexpired beside its replacement); the
+ * longest authority is what a sender acts under, so the maximum is
+ * reported, and a grant that never expires (expires 0) reports 0, which
+ * dominates every finite timestamp. False when no live grant carries the
+ * label with the scope — including peer-only rows, which never admit a
+ * local binding — so a caller that just proved liveness and then reads
+ * false has raced a revoke, and refuses. */
+bool zcl_fleet_steer_grant_expiry(const char *label, const char *scope,
+                                  long long *out)
+{
+    struct fmc_grant_set set;
+    const char *store;
+    long long now, best = -1;
+    size_t i;
+    bool any = false;
+    if (!label || !label[0] || !scope || !scope[0] || !out)
+        return false;
+    store = fmc_grant_set_read(label, &set);
+    if (store)
+        return false;
+    now = (long long)platform_time_wall_time_t();
+    for (i = 0; i < set.n; i++) {
+        if (strcmp(set.g[i].label, label) != 0 || set.g[i].peer[0])
+            continue;
+        if (fmc_grant_row_verdict(&set.g[i], scope, now))
+            continue;
+        if (set.g[i].expires == 0) {
+            *out = 0;
+            return true;
+        }
+        if (!any || set.g[i].expires > best)
+            best = set.g[i].expires;
+        any = true;
+    }
+    if (!any)
+        return false;
+    *out = best;
+    return true;
+}
+
 /* ── idempotency store ─────────────────────────────────────────────────── */
 
 /* Payload digest: FNV-1a/64 over to, body, ref, from (and kind, for a

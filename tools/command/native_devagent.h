@@ -519,6 +519,12 @@ void zcl_devagent_boardmail_admit(const struct zcl_boardmail_row *row,
 long long zcl_devagent_receive_drive(const struct rcv_drive_opts *opts,
                                      struct rcv_beat_stats *st);
 
+/* The queue's backpressure bound: post refuses QUEUE_FULL while this many
+ * rows are already queued. Implemented in
+ * tools/command/native_devagent_queue.c beside the refusal it reports,
+ * so a preflight's queue_full field and the live refusal cannot drift. */
+int zcl_devagent_queue_queued_max(void);
+
 /* Decide what one beat would decide for every directive from the start of
  * the mail history (a survey ignores the resident's intake cursor and pages
  * through the whole history), and write and post nothing.

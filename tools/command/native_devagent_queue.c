@@ -3425,6 +3425,15 @@ fail:
 
 /* ── dispatcher ────────────────────────────────────────────────────────── */
 
+/* The backpressure bound a preflight reports queue_full against: post
+ * refuses QUEUE_FULL while this many rows are already queued. One
+ * accessor rather than a second copy of the constant, so the report and
+ * the refusal cannot drift apart. */
+int zcl_devagent_queue_queued_max(void)
+{
+    return DVQ_QUEUED_MAX;
+}
+
 void zcl_native_handle_dev_agent_queue(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {

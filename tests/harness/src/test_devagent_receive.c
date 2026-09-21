@@ -985,6 +985,368 @@ _test_next:;
     rtx_restore();
     return failures;
 }
+
+/* ── preflight: the admission pipeline, read-only ──────────────────────────
+ * Born-RED for the preflight action on dev.agent.receive: before the leaf
+ * knows it, an unknown action refuses BAD_INPUT and every PREPARED
+ * assertion below fails; after, one directive's admission is decided with
+ * no write anywhere — no mail, no queue row, no brief/received/evidence
+ * file, no answer, no marker. */
+
+static long long rtx_reply_int(const struct rtx_call *c, const char *key)
+{
+    const struct json_value *v = json_get(&c->reply.data, key);
+    return (v && v->type == JSON_INT) ? (long long)json_get_int(v) : -1;
+}
+
+static bool rtx_reply_bool(const struct rtx_call *c, const char *key)
+{
+    const struct json_value *v = json_get(&c->reply.data, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
+/* 64 lowercase hex, the shape of every digest this leaf reports. */
+static bool rtx_hex64(const char *s)
+{
+    size_t i;
+    if (!s)
+        return false;
+    for (i = 0; i < 64; i++) {
+        char ch = s[i];
+        if ((ch < '0' || ch > '9') && (ch < 'a' || ch > 'f'))
+            return false;
+    }
+    return s[64] == '\0';
+}
+
+/* One preflight invocation. `to` NULL omits the key (the receiver is then
+ * implicit); otherwise it is passed through verbatim. */
+static void rtx_preflight(struct rtx_call *c, const char *ws, const char *ref,
+                          const char *from, const char *binding,
+                          const char *body, const char *to)
+{
+    rtx_begin(c, "dev.agent.receive", "zcl.agent_receive.v1");
+    (void)json_push_kv_str(&c->input, "action", "preflight");
+    (void)json_push_kv_str(&c->input, "receiver", "box-a");
+    (void)json_push_kv_str(&c->input, "workspace", ws);
+    (void)json_push_kv_str(&c->input, "ref", ref);
+    (void)json_push_kv_str(&c->input, "from", from);
+    (void)json_push_kv_str(&c->input, "sender_binding", binding);
+    (void)json_push_kv_str(&c->input, "body", body);
+    if (to)
+        (void)json_push_kv_str(&c->input, "to", to);
+    zcl_native_handle_dev_agent_receive(&c->request, &c->reply);
+}
+
+/* Everything a read-only action must leave alone: the receiver's brief and
+ * answer-marker dirs, the mail dir, the queue dir, the queued row, and the
+ * answers the receiver already posted. */
+struct rtx_frozen {
+    long long brief;
+    long long answered;
+    long long mail;
+    long long queue;
+    long long queued;
+    long long answers;
+};
+
+static void rtx_frozen_take(struct rtx_frozen *s, const char *ref)
+{
+    s->brief = rtx_count_dir("receive/brief");
+    s->answered = rtx_count_dir("receive/answered");
+    s->mail = rtx_count_dir("mail");
+    s->queue = rtx_count_dir("queue");
+    s->queued = rtx_queue_count("queued", ref);
+    s->answers = rtx_answers(ref, "");
+}
+
+static bool rtx_frozen_same(const struct rtx_frozen *a,
+                            const struct rtx_frozen *b)
+{
+    return a->brief == b->brief && a->answered == b->answered &&
+           a->mail == b->mail && a->queue == b->queue &&
+           a->queued == b->queued && a->answers == b->answers;
+}
+
+static int test_receive_preflight(void)
+{
+    int failures = 0;
+
+    TEST("an unknown action still refuses BAD_INPUT")
+    {
+        struct rtx_call c;
+        rtx_isolate("preflight-shape");
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "launch");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(!rtx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("a valid canary preflights PREPARED and writes nothing")
+    {
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        char body[4096], ws[1200];
+        rtx_isolate("preflight-ok");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction_sel(body, sizeof(body), "receiver", "",
+                          "Prove nothing moves.");
+        rtx_frozen_take(&before, "job-pre");
+        rtx_preflight(&c, ws, "job-pre", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "PREPARED");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "receiver"), "box-a");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "ref"), "job-pre");
+        ASSERT(rtx_hex64(rtx_reply_str(&c, "directive_root")));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "sender"), "chatgpt");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "binding"),
+                      rtx_ident_binding("chatgpt"));
+        ASSERT(rtx_reply_int(&c, "grant_expiry") > 0);
+        ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_realpath"), ws);
+        ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_head"),
+                      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        ASSERT(rtx_reply_bool(&c, "workspace_clean"));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "gate"), "hex_codec");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "kind"), "file");
+        ASSERT_EQ(rtx_reply_int(&c, "queue_next_seq"), 1);
+        ASSERT_EQ(rtx_reply_int(&c, "queue_depth"), 0);
+        ASSERT(!rtx_reply_bool(&c, "queue_full"));
+        ASSERT(rtx_reply_bool(&c, "queue_shape_ok"));
+        ASSERT(rtx_reply_bool(&c, "claim_path_clear"));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "executor"), "operator-determined");
+        /* The image digest is evidence, never proof: a platform with no
+         * running-image read reports "" beside "unavailable". */
+        {
+            const char *sha = rtx_reply_str(&c, "image_sha3");
+            ASSERT(sha[0] == '\0' || rtx_hex64(sha));
+        }
+        ASSERT(rtx_reply_str(&c, "image_identity")[0] != '\0');
+        rtx_end(&c);
+        rtx_frozen_take(&after, "job-pre");
+        ASSERT(rtx_frozen_same(&before, &after));
+        /* No answer was posted and no worker state exists for the ref. */
+        ASSERT_EQ(rtx_answers("job-pre", ""), 0);
+        ASSERT(!rtx_exists("engine/job-pre"));
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("an expired or foreign grant preflights refused, writing nothing")
+    {
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        char body[4096];
+        rtx_isolate("preflight-grant");
+        /* The expired row is appended in the store's own format, so the
+         * store itself must exist first: one live mint creates it. */
+        ASSERT(rtx_mint("housekeeping", "brief", 3600, NULL, 0));
+        ASSERT(rtx_mint_expired("stale"));
+        rtx_direction_sel(body, sizeof(body), "receiver", "",
+                          "Do it anyway.");
+        rtx_frozen_take(&before, "job-ex");
+        rtx_preflight(&c, g_rtx_ws, "job-ex", "stale",
+                      rtx_ident_binding("stale"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "refused");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "code"), "RECEIVE_SENDER_UNGRANTED");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "detail"), "STEER_GRANT_EXPIRED");
+        rtx_end(&c);
+        rtx_preflight(&c, g_rtx_ws, "job-ug", "nobody", RTX_FOREIGN_BINDING,
+                      body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "refused");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "code"), "RECEIVE_SENDER_UNGRANTED");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "detail"), "STEER_GRANT_UNKNOWN");
+        rtx_end(&c);
+        rtx_frozen_take(&after, "job-ex");
+        ASSERT(rtx_frozen_same(&before, &after));
+        ASSERT(!rtx_exists("receive/brief/job-ex.brief"));
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("a dirty workspace preflights refused, writing nothing")
+    {
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        char body[4096], ws[1200];
+        rtx_isolate("preflight-dirty");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        /* A different SIZE, so the index stat shortcut sees it even
+         * inside the same second (a same-size rewrite would not). */
+        ASSERT(rtx_put(ws, "src/x.c", "int zx(void) { return 1; } /* x */\n"));
+        rtx_direction_sel(body, sizeof(body), "receiver", "",
+                          "Work on a dirty tree.");
+        rtx_frozen_take(&before, "job-dirty");
+        rtx_preflight(&c, ws, "job-dirty", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "refused");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "code"), "RECEIVE_WORKSPACE_DIRTY");
+        rtx_end(&c);
+        rtx_frozen_take(&after, "job-dirty");
+        ASSERT(rtx_frozen_same(&before, &after));
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("an unknown gate preflights refused, writing nothing")
+    {
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        char body[4096];
+        rtx_isolate("preflight-gate");
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        (void)snprintf(body, sizeof(body),
+                       "muse-workspace: receiver\nmuse-scope: src/x.c\n"
+                       "muse-gate: bad gate!\n\nDo it.\n");
+        rtx_frozen_take(&before, "job-gate");
+        rtx_preflight(&c, g_rtx_ws, "job-gate", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "refused");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "code"),
+                      "RECEIVE_DIRECTION_MALFORMED");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "detail"), "muse-gate");
+        rtx_end(&c);
+        rtx_frozen_take(&after, "job-gate");
+        ASSERT(rtx_frozen_same(&before, &after));
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("to names the receiver implicitly and refuses anyone else")
+    {
+        struct rtx_call c;
+        char body[4096], ws[1200];
+        rtx_isolate("preflight-to");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "cccccccccccccccccccccccccccccccccccccccc"));
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction_sel(body, sizeof(body), "receiver", "",
+                          "Addressed work.");
+        rtx_preflight(&c, ws, "job-to", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, "box-b");
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "refused");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "code"), "RECEIVE_NOT_ADDRESSED");
+        rtx_end(&c);
+        rtx_preflight(&c, ws, "job-to", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, "box-a");
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "PREPARED");
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("preflight twice is byte-identical and writes nothing")
+    {
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        char body[4096], ws[1200];
+        char one[8192], two[8192];
+        size_t n1, n2;
+        rtx_isolate("preflight-twice");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "dddddddddddddddddddddddddddddddddddddddd"));
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction_sel(body, sizeof(body), "receiver", "",
+                          "Twice the question.");
+        rtx_frozen_take(&before, "job-twice");
+        rtx_preflight(&c, ws, "job-twice", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "PREPARED");
+        n1 = json_write(&c.reply.data, one, sizeof(one));
+        ASSERT(n1 < sizeof(one));
+        rtx_end(&c);
+        rtx_preflight(&c, ws, "job-twice", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        n2 = json_write(&c.reply.data, two, sizeof(two));
+        ASSERT(n2 < sizeof(two));
+        ASSERT_EQ((long long)n1, (long long)n2);
+        ASSERT_STR_EQ(one, two);
+        rtx_end(&c);
+        rtx_frozen_take(&after, "job-twice");
+        ASSERT(rtx_frozen_same(&before, &after));
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("a ref the survey already decided preflights decided, queuing nothing")
+    {
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        char body[4096], other[4096], ws[1200];
+        rtx_isolate("preflight-known");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"));
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction_sel(body, sizeof(body), "receiver", "",
+                          "Already decided work.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-done", body, 1));
+        rtx_opts_ws(&o, ws);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-done"), 1);
+        /* The dry survey decides it the same way: reconciled, not
+         * re-admitted. The live beat's answer marker is cleared first so
+         * the survey replays the row instead of skipping it as already
+         * answered — the marker is mail de-duplication, not work state. */
+        ASSERT(rtx_clear_answers());
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        (void)json_push_kv_str(&c.input, "workspace", ws);
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        ASSERT_EQ(rtx_reply_int(&c, "reconciled"), 1);
+        rtx_end(&c);
+        rtx_frozen_take(&before, "job-done");
+        rtx_preflight(&c, ws, "job-done", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "decided");
+        ASSERT(rtx_reply_bool(&c, "known"));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "stage"), "queued");
+        ASSERT_EQ(rtx_reply_int(&c, "seq"), 1);
+        rtx_end(&c);
+        /* The same ref under different bytes is a conflict, not work. */
+        rtx_direction_sel(other, sizeof(other), "receiver", "",
+                          "Something else entirely.");
+        rtx_preflight(&c, ws, "job-done", "chatgpt",
+                      rtx_ident_binding("chatgpt"), other, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "refused");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "code"), "RECEIVE_REF_CONFLICT");
+        rtx_end(&c);
+        rtx_frozen_take(&after, "job-done");
+        ASSERT(rtx_frozen_same(&before, &after));
+        ASSERT_EQ(rtx_queue_count("queued", "job-done"), 1);
+        ASSERT_EQ(rtx_answers("job-done", "state=accepted"), 1);
+        rtx_restore();
+        PASS();
+    }
+
+_test_next:;
+    rtx_restore();
+    return failures;
+}
 #endif /* !defined(_WIN32) */
 
 int test_devagent_receive(void);
@@ -995,6 +1357,7 @@ int test_devagent_receive(void)
 #if !defined(_WIN32)
     failures += test_receive_intake_paging();
     failures += test_receive_queue_order();
+    failures += test_receive_preflight();
 
     TEST("a granted directive becomes one queue row and one accept")
     {
