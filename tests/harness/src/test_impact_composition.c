@@ -5705,6 +5705,25 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
                             stubs[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
         }
+        /* The provisioned checker binaries a sealed generation carries
+         * after the docs-tools step; without them no fresh verdict below
+         * could be told apart from a missing toolchain. */
+        static const char *const tools[] = {
+            "build/bin/z23-lint",
+            "build/bin/z23-fleet-observe",
+        };
+        for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
+            ASSERT(ic_write(generation, tools[i], ""));
+            ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
+                            tools[i]) < (int)sizeof(script));
+            ASSERT(chmod(script, 0755) == 0);
+            /* The bare dir below tests the checker layer, not the
+             * toolchain layer, so it carries the same binaries. */
+            ASSERT(ic_write(bare, tools[i], ""));
+            ASSERT(snprintf(script, sizeof(script), "%s/%s", bare,
+                            tools[i]) < (int)sizeof(script));
+            ASSERT(chmod(script, 0755) == 0);
+        }
         /* All fresh: the seam passes and names nothing. */
         char why[256] = {0};
         ASSERT(zcl_dev_proof_test_generation_docs_fresh(generation, why,
@@ -5731,6 +5750,80 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
                       "tools/lint/check_capability_inventory_generated.sh");
         ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s' '%s'",
                                 generation, bare) < sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+        PASS();
+#endif
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
+{
+    int failures = 0;
+    TEST("proof generation: missing checker binaries refuse as tool failure, "
+         "never stale docs") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        static const char *const stubs[] = {
+            "tools/lint/check_capability_inventory_generated.sh",
+            "tools/lint/check_fleet_facts.sh",
+            "tools/lint/check_fleet_observations.sh",
+            "tools/scripts/check_doc_counts.sh",
+        };
+        static const char *const tools[] = {
+            "build/bin/z23-lint",
+            "build/bin/z23-fleet-observe",
+        };
+        char generation[4096], script[4352], cmd[8704];
+        test_make_tmpdir(generation, sizeof(generation),
+                         "impact_composition", "docs-tools-missing");
+        for (size_t i = 0; i < sizeof(stubs) / sizeof(stubs[0]); i++) {
+            ASSERT(ic_write(generation, stubs[i], "#!/bin/sh\nexit 0\n"));
+            ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
+                            stubs[i]) < (int)sizeof(script));
+            ASSERT(chmod(script, 0755) == 0);
+        }
+        /* Fresh checkers but an empty build/bin: a typed tool refusal that
+         * names the first missing binary, never doc drift. */
+        char why[256] = {0};
+        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
+                                                         sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generated_docs_tools_missing:"
+                      "build/bin/z23-lint");
+        /* Provisioned binaries, but the checker exec-fails exactly the way
+         * a missing z23-lint fails in a fresh generation (rc=127 plus the
+         * shell's ENOENT text): the rc is preserved in a typed tool
+         * failure, never reported as stale docs. */
+        for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
+            ASSERT(ic_write(generation, tools[i], ""));
+            ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
+                            tools[i]) < (int)sizeof(script));
+            ASSERT(chmod(script, 0755) == 0);
+        }
+        ASSERT(ic_write(generation, stubs[1],
+                        "#!/bin/sh\necho \"$0: line 1: build/bin/z23-lint: "
+                        "No such file or directory\" >&2\nexit 127\n"));
+        memset(why, 0, sizeof(why));
+        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
+                                                         sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generated_docs_checker_tool_failure:"
+                      "tools/lint/check_fleet_facts.sh:rc_127");
+        /* A checker that refuses with FATAL over a missing input (rc=2, the
+         * way check_fleet_observations.sh reports a missing generator
+         * binary) is likewise a tool failure, not drift. */
+        ASSERT(ic_write(generation, stubs[1], "#!/bin/sh\nexit 0\n"));
+        ASSERT(ic_write(generation, stubs[2],
+                        "#!/bin/sh\necho \"[check_fleet_observations] FATAL "
+                        "-- build/bin/z23-fleet-observe is missing\" >&2\n"
+                        "exit 2\n"));
+        memset(why, 0, sizeof(why));
+        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
+                                                         sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generated_docs_checker_tool_failure:"
+                      "tools/lint/check_fleet_observations.sh:rc_2");
+        ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s'",
+                                generation) < sizeof(cmd));
         ASSERT(system(cmd) == 0);
         PASS();
 #endif
@@ -6817,6 +6910,7 @@ int test_impact_composition(void)
     failures += test_ic_generation_hooks_configure_points_at_its_own_copy();
 #if !defined(_WIN32)
     failures += test_ic_generation_docs_fresh_refuses_stale();
+    failures += test_ic_generation_docs_fresh_refuses_missing_tools();
     failures += test_ic_generation_dependencies_survive_vendor_cleanup();
     failures += test_pw_original_plan_refreshes_before_sealing();
 #endif

@@ -4595,54 +4595,133 @@ static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
 };
 #define DP_DOCS_FRESH_N (sizeof(DP_DOCS_FRESH) / sizeof(DP_DOCS_FRESH[0]))
 
+/* The checker binaries a sealed generation must carry before any checker
+ * above may run: check_fleet_facts.sh execs z23-lint and
+ * check_fleet_observations.sh execs z23-fleet-observe. One canonical list
+ * feeds both the provisioning step and the fresh gate below, so the gate
+ * can never drift out of sync with what provisioning provides. */
+static const char *const DP_DOCS_TOOLS[] = {
+    "build/bin/z23-lint",
+    "build/bin/z23-fleet-observe",
+};
+#define DP_DOCS_TOOLS_N (sizeof(DP_DOCS_TOOLS) / sizeof(DP_DOCS_TOOLS[0]))
+
+/* Merged-output markers that prove a checker failed on its toolchain or
+ * inputs rather than on drifted docs. Every checker above reports genuine
+ * drift with FAIL and reserves FATAL for a broken environment, so these
+ * markers never match a real stale verdict. */
+static const char *const DP_DOCS_TOOL_MARKERS[] = {
+    "No such file or directory",
+    "not found",
+    "command not found",
+    "Permission denied",
+    "FATAL",
+    "is missing",
+    "ENOENT",
+};
+
+static bool dp_docs_output_signals_tool_failure(const char *out, int rc)
+{
+    /* No checker documents 126/127 as a drift verdict: the shell and the
+     * spawn child both use them exclusively for exec/setup failure. */
+    if (rc == 126 || rc == 127) return true;
+    if (!out) return false;
+    for (size_t i = 0; i < sizeof(DP_DOCS_TOOL_MARKERS) /
+                                sizeof(DP_DOCS_TOOL_MARKERS[0]);
+         i++) {
+        if (strstr(out, DP_DOCS_TOOL_MARKERS[i])) return true;
+    }
+    return false;
+}
+
 /* Measured 11 s for the inventory check on a loaded host; ten times that
  * still fails two orders of magnitude faster than the proof it guards. */
 #define DP_DOCS_FRESH_TIMEOUT_MS 120000
 
+/* The provisioning step builds these before any checker runs, but the
+ * gate must not assume it: a checker that exec-fails on a missing binary
+ * exits 127 with the shell's ENOENT text, which is a broken toolchain,
+ * never doc drift. Refuse here with the missing binary named instead of
+ * running checkers that cannot run. */
+static bool dp_docs_tools_present(const char *generation,
+                                  char *why, size_t why_len)
+{
+    for (size_t i = 0; i < DP_DOCS_TOOLS_N; i++) {
+        char tool[PATH_MAX];
+        if (!generation || !generation[0] ||
+            snprintf(tool, sizeof(tool), "%s/%s", generation,
+                     DP_DOCS_TOOLS[i]) >= (int)sizeof(tool) ||
+            access(tool, X_OK) != 0) {
+            proof_whyf(why, why_len, "proof_generated_docs_tools_missing:%s",
+                       DP_DOCS_TOOLS[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool dp_docs_fresh_run_checker(
+    const char *generation, const struct dp_docs_fresh_artifact *artifact,
+    char *why, size_t why_len)
+{
+    char script[PATH_MAX];
+    if (!generation || !generation[0] ||
+        snprintf(script, sizeof(script), "%s/%s", generation,
+                 artifact->check) >= (int)sizeof(script)) {
+        proof_why(why, why_len, "proof_generated_docs_path_invalid");
+        return false;
+    }
+    /* The generation's own copy: the check script resolves its tree
+     * from its own location, so this binds the verdict to the sealed
+     * bytes rather than the submitting checkout. */
+    struct stat st;
+    if (stat(script, &st) != 0 || !S_ISREG(st.st_mode)) {
+        proof_whyf(why, why_len, "proof_generated_docs_checker_missing:%s",
+                   artifact->check);
+        return false;
+    }
+    const char *argv[] = { script, NULL };
+    char out[4096];
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_observed(argv, out, sizeof(out),
+                                               DP_DOCS_FRESH_TIMEOUT_MS,
+                                               &timed_out);
+    if (timed_out) {
+        proof_whyf(why, why_len, "proof_generated_docs_check_timeout:%s",
+                   artifact->rel);
+        return false;
+    }
+    if (rc < 0) {
+        proof_whyf(why, why_len, "proof_generated_docs_checker_missing:%s",
+                   artifact->check);
+        return false;
+    }
+    if (rc != 0) {
+        /* A checker that dies on its toolchain (exec-failure rc, the
+         * shell's ENOENT text, or a FATAL over a missing input) keeps
+         * its rc and check identity in a typed tool failure. Only a
+         * checker that ran and reported drift refuses as stale. */
+        if (dp_docs_output_signals_tool_failure(out, rc)) {
+            proof_whyf(why, why_len,
+                       "proof_generated_docs_checker_tool_failure:%s:rc_%d",
+                       artifact->check, rc);
+            return false;
+        }
+        proof_whyf(why, why_len, "proof_generated_docs_stale:%s (%s)",
+                   artifact->rel, artifact->regen);
+        return false;
+    }
+    return true;
+}
+
 static bool dp_generation_docs_fresh(const char *generation,
                                      char *why, size_t why_len)
 {
+    if (!dp_docs_tools_present(generation, why, why_len)) return false;
     for (size_t i = 0; i < DP_DOCS_FRESH_N; i++) {
-        char script[PATH_MAX];
-        if (!generation || !generation[0] ||
-            snprintf(script, sizeof(script), "%s/%s", generation,
-                     DP_DOCS_FRESH[i].check) >= (int)sizeof(script)) {
-            proof_why(why, why_len, "proof_generated_docs_path_invalid");
+        if (!dp_docs_fresh_run_checker(generation, &DP_DOCS_FRESH[i], why,
+                                       why_len))
             return false;
-        }
-        /* The generation's own copy: the check script resolves its tree
-         * from its own location, so this binds the verdict to the sealed
-         * bytes rather than the submitting checkout. */
-        struct stat st;
-        if (stat(script, &st) != 0 || !S_ISREG(st.st_mode)) {
-            proof_whyf(why, why_len,
-                       "proof_generated_docs_checker_missing:%s",
-                       DP_DOCS_FRESH[i].check);
-            return false;
-        }
-        const char *argv[] = { script, NULL };
-        char out[4096];
-        bool timed_out = false;
-        int rc = zcl_spawn_capture_merged_observed(argv, out, sizeof(out),
-                                                   DP_DOCS_FRESH_TIMEOUT_MS,
-                                                   &timed_out);
-        if (timed_out) {
-            proof_whyf(why, why_len,
-                       "proof_generated_docs_check_timeout:%s",
-                       DP_DOCS_FRESH[i].rel);
-            return false;
-        }
-        if (rc < 0) {
-            proof_whyf(why, why_len,
-                       "proof_generated_docs_checker_missing:%s",
-                       DP_DOCS_FRESH[i].check);
-            return false;
-        }
-        if (rc != 0) {
-            proof_whyf(why, why_len, "proof_generated_docs_stale:%s (%s)",
-                       DP_DOCS_FRESH[i].rel, DP_DOCS_FRESH[i].regen);
-            return false;
-        }
     }
     return true;
 }
@@ -4659,27 +4738,26 @@ bool zcl_dev_proof_test_generation_docs_fresh(const char *generation,
  * jobs, two checker binaries, NULL. */
 #define DP_DOCS_TOOLS_ARGV_CAP 8
 
-/* The exact checker binaries the docs-fresh gate execs out of the sealed
- * generation. check_capability_inventory_generated.sh compiles its own
- * checker with cc and check_doc_counts.sh is pure shell, so only these
- * two need provisioning; both are direct-cc tools with no generated
- * inputs, so they build in a bare generation. `jobs` is stored by pointer
- * and must outlive argv. */
+/* The checker binaries the docs-fresh gate execs out of the sealed
+ * generation (DP_DOCS_TOOLS, shared with the gate so provisioning and
+ * verification can never name different binaries).
+ * check_capability_inventory_generated.sh compiles its own checker with cc
+ * and check_doc_counts.sh is pure shell, so only these two need
+ * provisioning; both are direct-cc tools with no generated inputs, so
+ * they build in a bare generation. `jobs` is stored by pointer and must
+ * outlive argv. */
 static bool dp_docs_tools_argv(const char *jobs, const char **argv,
                                size_t argv_cap)
 {
-    static const char *const tools[] = {
-        "build/bin/z23-lint",
-        "build/bin/z23-fleet-observe",
-    };
     size_t n = 0;
+    _Static_assert(3 + DP_DOCS_TOOLS_N + 1 <= DP_DOCS_TOOLS_ARGV_CAP,
+                   "docs-tools argv cap covers make, jobs, binaries, NULL");
     if (!jobs || !*jobs || !argv || argv_cap < DP_DOCS_TOOLS_ARGV_CAP)
         return false;
     argv[n++] = "make";
     argv[n++] = "--no-print-directory";
     argv[n++] = jobs;
-    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
-        argv[n++] = tools[i];
+    for (size_t i = 0; i < DP_DOCS_TOOLS_N; i++) argv[n++] = DP_DOCS_TOOLS[i];
     argv[n] = NULL;
     return true;
 }
