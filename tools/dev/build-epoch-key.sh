@@ -62,7 +62,70 @@ case "$MODE" in
 compiler-id)
     CC_COMMAND="${1:-}"
     CXX_COMMAND="${2:-${1:-}}"
+    REPO_ROOT="${3:-}"
     [ -n "$CC_COMMAND" ] || fail 'compiler-id requires the effective CC command'
+    # Cross-tree scope (ZRC-0007 probe-before-build): the identity must be
+    # comparable across checkouts and generations of one tree, so the scope
+    # root is a REQUIRED input, never a cwd default. A caller running in the
+    # wrong directory with a silent cwd default would mint a well-formed
+    # digest scoped to the wrong root; refusing without one makes that a
+    # loud error instead.
+    [ -n "$REPO_ROOT" ] || fail 'compiler-id requires the repository root scope'
+    ROOT_CANON="$(readlink -f -- "$REPO_ROOT" 2>/dev/null || true)"
+    REPO_ROOT_TRIMMED="${REPO_ROOT%/}"
+    [ -n "$ROOT_CANON" ] && [ -n "$REPO_ROOT_TRIMMED" ] && [ -d "$ROOT_CANON" ] ||
+        fail "compiler-id repository root is not a directory: $REPO_ROOT"
+
+    # A wrapper addressed through the repository (Make's `build/bin/zcc cc`,
+    # spelled via $(CURDIR) at parse time) resolves to a different absolute
+    # path in every checkout and generation of the same tree. Strip exactly
+    # one leading root prefix — canonical first, then the caller's literal
+    # spelling (Make hands $(CURDIR), which may spell a symlinked prefix
+    # logically) — so the bound argv spelling is root-relative. Anything not
+    # under the root keeps its absolute spelling below.
+    strip_repo_root()
+    {
+        local var_name="$1" value root stripped
+        value="${!var_name}"
+        for root in "$ROOT_CANON" "$REPO_ROOT_TRIMMED"; do
+            # Quoted-prefix removal is a literal string match (unlike case
+            # patterns, where glob characters in a root path would match
+            # more than the root itself). A non-prefix leaves the value
+            # unchanged, which the inequality detects.
+            stripped="${value#"$root"/}"
+            if [ "$stripped" != "$value" ]; then
+                printf -v "$var_name" '%s' "$stripped"
+                return 0
+            fi
+        done
+        return 0
+    }
+    strip_repo_root CC_COMMAND
+    strip_repo_root CXX_COMMAND
+    # v5 scope grounds relative tool addresses: a CC/CXX argv[0] spelled
+    # relative to the scope root (including one stripped above) executes the
+    # file under the root no matter where the caller runs — Make derives at
+    # parse time with cwd=root, but selftest probes re-derive from fixture
+    # directories. A relative spelling absent under the root keeps today's
+    # cwd-relative meaning and fails loudly if it resolves to nothing.
+    # Callers that mean cwd-relative must pass an absolute path or run at
+    # the root; a slash-containing relative address unambiguously means
+    # scope-relative. Bare tool names (no slash) stay POSIX PATH lookups:
+    # grounding those against the root would let any same-named file under
+    # the tree hijack the common `CC=cc` spelling.
+    ground_argv_tool()
+    {
+        local -n argv_ref="$1"
+        case "${argv_ref[0]}" in
+            /*) return 0 ;;
+            */*)
+                [ -f "$ROOT_CANON/${argv_ref[0]}" ] ||
+                    return 0
+                argv_ref[0]="$ROOT_CANON/${argv_ref[0]}"
+                ;;
+        esac
+        return 0
+    }
 
     safe_command CC "$CC_COMMAND"
     safe_command CXX "$CXX_COMMAND"
@@ -72,6 +135,8 @@ compiler-id)
     [ "${#CXX_ARGV[@]}" -gt 0 ] || fail 'CXX parsed to an empty argv'
     case "${CC_ARGV[0]}" in -*|*=*) fail 'CC argv[0] is not an executable token' ;; esac
     case "${CXX_ARGV[0]}" in -*|*=*) fail 'CXX argv[0] is not an executable token' ;; esac
+    ground_argv_tool CC_ARGV
+    ground_argv_tool CXX_ARGV
     command -v "${CC_ARGV[0]}" >/dev/null 2>&1 ||
         fail "compiler command not found: ${CC_ARGV[0]}"
     command -v "${CXX_ARGV[0]}" >/dev/null 2>&1 ||
@@ -87,15 +152,20 @@ compiler-id)
         fail 'could not create compiler fingerprint workspace'
     PREIMAGE="$WORK/compiler.preimage"
     : > "$PREIMAGE"
-    # v4 scopes a compile wrapper's configuration file to the wrapper that is
-    # argv[0] of CC (see the wrapper section below); v3 removed only the
-    # incidental current directory in Clang's verbose preprocessing
-    # diagnostics. Each bump retires every identity and memo entry recorded
-    # under the older rule, including copied Tor provenance manifests: the
-    # preimage's record SET changed, not just a value inside it, so every
-    # developer's epochs recompile once. That is the correct price for an
-    # identity that no longer moves when an unrelated file does.
-    printf 'zcl.build_compiler_identity.v4\0cc_command\0%s\0cxx_command\0%s\0' \
+    # v5 scopes the identity to a repository root: a tool resolved under that
+    # root is bound by its root-relative address (not its absolute path), and
+    # a CC/CXX command spelled through the root is stripped to the same
+    # relative spelling — so two checkouts/generations of one tree with
+    # identical bytes key identically (ZRC-0007 probe-before-build). v4 scoped
+    # a compile wrapper's configuration file to the wrapper that is argv[0]
+    # of CC (see the wrapper section below); v3 removed only the incidental
+    # current directory in Clang's verbose preprocessing diagnostics. Each
+    # bump retires every identity and memo entry recorded under the older
+    # rule, including copied Tor provenance manifests: the preimage's record
+    # SET changed, not just a value inside it, so every developer's epochs
+    # recompile once. That is the correct price for an identity that no
+    # longer moves when an unrelated file does.
+    printf 'zcl.build_compiler_identity.v5\0cc_command\0%s\0cxx_command\0%s\0' \
         "$CC_COMMAND" "$CXX_COMMAND" \
         >> "$PREIMAGE"
 
@@ -139,10 +209,20 @@ compiler-id)
     declare -A SEEN_TOOL=()
     fingerprint_tool()
     {
-        local label="$1" requested="$2" resolved digest
+        local label="$1" requested="$2" resolved digest tool_address
         [ -n "$requested" ] || return 0
         if [[ "$requested" == */* ]]; then
-            resolved="$(readlink -f -- "$requested" 2>/dev/null || true)"
+            # Same scope grounding as argv[0] above: a relative tool
+            # address resolves against the scope root first, so a
+            # derivation from any working directory fingerprints the
+            # same bytes. Falls back to cwd-relative, then to the
+            # explicit-absence record below.
+            if [[ "$requested" != /* ]] &&
+                [ -f "$ROOT_CANON/$requested" ]; then
+                resolved="$(readlink -f -- "$ROOT_CANON/$requested" 2>/dev/null || true)"
+            else
+                resolved="$(readlink -f -- "$requested" 2>/dev/null || true)"
+            fi
         else
             resolved="$(command -v -- "$requested" 2>/dev/null || true)"
             [ -n "$resolved" ] &&
@@ -164,8 +244,17 @@ compiler-id)
         SEEN_TOOL["$resolved"]=1
         digest="$(sha256_file "$resolved")" ||
             fail "could not hash compiler tool: $resolved"
+        # A tool is identified by its bytes; its ADDRESS is bound
+        # root-relative when it lives under the scope root, absolute
+        # otherwise. Absolute spellings always lead with `/` and relative
+        # ones never do, so the two shapes cannot collide. A host tool
+        # (/usr/bin/cc) keeps the exact v4 record bytes.
+        tool_address="$resolved"
+        case "$resolved" in
+            "$ROOT_CANON/"*) tool_address="${resolved#"$ROOT_CANON/"}" ;;
+        esac
         printf 'tool\0%s\0%s\0%s\0' \
-            "$label" "$resolved" "$digest" \
+            "$label" "$tool_address" "$digest" \
             >> "$PREIMAGE"
     }
 
@@ -720,6 +809,6 @@ build-system-id)
     ;;
 
 *)
-    fail 'usage: build-epoch-key.sh compiler-id CC [CXX] | compiler-bytes-id CC | key COMPILER PROFILE COMPILE_FLAGS LINK_FLAGS BUILD_SYSTEM_ID | build-system-id'
+    fail 'usage: build-epoch-key.sh compiler-id CC [CXX] ROOT | compiler-bytes-id CC | key COMPILER PROFILE COMPILE_FLAGS LINK_FLAGS BUILD_SYSTEM_ID | build-system-id'
     ;;
 esac

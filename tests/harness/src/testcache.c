@@ -85,6 +85,7 @@ struct testcache {
     char              root[4096];
     char              store_root[4096];
     struct trc_memo   memo;
+    struct testcache_stats stats;
     char            (*closure)[256];   /* TRC_MAX_CLOSURE scratch rows */
     /* Include-graph liveness, from the graph itself, measured once at open. */
     size_t            dep_count;       /* depfiles the graph was built from */
@@ -158,10 +159,12 @@ static int64_t trc_stat_mtime_ns(const struct stat *st)
 }
 
 /* SHA3-256 the bytes of <root>/<relpath> via a streaming read (no whole-file
- * buffer), and report the file's mtime. Returns false (and logs) if the file
- * cannot be opened/read. */
+ * buffer), and report the file's mtime and content byte count (the stats
+ * ledger for "cost grows with new information"). Returns false (and logs)
+ * if the file cannot be opened/read. */
 static bool trc_hash_file(const char *root, const char *relpath,
-                          uint8_t out[32], int64_t *out_mtime_ns)
+                          uint8_t out[32], int64_t *out_mtime_ns,
+                          size_t *out_bytes)
 {
     char path[4200];
     int n = snprintf(path, sizeof(path), "%s/%s", root, relpath);
@@ -184,9 +187,12 @@ static bool trc_hash_file(const char *root, const char *relpath,
     sha3_256_init(&ctx);
     unsigned char buf[65536];
     size_t got;
+    size_t total = 0;
     bool ok = true;
-    while ((got = fread(buf, 1, sizeof(buf), fp)) > 0)
+    while ((got = fread(buf, 1, sizeof(buf), fp)) > 0) {
         sha3_256_write(&ctx, buf, got);
+        total += got;
+    }
     if (ferror(fp)) {
         ZCL_LOG_EMIT_AT(ZCL_LOG_WARN, "[testcache] read error: %s\n", path);
         ok = false;
@@ -195,6 +201,7 @@ static bool trc_hash_file(const char *root, const char *relpath,
     if (ok) {
         sha3_256_finalize(&ctx, out);
         *out_mtime_ns = trc_stat_mtime_ns(&st);
+        *out_bytes = total;
     }
     return ok;
 }
@@ -212,14 +219,18 @@ static bool trc_file_hash(struct testcache *tc, const char *relpath,
         if (strcmp(m->slots[j].path, relpath) == 0) {
             memcpy(out, m->slots[j].hash, 32);
             *out_mtime_ns = m->slots[j].mtime_ns;
+            tc->stats.file_hash_memo_hits++;
             return true;
         }
         j = (j + 1) & (m->cap - 1);
     }
     uint8_t h[32];
     int64_t mt = 0;
-    if (!trc_hash_file(tc->root, relpath, h, &mt))
+    size_t nbytes = 0;
+    if (!trc_hash_file(tc->root, relpath, h, &mt, &nbytes))
         return false;
+    tc->stats.file_hash_reads++;
+    tc->stats.sha3_content_bytes += (uint64_t)nbytes;
     char *dup = zcl_strdup(relpath, "trc_memo_key");
     if (!dup)
         return false;
@@ -792,6 +803,7 @@ static void testcache_probe_group_internal(
     bool truncated = false, root_found = false;
     int nc = codeindex_forward_closure(tc->ci, group_name, tc->closure,
                                        TRC_MAX_CLOSURE, &truncated, &root_found);
+    tc->stats.closure_queries++;
     if (nc < 0) {
         out->code = TESTCACHE_R_CLOSURE_ERROR;
         snprintf(out->reason, sizeof(out->reason), "closure query error");
@@ -869,6 +881,7 @@ static void testcache_probe_group_internal(
     /* Is there a stored PASS at this exact key? Probe existence first (a quiet
      * access() — a MISS is the common, non-error case) before the verifying
      * load, so a cold cache never spams the log with "object not found". */
+    tc->stats.verdict_lookups++;
     if (vcs_object_has(tc->store_root, out->key)) {
         uint8_t *buf = NULL;
         size_t len = 0;
@@ -881,6 +894,7 @@ static void testcache_probe_group_internal(
                     memcmp(r->key_echo, out->key, 32) == 0) {
                     out->hit = true;
                     out->hit_flaky = (r->rsvd[0] & TRC_FLAKY_BIT) != 0;
+                    tc->stats.verdict_hits++;
                 }
             }
             free(buf);
@@ -904,6 +918,747 @@ void testcache_probe_group_proof(
         return;
     }
     testcache_probe_group_internal(tc, group_name, contract, true, out);
+}
+
+void testcache_stats(const struct testcache *tc, struct testcache_stats *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (tc && out) memcpy(out, &tc->stats, sizeof(*out));
+}
+
+void testcache_stats_reset(struct testcache *tc)
+{
+    if (tc) memset(&tc->stats, 0, sizeof(tc->stats));
+}
+
+void testcache_current_envkey(uint8_t out[32])
+{
+    if (out) trc_env_digest(out);
+}
+
+/* ── Probe capsule ───────────────────────────────────────────────────────
+ * Layout (all integers little-endian; see testcache.h for the contract):
+ *   magic[8] "ZTCAP1\0\0" | version u32=1
+ *   toolkey: u32 len + bytes (live toolkey string, compared live)
+ *   envkey[32] (compared against a live recompute)
+ *   caller bindings: source_id u32+bytes(<=64), mutation_id u32+bytes,
+ *     cas_present u8 + cas u32+bytes, graph_present u8 + graph u32+bytes,
+ *     dep_count u64, dep_newest_ns u64-bits
+ *   slots: u32 n (<=8192) + per slot: name u32+bytes(1..128),
+ *     contract u32 (<=GOLDEN_TIMING), key_valid u8, key[32],
+ *     cacheable/hit/hit_flaky u8, code u32 (<R__COUNT), n_closure i32
+ *   capsule SHA3-256 over every preceding byte (domain-separated)
+ * Strict: trailing bytes after the hash refuse; anything over cap
+ * (names, slots, file size) refuses. The hash is integrity only — it
+ * never addresses a verdict. */
+#define TRC_CAP_MAGIC "ZTCAP1\0\0"
+#define TRC_CAP_VERSION 1u
+#define TRC_CAP_MAX_SLOTS 8192u
+#define TRC_CAP_MAX_NAME 128u
+#define TRC_CAP_MAX_FILE (8u * 1024u * 1024u)
+#define TRC_CAP_DOMAIN "zcl.testcache.capsule.v1"
+
+static void trc_cap_put_u64(uint8_t *p, uint64_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+    p[4] = (uint8_t)(v >> 32);
+    p[5] = (uint8_t)(v >> 40);
+    p[6] = (uint8_t)(v >> 48);
+    p[7] = (uint8_t)(v >> 56);
+}
+
+/* Bounded NUL-terminated text: length, or SIZE_MAX when unterminated /
+ * over cap. */
+static size_t trc_cap_text_len(const char *s, size_t cap)
+{
+    size_t n = 0;
+    if (!s) return SIZE_MAX;
+    while (n < cap && s[n]) n++;
+    if (n >= cap) return SIZE_MAX;
+    return n;
+}
+
+/* Serialized body size, or 0 when any bound refuses. */
+static size_t trc_cap_body_size(const char *const *names, size_t n,
+                                const struct testcache_capsule_bindings *bind,
+                                size_t toolkey_len)
+{
+    size_t sid, mid, cas, graph, total, i;
+    if (!names || !bind || n > TRC_CAP_MAX_SLOTS) return 0;
+    sid = trc_cap_text_len(bind->source_id, 65);
+    mid = trc_cap_text_len(bind->mutation_id, 65);
+    if (sid > 64 || mid > 64) return 0;
+    cas = bind->source_cas_present
+        ? trc_cap_text_len(bind->source_cas, 65) : 0;
+    graph = bind->graph_root_present
+        ? trc_cap_text_len(bind->graph_root, 65) : 0;
+    if (cas > 64 || graph > 64) return 0;
+    total = 8 + 4 + 4 + toolkey_len + 32 + 4 + sid + 4 + mid + 1 + 4 + cas +
+            1 + 4 + graph + 8 + 8 + 4;
+    for (i = 0; i < n; i++) {
+        size_t nl;
+        if (!names[i]) return 0;
+        nl = strlen(names[i]);
+        if (nl == 0 || nl > TRC_CAP_MAX_NAME) return 0;
+        total += 4 + nl + 4 + 1 + 32 + 1 + 1 + 1 + 4 + 4;
+        if (total > TRC_CAP_MAX_FILE) return 0;
+    }
+    return total;
+}
+
+static uint8_t *trc_cap_emit_text(uint8_t *p, const char *s, size_t len)
+{
+    trc_put_u32le(p, (uint32_t)len);
+    memcpy(p + 4, s, len);
+    return p + 4 + len;
+}
+
+/* Argument validation for the writer: bounded slots, a bounded toolkey,
+ * and a body that fits the file cap with its 32-byte seal. */
+static bool trc_cap_write_pre(struct testcache *tc, const char *path,
+                              const char *const *names, size_t n,
+                              const struct testcache_probe *probes,
+                              const struct testcache_capsule_bindings *bind,
+                              const char **toolkey_out, size_t *tk_len_out,
+                              size_t *body_len_out)
+{
+    const char *toolkey;
+    size_t toolkey_len, body_len;
+    if (!tc || !path || !path[0] || !probes || !bind || !names) return false;
+    if (n > TRC_CAP_MAX_SLOTS) return false;
+    toolkey = testcache_toolkey();
+    toolkey_len = strlen(toolkey);
+    if (toolkey_len > 4096) return false;
+    body_len = trc_cap_body_size(names, n, bind, toolkey_len);
+    if (body_len == 0 || body_len + 32 > TRC_CAP_MAX_FILE) return false;
+    *toolkey_out = toolkey;
+    *tk_len_out = toolkey_len;
+    *body_len_out = body_len;
+    return true;
+}
+
+/* Header emit: magic, version, toolkey, live env digest, source/mutation
+ * identity, optional CAS/graph presence, and dep-graph facts. */
+static uint8_t *trc_cap_emit_head(uint8_t *p, struct testcache *tc,
+                                  const struct testcache_capsule_bindings *bind,
+                                  const char *toolkey, size_t toolkey_len)
+{
+    size_t cas_len, graph_len;
+    memcpy(p, TRC_CAP_MAGIC, 8);
+    p += 8;
+    trc_put_u32le(p, TRC_CAP_VERSION);
+    p += 4;
+    p = trc_cap_emit_text(p, toolkey, toolkey_len);
+    trc_env_digest(p);
+    p += 32;
+    p = trc_cap_emit_text(p, bind->source_id, strlen(bind->source_id));
+    p = trc_cap_emit_text(p, bind->mutation_id, strlen(bind->mutation_id));
+    *p++ = bind->source_cas_present ? 1 : 0;
+    cas_len = bind->source_cas_present ? strlen(bind->source_cas) : 0;
+    p = trc_cap_emit_text(p, bind->source_cas, cas_len);
+    *p++ = bind->graph_root_present ? 1 : 0;
+    graph_len = bind->graph_root_present ? strlen(bind->graph_root) : 0;
+    p = trc_cap_emit_text(p, bind->graph_root, graph_len);
+    trc_cap_put_u64(p, (uint64_t)tc->dep_count);
+    p += 8;
+    trc_cap_put_u64(p, (uint64_t)tc->dep_newest_ns);
+    p += 8;
+    return p;
+}
+
+/* Slot emit: count, then one ordered record per group. */
+static uint8_t *trc_cap_emit_slots(uint8_t *p, const char *const *names,
+                                   const enum zcl_test_proof_contract *contracts,
+                                   size_t n,
+                                   const struct testcache_probe *probes)
+{
+    size_t i;
+    trc_put_u32le(p, (uint32_t)n);
+    p += 4;
+    for (i = 0; i < n; i++) {
+        size_t nl = strlen(names[i]);
+        enum zcl_test_proof_contract contract = ZCL_TEST_PROOF_NONE;
+        if (contracts) contract = contracts[i];
+        trc_put_u32le(p, (uint32_t)nl);
+        p += 4;
+        memcpy(p, names[i], nl);
+        p += nl;
+        trc_put_u32le(p, (uint32_t)contract);
+        p += 4;
+        *p++ = probes[i].key_valid ? 1 : 0;
+        memcpy(p, probes[i].key, 32);
+        p += 32;
+        *p++ = probes[i].cacheable ? 1 : 0;
+        *p++ = probes[i].hit ? 1 : 0;
+        *p++ = probes[i].hit_flaky ? 1 : 0;
+        trc_put_u32le(p, (uint32_t)probes[i].code);
+        p += 4;
+        trc_put_u32le(p, (uint32_t)probes[i].n_closure);
+        p += 4;
+    }
+    return p;
+}
+
+/* Seal and store: SHA3 over the domain plus body, digest appended, one
+ * write with a close check. */
+static bool trc_cap_seal_store(uint8_t *body, size_t body_len, const char *path)
+{
+    struct sha3_256_ctx ctx;
+    uint8_t digest[32];
+    FILE *f;
+    bool ok;
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const uint8_t *)TRC_CAP_DOMAIN,
+                   strlen(TRC_CAP_DOMAIN));
+    sha3_256_write(&ctx, body, body_len);
+    sha3_256_finalize(&ctx, digest);
+    memcpy(body + body_len, digest, 32);
+    f = fopen(path, "wb");
+    ok = f && fwrite(body, 1, body_len + 32, f) == body_len + 32;
+    if (f) {
+        if (fclose(f) != 0) ok = false;
+    } else {
+        ok = false;
+    }
+    return ok;
+}
+
+bool testcache_capsule_write(struct testcache *tc, const char *path,
+                             const char *const *names,
+                             const enum zcl_test_proof_contract *contracts,
+                             size_t n, const struct testcache_probe *probes,
+                             const struct testcache_capsule_bindings *bind)
+{
+    const char *toolkey;
+    size_t toolkey_len, body_len;
+    uint8_t *body, *p;
+    bool ok;
+    if (!trc_cap_write_pre(tc, path, names, n, probes, bind, &toolkey,
+                           &toolkey_len, &body_len))
+        return false;
+    body = zcl_malloc(body_len + 32, "testcache_capsule");
+    if (!body) return false;
+    p = body;
+    p = trc_cap_emit_head(p, tc, bind, toolkey, toolkey_len);
+    p = trc_cap_emit_slots(p, names, contracts, n, probes);
+    ok = trc_cap_seal_store(body, body_len, path);
+    free(body);
+    return ok;
+}
+
+/* Bounded cursor over the capsule body: every read advances or latches
+ * `ok = false`, so a truncated file refuses instead of over-reading. */
+struct trc_cap_cursor {
+    const uint8_t *p;
+    size_t left;
+    bool ok;
+};
+
+static uint32_t trc_cap_u32(struct trc_cap_cursor *c)
+{
+    uint32_t v = 0;
+    if (!c || c->left < 4) {
+        if (c) c->ok = false;
+        return 0;
+    }
+    v = (uint32_t)c->p[0] | ((uint32_t)c->p[1] << 8) |
+        ((uint32_t)c->p[2] << 16) | ((uint32_t)c->p[3] << 24);
+    c->p += 4;
+    c->left -= 4;
+    return v;
+}
+
+static uint64_t trc_cap_u64(struct trc_cap_cursor *c)
+{
+    uint64_t lo = trc_cap_u32(c), hi = trc_cap_u32(c);
+    return lo | (hi << 32);
+}
+
+static bool trc_cap_bytes(struct trc_cap_cursor *c, uint8_t *out, size_t n)
+{
+    if (!c || !out || c->left < n) {
+        if (c) c->ok = false;
+        return false;
+    }
+    memcpy(out, c->p, n);
+    c->p += n;
+    c->left -= n;
+    return true;
+}
+
+static void trc_cap_why(char *why, size_t why_len, const char *msg)
+{
+    if (why && why_len > 0) {
+        snprintf(why, why_len, "%s", msg ? msg : "capsule refused");
+    }
+}
+
+/* Whole-file bounded read for the consumer: the capsule is written by us,
+ * but the file beside scratch is untrusted input — cap it hard. */
+static bool trc_cap_read(const char *path, uint8_t **bytes_out,
+                         size_t *len_out, char *why, size_t why_len)
+{
+    FILE *f;
+    long tell;
+    size_t len;
+    uint8_t *bytes;
+    if (!path || !path[0] || !bytes_out || !len_out) {
+        trc_cap_why(why, why_len, "no capsule path");
+        return false;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        trc_cap_why(why, why_len, "capsule unreadable");
+        return false;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        trc_cap_why(why, why_len, "capsule unseekable");
+        return false;
+    }
+    tell = ftell(f);
+    if (tell < 0 || (uint64_t)tell > TRC_CAP_MAX_FILE + 32) {
+        fclose(f);
+        trc_cap_why(why, why_len, "capsule too large");
+        return false;
+    }
+    len = (size_t)tell;
+    rewind(f);
+    bytes = zcl_malloc(len > 0 ? len : 1, "testcache_capsule_read");
+    if (!bytes) {
+        fclose(f);
+        trc_cap_why(why, why_len, "capsule alloc failed");
+        return false;
+    }
+    if (len > 0 && fread(bytes, 1, len, f) != len) {
+        free(bytes);
+        fclose(f);
+        trc_cap_why(why, why_len, "capsule unreadable");
+        return false;
+    }
+    fclose(f);
+    *bytes_out = bytes;
+    *len_out = len;
+    return true;
+}
+
+/* Magic, version, and the trailing integrity hash. Returns the body
+ * cursor on success: any byte difference anywhere refuses. */
+static bool trc_cap_verify(const uint8_t *bytes, size_t len,
+                           struct trc_cap_cursor *body, char *why,
+                           size_t why_len)
+{
+    struct sha3_256_ctx ctx;
+    uint8_t digest[32];
+    uint32_t version;
+    if (!bytes || len < 8 + 4 + 32 || !body) {
+        trc_cap_why(why, why_len, "capsule truncated");
+        return false;
+    }
+    if (memcmp(bytes, TRC_CAP_MAGIC, 8) != 0) {
+        trc_cap_why(why, why_len, "bad capsule magic");
+        return false;
+    }
+    version = (uint32_t)bytes[8] | ((uint32_t)bytes[9] << 8) |
+              ((uint32_t)bytes[10] << 16) | ((uint32_t)bytes[11] << 24);
+    if (version != TRC_CAP_VERSION) {
+        trc_cap_why(why, why_len, "capsule version drift");
+        return false;
+    }
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const uint8_t *)TRC_CAP_DOMAIN,
+                   strlen(TRC_CAP_DOMAIN));
+    sha3_256_write(&ctx, bytes, len - 32);
+    sha3_256_finalize(&ctx, digest);
+    if (memcmp(digest, bytes + len - 32, 32) != 0) {
+        trc_cap_why(why, why_len, "capsule hash mismatch");
+        return false;
+    }
+    body->p = bytes + 12;
+    body->left = len - 12 - 32;
+    body->ok = true;
+    return true;
+}
+
+/* Compare one parsed text binding against expectation. */
+static bool trc_cap_bind_text(const char *got, bool got_present,
+                              const char *want, bool want_present,
+                              char *why, size_t why_len, const char *what)
+{
+    char msg[64];
+    if (got_present != want_present) {
+        snprintf(msg, sizeof(msg), "%s presence drift", what);
+        trc_cap_why(why, why_len, msg);
+        return false;
+    }
+    if (want_present && strcmp(got, want) != 0) {
+        snprintf(msg, sizeof(msg), "%s drift", what);
+        trc_cap_why(why, why_len, msg);
+        return false;
+    }
+    return true;
+}
+
+static uint8_t trc_cap_u8(struct trc_cap_cursor *c)
+{
+    uint8_t v = 0;
+    if (!c || c->left < 1) {
+        if (c) c->ok = false;
+        return 0;
+    }
+    v = c->p[0];
+    c->p += 1;
+    c->left -= 1;
+    return v;
+}
+
+/* Parsed capsule header: everything before the slot vector. */
+struct trc_cap_head {
+    char toolkey[4097];
+    uint8_t envkey[32];
+    char sid[65];
+    char mid[65];
+    char cas[65];
+    bool cas_present;
+    char graph[65];
+    bool graph_present;
+    uint64_t dep_count;
+    uint64_t dep_newest;
+    uint32_t n_slots;
+};
+
+/* Length-prefixed text with an explicit bound; NUL-terminates field. */
+static bool trc_cap_field(struct trc_cap_cursor *c, char *field,
+                          size_t field_size, size_t maxtext, bool nonempty)
+{
+    uint32_t len = trc_cap_u32(c);
+    if (!c->ok || !field || len > maxtext || len + 1 > field_size) {
+        c->ok = false;
+        return false;
+    }
+    memset(field, 0, field_size);
+    if (len > 0 && !trc_cap_bytes(c, (uint8_t *)field, len)) return false;
+    if (len == 0 && nonempty) {
+        c->ok = false;
+        return false;
+    }
+    return true;
+}
+
+/* Toolkey string + live env digest. */
+static bool trc_cap_parse_toolenv(struct trc_cap_cursor *c,
+                                  struct trc_cap_head *h)
+{
+    uint32_t toolkey_len = trc_cap_u32(c);
+    if (!c->ok || toolkey_len == 0 || toolkey_len > 4096) {
+        c->ok = false;
+        return false;
+    }
+    memset(h->toolkey, 0, sizeof(h->toolkey));
+    if (!trc_cap_bytes(c, (uint8_t *)h->toolkey, toolkey_len)) return false;
+    return trc_cap_bytes(c, h->envkey, 32);
+}
+
+/* Required ids plus the two optional presence-framed roots. */
+static bool trc_cap_parse_ids(struct trc_cap_cursor *c,
+                              struct trc_cap_head *h)
+{
+    if (!trc_cap_field(c, h->sid, sizeof(h->sid), 64, true)) return false;
+    if (!trc_cap_field(c, h->mid, sizeof(h->mid), 64, true)) return false;
+    h->cas_present = trc_cap_u8(c) != 0;
+    if (!c->ok) return false;
+    if (!trc_cap_field(c, h->cas, sizeof(h->cas), 64, false)) return false;
+    h->graph_present = trc_cap_u8(c) != 0;
+    if (!c->ok) return false;
+    if (!trc_cap_field(c, h->graph, sizeof(h->graph), 64, false))
+        return false;
+    return true;
+}
+
+/* Dep provenance + slot count. */
+static bool trc_cap_parse_meta(struct trc_cap_cursor *c,
+                               struct trc_cap_head *h)
+{
+    h->dep_count = trc_cap_u64(c);
+    h->dep_newest = trc_cap_u64(c);
+    h->n_slots = trc_cap_u32(c);
+    if (!c->ok || h->n_slots > TRC_CAP_MAX_SLOTS) {
+        c->ok = false;
+        return false;
+    }
+    return true;
+}
+
+/* The caller's CURRENT bindings must be well-formed before they can
+ * accept anything: NUL-terminated ids, optional roots gated on presence. */
+static bool trc_cap_expected_ok(const struct testcache_capsule_bindings *e)
+{
+    size_t sid, mid, cas, graph;
+    if (!e) return false;
+    sid = trc_cap_text_len(e->source_id, 65);
+    mid = trc_cap_text_len(e->mutation_id, 65);
+    if (sid == SIZE_MAX || mid == SIZE_MAX || sid == 0 || mid == 0 ||
+        sid > 64 || mid > 64)
+        return false;
+    cas = e->source_cas_present ? trc_cap_text_len(e->source_cas, 65) : 0;
+    graph = e->graph_root_present ? trc_cap_text_len(e->graph_root, 65) : 0;
+    return cas <= 64 && graph <= 64;
+}
+
+/* One range-checked u32 field: advances past it or latches the refusal. */
+static bool trc_cap_field_u32(struct trc_cap_cursor *c, uint32_t max,
+                              uint32_t *out)
+{
+    uint32_t v = trc_cap_u32(c);
+    if (!c || !c->ok || v > max) {
+        if (c) c->ok = false;
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+/* One flag byte: 0 or 1, or the capsule refuses. */
+static bool trc_cap_field_flag(struct trc_cap_cursor *c, bool *out)
+{
+    uint8_t v = trc_cap_u8(c);
+    if (!c || !c->ok || v > 1) {
+        if (c) c->ok = false;
+        return false;
+    }
+    *out = v != 0;
+    return true;
+}
+
+/* Slot name: a nonempty NUL-terminated copy that fits the fixed field. */
+static bool trc_cap_parse_name(struct trc_cap_cursor *c,
+                               struct testcache_capsule_slot *slot)
+{
+    uint32_t namelen;
+    if (!c || !slot) {
+        if (c) c->ok = false;
+        return false;
+    }
+    namelen = trc_cap_u32(c);
+    if (!c->ok || namelen == 0 || namelen >= sizeof(slot->name)) {
+        c->ok = false;
+        return false;
+    }
+    if (!trc_cap_bytes(c, (uint8_t *)slot->name, namelen)) return false;
+    slot->name[namelen] = '\0';
+    return true;
+}
+
+/* One slot into out: every field range-checked, fail closed. The read
+ * order matches the writer's emit order exactly. */
+static bool trc_cap_parse_slot(struct trc_cap_cursor *c,
+                               struct testcache_capsule_slot *slot)
+{
+    uint32_t contract, code, ncl;
+    bool key_valid, cacheable, hit, hit_flaky;
+    if (!c || !slot) {
+        if (c) c->ok = false;
+        return false;
+    }
+    memset(slot, 0, sizeof(*slot));
+    if (!trc_cap_parse_name(c, slot)) return false;
+    if (!trc_cap_field_u32(c, (uint32_t)ZCL_TEST_PROOF_GOLDEN_TIMING,
+                           &contract))
+        return false;
+    if (!trc_cap_field_flag(c, &key_valid)) return false;
+    if (!trc_cap_bytes(c, slot->probe.key, 32)) return false;
+    if (!trc_cap_field_flag(c, &cacheable)) return false;
+    if (!trc_cap_field_flag(c, &hit)) return false;
+    if (!trc_cap_field_flag(c, &hit_flaky)) return false;
+    if (!trc_cap_field_u32(c, (uint32_t)TESTCACHE_R__COUNT - 1, &code))
+        return false;
+    if (!trc_cap_field_u32(c, (uint32_t)(1 << 20), &ncl)) return false;
+    slot->probe.key_valid = key_valid;
+    slot->probe.cacheable = cacheable;
+    slot->probe.hit = hit;
+    slot->probe.hit_flaky = hit_flaky;
+    slot->probe.code = (enum testcache_reason)code;
+    slot->probe.n_closure = (int)ncl;
+    snprintf(slot->probe.reason, sizeof(slot->probe.reason), "%s",
+             testcache_reason_label(slot->probe.code));
+    (void)contract;
+    return true;
+}
+
+/* Toolchain and environment bindings: the capsule's toolkey must be this
+ * binary's, and its env digest must match the live process env. */
+static bool trc_cap_check_toolenv(const struct trc_cap_head *h,
+                                  char *why, size_t why_len)
+{
+    uint8_t live_env[32];
+    if (strcmp(h->toolkey, testcache_toolkey()) != 0) {
+        trc_cap_why(why, why_len, "toolkey drift");
+        return false;
+    }
+    testcache_current_envkey(live_env);
+    if (memcmp(h->envkey, live_env, 32) != 0) {
+        trc_cap_why(why, why_len, "env drift");
+        return false;
+    }
+    return true;
+}
+
+/* Source identity bindings: candidate ids plus the optional CAS and
+ * graph roots, presence-gated on both sides. */
+static bool trc_cap_check_ids(const struct trc_cap_head *h,
+                              const struct testcache_capsule_bindings *expected,
+                              char *why, size_t why_len)
+{
+    if (strcmp(h->sid, expected->source_id) != 0 ||
+        strcmp(h->mid, expected->mutation_id) != 0) {
+        trc_cap_why(why, why_len, "source binding drift");
+        return false;
+    }
+    if (!trc_cap_bind_text(h->cas, h->cas_present, expected->source_cas,
+                           expected->source_cas_present, why, why_len,
+                           "source CAS"))
+        return false;
+    if (!trc_cap_bind_text(h->graph, h->graph_present,
+                           expected->graph_root,
+                           expected->graph_root_present, why, why_len,
+                           "graph root"))
+        return false;
+    return true;
+}
+
+/* Slot vector: fits the caller's cap, every slot parses, no trailing
+ * bytes. A slot that fails to parse refuses exactly as before, with
+ * whatever reason the earlier checks left. */
+static bool trc_cap_read_slots(struct trc_cap_cursor *body,
+                               const struct trc_cap_head *h,
+                               struct testcache_capsule_slot *out, size_t cap,
+                               char *why, size_t why_len)
+{
+    size_t i;
+    bool ok = true;
+    if (h->n_slots > cap) {
+        trc_cap_why(why, why_len, "too many slots");
+        return false;
+    }
+    for (i = 0; ok && i < h->n_slots; i++)
+        ok = trc_cap_parse_slot(body, &out[i]);
+    if (ok && body->left != 0) {
+        trc_cap_why(why, why_len, "capsule trailing bytes");
+        ok = false;
+    }
+    return ok;
+}
+
+/* Provenance account for the caller: slot count, dep facts, toolkey head. */
+static void trc_cap_fill_info(struct testcache_capsule_info *info,
+                              const struct trc_cap_head *h)
+{
+    size_t tk = strlen(h->toolkey);
+    size_t n = tk < 12 ? tk : 12;
+    info->n_slots = h->n_slots;
+    info->dep_count = h->dep_count;
+    memcpy(info->toolkey_hex12, h->toolkey, n);
+    info->toolkey_hex12[n] = '\0';
+}
+
+bool testcache_capsule_consume(const char *path,
+                               const struct testcache_capsule_bindings *expected,
+                               struct testcache_capsule_slot *out, size_t cap,
+                               struct testcache_capsule_info *info,
+                               char *why, size_t why_len)
+{
+    uint8_t *bytes = NULL;
+    size_t len = 0;
+    struct trc_cap_cursor body;
+    struct trc_cap_head h;
+    bool ok;
+    memset(&h, 0, sizeof(h));
+    if (!expected || !out || cap == 0 || !info ||
+        !trc_cap_expected_ok(expected)) {
+        trc_cap_why(why, why_len, "capsule refused");
+        return false;
+    }
+    memset(info, 0, sizeof(*info));
+    if (!trc_cap_read(path, &bytes, &len, why, why_len)) return false;
+    ok = trc_cap_verify(bytes, len, &body, why, why_len) &&
+         trc_cap_parse_toolenv(&body, &h) &&
+         trc_cap_parse_ids(&body, &h) &&
+         trc_cap_parse_meta(&body, &h);
+    ok = ok && trc_cap_check_toolenv(&h, why, why_len);
+    ok = ok && trc_cap_check_ids(&h, expected, why, why_len);
+    ok = ok && trc_cap_read_slots(&body, &h, out, cap, why, why_len);
+    if (ok) trc_cap_fill_info(info, &h);
+    free(bytes);
+    return ok;
+}
+
+void testcache_capsule_apply(const struct testcache_capsule_slot *slots,
+                             size_t n_slots,
+                             const char *const *want_names, size_t n_want,
+                             struct testcache_probe *out)
+{
+    size_t i, s;
+    if (!out) return;
+    for (i = 0; i < n_want; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        out[i].code = TESTCACHE_R_NO_HANDLE;
+        snprintf(out[i].reason, sizeof(out[i].reason),
+                 "capsule slot absent");
+        if (!want_names || !want_names[i] || !slots) continue;
+        for (s = 0; s < n_slots; s++) {
+            if (strcmp(slots[s].name, want_names[i]) != 0) continue;
+            out[i] = slots[s].probe;
+            break;
+        }
+    }
+}
+
+/* One slot of a batch: the ordinary reusable identity, or the slot's
+ * activated proof-contract variant — the same branch the per-group loop in
+ * test_parallel.c takes, so the seam can serve that loop without changing
+ * what any group means. */
+static void trc_probe_slot(struct testcache *tc, const char *name,
+                           enum zcl_test_proof_contract contract,
+                           struct testcache_probe *out)
+{
+    if (contract == ZCL_TEST_PROOF_NONE)
+        testcache_probe_group_internal(tc, name, ZCL_TEST_PROOF_NONE,
+                                       false, out);
+    else
+        testcache_probe_group_internal(tc, name, contract, true, out);
+}
+
+bool testcache_probe_groups(struct testcache *tc,
+                            const char *const *group_names,
+                            const enum zcl_test_proof_contract *contracts,
+                            size_t n_groups,
+                            struct testcache_probe *out)
+{
+    if (!tc || (n_groups > 0 && (!group_names || !out))) {
+        if (out) {
+            for (size_t i = 0; i < n_groups; i++) {
+                memset(&out[i], 0, sizeof(out[i]));
+                out[i].code = TESTCACHE_R_NO_HANDLE;
+                snprintf(out[i].reason, sizeof(out[i].reason),
+                         "no cache handle");
+            }
+        }
+        return false;
+    }
+    /* Sequentially, on the shared scratch + memo: each slot runs the exact
+     * same internal probe a solo call would, so keys are byte-identical by
+     * construction and one slot's truncation/non-resolution never reaches
+     * another slot's result. The memo only ever maps a path to the bytes
+     * read from it, so sharing it across slots changes no verdict. */
+    for (size_t i = 0; i < n_groups; i++) {
+        enum zcl_test_proof_contract contract = ZCL_TEST_PROOF_NONE;
+        if (contracts) contract = contracts[i];
+        trc_probe_slot(tc, group_names[i], contract, &out[i]);
+    }
+    return true;
 }
 
 static void trc_store_pass_ex(struct testcache *tc, const uint8_t key[32],

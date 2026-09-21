@@ -3097,6 +3097,67 @@ static int test_ic_proof_optional_dependencies(void)
     return failures;
 }
 
+static int test_ic_proof_checker_binaries(void)
+{
+    int failures = 0;
+    TEST("proof generation: sealed docs-gate checker binaries copy from the submitting checkout") {
+        char fixture[4096], source[4096], generation[4096];
+        ic_budget_fixture("checker-bins", fixture);
+        /* Hermetic start and end: the budget fixture path is stable, so a
+         * previous run's binaries must never satisfy this run's
+         * absent-prerequisite assertions. */
+        ASSERT(test_rm_rf_recursive(fixture) == 0);
+        ASSERT((size_t)snprintf(source, sizeof(source), "%s/source", fixture) <
+               sizeof(source));
+        ASSERT((size_t)snprintf(generation, sizeof(generation),
+                                "%s/generation", fixture) < sizeof(generation));
+        ASSERT(ic_write(source, "vendor/.keep", "fixture\n"));
+        ASSERT(ic_write(generation, "vendor/.keep", "fixture\n"));
+        static const char *const checkers[] = {
+            "build/bin/z23-lint",
+            "build/bin/z23-fleet-observe",
+        };
+        char why[256] = {0};
+        for (size_t i = 0; i < sizeof(checkers) / sizeof(checkers[0]); i++) {
+            const char *dep = checkers[i];
+            /* Absent is a named prerequisite, never an optional skip. */
+            ASSERT(!zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            ASSERT(strstr(why, "proof_generation_dependency_unavailable:") != NULL);
+            ASSERT(strstr(why, "optional") == NULL);
+            ASSERT(strstr(why, dep) != NULL);
+            char want[256];
+            ASSERT((size_t)snprintf(want, sizeof(want), "make %s", dep) <
+                   sizeof(want));
+            ASSERT(strstr(why, want) != NULL);
+            /* Present copies byte-identical under its own inode. */
+            ASSERT(ic_write(source, dep, "checker binary\n"));
+            ASSERT(zcl_dev_proof_test_generation_dependency(
+                source, generation, dep, why, sizeof(why)));
+            char src_file[4096], dst_file[4096];
+            ASSERT((size_t)snprintf(src_file, sizeof(src_file), "%s/%s",
+                                    source, dep) < sizeof(src_file));
+            ASSERT((size_t)snprintf(dst_file, sizeof(dst_file), "%s/%s",
+                                    generation, dep) < sizeof(dst_file));
+            struct stat src_st, dst_st;
+            ASSERT(stat(src_file, &src_st) == 0);
+            ASSERT(stat(dst_file, &dst_st) == 0);
+            ASSERT(src_st.st_dev != dst_st.st_dev ||
+                   src_st.st_ino != dst_st.st_ino);
+            ASSERT(dst_st.st_size == src_st.st_size);
+            FILE *copied_file = fopen(dst_file, "rb");
+            ASSERT(copied_file != NULL);
+            char body[32] = {0};
+            size_t got = fread(body, 1, sizeof(body) - 1, copied_file);
+            ASSERT(fclose(copied_file) == 0);
+            ASSERT(got == strlen("checker binary\n"));
+            ASSERT(strcmp(body, "checker binary\n") == 0);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool ic_dependency_link(const char *target, const char *path)
 {
     if (unlink(path) != 0 && errno != ENOENT) return false;
@@ -5435,35 +5496,43 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
     return failures;
 }
 #if !defined(_WIN32)
+/* The full required prerequisite set dp_generation_dependencies refuses
+ * without, shared by the vendor-cleanup and verdict-seed generation tests. */
+static const char *const ic_gen_dep_files[] = {
+    "vendor/lib/libcrypto.a", "vendor/include/openssl/ssl.h",
+    "vendor/sqlite3.c", "vendor/tor/libtor.a", "vendor/tor/.provenance",
+    "vendor/tor/Makefile",
+    "vendor/.cache/input.tar",
+    "vendor/cross/x86_64-w64-mingw32/lib/libsqlite3.a",
+    "vendor/cross/x86_64-w64-mingw32/lib/.provenance/libsqlite3.a.stamp",
+    "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+    "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+    "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+    "build/githooks/pre-push",
+#if defined(__linux__)
+    "build/hotswap/zcl_rollback_fixture_a.so",
+    "build/hotswap/zcl_rollback_fixture_b.so",
+#endif
+#if !defined(_WIN32)
+    "build/fixtures/rlc_child_v1",
+    "build/fixtures/rlc_child_broken",
+#endif
+    "build/bin/z23-lint",
+    "build/bin/z23-fleet-observe",
+};
+
 static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
 {
     int failures = 0;
+    static const char *const *files = ic_gen_dep_files;
+    static const size_t n_files =
+        sizeof(ic_gen_dep_files) / sizeof(ic_gen_dep_files[0]);
     TEST("proof generation: persistent vendor inputs survive successful cleanup") {
         char donor[4096], generation[4096], source[4096], target[4096];
         char hidden[4096], why[256] = {0};
         test_make_tmpdir(donor, sizeof(donor), "gen_deps", "donor");
         test_make_tmpdir(generation, sizeof(generation), "gen_deps", "copy");
-        static const char *const files[] = {
-            "vendor/lib/libcrypto.a", "vendor/include/openssl/ssl.h",
-            "vendor/sqlite3.c", "vendor/tor/libtor.a", "vendor/tor/.provenance",
-            "vendor/tor/Makefile",
-            "vendor/.cache/input.tar",
-            "vendor/cross/x86_64-w64-mingw32/lib/libsqlite3.a",
-            "vendor/cross/x86_64-w64-mingw32/lib/.provenance/libsqlite3.a.stamp",
-            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
-            "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
-            "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
-            "build/githooks/pre-push",
-#if defined(__linux__)
-            "build/hotswap/zcl_rollback_fixture_a.so",
-            "build/hotswap/zcl_rollback_fixture_b.so",
-#endif
-#if !defined(_WIN32)
-            "build/fixtures/rlc_child_v1",
-            "build/fixtures/rlc_child_broken",
-#endif
-        };
-        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i)
+        for (size_t i = 0; i < n_files; ++i)
             ASSERT(ic_write(donor, files[i], "fixture dependency bytes\n"));
         /* Successful build_vendor.sh removes this directory. The fixture
          * deliberately has only persistent outputs, including provenance. */
@@ -5472,7 +5541,7 @@ static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
         ASSERT(access(source, F_OK) != 0);
         ASSERT(zcl_dev_proof_test_generation_dependencies(
             donor, generation, why, sizeof(why)));
-        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+        for (size_t i = 0; i < n_files; ++i) {
             struct stat before, after;
             ASSERT(snprintf(source, sizeof(source), "%s/%s", donor, files[i]) <
                    (int)sizeof(source));
@@ -5510,6 +5579,186 @@ static int test_ic_generation_dependencies_survive_vendor_cleanup(void)
             ASSERT(strstr(why, "proof_generation_dependency_unavailable:") != NULL);
             ASSERT(strstr(why, required[i]) != NULL);
         }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ZRC-0007 probe-before-build: the checkout's addressed verdict records
+ * seed the generation, but in-flight tmp/ partials never travel. A donor
+ * without a store still prepares (cold, not refused — the first TEST in
+ * this file's generation suite already covers that shape). */
+static int test_ic_generation_verdict_seed(void)
+{
+    int failures = 0;
+    TEST("proof generation: verdict store seeds shards but never tmp partials") {
+        char donor[4096], generation[4096], vpath[4096];
+        char why[256] = {0};
+        test_make_tmpdir(donor, sizeof(donor), "gen_verdict", "donor");
+        test_make_tmpdir(generation, sizeof(generation), "gen_verdict",
+                         "copy");
+        for (size_t i = 0;
+             i < sizeof(ic_gen_dep_files) / sizeof(ic_gen_dep_files[0]);
+             ++i)
+            ASSERT(ic_write(donor, ic_gen_dep_files[i],
+                            "fixture dependency bytes\n"));
+        static const char verdict[] = "ZTCACHE1-seeded-verdict-record-bytes";
+        ASSERT(ic_write(donor, ".zvcs/objects/ab/verdict-address-record",
+                        verdict));
+        ASSERT(ic_write(donor, ".zvcs/objects/tmp/.9.0",
+                        "partial put bytes"));
+        ASSERT(zcl_dev_proof_test_generation_dependencies(
+            donor, generation, why, sizeof(why)));
+        ASSERT(snprintf(vpath, sizeof(vpath),
+                        "%s/.zvcs/objects/ab/verdict-address-record",
+                        generation) < (int)sizeof(vpath));
+        FILE *seeded = fopen(vpath, "rb");
+        ASSERT(seeded != NULL);
+        char seed_bytes[64] = {0};
+        size_t seed_count = fread(seed_bytes, 1, sizeof(seed_bytes) - 1,
+                                  seeded);
+        ASSERT(fclose(seeded) == 0);
+        ASSERT(seed_count == strlen(verdict));
+        ASSERT(memcmp(seed_bytes, verdict, strlen(verdict)) == 0);
+        ASSERT(snprintf(vpath, sizeof(vpath), "%s/.zvcs/objects/tmp",
+                        generation) < (int)sizeof(vpath));
+        ASSERT(access(vpath, F_OK) != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Routed-group preflight parser: the exact reader the proof worker runs on
+ * the runner's --cache-probe-only output before the test dimension decides
+ * what still needs execution. The SUMMARY carries the counts and the PROBE
+ * lines audit it — one bad line shape anywhere must refuse the whole
+ * account (fail closed to "the runner decides"), never mint a partial one.
+ * ASSERT jumps to the function's single _test_next label, so the eight
+ * shapes go through one TEST block via this table helper. */
+static bool ic_preflight_case(const char *bytes, size_t len, bool want,
+                              uint32_t g, uint32_t r, uint32_t m, uint32_t u)
+{
+    struct zcl_dev_proof_preflight pf;
+    bool got = zcl_dev_proof_test_preflight_parse(bytes, len, &pf);
+    if (got != want) {
+        printf("preflight case: verdict %d, want %d\n", (int)got,
+               (int)want);
+        return false;
+    }
+    if (want && (pf.groups != g || pf.would_reuse != r || pf.must_run != m ||
+                 pf.uncacheable != u)) {
+        printf("preflight case: got %u/%u/%u/%u, want %u/%u/%u/%u\n",
+               pf.groups, pf.would_reuse, pf.must_run, pf.uncacheable,
+               g, r, m, u);
+        return false;
+    }
+    return true;
+}
+
+static int test_ic_preflight_parse(void)
+{
+    int failures = 0;
+    TEST("proof preflight: summary-checked accounts pass, bent ones refuse") {
+        static const char good[] =
+            "test_parallel: cache PLAN — 3 cacheable, 1 cache HIT (will NOT run), 2 will run\n"
+            "PROBE test_a HIT cacheable 3895332c80a2\n"
+            "PROBE test_b MISS cacheable 77aa11c0ffee\n"
+            "PROBE test_c UNCACHEABLE external-input-denylist -\n"
+            "PROBE-SUMMARY groups=3 would_reuse=1 must_run=2 uncacheable=1\n"
+            "PROBE-STATS graph_opens=1 depfiles=5947 closure_queries=3 "
+            "file_hash_reads=40 memo_hits=11 sha3_bytes=9000 "
+            "verdict_lookups=2 verdict_hits=1\n";
+        static const char flaky[] =
+            "PROBE test_a HIT cacheable 3895332c80a2 flaky\n"
+            "PROBE-SUMMARY groups=1 would_reuse=1 must_run=0 uncacheable=0\n";
+        static const char nosum[] =
+            "PROBE test_a HIT cacheable 3895332c80a2\n";
+        static const char doubled[] =
+            "PROBE test_a HIT cacheable 3895332c80a2\n"
+            "PROBE-SUMMARY groups=1 would_reuse=1 must_run=0 uncacheable=0\n"
+            "PROBE-SUMMARY groups=1 would_reuse=1 must_run=0 uncacheable=0\n";
+        static const char miscount[] =
+            "PROBE test_a HIT cacheable 3895332c80a2\n"
+            "PROBE test_b MISS cacheable 77aa11c0ffee\n"
+            "PROBE-SUMMARY groups=1 would_reuse=1 must_run=0 uncacheable=0\n";
+        static const char badsplit[] =
+            "PROBE test_a HIT cacheable 3895332c80a2\n"
+            "PROBE-SUMMARY groups=1 would_reuse=1 must_run=1 uncacheable=0\n";
+        static const char garbage[] =
+            "PROBE test_a HIT cacheable 3895332c80a2\n"
+            "PROBE-SUMMARY groups=1 would_reuse=1 must_run=0 uncacheable=0 extra\n";
+        static const char empty_summary[] =
+            "PROBE-SUMMARY groups=0 would_reuse=0 must_run=0 uncacheable=0\n";
+        ASSERT(ic_preflight_case(good, sizeof(good) - 1, true, 3, 1, 2,
+                                 1));
+        ASSERT(ic_preflight_case(flaky, sizeof(flaky) - 1, true, 1, 1, 0,
+                                 0));
+        ASSERT(ic_preflight_case(nosum, sizeof(nosum) - 1, false, 0, 0, 0,
+                                 0));
+        ASSERT(ic_preflight_case(doubled, sizeof(doubled) - 1, false, 0, 0,
+                                 0, 0));
+        ASSERT(ic_preflight_case(miscount, sizeof(miscount) - 1, false, 0,
+                                 0, 0, 0));
+        ASSERT(ic_preflight_case(badsplit, sizeof(badsplit) - 1, false, 0,
+                                 0, 0, 0));
+        ASSERT(ic_preflight_case(garbage, sizeof(garbage) - 1, false, 0, 0,
+                                 0, 0));
+        ASSERT(ic_preflight_case("", 0, false, 0, 0, 0, 0));
+        ASSERT(ic_preflight_case(NULL, 0, false, 0, 0, 0, 0));
+        ASSERT(ic_preflight_case(empty_summary, sizeof(empty_summary) - 1,
+                                 true, 0, 0, 0, 0));
+        ASSERT(!zcl_dev_proof_test_preflight_parse(good, sizeof(good) - 1,
+                                                   NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Capsule flag plumbing: the worker hands both runner children the same
+ * five capsule arguments (write vs use + the four sealed bindings), so the
+ * test dimension's acceptance check compares the capsule against the exact
+ * values that gated its launch. One TEST block per function — ASSERT jumps
+ * to the function's single _test_next label. */
+static int test_ic_capsule_argv_write(void)
+{
+    int failures = 0;
+    TEST("proof capsule: preflight argv carries write + bindings") {
+        const char *argv[8] = {0};
+        int argc = zcl_dev_proof_test_capsule_argv(
+            true, "/tmp/x.probe-capsule", "sid", "mid", "cas", "gr", argv,
+            8);
+        ASSERT(argc == 5);
+        ASSERT(strcmp(argv[0], "--write-capsule=/tmp/x.probe-capsule") == 0);
+        ASSERT(strcmp(argv[1], "--capsule-source-id=sid") == 0);
+        ASSERT(strcmp(argv[2], "--capsule-mutation-id=mid") == 0);
+        ASSERT(strcmp(argv[3], "--capsule-source-cas=cas") == 0);
+        ASSERT(strcmp(argv[4], "--capsule-graph-root=gr") == 0);
+        ASSERT(argv[5] == NULL);
+        ASSERT(zcl_dev_proof_test_capsule_argv(true, NULL, "sid", "mid",
+                                               "cas", "gr", argv, 8) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_capsule_argv_use(void)
+{
+    int failures = 0;
+    TEST("proof capsule: dimension argv carries use + same bindings") {
+        const char *argv[8] = {0};
+        int argc = zcl_dev_proof_test_capsule_argv(
+            false, "/tmp/x.probe-capsule", "sid", "mid", "cas", "gr", argv,
+            8);
+        ASSERT(argc == 5);
+        ASSERT(strcmp(argv[0], "--use-capsule=/tmp/x.probe-capsule") == 0);
+        ASSERT(strcmp(argv[1], "--capsule-source-id=sid") == 0);
+        ASSERT(strcmp(argv[2], "--capsule-mutation-id=mid") == 0);
+        ASSERT(strcmp(argv[3], "--capsule-source-cas=cas") == 0);
+        ASSERT(strcmp(argv[4], "--capsule-graph-root=gr") == 0);
+        ASSERT(argv[5] == NULL);
+        ASSERT(zcl_dev_proof_test_capsule_argv(false, "/tmp/x.probe-capsule",
+                                               "sid", "mid", "cas", "gr",
+                                               argv, 5) == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -6912,6 +7161,10 @@ int test_impact_composition(void)
     failures += test_ic_generation_docs_fresh_refuses_stale();
     failures += test_ic_generation_docs_fresh_refuses_missing_tools();
     failures += test_ic_generation_dependencies_survive_vendor_cleanup();
+    failures += test_ic_generation_verdict_seed();
+    failures += test_ic_preflight_parse();
+    failures += test_ic_capsule_argv_write();
+    failures += test_ic_capsule_argv_use();
     failures += test_pw_original_plan_refreshes_before_sealing();
 #endif
     failures += test_ic_proof_budget_grows_with_groups();
@@ -6931,6 +7184,7 @@ int test_impact_composition(void)
 #endif
     failures += test_ic_proof_dependency_crosses_filesystems();
     failures += test_ic_proof_optional_dependencies();
+    failures += test_ic_proof_checker_binaries();
     failures += test_ic_proof_dependency_relative_links();
     failures += test_ic_proof_dependency_link_refusals();
     failures += test_ic_ram_scratch_reservations_hold_under_concurrency();

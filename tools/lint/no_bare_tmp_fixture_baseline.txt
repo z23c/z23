@@ -59,6 +59,7 @@ tests/harness/src/test_fleet_triggers.c 1
 tests/harness/src/test_hotswap_loader.c 6
 tests/harness/src/test_hotswap_module.c 5
 tests/harness/src/test_hotswap_module_v2.c 2
+tests/harness/src/test_impact_composition.c 3
 tests/harness/src/test_importblockindex_cli_dispatch.c 1
 tests/harness/src/test_integrity.c 6
 tests/harness/src/test_metaverse_broker_authority.c 1

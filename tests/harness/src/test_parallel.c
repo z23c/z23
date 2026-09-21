@@ -182,6 +182,441 @@ struct group_result {
     int load_unobserved;
 };
 
+/* Fill the compact slot arrays with the selected groups; returns the slot
+ * count. Skipped groups leave no slot, so the batch never sees them. */
+static size_t probe_slots_fill(const struct group_result *results,
+                               const char **names,
+                               enum zcl_test_proof_contract *contracts,
+                               size_t *back, bool activate_proof_contracts);
+
+/* Probe-only needs the cache on: with it off or auditing there is nothing
+ * reusable to report. */
+static bool probe_only_refused(bool cli_probe_only, bool cache_on)
+{
+    return cli_probe_only && !cache_on;
+}
+
+/* Fill the compact slot arrays with the selected groups; returns the slot
+ * count. Skipped groups leave no slot, so the batch never sees them. */
+static size_t probe_slots_fill(const struct group_result *results,
+                               const char **names,
+                               enum zcl_test_proof_contract *contracts,
+                               size_t *back, bool activate_proof_contracts)
+{
+    size_t k = 0;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped)
+            continue;
+        names[k] = g_groups[i].name;
+        contracts[k] = activate_proof_contracts
+            ? zcl_test_group_proof_contract(g_groups[i].name)
+            : ZCL_TEST_PROOF_NONE;
+        back[k] = i;
+        k++;
+    }
+    return k;
+}
+
+/* ── Probe capsule CLI + acquisition ────────────────────────────────────
+ * --write-capsule=PATH serializes the batch this process probes (the
+ * preflight path); --use-capsule=PATH consumes a capsule instead of
+ * opening testcache at all (the dimension path). The four --capsule-*
+ * binding flags carry the worker's sealed candidate identity on both
+ * sides; the consumer refuses unless the capsule matches them AND the
+ * live toolkey/envkey. A refused or absent capsule falls back to a fresh
+ * open+probe — never to running blind. */
+struct capsule_cli {
+    const char *write_path;
+    const char *use_path;
+    const char *source_id;
+    const char *mutation_id;
+    const char *source_cas;   /* NULL/empty when absent */
+    const char *graph_root;   /* NULL/empty when absent */
+};
+
+static bool cli_opt_capsule(const char *arg, struct capsule_cli *cap)
+{
+    if (!arg || !cap) return false;
+    if (strncmp(arg, "--write-capsule=",
+                sizeof("--write-capsule=") - 1) == 0) {
+        cap->write_path = arg + sizeof("--write-capsule=") - 1;
+        return true;
+    }
+    if (strncmp(arg, "--use-capsule=",
+                sizeof("--use-capsule=") - 1) == 0) {
+        cap->use_path = arg + sizeof("--use-capsule=") - 1;
+        return true;
+    }
+    if (strncmp(arg, "--capsule-source-id=",
+                sizeof("--capsule-source-id=") - 1) == 0) {
+        cap->source_id = arg + sizeof("--capsule-source-id=") - 1;
+        return true;
+    }
+    if (strncmp(arg, "--capsule-mutation-id=",
+                sizeof("--capsule-mutation-id=") - 1) == 0) {
+        cap->mutation_id = arg + sizeof("--capsule-mutation-id=") - 1;
+        return true;
+    }
+    if (strncmp(arg, "--capsule-source-cas=",
+                sizeof("--capsule-source-cas=") - 1) == 0) {
+        cap->source_cas = arg + sizeof("--capsule-source-cas=") - 1;
+        return true;
+    }
+    if (strncmp(arg, "--capsule-graph-root=",
+                sizeof("--capsule-graph-root=") - 1) == 0) {
+        cap->graph_root = arg + sizeof("--capsule-graph-root=") - 1;
+        return true;
+    }
+    return false;
+}
+
+struct capsule_state {
+    struct capsule_cli cli;
+    size_t depfiles;  /* capsule dep_count when consumed, else 0 */
+    bool used;        /* consume succeeded: probes[] are capsule slots */
+};
+
+/* Binding token rule: 1..64 chars of [0-9A-Za-z._-]. The worker passes
+ * sealed hex ids; anything else refuses the capsule (fresh probe). */
+static bool capsule_token_ok(const char *s)
+{
+    size_t n = 0;
+    if (!s || !s[0]) return false;
+    while (s[n]) {
+        char c = s[n];
+        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') || c == '.' || c == '_' ||
+                  c == '-';
+        if (!ok || n >= 64) return false;
+        n++;
+    }
+    return true;
+}
+
+static bool capsule_bindings_parse(const struct capsule_cli *cli,
+                                   struct testcache_capsule_bindings *out)
+{
+    if (!cli || !out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!capsule_token_ok(cli->source_id)) return false;
+    if (!capsule_token_ok(cli->mutation_id)) return false;
+    snprintf(out->source_id, sizeof(out->source_id), "%s", cli->source_id);
+    snprintf(out->mutation_id, sizeof(out->mutation_id), "%s",
+             cli->mutation_id);
+    if (cli->source_cas && cli->source_cas[0]) {
+        if (!capsule_token_ok(cli->source_cas)) return false;
+        snprintf(out->source_cas, sizeof(out->source_cas), "%s",
+                 cli->source_cas);
+        out->source_cas_present = true;
+    }
+    if (cli->graph_root && cli->graph_root[0]) {
+        if (!capsule_token_ok(cli->graph_root)) return false;
+        snprintf(out->graph_root, sizeof(out->graph_root), "%s",
+                 cli->graph_root);
+        out->graph_root_present = true;
+    }
+    return true;
+}
+
+/* Compact selected name/index vectors for capsule mapping. */
+static bool capsule_selected_names(const struct group_result *results,
+                                   const char ***want_out, size_t **back_out,
+                                   size_t *n_out)
+{
+    const char **want = NULL;
+    size_t *back = NULL, n_sel = 0, k = 0, i;
+    for (i = 0; i < (size_t)g_num_groups; i++)
+        if (!results[i].skipped)
+            n_sel++;
+    want = calloc(n_sel ? n_sel : 1, sizeof(*want));
+    back = calloc(n_sel ? n_sel : 1, sizeof(*back));
+    if (!want || !back) {
+        free(want);
+        free(back);
+        return false;
+    }
+    for (i = 0; i < (size_t)g_num_groups; i++) {
+        if (results[i].skipped)
+            continue;
+        want[k] = g_groups[i].name;
+        back[k] = i;
+        k++;
+    }
+    *want_out = want;
+    *back_out = back;
+    *n_out = n_sel;
+    return true;
+}
+
+/* Consume a capsule into the group-indexed probes[]: no testcache open,
+ * no dep-graph walk, no closure query, no file hash. Prints ACCEPTED with
+ * the slot count or rejected+why, then the caller either skips the open
+ * or fresh-probes. */
+static bool capsule_try_consume(struct capsule_state *st,
+                                const struct group_result *results,
+                                struct testcache_probe *probes)
+{
+    struct testcache_capsule_bindings expected;
+    struct testcache_capsule_slot *slots = NULL;
+    struct testcache_capsule_info info;
+    const char **want = NULL;
+    size_t *back = NULL, n_sel = 0, s;
+    char why[96];
+    bool ok = false;
+    if (!st || !results || !probes) return false;
+    if (!capsule_bindings_parse(&st->cli, &expected)) {
+        printf("test_parallel: capsule rejected (bad binding flags), "
+               "fresh probe\n");
+        return false;
+    }
+    slots = calloc((size_t)g_num_groups ? (size_t)g_num_groups : 1,
+                   sizeof(*slots));
+    if (!slots) {
+        printf("test_parallel: capsule rejected (slot alloc failed), "
+               "fresh probe\n");
+        return false;
+    }
+    if (!testcache_capsule_consume(st->cli.use_path, &expected, slots,
+                                   (size_t)g_num_groups, &info, why,
+                                   sizeof(why))) {
+        printf("test_parallel: capsule rejected (%s), fresh probe\n", why);
+        free(slots);
+        return false;
+    }
+    if (!capsule_selected_names(results, &want, &back, &n_sel)) {
+        printf("test_parallel: capsule rejected (select alloc failed), "
+               "fresh probe\n");
+        free(slots);
+        return false;
+    }
+    for (s = 0; s < n_sel; s++) {
+        struct testcache_probe mapped;
+        testcache_capsule_apply(slots, info.n_slots, &want[s], 1, &mapped);
+        probes[back[s]] = mapped;
+    }
+    st->depfiles = (size_t)info.dep_count;
+    st->used = true;
+    ok = true;
+    printf("test_parallel: capsule ACCEPTED %zu slot(s) for %zu selected "
+           "group(s), toolkey %s, no reopen\n",
+           info.n_slots, n_sel, info.toolkey_hex12);
+    free(want);
+    free(back);
+    free(slots);
+    return ok;
+}
+
+/* Serialize the just-probed batch beside the run. A write failure only
+ * loses future reuse (the dimension falls back); the probes at hand stay
+ * valid, so this never fails the run. */
+static void maybe_write_capsule(struct testcache *tc,
+                                const char *const *names,
+                                const enum zcl_test_proof_contract *contracts,
+                                size_t n,
+                                const struct testcache_probe *probes,
+                                const struct capsule_cli *cli)
+{
+    struct testcache_capsule_bindings bind;
+    if (!tc || !cli || !cli->write_path || !cli->write_path[0]) return;
+    if (!capsule_bindings_parse(cli, &bind)) {
+        fprintf(stderr, "test_parallel: capsule not written (bad binding "
+                        "flags)\n");
+        return;
+    }
+    if (!testcache_capsule_write(tc, cli->write_path, names, contracts, n,
+                                 probes, &bind))
+        fprintf(stderr, "test_parallel: capsule not written\n");
+}
+
+enum acquire_result { ACQUIRE_OK, ACQUIRE_DOWNGRADE };
+
+/* The four parallel probe arrays, sized to the selected-group count. */
+struct acquire_slots {
+    const char **names;
+    enum zcl_test_proof_contract *contracts;
+    struct testcache_probe *slot;
+    size_t *back;
+    size_t n_sel;
+};
+
+static size_t acquire_count_selected(const struct group_result *results)
+{
+    size_t n_sel = 0;
+    for (size_t i = 0; i < (size_t)g_num_groups; i++)
+        if (!results[i].skipped)
+            n_sel++;
+    return n_sel;
+}
+
+static bool acquire_slots_alloc(struct acquire_slots *a, size_t n_sel)
+{
+    size_t n = n_sel ? n_sel : 1;
+    a->names = calloc(n, sizeof(*a->names));
+    a->contracts = calloc(n, sizeof(*a->contracts));
+    a->slot = calloc(n, sizeof(*a->slot));
+    a->back = calloc(n, sizeof(*a->back));
+    a->n_sel = n_sel;
+    if (!a->names || !a->contracts || !a->slot || !a->back) {
+        free(a->names);
+        free(a->contracts);
+        free(a->slot);
+        free(a->back);
+        return false;
+    }
+    return true;
+}
+
+static void acquire_slots_free(struct acquire_slots *a)
+{
+    free(a->names);
+    free(a->contracts);
+    free(a->slot);
+    free(a->back);
+}
+
+/* Snapshot-or-live open plus the one batch probe over the shared memo.
+ * On success the slots are scattered back and the capsule is written;
+ * the caller owns close-on-failure. */
+static bool acquire_open_probe(struct testcache **tc,
+                               struct acquire_slots *a, bool snapshot,
+                               const char **changed_sources, size_t n_changed,
+                               const struct group_result *results,
+                               struct testcache_probe *probes,
+                               bool activate_proof_contracts,
+                               const struct capsule_cli *cli)
+{
+    size_t n_fill, s;
+    bool served;
+    *tc = snapshot
+        ? testcache_open_snapshot(NULL, changed_sources, n_changed)
+        : testcache_open(NULL);
+    if (!*tc) return false;
+    n_fill = probe_slots_fill(results, a->names, a->contracts, a->back,
+                              activate_proof_contracts);
+    served = testcache_probe_groups(*tc, a->names, a->contracts, n_fill,
+                                    a->slot);
+    if (served) {
+        for (s = 0; s < n_fill; s++)
+            probes[a->back[s]] = a->slot[s];
+        maybe_write_capsule(*tc, a->names, a->contracts, n_fill, a->slot,
+                            cli);
+    }
+    return served;
+}
+
+/* Probe acquisition: a validated capsule first (no open at all), else the
+ * snapshot-or-live open plus the one batch probe over the shared memo.
+ * DOWNGRADE means "open or alloc failed" and the caller runs everything. */
+static enum acquire_result acquire_probes(struct testcache **tc,
+        const struct group_result *results, struct testcache_probe *probes,
+        bool activate_proof_contracts, bool snapshot,
+        const char **changed_sources, size_t n_changed,
+        struct capsule_state *st)
+{
+    struct acquire_slots a;
+    bool served;
+    if (!tc || !results || !probes || !st) return ACQUIRE_DOWNGRADE;
+    if (!snapshot && st->cli.use_path && st->cli.use_path[0] &&
+        capsule_try_consume(st, results, probes))
+        return ACQUIRE_OK;
+    memset(&a, 0, sizeof(a));
+    if (!acquire_slots_alloc(&a, acquire_count_selected(results)))
+        return ACQUIRE_DOWNGRADE;
+    served = acquire_open_probe(tc, &a, snapshot, changed_sources, n_changed,
+                                results, probes, activate_proof_contracts,
+                                &st->cli);
+    acquire_slots_free(&a);
+    if (!served) {
+        testcache_close(*tc);
+        *tc = NULL;
+        return ACQUIRE_DOWNGRADE;
+    }
+    return ACQUIRE_OK;
+}
+
+/* Mark one cache HIT as CACHED (excluded from dispatch). Returns true
+ * when the group was a HIT. */
+static bool group_cache_hit_marked(struct group_result *results, size_t i,
+                                   const struct testcache_probe *probes,
+                                   size_t *cached_count)
+{
+    if (results[i].skipped) return false;
+    if (!probes[i].cacheable || !probes[i].hit) return false;
+    results[i].status = 0;
+    results[i].cached = 1;
+    (*cached_count)++;
+    /* A stored PASS earned by an alone rerun after a contended FAIL/WEDGED
+     * must never come back looking like an ordinary cache hit — that would
+     * hide the flake on every subsequent cached run forever. Reprint it. */
+    if (probes[i].hit_flaky) {
+        results[i].load_flaky = 1;
+        printf("LOAD-FLAKY %s first=CACHED alone=PASS "
+               "first_log=(prior run) alone_log=(cache hit; "
+               "see the run that stored this key)\n",
+               g_groups[i].name);
+    }
+    return true;
+}
+
+/* --cache-probe-only reporting: one line per selected group (never an
+ * aggregate key), a SUMMARY the caller's parser checks its line count
+ * against, and the STATS ledger for the 1/8/32 cost table. */
+static void print_probe_only(const struct group_result *results,
+                             const struct testcache_probe *probes,
+                             const struct testcache *tc)
+{
+    size_t n = 0, reuse = 0, uncacheable = 0;
+    if (!tc || !probes) {
+        /* No verified graph behind the verdicts (allocation downgrade):
+         * emit no SUMMARY, so the caller's self-check refuses the account
+         * instead of reading zeroed slots as a decision. */
+        printf("PROBE-ERROR no-verified-graph\n");
+        return;
+    }
+    for (size_t i = 0; i < g_num_groups; i++) {
+        const struct testcache_probe *p;
+        const char *verdict;
+        char key12[13];
+        if (results[i].skipped)
+            continue;
+        p = &probes[i];
+        n++;
+        if (!p->cacheable) {
+            verdict = "UNCACHEABLE";
+            uncacheable++;
+        } else if (p->hit) {
+            verdict = "HIT";
+            reuse++;
+        } else {
+            verdict = "MISS";
+        }
+        if (p->key_valid) {
+            for (int b = 0; b < 6; b++)
+                snprintf(key12 + b * 2, 3, "%02x", p->key[b]);
+        } else {
+            snprintf(key12, sizeof(key12), "-");
+        }
+        printf("PROBE %s %s %s %s%s\n", g_groups[i].name, verdict,
+               testcache_reason_label(p->code), key12,
+               p->hit_flaky ? " flaky" : "");
+    }
+    printf("PROBE-SUMMARY groups=%zu would_reuse=%zu must_run=%zu "
+           "uncacheable=%zu\n",
+           n, reuse, n - reuse, uncacheable);
+    struct testcache_stats s;
+    testcache_stats(tc, &s);
+    printf("PROBE-STATS graph_opens=1 depfiles=%zu closure_queries=%llu "
+           "file_hash_reads=%llu memo_hits=%llu sha3_bytes=%llu "
+           "verdict_lookups=%llu verdict_hits=%llu\n",
+           testcache_depfile_count(tc),
+           (unsigned long long)s.closure_queries,
+           (unsigned long long)s.file_hash_reads,
+           (unsigned long long)s.file_hash_memo_hits,
+           (unsigned long long)s.sha3_content_bytes,
+           (unsigned long long)s.verdict_lookups,
+           (unsigned long long)s.verdict_hits);
+}
+
 /* ── The per-group watchdog is on SILENCE, not on runtime ──────────────────
  *
  * This used to be `now - start > timeout_secs`, i.e. SIGKILL any group that
@@ -1537,7 +1972,10 @@ int main(int argc, char **argv)
     bool cli_cache = false;      /* --cache */
     bool cli_no_cache = false;   /* --no-cache */
     bool cli_cold_audit = false; /* --cold-audit */
+    bool cli_probe_only = false; /* --cache-probe-only */
+    struct capsule_state cap_state;
     bool activate_proof_contracts = false;
+    memset(&cap_state, 0, sizeof(cap_state));
     bool cache_snapshot = false;
     const char *changed_sources[32];
     size_t changed_source_count = 0;
@@ -1589,6 +2027,11 @@ int main(int argc, char **argv)
             cli_no_cache = true;
         } else if (strcmp(argv[i], "--cold-audit") == 0) {
             cli_cold_audit = true;
+        } else if (strcmp(argv[i], "--cache-probe-only") == 0) {
+            cli_probe_only = true;
+        } else if (cli_opt_capsule(argv[i], &cap_state.cli)) {
+            /* --write-capsule/--use-capsule/--capsule-*: honored only with
+             * --cache; otherwise silently ignored like the cache env. */
         } else if (strcmp(argv[i], "--activate-proof-contracts") == 0) {
             activate_proof_contracts = true;
         } else {
@@ -1598,7 +2041,11 @@ int main(int argc, char **argv)
                     "[--only=SUBSTR|--exact=FULL_ID[,FULL...]] "
                     "[--cache|--no-cache] "
                     "[--cache-snapshot --changed-source=PATH] "
-                    "[--cold-audit] [--activate-proof-contracts]\n",
+                    "[--cold-audit] [--activate-proof-contracts] "
+                    "[--cache-probe-only] "
+                    "[--write-capsule=PATH|--use-capsule=PATH "
+                    "--capsule-source-id=ID --capsule-mutation-id=ID "
+                    "--capsule-source-cas=HEX --capsule-graph-root=HEX]\n",
                     argv[0]);
             return 2;
         }
@@ -1643,6 +2090,14 @@ int main(int argc, char **argv)
         else if (cli_no_cache)   cache_mode = CACHE_OFF;
         else if (cli_cache || env_on) cache_mode = CACHE_ON;
         else                     cache_mode = CACHE_OFF;
+    }
+    /* A probe-only run reports what the cache WOULD reuse; with the cache
+     * off or auditing there is nothing reusable to report. (Placed before
+     * any allocation, so refusal here frees nothing.) */
+    if (probe_only_refused(cli_probe_only, cache_mode == CACHE_ON)) {
+        fprintf(stderr, "test_parallel: --cache-probe-only requires --cache "
+                        "(--no-cache and --cold-audit probe nothing reusable)\n");
+        return 2;
     }
 
     if (!list_only) {
@@ -1750,17 +2205,6 @@ int main(int argc, char **argv)
     size_t cacheable_count = 0;
     size_t reason_hist[TESTCACHE_R__COUNT] = {0};
     if (cache_mode != CACHE_OFF) {
-        tc = cache_snapshot
-            ? testcache_open_snapshot(NULL, changed_sources,
-                                      changed_source_count)
-            : testcache_open(NULL);
-        if (!tc) {
-            fprintf(stderr, "test_parallel: cache open failed — "
-                            "running every group uncached\n");
-            cache_mode = CACHE_OFF;
-        }
-    }
-    if (cache_mode != CACHE_OFF) {
         probes = calloc(g_num_groups, sizeof(*probes));
         if (!probes) {
             fprintf(stderr, "test_parallel: probe calloc failed — "
@@ -1771,41 +2215,29 @@ int main(int argc, char **argv)
         }
     }
     if (cache_mode != CACHE_OFF) {
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped) continue;
-            enum zcl_test_proof_contract contract =
-                zcl_test_group_proof_contract(g_groups[i].name);
-            if (activate_proof_contracts &&
-                contract != ZCL_TEST_PROOF_NONE)
-                testcache_probe_group_proof(tc, g_groups[i].name, contract,
-                                            &probes[i]);
-            else
-                testcache_probe_group(tc, g_groups[i].name, &probes[i]);
-        }
+        /* Probe acquisition: a validated capsule (no open at all), else
+         * the one open plus the batch probe over the shared memo.
+         * Fail-safe as before — any acquisition failure downgrades to
+         * CACHE_OFF and runs everything, and the marking/PLAN below is
+         * the else arm so a downgraded run prints no plan from zeroed
+         * probes. */
+        if (acquire_probes(&tc, results, probes, activate_proof_contracts,
+                           cache_snapshot, changed_sources,
+                           changed_source_count,
+                           &cap_state) != ACQUIRE_OK) {
+            fprintf(stderr, "test_parallel: cache probe failed (open or "
+                            "alloc) — running every group uncached\n");
+            testcache_close(tc);
+            tc = NULL;
+            cache_mode = CACHE_OFF;
+        } else {
         /* CACHE_ON: a provable stored PASS at the current key means the group
          * cannot have changed — mark it CACHED (status 0 excludes it from
          * dispatch; cached=1 records why). COLD_AUDIT never marks anything so
          * every group runs fresh and is verified after. */
         if (cache_mode == CACHE_ON) {
-            for (size_t i = 0; i < g_num_groups; i++) {
-                if (results[i].skipped) continue;
-                if (probes[i].cacheable && probes[i].hit) {
-                    results[i].status = 0;
-                    results[i].cached = 1;
-                    cached_count++;
-                    /* A stored PASS earned by an alone rerun after a
-                     * contended FAIL/WEDGED must never come back looking like
-                     * an ordinary cache hit — that would hide the flake on
-                     * every subsequent cached run forever. Reprint it. */
-                    if (probes[i].hit_flaky) {
-                        results[i].load_flaky = 1;
-                        printf("LOAD-FLAKY %s first=CACHED alone=PASS "
-                              "first_log=(prior run) alone_log=(cache hit; "
-                              "see the run that stored this key)\n",
-                              g_groups[i].name);
-                    }
-                }
-            }
+            for (size_t i = 0; i < g_num_groups; i++)
+                group_cache_hit_marked(results, i, probes, &cached_count);
         }
 
         /* ── The PLAN, printed BEFORE dispatch ──────────────────────────────
@@ -1837,7 +2269,12 @@ int main(int argc, char **argv)
                    testcache_reason_label((enum testcache_reason)r),
                    reason_hist[r]);
         }
-        if (testcache_depfile_count(tc) == 0)
+        /* Capsule-consumed runs never opened a handle (tc is NULL and the
+         * count is zero); the capsule's own dep-graph provenance fills the
+         * same slot, so the warnings below read the same in both modes. */
+        size_t plan_depfiles =
+            testcache_depfile_count(tc) + cap_state.depfiles;
+        if (plan_depfiles == 0)
             printf("test_parallel: !! NO DEPFILES under build/ — the include "
                    "graph is ABSENT, so every group is UNCACHEABLE and the "
                    "whole run is cold. Build first to restore caching. !!\n");
@@ -1845,8 +2282,20 @@ int main(int argc, char **argv)
             printf("test_parallel: !! %zu group(s) have inputs NEWER than the "
                    "include graph (%zu depfiles) — the graph cannot describe "
                    "them, so they are UNCACHEABLE. Rebuild to refresh. !!\n",
-                   reason_hist[TESTCACHE_R_GRAPH_STALE],
-                   testcache_depfile_count(tc));
+                   reason_hist[TESTCACHE_R_GRAPH_STALE], plan_depfiles);
+        }
+    }
+    /* Probe-only: the batch verdicts above ARE the deliverable (the routed
+     * set's preflight). Report them and exit before any fork: nothing here
+     * runs, stores, or dispatches. After an allocation downgrade there is no
+     * verified graph, so the report carries no SUMMARY and the caller's
+     * self-check refuses it. */
+    if (cli_probe_only) {
+        print_probe_only(results, probes, tc);
+        testcache_close(tc);
+        free(probes);
+        free(results);
+        return 0;
     }
 
     struct child_slot *slots =
@@ -2142,11 +2591,18 @@ int main(int argc, char **argv)
                  * uncontended pass: store the flag alongside the verdict so
                  * every future hit reprints LOAD-FLAKY (see the cache-hit
                  * arm above). */
-                if (results[i].load_flaky)
-                    testcache_store_pass_flaky(tc, probes[i].key);
-                else
-                    testcache_store_pass(tc, probes[i].key);
-                stored++;
+                /* Capsule-consumed runs arrive with no open handle: open
+                 * lazily on the first store so all-HIT cycles never pay an
+                 * open. A failed lazy open only loses future reuse, never
+                 * correctness — the PASS verdict already stands. */
+                if (!tc) tc = testcache_open(NULL);
+                if (tc) {
+                    if (results[i].load_flaky)
+                        testcache_store_pass_flaky(tc, probes[i].key);
+                    else
+                        testcache_store_pass(tc, probes[i].key);
+                    stored++;
+                }
             }
             if (cache_mode == CACHE_COLD_AUDIT && probes &&
                 probes[i].cacheable && probes[i].hit) {

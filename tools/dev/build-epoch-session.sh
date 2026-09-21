@@ -50,6 +50,10 @@ OWNER_PID="${17}"
 VERIFY_TOOL="${18:-tools/dev/source-identity.sh}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
+# The compiler-identity scope root: the checkout that owns this driver. The
+# verify re-derivation below must scope identically to Make's parse-time
+# derivation (which passes $(CURDIR)) or the comparison is meaningless.
+SCOPE_ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 source "$SELF_DIR/build-epoch-open-file-identity.sh"
 source "$SELF_DIR/build-epoch-lock-wait.sh"
 HOST_SYSTEM="$(uname -s 2>/dev/null || printf 'unknown')"
@@ -234,7 +238,7 @@ verify_authority()
     local actual_compiler actual_epoch actual_build_system
     local derive_rc=0 recheck third="" diag="" root=""
     set +e
-    actual_compiler="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    actual_compiler="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$SCOPE_ROOT")"
     derive_rc=$?
     set -e
     if [ "$derive_rc" -ne 0 ] || [ "$actual_compiler" != "$COMPILER_ID" ]; then
@@ -252,7 +256,7 @@ verify_authority()
         [ -z "$root" ] ||
             diag="$(mktemp -d "$root/zcl-build-epoch-diag.XXXXXX" 2>/dev/null || printf '')"
         recheck="$(ZCL_BUILD_EPOCH_DIAG_DIR="$diag" \
-            "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")" || {
+            "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$SCOPE_ROOT")" || {
             discard_diag "$diag"
             # Only a FIRST derivation that itself failed makes this a host
             # that could not run the probe twice. When the first derivation
@@ -282,7 +286,7 @@ verify_authority()
             # keyed one.
             if [ -n "$diag" ]; then
                 ZCL_BUILD_EPOCH_DIAG_DIR="$diag" \
-                    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" \
+                    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$SCOPE_ROOT" \
                     >"$diag/third" 2>/dev/null || true
                 third="$(cat "$diag/third" 2>/dev/null || printf '')"
                 describe_compiler_preimage_difference "$diag" \

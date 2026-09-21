@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define TC_FIX "test-tmp/tc_cache_fix"
 #define TC_STORE "test-tmp/tc_cache_store"
@@ -273,6 +274,1082 @@ static void tc_env_restore(struct tc_envsave *s, const char *name)
     free(s->val);
     s->val = NULL;
     s->was_set = false;
+}
+
+/* ── Phase PB: batched proof-reuse lookup ───────────────────────────────
+ * The routed-group preflight must probe a whole required set through ONE
+ * process, ONE testcache_open, ONE verified dep graph, and the shared
+ * path→SHA3 memo — and get byte-identical per-group verdicts. The fixture
+ * below is 32 entries test_demo_q01..q32, each with a PRIVATE top file
+ * calling the SHARED tc_mid()/tc_leaf() pair under the shared header and
+ * registry, so every closure overlaps on 4 of 5 files and the memo has
+ * something real to share. Each helper returns its own failure count so
+ * test_testcache() itself stays at its pinned complexity. */
+#define TC_QN 32
+#define TC_FIX2 "test-tmp/tc_cache_fix2"
+
+static void tc_qname(int i, char out[64])
+{
+    snprintf(out, 64, "test_demo_q%02d", i);
+}
+
+/* One private entry source. `add` is extra arithmetic inside the return
+ * ("" pristine, " + 1000" edited) so an in-closure edit touches exactly
+ * one group's closure. */
+static bool tc_write_q_source(int i, const char *add)
+{
+    char rel[128];
+    char body[576];
+    snprintf(rel, sizeof(rel), "core/modules/net/src/tc_q%02d.c", i);
+    snprintf(body, sizeof(body),
+             "/* core/modules/net/src/tc_q%02d.c — batch entry. */\n"
+             "#include \"net/tc.h\"\n"
+             "int test_demo_q%02d(void)\n"
+             "{\n"
+             "    return tc_mid() + tc_leaf()%s;\n"
+             "}\n",
+             i, i, add ? add : "");
+    return mk_write(TC_FIX, rel, body);
+}
+
+static bool tc_write_q_depfile(int i)
+{
+    char rel[128];
+    char body[576];
+    snprintf(rel, sizeof(rel), "build/obj/tc_q%02d.d", i);
+    snprintf(body, sizeof(body),
+             "build/obj/tc_q%02d.o: core/modules/net/src/tc_q%02d.c "
+             "core/modules/net/include/net/tc.h "
+             "core/modules/net/include/net/tc_registry.def\n",
+             i, i);
+    return mk_write(TC_FIX, rel, body);
+}
+
+/* The four base depfiles, byte-identical to write_fixture_full above:
+ * sources are always (re)written BEFORE depfiles so the graph stays the
+ * newest bytes in the fixture and the freshness guard holds. */
+static bool write_batch_depfiles(void)
+{
+    bool ok = mk_write(TC_FIX, "build/obj/tc_top.d",
+                       "build/obj/tc_top.o: core/modules/net/src/tc_top.c "
+                       "core/modules/net/include/net/tc.h "
+                       "core/modules/net/include/net/tc_registry.def\n") &&
+              mk_write(TC_FIX, "build/obj/tc_mid.d",
+                       "build/obj/tc_mid.o: core/modules/net/src/tc_mid.c "
+                       "core/modules/net/include/net/tc.h\n") &&
+              mk_write(TC_FIX, "build/obj/tc_leaf.d",
+                       "build/obj/tc_leaf.o: core/modules/net/src/tc_leaf.c "
+                       "core/modules/net/include/net/tc.h\n") &&
+              mk_write(TC_FIX, "build/obj/tc_other.d",
+                       "build/obj/tc_other.o: core/modules/net/src/tc_other.c "
+                       "core/modules/net/include/net/tc.h\n");
+    for (int i = 1; i <= TC_QN; i++)
+        if (!tc_write_q_depfile(i)) ok = false;
+    return ok;
+}
+
+static bool write_batch_fixture(void)
+{
+    bool ok = mk_write(TC_FIX, "core/modules/net/src/tc_top.c", TC_TOP) &&
+              mk_write(TC_FIX, "core/modules/net/src/tc_mid.c", TC_MID) &&
+              mk_write(TC_FIX, "core/modules/net/src/tc_leaf.c", TC_LEAF_A) &&
+              mk_write(TC_FIX, "core/modules/net/src/tc_other.c", TC_OTHER_A) &&
+              mk_write(TC_FIX, "core/modules/net/include/net/tc.h", TC_H_A) &&
+              mk_write(TC_FIX, "core/modules/net/include/net/tc_registry.def",
+                       TC_DEF_A);
+    if (!ok) return false;
+    for (int i = 1; i <= TC_QN; i++)
+        if (!tc_write_q_source(i, "")) return false;
+    return write_batch_depfiles();
+}
+
+/* Field-for-field probe identity (reason text is derived from the code,
+ * but compare it anyway: a divergent message is a divergent decision). */
+static bool tc_probe_equal(const struct testcache_probe *a,
+                           const struct testcache_probe *b)
+{
+    return a->key_valid == b->key_valid &&
+           a->cacheable == b->cacheable &&
+           a->hit == b->hit &&
+           a->hit_flaky == b->hit_flaky &&
+           a->n_closure == b->n_closure &&
+           a->code == b->code &&
+           strcmp(a->reason, b->reason) == 0 &&
+           memcmp(a->key, b->key, 32) == 0;
+}
+
+static uint64_t tc_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u +
+           (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Store one PASS per batch entry so parity covers HIT as well as MISS. */
+static bool tc_batch_seed(char names[TC_QN][64])
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool stored = tc != NULL;
+    for (int i = 0; stored && i < TC_QN; i++) {
+        struct testcache_probe p;
+        testcache_probe_group(tc, names[i], &p);
+        if (p.cacheable) testcache_store_pass(tc, p.key);
+        else stored = false;
+    }
+    if (tc) testcache_close(tc);
+    return stored;
+}
+
+/* Acceptance 2: one handle serving N groups returns exactly what N fresh
+ * handles return — key, code, hit, cacheable — including a denylisted and
+ * an unresolved slot that must not perturb their neighbours. */
+static int tc_batch_parity(void)
+{
+    int failures = 0;
+    static char names[TC_QN][64];
+    static const char *ptrs[TC_QN + 2];
+    for (int i = 0; i < TC_QN; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    ptrs[TC_QN] = "test_explorer_index";
+    ptrs[TC_QN + 1] = "test_no_such_symbol_zzz";
+    TC_CHECK("batch fixture writes", write_batch_fixture());
+    TC_CHECK("batch verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    TC_CHECK("every batch entry is cacheable for seeding",
+             tc_batch_seed(names));
+    static struct testcache_probe solo[TC_QN + 2], batched[TC_QN + 2];
+    for (size_t k = 0; k < TC_QN + 2; k++) {
+        struct testcache *tc = testcache_open(TC_FIX);
+        if (tc) testcache_probe_group(tc, ptrs[k], &solo[k]);
+        if (tc) testcache_close(tc);
+    }
+    TC_CHECK("solo probes hit their seeded PASSes",
+             solo[0].cacheable && solo[0].hit &&
+             solo[TC_QN - 1].cacheable && solo[TC_QN - 1].hit);
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool served = false;
+        if (tc) {
+            served = testcache_probe_groups(tc, ptrs, NULL, TC_QN + 2,
+                                            batched);
+            testcache_close(tc);
+        }
+        TC_CHECK("one handle serves the whole 34-slot set", served);
+    }
+    {
+        bool equal = true;
+        for (size_t k = 0; k < TC_QN + 2; k++)
+            if (!tc_probe_equal(&solo[k], &batched[k])) equal = false;
+        TC_CHECK("batch key/code/hit/cacheable == solo for every slot",
+                 equal);
+    }
+    TC_CHECK("denylisted slot stays uncacheable inside the batch",
+             !batched[TC_QN].cacheable &&
+             batched[TC_QN].code == TESTCACHE_R_EXTERNAL_INPUT);
+    TC_CHECK("unresolved slot stays uncacheable inside the batch",
+             !batched[TC_QN + 1].cacheable &&
+             batched[TC_QN + 1].code == TESTCACHE_R_ENTRY_UNRESOLVED);
+    return failures;
+}
+
+/* Acceptance 3: overlapping closures hash each unchanged file once per
+ * batch — the existing path→SHA3 memo, now observable via stats. */
+static int tc_batch_stats(void)
+{
+    int failures = 0;
+    static char names[8][64];
+    static const char *ptrs[8];
+    for (int i = 0; i < 8; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    TC_CHECK("stats fixture writes", write_batch_fixture());
+    TC_CHECK("stats verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    struct testcache *tc = testcache_open(TC_FIX);
+    TC_CHECK("stats cache opens", tc != NULL);
+    if (tc) {
+        static struct testcache_probe out[8];
+        bool served = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        TC_CHECK("batch of 8 served", served);
+        TC_CHECK("each closure is its 5 files (1 private + 4 shared)",
+                 out[0].n_closure == 5 && out[7].n_closure == 5);
+        struct testcache_stats s;
+        testcache_stats(tc, &s);
+        TC_CHECK("8 overlapping closures cost 8 closure queries",
+                 s.closure_queries == 8);
+        TC_CHECK("12 unique files read once (8 private + 4 shared)",
+                 s.file_hash_reads == 12);
+        TC_CHECK("the other 28 file visits hit the memo",
+                 s.file_hash_memo_hits == 8u * 5u - 12u);
+        TC_CHECK("content bytes flow through SHA3",
+                 s.sha3_content_bytes > 0);
+        TC_CHECK("one verdict lookup per cacheable group",
+                 s.verdict_lookups == 8 && s.verdict_hits == 0);
+        for (int i = 0; i < 8; i++)
+            if (out[i].cacheable) testcache_store_pass(tc, out[i].key);
+        bool served2 = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        TC_CHECK("second batch served from the same handle", served2);
+        struct testcache_stats s2;
+        testcache_stats(tc, &s2);
+        TC_CHECK("second batch reads no file twice",
+                 s2.file_hash_reads == 12);
+        TC_CHECK("stored PASSes all hit",
+                 s2.verdict_lookups == 16 && s2.verdict_hits == 8);
+        testcache_stats_reset(tc);
+        struct testcache_stats s3;
+        testcache_stats(tc, &s3);
+        TC_CHECK("stats reset zeroes every counter",
+                 s3.closure_queries == 0 && s3.file_hash_reads == 0 &&
+                 s3.file_hash_memo_hits == 0 &&
+                 s3.sha3_content_bytes == 0 && s3.verdict_lookups == 0 &&
+                 s3.verdict_hits == 0);
+        bool served3 = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        TC_CHECK("observability reset changes no verdict",
+                 served3 && out[0].hit && out[7].hit);
+        testcache_close(tc);
+    }
+    return failures;
+}
+
+/* Acceptance 4: the invalidation matrix. A private-top edit moves exactly
+ * one key; a shared-header edit moves all 32; an unrelated edit moves
+ * none. Depfiles are refreshed after every content edit (as a rebuild
+ * would) so the matrix measures content reach, not graph staleness. One
+ * helper per matrix step so each stays under the complexity cap. */
+static bool tc_inv_baseline(const char *const *ptrs, uint8_t k0[TC_QN][32])
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool ok = tc != NULL;
+    if (tc) {
+        static struct testcache_probe out[TC_QN];
+        ok = testcache_probe_groups(tc, ptrs, NULL, TC_QN, out);
+        for (int i = 0; ok && i < TC_QN; i++) {
+            if (!out[i].cacheable) ok = false;
+            else {
+                memcpy(k0[i], out[i].key, 32);
+                testcache_store_pass(tc, out[i].key);
+            }
+        }
+        testcache_close(tc);
+    }
+    return ok;
+}
+
+static bool tc_inv_private(const char *const *ptrs,
+                           const uint8_t k0[TC_QN][32])
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool selective = false;
+    if (tc) {
+        static struct testcache_probe out[TC_QN];
+        selective = testcache_probe_groups(tc, ptrs, NULL, TC_QN, out) &&
+                    memcmp(k0[6], out[6].key, 32) != 0 && !out[6].hit;
+        for (int i = 0; selective && i < TC_QN; i++) {
+            if (i != 6 && memcmp(k0[i], out[i].key, 32) != 0)
+                selective = false;
+            if (i != 6 && !out[i].hit) selective = false;
+        }
+        testcache_close(tc);
+    }
+    return selective;
+}
+
+static bool tc_inv_header(const char *const *ptrs,
+                          const uint8_t k0[TC_QN][32],
+                          uint8_t k2[TC_QN][32])
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool all_moved = false;
+    if (tc) {
+        static struct testcache_probe out[TC_QN];
+        all_moved = testcache_probe_groups(tc, ptrs, NULL, TC_QN, out);
+        for (int i = 0; all_moved && i < TC_QN; i++) {
+            if (memcmp(k0[i], out[i].key, 32) == 0) all_moved = false;
+            if (out[i].hit) all_moved = false;
+        }
+        for (int i = 0; all_moved && i < TC_QN; i++)
+            memcpy(k2[i], out[i].key, 32);
+        testcache_close(tc);
+    }
+    return all_moved;
+}
+
+static bool tc_inv_unrelated(const char *const *ptrs,
+                             const uint8_t k2[TC_QN][32])
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool none_moved = false;
+    if (tc) {
+        static struct testcache_probe out[TC_QN];
+        none_moved = testcache_probe_groups(tc, ptrs, NULL, TC_QN, out);
+        for (int i = 0; none_moved && i < TC_QN; i++)
+            if (memcmp(k2[i], out[i].key, 32) != 0) none_moved = false;
+        testcache_close(tc);
+    }
+    return none_moved;
+}
+
+static int tc_batch_invalidation(void)
+{
+    int failures = 0;
+    static char names[TC_QN][64];
+    static const char *ptrs[TC_QN];
+    for (int i = 0; i < TC_QN; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    TC_CHECK("matrix fixture writes", write_batch_fixture());
+    TC_CHECK("matrix verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    static uint8_t k0[TC_QN][32];
+    static uint8_t k2[TC_QN][32];
+    TC_CHECK("baseline keys stored for all 32",
+             tc_inv_baseline(ptrs, k0));
+    TC_CHECK("private-top edit of q07", tc_write_q_source(7, " + 1000") &&
+             write_batch_depfiles());
+    TC_CHECK("private edit invalidates only the group that reaches it",
+             tc_inv_private(ptrs, k0));
+    TC_CHECK("shared-header edit", mk_write(TC_FIX,
+             "core/modules/net/include/net/tc.h", TC_H_B) &&
+             write_batch_depfiles());
+    TC_CHECK("shared-header edit moves all 32 keys to MISS",
+             tc_inv_header(ptrs, k0, k2));
+    TC_CHECK("unrelated-source edit",
+             mk_write(TC_FIX, "core/modules/net/src/tc_other.c",
+                      TC_OTHER_B) && write_batch_depfiles());
+    TC_CHECK("unrelated edit moves no key", tc_inv_unrelated(ptrs, k2));
+    TC_CHECK("matrix fixture restored", write_batch_fixture());
+    return failures;
+}
+
+/* Acceptance 5+6: a stale or missing graph stays fail-closed per slot,
+ * and the coverage-gating env keeps its key separation across the batch.
+ * One helper per step so each stays under the complexity cap. */
+static bool tc_fc_stale(const char *const *ptrs)
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool stale = false;
+    if (tc) {
+        static struct testcache_probe out[8];
+        stale = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        for (int i = 0; stale && i < 8; i++)
+            if (out[i].cacheable ||
+                out[i].code != TESTCACHE_R_GRAPH_STALE) stale = false;
+        testcache_close(tc);
+    }
+    return stale;
+}
+
+static bool tc_fc_missing(const char *const *ptrs)
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool missing = false;
+    if (tc) {
+        static struct testcache_probe out[8];
+        missing = testcache_depfile_count(tc) == 0 &&
+                  testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        for (int i = 0; missing && i < 8; i++)
+            if (out[i].cacheable ||
+                out[i].code != TESTCACHE_R_NO_INCLUDE_GRAPH)
+                missing = false;
+        testcache_close(tc);
+    }
+    return missing;
+}
+
+static bool tc_fc_nonstress(const char *const *ptrs, uint8_t kn[8][32])
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool ok = tc != NULL;
+    if (tc) {
+        static struct testcache_probe out[8];
+        ok = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        for (int i = 0; ok && i < 8; i++) {
+            if (!out[i].cacheable) ok = false;
+            else memcpy(kn[i], out[i].key, 32);
+        }
+        testcache_close(tc);
+    }
+    return ok;
+}
+
+static bool tc_fc_stress(const char *const *ptrs,
+                         const uint8_t kn[8][32])
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool split = false;
+    if (tc) {
+        static struct testcache_probe out[8];
+        split = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        for (int i = 0; split && i < 8; i++)
+            if (!out[i].cacheable ||
+                memcmp(kn[i], out[i].key, 32) == 0) split = false;
+        testcache_close(tc);
+    }
+    return split;
+}
+
+static int tc_batch_failclosed(void)
+{
+    int failures = 0;
+    static char names[8][64];
+    static const char *ptrs[8];
+    for (int i = 0; i < 8; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    TC_CHECK("fail-closed fixture writes", write_batch_fixture());
+    TC_CHECK("fail-closed verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    TC_CHECK("leaf touched newer than its depfiles",
+             system("touch " TC_FIX "/core/modules/net/src/tc_leaf.c") == 0);
+    TC_CHECK("stale graph fails every slot closed", tc_fc_stale(ptrs));
+    TC_CHECK("depfile tree removed (fresh-clone shape)",
+             system("rm -rf " TC_FIX "/build") == 0);
+    TC_CHECK("missing graph fails every slot closed", tc_fc_missing(ptrs));
+    TC_CHECK("fixture restored for the env split", write_batch_fixture());
+    static uint8_t kn[8][32];
+    struct tc_envsave st;
+    tc_env_capture(&st, "ZCL_STRESS_TESTS");
+    /* The non-stress baseline must be captured with the flag absent even
+     * when the ambient runner exports ZCL_STRESS_TESTS=1; otherwise the
+     * baseline IS the stress key and the split below cannot separate. */
+    unsetenv("ZCL_STRESS_TESTS");
+    TC_CHECK("non-stress keys captured", tc_fc_nonstress(ptrs, kn));
+    setenv("ZCL_STRESS_TESTS", "1", 1);
+    TC_CHECK("stress env separates all 8 keys", tc_fc_stress(ptrs, kn));
+    tc_env_restore(&st, "ZCL_STRESS_TESTS");
+    return failures;
+}
+
+/* Acceptance 7: load-flaky PASSes still announce their flake per slot,
+ * and an activated proof-contract slot keeps its never-reusable identity
+ * without disturbing its neighbours. One helper per step so each stays
+ * under the complexity cap; every helper opens its own handle over the
+ * same on-disk verdict store. */
+static bool tc_sp_activated(const char *const *ptrs,
+                            const enum zcl_test_proof_contract *mixed)
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool ok = tc != NULL;
+    if (tc) {
+        static struct testcache_probe ord[8], out[8];
+        ok = testcache_probe_groups(tc, ptrs, NULL, 8, ord) &&
+             testcache_probe_groups(tc, ptrs, mixed, 8, out);
+        ok = ok && out[0].key_valid && !out[0].cacheable && !out[0].hit &&
+             !out[0].hit_flaky &&
+             out[0].code == TESTCACHE_R_ACTIVE_PROOF_CONTRACT &&
+             memcmp(out[0].key, ord[0].key, 32) != 0;
+        testcache_close(tc);
+    }
+    return ok;
+}
+
+static bool tc_sp_neighbours(const char *const *ptrs,
+                             const enum zcl_test_proof_contract *mixed)
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool neighbours = tc != NULL;
+    if (tc) {
+        static struct testcache_probe ord[8], out[8];
+        neighbours = testcache_probe_groups(tc, ptrs, NULL, 8, ord) &&
+                     testcache_probe_groups(tc, ptrs, mixed, 8, out);
+        for (int i = 1; neighbours && i < 8; i++)
+            if (!tc_probe_equal(&ord[i], &out[i])) neighbours = false;
+        testcache_close(tc);
+    }
+    return neighbours;
+}
+
+static bool tc_sp_flaky(const char *const *ptrs)
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool ok = tc != NULL;
+    if (tc) {
+        static struct testcache_probe out[8];
+        ok = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        for (int i = 1; ok && i < 8; i++) {
+            if (!out[i].cacheable) ok = false;
+            else testcache_store_pass(tc, out[i].key);
+        }
+        if (ok) testcache_store_pass_flaky(tc, out[1].key);
+        ok = ok && testcache_probe_groups(tc, ptrs, NULL, 8, out);
+        ok = ok && out[1].hit && out[1].hit_flaky;
+        for (int i = 2; ok && i < 8; i++)
+            if (!out[i].hit || out[i].hit_flaky) ok = false;
+        testcache_close(tc);
+    }
+    return ok;
+}
+
+static int tc_batch_special(void)
+{
+    int failures = 0;
+    static char names[8][64];
+    static const char *ptrs[8];
+    for (int i = 0; i < 8; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    TC_CHECK("special fixture writes", write_batch_fixture());
+    TC_CHECK("special verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    static const enum zcl_test_proof_contract mixed[8] = {
+        ZCL_TEST_PROOF_STRESS, ZCL_TEST_PROOF_NONE, ZCL_TEST_PROOF_NONE,
+        ZCL_TEST_PROOF_NONE, ZCL_TEST_PROOF_NONE, ZCL_TEST_PROOF_NONE,
+        ZCL_TEST_PROOF_NONE, ZCL_TEST_PROOF_NONE,
+    };
+    TC_CHECK("activated slot keeps identity but never reuses",
+             tc_sp_activated(ptrs, mixed));
+    TC_CHECK("neighbours unaffected by the activated slot",
+             tc_sp_neighbours(ptrs, mixed));
+    TC_CHECK("flaky verdicts report per slot", tc_sp_flaky(ptrs));
+    return failures;
+}
+
+/* Acceptance 8: keys survive a handle restart and a second physical tree
+ * (depfile-relative, content-addressed — the v5 identity at fixture
+ * scale). */
+static int tc_batch_restart_crosstree(void)
+{
+    int failures = 0;
+    static char names[8][64];
+    static const char *ptrs[8];
+    for (int i = 0; i < 8; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    TC_CHECK("restart fixture writes", write_batch_fixture());
+    TC_CHECK("restart verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    static uint8_t k1[8][32];
+    static struct testcache_probe reopen[8];
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool ok = tc != NULL;
+        if (tc) {
+            static struct testcache_probe first[8];
+            ok = testcache_probe_groups(tc, ptrs, NULL, 8, first);
+            for (int i = 0; ok && i < 8; i++)
+                memcpy(k1[i], first[i].key, 32);
+            testcache_close(tc);
+        }
+        TC_CHECK("first-tree keys captured", ok);
+    }
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool ok = tc != NULL;
+        if (tc) {
+            ok = testcache_probe_groups(tc, ptrs, NULL, 8, reopen);
+            testcache_close(tc);
+        }
+        bool stable = ok;
+        for (int i = 0; stable && i < 8; i++)
+            if (!reopen[i].cacheable ||
+                memcmp(k1[i], reopen[i].key, 32) != 0) stable = false;
+        TC_CHECK("restart produces the same 8 keys", stable);
+    }
+    TC_CHECK("second physical tree copies the fixture",
+             system("rm -rf " TC_FIX2 " && cp -r " TC_FIX " " TC_FIX2
+                    " && rm -rf " TC_FIX2 "/.zvcs") == 0);
+    {
+        struct testcache *tc = testcache_open(TC_FIX2);
+        bool ok = tc != NULL;
+        if (tc) {
+            static struct testcache_probe out[8];
+            ok = testcache_probe_groups(tc, ptrs, NULL, 8, out);
+            for (int i = 0; ok && i < 8; i++)
+                if (!out[i].cacheable ||
+                    memcmp(k1[i], out[i].key, 32) != 0) ok = false;
+            testcache_close(tc);
+        }
+        TC_CHECK("cross-tree produces the same 8 keys", ok);
+    }
+    TC_CHECK("second tree removed", system("rm -rf " TC_FIX2) == 0);
+    return failures;
+}
+
+/* The 1/8/32 cost shape: 32 fresh opens (today's per-group-process cost
+ * in miniature) against one open serving 1, 8, and 32 groups. Timings are
+ * diagnostic — the committed guarantee is the stats shape in
+ * tc_batch_stats; ratios are reported, never asserted, so a loaded host
+ * cannot flake the suite. */
+static int tc_batch_perf(void)
+{
+    int failures = 0;
+    static char names[TC_QN][64];
+    static const char *ptrs[TC_QN];
+    for (int i = 0; i < TC_QN; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    TC_CHECK("perf fixture writes", write_batch_fixture());
+    TC_CHECK("perf verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    static struct testcache_probe out[TC_QN];
+    uint64_t t0 = tc_now_ms();
+    for (int i = 0; i < TC_QN; i++) {
+        struct testcache *tc = testcache_open(TC_FIX);
+        if (tc) testcache_probe_group(tc, names[i], &out[i]);
+        if (tc) testcache_close(tc);
+    }
+    uint64_t indiv_ms = tc_now_ms() - t0;
+    uint64_t each_ms[3] = {0, 0, 0};
+    size_t each_n[3] = {1, 8, 32};
+    bool served = true;
+    for (int s = 0; s < 3; s++) {
+        struct testcache *tc = testcache_open(TC_FIX);
+        t0 = tc_now_ms();
+        if (tc)
+            served = testcache_probe_groups(tc, ptrs, NULL, each_n[s],
+                                            out) && served;
+        else
+            served = false;
+        each_ms[s] += tc_now_ms() - t0;
+        if (tc) testcache_close(tc);
+    }
+    printf("  testcache: batch-perf: individual-32=%llums"
+           " batch-1=%llums batch-8=%llums batch-32=%llums\n",
+           (unsigned long long)indiv_ms, (unsigned long long)each_ms[0],
+           (unsigned long long)each_ms[1], (unsigned long long)each_ms[2]);
+    TC_CHECK("batch path serves 1, 8, and 32", served);
+    return failures;
+}
+
+/* ── Phase PC: the probe capsule ────────────────────────────────────────
+ * One proof cycle must pay graph/index setup once: the preflight batch is
+ * serialized beside proof scratch (source/candidate identity, toolkey/env
+ * digest, dep-graph facts, ordered slots, capsule SHA3) and the test
+ * dimension consumes it instead of reopening. The capsule hash is
+ * INTEGRITY ONLY — it never addresses a verdict and never gates a skip by
+ * itself; every slot still carries its own key/code/cacheable/hit. Each
+ * helper returns its own failure count so test_testcache() stays pinned. */
+#define TC_CAP "test-tmp/tc_capsule.bin"
+#define TC_CAP2 "test-tmp/tc_capsule2.bin"
+
+/* The standard 8-slot set: six ordinary entries, one activated
+ * proof-contract slot, one denylisted slot. */
+static void tc_cap_ptrs(char names[7][64], const char **ptrs,
+                        enum zcl_test_proof_contract *mixed)
+{
+    for (int i = 0; i < 7; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+        mixed[i] = (i == 6) ? ZCL_TEST_PROOF_STRESS : ZCL_TEST_PROOF_NONE;
+    }
+    ptrs[7] = "test_explorer_index";
+    mixed[7] = ZCL_TEST_PROOF_NONE;
+}
+
+static void tc_cap_bindings(struct testcache_capsule_bindings *b)
+{
+    memset(b, 0, sizeof(*b));
+    memset(b->source_id, 'a', 64);
+    memset(b->mutation_id, 'b', 64);
+    memset(b->source_cas, 'c', 64);
+    b->source_cas_present = true;
+    memset(b->graph_root, 'd', 64);
+    b->graph_root_present = true;
+}
+
+/* Slot identity minus the free-text reason (the capsule carries codes,
+ * not messages; the reader re-derives labels from codes). */
+static bool tc_capslot_equal(const struct testcache_probe *a,
+                             const struct testcache_probe *b)
+{
+    return a->key_valid == b->key_valid &&
+           a->cacheable == b->cacheable &&
+           a->hit == b->hit &&
+           a->hit_flaky == b->hit_flaky &&
+           a->n_closure == b->n_closure &&
+           a->code == b->code &&
+           memcmp(a->key, b->key, 32) == 0;
+}
+
+static bool tc_read_file(const char *path, uint8_t *buf, size_t cap,
+                         size_t *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    size_t n = 0;
+    int c;
+    if (!f || !buf || !len_out) {
+        if (f) fclose(f);
+        return false;
+    }
+    while ((c = fgetc(f)) != EOF) {
+        if (n >= cap) {
+            fclose(f);
+            return false;
+        }
+        buf[n++] = (uint8_t)c;
+    }
+    fclose(f);
+    *len_out = n;
+    return n > 0;
+}
+
+static bool tc_write_file(const char *path, const uint8_t *buf, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f || !buf) {
+        if (f) fclose(f);
+        return false;
+    }
+    bool ok = fwrite(buf, 1, len, f) == len;
+    fclose(f);
+    return ok;
+}
+
+/* Acceptance: write → consume with identical bindings returns every slot
+ * byte-identical (minus reason text), with provenance intact. */
+/* Seed the batch fixture, store PASSes, reprobe: the second probe must
+ * hit every stored key. */
+static int tc_cap_phase_seed(const char **ptrs,
+                             const enum zcl_test_proof_contract *mixed,
+                             struct testcache_probe *batch)
+{
+    int failures = 0;
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool ok = tc != NULL;
+    if (tc) {
+        ok = testcache_probe_groups(tc, ptrs, mixed, 8, batch);
+        for (int i = 0; ok && i < 8; i++)
+            if (batch[i].cacheable) testcache_store_pass(tc, batch[i].key);
+        ok = ok && testcache_probe_groups(tc, ptrs, mixed, 8, batch);
+        testcache_close(tc);
+    }
+    TC_CHECK("capsule batch hits its stored PASSes",
+             ok && batch[0].hit && batch[5].hit);
+    return failures;
+}
+
+/* Write the capsule from the batch handle under the test bindings. */
+static int tc_cap_phase_write(const char **ptrs,
+                              const enum zcl_test_proof_contract *mixed,
+                              const struct testcache_probe *batch,
+                              const struct testcache_capsule_bindings *bind)
+{
+    int failures = 0;
+    struct testcache *tc = testcache_open(TC_FIX);
+    bool written = false;
+    if (tc) {
+        written = testcache_capsule_write(tc, TC_CAP, ptrs, mixed, 8,
+                                          batch, bind);
+        testcache_close(tc);
+    }
+    TC_CHECK("capsule writes from the batch handle", written);
+    return failures;
+}
+
+/* Consume under identical bindings: every slot byte-identical, denylist
+ * and proof-contract semantics intact. */
+static int tc_cap_phase_verify(const struct testcache_probe *batch,
+                               const struct testcache_capsule_bindings *bind)
+{
+    int failures = 0;
+    static struct testcache_capsule_slot slots[8];
+    struct testcache_capsule_info info;
+    char why[64];
+    bool consumed = testcache_capsule_consume(TC_CAP, bind, slots, 8,
+                                              &info, why, sizeof(why));
+    bool same;
+    TC_CHECK("capsule consumes with identical bindings", consumed);
+    same = consumed && info.n_slots == 8 && info.dep_count == 36;
+    for (int i = 0; same && i < 8; i++)
+        if (!tc_capslot_equal(&batch[i], &slots[i].probe)) same = false;
+    TC_CHECK("every slot returns byte-identical (34-slot parity shape)",
+             same);
+    TC_CHECK("denylisted + activated slots survive with semantics",
+             consumed && !slots[7].probe.cacheable &&
+             slots[7].probe.code == TESTCACHE_R_EXTERNAL_INPUT &&
+             slots[6].probe.key_valid &&
+             !slots[6].probe.cacheable &&
+             slots[6].probe.code ==
+                 TESTCACHE_R_ACTIVE_PROOF_CONTRACT);
+    return failures;
+}
+
+/* A cap that cannot fit the slots refuses, and scratch is removed. */
+static int tc_cap_phase_fit(const struct testcache_capsule_bindings *bind)
+{
+    int failures = 0;
+    static struct testcache_capsule_slot slots[8];
+    struct testcache_capsule_info info;
+    char why[64];
+    TC_CHECK("capsule that cannot fit its slots refuses",
+             !testcache_capsule_consume(TC_CAP, bind, slots, 4, &info,
+                                        why, sizeof(why)));
+    TC_CHECK("capsule scratch removed", system("rm -f " TC_CAP) == 0);
+    return failures;
+}
+
+static int tc_capsule_roundtrip(void)
+{
+    int failures = 0;
+    static char names[7][64];
+    static const char *ptrs[8];
+    static enum zcl_test_proof_contract mixed[8];
+    static struct testcache_probe batch[8];
+    struct testcache_capsule_bindings bind;
+    tc_cap_ptrs(names, ptrs, mixed);
+    TC_CHECK("capsule fixture writes", write_batch_fixture());
+    TC_CHECK("capsule verdict store starts empty",
+             system("rm -rf " TC_FIX "/.zvcs") == 0);
+    failures += tc_cap_phase_seed(ptrs, mixed, batch);
+    tc_cap_bindings(&bind);
+    failures += tc_cap_phase_write(ptrs, mixed, batch, &bind);
+    failures += tc_cap_phase_verify(batch, &bind);
+    failures += tc_cap_phase_fit(&bind);
+    return failures;
+}
+
+/* Acceptance: any corruption — flipped byte (header, bindings, or slot
+ * region), truncation, trailing garbage, empty, missing — refuses. A
+ * reordered capsule is byte-different, so the SHA3 over ordered slots
+ * rejects it the same way the flips below do. */
+static int tc_capsule_tamper(void)
+{
+    int failures = 0;
+    static char names[7][64];
+    static const char *ptrs[8];
+    static enum zcl_test_proof_contract mixed[8];
+    tc_cap_ptrs(names, ptrs, mixed);
+    TC_CHECK("tamper fixture writes", write_batch_fixture());
+    struct testcache_capsule_bindings bind;
+    tc_cap_bindings(&bind);
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool written = false;
+        if (tc) {
+            static struct testcache_probe batch[8];
+            written = testcache_probe_groups(tc, ptrs, mixed, 8, batch) &&
+                      testcache_capsule_write(tc, TC_CAP, ptrs, mixed, 8,
+                                              batch, &bind);
+            testcache_close(tc);
+        }
+        TC_CHECK("tamper capsule writes", written);
+    }
+    static uint8_t bytes[1 << 20];
+    size_t len = 0;
+    TC_CHECK("tamper capsule reads back",
+             tc_read_file(TC_CAP, bytes, sizeof(bytes), &len));
+    static const size_t flips[] = {10, 60, 0};
+    for (size_t f = 0; f < 3; f++) {
+        static uint8_t bent[1 << 20];
+        static struct testcache_capsule_slot slots[8];
+        struct testcache_capsule_info info;
+        char why[64];
+        size_t at = flips[f] == 0 ? len - 40 : flips[f];
+        bool rejected = false;
+        if (at < len) {
+            memcpy(bent, bytes, len);
+            bent[at] ^= 0x01;
+            if (tc_write_file(TC_CAP2, bent, len))
+                rejected = !testcache_capsule_consume(TC_CAP2, &bind, slots,
+                                                       8, &info, why, sizeof(why)) &&
+                           why[0] != '\0';
+        }
+        TC_CHECK("flipped byte refuses with a reason", rejected);
+    }
+    {
+        static struct testcache_capsule_slot slots[8];
+        struct testcache_capsule_info info;
+        char why[64];
+        bool trunc = tc_write_file(TC_CAP2, bytes, len / 2) &&
+                     !testcache_capsule_consume(TC_CAP2, &bind, slots, 8,
+                                                &info, why, sizeof(why));
+        TC_CHECK("truncated capsule refuses", trunc);
+        static uint8_t tail[64];
+        bool appended = false;
+        if (len + sizeof(tail) <= sizeof(bytes)) {
+            static uint8_t longer[1 << 20];
+            memcpy(longer, bytes, len);
+            memset(longer + len, 0x5a, sizeof(tail));
+            appended = tc_write_file(TC_CAP2, longer, len + sizeof(tail)) &&
+                       !testcache_capsule_consume(TC_CAP2, &bind, slots, 8,
+                                                  &info, why, sizeof(why));
+        }
+        TC_CHECK("appended garbage refuses", appended);
+        TC_CHECK("missing capsule refuses",
+                 !testcache_capsule_consume("test-tmp/tc_no_capsule.bin",
+                                            &bind, slots, 8, &info, why, sizeof(why)));
+    }
+    TC_CHECK("tamper scratch removed",
+             system("rm -f " TC_CAP " " TC_CAP2) == 0);
+    return failures;
+}
+
+/* Acceptance: the bindings are replay protection. A different
+ * source/mutation/cas/graph, or a live env that drifted since the write,
+ * refuses — while the same bindings minus the optional CAS still pass. */
+static int tc_capsule_bindings(void)
+{
+    int failures = 0;
+    static char names[7][64];
+    static const char *ptrs[8];
+    static enum zcl_test_proof_contract mixed[8];
+    tc_cap_ptrs(names, ptrs, mixed);
+    TC_CHECK("bindings fixture writes", write_batch_fixture());
+    struct testcache_capsule_bindings bind;
+    tc_cap_bindings(&bind);
+    /* The baseline capsule must be written with the flag absent even when
+     * the ambient runner exports ZCL_STRESS_TESTS=1; otherwise the later
+     * set-to-1 drift leg drifts nothing and the consume wrongly accepts. */
+    struct tc_envsave cap_st;
+    tc_env_capture(&cap_st, "ZCL_STRESS_TESTS");
+    unsetenv("ZCL_STRESS_TESTS");
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool written = false;
+        if (tc) {
+            static struct testcache_probe batch[8];
+            written = testcache_probe_groups(tc, ptrs, mixed, 8, batch) &&
+                      testcache_capsule_write(tc, TC_CAP, ptrs, mixed, 8,
+                                              batch, &bind);
+            testcache_close(tc);
+        }
+        TC_CHECK("bindings capsule writes", written);
+    }
+    static struct testcache_capsule_slot slots[8];
+    struct testcache_capsule_info info;
+    char why[64];
+    {
+        struct testcache_capsule_bindings drift = bind;
+        drift.source_id[0] ^= 0x01;
+        TC_CHECK("drifted source id refuses",
+                 !testcache_capsule_consume(TC_CAP, &drift, slots, 8, &info,
+                                            why, sizeof(why)));
+    }
+    {
+        struct testcache_capsule_bindings drift = bind;
+        drift.mutation_id[0] ^= 0x01;
+        TC_CHECK("drifted mutation refuses",
+                 !testcache_capsule_consume(TC_CAP, &drift, slots, 8, &info,
+                                            why, sizeof(why)));
+    }
+    {
+        struct testcache_capsule_bindings drift = bind;
+        drift.source_cas[0] ^= 0x01;
+        TC_CHECK("drifted source CAS refuses",
+                 !testcache_capsule_consume(TC_CAP, &drift, slots, 8, &info,
+                                            why, sizeof(why)));
+    }
+    {
+        struct testcache_capsule_bindings drift = bind;
+        drift.graph_root[0] ^= 0x01;
+        TC_CHECK("drifted graph root refuses",
+                 !testcache_capsule_consume(TC_CAP, &drift, slots, 8, &info,
+                                            why, sizeof(why)));
+    }
+    {
+        struct testcache_capsule_bindings drift = bind;
+        drift.source_cas_present = false;
+        TC_CHECK("dropped CAS presence refuses",
+                 !testcache_capsule_consume(TC_CAP, &drift, slots, 8, &info,
+                                            why, sizeof(why)));
+    }
+    {
+        struct tc_envsave st;
+        tc_env_capture(&st, "ZCL_STRESS_TESTS");
+        setenv("ZCL_STRESS_TESTS", "1", 1);
+        TC_CHECK("live env drift refuses",
+                 !testcache_capsule_consume(TC_CAP, &bind, slots, 8, &info,
+                                            why, sizeof(why)));
+        tc_env_restore(&st, "ZCL_STRESS_TESTS");
+    }
+    {
+        struct testcache_capsule_bindings bare;
+        tc_cap_bindings(&bare);
+        bare.source_cas_present = false;
+        bare.graph_root_present = false;
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool ok = false;
+        if (tc) {
+            static struct testcache_probe batch[8];
+            ok = testcache_probe_groups(tc, ptrs, mixed, 8, batch) &&
+                 testcache_capsule_write(tc, TC_CAP2, ptrs, mixed, 8,
+                                         batch, &bare) &&
+                 testcache_capsule_consume(TC_CAP2, &bare, slots, 8, &info,
+                                           why, sizeof(why));
+            testcache_close(tc);
+        }
+        TC_CHECK("optional bindings absent both sides still pass", ok);
+    }
+    TC_CHECK("bindings scratch removed",
+             system("rm -f " TC_CAP " " TC_CAP2) == 0);
+    tc_env_restore(&cap_st, "ZCL_STRESS_TESTS");
+    return failures;
+}
+
+/* The consumer maps capsule slots onto the selected set by name: exact
+ * slots copy through, absent groups run (NO_HANDLE uncacheable), extra
+ * slots are ignored, order never matters. */
+static int tc_capsule_apply(void)
+{
+    int failures = 0;
+    static char names[3][64];
+    static const char *ptrs[3];
+    for (int i = 0; i < 3; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+    }
+    TC_CHECK("apply fixture writes", write_batch_fixture());
+    static struct testcache_capsule_slot slots[3];
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool ok = tc != NULL;
+        if (tc) {
+            static struct testcache_probe batch[3];
+            ok = testcache_probe_groups(tc, ptrs, NULL, 3, batch);
+            for (int i = 0; ok && i < 3; i++) {
+                snprintf(slots[i].name, sizeof(slots[i].name), "%s",
+                         ptrs[i]);
+                slots[i].probe = batch[i];
+                if (strcmp(slots[i].name, ptrs[i]) != 0) ok = false;
+            }
+            testcache_close(tc);
+        }
+        TC_CHECK("apply slots probed", ok);
+    }
+    {
+        static const char *want[2];
+        static struct testcache_probe out[2];
+        char w0[64], w1[64];
+        tc_qname(3, w0);
+        tc_qname(1, w1);
+        want[0] = w0;
+        want[1] = w1;
+        testcache_capsule_apply(slots, 3, want, 2, out);
+        TC_CHECK("slots match by name regardless of order",
+                 tc_capslot_equal(&slots[2].probe, &out[0]) &&
+                 tc_capslot_equal(&slots[0].probe, &out[1]));
+    }
+    {
+        static const char *want[2];
+        static struct testcache_probe out[2];
+        want[0] = names[0];
+        want[1] = names[1];
+        testcache_capsule_apply(slots, 3, want, 2, out);
+        TC_CHECK("extra slots ignored",
+                 tc_capslot_equal(&slots[0].probe, &out[0]) &&
+                 tc_capslot_equal(&slots[1].probe, &out[1]));
+    }
+    {
+        static const char *want[2];
+        static struct testcache_probe out[2];
+        want[0] = names[0];
+        want[1] = "test_demo_q09";
+        testcache_capsule_apply(slots, 3, want, 2, out);
+        TC_CHECK("absent group runs instead of trusting",
+                 tc_capslot_equal(&slots[0].probe, &out[0]) &&
+                 !out[1].cacheable && !out[1].key_valid &&
+                 out[1].code == TESTCACHE_R_NO_HANDLE);
+    }
+    return failures;
 }
 
 int test_testcache(void)
@@ -1084,6 +2161,40 @@ int test_testcache(void)
              "unlike an ordinary load-flaky PASS",
              file_contains("tests/harness/src/test_parallel.c",
                            "!results[i].load_unobserved && probes &&"));
+
+    /* ── Phase PB: batched proof-reuse lookup over the routed set ── */
+    {
+        /* The runner's capsule-flag parser must size every prefix from
+         * the literal itself: a hand-counted length once silently
+         * rejected --capsule-graph-root (21 counted as 22) and dropped
+         * its value's first byte. If any flag goes back to a magic
+         * number, its sizeof needle below vanishes and this trips. */
+        static const char *const cli_len_pins[] = {
+            "sizeof(\"--write-capsule=\") - 1",
+            "sizeof(\"--use-capsule=\") - 1",
+            "sizeof(\"--capsule-source-id=\") - 1",
+            "sizeof(\"--capsule-mutation-id=\") - 1",
+            "sizeof(\"--capsule-source-cas=\") - 1",
+            "sizeof(\"--capsule-graph-root=\") - 1",
+        };
+        TC_CHECK("capsule flag prefixes are compiler-sized, never "
+                 "hand-counted",
+                 file_contains_all("tests/harness/src/test_parallel.c",
+                                   cli_len_pins,
+                                   sizeof(cli_len_pins) /
+                                       sizeof(cli_len_pins[0])));
+    }
+    failures += tc_capsule_roundtrip();
+    failures += tc_capsule_tamper();
+    failures += tc_capsule_bindings();
+    failures += tc_capsule_apply();
+    failures += tc_batch_parity();
+    failures += tc_batch_stats();
+    failures += tc_batch_invalidation();
+    failures += tc_batch_failclosed();
+    failures += tc_batch_special();
+    failures += tc_batch_restart_crosstree();
+    failures += tc_batch_perf();
 
     system("rm -rf " TC_FIX " " TC_STORE);
     tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");

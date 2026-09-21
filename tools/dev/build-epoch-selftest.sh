@@ -259,7 +259,7 @@ fi
 exec 9<&-
 
 phase compiler-id-and-env-sensitivity
-COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CXX_COMMAND")" ||
+COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")" ||
     fail 'compiler fingerprint failed'
 [[ "$COMPILER_ID" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid compiler fingerprint'
 
@@ -291,13 +291,13 @@ printf -v PORTABLE_CXX_COMMAND '%s ' "${portable_cxx_argv[@]}"
 PORTABLE_CXX_COMMAND="${PORTABLE_CXX_COMMAND% }"
 mkdir -p "$WORK/probe-one" "$WORK/probe with spaces" "$WORK/sdk-one" "$WORK/sdk-two"
 CWD_COMPILER_ID="$(cd "$WORK/probe-one" &&
-    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT")"
 SPACE_COMPILER_ID="$(cd "$WORK/probe with spaces" &&
-    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT")"
 [ "$CWD_COMPILER_ID" = "$SPACE_COMPILER_ID" ] ||
     fail 'incidental C/C++ compilation directories changed compiler identity'
 ARGV_COMPILER_ID="$(cd "$WORK/probe-one" &&
-    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND -DEPOCH_ARGV_PROBE=1" "$PORTABLE_CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND -DEPOCH_ARGV_PROBE=1" "$PORTABLE_CXX_COMMAND" "$ROOT")"
 [ "$ARGV_COMPILER_ID" != "$CWD_COMPILER_ID" ] ||
     fail 'explicit compiler argv disappeared during directory normalization'
 # Clang's explicit constant overrides may equal the first cwd, while the
@@ -310,9 +310,9 @@ case "$("${portable_cc_argv[@]}" --version 2>/dev/null)" in
             "-Xclang -fdebug-compilation-dir -Xclang $WORK/probe-one -Xclang -fcoverage-compilation-dir=$WORK/probe-one"; do
             explicit_cc="$PORTABLE_CC_COMMAND $explicit_dirs"
             EXPLICIT_ONE_ID="$(cd "$WORK/probe-one" &&
-                "$KEY_TOOL" compiler-id "$explicit_cc" "$PORTABLE_CXX_COMMAND")"
+                "$KEY_TOOL" compiler-id "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT")"
             EXPLICIT_TWO_ID="$(cd "$WORK/probe with spaces" &&
-                "$KEY_TOOL" compiler-id "$explicit_cc" "$PORTABLE_CXX_COMMAND")"
+                "$KEY_TOOL" compiler-id "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT")"
             [ "$EXPLICIT_ONE_ID" = "$EXPLICIT_TWO_ID" ] ||
                 fail 'identical explicit Clang directories changed identity across cwd'
             [ "$EXPLICIT_ONE_ID" != "$CWD_COMPILER_ID" ] ||
@@ -321,22 +321,61 @@ case "$("${portable_cc_argv[@]}" --version 2>/dev/null)" in
         ;;
 esac
 SDK_ONE_ID="$(SDKROOT="$WORK/sdk-one" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 SDK_TWO_ID="$(SDKROOT="$WORK/sdk-two" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 [ "$SDK_ONE_ID" != "$SDK_TWO_ID" ] ||
     fail 'SDK selection disappeared during directory normalization'
+
+# v5 cross-tree scope (ZRC-0007 probe-before-build): the same tree addressed
+# through a second absolute spelling — a symlinked root, the way a
+# generation addresses the tree from another absolute path — keys
+# identically. The scope-local wrapper pair guarantees the root-relative
+# tool-address records are exercised even on hosts whose CC is a bare
+# system driver; the CC pair covers the production spelling. A missing
+# scope, or one that is not a directory, refuses instead of minting a
+# default-scoped digest.
+phase compiler-id-cross-tree-scope
+mkdir -p "$WORK/scope-link"
+ln -sfn -- "$ROOT" "$WORK/scope-link/tree"
+ln -sfn -- "$WORK" "$WORK/scope-link/aliased"
+TREE_DIRECT_ID="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
+TREE_ALIAS_ID="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$WORK/scope-link/tree")"
+[ "$TREE_DIRECT_ID" = "$TREE_ALIAS_ID" ] ||
+    fail 'same tree keyed differently through an aliased scope root'
+TREE_SLASH_ID="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT/")"
+[ "$TREE_DIRECT_ID" = "$TREE_SLASH_ID" ] ||
+    fail 'trailing-slash scope spelling keyed differently'
+# Nested one level so the scope-relative address keeps a slash: bare
+# tool names stay POSIX PATH lookups (only slash-containing relative
+# addresses ground against the scope root).
+mkdir -p "$WORK/w"
+SCOPE_CC_WRAPPER="$WORK/w/scope-cc"
+SCOPE_CXX_WRAPPER="$WORK/w/scope-cxx"
+printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CC_COMMAND" > "$SCOPE_CC_WRAPPER"
+printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CXX_COMMAND" > "$SCOPE_CXX_WRAPPER"
+chmod +x "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER"
+SCOPE_DIRECT_ID="$("$KEY_TOOL" compiler-id "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK")"
+SCOPE_ALIAS_ID="$("$KEY_TOOL" compiler-id "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK/scope-link/aliased")"
+[ "$SCOPE_DIRECT_ID" = "$SCOPE_ALIAS_ID" ] ||
+    fail 'in-scope wrapper keyed differently through an aliased scope root'
+if "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" >/dev/null 2>&1; then
+    fail 'compiler-id without a scope root was accepted'
+fi
+if "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$WORK/no-such-root" >/dev/null 2>&1; then
+    fail 'compiler-id with an unresolvable scope root was accepted'
+fi
 
 phase compiler-id-and-env-sensitivity
 mkdir -p "$WORK/env-include"
 printf '#define EPOCH_ENV_PROBE 1\n' > "$WORK/env-include/probe.h"
 ENV_COMPILER_ID="$(CPATH="$WORK/env-include" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 [ "$ENV_COMPILER_ID" != "$COMPILER_ID" ] ||
     fail 'CPATH was omitted from compiler fingerprint'
 printf '#define EPOCH_ENV_PROBE 2\n' > "$WORK/env-include/probe.h"
 ENV_MUTATED_COMPILER_ID="$(CPATH="$WORK/env-include" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 [ "$ENV_MUTATED_COMPILER_ID" != "$ENV_COMPILER_ID" ] ||
     fail 'compiler include-root mutation was omitted from fingerprint'
 
@@ -349,23 +388,23 @@ SYSTEM_MTIME="$WORK/system-include/mtime.reference"
 printf '#define EPOCH_SYSTEM_PROBE 1\n' > "$SYSTEM_HEADER"
 touch -r "$SYSTEM_HEADER" "$SYSTEM_MTIME"
 SYSTEM_COMPILER_ID="$(C_INCLUDE_PATH="$WORK/system-include" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 printf '#define EPOCH_SYSTEM_PROBE 2\n' > "$SYSTEM_HEADER"
 SYSTEM_MUTATED_COMPILER_ID="$(C_INCLUDE_PATH="$WORK/system-include" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 [ "$SYSTEM_MUTATED_COMPILER_ID" != "$SYSTEM_COMPILER_ID" ] ||
     fail 'system include-root mutation was omitted from compiler fingerprint'
 printf '#define EPOCH_SYSTEM_PROBE 1\n' > "$SYSTEM_HEADER"
 touch -r "$SYSTEM_MTIME" "$SYSTEM_HEADER"
 SYSTEM_REVERTED_COMPILER_ID="$(C_INCLUDE_PATH="$WORK/system-include" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 [ "$SYSTEM_REVERTED_COMPILER_ID" != "$SYSTEM_COMPILER_ID" ] ||
     fail 'system include-root edit/revert ABA was omitted from compiler fingerprint'
 mkdir -p "$WORK/cyclic-include/nested"
 printf '#define EPOCH_CYCLE_PROBE 1\n' > "$WORK/cyclic-include/probe.h"
 ln -s .. "$WORK/cyclic-include/nested/parent"
 CYCLIC_COMPILER_ID="$(CPATH="$WORK/cyclic-include" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")" ||
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")" ||
     fail 'compiler fingerprint rejected a safely detected include-root cycle'
 [[ "$CYCLIC_COMPILER_ID" =~ ^[0-9a-f]{64}$ ]] ||
     fail 'cyclic include-root produced an invalid compiler fingerprint'
@@ -379,14 +418,14 @@ printf '#define EPOCH_LINK_PROBE 1\n' > "$LINK_TARGET"
 ln -s "$LINK_TARGET" "$WORK/link-include/first link.h"
 ln -s "$LINK_TARGET" "$WORK/link-include/second.h"
 ln -s "$WORK/missing/target.h" "$WORK/link-include/dangling.h"
-LINK_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+LINK_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 printf '#define EPOCH_LINK_PROBE 2\n' > "$LINK_TARGET"
-LINK_EDIT_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+LINK_EDIT_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 [ "$LINK_ID" != "$LINK_EDIT_ID" ] || fail 'linked target mutation was omitted'
 cp "$LINK_TARGET" "$WORK/other-target.h"
 rm "$WORK/link-include/first link.h"
 ln -s "$WORK/other-target.h" "$WORK/link-include/first link.h"
-LINK_RETARGET_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND")"
+LINK_RETARGET_ID="$(CPATH="$WORK/link-include" "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
 [ "$LINK_EDIT_ID" != "$LINK_RETARGET_ID" ] || fail 'link retarget was omitted'
 
 # Same-path tool replacement must never hit an argv/environment-only memo.
@@ -399,17 +438,17 @@ ID_CXX_WRAPPER="$WORK/identity-cxx"
 printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CC_COMMAND" > "$ID_CC_WRAPPER"
 printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CXX_COMMAND" > "$ID_CXX_WRAPPER"
 chmod +x "$ID_CC_WRAPPER" "$ID_CXX_WRAPPER"
-WRAPPER_ID="$("$KEY_TOOL" compiler-id "$ID_CC_WRAPPER" "$ID_CXX_WRAPPER")"
+WRAPPER_ID="$("$KEY_TOOL" compiler-id "$ID_CC_WRAPPER" "$ID_CXX_WRAPPER" "$ROOT")"
 printf '# same driver behavior, different wrapper bytes\n' >> "$ID_CC_WRAPPER"
-WRAPPER_EDIT_ID="$("$KEY_TOOL" compiler-id "$ID_CC_WRAPPER" "$ID_CXX_WRAPPER")"
+WRAPPER_EDIT_ID="$("$KEY_TOOL" compiler-id "$ID_CC_WRAPPER" "$ID_CXX_WRAPPER" "$ROOT")"
 [ "$WRAPPER_ID" != "$WRAPPER_EDIT_ID" ] || fail 'same-path tool mutation was omitted'
-if "$KEY_TOOL" compiler-id 'cc; printf unsafe' "$CC_COMMAND" \
+if "$KEY_TOOL" compiler-id 'cc; printf unsafe' "$CC_COMMAND" "$ROOT" \
         >/dev/null 2>&1; then
     fail 'shell-active CC string was accepted'
 fi
 
 if [ "$COMPILER_ID_ONLY" -eq 1 ]; then
-    printf 'build-epoch-selftest: PASS compiler_id_only=true cwd_portable=true explicit_argv_bound=true sdk_bound=true search_roots_bound=true compiler_id=%s\n' "$COMPILER_ID"
+    printf 'build-epoch-selftest: PASS compiler_id_only=true cwd_portable=true scope_portable=true explicit_argv_bound=true sdk_bound=true search_roots_bound=true compiler_id=%s\n' "$COMPILER_ID"
     exit 0
 fi
 
@@ -1446,7 +1485,7 @@ SHIM_PATH="$SHIM_ROOT/programs:$SHIM_PATH_DIR"
 # Every compiler-identity derivation in this phase, through that PATH.
 shim_compiler_id()
 {
-    env PATH="$SHIM_PATH" "$@" "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC"
+    env PATH="$SHIM_PATH" "$@" "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" "$ROOT"
 }
 
 # A4: the whole contract in two lines -- a fingerprint that cannot observe all
@@ -1624,7 +1663,7 @@ shim_home_compiler_id()
 {
     env -u CCACHE_CONFIGPATH -u CCACHE_DIR -u SCCACHE_CONF \
         PATH="$SHIM_PATH" HOME="$SHIM_HOME" \
-        "$KEY_TOOL" compiler-id "$1" "$1"
+        "$KEY_TOOL" compiler-id "$1" "$1" "$ROOT"
 }
 
 # (a) A driver that is not a wrapper must not observe the file at all.

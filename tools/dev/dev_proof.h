@@ -259,6 +259,34 @@ bool zcl_dev_proof_wait(const char *repo_root,
                         int timeout_ms,
                         struct zcl_dev_proof_status *out);
 
+/* The routed-group preflight account: what one batch probe of the whole
+ * required set reported. would_reuse + must_run == groups always; the test
+ * dimension re-derives the same split when it executes, so this is
+ * advisory and never execution authority. Declared unconditionally: the
+ * proof worker fills it in production, the seam below exposes its parser
+ * to tests. */
+struct zcl_dev_proof_preflight {
+    uint32_t groups;
+    uint32_t would_reuse;
+    uint32_t must_run;
+    uint32_t uncacheable;
+};
+
+/* The five capsule arguments shared by both runner children (write vs use
+ * plus the four sealed bindings). Storage travels with the struct so the
+ * argv pointers stay valid through the spawn; the worker fills one on its
+ * stack, the seam below exposes the same builder to tests. Declared
+ * unconditionally so every compilation of dev_proof.c sees the same layout;
+ * only the seam function is test-gated. */
+struct zcl_dev_proof_capsule_argv {
+    char capsule[192];
+    char sid[96];
+    char mid[96];
+    char cas[96];
+    char graph[96];
+    const char *argv[6];
+};
+
 #if defined(ZCL_TESTING)
 /* Watcher admission fixture: a held execution guard must preserve pending
  * edit work without forking a worker or arming a watcher. */
@@ -281,6 +309,23 @@ bool zcl_dev_proof_test_build_test_selector(
     const struct zcl_devloop_plan *plan, const char *root, bool inventory_only,
     char *out, size_t out_size, uint32_t *count_out, char *gated_out,
     size_t gated_size);
+/* Seam for the preflight parser: the exact reader the proof worker uses to
+ * turn the runner's --cache-probe-only output into the account above, so a
+ * test can prove the counts (and the summary self-check) without driving a
+ * proof cycle or spawning a runner. */
+bool zcl_dev_proof_test_preflight_parse(const char *bytes, size_t len,
+                                        struct zcl_dev_proof_preflight *out);
+/* Seam for the capsule argv builder: the exact flags the worker hands the
+ * preflight (write=true) and the test dimension (write=false), so a test
+ * can prove both children receive the same bindings without driving a
+ * proof cycle. Returns 5 with argv[0..4] set and argv[5] NULL, or 0 on
+ * any bad input or argv_cap < 6. */
+int zcl_dev_proof_test_capsule_argv(bool write, const char *capsule_path,
+                                    const char *source_id,
+                                    const char *mutation_id,
+                                    const char *source_cas,
+                                    const char *graph_root,
+                                    const char **argv, size_t argv_cap);
 /* Seam for the stress-env regression: the exact call the test dimension
  * makes right before it launches its runner, so a test can prove
  * ZCL_STRESS_TESTS lands in this process's own environ (and therefore in

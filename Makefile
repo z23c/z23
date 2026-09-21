@@ -405,7 +405,16 @@ endif
 ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
 BUILD_COMMIT := hotswap-loop
 else
-BUILD_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git update-index -q --refresh >/dev/null 2>&1; git diff-index --quiet HEAD -- 2>/dev/null || echo -dirty)
+# Lazy on purpose: the rev-parse/update-index/diff-index trio exists only to
+# stamp bench receipts and the agent deployment guard, neither of which the
+# edit-loop test doors consume. An eager `:=` made every parse — outer,
+# checkout-locked inner, and nested ensure — pay an index refresh plus a full
+# diff-index walk (~0.1s each) for a value nothing on that path expands. A
+# recursive `=` evaluates the identical query at first use, so bench and
+# deploy goals observe the same `<short-hash>[-dirty]` shape (arguably fresher:
+# the tree at recipe time, not at parse time), while focused parses fork no
+# git index mutation at all.
+BUILD_COMMIT = $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git update-index -q --refresh >/dev/null 2>&1; git diff-index --quiet HEAD -- 2>/dev/null || echo -dirty)
 endif
 # A parent Make/watcher may freeze its already-captured record on the recursive
 # command line.  GNU Make gives command-line variables precedence, but an
@@ -1564,7 +1573,23 @@ else
 # then yields the empty string, the validity assert below turns that into a
 # hard $(error), and the driver script's own stderr is deliberately NOT
 # swallowed here so the parse says WHICH probe failed.
-BUILD_COMPILER_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) compiler-id "$(CC)" "$(CXX)"))
+#
+# A parent Make on the checkout-locked test path freezes its already-derived
+# identity on the recursive command line (same provenance contract as
+# BUILD_SOURCE_RECORD above: command line only, never ambient environment).
+# The fingerprint re-derivation (~0.4s of compiler probes and toolchain byte
+# hashes) cannot observe anything new a second later in the same checkout, and
+# skipping it changes no selected epoch on an unchanged tree. Staleness stays
+# fail-closed two ways: the shape assert below rejects a malformed frozen
+# value at parse time, and build-epoch-session verify re-derives the live
+# compiler identity at recipe time and refuses on any mismatch before an
+# object is admitted.
+ifneq ($(origin BUILD_COMPILER_ID),command line)
+# The scope root travels explicitly on the command line (never via ambient
+# environment, matching the frozen-identity provenance contract above): at
+# parse time the shell runs in $(CURDIR), which IS the scope root.
+BUILD_COMPILER_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) compiler-id "$(CC)" "$(CXX)" "$(CURDIR)"))
+endif
 BUILD_COMPILER_ID_VALID := $(shell printf '%s\n' '$(BUILD_COMPILER_ID)' | awk '$$0 ~ /^[0-9a-f]{64}$$/ { print "yes" }')
 ifneq ($(BUILD_COMPILER_ID_VALID),yes)
 $(error compiler/toolchain fingerprint failed - see the build-epoch-key message above; refusing to select a compile epoch)
@@ -1573,8 +1598,13 @@ endif
 # without changing a tracked TU (this Makefile's flag variables and per-object
 # overrides, plus the epoch driver scripts). This is what keeps a Makefile
 # CFLAGS edit — which touches no source file — busting every epoch now that
-# the source identity no longer does.
+# the source identity no longer does. Frozen across the checkout-locked test
+# recursion exactly like BUILD_COMPILER_ID above: same command-line-only
+# provenance, same shape assert below, and any real drift still re-keys (and
+# rebuilds) through the live epoch-lease verification at recipe time.
+ifneq ($(origin BUILD_SYSTEM_ID),command line)
 BUILD_SYSTEM_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) build-system-id))
+endif
 BUILD_SYSTEM_ID_VALID := $(shell printf '%s\n' '$(BUILD_SYSTEM_ID)' | awk '$$0 ~ /^[0-9a-f]{64}$$/ { print "yes" }')
 ifneq ($(BUILD_SYSTEM_ID_VALID),yes)
 $(error build-system fingerprint failed - see the build-epoch-key message above; refusing to select a compile epoch)
@@ -3349,6 +3379,66 @@ templates-no-touch-selftest: $(VIEW_GEN_HEADERS)
 	}; \
 	echo "templates-no-touch-selftest: PASS"
 
+# Focused parses must not pay for the commit stamp: BUILD_COMMIT is lazy, so a
+# test-door parse forks no rev-parse/update-index/diff-index. The PATH shim
+# logs every git argv across the whole -n chain (outer, locked inner, nested
+# ensure) while delegating to the real binary, so capture-record keeps working
+# and only the stamp probes are asserted absent. The value check expands the
+# lazy variable in this parse and compares it against the same query run
+# directly: identical shape, no eager parse-time cost.
+.PHONY: build-commit-lazy-selftest
+build-commit-lazy-selftest:
+	@set -eu; \
+	shim="$$(mktemp -d)"; log="$$shim/git.log"; \
+	trap 'rm -rf "$$shim"' EXIT HUP INT TERM; \
+	real="$$(command -v git)"; \
+	{ printf '#!/bin/sh\n'; printf 'printf "%%s\\n" "$$*" >> "%s"\n' "$$log"; printf 'exec "%s" "$$@"\n' "$$real"; } > "$$shim/git"; \
+	chmod +x "$$shim/git"; \
+	PATH="$$shim:$$PATH" $(MAKE) --no-print-directory -n t-fast-exact ONLY=download_contention >/dev/null 2>&1; \
+	if grep -E 'update-index|diff-index' "$$log" >/dev/null 2>&1; then \
+	  echo "build-commit-lazy-selftest: FAIL: focused parse ran commit-stamp git probes:" >&2; \
+	  grep -E 'update-index|diff-index' "$$log" >&2; \
+	  exit 1; \
+	fi; \
+	have='$(BUILD_COMMIT)'; \
+	want="$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)$$(git update-index -q --refresh >/dev/null 2>&1; git diff-index --quiet HEAD -- 2>/dev/null || echo -dirty)"; \
+	[ "$$have" = "$$want" ] || { \
+	  echo "build-commit-lazy-selftest: FAIL: lazy value '$$have' != direct query '$$want'" >&2; \
+	  exit 1; \
+	}; \
+	echo "build-commit-lazy-selftest: PASS (no stamp probes on focused parse; value '$$have')"
+
+# The checkout-locked inner parse must accept the parent's frozen toolchain
+# identity (BUILD_COMPILER_ID/BUILD_SYSTEM_ID, command line only) and select
+# the byte-identical epoch it would derive live: frozen==fresh on an unchanged
+# tree, so skipping the ~0.4s re-fingerprint removes wait without moving any
+# artifact. A malformed frozen value must fail at parse time with the
+# fingerprint error (fail-closed, typed); a well-formed but stale value must
+# select a DIFFERENT epoch (never silently reuse the live one) — the live
+# re-derivation in build-epoch-session verify then refuses it at recipe time.
+# Epochs are read from `make -p` database dumps; the nested ensure parse
+# selects the zero sentinel (dev profile only), so only non-zero epochs count.
+.PHONY: toolchain-freeze-selftest
+toolchain-freeze-selftest:
+	@set -eu; \
+	work="$$(mktemp -d)"; \
+	trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
+	cid='$(BUILD_COMPILER_ID)'; sid='$(BUILD_SYSTEM_ID)'; rec='$(BUILD_SOURCE_RECORD)'; \
+	printf '%s' "$$cid" | grep -Eq '^[0-9a-f]{64}$$' || { echo "toolchain-freeze-selftest: FAIL: no live compiler identity in test parse" >&2; exit 1; }; \
+	printf '%s' "$$sid" | grep -Eq '^[0-9a-f]{64}$$' || { echo "toolchain-freeze-selftest: FAIL: no live build-system identity in test parse" >&2; exit 1; }; \
+	epoch_of() { name="$$1"; shift; ZCL_CHECKOUT_LOCK_HELD=1 $(MAKE) --no-print-directory -p -n t-fast-exact-locked EXACT_ONLY_MATCHED='test_download_contention' BUILD_SOURCE_RECORD="$$rec" "$$@" >"$$work/$$name.out" 2>"$$work/$$name.err"; rc=$$?; [ $$rc -eq 0 ] || return $$rc; awk '/^TEST_FAST_COMPILE_EPOCH := / { if ($$3 !~ /^0+$$/) print $$3 }' "$$work/$$name.out" | sort -u; }; \
+	live="$$(epoch_of live)"; \
+	[ "$$(printf '%s\n' "$$live" | wc -l)" = '1' ] || { echo "toolchain-freeze-selftest: FAIL: live epoch not unique:" >&2; printf '%s\n' "$$live" >&2; exit 1; }; \
+	frozen="$$(epoch_of frozen BUILD_COMPILER_ID="$$cid" BUILD_SYSTEM_ID="$$sid")"; \
+	[ "$$frozen" = "$$live" ] || { echo "toolchain-freeze-selftest: FAIL: frozen epoch '$$frozen' != live epoch '$$live'" >&2; exit 1; }; \
+	if epoch_of malformed BUILD_COMPILER_ID=deadbeef BUILD_SYSTEM_ID="$$sid" >/dev/null 2>&1; then \
+	  echo "toolchain-freeze-selftest: FAIL: malformed frozen identity was accepted" >&2; exit 1; \
+	fi; \
+	grep -q 'compiler/toolchain fingerprint failed' "$$work/malformed.err" || { echo "toolchain-freeze-selftest: FAIL: refusal not typed as fingerprint failure" >&2; exit 1; }; \
+	stale="$$(epoch_of stale BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000 BUILD_SYSTEM_ID="$$sid")"; \
+	[ "$$stale" != "$$live" ] || { echo "toolchain-freeze-selftest: FAIL: stale identity selected the live epoch" >&2; exit 1; }; \
+	echo "toolchain-freeze-selftest: PASS (frozen==live '$$live'; malformed refused; stale selects '$$stale')"
+
 .PHONY: site-css explorer-css
 site-css: $(SITE_CSS_GEN)
 explorer-css: site-css
@@ -4188,12 +4278,20 @@ agent-velocity:
 # Checkout-locked around BOTH prerequisite construction and execution. Locking
 # only this target's final recipe allowed a concurrent public invocation to
 # rewrite build depfiles while codeindex was sealing its physical input graph.
+#
+# Frozen toolchain identity for the checkout-locked recursions below (and the
+# verifier-ensure nested make further down). Empty when this parse never
+# fingerprinted — clean/prime-only parses carry the zero sentinel — so the
+# child derives live instead of inheriting a sentinel into a real epoch
+# selection. Same command-line-only provenance contract as BUILD_SOURCE_RECORD.
+ZCL_FROZEN_TOOLCHAIN_ARGS := $(if $(strip $(ZCL_EPOCH_PROFILES)),BUILD_COMPILER_ID='$(BUILD_COMPILER_ID)' BUILD_SYSTEM_ID='$(BUILD_SYSTEM_ID)')
 .PHONY: t-locked t-fast-locked t-fast-exact-locked dev-proof-bundle
 t:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory t-locked ONLY='$(ONLY)' \
-	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)'
+	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
+	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
 
 t-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) --only=$(ONLY)
@@ -4212,7 +4310,8 @@ t-fast:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory t-fast-locked ONLY='$(ONLY)' \
-	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)'
+	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
+	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
 
 t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
@@ -4226,7 +4325,8 @@ t-fast-exact:
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory t-fast-exact-locked \
 	    EXACT_ONLY_MATCHED='$(EXACT_ONLY_MATCHED)' \
-	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)'
+	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
+	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
 
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
@@ -4848,7 +4948,8 @@ dev-package-verifier-ensure:
 	  IFS= read -r have < '$(DEV_PACKAGE_VERIFY_ENSURE_STAMP)' || :; \
 	fi; \
 	if ! test -x '$(DEV_PACKAGE_VERIFY_BIN)' || test "$$have" != "$$want"; then \
-	  $(MAKE) --no-print-directory dev-package-verifier; \
+	  $(MAKE) --no-print-directory dev-package-verifier \
+	    $(ZCL_FROZEN_TOOLCHAIN_ARGS); \
 	fi
 endif
 
@@ -9881,8 +9982,18 @@ $(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP
 #
 # $(1) profile name, $(2) NAME of the profile's *_EPOCH_COMPILE_FLAGS variable.
 # Injected per-object so only testcache.o carries it.
+#
+# Cross-tree scope (ZRC-0007 probe-before-build): the flag string carries
+# -ffile-prefix-map=$(CURDIR)=... (REPRO_CFLAGS), whose absolute side is a
+# different spelling of the same semantic in every checkout/generation (map
+# this tree's root to the fixed token). The compile itself keeps the absolute
+# spelling; only the key input is canonicalized, replacing exactly the
+# $(CURDIR) prefix with a fixed token. No other flag variable carries an
+# absolute tree path (includes are all repo-relative -I, identity -D is
+# filtered from CACHED_CFLAGS above); a future absolute would show up as a
+# cross-tree toolkey mismatch, which fails safe (MISS, never a false HIT).
 zcl_testcache_toolkey = $(strip $(shell printf '%s\0%s\0%s\0%s\0' \
-  'zcl.testcache.toolkey.v1' '$(BUILD_COMPILER_ID)' '$(1)' '$(strip $($(2)))' \
+  'zcl.testcache.toolkey.v1' '$(BUILD_COMPILER_ID)' '$(1)' '$(subst $(CURDIR),<repo-root>,$(strip $($(2))))' \
   | sha256sum | cut -d' ' -f1))
 TESTCACHE_TOOLKEY_CPPFLAGS = \
   -DZCL_TESTCACHE_TOOLKEY=\"$(call zcl_testcache_toolkey,$(1),$(2))\"

@@ -232,6 +232,32 @@ loudly:
    make test-parallel TEST_PARALLEL_ARGS=--cold-audit         # verify: 0 divergences
    ```
 
+## Cold open in proof generations (STRETCH decision: rebuild stands)
+
+A proof generation is a fresh checkout (`generation_prepare` re-checkouts
+every cycle), so no verified code-index snapshot exists under its root and
+`codeindex_open` pays the full cold rebuild (~5.4 s). Reusing the parent
+checkout's snapshot via `codeindex_open_existing` plus a worker-supplied
+changed set was evaluated and **rejected** for the proof path:
+
+- There is no *existing* snapshot to reuse — provisioning one (copying the
+  parent store) is new topology-sharing infra, not a read of verified state.
+- On a fresh checkout + fresh build every source mtime predates every
+  depfile mtime, so the "input newer than include graph" backstop
+  (`TESTCACHE_R_GRAPH_STALE`) is blind there by construction. Changed-set
+  completeness would be the *sole* guard against a topologically
+  incomplete key.
+- That completeness (added + deleted + modified vs the snapshot's exact
+  tree) is not computed by the proof worker today, and a gap in it fails
+  in the worst direction: a false HIT skips a test the proof then vouches
+  for. The resident loop keeps the mtime defense because it runs in place
+  on a live store; that safety case does not transfer to fresh generations.
+
+So the cold rebuild stays: 5.4 s buys content-Merkle-verified call/include
+topology (`codeindex_is_stale`), and no stale topology is used to save it.
+The per-cycle win stands one level up instead — the probe capsule removes
+the *second* warm open, so a proof cycle pays graph/index setup once.
+
 ## Files
 
 - `cognition/modules/codeindex/src/codeindex_impact.c` — `codeindex_forward_closure()`.

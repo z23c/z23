@@ -123,7 +123,7 @@ if [ "$key_ok" -eq 1 ]; then
 fi
 compiler_id=""
 if [ "$key_ok" -eq 1 ]; then
-    compiler_id="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "${CXX:-g++}" 2>/dev/null)"
+    compiler_id="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "${CXX:-g++}" "$ROOT" 2>/dev/null)"
     [[ "$compiler_id" =~ ^[0-9a-f]{64}$ ]] || key_ok=0
 fi
 make_version=""

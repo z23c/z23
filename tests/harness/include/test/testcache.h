@@ -117,6 +117,114 @@ struct testcache_probe {
 void testcache_probe_group(struct testcache *tc, const char *group_name,
                            struct testcache_probe *out);
 
+/* Cumulative per-handle counters. Observability only: reading or resetting
+ * them never changes a key, a verdict, or cacheability. */
+struct testcache_stats {
+    uint64_t closure_queries;     /* codeindex_forward_closure calls */
+    uint64_t file_hash_reads;     /* unique files read from disk + hashed */
+    uint64_t file_hash_memo_hits; /* closure files served from the path memo */
+    uint64_t sha3_content_bytes;  /* file-content bytes folded into SHA3 */
+    uint64_t verdict_lookups;     /* addressed verdict existence probes */
+    uint64_t verdict_hits;        /* verified stored PASS records served */
+};
+void testcache_stats(const struct testcache *tc,
+                     struct testcache_stats *out);
+void testcache_stats_reset(struct testcache *tc);
+
+/* The current environment digest without a handle: exactly what an open
+ * handle would fold into its keys. The capsule consumer recomputes this
+ * live and refuses a capsule whose env moved since the write. */
+void testcache_current_envkey(uint8_t out[32]);
+
+/* Probe capsule: one proof cycle's batch verdicts as ephemeral scratch.
+ *
+ * The capsule binds, in order: the caller-supplied candidate identity
+ * below, the live toolkey string, the live env digest, dep-graph
+ * provenance (count + newest + the caller's graph content root), then the
+ * ordered per-group slots (name, proof contract, key, code, cacheable,
+ * hit, flaky, closure size), then a SHA3-256 over every preceding byte.
+ *
+ * The trailing hash is INTEGRITY ONLY. It never addresses a verdict and
+ * never gates a skip by itself: a consumer still reads each slot's own
+ * key/code/cacheable/hit, and any byte difference — corruption,
+ * truncation, trailing garbage, reordered slots — fails the hash and
+ * refuses the whole capsule. There is no aggregate "all groups" key and
+ * no new verdict store; the capsule never accepts anything, it only
+ * carries what the batch already decided.
+ *
+ * Graph freshness authority stays with the caller (the proof worker pins
+ * the graph content root at prefork and hands the same value to the
+ * writer and the reader): dep_count/dep_newest ride along as
+ * tamper-evident provenance but are never re-walked here. */
+struct testcache_capsule_bindings {
+    char source_id[65];       /* caller tree identity, NUL-terminated */
+    char mutation_id[65];     /* caller mutation identity, NUL-terminated */
+    char source_cas[65];      /* caller content root (hex text), if present */
+    bool source_cas_present;
+    char graph_root[65];      /* caller dep-graph content root, if present */
+    bool graph_root_present;
+    uint64_t dep_count;       /* provenance only, not revalidated */
+    int64_t dep_newest_ns;    /* provenance only, not revalidated */
+};
+struct testcache_capsule_info {
+    size_t n_slots;
+    uint64_t dep_count;       /* capsule's dep-graph provenance */
+    char toolkey_hex12[13];   /* capsule toolkey prefix, for log lines */
+};
+/* One consumed slot: the group name it was written under plus its
+ * independent probe. Names ride with the slots so the consumer can map
+ * them onto any selected set without reopening anything. */
+struct testcache_capsule_slot {
+    char name[128];
+    struct testcache_probe probe;
+};
+/* Serialize the batch result. The dep-graph provenance comes from the live
+ * handle; everything else from bind/slots. Bounded (at most 8192 slots,
+ * names at most 128 bytes, file at most 8 MiB); anything over refuses.
+ * Never aborts: false means "no capsule", and the caller falls back to a
+ * fresh probe. */
+bool testcache_capsule_write(struct testcache *tc, const char *path,
+                             const char *const *names,
+                             const enum zcl_test_proof_contract *contracts,
+                             size_t n, const struct testcache_probe *probes,
+                             const struct testcache_capsule_bindings *bind);
+/* Load, verify, and bind-check a capsule WITHOUT opening any handle: no
+ * codeindex open, no dep-graph walk, no closure query, no file hash. Reads
+ * at most cap slots into out (more slots than cap refuses), then fills
+ * info. `expected` carries the caller's CURRENT bindings; `why` (at least
+ * 64 bytes) names the first refusal. False means "no usable capsule" and
+ * the caller fresh-opens and reprobes. */
+bool testcache_capsule_consume(const char *path,
+                               const struct testcache_capsule_bindings *expected,
+                               struct testcache_capsule_slot *out, size_t cap,
+                               struct testcache_capsule_info *info,
+                               char *why, size_t why_len);
+/* Map consumed slots onto a selected set by exact name: hits copy through,
+ * a selected group with no slot reports NO_HANDLE uncacheable (it runs),
+ * extra slots are ignored, order never matters. Pure: no I/O, no handle. */
+void testcache_capsule_apply(const struct testcache_capsule_slot *slots,
+                             size_t n_slots,
+                             const char *const *want_names, size_t n_want,
+                             struct testcache_probe *out);
+
+/* Batch probe: N canonical group names in, N independent per-group results
+ * out, through this ONE handle (one verified dep graph, one shared
+ * path→SHA3 memo). Exactly equivalent to calling testcache_probe_group[_proof]
+ * once per slot on the same handle: same keys, same codes, same hits — there
+ * is no aggregate "all groups" key and verdicts stay per-group. Slots are
+ * independent: a bad name, truncated closure, or unreadable input reports
+ * UNCACHEABLE in its own slot and never perturbs another slot's result.
+ * `contracts` may be NULL (every slot takes the ordinary reusable identity);
+ * otherwise contracts[i] selects slot i's proof-contract variant exactly as
+ * testcache_probe_group_proof would. n_groups==0 is a no-op success. Returns
+ * false (every slot then reports NO_HANDLE uncacheable) when tc is NULL or
+ * when names/out is NULL with n_groups>0. */
+bool testcache_probe_groups(struct testcache *tc,
+                            const char *const *group_names,
+                            const enum zcl_test_proof_contract *contracts,
+                            size_t n_groups,
+                            struct testcache_probe *out);
+
 /* Compute the key for an activated proof contract. The result domain-wraps
  * the byte-identical ordinary v4 key with the canonical contract assignment.
  * A valid activated key is evidence identity only: it is never cacheable,

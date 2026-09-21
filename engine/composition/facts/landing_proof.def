@@ -107,9 +107,9 @@ ZCL_FACT("landing.proof", "testcache_pass_only",
          "tests/harness/include/test/testcache.h",
          "only PASS verdicts are ever stored (a fail is never cached)")
 ZCL_FACT("landing.proof", "testcache_called_in_test_runner",
-         "testcache_probe_group is called from the parallel test runner, after binaries are already built.",
+         "testcache_probe_groups serves the runner's whole selected set through one handle, after binaries are already built.",
          "tests/harness/src/test_parallel.c",
-         "testcache_probe_group(tc, g_groups[i].name, &probes[i]);")
+         "served = testcache_probe_groups(*tc, a->names, a->contracts, n_fill,")
 ZCL_FACT("landing.proof", "cycle_reuse_keyed_on_cas",
          "Whole-cycle reuse (cycle_proof_reuse) is keyed on source_cas content, not the commit sha.",
          "tools/dev/dev_proof.c",

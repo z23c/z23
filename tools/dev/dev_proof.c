@@ -4424,6 +4424,13 @@ static bool dp_generation_dependency(const char *root, const char *generation,
         if (dp_generation_dependency_optional(dependency))
             return dp_generation_optional_absent(target, dependency, why,
                                                   why_len);
+        /* Checker binaries for the sealed generated-docs gate come from
+         * the submitting checkout's own build, named as the exact make
+         * target that produces them. */
+        char make_target[512] = {0};
+        bool make_target_ok =
+            snprintf(make_target, sizeof(make_target), "make %s",
+                     dependency) < (int)sizeof(make_target);
         /* vendor/ entries come from the vendored-archive build; the
          * installed hooks come from arming the clone; the hotswap
          * fixture images come from any test-binary build. Naming the
@@ -4438,7 +4445,11 @@ static bool dp_generation_dependency(const char *root, const char *generation,
                                               15) == 0
                                         ? "make build/fixtures/rlc_child_v1 "
                                           "build/fixtures/rlc_child_broken"
-                                        : "make install-hooks";
+                                        : strncmp(dependency, "build/bin/",
+                                                  10) == 0 &&
+                                              make_target_ok
+                                            ? make_target
+                                            : "make install-hooks";
         proof_whyf(why, why_len,
                    "proof_generation_dependency_unavailable:%s (%s)",
                    dependency, fix);
@@ -4486,6 +4497,88 @@ static void dp_generation_warm(const struct proof_paths *paths,
     (void)warm_start_generation(paths, parent, generation, local, warm);
 }
 
+/* Seed the generation's test-verdict store from the submitting checkout.
+ *
+ * ZRC-0007 probe-before-build: a candidate that probes (runs cacheable
+ * groups) in the checkout stores PASS verdicts in <root>/.zvcs/objects,
+ * addressed by the exact per-group key (closure + toolchain + flags + env).
+ * Copying those addressed records into the generation lets its test
+ * dimension HIT them instead of re-running every group cold.
+ *
+ * Best-effort and never trusted: absence (a fresh clone has no store yet)
+ * means a cold run; a copy failure is one stderr line and a cold run.
+ * Corrupt, stale, or mismatched records fail closed at lookup time inside
+ * testcache (magic/status/key-echo re-verified, graph freshness
+ * re-checked), and only PASS is ever stored, so nothing copied here can
+ * turn a group green that the generation's own inputs would fail.
+ *
+ * The in-flight `tmp/` shard is never copied: those are partially written
+ * puts, not addressed verdicts, and the generation's store recreates tmp on
+ * its first put. Each shard copies through dependency_materialize, so
+ * symlink containment and mtime preservation match every other
+ * prerequisite. A concurrent checkout put racing the copy is safe by
+ * construction: completed verdicts rename atomically into their shard
+ * (copied whole or not at all) and partials live only under tmp/. */
+static void dp_generation_verdict_store(const char *root,
+                                        const char *generation)
+{
+    char source[PATH_MAX], target[PATH_MAX];
+    if (snprintf(source, sizeof(source), "%s/.zvcs/objects",
+                 root) >= (int)sizeof(source) ||
+        snprintf(target, sizeof(target), "%s/.zvcs/objects",
+                 generation) >= (int)sizeof(target)) {
+        fprintf(stderr,
+                "[devproof] verdict seed: path too long, generation runs cold\n");
+        return;
+    }
+    DIR *dir = opendir(source);
+    if (!dir) {
+        if (errno != ENOENT) {
+            fprintf(stderr,
+                    "[devproof] verdict seed: cannot read %s (%s), generation runs cold\n",
+                    source, strerror(errno));
+        }
+        return;
+    }
+    /* The objects/ level itself must exist: the per-shard materialize
+     * below only ever creates its single final level. */
+    if (!dp_seed_dir_ensure(target)) {
+        fprintf(stderr,
+                "[devproof] verdict seed: cannot prepare %s (%s), generation runs cold\n",
+                target, strerror(errno));
+        closedir(dir);
+        return;
+    }
+    bool ok = true;
+    int copy_errno = 0;
+    for (struct dirent *entry = readdir(dir); entry;
+         entry = readdir(dir)) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0 ||
+            strcmp(entry->d_name, "tmp") == 0)
+            continue;
+        char child_source[PATH_MAX], child_target[PATH_MAX];
+        if (!dp_child_paths(source, target, entry->d_name, child_source,
+                            child_target) ||
+            !dependency_materialize(child_source, child_target)) {
+            /* Capture here: a later successful readdir may overwrite
+             * errno (end-of-directory), which would misreport the cause. */
+            copy_errno = errno;
+            ok = false;
+            break;
+        }
+    }
+    if (closedir(dir) != 0) {
+        copy_errno = errno;
+        ok = false;
+    }
+    if (!ok) {
+        fprintf(stderr,
+                "[devproof] verdict seed: copy failed (%s), generation runs cold\n",
+                strerror(copy_errno));
+    }
+}
+
 static bool dp_generation_dependencies(const char *root,
                                         const char *generation,
                                         char *why, size_t why_len)
@@ -4531,6 +4624,16 @@ static bool dp_generation_dependencies(const char *root,
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
         "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
         "build/githooks",
+        /* Checker binaries the sealed generated-docs gate execs before any
+         * dimension builds inside the generation: without them every fresh
+         * proof fails the gate with a misleading "stale" verdict for what
+         * is actually a missing prerequisite. Copied from the submitting
+         * checkout (required: absence refuses with the exact make target
+         * above). The later lint dimension rebuilds and re-checks with
+         * binaries built from sealed source, so a stale submitter binary
+         * can only add fail-closed friction here, never false admission. */
+        "build/bin/z23-lint",
+        "build/bin/z23-fleet-observe",
 #if defined(__linux__)
         /* Order-only test-binary prerequisites that no admitted executable
          * links against: the rollback group dlopens these fixture images by
@@ -4554,6 +4657,10 @@ static bool dp_generation_dependencies(const char *root,
         if (!dp_generation_dependency(root, generation,
                                       dependencies[i], why, why_len))
             return false;
+    /* Advisory verdict seeding (ZRC-0007 probe-before-build): never fails
+     * the prepare. A generation without seeded verdicts runs every group
+     * cold, exactly as before this slice. */
+    dp_generation_verdict_store(root, generation);
     return true;
 }
 
@@ -4908,6 +5015,7 @@ static struct zcl_dev_proof_budget proof_step_budget(
 #define PROOF_GENERATED_DEFAULT_MS 300000
 #define PROOF_COMPILE_DEFAULT_MS 900000
 #define PROOF_BUNDLE_DEFAULT_MS 1800000
+#define PROOF_PREFLIGHT_DEFAULT_MS 120000
 #define PROOF_LINT_ARGV_CAP 6u
 
 /* Every exact receipt can authorize publication, regardless of the scratch
@@ -5232,6 +5340,133 @@ bool zcl_dev_proof_test_build_test_selector(
 {
     return build_test_selector(plan, root, inventory_only, out, out_size,
                                count_out, gated_out, gated_size);
+}
+#endif
+
+/* One PROBE-SUMMARY line, strictly: the four counts and nothing else.
+ * A line that is too long to be a summary, lacks the prefix, or carries
+ * trailing garbage is not a summary. */
+static bool dp_preflight_summary(const char *line, size_t len, unsigned *g,
+                                 unsigned *r, unsigned *m, unsigned *u)
+{
+    char buf[256];
+    char over[2];
+    if (!line || !g || !r || !m || !u) return false;
+    if (len <= 14 || len >= sizeof(buf)) return false;
+    if (memcmp(line, "PROBE-SUMMARY ", 14) != 0) return false;
+    memcpy(buf, line, len);
+    buf[len] = '\0';
+    return sscanf(buf, "PROBE-SUMMARY groups=%u would_reuse=%u "
+                       "must_run=%u uncacheable=%u%1s",
+                  g, r, m, u, over) == 4;
+}
+
+/* Read the runner's --cache-probe-only output into the preflight account.
+ * The SUMMARY carries the counts and the PROBE lines check it: exactly one
+ * summary, a self-consistent split, and a line count equal to the summary's
+ * group count. Anything else (truncated log, doubled summary, a summary
+ * that does not describe its own lines) refuses, and the caller falls back
+ * to "the runner decides". */
+static bool dp_preflight_parse(const char *bytes, size_t len,
+                               struct zcl_dev_proof_preflight *out)
+{
+    uint32_t lines = 0, summaries = 0;
+    unsigned groups = 0, reuse = 0, must = 0, unc = 0;
+    size_t i = 0;
+    if (!bytes || !out) return false;
+    memset(out, 0, sizeof(*out));
+    /* A bent SUMMARY line simply parses as "not a summary": with no valid
+     * summary the final check refuses, and a valid summary beside a bent
+     * line still has to describe every PROBE line to be accepted. */
+    while (i < len) {
+        size_t eol = i;
+        unsigned g = 0, r = 0, m = 0, u = 0;
+        while (eol < len && bytes[eol] != '\n') eol++;
+        if (eol - i > 6 && memcmp(bytes + i, "PROBE ", 6) == 0) lines++;
+        if (dp_preflight_summary(bytes + i, eol - i, &g, &r, &m, &u)) {
+            groups = g;
+            reuse = r;
+            must = m;
+            unc = u;
+            summaries++;
+        }
+        i = eol + 1;
+    }
+    if (summaries != 1 || lines != groups || must != groups - reuse ||
+        unc > groups)
+        return false;
+    out->groups = groups;
+    out->would_reuse = reuse;
+    out->must_run = must;
+    out->uncacheable = unc;
+    return true;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_preflight_parse(const char *bytes, size_t len,
+                                        struct zcl_dev_proof_preflight *out)
+{
+    return dp_preflight_parse(bytes, len, out);
+}
+#endif
+
+/* Capsule scratch path beside the proof logs: ephemeral cycle state, never
+ * published, never executed — the dimension's fallback is a fresh probe
+ * when it is absent. Takes plain strings so the helper stays above the
+ * worker struct. */
+static bool dp_capsule_path(const char *logs, const char *key,
+                            char out[PATH_MAX])
+{
+    int n;
+    if (!logs || !logs[0] || !key || !key[0] || !out) return false;
+    n = snprintf(out, PATH_MAX, "%s/%s.probe-capsule", logs, key);
+    return n > 0 && n < PATH_MAX;
+}
+
+/* The five capsule arguments both runner children share. All values are
+ * fixed-length sealed bindings, so fixed buffers with one upfront length
+ * gate cannot truncate. */
+static int dp_capsule_argv(struct zcl_dev_proof_capsule_argv *o, bool write,
+                           const char *capsule_path, const char *source_id,
+                           const char *mutation_id, const char *source_cas,
+                           const char *graph_root)
+{
+    if (!o || !capsule_path || !capsule_path[0] || !source_id ||
+        !source_id[0] || !mutation_id || !mutation_id[0] || !source_cas ||
+        !graph_root || strlen(capsule_path) > 128)
+        return 0;
+    snprintf(o->capsule, sizeof(o->capsule), "%s=%s",
+             write ? "--write-capsule" : "--use-capsule", capsule_path);
+    snprintf(o->sid, sizeof(o->sid), "--capsule-source-id=%s", source_id);
+    snprintf(o->mid, sizeof(o->mid), "--capsule-mutation-id=%s",
+             mutation_id);
+    snprintf(o->cas, sizeof(o->cas), "--capsule-source-cas=%s", source_cas);
+    snprintf(o->graph, sizeof(o->graph), "--capsule-graph-root=%s",
+             graph_root);
+    o->argv[0] = o->capsule;
+    o->argv[1] = o->sid;
+    o->argv[2] = o->mid;
+    o->argv[3] = o->cas;
+    o->argv[4] = o->graph;
+    o->argv[5] = NULL;
+    return 5;
+}
+
+#if defined(ZCL_TESTING)
+int zcl_dev_proof_test_capsule_argv(bool write, const char *capsule_path,
+                                    const char *source_id,
+                                    const char *mutation_id,
+                                    const char *source_cas,
+                                    const char *graph_root,
+                                    const char **argv, size_t argv_cap)
+{
+    static struct zcl_dev_proof_capsule_argv held;
+    if (argv_cap < 6) return 0;
+    if (dp_capsule_argv(&held, write, capsule_path, source_id, mutation_id,
+                        source_cas, graph_root) != 5)
+        return 0;
+    memcpy(argv, held.argv, sizeof(held.argv));
+    return 5;
 }
 #endif
 
@@ -6733,6 +6968,28 @@ static void dp_worker_lint_wall_note(const struct dp_worker *w,
  * runner. Neither feeds the other, so both children are launched
  * before either is waited on and the proof pays for the longer of the
  * two rather than their sum. */
+/* Capsule consume flags for the test dimension: the preflight's capsule
+ * under the same sealed bindings it launched with. Capsule assembly
+ * never fails the proof: a short return runs the dimension without it,
+ * which fresh-probes exactly as before. */
+static void dp_test_capsule_flags(struct dp_worker *w,
+                                  const char **test_argv, size_t *test_argc,
+                                  struct zcl_dev_proof_capsule_argv *cap_args)
+{
+    char capsule_path[PATH_MAX];
+    char graph_hex[65];
+    size_t i;
+    if (!dp_capsule_path(w->execution.logs, w->execution.key, capsule_path))
+        return;
+    zcl_hex_encode(w->depfile_root, 32, graph_hex);
+    if (dp_capsule_argv(cap_args, false, capsule_path,
+                        w->sealed_source_id, w->sealed_mutation_id,
+                        w->source_before.cas_root_sha3, graph_hex) != 5)
+        return;
+    for (i = 0; i < 5; i++)
+        test_argv[(*test_argc)++] = cap_args->argv[i];
+}
+
 static bool dp_worker_dimensions_run(struct dp_worker *w,
                                      struct zcl_dev_proof_dimension *lint,
                                      struct zcl_dev_proof_dimension *test,
@@ -6740,8 +6997,19 @@ static bool dp_worker_dimensions_run(struct dp_worker *w,
 {
     struct proof_dimension_run runs[2];
     size_t run_count = 0;
-    const char *test_argv[] = {w->generation_binary, w->only, "--cache",
-                               "--activate-proof-contracts", NULL};
+    /* The test dimension consumes the preflight's capsule when it
+     * validates (same sealed bindings it launched under); otherwise it
+     * fresh-probes exactly as before. Capsule assembly never fails the
+     * proof: a short argv simply runs without it. */
+    struct zcl_dev_proof_capsule_argv cap_args;
+    const char *test_argv[10];
+    size_t test_argc = 0;
+    test_argv[test_argc++] = w->generation_binary;
+    test_argv[test_argc++] = w->only;
+    test_argv[test_argc++] = "--cache";
+    test_argv[test_argc++] = "--activate-proof-contracts";
+    dp_test_capsule_flags(w, test_argv, &test_argc, &cap_args);
+    test_argv[test_argc] = NULL;
     struct zcl_dev_proof_budget test_budget =
         zcl_dev_proof_test_budget(w->paths->state, w->groups, test->selected);
     if (lint->selected &&
@@ -6779,6 +7047,107 @@ static bool dp_worker_dimensions_run(struct dp_worker *w,
     return true;
 }
 
+/* Bounded log read for the preflight account: the runner's probe-only
+ * output is ~100 bytes per group, so 2 MiB covers the whole catalog with
+ * room; anything larger is a log this reader cannot account from. */
+#define DP_PREFLIGHT_LOG_MAX (2u * 1024u * 1024u)
+
+static bool dp_preflight_log_read(const char *path, char **bytes, size_t *len)
+{
+    FILE *f;
+    char *buf;
+    size_t n;
+    bool err;
+    if (!path || !bytes || !len) return false;
+    f = fopen(path, "rb");
+    if (!f) return false;
+    buf = zcl_malloc(DP_PREFLIGHT_LOG_MAX + 1, "proof_preflight_log");
+    if (!buf) {
+        fclose(f);
+        return false;
+    }
+    n = fread(buf, 1, DP_PREFLIGHT_LOG_MAX + 1, f);
+    err = ferror(f) != 0;
+    fclose(f);
+    if (err || n > DP_PREFLIGHT_LOG_MAX) {
+        free(buf);
+        return false;
+    }
+    buf[n] = '\0';
+    *bytes = buf;
+    *len = n;
+    return true;
+}
+
+/* The routed-group preflight: probe the candidate's whole required set
+ * through the runner's batch path BEFORE the test dimension decides what
+ * still needs execution, and serialize that one decision as a probe
+ * capsule beside scratch so the dimension consumes it instead of
+ * reopening. Advisory only, by construction: the runner keeps execution
+ * authority, so a missing binary, a failed spawn, or an unparseable log
+ * costs one phase note ("unavailable, the runner decides") and never the
+ * proof — and a missing or refused capsule just fresh-probes. Runs after
+ * the prefork step so the generation's depfiles, admitted runner, and
+ * seeded verdicts are exactly what the dimension below will see. The
+ * cycle's tree-stability trust is unchanged (worker lease plus the
+ * publish-time identity recheck); the capsule only adds replay protection
+ * across cycles via its sealed bindings. */
+static void dp_worker_test_preflight(struct dp_worker *w)
+{
+    const char *argv[11];
+    char log[PATH_MAX];
+    char capsule[PATH_MAX];
+    char graph_hex[65];
+    char note[160];
+    char *bytes = NULL;
+    size_t len = 0, n = 0;
+    struct zcl_dev_proof_preflight pf;
+    struct zcl_dev_proof_budget budget;
+    struct zcl_dev_proof_capsule_argv cap;
+    int cap_argc = 0;
+    size_t i;
+    if (!w || !w->generation_binary[0] || !w->only[0]) return;
+    if (snprintf(log, sizeof(log), "%s/%s.test-preflight.log",
+                 w->execution.logs, w->execution.key) >= (int)sizeof(log))
+        return;
+    argv[n++] = w->generation_binary;
+    argv[n++] = w->only;
+    argv[n++] = "--cache";
+    argv[n++] = "--activate-proof-contracts";
+    argv[n++] = "--cache-probe-only";
+    if (dp_capsule_path(w->execution.logs, w->execution.key, capsule)) {
+        zcl_hex_encode(w->depfile_root, 32, graph_hex);
+        cap_argc = dp_capsule_argv(&cap, true, capsule,
+                                   w->sealed_source_id,
+                                   w->sealed_mutation_id,
+                                   w->source_before.cas_root_sha3, graph_hex);
+    }
+    if (cap_argc == 5) {
+        for (i = 0; i < 5; i++)
+            argv[n++] = cap.argv[i];
+    }
+    argv[n] = NULL;
+    budget = proof_step_budget(w->paths, "test_preflight",
+                               PROOF_PREFLIGHT_DEFAULT_MS);
+    (void)run_step(&w->execution, w->execution.root, log, argv,
+                   "test_preflight", &budget, NULL);
+    if (!dp_preflight_log_read(log, &bytes, &len) ||
+        !dp_preflight_parse(bytes, len, &pf)) {
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_preflight",
+                                       "unavailable_runner_decides");
+        free(bytes);
+        return;
+    }
+    free(bytes);
+    (void)snprintf(note, sizeof(note),
+                   "groups=%u would_reuse=%u must_run=%u uncacheable=%u "
+                   "capsule=%s",
+                   pf.groups, pf.would_reuse, pf.must_run, pf.uncacheable,
+                   cap_argc == 5 && access(capsule, F_OK) == 0 ? "written"
+                                                               : "absent");
+    (void)zcl_dev_proof_phase_note(w->paths->phases, "test_preflight", note);
+}
+
 /* Every dimension this proof actually runs, in order. */
 static bool dp_worker_dimensions(struct dp_worker *w, char *why,
                                  size_t why_len)
@@ -6796,6 +7165,7 @@ static bool dp_worker_dimensions(struct dp_worker *w, char *why,
     w->only[0] = 0;
     if (test->selected && !dp_worker_test_env(w, why, why_len)) return false;
     if (!dp_worker_prefork(w, test->selected != 0, why, why_len)) return false;
+    if (test->selected) dp_worker_test_preflight(w);
     if (!dp_worker_dimensions_run(w, lint, test, why, why_len)) return false;
     proof_phase_mark(w->phases, "dimension_lint_and_test");
     return true;
