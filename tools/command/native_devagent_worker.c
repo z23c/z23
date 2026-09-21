@@ -64,6 +64,14 @@
  * at all: one that does not fit the task is refused by name
  * (brief-too-large) before any submission, never cut to its head.
  *
+ * PRE-SPEND GUARDS. After claim and before the submitted flip and the
+ * executor fork, the worker re-verifies the sender authority the
+ * receiver's per-ref .evidence record names (binding plus expiry against
+ * the live grant store, peer grant for board-carried rows) and
+ * re-observes the brief's workspace (HEAD moved or dirty refuses).
+ * Either refuses through the existing refusal vocabulary below; missing
+ * evidence fails closed. The grant store is only ever read.
+ *
  * EXECUTOR SEAM. wkr_executor_fn is the whole production seam. The leaf
  * wires zcl_devagent_worker_no_executor (always refuses) until operator
  * relay supplies C's muse_session; the drive, gate, limits, receipts,
@@ -77,6 +85,7 @@
 
 #include "command/native_command.h"
 #include "command/native_devagent.h"
+#include "command/native_fleet.h"
 
 #include "base/safe_alloc.h"
 #include "config/command_catalog.h"
@@ -119,6 +128,18 @@
  * The rc is the one reap records; it never collides with 99-101 below. */
 #define WKR_REFUSE_BRIEF_SIZE "brief-too-large"
 #define WKR_REFUSE_BRIEF_READ "brief-unreadable"
+/* Pre-spend refusals: dead or unreadable sender authority, or a workspace
+ * that moved or dirtied between admission and execution. They ride the
+ * SAME refusal path as the brief refusals above (run.out rc 102 plus a
+ * no-receipt result row for reap to record) — no new queue state, no new
+ * outcome vocabulary. Nothing was submitted and nothing forked. */
+#define WKR_REFUSE_AUTHORITY "authority-ungranted"
+#define WKR_REFUSE_AUTHORITY_READ "authority-unreadable"
+#define WKR_REFUSE_WS_DIRTY "workspace-dirty"
+#define WKR_REFUSE_WS_MOVED "workspace-moved"
+/* The grant scope the worker re-verifies: the same "send" scope the
+ * receiver admitted under, never a second permission system. */
+#define WKR_SEND_SCOPE "send"
 #define WKR_RC_REFUSED 102
 /* A gated run whose receipt could not be written fails with this rc. */
 #define WKR_RECEIPT_UNWRITABLE "receipt-unwritable"
@@ -1019,6 +1040,246 @@ static void wkr_run_note(const struct wkr_result *res, const char *gateline,
     (void)snprintf(out, cap, "%.3000s %s", res ? res->evidence : "", gateline);
 }
 
+/* ── pre-spend guards: authority, then workspace ─────────────────────────
+ * A claimed row spends nothing until both hold, checked AFTER claim and
+ * BEFORE the submitted flip and the executor fork:
+ *
+ * 1. AUTHORITY. The receiver's per-ref .evidence record
+ *    (<state>/receive/brief/<name>.evidence) names the sender label, the
+ *    binding stamp, and the grant expiry seen at install. All three are
+ *    re-read against the LIVE grant store here: the binding must still be
+ *    the live credential for the label with the "send" scope, and the
+ *    expiry must still read. A board-carried row instead names the
+ *    verified signer and is re-checked against the live peer grant. A
+ *    revoke or expiry landing between admission and execution therefore
+ *    refuses here. Missing, unreadable, or mis-shaped evidence fails
+ *    closed: it refuses, it never admits.
+ * 2. WORKSPACE. The brief's resolved workspace (the muse-workspace line
+ *    the receiver wrote) is re-observed with the existing
+ *    zcl_devagent_workspace_observe: a HEAD that moved, or tracked paths
+ *    that dirtied, since the evidence record refuses. A brief naming no
+ *    workspace has nothing recorded and nothing re-verified; a same-box
+ *    absolute path (evidence head "none") re-checks existence and
+ *    resolvability, the properties its admission verified.
+ *
+ * Both refuse through wkr_refuse_job below — the queue's existing
+ * terminal/refusal vocabulary (run.out rc 102 plus the no-receipt result
+ * row reap already records). No new queue state is invented, submitted is
+ * never flipped, the executor never forks, and the grant store is only
+ * ever read, never minted or renewed. */
+
+struct wkr_evidence {
+    char sender[64];
+    char binding[ZCL_FLEET_STEER_BINDING_HEX + 1];
+    bool peer;
+    long long expiry;
+    char signer[64];
+    char head[41];
+    bool has_head;
+};
+
+/* One `key=value` line out of the evidence record. False when the key is
+ * absent, the value is empty or overflows, or a stray CR rides the line. */
+static bool wkr_ev_line(const char *text, const char *key, char *out,
+                        size_t cap)
+{
+    size_t klen = strlen(key);
+    const char *p = text;
+    if (!text || !key || !out || cap == 0)
+        return false;
+    for (;;) {
+        const char *eol;
+        size_t vlen;
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            p += klen + 1;
+            eol = strchr(p, '\n');
+            vlen = eol ? (size_t)(eol - p) : strlen(p);
+            if (vlen == 0 || vlen >= cap)
+                return false;
+            memcpy(out, p, vlen);
+            out[vlen] = '\0';
+            return strchr(out, '\r') == NULL;
+        }
+        p = strchr(p, '\n');
+        if (!p)
+            return false;
+        p++;
+    }
+}
+
+static bool wkr_ev_token(const char *s, size_t max)
+{
+    size_t i, n;
+    if (!s || s[0] == '\0' || (n = strlen(s)) > max)
+        return false;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool wkr_ev_hex(const char *s, size_t want)
+{
+    size_t i;
+    if (!s || strlen(s) != want)
+        return false;
+    for (i = 0; i < want; i++) {
+        char c = s[i];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+/* The evidence file one job's name addresses. False when the name cannot
+ * name a file safely or the path will not fit — both fail closed. */
+static bool wkr_evidence_path(const struct wkr_job *job, char *path,
+                              size_t cap)
+{
+    char dir[4096];
+    if (!job || !job->name[0] || !zcl_devagent_name_ok(job->name))
+        return false;
+    if (!wkr_state_dir(dir, sizeof(dir), "receive"))
+        return false;
+    return snprintf(path, cap, "%s/brief/%s.evidence", dir, job->name) <
+           (int)cap;
+}
+
+/* The sender lines: who the row spends as and the stamp that tied the
+ * row to the granting credential. */
+static bool wkr_evidence_sender(const char *text, struct wkr_evidence *ev)
+{
+    if (!wkr_ev_line(text, "sender", ev->sender, sizeof(ev->sender)))
+        return false;
+    if (!wkr_ev_token(ev->sender, sizeof(ev->sender) - 1))
+        return false;
+    if (!wkr_ev_line(text, "sender_binding", ev->binding,
+                     sizeof(ev->binding)))
+        return false;
+    return wkr_ev_hex(ev->binding, ZCL_FLEET_STEER_BINDING_HEX);
+}
+
+/* The expiry line: an integer install-time expiry for a local grant, or
+ * the `peer` literal plus the verified signer for a board-carried row. */
+static bool wkr_evidence_expiry(const char *text, struct wkr_evidence *ev)
+{
+    char expiry[32];
+    char *end = NULL;
+    if (!wkr_ev_line(text, "grant_expiry", expiry, sizeof(expiry)))
+        return false;
+    if (strcmp(expiry, "peer") == 0) {
+        ev->peer = true;
+        if (!wkr_ev_line(text, "board_signer", ev->signer,
+                         sizeof(ev->signer)))
+            return false;
+        return wkr_ev_token(ev->signer, sizeof(ev->signer) - 1);
+    }
+    ev->expiry = strtoll(expiry, &end, 10);
+    return end != NULL && *end == '\0';
+}
+
+/* The workspace_head line is optional: absent or "none" means the
+ * admission recorded no HEAD (a same-box absolute path). A present but
+ * mis-shaped HEAD fails closed like every other line. */
+static bool wkr_evidence_head(const char *text, struct wkr_evidence *ev)
+{
+    char head[64];
+    if (!wkr_ev_line(text, "workspace_head", head, sizeof(head)))
+        return true;
+    if (strcmp(head, "none") == 0)
+        return true;
+    if (!wkr_ev_hex(head, 40))
+        return false;
+    (void)snprintf(ev->head, sizeof(ev->head), "%s", head);
+    ev->has_head = true;
+    return true;
+}
+
+/* The authority lines of one job's evidence record. False when the file
+ * is missing or unreadable, when the row name cannot name a file safely,
+ * or when any required line is absent or mis-shaped — every one of those
+ * fails closed at the caller. */
+static bool wkr_evidence_read(const struct wkr_job *job,
+                              struct wkr_evidence *ev)
+{
+    char path[4096 + 160], text[2048];
+    memset(ev, 0, sizeof(*ev));
+    if (!wkr_evidence_path(job, path, sizeof(path)))
+        return false;
+    if (!zcl_devagent_worker_read_file(path, text, sizeof(text)))
+        return false;
+    return wkr_evidence_sender(text, ev) && wkr_evidence_expiry(text, ev) &&
+           wkr_evidence_head(text, ev);
+}
+
+/* The sender authority, re-verified against the live store. NULL passes;
+ * otherwise the named refusal. */
+static const char *wkr_guard_authority(const struct wkr_evidence *ev)
+{
+    long long exp = 0;
+    const char *why;
+    if (ev->peer) {
+        why = zcl_fleet_steer_grant_peer_live(ev->sender, ev->signer,
+                                              WKR_SEND_SCOPE);
+        return why ? WKR_REFUSE_AUTHORITY : NULL;
+    }
+    why = zcl_fleet_steer_grant_binding_live(ev->sender, ev->binding,
+                                             WKR_SEND_SCOPE);
+    if (why)
+        return WKR_REFUSE_AUTHORITY;
+    if (!zcl_fleet_steer_grant_expiry(ev->sender, WKR_SEND_SCOPE, &exp))
+        return WKR_REFUSE_AUTHORITY;
+    return NULL;
+}
+
+/* The brief's workspace, re-observed. NULL passes; otherwise the named
+ * refusal. No workspace line in the brief means the admission recorded
+ * none, so there is nothing to re-verify. */
+static const char *wkr_guard_workspace(const struct wkr_job *job,
+                                       const struct wkr_evidence *ev)
+{
+    char ws[1024];
+    struct rcv_workspace w;
+    if (!zcl_devagent_worker_task_workspace(job->task, ws, sizeof(ws)))
+        return NULL;
+    memset(&w, 0, sizeof(w));
+    if (!zcl_devagent_workspace_observe(ws, true, &w))
+        return WKR_REFUSE_WS_MOVED;
+    if (!w.directory || !w.resolved)
+        return WKR_REFUSE_WS_MOVED;
+    if (!ev->has_head)
+        return NULL;
+    if (!w.checkout || w.head[0] == '\0' || strcmp(w.head, ev->head) != 0)
+        return WKR_REFUSE_WS_MOVED;
+    if (w.dirty != 0)
+        return WKR_REFUSE_WS_DIRTY;
+    return NULL;
+}
+
+/* Both pre-spend guards in spend order. NULL spends; otherwise the named
+ * refusal the caller records without submitting or forking. */
+static const char *wkr_prespend_guard(const struct wkr_job *job)
+{
+    struct wkr_evidence ev;
+    const char *refusal;
+    if (!job)
+        return WKR_REFUSE_AUTHORITY_READ;
+    if (!wkr_evidence_read(job, &ev))
+        return WKR_REFUSE_AUTHORITY_READ;
+    refusal = wkr_guard_authority(&ev);
+    if (refusal)
+        return refusal;
+    return wkr_guard_workspace(job, &ev);
+}
+
+static long long wkr_refuse_job(const struct wkr_drive_opts *opts,
+                                const struct wkr_job *job, const char *why);
+
 static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
                                const struct wkr_job *job,
                                wkr_executor_fn exec)
@@ -1027,7 +1288,13 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
     struct wkr_outcome oc;
     struct wkr_result res;
     char verdict[32], gateline[256], note[3400];
+    const char *guard;
     long long rc;
+    /* Authority and workspace BEFORE the submitted flip and the fork: a
+     * refusal here spends nothing and submits nothing. */
+    guard = wkr_prespend_guard(job);
+    if (guard)
+        return wkr_refuse_job(opts, job, guard);
     if (!wkr_set_submitted(job->rundir)) {
         wkr_write_runout(job, 101, "claim-identity-unwritable");
         wkr_mail_result(opts, job, "claim-identity-unwritable", "",

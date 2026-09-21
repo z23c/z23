@@ -1717,19 +1717,79 @@ static bool rcv_ref_files_of(const struct rcv_ctx *c, const char *ref,
  * The tree id is the index-projected staged tree, NOT
  * tools/dev/source-identity.sh's source_id_sha256 — that one hashes the
  * built source set and cannot be had without a heavy call, and a beat never
- * waits on one. */
+ * waits on one.
+ *
+ * The sender lines are the worker's pre-spend record: the label the row
+ * was admitted under, the binding stamp that tied it to the granting
+ * credential, and the grant expiry read at install time (or the literal
+ * `peer` with the board signer for a board-carried row, whose authority is
+ * the peer grant, never a local one). The worker re-verifies all of this
+ * against the live store after claim and before forking, so a revoke or
+ * expiry that lands between admission and execution spends nothing. Every
+ * value is a bare token (label alphabet, lowercase hex, integer, or the
+ * `peer` literal), validated below so no row bytes can forge a line. */
+static bool rcv_label_token(const char *s, size_t max)
+{
+    size_t i, n;
+    if (!s || s[0] == '\0' || (n = strlen(s)) > max)
+        return false;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool rcv_hex_token(const char *s, size_t want)
+{
+    size_t i;
+    if (!s || strlen(s) != want)
+        return false;
+    for (i = 0; i < want; i++) {
+        char c = s[i];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))
+            continue;
+        return false;
+    }
+    return true;
+}
+
 static bool rcv_evidence_render(const struct rcv_direction *d,
                                 const struct rcv_workspace *w,
-                                const char *brief, char *out, size_t cap)
+                                const char *brief, const char *sender,
+                                const char *binding, const char *expiry,
+                                const char *signer, char *out, size_t cap)
 {
     char wsd[65], bd[65];
+    char sigline[128];
     int n;
+    if (!rcv_label_token(sender, 64) ||
+        !rcv_hex_token(binding, ZCL_FLEET_STEER_BINDING_HEX))
+        return false;
+    if (strcmp(expiry, "peer") == 0) {
+        if (!rcv_label_token(signer, 64))
+            return false;
+        if (snprintf(sigline, sizeof(sigline), "board_signer=%s\n", signer) >=
+            (int)sizeof(sigline))
+            return false;
+    } else {
+        char *end = NULL;
+        (void)strtoll(expiry, &end, 10);
+        if (!expiry[0] || !end || *end != '\0')
+            return false;
+        sigline[0] = '\0';
+    }
     rcv_brief_digest(w->root, wsd);
     rcv_brief_digest(brief, bd);
     n = snprintf(out, cap,
+                 "sender=%s\nsender_binding=%s\ngrant_expiry=%s\n%s"
                  "workspace_selector=%s\nworkspace_sha3=%s\n"
                  "workspace_head=%s\nworkspace_tree_sha3=%s\n"
                  "resolved_sha3=%s\nworkspace=%s\n",
+                 sender, binding, expiry, sigline,
                  d->selector ? d->workspace : "absolute", wsd,
                  w->head[0] ? w->head : "none", w->tree[0] ? w->tree : "none",
                  bd, w->root);
@@ -1799,16 +1859,53 @@ static void rcv_reconcile(struct rcv_ctx *c, const struct rcv_row *v,
  * before the queue actually holds the work, and no half state can be
  * mistaken for a decided ref: until the queue row exists the ref is still
  * unknown, and the next beat rewrites all three files identically. */
+/* The authority the worker will spend on, read at install rather than
+ * trusted from admission: a revoke landing between the two reads refuses
+ * instead of queueing. True with the expiry token filled (the integer the
+ * store reports, or the `peer` literal for a board-carried row, whose
+ * authority is the peer grant the board admission already checked). False
+ * answers the refusal, which names the SAME typed reason the worker would
+ * refuse with at spend time. */
+static bool rcv_install_authority(struct rcv_ctx *c, const struct rcv_row *v,
+                                  const char *src, char *expiry, size_t cap,
+                                  bool *board)
+{
+    long long exp = 0;
+    *board = (v->board_post && v->board_post[0]) ||
+             (v->board_signer && v->board_signer[0]);
+    if (*board) {
+        (void)snprintf(expiry, cap, "%s", "peer");
+        return true;
+    }
+    if (!zcl_fleet_steer_grant_expiry(v->from, RCV_SCOPE, &exp)) {
+        rcv_answer_refuse(c, v, src, "RECEIVE_SENDER_UNGRANTED",
+                          "grant-expiry-unreadable");
+        return false;
+    }
+    if (snprintf(expiry, cap, "%lld", exp) >= (int)cap) {
+        rcv_answer_refuse(c, v, src, "RECEIVE_STATE_UNWRITABLE",
+                          "brief-store");
+        return false;
+    }
+    return true;
+}
+
 static void rcv_install(struct rcv_ctx *c, const struct rcv_row *v,
                         const char *src, const struct rcv_direction *d,
                         const struct rcv_workspace *w,
                         const struct rcv_ref_files *f)
 {
     char brief[RCV_BRIEF_MAX];
-    char record[1024], evidence[1024];
+    char record[2048], evidence[1024];
+    char expiry[32];
+    bool board = false;
     long long seq;
+    if (!rcv_install_authority(c, v, src, expiry, sizeof(expiry), &board))
+        return;
     if (!rcv_brief_render(v->body, w->root, brief, sizeof(brief)) ||
-        !rcv_evidence_render(d, w, brief, record, sizeof(record))) {
+        !rcv_evidence_render(d, w, brief, v->from, v->sender_binding, expiry,
+                             board ? v->board_signer : "", record,
+                             sizeof(record))) {
         rcv_answer_refuse(c, v, src, "RECEIVE_WORKSPACE_INVALID",
                           "resolved-brief-too-long");
         return;

@@ -21,6 +21,7 @@
 
 #include "command/native_command.h"
 #include "command/native_devagent.h"
+#include "command/native_fleet.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -52,6 +53,14 @@ static bool g_wtx_had_xdg;
 static char g_fx_count[1024];
 static char g_fx_task[1024];
 
+/* The sender authority this rig's rows spend under: one live "send" grant
+ * minted lazily per isolation, whose binding and expiry the post helpers
+ * stage into the receiver's per-ref evidence slot. The worker's pre-spend
+ * guard reads that slot, so a row without it would (correctly) refuse. */
+static char g_wtx_binding[ZCL_FLEET_STEER_BINDING_HEX + 1];
+static long long g_wtx_expiry;
+static bool g_wtx_grant_ok;
+
 static void wtx_isolate(const char *tag)
 {
     char base[512];
@@ -66,6 +75,7 @@ static void wtx_isolate(const char *tag)
         (void)snprintf(g_wtx_saved_xdg, sizeof(g_wtx_saved_xdg), "%s",
                        getenv("XDG_STATE_HOME"));
     setenv("XDG_STATE_HOME", g_wtx_state, 1);
+    g_wtx_grant_ok = false;
 }
 
 static void wtx_restore(void)
@@ -188,6 +198,76 @@ static bool wtx_ok(const struct wtx_call *c)
     return c->reply.status == ZCL_COMMAND_STATUS_PASSED;
 }
 
+/* Mint the rig's live "send" grant once per isolation and remember what
+ * its rows stamp and what expiry the worker must re-read. */
+static void wtx_authority_ensure(void)
+{
+    struct wtx_call c;
+    const struct json_value *v;
+    const char *id;
+    if (g_wtx_grant_ok)
+        return;
+    wtx_begin(&c, "fleet.steer.grant", "zcl.fleet_steer_grant.v1");
+    (void)json_push_kv_str(&c.input, "action", "mint");
+    (void)json_push_kv_str(&c.input, "scopes", "send");
+    (void)json_push_kv_str(&c.input, "label", "wtx");
+    (void)json_push_kv_int(&c.input, "ttl_seconds", 3600);
+    zcl_native_handle_fleet_steer_grant(&c.request, &c.reply);
+    g_wtx_grant_ok = wtx_ok(&c);
+    v = json_get(&c.reply.data, "id");
+    id = (v && v->type == JSON_STR) ? json_get_str(v) : "";
+    if (g_wtx_grant_ok)
+        g_wtx_grant_ok =
+            zcl_fleet_steer_sender_binding(id, "wtx", g_wtx_binding,
+                                           sizeof(g_wtx_binding)) &&
+            zcl_fleet_steer_grant_expiry("wtx", "send", &g_wtx_expiry);
+    wtx_end(&c);
+}
+
+static void wtx_mkdir_p(char *path)
+{
+    char *p = path;
+    if (*p == '/')
+        p++;
+    for (; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            (void)mkdir(path, 0700);
+            *p = '/';
+        }
+    }
+    (void)mkdir(path, 0700);
+}
+
+/* Stage the per-ref evidence the worker's pre-spend guard reads: the
+ * sender the row spends as, its live binding, and the install-time
+ * expiry. Leaf and filler-brief rows name no workspace, so there is no
+ * workspace_head line and the workspace guard has nothing to re-verify. */
+static void wtx_authority_stage(const char *name)
+{
+    char dir[2048], path[2200], text[256];
+    FILE *f;
+    int w;
+    wtx_authority_ensure();
+    if (!g_wtx_grant_ok)
+        return;
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/receive/brief", g_wtx_state);
+    wtx_mkdir_p(dir);
+    if (snprintf(path, sizeof(path), "%s/%s.evidence", dir, name) >=
+        (int)sizeof(path))
+        return;
+    w = snprintf(text, sizeof(text),
+                 "sender=wtx\nsender_binding=%s\ngrant_expiry=%lld\n",
+                 g_wtx_binding, g_wtx_expiry);
+    if (w <= 0 || (size_t)w >= sizeof(text))
+        return;
+    f = fopen(path, "wb");
+    if (!f)
+        return;
+    (void)fwrite(text, 1, (size_t)w, f);
+    (void)fclose(f);
+}
+
 static void wtx_queue_post(const char *name)
 {
     struct wtx_call c;
@@ -198,6 +278,7 @@ static void wtx_queue_post(const char *name)
     zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
     (void)wtx_ok(&c);
     wtx_end(&c);
+    wtx_authority_stage(name);
 }
 
 static bool wtx_queue_verb(const char *action, const char *extra_key,
@@ -438,6 +519,8 @@ static bool wtx_post_brief(const char *name, size_t bytes, const char *tail)
     zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
     ok = wtx_ok(&c);
     wtx_end(&c);
+    if (ok)
+        wtx_authority_stage(name);
     return ok;
 }
 
@@ -2354,6 +2437,7 @@ static int wtx_cancel_and_group_cases(void)
         zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
         ASSERT(wtx_ok(&c));
         wtx_end(&c);
+        wtx_authority_stage("wtx-extgate");
         (void)remove(g_fx_count);
         g_fx_mode = 0;
         (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
