@@ -348,10 +348,11 @@ static bool capsule_selected_names(const struct group_result *results,
     return true;
 }
 
-/* Consume a capsule into the group-indexed probes[]: no testcache open,
- * no dep-graph walk, no closure query, no file hash. Prints ACCEPTED with
- * the slot count or rejected+why, then the caller either skips the open
- * or fresh-probes. */
+/* Consume a capsule into the group-indexed probes[]: structural, binding,
+ * and store-record checks only — no liveness proof. Prints ACCEPTED with
+ * the slot count or rejected+why; the caller revalidates every HIT against
+ * live keys (opening the same handle a fresh probe would use) and
+ * fresh-probes on any refusal. */
 static bool capsule_try_consume(struct capsule_state *st,
                                 const struct group_result *results,
                                 struct testcache_probe *probes)
@@ -399,7 +400,7 @@ static bool capsule_try_consume(struct capsule_state *st,
     st->used = true;
     ok = true;
     printf("test_parallel: capsule ACCEPTED %zu slot(s) for %zu selected "
-           "group(s), toolkey %s, no reopen\n",
+           "group(s), toolkey %s, live revalidation follows\n",
            info.n_slots, n_sel, info.toolkey_hex12);
     free(want);
     free(back);
@@ -505,9 +506,37 @@ static bool acquire_open_probe(struct testcache **tc,
     return served;
 }
 
-/* Probe acquisition: a validated capsule first (no open at all), else the
- * snapshot-or-live open plus the one batch probe over the shared memo.
- * DOWNGRADE means "open or alloc failed" and the caller runs everything. */
+/* Revalidate consumed HITs against live keys: the capsule spared the mint
+ * side no work, but consumption must still prove inputs byte-identical
+ * since mint — a slot key is a claim, not evidence. Opens the same live
+ * handle a fresh probe would use; any failure downgrades to run-all. */
+static bool capsule_revalidate_live(struct testcache **tc,
+                                    struct testcache_probe *probes)
+{
+    const char **names = NULL;
+    size_t i;
+    if (!tc || !probes) return false;
+    *tc = testcache_open(NULL);
+    if (!*tc) return false;
+    names = calloc((size_t)g_num_groups ? (size_t)g_num_groups : 1,
+                   sizeof(*names));
+    if (!names) {
+        testcache_close(*tc);
+        *tc = NULL;
+        return false;
+    }
+    for (i = 0; i < (size_t)g_num_groups; i++)
+        names[i] = g_groups[i].name;
+    testcache_capsule_revalidate(*tc, names, probes, (size_t)g_num_groups);
+    free(names);
+    return true;
+}
+
+/* Probe acquisition: a validated capsule first (structure, bindings, store
+ * records, then live keys — the open it spares is nothing the skip rests
+ * on), else the snapshot-or-live open plus the one batch probe over the
+ * shared memo. DOWNGRADE means "open or alloc failed" and the caller runs
+ * everything. */
 static enum acquire_result acquire_probes(struct testcache **tc,
         const struct group_result *results, struct testcache_probe *probes,
         bool activate_proof_contracts, bool snapshot,
@@ -518,8 +547,17 @@ static enum acquire_result acquire_probes(struct testcache **tc,
     bool served;
     if (!tc || !results || !probes || !st) return ACQUIRE_DOWNGRADE;
     if (!snapshot && st->cli.use_path && st->cli.use_path[0] &&
-        capsule_try_consume(st, results, probes))
+        capsule_try_consume(st, results, probes)) {
+        if (!capsule_revalidate_live(tc, probes)) {
+            testcache_close(*tc);
+            *tc = NULL;
+            return ACQUIRE_DOWNGRADE;
+        }
+        /* Live provenance supersedes the capsule's mint-time dep count in
+         * the PLAN diagnostics below. */
+        st->depfiles = 0;
         return ACQUIRE_OK;
+    }
     memset(&a, 0, sizeof(a));
     if (!acquire_slots_alloc(&a, acquire_count_selected(results)))
         return ACQUIRE_DOWNGRADE;
@@ -2270,9 +2308,10 @@ int main(int argc, char **argv)
                    testcache_reason_label((enum testcache_reason)r),
                    reason_hist[r]);
         }
-        /* Capsule-consumed runs never opened a handle (tc is NULL and the
-         * count is zero); the capsule's own dep-graph provenance fills the
-         * same slot, so the warnings below read the same in both modes. */
+        /* Capsule-consumed runs revalidated against a live handle, so the
+         * live dep-graph count is authoritative and the capsule's
+         * mint-time count is zeroed at accept; the warnings below read
+         * the same in both modes. */
         size_t plan_depfiles =
             testcache_depfile_count(tc) + cap_state.depfiles;
         if (plan_depfiles == 0)

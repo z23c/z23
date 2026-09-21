@@ -1660,6 +1660,32 @@ void testcache_capsule_apply(const struct testcache_capsule_slot *slots,
     }
 }
 
+/* Live-key revalidation: the slot key is a mint-time claim, so a consumed
+ * HIT keeps its skip only while live bytes reproduce it. */
+void testcache_capsule_revalidate(struct testcache *tc,
+                                  const char *const *names,
+                                  struct testcache_probe *probes, size_t n)
+{
+    size_t i;
+    if (!names || !probes) return;
+    for (i = 0; i < n; i++) {
+        struct testcache_probe live;
+        if (!probes[i].hit) continue;
+        memset(&live, 0, sizeof(live));
+        if (tc && names[i] && names[i][0])
+            testcache_probe_group(tc, names[i], &live);
+        if (live.key_valid && live.hit &&
+            memcmp(live.key, probes[i].key, 32) == 0)
+            continue;
+        probes[i] = live;
+        if (!probes[i].key_valid) {
+            probes[i].code = TESTCACHE_R_NO_HANDLE;
+            snprintf(probes[i].reason, sizeof(probes[i].reason),
+                     "capsule hit unverified live (runs)");
+        }
+    }
+}
+
 /* One slot of a batch: the ordinary reusable identity, or the slot's
  * activated proof-contract variant — the same branch the per-group loop in
  * test_parallel.c takes, so the seam can serve that loop without changing

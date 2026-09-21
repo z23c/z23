@@ -213,6 +213,17 @@ void testcache_capsule_apply(const struct testcache_capsule_slot *slots,
                              const char *const *want_names, size_t n_want,
                              struct testcache_probe *out,
                              const char *store_root);
+/* Live-key revalidation for consumed capsule HITs. names[i] is the group
+ * probes[i] was mapped from; a HIT keeps its skip only while a fresh live
+ * probe of that group reaches the identical key (inputs byte-identical
+ * since mint) and independently HITs it. Any divergence — changed content,
+ * stale graph, unreadable input, vanished record — replaces the slot with
+ * the live probe, so the group runs instead of skipping on dead evidence.
+ * A NULL handle cannot verify liveness and demotes every HIT (fail closed).
+ * Non-HIT slots pass through untouched. */
+void testcache_capsule_revalidate(struct testcache *tc,
+                                  const char *const *names,
+                                  struct testcache_probe *probes, size_t n);
 
 /* Batch probe: N canonical group names in, N independent per-group results
  * out, through this ONE handle (one verified dep graph, one shared

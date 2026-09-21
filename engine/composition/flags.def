@@ -1183,9 +1183,9 @@ Z23_FLAG("ZCL_HOTSWAP_SWAPPABLE_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_HOTSWAP_SYMBOLS_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-symbols.sh:58")
 Z23_FLAG("ZCL_HOTSWAP_TEST_AUTH", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1735")
+          "undocumented; first use tests/harness/src/test_parallel.c:1773")
 Z23_FLAG("ZCL_HOTSWAP_TEST_MODULE", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1700")
+          "undocumented; first use tests/harness/src/test_parallel.c:1738")
 Z23_FLAG("ZCL_HOTSWAP_VERIFY_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-verify.sh:43")
 Z23_FLAG("ZCL_HUMAN", "env_test", "-", "-",
@@ -2365,13 +2365,13 @@ Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:277")
 Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:1970; documented at docs/work/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
+          "first use tests/harness/src/test_parallel.c:2008; documented at docs/work/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",
-          "first use tests/harness/src/test_parallel.c:2068; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
+          "first use tests/harness/src/test_parallel.c:2106; documented at docs/work/test-result-cache.md:128: ZCL_TEST_CACHE_DUMP=test_hkdf_sha256_rfc5869 <test_parallel binary>")
 Z23_FLAG("ZCL_TESTCACHE_STORE_ROOT", "env_test", "-", "-",
           "first use tests/harness/src/testcache.c:629; documented at docs/zrc/0007-asynchronous-p2p-landing.md:171: 3. **Unpin the verdict store.** dev_proof.c sets ZCL_TESTCACHE_STORE_ROOT")
 Z23_FLAG("ZCL_TEST_FORK_GROUP", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_parallel.c:1913")
+          "undocumented; first use tests/harness/src/test_parallel.c:1951")
 Z23_FLAG("ZCL_TEST_FORK_ROLE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_boot_phase.c:459")
 Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",

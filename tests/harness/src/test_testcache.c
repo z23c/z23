@@ -1436,6 +1436,99 @@ static int tc_capsule_reverify(void)
     return failures;
 }
 
+/* Phase LV: live-key revalidation. A consumed HIT keeps its skip only
+ * while live bytes reproduce the slot key. Batch fixture seeded, slots
+ * minted from the live batch: unchanged inputs keep both HITs; an
+ * in-closure edit of exactly one group (depfile mtimes refreshed, so no
+ * GRAPH_STALE refusal) demotes that slot to a MISS carrying the NEW live
+ * key while the untouched slot still HITs; a NULL handle demotes all. */
+static int tc_live_keep_on_unchanged(const struct testcache_capsule_slot *slots,
+                                     const char **want)
+{
+    int failures = 0;
+    static struct testcache_probe out[2];
+    struct testcache *tc = testcache_open(TC_FIX);
+    TC_CHECK("live handle opens", tc != NULL);
+    if (tc) {
+        testcache_capsule_apply(slots, 2, want, 2, out, TC_STORE);
+        testcache_capsule_revalidate(tc, want, out, 2);
+        testcache_close(tc);
+    }
+    TC_CHECK("unchanged inputs keep both HITs",
+             out[0].hit && out[1].hit &&
+             tc_capslot_equal(&slots[0].probe, &out[0]) &&
+             tc_capslot_equal(&slots[1].probe, &out[1]));
+    return failures;
+}
+
+static int tc_live_demote_null(const struct testcache_capsule_slot *slots,
+                               const char **want)
+{
+    int failures = 0;
+    static struct testcache_probe out[2];
+    testcache_capsule_apply(slots, 2, want, 2, out, TC_STORE);
+    TC_CHECK("backed HITs present before null revalidation",
+             out[0].hit && out[1].hit);
+    testcache_capsule_revalidate(NULL, want, out, 2);
+    TC_CHECK("NULL handle demotes every HIT (fail closed)",
+             !out[0].hit && !out[1].hit);
+    return failures;
+}
+
+static int tc_live_demote_on_edit(const struct testcache_capsule_slot *slots,
+                                  const char **want)
+{
+    int failures = 0;
+    static struct testcache_probe out[2];
+    static struct testcache_probe expect;
+    TC_CHECK("single-group closure edit writes",
+             tc_write_q_source(1, " + 1000") && write_batch_depfiles());
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        bool edited_miss = false;
+        if (tc) {
+            testcache_probe_group(tc, want[0], &expect);
+            edited_miss = expect.cacheable && !expect.hit &&
+                          expect.key_valid &&
+                          memcmp(expect.key, slots[0].probe.key, 32) != 0;
+            testcache_capsule_apply(slots, 2, want, 2, out, TC_STORE);
+            testcache_capsule_revalidate(tc, want, out, 2);
+            testcache_close(tc);
+        }
+        TC_CHECK("edited group demotes to a MISS on the new live key",
+                 edited_miss && out[0].cacheable && !out[0].hit &&
+                 out[0].key_valid &&
+                 memcmp(out[0].key, expect.key, 32) == 0);
+        TC_CHECK("untouched group still HITs its slot",
+                 out[1].hit && tc_capslot_equal(&slots[1].probe, &out[1]));
+    }
+    return failures;
+}
+
+static int tc_capsule_live_revalidate(void)
+{
+    int failures = 0;
+    static char names[2][64];
+    static const char *ptrs[2];
+    static struct testcache_probe batch[2];
+    static struct testcache_capsule_slot slots[2];
+    static const char *want[2];
+    for (int i = 0; i < 2; i++) {
+        tc_qname(i + 1, names[i]);
+        ptrs[i] = names[i];
+        want[i] = names[i];
+        snprintf(slots[i].name, sizeof(slots[i].name), "%s", ptrs[i]);
+    }
+    failures += tc_reverify_seed(ptrs, batch);
+    for (int i = 0; i < 2; i++)
+        slots[i].probe = batch[i];
+    failures += tc_live_keep_on_unchanged(slots, want);
+    failures += tc_live_demote_null(slots, want);
+    failures += tc_live_demote_on_edit(slots, want);
+    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
+    return failures;
+}
+
 int test_testcache(void)
 {
     int failures = 0;
@@ -2273,6 +2366,7 @@ int test_testcache(void)
     failures += tc_capsule_bindings();
     failures += tc_capsule_apply();
     failures += tc_capsule_reverify();
+    failures += tc_capsule_live_revalidate();
     failures += tc_batch_parity();
     failures += tc_batch_stats();
     failures += tc_batch_invalidation();

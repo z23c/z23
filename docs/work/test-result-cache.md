@@ -267,6 +267,26 @@ demotes an unbacked HIT to MISS — the group runs instead of skipping on
 dead evidence. Demonstrated by the `tc_capsule_reverify` phase and the
 backing-removed lifecycle (sealed → capsule → wipe store → consume →
 dimension runs, no skip).
+Live-key revalidation: the store re-read alone still echoes a slot whose
+key is stale, because slot and record agree with each other but neither
+is recomputed from live bytes. A content-drift lifecycle (sealed →
+capsule → edit one source with the mtime frozen → consume same bindings)
+skipped on dead evidence (`groups_cached=1`, rc=0) while a fresh probe on
+the same bytes MISSED. Consumption therefore revalidates every HIT
+against a live key as well (`testcache_capsule_revalidate`, opening the
+same handle a fresh probe would use): unchanged inputs keep the skip, any
+divergence — changed content, stale graph, unreadable input, vanished
+record — demotes to the live probe, so the group runs. A NULL handle
+demotes every HIT (fail closed). Demonstrated by the
+`tc_capsule_live_revalidate` phase (including a mutation probe: with the
+revalidation neutered, exactly the demotion checks FAIL) and the
+content-drift lifecycle both ways (dirty → MISS + `ran 1`; restored →
+HIT). The honest price is that capsule consumption now costs about one
+fresh probe: the "pays graph/index setup once" win above no longer holds
+for consume-side opens. The capsule keeps its batch-coordination role —
+one mint, many coordinated consumers — but no longer its graph-open
+saving. Never shortcut this with mtime: a frozen-mtime edit re-keys to
+MISS, so timestamps are not trust inputs.
 
 ## Files
 
