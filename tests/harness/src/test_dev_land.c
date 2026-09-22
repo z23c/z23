@@ -1875,7 +1875,7 @@ static bool dlx_wait_step_held(const char *landdir)
         if (dlx_step_held(landdir) == 1)
             return true;
         struct timespec pause = { 0, 20 * 1000 * 1000L };
-        (void)nanosleep(&pause, NULL);
+        (void)nanosleep(&pause, NULL); /* real-clock: adoption child holds step.lock; no fake-clock seam reaches that flock. */
     }
     return false;
 }
