@@ -360,7 +360,8 @@ bool command_registry_devagent_input_extra_bool_key(const char *key)
            strcmp(key, "include_evidence_wires") == 0 ||
            strcmp(key, "include_units") == 0 ||
            strcmp(key, "list") == 0 || strcmp(key, "open") == 0 ||
-           strcmp(key, "publish") == 0 || strcmp(key, "fleet") == 0;
+           strcmp(key, "publish") == 0 || strcmp(key, "fleet") == 0 ||
+           strcmp(key, "terminate") == 0;
 }
 
 /* dev.land cancel names one request by its sequence number, and `--seq=3`

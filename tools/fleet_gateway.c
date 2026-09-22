@@ -1868,12 +1868,14 @@ static bool gw_code_find(const char *dir, const char *code, char *grant,
     return found;
 }
 
-/* Space-separated scope subset of brief,send,evidence joined with commas. */
+/* Space-separated scope subset of brief,send,evidence,terminate. */
 static bool gw_scope_comma(const char *scope, char *out, size_t cap)
 {
-    static const char *const vocab[3] = {"brief", "send", "evidence"};
+    static const char *const vocab[] = {"brief", "send", "evidence",
+                                        "terminate"};
+    enum { GW_SCOPE_N = 4 };
     char copy[128];
-    bool seen[3] = {false, false, false};
+    bool seen[GW_SCOPE_N] = {false, false, false, false};
     char *tok;
     size_t o = 0, i;
     bool any = false;
@@ -1883,7 +1885,7 @@ static bool gw_scope_comma(const char *scope, char *out, size_t cap)
     tok = strtok(copy, " ");
     while (tok) {
         bool known = false;
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < GW_SCOPE_N; i++) {
             if (strcmp(tok, vocab[i]) == 0) {
                 seen[i] = true;
                 known = true;
@@ -1894,7 +1896,7 @@ static bool gw_scope_comma(const char *scope, char *out, size_t cap)
             return false;
         tok = strtok(NULL, " ");
     }
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < GW_SCOPE_N; i++) {
         if (!seen[i])
             continue;
         if (o + strlen(vocab[i]) + 2 > cap)

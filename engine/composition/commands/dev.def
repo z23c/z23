@@ -1972,7 +1972,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "It touches no network and never waits for a run.", 65536,
     "agent,queue,post,dispatch,reap,status,async,worktree,flash",
     "zcl.agent_queue_input.v1", "zcl.agent_queue.v1",
-    "action,kind,name,group,path,brief,model,attempt,priority,depends_on,json,cwd,worker,session",
+    "action,kind,name,group,path,brief,model,attempt,priority,depends_on,json,cwd,worker,session,terminate",
     "action",
     "z23 dev agent queue post --kind=leaf --name=situation",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,

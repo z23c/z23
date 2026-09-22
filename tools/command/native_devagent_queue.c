@@ -2199,19 +2199,34 @@ static void dvq_claim(const struct zcl_command_request *req,
  * reaches here through the steer adapter, which cancels each queued row
  * its grant sent; direct cancel still refuses running rows. Lock,
  * temp+rename rewrite, typed refuses; no new state system appears. */
+static bool dvq_cancel_terminate(const struct zcl_command_request *req)
+{
+    const struct json_value *v = json_get(req->input, "terminate");
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
 static void dvq_cancel_filter(struct dvq_row *rows, size_t nrows,
-                              const char *name, struct dvq_row *kept,
-                              size_t *nkept, size_t *dropped, bool *live)
+                              const char *name, bool terminate,
+                              struct dvq_row *kept, size_t *nkept,
+                              size_t *dropped, size_t *terminated, bool *live)
 {
     size_t i;
     *nkept = 0;
     *dropped = 0;
+    *terminated = 0;
     *live = false;
     for (i = 0; i < nrows; i++) {
         if (strcmp(rows[i].name, name) == 0) {
             if (strcmp(rows[i].state, "queued") == 0 ||
                 strcmp(rows[i].state, "WAITING_EXTERNAL") == 0) {
                 (*dropped)++;
+                continue;
+            }
+            /* A grant that names terminate ends the running row's claim
+             * on later stages. Without it the service keeps the row. */
+            if (terminate && strcmp(rows[i].state, "running") == 0) {
+                (*dropped)++;
+                (*terminated)++;
                 continue;
             }
             *live = true;
@@ -2225,8 +2240,9 @@ static void dvq_cancel(const struct zcl_command_request *req,
 {
     struct dvq_dirs d;
     struct dvq_row *rows = NULL, *kept = NULL;
-    size_t nrows = 0, nkept = 0, dropped = 0;
+    size_t nrows = 0, nkept = 0, dropped = 0, terminated = 0;
     bool live = false;
+    bool terminate = false;
     char qpath[4096];
     const char *name;
     int lock = -1;
@@ -2236,6 +2252,7 @@ static void dvq_cancel(const struct zcl_command_request *req,
                  "request.input was missing");
         return;
     }
+    terminate = dvq_cancel_terminate(req);
     name = dvq_str(req, "name");
     if (!name || !dvq_name_ok(name)) {
         dvq_fail(reply, "BAD_INPUT", "cancel",
@@ -2278,7 +2295,8 @@ static void dvq_cancel(const struct zcl_command_request *req,
             return;
         }
     }
-    dvq_cancel_filter(rows, nrows, name, kept, &nkept, &dropped, &live);
+    dvq_cancel_filter(rows, nrows, name, terminate, kept, &nkept, &dropped,
+                      &terminated, &live);
     if (dropped > 0 &&
         !dvq_rewrite_rows(d.queue, qpath, kept, nkept)) {
         free(rows);
@@ -2296,7 +2314,10 @@ static void dvq_cancel(const struct zcl_command_request *req,
         (void)json_push_kv_str(&reply->data, "state", "cancelled");
         (void)json_push_kv_str(&reply->data, "name", name);
         (void)json_push_kv_int(&reply->data, "cancelled",
-                               (long long)dropped);
+                               (long long)(dropped - terminated));
+        (void)json_push_kv_int(&reply->data, "terminated",
+                               (long long)terminated);
+        (void)json_push_kv_bool(&reply->data, "running_continues", live);
         reply->status = ZCL_COMMAND_STATUS_PASSED;
         reply->exit_code = 0;
         return;

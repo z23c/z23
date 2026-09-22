@@ -4561,7 +4561,8 @@ static void fmc_do_evidence(const struct zcl_command_request *req,
  * widen the set by accident. */
 static bool fmc_scope_word_ok(const char *word, size_t len)
 {
-    static const char *const names[] = {"brief", "send", "evidence"};
+    static const char *const names[] = {"brief", "send", "evidence",
+                                        "terminate"};
     size_t i;
     for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         if (strlen(names[i]) == len && strncmp(names[i], word, len) == 0)
@@ -4637,7 +4638,7 @@ static bool fmc_grant_inputs(const struct zcl_command_request *req,
     in->scopes = fmc_str(req, "scopes");
     if (!in->scopes || !fmc_scopes_valid(in->scopes)) {
         fmc_fail(reply, "BAD_INPUT",
-                 "scopes is a subset of brief,send,evidence",
+                 "scopes is a subset of brief,send,evidence,terminate",
                  "closed scope vocabulary");
         return false;
     }
@@ -4926,60 +4927,86 @@ static size_t fmc_revoke_refs(const char *sent_path, const char *grant_id,
     return nrefs;
 }
 
-/* Cancel one queue row by ref through the queue sibling. Returns 1 when
- * a queued row dropped, 0 when there was nothing queued to stop
- * (not-found, running, or a sibling refusal). Running rows belong to
- * their worker; completed history is never rewritten. */
-static long long fmc_revoke_cancel_one(const struct zcl_command_request *req,
-                                       const char *ref)
+static long long fmc_reply_int(const struct fmc_sub *sub, const char *key)
+{
+    const struct json_value *v = json_get(&sub->reply.data, key);
+    if (!v || v->type != JSON_INT)
+        return 0;
+    return (long long)json_get_int(v);
+}
+
+static bool fmc_reply_bool(const struct fmc_sub *sub, const char *key)
+{
+    const struct json_value *v = json_get(&sub->reply.data, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
+/* Cancel one queue row by ref. `terminate` is the grant's explicit
+ * authority to end a running row's claim on later stages. Without it a
+ * running row is counted in *continued and left in place. */
+static void fmc_revoke_cancel_one(const struct zcl_command_request *req,
+                                  const char *ref, bool terminate,
+                                  long long *cancelled, long long *terminated,
+                                  long long *continued)
 {
     struct fmc_sub sub;
     char input[512];
-    const struct json_value *v;
-    long long cancelled = 0;
     int n;
-    n = snprintf(input, sizeof(input),
-                 "{\"action\":\"cancel\",\"name\":\"%s\"}", ref);
+    *cancelled = 0;
+    *terminated = 0;
+    *continued = 0;
+    n = terminate
+            ? snprintf(input, sizeof(input),
+                       "{\"action\":\"cancel\",\"name\":\"%s\","
+                       "\"terminate\":true}",
+                       ref)
+            : snprintf(input, sizeof(input),
+                       "{\"action\":\"cancel\",\"name\":\"%s\"}", ref);
     if (n <= 0 || (size_t)n >= sizeof(input))
-        return 0;
+        return;
     fmc_sub_begin(&sub, "zcl.agent_queue.v1", req, "dev.agent.queue");
-    if (!sub.valid) {
+    if (!sub.valid || !fmc_sub_input(&sub, input)) {
         fmc_sub_end(&sub);
-        return 0;
-    }
-    if (!fmc_sub_input(&sub, input)) {
-        fmc_sub_end(&sub);
-        return 0;
+        return;
     }
     zcl_native_handle_dev_agent_queue(&sub.request, &sub.reply);
     sub.ran = true;
     if (fmc_sub_ok(&sub)) {
-        v = json_get(&sub.reply.data, "cancelled");
-        if (v && v->type == JSON_INT)
-            cancelled = (long long)json_get_int(v);
+        *cancelled = fmc_reply_int(&sub, "cancelled");
+        *terminated = fmc_reply_int(&sub, "terminated");
+        if (fmc_reply_bool(&sub, "running_continues"))
+            *continued = 1;
+    } else if (strcmp(sub.reply.error.code, "CANCEL_RUNNING") == 0) {
+        *continued = 1;
     } else if (sub.reply.error.code[0] &&
-               strcmp(sub.reply.error.code, "CANCEL_RUNNING") != 0 &&
                strcmp(sub.reply.error.code, "CANCEL_NOT_FOUND") != 0) {
         LOG_ERROR(FMC_LOG, "revoke: queue cancel refused (ref=%s code=%s)",
                   ref, sub.reply.error.code);
     }
     fmc_sub_end(&sub);
-    return cancelled > 0 ? 1 : 0;
 }
 
-/* Best-effort revoke-cancel: drop every queued queue row whose ref was
- * sent under the revoked grant. Returns rows dropped. */
-static long long fmc_revoke_cancel_queued(
-    const struct zcl_command_request *req, const char *sent_path,
-    const char *grant_id)
+/* Best-effort revoke-cancel of every ref sent under the grant. */
+static void fmc_revoke_cancel_queued(const struct zcl_command_request *req,
+                                     const char *sent_path,
+                                     const char *grant_id, bool terminate,
+                                     long long *cancelled,
+                                     long long *terminated,
+                                     long long *continued)
 {
     char refs[64][FMC_REF_MAX + 1];
     size_t nrefs, i;
-    long long cancelled = 0;
+    *cancelled = 0;
+    *terminated = 0;
+    *continued = 0;
     nrefs = fmc_revoke_refs(sent_path, grant_id, refs, 64);
-    for (i = 0; i < nrefs; i++)
-        cancelled += fmc_revoke_cancel_one(req, refs[i]);
-    return cancelled;
+    for (i = 0; i < nrefs; i++) {
+        long long c = 0, t = 0, k = 0;
+        fmc_revoke_cancel_one(req, refs[i], terminate, &c, &t, &k);
+        *cancelled += c;
+        *terminated += t;
+        *continued += k;
+    }
 }
 
 static void fmc_grant_revoke(const struct zcl_command_request *req,
@@ -5045,16 +5072,20 @@ static void fmc_grant_revoke(const struct zcl_command_request *req,
      * own explicit-authority business; completed history is untouched. */
     {
         char sent_path[4096 + 32];
-        long long cancelled = 0;
+        long long cancelled = 0, terminated = 0, continued = 0;
         int s;
         s = snprintf(sent_path, sizeof(sent_path), "%s/sent.jsonl",
                      steerdir);
         if (s > 0 && (size_t)s < sizeof(sent_path))
-            cancelled = fmc_revoke_cancel_queued(req, sent_path, id);
+            fmc_revoke_cancel_queued(req, sent_path, id,
+                                     fmc_scope_has(g.scopes, "terminate"),
+                                     &cancelled, &terminated, &continued);
         (void)json_push_kv_str(&reply->data, "leaf", FMC_GRANT_LEAF);
         (void)json_push_kv_str(&reply->data, "id", id);
         (void)json_push_kv_bool(&reply->data, "revoked", true);
         (void)json_push_kv_int(&reply->data, "cancelled", cancelled);
+        (void)json_push_kv_int(&reply->data, "terminated", terminated);
+        (void)json_push_kv_int(&reply->data, "running_continued", continued);
     }
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;

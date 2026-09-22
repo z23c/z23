@@ -1624,6 +1624,119 @@ _test_next:;
     return failures;
 }
 
+/* Claim the posted row so it is running, through the real queue handler. */
+static bool fmx_claim_running(const char *name)
+{
+    struct fmx_call q;
+    const struct json_value *v;
+    const char *state;
+    fmx_begin(&q, "dev.agent.queue", "zcl.agent_queue.v1");
+    (void)json_push_kv_str(&q.input, "action", "post");
+    (void)json_push_kv_str(&q.input, "kind", "leaf");
+    (void)json_push_kv_str(&q.input, "name", name);
+    if (!fmx_run(&q, zcl_native_handle_dev_agent_queue) || !fmx_ok(&q)) {
+        fmx_end(&q);
+        return false;
+    }
+    fmx_end(&q);
+    fmx_begin(&q, "dev.agent.queue", "zcl.agent_queue.v1");
+    (void)json_push_kv_str(&q.input, "action", "claim");
+    (void)json_push_kv_str(&q.input, "worker", "worker1");
+    (void)json_push_kv_str(&q.input, "session", "session1");
+    if (!fmx_run(&q, zcl_native_handle_dev_agent_queue) || !fmx_ok(&q)) {
+        fmx_end(&q);
+        return false;
+    }
+    v = json_get(&q.reply.data, "state");
+    state = v && v->type == JSON_STR ? json_get_str(v) : "";
+    {
+        bool running = strcmp(state, "running") == 0;
+        fmx_end(&q);
+        return running;
+    }
+}
+
+static int fmx_t_revoke_running(void)
+{
+    int failures = 0;
+
+    TEST("steer: revoke leaves a running row, and terminate ends its claim") {
+        struct fmx_call s, c, q;
+        struct json_value items, item;
+        char gid[64];
+        fmx_isolate("revoke_run");
+        ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "field-agent", "running probe", "revoke-run-ref",
+                 "key-revoke-run-1");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send(&s, gid, &items));
+        json_free(&items);
+        ASSERT(fmx_ok(&s));
+        fmx_end(&s);
+        ASSERT(fmx_claim_running("revoke-run-ref"));
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "revoke");
+        (void)json_push_kv_str(&c.input, "id", gid);
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "cancelled")),
+                  (int64_t)0);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "terminated")),
+                  (int64_t)0);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "running_continued")),
+                  (int64_t)1);
+        fmx_end(&c);
+        fmx_begin(&q, "dev.agent.queue", "zcl.agent_queue.v1");
+        (void)json_push_kv_str(&q.input, "action", "cancel");
+        (void)json_push_kv_str(&q.input, "name", "revoke-run-ref");
+        ASSERT(fmx_run(&q, zcl_native_handle_dev_agent_queue));
+        ASSERT(!fmx_ok(&q));
+        ASSERT_STR_EQ(q.reply.error.code, "CANCEL_RUNNING");
+        fmx_end(&q);
+        fmx_restore();
+
+        fmx_isolate("revoke_term");
+        ASSERT(fmx_mint("brief,send,evidence,terminate", gid, sizeof(gid)));
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "field-agent", "terminate probe", "revoke-stop-ref",
+                 "key-revoke-stop-1");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send(&s, gid, &items));
+        json_free(&items);
+        ASSERT(fmx_ok(&s));
+        fmx_end(&s);
+        ASSERT(fmx_claim_running("revoke-stop-ref"));
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "revoke");
+        (void)json_push_kv_str(&c.input, "id", gid);
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "terminated")),
+                  (int64_t)1);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "running_continued")),
+                  (int64_t)0);
+        fmx_end(&c);
+        fmx_begin(&q, "dev.agent.queue", "zcl.agent_queue.v1");
+        (void)json_push_kv_str(&q.input, "action", "cancel");
+        (void)json_push_kv_str(&q.input, "name", "revoke-stop-ref");
+        ASSERT(fmx_run(&q, zcl_native_handle_dev_agent_queue));
+        ASSERT(!fmx_ok(&q));
+        ASSERT_STR_EQ(q.reply.error.code, "CANCEL_NOT_FOUND");
+        fmx_end(&q);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* Send one item and return the refusal code, or "" when it was accepted.
  * Isolation and the grant belong to the caller so one root can carry the
  * whole table. */
@@ -3878,6 +3991,7 @@ int test_fleet_steer(void)
     failures += fmx_t_grant_list();
     failures += fmx_t_peer_grants();
     failures += fmx_t_revoke_cancels_queued();
+    failures += fmx_t_revoke_running();
     failures += fmx_t_ref_grammar();
     failures += fmx_t_sender_binding();
     failures += fmx_t_board_absent();

@@ -559,7 +559,7 @@ ZCL_COMMAND_READY_COMMAND(
     "fleet.steer.grant", "fleet.steer", "",
     "Mint and revoke the adapter's scoped bearer grants",
     "mint draws 128 CSPRNG bits for one bearer id scoped to a subset of "
-    "brief,send,evidence with a bounded lifetime (ttl_seconds 0..2592000, "
+    "brief,send,evidence,terminate with a bounded lifetime (ttl_seconds 0..2592000, "
     "0 means no expiry) and appends it to the owner-private grant store; "
     "the id is returned exactly once and never echoed elsewhere. list "
     "inventories the store so the owner can see what there is to revoke: "
@@ -567,7 +567,10 @@ ZCL_COMMAND_READY_COMMAND(
     "and state, newest 128 kept, and the id cut to an 8-character prefix "
     "so the listing is never itself a credential file (revoke still needs "
     "the whole 32). revoke "
-    "appends a superseding revoked row (revoking twice re-affirms); "
+    "appends a superseding revoked row (revoking twice re-affirms). "
+    "Revoke drops queued work sent under the grant. A running row "
+    "continues unless the grant's scopes include terminate, which ends "
+    "that row's claim on later stages. "
     "unknown ids are refused, never silently accepted. A revoked or "
     "expired grant "
     "fails every fleet.steer verb with STEER_GRANT_REVOKED or "
