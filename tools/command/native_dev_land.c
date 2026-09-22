@@ -2072,6 +2072,9 @@ static enum dl_beat dl_beat_state(const char *landdir, int *pid_out)
 
 static enum dl_timer_unit dl_timer_unit_state(void)
 {
+#if defined(_WIN32)
+    return DL_TIMER_ABSENT;
+#else
     const char *home = getenv("HOME");
     char path[4096];
     struct stat st;
@@ -2087,6 +2090,7 @@ static enum dl_timer_unit dl_timer_unit_state(void)
     if (lstat(path, &st) == 0)
         return DL_TIMER_ARMED;
     return DL_TIMER_ABSENT;
+#endif
 }
 
 static const char *dl_timer_word(enum dl_timer_unit timer)
@@ -2209,6 +2213,13 @@ static bool dl_copy_path(const char *src, char *out, size_t cap)
 static bool dl_join_realpath(const char *base, const char *rel,
                              char *out, size_t cap)
 {
+#if defined(_WIN32)
+    (void)base;
+    (void)rel;
+    (void)out;
+    (void)cap;
+    return false;
+#else
     char joined[PATH_MAX];
     char resolved[PATH_MAX];
     if (!base || !rel || !rel[0])
@@ -2219,6 +2230,7 @@ static bool dl_join_realpath(const char *base, const char *rel,
     if (!realpath(joined, resolved))
         return false;
     return dl_copy_path(resolved, out, cap);
+#endif
 }
 
 static bool dl_gitdir_file(const char *wt, const char *git_file,

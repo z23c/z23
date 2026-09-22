@@ -16,10 +16,13 @@
  * an empty translation unit; there is no Muse host to adapt there. */
 #if !defined(_WIN32)
 
+#include "muse_session_internal.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/clock.h"
+#include "platform/os_proc.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -29,40 +32,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-#define MUSE_LINE_MAX (1024u * 1024u)
-#define MUSE_WS_MAX 4096u
-#define MUSE_TEXT_DEFAULT (64u * 1024u)
-#define MUSE_OPEN_DEFAULT_MS 15000
-#define MUSE_TURN_DEFAULT_MS 600000
-#define MUSE_CLOSE_GRACE_MS 3000
-
-struct muse_session {
-    pid_t child;
-    int to_child;
-    int from_child;
-    int next_id;
-    int64_t open_timeout_ms;
-    int64_t turn_timeout_ms;
-    uint64_t max_total_tokens;
-    uint64_t tokens_used;
-    bool usage_unresolved;
-    size_t max_text_bytes;
-    char workspace[MUSE_WS_MAX];
-    char err[MUSE_ERROR_MAX];
-    char kind[64];
-    bool retryable;
-};
-
 static struct muse_session *ms_alloc(pid_t child, int to_fd, int from_fd,
     const struct muse_session_limits *limits);
 static bool ms_handshake(struct muse_session *s);
 
-static void ms_fail(struct muse_session *s, const char *kind,
+void ms_fail(struct muse_session *s, const char *kind,
     bool retryable, const char *fmt, ...)
 {
     if (!s) return;
@@ -74,7 +54,7 @@ static void ms_fail(struct muse_session *s, const char *kind,
     va_end(ap);
 }
 
-static int64_t ms_monotonic_ms(void)
+int64_t ms_monotonic_ms(void)
 {
     return clock_now_monotonic_ns() / 1000000;
 }
@@ -129,9 +109,124 @@ static bool ms_write_all(struct muse_session *s, const char *buf, size_t len)
     return true;
 }
 
+
+
+/* The integer after a "max " line, or -1 when the file has none. */
+static long long ms_events_max_value(FILE *f)
+{
+    char buf[256];
+    while (fgets(buf, sizeof(buf), f)) {
+        long long v = 0;
+        const char *p;
+        if (strncmp(buf, "max ", 4) != 0)
+            continue;
+        p = buf + 4;
+        if (*p < '0' || *p > '9')
+            break;
+        while (*p >= '0' && *p <= '9') {
+            if (v > (LLONG_MAX - 9) / 10)
+                break;
+            v = v * 10 + (*p - '0');
+            p++;
+        }
+        return v;
+    }
+    return -1;
+}
+
+/* memory.events "max" for this process's cgroup, or -1 if unreadable.
+ * Hitting memory.max fails the page charge. The muse host then aborts
+ * itself, so oom_kill stays 0 and the parent only sees stdout EOF. */
+static long long ms_cgroup_max_events(void)
+{
+    char dir[512];
+    char path[700];
+    FILE *f;
+    long long v;
+    if (!os_proc_cgroup_dir(dir, sizeof(dir)))
+        return -1;
+    if (snprintf(path, sizeof(path), "%s/memory.events", dir) >=
+        (int)sizeof(path))
+        return -1;
+    f = fopen(path, "r");
+    if (!f)
+        return -1;
+    v = ms_events_max_value(f);
+    fclose(f);
+    return v;
+}
+
+/* Stdout EOF is not a reason by itself. The serve child has usually
+ * already exited: a Rust host abort under the worker cgroup prints
+ * "memory allocation failed" and then closes the pipe. Reap it here so
+ * the recorded reason names the exit or signal instead of a bare close.
+ * A child that is still alive keeps the bare close; close() still owns
+ * the grace-period kill. When memory.events max moved, the charge failed
+ * and the host aborted itself, so oom_kill stays 0. That is not retryable. */
+/* EOF can be observed before the exiting child is a zombie. Bound the
+ * reap so a child that closed stdout and kept running is not waited
+ * out for the whole turn. */
+static pid_t ms_reap_soon(struct muse_session *s, int *st)
+{
+    int64_t deadline = ms_monotonic_ms() + 1000;
+    pid_t r = 0;
+    *st = 0;
+    while (s && s->child > 0) {
+        r = waitpid(s->child, st, WNOHANG);
+        if (r == s->child || (r < 0 && errno != EINTR))
+            break;
+        if (ms_monotonic_ms() >= deadline)
+            break;
+        {
+            struct timespec rest = {.tv_sec = 0, .tv_nsec = 2000000};
+            (void)nanosleep(&rest, NULL);
+        }
+    }
+    return r;
+}
+
+static void ms_stdout_how(char *how, size_t cap, pid_t r, int st)
+{
+    if (r > 0 && WIFSIGNALED(st))
+        (void)snprintf(how, cap, "closed, child signal %d", WTERMSIG(st));
+    else if (r > 0 && WIFEXITED(st))
+        (void)snprintf(how, cap, "closed, child exit %d", WEXITSTATUS(st));
+    else
+        (void)snprintf(how, cap, "closed");
+}
+
+/* True when the child died on SIGABRT or SIGKILL and memory.events max
+ * moved. That charge is not retryable. oom_kill stays 0. */
+static bool ms_charge_killed(struct muse_session *s, pid_t r, int st)
+{
+    long long now;
+    if (!s || r <= 0 || !WIFSIGNALED(st))
+        return false;
+    if (WTERMSIG(st) != SIGABRT && WTERMSIG(st) != SIGKILL)
+        return false;
+    now = ms_cgroup_max_events();
+    return s->mem_max_events >= 0 && now > s->mem_max_events;
+}
+
+static void ms_fail_stdout_closed(struct muse_session *s)
+{
+    int st = 0;
+    pid_t r = ms_reap_soon(s, &st);
+    char how[64];
+    ms_stdout_how(how, sizeof(how), r, st);
+    if (r > 0 && s)
+        s->child = -1;
+    if (ms_charge_killed(s, r, st)) {
+        ms_fail(s, "memoryMax", false,
+                "memory.max charge failed, child signal %d", WTERMSIG(st));
+        return;
+    }
+    ms_fail(s, "transport", true, "serve stdout %s", how);
+}
+
 /* Reads one newline-terminated frame, bounded by MUSE_LINE_MAX. Returns 1 on
  * a frame, 0 on timeout, -1 on EOF/error. */
-static int ms_read_line(struct muse_session *s, char *buf, size_t cap,
+int ms_read_line(struct muse_session *s, char *buf, size_t cap,
     int64_t deadline_ms)
 {
     size_t n = 0;
@@ -157,8 +252,11 @@ static int ms_read_line(struct muse_session *s, char *buf, size_t cap,
         ssize_t k = read(s->from_child, &c, 1);
         if (k <= 0) {
             if (k < 0 && errno == EINTR) continue;
-            ms_fail(s, "transport", true, "serve stdout %s",
-                k == 0 ? "closed" : strerror(errno));
+            if (k == 0)
+                ms_fail_stdout_closed(s);
+            else
+                ms_fail(s, "transport", true, "serve stdout %s",
+                    strerror(errno));
             return -1;
         }
         if (c == '\n') {
@@ -213,7 +311,7 @@ static bool ms_raw_id_number(const char **pp, char *out, size_t cap,
 
 /* Copies the raw `"id":<token>` value token (number or quoted string) so a
  * server-initiated request can be answered with the identical id. */
-static bool ms_raw_id(const char *line, char *out, size_t cap)
+bool ms_raw_id(const char *line, char *out, size_t cap)
 {
     const char *p = strstr(line, "\"id\":");
     if (!p || cap == 0) return false;
@@ -229,7 +327,7 @@ static bool ms_raw_id(const char *line, char *out, size_t cap)
     return true;
 }
 
-static bool ms_send(struct muse_session *s, int id, const char *method,
+bool ms_send(struct muse_session *s, int id, const char *method,
     const char *params_json)
 {
     char head[256];
@@ -245,7 +343,7 @@ static bool ms_send(struct muse_session *s, int id, const char *method,
         ms_write_all(s, "}\n", 2);
 }
 
-static bool ms_send_raw(struct muse_session *s, const char *frame)
+bool ms_send_raw(struct muse_session *s, const char *frame)
 {
     return ms_write_all(s, frame, strlen(frame)) &&
         ms_write_all(s, "\n", 1);
@@ -266,54 +364,233 @@ bool muse_session_last_retryable(const struct muse_session *s)
     return s ? s->retryable : false;
 }
 
+/* A symlink is unlinked, never walked. The real catalog stays put. */
+static void ms_rm_rf(const char *path)
+{
+    DIR *d;
+    struct dirent *de;
+    if (!path || !path[0])
+        return;
+    d = opendir(path);
+    if (!d) {
+        (void)unlink(path);
+        return;
+    }
+    while ((de = readdir(d)) != NULL) {
+        char child[512];
+        struct stat st;
+        int n;
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        n = snprintf(child, sizeof(child), "%s/%s", path, de->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(child))
+            continue;
+        if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode))
+            ms_rm_rf(child);
+        else
+            (void)unlink(child);
+    }
+    closedir(d);
+    (void)rmdir(path);
+}
+
+static void ms_link_if_present(const char *from, const char *to)
+{
+    struct stat st;
+    if (from && to && lstat(from, &st) == 0)
+        (void)symlink(from, to);
+}
+
+/* The operator muse home, if one is configured. Sessions are not copied. */
+static int ms_real_muse_home(char *out, size_t cap)
+{
+    const char *xdg = getenv("XDG_DATA_HOME");
+    const char *home;
+    int n;
+    if (xdg && xdg[0])
+        n = snprintf(out, cap, "%s/muse", xdg);
+    else {
+        home = getenv("HOME");
+        if (!home || !home[0])
+            return -1;
+        n = snprintf(out, cap, "%s/.local/share/muse", home);
+    }
+    return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+/* One empty data home for this serve. The host loads every session under
+ * the operator muse home; that tree is large enough to hit the worker
+ * cgroup's memory.max during a turn. Model catalog and feature config are
+ * linked when present. Session history is not. */
+static int ms_isolate_data(char *dir, size_t cap)
+{
+    const char *tmp = getenv("TMPDIR");
+    char tmpl[128], muse[160], real[512], from[576], to[192];
+    if (!tmp || !tmp[0])
+        tmp = "/tmp";
+    if (snprintf(tmpl, sizeof(tmpl), "%s/z23-muse-XXXXXX", tmp) >=
+        (int)sizeof(tmpl))
+        return -1;
+    if (!mkdtemp(tmpl))
+        return -1;
+    if (snprintf(dir, cap, "%s", tmpl) >= (int)cap ||
+        snprintf(muse, sizeof(muse), "%s/muse", dir) >= (int)sizeof(muse) ||
+        mkdir(muse, 0700) != 0) {
+        ms_rm_rf(tmpl);
+        return -1;
+    }
+    if (ms_real_muse_home(real, sizeof(real)) == 0) {
+        if (snprintf(from, sizeof(from), "%s/model-catalog", real) <
+                (int)sizeof(from) &&
+            snprintf(to, sizeof(to), "%s/model-catalog", muse) <
+                (int)sizeof(to))
+            ms_link_if_present(from, to);
+        if (snprintf(from, sizeof(from), "%s/feature-config", real) <
+                (int)sizeof(from) &&
+            snprintf(to, sizeof(to), "%s/feature-config", muse) <
+                (int)sizeof(to))
+            ms_link_if_present(from, to);
+    }
+    return 0;
+}
+
+static void ms_remember_data(char *old, size_t cap, int *had_old)
+{
+    const char *prev = getenv("XDG_DATA_HOME");
+    *had_old = 0;
+    old[0] = '\0';
+    if (!prev || !prev[0])
+        return;
+    if (snprintf(old, cap, "%s", prev) < (int)cap)
+        *had_old = 1;
+}
+
+/* 1 when the child should inherit a fresh data home. The parent keeps
+ * old so it can put its own home back after fork. */
+static int ms_apply_data_home(char *data_home, size_t cap, char *old,
+                              size_t oldcap, int *had_old)
+{
+    data_home[0] = '\0';
+    if (ms_isolate_data(data_home, cap) != 0)
+        return 0;
+    ms_remember_data(old, oldcap, had_old);
+    if (setenv("XDG_DATA_HOME", data_home, 1) == 0)
+        return 1;
+    ms_rm_rf(data_home);
+    data_home[0] = '\0';
+    return 0;
+}
+
+static void ms_restore_data_home(int isolated, int had_old, const char *old)
+{
+    if (!isolated)
+        return;
+    if (had_old)
+        (void)setenv("XDG_DATA_HOME", old, 1);
+    else
+        unsetenv("XDG_DATA_HOME");
+}
+
+static bool ms_open_pipes(int to_child[2], int from_child[2])
+{
+    if (pipe(to_child) != 0)
+        return false;
+    if (pipe(from_child) != 0) {
+        int saved = errno;
+        close(to_child[0]);
+        close(to_child[1]);
+        errno = saved;
+        return false;
+    }
+    return true;
+}
+
+static void ms_cloexec_pair(const int fd[2])
+{
+    (void)fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(fd[1], F_SETFD, FD_CLOEXEC);
+}
+
+/* Async-signal-safe only between fork and exec — the same contract
+ * platform/modules/util/src/spawn.c:143 keeps in its own child arm.
+ * No shell: argv[0] goes straight to execvp(). */
+static void ms_child_serve(int to_child[2], int from_child[2],
+                           const char *serve_argv0)
+{
+    const char *host = serve_argv0 ? serve_argv0 : "muse";
+    const char *argv[] = {"muse", "serve", NULL};
+    (void)dup2(to_child[0], STDIN_FILENO);
+    (void)dup2(from_child[1], STDOUT_FILENO);
+    close(to_child[0]);
+    close(to_child[1]);
+    close(from_child[0]);
+    close(from_child[1]);
+    execvp(host, (char *const *)argv);
+    _exit(127);
+}
+
+static struct muse_session *ms_open_fork_fail(int to_child[2],
+                                              int from_child[2],
+                                              const char *data_home,
+                                              char err[MUSE_ERROR_MAX])
+{
+    if (err)
+        (void)snprintf(err, MUSE_ERROR_MAX, "fork: %s", strerror(errno));
+    close(to_child[0]);
+    close(to_child[1]);
+    close(from_child[0]);
+    close(from_child[1]);
+    if (data_home[0])
+        ms_rm_rf(data_home);
+    return NULL;
+}
+
 struct muse_session *muse_session_open(const char *serve_argv0,
     const struct muse_session_limits *limits, char err[MUSE_ERROR_MAX])
 {
     int to_child[2], from_child[2];
-    if (pipe(to_child) != 0 || pipe(from_child) != 0) {
-        if (err) (void)snprintf(err, MUSE_ERROR_MAX, "pipe: %s",
-            strerror(errno));
+    char data_home[256];
+    char old_data[512];
+    int isolated;
+    int had_old = 0;
+    pid_t pid;
+    struct muse_session *s;
+    isolated = ms_apply_data_home(data_home, sizeof(data_home), old_data,
+                                  sizeof(old_data), &had_old);
+    if (!ms_open_pipes(to_child, from_child)) {
+        ms_restore_data_home(isolated, had_old, old_data);
+        if (isolated)
+            ms_rm_rf(data_home);
+        if (err)
+            (void)snprintf(err, MUSE_ERROR_MAX, "pipe: %s", strerror(errno));
         return NULL;
     }
-    (void)fcntl(to_child[0], F_SETFD, FD_CLOEXEC);
-    (void)fcntl(to_child[1], F_SETFD, FD_CLOEXEC);
-    (void)fcntl(from_child[0], F_SETFD, FD_CLOEXEC);
-    (void)fcntl(from_child[1], F_SETFD, FD_CLOEXEC);
-    pid_t pid = fork();
-    if (pid < 0) {
-        if (err) (void)snprintf(err, MUSE_ERROR_MAX, "fork: %s",
-            strerror(errno));
-        close(to_child[0]); close(to_child[1]);
-        close(from_child[0]); close(from_child[1]);
-        return NULL;
-    }
-    if (pid == 0) {
-        /* Async-signal-safe only between fork and exec — the same contract
-         * platform/modules/util/src/spawn.c:143 keeps in its own child arm.
-         * No shell: argv[0] goes straight to execvp(), which PATH-searches
-         * it (or uses it as-is when it holds a '/'), so a caller-supplied
-         * host path never meets shell metacharacter expansion. */
-        const char *host = serve_argv0 ? serve_argv0 : "muse";
-        const char *argv[] = { "muse", "serve", NULL };
-        (void)dup2(to_child[0], STDIN_FILENO);
-        (void)dup2(from_child[1], STDOUT_FILENO);
-        close(to_child[0]); close(to_child[1]);
-        close(from_child[0]); close(from_child[1]);
-        execvp(host, (char *const *)argv);
-        _exit(127);
-    }
+    ms_cloexec_pair(to_child);
+    ms_cloexec_pair(from_child);
+    pid = fork();
+    if (pid != 0)
+        ms_restore_data_home(isolated, had_old, old_data);
+    if (pid < 0)
+        return ms_open_fork_fail(to_child, from_child, data_home, err);
+    if (pid == 0)
+        ms_child_serve(to_child, from_child, serve_argv0);
     close(to_child[0]);
     close(from_child[1]);
-    struct muse_session *s = ms_alloc(pid, to_child[1], from_child[0],
-        limits);
+    s = ms_alloc(pid, to_child[1], from_child[0], limits);
     if (!s) {
+        if (data_home[0])
+            ms_rm_rf(data_home);
         close(to_child[1]);
         close(from_child[0]);
-        if (err) (void)snprintf(err, MUSE_ERROR_MAX, "out of memory");
+        if (err)
+            (void)snprintf(err, MUSE_ERROR_MAX, "out of memory");
         return NULL;
     }
+    if (data_home[0])
+        (void)snprintf(s->data_home, sizeof(s->data_home), "%s", data_home);
     if (!ms_handshake(s)) {
-        if (err) (void)snprintf(err, MUSE_ERROR_MAX, "%s", s->err);
+        if (err)
+            (void)snprintf(err, MUSE_ERROR_MAX, "%s", s->err);
         muse_session_close(s);
         return NULL;
     }
@@ -337,6 +614,7 @@ static struct muse_session *ms_alloc(pid_t child, int to_fd, int from_fd,
     s->max_text_bytes =
         limits && limits->max_text_bytes > 0 ? limits->max_text_bytes
                                              : MUSE_TEXT_DEFAULT;
+    s->mem_max_events = ms_cgroup_max_events();
     (void)snprintf(s->kind, sizeof(s->kind), "%s", "ok");
     return s;
 }
@@ -451,12 +729,14 @@ void muse_session_close(struct muse_session *s)
         close(s->from_child);
         s->from_child = -1;
     }
+    if (s->data_home[0])
+        ms_rm_rf(s->data_home);
     free(s);
 }
 
 /* Awaits the response bearing id, ignoring unrelated async traffic. The raw
  * response line is returned malloc'd (caller frees) or NULL on timeout/EOF. */
-static char *ms_await(struct muse_session *s, int id, int64_t deadline_ms)
+char *ms_await(struct muse_session *s, int id, int64_t deadline_ms)
 {
     char *line = zcl_malloc(MUSE_LINE_MAX, "muse_session.frame");
     if (!line) {
@@ -486,7 +766,7 @@ static char *ms_await(struct muse_session *s, int id, int64_t deadline_ms)
 
 /* Splits a result/error response. Returns true on result (err untouched),
  * false on error with kind/retryable/message recorded. */
-static bool ms_split(struct muse_session *s, const char *line,
+bool ms_split(struct muse_session *s, const char *line,
     const struct json_value **result_out, struct json_value *doc)
 {
     if (!json_read(doc, line, strlen(line))) {
@@ -516,7 +796,7 @@ static bool ms_split(struct muse_session *s, const char *line,
     return true;
 }
 
-static bool ms_copy_str(char *dst, size_t cap, const char *src)
+bool ms_copy_str(char *dst, size_t cap, const char *src)
 {
     if (!dst || cap == 0 || !src) return false;
     size_t n = strlen(src);
@@ -761,705 +1041,6 @@ int muse_session_turn(struct muse_session *s, const char *command_id,
     return ok ? 0 : -1;
 }
 
-/* --- wait-time folding ------------------------------------------------ */
-
-/* Turn outcomes fold per-completion usage, not session-wide cumulative totals.
- * Repeated cursors in the bounded delivery window fold once. */
-#define MS_CURSOR_RING 16
-#define MS_CURSOR_MAX 128
-
-struct ms_wait_state {
-    struct muse_session *s;
-    const char *session_id;
-    const char *turn_id;
-    const struct muse_session_policy *policy;
-    struct muse_turn_outcome *out;
-    char *line;
-    char cursors[MS_CURSOR_RING][MS_CURSOR_MAX];
-    unsigned cursor_at;
-    bool done;
-    bool counted_usage;
-    bool usage_mismatch;
-    uint64_t raw_input_tokens;
-};
-
-/* Returns true when this cursor already folded (duplicate delivery). New
- * cursors are recorded. Unusable cursors fold normally (never dropped). */
-static bool ms_cursor_repeat(struct ms_wait_state *w, const char *cursor)
-{
-    if (!cursor || !cursor[0] || strlen(cursor) >= MS_CURSOR_MAX)
-        return false;
-    for (unsigned i = 0; i < MS_CURSOR_RING; i++) {
-        if (w->cursors[i][0] &&
-            strcmp(w->cursors[i], cursor) == 0)
-            return true;
-    }
-    (void)ms_copy_str(w->cursors[w->cursor_at % MS_CURSOR_RING],
-        MS_CURSOR_MAX, cursor);
-    w->cursor_at++;
-    return false;
-}
-
-static void ms_text_append(struct ms_wait_state *w, const char *chunk)
-{
-    if (!chunk || !chunk[0]) return;
-    size_t have = strlen(w->out->text);
-    size_t cap = w->s->max_text_bytes;
-    if (have >= cap) return;
-    size_t room = cap - have;
-    size_t n = strlen(chunk);
-    if (n >= room) n = room - 1;
-    memcpy(w->out->text + have, chunk, n);
-    w->out->text[have + n] = '\0';
-}
-
-static void ms_text_replace(struct ms_wait_state *w, const char *full)
-{
-    if (!full) return;
-    size_t cap = w->s->max_text_bytes;
-    size_t n = strlen(full);
-    if (n >= cap) n = cap - 1;
-    memcpy(w->out->text, full, n);
-    w->out->text[n] = '\0';
-}
-
-/* Confine to the session workspace: absolute paths must sit beneath it,
- * relative paths are read against it and must still fit. */
-static bool ms_path_confined(const char *workspace, const char *path)
-{
-    char absolute[MUSE_WS_MAX + 1024];
-    if (path[0] == '/') {
-        size_t ws = strlen(workspace);
-        if (strncmp(path, workspace, ws) != 0 ||
-            (path[ws] != '/' && path[ws] != '\0'))
-            return false;
-        size_t n = strlen(path);
-        if (n >= sizeof(absolute)) return false;
-        memcpy(absolute, path, n + 1);
-    } else {
-        int n = snprintf(absolute, sizeof(absolute), "%s/%s", workspace,
-            path);
-        if (n <= 0 || (size_t)n >= sizeof(absolute)) return false;
-    }
-    (void)absolute;
-    return true;
-}
-
-/* One authorized prefix against the workspace-relative subject. A
- * directory prefix ("notes/") authorizes its whole subtree; a bare prefix
- * ("notes", "src/sum.c") authorizes the node itself and its children,
- * never a sibling that merely shares the spelling ("notes2"). */
-static bool ms_prefix_covers(const char *prefix, const char *rel)
-{
-    if (!prefix || !prefix[0]) return false;
-    while (prefix[0] == '/') prefix++;
-    size_t pl = strlen(prefix);
-    if (pl == 0 || strncmp(rel, prefix, pl) != 0) return false;
-    return prefix[pl - 1] == '/' || rel[pl] == '/' || rel[pl] == '\0';
-}
-
-static bool ms_path_allowed(const struct muse_session_policy *policy,
-    const char *workspace, const char *path)
-{
-    if (!policy || !path || !path[0] || !workspace || !workspace[0])
-        return false;
-    if (!ms_path_confined(workspace, path)) return false;
-    const char *rel = path[0] == '/' ? path + strlen(workspace) +
-            (path[strlen(workspace)] == '/' ? 1 : 0) : path;
-    while (rel[0] == '/') rel++;
-    /* Reject escapes even when a prefix would otherwise match. */
-    if (strstr(rel, "..") != NULL) return false;
-    for (size_t i = 0; i < policy->allow_path_count; i++) {
-        if (ms_prefix_covers(policy->allow_paths[i], rel)) return true;
-    }
-    return false;
-}
-
-static bool ms_command_allowed(const struct muse_session_policy *policy,
-    const char *command)
-{
-    if (!policy || !command) return false;
-    for (size_t i = 0; i < policy->allow_command_count; i++) {
-        if (policy->allow_commands[i] &&
-            strcmp(policy->allow_commands[i], command) == 0)
-            return true;
-    }
-    return false;
-}
-
-/* The fields one approval/request frame hands the decision. */
-struct ms_approval_req {
-    const struct json_value *aid;
-    const struct json_value *subj;
-    const struct json_value *choices;
-    const struct json_value *psid;
-};
-
-/* The five fields an approval/request must carry. False with the refusal
- * recorded when the frame is malformed. */
-static bool ms_approval_fields(struct muse_session *s,
-    const struct json_value *doc, struct ms_approval_req *f)
-{
-    const struct json_value *params = json_get(doc, "params");
-    const struct json_value *aid =
-        params ? json_get(params, "approvalId") : NULL;
-    const struct json_value *req =
-        params ? json_get(params, "currentRequirementId") : NULL;
-    const struct json_value *subj =
-        params ? json_get(params, "subject") : NULL;
-    const struct json_value *choices =
-        params ? json_get(params, "availableChoices") : NULL;
-    const struct json_value *psid =
-        params ? json_get(params, "sessionId") : NULL;
-    if (!params || !aid || aid->type != JSON_STR || !req ||
-        !choices || choices->type != JSON_ARR ||
-        !psid || psid->type != JSON_STR) {
-        ms_fail(s, "invalidParams", false, "approval/request is malformed");
-        return false;
-    }
-    f->aid = aid;
-    f->subj = subj;
-    f->choices = choices;
-    f->psid = psid;
-    return true;
-}
-
-/* The subject decides: a path inside the authorized scope, or a command on
- * the authorized list. Everything else is denied. */
-static bool ms_approval_allows(struct ms_wait_state *w,
-    const struct json_value *subj)
-{
-    const char *kind = subj ? json_get_str(json_get(subj, "kind")) : NULL;
-    const char *path = subj ? json_get_str(json_get(subj, "path")) : NULL;
-    const char *command = subj ? json_get_str(json_get(subj, "command")) : NULL;
-    (void)kind;
-    return (path && path[0] &&
-            ms_path_allowed(w->policy, w->s->workspace, path)) ||
-        (command && command[0] && ms_command_allowed(w->policy, command));
-}
-
-/* The host's own choice id for the decision we want; NULL when the host
- * never offered it. */
-static const char *ms_approval_choice(const struct json_value *choices,
-    const char *want)
-{
-    const char *choice = NULL;
-    size_t n = json_size(choices);
-    for (size_t i = 0; i < n && !choice; i++) {
-        const struct json_value *c = json_at(choices, i);
-        const char *decision =
-            c ? json_get_str(json_get(c, "decision")) : NULL;
-        const char *cid = c ? json_get_str(json_get(c, "choiceId")) : NULL;
-        if (decision && cid && strcmp(decision, want) == 0) choice = cid;
-    }
-    return choice;
-}
-
-/* Copies a quoted requirement token verbatim, escapes included. */
-static size_t ms_req_quoted(const char *p, char *out, size_t cap)
-{
-    size_t k = 0;
-    if (k < cap - 1) out[k++] = *p++;
-    while (*p && *p != '"' && k < cap - 2) {
-        if (*p == '\\' && p[1] && k < cap - 3)
-            out[k++] = *p++;
-        out[k++] = *p++;
-    }
-    if (*p == '"' && k < cap - 1) out[k++] = *p;
-    return k;
-}
-
-/* Copies a bare requirement token up to its field separator, trailing
- * blanks trimmed. */
-static size_t ms_req_bare(const char *p, char *out, size_t cap)
-{
-    size_t k = 0;
-    while (*p && *p != ',' && *p != '}' && k < cap - 1) out[k++] = *p++;
-    while (k > 0 && (out[k - 1] == ' ' || out[k - 1] == '\t')) k--;
-    return k;
-}
-
-/* Requirement ids can be scalars or small objects; echo the raw token. */
-static bool ms_requirement_raw(const char *line, char *out, size_t cap)
-{
-    const char *req_at = strstr(line, "\"currentRequirementId\":");
-    size_t k;
-    out[0] = '\0';
-    if (!req_at) return false;
-    req_at += strlen("\"currentRequirementId\":");
-    k = *req_at == '"' ? ms_req_quoted(req_at, out, cap)
-                       : ms_req_bare(req_at, out, cap);
-    out[k] = '\0';
-    return out[0] != '\0';
-}
-
-/* Sends the approval/decide frame carrying the host's own choice. */
-static bool ms_approval_decide(struct muse_session *s, const char *aid,
-    const char *choice, const char *psid, const char *req_raw)
-{
-    char dc[MUSE_COMMAND_ID_MAX];
-    if (!muse_session_command_id(dc)) {
-        ms_fail(s, "internal", false, "command id unavailable");
-        return false;
-    }
-    char frame[4096];
-    /* choiceId/approvalId/sessionId are host-minted; lengths are bounded on
-     * the receipt path by the frame the host itself produced. */
-    int m = snprintf(frame, sizeof(frame),
-        "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"approval/decide\","
-        "\"params\":{\"approvalId\":\"%s\",\"choiceId\":\"%s\","
-        "\"commandId\":\"%s\",\"requirementId\":%s,\"sessionId\":\"%s\"}}",
-        s->next_id++, aid, choice, dc, req_raw, psid);
-    if (m <= 0 || (size_t)m >= sizeof(frame)) {
-        ms_fail(s, "internal", false, "approval decision overflow");
-        return false;
-    }
-    /* The ids above come from the host frame; a quote inside one would break
-     * framing, so refuse rather than emit a forged field. */
-    if (strchr(aid, '"') || strchr(choice, '"') || strchr(psid, '"')) {
-        ms_fail(s, "invalidParams", false, "approval identity is unusable");
-        return false;
-    }
-    return ms_send_raw(s, frame);
-}
-
-/* Receipts a server-initiated request by echoing its raw id verbatim.
- * `what` names the frame in the refusal. */
-static bool ms_ack_request(struct muse_session *s, const char *line,
-    const char *what)
-{
-    char receipt[128];
-    char rawid[128];
-    if (!ms_raw_id(line, rawid, sizeof(rawid))) {
-        ms_fail(s, "invalidParams", false, "%s has no id", what);
-        return false;
-    }
-    int m = snprintf(receipt, sizeof(receipt),
-        "{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{}}", rawid);
-    return m > 0 && (size_t)m < sizeof(receipt) && ms_send_raw(s, receipt);
-}
-
-/* Answers one server-initiated approval/request frame. The receipt echoes the
- * request id verbatim; the decision travels as approval/decide. */
-static bool ms_answer_approval(struct ms_wait_state *w, const char *line,
-    const struct json_value *doc)
-{
-    struct muse_session *s = w->s;
-    struct ms_approval_req f = {0};
-    if (!ms_approval_fields(s, doc, &f)) return false;
-    bool allow = ms_approval_allows(w, f.subj);
-    const char *want = allow ? "approved" : "denied";
-    const char *choice = ms_approval_choice(f.choices, want);
-    /* Refuse to invent a decision the host did not offer. */
-    if (!choice) {
-        ms_fail(s, "policy", false, "no %s choice offered", want);
-        return false;
-    }
-    char req_raw[1024] = {0};
-    if (!ms_requirement_raw(line, req_raw, sizeof(req_raw))) {
-        ms_fail(s, "invalidParams", false,
-            "approval requirement id is unreadable");
-        return false;
-    }
-    if (!ms_approval_decide(s, json_get_str(f.aid), choice,
-            json_get_str(f.psid), req_raw))
-        return false;
-    if (!ms_ack_request(s, line, "approval request")) return false;
-    if (allow) w->out->approvals_approved++;
-    else w->out->approvals_denied++;
-    return true;
-}
-
-static bool ms_decline_input(struct ms_wait_state *w, const char *line,
-    const struct json_value *doc)
-{
-    struct muse_session *s = w->s;
-    const struct json_value *params = json_get(doc, "params");
-    const struct json_value *uid =
-        params ? json_get(params, "userInputId") : NULL;
-    const struct json_value *psid =
-        params ? json_get(params, "sessionId") : NULL;
-    if (!uid || uid->type != JSON_STR || !psid || psid->type != JSON_STR) {
-        ms_fail(s, "invalidParams", false, "userInput/request is malformed");
-        return false;
-    }
-    if (strchr(json_get_str(uid), '"') ||
-        strchr(json_get_str(psid), '"')) {
-        ms_fail(s, "invalidParams", false, "user-input identity is unusable");
-        return false;
-    }
-    char dc[MUSE_COMMAND_ID_MAX];
-    if (!muse_session_command_id(dc)) {
-        ms_fail(s, "internal", false, "command id unavailable");
-        return false;
-    }
-    char frame[2048];
-    int m = snprintf(frame, sizeof(frame),
-        "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"userInput/cancel\","
-        "\"params\":{\"commandId\":\"%s\",\"sessionId\":\"%s\","
-        "\"userInputId\":\"%s\","
-        "\"reason\":\"z23 worker is non-interactive\"}}",
-        s->next_id++, dc, json_get_str(psid), json_get_str(uid));
-    if (m <= 0 || (size_t)m >= sizeof(frame) || !ms_send_raw(s, frame))
-        return false;
-    if (!ms_ack_request(s, line, "user-input request")) return false;
-    w->out->inputs_declined++;
-    return true;
-}
-
-static uint64_t ms_u64(const struct json_value *v)
-{
-    if (!v) return 0;
-    if (v->type == JSON_INT && json_get_int(v) > 0)
-        return (uint64_t)json_get_int(v);
-    return 0;
-}
-
-static uint64_t ms_usage_add(uint64_t a, uint64_t b)
-{
-    return b > UINT64_MAX - a ? UINT64_MAX : a + b;
-}
-
-static bool ms_budget_exceeded(const struct muse_session *s, uint64_t used)
-{
-    return s->max_total_tokens > 0 &&
-        (s->tokens_used > s->max_total_tokens ||
-         used > s->max_total_tokens - s->tokens_used);
-}
-
-/* A response to our own decide/cancel: surface only hard errors. */
-static bool ms_fold_response(struct muse_session *s,
-    const struct json_value *doc)
-{
-    const struct json_value *err = json_get(doc, "error");
-    if (!err) return true;
-    const struct json_value *msg = json_get(err, "message");
-    ms_fail(s, "error", false, "%s",
-        msg ? json_get_str(msg) : "serve command failed");
-    return false;
-}
-
-/* Cached input in one usage object: cacheReadTokens, else cachedTokens. */
-static uint64_t ms_usage_cached(const struct json_value *usage)
-{
-    const struct json_value *v = json_get(usage, "cacheReadTokens");
-    if (!v)
-        v = json_get(usage, "cachedTokens");
-    return ms_u64(v);
-}
-
-/* billed = total less cached input, never below zero and never more
- * cached than input (a host figure outside that is clamped, not trusted). */
-static void ms_usage_bill(struct muse_turn_outcome *o)
-{
-    if (o->cached_input_tokens > o->input_tokens)
-        o->cached_input_tokens = o->input_tokens;
-    o->billed_tokens = o->total_tokens > o->cached_input_tokens
-        ? o->total_tokens - o->cached_input_tokens : 0;
-    if (o->total_tokens == UINT64_MAX)
-        o->billed_tokens = UINT64_MAX;
-}
-
-/* Reconcile raw terminal usage with counted-once events. Legacy streams
- * without normalized counters use the terminal reading as their total. */
-static void ms_fold_usage_terminal(struct ms_wait_state *w,
-    const struct json_value *params)
-{
-    const struct json_value *usage = json_get(params, "usage");
-    if (!(usage && usage->type == JSON_OBJ && json_size(usage) > 0)) return;
-    if (w->counted_usage) {
-        /* Terminal counters are raw provider totals. They must reconcile
-         * with the observed events, not replace counted-once prompt totals. */
-        if (w->raw_input_tokens != ms_u64(json_get(usage, "inputTokens")) ||
-            w->out->output_tokens != ms_u64(json_get(usage, "outputTokens")) ||
-            w->out->cached_input_tokens != ms_usage_cached(usage)) {
-            ms_fail(w->s, "usageMismatch", false,
-                "terminal usage does not reconcile with observed turn usage");
-            w->usage_mismatch = true;
-            w->s->usage_unresolved = true;
-        }
-        return;
-    }
-    w->out->input_tokens = ms_u64(json_get(usage, "inputTokens"));
-    w->out->output_tokens = ms_u64(json_get(usage, "outputTokens"));
-    w->out->cached_input_tokens = ms_usage_cached(usage);
-    uint64_t total = ms_u64(json_get(usage, "totalTokens"));
-    if (total == 0)
-        total = ms_u64(json_get(params, "totalTokens"));
-    if (total == 0)
-        total = w->out->input_tokens + w->out->output_tokens;
-    w->out->total_tokens = total;
-    ms_usage_bill(w->out);
-}
-
-/* The terminal turn record: the host's own settlement plus its usage. */
-static void ms_fold_completed(struct ms_wait_state *w,
-    const struct json_value *params, const char *psid)
-{
-    const char *tid = json_get_str(json_get(params, "turnId"));
-    if (!((!tid || strcmp(tid, w->turn_id) == 0) &&
-            (!psid || strcmp(psid, w->session_id) == 0)))
-        return;
-    const char *terminal = json_get_str(json_get(params, "terminal"));
-    (void)ms_copy_str(w->out->terminal, sizeof(w->out->terminal),
-        terminal && terminal[0] ? terminal : "completed");
-    w->out->duration_ms = (int64_t)ms_u64(json_get(params, "durationMs"));
-    if (!json_get(params, "durationMs")) w->out->duration_ms = -1;
-    ms_fold_usage_terminal(w, params);
-    w->done = true;
-}
-
-/* turn/unqueued for our turn: the host dropped it before it ran. */
-static void ms_fold_unqueued(struct ms_wait_state *w,
-    const struct json_value *params)
-{
-    const char *tid = json_get_str(json_get(params, "turnId"));
-    if (tid && strcmp(tid, w->turn_id) == 0) {
-        (void)ms_copy_str(w->out->terminal, sizeof(w->out->terminal),
-            "cancelled");
-        w->done = true;
-    }
-}
-
-/* An idle session with no active turn. The terminal record follows on the
- * stream; the wait keeps draining briefly so the receipt still folds it. */
-static void ms_fold_status(struct ms_wait_state *w,
-    const struct json_value *params, const char *psid)
-{
-    const char *st = json_get_str(json_get(params, "status"));
-    const struct json_value *active = json_get(params, "activeTurnId");
-    if (st && strcmp(st, "idle") == 0 &&
-        (!active || active->type == JSON_NULL) &&
-        (!psid || strcmp(psid, w->session_id) == 0)) {
-        if (!w->done && w->out->terminal[0] == '\0')
-            (void)ms_copy_str(w->out->terminal,
-                sizeof(w->out->terminal), "completed");
-    }
-}
-
-/* Streaming text for our turn, appended in delivery order. */
-static void ms_fold_delta(struct ms_wait_state *w,
-    const struct json_value *params)
-{
-    const char *tid = json_get_str(json_get(params, "turnId"));
-    const char *field = json_get_str(json_get(params, "field"));
-    const char *delta = json_get_str(json_get(params, "delta"));
-    if ((!tid || strcmp(tid, w->turn_id) == 0) && field &&
-        strcmp(field, "text") == 0)
-        ms_text_append(w, delta);
-}
-
-/* A completed agent message replaces the streamed text with the final one. */
-static void ms_fold_item(struct ms_wait_state *w,
-    const struct json_value *params)
-{
-    const struct json_value *item = json_get(params, "item");
-    const char *tid =
-        item ? json_get_str(json_get(item, "turnId")) : NULL;
-    const char *knd = item ? json_get_str(json_get(item, "kind")) : NULL;
-    const char *text = item ? json_get_str(json_get(item, "text")) : NULL;
-    if ((!tid || strcmp(tid, w->turn_id) == 0) && knd &&
-        strcmp(knd, "agentMessage") == 0)
-        ms_text_replace(w, text ? text : "");
-}
-
-/* The host derives per-completion counted-once prompt/total counters.
- * Raw provider counters can use different cache conventions. */
-static void ms_fold_usage_apply(struct ms_wait_state *w,
-    const struct json_value *params)
-{
-    const struct json_value *usage = json_get(params, "usage");
-    const struct json_value *prompt = json_get(params, "promptTokens");
-    uint64_t raw = ms_u64(json_get(usage, "inputTokens"));
-    uint64_t input = raw;
-    if (prompt && prompt->type == JSON_INT) {
-        input = ms_u64(prompt);
-        w->counted_usage = true;
-    }
-    w->raw_input_tokens = ms_usage_add(w->raw_input_tokens, raw);
-    w->out->input_tokens = ms_usage_add(w->out->input_tokens, input);
-    w->out->output_tokens = ms_usage_add(w->out->output_tokens,
-        ms_u64(json_get(usage, "outputTokens")));
-    w->out->cached_input_tokens = ms_usage_add(w->out->cached_input_tokens,
-        ms_usage_cached(usage));
-    uint64_t total = ms_u64(json_get(params, "totalTokens"));
-    if (total == 0)
-        total = ms_usage_add(input, ms_u64(json_get(usage, "outputTokens")));
-    w->out->total_tokens = ms_usage_add(w->out->total_tokens, total);
-    ms_usage_bill(w->out);
-}
-
-/* One session/tokenUsage event. False only when the token cap trips. */
-static bool ms_fold_usage(struct ms_wait_state *w,
-    const struct json_value *params, const char *psid)
-{
-    struct muse_session *s = w->s;
-    const char *tid = json_get_str(json_get(params, "turnId"));
-    if (!((!tid || strcmp(tid, w->turn_id) == 0) &&
-            (!psid || strcmp(psid, w->session_id) == 0)))
-        return true;
-    const char *cursor = json_get_str(json_get(params, "viewCursor"));
-    /* Duplicate delivery: already folded, never double-count. */
-    if (ms_cursor_repeat(w, cursor)) return true;
-    ms_fold_usage_apply(w, params);
-    /* The cap means "may consume at most N": only consumption beyond N
-     * trips mid-turn; reaching exactly N completes and the next turn is
-     * refused. */
-    if (ms_budget_exceeded(s, w->out->billed_tokens)) {
-        ms_fail(s, "tokenBudget", false, "token budget spent mid-turn");
-        return false;
-    }
-    return true;
-}
-
-/* The notifications that only record turn state or turn text. An unknown
- * method is unrelated async traffic and is ignored. */
-static void ms_fold_stream(struct ms_wait_state *w, const char *m,
-    const struct json_value *params, const char *psid)
-{
-    if (!params) return;
-    if (strcmp(m, "turn/completed") == 0) ms_fold_completed(w, params, psid);
-    else if (strcmp(m, "turn/unqueued") == 0) ms_fold_unqueued(w, params);
-    else if (strcmp(m, "session/statusChanged") == 0)
-        ms_fold_status(w, params, psid);
-    else if (strcmp(m, "item/delta") == 0) ms_fold_delta(w, params);
-    else if (strcmp(m, "item/completed") == 0) ms_fold_item(w, params);
-}
-
-/* Folds one async frame. Returns false only for a fatal protocol/policy
- * failure; completion sets w->done. */
-static bool ms_fold(struct ms_wait_state *w, const char *line)
-{
-    struct muse_session *s = w->s;
-    struct json_value doc = {0};
-    if (!json_read(&doc, line, strlen(line))) {
-        json_free(&doc);
-        ms_fail(s, "parseError", false, "serve sent unparsable JSON");
-        return false;
-    }
-    const struct json_value *method = json_get(&doc, "method");
-    const char *m = method && method->type == JSON_STR ? json_get_str(method)
-                                                      : NULL;
-    bool ok = true;
-    if (!m) {
-        ok = ms_fold_response(s, &doc);
-        json_free(&doc);
-        return ok;
-    }
-    const struct json_value *params = json_get(&doc, "params");
-    const char *psid =
-        params ? json_get_str(json_get(params, "sessionId")) : NULL;
-    if (strcmp(m, "approval/request") == 0) {
-        ok = ms_answer_approval(w, line, &doc);
-    } else if (strcmp(m, "userInput/request") == 0) {
-        ok = ms_decline_input(w, line, &doc);
-    } else if (strcmp(m, "session/tokenUsage") == 0 && params) {
-        ok = ms_fold_usage(w, params, psid);
-    } else {
-        ms_fold_stream(w, m, params, psid);
-    }
-    json_free(&doc);
-    return ok;
-}
-
-/* Drains frames until the turn settles or a bound trips. 0 when the drain
- * ended on a settlement or the idle grace, -1 with the failure recorded. */
-static int ms_drain(struct ms_wait_state *w, char *line, int64_t deadline)
-{
-    struct muse_session *s = w->s;
-    int idle_grace = 0;
-    for (;;) {
-        int r = ms_read_line(s, line, MUSE_LINE_MAX, deadline);
-        if (r != 1) {
-            if (r == 0)
-                ms_fail(s, "timeout", true, "turn did not complete in time");
-            return -1;
-        }
-        if (!ms_fold(w, line)) return -1;
-        if (w->done) return 0;
-        /* An idle session with no terminal record yet gets a short grace so
-         * the receipt still folds the turn/completed frame. */
-        if (w->out->terminal[0] != '\0' && ++idle_grace > 64) return 0;
-    }
-}
-
-int muse_session_wait(struct muse_session *s, const char *session_id,
-    const char *turn_id, const struct muse_session_policy *policy,
-    struct muse_turn_outcome *out)
-{
-    if (!s || !session_id || !turn_id || !out) return -1;
-    memset(out, 0, sizeof(*out));
-    out->text = zcl_calloc(1, s->max_text_bytes, "muse_session.text");
-    if (!out->text) {
-        ms_fail(s, "internal", false, "out of memory");
-        return -1;
-    }
-    out->duration_ms = -1;
-    char *line = zcl_malloc(MUSE_LINE_MAX, "muse_session.frame");
-    if (!line) {
-        free(out->text);
-        out->text = NULL;
-        ms_fail(s, "internal", false, "out of memory");
-        return -1;
-    }
-    struct ms_wait_state w = {
-        .s = s, .session_id = session_id, .turn_id = turn_id,
-        .policy = policy, .out = out, .line = line, .done = false,
-    };
-    int64_t deadline = ms_monotonic_ms() + s->turn_timeout_ms;
-    int rc = ms_drain(&w, line, deadline);
-    if (w.usage_mismatch) rc = -1;
-    if (rc == 0 && ms_budget_exceeded(s, out->billed_tokens)) {
-        ms_fail(s, "tokenBudget", false, "token budget spent at settlement");
-        rc = -1;
-    }
-    if (rc == 0 && out->terminal[0] == '\0') {
-        /* Drain ended on grace without the terminal frame: report what the
-         * host settled, not a fabricated completion. */
-        ms_fail(s, "incomplete", true, "no terminal turn record folded");
-        rc = -1;
-    }
-    s->tokens_used = ms_usage_add(s->tokens_used, out->billed_tokens);
-    free(line);
-    if (rc != 0) {
-        free(out->text);
-        out->text = NULL;
-    }
-    return rc;
-}
-
-int muse_session_cancel(struct muse_session *s, const char *command_id,
-    const char *session_id, const char *turn_id)
-{
-    if (!s || !command_id || !session_id) return -1;
-    struct json_value params = {0};
-    json_init(&params);
-    json_set_object(&params);
-    bool ok = json_push_kv_str(&params, "commandId", command_id) &&
-        json_push_kv_str(&params, "sessionId", session_id);
-    if (ok && turn_id && turn_id[0])
-        ok = json_push_kv_str(&params, "turnId", turn_id);
-    size_t need = ok ? json_write(&params, NULL, 0) + 1 : 0;
-    char *text = ok && need > 0 ? zcl_malloc(need, "muse_session.params") : NULL;
-    if (!text) {
-        json_free(&params);
-        ms_fail(s, "internal", false, "out of memory");
-        return -1;
-    }
-    (void)json_write(&params, text, need);
-    json_free(&params);
-    int id = s->next_id++;
-    ok = ms_send(s, id, "turn/cancel", text);
-    free(text);
-    if (!ok) return -1;
-    char *line = ms_await(s, id, ms_monotonic_ms() + s->open_timeout_ms);
-    if (!line) return -1;
-    struct json_value doc = {0};
-    ok = ms_split(s, line, NULL, &doc);
-    free(line);
-    json_free(&doc);
-    return ok ? 0 : -1;
-}
 
 void muse_turn_outcome_free(struct muse_turn_outcome *out)
 {

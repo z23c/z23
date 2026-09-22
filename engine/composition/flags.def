@@ -1251,7 +1251,7 @@ Z23_FLAG("ZCL_LAND_BATCH_MAX", "env_build", "16", "-",
 Z23_FLAG("ZCL_LAND_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:102")
 Z23_FLAG("ZCL_LAND_DEPS_TEST_FORCE", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:4092")
+          "undocumented; first use tools/command/native_dev_land.c:4104")
 Z23_FLAG("ZCL_LAND_DRAIN_IDLE_SEC", "env_runtime", "900", "-",
           "how long a queued land request with no beat may sit before "
           "status raises drain_absent; a missing land timer raises it "
@@ -1288,15 +1288,15 @@ Z23_FLAG("ZCL_LAND_RACE_PREFIX", "env_test", "-", "-",
 Z23_FLAG("ZCL_LAND_READY_REF", "env_build", "land/ready", "-",
           "undocumented; first use tools/dev/land_lander.sh:105")
 Z23_FLAG("ZCL_LAND_REGEN_GATE_STUB_FAIL", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:2912")
+          "undocumented; first use tools/command/native_dev_land.c:2924")
 Z23_FLAG("ZCL_LAND_REGEN_MAKE_STUB", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:2896")
+          "undocumented; first use tools/command/native_dev_land.c:2908")
 Z23_FLAG("ZCL_LAND_STATE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_bench.sh:68")
 Z23_FLAG("ZCL_LAND_SUBMITTER", "env_build", "-", "-",
           "undocumented; first use tools/dev/land.sh:159")
 Z23_FLAG("ZCL_LAND_TEST_PICK_DELAY_MS", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:5090")
+          "undocumented; first use tools/command/native_dev_land.c:5102")
 Z23_FLAG("ZCL_LAND_TIMING", "env_build", "-", "-",
           "undocumented; first use tools/dev/land_lander.sh:101")
 Z23_FLAG("ZCL_LAND_WORKTREE", "env_build", "-", "-",

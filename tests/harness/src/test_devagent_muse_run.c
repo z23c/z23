@@ -23,9 +23,11 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #endif
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MR_CHECK(label, expression) do { \
@@ -1842,7 +1844,501 @@ static int mr_exec_host_exit(void)
         NULL, NULL, NULL, NULL, NULL, false, &r, err, &rc, &evidence) == 0);
     MR_CHECK("host-exit refused", rc == 1 && r.rc == 1 &&
         strcmp(r.verdict, "refused") == 0);
+    /* The fake host _exit(0)s after accepting the turn. The recorded
+     * reason has to name that exit; a bare "stdout closed" hides it. */
+    MR_CHECK("host-exit names the child status",
+        strstr(r.reason, "serve stdout closed, child exit 0") != NULL);
     free(evidence);
+    return failures;
+}
+
+/* Host abort()s after accept. The parent records the signal. A cgroup
+ * that did not move memory.events max does not call it a memory.max
+ * charge failure. */
+static int mr_exec_host_abort(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char err[MUSE_RUN_ERROR_MAX] = {0};
+    char *evidence = NULL;
+    int rc = -1;
+    memset(&r, 0, sizeof(r));
+    MR_CHECK("host-abort run", mr_execute(FAKE_ABORT, &d, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, false, &r, err, &rc, &evidence) == 0);
+    MR_CHECK("host-abort refused", rc == 1 && r.rc == 1 &&
+        strcmp(r.verdict, "refused") == 0);
+    {
+        char expect[80];
+        (void)snprintf(expect, sizeof(expect),
+            "serve stdout closed, child signal %d", SIGABRT);
+        MR_CHECK("host-abort names the signal",
+            strstr(r.reason, expect) != NULL);
+    }
+    MR_CHECK("host-abort is not a memory.max charge without the counter",
+        strstr(r.reason, "memory.max charge failed") == NULL);
+    free(evidence);
+    return failures;
+}
+
+static int mr_write_text(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    size_t n;
+    ssize_t w;
+    if (fd < 0) return -1;
+    n = strlen(text);
+    w = write(fd, text, n);
+    if (close(fd) != 0) return -1;
+    return w == (ssize_t)n ? 0 : -1;
+}
+
+/* Unified cgroup path for this process, or -1. */
+static int mr_unified_cgroup(char *cg, size_t cap)
+{
+    char line[512];
+    FILE *f = fopen("/proc/self/cgroup", "r");
+    cg[0] = '\0';
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f)) {
+        char *nl;
+        if (strncmp(line, "0::", 3) != 0)
+            continue;
+        nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        if (snprintf(cg, cap, "/sys/fs/cgroup%s", line + 3) >= (int)cap)
+            cg[0] = '\0';
+        break;
+    }
+    fclose(f);
+    return cg[0] == '\0' ? -1 : 0;
+}
+
+static int mr_delegates_memory(const char *cg)
+{
+    char stpath[700], st[256];
+    FILE *sf;
+    int delegated = 0;
+    if (snprintf(stpath, sizeof(stpath), "%s/cgroup.subtree_control", cg) >=
+        (int)sizeof(stpath))
+        return 0;
+    sf = fopen(stpath, "r");
+    if (!sf)
+        return 0;
+    if (fgets(st, sizeof(st), sf) && strstr(st, "memory"))
+        delegated = 1;
+    fclose(sf);
+    return delegated;
+}
+
+/* 0 armed, 1 the directory was not created (caller walks up), -1 the
+ * path does not fit. */
+static int mr_arm_child_cgroup(char *dir, size_t cap, const char *cg)
+{
+    char p[700];
+    if (snprintf(dir, cap, "%s/z23-memmax-%d", cg, (int)getpid()) >= (int)cap)
+        return -1;
+    if (mkdir(dir, 0755) != 0)
+        return 1;
+    if (snprintf(p, sizeof(p), "%s/memory.oom.group", dir) < (int)sizeof(p))
+        (void)mr_write_text(p, "0\n");
+    if (snprintf(p, sizeof(p), "%s/memory.swap.max", dir) < (int)sizeof(p))
+        (void)mr_write_text(p, "0\n");
+    return 0;
+}
+
+/* A parent that already delegates the memory controller can host one
+ * child cgroup. The session under test joins that cgroup. */
+static int mr_memory_cgroup_open(char *dir, size_t cap)
+{
+    char cg[512];
+    int hop;
+    if (cap < 32)
+        return -1;
+    if (mr_unified_cgroup(cg, sizeof(cg)) != 0)
+        return -1;
+    for (hop = 0; hop < 8 && cg[1] != '\0'; hop++) {
+        char *slash;
+        if (mr_delegates_memory(cg)) {
+            int arm = mr_arm_child_cgroup(dir, cap, cg);
+            if (arm <= 0)
+                return arm;
+        }
+        slash = strrchr(cg, '/');
+        if (!slash || slash == cg)
+            break;
+        *slash = '\0';
+    }
+    return -1;
+}
+
+static void mr_memory_cgroup_close(const char *dir)
+{
+    char line[512], self[700], procs[700];
+    FILE *f;
+    if (!dir || dir[0] == '\0') return;
+    self[0] = '\0';
+    f = fopen("/proc/self/cgroup", "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            char *nl;
+            if (strncmp(line, "0::", 3) != 0) continue;
+            nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+            if (snprintf(self, sizeof(self),
+                    "/sys/fs/cgroup%s/cgroup.procs", line + 3) >=
+                (int)sizeof(self))
+                self[0] = '\0';
+            break;
+        }
+        fclose(f);
+    }
+    if (snprintf(procs, sizeof(procs), "%s/cgroup.procs", dir) >=
+        (int)sizeof(procs)) {
+        (void)rmdir(dir);
+        return;
+    }
+    f = fopen(procs, "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (self[0] != '\0')
+                (void)mr_write_text(self, line);
+        }
+        fclose(f);
+    }
+    (void)rmdir(dir);
+}
+
+static int mr_cgroup_join(const char *dir)
+{
+    char path[700], pidb[32];
+    if (snprintf(path, sizeof(path), "%s/cgroup.procs", dir) >=
+        (int)sizeof(path))
+        return -1;
+    if (snprintf(pidb, sizeof(pidb), "%d\n", (int)getpid()) >=
+        (int)sizeof(pidb))
+        return -1;
+    return mr_write_text(path, pidb);
+}
+
+static void mr_memory_max_child(int wr, const char *dir)
+{
+    struct mr_dirs d;
+    struct muse_run_result r;
+    char err[MUSE_RUN_ERROR_MAX];
+    char buf[512];
+    char *evidence = NULL;
+    int rc = -1;
+    int n;
+    if (mr_cgroup_join(dir) != 0)
+        _exit(2);
+    memset(&r, 0, sizeof(r));
+    err[0] = '\0';
+    if (mr_execute(FAKE_CHARGE, &d, NULL, NULL, NULL, NULL, NULL, NULL,
+            NULL, false, &r, err, &rc, &evidence) != 0)
+        _exit(3);
+    free(evidence);
+    n = snprintf(buf, sizeof(buf), "%d %s %s\n", rc, r.verdict, r.reason);
+    if (n > 0)
+        (void)write(wr, buf, (size_t)n);
+    _exit(0);
+}
+
+static void mr_wait_bounded(pid_t kid, int *st, int seconds)
+{
+    struct timespec deadline, now;
+    (void)clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += seconds;
+    for (;;) {
+        pid_t got = waitpid(kid, st, WNOHANG);
+        if (got == kid || (got < 0 && errno != EINTR))
+            return;
+        (void)clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec &&
+                now.tv_nsec >= deadline.tv_nsec)) {
+            (void)kill(kid, SIGKILL);
+            (void)waitpid(kid, st, 0);
+            return;
+        }
+        {
+            struct timespec rest = {.tv_sec = 0, .tv_nsec = 20000000L};
+            (void)nanosleep(&rest, NULL);
+        }
+    }
+}
+
+static void mr_read_all(int fd, char *buf, size_t cap)
+{
+    size_t n = 0;
+    while (n + 1 < cap) {
+        ssize_t k = read(fd, buf + n, cap - 1 - n);
+        if (k < 0 && errno == EINTR)
+            continue;
+        if (k <= 0)
+            break;
+        n += (size_t)k;
+    }
+    buf[n] = '\0';
+}
+
+/* The host shares a cgroup with the session and crosses memory.max.
+ * The run must refuse with the charge reason, and the session parent
+ * must still be alive to say so. */
+static int mr_exec_memory_max(void)
+{
+    int failures = 0;
+    char dir[512];
+    char buf[512];
+    int sp[2] = {-1, -1};
+    pid_t kid;
+    int st = 0;
+    if (mr_memory_cgroup_open(dir, sizeof(dir)) != 0) {
+        MR_CHECK("memory cgroup delegated", false);
+        return 1;
+    }
+    if (pipe(sp) != 0) {
+        MR_CHECK("memory pipe", false);
+        mr_memory_cgroup_close(dir);
+        return 1;
+    }
+    kid = fork();
+    if (kid < 0) {
+        MR_CHECK("memory fork", false);
+        close(sp[0]);
+        close(sp[1]);
+        mr_memory_cgroup_close(dir);
+        return 1;
+    }
+    if (kid == 0) {
+        close(sp[0]);
+        mr_memory_max_child(sp[1], dir);
+    }
+    close(sp[1]);
+    mr_wait_bounded(kid, &st, 90);
+    mr_read_all(sp[0], buf, sizeof(buf));
+    close(sp[0]);
+    MR_CHECK("memory-max child finished",
+        WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    MR_CHECK("memory-max refused", strstr(buf, "1 refused ") == buf);
+    MR_CHECK("memory-max names the charge",
+        strstr(buf, "memory.max charge failed, child signal ") != NULL);
+    mr_memory_cgroup_close(dir);
+    return failures;
+}
+
+struct mr_fresh {
+    char root[512];
+    char bin[576];
+    char src[576];
+    char muse[576];
+    char poison[576];
+    char marker[640];
+    char probe[576];
+    char saved_path[4096];
+    char saved_data[512];
+    char saved_tmp[512];
+    int had_path;
+    int had_data;
+    int had_tmp;
+};
+
+static int mr_fresh_paths(struct mr_fresh *f)
+{
+    if (snprintf(f->bin, sizeof(f->bin), "%s/bin", f->root) >=
+        (int)sizeof(f->bin))
+        return -1;
+    if (snprintf(f->src, sizeof(f->src), "%s/host.c", f->root) >=
+        (int)sizeof(f->src))
+        return -1;
+    if (snprintf(f->muse, sizeof(f->muse), "%s/muse", f->bin) >=
+        (int)sizeof(f->muse))
+        return -1;
+    if (snprintf(f->poison, sizeof(f->poison), "%s/poison", f->root) >=
+        (int)sizeof(f->poison))
+        return -1;
+    if (snprintf(f->marker, sizeof(f->marker), "%s/muse/sessions/MARKER",
+                 f->poison) >= (int)sizeof(f->marker))
+        return -1;
+    if (snprintf(f->probe, sizeof(f->probe), "%s/probe", f->root) >=
+        (int)sizeof(f->probe))
+        return -1;
+    return 0;
+}
+
+static int mr_fresh_fixture(struct mr_fresh *f, const char *host_src)
+{
+    if (mr_fresh_paths(f) != 0)
+        return -1;
+    if (!mr_mkdir_p(f->bin) || !mr_write(f->src, host_src, 0))
+        return -1;
+    return 0;
+}
+
+static int mr_fresh_poison(const struct mr_fresh *f)
+{
+    char sessions[640];
+    if (snprintf(sessions, sizeof(sessions), "%s/muse/sessions", f->poison) >=
+        (int)sizeof(sessions))
+        return -1;
+    if (!mr_mkdir_p(sessions) || !mr_write(f->marker, "huge\n", 0))
+        return -1;
+    return 0;
+}
+
+/* 0 compiled, -1 fork failed, -2 the compiler failed. */
+static int mr_fresh_compile(const struct mr_fresh *f)
+{
+    pid_t cc = fork();
+    int st = 0;
+    if (cc < 0)
+        return -1;
+    if (cc == 0) {
+        execlp("cc", "cc", "-O2", "-o", f->muse, f->src, (char *)NULL);
+        _exit(127);
+    }
+    if (waitpid(cc, &st, 0) < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return -2;
+    return 0;
+}
+
+static int mr_save_env(const char *key, char *buf, size_t cap)
+{
+    const char *prev = getenv(key);
+    buf[0] = '\0';
+    if (prev && snprintf(buf, cap, "%s", prev) < (int)cap)
+        return 1;
+    return 0;
+}
+
+static int mr_fresh_env(const struct mr_fresh *f)
+{
+    if (setenv("PATH", f->bin, 1) != 0)
+        return -1;
+    if (setenv("XDG_DATA_HOME", f->poison, 1) != 0)
+        return -1;
+    if (setenv("MUSE_PROBE_FILE", f->probe, 1) != 0)
+        return -1;
+    if (setenv("TMPDIR", f->root, 1) != 0)
+        return -1;
+    return 0;
+}
+
+static void mr_trim_line(char *text)
+{
+    size_t n;
+    if (!text)
+        return;
+    n = strlen(text);
+    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r'))
+        text[--n] = '\0';
+}
+
+static int mr_fresh_recorded(char *seen, const char *poison, char **copied)
+{
+    int failures = 0;
+    char path[700];
+    if (seen)
+        mr_trim_line(seen);
+    MR_CHECK("fresh home recorded", seen && seen[0] &&
+        strcmp(seen, poison) != 0 && strstr(seen, "z23-muse-") != NULL);
+    if (seen && seen[0]) {
+        if (snprintf(path, sizeof(path), "%s/muse/sessions/MARKER", seen) <
+            (int)sizeof(path)) {
+            *copied = mr_read(path);
+            MR_CHECK("fresh home has no session history", *copied == NULL);
+        } else {
+            MR_CHECK("fresh home marker path", false);
+        }
+    }
+    return failures;
+}
+
+static void mr_fresh_restore(const struct mr_fresh *f)
+{
+    unsetenv("MUSE_PROBE_FILE");
+    if (f->had_tmp)
+        (void)setenv("TMPDIR", f->saved_tmp, 1);
+    else
+        unsetenv("TMPDIR");
+    if (f->had_path)
+        (void)setenv("PATH", f->saved_path, 1);
+    else
+        unsetenv("PATH");
+    if (f->had_data)
+        (void)setenv("XDG_DATA_HOME", f->saved_data, 1);
+    else
+        unsetenv("XDG_DATA_HOME");
+}
+
+/* The serve child must not inherit the operator muse home. That tree's
+ * session history is what pushes a turn through memory.max. */
+static int mr_exec_fresh_muse_home(void)
+{
+    int failures = 0;
+    struct mr_fresh home;
+    int built;
+    const char *host_src =
+        "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+        "int main(void) {\n"
+        "  const char *home = getenv(\"XDG_DATA_HOME\");\n"
+        "  const char *outp = getenv(\"MUSE_PROBE_FILE\");\n"
+        "  FILE *p; char line[8192];\n"
+        "  if (outp && home) {\n"
+        "    p = fopen(outp, \"w\");\n"
+        "    if (p) { fputs(home, p); fputc('\\n', p); fclose(p); }\n"
+        "  }\n"
+        "  while (fgets(line, sizeof line, stdin)) {\n"
+        "    if (strstr(line, \"\\\"method\\\":\\\"initialize\\\"\")) {\n"
+        "      fputs(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,"
+        "\\\"result\\\":{\\\"ok\\\":true}}\\n\", stdout);\n"
+        "      fflush(stdout);\n"
+        "    }\n"
+        "  }\n"
+        "  return 0;\n}\n";
+    struct muse_session *s = NULL;
+    char err[MUSE_ERROR_MAX];
+    char *seen = NULL;
+    char *copied_text = NULL;
+    memset(&home, 0, sizeof(home));
+    err[0] = '\0';
+    if (!test_mkdtemp(home.root, sizeof(home.root), "muse_home")) {
+        MR_CHECK("fresh home root", false);
+        return 1;
+    }
+    if (mr_fresh_fixture(&home, host_src) != 0) {
+        MR_CHECK("fresh home fixture", false);
+        return 1;
+    }
+    if (mr_fresh_poison(&home) != 0) {
+        MR_CHECK("fresh home poison", false);
+        return 1;
+    }
+    built = mr_fresh_compile(&home);
+    if (built < 0) {
+        MR_CHECK(built == -1 ? "fresh home cc fork" : "fresh home cc", false);
+        return 1;
+    }
+    home.had_path = mr_save_env("PATH", home.saved_path, sizeof(home.saved_path));
+    home.had_data = mr_save_env("XDG_DATA_HOME", home.saved_data,
+                                sizeof(home.saved_data));
+    home.had_tmp = mr_save_env("TMPDIR", home.saved_tmp, sizeof(home.saved_tmp));
+    if (mr_fresh_env(&home) != 0) {
+        MR_CHECK("fresh home env", false);
+        goto restore;
+    }
+    s = muse_session_open(NULL, NULL, err);
+    MR_CHECK("fresh home open", s != NULL);
+    seen = mr_read(home.probe);
+    failures += mr_fresh_recorded(seen, home.poison, &copied_text);
+    if (s)
+        muse_session_close(s);
+restore:
+    mr_fresh_restore(&home);
+    free(seen);
+    free(copied_text);
     return failures;
 }
 
@@ -2707,6 +3203,9 @@ static int mr_failures_execute(void)
     failures += mr_exec_unknown_frame();
     failures += mr_exec_garbage();
     failures += mr_exec_host_exit();
+    failures += mr_exec_host_abort();
+    failures += mr_exec_memory_max();
+    failures += mr_exec_fresh_muse_home();
     failures += mr_exec_timeout();
     failures += mr_exec_token_cap();
     failures += mr_exec_model_substitution();

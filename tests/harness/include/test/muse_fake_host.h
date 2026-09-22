@@ -11,6 +11,8 @@
 #include "services/muse_session.h"
 #include "json/json.h"
 #if !defined(_WIN32)
+#include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -33,6 +35,8 @@ enum fake_mode {
     FAKE_UNKNOWN,   /* journey plus an unknown-method notification mid-turn */
     FAKE_GARBAGE,   /* journey then a malformed line instead of terminal */
     FAKE_EXIT,      /* host exits right after the turn is accepted */
+    FAKE_ABORT,     /* host abort()s after the turn is accepted */
+    FAKE_CHARGE,    /* host forces a cgroup memory.max charge, then aborts */
     FAKE_USAGE_MATCH,
     FAKE_USAGE_MISMATCH,
     FAKE_USAGE_TERMINAL,
@@ -436,6 +440,81 @@ static void fake_usage_turn(FILE *out, const char *sid, const char *tid,
     fake_send(out, frame);
 }
 
+/* Lower this cgroup's memory.max to just above current usage and touch
+ * pages until the kernel refuses the charge. The session parent shares
+ * the cgroup and reads memory.events. */
+static void fake_charge_cgroup(void)
+{
+#if !defined(_WIN32)
+    char line[512], dir[700], path[760], num[64];
+    FILE *f;
+    char *nl;
+    long long cur;
+    int i;
+    f = fopen("/proc/self/oom_score_adj", "w");
+    if (f) {
+        (void)fputs("1000\n", f);
+        (void)fclose(f);
+    }
+    f = fopen("/proc/self/cgroup", "r");
+    if (!f) return;
+    dir[0] = '\0';
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "0::", 3) != 0) continue;
+        nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup%s", line + 3) >=
+            (int)sizeof(dir))
+            dir[0] = '\0';
+        break;
+    }
+    fclose(f);
+    if (dir[0] == '\0') return;
+    if (snprintf(path, sizeof(path), "%s/memory.swap.max", dir) <
+        (int)sizeof(path)) {
+        f = fopen(path, "w");
+        if (f) {
+            (void)fputs("0\n", f);
+            (void)fclose(f);
+        }
+    }
+    if (snprintf(path, sizeof(path), "%s/memory.current", dir) >=
+        (int)sizeof(path))
+        return;
+    f = fopen(path, "r");
+    if (!f || !fgets(num, sizeof(num), f)) {
+        if (f) fclose(f);
+        return;
+    }
+    fclose(f);
+    cur = strtoll(num, NULL, 10);
+    if (cur < 0) return;
+    if (snprintf(num, sizeof(num), "%lld\n", cur + (32LL * 1024LL * 1024LL)) >=
+        (int)sizeof(num))
+        return;
+    if (snprintf(path, sizeof(path), "%s/memory.max", dir) >= (int)sizeof(path))
+        return;
+    f = fopen(path, "w");
+    if (!f) return;
+    if (fputs(num, f) < 0) {
+        (void)fclose(f);
+        return;
+    }
+    if (fclose(f) != 0) return;
+    for (i = 0; i < 8; i++) {
+        size_t step = 16u * 1024u * 1024u;
+        unsigned char *p = mmap(NULL, step, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        size_t off;
+        if (p == MAP_FAILED) break;
+        for (off = 0; off < step; off += 4096u)
+            p[off] = 1;
+    }
+#else
+    (void)0;
+#endif
+}
+
 static void fake_main(enum fake_mode mode)
 {
     /* A failed test closes the transport mid-script; later frames must die
@@ -507,6 +586,29 @@ static void fake_main(enum fake_mode mode)
             } else if (mode == FAKE_EXIT) {
                 fflush(out);
                 _exit(0);
+            } else if (mode == FAKE_ABORT) {
+                fflush(out);
+#if !defined(_WIN32)
+                {
+                    struct rlimit core = {0, 0};
+                    (void)setrlimit(RLIMIT_CORE, &core);
+                }
+                abort();
+#else
+                _exit(134);
+#endif
+            } else if (mode == FAKE_CHARGE) {
+                fflush(out);
+                fake_charge_cgroup();
+#if !defined(_WIN32)
+                {
+                    struct rlimit core = {0, 0};
+                    (void)setrlimit(RLIMIT_CORE, &core);
+                }
+                abort();
+#else
+                _exit(134);
+#endif
             } else if (mode == FAKE_HANG) {
                 /* Silence: answer a cancel if one arrives, never send a
                  * terminal. The client must time out and cancel first. */

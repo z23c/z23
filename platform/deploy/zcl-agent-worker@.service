@@ -105,9 +105,15 @@ IOSchedulingPriority=6
 # BE HONEST ABOUT WHAT 1G MEANS: a heavy gate group will be OOM-killed under
 # it. That is fail-closed, not silent — the parent crash-records the child,
 # reap records the ref incomplete with no receipt, and nothing ever reads as
-# a pass. Raising the ceiling is an owner decision, and it requires
+# a pass. Raising MemoryMax is an owner decision, and it requires
 # re-running the budget gate; do not raise it here to make a job fit.
-MemoryHigh=768M
+#
+# MemoryHigh is not a second ceiling. Measured on node1-a 2026-09-22:
+# memory.peak stayed under memory.max, oom_kill stayed 0, and a 632-byte
+# muse allocation still failed once memory.high had fired and swap.peak
+# equalled swap.max. The throttle below the hard cap was the failure.
+# High is therefore the same 1G as MemoryMax. MemoryMax is unchanged.
+MemoryHigh=1G
 MemoryMax=1G
 MemorySwapMax=256M
 # The forked chain is worker -> executor -> model host, plus the gate's test
