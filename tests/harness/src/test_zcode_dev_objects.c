@@ -6907,11 +6907,13 @@ static int test_zd_task_context(void)
          * the full length, and both the flipped expectation and the
          * expired clock refuse. */
         struct vcs_zcode_task_v1 admitted;
+        struct vcs_zcode_proof_policy_v1 admitted_policy = {0};
         char goal_back[VCS_ZCODE_TASK_CONTEXT_GOAL_MAX + 1u];
         size_t goal_back_len = 0;
         uint8_t admit_root[32];
         ASSERT_EQ(vcs_zcode_task_context_admit(
-                      store, context_root, task_root, 1500, &admitted, NULL,
+                      store, context_root, task_root, 1500, &admitted,
+                      &admitted_policy,
                       (uint8_t *)goal_back, sizeof(goal_back), &goal_back_len,
                       admit_root),
                   VCS_ZCODE_TASK_CONTEXT_OK);
@@ -6919,6 +6921,8 @@ static int test_zd_task_context(void)
         ASSERT(memcmp(goal_back, goal_text, goal_back_len) == 0);
         ASSERT(memcmp(admit_root, task_root, 32) == 0);
         ASSERT(admitted.max_cpu_seconds == task.max_cpu_seconds);
+        ASSERT_EQ(admitted_policy.schema_version, policy.schema_version);
+        ASSERT_EQ(admitted_policy.required_proofs, policy.required_proofs);
         char tiny_goal[8];
         size_t tiny_len = 0;
         ASSERT_EQ(vcs_zcode_task_context_admit(
@@ -6932,9 +6936,12 @@ static int test_zd_task_context(void)
         memcpy(flipped, task_root, 32);
         flipped[0] ^= 1u;
         ASSERT_EQ(vcs_zcode_task_context_admit(
-                      store, context_root, flipped, 1500, NULL, NULL, NULL, 0,
+                      store, context_root, flipped, 1500, NULL,
+                      &admitted_policy, NULL, 0,
                       NULL, NULL),
                   VCS_ZCODE_TASK_CONTEXT_TASK_MISMATCH);
+        ASSERT_EQ(admitted_policy.schema_version, 0);
+        ASSERT_EQ(admitted_policy.required_proofs, 0);
         ASSERT_EQ(vcs_zcode_task_context_admit(
                       store, context_root, task_root, 2500, NULL, NULL, NULL,
                       0, NULL, NULL),

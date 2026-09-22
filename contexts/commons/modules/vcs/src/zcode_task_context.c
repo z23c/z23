@@ -211,8 +211,10 @@ enum vcs_zcode_task_context_error vcs_zcode_task_context_admit(
     struct vcs_zcode_proof_policy_v1 *policy_out, uint8_t *goal_out,
     size_t goal_cap, size_t *goal_len_out, uint8_t task_root_out[32])
 {
+    struct vcs_zcode_proof_policy_v1 discarded_policy;
+    if (!policy_out) policy_out = &discarded_policy;
+    memset(policy_out, 0, sizeof(*policy_out));
     if (task_out) memset(task_out, 0, sizeof(*task_out));
-    if (policy_out) memset(policy_out, 0, sizeof(*policy_out));
     if (goal_out && goal_cap) memset(goal_out, 0, goal_cap);
     if (goal_len_out) *goal_len_out = 0;
     if (task_root_out) memset(task_root_out, 0, 32);
@@ -257,15 +259,17 @@ enum vcs_zcode_task_context_error vcs_zcode_task_context_admit(
     uint8_t task_root[32];
     if (err == VCS_ZCODE_TASK_CONTEXT_OK) {
         struct vcs_zcode_task_v1 task;
+        struct vcs_zcode_proof_policy_v1 policy;
         err = vcs_zcode_task_context_verify_wires(
             task_wire, task_len, goal, goal_len, policy_wire, policy_len,
-            now_unix, &task, policy_out, task_root);
+            now_unix, &task, &policy, task_root);
         if (err == VCS_ZCODE_TASK_CONTEXT_OK) {
             if (expect_task_root &&
                 memcmp(task_root, expect_task_root, 32) != 0)
                 err = VCS_ZCODE_TASK_CONTEXT_TASK_MISMATCH;
             else {
                 if (task_out) *task_out = task;
+                *policy_out = policy;
                 if (task_root_out) memcpy(task_root_out, task_root, 32);
                 if (goal_len_out) *goal_len_out = goal_len;
                 if (goal_out) {
