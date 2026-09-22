@@ -4749,23 +4749,25 @@ static void fmc_grant_mint(const struct zcl_command_request *req,
 #define FMC_GRANT_PREFIX 8u
 
 /* Keep the LAST row per id (later rows supersede), bounded, oldest id
- * evicted first so a long store still shows its newest grants. */
-static void fmc_list_put(struct fmc_grant *set, size_t *n,
+ * evicted first so a long store still shows its newest grants.
+ * Returns true when `g` is a distinct id the caller has not counted yet. */
+static bool fmc_list_put(struct fmc_grant *set, size_t *n,
                          const struct fmc_grant *g)
 {
     size_t i;
     for (i = 0; i < *n; i++) {
         if (fmc_grant_id_eq(set[i].id, g->id)) {
             set[i] = *g;
-            return;
+            return false;
         }
     }
     if (*n < FMC_GRANT_LIST_CAP) {
         set[(*n)++] = *g;
-        return;
+        return true;
     }
     memmove(set, set + 1, (FMC_GRANT_LIST_CAP - 1) * sizeof(set[0]));
     set[FMC_GRANT_LIST_CAP - 1] = *g;
+    return true;
 }
 
 /* The one word that answers "can this credential be used right now". */
@@ -4802,8 +4804,10 @@ static void fmc_list_emit(struct json_value *arr, const struct fmc_grant *g,
     json_free(&row);
 }
 
-/* Collapse the append-only store to its current rows. Returns the number
- * of distinct ids kept; *total counts every distinct id seen. */
+/* Collapse the append-only store to its current rows. Returns how many
+ * ids the window kept. *total counts an id once while that id stays in
+ * the window; a later row for an id still held supersedes it and is not
+ * another grant. An id already evicted is no longer recognized. */
 static size_t fmc_list_collect(const char *path, struct fmc_grant *set,
                                size_t *total)
 {
@@ -4816,11 +4820,11 @@ static size_t fmc_list_collect(const char *path, struct fmc_grant *set,
     if (!f)
         return 0;
     while (fgets(line, sizeof(line), f)) {
-        size_t before = n;
         if (!fmc_grant_parse(line, &g))
             continue;
-        fmc_list_put(set, &n, &g);
-        if (n != before || n == FMC_GRANT_LIST_CAP)
+        /* A later row for an id already counted supersedes that row. It is
+         * not another grant, even when the window is already full. */
+        if (fmc_list_put(set, &n, &g))
             (*total)++;
     }
     (void)fclose(f);

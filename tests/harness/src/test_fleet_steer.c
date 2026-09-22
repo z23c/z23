@@ -1350,6 +1350,60 @@ _test_next:;
     return failures;
 }
 
+/* FMC_GRANT_LIST_CAP in native_fleet_steer.c. Filling it, then rewriting
+ * one id, must not invent a grant. One id past the cap is the overflow. */
+enum { FMX_GRANT_CAP = 128 };
+
+static int fmx_t_grant_list_full(void)
+{
+    int failures = 0;
+
+    TEST("steer: a full grant list does not count a rewrite as a new grant") {
+        struct fmx_call c;
+        char first[64], extra[64], id[64];
+        int i;
+        fmx_isolate("grant_list_full");
+        ASSERT(fmx_mint("send", first, sizeof(first)));
+        for (i = 1; i < FMX_GRANT_CAP; i++)
+            ASSERT(fmx_mint("send", id, sizeof(id)));
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "list");
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        ASSERT_EQ((int)fmx_int(&c, "shown"), FMX_GRANT_CAP);
+        ASSERT_EQ((int)fmx_int(&c, "total"), FMX_GRANT_CAP);
+        ASSERT(!json_get_bool(fmx_get(&c, "truncated")));
+        fmx_end(&c);
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "revoke");
+        (void)json_push_kv_str(&c.input, "id", first);
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        fmx_end(&c);
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "list");
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        ASSERT_EQ((int)fmx_int(&c, "shown"), FMX_GRANT_CAP);
+        ASSERT_EQ((int)fmx_int(&c, "total"), FMX_GRANT_CAP);
+        ASSERT(!json_get_bool(fmx_get(&c, "truncated")));
+        fmx_end(&c);
+        ASSERT(fmx_mint("send", extra, sizeof(extra)));
+        fmx_begin(&c, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&c.input, "action", "list");
+        ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_grant));
+        ASSERT(fmx_ok(&c));
+        ASSERT_EQ((int)fmx_int(&c, "shown"), FMX_GRANT_CAP);
+        ASSERT_EQ((int)fmx_int(&c, "total"), FMX_GRANT_CAP + 1);
+        ASSERT(json_get_bool(fmx_get(&c, "truncated")));
+        fmx_end(&c);
+        fmx_restore();
+        PASS();
+    } _test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* The grant store is inventoriable, and the inventory is not a credential.
  *
  * Before action=list there was no way to ask what credentials existed: mint
@@ -3989,6 +4043,7 @@ int test_fleet_steer(void)
     failures += fmx_t_sent_local_ack();
     failures += fmx_t_grants();
     failures += fmx_t_grant_list();
+    failures += fmx_t_grant_list_full();
     failures += fmx_t_peer_grants();
     failures += fmx_t_revoke_cancels_queued();
     failures += fmx_t_revoke_running();
