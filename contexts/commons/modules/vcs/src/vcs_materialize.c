@@ -73,7 +73,12 @@ static bool materialize_write(const char *path, const uint8_t *bytes,
         if (wrote <= 0) break;
         off += (size_t)wrote;
     }
-    bool synced = off == len && fsync(fd) == 0;
+    /* open() filters mode through the ambient umask, so restore the exact
+     * manifest permission bits: a re-capture must hash identically even
+     * when the materializing process runs under a restrictive umask. */
+    bool chmodded = off == len &&
+                    fchmod(fd, (mode_t)(mode & 0777u)) == 0;
+    bool synced = chmodded && fsync(fd) == 0;
     bool closed = close(fd) == 0;
     bool ok = synced && closed;
     if (!ok) (void)unlink(path);

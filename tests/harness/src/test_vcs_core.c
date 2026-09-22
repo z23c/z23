@@ -894,6 +894,54 @@ static int tsb_materialize_and_compare(struct tsb_ctx *ctx)
     return failures;
 }
 
+#if defined(_WIN32)
+/* POSIX permission bits have no Windows round-trip authority; the mode
+ * stability below is a POSIX-only claim. */
+static int tsb_materialize_mode_roundtrip(struct tsb_ctx *ctx)
+{
+    (void)ctx;
+    return 0;
+}
+#else
+static bool tsb_mode_is(const char *dir, const char *rel, mode_t want)
+{
+    char full[4096];
+    struct stat st;
+    (void)snprintf(full, sizeof(full), "%s/%s", dir, rel);
+    return stat(full, &st) == 0 && S_ISREG(st.st_mode) &&
+           (st.st_mode & 0777u) == want;
+}
+
+/* A materialized tree must re-capture to its declared root even when the
+ * materializing process runs under a restrictive umask: open() filters
+ * the manifest mode through the umask, so materialize restores the exact
+ * bits explicitly. A mode-only drift otherwise surfaces downstream as a
+ * phantom out-of-scope change on a byte-identical tree. */
+static int tsb_materialize_mode_roundtrip(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-modes");
+    mode_t saved = umask(0077);
+    int rc = vcs_tree_materialize(ctx->consumer, ctx->first_root, dir,
+                                  VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0);
+    (void)umask(saved);
+    VC_CHECK("source bundle materializes under restrictive umask",
+             rc == VCS_OK);
+    VC_CHECK("source bundle materialized modes match manifest",
+             tsb_mode_is(dir, "LICENSE", 0644) &&
+             tsb_mode_is(dir, "src/a.c", 0644) &&
+             tsb_mode_is(dir, "run.sh", 0755));
+    uint8_t recaptured[32];
+    VC_CHECK("source bundle materialized tree re-captures declared root",
+             vcs_tree_capture_path(dir, recaptured) == VCS_OK &&
+             memcmp(recaptured, ctx->first_root,
+                    sizeof(ctx->first_root)) == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
 static int tsb_corrupt_object_repair(struct tsb_ctx *ctx)
 {
     int failures = 0;
@@ -1032,6 +1080,7 @@ static int t_source_bundle(void)
     failures += tsb_bundle_root_and_truncation_refusals(&ctx);
     failures += tsb_corrupt_bytes_and_retry(&ctx);
     failures += tsb_materialize_and_compare(&ctx);
+    failures += tsb_materialize_mode_roundtrip(&ctx);
     failures += tsb_corrupt_object_repair(&ctx);
 
     failures += tsb_successor_bundle(&ctx);
