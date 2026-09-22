@@ -15,6 +15,8 @@
 #include "dev/fleet_roles.h"
 
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* A deterministic (pubkey, seed) pair, distinct per tag, with no real key
  * material and no real clock involved. */
@@ -23,6 +25,82 @@ static void make_key(uint8_t tag, uint8_t pub[32], uint8_t seed[32])
     memset(seed, tag, 32);
     uint8_t sk[32];
     zcl_ed25519_keypair(pub, sk, seed);
+}
+
+static int test_role_head_truncation(void)
+{
+    int failures = 0;
+    char root[256];
+    char chain[320];
+    struct stat st;
+    uint8_t op_pub[32], op_seed[32];
+    uint8_t worker_pub[32], worker_seed[32];
+    uint8_t other_pub[32], other_seed[32];
+    uint8_t worker_fp[ZCL_ROLE_FP_BYTES], other_fp[ZCL_ROLE_FP_BYTES];
+    uint8_t observer = 0;
+    off_t kept = 0;
+    test_make_tmpdir(root, sizeof root, "fleet_roles", "head");
+    make_key(0x11, op_pub, op_seed);
+    make_key(0x12, worker_pub, worker_seed);
+    make_key(0x13, other_pub, other_seed);
+    zcl_role_fingerprint(worker_pub, worker_fp);
+    zcl_role_fingerprint(other_pub, other_fp);
+
+    TEST("fleet roles: a truncated chain does not resume until a fresh "
+         "policy head is signed") {
+        struct zcl_role_report report;
+        struct zcl_role_store *store = NULL;
+        uint64_t seq = 0, head = 0, water = 0, anchored = 0;
+        ASSERT(zcl_role_from_name("observer", &observer));
+        store = zcl_role_store_open(root, &report);
+        ASSERT(store != NULL);
+        ASSERT_EQ((int)zcl_role_store_grant(store, worker_fp, ZCL_ROLE_worker,
+                                            op_pub, op_seed, 1000, &seq),
+                  (int)ZCL_ROLE_OK);
+        ASSERT(zcl_role_store_policy_head(store, &head, &water));
+        ASSERT_EQ((int)head, 1);
+        ASSERT_EQ((int)water, (int)head);
+        zcl_role_store_close(store);
+
+        ASSERT((size_t)snprintf(chain, sizeof chain,
+                                "%s/fleet_roles/roles.chain", root) <
+               sizeof chain);
+        ASSERT(stat(chain, &st) == 0);
+        kept = st.st_size;
+
+        store = zcl_role_store_open(root, &report);
+        ASSERT(store != NULL);
+        ASSERT_EQ((int)zcl_role_store_grant(store, other_fp, observer, op_pub,
+                                            op_seed, 1001, &seq),
+                  (int)ZCL_ROLE_OK);
+        ASSERT(zcl_role_store_policy_head(store, &head, &water));
+        anchored = head;
+        zcl_role_store_close(store);
+
+        ASSERT(truncate(chain, kept) == 0);
+        store = zcl_role_store_open(root, &report);
+        ASSERT(store == NULL);
+        ASSERT_EQ((int)report.status, (int)ZCL_ROLE_HEAD_LOST);
+        ASSERT_EQ((int)zcl_role_store_reanchor(root, other_pub, other_seed,
+                                               1002),
+                  (int)ZCL_ROLE_SIG_INVALID);
+        ASSERT_EQ((int)zcl_role_store_reanchor(root, op_pub, op_seed, 1002),
+                  (int)ZCL_ROLE_OK);
+        store = zcl_role_store_open(root, &report);
+        ASSERT(store != NULL);
+        ASSERT(zcl_role_store_has_role(store, worker_fp, ZCL_ROLE_worker));
+        ASSERT(!zcl_role_store_has_role(store, other_fp, observer));
+        ASSERT(zcl_role_store_policy_head(store, &head, &water));
+        ASSERT_EQ((int)head, (int)(anchored + 1u));
+        ASSERT_EQ((int)water, (int)head);
+        ASSERT(zcl_role_check(store, worker_fp, false, "fleet.board.post",
+                              "note", NULL, 0));
+        zcl_role_store_close(store);
+        PASS();
+    }
+    _test_next:
+    test_rm_rf_recursive(root);
+    return failures;
 }
 
 int test_fleet_roles(void)
@@ -44,6 +122,8 @@ int test_fleet_roles(void)
     zcl_role_fingerprint(stranger_pub, stranger_fp);
 
     struct zcl_role_store *store = NULL;
+
+    failures += test_role_head_truncation();
 
     TEST("fleet roles: the catalog names every declared role and refuses "
          "an unknown one") {

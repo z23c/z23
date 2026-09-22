@@ -14,9 +14,10 @@
  * process crashed mid-append", so it treats a broken final frame as an
  * ordinary torn write, truncates it away, and logs one WARN — the open
  * succeeds and that one row is simply gone. The practical effect is that
- * the chain's LENGTH is not authenticated: an attacker (or a bad disk) who
- * truncates the file removes the newest grants and revokes with nothing
- * here to detect it, until some later lane anchors the head elsewhere.
+ * the chain's length is authenticated by policy.head beside this file.
+ * Truncating the chain, or changing its bytes, makes the saved chain head
+ * disagree with the log, and the store then refuses to open until the
+ * operator signs a fresh head.
  * Only this node's own operator key is ever asked to sign a row — a grant
  * is always this node's own decision about a key, never a statement
  * carried in from a peer.
@@ -28,7 +29,9 @@
 #include "base/serialize_le.h"
 #include "chainlog/chainlog.h"
 #include "crypto/ed25519.h"
+#include "platform/positioned_file.h"
 #include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "sha3/sha3.h"
 
 #include <stdio.h>
@@ -36,6 +39,11 @@
 #include <string.h>
 
 #define ZCL_ROLE_ROW_DOMAIN "zcl.fleet_role_row.v1"
+#define ZCL_ROLE_HEAD_DOMAIN "zcl.fleet_role_head.v1"
+#define ZCL_ROLE_HEAD_VERSION 1u
+/* version + sequence + high_water + chain head + predecessor + operator */
+#define ZCL_ROLE_HEAD_BODY 113u
+#define ZCL_ROLE_HEAD_BYTES (ZCL_ROLE_HEAD_BODY + ZCL_ROLE_SIG_BYTES)
 #define ZCL_ROLE_CHAINLOG_KIND 0x524f4c45u /* "ROLE" */
 #define ZCL_ROLE_ROW_VERSION_BYTE 1u
 #define ZCL_ROLE_ROW_BODY_BYTES 76u
@@ -57,6 +65,21 @@ struct zcl_role_store {
     struct zcl_chainlog *log;
     struct zcl_role_entry table[ZCL_ROLE_TABLE_MAX];
     size_t table_n;
+    char dir[600];
+    bool anchored;
+    uint64_t head_seq;
+    uint64_t head_high_water;
+    uint8_t head_root[32];
+};
+
+struct role_head {
+    uint64_t sequence;
+    uint64_t high_water;
+    uint8_t chain[32];
+    uint8_t predecessor[32];
+    uint8_t operator_pub[32];
+    uint8_t sig[ZCL_ROLE_SIG_BYTES];
+    uint8_t root[32];
 };
 
 const char *zcl_role_status_label(enum zcl_role_status s)
@@ -70,6 +93,7 @@ const char *zcl_role_status_label(enum zcl_role_status s)
     case ZCL_ROLE_UNKNOWN_ROLE:  return "role_unknown";
     case ZCL_ROLE_NOT_GRANTED:   return "role_not_granted";
     case ZCL_ROLE_FULL:          return "role_table_full";
+    case ZCL_ROLE_HEAD_LOST:     return "role_head_lost";
     default:                     return "role_argument";
     }
 }
@@ -185,6 +209,8 @@ static void store_stream(uint8_t out[32])
     sha3_256_finalize(&ctx, out);
 }
 
+static enum zcl_role_status head_bind(struct zcl_role_store *s);
+
 struct zcl_role_store *zcl_role_store_open(const char *datadir,
                                            struct zcl_role_report *report)
 {
@@ -228,6 +254,12 @@ struct zcl_role_store *zcl_role_store_open(const char *datadir,
         return NULL;
     }
     s->log = log;
+    if ((size_t)snprintf(s->dir, sizeof s->dir, "%s", path) >= sizeof s->dir) {
+        zcl_chainlog_close(log);
+        free(s);
+        report->status = ZCL_ROLE_ARGUMENT;
+        return NULL;
+    }
     uint64_t count = zcl_chainlog_count(log);
     for (uint64_t seq = 1; seq <= count; seq++) {
         uint8_t buf[ZCL_ROLE_ROW_BYTES];
@@ -257,6 +289,15 @@ struct zcl_role_store *zcl_role_store_open(const char *datadir,
             return NULL;
         }
     }
+    {
+        enum zcl_role_status hs = head_bind(s);
+        if (hs != ZCL_ROLE_OK) {
+            zcl_chainlog_close(log);
+            free(s);
+            report->status = hs;
+            return NULL;
+        }
+    }
     report->status = ZCL_ROLE_OK;
     report->rows = count;
     return s;
@@ -268,6 +309,158 @@ void zcl_role_store_close(struct zcl_role_store *store)
         return;
     zcl_chainlog_close(store->log);
     free(store);
+}
+
+/* ── policy head ─────────────────────────────────────────────────────── */
+
+static void head_body(const struct role_head *h, uint8_t *out)
+{
+    memset(out, 0, ZCL_ROLE_HEAD_BODY);
+    out[0] = ZCL_ROLE_HEAD_VERSION;
+    zcl_write_u64_be(out + 1, h->sequence);
+    zcl_write_u64_be(out + 9, h->high_water);
+    memcpy(out + 17, h->chain, 32);
+    memcpy(out + 49, h->predecessor, 32);
+    memcpy(out + 81, h->operator_pub, 32);
+}
+
+static void head_root(const struct role_head *h, uint8_t out[32])
+{
+    uint8_t body[ZCL_ROLE_HEAD_BODY];
+    struct sha3_256_ctx ctx;
+    head_body(h, body);
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)ZCL_ROLE_HEAD_DOMAIN,
+                   sizeof(ZCL_ROLE_HEAD_DOMAIN));
+    sha3_256_write(&ctx, body, sizeof body);
+    sha3_256_finalize(&ctx, out);
+}
+
+static bool head_sign(struct role_head *h, const uint8_t seed[32])
+{
+    uint8_t pk[32], sk[32], msg[sizeof(ZCL_ROLE_HEAD_DOMAIN) + ZCL_ROLE_HEAD_BODY];
+    zcl_ed25519_keypair(pk, sk, seed);
+    if (memcmp(pk, h->operator_pub, 32) != 0) {
+        memset(sk, 0, sizeof sk);
+        return false;
+    }
+    memcpy(msg, ZCL_ROLE_HEAD_DOMAIN, sizeof(ZCL_ROLE_HEAD_DOMAIN));
+    head_body(h, msg + sizeof(ZCL_ROLE_HEAD_DOMAIN));
+    zcl_ed25519_sign(h->sig, msg, sizeof msg, sk, pk);
+    memset(sk, 0, sizeof sk);
+    head_root(h, h->root);
+    return true;
+}
+
+static bool head_verify(const struct role_head *h)
+{
+    uint8_t msg[sizeof(ZCL_ROLE_HEAD_DOMAIN) + ZCL_ROLE_HEAD_BODY];
+    memcpy(msg, ZCL_ROLE_HEAD_DOMAIN, sizeof(ZCL_ROLE_HEAD_DOMAIN));
+    head_body(h, msg + sizeof(ZCL_ROLE_HEAD_DOMAIN));
+    return ed25519_verify(h->sig, msg, sizeof msg, h->operator_pub);
+}
+
+static bool head_path(const char *dir, char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "%s/policy.head", dir);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* 0 absent, 1 ok, -1 unreadable or not this statement. */
+static int head_load(const char *dir, struct role_head *out)
+{
+    char path[640];
+    uint8_t buf[ZCL_ROLE_HEAD_BYTES];
+    struct platform_positioned_file file;
+    uint64_t size = 0;
+    if (!head_path(dir, path, sizeof path))
+        return -1;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        return 0;
+    bool ok = platform_positioned_file_size(&file, &size) &&
+              size == ZCL_ROLE_HEAD_BYTES &&
+              platform_positioned_file_read(&file, buf, sizeof buf, 0) ==
+                  (int64_t)sizeof buf;
+    platform_positioned_file_close(&file);
+    if (!ok || buf[0] != ZCL_ROLE_HEAD_VERSION)
+        return -1;
+    memset(out, 0, sizeof *out);
+    out->sequence = zcl_read_u64_be(buf + 1);
+    out->high_water = zcl_read_u64_be(buf + 9);
+    memcpy(out->chain, buf + 17, 32);
+    memcpy(out->predecessor, buf + 49, 32);
+    memcpy(out->operator_pub, buf + 81, 32);
+    memcpy(out->sig, buf + ZCL_ROLE_HEAD_BODY, ZCL_ROLE_SIG_BYTES);
+    if (!head_verify(out) || out->sequence == 0 ||
+        out->high_water < out->sequence)
+        return -1;
+    head_root(out, out->root);
+    return 1;
+}
+
+static bool head_save(const char *dir, const struct role_head *h)
+{
+    char path[640];
+    uint8_t buf[ZCL_ROLE_HEAD_BYTES];
+    struct platform_private_file file;
+    if (!head_path(dir, path, sizeof path))
+        return false;
+    head_body(h, buf);
+    memcpy(buf + ZCL_ROLE_HEAD_BODY, h->sig, ZCL_ROLE_SIG_BYTES);
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked_create(path, &file))
+        return false;
+    bool ok = platform_private_file_truncate(&file, 0) &&
+              platform_private_file_write_at(&file, buf, sizeof buf, 0) &&
+              platform_private_file_authority_flush(&file);
+    platform_private_file_close(&file);
+    return ok;
+}
+
+static enum zcl_role_status head_bind(struct zcl_role_store *s)
+{
+    struct role_head h;
+    uint8_t cur[32];
+    int loaded = head_load(s->dir, &h);
+    if (loaded == 0)
+        return ZCL_ROLE_OK;
+    if (loaded != 1)
+        return ZCL_ROLE_HEAD_LOST;
+    if (!zcl_chainlog_head(s->log, cur) || memcmp(cur, h.chain, 32) != 0)
+        return ZCL_ROLE_HEAD_LOST;
+    s->anchored = true;
+    s->head_seq = h.sequence;
+    s->head_high_water = h.high_water;
+    memcpy(s->head_root, h.root, 32);
+    return ZCL_ROLE_OK;
+}
+
+static enum zcl_role_status head_advance(struct zcl_role_store *s,
+                                         uint64_t chain_seq,
+                                         const uint8_t chain[32],
+                                         const uint8_t operator_pub[32],
+                                         const uint8_t seed[32])
+{
+    struct role_head h;
+    memset(&h, 0, sizeof h);
+    memcpy(h.operator_pub, operator_pub, 32);
+    memcpy(h.chain, chain, 32);
+    if (!s->anchored) {
+        h.sequence = chain_seq;
+        h.high_water = chain_seq;
+    } else {
+        h.sequence = s->head_seq + 1u;
+        h.high_water = h.sequence;
+        memcpy(h.predecessor, s->head_root, 32);
+    }
+    if (h.sequence == 0 || !head_sign(&h, seed) || !head_save(s->dir, &h))
+        return ZCL_ROLE_IO;
+    s->anchored = true;
+    s->head_seq = h.sequence;
+    s->head_high_water = h.high_water;
+    memcpy(s->head_root, h.root, 32);
+    return ZCL_ROLE_OK;
 }
 
 /* ── writes ──────────────────────────────────────────────────────────── */
@@ -291,12 +484,16 @@ static enum zcl_role_status store_append(
     if (!row_sign(&row, seed))
         return ZCL_ROLE_SIG_INVALID;
     uint8_t encoded[ZCL_ROLE_ROW_BYTES];
+    uint8_t chain[32];
     size_t len = row_encode(&row, encoded);
     uint64_t seq = 0;
     if (zcl_chainlog_append(store->log, ZCL_ROLE_CHAINLOG_KIND, encoded, len,
-                            &seq, NULL) != ZCL_CHAINLOG_OK)
+                            &seq, chain) != ZCL_CHAINLOG_OK)
         return ZCL_ROLE_IO;
     enum zcl_role_status rs = table_apply(store, &row);
+    if (rs != ZCL_ROLE_OK)
+        return rs;
+    rs = head_advance(store, seq, chain, operator_pub, seed);
     if (rs != ZCL_ROLE_OK)
         return rs;
     if (out_seq)
@@ -320,6 +517,80 @@ enum zcl_role_status zcl_role_store_revoke(
 {
     return store_append(store, ZCL_ROLE_ACTION_REVOKE, target_fp, role,
                         operator_pub, seed, now, out_seq);
+}
+
+bool zcl_role_store_policy_head(const struct zcl_role_store *store,
+                                uint64_t *sequence, uint64_t *high_water)
+{
+    if (!store || !store->anchored || !sequence || !high_water)
+        return false;
+    *sequence = store->head_seq;
+    *high_water = store->head_high_water;
+    return true;
+}
+
+static enum zcl_role_status head_plan(int loaded, const struct role_head *old,
+                                      const uint8_t cur[32],
+                                      const uint8_t operator_pub[32],
+                                      uint64_t count, struct role_head *next,
+                                      bool *write)
+{
+    *write = false;
+    if (loaded < 0)
+        return ZCL_ROLE_HEAD_LOST;
+    if (loaded == 1 && memcmp(old->operator_pub, operator_pub, 32) != 0)
+        return ZCL_ROLE_SIG_INVALID;
+    if (loaded == 1 && memcmp(old->chain, cur, 32) == 0)
+        return ZCL_ROLE_OK;
+    memset(next, 0, sizeof *next);
+    memcpy(next->operator_pub, operator_pub, 32);
+    memcpy(next->chain, cur, 32);
+    if (loaded == 1) {
+        next->sequence = old->sequence + 1u;
+        memcpy(next->predecessor, old->root, 32);
+    } else {
+        next->sequence = count == 0 ? 1u : count;
+    }
+    next->high_water = next->sequence;
+    *write = true;
+    return ZCL_ROLE_OK;
+}
+
+enum zcl_role_status zcl_role_store_reanchor(const char *datadir,
+                                            const uint8_t operator_pub[32],
+                                            const uint8_t seed[32],
+                                            int64_t now)
+{
+    char dir[600], chain_path[640];
+    uint8_t stream[32], cur[32];
+    struct zcl_chainlog_report crep;
+    struct zcl_chainlog *log = NULL;
+    struct role_head old, next;
+    bool write = false;
+    enum zcl_role_status st;
+    (void)now;
+    if (!datadir || datadir[0] != '/' || !operator_pub || !seed)
+        return ZCL_ROLE_ARGUMENT;
+    if ((size_t)snprintf(dir, sizeof dir, "%s/fleet_roles", datadir) >=
+            sizeof dir ||
+        (size_t)snprintf(chain_path, sizeof chain_path, "%s/roles.chain",
+                         dir) >= sizeof chain_path)
+        return ZCL_ROLE_ARGUMENT;
+    store_stream(stream);
+    log = zcl_chainlog_open(chain_path, stream, &crep);
+    if (!log || !zcl_chainlog_head(log, cur)) {
+        if (log)
+            zcl_chainlog_close(log);
+        return ZCL_ROLE_IO;
+    }
+    st = head_plan(head_load(dir, &old), &old, cur, operator_pub,
+                   zcl_chainlog_count(log), &next, &write);
+    zcl_chainlog_close(log);
+    if (st != ZCL_ROLE_OK || !write)
+        return st;
+    if (!head_sign(&next, seed) || !head_save(dir, &next))
+        return ZCL_ROLE_IO;
+    return ZCL_ROLE_OK;
 }
 
 bool zcl_role_store_has_role(const struct zcl_role_store *store,

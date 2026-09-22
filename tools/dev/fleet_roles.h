@@ -79,7 +79,8 @@ enum zcl_role_status {
     ZCL_ROLE_SIG_INVALID,  /* a row's signature does not verify */
     ZCL_ROLE_UNKNOWN_ROLE, /* a role id outside the closed catalog */
     ZCL_ROLE_NOT_GRANTED,  /* the fingerprint holds no active grant of it */
-    ZCL_ROLE_FULL          /* the in-memory grant table has no free slot */
+    ZCL_ROLE_FULL,         /* the in-memory grant table has no free slot */
+    ZCL_ROLE_HEAD_LOST     /* the anchored head does not match this chain */
 };
 
 const char *zcl_role_status_label(enum zcl_role_status s);
@@ -106,10 +107,13 @@ struct zcl_role_store;
  * by that refusal: the chainlog beneath this store treats a damaged final
  * frame as an ordinary torn write from a crashed append and silently drops
  * it (open succeeds, that one row is gone, one WARN is logged) rather than
- * refusing. The chain's LENGTH is therefore not authenticated: truncating
- * the file removes the newest grants and revokes without this store
- * detecting it, until the head is anchored somewhere else (not yet built).
- * See tools/dev/fleet_roles_store.c's file header for the same note. */
+ * refusing. The policy head beside the chain (`policy.head`) authenticates
+ * that length: a monotonic sequence, the predecessor head's root, and the
+ * chainlog head those rows hash to. The receiver's high-water is that
+ * sequence. A chain whose head no longer matches does not open
+ * (ZCL_ROLE_HEAD_LOST) until zcl_role_store_reanchor signs a fresh head.
+ * A store that has never anchored still opens; the next grant writes the
+ * first head. */
 struct zcl_role_store *zcl_role_store_open(const char *datadir,
                                            struct zcl_role_report *report);
 void zcl_role_store_close(struct zcl_role_store *store);
@@ -125,6 +129,22 @@ enum zcl_role_status zcl_role_store_revoke(
     struct zcl_role_store *store, const uint8_t target_fp[ZCL_ROLE_FP_BYTES],
     uint8_t role, const uint8_t operator_pub[32], const uint8_t seed[32],
     int64_t now, uint64_t *out_seq);
+
+/* The anchored policy head, when this store has one. `sequence` only
+ * increases. `high_water` is the highest sequence this receiver has
+ * accepted. Returns false when the store has not anchored yet. */
+bool zcl_role_store_policy_head(const struct zcl_role_store *store,
+                                uint64_t *sequence, uint64_t *high_water);
+
+/* Sign a fresh policy head over the chain as it is now. When the saved
+ * head still matches, this changes nothing. When it does not — the chain
+ * was truncated or its bytes changed — the new head's sequence is one past
+ * the saved sequence and its predecessor is that head's root. A store with
+ * no head yet is anchored at the current chain length. The operator seed
+ * must be the key named by an existing head. */
+enum zcl_role_status zcl_role_store_reanchor(
+    const char *datadir, const uint8_t operator_pub[32],
+    const uint8_t seed[32], int64_t now);
 
 bool zcl_role_store_has_role(const struct zcl_role_store *store,
                              const uint8_t fp[ZCL_ROLE_FP_BYTES],
