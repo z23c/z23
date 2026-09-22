@@ -2305,10 +2305,8 @@ static int t_programs(void)
     failures += za_program_data_survives(base, zcode, t0);
     zcl_command_reply_free(&cli_reply);
 
-    /* macOS has no qualified full-isolation package worker, so the
-     * standard-profile second build is a named refusal there; the
-     * byte-identity claim for programs is asserted on Linux. */
-#if !defined(__APPLE__)
+    /* Reproduce the installed executable through the qualified package
+     * worker on every supported native platform, including macOS. */
     struct package_lifecycle_reproduce_report repro;
     struct zcl_result rr =
         package_lifecycle_reproduce(base, "alice/ringcli", NULL, &repro);
@@ -2317,7 +2315,6 @@ static int t_programs(void)
                "msg=%s\n", repro.rule, repro.detail, rr.message);
     ZA_CHECK("a package shipping a program still reproduces byte-for-byte",
              rr.ok && repro.matched && repro.filed);
-#endif
 
     za_rm_rf(base);
     return failures;
