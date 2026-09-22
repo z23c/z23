@@ -1637,7 +1637,8 @@ ZCL_COMMAND_READY_READ(
     "that apply in it, the base ref and its head (base_known=false when the "
     "ref does not exist here), how many tracked files are dirty, how many are "
     "untracked, whether a hooks path is configured and armed, whether each "
-    "named file exists, and the ordered next actions. It runs no test group, "
+    "named file exists, the ordered next actions, and one next_action equal " 
+    "to the gate_command value for this situation. It runs no test group, "
     "builds nothing, and changes nothing.", 16384,
     "agent,start,orient,base,hooks,next",
     "zcl.agent_start_input.v1", "zcl.agent_start.v1", "cwd,files,base", "",

@@ -300,6 +300,19 @@ int test_devagent_start(void)
         PASS();
     }
 
+    TEST("start: next_action is the one gate value for this situation") {
+        struct dvx_call c;
+        dvx_begin(&c);
+        (void)json_push_kv_str(&c.input, "cwd", root);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT(strcmp(dvx_sub_str(&c, "situation", "situation"),
+                      "standalone") == 0);
+        ASSERT(strcmp(dvx_str(&c, "next_action"), "make_pre_push_ci") == 0);
+        dvx_end(&c);
+        PASS();
+    }
+
 _test_next:;
     (void)test_rm_rf_recursive(root);
     if (failures == 0) printf("test_devagent_start: all passed\n");

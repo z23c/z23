@@ -379,6 +379,29 @@ static void dvt_build_files(const char *cwd, const struct json_value *files_in,
 
 /* ── next actions ────────────────────────────────────────────────────────── */
 
+/* The one next action is the gate_command rule for this situation. The
+ * value is the machine token from agent_rules.def, not a second sentence. */
+static bool dvt_gate_value(const char *situation, char *out, size_t cap)
+{
+    const char *value = "";
+    if (!situation || !out || cap == 0)
+        return false;
+#define ZCL_AGENT_SITUATION(id_, test_prose_)
+#define ZCL_AGENT_RULE(id_, situation_, value_, say_)                        \
+    do {                                                                     \
+        if (strcmp(#id_, "gate_command") == 0 &&                             \
+            strcmp(#situation_, situation) == 0)                             \
+            value = value_;                                                  \
+    } while (0);
+#include "../../engine/composition/agent_rules.def"
+#undef ZCL_AGENT_RULE
+#undef ZCL_AGENT_SITUATION
+    if (!value[0])
+        return false;
+    return snprintf(out, cap, "%s", value) > 0 &&
+           (size_t)strlen(out) + 1u < cap;
+}
+
 static void dvt_build_next(const char *situation, struct json_value *out)
 {
     struct json_value item;
@@ -456,12 +479,17 @@ void zcl_native_handle_dev_agent_start(
     json_init(&next_arr);
     dvt_build_next(situation_id, &next_arr);
 
+    char next_action[64];
+    next_action[0] = '\0';
+    (void)dvt_gate_value(situation_id, next_action, sizeof(next_action));
+
     (void)json_push_kv(&reply->data, "situation", &situation_obj);
     (void)json_push_kv(&reply->data, "rules", &rules_arr);
     (void)json_push_kv(&reply->data, "base", &base_obj);
     (void)json_push_kv(&reply->data, "worktree", &worktree_obj);
     (void)json_push_kv(&reply->data, "files", &files_arr);
     (void)json_push_kv(&reply->data, "next", &next_arr);
+    (void)json_push_kv_str(&reply->data, "next_action", next_action);
 
     /* Orientation is one line, not a discovery process: an agent that
      * knows the table exists queries it instead of re-deriving the same
