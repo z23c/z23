@@ -1792,7 +1792,7 @@ represented by its children's sections.
 | `fleet join` | ready | mutate / app-write / **owner** · fast/low | **`token`**, `onion` | `zcl.fleet.join.v1` | `z23 fleet join <token> [--onion=<v3>.onion]` | Join this computer to a fleet from one pasted invite |
 | `fleet admit` | ready | mutate / app-write / **owner** · fast/low | **`receipt`**, `bridge` | `zcl.fleet.admit.v1` | `z23 fleet admit <receipt>` | Admit one joined computer to this fleet's machine roster |
 | `fleet import` | ready | mutate / app-write / **owner** · fast/low | **`line`** | `zcl.fleet.import.v1` | `z23 fleet import <roster-line>` | Copy one manager-sealed roster line onto this box's machine roster |
-| `fleet machines` | ready | read / read / **owner** · fast/low | none | `zcl.fleet.machines.v1` | `z23 fleet machines` | List the computers this owner has admitted to the fleet |
+| `fleet machines` | ready | read / read / **owner** · fast/low | `offset`, `limit` | `zcl.fleet.machines.v1` | `z23 fleet machines --input='{"offset":0,"limit":64}'` | List the computers this owner has admitted to the fleet |
 
 #### `fleet.board` — Signed, gossiped posts every node carries
 

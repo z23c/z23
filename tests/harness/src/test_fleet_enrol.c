@@ -20,9 +20,12 @@
 
 #include "test/test_core.h"
 
+#include "command/native_command.h"
+#include "config/command_catalog.h"
 #include "crypto/ed25519.h"
 #include "fleet_enrol.h"
 #include "json/json.h"
+#include "kernel/command_registry.h"
 #include "net/acme_b64url.h"
 
 #include <stdio.h>
@@ -788,6 +791,164 @@ static int test_fe_onion_refused_at_mint(void)
     return failures;
 }
 
+/* ── fleet.machines pages past the render cap ───────────────────────────── */
+
+static const char *fe_listed_name(const struct zcl_command_reply *reply,
+                                  size_t index)
+{
+    const struct json_value *rows = json_get(&reply->data, "machines");
+    const struct json_value *row = rows ? json_at(rows, index) : NULL;
+    const struct json_value *verified = row ? json_get(row, "verified") : NULL;
+    return json_get_str(json_get(verified, "name"));
+}
+
+/* The shipped leaf: the catalog validator, then the registered handler.
+ * A refusal from the validator never reaches the handler. */
+static bool fe_machines_call(const char *body, struct zcl_command_reply *reply,
+                             char *why, size_t why_cap)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "fleet.machines", NULL);
+    struct zcl_command_request request = {0};
+    struct json_value input;
+    json_init(&input);
+    why[0] = '\0';
+    if (!spec || !spec->handler ||
+        !json_read(&input, body, strlen(body)) ||
+        !zcl_command_registry_input_validate(spec, &input, why, why_cap)) {
+        json_free(&input);
+        return false;
+    }
+    request.spec = spec;
+    request.input = &input;
+    zcl_command_reply_init(reply, spec->output_schema);
+    spec->handler(&request, reply);
+    json_free(&input);
+    return true;
+}
+
+static int test_fe_machines_page(void)
+{
+    int failures = 0;
+    TEST("fleet machines: offset and limit page verified rows past the "
+         "render cap, and an unverifiable line does not take a slot") {
+        char row[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char name[8];
+        char past[8];
+        char before[8];
+        char query[64];
+        char why_text[192];
+        const char *why = NULL;
+        uint8_t op_pub[32], op_seed[32];
+        struct zcl_command_reply reply;
+        const struct zcl_command_spec *spec = NULL;
+        const struct json_value *flag = NULL;
+        uint32_t i = 0;
+        uint32_t cap = (uint32_t)FLEET_ENROL_ROSTER_MAX;
+        fe_isolate("machines-page");
+        fe_key(0xa1, op_seed, op_pub);
+        ASSERT(fleet_enrol_operator_write(op_pub, &why));
+        spec = zcl_command_registry_find(zcl_command_catalog(),
+                                        "fleet.machines", NULL);
+        ASSERT(spec != NULL);
+        ASSERT(strstr(spec->input_keys, "offset") != NULL);
+        ASSERT(strstr(spec->input_keys, "limit") != NULL);
+
+        /* Empty input is still the first page. An empty roster says so. */
+        ASSERT(fe_machines_call("{}", &reply, why_text, sizeof(why_text)));
+        ASSERT_STR_EQ(reply.error.code, "");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "total")), 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")), -1);
+        flag = json_get(&reply.data, "truncated");
+        ASSERT(flag && flag->type == JSON_BOOL && !json_get_bool(flag));
+        zcl_command_reply_free(&reply);
+
+        /* A line sealed by somebody else sits in the file and must not
+         * shift the verified page. */
+        ASSERT(fe_row("intruder", 0xb2, 0xb3, FLEET_ENROL_PORT_FIRST, "", row,
+                      sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        for (i = 0; i < cap + 1u; i++) {
+            ASSERT(snprintf(name, sizeof(name), "m%02u", i) > 0);
+            ASSERT(fe_row(name, 0xa1, (uint8_t)(0x10u + (i % 200u)),
+                          (uint16_t)(FLEET_ENROL_PORT_FIRST + (i % cap)),
+                          "", row, sizeof(row)));
+            ASSERT(fleet_roster_append(row, &why));
+        }
+        ASSERT(snprintf(before, sizeof(before), "m%02u", cap - 1u) > 0);
+        ASSERT(snprintf(past, sizeof(past), "m%02u", cap) > 0);
+
+        /* The default page stops at the render cap and names the next one. */
+        ASSERT(fe_machines_call("{}", &reply, why_text, sizeof(why_text)));
+        ASSERT_STR_EQ(reply.error.code, "");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "total")),
+                  (int64_t)cap + 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")),
+                  (int64_t)cap);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "offset")), 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")),
+                  (int64_t)cap);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "unverifiable")), 1);
+        flag = json_get(&reply.data, "truncated");
+        ASSERT(flag && flag->type == JSON_BOOL && json_get_bool(flag));
+        ASSERT_STR_EQ(fe_listed_name(&reply, 0), "m00");
+        ASSERT_STR_EQ(fe_listed_name(&reply, (size_t)cap - 1u), before);
+        zcl_command_reply_free(&reply);
+
+        /* The row past the render cap is the first row of the next page. */
+        ASSERT(snprintf(query, sizeof(query),
+                        "{\"offset\":%u,\"limit\":8}", cap) > 0);
+        ASSERT(fe_machines_call(query, &reply, why_text, sizeof(why_text)));
+        ASSERT_STR_EQ(reply.error.code, "");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "offset")), (int64_t)cap);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "limit")), 8);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")), -1);
+        flag = json_get(&reply.data, "truncated");
+        ASSERT(flag && flag->type == JSON_BOOL && !json_get_bool(flag));
+        ASSERT_STR_EQ(fe_listed_name(&reply, 0), past);
+        zcl_command_reply_free(&reply);
+
+        /* A page that straddles the cap returns both sides, in order. */
+        ASSERT(snprintf(query, sizeof(query),
+                        "{\"offset\":%u,\"limit\":2}", cap - 1u) > 0);
+        ASSERT(fe_machines_call(query, &reply, why_text, sizeof(why_text)));
+        ASSERT_STR_EQ(reply.error.code, "");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 2);
+        ASSERT_STR_EQ(fe_listed_name(&reply, 0), before);
+        ASSERT_STR_EQ(fe_listed_name(&reply, 1), past);
+        zcl_command_reply_free(&reply);
+
+        /* A limit above the render cap is one page, not a bigger reply. */
+        ASSERT(fe_machines_call("{\"limit\":1000000}", &reply, why_text,
+                                sizeof(why_text)));
+        ASSERT_STR_EQ(reply.error.code, "");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "limit")), (int64_t)cap);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")),
+                  (int64_t)cap);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "next_offset")),
+                  (int64_t)cap);
+        zcl_command_reply_free(&reply);
+
+        /* The validator is the gate the shell uses. These never dispatch. */
+        ASSERT(!fe_machines_call("{\"offset\":\"1\"}", &reply, why_text,
+                                 sizeof(why_text)));
+        ASSERT(strstr(why_text, "offset") != NULL);
+        ASSERT(!fe_machines_call("{\"offset\":-1}", &reply, why_text,
+                                 sizeof(why_text)));
+        ASSERT(strstr(why_text, "offset") != NULL);
+        ASSERT(!fe_machines_call("{\"limit\":0}", &reply, why_text,
+                                 sizeof(why_text)));
+        ASSERT(strstr(why_text, "limit") != NULL);
+        ASSERT(!fe_machines_call("{\"page\":1}", &reply, why_text,
+                                 sizeof(why_text)));
+        ASSERT(strstr(why_text, "unknown input key") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── rendering ──────────────────────────────────────────────────────────── */
 
 static int test_fe_render(void)
@@ -854,6 +1015,7 @@ int test_fleet_enrol(void)
     failures += test_fe_bridge();
     failures += test_fe_onion_grammar();
     failures += test_fe_onion_refused_at_mint();
+    failures += test_fe_machines_page();
     failures += test_fe_render();
     fe_restore();
     return failures;

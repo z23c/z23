@@ -28,6 +28,7 @@
 #include "platform/clock.h"
 #include "vcs/zcode_dht_identity.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -555,29 +556,111 @@ static void fe_import(const struct zcl_command_request *request,
 
 /* ── fleet machines ─────────────────────────────────────────────────────── */
 
+/* One reply renders at most one roster page. A larger `limit` is clamped
+ * to that cap; the rows after it stay reachable at `next_offset`. */
+#define FE_PAGE_INDEX_MAX 1000000u
+
+struct fe_page {
+    uint32_t offset;
+    uint32_t limit;
+};
+
 struct fe_list {
     struct json_value *array;
+    uint32_t skip;
+    uint32_t limit;
     uint32_t rendered;
     uint32_t dropped;
+    bool more;
+    bool stopped;
 };
+
+static bool fe_u32_key(const struct json_value *in, const char *key,
+                       bool *present, uint32_t *out,
+                       struct zcl_command_reply *reply)
+{
+    const struct json_value *v = in ? json_get(in, key) : NULL;
+    int64_t n = 0;
+    *present = v != NULL;
+    *out = 0;
+    if (!v)
+        return true;
+    if (v->type != JSON_INT) {
+        fe_fail(reply, "FLEET_PAGE_INVALID", "validate",
+                "offset and limit are whole numbers.", key);
+        return false;
+    }
+    n = json_get_int(v);
+    if (n < 0) {
+        fe_fail(reply, "FLEET_PAGE_INVALID", "validate",
+                "offset and limit are zero or greater.", key);
+        return false;
+    }
+    *out = n > (int64_t)FE_PAGE_INDEX_MAX ? FE_PAGE_INDEX_MAX : (uint32_t)n;
+    return true;
+}
+
+static bool fe_machines_page(const struct zcl_command_request *request,
+                             struct fe_page *page,
+                             struct zcl_command_reply *reply)
+{
+    const struct json_value *in = request ? request->input : NULL;
+    bool saw_offset = false, saw_limit = false;
+    uint32_t limit = 0;
+    page->offset = 0;
+    page->limit = (uint32_t)FLEET_ENROL_ROSTER_MAX;
+    if (!fe_u32_key(in, "offset", &saw_offset, &page->offset, reply) ||
+        !fe_u32_key(in, "limit", &saw_limit, &limit, reply))
+        return false;
+    (void)saw_offset;
+    if (!saw_limit)
+        return true;
+    if (limit < 1) {
+        fe_fail(reply, "FLEET_PAGE_INVALID", "validate",
+                "limit is at least 1.", "limit");
+        return false;
+    }
+    if (limit > (uint32_t)FLEET_ENROL_ROSTER_MAX)
+        limit = (uint32_t)FLEET_ENROL_ROSTER_MAX;
+    page->limit = limit;
+    return true;
+}
 
 static void fe_list_row(const struct fleet_machine *machine, void *user)
 {
     struct fe_list *list = user;
     struct json_value row;
-    /* The roster cannot hold more rows than the closed relay-port range has
-     * ports, so this cap can only ever bind on a file somebody grew by
-     * hand. It is still counted rather than silently dropped: a fleet map
-     * that quietly omits a machine is worse than one that says it did. */
-    if (list->rendered >= (uint32_t)FLEET_ENROL_ROSTER_MAX) {
-        list->dropped++;
+    if (list->stopped)
+        return;
+    /* `offset` counts verified rows only. Unverifiable lines never reach
+     * this callback, so they do not consume a page slot. */
+    if (list->skip > 0) {
+        list->skip--;
+        return;
+    }
+    if (list->rendered >= list->limit) {
+        list->more = true;
+        list->stopped = true;
         return;
     }
     json_init(&row);
     fleet_machine_render(machine, &row);
-    if (json_push_back(list->array, &row)) list->rendered++;
-    else list->dropped++;
+    if (json_push_back(list->array, &row))
+        list->rendered++;
+    else {
+        list->dropped++;
+        list->more = true;
+        list->stopped = true;
+    }
     json_free(&row);
+}
+
+static int64_t fe_next_offset(uint32_t offset, uint32_t rendered, bool more)
+{
+    uint64_t sum = (uint64_t)offset + rendered;
+    if (!more || sum > (uint64_t)INT64_MAX)
+        return -1;
+    return (int64_t)sum;
 }
 
 static void fe_machines(const struct zcl_command_request *request,
@@ -587,11 +670,15 @@ static void fe_machines(const struct zcl_command_request *request,
     uint8_t seed[FLEET_ENROL_SEED_BYTES], own[FLEET_ENROL_PUBKEY_BYTES];
     char hex[FLEET_ENROL_PUBKEY_HEX];
     struct json_value array;
-    struct fe_list list = { &array, 0, 0 };
+    struct fe_page page = {0};
+    struct fe_list list = { &array, 0, 0, 0, 0, false, false };
     struct fleet_roster_scan scan = {0};
     const char *why = NULL;
-    bool joined = false, own_present = false;
-    (void)request;
+    bool joined = false, own_present = false, more = false;
+    if (!fe_machines_page(request, &page, reply))
+        return;
+    list.skip = page.offset;
+    list.limit = page.limit;
     /* Whose roster is this? On a box that joined a fleet, the operator is
      * the key the owner pasted; on the manager, it is this box's own key.
      * A box that has done neither has no roster, which is a state, not an
@@ -619,13 +706,18 @@ static void fe_machines(const struct zcl_command_request *request,
         return;
     }
     zcl_hex_encode(operator_pubkey, FLEET_ENROL_PUBKEY_BYTES, hex);
+    more = list.more || list.dropped != 0;
     (void)json_push_kv_str(&reply->data, "schema", "zcl.fleet.machines.v1");
     (void)json_push_kv_str(&reply->data, "operator_pubkey",
                            joined || own_present ? hex : "");
     (void)json_push_kv_bool(&reply->data, "joined", joined);
     (void)json_push_kv_int(&reply->data, "total", (int64_t)scan.rows);
+    (void)json_push_kv_int(&reply->data, "offset", (int64_t)page.offset);
+    (void)json_push_kv_int(&reply->data, "limit", (int64_t)page.limit);
     (void)json_push_kv_int(&reply->data, "returned", (int64_t)list.rendered);
-    (void)json_push_kv_bool(&reply->data, "truncated", list.dropped != 0);
+    (void)json_push_kv_int(&reply->data, "next_offset",
+                           fe_next_offset(page.offset, list.rendered, more));
+    (void)json_push_kv_bool(&reply->data, "truncated", more);
     /* Counted, never rendered: a line this operator key did not seal is
      * somebody else's row or a corrupted one, and either way it is not
      * evidence about this fleet. */

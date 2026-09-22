@@ -148,23 +148,26 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_READ(
     "fleet.machines", "fleet", "",
     "List the computers this owner has admitted to the fleet",
-    "Every roster row this box holds whose operator seal verifies, oldest "
-    "first, each split into `verified` (what the operator signature actually "
-    "attests: name, box public key, relay port, enrolment time) and "
-    "`self_reported` (what the box said about its own hardware, OS and "
-    "toolchain — signed by that box, measured by nobody). The two are never "
-    "merged. The NAME leads every row: it is the handle the owner and their "
-    "agents use to talk about a machine, and it never changes with the "
-    "box's onion address, Noise fingerprint or ZID. Rows this operator key did not seal are counted in "
-    "`unverifiable` and never rendered. total/returned/truncated make the "
-    "bounds explicit. Reads no node and no datadir.",
-    /* The whole roster is bounded by the closed relay-port range, so this
-     * leaf's largest possible answer is computable and small; the default
-     * list budget would silently cut a fleet in half. */
+    "Verified roster rows, oldest first, each split into `verified` (what "
+    "the operator signature attests: name, box public key, relay port, "
+    "enrolment time) and `self_reported` (what the box said about its own "
+    "hardware, OS and toolchain — signed by that box, measured by nobody). "
+    "The two are never merged. The NAME leads every row and does not change "
+    "with the box's onion address, Noise fingerprint or ZID. Rows this "
+    "operator key did not seal are counted in `unverifiable` and never "
+    "rendered, and they do not consume a page slot. Optional `offset` and "
+    "`limit` select one page of verified rows; `limit` is at least 1 and is "
+    "capped at the render maximum, so a hand-grown roster past that cap is "
+    "reached by a later offset rather than a larger reply. `total` counts "
+    "every verified row, `returned` is this page, `truncated` means a later "
+    "page exists, and `next_offset` is -1 on the last page. Absent keys "
+    "read the first page. Reads no node and no datadir.",
+    /* One page is at most the roster render cap, so the largest answer
+     * stays inside this budget. The next page is next_offset. */
     65536,
     "fleet,machines,roster,inventory,verified,self-reported",
-    "zcl.command.empty_input.v1", "zcl.fleet.machines.v1", "", "",
-    "z23 fleet machines",
+    "zcl.fleet_machines_input.v1", "zcl.fleet.machines.v1", "offset,limit", "",
+    "z23 fleet machines --input='{\"offset\":0,\"limit\":64}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
