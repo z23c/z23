@@ -10,12 +10,16 @@
 #include "config/boot_mesh_machines.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
+#include "command/native_command.h"
+#include "config/command_catalog.h"
 #include "crypto/ed25519.h"
 #include "json/json.h"
+#include "kernel/command_registry.h"
 #include "models/mesh_machine_observation.h"
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
 #include "net/v2_identity.h"
+#include "platform/time_compat.h"
 #include "services/mesh_pairing_service.h"
 #include "validation/main_constants.h"
 #include "vcs/zcode_dht_delegation.h"
@@ -130,6 +134,141 @@ static bool mesh_observation_fixture(
     out->expires_unix = observed_unix + 30;
     out->received_unix = observed_unix + 1;
     return true;
+}
+
+/* ops.mesh.roster's page is ROSTER_ROW_MAX in native_fleet_roster.c. One
+ * extra paired machine is what makes the second page exist. */
+enum { ROSTER_PAGE = 32, ROSTER_MACHINES = ROSTER_PAGE + 1 };
+
+static const char *roster_row_id(const struct zcl_command_reply *reply,
+                                 size_t index)
+{
+    const struct json_value *rows = json_get(&reply->data, "rows");
+    const struct json_value *row = rows ? json_at(rows, index) : NULL;
+    const struct json_value *id = row ? json_get(row, "pairing_id") : NULL;
+    const char *text = id ? json_get_str(id) : NULL;
+    return text ? text : "";
+}
+
+static bool roster_call(struct zcl_command_reply *reply, const char *dir,
+                        bool with_after, int64_t after)
+{
+    struct json_value input;
+    struct zcl_command_request request;
+    char why[192];
+    bool ok = false;
+    why[0] = '\0';
+    json_init(&input);
+    json_set_object(&input);
+    memset(&request, 0, sizeof(request));
+    request.input = &input;
+    request.spec = zcl_command_registry_find(zcl_command_catalog(),
+                                             "ops.mesh.roster", NULL);
+    zcl_command_reply_init(reply, "zcl.fleet_roster.v1");
+    if (!json_push_kv_str(&input, "datadir", dir) ||
+        (with_after && !json_push_kv_int(&input, "after", after)) ||
+        !request.spec ||
+        !zcl_command_registry_input_validate(request.spec, &input, why,
+                                            sizeof(why))) {
+        printf("[roster input %s] ", why[0] ? why : "rejected");
+    } else {
+        zcl_native_handle_fleet_roster(&request, reply);
+        ok = reply->status == ZCL_COMMAND_STATUS_PASSED;
+        if (!ok)
+            printf("[roster %s] ", reply->error.code);
+    }
+    json_free(&input);
+    return ok;
+}
+
+static int test_mesh_roster_page(void)
+{
+    int failures = 0;
+    struct node_db ndb = {0};
+    struct zcl_command_reply page1, page2, past;
+    memset(&page1, 0, sizeof(page1));
+    memset(&page2, 0, sizeof(page2));
+    memset(&past, 0, sizeof(past));
+    TEST("ops.mesh.roster: a fleet past the page cap resumes without "
+         "repeating a pairing") {
+        char dir[256], path[320];
+        struct vcs_zcode_dht_delegation delegation;
+        uint8_t genesis[32], beacon[32], tip[32], online[32];
+        char ids[ROSTER_MACHINES][MESH_PAIRING_ID_HEX + 1];
+        int64_t wall = platform_time_wall_unix();
+        test_make_tmpdir(dir, sizeof(dir), "mesh_pairing", "roster-page");
+        snprintf(path, sizeof(path), "%s/node.db", dir);
+        ASSERT(node_db_open(&ndb, path));
+        mesh_fill32(genesis, 0x11);
+        mesh_fill32(beacon, 0x22);
+        mesh_fill32(tip, 0x33);
+        mesh_fill32(online, 0x44);
+        ASSERT(mesh_seed_block(&ndb, ZCL_FINALITY_DEPTH, beacon));
+        ASSERT(mesh_seed_block(&ndb, 2 * ZCL_FINALITY_DEPTH, tip));
+        for (int i = 0; i < ROSTER_MACHINES; i++) {
+            uint8_t seed[32], noise[32], fingerprint[32];
+            struct zid_identity identity = {0};
+            struct db_mesh_pairing row;
+            enum mesh_pairing_reason reason;
+            mesh_fill32(seed, (uint8_t)(0x80u + (unsigned)i));
+            mesh_fill32(noise, (uint8_t)(0xa0u + (unsigned)i));
+            ASSERT(vcs_zcode_dht_delegation_sign(
+                       &delegation, genesis, online, noise,
+                       ZCL_FINALITY_DEPTH, beacon,
+                       (uint64_t)(wall - 100), (uint64_t)(wall + 86400), 7,
+                       seed) == VCS_ZCODE_DHT_DELEGATION_OK);
+            memcpy(identity.master_pubkey, delegation.doc.master_pubkey, 32);
+            mesh_fill32(identity.anchor_txid, 0x77);
+            identity.anchor_height = 0;
+            identity.updated_height = 0;
+            snprintf(identity.status, sizeof(identity.status), "%s",
+                     ZID_IDENTITY_STATUS_ACTIVE);
+            snprintf(identity.source, sizeof(identity.source), "%s",
+                     ZID_IDENTITY_SOURCE_ZID_OVERLAY);
+            ASSERT(db_zid_identity_save(&ndb, &identity));
+            ASSERT(v2_identity_public_fingerprint(noise, fingerprint));
+            reason = mesh_pairing_service_accept(
+                &ndb, genesis, &delegation, fingerprint, noise, true,
+                MESH_PAIRING_CAP_STATUS_READ, wall - 40 + i, wall + 86400,
+                &row);
+            if (reason != MESH_PAIRING_OK)
+                printf("[accept %s] ", mesh_pairing_reason_token(reason));
+            ASSERT(reason == MESH_PAIRING_OK);
+            memcpy(ids[i], row.pairing_id, sizeof(ids[i]));
+        }
+        node_db_close(&ndb);
+        ASSERT(roster_call(&page1, dir, false, 0));
+        ASSERT_EQ(json_get_int(json_get(&page1.data, "total")),
+                  (int64_t)ROSTER_MACHINES);
+        ASSERT_EQ(json_get_int(json_get(&page1.data, "row_count")),
+                  (int64_t)ROSTER_PAGE);
+        ASSERT(json_get_bool(json_get(&page1.data, "truncated")));
+        ASSERT_EQ(json_get_int(json_get(&page1.data, "next_resume_after")),
+                  (int64_t)ROSTER_PAGE);
+        for (int i = 0; i < ROSTER_PAGE; i++)
+            ASSERT_STR_EQ(roster_row_id(&page1, (size_t)i), ids[i]);
+        ASSERT(roster_call(&page2, dir, true,
+                           json_get_int(json_get(&page1.data,
+                                                 "next_resume_after"))));
+        ASSERT_EQ(json_get_int(json_get(&page2.data, "row_count")), (int64_t)1);
+        ASSERT_EQ(json_get_int(json_get(&page2.data, "total")),
+                  (int64_t)ROSTER_MACHINES);
+        ASSERT(!json_get_bool(json_get(&page2.data, "truncated")));
+        ASSERT(json_get(&page2.data, "next_resume_after") == NULL);
+        ASSERT_STR_EQ(roster_row_id(&page2, 0), ids[ROSTER_PAGE]);
+        ASSERT(roster_call(&past, dir, true, ROSTER_MACHINES));
+        ASSERT_EQ(json_get_int(json_get(&past.data, "row_count")), (int64_t)0);
+        ASSERT_EQ(json_get_int(json_get(&past.data, "total")),
+                  (int64_t)ROSTER_MACHINES);
+        ASSERT(!json_get_bool(json_get(&past.data, "truncated")));
+        PASS();
+    } _test_next:;
+    if (ndb.open)
+        node_db_close(&ndb);
+    zcl_command_reply_free(&page1);
+    zcl_command_reply_free(&page2);
+    zcl_command_reply_free(&past);
+    return failures;
 }
 
 int test_mesh_pairing(void)
@@ -484,6 +623,8 @@ int test_mesh_pairing(void)
                       "PLAN_EXPIRED");
         PASS();
     }
+
+    failures += test_mesh_roster_page();
 
 _test_next:
     if (ndb.open)

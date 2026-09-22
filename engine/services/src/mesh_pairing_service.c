@@ -251,6 +251,34 @@ bool mesh_pairing_service_list(
     return true;
 }
 
+bool mesh_pairing_service_list_after(
+    struct node_db *ndb, int64_t now, size_t skip,
+    struct mesh_pairing_public_view *out, size_t max, size_t *count,
+    struct db_mesh_pairing_counts *counts)
+{
+    if (count)
+        *count = 0;
+    if (!ndb || !ndb->open || now <= 0 || !out || max == 0 || !count ||
+        !counts)
+        return false;
+    if (max > MESH_PAIRING_LIST_MAX)
+        max = MESH_PAIRING_LIST_MAX;
+    if (!db_mesh_pairing_count_states(ndb, now, counts))
+        LOG_FAIL("mesh_pairing", "list_after: count states failed");
+    struct db_mesh_pairing *rows = zcl_calloc(
+        max, sizeof(*rows), "mesh_pairing.redacted_list_after");
+    if (!rows) {
+        LOG_ERROR("mesh_pairing", "list_after: allocate %zu rows failed", max);
+        return false;
+    }
+    int found = db_mesh_pairing_list_after(ndb, rows, max, skip);
+    for (int i = 0; i < found; i++)
+        mesh_pairing_public_project(&rows[i], now, &out[i]);
+    free(rows);
+    *count = found > 0 ? (size_t)found : 0;
+    return true;
+}
+
 static void mesh_pairing_revoke_digest(
     const char *pairing_id, uint64_t generation, int64_t issued_at,
     int64_t expires_at, uint8_t out[32])

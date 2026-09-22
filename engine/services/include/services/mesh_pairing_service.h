@@ -94,6 +94,11 @@ enum mesh_pairing_reason mesh_pairing_service_revoke(
 bool mesh_pairing_service_list(
     struct node_db *ndb, int64_t now, struct mesh_pairing_public_view *out,
     size_t max, size_t *count, struct db_mesh_pairing_counts *counts);
+/* Same redacted view, starting `skip` rows into paired_at,pairing_id order. */
+bool mesh_pairing_service_list_after(
+    struct node_db *ndb, int64_t now, size_t skip,
+    struct mesh_pairing_public_view *out, size_t max, size_t *count,
+    struct db_mesh_pairing_counts *counts);
 
 /* Revocation is a short-lived compare-and-set transaction. The confirmation
  * token binds the exact pairing, current revocation generation, issue time,

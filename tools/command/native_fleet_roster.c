@@ -67,6 +67,7 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -89,6 +90,37 @@ struct roster_evidence {
     enum mesh_status_receipt_status status;
     int64_t observed_unix;
 };
+
+static int64_t roster_resume_after(const struct zcl_command_request *request)
+{
+    const struct json_value *in = request ? request->input : NULL;
+    const struct json_value *after_v = json_get(in, "after");
+    int64_t after = 0;
+    if (after_v && after_v->type == JSON_INT)
+        after = json_get_int(after_v);
+    if (after < 0)
+        after = 0;
+    return after;
+}
+
+static void roster_resume_hint(struct zcl_command_reply *reply,
+                               const char *datadir, int64_t next_after)
+{
+    struct json_value input;
+    char text[512];
+    size_t wrote;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_int(&input, "after", next_after);
+    if (datadir && datadir[0])
+        (void)json_push_kv_str(&input, "datadir", datadir);
+    wrote = json_write(&input, text, sizeof(text));
+    json_free(&input);
+    if (wrote > 0 && wrote < sizeof(text))
+        (void)zcl_command_reply_add_next(
+            reply, "ops.mesh.roster", text,
+            "list the next page of paired machines");
+}
 
 static void roster_fail(struct zcl_command_reply *reply, const char *code,
                         const char *message, const char *next_action)
@@ -305,6 +337,14 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
         datadir = json_get_str(arg);
     if (!datadir || !datadir[0])
         datadir = zcl_native_command_datadir();
+    int64_t resume_after = roster_resume_after(request);
+    /* SIZE_MAX does not fit in int64_t; casting it first makes every
+     * non-negative cursor look past the end. */
+    size_t skip = 0;
+    if (resume_after > 0)
+        skip = (uint64_t)resume_after > (uint64_t)SIZE_MAX
+                   ? SIZE_MAX
+                   : (size_t)resume_after;
 
     /* READ leaf: node_db_open() here would create, migrate and clean the
      * staging tables of whatever datadir the caller named, including the
@@ -316,8 +356,8 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
 
     now = platform_time_wall_unix();
     memset(&counts, 0, sizeof(counts));
-    if (!mesh_pairing_service_list(&ndb, now, views, ROSTER_ROW_MAX,
-                                   &view_count, &counts)) {
+    if (!mesh_pairing_service_list_after(&ndb, now, skip, views, ROSTER_ROW_MAX,
+                                         &view_count, &counts)) {
         zcl_native_node_db_close_readonly(&db, &ndb);
         roster_fail(reply, "ROSTER_STORE_UNREADABLE",
                     "the mesh pairing store could not be read, so this "
@@ -367,8 +407,13 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
 
     (void)json_push_kv_int(&reply->data, "row_count", (int64_t)view_count);
     (void)json_push_kv_int(&reply->data, "total", counts.total);
-    (void)json_push_kv_bool(&reply->data, "truncated",
-                            (int64_t)view_count < counts.total);
+    bool more = (int64_t)skip + (int64_t)view_count < counts.total;
+    (void)json_push_kv_bool(&reply->data, "truncated", more);
+    if (more) {
+        int64_t next_after = (int64_t)skip + (int64_t)view_count;
+        (void)json_push_kv_int(&reply->data, "next_resume_after", next_after);
+        roster_resume_hint(reply, datadir, next_after);
+    }
 
     json_init(&airships);
     json_set_object(&airships);

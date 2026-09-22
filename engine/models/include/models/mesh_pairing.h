@@ -60,6 +60,10 @@ bool db_mesh_pairing_find(struct node_db *ndb, const char *pairing_id,
                           struct db_mesh_pairing *out);
 int db_mesh_pairing_list(struct node_db *ndb, struct db_mesh_pairing *out,
                          size_t max);
+/* Same order as db_mesh_pairing_list, starting skip rows in. skip 0 is that
+ * list. A skip past the table returns 0. */
+int db_mesh_pairing_list_after(struct node_db *ndb, struct db_mesh_pairing *out,
+                               size_t max, size_t skip);
 bool db_mesh_pairing_count_states(struct node_db *ndb, int64_t now,
                                   struct db_mesh_pairing_counts *out);
 

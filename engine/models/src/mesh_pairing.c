@@ -159,13 +159,23 @@ bool db_mesh_pairing_find(struct node_db *ndb, const char *pairing_id,
 int db_mesh_pairing_list(struct node_db *ndb, struct db_mesh_pairing *out,
                          size_t max)
 {
+    return db_mesh_pairing_list_after(ndb, out, max, 0);
+}
+
+int db_mesh_pairing_list_after(struct node_db *ndb, struct db_mesh_pairing *out,
+                               size_t max, size_t skip)
+{
     sqlite3_stmt *st = NULL;
     if (!ndb || !ndb->open || !out || max == 0)
         return 0;
     AR_QUERY_LIST(ndb, st,
         "SELECT " MESH_PAIRING_COLS " FROM mesh_pairings "
-        "ORDER BY paired_at,pairing_id LIMIT ?",
-        out, max, AR_BIND_INT(st, 1, (int64_t)max),
+        "ORDER BY paired_at,pairing_id LIMIT ? OFFSET ?",
+        out, max,
+        do {
+            AR_BIND_INT(st, 1, (int64_t)max);
+            AR_BIND_INT(st, 2, (int64_t)skip);
+        } while (0),
         mesh_pairing_read(&out[count], st));
 }
 

@@ -647,15 +647,17 @@ ZCL_COMMAND_READY_READ(
     "facts, per machine and for the fleet, and the assets and facts come "
     "from that table rather than from this leaf. rules renders every row of "
     "that table with the sentence saying why it pays what it pays, so a "
-    "count of zero is accounted for in the same reply. Rows are capped and the "
-    "reply reports total and truncated. It refuses an operator with no "
+    "count of zero is accounted for in the same reply. One page holds at most "
+    "32 paired rows in paired_at,pairing_id order. `after` skips that many "
+    "rows. When rows remain, truncated is true and next_resume_after is how "
+    "many rows are already listed. It refuses an operator with no "
     "pairing at all, and refuses two rows carrying one chain identity "
     "rather than count one machine as two. It never dials, never probes, "
     "never writes, and never asks a running node anything.",
     ZCL_COMMAND_RESULT_BUDGET,
     "fleet,roster,machines,airships,verified,reachable,game,identity",
-    "zcl.fleet_roster_input.v1", "zcl.fleet_roster.v1", "datadir", "",
-    "z23 fleet roster",
+    "zcl.fleet_roster_input.v1", "zcl.fleet_roster.v1", "datadir,after", "",
+    "z23 fleet roster [--after=<paired rows already listed>]",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
