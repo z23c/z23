@@ -1233,15 +1233,15 @@ Z23_FLAG("ZCL_JOIN_LAST", "env_build", "0", "-",
 Z23_FLAG("ZCL_JSONQ", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-eval-selftest.sh:9")
 Z23_FLAG("ZCL_K9_DB", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1228")
+          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1291")
 Z23_FLAG("ZCL_K9_DIR", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1235")
+          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1298")
 Z23_FLAG("ZCL_K9_END", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1237")
+          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1300")
 Z23_FLAG("ZCL_K9_SRC", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1243")
+          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1306")
 Z23_FLAG("ZCL_K9_START", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1229")
+          "undocumented; first use tests/harness/src/test_kill9_recovery.c:1292")
 Z23_FLAG("ZCL_LAND_ALLOW_UNSIGNED", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:1671")
 Z23_FLAG("ZCL_LAND_BASE", "env_build", "main", "-",

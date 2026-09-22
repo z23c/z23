@@ -123,6 +123,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <poll.h>
 #include <sys/wait.h>
 #endif
 #include <time.h>
@@ -237,6 +238,28 @@ static int p11_7_count_utxos_above_tip(sqlite3 *db)
  * partially-staged transaction the SQLite journal will roll back on
  * the parent's next open. */
 
+#if !defined(_WIN32)
+static int p11_7_mid_apply_fd = -1;
+
+static void p11_7_hold_mid_apply(sqlite3 *db)
+{
+    if (p11_7_mid_apply_fd < 0) return;
+    if (sqlite3_get_autocommit(db) || p11_7_count_utxos_above_tip(db) != 4)
+        _exit(4);
+    const char ready = 'R';
+    if (write(p11_7_mid_apply_fd, &ready, 1) != 1) _exit(5);
+    for (;;) pause(); /* Parent owns the bounded wait and SIGKILL. */
+}
+
+static bool p11_7_wait_mid_apply(int fd)
+{
+    struct pollfd event = { .fd = fd, .events = POLLIN };
+    char ready = 0;
+    return poll(&event, 1, 5000) == 1 && (event.revents & POLLIN) &&
+        read(fd, &ready, 1) == 1 && ready == 'R';
+}
+#endif
+
 static void p11_7_child_worker(const char *dbpath, int start_height)
 {
     sqlite3 *db = NULL;
@@ -289,6 +312,9 @@ static void p11_7_child_worker(const char *dbpath, int start_height)
             sqlite3_finalize(s);
         }
 
+#if !defined(_WIN32)
+        p11_7_hold_mid_apply(db);
+#endif
         /* Update the tip pointer LAST — the ordering that makes the
          * "UTXOs ahead of tip" pathology observable if we get killed
          * between the UTXO inserts and the tip update. */
@@ -312,6 +338,50 @@ static void p11_7_child_worker(const char *dbpath, int start_height)
     sqlite3_close(db);
     _exit(0);
 }
+
+#if !defined(_WIN32)
+static pid_t p11_7_spawn_cycle(const char *dbpath, int start_height,
+    int cycle_idx, bool *mid_apply_observed)
+{
+    int ready_pipe[2] = {-1, -1};
+    if (cycle_idx == 0 && pipe(ready_pipe) != 0) {
+        perror("mid-apply pipe");
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (ready_pipe[0] >= 0) { close(ready_pipe[0]); close(ready_pipe[1]); }
+        perror("fork");
+        return -1;
+    }
+    if (pid == 0) {
+        if (ready_pipe[0] >= 0) close(ready_pipe[0]);
+        p11_7_mid_apply_fd = ready_pipe[1];
+        p11_7_child_worker(dbpath, start_height);
+        /* unreachable — child always _exit()s */
+        _exit(99);
+    }
+
+    *mid_apply_observed = true;
+    if (ready_pipe[0] >= 0) {
+        close(ready_pipe[1]);
+        *mid_apply_observed = p11_7_wait_mid_apply(ready_pipe[0]);
+        close(ready_pipe[0]);
+    }
+    return pid;
+}
+
+static bool p11_7_mid_apply_verified(int cycle_idx, bool observed, bool killed)
+{
+    if (!observed || (cycle_idx == 0 && !killed)) {
+        printf("FAIL (cycle %d: deterministic mid-apply SIGKILL was not observed)\n", cycle_idx);
+        return false;
+    }
+    if (cycle_idx == 0)
+        printf("kill9_recovery: observed SIGKILL with four uncommitted UTXOs before tip update\n");
+    return true;
+}
+#endif
 
 /* ── One kill-and-recover cycle ───────────────────────────── */
 
@@ -378,17 +448,9 @@ static int p11_7_one_cycle(const char *dbpath, int cycle_idx,
         return 1;
     }
 #else
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        return 1;
-    }
-    if (pid == 0) {
-        p11_7_child_worker(dbpath, start_height);
-        /* unreachable — child always _exit()s */
-        _exit(99);
-    }
-
+    bool mid_apply_observed = false;
+    pid_t pid = p11_7_spawn_cycle(dbpath, start_height, cycle_idx, &mid_apply_observed);
+    if (pid < 0) return 1;
     /* Randomised kill delay: 0.5ms to ~40ms.  Covers cases where the
      * child is (a) still opening the DB, (b) mid-transaction, (c)
      * between COMMIT rounds, (d) already finished (delay > 30ms). */
@@ -419,6 +481,7 @@ static int p11_7_one_cycle(const char *dbpath, int cycle_idx,
                cycle_idx, WIFSIGNALED(status), WIFEXITED(status), status);
         return 1;
     }
+    if (!p11_7_mid_apply_verified(cycle_idx, mid_apply_observed, killed)) return 1;
 #endif
 
     /* Parent reopens through the live node's entry point.  This is
@@ -1360,7 +1423,7 @@ int test_kill9_recovery(void)
     }
     if (!failures) {
         printf(" kill9_recovery OK "
-               "(10 cycles in %ds; %d advanced tip, %d killed mid-apply "
+               "(10 cycles in %ds; %d advanced tip, %d retained tip "
                "— all recovered cleanly, no UTXO overshoot)\n",
                elapsed, n_clean, n_killed);
     }
