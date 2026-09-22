@@ -558,7 +558,7 @@ Z23_FLAG("ZCL_DEV_ACTIVE_OUTPUT", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_AGENT_TIMEOUT", "env_build", "10", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:801")
 Z23_FLAG("ZCL_DEV_ALLOW_AUTO_REINDEX_DEPLOY", "env_runtime", "0", "-",
-          "first use tools/dev/dev_activation.c:737; documented at docs/AGENT_API.md:1004: explicit_recovery_env='ZCL_DEV_ALLOW_AUTO_REINDEX_DEPLOY'. Set that")
+          "first use tools/dev/dev_activation.c:743; documented at docs/AGENT_API.md:1004: explicit_recovery_env='ZCL_DEV_ALLOW_AUTO_REINDEX_DEPLOY'. Set that")
 Z23_FLAG("ZCL_DEV_ALLOW_OOM_BUDGET_DROPIN", "env_build", "0", "-",
           "undocumented; first use tools/dev/deploy-dev-lane.sh:744")
 Z23_FLAG("ZCL_DEV_ALLOW_REINDEX_DROPIN", "env_build", "0", "-",
