@@ -4729,9 +4729,11 @@ static const char *const DP_DOCS_TOOL_MARKERS[] = {
 
 static bool dp_docs_output_signals_tool_failure(const char *out, int rc)
 {
-    /* No checker documents 126/127 as a drift verdict: the shell and the
-     * spawn child both use them exclusively for exec/setup failure. */
-    if (rc == 126 || rc == 127) return true;
+    /* 126/127 are exec failures. rc=2 is the hollow/toolchain code every
+     * docs-fresh checker documents (z23-lint die(), an unreadable table,
+     * a generator that did not compile). Drift is exit 1. An rc=2 whose
+     * text lacks a marker must not be told to the operator as stale docs. */
+    if (rc == 2 || rc == 126 || rc == 127) return true;
     if (!out) return false;
     for (size_t i = 0; i < sizeof(DP_DOCS_TOOL_MARKERS) /
                                 sizeof(DP_DOCS_TOOL_MARKERS[0]);

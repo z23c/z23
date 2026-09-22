@@ -6071,6 +6071,18 @@ static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_checker_tool_failure:"
                       "tools/lint/check_fleet_observations.sh:rc_2");
+        /* rc=2 with no toolchain marker is still not drift. z23-lint's
+         * die() and an unreadable fleet table use that code and text
+         * that names neither FATAL nor a missing file. */
+        ASSERT(ic_write(generation, stubs[2], "#!/bin/sh\nexit 0\n"));
+        ASSERT(ic_write(generation, stubs[1],
+                        "#!/bin/sh\necho \"z23-lint: cannot resolve "
+                        "executable path\" >&2\nexit 2\n"));
+        memset(why, 0, sizeof(why));
+        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
+                                                         sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generated_docs_checker_tool_failure:"
+                      "tools/lint/check_fleet_facts.sh:rc_2");
         ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s'",
                                 generation) < sizeof(cmd));
         ASSERT(system(cmd) == 0);
