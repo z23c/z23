@@ -207,6 +207,8 @@ struct sandbox {
     char datadir[PATH_MAX];
     char gen_root[PATH_MAX];
     char *saved_home;
+    char *saved_xdg;
+    bool had_xdg;
 };
 
 static void sandbox_enter(struct sandbox *sb, const char *tag)
@@ -222,7 +224,11 @@ static void sandbox_enter(struct sandbox *sb, const char *tag)
     snprintf(sb->gen_root, sizeof(sb->gen_root), "%s/lib/gens", sb->home);
     const char *h = getenv("HOME");
     sb->saved_home = h ? strdup(h) : NULL;
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    sb->had_xdg = xdg != NULL;
+    sb->saved_xdg = xdg ? strdup(xdg) : NULL;
     setenv("HOME", sb->home, 1);
+    unsetenv("XDG_CONFIG_HOME");
     setenv("ZCL_DEV_ACTIVATION_VERIFY_TIMEOUT_S", "0", 1);
 }
 
@@ -235,6 +241,12 @@ static void sandbox_exit(struct sandbox *sb)
         unsetenv("HOME");
     }
     unsetenv("ZCL_DEV_ACTIVATION_VERIFY_TIMEOUT_S");
+    if (sb->had_xdg && sb->saved_xdg)
+        setenv("XDG_CONFIG_HOME", sb->saved_xdg, 1);
+    else
+        unsetenv("XDG_CONFIG_HOME");
+    free(sb->saved_xdg);
+    sb->saved_xdg = NULL;
     test_rm_rf_recursive(sb->home);
 }
 
@@ -1339,9 +1351,51 @@ static int test_null_result_refused(void)
     return failures;
 }
 
+static int test_dropin_follows_xdg_config_home(void)
+{
+    int failures = 0;
+    TEST("dev_activation: build-identity drop-in follows XDG_CONFIG_HOME") {
+        struct sandbox sb;
+        sandbox_enter(&sb, "xdg_dropin");
+        char xdg[PATH_MAX];
+        snprintf(xdg, sizeof(xdg), "%s/xdg-config", sb.home);
+        ASSERT(mkdir(xdg, 0700) == 0);
+        setenv("XDG_CONFIG_HOME", xdg, 1);
+
+        char artifact[PATH_MAX];
+        snprintf(artifact, sizeof(artifact), "%s/cand", sb.home);
+        ASSERT(write_fake_binary(artifact, 'A'));
+        struct fake_ctx c = {0};
+        snprintf(c.gen_root, sizeof(c.gen_root), "%s", sb.gen_root);
+        struct dev_activation_ops ops;
+        fake_ops_init(&ops, &c);
+        struct dev_activation_request req;
+        base_request(&req, &sb, artifact);
+        struct dev_activation_result r;
+        int rc = dev_activation_run(&req, &ops, &r);
+        ASSERT_EQ(rc, DEV_ACTIVATION_OK);
+
+        char drop[PATH_MAX];
+        snprintf(drop, sizeof(drop),
+                 "%s/systemd/user/zcl23-dev.service.d/90-build-identity.conf",
+                 xdg);
+        ASSERT(file_exists(drop));
+        char wrong[PATH_MAX];
+        snprintf(wrong, sizeof(wrong),
+                 "%s/.config/systemd/user/zcl23-dev.service.d/"
+                 "90-build-identity.conf",
+                 sb.home);
+        ASSERT(!file_exists(wrong));
+        sandbox_exit(&sb);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_activation(void)
 {
     int failures = 0;
+    failures += test_dropin_follows_xdg_config_home();
     failures += test_null_result_refused();
     failures += test_happy_activation();
     failures += test_unit_prepare_failure();

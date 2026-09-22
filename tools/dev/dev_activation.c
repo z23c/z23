@@ -641,6 +641,33 @@ static bool dev_validate_confinement(struct dev_activation_txn *txn)
     return true;
 }
 
+/* systemd --user reads units from $XDG_CONFIG_HOME/systemd/user when that
+ * variable is an absolute path, and from ~/.config/systemd/user otherwise.
+ * A relative or unsafe XDG_CONFIG_HOME is ignored. Returns the snprintf
+ * length of the drop-in path, or -1 when it does not fit. */
+static int dev_build_identity_dropin(const char *home, char *out, size_t cap)
+{
+#if defined(_WIN32)
+    return snprintf(out, cap,
+                    "%s/.config/systemd/user/zcl23-dev.service.d/"
+                    "90-build-identity.conf",
+                    home);
+#else
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    bool xdg_ok = xdg && xdg[0] == '/' && !strstr(xdg, "/../") &&
+                  !strstr(xdg, "\n");
+    if (xdg_ok && strlen(xdg) >= 3 &&
+        strcmp(xdg + strlen(xdg) - 3, "/..") == 0)
+        xdg_ok = false;
+    const char *root = xdg_ok ? xdg : home;
+    const char *mid = xdg_ok ? "" : "/.config";
+    return snprintf(out, cap,
+                    "%s%s/systemd/user/zcl23-dev.service.d/"
+                    "90-build-identity.conf",
+                    root, mid);
+#endif
+}
+
 static bool dev_derive_paths(struct dev_activation_txn *txn)
 {
     const struct dev_activation_request *req = txn->req;
@@ -675,9 +702,8 @@ static bool dev_derive_paths(struct dev_activation_txn *txn)
                  "%s/.local/bin/zclassic23-dev", txn->home);
     if (n <= 0 || (size_t)n >= sizeof(txn->compat_bin))
         LOG_FAIL("dev-activation", "compat path too long");
-    n = snprintf(txn->build_id_dropin, sizeof(txn->build_id_dropin),
-                 "%s/.config/systemd/user/zcl23-dev.service.d/90-build-identity.conf",
-                 txn->home);
+    n = dev_build_identity_dropin(txn->home, txn->build_id_dropin,
+                                  sizeof(txn->build_id_dropin));
     if (n <= 0 || (size_t)n >= sizeof(txn->build_id_dropin))
         LOG_FAIL("dev-activation", "drop-in path too long");
     n = snprintf(txn->deploy_state, sizeof(txn->deploy_state),
