@@ -141,6 +141,14 @@ static bool status_wallet_view_ready(void)
            stage < BOOT_STAGE_SHUTDOWN_REQUESTED;
 }
 
+/* Boot finished. Shutdown is not ready. This is not history validation. */
+static bool status_bootstrap_ready(void)
+{
+    enum boot_stage stage = boot_stage_current();
+    return stage >= BOOT_STAGE_READY &&
+           stage < BOOT_STAGE_SHUTDOWN_REQUESTED;
+}
+
 void status_readiness_facts_collect(int tip_gap, int log_head_gap,
                                     const struct agent_security_posture *posture,
                                     struct status_readiness_facts_view *out)
@@ -169,6 +177,7 @@ void status_readiness_facts_collect(int tip_gap, int log_head_gap,
 
     out->full_replay_verified =
         posture && posture->full_history_validation_complete;
+    out->bootstrap_ready = status_bootstrap_ready();
 }
 
 void status_push_readiness_facts_json(
@@ -182,4 +191,5 @@ void status_push_readiness_facts_json(
     json_push_kv_str(out, "archive_complete",
                      status_archive_completeness_name(view->archive_complete));
     json_push_kv_bool(out, "full_replay_verified", view->full_replay_verified);
+    json_push_kv_bool(out, "bootstrap_ready", view->bootstrap_ready);
 }

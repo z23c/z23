@@ -18,8 +18,10 @@
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 #include "controllers/agent_operator_contracts.h"
+#include "controllers/agent_security_posture.h"
 #include "json/json.h"
 #include "controllers/rpc_client.h"
+#include "util/boot_phase.h"
 
 #include <string.h>
 
@@ -329,9 +331,44 @@ static int test_status_readiness_archive_fails_closed_to_unknown(void)
     return failures;
 }
 
+static int test_bootstrap_ready_is_not_replay(void)
+{
+    int failures = 0;
+    TEST("bootstrap_ready and full_replay_verified are separate facts") {
+        struct agent_security_posture validated = {0};
+        struct status_readiness_facts_view facts = {0};
+        struct json_value doc;
+
+        boot_stage_reset_for_testing();
+        validated.full_history_validation_complete = true;
+        status_readiness_facts_collect(0, 0, &validated, &facts);
+        ASSERT(facts.full_replay_verified);
+        ASSERT(!facts.bootstrap_ready);
+
+        boot_stage_advance_to(BOOT_STAGE_READY);
+        validated.full_history_validation_complete = false;
+        status_readiness_facts_collect(0, 0, &validated, &facts);
+        ASSERT(!facts.full_replay_verified);
+        ASSERT(facts.bootstrap_ready);
+
+        json_init(&doc);
+        json_set_object(&doc);
+        status_push_readiness_facts_json(&doc, &facts);
+        ASSERT(json_get_bool(json_get(&doc, "bootstrap_ready")));
+        ASSERT(!json_get_bool(json_get(&doc, "full_replay_verified")));
+        json_free(&doc);
+
+        boot_stage_reset_for_testing();
+        PASS();
+    } _test_next:;
+    boot_stage_reset_for_testing();
+    return failures;
+}
+
 int test_status_readiness_truth(void)
 {
     int failures = 0;
+    failures += test_bootstrap_ready_is_not_replay();
     failures += test_status_readiness_four_facts_are_separate();
     failures += test_status_readiness_facts_vary_independently();
     failures += test_status_readiness_v2_reader_retained();

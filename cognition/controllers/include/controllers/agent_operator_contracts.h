@@ -92,8 +92,11 @@ struct status_readiness_facts_view {
     bool wallet_spend_allowed;
     enum status_archive_completeness archive_complete;
     /* History verified by replay (agent_security_posture.
-     * full_history_validation_complete). */
+     * full_history_validation_complete). Sovereign validation, not boot. */
     bool full_replay_verified;
+    /* The process finished boot and is at BOOT_STAGE_READY. Independent of
+     * full_replay_verified: a serving node can still be validating history. */
+    bool bootstrap_ready;
 };
 
 struct agent_security_posture;
@@ -108,8 +111,8 @@ void status_readiness_facts_collect(int tip_gap, int log_head_gap,
                                     struct status_readiness_facts_view *out);
 
 /* Emit the facts as flat keys on `out` (tip_follow, wallet_view_ready,
- * wallet_spend_allowed, archive_complete, full_replay_verified). This is the
- * v3 addition to zcl.public_status. */
+ * wallet_spend_allowed, archive_complete, full_replay_verified,
+ * bootstrap_ready). This is the v3 addition to zcl.public_status. */
 void status_push_readiness_facts_json(
     struct json_value *out, const struct status_readiness_facts_view *view);
 
