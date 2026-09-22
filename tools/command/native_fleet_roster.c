@@ -122,6 +122,32 @@ static void roster_resume_hint(struct zcl_command_reply *reply,
             "list the next page of paired machines");
 }
 
+/* Cursor conversion stays out of the roster handler so that function's
+ * complexity pin does not rise. SIZE_MAX does not fit in int64_t; casting
+ * it first makes every non-negative cursor look past the end. */
+static size_t roster_skip_count(const struct zcl_command_request *request)
+{
+    int64_t resume_after = roster_resume_after(request);
+    if (resume_after > 0)
+        return (uint64_t)resume_after > (uint64_t)SIZE_MAX
+                   ? SIZE_MAX
+                   : (size_t)resume_after;
+    return 0;
+}
+
+static void roster_emit_page(struct zcl_command_reply *reply,
+                             const char *datadir, size_t skip,
+                             size_t view_count, int64_t total)
+{
+    bool more = (int64_t)skip + (int64_t)view_count < total;
+    (void)json_push_kv_bool(&reply->data, "truncated", more);
+    if (more) {
+        int64_t next_after = (int64_t)skip + (int64_t)view_count;
+        (void)json_push_kv_int(&reply->data, "next_resume_after", next_after);
+        roster_resume_hint(reply, datadir, next_after);
+    }
+}
+
 static void roster_fail(struct zcl_command_reply *reply, const char *code,
                         const char *message, const char *next_action)
 {
@@ -337,14 +363,7 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
         datadir = json_get_str(arg);
     if (!datadir || !datadir[0])
         datadir = zcl_native_command_datadir();
-    int64_t resume_after = roster_resume_after(request);
-    /* SIZE_MAX does not fit in int64_t; casting it first makes every
-     * non-negative cursor look past the end. */
-    size_t skip = 0;
-    if (resume_after > 0)
-        skip = (uint64_t)resume_after > (uint64_t)SIZE_MAX
-                   ? SIZE_MAX
-                   : (size_t)resume_after;
+    size_t skip = roster_skip_count(request);
 
     /* READ leaf: node_db_open() here would create, migrate and clean the
      * staging tables of whatever datadir the caller named, including the
@@ -407,13 +426,7 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
 
     (void)json_push_kv_int(&reply->data, "row_count", (int64_t)view_count);
     (void)json_push_kv_int(&reply->data, "total", counts.total);
-    bool more = (int64_t)skip + (int64_t)view_count < counts.total;
-    (void)json_push_kv_bool(&reply->data, "truncated", more);
-    if (more) {
-        int64_t next_after = (int64_t)skip + (int64_t)view_count;
-        (void)json_push_kv_int(&reply->data, "next_resume_after", next_after);
-        roster_resume_hint(reply, datadir, next_after);
-    }
+    roster_emit_page(reply, datadir, skip, view_count, counts.total);
 
     json_init(&airships);
     json_set_object(&airships);
