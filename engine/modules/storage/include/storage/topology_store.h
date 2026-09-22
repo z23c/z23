@@ -103,7 +103,8 @@ int64_t topology_store_wal_bytes(void);
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe.
  * Surfaces: open, edge_count/cap, distinct_observers,
- * distinct_advertised_nodes, top_advertised (in-degree top-10), and
+ * distinct_advertised_nodes, top_advertised (in-degree top-10),
+ * sweeps_dropped (rows the sweep retention cap deleted), and
  * last_sweep (most recent topology_sweeps row). */
 bool topology_store_dump_state_json(struct json_value *out, const char *key);
 
@@ -115,6 +116,10 @@ int64_t topology_store_test_sweep_count(void);
 /* Lower the bounded-upsert cap so eviction is provable without inserting
  * TOPOLOGY_EDGES_CAP_DEFAULT rows. 0 restores the default. */
 void topology_store_test_set_cap(int64_t cap);
+/* Lower the sweep-ledger retention cap. 0 restores TOPOLOGY_SWEEPS_CAP. */
+void topology_store_test_set_sweeps_cap(int cap);
+/* Rows the sweep retention cap has deleted since the last test reset. */
+uint64_t topology_store_test_sweeps_dropped(void);
 #endif
 
 #endif /* ZCL_STORAGE_TOPOLOGY_STORE_H */

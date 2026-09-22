@@ -58,6 +58,35 @@ static struct net_addr ts_onion(unsigned char fill)
     return addr;
 }
 
+/* The retention checks stay out of test_topology_store. That function is
+ * pinned at M=18, and the dropped-count conjunction would make it 19. */
+static int topology_sweep_retention_checks(void)
+{
+    int failures = 0;
+
+    topology_store_test_set_sweeps_cap(2);
+    TS_CHECK("record_sweep past the cap",
+             topology_store_record_sweep(5200, 5210, 8, 4, 4, 1));
+    TS_CHECK("record_sweep one past the cap again",
+             topology_store_record_sweep(5300, 5310, 8, 4, 4, 1));
+    TS_CHECK("sweep ledger keeps the cap",
+             topology_store_test_sweep_count() == 2);
+    TS_CHECK("sweep retention names the deleted rows",
+             topology_store_test_sweeps_dropped() == 2);
+    {
+        struct json_value j;
+        json_init(&j);
+        TS_CHECK("dump after sweep retention",
+                 topology_store_dump_state_json(&j, NULL));
+        const struct json_value *dropped = json_get(&j, "sweeps_dropped");
+        TS_CHECK("dump reports sweeps_dropped == 2",
+                 dropped != NULL && json_get_int(dropped) == 2);
+        json_free(&j);
+    }
+    topology_store_test_set_sweeps_cap(0);
+    return failures;
+}
+
 int test_topology_store(void)
 {
     printf("\n=== topology_store tests ===\n");
@@ -247,6 +276,9 @@ int test_topology_store(void)
                  topology_store_record_sweep(5100, 5111, 64, 30, 30, 5));
         TS_CHECK("sweep_count == 2 after a second sweep",
                  topology_store_test_sweep_count() == 2);
+
+        /* Four sweeps into a cap of 2 delete the two oldest rows. */
+        failures += topology_sweep_retention_checks();
 
         topology_store_close();
         test_cleanup_tmpdir(dir);

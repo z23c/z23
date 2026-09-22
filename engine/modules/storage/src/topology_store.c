@@ -49,6 +49,12 @@ static _Atomic uint64_t g_edges_recorded_total = 0;
 static _Atomic uint64_t g_edges_rejected_total = 0;
 static _Atomic uint64_t g_evicted_total = 0;
 static _Atomic uint64_t g_sweeps_recorded_total = 0;
+/* Runtime sweep-ledger cap. The default is TOPOLOGY_SWEEPS_CAP; a test
+ * lowers it so delete-oldest is provable without inserting 20000 rows. */
+static _Atomic int g_sweeps_cap = TOPOLOGY_SWEEPS_CAP;
+/* Rows the sweep retention cap has deleted. That is coverage the ledger
+ * no longer holds. */
+static _Atomic uint64_t g_sweeps_dropped = 0;
 
 static void topology_lock_init(void)
 {
@@ -469,6 +475,27 @@ bool topology_store_record_self_edge(const struct net_addr *advertised_addr,
                             now_unix, out_new_advertised_node);
 }
 
+/* Delete sweep rows older than the retention cap and count them. On an
+ * empty table MAX(sweep_id) is NULL, so `sweep_id <= NULL` matches
+ * nothing. */
+static void topology_prune_sweeps(sqlite3 *db)
+{
+    char prune[160];
+    int cap = atomic_load_explicit(&g_sweeps_cap, memory_order_relaxed);
+    if (cap < 1)
+        cap = TOPOLOGY_SWEEPS_CAP;
+    snprintf(prune, sizeof(prune),
+            "DELETE FROM topology_sweeps WHERE sweep_id <= "
+            "(SELECT MAX(sweep_id) FROM topology_sweeps) - %d",
+            cap);
+    if (!exec_sql(db, prune, "prune topology_sweeps"))
+        return;
+    int dropped = sqlite3_changes(db);
+    if (dropped > 0)
+        atomic_fetch_add_explicit(&g_sweeps_dropped, (uint64_t)dropped,
+                                  memory_order_relaxed);
+}
+
 /* ── sweep summaries ──────────────────────────────────────────────────── */
 
 bool topology_store_record_sweep(int64_t started_unix, int64_t finished_unix,
@@ -501,16 +528,7 @@ bool topology_store_record_sweep(int64_t started_unix, int64_t finished_unix,
     if (ok) {
         atomic_fetch_add_explicit(&g_sweeps_recorded_total, 1,
                                   memory_order_relaxed);
-        /* Bounded retention: delete-oldest-past-cap, same idiom as
-         * peers_projection's peer_sessions/fork_events ledgers. On an empty
-         * table MAX(sweep_id) is NULL so `sweep_id <= NULL` matches
-         * nothing — safe. */
-        char prune[160];
-        snprintf(prune, sizeof(prune),
-                "DELETE FROM topology_sweeps WHERE sweep_id <= "
-                "(SELECT MAX(sweep_id) FROM topology_sweeps) - %d",
-                (int)TOPOLOGY_SWEEPS_CAP);
-        (void)exec_sql(db, prune, "prune topology_sweeps");
+        topology_prune_sweeps(db);
     }
     zcl_mutex_unlock(topology_lock_handle());
     return ok;
@@ -561,6 +579,9 @@ bool topology_store_dump_state_json(struct json_value *out, const char *key)
                                                memory_order_relaxed));
     json_push_kv_int(out, "sweeps_recorded_total",
                  (int64_t)atomic_load_explicit(&g_sweeps_recorded_total,
+                                               memory_order_relaxed));
+    json_push_kv_int(out, "sweeps_dropped",
+                 (int64_t)atomic_load_explicit(&g_sweeps_dropped,
                                                memory_order_relaxed));
 
     if (!open) {
@@ -657,6 +678,9 @@ void topology_store_test_reset(void)
     atomic_store_explicit(&g_edges_rejected_total, 0, memory_order_relaxed);
     atomic_store_explicit(&g_evicted_total, 0, memory_order_relaxed);
     atomic_store_explicit(&g_sweeps_recorded_total, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_sweeps_dropped, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_sweeps_cap, TOPOLOGY_SWEEPS_CAP,
+                          memory_order_relaxed);
     atomic_store_explicit(&g_cap, TOPOLOGY_EDGES_CAP_DEFAULT,
                           memory_order_relaxed);
     zcl_mutex_unlock(topology_lock_handle());
@@ -690,5 +714,17 @@ void topology_store_test_set_cap(int64_t cap)
     atomic_store_explicit(&g_cap,
                           cap > 0 ? cap : (int64_t)TOPOLOGY_EDGES_CAP_DEFAULT,
                           memory_order_relaxed);
+}
+
+void topology_store_test_set_sweeps_cap(int cap)
+{
+    atomic_store_explicit(&g_sweeps_cap,
+                          cap > 0 ? cap : TOPOLOGY_SWEEPS_CAP,
+                          memory_order_relaxed);
+}
+
+uint64_t topology_store_test_sweeps_dropped(void)
+{
+    return atomic_load_explicit(&g_sweeps_dropped, memory_order_relaxed);
 }
 #endif
