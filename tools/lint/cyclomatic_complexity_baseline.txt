@@ -1762,7 +1762,7 @@ engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_connect:27
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_resolve_range:21
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_run:20
-engine/controllers/src/rom_fetch_controller.c:zcl_native_handle_rom_fetch_bundle:43
+engine/controllers/src/rom_fetch_controller.c:zcl_native_handle_rom_fetch_bundle:40
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:52
 engine/controllers/src/snapshot_controller_import.c:import_block_index_thread:38
 engine/controllers/src/snapshot_controller_txindex.c:build_tx_index_thread:56

@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define RFC_SUBSYS "ops.debug.rom_fetch"
 
@@ -75,6 +76,20 @@ static const char *rfc_input(const struct zcl_command_request *request,
 static bool rfc_parse_hex32(const char *hex, uint8_t out[32])
 {
     return hex && strlen(hex) == 64 && ParseHex(hex, out, 32) == 32;
+}
+
+/* Default FS_PORT when the operator omits input.port. */
+static bool rfc_parse_port(const char *port_s, uint16_t *out)
+{
+    *out = FS_PORT;
+    if (!port_s || !port_s[0])
+        return true;
+    char *end = NULL;
+    long p = strtol(port_s, &end, 10);
+    if (!end || *end != '\0' || p < 1 || p > 65535)
+        return false;
+    *out = (uint16_t)p;
+    return true;
 }
 
 /* Mirrors the filename-from-digest fallback the download drivers apply
@@ -141,6 +156,46 @@ static void rfc_journal_reused(const char *out_dir,
     *out_bytes = bytes;
 }
 
+/* An identical artifact already installed at the committed path is a warm
+ * transfer: whole-file verification (size, chunk-root fold, whole SHA3) is
+ * the content proof, and no seeder is contacted. A missing or mismatched
+ * file returns false so the caller falls through to the resumable download. */
+static bool rfc_take_warm(const char *out_dir,
+                          const struct rom_fetch_manifest *m,
+                          uint32_t *reused_chunks, uint64_t *reused_bytes,
+                          uint32_t *chunks_verified)
+{
+    char path[1200];
+    int n = snprintf(path, sizeof(path), "%s/%s", out_dir, m->filename);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    if (access(path, R_OK) != 0)
+        return false;
+    if (!rom_fetch_verify_file(path, m))
+        return false;
+    *reused_chunks = m->num_chunks;
+    *reused_bytes = m->size_bytes;
+    *chunks_verified = m->num_chunks;
+    sync_benchmark_note_reused(m->size_bytes);
+    sync_benchmark_phase_begin(SYNC_BENCH_MANIFEST);
+    sync_benchmark_phase_end(SYNC_BENCH_MANIFEST);
+    sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+    sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+    return true;
+}
+
+/* Warm reuse never ran the download driver, so the status snapshot still
+ * names the previous attempt. The committed manifest name is the file
+ * rom_fetch_verify_file just accepted. */
+static const char *rfc_reply_filename(bool warm,
+                                      const struct rom_fetch_status *st,
+                                      const struct rom_fetch_manifest *m)
+{
+    if (warm || !st->filename[0])
+        return m->filename;
+    return st->filename;
+}
+
 void zcl_native_handle_rom_fetch_bundle(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -172,18 +227,13 @@ void zcl_native_handle_rom_fetch_bundle(
         return;
     }
 
-    uint16_t port = FS_PORT;
-    if (port_s[0]) {
-        char *end = NULL;
-        long p = strtol(port_s, &end, 10);
-        if (!end || *end != '\0' || p < 1 || p > 65535) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "BAD_PORT",
-                                   "parse", false, false,
-                                   "input.port must be 1..65535", RFC_SUBSYS);
-            return;
-        }
-        port = (uint16_t)p;
+    uint16_t port = 0;
+    if (!rfc_parse_port(port_s, &port)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_PORT",
+                               "parse", false, false,
+                               "input.port must be 1..65535", RFC_SUBSYS);
+        return;
     }
 
     struct rom_fetch_manifest m;
@@ -281,10 +331,16 @@ void zcl_native_handle_rom_fetch_bundle(
     bool fetched = false;
     bool fallback_used = false;
     bool used_manifest_path = false;
+    bool warm_identical = false;
     uint32_t chunks_verified = 0;
     uint32_t reused_chunks = 0;
     uint64_t reused_bytes = 0;
-    if (strchr(peer, ',')) {
+    if (rfc_take_warm(out_dir, &m, &reused_chunks, &reused_bytes,
+                      &chunks_verified)) {
+        warm_identical = true;
+        used_manifest_path = true;
+        fetched = true;
+    } else if (strchr(peer, ',')) {
         struct rom_fetch_peer peers[4];
         size_t npeers = 0;
         char list[512];
@@ -408,9 +464,10 @@ void zcl_native_handle_rom_fetch_bundle(
      * status snapshot holds the post-derivation name. */
     struct rom_fetch_status st;
     rom_fetch_status_snapshot(&st);
-    (void)json_push_kv_str(&reply->data, "installed", st.filename);
+    const char *installed = rfc_reply_filename(warm_identical, &st, &m);
+    (void)json_push_kv_str(&reply->data, "installed", installed);
     char path[1200];
-    snprintf(path, sizeof(path), "%s/%s", out_dir, st.filename);
+    snprintf(path, sizeof(path), "%s/%s", out_dir, installed);
     (void)json_push_kv_str(&reply->data, "path", path);
     (void)json_push_kv_int(&reply->data, "size_bytes",
                            (int64_t)m.size_bytes);
@@ -425,6 +482,7 @@ void zcl_native_handle_rom_fetch_bundle(
     (void)json_push_kv_bool(&reply->data, "used_manifest_path",
                             used_manifest_path);
     (void)json_push_kv_bool(&reply->data, "fallback_used", fallback_used);
+    (void)json_push_kv_bool(&reply->data, "warm_identical", warm_identical);
     if (used_manifest_path) {
         (void)json_push_kv_int(&reply->data, "chunks_verified",
                                (int64_t)chunks_verified);
