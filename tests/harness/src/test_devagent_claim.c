@@ -225,6 +225,74 @@ static bool dvx_fixture(const char *dir)
            dvx_git(dir, add) && dvx_git(dir, commit);
 }
 
+static int dvx_lease_tests(void)
+{
+    int failures = 0;
+    static const char *const files[] = {"engine/a.c", NULL};
+    TEST("claim: expired lease is reclaimed and renewal stays one row") {
+        char repo[512], other[600], row[2048], ledger[1024];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "lease-expired");
+        (void)snprintf(other, sizeof(other), "%s-other", repo);
+        ASSERT(dvx_fixture(repo));
+        const char *wt[] = {"worktree", "add", "-q", "-b", "other", other,
+                            NULL};
+        ASSERT(dvx_git(repo, wt));
+        (void)snprintf(row, sizeof(row),
+                       "{\"expires_unix\":1,\"worktree\":\"%s\","
+                       "\"story\":\"stalled\",\"files\":[\"engine/a.c\"]}\n",
+                       other);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        struct dvx_call c;
+        dvx_claim(&c, repo, "takeover", files, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "expired_reclaimed"), 1);
+        ASSERT(dvx_int(&c, "expires_unix") > 1);
+        ASSERT_EQ(dvx_int(&c, "live"), 1);
+        dvx_end(&c);
+        dvx_claim(&c, repo, "renew", files, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "live"), 1);
+        dvx_end(&c);
+        (void)snprintf(ledger, sizeof(ledger),
+                       "%s/.git/z23-agent-claims.jsonl", repo);
+        char *text = NULL;
+        size_t len = 0;
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &text, &len,
+                                        "claim_lease_renew"));
+        ASSERT(strstr(text, "stalled") == NULL);
+        free(text);
+        ASSERT_EQ(test_rm_rf_recursive(other), 0);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+
+    TEST("claim: malformed and legacy expiry never release a foreign file") {
+        char repo[512], row[2048];
+        static const char *const fields[] = {
+            "\"expires_unix\":+1,", "\"expires_unix\":01,",
+            "\"expires_unix\":\"bad\",", "\"expires_unix\":9223372036854775808,",
+            "", NULL};
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "lease-bad");
+        ASSERT(dvx_fixture(repo));
+        for (size_t i = 0; fields[i]; i++) {
+            (void)snprintf(row, sizeof(row),
+                           "{%s\"worktree\":\"/foreign\",\"story\":"
+                           "\"legacy\",\"files\":[\"engine/a.c\"]}\n",
+                           fields[i]);
+            ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+            struct dvx_call c;
+            dvx_claim(&c, repo, "probe", files, false);
+            ASSERT(dvx_run(&c) && !dvx_ok(&c));
+            ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+            dvx_end(&c);
+        }
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dvx_metadata_tests(void)
 {
     int failures = 0;
@@ -421,7 +489,7 @@ _test_next:;
 int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
-    int failures = dvx_metadata_tests() + dvx_unreadable_tests() +
+    int failures = dvx_lease_tests() + dvx_metadata_tests() + dvx_unreadable_tests() +
                    dvx_write_failure_tests() + dvx_interleaved_tests();
     char one[512], two[600];
     test_make_tmpdir(one, sizeof(one), "devagent_claim", "repo");

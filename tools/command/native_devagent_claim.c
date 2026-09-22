@@ -495,6 +495,11 @@ static bool dvc_line_expired(const char *line, long long now)
     if (!p)
         return false;
     p += strlen(key);
+    /* A lease is authority to drop another writer's row. Accept only the
+     * positive JSON integer spelling we emit, not strtoll's +, whitespace,
+     * or leading-zero extensions. Ambiguous rows keep their owner. */
+    if (*p < '1' || *p > '9')
+        return false;
     errno = 0;
     expiry = strtoll(p, &end, 10);
     return errno == 0 && end != p && expiry > 0 &&
