@@ -100,6 +100,7 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
+    unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
     /* The vendor/tor submodule fixtures below add a real gitlink pointing
      * at a same-host bare repo; modern git's default transport allowlist
      * otherwise refuses a local `file://`-style remote reached through
@@ -124,6 +125,7 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
+    unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
     unsetenv("GIT_ALLOW_PROTOCOL");
 }
 
@@ -500,6 +502,32 @@ static void dlx_step_lock_release(int fd)
         return;
     (void)flock(fd, LOCK_UN);
     close(fd);
+}
+
+/* 1 when another process holds step.lock, 0 when free, -1 when the file
+ * is absent or unreadable. Does not create the lock file. */
+static int dlx_step_held(const char *landdir)
+{
+    char path[1200];
+    int fd;
+    int err;
+    if (!landdir ||
+        (size_t)snprintf(path, sizeof(path), "%s/step.lock", landdir) >=
+            sizeof(path))
+        return -1;
+    fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        (void)flock(fd, LOCK_UN);
+        (void)close(fd);
+        return 0;
+    }
+    err = errno;
+    (void)close(fd);
+    if (err == EWOULDBLOCK || err == EAGAIN)
+        return 1;
+    return -1;
 }
 #endif
 
@@ -1764,6 +1792,445 @@ static int test_dev_land_publisher_death(void)
         ASSERT_STR_EQ(json_get_str(json_get(&outcomes->children[0], "tip")), rig.tip);
         ASSERT_STR_EQ(json_get_str(json_get(&outcomes->children[0], "tip_pushed")), rig.tip);
         dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* Publisher holds the step lock and is killed before it claims. The queued
+ * row stays eligible, status names drain_absent, and a different process
+ * adopts through dev land step: one claim, one push, refetch matches.
+ * Split so each function stays under the cyclomatic cap; the TEST below
+ * is the one case. */
+struct dlx_adopt_fix {
+    struct dlx_rig rig;
+    char before[64];
+    char landdir[1200];
+    char qpath[1400];
+    char marker[700];
+    char qsnap[8192];
+    size_t qsnap_len;
+};
+
+static bool dlx_eq_str(const char *got, const char *want)
+{
+    if (!got || !want || strcmp(got, want) != 0) {
+        printf("FAIL str got='%s' want='%s'\n",
+               got ? got : "(nil)", want ? want : "(nil)");
+        return false;
+    }
+    return true;
+}
+
+static bool dlx_eq_i64(int64_t got, int64_t want, const char *what)
+{
+    if (got != want) {
+        printf("FAIL %s got=%lld want=%lld\n", what ? what : "int",
+               (long long)got, (long long)want);
+        return false;
+    }
+    return true;
+}
+
+static bool dlx_has(const char *s, const char *frag)
+{
+    if (!s || !frag || strstr(s, frag) == NULL) {
+        printf("FAIL missing '%s'\n", frag ? frag : "(nil)");
+        return false;
+    }
+    return true;
+}
+
+static const char *dlx_jstr(const struct json_value *obj, const char *key)
+{
+    const char *s = json_get_str(json_get(obj, key));
+    return s ? s : "";
+}
+
+static bool dlx_alls(const bool *v, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!v[i])
+            return false;
+    }
+    return true;
+}
+
+static void dlx_adopt_hold_child(const char *landdir)
+{
+    int fd;
+    (void)alarm(30);
+    fd = dlx_step_lock_take(landdir);
+    if (fd < 0)
+        _exit(2);
+    for (;;)
+        pause();
+}
+
+static bool dlx_wait_step_held(const char *landdir)
+{
+    for (int i = 0; i < 100; i++) {
+        if (dlx_step_held(landdir) == 1)
+            return true;
+        struct timespec pause = { 0, 20 * 1000 * 1000L };
+        (void)nanosleep(&pause, NULL);
+    }
+    return false;
+}
+
+static bool dlx_child_ok(pid_t pid, int want)
+{
+    int status = 0;
+    pid_t waited = dlx_wait_child(pid, &status);
+    return waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == want;
+}
+
+static bool dlx_killed_ok(pid_t pid)
+{
+    int status = 0;
+    if (kill(pid, SIGKILL) != 0)
+        return false;
+    if (dlx_wait_child(pid, &status) != pid)
+        return false;
+    return WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+}
+
+static bool dlx_adopt_submit(struct dlx_adopt_fix *fx)
+{
+    struct dlx_call c;
+    memset(fx, 0, sizeof(*fx));
+    if (!dlx_rig_make(&fx->rig, "drain_adopt_rig"))
+        return false;
+    if (!dlx_origin_main(&fx->rig, fx->before))
+        return false;
+    dlx_submit(&c, &fx->rig, fx->rig.tip);
+    if (!dlx_run(&c) || !dlx_ok(&c)) {
+        dlx_end(&c);
+        return false;
+    }
+    dlx_end(&c);
+    dlx_landdir(fx->landdir, sizeof(fx->landdir));
+    if ((size_t)snprintf(fx->qpath, sizeof(fx->qpath), "%s/queue.jsonl",
+                         fx->landdir) >= sizeof(fx->qpath))
+        return false;
+    if (!dlx_slurp(fx->qpath, fx->qsnap, sizeof(fx->qsnap), &fx->qsnap_len))
+        return false;
+    return fx->qsnap_len > 0;
+}
+
+static bool dlx_status_json(struct dlx_call *c)
+{
+    dlx_begin(c, "status");
+    (void)json_push_kv_bool(&c->input, "json", true);
+    if (!dlx_run(c) || !dlx_ok(c)) {
+        dlx_end(c);
+        return false;
+    }
+    return true;
+}
+
+static bool dlx_beat_active_status(void)
+{
+    struct dlx_call c;
+    const struct json_value *steer;
+    bool ok;
+    if (!dlx_status_json(&c))
+        return false;
+    steer = json_get(&c.reply.data, "steer");
+    ok = steer && steer->type == JSON_OBJ &&
+         dlx_eq_str(dlx_str(&c, "incident"), "none") &&
+         dlx_has(dlx_jstr(steer, "receiver_driver"), "beat_active") &&
+         dlx_eq_str(dlx_jstr(steer, "lease"), "step.lock:held");
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_step_is_busy(void)
+{
+    struct dlx_call c;
+    bool busy;
+    dlx_begin(&c, "step");
+    if (!dlx_run(&c)) {
+        dlx_end(&c);
+        return false;
+    }
+    busy = strcmp(dlx_err_code(&c), "STEP_BUSY") == 0;
+    dlx_end(&c);
+    return busy;
+}
+
+static bool dlx_adopt_while_held(struct dlx_adopt_fix *fx)
+{
+    pid_t pid = fork();
+    char after[64];
+    bool saw;
+    if (pid < 0)
+        return false;
+    if (pid == 0) {
+        dlx_adopt_hold_child(fx->landdir);
+        _exit(2);
+    }
+    saw = dlx_wait_step_held(fx->landdir) && dlx_step_is_busy() &&
+          dlx_origin_main(&fx->rig, after) &&
+          strcmp(after, fx->before) == 0 && dlx_beat_active_status();
+    if (!dlx_killed_ok(pid))
+        return false;
+    return saw;
+}
+
+static bool dlx_queue_unchanged(const struct dlx_adopt_fix *fx)
+{
+    char after[8192];
+    size_t n = 0;
+    if (!dlx_slurp(fx->qpath, after, sizeof(after), &n))
+        return false;
+    return n == fx->qsnap_len && memcmp(after, fx->qsnap, n) == 0;
+}
+
+static bool dlx_steer_stalled(const struct dlx_call *c,
+                              const struct dlx_adopt_fix *fx)
+{
+    const struct json_value *steer = json_get(&c->reply.data, "steer");
+    const struct json_value *queued = dlx_arr(c, "queued");
+    bool v[8];
+    if (!steer || steer->type != JSON_OBJ)
+        return false;
+    v[0] = dlx_eq_str(dlx_str(c, "incident"), "drain_absent");
+    v[1] = dlx_eq_str(dlx_jstr(steer, "candidate"), fx->rig.tip);
+    v[2] = dlx_eq_i64(json_get_int(json_get(steer, "seq")), 1, "seq");
+    v[3] = dlx_eq_str(dlx_jstr(steer, "phase"), "queued");
+    v[4] = dlx_eq_str(dlx_jstr(steer, "owner"), "unclaimed");
+    v[5] = dlx_eq_str(dlx_jstr(steer, "lease"), "none");
+    v[6] = dlx_eq_str(dlx_jstr(steer, "proof_state"), "not_requested");
+    v[7] = dlx_has(dlx_jstr(steer, "receiver_driver"), "no_active_drain");
+    if (!dlx_alls(v, 8))
+        return false;
+    v[0] = dlx_eq_str(dlx_jstr(steer, "first_missing_transition"), "claim");
+    v[1] = dlx_eq_str(dlx_jstr(steer, "wake_command"), "z23-dev dev land step");
+    v[2] = dlx_has(dlx_jstr(steer, "remote_state"), "cached:");
+    v[3] = queued && queued->num_children == 1;
+    v[4] = json_get(&c->reply.data, "in_flight") == NULL;
+    return dlx_alls(v, 5);
+}
+
+static bool dlx_screen_names_incident(void)
+{
+    struct dlx_call c;
+    bool ok;
+    dlx_begin(&c, "status");
+    if (!dlx_run(&c) || !dlx_ok(&c)) {
+        dlx_end(&c);
+        return false;
+    }
+    ok = dlx_has(dlx_str(&c, "screen"), "incident: drain_absent") &&
+         dlx_has(dlx_str(&c, "screen"),
+                 "steer.wake_command: z23-dev dev land step");
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_adopt_incident(const struct dlx_adopt_fix *fx)
+{
+    struct dlx_call c;
+    bool stalled;
+    if (!dlx_queue_unchanged(fx))
+        return false;
+    if (!dlx_status_json(&c))
+        return false;
+    stalled = dlx_steer_stalled(&c, fx);
+    dlx_end(&c);
+    if (!stalled)
+        return false;
+    return dlx_screen_names_incident();
+}
+
+static bool dlx_arm_receive_count(struct dlx_adopt_fix *fx)
+{
+    char wrapper[700];
+    const char *count_push[4];
+    if ((size_t)snprintf(wrapper, sizeof(wrapper), "%s.receive-pack",
+                         fx->rig.bare) >= sizeof(wrapper))
+        return false;
+    if ((size_t)snprintf(fx->marker, sizeof(fx->marker),
+                         "%s/hooks/receive-invocations", fx->rig.bare) >=
+        sizeof(fx->marker))
+        return false;
+    if (!dlx_write(wrapper,
+                   "#!/bin/sh\n"
+                   "printf 'invoked\\n' >> \"$1/hooks/receive-invocations\" || exit 73\n"
+                   "exec git-receive-pack \"$@\"\n"))
+        return false;
+    if (chmod(wrapper, 0700) != 0)
+        return false;
+    count_push[0] = "config";
+    count_push[1] = "remote.origin.receivepack";
+    count_push[2] = wrapper;
+    count_push[3] = NULL;
+    return dlx_git(fx->rig.clone, count_push) == 0;
+}
+
+static void dlx_adopt_claim_child(void)
+{
+    struct dlx_call step;
+    (void)alarm(60);
+    dlx_begin(&step, "step");
+    if (!dlx_run(&step) || !dlx_ok(&step) ||
+        strcmp(dlx_str(&step, "state"), "started") != 0)
+        _exit(4);
+    _exit(0);
+}
+
+static bool dlx_one_claim_row(const struct dlx_adopt_fix *fx)
+{
+    char wire[8192];
+    size_t n = 0;
+    struct json_value row;
+    bool ok;
+    if (dlx_file_exists(fx->marker))
+        return false;
+    if (!dlx_slurp(fx->qpath, wire, sizeof(wire), &n))
+        return false;
+    json_init(&row);
+    if (!json_read(&row, wire, n)) {
+        json_free(&row);
+        return false;
+    }
+    ok = dlx_eq_str(dlx_jstr(&row, "state"), "inflight") &&
+         dlx_eq_str(dlx_jstr(&row, "phase"), "prove") &&
+         dlx_eq_i64(json_get_int(json_get(&row, "attempt")), 1, "attempt") &&
+         dlx_eq_str(dlx_jstr(&row, "tip"), fx->rig.tip);
+    json_free(&row);
+    return ok;
+}
+
+static bool dlx_inflight_only(const struct dlx_adopt_fix *fx)
+{
+    struct dlx_call c;
+    const struct json_value *flight;
+    const struct json_value *queued;
+    bool ok;
+    if (!dlx_status_json(&c))
+        return false;
+    flight = json_get(&c.reply.data, "in_flight");
+    queued = dlx_arr(&c, "queued");
+    ok = flight && flight->type == JSON_OBJ &&
+         dlx_eq_str(dlx_jstr(flight, "tip"), fx->rig.tip) &&
+         dlx_eq_str(dlx_str(&c, "incident"), "none") &&
+         queued && queued->num_children == 0;
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_adopt_claim(struct dlx_adopt_fix *fx)
+{
+    pid_t pid;
+    if (!dlx_arm_receive_count(fx))
+        return false;
+    pid = fork();
+    if (pid < 0)
+        return false;
+    if (pid == 0) {
+        dlx_adopt_claim_child();
+        _exit(4);
+    }
+    if (!dlx_child_ok(pid, 0))
+        return false;
+    if (!dlx_one_claim_row(fx))
+        return false;
+    return dlx_inflight_only(fx);
+}
+
+static void dlx_adopt_push_child(void)
+{
+    struct dlx_call step;
+    (void)alarm(60);
+    dlx_begin(&step, "step");
+    if (!dlx_run(&step) || !dlx_ok(&step) ||
+        strcmp(dlx_str(&step, "state"), "landed") != 0)
+        _exit(5);
+    dlx_end(&step);
+    dlx_begin(&step, "step");
+    if (!dlx_run(&step) || !dlx_ok(&step) ||
+        strcmp(dlx_str(&step, "state"), "empty") != 0)
+        _exit(6);
+    _exit(0);
+}
+
+static bool dlx_receive_once(const struct dlx_adopt_fix *fx)
+{
+    char wire[64];
+    size_t n = 0;
+    if (!dlx_slurp(fx->marker, wire, sizeof(wire), &n))
+        return false;
+    return n == 8 && memcmp(wire, "invoked\n", 8) == 0;
+}
+
+static bool dlx_refetch_matches(const struct dlx_adopt_fix *fx)
+{
+    char after[64], fetched[64];
+    const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
+    const char *rev[] = { "rev-parse", "origin/main", NULL };
+    if (!dlx_origin_main(&fx->rig, after))
+        return false;
+    if (strcmp(after, fx->rig.tip) != 0)
+        return false;
+    if (dlx_git(fx->rig.clone, fetch) != 0)
+        return false;
+    if (dlx_git_out(fx->rig.clone, rev, fetched, sizeof(fetched)) != 0)
+        return false;
+    return strcmp(fetched, fx->rig.tip) == 0 && strcmp(fetched, after) == 0;
+}
+
+static bool dlx_step_empty(void)
+{
+    struct dlx_call c;
+    bool empty;
+    dlx_begin(&c, "step");
+    if (!dlx_run(&c) || !dlx_ok(&c)) {
+        dlx_end(&c);
+        return false;
+    }
+    empty = strcmp(dlx_str(&c, "state"), "empty") == 0;
+    dlx_end(&c);
+    return empty;
+}
+
+static bool dlx_adopt_push(struct dlx_adopt_fix *fx)
+{
+    pid_t pid;
+    setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+    pid = fork();
+    if (pid < 0)
+        return false;
+    if (pid == 0) {
+        dlx_adopt_push_child();
+        _exit(6);
+    }
+    if (!dlx_child_ok(pid, 0))
+        return false;
+    if (!dlx_receive_once(fx) || !dlx_refetch_matches(fx))
+        return false;
+    if (!dlx_step_empty())
+        return false;
+    return dlx_receive_once(fx);
+}
+
+static int test_dev_land_drain_adoption(void)
+{
+    int failures = 0;
+    TEST("land: dead publisher leaves the queued row; one integrator adopts and pushes once") {
+        struct dlx_adopt_fix fx;
+        dlx_isolate("drain_adopt");
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_DRAIN_IDLE_SEC", "0", 1);
+        ASSERT(dlx_adopt_submit(&fx));
+        ASSERT(dlx_adopt_while_held(&fx));
+        ASSERT(dlx_adopt_incident(&fx));
+        ASSERT(dlx_adopt_claim(&fx));
+        ASSERT(dlx_adopt_push(&fx));
         PASS();
     }
 _test_next:;
@@ -3588,6 +4055,7 @@ int test_dev_land(void)
     }
 
     failures += test_dev_land_publisher_death();
+    failures += test_dev_land_drain_adoption();
     failures += test_dev_land_postpush_observation_missing(false);
     failures += test_dev_land_postpush_observation_missing(true);
     failures += test_dev_land_postpush_result_unconfirmed();

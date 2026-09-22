@@ -48,9 +48,25 @@
  *
  * OUTPUT (zcl.land.v1) on ok=true: leaf is always "dev.land", plus per
  * action: submit {seq, tip, state:"queued"}; status {queued, in_flight,
- * outcomes} plus screen unless json=true; step {state} where state is one of
- * empty | started | proving | landed | failed | conflict | rebased; cancel
- * {seq, state:"cancelled"}.
+ * outcomes, steer, incident} plus screen unless json=true; step {state}
+ * where state is one of empty | started | proving | landed | failed |
+ * conflict | rebased; cancel {seq, state:"cancelled"}.
+ *
+ * STEER. status fills one steer object for the row step would pick
+ * (the in-flight row, else the oldest queued row, else explicit none):
+ * candidate, seq, phase, owner, lease, proof_state, receiver_driver,
+ * first_missing_transition, wake_command, remote_state. remote_state is
+ * the cached origin/main ref in the submitting checkout, never a fetch.
+ * owner is the step.lock holder's pid while a beat holds the lock, and
+ * unclaimed when the lock is free. incident is drain_absent when that
+ * row is still queued, the lock is observably free, and either the
+ * z23-land-step timer is not armed or the row is older than the drain
+ * idle bound (ZCL_LAND_DRAIN_IDLE_SEC, default 900s — a healthy timer
+ * claims within one 20s period, so 900s is a dead drain, not a gap
+ * between beats). The wake command is then `z23-dev dev land step`:
+ * another authorized integrator adopts by calling that same step. A
+ * held lock is not an incident; a second step returns STEP_BUSY and
+ * does not push. status does not create step.lock and does not hold it.
  *
  * step ALSO fails closed with code STEP_BUSY (ZCL_COMMAND_STATUS_BLOCKED,
  * retryable) when another step is already driving this queue: no row is
@@ -132,6 +148,9 @@
 #include <io.h>
 #else
 #include <sys/file.h>
+#endif
+#if defined(__linux__)
+#include <sys/sysmacros.h>
 #endif
 
 /* mingw's <fcntl.h> has no O_CLOEXEC: descriptors on Windows are not
@@ -1879,6 +1898,603 @@ static void dl_cancel(const struct zcl_command_request *req,
     reply->exit_code = 0;
 }
 
+/* ── steer: one re-readable projection of the row step would pick ──────── */
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+static const char DL_WAKE_STEP[] = "z23-dev dev land step";
+static const char DL_WAKE_BUSY[] =
+    "none (step.lock held; z23-dev dev land step returns STEP_BUSY and does not push)";
+
+enum dl_beat {
+    DL_BEAT_FREE = 0,
+    DL_BEAT_HELD = 1,
+    DL_BEAT_UNKNOWN = 2
+};
+
+enum dl_timer_unit {
+    DL_TIMER_ABSENT = 0,
+    DL_TIMER_ARMED = 1,
+    DL_TIMER_UNKNOWN = 2
+};
+
+struct dl_steer_view {
+    char candidate[80];
+    long long seq;
+    char phase[24];
+    char owner[32];
+    char lease[24];
+    char proof_state[128];
+    char receiver_driver[96];
+    char missing[24];
+    char wake[180];
+    char remote_state[96];
+    char incident[24];
+};
+
+static int64_t dl_drain_idle_bound_s(void)
+{
+    const char *forced = getenv("ZCL_LAND_DRAIN_IDLE_SEC");
+    long parsed;
+    if (!forced || !forced[0])
+        return 900;
+    parsed = strtol(forced, NULL, 10);
+    if (parsed < 0)
+        return 900;
+    return (int64_t)parsed;
+}
+
+/* Howard Hinnant's civil-from-days inverse, days since 1970-01-01 UTC. */
+static int64_t dl_civil_days(int year, int month, int day)
+{
+    int64_t y = year;
+    int m = month;
+    int64_t era;
+    unsigned yoe, doy, doe;
+    y -= m <= 2;
+    m += m > 2 ? -3 : 9;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = (unsigned)(y - era * 400);
+    doy = (153u * (unsigned)m + 2u) / 5u + (unsigned)day - 1u;
+    doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    return era * 146097 + (int64_t)doe - 719468;
+}
+
+static bool dl_iso_unix(const char *ts, int64_t *out)
+{
+    int y, mo, d, h, mi, s;
+    if (!ts || sscanf(ts, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6)
+        return false;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31)
+        return false;
+    if (h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 60)
+        return false;
+    *out = dl_civil_days(y, mo, d) * 86400 +
+           (int64_t)h * 3600 + (int64_t)mi * 60 + s;
+    return true;
+}
+
+static int64_t dl_row_age(const struct dl_row *row, int64_t now, int64_t bound)
+{
+    int64_t then = 0;
+    int64_t age;
+    if (!row || !dl_iso_unix(row->ts, &then))
+        return bound;
+    age = now - then;
+    if (age < 0)
+        return 0;
+    return age;
+}
+
+static bool dl_lock_holder_pid(const char *path, int *pid_out)
+{
+#if !defined(__linux__)
+    (void)path;
+    (void)pid_out;
+    return false;
+#else
+    struct stat st;
+    FILE *f;
+    char line[256];
+    unsigned maj, min;
+    unsigned long ino;
+    if (!path || !pid_out || stat(path, &st) != 0)
+        return false;
+    maj = major(st.st_dev);
+    min = minor(st.st_dev);
+    ino = (unsigned long)st.st_ino;
+    f = fopen("/proc/locks", "re");
+    if (!f)
+        return false;
+    while (fgets(line, sizeof(line), f)) {
+        int pid = 0;
+        unsigned lm = 0, ln = 0;
+        unsigned long lino = 0;
+        if (sscanf(line, "%*d: FLOCK ADVISORY WRITE %d %x:%x:%lu",
+                   &pid, &lm, &ln, &lino) != 4)
+            continue;
+        if (lm == maj && ln == min && lino == ino && pid > 0) {
+            *pid_out = pid;
+            (void)fclose(f);
+            return true;
+        }
+    }
+    (void)fclose(f);
+    return false;
+#endif
+}
+
+#if defined(_WIN32)
+static enum dl_beat dl_beat_state(const char *landdir, int *pid_out)
+{
+    (void)landdir;
+    if (pid_out)
+        *pid_out = 0;
+    return DL_BEAT_UNKNOWN;
+}
+#else
+/* Observes step.lock. Does not create it and does not keep it: status is
+ * not a beat. LOCK_EX|LOCK_NB fails while a step holds the lock. */
+static enum dl_beat dl_beat_state(const char *landdir, int *pid_out)
+{
+    char path[4096 + 32];
+    int fd;
+    int err;
+    if (pid_out)
+        *pid_out = 0;
+    if (!landdir ||
+        snprintf(path, sizeof(path), "%s/step.lock", landdir) >=
+            (int)sizeof(path))
+        return DL_BEAT_UNKNOWN;
+    fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT)
+            return DL_BEAT_FREE;
+        return DL_BEAT_UNKNOWN;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        (void)flock(fd, LOCK_UN);
+        (void)close(fd);
+        return DL_BEAT_FREE;
+    }
+    err = errno;
+    (void)close(fd);
+    if (err == EWOULDBLOCK || err == EAGAIN) {
+        if (pid_out)
+            (void)dl_lock_holder_pid(path, pid_out);
+        return DL_BEAT_HELD;
+    }
+    return DL_BEAT_UNKNOWN;
+}
+#endif
+
+static enum dl_timer_unit dl_timer_unit_state(void)
+{
+    const char *home = getenv("HOME");
+    char path[4096];
+    struct stat st;
+    int n;
+    if (!home || !home[0])
+        return DL_TIMER_UNKNOWN;
+    n = snprintf(path, sizeof(path),
+                 "%s/.config/systemd/user/timers.target.wants/"
+                 "z23-land-step.timer",
+                 home);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return DL_TIMER_UNKNOWN;
+    if (lstat(path, &st) == 0)
+        return DL_TIMER_ARMED;
+    return DL_TIMER_ABSENT;
+}
+
+static const char *dl_timer_word(enum dl_timer_unit timer)
+{
+    if (timer == DL_TIMER_ARMED)
+        return "timer_unit=armed";
+    if (timer == DL_TIMER_ABSENT)
+        return "timer_unit=absent";
+    return "timer_unit=unknown";
+}
+
+static const struct dl_row *dl_pick_steer(const struct dl_row *rows, size_t n)
+{
+    size_t i;
+    if (!rows)
+        return NULL;
+    for (i = 0; i < n; i++) {
+        if (strcmp(rows[i].state, "inflight") == 0)
+            return &rows[i];
+    }
+    for (i = 0; i < n; i++) {
+        if (strcmp(rows[i].state, "queued") == 0)
+            return &rows[i];
+    }
+    return NULL;
+}
+
+static const char *dl_missing_of(const struct dl_row *row)
+{
+    if (!row)
+        return "none";
+    if (strcmp(row->state, "queued") == 0)
+        return "claim";
+    if (strcmp(row->state, "inflight") != 0)
+        return "none";
+    if (row->phase[0] == '\0' || strcmp(row->phase, "rebase") == 0 ||
+        strcmp(row->phase, "regen") == 0)
+        return "rebase";
+    if (strcmp(row->phase, "prebuild") == 0)
+        return "lint";
+    if (strcmp(row->phase, "prove") == 0)
+        return "proof";
+    if (strcmp(row->phase, "push") == 0)
+        return "push";
+    return "other";
+}
+
+static void dl_one_line(const char *in, char *out, size_t cap)
+{
+    size_t j = 0;
+    if (!out || cap == 0)
+        return;
+    if (!in)
+        in = "";
+    while (in[0] && j + 1 < cap) {
+        char c = in[0];
+        if (c == '\n' || c == '\r' || c == '\t')
+            c = ' ';
+        out[j++] = c;
+        in++;
+    }
+    out[j] = '\0';
+}
+
+static void dl_steer_phase(const struct dl_row *row, char *out, size_t cap)
+{
+    if (strcmp(row->state, "queued") == 0) {
+        (void)snprintf(out, cap, "queued");
+        return;
+    }
+    if (row->phase[0])
+        (void)snprintf(out, cap, "%s", row->phase);
+    else
+        (void)snprintf(out, cap, "inflight");
+}
+
+static void dl_steer_proof(const struct dl_row *row, char *out, size_t cap)
+{
+    if (strcmp(row->phase, "prove") == 0) {
+        if (row->detail[0])
+            dl_one_line(row->detail, out, cap);
+        else
+            (void)snprintf(out, cap, "pending");
+        return;
+    }
+    if (strcmp(row->phase, "push") == 0) {
+        (void)snprintf(out, cap, "passed");
+        return;
+    }
+    (void)snprintf(out, cap, "not_requested");
+}
+
+static bool dl_drain_absent(const struct dl_row *row, enum dl_beat beat,
+                            enum dl_timer_unit timer, int64_t age,
+                            int64_t bound)
+{
+    if (!row)
+        return false;
+    if (strcmp(row->state, "queued") != 0)
+        return false;
+    if (beat != DL_BEAT_FREE)
+        return false;
+    if (timer == DL_TIMER_ABSENT)
+        return true;
+    return age >= bound;
+}
+
+static bool dl_copy_path(const char *src, char *out, size_t cap)
+{
+    size_t n;
+    if (!src || !out || cap == 0)
+        return false;
+    n = strlen(src);
+    if (n + 1 > cap)
+        return false;
+    memcpy(out, src, n + 1);
+    return true;
+}
+
+static bool dl_join_realpath(const char *base, const char *rel,
+                             char *out, size_t cap)
+{
+    char joined[PATH_MAX];
+    char resolved[PATH_MAX];
+    if (!base || !rel || !rel[0])
+        return false;
+    if (snprintf(joined, sizeof(joined), "%s/%s", base, rel) >=
+        (int)sizeof(joined))
+        return false;
+    if (!realpath(joined, resolved))
+        return false;
+    return dl_copy_path(resolved, out, cap);
+}
+
+static bool dl_gitdir_file(const char *wt, const char *git_file,
+                           char *out, size_t cap)
+{
+    char buf[512];
+    char *p;
+    if (!dl_read_file(git_file, buf, sizeof(buf), NULL))
+        return false;
+    if (strncmp(buf, "gitdir: ", 8) != 0)
+        return false;
+    p = buf + 8;
+    dl_trim(p);
+    while (*p == ' ')
+        p++;
+    if (p[0] == '/')
+        return dl_copy_path(p, out, cap);
+    return dl_join_realpath(wt, p, out, cap);
+}
+
+static bool dl_resolve_gitdir(const char *wt, char *out, size_t cap)
+{
+    char path[4096];
+    struct stat st;
+    if (!wt ||
+        snprintf(path, sizeof(path), "%s/.git", wt) >= (int)sizeof(path))
+        return false;
+    if (stat(path, &st) != 0)
+        return false;
+    if (S_ISDIR(st.st_mode))
+        return dl_copy_path(path, out, cap);
+    return dl_gitdir_file(wt, path, out, cap);
+}
+
+static bool dl_loose_sha(const char *gitdir, const char *ref, char out[80])
+{
+    char path[4096];
+    char buf[80];
+    if (!gitdir || !ref ||
+        snprintf(path, sizeof(path), "%s/%s", gitdir, ref) >= (int)sizeof(path))
+        return false;
+    if (!dl_read_file(path, buf, sizeof(buf), NULL))
+        return false;
+    dl_trim(buf);
+    if (!dl_sha_ok(buf))
+        return false;
+    memcpy(out, buf, 41);
+    return true;
+}
+
+static bool dl_sha_from_packed(char *text, const char *ref, char out[80])
+{
+    char *save = NULL;
+    char *line;
+    if (!text || !ref)
+        return false;
+    for (line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *sp;
+        if (line[0] == '#' || line[0] == '^' || line[0] == '\0')
+            continue;
+        sp = strchr(line, ' ');
+        if (!sp)
+            continue;
+        *sp = '\0';
+        if (strcmp(sp + 1, ref) != 0)
+            continue;
+        if (!dl_sha_ok(line))
+            return false;
+        memcpy(out, line, 40);
+        out[40] = '\0';
+        return true;
+    }
+    return false;
+}
+
+static bool dl_packed_sha(const char *gitdir, const char *ref, char out[80])
+{
+    char path[4096];
+    char *text;
+    bool ok;
+    if (!gitdir ||
+        snprintf(path, sizeof(path), "%s/packed-refs", gitdir) >=
+            (int)sizeof(path))
+        return false;
+    text = (char *)zcl_malloc(DL_FILE_CAP, "dev.land.packed-refs");
+    if (!text)
+        return false;
+    ok = dl_read_file(path, text, DL_FILE_CAP, NULL) &&
+         dl_sha_from_packed(text, ref, out);
+    free(text);
+    return ok;
+}
+
+static bool dl_ref_sha(const char *gitdir, char out[80])
+{
+    static const char ref[] = "refs/remotes/origin/main";
+    if (dl_loose_sha(gitdir, ref, out))
+        return true;
+    return dl_packed_sha(gitdir, ref, out);
+}
+
+static bool dl_common_gitdir(const char *gitdir, char *out, size_t cap)
+{
+    char path[4096];
+    char buf[512];
+    if (!gitdir ||
+        snprintf(path, sizeof(path), "%s/commondir", gitdir) >=
+            (int)sizeof(path))
+        return false;
+    if (!dl_read_file(path, buf, sizeof(buf), NULL))
+        return false;
+    dl_trim(buf);
+    if (!buf[0])
+        return false;
+    if (buf[0] == '/')
+        return dl_copy_path(buf, out, cap);
+    return dl_join_realpath(gitdir, buf, out, cap);
+}
+
+static void dl_cached_remote(const char *wt, char *out, size_t cap)
+{
+    char gitdir[PATH_MAX];
+    char common[PATH_MAX];
+    char sha[80];
+    if (!wt || !wt[0]) {
+        (void)snprintf(out, cap, "unknown: no submitter worktree");
+        return;
+    }
+    if (!dl_resolve_gitdir(wt, gitdir, sizeof(gitdir))) {
+        (void)snprintf(out, cap, "unknown: gitdir unreadable");
+        return;
+    }
+    if (dl_ref_sha(gitdir, sha) ||
+        (dl_common_gitdir(gitdir, common, sizeof(common)) &&
+         dl_ref_sha(common, sha))) {
+        (void)snprintf(out, cap, "cached:%s", sha);
+        return;
+    }
+    (void)snprintf(out, cap, "unknown: cached origin/main ref missing");
+}
+
+static void dl_driver_idle(enum dl_beat beat, enum dl_timer_unit timer,
+                           char *out, size_t cap)
+{
+    if (beat == DL_BEAT_HELD) {
+        (void)snprintf(out, cap, "beat_active");
+        return;
+    }
+    if (beat == DL_BEAT_FREE)
+        (void)snprintf(out, cap, "idle %s", dl_timer_word(timer));
+    else
+        (void)snprintf(out, cap, "unknown: step.lock unreadable %s",
+                       dl_timer_word(timer));
+}
+
+static void dl_steer_compose(const struct dl_dirs *d, const struct dl_row *rows,
+                             size_t nrows, int64_t now, struct dl_steer_view *s)
+{
+    const struct dl_row *row;
+    enum dl_beat beat;
+    enum dl_timer_unit timer;
+    int pid = 0;
+    int64_t bound = dl_drain_idle_bound_s();
+    int64_t age;
+
+    memset(s, 0, sizeof(*s));
+    (void)snprintf(s->candidate, sizeof(s->candidate), "none");
+    (void)snprintf(s->phase, sizeof(s->phase), "none");
+    (void)snprintf(s->owner, sizeof(s->owner), "none");
+    (void)snprintf(s->lease, sizeof(s->lease), "none");
+    (void)snprintf(s->proof_state, sizeof(s->proof_state), "none");
+    (void)snprintf(s->missing, sizeof(s->missing), "none");
+    (void)snprintf(s->wake, sizeof(s->wake), "none");
+    (void)snprintf(s->remote_state, sizeof(s->remote_state),
+                   "unknown: no eligible row");
+    (void)snprintf(s->incident, sizeof(s->incident), "none");
+    timer = dl_timer_unit_state();
+    beat = dl_beat_state(d ? d->land : NULL, &pid);
+    dl_driver_idle(beat, timer, s->receiver_driver, sizeof(s->receiver_driver));
+    row = dl_pick_steer(rows, nrows);
+    if (!row)
+        return;
+    (void)snprintf(s->candidate, sizeof(s->candidate), "%s", row->tip);
+    s->seq = row->seq;
+    dl_steer_phase(row, s->phase, sizeof(s->phase));
+    dl_steer_proof(row, s->proof_state, sizeof(s->proof_state));
+    (void)snprintf(s->missing, sizeof(s->missing), "%s", dl_missing_of(row));
+    dl_cached_remote(row->worktree, s->remote_state, sizeof(s->remote_state));
+    age = dl_row_age(row, now, bound);
+    if (beat == DL_BEAT_HELD) {
+        if (pid > 0)
+            (void)snprintf(s->owner, sizeof(s->owner), "pid:%d", pid);
+        else
+            (void)snprintf(s->owner, sizeof(s->owner), "pid:unknown");
+        (void)snprintf(s->lease, sizeof(s->lease), "step.lock:held");
+        (void)snprintf(s->wake, sizeof(s->wake), "%s", DL_WAKE_BUSY);
+        (void)snprintf(s->receiver_driver, sizeof(s->receiver_driver),
+                       "beat_active");
+        return;
+    }
+    (void)snprintf(s->owner, sizeof(s->owner), "unclaimed");
+    (void)snprintf(s->lease, sizeof(s->lease), "none");
+    (void)snprintf(s->wake, sizeof(s->wake), "%s", DL_WAKE_STEP);
+    if (beat == DL_BEAT_FREE)
+        (void)snprintf(s->receiver_driver, sizeof(s->receiver_driver),
+                       "no_active_drain %s", dl_timer_word(timer));
+    else
+        (void)snprintf(s->receiver_driver, sizeof(s->receiver_driver),
+                       "unknown: step.lock unreadable %s",
+                       dl_timer_word(timer));
+    if (dl_drain_absent(row, beat, timer, age, bound))
+        (void)snprintf(s->incident, sizeof(s->incident), "drain_absent");
+}
+
+static void dl_steer_append_screen(char *screen, size_t cap, size_t *used,
+                                   const struct dl_steer_view *s)
+{
+    int w;
+    if (!screen || !used || !s || *used >= cap)
+        return;
+    w = snprintf(screen + *used, cap - *used,
+                 "steer.candidate: %s\n"
+                 "steer.seq: %lld\n"
+                 "steer.phase: %s\n"
+                 "steer.owner: %s\n"
+                 "steer.lease: %s\n"
+                 "steer.proof_state: %s\n"
+                 "steer.receiver_driver: %s\n"
+                 "steer.first_missing_transition: %s\n"
+                 "steer.wake_command: %s\n"
+                 "steer.remote_state: %s\n"
+                 "incident: %s\n",
+                 s->candidate, s->seq, s->phase, s->owner, s->lease,
+                 s->proof_state, s->receiver_driver, s->missing, s->wake,
+                 s->remote_state, s->incident);
+    if (w > 0 && (size_t)w < cap - *used)
+        *used += (size_t)w;
+}
+
+static void dl_steer_push(struct zcl_command_reply *reply,
+                          const struct dl_steer_view *s)
+{
+    struct json_value obj;
+    if (!reply || !s)
+        return;
+    json_init(&obj);
+    json_set_object(&obj);
+    (void)json_push_kv_str(&obj, "candidate", s->candidate);
+    (void)json_push_kv_int(&obj, "seq", s->seq);
+    (void)json_push_kv_str(&obj, "phase", s->phase);
+    (void)json_push_kv_str(&obj, "owner", s->owner);
+    (void)json_push_kv_str(&obj, "lease", s->lease);
+    (void)json_push_kv_str(&obj, "proof_state", s->proof_state);
+    (void)json_push_kv_str(&obj, "receiver_driver", s->receiver_driver);
+    (void)json_push_kv_str(&obj, "first_missing_transition", s->missing);
+    (void)json_push_kv_str(&obj, "wake_command", s->wake);
+    (void)json_push_kv_str(&obj, "remote_state", s->remote_state);
+    (void)json_push_kv(&reply->data, "steer", &obj);
+    (void)json_push_kv_str(&reply->data, "incident", s->incident);
+    json_free(&obj);
+}
+
+static void dl_status_attach_steer(struct zcl_command_reply *reply,
+                                   const struct dl_dirs *d,
+                                   const struct dl_row *rows, size_t nrows,
+                                   int64_t now, char *screen, size_t screen_cap,
+                                   size_t *used, bool want_json)
+{
+    struct dl_steer_view sv;
+    dl_steer_compose(d, rows, nrows, now, &sv);
+    if (!want_json)
+        dl_steer_append_screen(screen, screen_cap, used, &sv);
+    dl_steer_push(reply, &sv);
+}
+
 /* ── status ────────────────────────────────────────────────────────────── */
 
 static bool dl_push_queued(struct json_value *arr, const struct dl_row *r)
@@ -2061,6 +2677,8 @@ static void dl_status(const struct zcl_command_request *req,
         }
     }
 render_done:
+    dl_status_attach_steer(reply, &d, rows, nrows, now, screen, sizeof(screen),
+                           &used, want_json);
     free(rows);
     (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
     (void)json_push_kv(&reply->data, "queued", &queued);

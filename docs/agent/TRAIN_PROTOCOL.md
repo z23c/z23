@@ -86,7 +86,7 @@ push. `dev land` splits that in two so no agent waits for any of it.
 | Verb | What it does | What it waits for |
 | --- | --- | --- |
 | `dev land submit --tip <sha> [--worktree <dir>] [--note <text>]` | Checks the tip exists, is signed, and shares history with origin/main, then appends one request row to `<state>/land/queue.jsonl` and returns `{seq, tip, state: "queued"}`. | Nothing. It is a file append. |
-| `dev land status [--json]` | One screen: what is queued, the one request in flight with its phase, elapsed time and attempt, and the last ten outcomes with the tip that was pushed or the failing dimension and its log path. | Nothing. It reads files. |
+| `dev land status [--json]` | One screen: what is queued, the one request in flight with its phase, elapsed time and attempt, and the last ten outcomes with the tip that was pushed or the failing dimension and its log path. The same read fills one `steer` record (candidate, seq, phase, owner, lease, proof state, receiver/driver, first missing transition, wake command, cached remote ref) and sets `incident` to `drain_absent` when a queued row has no beat because the land timer is unarmed or the row is older than the drain idle bound. The wake command is `z23-dev dev land step`. | Nothing. It reads the queue, probes `step.lock` without holding it, and reads the cached origin/main ref. It does not fetch. |
 | `dev land step` | One scheduler beat, for a resident loop or timer to call. | Nothing that is another host's work. |
 | `dev land cancel --seq N` | Drops one request and records the cancellation. | Nothing. |
 
