@@ -29,11 +29,13 @@ zcode.science.fetch kind      # pointer resolver reads its private RPC selector 
 dev.agent.worker attempt    # worker sub-dispatches fixed claim inputs to dev.agent.queue; request->input never reaches the nested attempt key.
 dev.agent.worker priority  # worker sub-dispatches fixed claim inputs to dev.agent.queue; request->input never reaches the nested priority key.
 dev.agent.worker json       # worker sub-dispatches a fixed status+json object to dev.agent.queue; request->input never reaches the nested json key.
+dev.agent.worker terminate  # worker sub-dispatches fixed claim, reap, and status objects to dev.agent.queue; request->input never reaches the nested terminate key.
 dev.agent.worker body       # worker injects its own fixed result body into a private dev.agent.mail post; request->input never reaches that nested object.
 dev.agent.worker since      # dev.agent.mail reads since only on the pull branch; the worker only posts, so the read is dead here.
 fleet.steer.grant attempt   # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; request->input never reaches the nested attempt key.
 fleet.steer.grant priority # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; request->input never reaches the nested priority key.
 fleet.steer.grant json      # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; request->input never reaches the nested json key.
+fleet.steer.grant terminate # grant revoke injects terminate only into its private cancel object when the stored grant scopes name it; request->input never reaches that nested key.
 zcode.science.fetch namespace # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch semantic_root # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch transport_root # provider discovery reads its private RPC selector built by fetch; request->input never reaches that helper.
@@ -156,3 +158,4 @@ dev.agent.receive since     # the receiver builds its own pull object {action,si
 dev.agent.receive attempt   # the receiver sub-dispatches fixed post+status objects to dev.agent.queue, which reads attempt only on its claim/reap branches; request->input never reaches that nested key.
 dev.agent.receive priority  # the receiver composes its own post object from the muse-priority header; request->input never reaches the nested priority key.
 dev.agent.receive json      # the receiver sub-dispatches a fixed status+name object to dev.agent.queue; request->input never reaches the nested json key.
+dev.agent.receive terminate # the receiver sub-dispatches fixed post and status objects to dev.agent.queue; request->input never reaches the nested terminate key.
