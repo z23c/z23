@@ -78,7 +78,9 @@ static bool include_source_file(const char *path, void *opaque)
     const char *name = strrchr(path, '/');
     return !name || strcmp(name + 1, "excluded.tmp") != 0;
 }
+#endif
 
+#if !defined(_WIN32)
 static bool watcher_write(const char *path)
 {
     int fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0600);
@@ -121,7 +123,9 @@ static int directory_watcher_access_replace(const char *root)
     platform_directory_watcher_close(&watcher);
     return ok ? 0 : 1;
 }
+#endif
 
+#if defined(__APPLE__)
 static int directory_watcher_filtered_probe(const char *root)
 {
     char ignored[1200], hidden[1200], excluded[1200], visible[1200], swap[1200];
@@ -196,10 +200,12 @@ int test_directory_watcher(void)
         failures++;
     }
     (void)test_rm_rf_recursive(dir);
-#if defined(__APPLE__)
+#if !defined(_WIN32)
     test_make_tmpdir(dir, sizeof(dir), "directory_watcher", "access-replace");
     failures += directory_watcher_access_replace(dir);
     (void)test_rm_rf_recursive(dir);
+#endif
+#if defined(__APPLE__)
     test_make_tmpdir(dir, sizeof(dir), "directory_watcher", "filtered");
     printf("directory_watcher: filtered kqueue recursion ignores generated "
            "subtrees/files but observes source-root creates and writes... ");
