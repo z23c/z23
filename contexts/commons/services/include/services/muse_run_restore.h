@@ -26,7 +26,9 @@
  * artifact names. Ignored files are never listed by the fold and are
  * never touched. HEAD never moves: no commit, stash, reset of HEAD, or
  * branch change. A workspace that is not measurably clean afterwards
- * reports restored=false.
+ * reports restored=false. Once the tree measures clean at base, the
+ * index stat cache is refreshed so a stat-only reader agrees it is
+ * clean; a refresh failure reports incomplete, never half-undone.
  */
 #ifndef ZCL_SERVICES_MUSE_RUN_RESTORE_H
 #define ZCL_SERVICES_MUSE_RUN_RESTORE_H

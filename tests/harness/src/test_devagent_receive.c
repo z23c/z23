@@ -1637,6 +1637,37 @@ int test_devagent_receive(void)
         PASS();
     }
 
+    TEST("a second preapproved task under the same grant admits unaided")
+    {
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        char first[4096], second[4096];
+        rtx_isolate("second-admit");
+        /* One grant, no human between beats: the second distinct ref must
+         * admit on its own preapproval, with its own queue row + accept. */
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction(first, sizeof(first), "hex_codec", "First intent.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-2a", first, 1));
+        rtx_opts(&o, 1);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(st.refused, 0);
+        rtx_direction(second, sizeof(second), "hex_codec", "Second intent.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-2b", second, 2));
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(st.refused, 0);
+        ASSERT_EQ(st.reconciled, 0);
+        ASSERT_EQ(rtx_queue_count("queued", "job-2a"), 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-2b"), 1);
+        ASSERT_EQ(rtx_answers("job-2a", "state=accepted"), 1);
+        ASSERT_EQ(rtx_answers("job-2b", "state=accepted"), 1);
+        rtx_restore();
+        PASS();
+    }
+
     TEST("an accept is never posted merely because bytes arrived")
     {
         struct rcv_drive_opts o;

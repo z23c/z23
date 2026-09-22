@@ -551,6 +551,22 @@ static const char *mrr_settled(const struct mrr_state *st)
     return NULL;
 }
 
+/* After a verified settlement the bytes are base, but the index still
+ * carries the pre-turn stat while the rewritten files carry fresh mtimes
+ * — and even `git status` reports clean without writing the refresh
+ * back. The receiver's intake reads stat only, so it would refuse the
+ * next job DIRTY on byte-identical content. `update-index --refresh`
+ * syncs stat for content-matching files and never masks a real change:
+ * a content-dirty path is reported, not refreshed. */
+static const char *mrr_refresh_index(const struct mrr_state *st)
+{
+    const char *argv[] = { "git", "-C", st->in->workspace, "update-index",
+                           "--refresh", NULL };
+    if (!mrr_git_ok(argv))
+        return "incomplete: the index stat cache could not be refreshed";
+    return NULL;
+}
+
 /* Every path the scope audit names must be accounted for by the artifact:
  * the tracked half's paths (a rename counted as both halves, as the audit
  * counts it) plus the untracked rows. A fold that stopped short of the
@@ -603,6 +619,12 @@ static const char *mrr_apply(struct mrr_state *st, const char *patch,
     if (half_undone) *half_undone = true;
     why = mrr_undo(st, patch);
     if (!why) why = mrr_settled(st);
+    if (!why) {
+        /* The tree is verified at base: what follows cannot leave it
+         * half-undone, only incompletely settled for the next reader. */
+        if (half_undone) *half_undone = false;
+        why = mrr_refresh_index(st);
+    }
     if (!why && half_undone) *half_undone = false;
     return why;
 }

@@ -672,6 +672,10 @@ static const char *const wkr_env_allow[] = {
     "PATHEXT",    "ComSpec",     "USERPROFILE",  "HOMEDRIVE",
     "HOMEPATH",   "LOCALAPPDATA", "APPDATA",     "XDG_STATE_HOME",
     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    /* `muse serve` resolves its config/auth directory from
+     * XDG_CONFIG_HOME or HOME and exits before the handshake when
+     * neither is usable; without this entry no live turn can start. */
+    "HOME",
 };
 
 static bool wkr_env_put(char storage[][WKR_ENV_ENTRY_MAX], const char **ptrs,

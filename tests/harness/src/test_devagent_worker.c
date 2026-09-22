@@ -1271,14 +1271,20 @@ static int wtx_confine_cases(void)
         static char store[WKR_ENV_MAX][WKR_ENV_ENTRY_MAX];
         const char *env[WKR_ENV_MAX + 1];
         static char saved_path[8192];
+        static char saved_home[8192];
         const char *old_path = getenv("PATH");
+        const char *old_home = getenv("HOME");
         bool had_path = old_path != NULL;
+        bool had_home = old_home != NULL;
         int n;
         if (had_path)
             (void)snprintf(saved_path, sizeof(saved_path), "%s", old_path);
+        if (had_home)
+            (void)snprintf(saved_home, sizeof(saved_home), "%s", old_home);
         setenv("ANTHROPIC_API_KEY", "wtx-secret-anthropic", 1);
         setenv("GITHUB_TOKEN", "wtx-secret-github", 1);
         setenv("PATH", "/usr/bin:/bin", 1);
+        setenv("HOME", "/wtx/home", 1);
         n = zcl_devagent_worker_child_env("/run/dir", store, env,
                                           WKR_ENV_MAX);
         unsetenv("ANTHROPIC_API_KEY");
@@ -1287,11 +1293,19 @@ static int wtx_confine_cases(void)
             setenv("PATH", saved_path, 1);
         else
             unsetenv("PATH");
+        if (had_home)
+            setenv("HOME", saved_home, 1);
+        else
+            unsetenv("HOME");
         ASSERT(n >= 3);
         ASSERT(env[n] == NULL);
         ASSERT(wtx_env_has(env, "PATH=/usr/bin:/bin"));
         ASSERT(wtx_env_has(env, "TEMP=/run/dir"));
         ASSERT(wtx_env_has(env, "TMP=/run/dir"));
+        /* `muse serve` resolves its config/auth from XDG_CONFIG_HOME or
+         * HOME and exits before the handshake when neither is usable, so
+         * the child must carry HOME. */
+        ASSERT(wtx_env_has(env, "HOME=/wtx/home"));
         ASSERT(!wtx_env_has(env, "wtx-secret"));
         ASSERT(!wtx_env_has(env, "ANTHROPIC"));
         ASSERT(!wtx_env_has(env, "TOKEN"));

@@ -2669,6 +2669,74 @@ static int mr_exec_restore_pass(void)
     return failures;
 }
 
+/* A restore that rewrites byte-identical content must also settle the
+ * index stat cache. The receiver's intake reads stat only (git's own
+ * shortcut: size, mode bits, mtime seconds), and `git apply -R` plus
+ * `git restore --staged` leave the index holding the pre-turn stat while
+ * the files carry fresh mtimes — while even `git status` reports clean
+ * without writing the refresh back. The next admitted job on that
+ * workspace then refuses DIRTY until something refreshes the index.
+ *
+ * This drives the restore entry directly: the fake-turn rig installs a
+ * core.fsmonitor hook that makes every `git status` rescan and rewrite
+ * the index, which heals exactly the staleness this case must show. */
+static int mr_exec_restore_settles_index(void)
+{
+    int failures = 0;
+    struct mr_dirs d;
+    struct muse_restore_in in;
+    struct rcv_workspace w;
+    char base[64] = "";
+    char hex[64] = "";
+    char *fold = NULL;
+    char artifact[8192];
+    char cf[128];
+    char why[256] = "";
+    char reason[256] = "";
+    char path[8192];
+    bool half = true;
+    bool restored_ok;
+    memset(&in, 0, sizeof(in));
+    memset(&w, 0, sizeof(w));
+    MR_CHECK("settle lane", mr_lane(&d));
+    MR_CHECK("settle seed", mr_seed_committed(&d, "src/sum.c", "orig\n"));
+    MR_CHECK("settle base", muse_head_at(d.wt, base, sizeof(base)));
+    /* Force a second boundary between the commit and the restore, so the
+     * stale index stat the undo leaves behind cannot match by luck. */
+    sleep(1);
+    (void)snprintf(path, sizeof(path), "%s/src/sum.c", d.wt);
+    MR_CHECK("settle turn", mr_write(path, "orig\nTURN\n", 0));
+    MR_CHECK("settle fold",
+        muse_candidate_fold(d.wt, d.run, hex, sizeof(hex), &fold, why,
+            sizeof(why)));
+    (void)snprintf(artifact, sizeof(artifact), "%s/candidate-%s.diff",
+        d.run, hex);
+    (void)snprintf(cf, sizeof(cf), "candidate-%s.diff", hex);
+    MR_CHECK("settle publish", fold && mr_write(artifact, fold, 0));
+    free(fold);
+    fold = NULL;
+    in.workspace = d.wt;
+    in.rundir = d.run;
+    in.base = base;
+    in.candidate = hex;
+    in.candidate_file = cf;
+    in.pre_clean = true;
+    restored_ok = muse_restore_workspace(&in, reason, sizeof(reason), &half);
+    MR_CHECK("settle restored", restored_ok && !half);
+    MR_CHECK("settle content", mr_file_is(d.wt, "src/sum.c", "orig\n"));
+    MR_CHECK("settle intake-clean",
+        zcl_devagent_workspace_observe(d.wt, true, &w) && w.directory &&
+        w.resolved && w.checkout && w.dirty == 0);
+    /* Real byte changes still refuse: detection is not weakened. The
+     * size change makes this deterministic whatever the mtime reads. */
+    MR_CHECK("settle re-dirty",
+        mr_write(path, "orig\nREAL DIRT\n", 0));
+    memset(&w, 0, sizeof(w));
+    MR_CHECK("settle dirt seen",
+        zcl_devagent_workspace_observe(d.wt, true, &w) && w.dirty != 0);
+    return failures;
+}
+
 /* A judged-and-rejected run and a refused-after-the-turn run both leave
  * a verified candidate, so both are restored too. */
 static int mr_exec_restore_rejected(void)
@@ -3178,6 +3246,7 @@ static int mr_failures_restore(void)
 {
     int failures = 0;
     failures += mr_exec_restore_pass();
+    failures += mr_exec_restore_settles_index();
     failures += mr_exec_restore_rejected();
     failures += mr_exec_restore_not_baseline();
     failures += mr_exec_restore_unverified();
