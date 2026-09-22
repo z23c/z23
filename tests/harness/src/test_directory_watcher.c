@@ -79,6 +79,49 @@ static bool include_source_file(const char *path, void *opaque)
     return !name || strcmp(name + 1, "excluded.tmp") != 0;
 }
 
+static bool watcher_write(const char *path)
+{
+    int fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0600);
+    if (fd < 0) { perror("directory_watcher: open document"); return false; }
+    bool wrote = write(fd, "x", 1) == 1;
+    bool closed = close(fd) == 0;
+    if (!wrote || !closed) perror("directory_watcher: write document");
+    return wrote && closed;
+}
+
+static void watcher_observation(const char *label, bool ok)
+{
+    printf("directory_watcher: %s... %s\n", label, ok ? "OK" : "FAIL");
+}
+
+static int directory_watcher_access_replace(const char *root)
+{
+    char child[1200], retired[1200], document[1200];
+    (void)snprintf(child, sizeof(child), "%s/current", root);
+    (void)snprintf(retired, sizeof(retired), "%s/retired", root);
+    (void)snprintf(document, sizeof(document), "%s/current/task.txt", root);
+    struct platform_directory_watcher watcher;
+    platform_directory_watcher_init(&watcher);
+    bool ok = mkdir(child, 0700) == 0 && watcher_write(document) &&
+        platform_directory_watcher_open(&watcher, root);
+    ok = ok && chmod(document, 0400) == 0 &&
+        platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) ==
+            PLATFORM_DIRECTORY_WATCH_CHANGED;
+    watcher_observation("document access change observed", ok);
+    ok = ok && rename(child, retired) == 0 && mkdir(child, 0700) == 0 &&
+        watcher_write(document) &&
+        platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) ==
+            PLATFORM_DIRECTORY_WATCH_CHANGED;
+    watcher_observation("replaced nested document directory observed", ok);
+    ok = ok && platform_directory_watcher_wait(&watcher, 50, NULL, NULL) ==
+        PLATFORM_DIRECTORY_WATCH_TIMEOUT && watcher_write(document) &&
+        platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) ==
+            PLATFORM_DIRECTORY_WATCH_CHANGED;
+    watcher_observation("later edit in replacement observed", ok);
+    platform_directory_watcher_close(&watcher);
+    return ok ? 0 : 1;
+}
+
 static int directory_watcher_filtered_probe(const char *root)
 {
     char ignored[1200], hidden[1200], excluded[1200], visible[1200], swap[1200];
@@ -154,6 +197,9 @@ int test_directory_watcher(void)
     }
     (void)test_rm_rf_recursive(dir);
 #if defined(__APPLE__)
+    test_make_tmpdir(dir, sizeof(dir), "directory_watcher", "access-replace");
+    failures += directory_watcher_access_replace(dir);
+    (void)test_rm_rf_recursive(dir);
     test_make_tmpdir(dir, sizeof(dir), "directory_watcher", "filtered");
     printf("directory_watcher: filtered kqueue recursion ignores generated "
            "subtrees/files but observes source-root creates and writes... ");
