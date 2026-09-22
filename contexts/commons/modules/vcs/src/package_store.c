@@ -282,6 +282,27 @@ static long store_pick_victim(struct vcs_package_store *store,
     return best;
 }
 
+/* A new manifest is refused when it can never fit the pool it will land
+ * in. A pre-existing pin marker charges PINS, which never evicts, so the
+ * package must fit the bytes still free in that budget. An unpinned
+ * manifest must fit both its eventual class pool and the staging pool it
+ * assembles in. */
+static bool store_manifest_pool_fits(struct vcs_package_store *store,
+                                     bool pre_pinned, uint64_t total_bytes,
+                                     enum vcs_package_store_pool eventual)
+{
+    if (total_bytes > store_pool_budget(store, eventual))
+        return false;
+    if (!pre_pinned)
+        return total_bytes <=
+               store_pool_budget(store, VCS_PACKAGE_STORE_POOL_STAGING);
+    uint64_t budget = store_pool_budget(store, VCS_PACKAGE_STORE_POOL_PINS);
+    uint64_t used = store_pool_usage_locked(store, VCS_PACKAGE_STORE_POOL_PINS);
+    if (used > budget)
+        return false;
+    return total_bytes <= budget - used;
+}
+
 /* Make room for incoming_bytes in pool, evicting (HOT/RARE only) until
  * it fits. STAGING and PINS never evict. False = no room and no victim. */
 static bool store_ensure_room(struct vcs_package_store *store,
@@ -562,18 +583,16 @@ enum vcs_package_store_result vcs_package_store_put_manifest(
         return VCS_PACKAGE_STORE_ERR_LIMIT;
     }
 
-    /* Early feasibility: the package must fit the pool it will end in
-     * (pins if a marker pre-exists, else rare) and, unpinned, the staging
-     * pool it assembles in. A package that can never fit is refused now. */
+    /* Early feasibility: the package must fit the pool it will end in.
+     * A pin marker charges the pins budget, which never evicts, so a
+     * package that does not fit the bytes still free is refused before
+     * any manifest or chunk is admitted. */
     char pin[STORE_PATH_MAX];
     snprintf(pin, sizeof(pin), "%s/pins/%s", store->root, root_hex);
     bool pre_pinned = store_path_exists(pin);
     enum vcs_package_store_pool eventual =
         pre_pinned ? VCS_PACKAGE_STORE_POOL_PINS : VCS_PACKAGE_STORE_POOL_RARE;
-    if (total_bytes > store_pool_budget(store, eventual) ||
-        (!pre_pinned &&
-         total_bytes > store_pool_budget(store,
-                                         VCS_PACKAGE_STORE_POOL_STAGING))) {
+    if (!store_manifest_pool_fits(store, pre_pinned, total_bytes, eventual)) {
         store->quota_rejects_total++;
         pthread_mutex_unlock(&store->lock);
         return VCS_PACKAGE_STORE_ERR_QUOTA;

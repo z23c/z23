@@ -415,7 +415,7 @@ contexts/commons/modules/vcs/src/package_store.c:store_pick_victim:17
 contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_get_chunk:25
 contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_open:21
 contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_put_chunk:24
-contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_put_manifest:22
+contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_put_manifest:20
 contexts/commons/modules/vcs/src/package_store_io.c:store_atomic_write:25
 contexts/commons/modules/vcs/src/package_store_io.c:store_gc_cas:31
 contexts/commons/modules/vcs/src/package_store_io.c:store_load_manifests:21

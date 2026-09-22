@@ -509,6 +509,68 @@ static int store_case_pins_pre_existing_marker(struct vcs_package_store *s,
     return failures;
 }
 
+/* pre's marker carries no chunks, so L's 1000 bytes are the live pin
+ * charge. A second complete package fills the 2000-byte pins budget.
+ * A later marker whose package is smaller than the whole pool is still
+ * refused, and releasing one pin admits it. */
+static int store_case_pins_exhausted_refuses_manifest(
+    struct vcs_package_store *s, const char *dd, const char *paths[2],
+    const size_t lens[2])
+{
+    int failures = 0;
+    struct zs_pkg filler;
+    struct zs_pkg extra;
+    struct vcs_package_store_status st;
+    char marker[512];
+    char suffix[160];
+    FILE *f;
+    ZS_CHECK("pins: budget filler builds",
+             zs_make_package(&filler, 2, paths, lens, 0x22));
+    ZS_CHECK("pins: budget filler manifest admitted",
+             vcs_package_store_put_manifest(s, filler.wire, filler.wire_len,
+                                            NULL) == VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("pins: budget filler chunks stored",
+             zs_put_all(s, &filler) == VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("pins: budget filler pin fills the pool",
+             vcs_package_store_pin(s, filler.root, true) ==
+                 VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("pins: pins pool is exactly full",
+             vcs_package_store_pool_usage(s, VCS_PACKAGE_STORE_POOL_PINS) ==
+                 2000);
+    ZS_CHECK("pins: refused-manifest fixture builds",
+             zs_make_package(&extra, 2, paths, lens, 0x11));
+    snprintf(suffix, sizeof(suffix), "pins/%s", extra.root_hex);
+    zs_store_path(marker, sizeof(marker), dd, suffix);
+    f = fopen(marker, "wb");
+    ZS_CHECK("pins: exhausted-budget marker planted", f != NULL);
+    if (f)
+        fclose(f);
+    ZS_CHECK("pins: exhausted pin budget refuses the new manifest",
+             vcs_package_store_put_manifest(s, extra.wire, extra.wire_len,
+                                            NULL) ==
+                 VCS_PACKAGE_STORE_ERR_QUOTA);
+    ZS_CHECK("pins: refused manifest was not tracked",
+             !vcs_package_store_package_status(s, extra.root, &st));
+    ZS_CHECK("pins: the refusal kept the filler pin",
+             vcs_package_store_package_status(s, filler.root, &st) &&
+             st.pinned);
+    ZS_CHECK("pins: pins pool stayed at the budget",
+             vcs_package_store_pool_usage(s, VCS_PACKAGE_STORE_POOL_PINS) ==
+                 2000);
+    ZS_CHECK("pins: releasing the filler pin",
+             vcs_package_store_pin(s, filler.root, false) ==
+                 VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("pins: the released budget admits the refused manifest",
+             vcs_package_store_put_manifest(s, extra.wire, extra.wire_len,
+                                            NULL) == VCS_PACKAGE_STORE_OK);
+    ZS_CHECK("pins: admitted manifest honors its pin marker",
+             vcs_package_store_package_status(s, extra.root, &st) &&
+             st.pinned && st.pool == VCS_PACKAGE_STORE_POOL_PINS);
+    zs_free_package(&filler);
+    zs_free_package(&extra);
+    return failures;
+}
+
 static int store_case_pins_possession_fails_after_missing_byte(
     struct vcs_package_store *s, const char *dd, struct zs_pkg *l)
 {
@@ -561,6 +623,8 @@ int t_store_pins(void)
     struct zs_pkg pre;
     failures += store_case_pins_pre_existing_marker(s, dd, paths, lens,
                                                      &pre);
+    failures += store_case_pins_exhausted_refuses_manifest(s, dd, paths,
+                                                            lens);
     failures += store_case_pins_possession_fails_after_missing_byte(s, dd,
                                                                      &l);
 
