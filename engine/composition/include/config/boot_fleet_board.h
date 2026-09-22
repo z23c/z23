@@ -231,6 +231,12 @@ void boot_fleet_board_fleet_test_bind_authority(
     const struct vcs_zcode_dht_delegation *peer_delegation,
     const uint8_t network_genesis[32], int64_t now);
 void boot_fleet_board_fleet_test_new_epoch(void);
+/* Durable resume: remember the pull cursor under `dir`, drop the in-memory
+ * copy the way a process restart does, and read the `after` the next pull
+ * asked. NULL clears the directory. */
+void boot_fleet_board_fleet_test_cursor_dir(const char *dir);
+void boot_fleet_board_fleet_test_restart_cursors(void);
+int64_t boot_fleet_board_fleet_test_last_after(void);
 #endif
 
 #endif /* ZCL_CONFIG_BOOT_FLEET_BOARD_H */

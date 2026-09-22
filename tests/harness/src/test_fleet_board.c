@@ -3193,6 +3193,58 @@ static int test_fleet_board_public_no_grant_needed(void)
     return failures;
 }
 
+/* The paired pull's resume point is a file, not only this process. After
+ * one page the in-memory cursor is dropped the way a restart drops it, and
+ * the next pull must ask where the file says, not from arrival 0. */
+static int test_fleet_board_fleet_cursor_resumes(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    static struct fleet_board_post posts[FBW_POSTS];
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-cursor-test" };
+    char dir[512];
+    size_t frames = 0;
+    int64_t resumed = 0;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    test_make_tmpdir(dir, sizeof(dir), "fleet_board", "cursor");
+    boot_fleet_board_fleet_test_cursor_dir(dir);
+    bool opened = fbw_open(&w);
+
+    TEST("fleet board carriage: a restart resumes the paired pull from the "
+         "saved cursor") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        for (int i = 0; i < FBW_POSTS; i++) {
+            char text[48];
+            (void)snprintf(text, sizeof(text), "resume note %d", i);
+            ASSERT(fbw_post(&w.a, 11, FLEET_BOARD_SCOPE_FLEET, text,
+                            2000 + i, 3600, 2100, &posts[i]));
+        }
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames),
+                  (size_t)FLEET_BOARD_FLEET_ANSWER_POSTS_MAX);
+        ASSERT_EQ(boot_fleet_board_fleet_test_last_after(), (int64_t)0);
+        boot_fleet_board_fleet_test_restart_cursors();
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames),
+                  (size_t)(FBW_POSTS - FLEET_BOARD_FLEET_ANSWER_POSTS_MAX));
+        resumed = boot_fleet_board_fleet_test_last_after();
+        ASSERT(resumed > 0);
+        ASSERT(fbw_holds_all(&w.b, posts, FBW_POSTS));
+        PASS();
+    }
+    _test_next:
+    boot_fleet_board_fleet_test_cursor_dir(NULL);
+    fbw_close(&w);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -3235,6 +3287,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_scope_store();
     failures += test_fleet_board_reclaim_expired();
     failures += test_fleet_board_fleet_carriage();
+    failures += test_fleet_board_fleet_cursor_resumes();
     failures += test_fleet_board_fleet_carriage_gap_free();
     failures += test_fleet_board_fleet_quota();
     failures += test_fleet_board_public_no_grant_needed();

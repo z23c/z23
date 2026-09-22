@@ -28,6 +28,8 @@
 #include "crypto/random_secret.h"
 #include "models/fleet_board_post.h"
 #include "models/mesh_pairing.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "services/mesh_pairing_service.h"
 #include "supervisors/domains.h"
@@ -105,6 +107,7 @@ static zcl_once_t g_lock_once = ZCL_ONCE_INIT;
 static struct boot_svc_ctx *g_svc; /* borrowed; set by wire() */
 static struct board_inbox_slot g_inbox[FLEET_BOARD_FLEET_INBOX_MAX];
 static struct board_cursor g_cursors[FLEET_BOARD_FLEET_PEERS_MAX];
+static bool g_cursors_loaded;
 static struct liveness_contract g_contract;
 static supervisor_child_id g_child = SUPERVISOR_INVALID_ID;
 static int64_t g_last_pull;
@@ -127,6 +130,8 @@ static bool g_test_authority;
 static struct vcs_zcode_dht_delegation g_test_delegation;
 static uint8_t g_test_genesis[32];
 static int64_t g_test_now;
+static char g_test_cursor_dir[512];
+static int64_t g_test_last_after;
 #endif
 
 static void board_lock_init(void)
@@ -560,6 +565,166 @@ static struct board_cursor *board_cursor_slot(const uint8_t box_id[32],
     return free_slot;
 }
 
+/* One durable cursor record. Fixed width so a short or long file is
+ * refused whole and the pull starts again from the beginning, which
+ * dedupe by post id keeps correct. */
+#define BOARD_CURSOR_REC (4u + 32u + FLEET_BOARD_FLEET_EPOCH_BYTES + 32u)
+#define BOARD_CURSOR_MAGIC "FBc1"
+
+static bool board_cursor_file(char *out, size_t cap)
+{
+#ifdef ZCL_TESTING
+    if (g_test_cursor_dir[0]) {
+        int n = snprintf(out, cap, "%s/fleet-board-cursors", g_test_cursor_dir);
+        return n > 0 && (size_t)n < cap;
+    }
+#endif
+    struct node_db *ndb = board_db();
+    const char *slash = ndb ? strrchr(ndb->path, '/') : NULL;
+    if (!ndb || ndb->path[0] == '\0' || ndb->path[0] == ':' || !slash ||
+        slash == ndb->path)
+        return false;
+    int n = snprintf(out, cap, "%.*s/fleet-board-cursors",
+                     (int)(slash - ndb->path), ndb->path);
+    return n > 0 && (size_t)n < cap;
+}
+
+static void board_cursor_pack(const struct board_cursor *c, uint8_t *out)
+{
+    out[0] = c->epoch_known ? 1u : 0u;
+    out[1] = c->sweep_active ? 1u : 0u;
+    out[2] = c->sweep_turn ? 1u : 0u;
+    out[3] = 0;
+    memcpy(out + 4, c->peer_box_id, 32);
+    memcpy(out + 36, c->epoch, FLEET_BOARD_FLEET_EPOCH_BYTES);
+    zcl_write_u64_be(out + 36 + FLEET_BOARD_FLEET_EPOCH_BYTES,
+                     (uint64_t)c->next);
+    zcl_write_u64_be(out + 44 + FLEET_BOARD_FLEET_EPOCH_BYTES,
+                     (uint64_t)c->carry_min);
+    zcl_write_u64_be(out + 52 + FLEET_BOARD_FLEET_EPOCH_BYTES,
+                     (uint64_t)c->sweep_pos);
+    zcl_write_u64_be(out + 60 + FLEET_BOARD_FLEET_EPOCH_BYTES,
+                     (uint64_t)c->sweep_end);
+}
+
+static bool board_cursor_unpack(const uint8_t *in, struct board_cursor *out)
+{
+    uint64_t next = zcl_read_u64_be(in + 36 + FLEET_BOARD_FLEET_EPOCH_BYTES);
+    uint64_t carry = zcl_read_u64_be(in + 44 + FLEET_BOARD_FLEET_EPOCH_BYTES);
+    uint64_t spos = zcl_read_u64_be(in + 52 + FLEET_BOARD_FLEET_EPOCH_BYTES);
+    uint64_t send = zcl_read_u64_be(in + 60 + FLEET_BOARD_FLEET_EPOCH_BYTES);
+    if (next > (uint64_t)INT64_MAX || carry > (uint64_t)INT64_MAX ||
+        spos > (uint64_t)INT64_MAX || send > (uint64_t)INT64_MAX)
+        return false;
+    memset(out, 0, sizeof *out);
+    out->used = true;
+    out->epoch_known = in[0] != 0;
+    out->sweep_active = in[1] != 0;
+    out->sweep_turn = in[2] != 0;
+    memcpy(out->peer_box_id, in + 4, 32);
+    memcpy(out->epoch, in + 36, FLEET_BOARD_FLEET_EPOCH_BYTES);
+    out->next = (int64_t)next;
+    out->carry_min = (int64_t)carry;
+    out->sweep_pos = (int64_t)spos;
+    out->sweep_end = (int64_t)send;
+    return true;
+}
+
+static void board_cursor_write(const struct board_cursor *rows, size_t n)
+{
+    char path[1200];
+    uint8_t *buf = NULL;
+    struct platform_private_file file;
+    size_t bytes = 8u + n * BOARD_CURSOR_REC;
+    if (!board_cursor_file(path, sizeof path))
+        return;
+    buf = zcl_malloc(bytes, "fleet-board-cursors");
+    if (!buf)
+        return;
+    memcpy(buf, BOARD_CURSOR_MAGIC, 4);
+    zcl_write_u32_be(buf + 4, (uint32_t)n);
+    for (size_t i = 0; i < n; i++)
+        board_cursor_pack(&rows[i], buf + 8u + i * BOARD_CURSOR_REC);
+    platform_private_file_init(&file);
+    if (platform_private_file_open_locked_create(path, &file)) {
+        bool ok = platform_private_file_truncate(&file, 0) &&
+                  platform_private_file_write_at(&file, buf, bytes, 0) &&
+                  platform_private_file_authority_flush(&file);
+        platform_private_file_close(&file);
+        if (!ok)
+            LOG_WARN("fleet.board",
+                     "fleet pull cursor was not saved: path=%s", path);
+    }
+    free(buf);
+}
+
+static size_t board_cursor_read(const char *path, struct board_cursor *out,
+                                size_t cap)
+{
+    struct platform_positioned_file file;
+    uint8_t head[8];
+    uint8_t *buf = NULL;
+    uint64_t size = 0;
+    uint32_t count = 0;
+    size_t n = 0;
+    bool ok = false;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        return 0;
+    ok = platform_positioned_file_size(&file, &size) && size >= 8 &&
+         platform_positioned_file_read(&file, head, 8, 0) == 8;
+    if (ok) {
+        count = zcl_read_u32_be(head + 4);
+        ok = memcmp(head, BOARD_CURSOR_MAGIC, 4) == 0 && count <= cap &&
+             size == 8u + (uint64_t)count * BOARD_CURSOR_REC;
+    }
+    if (ok && count > 0) {
+        buf = zcl_malloc((size_t)count * BOARD_CURSOR_REC,
+                         "fleet-board-cursors");
+        ok = buf && platform_positioned_file_read(
+                        &file, buf, (size_t)count * BOARD_CURSOR_REC, 8) ==
+                        (int64_t)((size_t)count * BOARD_CURSOR_REC);
+    }
+    platform_positioned_file_close(&file);
+    if (!ok) {
+        free(buf);
+        LOG_WARN("fleet.board",
+                 "fleet pull cursor file was unreadable; pulls start again");
+        return 0;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        if (board_cursor_unpack(buf + (size_t)i * BOARD_CURSOR_REC, &out[n]))
+            n++;
+    }
+    free(buf);
+    return n;
+}
+
+/* Fill an empty in-memory table from the cursor file once per process.
+ * A missing file is a box that has never pulled. A later forget (a test
+ * bind, or shutdown) clears the flag so the next pull reads again. */
+static void board_cursors_load(void)
+{
+    char path[1200];
+    struct board_cursor snap[FLEET_BOARD_FLEET_PEERS_MAX];
+    size_t n = 0;
+    bool loaded = false;
+    board_lock();
+    loaded = g_cursors_loaded;
+    board_unlock();
+    if (loaded)
+        return;
+    if (board_cursor_file(path, sizeof path))
+        n = board_cursor_read(path, snap, FLEET_BOARD_FLEET_PEERS_MAX);
+    board_lock();
+    if (!g_cursors_loaded) {
+        for (size_t i = 0; i < n && i < FLEET_BOARD_FLEET_PEERS_MAX; i++)
+            g_cursors[i] = snap[i];
+        g_cursors_loaded = true;
+    }
+    board_unlock();
+}
+
 /* Choose the next pull toward one peer. While anything is waiting on a
  * sweep, pulls alternate: a forward page, then a sweep page, so new posts
  * keep flowing while refused ones are offered again. A sweep starts at the
@@ -568,6 +733,7 @@ static void board_plan_pull(struct board_ask *ask)
 {
     ask->after = 0;
     ask->sweep = false;
+    board_cursors_load();
     board_lock();
     struct board_cursor *c = board_cursor_slot(ask->peer_box_id, true);
     if (c) {
@@ -583,6 +749,9 @@ static void board_plan_pull(struct board_ask *ask)
         c->sweep_turn = pending && !ask->sweep;
     }
     board_unlock();
+#ifdef ZCL_TESTING
+    g_test_last_after = ask->after;
+#endif
 }
 
 /* Copy one peer's cursor out, so the store is written with no lock held.
@@ -603,11 +772,19 @@ static bool board_cursor_load(const uint8_t box_id[32],
  * stores back. */
 static void board_cursor_store(const struct board_cursor *in)
 {
+    struct board_cursor snap[FLEET_BOARD_FLEET_PEERS_MAX];
+    size_t n = 0;
     board_lock();
     struct board_cursor *c = board_cursor_slot(in->peer_box_id, false);
     if (c)
         *c = *in;
+    for (size_t i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX; i++) {
+        if (g_cursors[i].used)
+            snap[n++] = g_cursors[i];
+    }
+    g_cursors_loaded = true;
     board_unlock();
+    board_cursor_write(snap, n);
 }
 
 /* Is this answer's numbering the one the cursor holds? A different epoch
@@ -978,6 +1155,7 @@ static void board_forget_locked(void)
         free(g_inbox[i].rows);
     memset(g_inbox, 0, sizeof g_inbox);
     memset(g_cursors, 0, sizeof g_cursors);
+    g_cursors_loaded = false;
     g_last_pull = 0;
 }
 
@@ -1096,5 +1274,27 @@ void boot_fleet_board_fleet_test_new_epoch(void)
     board_lock();
     g_epoch_ready = false;
     board_unlock();
+}
+
+void boot_fleet_board_fleet_test_cursor_dir(const char *dir)
+{
+    board_lock();
+    g_test_cursor_dir[0] = '\0';
+    if (dir && dir[0])
+        (void)snprintf(g_test_cursor_dir, sizeof g_test_cursor_dir, "%s", dir);
+    board_unlock();
+}
+
+void boot_fleet_board_fleet_test_restart_cursors(void)
+{
+    board_lock();
+    memset(g_cursors, 0, sizeof g_cursors);
+    g_cursors_loaded = false;
+    board_unlock();
+}
+
+int64_t boot_fleet_board_fleet_test_last_after(void)
+{
+    return g_test_last_after;
 }
 #endif
