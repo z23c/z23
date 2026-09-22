@@ -16,6 +16,7 @@
 #include "command/native_command.h"
 #include "command/native_dev_index_catalog.h"
 #include "command/native_dev_index_ingest.h"
+#include "command/native_dev_index_parse.h"
 #include "command/native_dev_index_search.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -47,6 +48,21 @@ static bool dvi_append(const char *path, const char *text)
     size_t len = strlen(text);
     bool wrote = fwrite(text, 1, len, f) == len;
     return fclose(f) == 0 && wrote;
+}
+
+/* One log line longer than the ingest buffer, then one short line. The
+ * long line's first token sits inside the buffer so a truncated store
+ * would still make it searchable. */
+static bool dvi_write_overlong_log(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = fputs("overlongprefix ", f) >= 0;
+    for (size_t i = 0; ok && i < DEV_INDEX_LINE_MAX; i++)
+        ok = fputc('x', f) != EOF;
+    ok = ok && fputs(" tailtoken\nkeptshortline\n", f) >= 0;
+    return fclose(f) == 0 && ok;
 }
 
 /* platform_directory_ensure() creates exactly one level; fixtures here
@@ -449,7 +465,27 @@ int test_dev_index(void)
         PASS();
     }
 
-    (void)log_src;
+    TEST("index: a line past the import bound is skipped, not stored "
+        "truncated") {
+        char log_file[800];
+        (void)snprintf(log_file, sizeof(log_file), "%s/note.log", root);
+        ASSERT(dvi_write_overlong_log(log_file));
+        struct dev_index_ingest_result r;
+        ASSERT(dev_index_ingest_source(db, log_src, root, &r, err,
+                                       sizeof(err)));
+        ASSERT(r.rows_added == 1);
+        ASSERT(r.rows_skipped == 1);
+        struct dev_index_search_result res;
+        ASSERT(dev_index_search(db, "overlongprefix", "logs", 10, &res, err,
+                                sizeof(err)));
+        ASSERT(res.count == 0);
+        ASSERT(dev_index_search(db, "keptshortline", "logs", 10, &res, err,
+                                sizeof(err)));
+        ASSERT(res.count == 1);
+        ASSERT(strstr(res.hits[0].text, "keptshortline") != NULL);
+        PASS();
+    }
+
 _test_next:;
     dev_index_db_close(db);
     (void)test_rm_rf_recursive(parent);

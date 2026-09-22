@@ -323,7 +323,10 @@ static int dev_index_insert_row(sqlite3 *db, const char *source_id,
     return rc == SQLITE_DONE ? 1 : -1;
 }
 
-/* ── line reader: complete lines only, offset-precise ───────────────── */
+/* ── line reader: complete lines only, offset-precise ─────────────────
+ * Returns 1 with a whole line in buf, 2 when the line continued past
+ * buf (the cursor still advances; the caller must not store the prefix),
+ * 0 when the file ends mid-line, and -1 on a read error. */
 
 static int dev_index_read_line(FILE *fp, char *buf, size_t buf_cap,
                                long *end_offset)
@@ -340,6 +343,7 @@ static int dev_index_read_line(FILE *fp, char *buf, size_t buf_cap,
     }
     size_t len = strlen(buf);
     bool got_newline = len > 0 && buf[len - 1] == '\n';
+    bool overlong = false;
     if (got_newline) {
         buf[--len] = '\0';
         if (len > 0 && buf[len - 1] == '\r')
@@ -352,6 +356,7 @@ static int dev_index_read_line(FILE *fp, char *buf, size_t buf_cap,
                 found = true;
                 break;
             }
+            overlong = true;
         }
         if (!found) {
             (void)fseek(fp, start, SEEK_SET);
@@ -362,7 +367,7 @@ static int dev_index_read_line(FILE *fp, char *buf, size_t buf_cap,
     if (end < 0)
         return -1;
     *end_offset = end;
-    return 1;
+    return overlong ? 2 : 1;
 }
 
 static bool dev_index_stat_file(const char *path, int64_t *inode,
@@ -401,6 +406,12 @@ static bool dev_index_ingest_lines(sqlite3 *db, const struct dev_index_source *s
         if (rc == 0) {
             *end_offset = before;
             return true;
+        }
+        /* A line that does not fit the bound is coverage loss, not a
+         * truncated row. The prefix is not evidence of the whole line. */
+        if (rc == 2) {
+            (*rows_skipped)++;
+            continue;
         }
         struct dev_index_fields f;
         if (!dev_index_parse_line(src, line, &f)) {
