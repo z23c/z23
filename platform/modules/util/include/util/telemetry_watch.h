@@ -130,6 +130,13 @@ struct telemetry_watch_batch {
     uint64_t last_sequence;   /* newest record the ring holds (0 = none) */
     uint64_t oldest_sequence; /* oldest record still held  (0 = none) */
     uint64_t dropped_count;   /* records the caller missed; > 0 iff `gap` */
+    /* The lost interval, inclusive start and exclusive end, in THIS epoch.
+     * Sequences [lost_from, lost_until) were published and are no longer in
+     * the ring. Both are 0 when nothing was lost. When epoch_changed, the
+     * interval is in the new feed; the dead epoch's sequences are not
+     * addressable. dropped_count == lost_until - lost_from when gap is set. */
+    uint64_t lost_from;
+    uint64_t lost_until;
     uint64_t published_total; /* records ever published in this epoch */
     bool gap;                 /* the resume fell behind the ring */
     bool epoch_changed;       /* the caller's epoch is not this feed's */

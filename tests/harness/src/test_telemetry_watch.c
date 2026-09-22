@@ -179,6 +179,13 @@ static int check_resume_returns_only_subsequent(void)
  * window that looks like a quiet period silently corrupts an agent's model of
  * the node. */
 
+static bool tw_interval_is(const struct telemetry_watch_batch *b,
+                          uint64_t from, uint64_t until)
+{
+    return b->lost_from == from && b->lost_until == until &&
+           b->lost_until - b->lost_from == b->dropped_count;
+}
+
 static int check_overrun_ring_reports_the_gap(void)
 {
     int failures = 0;
@@ -196,6 +203,8 @@ static int check_overrun_ring_reports_the_gap(void)
     TW_CHECK("[watch] the gap is flagged", gapped.gap);
     TW_CHECK("[watch] dropped_count states exactly how many records were lost",
              gapped.dropped_count == overrun);
+    TW_CHECK("[watch] the lost interval is [1, oldest still held)",
+             tw_interval_is(&gapped, 1, gapped.oldest_sequence));
     TW_CHECK("[watch] the batch resumes at the OLDEST record still held, not "
              "at the caller's dead cursor",
              gapped.count > 0 &&
@@ -218,6 +227,8 @@ static int check_overrun_ring_reports_the_gap(void)
     TW_CHECK("[watch] a quiet period returns an empty batch", quiet.count == 0);
     TW_CHECK("[watch] a quiet period is not a gap and drops nothing",
              !quiet.gap && quiet.dropped_count == 0);
+    TW_CHECK("[watch] a quiet period names an empty lost interval",
+             tw_interval_is(&quiet, 0, 0));
     TW_CHECK("[watch] a quiet period names its own, different reason",
              quiet.reason &&
              strcmp(quiet.reason,
@@ -367,6 +378,14 @@ static int check_reply_fits_its_budget(void)
     TW_CHECK("[watch] and reported the gap the widest-record overrun created",
              json_get_bool(json_get(&reply.data, "gap")) &&
              json_get_int(json_get(&reply.data, "dropped_count")) > 0);
+    TW_CHECK("[watch] the reply names the lost interval, and its length is "
+             "the dropped count",
+             json_get_int(json_get(&reply.data, "lost_from")) >= 1 &&
+             json_get_int(json_get(&reply.data, "lost_until")) >
+                 json_get_int(json_get(&reply.data, "lost_from")) &&
+             json_get_int(json_get(&reply.data, "lost_until")) -
+                     json_get_int(json_get(&reply.data, "lost_from")) ==
+                 json_get_int(json_get(&reply.data, "dropped_count")));
     TW_CHECK("[watch] the reply states the pre-computed record cap it used",
              json_get_int(json_get(&reply.data, "batch_max_records")) >= 1);
     TW_CHECK("[watch] the reply carries a ready-to-run resume that is DATA, "

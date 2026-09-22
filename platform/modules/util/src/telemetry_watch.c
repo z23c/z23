@@ -202,6 +202,10 @@ bool telemetry_watch_read(uint64_t since, uint64_t since_epoch,
     if (g_held > 0 && first < out->oldest_sequence) {
         out->gap = true;
         out->dropped_count = out->oldest_sequence - first;
+        /* [lost_from, lost_until) is the hole. lost_until is the first
+         * sequence still held, which is where the batch resumes. */
+        out->lost_from = first;
+        out->lost_until = out->oldest_sequence;
         first = out->oldest_sequence;
     }
 

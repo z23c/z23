@@ -144,6 +144,9 @@ static bool twc_push_cursor(struct json_value *out,
     ok &= json_push_kv_int(out, "published_total", (int64_t)b->published_total);
     ok &= json_push_kv_bool(out, "gap", b->gap);
     ok &= json_push_kv_int(out, "dropped_count", (int64_t)b->dropped_count);
+    /* The hole itself, not only its length: [lost_from, lost_until). */
+    ok &= json_push_kv_int(out, "lost_from", (int64_t)b->lost_from);
+    ok &= json_push_kv_int(out, "lost_until", (int64_t)b->lost_until);
     ok &= json_push_kv_bool(out, "since_ahead", b->since_ahead);
     ok &= json_push_kv_bool(out, "more", b->more);
     ok &= json_push_kv_str(out, "reason", b->reason ? b->reason : "");
