@@ -577,6 +577,7 @@ static int test_immune_to_scan_cap(void)
          * had to find it cannot promise it reached that far. */
         ASSERT(rom_seed_find_by_root(report.artifact_root, NULL));
         ASSERT(report.seed_directory_entries > ROM_SEED_SCAN_ENTRY_CAP);
+        ASSERT(report.entries_beyond_cap > 0);
         ASSERT(!report.rescan_guaranteed);
 
         /* And the same call on an uncrowded directory reports the sweep as
@@ -589,6 +590,7 @@ static int test_immune_to_scan_cap(void)
         ASSERT(source_bundle_publish(wdir, bdir, NULL, &clean) ==
                SOURCE_BUNDLE_PUBLISH_OK);
         ASSERT(clean.rescan_guaranteed);
+        ASSERT(clean.entries_beyond_cap == 0);
         ASSERT(memcmp(clean.source_root, report.source_root, 32) == 0);
 
         fs_server_stop();

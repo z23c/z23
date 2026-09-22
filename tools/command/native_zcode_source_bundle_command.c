@@ -716,6 +716,7 @@ void zcl_native_handle_zcode_source_bundle_publish(
     zsb_carry(&reply->data, &body, "file_service_port");
     zsb_carry(&reply->data, &body, "republished");
     zsb_carry(&reply->data, &body, "seed_directory_entries");
+    zsb_carry(&reply->data, &body, "entries_beyond_cap");
     zsb_carry(&reply->data, &body, "rescan_guaranteed");
     zsb_carry(&reply->data, &body, "source_bytes");
     zsb_carry(&reply->data, &body, "file_count");

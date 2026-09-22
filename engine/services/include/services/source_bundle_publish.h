@@ -91,6 +91,10 @@ struct source_bundle_publish_report {
     /* Entries counted in the seeded bundles/ directory, stopping at
      * ROM_SEED_SCAN_ENTRY_CAP + 1 (the walk is bounded like the seeder's). */
     unsigned seed_directory_entries;
+    /* Directory entries the bounded walk did not classify, in the bundles
+     * directory and the datadir root together. Zero means the walk saw
+     * every entry. */
+    unsigned entries_beyond_cap;
     /* False when a future boot-time sweep could stop before reaching this
      * bundle — see the header comment. The sweep is bounded TWICE and the
      * registry is the tighter bound: it walks at most ROM_SEED_SCAN_ENTRY_CAP

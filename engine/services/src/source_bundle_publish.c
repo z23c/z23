@@ -172,24 +172,34 @@ static bool sbp_write_atomic(const char *staging, const char *final_path,
  * call serves it. An unopenable directory reports 0 of each, which is the
  * honest "nothing here is crowding it". */
 static unsigned sbp_seed_dir_entries(const char *dirpath,
-                                     unsigned *artifacts_out)
+                                     unsigned *artifacts_out,
+                                     unsigned *beyond_out)
 {
     if (artifacts_out)
         *artifacts_out = 0;
+    if (beyond_out)
+        *beyond_out = 0;
     DIR *d = opendir(dirpath);
     if (!d)
         return 0;
     unsigned seen = 0;
+    unsigned beyond = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
+        if (seen > ROM_SEED_SCAN_ENTRY_CAP) {
+            beyond++;
+            continue;
+        }
         seen++;
         if (seen > ROM_SEED_SCAN_ENTRY_CAP)
-            break;
+            continue;
         if (artifacts_out &&
             rom_seed_classify(e->d_name) != ROM_ARTIFACT_UNKNOWN)
             (*artifacts_out)++;
     }
     closedir(d);
+    if (beyond_out)
+        *beyond_out = beyond;
     return seen;
 }
 
@@ -361,9 +371,12 @@ enum source_bundle_publish_result source_bundle_publish(
      * shelf of bundles cannot keep. Both directories are counted, and every
      * classifying entry in either of them is a slot contender. */
     unsigned seed_artifacts = 0, root_artifacts = 0;
+    unsigned seed_beyond = 0, root_beyond = 0;
     report->seed_directory_entries =
-        sbp_seed_dir_entries(seed_dir, &seed_artifacts);
-    unsigned root_entries = sbp_seed_dir_entries(datadir, &root_artifacts);
+        sbp_seed_dir_entries(seed_dir, &seed_artifacts, &seed_beyond);
+    unsigned root_entries =
+        sbp_seed_dir_entries(datadir, &root_artifacts, &root_beyond);
+    report->entries_beyond_cap = seed_beyond + root_beyond;
     report->rescan_guaranteed =
         report->seed_directory_entries <= ROM_SEED_SCAN_ENTRY_CAP &&
         root_entries <= ROM_SEED_SCAN_ENTRY_CAP &&

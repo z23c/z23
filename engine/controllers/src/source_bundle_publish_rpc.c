@@ -115,6 +115,8 @@ static bool rpc_sourcebundle_publish(const struct json_value *params, bool help,
     json_push_kv_bool(result, "republished", report.republished);
     json_push_kv_int(result, "seed_directory_entries",
                      (int64_t)report.seed_directory_entries);
+    json_push_kv_int(result, "entries_beyond_cap",
+                     (int64_t)report.entries_beyond_cap);
     json_push_kv_bool(result, "rescan_guaranteed", report.rescan_guaranteed);
     json_push_kv_int(result, "source_bytes",
                      (int64_t)report.bundle.source_bytes);
