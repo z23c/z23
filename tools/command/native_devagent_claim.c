@@ -35,12 +35,15 @@
  *   worktree  `git rev-parse --show-toplevel`
  *   branch    `git rev-parse --abbrev-ref HEAD`, "" when detached
  *
- * SEMANTICS. A claim is LIVE while its line exists in the ledger.
+ * SEMANTICS. New claims are 15-minute leases. Repeating the same claim from
+ * the same worktree renews it. Expired rows are ignored for overlap and
+ * removed by the next successful claim. Rows without a valid expires_unix
+ * are legacy claims and remain live until their owner releases them.
  *   - A claim whose files intersect a live claim from a DIFFERENT worktree is
  *     refused: ok=false, status "CLAIM_OVERLAP", plus
  *     conflicts:[{file, worktree, story, claimed_at, branch}], one entry per
  *     offending file, plus ledger location. Missing historical metadata is
- *     empty; claim age never grants permission to reclaim another lane.
+ *     empty; age alone never reclaims a legacy claim.
  *     Nothing is written on refusal.
  *   - A claim from the SAME worktree REPLACES that worktree's own line, so
  *     re-claiming is idempotent and never overlaps itself.
@@ -59,6 +62,8 @@
  *            a release)
  *   ledger   absolute path of the ledger file
  *   live     number of live claim lines in the ledger after the write
+ *   expires_unix Unix expiry of a new claim; renew before this time
+ *   expired_reclaimed number of expired foreign rows removed by a claim
  *   released number of lines removed, present on a release
  *
  * FAILURE. A missing or empty `story`, or an empty `files` when release is
@@ -97,6 +102,7 @@
 #define DVC_PATH_CAP 1024
 #define DVC_LEDGER_MAX_ROWS 4096
 #define DVC_LEDGER_MAX_BYTES ((size_t)DVC_LEDGER_MAX_ROWS * DVC_LINE_CAP)
+#define DVC_LEASE_SECONDS 900
 
 /* ── git via the only allowed rail ──────────────────────────────────────── */
 
@@ -477,6 +483,24 @@ static bool dvc_line_is_ours(const char *line, const char *toplevel)
            strcmp(wt, toplevel) == 0;
 }
 
+/* Old rows and malformed expiry fields remain live: guessing that an owned
+ * worktree is idle would permit an overlapping writer. New rows are short
+ * leases; the owner renews by repeating the same claim before expiry. */
+static bool dvc_line_expired(const char *line, long long now)
+{
+    char *end = NULL;
+    const char *key = "\"expires_unix\":";
+    const char *p = strstr(line, key);
+    long long expiry;
+    if (!p)
+        return false;
+    p += strlen(key);
+    errno = 0;
+    expiry = strtoll(p, &end, 10);
+    return errno == 0 && end != p && expiry > 0 &&
+           (*end == ',' || *end == '}') && expiry <= now;
+}
+
 static bool dvc_stage_open(const char *path, char *tmp, size_t cap,
                            struct platform_private_file *file)
 {
@@ -504,11 +528,13 @@ static bool dvc_stage_line(struct platform_private_file *file,
  * truncate the previous claims; only the complete staged file replaces it. */
 static bool dvc_ledger_write(const char *path, const struct dvc_ledger *lg,
                              const char *toplevel, const char *newline,
-                             size_t *kept, size_t *released,
+                             long long now, size_t *kept, size_t *released,
+                             size_t *expired,
                              struct zcl_command_reply *reply)
 {
     *kept = 0;
     *released = 0;
+    *expired = 0;
     struct platform_private_file file;
     platform_private_file_init(&file);
     char tmp[PATH_MAX + 64];
@@ -518,6 +544,10 @@ static bool dvc_ledger_write(const char *path, const struct dvc_ledger *lg,
     for (size_t i = 0; ok && i < lg->n; i++) {
         if (dvc_line_is_ours(lg->lines[i], toplevel)) {
             (*released)++;
+            continue;
+        }
+        if (newline && dvc_line_expired(lg->lines[i], now)) {
+            (*expired)++;
             continue;
         }
         ok = dvc_stage_line(&file, lg->lines[i], &offset);
@@ -545,9 +575,9 @@ static void dvc_release(const struct dvc_facts *facts,
                         const struct dvc_ledger *lg,
                         struct zcl_command_reply *reply)
 {
-    size_t kept = 0, released = 0;
-    if (!dvc_ledger_write(facts->ledger, lg, facts->toplevel, NULL, &kept,
-                          &released, reply))
+    size_t kept = 0, released = 0, expired = 0;
+    if (!dvc_ledger_write(facts->ledger, lg, facts->toplevel, NULL, 0, &kept,
+                          &released, &expired, reply))
         return;
     (void)json_push_kv_str(&reply->data, "leaf", DVC_LEAF);
     struct json_value arr;
@@ -603,6 +633,7 @@ static size_t dvc_line_conflicts(const char *line, const char *wt,
 static bool dvc_check_overlap(const struct dvc_facts *facts,
                               const struct dvc_ledger *lg,
                               const struct json_value *norm,
+                              long long now,
                               struct zcl_command_reply *reply)
 {
     struct json_value conflicts;
@@ -611,7 +642,8 @@ static bool dvc_check_overlap(const struct dvc_facts *facts,
     size_t nconf = 0;
     for (size_t i = 0; i < lg->n; i++) {
         char wt[PATH_MAX];
-        if (!dvc_line_str(lg->lines[i], "worktree", wt, sizeof(wt)) ||
+        if (dvc_line_expired(lg->lines[i], now) ||
+            !dvc_line_str(lg->lines[i], "worktree", wt, sizeof(wt)) ||
             strcmp(wt, facts->toplevel) == 0)
             continue; /* unreadable or our own line: never conflicts */
         nconf += dvc_line_conflicts(lg->lines[i], wt, norm, &conflicts);
@@ -625,8 +657,8 @@ static bool dvc_check_overlap(const struct dvc_facts *facts,
         (void)snprintf(reply->error.next_action,
                        sizeof(reply->error.next_action),
                        "Coordinate with the named claim owner through dev.agent.mail; "
-                       "retry this claim after an authorized release. "
-                       "Claim age does not authorize takeover.");
+                       "retry this claim after an authorized release or a "
+                       "recorded lease expiry. Legacy claims require release.");
     }
     json_free(&conflicts);
     return nconf == 0;
@@ -641,7 +673,8 @@ static bool dvc_now_iso(char *ts, size_t cap)
 }
 
 /* Render this worktree's ledger line; false when it does not fit. */
-static bool dvc_build_line(const char *ts, const char *story,
+static bool dvc_build_line(const char *ts, long long expires_unix,
+                           const char *story,
                            const struct dvc_facts *facts,
                            const struct json_value *norm, char *line,
                            size_t cap)
@@ -651,9 +684,9 @@ static bool dvc_build_line(const char *ts, const char *story,
                           esc_wt, esc_br))
         return false;
     int w = snprintf(line, cap,
-                     "{\"ts\":\"%s\",\"worktree\":\"%s\",\"branch\":\"%s\","
+                     "{\"ts\":\"%s\",\"expires_unix\":%lld,\"worktree\":\"%s\",\"branch\":\"%s\","
                      "\"story\":\"%s\",\"files\":[",
-                     ts, esc_wt, esc_br, esc_story);
+                     ts, expires_unix, esc_wt, esc_br, esc_story);
     if (w < 0 || (size_t)w >= cap)
         return false;
     size_t used = (size_t)w;
@@ -677,7 +710,16 @@ static void dvc_claim(const struct dvc_facts *facts,
                       const struct json_value *norm,
                       struct zcl_command_reply *reply)
 {
-    if (!dvc_check_overlap(facts, lg, norm, reply))
+    uint64_t now_ms = clock_now_wall_ms();
+    if (now_ms / 1000 > (uint64_t)(LLONG_MAX - DVC_LEASE_SECONDS)) {
+        dvc_fail(reply, "CLOCK_UNAVAILABLE", "claim",
+                 "cannot bound the claim lease against the wall clock",
+                 "retry after the local clock is available");
+        return;
+    }
+    long long now = (long long)(now_ms / 1000);
+    long long expires_unix = now + DVC_LEASE_SECONDS;
+    if (!dvc_check_overlap(facts, lg, norm, now, reply))
         return; /* nothing is written on refusal */
     char ts[40];
     if (!dvc_now_iso(ts, sizeof(ts))) {
@@ -687,20 +729,23 @@ static void dvc_claim(const struct dvc_facts *facts,
         return;
     }
     char newline[DVC_LINE_CAP];
-    if (!dvc_build_line(ts, story, facts, norm, newline, sizeof(newline))) {
+    if (!dvc_build_line(ts, expires_unix, story, facts, norm, newline,
+                        sizeof(newline))) {
         dvc_fail(reply, "BAD_INPUT", "escape",
                  "claim line too large for the ledger format",
                  "input exceeded the ledger line budget");
         return;
     }
-    size_t kept = 0, replaced = 0;
-    if (!dvc_ledger_write(facts->ledger, lg, facts->toplevel, newline, &kept,
-                          &replaced, reply))
+    size_t kept = 0, replaced = 0, expired = 0;
+    if (!dvc_ledger_write(facts->ledger, lg, facts->toplevel, newline, now,
+                          &kept, &replaced, &expired, reply))
         return;
     (void)json_push_kv_str(&reply->data, "leaf", DVC_LEAF);
     (void)json_push_kv(&reply->data, "claimed", norm);
     (void)json_push_kv_str(&reply->data, "ledger", facts->ledger);
     (void)json_push_kv_int(&reply->data, "live", (long long)kept + 1);
+    (void)json_push_kv_int(&reply->data, "expires_unix", expires_unix);
+    (void)json_push_kv_int(&reply->data, "expired_reclaimed", (long long)expired);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }

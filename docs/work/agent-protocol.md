@@ -41,8 +41,13 @@ build/bin/z23-dev dev agent claim --input='{"story":"<slug>","files":[...]}'
 ```
 
 This refuses with `CLAIM_OVERLAP` when another worktree on the same checkout
-holds one of the files. Release files when done by adding `"release":true` to
-the same command.
+holds one of the files. A successful claim reports `expires_unix` and lasts 15
+minutes. Repeat the same claim before that time to renew it; stop writing if
+the lease expires, then claim again before resuming. A later claimant may take
+expired files, and the ledger removes expired rows on a successful claim. Rows
+written before leases have no expiry and still require their owner's release.
+Release files when done by adding `"release":true` to the same command. A
+file claim coordinates writers; it never grants proof or publication authority.
 
 ## Work
 

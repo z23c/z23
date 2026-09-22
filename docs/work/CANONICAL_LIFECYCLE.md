@@ -286,6 +286,12 @@ The overlap protection in `tools/command/native_devagent_claim.c` is not
 permission to remove writer safety. Coordinate ownership or use isolated
 proposal workspaces; an advisory claim never overrides receiver execution policy.
 
+The checkout-local `dev.agent.claim` adapter issues a 15-minute renewable file
+lease and reclaims expired rows on the next successful claim. Old ledger rows
+without an expiry remain owned until explicitly released. This local writer
+guard is not yet the signed CLAIM object above and never admits a candidate
+or a publication.
+
 Stale results fail closed for free. A worker that finishes against an old base
 produces a CANDIDATE whose `base_commit` no longer equals the observed `main`
 tip, so condition 1 of the publication rule fails before anything else is

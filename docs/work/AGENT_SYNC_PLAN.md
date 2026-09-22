@@ -1,5 +1,11 @@
 # Agent sync plan — every agent on one board, one target, one typed protocol
 
+This 2026-09-04 handoff records the interim train protocol. The active
+publication contract is [`CANONICAL_LIFECYCLE.md`](./CANONICAL_LIFECYCLE.md):
+eligible nodes may prepare and prove candidates concurrently; only the final
+expected-base `main` update is serialized by Git. The single PROVING owner
+below is historical behavior, not an integration requirement.
+
 This document is the handoff plan for the next developer.
 
 Goal: every agent, human or model, on any fleet box, sees the same small typed state, uses the same few verbs, and gets green work onto `main` in minutes. Nothing in the protocol blocks. Every step is a state transition recorded as an event. Every verdict comes from a gate, never from a report.
