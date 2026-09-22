@@ -53,14 +53,17 @@
  * the build tree's own build/bin, because the fast-test lane runs its binary
  * out of a per-epoch subdirectory; it is still a fixed relative path, not a
  * search. */
-struct zcl_result pkgl_worker_path(char *out, size_t cap)
+struct zcl_result pkgl_worker_path_for_executable(const char *executable,
+                                                 char *out, size_t cap)
 {
     char exe[PKGL_PATH_MAX];
-    if (!os_proc_exe_path(exe, sizeof(exe)))
-        return ZCL_ERR(-1, "cannot resolve own executable path");
-    char *deleted = strstr(exe, " (deleted)");
-    if (deleted)
-        *deleted = '\0';
+    if (!executable)
+        return ZCL_ERR(-1, "executable path is required");
+    int n = snprintf(exe, sizeof(exe), "%s", executable);
+    if (n < 0 || (size_t)n >= sizeof(exe))
+        return ZCL_ERR(-1, "executable path too long");
+    /* A kernel deletion marker trails the basename, so taking its parent
+     * already excludes it. Preserve literal marker text in directory names. */
     char *slash = strrchr(exe, '/');
     if (!slash)
         return ZCL_ERR(-1, "resolved executable path has no directory component");
@@ -91,6 +94,14 @@ struct zcl_result pkgl_worker_path(char *out, size_t cap)
                    "neither next to this binary nor in build/bin — build "
                    "the development helper (make dev-bin) before "
                    "installing packages");
+}
+
+struct zcl_result pkgl_worker_path(char *out, size_t cap)
+{
+    char exe[PKGL_PATH_MAX];
+    if (!os_proc_exe_path(exe, sizeof(exe)))
+        return ZCL_ERR(-1, "cannot resolve own executable path");
+    return pkgl_worker_path_for_executable(exe, out, cap);
 }
 
 /* ── streaming copy that hashes what it wrote ───────────────────────── */

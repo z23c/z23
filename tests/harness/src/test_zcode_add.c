@@ -36,6 +36,7 @@
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "services/package_lifecycle.h"
+#include "../../../contexts/commons/services/src/package_lifecycle_internal.h"
 #include "util/spawn.h"
 #include "vcs/package_build.h"
 #include "vcs/package_deps.h"
@@ -2322,10 +2323,32 @@ static int t_programs(void)
     return failures;
 }
 
+static int t_worker_literal_path(void)
+{
+    int failures = 0;
+    char base[256], directory[512], executable[640], worker[640], found[4096];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "worker-path");
+    (void)snprintf(directory, sizeof(directory), "%s/kept (deleted) files", base);
+    (void)snprintf(executable, sizeof(executable), "%s/z23", directory);
+    (void)snprintf(worker, sizeof(worker), "%s/zclassic23-package-verify-dev", directory);
+    bool prepared = za_mkdir_p(directory) && za_write_file(worker, "", 0, 0700);
+    ZA_CHECK("worker discovery fixture prepared", prepared);
+    ZA_CHECK("literal deleted text in install directory is preserved", prepared &&
+        pkgl_worker_path_for_executable(executable, found, sizeof(found)).ok &&
+        strcmp(found, worker) == 0);
+    (void)snprintf(executable, sizeof(executable), "%s/z23 (deleted)", directory);
+    ZA_CHECK("trailing kernel marker does not change verifier directory", prepared &&
+        pkgl_worker_path_for_executable(executable, found, sizeof(found)).ok &&
+        strcmp(found, worker) == 0);
+    ZA_CHECK("worker discovery fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 int test_zcode_add(void)
 {
     printf("\n=== zcode_add: package install lifecycle ===\n");
     int failures = 0;
+    failures += t_worker_literal_path();
     failures += t_deps_rules();
     failures += t_generations();
     failures += t_e2e();

@@ -143,6 +143,9 @@ struct zcl_result pkgl_data_dir(const struct pkgl_ctx *ctx, const char *name,
  * with the build tree's own build/bin as the one fallback. Shared by the
  * install and reproduce spawns. */
 struct zcl_result pkgl_worker_path(char *out, size_t cap);
+/* Internal discovery seam; production supplies the kernel-reported self path. */
+struct zcl_result pkgl_worker_path_for_executable(const char *executable,
+                                                 char *out, size_t cap);
 
 /* Resolve `name_or_root` (64-hex identity, "publisher/package@semver", or
  * "publisher/package" selecting the highest published semver) to the root
