@@ -156,6 +156,9 @@ uint64_t peers_projection_census_count(peers_projection_t *p);
 void peers_projection_test_set_retention_caps(uint64_t sessions_cap,
                                               uint64_t forks_cap);
 void peers_projection_test_reset_retention_caps(void);
+/* Rows the retention caps have deleted in this process. */
+uint64_t peers_projection_test_retention_dropped(void);
+void peers_projection_test_reset_retention_dropped(void);
 /* Lower the census_observations time-series retention cap. */
 void peers_projection_test_set_census_cap(uint64_t census_cap);
 /* Row count of a ledger table ("peer_sessions" / "fork_events" /

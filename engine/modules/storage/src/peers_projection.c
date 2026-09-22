@@ -71,12 +71,27 @@ static _Atomic uint64_t g_peer_sessions_cap = PEER_SESSIONS_RETENTION_CAP;
 static _Atomic uint64_t g_fork_events_cap = FORK_EVENTS_RETENTION_CAP;
 static _Atomic uint64_t g_census_observations_cap =
     CENSUS_OBSERVATIONS_RETENTION_CAP;
+/* Rows the retention caps deleted. That is coverage the ledgers no longer hold. */
+static _Atomic uint64_t g_retention_rows_dropped = 0;
 
 static bool apply_event(sqlite3 *db, enum event_log_type type,
                         const void *payload, size_t len, void *ctx,
                         bool *out_handled);
 
 /* Shared exec-and-log body; also satisfies projection_util.h's exec_sql decl. */
+static bool exec_sql(sqlite3 *db, const char *sql, const char *ctx);
+
+static bool pp_prune(sqlite3 *db, const char *sql, const char *ctx)
+{
+    if (!exec_sql(db, sql, ctx))
+        return false;
+    int dropped = sqlite3_changes(db);
+    if (dropped > 0)
+        atomic_fetch_add_explicit(&g_retention_rows_dropped,
+                                  (uint64_t)dropped, memory_order_relaxed);
+    return true;
+}
+
 static bool exec_sql(sqlite3 *db, const char *sql, const char *ctx)
 {
     return projection_consumer_exec_sql(db, "peers_projection", sql, ctx);
@@ -383,7 +398,7 @@ static bool apply_session_closed(sqlite3 *db,
             "(SELECT MAX(seq) FROM peer_sessions) - %llu",
             (unsigned long long)atomic_load_explicit(&g_peer_sessions_cap,
                                                      memory_order_relaxed));
-        if (!exec_sql(db, prune, "prune peer_sessions"))
+        if (!pp_prune(db, prune, "prune peer_sessions"))
             return false;
     }
 
@@ -456,7 +471,7 @@ static bool apply_fork_observed(sqlite3 *db,
             "(SELECT MAX(seq) FROM fork_events) - %llu",
             (unsigned long long)atomic_load_explicit(&g_fork_events_cap,
                                                      memory_order_relaxed));
-        return exec_sql(db, prune, "prune fork_events");
+        return pp_prune(db, prune, "prune fork_events");
     }
 }
 
@@ -565,7 +580,7 @@ static bool apply_census_observed(sqlite3 *db,
             "(SELECT MAX(seq) FROM census_observations) - %llu",
             (unsigned long long)atomic_load_explicit(&g_census_observations_cap,
                                                      memory_order_relaxed));
-        return exec_sql(db, prune, "prune census_observations");
+        return pp_prune(db, prune, "prune census_observations");
     }
 }
 
@@ -1050,6 +1065,9 @@ bool peers_projection_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "emit_fail_total",
                  (int64_t)atomic_load_explicit(&g_emit_fail_total,
                                                memory_order_relaxed));
+    json_push_kv_int(out, "retention_rows_dropped",
+                 (int64_t)atomic_load_explicit(&g_retention_rows_dropped,
+                                               memory_order_relaxed));
 
     /* Reserved `_health` key: { ok, reason } from open + emit_fail_total. */
     {
@@ -1248,6 +1266,17 @@ void peers_projection_test_reset_retention_caps(void)
     atomic_store_explicit(&g_census_observations_cap,
                           CENSUS_OBSERVATIONS_RETENTION_CAP,
                           memory_order_relaxed);
+}
+
+uint64_t peers_projection_test_retention_dropped(void)
+{
+    return atomic_load_explicit(&g_retention_rows_dropped,
+                                memory_order_relaxed);
+}
+
+void peers_projection_test_reset_retention_dropped(void)
+{
+    atomic_store_explicit(&g_retention_rows_dropped, 0, memory_order_relaxed);
 }
 
 void peers_projection_test_set_census_cap(uint64_t census_cap)

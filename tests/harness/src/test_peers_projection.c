@@ -342,6 +342,7 @@ static int t_ledger_retention(void)
     event_log_t *log = event_log_open(elog_path);
     peers_projection_t *p = peers_projection_open(proj_path, log);
 
+    peers_projection_test_reset_retention_dropped();
     peers_projection_test_set_retention_caps(3, 2);
 
     for (int i = 0; i < 5; i++)
@@ -357,6 +358,10 @@ static int t_ledger_retention(void)
              peers_projection_test_ledger_count(p, "peer_sessions") == 3);
     PP_CHECK("fork_events capped to 2",
              peers_projection_test_ledger_count(p, "fork_events") == 2);
+    /* Five sessions into a cap of 3, and four forks into a cap of 2,
+     * delete two rows from each ledger. */
+    PP_CHECK("retention names the deleted rows",
+             peers_projection_test_retention_dropped() == 4);
 
     peers_projection_test_reset_retention_caps();
     peers_projection_close(p);
