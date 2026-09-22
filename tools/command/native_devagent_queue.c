@@ -3317,6 +3317,64 @@ static bool dvq_push_running(struct json_value *arr, const struct dvq_row *r,
 
 /* A warm entry whose NB lock holds right now counts as free. The probe
  * never holds the lock past this call. */
+/* One status screen row. 0 means this state is not shown. */
+static int dvq_screen_row(char *out, size_t cap, const struct dvq_row *rows,
+                          size_t nrows, size_t i, const char *opath,
+                          long long now)
+{
+    const struct dvq_row *r = &rows[i];
+    long long age;
+    if (strcmp(r->state, "running") == 0) {
+        age = now - r->started;
+        if (age < 0)
+            age = 0;
+        return snprintf(out, cap, "  #%lld %-7s %-12s a%-3lld %s age %llds\n",
+                        r->seq, "running", r->name, r->attempt, r->worktree,
+                        age);
+    }
+    if (strcmp(r->state, "WAITING_EXTERNAL") == 0)
+        return snprintf(out, cap, "  #%lld WAITING_EXTERNAL %-12s a%-3lld %s\n",
+                        r->seq, r->name, r->attempt, r->depends_on);
+    if (strcmp(r->state, "queued") == 0)
+        return dvq_screen_queued(out, cap, rows, nrows, i, opath);
+    return 0;
+}
+
+/* Human screen. False only when the header itself does not fit. */
+static bool dvq_status_screen(char *screen, size_t cap,
+                              const struct dvq_row *rows, size_t nrows,
+                              const char *opath, long long queued_ready,
+                              size_t nqueued, size_t nrunning,
+                              const struct dvq_pool_census *census,
+                              long long now)
+{
+    char poolline[220];
+    size_t used, i;
+    int w;
+    dvq_pool_line(poolline, sizeof(poolline), census);
+    w = snprintf(screen, cap, "queue: %llu queued (%lld ready), %llu running (%s)\n",
+                 (unsigned long long)nqueued, queued_ready,
+                 (unsigned long long)nrunning, poolline);
+    if (w <= 0 || (size_t)w >= cap)
+        return false;
+    used = (size_t)w;
+    for (i = 0; i < nrows; i++) {
+        if (i >= 40) {
+            w = snprintf(screen + used, cap - used, "  ... and %llu more\n",
+                         (unsigned long long)(nrows - i));
+            if (w > 0 && (size_t)w < cap - used)
+                used += (size_t)w;
+            break;
+        }
+        w = dvq_screen_row(screen + used, cap - used, rows, nrows, i, opath,
+                           now);
+        if (w < 0 || (size_t)w >= cap - used)
+            break;
+        used += (size_t)w;
+    }
+    return true;
+}
+
 static void dvq_status(const struct zcl_command_request *req,
                        struct zcl_command_reply *reply)
 {
@@ -3331,8 +3389,6 @@ static void dvq_status(const struct zcl_command_request *req,
     bool want_json = false;
     const struct json_value *jv;
     char screen[16384];
-    size_t used = 0;
-    int w;
     if (req && req->input) {
         jv = json_get(req->input, "json");
         want_json = jv && json_get_bool(jv);
@@ -3438,56 +3494,11 @@ static void dvq_status(const struct zcl_command_request *req,
      * set of zeroes, and "idle" can never stand in for "cannot dispatch". */
     if (!dvq_status_pool(&pool, &census))
         goto fail;
-    if (!want_json) {
-        char poolline[220];
-        dvq_pool_line(poolline, sizeof(poolline), &census);
-        w = snprintf(screen, sizeof(screen),
-                     "queue: %llu queued (%lld ready), %llu running (%s)\n",
-                     (unsigned long long)queued.num_children, queued_ready,
-                     (unsigned long long)running.num_children, poolline);
-        if (w <= 0 || (size_t)w >= sizeof(screen))
-            goto fail;
-        used = (size_t)w;
-        for (size_t i = 0; i < nrows; i++) {
-            const char *tag = NULL;
-            if (strcmp(rows[i].state, "queued") == 0)
-                tag = "queued ";
-            else if (strcmp(rows[i].state, "running") == 0)
-                tag = "running";
-            else if (strcmp(rows[i].state, "WAITING_EXTERNAL") == 0)
-                tag = "waiting";
-            else
-                continue;
-            if (i >= 40) {
-                w = snprintf(screen + used, sizeof(screen) - used,
-                             "  ... and %llu more\n",
-                             (unsigned long long)(nrows - i));
-                if (w > 0 && (size_t)w < sizeof(screen) - used)
-                    used += (size_t)w;
-                break;
-            }
-            if (strcmp(tag, "running") == 0) {
-                long long age = now - rows[i].started;
-                if (age < 0)
-                    age = 0;
-                w = snprintf(screen + used, sizeof(screen) - used,
-                             "  #%lld %-7s %-12s a%-3lld %s age %llds\n",
-                             rows[i].seq, tag, rows[i].name,
-                             rows[i].attempt, rows[i].worktree, age);
-            } else if (strcmp(tag, "waiting") == 0) {
-                w = snprintf(screen + used, sizeof(screen) - used,
-                             "  #%lld WAITING_EXTERNAL %-12s a%-3lld %s\n",
-                             rows[i].seq, rows[i].name, rows[i].attempt,
-                             rows[i].depends_on);
-            } else {
-                w = dvq_screen_queued(screen + used, sizeof(screen) - used,
-                                      rows, nrows, i, opath);
-            }
-            if (w <= 0 || (size_t)w >= sizeof(screen) - used)
-                break;
-            used += (size_t)w;
-        }
-    }
+    if (!want_json &&
+        !dvq_status_screen(screen, sizeof(screen), rows, nrows, opath,
+                           queued_ready, queued.num_children,
+                           running.num_children, &census, now))
+        goto fail;
     free(rows);
     (void)json_push_kv_str(&reply->data, "leaf", DVQ_LEAF);
     (void)json_push_kv(&reply->data, "queued", &queued);

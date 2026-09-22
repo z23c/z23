@@ -3666,7 +3666,7 @@ tools/command/native_devagent_queue.c:dvq_next:49
 tools/command/native_devagent_queue.c:dvq_path_ok:34
 tools/command/native_devagent_queue.c:dvq_post:34
 tools/command/native_devagent_queue.c:dvq_reap:46
-tools/command/native_devagent_queue.c:dvq_status:38
+tools/command/native_devagent_queue.c:dvq_status:27
 tools/command/native_devagent_queue.c:dvq_task_prev:23
 tools/command/native_devagent_situation.c:zcl_native_handle_dev_agent_situation:16
 tools/command/native_devagent_start.c:zcl_native_handle_dev_agent_start:16
