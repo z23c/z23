@@ -74,6 +74,9 @@ struct trace_span {
 
     char operation[TRACE_MAX_OP_LEN];
     uint64_t start_us;
+    /* Wall clock at start, microseconds. OTLP timestamps use this clock,
+     * not the monotonic duration clock. */
+    uint64_t start_wall_us;
 
     struct trace_attr attrs[TRACE_MAX_ATTRS];
     int attr_count;
@@ -98,9 +101,17 @@ void trace_attr_int(struct trace_span *s, const char *key, int64_t val);
 /* Set span status (default UNSET → OK on trace_end if not set). */
 void trace_set_status(struct trace_span *s, enum trace_status status);
 
-/* End the span: compute duration, emit JSON via log_jsonf, pop from
- * thread-local stack, and free the span. */
+/* End the span: compute duration, emit one OTLP/HTTP JSON trace export
+ * via log_jsonf, pop from the thread-local stack, and free the span. */
 void trace_end(struct trace_span *s);
+
+/* Write one OTLP/HTTP JSON ExportTraceServiceRequest for `s`.
+ * `end_wall_us` is the wall-clock end in microseconds, the same clock as
+ * `start_wall_us`. The bytes are the published proto3 JSON mapping
+ * (base64 trace and span ids, decimal-string timestamps, enum status
+ * names). Returns false when `out` cannot hold the document. */
+bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
+                       char *out, size_t cap);
 
 /* ── Query ─────────────────────────────────────────────────── */
 

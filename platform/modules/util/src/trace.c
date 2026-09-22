@@ -123,6 +123,8 @@ struct trace_span *trace_start(const char *operation)
      * a normal path. */
 
     s->start_us = platform_time_monotonic_us();
+    int64_t wall = platform_time_realtime_us();
+    s->start_wall_us = (uint64_t)(wall > 0 ? wall : 0);
     s->status = TRACE_STATUS_UNSET;
     return s;
 }
@@ -157,6 +159,107 @@ void trace_set_status(struct trace_span *s, enum trace_status status)
 {
     if (!s) return;
     s->status = status;
+}
+
+static const char *trace_otlp_status(enum trace_status status)
+{
+    if (status == TRACE_STATUS_ERROR) return "STATUS_CODE_ERROR";
+    if (status == TRACE_STATUS_OK) return "STATUS_CODE_OK";
+    return "STATUS_CODE_UNSET";
+}
+
+static bool trace_otlp_b64(const char *hex, size_t raw_len,
+                           char *out, size_t cap)
+{
+    unsigned char raw[16];
+    if (raw_len > sizeof(raw) || !hex) return false;
+    if (ParseHex(hex, raw, raw_len) != raw_len) return false;
+    return EncodeBase64(raw, raw_len, out, cap) > 0;
+}
+
+static bool trace_otlp_attr(const struct trace_attr *a, char *out, size_t cap)
+{
+    char key[TRACE_MAX_KEY_LEN * 2];
+    char val[TRACE_MAX_VAL_LEN * 2];
+    int n;
+    log_json_escape(key, sizeof(key), a->key);
+    if (a->is_int) {
+        n = snprintf(out, cap,
+                     "{\"key\":\"%s\",\"value\":{\"intValue\":\"%lld\"}}",
+                     key, (long long)a->int_val);
+    } else {
+        log_json_escape(val, sizeof(val), a->str_val);
+        n = snprintf(out, cap,
+                     "{\"key\":\"%s\",\"value\":{\"stringValue\":\"%s\"}}",
+                     key, val);
+    }
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool trace_otlp_attrs(const struct trace_span *s, char *out, size_t cap)
+{
+    size_t n = 0;
+    if (cap == 0) return false;
+    out[0] = '\0';
+    for (int i = 0; i < s->attr_count; i++) {
+        char one[384];
+        int w;
+        if (!trace_otlp_attr(&s->attrs[i], one, sizeof(one))) return false;
+        w = snprintf(out + n, cap - n, "%s%s", i ? "," : "", one);
+        if (w < 0 || (size_t)w >= cap - n) return false;
+        n += (size_t)w;
+    }
+    return true;
+}
+
+bool trace_format_otlp(const struct trace_span *s, uint64_t end_wall_us,
+                       char *out, size_t cap)
+{
+    char trace_b64[32], span_b64[24], parent_b64[24];
+    char name[TRACE_MAX_OP_LEN * 2];
+    char attrs[4096];
+    bool has_parent;
+    uint64_t start_us, end_us;
+    int n;
+    if (!s || !out || cap < 64) return false;
+    if (!trace_otlp_b64(s->trace_id, 16, trace_b64, sizeof(trace_b64)))
+        return false;
+    if (!trace_otlp_b64(s->span_id, 8, span_b64, sizeof(span_b64)))
+        return false;
+    has_parent = s->parent_span_id[0] != '\0';
+    if (has_parent &&
+        !trace_otlp_b64(s->parent_span_id, 8, parent_b64, sizeof(parent_b64)))
+        return false;
+    log_json_escape(name, sizeof(name), s->operation);
+    if (!trace_otlp_attrs(s, attrs, sizeof(attrs))) return false;
+    start_us = s->start_wall_us;
+    end_us = end_wall_us < start_us ? start_us : end_wall_us;
+    if (has_parent) {
+        n = snprintf(out, cap,
+                     "{\"resourceSpans\":[{\"scopeSpans\":[{\"scope\":"
+                     "{\"name\":\"z23\"},\"spans\":[{\"traceId\":\"%s\","
+                     "\"spanId\":\"%s\",\"parentSpanId\":\"%s\","
+                     "\"name\":\"%s\",\"startTimeUnixNano\":\"%llu\","
+                     "\"endTimeUnixNano\":\"%llu\",\"attributes\":[%s],"
+                     "\"status\":{\"code\":\"%s\"}}]}]}]}",
+                     trace_b64, span_b64, parent_b64, name,
+                     (unsigned long long)(start_us * 1000ull),
+                     (unsigned long long)(end_us * 1000ull),
+                     attrs, trace_otlp_status(s->status));
+    } else {
+        n = snprintf(out, cap,
+                     "{\"resourceSpans\":[{\"scopeSpans\":[{\"scope\":"
+                     "{\"name\":\"z23\"},\"spans\":[{\"traceId\":\"%s\","
+                     "\"spanId\":\"%s\",\"name\":\"%s\","
+                     "\"startTimeUnixNano\":\"%llu\","
+                     "\"endTimeUnixNano\":\"%llu\",\"attributes\":[%s],"
+                     "\"status\":{\"code\":\"%s\"}}]}]}]}",
+                     trace_b64, span_b64, name,
+                     (unsigned long long)(start_us * 1000ull),
+                     (unsigned long long)(end_us * 1000ull),
+                     attrs, trace_otlp_status(s->status));
+    }
+    return n > 0 && (size_t)n < cap;
 }
 
 void trace_end(struct trace_span *s)
@@ -196,68 +299,13 @@ void trace_end(struct trace_span *s)
         return;
     }
 
-    /* Build attributes JSON fragment */
-    char attrs_buf[1024];
-    size_t pos = 0;
-    for (int i = 0; i < s->attr_count && pos < sizeof(attrs_buf) - 64; i++) {
-        char escaped_key[TRACE_MAX_KEY_LEN * 2];
-        log_json_escape(escaped_key, sizeof(escaped_key), s->attrs[i].key);
-
-        int n;
-        if (s->attrs[i].is_int) {
-            n = snprintf(attrs_buf + pos, sizeof(attrs_buf) - pos,
-                         "\"%s\":%lld,",
-                         escaped_key, (long long)s->attrs[i].int_val);
-        } else {
-            char escaped_val[TRACE_MAX_VAL_LEN * 2];
-            log_json_escape(escaped_val, sizeof(escaped_val),
-                           s->attrs[i].str_val);
-            n = snprintf(attrs_buf + pos, sizeof(attrs_buf) - pos,
-                         "\"%s\":\"%s\",",
-                         escaped_key, escaped_val);
-        }
-        if (n > 0) pos += (size_t)n;
-    }
-    /* Remove trailing comma */
-    if (pos > 0 && attrs_buf[pos - 1] == ',')
-        attrs_buf[--pos] = '\0';
-    else
-        attrs_buf[pos] = '\0';
-
-    /* Status string */
-    const char *status_str = "OK";
-    if (s->status == TRACE_STATUS_ERROR) status_str = "ERROR";
-    else if (s->status == TRACE_STATUS_UNSET) status_str = "UNSET";
-
-    /* Escaped operation name */
-    char escaped_op[TRACE_MAX_OP_LEN * 2];
-    log_json_escape(escaped_op, sizeof(escaped_op), s->operation);
-
-    /* Emit OTLP-compatible JSON span */
-    if (s->parent_span_id[0]) {
-        log_jsonf(LOG_JSON_INFO, "trace_span",
-                  "\"trace_id\":\"%s\","
-                  "\"span_id\":\"%s\","
-                  "\"parent_span_id\":\"%s\","
-                  "\"operation\":\"%s\","
-                  "\"duration_us\":%llu,"
-                  "\"status\":\"%s\","
-                  "\"attrs\":{%s}",
-                  s->trace_id, s->span_id, s->parent_span_id,
-                  escaped_op, (unsigned long long)duration_us,
-                  status_str, attrs_buf);
-    } else {
-        log_jsonf(LOG_JSON_INFO, "trace_span",
-                  "\"trace_id\":\"%s\","
-                  "\"span_id\":\"%s\","
-                  "\"operation\":\"%s\","
-                  "\"duration_us\":%llu,"
-                  "\"status\":\"%s\","
-                  "\"attrs\":{%s}",
-                  s->trace_id, s->span_id,
-                  escaped_op, (unsigned long long)duration_us,
-                  status_str, attrs_buf);
-    }
+    char body[4096];
+    uint64_t end_wall = 0;
+    int64_t now_wall = platform_time_realtime_us();
+    if (now_wall > 0)
+        end_wall = (uint64_t)now_wall;
+    if (trace_format_otlp(s, end_wall, body, sizeof(body)))
+        log_jsonf(LOG_JSON_INFO, "otlp_traces", "\"otlp\":%s", body);
 
     free(s);
 }

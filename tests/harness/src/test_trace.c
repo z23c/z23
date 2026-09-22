@@ -6,6 +6,7 @@
  * linkage, TLS stack, enable/disable, and edge cases. */
 
 #include "test/test_core.h"
+#include "encoding/utilstrencodings.h"
 #include "util/trace.h"
 
 #include <stdio.h>
@@ -260,11 +261,67 @@ static int test_reset_thread(void)
 
 /* ── Entry point ────────────────────────────────────────────── */
 
+static bool otlp_id_is(const char *body, const char *hex, size_t raw_len)
+{
+    unsigned char raw[16];
+    char expect[40];
+    if (ParseHex(hex, raw, raw_len) != raw_len) return false;
+    if (EncodeBase64(raw, raw_len, expect, sizeof(expect)) == 0) return false;
+    return strstr(body, expect) != NULL;
+}
+
+static int test_otlp_json(void)
+{
+    int failures = 0;
+    TEST("trace: ended span renders one OTLP JSON export") {
+        char body[4096];
+        char root_body[4096];
+        char start_nano[64];
+        char end_nano[64];
+        uint64_t end_us;
+        trace_set_enabled(true);
+        trace_reset_thread();
+        struct trace_span *parent = trace_start("otlp.parent");
+        struct trace_span *child = trace_start("say\"hi");
+        ASSERT(parent != NULL);
+        ASSERT(child != NULL);
+        trace_attr_str(child, "command", "z23 status");
+        trace_attr_int(child, "height", 123456);
+        trace_set_status(child, TRACE_STATUS_ERROR);
+        end_us = child->start_wall_us + 2500;
+        ASSERT(trace_format_otlp(child, end_us, body, sizeof(body)));
+        ASSERT(strstr(body, "\"resourceSpans\"") != NULL);
+        ASSERT(otlp_id_is(body, child->trace_id, 16));
+        ASSERT(otlp_id_is(body, child->span_id, 8));
+        ASSERT(otlp_id_is(body, parent->span_id, 8));
+        ASSERT(strstr(body, "\"name\":\"say\\\"hi\"") != NULL);
+        ASSERT(strstr(body, "\"code\":\"STATUS_CODE_ERROR\"") != NULL);
+        ASSERT(strstr(body, "\"stringValue\":\"z23 status\"") != NULL);
+        ASSERT(strstr(body, "\"intValue\":\"123456\"") != NULL);
+        snprintf(start_nano, sizeof(start_nano),
+                 "\"startTimeUnixNano\":\"%llu\"",
+                 (unsigned long long)(child->start_wall_us * 1000ull));
+        snprintf(end_nano, sizeof(end_nano),
+                 "\"endTimeUnixNano\":\"%llu\"",
+                 (unsigned long long)(end_us * 1000ull));
+        ASSERT(strstr(body, start_nano) != NULL);
+        ASSERT(strstr(body, end_nano) != NULL);
+        ASSERT(trace_format_otlp(parent, parent->start_wall_us, root_body,
+                                 sizeof(root_body)));
+        ASSERT(strstr(root_body, "parentSpanId") == NULL);
+        trace_end(child);
+        trace_end(parent);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_trace(void);
 
 int test_trace(void)
 {
     int failures = 0;
+    failures += test_otlp_json();
     failures += test_span_creation();
     failures += test_attributes();
     failures += test_attr_overflow();

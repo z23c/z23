@@ -2543,7 +2543,7 @@ platform/modules/util/src/telemetry_render.c:telemetry_render:22
 platform/modules/util/src/template.c:render_impl:28
 platform/modules/util/src/thread_profile.c:thread_profile_sample:28
 platform/modules/util/src/thread_registry.c:thread_registry_spawn:17
-platform/modules/util/src/trace.c:trace_end:20
+platform/modules/util/src/trace.c:trace_end:13
 platform/modules/util/src/util.c:ReadConfigFile:29
 tests/harness/differential/groth16_parity_oracle.c:build_corpus:32
 tests/harness/differential/groth16_parity_oracle.c:check_decode_corpus:26
