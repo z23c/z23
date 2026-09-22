@@ -79,14 +79,23 @@ compiler-id)
     # A wrapper addressed through the repository (Make's `build/bin/zcc cc`,
     # spelled via $(CURDIR) at parse time) resolves to a different absolute
     # path in every checkout and generation of the same tree. Strip exactly
-    # one leading root prefix — canonical first, then the caller's literal
-    # spelling (Make hands $(CURDIR), which may spell a symlinked prefix
-    # logically) — so the bound argv spelling is root-relative. Anything not
-    # under the root keeps its absolute spelling below.
+    # one leading root prefix. Resolve an absolute executable first so a
+    # third symlink spelling of the same tree has the same key; then retain
+    # the literal-prefix fallback for an executable that does not exist yet.
+    # Anything outside the root keeps its absolute spelling below.
     strip_repo_root()
     {
-        local var_name="$1" value root stripped
+        local var_name="$1" value root stripped executable resolved
         value="${!var_name}"
+        executable="${value%% *}"
+        if [[ "$executable" == /* ]]; then
+            resolved="$(readlink -f -- "$executable" 2>/dev/null || true)"
+            if [[ "$resolved" == "$ROOT_CANON/"* ]]; then
+                printf -v "$var_name" '%s%s' \
+                    "${resolved#"$ROOT_CANON/"}" "${value#"$executable"}"
+                return 0
+            fi
+        fi
         for root in "$ROOT_CANON" "$REPO_ROOT_TRIMMED"; do
             # Quoted-prefix removal is a literal string match (unlike case
             # patterns, where glob characters in a root path would match
