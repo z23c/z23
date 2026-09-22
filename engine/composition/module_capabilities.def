@@ -114,7 +114,7 @@ ZCL_MODULE_CAPABILITY("engine/controllers/src/policy_native_handlers.c", CAP_FS_
 ZCL_MODULE_CAPABILITY("engine/controllers/src/repair_controller.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/repair_controller_rebuild.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/repair_controller_utxo.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/controllers/src/rom_fetch_controller.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/controllers/src/rom_fetch_controller.c", CAP_FS_READ|CAP_FS_WRITE, "reads an already-installed ROM artifact before deciding whether a fetch must move content")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/rpc_client.c", CAP_NETWORK|CAP_FS_READ|CAP_FS_WRITE, "the loopback RPC client that dials the local node's HTTP+JSON-RPC port and reads its cookie file for auth")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/rpc_params.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/market/controllers/src/shop_native_fulfill_support.c", CAP_FS_READ|CAP_FS_WRITE, "")

@@ -170,9 +170,12 @@ static bool rfc_take_warm(const char *out_dir,
     if (n <= 0 || (size_t)n >= sizeof(path))
         return false;
     if (access(path, R_OK) != 0)
+        return false; // raw-return-ok:absent-install-is-the-cold-download
+    if (!rom_fetch_verify_file(path, m)) {
+        LOG_WARN(RFC_SUBSYS, "warm reuse refused for '%s': installed bytes "
+                 "do not match the committed artifact", path);
         return false;
-    if (!rom_fetch_verify_file(path, m))
-        return false;
+    }
     *reused_chunks = m->num_chunks;
     *reused_bytes = m->size_bytes;
     *chunks_verified = m->num_chunks;
