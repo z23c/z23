@@ -803,7 +803,9 @@ static const char *fe_listed_name(const struct zcl_command_reply *reply,
 }
 
 /* The shipped leaf: the catalog validator, then the registered handler.
- * A refusal from the validator never reaches the handler. */
+ * `reply` is initialized before any return. On false it has been freed
+ * and the caller must not free it. On true the caller owns it. A
+ * validator refusal never reaches the handler. */
 static bool fe_machines_call(const char *body, struct zcl_command_reply *reply,
                              char *why, size_t why_cap)
 {
@@ -811,17 +813,18 @@ static bool fe_machines_call(const char *body, struct zcl_command_reply *reply,
         zcl_command_catalog(), "fleet.machines", NULL);
     struct zcl_command_request request = {0};
     struct json_value input;
+    zcl_command_reply_init(reply, "zcl.fleet.machines.v1");
     json_init(&input);
     why[0] = '\0';
     if (!spec || !spec->handler ||
         !json_read(&input, body, strlen(body)) ||
         !zcl_command_registry_input_validate(spec, &input, why, why_cap)) {
         json_free(&input);
+        zcl_command_reply_free(reply);
         return false;
     }
     request.spec = spec;
     request.input = &input;
-    zcl_command_reply_init(reply, spec->output_schema);
     spec->handler(&request, reply);
     json_free(&input);
     return true;
