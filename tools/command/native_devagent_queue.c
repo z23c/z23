@@ -36,6 +36,13 @@
  *            or outcome carries) ends in a closed pass. An unknown,
  *            unfinished, retrying or failed dependency never unlocks it,
  *            and a late PASS for an older attempt never does either.
+ *            The three names owner, trust, and proof are not queue rows.
+ *            They name an external party. claim parks every queued row
+ *            that depends on one of them as state WAITING_EXTERNAL, writes
+ *            queue/wait/<name>.json, and claims the next runnable row in
+ *            the same call. WAITING_EXTERNAL is a worker-task wait. It is
+ *            not a fleet.steer delivery state, it does not occupy the
+ *            worker, and cancel drops it the way it drops a queued row.
  *   json     status only, optional bool: with true the reply carries the
  *            structured shape only; otherwise screen carries the human
  *            rendering too.
@@ -507,7 +514,7 @@ struct dvq_row {
     char brief[4096];
     char model[160];
     long long attempt;
-    char state[16];
+    char state[24]; /* WAITING_EXTERNAL is 17 characters */
     char worktree[4096];
     char pid_or_unit[128];
     long long started;
@@ -870,7 +877,8 @@ static long dvq_live_row(const struct dvq_row *rows, size_t n,
             continue;
         if (state ? strcmp(rows[i].state, state) == 0
                   : (strcmp(rows[i].state, "queued") == 0 ||
-                     strcmp(rows[i].state, "running") == 0))
+                     strcmp(rows[i].state, "running") == 0 ||
+                     strcmp(rows[i].state, "WAITING_EXTERNAL") == 0))
             return (long)i;
     }
     return -1;
@@ -1970,9 +1978,69 @@ static bool dvq_claim_args(const struct zcl_command_request *req,
     return true;
 }
 
+/* owner, trust, and proof are parties outside this queue. A row that
+ * names one is not runnable work and must not become the active job. */
+static bool dvq_external_dependency(const char *dep)
+{
+    return dep && (strcmp(dep, "owner") == 0 || strcmp(dep, "trust") == 0 ||
+                   strcmp(dep, "proof") == 0);
+}
+
+/* Durable dependency packet beside the ledger. The row's own state is
+ * WAITING_EXTERNAL; this file is the packet a later beat can name. */
+static bool dvq_park_external(const char *queuedir, struct dvq_row *r)
+{
+    char dir[4096 + 8];
+    char path[4096 + 96];
+    char body[256];
+    int n;
+    if (!queuedir || !r || !dvq_external_dependency(r->depends_on))
+        return false;
+    if (snprintf(dir, sizeof(dir), "%s/wait", queuedir) >= (int)sizeof(dir))
+        return false;
+    if (!dvq_mkdir_one(dir))
+        return false;
+    if (snprintf(path, sizeof(path), "%s/%s.json", dir, r->name) >=
+        (int)sizeof(path))
+        return false;
+    n = snprintf(body, sizeof(body),
+                 "{\"name\":\"%s\",\"wait\":\"%s\",\"state\":\"WAITING_EXTERNAL\","
+                 "\"seq\":%lld}\n",
+                 r->name, r->depends_on, r->seq);
+    if (n <= 0 || (size_t)n >= sizeof(body))
+        return false;
+    if (!dvq_write_file(path, body, (size_t)n))
+        return false;
+    (void)snprintf(r->state, sizeof(r->state), "WAITING_EXTERNAL");
+    r->pid_or_unit[0] = '\0';
+    dvq_clear_owner(r);
+    return true;
+}
+
+/* Park every queued external wait before the ready pick. Returns the
+ * number parked, or -1 when a packet could not be written. */
+static int dvq_park_waiting(const char *queuedir, struct dvq_row *rows,
+                            size_t n)
+{
+    int parked = 0;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (strcmp(rows[i].state, "queued") != 0)
+            continue;
+        if (!dvq_external_dependency(rows[i].depends_on))
+            continue;
+        if (!dvq_park_external(queuedir, &rows[i]))
+            return -1;
+        parked++;
+    }
+    return parked;
+}
+
 /* Oldest unfinished row, skipping names the closed predicate already
- * completed. Marks the pick running under the lock. Returns 1 with the
- * pick, 0 with done_name when only finished work waits, -1 refused. */
+ * completed. An owner/trust/proof wait is parked as WAITING_EXTERNAL
+ * first, so the pick is a different runnable row. Marks that pick
+ * running under the lock. Returns 1 with the pick, 0 with done_name
+ * when only finished work waits, -1 refused. */
 static int dvq_claim_take(const struct dvq_dirs *d, const char *qpath,
                           const char *opath, const char *worker,
                           const char *session, struct dvq_row *pick,
@@ -1995,6 +2063,23 @@ static int dvq_claim_take(const struct dvq_dirs *d, const char *qpath,
         dvq_fail(reply, "QUEUE_READ_FAILED", "claim",
                  "cannot read the queue file", qpath);
         return -1;
+    }
+    {
+        int parked = dvq_park_waiting(d->queue, rows, nrows);
+        if (parked < 0) {
+            free(rows);
+            dvq_unlock(lock);
+            dvq_fail(reply, "QUEUE_WRITE_FAILED", "claim",
+                     "cannot persist an external wait", qpath);
+            return -1;
+        }
+        if (parked > 0 && !dvq_rewrite_rows(d->queue, qpath, rows, nrows)) {
+            free(rows);
+            dvq_unlock(lock);
+            dvq_fail(reply, "QUEUE_WRITE_FAILED", "claim",
+                     "cannot record WAITING_EXTERNAL", qpath);
+            return -1;
+        }
     }
     {
         long at = dvq_pick_ready(rows, nrows, opath, true, done_name);
@@ -2124,7 +2209,8 @@ static void dvq_cancel_filter(struct dvq_row *rows, size_t nrows,
     *live = false;
     for (i = 0; i < nrows; i++) {
         if (strcmp(rows[i].name, name) == 0) {
-            if (strcmp(rows[i].state, "queued") == 0) {
+            if (strcmp(rows[i].state, "queued") == 0 ||
+                strcmp(rows[i].state, "WAITING_EXTERNAL") == 0) {
                 (*dropped)++;
                 continue;
             }
@@ -3368,6 +3454,8 @@ static void dvq_status(const struct zcl_command_request *req,
                 tag = "queued ";
             else if (strcmp(rows[i].state, "running") == 0)
                 tag = "running";
+            else if (strcmp(rows[i].state, "WAITING_EXTERNAL") == 0)
+                tag = "waiting";
             else
                 continue;
             if (i >= 40) {
@@ -3386,6 +3474,11 @@ static void dvq_status(const struct zcl_command_request *req,
                              "  #%lld %-7s %-12s a%-3lld %s age %llds\n",
                              rows[i].seq, tag, rows[i].name,
                              rows[i].attempt, rows[i].worktree, age);
+            } else if (strcmp(tag, "waiting") == 0) {
+                w = snprintf(screen + used, sizeof(screen) - used,
+                             "  #%lld WAITING_EXTERNAL %-12s a%-3lld %s\n",
+                             rows[i].seq, rows[i].name, rows[i].attempt,
+                             rows[i].depends_on);
             } else {
                 w = dvq_screen_queued(screen + used, sizeof(screen) - used,
                                       rows, nrows, i, opath);
