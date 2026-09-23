@@ -23,9 +23,9 @@ ZCL_FACT("landing.queue", "land_state_dir",
          "tools/command/native_dev_land.c",
          "STATE. <platform_state_root>/land (0700):")
 ZCL_FACT("landing.queue", "land_mail_outbox",
-         "Every dev.land outcome also appends to <platform_state_root>/mail/outbox.jsonl if that dir exists.",
+         "Every dev.land outcome posts a ref=tip note through the mail leaf when the mail dir exists.",
          "tools/command/native_dev_land.c",
-         "Every outcome also appends to <platform_state_root>/mail/outbox.jsonl when")
+         "The row carries ref=<tip> for")
 ZCL_FACT("landing.queue", "land_step_start_fn",
          "dl_step_start drives a queued row through worktree/rebase/lint/proof-request.",
          "tools/command/native_dev_land.c",

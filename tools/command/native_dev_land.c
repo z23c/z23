@@ -42,9 +42,11 @@
  *                   proof cannot mutate/read this checkout concurrently.
  *   wt/             the private landing worktree, created once and reused.
  *   logs/           one log per attempt; a failure row names its log.
- * Every outcome also appends to <platform_state_root>/mail/outbox.jsonl when
+ * Every outcome also posts a note to the mail leaf (which appends it to
+ * <platform_state_root>/mail/outbox.jsonl with the mail seq space) when
  * that directory exists, so an agent learns the result by pulling its mail
- * rather than by waiting on this queue.
+ * rather than by waiting on this queue. The row carries ref=<tip> for
+ * correlation; the land queue's own seq never enters the mail seq space.
  *
  * OUTPUT (zcl.land.v1) on ok=true: leaf is always "dev.land", plus per
  * action: submit {seq, tip, state:"queued"}; status {queued, in_flight,
@@ -118,6 +120,7 @@
 #include "dependency_links.h"
 
 #include "base/safe_alloc.h"
+#include "config/command_catalog.h"
 #include "json/json.h"
 #include "platform/file_clone.h"
 #include "platform/file_metadata.h"
@@ -1033,14 +1036,121 @@ static bool dl_rev_parse(const char *dir, const char *what, char out[80])
 
 /* ── the mail outbox (agents learn by pulling, never by waiting) ───────── */
 
+/* Sibling sub-dispatch into dev.agent.mail: the land leaf never appends to
+ * the mail store directly. A raw row cannot carry the mail leaf's
+ * sequencing (the land queue's own seq would collide with the outbox's seq
+ * space) and rows without to/body, or with a kind outside the mail set,
+ * never parse back — every such outcome was skipped by every pull while
+ * the global cursor stood still. Posting through the owning leaf keeps one
+ * writer, one seq space, and rows every reader parses. Same in-process
+ * shape the worker leaf uses for its result mail. */
+struct dl_msub {
+    struct json_value payload;
+    struct zcl_command_request request;
+    struct zcl_command_reply reply;
+    bool ran;
+    bool valid;
+};
+
+static void dl_msub_begin(struct dl_msub *s)
+{
+    json_init(&s->payload);
+    json_set_object(&s->payload);
+    memset(&s->request, 0, sizeof(s->request));
+    s->request.input = &s->payload;
+    s->request.spec =
+        zcl_command_registry_find(zcl_command_catalog(), "dev.agent.mail",
+                                  NULL);
+    s->request.view = "normal";
+    zcl_command_reply_init(&s->reply, "zcl.agent_mail.v1");
+    s->ran = false;
+    s->valid = s->request.spec != NULL;
+}
+
+static void dl_msub_end(struct dl_msub *s)
+{
+    zcl_command_reply_free(&s->reply);
+    json_free(&s->payload);
+    s->ran = false;
+}
+
+static bool dl_msub_ok(const struct dl_msub *s)
+{
+    return s && s->ran && s->reply.status == ZCL_COMMAND_STATUS_PASSED;
+}
+
+/* The log file's own name: the mail leaf refuses absolute paths anywhere
+ * in a body, and the full path is local-only evidence that never crosses
+ * hosts. */
+static const char *dl_log_base(const char *path)
+{
+    const char *slash = path ? strrchr(path, '/') : NULL;
+    const char *back = path ? strrchr(path, '\\') : NULL;
+    const char *base = slash && back ? (slash > back ? slash : back)
+                                     : (slash ? slash : back);
+    if (base)
+        return base + 1;
+    return path ? path : "";
+}
+
+/* Full outcome text. False when it does not fit: the caller falls back to
+ * the reduced row rather than truncating evidence mid-field. */
+static bool dl_outbox_body(const struct dl_row *r, const char *event,
+                           char *out, size_t cap)
+{
+    int w = snprintf(out, cap,
+                     "land=%s\nstate=%s\ntip=%s\nattempt=%lld\n"
+                     "dimension=%s\nnote=%s\ndetail=%s\nlog=%s\n",
+                     event, r->state, r->tip, r->attempt, r->dimension,
+                     r->note, r->detail, dl_log_base(r->log_path));
+    return w > 0 && (size_t)w < cap;
+}
+
+/* The row that always fits: alphabet-constrained fields only, so a body
+ * that somehow will not compose never cancels the outcome. Same fail-safe
+ * shape as the worker leaf's reduced result mail. */
+static void dl_outbox_body_reduced(const struct dl_row *r, const char *event,
+                                   char *out, size_t cap)
+{
+    (void)snprintf(out, cap,
+                   "land=%s\nstate=%s\ntip=%s\nattempt=%lld\nreduced=1\n",
+                   event, r->state, r->tip, r->attempt);
+}
+
+static bool dl_mail_post(const char *body, const char *ref)
+{
+    struct dl_msub sub;
+    bool posted;
+    dl_msub_begin(&sub);
+    if (!sub.valid) {
+        dl_msub_end(&sub);
+        return false;
+    }
+    posted = json_push_kv_str(&sub.payload, "action", "post") &&
+             json_push_kv_str(&sub.payload, "to", "*") &&
+             json_push_kv_str(&sub.payload, "kind", "note") &&
+             json_push_kv_str(&sub.payload, "body", body) &&
+             json_push_kv_str(&sub.payload, "ref", ref ? ref : "") &&
+             json_push_kv_str(&sub.payload, "from", DL_LEAF);
+    if (posted) {
+        zcl_command_handler_fn mail_handler = zcl_native_handle_dev_agent_mail;
+        mail_handler(&sub.request, &sub.reply);
+        /* Ran means the sibling handler was invoked, never that it
+         * accepted: acceptance is the reply's own status. */
+        sub.ran = true;
+        posted = dl_msub_ok(&sub);
+    }
+    dl_msub_end(&sub);
+    return posted;
+}
+
 static bool dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
                       const char *event)
 {
-    char dir[4096 + 16], path[4096 + 32], line[DL_LINE_CAP];
-    /* Same worst-case sizing as dl_encode_row's e_detail: see its comment. */
-    char e_note[2048], e_detail[256 * 6 + 16], ts[64];
+    /* Bodies stay below the mail leaf's own cap; the full text worst case
+     * (note 512 + detail 255 + headers) fits with room to spare. */
+    char dir[4096 + 16], full[2048];
     struct stat st;
-    int w;
     if (!d || !r || !event)
         return false;
     if (snprintf(dir, sizeof(dir), "%s/mail", d->root) >= (int)sizeof(dir))
@@ -1051,23 +1161,11 @@ static bool dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
         return errno == ENOENT;
     if ((st.st_mode & S_IFMT) != S_IFDIR)
         return false;
-    if (snprintf(path, sizeof(path), "%s/outbox.jsonl", dir) >=
-        (int)sizeof(path))
-        return false;
-    if (!dl_escape(r->note, e_note, sizeof(e_note)) ||
-        !dl_escape(r->detail, e_detail, sizeof(e_detail)))
-        return false;
-    dl_now_iso(ts);
-    w = snprintf(line, sizeof(line),
-                 "{\"ts\":\"%s\",\"from\":\"dev.land\",\"kind\":\"land\","
-                 "\"seq\":%lld,\"tip\":\"%s\",\"state\":\"%s\","
-                 "\"event\":\"%s\",\"attempt\":%lld,\"dimension\":\"%s\","
-                 "\"log_path\":\"%s\",\"note\":\"%s\","
-                 "\"detail\":\"%s\"}\n",
-                 ts, r->seq, r->tip, r->state, event, r->attempt,
-                 r->dimension, r->log_path, e_note, e_detail);
-    return w > 0 && (size_t)w < sizeof(line) &&
-           dl_append_row(path, line, (size_t)w);
+    if (dl_outbox_body(r, event, full, sizeof(full)) &&
+        dl_mail_post(full, r->tip))
+        return true;
+    dl_outbox_body_reduced(r, event, full, sizeof(full));
+    return dl_mail_post(full, r->tip);
 }
 
 /* ── outcomes ──────────────────────────────────────────────────────────── */

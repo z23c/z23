@@ -1937,6 +1937,219 @@ static bool dlx_resume_after_death(void)
     return false;
 }
 
+/* ── land outcomes stay visible in agent mail ────────────────────────────
+ *
+ * The land leaf reports queued/phase/outcome rows through the mail leaf so
+ * agents learn results by pulling. A raw append once wrote rows the mail
+ * parser could not read (no to/body, kind outside the mail set, land-queue
+ * seq colliding with the outbox seq space): every pull skipped them while
+ * the global cursor stood still. This test drives a real submit and pulls
+ * the outcome back by tip. */
+
+struct dlx_mail_call {
+    struct json_value input;
+    struct zcl_command_request request;
+    struct zcl_command_reply reply;
+};
+
+static void dlx_mail_begin(struct dlx_mail_call *m)
+{
+    json_init(&m->input);
+    json_set_object(&m->input);
+    memset(&m->request, 0, sizeof(m->request));
+    m->request.input = &m->input;
+    m->request.spec =
+        zcl_command_registry_find(zcl_command_catalog(), "dev.agent.mail",
+                                  NULL);
+    zcl_command_reply_init(&m->reply, "zcl.agent_mail.v1");
+}
+
+static void dlx_mail_end(struct dlx_mail_call *m)
+{
+    zcl_command_reply_free(&m->reply);
+    json_free(&m->input);
+}
+
+static bool dlx_mail_ok(const struct dlx_mail_call *m)
+{
+    return m->request.spec != NULL &&
+        m->reply.status == ZCL_COMMAND_STATUS_PASSED;
+}
+
+static bool dlx_mail_post(const char *to, const char *kind, const char *body,
+                          const char *ref, const char *from)
+{
+    struct dlx_mail_call m;
+    bool ok;
+    dlx_mail_begin(&m);
+    ok = json_push_kv_str(&m.input, "action", "post") &&
+         json_push_kv_str(&m.input, "to", to) &&
+         json_push_kv_str(&m.input, "kind", kind) &&
+         json_push_kv_str(&m.input, "body", body) &&
+         json_push_kv_str(&m.input, "ref", ref) &&
+         json_push_kv_str(&m.input, "from", from);
+    if (ok)
+        zcl_native_handle_dev_agent_mail(&m.request, &m.reply);
+    ok = ok && dlx_mail_ok(&m);
+    dlx_mail_end(&m);
+    return ok;
+}
+
+static bool dlx_mail_str_eq(const struct json_value *obj, const char *key,
+                            const char *want)
+{
+    const struct json_value *v = json_get(obj, key);
+    return v && v->type == JSON_STR && json_get_str(v) &&
+        strcmp(json_get_str(v), want) == 0;
+}
+
+/* One pulled row is the wanted land note; records its seq. */
+static bool dlx_mail_row_match(const struct json_value *row, const char *from,
+                               const char *kind, const char *ref,
+                               long long *seq)
+{
+    const struct json_value *v;
+    if (!dlx_mail_str_eq(row, "from", from))
+        return false;
+    if (!dlx_mail_str_eq(row, "kind", kind))
+        return false;
+    if (!dlx_mail_str_eq(row, "ref", ref))
+        return false;
+    v = json_get(row, "seq");
+    if (v && v->type == JSON_INT)
+        *seq = json_get_int(v);
+    return true;
+}
+
+/* One page's rows into the match accumulator. */
+static void dlx_mail_page_scan(const struct json_value *rows, const char *from,
+                               const char *kind, const char *ref,
+                               long long *seq, bool *found)
+{
+    size_t n;
+    if (!rows || rows->type != JSON_ARR)
+        return;
+    n = rows->num_children;
+    for (size_t i = 0; i < n; i++) {
+        if (dlx_mail_row_match(&rows->children[i], from, kind, ref, seq))
+            *found = true;
+    }
+}
+
+/* The token resuming the next page into *more. False when a further page
+ * exists but its token does not fit: fail closed instead of re-reading
+ * one page. */
+static bool dlx_mail_advance(const struct zcl_command_reply *reply,
+                             bool *more, char *since, size_t cap)
+{
+    const struct json_value *tok, *tr;
+    tr = json_get(&reply->data, "truncated");
+    *more = tr && tr->type == JSON_BOOL && json_get_bool(tr);
+    if (!*more)
+        return true;
+    tok = json_get(&reply->data, "next_since");
+    if (!tok || tok->type != JSON_STR || !json_get_str(tok) ||
+        strlen(json_get_str(tok)) >= cap)
+        return false;
+    (void)snprintf(since, cap, "%s", json_get_str(tok));
+    return true;
+}
+
+/* One pull page at `since`: sums its skipped count, scans its rows, and
+ * advances the cursor. */
+struct dlx_mail_page {
+    bool ok;
+    bool more;
+    long long skipped;
+};
+
+static void dlx_mail_page(struct dlx_mail_page *pg, const char *since,
+                          const char *from, const char *kind, const char *ref,
+                          long long *seq, bool *found, char *next, size_t cap)
+{
+    struct dlx_mail_call m;
+    const struct json_value *rows, *sk;
+    pg->ok = false;
+    pg->more = false;
+    pg->skipped = 0;
+    dlx_mail_begin(&m);
+    pg->ok = json_push_kv_str(&m.input, "action", "pull") &&
+             json_push_kv_str(&m.input, "since", since);
+    if (pg->ok)
+        zcl_native_handle_dev_agent_mail(&m.request, &m.reply);
+    pg->ok = pg->ok && dlx_mail_ok(&m);
+    if (!pg->ok) {
+        dlx_mail_end(&m);
+        return;
+    }
+    sk = json_get(&m.reply.data, "skipped");
+    if (sk && sk->type == JSON_INT)
+        pg->skipped = json_get_int(sk);
+    rows = json_get(&m.reply.data, "rows");
+    dlx_mail_page_scan(rows, from, kind, ref, seq, found);
+    pg->ok = dlx_mail_advance(&m.reply, &pg->more, next, cap);
+    dlx_mail_end(&m);
+}
+
+/* Drain every pull page following next_since. Sets *found when one row
+ * matches from/kind/ref, *seq to that row's seq, and *skipped to the summed
+ * skipped count across pages. */
+static bool dlx_mail_find(const char *from, const char *kind, const char *ref,
+                          long long *seq, long long *skipped, bool *found)
+{
+    char since[4096] = "0";
+    char next[4096] = "0";
+    *found = false;
+    *skipped = 0;
+    for (int page = 0; page < 64; page++) {
+        struct dlx_mail_page pg;
+        dlx_mail_page(&pg, since, from, kind, ref, seq, found, next,
+                      sizeof(next));
+        if (!pg.ok)
+            return false;
+        *skipped += pg.skipped;
+        if (!pg.more)
+            return true;
+        (void)snprintf(since, sizeof(since), "%s", next);
+    }
+    return false;
+}
+
+static int test_dev_land_outcome_visible_in_mail(void)
+{
+    int failures = 0;
+    TEST("land: a submitted outcome posts through the mail leaf and pulls back by tip") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        long long seq = -1, skipped = -1;
+        bool found = false;
+        dlx_isolate("mailvisible");
+        ASSERT(dlx_rig_make(&rig, "mailvisible_rig"));
+        /* The mail dir pre-exists on every real host (receiver/steer
+         * activity); establish it here through the mail leaf itself, the
+         * way production does. */
+        ASSERT(dlx_mail_post("*", "note", "seed", "seed", "test"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT(dlx_mail_find("dev.land", "note", rig.tip, &seq, &skipped,
+                             &found));
+        ASSERT(found);
+        /* Mail-allocated seq after the seed row, never the land queue's
+         * own seq 1 colliding with the outbox seq space. */
+        ASSERT_EQ(seq, 2);
+        /* Nothing in the store is skipped as malformed: every row parses. */
+        ASSERT_EQ(skipped, 0);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int test_dev_land_publisher_death(void)
 {
     int failures = 0;
@@ -4466,6 +4679,7 @@ int test_dev_land(void)
     failures += test_dev_land_lost_persistence();
     failures += test_dev_land_after_proof_restart();
     failures += test_dev_land_terminal_replay();
+    failures += test_dev_land_outcome_visible_in_mail();
 
     TEST("land: a hooksPath naming no real pre-push cannot skip admission") {
         struct dlx_rig rig;
