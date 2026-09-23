@@ -70,6 +70,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static bool zd_index_drop_object(const char *workspace,
+                                 const uint8_t root[32]);
+
 static bool zd_publication_check(struct node_db *ndb, const char *workspace,
     const char *action, const struct zcode_lane_status *lane,
     const struct vcs_zcode_publication_v1 *intent, const uint8_t signer[32],
@@ -5565,6 +5568,33 @@ static int test_zd_improve_command(void)
         ASSERT_EQ(mirror_receipt.git_oid_len, sizeof(mirror_git_oid));
         ASSERT(memcmp(mirror_receipt.git_oid, mirror_git_oid,
                       sizeof(mirror_git_oid)) == 0);
+        uint8_t *canonical_mirror = NULL;
+        size_t canonical_mirror_len = 0;
+        ASSERT_EQ(vcs_object_get(
+                      workspace, mirror_receipt_root,
+                      VCS_TAG_DEV_MIRROR_RECEIPT,
+                      &canonical_mirror, &canonical_mirror_len), 0);
+        ASSERT(zd_index_drop_object(workspace, mirror_receipt_root));
+        const uint8_t corrupt_mirror[] = "interrupted-mirror-receipt";
+        ASSERT(vcs_object_put_addressed(
+            workspace, mirror_receipt_root,
+            corrupt_mirror, sizeof(corrupt_mirror)));
+        ASSERT_EQ(vcs_devloop_mirror_load_for_job(
+                      workspace, publication_anchor.publication_job_root,
+                      &mirror_receipt, loaded_mirror_root),
+                  VCS_DEVLOOP_MIRROR_INVALID);
+        bool repaired_mirror_reused = false;
+        uint8_t repaired_mirror_root[32];
+        ASSERT(vcs_devloop_mirror_record(
+            workspace, publication_anchor.publication_job_root,
+            mirror_git_oid, sizeof(mirror_git_oid),
+            repaired_mirror_root, &repaired_mirror_reused));
+        ASSERT(repaired_mirror_reused);
+        ASSERT(memcmp(repaired_mirror_root, mirror_receipt_root, 32) == 0);
+        ASSERT(zd_object_equals_bytes(
+            workspace, mirror_receipt_root,
+            canonical_mirror, canonical_mirror_len));
+        free(canonical_mirror);
         zcl_command_reply_free(&mirror_reply);
         zcl_command_reply_init(
             &mirror_reply, "zcl.dev_publication_mirror_record.v1");

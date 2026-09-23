@@ -397,8 +397,9 @@ bool vcs_devloop_mirror_record(
     if (!mirror_build_from_provider(
             repo_root, job_root, git_oid, git_oid_len, &receipt) ||
         !mirror_receipt_serialize(&receipt, wire) ||
-        !vcs_object_put(repo_root, wire, sizeof(wire),
-                        VCS_TAG_DEV_MIRROR_RECEIPT, receipt_root_out))
+        !vcs_object_put_repair(repo_root, wire, sizeof(wire),
+                               VCS_TAG_DEV_MIRROR_RECEIPT,
+                               receipt_root_out, NULL))
         return false;
 #ifdef _WIN32
     char zvcs_path[PATH_MAX];
