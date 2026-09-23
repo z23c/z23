@@ -28,7 +28,8 @@ struct vcs_zcode_publication_index;
 
 /* A restart view for one immutable, stored, signer-pinned intent. Observations
  * are signed CAS objects, but a remote receipt still needs independent remote
- * verification. An incomplete scan refuses a decision. Even an empty complete
+ * verification. The index is bound to its build workspace; a mismatched
+ * workspace or incomplete scan refuses a decision. Even an empty complete
  * scan only permits a final recheck under the existing land/action lease; it
  * never grants dispatch authority by itself. */
 enum vcs_zcode_publication_recovery_state {

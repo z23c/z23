@@ -7426,6 +7426,19 @@ static int test_zd_publication_result(void)
         ASSERT_EQ(recovery.unknown_attempts, 1);
         ASSERT_EQ(recovery.accepted_attempts, 1);
         ASSERT_EQ(recovery.rejected_attempts, 1);
+        char other_dir[512];
+        test_make_tmpdir(other_dir, sizeof(other_dir), "zcode_dev",
+                         "publication_foreign_projection");
+        ASSERT(vcs_object_store_init(other_dir));
+        struct vcs_zcode_publication_index *foreign_projection =
+            vcs_zcode_publication_index_build(other_dir);
+        ASSERT(foreign_projection != NULL);
+        ASSERT(vcs_zcode_publication_index_complete(foreign_projection));
+        ASSERT(!vcs_zcode_publication_index_recovery(
+            foreign_projection, dir, intent_root, publisher, &recovery));
+        ASSERT_EQ(recovery.state, 0);
+        vcs_zcode_publication_index_free(foreign_projection);
+        test_rm_rf(other_dir);
         uint8_t unrelated_root[32] = {99};
         ASSERT(!vcs_zcode_publication_index_recovery(
             projection, dir, unrelated_root, publisher, &recovery));

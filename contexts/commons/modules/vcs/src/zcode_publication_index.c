@@ -21,6 +21,7 @@ static const uint8_t result_magic[8] = {'Z','C','P','R','E','S','\r','\n'};
 static const uint8_t receipt_magic[8] = {'Z','C','R','R','C','P','\r','\n'};
 
 struct vcs_zcode_publication_index {
+    char *repo_root;
     struct vcs_zcode_publication_observation_entry *entries;
     size_t count;
     size_t scanned;
@@ -197,12 +198,19 @@ struct vcs_zcode_publication_index *vcs_zcode_publication_index_build(
         zcl_malloc(sizeof(*index), "publication_index");
     if (!index) LOG_RETURN(NULL, INDEX_LOG, "index allocation failed");
     memset(index, 0, sizeof(*index));
+    size_t root_len = strlen(repo_root);
+    index->repo_root = zcl_malloc(root_len + 1u, "publication_index_root");
+    if (!index->repo_root) {
+        free(index);
+        LOG_RETURN(NULL, INDEX_LOG, "workspace identity allocation failed");
+    }
+    memcpy(index->repo_root, repo_root, root_len + 1u);
     index->complete = true;
     index->entries = zcl_malloc(sizeof(*index->entries) *
         VCS_ZCODE_PUBLICATION_INDEX_MAX_OBSERVATIONS,
         "publication_index_entries");
     if (!index->entries) {
-        free(index);
+        vcs_zcode_publication_index_free(index);
         LOG_RETURN(NULL, INDEX_LOG, "entry allocation failed");
     }
     char objects[4400];
@@ -220,6 +228,7 @@ struct vcs_zcode_publication_index *vcs_zcode_publication_index_build(
 void vcs_zcode_publication_index_free(struct vcs_zcode_publication_index *index)
 {
     if (!index) return;
+    free(index->repo_root);
     free(index->entries);
     free(index);
 }
@@ -275,6 +284,7 @@ bool vcs_zcode_publication_index_recovery(
     if (!out) LOG_RETURN(false, INDEX_LOG, "missing recovery output");
     memset(out, 0, sizeof(*out));
     if (!index || !index->complete || !repo_root || !repo_root[0] ||
+        strcmp(index->repo_root, repo_root) != 0 ||
         !publication_root || !expected_signer)
         LOG_RETURN(false, INDEX_LOG, "incomplete recovery input");
     struct vcs_zcode_publication_v1 intent;
