@@ -669,15 +669,20 @@ static struct zcl_result pkgl_active_target_matches(
                      canonical, hex);
     if (n <= 0 || (size_t)n >= sizeof(expected))
         return ZCL_ERR(-1, "expected active pointer path is too long");
+    struct stat installed;
+    if (lstat(expected, &installed) != 0 || !S_ISDIR(installed.st_mode))
+        return ZCL_ERR(-1,
+                       "active installed root for %s is missing or not a "
+                       "directory; inspect the install and reinstall the "
+                       "exact verified root", name);
     if (strcmp(actual, expected) != 0) {
         /* Older absolute links may contain a spelling of the same parent
          * through a symlink. Accept only if both paths resolve to the same
          * installed directory; a missing tree needs exact pointer bytes. */
-        struct stat observed, wanted;
+        struct stat observed;
         if (stat(actual, &observed) != 0 ||
-            stat(expected, &wanted) != 0 ||
-            observed.st_dev != wanted.st_dev ||
-            observed.st_ino != wanted.st_ino)
+            observed.st_dev != installed.st_dev ||
+            observed.st_ino != installed.st_ino)
             return ZCL_ERR(-1,
                            "active pointer and generation log disagree for %s; "
                            "inspect both and retry activation of the exact "

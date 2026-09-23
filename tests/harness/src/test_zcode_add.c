@@ -761,6 +761,35 @@ static int t_active_wrong_pointer(void)
     return failures;
 }
 
+static int t_active_missing_install(void)
+{
+    int failures = 0;
+    char base[256], installed[400];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "missing-install");
+    struct pkgl_ctx ctx = {0};
+    (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s/zcode", base);
+    uint8_t root[32], previous[32], observed[32];
+    za_fake_root(root, 0x76);
+    char hex[65];
+    za_hex(root, 32, hex);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s",
+                   ctx.zcode_dir, hex);
+    bool prepared = za_mkdir_p(installed);
+    bool had_previous = false;
+    struct zcl_result activated = pkgl_activate(
+        &ctx, "alice/preview", root, 1000, previous, &had_previous);
+    bool removed = activated.ok && za_rm_rf(installed);
+    size_t generations = 0;
+    bool present = false;
+    struct zcl_result read = package_lifecycle_active(
+        base, "alice/preview", observed, &generations, &present);
+    ZA_CHECK("status refuses an active root whose install disappeared",
+             prepared && removed && !read.ok &&
+                 strstr(read.message, "installed root") != NULL);
+    ZA_CHECK("missing-install fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 /* ── the user's own data, which no version owns ──────────────────────
  *
  * An install tree is content addressed: every update lands in a NEW
@@ -2578,6 +2607,7 @@ int test_zcode_add(void)
     failures += t_relative_active_pointer();
     failures += t_active_log_divergence();
     failures += t_active_wrong_pointer();
+    failures += t_active_missing_install();
     failures += t_e2e();
     failures += t_programs();
     printf("=== zcode_add complete: %d failure(s) ===\n", failures);
