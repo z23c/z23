@@ -6,6 +6,7 @@
 
 #include "vcs/vcs_devloop.h"
 #include "vcs_devloop_priv.h"
+#include "vcs_priv.h"
 #include "base/bytes.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_commit.h"
@@ -998,6 +999,45 @@ static void accepted_candidate_fail(
     LOG_WARN("vcs.devloop", "accepted candidate publication: %s", detail);
 }
 
+/* Recover only the exact accepted-lane receipt implied by this accepted work.
+ * The queue log still decides whether it is current; this repairs its CAS
+ * bytes before the existing progress scanner reads that log. */
+static bool accepted_candidate_repair_progress(
+    const char *workspace, const uint8_t job_root[32],
+    const uint8_t accepted_work_root[32])
+{
+    struct vcs_devloop_publication_receipt waiting = {
+        .version = VCS_DEVLOOP_PUBLICATION_RECEIPT_VERSION,
+        .phase = VCS_DEVLOOP_PUBLICATION_PHASE_WAITING_ACCEPTANCE,
+    };
+    memcpy(waiting.job_root, job_root, 32);
+    uint8_t wire[VCS_DEV_PUBLICATION_RECEIPT_WIRE_BYTES], waiting_root[32];
+    if (!publication_receipt_serialize(&waiting, wire)) return false;
+    vcs_sha3_tag(VCS_TAG_PUBLICATION_RECEIPT, wire, sizeof(wire),
+                 waiting_root);
+    struct vcs_devloop_publication_receipt accepted = {
+        .version = VCS_DEVLOOP_PUBLICATION_RECEIPT_VERSION,
+        .phase = VCS_DEVLOOP_PUBLICATION_PHASE_ACCEPTED_LANE_BOUND,
+    };
+    memcpy(accepted.job_root, job_root, 32);
+    memcpy(accepted.predecessor_receipt_root, waiting_root, 32);
+    memcpy(accepted.artifact_root, accepted_work_root, 32);
+    if (!publication_receipt_serialize(&accepted, wire)) return false;
+    uint8_t accepted_root[32];
+    vcs_sha3_tag(VCS_TAG_PUBLICATION_RECEIPT, wire, sizeof(wire),
+                 accepted_root);
+    if (!vcs_object_has(workspace, accepted_root)) return true;
+    struct vcs_devloop_publication_receipt loaded;
+    if (vcs_devloop_publication_receipt_load(workspace, accepted_root,
+                                             &loaded))
+        return true;
+    uint8_t repaired_root[32];
+    return vcs_object_put_repair(workspace, wire, sizeof(wire),
+                                 VCS_TAG_PUBLICATION_RECEIPT,
+                                 repaired_root, NULL) &&
+           memcmp(repaired_root, accepted_root, 32) == 0;
+}
+
 static bool accepted_candidate_existing_job(
     const char *workspace, const uint8_t source_root[32],
     const uint8_t accepted_work_root[32], int64_t now_unix,
@@ -1035,6 +1075,13 @@ static bool accepted_candidate_existing_job(
         if (!vcs_devloop_publication_job_load(workspace, roots[i], &job) ||
             memcmp(job.source_tree_root, source_root, 32) != 0)
             continue;
+        if (!accepted_candidate_repair_progress(
+                workspace, roots[i], accepted_work_root)) {
+            free(roots);
+            accepted_candidate_fail(out,
+                "exact accepted progress receipt could not be repaired");
+            return false;
+        }
         uint8_t waiting_root[32], progress_root[32];
         bool waiting_reused = false, proven_reused = false;
         if (!vcs_devloop_publication_advance_waiting_acceptance(

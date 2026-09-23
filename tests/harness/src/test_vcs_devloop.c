@@ -174,6 +174,39 @@ static int vd_test_accepted_candidate_commit_retry(
     return failures;
 }
 
+static int vd_test_accepted_candidate_progress_retry(
+    const char *authority, const char *candidate,
+    const struct vd_accepted_fixture *fixture,
+    const uint8_t source_root[32], int64_t accepted_now,
+    const struct vcs_devloop_accepted_candidate_result *first)
+{
+    int failures = 0;
+    VD_CHECK("publication: logged accepted progress is malformed",
+             vd_poison_object(authority, first->publication_progress_root));
+    struct vcs_devloop_publication_receipt invalid;
+    VD_CHECK("publication: malformed accepted progress refuses reload",
+             !vcs_devloop_publication_receipt_load(
+                 authority, first->publication_progress_root, &invalid));
+    struct vcs_devloop_accepted_candidate_result retried = {0};
+    vcs_devloop_publication_bind_accepted_candidate(
+        authority, candidate, fixture->accepted.accepted_work_root,
+        source_root, accepted_now, &retried);
+    VD_CHECK("publication: exact malformed progress retry reuses job",
+             retried.ok && retried.reused &&
+             memcmp(retried.publication_job_root,
+                    first->publication_job_root, 32) == 0);
+    struct vcs_devloop_publication_receipt repaired;
+    VD_CHECK("publication: accepted progress reloads at original root",
+             retried.ok &&
+             memcmp(retried.publication_progress_root,
+                    first->publication_progress_root, 32) == 0 &&
+             vcs_devloop_publication_receipt_load(
+                 authority, first->publication_progress_root, &repaired) &&
+             repaired.phase ==
+                 VCS_DEVLOOP_PUBLICATION_PHASE_ACCEPTED_LANE_BOUND);
+    return failures;
+}
+
 static int vd_test_source_capture_retry(
     const char *candidate, const uint8_t source_root[32])
 {
@@ -299,6 +332,10 @@ static int vd_test_accepted_candidate_job_retry(
             &first);
     if (retried.ok)
         failures += vd_test_accepted_candidate_commit_retry(
+            authority, candidate, fixture, source_root, accepted_now,
+            &first);
+    if (retried.ok)
+        failures += vd_test_accepted_candidate_progress_retry(
             authority, candidate, fixture, source_root, accepted_now,
             &first);
     if (staged)
