@@ -3859,8 +3859,8 @@ static bool dl_tip_checkout(const struct dl_dirs *d, struct dl_row *row,
                             char *why, size_t why_cap)
 {
     char buf[DL_GIT_CAP];
-    const char *ancestor_args[] = { "merge-base", "--is-ancestor",
-                                    observed_main, row->tip, NULL };
+    const char *ancestor_args[] = { "--no-replace-objects", "merge-base",
+                                    "--is-ancestor", observed_main, row->tip, NULL };
     const char *checkout_args[] = { "checkout", "--quiet", "--force",
                                     "--detach", row->tip, NULL };
     if (!dl_rev_parse(d->wt, row->tip, row->local)) {
@@ -3913,7 +3913,7 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
 {
     char buf[DL_GIT_CAP];
     bool integrated = false;
-    const char *rebase_args[] = { "rebase", observed_main, NULL };
+    const char *rebase_args[] = { "--no-replace-objects", "rebase", observed_main, NULL };
     const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U",
                                     NULL };
     const char *abort_args[] = { "rebase", "--abort", NULL };

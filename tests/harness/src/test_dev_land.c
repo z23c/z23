@@ -2956,7 +2956,7 @@ static int test_dev_land_recovery_ignores_replace_refs(void)
         struct dlx_rig rig;
         struct dlx_call c;
         char base[64], stranger[64], remote[64], land[1200], wt[1400];
-        char tree[64], forged[64];
+        char tree[64], forged[64], body[64];
         dlx_isolate("recovery_replace_ref");
         ASSERT(dlx_rig_make(&rig, "recovery_replace_ref_rig"));
         ASSERT(dlx_origin_main(&rig, base));
@@ -3005,6 +3005,21 @@ static int test_dev_land_recovery_ignores_replace_refs(void)
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, remote));
         ASSERT_STR_EQ(remote, stranger);
+
+        /* Keep the misleading local ref in place. The persisted request
+         * must still replay the candidate onto the real sibling and land
+         * its bytes, not converge to an empty rebase of the fake history. */
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        const char *show[] = { "show", "main:change.txt", NULL };
+        ASSERT(dlx_git_out(rig.bare, show, body, sizeof(body)) == 0);
+        ASSERT_STR_EQ(body, "one");
         dlx_restore();
         PASS();
     }
