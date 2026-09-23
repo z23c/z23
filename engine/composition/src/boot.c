@@ -383,8 +383,6 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
                  ctx->datadir);
         signal_handler_set_crash_log(crash_path);
     }
-    /* Arm the pre-RPC boot-progress beacon (util/boot_status.h). */
-    boot_status_init(ctx->datadir);
     /* Acquire data directory lock — prevents two instances from
      * corrupting SQLite / LevelDB by writing concurrently. */
     if (!boot_datadir_lock_acquire(ctx->datadir))

@@ -10,6 +10,7 @@
 #include "config/boot_datadir_lock.h"
 
 #include "config/boot_error.h"
+#include "util/boot_status.h"
 #include "util/hw_bench.h"
 #include "util/storage_pacing.h"
 
@@ -104,6 +105,9 @@ bool boot_datadir_lock_acquire(const char *datadir)
         return false;
     }
     g_datadir_handle = directory;
+    /* The first beacon belongs to the admitted writer, never to a second
+     * process that failed the private datadir lock. */
+    boot_status_init(datadir);
     hw_bench_init(datadir);
     /* Right after hw_bench, for the same reason: classify the datadir
      * storage ONCE, here, so every later bound (WAL truncation, log
@@ -464,6 +468,9 @@ bool boot_datadir_lock_acquire(const char *datadir)
 
     close(dir_fd);
     g_pidfile_fd = fd;
+    /* Publish before the storage probes: bootwait must not observe a stale
+     * serving beacon during their potentially long startup measurement. */
+    boot_status_init(datadir);
 
     /* This is the earliest point boot has exclusive, safe possession of the
      * datadir — before crypto/wallet/progress-store setup and well before

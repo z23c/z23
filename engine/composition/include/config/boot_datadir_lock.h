@@ -13,8 +13,9 @@ extern "C" {
  *
  * Acquisition holds a nonblocking OS file lock until release.  The PID file is
  * retained after release and is diagnostic only; leaving the inode in place
- * avoids an unlink/recreate race that could admit two writers.  Any failure to
- * establish or durably record the lock fails closed. */
+ * avoids an unlink/recreate race that could admit two writers. Any failure to
+ * establish or durably record the lock fails closed. Successful acquisition
+ * arms the first boot-status beacon; refusal leaves the owner's beacon. */
 bool boot_datadir_lock_acquire(const char *datadir);
 void boot_datadir_lock_release(void);
 
