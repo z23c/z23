@@ -12,6 +12,7 @@
 #include "base/safe_alloc.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -339,6 +340,21 @@ static bool publish_name_is_hex64(const char *name)
     return true;
 }
 
+static DIR *publish_open_releases(const char *path, bool *missing_out)
+{
+    *missing_out = false;
+    DIR *d = opendir(path);
+    if (d)
+        return d;
+    if (errno == ENOENT) {
+        *missing_out = true;
+        return NULL;
+    }
+    LOG_ERROR(PUBLISH_LOG, "cannot open releases directory %s: %s", path,
+              strerror(errno));
+    return NULL;
+}
+
 bool vcs_package_publish_load_releases(const char *zcode_dir,
                                        struct vcs_package_release *out,
                                        size_t out_cap, size_t *count_out,
@@ -352,9 +368,10 @@ bool vcs_package_publish_load_releases(const char *zcode_dir,
     int n = snprintf(dir, sizeof(dir), "%s/releases", zcode_dir);
     if (n < 0 || (size_t)n >= sizeof(dir))
         LOG_RETURN(false, PUBLISH_LOG, "releases path too long");
-    DIR *d = opendir(dir);
+    bool missing = false;
+    DIR *d = publish_open_releases(dir, &missing);
     if (!d)
-        return true; /* no releases yet: an empty load, not an error */
+        return missing; /* only ENOENT is an empty load */
     uint8_t *wire = zcl_malloc(VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES,
                                "publish_release_wire");
     if (!wire) {

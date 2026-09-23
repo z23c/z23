@@ -3060,6 +3060,31 @@ static int t_commit_routes_to_resident(void)
     return failures;
 }
 
+static int t_release_load_blocked_directory(void)
+{
+    int failures = 0;
+    char dd[256], zcode[320], releases[352];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "release-io");
+    snprintf(zcode, sizeof(zcode), "%s/zcode", dd);
+    snprintf(releases, sizeof(releases), "%s/releases", zcode);
+    bool prepared = mkdir(zcode, 0700) == 0;
+    FILE *blocker = prepared ? fopen(releases, "wb") : NULL;
+    prepared = blocker != NULL && fclose(blocker) == 0;
+    struct vcs_package_release release = {0};
+    size_t count = 0, skipped = 0;
+    bool loaded = prepared && vcs_package_publish_load_releases(
+        zcode, &release, 1, &count, &skipped);
+    ZP_CHECK("load: a file blocking releases refuses instead of hiding packages",
+             prepared && !loaded);
+    struct vcs_package_index *index =
+        prepared ? vcs_package_index_build(zcode) : NULL;
+    ZP_CHECK("index: a blocked release directory is not an empty shelf",
+             prepared && index == NULL);
+    vcs_package_index_free(index);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int test_zcode_publish(void)
 {
     printf("\n=== zcode_publish: publication + local search ===\n");
@@ -3075,6 +3100,7 @@ int test_zcode_publish(void)
     failures += t_library_reproduction();
     failures += t_show();
     failures += t_index_rebuild();
+    failures += t_release_load_blocked_directory();
     failures += t_registry_path();
     failures += t_commit_routes_to_resident();
     printf("=== zcode_publish complete: %d failure(s) ===\n", failures);
