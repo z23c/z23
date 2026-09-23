@@ -839,6 +839,22 @@ struct zcl_result pkgl_installed_dir(const struct pkgl_ctx *ctx,
 {
     if (!ctx || !root || !out)
         return ZCL_ERR(-1, "null argument building an install path");
+#ifndef _WIN32
+    char parent[PKGL_PATH_MAX];
+    int n = snprintf(parent, sizeof(parent), "%s/installed", ctx->zcode_dir);
+    if (n <= 0 || (size_t)n >= sizeof(parent))
+        return ZCL_ERR(-1, "installed parent path is too long");
+    struct stat st;
+    if (lstat(parent, &st) == 0) {
+        if (!S_ISDIR(st.st_mode))
+            return ZCL_ERR(-1, "installed parent is not a real directory; "
+                               "inspect the substituted path and restore "
+                               "the local installed directory: %s", parent);
+    } else if (errno != ENOENT) {
+        return ZCL_ERR(-1, "inspect installed parent %s: %s", parent,
+                       strerror(errno));
+    }
+#endif
     char hex[65];
     zcl_hex_encode(root, 32, hex);
     char rel[96];

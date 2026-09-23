@@ -2550,6 +2550,29 @@ static int za_program_parent_link_refusal(const char *base,
     ZA_CHECK("program parent directory fixture restored", restored);
     return failures;
 }
+
+static int za_installed_parent_link_refusal(const char *base,
+                                            const uint8_t root[32])
+{
+    int failures = 0;
+    char installed[4700], outside[4700], outside_abs[4700];
+    (void)snprintf(installed, sizeof(installed), "%s/zcode/installed", base);
+    (void)snprintf(outside, sizeof(outside), "%s/escaped-installed", base);
+    bool moved = rename(installed, outside) == 0;
+    bool linked = moved && test_abs_path(outside, outside_abs,
+                                         sizeof(outside_abs)) &&
+                  symlink(outside_abs, installed) == 0;
+    struct package_lifecycle_programs programs;
+    struct zcl_result listed = package_lifecycle_installed_programs(
+        base, root, &programs);
+    ZA_CHECK("program listing refuses an installed parent symlink outside the store",
+             linked && !listed.ok &&
+                 strstr(listed.message, "installed") != NULL);
+    bool removed_link = !linked || unlink(installed) == 0;
+    bool restored = removed_link && moved && rename(outside, installed) == 0;
+    ZA_CHECK("installed parent directory fixture restored", restored);
+    return failures;
+}
 #endif
 
 static int t_programs(void)
@@ -2687,6 +2710,7 @@ static int t_programs(void)
                                            installed_exec);
 #ifndef _WIN32
     failures += za_program_parent_link_refusal(base, cli_root, installed_bin);
+    failures += za_installed_parent_link_refusal(base, cli_root);
 #endif
     failures += za_program_data_survives(base, zcode, t0);
     zcl_command_reply_free(&cli_reply);
