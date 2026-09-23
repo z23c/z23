@@ -227,6 +227,14 @@ static size_t candidate_tree_prefixed_count(
     return count;
 }
 
+static bool candidate_tree_package_complete(
+    struct vcs_package_store *store, const uint8_t package_root[32])
+{
+    struct vcs_package_store_status status;
+    return vcs_package_store_package_status(store, package_root, &status) &&
+        status.complete;
+}
+
 enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_import(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
@@ -234,9 +242,10 @@ enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_import(
 {
     if (!store || !package_root || !repo_root || !task || !candidate)
         return VCS_ZCODE_CANDIDATE_TREE_NULL;
-    struct vcs_package_store_status status;
-    if (!vcs_package_store_package_status(store, package_root, &status) ||
-        !status.complete)
+    if (vcs_zcode_task_authority_validate_for_candidate(
+            repo_root, task, candidate) != VCS_ZCODE_TASK_AUTHORITY_OK)
+        return VCS_ZCODE_CANDIDATE_TREE_AUTHORITY;
+    if (!candidate_tree_package_complete(store, package_root))
         return VCS_ZCODE_CANDIDATE_TREE_LIMIT;
     uint8_t *wire = NULL; size_t wire_len = 0;
     if (vcs_package_store_get_manifest_wire(

@@ -42,7 +42,8 @@ enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_put_chunks(
     const char *repo_root, const struct vcs_zcode_candidate_v1 *candidate);
 
 /* Reconstruct every candidate blob from a complete content.v2 package,
- * validate the whole tree first, then admit the tagged blobs to ZVCS CAS. */
+ * validate the task/candidate authority and whole tree first, then admit
+ * the tagged blobs to ZVCS CAS. */
 enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_import(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const char *repo_root, const struct vcs_zcode_task_v1 *task,

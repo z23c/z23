@@ -3292,6 +3292,12 @@ static int test_zd_improve_command(void)
         ASSERT_EQ(vcs_zcode_candidate_tree_import(
                       transfer_store, transfer_root, receiver, &task,
                       &candidate), VCS_ZCODE_CANDIDATE_TREE_OK);
+        struct vcs_zcode_task_v1 wrong_tree_task = task;
+        wrong_tree_task.source_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_candidate_tree_import(
+                      transfer_store, transfer_root, receiver,
+                      &wrong_tree_task, &candidate),
+                  VCS_ZCODE_CANDIDATE_TREE_AUTHORITY);
         ASSERT(vcs_object_has(receiver, unchanged_blob));
         ASSERT_EQ(vcs_zcode_patch_verify_cas(receiver, &task, &candidate),
                   VCS_ZCODE_PATCH_OK);
