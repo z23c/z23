@@ -2443,6 +2443,22 @@ static int za_program_missing_refusal(const char *base,
              moved && !missing_program.ok);
     ZA_CHECK("program executable fixture restored",
              moved && rename(held_bin, installed_bin) == 0);
+#ifndef _WIN32
+    struct stat original_mode;
+    bool mode_read = stat(installed_bin, &original_mode) == 0;
+    bool demoted = mode_read &&
+                   chmod(installed_bin,
+                         (mode_t)(original_mode.st_mode & 0777u & ~0111u)) == 0;
+    struct package_lifecycle_programs nonexec_programs;
+    struct zcl_result nonexec = package_lifecycle_installed_programs(
+        base, root, &nonexec_programs);
+    ZA_CHECK("program listing refuses receipt-correct bytes without execute permission",
+             demoted && !nonexec.ok &&
+                 strstr(nonexec.message, "executable") != NULL);
+    ZA_CHECK("program execute permission fixture restored",
+             demoted &&
+                 chmod(installed_bin, (mode_t)(original_mode.st_mode & 0777u)) == 0);
+#endif
     return failures;
 }
 

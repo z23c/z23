@@ -250,6 +250,13 @@ static struct zcl_result pkgl_installed_outputs_match(
         if (bytes != output->bytes || memcmp(digest, output->sha3, 32) != 0)
             return ZCL_ERR(-1, "installed output %s does not match receipt",
                            output->path);
+#ifndef _WIN32
+        if (strncmp(output->path, "bin/", 4) == 0 &&
+            access(path, X_OK) != 0)
+            return ZCL_ERR(-1, "program lacks executable permission; "
+                               "restore mode 0755 or reinstall the exact "
+                               "root: %s", output->path);
+#endif
     }
     return ZCL_OK;
 }
