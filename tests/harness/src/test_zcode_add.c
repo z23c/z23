@@ -739,6 +739,56 @@ static int t_active_parent_symlink(void)
     return failures;
 }
 
+static int t_generation_parent_symlink(void)
+{
+    int failures = 0;
+    char base[256], installed[400], generations[400];
+    char outside[400], outside_abs[4400], escaped_log[440];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "generation-parent-link");
+    struct pkgl_ctx ctx = {0};
+    (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s/zcode", base);
+    uint8_t root[32], previous[32];
+    za_fake_root(root, 0x79);
+    char hex[65];
+    za_hex(root, 32, hex);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s",
+                   ctx.zcode_dir, hex);
+    (void)snprintf(generations, sizeof(generations), "%s/generations",
+                   ctx.zcode_dir);
+    (void)snprintf(outside, sizeof(outside), "%s/escaped-generations", base);
+    (void)snprintf(escaped_log, sizeof(escaped_log), "%s/alice/preview",
+                   outside);
+    bool prepared = za_mkdir_p(installed) && za_mkdir_p(outside) &&
+                    test_abs_path(outside, outside_abs, sizeof(outside_abs)) &&
+                    symlink(outside_abs, generations) == 0;
+    bool had_previous = false;
+    struct zcl_result activated = pkgl_activate(
+        &ctx, "alice/preview", root, 1000, previous, &had_previous);
+    struct stat escaped;
+    bool outside_untouched = lstat(escaped_log, &escaped) != 0 &&
+                             errno == ENOENT;
+    ZA_CHECK("activation refuses a symlinked generation directory",
+             prepared && !activated.ok && outside_untouched);
+    char publisher_link[440];
+    (void)snprintf(publisher_link, sizeof(publisher_link), "%s/alice",
+                   generations);
+    (void)snprintf(outside, sizeof(outside), "%s/escaped-gen-publisher", base);
+    (void)snprintf(escaped_log, sizeof(escaped_log), "%s/preview", outside);
+    bool publisher_prepared = unlink(generations) == 0 &&
+                              za_mkdir_p(generations) &&
+                              za_mkdir_p(outside) &&
+                              test_abs_path(outside, outside_abs,
+                                            sizeof(outside_abs)) &&
+                              symlink(outside_abs, publisher_link) == 0;
+    activated = pkgl_activate(&ctx, "alice/preview", root, 1001, previous,
+                              &had_previous);
+    outside_untouched = lstat(escaped_log, &escaped) != 0 && errno == ENOENT;
+    ZA_CHECK("activation refuses a symlinked generation publisher directory",
+             publisher_prepared && !activated.ok && outside_untouched);
+    ZA_CHECK("generation parent symlink fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 static int t_atomic_write_temp_symlink(void)
 {
     int failures = 0;
@@ -833,8 +883,9 @@ static int t_active_log_divergence(void)
              prepared && !activated.ok &&
                  strstr(activated.message, "generation") != NULL &&
                  lstat(active_path, &active_st) != 0 && errno == ENOENT);
-    ZA_CHECK("failed activation reports no active generation",
-             read.ok && !present && generations == 0);
+    ZA_CHECK("status reports the blocked generation directory",
+             !read.ok && strstr(read.message, "generation") != NULL &&
+                 !present && generations == 0);
     bool unblocked = unlink(log_parent) == 0;
     struct zcl_result retry = pkgl_activate(
         &ctx, "alice/preview", root, 1001, previous, &had_previous);
@@ -2824,6 +2875,7 @@ int test_zcode_add(void)
     failures += t_activation_target_shape();
     failures += t_active_temp_directory_preserved();
     failures += t_active_parent_symlink();
+    failures += t_generation_parent_symlink();
     failures += t_atomic_write_temp_symlink();
     failures += t_relative_active_pointer();
     failures += t_active_log_divergence();
