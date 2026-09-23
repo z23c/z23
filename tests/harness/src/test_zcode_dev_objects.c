@@ -7442,13 +7442,25 @@ static int test_zd_remote_receipt(void)
         uint8_t publisher_secret[32], publisher[32], observer_secret[32], observer[32];
         ed25519_keypair(publisher, publisher_secret, publisher_seed);
         ed25519_keypair(observer, observer_secret, observer_seed);
+        struct vcs_zcode_candidate_v1 candidate = {
+            .schema_version = 1,
+            .sequence = 1,
+            .created_unix = 999,
+        };
+        memset(candidate.task_root, 1, 32);
+        memset(candidate.base_source_root, 2, 32);
+        memset(candidate.patch_root, 3, 32);
+        memset(candidate.candidate_source_root, 7, 32);
+        memset(candidate.adapter_policy_root, 4, 32);
+        memcpy(candidate.author_pubkey, publisher, 32);
         struct vcs_zcode_publication_v1 intent = {
             .schema_version = 1,
             .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
             .target_ref = "refs/heads/main",
             .created_unix = 1000,
         };
-        memset(intent.candidate_root, 1, 32);
+        ASSERT_EQ(vcs_zcode_candidate_root(&candidate, intent.candidate_root),
+                  VCS_ZCODE_DEV_OK);
         memset(intent.proof_set_root, 2, 32);
         memset(intent.target_identity_root, 3, 32);
         memset(intent.authority_root, 4, 32);
@@ -7474,6 +7486,22 @@ static int test_zd_remote_receipt(void)
                   VCS_ZCODE_DEV_OK);
         ASSERT_EQ(vcs_zcode_remote_receipt_root(&receipt, receipt_root),
                   VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_zcode_remote_receipt_candidate_matches(
+            &receipt, &intent, &candidate, publisher, observer));
+        struct vcs_zcode_remote_receipt_v1 different_source = receipt;
+        different_source.fetched_main_source_root[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_remote_receipt_seal(
+            &different_source, observer_secret, observer), VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_remote_receipt_candidate_matches(
+            &different_source, &intent, &candidate, publisher, observer));
+        struct vcs_zcode_candidate_v1 different_candidate = candidate;
+        different_candidate.candidate_source_root[0] ^= 1;
+        ASSERT(!vcs_zcode_remote_receipt_candidate_matches(
+            &receipt, &intent, &different_candidate, publisher, observer));
+        ASSERT(!vcs_zcode_remote_receipt_candidate_matches(
+            &receipt, &intent, &candidate, observer, observer));
+        ASSERT(!vcs_zcode_remote_receipt_candidate_matches(
+            &receipt, &intent, &candidate, publisher, publisher));
         char dir[512];
         test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "remote_receipt");
         struct vcs_zcode_publication_index *projection =

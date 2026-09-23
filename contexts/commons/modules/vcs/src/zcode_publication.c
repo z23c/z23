@@ -603,6 +603,29 @@ static bool remote_receipt_intent_matches(
                VCS_ZCODE_PUBLICATION_REF_BYTES) == 0;
 }
 
+bool vcs_zcode_remote_receipt_candidate_matches(
+    const struct vcs_zcode_remote_receipt_v1 *receipt,
+    const struct vcs_zcode_publication_v1 *intent,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const uint8_t publisher_signer[32],
+    const uint8_t observer_signer[32])
+{
+    if (!receipt || !intent || !candidate || !publisher_signer ||
+        !observer_signer)
+        LOG_FAIL("vcs.remote_receipt", "missing candidate binding input");
+    uint8_t candidate_root[32];
+    if (vcs_zcode_publication_verify(intent, publisher_signer) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_remote_receipt_verify(receipt, observer_signer) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_root(candidate, candidate_root) != VCS_ZCODE_DEV_OK)
+        LOG_FAIL("vcs.remote_receipt", "candidate binding authenticity refused");
+    if (!remote_receipt_intent_matches(receipt, intent) ||
+        memcmp(intent->candidate_root, candidate_root, 32) != 0 ||
+        memcmp(receipt->fetched_main_source_root,
+               candidate->candidate_source_root, 32) != 0)
+        LOG_FAIL("vcs.remote_receipt", "candidate or fetched source root mismatch");
+    return true;
+}
+
 bool vcs_zcode_remote_receipt_load_verified(
     const char *workspace, const uint8_t root[32],
     const uint8_t publisher_signer[32], const uint8_t observer_signer[32],

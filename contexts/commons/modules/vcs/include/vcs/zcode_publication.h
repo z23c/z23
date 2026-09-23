@@ -176,6 +176,17 @@ enum vcs_zcode_dev_error vcs_zcode_remote_receipt_verify(
     const struct vcs_zcode_remote_receipt_v1 *receipt,
     const uint8_t expected_signer[32]);
 
+/* Authenticate both signed statements and bind the immutable candidate's
+ * source root to the observer's fetched source root. This does not verify
+ * that the remote ref was fetched, that ancestry was checked, or that the
+ * receipt qualifies as terminal under the receiver's policy. */
+bool vcs_zcode_remote_receipt_candidate_matches(
+    const struct vcs_zcode_remote_receipt_v1 *receipt,
+    const struct vcs_zcode_publication_v1 *intent,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const uint8_t publisher_signer[32],
+    const uint8_t observer_signer[32]);
+
 /* Both operations independently load the signed intent from the existing CAS.
  * Store refuses if intent persistence or target binding is missing. A repeated
  * exact store is idempotent; conflicting addressed bytes remain untouched.
