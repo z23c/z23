@@ -16,7 +16,8 @@
 #     (a NEW gate is therefore uncached until somebody classifies it)
 #   - the gate builds something, runs a compiler, or reads build/ -> NEVER
 #   - the gate reads a built binary, git history, git config, /proc,
-#     $HOME, or untracked/ignored worktree state                 -> NEVER
+#     $HOME, or untracked/ignored worktree state without an explicit
+#     action key covering it                                     -> NEVER
 #   - any tracked file cannot be hashed, or the manifest comes back short
 #     of the tracked-file count                                  -> the whole
 #     cache reports itself UNAVAILABLE and every gate runs
@@ -81,8 +82,9 @@ lint_cache_note() { printf 'lint-cache: %s\n' "$*" >&2; }
 # here. A gate added to LINT_GATES tomorrow is never-cached until somebody
 # reads it and classifies it. The fail-safe direction is "runs anyway".
 #
-# Every gate below was read end to end (script + every helper it sources) and
-# confirmed to be a pure function of what the tree key covers. The ones that
+# Every gate below was read end to end (script + every helper it sources).
+# check-flag-registry uses the dedicated complete action key below; other
+# entries are pure functions of the whole-tree key. The ones that
 # are NOT are listed underneath, each with the reason it can never be cached.
 LINT_CACHE_OK_GATES="
 check-no-retired-agent-protocol check-scanner-immunity check-malloc
@@ -134,7 +136,7 @@ check-shell-host-assumptions
 check-no-trust-state-ordering check-no-gnu-va-args check-no-warning-suppression
 check-result-discard
 check-published-platforms
-check-platform-header-guards
+check-platform-header-guards check-flag-registry
 "
 
 # Why each never-cached gate can never be cached. A reason is MANDATORY —
@@ -207,6 +209,73 @@ lint_cache_never_reason() {
             esac ;;
     esac
     return 0
+}
+
+# The flag-registry scanner has a narrower, mechanically enumerable input set
+# than the generic tree scan. Keep its identity separate from the v2 whole-tree
+# keyspace: a moved main containing only documentation does not invalidate its
+# result, while a new tracked scan path, changed row, checker executable, or
+# HEAD date does. Any unavailable input refuses caching.
+lint_cache_flag_registry_key() {
+    local gate="$1" cmd="$2" root="${ROOT:-.}" path digest
+    local binary="$root/build/bin/z23-lint" git_bin cc_bin xargs_bin
+    set -o pipefail
+    # A loader override can inject code whose bytes are outside this action's
+    # source and executable set. There is no sound reusable key for it here.
+    local override
+    for override in ${!LD_@} ${!DYLD_@}; do
+        [ -z "$override" ] || return 1
+    done
+    git_bin="$(command -v git)" || return 1
+    cc_bin="$(command -v "${CC:-cc}")" || return 1
+    xargs_bin="$(command -v xargs)" || return 1
+    [ -f "$binary" ] && [ -f "$git_bin" ] && [ -f "$cc_bin" ] &&
+    [ -f "$xargs_bin" ] && [ -f /bin/bash ] && [ -f /bin/sh ] &&
+        [ -f /usr/bin/env ] || return 1
+    (
+        set -o pipefail
+        local paths pointers
+        paths="$(mktemp /tmp/z23-flag-key-paths.XXXXXX)" || exit 1
+        pointers="$(mktemp /tmp/z23-flag-key-pointers.XXXXXX)" || exit 1
+        trap 'rm -f "$paths" "$paths.env" "$pointers"' EXIT
+        git -C "$root" ls-files -z -- '*.c' '*.h' '*.sh' Makefile > "$paths" || exit 1
+        (cd "$root" && "$binary" check-flag-registry --key-inputs) > "$pointers" || exit 1
+        printf '%s\0%s\0%s\0' 'zcl.lint.flag_registry_action.v3' "$gate" "$cmd"
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
+            "${ZCL_LINT_PRODUCTION_SCAN:-}" "${ZCL_LINT_BIN_DIR:-}" \
+            "${CC:-cc}" "${CFLAGS:-}" "${CPPFLAGS:-}" "${LDFLAGS:-}"
+        printf '%s\0%s\0%s\0%s\0' "${PATH:-}" "${LC_ALL:-}" \
+            "${LANG:-}" "${TZ:-}"
+        uname -srm || exit 1
+        printf '\0'
+        # Variable names cannot contain whitespace; values can contain
+        # newlines, so serialize name/value pairs with NULs after sorting
+        # names instead of sorting `env` text lines.
+        printf '%s\n' ${!GIT_@} ${!LC_@} | LC_ALL=C sort -u > "$paths.env" || exit 1
+        local name
+        while IFS= read -r name; do
+            [ -z "$name" ] || printf '%s\0%s\0' "$name" "${!name}"
+        done < "$paths.env"
+        printf '\0'
+        git -C "$root" log -1 --format=%cs || exit 1
+        printf '\0'
+        for path in engine/composition/flags.def build/bin/z23-lint; do
+            digest="$(sha256sum "$root/$path" | awk '{print $1}')" || exit 1
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 1
+            printf '%s\0%s\0' "$path" "$digest"
+        done
+        for path in "$git_bin" "$cc_bin" "$xargs_bin" /bin/bash /bin/sh /usr/bin/env; do
+            digest="$(sha256sum "$path" | awk '{print $1}')" || exit 1
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 1
+            printf '%s\0%s\0' "$path" "$digest"
+        done
+        # sha256sum -z emits digest plus the exact NUL-delimited path; xargs
+        # batches the scan rather than starting one process per source file.
+        # Either a missing file or a failed enumerator makes the key absent.
+        [ -s "$paths" ] && [ -s "$pointers" ] || exit 1
+        (cd "$root" && xargs -0 sha256sum -z -- < "$paths") || exit 1
+        (cd "$root" && xargs -0 sha256sum -z -- < "$pointers") || exit 1
+    ) | sha256sum | awk '{print $1}'
 }
 
 # True (0) when the gate may be cached at all.
@@ -339,10 +408,17 @@ lint_cache_derive_tree_key() {
 # Open the cache. Sets LINT_CACHE_AVAILABLE=1 only on complete success;
 # every failure path leaves it 0, which makes every gate run.
 lint_cache_open() {
-    local root="$1"
+    local root="$1" selected="${2:-}"
     LINT_CACHE_AVAILABLE=0
     LINT_CACHE_DIR="${ZCL_LINT_CACHE_DIR:-$root/.cache/lint-cache/$LINT_CACHE_SCHEMA}"
-    lint_cache_derive_tree_key "$root" || return 1
+    if [ "$selected" = check-flag-registry ]; then
+        # The focused action derives its own complete key in the worker.
+        # No other gate may adopt this sentinel as a whole-tree digest.
+        LINT_CACHE_TREE_KEY="$(printf '%s' 'zcl.lint.flag_registry_action.v3' |
+            sha256sum | awk '{print $1}')" || return 1
+    else
+        lint_cache_derive_tree_key "$root" || return 1
+    fi
     mkdir -p "$LINT_CACHE_DIR" 2>/dev/null || {
         lint_cache_note "unavailable: cannot create $LINT_CACHE_DIR"; return 1; }
     [ -w "$LINT_CACHE_DIR" ] || {
@@ -357,6 +433,10 @@ lint_cache_open() {
 # every gate.
 lint_cache_key() {
     local gate="$1" cmd="$2"
+    if [ "$gate" = check-flag-registry ]; then
+        lint_cache_flag_registry_key "$gate" "$cmd"
+        return $?
+    fi
     printf '%s|%s|%s|%s|%s|%s' \
         "$LINT_CACHE_SCHEMA" "$gate" "$cmd" "$LINT_CACHE_TREE_KEY" \
         "${ZCL_LINT_PRODUCTION_SCAN:-}" "${ZCL_LINT_BIN_DIR:-}" \
@@ -376,14 +456,36 @@ lint_cache_record_path() {
 lint_cache_has_pass() {
     local rec; rec="$(lint_cache_record_path "$1")"
     [ -f "$rec" ] || return 1
+    [ ! -e "$rec.conflict" ] || {
+        lint_cache_note "record refused: conflicting cold observation for $1"
+        return 1
+    }
     if ! tr -d '\0' < "$rec" 2>/dev/null | cmp -s - "$rec"; then
         lint_cache_note "record refused: $rec contains a NUL byte"
         return 1
     fi
-    if ! /usr/bin/grep -aq "^schema=$LINT_CACHE_SCHEMA\$" "$rec" 2>/dev/null; then
-        lint_cache_note "record refused: $rec has no exact schema=$LINT_CACHE_SCHEMA line"
+    if [ "$(wc -l < "$rec")" -ne 4 ] ||
+       ! /usr/bin/grep -aq "^schema=$LINT_CACHE_SCHEMA\$" "$rec" 2>/dev/null ||
+       ! /usr/bin/grep -aq "^key=$1\$" "$rec" 2>/dev/null ||
+       ! /usr/bin/grep -aq '^gate=[a-z0-9-][a-z0-9-]*$' "$rec" 2>/dev/null ||
+       ! /usr/bin/grep -aq '^stored_at_utc=[0-9TZ:.-][0-9TZ:.-]*$' "$rec" 2>/dev/null; then
+        lint_cache_note "record refused: $rec is malformed or names another key"
         return 1
     fi
+    return 0
+}
+
+lint_cache_note_conflict() {
+    local key="$1" gate="$2" marker
+    marker="$(lint_cache_record_path "$key").conflict"
+    if ! printf 'schema=%s\ngate=%s\nkey=%s\n' \
+         "$LINT_CACHE_SCHEMA" "$gate" "$key" > "$marker.tmp.$$" ||
+       ! mv -f "$marker.tmp.$$" "$marker"; then
+        lint_cache_note "cannot persist conflicting observation: $gate key=$key"
+        rm -f "$marker.tmp.$$" 2>/dev/null
+        return 1
+    fi
+    lint_cache_note "conflicting observation: $gate key=$key refused"
     return 0
 }
 
@@ -392,6 +494,7 @@ lint_cache_has_pass() {
 lint_cache_store_pass() {
     local gate="$1" key="$2" rec dir
     rec="$(lint_cache_record_path "$key")"
+    [ ! -e "$rec.conflict" ] || return 0
     dir="$(dirname "$rec")"
     mkdir -p "$dir" 2>/dev/null || return 0
     { printf 'schema=%s\ngate=%s\nkey=%s\nstored_at_utc=%s\n' \
@@ -417,12 +520,20 @@ lint_cache_dump() {
         return 0
     fi
     echo "schema:          $LINT_CACHE_SCHEMA"
-    echo "tracked files:   $LINT_CACHE_TRACKED_N"
-    echo "untracked files: $LINT_CACHE_UNTRACKED_N (visible to a production scan)"
-    echo "tree key:        $LINT_CACHE_TREE_KEY"
+    if [ "$gate" = check-flag-registry ]; then
+        echo "input scope:     tracked *.c/*.h/*.sh/Makefile, flags.def, pointer targets, checker binary, toolchain, env, HEAD date"
+    else
+        echo "tracked files:   $LINT_CACHE_TRACKED_N"
+        echo "untracked files: $LINT_CACHE_UNTRACKED_N (visible to a production scan)"
+        echo "tree key:        $LINT_CACHE_TREE_KEY"
+    fi
     echo "production scan: ${ZCL_LINT_PRODUCTION_SCAN:-}"
     echo "bin dir:         ${ZCL_LINT_BIN_DIR:-}"
-    key="$(lint_cache_key "$gate" "$cmd")"
+    key="$(lint_cache_key "$gate" "$cmd")" || key=""
+    if [[ ! "$key" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "state:           UNAVAILABLE (action inputs could not be hashed)"
+        return 0
+    fi
     echo "gate key:        $key"
     echo "record:          $(lint_cache_record_path "$key")"
     if lint_cache_has_pass "$key"; then

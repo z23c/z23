@@ -21,8 +21,10 @@
 #include "gate_flag_registry_priv.h"
 #include "lintc.h"
 
-/* True when tok parses as "<path>:<line>" — a nonempty path, a colon, and
- * one or more digits running to the end of tok. "Makefile deploy:" (no
+/* True when tok parses as "<path>:<line>" or "<shell-path>:auto". The auto
+ * form binds a component file to a scanner-recognized read, so moving lines
+ * in that component cannot force an edit to the shared registry. A nonempty
+ * path and colon are required. "Makefile deploy:" (no
  * digits after its colon) and a bare "Makefile" (no colon at all) both
  * return 0 here, which is how a prose why_ clause that merely contains
  * the words "first use" without a real pointer stays unaffected. */
@@ -35,15 +37,17 @@ static int fru_token_is_pointer(const char *tok, char *path, size_t pathcap,
     const char *d = colon + 1;
     if (!*d)
         return 0;
-    for (const char *q = d; *q; q++)
-        if (*q < '0' || *q > '9')
-            return 0;
+    int automatic = strcmp(d, "auto") == 0;
+    if (!automatic)
+        for (const char *q = d; *q; q++)
+            if (*q < '0' || *q > '9')
+                return 0;
     size_t plen = (size_t)(colon - tok);
     if (plen >= pathcap)
         return 0;
     memcpy(path, tok, plen);
     path[plen] = '\0';
-    *line = atoi(d);
+    *line = automatic ? -1 : atoi(d);
     return 1;
 }
 
@@ -142,6 +146,14 @@ static int fru_open_check(const char *path, int line, const char *name,
 
 static int fru_check_one(const struct fr_row *row, FILE *out)
 {
+    if (row->fu_line == -1) {
+        if (row->fu_auto_seen)
+            return 0;
+        return fprintf(out, "flag_registry: %s first use %s:auto has no "
+                       "scanner-recognized read in that tracked shell file\n",
+                       row->name, row->fu_path) < 0
+            ? die("z23-lint: write failed\n", "") : 1;
+    }
     char reason[400];
     int rc = fru_open_check(row->fu_path, row->fu_line, row->name, reason,
                             sizeof reason);

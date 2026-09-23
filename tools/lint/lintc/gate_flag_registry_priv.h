@@ -25,6 +25,7 @@ struct fr_row {
     char fu_path[FR_FU_PATH];
     int fu_line;
     int fu_present;
+    int fu_auto_seen;
     int used;
 };
 

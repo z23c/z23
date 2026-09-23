@@ -127,3 +127,18 @@ if lint_cache_has_pass "$fixture_key" 2>"$work/nul-record.log"; then
 fi
 grep -q 'contains a NUL byte' "$work/nul-record.log"
 echo 'PASS: NUL inside a stored record refuses reuse'
+
+# A cold observation that contradicts a cached PASS permanently poisons this
+# action key. A later PASS must not silently restore reuse at that address.
+conflict_key="$(lint_cache_key "check-conflict-fixture" "true")"
+lint_cache_store_pass "check-conflict-fixture" "$conflict_key"
+lint_cache_has_pass "$conflict_key"
+lint_cache_note_conflict "$conflict_key" "check-conflict-fixture"
+if lint_cache_has_pass "$conflict_key"; then
+ echo 'FAIL: conflicting observation still hits'; exit 1
+fi
+lint_cache_store_pass "check-conflict-fixture" "$conflict_key"
+if lint_cache_has_pass "$conflict_key"; then
+ echo 'FAIL: later PASS erased conflicting observation'; exit 1
+fi
+echo 'PASS: conflicting observation remains refused after a later PASS'

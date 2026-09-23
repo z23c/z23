@@ -374,8 +374,9 @@ worker() {
 
     if cache_adopt_from_env && lint_cache_gate_is_cacheable "$gate" \
        && cmd="$(gate_command "$gate")"; then
-        key="$(lint_cache_key "$gate" "$cmd")"
-        if lint_cache_has_pass "$key"; then
+        key="$(lint_cache_key "$gate" "$cmd")" || key=""
+        [[ "$key" =~ ^[0-9a-f]{64}$ ]] || key=""
+        if [ -n "$key" ] && lint_cache_has_pass "$key"; then
             wouldhit=1
             # --cold-audit deliberately does NOT skip: it runs every gate
             # fresh so the hit can be checked against the fresh verdict.
@@ -405,10 +406,23 @@ worker() {
     ms=$((end - start))
     printf '%s\n' "$ms" > "$GATES_DIR/$gate.ms"
     printf '%s\n' "$rc" > "$GATES_DIR/$gate.rc"
+    if [ "$rc" -ne 0 ] && [ "$wouldhit" -eq 1 ] && [ -n "$key" ]; then
+        # A cold audit that contradicts a stored PASS poisons this exact
+        # action key. Never let a later successful run erase the conflict.
+        lint_cache_note_conflict "$key" "$gate" || rc=2
+    fi
     # ONLY a pass is ever stored. A failure is never cached, so a red gate
     # can never be turned green by a later run.
     if [ "$rc" -eq 0 ] && [ -n "$key" ] && [ "$LINT_CACHE_AVAILABLE" = "1" ]; then
-        lint_cache_store_pass "$gate" "$key"
+        if [ "$gate" = check-flag-registry ]; then
+            local after_key
+            after_key="$(lint_cache_key "$gate" "$cmd")" || after_key=""
+            if [ "$after_key" != "$key" ]; then
+                lint_cache_note "unstable action inputs: $gate PASS not stored"
+                key=""
+            fi
+        fi
+        [ -z "$key" ] || lint_cache_store_pass "$gate" "$key"
     fi
     if [ "$rc" -eq 0 ]; then
         printf 'PASS %-42s %7s ms\n' "$gate" "$ms"
@@ -475,7 +489,7 @@ main() {
             echo "run_lint.sh: ZCL_LINT_CACHE_DUMP='$dump_gate' is not a known gate" >&2
             exit 2
         fi
-        lint_cache_open "$ROOT" || true
+        lint_cache_open "$ROOT" "$dump_gate" || true
         lint_cache_dump "$dump_gate" "$dump_cmd"
         exit 0
     fi
@@ -553,7 +567,7 @@ main() {
     fi
     export ZCL_LINT_CACHE_MODE=off ZCL_LINT_CACHE_TREE_KEY_X= ZCL_LINT_CACHE_DIR_X=
     if [ "$cache_mode" != "off" ]; then
-        if lint_cache_open "$ROOT"; then
+        if lint_cache_open "$ROOT" "${gates[*]}"; then
             export ZCL_LINT_CACHE_MODE="$cache_mode"
             export ZCL_LINT_CACHE_TREE_KEY_X="$LINT_CACHE_TREE_KEY"
             export ZCL_LINT_CACHE_DIR_X="$LINT_CACHE_DIR"

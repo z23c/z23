@@ -358,6 +358,14 @@ static int fr_scan_line(struct fr_ctx *ctx, const regex_t *re, int grp,
             rc = fr_report_unreg(ctx, path, lineno, name);
         else {
             ctx->rows[idx].used = 1;
+            if (ctx->rows[idx].fu_present && ctx->rows[idx].fu_line == -1
+                && strcmp(ctx->rows[idx].fu_path, path) == 0
+                && !fr_is_c_path(path)) {
+                const char *hash = strchr(line, '#');
+                const char *name_at = strstr(cursor, name);
+                if (name_at && (!hash || hash > name_at))
+                    ctx->rows[idx].fu_auto_seen = 1;
+            }
             rc = 0;
         }
         if (rc)
@@ -489,8 +497,28 @@ static int fr_run_impl(const char *def_path, const char *ls_cmd,
 
 int check_flag_registry_run(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    if (argc == 1 && strcmp(argv[0], "--key-inputs") == 0) {
+        /* The optional action cache must hash every first-use pointer target,
+         * including a future target outside the tracked scan pathspec. Emit
+         * the parser's actual paths, NUL-delimited; failure refuses reuse. */
+        static char defbuf[FR_DEF_BUF];
+        static struct fr_row rows[FR_MAX];
+        int n = 0;
+        if (fr_read_file(k_def_path, defbuf, sizeof defbuf) ||
+            fr_parse_def_buf(defbuf, rows, FR_MAX, &n))
+            return 2;
+        for (int i = 0; i < n; i++) {
+            if (!rows[i].fu_present)
+                continue;
+            size_t len = strlen(rows[i].fu_path) + 1;
+            if (fwrite(rows[i].fu_path, 1, len, stdout) != len)
+                return die("z23-lint: key input write failed\n", "");
+        }
+        return fflush(stdout) == 0 ? 0 :
+            die("z23-lint: key input flush failed\n", "");
+    }
+    if (argc != 0)
+        return die("z23-lint: check-flag-registry: unknown argument\n", "");
     char head[32];
     int code = 0;
     if (capture_cmd("git log -1 --format=%cs", head, sizeof head, &code))
@@ -672,6 +700,16 @@ static int fr_st_first_use_cases(FILE *out, char *ob, size_t obcap)
                       " does not read it (line past end; nearest read now "
                       "at ./fu_short.c:1)") == NULL;
 
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_FU_ZERO\", \"env_runtime\", \"-\", \"-\",\n"
+            " \"first use ./fu_zero.c:0\")\n",
+            "./fu_zero.c",
+            "int f(void){ return getenv(\"ZCL_FU_ZERO\") != 0; }\n",
+            "2026-01-01", "printf '%s\\0' fu_zero.c", out, ob,
+            obcap, &rc);
+    bad |= rc != 1
+        || strstr(ob, "ZCL_FU_ZERO first use ./fu_zero.c:0 does not read it") == NULL;
+
     if (csr_write("./fu_secret.c",
                 "int f(void){ return getenv(\"ZCL_FU_UNREADABLE\") != 0; }\n"))
         return 1;
@@ -684,6 +722,44 @@ static int fr_st_first_use_cases(FILE *out, char *ob, size_t obcap)
             obcap, &rc);
     bad |= rc != 2;
     chmod("./fu_secret.c", 0644);
+    return bad;
+}
+
+/* Two component-owned shell files can gain lines independently without
+ * editing their shared flag catalog. A comment or a read in the wrong file
+ * still cannot satisfy an :auto pointer. */
+static int fr_st_auto_component_cases(FILE *out, char *ob, size_t obcap)
+{
+    static const char def[] =
+        "Z23_FLAG(\"ZCL_AUTO_A\", \"env_build\", \"-\", \"-\",\n"
+        " \"first use fu_auto_a.sh:auto\")\n"
+        "Z23_FLAG(\"ZCL_AUTO_B\", \"env_build\", \"-\", \"-\",\n"
+        " \"first use fu_auto_b.sh:auto\")\n";
+    static const char ls[] = "printf '%s\\0' fu_auto_a.sh fu_auto_b.sh";
+    int bad = csr_write("./f.def", def)
+        || csr_write("./fu_auto_a.sh", "a=${ZCL_AUTO_A}\n")
+        || csr_write("./fu_auto_b.sh", "b=${ZCL_AUTO_B}\n");
+    if (bad) return 1;
+    for (int turn = 0; turn < 3; turn++) {
+        if (turn == 1)
+            bad |= csr_write("./fu_auto_a.sh", "\n\na=${ZCL_AUTO_A}\n");
+        if (turn == 2)
+            bad |= csr_write("./fu_auto_b.sh", "\n\n\nb=${ZCL_AUTO_B}\n");
+        if (bad) return 1;
+        int rc = fr_run_impl("./f.def", ls, "2026-01-01", out);
+        bad |= csr_slurp(out, ob, obcap);
+        bad |= rc != 0 || strstr(ob, "2 first-use pointers verified") == NULL;
+        bad |= psp_st_reset(out);
+    }
+    bad |= csr_write("./fu_auto_a.sh", "# ${ZCL_AUTO_A}\n");
+    bad |= csr_write("./fu_auto_b.sh",
+                     "a=${ZCL_AUTO_A}\nb=${ZCL_AUTO_B}\n");
+    if (bad) return 1;
+    int rc = fr_run_impl("./f.def", ls, "2026-01-01", out);
+    bad |= csr_slurp(out, ob, obcap);
+    bad |= rc != 1
+        || strstr(ob, "ZCL_AUTO_A first use fu_auto_a.sh:auto has no ") == NULL;
+    bad |= psp_st_reset(out);
     return bad;
 }
 
@@ -700,7 +776,10 @@ static void fr_st_cleanup(void)
     unlink("./fu_bad.c");
     unlink("./fu_bound.c");
     unlink("./fu_short.c");
+    unlink("./fu_zero.c");
     unlink("./fu_secret.c");
+    unlink("./fu_auto_a.sh");
+    unlink("./fu_auto_b.sh");
 }
 
 int check_flag_registry_selftest(void)
@@ -726,6 +805,7 @@ int check_flag_registry_selftest(void)
     char ob[4096];
     int bad = fr_st_core_cases(out, ob, sizeof ob);
     bad |= fr_st_first_use_cases(out, ob, sizeof ob);
+    bad |= fr_st_auto_component_cases(out, ob, sizeof ob);
     fflush(stdout);
     fflush(stderr);
 
