@@ -5,6 +5,7 @@
  * best-effort release). Split from boot_services.c along the
  * app_shutdown_svc seam. */
 #include "config/boot_internal.h"
+#include "config/boot_rpc_retry.h"
 #include "config/boot_background_workers.h"
 #include "config/boot_snapshot_offer.h"
 #include "config/boot_shutdown_marker.h"
@@ -50,6 +51,7 @@
 static void shutdown_stop_frontend_services(struct boot_svc_ctx *svc)
 {
     printf("[shutdown] stopping frontend services\n");
+    boot_rpc_retry_disarm(&svc->frontend_kernel);
     zcl_service_kernel_stop_all(&svc->frontend_kernel);
     printf("[shutdown] frontend services stopped\n");
 }

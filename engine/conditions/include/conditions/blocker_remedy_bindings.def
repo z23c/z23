@@ -512,3 +512,4 @@ ZCL_BLOCKER_REMEDY(zcode_dht.own_delegation_expired,            OWNER)
  *     is a bootstrap port a departing process still holds, which frees itself
  *     within seconds. The operator only sees it if the retries keep failing. */
 ZCL_BLOCKER_REMEDY(tor.start_failed,                            tor_start_failed)
+ZCL_BLOCKER_REMEDY(rpc.start_failed,                            rpc_start_failed)

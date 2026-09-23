@@ -160,6 +160,23 @@ bool zcl_service_kernel_start_all(struct zcl_service_kernel *kernel)
     return !degraded;
 }
 
+bool zcl_service_kernel_retry_failed(struct zcl_service_kernel *kernel,
+                                     const char *name)
+{
+    if (!kernel || !kernel->started || !name)
+        return false;
+    for (size_t i = 0; i < kernel->count; i++) {
+        struct zcl_service_entry *entry = &kernel->services[i];
+        if (strcmp(entry->spec.name, name) != 0)
+            continue;
+        if (entry->state != ZCL_SERVICE_FAILED ||
+            !service_independent(entry))
+            return false;
+        return service_start_entry(kernel, entry);
+    }
+    return false;
+}
+
 void zcl_service_kernel_stop_all(struct zcl_service_kernel *kernel)
 {
     if (!kernel)

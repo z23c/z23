@@ -103,6 +103,10 @@ bool zcl_service_kernel_register(struct zcl_service_kernel *kernel,
                                  const struct zcl_service_spec *spec);
 bool zcl_service_kernel_init_all(struct zcl_service_kernel *kernel);
 bool zcl_service_kernel_start_all(struct zcl_service_kernel *kernel);
+/* Retry one failed independent service while healthy siblings keep running.
+ * A successful retry updates the same entry observed by status(). */
+bool zcl_service_kernel_retry_failed(struct zcl_service_kernel *kernel,
+                                     const char *name);
 void zcl_service_kernel_stop_all(struct zcl_service_kernel *kernel);
 
 size_t zcl_service_kernel_count(const struct zcl_service_kernel *kernel);

@@ -4,6 +4,7 @@
  * mining, wallet sync, shutdown, and utility functions. */
 #include "platform/time_compat.h"
 #include "config/boot_internal.h"
+#include "config/boot_rpc_retry.h"
 #include "config/boot_refusal_reports.h"
 #include "util/sysinit.h"
 #include "config/boot_shutdown_marker.h"
@@ -1356,14 +1357,9 @@ bool app_init_services(struct app_context *ctx,
 
     /* frontend kernel start includes onion_tor bootstrap (Tor) — the
      * span the profile flagged as the likely bulk of the ~11s. */
-    /* De-fatal: a frontend-service start failure (rpc_http/explorer/Tor) is NOT
-     * data-unrecoverable — the node can still serve P2P + advance the chain. Per
-     * the mandate ("never silently dies unless the data is truly unrecoverable")
-     * we enter DEGRADED_SERVING and continue instead of crash-looping. It is
-     * LOUD: stderr + a structured event. (When rpc_http itself is down, dumpstate
-     * is unreachable whether we crash or degrade — so degrading strictly gains a
-     * live node + no crash-loop. rpc_http start only fails on a NULL-ctx
-     * programming invariant, so this path is effectively unreachable in prod.) */
+    /* A frontend failure is not data loss: keep P2P and chain advancement
+     * alive, report DEGRADED_SERVING, and retry a failed RPC bind below.
+     * The retry leaves healthy frontend siblings running. */
     if (!boot_register_frontend_services(svc) ||
         !zcl_service_kernel_start_all(&svc->frontend_kernel)) {
         fprintf(stderr,
@@ -1374,6 +1370,7 @@ bool app_init_services(struct app_context *ctx,
         service_state_advance(SERVICE_STATE_DEGRADED_SERVING,
                               "frontend_services_unavailable");
     }
+    boot_rpc_retry_arm(&svc->frontend_kernel);
 
     t_svc = boot_mark_step(t_svc, "svc.frontend_tor_start",
                            "svc.peer_discover_self");

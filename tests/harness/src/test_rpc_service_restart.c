@@ -41,6 +41,7 @@
 #include "platform/time_compat.h"
 #include "config/boot.h"
 #include "config/boot_internal.h"
+#include "config/boot_rpc_retry.h"
 #include "kernel/service_kernel.h"
 #include "rpc/server.h"
 #include "rpc/httpserver.h"
@@ -171,6 +172,45 @@ static int rsr_site_survived_refused_front_door(void)
     return 1;
 }
 
+static int rsr_retry_after_bind_conflict(struct zcl_service_kernel *kernel,
+                                         platform_socket_t held_fd)
+{
+    int failures = 0;
+    /* The serving site remains up while the exact failed RPC entry is
+     * retried. The production condition calls this same bounded retry when
+     * its clock is due; synthetic time keeps the fixture fast. */
+    boot_rpc_retry_arm(kernel);
+    int64_t retry_now = platform_time_monotonic_us();
+    printf("rpc_service_restart: retry waits for its first deadline... ");
+    if (boot_rpc_retry_failed() && !boot_rpc_retry_due(retry_now) &&
+        !boot_rpc_retry_attempt(retry_now)) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+    platform_socket_close(held_fd);
+    printf("rpc_service_restart: freed port recovers RPC without site restart... ");
+    if (boot_rpc_retry_attempt(retry_now + 6000000) &&
+        boot_rpc_retry_recovered() && !rpc_is_in_warmup(NULL, 0) &&
+        rsr_probe_answers(&g_tbl) && g_site_starts == 1) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+    printf("rpc_service_restart: settled retry is idempotent... ");
+    if (!boot_rpc_retry_attempt(retry_now + 6000000) &&
+        g_site_starts == 1 && rpc_http_is_running()) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+    boot_rpc_retry_disarm(kernel);
+    return failures;
+}
+
 int test_rpc_service_restart(void)
 {
     int failures = 0;
@@ -279,15 +319,16 @@ int test_rpc_service_restart(void)
     }
     failures += rsr_site_survived_refused_front_door();
 
+    failures += rsr_retry_after_bind_conflict(&kernel, held_fd);
+
     /* Close the cycle unconditionally. A failed INDEPENDENT service leaves
      * its siblings RUNNING (that is the point), so the kernel is started
      * either way and the next start_all is a restart, not a first start. */
     zcl_service_kernel_stop_all(&kernel);
-    platform_socket_close(held_fd);
 
-    printf("rpc_service_restart: a fresh process starts in warmup... ");
+    printf("rpc_service_restart: stopped RPC re-enters warmup... ");
     if (rpc_is_in_warmup(NULL, 0) &&
-        rsr_probe_refused(&g_tbl, "RPC server started")) {
+        rsr_probe_refused(&g_tbl, "RPC server restarting")) {
         printf("OK\n");
     } else {
         printf("FAIL\n");

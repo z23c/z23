@@ -291,7 +291,7 @@ page changing with it.
 test_groups: 1175
 port_interfaces: 13
 persistence_adapters: 14
-condition_registrations: 55
+condition_registrations: 56
 command_bundles: 31
 command_roots: 13
 dumpstate_subsystems: 167
