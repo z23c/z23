@@ -2376,7 +2376,8 @@ static int t_programs(void)
 static int t_worker_literal_path(void)
 {
     int failures = 0;
-    char base[256], directory[512], executable[640], worker[640], found[4096];
+    char base[256], directory[512], executable[640], worker[640];
+    char release_worker[640], found[4096];
     test_make_tmpdir(base, sizeof(base), "zcode_add", "worker-path");
     (void)snprintf(directory, sizeof(directory), "%s/kept (deleted) files", base);
     (void)snprintf(executable, sizeof(executable), "%s/z23", directory);
@@ -2390,6 +2391,15 @@ static int t_worker_literal_path(void)
     ZA_CHECK("trailing kernel marker does not change verifier directory", prepared &&
         pkgl_worker_path_for_executable(executable, found, sizeof(found)).ok &&
         strcmp(found, worker) == 0);
+    (void)snprintf(release_worker, sizeof(release_worker),
+                   "%s/zclassic23-package-verify", directory);
+    bool replaced = za_rm_rf(worker) && za_mkdir_p(worker) &&
+                    za_write_file(release_worker, "", 0, 0700);
+    ZA_CHECK("a directory named like the dev verifier cannot mask the release verifier",
+             replaced &&
+                 pkgl_worker_path_for_executable(executable, found,
+                                                 sizeof(found)).ok &&
+                 strcmp(found, release_worker) == 0);
     ZA_CHECK("worker discovery fixture removed", za_rm_rf(base));
     return failures;
 }

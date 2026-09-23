@@ -47,6 +47,18 @@
 
 /* ── worker discovery ───────────────────────────────────────────────── */
 
+static bool pkgl_worker_runnable(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return false;
+#ifdef _WIN32
+    return true; /* Windows execution uses the file extension. */
+#else
+    return access(path, X_OK) == 0;
+#endif
+}
+
 /* The worker ships beside whatever binary is running. Resolving it from
  * /proc/self/exe — never from PATH — means a PATH entry can never substitute
  * a different program into the only place that compiles. The one fallback is
@@ -68,7 +80,6 @@ struct zcl_result pkgl_worker_path_for_executable(const char *executable,
     if (!slash)
         return ZCL_ERR(-1, "resolved executable path has no directory component");
     *slash = '\0';
-    bool present = false;
     const char *names[] = {
         PKGL_DEV_WORKER_NAME,
         PKGL_RELEASE_WORKER_NAME,
@@ -77,23 +88,21 @@ struct zcl_result pkgl_worker_path_for_executable(const char *executable,
         int w = snprintf(out, cap, "%s/%s", exe, names[i]);
         if (w <= 0 || (size_t)w >= cap)
             return ZCL_ERR(-1, "worker path too long");
-        ZCL_CHECK(pkgl_exists(out, &present));
-        if (present)
+        if (pkgl_worker_runnable(out))
             return ZCL_OK;
     }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         int w = snprintf(out, cap, "build/bin/%s", names[i]);
         if (w <= 0 || (size_t)w >= cap)
             return ZCL_ERR(-1, "worker path too long");
-        ZCL_CHECK(pkgl_exists(out, &present));
-        if (present)
+        if (pkgl_worker_runnable(out))
             return ZCL_OK;
     }
     return ZCL_ERR(-1,
-                   "the fixed development or release package verifier is "
-                   "neither next to this binary nor in build/bin — build "
-                   "the development helper (make dev-bin) before "
-                   "installing packages");
+                   "no executable regular development or release package "
+                   "verifier beside this binary or in build/bin — build the "
+                   "development helper (make dev-bin), or repair its file "
+                   "type and execute permission before installing packages");
 }
 
 struct zcl_result pkgl_worker_path(char *out, size_t cap)
