@@ -7662,9 +7662,16 @@ static int test_zd_publication_result(void)
         wire[10] = 0;
         ASSERT(vcs_zcode_publication_result_parse(wire, sizeof(wire), &loaded)
                != VCS_ZCODE_DEV_OK);
+        ASSERT(zd_index_drop_object(dir, result_root));
+        const uint8_t corrupt_result[] = "interrupted-publication-result";
+        ASSERT(vcs_object_put_addressed(
+            dir, result_root, corrupt_result, sizeof(corrupt_result)));
         ASSERT(vcs_zcode_publication_result_store_verified(
             dir, &result, publisher, producer, stored));
         ASSERT(memcmp(stored, result_root, 32) == 0);
+        ASSERT(vcs_zcode_publication_result_load_verified(
+            dir, result_root, publisher, producer, &loaded));
+        ASSERT(memcmp(&loaded, &result, sizeof(result)) == 0);
         for (uint8_t outcome = VCS_ZCODE_PUBLICATION_ACCEPTED;
              outcome <= VCS_ZCODE_PUBLICATION_REJECTED; outcome++) {
             struct vcs_zcode_publication_result_v1 another = result;

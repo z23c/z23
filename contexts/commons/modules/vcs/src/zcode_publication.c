@@ -431,7 +431,8 @@ bool vcs_zcode_publication_result_store_verified(
             publisher_signer, &intent))
         LOG_FAIL("vcs.publication_result", "stored publication intent missing");
     struct vcs_zcode_publication_result_v1 checked;
-    if (!vcs_object_put_addressed(workspace, root, wire, sizeof(wire)) ||
+    if (!vcs_object_put_addressed_repair(
+            workspace, root, wire, sizeof(wire), NULL) ||
         !vcs_zcode_publication_result_load_verified(workspace, root,
             publisher_signer, producer_signer, &checked))
         LOG_FAIL("vcs.publication_result", "stored publication result did not verify");
