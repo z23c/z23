@@ -644,7 +644,7 @@ static int test_bootwait_requires_live_datadir_owner(void)
     int failures = 0;
     int owner_fd = -1;
     bool input_ready = false, reply_ready = false;
-    char tmpl[] = "/tmp/zcl_native_bootwait_XXXXXX";
+    char tmpl[512] = {0};
     char *dir = NULL;
     char path[512] = {0};
     struct json_value input;
@@ -653,7 +653,7 @@ static int test_bootwait_requires_live_datadir_owner(void)
         const struct zcl_command_spec *spec =
             find_spec(zcl_command_catalog(), "core.node.bootwait");
         ASSERT(spec != NULL);
-        dir = mkdtemp(tmpl);
+        dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_native_bootwait");
         ASSERT(dir != NULL);
         boot_status_init(dir);
         boot_status_note_stage((int)BOOT_STAGE_READY);

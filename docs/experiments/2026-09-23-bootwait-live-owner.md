@@ -26,7 +26,7 @@ neither state is a successful readiness observation. A held lock retains the
 existing ready result. The native command remains read-only.
 
 The registered `command_registry_catalog` fixture publishes a serving beacon
-in a private `mkdtemp` datadir, confirms that no owner refuses, holds the
+in a private disposable datadir, confirms that no owner refuses, holds the
 pidfile lock, then confirms that the same beacon passes. `make -j4 t-fast
 ONLY=command_registry_catalog` passed its one selected group with zero
 failures or skips. The test body took 8,727 ms; a cold, source-bound build
@@ -66,3 +66,34 @@ The lock observation excludes a dead node with an unheld pidfile. It does not
 verify an RPC response or bind a surviving beacon to a particular boot if
 another process holds the lock. A later isolated restart acceptance should
 bind the beacon generation to the owner and confirm the serving endpoint.
+
+## Fixture path recovery
+
+The exact proof of candidate `c91c8f6d5a9170c0e869e647848fb7a6d318f73e`
+against `1508e35cfe6fd28df1dfe0ca315c71f29d62bf3a` exposed a separate
+full-lint failure: `check-no-bare-tmp-fixture` counted four bare `/tmp`
+fixture sites in `test_command_registry_catalog.c` against its pinned limit
+of three. The new site was this `bootwait` fixture. The failed gate log has
+SHA-256 `966b6ab0a12e42d6ca22ffac913a584c97e9d26abb487d1d8b5a49f52906f45d`.
+The same proof also observed `test_make_lint_gates_realroot` exceed its
+300-second no-output bound under a host load average of 30.90. That is a
+separate load-sensitive test result, not a claim about this fixture's logic.
+
+The fixture now uses `test_mkdtemp()` so its abort residue stays beneath
+the checkout's `test-tmp/` directory. The unchanged shrink-only gate passed
+over 186 pinned files after the edit. On native Linux with GCC 16.1.1, the
+registered `command_registry_catalog` group passed 1/1 with zero failures
+and skips; test body 80,935 ms, cold command wall about 14m40s under
+concurrent build load. The transcript is
+`/tmp/z23-bootwait-fixture-gate-test-20260923.log` (SHA-256
+`4215af279395c77dd6e75edab5c7e2e8be744982576d7ad8eddce5f44821749c`).
+`make check-no-bare-tmp-fixture` passed on the edited checkout.
+`make -j2 lint-fast` passed 32/32 gates in 20,038 ms wall time; transcript
+`/tmp/z23-bootwait-fixture-lint-fast-20260923.log` has SHA-256
+`d9a3b2cb6398e45923705cb44a9cac7ee44540e6558aa2a621369e117a90ae0e`.
+After regenerating the capability inventory, `make -j2 lint-preflight`
+passed 5/5 gates in 565,454 ms wall time, including capability closure
+and inventory verification. Transcript
+`/tmp/z23-bootwait-fixture-preflight-20260923.log` has SHA-256
+`9a85ace89f6f773902ece826704ef4450a2405494e6f4fc37a29189d70605806`.
+Exact publication remains a separate required check.
