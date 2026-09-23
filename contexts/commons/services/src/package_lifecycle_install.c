@@ -720,6 +720,17 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
     ZCL_CHECK(pkgl_exists(target, &present));
     if (!present)
         return ZCL_ERR(-1, "cannot activate a root that is not installed");
+#ifndef _WIN32
+    struct stat target_st;
+    if (lstat(target, &target_st) != 0)
+        return ZCL_ERR(-1, "inspect installed root %s: %s", target,
+                       strerror(errno));
+    if (!S_ISDIR(target_st.st_mode))
+        return ZCL_ERR(-1,
+                       "installed root %s is not a directory; quarantine "
+                       "the invalid path and reinstall the exact root",
+                       target);
+#endif
 
     char tmp[PKGL_PATH_MAX];
     int n = snprintf(tmp, sizeof(tmp), "%s.zplnew.%ld", link, (long)getpid());

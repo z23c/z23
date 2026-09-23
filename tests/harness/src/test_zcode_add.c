@@ -616,6 +616,37 @@ static int t_release_selection(void)
     return failures;
 }
 
+static int t_activation_target_shape(void)
+{
+    int failures = 0;
+    char base[256], zcode[320], installed[400], active[400];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "target-shape");
+    (void)snprintf(zcode, sizeof(zcode), "%s/zcode", base);
+    struct pkgl_ctx ctx = {0};
+    (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s", zcode);
+    uint8_t root[32], previous[32];
+    za_fake_root(root, 0x71);
+    char hex[65];
+    za_hex(root, 32, hex);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s", zcode,
+                   hex);
+    (void)snprintf(active, sizeof(active), "%s/active/alice/preview", zcode);
+    char install_parent[400];
+    (void)snprintf(install_parent, sizeof(install_parent), "%s/installed",
+                   zcode);
+    bool fixture = za_mkdir_p(install_parent) &&
+                   za_write_file(installed, "not an install tree", 19, 0600);
+    ZA_CHECK("non-directory install target fixture prepared", fixture);
+    bool had_previous = false;
+    struct zcl_result result = pkgl_activate(&ctx, "alice/preview", root,
+                                             1000, previous, &had_previous);
+    ZA_CHECK("activation refuses an installed root replaced by a file",
+             fixture && !result.ok && strstr(result.message, "directory") &&
+                 !za_exists(active));
+    ZA_CHECK("activation target fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 /* ── the user's own data, which no version owns ──────────────────────
  *
  * An install tree is content addressed: every update lands in a NEW
@@ -2412,6 +2443,7 @@ int test_zcode_add(void)
     failures += t_deps_rules();
     failures += t_generations();
     failures += t_release_selection();
+    failures += t_activation_target_shape();
     failures += t_e2e();
     failures += t_programs();
     printf("=== zcode_add complete: %d failure(s) ===\n", failures);
