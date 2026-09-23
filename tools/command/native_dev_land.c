@@ -5064,8 +5064,8 @@ static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row,
                               const char *observed_main)
 {
     char buf[DL_GIT_CAP], commit[80];
-    const char *ancestor_args[] = { "merge-base", "--is-ancestor", commit,
-                                    observed_main, NULL };
+    const char *ancestor_args[] = { "--no-replace-objects", "merge-base",
+                                    "--is-ancestor", commit, observed_main, NULL };
     if (row->local[0] && dl_sha_ok(row->local)) {
         (void)snprintf(commit, sizeof(commit), "%s", row->local);
     } else if (!dl_rev_parse(d->wt, row->tip, commit)) {

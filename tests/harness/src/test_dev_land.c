@@ -2949,6 +2949,70 @@ _test_next:;
     return failures;
 }
 
+static int test_dev_land_recovery_ignores_replace_refs(void)
+{
+    int failures = 0;
+    TEST("land: restart cannot mistake a replaced remote commit for publication") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], stranger[64], remote[64], land[1200], wt[1400];
+        char tree[64], forged[64];
+        dlx_isolate("recovery_replace_ref");
+        ASSERT(dlx_rig_make(&rig, "recovery_replace_ref_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+
+        /* A competing integrator moves the real remote to a sibling tip.
+         * A local replacement object lies about that tip's parent. This
+         * simulates recovery after the persisted prove phase, not a push. */
+        const char *branch[] = { "checkout", "--quiet", "-B", "side", base, NULL };
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_commit(rig.clone, "stranger.txt", "other\n", stranger));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(wt, sizeof(wt), "%s/wt", land);
+        const char *tree_args[] = { "rev-parse", "HEAD^{tree}", NULL };
+        ASSERT(dlx_git_out(rig.clone, tree_args, tree, sizeof(tree)) == 0);
+        const char *forge[] = { "-c", "user.name=land", "-c",
+            "user.email=land@z23.invalid", "commit-tree", tree,
+            "-p", rig.tip, "-m", "false local ancestry", NULL };
+        ASSERT(dlx_git_out(wt, forge, forged, sizeof(forged)) == 0);
+        const char *replace[] = { "replace", stranger, forged, NULL };
+        ASSERT(dlx_git(wt, replace) == 0);
+        const char *apparent[] = { "merge-base", "--is-ancestor",
+            rig.tip, stranger, NULL };
+        const char *actual[] = { "--no-replace-objects", "merge-base",
+            "--is-ancestor", rig.tip, stranger, NULL };
+        ASSERT(dlx_git(wt, apparent) == 0);
+        ASSERT(dlx_git(wt, actual) == 1);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, stranger);
+
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
+        ASSERT_EQ(dlx_int(&c, "attempt"), 2);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, stranger);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_postpush_result_unconfirmed(void)
 {
     int failures = 0;
@@ -4681,6 +4745,7 @@ int test_dev_land(void)
     failures += test_dev_land_postpush_observation_missing(true);
     failures += test_dev_land_postpush_result_unconfirmed();
     failures += test_dev_land_expected_base_race();
+    failures += test_dev_land_recovery_ignores_replace_refs();
     failures += test_dev_land_nonfastforward_client_guard();
     failures += test_dev_land_lost_persistence();
     failures += test_dev_land_after_proof_restart();
