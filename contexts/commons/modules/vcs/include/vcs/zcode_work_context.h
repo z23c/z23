@@ -84,6 +84,9 @@ enum vcs_zcode_work_context_result vcs_zcode_work_context_action_root(
     const struct vcs_zcode_work_context_v1 *context, int64_t now_unix,
     uint8_t action_root[32], uint8_t input_root[32]);
 
+/* Put roots must be disjoint from each other and from context-owned input.
+ * Aliased roots are refused without touching the overlapping bytes. Other
+ * refusals clear available roots; only a fully admitted package yields roots. */
 enum vcs_zcode_work_context_result vcs_zcode_work_context_put(
     struct vcs_package_store *store,
     const struct vcs_zcode_work_context_v1 *context, int64_t now_unix,

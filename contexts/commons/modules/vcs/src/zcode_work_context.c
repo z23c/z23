@@ -20,6 +20,7 @@
 #include "vcs/zcode_task_authority_bundle.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -433,13 +434,73 @@ static enum vcs_zcode_work_context_result context_put_for_kind(
     return result;
 }
 
+static void context_put_roots_clear(uint8_t package_root[32],
+                                    uint8_t action_root[32])
+{
+    if (package_root) memset(package_root, 0, 32);
+    if (action_root) memset(action_root, 0, 32);
+}
+
+static bool context_put_overlap(const void *left, size_t left_len,
+                                const void *right, size_t right_len)
+{
+    if (!left || !right || !left_len || !right_len) return false;
+    uintptr_t a = (uintptr_t)left, b = (uintptr_t)right;
+    return a <= b ? b - a < left_len : a - b < right_len;
+}
+
+static bool context_put_roots_alias_input(
+    const struct vcs_zcode_work_context_v1 *context,
+    const uint8_t package_root[32], const uint8_t action_root[32])
+{
+    if (!context) return false;
+    const void *inputs[] = { context, context->fixed_input,
+                             context->candidate_authority,
+                             context->task_authority };
+    const size_t lengths[] = { sizeof(*context), context->fixed_input_len,
+                               context->candidate_authority_len,
+                               context->task_authority_len };
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        if (context_put_overlap(package_root, 32, inputs[i], lengths[i]) ||
+            context_put_overlap(action_root, 32, inputs[i], lengths[i]))
+            return true;
+    }
+    return false;
+}
+
+static enum vcs_zcode_work_context_result context_put_for_kind_checked(
+    struct vcs_package_store *store,
+    const struct vcs_zcode_work_context_v1 *context, const char *kind,
+    int64_t now_unix, const char *repo_root, bool require_repo_root,
+    uint8_t package_root[32], uint8_t action_root[32])
+{
+    /* Reject aliases before clearing: an output must never mutate input. */
+    if (context_put_overlap(package_root, 32, action_root, 32) ||
+        context_put_roots_alias_input(context, package_root, action_root))
+        return VCS_ZCODE_WORK_CONTEXT_NULL;
+    context_put_roots_clear(package_root, action_root);
+    if (!package_root || !action_root)
+        return VCS_ZCODE_WORK_CONTEXT_NULL;
+    if (require_repo_root && !repo_root)
+        return VCS_ZCODE_WORK_CONTEXT_NULL;
+    uint8_t pending_package[32], pending_action[32];
+    enum vcs_zcode_work_context_result result = context_put_for_kind(
+        store, context, kind, now_unix, repo_root,
+        pending_package, pending_action);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK) {
+        memcpy(package_root, pending_package, 32);
+        memcpy(action_root, pending_action, 32);
+    }
+    return result;
+}
+
 enum vcs_zcode_work_context_result vcs_zcode_work_context_put_for_kind(
     struct vcs_package_store *store,
     const struct vcs_zcode_work_context_v1 *context, const char *kind,
     int64_t now_unix, uint8_t package_root[32], uint8_t action_root[32])
 {
-    return context_put_for_kind(store, context, kind, now_unix, NULL,
-                                package_root, action_root);
+    return context_put_for_kind_checked(store, context, kind, now_unix, NULL,
+                                        false, package_root, action_root);
 }
 
 enum vcs_zcode_work_context_result
@@ -449,9 +510,9 @@ vcs_zcode_work_context_put_for_kind_with_candidate(
     int64_t now_unix, const char *repo_root, uint8_t package_root[32],
     uint8_t action_root[32])
 {
-    if (!repo_root) return VCS_ZCODE_WORK_CONTEXT_NULL;
-    return context_put_for_kind(store, context, kind, now_unix, repo_root,
-                                package_root, action_root);
+    return context_put_for_kind_checked(store, context, kind, now_unix,
+                                        repo_root, true, package_root,
+                                        action_root);
 }
 
 enum vcs_zcode_work_context_result vcs_zcode_work_context_put(

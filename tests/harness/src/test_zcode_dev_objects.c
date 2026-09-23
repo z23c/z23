@@ -3228,6 +3228,33 @@ static int test_zd_improve_command(void)
                       workspace, &task, &transfer.task_authority,
                       &transfer.task_authority_len),
                   VCS_ZCODE_TASK_AUTHORITY_OK);
+        int64_t transfer_now = (int64_t)platform_time_wall_unix();
+        uint8_t refused_transfer_root[32], refused_transfer_action[32];
+        memset(refused_transfer_root, 0xa5, sizeof(refused_transfer_root));
+        memset(refused_transfer_action, 0xa5, sizeof(refused_transfer_action));
+        ASSERT(vcs_zcode_work_context_put_for_kind_with_candidate(
+                   transfer_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
+                   transfer_now, transfer_dir, refused_transfer_root,
+                   refused_transfer_action) != VCS_ZCODE_WORK_CONTEXT_OK);
+        ASSERT(!zcl_bytes_any_set(
+            refused_transfer_root, sizeof(refused_transfer_root)));
+        ASSERT(!zcl_bytes_any_set(
+            refused_transfer_action, sizeof(refused_transfer_action)));
+        uint8_t aliased_root[32];
+        memset(aliased_root, 0xa5, sizeof(aliased_root));
+        ASSERT_EQ(vcs_zcode_work_context_put_for_kind_with_candidate(
+                      transfer_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
+                      transfer_now, workspace, aliased_root, aliased_root),
+                  VCS_ZCODE_WORK_CONTEXT_NULL);
+        ASSERT_EQ(aliased_root[0], 0xa5);
+        uint8_t source_before[32];
+        memcpy(source_before, transfer.source_sha256, sizeof(source_before));
+        ASSERT_EQ(vcs_zcode_work_context_put_for_kind_with_candidate(
+                      transfer_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
+                      transfer_now, workspace, (uint8_t *)&transfer,
+                      aliased_root), VCS_ZCODE_WORK_CONTEXT_NULL);
+        ASSERT(memcmp(source_before, transfer.source_sha256,
+                      sizeof(source_before)) == 0);
         struct vcs_package_manifest bounded_tree_manifest;
         vcs_package_manifest_init(&bounded_tree_manifest);
         uint64_t bounded_tree_bytes = 0;
@@ -3287,12 +3314,39 @@ static int test_zd_improve_command(void)
         vcs_package_manifest_free(&fresh_tree_manifest);
         vcs_package_manifest_free(&bounded_tree_manifest);
         uint8_t transfer_root[32], transfer_action[32];
-        int64_t transfer_now = (int64_t)platform_time_wall_unix();
         ASSERT_EQ(vcs_zcode_work_context_put_for_kind_with_candidate(
                       transfer_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
                       transfer_now, workspace, transfer_root,
                       transfer_action),
                   VCS_ZCODE_WORK_CONTEXT_OK);
+        char quota_dir[256];
+        test_make_tmpdir(quota_dir, sizeof(quota_dir), "zcode_dev",
+                         "authority_quota_retry");
+        struct vcs_package_store *quota_store =
+            vcs_package_store_open(quota_dir, 1);
+        ASSERT(quota_store != NULL);
+        memset(refused_transfer_root, 0xa5, sizeof(refused_transfer_root));
+        memset(refused_transfer_action, 0xa5, sizeof(refused_transfer_action));
+        ASSERT_EQ(vcs_zcode_work_context_put_for_kind_with_candidate(
+                      quota_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
+                      transfer_now, workspace, refused_transfer_root,
+                      refused_transfer_action), VCS_ZCODE_WORK_CONTEXT_STORE);
+        ASSERT(!zcl_bytes_any_set(
+            refused_transfer_root, sizeof(refused_transfer_root)));
+        ASSERT(!zcl_bytes_any_set(
+            refused_transfer_action, sizeof(refused_transfer_action)));
+        vcs_package_store_close(quota_store);
+        quota_store = vcs_package_store_open(
+            quota_dir, UINT64_C(256) * 1024u * 1024u);
+        ASSERT(quota_store != NULL);
+        uint8_t quota_retry_root[32], quota_retry_action[32];
+        ASSERT_EQ(vcs_zcode_work_context_put_for_kind_with_candidate(
+                      quota_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
+                      transfer_now, workspace, quota_retry_root,
+                      quota_retry_action), VCS_ZCODE_WORK_CONTEXT_OK);
+        ASSERT(memcmp(quota_retry_root, transfer_root, 32) == 0);
+        ASSERT(memcmp(quota_retry_action, transfer_action, 32) == 0);
+        vcs_package_store_close(quota_store);
         uint8_t *transfer_manifest_wire = NULL;
         size_t transfer_manifest_len = 0;
         ASSERT_EQ(vcs_package_store_get_manifest_wire(
