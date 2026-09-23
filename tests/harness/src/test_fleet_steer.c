@@ -4024,6 +4024,89 @@ _test_next:;
     return failures;
 }
 
+static int fmx_t_receiver_down(void)
+{
+    int failures = 0;
+
+    TEST("steer: a free receive lock is a down receiver; a held worker continues") {
+        struct fmx_call b;
+        const struct json_value *w;
+#if !defined(_WIN32)
+        char lockpath[1400];
+        int wfd = -1, rfd = -1;
+#endif
+        fmx_isolate("receiver_down");
+        fmx_prime_mail();
+        /* A directive this host sent, still queued: the incident is about
+         * the receiver, and the directive stays visible beside it. */
+        fmx_seed_inbox("self", "2026-01-01T00:00:00Z", 9, FMX_SENDER,
+                       "silent-box", "directive", "do the thing",
+                       "down-ref");
+        fmx_state_file("steer", "sent.jsonl",
+                       "{\"key\":\"k-down\",\"seq\":9,\"to\":\"silent-box\","
+                       "\"ref\":\"down-ref\"}\n",
+                       true);
+        /* Lock file present, nobody holding it: the receiver has stopped. */
+        fmx_state_file("receive", "receive.lock", "", false);
+#if !defined(_WIN32)
+        fmx_state_file("queue", "worker.lock", "", false);
+        (void)snprintf(lockpath, sizeof(lockpath),
+                       "%s/z23/dev/queue/worker.lock", g_fmx_state);
+        wfd = open(lockpath, O_RDWR);
+        ASSERT(wfd >= 0);
+        ASSERT(flock(wfd, LOCK_EX | LOCK_NB) == 0);
+#endif
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+#if !defined(_WIN32)
+        /* POSIX flock is what distinguishes a free lock from a held one. */
+        ASSERT(fmx_blocker_has(&b, "local receiver down: receive.lock free"));
+#endif
+        ASSERT(fmx_blocker_has(&b, "down-ref"));
+        ASSERT_STR_EQ(fmx_change_state(fmx_arr(&b, "changes"), FMX_SENDER,
+                                       "down-ref"),
+                      "queued");
+#if !defined(_WIN32)
+        /* The worker lock is held and the queue is empty: that worker
+         * stays idle. A down receiver does not take it with it. */
+        w = fmx_worker(&b, "local");
+        ASSERT(w != NULL);
+        ASSERT_STR_EQ(fmx_wstr(w, "state"), "idle");
+        ASSERT(strstr(fmx_wstr(w, "reason"), "resident lock is held") !=
+               NULL);
+        (void)flock(wfd, LOCK_UN);
+        (void)close(wfd);
+        wfd = -1;
+#endif
+        fmx_end(&b);
+#if !defined(_WIN32)
+        /* The same lock held by a live receiver is not a down incident. */
+        (void)snprintf(lockpath, sizeof(lockpath),
+                       "%s/z23/dev/receive/receive.lock", g_fmx_state);
+        rfd = open(lockpath, O_RDWR);
+        ASSERT(rfd >= 0);
+        ASSERT(flock(rfd, LOCK_EX | LOCK_NB) == 0);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(!fmx_blocker_has(&b,
+                                "local receiver down: receive.lock free"));
+        (void)flock(rfd, LOCK_UN);
+        (void)close(rfd);
+        fmx_end(&b);
+#else
+        (void)w;
+#endif
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 int test_fleet_steer(void);
 int test_fleet_steer(void)
 {
@@ -4053,6 +4136,7 @@ int test_fleet_steer(void)
     failures += fmx_t_capacity_unknown();
     failures += fmx_t_worker_answers();
     failures += fmx_t_queued_stale();
+    failures += fmx_t_receiver_down();
     failures += fmx_t_receipt_tokens();
     failures += fmx_t_process_not_work();
     failures += fmx_t_large_history();

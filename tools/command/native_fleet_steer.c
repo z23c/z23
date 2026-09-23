@@ -118,7 +118,11 @@
  *   idle     evidence newer than FMC_ALIVE_WINDOW_S and nothing open;
  *   unknown  everything else,
  * always with a reason. A lock held or a name seen is liveness at most,
- * never work. Unknown numbers are JSON null, never 0: capacity reports
+ * never work. A receive.lock file that exists and is not held means the
+ * resident receiver has stopped: the brief names that as the blocker
+ * "local receiver down: receive.lock free" and does not change any worker
+ * that still holds worker.lock (that worker stays idle or working).
+ * Unknown numbers are JSON null, never 0: capacity reports
  * known:false and all-null numbers when the queue did not answer, the
  * worktree pool reads pool_known:false and "UNKNOWN" sizes when this host
  * has no queue/pool.txt (only a measured empty pool reads 0), and
@@ -3765,6 +3769,20 @@ static void fmc_brief_reply(struct zcl_command_reply *reply,
     reply->exit_code = 0;
 }
 
+/* A receiver that has run on this box (the lock file exists) and is not
+ * holding that lock now is down. Said once, before the per-directive
+ * stale lines, so a full blocker list cannot hide it. A worker that
+ * still holds worker.lock is left on its own state: a down receiver
+ * does not stop runnable workers. */
+static void fmc_receiver_down_incident(struct json_value *blockers,
+                                       const char *receive_lock)
+{
+    if (!receive_lock || strcmp(receive_lock, "free") != 0)
+        return;
+    fmc_push_blocker(blockers,
+                     "local receiver down: receive.lock free");
+}
+
 static void fmc_do_brief(const struct zcl_command_request *req,
                          struct zcl_command_reply *reply)
 {
@@ -3796,6 +3814,10 @@ static void fmc_do_brief(const struct zcl_command_request *req,
         mc.since = tmp;
     if (fmc_int(req, "limit", &tmp) && tmp > 0)
         mc.changes_cap = tmp > FMC_CHANGES_MAX ? FMC_CHANGES_MAX : tmp;
+    /* Name a stopped receiver before the mail scan fills blockers. */
+    memset(&lo, 0, sizeof(lo));
+    lo.receive_lock = fmc_lock_state("receive", "receive.lock");
+    fmc_receiver_down_incident(&l.blockers, lo.receive_lock);
     mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv);
     fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
                     &qv, &l.outcomes);

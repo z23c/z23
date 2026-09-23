@@ -1,3 +1,4 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 [Unit]
 Description=Z23 resident mail receiver for agent identity %i (admits directives, queues work, runs nothing itself)
 # ONE PER BOX, and the instance name is this box's OWN mail identity — the
@@ -180,10 +181,13 @@ Environment=Z23_RECEIVE_WORKSPACE_FLAG=
 # and is expanded before argv is built, while an ${VAR} as the executable is
 # refused outright.
 #
-# deadline_s bounds a single drive; Restart=on-failure plus this unit's
-# restart limit is what makes the loop resident across days, and every
-# decision is re-derived from files on the next drive, so a restart between
-# beats neither loses a ref nor executes one twice.
+# deadline_s bounds a single drive. The drive exits 0 when that deadline
+# elapses, so Restart=on-failure leaves the unit dead and the box looks
+# idle while directives stay queued. Restart=always starts the next drive
+# after that exit. `systemctl stop` still stops the unit. The start limit
+# above still refuses a binary that exits in a tight loop. Every decision
+# is re-derived from files on the next drive, so a restart between beats
+# neither loses a ref nor executes one twice.
 ExecStart=%h/.local/bin/z23-dev dev agent receive run --receiver=%i $Z23_RECEIVE_WORKSPACE_FLAG --deadline_s=86400 --wait_ms=1000
 
 # The resident handles SIGTERM cooperatively: it stops taking new work at the
@@ -194,7 +198,7 @@ ExecStart=%h/.local/bin/z23-dev dev agent receive run --receiver=%i $Z23_RECEIVE
 KillMode=control-group
 TimeoutStopSec=60
 
-Restart=on-failure
+Restart=always
 RestartSec=30
 
 NoNewPrivileges=yes
