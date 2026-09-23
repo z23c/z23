@@ -86,8 +86,9 @@ static bool publication_receipt_publish(
 {
     uint8_t wire[VCS_DEV_PUBLICATION_RECEIPT_WIRE_BYTES];
     bool ok = publication_receipt_serialize(receipt, wire) &&
-              vcs_object_put(repo_root, wire, sizeof(wire),
-                             VCS_TAG_PUBLICATION_RECEIPT, receipt_root_out);
+              vcs_object_put_repair(repo_root, wire, sizeof(wire),
+                                    VCS_TAG_PUBLICATION_RECEIPT,
+                                    receipt_root_out, NULL);
     event_log_t *log = ok ? event_log_open(log_path) : NULL;
     if (ok)
         ok = log && event_log_append(log, EV_VCS_PUBLICATION_RECEIPT,

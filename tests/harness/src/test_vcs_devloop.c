@@ -152,6 +152,42 @@ static int vd_test_blob_map_retry(
     return failures;
 }
 
+static int vd_test_publication_receipt_retry(
+    const char *dir, const uint8_t job_root[32],
+    const uint8_t expected_receipt_root[32])
+{
+    int failures = 0;
+    uint8_t *original = NULL, *restored = NULL;
+    size_t original_len = 0, restored_len = 0;
+    uint8_t retry_root[32] = {0}, loaded_root[32] = {0};
+    struct vcs_devloop_publication_receipt loaded;
+    bool reused = true;
+    VD_CHECK("publication: receipt bytes load before interruption",
+             vcs_object_get(dir, expected_receipt_root,
+                            VCS_TAG_PUBLICATION_RECEIPT,
+                            &original, &original_len) == 0);
+    VD_CHECK("publication: interrupted receipt is seeded",
+             vd_poison_object(dir, expected_receipt_root));
+    VD_CHECK("publication: interrupted waiting phase retries",
+             vcs_devloop_publication_advance_waiting_acceptance(
+                 dir, job_root, retry_root, &reused));
+    VD_CHECK("publication: repaired receipt keeps exact root",
+             memcmp(retry_root, expected_receipt_root, 32) == 0);
+    VD_CHECK("publication: repaired receipt restores exact bytes",
+             vcs_object_get(dir, expected_receipt_root,
+                            VCS_TAG_PUBLICATION_RECEIPT,
+                            &restored, &restored_len) == 0 &&
+             restored_len == original_len && original &&
+             memcmp(restored, original, original_len) == 0);
+    VD_CHECK("publication: repaired receipt resumes progress",
+             vcs_devloop_publication_progress_load(
+                 dir, job_root, &loaded, loaded_root) &&
+             memcmp(loaded_root, expected_receipt_root, 32) == 0);
+    free(restored);
+    free(original);
+    return failures;
+}
+
 static bool vd_put_work_receipt(
     const char *dir, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
@@ -640,6 +676,8 @@ static int t_publication_enqueue(const char *dir)
                  VCS_DEVLOOP_PUBLICATION_PHASE_WAITING_ACCEPTANCE);
     VD_CHECK("publication: phase receipt binds immutable job",
              memcmp(progress.job_root, ar.publication_job_root, 32) == 0);
+    failures += vd_test_publication_receipt_retry(
+        dir, ar.publication_job_root, progress_root);
     reused = false;
     uint8_t retried_progress_root[32];
     VD_CHECK("publication: phase retry succeeds",
