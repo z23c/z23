@@ -705,9 +705,9 @@ static bool publication_enqueue_from_commit(
         memcpy(job.parent_workspace_root, parent_workspace_root, 32);
     uint8_t job_wire[VCS_DEV_PUBLICATION_JOB_WIRE_BYTES];
     if (!publication_job_serialize(&job, job_wire) ||
-        !vcs_object_put(repo_root, job_wire, sizeof(job_wire),
-                        VCS_TAG_PUBLICATION_JOB,
-                        out->publication_job_root) ||
+        !vcs_object_put_repair(repo_root, job_wire, sizeof(job_wire),
+                               VCS_TAG_PUBLICATION_JOB,
+                               out->publication_job_root, NULL) ||
         !vcs_devloop_publication_job_requeue(
             repo_root, out->publication_job_root,
             &out->publication_reused)) {

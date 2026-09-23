@@ -33,6 +33,7 @@
 #include "vcs/vcs_index.h"
 #include "vcs/vcs_object.h"
 #include "vcs/package_deps.h"
+#include "vcs/package_manifest.h"
 #include "vcs/package_mapping.h"
 #include "vcs/package_recipe.h"
 #include "vcs/source_bundle.h"
@@ -138,6 +139,50 @@ static int vd_test_accepted_bundle_retry(
              vcs_zcode_accepted_work_resolve(
                  consumer, fixture->accepted.accepted_work_root,
                  accepted_now, &resolved));
+    return failures;
+}
+
+static int vd_test_accepted_candidate_job_retry(
+    const char *authority, const struct vcs_source_bundle_sharded *source,
+    const struct vd_accepted_fixture *fixture,
+    const uint8_t source_root[32], int64_t accepted_now)
+{
+    int failures = 0;
+    char candidate[512];
+    test_make_tmpdir(candidate, sizeof(candidate),
+                     "vcs_devloop", "accepted-job-retry");
+    bool staged = vcs_tree_materialize(
+        authority, source_root, candidate,
+        VCS_PACKAGE_MAX_TOTAL_BYTES, 0) == VCS_OK &&
+        vcs_source_bundle_sharded_import(
+            source, source_root, candidate, NULL) == VCS_SOURCE_BUNDLE_OK;
+    VD_CHECK("publication: detached accepted candidate source stages", staged);
+    struct vcs_devloop_accepted_candidate_result first = {0}, retried = {0};
+    if (staged)
+        vcs_devloop_publication_bind_accepted_candidate(
+            authority, candidate, fixture->accepted.accepted_work_root,
+            source_root, accepted_now, &first);
+    VD_CHECK("publication: detached accepted job is durably queued",
+             first.ok && !first.reused &&
+             vcs_object_has(authority, first.publication_job_root));
+    VD_CHECK("publication: interrupted accepted job is poisoned",
+             first.ok && vd_poison_object(
+                 authority, first.publication_job_root));
+    if (first.ok)
+        vcs_devloop_publication_bind_accepted_candidate(
+            authority, candidate, fixture->accepted.accepted_work_root,
+            source_root, accepted_now, &retried);
+    VD_CHECK("publication: exact accepted job retry repairs CAS",
+             retried.ok &&
+             memcmp(retried.publication_job_root,
+                    first.publication_job_root, 32) == 0 &&
+             memcmp(retried.publication_progress_root,
+                    first.publication_progress_root, 32) == 0);
+    struct vcs_devloop_publication_job loaded;
+    VD_CHECK("publication: repaired accepted job reloads by exact root",
+             retried.ok && vcs_devloop_publication_job_load(
+                 authority, first.publication_job_root, &loaded));
+    test_rm_rf(candidate);
     return failures;
 }
 
@@ -832,6 +877,9 @@ static int t_publication_enqueue(const char *dir)
     failures += vd_test_accepted_bundle_retry(
         accepted_consumer, &fixture, job.source_tree_root,
         accepted_wire, accepted_wire_len, accepted_now);
+    failures += vd_test_accepted_candidate_job_retry(
+        accepted_consumer, &accepted_source, &fixture,
+        job.source_tree_root, accepted_now);
     uint8_t wrong_accepted_root[32];
     memcpy(wrong_accepted_root, fixture.accepted.accepted_work_root, 32);
     wrong_accepted_root[0] ^= 1u;
