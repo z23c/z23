@@ -783,6 +783,25 @@ struct zcl_result pkgl_generations_load(const struct pkgl_ctx *ctx,
 /* Point active/<publisher>/<package> at installed/<root>. The swap is a
  * rename over a fresh symlink, so a reader either sees the old generation or
  * the new one — never a missing or half-written pointer. */
+#ifndef _WIN32
+static struct zcl_result pkgl_clear_stale_active_link(const char *tmp)
+{
+    struct stat st;
+    if (lstat(tmp, &st) != 0)
+        return errno == ENOENT
+            ? ZCL_OK
+            : ZCL_ERR(-1, "inspect active temporary path %s: %s", tmp,
+                      strerror(errno));
+    if (!S_ISLNK(st.st_mode))
+        return ZCL_ERR(-1, "active temporary path is not a symlink; inspect "
+                           "and move it before retrying activation: %s", tmp);
+    if (unlink(tmp) != 0)
+        return ZCL_ERR(-1, "unlink stale active symlink %s: %s", tmp,
+                       strerror(errno));
+    return ZCL_OK;
+}
+#endif
+
 static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
                                           const char *name,
                                           const uint8_t root[32])
@@ -827,17 +846,20 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
     int n = snprintf(tmp, sizeof(tmp), "%s.zplnew.%ld", link, (long)getpid());
     if (n <= 0 || (size_t)n >= sizeof(tmp))
         return ZCL_ERR(-1, "active temp path too long");
-    ZCL_IGNORE_RESULT(pkgl_rm_rf(tmp), "stale active temp link");
 #ifdef _WIN32
     errno = ENOTSUP;
     return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
 #else
+    ZCL_CHECK(pkgl_clear_stale_active_link(tmp));
     if (symlink(absolute_target, tmp) != 0)
         return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
 #endif
     if (rename(tmp, link) != 0) {
         int e = errno;
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(tmp), "failed active swap cleaned up");
+#ifndef _WIN32
+        ZCL_IGNORE_RESULT(pkgl_clear_stale_active_link(tmp),
+                          "failed active swap symlink cleaned up");
+#endif
         return ZCL_ERR(-1, "activate %s: %s", link, strerror(e));
     }
     return ZCL_OK;

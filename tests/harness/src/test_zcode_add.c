@@ -657,6 +657,36 @@ static int t_activation_target_shape(void)
     return failures;
 }
 
+static int t_active_temp_directory_preserved(void)
+{
+    int failures = 0;
+    char base[256], installed[400], active[400], tmp[440], marker[480];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "active-temp-dir");
+    struct pkgl_ctx ctx = {0};
+    (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s/zcode", base);
+    uint8_t root[32], previous[32];
+    za_fake_root(root, 0x77);
+    char hex[65];
+    za_hex(root, 32, hex);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s",
+                   ctx.zcode_dir, hex);
+    (void)snprintf(active, sizeof(active), "%s/active/alice/preview",
+                   ctx.zcode_dir);
+    (void)snprintf(tmp, sizeof(tmp), "%s.zplnew.%ld", active, (long)getpid());
+    (void)snprintf(marker, sizeof(marker), "%s/keep.txt", tmp);
+    bool prepared = za_mkdir_p(installed) && za_mkdir_p(tmp) &&
+                    za_write_file(marker, "keep", 4, 0600);
+    bool had_previous = false;
+    struct zcl_result activated = pkgl_activate(
+        &ctx, "alice/preview", root, 1000, previous, &had_previous);
+    ZA_CHECK("activation refuses a temporary path that is a directory",
+             prepared && !activated.ok &&
+                 strstr(activated.message, "temporary") != NULL &&
+                 za_exists(marker) && !za_exists(active));
+    ZA_CHECK("active temporary directory fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 static int t_relative_active_pointer(void)
 {
     int failures = 0;
@@ -2685,6 +2715,7 @@ int test_zcode_add(void)
     failures += t_generations();
     failures += t_release_selection();
     failures += t_activation_target_shape();
+    failures += t_active_temp_directory_preserved();
     failures += t_relative_active_pointer();
     failures += t_active_log_divergence();
     failures += t_active_wrong_pointer();
