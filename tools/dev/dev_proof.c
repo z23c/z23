@@ -8024,21 +8024,35 @@ void zcl_dev_proof_execution_release(int guard)
 }
 
 #if !defined(_WIN32)
-static int dp_foreground_unarmed(const char *root, char *why, size_t why_len)
+static int dp_foreground_unarmed(const char *root, int *watch,
+                                 char *why, size_t why_len)
 {
     char path[PATH_MAX];
     struct stat state;
+    if (!watch) return -1;
+    *watch = -1;
     if (!zcl_devloop_watch_lock_path(root, path, sizeof(path))) {
         proof_why(why, why_len, "proof_watcher_state_unavailable");
         return -1;
     }
-    if (lstat(path, &state) == 0) {
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0 || fstat(fd, &state) != 0 || !S_ISREG(state.st_mode)) {
+        if (fd >= 0) (void)close(fd);
+        proof_why(why, why_len, "proof_watcher_state_unavailable");
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int saved = errno;
+        (void)close(fd);
+        if (saved != EWOULDBLOCK && saved != EAGAIN) {
+            proof_why(why, why_len, "proof_watcher_state_unavailable");
+            return -1;
+        }
         proof_why(why, why_len, "proof_foreground_requires_unarmed_checkout");
         return 0;
     }
-    if (errno == ENOENT) return 1;
-    proof_why(why, why_len, "proof_watcher_state_unavailable");
-    return -1;
+    *watch = fd;
+    return 1;
 }
 
 static volatile sig_atomic_t dp_foreground_signal;
@@ -8097,7 +8111,8 @@ static int dp_foreground_wait(pid_t worker)
  * preserved (qualified in impact_composition); containment of arbitrary
  * escaped descendants remains a separate, unclaimed boundary. */
 static int dp_foreground_run(const char *root, const char *local, const char *base,
-                              int *execution, int *landing, char *why, size_t why_len)
+                              int *execution, int *landing, int *watch,
+                              char *why, size_t why_len)
 {
     struct sigaction saved[3];
     if (zcl_devloop_process_cancel_requested() || !dp_foreground_handlers(saved)) {
@@ -8117,8 +8132,10 @@ static int dp_foreground_run(const char *root, const char *local, const char *ba
     }
     (void)close(*execution);
     if (*landing >= 0) (void)close(*landing);
+    (void)close(*watch);
     *execution = -1;
     *landing = -1;
+    *watch = -1;
     int result = dp_foreground_wait(worker);
     dp_foreground_restore(saved, 3);
     if (dp_foreground_signal) zcl_devloop_process_cancel_clear();
@@ -8128,7 +8145,7 @@ static int dp_foreground_run(const char *root, const char *local, const char *ba
 
 static int dp_proof_step_owned(const char *root, const char *local,
                                 const char *base, struct zcl_dev_proof_status *out,
-                                int *execution, int *landing)
+                                int *execution, int *landing, int *watch)
 {
     if (!proof_ensure_platform(root, local, base, out)) return -1;
     if (out->state == ZCL_DEV_PROOF_STATE_PASSED ||
@@ -8138,7 +8155,8 @@ static int dp_proof_step_owned(const char *root, const char *local,
         proof_why(out->detail, sizeof(out->detail), "proof_execution_busy");
         return 0;
     }
-    int claimed = dp_foreground_run(root, local, base, execution, landing, why, sizeof(why));
+    int claimed = dp_foreground_run(root, local, base, execution, landing,
+                                    watch, why, sizeof(why));
     if (claimed < 0) {
         proof_why(out->detail, sizeof(out->detail), why);
         return -1;
@@ -8163,18 +8181,22 @@ int zcl_dev_proof_step(const char *root, const char *local, const char *base,
     return -1;
 #else
     if (!zcl_dev_proof_status_read(root, local, base, out)) return -1;
-    int landing = -1, execution = -1;
-    int result = dp_foreground_unarmed(out->root, out->detail, sizeof(out->detail));
-    if (result <= 0) return result;
-    result = dp_landing_proof_guard(out->root, &landing, out->detail, sizeof(out->detail));
+    int landing = -1, execution = -1, watch = -1;
+    int result = dp_landing_proof_guard(out->root, &landing,
+                                        out->detail, sizeof(out->detail));
     if (result <= 0) return result;
     result = zcl_dev_proof_execution_acquire(out->root, &execution,
                                              out->detail, sizeof(out->detail));
     if (result > 0) {
-        result = dp_proof_step_owned(root, local, base, out, &execution, &landing);
+        result = dp_foreground_unarmed(out->root, &watch,
+                                        out->detail, sizeof(out->detail));
+        if (result > 0)
+            result = dp_proof_step_owned(root, local, base, out, &execution,
+                                         &landing, &watch);
         zcl_dev_proof_execution_release(execution);
     }
     proof_queue_lock_release(landing);
+    if (watch >= 0) (void)close(watch);
     return result;
 #endif
 }

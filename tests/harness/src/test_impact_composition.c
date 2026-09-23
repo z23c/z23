@@ -5880,6 +5880,16 @@ struct ic_landing_proof_fixture {
     size_t request_size;
 };
 
+static bool ic_watcher_lock_unowned(const char *path)
+{
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool unowned = flock(fd, LOCK_EX | LOCK_NB) == 0;
+    if (unowned) (void)flock(fd, LOCK_UN);
+    (void)close(fd);
+    return unowned;
+}
+
 static bool ic_landing_proof_prepare(struct ic_landing_proof_fixture *f,
                                       const char *tag)
 {
@@ -6395,7 +6405,7 @@ static int test_ic_foreground_selected_pair(void)
         ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_FAILED);
         ASSERT(ic_bytes_equal(request, bytes, size));
         snprintf(watcher, sizeof(watcher), "%s/.cache/zcl-dev-watch.lock", f.root);
-        ASSERT(access(watcher, F_OK) != 0);
+        ASSERT(ic_watcher_lock_unowned(watcher));
         ASSERT(test_rm_rf_recursive(f.parent) == 0);
         PASS();
     } _test_next:;
@@ -6454,11 +6464,16 @@ static int test_ic_foreground_execution_busy(void)
 static int test_ic_foreground_refuses_watcher(void)
 {
     int failures = 0;
-    TEST("proof step: existing watcher state refuses before claiming or changing requests") {
+    TEST("proof step: live watcher refuses; stale lock file can resume proof") {
         struct ic_landing_proof_fixture f = {0};
         ASSERT(ic_landing_proof_prepare(&f, "foreground-watcher"));
         const char marker[] = "123 verify ready proofq1\n";
         ASSERT(ic_write(f.root, ".cache/zcl-dev-watch.lock", marker));
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/.cache/zcl-dev-watch.lock", f.root);
+        int watcher = open(path, O_RDWR | O_CLOEXEC);
+        ASSERT(watcher >= 0);
+        ASSERT(flock(watcher, LOCK_EX | LOCK_NB) == 0);
         struct zcl_dev_proof_status status = {0};
         int result = zcl_dev_proof_step(f.root,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -6466,8 +6481,6 @@ static int test_ic_foreground_refuses_watcher(void)
         ASSERT_EQ(result, 0);
         ASSERT_STR_EQ(status.detail, "proof_foreground_requires_unarmed_checkout");
         ASSERT(ic_landing_request_unchanged(&f));
-        char path[4096];
-        snprintf(path, sizeof(path), "%s/.cache/zcl-dev-watch.lock", f.root);
         ASSERT(ic_bytes_equal(path, (const uint8_t *)marker, sizeof(marker) - 1));
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
@@ -6476,6 +6489,24 @@ static int test_ic_foreground_refuses_watcher(void)
         ASSERT_STR_EQ(reply.error.code, "PROOF_STEP_WATCHER_PRESENT");
         ASSERT(ic_proof_reply_serializes(&reply));
         zcl_command_reply_free(&reply);
+        ASSERT(flock(watcher, LOCK_UN) == 0);
+        ASSERT(close(watcher) == 0);
+        ASSERT_EQ(zcl_dev_proof_step(f.root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1111111111111111111111111111111111111111", &status), 1);
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(access(f.request, F_OK) != 0);
+        ASSERT(access(f.failure, F_OK) == 0);
+        ASSERT(ic_bytes_equal(path, (const uint8_t *)marker, sizeof(marker) - 1));
+        struct stat before, after;
+        ASSERT(stat(f.failure, &before) == 0);
+        ASSERT_EQ(zcl_dev_proof_step(f.root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1111111111111111111111111111111111111111", &status), 1);
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(stat(f.failure, &after) == 0);
+        ASSERT(before.st_ino == after.st_ino &&
+               before.st_size == after.st_size);
         ASSERT(test_rm_rf_recursive(f.parent) == 0);
         PASS();
     } _test_next:;
@@ -6612,7 +6643,7 @@ static int ic_proof_state_entries(const char *root, const char *name)
 }
 
 struct ic_competing_proof_observation {
-    bool ready, released, owner_reaped, failure_persisted, watcher_absent;
+    bool ready, released, owner_reaped, failure_persisted, watcher_unowned;
     int attempts_during, attempts_after, loser_result, retry_result;
     int loser_state, retry_state, owner_status;
     char loser_detail[128];
@@ -6652,7 +6683,7 @@ static void ic_competing_proof_case(struct ic_competing_proof_observation *o)
         o->failure_persisted = access(f.failure, F_OK) == 0;
         (void)snprintf(watcher, sizeof(watcher),
                        "%s/.cache/zcl-dev-watch.lock", f.root);
-        o->watcher_absent = access(watcher, F_OK) != 0;
+        o->watcher_unowned = ic_watcher_lock_unowned(watcher);
     }
     if (worker > 0) (void)kill(-worker, SIGKILL);
     if (channels[0] >= 0) (void)close(channels[0]);
@@ -6677,7 +6708,7 @@ static int test_ic_competing_fungible_proof_workers(void)
         ASSERT_EQ(o.retry_result, 1);
         ASSERT_EQ(o.retry_state, ZCL_DEV_PROOF_STATE_FAILED);
         ASSERT_EQ(o.attempts_after, 1);
-        ASSERT(o.failure_persisted && o.watcher_absent && o.cleaned);
+        ASSERT(o.failure_persisted && o.watcher_unowned && o.cleaned);
         PASS();
     } _test_next:;
     return failures;
