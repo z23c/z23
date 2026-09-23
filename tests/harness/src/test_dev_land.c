@@ -3424,11 +3424,92 @@ static int test_dev_land_long_proof_root(void)
     return failures;
 }
 
+static int test_dev_land_malformed_queue_refusal(void)
+{
+    int failures = 0;
+    TEST("land: a legacy row blocks status, submit and step without losing bytes") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1024], qpath[1200], before[8192], after[8192];
+        size_t before_len = 0, after_len = 0;
+        dlx_isolate("malformed_queue");
+        ASSERT(dlx_rig_make(&rig, "malformed_queue_rig"));
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "manual", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1) == 0);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir) <
+               (int)sizeof(qpath));
+        FILE *file = fopen(qpath, "ab");
+        ASSERT(file != NULL);
+        static const char legacy[] =
+            "{\"seq\":2,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+            "\"state\":\"queued\"}\n";
+        ASSERT(fwrite(legacy, 1, sizeof(legacy) - 1, file) == sizeof(legacy) - 1);
+        ASSERT(fclose(file) == 0);
+        ASSERT(dlx_slurp(qpath, before, sizeof(before), &before_len));
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_2");
+        dlx_end(&c);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_2");
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_2");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(qpath, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len);
+        ASSERT(memcmp(before, after, before_len) == 0);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_land_malformed_outcome_refusal(void)
+{
+    int failures = 0;
+    TEST("land: a malformed terminal outcome is named, never hidden") {
+        struct dlx_call c;
+        char landdir[1024], opath[1200];
+        dlx_isolate("malformed_outcome");
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", landdir) <
+               (int)sizeof(opath));
+        ASSERT(dlx_write(opath,
+            "{\"seq\":1,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+            "\"state\":\"landed\"}\n"));
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_outcome_record_1");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
     failures += test_dev_land_watcher_admission();
     failures += test_dev_land_long_proof_root();
+    failures += test_dev_land_malformed_queue_refusal();
+    failures += test_dev_land_malformed_outcome_refusal();
     failures += test_dev_land_exact_tree();
     failures += test_dev_land_source_binding();
 #if !defined(_WIN32)
@@ -4429,9 +4510,12 @@ int test_dev_land(void)
         }
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "empty") == 0);
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_1");
         dlx_end(&c);
+        /* Explicit fixture repair is required; a step never erases the
+         * foreign row just because its path was unsafe. */
+        ASSERT(dlx_write(qpath, ""));
         /* A normal, valid absolute worktree still lands: the parser
          * refuses only the shape it must, not every row that follows it. */
         ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));

@@ -3623,7 +3623,7 @@ tools/command/native_dev_land.c:dl_escape:17
 tools/command/native_dev_land.c:dl_materialize_file:47
 tools/command/native_dev_land.c:dl_proof_read:16
 tools/command/native_dev_land.c:dl_regen_run:21
-tools/command/native_dev_land.c:dl_status:44
+tools/command/native_dev_land.c:dl_status:40
 tools/command/native_dev_land.c:dl_step:17
 tools/command/native_dev_land.c:dl_step_resume:19
 tools/command/native_dev_land.c:dl_step_start:24

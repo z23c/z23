@@ -360,7 +360,7 @@ static bool dl_escape(const char *in, char *out, size_t cap)
     return true;
 }
 
-/* ── minimal per-line field extraction (a malformed row is skipped) ────── */
+/* ── minimal per-line field extraction ─────────────────────────────────── */
 
 static bool dl_line_int(const char *line, const char *key, long long *out)
 {
@@ -646,9 +646,56 @@ struct dl_row {
     char detail[256];
 };
 
+static bool dl_row_json_ok(const char *line)
+{
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, line, strlen(line)) && doc.type == JSON_OBJ;
+    json_free(&doc);
+    return ok;
+}
+
+static bool dl_row_state_ok(const struct dl_row *r)
+{
+    return strcmp(r->state, "queued") == 0 ||
+           strcmp(r->state, "inflight") == 0 ||
+           strcmp(r->state, "landed") == 0 ||
+           strcmp(r->state, "failed") == 0 ||
+           strcmp(r->state, "conflict") == 0 ||
+           strcmp(r->state, "cancelled") == 0;
+}
+
+static bool dl_row_phase_ok(const struct dl_row *r)
+{
+    return !r->phase[0] || strcmp(r->phase, "rebase") == 0 ||
+           strcmp(r->phase, "regen") == 0 ||
+           strcmp(r->phase, "prebuild") == 0 ||
+           strcmp(r->phase, "prove") == 0 ||
+           strcmp(r->phase, "push") == 0;
+}
+
+static bool dl_row_pair_ok(const struct dl_row *r)
+{
+    if ((r->base[0] && !dl_sha_ok(r->base)) ||
+        (r->local[0] && !dl_sha_ok(r->local)))
+        return false;
+    if (strcmp(r->state, "inflight") == 0 &&
+        (strcmp(r->phase, "prove") == 0 ||
+         strcmp(r->phase, "push") == 0))
+        return dl_sha_ok(r->base) && dl_sha_ok(r->local);
+    return true;
+}
+
+static bool dl_row_semantics_ok(const struct dl_row *r)
+{
+    return dl_row_state_ok(r) && dl_row_phase_ok(r) && dl_row_pair_ok(r);
+}
+
 static bool dl_parse_row(const char *line, struct dl_row *r)
 {
     if (!line || !line[0] || !r)
+        return false;
+    if (!dl_row_json_ok(line))
         return false;
     memset(r, 0, sizeof(*r));
     if (!dl_line_int(line, "seq", &r->seq) || r->seq < 1)
@@ -673,7 +720,7 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
     (void)dl_line_str(line, "dimension", r->dimension, sizeof(r->dimension));
     (void)dl_line_str(line, "log_path", r->log_path, sizeof(r->log_path));
     (void)dl_line_str(line, "detail", r->detail, sizeof(r->detail));
-    return true;
+    return dl_row_semantics_ok(r);
 }
 
 static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
@@ -724,16 +771,53 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
     return true;
 }
 
-/* Load every parseable row. A malformed line is skipped, never fatal: the
- * queue survives a foreign write. A missing file is an empty queue. */
+static bool dl_queue_row_ok(const char *line, struct dl_row *r,
+                            long long last_seq)
+{
+    return dl_parse_row(line, r) &&
+           (strcmp(r->state, "queued") == 0 ||
+            strcmp(r->state, "inflight") == 0) &&
+           r->seq > last_seq;
+}
+
+static bool dl_rows_reserve(struct dl_row **rows, size_t *cap, size_t n,
+                             char *why, size_t why_cap)
+{
+    if (n < *cap)
+        return true;
+    size_t next = *cap == 0 ? 16 : *cap * 2;
+    if (next > 65536) {
+        if (why && why_cap)
+            (void)snprintf(why, why_cap, "queue_row_capacity_exceeded");
+        errno = EOVERFLOW;
+        return false;
+    }
+    struct dl_row *grow = (struct dl_row *)zcl_realloc(
+        *rows, next * sizeof(**rows), "dev.land.rows");
+    if (!grow) {
+        if (why && why_cap)
+            (void)snprintf(why, why_cap, "queue_row_allocation_failed");
+        errno = ENOMEM;
+        return false;
+    }
+    *rows = grow;
+    *cap = next;
+    return true;
+}
+
+/* A malformed or legacy queue row is an obstruction, never permission to
+ * forget that work. Preserve the file byte-for-byte and name the offending
+ * record so another worker can diagnose it. A missing file is empty. */
 static bool dl_load_rows(const char *qpath, struct dl_row **rows_out,
-                         size_t *n_out)
+                         size_t *n_out, char *why, size_t why_cap)
 {
     char *text;
     struct dl_row *rows = NULL;
     size_t n = 0, cap = 0;
     char *save = NULL, *line;
     int read_errno = 0;
+    size_t record = 0;
+    long long last_seq = 0;
     if (!qpath || !rows_out || !n_out)
         return false;
     *rows_out = NULL;
@@ -744,24 +828,29 @@ static bool dl_load_rows(const char *qpath, struct dl_row **rows_out,
     if (!dl_read_file(qpath, text, DL_FILE_CAP, NULL)) {
         read_errno = errno;
         free(text);
+        if (read_errno != ENOENT && why && why_cap)
+            (void)snprintf(why, why_cap, "queue_read_failed_errno_%d",
+                           read_errno);
         return read_errno == ENOENT;
     }
     for (line = strtok_r(text, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
         struct dl_row r;
-        struct dl_row *grow;
-        if (!dl_parse_row(line, &r))
-            continue;
-        if (n == cap) {
-            size_t ncap = cap == 0 ? 16 : cap * 2;
-            if (ncap > 65536)
-                break;
-            grow = (struct dl_row *)zcl_realloc(rows, ncap * sizeof(*rows),
-                                                "dev.land.rows");
-            if (!grow)
-                break;
-            rows = grow;
-            cap = ncap;
+        record++;
+        if (!dl_queue_row_ok(line, &r, last_seq)) {
+            if (why && why_cap)
+                (void)snprintf(why, why_cap,
+                               "malformed_queue_record_%zu", record);
+            free(rows);
+            free(text);
+            errno = EINVAL;
+            return false;
+        }
+        last_seq = r.seq;
+        if (!dl_rows_reserve(&rows, &cap, n, why, why_cap)) {
+            free(rows);
+            free(text);
+            return false;
         }
         rows[n++] = r;
     }
@@ -769,6 +858,11 @@ static bool dl_load_rows(const char *qpath, struct dl_row **rows_out,
     *rows_out = rows;
     *n_out = n;
     return true;
+}
+
+static const char *dl_reason_or_path(const char *why, const char *path)
+{
+    return why && why[0] ? why : path;
 }
 
 /* Whole-file rewrite under the row lock: temp file plus rename, so a
@@ -1834,11 +1928,18 @@ static void dl_submit(const struct zcl_command_request *req,
                 "cannot take the queue lock", qpath);
         return;
     }
-    if (dl_load_rows(qpath, &rows, &nrows)) {
-        for (size_t i = 0; i < nrows; i++) {
-            if (rows[i].seq >= seq)
-                seq = rows[i].seq + 1;
-        }
+    char queue_why[128] = {0};
+    if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
+                      sizeof(queue_why))) {
+        dl_unlock(lock);
+        dl_fail(reply, "QUEUE_READ_FAILED", "submit",
+                "cannot append while the queue cannot be read",
+                dl_reason_or_path(queue_why, qpath));
+        return;
+    }
+    for (size_t i = 0; i < nrows; i++) {
+        if (rows[i].seq >= seq)
+            seq = rows[i].seq + 1;
     }
     free(rows);
     r.seq = seq;
@@ -1897,10 +1998,13 @@ static void dl_cancel(const struct zcl_command_request *req,
                 "cannot take the queue lock", qpath);
         return;
     }
-    if (!dl_load_rows(qpath, &rows, &nrows)) {
+    char queue_why[128] = {0};
+    if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
+                      sizeof(queue_why))) {
         dl_unlock(lock);
         dl_fail(reply, "QUEUE_READ_FAILED", "cancel",
-                "cannot read the queue file", qpath);
+                "cannot read the queue file",
+                dl_reason_or_path(queue_why, qpath));
         return;
     }
     memset(&hit, 0, sizeof(hit));
@@ -2617,6 +2721,48 @@ static bool dl_push_outcome_row(struct json_value *arr,
     return ok;
 }
 
+static bool dl_outcomes_tail(const char *path, struct dl_row last[10],
+                             size_t *count, char *why, size_t why_cap)
+{
+    char *text = (char *)zcl_malloc(DL_FILE_CAP, "dev.land.outcomes");
+    if (!text)
+        return false;
+    if (!dl_read_file(path, text, DL_FILE_CAP, NULL)) {
+        int read_errno = errno;
+        free(text);
+        if (read_errno == ENOENT)
+            return true;
+        if (why && why_cap)
+            (void)snprintf(why, why_cap,
+                           "outcomes_read_failed_errno_%d", read_errno);
+        return false;
+    }
+    char *save = NULL, *line;
+    size_t record = 0;
+    for (line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        struct dl_row row;
+        record++;
+        if (!dl_parse_row(line, &row) ||
+            strcmp(row.state, "queued") == 0 ||
+            strcmp(row.state, "inflight") == 0) {
+            if (why && why_cap)
+                (void)snprintf(why, why_cap,
+                               "malformed_outcome_record_%zu", record);
+            free(text);
+            return false;
+        }
+        if (*count == 10) {
+            for (size_t k = 1; k < *count; k++)
+                last[k - 1] = last[k];
+            (*count)--;
+        }
+        last[(*count)++] = row;
+    }
+    free(text);
+    return true;
+}
+
 static void dl_status(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -2625,6 +2771,7 @@ static void dl_status(const struct zcl_command_request *req,
     struct dl_row last[10];
     size_t nrows = 0, nlast = 0;
     char qpath[4096 + 32], opath[4096 + 32], screen[16384];
+    char read_why[128] = {0};
     struct json_value queued, inflight, outcomes;
     long long now = (long long)platform_time_wall_unix();
     bool want_json = false, have_inflight = false;
@@ -2649,9 +2796,12 @@ static void dl_status(const struct zcl_command_request *req,
                 "platform_state_root too long");
         return;
     }
-    if (!dl_load_rows(qpath, &rows, &nrows)) {
+    char queue_why[128] = {0};
+    if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
+                      sizeof(queue_why))) {
         dl_fail(reply, "QUEUE_READ_FAILED", "status",
-                "cannot read the queue file", qpath);
+                "cannot read the queue file",
+                dl_reason_or_path(queue_why, qpath));
         return;
     }
     json_init(&queued);
@@ -2671,30 +2821,11 @@ static void dl_status(const struct zcl_command_request *req,
         }
     }
     /* The last ten outcomes, oldest first. */
-    {
-        char *text = (char *)zcl_malloc(DL_FILE_CAP, "dev.land.outcomes");
-        if (!text)
+    if (!dl_outcomes_tail(opath, last, &nlast, read_why, sizeof(read_why)))
+        goto fail;
+    for (size_t k = 0; k < nlast; k++) {
+        if (!dl_push_outcome_row(&outcomes, &last[k]))
             goto fail;
-        if (dl_read_file(opath, text, DL_FILE_CAP, NULL)) {
-            char *save = NULL, *line;
-            for (line = strtok_r(text, "\n", &save); line;
-                 line = strtok_r(NULL, "\n", &save)) {
-                struct dl_row o;
-                if (!dl_parse_row(line, &o))
-                    continue;
-                if (nlast == sizeof(last) / sizeof(last[0])) {
-                    for (size_t k = 1; k < nlast; k++)
-                        last[k - 1] = last[k];
-                    nlast--;
-                }
-                last[nlast++] = o;
-            }
-        }
-        free(text);
-        for (size_t k = 0; k < nlast; k++) {
-            if (!dl_push_outcome_row(&outcomes, &last[k]))
-                goto fail;
-        }
     }
     if (!want_json) {
         w = snprintf(screen, sizeof(screen),
@@ -2768,7 +2899,9 @@ fail:
     json_free(&outcomes);
     free(rows);
     dl_fail(reply, "QUEUE_READ_FAILED", "status",
-            "cannot encode the status reply", qpath);
+            read_why[0] ? "cannot read the outcomes file"
+                        : "cannot encode the status reply",
+            dl_reason_or_path(read_why, qpath));
 }
 
 /* ── step: one scheduler beat, and it never waits ──────────────────────── */
@@ -2789,7 +2922,7 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     lock = dl_rows_lock(d->land);
     if (lock < 0)
         return false;
-    if (!dl_load_rows(qpath, &rows, &nrows)) {
+    if (!dl_load_rows(qpath, &rows, &nrows, NULL, 0)) {
         dl_unlock(lock);
         return false;
     }
@@ -5120,10 +5253,13 @@ static void dl_step(const struct zcl_command_request *req,
      * this step actually runs -- never before the busy check, which the
      * lock-contention test proves touches nothing. */
     dl_pool_sweep_and_log(&d);
-    if (!dl_load_rows(qpath, &rows, &nrows)) {
+    char queue_why[128] = {0};
+    if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
+                      sizeof(queue_why))) {
         dl_unlock(slot);
         dl_fail(reply, "QUEUE_READ_FAILED", "slot",
-                "cannot read the queue file", qpath);
+                "cannot read the queue file",
+                dl_reason_or_path(queue_why, qpath));
         return;
     }
     memset(&pick, 0, sizeof(pick));

@@ -1048,6 +1048,11 @@ its signed receipt. Landing does not start a resident proof watcher by default. 
 operator who explicitly wants the prior watcher path can set
 `ZCL_LAND_START_PROOF_WATCHER=1` for that landing step.
 
+`dev land` refuses a malformed or legacy queue record by record number on
+status, submit and step. It preserves the queue bytes until an operator
+repairs that record; a later valid row cannot make an earlier one disappear
+through a rewrite. Status likewise names a malformed terminal outcome.
+
 Queued exact proofs take the same lock shared before claiming a request
 and hold it until verification finishes. Requests created by checkout hooks
 therefore remain queued while the landing step prepares the tree. A busy
