@@ -148,8 +148,9 @@ static bool blob_map_build(
     }
     ok = ok && blob_map_serialize(blob_root, size, hashes, chunks,
                                   &wire, &wire_len) &&
-        vcs_object_put(repo_root, wire, wire_len,
-                       VCS_TAG_PACKAGE_BLOB_MAP, mapping_root);
+        vcs_object_put_repair(repo_root, wire, wire_len,
+                              VCS_TAG_PACKAGE_BLOB_MAP,
+                              mapping_root, NULL);
     free(wire);
     free(hashes);
     free(bytes);

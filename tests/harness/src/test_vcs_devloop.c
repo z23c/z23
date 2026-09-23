@@ -113,6 +113,45 @@ static bool vd_poison_object(const char *dir, const uint8_t root[32])
         vcs_object_put_addressed(dir, root, poison, sizeof(poison));
 }
 
+static int vd_test_blob_map_retry(
+    const char *dir, const uint8_t source_root[32],
+    const uint8_t lane_root[32], const uint8_t expected_set_root[32],
+    const struct vcs_package_mapping_set *set)
+{
+    int failures = 0;
+    if (set->count == 0) {
+        VD_CHECK("publication: blob mapping exists for retry", false);
+        return failures;
+    }
+    uint8_t blob_map_root[32], repair_set_root[32] = {0};
+    uint8_t *original_map = NULL, *repaired_map = NULL;
+    size_t original_len = 0, repaired_len = 0;
+    struct vcs_package_mapping_metrics repaired_metrics = {0};
+    memcpy(blob_map_root, set->entries[0].mapping_root, 32);
+    VD_CHECK("publication: blob mapping loads before interruption",
+             vcs_object_get(dir, blob_map_root, VCS_TAG_PACKAGE_BLOB_MAP,
+                            &original_map, &original_len) == 0);
+    VD_CHECK("publication: interrupted blob mapping is seeded",
+             vd_poison_object(dir, blob_map_root));
+    VD_CHECK("publication: blob mapping retry rebuilds from source",
+             vcs_package_mapping_set_build(
+                 dir, source_root, lane_root,
+                 &repaired_metrics, repair_set_root));
+    VD_CHECK("publication: blob mapping retry preserves set root",
+             memcmp(repair_set_root, expected_set_root, 32) == 0);
+    VD_CHECK("publication: blob mapping retry records a miss",
+             repaired_metrics.blob_misses == 1 &&
+             repaired_metrics.bytes_scanned > 0);
+    VD_CHECK("publication: blob mapping retry restores exact bytes",
+             vcs_object_get(dir, blob_map_root, VCS_TAG_PACKAGE_BLOB_MAP,
+                            &repaired_map, &repaired_len) == 0 &&
+             repaired_len == original_len && original_map &&
+             memcmp(repaired_map, original_map, original_len) == 0);
+    free(repaired_map);
+    free(original_map);
+    return failures;
+}
+
 static bool vd_put_work_receipt(
     const char *dir, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
@@ -873,6 +912,8 @@ static int t_publication_enqueue(const char *dir)
                     job.source_tree_root, 32) == 0);
     VD_CHECK("publication: mapping set binds accepted lane",
              memcmp(loaded_mapping.lane_receipt_root, lane_root, 32) == 0);
+    failures += vd_test_blob_map_retry(
+        dir, job.source_tree_root, lane_root, mapping_root, &loaded_mapping);
     vcs_package_mapping_set_free(&loaded_mapping);
 
     uint8_t wrong_mapping_root[32], wrong_lane[32];
