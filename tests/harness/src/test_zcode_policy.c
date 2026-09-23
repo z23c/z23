@@ -897,6 +897,24 @@ static int zpy_book_corrupt(struct zpy_book_fx *fx,
     return failures;
 }
 
+static int zpy_book_blocked_history(const struct zpy_book_fx *fx,
+                                    size_t events_before)
+{
+    int failures = 0;
+    char events[4400], saved[4400];
+    snprintf(events, sizeof(events), "%s/service/events", fx->zcode_dir);
+    snprintf(saved, sizeof(saved), "%s/service/events.saved", fx->zcode_dir);
+    bool prepared = events_before > 0 && rename(events, saved) == 0;
+    FILE *blocker = prepared ? fopen(events, "wb") : NULL;
+    prepared = blocker != NULL && fclose(blocker) == 0;
+    struct vcs_service_book *book =
+        prepared ? vcs_service_book_load(fx->zcode_dir) : NULL;
+    ZPY_CHECK("book: blocked event history refuses instead of resetting facts",
+              prepared && book == NULL);
+    vcs_service_book_free(book);
+    return failures;
+}
+
 static int t_book(void)
 {
     int failures = 0;
@@ -932,6 +950,7 @@ static int t_book(void)
         return failures + 1;
 
     failures += zpy_book_corrupt(&fx, book, events_before);
+    failures += zpy_book_blocked_history(&fx, events_before);
     zpy_rm_rf(fx.zcode_dir);
     return failures;
 }

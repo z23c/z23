@@ -525,6 +525,19 @@ static void svc_apply_no_credit(struct vcs_service_book *book,
 
 /* ── load / free ────────────────────────────────────────────────────── */
 
+static DIR *svc_open_events(struct vcs_service_book **book_io)
+{
+    DIR *dir = opendir((*book_io)->events_dir);
+    if (dir || errno == ENOENT)
+        return dir;
+    int open_errno = errno;
+    LOG_ERROR(SERVICE_LOG, "cannot open service events %s: %s",
+              (*book_io)->events_dir, strerror(open_errno));
+    free(*book_io);
+    *book_io = NULL;
+    return NULL;
+}
+
 struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
 {
     if (!zcode_dir || !zcode_dir[0])
@@ -540,9 +553,9 @@ struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
         LOG_NULL(SERVICE_LOG, "zcode dir path too long");
     }
 
-    DIR *dir = opendir(book->events_dir);
+    DIR *dir = svc_open_events(&book);
     if (!dir)
-        return book; /* a missing events dir is an empty book */
+        return book; /* ENOENT is empty; hard errors freed the book */
 
     /* Collect the 64-hex names, sort ascending, replay in order. */
     char (*names)[65] = NULL;
