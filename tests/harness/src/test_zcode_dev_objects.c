@@ -45,6 +45,7 @@
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_lane.h"
 #include "vcs/zcode_publication.h"
+#include "vcs/zcode_publication_index.h"
 #include "vcs/zcode_work_context.h"
 #include "vcs/zcode_work_node.h"
 #include "vcs/zcode_work_swarm.h"
@@ -7390,6 +7391,26 @@ static int test_zd_publication_result(void)
                 dir, stored, publisher, producer, &loaded));
             ASSERT(memcmp(&loaded, &another, sizeof(another)) == 0);
         }
+        struct vcs_zcode_publication_index *projection =
+            vcs_zcode_publication_index_build(dir);
+        ASSERT(projection != NULL);
+        ASSERT(vcs_zcode_publication_index_complete(projection));
+        ASSERT_EQ(vcs_zcode_publication_index_count(projection), 3);
+        char intent_hex[65];
+        zcl_hex_encode(intent_root, 32, intent_hex);
+        bool saw_unknown = false, saw_accepted = false, saw_rejected = false;
+        for (size_t i = 0; i < 3; i++) {
+            const struct vcs_zcode_publication_observation_entry *entry =
+                vcs_zcode_publication_index_at(projection, i);
+            ASSERT(entry != NULL);
+            ASSERT_STR_EQ(entry->publication_root_hex, intent_hex);
+            ASSERT_EQ(entry->kind, VCS_ZCODE_OBSERVATION_ATTEMPT_RESULT);
+            saw_unknown |= entry->outcome == VCS_ZCODE_PUBLICATION_UNKNOWN;
+            saw_accepted |= entry->outcome == VCS_ZCODE_PUBLICATION_ACCEPTED;
+            saw_rejected |= entry->outcome == VCS_ZCODE_PUBLICATION_REJECTED;
+        }
+        ASSERT(saw_unknown && saw_accepted && saw_rejected);
+        vcs_zcode_publication_index_free(projection);
         test_rm_rf(dir);
         PASS();
     } _test_next:;
@@ -7438,6 +7459,11 @@ static int test_zd_remote_receipt(void)
                   VCS_ZCODE_DEV_OK);
         char dir[512];
         test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "remote_receipt");
+        struct vcs_zcode_publication_index *projection =
+            vcs_zcode_publication_index_build(dir);
+        ASSERT(projection != NULL);
+        ASSERT(!vcs_zcode_publication_index_complete(projection));
+        vcs_zcode_publication_index_free(projection);
         ASSERT(vcs_object_store_init(dir));
         ASSERT(!vcs_zcode_remote_receipt_store_verified(
             dir, &receipt, publisher, observer, stored));
@@ -7474,6 +7500,28 @@ static int test_zd_remote_receipt(void)
         ASSERT(vcs_zcode_remote_receipt_store_verified(
             dir, &receipt, publisher, observer, stored));
         ASSERT(memcmp(stored, receipt_root, 32) == 0);
+        projection = vcs_zcode_publication_index_build(dir);
+        ASSERT(projection != NULL);
+        ASSERT(vcs_zcode_publication_index_complete(projection));
+        ASSERT_EQ(vcs_zcode_publication_index_count(projection), 1);
+        const struct vcs_zcode_publication_observation_entry *entry =
+            vcs_zcode_publication_index_at(projection, 0);
+        ASSERT(entry != NULL);
+        char receipt_hex[65], intent_hex[65];
+        zcl_hex_encode(receipt_root, 32, receipt_hex);
+        zcl_hex_encode(intent_root, 32, intent_hex);
+        ASSERT_STR_EQ(entry->root_hex, receipt_hex);
+        ASSERT_STR_EQ(entry->publication_root_hex, intent_hex);
+        ASSERT_EQ(entry->kind, VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT);
+        vcs_zcode_publication_index_free(projection);
+        uint8_t misplaced_root[32];
+        memset(misplaced_root, 0xaa, sizeof(misplaced_root));
+        ASSERT(vcs_object_put_addressed(dir, misplaced_root, wire, sizeof(wire)));
+        projection = vcs_zcode_publication_index_build(dir);
+        ASSERT(projection != NULL);
+        ASSERT(!vcs_zcode_publication_index_complete(projection));
+        ASSERT_EQ(vcs_zcode_publication_index_count(projection), 1);
+        vcs_zcode_publication_index_free(projection);
         test_rm_rf(dir);
         PASS();
     } _test_next:;
