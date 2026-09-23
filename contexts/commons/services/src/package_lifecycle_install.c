@@ -655,6 +655,76 @@ static struct zcl_result pkgl_active_path(const struct pkgl_ctx *ctx,
     return pkgl_join(ctx, rel, out, cap);
 }
 
+#ifndef _WIN32
+static struct zcl_result pkgl_active_target_matches(
+    const struct pkgl_ctx *ctx, const char *name,
+    const uint8_t expected_root[32], const char *actual)
+{
+    char canonical[PKGL_PATH_MAX], expected[PKGL_PATH_MAX], hex[65];
+    if (!realpath(ctx->zcode_dir, canonical))
+        return ZCL_ERR(-1, "cannot resolve package store %s: %s",
+                       ctx->zcode_dir, strerror(errno));
+    zcl_hex_encode(expected_root, 32, hex);
+    int n = snprintf(expected, sizeof(expected), "%s/installed/%s",
+                     canonical, hex);
+    if (n <= 0 || (size_t)n >= sizeof(expected))
+        return ZCL_ERR(-1, "expected active pointer path is too long");
+    if (strcmp(actual, expected) != 0) {
+        /* Older absolute links may contain a spelling of the same parent
+         * through a symlink. Accept only if both paths resolve to the same
+         * installed directory; a missing tree needs exact pointer bytes. */
+        struct stat observed, wanted;
+        if (stat(actual, &observed) != 0 ||
+            stat(expected, &wanted) != 0 ||
+            observed.st_dev != wanted.st_dev ||
+            observed.st_ino != wanted.st_ino)
+            return ZCL_ERR(-1,
+                           "active pointer and generation log disagree for %s; "
+                           "inspect both and retry activation of the exact "
+                           "verified root", name);
+    }
+    return ZCL_OK;
+}
+#endif
+
+struct zcl_result pkgl_active_pointer_matches(
+    const struct pkgl_ctx *ctx, const char *name,
+    const uint8_t expected_root[32], bool expected_present)
+{
+    if (!ctx || !name || (expected_present && !expected_root))
+        return ZCL_ERR(-1, "active pointer check needs a package and root");
+#ifdef _WIN32
+    (void)expected_root;
+    (void)expected_present;
+    return ZCL_OK; /* Native package activation is disabled on Windows. */
+#else
+    char link[PKGL_PATH_MAX];
+    ZCL_CHECK(pkgl_active_path(ctx, name, link, sizeof(link)));
+    struct stat st;
+    if (lstat(link, &st) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR)
+            return expected_present
+                ? ZCL_ERR(-1, "generation log names %s but its active pointer "
+                               "is missing; inspect the install and retry "
+                               "activation of the exact verified root", name)
+                : ZCL_OK;
+        return ZCL_ERR(-1, "inspect active pointer %s: %s", link,
+                       strerror(errno));
+    }
+    if (!expected_present || !S_ISLNK(st.st_mode))
+        return ZCL_ERR(-1, "active pointer and generation log disagree for %s; "
+                           "inspect both and retry activation of the exact "
+                           "verified root", name);
+    char actual[PKGL_PATH_MAX];
+    ssize_t len = readlink(link, actual, sizeof(actual) - 1u);
+    if (len < 0 || (size_t)len >= sizeof(actual) - 1u)
+        return ZCL_ERR(-1, "cannot read active pointer %s: %s", link,
+                       len < 0 ? strerror(errno) : "target path too long");
+    actual[len] = '\0';
+    return pkgl_active_target_matches(ctx, name, expected_root, actual);
+#endif
+}
+
 struct zcl_result pkgl_data_dir(const struct pkgl_ctx *ctx, const char *name,
                                 char *out, size_t cap)
 {

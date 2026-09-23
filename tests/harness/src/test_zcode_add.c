@@ -689,6 +689,78 @@ static int t_relative_active_pointer(void)
     return failures;
 }
 
+static int t_active_log_divergence(void)
+{
+    int failures = 0;
+    char base[256], installed[400], log_parent[400], active_path[400];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "log-divergence");
+    struct pkgl_ctx ctx = {0};
+    (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s/zcode", base);
+    uint8_t root[32], previous[32], observed[32];
+    za_fake_root(root, 0x73);
+    char hex[65];
+    za_hex(root, 32, hex);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s",
+                   ctx.zcode_dir, hex);
+    (void)snprintf(log_parent, sizeof(log_parent), "%s/generations",
+                   ctx.zcode_dir);
+    (void)snprintf(active_path, sizeof(active_path),
+                   "%s/active/alice/preview", ctx.zcode_dir);
+    bool prepared = za_mkdir_p(installed) &&
+                    za_write_file(log_parent, "blocked", 7, 0600);
+    bool had_previous = false;
+    struct zcl_result activated = pkgl_activate(
+        &ctx, "alice/preview", root, 1000, previous, &had_previous);
+    size_t generations = 0;
+    bool present = false;
+    struct zcl_result read = package_lifecycle_active(
+        base, "alice/preview", observed, &generations, &present);
+    ZA_CHECK("a failed generation write leaves a visible active pointer",
+             prepared && !activated.ok && za_exists(active_path));
+    ZA_CHECK("status refuses a swapped pointer without its generation log",
+             !read.ok && strstr(read.message, "generation") != NULL);
+    ZA_CHECK("divergent activation fixture removed", za_rm_rf(base));
+    return failures;
+}
+
+static int t_active_wrong_pointer(void)
+{
+    int failures = 0;
+    char base[256], installed[400], other[400], other_abs[4400];
+    char active_path[400];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "wrong-pointer");
+    struct pkgl_ctx ctx = {0};
+    (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s/zcode", base);
+    uint8_t root[32], wrong[32], previous[32], observed[32];
+    za_fake_root(root, 0x74);
+    za_fake_root(wrong, 0x75);
+    char hex[65];
+    za_hex(root, 32, hex);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s",
+                   ctx.zcode_dir, hex);
+    za_hex(wrong, 32, hex);
+    (void)snprintf(other, sizeof(other), "%s/installed/%s", ctx.zcode_dir,
+                   hex);
+    (void)snprintf(active_path, sizeof(active_path),
+                   "%s/active/alice/preview", ctx.zcode_dir);
+    bool prepared = za_mkdir_p(installed) && za_mkdir_p(other) &&
+                    test_abs_path(other, other_abs, sizeof(other_abs));
+    bool had_previous = false;
+    struct zcl_result activated = pkgl_activate(
+        &ctx, "alice/preview", root, 1000, previous, &had_previous);
+    bool replaced = prepared && activated.ok && unlink(active_path) == 0 &&
+                    symlink(other_abs, active_path) == 0;
+    size_t generations = 0;
+    bool present = false;
+    struct zcl_result read = package_lifecycle_active(
+        base, "alice/preview", observed, &generations, &present);
+    ZA_CHECK("status refuses a pointer to the wrong installed generation",
+             replaced && !read.ok &&
+                 strstr(read.message, "generation log disagree") != NULL);
+    ZA_CHECK("wrong-pointer fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 /* ── the user's own data, which no version owns ──────────────────────
  *
  * An install tree is content addressed: every update lands in a NEW
@@ -2504,6 +2576,8 @@ int test_zcode_add(void)
     failures += t_release_selection();
     failures += t_activation_target_shape();
     failures += t_relative_active_pointer();
+    failures += t_active_log_divergence();
+    failures += t_active_wrong_pointer();
     failures += t_e2e();
     failures += t_programs();
     printf("=== zcode_add complete: %d failure(s) ===\n", failures);

@@ -192,6 +192,10 @@ struct zcl_result pkgl_activate(const struct pkgl_ctx *ctx, const char *name,
 struct zcl_result pkgl_generations_load(const struct pkgl_ctx *ctx,
                                         const char *name,
                                         struct vcs_package_generations *out);
+/* Refuse an active pointer that disagrees with the durable generation log. */
+struct zcl_result pkgl_active_pointer_matches(
+    const struct pkgl_ctx *ctx, const char *name,
+    const uint8_t expected_root[32], bool expected_present);
 
 /* Retain the package in the local store so it can seed to peers (PINS pool,
  * never evicted). A pin refusal is reported, never silently swallowed. */

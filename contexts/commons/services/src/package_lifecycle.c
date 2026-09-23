@@ -811,6 +811,11 @@ struct zcl_result package_lifecycle_active(
     ZCL_CHECK(pkgl_ctx_open(&ctx, datadir));
     struct vcs_package_generations gens;
     struct zcl_result r = pkgl_generations_load(&ctx, name, &gens);
+    if (r.ok)
+        r = pkgl_active_pointer_matches(
+            &ctx, name,
+            gens.count ? gens.items[gens.count - 1u].root : NULL,
+            gens.count > 0);
     pkgl_ctx_close(&ctx);
     if (!r.ok)
         return r;
