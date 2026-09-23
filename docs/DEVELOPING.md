@@ -1059,8 +1059,8 @@ proof execution, releases the short landing step lock while proving, then
 tries publication immediately after a PASS. Another authorized driver can
 resume the persisted pair after a worker stops. A changed `origin/main` creates
 a successor from the original submitted tip. It retains the submission time
-and queue position for bounded retries, then yields behind already-queued
-work if main keeps moving. The prior receipt remains evidence only for its
+and claim priority across successor sequence changes. Each drive call is
+bounded if main keeps moving. The prior receipt remains evidence only for its
 original commit and base; the new pair requires its own full proof. A failed
 exact pair is logged before a successor is prepared. A bounded drive session
 can stop with the row still queued; rerun `dev land drive` to continue it.

@@ -4367,6 +4367,45 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_priority_snapshot(struct dlx_call *c, char ts[64])
+{
+    dlx_begin(c, "status");
+    bool ok = dlx_run(c) && dlx_ok(c);
+    if (ok) {
+        const struct json_value *queued = dlx_arr(c, "queued");
+        ok = queued && queued->num_children == 2;
+        if (ok) {
+            const char *value =
+                json_get_str(json_get(&queued->children[0], "ts"));
+            ok = value && snprintf(ts, 64, "%s", value) > 0;
+        }
+    }
+    dlx_end(c);
+    return ok;
+}
+
+static bool dlx_priority_successor_status(struct dlx_call *c,
+                                           const char *original_ts)
+{
+    dlx_begin(c, "status");
+    bool ok = dlx_run(c) && dlx_ok(c);
+    if (ok) {
+        const struct json_value *queued = dlx_arr(c, "queued");
+        const struct json_value *steer = json_get(&c->reply.data, "steer");
+        const char *ts = queued && queued->num_children == 2
+            ? json_get_str(json_get(&queued->children[1], "ts")) : NULL;
+        ok = queued && queued->num_children == 2 && steer &&
+             json_get_int(json_get(&queued->children[0], "seq")) == 2 &&
+             json_get_int(json_get(&queued->children[1], "seq")) == 3 &&
+             json_get_int(json_get(&queued->children[0], "priority_seq")) == 2 &&
+             json_get_int(json_get(&queued->children[1], "priority_seq")) == 1 &&
+             ts && strcmp(ts, original_ts) == 0 &&
+             json_get_int(json_get(steer, "seq")) == 3;
+    }
+    dlx_end(c);
+    return ok;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
@@ -5267,7 +5306,7 @@ int test_dev_land(void)
         PASS();
     }
 
-    TEST("land: moving main yields a claimable successor behind other work") {
+    TEST("land: moving main keeps the aged successor ahead of newer work") {
         struct dlx_rig rig;
         struct dlx_call c;
         const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
@@ -5276,7 +5315,7 @@ int test_dev_land(void)
         const char *branch[] = { "checkout", "--quiet", "-B", "side",
                                  "origin/main", NULL };
         const char *back[] = { "checkout", "--quiet", "-B", "main", NULL };
-        char side[600], stranger[64], following[64];
+        char side[600], stranger[64], following[64], original_ts[64];
         bool done = false;
         int i;
         dlx_isolate("moveforever");
@@ -5294,14 +5333,15 @@ int test_dev_land(void)
         ASSERT(dlx_ok(&c));
         ASSERT_EQ(dlx_int(&c, "seq"), 2);
         dlx_end(&c);
+        ASSERT(dlx_priority_snapshot(&c, original_ts));
         (void)snprintf(side, sizeof(side), "%s", rig.clone);
         /* Every cycle: rebase onto the current tip and ask for the proof
          * ("started"), then a stranger lands on main again before the
          * next step reads the answer, so the receipt is always about a
          * base nobody is on. Before DL_ATTEMPT_MAX capped this specific
-         * retry, this loop would run forever and starve the second row.
-         * When the bounded attempt budget is exhausted, the original tip
-         * must remain queued as a new sequence behind that row. */
+         * retry, one drive session could run forever. The bounded session
+         * stops, while the original tip retains its claim priority under
+         * the new sequence. */
         for (i = 0; i < 8 && !done; i++) {
             char tag[32];
             dlx_begin(&c, "step");
@@ -5329,10 +5369,11 @@ int test_dev_land(void)
             dlx_end(&c);
         }
         ASSERT(done);
+        ASSERT(dlx_priority_successor_status(&c, original_ts));
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
-        ASSERT_EQ(dlx_int(&c, "seq"), 2);
+        ASSERT_EQ(dlx_int(&c, "seq"), 3);
         ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
         dlx_end(&c);
         dlx_restore();

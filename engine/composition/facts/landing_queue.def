@@ -15,7 +15,7 @@
  * delete or rewrite the row. See docs/zrc/0006-knowledge-in-the-checkout.md. */
 
 ZCL_FACT("landing.queue", "land_row_schema",
-         "dev.land's queue row is struct dl_row with seq/tip/state/phase/attempt/base/local/pushed fields.",
+         "dev.land's queue row has seq/priority_seq/tip/state/phase/attempt/base/local/pushed fields.",
          "tools/command/native_dev_land.c",
          "struct dl_row {")
 ZCL_FACT("landing.queue", "land_state_dir",

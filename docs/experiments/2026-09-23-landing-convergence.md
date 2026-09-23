@@ -19,8 +19,8 @@ first move: the attempt became 2 instead of retaining 1. The transcript is
 The queue records the prepared commit, base, tree and proof intent before
 execution. A lost worker can request the same pair again. A changed main
 queues a new pair from the submitted tip; its prior receipt cannot authorize
-the new pair. The row retains its submission time through bounded retries,
-then yields behind already-queued work when the attempt limit is reached.
+the new pair. The row retains its submission time and claim priority when a
+bounded retry limit creates a successor with a new sequence.
 A bounded `dev land drive` call releases the step lock during proof and
 reacquires it immediately for the publication attempt.
 
@@ -253,3 +253,49 @@ Linux: test body 81,703 ms, cold command wall 298 s. Transcript
 `lint-preflight` passed 5/5 gates in 72 s; transcript
 `/tmp/z23-convergence-current3-lint-preflight.log` has SHA-256
 `89982c7203dfe770d5311ba19b77991e5170e8c52d619f217944a90068956a15`.
+
+## Priority-preserving successor
+
+The bounded retry path in the preceding candidate kept the original
+submission timestamp but appended a new-sequence successor behind newer
+queued work. The live receiver observed this when its older sequence `#11`
+became sequence `#13` behind `#12` after main advanced during proof. A
+disposable regression made the ordering requirement executable: after three
+proof-time main advances with a newer row waiting, the successor must retain
+the predecessor's claim priority and timestamp. The unchanged
+implementation failed at `tests/harness/src/test_dev_land.c:5263`, observing
+sequence `2` ahead of expected successor `3`. The canonical runner failed
+1/1 selected group with zero skips; test body 152,781 ms, command wall 262 s.
+The fail-before transcript `/tmp/z23-priority-fail-before.log` has SHA-256
+`f83d3e6cd943423f08c76a39bf765a6aa5b730d92d1e4d66d4b24aa849644b52`.
+
+An initial repair placed the new sequence at the predecessor's physical
+index. This broke the queue's increasing-sequence validation, and the
+pass-after group correctly refused `status` after the rewrite. Its transcript
+`/tmp/z23-priority-pass-after.log` has SHA-256
+`182902eea2d0d20f9b2856a3bce184d3113b72de89ce67f865b2c5e052cf7d60`.
+The queue keeps increasing sequence order and carries the original
+`priority_seq` in the existing row. Both the status steer and step picker
+choose the smallest inherited priority; a legacy row defaults to its own
+sequence. The history-aware allocator still assigns a fresh sequence, and
+the bounded drive call still stops after four cycles. No proof receipt
+changes authority.
+
+The corrected `make -j4 t-fast ONLY=dev_land` run passed its one selected
+group with zero failures or skips. Test body took 144,632 ms and the command
+took 163 s. Transcript `/tmp/z23-priority-pass-final.log` has SHA-256
+`a8fafaa1677be865298bf3d0ec7ef1e075ce7341961844d508147598bb7f4d31`.
+After extracting the row parser and fixture assertions to retain the
+unchanged complexity limits, the same group passed 1/1 with zero skips:
+test body 222,436 ms, command wall 235 s. Transcript
+`/tmp/z23-priority-test-helpers.log` has SHA-256
+`02a5183de80a3bbc6ac91ca383c2d6e9a8ff375277a8041d2ad840376bc6c4e2`.
+The standalone cyclomatic gate passed across 56,924 functions without
+raising its cap; transcript `/tmp/z23-priority-complexity.log` has SHA-256
+`59c2973d80243b350107d051befcc6d2967d945892e7a21fe361d258f8f9e746`.
+`lint-fast` then passed 32/32 gates in 21 s; transcript
+`/tmp/z23-priority-lint-fast-green.log` has SHA-256
+`e8c460d92329742cc517f433766cec346b2a0360d8570650528ef6fdfd4fb114`.
+`lint-preflight` passed 5/5 gates in 292 s under concurrent proof load;
+transcript `/tmp/z23-priority-lint-preflight.log` has SHA-256
+`db57aafe5930ccf01dd42574a83155b0ff83dc9970a828d0c1216bdfd07f5361`.

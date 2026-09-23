@@ -633,6 +633,7 @@ static bool dl_tor_source_config(const char *wt, char *out, size_t cap)
  *          already "the tip everything downstream proves and pushes". */
 struct dl_row {
     long long seq;
+    long long priority_seq;
     char ts[64];
     char tip[80];
     char worktree[4096];
@@ -696,6 +697,18 @@ static bool dl_row_semantics_ok(const struct dl_row *r)
     return dl_row_state_ok(r) && dl_row_phase_ok(r) && dl_row_pair_ok(r);
 }
 
+static bool dl_priority_parse(const char *line, struct dl_row *r)
+{
+    long long priority = 0;
+    r->priority_seq = r->seq;
+    if (!dl_line_int(line, "priority_seq", &priority))
+        return true;
+    if (priority < 1 || priority > r->seq)
+        return false;
+    r->priority_seq = priority;
+    return true;
+}
+
 static bool dl_parse_row(const char *line, struct dl_row *r)
 {
     if (!line || !line[0] || !r)
@@ -704,6 +717,8 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
         return false;
     memset(r, 0, sizeof(*r));
     if (!dl_line_int(line, "seq", &r->seq) || r->seq < 1)
+        return false;
+    if (!dl_priority_parse(line, r))
         return false;
     if (!dl_line_str(line, "tip", r->tip, sizeof(r->tip)) ||
         !dl_sha_ok(r->tip))
@@ -773,14 +788,14 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
         !dl_escape(r->detail, e_detail, sizeof(e_detail)))
         return false;
     w = snprintf(out, cap,
-                 "{\"seq\":%lld,\"ts\":\"%s\",\"tip\":\"%s\","
+                 "{\"seq\":%lld,\"priority_seq\":%lld,\"ts\":\"%s\",\"tip\":\"%s\","
                  "\"worktree\":\"%s\",\"note\":\"%s\",\"state\":\"%s\","
                  "\"phase\":\"%s\",\"attempt\":%lld,\"started\":%lld,"
                  "\"base\":\"%s\",\"local\":\"%s\",\"tree\":\"%s\","
                  "\"proof_intent\":\"%s\",\"tip_pushed\":\"%s\","
                  "\"dimension\":\"%s\",\"log_path\":\"%s\","
                  "\"detail\":\"%s\"}\n",
-                 r->seq, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
+                 r->seq, r->priority_seq, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
                  r->attempt, r->started, e_base, e_local, e_tree, e_intent,
                  e_pushed, e_dim, e_log, e_detail);
     if (w <= 0 || (size_t)w >= cap)
@@ -2186,6 +2201,7 @@ static void dl_submit(const struct zcl_command_request *req,
     }
     free(rows);
     r.seq = seq;
+    r.priority_seq = seq;
     if (!dl_encode_row(&r, line, sizeof(line), &len) ||
         !dl_append_row(qpath, line, len)) {
         dl_unlock(lock);
@@ -2500,20 +2516,28 @@ static const char *dl_timer_word(enum dl_timer_unit timer)
     return "timer_unit=unknown";
 }
 
+static bool dl_queued_precedes(const struct dl_row *row,
+                               const struct dl_row *best)
+{
+    return !best || row->priority_seq < best->priority_seq ||
+           (row->priority_seq == best->priority_seq && row->seq < best->seq);
+}
+
 static const struct dl_row *dl_pick_steer(const struct dl_row *rows, size_t n)
 {
     size_t i;
+    const struct dl_row *best = NULL;
     if (!rows)
         return NULL;
     for (i = 0; i < n; i++) {
         if (strcmp(rows[i].state, "inflight") == 0)
             return &rows[i];
     }
-    for (i = 0; i < n; i++) {
-        if (strcmp(rows[i].state, "queued") == 0)
-            return &rows[i];
-    }
-    return NULL;
+    for (i = 0; i < n; i++)
+        if (strcmp(rows[i].state, "queued") == 0 &&
+            dl_queued_precedes(&rows[i], best))
+            best = &rows[i];
+    return best;
 }
 
 static const char *dl_missing_of(const struct dl_row *row)
@@ -2914,6 +2938,7 @@ static bool dl_push_queued(struct json_value *arr, const struct dl_row *r)
     json_init(&item);
     json_set_object(&item);
     ok = json_push_kv_int(&item, "seq", r->seq) &&
+         json_push_kv_int(&item, "priority_seq", r->priority_seq) &&
          json_push_kv_str(&item, "tip", r->tip) &&
          json_push_kv_str(&item, "ts", r->ts) &&
          json_push_kv_int(&item, "attempt", r->attempt) &&
@@ -3114,7 +3139,8 @@ static void dl_status(const struct zcl_command_request *req,
             if (strcmp(rows[i].state, "queued") != 0)
                 continue;
             w = snprintf(screen + used, sizeof(screen) - used,
-                         "  #%lld %.12s queued\n", rows[i].seq, rows[i].tip);
+                         "  #%lld %.12s queued priority #%lld\n",
+                         rows[i].seq, rows[i].tip, rows[i].priority_seq);
             if (w <= 0 || (size_t)w >= sizeof(screen) - used)
                 goto render_done;
             used += (size_t)w;
@@ -3233,8 +3259,8 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     return ok;
 }
 
-static size_t dl_yield_index(const struct dl_row *rows, size_t nrows,
-                             const struct dl_row *row)
+static size_t dl_successor_index(const struct dl_row *rows, size_t nrows,
+                                 const struct dl_row *row)
 {
     for (size_t i = 0; i < nrows; i++)
         if (rows[i].seq == row->seq &&
@@ -3246,12 +3272,12 @@ static size_t dl_yield_index(const struct dl_row *rows, size_t nrows,
 
 static void dl_log(const struct dl_row *row, const char *text);
 
-/* A repeatedly moving base must give later requests a turn. Replace the
- * inflight row with one higher-sequence queued successor in a single queue
- * rewrite. The original tip stays byte-identical; a crash sees either the
- * old inflight row or its successor, never both or neither. */
-static bool dl_yield_successor(const struct dl_dirs *d, struct dl_row *row,
-                               long long *predecessor)
+/* Append the higher-sequence successor while keeping its original claim
+ * priority. The original tip stays byte-identical; a crash sees either
+ * the old row or its successor, never both or neither. The drive loop
+ * bounds work per call while a later caller can retry. */
+static bool dl_requeue_successor(const struct dl_dirs *d, struct dl_row *row,
+                                 long long *predecessor)
 {
     struct dl_row *rows = NULL;
     size_t nrows = 0, at = SIZE_MAX;
@@ -3268,7 +3294,7 @@ static bool dl_yield_successor(const struct dl_dirs *d, struct dl_row *row,
     if (lock < 0) return false;
     if (!dl_load_rows(qpath, &rows, &nrows, NULL, 0) || nrows == 0)
         goto done;
-    at = dl_yield_index(rows, nrows, row);
+    at = dl_successor_index(rows, nrows, row);
     if (at == SIZE_MAX) goto done; /* cancel won the row lock */
     if (!dl_submit_next_seq(d, rows, nrows, &next_seq, &why)) {
         dl_log(row, why);
@@ -5432,7 +5458,7 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
         (void)snprintf(row->detail, sizeof(row->detail),
                        "main moved to %.12s; successor of seq=%lld",
                        observed_main, predecessor);
-        if (dl_yield_successor(d, row, &predecessor)) {
+        if (dl_requeue_successor(d, row, &predecessor)) {
             dl_step_reply(reply, row, "queued");
             (void)json_push_kv_int(&reply->data, "predecessor_seq",
                                    predecessor);
@@ -5685,6 +5711,7 @@ static void dl_test_die_after_proof(void)
                                              struct dl_row *pick,
                                              bool *inflight)
 {
+    const struct dl_row *best = NULL;
     for (size_t i = 0; i < nrows; i++) {
         if (strcmp(rows[i].state, "inflight") == 0) {
             *pick = rows[i];
@@ -5692,13 +5719,14 @@ static void dl_test_die_after_proof(void)
             return true;
         }
     }
-    for (size_t i = 0; i < nrows; i++) {
-        if (strcmp(rows[i].state, "queued") == 0) {
-            *pick = rows[i];
-            return true;
-        }
-    }
-    return false;
+    for (size_t i = 0; i < nrows; i++)
+        if (strcmp(rows[i].state, "queued") == 0 &&
+            dl_queued_precedes(&rows[i], best))
+            best = &rows[i];
+    if (!best)
+        return false;
+    *pick = *best;
+    return true;
 }
 
 #if defined(ZCL_TESTING) && !defined(_WIN32)
