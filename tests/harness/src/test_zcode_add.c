@@ -2255,6 +2255,25 @@ static int za_publisher_gone(const char *base, const char *zcode,
     return failures;
 }
 
+static int za_program_missing_refusal(const char *base,
+                                      const uint8_t root[32],
+                                      const char *installed_bin,
+                                      bool installed_exec)
+{
+    int failures = 0;
+    char held_bin[4700];
+    (void)snprintf(held_bin, sizeof(held_bin), "%s.held", installed_bin);
+    bool moved = installed_exec && rename(installed_bin, held_bin) == 0;
+    struct package_lifecycle_programs missing_programs;
+    struct zcl_result missing_program = package_lifecycle_installed_programs(
+        base, root, &missing_programs);
+    ZA_CHECK("program listing refuses a missing receipt-bound executable",
+             moved && !missing_program.ok);
+    ZA_CHECK("program executable fixture restored",
+             moved && rename(held_bin, installed_bin) == 0);
+    return failures;
+}
+
 static int t_programs(void)
 {
     int failures = 0;
@@ -2386,6 +2405,8 @@ static int t_programs(void)
 
     failures += za_publisher_gone(base, zcode, first_path, installed_exec,
                                   t0);
+    failures += za_program_missing_refusal(base, cli_root, installed_bin,
+                                           installed_exec);
     failures += za_program_data_survives(base, zcode, t0);
     zcl_command_reply_free(&cli_reply);
 

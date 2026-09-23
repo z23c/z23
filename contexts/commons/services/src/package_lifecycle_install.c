@@ -851,6 +851,25 @@ struct zcl_result pkgl_pin(const struct pkgl_ctx *ctx, const uint8_t root[32])
 
 /* ── the programs an install hands a person ─────────────────────────── */
 
+static struct zcl_result pkgl_programs_check_install(
+    const char *datadir, const uint8_t root[32])
+{
+    struct package_lifecycle_step inspected;
+    bool verified_install = false;
+    struct zcl_result inspection = package_lifecycle_installed_inspect(
+        datadir, root, &inspected, &verified_install);
+    if (!inspection.ok)
+        return ZCL_ERR(-1,
+                       "cannot list programs from an invalid install: %s; "
+                       "quarantine the damaged tree and reinstall the exact root",
+                       inspection.message);
+    if (!verified_install)
+        return ZCL_ERR(-1,
+                       "cannot list programs from a root that is not installed; "
+                       "install the exact root first");
+    return ZCL_OK;
+}
+
 struct zcl_result package_lifecycle_installed_programs(
     const char *datadir, const uint8_t root[32],
     struct package_lifecycle_programs *out)
@@ -860,6 +879,7 @@ struct zcl_result package_lifecycle_installed_programs(
     memset(out, 0, sizeof(*out));
     if (!root)
         return ZCL_ERR(-1, "null package root");
+    ZCL_CHECK(pkgl_programs_check_install(datadir, root));
     struct pkgl_ctx ctx;
     ZCL_CHECK(pkgl_ctx_open(&ctx, datadir));
     char installed[PKGL_PATH_MAX];
