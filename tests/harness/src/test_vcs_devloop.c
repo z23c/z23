@@ -174,6 +174,54 @@ static int vd_test_accepted_candidate_commit_retry(
     return failures;
 }
 
+static int vd_test_source_capture_retry(
+    const char *candidate, const uint8_t source_root[32])
+{
+    int failures = 0;
+    char store[512];
+    test_make_tmpdir(store, sizeof(store),
+                     "vcs_devloop", "source-capture-retry");
+    uint8_t captured[32];
+    struct vcs_manifest manifest = {0};
+    bool staged = vcs_tree_capture_into(candidate, store, captured) == VCS_OK &&
+        memcmp(captured, source_root, 32) == 0 &&
+        vcs_tree_load(store, source_root, &manifest);
+    VD_CHECK("publication: source capture stages in independent CAS",
+             staged && manifest.count > 0);
+    if (!staged) { test_rm_rf(store); return failures; }
+    if (manifest.count == 0) {
+        vcs_manifest_free(&manifest);
+        test_rm_rf(store);
+        return failures;
+    }
+    uint8_t blob_root[32];
+    memcpy(blob_root, manifest.entries[0].blob, 32);
+    vcs_manifest_free(&manifest);
+    VD_CHECK("publication: interrupted source blob is poisoned",
+             vd_poison_object(store, blob_root));
+    VD_CHECK("publication: exact source blob capture retry preserves root",
+             vcs_tree_capture_into(candidate, store, captured) == VCS_OK &&
+             memcmp(captured, source_root, 32) == 0);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    VD_CHECK("publication: source blob reloads at exact CAS root",
+             vcs_object_get(store, blob_root, VCS_TAG_BLOB,
+                            &wire, &wire_len) == 0);
+    free(wire);
+    VD_CHECK("publication: interrupted source manifest is poisoned",
+             vd_poison_object(store, source_root));
+    VD_CHECK("publication: exact source manifest capture retry preserves root",
+             vcs_tree_capture_into(candidate, store, captured) == VCS_OK &&
+             memcmp(captured, source_root, 32) == 0);
+    bool reloaded = vcs_tree_load(store, source_root, &manifest);
+    VD_CHECK("publication: source manifest reloads at exact CAS root",
+             reloaded);
+    if (reloaded)
+        vcs_manifest_free(&manifest);
+    test_rm_rf(store);
+    return failures;
+}
+
 static int vd_test_accepted_candidate_proof_retry(
     const char *authority, const char *candidate,
     const struct vd_accepted_fixture *fixture,
@@ -253,6 +301,8 @@ static int vd_test_accepted_candidate_job_retry(
         failures += vd_test_accepted_candidate_commit_retry(
             authority, candidate, fixture, source_root, accepted_now,
             &first);
+    if (staged)
+        failures += vd_test_source_capture_retry(candidate, source_root);
     test_rm_rf(candidate);
     return failures;
 }

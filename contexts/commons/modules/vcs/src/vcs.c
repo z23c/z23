@@ -76,7 +76,13 @@ static bool manifest_store(const char *repo, const struct vcs_manifest *m,
     size_t serlen = 0;
     if (!vcs_manifest_serialize(m, &ser, &serlen))
         LOG_FAIL("vcs", "serialize manifest");
-    bool ok = vcs_object_put_addressed(repo, out_tree_hash, ser, serlen);
+    struct vcs_manifest existing;
+    bool valid = vcs_object_has(repo, out_tree_hash) &&
+        vcs_tree_load_bounded(repo, out_tree_hash, SIZE_MAX, SIZE_MAX,
+                              &existing);
+    if (valid) vcs_manifest_free(&existing);
+    bool ok = valid || vcs_object_put_addressed_repair(
+        repo, out_tree_hash, ser, serlen, NULL);
     free(ser);
     if (!ok)
         LOG_FAIL("vcs", "put manifest object");
@@ -160,14 +166,22 @@ static bool put_manifest_blobs(const char *scan_root, const char *store_root,
                                const struct vcs_manifest *m)
 {
     for (size_t i = 0; i < m->count; i++) {
-        if (vcs_object_has(store_root, m->entries[i].blob))
-            continue;
+        if (vcs_object_has(store_root, m->entries[i].blob)) {
+            uint8_t *existing = NULL;
+            size_t existing_len = 0;
+            bool valid = vcs_object_get(store_root, m->entries[i].blob,
+                                        VCS_TAG_BLOB, &existing,
+                                        &existing_len) == 0;
+            free(existing);
+            if (valid) continue;
+        }
         uint8_t *content = NULL;
         size_t clen = 0;
         if (read_whole_file(scan_root, m->entries[i].path, &content, &clen) != 0)
             LOG_FAIL("vcs", "read blob %s", m->entries[i].path);
         uint8_t got[32];
-        bool ok = vcs_object_put(store_root, content, clen, VCS_TAG_BLOB, got);
+        bool ok = vcs_object_put_repair(store_root, content, clen,
+                                        VCS_TAG_BLOB, got, NULL);
         free(content);
         if (!ok)
             LOG_FAIL("vcs", "put blob %s", m->entries[i].path);
