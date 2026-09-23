@@ -77,6 +77,61 @@ bool vcs_zcode_publication_store_verified(
     const char *workspace, const struct vcs_zcode_publication_v1 *intent,
     const uint8_t expected_signer[32], uint8_t out_root[32]);
 
+/* One immutable observation of a publication attempt. ACCEPTED records the
+ * client's acknowledgement, not an independently verified remote result.
+ * UNKNOWN retains an ambiguous acknowledgement for later reconciliation.
+ * The caller binds attempt_root to its existing action identity and keeps a
+ * rebuildable intent-to-result projection; CAS storage alone cannot discover
+ * results from an intent root. */
+#define VCS_ZCODE_PUBLICATION_RESULT_DOMAIN "zcl.zcode.publication_result.v1"
+#define VCS_ZCODE_PUBLICATION_RESULT_SIGNING_DOMAIN \
+    "zcl.zcode.publication_result.signing.v1"
+#define VCS_ZCODE_PUBLICATION_RESULT_BODY_BYTES 184u
+#define VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES 248u
+
+enum vcs_zcode_publication_outcome {
+    VCS_ZCODE_PUBLICATION_ACCEPTED = 1,
+    VCS_ZCODE_PUBLICATION_REJECTED = 2,
+    VCS_ZCODE_PUBLICATION_UNKNOWN = 3,
+};
+
+struct vcs_zcode_publication_result_v1 {
+    uint16_t schema_version;
+    uint8_t outcome;
+    uint8_t publication_root[32];
+    uint8_t attempt_root[32];
+    uint8_t diagnostics_root[32];
+    uint8_t evidence_root[32];
+    int64_t attempted_unix;
+    uint8_t producer_pubkey[32];
+    uint8_t signature[64];
+};
+
+enum vcs_zcode_dev_error vcs_zcode_publication_result_validate(
+    const struct vcs_zcode_publication_result_v1 *result);
+enum vcs_zcode_dev_error vcs_zcode_publication_result_serialize(
+    const struct vcs_zcode_publication_result_v1 *result,
+    uint8_t out[VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES]);
+enum vcs_zcode_dev_error vcs_zcode_publication_result_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_publication_result_v1 *out);
+enum vcs_zcode_dev_error vcs_zcode_publication_result_root(
+    const struct vcs_zcode_publication_result_v1 *result, uint8_t out[32]);
+enum vcs_zcode_dev_error vcs_zcode_publication_result_seal(
+    struct vcs_zcode_publication_result_v1 *result,
+    const uint8_t secret[32], const uint8_t pubkey[32]);
+enum vcs_zcode_dev_error vcs_zcode_publication_result_verify(
+    const struct vcs_zcode_publication_result_v1 *result,
+    const uint8_t expected_signer[32]);
+bool vcs_zcode_publication_result_store_verified(
+    const char *workspace, const struct vcs_zcode_publication_result_v1 *result,
+    const uint8_t publisher_signer[32], const uint8_t producer_signer[32],
+    uint8_t out_root[32]);
+bool vcs_zcode_publication_result_load_verified(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t publisher_signer[32], const uint8_t producer_signer[32],
+    struct vcs_zcode_publication_result_v1 *out);
+
 /* An observer's immutable statement about a fetched remote ref. The producer
  * must independently fetch and verify the remote, source root, and ancestry
  * evidence before sealing; signature verification alone proves none of them.

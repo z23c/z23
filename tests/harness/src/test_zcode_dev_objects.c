@@ -7295,6 +7295,107 @@ static int test_zd_publication_intent(void)
     return failures;
 }
 
+static int test_zd_publication_result(void)
+{
+    int failures = 0;
+    TEST("publication result: durable intent precedes each signed attempt") {
+        uint8_t publisher_seed[32] = {83}, producer_seed[32] = {84};
+        uint8_t publisher_secret[32], publisher[32], producer_secret[32], producer[32];
+        ed25519_keypair(publisher, publisher_secret, publisher_seed);
+        ed25519_keypair(producer, producer_secret, producer_seed);
+        struct vcs_zcode_publication_v1 intent = {
+            .schema_version = 1,
+            .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+            .target_ref = "refs/heads/main",
+            .created_unix = 1000,
+        };
+        memset(intent.candidate_root, 1, 32);
+        memset(intent.proof_set_root, 2, 32);
+        memset(intent.target_identity_root, 3, 32);
+        memset(intent.authority_root, 4, 32);
+        memset(intent.expected_base, 5, 20);
+        memset(intent.head_commit, 6, 20);
+        ASSERT_EQ(vcs_zcode_publication_seal(&intent, publisher_secret, publisher),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t intent_root[32], result_root[32], stored[32];
+        ASSERT_EQ(vcs_zcode_publication_root(&intent, intent_root), VCS_ZCODE_DEV_OK);
+        struct vcs_zcode_publication_result_v1 result = {
+            .schema_version = 1,
+            .outcome = VCS_ZCODE_PUBLICATION_UNKNOWN,
+            .attempted_unix = 1001,
+        };
+        memcpy(result.publication_root, intent_root, 32);
+        memset(result.attempt_root, 7, 32);
+        memset(result.evidence_root, 8, 32);
+        ASSERT_EQ(vcs_zcode_publication_result_seal(&result, producer_secret, producer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_publication_result_root(&result, result_root),
+                  VCS_ZCODE_DEV_OK);
+        struct vcs_zcode_publication_result_v1 invalid = result;
+        memset(invalid.evidence_root, 0, 32);
+        ASSERT_EQ(vcs_zcode_publication_result_validate(&invalid),
+                  VCS_ZCODE_DEV_ERR_ROOT_ZERO);
+        invalid = result;
+        invalid.signature[0] ^= 1;
+        ASSERT(vcs_zcode_publication_result_verify(&invalid, producer)
+               != VCS_ZCODE_DEV_OK);
+        char dir[512];
+        test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "publication_result");
+        ASSERT(vcs_object_store_init(dir));
+        ASSERT(!vcs_zcode_publication_result_store_verified(
+            dir, &result, publisher, producer, stored));
+        ASSERT(!zcl_bytes_any_set(stored, sizeof(stored)));
+        ASSERT(!vcs_object_has(dir, result_root));
+        ASSERT(vcs_zcode_publication_store_verified(dir, &intent, publisher, stored));
+        ASSERT(memcmp(stored, intent_root, 32) == 0);
+        ASSERT(!vcs_zcode_publication_result_store_verified(
+            dir, &result, producer, producer, stored));
+        ASSERT(!vcs_zcode_publication_result_store_verified(
+            dir, &result, publisher, publisher, stored));
+        ASSERT(vcs_zcode_publication_result_store_verified(
+            dir, &result, publisher, producer, stored));
+        ASSERT(memcmp(stored, result_root, 32) == 0);
+        struct vcs_zcode_publication_result_v1 loaded;
+        ASSERT(vcs_zcode_publication_result_load_verified(
+            dir, result_root, publisher, producer, &loaded));
+        ASSERT(memcmp(&loaded, &result, sizeof(result)) == 0);
+        uint8_t wire[VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_publication_result_serialize(&result, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_publication_result_parse(wire, sizeof(wire), &loaded),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(&loaded, &result, sizeof(result)) == 0);
+        wire[11] = 1;
+        ASSERT(vcs_zcode_publication_result_parse(wire, sizeof(wire), &loaded)
+               != VCS_ZCODE_DEV_OK);
+        wire[11] = 0;
+        wire[10] = 0;
+        ASSERT(vcs_zcode_publication_result_parse(wire, sizeof(wire), &loaded)
+               != VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_zcode_publication_result_store_verified(
+            dir, &result, publisher, producer, stored));
+        ASSERT(memcmp(stored, result_root, 32) == 0);
+        for (uint8_t outcome = VCS_ZCODE_PUBLICATION_ACCEPTED;
+             outcome <= VCS_ZCODE_PUBLICATION_REJECTED; outcome++) {
+            struct vcs_zcode_publication_result_v1 another = result;
+            another.outcome = outcome;
+            memset(another.attempt_root, outcome + 10, 32);
+            another.attempted_unix += outcome;
+            ASSERT_EQ(vcs_zcode_publication_result_seal(
+                &another, producer_secret, producer), VCS_ZCODE_DEV_OK);
+            ASSERT(vcs_zcode_publication_result_store_verified(
+                dir, &another, publisher, producer, stored));
+            ASSERT(memcmp(stored, result_root, 32) != 0);
+            ASSERT(vcs_zcode_publication_result_load_verified(
+                dir, stored, publisher, producer, &loaded));
+            ASSERT(memcmp(&loaded, &another, sizeof(another)) == 0);
+        }
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_zd_remote_receipt(void)
 {
     int failures = 0;
@@ -7390,6 +7491,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_candidate_review();
     failures += test_zd_lane_receipt();
     failures += test_zd_publication_intent();
+    failures += test_zd_publication_result();
     failures += test_zd_remote_receipt();
     failures += test_zd_receipt();
     failures += test_zd_work_context();

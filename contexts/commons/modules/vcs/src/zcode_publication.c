@@ -238,6 +238,207 @@ enum vcs_zcode_dev_error vcs_zcode_publication_verify(
         ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_SIGNATURE;
 }
 
+static const uint8_t publication_result_magic[8] = {'Z','C','P','R','E','S','\r','\n'};
+_Static_assert(VCS_ZCODE_PUBLICATION_RESULT_BODY_BYTES == 184u,
+               "publication result body offsets");
+_Static_assert(VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES == 248u,
+               "publication result wire offsets");
+
+static enum vcs_zcode_dev_error publication_result_fields(
+    const struct vcs_zcode_publication_result_v1 *r, bool signature)
+{
+    if (!r) return VCS_ZCODE_DEV_ERR_NULL;
+    if (r->schema_version != VCS_ZCODE_DEV_VERSION)
+        return VCS_ZCODE_DEV_ERR_VERSION;
+    if (r->outcome < VCS_ZCODE_PUBLICATION_ACCEPTED ||
+        r->outcome > VCS_ZCODE_PUBLICATION_UNKNOWN)
+        return VCS_ZCODE_DEV_ERR_POLICY;
+    if (!zcl_bytes_any_set(r->publication_root, 32) ||
+        !zcl_bytes_any_set(r->attempt_root, 32) ||
+        !zcl_bytes_any_set(r->evidence_root, 32))
+        return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+    if (r->attempted_unix <= 0) return VCS_ZCODE_DEV_ERR_TIME_ORDER;
+    if (!zcl_bytes_any_set(r->producer_pubkey, 32))
+        return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
+    if (signature && !zcl_bytes_any_set(r->signature, 64))
+        return VCS_ZCODE_DEV_ERR_SIGNATURE;
+    return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_publication_result_validate(
+    const struct vcs_zcode_publication_result_v1 *result)
+{
+    return publication_result_fields(result, true);
+}
+
+static enum vcs_zcode_dev_error publication_result_body(
+    const struct vcs_zcode_publication_result_v1 *r,
+    uint8_t out[VCS_ZCODE_PUBLICATION_RESULT_BODY_BYTES])
+{
+    enum vcs_zcode_dev_error error = publication_result_fields(r, false);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    memset(out, 0, VCS_ZCODE_PUBLICATION_RESULT_BODY_BYTES);
+    memcpy(out, publication_result_magic, 8);
+    zcl_write_u16_le(out + 8, r->schema_version);
+    out[10] = r->outcome;
+    memcpy(out + 16, r->publication_root, 32);
+    memcpy(out + 48, r->attempt_root, 32);
+    memcpy(out + 80, r->diagnostics_root, 32);
+    memcpy(out + 112, r->evidence_root, 32);
+    zcl_write_i64_le(out + 144, r->attempted_unix);
+    memcpy(out + 152, r->producer_pubkey, 32);
+    return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_publication_result_serialize(
+    const struct vcs_zcode_publication_result_v1 *r,
+    uint8_t out[VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES])
+{
+    if (!out) return VCS_ZCODE_DEV_ERR_NULL;
+    enum vcs_zcode_dev_error error = publication_result_body(r, out);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    if (!zcl_bytes_any_set(r->signature, 64))
+        return VCS_ZCODE_DEV_ERR_SIGNATURE;
+    memcpy(out + VCS_ZCODE_PUBLICATION_RESULT_BODY_BYTES, r->signature, 64);
+    return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_publication_result_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_publication_result_v1 *out)
+{
+    if (!out) return VCS_ZCODE_DEV_ERR_NULL;
+    memset(out, 0, sizeof(*out));
+    if (!wire) return VCS_ZCODE_DEV_ERR_NULL;
+    if (wire_len != VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES)
+        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+    if (memcmp(wire, publication_result_magic, 8) != 0 ||
+        zcl_bytes_any_set(wire + 11, 5))
+        return VCS_ZCODE_DEV_ERR_WIRE_MAGIC;
+    struct vcs_zcode_publication_result_v1 r = {0};
+    r.schema_version = zcl_read_u16_le(wire + 8);
+    r.outcome = wire[10];
+    memcpy(r.publication_root, wire + 16, 32);
+    memcpy(r.attempt_root, wire + 48, 32);
+    memcpy(r.diagnostics_root, wire + 80, 32);
+    memcpy(r.evidence_root, wire + 112, 32);
+    r.attempted_unix = zcl_read_i64_le(wire + 144);
+    memcpy(r.producer_pubkey, wire + 152, 32);
+    memcpy(r.signature, wire + 184, 64);
+    enum vcs_zcode_dev_error error = publication_result_fields(&r, true);
+    if (error == VCS_ZCODE_DEV_OK) *out = r;
+    return error;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_publication_result_root(
+    const struct vcs_zcode_publication_result_v1 *r, uint8_t out[32])
+{
+    if (!out) return VCS_ZCODE_DEV_ERR_NULL;
+    uint8_t wire[VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES];
+    enum vcs_zcode_dev_error error = vcs_zcode_publication_result_serialize(r, wire);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    static const char domain[] = VCS_ZCODE_PUBLICATION_RESULT_DOMAIN;
+    return vcs_signed_evidence_root(domain, sizeof(domain), wire, sizeof(wire), out)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
+}
+
+static enum vcs_zcode_dev_error publication_result_signing_root(
+    const struct vcs_zcode_publication_result_v1 *r, uint8_t out[32])
+{
+    uint8_t body[VCS_ZCODE_PUBLICATION_RESULT_BODY_BYTES];
+    enum vcs_zcode_dev_error error = publication_result_body(r, body);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    static const char domain[] = VCS_ZCODE_PUBLICATION_RESULT_SIGNING_DOMAIN;
+    return vcs_signed_evidence_root(domain, sizeof(domain), body, sizeof(body), out)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_publication_result_seal(
+    struct vcs_zcode_publication_result_v1 *r,
+    const uint8_t secret[32], const uint8_t pubkey[32])
+{
+    if (!r || !secret || !pubkey) return VCS_ZCODE_DEV_ERR_NULL;
+    memcpy(r->producer_pubkey, pubkey, 32);
+    uint8_t root[32];
+    enum vcs_zcode_dev_error error = publication_result_signing_root(r, root);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    return vcs_signed_evidence_seal_root(root, secret, pubkey, r->signature)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_SIGNATURE;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_publication_result_verify(
+    const struct vcs_zcode_publication_result_v1 *r,
+    const uint8_t expected_signer[32])
+{
+    if (!expected_signer) return VCS_ZCODE_DEV_ERR_NULL;
+    enum vcs_zcode_dev_error error = publication_result_fields(r, true);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    uint8_t root[32];
+    error = publication_result_signing_root(r, root);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    return vcs_signed_evidence_verify_root(root, r->signature,
+                r->producer_pubkey, expected_signer)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_SIGNATURE;
+}
+
+bool vcs_zcode_publication_result_load_verified(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t publisher_signer[32], const uint8_t producer_signer[32],
+    struct vcs_zcode_publication_result_v1 *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!workspace || !workspace[0] || !root || !publisher_signer ||
+        !producer_signer) return false;
+    uint8_t *wire = NULL, checked[32];
+    size_t length = 0;
+    struct vcs_zcode_publication_result_v1 result;
+    bool ok = vcs_object_load_raw_bounded(workspace, root,
+            VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES, &wire, &length) == 0 &&
+        vcs_zcode_publication_result_parse(wire, length, &result) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_publication_result_root(&result, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(root, checked, 32) == 0 &&
+        vcs_zcode_publication_result_verify(&result, producer_signer) == VCS_ZCODE_DEV_OK;
+    free(wire);
+    struct vcs_zcode_publication_v1 intent;
+    if (ok) ok = vcs_zcode_publication_load_verified(workspace,
+            result.publication_root, publisher_signer, &intent);
+    if (ok) *out = result;
+    return ok;
+}
+
+bool vcs_zcode_publication_result_store_verified(
+    const char *workspace, const struct vcs_zcode_publication_result_v1 *result,
+    const uint8_t publisher_signer[32], const uint8_t producer_signer[32],
+    uint8_t out_root[32])
+{
+    if (!out_root) LOG_FAIL("vcs.publication_result", "missing output root");
+    memset(out_root, 0, 32);
+    if (!workspace || !workspace[0] || !result || !publisher_signer ||
+        !producer_signer)
+        LOG_FAIL("vcs.publication_result", "missing store input");
+    uint8_t root[32], wire[VCS_ZCODE_PUBLICATION_RESULT_WIRE_BYTES];
+    if (vcs_zcode_publication_result_verify(result, producer_signer) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_publication_result_root(result, root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_publication_result_serialize(result, wire) != VCS_ZCODE_DEV_OK)
+        LOG_FAIL("vcs.publication_result", "result signature or canonical bytes refused");
+    if (!vcs_object_store_initialized(workspace))
+        LOG_FAIL("vcs.publication_result", "publication CAS is not initialized");
+    if (!vcs_object_store_init(workspace))
+        LOG_FAIL("vcs.publication_result", "publication CAS parent barriers failed");
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_publication_load_verified(workspace, result->publication_root,
+            publisher_signer, &intent))
+        LOG_FAIL("vcs.publication_result", "stored publication intent missing");
+    struct vcs_zcode_publication_result_v1 checked;
+    if (!vcs_object_put_addressed(workspace, root, wire, sizeof(wire)) ||
+        !vcs_zcode_publication_result_load_verified(workspace, root,
+            publisher_signer, producer_signer, &checked))
+        LOG_FAIL("vcs.publication_result", "stored publication result did not verify");
+    memcpy(out_root, root, 32);
+    return true;
+}
+
 static const uint8_t remote_receipt_magic[8] = {'Z','C','R','R','C','P','\r','\n'};
 _Static_assert(VCS_ZCODE_REMOTE_RECEIPT_BODY_BYTES == 376u,
                "remote receipt body offsets");
