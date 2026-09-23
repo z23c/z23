@@ -103,18 +103,74 @@ bool vcs_tree_load(const char *repo_root, const uint8_t tree_hash[32],
     return manifest_load(repo_root, tree_hash, out);
 }
 
-bool load_commit_by_id(const char *repo, const uint8_t commit_id[32],
-                       struct vcs_commit *out)
+struct commit_recovery {
+    const uint8_t *wanted;
+    uint8_t preimage[VCS_COMMIT_PREIMAGE_BYTES];
+    bool found;
+    bool error;
+};
+
+static bool commit_recovery_cb(uint64_t offset, enum event_log_type type,
+                               const void *payload, size_t len, void *user)
+{
+    (void)offset;
+    struct commit_recovery *ctx = user;
+    if (type != EV_VCS_COMMIT || len != VCS_COMMIT_RECORD_BYTES)
+        return true;
+    struct vcs_commit commit;
+    bool self_ok = false;
+    if (!vcs_commit_deserialize(payload, len, &commit, &self_ok) || !self_ok)
+        return true;
+    uint8_t id[32];
+    if (!vcs_commit_id(&commit, id)) {
+        ctx->error = true;
+        return false;
+    }
+    if (memcmp(id, ctx->wanted, sizeof(id)) != 0)
+        return true;
+    memcpy(ctx->preimage, payload, sizeof(ctx->preimage));
+    ctx->found = true;
+    return false;
+}
+
+static bool repair_commit_from_log(const char *repo, event_log_t *log,
+                                   const uint8_t id[32])
+{
+    if (!log)
+        LOG_FAIL("vcs", "no open commit log for recovery");
+    struct commit_recovery ctx = {.wanted = id};
+    int streamed = event_log_stream(log, 0, commit_recovery_cb, &ctx);
+    if (streamed != 0 || ctx.error || !ctx.found)
+        LOG_FAIL("vcs", "no verified commit record for object");
+    uint8_t repaired_id[32];
+    if (!vcs_object_put_repair(repo, ctx.preimage, sizeof(ctx.preimage),
+                               VCS_TAG_COMMIT, repaired_id, NULL) ||
+        memcmp(repaired_id, id, sizeof(repaired_id)) != 0)
+        LOG_FAIL("vcs", "repair exact commit object");
+    return true;
+}
+
+static bool load_commit_with_log(const char *repo, event_log_t *log,
+                                 const uint8_t commit_id[32],
+                                 struct vcs_commit *out)
 {
     uint8_t *pre = NULL;
     size_t prelen = 0;
-    if (vcs_object_get(repo, commit_id, VCS_TAG_COMMIT, &pre, &prelen) != 0)
-        LOG_FAIL("vcs", "load commit object");
+    if (vcs_object_get(repo, commit_id, VCS_TAG_COMMIT, &pre, &prelen) != 0 &&
+        (!repair_commit_from_log(repo, log, commit_id) ||
+         vcs_object_get(repo, commit_id, VCS_TAG_COMMIT, &pre, &prelen) != 0))
+        LOG_FAIL("vcs", "load or recover commit object");
     bool ok = vcs_commit_parse_preimage(pre, prelen, out);
     free(pre);
     if (!ok)
         LOG_FAIL("vcs", "parse commit preimage");
     return true;
+}
+
+bool load_commit_by_id(const char *repo, const uint8_t commit_id[32],
+                       struct vcs_commit *out)
+{
+    return load_commit_with_log(repo, NULL, commit_id, out);
 }
 
 /* ── open / close ────────────────────────────────────────────────── */
@@ -391,7 +447,7 @@ int vcs_status(struct vcs_repo *r, vcs_diff_cb cb, void *user,
     }
     if (have_head) {
         struct vcs_commit hc;
-        if (!load_commit_by_id(r->root, head_id, &hc) ||
+        if (!load_commit_with_log(r->root, r->log, head_id, &hc) ||
             !manifest_load(r->root, hc.tree_hash, &head)) {
             vcs_manifest_free(&cur);
             LOG_ERR("vcs", "load HEAD manifest");

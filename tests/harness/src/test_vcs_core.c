@@ -2042,6 +2042,49 @@ static void seed_worktree(const char *dir)
     vc_write(dir, "docs/notes.md", "# notes\n");
 }
 
+static int t_logged_commit_cas_recovery(const char *dir)
+{
+    int failures = 0;
+    seed_worktree(dir);
+    struct vcs_repo *repo = vcs_open(dir);
+    VC_CHECK("commit recovery: repository opens", repo != NULL);
+    if (!repo) return failures + 1;
+    struct vcs_snapshot_meta meta = {
+        .verdict_status = 1, .phase = "green", .task_ref = "durable-log",
+    };
+    uint8_t commit_root[32];
+    bool snapped = vcs_snapshot(repo, &meta, commit_root) == VCS_OK;
+    VC_CHECK("commit recovery: complete record and HEAD persist", snapped);
+    vcs_close(repo);
+    if (!snapped) return failures;
+    char hex[65], path[4096];
+    zcl_hex_encode(commit_root, 32, hex);
+    int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s",
+                     dir, hex, hex + 2);
+    int fd = n > 0 && (size_t)n < sizeof(path)
+        ? open(path, O_WRONLY) : -1;
+    uint8_t poison = 0xff;
+    bool damaged = fd >= 0 && pwrite(fd, &poison, 1, 0) == 1;
+    if (fd >= 0) close(fd);
+    VC_CHECK("commit recovery: by-id object is malformed", damaged);
+    repo = vcs_open(dir);
+    VC_CHECK("commit recovery: repository reopens", repo != NULL);
+    if (!repo) return failures + 1;
+    size_t changes = SIZE_MAX;
+    VC_CHECK("commit recovery: HEAD reloads from exact logged record",
+             damaged && vcs_status(repo, NULL, NULL, &changes) == VCS_OK &&
+             changes == 0);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    VC_CHECK("commit recovery: original CAS root reloads",
+             vcs_object_get(dir, commit_root, VCS_TAG_COMMIT,
+                            &wire, &wire_len) == 0 &&
+             wire_len == VCS_COMMIT_PREIMAGE_BYTES);
+    free(wire);
+    vcs_close(repo);
+    return failures;
+}
+
 #if defined(_WIN32)
 /* History verbs stay named-refused until POSIX mode capture is qualified.
  * Materialize is a separate byte-reconstruction path and is proven above. */
@@ -2947,6 +2990,10 @@ int test_vcs_core(void)
 #else
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "snap");
     failures += t_snapshot_status_revert(dir);
+    test_rm_rf_recursive(dir);
+
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "commit_recovery");
+    failures += t_logged_commit_cas_recovery(dir);
     test_rm_rf_recursive(dir);
 
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "atomicrevert");
