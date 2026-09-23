@@ -1738,6 +1738,8 @@ static int test_dev_land_after_proof_restart(void)
     return failures;
 }
 
+static bool dlx_mail_outcome_found(const char *tip);
+
 static int test_dev_land_terminal_replay(void)
 {
     int failures = 0;
@@ -1745,9 +1747,9 @@ static int test_dev_land_terminal_replay(void)
         struct dlx_rig rig;
         struct dlx_call c;
         char landdir[1200], qpath[1400], maildir[1400];
-        char opath[1400], outbox[1500], queue[8192], outcome[8192];
+        char opath[1400], queue[8192], outcome[8192];
         char remote[64];
-        size_t queue_len, outcome_len, mail_len;
+        size_t queue_len, outcome_len;
         dlx_isolate("outcome_append_failure");
         ASSERT(dlx_rig_make(&rig, "outcome_append_failure_rig"));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
@@ -1766,8 +1768,6 @@ static int test_dev_land_terminal_replay(void)
                (int)sizeof(opath));
         ASSERT(snprintf(maildir, sizeof(maildir), "%s/../mail", landdir) <
                (int)sizeof(maildir));
-        ASSERT(snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", maildir) <
-               (int)sizeof(outbox));
         setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
         setenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "1", 1);
         setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
@@ -1799,14 +1799,12 @@ static int test_dev_land_terminal_replay(void)
         dlx_end(&c);
         ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
         ASSERT_EQ(queue_len, 0);
-        char again[8192], mail[8192];
+        char again[8192];
         size_t again_len;
         ASSERT(dlx_slurp(opath, again, sizeof(again), &again_len));
         ASSERT_EQ(again_len, outcome_len);
         ASSERT(memcmp(again, outcome, outcome_len) == 0);
-        ASSERT(dlx_slurp(outbox, mail, sizeof(mail), &mail_len));
-        mail[mail_len] = '\0';
-        ASSERT(strstr(mail, "\"event\":\"outcome\"") != NULL);
+        ASSERT(dlx_mail_outcome_found(rig.tip));
         dlx_restore();
         PASS();
     }
@@ -2113,6 +2111,14 @@ static bool dlx_mail_find(const char *from, const char *kind, const char *ref,
         (void)snprintf(since, sizeof(since), "%s", next);
     }
     return false;
+}
+
+static bool dlx_mail_outcome_found(const char *tip)
+{
+    long long seq = -1, skipped = -1;
+    bool found = false;
+    return dlx_mail_find("dev.land", "note", tip, &seq, &skipped, &found) &&
+           found && seq > 0 && skipped == 0;
 }
 
 static int test_dev_land_outcome_visible_in_mail(void)
