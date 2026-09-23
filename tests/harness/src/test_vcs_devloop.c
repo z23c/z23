@@ -142,6 +142,37 @@ static int vd_test_accepted_bundle_retry(
     return failures;
 }
 
+static int vd_test_accepted_candidate_proof_retry(
+    const char *authority, const char *candidate,
+    const struct vd_accepted_fixture *fixture,
+    const uint8_t source_root[32], int64_t accepted_now,
+    const struct vcs_devloop_accepted_candidate_result *first)
+{
+    int failures = 0;
+    VD_CHECK("publication: interrupted accepted proof is poisoned",
+             vd_poison_object(authority, first->proof_receipt_root));
+    VD_CHECK("publication: logged accepted job is poisoned for exact retry",
+             vd_poison_object(authority, first->publication_job_root));
+    struct vcs_devloop_accepted_candidate_result retried = {0};
+    vcs_devloop_publication_bind_accepted_candidate(
+        authority, candidate, fixture->accepted.accepted_work_root,
+        source_root, accepted_now, &retried);
+    VD_CHECK("publication: exact accepted proof retry preserves job",
+             retried.ok &&
+             memcmp(retried.proof_receipt_root,
+                    first->proof_receipt_root, 32) == 0 &&
+             memcmp(retried.publication_job_root,
+                    first->publication_job_root, 32) == 0);
+    uint8_t *proof_wire = NULL;
+    size_t proof_wire_len = 0;
+    VD_CHECK("publication: exact accepted proof CAS reloads after retry",
+             retried.ok && vcs_object_get(
+                 authority, first->proof_receipt_root, VCS_TAG_DEV_PROOF,
+                 &proof_wire, &proof_wire_len) == 0 && proof_wire_len > 0);
+    free(proof_wire);
+    return failures;
+}
+
 static int vd_test_accepted_candidate_job_retry(
     const char *authority, const struct vcs_source_bundle_sharded *source,
     const struct vd_accepted_fixture *fixture,
@@ -182,6 +213,10 @@ static int vd_test_accepted_candidate_job_retry(
     VD_CHECK("publication: repaired accepted job reloads by exact root",
              retried.ok && vcs_devloop_publication_job_load(
                  authority, first.publication_job_root, &loaded));
+    if (retried.ok)
+        failures += vd_test_accepted_candidate_proof_retry(
+            authority, candidate, fixture, source_root, accepted_now,
+            &first);
     test_rm_rf(candidate);
     return failures;
 }

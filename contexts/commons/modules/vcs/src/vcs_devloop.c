@@ -683,8 +683,9 @@ static bool publication_enqueue_from_commit(
     publication_fixed((char *)proof_wire + off, 64,
                       verdict->proof_scope); off += 64;
     if (off != sizeof(proof_wire) ||
-        !vcs_object_put(repo_root, proof_wire, sizeof(proof_wire),
-                        VCS_TAG_DEV_PROOF, out->proof_receipt_root)) {
+        !vcs_object_put_repair(repo_root, proof_wire, sizeof(proof_wire),
+                               VCS_TAG_DEV_PROOF,
+                               out->proof_receipt_root, NULL)) {
         (void)snprintf(out->publication_error,
                        sizeof(out->publication_error), "%s",
                        "the immutable proof receipt could not be stored");
