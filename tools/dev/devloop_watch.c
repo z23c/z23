@@ -289,6 +289,15 @@ struct watch_context {
     /* This iteration's exact-commit verdict, established at the reactor
      * loop head and read (never recomputed) by the cancel poll. */
     bool commit_preempts;
+    /* A request arriving during a synchronous edit cycle must get the loop
+     * head back. This is only a wake hint; the loop head still checks the
+     * exact pair, source cleanliness and ordinary proof locks. */
+    char request_hint_dir[PATH_MAX];
+    struct timespec request_hint_mtime;
+    bool request_hint_present;
+    bool request_hint_armed;
+    bool request_hint_changed;
+    int64_t request_hint_next_us;
 };
 
 static volatile sig_atomic_t g_watch_stop;
@@ -470,6 +479,8 @@ static bool watch_commit_proof_claimable(const struct watch_context *ctx)
         ctx->proof_pending_count == 0;
 }
 
+static bool watch_root_is_landing(const char *root);
+
 /* True when the synchronous edit cycle at the bottom of the reactor must
  * yield: an exact commit-proof request is queued for current HEAD on a tree
  * clean enough for proof_worker() to admit, so the edit epoch this cycle is
@@ -494,22 +505,82 @@ static bool watch_commit_proof_prioritize(struct watch_context *ctx)
 {
     bool request_current_clean = watch_commit_request_current_clean(ctx);
     watch_commit_priority_apply(ctx, request_current_clean);
-    if (ctx)
+    if (ctx) {
         ctx->commit_preempts = request_current_clean;
+        ctx->request_hint_armed = false;
+        ctx->request_hint_changed = false;
+    }
     return request_current_clean;
 }
 
-/* The one cancel decision a foreground cycle answers: newer source events, or
- * the exact-commit verdict this iteration's loop head already established.
- * Both halves are plain reads — no directory, no file, no child — because a
- * cancel poll fires hundreds of times a second and runs under the process
- * runner's cancel-poll mutex. A dirty or moved checkout never reaches here
- * with the verdict set: watch_commit_request_current_clean() already refused
- * it, so such a cycle keeps its edit feedback. */
+/* Arm only on a clean landing tree. A request-directory mtime is cheap to
+ * observe from the process cancel poll and carries no proof authority. The
+ * later loop-head predicate remains the sole admission decision. */
+static void watch_request_hint_arm(struct watch_context *ctx)
+{
+    const char *argv[] = {
+        "git", "status", "--porcelain=v1", "--untracked-files=normal", NULL};
+    struct zcl_devloop_process_result result = {0};
+    struct stat st;
+    int n;
+    if (!ctx)
+        return;
+    ctx->request_hint_armed = false;
+    ctx->request_hint_changed = false;
+    if (!watch_root_is_landing(ctx->root))
+        return;
+    n = snprintf(ctx->request_hint_dir, sizeof(ctx->request_hint_dir),
+                 "%s/.cache/zcl-dev-proof/requests", ctx->root);
+    if (n <= 0 || (size_t)n >= sizeof(ctx->request_hint_dir) ||
+        !zcl_devloop_process_run(ctx->root, argv, 30000, &result) ||
+        result.timed_out || result.output_truncated || result.term_signal != 0 ||
+        result.exit_code != 0 || result.output_len != 0)
+        return;
+    ctx->request_hint_present = stat(ctx->request_hint_dir, &st) == 0 &&
+                                S_ISDIR(st.st_mode);
+    if (ctx->request_hint_present)
+        ctx->request_hint_mtime = st.st_mtim;
+    ctx->request_hint_next_us = 0;
+    ctx->request_hint_armed = true;
+    /* Close the gap between the loop-head decision and arming this hint.
+     * This full predicate runs before the cancel poll is installed. */
+    if (zcl_dev_proof_queue_has_pending(ctx->root) &&
+        watch_commit_request_current_clean(ctx))
+        ctx->request_hint_changed = true;
+}
+
+static bool watch_request_hint_poll(struct watch_context *ctx)
+{
+    struct stat st;
+    int64_t now;
+    bool present;
+    if (!ctx || !ctx->request_hint_armed)
+        return false;
+    if (ctx->request_hint_changed)
+        return true;
+    now = platform_time_monotonic_us();
+    if (now < ctx->request_hint_next_us)
+        return false;
+    ctx->request_hint_next_us = now + 50000;
+    present = stat(ctx->request_hint_dir, &st) == 0 && S_ISDIR(st.st_mode);
+    if (present != ctx->request_hint_present ||
+        (present &&
+         (st.st_mtim.tv_sec != ctx->request_hint_mtime.tv_sec ||
+          st.st_mtim.tv_nsec != ctx->request_hint_mtime.tv_nsec)))
+        ctx->request_hint_changed = true;
+    return ctx->request_hint_changed;
+}
+
+/* The foreground cycle yields for newer source events, an exact commit seen
+ * at the loop head, or a request-directory change observed by stat(2). The
+ * hint never parses a request or admits proof; the next loop head does that.
+ * The cancel poll runs under the process runner's non-recursive mutex, so it
+ * may not launch a child or run the full request predicate there. */
 static bool watch_cycle_should_yield(const struct watch_context *ctx,
                                      bool changed)
 {
-    return changed || (ctx && ctx->commit_preempts);
+    return changed || (ctx && (ctx->commit_preempts ||
+                               ctx->request_hint_changed));
 }
 
 static bool mkdirs(const char *path);
@@ -939,6 +1010,91 @@ static const char *watch_fg_queued_phase(struct watch_context *ctx,
     return NULL;
 }
 
+/* Exercise the real bounded process poll while the request arrives after
+ * the loop-head verdict. The disabled run is the old behavior on the same
+ * fixture: the child times out before the watcher gets back to the queue. */
+static bool watch_fg_midcycle_prepare(struct watch_context *ctx,
+                                      const char *head, bool hint)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path),
+                     "%s/.cache/zcl-dev-proof/requests/%s-%s.request",
+                     ctx->root, head, head);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    (void)unlink(path);
+    watch_request_hint_arm(ctx);
+    if (!ctx->request_hint_armed)
+        return false;
+    if (!hint)
+        ctx->request_hint_armed = false;
+    return true;
+}
+
+static const char *watch_fg_midcycle_result(bool ran, bool hint,
+                                            const struct zcl_devloop_process_result *result)
+{
+    if (!ran || (hint && (!result->cancelled || result->timed_out)) ||
+        (!hint && (!result->timed_out || result->cancelled)))
+        return hint ? "new request must cancel the obsolete cycle"
+                    : "old cycle must time out before seeing the request";
+    return NULL;
+}
+
+static const char *watch_fg_midcycle_once(struct watch_context *ctx,
+                                          const char *head, bool hint,
+                                          int64_t *elapsed_us)
+{
+    const char *argv[] = {"sleep", "30", NULL};
+    struct zcl_devloop_process_result result = {0};
+    int status = 0, saved_fd = ctx->fd;
+    if (!watch_fg_midcycle_prepare(ctx, head, hint))
+        return "clean landing hint arm";
+    pid_t writer = fork();
+    if (writer < 0)
+        return "request writer fork";
+    if (writer == 0) {
+        platform_sleep_ms(100);
+        _exit(watch_fg_request(ctx->root, head) ? 0 : 1);
+    }
+    ctx->fd = -1;
+    zcl_devloop_process_cancel_poll_set(watch_cancel_poll, ctx);
+    int64_t start = platform_time_monotonic_us();
+    bool ran = zcl_devloop_process_run(ctx->root, argv, 1500, &result);
+    *elapsed_us = platform_time_monotonic_us() - start;
+    zcl_devloop_process_cancel_poll_clear();
+    zcl_devloop_process_cancel_clear();
+    ctx->fd = saved_fd;
+    if (waitpid(writer, &status, 0) != writer || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        return "request writer";
+    return watch_fg_midcycle_result(ran, hint, &result);
+}
+
+static const char *watch_fg_midcycle_phase(struct watch_context *ctx,
+                                           const char *head)
+{
+    char parent[PATH_MAX], dir[PATH_MAX];
+    int64_t before_us = 0, after_us = 0;
+    int n = snprintf(parent, sizeof(parent), "%s/..", ctx->root);
+    if (n <= 0 || (size_t)n >= sizeof(parent) ||
+        !watch_fg_write(parent, "queue.lock", ""))
+        return "landing marker";
+    n = snprintf(dir, sizeof(dir), "%s/.cache/zcl-dev-proof/requests",
+                 ctx->root);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || !mkdirs(dir))
+        return "request directory";
+    const char *failed = watch_fg_midcycle_once(ctx, head, false, &before_us);
+    if (!failed)
+        failed = watch_fg_midcycle_once(ctx, head, true, &after_us);
+    if (!failed && (after_us >= before_us || after_us > 1200000))
+        failed = "request hint did not shorten the same cycle";
+    fprintf(stderr,
+            "[devloop] midcycle request: before=%lld ms after=%lld ms\n",
+            (long long)(before_us / 1000), (long long)(after_us / 1000));
+    return failed;
+}
+
 /* A dirty checkout keeps its edit feedback: the queued proof could not be
  * admitted there, so cancelling would trade feedback for nothing. */
 static const char *watch_fg_dirty_phase(struct watch_context *ctx)
@@ -1022,6 +1178,8 @@ bool zcl_devloop_watch_foreground_yield_selftest(const char *repo_root)
      * tree cancels the obsolete foreground cycle, so the reactor reaches the
      * loop head that starts it. */
     else
+        failed = watch_fg_midcycle_phase(&ctx, head);
+    if (!failed)
         failed = watch_fg_queued_phase(&ctx, head);
     if (!failed)
         failed = watch_fg_dirty_phase(&ctx);
@@ -2217,6 +2375,7 @@ static bool watch_cancel_poll(void *opaque)
             ctx->force_full_source_rescan = false;
         }
     }
+    (void)watch_request_hint_poll(ctx);
     return watch_cycle_should_yield(ctx, changed);
 }
 
@@ -2569,6 +2728,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         print_json_string(stdout, epoch_changed[0]);
         printf("}\n");
         fflush(stdout);
+        watch_request_hint_arm(&ctx);
         zcl_devloop_process_cancel_poll_set(watch_cancel_poll, &ctx);
         bool restart_union_ok = zcl_devloop_restart_source_set_add(
             &ctx.restart_sources, files, epoch_count);
