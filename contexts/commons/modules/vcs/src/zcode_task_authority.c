@@ -62,10 +62,10 @@ enum vcs_zcode_task_authority_result vcs_zcode_task_authority_store(
         lock_root, recipe_root);
     if (result != VCS_ZCODE_TASK_AUTHORITY_OK) return result;
     if (!vcs_object_store_init(repo_root) ||
-        !vcs_object_put_addressed(
-            repo_root, lock_root, lock_wire, lock_wire_len) ||
-        !vcs_object_put_addressed(
-            repo_root, recipe_root, recipe_wire, recipe_wire_len))
+        !vcs_object_put_addressed_repair(
+            repo_root, lock_root, lock_wire, lock_wire_len, NULL) ||
+        !vcs_object_put_addressed_repair(
+            repo_root, recipe_root, recipe_wire, recipe_wire_len, NULL))
         return VCS_ZCODE_TASK_AUTHORITY_CAS;
     uint8_t *lock_check = NULL, *recipe_check = NULL;
     size_t lock_check_len = 0, recipe_check_len = 0;

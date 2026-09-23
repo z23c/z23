@@ -548,6 +548,31 @@ static void zd_candidate(struct vcs_zcode_candidate_v1 *c,
     c->created_unix = 1000;
 }
 
+static bool zd_object_equals_bytes(const char *repo_root,
+                                   const uint8_t root[32],
+                                   const uint8_t *expected, size_t expected_len)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool equal = vcs_object_load_raw(repo_root, root, &wire, &wire_len) == 0 &&
+        wire_len == expected_len &&
+        (wire_len == 0 || memcmp(wire, expected, wire_len) == 0);
+    free(wire);
+    return equal;
+}
+
+static bool zd_object_equals_store(const char *left_root,
+                                   const char *right_root,
+                                   const uint8_t root[32])
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool equal = vcs_object_load_raw(left_root, root, &wire, &wire_len) == 0 &&
+        zd_object_equals_bytes(right_root, root, wire, wire_len);
+    free(wire);
+    return equal;
+}
+
 static int test_zd_agent_context(void)
 {
     int failures = 0;
@@ -3369,11 +3394,42 @@ static int test_zd_improve_command(void)
         ASSERT(received_transfer.task_authority_len > 0);
         test_make_tmpdir(receiver, sizeof(receiver), "zcode_dev",
                          "authority_receiver");
+        ASSERT(vcs_object_store_init(receiver));
+        const uint8_t poisoned_task_object[] = "interrupted-task-import";
+        ASSERT(vcs_object_put_addressed(
+            receiver, task.dependency_lock_root, poisoned_task_object,
+            sizeof(poisoned_task_object)));
+        ASSERT(vcs_object_put_addressed(
+            receiver, task.acceptance_tests_root, poisoned_task_object,
+            sizeof(poisoned_task_object)));
+        uint8_t *tampered_task_authority = zcl_malloc(
+            received_transfer.task_authority_len,
+            "test.task_authority.tampered");
+        ASSERT(tampered_task_authority != NULL);
+        memcpy(tampered_task_authority, received_transfer.task_authority,
+               received_transfer.task_authority_len);
+        tampered_task_authority[received_transfer.task_authority_len - 1u] ^= 1u;
+        ASSERT(vcs_zcode_task_authority_bundle_import(
+                   receiver, &received_transfer.task,
+                   tampered_task_authority,
+                   received_transfer.task_authority_len) !=
+               VCS_ZCODE_TASK_AUTHORITY_OK);
+        free(tampered_task_authority);
+        ASSERT(zd_object_equals_bytes(receiver, task.dependency_lock_root,
+                                      poisoned_task_object,
+                                      sizeof(poisoned_task_object)));
+        ASSERT(zd_object_equals_bytes(receiver, task.acceptance_tests_root,
+                                      poisoned_task_object,
+                                      sizeof(poisoned_task_object)));
         ASSERT_EQ(vcs_zcode_task_authority_bundle_import(
                       receiver, &received_transfer.task,
                       received_transfer.task_authority,
                       received_transfer.task_authority_len),
                   VCS_ZCODE_TASK_AUTHORITY_OK);
+        ASSERT(zd_object_equals_store(workspace, receiver,
+                                      task.dependency_lock_root));
+        ASSERT(zd_object_equals_store(workspace, receiver,
+                                      task.acceptance_tests_root));
         /* A receiver may retain a corrupt addressed object across a crash.
          * A verified bundle must repair it so the exact retry can finish. */
         uint8_t *repair_patch_wire = NULL;
