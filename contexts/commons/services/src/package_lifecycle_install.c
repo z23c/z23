@@ -246,7 +246,8 @@ static struct zcl_result pkgl_installed_outputs_match(
             return ZCL_ERR(-1, "installed output path is too long");
         uint8_t digest[32];
         uint64_t bytes = 0;
-        ZCL_CHECK(pkgl_sha3_file(path, digest, &bytes));
+        ZCL_CHECK(pkgl_sha3_file_beneath(installed, output->path,
+                                         digest, &bytes));
         if (bytes != output->bytes || memcmp(digest, output->sha3, 32) != 0)
             return ZCL_ERR(-1, "installed output %s does not match receipt",
                            output->path);

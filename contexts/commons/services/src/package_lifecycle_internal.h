@@ -119,8 +119,10 @@ struct zcl_result pkgl_read_file(const char *path, size_t cap, uint8_t **out,
                                  size_t *len_out);
 struct zcl_result pkgl_write_atomic(const char *path, const uint8_t *data,
                                     size_t len);
-struct zcl_result pkgl_sha3_file(const char *path, uint8_t out[32],
-                                 uint64_t *bytes_out);
+struct zcl_result pkgl_sha3_file_beneath(const char *root,
+                                         const char *relative,
+                                         uint8_t out[32],
+                                         uint64_t *bytes_out);
 struct zcl_result pkgl_exists(const char *path, bool *out);
 
 /* <zcode_dir>/installed/<root-hex> */

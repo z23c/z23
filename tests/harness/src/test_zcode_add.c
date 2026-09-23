@@ -2462,6 +2462,35 @@ static int za_program_missing_refusal(const char *base,
     return failures;
 }
 
+#ifndef _WIN32
+static int za_program_parent_link_refusal(const char *base,
+                                           const uint8_t root[32],
+                                           const char *installed_bin)
+{
+    int failures = 0;
+    char bin_dir[4700], outside[4700], outside_abs[4700];
+    (void)snprintf(bin_dir, sizeof(bin_dir), "%s", installed_bin);
+    char *slash = strrchr(bin_dir, '/');
+    bool shaped = slash != NULL;
+    if (shaped)
+        *slash = '\0';
+    (void)snprintf(outside, sizeof(outside), "%s/escaped-bin", base);
+    bool moved = shaped && rename(bin_dir, outside) == 0;
+    bool linked = moved && test_abs_path(outside, outside_abs,
+                                         sizeof(outside_abs)) &&
+                  symlink(outside_abs, bin_dir) == 0;
+    struct package_lifecycle_programs programs;
+    struct zcl_result listed = package_lifecycle_installed_programs(
+        base, root, &programs);
+    ZA_CHECK("program listing refuses an output reached through a parent symlink",
+             linked && !listed.ok);
+    bool removed_link = !linked || unlink(bin_dir) == 0;
+    bool restored = removed_link && moved && rename(outside, bin_dir) == 0;
+    ZA_CHECK("program parent directory fixture restored", restored);
+    return failures;
+}
+#endif
+
 static int t_programs(void)
 {
     int failures = 0;
@@ -2595,6 +2624,9 @@ static int t_programs(void)
                                   t0);
     failures += za_program_missing_refusal(base, cli_root, installed_bin,
                                            installed_exec);
+#ifndef _WIN32
+    failures += za_program_parent_link_refusal(base, cli_root, installed_bin);
+#endif
     failures += za_program_data_survives(base, zcode, t0);
     zcl_command_reply_free(&cli_reply);
 

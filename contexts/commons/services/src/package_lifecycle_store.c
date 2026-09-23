@@ -735,15 +735,19 @@ struct zcl_result pkgl_write_atomic(const char *path, const uint8_t *data,
 #endif
 }
 
-struct zcl_result pkgl_sha3_file(const char *path, uint8_t out[32],
-                                 uint64_t *bytes_out)
+struct zcl_result pkgl_sha3_file_beneath(const char *root,
+                                         const char *relative,
+                                         uint8_t out[32],
+                                         uint64_t *bytes_out)
 {
-    if (!path || !out || !bytes_out)
+    if (!root || !relative || !out || !bytes_out)
         return ZCL_ERR(-1, "null argument hashing a file");
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path))
-        return ZCL_ERR(-1, "open %s: refused, missing, or not regular", path);
+    if (!platform_positioned_file_open_beneath(&file, root, relative))
+        return ZCL_ERR(-1, "installed output %s is missing, not regular, or "
+                           "crosses a symlink; quarantine the damaged tree "
+                           "and reinstall the exact root", relative);
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     uint8_t buf[65536];
@@ -758,7 +762,7 @@ struct zcl_result pkgl_sha3_file(const char *path, uint8_t out[32],
     }
     platform_positioned_file_close(&file);
     if (got < 0)
-        return ZCL_ERR(-1, "read error hashing %s", path);
+        return ZCL_ERR(-1, "read error hashing installed output %s", relative);
     sha3_256_finalize(&ctx, out);
     *bytes_out = total;
     return ZCL_OK;
