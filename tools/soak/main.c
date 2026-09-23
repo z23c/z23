@@ -118,23 +118,81 @@ static bool scan_result_int(const char *buf, int64_t *out)
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     if (*p == 'n') return false; /* "result": null */
     char *end = NULL;
+    errno = 0;
     long long v = strtoll(p, &end, 10);
-    if (end == p) return false;
+    if (end == p || errno == ERANGE || v < 0) return false;
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
+    if (*end != ',' && *end != '}') return false;
     *out = (int64_t)v;
     return true;
 }
 
+/* Capture one child without invoking a shell. A full buffer is an error:
+ * accepting a truncated prefix could turn malformed RPC output into a height. */
+static bool capture_argv(const char *program, char *const argv[],
+                         const struct spawn_cfg *sp, char *out, size_t cap)
+{
+    if (!program || !program[0] || !out || cap < 2) return false;
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    pid_t child = fork();
+    if (child < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    if (child == 0) {
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
+        close(fds[1]);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            (void)dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        if (sp && sp->enabled) {
+            char port[16];
+            snprintf(port, sizeof(port), "%d", sp->rpcport);
+            if (setenv("ZCL_DATADIR", sp->datadir, 1) != 0 ||
+                setenv("ZCL_RPCPORT", port, 1) != 0)
+                _exit(127);
+        }
+        execvp(program, argv);
+        _exit(127);
+    }
+    close(fds[1]);
+    size_t used = 0;
+    bool complete = false;
+    while (used < cap - 1) {
+        ssize_t n = read(fds[0], out + used, cap - 1 - used);
+        if (n > 0) { used += (size_t)n; continue; }
+        if (n == 0) { complete = true; break; }
+        if (errno != EINTR) break;
+    }
+    if (!complete && used == cap - 1) {
+        char extra;
+        ssize_t n;
+        do { n = read(fds[0], &extra, 1); } while (n < 0 && errno == EINTR);
+        complete = n == 0;
+    }
+    close(fds[0]);
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    out[used] = '\0';
+    return complete && used > 0 && waited == child &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 static pid_t pidof_service(const char *service)
 {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "pidof -s %s 2>/dev/null", service);
-    FILE *f = popen(cmd, "r");
-    if (!f) return 0;
-    char line[64] = {0};
-    if (!fgets(line, sizeof(line), f)) { pclose(f); return 0; }
-    pclose(f);
-    long pid = strtol(line, NULL, 10);
-    if (pid <= 0) return 0;
+    char line[64];
+    char *const argv[] = {"pidof", "-s", (char *)service, NULL};
+    if (!capture_argv("pidof", argv, NULL, line, sizeof(line))) return 0;
+    char *end = NULL;
+    long pid = strtol(line, &end, 10);
+    if (pid <= 0 || end == line) return 0;
     return (pid_t)pid;
 }
 
@@ -160,37 +218,24 @@ static uint64_t rss_bytes_for(pid_t pid)
     return rss;
 }
 
-/* Run `<rpc_bin> <method>` and return its stdout. In spawn mode the
+/* Run `<rpc_bin> <method> [arg]` and return its stdout. In spawn mode the
  * ZCL_DATADIR + ZCL_RPCPORT env is PINNED to the isolated node so the
  * call can never reach the live node's default RPC port. `sp` may be
  * NULL (pidof mode) — then no env is forced and zcl-rpc uses its
  * defaults (the operator's live node). */
 static bool rpc_capture(const struct spawn_cfg *sp, const char *rpc_bin,
-                        const char *method, char *out, size_t out_cap)
+                        const char *method, const char *arg,
+                        char *out, size_t out_cap)
 {
-    char cmd[1024];
-    if (sp && sp->enabled) {
-        /* Pin BOTH env vars on EVERY isolated call — the lynchpin that
-         * keeps spawn-mode hermetic. */
-        snprintf(cmd, sizeof(cmd),
-                 "ZCL_DATADIR=%s ZCL_RPCPORT=%d %s %s 2>/dev/null",
-                 sp->datadir, sp->rpcport, rpc_bin, method);
-    } else {
-        snprintf(cmd, sizeof(cmd), "%s %s 2>/dev/null", rpc_bin, method);
-    }
-    FILE *f = popen(cmd, "r");
-    if (!f) return false;
-    size_t n = fread(out, 1, out_cap - 1, f);
-    pclose(f);
-    out[n] = '\0';
-    return n > 0;
+    char *const argv[] = {(char *)rpc_bin, (char *)method, (char *)arg, NULL};
+    return capture_argv(rpc_bin, argv, sp, out, out_cap);
 }
 
 static bool height_via_rpc(const struct spawn_cfg *sp, const char *rpc_bin,
                           int64_t *out)
 {
     char buf[8192];
-    if (!rpc_capture(sp, rpc_bin, "getblockcount", buf, sizeof(buf)))
+    if (!rpc_capture(sp, rpc_bin, "getblockcount", NULL, buf, sizeof(buf)))
         return false;
     return scan_result_int(buf, out);
 }
@@ -265,7 +310,7 @@ static bool spawn_wait_ready(struct spawn_cfg *sp, const char *rpc_bin,
 static void spawn_generate_one(struct spawn_cfg *sp, const char *rpc_bin)
 {
     char buf[16384];
-    (void)rpc_capture(sp, rpc_bin, "generate 1", buf, sizeof(buf));
+    (void)rpc_capture(sp, rpc_bin, "generate", "1", buf, sizeof(buf));
 }
 
 static void default_log_path(char *out, size_t n)
