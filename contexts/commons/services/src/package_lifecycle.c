@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ── the DAG loader ─────────────────────────────────────────────────── */
 
@@ -144,6 +145,20 @@ static struct zcl_result pkgl_plan_path(const struct pkgl_ctx *ctx,
     zcl_hex_encode(plan_id, 32, hex);
     char rel[96];
     (void)snprintf(rel, sizeof(rel), "addplans/%s", hex);
+#ifndef _WIN32
+    char parent[PKGL_PATH_MAX];
+    ZCL_CHECK(pkgl_join(ctx, "addplans", parent, sizeof(parent)));
+    struct stat st;
+    if (lstat(parent, &st) == 0) {
+        if (!S_ISDIR(st.st_mode))
+            return ZCL_ERR(-1, "plan parent is not a real directory; "
+                               "inspect the substituted path and restore "
+                               "the local addplans directory: %s", parent);
+    } else if (errno != ENOENT) {
+        return ZCL_ERR(-1, "inspect plan parent %s: %s", parent,
+                       strerror(errno));
+    }
+#endif
     return pkgl_join(ctx, rel, out, cap);
 }
 

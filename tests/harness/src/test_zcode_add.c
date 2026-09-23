@@ -1391,6 +1391,28 @@ static int t_installed_root_symlink(const char *base, const char *zcode,
     return failures;
 }
 
+static int t_addplans_parent_symlink(const char *base, const char *zcode,
+                                     int64_t now_unix)
+{
+    int failures = 0;
+    char parent[4400], outside[4400], outside_abs[4400];
+    snprintf(parent, sizeof(parent), "%s/addplans", zcode);
+    snprintf(outside, sizeof(outside), "%s/escaped-addplans", base);
+    bool ready = za_mkdir_p(outside) &&
+        test_abs_path(outside, outside_abs, sizeof(outside_abs)) &&
+        symlink(outside_abs, parent) == 0;
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result planned = package_lifecycle_plan(
+        base, "alice/ringbuffer", now_unix, &plan);
+    ZA_CHECK("planning refuses an addplans directory outside the store",
+             ready && !planned.ok &&
+                 strstr(planned.message, "plan") != NULL &&
+                 za_dir_entries(outside) == 0);
+    ZA_CHECK("addplans parent link fixture removed",
+             ready && unlink(parent) == 0);
+    return failures;
+}
+
 static int t_buildwork_parent_symlink(const char *base, const char *zcode,
                                       const char *installed_dir,
                                       const char *root_hex, int64_t now_unix)
@@ -1491,6 +1513,7 @@ static int t_e2e(void)
     }
 
     const int64_t t0 = 1700000000;
+    failures += t_addplans_parent_symlink(base, zcode, t0);
     struct package_lifecycle_plan_report plan;
     struct zcl_result r =
         package_lifecycle_plan(base, "alice/ringbuffer", t0, &plan);
