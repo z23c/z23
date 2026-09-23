@@ -299,3 +299,62 @@ raising its cap; transcript `/tmp/z23-priority-complexity.log` has SHA-256
 `lint-preflight` passed 5/5 gates in 292 s under concurrent proof load;
 transcript `/tmp/z23-priority-lint-preflight.log` has SHA-256
 `db57aafe5930ccf01dd42574a83155b0ff83dc9970a828d0c1216bdfd07f5361`.
+
+## Persisted priority type and exact-proof lint refusal
+
+On 2026-09-23 UTC, a disposable native Linux fixture submitted a signed tip,
+then changed its private queue row from `"priority_seq":1` to the valid JSON
+`"priority_seq":"x"`. The unmodified `dev land status` returned success and
+reported priority 1, silently interpreting the present malformed field as a
+legacy missing field. The fixture queue and response have SHA-256 roots
+`5b0ccd87c3a3ccba69cc51fc9689ad414924ec0307519403fb9bd7bbc73d3934`
+and `4da0ff6f55127b1f3273959fd9404b8f4049b0096f8cc45451c123fe7307fb1a`.
+The row parser now accepts the legacy default only when the parsed JSON object
+has no priority field; a present value must be an integer within the row's
+sequence bound. The registered regression checks that status, submit and step
+refuse the malformed row without changing its bytes.
+
+The first focused run after adding that fixture failed before corruption:
+its unsigned tip lacked the test-only proof stub required for unsigned
+admission. Its transcript `/tmp/z23-priority-parse-pass-after.log` has SHA-256
+`6bdaf7e0c7f504acf8a3c80f879239491cef3d353adff8d88a40243437d02f4c`.
+After arming the same stub as the adjacent fixture, the registered `dev_land`
+group passed 1/1 with zero skips, 108,291 ms of test body. The transcript
+`/tmp/z23-priority-parse-pass-after-2.log` has SHA-256
+`2500f9d152e0727123b041fadbdc666ee75e43ccda26f4d78e066368ab1ca2e9`.
+
+The exact `2857b5c124e79431929f1ad7994a73499fce1c6b` proof against
+`a68b814e74472e517daca28a2621a0d3689531b4` passed all 51 selected test
+groups with zero failures or skips, including two clean exclusive retries of
+load-flaky groups. Full lint failed 1/211 gates:
+`check-outparam-init-before-return` found a reply reinitialization after an
+early return in `dl_drive`. The test and lint logs have SHA-256 roots
+`6d156323b4a3190ec9b3d7bde1f6756173ed79ff2f208c28a12033dc3e902077`
+and `ed0a008de39767e6c5d131110bb5be127eddc3b8cb911edb923499c791825646`.
+This pair has no publication authority. Its queue request was cancelled through
+the native action after the failed observation was preserved.
+
+The repair gives the already-initialized reply one explicit reset operation
+between bounded drive cycles. The exact out-parameter gate passed across
+55,067 function bodies; `/tmp/z23-converge-outparam-pass.log` has SHA-256
+`7146d3adb3befe094fef9d0d20906a787d45fb3139c0c050375607d8f661fe67`.
+The combined successor passed `make -j4 t-fast ONLY=dev_land`, 1/1 group,
+zero failures and skips, 87,067 ms of test body. Its transcript
+`/tmp/z23-converge-successor-focused.log` has SHA-256
+`e84344277ac7e59c65ca4dc7bccadb19a9f8a1323137d6891029ded5ed9bd4b1`.
+This is local fixture and lint evidence; current-base full proof and a remote
+publication receipt remain required.
+
+The first `lint-fast` run on the combined repair failed only
+`check-flag-registry`: seven source first-use pointers still named their old
+line numbers after the parser change. Its transcript
+`/tmp/z23-converge-successor-lint-fast.log` has SHA-256
+`06ebdf0b0b05270ee41d3653a30bf8daf6c89390291d980a5393b99764a09679`.
+All twelve affected references were corrected; the direct registry gate
+verified 1,203 first-use pointers. The source-derived capability inventory
+was regenerated, producing 1,503 capabilities. The corrected `lint-fast`
+passed 32/32 gates in 12,656 ms; transcript SHA-256
+`2021fcefdef5814efcd23d910c8a99633d9f7d7bf1311d0f24f8f28179d2405c`.
+`lint-preflight` passed 5/5 gates in 118,697 ms under concurrent proof load;
+transcript SHA-256
+`89b13dafd7bd56aad0b916be63aaa4871b2d27b5b0e000f3a3fc7bdcc5d263a6`.

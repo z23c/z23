@@ -1055,8 +1055,10 @@ through a rewrite. Status likewise names a malformed terminal outcome.
 
 `dev land drive` runs a bounded foreground integrator session. It persists the
 candidate commit, current base, prepared tree and exact proof intent before
-proof execution, releases the short landing step lock while proving, then
-tries publication immediately after a PASS. Another authorized driver can
+proof execution, then tries publication immediately after a PASS. Proof holds
+a shared step guard while using the landing worktree, so another step cannot
+prepare that worktree until the proof settles; status remains available. A
+changed main is reconciled on the next step. Another authorized driver can
 resume the persisted pair after a worker stops. A changed `origin/main` creates
 a successor from the original submitted tip. It retains the submission time
 and claim priority across successor sequence changes. Each drive call is

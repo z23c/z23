@@ -4017,6 +4017,60 @@ static int test_dev_land_malformed_queue_refusal(void)
     return failures;
 }
 
+static int test_dev_land_malformed_priority_refusal(void)
+{
+    int failures = 0;
+    TEST("land: malformed persisted priority refuses without losing the row") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1024], qpath[1200], before[8192], after[8192];
+        size_t before_len = 0, after_len = 0;
+        dlx_isolate("malformed_priority");
+        ASSERT(dlx_rig_make(&rig, "malformed_priority_rig"));
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "manual", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1) == 0);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir) <
+               (int)sizeof(qpath));
+        ASSERT(dlx_slurp(qpath, before, sizeof(before) - 1, &before_len));
+        before[before_len] = '\0';
+        char *priority = strstr(before, "\"priority_seq\":");
+        ASSERT(priority != NULL);
+        priority += strlen("\"priority_seq\":");
+        ASSERT(*priority == '1');
+        ASSERT(before_len + 2 < sizeof(before));
+        memmove(priority + 3, priority + 1, strlen(priority + 1) + 1);
+        priority[0] = '"';
+        priority[1] = 'x';
+        priority[2] = '"';
+        before_len += 2;
+        ASSERT(dlx_write(qpath, before));
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_1");
+        dlx_end(&c);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(qpath, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len);
+        ASSERT(memcmp(before, after, before_len) == 0);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_dev_land_malformed_outcome_refusal(void)
 {
     int failures = 0;
@@ -4412,6 +4466,7 @@ int test_dev_land(void)
     failures += test_dev_land_watcher_admission();
     failures += test_dev_land_long_proof_root();
     failures += test_dev_land_malformed_queue_refusal();
+    failures += test_dev_land_malformed_priority_refusal();
     failures += test_dev_land_malformed_outcome_refusal();
     failures += test_dev_land_exact_tree();
     failures += test_dev_land_source_binding();

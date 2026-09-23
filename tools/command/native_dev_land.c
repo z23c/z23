@@ -652,11 +652,20 @@ struct dl_row {
     char detail[256];
 };
 
-static bool dl_row_json_ok(const char *line)
+static bool dl_row_json_ok(const char *line, long long *priority,
+                           bool *has_priority)
 {
     struct json_value doc;
+    const struct json_value *field;
     json_init(&doc);
     bool ok = json_read(&doc, line, strlen(line)) && doc.type == JSON_OBJ;
+    field = ok ? json_get(&doc, "priority_seq") : NULL;
+    *has_priority = field != NULL;
+    if (field) {
+        ok = field->type == JSON_INT;
+        if (ok)
+            *priority = json_get_int(field);
+    }
     json_free(&doc);
     return ok;
 }
@@ -697,28 +706,27 @@ static bool dl_row_semantics_ok(const struct dl_row *r)
     return dl_row_state_ok(r) && dl_row_phase_ok(r) && dl_row_pair_ok(r);
 }
 
-static bool dl_priority_parse(const char *line, struct dl_row *r)
+static bool dl_priority_parse(struct dl_row *r, long long priority,
+                              bool has_priority)
 {
-    long long priority = 0;
-    r->priority_seq = r->seq;
-    if (!dl_line_int(line, "priority_seq", &priority))
-        return true;
-    if (priority < 1 || priority > r->seq)
+    if (has_priority && (priority < 1 || priority > r->seq))
         return false;
-    r->priority_seq = priority;
+    r->priority_seq = has_priority ? priority : r->seq;
     return true;
 }
 
 static bool dl_parse_row(const char *line, struct dl_row *r)
 {
+    long long priority = 0;
+    bool has_priority = false;
     if (!line || !line[0] || !r)
         return false;
-    if (!dl_row_json_ok(line))
+    if (!dl_row_json_ok(line, &priority, &has_priority))
         return false;
     memset(r, 0, sizeof(*r));
     if (!dl_line_int(line, "seq", &r->seq) || r->seq < 1)
         return false;
-    if (!dl_priority_parse(line, r))
+    if (!dl_priority_parse(r, priority, has_priority))
         return false;
     if (!dl_line_str(line, "tip", r->tip, sizeof(r->tip)) ||
         !dl_sha_ok(r->tip))
@@ -5930,9 +5938,17 @@ static int dl_drive_proof(struct zcl_command_reply *reply)
 }
 #endif
 
-/* One bounded integrator session. Proof execution does not hold step.lock;
- * a PASS is followed immediately by another step that takes the short
- * publication slot and checks the remote base again. A lost CAS leaves the
+/* The dispatcher owns an initialized reply. Between drive cycles, release
+ * its prior data before writing the next step's result. */
+static void dl_drive_reply_reset(struct zcl_command_reply *reply)
+{
+    zcl_command_reply_free(reply);
+    zcl_command_reply_init(reply, "zcl.land.v1");
+}
+
+/* One bounded integrator session. Proof holds the shared step guard rather
+ * than the exclusive preparation slot. A PASS is followed immediately by a
+ * step that checks the remote base before publication. A lost CAS leaves the
  * same aged row queued for this or any later driver. */
 static void dl_drive(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
@@ -5950,8 +5966,7 @@ static void dl_drive(const struct zcl_command_request *req,
             return;
         state = json_get_str(json_get(&reply->data, "state"));
         if (state && strcmp(state, "rebased") == 0) {
-            zcl_command_reply_free(reply);
-            zcl_command_reply_init(reply, "zcl.land.v1");
+            dl_drive_reply_reset(reply);
             continue;
         }
         if (!state || (strcmp(state, "started") != 0 &&
@@ -5961,16 +5976,14 @@ static void dl_drive(const struct zcl_command_request *req,
         if (dl_drive_proof(reply) <= 0)
             return;
 #endif
-        zcl_command_reply_free(reply);
-        zcl_command_reply_init(reply, "zcl.land.v1");
+        dl_drive_reply_reset(reply);
         dl_step(req, reply);
         if (reply->status != ZCL_COMMAND_STATUS_PASSED)
             return;
         state = json_get_str(json_get(&reply->data, "state"));
         if (!state || strcmp(state, "rebased") != 0)
             return;
-        zcl_command_reply_free(reply);
-        zcl_command_reply_init(reply, "zcl.land.v1");
+        dl_drive_reply_reset(reply);
     }
     dl_fail(reply, "DRIVE_BUDGET_EXHAUSTED", "drive",
             "four proof cycles ended with a newer main tip; the aged row remains queued",
