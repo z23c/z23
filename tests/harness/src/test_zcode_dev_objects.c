@@ -7541,6 +7541,28 @@ static int test_zd_remote_receipt(void)
         ASSERT(vcs_zcode_remote_receipt_store_verified(
             dir, &receipt, publisher, observer, stored));
         ASSERT(memcmp(stored, receipt_root, 32) == 0);
+        struct vcs_zcode_remote_receipt_v1 recovered_receipt;
+        struct vcs_zcode_candidate_v1 recovered_candidate;
+        ASSERT(!vcs_zcode_remote_receipt_load_candidate_bound(
+            dir, receipt_root, publisher, observer,
+            &recovered_receipt, &recovered_candidate));
+        ASSERT_EQ(recovered_receipt.schema_version, 0);
+        ASSERT_EQ(recovered_candidate.schema_version, 0);
+        uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_candidate_serialize(&candidate, candidate_wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(dir, intent.candidate_root,
+            candidate_wire, sizeof(candidate_wire)));
+        ASSERT(vcs_zcode_remote_receipt_load_candidate_bound(
+            dir, receipt_root, publisher, observer,
+            &recovered_receipt, &recovered_candidate));
+        ASSERT(memcmp(&recovered_receipt, &receipt, sizeof(receipt)) == 0);
+        ASSERT(memcmp(&recovered_candidate, &candidate, sizeof(candidate)) == 0);
+        ASSERT(!vcs_zcode_remote_receipt_load_candidate_bound(
+            dir, receipt_root, publisher, publisher,
+            &recovered_receipt, &recovered_candidate));
+        ASSERT_EQ(recovered_receipt.schema_version, 0);
+        ASSERT_EQ(recovered_candidate.schema_version, 0);
         struct vcs_zcode_remote_receipt_v1 loaded;
         ASSERT(vcs_zcode_remote_receipt_load_verified(
             dir, receipt_root, publisher, observer, &loaded));

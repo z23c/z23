@@ -187,6 +187,17 @@ bool vcs_zcode_remote_receipt_candidate_matches(
     const uint8_t publisher_signer[32],
     const uint8_t observer_signer[32]);
 
+/* Restart-safe CAS reload of the signed receipt, its signed intent, and the
+ * exact canonical candidate named by that intent. Clears both outputs on
+ * refusal. Success proves object identity and source-root binding only;
+ * independent remote-ref and ancestry verification is still required. */
+bool vcs_zcode_remote_receipt_load_candidate_bound(
+    const char *workspace, const uint8_t receipt_root[32],
+    const uint8_t publisher_signer[32],
+    const uint8_t observer_signer[32],
+    struct vcs_zcode_remote_receipt_v1 *out_receipt,
+    struct vcs_zcode_candidate_v1 *out_candidate);
+
 /* Both operations independently load the signed intent from the existing CAS.
  * Store refuses if intent persistence or target binding is missing. A repeated
  * exact store is idempotent; conflicting addressed bytes remain untouched.

@@ -653,6 +653,44 @@ bool vcs_zcode_remote_receipt_load_verified(
     return ok;
 }
 
+bool vcs_zcode_remote_receipt_load_candidate_bound(
+    const char *workspace, const uint8_t receipt_root[32],
+    const uint8_t publisher_signer[32],
+    const uint8_t observer_signer[32],
+    struct vcs_zcode_remote_receipt_v1 *out_receipt,
+    struct vcs_zcode_candidate_v1 *out_candidate)
+{
+    if (!out_receipt || !out_candidate)
+        LOG_FAIL("vcs.remote_receipt", "missing recovery output");
+    memset(out_receipt, 0, sizeof(*out_receipt));
+    memset(out_candidate, 0, sizeof(*out_candidate));
+    if (!workspace || !workspace[0] || !receipt_root || !publisher_signer ||
+        !observer_signer)
+        LOG_FAIL("vcs.remote_receipt", "missing recovery input");
+    struct vcs_zcode_remote_receipt_v1 receipt;
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_remote_receipt_load_verified(workspace, receipt_root,
+            publisher_signer, observer_signer, &receipt) ||
+        !vcs_zcode_publication_load_verified(workspace,
+            receipt.publication_root, publisher_signer, &intent))
+        LOG_FAIL("vcs.remote_receipt", "receipt or intent recovery refused");
+    uint8_t *wire = NULL, checked[32];
+    size_t length = 0;
+    struct vcs_zcode_candidate_v1 candidate;
+    bool ok = vcs_object_load_raw_bounded(workspace, intent.candidate_root,
+            VCS_ZCODE_CANDIDATE_WIRE_BYTES, &wire, &length) == 0 &&
+        vcs_zcode_candidate_parse(wire, length, &candidate) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(&candidate, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(checked, intent.candidate_root, 32) == 0;
+    free(wire);
+    if (!ok || !vcs_zcode_remote_receipt_candidate_matches(&receipt, &intent,
+            &candidate, publisher_signer, observer_signer))
+        LOG_FAIL("vcs.remote_receipt", "candidate recovery or source binding refused");
+    *out_receipt = receipt;
+    *out_candidate = candidate;
+    return true;
+}
+
 static bool remote_receipt_store_payload(
     const struct vcs_zcode_remote_receipt_v1 *receipt,
     const uint8_t observer_signer[32], uint8_t root[32],
