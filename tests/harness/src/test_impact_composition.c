@@ -6483,13 +6483,15 @@ static int test_ic_foreground_refuses_watcher(void)
 }
 
 static pid_t ic_foreground_requester(const char *root, const char *path,
-                                       const int channels[2])
+                                       const int channels[2], bool independent)
 {
     pid_t requester = fork();
     if (requester != 0) return requester;
     (void)close(channels[0]);
     (void)close(channels[1]);
     if (setpgid(0, 0) != 0 || setenv("PATH", path, 1) != 0 ||
+        (independent && (setenv("HOME", root, 1) != 0 ||
+                         setenv("XDG_STATE_HOME", root, 1) != 0)) ||
         setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0) _exit(2);
     struct zcl_dev_proof_status status = {0};
     int result = zcl_dev_proof_step(root,
@@ -6568,7 +6570,7 @@ static bool ic_foreground_owner_case(int signal_number)
     int channels[2] = {-1, -1};
     char path[8192];
     if (!ic_landing_blocking_git(f.root, channels, path)) return false;
-    pid_t requester = ic_foreground_requester(f.root, path, channels);
+    pid_t requester = ic_foreground_requester(f.root, path, channels, false);
     if (requester < 0) return false;
     bool observed = ic_foreground_owner_observe(&f, requester, channels[0], signal_number);
     bool released = write(channels[1], "done\n", 5) == 5;
@@ -6586,6 +6588,96 @@ static int test_ic_foreground_owner_lifetime(void)
     TEST("proof step: requester cancellation settles worker; requester death preserves its guard") {
         ASSERT(ic_foreground_owner_case(SIGTERM));
         ASSERT(ic_foreground_owner_case(SIGKILL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ic_proof_state_entries(const char *root, const char *name)
+{
+    char path[4096];
+    if (snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s", root,
+                 name) >= (int)sizeof(path))
+        return -1;
+    DIR *directory = opendir(path);
+    if (!directory) return -1;
+    int count = 0;
+    for (struct dirent *entry = readdir(directory); entry;
+         entry = readdir(directory)) {
+        if (strcmp(entry->d_name, ".") != 0 &&
+            strcmp(entry->d_name, "..") != 0)
+            count++;
+    }
+    return closedir(directory) == 0 ? count : -1;
+}
+
+struct ic_competing_proof_observation {
+    bool ready, released, owner_reaped, failure_persisted, watcher_absent;
+    int attempts_during, attempts_after, loser_result, retry_result;
+    int loser_state, retry_state, owner_status;
+    char loser_detail[128];
+    bool cleaned;
+};
+
+static void ic_competing_proof_case(struct ic_competing_proof_observation *o)
+{
+    static const char local[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char base[] = "1111111111111111111111111111111111111111";
+    struct ic_landing_proof_fixture f = {0};
+    int channels[2] = {-1, -1};
+    char path[8192], watcher[4096];
+    pid_t worker = -1;
+    bool prepared = ic_landing_proof_prepare(&f, "competing-proof") &&
+                    ic_landing_blocking_git(f.root, channels, path);
+    if (prepared)
+        worker = ic_foreground_requester(f.root, path, channels, true);
+    if (worker > 0) {
+        struct pollfd ready = {.fd = channels[0], .events = POLLIN};
+        o->ready = poll(&ready, 1, 10000) == 1 &&
+                   (ready.revents & POLLIN) != 0;
+        if (o->ready) {
+            struct zcl_dev_proof_status status = {0};
+            o->attempts_during = ic_proof_state_entries(f.root, "attempts");
+            o->loser_result = zcl_dev_proof_step(f.root, local, base, &status);
+            o->loser_state = (int)status.state;
+            (void)snprintf(o->loser_detail, sizeof(o->loser_detail), "%s",
+                           status.detail);
+        }
+        o->released = write(channels[1], "done\n", 5) == 5;
+        o->owner_reaped = ic_foreground_reap(worker, &o->owner_status);
+        struct zcl_dev_proof_status status = {0};
+        o->retry_result = zcl_dev_proof_step(f.root, local, base, &status);
+        o->retry_state = (int)status.state;
+        o->attempts_after = ic_proof_state_entries(f.root, "attempts");
+        o->failure_persisted = access(f.failure, F_OK) == 0;
+        (void)snprintf(watcher, sizeof(watcher),
+                       "%s/.cache/zcl-dev-watch.lock", f.root);
+        o->watcher_absent = access(watcher, F_OK) != 0;
+    }
+    if (worker > 0) (void)kill(-worker, SIGKILL);
+    if (channels[0] >= 0) (void)close(channels[0]);
+    if (channels[1] >= 0) (void)close(channels[1]);
+    o->cleaned = prepared && test_rm_rf_recursive(f.parent) == 0;
+}
+
+static int test_ic_competing_fungible_proof_workers(void)
+{
+    int failures = 0;
+    TEST("proof step: independent worker owns one claim; loser retries terminal verdict") {
+        struct ic_competing_proof_observation o = {0};
+        ic_competing_proof_case(&o);
+        ASSERT(o.ready);
+        ASSERT_EQ(o.attempts_during, 1);
+        ASSERT_EQ(o.loser_result, 0);
+        ASSERT_EQ(o.loser_state, ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT_STR_EQ(o.loser_detail, "proof_execution_busy");
+        ASSERT(o.released && o.owner_reaped);
+        ASSERT(WIFEXITED(o.owner_status));
+        ASSERT_EQ(WEXITSTATUS(o.owner_status), 0);
+        ASSERT_EQ(o.retry_result, 1);
+        ASSERT_EQ(o.retry_state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT_EQ(o.attempts_after, 1);
+        ASSERT(o.failure_persisted && o.watcher_absent && o.cleaned);
         PASS();
     } _test_next:;
     return failures;
@@ -6692,7 +6784,8 @@ static bool ic_worker_death_setup(struct ic_worker_death_ctx *c)
                                 ic_worker_other_body) ||
         !ic_landing_blocking_git(c->f.root, c->channels, path))
         return false;
-    c->requester = ic_foreground_requester(c->f.root, path, c->channels);
+    c->requester = ic_foreground_requester(c->f.root, path, c->channels,
+                                           false);
     return c->requester >= 0;
 }
 
@@ -7106,6 +7199,7 @@ int test_impact_composition(void)
     failures += test_ic_foreground_execution_busy();
     failures += test_ic_foreground_refuses_watcher();
     failures += test_ic_foreground_owner_lifetime();
+    failures += test_ic_competing_fungible_proof_workers();
     failures += test_ic_worker_hard_death_containment();
 #endif
     failures += test_ic_truncated_closure_preserves_groups();
