@@ -243,6 +243,28 @@ vcs_zcode_publication_index_at(
     return index && i < index->count ? &index->entries[i] : NULL;
 }
 
+static void index_recovery_observations(
+    const struct vcs_zcode_publication_index *index, const char *root_hex,
+    struct vcs_zcode_publication_recovery_view *out)
+{
+    for (size_t i = 0; i < index->count; i++) {
+        const struct vcs_zcode_publication_observation_entry *entry =
+            &index->entries[i];
+        if (strcmp(entry->publication_root_hex, root_hex) != 0) continue;
+        if (entry->kind == VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT) {
+            out->remote_receipts++;
+        } else if (entry->kind == VCS_ZCODE_OBSERVATION_ATTEMPT_RESULT) {
+            out->attempt_results++;
+            if (entry->outcome == VCS_ZCODE_PUBLICATION_UNKNOWN)
+                out->unknown_attempts++;
+            else if (entry->outcome == VCS_ZCODE_PUBLICATION_ACCEPTED)
+                out->accepted_attempts++;
+            else if (entry->outcome == VCS_ZCODE_PUBLICATION_REJECTED)
+                out->rejected_attempts++;
+        }
+    }
+}
+
 bool vcs_zcode_publication_index_recovery(
     const struct vcs_zcode_publication_index *index,
     const char *repo_root,
@@ -261,22 +283,7 @@ bool vcs_zcode_publication_index_recovery(
         LOG_RETURN(false, INDEX_LOG, "publication intent is not stored and verified");
     char root_hex[65];
     zcl_hex_encode(publication_root, 32, root_hex);
-    for (size_t i = 0; i < index->count; i++) {
-        const struct vcs_zcode_publication_observation_entry *entry =
-            &index->entries[i];
-        if (strcmp(entry->publication_root_hex, root_hex) != 0) continue;
-        if (entry->kind == VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT) {
-            out->remote_receipts++;
-        } else if (entry->kind == VCS_ZCODE_OBSERVATION_ATTEMPT_RESULT) {
-            out->attempt_results++;
-            if (entry->outcome == VCS_ZCODE_PUBLICATION_UNKNOWN)
-                out->unknown_attempts++;
-            else if (entry->outcome == VCS_ZCODE_PUBLICATION_ACCEPTED)
-                out->accepted_attempts++;
-            else if (entry->outcome == VCS_ZCODE_PUBLICATION_REJECTED)
-                out->rejected_attempts++;
-        }
-    }
+    index_recovery_observations(index, root_hex, out);
     out->state = out->attempt_results || out->remote_receipts
         ? VCS_ZCODE_RECOVERY_RECONCILE_REMOTE
         : VCS_ZCODE_RECOVERY_RECHECK_UNDER_LEASE;
