@@ -7899,9 +7899,17 @@ static int test_zd_remote_receipt(void)
         ASSERT(memcmp(&loaded, &receipt, sizeof(receipt)) == 0);
         ASSERT(vcs_zcode_remote_receipt_parse(wire, sizeof(wire) - 1, &loaded)
                != VCS_ZCODE_DEV_OK);
+        ASSERT(zd_index_drop_object(dir, receipt_root));
+        const uint8_t corrupt_remote_receipt[] = "interrupted-remote-receipt";
+        ASSERT(vcs_object_put_addressed(
+            dir, receipt_root, corrupt_remote_receipt,
+            sizeof(corrupt_remote_receipt)));
         ASSERT(vcs_zcode_remote_receipt_store_verified(
             dir, &receipt, publisher, observer, stored));
         ASSERT(memcmp(stored, receipt_root, 32) == 0);
+        ASSERT(vcs_zcode_remote_receipt_load_verified(
+            dir, receipt_root, publisher, observer, &loaded));
+        ASSERT(memcmp(&loaded, &receipt, sizeof(receipt)) == 0);
         projection = vcs_zcode_publication_index_build(dir);
         ASSERT(projection != NULL);
         ASSERT(vcs_zcode_publication_index_complete(projection));

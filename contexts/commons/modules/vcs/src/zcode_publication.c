@@ -724,7 +724,8 @@ bool vcs_zcode_remote_receipt_store_verified(
             publisher_signer, &intent) || !remote_receipt_intent_matches(receipt, &intent))
         LOG_FAIL("vcs.remote_receipt", "stored publication intent missing or mismatched");
     struct vcs_zcode_remote_receipt_v1 checked;
-    if (!vcs_object_put_addressed(workspace, root, wire, sizeof(wire)) ||
+    if (!vcs_object_put_addressed_repair(
+            workspace, root, wire, sizeof(wire), NULL) ||
         !vcs_zcode_remote_receipt_load_verified(workspace, root,
             publisher_signer, observer_signer, &checked))
         LOG_FAIL("vcs.remote_receipt", "stored remote receipt did not verify");
