@@ -113,6 +113,22 @@ bool store_name_is_hex64(const char *name)
     return zcl_hex_decode_lower(name, scratch, 32);
 }
 
+#if !defined(_WIN32)
+static bool store_mkdir_real(const char *path)
+{
+    if (mkdir(path, 0700) != 0 && errno != EEXIST)
+        LOG_FAIL(STORE_LOG, "create store directory %s: %s", path,
+                 strerror(errno));
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        LOG_FAIL(STORE_LOG, "inspect store directory %s: %s", path,
+                 strerror(errno));
+    if (!S_ISDIR(st.st_mode))
+        LOG_FAIL(STORE_LOG, "store path is not a real directory: %s", path);
+    return true;
+}
+#endif
+
 bool store_mkdir_p(const char *path)
 {
 #if defined(_WIN32)
@@ -149,13 +165,11 @@ bool store_mkdir_p(const char *path)
         if (*p != '/')
             continue;
         *p = '\0';
-        if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+        if (!store_mkdir_real(buf))
             return false;
         *p = '/';
     }
-    if (mkdir(buf, 0700) != 0 && errno != EEXIST)
-        return false;
-    return true;
+    return store_mkdir_real(buf);
 #endif
 }
 

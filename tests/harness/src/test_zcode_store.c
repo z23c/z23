@@ -782,6 +782,44 @@ static int t_swarm_receipt_dump_state(void)
 }
 
 
+static int t_store_blocked_manifest_recovery(void)
+{
+    int failures = 0;
+    char dd[256], manifests[512], saved[512], cas[640];
+    struct vcs_package_store *store =
+        zs_open(dd, sizeof(dd), "manifest-blocker", 1000000u);
+    ZS_CHECK("recovery blocker: store opens", store != NULL);
+    if (!store)
+        return failures;
+    static const uint8_t bytes[] = "persisted package bytes";
+    uint8_t root[32] = {0}, chunk[32] = {0};
+    bool stored = vcs_blob_put_to(store, bytes, sizeof(bytes) - 1u, root) ==
+                      VCS_BLOB_OK &&
+                  vcs_package_chunk_hash(bytes, sizeof(bytes) - 1u, chunk);
+    char chunk_hex[65];
+    zs_hex32(chunk, chunk_hex);
+    zs_store_path(manifests, sizeof(manifests), dd, "manifests");
+    zs_store_path(saved, sizeof(saved), dd, "manifests.saved");
+    (void)snprintf(cas, sizeof(cas), "%s/zcode/cas/sha3/%.2s/%s", dd,
+                   chunk_hex, chunk_hex);
+    ZS_CHECK("recovery blocker: committed CAS exists", stored &&
+             zs_path_exists(cas));
+    vcs_package_store_close(store);
+
+    bool blocked = stored && rename(manifests, saved) == 0;
+    FILE *file = blocked ? fopen(manifests, "wb") : NULL;
+    blocked = file != NULL && fclose(file) == 0;
+    struct vcs_package_store *reopened =
+        blocked ? vcs_package_store_open(dd, 1000000u) : NULL;
+    ZS_CHECK("recovery refuses a file blocking committed manifests",
+             blocked && reopened == NULL);
+    ZS_CHECK("recovery leaves committed CAS intact on refusal",
+             blocked && zs_path_exists(cas));
+    vcs_package_store_close(reopened);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int test_zcode_store(void)
 {
     printf("\n=== zcode_store: local content-addressed package store ===\n");
@@ -791,6 +829,7 @@ int test_zcode_store(void)
     failures += t_store_chunk_flow();
     failures += t_store_dedup();
     failures += t_store_recovery();
+    failures += t_store_blocked_manifest_recovery();
     failures += t_store_corrupt_read_repair();
     failures += t_store_staging_quota();
     failures += t_store_hot_eviction();

@@ -419,7 +419,7 @@ contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_put_manifest:
 contexts/commons/modules/vcs/src/package_store_io.c:store_atomic_write:25
 contexts/commons/modules/vcs/src/package_store_io.c:store_gc_cas:31
 contexts/commons/modules/vcs/src/package_store_io.c:store_load_manifests:21
-contexts/commons/modules/vcs/src/package_store_io.c:store_mkdir_p:23
+contexts/commons/modules/vcs/src/package_store_io.c:store_mkdir_p:20
 contexts/commons/modules/vcs/src/package_store_io.c:store_package_commit:19
 contexts/commons/modules/vcs/src/package_store_io.c:store_read_file:19
 contexts/commons/modules/vcs/src/package_store_io.c:store_rm_rf:37
