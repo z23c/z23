@@ -23,6 +23,11 @@ function ConvertTo-Z23MsysPath {
     throw "z23-windows-path: REFUSE: expected an absolute drive or UNC path, got '$full'"
 }
 
+function Test-Z23FullyQualifiedDrivePath {
+    param([string]$Path)
+    return $Path -match '^[A-Za-z]:[\\/]'
+}
+
 function Resolve-Z23Msys2Root {
     [CmdletBinding()]
     param(
@@ -30,14 +35,14 @@ function Resolve-Z23Msys2Root {
         [string]$Path
     )
 
-    if (-not [System.IO.Path]::IsPathFullyQualified($Path)) {
-        throw "z23-windows-path: REFUSE: MSYS2 root must be an absolute path, got '$Path'"
-    }
     if ($Path.StartsWith('\\?\') -or $Path.StartsWith('\\.\')) {
         throw "z23-windows-path: REFUSE: device-path MSYS2 roots are not qualified"
     }
     if ($Path.StartsWith('\\')) {
         throw "z23-windows-path: REFUSE: UNC MSYS2 roots are not qualified"
+    }
+    if (-not (Test-Z23FullyQualifiedDrivePath -Path $Path)) {
+        throw "z23-windows-path: REFUSE: MSYS2 root must be an absolute path, got '$Path'"
     }
     if ($Path.Contains(';')) {
         throw "z23-windows-path: REFUSE: MSYS2 root cannot contain the Windows PATH separator ';'"
@@ -64,6 +69,18 @@ namespace Z23 {
 }
 
 function Assert-Z23MsysPathContract {
+    $qualificationCases = @(
+        @{ Input = 'C:\msys64'; Expected = $true },
+        @{ Input = 'D:/msys64'; Expected = $true },
+        @{ Input = 'C:msys64'; Expected = $false },
+        @{ Input = '.\msys64'; Expected = $false }
+    )
+    foreach ($case in $qualificationCases) {
+        $actual = Test-Z23FullyQualifiedDrivePath -Path $case.Input
+        if ($actual -ne $case.Expected) {
+            throw "z23-windows-path: SELFTEST FAIL: drive qualification for '$($case.Input)'"
+        }
+    }
     $cases = @(
         @{ Input = 'D:\msys64'; Expected = '/d/msys64' },
         @{ Input = 'C:\Program Files\MSYS2'; Expected = '/c/Program Files/MSYS2' },
