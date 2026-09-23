@@ -3231,10 +3231,60 @@ static int test_zd_improve_command(void)
         struct vcs_package_manifest bounded_tree_manifest;
         vcs_package_manifest_init(&bounded_tree_manifest);
         uint64_t bounded_tree_bytes = 0;
+        struct vcs_manifest budget_tree;
+        ASSERT(vcs_tree_load(workspace, candidate.candidate_source_root,
+                             &budget_tree));
+        ASSERT(budget_tree.count > 1);
+        ASSERT(budget_tree.entries[0].size > 0);
+        ASSERT(budget_tree.entries[1].size > 0);
+        ASSERT(vcs_package_content_add_file(
+            &bounded_tree_manifest, "existing.txt", VCS_PACKAGE_MODE_FILE,
+            (const uint8_t *)"seed", 4));
+        uint8_t before_tree_root[32], after_tree_root[32];
+        ASSERT(vcs_package_manifest_root(
+            &bounded_tree_manifest, before_tree_root));
+        size_t candidate_tree_files = budget_tree.count;
+        ASSERT_EQ(vcs_zcode_candidate_tree_add_manifest(
+                      workspace, &task, &candidate,
+                      budget_tree.entries[0].size, &bounded_tree_manifest,
+                      &bounded_tree_bytes),
+                  VCS_ZCODE_CANDIDATE_TREE_LIMIT);
+        ASSERT_EQ(bounded_tree_manifest.count, 1);
+        ASSERT_STR_EQ(bounded_tree_manifest.files[0].path, "existing.txt");
+        ASSERT(vcs_package_manifest_root(
+            &bounded_tree_manifest, after_tree_root));
+        ASSERT(memcmp(before_tree_root, after_tree_root, 32) == 0);
+        vcs_manifest_free(&budget_tree);
         ASSERT_EQ(vcs_zcode_candidate_tree_add_manifest(
                       workspace, &task, &candidate, 1,
                       &bounded_tree_manifest, &bounded_tree_bytes),
                   VCS_ZCODE_CANDIDATE_TREE_LIMIT);
+        ASSERT(vcs_package_manifest_root(
+            &bounded_tree_manifest, after_tree_root));
+        ASSERT(memcmp(before_tree_root, after_tree_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_candidate_tree_add_manifest(
+                      workspace, &task, &candidate,
+                      task.max_context_bytes, &bounded_tree_manifest,
+                      &bounded_tree_bytes),
+                  VCS_ZCODE_CANDIDATE_TREE_OK);
+        ASSERT_EQ(bounded_tree_manifest.count, candidate_tree_files + 1u);
+        uint8_t retried_tree_root[32], fresh_tree_root[32];
+        ASSERT(vcs_package_manifest_root(
+            &bounded_tree_manifest, retried_tree_root));
+        struct vcs_package_manifest fresh_tree_manifest;
+        vcs_package_manifest_init(&fresh_tree_manifest);
+        ASSERT(vcs_package_content_add_file(
+            &fresh_tree_manifest, "existing.txt", VCS_PACKAGE_MODE_FILE,
+            (const uint8_t *)"seed", 4));
+        ASSERT_EQ(vcs_zcode_candidate_tree_add_manifest(
+                      workspace, &task, &candidate,
+                      task.max_context_bytes, &fresh_tree_manifest,
+                      &bounded_tree_bytes),
+                  VCS_ZCODE_CANDIDATE_TREE_OK);
+        ASSERT(vcs_package_manifest_root(
+            &fresh_tree_manifest, fresh_tree_root));
+        ASSERT(memcmp(retried_tree_root, fresh_tree_root, 32) == 0);
+        vcs_package_manifest_free(&fresh_tree_manifest);
         vcs_package_manifest_free(&bounded_tree_manifest);
         uint8_t transfer_root[32], transfer_action[32];
         int64_t transfer_now = (int64_t)platform_time_wall_unix();

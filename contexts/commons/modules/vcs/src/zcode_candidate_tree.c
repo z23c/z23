@@ -91,6 +91,62 @@ static enum vcs_zcode_candidate_tree_result candidate_tree_add_entry(
     return result;
 }
 
+static enum vcs_zcode_candidate_tree_result candidate_tree_manifest_copy(
+    const struct vcs_package_manifest *source,
+    struct vcs_package_manifest *copy)
+{
+    vcs_package_manifest_init(copy);
+    uint8_t root[32];
+    if (!vcs_package_manifest_root(source, root))
+        return VCS_ZCODE_CANDIDATE_TREE_SHAPE;
+    if (source->count == 0) return VCS_ZCODE_CANDIDATE_TREE_OK;
+    copy->files = zcl_calloc(source->count, sizeof(*copy->files),
+                             "zcode.candidate_tree.manifest_copy");
+    if (!copy->files) return VCS_ZCODE_CANDIDATE_TREE_ALLOC;
+    copy->cap = source->count;
+    for (size_t i = 0; i < source->count; i++) {
+        const struct vcs_package_file *from = &source->files[i];
+        struct vcs_package_file *to = &copy->files[i];
+        copy->count = i + 1u;
+        to->mode = from->mode;
+        to->size = from->size;
+        to->chunk_count = from->chunk_count;
+        to->path = zcl_strdup(from->path,
+                              "zcode.candidate_tree.manifest_path");
+        if (!to->path) return VCS_ZCODE_CANDIDATE_TREE_ALLOC;
+        if (from->chunk_count > 0) {
+            size_t hash_bytes = (size_t)from->chunk_count * 32u;
+            to->chunk_hashes = zcl_malloc(hash_bytes,
+                                "zcode.candidate_tree.manifest_hashes");
+            if (!to->chunk_hashes) return VCS_ZCODE_CANDIDATE_TREE_ALLOC;
+            memcpy(to->chunk_hashes, from->chunk_hashes, hash_bytes);
+        }
+    }
+    return VCS_ZCODE_CANDIDATE_TREE_OK;
+}
+
+static enum vcs_zcode_candidate_tree_result candidate_tree_append_entries(
+    const char *repo_root, const struct vcs_manifest *tree,
+    uint64_t max_bytes, struct vcs_package_manifest *manifest,
+    uint64_t *tree_bytes)
+{
+    if (manifest->count > VCS_PACKAGE_MAX_FILES ||
+        tree->count > VCS_PACKAGE_MAX_FILES - manifest->count)
+        return VCS_ZCODE_CANDIDATE_TREE_LIMIT;
+    uint64_t total = 0;
+    for (size_t i = 0; i < tree->count; i++) {
+        if (UINT64_MAX - total < tree->entries[i].size ||
+            total + tree->entries[i].size > max_bytes)
+            return VCS_ZCODE_CANDIDATE_TREE_LIMIT;
+        enum vcs_zcode_candidate_tree_result result =
+            candidate_tree_add_entry(repo_root, &tree->entries[i], manifest);
+        if (result != VCS_ZCODE_CANDIDATE_TREE_OK) return result;
+        total += tree->entries[i].size;
+    }
+    *tree_bytes = total;
+    return VCS_ZCODE_CANDIDATE_TREE_OK;
+}
+
 enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_add_manifest(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate, uint64_t max_bytes,
@@ -105,24 +161,20 @@ enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_add_manifest(
     struct vcs_manifest tree;
     if (!vcs_tree_load(repo_root, candidate->candidate_source_root, &tree))
         return VCS_ZCODE_CANDIDATE_TREE_CAS;
+    struct vcs_package_manifest staged;
     enum vcs_zcode_candidate_tree_result result =
-        tree.count > VCS_PACKAGE_MAX_FILES - manifest->count
-            ? VCS_ZCODE_CANDIDATE_TREE_LIMIT
-            : VCS_ZCODE_CANDIDATE_TREE_OK;
-    uint64_t total = 0;
-    for (size_t i = 0; result == VCS_ZCODE_CANDIDATE_TREE_OK &&
-                         i < tree.count; i++) {
-        if (UINT64_MAX - total < tree.entries[i].size ||
-            total + tree.entries[i].size > max_bytes) {
-            result = VCS_ZCODE_CANDIDATE_TREE_LIMIT;
-            break;
-        }
-        result = candidate_tree_add_entry(repo_root, &tree.entries[i],
-                                          manifest);
-        total += tree.entries[i].size;
-    }
+        candidate_tree_manifest_copy(manifest, &staged);
+    if (result == VCS_ZCODE_CANDIDATE_TREE_OK)
+        result = candidate_tree_append_entries(
+            repo_root, &tree, max_bytes, &staged, tree_bytes);
     vcs_manifest_free(&tree);
-    if (result == VCS_ZCODE_CANDIDATE_TREE_OK) *tree_bytes = total;
+    if (result == VCS_ZCODE_CANDIDATE_TREE_OK) {
+        vcs_package_manifest_free(manifest);
+        *manifest = staged;
+    } else {
+        vcs_package_manifest_free(&staged);
+        *tree_bytes = 0;
+    }
     return result;
 }
 

@@ -30,7 +30,8 @@ const char *vcs_zcode_candidate_tree_result_string(
 
 /* Add every regular candidate-tree entry to an existing content.v2
  * manifest under candidate/. Blob bytes come only from the verified ZVCS
- * CAS. max_bytes bounds their combined payload. */
+ * CAS. max_bytes bounds their combined payload. Refusal leaves the existing
+ * manifest unchanged so a retry cannot carry partial candidate files. */
 enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_add_manifest(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate, uint64_t max_bytes,
