@@ -648,6 +648,23 @@ static struct zcl_result pkgl_generations_path(const struct pkgl_ctx *ctx,
     return pkgl_join(ctx, rel, out, cap);
 }
 
+#ifndef _WIN32
+static struct zcl_result pkgl_active_parent_shape(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return errno == ENOENT
+            ? ZCL_OK
+            : ZCL_ERR(-1, "inspect active parent %s: %s", path,
+                      strerror(errno));
+    if (!S_ISDIR(st.st_mode))
+        return ZCL_ERR(-1, "active parent is not a real directory; inspect "
+                           "the substituted path and restore the local "
+                           "active directory: %s", path);
+    return ZCL_OK;
+}
+#endif
+
 static struct zcl_result pkgl_active_path(const struct pkgl_ctx *ctx,
                                           const char *name, char *out,
                                           size_t cap)
@@ -660,6 +677,16 @@ static struct zcl_result pkgl_active_path(const struct pkgl_ctx *ctx,
     int n = snprintf(rel, sizeof(rel), "active/%s/%s", publisher, package);
     if (n <= 0 || (size_t)n >= sizeof(rel))
         return ZCL_ERR(-1, "active path too long for %s", name);
+#ifndef _WIN32
+    char parent[PKGL_PATH_MAX];
+    ZCL_CHECK(pkgl_join(ctx, "active", parent, sizeof(parent)));
+    ZCL_CHECK(pkgl_active_parent_shape(parent));
+    n = snprintf(parent, sizeof(parent), "%s/active/%s", ctx->zcode_dir,
+                 publisher);
+    if (n <= 0 || (size_t)n >= sizeof(parent))
+        return ZCL_ERR(-1, "active publisher path too long for %s", name);
+    ZCL_CHECK(pkgl_active_parent_shape(parent));
+#endif
     return pkgl_join(ctx, rel, out, cap);
 }
 
