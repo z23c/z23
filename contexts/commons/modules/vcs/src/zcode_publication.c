@@ -237,3 +237,234 @@ enum vcs_zcode_dev_error vcs_zcode_publication_verify(
     return vcs_signed_evidence_verify_root(root, p->signature, p->author_pubkey, expected_signer)
         ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_SIGNATURE;
 }
+
+static const uint8_t remote_receipt_magic[8] = {'Z','C','R','R','C','P','\r','\n'};
+_Static_assert(VCS_ZCODE_REMOTE_RECEIPT_BODY_BYTES == 376u,
+               "remote receipt body offsets");
+_Static_assert(VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES == 440u,
+               "remote receipt wire offsets");
+
+static enum vcs_zcode_dev_error remote_receipt_fields(
+    const struct vcs_zcode_remote_receipt_v1 *r, bool signature)
+{
+    if (!r) return VCS_ZCODE_DEV_ERR_NULL;
+    if (r->schema_version != VCS_ZCODE_DEV_VERSION)
+        return VCS_ZCODE_DEV_ERR_VERSION;
+    const uint8_t *roots[] = {r->publication_root, r->target_identity_root,
+        r->fetched_main_source_root, r->verified_ancestry_root,
+        r->evidence_root};
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        if (!zcl_bytes_any_set(roots[i], 32))
+            return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+    if (!publication_oid_valid(r->fetched_main_tip, r->git_object_format) ||
+        !publication_ref_valid(r->target_ref))
+        return VCS_ZCODE_DEV_ERR_POLICY;
+    if (r->observed_unix <= 0) return VCS_ZCODE_DEV_ERR_TIME_ORDER;
+    if (!zcl_bytes_any_set(r->observer_pubkey, 32))
+        return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
+    if (signature && !zcl_bytes_any_set(r->signature, 64))
+        return VCS_ZCODE_DEV_ERR_SIGNATURE;
+    return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_validate(
+    const struct vcs_zcode_remote_receipt_v1 *receipt)
+{
+    return remote_receipt_fields(receipt, true);
+}
+
+static enum vcs_zcode_dev_error remote_receipt_body(
+    const struct vcs_zcode_remote_receipt_v1 *r,
+    uint8_t out[VCS_ZCODE_REMOTE_RECEIPT_BODY_BYTES])
+{
+    enum vcs_zcode_dev_error error = remote_receipt_fields(r, false);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    memset(out, 0, VCS_ZCODE_REMOTE_RECEIPT_BODY_BYTES);
+    memcpy(out, remote_receipt_magic, 8);
+    zcl_write_u16_le(out + 8, r->schema_version);
+    out[10] = r->git_object_format;
+    memcpy(out + 16, r->publication_root, 32);
+    memcpy(out + 48, r->target_identity_root, 32);
+    memcpy(out + 80, r->target_ref, VCS_ZCODE_PUBLICATION_REF_BYTES);
+    memcpy(out + 208, r->fetched_main_tip, 32);
+    memcpy(out + 240, r->fetched_main_source_root, 32);
+    memcpy(out + 272, r->verified_ancestry_root, 32);
+    memcpy(out + 304, r->evidence_root, 32);
+    zcl_write_i64_le(out + 336, r->observed_unix);
+    memcpy(out + 344, r->observer_pubkey, 32);
+    return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_serialize(
+    const struct vcs_zcode_remote_receipt_v1 *r,
+    uint8_t out[VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES])
+{
+    if (!out) return VCS_ZCODE_DEV_ERR_NULL;
+    enum vcs_zcode_dev_error error = remote_receipt_body(r, out);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    if (!zcl_bytes_any_set(r->signature, 64))
+        return VCS_ZCODE_DEV_ERR_SIGNATURE;
+    memcpy(out + VCS_ZCODE_REMOTE_RECEIPT_BODY_BYTES, r->signature, 64);
+    return VCS_ZCODE_DEV_OK;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_remote_receipt_v1 *out)
+{
+    if (!out) return VCS_ZCODE_DEV_ERR_NULL;
+    memset(out, 0, sizeof(*out));
+    if (!wire) return VCS_ZCODE_DEV_ERR_NULL;
+    if (wire_len != VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES)
+        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+    if (memcmp(wire, remote_receipt_magic, 8) != 0 ||
+        zcl_bytes_any_set(wire + 11, 5))
+        return VCS_ZCODE_DEV_ERR_WIRE_MAGIC;
+    struct vcs_zcode_remote_receipt_v1 r = {0};
+    r.schema_version = zcl_read_u16_le(wire + 8);
+    r.git_object_format = wire[10];
+    memcpy(r.publication_root, wire + 16, 32);
+    memcpy(r.target_identity_root, wire + 48, 32);
+    memcpy(r.target_ref, wire + 80, VCS_ZCODE_PUBLICATION_REF_BYTES);
+    memcpy(r.fetched_main_tip, wire + 208, 32);
+    memcpy(r.fetched_main_source_root, wire + 240, 32);
+    memcpy(r.verified_ancestry_root, wire + 272, 32);
+    memcpy(r.evidence_root, wire + 304, 32);
+    r.observed_unix = zcl_read_i64_le(wire + 336);
+    memcpy(r.observer_pubkey, wire + 344, 32);
+    memcpy(r.signature, wire + 376, 64);
+    enum vcs_zcode_dev_error error = remote_receipt_fields(&r, true);
+    if (error == VCS_ZCODE_DEV_OK) *out = r;
+    return error;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_root(
+    const struct vcs_zcode_remote_receipt_v1 *r, uint8_t out[32])
+{
+    if (!out) return VCS_ZCODE_DEV_ERR_NULL;
+    uint8_t wire[VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES];
+    enum vcs_zcode_dev_error error = vcs_zcode_remote_receipt_serialize(r, wire);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    static const char domain[] = VCS_ZCODE_REMOTE_RECEIPT_DOMAIN;
+    return vcs_signed_evidence_root(domain, sizeof(domain), wire, sizeof(wire), out)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
+}
+
+static enum vcs_zcode_dev_error remote_receipt_signing_root(
+    const struct vcs_zcode_remote_receipt_v1 *r, uint8_t out[32])
+{
+    uint8_t body[VCS_ZCODE_REMOTE_RECEIPT_BODY_BYTES];
+    enum vcs_zcode_dev_error error = remote_receipt_body(r, body);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    static const char domain[] = VCS_ZCODE_REMOTE_RECEIPT_SIGNING_DOMAIN;
+    return vcs_signed_evidence_root(domain, sizeof(domain), body, sizeof(body), out)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_NULL;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_seal(
+    struct vcs_zcode_remote_receipt_v1 *r,
+    const uint8_t secret[32], const uint8_t pubkey[32])
+{
+    if (!r || !secret || !pubkey) return VCS_ZCODE_DEV_ERR_NULL;
+    memcpy(r->observer_pubkey, pubkey, 32);
+    uint8_t root[32];
+    enum vcs_zcode_dev_error error = remote_receipt_signing_root(r, root);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    return vcs_signed_evidence_seal_root(root, secret, pubkey, r->signature)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_SIGNATURE;
+}
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_verify(
+    const struct vcs_zcode_remote_receipt_v1 *r,
+    const uint8_t expected_signer[32])
+{
+    if (!expected_signer) return VCS_ZCODE_DEV_ERR_NULL;
+    enum vcs_zcode_dev_error error = remote_receipt_fields(r, true);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    uint8_t root[32];
+    error = remote_receipt_signing_root(r, root);
+    if (error != VCS_ZCODE_DEV_OK) return error;
+    return vcs_signed_evidence_verify_root(root, r->signature,
+                r->observer_pubkey, expected_signer)
+        ? VCS_ZCODE_DEV_OK : VCS_ZCODE_DEV_ERR_SIGNATURE;
+}
+
+static bool remote_receipt_intent_matches(
+    const struct vcs_zcode_remote_receipt_v1 *r,
+    const struct vcs_zcode_publication_v1 *intent)
+{
+    uint8_t root[32];
+    return vcs_zcode_publication_root(intent, root) == VCS_ZCODE_DEV_OK &&
+        memcmp(root, r->publication_root, 32) == 0 &&
+        r->git_object_format == intent->git_object_format &&
+        memcmp(r->target_identity_root, intent->target_identity_root, 32) == 0 &&
+        memcmp(r->target_ref, intent->target_ref,
+               VCS_ZCODE_PUBLICATION_REF_BYTES) == 0;
+}
+
+bool vcs_zcode_remote_receipt_load_verified(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t publisher_signer[32], const uint8_t observer_signer[32],
+    struct vcs_zcode_remote_receipt_v1 *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!workspace || !workspace[0] || !root || !publisher_signer ||
+        !observer_signer) return false;
+    uint8_t *wire = NULL, checked[32];
+    size_t length = 0;
+    struct vcs_zcode_remote_receipt_v1 receipt;
+    bool ok = vcs_object_load_raw_bounded(workspace, root,
+            VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES, &wire, &length) == 0 &&
+        vcs_zcode_remote_receipt_parse(wire, length, &receipt) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_remote_receipt_root(&receipt, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(root, checked, 32) == 0 &&
+        vcs_zcode_remote_receipt_verify(&receipt, observer_signer) == VCS_ZCODE_DEV_OK;
+    free(wire);
+    struct vcs_zcode_publication_v1 intent;
+    if (ok) ok = vcs_zcode_publication_load_verified(workspace,
+            receipt.publication_root, publisher_signer, &intent) &&
+        remote_receipt_intent_matches(&receipt, &intent);
+    if (ok) *out = receipt;
+    return ok;
+}
+
+static bool remote_receipt_store_payload(
+    const struct vcs_zcode_remote_receipt_v1 *receipt,
+    const uint8_t observer_signer[32], uint8_t root[32],
+    uint8_t wire[VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES])
+{
+    return vcs_zcode_remote_receipt_verify(receipt, observer_signer) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_remote_receipt_root(receipt, root) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_remote_receipt_serialize(receipt, wire) == VCS_ZCODE_DEV_OK;
+}
+
+bool vcs_zcode_remote_receipt_store_verified(
+    const char *workspace, const struct vcs_zcode_remote_receipt_v1 *receipt,
+    const uint8_t publisher_signer[32], const uint8_t observer_signer[32],
+    uint8_t out_root[32])
+{
+    if (!out_root) LOG_FAIL("vcs.remote_receipt", "missing output root");
+    memset(out_root, 0, 32);
+    if (!workspace || !workspace[0] || !receipt || !publisher_signer ||
+        !observer_signer)
+        LOG_FAIL("vcs.remote_receipt", "missing store input");
+    uint8_t root[32], wire[VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES];
+    if (!remote_receipt_store_payload(receipt, observer_signer, root, wire))
+        LOG_FAIL("vcs.remote_receipt", "receipt signature or canonical bytes refused");
+    if (!vcs_object_store_initialized(workspace))
+        LOG_FAIL("vcs.remote_receipt", "publication CAS is not initialized");
+    if (!vcs_object_store_init(workspace))
+        LOG_FAIL("vcs.remote_receipt", "publication CAS parent barriers failed");
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_publication_load_verified(workspace, receipt->publication_root,
+            publisher_signer, &intent) || !remote_receipt_intent_matches(receipt, &intent))
+        LOG_FAIL("vcs.remote_receipt", "stored publication intent missing or mismatched");
+    struct vcs_zcode_remote_receipt_v1 checked;
+    if (!vcs_object_put_addressed(workspace, root, wire, sizeof(wire)) ||
+        !vcs_zcode_remote_receipt_load_verified(workspace, root,
+            publisher_signer, observer_signer, &checked))
+        LOG_FAIL("vcs.remote_receipt", "stored remote receipt did not verify");
+    memcpy(out_root, root, 32);
+    return true;
+}

@@ -77,4 +77,61 @@ bool vcs_zcode_publication_store_verified(
     const char *workspace, const struct vcs_zcode_publication_v1 *intent,
     const uint8_t expected_signer[32], uint8_t out_root[32]);
 
+/* An observer's immutable statement about a fetched remote ref. The producer
+ * must independently fetch and verify the remote, source root, and ancestry
+ * evidence before sealing; signature verification alone proves none of them.
+ * Store requires a previously persisted publication intent. The codec and CAS
+ * checks below do not grant terminal lifecycle status: the receiving policy
+ * must verify the referenced remote observations and ancestry separately. */
+#define VCS_ZCODE_REMOTE_RECEIPT_DOMAIN "zcl.zcode.remote_receipt.v1"
+#define VCS_ZCODE_REMOTE_RECEIPT_SIGNING_DOMAIN \
+    "zcl.zcode.remote_receipt.signing.v1"
+#define VCS_ZCODE_REMOTE_RECEIPT_BODY_BYTES 376u
+#define VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES 440u
+
+struct vcs_zcode_remote_receipt_v1 {
+    uint16_t schema_version;
+    uint8_t git_object_format;
+    uint8_t publication_root[32];
+    uint8_t target_identity_root[32];
+    char target_ref[VCS_ZCODE_PUBLICATION_REF_BYTES];
+    uint8_t fetched_main_tip[32];
+    uint8_t fetched_main_source_root[32];
+    uint8_t verified_ancestry_root[32];
+    uint8_t evidence_root[32];
+    int64_t observed_unix;
+    uint8_t observer_pubkey[32];
+    uint8_t signature[64];
+};
+
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_validate(
+    const struct vcs_zcode_remote_receipt_v1 *receipt);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_serialize(
+    const struct vcs_zcode_remote_receipt_v1 *receipt,
+    uint8_t out[VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES]);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_remote_receipt_v1 *out);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_root(
+    const struct vcs_zcode_remote_receipt_v1 *receipt, uint8_t out[32]);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_seal(
+    struct vcs_zcode_remote_receipt_v1 *receipt,
+    const uint8_t secret[32], const uint8_t pubkey[32]);
+enum vcs_zcode_dev_error vcs_zcode_remote_receipt_verify(
+    const struct vcs_zcode_remote_receipt_v1 *receipt,
+    const uint8_t expected_signer[32]);
+
+/* Both operations independently load the signed intent from the existing CAS.
+ * Store refuses if intent persistence or target binding is missing. A repeated
+ * exact store is idempotent; conflicting addressed bytes remain untouched.
+ * Neither operation searches for receipts by intent or proves remote success. */
+bool vcs_zcode_remote_receipt_store_verified(
+    const char *workspace, const struct vcs_zcode_remote_receipt_v1 *receipt,
+    const uint8_t publisher_signer[32], const uint8_t observer_signer[32],
+    uint8_t out_root[32]);
+bool vcs_zcode_remote_receipt_load_verified(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t publisher_signer[32], const uint8_t observer_signer[32],
+    struct vcs_zcode_remote_receipt_v1 *out);
+
 #endif /* ZCL_VCS_ZCODE_PUBLICATION_H */

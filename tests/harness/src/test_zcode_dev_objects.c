@@ -7295,6 +7295,90 @@ static int test_zd_publication_intent(void)
     return failures;
 }
 
+static int test_zd_remote_receipt(void)
+{
+    int failures = 0;
+    TEST("remote receipt: statement requires a stored intent") {
+        uint8_t publisher_seed[32] = {81}, observer_seed[32] = {82};
+        uint8_t publisher_secret[32], publisher[32], observer_secret[32], observer[32];
+        ed25519_keypair(publisher, publisher_secret, publisher_seed);
+        ed25519_keypair(observer, observer_secret, observer_seed);
+        struct vcs_zcode_publication_v1 intent = {
+            .schema_version = 1,
+            .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+            .target_ref = "refs/heads/main",
+            .created_unix = 1000,
+        };
+        memset(intent.candidate_root, 1, 32);
+        memset(intent.proof_set_root, 2, 32);
+        memset(intent.target_identity_root, 3, 32);
+        memset(intent.authority_root, 4, 32);
+        memset(intent.expected_base, 5, 20);
+        memset(intent.head_commit, 6, 20);
+        ASSERT_EQ(vcs_zcode_publication_seal(&intent, publisher_secret, publisher),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t intent_root[32], receipt_root[32], stored[32];
+        ASSERT_EQ(vcs_zcode_publication_root(&intent, intent_root), VCS_ZCODE_DEV_OK);
+        struct vcs_zcode_remote_receipt_v1 receipt = {
+            .schema_version = 1,
+            .git_object_format = VCS_ZCODE_PUBLICATION_GIT_OID_20,
+            .target_ref = "refs/heads/main",
+            .observed_unix = 1001,
+        };
+        memcpy(receipt.publication_root, intent_root, 32);
+        memcpy(receipt.target_identity_root, intent.target_identity_root, 32);
+        memcpy(receipt.fetched_main_tip, intent.head_commit, 32);
+        memset(receipt.fetched_main_source_root, 7, 32);
+        memset(receipt.verified_ancestry_root, 8, 32);
+        memset(receipt.evidence_root, 9, 32);
+        ASSERT_EQ(vcs_zcode_remote_receipt_seal(&receipt, observer_secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_remote_receipt_root(&receipt, receipt_root),
+                  VCS_ZCODE_DEV_OK);
+        char dir[512];
+        test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "remote_receipt");
+        ASSERT(vcs_object_store_init(dir));
+        ASSERT(!vcs_zcode_remote_receipt_store_verified(
+            dir, &receipt, publisher, observer, stored));
+        ASSERT(!zcl_bytes_any_set(stored, sizeof(stored)));
+        ASSERT(!vcs_object_has(dir, receipt_root));
+        ASSERT(vcs_zcode_publication_store_verified(dir, &intent, publisher, stored));
+        ASSERT(memcmp(stored, intent_root, 32) == 0);
+        struct vcs_zcode_remote_receipt_v1 wrong = receipt;
+        memcpy(wrong.target_ref, "refs/heads/other", 17);
+        ASSERT_EQ(vcs_zcode_remote_receipt_seal(&wrong, observer_secret, observer),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(!vcs_zcode_remote_receipt_store_verified(
+            dir, &wrong, publisher, observer, stored));
+        ASSERT(!zcl_bytes_any_set(stored, sizeof(stored)));
+        ASSERT(!vcs_zcode_remote_receipt_store_verified(
+            dir, &receipt, publisher, publisher, stored));
+        ASSERT(vcs_zcode_remote_receipt_store_verified(
+            dir, &receipt, publisher, observer, stored));
+        ASSERT(memcmp(stored, receipt_root, 32) == 0);
+        struct vcs_zcode_remote_receipt_v1 loaded;
+        ASSERT(vcs_zcode_remote_receipt_load_verified(
+            dir, receipt_root, publisher, observer, &loaded));
+        ASSERT(memcmp(&loaded, &receipt, sizeof(receipt)) == 0);
+        ASSERT(!vcs_zcode_remote_receipt_load_verified(
+            dir, receipt_root, publisher, publisher, &loaded));
+        uint8_t wire[VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_remote_receipt_serialize(&receipt, wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_remote_receipt_parse(wire, sizeof(wire), &loaded),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(&loaded, &receipt, sizeof(receipt)) == 0);
+        ASSERT(vcs_zcode_remote_receipt_parse(wire, sizeof(wire) - 1, &loaded)
+               != VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_zcode_remote_receipt_store_verified(
+            dir, &receipt, publisher, observer, stored));
+        ASSERT(memcmp(stored, receipt_root, 32) == 0);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_dev_objects(void)
 {
     int failures = 0;
@@ -7306,6 +7390,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_candidate_review();
     failures += test_zd_lane_receipt();
     failures += test_zd_publication_intent();
+    failures += test_zd_remote_receipt();
     failures += test_zd_receipt();
     failures += test_zd_work_context();
     failures += test_zd_work_swarm();
