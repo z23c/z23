@@ -369,6 +369,11 @@ static struct zcl_result pkgl_build_paths_init(const struct pkgl_ctx *ctx,
     zcl_hex_encode(root, 32, hex);
     char rel[128];
     ZCL_CHECK(pkgl_worker_path(p->worker, sizeof(p->worker)));
+#ifndef _WIN32
+    char buildwork[PKGL_PATH_MAX];
+    ZCL_CHECK(pkgl_join(ctx, "buildwork", buildwork, sizeof(buildwork)));
+    ZCL_CHECK(pkgl_parent_shape(buildwork, "buildwork"));
+#endif
     (void)snprintf(rel, sizeof(rel), "buildwork/%s", hex);
     ZCL_CHECK(pkgl_join(ctx, rel, p->emit, sizeof(p->emit)));
     (void)snprintf(rel, sizeof(rel), "installed/.stage-%s", hex);
