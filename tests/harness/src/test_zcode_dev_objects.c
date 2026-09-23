@@ -3374,12 +3374,65 @@ static int test_zd_improve_command(void)
                       received_transfer.task_authority,
                       received_transfer.task_authority_len),
                   VCS_ZCODE_TASK_AUTHORITY_OK);
+        /* A receiver may retain a corrupt addressed object across a crash.
+         * A verified bundle must repair it so the exact retry can finish. */
+        uint8_t *repair_patch_wire = NULL;
+        size_t repair_patch_len = 0;
+        ASSERT_EQ(vcs_object_load_raw(
+                      workspace, candidate.patch_root, &repair_patch_wire,
+                      &repair_patch_len), 0);
+        struct vcs_zcode_patch_v1 repair_patch;
+        ASSERT_EQ(vcs_zcode_patch_parse(
+                      repair_patch_wire, repair_patch_len, &repair_patch),
+                  VCS_ZCODE_PATCH_OK);
+        ASSERT_EQ(repair_patch.count, 1);
+        ASSERT_EQ(repair_patch.changes[0].kind, VCS_DIFF_MODIFIED);
+        const uint8_t corrupt_object[] = "interrupted-import";
+        ASSERT(vcs_object_put_addressed(
+            receiver, candidate.patch_root, corrupt_object,
+            sizeof(corrupt_object)));
+        ASSERT(vcs_object_put_addressed(
+            receiver, repair_patch.changes[0].new_blob, corrupt_object,
+            sizeof(corrupt_object)));
+        uint8_t *tampered_authority = zcl_malloc(
+            received_transfer.candidate_authority_len,
+            "test.candidate_bundle.tampered");
+        ASSERT(tampered_authority != NULL);
+        memcpy(tampered_authority, received_transfer.candidate_authority,
+               received_transfer.candidate_authority_len);
+        tampered_authority[received_transfer.candidate_authority_len - 1u] ^= 1u;
+        ASSERT_EQ(vcs_zcode_candidate_bundle_import(
+                      receiver, &received_transfer.task,
+                      &received_transfer.candidate, tampered_authority,
+                      received_transfer.candidate_authority_len),
+                  VCS_ZCODE_CANDIDATE_BUNDLE_AUTHORITY);
+        free(tampered_authority);
+        uint8_t *still_corrupt = NULL;
+        size_t still_corrupt_len = 0;
+        ASSERT_EQ(vcs_object_load_raw(
+                      receiver, candidate.patch_root, &still_corrupt,
+                      &still_corrupt_len), 0);
+        ASSERT_EQ(still_corrupt_len, sizeof(corrupt_object));
+        ASSERT(memcmp(still_corrupt, corrupt_object,
+                      sizeof(corrupt_object)) == 0);
+        free(still_corrupt);
         ASSERT_EQ(vcs_zcode_candidate_bundle_import(
                       receiver, &received_transfer.task,
                       &received_transfer.candidate,
                       received_transfer.candidate_authority,
                       received_transfer.candidate_authority_len),
                   VCS_ZCODE_CANDIDATE_BUNDLE_OK);
+        ASSERT_EQ(vcs_zcode_patch_verify_cas(receiver, &task, &candidate),
+                  VCS_ZCODE_PATCH_OK);
+        uint8_t *repaired_blob = NULL;
+        size_t repaired_blob_len = 0;
+        ASSERT_EQ(vcs_object_get(
+                      receiver, repair_patch.changes[0].new_blob,
+                      VCS_TAG_BLOB, &repaired_blob, &repaired_blob_len), 0);
+        ASSERT_EQ(repaired_blob_len, repair_patch.changes[0].new_size);
+        free(repaired_blob);
+        vcs_zcode_patch_free(&repair_patch);
+        free(repair_patch_wire);
         struct vcs_manifest remote_candidate_manifest;
         ASSERT(vcs_tree_load(receiver, candidate.candidate_source_root,
                              &remote_candidate_manifest));

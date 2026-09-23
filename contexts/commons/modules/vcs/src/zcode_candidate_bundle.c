@@ -360,7 +360,8 @@ static enum vcs_zcode_candidate_bundle_result bundle_store_blobs(
         const uint8_t *hash = at; uint64_t len = vcs_rd_u64le(at + 32);
         at += VCS_ZCODE_CANDIDATE_BUNDLE_BLOB_HEADER_BYTES;
         uint8_t got[32];
-        if (!vcs_object_put(repo_root, at, (size_t)len, VCS_TAG_BLOB, got) ||
+        if (!vcs_object_put_repair(repo_root, at, (size_t)len,
+                                   VCS_TAG_BLOB, got, NULL) ||
             memcmp(got, hash, 32) != 0)
             return VCS_ZCODE_CANDIDATE_BUNDLE_CAS;
         at += (size_t)len;
@@ -388,14 +389,15 @@ enum vcs_zcode_candidate_bundle_result vcs_zcode_candidate_bundle_import(
         return result;
     }
     if (!vcs_object_store_init(repo_root) ||
-        !vcs_object_put_addressed(repo_root, task->write_scope_root,
-                                  parts.scope, parts.scope_len) ||
-        !vcs_object_put_addressed(repo_root, candidate->patch_root,
-                                  parts.patch, parts.patch_len) ||
-        !vcs_object_put_addressed(repo_root, task->source_root,
-                                  parts.base, parts.base_len) ||
-        !vcs_object_put_addressed(repo_root, candidate->candidate_source_root,
-                                  parts.candidate, parts.candidate_len))
+        !vcs_object_put_addressed_repair(repo_root, task->write_scope_root,
+                                         parts.scope, parts.scope_len, NULL) ||
+        !vcs_object_put_addressed_repair(repo_root, candidate->patch_root,
+                                         parts.patch, parts.patch_len, NULL) ||
+        !vcs_object_put_addressed_repair(repo_root, task->source_root,
+                                         parts.base, parts.base_len, NULL) ||
+        !vcs_object_put_addressed_repair(
+            repo_root, candidate->candidate_source_root,
+            parts.candidate, parts.candidate_len, NULL))
         result = VCS_ZCODE_CANDIDATE_BUNDLE_CAS;
     if (result == VCS_ZCODE_CANDIDATE_BUNDLE_OK)
         result = bundle_store_blobs(repo_root, &parts);
