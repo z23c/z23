@@ -515,8 +515,8 @@ static int tc_batch_stats(void)
     return failures;
 }
 
-/* Acceptance 4: the invalidation matrix. A private-top edit moves exactly
- * one key; a shared-header edit moves all 32; an unrelated edit moves
+/* Acceptance 4: the invalidation matrix. Two private-top edits move only
+ * their own keys; a shared-header edit moves all 32; an unrelated edit moves
  * none. Depfiles are refreshed after every content edit (as a rebuild
  * would) so the matrix measures content reach, not graph staleness. One
  * helper per matrix step so each stays under the complexity cap. */
@@ -540,18 +540,18 @@ static bool tc_inv_baseline(const char *const *ptrs, uint8_t k0[TC_QN][32])
 }
 
 static bool tc_inv_private(const char *const *ptrs,
-                           const uint8_t k0[TC_QN][32])
+                           const uint8_t k0[TC_QN][32], int second)
 {
     struct testcache *tc = testcache_open(TC_FIX);
     bool selective = false;
     if (tc) {
         static struct testcache_probe out[TC_QN];
-        selective = testcache_probe_groups(tc, ptrs, NULL, TC_QN, out) &&
-                    memcmp(k0[6], out[6].key, 32) != 0 && !out[6].hit;
+        selective = testcache_probe_groups(tc, ptrs, NULL, TC_QN, out);
         for (int i = 0; selective && i < TC_QN; i++) {
-            if (i != 6 && memcmp(k0[i], out[i].key, 32) != 0)
+            bool edited = i == 6 || i == second;
+            bool moved = memcmp(k0[i], out[i].key, 32) != 0;
+            if (edited ? (!moved || out[i].hit) : (moved || !out[i].hit))
                 selective = false;
-            if (i != 6 && !out[i].hit) selective = false;
         }
         testcache_close(tc);
     }
@@ -612,7 +612,11 @@ static int tc_batch_invalidation(void)
     TC_CHECK("private-top edit of q07", tc_write_q_source(7, " + 1000") &&
              write_batch_depfiles());
     TC_CHECK("private edit invalidates only the group that reaches it",
-             tc_inv_private(ptrs, k0));
+             tc_inv_private(ptrs, k0, -1));
+    TC_CHECK("independent private-top edit of q19",
+             tc_write_q_source(19, " + 2000") && write_batch_depfiles());
+    TC_CHECK("both private edits invalidate only their own groups",
+             tc_inv_private(ptrs, k0, 18));
     TC_CHECK("shared-header edit", mk_write(TC_FIX,
              "core/modules/net/include/net/tc.h", TC_H_B) &&
              write_batch_depfiles());
@@ -1529,6 +1533,36 @@ static int tc_capsule_live_revalidate(void)
     return failures;
 }
 
+static int tc_non_test_controls_stable(void)
+{
+    int failures = 0;
+    const char *const controls[] = { "ZCL_LINT_TU_CACHE" };
+    for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
+        struct tc_envsave caller;
+        uint8_t keys[2][32] = {{0}};
+        bool valid[2] = {false, false};
+        tc_env_capture(&caller, controls[i]);
+        for (size_t value = 0; value < 2; value++) {
+            TC_CHECK("set non-test control",
+                     setenv(controls[i], value ? "1" : "0", 1) == 0);
+            struct testcache *tc = testcache_open(TC_FIX);
+            TC_CHECK("non-test control fixture opens", tc != NULL);
+            if (tc) {
+                struct testcache_probe p;
+                testcache_probe_group(tc, "test_demo_entry", &p);
+                valid[value] = p.cacheable && p.key_valid;
+                memcpy(keys[value], p.key, 32);
+                testcache_close(tc);
+            }
+        }
+        TC_CHECK("non-test control does not globally bust closure keys",
+                 valid[0] && valid[1] &&
+                 memcmp(keys[0], keys[1], 32) == 0);
+        tc_env_restore(&caller, controls[i]);
+    }
+    return failures;
+}
+
 int test_testcache(void)
 {
     int failures = 0;
@@ -2015,6 +2049,8 @@ int test_testcache(void)
              have_fast_a && have_fast_b &&
              memcmp(key_fast_a, key_fast_b, sizeof(key_fast_a)) == 0);
     tc_env_restore(&caller_fast_record, "ZCL_FAST_BUILD_SOURCE_RECORD");
+    /* The lint-only per-TU cache knob has no bearing on test verdicts. */
+    failures += tc_non_test_controls_stable();
 
     /* Both branches of the capture/restore pair on a private variable, so the
      * "caller had it set" case above is not the only one covered. test.c runs
