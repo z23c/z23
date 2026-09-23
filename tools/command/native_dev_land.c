@@ -1,7 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: dev.land — submit a tip for proof and push, ask what happened,
- *          and drive one scheduler step, so no agent ever waits on a proof
- *          or a push.
+ *          drive one scheduler step or one bounded integrator session.
  *
  * ── CONTRACT (this file is the whole implementation) ──────────────────────
  *
@@ -14,7 +13,7 @@
  * a proof, a build, or another host.
  *
  * INPUT (zcl.land_input.v1)
- *   action    string, required: submit | status | step | cancel. Also the
+ *   action    string, required: submit | status | step | drive | cancel. Also the
  *             first positional, so `z23-dev dev land submit ...` works.
  *   tip       submit only, required: a commit-ish resolved in the submitting
  *             checkout; the row stores the full 40-hex commit id.
@@ -100,10 +99,10 @@
  * a second driver that finds it held gets STEP_BUSY and retries rather than
  * racing the first driver's rebase/lint against the worktree.
  *
- * NOTHING WAITS. submit, status and cancel touch only local files. step does
- * the rebase and the lint pass it was called to do and then RETURNS on the
- * proof request; a later step reads the proof's own state. No call here ever
- * sleeps, polls, or waits for a proof to finish.
+ * submit, status and cancel touch only local files. step returns after
+ * requesting proof. drive performs at most four resumable cycles, releasing
+ * step.lock before a foreground proof and reclaiming it only for the
+ * publication beat. A stopped driver leaves the same durable queue row.
  */
 
 /* realpath() is declared by glibc only through the fortify inline unless a
@@ -644,6 +643,8 @@ struct dl_row {
     long long started;
     char base[80];
     char local[80];
+    char tree[80];
+    char proof_intent[176];
     char pushed[80];
     char dimension[48];
     char log_path[4096];
@@ -720,6 +721,9 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
     (void)dl_line_int(line, "started", &r->started);
     (void)dl_line_str(line, "base", r->base, sizeof(r->base));
     (void)dl_line_str(line, "local", r->local, sizeof(r->local));
+    (void)dl_line_str(line, "tree", r->tree, sizeof(r->tree));
+    (void)dl_line_str(line, "proof_intent", r->proof_intent,
+                      sizeof(r->proof_intent));
     (void)dl_line_str(line, "tip_pushed", r->pushed, sizeof(r->pushed));
     (void)dl_line_str(line, "dimension", r->dimension, sizeof(r->dimension));
     (void)dl_line_str(line, "log_path", r->log_path, sizeof(r->log_path));
@@ -727,11 +731,22 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
     return dl_row_semantics_ok(r);
 }
 
+static bool dl_escape_proof_fields(const struct dl_row *r,
+                                    char base[160], char local[160],
+                                    char tree[160], char intent[352])
+{
+    return dl_escape(r->base, base, 160) &&
+           dl_escape(r->local, local, 160) &&
+           dl_escape(r->tree, tree, 160) &&
+           dl_escape(r->proof_intent, intent, 352);
+}
+
 static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                           size_t *len_out)
 {
     char e_ts[128], e_tip[160], e_wt[8192], e_note[2048], e_state[64];
-    char e_phase[64], e_base[160], e_local[160], e_pushed[160];
+    char e_phase[64], e_base[160], e_local[160], e_tree[160];
+    char e_intent[352], e_pushed[160];
     /* r->detail is char[256]; dl_escape() can expand a raw control byte
      * (anything but \n/\r/\t) into a 6-byte "\u00XX" sequence, so an
      * ALL-control-byte detail needs up to 255*6=1530 bytes to escape
@@ -751,8 +766,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
         !dl_escape(r->note, e_note, sizeof(e_note)) ||
         !dl_escape(r->state, e_state, sizeof(e_state)) ||
         !dl_escape(r->phase, e_phase, sizeof(e_phase)) ||
-        !dl_escape(r->base, e_base, sizeof(e_base)) ||
-        !dl_escape(r->local, e_local, sizeof(e_local)) ||
+        !dl_escape_proof_fields(r, e_base, e_local, e_tree, e_intent) ||
         !dl_escape(r->pushed, e_pushed, sizeof(e_pushed)) ||
         !dl_escape(r->dimension, e_dim, sizeof(e_dim)) ||
         !dl_escape(r->log_path, e_log, sizeof(e_log)) ||
@@ -762,12 +776,13 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "{\"seq\":%lld,\"ts\":\"%s\",\"tip\":\"%s\","
                  "\"worktree\":\"%s\",\"note\":\"%s\",\"state\":\"%s\","
                  "\"phase\":\"%s\",\"attempt\":%lld,\"started\":%lld,"
-                 "\"base\":\"%s\",\"local\":\"%s\",\"tip_pushed\":\"%s\","
+                 "\"base\":\"%s\",\"local\":\"%s\",\"tree\":\"%s\","
+                 "\"proof_intent\":\"%s\",\"tip_pushed\":\"%s\","
                  "\"dimension\":\"%s\",\"log_path\":\"%s\","
                  "\"detail\":\"%s\"}\n",
                  r->seq, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
-                 r->attempt, r->started, e_base, e_local, e_pushed, e_dim,
-                 e_log, e_detail);
+                 r->attempt, r->started, e_base, e_local, e_tree, e_intent,
+                 e_pushed, e_dim, e_log, e_detail);
     if (w <= 0 || (size_t)w >= cap)
         return false;
     if (len_out)
@@ -1606,6 +1621,7 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
 /* ── the proof, through the existing dev.proof machinery ───────────────── */
 
 enum dl_proof {
+    DL_PROOF_MISSING = -3,
     DL_PROOF_UNAVAILABLE = -2,
     DL_PROOF_FAILED = -1,
     DL_PROOF_PENDING = 0,
@@ -1917,6 +1933,33 @@ int64_t zcl_native_dev_land_test_idle_bound(void)
 }
 #endif
 
+static enum dl_proof dl_proof_stub_read(const char *stub, const char *wt,
+                                        const char *local, const char *base,
+                                        char *dimension, size_t dim_cap,
+                                        char *detail, size_t cap)
+{
+    if (strcmp(stub, "pass") == 0) {
+        (void)snprintf(detail, cap, "proof stub: pass");
+        return DL_PROOF_PASSED;
+    }
+    if (strcmp(stub, "fail") == 0) {
+        (void)snprintf(dimension, dim_cap, "lint");
+        (void)snprintf(detail, cap, "proof stub: fail");
+        return DL_PROOF_FAILED;
+    }
+    if (strcmp(stub, "missing") == 0) {
+        (void)snprintf(detail, cap, "%s", "proof worker lost its request");
+        return DL_PROOF_MISSING;
+    }
+    if (strcmp(stub, "watcher_absent") == 0)
+        (void)snprintf(detail, cap, "%s", "resident_proof_watcher_absent");
+    else if (strcmp(stub, "manual") == 0)
+        dl_proof_step_detail(wt, local, base, detail, cap);
+    else
+        (void)snprintf(detail, cap, "proof stub: %s", stub);
+    return DL_PROOF_PENDING;
+}
+
 static enum dl_proof dl_proof_read(const char *wt, const char *local,
                                    const char *base, char *dimension,
                                    size_t dim_cap, char *detail, size_t cap)
@@ -1926,25 +1969,9 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
         detail[0] = '\0';
     if (dimension && dim_cap)
         dimension[0] = '\0';
-    if (stub) {
-        if (strcmp(stub, "pass") == 0) {
-            (void)snprintf(detail, cap, "proof stub: pass");
-            return DL_PROOF_PASSED;
-        }
-        if (strcmp(stub, "fail") == 0) {
-            (void)snprintf(dimension, dim_cap, "lint");
-            (void)snprintf(detail, cap, "proof stub: fail");
-            return DL_PROOF_FAILED;
-        }
-        if (strcmp(stub, "watcher_absent") == 0)
-            (void)snprintf(detail, cap, "%s",
-                           "resident_proof_watcher_absent");
-        else if (strcmp(stub, "manual") == 0)
-            dl_proof_step_detail(wt, local, base, detail, cap);
-        else
-            (void)snprintf(detail, cap, "proof stub: %s", stub);
-        return DL_PROOF_PENDING;
-    }
+    if (stub)
+        return dl_proof_stub_read(stub, wt, local, base, dimension,
+                                  dim_cap, detail, cap);
 #ifdef ZCL_DEV_BUILD
     {
         struct zcl_dev_proof_status status = {0};
@@ -1972,6 +1999,8 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
             return DL_PROOF_FAILED;
         case ZCL_DEV_PROOF_STATE_INVALID:
             return DL_PROOF_UNAVAILABLE;
+        case ZCL_DEV_PROOF_STATE_MISSING:
+            return DL_PROOF_MISSING;
         default:
             return DL_PROOF_PENDING;
         }
@@ -2894,31 +2923,41 @@ static bool dl_push_queued(struct json_value *arr, const struct dl_row *r)
     return ok;
 }
 
-static bool dl_push_inflight(struct json_value *obj, const struct dl_row *r,
-                             const char *proof_root, long long now)
+static bool dl_push_proof_action(struct json_value *obj,
+                                  const struct dl_row *r,
+                                  const char *proof_root)
 {
-    long long elapsed = now - r->started;
-    if (elapsed < 0)
-        elapsed = 0;
-    bool ok = json_push_kv_int(obj, "seq", r->seq) &&
-           json_push_kv_str(obj, "tip", r->tip) &&
-           json_push_kv_str(obj, "phase", r->phase) &&
-           json_push_kv_int(obj, "attempt", r->attempt) &&
-           json_push_kv_int(obj, "elapsed_s", elapsed) &&
-           json_push_kv_str(obj, "base", r->base);
-    if (!ok || strcmp(r->phase, "prove") != 0 ||
+    if (strcmp(r->phase, "prove") != 0 ||
         !dl_sha_ok(r->local) || !dl_sha_ok(r->base))
-        return ok;
+        return true;
     struct json_value step;
     json_init(&step);
     json_set_object(&step);
-    ok = json_push_kv_str(&step, "command", "dev.proof.step") &&
+    bool ok = json_push_kv_str(&step, "command", "dev.proof.step") &&
          json_push_kv_str(&step, "root", proof_root) &&
          json_push_kv_str(&step, "local_commit", r->local) &&
          json_push_kv_str(&step, "remote_base", r->base) &&
          json_push_kv(obj, "proof_step", &step);
     json_free(&step);
     return ok;
+}
+
+static bool dl_push_inflight(struct json_value *obj, const struct dl_row *r,
+                             const char *proof_root, long long now)
+{
+    long long elapsed = now - r->started;
+    if (elapsed < 0)
+        elapsed = 0;
+    return json_push_kv_int(obj, "seq", r->seq) &&
+           json_push_kv_str(obj, "tip", r->tip) &&
+           json_push_kv_str(obj, "phase", r->phase) &&
+           json_push_kv_int(obj, "attempt", r->attempt) &&
+           json_push_kv_int(obj, "elapsed_s", elapsed) &&
+           json_push_kv_str(obj, "base", r->base) &&
+           json_push_kv_str(obj, "local", r->local) &&
+           json_push_kv_str(obj, "tree", r->tree) &&
+           json_push_kv_str(obj, "proof_intent", r->proof_intent) &&
+           dl_push_proof_action(obj, r, proof_root);
 }
 
 static bool dl_push_outcome_row(struct json_value *arr,
@@ -3205,6 +3244,8 @@ static size_t dl_yield_index(const struct dl_row *rows, size_t nrows,
     return SIZE_MAX;
 }
 
+static void dl_log(const struct dl_row *row, const char *text);
+
 /* A repeatedly moving base must give later requests a turn. Replace the
  * inflight row with one higher-sequence queued successor in a single queue
  * rewrite. The original tip stays byte-identical; a crash sees either the
@@ -3215,6 +3256,8 @@ static bool dl_yield_successor(const struct dl_dirs *d, struct dl_row *row,
     struct dl_row *rows = NULL;
     size_t nrows = 0, at = SIZE_MAX;
     char qpath[4096 + 32];
+    const char *why = NULL;
+    long long next_seq = 1;
     int lock;
     bool ok = false;
     if (!d || !row || !predecessor ||
@@ -3223,18 +3266,26 @@ static bool dl_yield_successor(const struct dl_dirs *d, struct dl_row *row,
         return false;
     lock = dl_rows_lock(d->land);
     if (lock < 0) return false;
-    if (!dl_load_rows(qpath, &rows, &nrows, NULL, 0) || nrows == 0 ||
-        rows[nrows - 1].seq == LLONG_MAX)
+    if (!dl_load_rows(qpath, &rows, &nrows, NULL, 0) || nrows == 0)
         goto done;
     at = dl_yield_index(rows, nrows, row);
     if (at == SIZE_MAX) goto done; /* cancel won the row lock */
+    if (!dl_submit_next_seq(d, rows, nrows, &next_seq, &why)) {
+        dl_log(row, why);
+        dl_log(row, "\n");
+        goto done;
+    }
     struct dl_row successor = *row;
-    successor.seq = rows[nrows - 1].seq + 1;
+    successor.seq = next_seq;
     (void)snprintf(successor.state, sizeof(successor.state), "queued");
     (void)snprintf(successor.phase, sizeof(successor.phase), "rebase");
     successor.attempt = 1;
     successor.started = 0;
     successor.local[0] = '\0';
+    successor.base[0] = '\0';
+    successor.tree[0] = '\0';
+    successor.proof_intent[0] = '\0';
+    successor.dimension[0] = '\0';
     for (size_t i = at + 1; i < nrows; i++) rows[i - 1] = rows[i];
     rows[nrows - 1] = successor;
     ok = dl_rewrite_rows(d->land, qpath, rows, nrows);
@@ -5170,13 +5221,75 @@ static bool dl_reconcile_landing(const struct dl_dirs *d, struct dl_row *row,
     return true;
 }
 
+/* Seal the prepared tree and exact proof pair in the row before asking a
+ * worker to prove it. A replacement driver can recover the same request
+ * after the initiating process dies. */
+static bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
+{
+    char rev[96];
+    char tree[256];
+    const char *args[] = { "rev-parse", "--verify", "--quiet", rev, NULL };
+    int n;
+    if (!dl_sha_ok(row->local) || !dl_sha_ok(row->base))
+        return false;
+    n = snprintf(rev, sizeof(rev), "%s^{tree}", row->local);
+    if (n <= 0 || (size_t)n >= sizeof(rev) ||
+        dl_git(d->wt, args, tree, sizeof(tree), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(tree);
+    if (!dl_sha_ok(tree))
+        return false;
+    (void)snprintf(row->tree, sizeof(row->tree), "%s", tree);
+    n = snprintf(row->proof_intent, sizeof(row->proof_intent), "%s@%s",
+                 row->local, row->base);
+    return n > 0 && (size_t)n < sizeof(row->proof_intent);
+}
+
+static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
+                            const char *regen_note,
+                            struct zcl_command_reply *reply)
+{
+    char detail[512];
+    enum dl_proof p;
+    (void)snprintf(row->phase, sizeof(row->phase), "prove");
+    if (!dl_proof_intent_bind(d, row)) {
+        (void)snprintf(row->state, sizeof(row->state), "failed");
+        (void)snprintf(row->dimension, sizeof(row->dimension),
+                       "proof_intent");
+        (void)snprintf(row->detail, sizeof(row->detail), "%s",
+                       "cannot bind the prepared tree to the exact proof pair");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
+        return;
+    }
+    if (!dl_commit_row(d, row, false)) {
+        dl_fail(reply, "QUEUE_WRITE_FAILED", "proof_intent",
+                "cannot persist the prepared tree and proof pair", d->land);
+        return;
+    }
+    p = dl_proof_request(d->wt, row->local, row->base, detail,
+                         sizeof(detail));
+    (void)snprintf(row->detail, sizeof(row->detail), "%s%s%s", regen_note,
+                   regen_note[0] ? "; " : "", detail);
+    dl_log(row, detail);
+    dl_log(row, "\n");
+    if (p == DL_PROOF_UNAVAILABLE || p == DL_PROOF_FAILED) {
+        (void)snprintf(row->state, sizeof(row->state), "failed");
+        (void)snprintf(row->dimension, sizeof(row->dimension), "proof");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
+        return;
+    }
+    if (dl_commit_or_report(d, row, false, reply, "started"))
+        dl_step_reply(reply, row, "started");
+}
+
 static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
-    char why[1024], detail[512], tickets[512], regen_note[256];
+    char why[1024], tickets[512], regen_note[256];
     char observed_main[80];
     int rebased;
-    enum dl_proof p;
 
     (void)snprintf(row->state, sizeof(row->state), "inflight");
     (void)snprintf(row->phase, sizeof(row->phase), "rebase");
@@ -5267,26 +5380,7 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    (void)snprintf(row->phase, sizeof(row->phase), "prove");
-    p = dl_proof_request(d->wt, row->local, row->base, detail,
-                         sizeof(detail));
-    /* The regeneration note survives into the proof's own detail: what
-     * landing ADDED to the tip is not something a later reader should
-     * have to reconstruct from the attempt log. */
-    (void)snprintf(row->detail, sizeof(row->detail), "%s%s%s", regen_note,
-                   regen_note[0] ? "; " : "", detail);
-    dl_log(row, detail);
-    dl_log(row, "\n");
-    if (p == DL_PROOF_UNAVAILABLE || p == DL_PROOF_FAILED) {
-        (void)snprintf(row->state, sizeof(row->state), "failed");
-        (void)snprintf(row->dimension, sizeof(row->dimension), "proof");
-        if (dl_commit_or_report(d, row, true, reply, "failed"))
-            dl_step_reply(reply, row, "failed");
-        return;
-    }
-    /* Asked for. Nothing here waits on the answer. */
-    if (dl_commit_or_report(d, row, false, reply, "started"))
-        dl_step_reply(reply, row, "started");
+    dl_start_proof(d, row, regen_note, reply);
 }
 
 /* The lease adds an expected-old-value comparison; it never grants history
@@ -5319,6 +5413,48 @@ static bool dl_push_proven_pair(const struct dl_dirs *d,
     return dl_git(d->wt, push, out, out_cap, DL_GIT_TIMEOUT_MS) == 0;
 }
 
+/* A changed base invalidates only this exact proof pair. Keep the submitted
+ * time and queue position through bounded retries, then yield to other queued
+ * work. The old pair stays in the attempt log and proof store, never as
+ * authority for the successor. */
+static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
+                              const char *observed_main,
+                              struct zcl_command_reply *reply)
+{
+    char prior[256];
+    (void)snprintf(prior, sizeof(prior),
+                   "superseded proof local=%.64s base=%.64s tree=%.64s\n",
+                   row->local, row->base, row->tree);
+    dl_log(row, prior);
+    row->attempt++;
+    if (row->attempt > DL_ATTEMPT_MAX) {
+        long long predecessor = row->seq;
+        (void)snprintf(row->detail, sizeof(row->detail),
+                       "main moved to %.12s; successor of seq=%lld",
+                       observed_main, predecessor);
+        if (dl_yield_successor(d, row, &predecessor)) {
+            dl_step_reply(reply, row, "queued");
+            (void)json_push_kv_int(&reply->data, "predecessor_seq",
+                                   predecessor);
+        } else {
+            dl_step_reply(reply, row, "rebased");
+            (void)json_push_kv_str(&reply->data, "persist", "failed");
+        }
+        return;
+    }
+    (void)snprintf(row->state, sizeof(row->state), "queued");
+    (void)snprintf(row->phase, sizeof(row->phase), "rebase");
+    row->dimension[0] = '\0';
+    row->proof_intent[0] = '\0';
+    (void)snprintf(row->detail, sizeof(row->detail),
+                   "origin/main moved to %.64s; successor queued",
+                   observed_main);
+    dl_log(row, row->detail);
+    dl_log(row, "\n");
+    if (dl_commit_or_report(d, row, false, reply, "rebased"))
+        dl_step_reply(reply, row, "rebased");
+}
+
 static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
@@ -5340,6 +5476,10 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
             dl_log(row, "\n");
             if (dl_reconcile_landing(d, row, observed_main, true, reply))
                 return;
+            if (strcmp(observed_main, row->base) != 0) {
+                dl_step_successor(d, row, observed_main, reply);
+                return;
+            }
             row->attempt++;
             (void)snprintf(row->phase, sizeof(row->phase), "rebase");
             (void)snprintf(row->detail, sizeof(row->detail), "%s",
@@ -5384,6 +5524,69 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
         dl_step_reply(reply, row, "landed");
 }
 
+static bool dl_resume_proof_read(const struct dl_dirs *d, struct dl_row *row,
+                                  const char *observed_main,
+                                  char dimension[48], char detail[512],
+                                  enum dl_proof *p,
+                                  struct zcl_command_reply *reply)
+{
+    if (strcmp(observed_main, row->base) != 0) {
+        dl_step_successor(d, row, observed_main, reply);
+        return false;
+    }
+    if ((!dl_sha_ok(row->tree) || !row->proof_intent[0]) &&
+        (!dl_proof_intent_bind(d, row) || !dl_commit_row(d, row, false))) {
+        dl_fail(reply, "PROOF_INTENT_UNAVAILABLE", "prove",
+                "cannot recover the prepared tree and exact proof pair",
+                d->land);
+        return false;
+    }
+    *p = dl_proof_read(d->wt, row->local, row->base, dimension,
+                       48, detail, 512);
+    if (*p == DL_PROOF_MISSING) {
+        dl_log(row, "proof worker missing; requeueing the persisted pair\n");
+        *p = dl_proof_request(d->wt, row->local, row->base, detail, 512);
+    }
+    (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
+    return true;
+}
+
+static void dl_resume_failed_proof(const struct dl_dirs *d,
+                                    struct dl_row *row,
+                                    const char dimension[48],
+                                    const char detail[512],
+                                    struct zcl_command_reply *reply)
+{
+    char base_now[80];
+    dl_log(row, "failed exact proof: ");
+    dl_log(row, detail);
+    dl_log(row, "\n");
+    if (!dl_observe_remote_main(d, row, base_now, false, reply))
+        return;
+    if (strcmp(base_now, row->base) != 0) {
+        dl_step_successor(d, row, base_now, reply);
+        return;
+    }
+    bool host_load = dl_host_load_failure(detail);
+    dl_log(row, detail);
+    dl_log(row, "\n");
+    if (host_load && row->attempt < DL_ATTEMPT_MAX) {
+        row->attempt++;
+        (void)snprintf(row->phase, sizeof(row->phase), "rebase");
+        (void)snprintf(row->dimension, sizeof(row->dimension), "host_load");
+        dl_log_path(d, row);
+        if (dl_commit_or_report(d, row, false, reply, "rebased"))
+            dl_step_reply(reply, row, "rebased");
+        return;
+    }
+    (void)snprintf(row->state, sizeof(row->state), "failed");
+    (void)snprintf(row->dimension, sizeof(row->dimension), "%s",
+                   dimension[0] ? dimension : "proof");
+    if (!row->detail[0])
+        (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
+    if (dl_commit_or_report(d, row, true, reply, "failed"))
+        dl_step_reply(reply, row, "failed");
+}
 #if defined(ZCL_TESTING)
 static void dl_test_die_after_proof(void)
 {
@@ -5418,14 +5621,13 @@ static void dl_test_die_after_proof(void)
         dl_step_start(d, row, reply);
         return;
     }
-    p = dl_proof_read(d->wt, row->local, row->base, dimension,
-                      sizeof(dimension), detail, sizeof(detail));
-    (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
+    if (!dl_resume_proof_read(d, row, observed_main, dimension, detail, &p, reply))
+        return;
     if (p == DL_PROOF_PENDING) {
 #ifdef ZCL_DEV_BUILD
-        /* WHY. Resume used to keep proving with a stale queued detail
-         * while no watcher existed for the landing worktree. */
-        if (!dl_stub() && !zcl_native_dev_loop_proof_queue_ready(d->wt)) {
+        const char *arm = getenv("ZCL_LAND_START_PROOF_WATCHER");
+        if (!dl_stub() && arm && strcmp(arm, "1") == 0 &&
+            !zcl_native_dev_loop_proof_queue_ready(d->wt)) {
             (void)snprintf(row->detail, sizeof(row->detail), "%s",
                            "resident_proof_watcher_absent");
             dl_watcher_kick(d->wt, row->detail, sizeof(row->detail));
@@ -5436,31 +5638,7 @@ static void dl_test_die_after_proof(void)
         return;
     }
     if (p != DL_PROOF_PASSED) {
-        bool host_load = dl_host_load_failure(detail);
-        dl_log(row, detail);
-        dl_log(row, "\n");
-        if (host_load && row->attempt < DL_ATTEMPT_MAX) {
-            row->attempt++;
-            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
-            (void)snprintf(row->dimension, sizeof(row->dimension),
-                           "host_load");
-            dl_log_path(d, row);
-            if (dl_commit_or_report(d, row, false, reply, "rebased"))
-                dl_step_reply(reply, row, "rebased");
-            return;
-        }
-        (void)snprintf(row->state, sizeof(row->state), "failed");
-        (void)snprintf(row->dimension, sizeof(row->dimension), "%s",
-                       dimension[0] ? dimension : "proof");
-        /* The proof's own typed failure names the first failing phase; a
-         * log-text scan of this attempt's transcript can only replace it
-         * with an unrelated row — for example a lint timing-table entry
-         * for a passing gate whose name contains "fail". The transcript
-         * stays reachable through log_path for the human dive. */
-        if (!row->detail[0])
-            (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
-        if (dl_commit_or_report(d, row, true, reply, "failed"))
-            dl_step_reply(reply, row, "failed");
+        dl_resume_failed_proof(d, row, dimension, detail, reply);
         return;
     }
 #if defined(ZCL_TESTING)
@@ -5474,35 +5652,7 @@ static void dl_test_die_after_proof(void)
         if (!dl_observe_remote_main(d, row, base_now, false, reply))
             return;
         if (strcmp(base_now, row->base) != 0) {
-            row->attempt++;
-            (void)snprintf(row->detail, sizeof(row->detail),
-                           "origin/main moved to %.12s while proving",
-                           base_now);
-            dl_log_path(d, row);
-            dl_log(row, row->detail);
-            dl_log(row, "\n");
-            /* Preserve this candidate and yield to later requests when
-             * main moves through the whole attempt budget. The next beat
-             * redoes the exact proof on the then-current base. */
-            if (row->attempt > DL_ATTEMPT_MAX) {
-                long long predecessor = row->seq;
-                (void)snprintf(row->base, sizeof(row->base), "%s", base_now);
-                (void)snprintf(row->detail, sizeof(row->detail),
-                               "main moved to %.12s; successor of seq=%lld",
-                               base_now, predecessor);
-                if (dl_yield_successor(d, row, &predecessor)) {
-                    dl_step_reply(reply, row, "queued");
-                    (void)json_push_kv_int(&reply->data, "predecessor_seq",
-                                           predecessor);
-                } else {
-                    dl_step_reply(reply, row, "rebased");
-                    (void)json_push_kv_str(&reply->data, "persist", "failed");
-                }
-                return;
-            }
-            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
-            if (dl_commit_or_report(d, row, false, reply, "rebased"))
-                dl_step_reply(reply, row, "rebased");
+            dl_step_successor(d, row, base_now, reply);
             return;
         }
     }
@@ -5550,6 +5700,31 @@ static void dl_test_die_after_proof(void)
     }
     return false;
 }
+
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static int g_dl_pick_ready_fd = -1;
+static int g_dl_pick_release_fd = -1;
+
+void zcl_native_dev_land_test_pick_barrier(int ready_fd, int release_fd)
+{
+    g_dl_pick_ready_fd = ready_fd;
+    g_dl_pick_release_fd = release_fd;
+}
+
+static bool dl_test_pick_barrier(void)
+{
+    if (g_dl_pick_ready_fd < 0 || g_dl_pick_release_fd < 0)
+        return true;
+    char marker = 'R';
+    ssize_t n;
+    do n = write(g_dl_pick_ready_fd, &marker, 1);
+    while (n < 0 && errno == EINTR);
+    if (n != 1) return false;
+    do n = read(g_dl_pick_release_fd, &marker, 1);
+    while (n < 0 && errno == EINTR);
+    return n == 1 && marker == 'G';
+}
+#endif
 
 static void dl_step(const struct zcl_command_request *req,
                     struct zcl_command_reply *reply)
@@ -5642,11 +5817,136 @@ static void dl_step(const struct zcl_command_request *req,
         }
     }
 #endif
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    if (!dl_test_pick_barrier()) {
+        dl_unlock(slot);
+        dl_fail(reply, "TEST_PICK_BARRIER_FAILED", "step",
+                "the test integrator barrier did not complete", d.land);
+        return;
+    }
+#endif
     if (have_inflight)
         dl_step_resume(&d, &pick, reply);
     else
         dl_step_start(&d, &pick, reply);
     dl_unlock(slot);
+#endif
+}
+
+/* Read the durable pair after a step has released step.lock. No process
+ * owns this intent: another authorized integrator can read the same row. */
+#ifdef ZCL_DEV_BUILD
+static bool dl_drive_pair(char local[80], char base[80], char root[4096])
+{
+    struct dl_dirs d;
+    struct dl_row *rows = NULL;
+    size_t count = 0;
+    char path[4096 + 32];
+    bool found = false;
+    if (!dl_dirs_make(&d) ||
+        snprintf(path, sizeof(path), "%s/queue.jsonl", d.land) >=
+            (int)sizeof(path) ||
+        !dl_load_rows(path, &rows, &count, NULL, 0))
+        return false;
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(rows[i].state, "inflight") != 0 ||
+            strcmp(rows[i].phase, "prove") != 0)
+            continue;
+        if (dl_sha_ok(rows[i].local) && dl_sha_ok(rows[i].base)) {
+            (void)snprintf(local, 80, "%s", rows[i].local);
+            (void)snprintf(base, 80, "%s", rows[i].base);
+            (void)snprintf(root, 4096, "%s", d.wt);
+            found = true;
+        }
+        break;
+    }
+    free(rows);
+    return found;
+}
+#endif
+
+/* Return 1 after this pair settles, 0 when a worker owns it, -1 on refusal. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static int dl_drive_proof(struct zcl_command_reply *reply)
+{
+#ifdef ZCL_DEV_BUILD
+    char local[80], base[80], root[4096];
+    struct zcl_dev_proof_status proof = {0};
+    int result;
+    if (dl_stub())
+        return 1;
+    if (!dl_drive_pair(local, base, root)) {
+        dl_fail(reply, "PROOF_INTENT_UNAVAILABLE", "drive",
+                "the exact in-flight proof pair is unavailable",
+                "retry dev land drive after inspecting dev land status");
+        return -1;
+    }
+    result = zcl_dev_proof_step(root, local, base, &proof);
+    if (result < 0) {
+        dl_fail(reply, "PROOF_STEP_REFUSED", "drive",
+                "the exact proof worker refused this pair", proof.detail);
+        return -1;
+    }
+    if (result == 0)
+        (void)json_push_kv_str(&reply->data, "proof_worker", proof.detail);
+    return result;
+#else
+    if (!dl_stub()) {
+        dl_fail(reply, "DEV_BUILD_REQUIRED", "drive",
+                "exact proof driving requires the development binary",
+                "make dev-bin");
+        return -1;
+    }
+    return 1;
+#endif
+}
+#endif
+
+/* One bounded integrator session. Proof execution does not hold step.lock;
+ * a PASS is followed immediately by another step that takes the short
+ * publication slot and checks the remote base again. A lost CAS leaves the
+ * same aged row queued for this or any later driver. */
+static void dl_drive(const struct zcl_command_request *req,
+                     struct zcl_command_reply *reply)
+{
+#if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
+    (void)req;
+    dl_fail(reply, "DEV_BUILD_REQUIRED", "drive",
+            "exact proof driving requires the development binary",
+            "make dev-bin");
+#else
+    for (int cycle = 0; cycle < 4; cycle++) {
+        const char *state;
+        dl_step(req, reply);
+        if (reply->status != ZCL_COMMAND_STATUS_PASSED)
+            return;
+        state = json_get_str(json_get(&reply->data, "state"));
+        if (state && strcmp(state, "rebased") == 0) {
+            zcl_command_reply_free(reply);
+            zcl_command_reply_init(reply, "zcl.land.v1");
+            continue;
+        }
+        if (!state || (strcmp(state, "started") != 0 &&
+                       strcmp(state, "proving") != 0))
+            return;
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+        if (dl_drive_proof(reply) <= 0)
+            return;
+#endif
+        zcl_command_reply_free(reply);
+        zcl_command_reply_init(reply, "zcl.land.v1");
+        dl_step(req, reply);
+        if (reply->status != ZCL_COMMAND_STATUS_PASSED)
+            return;
+        state = json_get_str(json_get(&reply->data, "state"));
+        if (!state || strcmp(state, "rebased") != 0)
+            return;
+        zcl_command_reply_free(reply);
+        zcl_command_reply_init(reply, "zcl.land.v1");
+    }
+    dl_fail(reply, "DRIVE_BUDGET_EXHAUSTED", "drive",
+            "four proof cycles ended with a newer main tip; the aged row remains queued",
+            "run dev land drive again from a current authorized checkout");
 #endif
 }
 
@@ -5660,14 +5960,14 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
         return;
     if (!request || !request->input) {
         dl_fail(reply, "BAD_INPUT", "route",
-                "dev land needs an action: submit|status|step|cancel",
+                "dev land needs an action: submit|status|step|drive|cancel",
                 "request.input was missing");
         return;
     }
     action = dl_str(request, "action");
     if (!action) {
         dl_fail(reply, "BAD_INPUT", "route",
-                "dev land needs an action: submit|status|step|cancel",
+                "dev land needs an action: submit|status|step|drive|cancel",
                 "input.action missing or empty");
         return;
     }
@@ -5683,11 +5983,15 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
         dl_step(request, reply);
         return;
     }
+    if (strcmp(action, "drive") == 0) {
+        dl_drive(request, reply);
+        return;
+    }
     if (strcmp(action, "cancel") == 0) {
         dl_cancel(request, reply);
         return;
     }
     dl_fail(reply, "UNKNOWN_ACTION", "route",
-            "action is one of submit|status|step|cancel",
+            "action is one of submit|status|step|drive|cancel",
             "input.action unknown");
 }

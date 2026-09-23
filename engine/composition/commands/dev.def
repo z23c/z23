@@ -1879,7 +1879,7 @@ ZCL_COMMAND_DEV_READ(
 /* ── dev.land ──────────────────────────────────────────────────────────────
  * The landing service: an agent submits a tip and returns in milliseconds,
  * a driver steps the queue, and the agent learns the outcome by
- * pulling. Nothing an agent calls waits on a proof or a push. step drives
+ * pulling. step drives
  * one beat under a host-wide, non-blocking slot lock — rebase onto
  * origin/main, lint, ASK for the exact proof, return — and a later step
  * reads the proof's own answer and fast-forwards origin/main. */
@@ -1898,20 +1898,25 @@ ZCL_COMMAND_DEV_COMMAND(
     "commit/base proof through dev.proof, and RETURNING; on an unarmed "
     "checkout status exposes the exact dev.proof.step inputs in "
     "in_flight.proof_step for any worker to claim, without starting a "
-    "resident watcher by default — a later step "
-    "reads the proof state and fast-forwards origin/main, re-rebases when "
-    "the base moved, and retries a host-load failure up to three times; "
+    "resident watcher by default; drive is a "
+    "bounded integrator session that releases the step lock during proof "
+    "and attempts publication immediately after PASS; a later step "
+    "reads the proof state and fast-forwards origin/main, retains submission "
+    "time through bounded moving-base retries before yielding to other "
+    "queued work, and retries a "
+    "host-load failure up to three times; "
     "cancel drops one request by sequence number. Every state change also "
     "appends to the agent mail outbox when one exists, so an agent learns "
-    "the outcome by pulling rather than by waiting. Git is the only "
-    "program it runs, always without a shell.", 65536,
-    "land,submit,step,status,cancel,queue,proof,push,rebase,async",
+    "the outcome by pulling rather than by waiting. Integration calls Git "
+    "without a shell; drive executes the existing bounded proof worker.", 65536,
+    "land,submit,step,drive,status,cancel,queue,proof,push,rebase,async",
     "zcl.land_input.v1", "zcl.land.v1",
     "action,tip,worktree,note,seq,json", "action",
-    "z23-dev dev land submit --tip=9afd46726",
+    "z23-dev dev land drive",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_HIGH,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_DEV_ONLY,

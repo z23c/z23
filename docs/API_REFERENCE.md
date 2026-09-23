@@ -669,7 +669,7 @@ represented by its children's sections.
 | `dev ff` | ready | read / read / operator · instant/low | none | `zcl.dev_ff.v1` | `z23 dev ff` | Fail-fast: compile, test, lint |
 | `dev verify-change` | compat 🔧 → `make dev-bin, then z23-dev dev verify-change` | read / read / **owner** · background/high | none | `zcl.dev_verify_change.v1` | `z23-dev dev verify-change` | Compile changed code and run its focused proofs — *changed-scope verification requires the dev-only process executor* |
 | `dev ci` | compat 🔧 → `z23-dev dev ci` | read / read / operator · fast/low | **`topic`**, `sha`, `root`, `json` | `zcl.dev_ci.v1` | `z23-dev dev ci receipt --sha=9afd46726` | Answer every CI and landing question from one screen — *the landing and unit queues are development-lane state* |
-| `dev land` | compat 🔧 → `z23-dev dev land` | mutate / dev-mutation / operator · fast/low | **`action`**, `tip`, `worktree`, `note`, `seq`, `json` | `zcl.land.v1` | `z23-dev dev land submit --tip=9afd46726` | Queue a tip; prove and push without waiting — *the landing queue is a development-lane coordination surface* |
+| `dev land` | compat 🔧 → `z23-dev dev land` | mutate / dev-mutation / operator · persistent/high | **`action`**, `tip`, `worktree`, `note`, `seq`, `json` | `zcl.land.v1` | `z23-dev dev land drive` | Queue a tip; prove and push without waiting — *the landing queue is a development-lane coordination surface* |
 
 #### `dev.retrieval` — Retrieval quality for a source generation
 

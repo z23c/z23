@@ -54,6 +54,7 @@ void zcl_native_dev_land_test_watcher_launch(const char *wt,
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+void zcl_native_dev_land_test_pick_barrier(int ready_fd, int release_fd);
 #endif
 
 #define DLX_PATH "dev.land"
@@ -1399,7 +1400,7 @@ static int test_dev_land_explicit_main(void)
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
-        ASSERT(strstr(dlx_str(&c, "detail"), "while proving") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "successor queued") != NULL);
         ASSERT_EQ(dlx_int(&c, "attempt"), 2);
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, main_now));
@@ -4044,6 +4045,328 @@ static int test_dev_land_malformed_outcome_refusal(void)
     return failures;
 }
 
+static int test_dev_land_missing_worker(void)
+{
+    int failures = 0;
+    TEST("land: a dead proof worker leaves a resumable exact intent") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], logpath[1400], log[8192];
+        size_t len = 0;
+        dlx_isolate("proof_worker_dead");
+        ASSERT(dlx_rig_make(&rig, "proof_worker_dead_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *flight = json_get(&c.reply.data,
+                                                   "in_flight");
+        ASSERT(flight != NULL);
+        ASSERT(strlen(json_get_str(json_get(flight, "tree"))) == 40);
+        ASSERT(strchr(json_get_str(json_get(flight, "proof_intent")), '@') !=
+               NULL);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "missing", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "proving");
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(logpath, sizeof(logpath), "%s/logs/land-1-a1.log",
+                       landdir);
+        ASSERT(dlx_slurp(logpath, log, sizeof(log) - 1, &len));
+        log[len] = '\0';
+        ASSERT(strstr(log, "proof worker missing; requeueing") != NULL);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static bool dlx_pick_barrier_open(int ready[2], int release[2])
+{
+    if (pipe(ready) != 0 || pipe(release) != 0) return false;
+    int fds[] = {ready[0], ready[1], release[0], release[1]};
+    for (size_t i = 0; i < sizeof(fds) / sizeof(fds[0]); i++)
+        if (fcntl(fds[i], F_SETFD, FD_CLOEXEC) != 0) return false;
+    return true;
+}
+
+static void dlx_pick_barrier_close(int ready[2], int release[2], pid_t child)
+{
+    zcl_native_dev_land_test_pick_barrier(-1, -1);
+    for (size_t i = 0; i < 2; i++) {
+        if (ready[i] >= 0) (void)close(ready[i]);
+        if (release[i] >= 0) (void)close(release[i]);
+    }
+    if (child > 0) (void)waitpid(child, NULL, 0);
+}
+
+static int test_dev_land_competing_publish(void)
+{
+    int failures = 0;
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    pid_t child = -1;
+    TEST("land: competing integrators publish one passed pair once") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        int status = 0;
+        dlx_isolate("passed_competitors");
+        ASSERT(dlx_rig_make(&rig, "passed_competitors_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        ASSERT(dlx_pick_barrier_open(ready, release));
+        zcl_native_dev_land_test_pick_barrier(ready[1], release[0]);
+        child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            (void)close(ready[0]);
+            (void)close(release[1]);
+            struct dlx_call other;
+            dlx_begin(&other, "step");
+            bool landed = dlx_run(&other) && dlx_ok(&other) &&
+                          strcmp(dlx_str(&other, "state"), "landed") == 0;
+            dlx_end(&other);
+            _exit(landed ? 0 : 1);
+        }
+        ASSERT(close(ready[1]) == 0);
+        ready[1] = -1;
+        ASSERT(close(release[0]) == 0);
+        release[0] = -1;
+        char marker = 0;
+        ASSERT(read(ready[0], &marker, 1) == 1 && marker == 'R');
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "STEP_BUSY");
+        dlx_end(&c);
+        ASSERT(write(release[1], "G", 1) == 1);
+        ASSERT(close(release[1]) == 0);
+        release[1] = -1;
+        ASSERT(waitpid(child, &status, 0) == child);
+        child = -1;
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        zcl_native_dev_land_test_pick_barrier(-1, -1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "empty");
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *outcomes = dlx_arr(&c, "outcomes");
+        ASSERT(outcomes && outcomes->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&outcomes->children[0], "state")),
+                      "landed");
+        dlx_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dlx_pick_barrier_close(ready, release, child);
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_bounded_drive(void)
+{
+    int failures = 0;
+    TEST("land: one bounded drive publishes a passing exact pair") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char main_tip[64];
+        dlx_isolate("bounded_drive");
+        ASSERT(dlx_rig_make(&rig, "bounded_drive_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "drive");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        char pushed[64];
+        (void)snprintf(pushed, sizeof(pushed), "%s",
+                       dlx_str(&c, "tip_pushed"));
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, main_tip));
+        ASSERT_STR_EQ(main_tip, pushed);
+        PASS();
+    }
+
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_pending_proof_move(void)
+{
+    int failures = 0;
+    TEST("land: moving main requeues a still-running proof") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
+                               NULL };
+        const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
+        const char *branch[] = { "checkout", "--quiet", "-B", "side",
+                                 "origin/main", NULL };
+        const char *back[] = { "checkout", "--quiet", "-B", "main", NULL };
+        char stranger[64], main_now[64];
+        dlx_isolate("move_pending");
+        ASSERT(dlx_rig_make(&rig, "move_pending_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_commit(rig.clone, "stranger.txt", "elsewhere\n", stranger));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_git(rig.clone, back) == 0);
+        ASSERT(dlx_git(rig.clone, fetch) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
+        ASSERT_EQ(dlx_int(&c, "attempt"), 2);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, main_now));
+        ASSERT_STR_EQ(main_now, stranger);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_main_moves_converge(void)
+{
+    int failures = test_dev_land_pending_proof_move();
+    TEST("land: three proof-time main advances yield then converge") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
+                               NULL };
+        const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
+        const char *branch[] = { "checkout", "--quiet", "-B", "side",
+                                 "origin/main", NULL };
+        const char *back[] = { "checkout", "--quiet", "-B", "main", NULL };
+        char side[600], stranger[64], original_ts[64], landed[64];
+        char following[64];
+        int i;
+        dlx_isolate("moveforever");
+        ASSERT(dlx_rig_make(&rig, "moveforever_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT(dlx_commit(rig.clone, "following.txt", "following\n",
+                          following));
+        dlx_submit(&c, &rig, following);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 2);
+        dlx_end(&c);
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 2);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "cancelled");
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *queued = dlx_arr(&c, "queued");
+        const struct json_value *outcomes = dlx_arr(&c, "outcomes");
+        ASSERT(queued && queued->num_children == 1);
+        ASSERT(outcomes && outcomes->num_children == 1);
+        ASSERT_EQ(json_get_int(json_get(&outcomes->children[0], "seq")), 2);
+        (void)snprintf(original_ts, sizeof(original_ts), "%s",
+                       json_get_str(json_get(&queued->children[0], "ts")));
+        dlx_end(&c);
+        (void)snprintf(side, sizeof(side), "%s", rig.clone);
+        for (i = 0; i < 3; i++) {
+            char tag[32];
+            dlx_begin(&c, "step");
+            ASSERT(dlx_run(&c));
+            ASSERT(dlx_ok(&c));
+            ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+            dlx_end(&c);
+            (void)snprintf(tag, sizeof(tag), "s%d.txt", i);
+            ASSERT(dlx_git(side, branch) == 0);
+            ASSERT(dlx_commit(side, tag, "elsewhere\n", stranger));
+            ASSERT(dlx_git(side, push) == 0);
+            ASSERT(dlx_git(side, back) == 0);
+            ASSERT(dlx_git(side, fetch) == 0);
+            dlx_begin(&c, "step");
+            ASSERT(dlx_run(&c));
+            ASSERT(dlx_ok(&c));
+            ASSERT_STR_EQ(dlx_str(&c, "state"),
+                          i == 2 ? "queued" : "rebased");
+            ASSERT_EQ(dlx_int(&c, "attempt"), i == 2 ? 1 : i + 2);
+            if (i == 2) {
+                ASSERT_EQ(dlx_int(&c, "predecessor_seq"), 1);
+                ASSERT_EQ(dlx_int(&c, "seq"), 3);
+            }
+            dlx_end(&c);
+            dlx_begin(&c, "status");
+            ASSERT(dlx_run(&c) && dlx_ok(&c));
+            queued = dlx_arr(&c, "queued");
+            ASSERT(queued && queued->num_children == 1);
+            ASSERT_STR_EQ(json_get_str(json_get(&queued->children[0], "ts")),
+                          original_ts);
+            dlx_end(&c);
+        }
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        (void)snprintf(landed, sizeof(landed), "%s",
+                       dlx_str(&c, "tip_pushed"));
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, stranger));
+        ASSERT_STR_EQ(stranger, landed);
+        PASS();
+    }
+
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
@@ -4339,6 +4662,12 @@ int test_dev_land(void)
         dlx_restore();
         PASS();
     }
+
+    failures += test_dev_land_missing_worker();
+
+    failures += test_dev_land_competing_publish();
+
+    failures += test_dev_land_bounded_drive();
 
     TEST("land: an unrelated stub value still reports its own detail") {
         struct dlx_rig rig;
@@ -5009,6 +5338,7 @@ int test_dev_land(void)
         dlx_restore();
         PASS();
     }
+    failures += test_dev_land_main_moves_converge();
 
     TEST("land: a worktree that looks like a git option is refused at "
         "parse, never reaches git") {

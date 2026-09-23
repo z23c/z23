@@ -51,15 +51,15 @@ ZCL_FACT("landing.queue", "land_lint_fast_fn",
          "tools/command/native_dev_land.c",
          "static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)")
 ZCL_FACT("landing.queue", "land_nothing_waits",
-         "dev.land's contract states step never sleeps or waits for a proof to finish; it returns after requesting one.",
+         "dev.land step returns after requesting proof; drive is a bounded foreground integrator session.",
          "tools/command/native_dev_land.c",
-         "NOTHING WAITS. submit, status and cancel touch only local files. step does")
+         "submit, status and cancel touch only local files. step returns after")
 ZCL_FACT("landing.queue", "land_attempt_max",
-         "dev.land bounds base-moved and push-refused retries to DL_ATTEMPT_MAX = 3 attempts.",
+         "dev.land bounds host-load, same-base push refusals and moving-main retries to DL_ATTEMPT_MAX = 3 attempts; a repeatedly moving main yields behind queued work.",
          "tools/command/native_dev_land.c",
          "#define DL_ATTEMPT_MAX 3")
 ZCL_FACT("landing.queue", "land_push_refused_retry",
-         "If the fast-forward push is refused, dev.land logs the refusal and rebases again on the next step, bounded by DL_ATTEMPT_MAX.",
+         "If the fast-forward push is refused on the same base, dev.land logs the refusal and rebases again on the next step, bounded by DL_ATTEMPT_MAX.",
          "tools/command/native_dev_land.c",
          "the fast-forward push was refused; rebasing")
 ZCL_FACT("landing.queue", "land_no_no_verify",

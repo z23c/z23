@@ -1032,7 +1032,7 @@ Before committing:
 9. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 A resident loop lands the same way through the native async queue
-(`z23-dev dev land submit|status|step|cancel`, `tools/command/native_dev_land.c`):
+(`z23-dev dev land submit|status|step|drive|cancel`, `tools/command/native_dev_land.c`):
 one driver steps that queue at a time, since `step` holds a per-queue lock for
 its whole run and a second driver that finds it held gets `STEP_BUSY`
 (retryable) and steps again shortly rather than racing the first driver's
@@ -1052,6 +1052,20 @@ operator who explicitly wants the prior watcher path can set
 status, submit and step. It preserves the queue bytes until an operator
 repairs that record; a later valid row cannot make an earlier one disappear
 through a rewrite. Status likewise names a malformed terminal outcome.
+
+`dev land drive` runs a bounded foreground integrator session. It persists the
+candidate commit, current base, prepared tree and exact proof intent before
+proof execution, releases the short landing step lock while proving, then
+tries publication immediately after a PASS. Another authorized driver can
+resume the persisted pair after a worker stops. A changed `origin/main` creates
+a successor from the original submitted tip. It retains the submission time
+and queue position for bounded retries, then yields behind already-queued
+work if main keeps moving. The prior receipt remains evidence only for its
+original commit and base; the new pair requires its own full proof. A failed
+exact pair is logged before a successor is prepared. A bounded drive session
+can stop with the row still queued; rerun `dev land drive` to continue it.
+A competing integrator receives `STEP_BUSY` during the short
+publication slot and must inspect status before another attempt.
 
 Queued exact proofs take the same lock shared before claiming a request
 and hold it until verification finishes. Requests created by checkout hooks
