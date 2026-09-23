@@ -3624,10 +3624,9 @@ tools/command/native_dev_land.c:dl_materialize_file:47
 tools/command/native_dev_land.c:dl_proof_read:16
 tools/command/native_dev_land.c:dl_regen_run:21
 tools/command/native_dev_land.c:dl_status:40
-tools/command/native_dev_land.c:dl_step:17
 tools/command/native_dev_land.c:dl_step_resume:19
 tools/command/native_dev_land.c:dl_step_start:24
-tools/command/native_dev_land.c:dl_submit:23
+tools/command/native_dev_land.c:dl_submit:22
 tools/command/native_dev_land.c:dl_worktree_ok:17
 tools/command/native_dev_land.c:dl_wt_vendor_tor_pin_matches:17
 tools/command/native_dev_lane.c:dln_clone_file:23

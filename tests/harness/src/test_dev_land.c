@@ -98,6 +98,8 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    unsetenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME");
+    unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
@@ -123,6 +125,8 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    unsetenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME");
+    unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
@@ -1665,6 +1669,180 @@ static int test_dev_land_lost_persistence(void)
         PASS();
     }
 
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_terminal_replay(void)
+{
+    int failures = 0;
+    TEST("land: failed outcome append keeps the pushed row reclaimable") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], qpath[1400], maildir[1400];
+        char opath[1400], outbox[1500], queue[8192], outcome[8192];
+        char remote[64];
+        size_t queue_len, outcome_len, mail_len;
+        dlx_isolate("outcome_append_failure");
+        ASSERT(dlx_rig_make(&rig, "outcome_append_failure_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir) <
+               (int)sizeof(qpath));
+        ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", landdir) <
+               (int)sizeof(opath));
+        ASSERT(snprintf(maildir, sizeof(maildir), "%s/../mail", landdir) <
+               (int)sizeof(maildir));
+        ASSERT(snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", maildir) <
+               (int)sizeof(outbox));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "1", 1);
+        setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_STR_EQ(dlx_str(&c, "persist"), "failed");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, rig.tip);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT(queue_len > 0);
+        unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
+        unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(dlx_write(maildir, "not a mail directory"));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_STR_EQ(dlx_str(&c, "persist"), "failed");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(opath, outcome, sizeof(outcome), &outcome_len));
+        ASSERT(outcome_len > 0);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT(queue_len > 0);
+        ASSERT(unlink(maildir) == 0 && mkdir(maildir, 0700) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT_EQ(queue_len, 0);
+        char again[8192], mail[8192];
+        size_t again_len;
+        ASSERT(dlx_slurp(opath, again, sizeof(again), &again_len));
+        ASSERT_EQ(again_len, outcome_len);
+        ASSERT(memcmp(again, outcome, outcome_len) == 0);
+        ASSERT(dlx_slurp(outbox, mail, sizeof(mail), &mail_len));
+        mail[mail_len] = '\0';
+        ASSERT(strstr(mail, "\"event\":\"outcome\"") != NULL);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: death after outcome append replays once without another push") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], opath[1400], qpath[1400], before[8192];
+        char after[8192], queue[8192], remote[64];
+        size_t before_len, after_len, queue_len;
+        int child_status = 0;
+        dlx_isolate("outcome_replay_death");
+        ASSERT(dlx_rig_make(&rig, "outcome_replay_death_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", landdir) <
+               (int)sizeof(opath));
+        ASSERT(snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir) <
+               (int)sizeof(qpath));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            struct dlx_call cc;
+            (void)setenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME", "1", 1);
+            (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
+            dlx_begin(&cc, "step");
+            (void)dlx_run(&cc);
+            _exit(90);
+        }
+        ASSERT(waitpid(child, &child_status, 0) == child);
+        ASSERT(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 81);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, rig.tip);
+        ASSERT(dlx_slurp(opath, before, sizeof(before), &before_len));
+        ASSERT(before_len > 0);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT(queue_len > 0);
+        /* A terminal receipt for the same request but another proof base
+         * cannot authorize replay or silently replace the candidate. */
+        char bad_pair[sizeof(before)];
+        ASSERT(before_len + 1 < sizeof(bad_pair));
+        memcpy(bad_pair, before, before_len);
+        bad_pair[before_len] = '\0';
+        char *base = strstr(bad_pair, "\"base\":\"");
+        ASSERT(base != NULL);
+        base += strlen("\"base\":\"");
+        ASSERT(strlen(base) >= 40);
+        base[0] = base[0] == 'a' ? 'b' : 'a';
+        ASSERT(dlx_write(opath, bad_pair));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT(queue_len > 0);
+        before[before_len] = '\0';
+        ASSERT(dlx_write(opath, before));
+        /* A second terminal claim for this exact request is not a
+         * "latest wins" verdict. Preserve the queue and name the conflict. */
+        char conflicting[sizeof(before) * 2];
+        ASSERT(before_len * 2 + 1 < sizeof(conflicting));
+        memcpy(conflicting, before, before_len);
+        memcpy(conflicting + before_len, before, before_len);
+        conflicting[before_len * 2] = '\0';
+        char *state = strstr(conflicting + before_len, "\"state\":\"landed\"");
+        ASSERT(state != NULL);
+        memcpy(state + strlen("\"state\":\""), "failed", 6);
+        ASSERT(dlx_write(opath, conflicting));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT(queue_len > 0);
+        before[before_len] = '\0';
+        ASSERT(dlx_write(opath, before));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(opath, after, sizeof(after), &after_len));
+        ASSERT_EQ(after_len, before_len);
+        ASSERT(memcmp(after, before, before_len) == 0);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT_EQ(queue_len, 0);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 2);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
 _test_next:;
     return failures;
 }
@@ -4221,6 +4399,7 @@ int test_dev_land(void)
     failures += test_dev_land_expected_base_race();
     failures += test_dev_land_nonfastforward_client_guard();
     failures += test_dev_land_lost_persistence();
+    failures += test_dev_land_terminal_replay();
 
     TEST("land: a hooksPath naming no real pre-push cannot skip admission") {
         struct dlx_rig rig;

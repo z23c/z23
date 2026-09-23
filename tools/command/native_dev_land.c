@@ -1033,7 +1033,7 @@ static bool dl_rev_parse(const char *dir, const char *what, char out[80])
 
 /* ── the mail outbox (agents learn by pulling, never by waiting) ───────── */
 
-static void dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
+static bool dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
                       const char *event)
 {
     char dir[4096 + 16], path[4096 + 32], line[DL_LINE_CAP];
@@ -1042,19 +1042,21 @@ static void dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
     struct stat st;
     int w;
     if (!d || !r || !event)
-        return;
+        return false;
     if (snprintf(dir, sizeof(dir), "%s/mail", d->root) >= (int)sizeof(dir))
-        return;
+        return false;
     /* Only when the mail leaf's directory already exists: this leaf creates
      * no mailbox of its own and never guesses at another leaf's layout. */
-    if (stat(dir, &st) != 0 || (st.st_mode & S_IFMT) != S_IFDIR)
-        return;
+    if (stat(dir, &st) != 0)
+        return errno == ENOENT;
+    if ((st.st_mode & S_IFMT) != S_IFDIR)
+        return false;
     if (snprintf(path, sizeof(path), "%s/outbox.jsonl", dir) >=
         (int)sizeof(path))
-        return;
+        return false;
     if (!dl_escape(r->note, e_note, sizeof(e_note)) ||
         !dl_escape(r->detail, e_detail, sizeof(e_detail)))
-        return;
+        return false;
     dl_now_iso(ts);
     w = snprintf(line, sizeof(line),
                  "{\"ts\":\"%s\",\"from\":\"dev.land\",\"kind\":\"land\","
@@ -1064,8 +1066,8 @@ static void dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
                  "\"detail\":\"%s\"}\n",
                  ts, r->seq, r->tip, r->state, event, r->attempt,
                  r->dimension, r->log_path, e_note, e_detail);
-    if (w > 0 && (size_t)w < sizeof(line))
-        (void)dl_append_row(path, line, (size_t)w);
+    return w > 0 && (size_t)w < sizeof(line) &&
+           dl_append_row(path, line, (size_t)w);
 }
 
 /* ── outcomes ──────────────────────────────────────────────────────────── */
@@ -1086,16 +1088,102 @@ static bool dl_write_row(const char *path, const struct dl_row *r)
            dl_append_row(path, line, len);
 }
 
-static void dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
+static bool dl_outcome_request_matches(const struct dl_row *row,
+                                       const struct dl_row *want)
+{
+    return row->seq == want->seq &&
+           strcmp(row->tip, want->tip) == 0 &&
+           strcmp(row->ts, want->ts) == 0 &&
+           strcmp(row->worktree, want->worktree) == 0;
+}
+
+static bool dl_outcome_inputs_match(const struct dl_row *row,
+                                    const struct dl_row *want)
+{
+    return strcmp(row->note, want->note) == 0 &&
+           (!want->base[0] || strcmp(row->base, want->base) == 0) &&
+           (!want->local[0] || strcmp(row->local, want->local) == 0);
+}
+
+static bool dl_scan_outcome_line(const char *line, const struct dl_row *want,
+                                 struct dl_row *found, bool *present,
+                                 long long *high_water)
+{
+    struct dl_row row;
+    if (!dl_parse_row(line, &row) ||
+        strcmp(row.state, "queued") == 0 ||
+        strcmp(row.state, "inflight") == 0)
+        return false;
+    if (row.seq > *high_water) *high_water = row.seq;
+    if (!want || !dl_outcome_request_matches(&row, want)) return true;
+    if (!dl_outcome_inputs_match(&row, want)) return false;
+    if (*present) return false; /* conflicting terminal observations */
+    *present = true;
+    if (found) *found = row;
+    return true;
+}
+
+/* An outcome may have been appended before a crash left its queue row in
+ * place. Match the request identity during replay and find the sequence
+ * high-water mark for new submissions. Malformed history refuses repair. */
+static bool dl_scan_outcomes(const struct dl_dirs *d, const struct dl_row *want,
+                             struct dl_row *found, bool *present,
+                             long long *high_water)
 {
     char path[4096 + 32];
-    if (!d || !r)
-        return;
+    char *data, *line, *save = NULL;
+    size_t len = 0;
+    if (!d || !present || !high_water)
+        return false;
+    *present = false;
+    *high_water = 0;
     if (snprintf(path, sizeof(path), "%s/outcomes.jsonl", d->land) >=
         (int)sizeof(path))
-        return;
-    (void)dl_write_row(path, r);
-    dl_outbox(d, r, "outcome");
+        return false;
+    data = (char *)zcl_malloc(DL_FILE_CAP, "dev.land.outcome.scan");
+    if (!data)
+        return false;
+    if (!dl_read_file(path, data, DL_FILE_CAP, &len)) {
+        int read_errno = errno;
+        free(data);
+        return read_errno == ENOENT;
+    }
+    if (len && data[len - 1] != '\n') {
+        free(data);
+        return false;
+    }
+    for (line = strtok_r(data, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (!dl_scan_outcome_line(line, want, found, present, high_water)) {
+            free(data);
+            return false;
+        }
+    }
+    free(data);
+    return true;
+}
+
+static bool dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
+{
+    char path[4096 + 32];
+    struct dl_row prior;
+    bool present = false;
+    long long high_water = 0;
+    if (!d || !r ||
+        !dl_scan_outcomes(d, r, &prior, &present, &high_water) ||
+        snprintf(path, sizeof(path), "%s/outcomes.jsonl", d->land) >=
+            (int)sizeof(path))
+        return false;
+    if (present)
+        *r = prior;
+    else if (
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+        (getenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND") &&
+         getenv("ZCL_DEVLOOP_TEST_PROCESS")) ||
+#endif
+        !dl_write_row(path, r))
+        return false;
+    return dl_outbox(d, r, "outcome");
 }
 
 /* ── commuting tickets: the named call site node2's leaf plugs into ─────
@@ -1815,6 +1903,28 @@ static const char *dl_allow_unsigned(void)
 
 /* ── submit ────────────────────────────────────────────────────────────── */
 
+static bool dl_submit_next_seq(const struct dl_dirs *d,
+                               const struct dl_row *rows, size_t nrows,
+                               long long *seq, const char **why)
+{
+    bool unused_present = false;
+    long long high_water = 0;
+    if (!dl_scan_outcomes(d, NULL, NULL, &unused_present, &high_water) ||
+        high_water == LLONG_MAX) {
+        *why = "outcomes.jsonl unreadable, malformed, or exhausted";
+        return false;
+    }
+    if (*seq <= high_water) *seq = high_water + 1;
+    for (size_t i = 0; i < nrows; i++) {
+        if (rows[i].seq == LLONG_MAX) {
+            *why = "queue sequence exhausted";
+            return false;
+        }
+        if (rows[i].seq >= *seq) *seq = rows[i].seq + 1;
+    }
+    return true;
+}
+
 static void dl_submit(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -1938,9 +2048,14 @@ static void dl_submit(const struct zcl_command_request *req,
                 dl_reason_or_path(queue_why, qpath));
         return;
     }
-    for (size_t i = 0; i < nrows; i++) {
-        if (rows[i].seq >= seq)
-            seq = rows[i].seq + 1;
+    const char *seq_why = NULL;
+    if (!dl_submit_next_seq(&d, rows, nrows, &seq, &seq_why)) {
+        free(rows);
+        dl_unlock(lock);
+        dl_fail(reply, "QUEUE_READ_FAILED", "submit",
+                "cannot assign a unique sequence while outcomes are unreadable",
+                seq_why);
+        return;
     }
     free(rows);
     r.seq = seq;
@@ -2025,6 +2140,18 @@ static void dl_cancel(const struct zcl_command_request *req,
                 "run `dev land status` for the live sequence numbers");
         return;
     }
+    (void)snprintf(hit.state, sizeof(hit.state), "cancelled");
+    hit.phase[0] = '\0';
+    (void)snprintf(hit.detail, sizeof(hit.detail), "%s",
+                   "cancelled by the operator");
+    if (!dl_record_outcome(&d, &hit)) {
+        free(rows);
+        dl_unlock(lock);
+        dl_fail(reply, "OUTCOME_WRITE_FAILED", "cancel",
+                "cannot record the terminal outcome; request remains live",
+                "outcomes.jsonl or mail/outbox.jsonl");
+        return;
+    }
     if (!dl_rewrite_rows(d.land, qpath, rows, kept)) {
         free(rows);
         dl_unlock(lock);
@@ -2034,15 +2161,10 @@ static void dl_cancel(const struct zcl_command_request *req,
     }
     free(rows);
     dl_unlock(lock);
-    (void)snprintf(hit.state, sizeof(hit.state), "cancelled");
-    hit.phase[0] = '\0';
-    (void)snprintf(hit.detail, sizeof(hit.detail), "%s",
-                   "cancelled by the operator");
-    dl_record_outcome(&d, &hit);
     (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
     (void)json_push_kv_int(&reply->data, "seq", seq);
     (void)json_push_kv_str(&reply->data, "tip", hit.tip);
-    (void)json_push_kv_str(&reply->data, "state", "cancelled");
+    (void)json_push_kv_str(&reply->data, "state", hit.state);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
@@ -2907,6 +3029,18 @@ fail:
 
 /* ── step: one scheduler beat, and it never waits ──────────────────────── */
 
+static bool dl_terminal_checkpoint(const struct dl_dirs *d,
+                                    struct dl_row *row)
+{
+    if (!dl_record_outcome(d, row)) return false;
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    if (getenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME") &&
+        getenv("ZCL_DEVLOOP_TEST_PROCESS"))
+        _exit(81);
+#endif
+    return true;
+}
+
 /* Persist one row back into the queue file, or drop it and record it as an
  * outcome when its state is terminal. */
 static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
@@ -2948,13 +3082,17 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
         dl_unlock(lock);
         return false;
     }
-    ok = dl_rewrite_rows(d->land, qpath, rows, kept);
+    /* The terminal observation is the checkpoint. If append or mail
+     * delivery fails, keep the live row so another step can retry. If the
+     * process dies after append but before this rewrite, replay recognizes
+     * the exact outcome and removes the row without running work again. */
+    ok = !terminal || dl_terminal_checkpoint(d, row);
+    if (ok)
+        ok = dl_rewrite_rows(d->land, qpath, rows, kept);
     free(rows);
     dl_unlock(lock);
-    if (ok && terminal)
-        dl_record_outcome(d, row);
-    else if (ok)
-        dl_outbox(d, row, "phase");
+    if (ok && !terminal)
+        (void)dl_outbox(d, row, "phase");
     return ok;
 }
 
@@ -5262,6 +5400,48 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
     dl_step_push(d, row, reply);
 }
 
+/* Return 1 after a durable terminal observation has been replayed, -1 on
+ * malformed history, and 0 when this picked row still needs work. */
+[[maybe_unused]] static int dl_step_terminal_replay(const struct dl_dirs *d,
+                                   const struct dl_row *pick,
+                                   struct zcl_command_reply *reply)
+{
+    struct dl_row prior;
+    bool terminal_seen = false;
+    long long high_water = 0;
+    if (!dl_scan_outcomes(d, pick, &prior, &terminal_seen, &high_water)) {
+        dl_fail(reply, "QUEUE_READ_FAILED", "slot",
+                "cannot reconcile a terminal outcome",
+                "outcomes.jsonl unreadable or malformed");
+        return -1;
+    }
+    if (!terminal_seen) return 0;
+    if (dl_commit_or_report(d, &prior, true, reply, prior.state))
+        dl_step_reply(reply, &prior, prior.state);
+    return 1;
+}
+
+[[maybe_unused]] static bool dl_step_pick_row(const struct dl_row *rows,
+                                             size_t nrows,
+                                             struct dl_row *pick,
+                                             bool *inflight)
+{
+    for (size_t i = 0; i < nrows; i++) {
+        if (strcmp(rows[i].state, "inflight") == 0) {
+            *pick = rows[i];
+            *inflight = true;
+            return true;
+        }
+    }
+    for (size_t i = 0; i < nrows; i++) {
+        if (strcmp(rows[i].state, "queued") == 0) {
+            *pick = rows[i];
+            return true;
+        }
+    }
+    return false;
+}
+
 static void dl_step(const struct zcl_command_request *req,
                     struct zcl_command_reply *reply)
 {
@@ -5277,7 +5457,7 @@ static void dl_step(const struct zcl_command_request *req,
     struct dl_row pick;
     size_t nrows = 0;
     char qpath[4096 + 32];
-    bool have_inflight = false, have_queued = false;
+    bool have_inflight = false, have_row = false;
     int slot;
     if (!dl_dirs_make(&d)) {
         dl_fail(reply, "STATE_DIR_FAILED", "slot",
@@ -5323,26 +5503,15 @@ static void dl_step(const struct zcl_command_request *req,
         return;
     }
     memset(&pick, 0, sizeof(pick));
-    for (size_t i = 0; i < nrows; i++) {
-        if (strcmp(rows[i].state, "inflight") == 0) {
-            pick = rows[i];
-            have_inflight = true;
-            break;
-        }
-    }
-    if (!have_inflight) {
-        for (size_t i = 0; i < nrows; i++) {
-            if (strcmp(rows[i].state, "queued") == 0) {
-                pick = rows[i];
-                have_queued = true;
-                break;
-            }
-        }
-    }
+    have_row = dl_step_pick_row(rows, nrows, &pick, &have_inflight);
     free(rows);
-    if (!have_inflight && !have_queued) {
+    if (!have_row) {
         dl_unlock(slot);
         dl_step_reply(reply, NULL, "empty");
+        return;
+    }
+    if (dl_step_terminal_replay(&d, &pick, reply) != 0) {
+        dl_unlock(slot);
         return;
     }
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
