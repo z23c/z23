@@ -14,10 +14,14 @@
 # Parallel-safety contract (verified 2026-07-18): gates are read-only over
 # the source tree in their default modes; ratchet baselines are written only
 # under an explicit manual ZCL_LINT_MODE=UPDATE (never via `make lint`);
-# every selftest-style gate works in a mktemp dir. The ONE exception runs in
-# a SERIAL prologue before the parallel pool:
+# every selftest-style gate works in a mktemp dir. Gates that read a live
+# generated index need a stable view after the build-affecting gates finish.
+# The serial exceptions are:
 #   check-git-hooks-installed — validates checkout-local Git configuration
-#     after its hermetic host-selection fixture completes.
+#     before the parallel pool, after its hermetic host-selection fixture.
+#   check-cookbook — RUN recipes query codeindex; a parallel gate can change
+#     depfile metadata during its rebuild, producing a retryable CODEINDEX_OPEN
+#     rather than the required answer. Run it after the parallel pool.
 # check-no-stray-untracked-source was also verified read-only; it no longer
 # needs to run first because the driver never circuit-breaks on the first
 # failure — all gates run and every failure is reported, strays included.
@@ -80,8 +84,9 @@ JOBS="${ZCL_LINT_JOBS:-8}"
 BIN_DIR="build/bin"
 BUDGET_SEC="${ZCL_LINT_BUDGET_SEC:-75}"
 
-# Gates that must run serially (and first) — see the header contract.
+# Gates that must run serially — see the header contract.
 SERIAL_PROLOGUE=" check-git-hooks-installed "
+SERIAL_EPILOGUE=" check-cookbook "
 
 # ── Gate invocation table ────────────────────────────────────────────────
 # One entry per check-* gate in the Makefile lint umbrella (LINT_GATES). The
@@ -560,11 +565,15 @@ main() {
         fi
     fi
 
-    local -a serial_gates=() par_gates=()
+    local -a serial_gates=() par_gates=() final_gates=()
     for g in "${gates[@]}"; do
         case "$SERIAL_PROLOGUE" in
             *" $g "*) serial_gates+=("$g") ;;
-            *)        par_gates+=("$g") ;;
+            *)
+                case "$SERIAL_EPILOGUE" in
+                    *" $g "*) final_gates+=("$g") ;;
+                    *)        par_gates+=("$g") ;;
+                esac ;;
         esac
     done
 
@@ -577,6 +586,9 @@ main() {
         printf '%s\n' "${par_gates[@]}" | \
             xargs -r -P "$JOBS" -n1 "$0" --worker
     fi
+    for g in "${final_gates[@]}"; do
+        worker "$g"
+    done
     run_end="$(now_ms)"
     wall_ms=$((run_end - run_start))
 

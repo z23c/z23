@@ -206,7 +206,10 @@ while IFS=$'\t' read -r kind f1 f2 f3 f4 f5; do
         out="$(timeout "$RUN_TIMEOUT" "$Z23" "${argv[@]}" 2>&1 || true)"
         case "$out" in
             *"$f4"*) ;;
-            *) bad "recipe '$f1': 'z23 $f3' no longer prints '$f4'" ;;
+            *)
+                bad "recipe '$f1': 'z23 $f3' no longer prints '$f4'"
+                note "  observed (first 2048 bytes): ${out:0:2048}"
+                ;;
         esac ;;
     RECIPE_ASK)
         asks=$((asks + 1))
