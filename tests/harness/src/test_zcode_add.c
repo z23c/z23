@@ -2298,6 +2298,28 @@ static int za_state_after_rollback(const char *base, int64_t t0,
                                    const struct za_state_app *a)
 {
     int failures = 0;
+    char hidden[PACKAGE_LIFECYCLE_DATA_DIR_MAX + 16u];
+    int n = snprintf(hidden, sizeof(hidden), "%s.hidden", a->alpha_path);
+    bool moved = n > 0 && (size_t)n < sizeof(hidden) &&
+                 rename(a->alpha_path, hidden) == 0;
+    struct package_lifecycle_rollback_report blocked_report;
+    struct zcl_result blocked = package_lifecycle_rollback(
+        base, "alice/statecli", t0 + 32, &blocked_report);
+    uint8_t active[32];
+    size_t generations = 0;
+    bool present = false;
+    struct zcl_result status = package_lifecycle_active(
+        base, "alice/statecli", active, &generations, &present);
+    ZA_CHECK("rollback refuses a previous program missing from its receipt",
+             moved && !blocked.ok &&
+                 strstr(blocked.message, "rollback") != NULL && status.ok &&
+                 present && generations == 2 &&
+                 memcmp(active, a->beta_root, 32) == 0);
+    ZA_CHECK("rollback refusal names the repair in the bounded report",
+             strcmp(blocked_report.rule, "rollback-target-invalid") == 0 &&
+                 strstr(blocked_report.detail, "reinstall the exact root") != NULL);
+    bool restored = moved && rename(hidden, a->alpha_path) == 0;
+    ZA_CHECK("the previous program fixture is restored", restored);
     struct package_lifecycle_rollback_report rb;
     struct zcl_result rbr =
         package_lifecycle_rollback(base, "alice/statecli", t0 + 32, &rb);

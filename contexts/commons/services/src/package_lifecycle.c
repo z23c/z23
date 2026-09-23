@@ -705,6 +705,23 @@ struct zcl_result package_lifecycle_last_activated(
     return r;
 }
 
+static struct zcl_result pkgl_rollback_target_verify(
+    const char *datadir, const char *name, const uint8_t root[32])
+{
+    struct package_lifecycle_step inspected;
+    bool installed = false;
+    struct zcl_result r = package_lifecycle_installed_inspect(
+        datadir, root, &inspected, &installed);
+    if (!r.ok)
+        return ZCL_ERR(-1, "rollback target for %s is invalid; quarantine "
+                           "the damaged install, reinstall the exact root, "
+                           "and retry rollback: %s", name, r.message);
+    if (!installed)
+        return ZCL_ERR(-1, "rollback target for %s is not installed; "
+                           "reinstall the exact root and retry rollback", name);
+    return ZCL_OK;
+}
+
 struct zcl_result package_lifecycle_rollback(
     const char *datadir, const char *name, int64_t now_unix,
     struct package_lifecycle_rollback_report *out)
@@ -765,6 +782,16 @@ struct zcl_result package_lifecycle_rollback(
                   "only one generation of this package was ever active");
         pkgl_ctx_close(&ctx);
         return ZCL_ERR(-1, "nothing to roll back to for '%s'", name);
+    }
+
+    r = pkgl_rollback_target_verify(datadir, name, out->to_root);
+    if (!r.ok) {
+        pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                  sizeof(out->detail), "rollback-target-invalid",
+                  "quarantine the damaged install, reinstall the exact root, "
+                  "and retry rollback");
+        pkgl_ctx_close(&ctx);
+        return r;
     }
 
     uint8_t prev[32];
