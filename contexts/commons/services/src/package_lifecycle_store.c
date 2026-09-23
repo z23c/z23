@@ -37,6 +37,36 @@
 
 /* ── context ────────────────────────────────────────────────────────── */
 
+#if !defined(_WIN32)
+static struct zcl_result pkgl_releases_parent_shape(const char *zcode_dir)
+{
+    struct stat st;
+    if (lstat(zcode_dir, &st) != 0)
+        return errno == ENOENT
+            ? ZCL_OK
+            : ZCL_ERR(-1, "inspect local zcode root %s: %s", zcode_dir,
+                      strerror(errno));
+    if (!S_ISDIR(st.st_mode))
+        return ZCL_ERR(-1, "local zcode root is linked or not a real "
+                           "directory; restore the local package store: %s",
+                       zcode_dir);
+    char releases[PKGL_PATH_MAX];
+    int n = snprintf(releases, sizeof(releases), "%s/releases", zcode_dir);
+    if (n <= 0 || (size_t)n >= sizeof(releases))
+        return ZCL_ERR(-1, "local releases directory path is too long");
+    if (lstat(releases, &st) != 0)
+        return errno == ENOENT
+            ? ZCL_OK
+            : ZCL_ERR(-1, "inspect local releases directory %s: %s",
+                      releases, strerror(errno));
+    if (!S_ISDIR(st.st_mode))
+        return ZCL_ERR(-1, "local releases directory is linked or not a "
+                           "real directory; restore the local releases "
+                           "directory: %s", releases);
+    return ZCL_OK;
+}
+#endif
+
 struct zcl_result pkgl_ctx_open(struct pkgl_ctx *ctx, const char *datadir)
 {
     if (!ctx || !datadir || !datadir[0])
@@ -48,6 +78,9 @@ struct zcl_result pkgl_ctx_open(struct pkgl_ctx *ctx, const char *datadir)
     n = snprintf(ctx->zcode_dir, sizeof(ctx->zcode_dir), "%s/zcode", datadir);
     if (n < 0 || (size_t)n >= sizeof(ctx->zcode_dir))
         return ZCL_ERR(-1, "datadir path too long for <datadir>/zcode");
+#if !defined(_WIN32)
+    ZCL_CHECK(pkgl_releases_parent_shape(ctx->zcode_dir));
+#endif
     ctx->releases = zcl_malloc(
         sizeof(*ctx->releases) * VCS_PACKAGE_PUBLISH_MAX_RELEASES,
         "pkgl.releases");

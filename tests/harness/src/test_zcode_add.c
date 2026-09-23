@@ -3031,6 +3031,46 @@ static int t_worker_literal_path(void)
     return failures;
 }
 
+static bool za_release_plan_refuses(const char *base, int64_t now,
+                                    const char *first, const char *second)
+{
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result planned =
+        package_lifecycle_plan(base, "alice/preview", now, &plan);
+    return !planned.ok && strstr(planned.message, first) != NULL &&
+           strstr(planned.message, second) != NULL;
+}
+
+static int t_release_parent_shape(void)
+{
+    int failures = 0;
+    char base[256], zcode[400], releases[440], outside[400];
+    char outside_abs[4400];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "release-parent");
+    (void)snprintf(zcode, sizeof(zcode), "%s/zcode", base);
+    (void)snprintf(releases, sizeof(releases), "%s/releases", zcode);
+    (void)snprintf(outside, sizeof(outside), "%s/outside", base);
+    bool prepared = za_mkdir_p(zcode) && za_mkdir_p(outside) &&
+                    test_abs_path(outside, outside_abs, sizeof(outside_abs)) &&
+                    symlink(outside_abs, releases) == 0;
+    ZA_CHECK("package plan refuses a linked local releases directory",
+             prepared && za_release_plan_refuses(base, 1000, "releases",
+                                                  "linked"));
+    bool blocked = prepared && unlink(releases) == 0 &&
+                   za_write_file(releases, "blocked", 7, 0600);
+    ZA_CHECK("package plan names a non-directory releases blocker",
+             blocked && za_release_plan_refuses(base, 1001, "releases",
+                                                 "directory"));
+    bool root_linked = blocked && unlink(releases) == 0 &&
+                       rmdir(zcode) == 0 &&
+                       symlink(outside_abs, zcode) == 0;
+    ZA_CHECK("package plan refuses a linked local zcode root",
+             root_linked && za_release_plan_refuses(base, 1002, "zcode",
+                                                     "linked"));
+    ZA_CHECK("release parent fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 int test_zcode_add(void)
 {
     printf("\n=== zcode_add: package install lifecycle ===\n");
@@ -3039,6 +3079,7 @@ int test_zcode_add(void)
     failures += t_deps_rules();
     failures += t_generations();
     failures += t_release_selection();
+    failures += t_release_parent_shape();
     failures += t_activation_target_shape();
     failures += t_active_temp_directory_preserved();
     failures += t_active_parent_symlink();
