@@ -13,6 +13,7 @@
 #endif
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -181,6 +182,36 @@ int pc_load_module_rows(const char *const *paths, int npaths, struct pc_modtable
         if (rc)
             return rc;
     }
+    return 0;
+}
+
+/* A source-owned row lives beside its .c file. Package sources can be
+ * enumerated independently, so no second central path catalog is needed. */
+int pc_load_module_sidecar(const char *root, const char *source,
+                           struct pc_modtable *out, int *n_rows)
+{
+    char path[PC_PATHLEN * 3];
+    if (!root || !source || !out || !n_rows ||
+        ovf(snprintf(path, sizeof path, "%s/%s.capabilities.def", root, source),
+            sizeof path))
+        return 2;
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return errno == ENOENT ? 0 : 2;
+    if (!S_ISREG(st.st_mode))
+        return 2;
+    struct pc_pathcaps *existing = pc_modtable_find(out, source);
+    if (existing)
+        return existing->source_owned ? 0 : 2; /* central/sidecar collision */
+    int before = out->n, count = 0;
+    if (pc_load_module_file(path, out, &count) != 0 ||
+        count != 1 || out->n != before + 1)
+        return 2;
+    struct pc_pathcaps *row = pc_modtable_find(out, source);
+    if (!row)
+        return 2; /* row named a different source than its sibling */
+    row->source_owned = 1;
+    (*n_rows)++;
     return 0;
 }
 

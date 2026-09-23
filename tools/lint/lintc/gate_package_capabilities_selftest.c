@@ -439,11 +439,63 @@ static int pcs_case_j(const char *base, int *fails)
                         "nothing", 0, "OK — every manifest", d, fails);
 }
 
+static int pcs_case_source_owned(const char *base, int *fails)
+{
+    char d[4096], p[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/source_owned", base), sizeof d) ||
+        csr_mkdirs(d) || pcs_fixture_base(d))
+        return 2;
+    const char *srcs[] = { "src/one.c", NULL };
+    if (pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\"", srcs) ||
+        ovf(snprintf(p, sizeof p, "%s/lib/owned/src/one.c.capabilities.def", d),
+            sizeof p) ||
+        csr_write(p, "ZCL_MODULE_CAPABILITY(\"lib/owned/src/one.c\", CAP_FS_READ, \"\")\n"))
+        return 2;
+    return pcs_expect_rc("K: a package derives a source-owned capability", 0,
+                         "OK — every manifest", d, fails);
+}
+
+static int pcs_case_source_owned_duplicate(const char *base, int *fails)
+{
+    char d[4096], p[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/source_duplicate", base), sizeof d) ||
+        csr_mkdirs(d) || pcs_fixture_base(d))
+        return 2;
+    const char *srcs[] = { "src/one.c", NULL };
+    const char *rows[] = { "lib/owned/src/one.c CAP_FS_READ", NULL };
+    if (pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\"", srcs) ||
+        pcs_fixture_rows(d, rows) ||
+        ovf(snprintf(p, sizeof p, "%s/lib/owned/src/one.c.capabilities.def", d),
+            sizeof p) ||
+        csr_write(p, "ZCL_MODULE_CAPABILITY(\"lib/owned/src/one.c\", CAP_FS_READ, \"\")\n"))
+        return 2;
+    return pcs_expect_rc("L: central and source-owned duplicate refuses", 2,
+                         "invalid source-owned", d, fails);
+}
+
+static int pcs_case_source_owned_misplaced(const char *base, int *fails)
+{
+    char d[4096], p[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/source_misplaced", base), sizeof d) ||
+        csr_mkdirs(d) || pcs_fixture_base(d))
+        return 2;
+    const char *srcs[] = { "src/one.c", NULL };
+    if (pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\"", srcs) ||
+        ovf(snprintf(p, sizeof p, "%s/lib/owned/src/one.c.capabilities.def", d),
+            sizeof p) ||
+        csr_write(p, "ZCL_MODULE_CAPABILITY(\"lib/other/src/one.c\", CAP_FS_READ, \"\")\n"))
+        return 2;
+    return pcs_expect_rc("M: misplaced source-owned row refuses", 2,
+                         "invalid source-owned", d, fails);
+}
+
 typedef int (*pcs_case_fn)(const char *, int *);
 static const pcs_case_fn k_pcs_cases[] = {
     pcs_case_a, pcs_case_b, pcs_case_c, pcs_case_c2, pcs_case_c3, pcs_case_d,
     pcs_case_e, pcs_case_e2, pcs_case_e3, pcs_case_f1, pcs_case_f2, pcs_case_g1,
     pcs_case_g2, pcs_case_h, pcs_case_i, pcs_case_j,
+    pcs_case_source_owned, pcs_case_source_owned_duplicate,
+    pcs_case_source_owned_misplaced,
 };
 
 int check_package_capabilities_selftest(void)
@@ -469,6 +521,6 @@ int check_package_capabilities_selftest(void)
         printf("== selftest: FAIL ==\n");
         return 1;
     }
-    printf("== selftest: PASS (16/16) ==\n");
+    printf("== selftest: PASS (19/19) ==\n");
     return 0;
 }

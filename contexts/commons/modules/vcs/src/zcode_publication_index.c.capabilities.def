@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the CAS observation projection. */
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_publication_index.c", CAP_FS_WRITE|CAP_FS_READ, "")

@@ -121,13 +121,6 @@ static int pc_open_modules(const char *root, struct pc_modtable *mods, FILE *out
     int rc = pc_load_module_rows(present, npresent, mods, n_mod);
     if (rc)
         return rc;
-    if (*n_mod < 1) {
-        fprintf(out, "check_package_capabilities: UNPROVEN — parsed 0 rows from\n"
-               "  %s. Every package would derive the empty set and\n"
-               "  every genuinely inert package would 'pass' off a scan that saw\n"
-               "  nothing. That is not a proof of inertness.\n", k_modules_defs[0]);
-        return 2;
-    }
     return 0;
 }
 
@@ -300,7 +293,7 @@ static int pc_check_symmetry(const char *name, char (*decl)[PC_ARRLEN], int dn,
 static int pc_grade_package(const char *root, const struct pc_pkg *pkg,
                             struct pc_modtable *mods, const struct sr_set *classes,
                             char *rep, size_t cap, size_t *used, int *violations,
-                            int *n_src_total, FILE *out)
+                            int *n_src_total, int *n_mod, FILE *out)
 {
     char manifest[PC_PATHLEN * 2];
     if (ovf(snprintf(manifest, sizeof manifest, "%s/%s/zcode-package.json", root,
@@ -332,6 +325,11 @@ static int pc_grade_package(const char *root, const struct pc_pkg *pkg,
 
     struct sr_set derived = { .count = 0 };
     for (int i = 0; i < sn; i++) {
+        if (pc_load_module_sidecar(root, sources[i], mods, n_mod) != 0) {
+            fprintf(out, "check_package_capabilities: UNPROVEN — invalid source-owned capability row for %s\n",
+                    sources[i]);
+            return 2;
+        }
         struct pc_pathcaps *row = pc_modtable_find(mods, sources[i]);
         if (!row)
             continue;
@@ -393,9 +391,15 @@ int pc_check_root(const char *root, FILE *out)
     int violations = 0, n_src_total = 0;
     for (int i = 0; i < npkg; i++) {
         rc = pc_grade_package(root, &pkgs[i], &mods, &classes, report, sizeof report,
-                              &used, &violations, &n_src_total, out);
+                              &used, &violations, &n_src_total, &n_mod, out);
         if (rc)
             return rc;
+    }
+    if (n_mod < 1) {
+        fprintf(out, "check_package_capabilities: UNPROVEN — parsed 0 rows from\n"
+               "  central or source-owned module capability declarations.\n"
+               "  A genuinely inert package cannot pass a hollow scan.\n");
+        return 2;
     }
 
     if (used > 0)

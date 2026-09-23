@@ -370,8 +370,14 @@ cap_closure_union_caps() {
     printf '%s' "$out"
 }
 
+cap_closure_sidecar_error() {
+    echo "check_capability_closure: FATAL — invalid source-owned capability sidecar: $1" >&2
+    return 1
+}
+
 cap_closure_load_module_rows() {
-    local file="$1" platform_file="${2:-}" out path cls pn=0
+    local file="$1" platform_file="${2:-}" root="$3" out path cls pn=0
+    local sidecar expected sidecars dir
     CAP_MOD_RAW=()
     CAP_MOD_UNION_RAW=()
     [ -f "$file" ] || return 1
@@ -381,6 +387,28 @@ cap_closure_load_module_rows() {
         CAP_MOD_RAW["$path"]="$cls"
         CAP_MOD_UNION_RAW["$path"]="$(cap_closure_union_caps "${CAP_MOD_UNION_RAW[$path]:-}" "$cls")"
     done <<< "$out"
+    # Source-owned sidecars are a deterministic extension of the portable
+    # table. Each names exactly its sibling .c file; duplicate central rows
+    # and malformed/misplaced declarations refuse rather than silently merge.
+    sidecars="$(
+        for dir in "$root"/{core,engine,contexts,cognition,platform}; do
+            [ -d "$dir" ] || continue
+            find "$dir" -name '*.c.capabilities.def' -print
+        done | LC_ALL=C sort
+    )" || return 1
+    while IFS= read -r sidecar; do
+        [ -n "$sidecar" ] || continue
+        [ -f "$sidecar" ] && [ ! -L "$sidecar" ] || cap_closure_sidecar_error "$sidecar" || return 1
+        expected="${sidecar#"$root"/}"
+        expected="${expected%.capabilities.def}"
+        out="$(cap_closure_module_tsv "$sidecar")" || return 1
+        [ -n "$out" ] && [[ "$out" != *$'\n'* ]] || cap_closure_sidecar_error "$sidecar" || return 1
+        IFS=$'\t' read -r path cls <<< "$out"
+        [ "$path" = "$expected" ] && [ -n "$cls" ] || cap_closure_sidecar_error "$sidecar" || return 1
+        [ -z "${CAP_MOD_RAW[$path]+x}" ] || cap_closure_sidecar_error "$sidecar (duplicate central row)" || return 1
+        CAP_MOD_RAW["$path"]="$cls"
+        CAP_MOD_UNION_RAW["$path"]="$(cap_closure_union_caps "" "$cls")"
+    done <<< "$sidecars"
     if [ -n "$platform_file" ] && [ -f "$platform_file" ]; then
         out="$(cap_closure_module_tsv "$platform_file")" || return 1
         while IFS=$'\t' read -r path cls; do
@@ -550,7 +578,7 @@ check_root() {
         return 2
     fi
 
-    if ! cap_closure_load_module_rows "$module_file" "$platform_module_file"; then
+    if ! cap_closure_load_module_rows "$module_file" "$platform_module_file" "$root"; then
         echo "check_capability_closure: FATAL — cannot read $module_file"
         return 2
     fi
@@ -1412,8 +1440,34 @@ EOF
         fi
     fi
 
+    # P. A source-owned declaration removes the central row edit without
+    # weakening closure. Misplacement and a duplicate central row must fail.
+    d="$FIXTURE_ROOT/p"
+    mkdir -p "$d/contexts/commons/modules/vcs/src" \
+             "$d/build/dev-obj/epochs/fx0/contexts/commons/modules/vcs/src"
+    make_epoch "$d"
+    fixture_symbols "$d"
+    fixture_module_rows "$d"
+    cat > "$d/contexts/commons/modules/vcs/src/owned.c" <<'EOF'
+extern int connect(int, int, int);
+int owned_use(void) { return connect(1, 2, 3); }
+EOF
+    cc -std=c23 -c "$d/contexts/commons/modules/vcs/src/owned.c" \
+        -o "$d/build/dev-obj/epochs/fx0/contexts/commons/modules/vcs/src/owned.o" 2>/dev/null \
+      || cc -c "$d/contexts/commons/modules/vcs/src/owned.c" \
+        -o "$d/build/dev-obj/epochs/fx0/contexts/commons/modules/vcs/src/owned.o"
+    local owned_sidecar="$d/contexts/commons/modules/vcs/src/owned.c.capabilities.def"
+    printf '%s\n' 'ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/owned.c", CAP_NETWORK, "fixture")' > "$owned_sidecar"
+    expect_accept "P1: source-owned declaration closes the compiled object" "$d" || rc=1
+    printf '%s\n' 'ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/other.c", CAP_NETWORK, "fixture")' > "$owned_sidecar"
+    expect_reject "P2: misplaced source-owned declaration refuses" "invalid source-owned" "$d" || rc=1
+    printf '%s\n' 'ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/owned.c", CAP_NETWORK, "fixture")' > "$owned_sidecar"
+    fixture_module_rows "$d" \
+        'ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/owned.c", CAP_NETWORK, "fixture")'
+    expect_reject "P3: central and source-owned duplicate refuses" "duplicate central row" "$d" || rc=1
+
     if [ "$rc" -eq 0 ]; then
-        echo "== selftest: PASS (16/16) =="
+        echo "== selftest: PASS (19/19) =="
     else
         echo "== selftest: FAIL =="
     fi

@@ -29,7 +29,7 @@ int pc_capset_add(struct pc_capset *s, const char *name);
  * ZCL_MODULE_CAPABILITY row grants it (CAP_NONE dropped, union across every
  * modules file that names this exact path — a package can cross platforms
  * and must declare the union of its portable and platform-exact reach). */
-struct pc_pathcaps { char path[PC_PATHLEN]; struct pc_capset caps; };
+struct pc_pathcaps { char path[PC_PATHLEN]; struct pc_capset caps; int source_owned; };
 struct pc_modtable { struct pc_pathcaps rows[PC_MAXPATH]; int n; };
 
 struct pc_pkg { char name[PC_NAMELEN]; char dir[PC_DIRLEN]; };
@@ -38,6 +38,8 @@ struct pc_pkg { char name[PC_NAMELEN]; char dir[PC_DIRLEN]; };
 int pc_load_classes(const char *path, struct sr_set *out, int *n_lines);
 int pc_load_module_rows(const char *const *paths, int npaths,
                         struct pc_modtable *out, int *n_rows);
+int pc_load_module_sidecar(const char *root, const char *source,
+                           struct pc_modtable *out, int *n_rows);
 int pc_load_registry(const char *const *paths, int npaths, struct pc_pkg *out,
                      int cap, int *n_out);
 /* 0 = key present (out and n hold its elements, possibly zero of them),

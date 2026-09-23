@@ -4146,13 +4146,13 @@ zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
 	@echo "zcode-package-asan: OK (isolated base/sha3/codec + signed package lifecycle)"
 
 .PHONY: check-zcode-package-registry print-zcode-monolith-lib-sources
-check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(LINTC_TOOL)
+check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(BIN_DIR)/z23-lint
 	@tools/lint/check_zcode_package_registry.sh
 .PHONY: check-zcode-package-standalone
-check-zcode-package-standalone: $(LINTC_TOOL)
+check-zcode-package-standalone: $(BIN_DIR)/z23-lint
 	@tools/lint/check_zcode_package_standalone.sh
 .PHONY: check-package-capabilities
-check-package-capabilities: $(LINTC_TOOL)
+check-package-capabilities: $(BIN_DIR)/z23-lint
 	@./tools/lint/check_package_capabilities.sh --selftest
 	@./tools/lint/check_package_capabilities.sh
 .PHONY: check-package-anatomy

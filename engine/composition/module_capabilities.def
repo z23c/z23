@@ -5,6 +5,9 @@
  * it is not duplicated here.
  *
  * ZCL_MODULE_CAPABILITY(source_path, CAP_A|CAP_B, why)
+ * New source files may put their one portable row in a sibling
+ * <source>.c.capabilities.def instead. Both capability gates read these
+ * source-owned rows in path order and reject a duplicate central row.
  *
  * A source file with NO row here declares the empty set — the maximally
  * restrictive answer, enforced positively by
@@ -1118,7 +1121,6 @@ ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_heuristic_lifecycl
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_heuristic_replication.c", CAP_NONE, "read-only accepted-replication projection over the existing CAS; grants no storage-write or acceptance authority")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_patch.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_patronage_projection.c", CAP_FS_WRITE|CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_publication_index.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_science_index.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_science_platform.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_seed.c", CAP_WALLET, "signs and derives the public key for a ZCODE seed's spending material")
