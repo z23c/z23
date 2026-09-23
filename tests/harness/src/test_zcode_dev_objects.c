@@ -5796,6 +5796,31 @@ static int test_zd_improve_command(void)
                       provider_progress_root, 32) == 0);
         ASSERT(memcmp(ack_progress_root,
                       loaded_ack_progress_root, 32) == 0);
+        uint8_t *canonical_ack_set = NULL;
+        size_t canonical_ack_set_len = 0;
+        ASSERT_EQ(vcs_object_get(
+                      workspace, ack_progress.artifact_root,
+                      VCS_TAG_PUBLICATION_ACK_SET,
+                      &canonical_ack_set, &canonical_ack_set_len), 0);
+        ASSERT(zd_index_drop_object(
+            workspace, ack_progress.artifact_root));
+        const uint8_t corrupt_ack_set[] = "interrupted-storage-ack-set";
+        ASSERT(vcs_object_put_addressed(
+            workspace, ack_progress.artifact_root,
+            corrupt_ack_set, sizeof(corrupt_ack_set)));
+        uint8_t repaired_ack_progress_root[32];
+        ack_reused = false;
+        ASSERT(vcs_devloop_publication_advance_storage_acks(
+            workspace, publication_anchor.publication_job_root,
+            ack_wire_ptrs, ack_wire_lengths, 2, &ack_verify,
+            repaired_ack_progress_root, &ack_reused));
+        ASSERT(ack_reused);
+        ASSERT(memcmp(repaired_ack_progress_root,
+                      ack_progress_root, 32) == 0);
+        ASSERT(zd_object_equals_bytes(
+            workspace, ack_progress.artifact_root,
+            canonical_ack_set, canonical_ack_set_len));
+        free(canonical_ack_set);
         ASSERT(vcs_devloop_publication_storage_ack_target(
             workspace, publication_anchor.publication_job_root,
             &provider_verify, &ack_target));

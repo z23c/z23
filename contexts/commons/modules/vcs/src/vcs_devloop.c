@@ -601,8 +601,9 @@ bool publication_storage_ack_set_store(
     zcl_write_u16_le(wire + 12, (uint16_t)record_count);
     memcpy(wire + VCS_DEV_PUBLICATION_ACK_SET_HEADER_BYTES,
            roots, record_count * 32);
-    if (!vcs_object_put(repo_root, wire, wire_len,
-                        VCS_TAG_PUBLICATION_ACK_SET, ack_set_root_out))
+    if (!vcs_object_put_repair(repo_root, wire, wire_len,
+                               VCS_TAG_PUBLICATION_ACK_SET,
+                               ack_set_root_out, NULL))
         return false;
     uint8_t *stored = NULL;
     size_t stored_len = 0;
