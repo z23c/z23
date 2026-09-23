@@ -1302,8 +1302,11 @@ Z23_FLAG("ZCL_LAND_SUBMITTER", "env_build", "-", "-",
 Z23_FLAG("ZCL_LAND_TEST_DIE_AFTER_OUTCOME", "env_test", "-", "-",
           "test-only crash after terminal outcome append; first use "
           "tools/command/native_dev_land.c:3037")
+Z23_FLAG("ZCL_LAND_TEST_DIE_AFTER_PROOF", "env_test", "-", "-",
+          "test-only crash after proof PASS before landing transition; first use "
+          "tools/command/native_dev_land.c:5293")
 Z23_FLAG("ZCL_LAND_TEST_PICK_DELAY_MS", "env_runtime", "-", "-",
-          "undocumented; first use tools/command/native_dev_land.c:5524")
+          "undocumented; first use tools/command/native_dev_land.c:5535")
 Z23_FLAG("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "env_test", "-", "-",
           "test-only terminal append refusal; first use "
           "tools/command/native_dev_land.c:1181")

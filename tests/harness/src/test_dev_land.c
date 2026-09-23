@@ -99,6 +99,7 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME");
+    unsetenv("ZCL_LAND_TEST_DIE_AFTER_PROOF");
     unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
@@ -126,6 +127,7 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
     unsetenv("ZCL_LAND_TEST_DIE_AFTER_OUTCOME");
+    unsetenv("ZCL_LAND_TEST_DIE_AFTER_PROOF");
     unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
     unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
     unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
@@ -1670,6 +1672,69 @@ static int test_dev_land_lost_persistence(void)
     }
 
 _test_next:;
+    return failures;
+}
+
+/* A finished proof is separate from the landing verdict. Kill a step after
+ * it observes PASS, before it can push or persist a phase change. The next
+ * process must consume the same exact row and finish once. The test-only
+ * proof stub supplies PASS; this tests landing recovery, not proof validity. */
+static int test_dev_land_after_proof_restart(void)
+{
+    int failures = 0;
+    TEST("land: death after proof PASS before verdict preserves the row for restart") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char base[64], remote[64], landdir[1200], qpath[1400];
+        char before[8192], after[8192];
+        size_t before_len = 0, after_len = 0;
+        int child_status = 0;
+        dlx_isolate("after_proof_restart");
+        ASSERT(dlx_rig_make(&rig, "after_proof_restart_rig"));
+        ASSERT(dlx_origin_main(&rig, base));
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "running", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1) == 0);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir) <
+               (int)sizeof(qpath));
+        ASSERT(dlx_slurp(qpath, before, sizeof(before), &before_len));
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "pass", 1) == 0);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            struct dlx_call cc;
+            (void)setenv("ZCL_LAND_TEST_DIE_AFTER_PROOF", "1", 1);
+            dlx_begin(&cc, "step");
+            (void)dlx_run(&cc);
+            _exit(90);
+        }
+        ASSERT(waitpid(child, &child_status, 0) == child);
+        ASSERT(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 82);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, base);
+        ASSERT(dlx_slurp(qpath, after, sizeof(after), &after_len));
+        ASSERT_EQ(after_len, before_len);
+        ASSERT(memcmp(after, before, before_len) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, rig.tip);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "empty");
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    } _test_next:;
     return failures;
 }
 
@@ -4399,6 +4464,7 @@ int test_dev_land(void)
     failures += test_dev_land_expected_base_race();
     failures += test_dev_land_nonfastforward_client_guard();
     failures += test_dev_land_lost_persistence();
+    failures += test_dev_land_after_proof_restart();
     failures += test_dev_land_terminal_replay();
 
     TEST("land: a hooksPath naming no real pre-push cannot skip admission") {

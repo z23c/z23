@@ -5286,6 +5286,14 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
         dl_step_reply(reply, row, "landed");
 }
 
+#if defined(ZCL_TESTING)
+static void dl_test_die_after_proof(void)
+{
+    /* Hard death before any landing transition is persisted. */
+    if (getenv("ZCL_LAND_TEST_DIE_AFTER_PROOF")) _exit(82);
+}
+#endif
+
 /* Read the proof's own state for the in-flight request and act once.
  * Windows refuses step before entering this POSIX-only call graph. */
 [[maybe_unused]] static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
@@ -5357,6 +5365,9 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
+#if defined(ZCL_TESTING)
+    dl_test_die_after_proof();
+#endif
     /* The proof passed for THIS (local, base) pair. If main moved while it
      * ran, the receipt is about a base nobody is on any more: rebase again
      * and prove again rather than pushing evidence that no longer applies. */
