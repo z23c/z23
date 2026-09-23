@@ -1038,6 +1038,14 @@ its whole run and a second driver that finds it held gets `STEP_BUSY`
 (retryable) and steps again shortly rather than racing the first driver's
 rebase and lint against the shared landing worktree.
 
+When a landing step queues an exact proof in an unarmed checkout, its detail
+names the `dev proof step --local_commit=<commit> --remote_base=<base> --root=<landing-worktree>`
+call. Any worker with access to that checkout can run this existing foreground
+step through `devbuild --wait`; the next landing step consumes its signed
+receipt. Landing does not start a resident proof watcher by default. An
+operator who explicitly wants the prior watcher path can set
+`ZCL_LAND_START_PROOF_WATCHER=1` for that landing step.
+
 Queued exact proofs take the same lock shared before claiming a request
 and hold it until verification finishes. Requests created by checkout hooks
 therefore remain queued while the landing step prepares the tree. A busy

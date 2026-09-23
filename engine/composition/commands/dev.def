@@ -1878,7 +1878,7 @@ ZCL_COMMAND_DEV_READ(
 
 /* ── dev.land ──────────────────────────────────────────────────────────────
  * The landing service: an agent submits a tip and returns in milliseconds,
- * a resident loop steps the queue, and the agent learns the outcome by
+ * a driver steps the queue, and the agent learns the outcome by
  * pulling. Nothing an agent calls waits on a proof or a push. step drives
  * one beat under a host-wide, non-blocking slot lock — rebase onto
  * origin/main, lint, ASK for the exact proof, return — and a later step
@@ -1895,7 +1895,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "tip or the failing dimension and its log; step takes one beat under a "
     "non-blocking host-wide slot lock, rebasing the tip onto origin/main in "
     "a private landing worktree, running lint-fast, requesting the exact "
-    "commit/base proof through dev.proof, and RETURNING — a later step "
+    "commit/base proof through dev.proof, and RETURNING; on an unarmed "
+    "checkout it names the exact dev.proof.step call for any worker to "
+    "claim, without starting a resident watcher by default — a later step "
     "reads the proof state and fast-forwards origin/main, re-rebases when "
     "the base moved, and retries a host-load failure up to three times; "
     "cancel drops one request by sequence number. Every state change also "

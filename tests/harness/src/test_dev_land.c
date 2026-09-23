@@ -3640,6 +3640,34 @@ int test_dev_land(void)
         PASS();
     }
 
+    TEST("land: an unarmed proof has an exact worker-stealable step") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("manual_proof");
+        ASSERT(dlx_rig_make(&rig, "manual_proof_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "manual", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "phase"), "prove") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"), "dev proof step") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), rig.tip) != NULL);
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "proving") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"), "dev proof step") != NULL);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
     TEST("land: an unrelated stub value still reports its own detail") {
         struct dlx_rig rig;
         struct dlx_call c;

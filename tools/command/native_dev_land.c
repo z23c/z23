@@ -1346,6 +1346,41 @@ static const char *dl_stub(void)
 #endif
 }
 
+/* The queued pair is already durable. Any worker with this checkout can run
+ * the existing one-pair foreground proof, then a later land step consumes
+ * its signed receipt. Keep the exact input in the row detail so losing the
+ * originating process does not lose the next action. */
+static void dl_proof_step_detail(const char *wt, const char *local,
+                                 const char *base, char *detail, size_t cap)
+{
+    int n = snprintf(detail, cap,
+        "dev proof step --local_commit=%s --remote_base=%s --root=%s",
+        local, base, wt);
+    if (n < 0 || (size_t)n >= cap || n >= 256)
+        (void)snprintf(detail, cap,
+                       "proof pending; exact step exceeds row detail budget");
+}
+
+#ifdef ZCL_DEV_BUILD
+static void dl_proof_status_detail(const struct zcl_dev_proof_status *status,
+                                   const char *wt, const char *local,
+                                   const char *base, char *detail, size_t cap)
+{
+    const char *arm = getenv("ZCL_LAND_START_PROOF_WATCHER");
+    if ((status->state == ZCL_DEV_PROOF_STATE_MISSING ||
+         (status->state == ZCL_DEV_PROOF_STATE_RUNNING &&
+          status->worker_id == 0)) &&
+        !zcl_native_dev_loop_proof_queue_ready(wt) &&
+        !(arm && strcmp(arm, "1") == 0)) {
+        dl_proof_step_detail(wt, local, base, detail, cap);
+        return;
+    }
+    (void)snprintf(detail, cap, "%s",
+                   status->detail[0] ? status->detail
+                                     : zcl_dev_proof_state_name(status->state));
+}
+#endif
+
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 /* A one-shot service owns its cgroup only until the step returns. Launch
  * the existing watcher through host admission so its verification lifetime
@@ -1414,9 +1449,10 @@ static void dl_watcher_kick_scheduled(const char *wt, char *detail, size_t cap)
 #endif
 
 #ifdef ZCL_DEV_BUILD
-/* WHY. A proof request is only a file; the resident watcher consumes it.
- * Landing starts that watcher in verify mode, or names why it is absent,
- * rather than sitting in proving with nobody draining the queue.
+/* A proof request is durable before a worker claims it. An unarmed landing
+ * names the exact dev.proof.step input so another worker can take it. Only an
+ * operator's explicit ZCL_LAND_START_PROOF_WATCHER=1 choice starts the
+ * resident verify watcher here.
  *
  * The non-Linux path reaches dev.loop's internal async-start entry point THROUGH a local
  * function-pointer variable, never by calling it by name, for the same
@@ -1503,6 +1539,8 @@ static enum dl_proof dl_proof_request(const char *wt, const char *local,
         if (strcmp(stub, "watcher_absent") == 0)
             (void)snprintf(detail, cap, "%s",
                            "resident_proof_watcher_absent");
+        else if (strcmp(stub, "manual") == 0)
+            dl_proof_step_detail(wt, local, base, detail, cap);
         else
             (void)snprintf(detail, cap, "proof stub: %s", stub);
         return DL_PROOF_PENDING;
@@ -1522,8 +1560,13 @@ static enum dl_proof dl_proof_request(const char *wt, const char *local,
             return DL_PROOF_PASSED;
         if (status.state == ZCL_DEV_PROOF_STATE_FAILED)
             return DL_PROOF_FAILED;
-        if (!zcl_native_dev_loop_proof_queue_ready(wt))
-            dl_watcher_kick(wt, detail, cap);
+        if (!zcl_native_dev_loop_proof_queue_ready(wt)) {
+            const char *arm = getenv("ZCL_LAND_START_PROOF_WATCHER");
+            if (arm && strcmp(arm, "1") == 0)
+                dl_watcher_kick(wt, detail, cap);
+            else
+                dl_proof_step_detail(wt, local, base, detail, cap);
+        }
         return DL_PROOF_PENDING;
     }
 #else
@@ -1613,6 +1656,8 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
         if (strcmp(stub, "watcher_absent") == 0)
             (void)snprintf(detail, cap, "%s",
                            "resident_proof_watcher_absent");
+        else if (strcmp(stub, "manual") == 0)
+            dl_proof_step_detail(wt, local, base, detail, cap);
         else
             (void)snprintf(detail, cap, "proof stub: %s", stub);
         return DL_PROOF_PENDING;
@@ -1626,10 +1671,7 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
                                             : "proof_status_unreadable");
             return DL_PROOF_FAILED;
         }
-        (void)snprintf(detail, cap, "%s",
-                       status.detail[0] ? status.detail
-                                        : zcl_dev_proof_state_name(
-                                              status.state));
+        dl_proof_status_detail(&status, wt, local, base, detail, cap);
         /* An unclaimed request that has sat past the idle bound is named,
          * not left as a bare "queued": a driver reading this status must
          * be able to tell "a worker is coming" from "nothing has consumed
