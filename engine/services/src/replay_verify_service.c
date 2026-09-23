@@ -215,6 +215,18 @@ struct zcl_result replay_verify_run_port(struct block_log_port *port,
                    st.deser_height);
     }
 
+    /* An adapter may return OK after reaching its own end of iteration.
+     * A shorter sweep cannot establish the requested range's integrity. */
+    uint64_t expected = (uint64_t)out->end_height - start_height + 1;
+    if (out->blocks_checked != expected) {
+        return ZCL_ERR(-8,
+                   "replay_verify_run_port: incomplete sweep start=%u "
+                   "end=%u checked=%llu expected=%llu",
+                   start_height, out->end_height,
+                   (unsigned long long)out->blocks_checked,
+                   (unsigned long long)expected);
+    }
+
     return ZCL_OK;
 }
 

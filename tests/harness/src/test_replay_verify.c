@@ -168,11 +168,40 @@ static bool rv_build_fixture_chain(const char *dir,
     return true;
 }
 
+/* Model an index that advertises a tip but returns an empty successful
+ * iteration. This must never qualify a requested integrity sweep. */
+static uint32_t rv_truncated_tip(void *self)
+{
+    (void)self;
+    return 2;
+}
+
+static struct zcl_result rv_truncated_iter(void *self, uint32_t start_height,
+                                            block_log_iter_fn cb,
+                                            void *user_data)
+{
+    (void)self;
+    (void)start_height;
+    (void)cb;
+    (void)user_data;
+    return ZCL_OK;
+}
+
 /* ── The CI teeth section ───────────────────────────────────────────
  * Returns failure count; runs with zero datadir dependency. */
 static int rv_ci_fixture_teeth(void)
 {
     int failures = 0;
+
+    struct block_log_port truncated = {
+        .tip_height = rv_truncated_tip,
+        .iter_from = rv_truncated_iter,
+    };
+    struct replay_verify_report truncated_report;
+    struct zcl_result truncated_result = replay_verify_run_port(
+        &truncated, 0, 0, &truncated_report);
+    RV_CHECK("ci: advertised tip with empty iteration refuses incomplete sweep",
+             !truncated_result.ok && truncated_report.blocks_checked == 0);
 
     /* 1. Contiguous chain: linkage clean, PoW rejected on every block. */
     char tmpl[PATH_MAX];
