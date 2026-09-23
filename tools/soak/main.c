@@ -108,13 +108,8 @@ struct spawn_cfg {
  * literal "result" key in a JSON-RPC response body. Accepts the
  * minimal shape the node emits ({"result":3081601,"error":null,
  * "id":1}) without dragging a full JSON parser into the runner. */
-static bool scan_result_int(const char *buf, int64_t *out)
+static bool scan_decimal_result(const char *p, int64_t *out)
 {
-    const char *p = strstr(buf, "\"result\"");
-    if (!p) return false;
-    p = strchr(p, ':');
-    if (!p) return false;
-    p++;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     if (*p == 'n') return false; /* "result": null */
     char *end = NULL;
@@ -125,6 +120,56 @@ static bool scan_result_int(const char *buf, int64_t *out)
     if (*end != ',' && *end != '}') return false;
     *out = (int64_t)v;
     return true;
+}
+
+static bool scan_result_int(const char *buf, int64_t *out)
+{
+    const char *p = strstr(buf, "\"result\"");
+    if (!p) return false;
+    p = strchr(p, ':');
+    if (!p) return false;
+    return scan_decimal_result(p + 1, out);
+}
+
+static void capture_child_exec(int write_fd, const char *program,
+                               char *const argv[], const struct spawn_cfg *sp)
+{
+    if (dup2(write_fd, STDOUT_FILENO) < 0) _exit(127);
+    close(write_fd);
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+        (void)dup2(devnull, STDERR_FILENO);
+        close(devnull);
+    }
+    if (sp && sp->enabled) {
+        char port[16];
+        snprintf(port, sizeof(port), "%d", sp->rpcport);
+        if (setenv("ZCL_DATADIR", sp->datadir, 1) != 0 ||
+            setenv("ZCL_RPCPORT", port, 1) != 0)
+            _exit(127);
+    }
+    execvp(program, argv);
+    _exit(127);
+}
+
+static bool capture_read_all(int fd, char *out, size_t cap)
+{
+    size_t used = 0;
+    bool complete = false;
+    while (used < cap - 1) {
+        ssize_t n = read(fd, out + used, cap - 1 - used);
+        if (n > 0) { used += (size_t)n; continue; }
+        if (n == 0) { complete = true; break; }
+        if (errno != EINTR) break;
+    }
+    if (!complete && used == cap - 1) {
+        char extra;
+        ssize_t n;
+        do { n = read(fd, &extra, 1); } while (n < 0 && errno == EINTR);
+        complete = n == 0;
+    }
+    out[used] = '\0';
+    return complete && used > 0;
 }
 
 /* Capture one child without invoking a shell. A full buffer is an error:
@@ -143,45 +188,16 @@ static bool capture_argv(const char *program, char *const argv[],
     }
     if (child == 0) {
         close(fds[0]);
-        if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
-        close(fds[1]);
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            (void)dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        if (sp && sp->enabled) {
-            char port[16];
-            snprintf(port, sizeof(port), "%d", sp->rpcport);
-            if (setenv("ZCL_DATADIR", sp->datadir, 1) != 0 ||
-                setenv("ZCL_RPCPORT", port, 1) != 0)
-                _exit(127);
-        }
-        execvp(program, argv);
-        _exit(127);
+        capture_child_exec(fds[1], program, argv, sp);
     }
     close(fds[1]);
-    size_t used = 0;
-    bool complete = false;
-    while (used < cap - 1) {
-        ssize_t n = read(fds[0], out + used, cap - 1 - used);
-        if (n > 0) { used += (size_t)n; continue; }
-        if (n == 0) { complete = true; break; }
-        if (errno != EINTR) break;
-    }
-    if (!complete && used == cap - 1) {
-        char extra;
-        ssize_t n;
-        do { n = read(fds[0], &extra, 1); } while (n < 0 && errno == EINTR);
-        complete = n == 0;
-    }
+    bool complete = capture_read_all(fds[0], out, cap);
     close(fds[0]);
     int status = 0;
     pid_t waited;
     do { waited = waitpid(child, &status, 0); }
     while (waited < 0 && errno == EINTR);
-    out[used] = '\0';
-    return complete && used > 0 && waited == child &&
+    return complete && waited == child &&
            WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
