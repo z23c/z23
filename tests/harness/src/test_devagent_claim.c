@@ -270,6 +270,7 @@ static int dvx_lease_tests(void)
         char repo[512], row[2048];
         static const char *const fields[] = {
             "\"expires_unix\":+1,", "\"expires_unix\":01,",
+            "\"expires_unix\":1,\"expires_unix\":2,",
             "\"expires_unix\":\"bad\",", "\"expires_unix\":9223372036854775808,",
             "", NULL};
         test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "lease-bad");

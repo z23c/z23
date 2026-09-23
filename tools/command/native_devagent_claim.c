@@ -503,7 +503,7 @@ static bool dvc_line_expired(const char *line, long long now)
     errno = 0;
     expiry = strtoll(p, &end, 10);
     return errno == 0 && end != p && expiry > 0 &&
-           (*end == ',' || *end == '}') && expiry <= now;
+           (*end == ',' || *end == '}') && !strstr(end, key) && expiry <= now;
 }
 
 static bool dvc_stage_open(const char *path, char *tmp, size_t cap,
