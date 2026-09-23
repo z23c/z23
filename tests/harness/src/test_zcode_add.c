@@ -136,6 +136,16 @@ static bool za_exists(const char *path)
     return stat(path, &st) == 0;
 }
 
+static bool za_link_targets_path(const char *link, const char *target)
+{
+    char actual[4400], expected[4400];
+    ssize_t len = readlink(link, actual, sizeof(actual) - 1u);
+    if (len <= 0 || !test_abs_path(target, expected, sizeof(expected)))
+        return false;
+    actual[len] = '\0';
+    return strcmp(actual, expected) == 0;
+}
+
 /* Non-dot entry count of one directory (0 when it cannot be opened). The
  * fastobj cache's object+sidecar pairs are the only thing that lands there,
  * so a positive count proves the confined worker actually used the cache. */
@@ -644,6 +654,38 @@ static int t_activation_target_shape(void)
              fixture && !result.ok && strstr(result.message, "directory") &&
                  !za_exists(active));
     ZA_CHECK("activation target fixture removed", za_rm_rf(base));
+    return failures;
+}
+
+static int t_relative_active_pointer(void)
+{
+    int failures = 0;
+    char base[256], installed[400], active[400];
+    (void)snprintf(base, sizeof(base), "test-tmp/za_relative_%ld",
+                   (long)getpid());
+    (void)za_rm_rf(base);
+    bool private_base = za_mkdir_p(base);
+    struct pkgl_ctx ctx = {0};
+    (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s/zcode", base);
+    uint8_t root[32], previous[32];
+    za_fake_root(root, 0x72);
+    char hex[65];
+    za_hex(root, 32, hex);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s",
+                   ctx.zcode_dir, hex);
+    (void)snprintf(active, sizeof(active), "%s/active/alice/preview",
+                   ctx.zcode_dir);
+    bool prepared = private_base && za_mkdir_p(installed);
+    bool had_previous = false;
+    struct zcl_result activated = pkgl_activate(
+        &ctx, "alice/preview", root, 1000, previous, &had_previous);
+    struct stat wanted, actual;
+    ZA_CHECK("relative datadir activation points at its installed directory",
+             prepared && activated.ok && stat(installed, &wanted) == 0 &&
+                 stat(active, &actual) == 0 &&
+                 wanted.st_dev == actual.st_dev &&
+                 wanted.st_ino == actual.st_ino);
+    ZA_CHECK("relative activation fixture removed", za_rm_rf(base));
     return failures;
 }
 
@@ -1717,16 +1759,12 @@ static int t_e2e(void)
     ZA_CHECK("version B's install tree is destroyed to stage the failure",
              za_rm_rf(installed2) && !za_exists(installed2));
     char blink[4400];
-    char bresolved[4400];
     snprintf(blink, sizeof(blink), "%s/active/alice/ringbuffer", zcode);
-    ssize_t bln = readlink(blink, bresolved, sizeof(bresolved) - 1u);
-    if (bln > 0)
-        bresolved[bln] = '\0';
-    else
-        bresolved[0] = '\0';
+    struct stat broken_link;
     ZA_CHECK("the active version is now a dangling pointer (B is broken)",
-             bln > 0 && strcmp(bresolved, installed2) == 0 &&
-                 !za_exists(bresolved));
+             lstat(blink, &broken_link) == 0 &&
+                 S_ISLNK(broken_link.st_mode) &&
+                 za_link_targets_path(blink, installed2) && !za_exists(blink));
 
     /* And go back with NO NAME: the user knows only that they want the
      * thing they were running before, not an identifier or a hash. */
@@ -1761,7 +1799,7 @@ static int t_e2e(void)
     else
         resolved[0] = '\0';
     ZA_CHECK("the active symlink points at A's install tree",
-             ln > 0 && strcmp(resolved, installed_dir) == 0);
+             ln > 0 && za_link_targets_path(link, installed_dir));
 
     /* The claim is byte-exactness, so assert byte-exactness: hash what the
      * active pointer resolves to TODAY and compare against the fingerprint
@@ -2465,6 +2503,7 @@ int test_zcode_add(void)
     failures += t_generations();
     failures += t_release_selection();
     failures += t_activation_target_shape();
+    failures += t_relative_active_pointer();
     failures += t_e2e();
     failures += t_programs();
     printf("=== zcode_add complete: %d failure(s) ===\n", failures);

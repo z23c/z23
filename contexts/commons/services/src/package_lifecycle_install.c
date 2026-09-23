@@ -730,6 +730,14 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
                        "installed root %s is not a directory; quarantine "
                        "the invalid path and reinstall the exact root",
                        target);
+    /* A caller may use a relative datadir. Symlink contents are resolved
+     * relative to active/<publisher>/, not the caller's working directory. */
+    char absolute_target[PKGL_PATH_MAX];
+    if (!realpath(target, absolute_target))
+        return ZCL_ERR(-1,
+                       "cannot resolve installed root %s for activation: %s; "
+                       "inspect the install path and retry",
+                       target, strerror(errno));
 #endif
 
     char tmp[PKGL_PATH_MAX];
@@ -741,7 +749,7 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
     errno = ENOTSUP;
     return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
 #else
-    if (symlink(target, tmp) != 0)
+    if (symlink(absolute_target, tmp) != 0)
         return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
 #endif
     if (rename(tmp, link) != 0) {
