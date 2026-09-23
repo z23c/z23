@@ -4393,7 +4393,7 @@ int test_dev_land(void)
         PASS();
     }
 
-    TEST("land: a base that keeps moving is bounded, not infinite") {
+    TEST("land: moving main yields a claimable successor behind other work") {
         struct dlx_rig rig;
         struct dlx_call c;
         const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
@@ -4402,7 +4402,7 @@ int test_dev_land(void)
         const char *branch[] = { "checkout", "--quiet", "-B", "side",
                                  "origin/main", NULL };
         const char *back[] = { "checkout", "--quiet", "-B", "main", NULL };
-        char side[600], stranger[64];
+        char side[600], stranger[64], following[64];
         bool done = false;
         int i;
         dlx_isolate("moveforever");
@@ -4413,14 +4413,21 @@ int test_dev_land(void)
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         dlx_end(&c);
+        ASSERT(dlx_commit(rig.clone, "following.txt", "following\n",
+                          following));
+        dlx_submit(&c, &rig, following);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 2);
+        dlx_end(&c);
         (void)snprintf(side, sizeof(side), "%s", rig.clone);
         /* Every cycle: rebase onto the current tip and ask for the proof
          * ("started"), then a stranger lands on main again before the
          * next step reads the answer, so the receipt is always about a
          * base nobody is on. Before DL_ATTEMPT_MAX capped this specific
-         * retry, this loop would run forever and starve every other
-         * queued row (this one is always picked first: dl_step prefers
-         * "inflight" over "queued"). */
+         * retry, this loop would run forever and starve the second row.
+         * When the bounded attempt budget is exhausted, the original tip
+         * must remain queued as a new sequence behind that row. */
         for (i = 0; i < 8 && !done; i++) {
             char tag[32];
             dlx_begin(&c, "step");
@@ -4437,8 +4444,10 @@ int test_dev_land(void)
             dlx_begin(&c, "step");
             ASSERT(dlx_run(&c));
             ASSERT(dlx_ok(&c));
-            if (strcmp(dlx_str(&c, "state"), "failed") == 0) {
-                ASSERT(strcmp(dlx_str(&c, "dimension"), "rebase") == 0);
+            if (strcmp(dlx_str(&c, "state"), "queued") == 0) {
+                ASSERT_EQ(dlx_int(&c, "predecessor_seq"), 1);
+                ASSERT_EQ(dlx_int(&c, "seq"), 3);
+                ASSERT(strcmp(dlx_str(&c, "tip"), rig.tip) == 0);
                 done = true;
             } else {
                 ASSERT(strcmp(dlx_str(&c, "state"), "rebased") == 0);
@@ -4446,6 +4455,12 @@ int test_dev_land(void)
             dlx_end(&c);
         }
         ASSERT(done);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 2);
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
         dlx_restore();
         PASS();
     }

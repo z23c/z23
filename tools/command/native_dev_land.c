@@ -50,7 +50,8 @@
  * action: submit {seq, tip, state:"queued"}; status {queued, in_flight,
  * outcomes, steer, incident} plus screen unless json=true; step {state}
  * where state is one of empty | started | proving | landed | failed |
- * conflict | rebased; cancel {seq, state:"cancelled"}.
+ * conflict | rebased | queued (a moving-main successor); cancel
+ * {seq, state:"cancelled"}.
  *
  * STEER. status fills one steer object for the row step would pick
  * (the in-flight row, else the oldest queued row, else explicit none):
@@ -2957,6 +2958,61 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     return ok;
 }
 
+static size_t dl_yield_index(const struct dl_row *rows, size_t nrows,
+                             const struct dl_row *row)
+{
+    for (size_t i = 0; i < nrows; i++)
+        if (rows[i].seq == row->seq &&
+            strcmp(rows[i].tip, row->tip) == 0 &&
+            strcmp(rows[i].state, "inflight") == 0)
+            return i;
+    return SIZE_MAX;
+}
+
+/* A repeatedly moving base must give later requests a turn. Replace the
+ * inflight row with one higher-sequence queued successor in a single queue
+ * rewrite. The original tip stays byte-identical; a crash sees either the
+ * old inflight row or its successor, never both or neither. */
+static bool dl_yield_successor(const struct dl_dirs *d, struct dl_row *row,
+                               long long *predecessor)
+{
+    struct dl_row *rows = NULL;
+    size_t nrows = 0, at = SIZE_MAX;
+    char qpath[4096 + 32];
+    int lock;
+    bool ok = false;
+    if (!d || !row || !predecessor ||
+        snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d->land) >=
+            (int)sizeof(qpath))
+        return false;
+    lock = dl_rows_lock(d->land);
+    if (lock < 0) return false;
+    if (!dl_load_rows(qpath, &rows, &nrows, NULL, 0) || nrows == 0 ||
+        rows[nrows - 1].seq == LLONG_MAX)
+        goto done;
+    at = dl_yield_index(rows, nrows, row);
+    if (at == SIZE_MAX) goto done; /* cancel won the row lock */
+    struct dl_row successor = *row;
+    successor.seq = rows[nrows - 1].seq + 1;
+    (void)snprintf(successor.state, sizeof(successor.state), "queued");
+    (void)snprintf(successor.phase, sizeof(successor.phase), "rebase");
+    successor.attempt = 1;
+    successor.started = 0;
+    successor.local[0] = '\0';
+    for (size_t i = at + 1; i < nrows; i++) rows[i - 1] = rows[i];
+    rows[nrows - 1] = successor;
+    ok = dl_rewrite_rows(d->land, qpath, rows, nrows);
+    if (ok) {
+        *predecessor = row->seq;
+        *row = successor;
+    }
+done:
+    free(rows);
+    dl_unlock(lock);
+    if (ok) dl_outbox(d, row, "queued");
+    return ok;
+}
+
 static void dl_step_reply(struct zcl_command_reply *reply,
                           const struct dl_row *row, const char *state)
 {
@@ -5178,19 +5234,23 @@ static void dl_step_push(const struct dl_dirs *d, struct dl_row *row,
             dl_log_path(d, row);
             dl_log(row, row->detail);
             dl_log(row, "\n");
-            /* A base that keeps moving under a legitimately-passing proof
-             * is not this row's fault, but it is still bounded: an
-             * inflight row is always preferred over a queued one (dl_step
-             * picks it first), so an uncapped retry here would starve
-             * every other request behind a repo where main advances every
-             * cycle. Fail it like any other exhausted attempt budget
-             * rather than loop forever. */
+            /* Preserve this candidate and yield to later requests when
+             * main moves through the whole attempt budget. The next beat
+             * redoes the exact proof on the then-current base. */
             if (row->attempt > DL_ATTEMPT_MAX) {
-                (void)snprintf(row->state, sizeof(row->state), "failed");
-                (void)snprintf(row->dimension, sizeof(row->dimension),
-                               "rebase");
-                if (dl_commit_or_report(d, row, true, reply, "failed"))
-                    dl_step_reply(reply, row, "failed");
+                long long predecessor = row->seq;
+                (void)snprintf(row->base, sizeof(row->base), "%s", base_now);
+                (void)snprintf(row->detail, sizeof(row->detail),
+                               "main moved to %.12s; successor of seq=%lld",
+                               base_now, predecessor);
+                if (dl_yield_successor(d, row, &predecessor)) {
+                    dl_step_reply(reply, row, "queued");
+                    (void)json_push_kv_int(&reply->data, "predecessor_seq",
+                                           predecessor);
+                } else {
+                    dl_step_reply(reply, row, "rebased");
+                    (void)json_push_kv_str(&reply->data, "persist", "failed");
+                }
                 return;
             }
             (void)snprintf(row->phase, sizeof(row->phase), "rebase");
