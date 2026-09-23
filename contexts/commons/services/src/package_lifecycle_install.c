@@ -789,6 +789,16 @@ struct zcl_result pkgl_data_dir(const struct pkgl_ctx *ctx, const char *name,
     int n = snprintf(rel, sizeof(rel), "data/%s/%s", publisher, package);
     if (n <= 0 || (size_t)n >= sizeof(rel))
         return ZCL_ERR(-1, "data path too long for %s", name);
+#ifndef _WIN32
+    char parent[PKGL_PATH_MAX];
+    ZCL_CHECK(pkgl_join(ctx, "data", parent, sizeof(parent)));
+    ZCL_CHECK(pkgl_parent_shape(parent, "data"));
+    n = snprintf(parent, sizeof(parent), "%s/data/%s", ctx->zcode_dir,
+                 publisher);
+    if (n <= 0 || (size_t)n >= sizeof(parent))
+        return ZCL_ERR(-1, "data publisher path too long for %s", name);
+    ZCL_CHECK(pkgl_parent_shape(parent, "data"));
+#endif
     return pkgl_join(ctx, rel, out, cap);
 }
 
