@@ -104,27 +104,70 @@ const struct vcs_package_release *pkgl_release_for_root(
     return best;
 }
 
-/* Compare two semver core triples plus a coarse prerelease rule: a release
- * WITH a prerelease sorts below the same core WITHOUT one. Full semver
- * precedence over prerelease identifiers is not needed to SELECT a root and
- * would add a grammar this layer has no authority over. */
+/* Release envelopes have already passed the package-release semver grammar.
+ * Compare numeric identifiers by digit count before bytes, so rc.10 follows
+ * rc.2 without converting an unbounded version number to an integer. */
+static int pkgl_semver_ident_cmp(const char *a, size_t an,
+                                const char *b, size_t bn, bool numeric)
+{
+    if (numeric && an != bn)
+        return an < bn ? -1 : 1;
+    size_t common = an < bn ? an : bn;
+    int order = memcmp(a, b, common);
+    if (order != 0)
+        return order;
+    return an == bn ? 0 : (an < bn ? -1 : 1);
+}
+
+static bool pkgl_semver_numeric(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+    }
+    return true;
+}
+
+static int pkgl_semver_prerelease_cmp(const char *a, const char *b)
+{
+    for (;;) {
+        const char *ae = a;
+        const char *be = b;
+        while (*ae && *ae != '.' && *ae != '+') ae++;
+        while (*be && *be != '.' && *be != '+') be++;
+        size_t an = (size_t)(ae - a);
+        size_t bn = (size_t)(be - b);
+        bool anum = pkgl_semver_numeric(a, an);
+        bool bnum = pkgl_semver_numeric(b, bn);
+        if (anum != bnum)
+            return anum ? -1 : 1;
+        int order = pkgl_semver_ident_cmp(a, an, b, bn, anum);
+        if (order != 0)
+            return order;
+        if (*ae != '.' || *be != '.')
+            return *ae == '.' ? 1 : (*be == '.' ? -1 : 0);
+        a = ae + 1;
+        b = be + 1;
+    }
+}
+
 static int pkgl_semver_cmp(const char *a, const char *b)
 {
-    unsigned long av[3] = { 0, 0, 0 };
-    unsigned long bv[3] = { 0, 0, 0 };
-    if (sscanf(a, "%lu.%lu.%lu", &av[0], &av[1], &av[2]) != 3)
-        return -1;  // raw-return-ok:comparator result (a sorts first), not an error
-    if (sscanf(b, "%lu.%lu.%lu", &bv[0], &bv[1], &bv[2]) != 3)
-        return 1;
-    for (size_t i = 0; i < 3; i++) {
-        if (av[i] != bv[i])
-            return av[i] < bv[i] ? -1 : 1;
+    for (size_t i = 0; i < 3u; i++) {
+        const char *ae = a;
+        const char *be = b;
+        while (*ae >= '0' && *ae <= '9') ae++;
+        while (*be >= '0' && *be <= '9') be++;
+        int order = pkgl_semver_ident_cmp(a, (size_t)(ae - a), b,
+                                           (size_t)(be - b), true);
+        if (order != 0)
+            return order;
+        a = *ae == '.' ? ae + 1 : ae;
+        b = *be == '.' ? be + 1 : be;
     }
-    bool apre = strchr(a, '-') != NULL;
-    bool bpre = strchr(b, '-') != NULL;
-    if (apre != bpre)
-        return apre ? -1 : 1;
-    return strcmp(a, b);
+    if (*a != '-' || *b != '-')
+        return *a == '-' ? -1 : (*b == '-' ? 1 : 0);
+    return pkgl_semver_prerelease_cmp(a + 1, b + 1);
 }
 
 const struct vcs_package_release *pkgl_release_for_name(

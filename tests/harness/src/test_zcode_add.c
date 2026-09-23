@@ -563,6 +563,59 @@ static int t_generations(void)
     return failures;
 }
 
+static int t_release_selection(void)
+{
+    int failures = 0;
+    struct vcs_package_release releases[4] = {0};
+    struct pkgl_ctx ctx = { .releases = releases, .release_count = 2 };
+    for (size_t i = 0; i < 4; i++) {
+        (void)snprintf(releases[i].name, sizeof(releases[i].name),
+                       "alice/preview");
+        releases[i].package_root[0] = (uint8_t)(i + 1u);
+    }
+    (void)snprintf(releases[0].semver, sizeof(releases[0].semver),
+                   "1.0.0-rc.10");
+    (void)snprintf(releases[1].semver, sizeof(releases[1].semver),
+                   "1.0.0-rc.2");
+    const struct vcs_package_release *selected =
+        pkgl_release_for_name(&ctx, "alice/preview");
+    ZA_CHECK("install selection orders numeric prerelease identifiers",
+             selected == &releases[0]);
+    (void)snprintf(releases[2].semver, sizeof(releases[2].semver),
+                   "1.0.0");
+    ctx.release_count = 3;
+    selected = pkgl_release_for_name(&ctx, "alice/preview");
+    ZA_CHECK("a stable release supersedes its prereleases",
+             selected == &releases[2]);
+    uint8_t resolved[32];
+    struct zcl_result missing = pkgl_resolve_target(
+        &ctx, "alice/preview@1.0.2", resolved);
+    ZA_CHECK("an absent exact version names a usable selection action",
+             !missing.ok && strstr(missing.message, "alice/preview@1.0.2") &&
+                 strstr(missing.message, "latest published version"));
+    (void)snprintf(releases[0].semver, sizeof(releases[0].semver),
+                   "1.0.1-1");
+    (void)snprintf(releases[1].semver, sizeof(releases[1].semver),
+                   "1.0.1-alpha");
+    ctx.release_count = 2;
+    selected = pkgl_release_for_name(&ctx, "alice/preview");
+    ZA_CHECK("numeric prerelease identifiers precede text identifiers",
+             selected == &releases[1]);
+    (void)snprintf(releases[0].semver, sizeof(releases[0].semver),
+                   "1.0.10+build.2");
+    (void)snprintf(releases[1].semver, sizeof(releases[1].semver),
+                   "1.0.9+build.10");
+    selected = pkgl_release_for_name(&ctx, "alice/preview");
+    ZA_CHECK("install selection compares numeric version cores",
+             selected == &releases[0]);
+    (void)snprintf(releases[1].semver, sizeof(releases[1].semver),
+                   "1.0.10+build.10");
+    selected = pkgl_release_for_name(&ctx, "alice/preview");
+    ZA_CHECK("build metadata does not change release precedence",
+             selected == &releases[0]);
+    return failures;
+}
+
 /* ── the user's own data, which no version owns ──────────────────────
  *
  * An install tree is content addressed: every update lands in a NEW
@@ -2348,6 +2401,7 @@ int test_zcode_add(void)
     failures += t_worker_literal_path();
     failures += t_deps_rules();
     failures += t_generations();
+    failures += t_release_selection();
     failures += t_e2e();
     failures += t_programs();
     printf("=== zcode_add complete: %d failure(s) ===\n", failures);

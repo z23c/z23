@@ -100,9 +100,16 @@ struct zcl_result pkgl_resolve_target(const struct pkgl_ctx *ctx,
         ? pkgl_release_for_name_semver(
               ctx, name_or_root, (size_t)(at - name_or_root), at + 1)
         : pkgl_release_for_name(ctx, name_or_root);
-    if (!rel)
+    if (!rel) {
+        if (at)
+            return ZCL_ERR(-1,
+                           "no exact release '%s' is published here; use "
+                           "publisher/package to select the latest published "
+                           "version, or retry with a published name@version",
+                           name_or_root);
         return ZCL_ERR(-1, "no package named '%s' is published here",
                        name_or_root);
+    }
     memcpy(out_root, rel->package_root, 32);
     return ZCL_OK;
 }
