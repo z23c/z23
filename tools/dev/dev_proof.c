@@ -5052,13 +5052,15 @@ static struct zcl_dev_proof_budget proof_step_budget(
 #define PROOF_COMPILE_DEFAULT_MS 900000
 #define PROOF_BUNDLE_DEFAULT_MS 1800000
 #define PROOF_PREFLIGHT_DEFAULT_MS 120000
-#define PROOF_LINT_ARGV_CAP 6u
+#define PROOF_LINT_ARGV_CAP 7u
 
 /* Every exact receipt can authorize publication, regardless of the scratch
  * directory that requested it. Run the same full lint contract everywhere;
- * lint-fast remains the separate edit-feedback target. Make coalesces the
- * Windows acceptance target already present in the umbrella. `jobs` must
- * outlive argv. */
+ * lint-fast remains the separate edit-feedback target. The lint umbrella's
+ * LINT_GATES already includes check-windows-acceptance. Naming that gate as
+ * a second Make goal makes it a prerequisite of lint and serializes its
+ * cross-links before the parallel gate runner, adding their wall times.
+ * `jobs` must outlive argv. */
 static bool proof_lint_prepare(const char *root, const char *jobs,
                                const char **argv, size_t argv_cap,
                                int64_t *fallback_ms, const char **targets)
@@ -5067,14 +5069,19 @@ static bool proof_lint_prepare(const char *root, const char *jobs,
     if (!jobs || !*jobs || !argv || argv_cap < PROOF_LINT_ARGV_CAP ||
         !fallback_ms || !targets)
         return false;
-    argv[0] = "make";
-    argv[1] = "--no-print-directory";
-    argv[2] = jobs;
-    argv[3] = "lint";
-    argv[4] = "check-windows-acceptance";
-    argv[5] = NULL;
+    /* The per-TU cache starts empty in this private generation, so its
+     * hashing and result stores are wasted work. Scope the cold setting to
+     * lint: testcache hashes ZCL_ variables, and exporting this lint-only
+     * knob from the shared worker would invalidate unrelated test hits. */
+    argv[0] = "env";
+    argv[1] = "ZCL_LINT_TU_CACHE=0";
+    argv[2] = "make";
+    argv[3] = "--no-print-directory";
+    argv[4] = jobs;
+    argv[5] = "lint";
+    argv[6] = NULL;
     *fallback_ms = PROOF_LINT_LANDING_MS;
-    *targets = "lint check-windows-acceptance";
+    *targets = "lint";
     return true;
 }
 
@@ -5097,7 +5104,8 @@ static bool proof_prepare_environment(void)
     static const char *const unset_names[] = {
         "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
         "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
-        "ZCL_LINT_MODE",
+        "ZCL_LINT_MODE", "ZCL_LINT_TU_CACHE", "ZCL_LINT_TU_CACHE_DIR",
+        "ZCL_LINT_TU_CACHE_GENERATIONS",
     };
     for (size_t i = 0; i < sizeof(unset_names) / sizeof(unset_names[0]); i++)
         if (unsetenv(unset_names[i]) != 0) return false;
@@ -6799,7 +6807,7 @@ static bool dp_worker_lint_plan(struct dp_worker *w,
                                 char *why, size_t why_len)
 {
     int64_t lint_fallback_ms = PROOF_LINT_LANDING_MS;
-    w->lint_targets = "lint check-windows-acceptance";
+    w->lint_targets = "lint";
     if (!proof_lint_prepare(w->paths->root, w->make_jobs, w->lint_argv,
                             PROOF_LINT_ARGV_CAP, &lint_fallback_ms,
                             &w->lint_targets)) {

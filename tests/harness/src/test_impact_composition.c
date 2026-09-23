@@ -5230,6 +5230,8 @@ static bool ic_proof_environment_child(void)
     static const char *const cleared[] = {
         "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
         "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
+        "ZCL_LINT_TU_CACHE", "ZCL_LINT_TU_CACHE_DIR",
+        "ZCL_LINT_TU_CACHE_GENERATIONS",
     };
     for (size_t i = 0; i < sizeof(cleared) / sizeof(cleared[0]); i++) {
         if (setenv(cleared[i], "--just-print", 1) != 0) return false;
@@ -5288,16 +5290,17 @@ static int test_ic_landing_proof_lint_argv(void)
         ASSERT(ic_write(land, "queue.lock", ""));
         ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, argv, 8, &argc,
                                             &fallback_ms, &targets));
-        ASSERT(argc == 5);
-        ASSERT(strcmp(argv[0], "make") == 0);
-        ASSERT(strcmp(argv[1], "--no-print-directory") == 0);
-        ASSERT(strcmp(argv[2], jobs) == 0);
+        ASSERT(argc == 6);
+        ASSERT(strcmp(argv[0], "env") == 0);
+        ASSERT(strcmp(argv[1], "ZCL_LINT_TU_CACHE=0") == 0);
+        ASSERT(strcmp(argv[2], "make") == 0);
+        ASSERT(strcmp(argv[3], "--no-print-directory") == 0);
+        ASSERT(strcmp(argv[4], jobs) == 0);
         /* Publication coverage does not depend on a scheduling lock. */
-        ASSERT(strcmp(argv[3], "lint") == 0);
-        ASSERT(strcmp(argv[4], "check-windows-acceptance") == 0);
-        ASSERT(argv[5] == NULL);
+        ASSERT(strcmp(argv[5], "lint") == 0);
+        ASSERT(argv[6] == NULL);
         ASSERT(fallback_ms == PROOF_LINT_LANDING_MS);
-        ASSERT(strcmp(targets, "lint check-windows-acceptance") == 0);
+        ASSERT(strcmp(targets, "lint") == 0);
         ASSERT(zcl_dev_proof_test_lint_targets_are_full(targets));
 
         char dev_parent[4096], dev[4096];
@@ -5309,15 +5312,16 @@ static int test_ic_landing_proof_lint_argv(void)
         targets = NULL;
         ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, argv, 8, &argc,
                                             &fallback_ms, &targets));
-        ASSERT(argc == 5);
-        ASSERT(strcmp(argv[0], "make") == 0);
-        ASSERT(strcmp(argv[1], "--no-print-directory") == 0);
-        ASSERT(strcmp(argv[2], jobs) == 0);
-        ASSERT(strcmp(argv[3], "lint") == 0);
-        ASSERT(strcmp(argv[4], "check-windows-acceptance") == 0);
-        ASSERT(argv[5] == NULL);
+        ASSERT(argc == 6);
+        ASSERT(strcmp(argv[0], "env") == 0);
+        ASSERT(strcmp(argv[1], "ZCL_LINT_TU_CACHE=0") == 0);
+        ASSERT(strcmp(argv[2], "make") == 0);
+        ASSERT(strcmp(argv[3], "--no-print-directory") == 0);
+        ASSERT(strcmp(argv[4], jobs) == 0);
+        ASSERT(strcmp(argv[5], "lint") == 0);
+        ASSERT(argv[6] == NULL);
         ASSERT(fallback_ms == PROOF_LINT_LANDING_MS);
-        ASSERT(strcmp(targets, "lint check-windows-acceptance") == 0);
+        ASSERT(strcmp(targets, "lint") == 0);
         ASSERT(zcl_dev_proof_test_lint_targets_are_full(targets));
 
         ASSERT(test_rm_rf_recursive(land) == 0);
@@ -5471,7 +5475,7 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
         ASSERT(ic_write(land, "queue.lock", ""));
         ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, lint_argv, 8, &lint_argc,
                                             &fallback_ms, &targets));
-        for (size_t i = 3; i < lint_argc; i++)
+        for (size_t i = 5; i < lint_argc; i++)
             ASSERT(!ic_argv_has(landing, lint_argv[i]));
 
         test_make_tmpdir(dev_parent, sizeof(dev_parent), "proof_prefork",
@@ -5485,7 +5489,7 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
             jobs, zcl_dev_proof_test_lint_targets_are_full(targets), lane,
             PROOF_PREFORK_ARGV_CAP));
         ASSERT(ic_argv_has(lane, "proof-lint-prebuild"));
-        for (size_t i = 3; i < lint_argc; i++)
+        for (size_t i = 5; i < lint_argc; i++)
             ASSERT(!ic_argv_has(lane, lint_argv[i]));
 
         ASSERT(test_rm_rf_recursive(land) == 0);
