@@ -434,7 +434,7 @@ iso_peer_rpc() {
 iso_wait_peer_listen() {
     local timeout="${1:-60}" deadline
     deadline=$(( $(date +%s) + timeout ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    while :; do
         if [ -n "$ISO_PEER_PID" ] && ! kill -0 "$ISO_PEER_PID" 2>/dev/null; then
             echo "isolated_node_env: peer node exited (see $ISO_PEER_DD/node.log)" >&2
             return 1
@@ -446,6 +446,7 @@ iso_wait_peer_listen() {
             rc=$?
         fi
         [ "$rc" -eq 1 ] || return "$rc"
+        [ "$(date +%s)" -lt "$deadline" ] || break
         sleep 0.5
     done
     return 1
@@ -453,15 +454,17 @@ iso_wait_peer_listen() {
 
 # Poll the primary until it reports >=1 connected peer (i.e. the peer node's
 # inbound handshake completed), or timeout. $1=secs.
-iso_wait_peer_connected() {    local timeout="${1:-60}" deadline n
+iso_wait_peer_connected() {
+    local timeout="${1:-60}" deadline n
     deadline=$(( $(date +%s) + timeout ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    while :; do
         if [ -n "$ISO_PEER_PID" ] && ! kill -0 "$ISO_PEER_PID" 2>/dev/null; then
             echo "isolated_node_env: peer node exited (see $ISO_PEER_DD/node.log)" >&2
             return 1
         fi
         n="$(iso_rpc_nonnegative_result getconnectioncount)" || n=""
         [ -n "$n" ] && [ "$n" != 0 ] && return 0
+        [ "$(date +%s)" -lt "$deadline" ] || break
         sleep 0.5
     done
     return 1
@@ -483,7 +486,7 @@ iso_rpc_nonnegative_result() {
 iso_wait_rpc_ready() {
     local timeout="${1:-60}" deadline
     deadline=$(( $(date +%s) + timeout ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    while :; do
         if [ -n "$ISO_NODE_PID" ] && ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
             echo "isolated_node_env: node exited during RPC warmup (see $ISO_DD/node.log)" >&2
             return 1
@@ -493,6 +496,7 @@ iso_wait_rpc_ready() {
             t="$(iso_rpc_nonnegative_result getblockcount)" || t=""
             [ -n "$t" ] && return 0
         fi
+        [ "$(date +%s)" -lt "$deadline" ] || break
         sleep 0.5
     done
     return 1

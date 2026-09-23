@@ -55,4 +55,23 @@ iso_wait_peer_listen 1 || rc=$?
 [ "$rc" = 2 ] || fail 'unobserved listener lost its refusal status'
 z23_tcp_port_listening() { return 1; }
 if iso_wait_peer_listen 1; then fail 'absent listener qualified'; fi
+# The first deadline check crosses a whole-second boundary.
+date() {
+    if [ "$1" != '+%s' ]; then command date "$@"; return; fi
+    if [ ! -e "$fixture/date-boundary" ]; then
+        : > "$fixture/date-boundary"
+        printf '100\n'
+    else
+        printf '101\n'
+    fi
+}
+fixture_reply='{"result":0,"error":null,"id":1}'
+iso_wait_rpc_ready 1 || fail 'successful height zero lost at second boundary'
+rm -f "$fixture/date-boundary"
+fixture_reply='{"result":2,"error":null,"id":1}'
+iso_wait_peer_connected 1 || fail 'connected peer lost at second boundary'
+rm -f "$fixture/date-boundary"
+z23_tcp_port_listening() { return 0; }
+iso_wait_peer_listen 1 || fail 'listener lost at second boundary'
+unset -f date
 printf 'isolated-readiness selftest: PASS typed_rpc=true errors_refused=true portable_listener=true unobserved_refused=true\n'
