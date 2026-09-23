@@ -24,6 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#endif
 
 static const char governed_source_roots[] =
 #define SOURCE_ROOT(name_) " " name_
@@ -633,6 +637,68 @@ static int test_bootstatus_projects_recovery_and_blocker(void)
     boot_status_init(NULL);
     return failures;
 }
+
+#ifndef _WIN32
+static int test_bootwait_requires_live_datadir_owner(void)
+{
+    int failures = 0;
+    int owner_fd = -1;
+    bool input_ready = false, reply_ready = false;
+    char tmpl[] = "/tmp/zcl_native_bootwait_XXXXXX";
+    char *dir = NULL;
+    char path[512] = {0};
+    struct json_value input;
+    struct zcl_command_reply reply;
+    TEST("bootwait refuses a stale serving beacon and accepts its live owner") {
+        const struct zcl_command_spec *spec =
+            find_spec(zcl_command_catalog(), "core.node.bootwait");
+        ASSERT(spec != NULL);
+        dir = mkdtemp(tmpl);
+        ASSERT(dir != NULL);
+        boot_status_init(dir);
+        boot_status_note_stage((int)BOOT_STAGE_READY);
+        boot_status_init(NULL);
+
+        json_init(&input);
+        input_ready = true;
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "datadir", dir);
+        (void)json_push_kv_int(&input, "timeout_ms", 1);
+        struct zcl_command_request request = {
+            .spec = spec, .input = &input, .view = "normal",
+        };
+        zcl_command_reply_init(&reply, spec->output_schema);
+        reply_ready = true;
+        zcl_native_handle_core_node_bootwait(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "BOOT_NODE_NOT_RUNNING");
+        zcl_command_reply_free(&reply);
+        reply_ready = false;
+
+        ASSERT(snprintf(path, sizeof(path), "%s/zclassic23.pid", dir) > 0);
+        owner_fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+        ASSERT(owner_fd >= 0);
+        ASSERT(flock(owner_fd, LOCK_EX | LOCK_NB) == 0);
+        zcl_command_reply_init(&reply, spec->output_schema);
+        reply_ready = true;
+        zcl_native_handle_core_node_bootwait(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        PASS();
+    } _test_next:;
+    if (reply_ready) zcl_command_reply_free(&reply);
+    if (input_ready) json_free(&input);
+    if (owner_fd >= 0) (void)close(owner_fd);
+    if (dir) {
+        if (path[0]) (void)unlink(path);
+        (void)snprintf(path, sizeof(path), "%s/%s", dir,
+                       ZCL_BOOT_STATUS_FILENAME);
+        (void)unlink(path);
+        (void)rmdir(dir);
+    }
+    boot_status_init(NULL);
+    return failures;
+}
+#endif
 
 static int test_bridge_replacement_rejects_non_bridge_leaf(void)
 {
@@ -4568,6 +4634,9 @@ int test_command_registry_catalog(void)
     failures += test_ready_leaves_bound();
     failures += test_bridge_bindings_reverse();
     failures += test_bootstatus_projects_recovery_and_blocker();
+#ifndef _WIN32
+    failures += test_bootwait_requires_live_datadir_owner();
+#endif
     failures += test_bridge_replacement_rejects_non_bridge_leaf();
     failures += test_messaging_inbox_wraps_rpc_array();
     failures += test_messaging_inbox_passes_index_object_through();

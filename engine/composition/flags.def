@@ -113,7 +113,7 @@ Z23_FLAG("ZCL_AGENT_LOOP_DEPLOY", "make_var", "-", "-",
 Z23_FLAG("ZCL_AGENT_RELEASE_BIN", "env_build", "build/bin/zclassic23", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:158")
 Z23_FLAG("ZCL_AGENT_SESSION", "env_runtime", "-", "-",
-          "first use tools/command/native_command.c:3453; documented at docs/CUSTODY_MODEL.md:223: as ZCL_AGENT_SESSION=<32 hex chars>")
+          "first use tools/command/native_command.c:3530; documented at docs/CUSTODY_MODEL.md:223: as ZCL_AGENT_SESSION=<32 hex chars>")
 Z23_FLAG("ZCL_AGENT_SHA3", "env_build", "-", "-",
           "undocumented; first use tools/dev/retrieval-gold-benchmark.sh:28")
 Z23_FLAG("ZCL_AGENT_SRC_BIN", "env_build", "build/bin/zclassic23-dev", "-",
@@ -1167,7 +1167,7 @@ Z23_FLAG("ZCL_HOTSWAP_NODE_BINARY", "env_build", "build/bin/zclassic23-dev", "-"
 Z23_FLAG("ZCL_HOTSWAP_PACKAGE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-package.sh:172")
 Z23_FLAG("ZCL_HOTSWAP_PRELOAD", "env_runtime", "-", "-",
-          "first use tools/command/native_command.c:3532; documented at docs/AGENT_API.md:1246: ZCL_HOTSWAP_PRELOAD=<module.so> on a one-shot CLI) runs the freshly")
+          "first use tools/command/native_command.c:3609; documented at docs/AGENT_API.md:1246: ZCL_HOTSWAP_PRELOAD=<module.so> on a one-shot CLI) runs the freshly")
 Z23_FLAG("ZCL_HOTSWAP_PROBE_CASES", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:55")
 Z23_FLAG("ZCL_HOTSWAP_SERVICE_FIXTURE", "env_build", "0", "-",

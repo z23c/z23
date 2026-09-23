@@ -38,6 +38,7 @@
 #include "platform/time_compat.h"
 #include "util/safe_alloc.h"
 #include "util/boot_status.h"
+#include "util/log_macros.h"
 #include "controllers/native_handler_body.h"
 #include "controllers/status_native_helpers.h"
 #include "controllers/status_native_handlers.h"
@@ -68,6 +69,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#endif
 
 /* ── root recognition ──────────────────────────────────────────────── */
 /* Canonical roots this adapter owns. `status` is the compact native entry
@@ -2209,6 +2214,82 @@ static void nc_bootstatus_fill(struct zcl_command_reply *reply,
     }
 }
 
+enum nc_boot_owner_state {
+    NC_BOOT_OWNER_HELD,
+    NC_BOOT_OWNER_FREE,
+    NC_BOOT_OWNER_UNKNOWN,
+};
+
+/* The beacon survives SIGKILL. Only the node's single-writer lock can turn
+ * its last serving observation into current readiness. This probe never
+ * creates or changes the pidfile. */
+static enum nc_boot_owner_state nc_boot_owner_probe(const char *datadir,
+                                                    int *problem)
+{
+    *problem = 0;
+#ifdef _WIN32
+    (void)datadir;
+    *problem = ENOSYS;
+    return NC_BOOT_OWNER_UNKNOWN;
+#else
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/zclassic23.pid", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        *problem = ENAMETOOLONG;
+        return NC_BOOT_OWNER_UNKNOWN;
+    }
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        *problem = errno;
+        return errno == ENOENT ? NC_BOOT_OWNER_FREE : NC_BOOT_OWNER_UNKNOWN;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        (void)flock(fd, LOCK_UN);
+        (void)close(fd);
+        return NC_BOOT_OWNER_FREE;
+    }
+    *problem = errno;
+    (void)close(fd);
+    return *problem == EWOULDBLOCK || *problem == EAGAIN
+        ? NC_BOOT_OWNER_HELD : NC_BOOT_OWNER_UNKNOWN;
+#endif
+}
+
+static bool nc_bootwait_owner_ready(const char *datadir,
+                                    struct zcl_command_reply *reply)
+{
+    int problem;
+    enum nc_boot_owner_state owner = nc_boot_owner_probe(datadir, &problem);
+    if (owner == NC_BOOT_OWNER_HELD)
+        return true;
+    if (owner == NC_BOOT_OWNER_UNKNOWN)
+        LOG_WARN("core.node.bootwait", "cannot inspect datadir owner lock: %s",
+                 strerror(problem));
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        owner == NC_BOOT_OWNER_FREE ? "BOOT_NODE_NOT_RUNNING"
+                                    : "BOOT_OWNER_UNVERIFIED",
+        "execute", true, false,
+        owner == NC_BOOT_OWNER_FREE
+            ? "the last beacon says serving, but no node holds the datadir; start the node and retry bootwait"
+            : "cannot verify the datadir owner lock; check pidfile access and retry bootwait",
+        datadir);
+    return false;
+}
+
+static void nc_bootwait_serving_reply(const char *datadir, int polls,
+                                      const struct boot_status_snapshot *snap,
+                                      struct zcl_command_reply *reply)
+{
+    if (!nc_bootwait_owner_ready(datadir, reply))
+        return;
+    (void)json_push_kv_str(&reply->data, "datadir", datadir);
+    (void)json_push_kv_int(&reply->data, "polls", polls);
+    nc_bootstatus_fill(reply, snap);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
 void zcl_native_handle_core_node_bootstatus(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -2287,11 +2368,7 @@ void zcl_native_handle_core_node_bootwait(
         if (boot_status_read(datadir, &snap, why, sizeof(why))) {
             ever_seen = true;
             if (snap.serving) {
-                (void)json_push_kv_str(&reply->data, "datadir", datadir);
-                (void)json_push_kv_int(&reply->data, "polls", polls);
-                nc_bootstatus_fill(reply, &snap);
-                reply->status = ZCL_COMMAND_STATUS_PASSED;
-                reply->exit_code = ZCL_COMMAND_EXIT_OK;
+                nc_bootwait_serving_reply(datadir, polls, &snap, reply);
                 return;
             }
         }

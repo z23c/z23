@@ -1528,7 +1528,8 @@ ZCL_COMMAND_READY_READ(
     "core.node.bootwait", "core.node", "", "Wait for boot to serve",
     "Polls <datadir>/boot_status.json on disk at the given heartbeat "
     "interval and reports once the node starts serving or the timeout "
-    "elapses; valid even before RPC binds.", 0,
+    "elapses; a stale serving beacon without a live datadir owner is "
+    "refused. Valid even before RPC binds.", 0,
     "boot,bootwait,wait,startup,serving,ready",
     "zcl.core_bootwait.input.v1", "zcl.core_bootstatus.v1",
     "datadir,timeout_ms,heartbeat_ms", "",
