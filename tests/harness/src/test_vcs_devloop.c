@@ -142,6 +142,38 @@ static int vd_test_accepted_bundle_retry(
     return failures;
 }
 
+static int vd_test_accepted_candidate_commit_retry(
+    const char *authority, const char *candidate,
+    const struct vd_accepted_fixture *fixture,
+    const uint8_t source_root[32], int64_t accepted_now,
+    const struct vcs_devloop_accepted_candidate_result *first)
+{
+    int failures = 0;
+    VD_CHECK("publication: interrupted detached commit is poisoned",
+             vd_poison_object(authority, first->vcs_commit_root));
+    VD_CHECK("publication: logged detached job is poisoned for commit retry",
+             vd_poison_object(authority, first->publication_job_root));
+    struct vcs_devloop_accepted_candidate_result retried = {0};
+    vcs_devloop_publication_bind_accepted_candidate(
+        authority, candidate, fixture->accepted.accepted_work_root,
+        source_root, accepted_now, &retried);
+    VD_CHECK("publication: exact detached commit retry preserves job",
+             retried.ok &&
+             memcmp(retried.vcs_commit_root,
+                    first->vcs_commit_root, 32) == 0 &&
+             memcmp(retried.publication_job_root,
+                    first->publication_job_root, 32) == 0);
+    uint8_t *commit_wire = NULL;
+    size_t commit_wire_len = 0;
+    VD_CHECK("publication: exact detached commit CAS reloads after retry",
+             retried.ok && vcs_object_get(
+                 authority, first->vcs_commit_root, VCS_TAG_COMMIT,
+                 &commit_wire, &commit_wire_len) == 0 &&
+             commit_wire_len > 0);
+    free(commit_wire);
+    return failures;
+}
+
 static int vd_test_accepted_candidate_proof_retry(
     const char *authority, const char *candidate,
     const struct vd_accepted_fixture *fixture,
@@ -215,6 +247,10 @@ static int vd_test_accepted_candidate_job_retry(
                  authority, first.publication_job_root, &loaded));
     if (retried.ok)
         failures += vd_test_accepted_candidate_proof_retry(
+            authority, candidate, fixture, source_root, accepted_now,
+            &first);
+    if (retried.ok)
+        failures += vd_test_accepted_candidate_commit_retry(
             authority, candidate, fixture, source_root, accepted_now,
             &first);
     test_rm_rf(candidate);

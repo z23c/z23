@@ -1161,8 +1161,9 @@ void vcs_devloop_publication_bind_accepted_candidate(
     uint8_t commit_preimage[VCS_COMMIT_PREIMAGE_BYTES];
     uint8_t commit_root[32];
     if (!vcs_commit_preimage(&detached, commit_preimage) ||
-        !vcs_object_put(authority_workspace, commit_preimage,
-                        sizeof(commit_preimage), VCS_TAG_COMMIT, commit_root)) {
+        !vcs_object_put_repair(authority_workspace, commit_preimage,
+                               sizeof(commit_preimage), VCS_TAG_COMMIT,
+                               commit_root, NULL)) {
         accepted_candidate_fail(out,
             "detached accepted candidate commit could not enter the publication CAS");
         return;
