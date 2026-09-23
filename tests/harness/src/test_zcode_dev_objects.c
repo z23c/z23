@@ -3502,15 +3502,23 @@ static int test_zd_improve_command(void)
         memcpy(unchanged_blob, unchanged_input->blob, 32);
         ASSERT(!vcs_object_has(receiver, unchanged_blob));
         vcs_manifest_free(&remote_candidate_manifest);
-        ASSERT_EQ(vcs_zcode_candidate_tree_import(
-                      transfer_store, transfer_root, receiver, &task,
-                      &candidate), VCS_ZCODE_CANDIDATE_TREE_OK);
+        const uint8_t poisoned_tree_blob[] = "interrupted-tree-import";
+        ASSERT(vcs_object_put_addressed(
+            receiver, unchanged_blob, poisoned_tree_blob,
+            sizeof(poisoned_tree_blob)));
         struct vcs_zcode_task_v1 wrong_tree_task = task;
         wrong_tree_task.source_root[0] ^= 1u;
         ASSERT_EQ(vcs_zcode_candidate_tree_import(
                       transfer_store, transfer_root, receiver,
                       &wrong_tree_task, &candidate),
                   VCS_ZCODE_CANDIDATE_TREE_AUTHORITY);
+        ASSERT(zd_object_equals_bytes(receiver, unchanged_blob,
+                                      poisoned_tree_blob,
+                                      sizeof(poisoned_tree_blob)));
+        ASSERT_EQ(vcs_zcode_candidate_tree_import(
+                      transfer_store, transfer_root, receiver, &task,
+                      &candidate), VCS_ZCODE_CANDIDATE_TREE_OK);
+        ASSERT(zd_object_equals_store(workspace, receiver, unchanged_blob));
         ASSERT(vcs_object_has(receiver, unchanged_blob));
         ASSERT_EQ(vcs_zcode_patch_verify_cas(receiver, &task, &candidate),
                   VCS_ZCODE_PATCH_OK);

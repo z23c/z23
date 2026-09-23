@@ -367,8 +367,8 @@ enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_import(
     for (size_t i = 0; result == VCS_ZCODE_CANDIDATE_TREE_OK &&
                          i < tree.count; i++) {
         uint8_t hash[32];
-        if (!vcs_object_put(repo_root, blobs[i].bytes, blobs[i].len,
-                            VCS_TAG_BLOB, hash) ||
+        if (!vcs_object_put_repair(repo_root, blobs[i].bytes, blobs[i].len,
+                                   VCS_TAG_BLOB, hash, NULL) ||
             memcmp(hash, blobs[i].entry->blob, 32) != 0)
             result = VCS_ZCODE_CANDIDATE_TREE_CAS;
     }
