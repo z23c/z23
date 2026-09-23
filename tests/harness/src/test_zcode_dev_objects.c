@@ -3187,6 +3187,13 @@ static int test_zd_improve_command(void)
         ASSERT_EQ(authority_bundle_len, authority_bundle_again_len);
         ASSERT(memcmp(authority_bundle, authority_bundle_again,
                       authority_bundle_len) == 0);
+        uint8_t *refused_bundle = authority_bundle;
+        size_t refused_bundle_len = authority_bundle_len;
+        ASSERT_EQ(vcs_zcode_candidate_bundle_export(
+                      workspace, NULL, &candidate, &refused_bundle,
+                      &refused_bundle_len), VCS_ZCODE_CANDIDATE_BUNDLE_NULL);
+        ASSERT(refused_bundle == NULL);
+        ASSERT_EQ(refused_bundle_len, 0);
         free(authority_bundle_again);
         char transfer_dir[256], receiver[256], restored_receiver[256];
         char restored_checkout[256];

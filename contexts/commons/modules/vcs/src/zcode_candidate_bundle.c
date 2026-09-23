@@ -119,14 +119,20 @@ static bool bundle_add_size(size_t *total, size_t add)
     return true;
 }
 
+static void bundle_clear_outputs(uint8_t **wire_out, size_t *wire_len)
+{
+    if (wire_out) *wire_out = NULL;
+    if (wire_len) *wire_len = 0;
+}
+
 enum vcs_zcode_candidate_bundle_result vcs_zcode_candidate_bundle_export(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
     uint8_t **wire_out, size_t *wire_len)
 {
+    bundle_clear_outputs(wire_out, wire_len);
     if (!repo_root || !task || !candidate || !wire_out || !wire_len)
         return VCS_ZCODE_CANDIDATE_BUNDLE_NULL;
-    *wire_out = NULL; *wire_len = 0;
     if (vcs_zcode_patch_verify_cas(repo_root, task, candidate) !=
         VCS_ZCODE_PATCH_OK)
         return VCS_ZCODE_CANDIDATE_BUNDLE_AUTHORITY;

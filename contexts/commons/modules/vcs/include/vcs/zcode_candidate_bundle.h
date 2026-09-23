@@ -28,7 +28,8 @@ const char *vcs_zcode_candidate_bundle_result_string(
     enum vcs_zcode_candidate_bundle_result result);
 
 /* Export the exact scope, patch, base/candidate manifests, and every unique
- * added/modified blob from the requester's existing ZVCS CAS. */
+ * added/modified blob from the requester's existing ZVCS CAS. Clear available
+ * outputs on every refusal so retry callers cannot reuse a stale bundle. */
 enum vcs_zcode_candidate_bundle_result vcs_zcode_candidate_bundle_export(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
