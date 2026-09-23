@@ -1360,6 +1360,37 @@ static bool za_tamper_chunk(const char *zcode, const char *content)
     return ok;
 }
 
+static int t_installed_root_symlink(const char *base, const char *zcode,
+                                    const char *installed_dir,
+                                    int64_t now_unix)
+{
+    int failures = 0;
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result planned = package_lifecycle_plan(
+        base, "alice/ringbuffer", now_unix, &plan);
+    char parent[4400], outside[4400], outside_abs[4400];
+    char marker[4500], receipts[4400];
+    snprintf(parent, sizeof(parent), "%s/installed", zcode);
+    snprintf(outside, sizeof(outside), "%s/escaped-install", base);
+    snprintf(marker, sizeof(marker), "%s/keep.txt", outside);
+    snprintf(receipts, sizeof(receipts), "%s/receipts", zcode);
+    bool ready = planned.ok && za_mkdir_p(parent) && za_mkdir_p(outside) &&
+        za_write_file(marker, "keep", 4, 0600) &&
+        test_abs_path(outside, outside_abs, sizeof(outside_abs)) &&
+        symlink(outside_abs, installed_dir) == 0;
+    struct package_lifecycle_commit_report commit = {0};
+    struct zcl_result attempted = ready
+        ? package_lifecycle_commit(base, plan.plan_id, now_unix + 1, &commit)
+        : ZCL_ERR(-1, "installed root symlink fixture was not prepared");
+    ZA_CHECK("install refuses a substituted root before filing its receipt",
+             ready && !attempted.ok &&
+                 strstr(attempted.message, "installed root") != NULL &&
+                 za_exists(marker) && za_dir_entries(receipts) == 0);
+    ZA_CHECK("installed root link fixture removed",
+             ready && unlink(installed_dir) == 0);
+    return failures;
+}
+
 static int t_buildwork_parent_symlink(const char *base, const char *zcode,
                                       const char *installed_dir,
                                       const char *root_hex, int64_t now_unix)
@@ -1509,6 +1540,7 @@ static int t_e2e(void)
                   strcmp(tampered.rule, "plan-invalid") == 0) &&
                  !za_exists(installed_dir));
 
+    failures += t_installed_root_symlink(base, zcode, installed_dir, t0);
     failures += t_buildwork_parent_symlink(base, zcode, installed_dir,
                                            root_hex, t0);
     failures += t_receipt_parent_symlink(base, zcode, installed_dir, t0);

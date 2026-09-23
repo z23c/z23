@@ -859,5 +859,17 @@ struct zcl_result pkgl_installed_dir(const struct pkgl_ctx *ctx,
     zcl_hex_encode(root, 32, hex);
     char rel[96];
     (void)snprintf(rel, sizeof(rel), "installed/%s", hex);
-    return pkgl_join(ctx, rel, out, cap);
+    ZCL_CHECK(pkgl_join(ctx, rel, out, cap));
+#ifndef _WIN32
+    if (lstat(out, &st) == 0) {
+        if (!S_ISDIR(st.st_mode))
+            return ZCL_ERR(-1, "installed root is not a real directory; "
+                               "inspect the substituted path and restore "
+                               "the exact local install: %s", out);
+    } else if (errno != ENOENT) {
+        return ZCL_ERR(-1, "inspect installed root %s: %s", out,
+                       strerror(errno));
+    }
+#endif
+    return ZCL_OK;
 }
