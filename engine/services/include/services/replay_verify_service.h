@@ -3,7 +3,7 @@
  * replay_verify_service — offline integrity / PoW verification sweep over
  * the legacy on-disk block log.
  *
- * This re-derives the four cheap consensus invariants directly from zclassicd's
+ * This re-derives the block integrity invariants directly from zclassicd's
  * persisted block storage, with no dependence on the live node's in-memory
  * chainstate. Given a datadir, it opens the read-only block_log_legacy
  * adapter (block_log_port.iter_from) and, for each block from
@@ -15,12 +15,14 @@
  *   3. prev-block linkage is contiguous (each block's hashPrevBlock equals
  *      the hash of the previously iterated block).
  *   4. The merkle root in the header matches the block's transactions.
+ *   5. The storage index hash identifies the block bytes it returns.
  *
  * Checks (1), (2) and (4) are delegated to the canonical consensus helper
  * check_block(check_pow=true, check_merkle_root=true); the crypto is NOT
  * reimplemented here. Check (3) is computed at the sweep level because the
  * block_log adapter hands blocks back in active-chain order but does not
- * itself assert linkage.
+ * itself assert linkage. Check (5) computes the block hash from bytes and
+ * compares it with the adapter's index key.
  *
  * It is read-only and side-effect free apart from a one-line artifact-style
  * summary emitted to the log. It does NOT touch the live node, any service,
@@ -46,6 +48,7 @@ struct replay_verify_report {
     uint64_t    pow_failures;       /* equihash or difficulty-target misses  */
     uint64_t    linkage_failures;   /* non-contiguous hashPrevBlock          */
     uint64_t    merkle_failures;    /* header merkle root != tx merkle root  */
+    uint64_t    hash_failures;      /* index hash != hash of block bytes    */
     int64_t     first_fail_height;  /* -1 if no failure observed             */
     const char *first_fail_reason;  /* static string; NULL if no failure     */
     uint32_t    start_height;       /* echo of the requested start           */

@@ -4,14 +4,15 @@
  *
  * Offline integrity / PoW verification sweep over the legacy on-disk block
  * log. Opens the read-only block_log_legacy adapter and walks blocks in
- * active-chain order via block_log_port.iter_from, re-deriving four cheap
- * consensus invariants per block:
+ * active-chain order via block_log_port.iter_from, re-deriving block
+ * integrity invariants per block:
  *
  *   1. Equihash solution (height-selected N,K) ─┐
  *   2. difficulty target (nBits)                ├─ delegated to check_block
  *   4. merkle root vs transactions             ┘  (check_pow=1,
  *                                                  check_merkle_root=1)
  *   3. prev-block linkage  ── computed here over the iteration order
+ *   5. indexed hash versus block bytes ── computed here
  *
  * The crypto is reused, never reimplemented (DEFENSIVE_CODING: do not
  * reinvent consensus primitives). The sweep is read-only and emits a single
@@ -93,6 +94,16 @@ static bool sweep_cb(uint32_t height,
         return false; /* stop iteration */
     }
 
+    /* The height index is evidence to verify, not an authority for the
+     * payload's identity. Derive the header hash from the block itself and
+     * use it for the next block's linkage check. */
+    struct uint256 actual_hash;
+    block_get_hash(&blk, &actual_hash);
+    if (memcmp(actual_hash.data, hash->bytes, sizeof actual_hash.data) != 0) {
+        r->hash_failures++;
+        note_first_fail(r, height, "hash");
+    }
+
     /* (1) equihash solution, (2) difficulty target, (4) merkle root —
      * all via the canonical consensus helper. check_size_limits is left
      * off: we are proving PoW + integrity, not contextual block policy. */
@@ -132,9 +143,9 @@ static bool sweep_cb(uint32_t height,
         }
     }
 
-    /* Advance the linkage cursor to this block's canonical hash. The
-     * adapter already computed it; trust the port-supplied hash. */
-    memcpy(st->prev_hash.bytes, hash->bytes, 32);
+    /* Linkage must follow the bytes just checked, even if the side index
+     * supplies an incorrect key. */
+    memcpy(st->prev_hash.bytes, actual_hash.data, sizeof actual_hash.data);
     st->have_prev = true;
 
     r->blocks_checked++;
@@ -284,6 +295,7 @@ struct zcl_result replay_verify_run(const char *datadir,
               "\"pow_failures\":%llu,"
               "\"linkage_failures\":%llu,"
               "\"merkle_failures\":%llu,"
+              "\"hash_failures\":%llu,"
               "\"first_fail_height\":%lld,"
               "\"first_fail_reason\":\"%s\"",
               dd_esc,
@@ -294,6 +306,7 @@ struct zcl_result replay_verify_run(const char *datadir,
               (unsigned long long)out->pow_failures,
               (unsigned long long)out->linkage_failures,
               (unsigned long long)out->merkle_failures,
+              (unsigned long long)out->hash_failures,
               (long long)out->first_fail_height,
               out->first_fail_reason ? out->first_fail_reason : "none");
 

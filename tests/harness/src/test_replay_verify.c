@@ -187,6 +187,45 @@ static struct zcl_result rv_truncated_iter(void *self, uint32_t start_height,
     return ZCL_OK;
 }
 
+static int rv_ci_wrong_hash_teeth(void)
+{
+    int failures = 0;
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof tmpl, "zcl_rv_badhash");
+    RV_CHECK("ci: mkdtemp bad-hash", dir != NULL);
+    if (!dir) return failures;
+
+    struct block_log_file *log = NULL;
+    struct block_log_port port = {0};
+    struct zcl_result opened = block_log_file_open(dir, &log, &port);
+    RV_CHECK("ci: open bad-hash log", opened.ok);
+    if (!opened.ok) return failures;
+
+    struct block b;
+    rv_build_block(&b, 0, NULL);
+    struct byte_stream bytes;
+    stream_init(&bytes, 1024);
+    bool serialized = block_serialize(&b, &bytes);
+    struct block_hash wrong_hash;
+    memset(wrong_hash.bytes, 0xA5, sizeof wrong_hash.bytes);
+    struct zcl_result appended = serialized
+        ? port.append(port.self, 0, &wrong_hash, bytes.data, bytes.size)
+        : ZCL_ERR(-1, "fixture serialization failed");
+    RV_CHECK("ci: append block under wrong hash", appended.ok);
+    if (appended.ok) {
+        struct replay_verify_report rep;
+        struct zcl_result swept = replay_verify_run_port(&port, 0, 0, &rep);
+        RV_CHECK("ci: wrong storage hash detected",
+                 swept.ok && rep.hash_failures == 1 &&
+                 rep.first_fail_height == 0 && rep.first_fail_reason &&
+                 strcmp(rep.first_fail_reason, "hash") == 0);
+    }
+    stream_free(&bytes);
+    block_free(&b);
+    block_log_file_close(log);
+    return failures;
+}
+
 /* ── The CI teeth section ───────────────────────────────────────────
  * Returns failure count; runs with zero datadir dependency. */
 static int rv_ci_fixture_teeth(void)
@@ -226,6 +265,7 @@ static int rv_ci_fixture_teeth(void)
          * (each hashPrevBlock matches the prior block's hash). */
         RV_CHECK("ci: contiguous chain → 0 linkage failures",
                  rep.linkage_failures == 0);
+        RV_CHECK("ci: matching storage hashes", rep.hash_failures == 0);
 
         /* TEETH #2: PoW verification is actually wired. These fixture
          * blocks have no valid Equihash solution, so a live check_pow MUST
@@ -239,6 +279,9 @@ static int rv_ci_fixture_teeth(void)
     }
     block_log_file_close(h);
     h = NULL;
+
+    /* The index hash must identify the block payload. */
+    failures += rv_ci_wrong_hash_teeth();
 
     /* 2. NEGATIVE CONTROL — corrupted linkage is CAUGHT.
      * Reopen the same dir, then build a fresh dir whose middle block points
@@ -408,6 +451,7 @@ int test_replay_verify(void)
     RV_CHECK("no pow failures",      rep.pow_failures == 0);
     RV_CHECK("no linkage failures",  rep.linkage_failures == 0);
     RV_CHECK("no merkle failures",   rep.merkle_failures == 0);
+    RV_CHECK("no hash failures",     rep.hash_failures == 0);
     RV_CHECK("first_fail_height == -1", rep.first_fail_height == -1);
     RV_CHECK("first_fail_reason NULL",  rep.first_fail_reason == NULL);
 
