@@ -687,6 +687,37 @@ static int t_active_temp_directory_preserved(void)
     return failures;
 }
 
+static int t_atomic_write_temp_symlink(void)
+{
+    int failures = 0;
+    char base[256], target[400], tmp[440], victim[400], victim_abs[4400];
+    test_make_tmpdir(base, sizeof(base), "zcode_add", "atomic-temp-link");
+    (void)snprintf(target, sizeof(target), "%s/report", base);
+    (void)snprintf(tmp, sizeof(tmp), "%s.zpltmp.%ld", target, (long)getpid());
+    (void)snprintf(victim, sizeof(victim), "%s/keep.txt", base);
+    bool prepared = za_mkdir_p(base) &&
+                    za_write_file(victim, "keep", 4, 0600) &&
+                    test_abs_path(victim, victim_abs, sizeof(victim_abs)) &&
+                    symlink(victim_abs, tmp) == 0;
+    struct zcl_result wrote = pkgl_write_atomic(
+        target, (const uint8_t *)"new", 3);
+    uint8_t *kept = NULL;
+    size_t kept_len = 0;
+    struct zcl_result read = pkgl_read_file(victim, 16, &kept, &kept_len);
+    struct stat temp_shape, target_shape;
+    bool temp_held = lstat(tmp, &temp_shape) == 0 &&
+                     S_ISLNK(temp_shape.st_mode);
+    bool target_absent = lstat(target, &target_shape) != 0 && errno == ENOENT;
+    ZA_CHECK("atomic write refuses a preexisting temporary symlink",
+             prepared && !wrote.ok &&
+                 strstr(wrote.message, "temporary") != NULL && temp_held &&
+                 target_absent && read.ok && kept_len == 4 &&
+                 memcmp(kept, "keep", 4) == 0);
+    free(kept);
+    ZA_CHECK("atomic temp symlink fixture removed", za_rm_rf(base));
+    return failures;
+}
+
 static int t_relative_active_pointer(void)
 {
     int failures = 0;
@@ -2716,6 +2747,7 @@ int test_zcode_add(void)
     failures += t_release_selection();
     failures += t_activation_target_shape();
     failures += t_active_temp_directory_preserved();
+    failures += t_atomic_write_temp_symlink();
     failures += t_relative_active_pointer();
     failures += t_active_log_divergence();
     failures += t_active_wrong_pointer();

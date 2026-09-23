@@ -697,6 +697,43 @@ struct zcl_result pkgl_read_file(const char *path, size_t cap, uint8_t **out,
     return ZCL_OK;
 }
 
+/* The caller owns a newly created temporary file. Close it on every path so
+ * a failed sync cannot leak descriptors during repeated storage pressure. */
+#ifndef _WIN32
+static struct zcl_result pkgl_write_temp_contents(int fd, const char *tmp,
+                                                  const uint8_t *data,
+                                                  size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, data + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            int e = errno;
+            close(fd);
+            unlink(tmp);
+            return ZCL_ERR(-1, "write %s: %s", tmp, strerror(e));
+        }
+        if (w == 0) {
+            close(fd);
+            unlink(tmp);
+            return ZCL_ERR(-1, "write %s made no progress; inspect free "
+                               "space and retry", tmp);
+        }
+        off += (size_t)w;
+    }
+    int sync_error = fsync(fd) == 0 ? 0 : errno;
+    int close_error = close(fd) == 0 ? 0 : errno;
+    if (sync_error || close_error) {
+        unlink(tmp);
+        return ZCL_ERR(-1, "durable write of %s failed: %s", tmp,
+                       strerror(sync_error ? sync_error : close_error));
+    }
+    return ZCL_OK;
+}
+#endif
+
 struct zcl_result pkgl_write_atomic(const char *path, const uint8_t *data,
                                     size_t len)
 {
@@ -709,23 +746,15 @@ struct zcl_result pkgl_write_atomic(const char *path, const uint8_t *data,
     int n = snprintf(tmp, sizeof(tmp), "%s.zpltmp.%ld", path, (long)getpid());
     if (n <= 0 || (size_t)n >= sizeof(tmp))
         return ZCL_ERR(-1, "temp path too long for %s", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                  0600);
+    if (fd < 0 && (errno == EEXIST || errno == ELOOP))
+        return ZCL_ERR(-1, "atomic write temporary path already exists; "
+                           "inspect and move it before retrying: %s", tmp);
     if (fd < 0)
         return ZCL_ERR(-1, "open %s: %s", tmp, strerror(errno));
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, data + off, len - off);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            int e = errno;
-            close(fd);
-            unlink(tmp);
-            return ZCL_ERR(-1, "write %s: %s", tmp, strerror(e));
-        }
-        off += (size_t)w;
-    }
-    if (fsync(fd) != 0 || close(fd) != 0 || rename(tmp, path) != 0) {
+    ZCL_CHECK(pkgl_write_temp_contents(fd, tmp, data, len));
+    if (rename(tmp, path) != 0) {
         int e = errno;
         unlink(tmp);
         return ZCL_ERR(-1, "durable write of %s failed: %s", path,
