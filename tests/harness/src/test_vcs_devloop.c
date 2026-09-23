@@ -102,6 +102,17 @@ static bool vd_put_object(const char *dir, const uint8_t root[32],
     return vcs_object_put_addressed(dir, root, wire, len);
 }
 
+static bool vd_poison_object(const char *dir, const uint8_t root[32])
+{
+    char hex[65], path[4096];
+    zcl_hex_encode(root, 32, hex);
+    int n = snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s",
+                     dir, hex, hex + 2);
+    const uint8_t poison[] = "interrupted-mapping-write";
+    return n > 0 && (size_t)n < sizeof(path) && unlink(path) == 0 &&
+        vcs_object_put_addressed(dir, root, poison, sizeof(poison));
+}
+
 static bool vd_put_work_receipt(
     const char *dir, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
@@ -841,6 +852,8 @@ static int t_publication_enqueue(const char *dir)
              first_map.bytes_scanned > 0);
     VD_CHECK("publication: cold mapping creates chunk hashes",
              first_map.new_chunks > 0 && first_map.reused_chunks == 0);
+    VD_CHECK("publication: interrupted mapping set is seeded",
+             vd_poison_object(dir, mapping_root));
     VD_CHECK("publication: exact mapping retry uses immutable cache",
              vcs_package_mapping_set_build(
                  dir, job.source_tree_root, lane_root,

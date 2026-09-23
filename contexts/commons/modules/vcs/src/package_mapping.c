@@ -410,8 +410,9 @@ bool vcs_package_mapping_set_build(
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     if (ok) ok = mapping_set_serialize(&set, &wire, &wire_len) &&
-        vcs_object_put(repo_root, wire, wire_len,
-                       VCS_TAG_PACKAGE_MAPPING_SET, mapping_set_root);
+        vcs_object_put_repair(repo_root, wire, wire_len,
+                              VCS_TAG_PACKAGE_MAPPING_SET,
+                              mapping_set_root, NULL);
     free(wire);
     if (index) vcs_index_close(index);
     free(entries);
