@@ -711,6 +711,40 @@ static bool proof_resolve_pair_platform(const char *repo_root,
     return true;
 }
 
+/* A shaped OID is not proof that the candidate or base exists locally.
+ * Check both as commit objects before publishing a new request, so an absent
+ * object never occupies a worker slot. Synthetic
+ * queue fixtures in the test binary intentionally use non-repository roots;
+ * only roots carrying their private fixture marker skip the Git check. */
+static bool dp_pair_commit_objects_present(const char *root,
+                                            const char *local,
+                                            const char *base,
+                                            char *why, size_t why_len)
+{
+#if defined(ZCL_TESTING)
+    char fixture[PATH_MAX];
+    int fixture_len = root
+        ? snprintf(fixture, sizeof(fixture), "%s/.cache/fixture", root) : -1;
+    if (fixture_len > 0 && fixture_len < (int)sizeof(fixture) &&
+        access(fixture, F_OK) == 0)
+        return true;
+#endif
+    char kind[32];
+    const char *local_argv[] = {"git", "cat-file", "-t", local, NULL};
+    const char *base_argv[] = {"git", "cat-file", "-t", base, NULL};
+    if (!git_capture(root, local_argv, kind, sizeof(kind)) ||
+        strcmp(kind, "commit") != 0) {
+        proof_why(why, why_len, "local_commit_object_missing");
+        return false;
+    }
+    if (!git_capture(root, base_argv, kind, sizeof(kind)) ||
+        strcmp(kind, "commit") != 0) {
+        proof_why(why, why_len, "remote_base_object_missing");
+        return false;
+    }
+    return true;
+}
+
 static bool read_exact_file(const char *path, uint8_t *out, size_t size)
 {
     struct stat st;
@@ -7796,6 +7830,11 @@ static bool proof_ensure_platform(const char *repo_root,
      * still in flight. Only explicit retry after prerequisite repair may
      * queue another attempt; ordinary ensure preserves the settled status. */
     if (out->state == ZCL_DEV_PROOF_STATE_FAILED) return true;
+    if (!dp_pair_commit_objects_present(repo_root, local, base, out->detail,
+                                        sizeof(out->detail))) {
+        out->state = ZCL_DEV_PROOF_STATE_INVALID;
+        return false;
+    }
     struct proof_paths paths;
     if (!proof_paths_fill(repo_root, local, base, &paths) ||
         !proof_state_prepare(&paths)) {
@@ -7935,6 +7974,11 @@ static bool proof_retry_platform(const char *repo_root,
     char local[65], base[65];
     (void)snprintf(local, sizeof(local), "%s", out->local_commit);
     (void)snprintf(base, sizeof(base), "%s", out->remote_base);
+    if (!dp_pair_commit_objects_present(repo_root, local, base, out->detail,
+                                        sizeof(out->detail))) {
+        out->state = ZCL_DEV_PROOF_STATE_INVALID;
+        return false;
+    }
     struct proof_paths paths;
     if (!proof_paths_fill(repo_root, local, base, &paths) ||
         !proof_state_prepare(&paths)) {

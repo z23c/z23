@@ -6309,6 +6309,54 @@ static bool ic_foreground_ancestry(struct ic_landing_proof_fixture *f,
     return pclose(input) == 0 && ok;
 }
 
+static int test_ic_proof_enqueue_requires_commit_objects(void)
+{
+    int failures = 0;
+    TEST("proof enqueue: malformed and missing commit objects never enter the queue") {
+        static const char missing_local[] =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        static const char missing_base[] =
+            "1111111111111111111111111111111111111111";
+        struct ic_landing_proof_fixture f = {0};
+        struct zcl_dev_proof_status status = {0};
+        char local[41], other[41], base[41], tree[41], request[4096];
+        test_make_tmpdir(f.parent, sizeof(f.parent), "impact_composition",
+                         "enqueue-object-identity");
+        ASSERT(snprintf(f.root, sizeof(f.root), "%s/repo", f.parent) <
+               (int)sizeof(f.root));
+        ASSERT(mkdir(f.root, 0700) == 0);
+        ASSERT(ic_foreground_ancestry(&f, local, other, base));
+        char command[4096];
+        ASSERT(snprintf(command, sizeof(command),
+                        "git -C %s rev-parse HEAD^{tree}", f.root) <
+               (int)sizeof(command));
+        FILE *input = popen(command, "r");
+        ASSERT(input != NULL);
+        bool tree_read = fscanf(input, "%40s", tree) == 1;
+        ASSERT(pclose(input) == 0 && tree_read);
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(!zcl_dev_proof_ensure(f.root, "not-an-oid", base, &status));
+        ASSERT_STR_EQ(status.detail, "local_commit_invalid");
+        ASSERT(!zcl_dev_proof_ensure(f.root, missing_local, base, &status));
+        ASSERT_STR_EQ(status.detail, "local_commit_object_missing");
+        ASSERT(!zcl_dev_proof_ensure(f.root, tree, base, &status));
+        ASSERT_STR_EQ(status.detail, "local_commit_object_missing");
+        ASSERT(!zcl_dev_proof_ensure(f.root, local, missing_base, &status));
+        ASSERT_STR_EQ(status.detail, "remote_base_object_missing");
+        ASSERT(snprintf(request, sizeof(request),
+                        "%s/.cache/zcl-dev-proof/requests/%s-%s.request",
+                        f.root, local, missing_base) < (int)sizeof(request));
+        ASSERT(access(request, F_OK) != 0);
+        ASSERT(zcl_dev_proof_ensure(f.root, local, base, &status));
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT_STR_EQ(status.detail, "resident_proof_request_queued");
+        ASSERT(unsetenv("ZCL_DEVLOOP_TEST_PROCESS") == 0);
+        ASSERT(test_rm_rf_recursive(f.parent) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static const struct zcl_command_reply *ic_proof_captured_reply;
 
 static void ic_proof_captured_handler(const struct zcl_command_request *request,
@@ -7228,6 +7276,7 @@ int test_impact_composition(void)
 #if !defined(_WIN32)
     failures += test_ic_foreground_selected_pair();
     failures += test_ic_foreground_execution_busy();
+    failures += test_ic_proof_enqueue_requires_commit_objects();
     failures += test_ic_foreground_refuses_watcher();
     failures += test_ic_foreground_owner_lifetime();
     failures += test_ic_competing_fungible_proof_workers();
