@@ -835,6 +835,50 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
     return ZCL_OK;
 }
 
+/* Finish all fallible directory and file writes before changing the active
+ * pointer. Only the short final rename remains after the pointer swap. */
+static struct zcl_result pkgl_prepare_generation_log(
+    const struct pkgl_ctx *ctx, const char *name,
+    const struct vcs_package_generations *gens,
+    char path[PKGL_PATH_MAX], char staged[PKGL_PATH_MAX])
+{
+    staged[0] = '\0';
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    enum vcs_package_install_error err =
+        vcs_package_generations_serialize(gens, &wire, &wire_len);
+    if (err != VCS_PACKAGE_INSTALL_OK)
+        return ZCL_ERR(-1, "generation serialize for %s: %s", name,
+                       vcs_package_install_error_string(err));
+    struct zcl_result r = pkgl_generations_path(ctx, name, path,
+                                                PKGL_PATH_MAX);
+    if (r.ok) {
+        char parent[PKGL_PATH_MAX];
+        (void)snprintf(parent, sizeof(parent), "%s", path);
+        char *slash = strrchr(parent, '/');
+        if (!slash)
+            r = ZCL_ERR(-1, "generation log path has no parent for %s", name);
+        else {
+            *slash = '\0';
+            r = pkgl_mkdir_p(parent);
+        }
+    }
+    if (r.ok) {
+        int n = snprintf(staged, PKGL_PATH_MAX, "%s.zplprep.%ld", path,
+                         (long)getpid());
+        if (n <= 0 || (size_t)n >= PKGL_PATH_MAX) {
+            staged[0] = '\0';
+            r = ZCL_ERR(-1, "generation staging path too long for %s", name);
+        } else
+            r = pkgl_write_atomic(staged, wire, wire_len);
+    }
+    free(wire);
+    if (!r.ok)
+        return ZCL_ERR(-1, "prepare generation log for %s: %s; inspect the "
+                           "log path and retry activation", name, r.message);
+    return ZCL_OK;
+}
+
 struct zcl_result pkgl_activate(const struct pkgl_ctx *ctx, const char *name,
                                 const uint8_t root[32], int64_t now_unix,
                                 uint8_t prev_root_out[32],
@@ -875,41 +919,37 @@ struct zcl_result pkgl_activate(const struct pkgl_ctx *ctx, const char *name,
     ZCL_CHECK(pkgl_data_dir(ctx, name, data_dir, sizeof(data_dir)));
     ZCL_CHECK(pkgl_mkdir_p(data_dir));
 
-    /* The pointer is swapped first: if the log write then fails the operator
-     * sees a log that lags reality, which the next activation repairs. The
-     * reverse order could leave a log claiming an activation that never
-     * happened. */
-    ZCL_CHECK(pkgl_swap_active(ctx, name, root));
     if (already_active)
-        return ZCL_OK;
+        return pkgl_swap_active(ctx, name, root);
 
     enum vcs_package_install_error err =
         vcs_package_generations_append(&gens, root, now_unix);
     if (err != VCS_PACKAGE_INSTALL_OK)
         return ZCL_ERR(-1, "generation append for %s: %s", name,
                        vcs_package_install_error_string(err));
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    err = vcs_package_generations_serialize(&gens, &wire, &wire_len);
-    if (err != VCS_PACKAGE_INSTALL_OK)
-        return ZCL_ERR(-1, "generation serialize for %s: %s", name,
-                       vcs_package_install_error_string(err));
-    char path[PKGL_PATH_MAX];
-    struct zcl_result gr = pkgl_generations_path(ctx, name, path,
-                                                 sizeof(path));
-    if (gr.ok) {
-        char parent[PKGL_PATH_MAX];
-        (void)snprintf(parent, sizeof(parent), "%s", path);
-        char *slash = strrchr(parent, '/');
-        if (slash) {
-            *slash = '\0';
-            gr = pkgl_mkdir_p(parent);
-        }
-        if (gr.ok)
-            gr = pkgl_write_atomic(path, wire, wire_len);
+    char path[PKGL_PATH_MAX], staged[PKGL_PATH_MAX];
+    struct zcl_result prepared =
+        pkgl_prepare_generation_log(ctx, name, &gens, path, staged);
+    if (!prepared.ok) {
+        if (staged[0])
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(staged),
+                              "failed generation staging cleaned up");
+        return prepared;
     }
-    free(wire);
-    return gr;
+    struct zcl_result swapped = pkgl_swap_active(ctx, name, root);
+    if (!swapped.ok) {
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(staged), "unused generation staged file");
+        return swapped;
+    }
+    if (rename(staged, path) != 0) {
+        int e = errno;
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(staged), "failed generation staged file");
+        return ZCL_ERR(-1, "publish generation log for %s: %s; the active "
+                           "pointer may have changed, so inspect both and "
+                           "retry activation of the exact verified root",
+                       name, strerror(e));
+    }
+    return ZCL_OK;
 }
 
 /* ── pinning ────────────────────────────────────────────────────────── */

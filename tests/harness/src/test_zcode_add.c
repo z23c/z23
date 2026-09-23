@@ -715,10 +715,21 @@ static int t_active_log_divergence(void)
     bool present = false;
     struct zcl_result read = package_lifecycle_active(
         base, "alice/preview", observed, &generations, &present);
-    ZA_CHECK("a failed generation write leaves a visible active pointer",
-             prepared && !activated.ok && za_exists(active_path));
-    ZA_CHECK("status refuses a swapped pointer without its generation log",
-             !read.ok && strstr(read.message, "generation") != NULL);
+    struct stat active_st;
+    ZA_CHECK("a blocked generation log refuses before the active swap",
+             prepared && !activated.ok &&
+                 strstr(activated.message, "generation") != NULL &&
+                 lstat(active_path, &active_st) != 0 && errno == ENOENT);
+    ZA_CHECK("failed activation reports no active generation",
+             read.ok && !present && generations == 0);
+    bool unblocked = unlink(log_parent) == 0;
+    struct zcl_result retry = pkgl_activate(
+        &ctx, "alice/preview", root, 1001, previous, &had_previous);
+    read = package_lifecycle_active(base, "alice/preview", observed,
+                                    &generations, &present);
+    ZA_CHECK("retry after removing the blocker activates the exact root",
+             unblocked && retry.ok && read.ok && present &&
+                 generations == 1 && memcmp(observed, root, 32) == 0);
     ZA_CHECK("divergent activation fixture removed", za_rm_rf(base));
     return failures;
 }
