@@ -3375,10 +3375,60 @@ static int test_dev_land_watcher_admission(void)
     return failures;
 }
 
+static int test_dev_land_long_proof_root(void)
+{
+    int failures = 0;
+    TEST("land: a long proof root remains a structured, worker-stealable action") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char parent[sizeof(g_dlx_state)], extended[sizeof(g_dlx_state)];
+        char leaf[201];
+        dlx_isolate("long_proof_root");
+        (void)snprintf(parent, sizeof(parent), "%s", g_dlx_state);
+        memset(leaf, 'p', sizeof(leaf) - 1);
+        leaf[sizeof(leaf) - 1] = '\0';
+        ASSERT(mkdir(parent, 0700) == 0);
+        ASSERT(snprintf(extended, sizeof(extended), "%s/%s", parent, leaf) <
+               (int)sizeof(extended));
+        ASSERT(mkdir(extended, 0700) == 0);
+        (void)snprintf(g_dlx_state, sizeof(g_dlx_state), "%s", extended);
+        ASSERT(setenv("XDG_STATE_HOME", g_dlx_state, 1) == 0);
+        ASSERT(dlx_rig_make(&rig, "long_proof_root_rig"));
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "manual", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1) == 0);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strstr(dlx_str(&c, "detail"), rig.tip) != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "exceeds row detail") == NULL);
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        const struct json_value *flight = json_get(&c.reply.data, "in_flight");
+        const struct json_value *action = json_get(flight, "proof_step");
+        ASSERT(action != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(action, "command")), "dev.proof.step");
+        ASSERT_STR_EQ(json_get_str(json_get(action, "local_commit")), rig.tip);
+        ASSERT(strstr(json_get_str(json_get(action, "root")), leaf) != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(action, "remote_base")),
+                      json_get_str(json_get(flight, "base")));
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_land(void)
 {
     int failures = 0;
     failures += test_dev_land_watcher_admission();
+    failures += test_dev_land_long_proof_root();
     failures += test_dev_land_exact_tree();
     failures += test_dev_land_source_binding();
 #if !defined(_WIN32)

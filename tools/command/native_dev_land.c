@@ -1353,10 +1353,12 @@ static const char *dl_stub(void)
 static void dl_proof_step_detail(const char *wt, const char *local,
                                  const char *base, char *detail, size_t cap)
 {
+    (void)wt;
     int n = snprintf(detail, cap,
-        "dev proof step --local_commit=%s --remote_base=%s --root=%s",
-        local, base, wt);
-    if (n < 0 || (size_t)n >= cap || n >= 256)
+        "dev proof step --local_commit=%s --remote_base=%s; "
+        "root=dev land status in_flight.proof_step.root",
+        local, base);
+    if (n < 0 || (size_t)n >= cap)
         (void)snprintf(detail, cap,
                        "proof pending; exact step exceeds row detail budget");
 }
@@ -2568,17 +2570,30 @@ static bool dl_push_queued(struct json_value *arr, const struct dl_row *r)
 }
 
 static bool dl_push_inflight(struct json_value *obj, const struct dl_row *r,
-                             long long now)
+                             const char *proof_root, long long now)
 {
     long long elapsed = now - r->started;
     if (elapsed < 0)
         elapsed = 0;
-    return json_push_kv_int(obj, "seq", r->seq) &&
+    bool ok = json_push_kv_int(obj, "seq", r->seq) &&
            json_push_kv_str(obj, "tip", r->tip) &&
            json_push_kv_str(obj, "phase", r->phase) &&
            json_push_kv_int(obj, "attempt", r->attempt) &&
            json_push_kv_int(obj, "elapsed_s", elapsed) &&
            json_push_kv_str(obj, "base", r->base);
+    if (!ok || strcmp(r->phase, "prove") != 0 ||
+        !dl_sha_ok(r->local) || !dl_sha_ok(r->base))
+        return ok;
+    struct json_value step;
+    json_init(&step);
+    json_set_object(&step);
+    ok = json_push_kv_str(&step, "command", "dev.proof.step") &&
+         json_push_kv_str(&step, "root", proof_root) &&
+         json_push_kv_str(&step, "local_commit", r->local) &&
+         json_push_kv_str(&step, "remote_base", r->base) &&
+         json_push_kv(obj, "proof_step", &step);
+    json_free(&step);
+    return ok;
 }
 
 static bool dl_push_outcome_row(struct json_value *arr,
@@ -2650,7 +2665,7 @@ static void dl_status(const struct zcl_command_request *req,
             if (!dl_push_queued(&queued, &rows[i]))
                 goto fail;
         } else if (strcmp(rows[i].state, "inflight") == 0 && !have_inflight) {
-            if (!dl_push_inflight(&inflight, &rows[i], now))
+            if (!dl_push_inflight(&inflight, &rows[i], d.wt, now))
                 goto fail;
             have_inflight = true;
         }
