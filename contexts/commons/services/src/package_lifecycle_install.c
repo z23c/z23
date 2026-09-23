@@ -45,6 +45,23 @@
 #define PKGL_DEV_WORKER_NAME "zclassic23-package-verify-dev"
 #define PKGL_RELEASE_WORKER_NAME "zclassic23-package-verify"
 
+#ifndef _WIN32
+static struct zcl_result pkgl_parent_shape(const char *path,
+                                           const char *role);
+#endif
+
+static struct zcl_result pkgl_receipt_path(const struct pkgl_ctx *ctx,
+                                           const char *rel, char *out,
+                                           size_t cap)
+{
+#ifndef _WIN32
+    char parent[PKGL_PATH_MAX];
+    ZCL_CHECK(pkgl_join(ctx, "receipts", parent, sizeof(parent)));
+    ZCL_CHECK(pkgl_parent_shape(parent, "receipt"));
+#endif
+    return pkgl_join(ctx, rel, out, cap);
+}
+
 /* ── worker discovery ───────────────────────────────────────────────── */
 
 static bool pkgl_worker_runnable(const char *path)
@@ -305,7 +322,7 @@ struct zcl_result pkgl_verify_installed_receipt(
     char relative[96];
     n = snprintf(relative, sizeof(relative), "receipts/%s", id_hex);
     struct zcl_result joined = n > 0 && (size_t)n < sizeof(relative)
-        ? pkgl_join(ctx, relative, filed, sizeof(filed))
+        ? pkgl_receipt_path(ctx, relative, filed, sizeof(filed))
         : ZCL_ERR(-1, "filed receipt path is too long");
     uint8_t *filed_wire = NULL;
     size_t filed_len = 0;
@@ -588,7 +605,8 @@ struct zcl_result pkgl_build_and_install(
         char id_hex[65];
         zcl_hex_encode(receipt_id, 32, id_hex);
         (void)snprintf(src, sizeof(src), "receipts/%s", id_hex);
-        struct zcl_result jr = pkgl_join(ctx, src, dst, sizeof(dst));
+        struct zcl_result jr =
+            pkgl_receipt_path(ctx, src, dst, sizeof(dst));
         if (jr.ok) {
             char *slash = strrchr(dst, '/');
             if (slash) {

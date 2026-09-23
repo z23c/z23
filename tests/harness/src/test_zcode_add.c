@@ -1360,6 +1360,33 @@ static bool za_tamper_chunk(const char *zcode, const char *content)
     return ok;
 }
 
+static int t_receipt_parent_symlink(const char *base, const char *zcode,
+                                    const char *installed_dir, int64_t now_unix)
+{
+    int failures = 0;
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result planned = package_lifecycle_plan(
+        base, "alice/ringbuffer", now_unix, &plan);
+    char receipt_parent[4400], escaped_dir[4400], escaped_abs[4400];
+    snprintf(receipt_parent, sizeof(receipt_parent), "%s/receipts", zcode);
+    snprintf(escaped_dir, sizeof(escaped_dir), "%s/escaped-receipts", base);
+    bool ready = planned.ok && za_mkdir_p(escaped_dir) &&
+        test_abs_path(escaped_dir, escaped_abs, sizeof(escaped_abs)) &&
+        symlink(escaped_abs, receipt_parent) == 0;
+    struct package_lifecycle_commit_report commit = {0};
+    struct zcl_result attempted = ready
+        ? package_lifecycle_commit(base, plan.plan_id, now_unix + 1, &commit)
+        : ZCL_ERR(-1, "receipt symlink fixture was not prepared");
+    ZA_CHECK("install refuses a receipt parent linked outside the store",
+             ready && !attempted.ok &&
+                 strstr(attempted.message, "receipt") != NULL &&
+                 za_dir_entries(escaped_dir) == 0 &&
+                 !za_exists(installed_dir));
+    ZA_CHECK("receipt parent link fixture removed",
+             ready && unlink(receipt_parent) == 0);
+    return failures;
+}
+
 // long-function-ok:one-lifecycle-transcript — this is a single ordered
 // transcript (publish, plan, commit, upgrade, roll back, then the three
 // refusals) against ONE fixture datadir; splitting it would either
@@ -1451,7 +1478,9 @@ static int t_e2e(void)
                   strcmp(tampered.rule, "plan-invalid") == 0) &&
                  !za_exists(installed_dir));
 
-    /* Re-plan (the edited file is unusable) and commit for real. */
+    failures += t_receipt_parent_symlink(base, zcode, installed_dir, t0);
+
+    /* Re-plan after the blocked attempt and commit for real. */
     r = package_lifecycle_plan(base, "alice/ringbuffer", t0, &plan);
     struct package_lifecycle_commit_report commit;
     struct zcl_result cr =
