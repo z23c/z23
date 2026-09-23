@@ -356,6 +356,7 @@ struct mvp_evidence {
     bool      c6_soak_last_healthy;
     bool      c6_soak_window_eligible;
     long long c6_soak_window_hours;               /* -1 when not tracked */
+    bool      c6_full_judge_met;                  /* retained full C6 judge MET, never inferred from ticks */
     bool      c6_slo_probe_present;               /* external SLO surface? */
     double    c6_slo_success_rate;                /* 0..1, <0 when unknown */
 

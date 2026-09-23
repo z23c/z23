@@ -36,6 +36,28 @@ static bool syncdiag_store_flow_pass(bool ok_in,
                   "tools/dev/store_onion_acceptance.sh") == 0;
 }
 
+static int test_mvp_c6_requires_full_judge(void)
+{
+    struct mvp_evidence ev = {0};
+    ev.c6_soak_present = true;
+    ev.c6_soak_last_healthy = true;
+    ev.c6_soak_window_eligible = true;
+    ev.c6_soak_window_hours = 200;
+
+    struct json_value out = {0};
+    bool ok = mvp_build_status_json(&ev, &out);
+    const struct json_value *arr = json_get(&out, "criteria");
+    const struct json_value *c6 = mvp_find_criterion(arr, "C6");
+    const struct json_value *evidence = json_get(c6, "evidence");
+    ok = ok && c6 && json_is_null(json_get(c6, "met")) &&
+         strcmp(json_get_str(json_get(c6, "met_state")), "unknown") == 0 &&
+         evidence && !json_get_bool(json_get(evidence, "full_judge_met"));
+    json_free(&out);
+    printf("mvp C6 local ticks cannot replace full judge... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int syncdiag_cases_operator(void)
 {
     int failures = 0;
@@ -832,11 +854,12 @@ int syncdiag_cases_operator(void)
             ev.c3_log_head_gap = 0;
             ev.c3_sync_benchmark_receipt_present = true;
             ev.c3_cold_sync_secs = 120;
-            /* C6: 168h+ clean healthy eligible window, no SLO probe. */
+            /* C6: 168h+ clean window and an explicit full-judge MET. */
             ev.c6_soak_present = true;
             ev.c6_soak_last_healthy = true;
             ev.c6_soak_window_eligible = true;
             ev.c6_soak_window_hours = 200;
+            ev.c6_full_judge_met = true;
             ev.c6_slo_probe_present = false;
             ev.c6_slo_success_rate = -1.0;
             /* C7: a recovery drill within the 2min budget. */
@@ -947,5 +970,6 @@ int syncdiag_cases_operator(void)
         else    { printf("FAIL\n"); failures++; }
     }
 
+    failures += test_mvp_c6_requires_full_judge();
     return failures;
 }

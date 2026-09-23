@@ -230,12 +230,11 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
     }
 
     /* ── C6: 7-day soak with zero operator intervention ──────────────
-     * Live evidence = the soak attestation service (per-tick healthy /
-     * window-eligible) + the continuous clean-window hours + an optional
-     * external SLO probe success rate. The soak service does not itself
-     * compute the 168h continuous window at runtime, so window_hours is
-     * unknown (-1) unless a caller supplies it → unknown with a named reason.
-     * The make soak-evidence-report judge remains the authority. */
+     * Local ticks, elapsed hours and an optional SLO probe are partial
+     * observations. They cannot establish the sovereign, exact-parity,
+     * workload-bound 168h claim. A caller must also supply a retained MET
+     * result from the full soak-evidence-report judge. Runtime does not
+     * currently track that result, so C6 stays unknown with a named reason. */
     {
         struct json_value e = {0};
         mvp_evidence_begin(&e,
@@ -246,6 +245,7 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
         json_push_kv_int(&e, "window_hours", ev->c6_soak_window_hours);
         json_push_kv_int(&e, "window_hours_required",
                          MVP_SOAK_WINDOW_HOURS_REQUIRED);
+        json_push_kv_bool(&e, "full_judge_met", ev->c6_full_judge_met);
         json_push_kv_bool(&e, "slo_probe_present", ev->c6_slo_probe_present);
         json_push_kv_real(&e, "slo_success_rate", ev->c6_slo_success_rate);
 
@@ -275,8 +275,14 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
             blocker = "soak.slo_below_floor";
             reason = "external SLO probe success rate below the floor";
         } else {
-            st = MVP_MET;
-            reason = "168h+ clean, healthy, eligible soak window";
+            static const enum mvp_met verdict[2] = {MVP_UNKNOWN, MVP_MET};
+            static const char *const explanation[2] = {
+                "full C6 soak-evidence-report MET verdict not supplied; "
+                "local healthy ticks cannot qualify the 168h window",
+                "168h+ clean, healthy, eligible soak window with full judge MET",
+            };
+            st = verdict[ev->c6_full_judge_met];
+            reason = explanation[ev->c6_full_judge_met];
         }
         mvp_push_criterion(&arr, "C6",
             "7-day soak with zero operator intervention", st, since, blocker,
