@@ -245,13 +245,20 @@ vcs_zcode_publication_index_at(
 
 bool vcs_zcode_publication_index_recovery(
     const struct vcs_zcode_publication_index *index,
+    const char *repo_root,
     const uint8_t publication_root[32],
+    const uint8_t expected_signer[32],
     struct vcs_zcode_publication_recovery_view *out)
 {
     if (!out) LOG_RETURN(false, INDEX_LOG, "missing recovery output");
     memset(out, 0, sizeof(*out));
-    if (!index || !index->complete || !publication_root)
+    if (!index || !index->complete || !repo_root || !repo_root[0] ||
+        !publication_root || !expected_signer)
         LOG_RETURN(false, INDEX_LOG, "incomplete recovery input");
+    struct vcs_zcode_publication_v1 intent;
+    if (!vcs_zcode_publication_load_verified(repo_root, publication_root,
+            expected_signer, &intent))
+        LOG_RETURN(false, INDEX_LOG, "publication intent is not stored and verified");
     char root_hex[65];
     zcl_hex_encode(publication_root, 32, root_hex);
     for (size_t i = 0; i < index->count; i++) {

@@ -26,11 +26,11 @@ struct vcs_zcode_publication_observation_entry {
 
 struct vcs_zcode_publication_index;
 
-/* A restart view for one immutable intent. Observations are signed CAS
- * objects, but a remote receipt still needs independent remote verification.
- * An incomplete scan refuses a decision. Even an empty complete scan only
- * permits a final recheck under the existing land/action lease; it never
- * grants dispatch authority by itself. */
+/* A restart view for one immutable, stored, signer-pinned intent. Observations
+ * are signed CAS objects, but a remote receipt still needs independent remote
+ * verification. An incomplete scan refuses a decision. Even an empty complete
+ * scan only permits a final recheck under the existing land/action lease; it
+ * never grants dispatch authority by itself. */
 enum vcs_zcode_publication_recovery_state {
     VCS_ZCODE_RECOVERY_RECHECK_UNDER_LEASE = 1,
     VCS_ZCODE_RECOVERY_RECONCILE_REMOTE = 2,
@@ -61,7 +61,9 @@ vcs_zcode_publication_index_at(
     const struct vcs_zcode_publication_index *index, size_t i);
 bool vcs_zcode_publication_index_recovery(
     const struct vcs_zcode_publication_index *index,
+    const char *repo_root,
     const uint8_t publication_root[32],
+    const uint8_t expected_signer[32],
     struct vcs_zcode_publication_recovery_view *out);
 
 #endif /* ZCL_VCS_ZCODE_PUBLICATION_INDEX_H */

@@ -7412,7 +7412,7 @@ static int test_zd_publication_result(void)
         ASSERT(saw_unknown && saw_accepted && saw_rejected);
         struct vcs_zcode_publication_recovery_view recovery;
         ASSERT(vcs_zcode_publication_index_recovery(
-            projection, intent_root, &recovery));
+            projection, dir, intent_root, publisher, &recovery));
         ASSERT_EQ(recovery.state, VCS_ZCODE_RECOVERY_RECONCILE_REMOTE);
         ASSERT_EQ(recovery.attempt_results, 3);
         ASSERT_EQ(recovery.remote_receipts, 0);
@@ -7420,10 +7420,13 @@ static int test_zd_publication_result(void)
         ASSERT_EQ(recovery.accepted_attempts, 1);
         ASSERT_EQ(recovery.rejected_attempts, 1);
         uint8_t unrelated_root[32] = {99};
-        ASSERT(vcs_zcode_publication_index_recovery(
-            projection, unrelated_root, &recovery));
-        ASSERT_EQ(recovery.state, VCS_ZCODE_RECOVERY_RECHECK_UNDER_LEASE);
+        ASSERT(!vcs_zcode_publication_index_recovery(
+            projection, dir, unrelated_root, publisher, &recovery));
+        ASSERT_EQ(recovery.state, 0);
         ASSERT_EQ(recovery.attempt_results, 0);
+        ASSERT(!vcs_zcode_publication_index_recovery(
+            projection, dir, intent_root, producer, &recovery));
+        ASSERT_EQ(recovery.state, 0);
         vcs_zcode_publication_index_free(projection);
         test_rm_rf(dir);
         PASS();
@@ -7479,7 +7482,7 @@ static int test_zd_remote_receipt(void)
         ASSERT(!vcs_zcode_publication_index_complete(projection));
         struct vcs_zcode_publication_recovery_view recovery;
         ASSERT(!vcs_zcode_publication_index_recovery(
-            projection, intent_root, &recovery));
+            projection, dir, intent_root, publisher, &recovery));
         ASSERT_EQ(recovery.state, 0);
         vcs_zcode_publication_index_free(projection);
         ASSERT(vcs_object_store_init(dir));
@@ -7489,6 +7492,15 @@ static int test_zd_remote_receipt(void)
         ASSERT(!vcs_object_has(dir, receipt_root));
         ASSERT(vcs_zcode_publication_store_verified(dir, &intent, publisher, stored));
         ASSERT(memcmp(stored, intent_root, 32) == 0);
+        projection = vcs_zcode_publication_index_build(dir);
+        ASSERT(projection != NULL);
+        ASSERT(vcs_zcode_publication_index_complete(projection));
+        ASSERT(vcs_zcode_publication_index_recovery(
+            projection, dir, intent_root, publisher, &recovery));
+        ASSERT_EQ(recovery.state, VCS_ZCODE_RECOVERY_RECHECK_UNDER_LEASE);
+        ASSERT_EQ(recovery.attempt_results, 0);
+        ASSERT_EQ(recovery.remote_receipts, 0);
+        vcs_zcode_publication_index_free(projection);
         struct vcs_zcode_remote_receipt_v1 wrong = receipt;
         memcpy(wrong.target_ref, "refs/heads/other", 17);
         ASSERT_EQ(vcs_zcode_remote_receipt_seal(&wrong, observer_secret, observer),
@@ -7532,7 +7544,7 @@ static int test_zd_remote_receipt(void)
         ASSERT_STR_EQ(entry->publication_root_hex, intent_hex);
         ASSERT_EQ(entry->kind, VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT);
         ASSERT(vcs_zcode_publication_index_recovery(
-            projection, intent_root, &recovery));
+            projection, dir, intent_root, publisher, &recovery));
         ASSERT_EQ(recovery.state, VCS_ZCODE_RECOVERY_RECONCILE_REMOTE);
         ASSERT_EQ(recovery.remote_receipts, 1);
         ASSERT_EQ(recovery.attempt_results, 0);
@@ -7545,7 +7557,7 @@ static int test_zd_remote_receipt(void)
         ASSERT(!vcs_zcode_publication_index_complete(projection));
         ASSERT_EQ(vcs_zcode_publication_index_count(projection), 1);
         ASSERT(!vcs_zcode_publication_index_recovery(
-            projection, intent_root, &recovery));
+            projection, dir, intent_root, publisher, &recovery));
         ASSERT_EQ(recovery.state, 0);
         vcs_zcode_publication_index_free(projection);
         test_rm_rf(dir);
