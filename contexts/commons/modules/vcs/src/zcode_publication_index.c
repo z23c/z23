@@ -242,3 +242,36 @@ vcs_zcode_publication_index_at(
 {
     return index && i < index->count ? &index->entries[i] : NULL;
 }
+
+bool vcs_zcode_publication_index_recovery(
+    const struct vcs_zcode_publication_index *index,
+    const uint8_t publication_root[32],
+    struct vcs_zcode_publication_recovery_view *out)
+{
+    if (!out) LOG_RETURN(false, INDEX_LOG, "missing recovery output");
+    memset(out, 0, sizeof(*out));
+    if (!index || !index->complete || !publication_root)
+        LOG_RETURN(false, INDEX_LOG, "incomplete recovery input");
+    char root_hex[65];
+    zcl_hex_encode(publication_root, 32, root_hex);
+    for (size_t i = 0; i < index->count; i++) {
+        const struct vcs_zcode_publication_observation_entry *entry =
+            &index->entries[i];
+        if (strcmp(entry->publication_root_hex, root_hex) != 0) continue;
+        if (entry->kind == VCS_ZCODE_OBSERVATION_REMOTE_RECEIPT) {
+            out->remote_receipts++;
+        } else if (entry->kind == VCS_ZCODE_OBSERVATION_ATTEMPT_RESULT) {
+            out->attempt_results++;
+            if (entry->outcome == VCS_ZCODE_PUBLICATION_UNKNOWN)
+                out->unknown_attempts++;
+            else if (entry->outcome == VCS_ZCODE_PUBLICATION_ACCEPTED)
+                out->accepted_attempts++;
+            else if (entry->outcome == VCS_ZCODE_PUBLICATION_REJECTED)
+                out->rejected_attempts++;
+        }
+    }
+    out->state = out->attempt_results || out->remote_receipts
+        ? VCS_ZCODE_RECOVERY_RECONCILE_REMOTE
+        : VCS_ZCODE_RECOVERY_RECHECK_UNDER_LEASE;
+    return true;
+}

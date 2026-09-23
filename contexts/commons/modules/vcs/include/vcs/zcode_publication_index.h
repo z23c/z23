@@ -26,6 +26,25 @@ struct vcs_zcode_publication_observation_entry {
 
 struct vcs_zcode_publication_index;
 
+/* A restart view for one immutable intent. Observations are signed CAS
+ * objects, but a remote receipt still needs independent remote verification.
+ * An incomplete scan refuses a decision. Even an empty complete scan only
+ * permits a final recheck under the existing land/action lease; it never
+ * grants dispatch authority by itself. */
+enum vcs_zcode_publication_recovery_state {
+    VCS_ZCODE_RECOVERY_RECHECK_UNDER_LEASE = 1,
+    VCS_ZCODE_RECOVERY_RECONCILE_REMOTE = 2,
+};
+
+struct vcs_zcode_publication_recovery_view {
+    enum vcs_zcode_publication_recovery_state state;
+    size_t attempt_results;
+    size_t remote_receipts;
+    size_t unknown_attempts;
+    size_t accepted_attempts;
+    size_t rejected_attempts;
+};
+
 /* Rebuild from repo_root's CAS. Complete means this directory walk saw no
  * read/validation/cap error; it is not a concurrent-write snapshot. Before
  * dispatch, the existing land/action lease must fence and recheck for prior
@@ -40,5 +59,9 @@ size_t vcs_zcode_publication_index_count(
 const struct vcs_zcode_publication_observation_entry *
 vcs_zcode_publication_index_at(
     const struct vcs_zcode_publication_index *index, size_t i);
+bool vcs_zcode_publication_index_recovery(
+    const struct vcs_zcode_publication_index *index,
+    const uint8_t publication_root[32],
+    struct vcs_zcode_publication_recovery_view *out);
 
 #endif /* ZCL_VCS_ZCODE_PUBLICATION_INDEX_H */
