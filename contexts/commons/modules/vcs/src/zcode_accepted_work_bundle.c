@@ -265,8 +265,9 @@ static bool accepted_bundle_store(
 {
     if (!vcs_object_store_init(workspace)) return false;
     for (size_t i = 0; i < count; i++)
-        if (!vcs_object_put_addressed(
-                workspace, views[i].root, views[i].bytes, views[i].len))
+        if (!vcs_object_put_addressed_repair(
+                workspace, views[i].root, views[i].bytes,
+                views[i].len, NULL))
             return false;
     return true;
 }

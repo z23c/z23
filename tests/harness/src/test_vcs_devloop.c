@@ -113,6 +113,34 @@ static bool vd_poison_object(const char *dir, const uint8_t root[32])
         vcs_object_put_addressed(dir, root, poison, sizeof(poison));
 }
 
+static int vd_test_accepted_bundle_retry(
+    const char *consumer, const struct vd_accepted_fixture *fixture,
+    const uint8_t source_root[32], const uint8_t *wire, size_t wire_len,
+    int64_t accepted_now)
+{
+    int failures = 0;
+    struct vcs_zcode_accepted_work_v1 imported, resolved;
+    uint32_t objects = 0, receipts = 0;
+    VD_CHECK("publication: interrupted consumer authority object is poisoned",
+             vd_poison_object(
+                 consumer, fixture->accepted.accepted_work_root));
+    VD_CHECK("publication: exact accepted bundle retry repairs consumer CAS",
+             wire &&
+             vcs_zcode_accepted_work_bundle_import(
+                 consumer, fixture->accepted.accepted_work_root,
+                 source_root, wire, wire_len,
+                 &imported, &objects, &receipts) ==
+                 VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK &&
+             objects >= 9 && receipts == 2 &&
+             memcmp(imported.expected_signer,
+                    fixture->signer_pubkey, 32) == 0);
+    VD_CHECK("publication: repaired authority resolves at original root",
+             vcs_zcode_accepted_work_resolve(
+                 consumer, fixture->accepted.accepted_work_root,
+                 accepted_now, &resolved));
+    return failures;
+}
+
 static int vd_test_blob_map_retry(
     const char *dir, const uint8_t source_root[32],
     const uint8_t lane_root[32], const uint8_t expected_set_root[32],
@@ -801,6 +829,9 @@ static int t_publication_enqueue(const char *dir)
              authority_objects >= 9 && authority_receipts == 2 &&
              memcmp(imported.expected_signer,
                     fixture.signer_pubkey, 32) == 0);
+    failures += vd_test_accepted_bundle_retry(
+        accepted_consumer, &fixture, job.source_tree_root,
+        accepted_wire, accepted_wire_len, accepted_now);
     uint8_t wrong_accepted_root[32];
     memcpy(wrong_accepted_root, fixture.accepted.accepted_work_root, 32);
     wrong_accepted_root[0] ^= 1u;
