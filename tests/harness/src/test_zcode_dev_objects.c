@@ -7439,6 +7439,19 @@ static int test_zd_publication_result(void)
         ASSERT_EQ(recovery.state, 0);
         vcs_zcode_publication_index_free(foreign_projection);
         test_rm_rf(other_dir);
+        char moved_dir[512];
+        int moved_len = snprintf(moved_dir, sizeof(moved_dir), "%s-moved", dir);
+        ASSERT(moved_len > 0 && (size_t)moved_len < sizeof(moved_dir));
+        ASSERT_EQ(rename(dir, moved_dir), 0);
+        ASSERT_EQ(mkdir(dir, 0700), 0);
+        ASSERT(vcs_object_store_init(dir));
+        ASSERT(vcs_zcode_publication_store_verified(
+            dir, &intent, publisher, stored));
+        ASSERT(!vcs_zcode_publication_index_recovery(
+            projection, dir, intent_root, publisher, &recovery));
+        ASSERT_EQ(recovery.state, 0);
+        test_rm_rf(dir);
+        ASSERT_EQ(rename(moved_dir, dir), 0);
         uint8_t unrelated_root[32] = {99};
         ASSERT(!vcs_zcode_publication_index_recovery(
             projection, dir, unrelated_root, publisher, &recovery));

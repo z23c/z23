@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define INDEX_LOG "vcs.publication_index"
 #define INDEX_MAX_SCANNED 262144u
@@ -22,6 +23,8 @@ static const uint8_t receipt_magic[8] = {'Z','C','R','R','C','P','\r','\n'};
 
 struct vcs_zcode_publication_index {
     char *repo_root;
+    dev_t repo_dev;
+    ino_t repo_ino;
     struct vcs_zcode_publication_observation_entry *entries;
     size_t count;
     size_t scanned;
@@ -206,6 +209,14 @@ struct vcs_zcode_publication_index *vcs_zcode_publication_index_build(
     }
     memcpy(index->repo_root, repo_root, root_len + 1u);
     index->complete = true;
+    struct stat root_stat;
+    if (stat(repo_root, &root_stat) != 0 || !S_ISDIR(root_stat.st_mode)) {
+        index->complete = false;
+        LOG_ERROR(INDEX_LOG, "workspace identity unavailable: %s", repo_root);
+    } else {
+        index->repo_dev = root_stat.st_dev;
+        index->repo_ino = root_stat.st_ino;
+    }
     index->entries = zcl_malloc(sizeof(*index->entries) *
         VCS_ZCODE_PUBLICATION_INDEX_MAX_OBSERVATIONS,
         "publication_index_entries");
@@ -252,6 +263,14 @@ vcs_zcode_publication_index_at(
     return index && i < index->count ? &index->entries[i] : NULL;
 }
 
+static bool index_workspace_matches(const struct vcs_zcode_publication_index *index,
+                                    const char *repo_root)
+{
+    struct stat root_stat;
+    return stat(repo_root, &root_stat) == 0 && S_ISDIR(root_stat.st_mode) &&
+        root_stat.st_dev == index->repo_dev && root_stat.st_ino == index->repo_ino;
+}
+
 static void index_recovery_observations(
     const struct vcs_zcode_publication_index *index, const char *root_hex,
     struct vcs_zcode_publication_recovery_view *out)
@@ -285,6 +304,7 @@ bool vcs_zcode_publication_index_recovery(
     memset(out, 0, sizeof(*out));
     if (!index || !index->complete || !repo_root || !repo_root[0] ||
         strcmp(index->repo_root, repo_root) != 0 ||
+        !index_workspace_matches(index, repo_root) ||
         !publication_root || !expected_signer)
         LOG_RETURN(false, INDEX_LOG, "incomplete recovery input");
     struct vcs_zcode_publication_v1 intent;
