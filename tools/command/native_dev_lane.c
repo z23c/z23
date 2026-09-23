@@ -78,12 +78,19 @@ static void dln_fail(struct zcl_command_reply *reply,
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static const char *const DLN_REQUIRED[] = {
+    "vendor/sqlite3.c",
     "vendor/tor/libtor.a",
+    "vendor/tor/.provenance",
+    "vendor/tor/Makefile",
     "vendor/lib",
     "vendor/include",
     "build/githooks",
+    "build/bin/z23-lint",
+    "build/bin/z23-fleet-observe",
     "build/hotswap/zcl_rollback_fixture_a.so",
     "build/hotswap/zcl_rollback_fixture_b.so",
+    "build/fixtures/rlc_child_v1",
+    "build/fixtures/rlc_child_broken",
 };
 
 static void dln_strip(char *s)
@@ -139,8 +146,14 @@ static const char *dln_dep_fix(const char *rel)
 {
     if (!rel)
         return "make vendor";
+    if (strncmp(rel, "vendor/tor/", 11) == 0)
+        return "make tor-full";
     if (strncmp(rel, "vendor/", 7) == 0)
         return "make vendor";
+    if (strncmp(rel, "build/bin/", 10) == 0)
+        return "make build/bin/z23-lint build/bin/z23-fleet-observe";
+    if (strncmp(rel, "build/fixtures/", 15) == 0)
+        return "make build/fixtures/rlc_child_v1 build/fixtures/rlc_child_broken";
     if (strncmp(rel, "build/hotswap/", 14) == 0)
         return "make test_parallel";
     return "make install-hooks";

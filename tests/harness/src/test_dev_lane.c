@@ -102,41 +102,37 @@ static bool dln_commit(const char *dir, const char *message)
     return dln_git(dir, add) && dln_git(dir, commit);
 }
 
-static bool dln_plant_deps(const char *root)
-{
-    return dln_write_dep(root, "vendor/lib/libfoo.a", "fake\n") &&
-           dln_write_dep(root, "vendor/include/foo.h", "fake\n") &&
-           dln_write_dep(root, "vendor/tor/libtor.a", "fake\n") &&
-           dln_write_dep(root,
-                         "vendor/tor/src/ext/ed25519/donna/"
-                         "libed25519_donna.a",
-                         "fake\n") &&
-           dln_write_dep(root,
-                         "vendor/tor/src/ext/ed25519/ref10/"
-                         "libed25519_ref10.a",
-                         "fake\n") &&
-           dln_write_dep(root,
-                         "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
-                         "fake\n") &&
-           dln_write_dep(root, "build/githooks/pre-push", "#!/bin/sh\n") &&
-           dln_write_dep(root, "build/hotswap/zcl_rollback_fixture_a.so",
-                         "fake\n") &&
-           dln_write_dep(root, "build/hotswap/zcl_rollback_fixture_b.so",
-                         "fake\n");
-}
-
 static const char *const dln_check_rels[] = {
+    "vendor/sqlite3.c",
     "vendor/lib/libfoo.a",
     "vendor/include/foo.h",
     "vendor/tor/libtor.a",
+    "vendor/tor/.provenance",
+    "vendor/tor/Makefile",
     "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
     "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
     "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
     "build/githooks/pre-push",
+    "build/bin/z23-lint",
+    "build/bin/z23-fleet-observe",
     "build/hotswap/zcl_rollback_fixture_a.so",
     "build/hotswap/zcl_rollback_fixture_b.so",
+    "build/fixtures/rlc_child_v1",
+    "build/fixtures/rlc_child_broken",
     NULL,
 };
+
+static bool dln_plant_deps(const char *root)
+{
+    for (size_t i = 0; dln_check_rels[i]; i++) {
+        const char *rel = dln_check_rels[i];
+        const char *content = strcmp(rel, "build/githooks/pre-push") == 0
+            ? "#!/bin/sh\n" : "fake\n";
+        if (!dln_write_dep(root, rel, content))
+            return false;
+    }
+    return true;
+}
 
 static bool dln_fixture(const char *root)
 {
@@ -241,7 +237,7 @@ int test_dev_lane(void)
         ASSERT(dln_bool(&reply, "ok"));
         ASSERT_STR_EQ(dln_str(&reply, "path"), lane);
         ASSERT(strlen(dln_str(&reply, "head")) == 40);
-        ASSERT(dln_int(&reply, "dependencies") == 9);
+        ASSERT(dln_int(&reply, "dependencies") == 16);
         ASSERT(dln_int(&reply, "libtor_links") == 1);
         ASSERT(dln_bool(&reply, "hooks_installed"));
 
@@ -288,7 +284,7 @@ int test_dev_lane(void)
         (void)json_push_kv_str(&input, "base", "HEAD");
         dln_call(root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
-        ASSERT(dln_int(&reply, "dependencies") == 9);
+        ASSERT(dln_int(&reply, "dependencies") == 16);
         zcl_command_reply_free(&reply);
 
         for (i = 0; dln_check_rels[i]; i++) {
