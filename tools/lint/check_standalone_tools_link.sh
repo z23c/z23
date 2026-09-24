@@ -46,10 +46,12 @@ MODE="${ZCL_LINT_MODE:-FAIL}"
 # that owns the derivation and asks it for the build alone; the gate still
 # adjudicates, in full, inside the lint dimension where it belongs.
 BUILD_ONLY=0
+LIST_TARGETS=0
 if [ "$#" -gt 0 ]; then
     for arg in "$@"; do
         case "$arg" in
             --build-only) BUILD_ONLY=1 ;;
+            --list-targets) LIST_TARGETS=1 ;;
             *)
                 echo "check-standalone-tools-link: unknown argument '$arg'" >&2
                 exit 2
@@ -311,6 +313,12 @@ done
 # into prose goes stale without anything noticing.
 gate_require_scanned "${#targets[@]}" 10 check-standalone-tools-link \
     "the exempt set has swallowed the gate — it is no longer proving anything"
+
+if [ "$LIST_TARGETS" -eq 1 ]; then
+    [ "$BUILD_ONLY" -eq 0 ] || exit 2
+    printf '%s\n' "${targets[@]}"
+    exit 0
+fi
 
 echo "[check_standalone_tools_link] ${#TOOLS[@]} tool rule(s) in Makefile;" \
      "${#EXEMPT[@]} exempt; building ${#targets[@]}"

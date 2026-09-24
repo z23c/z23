@@ -5139,9 +5139,9 @@ static void proof_tu_cache_prepare(const struct proof_paths *paths)
  * no make at all -- it execs the admitted runner and reads build outputs
  * (each lint-gate shard copies build/bin/z23-lint and
  * build/bin/file_size_policy into its sandbox and execs them). The lint
- * dimension does run make: `lint`'s own built prerequisites, and one nested
- * make inside check_standalone_tools_link.sh that links every standalone
- * tool rule the Makefile carries -- a set that includes z23-lint,
+ * dimension does run make: `lint`'s own built prerequisites, and the
+ * standalone tool targets exported by check_standalone_tools_link.sh into
+ * the same prefork Make graph -- a set that includes z23-lint,
  * zcl-nodectl, fbsh, file_size_policy, fleet-board-bridge and
  * zclassic23-engine-unit, i.e. the very executables the test dimension is
  * reading. A relink unlinks the output before it writes it, and on

@@ -14203,9 +14203,28 @@ endif
 # content through --source-record and marks them fresh, and building them here
 # would throw that admission away.
 .PHONY: proof-lint-prebuild
-proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL) tor-provenance-ready
+# The proof names this goal explicitly. Derive the gate's closed tool set once
+# during this Make parse, then build it in this Make's existing job graph.
+# Other callers retain the gate's own nested-Make fallback.
+ifneq ($(filter proof-lint-prebuild,$(MAKECMDGOALS)),)
+PROOF_LINT_TOOL_TARGETS := $(shell tools/lint/check_standalone_tools_link.sh --list-targets || printf 'PROOF_LINT_TOOL_CATALOG_FAILED')
+ifeq ($(strip $(PROOF_LINT_TOOL_TARGETS)),)
+$(error proof-lint-prebuild tool catalog was empty)
+endif
+ifneq ($(filter PROOF_LINT_TOOL_CATALOG_FAILED,$(PROOF_LINT_TOOL_TARGETS)),)
+$(error proof-lint-prebuild tool catalog failed)
+endif
+endif
+proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL) tor-provenance-ready $(PROOF_LINT_TOOL_TARGETS)
+ifneq ($(filter proof-lint-prebuild,$(MAKECMDGOALS)),)
+	@for tool in $(PROOF_LINT_TOOL_TARGETS); do \
+	  [ -f "$$tool" ] || { echo "proof-lint-prebuild: missing $$tool" >&2; exit 1; }; \
+	done
+else
 	+@./tools/lint/check_standalone_tools_link.sh --build-only
+endif
 	@echo "proof-lint-prebuild: every target the lint dimension can build is fresh"
+
 
 # One screen of truth from the LAST recorded lint and test runs — reads only
 # .cache/lint-timing/last-run.json and .cache/test-timing/last-run.json (plus
