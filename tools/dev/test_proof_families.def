@@ -16,3 +16,4 @@ ZCL_TEST_PROOF_FAMILY("oracle_policy", "test_*oracle")
  * partition or heavy group the registry carries is what the token selects. */
 ZCL_TEST_PROOF_FAMILY("make_lint_gates", "test_make_lint_gates*")
 ZCL_TEST_PROOF_FAMILY("block_index_projection", "test_block_index_projection*")
+ZCL_TEST_PROOF_FAMILY("dev_platform", "test_dev_platform*")

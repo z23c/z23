@@ -6,6 +6,7 @@
 
 #include "test/test_core.h"
 #include "test/test_timing_budget.h"
+#include "test_group_catalog.h"
 
 #include "command/native_dev_loop_command.h"
 #include "dev_activation.h"
@@ -404,11 +405,15 @@ static bool dp_group_in(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
  * "test_tor") must
  * additionally surface download.c's groups ("download"...) via the closure,
  * WITHOUT dropping the path floor. */
-#define DP_CLOSURE_FIX "test-tmp/dp_closure"
-
 static int test_change_plan_closure(void)
 {
     int failures = 0;
+    char fixture[PATH_MAX], absent[PATH_MAX];
+    if (snprintf(fixture, sizeof(fixture), "test-tmp/dp_closure_%ld",
+                 (long)getpid()) >= (int)sizeof(fixture) ||
+        snprintf(absent, sizeof(absent), "test-tmp/dp_closure_absent_%ld",
+                 (long)getpid()) >= (int)sizeof(absent))
+        return 1;
     TEST("dev platform: change plan unions symbol-closure groups onto the path floor") {
         const char *leaf_files[] = {
             "tests/harness/src/test_dev_platform.c",
@@ -420,35 +425,35 @@ static int test_change_plan_closure(void)
                            leaf_plan.path_groups_len,
                            "test_dev_platform"));
 
-        system("rm -rf " DP_CLOSURE_FIX);
+        ASSERT(test_rm_rf_recursive(fixture) == 0 || errno == ENOENT);
         /* tor_integration.c defines the changed leaf; download.c's function
          * calls it, so download.c is in the reverse-caller closure. Both paths
          * match distinct agent_impact rules ("test_tor" vs
          * "download ..."). */
-        ASSERT(dp_mk_write(DP_CLOSURE_FIX, "core/modules/net/src/tor_integration.c",
+        ASSERT(dp_mk_write(fixture, "core/modules/net/src/tor_integration.c",
                            "/* tor fixture */\n"
                            "#include \"net/clp.h\"\n"
                            "int tor_leaf(int x) { return x + 1; }\n"));
-        ASSERT(dp_mk_write(DP_CLOSURE_FIX, "core/modules/net/src/download.c",
+        ASSERT(dp_mk_write(fixture, "core/modules/net/src/download.c",
                            "/* download fixture */\n"
                            "#include \"net/clp.h\"\n"
                            "int dl_top(int x) { return tor_leaf(x) * 2; }\n"));
-        ASSERT(dp_mk_write(DP_CLOSURE_FIX,
+        ASSERT(dp_mk_write(fixture,
                            "tests/harness/src/test_dev_platform.c",
                            "/* semantic test leaf fixture */\n"
                            "#include \"net/clp.h\"\n"
                            "int test_dev_platform(void) { return tor_leaf(1); }\n"));
-        ASSERT(dp_mk_write(DP_CLOSURE_FIX, "core/modules/net/include/net/clp.h",
+        ASSERT(dp_mk_write(fixture, "core/modules/net/include/net/clp.h",
                            "#ifndef NET_CLP_H\n#define NET_CLP_H\n"
                            "int tor_leaf(int x);\nint dl_top(int x);\n#endif\n"));
-        ASSERT(dp_mk_write(DP_CLOSURE_FIX, "build/obj/tor_integration.d",
+        ASSERT(dp_mk_write(fixture, "build/obj/tor_integration.d",
                            "build/obj/tor_integration.o: "
                            "core/modules/net/src/tor_integration.c "
                            "core/modules/net/include/net/clp.h\n"));
-        ASSERT(dp_mk_write(DP_CLOSURE_FIX, "build/obj/download.d",
+        ASSERT(dp_mk_write(fixture, "build/obj/download.d",
                            "build/obj/download.o: core/modules/net/src/download.c "
                            "core/modules/net/include/net/clp.h\n"));
-        ASSERT(dp_mk_write(DP_CLOSURE_FIX,
+        ASSERT(dp_mk_write(fixture,
                            "build/obj/test_dev_platform.d",
                            "build/obj/test_dev_platform.o: "
                            "tests/harness/src/test_dev_platform.c "
@@ -464,7 +469,7 @@ static int test_change_plan_closure(void)
         /* "download" is NOT reachable by path glob from the tor file. */
         ASSERT(!dp_group_in(plan.path_groups, plan.path_groups_len, "download"));
 
-        ASSERT(zcl_devloop_plan_add_closure(DP_CLOSURE_FIX, files, 1, &plan));
+        ASSERT(zcl_devloop_plan_add_closure(fixture, files, 1, &plan));
         ASSERT(plan.closure_attempted);
         ASSERT(!plan.closure_truncated);
         /* Closure surfaces download.c's group set as an ADDITION. */
@@ -485,7 +490,7 @@ static int test_change_plan_closure(void)
          * path floor intact and adds nothing — never a partial/huge plan. */
         struct zcl_devloop_plan plan2;
         ASSERT(zcl_devloop_plan_files(files, 1, &plan2));
-        ASSERT(zcl_devloop_plan_add_closure("test-tmp/dp_closure_absent",
+        ASSERT(zcl_devloop_plan_add_closure(absent,
                                             files, 1, &plan2));
         ASSERT(plan2.closure_attempted);
         ASSERT(plan2.closure_groups_len == 0);
@@ -494,7 +499,7 @@ static int test_change_plan_closure(void)
 
         /* JSON surface carries both group sets + the truncation flag. */
         char body[16384];
-        size_t n = zcl_devloop_plan_json_closure(DP_CLOSURE_FIX, files, 1, body,
+        size_t n = zcl_devloop_plan_json_closure(fixture, files, 1, body,
                                                  sizeof(body));
         ASSERT(n > 0 && n < sizeof(body));
         struct json_value root = {0};
@@ -505,7 +510,7 @@ static int test_change_plan_closure(void)
         ASSERT(strstr(body, "download") != NULL);
         json_free(&root);
 
-        system("rm -rf " DP_CLOSURE_FIX);
+        ASSERT(test_rm_rf_recursive(fixture) == 0 || errno == ENOENT);
         PASS();
     } _test_next:;
     return failures;
@@ -2420,12 +2425,34 @@ static bool dp_second_checkout_hit_is_single_link(
             cross_st.st_ino != cache_st->st_ino);
 }
 
+static bool dp_hotswap_fixture_paths(
+    char root_a[PATH_MAX], char root_b[PATH_MAX],
+    char cache_rel[PATH_MAX], char compiler_rel[PATH_MAX],
+    char dep_path[PATH_MAX], char cache[PATH_MAX], char compiler[PATH_MAX])
+{
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)) ||
+        snprintf(root_a, PATH_MAX, "test-tmp/dev_hotswap_cache_a_%ld",
+                 (long)getpid()) >= PATH_MAX ||
+        snprintf(root_b, PATH_MAX, "test-tmp/dev_hotswap_cache_b_%ld",
+                 (long)getpid()) >= PATH_MAX ||
+        snprintf(cache_rel, PATH_MAX, "test-tmp/dev_hotswap_shared_cache_%ld",
+                 (long)getpid()) >= PATH_MAX ||
+        snprintf(compiler_rel, PATH_MAX, "test-tmp/dev_hotswap_fake_cc_%ld.sh",
+                 (long)getpid()) >= PATH_MAX ||
+        snprintf(dep_path, PATH_MAX,
+                 "%s/build/hotswap-fast/engine_controllers_src_status_native_handlers.c.d",
+                 root_b) >= PATH_MAX ||
+        snprintf(cache, PATH_MAX, "%s/%s", cwd, cache_rel) >= PATH_MAX ||
+        snprintf(compiler, PATH_MAX, "%s/%s", cwd, compiler_rel) >= PATH_MAX)
+        return false;
+    return true;
+}
+
 static bool run_hotswap_artifact_cache_fixture(void)
 {
-    static const char root_a[] = "test-tmp/dev_hotswap_cache_a";
-    static const char root_b[] = "test-tmp/dev_hotswap_cache_b";
-    static const char cache_rel[] = "test-tmp/dev_hotswap_shared_cache";
-    static const char compiler_rel[] = "test-tmp/dev_hotswap_fake_cc.sh";
+    char root_a[PATH_MAX], root_b[PATH_MAX], cache_rel[PATH_MAX];
+    char compiler_rel[PATH_MAX], dep_path[PATH_MAX];
     static const char fake_compiler[] =
         "#!/usr/bin/env bash\n"
         "set -eu\n"
@@ -2462,7 +2489,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
     bool ok = false;
     const char *stage = "setup";
     char why[256] = {0};
-    char cwd[PATH_MAX], cache[PATH_MAX], compiler[PATH_MAX];
+    char cache[PATH_MAX], compiler[PATH_MAX];
     char saved_cache[PATH_MAX] = {0};
     char saved_process[32] = {0};
     char saved_force_copy[32] = {0};
@@ -2473,6 +2500,9 @@ static bool run_hotswap_artifact_cache_fixture(void)
     bool had_cache = prior_cache && prior_cache[0];
     bool had_process = prior_process && prior_process[0];
     bool had_force_copy = prior_force_copy && prior_force_copy[0];
+    if (!dp_hotswap_fixture_paths(root_a, root_b, cache_rel, compiler_rel,
+                                  dep_path, cache, compiler))
+        return false;
     if (had_cache)
         (void)snprintf(saved_cache, sizeof(saved_cache), "%s", prior_cache);
     if (had_process)
@@ -2481,12 +2511,6 @@ static bool run_hotswap_artifact_cache_fixture(void)
     if (had_force_copy)
         (void)snprintf(saved_force_copy, sizeof(saved_force_copy), "%s",
                        prior_force_copy);
-    if (!getcwd(cwd, sizeof(cwd)) ||
-        snprintf(cache, sizeof(cache), "%s/%s", cwd, cache_rel) >=
-            (int)sizeof(cache) ||
-        snprintf(compiler, sizeof(compiler), "%s/%s", cwd, compiler_rel) >=
-            (int)sizeof(compiler))
-        goto out;
     test_rm_rf_recursive(root_a);
     test_rm_rf_recursive(root_b);
     test_rm_rf_recursive(cache_rel);
@@ -2585,8 +2609,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
     stage = "cold-dependency-mutation";
     if (!dp_mk_write(root_b, owner,
                      "int zcl_hotswap_fixture_owner(void) { return 13; }\n") ||
-        unlink("test-tmp/dev_hotswap_cache_b/build/hotswap-fast/"
-               "engine_controllers_src_status_native_handlers.c.d") != 0 ||
+        unlink(dep_path) != 0 ||
         platform_environment_set("ZCL_DEVLOOP_TEST_MUTATE_DEPS", "1", 1) != 0 ||
         zcl_devloop_hotswap_build(root_b, owner, &mutated, &process,
                                   why, sizeof(why)) ||
@@ -2678,11 +2701,78 @@ static int test_hotswap_artifact_cache(void)
     return failures;
 }
 
+/* Mirror the catalog's exact selection, then split only the declared
+ * integration-only groups. This fixture must assert the complete selected
+ * set even when the owner group acquires new registered shards. */
+static bool dp_expected_proof_groups(
+    const struct zcl_devloop_plan *plan,
+    char full[4096], char immediate[4096], char deferred[4096],
+    uint32_t *total, uint32_t *now, uint32_t *later)
+{
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+    size_t id_count = 0;
+    for (size_t i = 0; i < plan->path_groups_len; i++)
+        ids[id_count++] = plan->path_groups[i];
+    for (size_t i = 0; i < plan->closure_groups_len; i++)
+        ids[id_count++] = plan->closure_groups[i];
+    char selected[64][ZCL_TEST_GROUP_FULL_MAX];
+    bool truncated = false;
+    size_t count = zcl_test_group_expand_plan(
+        ids, id_count, selected, 64, &truncated);
+    if (count == SIZE_MAX || count == 0 || truncated)
+        return false;
+    full[0] = immediate[0] = deferred[0] = 0;
+    *total = *now = *later = 0;
+    for (size_t i = 0; i < count; i++) {
+        bool integration = zcl_test_group_is_integration_only(selected[i]);
+        char *tier = integration ? deferred : immediate;
+        size_t full_used = strlen(full), tier_used = strlen(tier);
+        int a = snprintf(full + full_used, 4096 - full_used, "%s%s",
+                         full_used ? "," : "", selected[i]);
+        int b = snprintf(tier + tier_used, 4096 - tier_used, "%s%s",
+                         tier_used ? "," : "", selected[i]);
+        if (a <= 0 || (size_t)a >= 4096 - full_used ||
+            b <= 0 || (size_t)b >= 4096 - tier_used)
+            return false;
+        (*total)++;
+        if (integration) (*later)++;
+        else (*now)++;
+    }
+    return *now <= 32;
+}
+
+static bool dp_restart_first_receipt_ok(
+    const struct zcl_devloop_restart_build_receipt *receipt)
+{
+    return receipt->candidate_probe_passed &&
+           receipt->changed_sources == 1 &&
+           !receipt->artifact_cache_hit &&
+           receipt->compiler_processes == 2 &&
+           receipt->linker_processes == 1 &&
+           receipt->complete_graph_linker_processes == 0 &&
+           receipt->probe_processes == 1 &&
+           receipt->source_guard_captures == 2;
+}
+
+static bool dp_restart_first_identity_ok(
+    const struct zcl_devloop_restart_build_receipt *receipt)
+{
+    return receipt->compile_startup_us > 0 &&
+           receipt->compile_body_us > 0 &&
+           receipt->link_startup_us > 0 &&
+           receipt->link_body_us > 0 &&
+           receipt->probe_startup_us > 0 &&
+           receipt->probe_body_us > 0 &&
+           strcmp(receipt->probe, "discover.help") == 0 &&
+           receipt->source_identity_overlay &&
+           strlen(receipt->source_cas_sha3) == 64 &&
+           strlen(receipt->artifact_sha256) == 64 &&
+           strlen(receipt->artifact_cache_key) == 64;
+}
+
 static bool run_resident_restart_fixture(void)
 {
-    static const char root[] = "test-tmp/dev_resident_restart";
-    static const char cache_rel[] = "test-tmp/dev_restart_shared_cache";
-    static const char compiler_rel[] = "test-tmp/dev_restart_fake_cc.sh";
+    char root[PATH_MAX], cache_rel[PATH_MAX], compiler_rel[PATH_MAX];
     static const char fake_compiler[] =
         "#!/usr/bin/env bash\n"
         "set -eu\n"
@@ -2731,6 +2821,7 @@ static bool run_resident_restart_fixture(void)
         "  chmod 0700 \"$out\"\n"
         "fi\n";
     bool ok = false;
+    const char *stage = "fixture setup";
     char why[256] = {0};
     char cwd[PATH_MAX], cache[PATH_MAX], compiler[PATH_MAX], plan[PATH_MAX * 4];
     char saved_cache[PATH_MAX] = {0};
@@ -2743,6 +2834,15 @@ static bool run_resident_restart_fixture(void)
     bool had_cache = prior_cache && prior_cache[0];
     bool had_process = prior_process && prior_process[0];
     bool had_force_copy = prior_force_copy && prior_force_copy[0];
+    if (snprintf(root, sizeof(root), "test-tmp/dev_resident_restart_%ld",
+                 (long)getpid()) >= (int)sizeof(root) ||
+        snprintf(cache_rel, sizeof(cache_rel),
+                 "test-tmp/dev_restart_shared_cache_%ld", (long)getpid()) >=
+            (int)sizeof(cache_rel) ||
+        snprintf(compiler_rel, sizeof(compiler_rel),
+                 "test-tmp/dev_restart_fake_cc_%ld.sh", (long)getpid()) >=
+            (int)sizeof(compiler_rel))
+        return false;
     if (had_cache)
         (void)snprintf(saved_cache, sizeof(saved_cache), "%s", prior_cache);
     if (had_process)
@@ -2830,25 +2930,36 @@ static bool run_resident_restart_fixture(void)
         platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) != 0)
         goto out;
 
+    stage = "first candidate build";
     const char *changed[] = { "tools/dev/restart_fixture.c" };
     struct zcl_devloop_restart_build_receipt receipt = {0};
     struct zcl_devloop_process_result process = {0};
-    if (!zcl_devloop_restart_build(root, changed, 1, &receipt, &process,
-                                   why, sizeof(why)) ||
-        !receipt.candidate_probe_passed || receipt.changed_sources != 1 ||
-        receipt.artifact_cache_hit || receipt.compiler_processes != 2 ||
-        receipt.linker_processes != 1 ||
-        receipt.complete_graph_linker_processes != 0 ||
-        receipt.probe_processes != 1 || receipt.source_guard_captures != 2 ||
-        receipt.compile_startup_us <= 0 || receipt.compile_body_us <= 0 ||
-        receipt.link_startup_us <= 0 || receipt.link_body_us <= 0 ||
-        receipt.probe_startup_us <= 0 || receipt.probe_body_us <= 0 ||
-        strcmp(receipt.probe, "discover.help") != 0 ||
-        !receipt.source_identity_overlay ||
-        strlen(receipt.source_cas_sha3) != 64 ||
-        strlen(receipt.artifact_sha256) != 64 ||
-        strlen(receipt.artifact_cache_key) != 64)
+    bool first_build_ok = zcl_devloop_restart_build(
+        root, changed, 1, &receipt, &process, why, sizeof(why));
+    if (!first_build_ok || !dp_restart_first_receipt_ok(&receipt) ||
+        !dp_restart_first_identity_ok(&receipt)) {
+        fprintf(stderr, "resident first build: ok=%d probe=%d changed=%u hit=%d "
+                "compile=%u link=%u full_link=%u probe_process=%u guard=%u "
+                "timing=%lld/%lld/%lld/%lld/%lld/%lld probe=%s overlay=%d "
+                "hashlen=%zu/%zu/%zu\n",
+                first_build_ok, receipt.candidate_probe_passed,
+                receipt.changed_sources, receipt.artifact_cache_hit,
+                receipt.compiler_processes, receipt.linker_processes,
+                receipt.complete_graph_linker_processes, receipt.probe_processes,
+                receipt.source_guard_captures,
+                (long long)receipt.compile_startup_us,
+                (long long)receipt.compile_body_us,
+                (long long)receipt.link_startup_us,
+                (long long)receipt.link_body_us,
+                (long long)receipt.probe_startup_us,
+                (long long)receipt.probe_body_us,
+                receipt.probe, receipt.source_identity_overlay,
+                strlen(receipt.source_cas_sha3),
+                strlen(receipt.artifact_sha256),
+                strlen(receipt.artifact_cache_key));
         goto out;
+    }
+    stage = "first cache copy";
     char cache_artifact[PATH_MAX];
     struct stat cache_st = {0}, published_st = {0};
     int cache_n = snprintf(cache_artifact, sizeof(cache_artifact),
@@ -2858,25 +2969,40 @@ static bool run_resident_restart_fixture(void)
         stat(cache_artifact, &cache_st) != 0 ||
         stat(receipt.artifact_path, &published_st) != 0 ||
         (cache_st.st_dev == published_st.st_dev &&
-         cache_st.st_ino == published_st.st_ino))
+         cache_st.st_ino == published_st.st_ino)) {
+        fprintf(stderr, "resident cache copy: artifact=%s cache=%s errno=%d "
+                "cache_ino=%llu published_ino=%llu\n",
+                receipt.artifact_path, cache_artifact, errno,
+                (unsigned long long)cache_st.st_ino,
+                (unsigned long long)published_st.st_ino);
         goto out;
+    }
 
     /* A test edit following a resident service publication carries both TUs
      * into the proof epoch. The runtime candidate compiles and links only the
      * service TU; the exact test candidate later compiles and links both with
      * TEST_CFLAGS, including APIs that exist only under ZCL_TESTING. */
+    stage = "runtime and test changed";
     const char *runtime_and_test_changed[] = {
         "tools/dev/restart_fixture.c",
         "tests/harness/src/restart_test_only.c",
     };
     memset(&receipt, 0, sizeof(receipt));
     memset(&process, 0, sizeof(process));
-    if (!zcl_devloop_restart_build(root, runtime_and_test_changed, 2,
-                                   &receipt, &process, why, sizeof(why)) ||
+    bool mixed_build_ok = zcl_devloop_restart_build(
+        root, runtime_and_test_changed, 2, &receipt, &process, why, sizeof(why));
+    if (!mixed_build_ok ||
         !receipt.candidate_probe_passed || receipt.changed_sources != 2 ||
         receipt.compiler_processes != 2 || !receipt.artifact_cache_hit ||
-        receipt.linker_processes != 0 || receipt.probe_processes != 1)
+        receipt.linker_processes != 0 || receipt.probe_processes != 1) {
+        fprintf(stderr, "resident mixed build: ok=%d probe=%d changed=%u "
+                "compile=%u hit=%d link=%u probe_process=%u\n",
+                mixed_build_ok, receipt.candidate_probe_passed,
+                receipt.changed_sources, receipt.compiler_processes,
+                receipt.artifact_cache_hit, receipt.linker_processes,
+                receipt.probe_processes);
         goto out;
+    }
     if (dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
         goto out;
     char first_build_key[65], first_build_hash[65];
@@ -2885,18 +3011,27 @@ static bool run_resident_restart_fixture(void)
     (void)snprintf(first_build_hash, sizeof(first_build_hash), "%s",
                    receipt.artifact_sha256);
 
+    stage = "complete resident proof";
     struct zcl_devloop_plan proof_plan = {0};
     if (!zcl_devloop_plan_files(changed, 1, &proof_plan))
         goto out;
     for (size_t d = 0; d < ZCL_DEVLOOP_DIM__COUNT; d++)
         proof_plan.dims[d].status = ZCL_DEVLOOP_DIM_NOT_APPLICABLE;
+    char expected_all[4096], expected_now[4096], expected_later[4096];
+    uint32_t expected_total = 0, expected_immediate = 0, expected_deferred = 0;
+    if (!dp_expected_proof_groups(&proof_plan, expected_all, expected_now,
+                                  expected_later, &expected_total,
+                                  &expected_immediate, &expected_deferred))
+        goto out;
     struct zcl_devloop_restart_proof_receipt proof = {0};
     if (!zcl_devloop_restart_prove(root, changed, 1, &proof_plan, &proof,
                                    &process, why, sizeof(why)) ||
         !proof.proof_complete || !proof.immediate_proof_complete ||
         proof.integration_proof_deferred || proof.deferred_group_count != 0 ||
-        proof.group_count != 18 ||
-        proof.groups_ran != 17 || proof.groups_cached != 1 ||
+        proof.group_count != expected_total ||
+        strcmp(proof.groups, expected_all) != 0 ||
+        proof.groups_ran + proof.groups_cached != expected_total ||
+        proof.groups_cached != 1 ||
         proof.self_skips != 0 ||
         !strstr(proof.groups, "test_dev_platform") ||
         !strstr(proof.groups, "test_make_lint_gates_heavy_02") ||
@@ -2920,6 +3055,7 @@ static bool run_resident_restart_fixture(void)
 
     /* Born red: a real exact-group failure must not be collapsed into the
      * runner-accounting fallback. The next action needs the failing count. */
+    stage = "born red proof";
     if (platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "2", 1) != 0)
         goto out;
     memset(&proof, 0, sizeof(proof));
@@ -2936,6 +3072,7 @@ static bool run_resident_restart_fixture(void)
     /* The next edit for the same task executes the remembered RED before
      * default/catalog order. Passing it clears the warm scheduling hint; it
      * never substitutes for the complete affected batch that follows. */
+    stage = "remembered red proof";
     memset(&proof, 0, sizeof(proof));
     memset(&process, 0, sizeof(process));
     if (!zcl_devloop_restart_prove(root, changed, 1, &proof_plan, &proof,
@@ -2949,6 +3086,7 @@ static bool run_resident_restart_fixture(void)
      * code_capsule must carry the epoch-generated clientversion overlay all
      * the way through a complete resident proof. The second source keeps the
      * fixture runner's fixed bounded changed-source probe deterministic. */
+    stage = "code capsule overlay proof";
     const char *code_changed[] = {
         "tools/command/native_code_command.c",
         "tools/dev/restart_fixture.c",
@@ -2971,15 +3109,20 @@ static bool run_resident_restart_fixture(void)
         proof.test_processes != 2)
         goto out;
 
+    stage = "immediate proof";
     memset(&proof, 0, sizeof(proof));
     memset(&process, 0, sizeof(process));
     if (!zcl_devloop_restart_prove_immediate(
             root, changed, 1, &proof_plan, &proof, &process,
             why, sizeof(why)) ||
         proof.proof_complete || !proof.immediate_proof_complete ||
-        !proof.integration_proof_deferred || proof.group_count != 5 ||
-        proof.deferred_group_count != 13 ||
-        proof.groups_ran != 4 || proof.groups_cached != 1 ||
+        !proof.integration_proof_deferred ||
+        proof.group_count != expected_immediate ||
+        proof.deferred_group_count != expected_deferred ||
+        strcmp(proof.groups, expected_now) != 0 ||
+        strcmp(proof.deferred_groups, expected_later) != 0 ||
+        proof.groups_ran + proof.groups_cached != expected_immediate ||
+        proof.groups_cached != 1 ||
         proof.self_skips != 0 ||
         !proof.artifact_cache_hit || proof.compiler_processes != 2 ||
         proof.linker_processes != 0 ||
@@ -2991,6 +3134,7 @@ static bool run_resident_restart_fixture(void)
 
     /* Exact, edit, and revert cycles compile the source for diagnostic
      * freshness, but only new complete-graph link inputs may invoke a linker. */
+    stage = "exact edit revert build";
     memset(&receipt, 0, sizeof(receipt));
     if (!zcl_devloop_restart_build(root, changed, 1, &receipt, &process,
                                    why, sizeof(why)) ||
@@ -3096,8 +3240,8 @@ static bool run_resident_restart_fixture(void)
 
 out:
     if (!ok)
-        fprintf(stderr, "resident restart fixture failed: %s\n",
-                why[0] ? why : "no build reason");
+        fprintf(stderr, "resident restart fixture failed at %s: %s\n",
+                stage, why[0] ? why : "no build reason");
     (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FAIL_GROUPS");
     if (had_cache)
         (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
@@ -3428,8 +3572,11 @@ static int test_native_source_cas_shadow(void)
 {
     int failures = 0;
     TEST("dev platform: native source CAS is incremental and remains shadow authority") {
-        static const char fixture[] = "test-tmp/dev_source_cas_shadow";
-        ASSERT(system("rm -rf test-tmp/dev_source_cas_shadow") == 0);
+        char fixture[PATH_MAX];
+        ASSERT(snprintf(fixture, sizeof(fixture),
+                        "test-tmp/dev_source_cas_shadow_%ld",
+                        (long)getpid()) < (int)sizeof(fixture));
+        ASSERT(test_rm_rf_recursive(fixture) == 0 || errno == ENOENT);
         ASSERT(dp_mk_write(fixture, "core/modules/net/src/source_cas_a.c",
                            "int source_cas_a(void) { return 1; }\n"));
         ASSERT(dp_mk_write(fixture, "core/modules/net/include/net/source_cas_a.h",
@@ -3502,7 +3649,7 @@ static int test_native_source_cas_shadow(void)
                       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") == 0);
         ASSERT(strcmp(authoritative.mutation_id,
                       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") == 0);
-        ASSERT(system("rm -rf test-tmp/dev_source_cas_shadow") == 0);
+        ASSERT(test_rm_rf_recursive(fixture) == 0 || errno == ENOENT);
         PASS();
     } _test_next:;
     return failures;
@@ -4137,55 +4284,199 @@ static int test_ephemeral_fixture_leaves_source_identity(void)
     return failures;
 }
 
+/* Case identity and ownership are kept in one table. The registered base
+ * group proves the partition; each child group runs its assigned cases. */
+struct dp_shard_case {
+    const char *name;
+    int (*run)(void);
+    unsigned shard;
+};
+#define DP_CASE(fn, owner) {#fn, fn, owner}
+static const struct dp_shard_case g_dp_cases[] = {
+    DP_CASE(test_failure_store, 5),
+    DP_CASE(test_distill_first_error, 7),
+    DP_CASE(test_hotswap_artifact_cache, 5),
+    DP_CASE(test_resident_restart_builder, 4),
+#if defined(__APPLE__)
+    DP_CASE(test_darwin_attested_descriptor_process, 4),
+#endif
+    DP_CASE(test_resident_process_cancellation, 4),
+    DP_CASE(test_exact_commit_preempts_edit_proof, 4),
+    DP_CASE(test_foreground_cycle_yields_to_commit, 4),
+    DP_CASE(test_watcher_stream_backpressure, 4),
+    DP_CASE(test_watch_idle_exit, 4),
+    DP_CASE(test_resident_process_supersession, 4),
+    DP_CASE(test_native_source_cas_shadow, 5),
+    DP_CASE(test_source_identity_failure_tokens, 5),
+    DP_CASE(test_cycle_proof_reuse_contract, 5),
+    DP_CASE(test_progressive_event_vocabulary, 5),
+    DP_CASE(test_reflex_policy_boundary, 5),
+    DP_CASE(test_hotfork_descriptor_boundary, 5),
+    DP_CASE(test_template_generator_concurrency, 3),
+    DP_CASE(test_ephemeral_fixture_leaves_source_identity, 2),
+    DP_CASE(test_native_identity_tokens_match_oracle, 1),
+    DP_CASE(test_cold_epoch_integrity_gate, 0),
+    DP_CASE(test_menu_and_search, 6),
+    DP_CASE(test_change_classification, 6),
+    DP_CASE(test_change_plan_closure, 6),
+    DP_CASE(test_watcher_publication_containment, 6),
+    DP_CASE(test_watch_start_wait_reply, 6),
+    DP_CASE(test_watch_relevance, 6),
+    DP_CASE(test_core_classification, 6),
+    DP_CASE(test_core_refusal_envelope, 6),
+    DP_CASE(test_core_refusal_cycle, 6),
+    DP_CASE(test_core_refusal_token, 6),
+    DP_CASE(test_public_app_abi, 7),
+    DP_CASE(test_app_runtime_transaction, 7),
+    DP_CASE(test_app_definition_compiler, 7),
+    DP_CASE(test_strict_dev_app_producers, 7),
+    DP_CASE(test_app_definition_hostile_fixtures, 7),
+    DP_CASE(test_signed_app_events, 7),
+    DP_CASE(test_social_sim, 7),
+    DP_CASE(test_native_activation_switch, 7),
+    DP_CASE(test_native_activation_request_builder, 7),
+    DP_CASE(test_native_activation_result_mapping, 7),
+};
+#undef DP_CASE
+#define DP_CASE_COUNT (sizeof(g_dp_cases) / sizeof(g_dp_cases[0]))
+#define DP_SHARD_COUNT 8u
+
+static const char *const g_dp_env_keys[] = {
+    "HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "TMPDIR",
+};
+struct dp_saved_env {
+    char *value[sizeof(g_dp_env_keys) / sizeof(g_dp_env_keys[0])];
+    bool present[sizeof(g_dp_env_keys) / sizeof(g_dp_env_keys[0])];
+};
+
+static bool dp_restore_env(struct dp_saved_env *saved)
+{
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(g_dp_env_keys) / sizeof(g_dp_env_keys[0]); i++) {
+        int rc = saved->present[i]
+            ? setenv(g_dp_env_keys[i], saved->value[i], 1)
+            : unsetenv(g_dp_env_keys[i]);
+        if (rc != 0) ok = false;
+        free(saved->value[i]);
+        saved->value[i] = NULL;
+    }
+    return ok;
+}
+
+static bool dp_private_env(struct dp_saved_env *saved, const char *root)
+{
+    for (size_t i = 0; i < sizeof(g_dp_env_keys) / sizeof(g_dp_env_keys[0]); i++) {
+        const char *value = getenv(g_dp_env_keys[i]);
+        saved->present[i] = value != NULL;
+        if (value) {
+            saved->value[i] = strdup(value);
+            if (!saved->value[i]) {
+                for (size_t j = 0; j < i; j++) free(saved->value[j]);
+                return false;
+            }
+        }
+    }
+    for (size_t i = 0; i < sizeof(g_dp_env_keys) / sizeof(g_dp_env_keys[0]); i++) {
+        if (setenv(g_dp_env_keys[i], root, 1) != 0) {
+            (void)dp_restore_env(saved);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int dp_run_shard(unsigned shard)
+{
+    char cwd[PATH_MAX], root[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)) ||
+        snprintf(root, sizeof(root), "%s.dp_shard_%ld_%u_XXXXXX",
+                 cwd, (long)getpid(), shard + 1u) >= (int)sizeof(root) ||
+        !mkdtemp(root)) {
+        perror("dev_platform: private shard directory");
+        return 1;
+    }
+    struct dp_saved_env saved = {0};
+    if (!dp_private_env(&saved, root)) {
+        fprintf(stderr, "dev_platform: private environment failed\n");
+        (void)test_rm_rf_recursive(root);
+        return 1;
+    }
+    int failures = 0;
+    printf("=== dev_platform shard=%u pid=%ld root=%s ===\n",
+           shard + 1u, (long)getpid(), root);
+    for (size_t i = 0; i < DP_CASE_COUNT; i++) {
+        if (g_dp_cases[i].shard != shard) continue;
+        int64_t started = platform_time_monotonic_ms();
+        int added = g_dp_cases[i].run();
+        int64_t finished = platform_time_monotonic_ms();
+        failures += added;
+        printf("[dev-platform-case] shard=%u name=%s ms=%lld failures=%d\n",
+               shard + 1u, g_dp_cases[i].name,
+               (long long)(finished >= started ? finished - started : -1), added);
+    }
+    if (!dp_restore_env(&saved)) failures++;
+    if (test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
+}
+
 static int test_dev_platform_platform_arm(void)
 {
     int failures = 0;
-    failures += test_failure_store();
-    failures += test_distill_first_error();
-    failures += test_hotswap_artifact_cache();
-    failures += test_resident_restart_builder();
+    unsigned counts[DP_SHARD_COUNT] = {0};
+    bool unique = true;
+    for (size_t i = 0; i < DP_CASE_COUNT; i++) {
+        if (g_dp_cases[i].shard >= DP_SHARD_COUNT) {
+            unique = false;
+            continue;
+        }
+        counts[g_dp_cases[i].shard]++;
+        for (size_t j = 0; j < i; j++)
+            if (g_dp_cases[i].run == g_dp_cases[j].run ||
+                strcmp(g_dp_cases[i].name, g_dp_cases[j].name) == 0)
+                unique = false;
+    }
+    size_t owned = 0;
+    bool nonempty = true;
+    for (unsigned i = 0; i < DP_SHARD_COUNT; i++) {
+        owned += counts[i];
+        nonempty &= counts[i] > 0;
+    }
+    if (DP_CASE_COUNT != 40u + (unsigned)(
 #if defined(__APPLE__)
-    failures += test_darwin_attested_descriptor_process();
+            1
+#else
+            0
 #endif
-    failures += test_resident_process_cancellation();
-    failures += test_exact_commit_preempts_edit_proof();
-    failures += test_foreground_cycle_yields_to_commit();
-    failures += test_watcher_stream_backpressure();
-    failures += test_watch_idle_exit();
-    failures += test_resident_process_supersession();
-    failures += test_native_source_cas_shadow();
-    failures += test_source_identity_failure_tokens();
-    failures += test_cycle_proof_reuse_contract();
-    failures += test_progressive_event_vocabulary();
-    failures += test_reflex_policy_boundary();
-    failures += test_hotfork_descriptor_boundary();
-    failures += test_template_generator_concurrency();
-    failures += test_ephemeral_fixture_leaves_source_identity();
-    failures += test_native_identity_tokens_match_oracle();
-    failures += test_cold_epoch_integrity_gate();
-    failures += test_menu_and_search();
-    failures += test_change_classification();
-    failures += test_change_plan_closure();
-    failures += test_watcher_publication_containment();
-    failures += test_watch_start_wait_reply();
-    failures += test_watch_relevance();
-    failures += test_core_classification();
-    failures += test_core_refusal_envelope();
-    failures += test_core_refusal_cycle();
-    failures += test_core_refusal_token();
-    failures += test_public_app_abi();
-    failures += test_app_runtime_transaction();
-    failures += test_app_definition_compiler();
-    failures += test_strict_dev_app_producers();
-    failures += test_app_definition_hostile_fixtures();
-    failures += test_signed_app_events();
-    failures += test_social_sim();
-    failures += test_native_activation_switch();
-    failures += test_native_activation_request_builder();
-    failures += test_native_activation_result_mapping();
-    printf("=== dev_platform: %d failures ===\n", failures);
+            ) || owned != DP_CASE_COUNT || !unique || !nonempty) {
+        fprintf(stderr, "dev_platform: case partition invalid\n");
+        failures++;
+    }
+    const char *plans[] = {"dev_platform"};
+    char expanded[DP_SHARD_COUNT + 1u][ZCL_TEST_GROUP_FULL_MAX];
+    bool truncated = false;
+    size_t selected = zcl_test_group_expand_plan(plans, 1, expanded,
+                                                  DP_SHARD_COUNT + 1u,
+                                                  &truncated);
+    if (selected != DP_SHARD_COUNT + 1u || truncated) {
+        fprintf(stderr, "dev_platform: proof family omits a shard\n");
+        failures++;
+    }
+    printf("dev_platform partition: cases=%zu shards=%u failures=%d\n",
+           DP_CASE_COUNT, DP_SHARD_COUNT, failures);
     return failures;
 }
+
+#define DP_SHARD_FN(tag, index) \
+    int test_dev_platform_shard_##tag(void) { return dp_run_shard(index); }
+DP_SHARD_FN(01, 0)
+DP_SHARD_FN(02, 1)
+DP_SHARD_FN(03, 2)
+DP_SHARD_FN(04, 3)
+DP_SHARD_FN(05, 4)
+DP_SHARD_FN(06, 5)
+DP_SHARD_FN(07, 6)
+DP_SHARD_FN(08, 7)
+#undef DP_SHARD_FN
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked dev-platform child lane
  * cannot run here. Skipped loudly rather than faked. */
@@ -4194,6 +4485,20 @@ static int test_dev_platform_platform_arm(void)
     printf("dev_platform: SKIP (Windows): forked dev-platform child lane\n");
     return 0;
 }
+#endif
+
+#if defined(_WIN32)
+#define DP_SHARD_FN(tag) \
+    int test_dev_platform_shard_##tag(void) { return test_dev_platform_platform_arm(); }
+DP_SHARD_FN(01)
+DP_SHARD_FN(02)
+DP_SHARD_FN(03)
+DP_SHARD_FN(04)
+DP_SHARD_FN(05)
+DP_SHARD_FN(06)
+DP_SHARD_FN(07)
+DP_SHARD_FN(08)
+#undef DP_SHARD_FN
 #endif
 
 int test_dev_platform(void)

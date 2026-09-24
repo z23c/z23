@@ -1396,6 +1396,23 @@ int main(int argc, char **argv)
     { extern int test_hotswap_shelf(void); failures += test_hotswap_shelf(); }
     { extern int test_hotswap_rollback(void); failures += test_hotswap_rollback(); }
     failures += test_dev_platform();
+    { extern int test_dev_platform_shard_01(void);
+      extern int test_dev_platform_shard_02(void);
+      extern int test_dev_platform_shard_03(void);
+      extern int test_dev_platform_shard_04(void);
+      extern int test_dev_platform_shard_05(void);
+      extern int test_dev_platform_shard_06(void);
+      extern int test_dev_platform_shard_07(void);
+      extern int test_dev_platform_shard_08(void);
+      failures += test_dev_platform_shard_01();
+      failures += test_dev_platform_shard_02();
+      failures += test_dev_platform_shard_03();
+      failures += test_dev_platform_shard_04();
+      failures += test_dev_platform_shard_05();
+      failures += test_dev_platform_shard_06();
+      failures += test_dev_platform_shard_07();
+      failures += test_dev_platform_shard_08();
+    }
     failures += test_command_registry_catalog();
     failures += test_command_registry_latency();
     failures += test_native_api_contract();
