@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source-identity.sh"
 REAL_GIT="$(command -v git)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-source-identity-selftest.XXXXXX")"
-trap 'rm -rf "$SANDBOX"' EXIT HUP INT TERM
+trap 'if [ -n "${BATCH_PID:-}" ]; then wait "$BATCH_PID" 2>/dev/null || true; fi; rm -rf "$SANDBOX"' EXIT HUP INT TERM
 
 fail()
 {
@@ -15,7 +15,7 @@ fail()
     exit 1
 }
 
-"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source-identity-batch-selftest.sh"
+"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source-identity-batch-selftest.sh" & BATCH_PID=$!
 
 cd "$SANDBOX"
 git init -q
@@ -600,5 +600,11 @@ if PATH="$PWD/fail-git-bin:$PATH" REAL_GIT="$REAL_GIT" \
         "$SCRIPT" capture > /dev/null 2>&1; then
     fail 'tracked-inventory command failure produced a partial identity'
 fi
+
+if ! wait "$BATCH_PID"; then
+    BATCH_PID=""
+    fail 'batched identity fixture failed'
+fi
+BATCH_PID=""
 
 printf 'source-identity-selftest: PASS identity=%s sha1_independent=true submodule_bytes=true ignored_compiler_inputs=true path_bytes=true inventory_fail_closed=true\n' "$fast"
