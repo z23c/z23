@@ -85,13 +85,17 @@ fi
 command_umask=$(umask)
 umask 077
 state=${DEVBUILD_BROKER_STATE:-$HOME/.local/state/development/broker-v1}
-mkdir -p "$state/queue" "$state/running"
+# The prior broker's waiters keep their original queue. Both versions count
+# the same running leases under the same mutex, so an upgrade does not let an
+# incompatible old queue head stall corrected admission.
+queue_dir=$state/queue-v3
+mkdir -p "$state/queue" "$queue_dir" "$state/running"
 exec 7>"$state/mutex.lock"
 start_ns=$(date +%s%N)
 start_tick=$(awk '{print $22}' "/proc/$$/stat")
 id="$$-$start_tick-$start_ns"
 unit="devbuild-${id}.scope"
-queue_file="$state/queue/$id"
+queue_file="$queue_dir/$id"
 run_file="$state/running/$id"
 new_file="$state/.new-$id"
 log_file="$state/events.tsv"
@@ -140,7 +144,7 @@ trap 'exit 143' TERM
 # lease while its scope is active; after both vanish, another waiter reaps it.
 reap() {
     local file p tick u live
-    for file in "$state"/queue/* "$state"/running/*; do
+    for file in "$queue_dir"/* "$state"/running/*; do
         [[ -f $file ]] || continue
         read -r p tick u _ <"$file"
         live=0
@@ -205,7 +209,7 @@ legacy_drained() {
 
 /usr/bin/flock 7
 printf '%s %s %s %s %s %s %s %s %s %s %s\n' \
-    "$$" "$start_tick" "$unit" "$project" "$class" "$cpu" "$ram" "$io" "$priority" "$start_ns" broker-v2 >"$new_file"
+    "$$" "$start_tick" "$unit" "$project" "$class" "$cpu" "$ram" "$io" "$priority" "$start_ns" broker-v3 >"$new_file"
 mv -- "$new_file" "$queue_file"
 printf '%s\t%s\tqueued\t%s\t%s\t%s\t%s\t%s\n' \
     "$start_ns" "$id" "$project" "$class" "$cpu" "$ram" "$io" >>"$log_file"
@@ -272,13 +276,30 @@ while :; do
     now_s=$(date +%s)
     best_id= best_score=-999999 best_ns=9999999999999999999
     hot_id= hot_score=-999999 hot_ns=9999999999999999999
-    for file in "$state"/queue/*; do
+    release_z23=0 release_qedc=0
+    for file in "$queue_dir"/*; do
+        [[ -f $file ]] || continue
+        read -r _ _ _ queued_project queued_class _ <"$file"
+        if [[ $queued_class == release ]]; then
+            [[ $queued_project != z23 ]] || release_z23=1
+            [[ $queued_project != qedc ]] || release_qedc=1
+        fi
+    done
+    for file in "$queue_dir"/*; do
         [[ -f $file ]] || continue
         read -r _ _ _ queued_project queued_class queued_cpu queued_ram queued_io pri queued_ns epoch <"$file"
         # A request started under the first cutover broker cannot pass its
         # global old-wrapper gate. Keep its place for when that gate drains,
         # but do not let it block newer compatible work meanwhile.
-        if [[ -e $state/legacy-inode && $epoch != broker-v2 ]]; then
+        if [[ -e $state/legacy-inode && $epoch != broker-v3 ]]; then
+            continue
+        fi
+        # A release proof may need the current ordinary lane to finish before
+        # its 20 GiB lease fits. Do not let another ordinary job refill that
+        # project's memory ahead of it; the other project remains eligible.
+        if [[ $queued_class != release && $queued_class != hotload ]] &&
+           { [[ $queued_project == z23 && $release_z23 == 1 ]] ||
+             [[ $queued_project == qedc && $release_qedc == 1 ]]; }; then
             continue
         fi
         # An older request that cannot fit must not hold the queue head while

@@ -114,6 +114,18 @@ kill -0 "$one" 2>/dev/null || {
 wait "$one" "$two"
 printf 'devbuild broker: incompatible queue head does not block fitting work PASS\n'
 
+old_tick=$(awk '{print $22}' "/proc/$$/stat")
+printf '%s %s %s qedc legacy 8 24 1 100 %s broker-v2\n' \
+    "$$" "$old_tick" old-queue.scope "$(( $(date +%s%N) - 10000000000 ))" \
+    >"$DEVBUILD_BROKER_STATE/queue/old-queue"
+"$root/devbuild-broker" --wait --project z23 --class normal true \
+    >"$scratch/old-queue-bypass.log" 2>&1
+[[ -e $DEVBUILD_BROKER_STATE/queue/old-queue ]] || {
+    printf 'new broker rewrote a prior wrapper queue entry\n' >&2; exit 1;
+}
+rm -f -- "$DEVBUILD_BROKER_STATE/queue/old-queue"
+printf 'devbuild broker: prior-wrapper queue stays isolated during upgrade PASS\n'
+
 "$root/devbuild-broker" --wait --project z23 --class normal \
     bash -c 'sleep 20 & exit 0' >"$scratch/orphan.log" 2>&1
 orphan_id=$(awk -F '\t' '$3 == "queued" {id=$2} END {print id}' \
@@ -151,15 +163,17 @@ wait "$legacy"
     }
 printf 'devbuild broker: old-wrapper drain gate PASS\n'
 
+legacy_before=$(awk -F '\t' '$3 == "admitted" && $5 == "legacy" {n++} END {print n+0}' \
+    "$DEVBUILD_BROKER_STATE/events.tsv")
 "$root/devbuild-broker" --wait --project z23 sleep 1 >"$scratch/z23-legacy.log" 2>&1 & one=$!
 "$root/devbuild-broker" --wait --project qedc sleep 1 >"$scratch/qedc-legacy.log" 2>&1 & two=$!
 for _ in {1..100}; do
     legacy_admitted=$(awk -F '\t' '$3 == "admitted" && $5 == "legacy" {n++} END {print n+0}' \
         "$DEVBUILD_BROKER_STATE/events.tsv")
-    [[ $legacy_admitted == 2 ]] && break
+    [[ $legacy_admitted == $((legacy_before + 2)) ]] && break
     sleep 0.05
 done
-[[ $legacy_admitted == 2 ]] || {
+[[ $legacy_admitted == $((legacy_before + 2)) ]] || {
     printf 'old default project jobs did not overlap\n' >&2; exit 1;
 }
 wait "$one" "$two"
